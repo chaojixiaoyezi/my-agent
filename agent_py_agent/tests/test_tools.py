@@ -13,6 +13,7 @@ from agent_py_agent.agent.tools import (
     AppendFileTool,
     FetchUrlTool,
     HttpRequestTool,
+    ReplaceInFileTool,
     ToolRegistry,
     WriteFileTool,
 )
@@ -128,6 +129,27 @@ def test_write_and_append_file_tools():
         assert write_result.ok
         assert append_result.ok
         assert (workspace / "src" / "demo.py").read_text(encoding="utf-8") == "print('a')\nprint('b')\n"
+
+
+def test_replace_in_file_tool():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        target = workspace / "src" / "demo.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("def hello():\n    return 'old'\n", encoding="utf-8")
+
+        tool = ReplaceInFileTool(workspace)
+        result = tool.execute(
+            {
+                "path": "src/demo.py",
+                "old": "return 'old'",
+                "new": "return 'new'",
+            }
+        )
+
+        assert result.ok
+        assert "替换 1 处" in result.output
+        assert target.read_text(encoding="utf-8") == "def hello():\n    return 'new'\n"
 
 
 def test_fetch_url_and_http_request_tools():

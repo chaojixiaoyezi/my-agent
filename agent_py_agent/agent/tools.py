@@ -534,6 +534,95 @@ class AppendFileTool(FileSystemTool):
         )
 
 
+class ReplaceInFileTool(FileSystemTool):
+    """精确替换文件中的一段文本。
+
+    这个工具是给“差异化编辑”准备的。
+    大白话说：如果只需要改一个函数、一行配置或一小段说明，就不要整文件覆盖。
+    """
+
+    def __init__(self, workspace_root: Path):
+        super().__init__(workspace_root)
+        self.spec = ToolSpec(
+            name="replace_in_file",
+            category="filesystem",
+            description="在文本文件中精确替换一段已有内容，适合小范围改代码和改配置。",
+            use_cases=[
+                "只改一个函数、一段注释、一行配置或一小段文档",
+                "已经通过 read_file 看过上下文，知道要替换的原文",
+                "希望保留文件其他部分不动，避免 write_file 整文件覆盖",
+            ],
+            avoid_when=[
+                "要创建新文件时用 write_file",
+                "只是往文件末尾补内容时用 append_file",
+                "不知道原文是否唯一时，先 read_file 或 search_text 确认上下文",
+            ],
+            keywords=[
+                "替换",
+                "修改代码",
+                "局部编辑",
+                "差异化编辑",
+                "replace",
+                "patch",
+                "refactor",
+                "edit",
+            ],
+            parameters={
+                "path": "要修改的文件路径",
+                "old": "文件中已经存在的原文",
+                "new": "替换后的新内容",
+                "count": "最多替换几处，默认 1",
+            },
+            parameter_details={
+                "path": "相对工作区的文本文件路径，必须是已有文件。",
+                "old": "必填，必须和文件里的原文完全一致；建议先用 read_file 获取准确片段。",
+                "new": "必填，用来替换 old 的新文本。",
+                "count": "可选，默认只替换第一处；传 0 或负数表示替换全部匹配。",
+            },
+            examples=[
+                '{"tool": "replace_in_file", "path": "agent_py_agent/agent/core.py", "old": "max_tool_rounds: int = 5", "new": "max_tool_rounds: int = 8"}',
+                '{"tool": "replace_in_file", "path": "README.md", "old": "old text", "new": "new text", "count": 1}',
+            ],
+        )
+
+    def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
+        raw_path = params.get("path")
+        old = params.get("old")
+        new = params.get("new")
+        if not raw_path:
+            return ToolExecutionResult("replace_in_file", False, "缺少必填参数 path")
+        if old is None:
+            return ToolExecutionResult("replace_in_file", False, "缺少必填参数 old")
+        if new is None:
+            return ToolExecutionResult("replace_in_file", False, "缺少必填参数 new")
+
+        target = self.resolve_path(str(raw_path))
+        if not target.exists():
+            return ToolExecutionResult("replace_in_file", False, f"文件不存在: {target}")
+        if not target.is_file():
+            return ToolExecutionResult("replace_in_file", False, f"目标不是文件: {target}")
+
+        content = target.read_text(encoding="utf-8")
+        old_text = str(old)
+        if old_text == "":
+            return ToolExecutionResult("replace_in_file", False, "old 不能为空字符串")
+
+        matches = content.count(old_text)
+        if matches == 0:
+            return ToolExecutionResult("replace_in_file", False, "没有找到要替换的原文，请先 read_file 确认上下文")
+
+        raw_count = int(params.get("count", 1))
+        replace_count = matches if raw_count <= 0 else raw_count
+        updated = content.replace(old_text, str(new), replace_count)
+        changed = min(matches, replace_count)
+        target.write_text(updated, encoding="utf-8")
+        return ToolExecutionResult(
+            "replace_in_file",
+            True,
+            f"已修改文件: {target.relative_to(self.workspace_root)}；替换 {changed} 处；原文共命中 {matches} 处",
+        )
+
+
 class FetchUrlTool(BaseTool):
     """抓取网页或纯文本接口内容。"""
 
@@ -713,6 +802,7 @@ class ToolRegistry:
         self.register(SearchTextTool(self.workspace_root, max_matches))
         self.register(WriteFileTool(self.workspace_root))
         self.register(AppendFileTool(self.workspace_root))
+        self.register(ReplaceInFileTool(self.workspace_root))
         self.register(FetchUrlTool(max_chars=web_max_chars, timeout=http_timeout))
         self.register(HttpRequestTool(max_chars=web_max_chars, timeout=http_timeout))
 
