@@ -117,6 +117,23 @@ def test_tool_catalog_and_recommended_sections():
     assert "推荐理由" in recommended
 
 
+def test_tool_allowlist_limits_prompt_and_execution():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        agent = SimpleAgent(cfg, workspace)
+        result = agent.run("读取 notes.txt", save=False, allowed_tools=["read_file"])
+        blocked = agent.tools.execute_call(
+            {"tool": "write_file", "path": "x.txt", "content": "x"},
+            allowed_tools=["read_file"],
+        )
+
+        assert "read_file [filesystem]" in result.prompt
+        assert "write_file [filesystem]" not in result.prompt
+        assert not blocked.ok
+        assert "未授权" in blocked.output
+
+
 def test_write_and_append_file_tools():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)

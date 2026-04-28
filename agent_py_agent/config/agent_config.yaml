@@ -25,6 +25,12 @@ memory_top_k: 5
 # 是否自动把用户输入和模型回复写入记忆
 auto_save_memory: true
 
+# 是否启用自学习功能
+# - false: 默认关闭，只按已有 prompt、记忆、工具和 skill 工作，不自动沉淀新经验
+# - true: 允许后续自学习模块在任务结束后生成“学习候选”
+# - 注意：开启后也不应该直接改正式 skill；应先生成草稿，再由用户确认
+enable_self_learning: false
+
 # 额外动态 prompt 文件
 prompt_files:
   - "prompts/default.md"
