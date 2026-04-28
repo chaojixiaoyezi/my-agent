@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+agent_py_agent/data/
+agent_py_agent/*/__pycache__/
+.env
+.env.*
+!.env.example

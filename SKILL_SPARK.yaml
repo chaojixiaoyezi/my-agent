@@ -1,0 +1,24 @@
+task: simple-python-agent
+status: EXECUTING
+pre_action_gate:
+  goal: "开发 Python3 CLI 智能体：外置配置、记忆、subagent、动态 prompt、可扩展工程结构。"
+  constraints:
+    - "第一轮不依赖外部模型 API，保证任何 Python3 环境可运行。"
+    - "配置参数必须有中文说明。"
+    - "有 Python 的地方就能用。"
+    - "真实入口和错误入口都要测试。"
+action_receipt: []
+post_validation: []
+task_close_review:
+  status: pending
+
+action_receipt_final:
+  - "写入 agent_py_agent CLI 智能体骨架、配置、记忆、subagent、测试。"
+post_validation_final:
+  result: PASS
+  evidence: validation/test-report.txt
+task_close_review_final:
+  status: COMPLETED
+  notes:
+    - "第一轮优先保证 Python3 标准库可运行，后续再接真实模型和工具。"
+    - "动态 prompt 和 subagent 已留扩展点。"

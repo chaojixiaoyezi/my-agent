@@ -1,0 +1,107 @@
+# Simple Python Agent 配置文件
+# 说明：
+# - 这个项目只用标准库读取一个“够用版” YAML
+# - 支持的结构主要是 `key: value` 和简单列表
+# - 追求的是跨平台、轻依赖、够维护，不是完整 YAML 语法
+
+# 智能体名称：主要用于 CLI 输出和日志标识
+agent_name: "SimplePythonAgent"
+
+# 系统人格：每次请求都会放进最终 prompt 的 System 段
+system_prompt: "你是一个谨慎、可扩展、会记录记忆、会在必要时调用工具的 Python CLI 智能体。先理解任务，再给出结构化回答。"
+
+# 默认模型后端：
+# - echo: 本地离线调试
+# - openai_compatible: 走 /chat/completions
+# - anthropic_compatible: 走 /v1/messages
+model_backend: "anthropic_compatible"
+
+# 记忆文件路径：JSONL 格式，每行一条记录
+memory_path: "data/memory.jsonl"
+
+# 每轮请求最多带多少条相关记忆进入 prompt
+memory_top_k: 5
+
+# 是否自动把用户输入和模型回复写入记忆
+auto_save_memory: true
+
+# 额外动态 prompt 文件
+prompt_files:
+  - "prompts/default.md"
+
+# 是否启用子任务记录
+enable_subagents: true
+
+# 单次最多拆出多少个子任务
+max_subagents: 5
+
+# 子任务记录输出目录
+subagent_workspace: "data/subagents"
+
+# 日志级别预留字段
+log_level: "info"
+
+# 扩展目录预留字段
+extensions_dir: "extensions"
+
+# 真实模型接口地址
+api_base: "https://api.minimaxi.com/anthropic"
+
+# API Key：
+# - 不要把真实 key 写进仓库
+# - 本地运行时优先从环境变量读取
+# - 如果你非常确定这是本地私有文件，也可以手动填到这里，但不建议
+api_key: ""
+
+# API Key 对应的环境变量名
+# Windows PowerShell 示例：$env:AGENT_API_KEY="你的key"
+# macOS / Linux 示例：export AGENT_API_KEY="你的key"
+api_key_env: "AGENT_API_KEY"
+
+# 模型名称
+model_name: "MiniMax-M2.7"
+
+# HTTP 请求总超时秒数
+request_timeout: 60
+
+# 允许模型最多生成多少 token
+max_tokens: 16314
+
+# 采样温度
+temperature: 0.2
+
+# Anthropic 兼容协议版本
+anthropic_version: "2023-06-01"
+
+# 是否启用工具调用循环
+enable_tools: true
+
+# 单轮请求里，最多允许几次“模型调用工具再继续推理”
+max_tool_rounds: 5
+
+# read_file 工具最多返回多少字符，避免单次结果太长
+tool_read_max_chars: 6000
+
+# list_files 工具最多列出多少条结果
+tool_list_max_entries: 200
+
+# search_text 工具最多返回多少条匹配
+tool_search_max_matches: 50
+
+# 网页抓取和接口响应最多保留多少字符
+tool_web_max_chars: 12000
+
+# fetch_url / http_request 工具默认超时秒数
+tool_http_timeout: 30
+
+# 工具目录里最多展示多少个工具条目
+# 这个值偏大也没问题，因为目录只放中等详细度信息，不会像完整手册那么占 prompt
+tool_catalog_limit: 20
+
+# 每次只把多少个最相关工具的“详细说明”注入 prompt
+# 这个值越小越省 token，但过小可能漏掉次优工具
+tool_retrieval_limit: 3
+
+# 是否启用向量检索预留开关
+# 当前代码已经把接口留好了，但默认仍以关键词检索为主
+tool_vector_search_enabled: false
