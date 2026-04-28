@@ -30,6 +30,7 @@ class AgentConfig:
     memory_path: str = "data/memory.jsonl"
     memory_top_k: int = 5
     auto_save_memory: bool = True
+    enable_self_learning: bool = False
     prompt_files: list[str] = field(default_factory=list)
     enable_subagents: bool = True
     max_subagents: int = 5

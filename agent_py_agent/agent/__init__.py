@@ -5,6 +5,9 @@ __all__ = [
     "memory",
     "prompting",
     "backend",
+    "capabilities",
+    "capability_config",
     "subagent",
     "core",
+    "skills",
 ]

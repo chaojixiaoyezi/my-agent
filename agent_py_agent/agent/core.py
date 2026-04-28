@@ -2,14 +2,15 @@ from __future__ import annotations
 
 """智能体核心循环。"""
 
-from dataclasses import dataclass
+import json
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .backend import get_backend
 from .config import AgentConfig
 from .memory import JsonlMemory
 from .prompting import PromptBuilder
-from .subagent import SubAgentManager, SubAgentTask
+from .subagent import SubAgentExecutionContext, SubAgentManager, SubAgentRunnerResult, SubAgentTask
 from .tools import ToolRegistry
 
 
@@ -61,13 +62,18 @@ class SimpleAgent:
         inject: list[str] | None = None,
         prompt_files: list[str] | None = None,
         save: bool | None = None,
+        allowed_tools: list[str] | None = None,
     ) -> AgentRunResult:
         """执行一轮智能体请求。"""
 
         memories = self.memory.search(user_prompt, self.config.memory_top_k)
-        tool_catalog_section = self.tools.render_catalog_section() if self.config.enable_tools else ""
+        tool_catalog_section = (
+            self.tools.render_catalog_section(allowed_tools=allowed_tools)
+            if self.config.enable_tools
+            else ""
+        )
         tool_recommendations_section = (
-            self.tools.render_recommended_tools_section(user_prompt)
+            self.tools.render_recommended_tools_section(user_prompt, allowed_tools=allowed_tools)
             if self.config.enable_tools
             else ""
         )
@@ -103,7 +109,7 @@ class SimpleAgent:
             tool_rounds += 1
             tool_context.append(f"[assistant-tool-round-{tool_rounds}]\n{response.text}")
             for idx, payload in enumerate(calls, start=1):
-                result = self.tools.execute_call(payload)
+                result = self.tools.execute_call(payload, allowed_tools=allowed_tools)
                 tool_context.append(
                     f"[tool-call-{tool_rounds}-{idx}]\n{payload}\n"
                     f"[tool-result-{tool_rounds}-{idx}]\n{result.render_for_prompt()}"
@@ -140,3 +146,103 @@ class SimpleAgent:
             raise RuntimeError("配置已禁用 subagent。")
         n = min(count or self.config.max_subagents, self.config.max_subagents)
         return self.subagents.split(goal, n)
+
+    def run_subagent(
+        self,
+        run_id: str,
+        *,
+        instruction: str = "",
+        dry_run: bool = True,
+        max_cards: int = 0,
+        probe: bool = True,
+    ) -> SubAgentRunnerResult:
+        """按执行上下文运行一个子代理入口。
+
+        第一版 runner 不负责并行调度，只负责把“上下文 -> 模型执行 -> 工单回写”
+        这条最小链路打通。默认 dry-run，避免误触真实模型接口。
+        """
+
+        context = self.subagents.write_execution_context(run_id, max_cards=max_cards)
+        prompt = _build_subagent_runner_prompt(context, instruction)
+        if dry_run:
+            return self.subagents.record_runner_result(
+                run_id,
+                dry_run=True,
+                ok=True,
+                message="dry-run: 已生成执行上下文和 runner prompt，未调用模型。",
+                prompt=prompt,
+            )
+
+        if probe:
+            probe_result = self.subagents.probe_channel(run_id)
+            if probe_result.channel_status == "BROKEN":
+                context = self.subagents.write_execution_context(run_id, max_cards=max_cards)
+                prompt = _build_subagent_runner_prompt(context, instruction)
+                return self.subagents.record_runner_result(
+                    run_id,
+                    dry_run=False,
+                    ok=False,
+                    message="通道健康检查为 BROKEN，未启动模型执行。",
+                    prompt=prompt,
+                    status="CHANNEL_ERROR",
+                    verification_status="UNVERIFIED",
+                    failure_type="channel",
+                )
+            context = self.subagents.write_execution_context(run_id, max_cards=max_cards)
+            prompt = _build_subagent_runner_prompt(context, instruction)
+
+        try:
+            result = self.run(
+                prompt,
+                save=False,
+                allowed_tools=context.allowed_tools,
+            )
+        except Exception as exc:
+            return self.subagents.record_runner_result(
+                run_id,
+                dry_run=False,
+                ok=False,
+                message=f"runner 执行失败: {exc}",
+                prompt=prompt,
+                status="BLOCKED",
+                verification_status="UNVERIFIED",
+                failure_type="runner_error",
+            )
+
+        return self.subagents.record_runner_result(
+            run_id,
+            dry_run=False,
+            ok=True,
+            message="runner 已完成模型调用，等待独立验收。",
+            prompt=result.prompt,
+            response=result.response,
+            backend=result.backend,
+            tool_rounds=result.tool_rounds,
+            status="AWAITING_ACCEPTANCE",
+            verification_status="NEEDS_ACCEPTANCE",
+        )
+
+
+def _build_subagent_runner_prompt(
+    context: SubAgentExecutionContext,
+    instruction: str = "",
+) -> str:
+    """把执行上下文压成子代理 runner 的用户任务。"""
+
+    payload = json.dumps(asdict(context), ensure_ascii=False, indent=2)
+    extra = instruction.strip() or "按执行上下文完成任务；如果能力不足，说明需要上抛的 capability_request。"
+    return (
+        "# SubAgent Runner Task\n\n"
+        "你是一个被父代理授权的子代理，只能依据下面的执行上下文工作。\n"
+        "不要使用上下文之外的 skill/tool，不要假完成；没有验收证据时只能标记等待验收或上抛能力请求。\n\n"
+        "## Extra Instruction\n\n"
+        f"{extra}\n\n"
+        "## Execution Context JSON\n\n"
+        "```json\n"
+        f"{payload}\n"
+        "```\n\n"
+        "## Required Output\n\n"
+        "- 说明完成了什么或卡在哪里。\n"
+        "- 列出使用过的授权工具或 skill。\n"
+        "- 给出可验收证据；如果没有证据，明确写出还需要什么能力或工具。\n"
+    )

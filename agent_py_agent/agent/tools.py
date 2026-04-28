@@ -811,12 +811,16 @@ class ToolRegistry:
 
         self.tools[tool.spec.name] = tool
 
-    def specs(self) -> list[ToolSpec]:
+    def specs(self, *, allowed_tools: list[str] | None = None) -> list[ToolSpec]:
         """按注册顺序返回所有工具说明。"""
 
-        return [tool.spec for tool in self.tools.values()]
+        allowed = _allowed_tool_set(allowed_tools)
+        specs = [tool.spec for tool in self.tools.values()]
+        if allowed is None:
+            return specs
+        return [spec for spec in specs if spec.name in allowed]
 
-    def render_catalog_section(self) -> str:
+    def render_catalog_section(self, *, allowed_tools: list[str] | None = None) -> str:
         """生成常驻 prompt 的工具目录。
 
         这里给的是中等详细度版本：
@@ -824,7 +828,10 @@ class ToolRegistry:
         但不会把每个参数的长篇说明全塞进去。
         """
 
-        entries = [spec.render_catalog_entry() for spec in self.specs()[: self.catalog_limit]]
+        specs = self.specs(allowed_tools=allowed_tools)
+        entries = [spec.render_catalog_entry() for spec in specs[: self.catalog_limit]]
+        if not entries:
+            entries = ["- none：当前执行上下文没有授权任何工具；缺能力时请上抛 capability_request。"]
         return (
             "# Tools\n"
             "当你需要看文件、改代码、查网页或测接口时，可以调用工具。\n"
@@ -837,26 +844,44 @@ class ToolRegistry:
             + "\n".join(entries)
         )
 
-    def find_relevant_specs(self, query: str) -> list[ToolSpec]:
+    def find_relevant_specs(
+        self,
+        query: str,
+        *,
+        allowed_tools: list[str] | None = None,
+    ) -> list[ToolSpec]:
         """根据当前任务挑出最相关的少量工具。"""
 
-        hits = self.retriever.search(query, self.specs(), self.retrieval_limit)
+        specs = self.specs(allowed_tools=allowed_tools)
+        hits = self.retriever.search(query, specs, self.retrieval_limit)
         if not hits:
             return []
-        by_name = {spec.name: spec for spec in self.specs()}
+        by_name = {spec.name: spec for spec in specs}
         return [by_name[hit.name] for hit in hits if hit.name in by_name]
 
-    def render_recommended_tools_section(self, query: str) -> str:
+    def render_recommended_tools_section(
+        self,
+        query: str,
+        *,
+        allowed_tools: list[str] | None = None,
+    ) -> str:
         """生成当前任务的候选工具详情区块。"""
 
-        hits = self.retriever.search(query, self.specs(), self.retrieval_limit)
+        specs = self.specs(allowed_tools=allowed_tools)
+        if not specs:
+            return (
+                "# Recommended Tools\n"
+                "当前执行上下文没有授权工具。若缺少能力，请提交 capability_request。"
+            )
+
+        hits = self.retriever.search(query, specs, self.retrieval_limit)
         if not hits:
             return (
                 "# Recommended Tools\n"
                 "当前没有明显高相关的工具命中。若要动手操作，请先根据 Tool Catalog 选最接近的工具。"
             )
 
-        by_name = {spec.name: spec for spec in self.specs()}
+        by_name = {spec.name: spec for spec in specs}
         blocks: list[str] = []
         for hit in hits:
             spec = by_name[hit.name]
@@ -894,7 +919,12 @@ class ToolRegistry:
             cursor = end + len(marker_end)
         return calls
 
-    def execute_call(self, payload: dict[str, Any]) -> ToolExecutionResult:
+    def execute_call(
+        self,
+        payload: dict[str, Any],
+        *,
+        allowed_tools: list[str] | None = None,
+    ) -> ToolExecutionResult:
         """执行单个工具调用。"""
 
         if payload.get("tool") == "__parse_error__":
@@ -903,6 +933,10 @@ class ToolRegistry:
         tool_name = payload.get("tool")
         if not tool_name:
             return ToolExecutionResult("unknown", False, "工具调用缺少 tool 字段")
+
+        allowed = _allowed_tool_set(allowed_tools)
+        if allowed is not None and str(tool_name) not in allowed:
+            return ToolExecutionResult(str(tool_name), False, f"工具未授权: {tool_name}")
 
         tool = self.tools.get(str(tool_name))
         if tool is None:
@@ -939,3 +973,11 @@ def _tokenize(text: str) -> list[str]:
             seen.add(token)
             unique.append(token)
     return unique
+
+
+def _allowed_tool_set(allowed_tools: list[str] | None) -> set[str] | None:
+    """把工具 allowlist 规范成集合；None 表示不限制。"""
+
+    if allowed_tools is None:
+        return None
+    return {str(item) for item in allowed_tools if str(item).strip()}
