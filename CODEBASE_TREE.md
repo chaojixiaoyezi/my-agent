@@ -33,6 +33,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |       |-- test_agent.py                      # 核心 agent 行为测试
 |       |-- test_backends.py                   # 后端适配测试
 |       `-- test_tools.py                      # 工具目录、工具调用和工具能力测试
+|-- .gitattributes                             # 跨平台文本编码和换行约定
 |-- .gitignore                                 # Git 忽略规则
 |-- ACCEPTANCE.md                              # 验收记录
 |-- CODEBASE_TREE.md                           # 当前这份目录树说明
@@ -62,6 +63,16 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 这次额外预留了混合检索框架：
 - 当前真正生效的是关键词检索。
 - 向量检索接口已经留好，后续接 embedding 时不用重写核心流程。
+
+当前内置工具包括：
+- `list_files`：列目录，适合先摸清项目结构。
+- `read_file`：读文本文件，适合查看代码、配置和文档。
+- `search_text`：搜索文本，适合先找函数名、配置项和关键字。
+- `write_file`：写入或覆盖整个文本文件，适合创建新文件或完整重写。
+- `append_file`：向文件末尾追加内容，适合补日志、补文档和补配置片段。
+- `replace_in_file`：精确替换文件中的一段已有内容，适合小范围改代码、改配置和改说明。
+- `fetch_url`：抓取网页或文本接口内容，适合查在线文档。
+- `http_request`：发送 HTTP 请求，适合测试 REST API、Webhook 和普通接口。
 
 ### `agent_py_agent/agent/core.py`
 
@@ -118,7 +129,18 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 这个测试文件重点验证：
 - 工具目录和候选工具详情是否真的出现在 prompt 里。
 - 工具调用循环能不能正常执行。
-- 写文件、追加文件、抓网页、测接口这些基础能力有没有回归。
+- 写文件、追加文件、局部替换、抓网页、测接口这些基础能力有没有回归。
+
+### `.gitattributes`
+
+这个文件负责把文本文件的跨平台规则写清楚。
+
+当前约定是：
+- 源码、Markdown、YAML、JSON 等文本文件都按 UTF-8 管理。
+- 仓库内自动规范文本文件换行。
+- Windows 脚本保留 CRLF，shell 脚本保留 LF。
+
+这样 Windows / macOS / Linux 来回开发时，中文注释和文档不容易因为编码或换行差异变乱。
 
 ## 跨平台兼容性
 
@@ -127,6 +149,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - 网络请求统一用标准库 `urllib`
 - 工具系统没有依赖 PowerShell、cmd 或 macOS 专用命令
 - 配置与数据文件统一按 UTF-8 读写
+- `.gitattributes` 明确了 UTF-8 文本和跨平台换行规则
 
 这意味着：
 - 在三大平台上都能直接跑纯 Python 主链路

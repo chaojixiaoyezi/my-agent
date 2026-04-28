@@ -75,10 +75,14 @@ tool_loop = subprocess.run(
         (
             "from agent_py_agent.tests.test_tools import "
             "test_tool_loop_and_prompt_transcript, "
+            "test_tool_catalog_and_recommended_sections, "
             "test_write_and_append_file_tools, "
+            "test_replace_in_file_tool, "
             "test_fetch_url_and_http_request_tools; "
             "test_tool_loop_and_prompt_transcript(); "
+            "test_tool_catalog_and_recommended_sections(); "
             "test_write_and_append_file_tools(); "
+            "test_replace_in_file_tool(); "
             "test_fetch_url_and_http_request_tools(); "
             "print('TOOL_TEST_PASS')"
         ),
