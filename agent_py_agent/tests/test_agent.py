@@ -9,11 +9,54 @@ import json
 import tempfile
 import time
 
+from agent_py_agent.agent.backend import BaseBackend, ModelResponse
 from agent_py_agent.agent.capabilities import CapabilityRouter
 from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.skills import SkillRegistry
+
+
+class StructuredSubagentBackend(BaseBackend):
+    """测试用后端：直接返回 runner 结构化结果。"""
+
+    name = "structured_subagent_backend"
+
+    def generate(self, prompt: str) -> ModelResponse:
+        assert "[SUBAGENT_RESULT]" in prompt
+        return ModelResponse(
+            text=(
+                "我读取了当前上下文，但缺少 HTTP 检查能力。\n"
+                "[SUBAGENT_RESULT]\n"
+                "{\n"
+                '  "status": "BLOCKED",\n'
+                '  "summary": "已完成代码阅读，但无法发起 HTTP 检查。",\n'
+                '  "used_tools": ["read_file", "write_file"],\n'
+                '  "used_skills": [],\n'
+                '  "evidence": [\n'
+                '    {"kind": "note", "summary": "已确认需要接口健康检查", "ok": true}\n'
+                "  ],\n"
+                '  "capability_requests": [\n'
+                '    {"problem": "需要请求接口确认状态码", "needed_capability": "http_request", "expected_output": "接口状态码", "tried": ["read_file"], "evidence": ["代码阅读不足以确认线上状态"], "constraints": {"method": "GET"}}\n'
+                "  ],\n"
+                '  "artifacts": [\n'
+                '    {"path": "reports/api_notes.md", "kind": "report", "summary": "接口检查前置阅读记录"}\n'
+                "  ],\n"
+                '  "tests": [\n'
+                '    {"name": "static-read", "command": "read_file api.py", "ok": true, "summary": "静态阅读完成"}\n'
+                "  ],\n"
+                '  "patches": [\n'
+                '    {"path": "agent_py_agent/agent/core.py", "status": "planned", "summary": "需要授权后再接 HTTP 检查"}\n'
+                "  ],\n"
+                '  "lessons": ["缺少线上检查工具时，不要把静态阅读当成接口可用证据"],\n'
+                '  "next_actions": ["route_capability_request", "rerun_subagent_after_grant"],\n'
+                '  "blocked_reason": "当前上下文没有授权 HTTP 请求工具",\n'
+                '  "failure_type": "capability_request"\n'
+                "}\n"
+                "[/SUBAGENT_RESULT]"
+            ),
+            backend=self.name,
+        )
 
 
 def test_memory_and_run():
@@ -737,3 +780,51 @@ def test_subagent_runner_dry_run_and_execute():
         assert "read_file [filesystem]" in prompt
         assert "write_file [filesystem]" not in prompt
         assert "echo 后端" in response
+
+
+def test_subagent_runner_parses_structured_output():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        agent.backend = StructuredSubagentBackend()
+        task = agent.subagents.create_run(
+            goal="检查接口健康",
+            thought="先读代码，如果缺 HTTP 能力则上抛。",
+            plan=["读取", "上抛能力请求"],
+            allowed_tools=["read_file"],
+        )
+
+        result = agent.run_subagent(task.id, dry_run=False, probe=False)
+        loaded = agent.subagents.load(task.id)
+        output = json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
+        runner_json = json.loads(Path(loaded.runner_result_json).read_text(encoding="utf-8"))
+
+        assert result.structured_output_found
+        assert result.structured_output_ok
+        assert result.evidence_count == 1
+        assert result.capability_request_count == 1
+        assert result.artifact_count == 1
+        assert result.test_count == 1
+        assert result.patch_count == 1
+        assert result.lesson_count == 1
+        assert loaded.status == "BLOCKED"
+        assert loaded.verification_status == "UNVERIFIED"
+        assert loaded.failure_type == "capability_request"
+        assert loaded.evidence[0].summary == "已确认需要接口健康检查"
+        assert loaded.capability_requests[0].needed_capability == "http_request"
+        assert loaded.capability_requests[0].status == "OPEN"
+        assert loaded.used_tools == ["read_file"]
+        assert "write_file" not in loaded.used_tools
+        assert output["next_action"] == "route_capability_request"
+        assert output["structured_output"]["ignored_unauthorized_tools"] == ["write_file"]
+        assert output["structured_output"]["capability_request_count"] == 1
+        assert output["artifacts"][0]["path"] == "reports/api_notes.md"
+        assert output["tests"][0]["name"] == "static-read"
+        assert output["patches"][0]["status"] == "planned"
+        assert output["lessons"] == ["缺少线上检查工具时，不要把静态阅读当成接口可用证据"]
+        assert output["next_actions"] == ["route_capability_request", "rerun_subagent_after_grant"]
+        assert runner_json["blocked_reason"] == "当前上下文没有授权 HTTP 请求工具"
+        debrief = Path(loaded.debrief_file).read_text(encoding="utf-8")
+        assert "Runner Artifacts" in debrief
+        assert "Runner Lessons" in debrief

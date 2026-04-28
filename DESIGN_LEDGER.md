@@ -435,8 +435,14 @@ L4: references/templates/scripts 附件
 - `SimpleAgent.run(..., allowed_tools=[...])`：限制工具目录、推荐工具和实际工具调用。
 - `SimpleAgent.run_subagent()`：读取并刷新执行上下文，生成 runner prompt。
 - `SubAgentManager.record_runner_result()`：把 runner 结果写回工单。
+- `parse_subagent_runner_output()`：解析 `[SUBAGENT_RESULT]` 结构化 JSON。
 - `python3 -m agent_py_agent subagent-run <run_id>`：默认 dry-run。
 - `python3 -m agent_py_agent subagent-run <run_id> --execute`：显式调用模型执行。
+- 结构化输出中的 `evidence` 会写入 `VerificationEvidence`。
+- 结构化输出中的 `capability_requests` 会写成 open `CapabilityRequest`。
+- 结构化输出中的 `artifacts` / `tests` / `patches` 会写进 `output.json`，供验收器和集成器读取。
+- 结构化输出中的 `lessons` / `next_actions` 会写进 `output.json`，并追加到 `DEBRIEF.md`。
+- 未授权的 `used_tools` / `used_skills` 会被忽略并写入 `output.json` 审计。
 - runner 输出文件：
   - `RUNNER_RESULT.md`
   - `reports/runner_result.json`
@@ -452,8 +458,8 @@ L4: references/templates/scripts 附件
 
 尚未落地：
 - 真正的并行 worker / process / session 管理。
-- runner 自动解析模型输出中的 capability_request。
-- runner 自动把验收证据结构化写入 evidence。
+- runner 还不会自动应用 patch；patches 目前只是计划/状态记录，必须由父代理或集成器验收后处理。
+- runner 还没有把 lessons 自动转成 skill 草稿。
 - 多子代理统一调度、超时接管和重派。
 
 ## 2026-04-29 / Subagent Channel Probe
@@ -663,3 +669,22 @@ suggested_tool: 是否建议开发成 tool
 - P0/P1/P2 问题分级已进入 due-check 报告，但还没接入执行器、用户汇报和自动接管流程。
 - 子代理模型字段。
 - 派工前工具 vs subagent 成本判断。
+
+## 2026-04-29 / 文档基线更新
+
+状态：已落地
+
+思路：
+- 之前 README 仍停留在早期简版，已经跟当前 capability / subagent / runner 体系不匹配。
+- 睡前需要把主链路、命令、协议、安全边界和测试策略写清楚，避免后续 AI 接手时只靠上下文记忆。
+
+已落地：
+- 重写根目录 `README.md`：项目总览、快速开始、配置、关键文档、安全边界和测试提醒。
+- 重写 `agent_py_agent/README.md`：包内 CLI 使用说明、工具、记忆、subagent 命令和 runner 协议入口。
+- 新增 `SUBAGENT_RUNBOOK.md`：详细说明 subagent / capability / runner 的运行流、工单目录、命令、结构化输出协议、写回规则和安全边界。
+- 更新 `TESTS.md`：区分安全定向测试和可能触发真实 API 的完整冒烟脚本。
+- 更新 `TEST_CHECKLIST.md`：按普通 run、工具、capability、subagent、runner、文档分组列检查项。
+- 更新 `CODEBASE_TREE.md`：加入 `SUBAGENT_RUNBOOK.md` 并说明职责。
+
+后续要求：
+- 改 subagent / capability / runner 主链路时，除了代码和测试，也要同步检查 `SUBAGENT_RUNBOOK.md`。
