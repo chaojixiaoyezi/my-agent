@@ -391,7 +391,41 @@ class SubAgentRunnerResult:
     result_file: str = ""
     result_json: str = ""
     output_json: str = ""
+    structured_output_found: bool = False
+    structured_output_ok: bool = False
+    structured_parse_error: str = ""
+    structured_summary: str = ""
+    evidence_count: int = 0
+    capability_request_count: int = 0
+    artifact_count: int = 0
+    test_count: int = 0
+    patch_count: int = 0
+    lesson_count: int = 0
+    blocked_reason: str = ""
     created_at: float = 0.0
+
+
+@dataclass
+class SubAgentParsedOutput:
+    """从 runner 模型回复里解析出来的机器结果。"""
+
+    found: bool = False
+    ok: bool = False
+    parse_error: str = ""
+    status: str = ""
+    summary: str = ""
+    blocked_reason: str = ""
+    failure_type: str = ""
+    used_skills: list[str] = field(default_factory=list)
+    used_tools: list[str] = field(default_factory=list)
+    evidence: list[dict[str, object]] = field(default_factory=list)
+    capability_requests: list[dict[str, object]] = field(default_factory=list)
+    artifacts: list[dict[str, object]] = field(default_factory=list)
+    tests: list[dict[str, object]] = field(default_factory=list)
+    patches: list[dict[str, object]] = field(default_factory=list)
+    lessons: list[str] = field(default_factory=list)
+    next_actions: list[str] = field(default_factory=list)
+    raw_json: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -1449,6 +1483,7 @@ class SubAgentManager:
         status: str = "",
         verification_status: str = "",
         failure_type: str = "",
+        structured_output: SubAgentParsedOutput | None = None,
     ) -> SubAgentRunnerResult:
         """把 runner 调用结果写回标准工单。"""
 
@@ -1456,11 +1491,91 @@ class SubAgentManager:
         _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
         self.save(task)
         now = time.time()
+        parsed = structured_output or SubAgentParsedOutput()
+        structured_evidence_count = 0
+        structured_request_count = 0
+        created_request_ids: list[str] = []
+        ignored_tools: list[str] = []
+        ignored_skills: list[str] = []
+        artifacts: list[dict[str, object]] = []
+        tests: list[dict[str, object]] = []
+        patches: list[dict[str, object]] = []
+        lessons: list[str] = []
+        next_actions: list[str] = []
 
         if prompt:
             Path(task.runner_prompt_file).write_text(prompt, encoding="utf-8")
         if response:
             Path(task.runner_response_file).write_text(response, encoding="utf-8")
+
+        if parsed.found and parsed.ok:
+            allowed_tools = set(task.allowed_tools)
+            allowed_skills = set(task.allowed_skills)
+            used_tools, ignored_tools = _split_allowed_items(parsed.used_tools, allowed_tools)
+            used_skills, ignored_skills = _split_allowed_items(parsed.used_skills, allowed_skills)
+            task.used_tools = _merge_list(task.used_tools, used_tools)
+            task.used_skills = _merge_list(task.used_skills, used_skills)
+
+            for item in parsed.evidence:
+                summary = str(item.get("summary", "")).strip()
+                if not summary:
+                    continue
+                task.evidence.append(
+                    VerificationEvidence(
+                        kind=str(item.get("kind", "note") or "note"),
+                        summary=summary,
+                        command=str(item.get("command", "") or ""),
+                        path=str(item.get("path", "") or ""),
+                        url=str(item.get("url", "") or ""),
+                        ok=bool(item.get("ok", True)),
+                        created_at=now,
+                    )
+                )
+                structured_evidence_count += 1
+
+            for item in parsed.capability_requests:
+                problem = str(item.get("problem", "")).strip()
+                needed = str(item.get("needed_capability", "")).strip()
+                if not problem or not needed:
+                    continue
+                request = CapabilityRequest(
+                    id=_new_id("capreq"),
+                    from_run_id=task.id,
+                    problem=problem,
+                    needed_capability=needed,
+                    expected_output=str(item.get("expected_output", "") or ""),
+                    tried=_string_list(item.get("tried", [])),
+                    evidence=_string_list(item.get("evidence", [])),
+                    constraints=_string_dict(item.get("constraints", {})),
+                    created_at=now,
+                )
+                task.capability_requests.append(request)
+                created_request_ids.append(request.id)
+                structured_request_count += 1
+
+            if parsed.summary:
+                message = parsed.summary
+            if parsed.blocked_reason:
+                message = f"{message} / blocked: {parsed.blocked_reason}" if message else parsed.blocked_reason
+            artifacts = _normalize_runner_items(parsed.artifacts)
+            tests = _normalize_runner_items(parsed.tests)
+            patches = _normalize_runner_items(parsed.patches)
+            lessons = parsed.lessons
+            next_actions = parsed.next_actions
+            if not failure_type and parsed.failure_type:
+                failure_type = parsed.failure_type
+            if structured_request_count and not failure_type:
+                failure_type = "capability_request"
+            if not status:
+                status = _status_from_structured_output(parsed)
+            if not verification_status:
+                verification_status = _verification_from_runner_status(status)
+        elif parsed.found and not parsed.ok:
+            ok = False
+            status = status or "BLOCKED"
+            verification_status = verification_status or "UNVERIFIED"
+            failure_type = failure_type or "structured_output_parse_error"
+            message = f"{message} / structured output parse failed: {parsed.parse_error}"
 
         if status:
             task.status = status.upper()
@@ -1478,6 +1593,9 @@ class SubAgentManager:
             task.ended_at = now
         task.updated_at = now
         task.heartbeat_at = now
+        blockers = []
+        if not ok or task.status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
+            blockers = [parsed.blocked_reason or message]
 
         output_payload = {
             "run_id": task.id,
@@ -1489,11 +1607,39 @@ class SubAgentManager:
             "backend": backend,
             "tool_rounds": tool_rounds,
             "response": response,
-            "artifacts": [],
-            "tests": [],
-            "acceptance": [],
-            "blockers": [] if ok else [message],
-            "next_action": "run_acceptance" if ok and not dry_run else "",
+            "structured_output": {
+                "found": parsed.found,
+                "ok": parsed.ok,
+                "parse_error": parsed.parse_error,
+                "summary": parsed.summary,
+                "status": parsed.status,
+                "blocked_reason": parsed.blocked_reason,
+                "evidence_count": structured_evidence_count,
+                "capability_request_count": structured_request_count,
+                "capability_request_ids": created_request_ids,
+                "artifact_count": len(artifacts),
+                "test_count": len(tests),
+                "patch_count": len(patches),
+                "lesson_count": len(lessons),
+                "ignored_unauthorized_tools": ignored_tools,
+                "ignored_unauthorized_skills": ignored_skills,
+            },
+            "used_tools": task.used_tools,
+            "used_skills": task.used_skills,
+            "artifacts": artifacts,
+            "tests": tests,
+            "patches": patches,
+            "acceptance": [item.summary for item in task.evidence],
+            "lessons": lessons,
+            "blockers": blockers,
+            "next_action": _runner_next_action(
+                dry_run=dry_run,
+                ok=ok,
+                status=task.status,
+                capability_request_count=structured_request_count,
+                next_actions=next_actions,
+            ),
+            "next_actions": next_actions,
             "created_at": now,
         }
         Path(task.output_json).write_text(
@@ -1517,6 +1663,17 @@ class SubAgentManager:
             result_file=task.runner_result_file,
             result_json=task.runner_result_json,
             output_json=task.output_json,
+            structured_output_found=parsed.found,
+            structured_output_ok=parsed.ok,
+            structured_parse_error=parsed.parse_error,
+            structured_summary=parsed.summary,
+            evidence_count=structured_evidence_count,
+            capability_request_count=structured_request_count,
+            artifact_count=len(artifacts),
+            test_count=len(tests),
+            patch_count=len(patches),
+            lesson_count=len(lessons),
+            blocked_reason=parsed.blocked_reason,
             created_at=now,
         )
         Path(task.runner_result_json).write_text(
@@ -1528,6 +1685,8 @@ class SubAgentManager:
             encoding="utf-8",
         )
         self.save(task)
+        if parsed.found and parsed.ok:
+            self._append_runner_debrief(task, parsed)
         self._append_task_work_log(
             task,
             f"subagent_runner: dry_run={dry_run} ok={ok} status={task.status} message={message}",
@@ -2244,6 +2403,43 @@ class SubAgentManager:
                 f"tools={','.join(record.granted_tools) or 'none'} message={record.message}\n"
             )
 
+    def _append_runner_debrief(
+        self,
+        task: SubAgentTask,
+        parsed: SubAgentParsedOutput,
+    ) -> None:
+        """把结构化 runner 产出追加到 DEBRIEF，方便人接管。"""
+
+        sections: list[str] = []
+        if parsed.artifacts:
+            sections.append("## Runner Artifacts")
+            sections.extend(_render_runner_item_line(item) for item in parsed.artifacts)
+        if parsed.tests:
+            sections.append("## Runner Tests")
+            sections.extend(_render_runner_item_line(item) for item in parsed.tests)
+        if parsed.patches:
+            sections.append("## Runner Patches")
+            sections.extend(_render_runner_item_line(item) for item in parsed.patches)
+        if parsed.lessons:
+            sections.append("## Runner Lessons")
+            sections.extend(f"- {item}" for item in parsed.lessons)
+        if parsed.next_actions:
+            sections.append("## Runner Next Actions")
+            sections.extend(f"- {item}" for item in parsed.next_actions)
+        if not sections:
+            return
+
+        path = Path(task.debrief_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text("# DEBRIEF\n\n", encoding="utf-8")
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write("\n## Runner Structured Output\n\n")
+            handle.write(f"- created_at: {time.time()}\n")
+            handle.write(f"- run_id: {task.id}\n\n")
+            handle.write("\n\n".join(sections))
+            handle.write("\n")
+
     def _ensure_work_order_files(self, task: SubAgentTask) -> None:
         """初始化标准工单目录和最小文件。"""
 
@@ -2746,20 +2942,40 @@ def render_runner_result_markdown(result: SubAgentRunnerResult) -> str:
         f"- ok: {status}",
         f"- backend: {result.backend or 'none'}",
         f"- tool_rounds: {result.tool_rounds}",
+        f"- structured_output_found: {result.structured_output_found}",
+        f"- structured_output_ok: {result.structured_output_ok}",
+        f"- evidence_count: {result.evidence_count}",
+        f"- capability_request_count: {result.capability_request_count}",
+        f"- artifact_count: {result.artifact_count}",
+        f"- test_count: {result.test_count}",
+        f"- patch_count: {result.patch_count}",
+        f"- lesson_count: {result.lesson_count}",
         "",
         "## Message",
         "",
         result.message or "none",
-        "",
-        "## Files",
-        "",
-        f"- execution_context_json: {result.execution_context_json}",
-        f"- execution_context_file: {result.execution_context_file}",
-        f"- prompt_file: {result.prompt_file or 'none'}",
-        f"- response_file: {result.response_file or 'none'}",
-        f"- result_json: {result.result_json}",
-        f"- output_json: {result.output_json}",
     ]
+    if result.structured_summary or result.blocked_reason or result.structured_parse_error:
+        lines.extend(["", "## Structured Output", ""])
+        if result.structured_summary:
+            lines.append(f"- summary: {result.structured_summary}")
+        if result.blocked_reason:
+            lines.append(f"- blocked_reason: {result.blocked_reason}")
+        if result.structured_parse_error:
+            lines.append(f"- parse_error: {result.structured_parse_error}")
+    lines.extend(
+        [
+            "",
+            "## Files",
+            "",
+            f"- execution_context_json: {result.execution_context_json}",
+            f"- execution_context_file: {result.execution_context_file}",
+            f"- prompt_file: {result.prompt_file or 'none'}",
+            f"- response_file: {result.response_file or 'none'}",
+            f"- result_json: {result.result_json}",
+            f"- output_json: {result.output_json}",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -3092,6 +3308,197 @@ def _route_card_payload(hit: CapabilitySearchHit) -> dict[str, str]:
         "score": f"{hit.score:.2f}",
         "reasons": "；".join(hit.reasons[:4]),
     }
+
+
+def parse_subagent_runner_output(text: str) -> SubAgentParsedOutput:
+    """解析 runner 模型回复中的结构化结果块。"""
+
+    marker_start = "[SUBAGENT_RESULT]"
+    marker_end = "[/SUBAGENT_RESULT]"
+    start = text.find(marker_start)
+    if start == -1:
+        return SubAgentParsedOutput(found=False, ok=False)
+    end = text.find(marker_end, start)
+    if end == -1:
+        return SubAgentParsedOutput(
+            found=True,
+            ok=False,
+            parse_error="缺少 [/SUBAGENT_RESULT] 结束标记。",
+        )
+    raw = text[start + len(marker_start) : end].strip()
+    raw = _strip_json_fence(raw)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return SubAgentParsedOutput(
+            found=True,
+            ok=False,
+            parse_error=f"JSON 解析失败: {exc}",
+        )
+    if not isinstance(payload, dict):
+        return SubAgentParsedOutput(
+            found=True,
+            ok=False,
+            parse_error="结构化结果必须是 JSON object。",
+        )
+
+    return SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        status=str(payload.get("status", "") or ""),
+        summary=str(payload.get("summary", "") or ""),
+        blocked_reason=str(payload.get("blocked_reason", "") or ""),
+        failure_type=str(payload.get("failure_type", "") or ""),
+        used_skills=_string_list(payload.get("used_skills", [])),
+        used_tools=_string_list(payload.get("used_tools", [])),
+        evidence=_dict_list(payload.get("evidence", [])),
+        capability_requests=_dict_list(payload.get("capability_requests", [])),
+        artifacts=_dict_list(payload.get("artifacts", [])),
+        tests=_dict_list(payload.get("tests", [])),
+        patches=_dict_list(payload.get("patches", [])),
+        lessons=_string_list(payload.get("lessons", [])),
+        next_actions=_string_list(payload.get("next_actions", [])),
+        raw_json=payload,
+    )
+
+
+def _strip_json_fence(raw: str) -> str:
+    """去掉可选的 Markdown JSON fence。"""
+
+    stripped = raw.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if lines and lines[0].startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _dict_list(value: object) -> list[dict[str, object]]:
+    """把任意值规范成 dict list。"""
+
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, object]] = []
+    for item in value:
+        if isinstance(item, dict):
+            result.append({str(key): val for key, val in item.items()})
+    return result
+
+
+def _string_list(value: object) -> list[str]:
+    """把任意值规范成字符串列表。"""
+
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _string_dict(value: object) -> dict[str, str]:
+    """把任意值规范成字符串字典。"""
+
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): str(val) for key, val in value.items()}
+
+
+def _split_allowed_items(items: list[str], allowed: set[str]) -> tuple[list[str], list[str]]:
+    """拆分授权项和未授权项。"""
+
+    accepted: list[str] = []
+    ignored: list[str] = []
+    for item in items:
+        if item in allowed:
+            accepted.append(item)
+        else:
+            ignored.append(item)
+    return accepted, ignored
+
+
+def _normalize_runner_items(items: list[dict[str, object]]) -> list[dict[str, object]]:
+    """把 runner item 转成稳定可 JSON 化的浅层对象。"""
+
+    normalized: list[dict[str, object]] = []
+    for item in items:
+        payload: dict[str, object] = {}
+        for key, value in item.items():
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                payload[str(key)] = value
+            elif isinstance(value, list):
+                payload[str(key)] = [str(entry) for entry in value]
+            elif isinstance(value, dict):
+                payload[str(key)] = {str(k): str(v) for k, v in value.items()}
+            else:
+                payload[str(key)] = str(value)
+        normalized.append(payload)
+    return normalized
+
+
+def _render_runner_item_line(item: dict[str, object]) -> str:
+    """把 runner 结构化条目渲染成一行 debrief。"""
+
+    title = (
+        item.get("path")
+        or item.get("name")
+        or item.get("command")
+        or item.get("summary")
+        or item.get("description")
+        or "item"
+    )
+    details = []
+    for key in ["kind", "status", "ok", "summary", "description"]:
+        if key in item and item[key] not in ("", None):
+            details.append(f"{key}={item[key]}")
+    suffix = f" ({'; '.join(details)})" if details else ""
+    return f"- {title}{suffix}"
+
+
+def _status_from_structured_output(parsed: SubAgentParsedOutput) -> str:
+    """把模型上报状态压成 runner 允许的任务状态。"""
+
+    status = parsed.status.upper().strip()
+    if parsed.capability_requests or parsed.blocked_reason:
+        return "BLOCKED"
+    if status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
+        return status
+    if status in {"DONE", "COMPLETED", "COMPLETE", "SUCCESS", "AWAITING_ACCEPTANCE"}:
+        return "AWAITING_ACCEPTANCE"
+    return "AWAITING_ACCEPTANCE"
+
+
+def _verification_from_runner_status(status: str) -> str:
+    """runner 不能直接 VERIFIED，只能进入待验收或未验收。"""
+
+    if status.upper() == "AWAITING_ACCEPTANCE":
+        return "NEEDS_ACCEPTANCE"
+    return "UNVERIFIED"
+
+
+def _runner_next_action(
+    *,
+    dry_run: bool,
+    ok: bool,
+    status: str,
+    capability_request_count: int,
+    next_actions: list[str] | None = None,
+) -> str:
+    """根据 runner 结果给机器读的下一步建议。"""
+
+    if dry_run:
+        return ""
+    if capability_request_count:
+        return "route_capability_request"
+    if next_actions:
+        return next_actions[0]
+    if ok and status == "AWAITING_ACCEPTANCE":
+        return "run_acceptance"
+    if not ok:
+        return "inspect_runner_failure"
+    return ""
 
 
 def _dedupe_granted_cards(

@@ -1,15 +1,81 @@
 # TEST_CHECKLIST
 
-## [已测]
-- [x] F01 Python3 标准库优先 — py_compile PASS，无运行依赖。
-- [x] F02 CLI 入口 — `python3 -m agent_py_agent --help` PASS。
-- [x] F03 JSONL 记忆 — remember/search PASS。
-- [x] F04 外置配置中文说明 — `config/agent_config.yaml`。
-- [x] F05 subagent 思维/计划/结果 — spawn-subagents PASS，生成 task.json/thought.md。
-- [x] F06 动态 prompt 注入 — run --inject PASS。
-- [x] F07 工程结构 — config/memory/prompt/backend/subagent/core 分层。
-- [x] F08 Web/API 扩展边界 — extensions_dir/backend 接口预留。
-- [x] F09 测试覆盖真实入口和错误入口 — --help/run/remember/search/spawn/unknown-command。
+## 每轮开发最低检查
 
-## [未测]
-无。
+- [ ] `python3 -m py_compile agent_py_agent/agent/*.py agent_py_agent/__main__.py`
+- [ ] `python3 -m agent_py_agent --help`
+- [ ] `git diff --check`
+
+## 修改普通 run / chat 时
+
+- [ ] `python3 -m agent_py_agent run "测试" --no-save`
+- [ ] chat 手动检查 `/help`、`/status`、`/btw`、`/exit`
+- [ ] 确认不会意外打印 API key
+
+如果当前默认配置是远端模型，先切 echo 或确认 API 成本。
+
+## 修改工具系统时
+
+- [ ] 工具目录仍能渲染
+- [ ] 推荐工具仍能按任务筛选
+- [ ] `[TOOL_CALL]` 解析正常
+- [ ] 未授权工具会被 allowlist 拦住
+- [ ] 文件工具仍限制在 workspace 内
+- [ ] HTTP 工具有超时和长度限制
+
+推荐命令见 [TESTS.md](TESTS.md) 的 Tools 部分。
+
+## 修改 capability / skill 时
+
+- [ ] `SKILL.md` frontmatter 解析正常
+- [ ] Skill Registry 能扫描目录
+- [ ] ToolSpec 能映射成 CapabilityCard
+- [ ] Capability Router 能同时检索 skill/tool
+- [ ] `capability_candidate_limit=0` 仍表示不限制
+- [ ] grant 不展开完整 skill 正文
+
+推荐命令见 [TESTS.md](TESTS.md) 的 Capability Router 部分。
+
+## 修改 subagent 工单时
+
+- [ ] 创建 run 后有标准目录和关键文件
+- [ ] `task.json` / `run.json` 可读
+- [ ] `STATUS.md` / `WORK_LOG.md` / `ACCEPTANCE.md` / `DEBRIEF.md` 存在
+- [ ] `output.json` / `dependencies.json` 存在
+- [ ] `validate_work_order()` 能发现缺失文件
+- [ ] `record_takeover()` 会写 `TAKEOVER.md`
+- [ ] DONE 缺 evidence 时会被拦截或 due-check 标红
+
+## 修改 due-check / action apply 时
+
+- [ ] due-check 能发现 fake done
+- [ ] due-check 能发现 open capability request
+- [ ] due-check 能发现 open gap
+- [ ] due-check 能发现 heartbeat stale / run timeout
+- [ ] action plan 默认 dry-run
+- [ ] apply 动作必须显式 `--apply`
+- [ ] takeover 需要 `--take-over-by`
+- [ ] apply 后有审计日志
+
+## 修改 runner 时
+
+- [ ] `subagent-run <run_id>` 默认 dry-run
+- [ ] `subagent-run <run_id> --execute` 才调用模型
+- [ ] 执行前默认 channel probe
+- [ ] BROKEN 通道不会继续模型调用
+- [ ] runner prompt 只包含 allowed tools
+- [ ] 未授权工具调用会失败
+- [ ] `[SUBAGENT_RESULT]` 缺失或 JSON 错误会被记录
+- [ ] evidence 会写入 `task.evidence`
+- [ ] capability_requests 会写成 open request
+- [ ] artifacts / tests / patches 会写入 `output.json`
+- [ ] lessons / next_actions 会写入 `output.json` 和 `DEBRIEF.md`
+- [ ] runner 不会直接标记 DONE
+
+## 修改文档时
+
+- [ ] 新增重要文件后更新 `CODEBASE_TREE.md`
+- [ ] 新增架构想法后更新 `DESIGN_LEDGER.md`
+- [ ] 新增命令后更新 README 或 runbook
+- [ ] 新增测试策略后更新 `TESTS.md`
+- [ ] 文档里的命令不要默认触发真实 API，除非明确提醒

@@ -50,6 +50,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |-- SKILL_SPARK.yaml                           # 项目任务描述
 |-- SPEC.md                                    # 原始需求规格
 |-- STATUS.md                                  # 当前阶段状态说明
+|-- SUBAGENT_RUNBOOK.md                        # subagent、capability 和 runner 详细运行手册
 |-- TESTS.md                                   # 测试说明
 |-- TEST_CHECKLIST.md                          # 测试检查清单
 `-- validation/                                # 验证输出目录
@@ -238,6 +239,10 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `write_execution_context()` 会写出 `execution_context.json` 和 `EXECUTION_CONTEXT.md`。
 - `python3 -m agent_py_agent subagent-context <run_id>` 可以生成单个子代理执行上下文包。
 - `record_runner_result()` 会把 runner 输出写回 `output.json`、`RUNNER_RESULT.md` 和任务日志。
+- `parse_subagent_runner_output()` 会解析 `[SUBAGENT_RESULT]...[/SUBAGENT_RESULT]` JSON 块。
+- 结构化 runner 输出里的 evidence 会自动写入验收证据。
+- 结构化 runner 输出里的 capability request 会自动写成 open `CapabilityRequest`。
+- 结构化 runner 输出里的 artifacts / tests / patches / lessons / next_actions 会写入 `output.json` 和 `DEBRIEF.md`。
 - `python3 -m agent_py_agent subagent-run <run_id>` 默认 dry-run；显式 `--execute` 才会调用模型。
 - `SimpleAgent.run(..., allowed_tools=[...])` 会限制 prompt 里的工具目录和实际工具调用。
 
@@ -302,6 +307,8 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - capability route 是否默认 dry-run，显式 apply 时是否能给 request 生成 grant 或 gap，并写入审计日志。
 - execution context 是否只包含已授权 skill/tool、granted card、任务边界和验收规则。
 - subagent runner 是否默认 dry-run，显式执行时是否只注入授权工具并把结果写回工单。
+- subagent runner 是否能解析结构化输出，并自动生成 evidence 和 capability request。
+- subagent runner 是否能把 artifacts / tests / patches / lessons / next_actions 落进机器结果和 debrief。
 
 ### `.gitattributes`
 
@@ -324,6 +331,21 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - 新增重要文件要更新 `CODEBASE_TREE.md`。
 - 自学习功能默认关闭，开启后也只能先生成学习候选草稿，不能自动改正式 skill。
 - skill 体系后续优先采用“索引 → 正文 → 附件”的渐进加载方向。
+
+### `SUBAGENT_RUNBOOK.md`
+
+这是当前 subagent / capability / runner 的详细手册。
+
+它说明：
+- 为什么要做工单化子代理。
+- capability request / grant / gap 的职责。
+- 标准工单目录每个文件的用途。
+- due-check / probe / action plan / action apply / capability route / runner 的命令流。
+- `[SUBAGENT_RESULT]` 结构化输出协议。
+- evidence、capability request、artifacts、tests、patches、lessons、next_actions 的写回规则。
+- runner 的安全边界和后续缺口。
+
+后续改 subagent 主链路时，除了 `DESIGN_LEDGER.md`，也要同步检查这份 runbook 是否需要更新。
 
 ### `DESIGN_LEDGER.md`
 

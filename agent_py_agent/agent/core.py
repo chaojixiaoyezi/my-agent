@@ -10,7 +10,13 @@ from .backend import get_backend
 from .config import AgentConfig
 from .memory import JsonlMemory
 from .prompting import PromptBuilder
-from .subagent import SubAgentExecutionContext, SubAgentManager, SubAgentRunnerResult, SubAgentTask
+from .subagent import (
+    SubAgentExecutionContext,
+    SubAgentManager,
+    SubAgentRunnerResult,
+    SubAgentTask,
+    parse_subagent_runner_output,
+)
 from .tools import ToolRegistry
 
 
@@ -209,17 +215,19 @@ class SimpleAgent:
                 failure_type="runner_error",
             )
 
+        structured = parse_subagent_runner_output(result.response)
         return self.subagents.record_runner_result(
             run_id,
             dry_run=False,
-            ok=True,
+            ok=structured.ok if structured.found else True,
             message="runner 已完成模型调用，等待独立验收。",
             prompt=result.prompt,
             response=result.response,
             backend=result.backend,
             tool_rounds=result.tool_rounds,
-            status="AWAITING_ACCEPTANCE",
-            verification_status="NEEDS_ACCEPTANCE",
+            status="" if structured.found else "AWAITING_ACCEPTANCE",
+            verification_status="" if structured.found else "NEEDS_ACCEPTANCE",
+            structured_output=structured,
         )
 
 
@@ -245,4 +253,32 @@ def _build_subagent_runner_prompt(
         "- 说明完成了什么或卡在哪里。\n"
         "- 列出使用过的授权工具或 skill。\n"
         "- 给出可验收证据；如果没有证据，明确写出还需要什么能力或工具。\n"
+        "- 最后必须输出一个机器可解析结果块，格式如下：\n\n"
+        "[SUBAGENT_RESULT]\n"
+        "{\n"
+        '  "status": "AWAITING_ACCEPTANCE",\n'
+        '  "summary": "本轮完成或卡住的摘要",\n'
+        '  "used_tools": [],\n'
+        '  "used_skills": [],\n'
+        '  "evidence": [\n'
+        '    {"kind": "command", "summary": "验证摘要", "command": "", "path": "", "url": "", "ok": true}\n'
+        "  ],\n"
+        '  "capability_requests": [\n'
+        '    {"problem": "缺少什么", "needed_capability": "能力名", "expected_output": "希望得到什么", "tried": [], "evidence": [], "constraints": {}}\n'
+        "  ],\n"
+        '  "artifacts": [\n'
+        '    {"path": "产物路径", "kind": "file|report|log", "summary": "产物说明"}\n'
+        "  ],\n"
+        '  "tests": [\n'
+        '    {"name": "测试名称", "command": "运行命令", "ok": true, "summary": "测试结果摘要"}\n'
+        "  ],\n"
+        '  "patches": [\n'
+        '    {"path": "改动文件", "status": "applied|planned|blocked", "summary": "改了什么或准备改什么"}\n'
+        "  ],\n"
+        '  "lessons": ["可沉淀经验，适合未来变成 skill 或规则"],\n'
+        '  "next_actions": ["建议父代理下一步动作"],\n'
+        '  "blocked_reason": "",\n'
+        '  "failure_type": ""\n'
+        "}\n"
+        "[/SUBAGENT_RESULT]\n"
     )
