@@ -78,6 +78,39 @@
 - 给迁移出来的历史函数逐个补齐更细的人类大白话注释。
 - 增加 import 边界测试，防止后续从上层模块反向依赖底层实现。
 
+## 2026-04-29 / 第二轮目录归位
+
+状态：已落地
+
+思路：
+- 第一轮解决“文件太大”，第二轮解决“根目录仍然平铺”。
+- 根目录只保留兼容门面，真实实现进职责目录。
+- 未来方向可以先建目录和 README 定义边界，但不写无意义 wrapper 或空代码。
+
+已落地：
+- `backend.py` -> `backends/base.py`
+- `config.py` -> `settings/config.py`
+- `capabilities.py` / `capability_config.py` / `skills.py` -> `capability/`
+- `file_io.py` -> `io/jsonl.py`
+- `memory.py` -> `memory_store/jsonl.py`
+- `prompting.py` -> `prompting_parts/builder.py`
+- 新增 `agent_py_agent/agent/DIRECTORY_GUIDE.md` 作为 agent 目录地图。
+- 新增未来目录并用 README 固定含义：`clients/`、`repositories/`、`observability/`、`security/`、`validators/`。
+
+保留兼容：
+- `agent.backend`
+- `agent.config`
+- `agent.capabilities`
+- `agent.capability_config`
+- `agent.skills`
+- `agent.file_io`
+- `agent.memory`
+- `agent.prompting`
+
+后续方向：
+- 为目录边界补 import-lint 风格测试，防止上层反向依赖底层。
+- 未来新增外部依赖时优先进入 `clients/`；新增安全硬门禁时优先进入 `security/`；新增跨领域校验时优先进入 `validators/`。
+
 ## 2026-04-29 / 本地事实源
 
 状态：部分落地
