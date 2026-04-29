@@ -1000,3 +1000,21 @@ suggested_tool: 是否建议开发成 tool
 - 稳定后考虑让 `my-agent chat` 默认 attach 到 gateway。
 - 把更多 slash command 也改成 gateway 请求，减少前台 CLI 对本地状态的直接操作。
 - 给 chat/TUI 增加异步完成通知，而不是每条消息都由当前 worker 等 response。
+
+## 2026-04-29 / 默认入口自动进入 Gateway Chat
+
+状态：已落地
+
+思路：
+- 用户安装后应该能直接敲 `my-agent` 使用，不需要先学习 `gateway start` 和 `chat --gateway`。
+- 默认入口应该自动确保 gateway 存活，然后进入 gateway chat。
+- 退出 chat 不关闭 gateway，保持“前台客户端可退出，后台本体继续值班”的体验。
+
+已落地：
+- argparse 子命令改为可选；没有子命令时进入 `cmd_default()`。
+- `cmd_default()` 调用 `ensure_gateway_started()`，未运行则自动 `gateway start`。
+- gateway 存活后，默认入口进入 `cmd_chat()` 的 gateway 模式。
+
+后续方向：
+- 观察默认入口稳定性，再考虑是否让显式 `my-agent chat` 也默认 attach gateway。
+- 补更好的首次启动引导，例如配置 API key、模型后端和 gateway 状态提示。

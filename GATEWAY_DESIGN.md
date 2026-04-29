@@ -9,11 +9,12 @@
 目标是：
 
 ```text
+my-agent
 my-agent gateway restart
 my-agent chat
 ```
 
-`gateway` 是本地常驻 runtime，`chat` / TUI 只是客户端。用户可以退出聊天界面、重启 gateway、刷新会话；任务树、runner 输出、验收、能力授权、失败原因和调度日志都要落盘，gateway 重启后从任务账本恢复，而不是依赖某个长聊天上下文活着。
+`gateway` 是本地常驻 runtime，`chat` / TUI 只是客户端。用户可以退出聊天界面、重启 gateway、刷新会话；任务树、runner 输出、验收、能力授权、失败原因和调度日志都要落盘，gateway 重启后从任务账本恢复，而不是依赖某个长聊天上下文活着。当前 `my-agent` 不带子命令时已经会自动启动 gateway 并进入 `chat --gateway`，这是默认用户体验。
 
 第一版 gateway 已先落成一个很薄的本地后台控制面：
 

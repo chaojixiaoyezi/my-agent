@@ -405,6 +405,28 @@ def gateway_running(paths: GatewayPaths) -> tuple[int, bool]:
     return pid, bool(pid and is_pid_alive(pid))
 
 
+def wait_for_gateway_running(paths: GatewayPaths, timeout: float = 10.0) -> tuple[int, bool]:
+    """Wait briefly for a just-started gateway process to become observable.
+
+    On Windows, `gateway start` can return before the next CLI process can
+    reliably query the new pid. This helper smooths out the common
+    `gateway start && gateway ask ...` race without changing the file-queue
+    protocol underneath.
+    """
+
+    deadline = time.time() + max(0.0, timeout)
+    last_pid = 0
+    while True:
+        pid, alive = gateway_running(paths)
+        if pid:
+            last_pid = pid
+        if alive:
+            return pid, True
+        if time.time() >= deadline:
+            return pid or last_pid, False
+        time.sleep(0.2)
+
+
 def render_gateway_status(agent: SimpleAgent, paths: GatewayPaths) -> list[str]:
     """生成 gateway 状态摘要，供 `gateway status` 和 `chat --gateway /status` 复用。"""
 
@@ -981,6 +1003,51 @@ def cmd_gateway(args) -> int:
     return 2
 
 
+def ensure_gateway_started(args) -> int:
+    """确保 gateway 后台进程正在运行；未运行时自动启动。
+
+    这是 `my-agent` 无参数默认入口的核心：用户只敲命令名时，不应该先学习
+    `gateway start`，程序会自己把后台值班进程拉起来。
+    """
+
+    agent = make_agent(args)
+    paths = gateway_paths(agent)
+    pid, alive = gateway_running(paths)
+    if alive:
+        return 0
+    start_args = argparse.Namespace(
+        config=args.config,
+        force=False,
+        force_lock=False,
+    )
+    code = cmd_gateway_start(start_args)
+    if code:
+        return code
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        pid, alive = gateway_running(paths)
+        if alive:
+            return 0
+        time.sleep(0.2)
+    print("gateway 已尝试启动，但未能确认存活。请运行 my-agent gateway status 查看。", file=sys.stderr)
+    return 2
+
+
+def cmd_default(args) -> int:
+    """无子命令默认入口：自动启动 gateway，然后进入 gateway chat。"""
+
+    code = ensure_gateway_started(args)
+    if code:
+        return code
+    args.gateway = True
+    args.gateway_timeout = None
+    args.inject = None
+    args.prompt_file = None
+    args.memory_limit = 5
+    args.no_save = False
+    return cmd_chat(args)
+
+
 def cmd_gateway_start(args) -> int:
     """启动第一版后台 gateway。"""
 
@@ -1048,6 +1115,7 @@ def cmd_gateway_start(args) -> int:
             "log": str(paths.log),
         },
     )
+    wait_for_gateway_running(paths, timeout=10.0)
     print(f"gateway starting pid={process.pid}")
     print(f"state: {paths.state}")
     print(f"log: {paths.log}")
@@ -1271,7 +1339,7 @@ def cmd_gateway_ask(args) -> int:
 
     agent = make_agent(args)
     paths = gateway_paths(agent)
-    pid, alive = gateway_running(paths)
+    pid, alive = wait_for_gateway_running(paths, timeout=10.0)
     if not alive:
         print("gateway 未在运行。请先执行: my-agent gateway start", file=sys.stderr)
         return 2
@@ -1543,7 +1611,7 @@ def cmd_chat(args) -> int:
     use_gateway = bool(args.gateway)
     paths = gateway_paths(agent)
     if use_gateway:
-        _, alive = gateway_running(paths)
+        _, alive = wait_for_gateway_running(paths, timeout=10.0)
         if not alive:
             print("gateway 未在运行。请先执行: my-agent gateway start", file=sys.stderr)
             return 2
@@ -1800,7 +1868,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(DEFAULT_CONFIG),
         help="配置文件路径，默认使用 config/agent_config.yaml",
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
+    parser.set_defaults(func=cmd_default)
 
     run = sub.add_parser("run", help="运行一次智能体对话")
     run.add_argument("prompt", help="用户任务 / prompt")
