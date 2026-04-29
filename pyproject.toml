@@ -9,6 +9,9 @@ description = "A small Python CLI agent with memory, tools, and auditable subage
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
+dependencies = [
+  "prompt_toolkit>=3.0",
+]
 
 [project.scripts]
 my-agent = "agent_py_agent.__main__:main"

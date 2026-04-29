@@ -10,6 +10,7 @@ def test_pyproject_exposes_my_agent_console_script():
 
     assert data["project"]["name"] == "my-agent"
     assert data["project"]["scripts"]["my-agent"] == "agent_py_agent.__main__:main"
+    assert "prompt_toolkit>=3.0" in data["project"]["dependencies"]
 
     from agent_py_agent.__main__ import main
 
