@@ -1151,3 +1151,46 @@ suggested_tool: 是否建议开发成 tool
 
 测试：
 - 新增回归：模型 evidence 不写 `read_file` / `write_file` 字符串，但 `actual_tools` 记录真实执行时，父代理验收应通过。
+
+## 2026-04-29 / 代码体检与后续拆分计划
+
+状态：已完成检查，暂不做大规模重构
+
+当前规模：
+- tracked 文本总行数约 1.77 万行。
+- Python 约 1.35 万行，Markdown 约 0.39 万行。
+- 最大文件集中在：
+  - `agent_py_agent/agent/subagent.py`：约 4.8k 行，承担子代理模型、存储、看板、due-check、action、capability route、runner、patch、acceptance、dispatch 等职责。
+  - `agent_py_agent/__main__.py`：约 2.7k 行，承担 argparse、chat、gateway、scenario-test、daemon、subagent CLI 等职责。
+  - `agent_py_agent/agent/core.py`：约 1.6k 行，承担主循环、runner、planner、dispatch 编排工具等职责。
+  - `agent_py_agent/agent/tools.py`：约 1.0k 行，承担工具规格、工具实现、检索和工具调用解析。
+
+文档状态：
+- `README.md`、`CLI_REFERENCE.md`、`TESTS.md`、`SUBAGENT_RUNBOOK.md`、`GATEWAY_DESIGN.md`、`GATEWAY_RESEARCH.md`、`CODEBASE_TREE.md` 已覆盖当前主链路。
+- 本轮补充 `CODEBASE_TREE.md`，加入 `test_cli_reference.py`、`test_packaging.py`，并补充 XML-ish 工具调用解析和 `actual_tools` 系统证据说明。
+
+判断：
+- 当前先不急着重构，因为 gateway / scenario-test / runner / acceptance 正处在高频变化阶段，大规模移动代码会增加回归成本。
+- 但 `subagent.py` 和 `__main__.py` 已经明显超过长期维护舒适区，后续做 gateway worker pool、SQLite ledger、多 gateway 组织通信前，应该分阶段拆分。
+
+建议拆分顺序：
+1. 先拆纯数据和纯解析，风险最低：
+   - `agent/subagent_models.py`：dataclass / enum / schema。
+   - `agent/subagent_parsers.py`：`parse_subagent_runner_output()`、parent planner parser、结构化输出修复相关纯函数。
+   - `agent/tool_call_parser.py`：`[TOOL_CALL]` JSON 和 XML-ish 方言解析。
+2. 再拆子代理业务域：
+   - `agent/subagent_storage.py`：路径、读写、工单目录初始化。
+   - `agent/subagent_acceptance.py`：验收 finding / report / apply。
+   - `agent/subagent_dispatch.py`：due-check、action plan、dispatch/watch。
+   - `agent/subagent_runner.py`：execution context、runner result、actual_tools 证据。
+3. 再拆 CLI：
+   - `cli/parser.py`：argparse 构造。
+   - `cli/gateway.py`：gateway start/status/stop/ask/result。
+   - `cli/scenario.py`：scenario-test fixture 和坏天气场景。
+   - `cli/chat.py`：前台 chat 和 gateway chat 客户端。
+4. 最后拆测试文件：
+   - `test_agent.py` 按 acceptance、dispatch、runner、capability、board/probe 分文件。
+
+约束：
+- 每次拆分只移动一个低耦合区域，先保持 import 兼容，跑完整 `run_tests.py` 后再继续。
+- 不在同一轮同时改行为和大移动文件，避免不知道失败来自重构还是功能变化。
