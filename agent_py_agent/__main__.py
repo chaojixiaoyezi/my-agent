@@ -314,6 +314,38 @@ def cmd_subagents_route_capabilities(args) -> int:
     return 0
 
 
+def cmd_subagents_acceptance(args) -> int:
+    """验收等待验收的 subagent，默认 dry-run。"""
+
+    agent = make_agent(args)
+    report = agent.subagents.write_acceptance_review_report(
+        run_ids=args.run_id or None,
+        apply=args.apply,
+        reviewer=args.reviewer,
+        note=args.note or "",
+        limit=args.limit,
+    )
+    mode = "apply" if args.apply else "dry-run"
+    print("SUBAGENT ACCEPTANCE")
+    print(f"mode={mode} total_records={report.summary.get('total', 0)}")
+    print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
+    if not report.records:
+        print("暂时没有等待验收的 subagent。")
+    for record in report.records:
+        status = "OK" if record.ok else "FAIL"
+        print(
+            f"- [{status}] {record.run_id} decision={record.decision} "
+            f"applied={record.applied} {record.before_status}/{record.before_verification_status}"
+            f"->{record.after_status}/{record.after_verification_status} :: {record.message}"
+        )
+    print(f"\n已写入: {agent.subagents.workspace / 'subagent_acceptance_report.json'}")
+    print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_ACCEPTANCE.md'}")
+    if args.apply:
+        print(f"审计日志: {agent.subagents.workspace / 'subagent_acceptance_log.jsonl'}")
+        print(f"审计日志: {agent.subagents.workspace / 'ACCEPTANCE_REVIEW_LOG.md'}")
+    return 0
+
+
 def cmd_subagent_context(args) -> int:
     """生成单个 subagent 的执行上下文包。"""
 
@@ -677,6 +709,15 @@ def build_parser() -> argparse.ArgumentParser:
     route.add_argument("--skill-dir", action="append", help="额外 skill 目录，可多次传入")
     route.add_argument("--limit", type=int, default=20, help="最多处理多少条 request")
     route.set_defaults(func=cmd_subagents_route_capabilities, apply=False)
+
+    acceptance = sub.add_parser("subagents-acceptance", help="验收等待验收的 subagent")
+    acceptance.add_argument("--dry-run", action="store_false", dest="apply", help="只生成验收报告，不修改记录")
+    acceptance.add_argument("--apply", action="store_true", help="验收通过时标记 DONE/VERIFIED，失败时标记 BLOCKED/FAILED")
+    acceptance.add_argument("--run-id", nargs="*", help="只验收指定子代理运行 ID")
+    acceptance.add_argument("--limit", type=int, default=20, help="最多处理多少条记录")
+    acceptance.add_argument("--reviewer", default="parent", help="验收者标识")
+    acceptance.add_argument("--note", help="写入验收记录的备注")
+    acceptance.set_defaults(func=cmd_subagents_acceptance, apply=False)
 
     subagent_context = sub.add_parser("subagent-context", help="生成单个 subagent 执行上下文包")
     subagent_context.add_argument("run_id", help="子代理运行 ID")

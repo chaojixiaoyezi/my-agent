@@ -73,6 +73,15 @@
 - [ ] lessons / next_actions 会写入 `output.json` 和 `DEBRIEF.md`
 - [ ] runner 不会直接标记 DONE
 
+## 修改 subagent 验收时
+
+- [ ] `subagents-acceptance` 默认 dry-run
+- [ ] `subagents-acceptance --apply` 只验收等待验收的任务
+- [ ] 缺 evidence 时不会标记 DONE
+- [ ] 有 blocker、失败 tests 或未处理 patches 时不会标记 DONE
+- [ ] 验收通过时状态变为 `DONE` 且 verification 为 `VERIFIED`
+- [ ] 每次验收都会写全局报告和单任务 `ACCEPTANCE_REVIEW.md`
+
 ## 修改文档时
 
 - [ ] 新增重要文件后更新 `CODEBASE_TREE.md`

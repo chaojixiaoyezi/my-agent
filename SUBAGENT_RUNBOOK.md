@@ -521,6 +521,50 @@ runner 不会：
 - 自动生成正式 skill。
 - 自动扩大 allowed tools。
 
+## 父代理验收
+
+默认 dry-run：
+
+```bash
+python3 -m agent_py_agent subagents-acceptance
+```
+
+指定 run：
+
+```bash
+python3 -m agent_py_agent subagents-acceptance --run-id <run_id>
+```
+
+真正写回：
+
+```bash
+python3 -m agent_py_agent subagents-acceptance --apply --run-id <run_id>
+```
+
+验收器会检查：
+- 工单现场是否完整。
+- run 是否处于 `AWAITING_ACCEPTANCE` / `NEEDS_ACCEPTANCE`。
+- channel 是否不是 `BROKEN`。
+- runner 结构化输出是否可解析。
+- 是否至少有一条 ok evidence。
+- 是否没有失败 evidence。
+- 是否没有 open capability request / gap。
+- `output.json.blockers` 是否为空。
+- `output.json.tests` 是否没有失败项。
+- `output.json.patches` 是否没有 `planned` / `blocked` 未处理项。
+
+输出：
+- 全局 `subagent_acceptance_report.json`
+- 全局 `SUBAGENT_ACCEPTANCE.md`
+- 单任务 `reports/acceptance_review.json`
+- 单任务 `ACCEPTANCE_REVIEW.md`
+- apply 时追加 `subagent_acceptance_log.jsonl` 和 `ACCEPTANCE_REVIEW_LOG.md`
+
+写回规则：
+- 通过并 apply：`DONE + VERIFIED`
+- 不通过并 apply：`BLOCKED + FAILED`
+- dry-run：只写报告，不修改任务状态。
+
 ## 状态流
 
 常见状态：

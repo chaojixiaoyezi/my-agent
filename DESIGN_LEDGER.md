@@ -688,3 +688,35 @@ suggested_tool: 是否建议开发成 tool
 
 后续要求：
 - 改 subagent / capability / runner 主链路时，除了代码和测试，也要同步检查 `SUBAGENT_RUNBOOK.md`。
+
+## 2026-04-29 / Subagent 验收器
+
+状态：已落地
+
+思路：
+- runner 完成后只能进入 `AWAITING_ACCEPTANCE` / `NEEDS_ACCEPTANCE`，不能自己标记 DONE。
+- 父代理需要一个独立验收入口，读取 evidence、tests、patches、blockers、capability request/gap 和 runner 结构化输出。
+- 默认必须 dry-run，只有显式 apply 才能写回状态。
+
+已落地：
+- `AcceptanceReviewFinding` / `AcceptanceReviewRecord` / `AcceptanceReviewReport`。
+- `SubAgentManager.review_acceptances()`：批量验收等待验收的 run。
+- `SubAgentManager.write_acceptance_review_report()`：写出 `subagent_acceptance_report.json` 和 `SUBAGENT_ACCEPTANCE.md`。
+- `python3 -m agent_py_agent subagents-acceptance`：默认 dry-run。
+- `python3 -m agent_py_agent subagents-acceptance --apply --run-id <run_id>`：验收通过时标记 `DONE/VERIFIED`，失败时标记 `BLOCKED/FAILED`。
+
+当前验收检查：
+- 工单现场完整。
+- 任务确实处于等待验收状态。
+- 通道不是 `BROKEN`。
+- runner 结构化输出可解析，或至少能按人工证据验收。
+- 至少有一条 ok evidence。
+- 没有失败 evidence。
+- 没有 open capability request/gap。
+- `output.json` 没有 blocker。
+- tests 不失败。
+- patches 没有 `planned` / `blocked` 未处理项。
+
+后续方向：
+- 验收器可以接入可执行测试命令，但必须先做命令 allowlist 和超时审计。
+- patch apply 需要独立审核链路，不能由验收器直接应用未知 patch。

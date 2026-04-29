@@ -192,6 +192,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `ActionPlanItem` / `ActionPlanReport`：把 due-check 问题转成 dry-run 动作计划。
 - `ActionApplyRecord` / `ActionApplyReport`：执行或 dry-run 执行动作计划，并留下审计记录。
 - `CapabilityRouteRecord` / `CapabilityRouteReport`：把 open capability request 路由到 skill/tool card。
+- `AcceptanceReviewFinding` / `AcceptanceReviewRecord` / `AcceptanceReviewReport`：记录父代理验收检查、决策和写回结果。
 - `SubAgentExecutionContext`：把授权后的 skill/tool、能力卡、写入边界和验收要求打成子代理执行上下文。
 - `SubAgentRunnerResult`：记录一次子代理 runner 调用的模式、结果、状态和证据文件。
 
@@ -235,6 +236,10 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `write_capability_route_report()` 会写出 `subagent_capability_route_report.json` 和 `SUBAGENT_CAPABILITY_ROUTE.md`。
 - 真正 apply 时会追加 `subagent_capability_route_log.jsonl` 和 `CAPABILITY_ROUTE_LOG.md` 审计日志。
 - `python3 -m agent_py_agent subagents-route-capabilities` 可以 dry-run 或 apply 路由 open capability request。
+- `review_acceptances()` 会检查等待验收的 run 是否具备证据、无 blocker、无未处理 capability request/gap、测试和 patch 状态可接受。
+- `write_acceptance_review_report()` 会写出 `subagent_acceptance_report.json` 和 `SUBAGENT_ACCEPTANCE.md`。
+- 真正 apply 时会追加 `subagent_acceptance_log.jsonl` 和 `ACCEPTANCE_REVIEW_LOG.md` 审计日志。
+- `python3 -m agent_py_agent subagents-acceptance` 默认 dry-run；显式 `--apply` 才会把通过验收的 run 标记为 `DONE/VERIFIED`。
 - `build_execution_context()` 会把当前 run 的授权、能力卡、验收要求和写入边界压成最小上下文。
 - `write_execution_context()` 会写出 `execution_context.json` 和 `EXECUTION_CONTEXT.md`。
 - `python3 -m agent_py_agent subagent-context <run_id>` 可以生成单个子代理执行上下文包。
