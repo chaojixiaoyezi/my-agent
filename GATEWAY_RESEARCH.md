@@ -210,6 +210,8 @@ Node-RED 把 flows 和 credentials 放在 userDir，context 可以用本地文�
 
 下级 gateway 默认不能读取上级的全部任务、现状、记忆、密钥和工具状态；但它可以在授权范围内独立完成任意任务，也可以继续管理自己的下级 gateway。root gateway 保留 reclaim 协调权的能力，但 root reclaim 不等于无限读取其他 gateway 的私有状态。
 
+组织扩展通过 invite key 完成：上级 gateway 可以在授权范围内邀请新的 gateway 加入自己的下级关系，新的 gateway 仍是完整 my-agent，只是在组织里有受限成员身份。组织结构需要独立账本记录 parent/children、membership、grants、delegations、last_seen 和 coordination_epoch，并通过事件日志随时重建。
+
 ### 第一阶段：本地 gateway control plane
 
 先做：
