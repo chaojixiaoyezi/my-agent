@@ -118,7 +118,8 @@ my-agent subagents-dispatch --watch --max-cycles 1 --interval 0
 - 创建隔离临时配置，避免污染默认 `data/memory.jsonl` 和 `data/subagents/`。
 - 跑一次真实 API `subagent-run --execute`，要求真实后端、工具调用、结构化输出、证据写回和父代理验收闭环。
 - 检查 `subagents-dispatch --help`，并跑一次隔离的 `subagents-dispatch --watch --max-cycles 1 --interval 0`。
-- 通过自动发现测试覆盖 dispatch 规划、runner、patch 审核、验收、watch 循环和 watch lock。
+- 跑一次隔离的 `subagents-dispatch --watch --planner --max-cycles 1 --interval 0`，确认父代理 planner 能通过真实 API 唤醒。
+- 通过自动发现测试覆盖 dispatch 规划、父代理 planner、runner、patch 审核、验收、watch 循环和 watch lock。
 - 跑 chat 真实模型路径。
 - 自动发现并运行所有 `test_*.py` 中的 `test_` 函数。
 - 不允许手写测试清单漏掉新增测试。

@@ -106,6 +106,8 @@
 - [ ] `subagents-dispatch --watch --max-cycles 1 --interval 0` 能安全退出
 - [ ] watch 模式会写 heartbeat、watch 报告和 watch 日志
 - [ ] watch lock 会阻止第二个父代理同时运行
+- [ ] `--planner` 在有 active/pending/stalled/needs-intervention 时会调用父代理 LLM
+- [ ] planner gate 不允许有待处理事项时只返回 `HEARTBEAT_OK`
 
 ## 修改文档时
 

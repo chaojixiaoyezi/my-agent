@@ -18,10 +18,12 @@ from .prompting import PromptBuilder
 from .subagent import (
     DispatchReport,
     DispatchWatchReport,
+    ParentPlannerRecord,
     SubAgentExecutionContext,
     SubAgentManager,
     SubAgentRunnerResult,
     SubAgentTask,
+    parse_parent_planner_output,
     parse_subagent_runner_output,
 )
 from .tools import ToolRegistry
@@ -36,6 +38,9 @@ class AgentRunResult:
     backend: str
     used_memories: int
     tool_rounds: int = 0
+
+
+PARENT_PLANNER_READ_TOOLS = ["list_files", "read_file", "search_text"]
 
 
 class SimpleAgent:
@@ -237,6 +242,125 @@ class SimpleAgent:
             structured_output=structured,
         )
 
+    def run_parent_planner(
+        self,
+        router: CapabilityRouter,
+        capability_config: CapabilityConfig | None = None,
+        *,
+        apply: bool = False,
+        execute_runners: bool = False,
+        max_runners: int = 1,
+        limit: int = 20,
+        reviewer: str = "parent-dispatch",
+        note: str = "",
+        runner_instruction: str = "",
+    ) -> ParentPlannerRecord:
+        """运行一轮父代理 LLM planner，并写出审计报告。
+
+        planner 不是 heartbeat 的浅层 OK，而是一个完整模型 turn。只有状态门禁发现
+        有 active/pending/stalled/needs-intervention 事项时，才真正调用模型；如果模型
+        在有事时只回 HEARTBEAT_OK，会被标记为失败。
+        """
+
+        cfg = capability_config or CapabilityConfig()
+        state = _build_parent_planner_state(
+            self,
+            cfg,
+            max_runners=max_runners,
+            limit=limit,
+            reviewer=reviewer,
+            note=note,
+        )
+        gate = state["gate"]
+        gate_summary = {key: int(value) for key, value in gate.items() if isinstance(value, int)}
+        if not gate.get("needs_planner", 0):
+            record = self.subagents.make_parent_planner_record(
+                dry_run=not apply,
+                triggered=False,
+                ok=True,
+                decision="HEARTBEAT_OK",
+                message="planner gate 确认无 active/pending/stalled/needs-intervention 事项，允许 HEARTBEAT_OK。",
+                gate_summary=gate_summary,
+                summary="no work",
+            )
+            report = self.subagents.build_parent_planner_report([record], dry_run=not apply)
+            self.subagents.write_parent_planner_report(report, append_log=apply)
+            return record
+
+        prompt = _build_parent_planner_prompt(
+            state,
+            apply=apply,
+            execute_runners=execute_runners,
+            max_runners=max_runners,
+            runner_instruction=runner_instruction,
+        )
+        prompt_path, response_path = self.subagents.write_parent_planner_exchange(prompt)
+        try:
+            result = self.run(
+                prompt,
+                save=False,
+                allowed_tools=PARENT_PLANNER_READ_TOOLS,
+            )
+        except Exception as exc:
+            record = self.subagents.make_parent_planner_record(
+                dry_run=not apply,
+                triggered=True,
+                ok=False,
+                decision="PLANNER_ERROR",
+                message=f"父代理 planner 调用失败: {exc}",
+                gate_summary=gate_summary,
+                prompt_path=prompt_path,
+                response_path=response_path,
+                evidence_paths=[prompt_path],
+            )
+            report = self.subagents.build_parent_planner_report([record], dry_run=not apply)
+            self.subagents.write_parent_planner_report(report, append_log=apply)
+            return record
+
+        prompt_path, response_path = self.subagents.write_parent_planner_exchange(
+            result.prompt,
+            result.response,
+        )
+        parsed = parse_parent_planner_output(result.response)
+        ok = parsed.found and parsed.ok
+        decision = parsed.decision or "PARSE_ERROR"
+        message = parsed.summary or "父代理 planner 已完成完整 LLM turn。"
+        parse_error = parsed.parse_error
+        if not parsed.found:
+            ok = False
+            decision = "PARSE_ERROR"
+            parse_error = "缺少 [PARENT_PLANNER_RESULT] 结构化结果块。"
+            message = "父代理 planner 有模型回复，但缺少结构化结果，不能当作 OK。"
+        if parsed.decision == "HEARTBEAT_OK" and gate.get("needs_planner", 0):
+            ok = False
+            parse_error = parse_error or "planner gate blocked HEARTBEAT_OK"
+            message = "状态门禁发现仍有待处理事项，禁止 planner 只返回 HEARTBEAT_OK。"
+
+        record = self.subagents.make_parent_planner_record(
+            dry_run=not apply,
+            triggered=True,
+            ok=ok,
+            decision=decision,
+            message=message,
+            gate_summary=gate_summary,
+            backend=result.backend,
+            tool_rounds=result.tool_rounds,
+            parse_error=parse_error,
+            summary=parsed.summary,
+            actions=parsed.actions,
+            blockers=parsed.blockers,
+            risks=parsed.risks,
+            notes=parsed.notes,
+            runner_instruction=parsed.runner_instruction,
+            suggested_max_runners=parsed.suggested_max_runners,
+            prompt_path=prompt_path,
+            response_path=response_path,
+            evidence_paths=[prompt_path, response_path],
+        )
+        report = self.subagents.build_parent_planner_report([record], dry_run=not apply)
+        self.subagents.write_parent_planner_report(report, append_log=apply)
+        return record
+
     def dispatch_subagents(
         self,
         router: CapabilityRouter,
@@ -244,6 +368,7 @@ class SimpleAgent:
         *,
         apply: bool = False,
         execute_runners: bool = False,
+        planner: bool = False,
         max_runners: int = 1,
         limit: int = 20,
         reviewer: str = "parent-dispatch",
@@ -263,6 +388,39 @@ class SimpleAgent:
 
         cfg = capability_config or CapabilityConfig()
         records = []
+        effective_runner_instruction = runner_instruction
+        effective_max_runners = max_runners
+
+        if planner:
+            planner_record = self.run_parent_planner(
+                router,
+                cfg,
+                apply=apply,
+                execute_runners=execute_runners,
+                max_runners=max_runners,
+                limit=limit,
+                reviewer=reviewer,
+                note=note,
+                runner_instruction=runner_instruction,
+            )
+            if planner_record.runner_instruction:
+                effective_runner_instruction = _combine_runner_instruction(
+                    runner_instruction,
+                    planner_record.runner_instruction,
+                )
+            if planner_record.suggested_max_runners > 0 and max_runners > 0:
+                effective_max_runners = min(max_runners, planner_record.suggested_max_runners)
+            records.append(
+                self.subagents.make_dispatch_record(
+                    step="parent_planner",
+                    action=planner_record.decision.lower(),
+                    dry_run=not apply,
+                    applied=False,
+                    ok=planner_record.ok,
+                    message=planner_record.message,
+                    evidence_paths=planner_record.evidence_paths,
+                )
+            )
 
         due_report = self.subagents.write_due_check(cfg) if apply else self.subagents.due_check(cfg)
         records.append(
@@ -339,7 +497,7 @@ class SimpleAgent:
                 )
             )
 
-        runner_candidates = _dispatch_runner_candidates(self.subagents.list_runs(), max_runners)
+        runner_candidates = _dispatch_runner_candidates(self.subagents.list_runs(), effective_max_runners)
         for task in runner_candidates:
             before = self.subagents.load(task.id)
             if not apply:
@@ -363,7 +521,7 @@ class SimpleAgent:
 
             result = self.run_subagent(
                 task.id,
-                instruction=runner_instruction,
+                instruction=effective_runner_instruction,
                 dry_run=not execute_runners,
                 max_cards=max_cards,
                 probe=probe,
@@ -466,6 +624,7 @@ class SimpleAgent:
         *,
         apply: bool = False,
         execute_runners: bool = False,
+        planner: bool = False,
         max_runners: int = 1,
         limit: int = 20,
         reviewer: str = "parent-dispatch",
@@ -507,6 +666,7 @@ class SimpleAgent:
                         cfg,
                         apply=apply,
                         execute_runners=execute_runners,
+                        planner=planner,
                         max_runners=max_runners,
                         limit=limit,
                         reviewer=reviewer,
@@ -569,6 +729,215 @@ class SimpleAgent:
 
         report = self.subagents.build_dispatch_watch_report(records, dry_run=not apply)
         return self.subagents.write_dispatch_watch_report(report)
+
+
+def _build_parent_planner_state(
+    agent: SimpleAgent,
+    cfg: CapabilityConfig,
+    *,
+    max_runners: int,
+    limit: int,
+    reviewer: str,
+    note: str,
+) -> dict[str, object]:
+    """收集父代理 planner 的状态快照和 heartbeat gate。"""
+
+    tasks = agent.subagents.list_runs()
+    board = agent.subagents.build_board(recent_limit=limit)
+    due_report = agent.subagents.due_check(cfg)
+    action_plan = agent.subagents.plan_actions(cfg)
+    runner_candidates = _dispatch_runner_candidates(tasks, max_runners)
+    patch_run_ids = _dispatch_patch_review_run_ids(tasks)[:limit]
+    acceptance_report = agent.subagents.review_acceptances(
+        apply=False,
+        reviewer=reviewer,
+        note=note,
+        limit=limit,
+    )
+    active_tasks = [
+        task
+        for task in tasks
+        if task.status not in {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
+        or task.verification_status == "NEEDS_ACCEPTANCE"
+    ]
+    open_requests = []
+    open_gaps = []
+    for task in tasks:
+        for request in task.capability_requests:
+            if request.status == "OPEN":
+                open_requests.append(
+                    {
+                        "run_id": task.id,
+                        "request_id": request.id,
+                        "needed_capability": request.needed_capability,
+                        "problem": request.problem,
+                        "expected_output": request.expected_output,
+                    }
+                )
+        for gap in task.capability_gaps:
+            if gap.status == "OPEN":
+                open_gaps.append(
+                    {
+                        "run_id": task.id,
+                        "gap_id": gap.id,
+                        "needed_capability": gap.needed_capability,
+                        "problem": gap.problem,
+                    }
+                )
+
+    gate_summary = {
+        "total_tasks": len(tasks),
+        "active_tasks": len(active_tasks),
+        "due_issues": due_report.summary.get("total", 0),
+        "action_items": action_plan.summary.get("total", 0),
+        "runner_candidates": len(runner_candidates),
+        "patch_reviews": len(patch_run_ids),
+        "acceptance_records": len(acceptance_report.records),
+        "open_capability_requests": len(open_requests),
+        "open_capability_gaps": len(open_gaps),
+    }
+    gate_summary["needs_planner"] = int(
+        any(
+            gate_summary[key] > 0
+            for key in (
+                "active_tasks",
+                "due_issues",
+                "action_items",
+                "runner_candidates",
+                "patch_reviews",
+                "acceptance_records",
+                "open_capability_requests",
+                "open_capability_gaps",
+            )
+        )
+    )
+
+    return {
+        "gate": gate_summary,
+        "board_summary": board.summary,
+        "active_tasks": [_task_state_for_planner(task) for task in active_tasks[:limit]],
+        "due_issues": [
+            {
+                "run_id": issue.run_id,
+                "severity": issue.severity,
+                "kind": issue.kind,
+                "message": issue.message,
+                "suggested_action": issue.suggested_action,
+                "status": issue.status,
+                "goal": issue.goal,
+                "risk_flags": issue.risk_flags,
+            }
+            for issue in due_report.issues[:limit]
+        ],
+        "action_items": [
+            {
+                "run_id": item.run_id,
+                "severity": item.severity,
+                "priority": item.priority,
+                "action": item.action,
+                "reason": item.reason,
+                "would_change_status_to": item.would_change_status_to,
+            }
+            for item in action_plan.actions[:limit]
+        ],
+        "runner_candidates": [_task_state_for_planner(task) for task in runner_candidates],
+        "patch_review_run_ids": patch_run_ids,
+        "acceptance_records": [
+            {
+                "run_id": record.run_id,
+                "decision": record.decision,
+                "ok": record.ok,
+                "message": record.message,
+                "evidence_count": record.evidence_count,
+                "test_count": record.test_count,
+            }
+            for record in acceptance_report.records[:limit]
+        ],
+        "open_capability_requests": open_requests[:limit],
+        "open_capability_gaps": open_gaps[:limit],
+    }
+
+
+def _build_parent_planner_prompt(
+    state: dict[str, object],
+    *,
+    apply: bool,
+    execute_runners: bool,
+    max_runners: int,
+    runner_instruction: str,
+) -> str:
+    """构建父代理 planner 的完整 LLM turn prompt。"""
+
+    payload = json.dumps(state, ensure_ascii=False, indent=2)
+    mode = "apply" if apply else "dry-run"
+    return (
+        "# Parent Planner Tick\n\n"
+        "你是父代理 planner。这个 tick 来自定时 watch，不是浅层 heartbeat。\n"
+        "你必须根据状态快照判断是否有待处理事项；如果有 active/pending/stalled/"
+        "needs-intervention，不允许只返回 HEARTBEAT_OK。\n\n"
+        "你可以使用只读工具核对状态，但不要直接写文件。真正写回由调度器按审计流程执行。\n\n"
+        "## Runtime\n\n"
+        f"- mode: {mode}\n"
+        f"- execute_runners: {execute_runners}\n"
+        f"- cli_max_runners: {max_runners}\n"
+        f"- existing_runner_instruction: {runner_instruction or 'none'}\n\n"
+        "## State Snapshot\n\n"
+        "```json\n"
+        f"{payload}\n"
+        "```\n\n"
+        "## Decision Rules\n\n"
+        "- 如果 gate.needs_planner 为 0，可以返回 HEARTBEAT_OK。\n"
+        "- 如果 gate.needs_planner 为 1，必须给出 DISPATCH 或 BLOCKED_REPORT。\n"
+        "- 你可以建议 runner_instruction，但不能提高 cli_max_runners，只能建议更小或相等的数量。\n"
+        "- 你输出的 actions 只是建议；系统会再用规则调度器验证和执行。\n\n"
+        "## Required Output\n\n"
+        "最后必须输出一个机器可解析结果块，格式如下。结果块里只能放裸 JSON object，"
+        "不要使用 Markdown 代码围栏。\n\n"
+        "[PARENT_PLANNER_RESULT]\n"
+        "{\n"
+        '  "decision": "DISPATCH",\n'
+        '  "summary": "本轮父代理判断摘要",\n'
+        '  "should_dispatch": true,\n'
+        '  "runner_instruction": "给本轮 runner 的额外指令，可为空",\n'
+        '  "suggested_max_runners": 1,\n'
+        '  "actions": [\n'
+        '    {"action": "execute_runner|review_acceptance|route_capability|takeover|report_blocker", "run_id": "", "priority": 1, "reason": ""}\n'
+        "  ],\n"
+        '  "blockers": [],\n'
+        '  "risks": [],\n'
+        '  "notes": []\n'
+        "}\n"
+        "[/PARENT_PLANNER_RESULT]\n"
+    )
+
+
+def _task_state_for_planner(task: SubAgentTask) -> dict[str, object]:
+    """压缩任务状态，避免把完整工单塞进 planner prompt。"""
+
+    return {
+        "run_id": task.id,
+        "status": task.status,
+        "verification_status": task.verification_status,
+        "channel_status": task.channel_status,
+        "goal": task.goal,
+        "owner": task.owner,
+        "final_owner": task.final_owner,
+        "updated_at": task.updated_at,
+        "heartbeat_at": task.heartbeat_at,
+        "evidence_count": len(task.evidence),
+        "open_request_count": sum(1 for item in task.capability_requests if item.status == "OPEN"),
+        "open_gap_count": sum(1 for item in task.capability_gaps if item.status == "OPEN"),
+    }
+
+
+def _combine_runner_instruction(base: str, planner_instruction: str) -> str:
+    """合并 CLI 指令和 planner 指令，保持 CLI 指令优先可见。"""
+
+    base = base.strip()
+    planner_instruction = planner_instruction.strip()
+    if base and planner_instruction:
+        return f"{base}\n\n父代理 planner 补充指令：{planner_instruction}"
+    return base or planner_instruction
 
 
 def _build_subagent_runner_prompt(
