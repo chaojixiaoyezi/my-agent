@@ -31,16 +31,22 @@ def gateway_stale_processing(paths: GatewayPaths, timeout_seconds: int) -> list[
     timeout_seconds = max(1, int(timeout_seconds or 1))
     for path in sorted(paths.processing.glob("*.json")):
         payload = read_json_file(path)
-        started_at = _gateway_processing_started_at(payload, path)
-        age = now - started_at if started_at else 0
-        if started_at and age < timeout_seconds:
+        request_id = str(payload.get("id") or path.stem)
+        if gateway_response_path(paths, request_id).exists():
+            continue
+        lease_at = _gateway_processing_lease_at(payload, path)
+        age = now - lease_at if lease_at else 0
+        if lease_at and age < timeout_seconds:
             continue
         items.append(
             {
-                "request_id": str(payload.get("id") or path.stem),
+                "request_id": request_id,
                 "path": str(path),
-                "age_seconds": round(age, 1) if started_at else 0,
+                "age_seconds": round(age, 1) if lease_at else 0,
                 "attempts": _gateway_request_attempts(payload),
+                "lease_owner": str(payload.get("lease_owner") or ""),
+                "lease_heartbeat_at": payload.get("lease_heartbeat_at", 0),
+                "lease_started_at": payload.get("lease_started_at", 0),
             }
         )
     return items
@@ -63,8 +69,10 @@ def recover_gateway_processing_requests(
 
     paths.inbox.mkdir(parents=True, exist_ok=True)
     paths.processing.mkdir(parents=True, exist_ok=True)
+    paths.done.mkdir(parents=True, exist_ok=True)
     paths.failed.mkdir(parents=True, exist_ok=True)
-    summary = {"requeued": 0, "failed": 0, "checked": 0}
+    paths.responses.mkdir(parents=True, exist_ok=True)
+    summary = {"requeued": 0, "failed": 0, "checked": 0, "archived": 0}
     now = time.time()
     max_attempts = max(1, int(max_attempts or 1))
     timeout_seconds = max(1, int(timeout_seconds or 1))
@@ -73,8 +81,17 @@ def recover_gateway_processing_requests(
         if not payload:
             payload = {"id": request_path.stem, "kind": "unknown", "created_at": 0}
         summary["checked"] += 1
-        started_at = _gateway_processing_started_at(payload, request_path)
-        stale = startup or not started_at or now - started_at >= timeout_seconds
+        request_id = str(payload.get("id") or request_path.stem)
+        if gateway_response_path(paths, request_id).exists():
+            try:
+                _archive_gateway_request(request_path, paths.done)
+            except OSError as exc:
+                _report_gateway_side_effect_error("archive_duplicate_gateway_processing_request", request_id, exc)
+                continue
+            summary["archived"] += 1
+            continue
+        lease_at = _gateway_processing_lease_at(payload, request_path)
+        stale = startup or not lease_at or now - lease_at >= timeout_seconds
         if not stale:
             continue
         attempts = _gateway_request_attempts(payload)
@@ -147,7 +164,25 @@ def _gateway_processing_started_at(payload: dict, request_path: Path) -> float:
     有些旧请求没有 lease 字段，那就按 started/updated/created 或文件修改时间兜底。
     """
 
-    for key in ("lease_started_at", "started_at", "updated_at", "created_at"):
+    return _gateway_processing_timestamp(
+        payload,
+        request_path,
+        ("lease_started_at", "started_at", "updated_at", "created_at"),
+    )
+
+
+def _gateway_processing_lease_at(payload: dict, request_path: Path) -> float:
+    """Return the freshness timestamp used for stale processing recovery."""
+
+    return _gateway_processing_timestamp(
+        payload,
+        request_path,
+        ("lease_heartbeat_at", "lease_started_at", "started_at", "updated_at", "created_at"),
+    )
+
+
+def _gateway_processing_timestamp(payload: dict, request_path: Path, keys: tuple[str, ...]) -> float:
+    for key in keys:
         try:
             value = float(payload.get(key, 0) or 0)
         except (TypeError, ValueError):
