@@ -15,6 +15,103 @@ my-agent chat
 
 `gateway` 是本地常驻 runtime，`chat` / TUI 只是客户端。用户可以退出聊天界面、重启 gateway、刷新会话；任务树、runner 输出、验收、能力授权、失败原因和调度日志都要落盘，gateway 重启后从任务账本恢复，而不是依赖某个长聊天上下文活着。
 
+## 多 Gateway 组织模型
+
+长期目标不是“一个主 gateway 拥有所有下级”，而是“多个完整独立 gateway 通过授权、委托和汇报形成组织关系”。
+
+每个 gateway 都是完整 agent 实体：
+
+- 有自己的身份、任务账本、记忆、配置、工具、密钥和能力目录。
+- 可以独立聊天、拆任务、开自己的子代理/孙代理、运行 planner 和 runner。
+- 可以作为上级协调其他 gateway，也可以作为下级接收其他 gateway 的委托。
+- 不因为成为“副 gateway”而减少自身能力。
+
+上下级关系只定义访问边界和协调关系：
+
+- 上级可以把某个任务、某段上下文、某些能力卡授权给下级。
+- 下级默认不能读取上级的全部任务、现状、记忆、密钥、工具状态或权限。
+- 下级完成任务后回报授权范围内的结果和证据。
+- 下级仍然可以在自己的本体内独立承担任意工作。
+
+所以这里的核心不是 role-based capability reduction，而是：
+
+```text
+identity 决定所有权
+grant 决定访问权
+delegation 决定协调权
+```
+
+主 gateway 和副 gateway 的区别，不是“谁功能更多”，而是“谁在当前组织关系里承担协调责任，谁能访问哪些被授权资源”。
+
+### Root 与协调权
+
+一个 my-agent identity 可以有 root gateway。root 是创始身份或最高恢复者，拥有一键 reclaim 的权利。root 可以把当前协调权委托给另一个 gateway，让它成为 active coordinator；root 自己仍然是完整 gateway，不是低配下级。
+
+委托后的约束：
+
+- active coordinator 可以调度全局任务和协调下级 gateway。
+- active coordinator 不会自动获得 root 的全部私有记忆、密钥、任务账本和工具状态。
+- root 可以 reclaim 协调权。
+- 被委托出来的 coordinator 不能把 root reclaim 权限转授给别人。
+
+每次协调权变更都应该增加 epoch，避免旧 coordinator 在网络延迟或恢复后继续写入旧命令。
+
+```yaml
+agent_identity_id: "my-agent-001"
+root_gateway_id: "gateway-a"
+active_coordinator_gateway_id: "gateway-b"
+coordination_epoch: 42
+root_reclaim_enabled: true
+```
+
+### 授权与委托
+
+gateway 之间传递任务时，不传“整个自己”，只传明确 scope：
+
+```yaml
+delegation:
+  from_gateway_id: "gateway-a"
+  to_gateway_id: "gateway-b"
+  task_id: "task-123"
+  scope:
+    artifacts:
+      - "task-123/context.md"
+      - "task-123/evidence/"
+    capability_cards:
+      - "python-testing"
+      - "repo-readonly"
+    allowed_actions:
+      - "run"
+      - "test"
+      - "report"
+  expires: "after_task"
+  epoch: 42
+```
+
+这样可以同时满足：
+
+- 公司模式：CEO gateway 可以委托部门 gateway；部门 gateway 仍是完整主体。
+- 多机器模式：一台机器挂了，其他 gateway 可在授权范围内接替任务。
+- 隐私和安全：下级不能非法获取上级全部状态和权限。
+- 迁移和备份：本体可以迁移，但每个 gateway 的私有状态和共享状态要区分。
+
+### 第一版如何留地基
+
+第一版仍然先做单机 gateway，但 schema 和日志要提前留下这些概念：
+
+- `gateway_id`
+- `agent_identity_id`
+- `root_gateway_id`
+- `active_coordinator_gateway_id`
+- `coordination_epoch`
+- `delegation_id`
+- `delegated_by_gateway_id`
+- `assigned_gateway_id`
+- `grant_scope`
+- `attempt_id`
+
+先不做跨机器通信，也不做真正组织树；但任务、事件、runner attempt 和 gateway 状态里先带这些字段，后续扩展时不会推倒重来。
+
 ## 外部方案参考
 
 ### 通道运行时
