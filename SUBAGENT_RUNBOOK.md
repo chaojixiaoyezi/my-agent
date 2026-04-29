@@ -588,6 +588,16 @@ watch 模式：
 python3 -m agent_py_agent subagents-dispatch --watch --interval 30
 ```
 
+配置驱动前台 daemon：
+
+```bash
+python3 -m agent_py_agent daemon
+```
+
+`daemon` 读取 `agent_config.yaml` 里的 `daemon_*` 配置，适合把常驻参数收进配置文件，日常启动时少打长命令。
+
+`daemon_*` 数字项里的 `0` 是显式策略值，不是“未设置”：`daemon_max_cycles=0` 表示持续运行，`daemon_max_runners=0` 表示不执行 runner，`daemon_max_cards=0` 表示不限制能力卡数量，`daemon_interval=0` 表示每轮之间不等待，通常只用于测试或单轮验证。
+
 父代理 planner 模式：
 
 ```bash
@@ -623,6 +633,7 @@ python3 -m agent_py_agent subagents-dispatch --watch --max-cycles 1 --interval 0
 注意：
 - `subagents-dispatch` 默认不是常驻进程，只执行一轮。
 - `--watch` 会持续循环；`--max-cycles 1` 可用于 CI 和人工安全验证。
+- `daemon` 是配置驱动的前台常驻入口，当前还不是后台 gateway/service。
 - watch 会创建 `subagent_dispatch_watch.lock`，阻止两个父代理同时调度同一批工单。
 - `--apply` 会写审计日志，但默认不调用模型 runner。
 - `--execute-runners` 必须和 `--apply` 一起使用，才会请求真实模型 API。

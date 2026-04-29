@@ -108,6 +108,7 @@
 - [ ] watch lock 会阻止第二个父代理同时运行
 - [ ] `--planner` 在有 active/pending/stalled/needs-intervention 时会调用父代理 LLM
 - [ ] planner gate 不允许有待处理事项时只返回 `HEARTBEAT_OK`
+- [ ] `my-agent daemon` 会读取 `daemon_*` 配置，并能用 `--max-cycles 1` 安全退出
 
 ## 修改文档时
 

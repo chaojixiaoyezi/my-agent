@@ -141,6 +141,8 @@ run(agent_cmd("subagents-patches", "--help"))
 run(agent_cmd("subagents-dispatch", "--help"))
 run(agent_cmd("subagents-dispatch", "--watch", "--max-cycles", "1", "--interval", "0", "--max-runners", "0"))
 run(agent_cmd("subagents-dispatch", "--watch", "--planner", "--max-cycles", "1", "--interval", "0", "--max-runners", "0"))
+run(agent_cmd("daemon", "--help"))
+run(agent_cmd("daemon", "--max-cycles", "1", "--interval", "0", "--max-runners", "0", "--no-planner"))
 run(agent_cmd("subagent-context", "--help"))
 run(agent_cmd("subagent-run", "--help"))
 
@@ -152,7 +154,9 @@ run(
         "--execute",
         "--instruction",
         (
-            "真实 API E2E 测试：必须先调用 read_file 读取 README.md，"
+            "真实 API E2E 测试：必须先调用 read_file，"
+            "且工具调用 payload 必须精确使用 {\"tool\":\"read_file\",\"path\":\"README.md\"}；"
+            "不要读取 task_dir、Temp 目录、绝对路径或 execution_context 路径。"
             "然后输出一个裸 JSON 的 [SUBAGENT_RESULT]。"
             "status=AWAITING_ACCEPTANCE；evidence 至少 1 条；tests 至少 1 条 ok=true；"
             "不要使用 Markdown 代码围栏，不要标记 DONE。"
