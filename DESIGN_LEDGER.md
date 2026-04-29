@@ -40,6 +40,44 @@
 - `__main__.py` 继续拆：scenario-test、local-doctor/local-rebuild。
 - 后续每拆一块，都要保留测试命令和变更说明。
 
+## 2026-04-29 / 大文件按职责拆分完成
+
+状态：已落地
+
+思路：
+- 不是为了凑行数拆文件，而是按变化原因拆：CLI、工具、gateway 协议、LocalStore、SimpleAgent 编排、subagent 管理各自成边界。
+- 旧入口继续兼容，避免一次重构让测试、脚本和历史导入全部断掉。
+- 新拆出的包都用模块 docstring 写“两层注释”：第一段给 LLM 技术契约，后面给人讲白话边界。
+
+已落地：
+- `agent_py_agent/cli/`：把 `__main__.py` 拆成 common、local、subagents、daemon、gateway、adapter、scenario、chat、parser。
+- `agent_py_agent/agent/agent_core/`：把 `core.py` 拆成 runtime、subagent、dispatch、planner、runner prompt、runner dispatch、orchestration tools。
+- `agent_py_agent/agent/tooling/`：把 `tools.py` 拆成 models、filesystem、web、parser、registry、write_boundary。
+- `agent_py_agent/agent/gateway_parts/`：把 `gateway.py` 拆成 paths、io、process_control、logging、recovery、runtime、adapter。
+- `agent_py_agent/agent/local_storage/`：把 `local_store.py` 拆成 models、schema、records、search、events、maintenance。
+- `agent_py_agent/agent/subagents/`：`subagent.py` 继续作为兼容入口，manager 能力拆成 models/reports/rendering/parsing/policies/probe 和多组 manager mixin。
+
+当前约束：
+- 生产 Python 文件当前没有超过 500 行；最大文件 `agent_py_agent/cli/gateway_process.py` 为 498 行。
+- 不鼓励跨模块引用 internal 细节；新功能优先走兼容入口或对应职责包公开 API。
+- 历史函数 docstring 还会随着后续触碰继续补齐到完整“两层注释”。
+
+验证记录：
+- `python3 -m py_compile agent_py_agent/__main__.py agent_py_agent/cli/*.py agent_py_agent/agent/*.py agent_py_agent/agent/*/*.py`
+- `agent_py_agent.tests.test_tools`
+- `agent_py_agent.tests.test_agent`
+- `agent_py_agent.tests.test_local_store`
+- `agent_py_agent.tests.test_packaging`
+- `agent_py_agent.tests.test_cli_reference`
+- `python3 -m agent_py_agent --help`
+- `python3 -m agent_py_agent local-doctor --json`
+- `python3 -m agent_py_agent gateway status`
+
+后续方向：
+- 继续把 `manager_*` 里少数 100 行以上复杂函数细拆成 validator/policy/render/repository。
+- 给迁移出来的历史函数逐个补齐更细的人类大白话注释。
+- 增加 import 边界测试，防止后续从上层模块反向依赖底层实现。
+
 ## 2026-04-29 / 本地事实源
 
 状态：部分落地

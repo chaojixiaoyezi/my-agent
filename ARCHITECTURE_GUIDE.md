@@ -26,11 +26,27 @@ def submit_gateway_ask(...) -> tuple[str, Path, Path]:
 
 `agent_py_agent/__main__.py`
 
-CLI 入口层。它负责解析命令、组装参数、打印结果和启动后台线程。它不应该长期持有具体协议实现，比如 gateway 文件队列怎么归档、adapter 消息怎么转请求。
+CLI 兼容入口层。真实 CLI 实现已经拆到 `agent_py_agent/cli/`，`__main__.py` 只保留 `python -m agent_py_agent` 入口和旧导入兼容。
+
+`agent_py_agent/cli/`
+
+CLI 命令层。按领域拆分为：
+- `common.py`：配置加载、创建 `SimpleAgent`、能力路由、时间格式。
+- `local_doctor.py` / `local_commands.py`：LocalStore 体检、重建、状态、记忆和搜索命令。
+- `subagents.py`：子代理看板、due-check、动作、能力路由、验收、patch、dispatch、runner 入口。
+- `daemon.py`：daemon 参数合并和前台常驻调度。
+- `gateway_process.py` / `gateway_client.py` / `adapter.py`：gateway 进程、客户端 ask/result、文件 adapter。
+- `scenario.py` / `scenario_cases.py` / `scenario_utils.py`：隔离场景测试入口、专项 case、fixture 工具。
+- `chat.py`：交互式 chat 队列和斜杠命令。
+- `parser.py`：argparse 命令树。
 
 `agent_py_agent/agent/gateway.py`
 
-gateway 协议层。它负责 gateway 路径、文件队列、请求领取、响应写出、adapter inbox/outbox、processing 恢复、gateway LocalStore 重建索引。
+gateway 兼容入口层。真实协议实现已经拆到 `agent_py_agent/agent/gateway_parts/`。
+
+`agent_py_agent/agent/gateway_parts/`
+
+gateway 协议层。按职责拆为：路径模型、JSON 文件队列 IO、进程控制、LocalStore 日志镜像、processing 恢复、运行时请求处理、adapter inbox/outbox 转换。
 
 关键约束：
 - 请求必须有 request_id。
@@ -44,15 +60,66 @@ gateway 协议层。它负责 gateway 路径、文件队列、请求领取、响
 
 `agent_py_agent/agent/core.py`
 
-智能体运行层。它负责 prompt、记忆、模型后端、工具循环和 subagent runner 的编排。
+智能体组合入口层。真实实现已经拆到 `agent_py_agent/agent/agent_core/`。
+
+`agent_py_agent/agent/agent_core/`
+
+智能体运行层。按职责拆为：主模型/工具循环、子代理 runner、父代理 planner、dispatch/watch、runner 候选和重试规则、编排工具、参数归一化、watch lock、prompt 模板。
 
 `agent_py_agent/agent/tools.py`
 
-工具执行边界。它负责工具目录、工具调用解析、工具 allowlist，以及 subagent 写入边界的硬拦截。
+工具兼容入口层。真实实现已经拆到 `agent_py_agent/agent/tooling/`。
+
+`agent_py_agent/agent/tooling/`
+
+工具执行边界。按职责拆为：工具元数据和检索模型、工作区文件工具、HTTP 工具、工具调用解析、写入边界门禁、工具注册表。
 
 `agent_py_agent/agent/subagent.py`
 
-子代理运行树层。它还偏大，后续优先继续拆成：models、work_order、dispatch、acceptance、patch_review、rendering、parsing。
+子代理兼容入口层。真实实现已经拆到 `agent_py_agent/agent/subagents/`，包括模型、报告、渲染、解析、策略、probe、manager mixin、验收、patch、dispatch、runner 结果、索引等模块。
+
+`agent_py_agent/agent/local_store.py`
+
+LocalStore 组合入口层。真实实现已经拆到 `agent_py_agent/agent/local_storage/`。
+
+`agent_py_agent/agent/local_storage/`
+
+本地事实源层。按职责拆为：数据模型、schema/连接、记录写入与正文文件、FTS/LIKE 搜索、事件时间线、维护统计。
+
+## 2026-04-29 大文件拆分报告
+
+拆分前问题：
+- `__main__.py`、`core.py`、`tools.py`、`gateway.py`、`local_store.py`、`subagent.py` 都混了多个变化原因；CLI、协议、业务编排、存储、工具解析交织在一起。
+- 大函数承担过多阶段，比如 dispatch、chat、build_parser、gateway run，不利于定位 bug 和补单测。
+- 外部协议和底层实现容易散落在业务入口里，后续扩展 gateway、adapter、runner、工具安全边界时风险高。
+
+拆分后结构：
+- CLI 层只做命令解析、参数整理、打印和进程入口。
+- Core 层只组合主代理依赖，运行循环、子代理、dispatch、prompt、工具编排拆成 `agent_core/`。
+- Gateway 层只暴露兼容入口，协议细节拆成 `gateway_parts/`。
+- Tool 层只暴露兼容入口，具体工具、解析、注册、写边界拆成 `tooling/`。
+- LocalStore 层只暴露组合入口，schema、records、search、events、maintenance 拆成 `local_storage/`。
+- Subagent 层只暴露兼容入口，manager 能力按职责拆到 `subagents/`。
+
+迁移清单：
+- 保留旧导入：`agent_py_agent.__main__`、`agent_py_agent.agent.core`、`agent_py_agent.agent.tools`、`agent_py_agent.agent.gateway`、`agent_py_agent.agent.local_store`、`agent_py_agent.agent.subagent` 继续可用。
+- 新代码优先导入职责包：`cli/`、`agent_core/`、`tooling/`、`gateway_parts/`、`local_storage/`、`subagents/`。
+- 生产 Python 文件当前没有超过 500 行；最大的 `cli/gateway_process.py` 为 498 行。
+
+影响范围：
+- 对用户 CLI 行为、工具调用协议、gateway 文件协议、LocalStore 数据结构、subagent 工单格式保持兼容。
+- 风险主要在拆分后的跨模块导入、旧私有函数兼容、少量 CLI 边角命令路径。
+
+测试命令：
+- `python3 -m py_compile agent_py_agent/__main__.py agent_py_agent/cli/*.py agent_py_agent/agent/*.py agent_py_agent/agent/*/*.py`
+- `python3 - <<'PY' ... 全量发现测试 ... PY`
+- `python3 -m agent_py_agent --help`
+- `python3 -m agent_py_agent local-doctor --json`
+- `python3 -m agent_py_agent gateway status`
+
+剩余风险：
+- 注释规范已经在新拆模块的模块/组合类上落地；部分迁移出来的历史函数 docstring 还保留旧写法，后续改动到哪个函数时继续补齐“LLM contract + Human version”。
+- `manager_*` 里仍有少数 100 行以上复杂函数，已经低于 500 行文件线，但后续可以继续按验收规则、报告渲染、状态计算再细拆。
 
 ## 拆分原则
 
