@@ -334,6 +334,53 @@ class CapabilityRouteReport:
 
 
 @dataclass
+class AcceptanceReviewFinding:
+    """一次验收检查中的单项结论。"""
+
+    name: str
+    ok: bool
+    severity: str
+    message: str
+    evidence_path: str = ""
+    created_at: float = 0.0
+
+
+@dataclass
+class AcceptanceReviewRecord:
+    """单个子代理运行的验收记录。"""
+
+    id: str
+    run_id: str
+    dry_run: bool
+    applied: bool
+    ok: bool
+    decision: str
+    message: str
+    before_status: str
+    after_status: str
+    before_verification_status: str
+    after_verification_status: str
+    reviewer: str = ""
+    note: str = ""
+    evidence_count: int = 0
+    test_count: int = 0
+    artifact_count: int = 0
+    findings: list[AcceptanceReviewFinding] = field(default_factory=list)
+    evidence_paths: list[str] = field(default_factory=list)
+    created_at: float = 0.0
+
+
+@dataclass
+class AcceptanceReviewReport:
+    """父代理验收报告。"""
+
+    generated_at: float
+    dry_run: bool
+    summary: dict[str, int]
+    records: list[AcceptanceReviewRecord]
+
+
+@dataclass
 class SubAgentExecutionContext:
     """下发给子代理执行器的瘦身上下文。
 
@@ -1366,6 +1413,108 @@ class SubAgentManager:
                 self._append_capability_route_log(record)
         return report
 
+    def review_acceptance(
+        self,
+        run_id: str,
+        *,
+        apply: bool = False,
+        reviewer: str = "parent",
+        note: str = "",
+    ) -> AcceptanceReviewRecord:
+        """验收单个等待验收的子代理运行。"""
+
+        task = self.load(run_id)
+        return self._review_acceptance_task(
+            task,
+            apply=apply,
+            reviewer=reviewer,
+            note=note,
+        )
+
+    def review_acceptances(
+        self,
+        run_ids: list[str] | None = None,
+        *,
+        apply: bool = False,
+        reviewer: str = "parent",
+        note: str = "",
+        limit: int = 0,
+    ) -> AcceptanceReviewReport:
+        """批量验收子代理运行。
+
+        不指定 run_id 时，只挑出正在等待验收的运行，避免误动历史任务。
+        """
+
+        selected = self._select_runs(run_ids)
+        if run_ids is None:
+            selected = [
+                task
+                for task in selected
+                if task.status == "AWAITING_ACCEPTANCE"
+                or task.verification_status == "NEEDS_ACCEPTANCE"
+            ]
+        if limit > 0:
+            selected = selected[:limit]
+
+        records = [
+            self._review_acceptance_task(
+                task,
+                apply=apply,
+                reviewer=reviewer,
+                note=note,
+            )
+            for task in selected
+        ]
+        summary: dict[str, int] = {"total": len(records)}
+        for record in records:
+            summary[record.decision] = summary.get(record.decision, 0) + 1
+            summary["ok" if record.ok else "failed"] = summary.get(
+                "ok" if record.ok else "failed",
+                0,
+            ) + 1
+            summary["dry_run" if record.dry_run else "applied"] = summary.get(
+                "dry_run" if record.dry_run else "applied",
+                0,
+            ) + 1
+        return AcceptanceReviewReport(
+            generated_at=time.time(),
+            dry_run=not apply,
+            summary=summary,
+            records=records,
+        )
+
+    def write_acceptance_review_report(
+        self,
+        run_ids: list[str] | None = None,
+        *,
+        apply: bool = False,
+        reviewer: str = "parent",
+        note: str = "",
+        limit: int = 0,
+    ) -> AcceptanceReviewReport:
+        """写出验收报告，并在 apply 时写回任务状态。"""
+
+        report = self.review_acceptances(
+            run_ids,
+            apply=apply,
+            reviewer=reviewer,
+            note=note,
+            limit=limit,
+        )
+        (self.workspace / "subagent_acceptance_report.json").write_text(
+            json.dumps(asdict(report), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (self.workspace / "SUBAGENT_ACCEPTANCE.md").write_text(
+            render_acceptance_review_markdown(report),
+            encoding="utf-8",
+        )
+        for record in report.records:
+            self._write_acceptance_record_files(record)
+            if apply:
+                self._append_acceptance_review_log(record)
+        return report
+
     def build_execution_context(
         self,
         run_id: str,
@@ -2255,6 +2404,303 @@ class SubAgentManager:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(f"- {time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
 
+    def _review_acceptance_task(
+        self,
+        task: SubAgentTask,
+        *,
+        apply: bool,
+        reviewer: str,
+        note: str,
+    ) -> AcceptanceReviewRecord:
+        """对单个任务执行验收判断，并按需写回状态。"""
+
+        now = time.time()
+        before_status = task.status
+        before_verification = task.verification_status
+        output = _read_json_object(Path(task.output_json))
+        runner = _read_json_object(Path(task.runner_result_json))
+        findings = self._acceptance_findings(task, output, runner, now)
+        ok = all(item.ok or item.severity == "P2" for item in findings)
+        ready = task.status == "AWAITING_ACCEPTANCE" or task.verification_status == "NEEDS_ACCEPTANCE"
+        decision = "ACCEPT" if ok else "REJECT"
+        message = "验收通过。"
+        if not ok:
+            failed = [item.message for item in findings if not item.ok and item.severity != "P2"]
+            message = "验收未通过: " + "；".join(failed[:3])
+        applied = False
+
+        if apply and ready:
+            if ok:
+                task.status = "DONE"
+                task.verification_status = "VERIFIED"
+                task.failure_type = ""
+                task.result = task.result or message
+                task.ended_at = now
+                applied = True
+            else:
+                task.status = "BLOCKED"
+                task.verification_status = "FAILED"
+                task.failure_type = "acceptance_failed"
+                task.result = message
+                task.ended_at = now
+                applied = True
+            task.updated_at = now
+            task.heartbeat_at = now
+            self.save(task)
+            self._append_task_work_log(
+                task,
+                f"acceptance_review: decision={decision} reviewer={reviewer} message={message}",
+            )
+        elif apply and not ready:
+            message = f"任务当前状态不在等待验收范围内，未写回: status={task.status} verify={task.verification_status}"
+
+        record = AcceptanceReviewRecord(
+            id=_new_id("accept"),
+            run_id=task.id,
+            dry_run=not apply,
+            applied=applied,
+            ok=ok,
+            decision=decision,
+            message=message,
+            before_status=before_status,
+            after_status=task.status,
+            before_verification_status=before_verification,
+            after_verification_status=task.verification_status,
+            reviewer=reviewer,
+            note=note,
+            evidence_count=len(task.evidence),
+            test_count=len(_dict_list(output.get("tests", []))),
+            artifact_count=len(_dict_list(output.get("artifacts", []))),
+            findings=findings,
+            evidence_paths=[
+                item.evidence_path for item in findings if item.evidence_path
+            ],
+            created_at=now,
+        )
+        return record
+
+    def _acceptance_findings(
+        self,
+        task: SubAgentTask,
+        output: dict[str, object],
+        runner: dict[str, object],
+        created_at: float,
+    ) -> list[AcceptanceReviewFinding]:
+        """生成验收检查项。"""
+
+        findings: list[AcceptanceReviewFinding] = []
+        validation = self.validate_work_order(task.id)
+        findings.append(
+            AcceptanceReviewFinding(
+                name="work_order",
+                ok=validation.ok,
+                severity="P0",
+                message="工单现场完整。" if validation.ok else f"工单缺少 {len(validation.missing)} 个关键路径。",
+                evidence_path=task.task_dir,
+                created_at=created_at,
+            )
+        )
+        ready = task.status == "AWAITING_ACCEPTANCE" or task.verification_status == "NEEDS_ACCEPTANCE"
+        findings.append(
+            AcceptanceReviewFinding(
+                name="ready_for_acceptance",
+                ok=ready,
+                severity="P1",
+                message=(
+                    "任务处于等待验收状态。"
+                    if ready
+                    else f"任务未处于等待验收状态: status={task.status} verify={task.verification_status}"
+                ),
+                evidence_path=task.runner_result_json,
+                created_at=created_at,
+            )
+        )
+        findings.append(
+            AcceptanceReviewFinding(
+                name="channel_not_broken",
+                ok=task.channel_status != "BROKEN",
+                severity="P1",
+                message=(
+                    "通道未标记为 BROKEN。"
+                    if task.channel_status != "BROKEN"
+                    else "通道为 BROKEN，不能验收。"
+                ),
+                evidence_path=task.channel_probe_file,
+                created_at=created_at,
+            )
+        )
+
+        runner_structured_found = bool(runner.get("structured_output_found", False))
+        runner_structured_ok = bool(runner.get("structured_output_ok", False))
+        findings.append(
+            AcceptanceReviewFinding(
+                name="structured_output",
+                ok=(not runner_structured_found) or runner_structured_ok,
+                severity="P1",
+                message=(
+                    "runner 结构化输出可解析。"
+                    if runner_structured_found and runner_structured_ok
+                    else "runner 未记录结构化输出，按人工证据验收。"
+                    if not runner_structured_found
+                    else f"runner 结构化输出解析失败: {runner.get('structured_parse_error', '')}"
+                ),
+                evidence_path=task.runner_result_json,
+                created_at=created_at,
+            )
+        )
+
+        ok_evidence = [item for item in task.evidence if item.ok]
+        bad_evidence = [item for item in task.evidence if not item.ok]
+        findings.append(
+            AcceptanceReviewFinding(
+                name="evidence_present",
+                ok=bool(ok_evidence),
+                severity="P0",
+                message=(
+                    f"已有 {len(ok_evidence)} 条可用验收证据。"
+                    if ok_evidence
+                    else "缺少可用验收证据。"
+                ),
+                evidence_path=task.acceptance_file,
+                created_at=created_at,
+            )
+        )
+        findings.append(
+            AcceptanceReviewFinding(
+                name="evidence_not_failed",
+                ok=not bad_evidence,
+                severity="P1",
+                message=(
+                    "没有失败验收证据。"
+                    if not bad_evidence
+                    else f"存在 {len(bad_evidence)} 条失败证据。"
+                ),
+                evidence_path=task.acceptance_file,
+                created_at=created_at,
+            )
+        )
+
+        open_requests = [item for item in task.capability_requests if item.status == "OPEN"]
+        open_gaps = [item for item in task.capability_gaps if item.status == "OPEN"]
+        findings.append(
+            AcceptanceReviewFinding(
+                name="no_open_capability_requests",
+                ok=not open_requests,
+                severity="P1",
+                message=(
+                    "没有待处理 capability request。"
+                    if not open_requests
+                    else f"仍有 {len(open_requests)} 条 OPEN capability request。"
+                ),
+                evidence_path=task.output_json,
+                created_at=created_at,
+            )
+        )
+        findings.append(
+            AcceptanceReviewFinding(
+                name="no_open_capability_gaps",
+                ok=not open_gaps,
+                severity="P1",
+                message=(
+                    "没有待处理 capability gap。"
+                    if not open_gaps
+                    else f"仍有 {len(open_gaps)} 条 OPEN capability gap。"
+                ),
+                evidence_path=task.output_json,
+                created_at=created_at,
+            )
+        )
+
+        blockers = [item for item in _string_list(output.get("blockers", [])) if item.strip()]
+        findings.append(
+            AcceptanceReviewFinding(
+                name="no_output_blockers",
+                ok=not blockers,
+                severity="P1",
+                message="output.json 没有 blocker。" if not blockers else f"output.json 仍有 blocker: {blockers[0]}",
+                evidence_path=task.output_json,
+                created_at=created_at,
+            )
+        )
+
+        tests = _dict_list(output.get("tests", []))
+        failed_tests = [item for item in tests if not bool(item.get("ok", False))]
+        findings.append(
+            AcceptanceReviewFinding(
+                name="tests_passed",
+                ok=not failed_tests,
+                severity="P1",
+                message=(
+                    f"runner 记录的 {len(tests)} 条测试均通过。"
+                    if tests and not failed_tests
+                    else "runner 未记录测试，允许仅凭证据进入人工验收。"
+                    if not tests
+                    else f"存在 {len(failed_tests)} 条失败测试。"
+                ),
+                evidence_path=task.output_json,
+                created_at=created_at,
+            )
+        )
+
+        patches = _dict_list(output.get("patches", []))
+        unresolved_patches = [
+            item for item in patches if str(item.get("status", "")).lower() in {"planned", "blocked"}
+        ]
+        findings.append(
+            AcceptanceReviewFinding(
+                name="no_unresolved_patches",
+                ok=not unresolved_patches,
+                severity="P1",
+                message=(
+                    "没有未处理 patch。"
+                    if not unresolved_patches
+                    else f"仍有 {len(unresolved_patches)} 个 patch 处于 planned/blocked。"
+                ),
+                evidence_path=task.output_json,
+                created_at=created_at,
+            )
+        )
+        return findings
+
+    def _write_acceptance_record_files(self, record: AcceptanceReviewRecord) -> None:
+        """把单个验收记录写进对应任务目录。"""
+
+        try:
+            task = self.load(record.run_id)
+        except FileNotFoundError:
+            return
+        record_json = Path(task.reports_dir) / "acceptance_review.json"
+        record_md = Path(task.task_dir) / "ACCEPTANCE_REVIEW.md"
+        record_json.write_text(
+            json.dumps(asdict(record), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        record_md.write_text(render_acceptance_record_markdown(record), encoding="utf-8")
+        with Path(task.acceptance_file).open("a", encoding="utf-8") as handle:
+            handle.write("\n## Review\n\n")
+            handle.write(f"- id: {record.id}\n")
+            handle.write(f"- decision: {record.decision}\n")
+            handle.write(f"- ok: {record.ok}\n")
+            handle.write(f"- applied: {record.applied}\n")
+            handle.write(f"- message: {record.message}\n")
+
+    def _append_acceptance_review_log(self, record: AcceptanceReviewRecord) -> None:
+        """写入全局验收审计日志。"""
+
+        jsonl = self.workspace / "subagent_acceptance_log.jsonl"
+        with jsonl.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
+
+        markdown = self.workspace / "ACCEPTANCE_REVIEW_LOG.md"
+        if not markdown.exists():
+            markdown.write_text("# ACCEPTANCE REVIEW LOG\n\n", encoding="utf-8")
+        with markdown.open("a", encoding="utf-8") as handle:
+            status = "OK" if record.ok else "FAIL"
+            handle.write(
+                f"- [{status}] {record.id} run={record.run_id} decision={record.decision} "
+                f"applied={record.applied} message={record.message}\n"
+            )
+
     def _select_runs(self, run_ids: list[str] | None) -> list[SubAgentTask]:
         """按 run id 选择运行记录。"""
 
@@ -2539,6 +2985,16 @@ def _merge_list(left: list[str], right: list[str]) -> list[str]:
     return merged
 
 
+def _read_json_object(path: Path) -> dict[str, object]:
+    """读取 JSON object，缺失或格式不对时返回空对象。"""
+
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
 def _probe_ok(
     name: str,
     summary: str,
@@ -2810,6 +3266,73 @@ def render_capability_route_markdown(report: CapabilityRouteReport) -> str:
         lines.append(f"  - message: {record.message}")
         if record.reasons:
             lines.append(f"  - reasons: {'; '.join(record.reasons[:5])}")
+    return "\n".join(lines) + "\n"
+
+
+def render_acceptance_review_markdown(report: AcceptanceReviewReport) -> str:
+    """渲染批量验收报告。"""
+
+    mode = "dry-run" if report.dry_run else "apply"
+    lines = [
+        "# SUBAGENT ACCEPTANCE",
+        "",
+        f"- generated_at: {report.generated_at}",
+        f"- mode: {mode}",
+        f"- total_records: {report.summary.get('total', 0)}",
+        "",
+        "## Summary",
+        "",
+    ]
+    for key in sorted(report.summary):
+        lines.append(f"- {key}: {report.summary[key]}")
+    lines.extend(["", "## Records", ""])
+    if not report.records:
+        lines.append("- 暂无等待验收的子代理运行")
+    for record in report.records[:100]:
+        status = "OK" if record.ok else "FAIL"
+        lines.append(
+            f"- [{status}] `{record.run_id}` decision={record.decision} "
+            f"applied={record.applied} {record.before_status}/{record.before_verification_status}"
+            f" -> {record.after_status}/{record.after_verification_status}"
+        )
+        lines.append(f"  - {record.message}")
+        failed = [item for item in record.findings if not item.ok and item.severity != "P2"]
+        for item in failed[:5]:
+            lines.append(f"  - [{item.severity}] {item.name}: {item.message}")
+    return "\n".join(lines) + "\n"
+
+
+def render_acceptance_record_markdown(record: AcceptanceReviewRecord) -> str:
+    """渲染单个验收记录。"""
+
+    lines = [
+        "# ACCEPTANCE REVIEW",
+        "",
+        f"- id: {record.id}",
+        f"- run_id: {record.run_id}",
+        f"- mode: {'dry-run' if record.dry_run else 'apply'}",
+        f"- decision: {record.decision}",
+        f"- ok: {record.ok}",
+        f"- applied: {record.applied}",
+        f"- reviewer: {record.reviewer or 'none'}",
+        f"- note: {record.note or 'none'}",
+        f"- status: {record.before_status}/{record.before_verification_status} -> {record.after_status}/{record.after_verification_status}",
+        f"- message: {record.message}",
+        "",
+        "## Counts",
+        "",
+        f"- evidence: {record.evidence_count}",
+        f"- tests: {record.test_count}",
+        f"- artifacts: {record.artifact_count}",
+        "",
+        "## Findings",
+        "",
+    ]
+    for item in record.findings:
+        status = "OK" if item.ok else "FAIL"
+        lines.append(f"- [{status}] {item.severity} {item.name}: {item.message}")
+        if item.evidence_path:
+            lines.append(f"  - evidence: {item.evidence_path}")
     return "\n".join(lines) + "\n"
 
 

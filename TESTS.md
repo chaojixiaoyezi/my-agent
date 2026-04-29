@@ -18,6 +18,7 @@ CLI 入口：
 python3 -m agent_py_agent --help
 python3 -m agent_py_agent subagent-run --help
 python3 -m agent_py_agent subagents-route-capabilities --help
+python3 -m agent_py_agent subagents-acceptance --help
 ```
 
 Git 空白检查：
@@ -31,7 +32,7 @@ git diff --check
 ### Subagent / Capability / Runner
 
 ```bash
-python3 -c "from agent_py_agent.tests.test_agent import test_subagents, test_subagent_capability_records, test_subagent_fake_done_requires_evidence, test_subagent_work_order_validation, test_subagent_takeover_records_locked_files, test_subagent_board_scales_and_flags, test_subagent_due_check_report, test_subagent_channel_probe_records_status, test_subagent_channel_probe_report, test_subagent_action_plan_dry_run, test_subagent_action_apply_dry_run_and_apply, test_subagent_action_apply_repairs_work_order, test_subagent_capability_route_grants_tool, test_subagent_capability_route_grants_skill, test_subagent_capability_route_creates_gap_when_no_match, test_subagent_execution_context_uses_only_grants, test_subagent_runner_dry_run_and_execute, test_subagent_runner_parses_structured_output, test_subagent_runner_parser_uses_last_parseable_fenced_block; test_subagents(); test_subagent_capability_records(); test_subagent_fake_done_requires_evidence(); test_subagent_work_order_validation(); test_subagent_takeover_records_locked_files(); test_subagent_board_scales_and_flags(); test_subagent_due_check_report(); test_subagent_channel_probe_records_status(); test_subagent_channel_probe_report(); test_subagent_action_plan_dry_run(); test_subagent_action_apply_dry_run_and_apply(); test_subagent_action_apply_repairs_work_order(); test_subagent_capability_route_grants_tool(); test_subagent_capability_route_grants_skill(); test_subagent_capability_route_creates_gap_when_no_match(); test_subagent_execution_context_uses_only_grants(); test_subagent_runner_dry_run_and_execute(); test_subagent_runner_parses_structured_output(); test_subagent_runner_parser_uses_last_parseable_fenced_block(); print('SUBAGENT_TEST_PASS')"
+python3 -c "from agent_py_agent.tests.test_agent import test_subagents, test_subagent_capability_records, test_subagent_fake_done_requires_evidence, test_subagent_work_order_validation, test_subagent_takeover_records_locked_files, test_subagent_board_scales_and_flags, test_subagent_due_check_report, test_subagent_channel_probe_records_status, test_subagent_channel_probe_report, test_subagent_action_plan_dry_run, test_subagent_action_apply_dry_run_and_apply, test_subagent_action_apply_repairs_work_order, test_subagent_capability_route_grants_tool, test_subagent_capability_route_grants_skill, test_subagent_capability_route_creates_gap_when_no_match, test_subagent_execution_context_uses_only_grants, test_subagent_runner_dry_run_and_execute, test_subagent_runner_parses_structured_output, test_subagent_runner_parser_uses_last_parseable_fenced_block, test_subagent_acceptance_dry_run_and_apply, test_subagent_acceptance_rejects_missing_evidence_without_apply; test_subagents(); test_subagent_capability_records(); test_subagent_fake_done_requires_evidence(); test_subagent_work_order_validation(); test_subagent_takeover_records_locked_files(); test_subagent_board_scales_and_flags(); test_subagent_due_check_report(); test_subagent_channel_probe_records_status(); test_subagent_channel_probe_report(); test_subagent_action_plan_dry_run(); test_subagent_action_apply_dry_run_and_apply(); test_subagent_action_apply_repairs_work_order(); test_subagent_capability_route_grants_tool(); test_subagent_capability_route_grants_skill(); test_subagent_capability_route_creates_gap_when_no_match(); test_subagent_execution_context_uses_only_grants(); test_subagent_runner_dry_run_and_execute(); test_subagent_runner_parses_structured_output(); test_subagent_runner_parser_uses_last_parseable_fenced_block(); test_subagent_acceptance_dry_run_and_apply(); test_subagent_acceptance_rejects_missing_evidence_without_apply(); print('SUBAGENT_TEST_PASS')"
 ```
 
 覆盖：
@@ -51,6 +52,7 @@ python3 -c "from agent_py_agent.tests.test_agent import test_subagents, test_sub
 - runner dry-run / execute。
 - `[SUBAGENT_RESULT]` 结构化输出解析。
 - 真实模型常见的 Markdown fenced JSON 结构化输出解析。
+- subagent 验收 dry-run / apply。
 - evidence / capability_requests / artifacts / tests / patches / lessons / next_actions 写回。
 
 ### Tools

@@ -69,6 +69,7 @@ run([sys.executable, "-m", "agent_py_agent", "subagents-due-check", "--limit", "
 run([sys.executable, "-m", "agent_py_agent", "subagents-plan-actions", "--limit", "2"])
 run([sys.executable, "-m", "agent_py_agent", "subagents-apply-actions", "--dry-run", "--limit", "2"])
 run([sys.executable, "-m", "agent_py_agent", "subagents-route-capabilities", "--dry-run", "--limit", "2"])
+run([sys.executable, "-m", "agent_py_agent", "subagents-acceptance", "--help"])
 run([sys.executable, "-m", "agent_py_agent", "subagent-context", "--help"])
 run([sys.executable, "-m", "agent_py_agent", "subagent-run", "--help"])
 
@@ -95,7 +96,9 @@ agent_loop = run_capture(
             "test_subagent_execution_context_uses_only_grants, "
             "test_subagent_runner_dry_run_and_execute, "
             "test_subagent_runner_parses_structured_output, "
-            "test_subagent_runner_parser_uses_last_parseable_fenced_block; "
+            "test_subagent_runner_parser_uses_last_parseable_fenced_block, "
+            "test_subagent_acceptance_dry_run_and_apply, "
+            "test_subagent_acceptance_rejects_missing_evidence_without_apply; "
             "test_subagents(); "
             "test_subagent_capability_records(); "
             "test_subagent_fake_done_requires_evidence(); "
@@ -115,6 +118,8 @@ agent_loop = run_capture(
             "test_subagent_runner_dry_run_and_execute(); "
             "test_subagent_runner_parses_structured_output(); "
             "test_subagent_runner_parser_uses_last_parseable_fenced_block(); "
+            "test_subagent_acceptance_dry_run_and_apply(); "
+            "test_subagent_acceptance_rejects_missing_evidence_without_apply(); "
             "print('AGENT_TEST_PASS')"
         ),
     ],

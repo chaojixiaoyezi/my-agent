@@ -26,6 +26,7 @@ subagents-probe             检查子代理通道健康
 subagents-plan-actions      根据 due-check 生成动作计划
 subagents-apply-actions     dry-run 或 apply 低风险动作
 subagents-route-capabilities 路由 open capability request
+subagents-acceptance        验收等待验收的子代理
 subagent-context            生成单个子代理执行上下文
 subagent-run                按执行上下文运行子代理 runner
 ```
@@ -192,6 +193,18 @@ python3 -m agent_py_agent subagents-route-capabilities --dry-run
 
 ```bash
 python3 -m agent_py_agent subagents-route-capabilities --apply
+```
+
+验收 dry-run：
+
+```bash
+python3 -m agent_py_agent subagents-acceptance --dry-run
+```
+
+验收 apply：
+
+```bash
+python3 -m agent_py_agent subagents-acceptance --apply --run-id <run_id>
 ```
 
 生成执行上下文：

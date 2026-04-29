@@ -15,7 +15,7 @@ from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.skills import SkillRegistry
-from agent_py_agent.agent.subagent import parse_subagent_runner_output
+from agent_py_agent.agent.subagent import VerificationEvidence, parse_subagent_runner_output
 
 
 class StructuredSubagentBackend(BaseBackend):
@@ -866,3 +866,107 @@ def test_subagent_runner_parser_uses_last_parseable_fenced_block():
     assert parsed.used_tools == ["read_file"]
     assert parsed.evidence[0]["summary"] == "读取 SPEC.md"
     assert parsed.tests[0]["name"] == "format"
+
+
+def test_subagent_acceptance_dry_run_and_apply():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        task = agent.subagents.create_run(
+            goal="验收 runner 结果",
+            thought="runner 已完成，等待父代理验收。",
+            plan=["检查 evidence", "检查 tests", "标记完成"],
+            acceptance_checks=["有证据", "无 blocker"],
+        )
+        task.status = "AWAITING_ACCEPTANCE"
+        task.verification_status = "NEEDS_ACCEPTANCE"
+        task.channel_status = "OK"
+        task.evidence.append(
+            VerificationEvidence(
+                kind="command",
+                summary="smoke test 通过",
+                command="python smoke.py",
+                ok=True,
+                created_at=time.time(),
+            )
+        )
+        agent.subagents.save(task)
+        Path(task.output_json).write_text(
+            json.dumps(
+                {
+                    "run_id": task.id,
+                    "status": "AWAITING_ACCEPTANCE",
+                    "artifacts": [{"path": "reports/smoke.md", "kind": "report"}],
+                    "tests": [{"name": "smoke", "command": "python smoke.py", "ok": True}],
+                    "patches": [],
+                    "blockers": [],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        Path(task.runner_result_json).write_text(
+            json.dumps(
+                {
+                    "run_id": task.id,
+                    "structured_output_found": True,
+                    "structured_output_ok": True,
+                    "structured_parse_error": "",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        dry = agent.subagents.write_acceptance_review_report(
+            run_ids=[task.id],
+            apply=False,
+            reviewer="tester",
+        )
+        loaded = agent.subagents.load(task.id)
+        assert dry.dry_run
+        assert dry.records[0].ok
+        assert dry.records[0].decision == "ACCEPT"
+        assert dry.records[0].applied is False
+        assert loaded.status == "AWAITING_ACCEPTANCE"
+
+        applied = agent.subagents.write_acceptance_review_report(
+            run_ids=[task.id],
+            apply=True,
+            reviewer="tester",
+        )
+        loaded = agent.subagents.load(task.id)
+        assert not applied.dry_run
+        assert applied.records[0].applied
+        assert loaded.status == "DONE"
+        assert loaded.verification_status == "VERIFIED"
+        assert Path(loaded.task_dir, "ACCEPTANCE_REVIEW.md").exists()
+        assert Path(loaded.reports_dir, "acceptance_review.json").exists()
+
+
+def test_subagent_acceptance_rejects_missing_evidence_without_apply():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        task = agent.subagents.create_run(
+            goal="缺证据验收",
+            thought="故意没有 evidence。",
+            plan=["等待验收"],
+        )
+        task.status = "AWAITING_ACCEPTANCE"
+        task.verification_status = "NEEDS_ACCEPTANCE"
+        agent.subagents.save(task)
+
+        report = agent.subagents.write_acceptance_review_report(
+            run_ids=[task.id],
+            apply=False,
+        )
+        loaded = agent.subagents.load(task.id)
+        assert report.records[0].decision == "REJECT"
+        assert not report.records[0].ok
+        assert any(item.name == "evidence_present" and not item.ok for item in report.records[0].findings)
+        assert loaded.status == "AWAITING_ACCEPTANCE"
