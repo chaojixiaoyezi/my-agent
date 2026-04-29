@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..agent.core import SimpleAgent
+from ..agent.subagents.models import SubAgentTask
 from .common import ROOT, make_agent
 
 
@@ -76,7 +77,7 @@ def write_scenario_fixture(fixture_root: Path) -> None:
                 "## 验收目标",
                 "",
                 "- 子代理必须读取本 README。",
-                "- 子代理必须在 scenario_outputs/ 里写入自己的报告。",
+                "- 子代理必须在自己的 task_dir/scenario_outputs/ 里写入报告。",
                 "- 父代理必须完成 runner 调度和验收闭环。",
                 "",
             ]
@@ -147,9 +148,10 @@ def build_scenario_prompt(count: int) -> str:
         "请只调用一次 create_subagents，参数必须满足：\n"
         f"- count: {count}\n"
         "- tool_preset: coding\n"
-        "- goal: 在隔离 fixture 项目中读取 README.md，并在 scenario_outputs/ 写入自己的证据报告\n"
+        "- goal: 在隔离 fixture 项目中读取 README.md，并在子代理 task_dir/scenario_outputs/ 写入自己的证据报告\n"
         "- acceptance_checks: 必须有 read_file 证据；必须有 write_file 证据；必须等待父代理验收\n"
-        "- plan: 读取 README.md；写入 scenario_outputs/<run_id>.md；输出 SUBAGENT_RESULT；等待验收\n\n"
+        "- plan: 读取 README.md；从执行上下文读取 task_dir；写入 task_dir/scenario_outputs/<run_id>.md；"
+        "输出 SUBAGENT_RESULT；等待验收\n\n"
         "创建后可以调用 subagent_board 看一眼状态，然后用一句话汇报创建了几个子代理。"
     )
 
@@ -161,13 +163,14 @@ def build_scenario_runner_instruction() -> str:
         "这是隔离全流程测试的 runner 阶段。你只能在当前 fixture 工作区内操作。\n"
         "必须严格按顺序完成，不允许跳步：\n"
         "1. 第一轮先只调用 read_file，payload 精确使用 {\"tool\":\"read_file\",\"path\":\"README.md\"}。\n"
-        "2. 收到 read_file 成功结果后，从执行上下文 JSON 找到自己的 run_id。\n"
-        "3. 第二轮只调用 write_file，path 使用 scenario_outputs/<run_id>.md，content 写一份 3-6 行中文报告，"
-        "说明已读取 README.md，并注明这是隔离测试。\n"
+        "2. 收到 read_file 成功结果后，从执行上下文 JSON 找到自己的 run_id、task_dir 和 allowed_write_roots。\n"
+        "3. 第二轮只调用 write_file，path 必须落在 allowed_write_roots 里面，推荐使用 "
+        ".my_agent/subagents/<run_id>/scenario_outputs/<run_id>.md；content 写一份 3-6 行中文报告，"
+        "说明已读取 README.md，并注明这是隔离测试和 task_dir 内产物。\n"
         "4. 只有在你已经看到 write_file 成功结果后，才允许输出最终 [SUBAGENT_RESULT]。\n"
         "5. 最终回复只能包含一个 [SUBAGENT_RESULT] JSON 结果块，不要输出 Markdown 代码围栏。\n"
         "JSON 必须包含：status=AWAITING_ACCEPTANCE；summary；used_tools 至少包含 read_file 和 write_file；"
-        "evidence 至少两条，分别证明 README.md 已读取、scenario_outputs/<run_id>.md 已写入；"
+        "evidence 至少两条，分别证明 README.md 已读取、task_dir/scenario_outputs/<run_id>.md 已写入；"
         "tests 至少一条 ok=true；artifacts 包含写入的报告路径；patches 为空数组。"
     )
 
@@ -252,6 +255,40 @@ def scenario_tasks_verified(agent: SimpleAgent, expected_count: int) -> bool:
         task.status == "DONE" and task.verification_status == "VERIFIED"
         for task in tasks[:expected_count]
     )
+
+
+def collect_scenario_report_files(agent: SimpleAgent, fixture_root: Path, expected_count: int) -> list[Path]:
+    """LLM: collect physical scenario report artifacts from the current write-boundary locations.
+
+    给人看的解释：
+    真实 runner 现在不能随便往 fixture 项目根目录写文件，只能写自己的 task_dir。
+    这个函数负责去“真实允许写入的位置”找报告，同时兼容旧的 fixture_root/scenario_outputs。
+    """
+
+    report_files: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in _scenario_report_candidates(agent.subagents.list_runs()[:expected_count], fixture_root):
+        resolved = candidate.resolve(strict=False)
+        if resolved in seen or not candidate.exists():
+            continue
+        seen.add(resolved)
+        report_files.append(candidate)
+    return sorted(report_files)
+
+
+def _scenario_report_candidates(tasks: list[SubAgentTask], fixture_root: Path) -> list[Path]:
+    """LLM: derive scenario report candidate paths from task dirs and legacy fixture output dir.
+
+    给人看的解释：
+    新规则下报告应该在每个子代理自己的目录里。
+    旧规则下报告可能在 fixture_project/scenario_outputs，所以这里也顺手找一下旧位置。
+    """
+
+    candidates = list((fixture_root / "scenario_outputs").glob("*.md"))
+    for task in tasks:
+        task_dir = Path(task.task_dir)
+        candidates.extend((task_dir / "scenario_outputs").glob("*.md"))
+    return candidates
 
 
 def write_scenario_summary(

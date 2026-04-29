@@ -22,6 +22,7 @@ from .scenario_cases import (
 from .scenario_utils import (
     build_scenario_prompt,
     build_scenario_runner_instruction,
+    collect_scenario_report_files,
     create_scenario_workspace,
     load_scenario_agent,
     print_scenario_board,
@@ -151,7 +152,7 @@ def cmd_scenario_test(args) -> int:
             break
 
     print_scenario_step(4, "核对隔离文件和最终报告")
-    report_files = sorted((paths.fixture_root / "scenario_outputs").glob("*.md"))
+    report_files = collect_scenario_report_files(agent, paths.fixture_root, args.count)
     if args.dry_run:
         files_ok = True
         print("dry_run=true，跳过 runner 写文件检查。")

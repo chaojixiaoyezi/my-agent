@@ -240,37 +240,12 @@ run(
 run(agent_cmd("subagents-acceptance", "--apply", "--run-id", e2e_run_id, "--reviewer", "full-smoke"))
 assert_real_api_subagent_e2e(e2e_run_id)
 
-discovered_tests = run_capture(
-    [
-        sys.executable,
-        "-c",
-        (
-            "from pathlib import Path\n"
-            "import importlib\n"
-            "import inspect\n"
-            "\n"
-            "total = 0\n"
-            "for path in sorted(Path('agent_py_agent/tests').glob('test_*.py')):\n"
-            "    module_name = f'agent_py_agent.tests.{path.stem}'\n"
-            "    module = importlib.import_module(module_name)\n"
-            "    tests = [\n"
-            "        (name, func)\n"
-            "        for name, func in inspect.getmembers(module, inspect.isfunction)\n"
-            "        if name.startswith('test_') and func.__module__ == module.__name__\n"
-            "    ]\n"
-            "    for name, func in sorted(tests):\n"
-            "        print(f'RUN {module_name}.{name}')\n"
-            "        func()\n"
-            "        total += 1\n"
-            "print(f'ALL_DISCOVERED_TESTS_PASS total={total}')\n"
-        ),
-    ],
-)
+discovered_tests = run_capture([sys.executable, "-m", "pytest", "agent_py_agent/tests", "-q"])
 print(discovered_tests.stdout)
 if discovered_tests.stderr:
     print(discovered_tests.stderr)
 assert discovered_tests.returncode == 0
-assert "ALL_DISCOVERED_TESTS_PASS" in discovered_tests.stdout
+assert "passed" in discovered_tests.stdout
 
 bad = run_capture(
     agent_cmd("unknown-command"),

@@ -23,6 +23,7 @@ from ..agent.gateway import (
     wait_for_gateway_response,
     wait_for_gateway_running,
 )
+from .chat import cmd_chat
 from .common import make_agent
 from .gateway_process import cmd_gateway_start
 
