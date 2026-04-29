@@ -12,6 +12,44 @@
 
 ## 推荐快速检查
 
+## 可见真实环境测试台
+
+第一版 Live Lab 已经加到 `scripts/`：
+
+```bash
+# 在当前终端跑，不调用真实模型，适合开发后快速回归
+python3 scripts/live_agent_lab.py --suite smoke
+
+# 在 macOS 新开一个可见 Terminal，跑真实 LLM gateway + 长链路场景
+scripts/open_live_lab.sh --suite real --real-llm --timeout 300 --count 1 --max-cycles 2
+```
+
+它会把每轮测试关进 `validation/live_lab/<run-id>/fixture_project`，并打印/保存：
+- 发给 `my-agent` 的 prompt。
+- 实际执行的 CLI 命令。
+- stdout / stderr / exit code / 耗时。
+- transcript、summary、response、scenario summary 等证据路径。
+
+`--suite smoke` 默认会把后端临时覆盖成 `echo`，不烧真实 API；`--suite real` 和 `--suite all` 必须显式传 `--real-llm`。
+
+中途想停下一轮长测试时，在另一个终端执行输出里提示的：
+
+```bash
+touch validation/live_lab/<run-id>/STOP
+```
+
+## 并行开发工作台检查
+
+workstream 脚本不直接修改主仓库代码；用于创建、打开和检查隔离 `git worktree`：
+
+```bash
+bash -n scripts/workstream_*.sh scripts/open_workstream.sh
+scripts/workstream_status.sh
+scripts/workstream_create.sh --help
+scripts/workstream_create.sh memory --dry-run
+scripts/open_workstream.sh --help
+```
+
 语法检查：
 
 ```bash

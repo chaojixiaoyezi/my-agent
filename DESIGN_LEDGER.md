@@ -19,6 +19,57 @@
 暂停         暂时不做，但保留背景
 ```
 
+## 2026-04-29 / 可见真实环境测试台 Live Lab
+
+状态：部分落地
+
+思路：
+- 开发 agent 不能只靠单元测试，需要能在用户看得见的终端里跑真实 runtime。
+- 测试台必须显示发给 my-agent 的 prompt、实际命令、stdout/stderr、耗时、退出码和证据路径。
+- 默认必须隔离 workspace，避免真实测试污染开发仓库。
+- 默认不烧真实 API；只有显式 `--real-llm` 才跑真实 LLM case。
+
+已落地：
+- `scripts/live_agent_lab.py` 作为薄入口。
+- `scripts/live_lab/cli.py` 管参数。
+- `scripts/live_lab/runner.py` 管隔离配置、命令执行、transcript 和 summary。
+- `scripts/live_lab/cases.py` 管 health、bad-weather、gateway ask 和 long subagent 场景。
+- `scripts/open_live_lab.sh` 可在 macOS 新开可见 Terminal。
+- `validation/live_lab/` 已加入 `.gitignore`。
+
+后续方向：
+- 增加 memory 长任务、tools 边界任务、问题任务和多轮恢复任务。
+- 把真实测试结果摘要索引进 LocalStore，方便之后按 case 和失败类型搜索。
+- 增加可配置任务矩阵，支持批量跑大量真实 LLM case。
+
+## 2026-04-29 / 并行开发 Workstream 工作台
+
+状态：部分落地
+
+思路：
+- 多个 会话运行时/AI 可以并行，但必须先把目录、分支、职责边界和交接格式定清楚。
+- 主工作区只做集成和验收；每条开发线用独立 `git worktree` 和 `workstream/<name>` 分支。
+- 并行线不直接合并 main；完成后写 handoff，由主线统一检查 diff、跑测试、解决冲突和提交。
+
+已落地：
+- `WORKSTREAMS.md` 定义 workstream 规则、预置开发线和主线集成流程。
+- `HANDOFF_TEMPLATE.md` 定义交接格式。
+- `scripts/workstream_create.sh` 创建 worktree 和分支。
+- `scripts/workstream_status.sh` 查看主仓库和所有 worktree 状态。
+- `scripts/open_workstream.sh` 打开某条开发线的可见终端。
+- `scripts/workstream_common.sh` 统一路径、分支命名和名称校验。
+
+预置开发线：
+- `memory`
+- `framework-runtime`
+- `tools-boundary`
+- `live-lab-test`
+
+后续方向：
+- 根据真实使用情况加入 `workstream_sync.sh`、`workstream_handoff_check.sh`。
+- 主线集成时增加“读取 handoff + diff + 测试结果”的固定 checklist。
+- 如果并行线数量增加，再考虑自动生成每条线的专属 会话运行时 prompt。
+
 ## 2026-04-29 / 大文件拆分第一步
 
 状态：部分落地

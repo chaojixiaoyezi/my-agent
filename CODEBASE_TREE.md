@@ -16,6 +16,16 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |-- ARCHITECTURE_GUIDE.md                      # 架构边界、拆分顺序和两层注释规则，给人和 LLM 都看
 |-- GATEWAY_DESIGN.md                          # gateway 常驻形态、外部方案对比和本项目目标设计
 |-- GATEWAY_RESEARCH.md                        # gateway 大调研，比较 daemon、任务队列、workflow、Notebook 和 AI gateway 方案
+|-- WORKSTREAMS.md                             # 并行开发工作台说明，定义 worktree、职责边界和集成流程
+|-- HANDOFF_TEMPLATE.md                        # 并行开发线完成后的交接模板
+|-- scripts/                                   # 开发辅助脚本，放可见测试台和 workstream 管理入口
+|   |-- live_agent_lab.py                      # Live Lab 薄入口，启动可见真实环境测试台
+|   |-- live_lab/                              # Live Lab 参数解析、运行器、case 和常量
+|   |-- open_live_lab.sh                       # macOS 新开可见 Terminal 跑 Live Lab
+|   |-- workstream_common.sh                   # workstream 脚本共享路径、命名和校验函数
+|   |-- workstream_create.sh                   # 创建 git worktree 并行开发线
+|   |-- workstream_status.sh                   # 查看主仓库和所有 worktree 的分支与脏文件状态
+|   `-- open_workstream.sh                     # 打开某条 workstream 的可见 Terminal
 |-- agent_py_agent/                            # Python 包目录，核心代码主要都在这里
 |   |-- __init__.py                            # 安装包初始化文件，记录包版本
 |   |-- __main__.py                            # CLI 兼容入口，真实命令实现已拆到 cli/
@@ -134,6 +144,45 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `replace_in_file`：精确替换文件中的一段已有内容，适合小范围改代码、改配置和改说明。
 - `fetch_url`：抓取网页或文本接口内容，适合查在线文档。
 - `http_request`：发送 HTTP 请求，适合测试 REST API、Webhook 和普通接口。
+
+### `WORKSTREAMS.md`
+
+这是并行开发工作台的规则入口。
+
+它定义：
+- 哪些开发线可以并行。
+- 每条线默认对应哪个 `git worktree` 和分支。
+- 每条线负责什么、不应该碰什么。
+- 主线如何读取 handoff、检查 diff、跑测试并统一集成。
+
+当前预置线包括：
+- `memory`
+- `framework-runtime`
+- `tools-boundary`
+- `live-lab-test`
+
+### `scripts/live_agent_lab.py` 和 `scripts/live_lab/`
+
+这是可见真实环境测试台。
+
+它负责：
+- 创建隔离 fixture 项目。
+- 写入隔离配置，避免污染主仓库数据。
+- 打印并保存发给 `my-agent` 的 prompt。
+- 打印实际命令、stdout、stderr、退出码和耗时。
+- 调用现有 `scenario-test` 跑健康、坏天气、真实 gateway ask 和真实 subagent 长链路。
+
+`scripts/open_live_lab.sh` 会在 macOS 新开 Terminal，让用户能直接看到测试过程。
+
+### `scripts/workstream_*.sh` 和 `scripts/open_workstream.sh`
+
+这是并行开发线管理脚本。
+
+它们负责：
+- `workstream_create.sh`：创建 `git worktree` 和 `workstream/<name>` 分支。
+- `workstream_status.sh`：列出主仓库和所有 worktree 的分支、HEAD 和脏文件数量。
+- `open_workstream.sh`：打开某条开发线的可见终端。
+- `workstream_common.sh`：统一路径计算、名称校验和分支命名。
 
 ### `agent_py_agent/agent/core.py`
 
