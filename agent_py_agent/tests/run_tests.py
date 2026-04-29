@@ -150,6 +150,18 @@ run(agent_cmd("subagents-dispatch", "--watch", "--max-cycles", "1", "--interval"
 run(agent_cmd("subagents-dispatch", "--watch", "--planner", "--max-cycles", "1", "--interval", "0", "--max-runners", "0"))
 run(agent_cmd("daemon", "--help"))
 run(agent_cmd("daemon", "--max-cycles", "1", "--interval", "0", "--max-runners", "auto", "--no-planner"))
+default_chat = run_capture(
+    agent_cmd(),
+    input="/status\nlogout\n",
+    timeout=60,
+)
+print(default_chat.stdout)
+if default_chat.stderr:
+    print(default_chat.stderr)
+assert default_chat.returncode == 0
+assert "当前模式: gateway 客户端" in default_chat.stdout
+assert "gateway status=running" in default_chat.stdout
+run(agent_cmd("gateway", "stop", "--timeout", "10", "--kill"))
 run(agent_cmd("gateway", "--help"))
 run(agent_cmd("gateway", "status"))
 run(agent_cmd("gateway", "run", "--max-cycles", "1", "--interval", "0", "--max-runners", "0", "--no-planner"))

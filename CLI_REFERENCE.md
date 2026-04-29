@@ -19,6 +19,7 @@ python -m pip install -e .
 安装后直接运行：
 
 ```powershell
+my-agent
 my-agent --help
 ```
 
@@ -39,6 +40,7 @@ python -m agent_py_agent --help
 
 | 形态 | 命令 | 是否常驻 | 是否调用真实 API |
 | --- | --- | --- | --- |
+| 默认入口 | `my-agent` | 前台 chat + 后台 gateway | 是，由后台 gateway 调用 |
 | 查看帮助 | `my-agent --help` | 否 | 否 |
 | 单轮对话 | `my-agent run "任务"` | 否 | 是，取决于配置的模型后端 |
 | 交互聊天 | `my-agent chat` | 前台交互 | 是，用户发送消息时调用 |
@@ -52,7 +54,7 @@ python -m agent_py_agent --help
 | 真实 runner 调度 | `my-agent subagents-dispatch --apply --execute-runners` | 否 | 是 |
 | 子代理单次执行 | `my-agent subagent-run <run_id> --execute` | 否 | 是 |
 
-当前 gateway 第一版已经实现为本地后台进程控制面：它管理 pid、state、heartbeat、stop request、日志和本地请求队列，并在内部复用 daemon/watch 调度。常驻形态和外部方案对比见 [GATEWAY_DESIGN.md](GATEWAY_DESIGN.md)。
+当前 gateway 第一版已经实现为本地后台进程控制面：它管理 pid、state、heartbeat、stop request、日志和本地请求队列，并在内部复用 daemon/watch 调度。`my-agent` 不带子命令时会自动确保 gateway 存活，然后进入 `chat --gateway`。常驻形态和外部方案对比见 [GATEWAY_DESIGN.md](GATEWAY_DESIGN.md)。
 
 ## 常用命令
 
@@ -80,7 +82,15 @@ my-agent subagents-dispatch --watch --planner --interval 30
 my-agent daemon
 ```
 
-启动后台 gateway：
+默认启动体验：
+
+```powershell
+my-agent
+```
+
+等价于：自动启动后台 gateway，然后进入 `my-agent chat --gateway`。退出 chat 不会关闭 gateway，后续还可以继续 `my-agent` 或 `my-agent chat --gateway` 接回去。
+
+手动管理后台 gateway：
 
 ```powershell
 my-agent gateway start

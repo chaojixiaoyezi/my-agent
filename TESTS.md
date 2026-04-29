@@ -112,6 +112,7 @@ my-agent gateway run --max-cycles 1 --interval 0 --max-runners 0 --no-planner
 my-agent gateway start
 my-agent gateway ask "真实 API gateway ask 冒烟"
 my-agent chat --gateway --no-save
+my-agent
 my-agent gateway stop --kill
 ```
 
@@ -129,6 +130,7 @@ my-agent gateway stop --kill
 - 跑一次隔离的 `gateway status` 和 `gateway run --max-cycles 1 --interval 0 --max-runners 0 --no-planner`，确认 gateway 控制面文件可写且单轮安全退出。
 - 跑一次隔离的 `gateway start -> gateway ask -> gateway status -> gateway stop`，确认本地 inbox/response 通道会触发真实 API。
 - 跑一次隔离的 `chat --gateway --no-save`，确认 chat 可以作为 gateway 客户端投递普通消息。
+- 跑一次隔离的无子命令 `my-agent`，确认会自动启动 gateway 并进入 gateway chat。
 - 通过自动发现测试覆盖 dispatch 规划、父代理 planner、runner、patch 审核、验收、watch 循环和 watch lock。
 - 跑 chat 真实模型路径。
 - 自动发现并运行所有 `test_*.py` 中的 `test_` 函数。

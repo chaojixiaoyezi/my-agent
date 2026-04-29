@@ -11,6 +11,7 @@ python -m pip install -e .
 安装后可以直接运行：
 
 ```bash
+my-agent
 my-agent --help
 my-agent chat
 my-agent gateway start
@@ -26,6 +27,7 @@ my-agent gateway ask "你好，检查一下当前任务"
 当前推荐的常驻方式是第一版后台 gateway：
 
 ```bash
+my-agent
 my-agent gateway start
 my-agent chat --gateway
 my-agent gateway status
@@ -33,11 +35,13 @@ my-agent gateway ask "继续推进当前任务"
 my-agent gateway stop
 ```
 
+`my-agent` 不带子命令时会自动启动后台 gateway，然后进入 `chat --gateway`。退出 chat 不会关闭 gateway；gateway 会继续在后台值班。
+
 `gateway` 第一版会启动后台 Python 进程，在内部复用现有 daemon/watch 调度，并写 pid、state、heartbeat、stop request、日志和本地请求队列。`gateway ask` 会把聊天/任务投递给后台 gateway，由常驻进程调用模型并把结果写回 `data/gateway/responses`。
 
 大白话说：`gateway start` 是“把主代理放到后台值班”，`gateway ask` 是“给后台主代理发一句话”，`gateway result` 是“拿之前异步任务的结果”。以后接入聊天工具后，普通用户不需要手动敲 `ask/result`，聊天工具会自动投递请求并把结果回给你；这两个命令会保留为开发和排错入口。
 
-`my-agent chat --gateway` 已经可以把普通聊天消息接到后台 gateway：chat 只是前台客户端，真正调用模型的是 gateway。当前为了稳妥，默认 `my-agent chat` 仍然保留原来的前台模型调用；等 gateway chat 稳定后，再考虑把它变成默认。
+`my-agent chat --gateway` 已经可以把普通聊天消息接到后台 gateway：chat 只是前台客户端，真正调用模型的是 gateway。`my-agent` 默认会走这条路径。为了稳妥，显式执行 `my-agent chat` 仍然保留原来的前台模型调用。
 
 `daemon` 仍保留为前台调试入口。开启 planner 后，如果 gate 发现仍有 active/pending/stalled/needs-intervention 事项，会触发完整父代理 LLM turn；如果模型只回 `HEARTBEAT_OK`，会被记录为失败。
 

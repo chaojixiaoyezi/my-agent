@@ -6,6 +6,7 @@
 
 ```bash
 python -m pip install -e .
+my-agent
 my-agent --help
 ```
 
@@ -15,9 +16,12 @@ my-agent --help
 python3 -m agent_py_agent
 ```
 
+不带子命令时，`my-agent` 会自动确保 gateway 后台进程正在运行，然后进入 `chat --gateway`。
+
 例如：
 
 ```bash
+my-agent
 my-agent chat
 my-agent gateway start
 my-agent chat --gateway
@@ -87,12 +91,13 @@ python3 -m agent_py_agent run "按额外规则回答" --prompt-file prompts/defa
 ## Chat 模式
 
 ```bash
+python3 -m agent_py_agent
 python3 -m agent_py_agent chat
 python3 -m agent_py_agent gateway start
 python3 -m agent_py_agent chat --gateway
 ```
 
-默认 chat 在当前前台进程里调用模型。`chat --gateway` 会把普通消息投递给后台 gateway，chat 自己只负责接收输入和显示响应。
+不带子命令的 `python3 -m agent_py_agent` 会自动启动 gateway 并进入 gateway chat。显式 `chat` 仍在当前前台进程里调用模型。`chat --gateway` 会把普通消息投递给后台 gateway，chat 自己只负责接收输入和显示响应。
 
 常用命令：
 
