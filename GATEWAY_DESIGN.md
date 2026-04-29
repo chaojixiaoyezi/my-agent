@@ -23,9 +23,21 @@ my-agent gateway status
 my-agent gateway stop
 my-agent gateway restart
 my-agent gateway logs
+my-agent gateway ask "继续推进当前任务"
+my-agent gateway result <request_id>
 ```
 
-它先负责后台进程、pid、state、heartbeat、stop request 和日志，内部暂时复用现有 daemon/watch 调度。SQLite 任务账本、worker pool、跨机器通信和组织模型会在这个入口上逐步接入。
+它先负责后台进程、pid、state、heartbeat、stop request、日志和本地消息入口，内部暂时复用现有 daemon/watch 调度。SQLite 任务账本、worker pool、跨机器通信和组织模型会在这个入口上逐步接入。
+
+第二步已经补上本地 inbox / response 通道：
+
+```text
+client CLI -> data/gateway/requests/pending/<request_id>.json
+gateway worker -> data/gateway/responses/<request_id>.json
+gateway audit -> data/gateway/gateway_requests.jsonl
+```
+
+`gateway ask` 是最小客户端协议。它还不是完整 TUI attach，也不是 HTTP/WebSocket gateway，但已经把“用户消息进入常驻 gateway 并触发完整 LLM turn”这件事从前台 chat 里拆了出来。后续 `chat` / TUI 可以复用同一条请求队列，或者把底层从文件队列替换成 SQLite / HTTP，而不改变用户命令面。
 
 ## 多 Gateway 组织模型
 

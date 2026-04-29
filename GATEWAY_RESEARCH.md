@@ -62,6 +62,7 @@ OpenClaw 把 gateway 定义为 24/7 后台服务，负责通道连接、消息�
 - gateway 必须有两层：控制面负责接消息和调度，执行面负责 runner。
 - heartbeat 必须读任务账本和 gate，不允许直接固定 OK。
 - 每次 planner/runner/acceptance 都要写审计记录。
+- 本项目第一版先用本地文件 inbox/response 模拟 messaging gateway：`gateway ask` 写 pending request，后台 worker 触发完整 LLM turn，再把响应写回 response 文件。后续可以把这个通道替换成 SQLite / HTTP / WebSocket。
 
 参考：
 - OpenClaw gateway: https://www.getopenclaw.ai/docs/gateway

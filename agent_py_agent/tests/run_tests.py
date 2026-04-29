@@ -23,7 +23,12 @@ TEST_CONFIG.write_text(
     + "\n# full smoke test isolation\n"
     + f'memory_path: "{str(TEST_MEMORY).replace("\\", "/")}"\n'
     + f'subagent_workspace: "{str(TEST_SUBAGENTS).replace("\\", "/")}"\n'
-    + f'gateway_workspace: "{str(TEST_GATEWAY).replace("\\", "/")}"\n',
+    + f'gateway_workspace: "{str(TEST_GATEWAY).replace("\\", "/")}"\n'
+    + "daemon_planner: false\n"
+    + "daemon_max_runners: 0\n"
+    + "daemon_interval: 1\n"
+    + "gateway_request_timeout: 180\n"
+    + "gateway_request_poll_interval: 1\n",
     encoding="utf-8",
 )
 
@@ -148,6 +153,23 @@ run(agent_cmd("daemon", "--max-cycles", "1", "--interval", "0", "--max-runners",
 run(agent_cmd("gateway", "--help"))
 run(agent_cmd("gateway", "status"))
 run(agent_cmd("gateway", "run", "--max-cycles", "1", "--interval", "0", "--max-runners", "0", "--no-planner"))
+run(agent_cmd("gateway", "ask", "--help"))
+run(agent_cmd("gateway", "result", "--help"))
+run(agent_cmd("gateway", "start", "--force"))
+try:
+    run(
+        agent_cmd(
+            "gateway",
+            "ask",
+            "真实 API gateway ask 冒烟：不要调用工具，请只用一句话回答 GATEWAY_OK。",
+            "--timeout",
+            "180",
+            "--no-save",
+        )
+    )
+    run(agent_cmd("gateway", "status"))
+finally:
+    run(agent_cmd("gateway", "stop", "--timeout", "10", "--kill"))
 run(agent_cmd("subagent-context", "--help"))
 run(agent_cmd("subagent-run", "--help"))
 

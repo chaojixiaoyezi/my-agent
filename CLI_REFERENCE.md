@@ -47,10 +47,11 @@ python -m agent_py_agent --help
 | 父代理 LLM planner 调度 | `my-agent subagents-dispatch --watch --planner --interval 30` | 前台常驻 | 是，有待处理事项时调用父代理 planner |
 | 配置驱动前台 daemon | `my-agent daemon` | 前台常驻 | 取决于 `daemon_*` 配置 |
 | 后台 gateway | `my-agent gateway start` | 后台常驻 | 取决于 `daemon_*` 配置 |
+| gateway 客户端请求 | `my-agent gateway ask "任务"` | 否，投递到后台 gateway | 是，由后台 gateway 调用 |
 | 真实 runner 调度 | `my-agent subagents-dispatch --apply --execute-runners` | 否 | 是 |
 | 子代理单次执行 | `my-agent subagent-run <run_id> --execute` | 否 | 是 |
 
-当前 gateway 第一版已经实现为本地后台进程控制面：它管理 pid、state、heartbeat、stop request 和日志，并在内部复用 daemon/watch 调度。常驻形态和外部方案对比见 [GATEWAY_DESIGN.md](GATEWAY_DESIGN.md)。
+当前 gateway 第一版已经实现为本地后台进程控制面：它管理 pid、state、heartbeat、stop request、日志和本地请求队列，并在内部复用 daemon/watch 调度。常驻形态和外部方案对比见 [GATEWAY_DESIGN.md](GATEWAY_DESIGN.md)。
 
 ## 常用命令
 
@@ -83,6 +84,7 @@ my-agent daemon
 ```powershell
 my-agent gateway start
 my-agent gateway status
+my-agent gateway ask "继续推进当前任务"
 my-agent gateway stop
 ```
 
@@ -436,9 +438,11 @@ my-agent gateway status
 my-agent gateway stop
 my-agent gateway restart
 my-agent gateway logs
+my-agent gateway ask "帮我检查当前任务状态"
+my-agent gateway result <request_id>
 ```
 
-`gateway` 第一版是本地后台控制面。它会启动一个后台 Python 进程，在内部按配置运行现有 daemon/watch 调度，并把 pid、state、heartbeat、stop request 和日志写到 `gateway_workspace`。它还不是多机器组织 gateway，也还没有 worker pool；这些会在后续接入同一命令面。
+`gateway` 第一版是本地后台控制面。它会启动一个后台 Python 进程，在内部按配置运行现有 daemon/watch 调度，并把 pid、state、heartbeat、stop request、请求队列、响应和日志写到 `gateway_workspace`。它还不是多机器组织 gateway，也还没有 worker pool；这些会在后续接入同一命令面。
 
 | 子命令 | 说明 |
 | --- | --- |
@@ -447,6 +451,8 @@ my-agent gateway logs
 | `stop` | 写 stop request，等待后台 gateway 在调度轮次之间正常退出。 |
 | `restart` | 先 stop 再 start。 |
 | `logs` | 显示 gateway 日志尾部。 |
+| `ask` | 把一条聊天/任务请求写入本地 inbox，由后台 gateway 调用模型处理。 |
+| `result` | 根据 request id 读取 `ask --no-wait` 留下的响应。 |
 | `run` | 内部/调试命令，前台运行 gateway 循环；通常由 `start` 调用。 |
 
 常用参数：
@@ -462,6 +468,15 @@ my-agent gateway logs
 | `restart` | `--force` | 停止超时后强制终止旧进程。 |
 | `restart` | `--force-lock` | 重启后传给内部 daemon。 |
 | `logs` | `--lines <n>` | 显示最后多少行日志，`0` 表示全部。 |
+| `ask` | `--inject <text>` | 给本次 gateway 请求动态注入 prompt，可多次传入。 |
+| `ask` | `--prompt-file <path>` | 给本次请求追加 prompt 文件，可多次传入。 |
+| `ask` | `--no-save` | 不把本次 gateway 对话保存进记忆。 |
+| `ask` | `--show-prompt` | 响应返回时打印最终 prompt。 |
+| `ask` | `--timeout <seconds>` | 等待后台响应的秒数，默认使用 `gateway_request_timeout`。 |
+| `ask` | `--no-wait` | 只投递请求并立即返回 request id。 |
+| `ask` | `--json` | 输出完整响应 JSON。 |
+| `result` | `--show-prompt` | 打印响应 JSON 中保存的最终 prompt。 |
+| `result` | `--json` | 输出完整响应 JSON。 |
 | `run` | daemon 同名参数 | 内部调试用，支持 `--max-cycles 1 --interval 0 --no-planner` 这类安全验证。 |
 
 gateway 控制面配置：
@@ -471,6 +486,8 @@ gateway_workspace: "data/gateway"
 gateway_heartbeat_interval: 5
 gateway_stale_seconds: 120
 gateway_stop_timeout: 20
+gateway_request_timeout: 300
+gateway_request_poll_interval: 1
 ```
 
 默认文件：
@@ -481,6 +498,11 @@ agent_py_agent/data/gateway/gateway_state.json
 agent_py_agent/data/gateway/gateway_heartbeat.json
 agent_py_agent/data/gateway/gateway_stop.request
 agent_py_agent/data/gateway/gateway.log
+agent_py_agent/data/gateway/requests/pending/<request_id>.json
+agent_py_agent/data/gateway/requests/processing/<request_id>.json
+agent_py_agent/data/gateway/requests/done/<request_id>.json
+agent_py_agent/data/gateway/responses/<request_id>.json
+agent_py_agent/data/gateway/gateway_requests.jsonl
 ```
 
 ## `subagent-context`
