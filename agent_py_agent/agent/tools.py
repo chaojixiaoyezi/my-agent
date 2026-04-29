@@ -811,11 +811,18 @@ class ToolRegistry:
 
         self.tools[tool.spec.name] = tool
 
-    def specs(self, *, allowed_tools: list[str] | None = None) -> list[ToolSpec]:
+    def specs(
+        self,
+        *,
+        allowed_tools: list[str] | None = None,
+        include_orchestration: bool = False,
+    ) -> list[ToolSpec]:
         """按注册顺序返回所有工具说明。"""
 
         allowed = _allowed_tool_set(allowed_tools)
         specs = [tool.spec for tool in self.tools.values()]
+        if not include_orchestration:
+            specs = [spec for spec in specs if spec.category != "orchestration"]
         if allowed is None:
             return specs
         return [spec for spec in specs if spec.name in allowed]
@@ -828,7 +835,7 @@ class ToolRegistry:
         但不会把每个参数的长篇说明全塞进去。
         """
 
-        specs = self.specs(allowed_tools=allowed_tools)
+        specs = self.specs(allowed_tools=allowed_tools, include_orchestration=True)
         entries = [spec.render_catalog_entry() for spec in specs[: self.catalog_limit]]
         if not entries:
             entries = ["- none：当前执行上下文没有授权任何工具；缺能力时请上抛 capability_request。"]
@@ -852,7 +859,7 @@ class ToolRegistry:
     ) -> list[ToolSpec]:
         """根据当前任务挑出最相关的少量工具。"""
 
-        specs = self.specs(allowed_tools=allowed_tools)
+        specs = self.specs(allowed_tools=allowed_tools, include_orchestration=True)
         hits = self.retriever.search(query, specs, self.retrieval_limit)
         if not hits:
             return []
@@ -867,7 +874,7 @@ class ToolRegistry:
     ) -> str:
         """生成当前任务的候选工具详情区块。"""
 
-        specs = self.specs(allowed_tools=allowed_tools)
+        specs = self.specs(allowed_tools=allowed_tools, include_orchestration=True)
         if not specs:
             return (
                 "# Recommended Tools\n"

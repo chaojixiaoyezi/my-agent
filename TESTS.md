@@ -76,6 +76,7 @@ python3 -c "from agent_py_agent.tests.test_tools import test_tool_loop_and_promp
 - 工具目录。
 - 推荐工具详情。
 - 工具调用循环。
+- 主代理自然语言派工工具：`create_subagents` / `subagent_board` / `dispatch_subagents`。
 - 工具 allowlist。
 - 文件写入 / 追加 / 替换。
 - fetch_url / http_request。
@@ -131,6 +132,7 @@ my-agent gateway stop --kill
 - 跑一次隔离的 `gateway start -> gateway ask -> gateway status -> gateway stop`，确认本地 inbox/response 通道会触发真实 API。
 - 跑一次隔离的 `chat --gateway --no-save`，确认 chat 可以作为 gateway 客户端投递普通消息。
 - 跑一次隔离的无子命令 `my-agent`，确认会自动启动 gateway 并进入 gateway chat。
+- 自动发现测试会覆盖主代理从工具调用创建子代理、读取子代理看板、dry-run 调度，以及防止 `execute_runners=true` 在未 `apply=true` 时误触发真实 runner。
 - 通过自动发现测试覆盖 dispatch 规划、父代理 planner、runner、patch 审核、验收、watch 循环和 watch lock。
 - 跑 chat 真实模型路径。
 - 自动发现并运行所有 `test_*.py` 中的 `test_` 函数。

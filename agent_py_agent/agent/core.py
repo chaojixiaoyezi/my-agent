@@ -26,7 +26,7 @@ from .subagent import (
     parse_parent_planner_output,
     parse_subagent_runner_output,
 )
-from .tools import ToolRegistry
+from .tools import BaseTool, ToolExecutionResult, ToolRegistry, ToolSpec
 
 
 @dataclass
@@ -72,6 +72,9 @@ class SimpleAgent:
             retrieval_limit=config.tool_retrieval_limit,
             vector_search_enabled=config.tool_vector_search_enabled,
         )
+        self.tools.register(CreateSubagentsTool(self))
+        self.tools.register(SubagentBoardTool(self))
+        self.tools.register(DispatchSubagentsTool(self))
 
     def run(
         self,
@@ -766,6 +769,351 @@ class SimpleAgent:
 
         report = self.subagents.build_dispatch_watch_report(records, dry_run=not apply)
         return self.subagents.write_dispatch_watch_report(report)
+
+
+READ_ONLY_SUBAGENT_TOOLS = ["list_files", "read_file", "search_text"]
+CODING_SUBAGENT_TOOLS = [
+    "list_files",
+    "read_file",
+    "search_text",
+    "write_file",
+    "append_file",
+    "replace_in_file",
+]
+
+
+class CreateSubagentsTool(BaseTool):
+    """主代理工具：把自然语言里的派工意图落成 subagent 工单。"""
+
+    def __init__(self, agent: SimpleAgent):
+        self.agent = agent
+        self.spec = ToolSpec(
+            name="create_subagents",
+            category="orchestration",
+            description="创建一个或多个子代理任务记录，适合把复杂任务正式拆给子代理。",
+            use_cases=[
+                "用户要求拆分任务、派多个子代理、开工单或让子代理分别处理事项",
+                "需要把聊天里的计划落盘，后续由 dispatch_subagents 推进和验收",
+            ],
+            avoid_when=[
+                "只是解释思路、不需要真正创建任务时，不要调用；先直接回答即可",
+            ],
+            keywords=[
+                "子代理",
+                "派工",
+                "拆分",
+                "工单",
+                "任务",
+                "subagent",
+                "delegate",
+                "spawn",
+                "assign",
+            ],
+            parameters={
+                "goal": "总目标或任务描述，必填",
+                "count": "创建多少个子代理，默认 1，受 max_subagents 限制",
+                "tool_preset": "默认 read_only；coding 会授予文件读写工具；none 不授予工具",
+                "allowed_tools": "显式工具列表；传了它就覆盖 tool_preset",
+                "acceptance_checks": "验收标准列表",
+                "plan": "每个子代理的初始步骤列表",
+            },
+            parameter_details={
+                "goal": "写清楚子代理要交付什么，不要只写一个空泛标题。",
+                "count": "例如 3 表示创建 3 个并列子任务；如果任务需要人工精细拆分，可以多次调用本工具。",
+                "tool_preset": "`read_only` 只允许 list/read/search；`coding` 允许读写和替换文件；`none` 不授予工具。",
+                "allowed_tools": "JSON 数组，例如 [\"read_file\", \"write_file\"]。如果需要写代码，通常至少给 read_file/search_text/write_file/replace_in_file。",
+                "acceptance_checks": "JSON 数组或多行文本，说明父代理后续怎样判断任务完成。",
+                "plan": "JSON 数组或多行文本，给子代理的初始执行步骤。",
+            },
+            examples=[
+                '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"tool_preset":"coding","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',
+                '{"tool":"create_subagents","goal":"调研 gateway 失败场景","count":2,"tool_preset":"read_only"}',
+            ],
+        )
+
+    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+        if not self.agent.config.enable_subagents:
+            return ToolExecutionResult("create_subagents", False, "配置已禁用 subagent。")
+
+        goal = str(params.get("goal") or "").strip()
+        if not goal:
+            return ToolExecutionResult("create_subagents", False, "缺少必填参数 goal。")
+
+        count = _positive_int(params.get("count"), default=1)
+        if count <= 0:
+            return ToolExecutionResult("create_subagents", False, "count 必须大于 0。")
+        if self.agent.config.max_subagents > 0:
+            count = min(count, self.agent.config.max_subagents)
+
+        allowed_tools = _string_list(params.get("allowed_tools"))
+        if not allowed_tools:
+            preset = str(params.get("tool_preset") or "read_only").strip().lower()
+            if preset == "coding":
+                allowed_tools = list(CODING_SUBAGENT_TOOLS)
+            elif preset == "none":
+                allowed_tools = []
+            else:
+                allowed_tools = list(READ_ONLY_SUBAGENT_TOOLS)
+
+        plan = _string_list(params.get("plan")) or ["理解目标", "执行任务", "产出证据", "等待父代理验收"]
+        acceptance_checks = _string_list(params.get("acceptance_checks"))
+        thought = str(params.get("thought") or "根据父代理派工执行，并保留可验收证据。").strip()
+        agent_name = str(params.get("agent_name") or "general").strip()
+        role = str(params.get("role") or "worker").strip()
+        owner = str(params.get("owner") or "").strip()
+        supervisor = str(params.get("supervisor") or "parent").strip()
+        final_owner = str(params.get("final_owner") or "").strip()
+
+        tasks = []
+        for index in range(1, count + 1):
+            task_goal = goal if count == 1 else f"{goal} / 子任务{index}"
+            task = self.agent.subagents.create_run(
+                goal=task_goal,
+                thought=thought,
+                plan=plan,
+                agent_name=agent_name,
+                role=role,
+                allowed_tools=allowed_tools,
+                owner=owner,
+                supervisor=supervisor,
+                final_owner=final_owner,
+                acceptance_checks=acceptance_checks,
+            )
+            tasks.append(task)
+
+        payload = {
+            "created": len(tasks),
+            "ids": [task.id for task in tasks],
+            "allowed_tools": allowed_tools,
+            "subagent_workspace": str(self.agent.subagents.workspace),
+            "tasks": [
+                {
+                    "id": task.id,
+                    "goal": task.goal,
+                    "status": task.status,
+                    "verification_status": task.verification_status,
+                    "task_dir": task.task_dir,
+                }
+                for task in tasks
+            ],
+        }
+        return ToolExecutionResult(
+            "create_subagents",
+            True,
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+
+
+class SubagentBoardTool(BaseTool):
+    """主代理工具：把当前子代理任务树摘要返回给模型。"""
+
+    def __init__(self, agent: SimpleAgent):
+        self.agent = agent
+        self.spec = ToolSpec(
+            name="subagent_board",
+            category="orchestration",
+            description="查看当前子代理看板和状态摘要，用来判断任务是否待执行、待验收或卡住。",
+            use_cases=[
+                "用户问当前任务进度、有哪些子代理、哪些任务卡住或完成",
+                "调度前先查看任务树状态，避免重复派工",
+            ],
+            avoid_when=[
+                "已经知道具体 run_id 且只需要执行 dispatch 时，可以直接调用 dispatch_subagents",
+            ],
+            keywords=["任务状态", "看板", "进度", "子代理", "board", "status", "subagent"],
+            parameters={
+                "limit": "最多返回多少条明细，默认 10",
+                "status": "按状态过滤，可选，如 PLANNING/DONE/BLOCKED",
+            },
+            examples=[
+                '{"tool":"subagent_board","limit":10}',
+                '{"tool":"subagent_board","status":"BLOCKED","limit":20}',
+            ],
+        )
+
+    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+        limit = _positive_int(params.get("limit"), default=10)
+        status_filter = str(params.get("status") or "").strip().upper()
+        board = self.agent.subagents.write_board(recent_limit=max(1, limit))
+        items = board.items
+        if status_filter:
+            items = [item for item in items if item.status.upper() == status_filter]
+        items = items[:limit]
+        payload = {
+            "summary": board.summary,
+            "returned": len(items),
+            "subagent_workspace": str(self.agent.subagents.workspace),
+            "items": [
+                {
+                    "id": item.id,
+                    "goal": item.goal,
+                    "status": item.status,
+                    "verification_status": item.verification_status,
+                    "channel_status": item.channel_status,
+                    "risk_flags": item.risk_flags,
+                    "evidence_count": item.evidence_count,
+                    "open_request_count": item.open_request_count,
+                    "open_gap_count": item.open_gap_count,
+                    "task_dir": item.task_dir,
+                }
+                for item in items
+            ],
+            "board_json": str(self.agent.subagents.workspace / "subagent_board.json"),
+            "board_md": str(self.agent.subagents.workspace / "SUBAGENT_BOARD.md"),
+        }
+        return ToolExecutionResult("subagent_board", True, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+class DispatchSubagentsTool(BaseTool):
+    """主代理工具：从聊天里触发一轮父代理调度。"""
+
+    def __init__(self, agent: SimpleAgent):
+        self.agent = agent
+        self.spec = ToolSpec(
+            name="dispatch_subagents",
+            category="orchestration",
+            description="执行一轮子代理调度，可 dry-run，也可 apply 并调用真实 runner。",
+            use_cases=[
+                "已经创建子代理后，用户要求推进、开跑、验收、处理卡住项",
+                "需要让父代理检查 due-check、路由能力、执行 runner、审核 patch 或验收结果",
+            ],
+            avoid_when=[
+                "只是创建任务时先用 create_subagents；没有明确推进意图时默认 dry-run 更稳",
+            ],
+            keywords=["调度", "推进", "运行", "验收", "派工", "dispatch", "runner", "acceptance"],
+            parameters={
+                "apply": "是否写回低风险动作，默认 false",
+                "execute_runners": "是否真实调用模型执行 runner，必须配合 apply=true",
+                "planner": "是否启用父代理 planner，默认 false",
+                "max_runners": "本轮最多推进多少个 runner，默认 1；0 表示不执行 runner",
+                "limit": "每阶段最多处理多少条记录，默认 20；0 表示不限制",
+                "runner_instruction": "给 runner 的额外指令",
+            },
+            parameter_details={
+                "apply": "false 只生成计划和报告；true 会写审计日志并可能改变任务状态。",
+                "execute_runners": "true 会消耗真实 API；只有用户明确要求开跑/真实执行/完整测试时才打开。",
+                "planner": "true 会额外调用父代理 LLM planner；适合长任务统筹，但会多消耗一次模型调用。",
+                "max_runners": "用来限制本轮推进数量，避免一次把太多子代理同时跑起来。",
+            },
+            examples=[
+                '{"tool":"dispatch_subagents","apply":false,"max_runners":1}',
+                '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"max_runners":2,"runner_instruction":"只在隔离 fixture 目录内写文件，并输出可验收证据"}',
+            ],
+        )
+
+    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+        apply = _bool_param(params.get("apply"), default=False)
+        execute_runners = _bool_param(params.get("execute_runners"), default=False)
+        if execute_runners and not apply:
+            return ToolExecutionResult(
+                "dispatch_subagents",
+                False,
+                "execute_runners=true 必须配合 apply=true，避免误触发真实 API runner。",
+            )
+
+        cfg = CapabilityConfig()
+        router = CapabilityRouter(
+            config=cfg,
+            tool_specs=[
+                spec
+                for spec in self.agent.tools.specs()
+                if spec.category != "orchestration"
+            ],
+        )
+        report = self.agent.dispatch_subagents(
+            router,
+            cfg,
+            apply=apply,
+            execute_runners=execute_runners,
+            planner=_bool_param(params.get("planner"), default=False),
+            max_runners=_non_negative_int(params.get("max_runners"), default=1),
+            limit=_non_negative_int(params.get("limit"), default=20),
+            reviewer=str(params.get("reviewer") or "chat-tool").strip(),
+            note=str(params.get("note") or "triggered by dispatch_subagents tool").strip(),
+            runner_instruction=str(params.get("runner_instruction") or params.get("instruction") or "").strip(),
+            max_cards=_non_negative_int(params.get("max_cards"), default=0),
+            probe=not _bool_param(params.get("no_probe"), default=False),
+            take_over_by=str(params.get("take_over_by") or "").strip(),
+            locked_files=_string_list(params.get("locked_files")),
+        )
+        payload = {
+            "dry_run": report.dry_run,
+            "summary": report.summary,
+            "records": [
+                {
+                    "step": item.step,
+                    "action": item.action,
+                    "run_id": item.run_id,
+                    "ok": item.ok,
+                    "dry_run": item.dry_run,
+                    "applied": item.applied,
+                    "message": item.message,
+                    "before_status": item.before_status,
+                    "after_status": item.after_status,
+                }
+                for item in report.records
+            ],
+            "dispatch_json": str(self.agent.subagents.workspace / "subagent_dispatch_report.json"),
+            "dispatch_md": str(self.agent.subagents.workspace / "SUBAGENT_DISPATCH.md"),
+        }
+        return ToolExecutionResult("dispatch_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _string_list(value: object) -> list[str]:
+    """把工具参数里的数组/JSON 数组/多行文本整理成字符串列表。"""
+
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, tuple):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value).strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item).strip()]
+    if "\n" in text:
+        return [line.strip("- ").strip() for line in text.splitlines() if line.strip("- ").strip()]
+    if "," in text:
+        return [item.strip() for item in text.split(",") if item.strip()]
+    return [text]
+
+
+def _bool_param(value: object, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "apply"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "dry-run", "dry_run"}:
+        return False
+    return default
+
+
+def _positive_int(value: object, *, default: int) -> int:
+    try:
+        parsed = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+    return max(0, parsed)
+
+
+def _non_negative_int(value: object, *, default: int) -> int:
+    try:
+        parsed = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+    return max(0, parsed)
 
 
 def _sleep_with_stop(interval: float, stop_path: Path | None) -> bool:
