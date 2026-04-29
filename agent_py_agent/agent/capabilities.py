@@ -1,281 +1,30 @@
 from __future__ import annotations
 
-"""统一能力路由模块。
+"""LLM: compatibility facade for capability routing moved to `agent.capability`.
 
-这里把 skill 和 tool 都抽象成 Capability Card。
-后续无论是父代理给子代理下发 skill，还是下发 tool，都可以走同一套路由协议。
+给人看的解释：
+真实能力路由代码已经放进 `agent_py_agent.agent.capability`。
+这个文件只保留旧入口，让测试和历史调用不用立刻改 import。
 """
 
-import re
-from dataclasses import dataclass, field
-from typing import Any
+from .capability import (  # noqa: F401
+    CapabilityCard,
+    CapabilityRouter,
+    CapabilitySearchHit,
+    classify_tool_risk,
+    from_skill_card,
+    from_tool_spec,
+    score_card,
+    tokenize,
+)
 
-from .capability_config import CapabilityConfig
-from .skills import SkillCard, SkillRegistry
-from .tools import ToolSpec
-
-
-@dataclass
-class CapabilityCard:
-    """统一能力卡片。
-
-    `kind` 当前主要是 `skill` 或 `tool`，但刻意保留成普通字符串。
-    后续如果要加入 resource、mcp、remote_agent，也不用改 schema。
-    """
-
-    id: str
-    kind: str
-    name: str
-    description: str
-    capabilities: list[str] = field(default_factory=list)
-    when_to_use: list[str] = field(default_factory=list)
-    not_when_to_use: list[str] = field(default_factory=list)
-    keywords: list[str] = field(default_factory=list)
-    risk_level: str = "low"
-    side_effects: list[str] = field(default_factory=list)
-    source: str = ""
-    path: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def render_compact(self, *, max_chars: int = 0) -> str:
-        """渲染短卡片。
-
-        `max_chars=0` 表示不限制。这里先用字符数兜底，未来接 tokenizer 后
-        再替换成精确 token 控制。
-        """
-
-        lines = [
-            f"- {self.kind}:{self.name} [{self.risk_level}]",
-            f"  说明：{self.description}",
-        ]
-        if self.capabilities:
-            lines.append(f"  能力：{', '.join(self.capabilities)}")
-        if self.when_to_use:
-            lines.append(f"  何时使用：{'; '.join(self.when_to_use[:3])}")
-        if self.not_when_to_use:
-            lines.append(f"  不适用：{'; '.join(self.not_when_to_use[:2])}")
-        if self.side_effects:
-            lines.append(f"  副作用：{', '.join(self.side_effects)}")
-        text = "\n".join(lines)
-        if max_chars and len(text) > max_chars:
-            return text[:max_chars] + "\n  ... 已截断"
-        return text
-
-
-@dataclass
-class CapabilitySearchHit:
-    """能力检索命中结果。"""
-
-    card: CapabilityCard
-    score: float
-    reasons: list[str]
-
-
-class CapabilityRouter:
-    """统一能力路由器。
-
-    它不负责执行工具，也不负责展开 skill 正文。
-    它只回答一个问题：当前能力缺口最可能需要哪些 skill/tool card？
-    """
-
-    def __init__(
-        self,
-        *,
-        config: CapabilityConfig | None = None,
-        skill_registry: SkillRegistry | None = None,
-        tool_specs: list[ToolSpec] | None = None,
-        extra_cards: list[CapabilityCard] | None = None,
-    ):
-        self.config = config or CapabilityConfig()
-        self._cards: dict[str, CapabilityCard] = {}
-        if skill_registry is not None:
-            for card in skill_registry.cards():
-                self.register(from_skill_card(card))
-        for spec in tool_specs or []:
-            self.register(from_tool_spec(spec))
-        for card in extra_cards or []:
-            self.register(card)
-
-    def register(self, card: CapabilityCard) -> None:
-        """注册或覆盖一张能力卡。"""
-
-        self._cards[card.id] = card
-
-    def cards(self, *, kinds: set[str] | None = None) -> list[CapabilityCard]:
-        """返回当前能力卡。"""
-
-        cards = list(self._cards.values())
-        if kinds is None:
-            return cards
-        return [card for card in cards if card.kind in kinds]
-
-    def search(
-        self,
-        query: str,
-        *,
-        limit: int | None = None,
-        kinds: set[str] | None = None,
-    ) -> list[CapabilitySearchHit]:
-        """检索候选能力。
-
-        `limit=None` 时使用配置里的 `capability_candidate_limit`。
-        `limit=0` 表示不限制。
-        """
-
-        effective_limit = self.config.capability_candidate_limit if limit is None else limit
-        hits: list[CapabilitySearchHit] = []
-        for card in self.cards(kinds=kinds):
-            score, reasons = score_card(query, card)
-            if score > 0:
-                hits.append(CapabilitySearchHit(card=card, score=score, reasons=reasons[:4]))
-        hits.sort(key=lambda item: (-item.score, item.card.kind, item.card.name))
-        if effective_limit == 0:
-            return hits
-        return hits[:effective_limit]
-
-    def render_candidates(
-        self,
-        query: str,
-        *,
-        limit: int | None = None,
-        kinds: set[str] | None = None,
-    ) -> str:
-        """把候选能力渲染成给代理看的短说明。"""
-
-        hits = self.search(query, limit=limit, kinds=kinds)
-        if not hits:
-            return "# Candidate Capabilities\n当前没有明显匹配的 skill/tool card。"
-        blocks: list[str] = []
-        for hit in hits:
-            reason_text = "；".join(hit.reasons) or "与当前能力缺口相关"
-            blocks.append(f"{hit.card.render_compact()}\n  推荐理由：{reason_text}")
-        return "# Candidate Capabilities\n" + "\n\n".join(blocks)
-
-
-def from_skill_card(card: SkillCard) -> CapabilityCard:
-    """把 Skill Card 映射成统一能力卡。"""
-
-    return CapabilityCard(
-        id=f"skill:{card.name}",
-        kind="skill",
-        name=card.name,
-        description=card.description,
-        capabilities=card.capabilities,
-        when_to_use=[card.when_to_use] if card.when_to_use else [],
-        keywords=[*card.tags, *card.capabilities, *card.tools_required],
-        risk_level=card.risk_level,
-        source=card.source,
-        path=str(card.path),
-        metadata={
-            "scope": card.scope,
-            "tools_required": card.tools_required,
-        },
-    )
-
-
-def from_tool_spec(spec: ToolSpec) -> CapabilityCard:
-    """把现有 ToolSpec 映射成统一能力卡。"""
-
-    side_effects, risk_level = classify_tool_risk(spec)
-    return CapabilityCard(
-        id=f"tool:{spec.name}",
-        kind="tool",
-        name=spec.name,
-        description=spec.description,
-        capabilities=[spec.category, spec.name],
-        when_to_use=spec.use_cases,
-        not_when_to_use=spec.avoid_when,
-        keywords=spec.keywords,
-        risk_level=risk_level,
-        side_effects=side_effects,
-        source="builtin_tool_registry",
-        metadata={
-            "parameters": spec.parameters,
-            "examples": spec.examples,
-        },
-    )
-
-
-def classify_tool_risk(spec: ToolSpec) -> tuple[list[str], str]:
-    """给现有工具补一层基础风险分类。
-
-    这不是最终安全策略，只是 Tool Card 的初始风险信号。
-    后续可以在 tool card 里继续扩展更细的权限和确认机制。
-    """
-
-    name = spec.name
-    if name in {"write_file", "append_file", "replace_in_file"}:
-        return ["filesystem_write"], "high"
-    if name == "http_request":
-        return ["network_request"], "medium"
-    if name == "fetch_url":
-        return ["network_read"], "medium"
-    if spec.category == "filesystem":
-        return ["filesystem_read"], "low"
-    return [], "low"
-
-
-def score_card(query: str, card: CapabilityCard) -> tuple[float, list[str]]:
-    """用可解释的关键词规则给能力卡打分。"""
-
-    tokens = tokenize(query)
-    if not tokens:
-        return 0.0, []
-    haystacks = {
-        "name": card.name.lower(),
-        "kind": card.kind.lower(),
-        "description": card.description.lower(),
-        "capabilities": " ".join(card.capabilities).lower(),
-        "keywords": " ".join(card.keywords).lower(),
-        "when_to_use": " ".join(card.when_to_use).lower(),
-        "not_when_to_use": " ".join(card.not_when_to_use).lower(),
-    }
-    score = 0.0
-    reasons: list[str] = []
-    for token in tokens:
-        token_score = 0.0
-        if token in haystacks["name"]:
-            token_score += 6.0
-            reasons.append(f"命中名称“{token}”")
-        if token in haystacks["capabilities"]:
-            token_score += 5.0
-            reasons.append(f"命中能力“{token}”")
-        if token in haystacks["keywords"]:
-            token_score += 4.0
-            reasons.append(f"命中关键词“{token}”")
-        if token in haystacks["kind"]:
-            token_score += 2.0
-            reasons.append(f"命中类型“{token}”")
-        if token in haystacks["description"] or token in haystacks["when_to_use"]:
-            token_score += 1.5
-            reasons.append(f"命中描述“{token}”")
-        score += token_score
-    return score, _dedupe(reasons)
-
-
-def tokenize(text: str) -> list[str]:
-    """把查询切成适合粗检索的 token。"""
-
-    lowered = text.lower()
-    tokens = re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]+", lowered)
-    expanded: list[str] = []
-    for token in tokens:
-        expanded.append(token)
-        if re.fullmatch(r"[\u4e00-\u9fff]+", token):
-            for size in (2, 3, 4):
-                for idx in range(0, max(len(token) - size + 1, 0)):
-                    expanded.append(token[idx : idx + size])
-    return _dedupe(expanded)
-
-
-def _dedupe(items: list[str]) -> list[str]:
-    """保持顺序去重。"""
-
-    seen: set[str] = set()
-    result: list[str] = []
-    for item in items:
-        if item in seen:
-            continue
-        seen.add(item)
-        result.append(item)
-    return result
+__all__ = [
+    "CapabilityCard",
+    "CapabilityRouter",
+    "CapabilitySearchHit",
+    "classify_tool_risk",
+    "from_skill_card",
+    "from_tool_spec",
+    "score_card",
+    "tokenize",
+]

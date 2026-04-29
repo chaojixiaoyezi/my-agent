@@ -7,6 +7,7 @@
 ## Tree
 
 > 2026-04-29 更新：大文件已经按职责拆分。旧入口文件仍保留兼容导入，新实现优先看 `cli/`、`agent_core/`、`tooling/`、`gateway_parts/`、`local_storage/`、`subagents/`。
+> 第二轮更新：`agent/` 根目录散落实现已继续归位。目录含义详见 `agent_py_agent/agent/DIRECTORY_GUIDE.md`。
 
 ```text
 simple-python-agent-v0.3/                      # 项目根目录，放代码、说明文档和验证记录
@@ -35,24 +36,36 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   `-- parser.py                          # argparse 命令树和 main()
 |   |-- agent/                                 # 智能体核心模块目录
 |   |   |-- __init__.py                        # 包初始化文件
-|   |   |-- backend.py                         # 模型后端适配层，负责对接 echo / OpenAI 兼容 / Anthropic 兼容接口
-|   |   |-- capabilities.py                    # 统一能力路由模块，把 skill card 和 tool card 放到同一检索入口
-|   |   |-- capability_config.py              # 能力路由配置结构，管理 skill/tool 授权和子代理上抛参数
-|   |   |-- config.py                          # 配置结构和简化 YAML 加载器
+|   |   |-- DIRECTORY_GUIDE.md                 # agent 目录职责地图，后续新增文件先看这里
+|   |   |-- backend.py                         # 模型后端兼容入口，真实实现已拆到 backends/
+|   |   |-- backends/                          # 模型后端适配层，负责 echo / OpenAI 兼容 / Anthropic 兼容接口
+|   |   |-- capabilities.py                    # 能力路由兼容入口，真实实现已拆到 capability/
+|   |   |-- capability_config.py              # 能力配置兼容入口，真实实现已拆到 capability/
+|   |   |-- capability/                        # 能力路由、能力配置、Skill Card、Tool Card 统一治理
+|   |   |-- clients/                           # 未来非模型外部服务客户端目录，目前用 README 定义边界
+|   |   |-- config.py                          # 配置兼容入口，真实实现已拆到 settings/
+|   |   |-- settings/                          # 配置结构、简化 YAML 加载器和环境变量覆盖
 |   |   |-- core.py                            # SimpleAgent 兼容组合入口，真实实现已拆到 agent_core/
 |   |   |-- agent_core/                        # 主循环、子代理 runner、planner、dispatch、编排工具、runner 规则
-|   |   |-- file_io.py                         # 文件 I/O 小工具，当前负责带锁追加 JSONL
+|   |   |-- file_io.py                         # 文件 I/O 兼容入口，真实实现已拆到 io/
+|   |   |-- io/                                # 无业务含义的底层文件 I/O 原语，例如 locked JSONL append
 |   |   |-- gateway.py                         # gateway 兼容入口，真实协议实现已拆到 gateway_parts/
 |   |   |-- gateway_parts/                     # gateway 路径、IO、进程控制、恢复、运行时、adapter、索引日志
 |   |   |-- local_store.py                     # LocalStore 兼容组合入口，真实实现已拆到 local_storage/
 |   |   |-- local_storage/                     # LocalStore models/schema/records/search/events/maintenance
-|   |   |-- memory.py                          # 本地记忆系统，JSONL 记原始流水，LocalStore 负责索引检索
-|   |   |-- prompting.py                       # prompt 拼装器，负责把人格、记忆、工具信息和用户任务合成最终上下文
-|   |   |-- skills.py                          # Skill Card 扫描和读取模块，负责把 SKILL.md 变成轻量索引
+|   |   |-- memory.py                          # 记忆兼容入口，真实实现已拆到 memory_store/
+|   |   |-- memory_store/                      # 长期记忆存储，当前是 JSONL + LocalStore 索引
+|   |   |-- observability/                     # 未来 request_id、耗时、状态、错误码、metrics、trace 目录
+|   |   |-- prompting.py                       # prompt 兼容入口，真实实现已拆到 prompting_parts/
+|   |   |-- prompting_parts/                   # prompt 构造、工具 transcript、未来上下文预算策略
+|   |   |-- repositories/                      # 未来领域仓储接口目录，目前用 README 定义边界
+|   |   |-- security/                          # 未来权限、输入净化、可信度、安全默认策略目录
+|   |   |-- skills.py                          # Skill Card 兼容入口，真实实现已拆到 capability/skills.py
 |   |   |-- subagent.py                        # 子代理兼容入口，真实实现已拆到 subagents/
 |   |   |-- subagents/                         # 子代理模型、报告、manager mixin、验收、dispatch、runner、索引等
 |   |   |-- tools.py                           # 工具兼容入口，真实实现已拆到 tooling/
-|   |   `-- tooling/                           # 工具模型、文件工具、HTTP 工具、解析器、注册表、写边界
+|   |   |-- tooling/                           # 工具模型、文件工具、HTTP 工具、解析器、注册表、写边界
+|   |   `-- validators/                        # 未来跨领域校验规则目录，目前用 README 定义边界
 |   |-- config/                                # 配置目录
 |   |   |-- agent_config.yaml                  # 运行配置文件，控制模型、记忆、工具和检索参数
 |   |   `-- capability_config.yaml            # 能力路由配置文件，控制 skill/tool 授权、上抛和候选数量

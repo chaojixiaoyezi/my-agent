@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-"""LLM: compatibility facade for model backend adapters moved to `agent.backends`.
+"""LLM: public API for model backend adapters and normalized model responses.
 
 给人看的解释：
-真实后端实现已经放到 `agent_py_agent.agent.backends`。
-这个文件只保留旧导入路径，避免历史代码里的 `from agent.backend import ...` 失效。
+这里放所有“怎么和模型服务说话”的代码。以后新增 OpenAI、Anthropic、本地模型、
+公司内网模型，都应该进这个目录，而不是塞回 `core.py`。
 """
 
-from .backends import (  # noqa: F401
+from .base import (
     AnthropicCompatibleBackend,
     BaseBackend,
     EchoBackend,
