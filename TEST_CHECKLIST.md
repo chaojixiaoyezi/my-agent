@@ -114,6 +114,7 @@
 - [ ] `my-agent gateway stop` 通过 stop request 正常停止后台进程
 - [ ] `my-agent gateway ask` 能通过后台 gateway 处理真实 API 请求并写入 `responses/<request_id>.json`
 - [ ] `my-agent gateway result <request_id>` 能读取异步请求结果
+- [ ] `my-agent chat --gateway` 会把普通聊天消息投递给后台 gateway，并且 `/status` 会显示 gateway 队列状态
 
 ## 修改文档时
 

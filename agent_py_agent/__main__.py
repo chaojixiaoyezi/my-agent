@@ -367,6 +367,66 @@ def print_gateway_response(payload: dict, *, json_mode: bool = False, show_promp
     return 0 if payload.get("ok") else 2
 
 
+def submit_gateway_ask(
+    paths: GatewayPaths,
+    *,
+    prompt: str,
+    inject: list[str] | None = None,
+    prompt_files: list[str] | None = None,
+    save: bool = True,
+    include_prompt: bool = False,
+) -> tuple[str, Path, Path]:
+    """把一条 ask 请求写进 gateway inbox，并返回请求 ID 和文件路径。
+
+    `gateway ask` 和 `chat --gateway` 都走这个函数。这样以后把底层从文件队列
+    换成 SQLite/HTTP 时，只需要换这一层，CLI 和 chat 的用户体验可以保持稳定。
+    """
+
+    request_id = new_gateway_request_id()
+    payload = {
+        "id": request_id,
+        "kind": "ask",
+        "prompt": prompt,
+        "inject": inject or [],
+        "prompt_files": prompt_files or [],
+        "save": save,
+        "include_prompt": include_prompt,
+        "created_at": time.time(),
+        "client_pid": os.getpid(),
+    }
+    request_path = write_gateway_request(paths, payload)
+    return request_id, request_path, gateway_response_path(paths, request_id)
+
+
+def gateway_running(paths: GatewayPaths) -> tuple[int, bool]:
+    """返回 gateway pid 和存活状态。"""
+
+    pid = read_pid(paths.pid)
+    return pid, bool(pid and is_pid_alive(pid))
+
+
+def render_gateway_status(agent: SimpleAgent, paths: GatewayPaths) -> list[str]:
+    """生成 gateway 状态摘要，供 `gateway status` 和 `chat --gateway /status` 复用。"""
+
+    pid, alive = gateway_running(paths)
+    state = read_json_file(paths.state)
+    heartbeat = read_json_file(paths.heartbeat)
+    heartbeat_at = float(heartbeat.get("updated_at", 0) or 0)
+    age = time.time() - heartbeat_at if heartbeat_at else 0
+    stale = bool(heartbeat_at and age > agent.config.gateway_stale_seconds)
+    status = "running" if alive else state.get("status", "stopped")
+    if alive and stale:
+        status = "stale"
+
+    lines = [
+        f"gateway status={status} pid={pid if pid else '-'} alive={alive}",
+        "gateway requests=" + json.dumps(gateway_request_counts(paths), ensure_ascii=False, sort_keys=True),
+    ]
+    if heartbeat_at:
+        lines.append(f"gateway heartbeat_age_seconds={age:.1f}")
+    return lines
+
+
 def cmd_run(args) -> int:
     """执行一次单轮请求。"""
 
@@ -1105,8 +1165,7 @@ def cmd_gateway_status(args) -> int:
 
     agent = make_agent(args)
     paths = gateway_paths(agent)
-    pid = read_pid(paths.pid)
-    alive = is_pid_alive(pid)
+    pid, alive = gateway_running(paths)
     state = read_json_file(paths.state)
     heartbeat = read_json_file(paths.heartbeat)
     heartbeat_at = float(heartbeat.get("updated_at", 0) or 0)
@@ -1212,25 +1271,19 @@ def cmd_gateway_ask(args) -> int:
 
     agent = make_agent(args)
     paths = gateway_paths(agent)
-    pid = read_pid(paths.pid)
-    if not pid or not is_pid_alive(pid):
+    pid, alive = gateway_running(paths)
+    if not alive:
         print("gateway 未在运行。请先执行: my-agent gateway start", file=sys.stderr)
         return 2
 
-    request_id = new_gateway_request_id()
-    payload = {
-        "id": request_id,
-        "kind": "ask",
-        "prompt": args.prompt,
-        "inject": args.inject or [],
-        "prompt_files": args.prompt_file or [],
-        "save": not args.no_save,
-        "include_prompt": bool(args.show_prompt),
-        "created_at": time.time(),
-        "client_pid": os.getpid(),
-    }
-    request_path = write_gateway_request(paths, payload)
-    response_path = gateway_response_path(paths, request_id)
+    request_id, request_path, response_path = submit_gateway_ask(
+        paths,
+        prompt=args.prompt,
+        inject=args.inject or [],
+        prompt_files=args.prompt_file or [],
+        save=not args.no_save,
+        include_prompt=bool(args.show_prompt),
+    )
     if args.no_wait:
         # 异步模式：只告诉用户“请求已放进队列”，不在当前终端等模型结果。
         print(f"queued request_id={request_id}")
@@ -1487,10 +1540,19 @@ def cmd_chat(args) -> int:
     """启动交互循环。"""
 
     agent = make_agent(args)
+    use_gateway = bool(args.gateway)
+    paths = gateway_paths(agent)
+    if use_gateway:
+        _, alive = gateway_running(paths)
+        if not alive:
+            print("gateway 未在运行。请先执行: my-agent gateway start", file=sys.stderr)
+            return 2
     print(
         f"{agent.config.agent_name} 交互循环已启动。"
         "输入 /help 查看命令，输入 /exit 或 /logout 退出，也可以直接按 Ctrl+C。"
     )
+    if use_gateway:
+        print("当前模式: gateway 客户端。普通消息会投递给后台 gateway 处理。")
     runtime_inject: list[str] = args.inject or []
     prompt_files: list[str] = args.prompt_file or []
     jobs: queue.Queue[ChatJob] = queue.Queue()
@@ -1528,19 +1590,55 @@ def cmd_chat(args) -> int:
             try:
                 started_at = running_started_at
                 print(f"\n正在处理: {job.user}", flush=True)
-                result = agent.run(
-                    job.user,
-                    inject=job.inject,
-                    prompt_files=job.prompt_files,
-                    save=not args.no_save,
-                )
-                elapsed = time.perf_counter() - started_at
-                if job.show_prompt:
-                    print("===== FINAL PROMPT =====")
-                    print(result.prompt)
-                    print("===== RESPONSE =====")
-                print(f"[耗时 {elapsed:.2f}s; 工具轮数 {result.tool_rounds}]")
-                print(f"{agent.config.agent_name}> {result.response}")
+                if use_gateway:
+                    _, alive = gateway_running(paths)
+                    if not alive:
+                        raise RuntimeError("gateway 已停止。请先执行: my-agent gateway start")
+                    request_id, _, response_path = submit_gateway_ask(
+                        paths,
+                        prompt=job.user,
+                        inject=job.inject,
+                        prompt_files=job.prompt_files,
+                        save=not args.no_save,
+                        include_prompt=job.show_prompt,
+                    )
+                    timeout = (
+                        args.gateway_timeout
+                        if args.gateway_timeout is not None
+                        else agent.config.gateway_request_timeout
+                    )
+                    response = wait_for_gateway_response(paths, request_id, timeout)
+                    elapsed = time.perf_counter() - started_at
+                    if not response:
+                        raise TimeoutError(
+                            f"gateway 请求等待超时: request_id={request_id} response={response_path}"
+                        )
+                    if job.show_prompt and response.get("prompt"):
+                        print("===== FINAL PROMPT =====")
+                        print(response.get("prompt", ""))
+                        print("===== RESPONSE =====")
+                    print(
+                        f"[耗时 {elapsed:.2f}s; gateway_request={request_id}; "
+                        f"工具轮数 {response.get('tool_rounds', 0)}]"
+                    )
+                    if response.get("ok"):
+                        print(f"{agent.config.agent_name}> {response.get('response', '')}")
+                    else:
+                        print(f"错误: {response.get('error', 'gateway 请求失败')}")
+                else:
+                    result = agent.run(
+                        job.user,
+                        inject=job.inject,
+                        prompt_files=job.prompt_files,
+                        save=not args.no_save,
+                    )
+                    elapsed = time.perf_counter() - started_at
+                    if job.show_prompt:
+                        print("===== FINAL PROMPT =====")
+                        print(result.prompt)
+                        print("===== RESPONSE =====")
+                    print(f"[耗时 {elapsed:.2f}s; 工具轮数 {result.tool_rounds}]")
+                    print(f"{agent.config.agent_name}> {result.response}")
             except Exception as exc:
                 print(f"错误: {exc}")
             finally:
@@ -1567,7 +1665,10 @@ def cmd_chat(args) -> int:
         if active_count:
             print(f"已加入任务队列，前面还有 {active_count} 个任务。")
         else:
-            print("已发送到后台，模型响应期间可以继续输入。")
+            if use_gateway:
+                print("已发送到 gateway 后台，模型响应期间可以继续输入。")
+            else:
+                print("已发送到后台，模型响应期间可以继续输入。")
 
     output_context = patch_stdout() if prompt_session is not None else nullcontext()
     with output_context:
@@ -1599,7 +1700,7 @@ def cmd_chat(args) -> int:
                 print(
                     """可用命令：
 /help                         显示帮助
-/status                       查看后台任务状态
+/status                       查看后台任务状态；gateway 模式会额外显示 gateway 状态
 /exit                         退出
 /logout                       退出
 exit / logout                 兼容旧习惯
@@ -1628,6 +1729,9 @@ Ctrl+C                        退出
                     print(f"当前任务: {prompt}")
                 else:
                     print(f"当前没有运行中的任务；队列中还有 {pending_jobs} 个任务。")
+                if use_gateway:
+                    for line in render_gateway_status(agent, paths):
+                        print(line)
                 continue
             if user.startswith("/remember "):
                 rec = agent.remember(user[len("/remember ") :], kind="note")
@@ -1726,6 +1830,8 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--prompt-file", action="append", help="启动时加载额外 prompt 文件，可多次传入")
     chat.add_argument("--memory-limit", type=int, default=5, help="交互中 /memory 默认显示条数")
     chat.add_argument("--no-save", action="store_true", help="交互对话不自动保存到记忆")
+    chat.add_argument("--gateway", action="store_true", help="把普通聊天消息投递给后台 gateway，而不是在当前前台进程里调用模型")
+    chat.add_argument("--gateway-timeout", type=float, help="gateway 模式等待单条响应的秒数，默认使用配置 gateway_request_timeout")
     chat.set_defaults(func=cmd_chat)
 
     spawn = sub.add_parser("spawn-subagents", help="拆分并创建 subagent 任务记录")

@@ -37,7 +37,7 @@ gateway worker -> data/gateway/responses/<request_id>.json
 gateway audit -> data/gateway/gateway_requests.jsonl
 ```
 
-`gateway ask` 是最小客户端协议。它还不是完整 TUI attach，也不是 HTTP/WebSocket gateway，但已经把“用户消息进入常驻 gateway 并触发完整 LLM turn”这件事从前台 chat 里拆了出来。后续 `chat` / TUI 可以复用同一条请求队列，或者把底层从文件队列替换成 SQLite / HTTP，而不改变用户命令面。
+`gateway ask` 是最小客户端协议。它还不是完整 TUI attach，也不是 HTTP/WebSocket gateway，但已经把“用户消息进入常驻 gateway 并触发完整 LLM turn”这件事从前台 chat 里拆了出来。`chat --gateway` 已经开始复用这条请求队列：chat 只做前台客户端，普通消息交给后台 gateway 处理。后续 TUI 可以继续复用同一条请求队列，或者把底层从文件队列替换成 SQLite / HTTP，而不改变用户命令面。
 
 ### 大白话解释：gateway ask / result
 
@@ -55,6 +55,7 @@ my-agent gateway result <request_id>
 - `gateway ask "一句话"`：把这句话发给后台主代理，并在当前终端等它回话。
 - `gateway ask "长任务" --no-wait`：把任务发给后台主代理，但当前终端不等结果，只拿一个 `request_id`。
 - `gateway result <request_id>`：以后根据这个 `request_id` 去拿结果。
+- `chat --gateway`：在交互界面里自动做 `ask/result`，用户只像正常聊天一样输入。
 
 未来如果接入微信、Telegram、飞书、Web TUI 或桌面客户端，用户不会手动敲这些命令。聊天工具会替用户做同样的事：
 

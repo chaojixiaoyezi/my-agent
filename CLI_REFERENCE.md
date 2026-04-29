@@ -42,6 +42,7 @@ python -m agent_py_agent --help
 | 查看帮助 | `my-agent --help` | 否 | 否 |
 | 单轮对话 | `my-agent run "任务"` | 否 | 是，取决于配置的模型后端 |
 | 交互聊天 | `my-agent chat` | 前台交互 | 是，用户发送消息时调用 |
+| gateway 客户端聊天 | `my-agent chat --gateway` | 前台客户端，后台 gateway 执行 | 是，由后台 gateway 调用 |
 | 一轮父代理调度 | `my-agent subagents-dispatch` | 否 | 否，默认 dry-run |
 | 持续父代理调度 | `my-agent subagents-dispatch --watch --interval 30` | 前台常驻 | 否，除非加 `--apply --execute-runners` |
 | 父代理 LLM planner 调度 | `my-agent subagents-dispatch --watch --planner --interval 30` | 前台常驻 | 是，有待处理事项时调用父代理 planner |
@@ -108,7 +109,7 @@ Ctrl+C
 | `remember` | 手动写入一条记忆 | 是 | 否 |
 | `memory-list` | 列出最近记忆 | 否 | 否 |
 | `memory-search` | 搜索记忆 | 否 | 否 |
-| `chat` | 启动交互循环 | 默认写记忆，可用 `--no-save` 关闭 | 是，用户发消息时调用 |
+| `chat` | 启动交互循环 | 默认写记忆，可用 `--no-save` 关闭 | 是；加 `--gateway` 时由后台 gateway 调用 |
 | `spawn-subagents` | 拆分并创建 subagent 工单 | 是 | 否 |
 | `subagents` | 查看 subagent 看板 | 否 | 否 |
 | `subagents-due-check` | 巡检 subagent 风险 | 写全局 due-check 报告 | 否 |
@@ -176,7 +177,11 @@ my-agent memory-search "表格" --limit 5
 
 ```powershell
 my-agent chat
+my-agent gateway start
+my-agent chat --gateway
 ```
+
+默认 `my-agent chat` 会在当前前台进程里调用模型。`my-agent chat --gateway` 则只把普通消息投递给已经启动的后台 gateway，当前 chat 变成客户端。这样退出 chat 后，gateway 仍可继续常驻；后续 TUI/聊天工具也会走同一条通道。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -184,6 +189,10 @@ my-agent chat
 | `--prompt-file <path>` | - | 启动时加载额外 prompt 文件，可多次传入。 |
 | `--memory-limit <n>` | `5` | 交互中 `/memory` 默认显示条数。 |
 | `--no-save` | `false` | 交互对话不自动保存到记忆。 |
+| `--gateway` | `false` | 普通聊天消息投递给后台 gateway；如果 gateway 没启动，会提示先执行 `my-agent gateway start`。 |
+| `--gateway-timeout <seconds>` | `gateway_request_timeout` | gateway 模式等待单条响应的秒数。 |
+
+chat 内部命令仍在本地处理，例如 `/memory`、`/remember`、`/subagents`。普通自然语言消息才会进入模型；在 `--gateway` 模式下，这些普通消息会走 gateway request/response。
 
 ## `spawn-subagents`
 
