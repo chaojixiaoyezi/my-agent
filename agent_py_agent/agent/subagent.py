@@ -2217,6 +2217,25 @@ class SubAgentManager:
                     ignored_tools,
                     [item for item in used_tools if item not in actual_allowed_tools],
                 )
+                for tool_name in actual_allowed_tools:
+                    if not any(
+                        item.ok
+                        and (
+                            item.kind == tool_name
+                            or item.command == tool_name
+                            or item.command.startswith(f"{tool_name} ")
+                        )
+                        for item in task.evidence
+                    ):
+                        task.evidence.append(
+                            VerificationEvidence(
+                                kind=tool_name,
+                                summary=f"系统记录 runner 实际执行过 {tool_name}。",
+                                command=tool_name,
+                                ok=True,
+                                created_at=now,
+                            )
+                        )
             else:
                 task.used_tools = _merge_list(task.used_tools, used_tools)
             task.used_skills = _merge_list(task.used_skills, used_skills)

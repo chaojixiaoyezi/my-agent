@@ -78,7 +78,7 @@ my-agent scenario-test --case all --count 1
 当前项目重点不是“做一个简单聊天脚本”，而是在逐步搭一个可审计、可扩展、能承载多层子代理工作的基础设施：
 - 普通 chat / run，以及 `chat --gateway` 客户端模式。
 - 长期记忆。
-- 工具目录和工具调用循环。
+- 工具目录和工具调用循环，兼容标准 `[TOOL_CALL]` JSON 以及 Qwen/OpenClaw 常见的 XML-ish 工具调用方言。
 - skill / tool 统一能力路由。
 - subagent 工单、看板、due-check、通道探测。
 - capability request / grant / gap。
@@ -93,7 +93,7 @@ my-agent scenario-test --case all --count 1
 已能运行的主链路：
 1. 普通请求进入 `SimpleAgent.run()`。
 2. 根据任务注入工具目录和推荐工具。
-3. 模型如输出 `[TOOL_CALL]`，工具系统执行并回填结果。
+3. 模型如输出 `[TOOL_CALL]`，或输出 Qwen/OpenClaw 常见的 `<tool_call><function=...><parameter=...>` 形式，工具系统会解析、执行并回填结果；如果工具调用半截损坏，会变成可恢复的 `__parse_error__`。
 4. 子代理可以创建工单，记录父子关系、能力边界、验收要求和证据。
 5. 子代理缺能力时记录 `CapabilityRequest`。
 6. 父代理可用 Capability Router 把 request 路由成 grant 或 gap。

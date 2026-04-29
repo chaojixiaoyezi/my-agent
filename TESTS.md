@@ -61,7 +61,7 @@ python3 -c "from agent_py_agent.tests import test_agent; tests=[fn for name, fn 
 - `[SUBAGENT_RESULT]` 结构化输出解析。
 - 真实模型常见的 Markdown fenced JSON 结构化输出解析。
 - subagent 验收 dry-run / apply。
-- 验收按真实工具执行记录核对 `read_file/write_file`，并检查本地 artifact 路径是否存在。
+- 验收按真实工具执行记录核对 `read_file/write_file`；runner 的 `actual_tools` 会落成系统证据，避免模型 evidence 换写法时误判，并检查本地 artifact 路径是否存在。
 - patch 审核 dry-run / apply。
 - applied patch 必须先有 `review_status=APPROVED` 才能通过验收。
 - planned / blocked / 未知状态 patch 会阻断验收。
@@ -72,7 +72,7 @@ python3 -c "from agent_py_agent.tests import test_agent; tests=[fn for name, fn 
 ### Tools
 
 ```bash
-python3 -c "from agent_py_agent.tests.test_tools import test_tool_loop_and_prompt_transcript, test_tool_catalog_and_recommended_sections, test_tool_allowlist_limits_prompt_and_execution, test_write_and_append_file_tools, test_replace_in_file_tool, test_fetch_url_and_http_request_tools; test_tool_loop_and_prompt_transcript(); test_tool_catalog_and_recommended_sections(); test_tool_allowlist_limits_prompt_and_execution(); test_write_and_append_file_tools(); test_replace_in_file_tool(); test_fetch_url_and_http_request_tools(); print('TOOL_TEST_PASS')"
+python3 -c "from agent_py_agent.tests.test_tools import test_tool_loop_and_prompt_transcript, test_tool_catalog_and_recommended_sections, test_tool_call_parser_accepts_subagent_call_alias, test_tool_call_parser_accepts_qwen_xmlish_read_call, test_tool_call_parser_accepts_qwen_xmlish_write_call, test_tool_call_parser_reports_incomplete_qwen_xmlish_call, test_tool_allowlist_limits_prompt_and_execution, test_write_and_append_file_tools, test_replace_in_file_tool, test_fetch_url_and_http_request_tools; test_tool_loop_and_prompt_transcript(); test_tool_catalog_and_recommended_sections(); test_tool_call_parser_accepts_subagent_call_alias(); test_tool_call_parser_accepts_qwen_xmlish_read_call(); test_tool_call_parser_accepts_qwen_xmlish_write_call(); test_tool_call_parser_reports_incomplete_qwen_xmlish_call(); test_tool_allowlist_limits_prompt_and_execution(); test_write_and_append_file_tools(); test_replace_in_file_tool(); test_fetch_url_and_http_request_tools(); print('TOOL_TEST_PASS')"
 ```
 
 覆盖：
@@ -80,7 +80,8 @@ python3 -c "from agent_py_agent.tests.test_tools import test_tool_loop_and_promp
 - 推荐工具详情。
 - 工具调用循环。
 - 主代理自然语言派工工具：`create_subagents` / `subagent_board` / `dispatch_subagents`。
-- 工具调用解析兼容 `[SUBAGENT_CALL]` 错标记，并拦截同轮重复编排调用。
+- 工具调用解析兼容 `[SUBAGENT_CALL]` 错标记、Qwen/OpenClaw 常见的 XML-ish `<tool_call><function=...><parameter=...>` 方言，并拦截同轮重复编排调用。
+- 半截 XML-ish 工具调用会变成 `__parse_error__` 工具结果，避免把整轮主代理流程炸掉。
 - 工具 allowlist。
 - 文件写入 / 追加 / 替换。
 - fetch_url / http_request。

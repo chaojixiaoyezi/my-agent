@@ -1271,6 +1271,58 @@ def test_subagent_acceptance_enforces_required_write_file_evidence():
         )
 
 
+def test_subagent_acceptance_uses_actual_tool_evidence_from_runner():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        task = agent.subagents.create_run(
+            goal="真实工具证据验收",
+            thought="runner 的自然语言证据没有写工具名，但系统有 actual_tools。",
+            plan=["读取", "写入", "等待验收"],
+            allowed_tools=["read_file", "write_file"],
+            acceptance_checks=["必须有 read_file 证据；必须有 write_file 证据"],
+        )
+        parsed = parse_subagent_runner_output(
+            "[SUBAGENT_RESULT]\n"
+            "{\n"
+            '  "status": "AWAITING_ACCEPTANCE",\n'
+            '  "summary": "已读取 README 并写入报告",\n'
+            '  "used_tools": ["read_file", "write_file"],\n'
+            '  "evidence": [\n'
+            '    {"kind": "command", "summary": "读取 README.md 成功", "path": "README.md", "ok": true},\n'
+            '    {"kind": "command", "summary": "写入报告成功", "path": "scenario_outputs/demo.md", "ok": true}\n'
+            "  ],\n"
+            '  "artifacts": [],\n'
+            '  "tests": [],\n'
+            '  "patches": []\n'
+            "}\n"
+            "[/SUBAGENT_RESULT]"
+        )
+        agent.subagents.record_runner_result(
+            task.id,
+            dry_run=False,
+            ok=True,
+            message="done",
+            structured_output=parsed,
+            actual_tools=["read_file", "write_file"],
+            tool_rounds=2,
+        )
+
+        report = agent.subagents.write_acceptance_review_report(
+            run_ids=[task.id],
+            apply=True,
+            reviewer="tester",
+        )
+        loaded = agent.subagents.load(task.id)
+
+        assert report.records[0].decision == "ACCEPT"
+        assert loaded.status == "DONE"
+        assert loaded.verification_status == "VERIFIED"
+        assert any(item.command == "read_file" for item in loaded.evidence)
+        assert any(item.command == "write_file" for item in loaded.evidence)
+
+
 def test_subagent_patch_review_approves_applied_patch_before_acceptance():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)

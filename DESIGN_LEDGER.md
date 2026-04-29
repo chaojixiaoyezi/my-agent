@@ -1114,3 +1114,40 @@ suggested_tool: 是否建议开发成 tool
 后续方向：
 - 增加 stalled 接管、能力缺口上抛再 rerun 的场景。
 - 给 `scenario_summary` 增加事件时间线，方便 TUI/网页观察。
+
+## 2026-04-29 / Qwen XML-ish 工具调用兼容
+
+状态：已落地
+
+背景：
+- 真实模型或其他 agent runtime 可能不会严格输出我们提示词里的 `[TOOL_CALL]` JSON，而是输出类似 Qwen/OpenClaw 的 XML-ish 方言：`<tool_call><function=read><parameter=file_path>...</parameter></function></tool_call>`。
+- 之前这类输出会落在解析器外；如果 runtime 侧尝试解析不完整片段，还可能出现 `Failed to parse input at pos ...` 一类错误。
+
+已落地：
+- `ToolRegistry.parse_tool_calls()` 继续优先支持标准 `[TOOL_CALL]` / `[SUBAGENT_CALL]` JSON 块。
+- 新增 XML-ish `<tool_call>` 方言解析：`read` -> `read_file`、`write` -> `write_file`、`search`/`grep` -> `search_text`、`list`/`ls` -> `list_files` 等常见别名会自动归一化。
+- 参数别名会归一化：`file_path`、`filepath`、`filename`、`file` -> `path`。
+- 参数内容会做 HTML entity 解码，简单 JSON 值会尽量还原成对象/数组/数字/布尔值。
+- 如果 `<tool_call>` 只有半截、缺少 `</tool_call>`，不会让主循环崩溃，而是返回 `__parse_error__`，让后续模型回合有机会修正格式。
+
+测试：
+- 新增工具解析回归：标准 `[SUBAGENT_CALL]` alias、XML-ish read、XML-ish write、半截 XML-ish parse error。
+
+后续方向：
+- 如果接入更多模型方言，再把解析器扩展成显式 adapter 列表，并记录每种方言的命中率和失败样本。
+
+## 2026-04-29 / Runner actual_tools 系统证据
+
+状态：已落地
+
+背景：
+- 真实 runner 可能确实调用了 `read_file` / `write_file`，但结构化 evidence 里只写“读取 README 成功”“写入报告成功”，没有把工具名写进 `kind`、`command` 或 `summary`。
+- 旧验收逻辑会因此误判缺少 `read_file` 证据，哪怕系统自己的 `actual_tools` 已经记录了真实工具调用。
+
+已落地：
+- `record_runner_result(..., actual_tools=[...])` 会把实际成功执行过的授权工具落成系统证据，格式为 `kind=<tool>`、`command=<tool>`。
+- 验收继续优先信任系统真实工具记录，而不是模型自称的 `used_tools`。
+- 保留 artifact 路径存在性等独立验收项，避免只有工具名而没有真实交付物时误过。
+
+测试：
+- 新增回归：模型 evidence 不写 `read_file` / `write_file` 字符串，但 `actual_tools` 记录真实执行时，父代理验收应通过。
