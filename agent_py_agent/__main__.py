@@ -18,6 +18,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
+from .agent.backend import ModelResponse
 from .agent.capabilities import CapabilityRouter
 from .agent.capability_config import load_capability_config
 from .agent.config import load_config
@@ -1425,6 +1426,8 @@ def cmd_scenario_test(args) -> int:
         return run_scenario_verification_case(args)
     if args.case == "gateway-restart":
         return run_scenario_gateway_restart_case(args)
+    if args.case == "runner-retry":
+        return run_scenario_runner_retry_case(args)
 
     if args.count <= 0:
         print("--count 必须大于 0。", file=sys.stderr)
@@ -1544,7 +1547,7 @@ def cmd_scenario_test(args) -> int:
 def run_scenario_suite(args) -> int:
     """连续运行一组隔离场景。"""
 
-    cases = ["verification", "gateway-restart", "happy"]
+    cases = ["verification", "gateway-restart", "runner-retry", "happy"]
     results: list[dict[str, object]] = []
     for case in cases:
         print(f"\n######## SCENARIO CASE: {case} ########")
@@ -1742,6 +1745,156 @@ def run_scenario_gateway_restart_case(args) -> int:
     return 0 if final_ok else 2
 
 
+def print_dispatch_report(report) -> None:
+    """打印场景测试里的 dispatch 摘要。"""
+
+    print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
+    for record in report.records:
+        status = "OK" if record.ok else "FAIL"
+        run = record.run_id or "global"
+        print(
+            f"- [{status}] {record.step}/{record.action} run={run} "
+            f"applied={record.applied} :: {record.message}"
+        )
+
+
+class ScenarioRetryBackend:
+    """场景测试用后端：第一次失败，第二次给出可验收结果。"""
+
+    name = "scenario_retry_backend"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, prompt: str) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("scenario transient runner failure")
+        return ModelResponse(
+            text=(
+                "[SUBAGENT_RESULT]\n"
+                "{\n"
+                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "summary": "runner 在第二次尝试中完成，已生成可验收证据。",\n'
+                '  "used_tools": [],\n'
+                '  "used_skills": [],\n'
+                '  "evidence": [\n'
+                '    {"kind": "note", "summary": "第二次 runner 尝试成功", "ok": true}\n'
+                "  ],\n"
+                '  "capability_requests": [],\n'
+                '  "artifacts": [],\n'
+                '  "tests": [\n'
+                '    {"name": "runner retry", "command": "", "ok": true, "summary": "第二次尝试通过"}\n'
+                "  ],\n"
+                '  "patches": [],\n'
+                '  "lessons": ["临时 runner 错误可以由父代理有限重试恢复"],\n'
+                '  "next_actions": [],\n'
+                '  "blocked_reason": "",\n'
+                '  "failure_type": ""\n'
+                "}\n"
+                "[/SUBAGENT_RESULT]"
+            ),
+            backend=self.name,
+        )
+
+
+def run_scenario_runner_retry_case(args) -> int:
+    """验证临时 runner 失败会被下一轮 dispatch 自动重试。"""
+
+    paths = create_scenario_workspace(args)
+    print("MY-AGENT SCENARIO TEST")
+    print("case=runner-retry")
+    print(f"run_root={paths.run_root}")
+    print(f"fixture_root={paths.fixture_root}")
+    print(f"config={paths.config}")
+
+    agent = load_scenario_agent(paths.config)
+    backend = ScenarioRetryBackend()
+    agent.backend = backend
+    capability_config = load_capability_config(args.capability_config)
+    router = make_capability_router(agent, capability_config, args.skill_dir)
+
+    print_scenario_step(1, "创建会先失败一次的子代理工单")
+    task = agent.subagents.create_run(
+        goal="极端场景：runner 第一次调用模型失败，下一轮 dispatch 应自动重试",
+        thought="验证临时模型/接口错误不会让任务永久卡死。",
+        plan=["第一次 runner 失败", "下一轮自动重试", "成功后父代理验收"],
+        acceptance_checks=["第二次 runner 必须生成证据", "父代理必须验收通过"],
+    )
+    print(f"run_id={task.id}")
+
+    print_scenario_step(2, "第一轮 dispatch：模拟 runner 临时失败")
+    first = agent.dispatch_subagents(
+        router,
+        capability_config,
+        apply=True,
+        execute_runners=True,
+        max_runners=1,
+        probe=False,
+        reviewer="scenario-runner-retry",
+        note="first attempt should fail",
+    )
+    print_dispatch_report(first)
+    after_first = agent.subagents.load(task.id)
+    print(
+        f"after_first status={after_first.status} failure_type={after_first.failure_type} "
+        f"attempts={after_first.runner_attempts}"
+    )
+
+    print_scenario_step(3, "第二轮 dispatch：自动重试并验收")
+    second = agent.dispatch_subagents(
+        router,
+        capability_config,
+        apply=True,
+        execute_runners=True,
+        max_runners=1,
+        probe=False,
+        reviewer="scenario-runner-retry",
+        note="retry should succeed",
+    )
+    print_dispatch_report(second)
+    loaded = agent.subagents.load(task.id)
+    print(
+        f"final status={loaded.status} verify={loaded.verification_status} "
+        f"attempts={loaded.runner_attempts} backend_calls={backend.calls}"
+    )
+
+    first_runner = [item for item in first.records if item.step == "runner"]
+    second_runner = [item for item in second.records if item.step == "runner"]
+    final_ok = (
+        first_runner
+        and first_runner[0].action == "execute_runner"
+        and not first_runner[0].ok
+        and after_first.status == "BLOCKED"
+        and after_first.failure_type == "runner_error"
+        and after_first.runner_attempts == 1
+        and second_runner
+        and second_runner[0].action == "retry_runner"
+        and second_runner[0].ok
+        and loaded.status == "DONE"
+        and loaded.verification_status == "VERIFIED"
+        and loaded.runner_attempts == 2
+        and backend.calls == 2
+    )
+    write_scenario_summary(
+        paths,
+        ok=final_ok,
+        reason="runner retry passed" if final_ok else "runner retry failed",
+        extra={
+            "case": "runner-retry",
+            "run_id": task.id,
+            "backend_calls": backend.calls,
+            "first_status": after_first.status,
+            "final_status": loaded.status,
+            "runner_attempts": loaded.runner_attempts,
+        },
+    )
+    print(f"\nsummary_json={paths.summary_json}")
+    print(f"summary_md={paths.summary_md}")
+    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
+    return 0 if final_ok else 2
+
+
 def create_scenario_workspace(args) -> ScenarioPaths:
     """创建一次不会污染开发仓库的场景测试目录。"""
 
@@ -1834,6 +1987,7 @@ daemon_apply: false
 daemon_execute_runners: false
 daemon_max_runners: 0
 daemon_interval: 1
+runner_failure_policy: "auto"
 max_tool_rounds: 8
 """
     target_config.write_text(base + overrides, encoding="utf-8")
@@ -2690,9 +2844,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scenario.add_argument(
         "--case",
-        choices=["happy", "verification", "gateway-restart", "all"],
+        choices=["happy", "verification", "gateway-restart", "runner-retry", "all"],
         default="happy",
-        help="场景类型：happy 跑真实全流程；verification 测验收防作弊；gateway-restart 测重启恢复；all 连续运行",
+        help="场景类型：happy 跑真实全流程；verification 测验收防作弊；gateway-restart 测重启恢复；runner-retry 测 runner 失败重试；all 连续运行",
     )
     scenario.add_argument("--workspace", help="保存场景测试结果的父目录；不传则使用系统临时目录")
     scenario.add_argument("--count", type=int, default=2, help="本场景创建多少个子代理")

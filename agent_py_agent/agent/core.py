@@ -205,12 +205,16 @@ class SimpleAgent:
         dry_run: bool = True,
         max_cards: int = 0,
         probe: bool = True,
+        retry_reason: str = "",
     ) -> SubAgentRunnerResult:
         """按执行上下文运行一个子代理入口。
 
         第一版 runner 不负责并行调度，只负责把“上下文 -> 模型执行 -> 工单回写”
         这条最小链路打通。默认 dry-run，避免误触真实模型接口。
         """
+
+        if not dry_run:
+            self.subagents.prepare_runner_attempt(run_id, retry_reason=retry_reason)
 
         context = self.subagents.write_execution_context(run_id, max_cards=max_cards)
         prompt = _build_subagent_runner_prompt(context, instruction)
@@ -558,19 +562,30 @@ class SimpleAgent:
                 )
             )
 
-        runner_candidates = _dispatch_runner_candidates(self.subagents.list_runs(), effective_max_runners)
+        runner_max_attempts = _runner_max_attempts(self.config.runner_failure_policy)
+        runner_candidates = _dispatch_runner_candidates(
+            self.subagents.list_runs(),
+            effective_max_runners,
+            runner_max_attempts=runner_max_attempts,
+        )
         for task in runner_candidates:
             before = self.subagents.load(task.id)
+            retry_reason = _runner_retry_reason(before, runner_max_attempts)
+            action_name = "retry_runner" if retry_reason else "execute_runner"
             if not apply:
                 records.append(
                     self.subagents.make_dispatch_record(
                         step="runner",
-                        action="execute_runner",
+                        action=action_name,
                         run_id=task.id,
                         dry_run=True,
                         applied=False,
                         ok=True,
-                        message="dry-run: apply 时会生成执行上下文；带 --execute-runners 时会调用模型。",
+                        message=(
+                            f"dry-run: 将重试 runner（{retry_reason}）。"
+                            if retry_reason
+                            else "dry-run: apply 时会生成执行上下文；带 --execute-runners 时会调用模型。"
+                        ),
                         before_status=before.status,
                         after_status=before.status,
                         before_verification_status=before.verification_status,
@@ -586,12 +601,19 @@ class SimpleAgent:
                 dry_run=not execute_runners,
                 max_cards=max_cards,
                 probe=probe,
+                retry_reason=retry_reason,
             )
             after = self.subagents.load(task.id)
             records.append(
                 self.subagents.make_dispatch_record(
                     step="runner",
-                    action="execute_runner" if execute_runners else "runner_dry_run",
+                    action=(
+                        "retry_runner"
+                        if retry_reason and execute_runners
+                        else "execute_runner"
+                        if execute_runners
+                        else "runner_dry_run"
+                    ),
                     run_id=task.id,
                     dry_run=result.dry_run,
                     applied=not result.dry_run,
@@ -1522,14 +1544,69 @@ def _append_runner_repair_failure(original_response: str, exc: Exception) -> str
     )
 
 
-def _dispatch_runner_candidates(tasks: list[SubAgentTask], max_runners: int) -> list[SubAgentTask]:
+RETRYABLE_RUNNER_FAILURE_TYPES = {
+    "runner_error",
+    "structured_output_parse_error",
+    "tool_result_missing",
+    "model_error",
+    "api_error",
+    "transient_error",
+}
+
+
+def _runner_max_attempts(policy: str) -> int:
+    """把 runner_failure_policy 转成总尝试次数。
+
+    `auto` 第一版等价于“最多 2 次”：初次失败后再补一次机会。
+    这里返回的是总尝试次数，不是额外 retry 次数。
+    """
+
+    value = str(policy or "auto").strip().lower()
+    if value in {"", "auto"}:
+        return 2
+    if value in {"off", "none", "disabled", "false", "no"}:
+        return 1
+    try:
+        return max(1, int(value))
+    except ValueError:
+        return 2
+
+
+def _runner_failure_type(task: SubAgentTask) -> str:
+    """标准化 runner failure_type，兼容模型输出大小写。"""
+
+    return str(task.failure_type or "").strip().lower()
+
+
+def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:
+    """判断一个已失败任务是否还能自动重试。"""
+
+    if runner_max_attempts <= 1:
+        return ""
+    if task.status not in {"BLOCKED", "FAILED"}:
+        return ""
+    failure_type = _runner_failure_type(task)
+    if failure_type not in RETRYABLE_RUNNER_FAILURE_TYPES:
+        return ""
+    attempts = max(0, int(task.runner_attempts or 0))
+    if attempts >= runner_max_attempts:
+        return ""
+    return f"failure_type={failure_type}; attempt={attempts + 1}/{runner_max_attempts}"
+
+
+def _dispatch_runner_candidates(
+    tasks: list[SubAgentTask],
+    max_runners: int,
+    *,
+    runner_max_attempts: int = 1,
+) -> list[SubAgentTask]:
     """挑选一轮 dispatch 可推进的 runner。"""
 
     if max_runners <= 0:
         return []
     candidates: list[SubAgentTask] = []
     for task in tasks:
-        if not _is_dispatch_runner_candidate(task):
+        if not _is_dispatch_runner_candidate(task, runner_max_attempts=runner_max_attempts):
             continue
         candidates.append(task)
         if len(candidates) >= max_runners:
@@ -1545,13 +1622,16 @@ def _limit_items(items: list, limit: int) -> list:
     return list(items)[:limit]
 
 
-def _is_dispatch_runner_candidate(task: SubAgentTask) -> bool:
+def _is_dispatch_runner_candidate(
+    task: SubAgentTask,
+    *,
+    runner_max_attempts: int = 1,
+) -> bool:
     """判断任务是否可以由 dispatch 启动 runner。"""
 
     if task.status in {
         "AWAITING_ACCEPTANCE",
         "DONE",
-        "FAILED",
         "TIMEOUT",
         "CHANNEL_ERROR",
         "TAKEN_OVER",
@@ -1566,7 +1646,11 @@ def _is_dispatch_runner_candidate(task: SubAgentTask) -> bool:
     if any(item.status == "OPEN" for item in task.capability_gaps):
         return False
     if task.status == "BLOCKED":
-        return task.failure_type == "capability_request" and bool(task.capability_grants)
+        if _runner_failure_type(task) == "capability_request" and bool(task.capability_grants):
+            return True
+        return bool(_runner_retry_reason(task, runner_max_attempts))
+    if task.status == "FAILED":
+        return bool(_runner_retry_reason(task, runner_max_attempts))
     return task.status in {"PLANNING", "RUNNING"}
 
 

@@ -99,6 +99,48 @@ class AcceptedSubagentBackend(BaseBackend):
         )
 
 
+class FlakyThenAcceptedSubagentBackend(BaseBackend):
+    """测试用后端：第一次模型调用失败，第二次返回可验收结果。"""
+
+    name = "flaky_then_accepted_subagent_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("temporary runner backend outage")
+        assert "[SUBAGENT_RESULT]" in prompt
+        assert "runner_attempts" in prompt
+        return ModelResponse(
+            text=(
+                "[SUBAGENT_RESULT]\n"
+                "{\n"
+                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "summary": "重试后 runner 已完成。",\n'
+                '  "used_tools": [],\n'
+                '  "used_skills": [],\n'
+                '  "evidence": [\n'
+                '    {"kind": "note", "summary": "第二次尝试成功生成证据", "ok": true}\n'
+                "  ],\n"
+                '  "capability_requests": [],\n'
+                '  "artifacts": [],\n'
+                '  "tests": [\n'
+                '    {"name": "retry-smoke", "command": "", "ok": true, "summary": "重试通过"}\n'
+                "  ],\n"
+                '  "patches": [],\n'
+                '  "lessons": [],\n'
+                '  "next_actions": [],\n'
+                '  "blocked_reason": "",\n'
+                '  "failure_type": ""\n'
+                "}\n"
+                "[/SUBAGENT_RESULT]"
+            ),
+            backend=self.name,
+        )
+
+
 class RepairingSubagentBackend(BaseBackend):
     """测试用后端：第一次漏掉结构化块，修复回合补齐。"""
 
@@ -1600,6 +1642,57 @@ def test_subagent_dispatch_apply_executes_runner_and_accepts():
         assert loaded.status == "DONE"
         assert loaded.verification_status == "VERIFIED"
         assert loaded.evidence[0].summary == "调度器结构化执行证据"
+
+
+def test_subagent_dispatch_retries_transient_runner_failure():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        backend = FlakyThenAcceptedSubagentBackend()
+        agent.backend = backend
+        task = agent.subagents.create_run(
+            goal="调度器重试临时 runner 失败",
+            thought="第一次模型调用失败后，下一轮 dispatch 应该自动重试。",
+            plan=["第一次失败", "第二次重试", "验收"],
+        )
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+
+        first = agent.dispatch_subagents(
+            router,
+            CapabilityConfig(),
+            apply=True,
+            execute_runners=True,
+            max_runners=1,
+            probe=False,
+            reviewer="dispatch-test",
+        )
+        after_first = agent.subagents.load(task.id)
+
+        assert any(item.step == "runner" and item.action == "execute_runner" and not item.ok for item in first.records)
+        assert after_first.status == "BLOCKED"
+        assert after_first.failure_type == "runner_error"
+        assert after_first.runner_attempts == 1
+        assert "temporary runner backend outage" in after_first.runner_last_error
+
+        second = agent.dispatch_subagents(
+            router,
+            CapabilityConfig(),
+            apply=True,
+            execute_runners=True,
+            max_runners=1,
+            probe=False,
+            reviewer="dispatch-test",
+        )
+        loaded = agent.subagents.load(task.id)
+
+        assert any(item.step == "runner" and item.action == "retry_runner" and item.ok for item in second.records)
+        assert any(item.step == "acceptance" and item.applied and item.ok for item in second.records)
+        assert backend.calls == 2
+        assert loaded.status == "DONE"
+        assert loaded.verification_status == "VERIFIED"
+        assert loaded.runner_attempts == 2
+        assert loaded.runner_last_error == ""
 
 
 def test_parent_planner_parser_reads_structured_result():

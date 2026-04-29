@@ -541,6 +541,8 @@ class SubAgentExecutionContext:
     status: str = "PLANNING"
     verification_status: str = "UNVERIFIED"
     channel_status: str = "UNKNOWN"
+    runner_attempts: int = 0
+    runner_last_error: str = ""
     owner: str = ""
     supervisor: str = ""
     final_owner: str = ""
@@ -574,6 +576,8 @@ class SubAgentRunnerResult:
     message: str
     backend: str = ""
     tool_rounds: int = 0
+    runner_attempts: int = 0
+    runner_last_error: str = ""
     execution_context_json: str = ""
     execution_context_file: str = ""
     prompt_file: str = ""
@@ -652,6 +656,9 @@ class SubAgentTask:
     verification_status: str = "UNVERIFIED"
     failure_type: str = ""
     result: str = ""
+    runner_attempts: int = 0
+    runner_last_attempt_at: float = 0.0
+    runner_last_error: str = ""
     created_at: float = 0.0
     updated_at: float = 0.0
     heartbeat_at: float = 0.0
@@ -967,6 +974,31 @@ class SubAgentManager:
             task.ended_at = time.time()
         task.updated_at = time.time()
         self.save(task)
+        return task
+
+    def prepare_runner_attempt(self, run_id: str, *, retry_reason: str = "") -> SubAgentTask:
+        """把任务切到 RUNNING，准备启动一次 runner。
+
+        初次执行和重试都走这里。大白话说：
+        - 旧的失败原因保留在 runner_last_error / 日志里；
+        - 当前状态先恢复成 RUNNING，避免 runner 看到 BLOCKED 后误以为任务已经不能做；
+        - 真正成功或失败由 record_runner_result 再写回。
+        """
+
+        task = self.load(run_id)
+        previous = f"{task.status}/{task.failure_type or 'none'}"
+        task.status = "RUNNING"
+        task.verification_status = "UNVERIFIED"
+        task.failure_type = ""
+        task.ended_at = 0.0
+        task.updated_at = time.time()
+        task.heartbeat_at = task.updated_at
+        self.save(task)
+        suffix = f" retry_reason={retry_reason}" if retry_reason else ""
+        self._append_task_work_log(
+            task,
+            f"runner_attempt: start previous={previous} attempt={task.runner_attempts + 1}{suffix}",
+        )
         return task
 
     def record_takeover(
@@ -2064,6 +2096,8 @@ class SubAgentManager:
             status=task.status,
             verification_status=task.verification_status,
             channel_status=task.channel_status,
+            runner_attempts=task.runner_attempts,
+            runner_last_error=task.runner_last_error,
             owner=task.owner,
             supervisor=task.supervisor,
             final_owner=task.final_owner,
@@ -2258,6 +2292,13 @@ class SubAgentManager:
             task.ended_at = now
         task.updated_at = now
         task.heartbeat_at = now
+        if not dry_run:
+            task.runner_attempts = max(0, int(task.runner_attempts or 0)) + 1
+            task.runner_last_attempt_at = now
+            if not ok or task.status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
+                task.runner_last_error = message
+            else:
+                task.runner_last_error = ""
         blockers = []
         if not ok or task.status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
             blockers = [parsed.blocked_reason or message]
@@ -2271,6 +2312,8 @@ class SubAgentManager:
             "message": message,
             "backend": backend,
             "tool_rounds": tool_rounds,
+            "runner_attempts": task.runner_attempts,
+            "runner_last_error": task.runner_last_error,
             "response": response,
             "structured_output": {
                 "found": parsed.found,
@@ -2322,6 +2365,8 @@ class SubAgentManager:
             message=message,
             backend=backend,
             tool_rounds=tool_rounds,
+            runner_attempts=task.runner_attempts,
+            runner_last_error=task.runner_last_error,
             execution_context_json=task.execution_context_json,
             execution_context_file=task.execution_context_file,
             prompt_file=task.runner_prompt_file if prompt else "",
@@ -4346,6 +4391,8 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
         f"- status: {context.status}",
         f"- verification_status: {context.verification_status}",
         f"- channel_status: {context.channel_status}",
+        f"- runner_attempts: {context.runner_attempts}",
+        f"- runner_last_error: {context.runner_last_error or 'none'}",
         f"- agent: {context.agent_name}",
         f"- role: {context.role}",
         f"- owner: {context.owner or 'none'}",
@@ -4464,6 +4511,8 @@ def render_runner_result_markdown(result: SubAgentRunnerResult) -> str:
         f"- ok: {status}",
         f"- backend: {result.backend or 'none'}",
         f"- tool_rounds: {result.tool_rounds}",
+        f"- runner_attempts: {result.runner_attempts}",
+        f"- runner_last_error: {result.runner_last_error or 'none'}",
         f"- structured_output_found: {result.structured_output_found}",
         f"- structured_output_ok: {result.structured_output_ok}",
         f"- evidence_count: {result.evidence_count}",
