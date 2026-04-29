@@ -210,9 +210,32 @@ my-agent local-store-status
 
 ```powershell
 my-agent local-search "表格" --source-type memory --limit 5
+my-agent local-search "gateway 日志" --source-type gateway_request
+my-agent local-search "某个子任务目标" --source-type subagent_run
 ```
 
 搜索本地事实源。它会优先走 SQLite FTS5；如果当前 Python/SQLite 不支持 FTS5，或某次查询被 FTS5 语法拒绝，会自动退回普通 LIKE 检索。
+
+当前已经写入本地事实源的主要来源：
+
+| source_type | 内容 |
+| --- | --- |
+| `memory` | 用户/助手记忆 |
+| `gateway_request` | gateway ask 的提交、处理、完成/失败摘要 |
+| `gateway_event` | gateway 启动、停止、失败、清理等生命周期事件 |
+| `subagent_run` | 子代理工单当前状态、目标、证据和能力请求摘要 |
+| `subagent_work_log` | 单个子代理 `WORK_LOG.md` 追加项 |
+| `subagent_runner_result` | runner dry-run / execute 结果 |
+| `subagent_execution_context` | 子代理执行上下文生成记录 |
+| `subagent_acceptance_review` | 父代理验收记录 |
+| `subagent_patch_review` | patch 审核记录 |
+| `subagent_dispatch` | 父代理调度单条动作 |
+| `subagent_dispatch_report` | 最近一次 dispatch 汇总报告 |
+| `subagent_dispatch_watch` | watch 循环记录 |
+| `parent_planner` | 父代理 planner 决策记录 |
+| `subagent_capability_route` | 能力请求路由记录 |
+| `subagent_action_apply` | action apply 记录 |
+| `subagent_channel_probe` | 子代理通道健康检查记录 |
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |

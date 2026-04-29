@@ -145,6 +145,7 @@ run(agent_cmd("local-store-status"))
 run(agent_cmd("local-index-memory"))
 run(agent_cmd("local-search", "表格", "--source-type", "memory"))
 run(agent_cmd("spawn-subagents", "开发 CLI 智能体", "--count", "2"))
+run(agent_cmd("local-search", "开发", "--source-type", "subagent_run"))
 run(agent_cmd("subagents-probe", "--limit", "2"))
 run(agent_cmd("subagents-due-check", "--limit", "2"))
 run(agent_cmd("subagents-plan-actions", "--limit", "2"))
@@ -186,6 +187,7 @@ try:
             "--no-save",
         )
     )
+    run(agent_cmd("local-search", "真实 API gateway ask", "--source-type", "gateway_request"))
     run(agent_cmd("gateway", "status"))
     gateway_chat_input = "/status\n你好\nlogout\n"
     gateway_chat = run_capture(

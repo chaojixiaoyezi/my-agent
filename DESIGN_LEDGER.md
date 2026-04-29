@@ -35,9 +35,9 @@
 - `JsonlMemory` 双写：记忆继续写 JSONL，同时索引到 LocalStore。
 - `local-store-status`、`local-search`、`local-index-memory` 三个 CLI 命令。
 - 配置项：`local_store_path`、`local_store_files_dir`、`local_store_events_path`、`local_store_fts_enabled`。
+- gateway request、gateway 生命周期、subagent run、work log、runner result、execution context、acceptance、patch review、dispatch、watch、parent planner、capability route、action apply、channel probe 已接入 LocalStore。
 
 后续方向：
-- gateway request/response、subagent run、验收报告也逐步接入 LocalStore。
 - 增加定期 compact/rebuild/backup 命令。
 - 公司级使用时，本地仍为第一事实源，远端只做同步、备份、组织视图和跨设备协作。
 - 向量检索后续可以作为附加索引，而不是替代 SQLite/FTS5/文件/JSONL 这一层。

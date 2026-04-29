@@ -146,6 +146,11 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 当前已接入记忆系统：新记忆会继续写 `memory.jsonl`，同时索引到 LocalStore。
 旧记忆可以通过 `my-agent local-index-memory` 补建索引。
 
+当前也已接入主要运行日志：gateway request / gateway lifecycle、subagent run、
+work log、runner result、execution context、acceptance、patch review、dispatch、
+dispatch watch、parent planner、capability route、action apply 和 channel probe。
+这些原本的文件报告仍然会照常写出，LocalStore 只额外提供可搜索账本和统一审计事件。
+
 ### `agent_py_agent/agent/config.py`
 
 这个文件定义项目的配置总表，并提供一个轻量 YAML 读取器。

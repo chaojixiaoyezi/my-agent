@@ -65,7 +65,7 @@ class SimpleAgent:
         self.memory = JsonlMemory(self.root / config.memory_path, local_store=self.local_store)
         self.prompts = PromptBuilder(config, self.root)
         self.backend = get_backend(config.model_backend, config)
-        self.subagents = SubAgentManager(self.root / config.subagent_workspace)
+        self.subagents = SubAgentManager(self.root / config.subagent_workspace, local_store=self.local_store)
 
         # CLI 入口传进来的 root 通常是包目录 `agent_py_agent`。
         # 但工具更适合看到整个项目根目录，不然它只能读到包内部文件。
