@@ -94,6 +94,7 @@ class SimpleAgent:
         prompt_files: list[str] | None = None,
         save: bool | None = None,
         allowed_tools: list[str] | None = None,
+        write_boundary: dict[str, object] | None = None,
     ) -> AgentRunResult:
         """执行一轮智能体请求。"""
 
@@ -162,7 +163,11 @@ class SimpleAgent:
                         "请基于前面的工具结果直接给最终回答，不要再次调用同一个工具。",
                     )
                 else:
-                    result = self.tools.execute_call(payload, allowed_tools=allowed_tools)
+                    result = self.tools.execute_call(
+                        payload,
+                        allowed_tools=allowed_tools,
+                        write_boundary=write_boundary,
+                    )
                     if one_shot_key and result.ok:
                         one_shot_tool_calls.add(one_shot_key)
                 if result.ok and result.tool not in {"__parse_error__", "unknown"}:
@@ -258,6 +263,7 @@ class SimpleAgent:
                 prompt,
                 save=False,
                 allowed_tools=context.allowed_tools,
+                write_boundary=context.write_boundary,
             )
         except Exception as exc:
             return self.subagents.record_runner_result(

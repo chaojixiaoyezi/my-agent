@@ -23,6 +23,7 @@ from .agent.capabilities import CapabilityRouter
 from .agent.capability_config import load_capability_config
 from .agent.config import load_config
 from .agent.core import SimpleAgent
+from .agent.file_io import append_jsonl
 from .agent.skills import SkillRegistry
 from .agent.subagent import VerificationEvidence, filter_board_items
 
@@ -346,9 +347,7 @@ def append_gateway_history(paths: GatewayPaths, payload: dict) -> None:
     JSONL 一行一条，方便以后按时间追踪请求，也方便后续迁移到 SQLite。
     """
 
-    paths.history.parent.mkdir(parents=True, exist_ok=True)
-    with paths.history.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    append_jsonl(paths.history, payload, sort_keys=True)
 
 
 def log_gateway_payload(

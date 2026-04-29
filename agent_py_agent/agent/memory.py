@@ -17,6 +17,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .file_io import append_jsonl
+
 if TYPE_CHECKING:
     from .local_store import LocalSearchResult, LocalStore
 
@@ -68,8 +70,7 @@ class JsonlMemory:
             tags=tags or [],
             created_at=time.time(),
         )
-        with self.path.open("a", encoding="utf-8") as file:
-            file.write(record.to_json() + "\n")
+        append_jsonl(self.path, asdict(record))
         self._try_index_record(record)
         return record
 
