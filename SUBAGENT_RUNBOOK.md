@@ -14,7 +14,7 @@
   -> subagent-run 读取 execution_context
   -> runner 输出 [SUBAGENT_RESULT] JSON
   -> 系统把 evidence/request/artifacts/tests/patches/lessons 写回工单
-  -> 父代理再做 patch 审核、验收、路由、接管或重派
+  -> 父代理 dispatch 做 patch 审核、验收、路由、接管或重派
 ```
 
 ## 设计目标
@@ -560,6 +560,45 @@ python3 -m agent_py_agent subagents-patches --apply --run-id <run_id>
 - 当前不会自动应用未知 diff 或改动文件。
 - applied patch 如果没有 `review_status=APPROVED`，父代理验收会继续阻断。
 
+## 父代理调度
+
+默认 dry-run：
+
+```bash
+python3 -m agent_py_agent subagents-dispatch
+```
+
+真正写回低风险动作、能力路由、patch 审核和验收：
+
+```bash
+python3 -m agent_py_agent subagents-dispatch --apply
+```
+
+真正调用 runner 模型：
+
+```bash
+python3 -m agent_py_agent subagents-dispatch --apply --execute-runners
+```
+
+调度顺序：
+- `due_check`：扫描工单风险。
+- `action_apply`：执行或预览低风险动作。
+- `capability_route`：处理 open capability request。
+- `runner`：挑选可执行 run 生成上下文；只有 `--apply --execute-runners` 才调用模型。
+- `patch_review`：审核 runner 输出里的 patch 记录。
+- `acceptance`：把通过验收的 run 收口到 `DONE/VERIFIED`。
+
+输出：
+- 全局 `subagent_dispatch_report.json`
+- 全局 `SUBAGENT_DISPATCH.md`
+- apply 时追加 `subagent_dispatch_log.jsonl` 和 `DISPATCH_LOG.md`
+
+注意：
+- `subagents-dispatch` 不是常驻进程，只执行一轮。
+- `--apply` 会写审计日志，但默认不调用模型 runner。
+- `--execute-runners` 必须和 `--apply` 一起使用，才会请求真实模型 API。
+- 常驻 daemon 可以在这条稳定的一轮调度命令之上再实现。
+
 ## 父代理验收
 
 默认 dry-run：
@@ -685,6 +724,7 @@ failure_type = structured_output_parse_error
 
 优先级高：
 - 多子代理调度器：批量启动、限流、心跳、超时、接管。
+- 常驻 daemon：在 `subagents-dispatch` 的一轮调度基础上增加 watch loop、锁和退出控制。
 - 接受层：从 `output.json.tests` / `artifacts` 自动生成验收任务。
 - patch 集成器：读取真实 diff/patch，按权限、owner 和审核结果做受控集成。
 - lessons -> learning draft：在 `enable_self_learning=true` 时生成草稿。
@@ -700,6 +740,7 @@ python3 -m py_compile agent_py_agent/agent/*.py agent_py_agent/__main__.py
 python3 -m agent_py_agent --help
 python3 -m agent_py_agent subagent-run --help
 python3 -m agent_py_agent subagents-patches --help
+python3 -m agent_py_agent subagents-dispatch --help
 git diff --check
 git status --short
 ```

@@ -760,3 +760,24 @@ suggested_tool: 是否建议开发成 tool
 后续注意：
 - patch 审核器目前只审核 runner 已声明的 patch 状态，不自动应用 diff。
 - 后续真正做 patch 集成器时，需要 owner、写入边界、diff 审计和测试命令 allowlist。
+
+## 2026-04-29 / 父代理一轮调度器
+
+状态：已落地
+
+思路：
+- 当前 chat 退出后父代理不常驻，但工单状态已经可恢复。
+- 在做 daemon 前，先把“一轮父代理应该如何推进任务树”做成可审计命令。
+- 调度器必须默认 dry-run；真实 runner 调用需要比普通 apply 更明确的开关。
+
+已落地：
+- 新增 `DispatchRecord` / `DispatchReport`。
+- 新增 `SimpleAgent.dispatch_subagents()`：按 due-check、action apply、capability route、runner、patch review、acceptance 顺序执行一轮调度。
+- 新增 `python3 -m agent_py_agent subagents-dispatch`。
+- `subagents-dispatch --apply` 会写回低风险动作、能力路由、patch 审核和验收，并写调度审计日志。
+- `subagents-dispatch --apply --execute-runners` 才会调用模型 runner。
+- 新增 dispatch 单测：dry-run 规划、patch 审核后验收、runner 执行后验收。
+
+后续方向：
+- 在 dispatch 稳定后加 `--watch` 或独立 daemon。
+- daemon 需要运行锁、停止信号、轮询间隔、最大 API 消耗和崩溃恢复记录。

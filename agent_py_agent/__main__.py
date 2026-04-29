@@ -378,6 +378,51 @@ def cmd_subagents_patches(args) -> int:
     return 0
 
 
+def cmd_subagents_dispatch(args) -> int:
+    """执行一轮父代理调度，默认 dry-run。"""
+
+    agent = make_agent(args)
+    capability_config = load_capability_config(args.capability_config)
+    router = make_capability_router(agent, capability_config, args.skill_dir)
+    report = agent.dispatch_subagents(
+        router,
+        capability_config,
+        apply=args.apply,
+        execute_runners=args.execute_runners,
+        max_runners=args.max_runners,
+        limit=args.limit,
+        reviewer=args.reviewer,
+        note=args.note or "",
+        runner_instruction=args.instruction or "",
+        max_cards=args.max_cards,
+        probe=not args.no_probe,
+        take_over_by=args.take_over_by or "",
+        locked_files=args.locked_file or [],
+    )
+    mode = "apply" if args.apply else "dry-run"
+    print("SUBAGENT DISPATCH")
+    print(
+        f"mode={mode} execute_runners={args.execute_runners} "
+        f"total_records={report.summary.get('total', 0)}"
+    )
+    print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
+    if not report.records:
+        print("暂时没有调度动作。")
+    for record in report.records:
+        status = "OK" if record.ok else "FAIL"
+        run = record.run_id or "global"
+        print(
+            f"- [{status}] {record.step}/{record.action} run={run} "
+            f"applied={record.applied} :: {record.message}"
+        )
+    print(f"\n已写入: {agent.subagents.workspace / 'subagent_dispatch_report.json'}")
+    print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_DISPATCH.md'}")
+    if args.apply:
+        print(f"审计日志: {agent.subagents.workspace / 'subagent_dispatch_log.jsonl'}")
+        print(f"审计日志: {agent.subagents.workspace / 'DISPATCH_LOG.md'}")
+    return 0
+
+
 def cmd_subagent_context(args) -> int:
     """生成单个 subagent 的执行上下文包。"""
 
@@ -759,6 +804,27 @@ def build_parser() -> argparse.ArgumentParser:
     patches.add_argument("--reviewer", default="parent", help="审核者标识")
     patches.add_argument("--note", help="写入 patch 审核记录的备注")
     patches.set_defaults(func=cmd_subagents_patches, apply=False)
+
+    dispatch = sub.add_parser("subagents-dispatch", help="执行一轮父代理调度，默认 dry-run")
+    dispatch.add_argument(
+        "--capability-config",
+        default=str(DEFAULT_CAPABILITY_CONFIG),
+        help="能力路由配置文件路径，默认使用 config/capability_config.yaml",
+    )
+    dispatch.add_argument("--dry-run", action="store_false", dest="apply", help="只生成调度报告，不修改记录")
+    dispatch.add_argument("--apply", action="store_true", help="执行低风险调度动作并写审计日志")
+    dispatch.add_argument("--execute-runners", action="store_true", help="配合 --apply 调用真实模型执行 runner")
+    dispatch.add_argument("--max-runners", type=int, default=1, help="本轮最多推进多少个 runner")
+    dispatch.add_argument("--limit", type=int, default=20, help="每个阶段最多处理多少条记录")
+    dispatch.add_argument("--reviewer", default="parent-dispatch", help="patch/acceptance 审核者标识")
+    dispatch.add_argument("--note", help="写入调度关联审核记录的备注")
+    dispatch.add_argument("--instruction", help="给本轮 runner 的额外指令")
+    dispatch.add_argument("--max-cards", type=int, default=0, help="runner 最多注入多少张能力卡，0 表示不限制")
+    dispatch.add_argument("--no-probe", action="store_true", help="执行 runner 前不做通道健康检查")
+    dispatch.add_argument("--take-over-by", help="接管动作的接管者，apply takeover 时必填")
+    dispatch.add_argument("--locked-file", action="append", help="接管时锁定的文件，可多次传入")
+    dispatch.add_argument("--skill-dir", action="append", help="额外 skill 目录，可多次传入")
+    dispatch.set_defaults(func=cmd_subagents_dispatch, apply=False)
 
     subagent_context = sub.add_parser("subagent-context", help="生成单个 subagent 执行上下文包")
     subagent_context.add_argument("run_id", help="子代理运行 ID")

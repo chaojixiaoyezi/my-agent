@@ -138,6 +138,7 @@ run(agent_cmd("subagents-apply-actions", "--dry-run", "--limit", "2"))
 run(agent_cmd("subagents-route-capabilities", "--dry-run", "--limit", "2"))
 run(agent_cmd("subagents-acceptance", "--help"))
 run(agent_cmd("subagents-patches", "--help"))
+run(agent_cmd("subagents-dispatch", "--help"))
 run(agent_cmd("subagent-context", "--help"))
 run(agent_cmd("subagent-run", "--help"))
 

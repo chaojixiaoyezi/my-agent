@@ -60,6 +60,41 @@ class StructuredSubagentBackend(BaseBackend):
         )
 
 
+class AcceptedSubagentBackend(BaseBackend):
+    """测试用后端：返回可直接验收的结构化结果。"""
+
+    name = "accepted_subagent_backend"
+
+    def generate(self, prompt: str) -> ModelResponse:
+        assert "[SUBAGENT_RESULT]" in prompt
+        return ModelResponse(
+            text=(
+                "[SUBAGENT_RESULT]\n"
+                "{\n"
+                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "summary": "调度器 runner 已完成。",\n'
+                '  "used_tools": [],\n'
+                '  "used_skills": [],\n'
+                '  "evidence": [\n'
+                '    {"kind": "note", "summary": "调度器结构化执行证据", "ok": true}\n'
+                "  ],\n"
+                '  "capability_requests": [],\n'
+                '  "artifacts": [],\n'
+                '  "tests": [\n'
+                '    {"name": "dispatch-smoke", "command": "", "ok": true, "summary": "通过"}\n'
+                "  ],\n"
+                '  "patches": [],\n'
+                '  "lessons": [],\n'
+                '  "next_actions": [],\n'
+                '  "blocked_reason": "",\n'
+                '  "failure_type": ""\n'
+                "}\n"
+                "[/SUBAGENT_RESULT]"
+            ),
+            backend=self.name,
+        )
+
+
 def test_memory_and_run():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -868,6 +903,36 @@ def test_subagent_runner_parser_uses_last_parseable_fenced_block():
     assert parsed.tests[0]["name"] == "format"
 
 
+def test_subagent_runner_parser_accepts_prefixed_json_block():
+    text = (
+        "[SUBAGENT_RESULT]\n"
+        "json\n"
+        "{\n"
+        '  "status": "AWAITING_ACCEPTANCE",\n'
+        '  "summary": "模型在 JSON 前多写了语言标签。",\n'
+        '  "used_tools": [],\n'
+        '  "used_skills": [],\n'
+        '  "evidence": [{"kind": "note", "summary": "仍可解析", "ok": true}],\n'
+        '  "capability_requests": [],\n'
+        '  "artifacts": [],\n'
+        '  "tests": [],\n'
+        '  "patches": [],\n'
+        '  "lessons": [],\n'
+        '  "next_actions": [],\n'
+        '  "blocked_reason": "",\n'
+        '  "failure_type": ""\n'
+        "}\n"
+        "[/SUBAGENT_RESULT]"
+    )
+
+    parsed = parse_subagent_runner_output(text)
+
+    assert parsed.found
+    assert parsed.ok
+    assert parsed.summary == "模型在 JSON 前多写了语言标签。"
+    assert parsed.evidence[0]["summary"] == "仍可解析"
+
+
 def test_subagent_acceptance_dry_run_and_apply():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -1179,3 +1244,175 @@ def test_subagent_patch_review_rejects_invalid_patch_status():
         )
         assert acceptance.records[0].decision == "REJECT"
         assert any(item.name == "patch_status_valid" and not item.ok for item in acceptance.records[0].findings)
+
+
+def test_subagent_dispatch_dry_run_plans_runner_patch_and_acceptance():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        runner_task = agent.subagents.create_run(
+            goal="调度 runner dry-run",
+            thought="等待父代理调度。",
+            plan=["执行 runner"],
+        )
+        review_task = agent.subagents.create_run(
+            goal="调度 patch 和验收 dry-run",
+            thought="runner 已完成，等待审核。",
+            plan=["审核 patch", "验收"],
+        )
+        review_task.status = "AWAITING_ACCEPTANCE"
+        review_task.verification_status = "NEEDS_ACCEPTANCE"
+        review_task.channel_status = "OK"
+        review_task.evidence.append(
+            VerificationEvidence(
+                kind="note",
+                summary="有验收证据",
+                ok=True,
+                created_at=time.time(),
+            )
+        )
+        agent.subagents.save(review_task)
+        Path(review_task.output_json).write_text(
+            json.dumps(
+                {
+                    "run_id": review_task.id,
+                    "tests": [{"name": "smoke", "command": "", "ok": True}],
+                    "patches": [
+                        {
+                            "path": "agent_py_agent/agent/demo.py",
+                            "status": "applied",
+                            "summary": "已应用但未审核",
+                        }
+                    ],
+                    "blockers": [],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+        report = agent.dispatch_subagents(
+            router,
+            CapabilityConfig(),
+            apply=False,
+            max_runners=1,
+        )
+        output = json.loads(Path(review_task.output_json).read_text(encoding="utf-8"))
+
+        assert report.dry_run
+        assert any(item.step == "runner" and item.run_id == runner_task.id for item in report.records)
+        assert any(item.step == "patch_review" and item.run_id == review_task.id for item in report.records)
+        assert any(item.step == "acceptance" and item.run_id == review_task.id for item in report.records)
+        assert "review_status" not in output["patches"][0]
+        assert agent.subagents.load(runner_task.id).status == "PLANNING"
+        assert (root / "subs" / "subagent_dispatch_report.json").exists()
+        assert not (root / "subs" / "subagent_dispatch_log.jsonl").exists()
+
+
+def test_subagent_dispatch_apply_reviews_patch_then_accepts():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        task = agent.subagents.create_run(
+            goal="调度 patch 审核后验收",
+            thought="runner 已完成，等待调度器收口。",
+            plan=["审核 patch", "验收"],
+        )
+        task.status = "AWAITING_ACCEPTANCE"
+        task.verification_status = "NEEDS_ACCEPTANCE"
+        task.channel_status = "OK"
+        task.evidence.append(
+            VerificationEvidence(
+                kind="note",
+                summary="有验收证据",
+                ok=True,
+                created_at=time.time(),
+            )
+        )
+        agent.subagents.save(task)
+        Path(task.output_json).write_text(
+            json.dumps(
+                {
+                    "run_id": task.id,
+                    "tests": [{"name": "smoke", "command": "", "ok": True}],
+                    "patches": [
+                        {
+                            "path": "agent_py_agent/agent/demo.py",
+                            "status": "applied",
+                            "summary": "已应用",
+                        }
+                    ],
+                    "blockers": [],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        Path(task.runner_result_json).write_text(
+            json.dumps(
+                {
+                    "run_id": task.id,
+                    "structured_output_found": True,
+                    "structured_output_ok": True,
+                    "structured_parse_error": "",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+        report = agent.dispatch_subagents(
+            router,
+            CapabilityConfig(),
+            apply=True,
+            max_runners=0,
+            reviewer="dispatch-test",
+        )
+        loaded = agent.subagents.load(task.id)
+        output = json.loads(Path(task.output_json).read_text(encoding="utf-8"))
+
+        assert not report.dry_run
+        assert any(item.step == "patch_review" and item.ok for item in report.records)
+        assert any(item.step == "acceptance" and item.ok for item in report.records)
+        assert output["patches"][0]["review_status"] == "APPROVED"
+        assert loaded.status == "DONE"
+        assert loaded.verification_status == "VERIFIED"
+        assert (root / "subs" / "DISPATCH_LOG.md").exists()
+
+
+def test_subagent_dispatch_apply_executes_runner_and_accepts():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        agent.backend = AcceptedSubagentBackend()
+        task = agent.subagents.create_run(
+            goal="调度器执行 runner",
+            thought="等待 dispatch 调用真实 runner 路径。",
+            plan=["执行", "验收"],
+        )
+
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+        report = agent.dispatch_subagents(
+            router,
+            CapabilityConfig(),
+            apply=True,
+            execute_runners=True,
+            max_runners=1,
+            probe=False,
+            reviewer="dispatch-test",
+        )
+        loaded = agent.subagents.load(task.id)
+
+        assert any(item.step == "runner" and item.applied and item.ok for item in report.records)
+        assert any(item.step == "acceptance" and item.applied and item.ok for item in report.records)
+        assert loaded.status == "DONE"
+        assert loaded.verification_status == "VERIFIED"
+        assert loaded.evidence[0].summary == "调度器结构化执行证据"

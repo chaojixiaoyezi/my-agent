@@ -24,6 +24,7 @@ python3 -m agent_py_agent subagent-run --help
 python3 -m agent_py_agent subagents-route-capabilities --help
 python3 -m agent_py_agent subagents-acceptance --help
 python3 -m agent_py_agent subagents-patches --help
+python3 -m agent_py_agent subagents-dispatch --help
 ```
 
 Git 空白检查：
@@ -61,6 +62,8 @@ python3 -c "from agent_py_agent.tests import test_agent; tests=[fn for name, fn 
 - patch 审核 dry-run / apply。
 - applied patch 必须先有 `review_status=APPROVED` 才能通过验收。
 - planned / blocked / 未知状态 patch 会阻断验收。
+- 父代理 dispatch dry-run / apply。
+- dispatch apply 后的 runner 执行和验收闭环。
 - evidence / capability_requests / artifacts / tests / patches / lessons / next_actions 写回。
 
 ### Tools
@@ -106,6 +109,7 @@ python3 agent_py_agent/tests/run_tests.py
 - 跑一次真实模型 `run`。
 - 创建隔离临时配置，避免污染默认 `data/memory.jsonl` 和 `data/subagents/`。
 - 跑一次真实 API `subagent-run --execute`，要求真实后端、工具调用、结构化输出、证据写回和父代理验收闭环。
+- 检查 `subagents-dispatch --help`，并通过自动发现测试覆盖 dispatch 规划、runner、patch 审核和验收。
 - 跑 chat 真实模型路径。
 - 自动发现并运行所有 `test_*.py` 中的 `test_` 函数。
 - 不允许手写测试清单漏掉新增测试。

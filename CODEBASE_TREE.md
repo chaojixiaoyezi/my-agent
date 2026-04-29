@@ -194,6 +194,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `CapabilityRouteRecord` / `CapabilityRouteReport`：把 open capability request 路由到 skill/tool card。
 - `AcceptanceReviewFinding` / `AcceptanceReviewRecord` / `AcceptanceReviewReport`：记录父代理验收检查、决策和写回结果。
 - `PatchReviewRecord` / `PatchReviewReport`：记录 runner patch 输出的审核、决策和写回结果。
+- `DispatchRecord` / `DispatchReport`：记录父代理一轮调度中的 due-check、路由、runner、patch 审核和验收步骤。
 - `SubAgentExecutionContext`：把授权后的 skill/tool、能力卡、写入边界和验收要求打成子代理执行上下文。
 - `SubAgentRunnerResult`：记录一次子代理 runner 调用的模式、结果、状态和证据文件。
 
@@ -245,6 +246,9 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `review_patches()` 会检查 runner 输出的 patch 记录，只允许已应用且状态合法的 patch 进入审核通过。
 - `write_patch_review_report()` 会写出 `subagent_patch_review_report.json`、`SUBAGENT_PATCH_REVIEW.md` 和单任务 `PATCH_REVIEW.md`。
 - `python3 -m agent_py_agent subagents-patches` 默认 dry-run；显式 `--apply` 才会写回 patch `review_status` 和审计日志。
+- `SimpleAgent.dispatch_subagents()` 会执行一轮父代理调度：due-check、action apply、capability route、runner、patch review、acceptance。
+- `write_dispatch_report()` 会写出 `subagent_dispatch_report.json` 和 `SUBAGENT_DISPATCH.md`，apply 时追加调度审计日志。
+- `python3 -m agent_py_agent subagents-dispatch` 默认 dry-run；`--apply --execute-runners` 才会真实调用 runner 模型。
 - `build_execution_context()` 会把当前 run 的授权、能力卡、验收要求和写入边界压成最小上下文。
 - `write_execution_context()` 会写出 `execution_context.json` 和 `EXECUTION_CONTEXT.md`。
 - `python3 -m agent_py_agent subagent-context <run_id>` 可以生成单个子代理执行上下文包。
@@ -320,6 +324,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - subagent runner 是否能解析结构化输出，并自动生成 evidence 和 capability request。
 - subagent runner 是否能把 artifacts / tests / patches / lessons / next_actions 落进机器结果和 debrief。
 - subagent patch 审核是否能批准 applied patch，并阻断 planned / blocked / 未知状态 patch。
+- subagent dispatch 是否能把 runner、patch review 和 acceptance 串成一轮父代理调度。
 
 ### `.gitattributes`
 
