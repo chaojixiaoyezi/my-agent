@@ -287,6 +287,74 @@ def test_tool_call_parser_accepts_subagent_call_alias():
     assert calls == [{"tool": "read_file", "path": "README.md"}]
 
 
+def test_tool_call_parser_accepts_qwen_xmlish_read_call():
+    registry = ToolRegistry(
+        Path.cwd(),
+        max_chars=6000,
+        max_entries=200,
+        max_matches=50,
+        web_max_chars=12000,
+        http_timeout=30,
+        catalog_limit=20,
+        retrieval_limit=3,
+        vector_search_enabled=False,
+    )
+    calls = registry.parse_tool_calls(
+        "<tool_call>\n"
+        "<function=read>\n"
+        "<parameter=file_path>\nREADME.md\n</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+
+    assert calls == [{"tool": "read_file", "path": "README.md"}]
+
+
+def test_tool_call_parser_accepts_qwen_xmlish_write_call():
+    registry = ToolRegistry(
+        Path.cwd(),
+        max_chars=6000,
+        max_entries=200,
+        max_matches=50,
+        web_max_chars=12000,
+        http_timeout=30,
+        catalog_limit=20,
+        retrieval_limit=3,
+        vector_search_enabled=False,
+    )
+    calls = registry.parse_tool_calls(
+        '<tool_call><function name="write">'
+        '<parameter name="file_path">notes.txt</parameter>'
+        '<parameter name="content">hello &amp; hi</parameter>'
+        "</function></tool_call>"
+    )
+
+    assert calls == [{"tool": "write_file", "path": "notes.txt", "content": "hello & hi"}]
+
+
+def test_tool_call_parser_reports_incomplete_qwen_xmlish_call():
+    registry = ToolRegistry(
+        Path.cwd(),
+        max_chars=6000,
+        max_entries=200,
+        max_matches=50,
+        web_max_chars=12000,
+        http_timeout=30,
+        catalog_limit=20,
+        retrieval_limit=3,
+        vector_search_enabled=False,
+    )
+    calls = registry.parse_tool_calls(
+        "<tool_call><function=read><parameter=file_path>A.md</parameter></tool_call>\n"
+        "<tool_call><function=read><parameter=file_path>B.md</parameter>"
+    )
+
+    assert calls[0] == {"tool": "read_file", "path": "A.md"}
+    assert calls[1]["tool"] == "__parse_error__"
+    assert "missing a closing </tool_call>" in calls[1]["error"]
+    assert "B.md" in calls[1]["raw"]
+
+
 def test_tool_allowlist_limits_prompt_and_execution():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
