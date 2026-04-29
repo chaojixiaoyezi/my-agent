@@ -13,6 +13,88 @@ from typing import Any
 
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 
+_MAX_PATH_CHARS = 4096
+_MAX_SEARCH_QUERY_CHARS = 4000
+_MAX_SEARCH_LINE_CHARS = 500
+_MAX_WRITE_TEXT_CHARS = 1_000_000
+
+
+def _has_control_chars(text: str) -> bool:
+    return any(ord(char) < 32 for char in text)
+
+
+def _required_path(value: Any, *, name: str = "path") -> str:
+    if value is None:
+        raise ValueError(f"缺少必填参数 {name}")
+    if not isinstance(value, (str, Path)):
+        raise ValueError(f"{name} 参数必须是字符串路径")
+    text = str(value).strip()
+    if not text:
+        raise ValueError(f"{name} 不能为空")
+    if len(text) > _MAX_PATH_CHARS:
+        raise ValueError(f"{name} 过长，最多 {_MAX_PATH_CHARS} 个字符")
+    if _has_control_chars(text):
+        raise ValueError(f"{name} 包含不支持的控制字符")
+    return text
+
+
+def _optional_path(value: Any, *, default: str = ".") -> str:
+    if value is None:
+        return default
+    return _required_path(value)
+
+
+def _text_param(
+    value: Any,
+    *,
+    name: str,
+    max_chars: int,
+    allow_empty: bool = False,
+    strip: bool = False,
+) -> str:
+    if value is None:
+        raise ValueError(f"缺少必填参数 {name}")
+    if not isinstance(value, (str, int, float, bool)):
+        raise ValueError(f"{name} 参数必须是字符串或标量文本")
+    text = str(value)
+    if strip:
+        text = text.strip()
+    if not allow_empty and text == "":
+        raise ValueError(f"{name} 不能为空")
+    if len(text) > max_chars:
+        raise ValueError(f"{name} 过长，最多 {max_chars} 个字符")
+    return text
+
+
+def _int_param(value: Any, *, name: str, default: int, min_value: int | None = None) -> int:
+    if value is None:
+        parsed = default
+    else:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} 必须是整数") from exc
+    if min_value is not None and parsed < min_value:
+        raise ValueError(f"{name} 不能小于 {min_value}")
+    return parsed
+
+
+def _bool_param(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
+
+
 class FileSystemTool(BaseTool):
     """文件系统类工具的安全边界。
 
@@ -24,19 +106,30 @@ class FileSystemTool(BaseTool):
     def __init__(self, workspace_root: Path):
         self.workspace_root = workspace_root.resolve()
 
-    def resolve_path(self, raw_path: str) -> Path:
+    def resolve_path(self, raw_path: str | Path) -> Path:
         """解析路径，并强制限制在工作区内部。"""
 
-        candidate = Path(raw_path)
+        raw_text = _required_path(raw_path)
+        candidate = Path(raw_text)
         if not candidate.is_absolute():
-            candidate = (self.workspace_root / candidate).resolve()
-        else:
-            candidate = candidate.resolve()
+            candidate = self.workspace_root / candidate
+        try:
+            candidate = candidate.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError("路径解析失败，请检查路径是否有效。") from exc
         try:
             candidate.relative_to(self.workspace_root)
         except ValueError as exc:
-            raise ValueError(f"路径超出允许的工作区范围: {candidate}") from exc
+            raise ValueError("路径超出允许的工作区范围，请使用工作区内路径。") from exc
         return candidate
+
+    def display_path(self, path: Path) -> str:
+        """把路径转成可审计但不泄露工作区绝对路径的格式。"""
+
+        try:
+            return str(path.relative_to(self.workspace_root))
+        except ValueError:
+            return "<outside-workspace>"
 
 
 class ListFilesTool(FileSystemTool):
@@ -72,13 +165,16 @@ class ListFilesTool(FileSystemTool):
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        raw_path = str(params.get("path", "."))
-        recursive = bool(params.get("recursive", False))
-        target = self.resolve_path(raw_path)
+        try:
+            raw_path = _optional_path(params.get("path"), default=".")
+            recursive = _bool_param(params.get("recursive"), default=False)
+            target = self.resolve_path(raw_path)
+        except ValueError as exc:
+            return ToolExecutionResult("list_files", False, str(exc))
         if not target.exists():
-            return ToolExecutionResult("list_files", False, f"路径不存在: {target}")
+            return ToolExecutionResult("list_files", False, f"路径不存在: {self.display_path(target)}")
         if target.is_file():
-            return ToolExecutionResult("list_files", True, str(target.relative_to(self.workspace_root)))
+            return ToolExecutionResult("list_files", True, self.display_path(target))
 
         iterator = target.rglob("*") if recursive else target.iterdir()
         entries: list[str] = []
@@ -126,20 +222,28 @@ class ReadFileTool(FileSystemTool):
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        raw_path = params.get("path")
-        if not raw_path:
-            return ToolExecutionResult("read_file", False, "缺少必填参数 path")
-
-        target = self.resolve_path(str(raw_path))
+        try:
+            raw_path = _required_path(params.get("path"))
+            target = self.resolve_path(raw_path)
+        except ValueError as exc:
+            return ToolExecutionResult("read_file", False, str(exc))
         if not target.exists():
-            return ToolExecutionResult("read_file", False, f"文件不存在: {target}")
+            return ToolExecutionResult("read_file", False, f"文件不存在: {self.display_path(target)}")
         if not target.is_file():
-            return ToolExecutionResult("read_file", False, f"目标不是文件: {target}")
+            return ToolExecutionResult("read_file", False, f"目标不是文件: {self.display_path(target)}")
 
-        content = target.read_text(encoding="utf-8")
+        try:
+            content = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return ToolExecutionResult("read_file", False, "文件不是有效 UTF-8 文本，无法读取。")
         lines = content.splitlines()
-        start_line = max(int(params.get("start_line", 1)), 1)
-        end_line = int(params.get("end_line", len(lines)))
+        try:
+            start_line = _int_param(params.get("start_line"), name="start_line", default=1, min_value=1)
+            end_line = _int_param(params.get("end_line"), name="end_line", default=max(len(lines), 1), min_value=1)
+        except ValueError as exc:
+            return ToolExecutionResult("read_file", False, str(exc))
+        if end_line < start_line:
+            return ToolExecutionResult("read_file", False, "end_line 不能小于 start_line")
         selected = lines[start_line - 1 : end_line]
         numbered = [f"{idx}: {line}" for idx, line in enumerate(selected, start=start_line)]
         result = "\n".join(numbered)
@@ -181,13 +285,19 @@ class SearchTextTool(FileSystemTool):
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        query = str(params.get("query", "")).strip()
-        if not query:
-            return ToolExecutionResult("search_text", False, "缺少必填参数 query")
-
-        target = self.resolve_path(str(params.get("path", ".")))
+        try:
+            query = _text_param(
+                params.get("query"),
+                name="query",
+                max_chars=_MAX_SEARCH_QUERY_CHARS,
+                strip=True,
+            )
+            raw_path = _optional_path(params.get("path"), default=".")
+            target = self.resolve_path(raw_path)
+        except ValueError as exc:
+            return ToolExecutionResult("search_text", False, str(exc))
         if not target.exists():
-            return ToolExecutionResult("search_text", False, f"路径不存在: {target}")
+            return ToolExecutionResult("search_text", False, f"路径不存在: {self.display_path(target)}")
 
         search_root = target if target.is_dir() else target.parent
         candidates = [target] if target.is_file() else list(search_root.rglob("*"))
@@ -196,10 +306,20 @@ class SearchTextTool(FileSystemTool):
             if not item.is_file():
                 continue
             try:
-                for idx, line in enumerate(item.read_text(encoding="utf-8").splitlines(), start=1):
+                safe_item = self.resolve_path(item)
+            except ValueError:
+                continue
+            try:
+                for idx, line in enumerate(safe_item.read_text(encoding="utf-8").splitlines(), start=1):
                     if query in line:
-                        rel = item.relative_to(self.workspace_root)
-                        matches.append(f"{rel}:{idx}: {line.strip()}")
+                        try:
+                            rel = item.relative_to(self.workspace_root)
+                        except ValueError:
+                            rel = safe_item.relative_to(self.workspace_root)
+                        snippet = line.strip()
+                        if len(snippet) > _MAX_SEARCH_LINE_CHARS:
+                            snippet = snippet[:_MAX_SEARCH_LINE_CHARS] + "... 已截断"
+                        matches.append(f"{rel}:{idx}: {snippet}")
                         if len(matches) >= self.max_matches:
                             matches.append(f"... 已截断，最多显示 {self.max_matches} 条")
                             return ToolExecutionResult("search_text", True, "\n".join(matches))
@@ -239,20 +359,24 @@ class WriteFileTool(FileSystemTool):
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        raw_path = params.get("path")
-        content = params.get("content")
-        if not raw_path:
-            return ToolExecutionResult("write_file", False, "缺少必填参数 path")
-        if content is None:
-            return ToolExecutionResult("write_file", False, "缺少必填参数 content")
-
-        target = self.resolve_path(str(raw_path))
+        try:
+            raw_path = _required_path(params.get("path"))
+            content = _text_param(
+                params.get("content"),
+                name="content",
+                max_chars=_MAX_WRITE_TEXT_CHARS,
+                allow_empty=True,
+            )
+            target = self.resolve_path(raw_path)
+        except ValueError as exc:
+            return ToolExecutionResult("write_file", False, str(exc))
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(str(content), encoding="utf-8")
+        target = self.resolve_path(target)
+        target.write_text(content, encoding="utf-8")
         return ToolExecutionResult(
             "write_file",
             True,
-            f"已写入文件: {target.relative_to(self.workspace_root)}",
+            f"已写入文件: {self.display_path(target)}",
         )
 
 
@@ -287,21 +411,25 @@ class AppendFileTool(FileSystemTool):
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        raw_path = params.get("path")
-        content = params.get("content")
-        if not raw_path:
-            return ToolExecutionResult("append_file", False, "缺少必填参数 path")
-        if content is None:
-            return ToolExecutionResult("append_file", False, "缺少必填参数 content")
-
-        target = self.resolve_path(str(raw_path))
+        try:
+            raw_path = _required_path(params.get("path"))
+            content = _text_param(
+                params.get("content"),
+                name="content",
+                max_chars=_MAX_WRITE_TEXT_CHARS,
+                allow_empty=True,
+            )
+            target = self.resolve_path(raw_path)
+        except ValueError as exc:
+            return ToolExecutionResult("append_file", False, str(exc))
         target.parent.mkdir(parents=True, exist_ok=True)
+        target = self.resolve_path(target)
         with target.open("a", encoding="utf-8") as file:
-            file.write(str(content))
+            file.write(content)
         return ToolExecutionResult(
             "append_file",
             True,
-            f"已追加文件: {target.relative_to(self.workspace_root)}",
+            f"已追加文件: {self.display_path(target)}",
         )
 
 
@@ -357,38 +485,46 @@ class ReplaceInFileTool(FileSystemTool):
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        raw_path = params.get("path")
-        old = params.get("old")
-        new = params.get("new")
-        if not raw_path:
-            return ToolExecutionResult("replace_in_file", False, "缺少必填参数 path")
-        if old is None:
-            return ToolExecutionResult("replace_in_file", False, "缺少必填参数 old")
-        if new is None:
-            return ToolExecutionResult("replace_in_file", False, "缺少必填参数 new")
-
-        target = self.resolve_path(str(raw_path))
+        try:
+            raw_path = _required_path(params.get("path"))
+            old_text = _text_param(
+                params.get("old"),
+                name="old",
+                max_chars=_MAX_WRITE_TEXT_CHARS,
+            )
+            new_text = _text_param(
+                params.get("new"),
+                name="new",
+                max_chars=_MAX_WRITE_TEXT_CHARS,
+                allow_empty=True,
+            )
+            target = self.resolve_path(raw_path)
+        except ValueError as exc:
+            return ToolExecutionResult("replace_in_file", False, str(exc))
         if not target.exists():
-            return ToolExecutionResult("replace_in_file", False, f"文件不存在: {target}")
+            return ToolExecutionResult("replace_in_file", False, f"文件不存在: {self.display_path(target)}")
         if not target.is_file():
-            return ToolExecutionResult("replace_in_file", False, f"目标不是文件: {target}")
+            return ToolExecutionResult("replace_in_file", False, f"目标不是文件: {self.display_path(target)}")
 
-        content = target.read_text(encoding="utf-8")
-        old_text = str(old)
-        if old_text == "":
-            return ToolExecutionResult("replace_in_file", False, "old 不能为空字符串")
+        try:
+            content = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return ToolExecutionResult("replace_in_file", False, "文件不是有效 UTF-8 文本，无法替换。")
 
         matches = content.count(old_text)
         if matches == 0:
             return ToolExecutionResult("replace_in_file", False, "没有找到要替换的原文，请先 read_file 确认上下文")
 
-        raw_count = int(params.get("count", 1))
+        try:
+            raw_count = _int_param(params.get("count"), name="count", default=1)
+        except ValueError as exc:
+            return ToolExecutionResult("replace_in_file", False, str(exc))
         replace_count = matches if raw_count <= 0 else raw_count
-        updated = content.replace(old_text, str(new), replace_count)
+        updated = content.replace(old_text, new_text, replace_count)
         changed = min(matches, replace_count)
         target.write_text(updated, encoding="utf-8")
         return ToolExecutionResult(
             "replace_in_file",
             True,
-            f"已修改文件: {target.relative_to(self.workspace_root)}；替换 {changed} 处；原文共命中 {matches} 处",
+            f"已修改文件: {self.display_path(target)}；替换 {changed} 处；原文共命中 {matches} 处",
         )
