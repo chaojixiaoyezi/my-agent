@@ -27,6 +27,7 @@ subagents-plan-actions      根据 due-check 生成动作计划
 subagents-apply-actions     dry-run 或 apply 低风险动作
 subagents-route-capabilities 路由 open capability request
 subagents-acceptance        验收等待验收的子代理
+subagents-patches           审核 runner 输出里的 patch 记录
 subagent-context            生成单个子代理执行上下文
 subagent-run                按执行上下文运行子代理 runner
 ```
@@ -207,6 +208,18 @@ python3 -m agent_py_agent subagents-acceptance --dry-run
 python3 -m agent_py_agent subagents-acceptance --apply --run-id <run_id>
 ```
 
+patch 审核 dry-run：
+
+```bash
+python3 -m agent_py_agent subagents-patches --dry-run
+```
+
+patch 审核 apply：
+
+```bash
+python3 -m agent_py_agent subagents-patches --apply --run-id <run_id>
+```
+
 生成执行上下文：
 
 ```bash
@@ -286,6 +299,7 @@ export AGENT_API_KEY="你的 key"
 python3 -m py_compile agent_py_agent/agent/*.py agent_py_agent/__main__.py
 python3 -m agent_py_agent --help
 python3 -m agent_py_agent subagent-run --help
+python3 -m agent_py_agent subagents-patches --help
 ```
 
-注意：完整 `agent_py_agent/tests/run_tests.py` 可能触发 `agent_py_agent run`，如果当前配置是远端模型，可能会请求真实 API。
+注意：完整 `agent_py_agent/tests/run_tests.py` 是当前标准收口冒烟，会使用真实 API，并用临时配置隔离 memory 和 subagent 测试数据。

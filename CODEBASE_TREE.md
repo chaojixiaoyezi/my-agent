@@ -193,6 +193,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `ActionApplyRecord` / `ActionApplyReport`：执行或 dry-run 执行动作计划，并留下审计记录。
 - `CapabilityRouteRecord` / `CapabilityRouteReport`：把 open capability request 路由到 skill/tool card。
 - `AcceptanceReviewFinding` / `AcceptanceReviewRecord` / `AcceptanceReviewReport`：记录父代理验收检查、决策和写回结果。
+- `PatchReviewRecord` / `PatchReviewReport`：记录 runner patch 输出的审核、决策和写回结果。
 - `SubAgentExecutionContext`：把授权后的 skill/tool、能力卡、写入边界和验收要求打成子代理执行上下文。
 - `SubAgentRunnerResult`：记录一次子代理 runner 调用的模式、结果、状态和证据文件。
 
@@ -202,6 +203,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `thought.md`：给人看的计划和能力边界摘要。
 - `execution_context.json` / `EXECUTION_CONTEXT.md`：按需生成的子代理执行上下文包，不包含全局能力宇宙。
 - `RUNNER_RESULT.md` / `reports/runner_result.json`：runner dry-run 或 execute 后的审计结果。
+- `PATCH_REVIEW.md` / `reports/patch_review.json`：patch 审核后的单任务证据。
 - `logs/runner_prompt.md` / `logs/runner_response.md`：runner 实际使用的 prompt 和模型回复。
 
 当前已经加入第一层 Fake Done 防护：
@@ -240,6 +242,9 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `write_acceptance_review_report()` 会写出 `subagent_acceptance_report.json` 和 `SUBAGENT_ACCEPTANCE.md`。
 - 真正 apply 时会追加 `subagent_acceptance_log.jsonl` 和 `ACCEPTANCE_REVIEW_LOG.md` 审计日志。
 - `python3 -m agent_py_agent subagents-acceptance` 默认 dry-run；显式 `--apply` 才会把通过验收的 run 标记为 `DONE/VERIFIED`。
+- `review_patches()` 会检查 runner 输出的 patch 记录，只允许已应用且状态合法的 patch 进入审核通过。
+- `write_patch_review_report()` 会写出 `subagent_patch_review_report.json`、`SUBAGENT_PATCH_REVIEW.md` 和单任务 `PATCH_REVIEW.md`。
+- `python3 -m agent_py_agent subagents-patches` 默认 dry-run；显式 `--apply` 才会写回 patch `review_status` 和审计日志。
 - `build_execution_context()` 会把当前 run 的授权、能力卡、验收要求和写入边界压成最小上下文。
 - `write_execution_context()` 会写出 `execution_context.json` 和 `EXECUTION_CONTEXT.md`。
 - `python3 -m agent_py_agent subagent-context <run_id>` 可以生成单个子代理执行上下文包。
@@ -314,6 +319,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - subagent runner 是否默认 dry-run，显式执行时是否只注入授权工具并把结果写回工单。
 - subagent runner 是否能解析结构化输出，并自动生成 evidence 和 capability request。
 - subagent runner 是否能把 artifacts / tests / patches / lessons / next_actions 落进机器结果和 debrief。
+- subagent patch 审核是否能批准 applied patch，并阻断 planned / blocked / 未知状态 patch。
 
 ### `.gitattributes`
 

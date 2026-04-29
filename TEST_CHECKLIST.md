@@ -6,6 +6,7 @@
 - [ ] `python3 -m agent_py_agent --help`
 - [ ] `git diff --check`
 - [ ] 收口前运行 `python3 agent_py_agent/tests/run_tests.py`，并确认它使用真实 API
+- [ ] 确认完整冒烟打印 `FULL_SMOKE_TEST_WORKSPACE=...`，测试数据没有污染默认 `agent_py_agent/data/`
 - [ ] 确认完整冒烟脚本自动发现并运行了所有 `test_*.py` / `test_` 函数
 
 ## 修改普通 run / chat 时
@@ -73,15 +74,26 @@
 - [ ] artifacts / tests / patches 会写入 `output.json`
 - [ ] lessons / next_actions 会写入 `output.json` 和 `DEBRIEF.md`
 - [ ] runner 不会直接标记 DONE
+- [ ] 完整冒烟覆盖真实 API `subagent-run --execute`，并确认 backend 不是 echo
+- [ ] 真实 API runner 至少完成一次授权工具调用、结构化输出和 evidence 写回
 
 ## 修改 subagent 验收时
 
 - [ ] `subagents-acceptance` 默认 dry-run
 - [ ] `subagents-acceptance --apply` 只验收等待验收的任务
 - [ ] 缺 evidence 时不会标记 DONE
-- [ ] 有 blocker、失败 tests 或未处理 patches 时不会标记 DONE
+- [ ] 有 blocker、失败 tests、未处理 patches 或未审核 applied patch 时不会标记 DONE
 - [ ] 验收通过时状态变为 `DONE` 且 verification 为 `VERIFIED`
 - [ ] 每次验收都会写全局报告和单任务 `ACCEPTANCE_REVIEW.md`
+
+## 修改 subagent patch 审核时
+
+- [ ] `subagents-patches` 默认 dry-run
+- [ ] `subagents-patches --apply --run-id <run_id>` 会写回 `review_status`
+- [ ] `applied` patch 只有审核为 `APPROVED` 后才允许验收通过
+- [ ] `planned` / `blocked` patch 会写成 `NEEDS_ACTION` 并阻断验收
+- [ ] 未知 patch 状态会写成 `NEEDS_ACTION` 并阻断验收
+- [ ] 每次 apply 都会写全局 patch 审核报告、单任务 `PATCH_REVIEW.md` 和审计日志
 
 ## 修改文档时
 

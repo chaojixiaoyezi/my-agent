@@ -1,15 +1,29 @@
 """仓库内置的本地冒烟测试入口。"""
 
 from pathlib import Path
+import json
 import os
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT.parent
 RUN_ENV = os.environ.copy()
 RUN_ENV.setdefault("PYTHONUTF8", "1")
 RUN_ENV.setdefault("PYTHONIOENCODING", "utf-8")
+TEST_TMP_HANDLE = tempfile.TemporaryDirectory(prefix="agent-full-smoke-")
+TEST_TMP = Path(TEST_TMP_HANDLE.name)
+TEST_MEMORY = TEST_TMP / "memory.jsonl"
+TEST_SUBAGENTS = TEST_TMP / "subagents"
+TEST_CONFIG = TEST_TMP / "agent_config.yaml"
+TEST_CONFIG.write_text(
+    (ROOT / "config" / "agent_config.yaml").read_text(encoding="utf-8")
+    + "\n# full smoke test isolation\n"
+    + f'memory_path: "{str(TEST_MEMORY).replace("\\", "/")}"\n'
+    + f'subagent_workspace: "{str(TEST_SUBAGENTS).replace("\\", "/")}"\n',
+    encoding="utf-8",
+)
 
 
 def configure_stdio() -> None:
@@ -50,6 +64,59 @@ def run(cmd):
         raise SystemExit(completed.returncode)
 
 
+def agent_cmd(*args):
+    return [sys.executable, "-m", "agent_py_agent", "--config", str(TEST_CONFIG), *args]
+
+
+def create_real_api_subagent_run() -> str:
+    """创建真实 API runner E2E 使用的隔离子代理工单。"""
+
+    script = (
+        "from pathlib import Path\n"
+        "from agent_py_agent.agent.config import load_config\n"
+        "from agent_py_agent.agent.core import SimpleAgent\n"
+        f"cfg = load_config(r'{TEST_CONFIG}')\n"
+        "agent = SimpleAgent(cfg, Path('agent_py_agent').resolve())\n"
+        "task = agent.subagents.create_run(\n"
+        "    goal='真实 API 子代理 E2E：读取 README.md 并生成验收证据',\n"
+        "    thought='验证真实模型、工具调用、结构化输出和父代理验收闭环。',\n"
+        "    plan=['读取 README.md', '输出 SUBAGENT_RESULT', '等待验收'],\n"
+        "    allowed_tools=['read_file'],\n"
+        "    acceptance_checks=['真实 API runner 执行成功', '结构化输出可解析', '父代理验收通过'],\n"
+        ")\n"
+        "print(task.id)\n"
+    )
+    completed = run_capture([sys.executable, "-c", script])
+    print(completed.stdout)
+    if completed.stderr:
+        print(completed.stderr)
+    assert completed.returncode == 0
+    run_id = completed.stdout.strip().splitlines()[-1]
+    assert run_id.startswith("subagent-")
+    return run_id
+
+
+def assert_real_api_subagent_e2e(run_id: str) -> None:
+    """确认真实 API runner 和验收状态都已闭环。"""
+
+    run_dir = TEST_SUBAGENTS / run_id
+    runner = json.loads((run_dir / "reports" / "runner_result.json").read_text(encoding="utf-8"))
+    assert runner["ok"] is True
+    assert runner["backend"] != "echo"
+    assert runner["structured_output_found"] is True
+    assert runner["structured_output_ok"] is True
+    assert runner["evidence_count"] >= 1
+    assert runner["tool_rounds"] >= 1
+
+    task = json.loads((run_dir / "task.json").read_text(encoding="utf-8"))
+    assert task["status"] == "DONE"
+    assert task["verification_status"] == "VERIFIED"
+    assert (run_dir / "ACCEPTANCE_REVIEW.md").exists()
+    assert (run_dir / "reports" / "acceptance_review.json").exists()
+
+
+print(f"FULL_SMOKE_TEST_WORKSPACE={TEST_TMP}")
+
 run(
     [
         sys.executable,
@@ -59,19 +126,38 @@ run(
         str(ROOT / "__main__.py"),
     ]
 )
-run([sys.executable, "-m", "agent_py_agent", "--help"])
-run([sys.executable, "-m", "agent_py_agent", "run", "测试动态 prompt", "--inject", "请用三点回答", "--no-save"])
-run([sys.executable, "-m", "agent_py_agent", "remember", "我喜欢清晰的表格", "--kind", "preference"])
-run([sys.executable, "-m", "agent_py_agent", "memory-search", "表格"])
-run([sys.executable, "-m", "agent_py_agent", "spawn-subagents", "开发 CLI 智能体", "--count", "2"])
-run([sys.executable, "-m", "agent_py_agent", "subagents-probe", "--limit", "2"])
-run([sys.executable, "-m", "agent_py_agent", "subagents-due-check", "--limit", "2"])
-run([sys.executable, "-m", "agent_py_agent", "subagents-plan-actions", "--limit", "2"])
-run([sys.executable, "-m", "agent_py_agent", "subagents-apply-actions", "--dry-run", "--limit", "2"])
-run([sys.executable, "-m", "agent_py_agent", "subagents-route-capabilities", "--dry-run", "--limit", "2"])
-run([sys.executable, "-m", "agent_py_agent", "subagents-acceptance", "--help"])
-run([sys.executable, "-m", "agent_py_agent", "subagent-context", "--help"])
-run([sys.executable, "-m", "agent_py_agent", "subagent-run", "--help"])
+run(agent_cmd("--help"))
+run(agent_cmd("run", "测试动态 prompt", "--inject", "请用三点回答", "--no-save"))
+run(agent_cmd("remember", "我喜欢清晰的表格", "--kind", "preference"))
+run(agent_cmd("memory-search", "表格"))
+run(agent_cmd("spawn-subagents", "开发 CLI 智能体", "--count", "2"))
+run(agent_cmd("subagents-probe", "--limit", "2"))
+run(agent_cmd("subagents-due-check", "--limit", "2"))
+run(agent_cmd("subagents-plan-actions", "--limit", "2"))
+run(agent_cmd("subagents-apply-actions", "--dry-run", "--limit", "2"))
+run(agent_cmd("subagents-route-capabilities", "--dry-run", "--limit", "2"))
+run(agent_cmd("subagents-acceptance", "--help"))
+run(agent_cmd("subagents-patches", "--help"))
+run(agent_cmd("subagent-context", "--help"))
+run(agent_cmd("subagent-run", "--help"))
+
+e2e_run_id = create_real_api_subagent_run()
+run(
+    agent_cmd(
+        "subagent-run",
+        e2e_run_id,
+        "--execute",
+        "--instruction",
+        (
+            "真实 API E2E 测试：必须先调用 read_file 读取 README.md，"
+            "然后输出一个裸 JSON 的 [SUBAGENT_RESULT]。"
+            "status=AWAITING_ACCEPTANCE；evidence 至少 1 条；tests 至少 1 条 ok=true；"
+            "不要使用 Markdown 代码围栏，不要标记 DONE。"
+        ),
+    )
+)
+run(agent_cmd("subagents-acceptance", "--apply", "--run-id", e2e_run_id, "--reviewer", "full-smoke"))
+assert_real_api_subagent_e2e(e2e_run_id)
 
 discovered_tests = run_capture(
     [
@@ -106,7 +192,7 @@ assert discovered_tests.returncode == 0
 assert "ALL_DISCOVERED_TESTS_PASS" in discovered_tests.stdout
 
 bad = run_capture(
-    [sys.executable, "-m", "agent_py_agent", "unknown-command"],
+    agent_cmd("unknown-command"),
 )
 print("bad-command-returncode", bad.returncode)
 assert bad.returncode != 0
@@ -121,7 +207,7 @@ chat_input = (
     "logout\n"
 )
 chat = run_capture(
-    [sys.executable, "-m", "agent_py_agent", "chat", "--no-save"],
+    agent_cmd("chat", "--no-save"),
     input=chat_input,
     timeout=30,
 )
