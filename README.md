@@ -180,6 +180,9 @@ python3 scripts/live_agent_lab.py --suite smoke
 ```bash
 my-agent run "你好，用一句话介绍你自己" --no-save
 # 直接调用一次真实模型；--no-save 表示不要把这轮写入长期记忆。
+
+my-agent run "继续刚才的 README 任务" --resume-context --show-prompt
+# 临时打开恢复上下文注入，并打印最终 prompt，方便检查它到底注入了哪些恢复线索。
 ```
 
 如果你想看后台 gateway 路径：
@@ -243,6 +246,9 @@ my-agent chat --gateway
 
 my-agent gateway ask "继续推进当前任务"
 # 给后台 gateway 发一条同步请求；会调用真实模型，并等待结果。
+
+my-agent gateway ask "继续推进当前任务" --resume-context --show-prompt
+# 临时打开恢复上下文注入，并在响应里打印最终 prompt。
 
 my-agent gateway ask "跑一个长任务" --no-wait
 # 异步投递请求，不等模型完成；会返回 request_id。
@@ -390,6 +396,7 @@ agent_py_agent/config/agent_config.yaml
 
 - 模型后端、API 地址、模型名、key 环境变量名。
 - 记忆路径和本地事实源路径。
+- memory raw/hook 归档、长期规则路由和可选恢复上下文注入开关。
 - gateway 工作区和请求超时。
 - daemon / runner / 调度策略。
 - 工具开关和工具返回长度。

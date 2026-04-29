@@ -116,3 +116,59 @@ def test_run_can_force_recovery_snapshot_without_raw_archive(tmp_path):
     assert snapshots[0]["task_refs"] == ["subagent-1"]
     assert snapshots[0]["content_paths"] == ["subagents/subagent-1/STATUS.md"]
     assert snapshots[0]["next_actions"] == ["读取 STATUS.md 后继续验收"]
+
+
+def test_auto_resume_context_is_disabled_by_default(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent.run("README 恢复上下文任务", save=True)
+
+    result = agent.run("继续 README", save=False)
+
+    assert result.memory_resume_context_injected is False
+    assert "### Auto Recovery Context" not in result.prompt
+
+
+def test_auto_resume_context_injects_on_trigger_when_enabled(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            memory_resume_auto_context_enabled=True,
+            memory_resume_auto_context_limit=3,
+        ),
+        tmp_path,
+    )
+    agent.run("README 恢复上下文任务", save=True, request_id="request-auto-1")
+
+    result = agent.run("继续 README", save=False)
+
+    assert result.memory_resume_context_injected is True
+    assert result.memory_resume_context_query == "README"
+    assert result.memory_resume_context_matches >= 1
+    assert "### Auto Recovery Context" in result.prompt
+    assert "# Recovery Brief" in result.prompt
+    assert "latest_user_intent: README 恢复上下文任务" in result.prompt
+    assert result.memory_resume_context_error == ""
+
+
+def test_auto_resume_context_can_be_enabled_per_run(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent.run("README 临时恢复开关任务", save=True, request_id="request-auto-override")
+
+    result = agent.run("继续 README", save=False, resume_context=True)
+
+    assert result.memory_resume_context_injected is True
+    assert result.memory_resume_context_token_estimate > 0
+    assert result.prompt_token_estimate >= result.memory_resume_context_token_estimate
+
+
+def test_auto_resume_context_can_be_disabled_per_run(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(model_backend="echo", memory_resume_auto_context_enabled=True),
+        tmp_path,
+    )
+    agent.run("README 禁用恢复开关任务", save=True)
+
+    result = agent.run("继续 README", save=False, resume_context=False)
+
+    assert result.memory_resume_context_injected is False
+    assert "### Auto Recovery Context" not in result.prompt

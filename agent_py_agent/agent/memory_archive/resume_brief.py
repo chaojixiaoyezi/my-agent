@@ -197,10 +197,21 @@ def _context_block(
 
 
 def _summary_line(label: str, values: list[str]) -> str:
+    """LLM: render one optional single-line summary item.
+
+    大白话：有值就输出 `名字: 内容`，没值就返回空字符串，避免简报里出现一堆 unknown 噪声。
+    """
+
     return f"{label}: {values[0]}" if values else ""
 
 
 def _string_list(value: object) -> list[str]:
+    """LLM: coerce a payload field into a clean list of strings.
+
+    大白话：hook 里可能已经是列表，也可能是单个字符串。
+    这里统一清洗掉空白，后面提取意图和动作时更稳。
+    """
+
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     text = str(value or "").strip()
@@ -208,6 +219,12 @@ def _string_list(value: object) -> list[str]:
 
 
 def _dedupe(values: list[str]) -> list[str]:
+    """LLM: remove duplicate strings without changing evidence order.
+
+    大白话：同一个意图可能同时出现在 raw 和 hook 里。
+    我们只保留第一次出现的版本，让简报短一点，也不打乱时间线。
+    """
+
     items: list[str] = []
     for value in values:
         text = value.strip()
@@ -217,6 +234,12 @@ def _dedupe(values: list[str]) -> list[str]:
 
 
 def _append(items: list[str], value: object) -> None:
+    """LLM: append one non-empty string if it is not already present.
+
+    大白话：集中收集 session/request/run/task ID 时用它去重。
+    这样下一步恢复可以拿到干净的 ID 列表。
+    """
+
     text = str(value or "").strip()
     if text and text not in items:
         items.append(text)

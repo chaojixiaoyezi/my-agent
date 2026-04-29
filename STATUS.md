@@ -2,7 +2,7 @@
 
 更新时间：2026-04-30
 
-当前阶段：`v0.4-dev / memory resume and archive observability`
+当前阶段：`v0.4-dev / memory resume and auto recovery context`
 
 总体状态：核心骨架已可运行，真实 API 全流程已通过；当前重点已经从“能跑”进入“可常驻、可观察、可恢复、可审计”。
 
@@ -10,6 +10,8 @@
 - 已完成完整从头到尾真实链路测试：CLI、memory、LocalStore、gateway、scenario、真实 API runner、父代理验收全部通过。
 - 已新增轻量 recovery snapshot 自动写入：普通 run/chat/gateway 默认随保存写 hook，subagent-run 在 runner 结果写回后写 run_id 恢复锚点。
 - `memory-resume` 已支持 `--context-only`，可以只输出稳定恢复块，方便人工 handoff、真实环境测试和后续自动注入。
+- 已新增可选恢复上下文自动注入：默认关闭；打开后在“继续/恢复/刚刚/run_id”等场景读取归档和事实源，把短 `Recovery Brief` 注入本轮 prompt。
+- `run/chat/gateway ask` 已支持 `--resume-context` / `--no-resume-context` 临时开关，并在状态行展示 prompt、injection、resume 的保守 token 估算。
 - 修复默认 gateway 入口缺少 chat handler 的回归；`my-agent` 默认入口可自动进入 gateway chat。
 - scenario-test 已按当前写入边界核对子代理 `task_dir/scenario_outputs/` 产物，避免旧路径误判。
 - 完整冒烟脚本最后统一改用 pytest 正常运行，避免跳过 pytest fixture 机制。
@@ -176,7 +178,7 @@ my-agent timeline --event-type gateway_request_completed --details
 - `py_compile`
 - `CLI_REFERENCE` 命令/参数覆盖测试
 - LocalStore 定向测试
-- pytest 全量测试：`126 passed`
+- pytest 全量测试：`131 passed`
 - 标准完整冒烟：`ALL_TESTS_PASS`
 - 真实 API gateway ask
 - 真实 API scenario-test happy path

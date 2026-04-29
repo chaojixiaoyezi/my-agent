@@ -41,6 +41,9 @@ class MemorySettings:
     memory_rule_routing_mode: str = "soft"
     memory_rule_auto_read_limit: int = 3
     memory_rule_receipt_enabled: bool = True
+    memory_resume_auto_context_enabled: bool = False
+    memory_resume_auto_context_mode: str = "trigger"
+    memory_resume_auto_context_limit: int = 5
 
 
 @dataclass(frozen=True)
@@ -136,6 +139,27 @@ def normalize_memory_settings(values: Mapping[str, Any] | object | None = None) 
             "memory_rule_receipt_enabled",
             _lookup(source, "memory_rule_receipt_enabled"),
             default=defaults.memory_rule_receipt_enabled,
+            warnings=warnings,
+        ),
+        memory_resume_auto_context_enabled=_coerce_bool(
+            "memory_resume_auto_context_enabled",
+            _lookup(source, "memory_resume_auto_context_enabled"),
+            default=defaults.memory_resume_auto_context_enabled,
+            warnings=warnings,
+        ),
+        memory_resume_auto_context_mode=_coerce_choice(
+            "memory_resume_auto_context_mode",
+            _lookup(source, "memory_resume_auto_context_mode"),
+            default=defaults.memory_resume_auto_context_mode,
+            choices={"off", "trigger", "always"},
+            warnings=warnings,
+        ),
+        memory_resume_auto_context_limit=_coerce_int(
+            "memory_resume_auto_context_limit",
+            _lookup(source, "memory_resume_auto_context_limit"),
+            default=defaults.memory_resume_auto_context_limit,
+            min_value=1,
+            max_value=50,
             warnings=warnings,
         ),
     )

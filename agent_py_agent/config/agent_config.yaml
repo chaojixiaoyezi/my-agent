@@ -52,6 +52,10 @@ auto_save_memory: true
 # - memory_rule_routing_mode:
 #   off: 不做长期规则路由；soft: 命中后提示/自动读少量规则；strict: 强规则场景必须读权威文件。
 # - memory_rule_auto_read_limit 表示每轮最多自动读取多少条规则正文；0 表示不自动读取。
+# - memory_resume_auto_context_enabled 默认关闭，避免普通请求因为恢复检索变慢。
+# - memory_resume_auto_context_mode:
+#   off: 不注入恢复块；trigger: 只有“继续/恢复/刚刚/run_id”等场景触发；always: 每轮都尝试。
+# - memory_resume_auto_context_limit 表示自动恢复最多拿多少条线索，范围 1-50。
 memory_archive_level: 3
 memory_hook_enabled: true
 memory_hook_archive_level: 3
@@ -60,6 +64,9 @@ memory_rule_routing_enabled: true
 memory_rule_routing_mode: "soft"
 memory_rule_auto_read_limit: 3
 memory_rule_receipt_enabled: true
+memory_resume_auto_context_enabled: false
+memory_resume_auto_context_mode: "trigger"
+memory_resume_auto_context_limit: 5
 
 # 是否启用自学习功能
 # - false: 默认关闭，只按已有 prompt、记忆、工具和 skill 工作，不自动沉淀新经验

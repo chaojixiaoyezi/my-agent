@@ -21,7 +21,7 @@ from ..agent.gateway import (
     wait_for_gateway_response,
     wait_for_gateway_running,
 )
-from .common import CHAT_PROMPT, FALLBACK_CHAT_PROMPT, make_agent
+from .common import CHAT_PROMPT, FALLBACK_CHAT_PROMPT, make_agent, resume_context_override
 from .models import ChatJob
 
 try:
@@ -114,6 +114,7 @@ def cmd_chat(args) -> int:
                         prompt_files=job.prompt_files,
                         save=not args.no_save,
                         include_prompt=job.show_prompt,
+                        resume_context=resume_context_override(args),
                         agent=agent,
                     )
                     timeout = (
@@ -133,7 +134,9 @@ def cmd_chat(args) -> int:
                         print("===== RESPONSE =====")
                     print(
                         f"[耗时 {elapsed:.2f}s; gateway_request={request_id}; "
-                        f"工具轮数 {response.get('tool_rounds', 0)}]"
+                        f"工具轮数 {response.get('tool_rounds', 0)}; "
+                        f"prompt_tokens≈{response.get('prompt_token_estimate', 0)}; "
+                        f"resume_context={1 if response.get('memory_resume_context_injected') else 0}]"
                     )
                     if response.get("ok"):
                         print(f"{agent.config.agent_name}> {response.get('response', '')}")
@@ -146,6 +149,7 @@ def cmd_chat(args) -> int:
                         prompt_files=job.prompt_files,
                         save=not args.no_save,
                         source="chat",
+                        resume_context=resume_context_override(args),
                         recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
                     )
                     elapsed = time.perf_counter() - started_at
@@ -153,7 +157,11 @@ def cmd_chat(args) -> int:
                         print("===== FINAL PROMPT =====")
                         print(result.prompt)
                         print("===== RESPONSE =====")
-                    print(f"[耗时 {elapsed:.2f}s; 工具轮数 {result.tool_rounds}]")
+                    print(
+                        f"[耗时 {elapsed:.2f}s; 工具轮数 {result.tool_rounds}; "
+                        f"prompt_tokens≈{result.prompt_token_estimate}; "
+                        f"resume_context={1 if result.memory_resume_context_injected else 0}]"
+                    )
                     print(f"{agent.config.agent_name}> {result.response}")
             except Exception as exc:
                 print(f"错误: {exc}")

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 
-from ..memory_archive import archive_run_turn, write_recovery_snapshot
+from ..memory_archive import archive_run_turn, build_auto_resume_context, estimate_tokens, write_recovery_snapshot
 from ..memory_routing import build_routed_memory_context
 from ..tools import ToolExecutionResult
 from .models import AgentRunResult
@@ -37,6 +37,7 @@ class SimpleAgentRuntimeMixin:
         task_id: str = "",
         source: str = "run",
         recovery_snapshot: bool | None = None,
+        resume_context: bool | None = None,
         recovery_task_refs: list[str] | None = None,
         recovery_content_paths: list[str] | None = None,
         recovery_next_actions: list[str] | None = None,
@@ -55,8 +56,16 @@ class SimpleAgentRuntimeMixin:
             auto_read_limit=route_auto_read_limit,
             limit=max(route_auto_read_limit, 5),
         )
+        resume_context_result = build_auto_resume_context(self, user_prompt, enabled=resume_context)
+        resume_context_section = (
+            "### Auto Recovery Context\n"
+            f"{resume_context_result.context_block}"
+            if resume_context_result.injected
+            else ""
+        )
         runtime_injections = [
             *(inject or []),
+            *([resume_context_section] if resume_context_section else []),
             *routed_context.injected_sections,
         ]
         tool_catalog_section = (
@@ -211,10 +220,23 @@ class SimpleAgentRuntimeMixin:
             ],
             archive_events=archive_result.event_count if archive_result else 0,
             archive_token_estimate=archive_result.token_estimate if archive_result else 0,
+            prompt_token_estimate=estimate_tokens(final_prompt),
+            runtime_injection_token_estimate=estimate_tokens(runtime_injections) if runtime_injections else 0,
             recovery_snapshot_id=snapshot_result.snapshot_id if snapshot_result else "",
             recovery_snapshot_path=snapshot_result.path if snapshot_result else "",
             recovery_snapshot_error=snapshot_result.error if snapshot_result else "",
             recovery_snapshot_token_estimate=snapshot_result.token_estimate if snapshot_result else 0,
+            memory_resume_context_injected=resume_context_result.injected,
+            memory_resume_context_query=resume_context_result.query,
+            memory_resume_context_matches=(
+                resume_context_result.archive_match_count
+                + resume_context_result.local_match_count
+                + resume_context_result.task_fact_source_count
+            ),
+            memory_resume_context_token_estimate=estimate_tokens(resume_context_result.context_block)
+            if resume_context_result.injected
+            else 0,
+            memory_resume_context_error=resume_context_result.error,
         )
 
     def remember(self, content: str, *, kind: str = "note"):

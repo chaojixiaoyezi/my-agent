@@ -23,6 +23,20 @@ CHAT_PROMPT = "你> "
 FALLBACK_CHAT_PROMPT = "user> "
 
 
+def add_resume_context_switches(command) -> None:
+    """LLM: add tri-state CLI switches for optional recovery context injection.
+
+    给人看的解释：
+    不传参数就按配置走；`--resume-context` 临时打开；`--no-resume-context` 临时关闭。
+    这样测试恢复能力时不用反复改 YAML。
+    """
+
+    group = command.add_mutually_exclusive_group()
+    group.add_argument("--resume-context", dest="resume_context", action="store_true", help="本次请求临时启用恢复上下文注入")
+    group.add_argument("--no-resume-context", dest="resume_context", action="store_false", help="本次请求临时关闭恢复上下文注入")
+    command.set_defaults(resume_context=None)
+
+
 def configure_stdio() -> None:
     """把标准输出尽量固定到 UTF-8。
 
@@ -87,6 +101,17 @@ def format_local_time(timestamp: float) -> str:
     if not timestamp:
         return "-"
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+
+
+def resume_context_override(args) -> bool | None:
+    """LLM: read the tri-state CLI override for automatic recovery context.
+
+    给人看的解释：
+    命令行有三种状态：没传参数就返回 None，表示按配置走；
+    传 `--resume-context` 返回 True，传 `--no-resume-context` 返回 False。
+    """
+
+    return getattr(args, "resume_context", None)
 
 
 def _memory_record_count(agent: SimpleAgent) -> int:
