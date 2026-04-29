@@ -1635,6 +1635,8 @@ def cmd_chat(args) -> int:
         if PromptSession is not None and sys.stdin.isatty() and sys.stdout.isatty()
         else None
     )
+    fallback_interactive = prompt_session is None and sys.stdin.isatty() and sys.stdout.isatty()
+    fallback_waiting_for_input = False
 
     def bottom_toolbar() -> str:
         with state_lock:
@@ -1645,6 +1647,21 @@ def cmd_chat(args) -> int:
         if is_running:
             return f"思考中... {elapsed:.0f}s | 队列 {pending_jobs}"
         return f"等待处理 | 队列 {pending_jobs}"
+
+    def redraw_fallback_prompt() -> None:
+        """Redraw the plain input prompt after background output.
+
+        prompt_toolkit handles this automatically. The stdlib input() fallback
+        does not, so a background reply can leave the terminal without a visible
+        `user> ` prompt even though input is still waiting.
+        """
+
+        if not fallback_interactive:
+            return
+        with state_lock:
+            should_redraw = fallback_waiting_for_input and not shutting_down
+        if should_redraw:
+            print(FALLBACK_CHAT_PROMPT, end="", flush=True)
 
     def worker() -> None:
         nonlocal is_running, pending_jobs, running_prompt, running_started_at
@@ -1715,6 +1732,7 @@ def cmd_chat(args) -> int:
                     running_prompt = ""
                     running_started_at = 0.0
                 jobs.task_done()
+                redraw_fallback_prompt()
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -1749,7 +1767,17 @@ def cmd_chat(args) -> int:
                         refresh_interval=1,
                     ).strip()
                 else:
-                    user = input(FALLBACK_CHAT_PROMPT).strip()
+                    if fallback_interactive:
+                        print(FALLBACK_CHAT_PROMPT, end="", flush=True)
+                        with state_lock:
+                            fallback_waiting_for_input = True
+                        try:
+                            user = input().strip()
+                        finally:
+                            with state_lock:
+                                fallback_waiting_for_input = False
+                    else:
+                        user = input(FALLBACK_CHAT_PROMPT).strip()
             except (EOFError, KeyboardInterrupt):
                 print("\n再见。")
                 return 0
