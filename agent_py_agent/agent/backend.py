@@ -51,7 +51,8 @@ class EchoBackend(BaseBackend):
     def generate(self, prompt: str) -> ModelResponse:
         lines = [line.strip() for line in prompt.splitlines() if line.strip()]
         if "# User Task" in prompt:
-            task = prompt.split("# User Task", 1)[-1].strip()
+            task = prompt.split("# User Task", 1)[-1]
+            task = task.split("\n# ", 1)[0].strip()
         else:
             task = lines[-1] if lines else "空任务"
 

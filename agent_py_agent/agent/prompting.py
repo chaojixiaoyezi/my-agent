@@ -3,13 +3,14 @@ from __future__ import annotations
 """主智能体使用的 prompt 拼装器。
 
 这个模块的职责很纯粹：
-把系统人格、相关记忆、动态规则、工具目录、候选工具详情、工具执行记录和用户任务
+把系统人格、相关记忆、动态规则、工具目录、候选工具详情、用户任务和工具执行记录
 按固定顺序拼成模型真正看到的上下文。
 
 顺序设计不是随便排的：
 - 前面先放人格和长期规则，保证回答风格稳定
 - 中间放记忆和工具信息，帮助模型理解“这次该怎么做”
-- 最后放用户任务，尽量让模型聚焦当前问题
+- 没有工具记录时，最后放用户任务，让模型聚焦当前问题
+- 已经有工具记录时，最后放工具记录和继续指令，让模型从最新工具结果往下走
 """
 
 from pathlib import Path
@@ -65,6 +66,20 @@ class PromptBuilder:
         dynamic = "\n".join(self.read_prompt_files(prompt_files))
         injected = "\n".join(inject or [])
         tools_history = "\n\n".join(tool_context or [])
+        if tools_history:
+            task_and_transcript = (
+                f"# User Task\n{user_prompt}\n\n"
+                f"# Tool Transcript\n{tools_history}\n\n"
+                "# Continue From Tool Transcript\n"
+                "从最新的工具结果继续推进，不要重新开始任务。"
+                "如果某个工具调用已经成功，不要重复调用同一个工具和同一组参数；"
+                "直接使用已有结果进入下一步，或在证据足够时给出最终答案。"
+            )
+        else:
+            task_and_transcript = (
+                "# Tool Transcript\n（无）\n\n"
+                f"# User Task\n{user_prompt}"
+            )
         return (
             f"# System\n{self.config.system_prompt}\n\n"
             f"# Related Memory\n{memory_text}\n\n"
@@ -72,6 +87,5 @@ class PromptBuilder:
             f"# Runtime Injection\n{injected or '（无）'}\n\n"
             f"{tool_catalog_section or '# Tools\\n（当前未启用工具）'}\n\n"
             f"{tool_recommendations_section or '# Recommended Tools\\n（当前无候选工具详情）'}\n\n"
-            f"# Tool Transcript\n{tools_history or '（无）'}\n\n"
-            f"# User Task\n{user_prompt}\n"
+            f"{task_and_transcript}\n"
         )
