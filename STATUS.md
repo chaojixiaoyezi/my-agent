@@ -7,6 +7,8 @@
 总体状态：核心骨架已可运行，真实 API 全流程已通过；当前重点已经从“能跑”进入“可常驻、可观察、可恢复、可审计”。
 
 最新推进：
+- 新增 workstream 并行开发工作台：用 git worktree 隔离 memory、runtime、tools-boundary、live-lab 等开发线，并提供状态查看、可见终端打开和 handoff 模板。
+- 新增 Live Lab 可见真实环境测试台：可以新开 Terminal 观察 prompt、命令、响应和证据路径，并默认使用隔离 workspace。
 - 已新增 `local-doctor` / `local-rebuild`，可从 memory、gateway、subagent 文件事实源诊断并重建 LocalStore。
 - `status` 已输出 suggested actions，能提示 gateway、LocalStore 和 subagent 的下一步处理动作。
 - gateway 请求队列新增 `failed` 归档、processing lease、超时重排/失败归档和保守 request worker pool。
@@ -182,6 +184,10 @@ my-agent timeline --event-type gateway_request_completed --details
 
 ```powershell
 python agent_py_agent/tests/run_tests.py
+python3 scripts/live_agent_lab.py --suite smoke
+scripts/open_live_lab.sh --suite real --real-llm --timeout 300 --count 1 --max-cycles 2
+bash -n scripts/workstream_*.sh scripts/open_workstream.sh
+scripts/workstream_status.sh
 ```
 
 注意：完整冒烟按当前约定会调用真实 API。

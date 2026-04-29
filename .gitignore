@@ -8,3 +8,5 @@ agent_py_agent/*/__pycache__/
 .env
 .env.*
 !.env.example
+validation/live_lab/
+my-agent-worktrees/
