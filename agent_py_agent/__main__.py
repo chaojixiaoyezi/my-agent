@@ -478,6 +478,107 @@ def cmd_subagents_dispatch(args) -> int:
     return 0
 
 
+def cmd_daemon(args) -> int:
+    """按配置启动前台常驻调度。"""
+
+    agent = make_agent(args)
+    cfg = agent.config
+    apply = cfg.daemon_apply if args.apply is None else args.apply
+    execute_runners = (
+        cfg.daemon_execute_runners if args.execute_runners is None else args.execute_runners
+    )
+    planner = cfg.daemon_planner if args.planner is None else args.planner
+    if execute_runners and not apply:
+        print("daemon_execute_runners / --execute-runners 必须和 daemon_apply / --apply 一起使用。", file=sys.stderr)
+        return 2
+
+    interval = args.interval if args.interval is not None else cfg.daemon_interval
+    max_runners = args.max_runners if args.max_runners is not None else cfg.daemon_max_runners
+    limit = args.limit if args.limit is not None else cfg.daemon_limit
+    max_cycles = args.max_cycles if args.max_cycles is not None else cfg.daemon_max_cycles
+    max_cards = args.max_cards if args.max_cards is not None else cfg.daemon_max_cards
+    reviewer = args.reviewer or cfg.daemon_reviewer
+    instruction = args.instruction if args.instruction is not None else cfg.daemon_runner_instruction
+    probe = False if args.no_probe else cfg.daemon_probe
+
+    invalid_number = _validate_daemon_numbers(
+        interval=interval,
+        max_runners=max_runners,
+        limit=limit,
+        max_cycles=max_cycles,
+        max_cards=max_cards,
+    )
+    if invalid_number:
+        print(invalid_number, file=sys.stderr)
+        return 2
+
+    capability_config = load_capability_config(args.capability_config)
+    router = make_capability_router(agent, capability_config, args.skill_dir)
+    mode = "apply" if apply else "dry-run"
+    print("MY-AGENT DAEMON")
+    print("mode=foreground")
+    print(
+        f"dispatch_mode={mode} planner={planner} execute_runners={execute_runners} "
+        f"interval={interval} max_runners={max_runners} max_cycles={max_cycles}"
+    )
+    print("停止：Ctrl+C")
+    try:
+        report = agent.watch_subagents(
+            router,
+            capability_config,
+            apply=apply,
+            execute_runners=execute_runners,
+            planner=planner,
+            max_runners=max_runners,
+            limit=limit,
+            reviewer=reviewer,
+            note=args.note or "",
+            runner_instruction=instruction or "",
+            max_cards=max_cards,
+            probe=probe,
+            take_over_by=args.take_over_by or "",
+            locked_files=args.locked_file or [],
+            interval=interval,
+            max_cycles=max_cycles,
+            force_lock=args.force_lock,
+        )
+    except KeyboardInterrupt:
+        print("\ndaemon stopped by Ctrl+C")
+        return 130
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    print("DAEMON EXITED")
+    print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
+    print(f"heartbeat: {agent.subagents.workspace / 'subagent_dispatch_watch_heartbeat.json'}")
+    print(f"watch: {agent.subagents.workspace / 'SUBAGENT_DISPATCH_WATCH.md'}")
+    if planner:
+        print(f"planner: {agent.subagents.workspace / 'PARENT_PLANNER.md'}")
+    return 0
+
+
+def _validate_daemon_numbers(
+    *,
+    interval: float,
+    max_runners: int,
+    limit: int,
+    max_cycles: int,
+    max_cards: int,
+) -> str:
+    if interval < 0:
+        return "daemon_interval / --interval 不能小于 0；0 表示每轮之间不等待，通常只用于测试。"
+    if max_runners < 0:
+        return "daemon_max_runners / --max-runners 不能小于 0；0 表示本轮不执行 runner。"
+    if limit <= 0:
+        return "daemon_limit / --limit 必须大于 0。"
+    if max_cycles < 0:
+        return "daemon_max_cycles / --max-cycles 不能小于 0；0 表示持续运行。"
+    if max_cards < 0:
+        return "daemon_max_cards / --max-cards 不能小于 0；0 表示不限制。"
+    return ""
+
+
 def cmd_subagent_context(args) -> int:
     """生成单个 subagent 的执行上下文包。"""
 
@@ -870,10 +971,10 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch.add_argument("--apply", action="store_true", help="执行低风险调度动作并写审计日志")
     dispatch.add_argument("--execute-runners", action="store_true", help="配合 --apply 调用真实模型执行 runner")
     dispatch.add_argument("--planner", action="store_true", help="有待处理事项时调用父代理 LLM planner，禁止空心 HEARTBEAT_OK")
-    dispatch.add_argument("--max-runners", type=int, default=1, help="本轮最多推进多少个 runner")
+    dispatch.add_argument("--max-runners", type=int, default=1, help="本轮最多推进多少个 runner，0 表示不执行 runner")
     dispatch.add_argument("--limit", type=int, default=20, help="每个阶段最多处理多少条记录")
     dispatch.add_argument("--watch", action="store_true", help="持续循环执行 dispatch")
-    dispatch.add_argument("--interval", type=float, default=30.0, help="watch 模式每轮间隔秒数")
+    dispatch.add_argument("--interval", type=float, default=30.0, help="watch 模式每轮间隔秒数，0 表示不等待")
     dispatch.add_argument("--max-cycles", type=int, default=0, help="watch 模式最多循环次数，0 表示持续运行")
     dispatch.add_argument("--force-lock", action="store_true", help="强制覆盖已有 watch lock")
     dispatch.add_argument("--reviewer", default="parent-dispatch", help="patch/acceptance 审核者标识")
@@ -885,6 +986,33 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch.add_argument("--locked-file", action="append", help="接管时锁定的文件，可多次传入")
     dispatch.add_argument("--skill-dir", action="append", help="额外 skill 目录，可多次传入")
     dispatch.set_defaults(func=cmd_subagents_dispatch, apply=False)
+
+    daemon = sub.add_parser("daemon", help="按配置启动前台常驻调度")
+    daemon.add_argument(
+        "--capability-config",
+        default=str(DEFAULT_CAPABILITY_CONFIG),
+        help="能力路由配置文件路径，默认使用 config/capability_config.yaml",
+    )
+    daemon.add_argument("--dry-run", action="store_false", dest="apply", default=None, help="覆盖配置：只生成报告，不写回")
+    daemon.add_argument("--apply", action="store_true", default=None, help="覆盖配置：写回低风险动作和审计日志")
+    daemon.add_argument("--execute-runners", action="store_true", dest="execute_runners", default=None, help="覆盖配置：配合 apply 调用真实模型执行 runner")
+    daemon.add_argument("--no-execute-runners", action="store_false", dest="execute_runners", help="覆盖配置：不调用真实模型执行 runner")
+    daemon.add_argument("--planner", action="store_true", dest="planner", default=None, help="覆盖配置：启用父代理 LLM planner")
+    daemon.add_argument("--no-planner", action="store_false", dest="planner", help="覆盖配置：关闭父代理 LLM planner")
+    daemon.add_argument("--interval", type=float, help="覆盖配置：每轮间隔秒数，0 表示不等待")
+    daemon.add_argument("--max-runners", type=int, help="覆盖配置：每轮最多推进多少个 runner，0 表示不执行 runner")
+    daemon.add_argument("--limit", type=int, help="覆盖配置：每个阶段最多处理多少条记录")
+    daemon.add_argument("--max-cycles", type=int, help="覆盖配置：最多循环次数，0 表示持续运行")
+    daemon.add_argument("--force-lock", action="store_true", help="强制覆盖已有 watch lock")
+    daemon.add_argument("--reviewer", help="覆盖配置：patch/acceptance 审核者标识")
+    daemon.add_argument("--note", help="写入调度关联审核记录的备注")
+    daemon.add_argument("--instruction", help="覆盖配置：给 runner 的额外指令")
+    daemon.add_argument("--max-cards", type=int, help="覆盖配置：runner 最多注入多少张能力卡，0 表示不限制")
+    daemon.add_argument("--no-probe", action="store_true", help="覆盖配置：执行 runner 前不做通道健康检查")
+    daemon.add_argument("--take-over-by", help="接管动作的接管者，apply takeover 时必填")
+    daemon.add_argument("--locked-file", action="append", help="接管时锁定的文件，可多次传入")
+    daemon.add_argument("--skill-dir", action="append", help="额外 skill 目录，可多次传入")
+    daemon.set_defaults(func=cmd_daemon)
 
     subagent_context = sub.add_parser("subagent-context", help="生成单个 subagent 执行上下文包")
     subagent_context.add_argument("run_id", help="子代理运行 ID")

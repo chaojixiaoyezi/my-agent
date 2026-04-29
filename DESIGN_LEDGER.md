@@ -840,3 +840,22 @@ suggested_tool: 是否建议开发成 tool
 后续方向：
 - 让 planner 的 action plan 接入更丰富的受控动作，如 spawn-subagents、reassign、takeover。
 - gateway 后台化后，把 planner tick 作为后台事件的一等公民。
+
+## 2026-04-29 / 配置驱动 daemon 入口
+
+状态：已落地
+
+思路：
+- `subagents-dispatch --watch --planner --apply --execute-runners --interval 30 --max-runners 1` 太长，不适合作为日常启动命令。
+- 在 gateway/service 形态确定前，先提供 `my-agent daemon` 前台入口，并把常驻参数移到 `agent_config.yaml`。
+- 默认配置必须安全：不写回、不执行 runner；用户确认后再把 `daemon_apply` 和 `daemon_execute_runners` 改为 true。
+
+已落地：
+- 新增 `daemon_*` 配置：planner、apply、execute_runners、interval、max_runners、limit、max_cycles、max_cards、probe、reviewer、runner_instruction。
+- 新增 `my-agent daemon`，按配置启动前台常驻调度。
+- daemon 支持少量 CLI override，用于临时测试或手动覆盖配置。
+- 明确 `0` 值语义：`max_cycles=0` 持续运行，`max_runners=0` 不执行 runner，`max_cards=0` 不限制，`interval=0` 不等待且主要用于测试。
+
+后续方向：
+- 在这个入口之上做真正后台 `gateway start/status/stop/restart`。
+- 增加 pid 文件、stdout/stderr 日志轮转和 Windows 后台进程管理。

@@ -45,6 +45,7 @@ python -m agent_py_agent --help
 | 一轮父代理调度 | `my-agent subagents-dispatch` | 否 | 否，默认 dry-run |
 | 持续父代理调度 | `my-agent subagents-dispatch --watch --interval 30` | 前台常驻 | 否，除非加 `--apply --execute-runners` |
 | 父代理 LLM planner 调度 | `my-agent subagents-dispatch --watch --planner --interval 30` | 前台常驻 | 是，有待处理事项时调用父代理 planner |
+| 配置驱动前台 daemon | `my-agent daemon` | 前台常驻 | 取决于 `daemon_*` 配置 |
 | 真实 runner 调度 | `my-agent subagents-dispatch --apply --execute-runners` | 否 | 是 |
 | 子代理单次执行 | `my-agent subagent-run <run_id> --execute` | 否 | 是 |
 
@@ -68,6 +69,12 @@ my-agent subagents-dispatch --watch --interval 30
 
 ```powershell
 my-agent subagents-dispatch --watch --planner --interval 30
+```
+
+按配置启动前台 daemon：
+
+```powershell
+my-agent daemon
 ```
 
 持续巡检并允许真实推进 runner：
@@ -101,6 +108,7 @@ Ctrl+C
 | `subagents-acceptance` | 验收等待验收的 subagent | `--apply` 时写回状态和审计日志 | 否 |
 | `subagents-patches` | 审核 runner 输出的 patch 记录 | `--apply` 时写 patch 审核状态和日志 | 否 |
 | `subagents-dispatch` | 执行父代理调度 | dry-run 写报告；`--apply` 写回 | 只有 `--apply --execute-runners` 会调用 |
+| `daemon` | 按 `agent_config.yaml` 的 `daemon_*` 配置启动前台常驻调度 | 取决于配置 | 取决于配置 |
 | `subagent-context` | 生成单个 subagent 执行上下文 | 是 | 否 |
 | `subagent-run` | 按执行上下文运行一个 subagent | 是 | 只有 `--execute` 会调用 |
 | `subagent` | 查看单个 subagent 详情 | 否 | 否 |
@@ -308,10 +316,10 @@ my-agent subagents-dispatch --watch --planner --interval 30
 | `--apply` | `false` | 执行低风险调度动作并写审计日志。 |
 | `--execute-runners` | `false` | 配合 `--apply` 调用真实模型执行 runner；不能单独使用。 |
 | `--planner` | `false` | 有 active/pending/stalled/needs-intervention 事项时调用父代理 LLM planner；如果模型只回 `HEARTBEAT_OK`，会被 gate 标记为失败。 |
-| `--max-runners <n>` | `1` | 本轮最多推进多少个 runner。 |
+| `--max-runners <n>` | `1` | 本轮最多推进多少个 runner；`0` 表示不执行 runner。 |
 | `--limit <n>` | `20` | 每个阶段最多处理多少条记录。 |
 | `--watch` | `false` | 持续循环执行 dispatch。 |
-| `--interval <seconds>` | `30.0` | watch 模式每轮间隔秒数。 |
+| `--interval <seconds>` | `30.0` | watch 模式每轮间隔秒数；`0` 表示不等待，通常只用于测试或单轮验证。 |
 | `--max-cycles <n>` | `0` | watch 模式最多循环次数，`0` 表示持续运行。 |
 | `--force-lock` | `false` | 强制覆盖已有 watch lock；只应在确认旧进程已退出后使用。 |
 | `--reviewer <name>` | `parent-dispatch` | patch/acceptance 审核者标识。 |
@@ -342,6 +350,61 @@ agent_py_agent/data/subagents/parent_planner_prompt.md
 agent_py_agent/data/subagents/parent_planner_response.md
 agent_py_agent/data/subagents/parent_planner_log.jsonl
 agent_py_agent/data/subagents/PARENT_PLANNER_LOG.md
+```
+
+## `daemon`
+
+```powershell
+my-agent daemon
+```
+
+`daemon` 是配置驱动的前台常驻入口，等价于按 `agent_config.yaml` 的 `daemon_*` 配置调用 `subagents-dispatch --watch ...`。它不是后台 service，终端关闭或 `Ctrl+C` 后会停止。
+
+常用覆盖：
+
+```powershell
+my-agent daemon --apply --execute-runners
+my-agent daemon --max-cycles 1 --interval 0 --no-planner
+```
+
+| 参数 | 默认值来源 | 说明 |
+| --- | --- | --- |
+| `--capability-config <path>` | `agent_py_agent/config/capability_config.yaml` | 指定能力路由配置。 |
+| `--dry-run` | 覆盖 `daemon_apply` | 只生成报告，不写回。 |
+| `--apply` | 覆盖 `daemon_apply` | 写回低风险动作和审计日志。 |
+| `--execute-runners` | 覆盖 `daemon_execute_runners` | 配合 apply 调用真实模型执行 runner。 |
+| `--no-execute-runners` | 覆盖 `daemon_execute_runners` | 不调用真实模型执行 runner。 |
+| `--planner` | 覆盖 `daemon_planner` | 启用父代理 LLM planner。 |
+| `--no-planner` | 覆盖 `daemon_planner` | 关闭父代理 LLM planner。 |
+| `--interval <seconds>` | `daemon_interval` | 每轮调度结束后的等待秒数；`0` 表示不等待，通常只用于测试或单轮验证。 |
+| `--max-runners <n>` | `daemon_max_runners` | 每轮最多推进多少个 runner；`0` 表示不执行 runner。 |
+| `--limit <n>` | `daemon_limit` | 每个阶段最多处理多少条记录。 |
+| `--max-cycles <n>` | `daemon_max_cycles` | 最多循环次数，`0` 表示持续运行。 |
+| `--force-lock` | - | 强制覆盖已有 watch lock。 |
+| `--reviewer <name>` | `daemon_reviewer` | patch/acceptance 审核者标识。 |
+| `--note <text>` | - | 写入调度关联审核记录的备注。 |
+| `--instruction <text>` | `daemon_runner_instruction` | 给 runner 的额外指令。 |
+| `--max-cards <n>` | `daemon_max_cards` | runner 最多注入多少张能力卡；`0` 表示不限制。 |
+| `--no-probe` | 覆盖 `daemon_probe` | 执行 runner 前不做通道健康检查。 |
+| `--take-over-by <name>` | - | 接管动作的接管者，apply takeover 时必填。 |
+| `--locked-file <path>` | - | 接管时锁定的文件，可多次传入。 |
+| `--skill-dir <path>` | - | 额外 skill 目录，可多次传入。 |
+
+默认配置位置：
+
+```yaml
+# 0 是显式策略值，不表示“未设置”
+daemon_planner: true
+daemon_apply: false
+daemon_execute_runners: false
+daemon_interval: 30
+daemon_max_runners: 1
+daemon_limit: 20
+daemon_max_cycles: 0
+daemon_max_cards: 0
+daemon_probe: true
+daemon_reviewer: "parent-daemon"
+daemon_runner_instruction: ""
 ```
 
 ## `subagent-context`

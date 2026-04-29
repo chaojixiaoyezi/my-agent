@@ -44,6 +44,27 @@ max_subagents: 5
 # 子任务记录输出目录
 subagent_workspace: "data/subagents"
 
+# 前台 daemon 默认策略：
+# - my-agent daemon 会读取这些配置，减少启动时的长参数
+# - 默认不写回、不执行 runner，避免刚安装后误触真实任务推进
+# - 本地确认后可以把 daemon_apply / daemon_execute_runners 改成 true
+# - 数字项里的 0 是显式策略值，不是“未设置”：
+#   daemon_max_cycles=0 表示持续运行
+#   daemon_max_runners=0 表示不执行 runner
+#   daemon_max_cards=0 表示不限制能力卡数量
+#   daemon_interval=0 表示每轮之间不等待，通常只用于测试或单轮验证
+daemon_planner: true
+daemon_apply: false
+daemon_execute_runners: false
+daemon_interval: 30
+daemon_max_runners: 1
+daemon_limit: 20
+daemon_max_cycles: 0
+daemon_max_cards: 0
+daemon_probe: true
+daemon_reviewer: "parent-daemon"
+daemon_runner_instruction: ""
+
 # 日志级别预留字段
 log_level: "info"
 

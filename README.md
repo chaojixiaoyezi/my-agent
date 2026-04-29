@@ -13,7 +13,7 @@ python -m pip install -e .
 ```bash
 my-agent --help
 my-agent chat
-my-agent subagents-dispatch --watch --interval 30
+my-agent daemon
 ```
 
 完整参数手册见 [CLI_REFERENCE.md](CLI_REFERENCE.md)。
@@ -23,10 +23,12 @@ my-agent subagents-dispatch --watch --interval 30
 当前常驻方式是一个前台 watch 进程：
 
 ```bash
-my-agent subagents-dispatch --watch --planner --apply --execute-runners --interval 30 --max-runners 1
+my-agent daemon
 ```
 
-它会持续写 heartbeat、watch log 和 lock。加上 `--planner` 后，如果 gate 发现仍有 active/pending/stalled/needs-intervention 事项，会触发完整父代理 LLM turn；如果模型只回 `HEARTBEAT_OK`，会被记录为失败。Gateway 方式可以作为下一阶段：由 `my-agent gateway start/status/stop` 管理后台 watch 进程，CLI 再和 gateway 通信。
+`daemon` 会读取 `agent_config.yaml` 里的 `daemon_*` 配置，持续写 heartbeat、watch log 和 lock。开启 planner 后，如果 gate 发现仍有 active/pending/stalled/needs-intervention 事项，会触发完整父代理 LLM turn；如果模型只回 `HEARTBEAT_OK`，会被记录为失败。Gateway 方式可以作为下一阶段：由 `my-agent gateway start/status/stop` 管理后台 watch 进程，CLI 再和 gateway 通信。
+
+`daemon_*` 数字项里的 `0` 是显式策略值，不是“未设置”：`daemon_max_cycles=0` 表示持续运行，`daemon_max_runners=0` 表示不执行 runner，`daemon_max_cards=0` 表示不限制能力卡数量，`daemon_interval=0` 表示每轮之间不等待，通常只用于测试或单轮验证。
 
 一个用 Python3 标准库搭起来的个人通用智能体骨架。
 

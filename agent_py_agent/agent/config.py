@@ -35,6 +35,17 @@ class AgentConfig:
     enable_subagents: bool = True
     max_subagents: int = 5
     subagent_workspace: str = "data/subagents"
+    daemon_planner: bool = True
+    daemon_apply: bool = False
+    daemon_execute_runners: bool = False
+    daemon_interval: int = 30
+    daemon_max_runners: int = 1
+    daemon_limit: int = 20
+    daemon_max_cycles: int = 0
+    daemon_max_cards: int = 0
+    daemon_probe: bool = True
+    daemon_reviewer: str = "parent-daemon"
+    daemon_runner_instruction: str = ""
     log_level: str = "info"
     extensions_dir: str = "extensions"
     api_base: str = "https://api.openai.com/v1"

@@ -19,7 +19,7 @@ python3 -m agent_py_agent
 
 ```bash
 my-agent chat
-my-agent subagents-dispatch --watch --interval 30
+my-agent daemon
 ```
 
 完整参数手册见仓库根目录的 [CLI_REFERENCE.md](../CLI_REFERENCE.md)。
@@ -266,8 +266,10 @@ python3 -m agent_py_agent subagents-dispatch --apply --execute-runners
 watch 常驻循环：
 
 ```bash
-python3 -m agent_py_agent subagents-dispatch --watch --interval 30
+python3 -m agent_py_agent daemon
 ```
+
+`daemon` 默认读取 `agent_config.yaml` 里的 `daemon_*` 配置。数字项里的 `0` 是显式策略值：`daemon_max_cycles=0` 表示持续运行，`daemon_max_runners=0` 表示不执行 runner，`daemon_max_cards=0` 表示不限制能力卡数量，`daemon_interval=0` 表示每轮之间不等待，通常只用于测试或单轮验证。
 
 父代理 LLM planner 常驻循环：
 
