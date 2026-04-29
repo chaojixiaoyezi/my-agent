@@ -4,6 +4,9 @@ import json
 import tempfile
 from pathlib import Path
 
+from agent_py_agent.__main__ import _handle_gateway_request, gateway_paths, submit_gateway_ask
+from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.local_store import LocalStore
 from agent_py_agent.agent.memory import JsonlMemory
 
@@ -81,3 +84,63 @@ def test_jsonl_memory_can_backfill_existing_records():
         assert memory.index_all() == 1
         assert store.stats()["record_count"] == 1
         assert memory.search("补建", top_k=1)[0].role == "assistant"
+
+
+def test_subagent_flow_indexes_logs_to_local_store():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(
+            model_backend="echo",
+            memory_path="memory.jsonl",
+            subagent_workspace="subs",
+            local_store_path="local_store/local.db",
+            local_store_files_dir="local_store/files",
+            local_store_events_path="local_store/events.jsonl",
+        )
+        agent = SimpleAgent(cfg, root)
+        task = agent.subagents.create_run(
+            goal="统一日志测试：让子代理记录可以搜索",
+            thought="验证 subagent_run 和 runner_result 会进入 LocalStore。",
+            plan=["生成工单", "执行 dry-run runner", "搜索日志"],
+        )
+
+        run_hits = agent.local_store.search("统一日志测试", source_type="subagent_run")
+        assert len(run_hits) == 1
+        assert run_hits[0].source_id == task.id
+
+        result = agent.run_subagent(task.id, dry_run=True)
+        runner_hits = agent.local_store.search(task.id, source_type="subagent_runner_result")
+        context_hits = agent.local_store.search(task.id, source_type="subagent_execution_context")
+
+        assert result.run_id == task.id
+        assert runner_hits
+        assert context_hits
+
+
+def test_gateway_request_indexes_logs_to_local_store():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(
+            model_backend="echo",
+            memory_path="memory.jsonl",
+            gateway_workspace="gateway",
+            local_store_path="local_store/local.db",
+            local_store_files_dir="local_store/files",
+            local_store_events_path="local_store/events.jsonl",
+        )
+        agent = SimpleAgent(cfg, root)
+        paths = gateway_paths(agent)
+        request_id, request_path, _ = submit_gateway_ask(
+            paths,
+            prompt="gateway 日志测试：这条请求应该能被搜索到",
+            save=False,
+            agent=agent,
+        )
+
+        response = _handle_gateway_request(agent, request_path)
+        hits = agent.local_store.search("gateway 日志测试", source_type="gateway_request")
+
+        assert response["ok"] is True
+        assert request_id == response["id"]
+        assert hits
+        assert hits[0].source_id == request_id

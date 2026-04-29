@@ -147,7 +147,11 @@ python3 -m agent_py_agent subagents
 python3 -m agent_py_agent local-store-status
 python3 -m agent_py_agent local-index-memory
 python3 -m agent_py_agent local-search "表格" --source-type memory
+python3 -m agent_py_agent local-search "gateway 日志" --source-type gateway_request
+python3 -m agent_py_agent local-search "子代理目标" --source-type subagent_run
 ```
+
+当前 memory、gateway ask、gateway 生命周期事件、subagent 工单、runner 结果、验收、patch 审核、dispatch、watch、planner、能力路由和通道探测都会写入本地事实源。也就是说，原来的文件日志还在，同时多了一层可搜索账本。
 
 生成单个子代理执行上下文：
 

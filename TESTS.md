@@ -104,7 +104,7 @@ python3 -c "from agent_py_agent.tests.test_capabilities import test_skill_card_p
 ### Local Store
 
 ```bash
-python3 -c "from agent_py_agent.tests.test_local_store import test_local_store_records_events_and_searches, test_local_store_like_fallback_when_fts_disabled, test_jsonl_memory_indexes_to_local_store, test_jsonl_memory_can_backfill_existing_records; test_local_store_records_events_and_searches(); test_local_store_like_fallback_when_fts_disabled(); test_jsonl_memory_indexes_to_local_store(); test_jsonl_memory_can_backfill_existing_records(); print('LOCAL_STORE_TEST_PASS')"
+python3 -c "from agent_py_agent.tests.test_local_store import test_local_store_records_events_and_searches, test_local_store_like_fallback_when_fts_disabled, test_jsonl_memory_indexes_to_local_store, test_jsonl_memory_can_backfill_existing_records, test_subagent_flow_indexes_logs_to_local_store, test_gateway_request_indexes_logs_to_local_store; test_local_store_records_events_and_searches(); test_local_store_like_fallback_when_fts_disabled(); test_jsonl_memory_indexes_to_local_store(); test_jsonl_memory_can_backfill_existing_records(); test_subagent_flow_indexes_logs_to_local_store(); test_gateway_request_indexes_logs_to_local_store(); print('LOCAL_STORE_TEST_PASS')"
 ```
 
 覆盖：
@@ -114,6 +114,8 @@ python3 -c "from agent_py_agent.tests.test_local_store import test_local_store_r
 - 审计事件追加到 JSONL。
 - `JsonlMemory` 新记忆自动索引到 LocalStore。
 - 旧 `memory.jsonl` 可通过 `index_all()` / `local-index-memory` 补建索引。
+- subagent 工单、execution context 和 runner result 会索引到 LocalStore。
+- gateway ask 请求从 queued 到 completed 会索引到 LocalStore。
 
 ## 标准完整冒烟测试
 
@@ -142,6 +144,8 @@ my-agent chat --gateway --no-save
 my-agent local-store-status
 my-agent local-index-memory
 my-agent local-search "表格" --source-type memory
+my-agent local-search "gateway" --source-type gateway_request
+my-agent local-search "subagent" --source-type subagent_run
 my-agent
 my-agent gateway stop --kill
 ```
@@ -167,6 +171,7 @@ my-agent gateway stop --kill
 - 跑一次隔离的 `chat --gateway --no-save`，确认 chat 可以作为 gateway 客户端投递普通消息。
 - 跑一次隔离的无子命令 `my-agent`，确认会自动启动 gateway 并进入 gateway chat。
 - 跑一次 `local-store-status`、`local-index-memory` 和 `local-search`，确认本地事实源路径隔离、旧记忆可补建、SQLite/FTS5/LIKE 查询可用。
+- 确认 gateway request、subagent run、runner result、dispatch/acceptance 等关键流程都有对应 LocalStore 记录或事件。
 - 自动发现测试会覆盖主代理从工具调用创建子代理、读取子代理看板、dry-run 调度，以及防止 `execute_runners=true` 在未 `apply=true` 时误触发真实 runner。
 - 通过自动发现测试覆盖 dispatch 规划、父代理 planner、runner、patch 审核、验收、watch 循环和 watch lock。
 - 跑 chat 真实模型路径。

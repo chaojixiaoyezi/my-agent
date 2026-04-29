@@ -185,6 +185,44 @@ class LocalStore:
             content_path=stored_path,
         )
 
+    def log_record(
+        self,
+        *,
+        source_type: str,
+        source_id: str,
+        title: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+        event_type: str = "local_record_logged",
+        visibility: str = "private",
+    ) -> LocalSearchResult:
+        """写一条可搜索记录，并追加一条语义化审计事件。
+
+        `upsert_record()` 只表达“索引里有这条记录”。
+        `log_record()` 额外表达“发生了一件事”，适合 gateway/subagent/runner
+        这类流程日志使用。
+        """
+
+        record = self.upsert_record(
+            source_type=source_type,
+            source_id=source_id,
+            title=title,
+            content=content,
+            metadata=metadata or {},
+            visibility=visibility,
+        )
+        self.record_event(
+            event_type,
+            record_id=record.id,
+            payload={
+                "source_type": source_type,
+                "source_id": source_id,
+                "title": title,
+                **(metadata or {}),
+            },
+        )
+        return record
+
     def get_record(self, record_id: str) -> LocalSearchResult | None:
         """按 ID 读取一条记录。"""
 

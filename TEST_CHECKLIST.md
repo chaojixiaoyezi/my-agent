@@ -27,6 +27,10 @@
 - [ ] `my-agent local-index-memory` 能补建旧 `memory.jsonl`
 - [ ] `my-agent local-search "关键词" --source-type memory` 能返回命中
 - [ ] 完整冒烟配置会隔离 `local_store_path`、`local_store_files_dir` 和 `local_store_events_path`
+- [ ] gateway ask 能写入 `gateway_request` 记录和 gateway 事件
+- [ ] subagent run 保存后能写入 `subagent_run` 记录
+- [ ] runner result 能写入 `subagent_runner_result` 记录
+- [ ] acceptance / patch / dispatch / watch / planner / capability route / action apply / channel probe 都有 LocalStore 记录或事件
 
 ## 修改工具系统时
 

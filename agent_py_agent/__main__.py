@@ -322,6 +322,88 @@ def append_gateway_history(paths: GatewayPaths, payload: dict) -> None:
         handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+def log_gateway_payload(
+    agent: SimpleAgent,
+    payload: dict,
+    *,
+    event_type: str,
+    request_path: Path | None = None,
+    response_path: Path | None = None,
+) -> None:
+    """把 gateway 请求/响应写入 LocalStore；失败不影响文件队列。"""
+
+    request_id = str(payload.get("id") or "")
+    if not request_id:
+        return
+    try:
+        status = str(payload.get("status") or "queued")
+        kind = str(payload.get("kind") or "unknown")
+        content = "\n".join(
+            [
+                "# Gateway Request",
+                f"id: {request_id}",
+                f"kind: {kind}",
+                f"status: {status}",
+                f"ok: {payload.get('ok', '')}",
+                f"backend: {payload.get('backend', '')}",
+                f"tool_rounds: {payload.get('tool_rounds', '')}",
+                f"prompt: {payload.get('prompt', '')}",
+                f"response: {payload.get('response', '')}",
+                f"error: {payload.get('error', '')}",
+                f"request_file: {request_path or payload.get('request_file', '')}",
+                f"response_file: {response_path or ''}",
+                "",
+                "## Payload",
+                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            ]
+        )
+        agent.local_store.log_record(
+            source_type="gateway_request",
+            source_id=request_id,
+            title=f"Gateway {kind} {status} {request_id}",
+            content=content,
+            metadata={
+                "request_id": request_id,
+                "kind": kind,
+                "status": status,
+                "ok": bool(payload.get("ok", False)),
+                "backend": str(payload.get("backend", "")),
+                "tool_rounds": int(payload.get("tool_rounds", 0) or 0),
+                "created_at": float(payload.get("created_at", 0) or 0),
+                "started_at": float(payload.get("started_at", 0) or 0),
+                "ended_at": float(payload.get("ended_at", 0) or 0),
+                "request_path": str(request_path or payload.get("request_file", "")),
+                "response_path": str(response_path or ""),
+            },
+            event_type=event_type,
+        )
+    except Exception:
+        return
+
+
+def log_gateway_event(agent: SimpleAgent, event_type: str, payload: dict) -> None:
+    """把 gateway 生命周期事件写入 LocalStore。"""
+
+    try:
+        created_at = time.time()
+        source_id = f"{event_type}:{created_at:.6f}"
+        agent.local_store.log_record(
+            source_type="gateway_event",
+            source_id=source_id,
+            title=f"Gateway event {event_type}",
+            content=json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            metadata={
+                "event_type": event_type,
+                "status": str(payload.get("status", "")),
+                "pid": int(payload.get("pid", 0) or 0),
+                "created_at": created_at,
+            },
+            event_type=event_type,
+        )
+    except Exception:
+        return
+
+
 def requeue_gateway_processing_requests(paths: GatewayPaths) -> int:
     """gateway 启动时把上次崩溃遗留的 processing 请求退回 pending。
 
@@ -394,6 +476,7 @@ def submit_gateway_ask(
     prompt_files: list[str] | None = None,
     save: bool = True,
     include_prompt: bool = False,
+    agent: SimpleAgent | None = None,
 ) -> tuple[str, Path, Path]:
     """把一条 ask 请求写进 gateway inbox，并返回请求 ID 和文件路径。
 
@@ -414,7 +497,16 @@ def submit_gateway_ask(
         "client_pid": os.getpid(),
     }
     request_path = write_gateway_request(paths, payload)
-    return request_id, request_path, gateway_response_path(paths, request_id)
+    response_path = gateway_response_path(paths, request_id)
+    if agent is not None:
+        log_gateway_payload(
+            agent,
+            {**payload, "status": "queued", "ok": False},
+            event_type="gateway_request_queued",
+            request_path=request_path,
+            response_path=response_path,
+        )
+    return request_id, request_path, response_path
 
 
 def gateway_running(paths: GatewayPaths) -> tuple[int, bool]:
@@ -1197,10 +1289,26 @@ def cmd_gateway_run(args) -> int:
     requeued = requeue_gateway_processing_requests(paths)
     pid = os.getpid()
     paths.pid.write_text(str(pid), encoding="utf-8")
+    log_gateway_event(
+        agent,
+        "gateway_run_started",
+        {
+            "status": "starting",
+            "pid": pid,
+            "gateway_workspace": str(paths.root),
+            "subagent_workspace": str(agent.subagents.workspace),
+            "requeued_requests": requeued,
+        },
+    )
     try:
         options = _resolve_daemon_options(agent, args)
     except ValueError as exc:
         write_json_file(paths.state, {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()})
+        log_gateway_event(
+            agent,
+            "gateway_run_failed",
+            {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()},
+        )
         print(str(exc), file=sys.stderr)
         return 2
 
@@ -1223,6 +1331,23 @@ def cmd_gateway_run(args) -> int:
             "status": "running",
             "pid": pid,
             "started_at": time.time(),
+            "gateway_workspace": str(paths.root),
+            "subagent_workspace": str(agent.subagents.workspace),
+            "apply": options.apply,
+            "execute_runners": options.execute_runners,
+            "planner": options.planner,
+            "interval": options.interval,
+            "max_runners": options.max_runners,
+            "max_cycles": options.max_cycles,
+            "requeued_requests": requeued,
+        },
+    )
+    log_gateway_event(
+        agent,
+        "gateway_run_running",
+        {
+            "status": "running",
+            "pid": pid,
             "gateway_workspace": str(paths.root),
             "subagent_workspace": str(agent.subagents.workspace),
             "apply": options.apply,
@@ -1269,11 +1394,26 @@ def cmd_gateway_run(args) -> int:
                 "summary": report.summary,
             },
         )
+        log_gateway_event(
+            agent,
+            "gateway_run_stopped",
+            {"status": final_status, "pid": pid, "stopped_at": time.time(), "summary": report.summary},
+        )
     except KeyboardInterrupt:
         write_json_file(paths.state, {"status": "interrupted", "pid": pid, "stopped_at": time.time()})
+        log_gateway_event(
+            agent,
+            "gateway_run_interrupted",
+            {"status": "interrupted", "pid": pid, "stopped_at": time.time()},
+        )
         exit_code = 130
     except Exception as exc:
         write_json_file(paths.state, {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()})
+        log_gateway_event(
+            agent,
+            "gateway_run_failed",
+            {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()},
+        )
         print(str(exc), file=sys.stderr)
         exit_code = 2
     finally:
@@ -1289,6 +1429,11 @@ def cmd_gateway_run(args) -> int:
         except OSError:
             pass
         _write_gateway_heartbeat(paths, agent, options, status="stopped", pid=pid)
+        log_gateway_event(
+            agent,
+            "gateway_run_cleanup",
+            {"status": "cleanup", "pid": pid, "updated_at": time.time()},
+        )
     return exit_code
 
 
@@ -1342,14 +1487,29 @@ def cmd_gateway_stop(args) -> int:
         json.dumps({"requested_at": time.time(), "reason": args.reason or "user stop"}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    log_gateway_event(
+        agent,
+        "gateway_stop_requested",
+        {"status": "stop_requested", "pid": pid, "reason": args.reason or "user stop", "updated_at": time.time()},
+    )
     timeout = args.timeout if args.timeout is not None else agent.config.gateway_stop_timeout
     if wait_for_pid_exit(pid, timeout):
+        log_gateway_event(
+            agent,
+            "gateway_stopped",
+            {"status": "stopped", "pid": pid, "updated_at": time.time()},
+        )
         print(f"gateway stopped pid={pid}")
         return 0
     if args.kill:
         terminate_pid(pid)
         if wait_for_pid_exit(pid, 5):
             write_json_file(paths.state, {"status": "killed", "pid": pid, "stopped_at": time.time()})
+            log_gateway_event(
+                agent,
+                "gateway_killed",
+                {"status": "killed", "pid": pid, "updated_at": time.time()},
+            )
             try:
                 paths.pid.unlink()
             except OSError:
@@ -1415,6 +1575,7 @@ def cmd_gateway_ask(args) -> int:
         prompt_files=args.prompt_file or [],
         save=not args.no_save,
         include_prompt=bool(args.show_prompt),
+        agent=agent,
     )
     if args.no_wait:
         # 异步模式：只告诉用户“请求已放进队列”，不在当前终端等模型结果。
@@ -1428,6 +1589,21 @@ def cmd_gateway_ask(args) -> int:
     timeout = args.timeout if args.timeout is not None else agent.config.gateway_request_timeout
     response = wait_for_gateway_response(paths, request_id, timeout)
     if not response:
+        log_gateway_payload(
+            agent,
+            {
+                "id": request_id,
+                "kind": "ask",
+                "status": "timeout",
+                "ok": False,
+                "error": f"timeout after {timeout}s",
+                "created_at": 0,
+                "ended_at": time.time(),
+            },
+            event_type="gateway_request_timeout",
+            request_path=request_path,
+            response_path=response_path,
+        )
         print(f"gateway 请求等待超时: request_id={request_id} timeout={timeout}s", file=sys.stderr)
         print(f"response: {response_path}")
         return 2
@@ -2421,6 +2597,13 @@ def _handle_gateway_request(agent: SimpleAgent, request_path: Path) -> dict:
         "prompt": "",
         "request_file": str(request_path),
     }
+    log_gateway_payload(
+        agent,
+        {**request, "id": request_id, "kind": kind or "unknown", "status": "processing", "ok": False, "started_at": started_at},
+        event_type="gateway_request_processing",
+        request_path=request_path,
+        response_path=gateway_response_path(gateway_paths(agent), request_id),
+    )
     try:
         if kind != "ask":
             raise ValueError(f"unsupported gateway request kind: {kind or 'empty'}")
@@ -2455,6 +2638,13 @@ def _handle_gateway_request(agent: SimpleAgent, request_path: Path) -> dict:
     ended_at = time.time()
     response["ended_at"] = ended_at
     response["duration_seconds"] = round(ended_at - started_at, 3)
+    log_gateway_payload(
+        agent,
+        {**response, "prompt": request.get("prompt", "")},
+        event_type="gateway_request_completed" if response.get("ok") else "gateway_request_failed",
+        request_path=request_path,
+        response_path=gateway_response_path(gateway_paths(agent), request_id),
+    )
     return response
 
 
@@ -2628,6 +2818,7 @@ def cmd_chat(args) -> int:
                         prompt_files=job.prompt_files,
                         save=not args.no_save,
                         include_prompt=job.show_prompt,
+                        agent=agent,
                     )
                     timeout = (
                         args.gateway_timeout
