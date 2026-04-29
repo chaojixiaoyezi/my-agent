@@ -39,6 +39,76 @@ gateway audit -> data/gateway/gateway_requests.jsonl
 
 `gateway ask` 是最小客户端协议。它还不是完整 TUI attach，也不是 HTTP/WebSocket gateway，但已经把“用户消息进入常驻 gateway 并触发完整 LLM turn”这件事从前台 chat 里拆了出来。后续 `chat` / TUI 可以复用同一条请求队列，或者把底层从文件队列替换成 SQLite / HTTP，而不改变用户命令面。
 
+### 大白话解释：gateway ask / result
+
+这三个命令不是最终普通用户每天必须敲的命令，而是现在给 gateway 留出来的“本地消息入口”和“调试口”：
+
+```text
+my-agent gateway ask "继续推进当前任务"
+my-agent gateway ask "长任务" --no-wait
+my-agent gateway result <request_id>
+```
+
+可以这样理解：
+
+- `gateway start`：先把本地常驻的主代理后台启动起来。
+- `gateway ask "一句话"`：把这句话发给后台主代理，并在当前终端等它回话。
+- `gateway ask "长任务" --no-wait`：把任务发给后台主代理，但当前终端不等结果，只拿一个 `request_id`。
+- `gateway result <request_id>`：以后根据这个 `request_id` 去拿结果。
+
+未来如果接入微信、Telegram、飞书、Web TUI 或桌面客户端，用户不会手动敲这些命令。聊天工具会替用户做同样的事：
+
+```text
+用户在聊天工具里发消息
+-> 聊天适配器把消息写入 gateway inbox
+-> gateway 触发完整 LLM turn
+-> gateway 写出 response
+-> 聊天适配器把 response 发回给用户
+```
+
+所以这些 CLI 命令的定位是：
+
+- 普通用户：以后基本不用直接关心。
+- 开发者/高级用户：用来验证 gateway 本体是否工作。
+- 排错时：如果聊天工具没回复，可以先用 `gateway ask` 判断是 gateway 坏了，还是聊天适配器坏了。
+- 架构上：这是未来 TUI、聊天工具、HTTP/WebSocket adapter 都会复用的最小协议雏形。
+
+### 本地队列目录怎么理解
+
+当前先用文件队列，原因是简单、跨平台、容易看见和调试。每个目录的含义如下：
+
+```text
+data/gateway/requests/pending/
+```
+
+等待处理的请求。`gateway ask` 会先把请求 JSON 写到这里。可以把它理解成“收件箱”。
+
+```text
+data/gateway/requests/processing/
+```
+
+gateway 正在处理的请求。后台 worker 取走 pending 请求时，会先移动到这里。可以把它理解成“正在办”。
+
+```text
+data/gateway/requests/done/
+```
+
+已经处理完的请求原件。处理完成后，请求 JSON 会移动到这里。可以把它理解成“已归档的原始工单”。
+
+```text
+data/gateway/responses/
+```
+
+处理结果。每个 request id 对应一个响应 JSON。`gateway result <request_id>` 读取的就是这里。
+
+```text
+data/gateway/gateway_requests.jsonl
+```
+
+请求审计日志。每处理完一次请求，就追加一行，方便以后追踪“谁什么时候给 gateway 发了什么，结果是什么”。
+
+如果 gateway 崩溃时有请求停在 `processing/`，下一次 gateway 启动时会把这些请求退回 `pending/`，避免任务半路卡死。
+
 ## 多 Gateway 组织模型
 
 长期目标不是“一个主 gateway 拥有所有下级”，而是“多个完整独立 gateway 通过授权、委托和汇报形成组织关系”。

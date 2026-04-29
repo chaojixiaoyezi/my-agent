@@ -71,9 +71,15 @@ gateway_stale_seconds: 120
 gateway_stop_timeout: 20
 
 # gateway 本地消息入口。
-# ask/submit 会先把请求写进 requests/pending，后台 gateway 再取走执行，
-# 结果写进 responses，并追加 gateway_requests.jsonl 审计日志。
-# request_timeout 是 CLI 等待结果的默认时长；poll_interval 是后台轮询 inbox 的间隔。
+# 这几个配置控制 `my-agent gateway ask/result` 这一层。
+# 当前还没有 HTTP/WebSocket 服务，先用本地文件队列：
+# - requests/pending：新请求，相当于收件箱。
+# - requests/processing：gateway 正在处理的请求；如果进程崩溃，重启会退回 pending。
+# - requests/done：处理完的请求原件，方便排查。
+# - responses：模型响应，`gateway result <request_id>` 读取这里。
+# - gateway_requests.jsonl：一行一条审计日志。
+# gateway_request_timeout 是 CLI 等待结果的默认时长，单位秒。
+# gateway_request_poll_interval 是后台 worker 多久检查一次 pending，单位秒。
 gateway_request_timeout: 300
 gateway_request_poll_interval: 1
 

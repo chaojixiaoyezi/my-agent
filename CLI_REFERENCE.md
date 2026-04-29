@@ -444,6 +444,16 @@ my-agent gateway result <request_id>
 
 `gateway` 第一版是本地后台控制面。它会启动一个后台 Python 进程，在内部按配置运行现有 daemon/watch 调度，并把 pid、state、heartbeat、stop request、请求队列、响应和日志写到 `gateway_workspace`。它还不是多机器组织 gateway，也还没有 worker pool；这些会在后续接入同一命令面。
 
+先把它理解成三层：
+
+```text
+gateway start/stop/status/logs  管后台进程活不活
+gateway ask/result              给后台进程发消息、拿结果
+gateway run                     内部调试入口，平时不用直接敲
+```
+
+`ask/result` 是保留给开发和调试的本地入口。以后接微信、飞书、Telegram、Web TUI 时，聊天工具会替你调用同一套 gateway 请求协议；普通用户只需要在聊天工具里发消息，gateway 做完后自动回复。
+
 | 子命令 | 说明 |
 | --- | --- |
 | `start` | 启动后台 gateway；已运行时默认不重复启动。 |
@@ -454,6 +464,36 @@ my-agent gateway result <request_id>
 | `ask` | 把一条聊天/任务请求写入本地 inbox，由后台 gateway 调用模型处理。 |
 | `result` | 根据 request id 读取 `ask --no-wait` 留下的响应。 |
 | `run` | 内部/调试命令，前台运行 gateway 循环；通常由 `start` 调用。 |
+
+### `gateway ask` 的两种用法
+
+同步用法：发消息，然后当前终端一直等到结果回来。
+
+```powershell
+my-agent gateway ask "总结一下当前项目状态"
+```
+
+适合短任务、确认 gateway 能否正常调用模型、或者临时让后台主代理回答一句话。
+
+异步用法：只发任务，不等结果。
+
+```powershell
+my-agent gateway ask "跑一轮完整检查" --no-wait
+```
+
+它会返回类似：
+
+```text
+queued request_id=gwreq-1777442684-0b7ac8cb
+```
+
+之后再查：
+
+```powershell
+my-agent gateway result gwreq-1777442684-0b7ac8cb
+```
+
+适合比较长的任务。这个设计也是未来聊天工具“先回复已收到，做完再回你”的基础。
 
 常用参数：
 
@@ -478,6 +518,16 @@ my-agent gateway result <request_id>
 | `result` | `--show-prompt` | 打印响应 JSON 中保存的最终 prompt。 |
 | `result` | `--json` | 输出完整响应 JSON。 |
 | `run` | daemon 同名参数 | 内部调试用，支持 `--max-cycles 1 --interval 0 --no-planner` 这类安全验证。 |
+
+### 请求文件流转
+
+当前实现先用文件队列，不用 HTTP server。好处是跨平台、容易查问题，也方便后续替换成 SQLite 或 WebSocket。
+
+```text
+ask 写入 pending -> gateway 移到 processing -> 模型处理 -> 写 responses -> 原请求移到 done
+```
+
+如果 gateway 意外退出，重启时会把 `processing` 里没处理完的请求退回 `pending`。这表示“上次正在办但没办完，重新排队”。
 
 gateway 控制面配置：
 

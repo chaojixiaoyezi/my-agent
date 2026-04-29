@@ -276,6 +276,18 @@ python3 -m agent_py_agent gateway stop
 
 `gateway` 第一版会启动后台 Python 进程，并写 `gateway.pid`、`gateway_state.json`、`gateway_heartbeat.json`、`gateway_stop.request`、`gateway.log`、本地请求队列和响应文件。`gateway ask` 会把聊天/任务写入 `requests/pending`，后台 gateway 处理后把结果写入 `responses`，后续 chat/TUI 会接到这条客户端通道上。
 
+这里的本地请求队列可以这样理解：
+
+```text
+requests/pending      新请求，等待 gateway 处理
+requests/processing   正在处理；gateway 崩溃后会退回 pending
+requests/done         已处理请求的原始记录
+responses             每个 request_id 对应的模型响应
+gateway_requests.jsonl 审计日志
+```
+
+`gateway ask/result` 不是最终用户必须记住的日常入口。以后接聊天工具时，聊天工具会把用户消息写入同一条队列，再把 response 自动发回给用户；CLI 命令主要用于开发、调试和排查外部适配器问题。
+
 前台 watch 调试入口：
 
 ```bash
