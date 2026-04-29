@@ -43,6 +43,24 @@ memory_top_k: 5
 # 是否自动把用户输入和模型回复写入记忆
 auto_save_memory: true
 
+# Memory 新架构安全配置（第一版骨架）：
+# - 这些字段先定义“开关、等级、保留天数和规则路由模式”，具体 hook/routing 业务后续再接。
+# - 如果用户乱填 abcd、乱码、脚本片段、负数或越界数字，程序会自动回到默认值，不会崩溃。
+# - memory_archive_level 控制全量会话冷归档粒度：
+#   0: 尽量全量；1: 去掉重型工具展示数据；2: 摘要加关键事件；3: 最小恢复快照。
+# - memory_hook_retention_days 表示 hook 快照保留天数；0 表示不自动删除。
+# - memory_rule_routing_mode:
+#   off: 不做长期规则路由；soft: 命中后提示/自动读少量规则；strict: 强规则场景必须读权威文件。
+# - memory_rule_auto_read_limit 表示每轮最多自动读取多少条规则正文；0 表示不自动读取。
+memory_archive_level: 3
+memory_hook_enabled: true
+memory_hook_archive_level: 3
+memory_hook_retention_days: 7
+memory_rule_routing_enabled: true
+memory_rule_routing_mode: "soft"
+memory_rule_auto_read_limit: 3
+memory_rule_receipt_enabled: true
+
 # 是否启用自学习功能
 # - false: 默认关闭，只按已有 prompt、记忆、工具和 skill 工作，不自动沉淀新经验
 # - true: 允许后续自学习模块在任务结束后生成“学习候选”

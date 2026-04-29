@@ -20,3 +20,7 @@ class AgentRunResult:
     used_memories: int
     tool_rounds: int = 0
     executed_tools: list[str] | None = None
+    memory_route_matches: int = 0
+    memory_route_paths: list[str] | None = None
+    archive_events: int = 0
+    archive_token_estimate: int = 0

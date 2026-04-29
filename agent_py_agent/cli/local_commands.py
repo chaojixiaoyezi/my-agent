@@ -157,7 +157,8 @@ def cmd_run(args) -> int:
     print(result.response)
     print(
         f"\n[backend={result.backend}; used_memories={result.used_memories}; "
-        f"tool_rounds={result.tool_rounds}]"
+        f"tool_rounds={result.tool_rounds}; routed_rules={result.memory_route_matches}; "
+        f"archive_events={result.archive_events}]"
     )
     return 0
 

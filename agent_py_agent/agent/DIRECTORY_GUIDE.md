@@ -18,6 +18,7 @@
 - `local_store.py` -> `local_storage/`
 - `subagent.py` -> `subagents/`
 - `tools.py` -> `tooling/`
+- `memory_settings.py` -> `settings/memory.py`
 
 新代码不要把真实业务继续堆到门面文件里。门面文件只做旧导入兼容。
 
@@ -87,6 +88,22 @@ gateway 文件协议层。放 gateway 路径、JSON 队列 IO、进程状态、p
 
 不允许：普通 LocalStore schema、prompt 拼装、模型调用。
 
+### `memory_archive/`
+
+记忆冷归档和压缩前 hook 存储层。当前放 `CompressionSnapshot`、`RawMemoryEvent`、按天 JSONL 写入、readback 验证、hook 留存清理和 token 估算。
+
+允许：定义压缩前恢复快照、raw 会话事件索引卡、固定目录写入、留存策略、轻量 token 估算。
+
+不允许：决定什么时候压缩、调用模型生成摘要、把快照直接塞进 prompt、替代任务目录事实源。
+
+### `memory_routing/`
+
+长期规则路由层。负责把用户输入确定性匹配到 memory routing index，再解析出应该查看的 authority file，并提供受 root 边界保护的短正文读取 context。
+
+允许：route index 加载、关键词/别名匹配、soft/strict path resolution、read receipt 结构、索引诊断、runtime 规则 context 构建。
+
+不允许：修改长期规则文件、越过 root 读取文件、替代 RAG 或任务状态核验、直接改主循环。
+
 ### `observability/`
 
 未来可观测性层，当前只保留目录定义。
@@ -123,7 +140,7 @@ Prompt 构造层。放系统 prompt、记忆、工具目录、推荐工具、工
 
 运行配置层。放 `AgentConfig`、轻量 YAML 读取、环境变量覆盖。
 
-允许：配置 schema、配置文件解析、默认值。
+允许：配置 schema、配置文件解析、默认值、memory 配置安全规范化和 warning receipt。
 
 不允许：业务执行、动态状态、运行时报告。
 

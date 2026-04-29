@@ -7,6 +7,10 @@ from __future__ import annotations
 它不处理子代理调度细节，那些已经拆到别的 mixin。
 """
 
+import time
+
+from ..memory_archive import archive_run_turn
+from ..memory_routing import build_routed_memory_context
 from ..tools import ToolExecutionResult
 from .models import AgentRunResult
 from .parameters import _one_shot_tool_call_key
@@ -32,6 +36,21 @@ class SimpleAgentRuntimeMixin:
         """执行一轮智能体请求。"""
 
         memories = self.memory.search(user_prompt, self.config.memory_top_k)
+        route_mode = str(getattr(self.config, "memory_rule_routing_mode", "soft") or "soft")
+        route_enabled = bool(getattr(self.config, "memory_rule_routing_enabled", True)) and route_mode != "off"
+        route_auto_read_limit = int(getattr(self.config, "memory_rule_auto_read_limit", 3))
+        routed_context = build_routed_memory_context(
+            self.root,
+            user_prompt,
+            enabled=route_enabled,
+            mode=route_mode if route_mode != "off" else "soft",
+            auto_read_limit=route_auto_read_limit,
+            limit=max(route_auto_read_limit, 5),
+        )
+        runtime_injections = [
+            *(inject or []),
+            *routed_context.injected_sections,
+        ]
         tool_catalog_section = (
             self.tools.render_catalog_section(allowed_tools=allowed_tools)
             if self.config.enable_tools
@@ -48,12 +67,13 @@ class SimpleAgentRuntimeMixin:
         final_response = None
         one_shot_tool_calls: set[str] = set()
         executed_tools: list[str] = []
+        archive_tool_calls: list[dict[str, object]] = []
 
         while True:
             final_prompt = self.prompts.build(
                 user_prompt,
                 memories,
-                inject=inject,
+                inject=runtime_injections,
                 prompt_files=prompt_files,
                 tool_catalog_section=tool_catalog_section,
                 tool_recommendations_section=tool_recommendations_section,
@@ -74,7 +94,7 @@ class SimpleAgentRuntimeMixin:
                 final_prompt = self.prompts.build(
                     user_prompt,
                     memories,
-                    inject=inject,
+                    inject=runtime_injections,
                     prompt_files=prompt_files,
                     tool_catalog_section=tool_catalog_section,
                     tool_recommendations_section=tool_recommendations_section,
@@ -105,6 +125,14 @@ class SimpleAgentRuntimeMixin:
                         one_shot_tool_calls.add(one_shot_key)
                 if result.ok and result.tool not in {"__parse_error__", "unknown"}:
                     executed_tools.append(result.tool)
+                archive_tool_calls.append(
+                    {
+                        "tool": result.tool,
+                        "id": f"{tool_rounds}-{idx}",
+                        "ok": result.ok,
+                        "parameters": payload,
+                    }
+                )
                 tool_context.append(
                     f"[tool-call-{tool_rounds}-{idx}]\n{payload}\n"
                     f"[tool-result-{tool_rounds}-{idx}]\n{result.render_for_prompt()}"
@@ -115,6 +143,19 @@ class SimpleAgentRuntimeMixin:
         if do_save:
             self.memory.add("user", user_prompt)
             self.memory.add("agent", final_response.text, tags=[final_response.backend])
+            archive_result = archive_run_turn(
+                self.root,
+                session_id=getattr(self, "session_id", self.config.agent_name),
+                request_id=f"run-{time.time_ns()}",
+                user_prompt=user_prompt,
+                response_text=final_response.text,
+                backend=final_response.backend,
+                tool_calls=archive_tool_calls,
+                source="run",
+                archive_level=int(getattr(self.config, "memory_archive_level", 3)),
+            )
+        else:
+            archive_result = None
 
         return AgentRunResult(
             prompt=final_prompt,
@@ -123,6 +164,13 @@ class SimpleAgentRuntimeMixin:
             used_memories=len(memories),
             tool_rounds=tool_rounds,
             executed_tools=executed_tools,
+            memory_route_matches=len(routed_context.matches),
+            memory_route_paths=[
+                *routed_context.required_read_paths,
+                *routed_context.candidate_paths,
+            ],
+            archive_events=archive_result.event_count if archive_result else 0,
+            archive_token_estimate=archive_result.token_estimate if archive_result else 0,
         )
 
     def remember(self, content: str, *, kind: str = "note"):

@@ -15,6 +15,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .memory import normalize_agent_memory_config
+
 
 @dataclass
 class AgentConfig:
@@ -31,6 +33,15 @@ class AgentConfig:
     memory_path: str = "data/memory.jsonl"
     memory_top_k: int = 5
     auto_save_memory: bool = True
+    memory_archive_level: int = 3
+    memory_hook_enabled: bool = True
+    memory_hook_archive_level: int = 3
+    memory_hook_retention_days: int = 7
+    memory_rule_routing_enabled: bool = True
+    memory_rule_routing_mode: str = "soft"
+    memory_rule_auto_read_limit: int = 3
+    memory_rule_receipt_enabled: bool = True
+    memory_config_warnings: list[dict[str, Any]] = field(default_factory=list)
     local_store_path: str = "data/local_store/local.db"
     local_store_files_dir: str = "data/local_store/files"
     local_store_events_path: str = "data/local_store/events.jsonl"
@@ -156,6 +167,7 @@ def load_config(config_path: str | Path) -> AgentConfig:
     allowed = set(AgentConfig.__dataclass_fields__.keys())
     clean = {key: value for key, value in raw.items() if key in allowed}
     config = AgentConfig(**clean)
+    normalize_agent_memory_config(config)
 
     # 优先从环境变量读取密钥。
     # 大白话解释：仓库里只留“去哪里拿 key”的说明，不再把真 key 写进代码仓库。

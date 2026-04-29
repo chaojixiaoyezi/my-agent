@@ -91,6 +91,7 @@ from .cli.local_doctor import (
     rebuild_local_store,
     rebuild_subagent_index,
 )
+from .cli.memory_commands import cmd_memory_doctor, cmd_memory_route
 from .cli.models import ChatJob, DaemonOptions
 from .cli.parser import build_parser, main
 from .cli.scenario import cmd_scenario_test, print_dispatch_report, run_scenario_suite
