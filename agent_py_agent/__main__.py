@@ -560,6 +560,124 @@ def render_gateway_status(agent: SimpleAgent, paths: GatewayPaths) -> list[str]:
     return lines
 
 
+def format_local_time(timestamp: float) -> str:
+    """把 Unix 时间戳格式化成人能扫一眼的本地时间。"""
+
+    if not timestamp:
+        return "-"
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+
+
+def cmd_status(args) -> int:
+    """显示 my-agent 当前全局状态。"""
+
+    agent = make_agent(args)
+    paths = gateway_paths(agent)
+    local_stats = agent.local_store.stats()
+    board = agent.subagents.build_board(recent_limit=args.limit)
+    timeline = agent.local_store.timeline(limit=args.limit)
+    pid, alive = gateway_running(paths)
+    gateway_state = read_json_file(paths.state)
+    heartbeat = read_json_file(paths.heartbeat)
+    heartbeat_at = float(heartbeat.get("updated_at", 0) or 0)
+    heartbeat_age = time.time() - heartbeat_at if heartbeat_at else 0
+    gateway_status = "running" if alive else gateway_state.get("status", "stopped")
+    if alive and heartbeat_at and heartbeat_age > agent.config.gateway_stale_seconds:
+        gateway_status = "stale"
+
+    payload = {
+        "agent_name": agent.config.agent_name,
+        "workspace_root": str(agent.root),
+        "gateway": {
+            "status": gateway_status,
+            "pid": pid,
+            "alive": alive,
+            "heartbeat_age_seconds": round(heartbeat_age, 1) if heartbeat_at else 0,
+            "request_counts": gateway_request_counts(paths),
+            "workspace": str(paths.root),
+        },
+        "local_store": local_stats,
+        "subagents": {
+            "summary": board.summary,
+            "hot_count": len(board.hot_list),
+            "recent_count": len(board.recent),
+            "hot": [item.__dict__ for item in board.hot_list[: args.limit]],
+            "recent": [item.__dict__ for item in board.recent[: args.limit]],
+        },
+        "timeline": [item.__dict__ for item in timeline],
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+
+    print("MY-AGENT STATUS")
+    print(f"agent={agent.config.agent_name}")
+    print(f"workspace={agent.root}")
+    print("")
+    print("Gateway")
+    print(f"- status={gateway_status} pid={pid if pid else '-'} alive={alive}")
+    if heartbeat_at:
+        print(f"- heartbeat_age_seconds={heartbeat_age:.1f}")
+    print("- requests=" + json.dumps(gateway_request_counts(paths), ensure_ascii=False, sort_keys=True))
+    print(f"- workspace={paths.root}")
+    print("")
+    print("Local Store")
+    print(f"- records={local_stats['record_count']} events={local_stats['event_count']} fts5={local_stats['fts5_enabled']}")
+    print(f"- db={local_stats['db_path']}")
+    print("")
+    print("Subagents")
+    print("- summary=" + json.dumps(board.summary, ensure_ascii=False, sort_keys=True))
+    if board.hot_list:
+        print(f"- hot={len(board.hot_list)}")
+        for item in board.hot_list[: args.limit]:
+            flags = ",".join(item.risk_flags) if item.risk_flags else "ok"
+            print(f"  - {item.id} {item.status}/{item.verification_status} flags={flags} :: {item.goal}")
+    else:
+        print("- hot=0")
+    if args.recent:
+        print("- recent:")
+        for item in board.recent[: args.limit]:
+            print(f"  - {item.id} {item.status}/{item.verification_status} :: {item.goal}")
+    print("")
+    print("Timeline")
+    if not timeline:
+        print("- 暂无事件")
+    for item in timeline:
+        source = f"{item.source_type}/{item.source_id}".strip("/")
+        print(f"- {format_local_time(item.created_at)} {item.event_type} {source} :: {item.title}")
+    return 0
+
+
+def cmd_timeline(args) -> int:
+    """显示 LocalStore 最近事件。"""
+
+    agent = make_agent(args)
+    items = agent.local_store.timeline(
+        limit=args.limit,
+        source_type=args.source_type,
+        event_type=args.event_type,
+    )
+    if args.json:
+        print(json.dumps([item.__dict__ for item in items], ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+
+    print("MY-AGENT TIMELINE")
+    if args.source_type:
+        print(f"source_type={args.source_type}")
+    if args.event_type:
+        print(f"event_type={args.event_type}")
+    if not items:
+        print("暂无事件。")
+        return 0
+    for item in items:
+        source = f"{item.source_type}/{item.source_id}".strip("/")
+        title = item.title or "-"
+        print(f"- {format_local_time(item.created_at)} {item.event_type} {source} :: {title}")
+        if args.details:
+            print("  payload=" + json.dumps(item.payload, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
 def cmd_run(args) -> int:
     """执行一次单轮请求。"""
 
@@ -3031,6 +3149,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command")
     parser.set_defaults(func=cmd_default)
+
+    status = sub.add_parser("status", help="查看 my-agent 全局状态")
+    status.add_argument("--limit", type=int, default=5, help="最多显示多少条 hot/recent/timeline 项")
+    status.add_argument("--recent", action="store_true", help="显示最近子代理列表")
+    status.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    status.set_defaults(func=cmd_status)
+
+    timeline = sub.add_parser("timeline", help="查看本地事实源最近事件")
+    timeline.add_argument("--limit", type=int, default=20, help="最多显示多少条事件")
+    timeline.add_argument("--source-type", help="按来源过滤，如 gateway_request/subagent_run")
+    timeline.add_argument("--event-type", help="按事件类型过滤，如 gateway_request_completed")
+    timeline.add_argument("--details", action="store_true", help="显示事件 payload 摘要")
+    timeline.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    timeline.set_defaults(func=cmd_timeline)
 
     run = sub.add_parser("run", help="运行一次智能体对话")
     run.add_argument("prompt", help="用户任务 / prompt")

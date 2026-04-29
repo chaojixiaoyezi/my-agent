@@ -45,6 +45,8 @@ python3 -m agent_py_agent --help
 
 ```text
 run                         运行一次智能体对话
+status                      查看 gateway、LocalStore、subagent 和最近事件总览
+timeline                    查看本地事实源最近事件
 chat                        启动交互循环
 remember                    手动写入记忆
 memory-list                 列出最近记忆
@@ -179,9 +181,12 @@ python3 -m agent_py_agent local-index-memory
 python3 -m agent_py_agent local-search "表格" --source-type memory
 python3 -m agent_py_agent local-search "gateway 日志" --source-type gateway_request
 python3 -m agent_py_agent local-search "子代理目标" --source-type subagent_run
+python3 -m agent_py_agent status
+python3 -m agent_py_agent timeline --limit 20
 ```
 
 gateway request、gateway 生命周期事件、subagent 工单、runner 结果、验收、patch 审核、dispatch、watch、planner、能力路由和通道探测也会写入本地事实源。
+`status` 看当前总览；`timeline` 看最近事件。
 
 这个目录默认被 Git 忽略。
 

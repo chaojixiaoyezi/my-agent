@@ -24,6 +24,9 @@
 - [ ] 正文文件写入 `local_store_files_dir`
 - [ ] 审计事件追加到 `local_store_events_path`
 - [ ] `my-agent local-store-status` 输出路径、记录数、事件数和 FTS5 状态
+- [ ] `my-agent status` 能汇总 gateway、LocalStore、subagent 和 timeline
+- [ ] `my-agent timeline --limit 5` 能显示最近事件
+- [ ] `my-agent timeline --source-type gateway_request` 和 `--event-type ...` 能过滤
 - [ ] `my-agent local-index-memory` 能补建旧 `memory.jsonl`
 - [ ] `my-agent local-search "关键词" --source-type memory` 能返回命中
 - [ ] 完整冒烟配置会隔离 `local_store_path`、`local_store_files_dir` 和 `local_store_events_path`
