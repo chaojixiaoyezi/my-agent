@@ -11,6 +11,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |-- pyproject.toml                             # Python packaging 配置，提供 my-agent console script
 |-- CLI_REFERENCE.md                           # 完整 CLI 参数手册，说明每个命令和参数
 |-- GATEWAY_DESIGN.md                          # gateway 常驻形态、外部方案对比和本项目目标设计
+|-- GATEWAY_RESEARCH.md                        # gateway 大调研，比较 daemon、任务队列、workflow、Notebook 和 AI gateway 方案
 |-- agent_py_agent/                            # Python 包目录，核心代码主要都在这里
 |   |-- __init__.py                            # 安装包初始化文件，记录包版本
 |   |-- __main__.py                            # CLI 入口，负责 run/chat/记忆/subagent 看板与巡检命令

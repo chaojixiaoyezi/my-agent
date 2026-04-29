@@ -114,7 +114,7 @@
 
 - [ ] 新增重要文件后更新 `CODEBASE_TREE.md`
 - [ ] 新增架构想法后更新 `DESIGN_LEDGER.md`
-- [ ] 调整 gateway / daemon 形态后更新 `GATEWAY_DESIGN.md`
+- [ ] 调整 gateway / daemon 形态后更新 `GATEWAY_DESIGN.md` 和 `GATEWAY_RESEARCH.md`
 - [ ] 新增命令后更新 README 或 runbook
 - [ ] CLI 命令或参数变化时更新 `CLI_REFERENCE.md`
 - [ ] 新增测试策略后更新 `TESTS.md`

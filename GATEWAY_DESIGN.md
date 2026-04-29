@@ -2,6 +2,8 @@
 
 这份文档记录 gateway 常驻方向的外部参考和本项目目标。它不是实现完成清单，而是避免我们把“前台 daemon”“TUI 会话”“后台 runtime”“任务状态”混在一起。
 
+更完整的外部方案调研、优缺点拆解和阶段建议见 [GATEWAY_RESEARCH.md](GATEWAY_RESEARCH.md)。
+
 ## 我们要的形态
 
 目标是：
