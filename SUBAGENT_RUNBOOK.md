@@ -580,6 +580,18 @@ python3 -m agent_py_agent subagents-dispatch --apply
 python3 -m agent_py_agent subagents-dispatch --apply --execute-runners
 ```
 
+watch 模式：
+
+```bash
+python3 -m agent_py_agent subagents-dispatch --watch --interval 30
+```
+
+测试 watch 一轮：
+
+```bash
+python3 -m agent_py_agent subagents-dispatch --watch --max-cycles 1 --interval 0
+```
+
 调度顺序：
 - `due_check`：扫描工单风险。
 - `action_apply`：执行或预览低风险动作。
@@ -592,12 +604,18 @@ python3 -m agent_py_agent subagents-dispatch --apply --execute-runners
 - 全局 `subagent_dispatch_report.json`
 - 全局 `SUBAGENT_DISPATCH.md`
 - apply 时追加 `subagent_dispatch_log.jsonl` 和 `DISPATCH_LOG.md`
+- watch 模式写 `subagent_dispatch_watch_report.json` 和 `SUBAGENT_DISPATCH_WATCH.md`
+- watch 模式追加 `subagent_dispatch_watch_log.jsonl` 和 `DISPATCH_WATCH_LOG.md`
+- watch 模式持续更新 `subagent_dispatch_watch_heartbeat.json`
 
 注意：
-- `subagents-dispatch` 不是常驻进程，只执行一轮。
+- `subagents-dispatch` 默认不是常驻进程，只执行一轮。
+- `--watch` 会持续循环；`--max-cycles 1` 可用于 CI 和人工安全验证。
+- watch 会创建 `subagent_dispatch_watch.lock`，阻止两个父代理同时调度同一批工单。
 - `--apply` 会写审计日志，但默认不调用模型 runner。
 - `--execute-runners` 必须和 `--apply` 一起使用，才会请求真实模型 API。
-- 常驻 daemon 可以在这条稳定的一轮调度命令之上再实现。
+- 如果确认旧 lock 是异常退出残留，可以用 `--force-lock` 覆盖。
+- 独立 daemon 可以在这条稳定的 watch 命令之上再实现。
 
 ## 父代理验收
 
@@ -724,7 +742,7 @@ failure_type = structured_output_parse_error
 
 优先级高：
 - 多子代理调度器：批量启动、限流、心跳、超时、接管。
-- 常驻 daemon：在 `subagents-dispatch` 的一轮调度基础上增加 watch loop、锁和退出控制。
+- 独立 daemon：在 `subagents-dispatch --watch` 基础上增加系统服务封装和外部停止控制。
 - 接受层：从 `output.json.tests` / `artifacts` 自动生成验收任务。
 - patch 集成器：读取真实 diff/patch，按权限、owner 和审核结果做受控集成。
 - lessons -> learning draft：在 `enable_self_learning=true` 时生成草稿。

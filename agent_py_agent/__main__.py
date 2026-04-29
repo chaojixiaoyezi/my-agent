@@ -381,9 +381,56 @@ def cmd_subagents_patches(args) -> int:
 def cmd_subagents_dispatch(args) -> int:
     """执行一轮父代理调度，默认 dry-run。"""
 
+    if args.execute_runners and not args.apply:
+        print("--execute-runners 必须和 --apply 一起使用。", file=sys.stderr)
+        return 2
+
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)
+    if args.watch:
+        try:
+            report = agent.watch_subagents(
+                router,
+                capability_config,
+                apply=args.apply,
+                execute_runners=args.execute_runners,
+                max_runners=args.max_runners,
+                limit=args.limit,
+                reviewer=args.reviewer,
+                note=args.note or "",
+                runner_instruction=args.instruction or "",
+                max_cards=args.max_cards,
+                probe=not args.no_probe,
+                take_over_by=args.take_over_by or "",
+                locked_files=args.locked_file or [],
+                interval=args.interval,
+                max_cycles=args.max_cycles,
+                force_lock=args.force_lock,
+            )
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        mode = "apply" if args.apply else "dry-run"
+        print("SUBAGENT DISPATCH WATCH")
+        print(
+            f"mode={mode} execute_runners={args.execute_runners} "
+            f"cycles={report.summary.get('total', 0)}"
+        )
+        print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
+        for record in report.records:
+            status = "OK" if record.ok else "FAIL"
+            print(
+                f"- [{status}] cycle={record.cycle} records={record.dispatch_record_count} "
+                f":: {record.message}"
+            )
+        print(f"\n已写入: {agent.subagents.workspace / 'subagent_dispatch_watch_report.json'}")
+        print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_DISPATCH_WATCH.md'}")
+        print(f"heartbeat: {agent.subagents.workspace / 'subagent_dispatch_watch_heartbeat.json'}")
+        print(f"watch log: {agent.subagents.workspace / 'subagent_dispatch_watch_log.jsonl'}")
+        print(f"watch log: {agent.subagents.workspace / 'DISPATCH_WATCH_LOG.md'}")
+        return 0
+
     report = agent.dispatch_subagents(
         router,
         capability_config,
@@ -816,6 +863,10 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch.add_argument("--execute-runners", action="store_true", help="配合 --apply 调用真实模型执行 runner")
     dispatch.add_argument("--max-runners", type=int, default=1, help="本轮最多推进多少个 runner")
     dispatch.add_argument("--limit", type=int, default=20, help="每个阶段最多处理多少条记录")
+    dispatch.add_argument("--watch", action="store_true", help="持续循环执行 dispatch")
+    dispatch.add_argument("--interval", type=float, default=30.0, help="watch 模式每轮间隔秒数")
+    dispatch.add_argument("--max-cycles", type=int, default=0, help="watch 模式最多循环次数，0 表示持续运行")
+    dispatch.add_argument("--force-lock", action="store_true", help="强制覆盖已有 watch lock")
     dispatch.add_argument("--reviewer", default="parent-dispatch", help="patch/acceptance 审核者标识")
     dispatch.add_argument("--note", help="写入调度关联审核记录的备注")
     dispatch.add_argument("--instruction", help="给本轮 runner 的额外指令")
