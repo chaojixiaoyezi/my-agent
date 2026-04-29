@@ -5,14 +5,14 @@
 - [ ] `python3 -m py_compile agent_py_agent/agent/*.py agent_py_agent/__main__.py`
 - [ ] `python3 -m agent_py_agent --help`
 - [ ] `git diff --check`
+- [ ] 收口前运行 `python3 agent_py_agent/tests/run_tests.py`，并确认它使用真实 API
 
 ## 修改普通 run / chat 时
 
 - [ ] `python3 -m agent_py_agent run "测试" --no-save`
 - [ ] chat 手动检查 `/help`、`/status`、`/btw`、`/exit`
 - [ ] 确认不会意外打印 API key
-
-如果当前默认配置是远端模型，先切 echo 或确认 API 成本。
+- [ ] 不使用 echo/fake backend 作为最终通过依据
 
 ## 修改工具系统时
 
@@ -88,4 +88,4 @@
 - [ ] 新增架构想法后更新 `DESIGN_LEDGER.md`
 - [ ] 新增命令后更新 README 或 runbook
 - [ ] 新增测试策略后更新 `TESTS.md`
-- [ ] 文档里的命令不要默认触发真实 API，除非明确提醒
+- [ ] 文档里的验收级测试说明真实 API 要求和必要环境变量

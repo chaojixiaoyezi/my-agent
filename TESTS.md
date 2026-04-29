@@ -2,7 +2,11 @@
 
 这份文档记录当前推荐的测试方式。
 
-注意：当前默认 `agent_config.yaml` 可能配置为远端模型后端。完整 `agent_py_agent/tests/run_tests.py` 里包含 `agent_py_agent run`，如果直接执行，可能会触发真实模型 API。日常开发优先跑定向测试。
+测试策略约定：
+- 后续验收级、冒烟和回归测试默认直接调用真实 API，不再把 echo/fake backend 的结果当作最终通过依据。
+- 纯解析、纯函数和局部单元测试可以作为定位辅助，但收口时必须补跑真实 API 路径。
+- `agent_py_agent/tests/run_tests.py` 是当前标准完整冒烟入口，会按当前配置请求真实模型 API。
+- 运行前确认 `AGENT_API_KEY`、`api_base`、`model_name` 指向本轮要验收的真实后端。
 
 ## 推荐快速检查
 
@@ -82,7 +86,7 @@ python3 -c "from agent_py_agent.tests.test_capabilities import test_skill_card_p
 - skill/tool 统一检索。
 - `0` 表示不限制。
 
-## 完整冒烟测试
+## 标准完整冒烟测试
 
 命令：
 
@@ -90,11 +94,7 @@ python3 -c "from agent_py_agent.tests.test_capabilities import test_skill_card_p
 python3 agent_py_agent/tests/run_tests.py
 ```
 
-运行前请确认：
-- 当前模型后端是否是 `echo`。
-- 或者你接受它按配置请求真实模型 API。
-
-如果默认配置是远端模型，不建议睡前直接跑完整脚本。
+这条命令应直接调用真实 API。若失败，先看真实 API 错误、模型输出协议、工具调用和 Windows/UTF-8 捕获问题，不要直接降级到 echo 后端作为通过结论。
 
 ## 历史记录
 
@@ -109,4 +109,4 @@ python3 agent_py_agent/tests/run_tests.py
 - 错误入口 `unknown-command` 返回非 0
 - HTTP 后端 payload/header/解析
 
-这些记录的旧证据文件在 `validation/` 下。当前开发判断以本文件的推荐定向测试为准。
+这些记录的旧证据文件在 `validation/` 下。当前开发判断以真实 API 完整冒烟和本文件的定向测试共同为准；最终收口以真实 API 路径为准。
