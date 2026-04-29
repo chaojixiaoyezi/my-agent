@@ -200,6 +200,16 @@ Codex 把每个 coding task 放在独立云 sandbox，并行执行，完成后�
 
 ## 对 my-agent 的推荐架构
 
+### 先定身份模型
+
+`my-agent` 未来不是单个进程，也不是单个聊天 session，而是一个长期身份。每个 gateway 都是完整独立 agent，不因为处在下级位置而减少功能。上下级关系只通过授权、委托和汇报形成：
+
+- identity 决定所有权。
+- grant 决定访问权。
+- delegation 决定协调权。
+
+下级 gateway 默认不能读取上级的全部任务、现状、记忆、密钥和工具状态；但它可以在授权范围内独立完成任意任务，也可以继续管理自己的下级 gateway。root gateway 保留 reclaim 协调权的能力，但 root reclaim 不等于无限读取其他 gateway 的私有状态。
+
 ### 第一阶段：本地 gateway control plane
 
 先做：

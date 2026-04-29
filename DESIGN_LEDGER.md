@@ -880,3 +880,22 @@ suggested_tool: 是否建议开发成 tool
 后续方向：
 - 做真正的 `my-agent gateway start/status/stop/restart`。
 - 把 `runner_concurrency` 和 `runner_start_rate` 接到后台 worker pool，而不是前台同步循环。
+
+## 2026-04-29 / Gateway 独立主体与委托模型
+
+状态：已落地设计
+
+思路：
+- 多 gateway 不应该是“主完整、副低配”的关系。
+- 每个 gateway 都是完整独立 agent，有自己的身份、任务账本、记忆、工具、密钥和能力目录。
+- 上下级只表示授权、委托、汇报和协调关系，不削弱任何 gateway 的自身能力。
+
+已落地：
+- `GATEWAY_DESIGN.md` 增加多 gateway 组织模型。
+- 明确 `identity 决定所有权，grant 决定访问权，delegation 决定协调权`。
+- 明确 root gateway 可保留 reclaim 协调权，但 active coordinator 不自动获得 root 的全部私有状态。
+- 第一版单机 gateway 的 schema 预留 `gateway_id`、`agent_identity_id`、`coordination_epoch`、`delegation_id`、`grant_scope`、`attempt_id` 等字段。
+
+后续方向：
+- 第一版仍从单机 gateway 做起，但任务账本和事件日志提前带 gateway/identity/delegation 字段。
+- 后续再做跨机器通信、授权交换、本体备份和迁移。
