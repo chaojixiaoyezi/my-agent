@@ -70,6 +70,159 @@
 - 主线集成时增加“读取 handoff + diff + 测试结果”的固定 checklist。
 - 如果并行线数量增加，再考虑自动生成每条线的专属 Codex prompt。
 
+## 2026-04-29 / Memory 第一批痛点归档
+
+状态：设计中
+
+思路：
+- 记忆系统的问题不是“没有记忆”，而是层级、召回、任务状态、flush、lesson 抽象和未来 skill 沉淀之间没有稳定同步。
+- 关键规则不能只依赖 RAG；需要 HOT 层、INDEX 和固定引用入口。
+- 任务状态不能只写进 memory，必须以任务目录、证据和测试结果为准。
+- 历史 session 里的“已完成/已修复”只能作为线索，不能直接当当前事实。
+- 子代理成果必须进入任务目录和可恢复摘要，不能只留在聊天汇报里。
+- 自学习先不做，只预留 Skill Draft / Learning Candidate 的位置。
+
+已落地：
+- 新增 `MEMORY_BACKLOG.md`，把第一批痛点去重成 15 类，并记录初步设计原则。
+
+后续方向：
+- 等第二批痛点输入后继续合并去重。
+- 再讨论 memory 最小闭环：`memory doctor`、`memory flush`、结构化 `memory write`、HOT/INDEX 入口和子代理收束摘要。
+- 在正式开发前先明确 memory 分层和写入验证规则。
+
+## 2026-04-30 / Memory 全量归档等级与压缩前 Hook
+
+状态：设计中
+
+思路：
+- 原始会话可以做全量冷归档，但不能直接进入 prompt。
+- 普通用户不应该面对一堆细碎开关，更适合一个 `memory_archive_level`。
+- `memory_archive_level` 采用 0-3 级：0 最完整，3 最小但仍保留最大化恢复任务所需字段。
+- 多轮上下文压缩后仍会遗忘，所以压缩前必须有 hook，先保存结构化恢复快照，再允许压缩。
+- hook 快照不和 daily memory 混放，按天写入独立 `memory/hooks/YYYY-MM-DD.jsonl`。
+- hook 快照默认保留 7 天，用户可以按硬盘情况调大或不限制。
+- 记忆要按功能分目录：daily、hooks、raw、index、hot、lessons、toolchains、tasks 各自独立。
+- token / context budget 必须实时可见，不能等用户已经丢状态才发现。
+- 记忆配置解析必须安全默认：乱码、注入字符、非法枚举、越界数字都不能直接生效，要回落默认/安全值并可观察。
+
+已落地：
+- `MEMORY_BACKLOG.md` 记录了 raw archive 0-3 等级、等级 3 的恢复底线、压缩前 hook 字段、每日 hook 文件、默认 7 天保留期、token 可见性要求和配置安全默认规则。
+
+后续方向：
+- 设计 `memory_archive_level` 配置项。
+- 设计 `memory_hook_retention_days`、`memory_hook_enabled` 和 `memory_hook_archive_level` 配置项。
+- 设计 memory 配置解析器和 `memory config doctor`，展示最终生效值与回落原因。
+- 设计 compression snapshot 存储格式。
+- 在 `status` / chat / Live Lab 中展示 token 估算和压缩风险。
+- 实现前先定义脱敏策略，避免全量归档写入 key、cookie、token。
+
+## 2026-04-30 / Memory 长期规则索引化与强制路由
+
+状态：设计中
+
+思路：
+- 长期规则不能一条条塞进常驻 memory，否则用久后会变成第二个臃肿上下文。
+- 常驻 memory 只做入口导航：从 `MEMORY.md` 指向 routing index，再由 index 指向正式规则文件。
+- 正式规则文件可以写得详细，但默认不进入 prompt；只有命中触发条件时才读取。
+- 只靠提示词要求 AI “记得去读 index”不可靠，运行时必须做一层确定性 memory router。
+
+建议结构：
+- `MEMORY.md`：极短顶层导航，只告诉模型有哪些 index。
+- `memory/routing/INDEX.md` 或分主题 routing 文件：写 trigger、aliases、scope、authority_path、priority、stale_check。
+- `references/.../*.md` 或 `memory/rules/.../*.md`：正式长期规则正文。
+
+防止 AI 不遵守的工程手段：
+- 每轮用户输入先过关键词 / FTS / route matcher，产出 `required_read_paths`。
+- 高置信和 strict 规则由代码自动读取；中置信规则作为候选提示；低置信只记录。
+- 正式任务、安全边界、工具权限、记忆写入等关键场景开启 strict gate：命中规则但没有读取权威文件时，不允许直接给最终结论。
+- 每次读取写 `memory_read_receipt`，记录 route_id、路径、hash、耗时和触发原因。
+- `memory doctor` 检查索引路径是否存在、触发词是否冲突、正式规则是否过期。
+- 加路由测试：给定触发词，必须命中指定 index 和 authority_path。
+
+已落地：
+- `MEMORY_BACKLOG.md` 记录了长期规则索引化、两级/三级导航、索引字段、strict/soft 路由模式和 receipt 思路。
+
+后续方向：
+- 定义 `MemoryRoute` 数据结构。
+- 实现 `memory-route` / `memory doctor` 的最小版本。
+- 把路由命中结果接入 chat、gateway request 和正式任务恢复流程。
+
+## 2026-04-30 / Memory 压缩方式调研
+
+状态：设计中
+
+调研对象：
+- LangGraph / LangChain：短期记忆超上下文后支持 trim、delete、summarize 和 checkpoint。
+- OpenAI Realtime：支持 auto / disabled truncation，也支持 retention ratio；说明了截断会从最旧消息开始丢上下文。
+- OpenAI Agents SDK：`OpenAIResponsesCompactionSession` 通过 trigger hook 自动 compact，并会重写 session history。
+- LlamaIndex：短期 chat history 有 token ratio，超出后把旧消息 flush 到长期 memory blocks。
+- OpenAI Agents SDK sandbox memory：run 结束后先做 conversation extraction，再由 consolidation agent 汇总到 `MEMORY.md` / `memory_summary.md`。
+- MemGPT：把上下文窗口当快内存、外部存储当慢内存，走操作系统式分层记忆。
+- Claude Code：启动入口保持短规则，复杂流程放 skill / scoped rules，避免常驻上下文膨胀。
+
+结论：
+- 不采用单一压缩方式；直接截断太危险，纯摘要会漂移，纯 RAG 不可靠。
+- 第一版采用组合策略：实时 token 预算 -> 压缩前 hook -> 滚动摘要或结构化摘要 -> raw 冷归档 -> 后台提取 daily/task/lesson 候选。
+- 压缩摘要只服务“下一轮模型继续推理”，不能当事实源；事实源必须回到 task `STATUS/HANDOFF/ACCEPTANCE/TESTS`、daily memory 和 hook/raw archive。
+- 严禁无 snapshot 的 truncation。即使是应急滑窗，也必须先写 `memory/hooks/YYYY-MM-DD.jsonl` 并 readback 验证。
+- 正式任务默认使用 `structured_summary`，普通聊天默认 `rolling_summary`，后台再用 `extract_then_consolidate` 做长期沉淀。
+
+已落地：
+- `MEMORY_BACKLOG.md` 新增“压缩方式调研”章节，记录各家做法、优缺点和我们的模式枚举：`off`、`truncate_after_snapshot`、`rolling_summary`、`structured_summary`、`extract_then_consolidate`。
+
+后续方向：
+- 定义 compression snapshot JSON schema。
+- 定义摘要 prompt，要求输出 snapshot/task refs，禁止把摘要写成事实结论。
+- 定义 token budget 估算器，把 system、messages、tools、tool results、中文文本都纳入估算范围。
+- 在恢复链路实现固定顺序：compression snapshot -> task 权威文件 -> daily memory -> HOT/routes -> raw archive/RAG。
+
+## 2026-04-30 / Memory 第一版骨架并行落地
+
+状态：部分落地
+
+思路：
+- memory 可以先开工，但第一版只做可测试骨架，不急着把所有流程接进主循环。
+- 三条线可以并行：配置安全默认、长期规则 router、压缩前 hook/raw archive。
+- 主线负责收口语义一致性，尤其是安全默认值不能和 router 行为冲突。
+
+已落地：
+- 配置线：新增 `MemorySettings`、`MemoryConfigWarning`、配置规范化和 warning receipt；`AgentConfig` 新增 memory 配置字段；`agent_config.yaml` 写入中文注释。
+- 路由线：新增 `memory_routing/`，支持 JSON/Markdown route index、关键词/别名匹配、soft/strict path resolution、route 诊断和 read receipt 结构。
+- 归档线：新增 `memory_archive/`，支持 `CompressionSnapshot`、`RawMemoryEvent`、每日 hook/raw JSONL、snapshot readback 验证、hook retention 和保守 token 估算。
+- 主线修正：`memory_rule_auto_read_limit=0` 明确为“不自动选择读取路径”，避免配置写 0 时扩大读取范围。
+- `agent/` 根目录只保留 `memory_settings.py` 兼容门面，真实实现归到 `settings/memory.py`，继续遵守分层原则。
+
+后续方向：
+- 把 router 命中结果接入 `SimpleAgent.run()` 的 prompt 构造前置步骤。
+- 增加 `memory doctor` / `memory-route` CLI，展示配置 warning、route 诊断、hook 留存状态和 read receipt。
+- 把 `append_snapshot` 接到真实压缩前 hook；目前还没有真实压缩流程，所以只先保留存储 API。
+- 设计 raw 大正文落盘和脱敏策略，避免把 key/cookie/token 全量写入冷归档。
+
+## 2026-04-30 / Memory 可见诊断与主循环薄接入
+
+状态：部分落地
+
+思路：
+- memory 骨架不能只停在库函数；必须让用户和开发者能看见它怎么路由、哪里有配置回退、归档目录有没有动静。
+- 接主循环时要薄：不重写工具循环，不让长期规则全文常驻，只在命中 route 时注入短 authority section。
+- raw archive 先跟随 `save/auto_save_memory`，用户 `--no-save` 时不写冷归档，避免违反显式不保存语义。
+
+已落地：
+- 新增 `memory-route`：给定 query，读取 `memory/routing/INDEX.md` 或 `--index` 指定文件，输出 route matches、required/candidate paths 和诊断。
+- 新增 `memory-doctor`：展示 memory effective config、config warnings、route index 校验、hook/raw 目录状态。
+- 新增 runtime routing context：安全限制在 workspace root 内读取 authority 文件，生成 injected sections 和 read receipts。
+- 新增 raw archive run helper：把一轮 run 的 user/assistant/tool metadata 写入 `memory/raw/YYYY-MM-DD.jsonl`，生成稳定 event_id/content_hash 和 token estimate。
+- `SimpleAgent.run()` 已接入：
+  - 调模型前读取命中 route 的短 authority section 并注入 prompt。
+  - 保存对话时写 raw archive；`save=False` 时不写。
+  - `AgentRunResult` 增加 routed rule 和 archive 统计字段。
+
+后续方向：
+- 把 read receipts 写入 LocalStore event，方便 timeline/doctor 查“本轮到底读了哪些规则”。
+- 增加 route index 默认模板和创建命令，降低用户第一次配置成本。
+- 接入真正压缩前 hook，当前 raw archive 已接主循环，但 compression snapshot 还只是存储 API。
+- 做脱敏策略和大正文 blob 存储，不把工具输出正文直接塞进 raw event preview。
+
 ## 2026-04-29 / 大文件拆分第一步
 
 状态：部分落地

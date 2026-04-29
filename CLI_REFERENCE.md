@@ -140,6 +140,8 @@ Ctrl+C
 | `remember` | 手动写入一条记忆 | 是 | 否 |
 | `memory-list` | 列出最近记忆 | 否 | 否 |
 | `memory-search` | 搜索记忆 | 否 | 否 |
+| `memory-route` | 按长期规则索引预览 memory 路由命中 | 否 | 否 |
+| `memory-doctor` | 诊断 memory 配置、路由索引和归档目录 | 否 | 否 |
 | `local-store-status` | 查看本地事实源状态 | 否 | 否 |
 | `local-search` | 搜索 SQLite/FTS5 本地事实源 | 否 | 否 |
 | `local-index-memory` | 把旧 JSONL 记忆补建到本地事实源 | 是 | 否 |
@@ -244,6 +246,40 @@ my-agent memory-search "表格" --limit 5
 | --- | --- | --- |
 | `query` | - | 必填，搜索关键词。 |
 | `--limit <n>` | `5` | 最多显示条数。 |
+
+## `memory-route`
+
+```powershell
+my-agent memory-route "上下文压缩前要不要读长期规则"
+my-agent memory-route "memory index" --index memory/routing/INDEX.md --mode strict --limit 5 --auto-read-limit 2
+my-agent memory-route "任务恢复规则" --json
+```
+
+按长期规则路由索引预览查询会命中哪些 authority 文件。默认索引是工作区下的 `memory/routing/INDEX.md`；索引不存在时不会崩溃，会输出清楚的诊断信息。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `query` | - | 必填，要路由的查询或用户任务。 |
+| `--index <path>` | `memory/routing/INDEX.md` | 指定路由索引文件；相对路径按 agent workspace root 解析。 |
+| `--mode <mode>` | 配置 `memory_rule_routing_mode` | 路由模式，可选 `off`、`soft`、`strict`。 |
+| `--limit <n>` | `5` | 最多显示多少条命中 route；`0` 表示不截断。 |
+| `--auto-read-limit <n>` | 配置 `memory_rule_auto_read_limit` | 最多升级多少条规则路径到 required/candidate。 |
+| `--json` | `false` | 输出机器可读 JSON，包含 `matches`、`required_read_paths`、`candidate_paths` 和诊断信息。 |
+
+## `memory-doctor`
+
+```powershell
+my-agent memory-doctor
+my-agent memory-doctor --index memory/routing/INDEX.md
+my-agent memory-doctor --json
+```
+
+诊断 memory 配置和文件骨架：显示 memory 配置的 effective values、配置回退 warnings、路由索引是否存在、routes 加载和校验结果，以及 `memory/hooks`、`memory/raw` 目录的文件数、最近文件和 hook retention 配置。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--index <path>` | `memory/routing/INDEX.md` | 指定路由索引文件；相对路径按 agent workspace root 解析。 |
+| `--json` | `false` | 输出机器可读 JSON，包含 `warnings`、`routing.routes` 和 archive 目录状态。 |
 
 ## `local-store-status`
 

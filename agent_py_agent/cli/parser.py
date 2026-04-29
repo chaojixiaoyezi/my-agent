@@ -35,6 +35,7 @@ from .local_commands import (
     cmd_status,
     cmd_timeline,
 )
+from .memory_commands import cmd_memory_doctor, cmd_memory_route
 from .scenario import cmd_scenario_test
 from .subagents import (
     cmd_spawn,
@@ -104,6 +105,20 @@ def build_parser() -> argparse.ArgumentParser:
     memory_search.add_argument("query", help="搜索关键词")
     memory_search.add_argument("--limit", type=int, default=5, help="最多显示条数")
     memory_search.set_defaults(func=cmd_memory_search)
+
+    memory_route = sub.add_parser("memory-route", help="按长期规则索引预览 memory 路由命中")
+    memory_route.add_argument("query", help="要路由的查询或用户任务")
+    memory_route.add_argument("--index", help="路由索引文件；相对路径按 workspace root 解析")
+    memory_route.add_argument("--mode", choices=["off", "soft", "strict"], help="路由模式；默认使用配置")
+    memory_route.add_argument("--limit", type=int, default=5, help="最多显示多少条命中 route；0 表示不截断")
+    memory_route.add_argument("--auto-read-limit", type=int, help="最多升级多少条规则路径；默认使用配置")
+    memory_route.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    memory_route.set_defaults(func=cmd_memory_route)
+
+    memory_doctor = sub.add_parser("memory-doctor", help="诊断 memory 配置、路由索引和归档目录")
+    memory_doctor.add_argument("--index", help="路由索引文件；相对路径按 workspace root 解析")
+    memory_doctor.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    memory_doctor.set_defaults(func=cmd_memory_doctor)
 
     local_store_status = sub.add_parser("local-store-status", help="查看本地事实源状态")
     local_store_status.set_defaults(func=cmd_local_store_status)

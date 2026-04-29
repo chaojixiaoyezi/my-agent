@@ -16,6 +16,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |-- ARCHITECTURE_GUIDE.md                      # 架构边界、拆分顺序和两层注释规则，给人和 LLM 都看
 |-- GATEWAY_DESIGN.md                          # gateway 常驻形态、外部方案对比和本项目目标设计
 |-- GATEWAY_RESEARCH.md                        # gateway 大调研，比较 daemon、任务队列、workflow、Notebook 和 AI gateway 方案
+|-- MEMORY_BACKLOG.md                          # 记忆系统痛点、去重分类和后续设计讨论入口
 |-- WORKSTREAMS.md                             # 并行开发工作台说明，定义 worktree、职责边界和集成流程
 |-- HANDOFF_TEMPLATE.md                        # 并行开发线完成后的交接模板
 |-- scripts/                                   # 开发辅助脚本，放可见测试台和 workstream 管理入口
@@ -34,6 +35,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- common.py                          # 配置加载、创建 SimpleAgent、能力路由和通用格式化
 |   |   |-- local_doctor.py                    # LocalStore/gateway/subagent 体检和重建规则
 |   |   |-- local_commands.py                  # status/timeline/run/memory/local-search/local-doctor/local-rebuild 命令
+|   |   |-- memory_commands.py                 # memory-route/memory-doctor 可见诊断命令
 |   |   |-- subagents.py                       # 子代理看板、动作、路由、验收、dispatch、runner 命令
 |   |   |-- daemon.py                          # daemon 配置合并和前台常驻调度
 |   |   |-- gateway_process.py                 # gateway 进程生命周期、run loop、heartbeat 和 request worker
@@ -64,7 +66,10 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- local_store.py                     # LocalStore 兼容组合入口，真实实现已拆到 local_storage/
 |   |   |-- local_storage/                     # LocalStore models/schema/records/search/events/maintenance
 |   |   |-- memory.py                          # 记忆兼容入口，真实实现已拆到 memory_store/
+|   |   |-- memory_settings.py                 # memory 配置安全解析兼容入口，真实实现已拆到 settings/memory.py
 |   |   |-- memory_store/                      # 长期记忆存储，当前是 JSONL + LocalStore 索引
+|   |   |-- memory_archive/                    # 压缩前 hook 快照和 raw 冷归档 JSONL 存储骨架
+|   |   |-- memory_routing/                    # 长期规则索引化路由，负责 MEMORY -> index -> authority file 的确定性匹配
 |   |   |-- observability/                     # 未来 request_id、耗时、状态、错误码、metrics、trace 目录
 |   |   |-- prompting.py                       # prompt 兼容入口，真实实现已拆到 prompting_parts/
 |   |   |-- prompting_parts/                   # prompt 构造、工具 transcript、未来上下文预算策略
@@ -94,6 +99,13 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |       |-- test_capabilities.py               # skill/tool 统一能力路由测试
 |       |-- test_cli_reference.py              # CLI_REFERENCE 与 argparse 命令/参数覆盖测试
 |       |-- test_local_store.py                # SQLite/FTS5/JSONL/记忆索引回归测试
+|       |-- test_memory_archive.py             # 压缩前快照、raw 冷归档、留存策略和 token 估算测试
+|       |-- test_memory_archive_runtime.py     # run turn 冷归档 helper、稳定 event_id/hash 和工具元数据测试
+|       |-- test_memory_cli.py                 # memory-route / memory-doctor CLI 可见诊断测试
+|       |-- test_memory_config.py              # memory 配置安全默认、非法值回退和 warning receipt 测试
+|       |-- test_memory_routing.py             # 长期规则 route 加载、匹配、soft/strict 解析和索引诊断测试
+|       |-- test_memory_routing_context.py     # runtime rule routing context 安全读取和 prompt 片段测试
+|       |-- test_memory_runtime.py             # SimpleAgent.run 接入 routed memory 与 raw archive 的回归测试
 |       |-- test_packaging.py                  # console script、workspace_root 等安装与配置行为测试
 |       `-- test_tools.py                      # 工具目录、工具调用和工具能力测试
 |-- .gitattributes                             # 跨平台文本编码和换行约定
@@ -160,6 +172,17 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `framework-runtime`
 - `tools-boundary`
 - `live-lab-test`
+
+### `MEMORY_BACKLOG.md`
+
+这是记忆系统的专门讨论入口。
+
+它记录：
+- 记忆没有真实落盘的问题。
+- 临时上下文、长期偏好、任务状态、lesson 和 skill 种子混杂的问题。
+- HOT 层、Daily、Task、Lesson、Archive、Skill Draft 等建议分层。
+- RAG 召回不稳定、压缩前 flush、任务状态同步、历史污染、子代理成果收束等问题。
+- 自学习暂不开发，只预留 Skill Draft / Learning Candidate 的边界。
 
 ### `scripts/live_agent_lab.py` 和 `scripts/live_lab/`
 
