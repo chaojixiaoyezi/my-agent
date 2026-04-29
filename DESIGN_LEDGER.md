@@ -1042,3 +1042,37 @@ suggested_tool: 是否建议开发成 tool
 后续方向：
 - 基于这些工具增加隔离 fixture 全流程场景测试：chat -> 创建多个子代理 -> dispatch -> runner -> 验收 -> 汇报。
 - 给真实场景测试固定临时 `memory_path`、`subagent_workspace`、`gateway_workspace` 和 fixture 工作区，确保不污染当前开发仓库。
+
+## 2026-04-29 / 隔离全流程场景测试
+
+状态：已落地第一版
+
+背景：
+- 用户希望能“看完整流程”，而不是只跑分散的单元测试或 smoke。
+- 全流程测试必须能调用真实 API，但不能污染当前开发仓库，也不能把 runner 文件写到项目源码里。
+- gateway、主代理自然语言派工、subagent runner 和父代理验收需要被串起来观察。
+
+已落地：
+- 新增配置 `workspace_root`：为空时保持默认项目根；设置后 memory、subagent、gateway、prompt_files 和文件工具都以该目录为根。
+- 新增 `my-agent scenario-test`：
+  - 每次创建独立 `scenario-*` 临时目录和 `fixture_project`。
+  - 写入隔离配置，把 `workspace_root` 指向 fixture。
+  - 默认启动隔离 gateway，使用 `gateway ask` 触发主代理创建多个子代理。
+  - 随后由当前进程执行 dispatch，允许真实 runner/API、写入 fixture 内报告，并执行父代理验收。
+  - 输出看板、runner 证据文件、`scenario_summary.json` 和 `SCENARIO_SUMMARY.md`。
+- 修复真实场景暴露的问题：
+  - 同一轮 `run()` 内重复的编排工具调用会被去重，避免模型反复创建相同子代理。
+  - 达到工具轮数上限时会再让模型生成最终回答，不再直接返回最后一个工具调用块。
+  - 工具解析器兼容模型把 `[TOOL_CALL]` 误写成 `[SUBAGENT_CALL]` 的常见情况。
+  - runner 回写会记录系统真实执行过的工具；验收不再相信模型自称的 `used_tools`。
+  - 验收会按 `acceptance_checks` 核对 `read_file/write_file` 证据，并检查本地 artifact 路径是否真实存在。
+
+安全边界：
+- 默认不复用开发仓库的 `data/`。
+- runner 写文件工具只能看到 fixture 工作区。
+- `--direct` 可跳过 gateway，便于定位 gateway 和主代理自身的问题差异。
+- `--dry-run` 可跳过真实 runner API，只观察派工和调度计划。
+
+后续方向：
+- 增加更极端的 fixture：runner 失败、结构化输出损坏、能力请求、stalled、gateway 重启恢复。
+- 把场景测试报告做成更适合前端/TUI 展示的事件时间线。

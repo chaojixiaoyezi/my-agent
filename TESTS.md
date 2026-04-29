@@ -6,6 +6,7 @@
 - 后续验收级、冒烟和回归测试默认直接调用真实 API，不再把 echo/fake backend 的结果当作最终通过依据。
 - 纯解析、纯函数和局部单元测试可以作为定位辅助，但收口时必须补跑真实 API 路径。
 - `agent_py_agent/tests/run_tests.py` 是当前标准完整冒烟入口，会按当前配置请求真实模型 API，使用临时配置隔离 memory/subagent 数据，并自动发现运行 `agent_py_agent/tests/test_*.py` 里的所有 `test_` 函数。
+- `my-agent scenario-test` 是当前推荐的可观察全流程入口：它会新建临时 fixture，走 gateway ask、主代理派工、真实 runner、父代理验收，并把所有状态关进 `workspace_root`。
 - 运行前确认 `AGENT_API_KEY`、`api_base`、`model_name` 指向本轮要验收的真实后端。
 
 ## 推荐快速检查
@@ -59,6 +60,7 @@ python3 -c "from agent_py_agent.tests import test_agent; tests=[fn for name, fn 
 - `[SUBAGENT_RESULT]` 结构化输出解析。
 - 真实模型常见的 Markdown fenced JSON 结构化输出解析。
 - subagent 验收 dry-run / apply。
+- 验收按真实工具执行记录核对 `read_file/write_file`，并检查本地 artifact 路径是否存在。
 - patch 审核 dry-run / apply。
 - applied patch 必须先有 `review_status=APPROVED` 才能通过验收。
 - planned / blocked / 未知状态 patch 会阻断验收。
@@ -77,6 +79,7 @@ python3 -c "from agent_py_agent.tests.test_tools import test_tool_loop_and_promp
 - 推荐工具详情。
 - 工具调用循环。
 - 主代理自然语言派工工具：`create_subagents` / `subagent_board` / `dispatch_subagents`。
+- 工具调用解析兼容 `[SUBAGENT_CALL]` 错标记，并拦截同轮重复编排调用。
 - 工具 allowlist。
 - 文件写入 / 追加 / 替换。
 - fetch_url / http_request。
@@ -107,6 +110,7 @@ python3 agent_py_agent/tests/run_tests.py
 ```bash
 python -m pip install -e .
 my-agent --help
+my-agent scenario-test
 my-agent subagents-dispatch --watch --max-cycles 1 --interval 0
 my-agent daemon --max-cycles 1 --interval 0 --max-runners auto --no-planner
 my-agent gateway run --max-cycles 1 --interval 0 --max-runners 0 --no-planner
@@ -123,6 +127,7 @@ my-agent gateway stop --kill
 - 编译所有 agent 模块。
 - 跑 CLI 真实入口。
 - 跑一次真实模型 `run`。
+- 跑一次 `scenario-test` 或等价隔离场景，观察 gateway ask -> 主代理派工 -> dispatch runner -> 验收闭环。
 - 创建隔离临时配置，避免污染默认 `data/memory.jsonl` 和 `data/subagents/`。
 - 跑一次真实 API `subagent-run --execute`，要求真实后端、工具调用、结构化输出、证据写回和父代理验收闭环。
 - 检查 `subagents-dispatch --help`，并跑一次隔离的 `subagents-dispatch --watch --max-cycles 1 --interval 0`。

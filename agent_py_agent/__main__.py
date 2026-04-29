@@ -10,6 +10,7 @@ import queue
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -111,7 +112,24 @@ def make_agent(args) -> SimpleAgent:
     """根据配置创建一个可直接运行的智能体实例。"""
 
     config = load_config(args.config)
-    return SimpleAgent(config, ROOT)
+    return SimpleAgent(config, resolve_workspace_root(config, args.config))
+
+
+def resolve_workspace_root(config, config_path: str | Path) -> Path:
+    """解析本次运行实际使用的工作区根目录。
+
+    默认仍然使用包目录 `agent_py_agent`，保持之前行为不变。配置里写了
+    `workspace_root` 时，memory、gateway、subagent 账本和文件工具都会落在该目录下。
+    场景测试会利用这个开关把真实 API 任务关进临时 fixture，避免碰当前开发仓库。
+    """
+
+    raw = str(getattr(config, "workspace_root", "") or "").strip()
+    if not raw:
+        return ROOT
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path(config_path).expanduser().resolve().parent / candidate
+    return candidate.resolve()
 
 
 def make_capability_router(agent: SimpleAgent, capability_config, skill_dirs: list[str] | None):
@@ -1387,6 +1405,394 @@ def cmd_gateway_result(args) -> int:
     return print_gateway_response(payload, json_mode=args.json, show_prompt=args.show_prompt)
 
 
+@dataclass
+class ScenarioPaths:
+    """一次隔离场景测试使用的目录集合。"""
+
+    run_root: Path
+    fixture_root: Path
+    config: Path
+    summary_json: Path
+    summary_md: Path
+
+
+def cmd_scenario_test(args) -> int:
+    """跑一轮可观察、隔离的真实任务全流程。"""
+
+    if args.count <= 0:
+        print("--count 必须大于 0。", file=sys.stderr)
+        return 2
+    if args.max_runners <= 0 and not args.dry_run:
+        print("--max-runners 必须大于 0；如果只想预览，请加 --dry-run。", file=sys.stderr)
+        return 2
+    if args.max_cycles <= 0:
+        print("--max-cycles 必须大于 0。", file=sys.stderr)
+        return 2
+
+    paths = create_scenario_workspace(args)
+    print("MY-AGENT SCENARIO TEST")
+    print(f"run_root={paths.run_root}")
+    print(f"fixture_root={paths.fixture_root}")
+    print(f"config={paths.config}")
+    print("")
+
+    prompt = build_scenario_prompt(args.count)
+    created_via = "direct"
+    gateway_payload: dict[str, object] = {}
+    if args.direct:
+        print_scenario_step(1, "主代理聊天派工（direct agent.run）")
+        agent = load_scenario_agent(paths.config)
+        result = agent.run(prompt, save=False)
+        print(result.response)
+        print(f"[backend={result.backend}; tool_rounds={result.tool_rounds}]")
+    else:
+        print_scenario_step(1, "主代理聊天派工（gateway ask）")
+        created_via = "gateway"
+        gateway_payload = run_scenario_gateway_ask(paths, prompt, timeout=args.timeout)
+        if not gateway_payload.get("ok"):
+            write_scenario_summary(paths, ok=False, reason="gateway ask failed", extra={"gateway": gateway_payload})
+            return 2
+
+    agent = load_scenario_agent(paths.config)
+    tasks = agent.subagents.list_runs()
+    print_scenario_step(2, "检查派工结果")
+    print_scenario_board(agent, limit=args.count + 5)
+    if len(tasks) < args.count:
+        reason = f"期望至少创建 {args.count} 个子代理，实际只有 {len(tasks)} 个。"
+        print(f"SCENARIO_FAIL: {reason}", file=sys.stderr)
+        write_scenario_summary(paths, ok=False, reason=reason, extra={"created_via": created_via})
+        return 2
+
+    print_scenario_step(3, "父代理调度 runner 和验收")
+    capability_config = load_capability_config(args.capability_config)
+    router = make_capability_router(agent, capability_config, args.skill_dir)
+    dispatch_summaries: list[dict[str, object]] = []
+    final_ok = False
+    for cycle in range(1, args.max_cycles + 1):
+        print(f"\n--- dispatch cycle {cycle}/{args.max_cycles} ---")
+        report = agent.dispatch_subagents(
+            router,
+            capability_config,
+            apply=True,
+            execute_runners=not args.dry_run,
+            planner=args.planner,
+            max_runners=args.max_runners,
+            limit=0,
+            reviewer="scenario-test",
+            note="isolated full-flow scenario test",
+            runner_instruction=build_scenario_runner_instruction(),
+            max_cards=0,
+            probe=True,
+        )
+        dispatch_summaries.append(
+            {
+                "cycle": cycle,
+                "summary": report.summary,
+                "record_count": len(report.records),
+                "ok": all(item.ok for item in report.records),
+            }
+        )
+        print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
+        for record in report.records:
+            status = "OK" if record.ok else "FAIL"
+            run = record.run_id or "global"
+            print(
+                f"- [{status}] {record.step}/{record.action} run={run} "
+                f"applied={record.applied} :: {record.message}"
+            )
+        print_scenario_board(agent, limit=args.count + 5)
+        final_ok = scenario_tasks_verified(agent, args.count)
+        if final_ok:
+            break
+
+    print_scenario_step(4, "核对隔离文件和最终报告")
+    report_files = sorted((paths.fixture_root / "scenario_outputs").glob("*.md"))
+    if args.dry_run:
+        files_ok = True
+        print("dry_run=true，跳过 runner 写文件检查。")
+    else:
+        files_ok = len(report_files) >= args.count
+        print(f"scenario_output_files={len(report_files)}")
+        for item in report_files:
+            print(f"- {item}")
+    final_ok = final_ok and files_ok
+    reason = "scenario passed" if final_ok else "scenario did not reach verified state"
+    write_scenario_summary(
+        paths,
+        ok=final_ok,
+        reason=reason,
+        extra={
+            "created_via": created_via,
+            "gateway": gateway_payload,
+            "dispatch": dispatch_summaries,
+            "report_files": [str(item) for item in report_files],
+        },
+    )
+    print(f"\nsummary_json={paths.summary_json}")
+    print(f"summary_md={paths.summary_md}")
+    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
+    return 0 if final_ok else 2
+
+
+def create_scenario_workspace(args) -> ScenarioPaths:
+    """创建一次不会污染开发仓库的场景测试目录。"""
+
+    parent = (
+        Path(args.workspace).expanduser().resolve()
+        if args.workspace
+        else Path(tempfile.gettempdir()) / "my-agent-scenarios"
+    )
+    parent.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    run_root = parent / f"scenario-{stamp}-{uuid.uuid4().hex[:6]}"
+    fixture_root = run_root / "fixture_project"
+    fixture_root.mkdir(parents=True, exist_ok=True)
+    write_scenario_fixture(fixture_root)
+    config_path = run_root / "scenario_agent_config.yaml"
+    write_scenario_config(
+        source_config=Path(args.config),
+        target_config=config_path,
+        fixture_root=fixture_root,
+        request_timeout=args.timeout,
+        max_subagents=max(args.count, 1),
+    )
+    return ScenarioPaths(
+        run_root=run_root,
+        fixture_root=fixture_root,
+        config=config_path,
+        summary_json=run_root / "scenario_summary.json",
+        summary_md=run_root / "SCENARIO_SUMMARY.md",
+    )
+
+
+def write_scenario_fixture(fixture_root: Path) -> None:
+    """写一个足够小、可被真实 runner 安全读写的项目。"""
+
+    (fixture_root / "README.md").write_text(
+        "\n".join(
+            [
+                "# My Agent Scenario Fixture",
+                "",
+                "这是 my-agent 隔离全流程测试用的小项目。",
+                "所有 runner 只能在这个目录里读写文件。",
+                "",
+                "## 验收目标",
+                "",
+                "- 子代理必须读取本 README。",
+                "- 子代理必须在 scenario_outputs/ 里写入自己的报告。",
+                "- 父代理必须完成 runner 调度和验收闭环。",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (fixture_root / "notes").mkdir(parents=True, exist_ok=True)
+    (fixture_root / "notes" / "input_a.md").write_text(
+        "A 组素材：检查 fixture 的 README，并说明读写工具是否可用。\n",
+        encoding="utf-8",
+    )
+    (fixture_root / "notes" / "input_b.md").write_text(
+        "B 组素材：输出一份简短证据报告，证明任务只在隔离目录内运行。\n",
+        encoding="utf-8",
+    )
+    (fixture_root / "scenario_outputs").mkdir(parents=True, exist_ok=True)
+
+
+def write_scenario_config(
+    *,
+    source_config: Path,
+    target_config: Path,
+    fixture_root: Path,
+    request_timeout: float,
+    max_subagents: int,
+) -> None:
+    """基于当前配置写一份隔离配置，保留模型和 API 设置。"""
+
+    base = source_config.read_text(encoding="utf-8")
+    fixture = str(fixture_root).replace("\\", "/")
+    overrides = f"""
+
+# scenario-test isolation overrides
+workspace_root: "{fixture}"
+prompt_files:
+memory_path: ".my_agent/memory.jsonl"
+subagent_workspace: ".my_agent/subagents"
+gateway_workspace: ".my_agent/gateway"
+max_subagents: {max_subagents}
+gateway_request_timeout: {int(request_timeout)}
+gateway_request_poll_interval: 1
+daemon_planner: false
+daemon_apply: false
+daemon_execute_runners: false
+daemon_max_runners: 0
+daemon_interval: 1
+max_tool_rounds: 8
+"""
+    target_config.write_text(base + overrides, encoding="utf-8")
+
+
+def load_scenario_agent(config_path: Path) -> SimpleAgent:
+    """加载隔离配置对应的 agent。"""
+
+    class Args:
+        config = str(config_path)
+
+    return make_agent(Args())
+
+
+def build_scenario_prompt(count: int) -> str:
+    """构建主代理派工 prompt，尽量让真实模型稳定调用派工工具。"""
+
+    return (
+        "这是 my-agent 隔离全流程场景测试。你必须通过工具创建子代理工单，"
+        "不要自己直接完成任务。\n\n"
+        "请只调用一次 create_subagents，参数必须满足：\n"
+        f"- count: {count}\n"
+        "- tool_preset: coding\n"
+        "- goal: 在隔离 fixture 项目中读取 README.md，并在 scenario_outputs/ 写入自己的证据报告\n"
+        "- acceptance_checks: 必须有 read_file 证据；必须有 write_file 证据；必须等待父代理验收\n"
+        "- plan: 读取 README.md；写入 scenario_outputs/<run_id>.md；输出 SUBAGENT_RESULT；等待验收\n\n"
+        "创建后可以调用 subagent_board 看一眼状态，然后用一句话汇报创建了几个子代理。"
+    )
+
+
+def build_scenario_runner_instruction() -> str:
+    """给每个真实 runner 的稳定执行说明。"""
+
+    return (
+        "这是隔离全流程测试的 runner 阶段。你只能在当前 fixture 工作区内操作。\n"
+        "必须严格按顺序完成，不允许跳步：\n"
+        "1. 第一轮先只调用 read_file，payload 精确使用 {\"tool\":\"read_file\",\"path\":\"README.md\"}。\n"
+        "2. 收到 read_file 成功结果后，从执行上下文 JSON 找到自己的 run_id。\n"
+        "3. 第二轮只调用 write_file，path 使用 scenario_outputs/<run_id>.md，content 写一份 3-6 行中文报告，"
+        "说明已读取 README.md，并注明这是隔离测试。\n"
+        "4. 只有在你已经看到 write_file 成功结果后，才允许输出最终 [SUBAGENT_RESULT]。\n"
+        "5. 最终回复只能包含一个 [SUBAGENT_RESULT] JSON 结果块，不要输出 Markdown 代码围栏。\n"
+        "JSON 必须包含：status=AWAITING_ACCEPTANCE；summary；used_tools 至少包含 read_file 和 write_file；"
+        "evidence 至少两条，分别证明 README.md 已读取、scenario_outputs/<run_id>.md 已写入；"
+        "tests 至少一条 ok=true；artifacts 包含写入的报告路径；patches 为空数组。"
+    )
+
+
+def run_scenario_gateway_ask(paths: ScenarioPaths, prompt: str, *, timeout: float) -> dict[str, object]:
+    """用隔离配置启动 gateway、投递一次 ask，然后关闭 gateway。"""
+
+    def command(*parts: str) -> list[str]:
+        return [sys.executable, "-m", "agent_py_agent", "--config", str(paths.config), *parts]
+
+    env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    start = run_scenario_subprocess(command("gateway", "start", "--force"), env=env, timeout=60)
+    if start.returncode != 0:
+        return {"ok": False, "error": "gateway start failed", "stdout": start.stdout, "stderr": start.stderr}
+    try:
+        ask = run_scenario_subprocess(
+            command("gateway", "ask", prompt, "--timeout", str(timeout), "--no-save", "--json"),
+            env=env,
+            timeout=timeout + 30,
+        )
+        if ask.returncode != 0:
+            return {"ok": False, "error": "gateway ask failed", "stdout": ask.stdout, "stderr": ask.stderr}
+        try:
+            payload = json.loads(ask.stdout)
+        except json.JSONDecodeError as exc:
+            return {"ok": False, "error": f"gateway response was not JSON: {exc}", "stdout": ask.stdout}
+        return payload
+    finally:
+        run_scenario_subprocess(
+            command("gateway", "stop", "--timeout", "10", "--kill", "--reason", "scenario-test done"),
+            env=env,
+            timeout=30,
+        )
+
+
+def run_scenario_subprocess(cmd: list[str], *, env: dict[str, str], timeout: float) -> subprocess.CompletedProcess:
+    """运行隔离场景里的 CLI 子命令，并把输出原样展示给用户观察。"""
+
+    print("$", " ".join(cmd))
+    completed = subprocess.run(
+        cmd,
+        cwd=ROOT.parent,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        env=env,
+        timeout=timeout,
+    )
+    if completed.stdout:
+        print(completed.stdout)
+    if completed.stderr:
+        print(completed.stderr)
+    return completed
+
+
+def print_scenario_step(index: int, title: str) -> None:
+    print(f"\n== {index}. {title} ==")
+
+
+def print_scenario_board(agent: SimpleAgent, *, limit: int) -> None:
+    """打印一份短看板，方便观察当前阶段。"""
+
+    board = agent.subagents.write_board(recent_limit=limit)
+    print("board_summary=" + json.dumps(board.summary, ensure_ascii=False, sort_keys=True))
+    for item in board.items[:limit]:
+        print(
+            f"- {item.id} status={item.status} verify={item.verification_status} "
+            f"tools_evidence={item.evidence_count} flags={','.join(item.risk_flags) or 'ok'} :: {item.goal}"
+        )
+    print(f"board_json={agent.subagents.workspace / 'subagent_board.json'}")
+    print(f"board_md={agent.subagents.workspace / 'SUBAGENT_BOARD.md'}")
+
+
+def scenario_tasks_verified(agent: SimpleAgent, expected_count: int) -> bool:
+    tasks = agent.subagents.list_runs()
+    if len(tasks) < expected_count:
+        return False
+    return all(
+        task.status == "DONE" and task.verification_status == "VERIFIED"
+        for task in tasks[:expected_count]
+    )
+
+
+def write_scenario_summary(
+    paths: ScenarioPaths,
+    *,
+    ok: bool,
+    reason: str,
+    extra: dict[str, object] | None = None,
+) -> None:
+    """写机器可读和人类可读的场景测试摘要。"""
+
+    payload = {
+        "ok": ok,
+        "reason": reason,
+        "run_root": str(paths.run_root),
+        "fixture_root": str(paths.fixture_root),
+        "config": str(paths.config),
+        "summary_json": str(paths.summary_json),
+        "summary_md": str(paths.summary_md),
+        **(extra or {}),
+    }
+    paths.summary_json.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    lines = [
+        "# Scenario Test Summary",
+        "",
+        f"- ok: {ok}",
+        f"- reason: {reason}",
+        f"- run_root: {paths.run_root}",
+        f"- fixture_root: {paths.fixture_root}",
+        f"- config: {paths.config}",
+    ]
+    if extra:
+        lines.extend(["", "## Extra", "", "```json", json.dumps(extra, ensure_ascii=False, indent=2), "```"])
+    paths.summary_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _gateway_request_loop(args, paths: GatewayPaths, stop_event: threading.Event) -> None:
     """后台处理 gateway inbox 请求。
 
@@ -2067,6 +2473,23 @@ def build_parser() -> argparse.ArgumentParser:
     daemon.add_argument("--locked-file", action="append", help="接管时锁定的文件，可多次传入")
     daemon.add_argument("--skill-dir", action="append", help="额外 skill 目录，可多次传入")
     daemon.set_defaults(func=cmd_daemon)
+
+    scenario = sub.add_parser("scenario-test", help="跑一轮隔离的真实全流程任务测试")
+    scenario.add_argument(
+        "--capability-config",
+        default=str(DEFAULT_CAPABILITY_CONFIG),
+        help="能力路由配置文件路径，默认使用 config/capability_config.yaml",
+    )
+    scenario.add_argument("--workspace", help="保存场景测试结果的父目录；不传则使用系统临时目录")
+    scenario.add_argument("--count", type=int, default=2, help="本场景创建多少个子代理")
+    scenario.add_argument("--max-runners", type=int, default=2, help="每轮最多推进多少个 runner")
+    scenario.add_argument("--max-cycles", type=int, default=3, help="最多执行多少轮 dispatch")
+    scenario.add_argument("--timeout", type=float, default=300.0, help="gateway ask 等待响应的秒数")
+    scenario.add_argument("--dry-run", action="store_true", help="只调度不执行真实 runner API")
+    scenario.add_argument("--planner", action="store_true", help="dispatch 时启用父代理 planner")
+    scenario.add_argument("--direct", action="store_true", help="不经过 gateway，直接用当前进程跑主代理派工")
+    scenario.add_argument("--skill-dir", action="append", help="额外 skill 目录，可多次传入")
+    scenario.set_defaults(func=cmd_scenario_test)
 
     gateway = sub.add_parser("gateway", help="管理后台 gateway 进程")
     gateway_sub = gateway.add_subparsers(dest="gateway_command")

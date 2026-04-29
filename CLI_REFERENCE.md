@@ -52,6 +52,7 @@ python -m agent_py_agent --help
 | 后台 gateway | `my-agent gateway start` | 后台常驻 | 取决于 `daemon_*` 配置 |
 | gateway 客户端请求 | `my-agent gateway ask "任务"` | 否，投递到后台 gateway | 是，由后台 gateway 调用 |
 | 真实 runner 调度 | `my-agent subagents-dispatch --apply --execute-runners` | 否 | 是 |
+| 隔离全流程测试 | `my-agent scenario-test` | 临时启动并停止 gateway | 是，除非加 `--dry-run` |
 | 子代理单次执行 | `my-agent subagent-run <run_id> --execute` | 否 | 是 |
 
 当前 gateway 第一版已经实现为本地后台进程控制面：它管理 pid、state、heartbeat、stop request、日志和本地请求队列，并在内部复用 daemon/watch 调度。`my-agent` 不带子命令时会自动确保 gateway 存活，然后进入 `chat --gateway`。常驻形态和外部方案对比见 [GATEWAY_DESIGN.md](GATEWAY_DESIGN.md)。
@@ -105,6 +106,14 @@ my-agent gateway stop
 my-agent subagents-dispatch --watch --planner --apply --execute-runners --interval 30 --max-runners 1
 ```
 
+跑一轮可观察的隔离全流程测试：
+
+```powershell
+my-agent scenario-test
+```
+
+它会新建临时 fixture 工作区，经过 `gateway ask` 让主代理派工，再执行真实 runner 和父代理验收。所有 memory、subagent、gateway 和写文件工具都被 `workspace_root` 关在临时目录里。
+
 停止前台 watch：
 
 ```text
@@ -131,6 +140,7 @@ Ctrl+C
 | `subagents-patches` | 审核 runner 输出的 patch 记录 | `--apply` 时写 patch 审核状态和日志 | 否 |
 | `subagents-dispatch` | 执行父代理调度 | dry-run 写报告；`--apply` 写回 | 只有 `--apply --execute-runners` 会调用 |
 | `daemon` | 按 `agent_config.yaml` 的 `daemon_*` 配置启动前台常驻调度 | 取决于配置 | 取决于配置 |
+| `scenario-test` | 跑一轮隔离的 gateway/chat/subagent/runner/验收全流程 | 写临时 fixture 和报告 | 默认调用真实 API，可用 `--dry-run` 跳过 runner |
 | `gateway` | 管理后台 gateway 进程 | 写 gateway pid/state/heartbeat/log | 取决于配置 |
 | `subagent-context` | 生成单个 subagent 执行上下文 | 是 | 否 |
 | `subagent-run` | 按执行上下文运行一个 subagent | 是 | 只有 `--execute` 会调用 |
@@ -458,6 +468,47 @@ daemon_probe: true
 daemon_reviewer: "parent-daemon"
 daemon_runner_instruction: ""
 ```
+
+## `scenario-test`
+
+```powershell
+my-agent scenario-test
+my-agent scenario-test --workspace .\tmp-scenarios --count 2 --max-runners 2
+my-agent scenario-test --direct
+my-agent scenario-test --dry-run
+```
+
+`scenario-test` 是专门给我们观察全流程用的隔离测试入口。默认流程是：
+
+```text
+新建临时 fixture -> 写隔离配置 workspace_root -> 启动临时 gateway
+-> gateway ask 触发主代理创建子代理 -> dispatch 执行真实 runner
+-> 父代理验收 -> 输出看板和 SCENARIO_SUMMARY
+```
+
+它每次都会在父目录下新建一个 `scenario-*` 子目录，不会复用当前开发仓库的数据目录。默认会调用真实 API：主代理派工走一次模型，runner 也会走真实模型。只想看调度计划时用 `--dry-run`。
+
+| 参数 | 说明 |
+| --- | --- |
+| `--capability-config <path>` | 能力路由配置文件路径，默认使用 `config/capability_config.yaml`。 |
+| `--workspace <path>` | 保存场景测试结果的父目录；不传则使用系统临时目录。 |
+| `--count <n>` | 本场景创建多少个子代理，默认 `2`。 |
+| `--max-runners <n>` | 每轮最多推进多少个 runner，默认 `2`。 |
+| `--max-cycles <n>` | 最多执行多少轮 dispatch，默认 `3`。 |
+| `--timeout <seconds>` | gateway ask 等待响应的秒数，默认 `300`。 |
+| `--dry-run` | 只调度不执行真实 runner API；主代理/gateway 派工仍可能调用模型。 |
+| `--planner` | dispatch 时启用父代理 planner。 |
+| `--direct` | 不经过 gateway，直接用当前进程跑主代理派工；排查 gateway 时不要加。 |
+| `--skill-dir <path>` | 额外 skill 目录，可多次传入。 |
+
+关键输出：
+
+| 输出 | 说明 |
+| --- | --- |
+| `run_root` | 本次测试的总目录。 |
+| `fixture_root` | 被测隔离项目目录，文件工具只能在这里读写。 |
+| `scenario_outputs/*.md` | runner 写出的证据报告。 |
+| `scenario_summary.json` / `SCENARIO_SUMMARY.md` | 本次测试摘要。 |
 
 ## `gateway`
 
