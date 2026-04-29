@@ -5,7 +5,7 @@
 测试策略约定：
 - 后续验收级、冒烟和回归测试默认直接调用真实 API，不再把 echo/fake backend 的结果当作最终通过依据。
 - 纯解析、纯函数和局部单元测试可以作为定位辅助，但收口时必须补跑真实 API 路径。
-- `agent_py_agent/tests/run_tests.py` 是当前标准完整冒烟入口，会按当前配置请求真实模型 API。
+- `agent_py_agent/tests/run_tests.py` 是当前标准完整冒烟入口，会按当前配置请求真实模型 API，并自动发现运行 `agent_py_agent/tests/test_*.py` 里的所有 `test_` 函数。
 - 运行前确认 `AGENT_API_KEY`、`api_base`、`model_name` 指向本轮要验收的真实后端。
 
 ## 推荐快速检查
@@ -95,6 +95,14 @@ python3 agent_py_agent/tests/run_tests.py
 ```
 
 这条命令应直接调用真实 API。若失败，先看真实 API 错误、模型输出协议、工具调用和 Windows/UTF-8 捕获问题，不要直接降级到 echo 后端作为通过结论。
+
+完整冒烟脚本必须做到：
+- 编译所有 agent 模块。
+- 跑 CLI 真实入口。
+- 跑一次真实模型 `run`。
+- 跑 chat 真实模型路径。
+- 自动发现并运行所有 `test_*.py` 中的 `test_` 函数。
+- 不允许手写测试清单漏掉新增测试。
 
 ## 历史记录
 
