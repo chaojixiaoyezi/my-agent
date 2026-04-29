@@ -29,6 +29,26 @@ def write_json_file(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def write_json_file_atomic(path: Path, payload: dict) -> None:
+    """LLM contract: atomically replace one JSON object file.
+
+    Human version:
+    processing lease heartbeat 会频繁刷新。如果直接覆盖原文件，其他进程可能读到半截 JSON。
+    这里先写同目录临时文件，再 rename 覆盖，让 recovery/local-doctor 看到的永远是完整对象。
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(path)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def read_json_file(path: Path) -> dict:
     """LLM contract: read an optional JSON object; invalid/missing means empty.
 
@@ -38,9 +58,10 @@ def read_json_file(path: Path) -> dict:
     """
 
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def read_pid(path: Path) -> int:
