@@ -228,14 +228,42 @@ class SimpleAgent:
             )
 
         structured = parse_subagent_runner_output(result.response)
+        prompt_for_log = result.prompt
+        response_for_log = result.response
+        backend_name = result.backend
+        message = "runner 已完成模型调用，等待独立验收。"
+        if not (structured.found and structured.ok):
+            repair_prompt = _build_subagent_runner_repair_prompt(
+                context,
+                original_prompt=result.prompt,
+                original_response=result.response,
+                parse_error=structured.parse_error,
+            )
+            try:
+                repair_response = self.backend.generate(repair_prompt)
+            except Exception as exc:
+                response_for_log = _append_runner_repair_failure(result.response, exc)
+            else:
+                repaired = parse_subagent_runner_output(repair_response.text)
+                prompt_for_log = _append_runner_repair_prompt(result.prompt, repair_prompt)
+                response_for_log = _append_runner_repair_response(
+                    result.response,
+                    repair_response.text,
+                )
+                backend_name = repair_response.backend or result.backend
+                if repaired.found and repaired.ok:
+                    structured = repaired
+                    message = "runner 已完成模型调用，并已修复结构化结果，等待独立验收。"
+                elif not structured.found and repaired.found:
+                    structured = repaired
         return self.subagents.record_runner_result(
             run_id,
             dry_run=False,
             ok=structured.ok if structured.found else True,
-            message="runner 已完成模型调用，等待独立验收。",
-            prompt=result.prompt,
-            response=result.response,
-            backend=result.backend,
+            message=message,
+            prompt=prompt_for_log,
+            response=response_for_log,
+            backend=backend_name,
             tool_rounds=result.tool_rounds,
             status="" if structured.found else "AWAITING_ACCEPTANCE",
             verification_status="" if structured.found else "NEEDS_ACCEPTANCE",
@@ -637,6 +665,7 @@ class SimpleAgent:
         interval: float = 30.0,
         max_cycles: int = 0,
         force_lock: bool = False,
+        stop_file: str | Path | None = None,
     ) -> DispatchWatchReport:
         """以 watch 模式持续执行父代理调度。"""
 
@@ -648,9 +677,12 @@ class SimpleAgent:
         cfg = capability_config or CapabilityConfig()
         records = []
         lock_path = self.subagents.workspace / "subagent_dispatch_watch.lock"
+        stop_path = Path(stop_file) if stop_file else None
         with _DispatchWatchLock(lock_path, force=force_lock) as lock:
             cycle = 0
             while max_cycles == 0 or cycle < max_cycles:
+                if stop_path and stop_path.exists():
+                    break
                 cycle += 1
                 started_at = time.time()
                 self.subagents.write_dispatch_watch_heartbeat(
@@ -708,6 +740,10 @@ class SimpleAgent:
                 self.subagents.append_dispatch_watch_log(record)
 
                 more_cycles = max_cycles == 0 or cycle < max_cycles
+                stop_requested = bool(stop_path and stop_path.exists())
+                if stop_requested:
+                    more_cycles = False
+                    message = f"{message} stop requested."
                 self.subagents.write_dispatch_watch_heartbeat(
                     cycle=cycle,
                     status="sleeping" if more_cycles else "stopping",
@@ -717,7 +753,8 @@ class SimpleAgent:
                 )
                 if not more_cycles:
                     break
-                time.sleep(interval)
+                if _sleep_with_stop(interval, stop_path):
+                    break
 
             self.subagents.write_dispatch_watch_heartbeat(
                 cycle=cycle,
@@ -729,6 +766,19 @@ class SimpleAgent:
 
         report = self.subagents.build_dispatch_watch_report(records, dry_run=not apply)
         return self.subagents.write_dispatch_watch_report(report)
+
+
+def _sleep_with_stop(interval: float, stop_path: Path | None) -> bool:
+    """睡眠时定期检查 stop 文件；返回 True 表示收到停止请求。"""
+
+    if interval <= 0:
+        return bool(stop_path and stop_path.exists())
+    deadline = time.time() + interval
+    while time.time() < deadline:
+        if stop_path and stop_path.exists():
+            return True
+        time.sleep(min(1.0, max(0.0, deadline - time.time())))
+    return bool(stop_path and stop_path.exists())
 
 
 def _build_parent_planner_state(
@@ -993,6 +1043,85 @@ def _build_subagent_runner_prompt(
         '  "failure_type": ""\n'
         "}\n"
         "[/SUBAGENT_RESULT]\n"
+    )
+
+
+def _build_subagent_runner_repair_prompt(
+    context: SubAgentExecutionContext,
+    *,
+    original_prompt: str,
+    original_response: str,
+    parse_error: str = "",
+) -> str:
+    """要求模型把上一轮 runner 回复整理成机器可解析结果块。"""
+
+    payload = json.dumps(asdict(context), ensure_ascii=False, indent=2)
+    problem = parse_error.strip() or "上一轮回复缺少 [SUBAGENT_RESULT] 结果块。"
+    return (
+        "# SubAgent Runner Output Repair\n\n"
+        "上一轮子代理已经完成了一次执行，但父代理没有拿到可解析的机器结果块。\n"
+        "你现在只做格式修复：不要调用工具，不要新增事实，不要虚构证据；"
+        "只能根据执行上下文、上一轮最终 prompt 里的工具结果、以及上一轮回复来整理结果。\n"
+        "如果上一轮确实没有可验收证据，就把 status 写成 BLOCKED，并在 blocked_reason 里说明缺什么。\n\n"
+        "必须只输出下面这种结果块，不要输出解释文字、Markdown 代码围栏或额外前后缀：\n\n"
+        "[SUBAGENT_RESULT]\n"
+        "{\n"
+        '  "status": "AWAITING_ACCEPTANCE",\n'
+        '  "summary": "本轮完成或卡住的摘要",\n'
+        '  "used_tools": [],\n'
+        '  "used_skills": [],\n'
+        '  "evidence": [],\n'
+        '  "capability_requests": [],\n'
+        '  "artifacts": [],\n'
+        '  "tests": [],\n'
+        '  "patches": [],\n'
+        '  "lessons": [],\n'
+        '  "next_actions": [],\n'
+        '  "blocked_reason": "",\n'
+        '  "failure_type": ""\n'
+        "}\n"
+        "[/SUBAGENT_RESULT]\n\n"
+        "## Parse Problem\n\n"
+        f"{problem}\n\n"
+        "## Execution Context JSON\n\n"
+        f"{payload}\n\n"
+        "## Previous Final Prompt\n\n"
+        f"{original_prompt}\n\n"
+        "## Previous Model Response\n\n"
+        f"{original_response}\n"
+    )
+
+
+def _append_runner_repair_prompt(original_prompt: str, repair_prompt: str) -> str:
+    """把原始 runner prompt 和修复 prompt 合并进审计日志。"""
+
+    return (
+        f"{original_prompt}\n\n"
+        "---\n\n"
+        "# Structured Output Repair Prompt\n\n"
+        f"{repair_prompt}"
+    )
+
+
+def _append_runner_repair_response(original_response: str, repair_response: str) -> str:
+    """把原始 runner 回复和修复回复合并进审计日志。"""
+
+    return (
+        f"{original_response}\n\n"
+        "---\n\n"
+        "# Structured Output Repair Response\n\n"
+        f"{repair_response}"
+    )
+
+
+def _append_runner_repair_failure(original_response: str, exc: Exception) -> str:
+    """记录结构化修复回合失败，保留原始 runner 回复。"""
+
+    return (
+        f"{original_response}\n\n"
+        "---\n\n"
+        "# Structured Output Repair Failure\n\n"
+        f"{type(exc).__name__}: {exc}"
     )
 
 

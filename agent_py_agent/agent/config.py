@@ -42,6 +42,10 @@ class AgentConfig:
     runner_start_rate: str = "auto"
     runner_timeout_seconds: str = "auto"
     runner_failure_policy: str = "auto"
+    gateway_workspace: str = "data/gateway"
+    gateway_heartbeat_interval: int = 5
+    gateway_stale_seconds: int = 120
+    gateway_stop_timeout: int = 20
     daemon_planner: bool = True
     daemon_apply: bool = False
     daemon_execute_runners: bool = False

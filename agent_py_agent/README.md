@@ -263,7 +263,17 @@ python3 -m agent_py_agent subagents-dispatch --apply
 python3 -m agent_py_agent subagents-dispatch --apply --execute-runners
 ```
 
-watch 常驻循环：
+后台 gateway：
+
+```bash
+python3 -m agent_py_agent gateway start
+python3 -m agent_py_agent gateway status
+python3 -m agent_py_agent gateway stop
+```
+
+`gateway` 第一版会启动后台 Python 进程，并写 `gateway.pid`、`gateway_state.json`、`gateway_heartbeat.json`、`gateway_stop.request` 和 `gateway.log`。它内部暂时复用 daemon/watch 调度，后续会接 worker pool 和任务账本。
+
+前台 watch 调试入口：
 
 ```bash
 python3 -m agent_py_agent daemon

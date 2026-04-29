@@ -14,7 +14,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |-- GATEWAY_RESEARCH.md                        # gateway 大调研，比较 daemon、任务队列、workflow、Notebook 和 AI gateway 方案
 |-- agent_py_agent/                            # Python 包目录，核心代码主要都在这里
 |   |-- __init__.py                            # 安装包初始化文件，记录包版本
-|   |-- __main__.py                            # CLI 入口，负责 run/chat/记忆/subagent 看板与巡检命令
+|   |-- __main__.py                            # CLI 入口，负责 run/chat/记忆/subagent 看板、巡检和 gateway 管理命令
 |   |-- README.md                              # 包级说明文档
 |   |-- agent/                                 # 智能体核心模块目录
 |   |   |-- __init__.py                        # 包初始化文件
@@ -33,6 +33,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   `-- capability_config.yaml            # 能力路由配置文件，控制 skill/tool 授权、上抛和候选数量
 |   |-- data/                                  # 运行时数据目录
 |   |   |-- memory.jsonl                       # 长期记忆文件
+|   |   |-- gateway/                           # gateway pid/state/heartbeat/log/stop request 输出目录
 |   |   `-- subagents/                         # 子任务记录输出目录
 |   |-- extensions/                            # 预留扩展目录
 |   |-- prompts/                               # prompt 规则文件目录
@@ -259,6 +260,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `write_dispatch_report()` 会写出 `subagent_dispatch_report.json` 和 `SUBAGENT_DISPATCH.md`，apply 时追加调度审计日志。
 - `python3 -m agent_py_agent subagents-dispatch` 默认 dry-run；`--watch` 可常驻循环；`--planner` 可触发父代理 LLM planner；`--apply --execute-runners` 才会真实调用 runner 模型。
 - `python3 -m agent_py_agent daemon` 会读取主配置里的 `daemon_*` 配置，作为配置驱动的前台常驻入口；`daemon_max_runners: "auto"` 当前映射成保守值 1。
+- `python3 -m agent_py_agent gateway start/status/stop/restart/logs` 会管理第一版后台 gateway 进程。
 - `build_execution_context()` 会把当前 run 的授权、能力卡、验收要求和写入边界压成最小上下文。
 - `write_execution_context()` 会写出 `execution_context.json` 和 `EXECUTION_CONTEXT.md`。
 - `python3 -m agent_py_agent subagent-context <run_id>` 可以生成单个子代理执行上下文包。
@@ -277,6 +279,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 你后续调工具策略时，优先会改这里：
 - 用户层任务规模：`task_max_subagents`、`task_max_grandchildren`，0 表示不设硬上限。
 - 未来 gateway 自适应策略：`scheduler_mode`、`runner_concurrency`、`runner_start_rate`、`runner_timeout_seconds` 和 `runner_failure_policy`，默认都是 `auto`。
+- 第一版 gateway 控制面：`gateway_workspace`、`gateway_heartbeat_interval`、`gateway_stale_seconds` 和 `gateway_stop_timeout`。
 - 当前前台 daemon 高级参数：`daemon_*`，用于在 gateway 完整实现前控制 watch 调度。
 - 工具返回长度限制
 - 工具详情注入数量

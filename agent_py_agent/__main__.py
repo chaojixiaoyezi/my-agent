@@ -3,8 +3,12 @@ from __future__ import annotations
 """简单 Python 智能体的 CLI 入口。"""
 
 import argparse
+import ctypes
 import json
+import os
 import queue
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -43,6 +47,35 @@ class ChatJob:
     prompt_files: list[str]
 
 
+@dataclass
+class GatewayPaths:
+    """gateway 第一版控制面使用的本地文件。"""
+
+    root: Path
+    pid: Path
+    state: Path
+    heartbeat: Path
+    stop_request: Path
+    log: Path
+
+
+@dataclass
+class DaemonOptions:
+    """daemon/gateway 共享的调度选项。"""
+
+    apply: bool
+    execute_runners: bool
+    planner: bool
+    interval: float
+    max_runners: int
+    limit: int
+    max_cycles: int
+    max_cards: int
+    reviewer: str
+    instruction: str
+    probe: bool
+
+
 def configure_stdio() -> None:
     """把标准输出尽量固定到 UTF-8。
 
@@ -79,6 +112,106 @@ def make_capability_router(agent: SimpleAgent, capability_config, skill_dirs: li
         skill_registry=skills,
         tool_specs=agent.tools.specs(),
     )
+
+
+def gateway_paths(agent: SimpleAgent) -> GatewayPaths:
+    """返回 gateway 控制面文件路径。"""
+
+    root = agent.root / agent.config.gateway_workspace
+    return GatewayPaths(
+        root=root,
+        pid=root / "gateway.pid",
+        state=root / "gateway_state.json",
+        heartbeat=root / "gateway_heartbeat.json",
+        stop_request=root / "gateway_stop.request",
+        log=root / "gateway.log",
+    )
+
+
+def write_json_file(path: Path, payload: dict) -> None:
+    """写一个简单 JSON 文件。"""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def read_json_file(path: Path) -> dict:
+    """读取 JSON 文件；不存在或损坏时返回空 dict。"""
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def read_pid(path: Path) -> int:
+    """读取 pid 文件。"""
+
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def is_pid_alive(pid: int) -> bool:
+    """跨平台检查进程是否仍在运行。"""
+
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            return bool(ok) and exit_code.value == STILL_ACTIVE
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def terminate_pid(pid: int) -> None:
+    """请求终止一个进程。"""
+
+    if pid <= 0:
+        return
+    try:
+        if os.name == "nt":
+            os.kill(pid, signal.SIGTERM)
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+
+
+def wait_for_pid_exit(pid: int, timeout: float) -> bool:
+    """等待进程退出。"""
+
+    deadline = time.time() + max(0.0, timeout)
+    while time.time() < deadline:
+        if not is_pid_alive(pid):
+            return True
+        time.sleep(0.2)
+    return not is_pid_alive(pid)
+
+
+def tail_lines(path: Path, line_count: int) -> list[str]:
+    """读取日志末尾若干行。"""
+
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    if line_count <= 0:
+        return lines
+    return lines[-line_count:]
 
 
 def cmd_run(args) -> int:
@@ -482,69 +615,40 @@ def cmd_daemon(args) -> int:
     """按配置启动前台常驻调度。"""
 
     agent = make_agent(args)
-    cfg = agent.config
-    apply = cfg.daemon_apply if args.apply is None else args.apply
-    execute_runners = (
-        cfg.daemon_execute_runners if args.execute_runners is None else args.execute_runners
-    )
-    planner = cfg.daemon_planner if args.planner is None else args.planner
-    if execute_runners and not apply:
-        print("daemon_execute_runners / --execute-runners 必须和 daemon_apply / --apply 一起使用。", file=sys.stderr)
-        return 2
-
-    interval = args.interval if args.interval is not None else cfg.daemon_interval
-    raw_max_runners = args.max_runners if args.max_runners is not None else cfg.daemon_max_runners
     try:
-        max_runners = _resolve_daemon_max_runners(raw_max_runners)
+        options = _resolve_daemon_options(agent, args)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
-        return 2
-    limit = args.limit if args.limit is not None else cfg.daemon_limit
-    max_cycles = args.max_cycles if args.max_cycles is not None else cfg.daemon_max_cycles
-    max_cards = args.max_cards if args.max_cards is not None else cfg.daemon_max_cards
-    reviewer = args.reviewer or cfg.daemon_reviewer
-    instruction = args.instruction if args.instruction is not None else cfg.daemon_runner_instruction
-    probe = False if args.no_probe else cfg.daemon_probe
-
-    invalid_number = _validate_daemon_numbers(
-        interval=interval,
-        max_runners=max_runners,
-        limit=limit,
-        max_cycles=max_cycles,
-        max_cards=max_cards,
-    )
-    if invalid_number:
-        print(invalid_number, file=sys.stderr)
         return 2
 
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)
-    mode = "apply" if apply else "dry-run"
+    mode = "apply" if options.apply else "dry-run"
     print("MY-AGENT DAEMON")
     print("mode=foreground")
     print(
-        f"dispatch_mode={mode} planner={planner} execute_runners={execute_runners} "
-        f"interval={interval} max_runners={max_runners} max_cycles={max_cycles}"
+        f"dispatch_mode={mode} planner={options.planner} execute_runners={options.execute_runners} "
+        f"interval={options.interval} max_runners={options.max_runners} max_cycles={options.max_cycles}"
     )
     print("停止：Ctrl+C")
     try:
         report = agent.watch_subagents(
             router,
             capability_config,
-            apply=apply,
-            execute_runners=execute_runners,
-            planner=planner,
-            max_runners=max_runners,
-            limit=limit,
-            reviewer=reviewer,
+            apply=options.apply,
+            execute_runners=options.execute_runners,
+            planner=options.planner,
+            max_runners=options.max_runners,
+            limit=options.limit,
+            reviewer=options.reviewer,
             note=args.note or "",
-            runner_instruction=instruction or "",
-            max_cards=max_cards,
-            probe=probe,
+            runner_instruction=options.instruction or "",
+            max_cards=options.max_cards,
+            probe=options.probe,
             take_over_by=args.take_over_by or "",
             locked_files=args.locked_file or [],
-            interval=interval,
-            max_cycles=max_cycles,
+            interval=options.interval,
+            max_cycles=options.max_cycles,
             force_lock=args.force_lock,
         )
     except KeyboardInterrupt:
@@ -558,7 +662,7 @@ def cmd_daemon(args) -> int:
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
     print(f"heartbeat: {agent.subagents.workspace / 'subagent_dispatch_watch_heartbeat.json'}")
     print(f"watch: {agent.subagents.workspace / 'SUBAGENT_DISPATCH_WATCH.md'}")
-    if planner:
+    if options.planner:
         print(f"planner: {agent.subagents.workspace / 'PARENT_PLANNER.md'}")
     return 0
 
@@ -600,6 +704,368 @@ def _resolve_daemon_max_runners(value: object) -> int:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise ValueError("daemon_max_runners / --max-runners 必须是整数或 auto。") from exc
+
+
+def _resolve_daemon_options(agent: SimpleAgent, args) -> DaemonOptions:
+    """合并配置和 CLI override，得到 daemon/gateway 运行参数。"""
+
+    cfg = agent.config
+    apply = cfg.daemon_apply if getattr(args, "apply", None) is None else args.apply
+    execute_runners = (
+        cfg.daemon_execute_runners
+        if getattr(args, "execute_runners", None) is None
+        else args.execute_runners
+    )
+    planner = cfg.daemon_planner if getattr(args, "planner", None) is None else args.planner
+    if execute_runners and not apply:
+        raise ValueError("daemon_execute_runners / --execute-runners 必须和 daemon_apply / --apply 一起使用。")
+
+    interval = getattr(args, "interval", None)
+    interval = cfg.daemon_interval if interval is None else interval
+    raw_max_runners = getattr(args, "max_runners", None)
+    raw_max_runners = cfg.daemon_max_runners if raw_max_runners is None else raw_max_runners
+    max_runners = _resolve_daemon_max_runners(raw_max_runners)
+    limit = getattr(args, "limit", None)
+    limit = cfg.daemon_limit if limit is None else limit
+    max_cycles = getattr(args, "max_cycles", None)
+    max_cycles = cfg.daemon_max_cycles if max_cycles is None else max_cycles
+    max_cards = getattr(args, "max_cards", None)
+    max_cards = cfg.daemon_max_cards if max_cards is None else max_cards
+    reviewer = getattr(args, "reviewer", None) or cfg.daemon_reviewer
+    instruction = getattr(args, "instruction", None)
+    instruction = cfg.daemon_runner_instruction if instruction is None else instruction
+    probe = False if getattr(args, "no_probe", False) else cfg.daemon_probe
+
+    invalid_number = _validate_daemon_numbers(
+        interval=interval,
+        max_runners=max_runners,
+        limit=limit,
+        max_cycles=max_cycles,
+        max_cards=max_cards,
+    )
+    if invalid_number:
+        raise ValueError(invalid_number)
+
+    return DaemonOptions(
+        apply=apply,
+        execute_runners=execute_runners,
+        planner=planner,
+        interval=interval,
+        max_runners=max_runners,
+        limit=limit,
+        max_cycles=max_cycles,
+        max_cards=max_cards,
+        reviewer=reviewer,
+        instruction=instruction,
+        probe=probe,
+    )
+
+
+def cmd_gateway(args) -> int:
+    """gateway 命令族入口。"""
+
+    print("请指定 gateway 子命令：start / status / stop / restart / logs。", file=sys.stderr)
+    return 2
+
+
+def cmd_gateway_start(args) -> int:
+    """启动第一版后台 gateway。"""
+
+    agent = make_agent(args)
+    paths = gateway_paths(agent)
+    paths.root.mkdir(parents=True, exist_ok=True)
+    pid = read_pid(paths.pid)
+    if pid and is_pid_alive(pid) and not args.force:
+        print(f"gateway 已在运行 pid={pid}")
+        print(f"status: {paths.state}")
+        return 0
+    if pid and is_pid_alive(pid) and args.force:
+        paths.stop_request.write_text(
+            json.dumps({"requested_at": time.time(), "reason": "force restart before start"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        if not wait_for_pid_exit(pid, agent.config.gateway_stop_timeout):
+            terminate_pid(pid)
+            wait_for_pid_exit(pid, 5)
+
+    try:
+        paths.stop_request.unlink()
+    except OSError:
+        pass
+
+    config_path = Path(args.config).resolve()
+    command = [
+        sys.executable,
+        "-m",
+        "agent_py_agent",
+        "--config",
+        str(config_path),
+        "gateway",
+        "run",
+    ]
+    if args.force_lock:
+        command.append("--force-lock")
+
+    creationflags = 0
+    start_new_session = False
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    else:
+        start_new_session = True
+
+    with paths.log.open("ab") as log_file:
+        process = subprocess.Popen(
+            command,
+            cwd=ROOT.parent,
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            creationflags=creationflags,
+            start_new_session=start_new_session,
+        )
+
+    paths.pid.write_text(str(process.pid), encoding="utf-8")
+    write_json_file(
+        paths.state,
+        {
+            "status": "starting",
+            "pid": process.pid,
+            "started_at": time.time(),
+            "command": command,
+            "log": str(paths.log),
+        },
+    )
+    print(f"gateway starting pid={process.pid}")
+    print(f"state: {paths.state}")
+    print(f"log: {paths.log}")
+    return 0
+
+
+def cmd_gateway_run(args) -> int:
+    """内部命令：前台运行 gateway 后台循环。"""
+
+    agent = make_agent(args)
+    paths = gateway_paths(agent)
+    paths.root.mkdir(parents=True, exist_ok=True)
+    pid = os.getpid()
+    paths.pid.write_text(str(pid), encoding="utf-8")
+    try:
+        options = _resolve_daemon_options(agent, args)
+    except ValueError as exc:
+        write_json_file(paths.state, {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()})
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    stop_event = threading.Event()
+    heartbeat_thread = threading.Thread(
+        target=_gateway_heartbeat_loop,
+        args=(paths, agent, options, stop_event),
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    write_json_file(
+        paths.state,
+        {
+            "status": "running",
+            "pid": pid,
+            "started_at": time.time(),
+            "gateway_workspace": str(paths.root),
+            "subagent_workspace": str(agent.subagents.workspace),
+            "apply": options.apply,
+            "execute_runners": options.execute_runners,
+            "planner": options.planner,
+            "interval": options.interval,
+            "max_runners": options.max_runners,
+            "max_cycles": options.max_cycles,
+        },
+    )
+
+    capability_config = load_capability_config(args.capability_config)
+    router = make_capability_router(agent, capability_config, args.skill_dir)
+    exit_code = 0
+    try:
+        report = agent.watch_subagents(
+            router,
+            capability_config,
+            apply=options.apply,
+            execute_runners=options.execute_runners,
+            planner=options.planner,
+            max_runners=options.max_runners,
+            limit=options.limit,
+            reviewer=options.reviewer,
+            note=args.note or "",
+            runner_instruction=options.instruction or "",
+            max_cards=options.max_cards,
+            probe=options.probe,
+            take_over_by=args.take_over_by or "",
+            locked_files=args.locked_file or [],
+            interval=options.interval,
+            max_cycles=options.max_cycles,
+            force_lock=args.force_lock,
+            stop_file=paths.stop_request,
+        )
+        final_status = "stopped" if paths.stop_request.exists() else "exited"
+        write_json_file(
+            paths.state,
+            {
+                "status": final_status,
+                "pid": pid,
+                "stopped_at": time.time(),
+                "summary": report.summary,
+            },
+        )
+    except KeyboardInterrupt:
+        write_json_file(paths.state, {"status": "interrupted", "pid": pid, "stopped_at": time.time()})
+        exit_code = 130
+    except Exception as exc:
+        write_json_file(paths.state, {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()})
+        print(str(exc), file=sys.stderr)
+        exit_code = 2
+    finally:
+        stop_event.set()
+        heartbeat_thread.join(timeout=2)
+        try:
+            paths.pid.unlink()
+        except OSError:
+            pass
+        try:
+            paths.stop_request.unlink()
+        except OSError:
+            pass
+        _write_gateway_heartbeat(paths, agent, options, status="stopped", pid=pid)
+    return exit_code
+
+
+def cmd_gateway_status(args) -> int:
+    """显示 gateway 状态。"""
+
+    agent = make_agent(args)
+    paths = gateway_paths(agent)
+    pid = read_pid(paths.pid)
+    alive = is_pid_alive(pid)
+    state = read_json_file(paths.state)
+    heartbeat = read_json_file(paths.heartbeat)
+    heartbeat_at = float(heartbeat.get("updated_at", 0) or 0)
+    age = time.time() - heartbeat_at if heartbeat_at else 0
+    stale = bool(heartbeat_at and age > agent.config.gateway_stale_seconds)
+    status = "running" if alive else state.get("status", "stopped")
+    if alive and stale:
+        status = "stale"
+
+    print("MY-AGENT GATEWAY")
+    print(f"status={status} pid={pid if pid else '-'} alive={alive}")
+    if heartbeat_at:
+        print(f"heartbeat_age_seconds={age:.1f}")
+    if state:
+        print("state=" + json.dumps(state, ensure_ascii=False, sort_keys=True))
+    print(f"workspace: {paths.root}")
+    print(f"log: {paths.log}")
+    return 0
+
+
+def cmd_gateway_stop(args) -> int:
+    """请求 gateway 正常停止。"""
+
+    agent = make_agent(args)
+    paths = gateway_paths(agent)
+    pid = read_pid(paths.pid)
+    if not pid or not is_pid_alive(pid):
+        try:
+            paths.pid.unlink()
+        except OSError:
+            pass
+        print("gateway 未在运行")
+        return 0
+
+    paths.root.mkdir(parents=True, exist_ok=True)
+    paths.stop_request.write_text(
+        json.dumps({"requested_at": time.time(), "reason": args.reason or "user stop"}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    timeout = args.timeout if args.timeout is not None else agent.config.gateway_stop_timeout
+    if wait_for_pid_exit(pid, timeout):
+        print(f"gateway stopped pid={pid}")
+        return 0
+    if args.kill:
+        terminate_pid(pid)
+        if wait_for_pid_exit(pid, 5):
+            write_json_file(paths.state, {"status": "killed", "pid": pid, "stopped_at": time.time()})
+            try:
+                paths.pid.unlink()
+            except OSError:
+                pass
+            print(f"gateway killed pid={pid}")
+            return 0
+    print(f"gateway stop requested but still running pid={pid}", file=sys.stderr)
+    return 2
+
+
+def cmd_gateway_restart(args) -> int:
+    """重启 gateway。"""
+
+    stop_args = argparse.Namespace(
+        config=args.config,
+        timeout=args.timeout,
+        kill=args.force,
+        reason="gateway restart",
+    )
+    stop_code = cmd_gateway_stop(stop_args)
+    if stop_code not in {0}:
+        return stop_code
+    start_args = argparse.Namespace(
+        config=args.config,
+        force=True,
+        force_lock=args.force_lock,
+    )
+    return cmd_gateway_start(start_args)
+
+
+def cmd_gateway_logs(args) -> int:
+    """输出 gateway 日志尾部。"""
+
+    agent = make_agent(args)
+    paths = gateway_paths(agent)
+    lines = tail_lines(paths.log, args.lines)
+    if not lines:
+        print(f"暂无 gateway 日志: {paths.log}")
+        return 0
+    for line in lines:
+        print(line)
+    return 0
+
+
+def _gateway_heartbeat_loop(paths: GatewayPaths, agent: SimpleAgent, options: DaemonOptions, stop_event: threading.Event) -> None:
+    """定期写 gateway heartbeat。"""
+
+    while not stop_event.is_set():
+        _write_gateway_heartbeat(paths, agent, options, status="running", pid=os.getpid())
+        stop_event.wait(max(1, agent.config.gateway_heartbeat_interval))
+
+
+def _write_gateway_heartbeat(
+    paths: GatewayPaths,
+    agent: SimpleAgent,
+    options: DaemonOptions,
+    *,
+    status: str,
+    pid: int,
+) -> None:
+    write_json_file(
+        paths.heartbeat,
+        {
+            "status": status,
+            "pid": pid,
+            "updated_at": time.time(),
+            "gateway_workspace": str(paths.root),
+            "subagent_workspace": str(agent.subagents.workspace),
+            "apply": options.apply,
+            "execute_runners": options.execute_runners,
+            "planner": options.planner,
+            "interval": options.interval,
+            "max_runners": options.max_runners,
+            "max_cycles": options.max_cycles,
+        },
+    )
 
 
 def cmd_subagent_context(args) -> int:
@@ -1036,6 +1502,61 @@ def build_parser() -> argparse.ArgumentParser:
     daemon.add_argument("--locked-file", action="append", help="接管时锁定的文件，可多次传入")
     daemon.add_argument("--skill-dir", action="append", help="额外 skill 目录，可多次传入")
     daemon.set_defaults(func=cmd_daemon)
+
+    gateway = sub.add_parser("gateway", help="管理后台 gateway 进程")
+    gateway_sub = gateway.add_subparsers(dest="gateway_command")
+    gateway.set_defaults(func=cmd_gateway)
+
+    gateway_start = gateway_sub.add_parser("start", help="启动后台 gateway")
+    gateway_start.add_argument("--force", action="store_true", help="已有 gateway 运行时先尝试停止再启动")
+    gateway_start.add_argument("--force-lock", action="store_true", help="传给内部 daemon，强制覆盖已有 dispatch watch lock")
+    gateway_start.set_defaults(func=cmd_gateway_start)
+
+    gateway_run = gateway_sub.add_parser("run", help="内部命令：前台运行 gateway 循环")
+    gateway_run.add_argument(
+        "--capability-config",
+        default=str(DEFAULT_CAPABILITY_CONFIG),
+        help="能力路由配置文件路径，默认使用 config/capability_config.yaml",
+    )
+    gateway_run.add_argument("--dry-run", action="store_false", dest="apply", default=None, help="覆盖配置：只生成报告，不写回")
+    gateway_run.add_argument("--apply", action="store_true", default=None, help="覆盖配置：写回低风险动作和审计日志")
+    gateway_run.add_argument("--execute-runners", action="store_true", dest="execute_runners", default=None, help="覆盖配置：配合 apply 调用真实模型执行 runner")
+    gateway_run.add_argument("--no-execute-runners", action="store_false", dest="execute_runners", help="覆盖配置：不调用真实模型执行 runner")
+    gateway_run.add_argument("--planner", action="store_true", dest="planner", default=None, help="覆盖配置：启用父代理 LLM planner")
+    gateway_run.add_argument("--no-planner", action="store_false", dest="planner", help="覆盖配置：关闭父代理 LLM planner")
+    gateway_run.add_argument("--interval", type=float, help="覆盖配置：每轮间隔秒数，0 表示不等待")
+    gateway_run.add_argument("--max-runners", help="覆盖配置：每轮最多推进多少个 runner；auto 表示保守自适应，0 表示不执行 runner")
+    gateway_run.add_argument("--limit", type=int, help="覆盖配置：每个阶段最多处理多少条记录，0 表示不限制")
+    gateway_run.add_argument("--max-cycles", type=int, help="覆盖配置：最多循环次数，0 表示持续运行")
+    gateway_run.add_argument("--force-lock", action="store_true", help="强制覆盖已有 watch lock")
+    gateway_run.add_argument("--reviewer", help="覆盖配置：patch/acceptance 审核者标识")
+    gateway_run.add_argument("--note", help="写入调度关联审核记录的备注")
+    gateway_run.add_argument("--instruction", help="覆盖配置：给 runner 的额外指令")
+    gateway_run.add_argument("--max-cards", type=int, help="覆盖配置：runner 最多注入多少张能力卡，0 表示不限制")
+    gateway_run.add_argument("--no-probe", action="store_true", help="覆盖配置：执行 runner 前不做通道健康检查")
+    gateway_run.add_argument("--take-over-by", help="接管动作的接管者，apply takeover 时必填")
+    gateway_run.add_argument("--locked-file", action="append", help="接管时锁定的文件，可多次传入")
+    gateway_run.add_argument("--skill-dir", action="append", help="额外 skill 目录，可多次传入")
+    gateway_run.set_defaults(func=cmd_gateway_run)
+
+    gateway_status = gateway_sub.add_parser("status", help="查看 gateway 状态")
+    gateway_status.set_defaults(func=cmd_gateway_status)
+
+    gateway_stop = gateway_sub.add_parser("stop", help="请求 gateway 停止")
+    gateway_stop.add_argument("--timeout", type=float, help="等待正常停止的秒数，默认使用配置")
+    gateway_stop.add_argument("--kill", action="store_true", help="超时后强制终止进程")
+    gateway_stop.add_argument("--reason", help="写入 stop request 的原因")
+    gateway_stop.set_defaults(func=cmd_gateway_stop)
+
+    gateway_restart = gateway_sub.add_parser("restart", help="重启 gateway")
+    gateway_restart.add_argument("--timeout", type=float, help="等待正常停止的秒数，默认使用配置")
+    gateway_restart.add_argument("--force", action="store_true", help="停止超时后强制终止旧进程")
+    gateway_restart.add_argument("--force-lock", action="store_true", help="传给内部 daemon，强制覆盖已有 dispatch watch lock")
+    gateway_restart.set_defaults(func=cmd_gateway_restart)
+
+    gateway_logs = gateway_sub.add_parser("logs", help="显示 gateway 日志尾部")
+    gateway_logs.add_argument("--lines", type=int, default=80, help="显示最后多少行日志，0 表示全部")
+    gateway_logs.set_defaults(func=cmd_gateway_logs)
 
     subagent_context = sub.add_parser("subagent-context", help="生成单个 subagent 执行上下文包")
     subagent_context.add_argument("run_id", help="子代理运行 ID")

@@ -99,6 +99,50 @@ class AcceptedSubagentBackend(BaseBackend):
         )
 
 
+class RepairingSubagentBackend(BaseBackend):
+    """测试用后端：第一次漏掉结构化块，修复回合补齐。"""
+
+    name = "repairing_subagent_backend"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str) -> ModelResponse:
+        self.prompts.append(prompt)
+        if len(self.prompts) == 1:
+            assert "[SUBAGENT_RESULT]" in prompt
+            return ModelResponse(text="我已经完成检查，但这次忘记输出机器结果块。", backend=self.name)
+
+        assert "# SubAgent Runner Output Repair" in prompt
+        assert "我已经完成检查" in prompt
+        return ModelResponse(
+            text=(
+                "[SUBAGENT_RESULT]\n"
+                "{\n"
+                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "summary": "已通过修复回合补齐结构化结果。",\n'
+                '  "used_tools": [],\n'
+                '  "used_skills": [],\n'
+                '  "evidence": [\n'
+                '    {"kind": "note", "summary": "修复回合根据上一轮回复生成可验收证据", "ok": true}\n'
+                "  ],\n"
+                '  "capability_requests": [],\n'
+                '  "artifacts": [],\n'
+                '  "tests": [\n'
+                '    {"name": "repair-format", "command": "", "ok": true, "summary": "结构化格式已恢复"}\n'
+                "  ],\n"
+                '  "patches": [],\n'
+                '  "lessons": [],\n'
+                '  "next_actions": [],\n'
+                '  "blocked_reason": "",\n'
+                '  "failure_type": ""\n'
+                "}\n"
+                "[/SUBAGENT_RESULT]"
+            ),
+            backend=self.name,
+        )
+
+
 class ParentPlannerBackend(BaseBackend):
     """测试用后端：返回父代理 planner 结构化结果。"""
 
@@ -902,6 +946,35 @@ def test_subagent_runner_parses_structured_output():
         debrief = Path(loaded.debrief_file).read_text(encoding="utf-8")
         assert "Runner Artifacts" in debrief
         assert "Runner Lessons" in debrief
+
+
+def test_subagent_runner_repairs_missing_structured_output():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        backend = RepairingSubagentBackend()
+        agent.backend = backend
+        task = agent.subagents.create_run(
+            goal="检查 runner 结构化输出恢复",
+            thought="模型可能完成了工作，但忘记结果块。",
+            plan=["执行", "修复格式", "等待验收"],
+            allowed_tools=[],
+            acceptance_checks=["必须有可验收证据"],
+        )
+
+        result = agent.run_subagent(task.id, dry_run=False, probe=False)
+        loaded = agent.subagents.load(task.id)
+        response = Path(loaded.runner_response_file).read_text(encoding="utf-8")
+
+        assert len(backend.prompts) == 2
+        assert result.structured_output_found
+        assert result.structured_output_ok
+        assert result.evidence_count == 1
+        assert result.test_count == 1
+        assert loaded.status == "AWAITING_ACCEPTANCE"
+        assert loaded.verification_status == "NEEDS_ACCEPTANCE"
+        assert "Structured Output Repair Response" in response
 
 
 def test_subagent_runner_parser_uses_last_parseable_fenced_block():

@@ -16,12 +16,14 @@ TEST_TMP_HANDLE = tempfile.TemporaryDirectory(prefix="agent-full-smoke-")
 TEST_TMP = Path(TEST_TMP_HANDLE.name)
 TEST_MEMORY = TEST_TMP / "memory.jsonl"
 TEST_SUBAGENTS = TEST_TMP / "subagents"
+TEST_GATEWAY = TEST_TMP / "gateway"
 TEST_CONFIG = TEST_TMP / "agent_config.yaml"
 TEST_CONFIG.write_text(
     (ROOT / "config" / "agent_config.yaml").read_text(encoding="utf-8")
     + "\n# full smoke test isolation\n"
     + f'memory_path: "{str(TEST_MEMORY).replace("\\", "/")}"\n'
-    + f'subagent_workspace: "{str(TEST_SUBAGENTS).replace("\\", "/")}"\n',
+    + f'subagent_workspace: "{str(TEST_SUBAGENTS).replace("\\", "/")}"\n'
+    + f'gateway_workspace: "{str(TEST_GATEWAY).replace("\\", "/")}"\n',
     encoding="utf-8",
 )
 
@@ -143,6 +145,9 @@ run(agent_cmd("subagents-dispatch", "--watch", "--max-cycles", "1", "--interval"
 run(agent_cmd("subagents-dispatch", "--watch", "--planner", "--max-cycles", "1", "--interval", "0", "--max-runners", "0"))
 run(agent_cmd("daemon", "--help"))
 run(agent_cmd("daemon", "--max-cycles", "1", "--interval", "0", "--max-runners", "auto", "--no-planner"))
+run(agent_cmd("gateway", "--help"))
+run(agent_cmd("gateway", "status"))
+run(agent_cmd("gateway", "run", "--max-cycles", "1", "--interval", "0", "--max-runners", "0", "--no-planner"))
 run(agent_cmd("subagent-context", "--help"))
 run(agent_cmd("subagent-run", "--help"))
 
@@ -157,9 +162,15 @@ run(
             "真实 API E2E 测试：必须先调用 read_file，"
             "且工具调用 payload 必须精确使用 {\"tool\":\"read_file\",\"path\":\"README.md\"}；"
             "不要读取 task_dir、Temp 目录、绝对路径或 execution_context 路径。"
-            "然后输出一个裸 JSON 的 [SUBAGENT_RESULT]。"
-            "status=AWAITING_ACCEPTANCE；evidence 至少 1 条；tests 至少 1 条 ok=true；"
-            "不要使用 Markdown 代码围栏，不要标记 DONE。"
+            "最终回复必须只包含一个结构化结果块，格式精确为："
+            "[SUBAGENT_RESULT]\\n{JSON}\\n[/SUBAGENT_RESULT]。"
+            "JSON 必须可被 json.loads 解析，必须包含："
+            "\"status\":\"AWAITING_ACCEPTANCE\"，"
+            "\"message\":\"已读取 README.md 并生成证据\"，"
+            "\"evidence\":[{\"kind\":\"file_read\",\"summary\":\"README.md 已通过 read_file 读取\",\"path\":\"README.md\",\"ok\":true}]，"
+            "\"tests\":[{\"name\":\"read_file README.md\",\"command\":\"read_file README.md\",\"ok\":true,\"summary\":\"工具调用成功\"}]，"
+            "\"artifacts\":[]，\"patches\":[]。"
+            "不要输出 Markdown 代码围栏、解释文字或 DONE。"
         ),
     )
 )

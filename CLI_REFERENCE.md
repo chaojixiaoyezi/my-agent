@@ -46,10 +46,11 @@ python -m agent_py_agent --help
 | 持续父代理调度 | `my-agent subagents-dispatch --watch --interval 30` | 前台常驻 | 否，除非加 `--apply --execute-runners` |
 | 父代理 LLM planner 调度 | `my-agent subagents-dispatch --watch --planner --interval 30` | 前台常驻 | 是，有待处理事项时调用父代理 planner |
 | 配置驱动前台 daemon | `my-agent daemon` | 前台常驻 | 取决于 `daemon_*` 配置 |
+| 后台 gateway | `my-agent gateway start` | 后台常驻 | 取决于 `daemon_*` 配置 |
 | 真实 runner 调度 | `my-agent subagents-dispatch --apply --execute-runners` | 否 | 是 |
 | 子代理单次执行 | `my-agent subagent-run <run_id> --execute` | 否 | 是 |
 
-当前 gateway 尚未实现。现在的常驻方式是前台 watch 进程，后续可以在它外面增加 `my-agent gateway start/status/stop`。常驻形态和外部方案对比见 [GATEWAY_DESIGN.md](GATEWAY_DESIGN.md)。
+当前 gateway 第一版已经实现为本地后台进程控制面：它管理 pid、state、heartbeat、stop request 和日志，并在内部复用 daemon/watch 调度。常驻形态和外部方案对比见 [GATEWAY_DESIGN.md](GATEWAY_DESIGN.md)。
 
 ## 常用命令
 
@@ -75,6 +76,14 @@ my-agent subagents-dispatch --watch --planner --interval 30
 
 ```powershell
 my-agent daemon
+```
+
+启动后台 gateway：
+
+```powershell
+my-agent gateway start
+my-agent gateway status
+my-agent gateway stop
 ```
 
 持续巡检并允许真实推进 runner：
@@ -109,6 +118,7 @@ Ctrl+C
 | `subagents-patches` | 审核 runner 输出的 patch 记录 | `--apply` 时写 patch 审核状态和日志 | 否 |
 | `subagents-dispatch` | 执行父代理调度 | dry-run 写报告；`--apply` 写回 | 只有 `--apply --execute-runners` 会调用 |
 | `daemon` | 按 `agent_config.yaml` 的 `daemon_*` 配置启动前台常驻调度 | 取决于配置 | 取决于配置 |
+| `gateway` | 管理后台 gateway 进程 | 写 gateway pid/state/heartbeat/log | 取决于配置 |
 | `subagent-context` | 生成单个 subagent 执行上下文 | 是 | 否 |
 | `subagent-run` | 按执行上下文运行一个 subagent | 是 | 只有 `--execute` 会调用 |
 | `subagent` | 查看单个 subagent 详情 | 否 | 否 |
@@ -416,6 +426,61 @@ daemon_max_cards: 0
 daemon_probe: true
 daemon_reviewer: "parent-daemon"
 daemon_runner_instruction: ""
+```
+
+## `gateway`
+
+```powershell
+my-agent gateway start
+my-agent gateway status
+my-agent gateway stop
+my-agent gateway restart
+my-agent gateway logs
+```
+
+`gateway` 第一版是本地后台控制面。它会启动一个后台 Python 进程，在内部按配置运行现有 daemon/watch 调度，并把 pid、state、heartbeat、stop request 和日志写到 `gateway_workspace`。它还不是多机器组织 gateway，也还没有 worker pool；这些会在后续接入同一命令面。
+
+| 子命令 | 说明 |
+| --- | --- |
+| `start` | 启动后台 gateway；已运行时默认不重复启动。 |
+| `status` | 读取 pid、state 和 heartbeat，显示是否存活。 |
+| `stop` | 写 stop request，等待后台 gateway 在调度轮次之间正常退出。 |
+| `restart` | 先 stop 再 start。 |
+| `logs` | 显示 gateway 日志尾部。 |
+| `run` | 内部/调试命令，前台运行 gateway 循环；通常由 `start` 调用。 |
+
+常用参数：
+
+| 子命令 | 参数 | 说明 |
+| --- | --- | --- |
+| `start` | `--force` | 如果已有 gateway 在跑，先尝试停止再启动。 |
+| `start` | `--force-lock` | 传给内部 daemon，强制覆盖已有 dispatch watch lock。 |
+| `stop` | `--timeout <seconds>` | 等待正常停止的秒数，默认使用 `gateway_stop_timeout`。 |
+| `stop` | `--kill` | 超时后强制终止进程。 |
+| `stop` | `--reason <text>` | 写入 stop request 的原因。 |
+| `restart` | `--timeout <seconds>` | 等待正常停止的秒数。 |
+| `restart` | `--force` | 停止超时后强制终止旧进程。 |
+| `restart` | `--force-lock` | 重启后传给内部 daemon。 |
+| `logs` | `--lines <n>` | 显示最后多少行日志，`0` 表示全部。 |
+| `run` | daemon 同名参数 | 内部调试用，支持 `--max-cycles 1 --interval 0 --no-planner` 这类安全验证。 |
+
+gateway 控制面配置：
+
+```yaml
+gateway_workspace: "data/gateway"
+gateway_heartbeat_interval: 5
+gateway_stale_seconds: 120
+gateway_stop_timeout: 20
+```
+
+默认文件：
+
+```text
+agent_py_agent/data/gateway/gateway.pid
+agent_py_agent/data/gateway/gateway_state.json
+agent_py_agent/data/gateway/gateway_heartbeat.json
+agent_py_agent/data/gateway/gateway_stop.request
+agent_py_agent/data/gateway/gateway.log
 ```
 
 ## `subagent-context`

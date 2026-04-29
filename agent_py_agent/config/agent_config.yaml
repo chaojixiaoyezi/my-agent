@@ -61,6 +61,15 @@ runner_start_rate: "auto"
 runner_timeout_seconds: "auto"
 runner_failure_policy: "auto"
 
+# Gateway 本地控制面（第一版）：
+# - gateway 是后台常驻外壳，chat/TUI 后续会作为客户端 attach。
+# - 第一版先用本地文件管理状态：pid、heartbeat、state、stop request 和日志。
+# - 调整这些配置后，重启 gateway 即可生效；任务状态仍保存在 subagent/task 账本里。
+gateway_workspace: "data/gateway"
+gateway_heartbeat_interval: 5
+gateway_stale_seconds: 120
+gateway_stop_timeout: 20
+
 # 前台 daemon 默认策略（高级 / 过渡期）：
 # - my-agent daemon 会读取这些配置，减少启动时的长参数。
 # - 当前 daemon 还不是完整 gateway/service；它是一个前台 watch 调度循环。
