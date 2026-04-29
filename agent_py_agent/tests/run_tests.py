@@ -1,16 +1,48 @@
 """仓库内置的本地冒烟测试入口。"""
 
 from pathlib import Path
+import os
 import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT.parent
+RUN_ENV = os.environ.copy()
+RUN_ENV.setdefault("PYTHONUTF8", "1")
+RUN_ENV.setdefault("PYTHONIOENCODING", "utf-8")
+
+
+def configure_stdio() -> None:
+    """让测试脚本自己的输出也固定为 UTF-8。"""
+
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+def run_capture(cmd, **kwargs):
+    """用 UTF-8 捕获子进程输出，避免 Windows 默认 GBK 解码中文失败。"""
+
+    return subprocess.run(
+        cmd,
+        cwd=PROJECT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        env=RUN_ENV,
+        **kwargs,
+    )
+
+
+configure_stdio()
 
 
 def run(cmd):
     print("$", " ".join(cmd))
-    completed = subprocess.run(cmd, cwd=PROJECT, text=True, capture_output=True)
+    completed = run_capture(cmd)
     print(completed.stdout)
     if completed.stderr:
         print(completed.stderr)
@@ -40,7 +72,7 @@ run([sys.executable, "-m", "agent_py_agent", "subagents-route-capabilities", "--
 run([sys.executable, "-m", "agent_py_agent", "subagent-context", "--help"])
 run([sys.executable, "-m", "agent_py_agent", "subagent-run", "--help"])
 
-agent_loop = subprocess.run(
+agent_loop = run_capture(
     [
         sys.executable,
         "-c",
@@ -86,9 +118,6 @@ agent_loop = subprocess.run(
             "print('AGENT_TEST_PASS')"
         ),
     ],
-    cwd=PROJECT,
-    text=True,
-    capture_output=True,
 )
 print(agent_loop.stdout)
 if agent_loop.stderr:
@@ -96,11 +125,8 @@ if agent_loop.stderr:
 assert agent_loop.returncode == 0
 assert "AGENT_TEST_PASS" in agent_loop.stdout
 
-bad = subprocess.run(
+bad = run_capture(
     [sys.executable, "-m", "agent_py_agent", "unknown-command"],
-    cwd=PROJECT,
-    text=True,
-    capture_output=True,
 )
 print("bad-command-returncode", bad.returncode)
 assert bad.returncode != 0
@@ -114,12 +140,9 @@ chat_input = (
     "你好\n"
     "logout\n"
 )
-chat = subprocess.run(
+chat = run_capture(
     [sys.executable, "-m", "agent_py_agent", "chat", "--no-save"],
-    cwd=PROJECT,
     input=chat_input,
-    text=True,
-    capture_output=True,
     timeout=30,
 )
 print(chat.stdout)
@@ -131,7 +154,7 @@ assert "已记忆" in chat.stdout
 assert "已发送到后台" in chat.stdout
 assert "subagent-" in chat.stdout
 
-tool_loop = subprocess.run(
+tool_loop = run_capture(
     [
         sys.executable,
         "-c",
@@ -152,9 +175,6 @@ tool_loop = subprocess.run(
             "print('TOOL_TEST_PASS')"
         ),
     ],
-    cwd=PROJECT,
-    text=True,
-    capture_output=True,
 )
 print(tool_loop.stdout)
 if tool_loop.stderr:
@@ -162,7 +182,7 @@ if tool_loop.stderr:
 assert tool_loop.returncode == 0
 assert "TOOL_TEST_PASS" in tool_loop.stdout
 
-capability_loop = subprocess.run(
+capability_loop = run_capture(
     [
         sys.executable,
         "-c",
@@ -179,9 +199,6 @@ capability_loop = subprocess.run(
             "print('CAPABILITY_TEST_PASS')"
         ),
     ],
-    cwd=PROJECT,
-    text=True,
-    capture_output=True,
 )
 print(capability_loop.stdout)
 if capability_loop.stderr:
