@@ -43,6 +43,8 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |       |-- test_agent.py                      # 核心 agent 行为测试
 |       |-- test_backends.py                   # 后端适配测试
 |       |-- test_capabilities.py               # skill/tool 统一能力路由测试
+|       |-- test_cli_reference.py              # CLI_REFERENCE 与 argparse 命令/参数覆盖测试
+|       |-- test_packaging.py                  # console script、workspace_root 等安装与配置行为测试
 |       `-- test_tools.py                      # 工具目录、工具调用和工具能力测试
 |-- .gitattributes                             # 跨平台文本编码和换行约定
 |-- .gitignore                                 # Git 忽略规则
@@ -74,6 +76,9 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
   一层是常驻的工具目录，一层是按当前任务筛出来的少量候选详情。
 - 执行工具调用。
 - 支持 `allowed_tools` 白名单，给 subagent runner 限制可见和可调用工具。
+- 解析模型输出里的工具调用块。
+  标准格式是 `[TOOL_CALL]...JSON...[/TOOL_CALL]`，同时兼容 Qwen/OpenClaw 常见的 XML-ish `<tool_call><function=...><parameter=...>` 方言。
+  如果 XML-ish 工具调用只有半截，解析器会返回 `__parse_error__`，让主循环继续可恢复，而不是直接崩掉。
 
 这次额外预留了混合检索框架：
 - 当前真正生效的是关键词检索。
@@ -266,6 +271,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `write_execution_context()` 会写出 `execution_context.json` 和 `EXECUTION_CONTEXT.md`。
 - `python3 -m agent_py_agent subagent-context <run_id>` 可以生成单个子代理执行上下文包。
 - `record_runner_result()` 会把 runner 输出写回 `output.json`、`RUNNER_RESULT.md` 和任务日志。
+- `record_runner_result(..., actual_tools=[...])` 会把系统真实记录的工具执行落成验收证据，避免模型 evidence 换写法时误判缺少 `read_file/write_file`。
 - `parse_subagent_runner_output()` 会解析 `[SUBAGENT_RESULT]...[/SUBAGENT_RESULT]` JSON 块。
 - 结构化 runner 输出里的 evidence 会自动写入验收证据。
 - 结构化 runner 输出里的 capability request 会自动写成 open `CapabilityRequest`。
@@ -340,6 +346,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - subagent runner 是否默认 dry-run，显式执行时是否只注入授权工具并把结果写回工单。
 - subagent runner 是否能解析结构化输出，并自动生成 evidence 和 capability request。
 - subagent runner 是否能把 artifacts / tests / patches / lessons / next_actions 落进机器结果和 debrief。
+- subagent runner 的 `actual_tools` 是否会转成系统验收证据，避免真实工具调用被模型自然语言 evidence 写法影响。
 - subagent patch 审核是否能批准 applied patch，并阻断 planned / blocked / 未知状态 patch。
 - subagent dispatch 是否能把 runner、patch review 和 acceptance 串成一轮父代理调度。
 - subagent dispatch watch 是否能安全循环、写 heartbeat，并用 lock 阻止双父代理。
