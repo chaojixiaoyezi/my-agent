@@ -66,6 +66,7 @@ _XMLISH_PARAMETER_ALIASES = {
     "filepath": "path",
     "filename": "path",
 }
+_MAX_XMLISH_RAW_CHARS = 1000
 
 
 def parse_xmlish_tool_calls(text: str) -> list[tuple[int, dict[str, Any]]]:
@@ -97,7 +98,7 @@ def parse_xmlish_tool_calls(text: str) -> list[tuple[int, dict[str, Any]]]:
                 {
                     "tool": "__parse_error__",
                     "error": "XML-ish tool call is missing a closing </tool_call> tag",
-                    "raw": text[tail_start:].strip(),
+                    "raw": _truncate_raw(text[tail_start:].strip()),
                 },
             )
         )
@@ -112,7 +113,7 @@ def _parse_xmlish_tool_call_body(body: str, raw: str) -> dict[str, Any]:
         return {
             "tool": "__parse_error__",
             "error": "XML-ish tool call is missing a function name",
-            "raw": raw.strip(),
+            "raw": _truncate_raw(raw.strip()),
         }
 
     payload: dict[str, Any] = {
@@ -153,3 +154,9 @@ def _decode_xmlish_parameter_value(value: str) -> Any:
         except json.JSONDecodeError:
             pass
     return text
+
+
+def _truncate_raw(text: str) -> str:
+    if len(text) <= _MAX_XMLISH_RAW_CHARS:
+        return text
+    return text[:_MAX_XMLISH_RAW_CHARS] + "\n... 已截断"
