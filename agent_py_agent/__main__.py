@@ -50,7 +50,15 @@ class ChatJob:
 
 @dataclass
 class GatewayPaths:
-    """gateway 第一版控制面使用的本地文件。"""
+    """gateway 第一版控制面使用的本地文件。
+
+    大白话：
+    - pid/state/heartbeat/stop_request/log 负责“后台进程活没活、怎么停、日志在哪”。
+    - inbox/processing/done/responses/history 负责“客户端发来的消息怎么交给后台 gateway”。
+
+    当前先用文件队列，而不是 HTTP server 或数据库，是为了跨平台、好调试。
+    后续可以把这组路径背后的实现换成 SQLite / WebSocket，但上层命令可以保持不变。
+    """
 
     root: Path
     pid: Path
@@ -121,7 +129,11 @@ def make_capability_router(agent: SimpleAgent, capability_config, skill_dirs: li
 
 
 def gateway_paths(agent: SimpleAgent) -> GatewayPaths:
-    """返回 gateway 控制面文件路径。"""
+    """返回 gateway 控制面文件路径。
+
+    `agent.root` 通常是包目录 `agent_py_agent`，所以默认运行数据会落到
+    `agent_py_agent/data/gateway`。测试里会通过配置覆盖到临时目录，避免污染真实数据。
+    """
 
     root = agent.root / agent.config.gateway_workspace
     return GatewayPaths(
@@ -226,7 +238,10 @@ def tail_lines(path: Path, line_count: int) -> list[str]:
 
 
 def new_gateway_request_id() -> str:
-    """生成本地 gateway 请求 ID。"""
+    """生成本地 gateway 请求 ID。
+
+    格式里带时间戳，方便人眼粗略判断请求时间；再加随机片段，避免同一秒内冲突。
+    """
 
     return f"gwreq-{int(time.time())}-{uuid.uuid4().hex[:8]}"
 
@@ -238,7 +253,14 @@ def gateway_response_path(paths: GatewayPaths, request_id: str) -> Path:
 
 
 def gateway_request_counts(paths: GatewayPaths) -> dict[str, int]:
-    """统计 gateway 本地 inbox 的请求数量。"""
+    """统计 gateway 本地请求队列数量。
+
+    `status` 命令会显示这些数字：
+    - pending：还没开始处理的请求。
+    - processing：正在处理的请求。
+    - done：已经处理完并归档的请求原件。
+    - responses：已经写出的响应数量。
+    """
 
     def count_json(path: Path) -> int:
         try:
@@ -255,7 +277,11 @@ def gateway_request_counts(paths: GatewayPaths) -> dict[str, int]:
 
 
 def write_gateway_request(paths: GatewayPaths, payload: dict) -> Path:
-    """把一条请求原子写入 gateway inbox。"""
+    """把一条请求原子写入 gateway inbox。
+
+    先写 `.tmp`，再 rename 到正式文件名。这样 gateway worker 不会读到半截 JSON。
+    这是文件队列里很重要的小细节。
+    """
 
     request_id = str(payload["id"])
     paths.inbox.mkdir(parents=True, exist_ok=True)
@@ -267,7 +293,10 @@ def write_gateway_request(paths: GatewayPaths, payload: dict) -> Path:
 
 
 def append_gateway_history(paths: GatewayPaths, payload: dict) -> None:
-    """追加 gateway 请求处理历史。"""
+    """追加 gateway 请求处理历史。
+
+    JSONL 一行一条，方便以后按时间追踪请求，也方便后续迁移到 SQLite。
+    """
 
     paths.history.parent.mkdir(parents=True, exist_ok=True)
     with paths.history.open("a", encoding="utf-8") as handle:
@@ -275,7 +304,11 @@ def append_gateway_history(paths: GatewayPaths, payload: dict) -> None:
 
 
 def requeue_gateway_processing_requests(paths: GatewayPaths) -> int:
-    """gateway 启动时把上次崩溃遗留的 processing 请求退回 pending。"""
+    """gateway 启动时把上次崩溃遗留的 processing 请求退回 pending。
+
+    如果 gateway 刚把请求从 pending 移到 processing 就崩了，这个请求既没有 response，
+    也不会再被 pending 扫描到。启动时退回 pending，等于告诉系统：“上次没办完，重新排队。”
+    """
 
     paths.inbox.mkdir(parents=True, exist_ok=True)
     paths.processing.mkdir(parents=True, exist_ok=True)
@@ -290,7 +323,11 @@ def requeue_gateway_processing_requests(paths: GatewayPaths) -> int:
 
 
 def wait_for_gateway_response(paths: GatewayPaths, request_id: str, timeout: float) -> dict:
-    """等待 gateway 写出响应 JSON。"""
+    """等待 gateway 写出响应 JSON。
+
+    `gateway ask` 默认走同步模式：CLI 写入请求后，就在这里轮询 response 文件。
+    `--no-wait` 会跳过等待，用户之后用 `gateway result <request_id>` 再读取。
+    """
 
     path = gateway_response_path(paths, request_id)
     deadline = time.time() + max(0.0, timeout)
@@ -303,7 +340,10 @@ def wait_for_gateway_response(paths: GatewayPaths, request_id: str, timeout: flo
 
 
 def print_gateway_response(payload: dict, *, json_mode: bool = False, show_prompt: bool = False) -> int:
-    """按 CLI 习惯输出 gateway 响应。"""
+    """按 CLI 习惯输出 gateway 响应。
+
+    默认输出给人看；`--json` 输出完整机器结果，方便脚本或未来聊天适配器复用。
+    """
 
     if json_mode:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
@@ -1164,7 +1204,11 @@ def cmd_gateway_logs(args) -> int:
 
 
 def cmd_gateway_ask(args) -> int:
-    """向正在运行的 gateway 投递一条聊天请求。"""
+    """向正在运行的 gateway 投递一条聊天请求。
+
+    这是未来聊天工具/TUI 的最小原型：
+    CLI 只是客户端，把用户消息写进 pending；真正调用模型的是后台 gateway 进程。
+    """
 
     agent = make_agent(args)
     paths = gateway_paths(agent)
@@ -1188,11 +1232,14 @@ def cmd_gateway_ask(args) -> int:
     request_path = write_gateway_request(paths, payload)
     response_path = gateway_response_path(paths, request_id)
     if args.no_wait:
+        # 异步模式：只告诉用户“请求已放进队列”，不在当前终端等模型结果。
         print(f"queued request_id={request_id}")
         print(f"request: {request_path}")
         print(f"response: {response_path}")
         return 0
 
+    # 同步模式：命令行阻塞等待 response 文件出现。聊天工具以后也可以用同样逻辑，
+    # 或者只监听 responses 目录/数据库事件后主动推送消息给用户。
     timeout = args.timeout if args.timeout is not None else agent.config.gateway_request_timeout
     response = wait_for_gateway_response(paths, request_id, timeout)
     if not response:
@@ -1203,7 +1250,11 @@ def cmd_gateway_ask(args) -> int:
 
 
 def cmd_gateway_result(args) -> int:
-    """读取某个 gateway 请求的结果。"""
+    """读取某个 gateway 请求的结果。
+
+    主要服务于 `gateway ask --no-wait`。普通用户以后在聊天工具里不需要手动查，
+    聊天适配器会拿这个 response 再发回对应会话。
+    """
 
     agent = make_agent(args)
     paths = gateway_paths(agent)
@@ -1216,7 +1267,14 @@ def cmd_gateway_result(args) -> int:
 
 
 def _gateway_request_loop(args, paths: GatewayPaths, stop_event: threading.Event) -> None:
-    """后台处理 gateway inbox 请求。"""
+    """后台处理 gateway inbox 请求。
+
+    这个 worker 和 dispatch watch 在同一个 gateway 进程里并行：
+    - dispatch watch 负责定时巡检任务树。
+    - request worker 负责响应用户/客户端即时消息。
+
+    第一版只串行处理请求，先保证正确落盘和可恢复；真正并发 worker pool 后续再接。
+    """
 
     try:
         agent = make_agent(args)
@@ -1237,7 +1295,13 @@ def _gateway_request_loop(args, paths: GatewayPaths, stop_event: threading.Event
 
 
 def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths) -> int:
-    """处理当前所有待处理 gateway 请求。"""
+    """处理当前所有待处理 gateway 请求。
+
+    文件流转：
+    pending -> processing -> responses + done
+
+    用 rename/move 表达状态变化，方便人直接看目录也能知道请求卡在哪一步。
+    """
 
     paths.inbox.mkdir(parents=True, exist_ok=True)
     paths.processing.mkdir(parents=True, exist_ok=True)
@@ -1263,7 +1327,15 @@ def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths) -> int:
 
 
 def _handle_gateway_request(agent: SimpleAgent, request_path: Path) -> dict:
-    """执行单条 gateway 请求，并返回响应 payload。"""
+    """执行单条 gateway 请求，并返回响应 payload。
+
+    目前只支持 `kind=ask`，也就是“一条用户消息 -> 一次完整 agent.run()”。
+    后续可以继续扩展：
+    - kind=create_subagents
+    - kind=dispatch_once
+    - kind=resume_task
+    - kind=external_chat_message
+    """
 
     request = read_json_file(request_path)
     request_id = str(request.get("id") or request_path.stem)
@@ -1848,21 +1920,24 @@ def build_parser() -> argparse.ArgumentParser:
     gateway_logs.add_argument("--lines", type=int, default=80, help="显示最后多少行日志，0 表示全部")
     gateway_logs.set_defaults(func=cmd_gateway_logs)
 
-    gateway_ask = gateway_sub.add_parser("ask", help="向后台 gateway 投递一条聊天请求")
+    gateway_ask = gateway_sub.add_parser(
+        "ask",
+        help="向后台 gateway 投递一条聊天请求；未来聊天工具/TUI 会复用这条通道",
+    )
     gateway_ask.add_argument("prompt", help="用户任务 / prompt")
     gateway_ask.add_argument("--inject", action="append", help="动态注入 prompt，可多次传入")
     gateway_ask.add_argument("--prompt-file", action="append", help="额外动态 prompt 文件，可多次传入")
     gateway_ask.add_argument("--no-save", action="store_true", help="不保存本次对话到记忆")
     gateway_ask.add_argument("--show-prompt", action="store_true", help="响应返回时打印最终 prompt")
     gateway_ask.add_argument("--timeout", type=float, help="等待 gateway 响应的秒数，默认使用配置")
-    gateway_ask.add_argument("--no-wait", action="store_true", help="只投递请求并立即返回 request_id")
-    gateway_ask.add_argument("--json", action="store_true", help="输出完整响应 JSON")
+    gateway_ask.add_argument("--no-wait", action="store_true", help="只投递请求并立即返回 request_id，适合长任务")
+    gateway_ask.add_argument("--json", action="store_true", help="输出完整响应 JSON，方便脚本或聊天适配器读取")
     gateway_ask.set_defaults(func=cmd_gateway_ask)
 
-    gateway_result = gateway_sub.add_parser("result", help="读取某个 gateway 请求结果")
+    gateway_result = gateway_sub.add_parser("result", help="读取某个 gateway 请求结果，通常配合 ask --no-wait 使用")
     gateway_result.add_argument("request_id", help="gateway 请求 ID")
     gateway_result.add_argument("--show-prompt", action="store_true", help="打印响应中保存的最终 prompt")
-    gateway_result.add_argument("--json", action="store_true", help="输出完整响应 JSON")
+    gateway_result.add_argument("--json", action="store_true", help="输出完整响应 JSON，方便脚本或聊天适配器读取")
     gateway_result.set_defaults(func=cmd_gateway_result)
 
     subagent_context = sub.add_parser("subagent-context", help="生成单个 subagent 执行上下文包")

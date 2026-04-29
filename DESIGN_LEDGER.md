@@ -960,3 +960,23 @@ suggested_tool: 是否建议开发成 tool
 - 让 `my-agent chat` 默认 attach 到 gateway，而不是只在前台进程里跑。
 - 将文件队列升级为 SQLite jobs/leases，支持崩溃恢复、重试、超时和 worker pool。
 - 再向上接 TUI、HTTP/WebSocket、本地托盘服务和跨 gateway 通信。
+
+## 2026-04-29 / Gateway 说明白话化
+
+状态：已落地
+
+思路：
+- `gateway ask/result` 会保留，但它们不是最终普通用户每天必须敲的命令。
+- 它们的定位是本地协议验证口、开发者调试口、聊天工具/TUI 接入前的最小客户端。
+- 文档和代码注释要把“为什么要有这些命令”“以后接聊天工具后谁来调用它们”“每个队列目录是什么意思”说清楚。
+
+已落地：
+- `GATEWAY_DESIGN.md` 增加 `gateway ask/result` 大白话解释和本地队列目录说明。
+- `CLI_REFERENCE.md` 增加同步/异步示例、请求流转和定位说明。
+- `README.md`、`agent_py_agent/README.md` 增加普通用户视角解释。
+- `agent_config.yaml` 增加 gateway 请求队列配置注释。
+- `agent_py_agent/__main__.py` 增加 `GatewayPaths`、请求写入、崩溃恢复、worker loop 和 response 输出的代码注释。
+
+后续方向：
+- `chat` / TUI 接入后，把 `gateway ask/result` 收到“开发者命令”层级。
+- 外部聊天工具接入时复用同一个 request/response 协议，并把响应自动回发给用户。
