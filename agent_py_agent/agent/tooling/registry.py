@@ -32,6 +32,13 @@ from .parser import parse_xmlish_tool_calls
 from .web import FetchUrlTool, HttpRequestTool
 from .write_boundary import validate_write_boundary
 
+_MAX_TOOL_PAYLOAD_FIELDS = 64
+_MAX_TOOL_FIELD_NAME_CHARS = 128
+_MAX_TOOL_NAME_CHARS = 128
+_MAX_PARSE_ERROR_RAW_CHARS = 1000
+_MAX_EXCEPTION_MESSAGE_CHARS = 500
+
+
 class ToolRegistry:
     """工具注册表。
 
@@ -198,15 +205,14 @@ class ToolRegistry:
                 calls.append(
                     (
                         start,
-                        {
-                            "tool": "__parse_error__",
-                            "error": f"工具调用 JSON 解析失败: {exc}",
-                            "raw": raw,
-                        },
+                        _parse_error_payload(f"工具调用 JSON 解析失败: {exc}", raw),
                     )
                 )
             else:
-                calls.append((start, payload))
+                if not isinstance(payload, dict):
+                    calls.append((start, _parse_error_payload("工具调用必须是 JSON 对象", raw)))
+                else:
+                    calls.append((start, payload))
             cursor = end + len(marker_end)
         calls.extend(parse_xmlish_tool_calls(text))
         calls.sort(key=lambda item: item[0])
@@ -214,42 +220,49 @@ class ToolRegistry:
 
     def execute_call(
         self,
-        payload: dict[str, Any],
+        payload: object,
         *,
         allowed_tools: list[str] | None = None,
         write_boundary: dict[str, object] | None = None,
     ) -> ToolExecutionResult:
         """执行单个工具调用。"""
 
-        if payload.get("tool") == "__parse_error__":
-            return ToolExecutionResult("__parse_error__", False, payload["error"])
+        normalized_payload, payload_error = _normalize_tool_payload(payload)
+        if payload_error:
+            return ToolExecutionResult("unknown", False, payload_error)
+        assert normalized_payload is not None
+        payload = normalized_payload
 
-        tool_name = payload.get("tool")
-        if not tool_name:
-            return ToolExecutionResult("unknown", False, "工具调用缺少 tool 字段")
+        if payload.get("tool") == "__parse_error__":
+            return ToolExecutionResult("__parse_error__", False, str(payload.get("error") or "工具调用解析失败"))
+
+        try:
+            tool_name = _tool_name(payload.get("tool"))
+        except ValueError as exc:
+            return ToolExecutionResult("unknown", False, str(exc))
 
         allowed = _allowed_tool_set(allowed_tools)
-        if allowed is not None and str(tool_name) not in allowed:
-            return ToolExecutionResult(str(tool_name), False, f"工具未授权: {tool_name}")
+        if allowed is not None and tool_name not in allowed:
+            return ToolExecutionResult(tool_name, False, f"工具未授权: {tool_name}")
 
-        tool = self.tools.get(str(tool_name))
+        tool = self.tools.get(tool_name)
         if tool is None:
-            return ToolExecutionResult(str(tool_name), False, f"未知工具: {tool_name}")
+            return ToolExecutionResult(tool_name, False, f"未知工具: {tool_name}")
 
         params = {key: value for key, value in payload.items() if key != "tool"}
         boundary_error = validate_write_boundary(
-            str(tool_name),
+            tool_name,
             params,
             workspace_root=self.workspace_root,
             write_boundary=write_boundary,
         )
         if boundary_error:
-            return ToolExecutionResult(str(tool_name), False, boundary_error)
+            return ToolExecutionResult(tool_name, False, boundary_error)
 
         try:
             return tool.execute(params)
         except Exception as exc:
-            return ToolExecutionResult(str(tool_name), False, f"工具执行失败: {exc}")
+            return ToolExecutionResult(tool_name, False, _format_tool_exception(exc))
 
 
 
@@ -259,6 +272,63 @@ def _allowed_tool_set(allowed_tools: list[str] | None) -> set[str] | None:
     if allowed_tools is None:
         return None
     return {str(item) for item in allowed_tools if str(item).strip()}
+
+
+def _parse_error_payload(error: str, raw: str) -> dict[str, str]:
+    return {
+        "tool": "__parse_error__",
+        "error": error,
+        "raw": _truncate(raw, _MAX_PARSE_ERROR_RAW_CHARS),
+    }
+
+
+def _normalize_tool_payload(payload: object) -> tuple[dict[str, Any] | None, str]:
+    if not isinstance(payload, dict):
+        return None, "工具调用必须是 JSON 对象"
+    if len(payload) > _MAX_TOOL_PAYLOAD_FIELDS:
+        return None, f"工具调用字段过多，最多 {_MAX_TOOL_PAYLOAD_FIELDS} 个字段"
+
+    normalized: dict[str, Any] = {}
+    for key, value in payload.items():
+        key_text = str(key)
+        if not key_text:
+            return None, "工具调用包含空参数名"
+        if len(key_text) > _MAX_TOOL_FIELD_NAME_CHARS:
+            return None, f"工具调用参数名过长，最多 {_MAX_TOOL_FIELD_NAME_CHARS} 个字符"
+        if any(ord(char) < 32 for char in key_text):
+            return None, "工具调用参数名包含不支持的控制字符"
+        normalized[key_text] = value
+    return normalized, ""
+
+
+def _tool_name(value: object) -> str:
+    if value is None:
+        raise ValueError("工具调用缺少 tool 字段")
+    if not isinstance(value, (str, int, float, bool)):
+        raise ValueError("tool 字段必须是字符串工具名")
+    name = str(value).strip()
+    if not name:
+        raise ValueError("工具调用缺少 tool 字段")
+    if len(name) > _MAX_TOOL_NAME_CHARS:
+        raise ValueError(f"tool 字段过长，最多 {_MAX_TOOL_NAME_CHARS} 个字符")
+    if any(ord(char) < 32 for char in name):
+        raise ValueError("tool 字段包含不支持的控制字符")
+    return name
+
+
+def _format_tool_exception(exc: Exception) -> str:
+    if isinstance(exc, ValueError):
+        message = _truncate(str(exc), _MAX_EXCEPTION_MESSAGE_CHARS)
+        return f"工具执行失败: {message or exc.__class__.__name__}"
+    if isinstance(exc, (OSError, UnicodeError)):
+        return f"工具执行失败: {exc.__class__.__name__}；请检查路径、权限或文件编码。"
+    return f"工具执行失败: {exc.__class__.__name__}；请检查参数后重试。"
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n... 已截断"
 
 
 WRITE_TOOL_NAMES = {"write_file", "append_file", "replace_in_file"}

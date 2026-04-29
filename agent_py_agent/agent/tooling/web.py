@@ -9,11 +9,85 @@ from __future__ import annotations
 """
 
 import json
+import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
 from .models import BaseTool, ToolExecutionResult, ToolSpec
+
+_MAX_URL_CHARS = 4096
+_MAX_BODY_CHARS = 1_000_000
+_MAX_HEADER_JSON_CHARS = 65536
+_MAX_HEADER_COUNT = 100
+_MAX_HEADER_NAME_CHARS = 128
+_MAX_HEADER_VALUE_CHARS = 8192
+_MAX_METHOD_CHARS = 16
+_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+_HTTP_METHOD_RE = re.compile(r"^[A-Z][A-Z0-9_-]*$")
+
+
+def _has_control_chars(text: str) -> bool:
+    return any(ord(char) < 32 for char in text)
+
+
+def _scalar_text(value: Any, *, name: str, max_chars: int, allow_empty: bool = False) -> str:
+    if value is None:
+        raise ValueError(f"缺少必填参数 {name}")
+    if not isinstance(value, (str, int, float, bool)):
+        raise ValueError(f"{name} 参数必须是字符串或标量文本")
+    text = str(value).strip() if name in {"url", "method"} else str(value)
+    if not allow_empty and text == "":
+        raise ValueError(f"{name} 不能为空")
+    if len(text) > max_chars:
+        raise ValueError(f"{name} 过长，最多 {max_chars} 个字符")
+    return text
+
+
+def _normalize_url(value: Any) -> str:
+    url = _scalar_text(value, name="url", max_chars=_MAX_URL_CHARS)
+    if _has_control_chars(url):
+        raise ValueError("url 包含不支持的控制字符")
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme.lower() not in {"http", "https"}:
+        raise ValueError("url 只支持 http 或 https")
+    if not parts.netloc or not parts.hostname:
+        raise ValueError("url 必须包含有效主机名")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("url 不支持携带用户名或密码")
+    return url
+
+
+def _normalize_method(value: Any) -> str:
+    method = _scalar_text(value, name="method", max_chars=_MAX_METHOD_CHARS).upper()
+    if not _HTTP_METHOD_RE.fullmatch(method):
+        raise ValueError("method 必须是有效的 HTTP 方法名")
+    return method
+
+
+def _format_response(tool: str, status: int, headers: Any, body: str, max_chars: int) -> ToolExecutionResult:
+    result = (
+        f"status={status}\n"
+        f"content_type={headers.get('Content-Type', '')}\n\n"
+        f"{body[:max_chars]}"
+    )
+    if len(body) > max_chars:
+        result += "\n... 已截断"
+    return ToolExecutionResult(tool, True, result)
+
+
+def _format_http_error(tool: str, exc: urllib.error.HTTPError, max_chars: int) -> ToolExecutionResult:
+    detail = exc.read(max_chars + 1).decode("utf-8", "replace")
+    result = (
+        f"HTTP {exc.code}\n"
+        f"content_type={exc.headers.get('Content-Type', '')}\n\n"
+        f"{detail[:max_chars]}"
+    )
+    if len(detail) > max_chars:
+        result += "\n... 已截断"
+    return ToolExecutionResult(tool, False, result)
+
 
 class FetchUrlTool(BaseTool):
     """抓取网页或纯文本接口内容。"""
@@ -45,9 +119,10 @@ class FetchUrlTool(BaseTool):
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        url = str(params.get("url", "")).strip()
-        if not url:
-            return ToolExecutionResult("fetch_url", False, "缺少必填参数 url")
+        try:
+            url = _normalize_url(params.get("url"))
+        except ValueError as exc:
+            return ToolExecutionResult("fetch_url", False, str(exc))
 
         req = urllib.request.Request(
             url,
@@ -57,19 +132,11 @@ class FetchUrlTool(BaseTool):
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 body = resp.read().decode("utf-8", "replace")
-                result = (
-                    f"status={resp.status}\n"
-                    f"content_type={resp.headers.get('Content-Type', '')}\n\n"
-                    f"{body[: self.max_chars]}"
-                )
-                if len(body) > self.max_chars:
-                    result += "\n... 已截断"
-                return ToolExecutionResult("fetch_url", True, result)
+                return _format_response("fetch_url", resp.status, resp.headers, body, self.max_chars)
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")
-            return ToolExecutionResult("fetch_url", False, f"HTTP {exc.code}: {detail}")
-        except Exception as exc:
-            return ToolExecutionResult("fetch_url", False, f"请求失败: {exc}")
+            return _format_http_error("fetch_url", exc, self.max_chars)
+        except (urllib.error.URLError, TimeoutError) as exc:
+            return ToolExecutionResult("fetch_url", False, f"请求失败: {exc.__class__.__name__}")
 
 
 class HttpRequestTool(BaseTool):
@@ -109,32 +176,30 @@ class HttpRequestTool(BaseTool):
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        url = str(params.get("url", "")).strip()
-        if not url:
-            return ToolExecutionResult("http_request", False, "缺少必填参数 url")
-
-        method = str(params.get("method", "GET")).upper()
-        headers = self._normalize_headers(params.get("headers"))
-        body = params.get("body")
-        data = None if body is None else str(body).encode("utf-8")
+        try:
+            url = _normalize_url(params.get("url"))
+            method = _normalize_method(params.get("method", "GET"))
+            headers = self._normalize_headers(params.get("headers"))
+            body = params.get("body")
+            body_text = None if body is None else _scalar_text(
+                body,
+                name="body",
+                max_chars=_MAX_BODY_CHARS,
+                allow_empty=True,
+            )
+        except ValueError as exc:
+            return ToolExecutionResult("http_request", False, str(exc))
+        data = None if body_text is None else body_text.encode("utf-8")
 
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                body_text = resp.read().decode("utf-8", "replace")
-                result = (
-                    f"status={resp.status}\n"
-                    f"content_type={resp.headers.get('Content-Type', '')}\n\n"
-                    f"{body_text[: self.max_chars]}"
-                )
-                if len(body_text) > self.max_chars:
-                    result += "\n... 已截断"
-                return ToolExecutionResult("http_request", True, result)
+                response_body = resp.read().decode("utf-8", "replace")
+                return _format_response("http_request", resp.status, resp.headers, response_body, self.max_chars)
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")
-            return ToolExecutionResult("http_request", False, f"HTTP {exc.code}: {detail}")
-        except Exception as exc:
-            return ToolExecutionResult("http_request", False, f"请求失败: {exc}")
+            return _format_http_error("http_request", exc, self.max_chars)
+        except (urllib.error.URLError, TimeoutError) as exc:
+            return ToolExecutionResult("http_request", False, f"请求失败: {exc.__class__.__name__}")
 
     def _normalize_headers(self, headers: Any) -> dict[str, str]:
         """把请求头统一整理成 `dict[str, str]`。"""
@@ -142,14 +207,44 @@ class HttpRequestTool(BaseTool):
         if headers is None:
             return {"User-Agent": "SimplePythonAgent/1.0"}
         if isinstance(headers, dict):
-            normalized = {str(k): str(v) for k, v in headers.items()}
+            normalized = _normalize_header_dict(headers)
             normalized.setdefault("User-Agent", "SimplePythonAgent/1.0")
             return normalized
         if isinstance(headers, str):
-            parsed = json.loads(headers)
+            if len(headers) > _MAX_HEADER_JSON_CHARS:
+                raise ValueError(f"headers 过长，最多 {_MAX_HEADER_JSON_CHARS} 个字符")
+            try:
+                parsed = json.loads(headers)
+            except json.JSONDecodeError as exc:
+                raise ValueError("headers 必须是 JSON 对象字符串") from exc
             if not isinstance(parsed, dict):
                 raise ValueError("headers 字符串解析后必须是 JSON 对象")
-            normalized = {str(k): str(v) for k, v in parsed.items()}
+            normalized = _normalize_header_dict(parsed)
             normalized.setdefault("User-Agent", "SimplePythonAgent/1.0")
             return normalized
         raise ValueError("headers 必须为空、对象或 JSON 字符串")
+
+
+def _normalize_header_dict(headers: dict[Any, Any]) -> dict[str, str]:
+    if len(headers) > _MAX_HEADER_COUNT:
+        raise ValueError(f"headers 字段过多，最多 {_MAX_HEADER_COUNT} 个")
+    normalized: dict[str, str] = {}
+    for key, value in headers.items():
+        if not isinstance(key, (str, int, float, bool)):
+            raise ValueError("headers 名称必须是字符串或标量")
+        if not isinstance(value, (str, int, float, bool)):
+            raise ValueError("headers 值必须是字符串或标量")
+        name = str(key).strip()
+        header_value = str(value)
+        if not name:
+            raise ValueError("headers 包含空名称")
+        if len(name) > _MAX_HEADER_NAME_CHARS:
+            raise ValueError(f"headers 名称过长，最多 {_MAX_HEADER_NAME_CHARS} 个字符")
+        if len(header_value) > _MAX_HEADER_VALUE_CHARS:
+            raise ValueError(f"headers 值过长，最多 {_MAX_HEADER_VALUE_CHARS} 个字符")
+        if not _HEADER_NAME_RE.fullmatch(name):
+            raise ValueError("headers 名称包含非法字符")
+        if "\r" in header_value or "\n" in header_value:
+            raise ValueError("headers 值不能包含换行")
+        normalized[name] = header_value
+    return normalized
