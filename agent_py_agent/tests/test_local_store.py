@@ -2,9 +2,22 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
+import time
 from pathlib import Path
 
-from agent_py_agent.__main__ import _handle_gateway_request, gateway_paths, submit_gateway_ask
+from agent_py_agent.__main__ import (
+    AdapterPaths,
+    _handle_gateway_request,
+    _process_gateway_requests,
+    build_local_doctor_report,
+    gateway_paths,
+    process_file_adapter_once,
+    rebuild_local_store,
+    recover_gateway_processing_requests,
+    submit_gateway_ask,
+    write_json_file,
+)
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.local_store import LocalStore
@@ -176,3 +189,158 @@ def test_gateway_request_indexes_logs_to_local_store():
         assert request_id == response["id"]
         assert hits
         assert hits[0].source_id == request_id
+
+
+def test_local_rebuild_indexes_memory_gateway_and_subagents():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(
+            model_backend="echo",
+            memory_path="memory.jsonl",
+            gateway_workspace="gateway",
+            subagent_workspace="subs",
+            local_store_path="local_store/local.db",
+            local_store_files_dir="local_store/files",
+            local_store_events_path="local_store/events.jsonl",
+        )
+        agent = SimpleAgent(cfg, root)
+        agent.remember("重建测试记忆：local-rebuild 应该重新索引。", kind="note")
+        task = agent.subagents.create_run(
+            goal="local-rebuild 子代理索引测试",
+            thought="生成一个可被重建扫描到的工单。",
+            plan=["创建工单", "重建索引"],
+        )
+        gpaths = gateway_paths(agent)
+        submit_gateway_ask(
+            gpaths,
+            prompt="local-rebuild gateway 请求索引测试",
+            save=False,
+            agent=agent,
+        )
+        assert _process_gateway_requests(agent, gpaths) == 1
+
+        agent.local_store.reset()
+        result = rebuild_local_store(agent, sources={"memory", "gateway", "subagent", "fts"}, reset=False)
+
+        counts = result["source_counts"]
+        assert counts["memory"] == 1
+        assert counts["gateway_request"] >= 1
+        assert counts["subagent_run"] == 1
+        assert agent.local_store.search("local-rebuild 子代理", source_type="subagent_run")[0].source_id == task.id
+
+        doctor = build_local_doctor_report(agent)
+        assert doctor["memory_count"] == 1
+        assert any(item["name"] == "memory_index" for item in doctor["checks"])
+
+
+def test_gateway_processing_recovery_requeues_then_fails_after_attempt_limit():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(
+            model_backend="echo",
+            gateway_workspace="gateway",
+            local_store_path="local_store/local.db",
+            local_store_files_dir="local_store/files",
+            local_store_events_path="local_store/events.jsonl",
+            gateway_processing_timeout_seconds=1,
+            gateway_request_max_attempts=2,
+        )
+        agent = SimpleAgent(cfg, root)
+        paths = gateway_paths(agent)
+        for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
+            path.mkdir(parents=True, exist_ok=True)
+
+        request_path = paths.processing / "gwreq-timeout.json"
+        write_json_file(
+            request_path,
+            {
+                "id": "gwreq-timeout",
+                "kind": "ask",
+                "prompt": "会被重排的请求",
+                "attempts": 1,
+                "lease_started_at": time.time() - 10,
+            },
+        )
+        recovered = recover_gateway_processing_requests(
+            paths,
+            startup=False,
+            max_attempts=2,
+            timeout_seconds=1,
+            agent=agent,
+        )
+        assert recovered["requeued"] == 1
+        assert (paths.inbox / request_path.name).exists()
+
+        second_path = paths.processing / "gwreq-fail.json"
+        write_json_file(
+            second_path,
+            {
+                "id": "gwreq-fail",
+                "kind": "ask",
+                "prompt": "会失败归档的请求",
+                "attempts": 2,
+                "lease_started_at": time.time() - 10,
+            },
+        )
+        failed = recover_gateway_processing_requests(
+            paths,
+            startup=False,
+            max_attempts=2,
+            timeout_seconds=1,
+            agent=agent,
+        )
+        assert failed["failed"] == 1
+        assert (paths.failed / second_path.name).exists()
+        assert (paths.responses / "gwreq-fail.json").exists()
+
+
+def test_file_adapter_writes_gateway_response_to_outbox():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(
+            model_backend="echo",
+            gateway_workspace="gateway",
+            adapter_workspace="adapter",
+            local_store_path="local_store/local.db",
+            local_store_files_dir="local_store/files",
+            local_store_events_path="local_store/events.jsonl",
+        )
+        agent = SimpleAgent(cfg, root)
+        gpaths = gateway_paths(agent)
+        apaths = AdapterPaths(
+            root=root / "adapter",
+            inbox=root / "adapter" / "inbox",
+            processing=root / "adapter" / "processing",
+            done=root / "adapter" / "done",
+            failed=root / "adapter" / "failed",
+            outbox=root / "adapter" / "outbox",
+        )
+        apaths.inbox.mkdir(parents=True, exist_ok=True)
+        write_json_file(
+            apaths.inbox / "msg-1.json",
+            {"id": "msg-1", "text": "文件 adapter 测试", "conversation_id": "conv-1"},
+        )
+
+        def gateway_once():
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if list(gpaths.inbox.glob("*.json")):
+                    _process_gateway_requests(agent, gpaths)
+                    return
+                time.sleep(0.05)
+
+        thread = threading.Thread(target=gateway_once)
+        thread.start()
+        processed = process_file_adapter_once(
+            agent,
+            gateway_paths_obj=gpaths,
+            adapter_paths_obj=apaths,
+            timeout=5,
+        )
+        thread.join(timeout=5)
+
+        assert processed == 1
+        output = json.loads((apaths.outbox / "msg-1.json").read_text(encoding="utf-8"))
+        assert output["ok"] is True
+        assert output["adapter_message_id"] == "msg-1"
+        assert output["gateway_request_id"].startswith("gwreq-")

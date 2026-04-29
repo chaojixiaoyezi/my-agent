@@ -106,6 +106,18 @@ gateway_stop_timeout: 20
 # gateway_request_poll_interval 是后台 worker 多久检查一次 pending，单位秒。
 gateway_request_timeout: 300
 gateway_request_poll_interval: 1
+# gateway request worker 池：
+# - gateway_request_workers 控制本地 ask 队列并发处理数。
+# - 1 是最保守默认值；调大后每个 worker 都会创建自己的 agent/backend。
+# - gateway_processing_timeout_seconds 用来判断 processing 请求是否已经卡死。
+# - gateway_request_max_attempts 控制卡死请求最多自动重试几次，超过后归档到 failed。
+gateway_request_workers: 1
+gateway_processing_timeout_seconds: 900
+gateway_request_max_attempts: 2
+
+# 外部聊天工具 / TUI 文件适配器工作区。
+# 第一版 adapter file 会从 inbox 读 JSON 消息，把结果写到 outbox。
+adapter_workspace: "data/adapters/file"
 
 # 前台 daemon 默认策略（高级 / 过渡期）：
 # - my-agent daemon 会读取这些配置，减少启动时的长参数。

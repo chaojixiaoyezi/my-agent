@@ -71,8 +71,21 @@ class GatewayPaths:
     inbox: Path
     processing: Path
     done: Path
+    failed: Path
     responses: Path
     history: Path
+
+
+@dataclass
+class AdapterPaths:
+    """外部聊天工具 / TUI 文件适配器的本地目录。"""
+
+    root: Path
+    inbox: Path
+    processing: Path
+    done: Path
+    failed: Path
+    outbox: Path
 
 
 @dataclass
@@ -165,8 +178,23 @@ def gateway_paths(agent: SimpleAgent) -> GatewayPaths:
         inbox=root / "requests" / "pending",
         processing=root / "requests" / "processing",
         done=root / "requests" / "done",
+        failed=root / "requests" / "failed",
         responses=root / "responses",
         history=root / "gateway_requests.jsonl",
+    )
+
+
+def adapter_paths(agent: SimpleAgent) -> AdapterPaths:
+    """返回文件适配器目录。"""
+
+    root = agent.root / agent.config.adapter_workspace
+    return AdapterPaths(
+        root=root,
+        inbox=root / "inbox",
+        processing=root / "processing",
+        done=root / "done",
+        failed=root / "failed",
+        outbox=root / "outbox",
     )
 
 
@@ -291,6 +319,7 @@ def gateway_request_counts(paths: GatewayPaths) -> dict[str, int]:
         "pending": count_json(paths.inbox),
         "processing": count_json(paths.processing),
         "done": count_json(paths.done),
+        "failed": count_json(paths.failed),
         "responses": count_json(paths.responses),
     }
 
@@ -404,23 +433,153 @@ def log_gateway_event(agent: SimpleAgent, event_type: str, payload: dict) -> Non
         return
 
 
-def requeue_gateway_processing_requests(paths: GatewayPaths) -> int:
-    """gateway 启动时把上次崩溃遗留的 processing 请求退回 pending。
+def _gateway_request_attempts(payload: dict) -> int:
+    try:
+        return int(payload.get("attempts", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
-    如果 gateway 刚把请求从 pending 移到 processing 就崩了，这个请求既没有 response，
-    也不会再被 pending 扫描到。启动时退回 pending，等于告诉系统：“上次没办完，重新排队。”
+
+def _gateway_processing_started_at(payload: dict, request_path: Path) -> float:
+    for key in ("lease_started_at", "started_at", "updated_at", "created_at"):
+        try:
+            value = float(payload.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    try:
+        return request_path.stat().st_mtime
+    except OSError:
+        return 0
+
+
+def _write_gateway_failure_response(
+    paths: GatewayPaths,
+    request_path: Path,
+    payload: dict,
+    *,
+    status: str,
+    error: str,
+    event_type: str,
+    agent: SimpleAgent | None = None,
+) -> dict:
+    request_id = str(payload.get("id") or request_path.stem)
+    now = time.time()
+    started_at = _gateway_processing_started_at(payload, request_path) or now
+    response = {
+        "id": request_id,
+        "kind": str(payload.get("kind") or "unknown"),
+        "ok": False,
+        "status": status,
+        "created_at": payload.get("created_at", 0),
+        "started_at": started_at,
+        "ended_at": now,
+        "duration_seconds": round(now - started_at, 3),
+        "response": "",
+        "error": error,
+        "backend": "",
+        "used_memories": 0,
+        "tool_rounds": 0,
+        "prompt": "",
+        "request_file": str(request_path),
+        "attempts": _gateway_request_attempts(payload),
+    }
+    response_path = gateway_response_path(paths, request_id)
+    if not response_path.exists():
+        write_json_file(response_path, response)
+    append_gateway_history(paths, response)
+    if agent:
+        log_gateway_payload(
+            agent,
+            {**response, "prompt": payload.get("prompt", "")},
+            event_type=event_type,
+            request_path=request_path,
+            response_path=response_path,
+        )
+    return response
+
+
+def _archive_gateway_request(path: Path, target_dir: Path) -> Path:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / path.name
+    if target.exists():
+        target = target_dir / f"{path.stem}-{int(time.time())}{path.suffix}"
+    path.replace(target)
+    return target
+
+
+def recover_gateway_processing_requests(
+    paths: GatewayPaths,
+    *,
+    max_attempts: int = 2,
+    timeout_seconds: int = 900,
+    startup: bool = False,
+    agent: SimpleAgent | None = None,
+) -> dict[str, int]:
+    """恢复或归档卡在 processing 的 gateway 请求。
+
+    - gateway 启动时：认为 processing 都是上个进程遗留，未超尝试次数就退回 pending。
+    - gateway 运行中：只处理超过 timeout 的 processing，请求未超尝试次数就重排，超了就失败归档。
     """
 
     paths.inbox.mkdir(parents=True, exist_ok=True)
     paths.processing.mkdir(parents=True, exist_ok=True)
-    count = 0
+    paths.failed.mkdir(parents=True, exist_ok=True)
+    summary = {"requeued": 0, "failed": 0, "checked": 0}
+    now = time.time()
+    max_attempts = max(1, int(max_attempts or 1))
+    timeout_seconds = max(1, int(timeout_seconds or 1))
     for request_path in sorted(paths.processing.glob("*.json")):
+        payload = read_json_file(request_path)
+        if not payload:
+            payload = {"id": request_path.stem, "kind": "unknown", "created_at": 0}
+        summary["checked"] += 1
+        started_at = _gateway_processing_started_at(payload, request_path)
+        stale = startup or not started_at or now - started_at >= timeout_seconds
+        if not stale:
+            continue
+        attempts = _gateway_request_attempts(payload)
+        if attempts >= max_attempts:
+            _write_gateway_failure_response(
+                paths,
+                request_path,
+                payload,
+                status="failed",
+                error=f"gateway processing timeout after {timeout_seconds}s; attempts={attempts}",
+                event_type="gateway_request_processing_failed",
+                agent=agent,
+            )
+            try:
+                _archive_gateway_request(request_path, paths.failed)
+            except OSError:
+                continue
+            summary["failed"] += 1
+            continue
+        payload.update(
+            {
+                "status": "pending",
+                "requeued_at": now,
+                "last_error": (
+                    "gateway restarted before request completed"
+                    if startup
+                    else f"gateway processing timeout after {timeout_seconds}s"
+                ),
+            }
+        )
         try:
+            write_json_file(request_path, payload)
             request_path.replace(paths.inbox / request_path.name)
         except OSError:
             continue
-        count += 1
-    return count
+        summary["requeued"] += 1
+    return summary
+
+
+def requeue_gateway_processing_requests(paths: GatewayPaths) -> int:
+    """兼容旧测试/场景：gateway 启动时退回遗留 processing 请求。"""
+
+    return recover_gateway_processing_requests(paths, startup=True)["requeued"]
 
 
 def wait_for_gateway_response(paths: GatewayPaths, request_id: str, timeout: float) -> dict:
@@ -495,6 +654,8 @@ def submit_gateway_ask(
         "include_prompt": include_prompt,
         "created_at": time.time(),
         "client_pid": os.getpid(),
+        "status": "pending",
+        "attempts": 0,
     }
     request_path = write_gateway_request(paths, payload)
     response_path = gateway_response_path(paths, request_id)
@@ -568,6 +729,307 @@ def format_local_time(timestamp: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
 
 
+def _memory_record_count(agent: SimpleAgent) -> int:
+    try:
+        return len(agent.memory.all())
+    except Exception:
+        return 0
+
+
+def _add_doctor_check(
+    checks: list[dict],
+    *,
+    name: str,
+    ok: bool,
+    severity: str,
+    message: str,
+    details: dict | None = None,
+) -> None:
+    checks.append(
+        {
+            "name": name,
+            "ok": ok,
+            "severity": "ok" if ok else severity,
+            "message": message,
+            "details": details or {},
+        }
+    )
+
+
+def gateway_stale_processing(paths: GatewayPaths, timeout_seconds: int) -> list[dict]:
+    """列出超过 processing timeout 的 gateway 请求。"""
+
+    items: list[dict] = []
+    now = time.time()
+    timeout_seconds = max(1, int(timeout_seconds or 1))
+    for path in sorted(paths.processing.glob("*.json")):
+        payload = read_json_file(path)
+        started_at = _gateway_processing_started_at(payload, path)
+        age = now - started_at if started_at else 0
+        if started_at and age < timeout_seconds:
+            continue
+        items.append(
+            {
+                "request_id": str(payload.get("id") or path.stem),
+                "path": str(path),
+                "age_seconds": round(age, 1) if started_at else 0,
+                "attempts": _gateway_request_attempts(payload),
+            }
+        )
+    return items
+
+
+def build_local_doctor_report(agent: SimpleAgent, *, limit: int = 20) -> dict:
+    """生成本地事实源/gateway/subagent 的诊断报告。"""
+
+    paths = gateway_paths(agent)
+    checks: list[dict] = []
+    suggestions: list[str] = []
+    stats = agent.local_store.stats()
+    source_counts = agent.local_store.source_counts()
+    memory_count = _memory_record_count(agent)
+    memory_indexed = source_counts.get("memory", 0)
+    _add_doctor_check(
+        checks,
+        name="local_store_open",
+        ok=True,
+        severity="P0",
+        message="LocalStore SQLite 可以打开。",
+        details=stats,
+    )
+    for label, path in {
+        "memory_path": agent.memory.path,
+        "local_store_db": Path(stats["db_path"]),
+        "local_store_files_dir": Path(stats["files_dir"]),
+        "local_store_events_path": Path(stats["events_path"]),
+        "gateway_workspace": paths.root,
+        "subagent_workspace": agent.subagents.workspace,
+    }.items():
+        exists = path.exists()
+        _add_doctor_check(
+            checks,
+            name=f"path_{label}",
+            ok=exists or label in {"memory_path", "gateway_workspace", "subagent_workspace"},
+            severity="P1",
+            message=f"{label} {'存在' if exists else '尚未创建'}: {path}",
+            details={"path": str(path), "exists": exists},
+        )
+    memory_ok = memory_count == memory_indexed
+    _add_doctor_check(
+        checks,
+        name="memory_index",
+        ok=memory_ok,
+        severity="P1",
+        message=f"JSONL 记忆 {memory_count} 条，LocalStore memory 索引 {memory_indexed} 条。",
+        details={"memory_jsonl": memory_count, "memory_indexed": memory_indexed},
+    )
+    if not memory_ok:
+        suggestions.append("运行 `my-agent local-rebuild --source memory` 补齐记忆索引。")
+
+    missing_files = agent.local_store.missing_content_files(limit=limit)
+    _add_doctor_check(
+        checks,
+        name="local_store_content_files",
+        ok=not missing_files,
+        severity="P1",
+        message=f"LocalStore 正文文件缺失 {len(missing_files)} 条。",
+        details={"missing": missing_files},
+    )
+    if missing_files:
+        suggestions.append("运行 `my-agent local-rebuild --reset` 从原始文件事实源重建索引。")
+
+    counts = gateway_request_counts(paths)
+    stale_processing = gateway_stale_processing(paths, agent.config.gateway_processing_timeout_seconds)
+    _add_doctor_check(
+        checks,
+        name="gateway_queue",
+        ok=not stale_processing,
+        severity="P1",
+        message=f"gateway 队列 {json.dumps(counts, ensure_ascii=False, sort_keys=True)}；stale processing={len(stale_processing)}。",
+        details={"counts": counts, "stale_processing": stale_processing},
+    )
+    if stale_processing:
+        suggestions.append("运行 `my-agent gateway restart --force` 或 `my-agent local-doctor --repair` 处理卡住的 processing 请求。")
+
+    invalid_work_orders = []
+    for task in agent.subagents.list_runs():
+        validation = agent.subagents.validate_work_order(task.id)
+        if not validation.ok:
+            invalid_work_orders.append(
+                {"run_id": task.id, "missing": validation.missing, "warnings": validation.warnings}
+            )
+            if len(invalid_work_orders) >= limit:
+                break
+    _add_doctor_check(
+        checks,
+        name="subagent_work_orders",
+        ok=not invalid_work_orders,
+        severity="P1",
+        message=f"subagent 工单缺失关键文件 {len(invalid_work_orders)} 条。",
+        details={"invalid": invalid_work_orders},
+    )
+    if invalid_work_orders:
+        suggestions.append("运行 `my-agent subagents-apply-actions --apply --action repair_work_order` 修复缺失工单文件。")
+
+    if stats["record_count"] == 0 and (memory_count or agent.subagents.list_runs() or any(counts.values())):
+        suggestions.append("LocalStore 为空但磁盘上已有事实源，建议运行 `my-agent local-rebuild`。")
+    ok = all(item["ok"] for item in checks)
+    return {
+        "ok": ok,
+        "stats": stats,
+        "source_counts": source_counts,
+        "memory_count": memory_count,
+        "gateway_counts": counts,
+        "checks": checks,
+        "suggestions": suggestions,
+    }
+
+
+def _index_gateway_payload(
+    agent: SimpleAgent,
+    payload: dict,
+    *,
+    request_path: Path | None = None,
+    response_path: Path | None = None,
+    event_type: str = "gateway_request_rebuilt",
+) -> bool:
+    request_id = str(payload.get("id") or (request_path.stem if request_path else "")).strip()
+    if not request_id:
+        return False
+    log_gateway_payload(
+        agent,
+        {
+            **payload,
+            "id": request_id,
+            "kind": str(payload.get("kind") or "ask"),
+            "status": str(payload.get("status") or "rebuilt"),
+            "ok": bool(payload.get("ok", False)),
+        },
+        event_type=event_type,
+        request_path=request_path,
+        response_path=response_path,
+    )
+    return True
+
+
+def rebuild_gateway_index(agent: SimpleAgent) -> int:
+    """从 gateway history/队列/response 文件重建 LocalStore gateway_request 记录。"""
+
+    paths = gateway_paths(agent)
+    count = 0
+    if paths.history.exists():
+        for line in paths.history.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if _index_gateway_payload(agent, payload, response_path=gateway_response_path(paths, str(payload.get("id") or ""))):
+                count += 1
+    for folder in (paths.inbox, paths.processing, paths.done, paths.failed):
+        for request_path in sorted(folder.glob("*.json")):
+            payload = read_json_file(request_path)
+            if not payload:
+                continue
+            request_id = str(payload.get("id") or request_path.stem)
+            response_path = gateway_response_path(paths, request_id)
+            response_payload = read_json_file(response_path)
+            merged = {**payload, **response_payload} if response_payload else payload
+            if _index_gateway_payload(agent, merged, request_path=request_path, response_path=response_path):
+                count += 1
+    for response_path in sorted(paths.responses.glob("*.json")):
+        payload = read_json_file(response_path)
+        if not payload:
+            continue
+        if _index_gateway_payload(agent, payload, response_path=response_path):
+            count += 1
+    return count
+
+
+def rebuild_subagent_index(agent: SimpleAgent) -> int:
+    """从 subagent 工单目录重建主要 LocalStore 记录。"""
+
+    count = 0
+    for task in agent.subagents.list_runs():
+        agent.subagents._index_task(task)
+        count += 1
+        task_dir = Path(task.task_dir)
+        for rel_path, source_type in {
+            "WORK_LOG.md": "subagent_work_log",
+            "execution_context.json": "subagent_execution_context",
+            "reports/runner_result.json": "subagent_runner_result",
+            "reports/acceptance_review.json": "subagent_acceptance_review",
+            "reports/patch_review.json": "subagent_patch_review",
+        }.items():
+            path = task_dir / rel_path
+            if not path.exists():
+                continue
+            content = path.read_text(encoding="utf-8", errors="replace")
+            source_id = task.id if rel_path == "execution_context.json" else f"{task.id}:{rel_path}"
+            agent.local_store.log_record(
+                source_type=source_type,
+                source_id=source_id,
+                title=f"{source_type} {task.id}",
+                content=content,
+                metadata={"run_id": task.id, "path": str(path), "rebuilt": True},
+                event_type=f"{source_type}_rebuilt",
+            )
+            count += 1
+    return count
+
+
+def rebuild_local_store(agent: SimpleAgent, *, sources: set[str], reset: bool = False) -> dict:
+    """按来源重建 LocalStore。"""
+
+    if reset:
+        agent.local_store.reset()
+    result = {
+        "reset": reset,
+        "sources": sorted(sources),
+        "memory_indexed": 0,
+        "gateway_indexed": 0,
+        "subagent_indexed": 0,
+        "fts_rebuilt": 0,
+    }
+    if "memory" in sources:
+        result["memory_indexed"] = agent.memory.index_all()
+    if "gateway" in sources:
+        result["gateway_indexed"] = rebuild_gateway_index(agent)
+    if "subagent" in sources:
+        result["subagent_indexed"] = rebuild_subagent_index(agent)
+    if "fts" in sources or reset:
+        result["fts_rebuilt"] = agent.local_store.rebuild_fts()
+    result["stats"] = agent.local_store.stats()
+    result["source_counts"] = agent.local_store.source_counts()
+    return result
+
+
+def build_status_suggestions(agent: SimpleAgent, payload: dict) -> list[str]:
+    """根据 status payload 给出下一步建议。"""
+
+    suggestions: list[str] = []
+    gateway = payload["gateway"]
+    counts = gateway["request_counts"]
+    local_store = payload["local_store"]
+    hot_count = int(payload["subagents"]["hot_count"])
+    if gateway["status"] == "stopped" and (counts.get("pending", 0) or counts.get("processing", 0)):
+        suggestions.append("gateway 停止但队列里还有请求：运行 `my-agent gateway start`。")
+    elif gateway["status"] == "stopped":
+        suggestions.append("需要后台值班时运行 `my-agent gateway start`，或直接执行 `my-agent`。")
+    if gateway["status"] == "stale":
+        suggestions.append("gateway heartbeat 已过期：运行 `my-agent gateway restart --force`。")
+    if counts.get("failed", 0):
+        suggestions.append("gateway failed 队列非空：运行 `my-agent gateway logs` 和 `my-agent timeline --source-type gateway_request` 排查。")
+    if local_store["record_count"] == 0 and (_memory_record_count(agent) or agent.subagents.list_runs() or any(counts.values())):
+        suggestions.append("LocalStore 为空但已有文件事实源：运行 `my-agent local-rebuild`。")
+    if hot_count:
+        suggestions.append("存在红灯 subagent：运行 `my-agent subagents-due-check`，必要时再 `my-agent subagents-dispatch --apply`。")
+    if not payload["timeline"] and local_store["record_count"]:
+        suggestions.append("LocalStore 有记录但 timeline 为空：运行 `my-agent local-rebuild --reset` 从文件事实源重建事件索引。")
+    return suggestions
+
+
 def cmd_status(args) -> int:
     """显示 my-agent 当前全局状态。"""
 
@@ -606,6 +1068,7 @@ def cmd_status(args) -> int:
         },
         "timeline": [item.__dict__ for item in timeline],
     }
+    payload["suggested_actions"] = build_status_suggestions(agent, payload)
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
@@ -645,6 +1108,13 @@ def cmd_status(args) -> int:
     for item in timeline:
         source = f"{item.source_type}/{item.source_id}".strip("/")
         print(f"- {format_local_time(item.created_at)} {item.event_type} {source} :: {item.title}")
+    print("")
+    print("Suggested Actions")
+    if payload["suggested_actions"]:
+        for item in payload["suggested_actions"]:
+            print(f"- {item}")
+    else:
+        print("- 暂无，当前没有明显需要立刻处理的事项。")
     return 0
 
 
@@ -770,6 +1240,61 @@ def cmd_local_index_memory(args) -> int:
             sort_keys=True,
         )
     )
+    return 0
+
+
+def cmd_local_doctor(args) -> int:
+    """诊断 LocalStore、gateway 队列和 subagent 文件事实源的一致性。"""
+
+    agent = make_agent(args)
+    if args.repair:
+        recovery = recover_gateway_processing_requests(
+            gateway_paths(agent),
+            startup=False,
+            max_attempts=agent.config.gateway_request_max_attempts,
+            timeout_seconds=agent.config.gateway_processing_timeout_seconds,
+            agent=agent,
+        )
+    else:
+        recovery = {}
+    report = build_local_doctor_report(agent, limit=args.limit)
+    if recovery:
+        report["repair"] = {"gateway_processing_recovery": recovery}
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if report["ok"] else 1
+
+    print("MY-AGENT LOCAL DOCTOR")
+    print(f"ok={report['ok']}")
+    print("stats=" + json.dumps(report["stats"], ensure_ascii=False, sort_keys=True))
+    print("source_counts=" + json.dumps(report["source_counts"], ensure_ascii=False, sort_keys=True))
+    if recovery:
+        print("repair=" + json.dumps(report["repair"], ensure_ascii=False, sort_keys=True))
+    for check in report["checks"]:
+        mark = "OK" if check["ok"] else check["severity"]
+        print(f"- [{mark}] {check['name']}: {check['message']}")
+    if report["suggestions"]:
+        print("")
+        print("Suggested Actions")
+        for item in report["suggestions"]:
+            print(f"- {item}")
+    return 0 if report["ok"] else 1
+
+
+def cmd_local_rebuild(args) -> int:
+    """从文件事实源重建 LocalStore 索引。"""
+
+    agent = make_agent(args)
+    requested = set(args.source or ["memory", "gateway", "subagent", "fts"])
+    if "all" in requested:
+        requested = {"memory", "gateway", "subagent", "fts"}
+    allowed = {"memory", "gateway", "subagent", "fts"}
+    unknown = sorted(requested - allowed)
+    if unknown:
+        print(f"未知 source: {', '.join(unknown)}", file=sys.stderr)
+        return 2
+    result = rebuild_local_store(agent, sources=requested, reset=args.reset)
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
 
@@ -1402,9 +1927,16 @@ def cmd_gateway_run(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)
-    for path in (paths.inbox, paths.processing, paths.done, paths.responses):
+    for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         path.mkdir(parents=True, exist_ok=True)
-    requeued = requeue_gateway_processing_requests(paths)
+    recovery = recover_gateway_processing_requests(
+        paths,
+        startup=True,
+        max_attempts=agent.config.gateway_request_max_attempts,
+        timeout_seconds=agent.config.gateway_processing_timeout_seconds,
+        agent=agent,
+    )
+    requeued = recovery["requeued"]
     pid = os.getpid()
     paths.pid.write_text(str(pid), encoding="utf-8")
     log_gateway_event(
@@ -1416,6 +1948,7 @@ def cmd_gateway_run(args) -> int:
             "gateway_workspace": str(paths.root),
             "subagent_workspace": str(agent.subagents.workspace),
             "requeued_requests": requeued,
+            "failed_processing_requests": recovery["failed"],
         },
     )
     try:
@@ -1458,6 +1991,8 @@ def cmd_gateway_run(args) -> int:
             "max_runners": options.max_runners,
             "max_cycles": options.max_cycles,
             "requeued_requests": requeued,
+            "failed_processing_requests": recovery["failed"],
+            "request_workers": max(1, int(agent.config.gateway_request_workers or 1)),
         },
     )
     log_gateway_event(
@@ -1475,6 +2010,8 @@ def cmd_gateway_run(args) -> int:
             "max_runners": options.max_runners,
             "max_cycles": options.max_cycles,
             "requeued_requests": requeued,
+            "failed_processing_requests": recovery["failed"],
+            "request_workers": max(1, int(agent.config.gateway_request_workers or 1)),
         },
     )
 
@@ -1581,6 +2118,9 @@ def cmd_gateway_status(args) -> int:
         "requests="
         + json.dumps(counts, ensure_ascii=False, sort_keys=True)
     )
+    stale_processing = gateway_stale_processing(paths, agent.config.gateway_processing_timeout_seconds)
+    if stale_processing:
+        print("stale_processing=" + json.dumps(stale_processing, ensure_ascii=False, sort_keys=True))
     print(f"workspace: {paths.root}")
     print(f"log: {paths.log}")
     return 0
@@ -1743,6 +2283,194 @@ def cmd_gateway_result(args) -> int:
         print(f"response: {gateway_response_path(paths, args.request_id)}")
         return 2
     return print_gateway_response(payload, json_mode=args.json, show_prompt=args.show_prompt)
+
+
+def cmd_adapter(args) -> int:
+    """adapter 命令族入口。"""
+
+    print("请指定 adapter 子命令：file。", file=sys.stderr)
+    return 2
+
+
+def _adapter_message_id(payload: dict, path: Path) -> str:
+    return str(payload.get("id") or payload.get("message_id") or path.stem).strip() or path.stem
+
+
+def _adapter_message_prompt(payload: dict) -> str:
+    for key in ("prompt", "text", "message", "content"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _adapter_output_path(paths: AdapterPaths, message_id: str) -> Path:
+    return paths.outbox / f"{message_id}.json"
+
+
+def process_file_adapter_once(
+    agent: SimpleAgent,
+    *,
+    gateway_paths_obj: GatewayPaths,
+    adapter_paths_obj: AdapterPaths,
+    timeout: float,
+    limit: int = 20,
+) -> int:
+    """处理一批 adapter inbox 消息。"""
+
+    for path in (
+        adapter_paths_obj.inbox,
+        adapter_paths_obj.processing,
+        adapter_paths_obj.done,
+        adapter_paths_obj.failed,
+        adapter_paths_obj.outbox,
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+    processed = 0
+    for message_path in sorted(adapter_paths_obj.inbox.glob("*.json")):
+        if limit > 0 and processed >= limit:
+            break
+        processing_path = adapter_paths_obj.processing / message_path.name
+        try:
+            message_path.replace(processing_path)
+        except OSError:
+            continue
+        payload = read_json_file(processing_path)
+        message_id = _adapter_message_id(payload, processing_path)
+        prompt = _adapter_message_prompt(payload)
+        output_path = _adapter_output_path(adapter_paths_obj, message_id)
+        started_at = time.time()
+        if not prompt:
+            response = {
+                "id": message_id,
+                "ok": False,
+                "status": "failed",
+                "error": "adapter message 缺少 prompt/text/message/content 字段。",
+                "created_at": payload.get("created_at", 0),
+                "started_at": started_at,
+                "ended_at": time.time(),
+                "source_file": str(processing_path),
+            }
+            write_json_file(output_path, response)
+            try:
+                _archive_gateway_request(processing_path, adapter_paths_obj.failed)
+            except OSError:
+                pass
+            processed += 1
+            continue
+
+        request_id, request_path, gateway_response = submit_gateway_ask(
+            gateway_paths_obj,
+            prompt=prompt,
+            inject=[str(item) for item in payload.get("inject", [])],
+            prompt_files=[str(item) for item in payload.get("prompt_files", [])],
+            save=not bool(payload.get("no_save", False)),
+            include_prompt=bool(payload.get("include_prompt", False)),
+            agent=agent,
+        )
+        response = wait_for_gateway_response(gateway_paths_obj, request_id, timeout)
+        if not response:
+            response = {
+                "id": request_id,
+                "kind": "ask",
+                "ok": False,
+                "status": "timeout",
+                "error": f"timeout after {timeout}s",
+                "created_at": payload.get("created_at", 0),
+                "started_at": started_at,
+                "ended_at": time.time(),
+                "response": "",
+                "request_file": str(request_path),
+            }
+        adapter_response = {
+            "adapter_message_id": message_id,
+            "conversation_id": payload.get("conversation_id", ""),
+            "user": payload.get("user", ""),
+            "gateway_request_id": request_id,
+            "gateway_request_file": str(request_path),
+            "gateway_response_file": str(gateway_response),
+            "source_file": str(processing_path),
+            "ok": bool(response.get("ok", False)),
+            "status": response.get("status", "unknown"),
+            "response": response.get("response", ""),
+            "error": response.get("error", ""),
+            "payload": response,
+            "created_at": payload.get("created_at", 0),
+            "started_at": started_at,
+            "ended_at": time.time(),
+        }
+        write_json_file(output_path, adapter_response)
+        try:
+            _archive_gateway_request(
+                processing_path,
+                adapter_paths_obj.done if adapter_response["ok"] else adapter_paths_obj.failed,
+            )
+        except OSError:
+            pass
+        processed += 1
+    return processed
+
+
+def cmd_adapter_file(args) -> int:
+    """文件协议 adapter：inbox JSON -> gateway -> outbox JSON。"""
+
+    agent = make_agent(args)
+    gpaths = gateway_paths(agent)
+    apaths = adapter_paths(agent)
+    if args.root:
+        root = Path(args.root).expanduser()
+        apaths = AdapterPaths(
+            root=root,
+            inbox=root / "inbox",
+            processing=root / "processing",
+            done=root / "done",
+            failed=root / "failed",
+            outbox=root / "outbox",
+        )
+    if args.inbox:
+        apaths.inbox = Path(args.inbox).expanduser()
+    if args.outbox:
+        apaths.outbox = Path(args.outbox).expanduser()
+
+    if not args.no_start_gateway:
+        code = ensure_gateway_started(args)
+        if code:
+            return code
+    else:
+        _, alive = gateway_running(gpaths)
+        if not alive:
+            print("gateway 未在运行，且指定了 --no-start-gateway。", file=sys.stderr)
+            return 2
+
+    timeout = args.timeout if args.timeout is not None else agent.config.gateway_request_timeout
+    total = 0
+    while True:
+        processed = process_file_adapter_once(
+            agent,
+            gateway_paths_obj=gpaths,
+            adapter_paths_obj=apaths,
+            timeout=timeout,
+            limit=args.limit,
+        )
+        total += processed
+        if args.once or not args.watch:
+            break
+        time.sleep(max(0.2, args.poll_interval))
+    print(
+        json.dumps(
+            {
+                "processed": total,
+                "adapter_root": str(apaths.root),
+                "inbox": str(apaths.inbox),
+                "outbox": str(apaths.outbox),
+                "gateway_workspace": str(gpaths.root),
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 @dataclass
@@ -2040,7 +2768,7 @@ def run_scenario_gateway_restart_case(args) -> int:
 
     agent = load_scenario_agent(paths.config)
     gpaths = gateway_paths(agent)
-    for path in (gpaths.inbox, gpaths.processing, gpaths.done, gpaths.responses):
+    for path in (gpaths.inbox, gpaths.processing, gpaths.done, gpaths.failed, gpaths.responses):
         path.mkdir(parents=True, exist_ok=True)
 
     request_id = new_gateway_request_id()
@@ -2626,32 +3354,61 @@ def write_scenario_summary(
 def _gateway_request_loop(args, paths: GatewayPaths, stop_event: threading.Event) -> None:
     """后台处理 gateway inbox 请求。
 
-    这个 worker 和 dispatch watch 在同一个 gateway 进程里并行：
-    - dispatch watch 负责定时巡检任务树。
-    - request worker 负责响应用户/客户端即时消息。
-
-    第一版只串行处理请求，先保证正确落盘和可恢复；真正并发 worker pool 后续再接。
+    这个线程会按配置启动一个很保守的 worker pool。每个 worker 都有自己的
+    `SimpleAgent` 实例，避免并发请求共享 backend / LocalStore 连接。
     """
+
+    try:
+        bootstrap_agent = make_agent(args)
+        worker_count = max(1, int(bootstrap_agent.config.gateway_request_workers or 1))
+    except Exception as exc:
+        print(f"gateway request worker failed to initialize: {exc}", file=sys.stderr)
+        return
+    workers: list[threading.Thread] = []
+    for index in range(worker_count):
+        thread = threading.Thread(
+            target=_gateway_request_worker_loop,
+            args=(args, paths, stop_event, index),
+            daemon=True,
+        )
+        thread.start()
+        workers.append(thread)
+    while not stop_event.is_set():
+        stop_event.wait(0.5)
+    for thread in workers:
+        thread.join(timeout=2)
+
+
+def _gateway_request_worker_loop(args, paths: GatewayPaths, stop_event: threading.Event, worker_index: int) -> None:
+    """单个 gateway request worker。"""
 
     try:
         agent = make_agent(args)
     except Exception as exc:
-        print(f"gateway request worker failed to initialize: {exc}", file=sys.stderr)
+        print(f"gateway request worker {worker_index} failed to initialize: {exc}", file=sys.stderr)
         return
 
     poll_interval = max(1, int(agent.config.gateway_request_poll_interval))
     while not stop_event.is_set():
         try:
-            processed = _process_gateway_requests(agent, paths)
+            if worker_index == 0:
+                recover_gateway_processing_requests(
+                    paths,
+                    startup=False,
+                    max_attempts=agent.config.gateway_request_max_attempts,
+                    timeout_seconds=agent.config.gateway_processing_timeout_seconds,
+                    agent=agent,
+                )
+            processed = _process_gateway_requests(agent, paths, worker_id=f"gw-worker-{worker_index}")
         except Exception as exc:
-            print(f"gateway request worker failed: {exc}", file=sys.stderr)
+            print(f"gateway request worker {worker_index} failed: {exc}", file=sys.stderr)
             processed = 0
         if processed:
             continue
         stop_event.wait(poll_interval)
 
 
-def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths) -> int:
+def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths, *, worker_id: str = "gw-worker") -> int:
     """处理当前所有待处理 gateway 请求。
 
     文件流转：
@@ -2663,6 +3420,7 @@ def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths) -> int:
     paths.inbox.mkdir(parents=True, exist_ok=True)
     paths.processing.mkdir(parents=True, exist_ok=True)
     paths.done.mkdir(parents=True, exist_ok=True)
+    paths.failed.mkdir(parents=True, exist_ok=True)
     paths.responses.mkdir(parents=True, exist_ok=True)
     processed = 0
     for request_path in sorted(paths.inbox.glob("*.json")):
@@ -2671,12 +3429,32 @@ def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths) -> int:
             request_path.replace(processing_path)
         except OSError:
             continue
+        request_payload = read_json_file(processing_path)
+        request_id = str(request_payload.get("id") or processing_path.stem)
+        response_path = gateway_response_path(paths, request_id)
+        if response_path.exists():
+            try:
+                _archive_gateway_request(processing_path, paths.done)
+            except OSError:
+                pass
+            processed += 1
+            continue
+        request_payload.update(
+            {
+                "status": "processing",
+                "attempts": _gateway_request_attempts(request_payload) + 1,
+                "lease_owner": worker_id,
+                "lease_started_at": time.time(),
+            }
+        )
+        write_json_file(processing_path, request_payload)
         response = _handle_gateway_request(agent, processing_path)
         response_path = gateway_response_path(paths, str(response.get("id", processing_path.stem)))
-        write_json_file(response_path, response)
+        if not response_path.exists():
+            write_json_file(response_path, response)
         append_gateway_history(paths, response)
         try:
-            processing_path.replace(paths.done / processing_path.name)
+            _archive_gateway_request(processing_path, paths.done if response.get("ok") else paths.failed)
         except OSError:
             pass
         processed += 1
@@ -2714,6 +3492,8 @@ def _handle_gateway_request(agent: SimpleAgent, request_path: Path) -> dict:
         "tool_rounds": 0,
         "prompt": "",
         "request_file": str(request_path),
+        "attempts": _gateway_request_attempts(request),
+        "lease_owner": request.get("lease_owner", ""),
     }
     log_gateway_payload(
         agent,
@@ -3201,6 +3981,22 @@ def build_parser() -> argparse.ArgumentParser:
     local_index_memory = sub.add_parser("local-index-memory", help="把现有 JSONL 记忆补建到本地事实源")
     local_index_memory.set_defaults(func=cmd_local_index_memory)
 
+    local_doctor = sub.add_parser("local-doctor", help="诊断 LocalStore、gateway 队列和 subagent 文件事实源")
+    local_doctor.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    local_doctor.add_argument("--repair", action="store_true", help="处理超时 processing gateway 请求")
+    local_doctor.add_argument("--limit", type=int, default=20, help="每类问题最多显示多少条")
+    local_doctor.set_defaults(func=cmd_local_doctor)
+
+    local_rebuild = sub.add_parser("local-rebuild", help="从 memory/gateway/subagent 文件事实源重建 LocalStore")
+    local_rebuild.add_argument(
+        "--source",
+        action="append",
+        choices=["all", "memory", "gateway", "subagent", "fts"],
+        help="只重建指定来源，可多次传入；默认 all",
+    )
+    local_rebuild.add_argument("--reset", action="store_true", help="先清空 LocalStore records/events/FTS 再重建")
+    local_rebuild.set_defaults(func=cmd_local_rebuild)
+
     chat = sub.add_parser("chat", help="启动交互循环，反复与智能体交流")
     chat.add_argument("--inject", action="append", help="启动时注入 prompt，可多次传入")
     chat.add_argument("--prompt-file", action="append", help="启动时加载额外 prompt 文件，可多次传入")
@@ -3444,6 +4240,22 @@ def build_parser() -> argparse.ArgumentParser:
     gateway_result.add_argument("--show-prompt", action="store_true", help="打印响应中保存的最终 prompt")
     gateway_result.add_argument("--json", action="store_true", help="输出完整响应 JSON，方便脚本或聊天适配器读取")
     gateway_result.set_defaults(func=cmd_gateway_result)
+
+    adapter = sub.add_parser("adapter", help="外部聊天工具 / TUI 适配器")
+    adapter_sub = adapter.add_subparsers(dest="adapter_command")
+    adapter.set_defaults(func=cmd_adapter)
+
+    adapter_file = adapter_sub.add_parser("file", help="文件协议适配器：inbox JSON -> gateway -> outbox JSON")
+    adapter_file.add_argument("--root", help="适配器根目录；默认使用配置 adapter_workspace")
+    adapter_file.add_argument("--inbox", help="覆盖 inbox 目录")
+    adapter_file.add_argument("--outbox", help="覆盖 outbox 目录")
+    adapter_file.add_argument("--watch", action="store_true", help="持续轮询 inbox")
+    adapter_file.add_argument("--once", action="store_true", help="只处理当前已有消息后退出")
+    adapter_file.add_argument("--poll-interval", type=float, default=1.0, help="watch 模式轮询间隔秒数")
+    adapter_file.add_argument("--limit", type=int, default=20, help="每轮最多处理多少条消息，0 表示不限制")
+    adapter_file.add_argument("--timeout", type=float, help="等待 gateway 响应的秒数，默认使用配置 gateway_request_timeout")
+    adapter_file.add_argument("--no-start-gateway", action="store_true", help="不自动启动 gateway；未运行时直接失败")
+    adapter_file.set_defaults(func=cmd_adapter_file)
 
     subagent_context = sub.add_parser("subagent-context", help="生成单个 subagent 执行上下文包")
     subagent_context.add_argument("run_id", help="子代理运行 ID")

@@ -53,6 +53,10 @@ class AgentConfig:
     gateway_stop_timeout: int = 20
     gateway_request_timeout: int = 300
     gateway_request_poll_interval: int = 1
+    gateway_request_workers: int = 1
+    gateway_processing_timeout_seconds: int = 900
+    gateway_request_max_attempts: int = 2
+    adapter_workspace: str = "data/adapters/file"
     daemon_planner: bool = True
     daemon_apply: bool = False
     daemon_execute_runners: bool = False

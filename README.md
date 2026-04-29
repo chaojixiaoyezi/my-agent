@@ -21,6 +21,9 @@ my-agent status
 my-agent timeline --limit 20
 my-agent gateway ask "你好，检查一下当前任务"
 my-agent scenario-test
+my-agent local-doctor
+my-agent local-rebuild
+my-agent adapter file --watch
 ```
 
 完整参数手册见 [CLI_REFERENCE.md](CLI_REFERENCE.md)。
@@ -40,7 +43,7 @@ my-agent gateway stop
 
 `my-agent` 不带子命令时会自动启动后台 gateway，然后进入 `chat --gateway`。退出 chat 不会关闭 gateway；gateway 会继续在后台值班。
 
-`gateway` 第一版会启动后台 Python 进程，在内部复用现有 daemon/watch 调度，并写 pid、state、heartbeat、stop request、日志和本地请求队列。`gateway ask` 会把聊天/任务投递给后台 gateway，由常驻进程调用模型并把结果写回 `data/gateway/responses`。
+`gateway` 第一版会启动后台 Python 进程，在内部复用现有 daemon/watch 调度，并写 pid、state、heartbeat、stop request、日志和本地请求队列。`gateway ask` 会把聊天/任务投递给后台 gateway，由常驻进程调用模型并把结果写回 `data/gateway/responses`。请求队列现在有 processing lease、超时重排、failed 归档和保守 request worker pool。
 
 大白话说：`gateway start` 是“把主代理放到后台值班”，`gateway ask` 是“给后台主代理发一句话”，`gateway result` 是“拿之前异步任务的结果”。以后接入聊天工具后，普通用户不需要手动敲 `ask/result`，聊天工具会自动投递请求并把结果回给你；这两个命令会保留为开发和排错入口。
 
@@ -148,6 +151,8 @@ python3 -m agent_py_agent subagents
 ```bash
 python3 -m agent_py_agent local-store-status
 python3 -m agent_py_agent local-index-memory
+python3 -m agent_py_agent local-doctor
+python3 -m agent_py_agent local-rebuild
 python3 -m agent_py_agent local-search "表格" --source-type memory
 python3 -m agent_py_agent local-search "gateway 日志" --source-type gateway_request
 python3 -m agent_py_agent local-search "子代理目标" --source-type subagent_run
@@ -157,6 +162,15 @@ python3 -m agent_py_agent timeline --source-type gateway_request
 
 当前 memory、gateway ask、gateway 生命周期事件、subagent 工单、runner 结果、验收、patch 审核、dispatch、watch、planner、能力路由和通道探测都会写入本地事实源。也就是说，原来的文件日志还在，同时多了一层可搜索账本。
 `status` 是总览入口，适合看“现在系统怎么样”；`timeline` 是事件入口，适合看“刚刚发生了什么”。
+`local-doctor` 用来查 SQLite/JSONL/文件队列/工单目录是否一致；`local-rebuild` 用来从磁盘事实源重建 LocalStore。
+
+外部聊天工具或 TUI 第一版可以走文件适配器：
+
+```bash
+python3 -m agent_py_agent adapter file --watch
+```
+
+把消息 JSON 写进 `adapter_workspace/inbox`，adapter 会投递给 gateway，并把响应写到 `outbox`。
 
 生成单个子代理执行上下文：
 

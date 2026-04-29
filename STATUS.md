@@ -6,6 +6,13 @@
 
 总体状态：核心骨架已可运行，真实 API 全流程已通过；当前重点已经从“能跑”进入“可常驻、可观察、可恢复、可审计”。
 
+最新推进：
+- 已新增 `local-doctor` / `local-rebuild`，可从 memory、gateway、subagent 文件事实源诊断并重建 LocalStore。
+- `status` 已输出 suggested actions，能提示 gateway、LocalStore 和 subagent 的下一步处理动作。
+- gateway 请求队列新增 `failed` 归档、processing lease、超时重排/失败归档和保守 request worker pool。
+- runner 并发已有第一版配置入口：默认 1；显式设置 `runner_concurrency` 为数字后才并行执行多个 run。
+- 已新增 `adapter file` 文件协议，外部聊天工具/TUI 可通过 inbox/outbox 复用 gateway。
+
 最近已推送提交：
 - `22efdce feat: add status and timeline views`
 - `519492b feat: index gateway and subagent logs`
@@ -229,11 +236,14 @@ python agent_py_agent/tests/run_tests.py
 my-agent
 my-agent status
 my-agent timeline --limit 20
+my-agent local-doctor
+my-agent local-rebuild
 my-agent local-search "关键词"
 my-agent local-search "任务目标" --source-type subagent_run
 my-agent local-search "gateway" --source-type gateway_request
 my-agent gateway status
 my-agent gateway ask "继续推进当前任务"
+my-agent adapter file --watch
 my-agent subagents
 my-agent subagents-dispatch --watch --planner --apply --execute-runners
 my-agent scenario-test

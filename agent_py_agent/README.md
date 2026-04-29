@@ -54,6 +54,8 @@ memory-search               搜索记忆
 local-store-status          查看 SQLite/FTS5 本地事实源状态
 local-search                搜索本地事实源
 local-index-memory          把旧 JSONL 记忆补建到本地事实源
+local-doctor                诊断 LocalStore / gateway / subagent 文件账本一致性
+local-rebuild               从文件事实源重建 LocalStore
 spawn-subagents             创建子代理工单
 subagents                   查看子代理红绿灯看板
 subagent                    查看单个子代理详情
@@ -67,6 +69,7 @@ subagents-patches           审核 runner 输出里的 patch 记录
 subagents-dispatch          执行一轮父代理调度
 scenario-test               隔离跑 gateway/派工/runner/验收全流程
 gateway                     管理后台 gateway，并向 gateway 投递请求
+adapter                     外部聊天工具 / TUI 文件适配器
 subagent-context            生成单个子代理执行上下文
 subagent-run                按执行上下文运行子代理 runner
 ```
@@ -178,6 +181,8 @@ agent_py_agent/data/local_store/
 ```bash
 python3 -m agent_py_agent local-store-status
 python3 -m agent_py_agent local-index-memory
+python3 -m agent_py_agent local-doctor
+python3 -m agent_py_agent local-rebuild
 python3 -m agent_py_agent local-search "表格" --source-type memory
 python3 -m agent_py_agent local-search "gateway 日志" --source-type gateway_request
 python3 -m agent_py_agent local-search "子代理目标" --source-type subagent_run
@@ -187,6 +192,7 @@ python3 -m agent_py_agent timeline --limit 20
 
 gateway request、gateway 生命周期事件、subagent 工单、runner 结果、验收、patch 审核、dispatch、watch、planner、能力路由和通道探测也会写入本地事实源。
 `status` 看当前总览；`timeline` 看最近事件。
+`local-doctor` 查本地账本是否一致；`local-rebuild` 从 memory、gateway、subagent 文件事实源补建 LocalStore。
 
 这个目录默认被 Git 忽略。
 
@@ -334,13 +340,22 @@ python3 -m agent_py_agent gateway stop
 
 ```text
 requests/pending      新请求，等待 gateway 处理
-requests/processing   正在处理；gateway 崩溃后会退回 pending
+requests/processing   正在处理；gateway 崩溃或 processing 超时后会退回 pending
 requests/done         已处理请求的原始记录
+requests/failed       超过重试次数或处理失败的请求归档
 responses             每个 request_id 对应的模型响应
 gateway_requests.jsonl 审计日志
 ```
 
 `gateway ask/result` 不是最终用户必须记住的日常入口。以后接聊天工具时，聊天工具会把用户消息写入同一条队列，再把 response 自动发回给用户；CLI 命令主要用于开发、调试和排查外部适配器问题。
+
+第一版文件适配器：
+
+```bash
+python3 -m agent_py_agent adapter file --watch
+```
+
+外部工具把 JSON 消息写到 `adapter_workspace/inbox`，adapter 投递给 gateway，再把响应写到 `outbox`。
 
 `chat --gateway` 是这条路的第一步：它已经不在前台 chat 里直接调用模型，而是把普通消息交给后台 gateway。后续 TUI、微信、飞书、Telegram 等适配器会继续复用同一条消息通道。
 
