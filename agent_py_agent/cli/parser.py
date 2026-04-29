@@ -169,6 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     memory_resume.add_argument("--tool-name", help="按工具名精确过滤")
     memory_resume.add_argument("--source", help="按来源精确过滤")
     memory_resume.add_argument("--limit", type=int, default=20, help="最多显示多少条线索")
+    memory_resume.add_argument("--context-only", action="store_true", help="只输出可交接/注入的恢复上下文块")
     memory_resume.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     memory_resume.set_defaults(func=cmd_memory_resume)
 

@@ -9,6 +9,7 @@
 最新推进：
 - 已完成完整从头到尾真实链路测试：CLI、memory、LocalStore、gateway、scenario、真实 API runner、父代理验收全部通过。
 - 已新增轻量 recovery snapshot 自动写入：普通 run/chat/gateway 默认随保存写 hook，subagent-run 在 runner 结果写回后写 run_id 恢复锚点。
+- `memory-resume` 已支持 `--context-only`，可以只输出稳定恢复块，方便人工 handoff、真实环境测试和后续自动注入。
 - 修复默认 gateway 入口缺少 chat handler 的回归；`my-agent` 默认入口可自动进入 gateway chat。
 - scenario-test 已按当前写入边界核对子代理 `task_dir/scenario_outputs/` 产物，避免旧路径误判。
 - 完整冒烟脚本最后统一改用 pytest 正常运行，避免跳过 pytest fixture 机制。
@@ -175,7 +176,7 @@ my-agent timeline --event-type gateway_request_completed --details
 - `py_compile`
 - `CLI_REFERENCE` 命令/参数覆盖测试
 - LocalStore 定向测试
-- pytest 全量测试：`125 passed`
+- pytest 全量测试：`126 passed`
 - 标准完整冒烟：`ALL_TESTS_PASS`
 - 真实 API gateway ask
 - 真实 API scenario-test happy path
@@ -230,7 +231,8 @@ scripts/workstream_status.sh
 
 2. memory resume 恢复线索
    - 用户说“继续”或给出关键词时，能找出相关归档、LocalStore 记录和任务目录引用。
-   - 输出恢复摘要、事实源路径和下一步建议，但不把 archive 当最终事实源。
+   - 输出恢复摘要、事实源路径和下一步建议，也可以用 `--context-only` 单独输出恢复上下文块。
+   - 不把 archive 当最终事实源，正式继续前仍先读任务目录。
 
 3. 压缩前 hook 标准化
    - 把 run/chat/gateway/subagent-run 的结束点统一写 recovery snapshot。

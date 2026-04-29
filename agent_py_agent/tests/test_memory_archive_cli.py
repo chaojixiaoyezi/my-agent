@@ -184,3 +184,45 @@ def test_memory_resume_links_archive_clue_to_task_fact_source(tmp_path, capsys):
     assert payload["brief"]["likely_task_statuses"][0]["status"] == "PLANNING"
     assert "Recovery Brief" in payload["brief"]["context_block"]
     assert "archive/local matches are recovery clues" in payload["brief"]["context_block"]
+
+
+def test_memory_resume_context_only_prints_recovery_block(tmp_path, capsys):
+    config_path = _write_config(tmp_path)
+    root = _workspace(config_path)
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            subagent_workspace="subagents",
+            local_store_path="local_store/local.db",
+            local_store_files_dir="local_store/files",
+            local_store_events_path="local_store/events.jsonl",
+        ),
+        root,
+    )
+    task = agent.subagents.create_run(
+        goal="继续 README 场景测试任务",
+        thought="验证 context-only 能输出稳定恢复块。",
+        plan=["读取 STATUS", "继续执行"],
+    )
+    _write_archive_fixture(root, run_id=task.id)
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--config",
+            str(config_path),
+            "memory-resume",
+            "README",
+            "--run-id",
+            task.id,
+            "--context-only",
+        ]
+    )
+    code = args.func(args)
+    output = capsys.readouterr().out
+
+    assert code == 0
+    assert output.startswith("# Recovery Brief")
+    assert "latest_user_intent: 继续 README 场景测试任务" in output
+    assert "must_read" in output
+    assert "MY-AGENT MEMORY RESUME" not in output
