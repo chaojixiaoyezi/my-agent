@@ -36,6 +36,8 @@ class ToolCallingBackend(BaseBackend):
                 text='[TOOL_CALL]\n{"tool": "read_file", "path": "notes.txt"}\n[/TOOL_CALL]',
                 backend=self.name,
             )
+        assert prompt.index("# User Task") < prompt.index("# Tool Transcript")
+        assert "# Continue From Tool Transcript" in prompt
         assert "hello tool world" in prompt
         return ModelResponse(text="工具执行完成", backend=self.name)
 

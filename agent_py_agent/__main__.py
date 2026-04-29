@@ -23,7 +23,7 @@ from .agent.capability_config import load_capability_config
 from .agent.config import load_config
 from .agent.core import SimpleAgent
 from .agent.skills import SkillRegistry
-from .agent.subagent import filter_board_items
+from .agent.subagent import VerificationEvidence, filter_board_items
 
 try:
     from prompt_toolkit import PromptSession
@@ -1419,6 +1419,13 @@ class ScenarioPaths:
 def cmd_scenario_test(args) -> int:
     """跑一轮可观察、隔离的真实任务全流程。"""
 
+    if args.case == "all":
+        return run_scenario_suite(args)
+    if args.case == "verification":
+        return run_scenario_verification_case(args)
+    if args.case == "gateway-restart":
+        return run_scenario_gateway_restart_case(args)
+
     if args.count <= 0:
         print("--count 必须大于 0。", file=sys.stderr)
         return 2
@@ -1526,6 +1533,207 @@ def cmd_scenario_test(args) -> int:
             "gateway": gateway_payload,
             "dispatch": dispatch_summaries,
             "report_files": [str(item) for item in report_files],
+        },
+    )
+    print(f"\nsummary_json={paths.summary_json}")
+    print(f"summary_md={paths.summary_md}")
+    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
+    return 0 if final_ok else 2
+
+
+def run_scenario_suite(args) -> int:
+    """连续运行一组隔离场景。"""
+
+    cases = ["verification", "gateway-restart", "happy"]
+    results: list[dict[str, object]] = []
+    for case in cases:
+        print(f"\n######## SCENARIO CASE: {case} ########")
+        case_args = argparse.Namespace(**vars(args))
+        case_args.case = case
+        code = cmd_scenario_test(case_args)
+        results.append({"case": case, "ok": code == 0, "exit_code": code})
+        if code != 0:
+            print("SCENARIO_SUITE_FAIL")
+            print(json.dumps(results, ensure_ascii=False, indent=2))
+            return code
+    print("SCENARIO_SUITE_PASS")
+    print(json.dumps(results, ensure_ascii=False, indent=2))
+    return 0
+
+
+def run_scenario_verification_case(args) -> int:
+    """验证父代理不会接受伪造 artifact / 自称完成。"""
+
+    paths = create_scenario_workspace(args)
+    print("MY-AGENT SCENARIO TEST")
+    print("case=verification")
+    print(f"run_root={paths.run_root}")
+    print(f"fixture_root={paths.fixture_root}")
+    print(f"config={paths.config}")
+
+    agent = load_scenario_agent(paths.config)
+    print_scenario_step(1, "构造伪造完成的子代理记录")
+    task = agent.subagents.create_run(
+        goal="极端场景：runner 声称写了 artifact，但文件实际不存在",
+        thought="验证父代理验收不能只相信模型自称。",
+        plan=["伪造 output.json", "触发验收", "确认验收拒绝"],
+        allowed_tools=["read_file", "write_file"],
+        acceptance_checks=["必须有 read_file 证据", "必须有 write_file 证据", "artifact 文件必须真实存在"],
+    )
+    task.status = "AWAITING_ACCEPTANCE"
+    task.verification_status = "NEEDS_ACCEPTANCE"
+    task.channel_status = "OK"
+    task.used_tools = ["read_file", "write_file"]
+    task.evidence.append(
+        VerificationEvidence(
+            kind="file_read",
+            summary="伪造证据：声称 read_file 成功",
+            path="README.md",
+            ok=True,
+            created_at=time.time(),
+        )
+    )
+    task.evidence.append(
+        VerificationEvidence(
+            kind="file_write",
+            summary="伪造证据：声称 write_file 写入 scenario_outputs/forged.md",
+            path="scenario_outputs/forged.md",
+            ok=True,
+            created_at=time.time(),
+        )
+    )
+    agent.subagents.save(task)
+    Path(task.output_json).write_text(
+        json.dumps(
+            {
+                "run_id": task.id,
+                "status": "AWAITING_ACCEPTANCE",
+                "artifacts": [
+                    {
+                        "path": "scenario_outputs/forged.md",
+                        "kind": "report",
+                        "summary": "这个文件被故意留空不存在，用来测试验收防作弊。",
+                    }
+                ],
+                "tests": [{"name": "fake-test", "command": "echo ok", "ok": True}],
+                "patches": [],
+                "blockers": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    Path(task.runner_result_json).write_text(
+        json.dumps(
+            {
+                "run_id": task.id,
+                "structured_output_found": True,
+                "structured_output_ok": True,
+                "structured_parse_error": "",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    print_scenario_step(2, "执行父代理验收")
+    report = agent.subagents.write_acceptance_review_report(
+        run_ids=[task.id],
+        apply=True,
+        reviewer="scenario-verification",
+        note="forged artifact must be rejected",
+    )
+    loaded = agent.subagents.load(task.id)
+    for record in report.records:
+        print(
+            f"- decision={record.decision} ok={record.ok} applied={record.applied} "
+            f"{record.before_status}/{record.before_verification_status}->"
+            f"{record.after_status}/{record.after_verification_status}"
+        )
+        for finding in record.findings:
+            if not finding.ok:
+                print(f"  [finding:{finding.severity}] {finding.name}: {finding.message}")
+
+    final_ok = (
+        report.records
+        and report.records[0].decision == "REJECT"
+        and not report.records[0].ok
+        and loaded.status == "BLOCKED"
+        and loaded.verification_status == "FAILED"
+        and any(
+            item.name == "artifact_paths_exist" and not item.ok
+            for item in report.records[0].findings
+        )
+    )
+    write_scenario_summary(
+        paths,
+        ok=final_ok,
+        reason="verification guard passed" if final_ok else "verification guard failed",
+        extra={
+            "case": "verification",
+            "run_id": task.id,
+            "acceptance_report": str(agent.subagents.workspace / "subagent_acceptance_report.json"),
+            "acceptance_md": str(agent.subagents.workspace / "SUBAGENT_ACCEPTANCE.md"),
+        },
+    )
+    print(f"\nsummary_json={paths.summary_json}")
+    print(f"summary_md={paths.summary_md}")
+    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
+    return 0 if final_ok else 2
+
+
+def run_scenario_gateway_restart_case(args) -> int:
+    """验证 gateway 启动时会恢复遗留 processing 请求。"""
+
+    paths = create_scenario_workspace(args)
+    print("MY-AGENT SCENARIO TEST")
+    print("case=gateway-restart")
+    print(f"run_root={paths.run_root}")
+    print(f"fixture_root={paths.fixture_root}")
+    print(f"config={paths.config}")
+
+    agent = load_scenario_agent(paths.config)
+    gpaths = gateway_paths(agent)
+    for path in (gpaths.inbox, gpaths.processing, gpaths.done, gpaths.responses):
+        path.mkdir(parents=True, exist_ok=True)
+
+    request_id = new_gateway_request_id()
+    processing_path = gpaths.processing / f"{request_id}.json"
+    payload = {
+        "id": request_id,
+        "kind": "ask",
+        "prompt": "这个请求模拟 gateway 崩溃时卡在 processing。",
+        "inject": [],
+        "prompt_files": [],
+        "save": False,
+        "include_prompt": False,
+        "created_at": time.time(),
+        "client_pid": os.getpid(),
+    }
+    write_json_file(processing_path, payload)
+
+    print_scenario_step(1, "模拟旧 gateway 崩溃遗留 processing 请求")
+    print(f"processing_before={processing_path.exists()} path={processing_path}")
+    requeued = requeue_gateway_processing_requests(gpaths)
+    pending_path = gpaths.inbox / processing_path.name
+    print_scenario_step(2, "执行 gateway 启动恢复步骤")
+    print(f"requeued={requeued}")
+    print(f"processing_after={processing_path.exists()}")
+    print(f"pending_after={pending_path.exists()} path={pending_path}")
+
+    final_ok = requeued == 1 and not processing_path.exists() and pending_path.exists()
+    write_scenario_summary(
+        paths,
+        ok=final_ok,
+        reason="gateway restart requeue passed" if final_ok else "gateway restart requeue failed",
+        extra={
+            "case": "gateway-restart",
+            "request_id": request_id,
+            "pending_path": str(pending_path),
+            "processing_path": str(processing_path),
+            "requeued": requeued,
         },
     )
     print(f"\nsummary_json={paths.summary_json}")
@@ -2479,6 +2687,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--capability-config",
         default=str(DEFAULT_CAPABILITY_CONFIG),
         help="能力路由配置文件路径，默认使用 config/capability_config.yaml",
+    )
+    scenario.add_argument(
+        "--case",
+        choices=["happy", "verification", "gateway-restart", "all"],
+        default="happy",
+        help="场景类型：happy 跑真实全流程；verification 测验收防作弊；gateway-restart 测重启恢复；all 连续运行",
     )
     scenario.add_argument("--workspace", help="保存场景测试结果的父目录；不传则使用系统临时目录")
     scenario.add_argument("--count", type=int, default=2, help="本场景创建多少个子代理")

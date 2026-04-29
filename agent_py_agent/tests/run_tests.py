@@ -197,6 +197,8 @@ finally:
     run(agent_cmd("gateway", "stop", "--timeout", "10", "--kill"))
 run(agent_cmd("subagent-context", "--help"))
 run(agent_cmd("subagent-run", "--help"))
+run(agent_cmd("scenario-test", "--case", "verification"))
+run(agent_cmd("scenario-test", "--case", "gateway-restart"))
 run(agent_cmd("scenario-test", "--count", "1", "--max-runners", "1", "--max-cycles", "2", "--timeout", "180"))
 
 e2e_run_id = create_real_api_subagent_run()

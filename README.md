@@ -57,6 +57,16 @@ my-agent scenario-test
 
 它会新建临时 fixture，通过 gateway ask 让主代理派工，再执行真实 runner 和父代理验收，并把 `memory_path`、`subagent_workspace`、`gateway_workspace` 和文件工具都关进 `workspace_root` 指向的临时目录，避免污染当前开发仓库。
 
+坏天气场景也走同一个入口：
+
+```bash
+my-agent scenario-test --case verification
+my-agent scenario-test --case gateway-restart
+my-agent scenario-test --case all --count 1
+```
+
+`verification` 会确认伪造 artifact 不会通过验收；`gateway-restart` 会确认旧 gateway 崩溃遗留的 processing 请求能退回 pending。
+
 `daemon` 仍保留为前台调试入口。开启 planner 后，如果 gate 发现仍有 active/pending/stalled/needs-intervention 事项，会触发完整父代理 LLM turn；如果模型只回 `HEARTBEAT_OK`，会被记录为失败。
 
 配置分两层：`task_max_subagents=0` / `task_max_grandchildren=0` 表示用户层任务规模不设硬上限；`runner_concurrency: "auto"` 等调度项留给未来 gateway 自适应。当前 `daemon_*` 是前台调度器的高级参数：`daemon_max_runners: "auto"` 会先映射成保守值 1，`daemon_max_cycles=0` 表示持续运行，`daemon_limit=0` 表示不限制记录条数，`daemon_max_cards=0` 表示不限制能力卡数量，`daemon_interval=0` 通常只用于测试或单轮验证。

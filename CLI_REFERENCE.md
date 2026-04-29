@@ -474,6 +474,9 @@ daemon_runner_instruction: ""
 ```powershell
 my-agent scenario-test
 my-agent scenario-test --workspace .\tmp-scenarios --count 2 --max-runners 2
+my-agent scenario-test --case verification
+my-agent scenario-test --case gateway-restart
+my-agent scenario-test --case all --count 1
 my-agent scenario-test --direct
 my-agent scenario-test --dry-run
 ```
@@ -486,11 +489,21 @@ my-agent scenario-test --dry-run
 -> 父代理验收 -> 输出看板和 SCENARIO_SUMMARY
 ```
 
-它每次都会在父目录下新建一个 `scenario-*` 子目录，不会复用当前开发仓库的数据目录。默认会调用真实 API：主代理派工走一次模型，runner 也会走真实模型。只想看调度计划时用 `--dry-run`。
+它每次都会在父目录下新建一个 `scenario-*` 子目录，不会复用当前开发仓库的数据目录。默认 `--case happy` 会调用真实 API：主代理派工走一次模型，runner 也会走真实模型。只想看调度计划时用 `--dry-run`。
+
+`--case` 可以切换坏天气场景：
+
+| case | 说明 | 是否调用真实 API |
+| --- | --- | --- |
+| `happy` | gateway ask -> 主代理派工 -> runner 写文件 -> 父代理验收 | 是 |
+| `verification` | 构造“模型声称写了 artifact 但文件不存在”的伪完成记录，确认验收必须拒绝 | 否 |
+| `gateway-restart` | 模拟旧 gateway 崩溃时遗留的 `processing` 请求，确认重启恢复会退回 `pending` | 否 |
+| `all` | 依次跑 `verification`、`gateway-restart`、`happy` | `happy` 会调用 |
 
 | 参数 | 说明 |
 | --- | --- |
 | `--capability-config <path>` | 能力路由配置文件路径，默认使用 `config/capability_config.yaml`。 |
+| `--case <name>` | 场景类型，默认 `happy`。 |
 | `--workspace <path>` | 保存场景测试结果的父目录；不传则使用系统临时目录。 |
 | `--count <n>` | 本场景创建多少个子代理，默认 `2`。 |
 | `--max-runners <n>` | 每轮最多推进多少个 runner，默认 `2`。 |

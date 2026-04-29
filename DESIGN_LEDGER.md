@@ -1066,6 +1066,7 @@ suggested_tool: 是否建议开发成 tool
   - 工具解析器兼容模型把 `[TOOL_CALL]` 误写成 `[SUBAGENT_CALL]` 的常见情况。
   - runner 回写会记录系统真实执行过的工具；验收不再相信模型自称的 `used_tools`。
   - 验收会按 `acceptance_checks` 核对 `read_file/write_file` 证据，并检查本地 artifact 路径是否真实存在。
+  - 有工具执行记录时，prompt 会把 `Tool Transcript` 放在用户任务之后，并追加继续指令，避免模型每轮被末尾任务说明拉回起点、重复调用同一个工具。
 
 安全边界：
 - 默认不复用开发仓库的 `data/`。
@@ -1076,3 +1077,26 @@ suggested_tool: 是否建议开发成 tool
 后续方向：
 - 增加更极端的 fixture：runner 失败、结构化输出损坏、能力请求、stalled、gateway 重启恢复。
 - 把场景测试报告做成更适合前端/TUI 展示的事件时间线。
+
+## 2026-04-29 / 坏天气场景测试第一版
+
+状态：已落地第一版
+
+背景：
+- happy path 已经能证明主链路能跑通，但真正要长期可靠，需要把失败和恢复场景也做成可重复测试。
+- 这些场景必须继续隔离运行，不能污染开发仓库。
+
+已落地：
+- `my-agent scenario-test --case verification`
+  - 构造一个伪造完成的子代理：声称 read/write 成功，也声称有 artifact。
+  - 实际不写 artifact 文件。
+  - 父代理验收必须拒绝，并把任务标成 `BLOCKED / FAILED`。
+- `my-agent scenario-test --case gateway-restart`
+  - 模拟旧 gateway 崩溃时请求卡在 `requests/processing`。
+  - 执行 gateway 启动恢复步骤，把请求退回 `requests/pending`。
+- `my-agent scenario-test --case all`
+  - 依次运行 `verification`、`gateway-restart`、`happy`。
+
+后续方向：
+- 增加 runner 真实失败重试、结构化输出损坏修复、stalled 接管、能力缺口上抛再 rerun 的场景。
+- 给 `scenario_summary` 增加事件时间线，方便 TUI/网页观察。
