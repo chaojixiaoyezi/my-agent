@@ -6,6 +6,7 @@
 - [ ] `python3 -m agent_py_agent --help`
 - [ ] `git diff --check`
 - [ ] 收口前运行 `python3 agent_py_agent/tests/run_tests.py`，并确认它使用真实 API
+- [ ] 确认完整冒烟脚本自动发现并运行了所有 `test_*.py` / `test_` 函数
 
 ## 修改普通 run / chat 时
 

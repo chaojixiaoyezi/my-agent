@@ -733,7 +733,9 @@ suggested_tool: 是否建议开发成 tool
 已落地：
 - 更新 `TESTS.md`，把真实 API 作为标准完整冒烟要求。
 - 更新 `TEST_CHECKLIST.md`，要求收口前运行完整冒烟并确认使用真实 API。
+- `agent_py_agent/tests/run_tests.py` 改为自动发现并运行所有 `test_*.py` / `test_` 函数，避免手写清单漏掉新增测试。
 
 后续注意：
 - 如果真实 API 不稳定，要记录失败类型，而不是直接降级成 echo 后端通过。
 - 新增测试命令时，区分“局部定位测试”和“真实 API 收口测试”。
+- 新增 `test_*.py` 或 `test_` 函数后，不需要手动加入完整冒烟清单，但必须确认完整冒烟脚本发现了它。
