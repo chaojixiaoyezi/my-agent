@@ -38,9 +38,11 @@ class AgentRunResult:
     backend: str
     used_memories: int
     tool_rounds: int = 0
+    executed_tools: list[str] | None = None
 
 
 PARENT_PLANNER_READ_TOOLS = ["list_files", "read_file", "search_text"]
+ONE_SHOT_TOOL_NAMES = {"create_subagents", "subagent_board", "dispatch_subagents"}
 
 
 class SimpleAgent:
@@ -102,6 +104,8 @@ class SimpleAgent:
         tool_rounds = 0
         final_prompt = ""
         final_response = None
+        one_shot_tool_calls: set[str] = set()
+        executed_tools: list[str] = []
 
         while True:
             final_prompt = self.prompts.build(
@@ -125,12 +129,36 @@ class SimpleAgent:
 
             if tool_rounds >= self.config.max_tool_rounds:
                 tool_context.append("[tool-system]\n已达到最大工具轮数限制，停止继续调用工具。")
+                final_prompt = self.prompts.build(
+                    user_prompt,
+                    memories,
+                    inject=inject,
+                    prompt_files=prompt_files,
+                    tool_catalog_section=tool_catalog_section,
+                    tool_recommendations_section=tool_recommendations_section,
+                    tool_context=tool_context,
+                )
+                final_response = self.backend.generate(final_prompt)
                 break
 
             tool_rounds += 1
             tool_context.append(f"[assistant-tool-round-{tool_rounds}]\n{response.text}")
             for idx, payload in enumerate(calls, start=1):
-                result = self.tools.execute_call(payload, allowed_tools=allowed_tools)
+                one_shot_key = _one_shot_tool_call_key(payload)
+                if one_shot_key and one_shot_key in one_shot_tool_calls:
+                    tool_name = str(payload.get("tool") or "unknown")
+                    result = ToolExecutionResult(
+                        tool_name,
+                        False,
+                        "本轮已经执行过相同的一次性编排工具调用，系统已阻止重复执行。"
+                        "请基于前面的工具结果直接给最终回答，不要再次调用同一个工具。",
+                    )
+                else:
+                    result = self.tools.execute_call(payload, allowed_tools=allowed_tools)
+                    if one_shot_key and result.ok:
+                        one_shot_tool_calls.add(one_shot_key)
+                if result.ok and result.tool not in {"__parse_error__", "unknown"}:
+                    executed_tools.append(result.tool)
                 tool_context.append(
                     f"[tool-call-{tool_rounds}-{idx}]\n{payload}\n"
                     f"[tool-result-{tool_rounds}-{idx}]\n{result.render_for_prompt()}"
@@ -148,6 +176,7 @@ class SimpleAgent:
             backend=final_response.backend,
             used_memories=len(memories),
             tool_rounds=tool_rounds,
+            executed_tools=executed_tools,
         )
 
     def remember(self, content: str, *, kind: str = "note"):
@@ -271,6 +300,7 @@ class SimpleAgent:
             status="" if structured.found else "AWAITING_ACCEPTANCE",
             verification_status="" if structured.found else "NEEDS_ACCEPTANCE",
             structured_output=structured,
+            actual_tools=result.executed_tools or [],
         )
 
     def run_parent_planner(
@@ -769,6 +799,25 @@ class SimpleAgent:
 
         report = self.subagents.build_dispatch_watch_report(records, dry_run=not apply)
         return self.subagents.write_dispatch_watch_report(report)
+
+
+def _one_shot_tool_call_key(payload: dict[str, object]) -> str:
+    """给一次性编排工具生成本轮去重 key。
+
+    真实模型偶尔会在看见工具结果后重复同一个编排工具调用。
+    `create_subagents` 多执行一次会多落一个真实工单；`subagent_board`
+    重复读虽然不改状态，但会拖慢收口。这里仅在同一轮 `run()` 里拦住
+    完全相同的重复调用，保留“以后再次派工/查看”的自由。
+    """
+
+    tool_name = str(payload.get("tool") or "")
+    if tool_name not in ONE_SHOT_TOOL_NAMES:
+        return ""
+    try:
+        normalized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    except TypeError:
+        normalized = str(sorted((str(key), str(value)) for key, value in payload.items()))
+    return f"{tool_name}:{normalized}"
 
 
 READ_ONLY_SUBAGENT_TOOLS = ["list_files", "read_file", "search_text"]

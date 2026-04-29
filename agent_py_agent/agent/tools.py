@@ -900,16 +900,28 @@ class ToolRegistry:
         """从模型输出里提取工具调用块。"""
 
         calls: list[dict[str, Any]] = []
-        marker_start = "[TOOL_CALL]"
-        marker_end = "[/TOOL_CALL]"
+        start_markers = ["[TOOL_CALL]", "[SUBAGENT_CALL]"]
+        end_markers = ["[/TOOL_CALL]", "[/SUBAGENT_CALL]"]
         cursor = 0
         while True:
-            start = text.find(marker_start, cursor)
-            if start == -1:
+            starts = [
+                (pos, marker)
+                for marker in start_markers
+                for pos in [text.find(marker, cursor)]
+                if pos != -1
+            ]
+            if not starts:
                 break
-            end = text.find(marker_end, start)
-            if end == -1:
+            start, marker_start = min(starts, key=lambda item: item[0])
+            ends = [
+                (pos, marker)
+                for marker in end_markers
+                for pos in [text.find(marker, start + len(marker_start))]
+                if pos != -1
+            ]
+            if not ends:
                 break
+            end, marker_end = min(ends, key=lambda item: item[0])
             raw = text[start + len(marker_start) : end].strip().strip("`")
             try:
                 payload = json.loads(raw)

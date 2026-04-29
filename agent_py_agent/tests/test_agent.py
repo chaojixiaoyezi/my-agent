@@ -932,10 +932,10 @@ def test_subagent_runner_parses_structured_output():
         assert loaded.evidence[0].summary == "已确认需要接口健康检查"
         assert loaded.capability_requests[0].needed_capability == "http_request"
         assert loaded.capability_requests[0].status == "OPEN"
-        assert loaded.used_tools == ["read_file"]
+        assert loaded.used_tools == []
         assert "write_file" not in loaded.used_tools
         assert output["next_action"] == "route_capability_request"
-        assert output["structured_output"]["ignored_unauthorized_tools"] == ["write_file"]
+        assert sorted(output["structured_output"]["ignored_unauthorized_tools"]) == ["read_file", "write_file"]
         assert output["structured_output"]["capability_request_count"] == 1
         assert output["artifacts"][0]["path"] == "reports/api_notes.md"
         assert output["tests"][0]["name"] == "static-read"
@@ -1058,6 +1058,8 @@ def test_subagent_acceptance_dry_run_and_apply():
         task.status = "AWAITING_ACCEPTANCE"
         task.verification_status = "NEEDS_ACCEPTANCE"
         task.channel_status = "OK"
+        Path(task.reports_dir).mkdir(parents=True, exist_ok=True)
+        Path(task.reports_dir, "smoke.md").write_text("smoke ok\n", encoding="utf-8")
         task.evidence.append(
             VerificationEvidence(
                 kind="command",
@@ -1146,6 +1148,77 @@ def test_subagent_acceptance_rejects_missing_evidence_without_apply():
         assert not report.records[0].ok
         assert any(item.name == "evidence_present" and not item.ok for item in report.records[0].findings)
         assert loaded.status == "AWAITING_ACCEPTANCE"
+
+
+def test_subagent_acceptance_enforces_required_write_file_evidence():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        task = agent.subagents.create_run(
+            goal="缺少写文件证据",
+            thought="runner 只读了文件，但验收要求写文件。",
+            plan=["读取", "写入", "等待验收"],
+            acceptance_checks=["必须有 read_file 证据；必须有 write_file 证据"],
+        )
+        task.status = "AWAITING_ACCEPTANCE"
+        task.verification_status = "NEEDS_ACCEPTANCE"
+        task.channel_status = "OK"
+        task.used_tools = ["read_file"]
+        task.evidence.append(
+            VerificationEvidence(
+                kind="read_file",
+                summary="成功读取 README.md",
+                path="README.md",
+                ok=True,
+                created_at=time.time(),
+            )
+        )
+        agent.subagents.save(task)
+        Path(task.output_json).write_text(
+            json.dumps(
+                {
+                    "run_id": task.id,
+                    "status": "AWAITING_ACCEPTANCE",
+                    "tests": [],
+                    "artifacts": [],
+                    "patches": [],
+                    "blockers": [],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        Path(task.runner_result_json).write_text(
+            json.dumps(
+                {
+                    "run_id": task.id,
+                    "structured_output_found": True,
+                    "structured_output_ok": True,
+                    "structured_parse_error": "",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        report = agent.subagents.write_acceptance_review_report(
+            run_ids=[task.id],
+            apply=True,
+            reviewer="tester",
+        )
+        loaded = agent.subagents.load(task.id)
+
+        assert report.records[0].decision == "REJECT"
+        assert not report.records[0].ok
+        assert loaded.status == "BLOCKED"
+        assert loaded.verification_status == "FAILED"
+        assert any(
+            item.name == "acceptance_requires_write_file" and not item.ok
+            for item in report.records[0].findings
+        )
 
 
 def test_subagent_patch_review_approves_applied_patch_before_acceptance():

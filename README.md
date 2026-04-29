@@ -18,6 +18,7 @@ my-agent gateway start
 my-agent chat --gateway
 my-agent gateway status
 my-agent gateway ask "你好，检查一下当前任务"
+my-agent scenario-test
 ```
 
 完整参数手册见 [CLI_REFERENCE.md](CLI_REFERENCE.md)。
@@ -48,7 +49,13 @@ my-agent gateway stop
 - `subagent_board`：让主代理读取当前子代理看板和风险状态。
 - `dispatch_subagents`：让主代理触发一轮调度；默认 dry-run，只有明确 `apply=true` 且 `execute_runners=true` 才会调用真实 runner。
 
-做真实任务测试时，请继续用隔离配置，把 `memory_path`、`subagent_workspace` 和 `gateway_workspace` 指向临时目录，避免污染当前开发仓库。
+做真实任务测试时，可以直接跑：
+
+```bash
+my-agent scenario-test
+```
+
+它会新建临时 fixture，通过 gateway ask 让主代理派工，再执行真实 runner 和父代理验收，并把 `memory_path`、`subagent_workspace`、`gateway_workspace` 和文件工具都关进 `workspace_root` 指向的临时目录，避免污染当前开发仓库。
 
 `daemon` 仍保留为前台调试入口。开启 planner 后，如果 gate 发现仍有 active/pending/stalled/needs-intervention 事项，会触发完整父代理 LLM turn；如果模型只回 `HEARTBEAT_OK`，会被记录为失败。
 
@@ -67,6 +74,7 @@ my-agent gateway stop
 - subagent runner dry-run / execute。
 - runner 结构化输出回写。
 - gateway 后台进程与本地 inbox / response 消息入口。
+- `scenario-test` 隔离全流程观察入口。
 
 ## 当前状态
 

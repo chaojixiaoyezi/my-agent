@@ -26,6 +26,7 @@ class AgentConfig:
 
     agent_name: str = "SimplePythonAgent"
     system_prompt: str = "你是一个谨慎、可扩展、会记录记忆、会在必要时调用工具的 Python CLI 智能体。先理解任务，再给出结构化回答。"
+    workspace_root: str = ""
     model_backend: str = "echo"
     memory_path: str = "data/memory.jsonl"
     memory_top_k: int = 5

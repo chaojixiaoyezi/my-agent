@@ -26,6 +26,7 @@ my-agent chat
 my-agent gateway start
 my-agent chat --gateway
 my-agent gateway ask "你好"
+my-agent scenario-test
 ```
 
 完整参数手册见仓库根目录的 [CLI_REFERENCE.md](../CLI_REFERENCE.md)。
@@ -59,10 +60,25 @@ subagents-route-capabilities 路由 open capability request
 subagents-acceptance        验收等待验收的子代理
 subagents-patches           审核 runner 输出里的 patch 记录
 subagents-dispatch          执行一轮父代理调度
+scenario-test               隔离跑 gateway/派工/runner/验收全流程
 gateway                     管理后台 gateway，并向 gateway 投递请求
 subagent-context            生成单个子代理执行上下文
 subagent-run                按执行上下文运行子代理 runner
 ```
+
+## 隔离全流程观察
+
+```bash
+python3 -m agent_py_agent scenario-test
+```
+
+这条命令会创建临时 fixture 项目，把 `workspace_root` 指过去，然后走：
+
+```text
+gateway ask -> 主代理 create_subagents -> dispatch runner -> 父代理验收
+```
+
+所有 memory、subagent、gateway 和文件工具写入都在临时目录里，不会碰当前开发仓库。
 
 ## 普通运行
 

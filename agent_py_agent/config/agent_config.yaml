@@ -10,6 +10,13 @@ agent_name: "SimplePythonAgent"
 # 系统人格：每次请求都会放进最终 prompt 的 System 段
 system_prompt: "你是一个谨慎、可扩展、会记录记忆、会在必要时调用工具的 Python CLI 智能体。先理解任务，再给出结构化回答。"
 
+# 工作区根目录：
+# - 留空时使用项目默认根目录，保持普通开发体验。
+# - 场景测试、外部聊天工具或未来多项目模式可以把它指向某个独立目录。
+# - memory_path、subagent_workspace、gateway_workspace、prompt_files 和文件工具都会以这个目录为基础。
+# - 这就是“测试不能影响当前开发仓库”的关键开关。
+workspace_root: ""
+
 # 默认模型后端：
 # - echo: 本地离线调试
 # - openai_compatible: 走 /chat/completions

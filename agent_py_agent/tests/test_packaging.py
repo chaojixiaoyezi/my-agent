@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tomllib
+import tempfile
 from pathlib import Path
 
 
@@ -15,3 +16,16 @@ def test_pyproject_exposes_my_agent_console_script():
     from agent_py_agent.__main__ import main
 
     assert callable(main)
+
+
+def test_workspace_root_resolves_relative_to_config_file():
+    from agent_py_agent.__main__ import resolve_workspace_root
+    from agent_py_agent.agent.config import load_config
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        config_path = root / "agent_config.yaml"
+        config_path.write_text('workspace_root: "fixture"\n', encoding="utf-8")
+
+        config = load_config(config_path)
+        assert resolve_workspace_root(config, config_path) == (root / "fixture").resolve()

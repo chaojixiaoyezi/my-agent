@@ -2140,6 +2140,7 @@ class SubAgentManager:
         verification_status: str = "",
         failure_type: str = "",
         structured_output: SubAgentParsedOutput | None = None,
+        actual_tools: list[str] | None = None,
     ) -> SubAgentRunnerResult:
         """把 runner 调用结果写回标准工单。"""
 
@@ -2169,7 +2170,15 @@ class SubAgentManager:
             allowed_skills = set(task.allowed_skills)
             used_tools, ignored_tools = _split_allowed_items(parsed.used_tools, allowed_tools)
             used_skills, ignored_skills = _split_allowed_items(parsed.used_skills, allowed_skills)
-            task.used_tools = _merge_list(task.used_tools, used_tools)
+            if actual_tools is not None:
+                actual_allowed_tools = [item for item in actual_tools if item in allowed_tools]
+                task.used_tools = _merge_list(task.used_tools, actual_allowed_tools)
+                ignored_tools = _merge_list(
+                    ignored_tools,
+                    [item for item in used_tools if item not in actual_allowed_tools],
+                )
+            else:
+                task.used_tools = _merge_list(task.used_tools, used_tools)
             task.used_skills = _merge_list(task.used_skills, used_skills)
 
             for item in parsed.evidence:
@@ -2277,6 +2286,7 @@ class SubAgentManager:
                 "test_count": len(tests),
                 "patch_count": len(patches),
                 "lesson_count": len(lessons),
+                "actual_tools": actual_tools or [],
                 "ignored_unauthorized_tools": ignored_tools,
                 "ignored_unauthorized_skills": ignored_skills,
             },
@@ -3087,6 +3097,55 @@ class SubAgentManager:
             )
         )
 
+        acceptance_text = "；".join(task.acceptance_checks).lower()
+        if "read_file" in acceptance_text:
+            has_read = "read_file" in task.used_tools and any(
+                item.ok and (
+                    item.kind in {"read_file", "file_read", "file_content"}
+                    or "read_file" in item.command.lower()
+                    or "read_file" in item.summary.lower()
+                )
+                for item in task.evidence
+            )
+            findings.append(
+                AcceptanceReviewFinding(
+                    name="acceptance_requires_read_file",
+                    ok=has_read,
+                    severity="P0",
+                    message=(
+                        "acceptance_checks 要求 read_file，且已有对应工具和证据。"
+                        if has_read
+                        else "acceptance_checks 要求 read_file，但缺少对应工具执行或证据。"
+                    ),
+                    evidence_path=task.acceptance_file,
+                    created_at=created_at,
+                )
+            )
+        if "write_file" in acceptance_text:
+            has_write = "write_file" in task.used_tools and any(
+                item.ok and (
+                    item.kind in {"write_file", "file_write", "file_written"}
+                    or "write_file" in item.command.lower()
+                    or "write_file" in item.summary.lower()
+                    or "写入" in item.summary
+                )
+                for item in task.evidence
+            )
+            findings.append(
+                AcceptanceReviewFinding(
+                    name="acceptance_requires_write_file",
+                    ok=has_write,
+                    severity="P0",
+                    message=(
+                        "acceptance_checks 要求 write_file，且已有对应工具和证据。"
+                        if has_write
+                        else "acceptance_checks 要求 write_file，但缺少对应工具执行或证据。"
+                    ),
+                    evidence_path=task.acceptance_file,
+                    created_at=created_at,
+                )
+            )
+
         open_requests = [item for item in task.capability_requests if item.status == "OPEN"]
         open_gaps = [item for item in task.capability_gaps if item.status == "OPEN"]
         findings.append(
@@ -3143,6 +3202,28 @@ class SubAgentManager:
                     else "runner 未记录测试，允许仅凭证据进入人工验收。"
                     if not tests
                     else f"存在 {len(failed_tests)} 条失败测试。"
+                ),
+                evidence_path=task.output_json,
+                created_at=created_at,
+            )
+        )
+
+        artifacts = _dict_list(output.get("artifacts", []))
+        missing_artifacts = [
+            str(item.get("path", "") or "")
+            for item in artifacts
+            if str(item.get("path", "") or "").strip()
+            and not self._artifact_exists(task, str(item.get("path", "") or ""))
+        ]
+        findings.append(
+            AcceptanceReviewFinding(
+                name="artifact_paths_exist",
+                ok=not missing_artifacts,
+                severity="P1",
+                message=(
+                    f"runner 记录的 {len(artifacts)} 个 artifact 路径可核对。"
+                    if not missing_artifacts
+                    else f"存在 {len(missing_artifacts)} 个 artifact 路径不存在: {missing_artifacts[0]}"
                 ),
                 evidence_path=task.output_json,
                 created_at=created_at,
@@ -3208,6 +3289,31 @@ class SubAgentManager:
             )
         )
         return findings
+
+    def _artifact_exists(self, task: SubAgentTask, raw_path: str) -> bool:
+        """核对 runner 声称的本地 artifact 是否真实存在。
+
+        artifact path 可能是相对任务目录，也可能是相对工作区根目录。当前
+        `workspace_root` 场景下 subagent workspace 通常是
+        `<root>/.my_agent/subagents`，所以也会尝试回到 `<root>` 查找。
+        """
+
+        text = raw_path.strip()
+        if not text or "://" in text:
+            return True
+        path = Path(text)
+        candidates = [path] if path.is_absolute() else []
+        if not path.is_absolute():
+            candidates.extend(
+                [
+                    Path(task.task_dir) / path,
+                    self.workspace / path,
+                    self.workspace.parent / path,
+                ]
+            )
+            if self.workspace.name == "subagents" and self.workspace.parent.name == ".my_agent":
+                candidates.append(self.workspace.parent.parent / path)
+        return any(candidate.exists() for candidate in candidates)
 
     def _review_patch_task(
         self,

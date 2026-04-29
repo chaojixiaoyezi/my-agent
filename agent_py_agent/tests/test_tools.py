@@ -71,6 +71,53 @@ class SubagentDelegationBackend(BaseBackend):
         return ModelResponse(text="已创建子代理任务并等待调度。", backend=self.name)
 
 
+class DuplicateSubagentDelegationBackend(BaseBackend):
+    """假的模型后端：连续重复同一个派工工具调用。"""
+
+    name = "fake_duplicate_subagent_delegation_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str) -> ModelResponse:
+        self.calls += 1
+        if self.calls <= 2:
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    "{"
+                    '"tool":"create_subagents",'
+                    '"goal":"重复派工防护测试",'
+                    '"count":1,'
+                    '"tool_preset":"read_only"'
+                    "}\n"
+                    "[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        assert "阻止重复执行" in prompt
+        return ModelResponse(text="重复派工已被拦截并收口。", backend=self.name)
+
+
+class MaxToolRoundBackend(BaseBackend):
+    """假的模型后端：验证工具轮数到顶时会再生成最终回答。"""
+
+    name = "fake_max_tool_round_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        assert "已达到最大工具轮数限制" in prompt
+        return ModelResponse(text="工具轮数到顶后已正常收口。", backend=self.name)
+
+
 class DemoHandler(BaseHTTPRequestHandler):
     """本地测试 HTTP 服务。"""
 
@@ -157,6 +204,45 @@ def test_agent_can_delegate_to_subagents_from_tool_call():
         assert "必须配合 apply=true" in blocked_dispatch.output
 
 
+def test_repeated_orchestration_tool_call_is_not_executed_twice():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            subagent_workspace="subs",
+            max_tool_rounds=4,
+        )
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = DuplicateSubagentDelegationBackend()
+
+        result = agent.run("请只创建一个子代理", save=False)
+        tasks = agent.subagents.list_runs()
+
+        assert result.response == "重复派工已被拦截并收口。"
+        assert result.tool_rounds == 2
+        assert len(tasks) == 1
+
+
+def test_max_tool_rounds_generates_final_response():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        (workspace / "notes.txt").write_text("hello", encoding="utf-8")
+        cfg = AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            max_tool_rounds=0,
+        )
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = MaxToolRoundBackend()
+
+        result = agent.run("读取 notes", save=False)
+
+        assert result.response == "工具轮数到顶后已正常收口。"
+        assert result.tool_rounds == 0
+        assert agent.backend.calls == 2
+
+
 def test_tool_catalog_and_recommended_sections():
     registry = ToolRegistry(
         Path.cwd(),
@@ -178,6 +264,25 @@ def test_tool_catalog_and_recommended_sections():
     assert "适用场景" in catalog
     assert "## http_request" in recommended
     assert "推荐理由" in recommended
+
+
+def test_tool_call_parser_accepts_subagent_call_alias():
+    registry = ToolRegistry(
+        Path.cwd(),
+        max_chars=6000,
+        max_entries=200,
+        max_matches=50,
+        web_max_chars=12000,
+        http_timeout=30,
+        catalog_limit=20,
+        retrieval_limit=3,
+        vector_search_enabled=False,
+    )
+    calls = registry.parse_tool_calls(
+        '[SUBAGENT_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
+    )
+
+    assert calls == [{"tool": "read_file", "path": "README.md"}]
 
 
 def test_tool_allowlist_limits_prompt_and_execution():
