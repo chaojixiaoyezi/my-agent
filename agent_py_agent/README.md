@@ -1,5 +1,27 @@
 # agent_py_agent
 
+## 安装入口
+
+仓库根目录提供 `pyproject.toml`，本地开发安装后会生成 `my-agent` 命令：
+
+```bash
+python -m pip install -e .
+my-agent --help
+```
+
+`my-agent` 当前等价于：
+
+```bash
+python3 -m agent_py_agent
+```
+
+例如：
+
+```bash
+my-agent chat
+my-agent subagents-dispatch --watch --interval 30
+```
+
 这是 `my-agent` 的 Python 包目录，负责 CLI 入口、模型后端、prompt 拼装、工具循环、记忆、skill/tool 能力路由和 subagent 工单系统。
 
 项目目前坚持一个原则：主链路尽量只依赖 Python3 标准库，先把结构、边界和可审计性做稳。

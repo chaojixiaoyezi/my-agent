@@ -8,7 +8,9 @@
 
 ```text
 simple-python-agent-v0.3/                      # 项目根目录，放代码、说明文档和验证记录
+|-- pyproject.toml                             # Python packaging 配置，提供 my-agent console script
 |-- agent_py_agent/                            # Python 包目录，核心代码主要都在这里
+|   |-- __init__.py                            # 安装包初始化文件，记录包版本
 |   |-- __main__.py                            # CLI 入口，负责 run/chat/记忆/subagent 看板与巡检命令
 |   |-- README.md                              # 包级说明文档
 |   |-- agent/                                 # 智能体核心模块目录

@@ -802,3 +802,20 @@ suggested_tool: 是否建议开发成 tool
 后续方向：
 - 增加外部停止信号或 stop 文件。
 - 增加 API 消耗预算、每轮最大耗时和 daemon/service 包装。
+
+## 2026-04-29 / 安装后命令入口
+
+状态：已落地
+
+思路：
+- 现在可以用 `python3 -m agent_py_agent` 运行，但正式 agent 更应该安装后直接敲命令名。
+- 暂定命令名为 `my-agent`，后续品牌名确定后只改 packaging script，不改业务入口。
+
+已落地：
+- 新增 `pyproject.toml`。
+- 新增 console script：`my-agent = agent_py_agent.__main__:main`。
+- 新增 `agent_py_agent/__init__.py`，让包在标准 packaging 下更明确。
+
+后续方向：
+- 增加 gateway 命令族：`my-agent gateway start/status/stop`。
+- gateway 负责后台常驻、pid/lock/heartbeat、日志和外部控制；现有 `subagents-dispatch --watch` 作为 gateway 的核心工作循环。
