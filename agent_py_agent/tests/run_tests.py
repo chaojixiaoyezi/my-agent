@@ -142,7 +142,7 @@ run(agent_cmd("subagents-dispatch", "--help"))
 run(agent_cmd("subagents-dispatch", "--watch", "--max-cycles", "1", "--interval", "0", "--max-runners", "0"))
 run(agent_cmd("subagents-dispatch", "--watch", "--planner", "--max-cycles", "1", "--interval", "0", "--max-runners", "0"))
 run(agent_cmd("daemon", "--help"))
-run(agent_cmd("daemon", "--max-cycles", "1", "--interval", "0", "--max-runners", "0", "--no-planner"))
+run(agent_cmd("daemon", "--max-cycles", "1", "--interval", "0", "--max-runners", "auto", "--no-planner"))
 run(agent_cmd("subagent-context", "--help"))
 run(agent_cmd("subagent-run", "--help"))
 

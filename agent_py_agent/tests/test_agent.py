@@ -1543,6 +1543,34 @@ def test_subagent_dispatch_parent_planner_blocks_empty_heartbeat_ok_when_gate_ha
         assert "禁止" in planner_record.message
 
 
+def test_subagent_dispatch_parent_planner_zero_limit_means_unlimited_context():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        backend = ParentPlannerBackend()
+        agent.backend = backend
+        agent.subagents.create_run(
+            goal="zero limit active task should appear in planner prompt",
+            thought="验证 limit=0 不会把 planner 上下文切空。",
+            plan=["dispatch"],
+        )
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+
+        report = agent.dispatch_subagents(
+            router,
+            CapabilityConfig(),
+            apply=False,
+            planner=True,
+            max_runners=0,
+            limit=0,
+        )
+
+        assert len(backend.prompts) == 1
+        assert "zero limit active task should appear in planner prompt" in backend.prompts[0]
+        assert any(item.step == "parent_planner" and item.ok for item in report.records)
+
+
 def test_subagent_dispatch_watch_runs_one_cycle_and_releases_lock():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)

@@ -107,7 +107,7 @@ python3 agent_py_agent/tests/run_tests.py
 python -m pip install -e .
 my-agent --help
 my-agent subagents-dispatch --watch --max-cycles 1 --interval 0
-my-agent daemon --max-cycles 1 --interval 0 --max-runners 0 --no-planner
+my-agent daemon --max-cycles 1 --interval 0 --max-runners auto --no-planner
 ```
 
 这条命令应直接调用真实 API。若失败，先看真实 API 错误、模型输出协议、工具调用和 Windows/UTF-8 捕获问题，不要直接降级到 echo 后端作为通过结论。
@@ -120,7 +120,7 @@ my-agent daemon --max-cycles 1 --interval 0 --max-runners 0 --no-planner
 - 跑一次真实 API `subagent-run --execute`，要求真实后端、工具调用、结构化输出、证据写回和父代理验收闭环。
 - 检查 `subagents-dispatch --help`，并跑一次隔离的 `subagents-dispatch --watch --max-cycles 1 --interval 0`。
 - 跑一次隔离的 `subagents-dispatch --watch --planner --max-cycles 1 --interval 0`，确认父代理 planner 能通过真实 API 唤醒。
-- 跑一次隔离的 `daemon --max-cycles 1 --interval 0 --max-runners 0 --no-planner`，确认配置驱动常驻入口可安全退出。
+- 跑一次隔离的 `daemon --max-cycles 1 --interval 0 --max-runners auto --no-planner`，确认配置驱动常驻入口可安全退出，并确认 `auto` 参数能解析。
 - 通过自动发现测试覆盖 dispatch 规划、父代理 planner、runner、patch 审核、验收、watch 循环和 watch lock。
 - 跑 chat 真实模型路径。
 - 自动发现并运行所有 `test_*.py` 中的 `test_` 函数。

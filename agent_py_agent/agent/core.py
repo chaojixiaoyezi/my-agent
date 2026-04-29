@@ -743,11 +743,12 @@ def _build_parent_planner_state(
     """收集父代理 planner 的状态快照和 heartbeat gate。"""
 
     tasks = agent.subagents.list_runs()
-    board = agent.subagents.build_board(recent_limit=limit)
+    board_limit = limit if limit > 0 else len(tasks)
+    board = agent.subagents.build_board(recent_limit=board_limit)
     due_report = agent.subagents.due_check(cfg)
     action_plan = agent.subagents.plan_actions(cfg)
     runner_candidates = _dispatch_runner_candidates(tasks, max_runners)
-    patch_run_ids = _dispatch_patch_review_run_ids(tasks)[:limit]
+    patch_run_ids = _limit_items(_dispatch_patch_review_run_ids(tasks), limit)
     acceptance_report = agent.subagents.review_acceptances(
         apply=False,
         reviewer=reviewer,
@@ -815,7 +816,7 @@ def _build_parent_planner_state(
     return {
         "gate": gate_summary,
         "board_summary": board.summary,
-        "active_tasks": [_task_state_for_planner(task) for task in active_tasks[:limit]],
+        "active_tasks": [_task_state_for_planner(task) for task in _limit_items(active_tasks, limit)],
         "due_issues": [
             {
                 "run_id": issue.run_id,
@@ -827,7 +828,7 @@ def _build_parent_planner_state(
                 "goal": issue.goal,
                 "risk_flags": issue.risk_flags,
             }
-            for issue in due_report.issues[:limit]
+            for issue in _limit_items(due_report.issues, limit)
         ],
         "action_items": [
             {
@@ -838,7 +839,7 @@ def _build_parent_planner_state(
                 "reason": item.reason,
                 "would_change_status_to": item.would_change_status_to,
             }
-            for item in action_plan.actions[:limit]
+            for item in _limit_items(action_plan.actions, limit)
         ],
         "runner_candidates": [_task_state_for_planner(task) for task in runner_candidates],
         "patch_review_run_ids": patch_run_ids,
@@ -851,10 +852,10 @@ def _build_parent_planner_state(
                 "evidence_count": record.evidence_count,
                 "test_count": record.test_count,
             }
-            for record in acceptance_report.records[:limit]
+            for record in _limit_items(acceptance_report.records, limit)
         ],
-        "open_capability_requests": open_requests[:limit],
-        "open_capability_gaps": open_gaps[:limit],
+        "open_capability_requests": _limit_items(open_requests, limit),
+        "open_capability_gaps": _limit_items(open_gaps, limit),
     }
 
 
@@ -1008,6 +1009,14 @@ def _dispatch_runner_candidates(tasks: list[SubAgentTask], max_runners: int) -> 
         if len(candidates) >= max_runners:
             break
     return candidates
+
+
+def _limit_items(items: list, limit: int) -> list:
+    """按调度 limit 截断列表；0 表示不限制。"""
+
+    if limit <= 0:
+        return list(items)
+    return list(items)[:limit]
 
 
 def _is_dispatch_runner_candidate(task: SubAgentTask) -> bool:

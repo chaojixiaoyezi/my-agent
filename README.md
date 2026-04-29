@@ -28,7 +28,7 @@ my-agent daemon
 
 `daemon` 会读取 `agent_config.yaml` 里的 `daemon_*` 配置，持续写 heartbeat、watch log 和 lock。开启 planner 后，如果 gate 发现仍有 active/pending/stalled/needs-intervention 事项，会触发完整父代理 LLM turn；如果模型只回 `HEARTBEAT_OK`，会被记录为失败。Gateway 方式可以作为下一阶段：由 `my-agent gateway start/status/stop` 管理后台 watch 进程，CLI 再和 gateway 通信。
 
-`daemon_*` 数字项里的 `0` 是显式策略值，不是“未设置”：`daemon_max_cycles=0` 表示持续运行，`daemon_max_runners=0` 表示不执行 runner，`daemon_max_cards=0` 表示不限制能力卡数量，`daemon_interval=0` 表示每轮之间不等待，通常只用于测试或单轮验证。
+配置分两层：`task_max_subagents=0` / `task_max_grandchildren=0` 表示用户层任务规模不设硬上限；`runner_concurrency: "auto"` 等调度项留给未来 gateway 自适应。当前 `daemon_*` 是前台调度器的高级参数：`daemon_max_runners: "auto"` 会先映射成保守值 1，`daemon_max_cycles=0` 表示持续运行，`daemon_limit=0` 表示不限制记录条数，`daemon_max_cards=0` 表示不限制能力卡数量，`daemon_interval=0` 通常只用于测试或单轮验证。
 
 一个用 Python3 标准库搭起来的个人通用智能体骨架。
 

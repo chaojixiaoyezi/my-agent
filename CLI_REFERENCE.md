@@ -49,7 +49,7 @@ python -m agent_py_agent --help
 | 真实 runner 调度 | `my-agent subagents-dispatch --apply --execute-runners` | 否 | 是 |
 | 子代理单次执行 | `my-agent subagent-run <run_id> --execute` | 否 | 是 |
 
-当前 gateway 尚未实现。现在的常驻方式是前台 watch 进程，后续可以在它外面增加 `my-agent gateway start/status/stop`。
+当前 gateway 尚未实现。现在的常驻方式是前台 watch 进程，后续可以在它外面增加 `my-agent gateway start/status/stop`。常驻形态和外部方案对比见 [GATEWAY_DESIGN.md](GATEWAY_DESIGN.md)。
 
 ## 常用命令
 
@@ -317,7 +317,7 @@ my-agent subagents-dispatch --watch --planner --interval 30
 | `--execute-runners` | `false` | 配合 `--apply` 调用真实模型执行 runner；不能单独使用。 |
 | `--planner` | `false` | 有 active/pending/stalled/needs-intervention 事项时调用父代理 LLM planner；如果模型只回 `HEARTBEAT_OK`，会被 gate 标记为失败。 |
 | `--max-runners <n>` | `1` | 本轮最多推进多少个 runner；`0` 表示不执行 runner。 |
-| `--limit <n>` | `20` | 每个阶段最多处理多少条记录。 |
+| `--limit <n>` | `20` | 每个阶段最多处理多少条记录；`0` 表示不限制。 |
 | `--watch` | `false` | 持续循环执行 dispatch。 |
 | `--interval <seconds>` | `30.0` | watch 模式每轮间隔秒数；`0` 表示不等待，通常只用于测试或单轮验证。 |
 | `--max-cycles <n>` | `0` | watch 模式最多循环次数，`0` 表示持续运行。 |
@@ -377,8 +377,8 @@ my-agent daemon --max-cycles 1 --interval 0 --no-planner
 | `--planner` | 覆盖 `daemon_planner` | 启用父代理 LLM planner。 |
 | `--no-planner` | 覆盖 `daemon_planner` | 关闭父代理 LLM planner。 |
 | `--interval <seconds>` | `daemon_interval` | 每轮调度结束后的等待秒数；`0` 表示不等待，通常只用于测试或单轮验证。 |
-| `--max-runners <n>` | `daemon_max_runners` | 每轮最多推进多少个 runner；`0` 表示不执行 runner。 |
-| `--limit <n>` | `daemon_limit` | 每个阶段最多处理多少条记录。 |
+| `--max-runners <n|auto>` | `daemon_max_runners` | 每轮最多推进多少个 runner；`auto` 当前映射为保守值 1，未来 gateway 会自适应；`0` 表示不执行 runner。 |
+| `--limit <n>` | `daemon_limit` | 每个阶段最多处理多少条记录；`0` 表示不限制。 |
 | `--max-cycles <n>` | `daemon_max_cycles` | 最多循环次数，`0` 表示持续运行。 |
 | `--force-lock` | - | 强制覆盖已有 watch lock。 |
 | `--reviewer <name>` | `daemon_reviewer` | patch/acceptance 审核者标识。 |
@@ -393,13 +393,24 @@ my-agent daemon --max-cycles 1 --interval 0 --no-planner
 默认配置位置：
 
 ```yaml
-# 0 是显式策略值，不表示“未设置”
+# 用户层任务规模：0 表示不设硬上限，让主代理按任务复杂度决定
+task_max_subagents: 0
+task_max_grandchildren: 0
+
+# 未来 gateway 调度策略：auto 表示由主代理/调度器自适应
+scheduler_mode: "auto"
+runner_concurrency: "auto"
+runner_start_rate: "auto"
+runner_timeout_seconds: "auto"
+runner_failure_policy: "auto"
+
+# 前台 daemon 过渡期参数：0 是显式策略值，不表示“未设置”
 daemon_planner: true
 daemon_apply: false
 daemon_execute_runners: false
 daemon_interval: 30
-daemon_max_runners: 1
-daemon_limit: 20
+daemon_max_runners: "auto"
+daemon_limit: 0
 daemon_max_cycles: 0
 daemon_max_cards: 0
 daemon_probe: true
