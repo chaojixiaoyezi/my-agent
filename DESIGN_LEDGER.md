@@ -980,3 +980,23 @@ suggested_tool: 是否建议开发成 tool
 后续方向：
 - `chat` / TUI 接入后，把 `gateway ask/result` 收到“开发者命令”层级。
 - 外部聊天工具接入时复用同一个 request/response 协议，并把响应自动回发给用户。
+
+## 2026-04-29 / Chat 接入 Gateway
+
+状态：已落地第一版
+
+思路：
+- 先不改变 `my-agent chat` 的默认行为，避免破坏现有前台交互路径。
+- 新增 `my-agent chat --gateway`，让 chat 成为 gateway 客户端。
+- 普通自然语言消息走 gateway request/response；本地命令 `/memory`、`/remember`、`/subagents` 暂时继续在当前 CLI 里处理。
+
+已落地：
+- `chat --gateway` 启动时检查 gateway 是否正在运行；未运行时提示先 `my-agent gateway start`。
+- chat worker 复用 `submit_gateway_ask()` 写入 gateway inbox，并等待 response。
+- `/status` 在 gateway 模式下额外显示 gateway 存活状态和 pending/processing/done/responses 数量。
+- 新增 `--gateway-timeout`，可临时覆盖单条消息等待时间。
+
+后续方向：
+- 稳定后考虑让 `my-agent chat` 默认 attach 到 gateway。
+- 把更多 slash command 也改成 gateway 请求，减少前台 CLI 对本地状态的直接操作。
+- 给 chat/TUI 增加异步完成通知，而不是每条消息都由当前 worker 等 response。

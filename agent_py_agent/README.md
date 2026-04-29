@@ -20,6 +20,7 @@ python3 -m agent_py_agent
 ```bash
 my-agent chat
 my-agent gateway start
+my-agent chat --gateway
 my-agent gateway ask "你好"
 ```
 
@@ -87,7 +88,11 @@ python3 -m agent_py_agent run "按额外规则回答" --prompt-file prompts/defa
 
 ```bash
 python3 -m agent_py_agent chat
+python3 -m agent_py_agent gateway start
+python3 -m agent_py_agent chat --gateway
 ```
+
+默认 chat 在当前前台进程里调用模型。`chat --gateway` 会把普通消息投递给后台 gateway，chat 自己只负责接收输入和显示响应。
 
 常用命令：
 
@@ -107,6 +112,8 @@ python3 -m agent_py_agent chat
 ```
 
 模型响应期间可以继续输入，新的请求会进入后台队列。
+
+在 `--gateway` 模式下，`/memory`、`/remember`、`/subagents` 等命令仍由当前 CLI 本地处理；普通自然语言消息会通过 gateway request/response 通道交给后台 gateway。`/status` 会额外显示 gateway 是否存活、pending/processing/done/response 数量。
 
 ## 记忆
 
@@ -287,6 +294,8 @@ gateway_requests.jsonl 审计日志
 ```
 
 `gateway ask/result` 不是最终用户必须记住的日常入口。以后接聊天工具时，聊天工具会把用户消息写入同一条队列，再把 response 自动发回给用户；CLI 命令主要用于开发、调试和排查外部适配器问题。
+
+`chat --gateway` 是这条路的第一步：它已经不在前台 chat 里直接调用模型，而是把普通消息交给后台 gateway。后续 TUI、微信、飞书、Telegram 等适配器会继续复用同一条消息通道。
 
 前台 watch 调试入口：
 
