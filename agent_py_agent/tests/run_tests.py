@@ -62,7 +62,8 @@ agent_loop = subprocess.run(
             "test_subagent_capability_route_creates_gap_when_no_match, "
             "test_subagent_execution_context_uses_only_grants, "
             "test_subagent_runner_dry_run_and_execute, "
-            "test_subagent_runner_parses_structured_output; "
+            "test_subagent_runner_parses_structured_output, "
+            "test_subagent_runner_parser_uses_last_parseable_fenced_block; "
             "test_subagents(); "
             "test_subagent_capability_records(); "
             "test_subagent_fake_done_requires_evidence(); "
@@ -81,6 +82,7 @@ agent_loop = subprocess.run(
             "test_subagent_execution_context_uses_only_grants(); "
             "test_subagent_runner_dry_run_and_execute(); "
             "test_subagent_runner_parses_structured_output(); "
+            "test_subagent_runner_parser_uses_last_parseable_fenced_block(); "
             "print('AGENT_TEST_PASS')"
         ),
     ],

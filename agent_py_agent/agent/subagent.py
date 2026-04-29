@@ -3315,32 +3315,57 @@ def parse_subagent_runner_output(text: str) -> SubAgentParsedOutput:
 
     marker_start = "[SUBAGENT_RESULT]"
     marker_end = "[/SUBAGENT_RESULT]"
-    start = text.find(marker_start)
-    if start == -1:
+    candidates = _extract_subagent_result_blocks(text, marker_start, marker_end)
+    if not candidates:
+        if marker_start in text:
+            return SubAgentParsedOutput(
+                found=True,
+                ok=False,
+                parse_error="缺少 [/SUBAGENT_RESULT] 结束标记。",
+            )
         return SubAgentParsedOutput(found=False, ok=False)
-    end = text.find(marker_end, start)
-    if end == -1:
+
+    parse_errors = []
+    for raw in reversed(candidates):
+        raw = _strip_json_fence(raw)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            parse_errors.append(f"JSON 解析失败: {exc}")
+            continue
+        if not isinstance(payload, dict):
+            parse_errors.append("结构化结果必须是 JSON object。")
+            continue
+        return _parsed_output_from_payload(payload)
+
+    if parse_errors:
         return SubAgentParsedOutput(
             found=True,
             ok=False,
-            parse_error="缺少 [/SUBAGENT_RESULT] 结束标记。",
+            parse_error=parse_errors[0],
         )
-    raw = text[start + len(marker_start) : end].strip()
-    raw = _strip_json_fence(raw)
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        return SubAgentParsedOutput(
-            found=True,
-            ok=False,
-            parse_error=f"JSON 解析失败: {exc}",
-        )
-    if not isinstance(payload, dict):
-        return SubAgentParsedOutput(
-            found=True,
-            ok=False,
-            parse_error="结构化结果必须是 JSON object。",
-        )
+    return SubAgentParsedOutput(found=True, ok=False, parse_error="未找到可解析的结构化结果。")
+
+
+def _extract_subagent_result_blocks(text: str, marker_start: str, marker_end: str) -> list[str]:
+    """提取所有成对的 runner 结果块，允许正文里先提到协议标记。"""
+
+    blocks = []
+    offset = 0
+    while True:
+        start = text.find(marker_start, offset)
+        if start == -1:
+            break
+        end = text.find(marker_end, start + len(marker_start))
+        if end == -1:
+            break
+        blocks.append(text[start + len(marker_start) : end].strip())
+        offset = end + len(marker_end)
+    return blocks
+
+
+def _parsed_output_from_payload(payload: dict[str, object]) -> SubAgentParsedOutput:
+    """把已解析 JSON payload 转成标准结果对象。"""
 
     return SubAgentParsedOutput(
         found=True,

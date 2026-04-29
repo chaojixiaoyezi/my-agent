@@ -66,6 +66,7 @@
 - [ ] runner prompt 只包含 allowed tools
 - [ ] 未授权工具调用会失败
 - [ ] `[SUBAGENT_RESULT]` 缺失或 JSON 错误会被记录
+- [ ] `[SUBAGENT_RESULT]` 前文提到协议标记或 JSON 带 Markdown fence 时仍能解析最终结果块
 - [ ] evidence 会写入 `task.evidence`
 - [ ] capability_requests 会写成 open request
 - [ ] artifacts / tests / patches 会写入 `output.json`

@@ -254,6 +254,8 @@ def _build_subagent_runner_prompt(
         "- 列出使用过的授权工具或 skill。\n"
         "- 给出可验收证据；如果没有证据，明确写出还需要什么能力或工具。\n"
         "- 最后必须输出一个机器可解析结果块，格式如下：\n\n"
+        "注意：结果块里面只能放裸 JSON object，不要使用 ```json 或任何 Markdown 代码围栏。\n"
+        "在最终结果块之前，不要把 [SUBAGENT_RESULT] 或 [/SUBAGENT_RESULT] 当作普通说明文字重复引用。\n\n"
         "[SUBAGENT_RESULT]\n"
         "{\n"
         '  "status": "AWAITING_ACCEPTANCE",\n'
