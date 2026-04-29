@@ -19,7 +19,8 @@ python3 -m agent_py_agent
 
 ```bash
 my-agent chat
-my-agent daemon
+my-agent gateway start
+my-agent gateway ask "你好"
 ```
 
 完整参数手册见仓库根目录的 [CLI_REFERENCE.md](../CLI_REFERENCE.md)。
@@ -53,6 +54,7 @@ subagents-route-capabilities 路由 open capability request
 subagents-acceptance        验收等待验收的子代理
 subagents-patches           审核 runner 输出里的 patch 记录
 subagents-dispatch          执行一轮父代理调度
+gateway                     管理后台 gateway，并向 gateway 投递请求
 subagent-context            生成单个子代理执行上下文
 subagent-run                按执行上下文运行子代理 runner
 ```
@@ -268,10 +270,11 @@ python3 -m agent_py_agent subagents-dispatch --apply --execute-runners
 ```bash
 python3 -m agent_py_agent gateway start
 python3 -m agent_py_agent gateway status
+python3 -m agent_py_agent gateway ask "继续推进当前任务"
 python3 -m agent_py_agent gateway stop
 ```
 
-`gateway` 第一版会启动后台 Python 进程，并写 `gateway.pid`、`gateway_state.json`、`gateway_heartbeat.json`、`gateway_stop.request` 和 `gateway.log`。它内部暂时复用 daemon/watch 调度，后续会接 worker pool 和任务账本。
+`gateway` 第一版会启动后台 Python 进程，并写 `gateway.pid`、`gateway_state.json`、`gateway_heartbeat.json`、`gateway_stop.request`、`gateway.log`、本地请求队列和响应文件。`gateway ask` 会把聊天/任务写入 `requests/pending`，后台 gateway 处理后把结果写入 `responses`，后续 chat/TUI 会接到这条客户端通道上。
 
 前台 watch 调试入口：
 

@@ -70,6 +70,13 @@ gateway_heartbeat_interval: 5
 gateway_stale_seconds: 120
 gateway_stop_timeout: 20
 
+# gateway 本地消息入口。
+# ask/submit 会先把请求写进 requests/pending，后台 gateway 再取走执行，
+# 结果写进 responses，并追加 gateway_requests.jsonl 审计日志。
+# request_timeout 是 CLI 等待结果的默认时长；poll_interval 是后台轮询 inbox 的间隔。
+gateway_request_timeout: 300
+gateway_request_poll_interval: 1
+
 # 前台 daemon 默认策略（高级 / 过渡期）：
 # - my-agent daemon 会读取这些配置，减少启动时的长参数。
 # - 当前 daemon 还不是完整 gateway/service；它是一个前台 watch 调度循环。

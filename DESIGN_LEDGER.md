@@ -939,3 +939,24 @@ suggested_tool: 是否建议开发成 tool
 - `chat` / TUI attach 到 gateway。
 - 接入 SQLite task ledger、jobs、leases 和 worker pool。
 - 增加 systemd / launchd / Windows Task Scheduler 安装入口。
+
+## 2026-04-29 / Gateway 本地消息入口
+
+状态：已落地
+
+思路：
+- gateway 不能只是后台调度壳子，还需要接受用户消息并触发完整 LLM turn。
+- 第一版先用本地文件 inbox/response 队列，不急着引入 HTTP server、WebSocket 或 SQLite。
+- CLI 客户端先验证协议：请求落盘、gateway worker 取走、模型调用、响应落盘、客户端等待或稍后读取。
+
+已落地：
+- 新增 `my-agent gateway ask "<prompt>"`，向后台 gateway 投递聊天/任务请求。
+- 新增 `my-agent gateway result <request_id>`，读取异步请求结果。
+- 新增 gateway 请求目录：`requests/pending`、`requests/processing`、`requests/done`、`responses` 和 `gateway_requests.jsonl`。
+- gateway 后台进程启动 request worker，和 dispatch watch 并行常驻。
+- `gateway status`/heartbeat 会带 request counts，方便判断是否堆积。
+
+后续方向：
+- 让 `my-agent chat` 默认 attach 到 gateway，而不是只在前台进程里跑。
+- 将文件队列升级为 SQLite jobs/leases，支持崩溃恢复、重试、超时和 worker pool。
+- 再向上接 TUI、HTTP/WebSocket、本地托盘服务和跨 gateway 通信。

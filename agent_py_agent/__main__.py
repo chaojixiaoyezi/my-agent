@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +58,11 @@ class GatewayPaths:
     heartbeat: Path
     stop_request: Path
     log: Path
+    inbox: Path
+    processing: Path
+    done: Path
+    responses: Path
+    history: Path
 
 
 @dataclass
@@ -125,6 +131,11 @@ def gateway_paths(agent: SimpleAgent) -> GatewayPaths:
         heartbeat=root / "gateway_heartbeat.json",
         stop_request=root / "gateway_stop.request",
         log=root / "gateway.log",
+        inbox=root / "requests" / "pending",
+        processing=root / "requests" / "processing",
+        done=root / "requests" / "done",
+        responses=root / "responses",
+        history=root / "gateway_requests.jsonl",
     )
 
 
@@ -212,6 +223,108 @@ def tail_lines(path: Path, line_count: int) -> list[str]:
     if line_count <= 0:
         return lines
     return lines[-line_count:]
+
+
+def new_gateway_request_id() -> str:
+    """生成本地 gateway 请求 ID。"""
+
+    return f"gwreq-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+
+
+def gateway_response_path(paths: GatewayPaths, request_id: str) -> Path:
+    """返回某个 gateway 请求的响应文件路径。"""
+
+    return paths.responses / f"{request_id}.json"
+
+
+def gateway_request_counts(paths: GatewayPaths) -> dict[str, int]:
+    """统计 gateway 本地 inbox 的请求数量。"""
+
+    def count_json(path: Path) -> int:
+        try:
+            return len([item for item in path.glob("*.json") if item.is_file()])
+        except OSError:
+            return 0
+
+    return {
+        "pending": count_json(paths.inbox),
+        "processing": count_json(paths.processing),
+        "done": count_json(paths.done),
+        "responses": count_json(paths.responses),
+    }
+
+
+def write_gateway_request(paths: GatewayPaths, payload: dict) -> Path:
+    """把一条请求原子写入 gateway inbox。"""
+
+    request_id = str(payload["id"])
+    paths.inbox.mkdir(parents=True, exist_ok=True)
+    target = paths.inbox / f"{request_id}.json"
+    tmp = paths.inbox / f".{request_id}.tmp"
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(target)
+    return target
+
+
+def append_gateway_history(paths: GatewayPaths, payload: dict) -> None:
+    """追加 gateway 请求处理历史。"""
+
+    paths.history.parent.mkdir(parents=True, exist_ok=True)
+    with paths.history.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def requeue_gateway_processing_requests(paths: GatewayPaths) -> int:
+    """gateway 启动时把上次崩溃遗留的 processing 请求退回 pending。"""
+
+    paths.inbox.mkdir(parents=True, exist_ok=True)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for request_path in sorted(paths.processing.glob("*.json")):
+        try:
+            request_path.replace(paths.inbox / request_path.name)
+        except OSError:
+            continue
+        count += 1
+    return count
+
+
+def wait_for_gateway_response(paths: GatewayPaths, request_id: str, timeout: float) -> dict:
+    """等待 gateway 写出响应 JSON。"""
+
+    path = gateway_response_path(paths, request_id)
+    deadline = time.time() + max(0.0, timeout)
+    while time.time() <= deadline:
+        payload = read_json_file(path)
+        if payload:
+            return payload
+        time.sleep(0.2)
+    return {}
+
+
+def print_gateway_response(payload: dict, *, json_mode: bool = False, show_prompt: bool = False) -> int:
+    """按 CLI 习惯输出 gateway 响应。"""
+
+    if json_mode:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if payload.get("ok") else 2
+
+    if show_prompt and payload.get("prompt"):
+        print("===== FINAL PROMPT =====")
+        print(payload.get("prompt", ""))
+        print("===== RESPONSE =====")
+
+    response = str(payload.get("response", "") or "")
+    if response:
+        print(response)
+    else:
+        print(str(payload.get("error", "gateway 请求没有返回内容。") or "gateway 请求没有返回内容。"))
+
+    print(
+        f"\n[request_id={payload.get('id', '-')}; status={payload.get('status', '-')}; "
+        f"backend={payload.get('backend', '-')}; tool_rounds={payload.get('tool_rounds', 0)}]"
+    )
+    return 0 if payload.get("ok") else 2
 
 
 def cmd_run(args) -> int:
@@ -764,7 +877,7 @@ def _resolve_daemon_options(agent: SimpleAgent, args) -> DaemonOptions:
 def cmd_gateway(args) -> int:
     """gateway 命令族入口。"""
 
-    print("请指定 gateway 子命令：start / status / stop / restart / logs。", file=sys.stderr)
+    print("请指定 gateway 子命令：start / status / stop / restart / logs / ask / result。", file=sys.stderr)
     return 2
 
 
@@ -847,6 +960,9 @@ def cmd_gateway_run(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)
+    for path in (paths.inbox, paths.processing, paths.done, paths.responses):
+        path.mkdir(parents=True, exist_ok=True)
+    requeued = requeue_gateway_processing_requests(paths)
     pid = os.getpid()
     paths.pid.write_text(str(pid), encoding="utf-8")
     try:
@@ -863,6 +979,12 @@ def cmd_gateway_run(args) -> int:
         daemon=True,
     )
     heartbeat_thread.start()
+    request_thread = threading.Thread(
+        target=_gateway_request_loop,
+        args=(args, paths, stop_event),
+        daemon=True,
+    )
+    request_thread.start()
     write_json_file(
         paths.state,
         {
@@ -877,6 +999,7 @@ def cmd_gateway_run(args) -> int:
             "interval": options.interval,
             "max_runners": options.max_runners,
             "max_cycles": options.max_cycles,
+            "requeued_requests": requeued,
         },
     )
 
@@ -924,6 +1047,7 @@ def cmd_gateway_run(args) -> int:
     finally:
         stop_event.set()
         heartbeat_thread.join(timeout=2)
+        request_thread.join(timeout=2)
         try:
             paths.pid.unlink()
         except OSError:
@@ -958,6 +1082,11 @@ def cmd_gateway_status(args) -> int:
         print(f"heartbeat_age_seconds={age:.1f}")
     if state:
         print("state=" + json.dumps(state, ensure_ascii=False, sort_keys=True))
+    counts = gateway_request_counts(paths)
+    print(
+        "requests="
+        + json.dumps(counts, ensure_ascii=False, sort_keys=True)
+    )
     print(f"workspace: {paths.root}")
     print(f"log: {paths.log}")
     return 0
@@ -1034,6 +1163,166 @@ def cmd_gateway_logs(args) -> int:
     return 0
 
 
+def cmd_gateway_ask(args) -> int:
+    """向正在运行的 gateway 投递一条聊天请求。"""
+
+    agent = make_agent(args)
+    paths = gateway_paths(agent)
+    pid = read_pid(paths.pid)
+    if not pid or not is_pid_alive(pid):
+        print("gateway 未在运行。请先执行: my-agent gateway start", file=sys.stderr)
+        return 2
+
+    request_id = new_gateway_request_id()
+    payload = {
+        "id": request_id,
+        "kind": "ask",
+        "prompt": args.prompt,
+        "inject": args.inject or [],
+        "prompt_files": args.prompt_file or [],
+        "save": not args.no_save,
+        "include_prompt": bool(args.show_prompt),
+        "created_at": time.time(),
+        "client_pid": os.getpid(),
+    }
+    request_path = write_gateway_request(paths, payload)
+    response_path = gateway_response_path(paths, request_id)
+    if args.no_wait:
+        print(f"queued request_id={request_id}")
+        print(f"request: {request_path}")
+        print(f"response: {response_path}")
+        return 0
+
+    timeout = args.timeout if args.timeout is not None else agent.config.gateway_request_timeout
+    response = wait_for_gateway_response(paths, request_id, timeout)
+    if not response:
+        print(f"gateway 请求等待超时: request_id={request_id} timeout={timeout}s", file=sys.stderr)
+        print(f"response: {response_path}")
+        return 2
+    return print_gateway_response(response, json_mode=args.json, show_prompt=args.show_prompt)
+
+
+def cmd_gateway_result(args) -> int:
+    """读取某个 gateway 请求的结果。"""
+
+    agent = make_agent(args)
+    paths = gateway_paths(agent)
+    payload = read_json_file(gateway_response_path(paths, args.request_id))
+    if not payload:
+        print(f"未找到 gateway 响应: {args.request_id}", file=sys.stderr)
+        print(f"response: {gateway_response_path(paths, args.request_id)}")
+        return 2
+    return print_gateway_response(payload, json_mode=args.json, show_prompt=args.show_prompt)
+
+
+def _gateway_request_loop(args, paths: GatewayPaths, stop_event: threading.Event) -> None:
+    """后台处理 gateway inbox 请求。"""
+
+    try:
+        agent = make_agent(args)
+    except Exception as exc:
+        print(f"gateway request worker failed to initialize: {exc}", file=sys.stderr)
+        return
+
+    poll_interval = max(1, int(agent.config.gateway_request_poll_interval))
+    while not stop_event.is_set():
+        try:
+            processed = _process_gateway_requests(agent, paths)
+        except Exception as exc:
+            print(f"gateway request worker failed: {exc}", file=sys.stderr)
+            processed = 0
+        if processed:
+            continue
+        stop_event.wait(poll_interval)
+
+
+def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths) -> int:
+    """处理当前所有待处理 gateway 请求。"""
+
+    paths.inbox.mkdir(parents=True, exist_ok=True)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    paths.done.mkdir(parents=True, exist_ok=True)
+    paths.responses.mkdir(parents=True, exist_ok=True)
+    processed = 0
+    for request_path in sorted(paths.inbox.glob("*.json")):
+        processing_path = paths.processing / request_path.name
+        try:
+            request_path.replace(processing_path)
+        except OSError:
+            continue
+        response = _handle_gateway_request(agent, processing_path)
+        response_path = gateway_response_path(paths, str(response.get("id", processing_path.stem)))
+        write_json_file(response_path, response)
+        append_gateway_history(paths, response)
+        try:
+            processing_path.replace(paths.done / processing_path.name)
+        except OSError:
+            pass
+        processed += 1
+    return processed
+
+
+def _handle_gateway_request(agent: SimpleAgent, request_path: Path) -> dict:
+    """执行单条 gateway 请求，并返回响应 payload。"""
+
+    request = read_json_file(request_path)
+    request_id = str(request.get("id") or request_path.stem)
+    kind = str(request.get("kind") or "").strip()
+    started_at = time.time()
+    response = {
+        "id": request_id,
+        "kind": kind or "unknown",
+        "ok": False,
+        "status": "failed",
+        "created_at": request.get("created_at", 0),
+        "started_at": started_at,
+        "ended_at": 0,
+        "duration_seconds": 0,
+        "response": "",
+        "error": "",
+        "backend": "",
+        "used_memories": 0,
+        "tool_rounds": 0,
+        "prompt": "",
+        "request_file": str(request_path),
+    }
+    try:
+        if kind != "ask":
+            raise ValueError(f"unsupported gateway request kind: {kind or 'empty'}")
+        prompt = str(request.get("prompt") or "").strip()
+        if not prompt:
+            raise ValueError("gateway ask prompt 不能为空。")
+        result = agent.run(
+            prompt,
+            inject=[str(item) for item in request.get("inject", [])],
+            prompt_files=[str(item) for item in request.get("prompt_files", [])],
+            save=bool(request.get("save", True)),
+        )
+        response.update(
+            {
+                "ok": True,
+                "status": "done",
+                "response": result.response,
+                "backend": result.backend,
+                "used_memories": result.used_memories,
+                "tool_rounds": result.tool_rounds,
+                "prompt": result.prompt if request.get("include_prompt") else "",
+            }
+        )
+    except Exception as exc:
+        response.update(
+            {
+                "ok": False,
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
+    ended_at = time.time()
+    response["ended_at"] = ended_at
+    response["duration_seconds"] = round(ended_at - started_at, 3)
+    return response
+
+
 def _gateway_heartbeat_loop(paths: GatewayPaths, agent: SimpleAgent, options: DaemonOptions, stop_event: threading.Event) -> None:
     """定期写 gateway heartbeat。"""
 
@@ -1064,6 +1353,7 @@ def _write_gateway_heartbeat(
             "interval": options.interval,
             "max_runners": options.max_runners,
             "max_cycles": options.max_cycles,
+            "request_counts": gateway_request_counts(paths),
         },
     )
 
@@ -1557,6 +1847,23 @@ def build_parser() -> argparse.ArgumentParser:
     gateway_logs = gateway_sub.add_parser("logs", help="显示 gateway 日志尾部")
     gateway_logs.add_argument("--lines", type=int, default=80, help="显示最后多少行日志，0 表示全部")
     gateway_logs.set_defaults(func=cmd_gateway_logs)
+
+    gateway_ask = gateway_sub.add_parser("ask", help="向后台 gateway 投递一条聊天请求")
+    gateway_ask.add_argument("prompt", help="用户任务 / prompt")
+    gateway_ask.add_argument("--inject", action="append", help="动态注入 prompt，可多次传入")
+    gateway_ask.add_argument("--prompt-file", action="append", help="额外动态 prompt 文件，可多次传入")
+    gateway_ask.add_argument("--no-save", action="store_true", help="不保存本次对话到记忆")
+    gateway_ask.add_argument("--show-prompt", action="store_true", help="响应返回时打印最终 prompt")
+    gateway_ask.add_argument("--timeout", type=float, help="等待 gateway 响应的秒数，默认使用配置")
+    gateway_ask.add_argument("--no-wait", action="store_true", help="只投递请求并立即返回 request_id")
+    gateway_ask.add_argument("--json", action="store_true", help="输出完整响应 JSON")
+    gateway_ask.set_defaults(func=cmd_gateway_ask)
+
+    gateway_result = gateway_sub.add_parser("result", help="读取某个 gateway 请求结果")
+    gateway_result.add_argument("request_id", help="gateway 请求 ID")
+    gateway_result.add_argument("--show-prompt", action="store_true", help="打印响应中保存的最终 prompt")
+    gateway_result.add_argument("--json", action="store_true", help="输出完整响应 JSON")
+    gateway_result.set_defaults(func=cmd_gateway_result)
 
     subagent_context = sub.add_parser("subagent-context", help="生成单个 subagent 执行上下文包")
     subagent_context.add_argument("run_id", help="子代理运行 ID")

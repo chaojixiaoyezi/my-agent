@@ -112,6 +112,8 @@
 - [ ] `my-agent gateway start/status/stop/restart/logs` 命令存在
 - [ ] `my-agent gateway run --max-cycles 1 --interval 0 --max-runners 0 --no-planner` 能写 gateway state/heartbeat 并安全退出
 - [ ] `my-agent gateway stop` 通过 stop request 正常停止后台进程
+- [ ] `my-agent gateway ask` 能通过后台 gateway 处理真实 API 请求并写入 `responses/<request_id>.json`
+- [ ] `my-agent gateway result <request_id>` 能读取异步请求结果
 
 ## 修改文档时
 
