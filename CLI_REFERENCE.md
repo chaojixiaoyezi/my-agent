@@ -478,6 +478,7 @@ my-agent scenario-test
 my-agent scenario-test --workspace .\tmp-scenarios --count 2 --max-runners 2
 my-agent scenario-test --case verification
 my-agent scenario-test --case gateway-restart
+my-agent scenario-test --case structured-repair
 my-agent scenario-test --case runner-retry
 my-agent scenario-test --case all --count 1
 my-agent scenario-test --direct
@@ -501,8 +502,9 @@ my-agent scenario-test --dry-run
 | `happy` | gateway ask -> 主代理派工 -> runner 写文件 -> 父代理验收 | 是 |
 | `verification` | 构造“模型声称写了 artifact 但文件不存在”的伪完成记录，确认验收必须拒绝 | 否 |
 | `gateway-restart` | 模拟旧 gateway 崩溃时遗留的 `processing` 请求，确认重启恢复会退回 `pending` | 否 |
+| `structured-repair` | 模拟 runner 输出损坏的 `[SUBAGENT_RESULT]`，确认修复回合补齐 JSON 并通过验收 | 否 |
 | `runner-retry` | 模拟 runner 第一次模型调用失败，确认下一轮 dispatch 会有限重试并完成验收 | 否 |
-| `all` | 依次跑 `verification`、`gateway-restart`、`runner-retry`、`happy` | `happy` 会调用 |
+| `all` | 依次跑 `verification`、`gateway-restart`、`structured-repair`、`runner-retry`、`happy` | `happy` 会调用 |
 
 | 参数 | 说明 |
 | --- | --- |

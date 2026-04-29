@@ -1426,6 +1426,8 @@ def cmd_scenario_test(args) -> int:
         return run_scenario_verification_case(args)
     if args.case == "gateway-restart":
         return run_scenario_gateway_restart_case(args)
+    if args.case == "structured-repair":
+        return run_scenario_structured_repair_case(args)
     if args.case == "runner-retry":
         return run_scenario_runner_retry_case(args)
 
@@ -1547,7 +1549,7 @@ def cmd_scenario_test(args) -> int:
 def run_scenario_suite(args) -> int:
     """连续运行一组隔离场景。"""
 
-    cases = ["verification", "gateway-restart", "runner-retry", "happy"]
+    cases = ["verification", "gateway-restart", "structured-repair", "runner-retry", "happy"]
     results: list[dict[str, object]] = []
     for case in cases:
         print(f"\n######## SCENARIO CASE: {case} ########")
@@ -1756,6 +1758,133 @@ def print_dispatch_report(report) -> None:
             f"- [{status}] {record.step}/{record.action} run={run} "
             f"applied={record.applied} :: {record.message}"
         )
+
+
+class ScenarioStructuredRepairBackend:
+    """场景测试用后端：第一次输出坏结果块，修复回合补齐 JSON。"""
+
+    name = "scenario_structured_repair_backend"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, prompt: str) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text=(
+                    "我已经完成任务，但这次故意输出一个损坏的结构化结果块。\n"
+                    "[SUBAGENT_RESULT]\n"
+                    "{\n"
+                    '  "status": "AWAITING_ACCEPTANCE",\n'
+                    '  "summary": "这个 JSON 少了结尾，用来模拟模型输出损坏",\n'
+                    '  "evidence": [\n'
+                    '    {"kind": "note", "summary": "原始回复声称已有证据", "ok": true}\n'
+                ),
+                backend=self.name,
+            )
+        return ModelResponse(
+            text=(
+                "[SUBAGENT_RESULT]\n"
+                "{\n"
+                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "summary": "结构化输出损坏后已通过修复回合补齐。",\n'
+                '  "used_tools": [],\n'
+                '  "used_skills": [],\n'
+                '  "evidence": [\n'
+                '    {"kind": "note", "summary": "修复回合生成了可解析证据", "ok": true}\n'
+                "  ],\n"
+                '  "capability_requests": [],\n'
+                '  "artifacts": [],\n'
+                '  "tests": [\n'
+                '    {"name": "structured repair", "command": "", "ok": true, "summary": "坏 JSON 已修复"}\n'
+                "  ],\n"
+                '  "patches": [],\n'
+                '  "lessons": ["结构化输出损坏时先做格式修复，不新增事实"],\n'
+                '  "next_actions": [],\n'
+                '  "blocked_reason": "",\n'
+                '  "failure_type": ""\n'
+                "}\n"
+                "[/SUBAGENT_RESULT]"
+            ),
+            backend=self.name,
+        )
+
+
+def run_scenario_structured_repair_case(args) -> int:
+    """验证 runner 坏结构化输出会进入修复回合并通过验收。"""
+
+    paths = create_scenario_workspace(args)
+    print("MY-AGENT SCENARIO TEST")
+    print("case=structured-repair")
+    print(f"run_root={paths.run_root}")
+    print(f"fixture_root={paths.fixture_root}")
+    print(f"config={paths.config}")
+
+    agent = load_scenario_agent(paths.config)
+    backend = ScenarioStructuredRepairBackend()
+    agent.backend = backend
+    capability_config = load_capability_config(args.capability_config)
+    router = make_capability_router(agent, capability_config, args.skill_dir)
+
+    print_scenario_step(1, "创建会输出坏 JSON 的子代理工单")
+    task = agent.subagents.create_run(
+        goal="极端场景：runner 输出损坏的 SUBAGENT_RESULT，父代理应触发修复回合",
+        thought="验证结构化输出坏掉时不会直接把任务丢成无法验收。",
+        plan=["输出损坏结果块", "修复结构化结果", "父代理验收"],
+        acceptance_checks=["必须触发 structured repair", "修复后必须有证据", "父代理必须验收通过"],
+    )
+    print(f"run_id={task.id}")
+
+    print_scenario_step(2, "执行 dispatch：runner 输出坏 JSON 后修复并验收")
+    report = agent.dispatch_subagents(
+        router,
+        capability_config,
+        apply=True,
+        execute_runners=True,
+        max_runners=1,
+        probe=False,
+        reviewer="scenario-structured-repair",
+        note="structured output damage should be repaired",
+    )
+    print_dispatch_report(report)
+    loaded = agent.subagents.load(task.id)
+    runner = json.loads(Path(loaded.runner_result_json).read_text(encoding="utf-8"))
+    output = json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
+    print(
+        f"final status={loaded.status} verify={loaded.verification_status} "
+        f"backend_calls={backend.calls} repair_attempted={runner.get('structured_repair_attempted')} "
+        f"repair_ok={runner.get('structured_repair_ok')}"
+    )
+
+    final_ok = (
+        backend.calls == 2
+        and loaded.status == "DONE"
+        and loaded.verification_status == "VERIFIED"
+        and runner.get("structured_output_found") is True
+        and runner.get("structured_output_ok") is True
+        and runner.get("structured_repair_attempted") is True
+        and runner.get("structured_repair_ok") is True
+        and output.get("structured_output", {}).get("repair_attempted") is True
+        and any(item.step == "acceptance" and item.ok for item in report.records)
+    )
+    write_scenario_summary(
+        paths,
+        ok=final_ok,
+        reason="structured repair passed" if final_ok else "structured repair failed",
+        extra={
+            "case": "structured-repair",
+            "run_id": task.id,
+            "backend_calls": backend.calls,
+            "final_status": loaded.status,
+            "structured_repair_attempted": runner.get("structured_repair_attempted"),
+            "structured_repair_ok": runner.get("structured_repair_ok"),
+        },
+    )
+    print(f"\nsummary_json={paths.summary_json}")
+    print(f"summary_md={paths.summary_md}")
+    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
+    return 0 if final_ok else 2
 
 
 class ScenarioRetryBackend:
@@ -2844,9 +2973,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scenario.add_argument(
         "--case",
-        choices=["happy", "verification", "gateway-restart", "runner-retry", "all"],
+        choices=["happy", "verification", "gateway-restart", "structured-repair", "runner-retry", "all"],
         default="happy",
-        help="场景类型：happy 跑真实全流程；verification 测验收防作弊；gateway-restart 测重启恢复；runner-retry 测 runner 失败重试；all 连续运行",
+        help="场景类型：happy 跑真实全流程；verification 测验收防作弊；gateway-restart 测重启恢复；structured-repair 测坏结构化输出修复；runner-retry 测 runner 失败重试；all 连续运行",
     )
     scenario.add_argument("--workspace", help="保存场景测试结果的父目录；不传则使用系统临时目录")
     scenario.add_argument("--count", type=int, default=2, help="本场景创建多少个子代理")

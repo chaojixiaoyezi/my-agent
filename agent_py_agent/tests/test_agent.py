@@ -1012,11 +1012,19 @@ def test_subagent_runner_repairs_missing_structured_output():
         assert len(backend.prompts) == 2
         assert result.structured_output_found
         assert result.structured_output_ok
+        assert result.structured_repair_attempted
+        assert result.structured_repair_ok
         assert result.evidence_count == 1
         assert result.test_count == 1
         assert loaded.status == "AWAITING_ACCEPTANCE"
         assert loaded.verification_status == "NEEDS_ACCEPTANCE"
         assert "Structured Output Repair Response" in response
+        runner_json = json.loads(Path(loaded.runner_result_json).read_text(encoding="utf-8"))
+        output_json = json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
+        assert runner_json["structured_repair_attempted"] is True
+        assert runner_json["structured_repair_ok"] is True
+        assert output_json["structured_output"]["repair_attempted"] is True
+        assert output_json["structured_output"]["repair_ok"] is True
 
 
 def test_subagent_runner_parser_uses_last_parseable_fenced_block():

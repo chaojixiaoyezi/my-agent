@@ -588,6 +588,9 @@ class SubAgentRunnerResult:
     structured_output_found: bool = False
     structured_output_ok: bool = False
     structured_parse_error: str = ""
+    structured_repair_attempted: bool = False
+    structured_repair_ok: bool = False
+    structured_repair_error: str = ""
     structured_summary: str = ""
     evidence_count: int = 0
     capability_request_count: int = 0
@@ -2175,6 +2178,9 @@ class SubAgentManager:
         failure_type: str = "",
         structured_output: SubAgentParsedOutput | None = None,
         actual_tools: list[str] | None = None,
+        structured_repair_attempted: bool = False,
+        structured_repair_ok: bool = False,
+        structured_repair_error: str = "",
     ) -> SubAgentRunnerResult:
         """把 runner 调用结果写回标准工单。"""
 
@@ -2319,6 +2325,9 @@ class SubAgentManager:
                 "found": parsed.found,
                 "ok": parsed.ok,
                 "parse_error": parsed.parse_error,
+                "repair_attempted": structured_repair_attempted,
+                "repair_ok": structured_repair_ok,
+                "repair_error": structured_repair_error,
                 "summary": parsed.summary,
                 "status": parsed.status,
                 "blocked_reason": parsed.blocked_reason,
@@ -2377,6 +2386,9 @@ class SubAgentManager:
             structured_output_found=parsed.found,
             structured_output_ok=parsed.ok,
             structured_parse_error=parsed.parse_error,
+            structured_repair_attempted=structured_repair_attempted,
+            structured_repair_ok=structured_repair_ok,
+            structured_repair_error=structured_repair_error,
             structured_summary=parsed.summary,
             evidence_count=structured_evidence_count,
             capability_request_count=structured_request_count,
@@ -4515,6 +4527,8 @@ def render_runner_result_markdown(result: SubAgentRunnerResult) -> str:
         f"- runner_last_error: {result.runner_last_error or 'none'}",
         f"- structured_output_found: {result.structured_output_found}",
         f"- structured_output_ok: {result.structured_output_ok}",
+        f"- structured_repair_attempted: {result.structured_repair_attempted}",
+        f"- structured_repair_ok: {result.structured_repair_ok}",
         f"- evidence_count: {result.evidence_count}",
         f"- capability_request_count: {result.capability_request_count}",
         f"- artifact_count: {result.artifact_count}",
@@ -4534,6 +4548,8 @@ def render_runner_result_markdown(result: SubAgentRunnerResult) -> str:
             lines.append(f"- blocked_reason: {result.blocked_reason}")
         if result.structured_parse_error:
             lines.append(f"- parse_error: {result.structured_parse_error}")
+        if result.structured_repair_error:
+            lines.append(f"- repair_error: {result.structured_repair_error}")
     lines.extend(
         [
             "",

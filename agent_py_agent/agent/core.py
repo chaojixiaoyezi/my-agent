@@ -268,7 +268,11 @@ class SimpleAgent:
         response_for_log = result.response
         backend_name = result.backend
         message = "runner 已完成模型调用，等待独立验收。"
+        structured_repair_attempted = False
+        structured_repair_ok = False
+        structured_repair_error = ""
         if not (structured.found and structured.ok):
+            structured_repair_attempted = True
             repair_prompt = _build_subagent_runner_repair_prompt(
                 context,
                 original_prompt=result.prompt,
@@ -278,6 +282,7 @@ class SimpleAgent:
             try:
                 repair_response = self.backend.generate(repair_prompt)
             except Exception as exc:
+                structured_repair_error = str(exc)
                 response_for_log = _append_runner_repair_failure(result.response, exc)
             else:
                 repaired = parse_subagent_runner_output(repair_response.text)
@@ -289,9 +294,13 @@ class SimpleAgent:
                 backend_name = repair_response.backend or result.backend
                 if repaired.found and repaired.ok:
                     structured = repaired
+                    structured_repair_ok = True
                     message = "runner 已完成模型调用，并已修复结构化结果，等待独立验收。"
                 elif not structured.found and repaired.found:
                     structured = repaired
+                    structured_repair_error = repaired.parse_error
+                else:
+                    structured_repair_error = repaired.parse_error or "repair response still missing structured output"
         return self.subagents.record_runner_result(
             run_id,
             dry_run=False,
@@ -305,6 +314,9 @@ class SimpleAgent:
             verification_status="" if structured.found else "NEEDS_ACCEPTANCE",
             structured_output=structured,
             actual_tools=result.executed_tools or [],
+            structured_repair_attempted=structured_repair_attempted,
+            structured_repair_ok=structured_repair_ok,
+            structured_repair_error=structured_repair_error,
         )
 
     def run_parent_planner(

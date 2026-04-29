@@ -1094,12 +1094,16 @@ suggested_tool: 是否建议开发成 tool
 - `my-agent scenario-test --case gateway-restart`
   - 模拟旧 gateway 崩溃时请求卡在 `requests/processing`。
   - 执行 gateway 启动恢复步骤，把请求退回 `requests/pending`。
+- `my-agent scenario-test --case structured-repair`
+  - 模拟 runner 已回复但 `[SUBAGENT_RESULT]` JSON 损坏。
+  - 父代理触发修复回合，只整理格式，不新增事实。
+  - `runner_result.json` 记录 `structured_repair_attempted=true` 和 `structured_repair_ok=true`，修复后进入验收。
 - `my-agent scenario-test --case runner-retry`
   - 模拟 runner 第一次模型调用出现临时错误。
   - 任务先落成 `BLOCKED / runner_error`，记录 `runner_attempts=1` 和最后错误。
   - 下一轮 dispatch 识别为可重试错误，执行 `retry_runner`，成功后进入父代理验收并变成 `DONE / VERIFIED`。
 - `my-agent scenario-test --case all`
-  - 依次运行 `verification`、`gateway-restart`、`runner-retry`、`happy`。
+  - 依次运行 `verification`、`gateway-restart`、`structured-repair`、`runner-retry`、`happy`。
 
 调度策略：
 - 新增 runner 尝试计数：`runner_attempts`、`runner_last_attempt_at`、`runner_last_error`。
@@ -1108,5 +1112,5 @@ suggested_tool: 是否建议开发成 tool
 - 不自动重试能力缺口、验收失败、通道 BROKEN、接管任务，避免父代理在权限或事实不明时重复消耗 API。
 
 后续方向：
-- 增加结构化输出损坏修复、stalled 接管、能力缺口上抛再 rerun 的场景。
+- 增加 stalled 接管、能力缺口上抛再 rerun 的场景。
 - 给 `scenario_summary` 增加事件时间线，方便 TUI/网页观察。

@@ -62,11 +62,12 @@ my-agent scenario-test
 ```bash
 my-agent scenario-test --case verification
 my-agent scenario-test --case gateway-restart
+my-agent scenario-test --case structured-repair
 my-agent scenario-test --case runner-retry
 my-agent scenario-test --case all --count 1
 ```
 
-`verification` 会确认伪造 artifact 不会通过验收；`gateway-restart` 会确认旧 gateway 崩溃遗留的 processing 请求能退回 pending；`runner-retry` 会确认 runner 临时失败后下一轮 dispatch 能有限重试并完成验收。
+`verification` 会确认伪造 artifact 不会通过验收；`gateway-restart` 会确认旧 gateway 崩溃遗留的 processing 请求能退回 pending；`structured-repair` 会确认坏结构化输出能被修复回合补齐；`runner-retry` 会确认 runner 临时失败后下一轮 dispatch 能有限重试并完成验收。
 
 `daemon` 仍保留为前台调试入口。开启 planner 后，如果 gate 发现仍有 active/pending/stalled/needs-intervention 事项，会触发完整父代理 LLM turn；如果模型只回 `HEARTBEAT_OK`，会被记录为失败。
 

@@ -199,6 +199,7 @@ run(agent_cmd("subagent-context", "--help"))
 run(agent_cmd("subagent-run", "--help"))
 run(agent_cmd("scenario-test", "--case", "verification"))
 run(agent_cmd("scenario-test", "--case", "gateway-restart"))
+run(agent_cmd("scenario-test", "--case", "structured-repair"))
 run(agent_cmd("scenario-test", "--case", "runner-retry"))
 run(agent_cmd("scenario-test", "--count", "1", "--max-runners", "1", "--max-cycles", "2", "--timeout", "180"))
 
