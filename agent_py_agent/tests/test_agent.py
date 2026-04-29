@@ -99,6 +99,54 @@ class AcceptedSubagentBackend(BaseBackend):
         )
 
 
+class BoundaryWriteSubagentBackend(BaseBackend):
+    """测试用后端：先尝试越界写文件，再根据工具拦截结果收口。"""
+
+    name = "boundary_write_subagent_backend"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str) -> ModelResponse:
+        self.prompts.append(prompt)
+        if len(self.prompts) == 1:
+            assert "allowed_write_roots" in prompt
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    '{"tool": "write_file", "path": "README.md", "content": "bad"}\n'
+                    "[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+
+        assert "写入被阻止" in prompt
+        return ModelResponse(
+            text=(
+                "[SUBAGENT_RESULT]\n"
+                "{\n"
+                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "summary": "越界写入已被工具层阻止。",\n'
+                '  "used_tools": [],\n'
+                '  "used_skills": [],\n'
+                '  "evidence": [\n'
+                '    {"kind": "note", "summary": "工具结果显示 README.md 越界写入被阻止", "ok": true}\n'
+                "  ],\n"
+                '  "capability_requests": [],\n'
+                '  "artifacts": [],\n'
+                '  "tests": [],\n'
+                '  "patches": [],\n'
+                '  "lessons": [],\n'
+                '  "next_actions": [],\n'
+                '  "blocked_reason": "",\n'
+                '  "failure_type": ""\n'
+                "}\n"
+                "[/SUBAGENT_RESULT]"
+            ),
+            backend=self.name,
+        )
+
+
 class FlakyThenAcceptedSubagentBackend(BaseBackend):
     """测试用后端：第一次模型调用失败，第二次返回可验收结果。"""
 
@@ -993,6 +1041,29 @@ def test_subagent_runner_parses_structured_output():
         debrief = Path(loaded.debrief_file).read_text(encoding="utf-8")
         assert "Runner Artifacts" in debrief
         assert "Runner Lessons" in debrief
+
+
+def test_subagent_runner_enforces_write_boundary_at_tool_layer():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        backend = BoundaryWriteSubagentBackend()
+        agent.backend = backend
+        task = agent.subagents.create_run(
+            goal="确认 subagent 不能写出自己的工单目录",
+            thought="模型即使要求写 README，也应该被工具层挡住。",
+            plan=["尝试写文件", "检查工具结果", "输出结构化证据"],
+            allowed_tools=["write_file"],
+        )
+
+        result = agent.run_subagent(task.id, dry_run=False, probe=False)
+
+        assert result.structured_output_found
+        assert result.structured_output_ok
+        assert len(backend.prompts) == 2
+        assert not (root / "README.md").exists()
+        assert "写入被阻止" in backend.prompts[1]
 
 
 def test_subagent_runner_repairs_missing_structured_output():

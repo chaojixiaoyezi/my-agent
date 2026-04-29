@@ -372,6 +372,59 @@ def test_tool_allowlist_limits_prompt_and_execution():
         assert "未授权" in blocked.output
 
 
+def test_write_boundary_blocks_subagent_writes_outside_allowed_roots():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        registry = ToolRegistry(
+            workspace,
+            max_chars=12000,
+            max_entries=100,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+        )
+        task_dir = workspace / "subs" / "run-1"
+        boundary = {
+            "allowed_write_roots": [str(task_dir)],
+            "forbidden_write_roots": [str(task_dir / "private")],
+            "locked_files": ["subs/run-1/LOCKED.md"],
+        }
+
+        ok = registry.execute_call(
+            {"tool": "write_file", "path": "subs/run-1/output.md", "content": "ok"},
+            allowed_tools=["write_file"],
+            write_boundary=boundary,
+        )
+        outside = registry.execute_call(
+            {"tool": "write_file", "path": "README.md", "content": "bad"},
+            allowed_tools=["write_file"],
+            write_boundary=boundary,
+        )
+        forbidden = registry.execute_call(
+            {"tool": "write_file", "path": "subs/run-1/private/secret.md", "content": "bad"},
+            allowed_tools=["write_file"],
+            write_boundary=boundary,
+        )
+        locked = registry.execute_call(
+            {"tool": "write_file", "path": "subs/run-1/LOCKED.md", "content": "bad"},
+            allowed_tools=["write_file"],
+            write_boundary=boundary,
+        )
+
+        assert ok.ok
+        assert (task_dir / "output.md").read_text(encoding="utf-8") == "ok"
+        assert not outside.ok
+        assert "allowed_write_roots" in outside.output
+        assert not (workspace / "README.md").exists()
+        assert not forbidden.ok
+        assert "forbidden_write_roots" in forbidden.output
+        assert not locked.ok
+        assert "locked_files" in locked.output
+
+
 def test_write_and_append_file_tools():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)

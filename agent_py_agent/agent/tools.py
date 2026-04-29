@@ -949,6 +949,7 @@ class ToolRegistry:
         payload: dict[str, Any],
         *,
         allowed_tools: list[str] | None = None,
+        write_boundary: dict[str, object] | None = None,
     ) -> ToolExecutionResult:
         """执行单个工具调用。"""
 
@@ -968,6 +969,15 @@ class ToolRegistry:
             return ToolExecutionResult(str(tool_name), False, f"未知工具: {tool_name}")
 
         params = {key: value for key, value in payload.items() if key != "tool"}
+        boundary_error = _validate_write_boundary(
+            str(tool_name),
+            params,
+            workspace_root=self.workspace_root,
+            write_boundary=write_boundary,
+        )
+        if boundary_error:
+            return ToolExecutionResult(str(tool_name), False, boundary_error)
+
         try:
             return tool.execute(params)
         except Exception as exc:
@@ -1006,6 +1016,106 @@ def _allowed_tool_set(allowed_tools: list[str] | None) -> set[str] | None:
     if allowed_tools is None:
         return None
     return {str(item) for item in allowed_tools if str(item).strip()}
+
+
+WRITE_TOOL_NAMES = {"write_file", "append_file", "replace_in_file"}
+
+
+def _validate_write_boundary(
+    tool_name: str,
+    params: dict[str, Any],
+    *,
+    workspace_root: Path,
+    write_boundary: dict[str, object] | None,
+) -> str:
+    """Enforce subagent write boundaries before filesystem write tools run.
+
+    In plain terms: prompts can tell a subagent "only write here", but prompts
+    are not a lock. This check is the real lock at the tool layer: a write must
+    stay inside allowed roots and avoid forbidden or locked paths.
+    """
+
+    if tool_name not in WRITE_TOOL_NAMES or write_boundary is None:
+        return ""
+
+    raw_path = params.get("path")
+    if not raw_path:
+        return ""
+
+    try:
+        target = _resolve_boundary_path(str(raw_path), workspace_root)
+    except ValueError as exc:
+        return str(exc)
+
+    allowed_roots = _boundary_paths(write_boundary.get("allowed_write_roots"), workspace_root)
+    if not allowed_roots:
+        return "写入被阻止: 当前 subagent 没有配置 allowed_write_roots，不能执行写文件工具。"
+    if not any(_is_relative_to(target, root) for root in allowed_roots):
+        roots = ", ".join(_display_path(root, workspace_root) for root in allowed_roots)
+        return (
+            "写入被阻止: 目标路径不在 allowed_write_roots 内。"
+            f" target={_display_path(target, workspace_root)} allowed={roots}"
+        )
+
+    forbidden_roots = _boundary_paths(write_boundary.get("forbidden_write_roots"), workspace_root)
+    for root in forbidden_roots:
+        if _is_relative_to(target, root):
+            return (
+                "写入被阻止: 目标路径落在 forbidden_write_roots 内。"
+                f" target={_display_path(target, workspace_root)} forbidden={_display_path(root, workspace_root)}"
+            )
+
+    locked_paths = _boundary_paths(write_boundary.get("locked_files"), workspace_root)
+    for locked in locked_paths:
+        if target == locked or _is_relative_to(target, locked):
+            return (
+                "写入被阻止: 目标路径已被 locked_files 锁定。"
+                f" target={_display_path(target, workspace_root)} locked={_display_path(locked, workspace_root)}"
+            )
+
+    return ""
+
+
+def _boundary_paths(raw_paths: object, workspace_root: Path) -> list[Path]:
+    if not isinstance(raw_paths, list):
+        return []
+    paths: list[Path] = []
+    for raw in raw_paths:
+        text = str(raw).strip()
+        if not text:
+            continue
+        try:
+            paths.append(_resolve_boundary_path(text, workspace_root))
+        except ValueError:
+            continue
+    return paths
+
+
+def _resolve_boundary_path(raw_path: str, workspace_root: Path) -> Path:
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        candidate = workspace_root / candidate
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(workspace_root)
+    except ValueError as exc:
+        raise ValueError(f"路径超出允许的工作区范围: {resolved}") from exc
+    return resolved
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _display_path(path: Path, workspace_root: Path) -> str:
+    try:
+        return str(path.relative_to(workspace_root))
+    except ValueError:
+        return str(path)
 
 
 _XMLISH_TOOL_BLOCK_RE = re.compile(

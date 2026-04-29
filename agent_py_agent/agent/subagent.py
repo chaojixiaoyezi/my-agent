@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 from .capabilities import CapabilityRouter, CapabilitySearchHit
 from .capability_config import CapabilityConfig
+from .file_io import append_jsonl
 
 if TYPE_CHECKING:
     from .local_store import LocalStore
@@ -3065,9 +3066,7 @@ class SubAgentManager:
         """写入全局 action apply 审计日志。"""
 
         jsonl = self.workspace / "subagent_action_apply_log.jsonl"
-        jsonl.parent.mkdir(parents=True, exist_ok=True)
-        with jsonl.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
+        append_jsonl(jsonl, asdict(record))
 
         markdown = self.workspace / "ACTION_APPLY_LOG.md"
         if not markdown.exists():
@@ -3624,8 +3623,7 @@ class SubAgentManager:
         """写入全局验收审计日志。"""
 
         jsonl = self.workspace / "subagent_acceptance_log.jsonl"
-        with jsonl.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
+        append_jsonl(jsonl, asdict(record))
 
         markdown = self.workspace / "ACCEPTANCE_REVIEW_LOG.md"
         if not markdown.exists():
@@ -3657,8 +3655,7 @@ class SubAgentManager:
         """写入全局 patch 审核日志。"""
 
         jsonl = self.workspace / "subagent_patch_review_log.jsonl"
-        with jsonl.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
+        append_jsonl(jsonl, asdict(record))
 
         markdown = self.workspace / "PATCH_REVIEW_LOG.md"
         if not markdown.exists():
@@ -3675,8 +3672,7 @@ class SubAgentManager:
         """写入全局调度器审计日志。"""
 
         jsonl = self.workspace / "subagent_dispatch_log.jsonl"
-        with jsonl.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
+        append_jsonl(jsonl, asdict(record))
 
         markdown = self.workspace / "DISPATCH_LOG.md"
         if not markdown.exists():
@@ -3694,8 +3690,7 @@ class SubAgentManager:
         """写入全局 watch 审计日志。"""
 
         jsonl = self.workspace / "subagent_dispatch_watch_log.jsonl"
-        with jsonl.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
+        append_jsonl(jsonl, asdict(record))
 
         markdown = self.workspace / "DISPATCH_WATCH_LOG.md"
         if not markdown.exists():
@@ -3712,8 +3707,7 @@ class SubAgentManager:
         """写入全局父代理 planner 审计日志。"""
 
         jsonl = self.workspace / "parent_planner_log.jsonl"
-        with jsonl.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
+        append_jsonl(jsonl, asdict(record))
 
         markdown = self.workspace / "PARENT_PLANNER_LOG.md"
         if not markdown.exists():
@@ -4109,9 +4103,7 @@ class SubAgentManager:
         """写入 capability route 审计日志。"""
 
         jsonl = self.workspace / "subagent_capability_route_log.jsonl"
-        jsonl.parent.mkdir(parents=True, exist_ok=True)
-        with jsonl.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
+        append_jsonl(jsonl, asdict(record))
 
         markdown = self.workspace / "CAPABILITY_ROUTE_LOG.md"
         if not markdown.exists():

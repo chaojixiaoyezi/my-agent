@@ -20,6 +20,7 @@ from agent_py_agent.__main__ import (
 )
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.file_io import append_jsonl
 from agent_py_agent.agent.local_store import LocalStore
 from agent_py_agent.agent.memory import JsonlMemory
 
@@ -51,6 +52,30 @@ def test_local_store_records_events_and_searches():
         events = (root / "events.jsonl").read_text(encoding="utf-8").splitlines()
         assert len(events) == 1
         assert json.loads(events[0])["event_type"] == "record_upserted"
+
+
+def test_locked_jsonl_append_preserves_complete_lines_under_threads():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        path = root / "events.jsonl"
+        total_threads = 8
+        per_thread = 25
+
+        def writer(worker: int) -> None:
+            for index in range(per_thread):
+                append_jsonl(path, {"worker": worker, "index": index})
+
+        threads = [threading.Thread(target=writer, args=(worker,)) for worker in range(total_threads)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        lines = path.read_text(encoding="utf-8").splitlines()
+        records = [json.loads(line) for line in lines]
+
+        assert len(records) == total_threads * per_thread
+        assert len({(item["worker"], item["index"]) for item in records}) == total_threads * per_thread
 
 
 def test_local_store_like_fallback_when_fts_disabled():

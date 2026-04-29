@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
+from .file_io import append_jsonl
+
 
 PREVIEW_CHARS = 12000
 
@@ -695,21 +697,17 @@ class LocalStore:
             """,
             (event.event_id, event.event_type, event.record_id, payload_json, event.created_at),
         )
-        with self.events_path.open("a", encoding="utf-8") as file:
-            file.write(
-                json.dumps(
-                    {
-                        "event_id": event.event_id,
-                        "event_type": event.event_type,
-                        "record_id": event.record_id,
-                        "payload": event.payload,
-                        "created_at": event.created_at,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                )
-                + "\n"
-            )
+        append_jsonl(
+            self.events_path,
+            {
+                "event_id": event.event_id,
+                "event_type": event.event_type,
+                "record_id": event.record_id,
+                "payload": event.payload,
+                "created_at": event.created_at,
+            },
+            sort_keys=True,
+        )
         return event
 
     def _row_to_result(self, row: sqlite3.Row, *, score: float = 0.0) -> LocalSearchResult:
