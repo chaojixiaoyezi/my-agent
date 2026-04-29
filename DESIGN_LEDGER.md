@@ -19,6 +19,27 @@
 暂停         暂时不做，但保留背景
 ```
 
+## 2026-04-29 / 大文件拆分第一步
+
+状态：部分落地
+
+思路：
+- `__main__.py` 应该是 CLI 入口，不应该长期承载 gateway 文件协议细节。
+- gateway 是独立协议边界：路径、请求队列、adapter、恢复、响应、索引重建都可以单独成模块。
+- 新拆出的模块必须按“两层注释”写：第一行给 LLM 技术契约，第二行开始给人讲大白话。
+
+已落地：
+- 新增 `agent_py_agent/agent/gateway.py`。
+- 从 `__main__.py` 拆出 gateway 路径、adapter 路径、JSON 文件读写、pid/日志小工具、请求提交、响应等待、processing 恢复、adapter inbox/outbox 处理、gateway 请求执行和 gateway 索引重建。
+- `__main__.py` 保留旧导入兼容，测试仍可从 `agent_py_agent.__main__` import 旧函数名。
+- 新增 `ARCHITECTURE_GUIDE.md`，记录架构边界、拆分原则和两层注释规范。
+- `gateway.py` 的关键函数都补了 LLM contract + Human version 两层注释。
+
+后续方向：
+- `subagent.py` 继续拆：models、rendering、parsing、dispatch、acceptance。
+- `__main__.py` 继续拆：scenario-test、local-doctor/local-rebuild。
+- 后续每拆一块，都要保留测试命令和变更说明。
+
 ## 2026-04-29 / 本地事实源
 
 状态：部分落地

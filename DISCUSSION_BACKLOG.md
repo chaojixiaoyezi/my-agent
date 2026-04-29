@@ -82,6 +82,12 @@ subagent 可能输出一份看起来很完整的验收材料，但里面的测�
 
 ### 6. 大文件需要逐步拆开，不然以后维护会越来越吃力
 
+本轮进展：
+
+已经先把 gateway 文件队列、adapter 文件协议、gateway processing 恢复和 gateway 索引重建从 `__main__.py` 拆到 `agent_py_agent/agent/gateway.py`。这样 CLI 入口少背一块底层协议细节，后续 gateway 继续升级也不用在 main 里堆。
+
+这一步还没有把 `subagent.py` 拆完。它会是下一块更大的整理对象，建议按 `models / rendering / parsing / dispatch / acceptance` 这些边界继续拆。
+
 现在 `agent_py_agent/__main__.py` 和 `agent_py_agent/agent/subagent.py` 都已经偏大。
 
 大白话说，就是很多职责堆在一个文件里：命令行参数、gateway 控制、状态检查、修复逻辑、subagent 调度、验收、日志写入都挤在一起。

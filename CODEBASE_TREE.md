@@ -10,11 +10,12 @@
 simple-python-agent-v0.3/                      # 项目根目录，放代码、说明文档和验证记录
 |-- pyproject.toml                             # Python packaging 配置，提供 my-agent console script
 |-- CLI_REFERENCE.md                           # 完整 CLI 参数手册，说明每个命令和参数
+|-- ARCHITECTURE_GUIDE.md                      # 架构边界、拆分顺序和两层注释规则，给人和 LLM 都看
 |-- GATEWAY_DESIGN.md                          # gateway 常驻形态、外部方案对比和本项目目标设计
 |-- GATEWAY_RESEARCH.md                        # gateway 大调研，比较 daemon、任务队列、workflow、Notebook 和 AI gateway 方案
 |-- agent_py_agent/                            # Python 包目录，核心代码主要都在这里
 |   |-- __init__.py                            # 安装包初始化文件，记录包版本
-|   |-- __main__.py                            # CLI 入口，负责 run/chat/status/timeline、记忆、subagent 看板、巡检、gateway 管理和本地请求队列
+|   |-- __main__.py                            # CLI 入口，负责命令解析、参数组装、结果打印和后台线程启动
 |   |-- README.md                              # 包级说明文档
 |   |-- agent/                                 # 智能体核心模块目录
 |   |   |-- __init__.py                        # 包初始化文件
@@ -23,6 +24,8 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- capability_config.py              # 能力路由配置结构，管理 skill/tool 授权和子代理上抛参数
 |   |   |-- config.py                          # 配置结构和简化 YAML 加载器
 |   |   |-- core.py                            # 智能体主调度器，把 prompt、记忆、后端、工具循环和 subagent runner 串起来
+|   |   |-- file_io.py                         # 文件 I/O 小工具，当前负责带锁追加 JSONL
+|   |   |-- gateway.py                         # gateway 文件队列、adapter、请求恢复和 gateway 索引重建
 |   |   |-- local_store.py                     # 本地事实源，负责 SQLite/FTS5 索引、正文文件和 JSONL 审计事件
 |   |   |-- memory.py                          # 本地记忆系统，JSONL 记原始流水，LocalStore 负责索引检索
 |   |   |-- prompting.py                       # prompt 拼装器，负责把人格、记忆、工具信息和用户任务合成最终上下文
@@ -55,6 +58,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |-- AGENTS.md                                  # AI 开发规范，约束后续开发、配置、文档和自学习改动
 |-- CODEBASE_TREE.md                           # 当前这份目录树说明
 |-- DESIGN_LEDGER.md                           # 设计思路台账，记录新想法、落地状态和后续方向
+|-- DISCUSSION_BACKLOG.md                      # 功能开发之外的系统问题讨论清单
 |-- EVIDENCE.md                                # 过程证据记录
 |-- RESULT.md                                  # 结果记录
 |-- RUNLOG.md                                  # 运行日志说明
@@ -116,6 +120,34 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 5. 执行结果写回工单，状态进入 `AWAITING_ACCEPTANCE`，等待独立验收。
 
 简单说，`core.py` 负责把“会想”变成“会做”。
+
+### `agent_py_agent/agent/gateway.py`
+
+这是 gateway 文件协议层，从 `__main__.py` 里拆出来。
+
+它现在负责：
+- `GatewayPaths` / `AdapterPaths`：集中描述 gateway 和 adapter 的所有文件路径。
+- gateway 请求队列：pending、processing、done、failed、responses 的文件流转。
+- gateway request 执行：读取请求、调用 `agent.run()`、写响应、写 history。
+- adapter 文件协议：inbox JSON 转 gateway ask，结果写到 outbox JSON。
+- processing 恢复：gateway 重启或请求超时后，重排或失败归档。
+- gateway LocalStore 重建索引：从 history、队列和 response 文件恢复可搜索记录。
+
+拆出来以后，`__main__.py` 不再需要知道每个 gateway 文件怎么命名、怎么归档。
+CLI 只负责启动命令和打印结果；协议细节交给 `gateway.py`。
+
+### `agent_py_agent/agent/file_io.py`
+
+这是本地文件 I/O 小工具层。
+
+当前只有一个核心职责：带锁追加 JSONL。
+
+为什么需要它：
+- memory、LocalStore、gateway、subagent 都会写 JSONL 审计流水。
+- gateway worker / runner / watch 以后可能并发写同一个文件。
+- 如果没有锁，两条 JSON 可能互相插到一起，账本就坏了。
+
+`append_jsonl()` 会先拿同进程线程锁和文件旁边的 `.lock`，再写完整一行。
 
 ### `agent_py_agent/agent/prompting.py`
 
