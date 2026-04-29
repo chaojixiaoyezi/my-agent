@@ -871,6 +871,7 @@ suggested_tool: 是否建议开发成 tool
 
 已落地：
 - 新增 `GATEWAY_DESIGN.md`，记录 通道运行时、长期助手、模型助手 session 和 会话运行时 云任务形态的参考。
+- 新增 `GATEWAY_RESEARCH.md`，扩展调研到进程守护、AI gateway、Jupyter kernel、Celery/RQ/n8n、Temporal/LangGraph/CrewAI、Node-RED/Home Assistant、Ollama/PM2/Supervisor/Task Scheduler 等方案。
 - 新增用户层任务规模配置：`task_max_subagents`、`task_max_grandchildren`，默认 `0` 表示不设硬上限。
 - 新增未来 gateway 策略配置：`scheduler_mode`、`runner_concurrency`、`runner_start_rate`、`runner_timeout_seconds`、`runner_failure_policy`，默认 `auto`。
 - `daemon_max_runners` 默认改为 `"auto"`；当前前台 daemon 会映射成保守值 1。
