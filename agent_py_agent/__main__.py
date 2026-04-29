@@ -518,6 +518,51 @@ def cmd_memory_search(args) -> int:
     return 0
 
 
+def cmd_local_store_status(args) -> int:
+    """显示本地事实源状态。"""
+
+    agent = make_agent(args)
+    print(json.dumps(agent.local_store.stats(), ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_local_search(args) -> int:
+    """搜索本地事实源。"""
+
+    agent = make_agent(args)
+    hits = agent.local_store.search(
+        args.query,
+        limit=args.limit,
+        source_type=args.source_type,
+        visibility=args.visibility,
+    )
+    for hit in hits:
+        payload = hit.__dict__.copy()
+        if args.preview_chars >= 0:
+            payload["content"] = payload["content"][: args.preview_chars]
+        print(json.dumps(payload, ensure_ascii=False))
+    return 0
+
+
+def cmd_local_index_memory(args) -> int:
+    """把现有 JSONL 记忆补建到本地事实源索引。"""
+
+    agent = make_agent(args)
+    count = agent.memory.index_all()
+    print(
+        json.dumps(
+            {
+                "indexed": count,
+                "stats": agent.local_store.stats(),
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def cmd_spawn(args) -> int:
     """生成子任务记录。"""
 
@@ -2818,6 +2863,20 @@ def build_parser() -> argparse.ArgumentParser:
     memory_search.add_argument("query", help="搜索关键词")
     memory_search.add_argument("--limit", type=int, default=5, help="最多显示条数")
     memory_search.set_defaults(func=cmd_memory_search)
+
+    local_store_status = sub.add_parser("local-store-status", help="查看本地事实源状态")
+    local_store_status.set_defaults(func=cmd_local_store_status)
+
+    local_search = sub.add_parser("local-search", help="搜索本地事实源 SQLite/FTS5 索引")
+    local_search.add_argument("query", help="搜索关键词；为空时可用 local-store-status 看整体状态")
+    local_search.add_argument("--limit", type=int, default=5, help="最多显示条数")
+    local_search.add_argument("--source-type", help="按来源过滤，如 memory/gateway_request/subagent_run")
+    local_search.add_argument("--visibility", help="按可见性过滤，默认不过滤")
+    local_search.add_argument("--preview-chars", type=int, default=500, help="每条命中最多打印多少正文字符；-1 表示完整打印")
+    local_search.set_defaults(func=cmd_local_search)
+
+    local_index_memory = sub.add_parser("local-index-memory", help="把现有 JSONL 记忆补建到本地事实源")
+    local_index_memory.set_defaults(func=cmd_local_index_memory)
 
     chat = sub.add_parser("chat", help="启动交互循环，反复与智能体交流")
     chat.add_argument("--inject", action="append", help="启动时注入 prompt，可多次传入")

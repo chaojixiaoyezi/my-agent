@@ -26,6 +26,17 @@ model_backend: "anthropic_compatible"
 # 记忆文件路径：JSONL 格式，每行一条记录
 memory_path: "data/memory.jsonl"
 
+# 本地事实源（第一版）：SQLite + FTS5 + 文件系统 + JSONL
+# - SQLite: 保存结构化索引和审计事件，适合统计、过滤、恢复。
+# - FTS5: SQLite 自带全文检索扩展，能用时就走本地全文搜索；不能用时自动退回 LIKE。
+# - files: 正文和未来大 artifact 放文件系统，避免数据库过胖，也方便人工直接打开。
+# - events.jsonl: 追加式流水账，方便排查“什么时候写了什么”，后续也适合上传同步。
+# 普通用户不需要改这里；高级用户可以把这组路径放到独立数据盘或同步目录。
+local_store_path: "data/local_store/local.db"
+local_store_files_dir: "data/local_store/files"
+local_store_events_path: "data/local_store/events.jsonl"
+local_store_fts_enabled: true
+
 # 每轮请求最多带多少条相关记忆进入 prompt
 memory_top_k: 5
 

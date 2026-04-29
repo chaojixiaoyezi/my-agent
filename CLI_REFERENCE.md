@@ -128,6 +128,9 @@ Ctrl+C
 | `remember` | 手动写入一条记忆 | 是 | 否 |
 | `memory-list` | 列出最近记忆 | 否 | 否 |
 | `memory-search` | 搜索记忆 | 否 | 否 |
+| `local-store-status` | 查看本地事实源状态 | 否 | 否 |
+| `local-search` | 搜索 SQLite/FTS5 本地事实源 | 否 | 否 |
+| `local-index-memory` | 把旧 JSONL 记忆补建到本地事实源 | 是 | 否 |
 | `chat` | 启动交互循环 | 默认写记忆，可用 `--no-save` 关闭 | 是；加 `--gateway` 时由后台 gateway 调用 |
 | `spawn-subagents` | 拆分并创建 subagent 工单 | 是 | 否 |
 | `subagents` | 查看 subagent 看板 | 否 | 否 |
@@ -192,6 +195,40 @@ my-agent memory-search "表格" --limit 5
 | --- | --- | --- |
 | `query` | - | 必填，搜索关键词。 |
 | `--limit <n>` | `5` | 最多显示条数。 |
+
+## `local-store-status`
+
+```powershell
+my-agent local-store-status
+```
+
+显示本地事实源当前状态，包括 SQLite 数据库路径、正文文件目录、审计 JSONL 路径、FTS5 是否可用、记录数和事件数。
+
+这条命令不会调用模型，也不会写业务记录；它只会在启动 agent 时确保本地事实源结构存在。
+
+## `local-search`
+
+```powershell
+my-agent local-search "表格" --source-type memory --limit 5
+```
+
+搜索本地事实源。它会优先走 SQLite FTS5；如果当前 Python/SQLite 不支持 FTS5，或某次查询被 FTS5 语法拒绝，会自动退回普通 LIKE 检索。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `query` | - | 必填，搜索关键词。 |
+| `--limit <n>` | `5` | 最多显示条数。 |
+| `--source-type <type>` | - | 只搜索某类来源，例如 `memory`、`gateway_request`、`subagent_run`。 |
+| `--visibility <value>` | - | 只搜索某种可见性，默认不过滤。第一版常见值是 `private`。 |
+| `--preview-chars <n>` | `500` | 每条命中最多打印多少正文字符；`-1` 表示完整打印。 |
+
+## `local-index-memory`
+
+```powershell
+my-agent local-index-memory
+```
+
+把已有 `memory_path` 里的 JSONL 记忆补建到 SQLite/FTS5 本地事实源。升级到这版之后可以先跑一次，后续新记忆会自动双写：JSONL 保留原始流水，SQLite/FTS5 负责检索。
 
 ## `chat`
 

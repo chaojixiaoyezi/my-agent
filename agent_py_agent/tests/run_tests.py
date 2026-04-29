@@ -15,6 +15,7 @@ RUN_ENV.setdefault("PYTHONIOENCODING", "utf-8")
 TEST_TMP_HANDLE = tempfile.TemporaryDirectory(prefix="agent-full-smoke-")
 TEST_TMP = Path(TEST_TMP_HANDLE.name)
 TEST_MEMORY = TEST_TMP / "memory.jsonl"
+TEST_LOCAL_STORE = TEST_TMP / "local_store"
 TEST_SUBAGENTS = TEST_TMP / "subagents"
 TEST_GATEWAY = TEST_TMP / "gateway"
 TEST_CONFIG = TEST_TMP / "agent_config.yaml"
@@ -22,6 +23,9 @@ TEST_CONFIG.write_text(
     (ROOT / "config" / "agent_config.yaml").read_text(encoding="utf-8")
     + "\n# full smoke test isolation\n"
     + f'memory_path: "{str(TEST_MEMORY).replace("\\", "/")}"\n'
+    + f'local_store_path: "{str(TEST_LOCAL_STORE / "local.db").replace("\\", "/")}"\n'
+    + f'local_store_files_dir: "{str(TEST_LOCAL_STORE / "files").replace("\\", "/")}"\n'
+    + f'local_store_events_path: "{str(TEST_LOCAL_STORE / "events.jsonl").replace("\\", "/")}"\n'
     + f'subagent_workspace: "{str(TEST_SUBAGENTS).replace("\\", "/")}"\n'
     + f'gateway_workspace: "{str(TEST_GATEWAY).replace("\\", "/")}"\n'
     + "daemon_planner: false\n"
@@ -137,6 +141,9 @@ run(agent_cmd("--help"))
 run(agent_cmd("run", "测试动态 prompt", "--inject", "请用三点回答", "--no-save"))
 run(agent_cmd("remember", "我喜欢清晰的表格", "--kind", "preference"))
 run(agent_cmd("memory-search", "表格"))
+run(agent_cmd("local-store-status"))
+run(agent_cmd("local-index-memory"))
+run(agent_cmd("local-search", "表格", "--source-type", "memory"))
 run(agent_cmd("spawn-subagents", "开发 CLI 智能体", "--count", "2"))
 run(agent_cmd("subagents-probe", "--limit", "2"))
 run(agent_cmd("subagents-due-check", "--limit", "2"))

@@ -2,19 +2,23 @@ from __future__ import annotations
 
 """本地记忆模块。
 
-当前实现比较朴素，但很好懂：
-- 每条记忆存成一行 JSON
-- 全部放在一个 `.jsonl` 文件里
-- 检索时做简单关键词匹配
+记忆现在采用“双轨落盘”：
+- JSONL 仍然是原始记忆流水，每行一条记录，方便直接打开查看。
+- 可选 LocalStore 会把同一条记忆索引到 SQLite + FTS5，方便更快检索。
 
-它不是向量数据库，也没有复杂召回策略。
-说白了，现在先保证“有记忆、能落盘、能搜到”，后面再逐步升级。
+这样做的好处是：简单文件还在，后续要做本地检索、同步、迁移或审计时，
+也已经有结构化账本可以接。
 """
 
+import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .local_store import LocalSearchResult, LocalStore
 
 
 @dataclass
@@ -38,12 +42,13 @@ class MemoryRecord:
 class JsonlMemory:
     """基于 JSONL 文件的轻量记忆存储。
 
-    这里没有上数据库，就是因为项目当前优先要“简单可跑”。
-    你甚至可以直接用文本编辑器打开记忆文件看里面存了什么。
+    JSONL 是事实流水，LocalStore 是检索索引。
+    即使 SQLite 或 FTS5 出问题，JSONL 记忆也不应该因此写不进去。
     """
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, local_store: "LocalStore | None" = None):
         self.path = Path(path)
+        self.local_store = local_store
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def add(
@@ -65,6 +70,7 @@ class JsonlMemory:
         )
         with self.path.open("a", encoding="utf-8") as file:
             file.write(record.to_json() + "\n")
+        self._try_index_record(record)
         return record
 
     def all(self) -> list[MemoryRecord]:
@@ -81,13 +87,32 @@ class JsonlMemory:
         return records
 
     def search(self, query: str, top_k: int = 5) -> list[MemoryRecord]:
-        """按简单关键词规则搜索记忆。
+        """搜索记忆。
 
-        这里不是语义搜索，而是很直接的文本匹配。
-        这么做的优点是简单、稳定、没有外部依赖；
-        缺点是智能程度有限。
+        有 LocalStore 时优先走 SQLite/FTS5。
+        没有索引、索引为空或索引临时失败时，退回 JSONL 关键词检索。
         """
 
+        indexed = self._search_local_store(query, top_k)
+        if indexed:
+            return indexed
+        return self._search_jsonl(query, top_k)
+
+    def index_all(self) -> int:
+        """把现有 JSONL 记忆补建到 LocalStore。
+
+        这个命令适合第一次升级到 SQLite/FTS5 后运行一次。
+        """
+
+        if not self.local_store:
+            return 0
+        count = 0
+        for record in self.all():
+            self._index_record(record)
+            count += 1
+        return count
+
+    def _search_jsonl(self, query: str, top_k: int = 5) -> list[MemoryRecord]:
         query_terms = {term.lower() for term in query.split() if term.strip()}
         scored: list[tuple[int, float, MemoryRecord]] = []
         for rec in self.all():
@@ -99,3 +124,53 @@ class JsonlMemory:
                 scored.append((score, rec.created_at, rec))
         scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
         return [record for _, _, record in scored[:top_k]]
+
+    def _search_local_store(self, query: str, top_k: int) -> list[MemoryRecord]:
+        if not self.local_store:
+            return []
+        try:
+            hits = self.local_store.search(query, limit=top_k, source_type="memory")
+        except Exception:
+            return []
+        return [self._memory_from_hit(hit) for hit in hits]
+
+    def _try_index_record(self, record: MemoryRecord) -> None:
+        if not self.local_store:
+            return
+        try:
+            self._index_record(record)
+        except Exception:
+            # 记忆 JSONL 是主流水，索引失败不能让 chat/runner 主链路中断。
+            return
+
+    def _index_record(self, record: MemoryRecord) -> None:
+        if not self.local_store:
+            return
+        self.local_store.upsert_record(
+            source_type="memory",
+            source_id=self._source_id(record),
+            title=f"{record.kind}:{record.role}",
+            content=record.content,
+            metadata={
+                "role": record.role,
+                "kind": record.kind,
+                "tags": record.tags or [],
+                "created_at": record.created_at,
+            },
+        )
+
+    def _source_id(self, record: MemoryRecord) -> str:
+        payload = json.dumps(asdict(record), ensure_ascii=False, sort_keys=True)
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+        return f"{record.created_at:.6f}:{record.role}:{record.kind}:{digest}"
+
+    def _memory_from_hit(self, hit: "LocalSearchResult") -> MemoryRecord:
+        metadata = hit.metadata
+        tags = metadata.get("tags")
+        return MemoryRecord(
+            role=str(metadata.get("role") or "unknown"),
+            content=hit.content,
+            kind=str(metadata.get("kind") or "dialogue"),
+            tags=tags if isinstance(tags, list) else [],
+            created_at=float(metadata.get("created_at") or hit.created_at),
+        )

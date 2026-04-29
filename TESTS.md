@@ -27,6 +27,8 @@ python3 -m agent_py_agent subagents-route-capabilities --help
 python3 -m agent_py_agent subagents-acceptance --help
 python3 -m agent_py_agent subagents-patches --help
 python3 -m agent_py_agent subagents-dispatch --help
+python3 -m agent_py_agent local-store-status
+python3 -m agent_py_agent local-search "表格" --source-type memory
 ```
 
 Git 空白检查：
@@ -99,6 +101,20 @@ python3 -c "from agent_py_agent.tests.test_capabilities import test_skill_card_p
 - skill/tool 统一检索。
 - `0` 表示不限制。
 
+### Local Store
+
+```bash
+python3 -c "from agent_py_agent.tests.test_local_store import test_local_store_records_events_and_searches, test_local_store_like_fallback_when_fts_disabled, test_jsonl_memory_indexes_to_local_store, test_jsonl_memory_can_backfill_existing_records; test_local_store_records_events_and_searches(); test_local_store_like_fallback_when_fts_disabled(); test_jsonl_memory_indexes_to_local_store(); test_jsonl_memory_can_backfill_existing_records(); print('LOCAL_STORE_TEST_PASS')"
+```
+
+覆盖：
+- SQLite 记录表和审计事件写入。
+- FTS5 可用时走全文检索，不可用时自动退回 LIKE。
+- 正文落到文件系统。
+- 审计事件追加到 JSONL。
+- `JsonlMemory` 新记忆自动索引到 LocalStore。
+- 旧 `memory.jsonl` 可通过 `index_all()` / `local-index-memory` 补建索引。
+
 ## 标准完整冒烟测试
 
 命令：
@@ -123,6 +139,9 @@ my-agent gateway run --max-cycles 1 --interval 0 --max-runners 0 --no-planner
 my-agent gateway start
 my-agent gateway ask "真实 API gateway ask 冒烟"
 my-agent chat --gateway --no-save
+my-agent local-store-status
+my-agent local-index-memory
+my-agent local-search "表格" --source-type memory
 my-agent
 my-agent gateway stop --kill
 ```
@@ -147,6 +166,7 @@ my-agent gateway stop --kill
 - 跑一次隔离的 `gateway start -> gateway ask -> gateway status -> gateway stop`，确认本地 inbox/response 通道会触发真实 API。
 - 跑一次隔离的 `chat --gateway --no-save`，确认 chat 可以作为 gateway 客户端投递普通消息。
 - 跑一次隔离的无子命令 `my-agent`，确认会自动启动 gateway 并进入 gateway chat。
+- 跑一次 `local-store-status`、`local-index-memory` 和 `local-search`，确认本地事实源路径隔离、旧记忆可补建、SQLite/FTS5/LIKE 查询可用。
 - 自动发现测试会覆盖主代理从工具调用创建子代理、读取子代理看板、dry-run 调度，以及防止 `execute_runners=true` 在未 `apply=true` 时误触发真实 runner。
 - 通过自动发现测试覆盖 dispatch 规划、父代理 planner、runner、patch 审核、验收、watch 循环和 watch lock。
 - 跑 chat 真实模型路径。

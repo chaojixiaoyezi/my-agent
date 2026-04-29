@@ -13,6 +13,7 @@ from .backend import get_backend
 from .capabilities import CapabilityRouter
 from .capability_config import CapabilityConfig
 from .config import AgentConfig
+from .local_store import LocalStore
 from .memory import JsonlMemory
 from .prompting import PromptBuilder
 from .subagent import (
@@ -55,7 +56,13 @@ class SimpleAgent:
     def __init__(self, config: AgentConfig, root: str | Path):
         self.config = config
         self.root = Path(root)
-        self.memory = JsonlMemory(self.root / config.memory_path)
+        self.local_store = LocalStore(
+            self.root / config.local_store_path,
+            files_dir=self.root / config.local_store_files_dir,
+            events_path=self.root / config.local_store_events_path,
+            enable_fts=config.local_store_fts_enabled,
+        )
+        self.memory = JsonlMemory(self.root / config.memory_path, local_store=self.local_store)
         self.prompts = PromptBuilder(config, self.root)
         self.backend = get_backend(config.model_backend, config)
         self.subagents = SubAgentManager(self.root / config.subagent_workspace)
