@@ -3,6 +3,9 @@ from __future__ import annotations
 """智能体核心循环。"""
 
 import json
+import os
+import time
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -14,6 +17,7 @@ from .memory import JsonlMemory
 from .prompting import PromptBuilder
 from .subagent import (
     DispatchReport,
+    DispatchWatchReport,
     SubAgentExecutionContext,
     SubAgentManager,
     SubAgentRunnerResult,
@@ -455,6 +459,117 @@ class SimpleAgent:
         report = self.subagents.build_dispatch_report(records, dry_run=not apply)
         return self.subagents.write_dispatch_report(report, append_log=apply)
 
+    def watch_subagents(
+        self,
+        router: CapabilityRouter,
+        capability_config: CapabilityConfig | None = None,
+        *,
+        apply: bool = False,
+        execute_runners: bool = False,
+        max_runners: int = 1,
+        limit: int = 20,
+        reviewer: str = "parent-dispatch",
+        note: str = "",
+        runner_instruction: str = "",
+        max_cards: int = 0,
+        probe: bool = True,
+        take_over_by: str = "",
+        locked_files: list[str] | None = None,
+        interval: float = 30.0,
+        max_cycles: int = 0,
+        force_lock: bool = False,
+    ) -> DispatchWatchReport:
+        """以 watch 模式持续执行父代理调度。"""
+
+        if max_cycles < 0:
+            raise ValueError("max_cycles 不能小于 0。")
+        if interval < 0:
+            raise ValueError("interval 不能小于 0。")
+
+        cfg = capability_config or CapabilityConfig()
+        records = []
+        lock_path = self.subagents.workspace / "subagent_dispatch_watch.lock"
+        with _DispatchWatchLock(lock_path, force=force_lock) as lock:
+            cycle = 0
+            while max_cycles == 0 or cycle < max_cycles:
+                cycle += 1
+                started_at = time.time()
+                self.subagents.write_dispatch_watch_heartbeat(
+                    cycle=cycle,
+                    status="running",
+                    lock_path=str(lock_path),
+                    pid=os.getpid(),
+                    message="dispatch cycle started",
+                )
+                try:
+                    dispatch_report = self.dispatch_subagents(
+                        router,
+                        cfg,
+                        apply=apply,
+                        execute_runners=execute_runners,
+                        max_runners=max_runners,
+                        limit=limit,
+                        reviewer=reviewer,
+                        note=note,
+                        runner_instruction=runner_instruction,
+                        max_cards=max_cards,
+                        probe=probe,
+                        take_over_by=take_over_by,
+                        locked_files=locked_files or [],
+                    )
+                    ok = all(item.ok for item in dispatch_report.records)
+                    message = f"完成一轮 dispatch，records={len(dispatch_report.records)}。"
+                    record_count = len(dispatch_report.records)
+                    dispatch_summary = dispatch_report.summary
+                    evidence_paths = [
+                        str(self.subagents.workspace / "subagent_dispatch_report.json"),
+                        str(self.subagents.workspace / "SUBAGENT_DISPATCH.md"),
+                    ]
+                except Exception as exc:
+                    ok = False
+                    message = f"dispatch cycle failed: {exc}"
+                    record_count = 0
+                    dispatch_summary = {}
+                    evidence_paths = []
+
+                ended_at = time.time()
+                record = self.subagents.make_dispatch_watch_record(
+                    cycle=cycle,
+                    dry_run=not apply,
+                    ok=ok,
+                    message=message,
+                    dispatch_record_count=record_count,
+                    dispatch_summary=dispatch_summary,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    evidence_paths=evidence_paths,
+                )
+                records.append(record)
+                self.subagents.append_dispatch_watch_log(record)
+
+                more_cycles = max_cycles == 0 or cycle < max_cycles
+                self.subagents.write_dispatch_watch_heartbeat(
+                    cycle=cycle,
+                    status="sleeping" if more_cycles else "stopping",
+                    lock_path=str(lock_path),
+                    pid=os.getpid(),
+                    message=message,
+                )
+                if not more_cycles:
+                    break
+                time.sleep(interval)
+
+            self.subagents.write_dispatch_watch_heartbeat(
+                cycle=cycle,
+                status="stopped",
+                lock_path=str(lock_path),
+                pid=os.getpid(),
+                message=f"watch stopped; lock={lock.token}",
+            )
+
+        report = self.subagents.build_dispatch_watch_report(records, dry_run=not apply)
+        return self.subagents.write_dispatch_watch_report(report)
+
 
 def _build_subagent_runner_prompt(
     context: SubAgentExecutionContext,
@@ -571,3 +686,42 @@ def _task_has_runner_patches(task: SubAgentTask) -> bool:
     except (OSError, json.JSONDecodeError, TypeError):
         return False
     return isinstance(payload.get("patches"), list) and bool(payload.get("patches"))
+
+
+class _DispatchWatchLock:
+    """简单跨平台文件锁，避免多个父代理同时 watch。"""
+
+    def __init__(self, path: Path, *, force: bool = False):
+        self.path = path
+        self.force = force
+        self.token = uuid.uuid4().hex
+        self.acquired = False
+
+    def __enter__(self) -> "_DispatchWatchLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.force and self.path.exists():
+            self.path.unlink()
+        payload = {
+            "token": self.token,
+            "pid": os.getpid(),
+            "created_at": time.time(),
+        }
+        try:
+            with self.path.open("x", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False, indent=2))
+        except FileExistsError as exc:
+            raise RuntimeError(
+                f"dispatch watch lock 已存在: {self.path}；确认没有父代理在运行后可使用 --force-lock。"
+            ) from exc
+        self.acquired = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if not self.acquired or not self.path.exists():
+            return
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if payload.get("token") == self.token:
+            self.path.unlink()

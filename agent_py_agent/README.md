@@ -239,6 +239,18 @@ python3 -m agent_py_agent subagents-dispatch --apply
 python3 -m agent_py_agent subagents-dispatch --apply --execute-runners
 ```
 
+watch 常驻循环：
+
+```bash
+python3 -m agent_py_agent subagents-dispatch --watch --interval 30
+```
+
+安全跑一轮 watch：
+
+```bash
+python3 -m agent_py_agent subagents-dispatch --watch --max-cycles 1 --interval 0
+```
+
 生成执行上下文：
 
 ```bash

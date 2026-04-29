@@ -1416,3 +1416,62 @@ def test_subagent_dispatch_apply_executes_runner_and_accepts():
         assert loaded.status == "DONE"
         assert loaded.verification_status == "VERIFIED"
         assert loaded.evidence[0].summary == "调度器结构化执行证据"
+
+
+def test_subagent_dispatch_watch_runs_one_cycle_and_releases_lock():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        agent.subagents.create_run(
+            goal="watch 调度 dry-run",
+            thought="等待 watch 调度一轮。",
+            plan=["dispatch"],
+        )
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+
+        report = agent.watch_subagents(
+            router,
+            CapabilityConfig(),
+            apply=False,
+            max_cycles=1,
+            interval=0,
+            max_runners=1,
+        )
+        workspace = root / "subs"
+
+        assert report.summary["total"] == 1
+        assert report.records[0].ok
+        assert report.records[0].dispatch_record_count >= 1
+        assert (workspace / "subagent_dispatch_watch_report.json").exists()
+        assert (workspace / "SUBAGENT_DISPATCH_WATCH.md").exists()
+        assert (workspace / "subagent_dispatch_watch_heartbeat.json").exists()
+        assert (workspace / "DISPATCH_WATCH_LOG.md").exists()
+        assert not (workspace / "subagent_dispatch_watch.lock").exists()
+
+
+def test_subagent_dispatch_watch_lock_prevents_second_parent():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+        workspace = root / "subs"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "subagent_dispatch_watch.lock").write_text(
+            json.dumps({"token": "other", "pid": 123, "created_at": time.time()}),
+            encoding="utf-8",
+        )
+
+        try:
+            agent.watch_subagents(
+                router,
+                CapabilityConfig(),
+                apply=False,
+                max_cycles=1,
+                interval=0,
+            )
+        except RuntimeError as exc:
+            assert "dispatch watch lock 已存在" in str(exc)
+        else:
+            raise AssertionError("watch lock should block a second parent")

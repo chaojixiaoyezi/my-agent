@@ -442,6 +442,32 @@ class DispatchReport:
 
 
 @dataclass
+class DispatchWatchRecord:
+    """父代理 watch 模式的一轮循环记录。"""
+
+    id: str
+    cycle: int
+    dry_run: bool
+    ok: bool
+    message: str
+    dispatch_record_count: int
+    dispatch_summary: dict[str, int] = field(default_factory=dict)
+    started_at: float = 0.0
+    ended_at: float = 0.0
+    evidence_paths: list[str] = field(default_factory=list)
+
+
+@dataclass
+class DispatchWatchReport:
+    """父代理 watch 模式报告。"""
+
+    generated_at: float
+    dry_run: bool
+    summary: dict[str, int]
+    records: list[DispatchWatchRecord]
+
+
+@dataclass
 class SubAgentExecutionContext:
     """下发给子代理执行器的瘦身上下文。
 
@@ -1743,6 +1769,96 @@ class SubAgentManager:
             for record in report.records:
                 self._append_dispatch_log(record)
         return report
+
+    def make_dispatch_watch_record(
+        self,
+        *,
+        cycle: int,
+        dry_run: bool,
+        ok: bool,
+        message: str,
+        dispatch_record_count: int,
+        dispatch_summary: dict[str, int] | None = None,
+        started_at: float = 0.0,
+        ended_at: float = 0.0,
+        evidence_paths: list[str] | None = None,
+    ) -> DispatchWatchRecord:
+        """创建一条 watch 循环记录。"""
+
+        return DispatchWatchRecord(
+            id=_new_id("watch"),
+            cycle=cycle,
+            dry_run=dry_run,
+            ok=ok,
+            message=message,
+            dispatch_record_count=dispatch_record_count,
+            dispatch_summary=dispatch_summary or {},
+            started_at=started_at,
+            ended_at=ended_at,
+            evidence_paths=evidence_paths or [],
+        )
+
+    def build_dispatch_watch_report(
+        self,
+        records: list[DispatchWatchRecord],
+        *,
+        dry_run: bool,
+    ) -> DispatchWatchReport:
+        """汇总 watch 循环记录。"""
+
+        summary: dict[str, int] = {"total": len(records)}
+        for record in records:
+            summary["ok" if record.ok else "failed"] = summary.get(
+                "ok" if record.ok else "failed",
+                0,
+            ) + 1
+            summary["dry_run" if record.dry_run else "applied"] = summary.get(
+                "dry_run" if record.dry_run else "applied",
+                0,
+            ) + 1
+            summary["dispatch_records"] = summary.get("dispatch_records", 0) + record.dispatch_record_count
+        return DispatchWatchReport(
+            generated_at=time.time(),
+            dry_run=dry_run,
+            summary=summary,
+            records=records,
+        )
+
+    def write_dispatch_watch_report(self, report: DispatchWatchReport) -> DispatchWatchReport:
+        """写出 watch 模式报告。"""
+
+        (self.workspace / "subagent_dispatch_watch_report.json").write_text(
+            json.dumps(asdict(report), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (self.workspace / "SUBAGENT_DISPATCH_WATCH.md").write_text(
+            render_dispatch_watch_markdown(report),
+            encoding="utf-8",
+        )
+        return report
+
+    def write_dispatch_watch_heartbeat(
+        self,
+        *,
+        cycle: int,
+        status: str,
+        lock_path: str,
+        pid: int,
+        message: str = "",
+    ) -> Path:
+        """写出 watch heartbeat，方便外部知道父代理还活着。"""
+
+        path = self.workspace / "subagent_dispatch_watch_heartbeat.json"
+        payload = {
+            "cycle": cycle,
+            "status": status,
+            "lock_path": lock_path,
+            "pid": pid,
+            "message": message,
+            "updated_at": time.time(),
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return path
 
     def build_execution_context(
         self,
@@ -3120,6 +3236,23 @@ class SubAgentManager:
                 f"run={run} applied={record.applied} message={record.message}\n"
             )
 
+    def append_dispatch_watch_log(self, record: DispatchWatchRecord) -> None:
+        """写入全局 watch 审计日志。"""
+
+        jsonl = self.workspace / "subagent_dispatch_watch_log.jsonl"
+        with jsonl.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
+
+        markdown = self.workspace / "DISPATCH_WATCH_LOG.md"
+        if not markdown.exists():
+            markdown.write_text("# DISPATCH WATCH LOG\n\n", encoding="utf-8")
+        with markdown.open("a", encoding="utf-8") as handle:
+            status = "OK" if record.ok else "FAIL"
+            handle.write(
+                f"- [{status}] {record.id} cycle={record.cycle} "
+                f"records={record.dispatch_record_count} message={record.message}\n"
+            )
+
     def _select_runs(self, run_ids: list[str] | None) -> list[SubAgentTask]:
         """按 run id 选择运行记录。"""
 
@@ -3843,6 +3976,35 @@ def render_dispatch_markdown(report: DispatchReport) -> str:
         lines.append(
             f"- [{status}] {record.step}/{record.action} run={run} "
             f"applied={record.applied} dry_run={record.dry_run}"
+        )
+        lines.append(f"  - {record.message}")
+    return "\n".join(lines) + "\n"
+
+
+def render_dispatch_watch_markdown(report: DispatchWatchReport) -> str:
+    """渲染父代理 watch 模式报告。"""
+
+    mode = "dry-run" if report.dry_run else "apply"
+    lines = [
+        "# SUBAGENT DISPATCH WATCH",
+        "",
+        f"- generated_at: {report.generated_at}",
+        f"- mode: {mode}",
+        f"- total_cycles: {report.summary.get('total', 0)}",
+        "",
+        "## Summary",
+        "",
+    ]
+    for key in sorted(report.summary):
+        lines.append(f"- {key}: {report.summary[key]}")
+    lines.extend(["", "## Cycles", ""])
+    if not report.records:
+        lines.append("- 暂无 watch 循环记录")
+    for record in report.records[:200]:
+        status = "OK" if record.ok else "FAIL"
+        lines.append(
+            f"- [{status}] cycle={record.cycle} records={record.dispatch_record_count} "
+            f"started={record.started_at} ended={record.ended_at}"
         )
         lines.append(f"  - {record.message}")
     return "\n".join(lines) + "\n"

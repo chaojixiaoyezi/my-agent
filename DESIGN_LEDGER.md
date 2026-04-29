@@ -781,3 +781,24 @@ suggested_tool: 是否建议开发成 tool
 后续方向：
 - 在 dispatch 稳定后加 `--watch` 或独立 daemon。
 - daemon 需要运行锁、停止信号、轮询间隔、最大 API 消耗和崩溃恢复记录。
+
+## 2026-04-29 / 父代理 watch 模式
+
+状态：已落地
+
+思路：
+- 一轮 `subagents-dispatch` 已经能推进任务树，但退出后不会继续巡检。
+- 在独立 daemon 前，先让同一个命令支持 watch 循环，并保持 CLI 可测试、可退出。
+- watch 必须有运行锁，避免两个父代理同时推进同一批工单。
+
+已落地：
+- 新增 `DispatchWatchRecord` / `DispatchWatchReport`。
+- 新增 `SimpleAgent.watch_subagents()`。
+- `python3 -m agent_py_agent subagents-dispatch --watch` 会持续循环 dispatch。
+- `--interval` 控制轮询间隔，`--max-cycles` 控制安全退出，`--force-lock` 用于人工处理残留 lock。
+- watch 写 `subagent_dispatch_watch_heartbeat.json`、`subagent_dispatch_watch_report.json`、`SUBAGENT_DISPATCH_WATCH.md`、`subagent_dispatch_watch_log.jsonl` 和 `DISPATCH_WATCH_LOG.md`。
+- `--execute-runners` 现在必须和 `--apply` 同时使用。
+
+后续方向：
+- 增加外部停止信号或 stop 文件。
+- 增加 API 消耗预算、每轮最大耗时和 daemon/service 包装。

@@ -103,6 +103,9 @@
 - [ ] `--apply --execute-runners` 才会推进真实 runner，并可能消耗 API
 - [ ] dispatch 顺序保持为 due-check / action apply / capability route / runner / patch review / acceptance
 - [ ] dispatch apply 后能把可验收 run 收口到 `DONE/VERIFIED`
+- [ ] `subagents-dispatch --watch --max-cycles 1 --interval 0` 能安全退出
+- [ ] watch 模式会写 heartbeat、watch 报告和 watch 日志
+- [ ] watch lock 会阻止第二个父代理同时运行
 
 ## 修改文档时
 
