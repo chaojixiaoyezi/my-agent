@@ -15,6 +15,18 @@ my-agent chat
 
 `gateway` 是本地常驻 runtime，`chat` / TUI 只是客户端。用户可以退出聊天界面、重启 gateway、刷新会话；任务树、runner 输出、验收、能力授权、失败原因和调度日志都要落盘，gateway 重启后从任务账本恢复，而不是依赖某个长聊天上下文活着。
 
+第一版 gateway 已先落成一个很薄的本地后台控制面：
+
+```text
+my-agent gateway start
+my-agent gateway status
+my-agent gateway stop
+my-agent gateway restart
+my-agent gateway logs
+```
+
+它先负责后台进程、pid、state、heartbeat、stop request 和日志，内部暂时复用现有 daemon/watch 调度。SQLite 任务账本、worker pool、跨机器通信和组织模型会在这个入口上逐步接入。
+
 ## 多 Gateway 组织模型
 
 长期目标不是“一个主 gateway 拥有所有下级”，而是“多个完整独立 gateway 通过授权、委托和汇报形成组织关系”。

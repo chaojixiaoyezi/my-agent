@@ -109,6 +109,9 @@
 - [ ] `--planner` 在有 active/pending/stalled/needs-intervention 时会调用父代理 LLM
 - [ ] planner gate 不允许有待处理事项时只返回 `HEARTBEAT_OK`
 - [ ] `my-agent daemon` 会读取 `daemon_*` 配置，能解析 `daemon_max_runners: "auto"`，并能用 `--max-cycles 1` 安全退出
+- [ ] `my-agent gateway start/status/stop/restart/logs` 命令存在
+- [ ] `my-agent gateway run --max-cycles 1 --interval 0 --max-runners 0 --no-planner` 能写 gateway state/heartbeat 并安全退出
+- [ ] `my-agent gateway stop` 通过 stop request 正常停止后台进程
 
 ## 修改文档时
 

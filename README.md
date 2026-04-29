@@ -13,20 +13,23 @@ python -m pip install -e .
 ```bash
 my-agent --help
 my-agent chat
-my-agent daemon
+my-agent gateway start
+my-agent gateway status
 ```
 
 完整参数手册见 [CLI_REFERENCE.md](CLI_REFERENCE.md)。
 
 项目名先固定为 `my-agent`。后续如果确定正式名字，只需要改 `pyproject.toml` 里的 `project.name` 和 `project.scripts`，代码入口可以继续复用 `agent_py_agent.__main__:main`。
 
-当前常驻方式是一个前台 watch 进程：
+当前推荐的常驻方式是第一版后台 gateway：
 
 ```bash
-my-agent daemon
+my-agent gateway start
+my-agent gateway status
+my-agent gateway stop
 ```
 
-`daemon` 会读取 `agent_config.yaml` 里的 `daemon_*` 配置，持续写 heartbeat、watch log 和 lock。开启 planner 后，如果 gate 发现仍有 active/pending/stalled/needs-intervention 事项，会触发完整父代理 LLM turn；如果模型只回 `HEARTBEAT_OK`，会被记录为失败。Gateway 方式可以作为下一阶段：由 `my-agent gateway start/status/stop` 管理后台 watch 进程，CLI 再和 gateway 通信。
+`gateway` 第一版会启动后台 Python 进程，在内部复用现有 daemon/watch 调度，并写 pid、state、heartbeat、stop request 和日志。`daemon` 仍保留为前台调试入口。开启 planner 后，如果 gate 发现仍有 active/pending/stalled/needs-intervention 事项，会触发完整父代理 LLM turn；如果模型只回 `HEARTBEAT_OK`，会被记录为失败。
 
 配置分两层：`task_max_subagents=0` / `task_max_grandchildren=0` 表示用户层任务规模不设硬上限；`runner_concurrency: "auto"` 等调度项留给未来 gateway 自适应。当前 `daemon_*` 是前台调度器的高级参数：`daemon_max_runners: "auto"` 会先映射成保守值 1，`daemon_max_cycles=0` 表示持续运行，`daemon_limit=0` 表示不限制记录条数，`daemon_max_cards=0` 表示不限制能力卡数量，`daemon_interval=0` 通常只用于测试或单轮验证。
 

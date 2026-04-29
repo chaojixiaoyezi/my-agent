@@ -919,3 +919,23 @@ suggested_tool: 是否建议开发成 tool
 后续方向：
 - 第一版 gateway 先落单机 `gateway_id` / `agent_identity_id` / `org_id` / event log。
 - 第二阶段再实现 invite、组织账本和跨 gateway 通信。
+
+## 2026-04-29 / 第一版本地 Gateway 控制面
+
+状态：已落地
+
+思路：
+- 先做薄而稳的本地后台外壳，不直接上 worker pool、HTTP API、多机器和组织通信。
+- 用户命令面先稳定为 `my-agent gateway start/status/stop/restart/logs`。
+- 内部暂时复用现有 daemon/watch 调度，后续再替换成 SQLite jobs 和 worker subprocess pool。
+
+已落地：
+- 新增 `gateway` 命令族：`start`、`status`、`stop`、`restart`、`logs`、内部 `run`。
+- 新增 gateway 控制面文件：`gateway.pid`、`gateway_state.json`、`gateway_heartbeat.json`、`gateway_stop.request`、`gateway.log`。
+- 新增 `gateway_workspace`、`gateway_heartbeat_interval`、`gateway_stale_seconds`、`gateway_stop_timeout` 配置。
+- `watch_subagents()` 支持 stop file，gateway stop 可以在调度轮次之间正常退出。
+
+后续方向：
+- `chat` / TUI attach 到 gateway。
+- 接入 SQLite task ledger、jobs、leases 和 worker pool。
+- 增加 systemd / launchd / Windows Task Scheduler 安装入口。
