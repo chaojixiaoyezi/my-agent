@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,6 +24,7 @@ from .io import (
     read_pid,
     write_gateway_request,
     write_json_file,
+    write_json_file_atomic,
 )
 from .logging import _index_gateway_payload, _report_gateway_side_effect_error, log_gateway_payload
 from .paths import GatewayPaths, gateway_paths
@@ -219,6 +221,75 @@ def rebuild_gateway_index(agent: SimpleAgent) -> int:
     return count
 
 
+def _gateway_processing_lease_interval(agent: SimpleAgent) -> float:
+    """Return a heartbeat cadence short enough to keep processing leases fresh."""
+
+    try:
+        gateway_interval = float(agent.config.gateway_heartbeat_interval or 5)
+    except (TypeError, ValueError):
+        gateway_interval = 5.0
+    try:
+        processing_timeout = float(agent.config.gateway_processing_timeout_seconds or 900)
+    except (TypeError, ValueError):
+        processing_timeout = 900.0
+    if processing_timeout > 0:
+        gateway_interval = min(gateway_interval, max(0.2, processing_timeout / 3.0))
+    return max(0.2, gateway_interval)
+
+
+def _touch_gateway_processing_lease(request_path: Path, *, request_id: str, worker_id: str = "") -> bool:
+    """Refresh the lease heartbeat on a processing request file."""
+
+    payload = read_json_file(request_path)
+    if not payload:
+        return False
+    payload_id = str(payload.get("id") or request_path.stem)
+    if payload_id != request_id:
+        return False
+    now = time.time()
+    payload["id"] = payload_id
+    payload["status"] = "processing"
+    if worker_id:
+        payload["lease_owner"] = worker_id
+    else:
+        payload.setdefault("lease_owner", "")
+    payload.setdefault("lease_started_at", now)
+    payload["lease_heartbeat_at"] = now
+    payload["updated_at"] = now
+    try:
+        write_json_file_atomic(request_path, payload)
+    except OSError as exc:
+        _report_gateway_side_effect_error("gateway_lease_heartbeat", request_id, exc)
+        return False
+    return True
+
+
+def _start_gateway_processing_lease_heartbeat(
+    agent: SimpleAgent,
+    request_path: Path,
+    *,
+    request_id: str,
+    worker_id: str = "",
+) -> tuple[threading.Event, threading.Thread]:
+    """Start a daemon thread that keeps one processing lease alive during agent.run."""
+
+    stop_event = threading.Event()
+    interval = _gateway_processing_lease_interval(agent)
+
+    def heartbeat_loop() -> None:
+        while not stop_event.wait(interval):
+            if not _touch_gateway_processing_lease(request_path, request_id=request_id, worker_id=worker_id):
+                return
+
+    thread = threading.Thread(
+        target=heartbeat_loop,
+        name=f"gateway-lease-{request_id}",
+        daemon=True,
+    )
+    thread.start()
+    return stop_event, thread
+
+
 def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths, *, worker_id: str = "gw-worker") -> int:
     """LLM contract: claim and process all currently pending gateway requests.
 
@@ -242,6 +313,7 @@ def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths, *, worker
             continue
         request_payload = read_json_file(processing_path)
         request_id = str(request_payload.get("id") or processing_path.stem)
+        request_payload.setdefault("id", request_id)
         response_path = gateway_response_path(paths, request_id)
         if response_path.exists():
             try:
@@ -250,16 +322,23 @@ def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths, *, worker
                 _report_gateway_side_effect_error("archive_duplicate_gateway_request", request_id, exc)
             processed += 1
             continue
+        lease_now = time.time()
         request_payload.update(
             {
                 "status": "processing",
                 "attempts": _gateway_request_attempts(request_payload) + 1,
                 "lease_owner": worker_id,
-                "lease_started_at": time.time(),
+                "lease_started_at": lease_now,
+                "lease_heartbeat_at": lease_now,
+                "updated_at": lease_now,
             }
         )
-        write_json_file(processing_path, request_payload)
-        response = _handle_gateway_request(agent, processing_path)
+        try:
+            write_json_file_atomic(processing_path, request_payload)
+        except OSError as exc:
+            _report_gateway_side_effect_error("prepare_gateway_request_lease", request_id, exc)
+            continue
+        response = _handle_gateway_request(agent, processing_path, refresh_lease=True, worker_id=worker_id)
         response_path = gateway_response_path(paths, str(response.get("id", processing_path.stem)))
         if not response_path.exists():
             write_json_file(response_path, response)
@@ -272,7 +351,13 @@ def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths, *, worker
     return processed
 
 
-def _handle_gateway_request(agent: SimpleAgent, request_path: Path) -> dict:
+def _handle_gateway_request(
+    agent: SimpleAgent,
+    request_path: Path,
+    *,
+    refresh_lease: bool = False,
+    worker_id: str = "",
+) -> dict:
     """LLM contract: execute one gateway request file and return response payload.
 
     Human version:
@@ -283,6 +368,10 @@ def _handle_gateway_request(agent: SimpleAgent, request_path: Path) -> dict:
     request = read_json_file(request_path)
     request_id = str(request.get("id") or request_path.stem)
     kind = str(request.get("kind") or "").strip()
+    response_path = gateway_response_path(gateway_paths(agent), request_id)
+    existing_response = read_json_file(response_path)
+    if existing_response:
+        return existing_response
     started_at = time.time()
     response = {
         "id": request_id,
@@ -303,6 +392,8 @@ def _handle_gateway_request(agent: SimpleAgent, request_path: Path) -> dict:
         "request_file": str(request_path),
         "attempts": _gateway_request_attempts(request),
         "lease_owner": request.get("lease_owner", ""),
+        "lease_started_at": request.get("lease_started_at", 0),
+        "lease_heartbeat_at": request.get("lease_heartbeat_at", 0),
     }
     log_gateway_payload(
         agent,
@@ -316,8 +407,20 @@ def _handle_gateway_request(agent: SimpleAgent, request_path: Path) -> dict:
         },
         event_type="gateway_request_processing",
         request_path=request_path,
-        response_path=gateway_response_path(gateway_paths(agent), request_id),
+        response_path=response_path,
     )
+    lease_stop: threading.Event | None = None
+    lease_thread: threading.Thread | None = None
+    should_refresh_lease = refresh_lease or str(request.get("status") or "") == "processing"
+    if should_refresh_lease:
+        lease_worker = worker_id or str(request.get("lease_owner") or "")
+        _touch_gateway_processing_lease(request_path, request_id=request_id, worker_id=lease_worker)
+        lease_stop, lease_thread = _start_gateway_processing_lease_heartbeat(
+            agent,
+            request_path,
+            request_id=request_id,
+            worker_id=lease_worker,
+        )
     try:
         if kind != "ask":
             response["error_code"] = "UNSUPPORTED_KIND"
@@ -352,7 +455,20 @@ def _handle_gateway_request(agent: SimpleAgent, request_path: Path) -> dict:
                 "error": f"{type(exc).__name__}: {exc}",
             }
         )
+    finally:
+        if lease_stop is not None:
+            lease_stop.set()
+        if lease_thread is not None:
+            lease_thread.join(timeout=2)
     ended_at = time.time()
+    final_request = read_json_file(request_path)
+    if final_request:
+        response["lease_owner"] = final_request.get("lease_owner", response.get("lease_owner", ""))
+        response["lease_started_at"] = final_request.get("lease_started_at", response.get("lease_started_at", 0))
+        response["lease_heartbeat_at"] = final_request.get(
+            "lease_heartbeat_at",
+            response.get("lease_heartbeat_at", 0),
+        )
     response["ended_at"] = ended_at
     response["duration_seconds"] = round(ended_at - started_at, 3)
     log_gateway_payload(
@@ -360,6 +476,6 @@ def _handle_gateway_request(agent: SimpleAgent, request_path: Path) -> dict:
         {**response, "prompt": request.get("prompt", "")},
         event_type="gateway_request_completed" if response.get("ok") else "gateway_request_failed",
         request_path=request_path,
-        response_path=gateway_response_path(gateway_paths(agent), request_id),
+        response_path=response_path,
     )
     return response
