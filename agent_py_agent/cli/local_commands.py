@@ -149,16 +149,20 @@ def cmd_run(args) -> int:
         inject=args.inject or [],
         prompt_files=args.prompt_file or [],
         save=args.save,
+        source="cli_run",
+        recovery_next_actions=["如需恢复本次单轮 run，先查看 memory-resume 和 LocalStore 记录。"],
     )
     if args.show_prompt:
         print("===== FINAL PROMPT =====")
         print(result.prompt)
         print("===== RESPONSE =====")
     print(result.response)
+    snapshot_state = "error" if result.recovery_snapshot_error else "1" if result.recovery_snapshot_path else "0"
     print(
         f"\n[backend={result.backend}; used_memories={result.used_memories}; "
         f"tool_rounds={result.tool_rounds}; routed_rules={result.memory_route_matches}; "
-        f"archive_events={result.archive_events}]"
+        f"archive_events={result.archive_events}; "
+        f"recovery_snapshot={snapshot_state}]"
     )
     return 0
 

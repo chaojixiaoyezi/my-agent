@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from .models import CompressionSnapshot, RawMemoryEvent
 from .runtime import ArchiveRunTurnResult, archive_run_turn
+from .snapshots import RecoverySnapshotResult, write_recovery_snapshot
 from .storage import (
     MemoryArchiveError,
     append_raw_event,
@@ -24,6 +25,7 @@ __all__ = [
     "ArchiveRunTurnResult",
     "MemoryArchiveError",
     "RawMemoryEvent",
+    "RecoverySnapshotResult",
     "archive_run_turn",
     "append_raw_event",
     "append_snapshot",
@@ -31,4 +33,5 @@ __all__ = [
     "estimate_tokens",
     "raw_event_path_for",
     "snapshot_path_for",
+    "write_recovery_snapshot",
 ]

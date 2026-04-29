@@ -219,6 +219,40 @@ def test_gateway_request_indexes_logs_to_local_store():
         assert hits[0].source_id == request_id
 
 
+def test_gateway_request_writes_recovery_snapshot_when_saved():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(
+            model_backend="echo",
+            gateway_workspace="gateway",
+            local_store_path="local_store/local.db",
+            local_store_files_dir="local_store/files",
+            local_store_events_path="local_store/events.jsonl",
+        )
+        agent = SimpleAgent(cfg, root)
+        paths = gateway_paths(agent)
+        request_id, request_path, _ = submit_gateway_ask(
+            paths,
+            prompt="gateway recovery snapshot 测试",
+            save=True,
+            agent=agent,
+        )
+
+        response = _handle_gateway_request(agent, request_path)
+
+        assert response["ok"] is True
+        assert response["recovery_snapshot_path"]
+        snapshot_path = Path(response["recovery_snapshot_path"])
+        records = [
+            json.loads(line)
+            for line in snapshot_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert records[-1]["snapshot_id"] == response["recovery_snapshot_id"]
+        assert records[-1]["dispatch_events"][0]["source"] == "gateway"
+        assert records[-1]["dispatch_events"][0]["request_id"] == request_id
+
+
 def test_local_rebuild_indexes_memory_gateway_and_subagents():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)

@@ -136,7 +136,7 @@ Ctrl+C
 | --- | --- | --- | --- |
 | `status` | 查看 gateway、LocalStore、subagent 和最近事件总览 | 否 | 否 |
 | `timeline` | 查看本地事实源最近事件 | 否 | 否 |
-| `run` | 运行一次智能体对话 | 默认写记忆，可用 `--no-save` 关闭 | 是，除非配置 echo 后端 |
+| `run` | 运行一次智能体对话 | 默认写记忆和轻量 recovery hook，可用 `--no-save` 关闭普通会话保存 | 是，除非配置 echo 后端 |
 | `remember` | 手动写入一条记忆 | 是 | 否 |
 | `memory-list` | 列出最近记忆 | 否 | 否 |
 | `memory-search` | 搜索记忆 | 否 | 否 |
@@ -208,6 +208,8 @@ my-agent timeline --event-type gateway_request_completed --details
 ```powershell
 my-agent run "总结这个项目" --no-save
 ```
+
+默认保存时，`run` 会同时写入普通 JSONL memory、raw archive 和一条轻量 `memory/hooks/YYYY-MM-DD.jsonl` recovery snapshot。`--no-save` 会关闭普通单轮会话保存；任务类 runner 仍会通过自己的事实源写 run_id 级恢复锚点。
 
 | 参数 | 说明 |
 | --- | --- |
@@ -340,6 +342,18 @@ my-agent memory-resume --request-id gwreq-xxx --limit 10
 ```
 
 从归档线索、LocalStore 检索结果和 subagent 任务目录中生成恢复简报。它会列出 archive clues、LocalStore clues、任务事实源路径和下一步建议，提醒你先读 `STATUS.md`、`WORK_LOG.md`、`HANDOFF.md`、`TEST_CHECKLIST.md` 等权威文件后再继续。
+
+JSON 输出里会额外包含 `brief`：
+
+| 字段 | 说明 |
+| --- | --- |
+| `latest_user_intent` | 最近能恢复出的用户意图。 |
+| `latest_assistant_action` | 最近能恢复出的助手动作。 |
+| `related_ids` | 关联的 session/request/run/task ID，方便下一轮精确恢复。 |
+| `likely_task_statuses` | 从任务目录读出的状态摘要；没有任务目录时不会凭 archive 猜。 |
+| `recommended_read_paths` | 必读事实源路径。 |
+| `authority_note` | 提醒 archive/local 只是恢复线索，任务文件才是当前事实源。 |
+| `context_block` | 稳定格式的恢复文本块，后续可用于人工 handoff 或自动注入。 |
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |

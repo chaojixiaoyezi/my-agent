@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
+from ..memory_archive import write_recovery_snapshot
 from ..subagent import (
     ParentPlannerRecord,
     SubAgentRunnerResult,
@@ -95,9 +96,11 @@ class SimpleAgentSubagentMixin:
                 save=False,
                 allowed_tools=context.allowed_tools,
                 write_boundary=context.write_boundary,
+                source="subagent_run_model_turn",
+                recovery_snapshot=False,
             )
         except Exception as exc:
-            return self.subagents.record_runner_result(
+            failed_result = self.subagents.record_runner_result(
                 run_id,
                 dry_run=False,
                 ok=False,
@@ -107,6 +110,16 @@ class SimpleAgentSubagentMixin:
                 verification_status="UNVERIFIED",
                 failure_type="runner_error",
             )
+            self._write_subagent_recovery_snapshot(
+                run_id,
+                user_prompt=context.goal,
+                response_text=failed_result.message,
+                backend="",
+                status=failed_result.status,
+                error_code=failed_result.runner_last_error or "runner_error",
+                tool_calls=[],
+            )
+            return failed_result
 
         structured = parse_subagent_runner_output(result.response)
         prompt_for_log = result.prompt
@@ -146,7 +159,7 @@ class SimpleAgentSubagentMixin:
                     structured_repair_error = repaired.parse_error
                 else:
                     structured_repair_error = repaired.parse_error or "repair response still missing structured output"
-        return self.subagents.record_runner_result(
+        runner_result = self.subagents.record_runner_result(
             run_id,
             dry_run=False,
             ok=structured.ok if structured.found else True,
@@ -162,6 +175,73 @@ class SimpleAgentSubagentMixin:
             structured_repair_attempted=structured_repair_attempted,
             structured_repair_ok=structured_repair_ok,
             structured_repair_error=structured_repair_error,
+        )
+        self._write_subagent_recovery_snapshot(
+            run_id,
+            user_prompt=context.goal,
+            response_text=message,
+            backend=backend_name,
+            status=runner_result.status,
+            error_code=runner_result.runner_last_error,
+            tool_calls=[
+                {"tool": tool_name, "id": f"{run_id}:{index}", "ok": True}
+                for index, tool_name in enumerate(result.executed_tools or [], start=1)
+            ],
+        )
+        return runner_result
+
+    def _write_subagent_recovery_snapshot(
+        self,
+        run_id: str,
+        *,
+        user_prompt: str,
+        response_text: str,
+        backend: str,
+        status: str,
+        error_code: str,
+        tool_calls: list[dict[str, object]],
+    ) -> None:
+        """LLM: write a best-effort run_id recovery snapshot after subagent-run finishes.
+
+        给人看的解释：
+        子代理 runner 用 `save=False`，避免把大 prompt 写进普通对话记忆。
+        但任务恢复需要一个小锚点，所以 runner 结果写回后单独写 hook，并附上任务目录里的权威文件路径。
+        """
+
+        if not bool(getattr(self.config, "memory_hook_enabled", True)):
+            return
+        try:
+            task = self.subagents.load(run_id)
+        except (FileNotFoundError, TypeError):
+            task = None
+        content_paths = []
+        next_actions = ["先读取子代理 STATUS/WORK_LOG/RUNNER_RESULT/output.json，再判断是否可以验收或重跑。"]
+        if task is not None:
+            content_paths = [
+                task.status_file,
+                task.work_log_file,
+                task.runner_result_file,
+                task.runner_result_json,
+                task.output_json,
+                task.handoff_file,
+            ]
+        write_recovery_snapshot(
+            self.root,
+            session_id=getattr(self, "session_id", self.config.agent_name),
+            request_id=f"subagent-run:{run_id}",
+            run_id=run_id,
+            task_id=run_id,
+            user_prompt=user_prompt,
+            response_text=response_text,
+            backend=backend,
+            source="subagent_run",
+            status=status.lower() or "unknown",
+            error_code=error_code,
+            tool_calls=tool_calls,
+            task_refs=[run_id],
+            content_paths=content_paths,
+            next_actions=next_actions,
+            archive_level=int(getattr(self.config, "memory_hook_archive_level", 3)),
         )
 
     def run_parent_planner(

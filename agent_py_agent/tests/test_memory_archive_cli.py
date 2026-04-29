@@ -58,6 +58,23 @@ def _write_archive_fixture(root: Path, *, run_id: str = "subagent-archive-demo")
             created_at="2026-04-30T08:00:00+00:00",
         ),
     )
+    append_raw_event(
+        root,
+        RawMemoryEvent(
+            event_id="raw-demo-2",
+            session_id="session-demo",
+            request_id="request-demo",
+            run_id=run_id,
+            speaker="assistant",
+            target="user",
+            action="response",
+            status="ok",
+            task_id=run_id,
+            content_preview="已创建子代理，等待父代理继续验收。",
+            source="run",
+            created_at="2026-04-30T08:00:30+00:00",
+        ),
+    )
     append_snapshot(
         root,
         CompressionSnapshot(
@@ -66,6 +83,16 @@ def _write_archive_fixture(root: Path, *, run_id: str = "subagent-archive-demo")
             compression_id="compression-demo",
             turn_range={"start": 1, "end": 2},
             user_intents=["继续 README 场景测试任务"],
+            assistant_actions=["已创建子代理，等待父代理继续验收。"],
+            dispatch_events=[
+                {
+                    "source": "subagent_run",
+                    "request_id": "request-demo",
+                    "run_id": run_id,
+                    "task_id": run_id,
+                    "status": "awaiting_acceptance",
+                }
+            ],
             next_actions=["读取 STATUS.md 和 WORK_LOG.md"],
             task_refs=[run_id],
             created_at="2026-04-30T08:01:00+00:00",
@@ -150,3 +177,10 @@ def test_memory_resume_links_archive_clue_to_task_fact_source(tmp_path, capsys):
         item.endswith("STATUS.md")
         for item in payload["resume"]["recommended_read_paths"]
     )
+    assert payload["brief"]["latest_user_intent"] == "继续 README 场景测试任务"
+    assert payload["brief"]["latest_assistant_action"] == "已创建子代理，等待父代理继续验收。"
+    assert payload["brief"]["related_ids"]["request_ids"] == ["request-demo"]
+    assert payload["brief"]["related_ids"]["run_ids"] == [task.id]
+    assert payload["brief"]["likely_task_statuses"][0]["status"] == "PLANNING"
+    assert "Recovery Brief" in payload["brief"]["context_block"]
+    assert "archive/local matches are recovery clues" in payload["brief"]["context_block"]

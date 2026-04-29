@@ -434,6 +434,11 @@ def _handle_gateway_request(
             inject=[str(item) for item in request.get("inject", [])],
             prompt_files=[str(item) for item in request.get("prompt_files", [])],
             save=bool(request.get("save", True)),
+            request_id=request_id,
+            source="gateway",
+            recovery_snapshot=bool(request.get("save", True)),
+            recovery_next_actions=["如需恢复本次 gateway 请求，先读取 gateway response 和 LocalStore gateway_request 记录。"],
+            recovery_content_paths=[str(request_path), str(response_path)],
         )
         response.update(
             {
@@ -444,6 +449,9 @@ def _handle_gateway_request(
                 "used_memories": result.used_memories,
                 "tool_rounds": result.tool_rounds,
                 "prompt": result.prompt if request.get("include_prompt") else "",
+                "recovery_snapshot_id": result.recovery_snapshot_id,
+                "recovery_snapshot_path": result.recovery_snapshot_path,
+                "recovery_snapshot_error": result.recovery_snapshot_error,
             }
         )
     except Exception as exc:
