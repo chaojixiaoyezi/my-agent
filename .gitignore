@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+*.egg-info/
 .DS_Store
 
 agent_py_agent/data/

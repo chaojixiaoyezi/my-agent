@@ -101,6 +101,14 @@ python3 -c "from agent_py_agent.tests.test_capabilities import test_skill_card_p
 python3 agent_py_agent/tests/run_tests.py
 ```
 
+安装入口验证：
+
+```bash
+python -m pip install -e .
+my-agent --help
+my-agent subagents-dispatch --watch --max-cycles 1 --interval 0
+```
+
 这条命令应直接调用真实 API。若失败，先看真实 API 错误、模型输出协议、工具调用和 Windows/UTF-8 捕获问题，不要直接降级到 echo 后端作为通过结论。
 
 完整冒烟脚本必须做到：

@@ -1,5 +1,31 @@
 # my-agent
 
+## 安装后直接执行
+
+本地开发安装：
+
+```bash
+python -m pip install -e .
+```
+
+安装后可以直接运行：
+
+```bash
+my-agent --help
+my-agent chat
+my-agent subagents-dispatch --watch --interval 30
+```
+
+项目名先固定为 `my-agent`。后续如果确定正式名字，只需要改 `pyproject.toml` 里的 `project.name` 和 `project.scripts`，代码入口可以继续复用 `agent_py_agent.__main__:main`。
+
+当前常驻方式是一个前台 watch 进程：
+
+```bash
+my-agent subagents-dispatch --watch --apply --execute-runners --interval 30 --max-runners 1
+```
+
+它会持续写 heartbeat、watch log 和 lock。Gateway 方式可以作为下一阶段：由 `my-agent gateway start/status/stop` 管理后台 watch 进程，CLI 再和 gateway 通信。
+
 一个用 Python3 标准库搭起来的个人通用智能体骨架。
 
 当前项目重点不是“做一个简单聊天脚本”，而是在逐步搭一个可审计、可扩展、能承载多层子代理工作的基础设施：
