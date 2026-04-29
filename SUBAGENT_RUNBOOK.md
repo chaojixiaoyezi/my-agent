@@ -562,6 +562,8 @@ python3 -m agent_py_agent subagents-patches --apply --run-id <run_id>
 
 ## 父代理调度
 
+完整 CLI 参数手册见 [CLI_REFERENCE.md](CLI_REFERENCE.md)。
+
 默认 dry-run：
 
 ```bash

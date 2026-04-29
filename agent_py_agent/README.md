@@ -22,6 +22,8 @@ my-agent chat
 my-agent subagents-dispatch --watch --interval 30
 ```
 
+完整参数手册见仓库根目录的 [CLI_REFERENCE.md](../CLI_REFERENCE.md)。
+
 这是 `my-agent` 的 Python 包目录，负责 CLI 入口、模型后端、prompt 拼装、工具循环、记忆、skill/tool 能力路由和 subagent 工单系统。
 
 项目目前坚持一个原则：主链路尽量只依赖 Python3 标准库，先把结构、边界和可审计性做稳。
