@@ -15,6 +15,7 @@ from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.skills import SkillRegistry
+from agent_py_agent.agent.subagent import parse_subagent_runner_output
 
 
 class StructuredSubagentBackend(BaseBackend):
@@ -828,3 +829,40 @@ def test_subagent_runner_parses_structured_output():
         debrief = Path(loaded.debrief_file).read_text(encoding="utf-8")
         assert "Runner Artifacts" in debrief
         assert "Runner Lessons" in debrief
+
+
+def test_subagent_runner_parser_uses_last_parseable_fenced_block():
+    text = (
+        "模型先在说明里提到了协议标记。\n"
+        "- 输出 `[SUBAGENT_RESULT]` 标记。\n"
+        "- 输出 `[/SUBAGENT_RESULT]` 结束标记。\n\n"
+        "# [SUBAGENT_RESULT]\n"
+        "```json\n"
+        "{\n"
+        '  "status": "AWAITING_ACCEPTANCE",\n'
+        '  "summary": "真实 runner 输出里 JSON 被 Markdown fence 包住。",\n'
+        '  "used_tools": ["read_file"],\n'
+        '  "used_skills": [],\n'
+        '  "evidence": [{"kind": "read_file", "summary": "读取 SPEC.md", "ok": true}],\n'
+        '  "capability_requests": [],\n'
+        '  "artifacts": [],\n'
+        '  "tests": [{"name": "format", "command": "", "ok": true, "summary": "parsed"}],\n'
+        '  "patches": [],\n'
+        '  "lessons": [],\n'
+        '  "next_actions": [],\n'
+        '  "blocked_reason": "",\n'
+        '  "failure_type": ""\n'
+        "}\n"
+        "```\n"
+        "[/SUBAGENT_RESULT]\n"
+    )
+
+    parsed = parse_subagent_runner_output(text)
+
+    assert parsed.found
+    assert parsed.ok
+    assert parsed.status == "AWAITING_ACCEPTANCE"
+    assert parsed.summary == "真实 runner 输出里 JSON 被 Markdown fence 包住。"
+    assert parsed.used_tools == ["read_file"]
+    assert parsed.evidence[0]["summary"] == "读取 SPEC.md"
+    assert parsed.tests[0]["name"] == "format"
