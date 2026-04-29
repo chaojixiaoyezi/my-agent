@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..agent.memory_archive import raw_event_path_for, snapshot_path_for
+from .storage import raw_event_path_for, snapshot_path_for
 
 
 ARCHIVE_SEARCH_FILE_LIMIT = 30
@@ -454,6 +454,12 @@ def _archive_search_text(record: dict[str, Any]) -> str:
 
 
 def _append_run_id(items: list[str], value: object) -> None:
+    """LLM: extract and append one subagent run ID from a loose text value.
+
+    大白话：有些地方存的是完整句子，比如“请看 subagent-xxx”。
+    这个函数把里面真正的 `subagent-*` ID 挖出来，避免恢复时找不到任务目录。
+    """
+
     text = str(value or "").strip()
     if not text or "subagent-" not in text:
         return
@@ -463,6 +469,12 @@ def _append_run_id(items: list[str], value: object) -> None:
 
 
 def _created_at_sort(value: str, *, fallback: float) -> float:
+    """LLM: convert an ISO-like timestamp to a sortable epoch value.
+
+    大白话：归档记录要按时间倒序显示。
+    如果时间字符串坏了，就用文件修改时间这类 fallback，保证命令还能继续跑。
+    """
+
     text = str(value or "").strip()
     if not text:
         return fallback
@@ -481,6 +493,12 @@ def _created_at_sort(value: str, *, fallback: float) -> float:
 
 
 def _list_value(value: object) -> list[object]:
+    """LLM: normalize a scalar-or-list payload field into a list.
+
+    大白话：JSON 里有些字段可能是单个字符串，也可能已经是列表。
+    这里统一成列表，后面搜索和展示就不用到处判断类型。
+    """
+
     if isinstance(value, list):
         return value
     if value in (None, ""):

@@ -18,7 +18,7 @@ from ..agent.gateway import (
     read_json_file,
     recover_gateway_processing_requests,
 )
-from .common import format_local_time, make_agent
+from .common import format_local_time, make_agent, resume_context_override
 from .local_doctor import build_local_doctor_report, build_status_suggestions, rebuild_local_store
 
 
@@ -150,6 +150,7 @@ def cmd_run(args) -> int:
         prompt_files=args.prompt_file or [],
         save=args.save,
         source="cli_run",
+        resume_context=resume_context_override(args),
         recovery_next_actions=["如需恢复本次单轮 run，先查看 memory-resume 和 LocalStore 记录。"],
     )
     if args.show_prompt:
@@ -161,8 +162,11 @@ def cmd_run(args) -> int:
     print(
         f"\n[backend={result.backend}; used_memories={result.used_memories}; "
         f"tool_rounds={result.tool_rounds}; routed_rules={result.memory_route_matches}; "
+        f"prompt_tokens≈{result.prompt_token_estimate}; inject_tokens≈{result.runtime_injection_token_estimate}; "
         f"archive_events={result.archive_events}; "
-        f"recovery_snapshot={snapshot_state}]"
+        f"recovery_snapshot={snapshot_state}; "
+        f"resume_context={1 if result.memory_resume_context_injected else 0}; "
+        f"resume_tokens≈{result.memory_resume_context_token_estimate}]"
     )
     return 0
 

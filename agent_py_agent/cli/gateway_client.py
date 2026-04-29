@@ -24,7 +24,7 @@ from ..agent.gateway import (
     wait_for_gateway_running,
 )
 from .chat import cmd_chat
-from .common import make_agent
+from .common import make_agent, resume_context_override
 from .gateway_process import cmd_gateway_start
 
 
@@ -100,6 +100,7 @@ def cmd_gateway_ask(args) -> int:
         prompt_files=args.prompt_file or [],
         save=not args.no_save,
         include_prompt=bool(args.show_prompt),
+        resume_context=resume_context_override(args),
         agent=agent,
     )
     if args.no_wait:

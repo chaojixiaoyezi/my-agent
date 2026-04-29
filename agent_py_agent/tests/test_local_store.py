@@ -253,6 +253,36 @@ def test_gateway_request_writes_recovery_snapshot_when_saved():
         assert records[-1]["dispatch_events"][0]["request_id"] == request_id
 
 
+def test_gateway_request_can_override_resume_context():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(
+            model_backend="echo",
+            gateway_workspace="gateway",
+            local_store_path="local_store/local.db",
+            local_store_files_dir="local_store/files",
+            local_store_events_path="local_store/events.jsonl",
+        )
+        agent = SimpleAgent(cfg, root)
+        agent.run("gateway README 恢复开关任务", save=True)
+        paths = gateway_paths(agent)
+        _, request_path, _ = submit_gateway_ask(
+            paths,
+            prompt="继续 README",
+            save=False,
+            include_prompt=True,
+            resume_context=True,
+            agent=agent,
+        )
+
+        response = _handle_gateway_request(agent, request_path)
+
+        assert response["ok"] is True
+        assert response["memory_resume_context_injected"] is True
+        assert response["memory_resume_context_token_estimate"] > 0
+        assert "### Auto Recovery Context" in response["prompt"]
+
+
 def test_local_rebuild_indexes_memory_gateway_and_subagents():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)

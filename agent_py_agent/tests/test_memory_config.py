@@ -24,6 +24,9 @@ def test_memory_settings_accepts_boundary_values():
             "memory_rule_routing_mode": "STRICT",
             "memory_rule_auto_read_limit": "0",
             "memory_rule_receipt_enabled": 1,
+            "memory_resume_auto_context_enabled": "true",
+            "memory_resume_auto_context_mode": "ALWAYS",
+            "memory_resume_auto_context_limit": "1",
         }
     )
 
@@ -36,6 +39,9 @@ def test_memory_settings_accepts_boundary_values():
     assert settings.memory_rule_routing_mode == "strict"
     assert settings.memory_rule_auto_read_limit == 0
     assert settings.memory_rule_receipt_enabled is True
+    assert settings.memory_resume_auto_context_enabled is True
+    assert settings.memory_resume_auto_context_mode == "always"
+    assert settings.memory_resume_auto_context_limit == 1
 
 
 def test_memory_settings_invalid_values_fall_back_with_warnings():
@@ -49,6 +55,9 @@ def test_memory_settings_invalid_values_fall_back_with_warnings():
             "memory_rule_routing_mode": "strict; rm -rf /",
             "memory_rule_auto_read_limit": -5,
             "memory_rule_receipt_enabled": "maybe",
+            "memory_resume_auto_context_enabled": "maybe",
+            "memory_resume_auto_context_mode": "always; rm -rf /",
+            "memory_resume_auto_context_limit": 999,
         }
     )
 
@@ -62,6 +71,9 @@ def test_memory_settings_invalid_values_fall_back_with_warnings():
         "memory_rule_routing_mode",
         "memory_rule_auto_read_limit",
         "memory_rule_receipt_enabled",
+        "memory_resume_auto_context_enabled",
+        "memory_resume_auto_context_mode",
+        "memory_resume_auto_context_limit",
     }
     assert all(warning.fallback_value is not None for warning in warnings)
 
@@ -79,6 +91,9 @@ def test_load_config_normalizes_memory_values_and_keeps_warning_receipts(tmp_pat
                 "memory_rule_routing_mode: off",
                 "memory_rule_auto_read_limit: abcd",
                 "memory_rule_receipt_enabled: false",
+                "memory_resume_auto_context_enabled: yes",
+                "memory_resume_auto_context_mode: trigger",
+                "memory_resume_auto_context_limit: 0",
             ]
         ),
         encoding="utf-8",
@@ -94,9 +109,13 @@ def test_load_config_normalizes_memory_values_and_keeps_warning_receipts(tmp_pat
     assert config.memory_rule_routing_mode == "off"
     assert config.memory_rule_auto_read_limit == 3
     assert config.memory_rule_receipt_enabled is False
+    assert config.memory_resume_auto_context_enabled is True
+    assert config.memory_resume_auto_context_mode == "trigger"
+    assert config.memory_resume_auto_context_limit == 5
     assert [item["field_name"] for item in config.memory_config_warnings] == [
         "memory_archive_level",
         "memory_hook_enabled",
         "memory_hook_archive_level",
         "memory_rule_auto_read_limit",
+        "memory_resume_auto_context_limit",
     ]

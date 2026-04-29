@@ -74,10 +74,8 @@ def print_gateway_response(payload: dict, *, json_mode: bool = False, show_promp
     else:
         print(str(payload.get("error", "gateway 请求没有返回内容。") or "gateway 请求没有返回内容。"))
 
-    print(
-        f"\n[request_id={payload.get('id', '-')}; status={payload.get('status', '-')}; "
-        f"backend={payload.get('backend', '-')}; tool_rounds={payload.get('tool_rounds', 0)}]"
-    )
+    status_line = f"request_id={payload.get('id', '-')}; status={payload.get('status', '-')}; backend={payload.get('backend', '-')}; tool_rounds={payload.get('tool_rounds', 0)}; prompt_tokens≈{payload.get('prompt_token_estimate', 0)}; resume_context={1 if payload.get('memory_resume_context_injected') else 0}"
+    print(f"\n[{status_line}]")
     return 0 if payload.get("ok") else 2
 
 
@@ -89,6 +87,7 @@ def submit_gateway_ask(
     prompt_files: list[str] | None = None,
     save: bool = True,
     include_prompt: bool = False,
+    resume_context: bool | None = None,
     agent: SimpleAgent | None = None,
 ) -> tuple[str, Path, Path]:
     """LLM contract: enqueue one ask request and return request/response paths.
@@ -111,6 +110,8 @@ def submit_gateway_ask(
         "status": "pending",
         "attempts": 0,
     }
+    if resume_context is not None:
+        payload["resume_context"] = bool(resume_context)
     request_path = write_gateway_request(paths, payload)
     response_path = gateway_response_path(paths, request_id)
     if agent is not None:
@@ -437,6 +438,7 @@ def _handle_gateway_request(
             request_id=request_id,
             source="gateway",
             recovery_snapshot=bool(request.get("save", True)),
+            resume_context=request.get("resume_context") if "resume_context" in request else None,
             recovery_next_actions=["如需恢复本次 gateway 请求，先读取 gateway response 和 LocalStore gateway_request 记录。"],
             recovery_content_paths=[str(request_path), str(response_path)],
         )
@@ -449,9 +451,16 @@ def _handle_gateway_request(
                 "used_memories": result.used_memories,
                 "tool_rounds": result.tool_rounds,
                 "prompt": result.prompt if request.get("include_prompt") else "",
+                "prompt_token_estimate": result.prompt_token_estimate,
+                "runtime_injection_token_estimate": result.runtime_injection_token_estimate,
                 "recovery_snapshot_id": result.recovery_snapshot_id,
                 "recovery_snapshot_path": result.recovery_snapshot_path,
                 "recovery_snapshot_error": result.recovery_snapshot_error,
+                "memory_resume_context_injected": result.memory_resume_context_injected,
+                "memory_resume_context_query": result.memory_resume_context_query,
+                "memory_resume_context_matches": result.memory_resume_context_matches,
+                "memory_resume_context_token_estimate": result.memory_resume_context_token_estimate,
+                "memory_resume_context_error": result.memory_resume_context_error,
             }
         )
     except Exception as exc:

@@ -8,6 +8,7 @@ from __future__ import annotations
 """
 
 from .models import CompressionSnapshot, RawMemoryEvent
+from .resume_context import ResumeContextResult, build_auto_resume_context
 from .runtime import ArchiveRunTurnResult, archive_run_turn
 from .snapshots import RecoverySnapshotResult, write_recovery_snapshot
 from .storage import (
@@ -26,9 +27,11 @@ __all__ = [
     "MemoryArchiveError",
     "RawMemoryEvent",
     "RecoverySnapshotResult",
+    "ResumeContextResult",
     "archive_run_turn",
     "append_raw_event",
     "append_snapshot",
+    "build_auto_resume_context",
     "enforce_retention",
     "estimate_tokens",
     "raw_event_path_for",

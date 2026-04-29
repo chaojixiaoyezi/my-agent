@@ -211,6 +211,10 @@ my-agent run "总结这个项目" --no-save
 
 默认保存时，`run` 会同时写入普通 JSONL memory、raw archive 和一条轻量 `memory/hooks/YYYY-MM-DD.jsonl` recovery snapshot。`--no-save` 会关闭普通单轮会话保存；任务类 runner 仍会通过自己的事实源写 run_id 级恢复锚点。
 
+如果配置打开 `memory_resume_auto_context_enabled: true`，`run/chat/gateway` 会在“继续、刚刚、恢复、run_id/request_id”等恢复场景里尝试读取归档和任务事实源，并把一段短小 `Recovery Brief` 注入本轮 prompt。默认关闭，避免普通请求被恢复检索拖慢。
+
+`run` 结束状态行会显示粗略 token 估算，例如 `prompt_tokens≈...`、`inject_tokens≈...`、`resume_tokens≈...`。这是保守估算，不是模型厂商 tokenizer 的精确计费值。
+
 | 参数 | 说明 |
 | --- | --- |
 | `prompt` | 必填，用户任务或问题。 |
@@ -219,6 +223,8 @@ my-agent run "总结这个项目" --no-save
 | `--save` | 保存本次对话到记忆。 |
 | `--no-save` | 不保存本次对话到记忆。 |
 | `--show-prompt` | 打印最终拼装后的 prompt。 |
+| `--resume-context` | 本次请求临时启用恢复上下文注入，不用改配置文件。 |
+| `--no-resume-context` | 本次请求临时关闭恢复上下文注入。 |
 
 ## `remember`
 
@@ -486,8 +492,12 @@ my-agent chat --gateway
 | `--no-save` | `false` | 交互对话不自动保存到记忆。 |
 | `--gateway` | `false` | 普通聊天消息投递给后台 gateway；如果 gateway 没启动，会提示先执行 `my-agent gateway start`。 |
 | `--gateway-timeout <seconds>` | `gateway_request_timeout` | gateway 模式等待单条响应的秒数。 |
+| `--resume-context` | 配置值 | 本次 chat 会话临时启用恢复上下文注入。 |
+| `--no-resume-context` | 配置值 | 本次 chat 会话临时关闭恢复上下文注入。 |
 
 chat 内部命令仍在本地处理，例如 `/memory`、`/remember`、`/subagents`。普通自然语言消息才会进入模型；在 `--gateway` 模式下，这些普通消息会走 gateway request/response。
+
+chat 和 gateway 都复用 `SimpleAgent.run()` 的恢复上下文能力。也就是说，只有当主配置显式打开 `memory_resume_auto_context_enabled` 时，普通消息才会在恢复触发词场景里自动注入 `Recovery Brief`；默认不查、不注入。
 
 普通自然语言进入模型后，主代理可以调用三个编排工具：
 
@@ -889,6 +899,8 @@ my-agent gateway result gwreq-1777442684-0b7ac8cb
 | `ask` | `--timeout <seconds>` | 等待后台响应的秒数，默认使用 `gateway_request_timeout`。 |
 | `ask` | `--no-wait` | 只投递请求并立即返回 request id。 |
 | `ask` | `--json` | 输出完整响应 JSON。 |
+| `ask` | `--resume-context` | 本次 gateway 请求临时启用恢复上下文注入。 |
+| `ask` | `--no-resume-context` | 本次 gateway 请求临时关闭恢复上下文注入。 |
 | `result` | `--show-prompt` | 打印响应 JSON 中保存的最终 prompt。 |
 | `result` | `--json` | 输出完整响应 JSON。 |
 | `run` | daemon 同名参数 | 内部调试用，支持 `--max-cycles 1 --interval 0 --no-planner` 这类安全验证。 |
@@ -915,6 +927,14 @@ gateway_request_poll_interval: 1
 gateway_request_workers: 1
 gateway_processing_timeout_seconds: 900
 gateway_request_max_attempts: 2
+```
+
+恢复上下文自动注入配置：
+
+```yaml
+memory_resume_auto_context_enabled: false
+memory_resume_auto_context_mode: "trigger"  # off / trigger / always
+memory_resume_auto_context_limit: 5         # 1-50
 ```
 
 默认文件：

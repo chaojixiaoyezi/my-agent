@@ -4,14 +4,14 @@ from __future__ import annotations
 
 给人看的解释：
 这个文件只管命令入口和打印。
-真正的归档读取、过滤和恢复线索整理在 `memory_archive_query.py`，避免 CLI 文件重新变成大杂烩。
+真正的归档读取、过滤和恢复线索整理在 `agent.memory_archive.query`，避免 CLI 文件重新变成大杂烩。
 """
 
 import json
 from typing import Any
 
 from .common import make_agent
-from .memory_archive_query import (
+from ..agent.memory_archive.query import (
     archive_filters_from_args,
     build_resume_guidance,
     collect_archive_records,
@@ -22,7 +22,7 @@ from .memory_archive_query import (
     resume_local_query,
     strip_sort_keys,
 )
-from .memory_resume_brief import build_resume_brief
+from ..agent.memory_archive.resume_brief import build_resume_brief
 
 
 def cmd_memory_archive_list(args) -> int:

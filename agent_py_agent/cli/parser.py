@@ -11,7 +11,7 @@ import argparse
 
 from .adapter import cmd_adapter, cmd_adapter_file
 from .chat import cmd_chat
-from .common import DEFAULT_CAPABILITY_CONFIG, DEFAULT_CONFIG, configure_stdio
+from .common import DEFAULT_CAPABILITY_CONFIG, DEFAULT_CONFIG, add_resume_context_switches, configure_stdio
 from .daemon import cmd_daemon
 from .gateway_client import cmd_default, cmd_gateway, cmd_gateway_ask, cmd_gateway_result
 from .gateway_process import (
@@ -95,6 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--save", action="store_true", default=None, help="保存本次对话到记忆")
     run.add_argument("--no-save", action="store_false", dest="save", help="不保存本次对话到记忆")
     run.add_argument("--show-prompt", action="store_true", help="打印最终拼装后的 prompt")
+    add_resume_context_switches(run)
     run.set_defaults(func=cmd_run)
 
     remember = sub.add_parser("remember", help="手动写入一条记忆")
@@ -210,6 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--no-save", action="store_true", help="交互对话不自动保存到记忆")
     chat.add_argument("--gateway", action="store_true", help="把普通聊天消息投递给后台 gateway，而不是在当前前台进程里调用模型")
     chat.add_argument("--gateway-timeout", type=float, help="gateway 模式等待单条响应的秒数，默认使用配置 gateway_request_timeout")
+    add_resume_context_switches(chat)
     chat.set_defaults(func=cmd_chat)
 
     spawn = sub.add_parser("spawn-subagents", help="拆分并创建 subagent 任务记录")
@@ -439,6 +441,7 @@ def build_parser() -> argparse.ArgumentParser:
     gateway_ask.add_argument("--timeout", type=float, help="等待 gateway 响应的秒数，默认使用配置")
     gateway_ask.add_argument("--no-wait", action="store_true", help="只投递请求并立即返回 request_id，适合长任务")
     gateway_ask.add_argument("--json", action="store_true", help="输出完整响应 JSON，方便脚本或聊天适配器读取")
+    add_resume_context_switches(gateway_ask)
     gateway_ask.set_defaults(func=cmd_gateway_ask)
 
     gateway_result = gateway_sub.add_parser("result", help="读取某个 gateway 请求结果，通常配合 ask --no-wait 使用")
