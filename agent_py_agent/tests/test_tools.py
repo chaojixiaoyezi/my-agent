@@ -13,7 +13,10 @@ from agent_py_agent.agent.tools import (
     AppendFileTool,
     FetchUrlTool,
     HttpRequestTool,
+    ListFilesTool,
+    ReadFileTool,
     ReplaceInFileTool,
+    SearchTextTool,
     ToolRegistry,
     WriteFileTool,
 )
@@ -159,6 +162,20 @@ def start_test_server():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
+
+
+def make_tool_registry(workspace: Path) -> ToolRegistry:
+    return ToolRegistry(
+        workspace,
+        max_chars=12000,
+        max_entries=100,
+        max_matches=50,
+        web_max_chars=12000,
+        http_timeout=30,
+        catalog_limit=20,
+        retrieval_limit=3,
+        vector_search_enabled=False,
+    )
 
 
 def test_tool_loop_and_prompt_transcript():
@@ -355,6 +372,21 @@ def test_tool_call_parser_reports_incomplete_qwen_xmlish_call():
     assert "B.md" in calls[1]["raw"]
 
 
+def test_tool_call_parser_and_executor_reject_non_object_payloads():
+    registry = make_tool_registry(Path.cwd())
+
+    calls = registry.parse_tool_calls("[TOOL_CALL]\n[1, 2, 3]\n[/TOOL_CALL]")
+    parsed_result = registry.execute_call(calls[0])
+    direct_result = registry.execute_call(["not", "a", "dict"])
+
+    assert calls[0]["tool"] == "__parse_error__"
+    assert "JSON 对象" in calls[0]["error"]
+    assert not parsed_result.ok
+    assert "JSON 对象" in parsed_result.output
+    assert not direct_result.ok
+    assert "JSON 对象" in direct_result.output
+
+
 def test_tool_allowlist_limits_prompt_and_execution():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
@@ -375,18 +407,9 @@ def test_tool_allowlist_limits_prompt_and_execution():
 def test_write_boundary_blocks_subagent_writes_outside_allowed_roots():
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        registry = ToolRegistry(
-            workspace,
-            max_chars=12000,
-            max_entries=100,
-            max_matches=50,
-            web_max_chars=12000,
-            http_timeout=30,
-            catalog_limit=20,
-            retrieval_limit=3,
-            vector_search_enabled=False,
-        )
+        registry = make_tool_registry(workspace)
         task_dir = workspace / "subs" / "run-1"
+        task_dir.mkdir(parents=True)
         boundary = {
             "allowed_write_roots": [str(task_dir)],
             "forbidden_write_roots": [str(task_dir / "private")],
@@ -413,6 +436,16 @@ def test_write_boundary_blocks_subagent_writes_outside_allowed_roots():
             allowed_tools=["write_file"],
             write_boundary=boundary,
         )
+        locked_child = registry.execute_call(
+            {"tool": "write_file", "path": "subs/run-1/LOCKED.md/child.txt", "content": "bad"},
+            allowed_tools=["write_file"],
+            write_boundary=boundary,
+        )
+        weird_path = registry.execute_call(
+            {"tool": "write_file", "path": {"unexpected": "object"}, "content": "bad"},
+            allowed_tools=["write_file"],
+            write_boundary=boundary,
+        )
 
         assert ok.ok
         assert (task_dir / "output.md").read_text(encoding="utf-8") == "ok"
@@ -423,6 +456,35 @@ def test_write_boundary_blocks_subagent_writes_outside_allowed_roots():
         assert "forbidden_write_roots" in forbidden.output
         assert not locked.ok
         assert "locked_files" in locked.output
+        assert not locked_child.ok
+        assert "locked_files" in locked_child.output
+        assert not (task_dir / "LOCKED.md").exists()
+        assert not weird_path.ok
+        assert "path 参数必须是字符串路径" in weird_path.output
+
+
+def test_write_boundary_blocks_symlink_escape_under_allowed_root():
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as outside_td:
+        workspace = Path(td)
+        outside = Path(outside_td)
+        registry = make_tool_registry(workspace)
+        task_dir = workspace / "subs" / "run-1"
+        task_dir.mkdir(parents=True)
+        link = task_dir / "outside-link"
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except OSError:
+            return
+
+        result = registry.execute_call(
+            {"tool": "write_file", "path": "subs/run-1/outside-link/escape.txt", "content": "bad"},
+            allowed_tools=["write_file"],
+            write_boundary={"allowed_write_roots": [str(task_dir)]},
+        )
+
+        assert not result.ok
+        assert "路径超出允许的工作区范围" in result.output
+        assert not (outside / "escape.txt").exists()
 
 
 def test_write_and_append_file_tools():
@@ -437,6 +499,57 @@ def test_write_and_append_file_tools():
         assert write_result.ok
         assert append_result.ok
         assert (workspace / "src" / "demo.py").read_text(encoding="utf-8") == "print('a')\nprint('b')\n"
+
+
+def test_filesystem_tools_reject_bad_parameters_and_hide_absolute_outside_paths():
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as outside_td:
+        workspace = Path(td)
+        outside_file = Path(outside_td) / "secret.txt"
+        outside_file.write_text("secret", encoding="utf-8")
+        (workspace / "notes.txt").write_text("line one\nline two\n", encoding="utf-8")
+        read_tool = ReadFileTool(workspace, max_chars=2000)
+        write_tool = WriteFileTool(workspace)
+        list_tool = ListFilesTool(workspace, max_entries=20)
+        (workspace / "src").mkdir()
+        (workspace / "src" / "nested.txt").write_text("nested", encoding="utf-8")
+
+        outside = read_tool.execute({"path": str(outside_file)})
+        bad_line = read_tool.execute({"path": "notes.txt", "start_line": "abc"})
+        bad_path_type = write_tool.execute({"path": {"bad": "type"}, "content": "x"})
+        non_recursive = list_tool.execute({"path": ".", "recursive": "false"})
+
+        assert not outside.ok
+        assert "工作区" in outside.output
+        assert str(outside_file) not in outside.output
+        assert not bad_line.ok
+        assert "start_line 必须是整数" in bad_line.output
+        assert not bad_path_type.ok
+        assert "path 参数必须是字符串路径" in bad_path_type.output
+        assert non_recursive.ok
+        assert "src/" in non_recursive.output
+        assert "src/nested.txt" not in non_recursive.output
+
+
+def test_search_text_does_not_follow_symlink_to_outside_workspace():
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as outside_td:
+        workspace = Path(td)
+        outside_file = Path(outside_td) / "outside.txt"
+        outside_file.write_text("needle outside workspace", encoding="utf-8")
+        link = workspace / "linked-outside.txt"
+        try:
+            link.symlink_to(outside_file)
+        except OSError:
+            return
+        search_tool = SearchTextTool(workspace, max_matches=10)
+        read_tool = ReadFileTool(workspace, max_chars=2000)
+
+        search_result = search_tool.execute({"query": "needle", "path": "."})
+        read_result = read_tool.execute({"path": "linked-outside.txt"})
+
+        assert search_result.ok
+        assert "没有找到匹配项" in search_result.output
+        assert not read_result.ok
+        assert "路径超出允许的工作区范围" in read_result.output
 
 
 def test_replace_in_file_tool():
@@ -484,3 +597,30 @@ def test_fetch_url_and_http_request_tools():
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_web_tools_reject_unsafe_urls_and_bad_request_parameters():
+    fetch_tool = FetchUrlTool(max_chars=2000, timeout=5)
+    http_tool = HttpRequestTool(max_chars=2000, timeout=5)
+
+    file_url = fetch_tool.execute({"url": "file:///etc/passwd"})
+    userinfo_url = fetch_tool.execute({"url": "https://user:pass@example.com"})
+    bad_header = http_tool.execute(
+        {
+            "url": "https://example.com",
+            "headers": {"X-Test": "ok\nbad"},
+        }
+    )
+    bad_method = http_tool.execute({"url": "https://example.com", "method": "GET\nPOST"})
+    bad_body = http_tool.execute({"url": "https://example.com", "body": {"not": "text"}})
+
+    assert not file_url.ok
+    assert "http 或 https" in file_url.output
+    assert not userinfo_url.ok
+    assert "用户名或密码" in userinfo_url.output
+    assert not bad_header.ok
+    assert "headers 值不能包含换行" in bad_header.output
+    assert not bad_method.ok
+    assert "method 必须是有效的 HTTP 方法名" in bad_method.output
+    assert not bad_body.ok
+    assert "body 参数必须是字符串或标量文本" in bad_body.output
