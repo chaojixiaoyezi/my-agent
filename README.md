@@ -16,6 +16,8 @@ my-agent chat
 my-agent subagents-dispatch --watch --interval 30
 ```
 
+完整参数手册见 [CLI_REFERENCE.md](CLI_REFERENCE.md)。
+
 项目名先固定为 `my-agent`。后续如果确定正式名字，只需要改 `pyproject.toml` 里的 `project.name` 和 `project.scripts`，代码入口可以继续复用 `agent_py_agent.__main__:main`。
 
 当前常驻方式是一个前台 watch 进程：

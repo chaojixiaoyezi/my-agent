@@ -112,5 +112,6 @@
 - [ ] 新增重要文件后更新 `CODEBASE_TREE.md`
 - [ ] 新增架构想法后更新 `DESIGN_LEDGER.md`
 - [ ] 新增命令后更新 README 或 runbook
+- [ ] CLI 命令或参数变化时更新 `CLI_REFERENCE.md`
 - [ ] 新增测试策略后更新 `TESTS.md`
 - [ ] 文档里的验收级测试说明真实 API 要求和必要环境变量
