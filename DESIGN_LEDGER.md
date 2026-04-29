@@ -859,3 +859,23 @@ suggested_tool: 是否建议开发成 tool
 后续方向：
 - 在这个入口之上做真正后台 `gateway start/status/stop/restart`。
 - 增加 pid 文件、stdout/stderr 日志轮转和 Windows 后台进程管理。
+
+## 2026-04-29 / Gateway 参数分层
+
+状态：已落地配置层
+
+思路：
+- 普通用户不应该理解 `interval`、`max-runners`、`limit` 这类底层调度参数。
+- 用户层只关心任务规模，比如最多多少子代理/孙代理；不关心每轮调度多少条。
+- 高级用户可以自己调，但默认应该是 `auto` 或“不设硬上限”。
+
+已落地：
+- 新增 `GATEWAY_DESIGN.md`，记录 通道运行时、长期助手、模型助手 session 和 会话运行时 云任务形态的参考。
+- 新增用户层任务规模配置：`task_max_subagents`、`task_max_grandchildren`，默认 `0` 表示不设硬上限。
+- 新增未来 gateway 策略配置：`scheduler_mode`、`runner_concurrency`、`runner_start_rate`、`runner_timeout_seconds`、`runner_failure_policy`，默认 `auto`。
+- `daemon_max_runners` 默认改为 `"auto"`；当前前台 daemon 会映射成保守值 1。
+- `daemon_limit` 默认改为 `0`，表示每个阶段不限制记录条数。
+
+后续方向：
+- 做真正的 `my-agent gateway start/status/stop/restart`。
+- 把 `runner_concurrency` 和 `runner_start_rate` 接到后台 worker pool，而不是前台同步循环。

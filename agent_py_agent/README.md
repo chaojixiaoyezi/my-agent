@@ -269,7 +269,7 @@ watch 常驻循环：
 python3 -m agent_py_agent daemon
 ```
 
-`daemon` 默认读取 `agent_config.yaml` 里的 `daemon_*` 配置。数字项里的 `0` 是显式策略值：`daemon_max_cycles=0` 表示持续运行，`daemon_max_runners=0` 表示不执行 runner，`daemon_max_cards=0` 表示不限制能力卡数量，`daemon_interval=0` 表示每轮之间不等待，通常只用于测试或单轮验证。
+`daemon` 默认读取 `agent_config.yaml` 里的 `daemon_*` 配置。用户层任务规模用 `task_max_subagents=0` / `task_max_grandchildren=0` 表示不设硬上限；未来 gateway 的并发、超时和启动速率先写成 `auto`。当前前台 daemon 里，`daemon_max_runners: "auto"` 会映射成保守值 1，`daemon_max_cycles=0` 表示持续运行，`daemon_limit=0` 表示不限制记录条数。
 
 父代理 LLM planner 常驻循环：
 

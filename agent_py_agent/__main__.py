@@ -493,7 +493,12 @@ def cmd_daemon(args) -> int:
         return 2
 
     interval = args.interval if args.interval is not None else cfg.daemon_interval
-    max_runners = args.max_runners if args.max_runners is not None else cfg.daemon_max_runners
+    raw_max_runners = args.max_runners if args.max_runners is not None else cfg.daemon_max_runners
+    try:
+        max_runners = _resolve_daemon_max_runners(raw_max_runners)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     limit = args.limit if args.limit is not None else cfg.daemon_limit
     max_cycles = args.max_cycles if args.max_cycles is not None else cfg.daemon_max_cycles
     max_cards = args.max_cards if args.max_cards is not None else cfg.daemon_max_cards
@@ -570,13 +575,31 @@ def _validate_daemon_numbers(
         return "daemon_interval / --interval 不能小于 0；0 表示每轮之间不等待，通常只用于测试。"
     if max_runners < 0:
         return "daemon_max_runners / --max-runners 不能小于 0；0 表示本轮不执行 runner。"
-    if limit <= 0:
-        return "daemon_limit / --limit 必须大于 0。"
+    if limit < 0:
+        return "daemon_limit / --limit 不能小于 0；0 表示不限制记录条数。"
     if max_cycles < 0:
         return "daemon_max_cycles / --max-cycles 不能小于 0；0 表示持续运行。"
     if max_cards < 0:
         return "daemon_max_cards / --max-cards 不能小于 0；0 表示不限制。"
     return ""
+
+
+def _resolve_daemon_max_runners(value: object) -> int:
+    """把 daemon_max_runners 的 auto / 数字配置转成当前前台调度器可执行的整数。"""
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"", "auto"}:
+            # 当前 daemon 还没有后台 worker pool；auto 先映射成保守的一轮 1 个 runner。
+            return 1
+        try:
+            return int(normalized)
+        except ValueError as exc:
+            raise ValueError("daemon_max_runners / --max-runners 必须是整数或 auto。") from exc
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("daemon_max_runners / --max-runners 必须是整数或 auto。") from exc
 
 
 def cmd_subagent_context(args) -> int:
@@ -972,7 +995,7 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch.add_argument("--execute-runners", action="store_true", help="配合 --apply 调用真实模型执行 runner")
     dispatch.add_argument("--planner", action="store_true", help="有待处理事项时调用父代理 LLM planner，禁止空心 HEARTBEAT_OK")
     dispatch.add_argument("--max-runners", type=int, default=1, help="本轮最多推进多少个 runner，0 表示不执行 runner")
-    dispatch.add_argument("--limit", type=int, default=20, help="每个阶段最多处理多少条记录")
+    dispatch.add_argument("--limit", type=int, default=20, help="每个阶段最多处理多少条记录，0 表示不限制")
     dispatch.add_argument("--watch", action="store_true", help="持续循环执行 dispatch")
     dispatch.add_argument("--interval", type=float, default=30.0, help="watch 模式每轮间隔秒数，0 表示不等待")
     dispatch.add_argument("--max-cycles", type=int, default=0, help="watch 模式最多循环次数，0 表示持续运行")
@@ -1000,8 +1023,8 @@ def build_parser() -> argparse.ArgumentParser:
     daemon.add_argument("--planner", action="store_true", dest="planner", default=None, help="覆盖配置：启用父代理 LLM planner")
     daemon.add_argument("--no-planner", action="store_false", dest="planner", help="覆盖配置：关闭父代理 LLM planner")
     daemon.add_argument("--interval", type=float, help="覆盖配置：每轮间隔秒数，0 表示不等待")
-    daemon.add_argument("--max-runners", type=int, help="覆盖配置：每轮最多推进多少个 runner，0 表示不执行 runner")
-    daemon.add_argument("--limit", type=int, help="覆盖配置：每个阶段最多处理多少条记录")
+    daemon.add_argument("--max-runners", help="覆盖配置：每轮最多推进多少个 runner；auto 表示保守自适应，0 表示不执行 runner")
+    daemon.add_argument("--limit", type=int, help="覆盖配置：每个阶段最多处理多少条记录，0 表示不限制")
     daemon.add_argument("--max-cycles", type=int, help="覆盖配置：最多循环次数，0 表示持续运行")
     daemon.add_argument("--force-lock", action="store_true", help="强制覆盖已有 watch lock")
     daemon.add_argument("--reviewer", help="覆盖配置：patch/acceptance 审核者标识")

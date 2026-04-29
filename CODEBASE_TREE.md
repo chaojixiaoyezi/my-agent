@@ -10,6 +10,7 @@
 simple-python-agent-v0.3/                      # 项目根目录，放代码、说明文档和验证记录
 |-- pyproject.toml                             # Python packaging 配置，提供 my-agent console script
 |-- CLI_REFERENCE.md                           # 完整 CLI 参数手册，说明每个命令和参数
+|-- GATEWAY_DESIGN.md                          # gateway 常驻形态、外部方案对比和本项目目标设计
 |-- agent_py_agent/                            # Python 包目录，核心代码主要都在这里
 |   |-- __init__.py                            # 安装包初始化文件，记录包版本
 |   |-- __main__.py                            # CLI 入口，负责 run/chat/记忆/subagent 看板与巡检命令
@@ -256,7 +257,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `SimpleAgent.run_parent_planner()` 会在 gate 发现待处理事项时触发完整父代理 LLM turn，并阻断空心 `HEARTBEAT_OK`。
 - `write_dispatch_report()` 会写出 `subagent_dispatch_report.json` 和 `SUBAGENT_DISPATCH.md`，apply 时追加调度审计日志。
 - `python3 -m agent_py_agent subagents-dispatch` 默认 dry-run；`--watch` 可常驻循环；`--planner` 可触发父代理 LLM planner；`--apply --execute-runners` 才会真实调用 runner 模型。
-- `python3 -m agent_py_agent daemon` 会读取主配置里的 `daemon_*` 配置，作为配置驱动的前台常驻入口。
+- `python3 -m agent_py_agent daemon` 会读取主配置里的 `daemon_*` 配置，作为配置驱动的前台常驻入口；`daemon_max_runners: "auto"` 当前映射成保守值 1。
 - `build_execution_context()` 会把当前 run 的授权、能力卡、验收要求和写入边界压成最小上下文。
 - `write_execution_context()` 会写出 `execution_context.json` 和 `EXECUTION_CONTEXT.md`。
 - `python3 -m agent_py_agent subagent-context <run_id>` 可以生成单个子代理执行上下文包。
@@ -273,6 +274,9 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 这是给人改的配置文件，不是给代码看的结构定义。
 
 你后续调工具策略时，优先会改这里：
+- 用户层任务规模：`task_max_subagents`、`task_max_grandchildren`，0 表示不设硬上限。
+- 未来 gateway 自适应策略：`scheduler_mode`、`runner_concurrency`、`runner_start_rate`、`runner_timeout_seconds` 和 `runner_failure_policy`，默认都是 `auto`。
+- 当前前台 daemon 高级参数：`daemon_*`，用于在 gateway 完整实现前控制 watch 调度。
 - 工具返回长度限制
 - 工具详情注入数量
 - 是否打开向量检索开关

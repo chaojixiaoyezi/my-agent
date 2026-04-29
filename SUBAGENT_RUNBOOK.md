@@ -596,7 +596,10 @@ python3 -m agent_py_agent daemon
 
 `daemon` 读取 `agent_config.yaml` 里的 `daemon_*` 配置，适合把常驻参数收进配置文件，日常启动时少打长命令。
 
-`daemon_*` 数字项里的 `0` 是显式策略值，不是“未设置”：`daemon_max_cycles=0` 表示持续运行，`daemon_max_runners=0` 表示不执行 runner，`daemon_max_cards=0` 表示不限制能力卡数量，`daemon_interval=0` 表示每轮之间不等待，通常只用于测试或单轮验证。
+配置分两层：
+- 用户层任务规模：`task_max_subagents=0` / `task_max_grandchildren=0` 表示不设硬上限，让主代理按任务复杂度决定。
+- 未来 gateway 调度策略：`runner_concurrency: "auto"`、`runner_start_rate: "auto"`、`runner_timeout_seconds: "auto"` 表示由主代理/调度器根据模型速度、失败率、队列长度和卡住情况自适应。
+- 当前前台 daemon 高级参数：`daemon_max_runners: "auto"` 会先映射成保守值 1；`daemon_max_cycles=0` 表示持续运行；`daemon_limit=0` 表示不限制记录条数；`daemon_max_cards=0` 表示不限制能力卡数量；`daemon_interval=0` 通常只用于测试或单轮验证。
 
 父代理 planner 模式：
 

@@ -44,21 +44,40 @@ max_subagents: 5
 # 子任务记录输出目录
 subagent_workspace: "data/subagents"
 
-# 前台 daemon 默认策略：
-# - my-agent daemon 会读取这些配置，减少启动时的长参数
-# - 默认不写回、不执行 runner，避免刚安装后误触真实任务推进
-# - 本地确认后可以把 daemon_apply / daemon_execute_runners 改成 true
+# 任务规模策略（用户层）：
+# - 这是你和主代理聊天时“最多开多少子代理/孙代理”的默认边界。
+# - 0 表示不设硬上限，让主代理按任务复杂度决定；如果用户在聊天里明确说“最多 20 个子代理”，那条任务可以覆盖这里。
+# - 这些是任务规模，不是模型调用并发。并发由下面 scheduler/runner 策略控制。
+task_max_subagents: 0
+task_max_grandchildren: 0
+
+# 调度策略（未来 gateway 的主要策略面板）：
+# - auto 表示由主代理/调度器根据模型速度、失败率、队列长度和卡住情况自适应调整。
+# - 普通用户不需要改这些；高级用户可以改成具体数字或具体策略。
+# - 当前前台 daemon 只会读取 daemon_* 低层参数；这些字段先作为 gateway 设计契约和配置落点。
+scheduler_mode: "auto"
+runner_concurrency: "auto"
+runner_start_rate: "auto"
+runner_timeout_seconds: "auto"
+runner_failure_policy: "auto"
+
+# 前台 daemon 默认策略（高级 / 过渡期）：
+# - my-agent daemon 会读取这些配置，减少启动时的长参数。
+# - 当前 daemon 还不是完整 gateway/service；它是一个前台 watch 调度循环。
+# - 默认不写回、不执行 runner，避免刚安装后误触真实任务推进；确认要自动推进后，把 daemon_apply 和 daemon_execute_runners 改成 true。
+# - daemon_max_runners 是当前前台调度器的“每轮最多推进多少 runner”，不是未来 worker 并发数。
+# - daemon_max_runners: "auto" 当前会映射成保守值 1；未来 gateway 会改成自适应并发。
 # - 数字项里的 0 是显式策略值，不是“未设置”：
 #   daemon_max_cycles=0 表示持续运行
-#   daemon_max_runners=0 表示不执行 runner
+#   daemon_limit=0 表示每个阶段不设记录条数上限
 #   daemon_max_cards=0 表示不限制能力卡数量
 #   daemon_interval=0 表示每轮之间不等待，通常只用于测试或单轮验证
 daemon_planner: true
 daemon_apply: false
 daemon_execute_runners: false
 daemon_interval: 30
-daemon_max_runners: 1
-daemon_limit: 20
+daemon_max_runners: "auto"
+daemon_limit: 0
 daemon_max_cycles: 0
 daemon_max_cards: 0
 daemon_probe: true
