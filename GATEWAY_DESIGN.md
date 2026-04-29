@@ -95,6 +95,90 @@ delegation:
 - 隐私和安全：下级不能非法获取上级全部状态和权限。
 - 迁移和备份：本体可以迁移，但每个 gateway 的私有状态和共享状态要区分。
 
+### Organization Gateway Model
+
+组织模型可以理解成：用户创建一个组织，root gateway 生成组织身份和邀请凭证；员工或其他机器使用被授予的 key / invite 安装并注册自己的 my-agent。注册后的 gateway 加入组织关系，但仍然是完整独立的 my-agent。
+
+示例：
+
+```text
+Company / Organization
+  root gateway: founder-my-agent
+    |
+    |-- department gateway: engineering-lead-my-agent
+    |     |
+    |     |-- member gateway: backend-dev-my-agent
+    |     `-- member gateway: qa-my-agent
+    |
+    `-- department gateway: ops-lead-my-agent
+          |
+          `-- member gateway: build-machine-my-agent
+```
+
+这里每个节点都能完整工作：
+
+- root gateway 可以做自己的任务。
+- department gateway 可以独立工作，也可以管理自己下面的 gateway。
+- member gateway 可以独立工作，也可以在被授权时继续邀请自己的下级。
+- 组织关系可以随时调整：提升、降级、转移团队、撤销授权、重新指定 coordinator。
+
+“降级”不是能力减少，而是组织职责变化。例如某个部门 gateway 不再负责协调某个团队，它仍然是完整 my-agent，只是该团队的 coordinator role 被移交给另一个 gateway。
+
+### Invite Key 与注册
+
+组织扩展不应该靠共享 root 的 API key，而应该靠邀请凭证。invite key 只证明“被谁邀请、允许加入哪里、初始权限是什么、是否允许继续邀请下级”。
+
+```yaml
+invite:
+  org_id: "org-001"
+  issued_by_gateway_id: "founder-my-agent"
+  parent_gateway_id: "engineering-lead-my-agent"
+  invitee_label: "backend-dev"
+  initial_role: "member"
+  allowed_scopes:
+    - "receive_tasks"
+    - "report_results"
+    - "request_capabilities"
+  can_invite_children: false
+  expires_at: "2026-05-30T00:00:00Z"
+```
+
+副 gateway 也可以签发自己的 invite，把新人加入到自己的下级关系里，但只能在自己被授权的组织范围内做这件事。它不能借此读取上级的私有账本，也不能绕过上级拿到未授权能力。
+
+### 组织架构状态
+
+组织关系必须是可查询、可审计、可恢复的状态，不应该只存在聊天里。后续应该有一个组织账本，至少记录：
+
+- `org_id`
+- `gateway_id`
+- `parent_gateway_id`
+- `children_gateway_ids`
+- `active_coordinator_for`
+- `membership_status`: active / suspended / revoked / left
+- `capability_summary`
+- `last_seen_at`
+- `trust_level`
+- `can_invite_children`
+- `grants`
+- `delegations`
+- `coordination_epoch`
+
+组织架构变化必须追加事件：
+
+- gateway joined
+- gateway left
+- gateway suspended
+- gateway revoked
+- coordinator delegated
+- coordinator reclaimed
+- parent changed
+- invite issued
+- invite revoked
+- grant issued
+- grant revoked
+
+这让组织随时可重建，也能回答“现在谁归谁管”“谁有权看什么”“谁正在负责哪个任务子树”。
+
 ### 第一版如何留地基
 
 第一版仍然先做单机 gateway，但 schema 和日志要提前留下这些概念：
@@ -107,10 +191,28 @@ delegation:
 - `delegation_id`
 - `delegated_by_gateway_id`
 - `assigned_gateway_id`
+- `parent_gateway_id`
+- `org_id`
+- `membership_status`
+- `can_invite_children`
 - `grant_scope`
 - `attempt_id`
 
 先不做跨机器通信，也不做真正组织树；但任务、事件、runner attempt 和 gateway 状态里先带这些字段，后续扩展时不会推倒重来。
+
+### 仍需补充的设计点
+
+开工前还要继续补齐这些边界，但不需要第一版全部实现：
+
+- Invite key 的签名、撤销和过期机制。
+- root reclaim 与 active coordinator 的冲突处理。
+- 下级 gateway 离线后，它负责的任务如何超时、重派或转交。
+- 跨机器 artifact 同步：哪些内容共享，哪些内容只留本机。
+- 组织备份和迁移：导出 org ledger、task ledger、artifact bundle，但不导出本机 secret。
+- Secret 管理：API key、私有工具凭证、员工本机密钥必须本地保存，不进入上级账本。
+- 版本兼容：不同 my-agent 版本之间如何协作。
+- 权限审计：每次 grant、delegation、revoke、reclaim 都要有事件记录。
+- 隐私策略：上级能看到下级汇报，但不能默认看到下级全部私有记忆。
 
 ## 外部方案参考
 

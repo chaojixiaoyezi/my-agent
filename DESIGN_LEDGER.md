@@ -899,3 +899,23 @@ suggested_tool: 是否建议开发成 tool
 后续方向：
 - 第一版仍从单机 gateway 做起，但任务账本和事件日志提前带 gateway/identity/delegation 字段。
 - 后续再做跨机器通信、授权交换、本体备份和迁移。
+
+## 2026-04-29 / Organization Gateway Model
+
+状态：已落地设计
+
+思路：
+- my-agent 可以组成组织：root gateway 创建组织，其他人或机器通过 invite key 安装并注册自己的完整 my-agent。
+- 副 gateway 可以在授权范围内继续邀请自己的下级 gateway，形成公司/部门/成员式组织树。
+- 组织关系随时可调整，但调整的是协调权和授权范围，不是 gateway 自身能力。
+
+已落地：
+- `GATEWAY_DESIGN.md` 增加 Organization Gateway Model。
+- 设计 invite key 字段：`org_id`、`issued_by_gateway_id`、`parent_gateway_id`、`allowed_scopes`、`can_invite_children`、`expires_at`。
+- 明确组织架构要有独立状态：parent/children、membership、capability summary、last_seen、trust level、grants、delegations、coordination epoch。
+- 明确组织事件日志：join/leave/suspend/revoke/delegate/reclaim/reparent/invite/grant/revoke。
+- 增加开工前待补充清单：invite 签名撤销、secret 管理、artifact 同步、离线接管、版本兼容、权限审计和隐私策略。
+
+后续方向：
+- 第一版 gateway 先落单机 `gateway_id` / `agent_identity_id` / `org_id` / event log。
+- 第二阶段再实现 invite、组织账本和跨 gateway 通信。
