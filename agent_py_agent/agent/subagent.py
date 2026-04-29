@@ -679,7 +679,12 @@ class SubAgentTask:
     scratch_dir: str = ""
     status_file: str = ""
     work_log_file: str = ""
+    action_receipts_file: str = ""
     acceptance_file: str = ""
+    test_checklist_file: str = ""
+    bugs_file: str = ""
+    skill_usage_file: str = ""
+    handoff_file: str = ""
     debrief_file: str = ""
     output_json: str = ""
     dependencies_json: str = ""
@@ -1048,6 +1053,7 @@ class SubAgentManager:
         """检查子代理工单目录是否具备最小可接管结构。"""
 
         task = self.load(run_id)
+        _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
         required_paths = [
             task.task_dir,
             task.data_dir,
@@ -1058,7 +1064,12 @@ class SubAgentManager:
             task.scratch_dir,
             task.status_file,
             task.work_log_file,
+            task.action_receipts_file,
             task.acceptance_file,
+            task.test_checklist_file,
+            task.bugs_file,
+            task.skill_usage_file,
+            task.handoff_file,
             task.debrief_file,
             task.output_json,
             task.dependencies_json,
@@ -2183,7 +2194,12 @@ class SubAgentManager:
                 "locked_files": task.locked_files,
                 "status_file": task.status_file,
                 "work_log_file": task.work_log_file,
+                "action_receipts_file": task.action_receipts_file,
                 "acceptance_file": task.acceptance_file,
+                "test_checklist_file": task.test_checklist_file,
+                "bugs_file": task.bugs_file,
+                "skill_usage_file": task.skill_usage_file,
+                "handoff_file": task.handoff_file,
                 "debrief_file": task.debrief_file,
                 "output_json": task.output_json,
                 "dependencies_json": task.dependencies_json,
@@ -2750,7 +2766,12 @@ class SubAgentManager:
             "scratch_dir": str(task_dir / "scratch"),
             "status_file": str(task_dir / "STATUS.md"),
             "work_log_file": str(task_dir / "WORK_LOG.md"),
+            "action_receipts_file": str(task_dir / "ACTION_RECEIPTS.md"),
             "acceptance_file": str(task_dir / "ACCEPTANCE.md"),
+            "test_checklist_file": str(task_dir / "TEST_CHECKLIST.md"),
+            "bugs_file": str(task_dir / "BUGS.md"),
+            "skill_usage_file": str(task_dir / "SKILL_USAGE.md"),
+            "handoff_file": str(task_dir / "HANDOFF.md"),
             "debrief_file": str(task_dir / "DEBRIEF.md"),
             "output_json": str(task_dir / "output.json"),
             "dependencies_json": str(task_dir / "dependencies.json"),
@@ -4169,11 +4190,59 @@ class SubAgentManager:
             f"- {time.strftime('%Y-%m-%d %H:%M:%S')} 创建工单 {task.id}\n",
         )
         _write_if_missing(
+            Path(task.action_receipts_file),
+            "# ACTION_RECEIPTS\n\n"
+            "每轮推进后追加一条 receipt，避免压缩或跨天后丢失现场。\n\n"
+            "## Template\n\n"
+            "- time: \n"
+            "- action: \n"
+            "- evidence: \n"
+            "- failure_or_fallback: \n"
+            "- next: \n",
+        )
+        _write_if_missing(
             Path(task.acceptance_file),
             "# ACCEPTANCE\n\n"
             "## Checks\n"
             + "\n".join(f"- [ ] {item}" for item in task.acceptance_checks or ["未设置"])
             + "\n\n## Evidence\n\n- 暂无\n",
+        )
+        _write_if_missing(
+            Path(task.test_checklist_file),
+            "# TEST_CHECKLIST\n\n"
+            "## From Requirement\n\n"
+            "- [ ] 原始需求已转成可测试清单\n"
+            "- [ ] P0/P1 验收标准已明确\n\n"
+            "## Entrypoints\n\n"
+            "- [ ] CLI/API/Web/文件入口已实际运行\n"
+            "- [ ] 异常路径和边界输入已覆盖\n\n"
+            "## Evidence\n\n"
+            "- [ ] 测试命令、日志、截图或报告路径已记录\n",
+        )
+        _write_if_missing(
+            Path(task.bugs_file),
+            "# BUGS\n\n"
+            "## Open P0/P1\n\n- 暂无\n\n"
+            "## Non-blocking\n\n- 暂无\n",
+        )
+        _write_if_missing(
+            Path(task.skill_usage_file),
+            "# SKILL_USAGE\n\n"
+            "记录本任务匹配、读取和实际使用过的 skill / references / 外部知识库。\n\n"
+            "## Used\n\n- 暂无\n\n"
+            "## Considered But Not Used\n\n- 暂无\n",
+        )
+        _write_if_missing(
+            Path(task.handoff_file),
+            "# HANDOFF\n\n"
+            "## Current State\n\n- 待填写\n\n"
+            "## Done\n\n- 待填写\n\n"
+            "## Not Done\n\n- 待填写\n\n"
+            "## Next Step\n\n- 待填写\n\n"
+            "## Recovery Entry\n\n"
+            f"- status: {task.status_file}\n"
+            f"- acceptance: {task.acceptance_file}\n"
+            f"- tests: {task.test_checklist_file}\n",
         )
         _write_if_missing(
             Path(task.debrief_file),

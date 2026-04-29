@@ -244,7 +244,12 @@ def test_subagents():
         assert tasks[0].root_id == tasks[0].id
         assert Path(tasks[0].status_file).exists()
         assert Path(tasks[0].work_log_file).exists()
+        assert Path(tasks[0].action_receipts_file).exists()
         assert Path(tasks[0].acceptance_file).exists()
+        assert Path(tasks[0].test_checklist_file).exists()
+        assert Path(tasks[0].bugs_file).exists()
+        assert Path(tasks[0].skill_usage_file).exists()
+        assert Path(tasks[0].handoff_file).exists()
         assert Path(tasks[0].debrief_file).exists()
         assert Path(tasks[0].output_json).exists()
         assert Path(tasks[0].dependencies_json).exists()

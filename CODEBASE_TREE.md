@@ -260,7 +260,7 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 
 当前已经加入标准工单目录：
 - 创建子代理运行时自动生成 `data/`、`output/`、`tests/`、`reports/`、`logs/`、`scratch/`。
-- 自动初始化 `STATUS.md`、`WORK_LOG.md`、`ACCEPTANCE.md`、`DEBRIEF.md`。
+- 自动初始化 `STATUS.md`、`WORK_LOG.md`、`ACTION_RECEIPTS.md`、`ACCEPTANCE.md`、`TEST_CHECKLIST.md`、`BUGS.md`、`SKILL_USAGE.md`、`HANDOFF.md`、`DEBRIEF.md`。
 - 支持写入 `TAKEOVER.md`，记录接管者、原因和 locked files。
 - 自动初始化 `output.json` 和 `dependencies.json`，给机器读取任务状态和依赖。
 - 记录 `allowed_write_roots` 和 `forbidden_write_roots`，先把写入边界落到运行记录里。

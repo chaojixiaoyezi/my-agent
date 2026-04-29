@@ -694,6 +694,53 @@ suggested_tool: 是否建议开发成 tool
 - 子代理模型字段。
 - 派工前工具 vs subagent 成本判断。
 
+## 2026-04-29 / 外部痛点文档：PAIN_POINTS 小中大型/超大型任务
+
+状态：已记录，部分约束已落地
+
+来源：
+- `/Users/example/Downloads/PAIN_POINTS.md`
+- 文档更新时间：2026-04-29T00:23:18
+- 范围：不重复派工痛点本身，聚焦小众、大型、超大型任务里的上下文、证据、边界、验收和恢复问题。
+
+去重判断：
+- 已由现有框架覆盖或部分覆盖：Fake Done 防护、父代理独立验收、runner 不直接 DONE、子代理工单落盘、due-check、channel probe、gateway 恢复、LocalStore/timeline、目录边界字段、patch review、防止空心 heartbeat。
+- 与 `DISPATCH_PAIN_POINTS` 重叠：completion notification 不等于完成、父代理不能放养、通道故障和任务失败要分离、P0/P1/P2 分级、子代理输出必须落盘、工具失败要 fallback。
+
+新增或强调的关键痛点：
+- 小任务容易裸做：不建现场、不测入口、不留 Action Receipt，把 import PASS 当功能 PASS。
+- 中任务容易边界不清：缺 SPEC、缺 `SKILL_USAGE.md`、测试清单不是从需求正推、只测核心路径不测异常路径。
+- 大任务容易集成漏项：缺架构/接口契约，横向拆太多但没有竖向闭环，并行后缺集成验收。
+- 超大型任务容易状态失控：跨天/压缩/多会话后上下文断片，任务树、owner、交付物、依赖关系失控。
+- 不能把时长当工作量，禁止 sleep/heartbeat/cron 空循环凑自治时长。
+- 长上下文恢复必须靠任务目录和最小恢复入口，而不是靠聊天记忆。
+- 安全/敏感任务要和普通 QQ/聊天主会话隔离，短摘要回流，失败要区分模型风控、工具缺失、权限、网络、证据不足。
+- 小众领域不能用通用模板糊过去，开工前要读 skill / references / 外部知识库，并记录使用证据。
+- 数据规模必须可断言，例如 `stats.json` 或测试脚本断言，不接受少量 demo 数据冒充规模交付。
+- 浏览器/Web/PWA/游戏验收不能只看首页，要覆盖导航、输入、点击、状态变化、localStorage、控制台错误、移动端触控、失败提示。
+- 文件很多时必须明确当前事实源：`STATUS.md` 当前状态，`ACCEPTANCE.md` 验收，`TESTS.md` / `TEST_CHECKLIST.md` 验证，`DEBRIEF.md` 复盘。
+
+本轮已落地：
+- 子代理标准工单新增恢复/证据入口：
+  - `ACTION_RECEIPTS.md`
+  - `TEST_CHECKLIST.md`
+  - `BUGS.md`
+  - `SKILL_USAGE.md`
+  - `HANDOFF.md`
+- `validate_work_order()` 会把这些新增文件纳入工单完整性检查；旧工单可通过 `repair_work_order` 补齐。
+- execution context 的 write boundary 会把这些入口路径下发给 runner，方便子代理按最小事实源写证据。
+
+仍未开发，先记录：
+- 顶层任务现场模板：按 small / medium / large / huge 生成 `STATUS.md`、`SPEC.md`、`HANDOFF.md`、`BUGS.md`、`ACTION_RECEIPTS.md`、`SKILL_USAGE.md`、`TEST_CHECKLIST.md`。
+- SPEC 编号到 TEST_CHECKLIST / Evidence 的追踪链，避免功能数量多时漏项。
+- Tool fallback log：`TOOL_FALLBACK_LOG.md` / `diagnostics.md`，并把工具可用性反馈回 Tool Card。
+- Browser/PWA/Game 自动验收器：关键路径、控制台错误、移动端触控、重载恢复、localStorage 检查。
+- 数据规模断言器：读取 `stats.json` 或生成测试，确认文档数、切片数、问题数、视图数等不缩水。
+- 安全任务隔离策略：独立任务目录、短摘要回流、模型风控分类、`TRIED / FINDINGS / NEXT_ANGLES`。
+- 跨天 daily memory checkpoint / handoff 自动生成。
+- 顶层 boundary doctor：检查任务是否越权写 HOME、Desktop、Downloads、`.通道运行时` 等禁区。
+- “竖向闭环优先”调度策略：大任务先跑一条从入口到验收的可用链路，再横向扩规模。
+
 ## 2026-04-29 / 文档基线更新
 
 状态：已落地
@@ -1218,3 +1265,73 @@ suggested_tool: 是否建议开发成 tool
 约束：
 - 每次拆分只移动一个低耦合区域，先保持 import 兼容，跑完整 `run_tests.py` 后再继续。
 - 不在同一轮同时改行为和大移动文件，避免不知道失败来自重构还是功能变化。
+
+## 2026-04-29 / 本地恢复、诊断、worker 和 adapter 第一版
+
+状态：部分落地
+
+已落地：
+- `local-doctor`：诊断 LocalStore、memory JSONL、gateway 队列和 subagent 工单目录是否一致。
+- `local-doctor --repair`：处理超时的 gateway `processing` 请求，未超尝试次数则退回 `pending`，超过则写响应并归档到 `failed`。
+- `local-rebuild`：从 memory、gateway、subagent 文件事实源重建 LocalStore，支持 `--source` 和 `--reset`。
+- `status` 增加 `suggested_actions`，人类输出也显示建议下一步动作。
+- gateway 请求队列新增 `failed` 目录、processing lease、attempts、超时重排和失败归档。
+- `gateway_request_workers`：gateway ask/request 第一版保守 worker pool，默认 1 个 worker。
+- `runner_concurrency`：runner 并发第一版，默认 `auto -> 1`，只有显式数字才会并行多个不同 run。
+- `adapter file`：文件协议适配器，外部聊天工具/TUI 可写 `inbox/*.json`，adapter 投递 gateway 后写 `outbox/*.json`。
+
+仍未开发，先记录：
+- LocalStore compact / backup / export / import 命令。
+- LocalStore rebuild 的更完整来源覆盖：dispatch/watch/planner 全量历史、任意 `reports/*.json` 的类型化恢复、artifact 大文件索引。
+- gateway 请求取消、优先级、租约续期、迟到响应去重策略和更细的错误分类。
+- gateway worker 的 API 预算、启动速率、自适应并发和 per-model 限流。
+- runner pool 的进程级隔离、session 复用、超时硬中断和跨进程锁。
+- adapter 的 HTTP/WebSocket/平台插件版，以及鉴权、会话映射、去重、消息编辑/撤回。
+- TUI 观察面板，复用 `status` / `timeline` / `adapter file` / gateway request protocol。
+
+## 2026-04-29 / 注释重构规范
+
+状态：设计已记录，待分阶段落地
+
+背景：
+- 当前 Python 代码里函数/类定义约 650 个，其中大量 docstring 是一句话说明，`__main__.py`、`subagent.py`、`core.py`、`tools.py` 尤其需要更清晰的 LLM/人类双层说明。
+- 直接全仓一次性重写注释会让 diff 过大，也会进一步放大已经偏大的文件体积；应分模块、分职责迁移。
+
+目标注释格式：
+
+```python
+def example(...):
+    """LLM: technical summary of the contract, side effects and invariants.
+
+    人话说明：
+    这个函数用来做什么，什么时候会被调用。
+
+    具体例子：
+    - 输入什么，输出什么。
+    - 它会写哪些文件、调用哪些模型或工具。
+    - 它失败时怎么表现，调用方应该怎么处理。
+
+    注意边界：
+    - 哪些参数不能乱传。
+    - 哪些副作用需要审计。
+    """
+```
+
+规范：
+- 第一行给 LLM/后续维护者读，使用技术语言，写清 contract / invariant / side effects。
+- 第二行开始给人读，用大白话解释，默认小白能懂。
+- 对有副作用的函数必须写清：会不会写文件、调用 API、启动进程、改状态、消费真实模型。
+- 对恢复/调度/验收函数必须写清：输入事实源、状态流转、失败时的 fallback。
+- 对工具和 adapter 必须写例子，例如一个 JSON 输入如何变成输出文件。
+- 测试函数不强求长注释；测试名和断言清楚即可。
+
+建议落地顺序：
+1. 先改稳定的小模块：`config.py`、`memory.py`、`local_store.py`、`backend.py`。
+2. 再改工具边界：`tools.py`，重点写清读写边界、网络工具、工具解析器。
+3. 再改核心编排：`core.py`，重点是 `run()`、`run_subagent()`、dispatch/watch/planner。
+4. 再改 CLI：拆分 `__main__.py` 后分别注释 gateway、adapter、scenario、chat。
+5. 最后改 `subagent.py`：先拆 models/storage/acceptance/dispatch/runner，再补双层注释。
+
+不建议：
+- 不在当前大文件状态下把 650 个函数一次性塞长注释；这会让 `__main__.py` 和 `subagent.py` 更难读。
+- 不把注释当设计替代品；复杂流程仍应通过类型、报告 JSON、测试和 runbook 表达。

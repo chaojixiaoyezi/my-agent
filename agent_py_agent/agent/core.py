@@ -6,6 +6,7 @@ import json
 import os
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -587,6 +588,7 @@ class SimpleAgent:
             effective_max_runners,
             runner_max_attempts=runner_max_attempts,
         )
+        pending_runner_jobs = []
         for task in runner_candidates:
             before = self.subagents.load(task.id)
             retry_reason = _runner_retry_reason(before, runner_max_attempts)
@@ -614,41 +616,66 @@ class SimpleAgent:
                 )
                 continue
 
-            result = self.run_subagent(
-                task.id,
-                instruction=effective_runner_instruction,
-                dry_run=not execute_runners,
-                max_cards=max_cards,
-                probe=probe,
-                retry_reason=retry_reason,
-            )
-            after = self.subagents.load(task.id)
-            records.append(
-                self.subagents.make_dispatch_record(
-                    step="runner",
-                    action=(
-                        "retry_runner"
-                        if retry_reason and execute_runners
-                        else "execute_runner"
-                        if execute_runners
-                        else "runner_dry_run"
-                    ),
-                    run_id=task.id,
-                    dry_run=result.dry_run,
-                    applied=not result.dry_run,
-                    ok=result.ok,
-                    message=result.message,
-                    before_status=before.status,
-                    after_status=after.status,
-                    before_verification_status=before.verification_status,
-                    after_verification_status=after.verification_status,
-                    evidence_paths=[
-                        result.execution_context_json,
-                        result.result_json,
-                        result.output_json,
-                    ],
+            pending_runner_jobs.append((task.id, before, retry_reason))
+
+        runner_concurrency = _resolve_runner_concurrency(self.config.runner_concurrency, len(pending_runner_jobs))
+        if pending_runner_jobs and runner_concurrency > 1 and execute_runners:
+            future_to_job = {}
+            with ThreadPoolExecutor(max_workers=runner_concurrency) as executor:
+                for run_id, before, retry_reason in pending_runner_jobs:
+                    future = executor.submit(
+                        _run_subagent_worker,
+                        self.config,
+                        self.root,
+                        run_id,
+                        effective_runner_instruction,
+                        not execute_runners,
+                        max_cards,
+                        probe,
+                        retry_reason,
+                    )
+                    future_to_job[future] = (run_id, before, retry_reason)
+                completed: dict[str, tuple[SubAgentRunnerResult, object]] = {}
+                for future in as_completed(future_to_job):
+                    run_id, before, retry_reason = future_to_job[future]
+                    result = future.result()
+                    after = self.subagents.load(run_id)
+                    completed[run_id] = (result, after)
+            for run_id, before, retry_reason in pending_runner_jobs:
+                result, after = completed[run_id]
+                records.append(
+                    _runner_dispatch_record(
+                        self,
+                        run_id=run_id,
+                        before=before,
+                        after=after,
+                        result=result,
+                        retry_reason=retry_reason,
+                        execute_runners=execute_runners,
+                    )
                 )
-            )
+        else:
+            for run_id, before, retry_reason in pending_runner_jobs:
+                result = self.run_subagent(
+                    run_id,
+                    instruction=effective_runner_instruction,
+                    dry_run=not execute_runners,
+                    max_cards=max_cards,
+                    probe=probe,
+                    retry_reason=retry_reason,
+                )
+                after = self.subagents.load(run_id)
+                records.append(
+                    _runner_dispatch_record(
+                        self,
+                        run_id=run_id,
+                        before=before,
+                        after=after,
+                        result=result,
+                        retry_reason=retry_reason,
+                        execute_runners=execute_runners,
+                    )
+                )
 
         patch_run_ids = _dispatch_patch_review_run_ids(self.subagents.list_runs())
         if patch_run_ids:
@@ -1611,6 +1638,91 @@ def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:
     if attempts >= runner_max_attempts:
         return ""
     return f"failure_type={failure_type}; attempt={attempts + 1}/{runner_max_attempts}"
+
+
+def _resolve_runner_concurrency(value: object, job_count: int) -> int:
+    """把 runner_concurrency 配置转成实际 worker 数。
+
+    `auto` 先保持 1，避免默认并发消耗真实 API；明确写数字时才并行。
+    """
+
+    if job_count <= 0:
+        return 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"", "auto"}:
+            return 1
+        try:
+            parsed = int(normalized)
+        except ValueError:
+            return 1
+    else:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 1
+    return max(1, min(parsed, job_count))
+
+
+def _run_subagent_worker(
+    config: AgentConfig,
+    root: Path,
+    run_id: str,
+    instruction: str,
+    dry_run: bool,
+    max_cards: int,
+    probe: bool,
+    retry_reason: str,
+) -> SubAgentRunnerResult:
+    """并发 runner worker：每个线程使用独立 SimpleAgent 实例。"""
+
+    worker = SimpleAgent(config, root)
+    return worker.run_subagent(
+        run_id,
+        instruction=instruction,
+        dry_run=dry_run,
+        max_cards=max_cards,
+        probe=probe,
+        retry_reason=retry_reason,
+    )
+
+
+def _runner_dispatch_record(
+    agent: SimpleAgent,
+    *,
+    run_id: str,
+    before: SubAgentTask,
+    after: SubAgentTask,
+    result: SubAgentRunnerResult,
+    retry_reason: str,
+    execute_runners: bool,
+):
+    """把 runner 执行结果转成 dispatch record。"""
+
+    return agent.subagents.make_dispatch_record(
+        step="runner",
+        action=(
+            "retry_runner"
+            if retry_reason and execute_runners
+            else "execute_runner"
+            if execute_runners
+            else "runner_dry_run"
+        ),
+        run_id=run_id,
+        dry_run=result.dry_run,
+        applied=not result.dry_run,
+        ok=result.ok,
+        message=result.message,
+        before_status=before.status,
+        after_status=after.status,
+        before_verification_status=before.verification_status,
+        after_verification_status=after.verification_status,
+        evidence_paths=[
+            result.execution_context_json,
+            result.result_json,
+            result.output_json,
+        ],
+    )
 
 
 def _dispatch_runner_candidates(

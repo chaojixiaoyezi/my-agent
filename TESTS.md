@@ -29,6 +29,9 @@ python3 -m agent_py_agent subagents-route-capabilities --help
 python3 -m agent_py_agent subagents-acceptance --help
 python3 -m agent_py_agent subagents-patches --help
 python3 -m agent_py_agent subagents-dispatch --help
+python3 -m agent_py_agent local-doctor
+python3 -m agent_py_agent local-rebuild --source fts
+python3 -m agent_py_agent adapter file --help
 python3 -m agent_py_agent local-store-status
 python3 -m agent_py_agent local-search "表格" --source-type memory
 ```
@@ -106,7 +109,7 @@ python3 -c "from agent_py_agent.tests.test_capabilities import test_skill_card_p
 ### Local Store
 
 ```bash
-python3 -c "from agent_py_agent.tests.test_local_store import test_local_store_records_events_and_searches, test_local_store_like_fallback_when_fts_disabled, test_local_store_timeline_filters_events, test_jsonl_memory_indexes_to_local_store, test_jsonl_memory_can_backfill_existing_records, test_subagent_flow_indexes_logs_to_local_store, test_gateway_request_indexes_logs_to_local_store; test_local_store_records_events_and_searches(); test_local_store_like_fallback_when_fts_disabled(); test_local_store_timeline_filters_events(); test_jsonl_memory_indexes_to_local_store(); test_jsonl_memory_can_backfill_existing_records(); test_subagent_flow_indexes_logs_to_local_store(); test_gateway_request_indexes_logs_to_local_store(); print('LOCAL_STORE_TEST_PASS')"
+python3 -c "from agent_py_agent.tests import test_local_store as t; [fn() for name, fn in sorted(vars(t).items()) if name.startswith('test_') and callable(fn)]; print('LOCAL_STORE_TEST_PASS')"
 ```
 
 覆盖：
@@ -148,6 +151,9 @@ my-agent status --json
 my-agent timeline --limit 5
 my-agent local-store-status
 my-agent local-index-memory
+my-agent local-doctor
+my-agent local-rebuild --source fts
+my-agent adapter file --help
 my-agent local-search "表格" --source-type memory
 my-agent local-search "gateway" --source-type gateway_request
 my-agent local-search "subagent" --source-type subagent_run
@@ -176,7 +182,8 @@ my-agent gateway stop --kill
 - 跑一次隔离的 `chat --gateway --no-save`，确认 chat 可以作为 gateway 客户端投递普通消息。
 - 跑一次隔离的无子命令 `my-agent`，确认会自动启动 gateway 并进入 gateway chat。
 - 跑一次 `status --json` 和 `timeline --limit 5`，确认统一观察入口可读。
-- 跑一次 `local-store-status`、`local-index-memory` 和 `local-search`，确认本地事实源路径隔离、旧记忆可补建、SQLite/FTS5/LIKE 查询可用。
+- 跑一次 `local-store-status`、`local-index-memory`、`local-doctor`、`local-rebuild` 和 `local-search`，确认本地事实源路径隔离、旧记忆可补建、SQLite/FTS5/LIKE 查询可用。
+- 跑一次 `adapter file --help`，并用局部测试覆盖 inbox -> gateway -> outbox 文件适配器。
 - 确认 gateway request、subagent run、runner result、dispatch/acceptance 等关键流程都有对应 LocalStore 记录或事件。
 - 自动发现测试会覆盖主代理从工具调用创建子代理、读取子代理看板、dry-run 调度，以及防止 `execute_runners=true` 在未 `apply=true` 时误触发真实 runner。
 - 通过自动发现测试覆盖 dispatch 规划、父代理 planner、runner、patch 审核、验收、watch 循环和 watch lock。

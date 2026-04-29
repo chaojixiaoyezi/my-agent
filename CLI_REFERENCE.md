@@ -143,6 +143,8 @@ Ctrl+C
 | `local-store-status` | 查看本地事实源状态 | 否 | 否 |
 | `local-search` | 搜索 SQLite/FTS5 本地事实源 | 否 | 否 |
 | `local-index-memory` | 把旧 JSONL 记忆补建到本地事实源 | 是 | 否 |
+| `local-doctor` | 诊断 LocalStore、gateway 队列和 subagent 文件事实源 | 可选 `--repair` | 否 |
+| `local-rebuild` | 从 memory/gateway/subagent 文件事实源重建 LocalStore | 是 | 否 |
 | `chat` | 启动交互循环 | 默认写记忆，可用 `--no-save` 关闭 | 是；加 `--gateway` 时由后台 gateway 调用 |
 | `spawn-subagents` | 拆分并创建 subagent 工单 | 是 | 否 |
 | `subagents` | 查看 subagent 看板 | 否 | 否 |
@@ -157,6 +159,7 @@ Ctrl+C
 | `daemon` | 按 `agent_config.yaml` 的 `daemon_*` 配置启动前台常驻调度 | 取决于配置 | 取决于配置 |
 | `scenario-test` | 跑一轮隔离的 gateway/chat/subagent/runner/验收全流程 | 写临时 fixture 和报告 | 默认调用真实 API，可用 `--dry-run` 跳过 runner |
 | `gateway` | 管理后台 gateway 进程 | 写 gateway pid/state/heartbeat/log | 取决于配置 |
+| `adapter` | 外部聊天工具 / TUI 适配器入口 | 写 adapter inbox/outbox | 由后台 gateway 调用 |
 | `subagent-context` | 生成单个 subagent 执行上下文 | 是 | 否 |
 | `subagent-run` | 按执行上下文运行一个 subagent | 是 | 只有 `--execute` 会调用 |
 | `subagent` | 查看单个 subagent 详情 | 否 | 否 |
@@ -169,7 +172,7 @@ my-agent status --recent --limit 10
 my-agent status --json
 ```
 
-显示当前本地工作台总览：gateway 存活状态、gateway 队列数量、LocalStore 记录/事件数量、subagent summary、红灯任务和最近事件。它只读现有账本，不调用模型。
+显示当前本地工作台总览：gateway 存活状态、gateway 队列数量、LocalStore 记录/事件数量、subagent summary、红灯任务、最近事件和建议下一步动作。它只读现有账本，不调用模型。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -298,6 +301,38 @@ my-agent local-index-memory
 ```
 
 把已有 `memory_path` 里的 JSONL 记忆补建到 SQLite/FTS5 本地事实源。升级到这版之后可以先跑一次，后续新记忆会自动双写：JSONL 保留原始流水，SQLite/FTS5 负责检索。
+
+## `local-doctor`
+
+```powershell
+my-agent local-doctor
+my-agent local-doctor --json
+my-agent local-doctor --repair
+```
+
+诊断本地事实源和文件账本是否一致：SQLite 是否可打开、记忆 JSONL 是否已索引、LocalStore 正文文件是否缺失、gateway processing 是否超时、subagent 工单是否缺关键文件。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--json` | `false` | 输出机器可读 JSON。 |
+| `--repair` | `false` | 处理超过 `gateway_processing_timeout_seconds` 的 processing 请求：未超尝试次数则退回 pending，超过则写 failed response 并归档。 |
+| `--limit <n>` | `20` | 每类问题最多显示多少条。 |
+
+## `local-rebuild`
+
+```powershell
+my-agent local-rebuild
+my-agent local-rebuild --source memory
+my-agent local-rebuild --source gateway --source subagent
+my-agent local-rebuild --reset
+```
+
+从磁盘事实源重建 LocalStore 索引。默认重建 `memory`、`gateway`、`subagent` 和 `fts`。`--reset` 会先清空 LocalStore 的 records/events/FTS，再从 JSONL、gateway 队列/响应、subagent 工单目录重新索引；它不会删除原始 memory、gateway、subagent 文件。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--source <name>` | `all` | 只重建指定来源，可多次传入；可选 `all`、`memory`、`gateway`、`subagent`、`fts`。 |
+| `--reset` | `false` | 先清空 LocalStore records/events/FTS 再重建。 |
 
 ## `chat`
 
@@ -647,7 +682,7 @@ my-agent gateway ask "帮我检查当前任务状态"
 my-agent gateway result <request_id>
 ```
 
-`gateway` 第一版是本地后台控制面。它会启动一个后台 Python 进程，在内部按配置运行现有 daemon/watch 调度，并把 pid、state、heartbeat、stop request、请求队列、响应和日志写到 `gateway_workspace`。它还不是多机器组织 gateway，也还没有 worker pool；这些会在后续接入同一命令面。
+`gateway` 第一版是本地后台控制面。它会启动一个后台 Python 进程，在内部按配置运行现有 daemon/watch 调度，并把 pid、state、heartbeat、stop request、请求队列、响应和日志写到 `gateway_workspace`。当前 request worker pool 已有保守第一版，默认 1 个 worker；runner 并发也只在显式配置 `runner_concurrency` 为数字时启用。它还不是多机器组织 gateway。
 
 先把它理解成三层：
 
@@ -729,10 +764,10 @@ my-agent gateway result gwreq-1777442684-0b7ac8cb
 当前实现先用文件队列，不用 HTTP server。好处是跨平台、容易查问题，也方便后续替换成 SQLite 或 WebSocket。
 
 ```text
-ask 写入 pending -> gateway 移到 processing -> 模型处理 -> 写 responses -> 原请求移到 done
+ask 写入 pending -> gateway worker 加 lease 并移到 processing -> 模型处理 -> 写 responses -> 原请求移到 done/failed
 ```
 
-如果 gateway 意外退出，重启时会把 `processing` 里没处理完的请求退回 `pending`。这表示“上次正在办但没办完，重新排队”。
+如果 gateway 意外退出，重启时会把 `processing` 里没处理完且未超尝试次数的请求退回 `pending`。运行中如果 processing 超过 `gateway_processing_timeout_seconds`，也会按 `gateway_request_max_attempts` 自动重排或归档到 `failed`。
 
 gateway 控制面配置：
 
@@ -743,6 +778,9 @@ gateway_stale_seconds: 120
 gateway_stop_timeout: 20
 gateway_request_timeout: 300
 gateway_request_poll_interval: 1
+gateway_request_workers: 1
+gateway_processing_timeout_seconds: 900
+gateway_request_max_attempts: 2
 ```
 
 默认文件：
@@ -756,9 +794,56 @@ agent_py_agent/data/gateway/gateway.log
 agent_py_agent/data/gateway/requests/pending/<request_id>.json
 agent_py_agent/data/gateway/requests/processing/<request_id>.json
 agent_py_agent/data/gateway/requests/done/<request_id>.json
+agent_py_agent/data/gateway/requests/failed/<request_id>.json
 agent_py_agent/data/gateway/responses/<request_id>.json
 agent_py_agent/data/gateway/gateway_requests.jsonl
 ```
+
+## `adapter`
+
+第一版先提供文件协议：
+
+```powershell
+my-agent adapter file
+my-agent adapter file --watch
+my-agent adapter file --root /tmp/my-agent-adapter
+```
+
+外部聊天工具或 TUI 可以把消息 JSON 写进 adapter inbox，adapter 会投递到 gateway，再把响应写到 outbox。
+
+输入 JSON 支持这些字段：
+
+```json
+{
+  "id": "msg-1",
+  "conversation_id": "conv-1",
+  "user": "user-1",
+  "text": "帮我看一下当前任务状态",
+  "no_save": false
+}
+```
+
+默认目录：
+
+```text
+agent_py_agent/data/adapters/file/inbox/<message_id>.json
+agent_py_agent/data/adapters/file/processing/<message_id>.json
+agent_py_agent/data/adapters/file/done/<message_id>.json
+agent_py_agent/data/adapters/file/failed/<message_id>.json
+agent_py_agent/data/adapters/file/outbox/<message_id>.json
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--root <path>` | `adapter_workspace` | 适配器根目录。 |
+| `--inbox <path>` | `<root>/inbox` | 覆盖 inbox 目录。 |
+| `--outbox <path>` | `<root>/outbox` | 覆盖 outbox 目录。 |
+| `--watch` | `false` | 持续轮询 inbox。 |
+| `--once` | `false` | 只处理当前已有消息后退出。 |
+| `--poll-interval <seconds>` | `1.0` | watch 模式轮询间隔。 |
+| `--limit <n>` | `20` | 每轮最多处理多少条消息，`0` 表示不限制。 |
+| `--timeout <seconds>` | `gateway_request_timeout` | 等待 gateway 响应的秒数。 |
+| `--no-start-gateway` | `false` | 不自动启动 gateway，未运行时直接失败。 |
 
 ## `subagent-context`
 

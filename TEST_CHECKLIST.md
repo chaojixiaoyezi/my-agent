@@ -24,7 +24,10 @@
 - [ ] 正文文件写入 `local_store_files_dir`
 - [ ] 审计事件追加到 `local_store_events_path`
 - [ ] `my-agent local-store-status` 输出路径、记录数、事件数和 FTS5 状态
+- [ ] `my-agent local-doctor` 能发现 memory/LocalStore、gateway processing、subagent 工单不一致
+- [ ] `my-agent local-rebuild` 能从 memory、gateway、subagent 文件事实源重建索引
 - [ ] `my-agent status` 能汇总 gateway、LocalStore、subagent 和 timeline
+- [ ] `my-agent status` 能输出 suggested actions
 - [ ] `my-agent timeline --limit 5` 能显示最近事件
 - [ ] `my-agent timeline --source-type gateway_request` 和 `--event-type ...` 能过滤
 - [ ] `my-agent local-index-memory` 能补建旧 `memory.jsonl`
@@ -62,6 +65,7 @@
 - [ ] 创建 run 后有标准目录和关键文件
 - [ ] `task.json` / `run.json` 可读
 - [ ] `STATUS.md` / `WORK_LOG.md` / `ACCEPTANCE.md` / `DEBRIEF.md` 存在
+- [ ] `ACTION_RECEIPTS.md` / `TEST_CHECKLIST.md` / `BUGS.md` / `SKILL_USAGE.md` / `HANDOFF.md` 存在
 - [ ] `output.json` / `dependencies.json` 存在
 - [ ] `validate_work_order()` 能发现缺失文件
 - [ ] `record_takeover()` 会写 `TAKEOVER.md`
@@ -132,9 +136,12 @@
 - [ ] `my-agent gateway run --max-cycles 1 --interval 0 --max-runners 0 --no-planner` 能写 gateway state/heartbeat 并安全退出
 - [ ] `my-agent gateway stop` 通过 stop request 正常停止后台进程
 - [ ] `my-agent gateway ask` 能通过后台 gateway 处理真实 API 请求并写入 `responses/<request_id>.json`
+- [ ] gateway 超时 `processing` 请求会按 attempts 退回 pending 或归档 failed
+- [ ] `gateway_request_workers` 大于 1 时多个 request worker 能并发抢 pending 请求且不重复覆盖响应
 - [ ] `my-agent gateway result <request_id>` 能读取异步请求结果
 - [ ] `my-agent chat --gateway` 会把普通聊天消息投递给后台 gateway，并且 `/status` 会显示 gateway 队列状态
 - [ ] 无子命令 `my-agent` 会自动启动 gateway 并进入 gateway chat；退出 chat 不会关闭 gateway
+- [ ] `my-agent adapter file --help` 可用，文件 adapter 能把 inbox JSON 转成 gateway 请求并把响应写到 outbox
 
 ## 修改文档时
 

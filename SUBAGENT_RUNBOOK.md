@@ -141,7 +141,12 @@ agent_py_agent/data/subagents/<run_id>/
 |-- thought.md
 |-- STATUS.md
 |-- WORK_LOG.md
+|-- ACTION_RECEIPTS.md
 |-- ACCEPTANCE.md
+|-- TEST_CHECKLIST.md
+|-- BUGS.md
+|-- SKILL_USAGE.md
+|-- HANDOFF.md
 |-- DEBRIEF.md
 |-- TAKEOVER.md
 |-- CHANNEL_PROBE.md
