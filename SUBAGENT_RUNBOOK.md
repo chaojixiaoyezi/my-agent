@@ -14,7 +14,7 @@
   -> subagent-run 读取 execution_context
   -> runner 输出 [SUBAGENT_RESULT] JSON
   -> 系统把 evidence/request/artifacts/tests/patches/lessons 写回工单
-  -> 父代理再做验收、路由、接管或重派
+  -> 父代理再做 patch 审核、验收、路由、接管或重派
 ```
 
 ## 设计目标
@@ -521,6 +521,45 @@ runner 不会：
 - 自动生成正式 skill。
 - 自动扩大 allowed tools。
 
+## Patch 审核
+
+默认 dry-run：
+
+```bash
+python3 -m agent_py_agent subagents-patches
+```
+
+指定 run：
+
+```bash
+python3 -m agent_py_agent subagents-patches --run-id <run_id>
+```
+
+真正写回：
+
+```bash
+python3 -m agent_py_agent subagents-patches --apply --run-id <run_id>
+```
+
+审核器会检查：
+- `output.json.patches` 是否存在需要审核的记录。
+- patch 状态是否只使用 `applied` / `planned` / `blocked`。
+- `planned` / `blocked` patch 不能审核通过。
+- 未知状态 patch 不能审核通过。
+- 只有全部 patch 都是 `applied` 时，才会写回 `review_status=APPROVED`。
+
+输出：
+- 全局 `subagent_patch_review_report.json`
+- 全局 `SUBAGENT_PATCH_REVIEW.md`
+- 单任务 `reports/patch_review.json`
+- 单任务 `PATCH_REVIEW.md`
+- apply 时追加 `subagent_patch_review_log.jsonl` 和 `PATCH_REVIEW_LOG.md`
+
+注意：
+- patch 审核器只审核 runner 已声明的 patch 状态。
+- 当前不会自动应用未知 diff 或改动文件。
+- applied patch 如果没有 `review_status=APPROVED`，父代理验收会继续阻断。
+
 ## 父代理验收
 
 默认 dry-run：
@@ -552,6 +591,8 @@ python3 -m agent_py_agent subagents-acceptance --apply --run-id <run_id>
 - `output.json.blockers` 是否为空。
 - `output.json.tests` 是否没有失败项。
 - `output.json.patches` 是否没有 `planned` / `blocked` 未处理项。
+- `output.json.patches` 是否没有未知状态项。
+- `applied` patch 是否已经通过 patch 审核。
 
 输出：
 - 全局 `subagent_acceptance_report.json`
@@ -645,7 +686,7 @@ failure_type = structured_output_parse_error
 优先级高：
 - 多子代理调度器：批量启动、限流、心跳、超时、接管。
 - 接受层：从 `output.json.tests` / `artifacts` 自动生成验收任务。
-- patch 集成器：读取 `patches`，按权限和 owner 做集成。
+- patch 集成器：读取真实 diff/patch，按权限、owner 和审核结果做受控集成。
 - lessons -> learning draft：在 `enable_self_learning=true` 时生成草稿。
 - 跨层能力上抛：父代理找不到时继续向爷代理或更高层抛。
 - ACP / adapter：接外部 agent session 或远端执行器。
@@ -658,8 +699,9 @@ failure_type = structured_output_parse_error
 python3 -m py_compile agent_py_agent/agent/*.py agent_py_agent/__main__.py
 python3 -m agent_py_agent --help
 python3 -m agent_py_agent subagent-run --help
+python3 -m agent_py_agent subagents-patches --help
 git diff --check
 git status --short
 ```
 
-如果默认配置是远端模型，谨慎运行完整 `agent_py_agent/tests/run_tests.py`，它可能触发真实 API。
+收口时运行完整 `python3 agent_py_agent/tests/run_tests.py`，它会触发真实 API，并使用临时配置隔离测试数据。

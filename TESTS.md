@@ -5,7 +5,7 @@
 测试策略约定：
 - 后续验收级、冒烟和回归测试默认直接调用真实 API，不再把 echo/fake backend 的结果当作最终通过依据。
 - 纯解析、纯函数和局部单元测试可以作为定位辅助，但收口时必须补跑真实 API 路径。
-- `agent_py_agent/tests/run_tests.py` 是当前标准完整冒烟入口，会按当前配置请求真实模型 API，并自动发现运行 `agent_py_agent/tests/test_*.py` 里的所有 `test_` 函数。
+- `agent_py_agent/tests/run_tests.py` 是当前标准完整冒烟入口，会按当前配置请求真实模型 API，使用临时配置隔离 memory/subagent 数据，并自动发现运行 `agent_py_agent/tests/test_*.py` 里的所有 `test_` 函数。
 - 运行前确认 `AGENT_API_KEY`、`api_base`、`model_name` 指向本轮要验收的真实后端。
 
 ## 推荐快速检查
@@ -23,6 +23,7 @@ python3 -m agent_py_agent --help
 python3 -m agent_py_agent subagent-run --help
 python3 -m agent_py_agent subagents-route-capabilities --help
 python3 -m agent_py_agent subagents-acceptance --help
+python3 -m agent_py_agent subagents-patches --help
 ```
 
 Git 空白检查：
@@ -36,7 +37,7 @@ git diff --check
 ### Subagent / Capability / Runner
 
 ```bash
-python3 -c "from agent_py_agent.tests.test_agent import test_subagents, test_subagent_capability_records, test_subagent_fake_done_requires_evidence, test_subagent_work_order_validation, test_subagent_takeover_records_locked_files, test_subagent_board_scales_and_flags, test_subagent_due_check_report, test_subagent_channel_probe_records_status, test_subagent_channel_probe_report, test_subagent_action_plan_dry_run, test_subagent_action_apply_dry_run_and_apply, test_subagent_action_apply_repairs_work_order, test_subagent_capability_route_grants_tool, test_subagent_capability_route_grants_skill, test_subagent_capability_route_creates_gap_when_no_match, test_subagent_execution_context_uses_only_grants, test_subagent_runner_dry_run_and_execute, test_subagent_runner_parses_structured_output, test_subagent_runner_parser_uses_last_parseable_fenced_block, test_subagent_acceptance_dry_run_and_apply, test_subagent_acceptance_rejects_missing_evidence_without_apply; test_subagents(); test_subagent_capability_records(); test_subagent_fake_done_requires_evidence(); test_subagent_work_order_validation(); test_subagent_takeover_records_locked_files(); test_subagent_board_scales_and_flags(); test_subagent_due_check_report(); test_subagent_channel_probe_records_status(); test_subagent_channel_probe_report(); test_subagent_action_plan_dry_run(); test_subagent_action_apply_dry_run_and_apply(); test_subagent_action_apply_repairs_work_order(); test_subagent_capability_route_grants_tool(); test_subagent_capability_route_grants_skill(); test_subagent_capability_route_creates_gap_when_no_match(); test_subagent_execution_context_uses_only_grants(); test_subagent_runner_dry_run_and_execute(); test_subagent_runner_parses_structured_output(); test_subagent_runner_parser_uses_last_parseable_fenced_block(); test_subagent_acceptance_dry_run_and_apply(); test_subagent_acceptance_rejects_missing_evidence_without_apply(); print('SUBAGENT_TEST_PASS')"
+python3 -c "from agent_py_agent.tests import test_agent; tests=[fn for name, fn in sorted(vars(test_agent).items()) if name.startswith('test_') and callable(fn)]; [fn() for fn in tests]; print(f'AGENT_TEST_PASS total={len(tests)}')"
 ```
 
 覆盖：
@@ -57,6 +58,9 @@ python3 -c "from agent_py_agent.tests.test_agent import test_subagents, test_sub
 - `[SUBAGENT_RESULT]` 结构化输出解析。
 - 真实模型常见的 Markdown fenced JSON 结构化输出解析。
 - subagent 验收 dry-run / apply。
+- patch 审核 dry-run / apply。
+- applied patch 必须先有 `review_status=APPROVED` 才能通过验收。
+- planned / blocked / 未知状态 patch 会阻断验收。
 - evidence / capability_requests / artifacts / tests / patches / lessons / next_actions 写回。
 
 ### Tools
@@ -100,6 +104,8 @@ python3 agent_py_agent/tests/run_tests.py
 - 编译所有 agent 模块。
 - 跑 CLI 真实入口。
 - 跑一次真实模型 `run`。
+- 创建隔离临时配置，避免污染默认 `data/memory.jsonl` 和 `data/subagents/`。
+- 跑一次真实 API `subagent-run --execute`，要求真实后端、工具调用、结构化输出、证据写回和父代理验收闭环。
 - 跑 chat 真实模型路径。
 - 自动发现并运行所有 `test_*.py` 中的 `test_` 函数。
 - 不允许手写测试清单漏掉新增测试。

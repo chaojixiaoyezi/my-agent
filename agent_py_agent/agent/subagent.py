@@ -381,6 +381,37 @@ class AcceptanceReviewReport:
 
 
 @dataclass
+class PatchReviewRecord:
+    """runner patch 输出的审核记录。"""
+
+    id: str
+    run_id: str
+    dry_run: bool
+    applied: bool
+    ok: bool
+    decision: str
+    message: str
+    patch_count: int
+    approved_count: int = 0
+    blocked_count: int = 0
+    reviewer: str = ""
+    note: str = ""
+    evidence_paths: list[str] = field(default_factory=list)
+    patches: list[dict[str, object]] = field(default_factory=list)
+    created_at: float = 0.0
+
+
+@dataclass
+class PatchReviewReport:
+    """批量 patch 审核报告。"""
+
+    generated_at: float
+    dry_run: bool
+    summary: dict[str, int]
+    records: list[PatchReviewRecord]
+
+
+@dataclass
 class SubAgentExecutionContext:
     """下发给子代理执行器的瘦身上下文。
 
@@ -1515,6 +1546,91 @@ class SubAgentManager:
                 self._append_acceptance_review_log(record)
         return report
 
+    def review_patches(
+        self,
+        run_ids: list[str] | None = None,
+        *,
+        apply: bool = False,
+        reviewer: str = "parent",
+        note: str = "",
+        limit: int = 0,
+    ) -> PatchReviewReport:
+        """审核 runner 输出里的 patch 记录。
+
+        这里不直接应用任意 patch，只审核 runner 已声明的 patch 状态。
+        `planned` / `blocked` patch 会被拦住，防止未处理改动进入 DONE。
+        """
+
+        selected = self._select_runs(run_ids)
+        records: list[PatchReviewRecord] = []
+        for task in selected:
+            output = _read_json_object(Path(task.output_json))
+            patches = _dict_list(output.get("patches", []))
+            if run_ids is None and not patches:
+                continue
+            records.append(
+                self._review_patch_task(
+                    task,
+                    output=output,
+                    patches=patches,
+                    apply=apply,
+                    reviewer=reviewer,
+                    note=note,
+                )
+            )
+            if limit > 0 and len(records) >= limit:
+                break
+
+        summary: dict[str, int] = {"total": len(records)}
+        for record in records:
+            summary[record.decision] = summary.get(record.decision, 0) + 1
+            summary["ok" if record.ok else "failed"] = summary.get(
+                "ok" if record.ok else "failed",
+                0,
+            ) + 1
+            summary["dry_run" if record.dry_run else "applied"] = summary.get(
+                "dry_run" if record.dry_run else "applied",
+                0,
+            ) + 1
+        return PatchReviewReport(
+            generated_at=time.time(),
+            dry_run=not apply,
+            summary=summary,
+            records=records,
+        )
+
+    def write_patch_review_report(
+        self,
+        run_ids: list[str] | None = None,
+        *,
+        apply: bool = False,
+        reviewer: str = "parent",
+        note: str = "",
+        limit: int = 0,
+    ) -> PatchReviewReport:
+        """写出 patch 审核报告。"""
+
+        report = self.review_patches(
+            run_ids,
+            apply=apply,
+            reviewer=reviewer,
+            note=note,
+            limit=limit,
+        )
+        (self.workspace / "subagent_patch_review_report.json").write_text(
+            json.dumps(asdict(report), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (self.workspace / "SUBAGENT_PATCH_REVIEW.md").write_text(
+            render_patch_review_markdown(report),
+            encoding="utf-8",
+        )
+        for record in report.records:
+            self._write_patch_review_record_files(record)
+            if apply:
+                self._append_patch_review_log(record)
+        return report
+
     def build_execution_context(
         self,
         run_id: str,
@@ -2643,8 +2759,20 @@ class SubAgentManager:
         )
 
         patches = _dict_list(output.get("patches", []))
+        valid_patch_statuses = {"applied", "planned", "blocked"}
         unresolved_patches = [
             item for item in patches if str(item.get("status", "")).lower() in {"planned", "blocked"}
+        ]
+        invalid_patches = [
+            item
+            for item in patches
+            if str(item.get("status", "")).lower() not in valid_patch_statuses
+        ]
+        unreviewed_applied_patches = [
+            item
+            for item in patches
+            if str(item.get("status", "")).lower() == "applied"
+            and str(item.get("review_status", "")).upper() != "APPROVED"
         ]
         findings.append(
             AcceptanceReviewFinding(
@@ -2660,7 +2788,135 @@ class SubAgentManager:
                 created_at=created_at,
             )
         )
+        findings.append(
+            AcceptanceReviewFinding(
+                name="patch_status_valid",
+                ok=not invalid_patches,
+                severity="P1",
+                message=(
+                    "patch 状态均符合协议。"
+                    if not invalid_patches
+                    else f"存在 {len(invalid_patches)} 个未知 patch 状态。"
+                ),
+                evidence_path=task.output_json,
+                created_at=created_at,
+            )
+        )
+        findings.append(
+            AcceptanceReviewFinding(
+                name="patches_reviewed",
+                ok=not unreviewed_applied_patches,
+                severity="P1",
+                message=(
+                    "所有 applied patch 已审核。"
+                    if not unreviewed_applied_patches
+                    else f"仍有 {len(unreviewed_applied_patches)} 个 applied patch 未通过审核。"
+                ),
+                evidence_path=task.output_json,
+                created_at=created_at,
+            )
+        )
         return findings
+
+    def _review_patch_task(
+        self,
+        task: SubAgentTask,
+        *,
+        output: dict[str, object],
+        patches: list[dict[str, object]],
+        apply: bool,
+        reviewer: str,
+        note: str,
+    ) -> PatchReviewRecord:
+        """审核单个任务的 patch 输出。"""
+
+        now = time.time()
+        patch_count = len(patches)
+        valid_patch_statuses = {"applied", "planned", "blocked"}
+        blocked = [
+            item
+            for item in patches
+            if str(item.get("status", "")).lower() in {"planned", "blocked"}
+        ]
+        invalid = [
+            item
+            for item in patches
+            if str(item.get("status", "")).lower() not in valid_patch_statuses
+        ]
+        applied_patches = [
+            item for item in patches if str(item.get("status", "")).lower() == "applied"
+        ]
+        ok = bool(patches) and not blocked and not invalid
+        decision = "APPROVE" if ok else "REJECT"
+        if not patches:
+            decision = "NO_PATCHES"
+            message = "没有 patch 需要审核。"
+        elif blocked or invalid:
+            parts = []
+            if blocked:
+                parts.append(f"{len(blocked)} 个 patch 处于 planned/blocked")
+            if invalid:
+                parts.append(f"{len(invalid)} 个 patch 状态未知")
+            message = "；".join(parts) + "，不能审核通过。"
+        else:
+            message = f"{len(applied_patches)} 个 patch 已声明 applied，可审核通过。"
+
+        applied = False
+        reviewed_patches = [dict(item) for item in patches]
+        if apply and patches:
+            if ok:
+                for item in reviewed_patches:
+                    item["review_status"] = "APPROVED"
+                    item["reviewed_by"] = reviewer
+                    item["reviewed_at"] = now
+                    if note:
+                        item["review_note"] = note
+                output["patches"] = reviewed_patches
+                Path(task.output_json).write_text(
+                    json.dumps(output, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                self._append_task_work_log(
+                    task,
+                    f"patch_review: approved={len(reviewed_patches)} reviewer={reviewer}",
+                )
+                applied = True
+            else:
+                for item in reviewed_patches:
+                    if str(item.get("status", "")).lower() != "applied":
+                        item["review_status"] = "NEEDS_ACTION"
+                        item["reviewed_by"] = reviewer
+                        item["reviewed_at"] = now
+                        if note:
+                            item["review_note"] = note
+                output["patches"] = reviewed_patches
+                Path(task.output_json).write_text(
+                    json.dumps(output, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                self._append_task_work_log(
+                    task,
+                    f"patch_review: blocked={len(blocked) + len(invalid)} reviewer={reviewer}",
+                )
+                applied = True
+
+        return PatchReviewRecord(
+            id=_new_id("patchreview"),
+            run_id=task.id,
+            dry_run=not apply,
+            applied=applied,
+            ok=ok,
+            decision=decision,
+            message=message,
+            patch_count=patch_count,
+            approved_count=len(reviewed_patches) if ok else 0,
+            blocked_count=len(blocked) + len(invalid),
+            reviewer=reviewer,
+            note=note,
+            evidence_paths=[task.output_json, task.work_log_file],
+            patches=reviewed_patches,
+            created_at=now,
+        )
 
     def _write_acceptance_record_files(self, record: AcceptanceReviewRecord) -> None:
         """把单个验收记录写进对应任务目录。"""
@@ -2694,6 +2950,38 @@ class SubAgentManager:
         markdown = self.workspace / "ACCEPTANCE_REVIEW_LOG.md"
         if not markdown.exists():
             markdown.write_text("# ACCEPTANCE REVIEW LOG\n\n", encoding="utf-8")
+        with markdown.open("a", encoding="utf-8") as handle:
+            status = "OK" if record.ok else "FAIL"
+            handle.write(
+                f"- [{status}] {record.id} run={record.run_id} decision={record.decision} "
+                f"applied={record.applied} message={record.message}\n"
+            )
+
+    def _write_patch_review_record_files(self, record: PatchReviewRecord) -> None:
+        """把单个 patch 审核记录写入对应任务目录。"""
+
+        try:
+            task = self.load(record.run_id)
+        except FileNotFoundError:
+            return
+        record_json = Path(task.reports_dir) / "patch_review.json"
+        record_md = Path(task.task_dir) / "PATCH_REVIEW.md"
+        record_json.write_text(
+            json.dumps(asdict(record), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        record_md.write_text(render_patch_review_record_markdown(record), encoding="utf-8")
+
+    def _append_patch_review_log(self, record: PatchReviewRecord) -> None:
+        """写入全局 patch 审核日志。"""
+
+        jsonl = self.workspace / "subagent_patch_review_log.jsonl"
+        with jsonl.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
+
+        markdown = self.workspace / "PATCH_REVIEW_LOG.md"
+        if not markdown.exists():
+            markdown.write_text("# PATCH REVIEW LOG\n\n", encoding="utf-8")
         with markdown.open("a", encoding="utf-8") as handle:
             status = "OK" if record.ok else "FAIL"
             handle.write(
@@ -3333,6 +3621,67 @@ def render_acceptance_record_markdown(record: AcceptanceReviewRecord) -> str:
         lines.append(f"- [{status}] {item.severity} {item.name}: {item.message}")
         if item.evidence_path:
             lines.append(f"  - evidence: {item.evidence_path}")
+    return "\n".join(lines) + "\n"
+
+
+def render_patch_review_markdown(report: PatchReviewReport) -> str:
+    """渲染批量 patch 审核报告。"""
+
+    mode = "dry-run" if report.dry_run else "apply"
+    lines = [
+        "# SUBAGENT PATCH REVIEW",
+        "",
+        f"- generated_at: {report.generated_at}",
+        f"- mode: {mode}",
+        f"- total_records: {report.summary.get('total', 0)}",
+        "",
+        "## Summary",
+        "",
+    ]
+    for key in sorted(report.summary):
+        lines.append(f"- {key}: {report.summary[key]}")
+    lines.extend(["", "## Records", ""])
+    if not report.records:
+        lines.append("- 暂无 patch 需要审核")
+    for record in report.records[:100]:
+        status = "OK" if record.ok else "FAIL"
+        lines.append(
+            f"- [{status}] `{record.run_id}` decision={record.decision} "
+            f"patches={record.patch_count} approved={record.approved_count} blocked={record.blocked_count}"
+        )
+        lines.append(f"  - {record.message}")
+    return "\n".join(lines) + "\n"
+
+
+def render_patch_review_record_markdown(record: PatchReviewRecord) -> str:
+    """渲染单个 patch 审核记录。"""
+
+    lines = [
+        "# PATCH REVIEW",
+        "",
+        f"- id: {record.id}",
+        f"- run_id: {record.run_id}",
+        f"- mode: {'dry-run' if record.dry_run else 'apply'}",
+        f"- decision: {record.decision}",
+        f"- ok: {record.ok}",
+        f"- applied: {record.applied}",
+        f"- reviewer: {record.reviewer or 'none'}",
+        f"- note: {record.note or 'none'}",
+        f"- patch_count: {record.patch_count}",
+        f"- approved_count: {record.approved_count}",
+        f"- blocked_count: {record.blocked_count}",
+        f"- message: {record.message}",
+        "",
+        "## Patches",
+        "",
+    ]
+    if not record.patches:
+        lines.append("- none")
+    for item in record.patches:
+        lines.append(
+            f"- [{item.get('status', 'unknown')}] {item.get('path', 'unknown')} "
+            f"review={item.get('review_status', 'UNREVIEWED')} :: {item.get('summary', '')}"
+        )
     return "\n".join(lines) + "\n"
 
 

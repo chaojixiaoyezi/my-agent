@@ -739,3 +739,24 @@ suggested_tool: 是否建议开发成 tool
 - 如果真实 API 不稳定，要记录失败类型，而不是直接降级成 echo 后端通过。
 - 新增测试命令时，区分“局部定位测试”和“真实 API 收口测试”。
 - 新增 `test_*.py` 或 `test_` 函数后，不需要手动加入完整冒烟清单，但必须确认完整冒烟脚本发现了它。
+
+## 2026-04-29 / 真实 API E2E、测试隔离和 patch 审核链
+
+状态：已落地
+
+思路：
+- 完整冒烟不能只跑普通 `run/chat`，还要覆盖真实 API 的 `subagent-run --execute`。
+- 冒烟测试不能污染默认记忆和默认 subagent 工单目录。
+- runner 声明的 `patches` 需要独立审核链路；验收器不能直接把未审核 patch 当成完成。
+
+已落地：
+- `agent_py_agent/tests/run_tests.py` 创建临时配置，隔离 `memory_path` 和 `subagent_workspace`。
+- 完整冒烟会创建真实 API 子代理工单，运行 `subagent-run --execute`，确认 backend 不是 echo、工具调用发生、结构化输出可解析、evidence 写回，并由父代理验收为 `DONE/VERIFIED`。
+- 新增 `PatchReviewRecord` / `PatchReviewReport`。
+- 新增 `SubAgentManager.review_patches()` 和 `write_patch_review_report()`。
+- 新增 `python3 -m agent_py_agent subagents-patches`，默认 dry-run，显式 `--apply` 才写回 `review_status`。
+- 验收器新增 `patches_reviewed` 和 `patch_status_valid` 检查：未审核的 applied patch、planned/blocked patch、未知状态 patch 都不能进入 `DONE/VERIFIED`。
+
+后续注意：
+- patch 审核器目前只审核 runner 已声明的 patch 状态，不自动应用 diff。
+- 后续真正做 patch 集成器时，需要 owner、写入边界、diff 审计和测试命令 allowlist。

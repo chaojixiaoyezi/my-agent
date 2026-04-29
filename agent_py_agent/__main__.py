@@ -346,6 +346,38 @@ def cmd_subagents_acceptance(args) -> int:
     return 0
 
 
+def cmd_subagents_patches(args) -> int:
+    """审核 runner 输出里的 patch 记录，默认 dry-run。"""
+
+    agent = make_agent(args)
+    report = agent.subagents.write_patch_review_report(
+        run_ids=args.run_id or None,
+        apply=args.apply,
+        reviewer=args.reviewer,
+        note=args.note or "",
+        limit=args.limit,
+    )
+    mode = "apply" if args.apply else "dry-run"
+    print("SUBAGENT PATCH REVIEW")
+    print(f"mode={mode} total_records={report.summary.get('total', 0)}")
+    print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
+    if not report.records:
+        print("暂时没有 patch 需要审核。")
+    for record in report.records:
+        status = "OK" if record.ok else "FAIL"
+        print(
+            f"- [{status}] {record.run_id} decision={record.decision} "
+            f"patches={record.patch_count} approved={record.approved_count} "
+            f"blocked={record.blocked_count} applied={record.applied} :: {record.message}"
+        )
+    print(f"\n已写入: {agent.subagents.workspace / 'subagent_patch_review_report.json'}")
+    print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_PATCH_REVIEW.md'}")
+    if args.apply:
+        print(f"审计日志: {agent.subagents.workspace / 'subagent_patch_review_log.jsonl'}")
+        print(f"审计日志: {agent.subagents.workspace / 'PATCH_REVIEW_LOG.md'}")
+    return 0
+
+
 def cmd_subagent_context(args) -> int:
     """生成单个 subagent 的执行上下文包。"""
 
@@ -718,6 +750,15 @@ def build_parser() -> argparse.ArgumentParser:
     acceptance.add_argument("--reviewer", default="parent", help="验收者标识")
     acceptance.add_argument("--note", help="写入验收记录的备注")
     acceptance.set_defaults(func=cmd_subagents_acceptance, apply=False)
+
+    patches = sub.add_parser("subagents-patches", help="审核 runner 输出里的 patch 记录")
+    patches.add_argument("--dry-run", action="store_false", dest="apply", help="只生成 patch 审核报告，不修改记录")
+    patches.add_argument("--apply", action="store_true", help="写回 patch 审核状态")
+    patches.add_argument("--run-id", nargs="*", help="只审核指定子代理运行 ID")
+    patches.add_argument("--limit", type=int, default=20, help="最多处理多少条记录")
+    patches.add_argument("--reviewer", default="parent", help="审核者标识")
+    patches.add_argument("--note", help="写入 patch 审核记录的备注")
+    patches.set_defaults(func=cmd_subagents_patches, apply=False)
 
     subagent_context = sub.add_parser("subagent-context", help="生成单个 subagent 执行上下文包")
     subagent_context.add_argument("run_id", help="子代理运行 ID")
