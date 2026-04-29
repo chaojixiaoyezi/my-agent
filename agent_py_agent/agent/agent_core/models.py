@@ -1,0 +1,22 @@
+from __future__ import annotations
+
+"""LLM: defines agent runtime DTOs shared across the core mixins.
+
+给人看的解释：
+这个文件只放主代理运行结果这类小结构。
+它不碰模型、不碰工具、不碰子代理，只给其他模块一个稳定的数据返回格式。
+"""
+
+from dataclasses import dataclass
+
+
+@dataclass
+class AgentRunResult:
+    """一次 `run()` 调用的结果。"""
+
+    prompt: str
+    response: str
+    backend: str
+    used_memories: int
+    tool_rounds: int = 0
+    executed_tools: list[str] | None = None

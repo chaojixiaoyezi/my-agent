@@ -6,6 +6,8 @@
 
 ## Tree
 
+> 2026-04-29 更新：大文件已经按职责拆分。旧入口文件仍保留兼容导入，新实现优先看 `cli/`、`agent_core/`、`tooling/`、`gateway_parts/`、`local_storage/`、`subagents/`。
+
 ```text
 simple-python-agent-v0.3/                      # 项目根目录，放代码、说明文档和验证记录
 |-- pyproject.toml                             # Python packaging 配置，提供 my-agent console script
@@ -15,23 +17,42 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |-- GATEWAY_RESEARCH.md                        # gateway 大调研，比较 daemon、任务队列、workflow、Notebook 和 AI gateway 方案
 |-- agent_py_agent/                            # Python 包目录，核心代码主要都在这里
 |   |-- __init__.py                            # 安装包初始化文件，记录包版本
-|   |-- __main__.py                            # CLI 入口，负责命令解析、参数组装、结果打印和后台线程启动
+|   |-- __main__.py                            # CLI 兼容入口，真实命令实现已拆到 cli/
 |   |-- README.md                              # 包级说明文档
+|   |-- cli/                                   # CLI 命令层，按 common/local/subagents/gateway/scenario/chat/parser 拆分
+|   |   |-- common.py                          # 配置加载、创建 SimpleAgent、能力路由和通用格式化
+|   |   |-- local_doctor.py                    # LocalStore/gateway/subagent 体检和重建规则
+|   |   |-- local_commands.py                  # status/timeline/run/memory/local-search/local-doctor/local-rebuild 命令
+|   |   |-- subagents.py                       # 子代理看板、动作、路由、验收、dispatch、runner 命令
+|   |   |-- daemon.py                          # daemon 配置合并和前台常驻调度
+|   |   |-- gateway_process.py                 # gateway 进程生命周期、run loop、heartbeat 和 request worker
+|   |   |-- gateway_client.py                  # gateway ask/result/default 客户端命令
+|   |   |-- adapter.py                         # 文件 adapter：外部 inbox/outbox JSON 与 gateway ask 转换
+|   |   |-- scenario.py                        # scenario-test 命令入口和 happy path
+|   |   |-- scenario_cases.py                  # verification/gateway-restart/structured-repair/runner-retry 专项场景
+|   |   |-- scenario_utils.py                  # scenario fixture、隔离配置、子进程和摘要工具
+|   |   |-- chat.py                            # 交互 chat 队列和斜杠命令
+|   |   `-- parser.py                          # argparse 命令树和 main()
 |   |-- agent/                                 # 智能体核心模块目录
 |   |   |-- __init__.py                        # 包初始化文件
 |   |   |-- backend.py                         # 模型后端适配层，负责对接 echo / OpenAI 兼容 / Anthropic 兼容接口
 |   |   |-- capabilities.py                    # 统一能力路由模块，把 skill card 和 tool card 放到同一检索入口
 |   |   |-- capability_config.py              # 能力路由配置结构，管理 skill/tool 授权和子代理上抛参数
 |   |   |-- config.py                          # 配置结构和简化 YAML 加载器
-|   |   |-- core.py                            # 智能体主调度器，把 prompt、记忆、后端、工具循环和 subagent runner 串起来
+|   |   |-- core.py                            # SimpleAgent 兼容组合入口，真实实现已拆到 agent_core/
+|   |   |-- agent_core/                        # 主循环、子代理 runner、planner、dispatch、编排工具、runner 规则
 |   |   |-- file_io.py                         # 文件 I/O 小工具，当前负责带锁追加 JSONL
-|   |   |-- gateway.py                         # gateway 文件队列、adapter、请求恢复和 gateway 索引重建
-|   |   |-- local_store.py                     # 本地事实源，负责 SQLite/FTS5 索引、正文文件和 JSONL 审计事件
+|   |   |-- gateway.py                         # gateway 兼容入口，真实协议实现已拆到 gateway_parts/
+|   |   |-- gateway_parts/                     # gateway 路径、IO、进程控制、恢复、运行时、adapter、索引日志
+|   |   |-- local_store.py                     # LocalStore 兼容组合入口，真实实现已拆到 local_storage/
+|   |   |-- local_storage/                     # LocalStore models/schema/records/search/events/maintenance
 |   |   |-- memory.py                          # 本地记忆系统，JSONL 记原始流水，LocalStore 负责索引检索
 |   |   |-- prompting.py                       # prompt 拼装器，负责把人格、记忆、工具信息和用户任务合成最终上下文
 |   |   |-- skills.py                          # Skill Card 扫描和读取模块，负责把 SKILL.md 变成轻量索引
-|   |   |-- subagent.py                        # 子代理运行树模块，记录父子关系、能力请求、授权、缺口、看板和 due-check
-|   |   `-- tools.py                           # 工具注册、工具元数据、工具检索和工具执行入口
+|   |   |-- subagent.py                        # 子代理兼容入口，真实实现已拆到 subagents/
+|   |   |-- subagents/                         # 子代理模型、报告、manager mixin、验收、dispatch、runner、索引等
+|   |   |-- tools.py                           # 工具兼容入口，真实实现已拆到 tooling/
+|   |   `-- tooling/                           # 工具模型、文件工具、HTTP 工具、解析器、注册表、写边界
 |   |-- config/                                # 配置目录
 |   |   |-- agent_config.yaml                  # 运行配置文件，控制模型、记忆、工具和检索参数
 |   |   `-- capability_config.yaml            # 能力路由配置文件，控制 skill/tool 授权、上抛和候选数量
