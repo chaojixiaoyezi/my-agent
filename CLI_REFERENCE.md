@@ -469,6 +469,8 @@ daemon_reviewer: "parent-daemon"
 daemon_runner_instruction: ""
 ```
 
+`runner_failure_policy: "auto"` 当前表示 runner 临时失败后最多尝试 2 次。可以写 `"off"` 关闭自动重试，也可以写 `"3"` 这类数字字符串表示总尝试次数。自动重试只覆盖 runner 自身错误、结构化输出解析失败、工具结果丢失这类可恢复问题。
+
 ## `scenario-test`
 
 ```powershell
@@ -476,6 +478,7 @@ my-agent scenario-test
 my-agent scenario-test --workspace .\tmp-scenarios --count 2 --max-runners 2
 my-agent scenario-test --case verification
 my-agent scenario-test --case gateway-restart
+my-agent scenario-test --case runner-retry
 my-agent scenario-test --case all --count 1
 my-agent scenario-test --direct
 my-agent scenario-test --dry-run
@@ -498,7 +501,8 @@ my-agent scenario-test --dry-run
 | `happy` | gateway ask -> 主代理派工 -> runner 写文件 -> 父代理验收 | 是 |
 | `verification` | 构造“模型声称写了 artifact 但文件不存在”的伪完成记录，确认验收必须拒绝 | 否 |
 | `gateway-restart` | 模拟旧 gateway 崩溃时遗留的 `processing` 请求，确认重启恢复会退回 `pending` | 否 |
-| `all` | 依次跑 `verification`、`gateway-restart`、`happy` | `happy` 会调用 |
+| `runner-retry` | 模拟 runner 第一次模型调用失败，确认下一轮 dispatch 会有限重试并完成验收 | 否 |
+| `all` | 依次跑 `verification`、`gateway-restart`、`runner-retry`、`happy` | `happy` 会调用 |
 
 | 参数 | 说明 |
 | --- | --- |

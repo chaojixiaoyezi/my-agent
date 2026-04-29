@@ -62,14 +62,15 @@ my-agent scenario-test
 ```bash
 my-agent scenario-test --case verification
 my-agent scenario-test --case gateway-restart
+my-agent scenario-test --case runner-retry
 my-agent scenario-test --case all --count 1
 ```
 
-`verification` 会确认伪造 artifact 不会通过验收；`gateway-restart` 会确认旧 gateway 崩溃遗留的 processing 请求能退回 pending。
+`verification` 会确认伪造 artifact 不会通过验收；`gateway-restart` 会确认旧 gateway 崩溃遗留的 processing 请求能退回 pending；`runner-retry` 会确认 runner 临时失败后下一轮 dispatch 能有限重试并完成验收。
 
 `daemon` 仍保留为前台调试入口。开启 planner 后，如果 gate 发现仍有 active/pending/stalled/needs-intervention 事项，会触发完整父代理 LLM turn；如果模型只回 `HEARTBEAT_OK`，会被记录为失败。
 
-配置分两层：`task_max_subagents=0` / `task_max_grandchildren=0` 表示用户层任务规模不设硬上限；`runner_concurrency: "auto"` 等调度项留给未来 gateway 自适应。当前 `daemon_*` 是前台调度器的高级参数：`daemon_max_runners: "auto"` 会先映射成保守值 1，`daemon_max_cycles=0` 表示持续运行，`daemon_limit=0` 表示不限制记录条数，`daemon_max_cards=0` 表示不限制能力卡数量，`daemon_interval=0` 通常只用于测试或单轮验证。
+配置分两层：`task_max_subagents=0` / `task_max_grandchildren=0` 表示用户层任务规模不设硬上限；`runner_concurrency: "auto"` 等调度项留给未来 gateway 自适应。`runner_failure_policy: "auto"` 当前表示临时 runner 失败最多尝试 2 次，`"off"` 表示不自动重试，数字字符串如 `"3"` 表示最多尝试 3 次。当前 `daemon_*` 是前台调度器的高级参数：`daemon_max_runners: "auto"` 会先映射成保守值 1，`daemon_max_cycles=0` 表示持续运行，`daemon_limit=0` 表示不限制记录条数，`daemon_max_cards=0` 表示不限制能力卡数量，`daemon_interval=0` 通常只用于测试或单轮验证。
 
 一个用 Python3 标准库搭起来的个人通用智能体骨架。
 

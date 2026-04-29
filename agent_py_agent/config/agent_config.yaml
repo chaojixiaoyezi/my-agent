@@ -66,6 +66,12 @@ scheduler_mode: "auto"
 runner_concurrency: "auto"
 runner_start_rate: "auto"
 runner_timeout_seconds: "auto"
+# runner_failure_policy 控制 runner 临时失败后的总尝试次数：
+# - "auto": 当前等价于最多 2 次，也就是首次失败后下一轮 dispatch 再试一次
+# - "off" / "none" / "disabled": 不自动重试，总尝试次数为 1
+# - "3" 这类数字字符串：最多尝试 3 次
+# 第一版只重试 runner_error、structured_output_parse_error、tool_result_missing
+# 这类“执行通道/格式/临时工具结果”问题；能力缺口、验收失败、通道 BROKEN 不自动重跑。
 runner_failure_policy: "auto"
 
 # Gateway 本地控制面（第一版）：

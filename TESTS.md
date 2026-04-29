@@ -7,7 +7,7 @@
 - 纯解析、纯函数和局部单元测试可以作为定位辅助，但收口时必须补跑真实 API 路径。
 - `agent_py_agent/tests/run_tests.py` 是当前标准完整冒烟入口，会按当前配置请求真实模型 API，使用临时配置隔离 memory/subagent 数据，并自动发现运行 `agent_py_agent/tests/test_*.py` 里的所有 `test_` 函数。
 - `my-agent scenario-test` 是当前推荐的可观察全流程入口：它会新建临时 fixture，走 gateway ask、主代理派工、真实 runner、父代理验收，并把所有状态关进 `workspace_root`。
-- `my-agent scenario-test --case verification` 和 `--case gateway-restart` 是坏天气场景入口，分别覆盖验收防作弊和 gateway processing 请求恢复。
+- `my-agent scenario-test --case verification`、`--case gateway-restart` 和 `--case runner-retry` 是坏天气场景入口，分别覆盖验收防作弊、gateway processing 请求恢复和 runner 临时失败重试。
 - 运行前确认 `AGENT_API_KEY`、`api_base`、`model_name` 指向本轮要验收的真实后端。
 
 ## 推荐快速检查
@@ -114,6 +114,7 @@ my-agent --help
 my-agent scenario-test
 my-agent scenario-test --case verification
 my-agent scenario-test --case gateway-restart
+my-agent scenario-test --case runner-retry
 my-agent subagents-dispatch --watch --max-cycles 1 --interval 0
 my-agent daemon --max-cycles 1 --interval 0 --max-runners auto --no-planner
 my-agent gateway run --max-cycles 1 --interval 0 --max-runners 0 --no-planner
@@ -133,6 +134,7 @@ my-agent gateway stop --kill
 - 跑一次 `scenario-test` 或等价隔离场景，观察 gateway ask -> 主代理派工 -> dispatch runner -> 验收闭环。
 - 跑 `scenario-test --case verification`，确认伪造 artifact / 模型自称完成不会通过验收。
 - 跑 `scenario-test --case gateway-restart`，确认 gateway 崩溃遗留的 processing 请求会退回 pending。
+- 跑 `scenario-test --case runner-retry`，确认临时 runner 失败会在下一轮 dispatch 有限重试并最终验收。
 - 创建隔离临时配置，避免污染默认 `data/memory.jsonl` 和 `data/subagents/`。
 - 跑一次真实 API `subagent-run --execute`，要求真实后端、工具调用、结构化输出、证据写回和父代理验收闭环。
 - 检查 `subagents-dispatch --help`，并跑一次隔离的 `subagents-dispatch --watch --max-cycles 1 --interval 0`。
