@@ -41,6 +41,8 @@ python -m agent_py_agent --help
 | 形态 | 命令 | 是否常驻 | 是否调用真实 API |
 | --- | --- | --- | --- |
 | 默认入口 | `my-agent` | 前台 chat + 后台 gateway | 是，由后台 gateway 调用 |
+| 全局状态 | `my-agent status` | 否 | 否 |
+| 最近事件 | `my-agent timeline` | 否 | 否 |
 | 查看帮助 | `my-agent --help` | 否 | 否 |
 | 单轮对话 | `my-agent run "任务"` | 否 | 是，取决于配置的模型后端 |
 | 交互聊天 | `my-agent chat` | 前台交互 | 是，用户发送消息时调用 |
@@ -100,6 +102,14 @@ my-agent gateway ask "继续推进当前任务"
 my-agent gateway stop
 ```
 
+查看全局状态和最近事件：
+
+```powershell
+my-agent status
+my-agent timeline --limit 20
+my-agent timeline --source-type gateway_request --details
+```
+
 持续巡检并允许真实推进 runner：
 
 ```powershell
@@ -124,6 +134,8 @@ Ctrl+C
 
 | 命令 | 用途 | 写文件 | 真实 API |
 | --- | --- | --- | --- |
+| `status` | 查看 gateway、LocalStore、subagent 和最近事件总览 | 否 | 否 |
+| `timeline` | 查看本地事实源最近事件 | 否 | 否 |
 | `run` | 运行一次智能体对话 | 默认写记忆，可用 `--no-save` 关闭 | 是，除非配置 echo 后端 |
 | `remember` | 手动写入一条记忆 | 是 | 否 |
 | `memory-list` | 列出最近记忆 | 否 | 否 |
@@ -148,6 +160,40 @@ Ctrl+C
 | `subagent-context` | 生成单个 subagent 执行上下文 | 是 | 否 |
 | `subagent-run` | 按执行上下文运行一个 subagent | 是 | 只有 `--execute` 会调用 |
 | `subagent` | 查看单个 subagent 详情 | 否 | 否 |
+
+## `status`
+
+```powershell
+my-agent status
+my-agent status --recent --limit 10
+my-agent status --json
+```
+
+显示当前本地工作台总览：gateway 存活状态、gateway 队列数量、LocalStore 记录/事件数量、subagent summary、红灯任务和最近事件。它只读现有账本，不调用模型。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--limit <n>` | `5` | 最多显示多少条 hot/recent/timeline 项。 |
+| `--recent` | `false` | 额外显示最近子代理列表。 |
+| `--json` | `false` | 输出机器可读 JSON，方便后续 TUI/聊天工具复用。 |
+
+## `timeline`
+
+```powershell
+my-agent timeline --limit 20
+my-agent timeline --source-type gateway_request
+my-agent timeline --event-type gateway_request_completed --details
+```
+
+显示 LocalStore 最近事件。它更像“发生了什么”的时间线，而 `local-search` 更像“按关键词找资料”。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--limit <n>` | `20` | 最多显示多少条事件。 |
+| `--source-type <type>` | - | 按来源过滤，例如 `gateway_request`、`subagent_run`、`subagent_runner_result`。 |
+| `--event-type <type>` | - | 按事件类型过滤，例如 `gateway_request_completed`、`subagent_run_saved`。 |
+| `--details` | `false` | 显示事件 payload 摘要。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
 
 ## `run`
 

@@ -58,6 +58,38 @@ def test_local_store_like_fallback_when_fts_disabled():
         assert hits[0].source_id == "fallback"
 
 
+def test_local_store_timeline_filters_events():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        store = LocalStore(root / "local.db")
+        store.log_record(
+            source_type="gateway_request",
+            source_id="gw-1",
+            title="Gateway demo",
+            content="gateway timeline demo",
+            metadata={"status": "done"},
+            event_type="gateway_request_completed",
+        )
+        store.log_record(
+            source_type="subagent_run",
+            source_id="sub-1",
+            title="Subagent demo",
+            content="subagent timeline demo",
+            metadata={"status": "PLANNING"},
+            event_type="subagent_run_saved",
+        )
+
+        all_items = store.timeline(limit=5)
+        gateway_items = store.timeline(limit=5, source_type="gateway_request")
+        event_items = store.timeline(limit=5, event_type="subagent_run_saved")
+
+        assert len(all_items) >= 4
+        assert len(gateway_items) == 2
+        assert {item.source_id for item in gateway_items} == {"gw-1"}
+        assert len(event_items) == 1
+        assert event_items[0].source_type == "subagent_run"
+
+
 def test_jsonl_memory_indexes_to_local_store():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)

@@ -138,10 +138,12 @@ run(
     ]
 )
 run(agent_cmd("--help"))
+run(agent_cmd("status", "--json"))
 run(agent_cmd("run", "测试动态 prompt", "--inject", "请用三点回答", "--no-save"))
 run(agent_cmd("remember", "我喜欢清晰的表格", "--kind", "preference"))
 run(agent_cmd("memory-search", "表格"))
 run(agent_cmd("local-store-status"))
+run(agent_cmd("timeline", "--limit", "5"))
 run(agent_cmd("local-index-memory"))
 run(agent_cmd("local-search", "表格", "--source-type", "memory"))
 run(agent_cmd("spawn-subagents", "开发 CLI 智能体", "--count", "2"))

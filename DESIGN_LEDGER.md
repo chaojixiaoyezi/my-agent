@@ -34,6 +34,7 @@
 - `agent_py_agent/agent/local_store.py`：LocalStore 第一版。
 - `JsonlMemory` 双写：记忆继续写 JSONL，同时索引到 LocalStore。
 - `local-store-status`、`local-search`、`local-index-memory` 三个 CLI 命令。
+- `status` / `timeline` 两个观察入口：一个看当前总览，一个看最近事件。
 - 配置项：`local_store_path`、`local_store_files_dir`、`local_store_events_path`、`local_store_fts_enabled`。
 - gateway request、gateway 生命周期、subagent run、work log、runner result、execution context、acceptance、patch review、dispatch、watch、parent planner、capability route、action apply、channel probe 已接入 LocalStore。
 

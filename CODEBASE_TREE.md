@@ -14,7 +14,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |-- GATEWAY_RESEARCH.md                        # gateway 大调研，比较 daemon、任务队列、workflow、Notebook 和 AI gateway 方案
 |-- agent_py_agent/                            # Python 包目录，核心代码主要都在这里
 |   |-- __init__.py                            # 安装包初始化文件，记录包版本
-|   |-- __main__.py                            # CLI 入口，负责 run/chat/记忆/subagent 看板、巡检、gateway 管理和本地请求队列
+|   |-- __main__.py                            # CLI 入口，负责 run/chat/status/timeline、记忆、subagent 看板、巡检、gateway 管理和本地请求队列
 |   |-- README.md                              # 包级说明文档
 |   |-- agent/                                 # 智能体核心模块目录
 |   |   |-- __init__.py                        # 包初始化文件
@@ -150,6 +150,8 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 work log、runner result、execution context、acceptance、patch review、dispatch、
 dispatch watch、parent planner、capability route、action apply 和 channel probe。
 这些原本的文件报告仍然会照常写出，LocalStore 只额外提供可搜索账本和统一审计事件。
+`my-agent timeline` 会读取 SQLite 事件表并 join 记录标题，`my-agent status`
+会汇总 gateway、LocalStore、subagent 看板和最近事件。
 
 ### `agent_py_agent/agent/config.py`
 

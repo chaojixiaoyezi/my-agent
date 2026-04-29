@@ -39,6 +39,20 @@ class LocalStoreEvent:
 
 
 @dataclass
+class LocalTimelineItem:
+    """时间线里展示的一条事件。"""
+
+    event_id: str
+    event_type: str
+    record_id: str
+    source_type: str
+    source_id: str
+    title: str
+    payload: dict[str, Any]
+    created_at: float
+
+
+@dataclass
 class LocalSearchResult:
     """一次本地检索命中的记录。"""
 
@@ -292,6 +306,53 @@ class LocalStore:
             ).fetchall()
         return [self._row_to_result(row) for row in rows]
 
+    def timeline(
+        self,
+        *,
+        limit: int = 20,
+        source_type: str | None = None,
+        event_type: str | None = None,
+    ) -> list[LocalTimelineItem]:
+        """读取最近本地事件。
+
+        这是真正给 `my-agent timeline/status` 用的视图：
+        它不读 JSONL 文件，而是从 SQLite 事件表读取，并尽量 join 到 records，
+        这样能同时显示事件类型和对应记录标题。
+        """
+
+        if limit <= 0:
+            return []
+        clauses: list[str] = []
+        params: list[Any] = []
+        if source_type:
+            clauses.append("records.source_type = ?")
+            params.append(source_type)
+        if event_type:
+            clauses.append("events.event_type = ?")
+            params.append(event_type)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        with self._connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    events.event_id,
+                    events.event_type,
+                    events.record_id,
+                    events.payload_json,
+                    events.created_at,
+                    records.source_type,
+                    records.source_id,
+                    records.title
+                FROM events
+                LEFT JOIN records ON records.id = events.record_id
+                {where}
+                ORDER BY events.created_at DESC, events.seq DESC
+                LIMIT ?
+                """,
+                [*params, limit],
+            ).fetchall()
+        return [self._timeline_row(row) for row in rows]
+
     def record_event(
         self,
         event_type: str,
@@ -421,10 +482,14 @@ class LocalStore:
             conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError:
+            # 另一个 gateway / CLI 进程短暂持锁时，状态查询不能因为切 WAL 失败而崩。
+            pass
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
@@ -593,6 +658,22 @@ class LocalStore:
             updated_at=float(row["updated_at"]),
             score=score,
             content_path=row["content_path"],
+        )
+
+    def _timeline_row(self, row: sqlite3.Row) -> LocalTimelineItem:
+        payload = json.loads(row["payload_json"] or "{}")
+        source_type = row["source_type"] or str(payload.get("source_type", ""))
+        source_id = row["source_id"] or str(payload.get("source_id", ""))
+        title = row["title"] or str(payload.get("title", ""))
+        return LocalTimelineItem(
+            event_id=row["event_id"],
+            event_type=row["event_type"],
+            record_id=row["record_id"],
+            source_type=source_type,
+            source_id=source_id,
+            title=title,
+            payload=payload,
+            created_at=float(row["created_at"]),
         )
 
     def _read_content(self, row: sqlite3.Row) -> str:
