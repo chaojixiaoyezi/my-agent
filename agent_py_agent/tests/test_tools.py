@@ -40,6 +40,37 @@ class ToolCallingBackend(BaseBackend):
         return ModelResponse(text="工具执行完成", backend=self.name)
 
 
+class SubagentDelegationBackend(BaseBackend):
+    """假的模型后端：模拟主代理从自然语言里真正创建子代理。"""
+
+    name = "fake_subagent_delegation_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            assert "create_subagents [orchestration]" in prompt
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    "{"
+                    '"tool":"create_subagents",'
+                    '"goal":"隔离场景测试：实现 fixture 功能并产出证据",'
+                    '"count":2,'
+                    '"tool_preset":"coding",'
+                    '"acceptance_checks":["必须有文件证据","必须说明测试结果"]'
+                    "}\n"
+                    "[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        assert "subagent_workspace" in prompt
+        assert "write_file" in prompt
+        return ModelResponse(text="已创建子代理任务并等待调度。", backend=self.name)
+
+
 class DemoHandler(BaseHTTPRequestHandler):
     """本地测试 HTTP 服务。"""
 
@@ -92,6 +123,38 @@ def test_tool_loop_and_prompt_transcript():
         assert result.response == "工具执行完成"
         assert result.tool_rounds == 1
         assert "hello tool world" in result.prompt
+
+
+def test_agent_can_delegate_to_subagents_from_tool_call():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            subagent_workspace="subs",
+            max_subagents=3,
+        )
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = SubagentDelegationBackend()
+
+        result = agent.run("请创建两个子代理做隔离 coding 场景测试", save=False)
+        tasks = agent.subagents.list_runs()
+        board = agent.tools.execute_call({"tool": "subagent_board", "limit": 5})
+        dry_dispatch = agent.tools.execute_call({"tool": "dispatch_subagents", "apply": False, "max_runners": 1})
+        blocked_dispatch = agent.tools.execute_call(
+            {"tool": "dispatch_subagents", "execute_runners": True, "apply": False}
+        )
+
+        assert result.response == "已创建子代理任务并等待调度。"
+        assert result.tool_rounds == 1
+        assert len(tasks) == 2
+        assert all("write_file" in task.allowed_tools for task in tasks)
+        assert board.ok
+        assert tasks[0].id in board.output
+        assert dry_dispatch.ok
+        assert '"dry_run": true' in dry_dispatch.output
+        assert not blocked_dispatch.ok
+        assert "必须配合 apply=true" in blocked_dispatch.output
 
 
 def test_tool_catalog_and_recommended_sections():

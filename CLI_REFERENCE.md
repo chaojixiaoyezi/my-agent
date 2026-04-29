@@ -204,6 +204,16 @@ my-agent chat --gateway
 
 chat 内部命令仍在本地处理，例如 `/memory`、`/remember`、`/subagents`。普通自然语言消息才会进入模型；在 `--gateway` 模式下，这些普通消息会走 gateway request/response。
 
+普通自然语言进入模型后，主代理可以调用三个编排工具：
+
+| 工具 | 作用 | 风险边界 |
+| --- | --- | --- |
+| `create_subagents` | 创建一个或多个子代理工单 | 默认只授予 read-only 工具；`tool_preset="coding"` 才授予文件读写工具 |
+| `subagent_board` | 读取当前子代理看板 | 只读 |
+| `dispatch_subagents` | 执行一轮父代理调度 | 默认 dry-run；必须同时 `apply=true` 和 `execute_runners=true` 才会真实调用 runner API |
+
+因此你可以在 chat 里说“拆给两个子代理做，并先 dry-run 看看调度计划”。如果要做真实 runner 测试，建议明确说明“使用隔离 fixture 目录、允许真实 API、最多 N 个 runner”。
+
 ## `spawn-subagents`
 
 ```powershell

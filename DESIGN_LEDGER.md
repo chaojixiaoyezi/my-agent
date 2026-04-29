@@ -1018,3 +1018,27 @@ suggested_tool: 是否建议开发成 tool
 后续方向：
 - 观察默认入口稳定性，再考虑是否让显式 `my-agent chat` 也默认 attach gateway。
 - 补更好的首次启动引导，例如配置 API key、模型后端和 gateway 状态提示。
+
+## 2026-04-29 / 主代理自然语言派工工具
+
+状态：已落地
+
+背景：
+- 之前 chat 里的主代理会建议“可以拆给 subagent”，但普通自然语言消息不能稳定地真正创建工单和触发调度。
+- CLI 已有 `spawn-subagents`、`subagents-dispatch` 等命令，但它们还没有进入主代理可调用工具目录。
+- 后续要做隔离版全流程场景测试，需要从 chat/gateway 入口模拟真实用户派活，而不是只靠手动 CLI 拼流程。
+
+已落地：
+- 新增 `create_subagents` 主代理工具：把自然语言里的拆分/派工意图落成子代理工单。
+- 新增 `subagent_board` 主代理工具：让主代理读取子代理看板、状态和风险旗标。
+- 新增 `dispatch_subagents` 主代理工具：让主代理触发一轮父代理调度。
+- `dispatch_subagents` 默认 dry-run；`execute_runners=true` 必须配合 `apply=true`，避免误触发真实 runner/API。
+- `create_subagents` 默认授予 read-only 工具；只有 `tool_preset="coding"` 或显式 `allowed_tools` 才给写文件能力。
+
+测试：
+- 新增工具级回归：模拟模型在普通 `agent.run()` 中调用 `create_subagents`，确认子代理工单真实落盘。
+- 同一测试覆盖 `subagent_board`、`dispatch_subagents` dry-run，以及未 `apply=true` 时拒绝真实 runner。
+
+后续方向：
+- 基于这些工具增加隔离 fixture 全流程场景测试：chat -> 创建多个子代理 -> dispatch -> runner -> 验收 -> 汇报。
+- 给真实场景测试固定临时 `memory_path`、`subagent_workspace`、`gateway_workspace` 和 fixture 工作区，确保不污染当前开发仓库。

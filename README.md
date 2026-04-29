@@ -43,6 +43,13 @@ my-agent gateway stop
 
 `my-agent chat --gateway` 已经可以把普通聊天消息接到后台 gateway：chat 只是前台客户端，真正调用模型的是 gateway。`my-agent` 默认会走这条路径。为了稳妥，显式执行 `my-agent chat` 仍然保留原来的前台模型调用。
 
+主代理现在也能在自然语言对话里真正派工，而不只是“建议使用 subagent”。工具目录里新增了三个主代理专属工具：
+- `create_subagents`：把聊天里的拆分/派工意图落成子代理工单。
+- `subagent_board`：让主代理读取当前子代理看板和风险状态。
+- `dispatch_subagents`：让主代理触发一轮调度；默认 dry-run，只有明确 `apply=true` 且 `execute_runners=true` 才会调用真实 runner。
+
+做真实任务测试时，请继续用隔离配置，把 `memory_path`、`subagent_workspace` 和 `gateway_workspace` 指向临时目录，避免污染当前开发仓库。
+
 `daemon` 仍保留为前台调试入口。开启 planner 后，如果 gate 发现仍有 active/pending/stalled/needs-intervention 事项，会触发完整父代理 LLM turn；如果模型只回 `HEARTBEAT_OK`，会被记录为失败。
 
 配置分两层：`task_max_subagents=0` / `task_max_grandchildren=0` 表示用户层任务规模不设硬上限；`runner_concurrency: "auto"` 等调度项留给未来 gateway 自适应。当前 `daemon_*` 是前台调度器的高级参数：`daemon_max_runners: "auto"` 会先映射成保守值 1，`daemon_max_cycles=0` 表示持续运行，`daemon_limit=0` 表示不限制记录条数，`daemon_max_cards=0` 表示不限制能力卡数量，`daemon_interval=0` 通常只用于测试或单轮验证。
