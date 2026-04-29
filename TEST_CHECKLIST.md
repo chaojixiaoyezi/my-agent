@@ -95,6 +95,15 @@
 - [ ] 未知 patch 状态会写成 `NEEDS_ACTION` 并阻断验收
 - [ ] 每次 apply 都会写全局 patch 审核报告、单任务 `PATCH_REVIEW.md` 和审计日志
 
+## 修改 subagent 调度器时
+
+- [ ] `subagents-dispatch` 默认 dry-run
+- [ ] `subagents-dispatch --apply` 会写 `SUBAGENT_DISPATCH.md` 和审计日志
+- [ ] `--execute-runners` 不传时，不会调用模型 runner
+- [ ] `--apply --execute-runners` 才会推进真实 runner，并可能消耗 API
+- [ ] dispatch 顺序保持为 due-check / action apply / capability route / runner / patch review / acceptance
+- [ ] dispatch apply 后能把可验收 run 收口到 `DONE/VERIFIED`
+
 ## 修改文档时
 
 - [ ] 新增重要文件后更新 `CODEBASE_TREE.md`

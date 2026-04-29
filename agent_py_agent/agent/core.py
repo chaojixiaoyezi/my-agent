@@ -7,10 +7,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .backend import get_backend
+from .capabilities import CapabilityRouter
+from .capability_config import CapabilityConfig
 from .config import AgentConfig
 from .memory import JsonlMemory
 from .prompting import PromptBuilder
 from .subagent import (
+    DispatchReport,
     SubAgentExecutionContext,
     SubAgentManager,
     SubAgentRunnerResult,
@@ -230,6 +233,228 @@ class SimpleAgent:
             structured_output=structured,
         )
 
+    def dispatch_subagents(
+        self,
+        router: CapabilityRouter,
+        capability_config: CapabilityConfig | None = None,
+        *,
+        apply: bool = False,
+        execute_runners: bool = False,
+        max_runners: int = 1,
+        limit: int = 20,
+        reviewer: str = "parent-dispatch",
+        note: str = "",
+        runner_instruction: str = "",
+        max_cards: int = 0,
+        probe: bool = True,
+        take_over_by: str = "",
+        locked_files: list[str] | None = None,
+    ) -> DispatchReport:
+        """执行一轮父代理调度。
+
+        dry-run 只汇总会做什么；apply 会依次执行低风险动作、能力路由、
+        runner、patch 审核和父代理验收。真实模型调用还需要额外打开
+        `execute_runners`，避免普通 apply 意外消耗 API。
+        """
+
+        cfg = capability_config or CapabilityConfig()
+        records = []
+
+        due_report = self.subagents.write_due_check(cfg) if apply else self.subagents.due_check(cfg)
+        records.append(
+            self.subagents.make_dispatch_record(
+                step="due_check",
+                action="scan",
+                dry_run=not apply,
+                applied=False,
+                ok=True,
+                message=f"发现 {due_report.summary.get('total', 0)} 个 due-check issue。",
+                evidence_paths=[str(self.subagents.workspace / "subagent_due_check.json")],
+            )
+        )
+
+        action_report = (
+            self.subagents.write_action_apply_report(
+                cfg,
+                apply=apply,
+                take_over_by=take_over_by,
+                locked_files=locked_files or [],
+                limit=limit,
+            )
+            if apply
+            else self.subagents.apply_actions(
+                cfg,
+                apply=False,
+                take_over_by=take_over_by,
+                locked_files=locked_files or [],
+                limit=limit,
+            )
+        )
+        for item in action_report.records:
+            records.append(
+                self.subagents.make_dispatch_record(
+                    step="action_apply",
+                    action=item.action,
+                    run_id=item.run_id,
+                    dry_run=item.dry_run,
+                    applied=item.applied,
+                    ok=item.ok,
+                    message=item.message,
+                    before_status=item.before_status,
+                    after_status=item.after_status,
+                    evidence_paths=item.evidence_paths,
+                )
+            )
+
+        route_report = (
+            self.subagents.write_capability_route_report(
+                router,
+                cfg,
+                apply=apply,
+                limit=limit,
+            )
+            if apply
+            else self.subagents.route_capability_requests(
+                router,
+                cfg,
+                apply=False,
+                limit=limit,
+            )
+        )
+        for item in route_report.records:
+            records.append(
+                self.subagents.make_dispatch_record(
+                    step="capability_route",
+                    action=item.status.lower(),
+                    run_id=item.run_id,
+                    dry_run=item.dry_run,
+                    applied=not item.dry_run,
+                    ok=item.status in {"WOULD_GRANT", "GRANTED"},
+                    message=item.message,
+                    evidence_paths=[str(self.subagents.workspace / "subagent_capability_route_report.json")],
+                )
+            )
+
+        runner_candidates = _dispatch_runner_candidates(self.subagents.list_runs(), max_runners)
+        for task in runner_candidates:
+            before = self.subagents.load(task.id)
+            if not apply:
+                records.append(
+                    self.subagents.make_dispatch_record(
+                        step="runner",
+                        action="execute_runner",
+                        run_id=task.id,
+                        dry_run=True,
+                        applied=False,
+                        ok=True,
+                        message="dry-run: apply 时会生成执行上下文；带 --execute-runners 时会调用模型。",
+                        before_status=before.status,
+                        after_status=before.status,
+                        before_verification_status=before.verification_status,
+                        after_verification_status=before.verification_status,
+                        evidence_paths=[before.task_dir],
+                    )
+                )
+                continue
+
+            result = self.run_subagent(
+                task.id,
+                instruction=runner_instruction,
+                dry_run=not execute_runners,
+                max_cards=max_cards,
+                probe=probe,
+            )
+            after = self.subagents.load(task.id)
+            records.append(
+                self.subagents.make_dispatch_record(
+                    step="runner",
+                    action="execute_runner" if execute_runners else "runner_dry_run",
+                    run_id=task.id,
+                    dry_run=result.dry_run,
+                    applied=not result.dry_run,
+                    ok=result.ok,
+                    message=result.message,
+                    before_status=before.status,
+                    after_status=after.status,
+                    before_verification_status=before.verification_status,
+                    after_verification_status=after.verification_status,
+                    evidence_paths=[
+                        result.execution_context_json,
+                        result.result_json,
+                        result.output_json,
+                    ],
+                )
+            )
+
+        patch_run_ids = _dispatch_patch_review_run_ids(self.subagents.list_runs())
+        if patch_run_ids:
+            patch_report = (
+                self.subagents.write_patch_review_report(
+                    patch_run_ids,
+                    apply=True,
+                    reviewer=reviewer,
+                    note=note,
+                    limit=limit,
+                )
+                if apply
+                else self.subagents.review_patches(
+                    patch_run_ids,
+                    apply=False,
+                    reviewer=reviewer,
+                    note=note,
+                    limit=limit,
+                )
+            )
+            for item in patch_report.records:
+                records.append(
+                    self.subagents.make_dispatch_record(
+                        step="patch_review",
+                        action=item.decision.lower(),
+                        run_id=item.run_id,
+                        dry_run=item.dry_run,
+                        applied=item.applied,
+                        ok=item.ok,
+                        message=item.message,
+                        evidence_paths=item.evidence_paths,
+                    )
+                )
+
+        acceptance_report = (
+            self.subagents.write_acceptance_review_report(
+                apply=True,
+                reviewer=reviewer,
+                note=note,
+                limit=limit,
+            )
+            if apply
+            else self.subagents.review_acceptances(
+                apply=False,
+                reviewer=reviewer,
+                note=note,
+                limit=limit,
+            )
+        )
+        for item in acceptance_report.records:
+            records.append(
+                self.subagents.make_dispatch_record(
+                    step="acceptance",
+                    action=item.decision.lower(),
+                    run_id=item.run_id,
+                    dry_run=item.dry_run,
+                    applied=item.applied,
+                    ok=item.ok,
+                    message=item.message,
+                    before_status=item.before_status,
+                    after_status=item.after_status,
+                    before_verification_status=item.before_verification_status,
+                    after_verification_status=item.after_verification_status,
+                    evidence_paths=item.evidence_paths,
+                )
+            )
+
+        report = self.subagents.build_dispatch_report(records, dry_run=not apply)
+        return self.subagents.write_dispatch_report(report, append_log=apply)
+
 
 def _build_subagent_runner_prompt(
     context: SubAgentExecutionContext,
@@ -284,3 +509,65 @@ def _build_subagent_runner_prompt(
         "}\n"
         "[/SUBAGENT_RESULT]\n"
     )
+
+
+def _dispatch_runner_candidates(tasks: list[SubAgentTask], max_runners: int) -> list[SubAgentTask]:
+    """挑选一轮 dispatch 可推进的 runner。"""
+
+    if max_runners <= 0:
+        return []
+    candidates: list[SubAgentTask] = []
+    for task in tasks:
+        if not _is_dispatch_runner_candidate(task):
+            continue
+        candidates.append(task)
+        if len(candidates) >= max_runners:
+            break
+    return candidates
+
+
+def _is_dispatch_runner_candidate(task: SubAgentTask) -> bool:
+    """判断任务是否可以由 dispatch 启动 runner。"""
+
+    if task.status in {
+        "AWAITING_ACCEPTANCE",
+        "DONE",
+        "FAILED",
+        "TIMEOUT",
+        "CHANNEL_ERROR",
+        "TAKEN_OVER",
+    }:
+        return False
+    if task.verification_status in {"NEEDS_ACCEPTANCE", "VERIFIED"}:
+        return False
+    if task.channel_status == "BROKEN":
+        return False
+    if any(item.status == "OPEN" for item in task.capability_requests):
+        return False
+    if any(item.status == "OPEN" for item in task.capability_gaps):
+        return False
+    if task.status == "BLOCKED":
+        return task.failure_type == "capability_request" and bool(task.capability_grants)
+    return task.status in {"PLANNING", "RUNNING"}
+
+
+def _dispatch_patch_review_run_ids(tasks: list[SubAgentTask]) -> list[str]:
+    """挑选本轮调度需要审核 patch 的 run。"""
+
+    run_ids: list[str] = []
+    for task in tasks:
+        if task.status != "AWAITING_ACCEPTANCE" and task.verification_status != "NEEDS_ACCEPTANCE":
+            continue
+        if _task_has_runner_patches(task):
+            run_ids.append(task.id)
+    return run_ids
+
+
+def _task_has_runner_patches(task: SubAgentTask) -> bool:
+    """读取 output.json 判断是否有 patch 记录。"""
+
+    try:
+        payload = json.loads(Path(task.output_json).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(payload.get("patches"), list) and bool(payload.get("patches"))

@@ -412,6 +412,36 @@ class PatchReviewReport:
 
 
 @dataclass
+class DispatchRecord:
+    """父代理调度器的一步审计记录。"""
+
+    id: str
+    step: str
+    action: str
+    run_id: str
+    dry_run: bool
+    applied: bool
+    ok: bool
+    message: str
+    before_status: str = ""
+    after_status: str = ""
+    before_verification_status: str = ""
+    after_verification_status: str = ""
+    evidence_paths: list[str] = field(default_factory=list)
+    created_at: float = 0.0
+
+
+@dataclass
+class DispatchReport:
+    """父代理调度器报告。"""
+
+    generated_at: float
+    dry_run: bool
+    summary: dict[str, int]
+    records: list[DispatchRecord]
+
+
+@dataclass
 class SubAgentExecutionContext:
     """下发给子代理执行器的瘦身上下文。
 
@@ -1629,6 +1659,89 @@ class SubAgentManager:
             self._write_patch_review_record_files(record)
             if apply:
                 self._append_patch_review_log(record)
+        return report
+
+    def make_dispatch_record(
+        self,
+        *,
+        step: str,
+        action: str,
+        run_id: str = "",
+        dry_run: bool = True,
+        applied: bool = False,
+        ok: bool = True,
+        message: str = "",
+        before_status: str = "",
+        after_status: str = "",
+        before_verification_status: str = "",
+        after_verification_status: str = "",
+        evidence_paths: list[str] | None = None,
+    ) -> DispatchRecord:
+        """创建一条调度器审计记录。"""
+
+        return DispatchRecord(
+            id=_new_id("dispatch"),
+            step=step,
+            action=action,
+            run_id=run_id,
+            dry_run=dry_run,
+            applied=applied,
+            ok=ok,
+            message=message,
+            before_status=before_status,
+            after_status=after_status,
+            before_verification_status=before_verification_status,
+            after_verification_status=after_verification_status,
+            evidence_paths=evidence_paths or [],
+            created_at=time.time(),
+        )
+
+    def build_dispatch_report(
+        self,
+        records: list[DispatchRecord],
+        *,
+        dry_run: bool,
+    ) -> DispatchReport:
+        """汇总调度器审计记录。"""
+
+        summary: dict[str, int] = {"total": len(records)}
+        for record in records:
+            summary[record.step] = summary.get(record.step, 0) + 1
+            summary[record.action] = summary.get(record.action, 0) + 1
+            summary["ok" if record.ok else "failed"] = summary.get(
+                "ok" if record.ok else "failed",
+                0,
+            ) + 1
+            summary["applied" if record.applied else "dry_run"] = summary.get(
+                "applied" if record.applied else "dry_run",
+                0,
+            ) + 1
+        return DispatchReport(
+            generated_at=time.time(),
+            dry_run=dry_run,
+            summary=summary,
+            records=records,
+        )
+
+    def write_dispatch_report(
+        self,
+        report: DispatchReport,
+        *,
+        append_log: bool = False,
+    ) -> DispatchReport:
+        """写出调度器报告和可选审计日志。"""
+
+        (self.workspace / "subagent_dispatch_report.json").write_text(
+            json.dumps(asdict(report), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (self.workspace / "SUBAGENT_DISPATCH.md").write_text(
+            render_dispatch_markdown(report),
+            encoding="utf-8",
+        )
+        if append_log:
+            for record in report.records:
+                self._append_dispatch_log(record)
         return report
 
     def build_execution_context(
@@ -2989,11 +3102,31 @@ class SubAgentManager:
                 f"applied={record.applied} message={record.message}\n"
             )
 
+    def _append_dispatch_log(self, record: DispatchRecord) -> None:
+        """写入全局调度器审计日志。"""
+
+        jsonl = self.workspace / "subagent_dispatch_log.jsonl"
+        with jsonl.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
+
+        markdown = self.workspace / "DISPATCH_LOG.md"
+        if not markdown.exists():
+            markdown.write_text("# DISPATCH LOG\n\n", encoding="utf-8")
+        with markdown.open("a", encoding="utf-8") as handle:
+            status = "OK" if record.ok else "FAIL"
+            run = record.run_id or "global"
+            handle.write(
+                f"- [{status}] {record.id} step={record.step} action={record.action} "
+                f"run={run} applied={record.applied} message={record.message}\n"
+            )
+
     def _select_runs(self, run_ids: list[str] | None) -> list[SubAgentTask]:
         """按 run id 选择运行记录。"""
 
-        if not run_ids:
+        if run_ids is None:
             return self.list_runs()
+        if not run_ids:
+            return []
         runs: list[SubAgentTask] = []
         for run_id in run_ids:
             try:
@@ -3685,6 +3818,36 @@ def render_patch_review_record_markdown(record: PatchReviewRecord) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_dispatch_markdown(report: DispatchReport) -> str:
+    """渲染父代理调度器报告。"""
+
+    mode = "dry-run" if report.dry_run else "apply"
+    lines = [
+        "# SUBAGENT DISPATCH",
+        "",
+        f"- generated_at: {report.generated_at}",
+        f"- mode: {mode}",
+        f"- total_records: {report.summary.get('total', 0)}",
+        "",
+        "## Summary",
+        "",
+    ]
+    for key in sorted(report.summary):
+        lines.append(f"- {key}: {report.summary[key]}")
+    lines.extend(["", "## Records", ""])
+    if not report.records:
+        lines.append("- 暂无调度动作")
+    for record in report.records[:200]:
+        status = "OK" if record.ok else "FAIL"
+        run = f"`{record.run_id}`" if record.run_id else "`global`"
+        lines.append(
+            f"- [{status}] {record.step}/{record.action} run={run} "
+            f"applied={record.applied} dry_run={record.dry_run}"
+        )
+        lines.append(f"  - {record.message}")
+    return "\n".join(lines) + "\n"
+
+
 def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
     """渲染给子代理执行器读取的人类版上下文。"""
 
@@ -4199,14 +4362,9 @@ def parse_subagent_runner_output(text: str) -> SubAgentParsedOutput:
 
     parse_errors = []
     for raw in reversed(candidates):
-        raw = _strip_json_fence(raw)
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            parse_errors.append(f"JSON 解析失败: {exc}")
-            continue
-        if not isinstance(payload, dict):
-            parse_errors.append("结构化结果必须是 JSON object。")
+        payload, error = _parse_runner_json_payload(raw)
+        if error:
+            parse_errors.append(error)
             continue
         return _parsed_output_from_payload(payload)
 
@@ -4271,6 +4429,45 @@ def _strip_json_fence(raw: str) -> str:
     if lines and lines[-1].strip() == "```":
         lines = lines[:-1]
     return "\n".join(lines).strip()
+
+
+def _parse_runner_json_payload(raw: str) -> tuple[dict[str, object], str]:
+    """从 runner 结果块里解析 JSON object。"""
+
+    stripped = _strip_json_fence(raw)
+    candidates = [stripped]
+    embedded = _extract_first_json_object_text(stripped)
+    if embedded and embedded not in candidates:
+        candidates.append(embedded)
+
+    errors: list[str] = []
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            errors.append(f"JSON 解析失败: {exc}")
+            continue
+        if not isinstance(payload, dict):
+            errors.append("结构化结果必须是 JSON object。")
+            continue
+        return {str(key): value for key, value in payload.items()}, ""
+    return {}, errors[0] if errors else "未找到可解析的 JSON object。"
+
+
+def _extract_first_json_object_text(text: str) -> str:
+    """容忍模型在结果块里给 JSON 加了 `json` 或说明前缀。"""
+
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            payload, end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return text[index : index + end]
+    return ""
 
 
 def _dict_list(value: object) -> list[dict[str, object]]:
