@@ -395,6 +395,7 @@ def cmd_subagents_dispatch(args) -> int:
                 capability_config,
                 apply=args.apply,
                 execute_runners=args.execute_runners,
+                planner=args.planner,
                 max_runners=args.max_runners,
                 limit=args.limit,
                 reviewer=args.reviewer,
@@ -414,7 +415,7 @@ def cmd_subagents_dispatch(args) -> int:
         mode = "apply" if args.apply else "dry-run"
         print("SUBAGENT DISPATCH WATCH")
         print(
-            f"mode={mode} execute_runners={args.execute_runners} "
+            f"mode={mode} planner={args.planner} execute_runners={args.execute_runners} "
             f"cycles={report.summary.get('total', 0)}"
         )
         print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
@@ -429,6 +430,9 @@ def cmd_subagents_dispatch(args) -> int:
         print(f"heartbeat: {agent.subagents.workspace / 'subagent_dispatch_watch_heartbeat.json'}")
         print(f"watch log: {agent.subagents.workspace / 'subagent_dispatch_watch_log.jsonl'}")
         print(f"watch log: {agent.subagents.workspace / 'DISPATCH_WATCH_LOG.md'}")
+        if args.planner:
+            print(f"planner: {agent.subagents.workspace / 'parent_planner_report.json'}")
+            print(f"planner: {agent.subagents.workspace / 'PARENT_PLANNER.md'}")
         return 0
 
     report = agent.dispatch_subagents(
@@ -436,6 +440,7 @@ def cmd_subagents_dispatch(args) -> int:
         capability_config,
         apply=args.apply,
         execute_runners=args.execute_runners,
+        planner=args.planner,
         max_runners=args.max_runners,
         limit=args.limit,
         reviewer=args.reviewer,
@@ -449,7 +454,7 @@ def cmd_subagents_dispatch(args) -> int:
     mode = "apply" if args.apply else "dry-run"
     print("SUBAGENT DISPATCH")
     print(
-        f"mode={mode} execute_runners={args.execute_runners} "
+        f"mode={mode} planner={args.planner} execute_runners={args.execute_runners} "
         f"total_records={report.summary.get('total', 0)}"
     )
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
@@ -467,6 +472,9 @@ def cmd_subagents_dispatch(args) -> int:
     if args.apply:
         print(f"审计日志: {agent.subagents.workspace / 'subagent_dispatch_log.jsonl'}")
         print(f"审计日志: {agent.subagents.workspace / 'DISPATCH_LOG.md'}")
+    if args.planner:
+        print(f"planner: {agent.subagents.workspace / 'parent_planner_report.json'}")
+        print(f"planner: {agent.subagents.workspace / 'PARENT_PLANNER.md'}")
     return 0
 
 
@@ -861,6 +869,7 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch.add_argument("--dry-run", action="store_false", dest="apply", help="只生成调度报告，不修改记录")
     dispatch.add_argument("--apply", action="store_true", help="执行低风险调度动作并写审计日志")
     dispatch.add_argument("--execute-runners", action="store_true", help="配合 --apply 调用真实模型执行 runner")
+    dispatch.add_argument("--planner", action="store_true", help="有待处理事项时调用父代理 LLM planner，禁止空心 HEARTBEAT_OK")
     dispatch.add_argument("--max-runners", type=int, default=1, help="本轮最多推进多少个 runner")
     dispatch.add_argument("--limit", type=int, default=20, help="每个阶段最多处理多少条记录")
     dispatch.add_argument("--watch", action="store_true", help="持续循环执行 dispatch")

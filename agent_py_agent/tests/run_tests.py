@@ -140,6 +140,7 @@ run(agent_cmd("subagents-acceptance", "--help"))
 run(agent_cmd("subagents-patches", "--help"))
 run(agent_cmd("subagents-dispatch", "--help"))
 run(agent_cmd("subagents-dispatch", "--watch", "--max-cycles", "1", "--interval", "0", "--max-runners", "0"))
+run(agent_cmd("subagents-dispatch", "--watch", "--planner", "--max-cycles", "1", "--interval", "0", "--max-runners", "0"))
 run(agent_cmd("subagent-context", "--help"))
 run(agent_cmd("subagent-run", "--help"))
 

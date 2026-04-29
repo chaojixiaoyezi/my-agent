@@ -468,6 +468,62 @@ class DispatchWatchReport:
 
 
 @dataclass
+class ParentPlannerParsedOutput:
+    """父代理 planner 的结构化模型输出。"""
+
+    found: bool
+    ok: bool
+    decision: str = ""
+    summary: str = ""
+    should_dispatch: bool = True
+    runner_instruction: str = ""
+    suggested_max_runners: int = 0
+    actions: list[dict[str, object]] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+    risks: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    parse_error: str = ""
+    raw_json: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass
+class ParentPlannerRecord:
+    """父代理 planner 的一次审计记录。"""
+
+    id: str
+    dry_run: bool
+    triggered: bool
+    ok: bool
+    decision: str
+    message: str
+    gate_summary: dict[str, int] = field(default_factory=dict)
+    backend: str = ""
+    tool_rounds: int = 0
+    parse_error: str = ""
+    summary: str = ""
+    actions: list[dict[str, object]] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+    risks: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    runner_instruction: str = ""
+    suggested_max_runners: int = 0
+    prompt_path: str = ""
+    response_path: str = ""
+    evidence_paths: list[str] = field(default_factory=list)
+    created_at: float = 0.0
+
+
+@dataclass
+class ParentPlannerReport:
+    """父代理 planner 报告。"""
+
+    generated_at: float
+    dry_run: bool
+    summary: dict[str, int]
+    records: list[ParentPlannerRecord]
+
+
+@dataclass
 class SubAgentExecutionContext:
     """下发给子代理执行器的瘦身上下文。
 
@@ -1859,6 +1915,112 @@ class SubAgentManager:
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
+
+    def write_parent_planner_exchange(self, prompt: str, response: str = "") -> tuple[str, str]:
+        """写出最近一次父代理 planner 的 prompt / response。"""
+
+        prompt_path = self.workspace / "parent_planner_prompt.md"
+        response_path = self.workspace / "parent_planner_response.md"
+        prompt_path.write_text(prompt, encoding="utf-8")
+        if response:
+            response_path.write_text(response, encoding="utf-8")
+        return str(prompt_path), str(response_path)
+
+    def make_parent_planner_record(
+        self,
+        *,
+        dry_run: bool,
+        triggered: bool,
+        ok: bool,
+        decision: str,
+        message: str,
+        gate_summary: dict[str, int] | None = None,
+        backend: str = "",
+        tool_rounds: int = 0,
+        parse_error: str = "",
+        summary: str = "",
+        actions: list[dict[str, object]] | None = None,
+        blockers: list[str] | None = None,
+        risks: list[str] | None = None,
+        notes: list[str] | None = None,
+        runner_instruction: str = "",
+        suggested_max_runners: int = 0,
+        prompt_path: str = "",
+        response_path: str = "",
+        evidence_paths: list[str] | None = None,
+    ) -> ParentPlannerRecord:
+        """创建父代理 planner 审计记录。"""
+
+        return ParentPlannerRecord(
+            id=_new_id("planner"),
+            dry_run=dry_run,
+            triggered=triggered,
+            ok=ok,
+            decision=decision,
+            message=message,
+            gate_summary=gate_summary or {},
+            backend=backend,
+            tool_rounds=tool_rounds,
+            parse_error=parse_error,
+            summary=summary,
+            actions=actions or [],
+            blockers=blockers or [],
+            risks=risks or [],
+            notes=notes or [],
+            runner_instruction=runner_instruction,
+            suggested_max_runners=suggested_max_runners,
+            prompt_path=prompt_path,
+            response_path=response_path,
+            evidence_paths=evidence_paths or [],
+            created_at=time.time(),
+        )
+
+    def build_parent_planner_report(
+        self,
+        records: list[ParentPlannerRecord],
+        *,
+        dry_run: bool,
+    ) -> ParentPlannerReport:
+        """汇总父代理 planner 记录。"""
+
+        summary: dict[str, int] = {"total": len(records)}
+        for record in records:
+            summary["triggered" if record.triggered else "skipped"] = summary.get(
+                "triggered" if record.triggered else "skipped",
+                0,
+            ) + 1
+            summary["ok" if record.ok else "failed"] = summary.get(
+                "ok" if record.ok else "failed",
+                0,
+            ) + 1
+            summary[record.decision] = summary.get(record.decision, 0) + 1
+        return ParentPlannerReport(
+            generated_at=time.time(),
+            dry_run=dry_run,
+            summary=summary,
+            records=records,
+        )
+
+    def write_parent_planner_report(
+        self,
+        report: ParentPlannerReport,
+        *,
+        append_log: bool = False,
+    ) -> ParentPlannerReport:
+        """写出父代理 planner 报告和可选审计日志。"""
+
+        (self.workspace / "parent_planner_report.json").write_text(
+            json.dumps(asdict(report), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (self.workspace / "PARENT_PLANNER.md").write_text(
+            render_parent_planner_markdown(report),
+            encoding="utf-8",
+        )
+        if append_log:
+            for record in report.records:
+                self.append_parent_planner_log(record)
+        return report
 
     def build_execution_context(
         self,
@@ -3253,6 +3415,23 @@ class SubAgentManager:
                 f"records={record.dispatch_record_count} message={record.message}\n"
             )
 
+    def append_parent_planner_log(self, record: ParentPlannerRecord) -> None:
+        """写入全局父代理 planner 审计日志。"""
+
+        jsonl = self.workspace / "parent_planner_log.jsonl"
+        with jsonl.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
+
+        markdown = self.workspace / "PARENT_PLANNER_LOG.md"
+        if not markdown.exists():
+            markdown.write_text("# PARENT PLANNER LOG\n\n", encoding="utf-8")
+        with markdown.open("a", encoding="utf-8") as handle:
+            status = "OK" if record.ok else "FAIL"
+            handle.write(
+                f"- [{status}] {record.id} decision={record.decision} "
+                f"triggered={record.triggered} message={record.message}\n"
+            )
+
     def _select_runs(self, run_ids: list[str] | None) -> list[SubAgentTask]:
         """按 run id 选择运行记录。"""
 
@@ -4010,6 +4189,46 @@ def render_dispatch_watch_markdown(report: DispatchWatchReport) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_parent_planner_markdown(report: ParentPlannerReport) -> str:
+    """渲染父代理 planner 报告。"""
+
+    mode = "dry-run" if report.dry_run else "apply"
+    lines = [
+        "# PARENT PLANNER",
+        "",
+        f"- generated_at: {report.generated_at}",
+        f"- mode: {mode}",
+        f"- total_records: {report.summary.get('total', 0)}",
+        "",
+        "## Summary",
+        "",
+    ]
+    for key in sorted(report.summary):
+        lines.append(f"- {key}: {report.summary[key]}")
+    lines.extend(["", "## Records", ""])
+    if not report.records:
+        lines.append("- 暂无 planner 记录")
+    for record in report.records[:200]:
+        status = "OK" if record.ok else "FAIL"
+        lines.append(
+            f"- [{status}] {record.id} decision={record.decision} "
+            f"triggered={record.triggered} tool_rounds={record.tool_rounds}"
+        )
+        lines.append(f"  - {record.message}")
+        if record.summary:
+            lines.append(f"  - summary: {record.summary}")
+        if record.runner_instruction:
+            lines.append(f"  - runner_instruction: {record.runner_instruction}")
+        if record.actions:
+            lines.append(f"  - actions: {len(record.actions)}")
+        if record.parse_error:
+            lines.append(f"  - parse_error: {record.parse_error}")
+        if record.gate_summary:
+            gate = ", ".join(f"{key}={value}" for key, value in sorted(record.gate_summary.items()))
+            lines.append(f"  - gate: {gate}")
+    return "\n".join(lines) + "\n"
+
+
 def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
     """渲染给子代理执行器读取的人类版上下文。"""
 
@@ -4539,6 +4758,38 @@ def parse_subagent_runner_output(text: str) -> SubAgentParsedOutput:
     return SubAgentParsedOutput(found=True, ok=False, parse_error="未找到可解析的结构化结果。")
 
 
+def parse_parent_planner_output(text: str) -> ParentPlannerParsedOutput:
+    """解析父代理 planner 模型回复中的结构化结果块。"""
+
+    marker_start = "[PARENT_PLANNER_RESULT]"
+    marker_end = "[/PARENT_PLANNER_RESULT]"
+    candidates = _extract_subagent_result_blocks(text, marker_start, marker_end)
+    if not candidates:
+        if marker_start in text:
+            return ParentPlannerParsedOutput(
+                found=True,
+                ok=False,
+                parse_error="缺少 [/PARENT_PLANNER_RESULT] 结束标记。",
+            )
+        return ParentPlannerParsedOutput(found=False, ok=False)
+
+    parse_errors = []
+    for raw in reversed(candidates):
+        payload, error = _parse_runner_json_payload(raw)
+        if error:
+            parse_errors.append(error)
+            continue
+        return _parsed_parent_planner_from_payload(payload)
+
+    if parse_errors:
+        return ParentPlannerParsedOutput(
+            found=True,
+            ok=False,
+            parse_error=parse_errors[0],
+        )
+    return ParentPlannerParsedOutput(found=True, ok=False, parse_error="未找到可解析的结构化结果。")
+
+
 def _extract_subagent_result_blocks(text: str, marker_start: str, marker_end: str) -> list[str]:
     """提取所有成对的 runner 结果块，允许正文里先提到协议标记。"""
 
@@ -4554,6 +4805,29 @@ def _extract_subagent_result_blocks(text: str, marker_start: str, marker_end: st
         blocks.append(text[start + len(marker_start) : end].strip())
         offset = end + len(marker_end)
     return blocks
+
+
+def _parsed_parent_planner_from_payload(payload: dict[str, object]) -> ParentPlannerParsedOutput:
+    """把已解析 JSON payload 转成父代理 planner 结果。"""
+
+    decision = str(payload.get("decision", "") or "").strip().upper()
+    if not decision:
+        decision = "DISPATCH" if bool(payload.get("should_dispatch", True)) else "HEARTBEAT_OK"
+    suggested_max_runners = _int_value(payload.get("suggested_max_runners", 0))
+    return ParentPlannerParsedOutput(
+        found=True,
+        ok=True,
+        decision=decision,
+        summary=str(payload.get("summary", "") or ""),
+        should_dispatch=bool(payload.get("should_dispatch", decision != "HEARTBEAT_OK")),
+        runner_instruction=str(payload.get("runner_instruction", "") or ""),
+        suggested_max_runners=max(0, suggested_max_runners),
+        actions=_dict_list(payload.get("actions", [])),
+        blockers=_string_list(payload.get("blockers", [])),
+        risks=_string_list(payload.get("risks", [])),
+        notes=_string_list(payload.get("notes", [])),
+        raw_json=payload,
+    )
 
 
 def _parsed_output_from_payload(payload: dict[str, object]) -> SubAgentParsedOutput:
@@ -4652,6 +4926,23 @@ def _string_list(value: object) -> list[str]:
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return []
+
+
+def _int_value(value: object) -> int:
+    """把任意值尽量转成整数，失败时返回 0。"""
+
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return int(float(value.strip()))
+        except ValueError:
+            return 0
+    return 0
 
 
 def _string_dict(value: object) -> dict[str, str]:

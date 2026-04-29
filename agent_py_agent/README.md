@@ -269,6 +269,12 @@ watch 常驻循环：
 python3 -m agent_py_agent subagents-dispatch --watch --interval 30
 ```
 
+父代理 LLM planner 常驻循环：
+
+```bash
+python3 -m agent_py_agent subagents-dispatch --watch --planner --interval 30
+```
+
 安全跑一轮 watch：
 
 ```bash

@@ -588,6 +588,14 @@ watch 模式：
 python3 -m agent_py_agent subagents-dispatch --watch --interval 30
 ```
 
+父代理 planner 模式：
+
+```bash
+python3 -m agent_py_agent subagents-dispatch --watch --planner --interval 30
+```
+
+`--planner` 会先跑 heartbeat gate：只要存在 active task、due-check issue、action item、runner candidate、patch review、acceptance、open capability request/gap，就调用父代理 LLM planner。模型在 gate 非空时只返回 `HEARTBEAT_OK` 会被标为失败。
+
 测试 watch 一轮：
 
 ```bash
@@ -599,6 +607,7 @@ python3 -m agent_py_agent subagents-dispatch --watch --max-cycles 1 --interval 0
 - `action_apply`：执行或预览低风险动作。
 - `capability_route`：处理 open capability request。
 - `runner`：挑选可执行 run 生成上下文；只有 `--apply --execute-runners` 才调用模型。
+- `parent_planner`：开启 `--planner` 后，有待处理事项时调用父代理 LLM，生成审计化行动建议和 runner 补充指令。
 - `patch_review`：审核 runner 输出里的 patch 记录。
 - `acceptance`：把通过验收的 run 收口到 `DONE/VERIFIED`。
 
@@ -609,6 +618,7 @@ python3 -m agent_py_agent subagents-dispatch --watch --max-cycles 1 --interval 0
 - watch 模式写 `subagent_dispatch_watch_report.json` 和 `SUBAGENT_DISPATCH_WATCH.md`
 - watch 模式追加 `subagent_dispatch_watch_log.jsonl` 和 `DISPATCH_WATCH_LOG.md`
 - watch 模式持续更新 `subagent_dispatch_watch_heartbeat.json`
+- planner 模式写 `parent_planner_report.json`、`PARENT_PLANNER.md`、`parent_planner_prompt.md`、`parent_planner_response.md`、`parent_planner_log.jsonl` 和 `PARENT_PLANNER_LOG.md`
 
 注意：
 - `subagents-dispatch` 默认不是常驻进程，只执行一轮。
@@ -616,6 +626,7 @@ python3 -m agent_py_agent subagents-dispatch --watch --max-cycles 1 --interval 0
 - watch 会创建 `subagent_dispatch_watch.lock`，阻止两个父代理同时调度同一批工单。
 - `--apply` 会写审计日志，但默认不调用模型 runner。
 - `--execute-runners` 必须和 `--apply` 一起使用，才会请求真实模型 API。
+- `--planner` 可能请求真实模型 API，用来避免 watch 只是空心 heartbeat。
 - 如果确认旧 lock 是异常退出残留，可以用 `--force-lock` 覆盖。
 - 独立 daemon 可以在这条稳定的 watch 命令之上再实现。
 

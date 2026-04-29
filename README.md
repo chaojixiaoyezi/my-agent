@@ -23,10 +23,10 @@ my-agent subagents-dispatch --watch --interval 30
 当前常驻方式是一个前台 watch 进程：
 
 ```bash
-my-agent subagents-dispatch --watch --apply --execute-runners --interval 30 --max-runners 1
+my-agent subagents-dispatch --watch --planner --apply --execute-runners --interval 30 --max-runners 1
 ```
 
-它会持续写 heartbeat、watch log 和 lock。Gateway 方式可以作为下一阶段：由 `my-agent gateway start/status/stop` 管理后台 watch 进程，CLI 再和 gateway 通信。
+它会持续写 heartbeat、watch log 和 lock。加上 `--planner` 后，如果 gate 发现仍有 active/pending/stalled/needs-intervention 事项，会触发完整父代理 LLM turn；如果模型只回 `HEARTBEAT_OK`，会被记录为失败。Gateway 方式可以作为下一阶段：由 `my-agent gateway start/status/stop` 管理后台 watch 进程，CLI 再和 gateway 通信。
 
 一个用 Python3 标准库搭起来的个人通用智能体骨架。
 

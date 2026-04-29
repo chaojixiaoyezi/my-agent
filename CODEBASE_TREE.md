@@ -199,6 +199,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `PatchReviewRecord` / `PatchReviewReport`：记录 runner patch 输出的审核、决策和写回结果。
 - `DispatchRecord` / `DispatchReport`：记录父代理一轮调度中的 due-check、路由、runner、patch 审核和验收步骤。
 - `DispatchWatchRecord` / `DispatchWatchReport`：记录父代理 watch 模式的循环、心跳和退出状态。
+- `ParentPlannerParsedOutput` / `ParentPlannerRecord` / `ParentPlannerReport`：记录父代理 LLM planner 的结构化输出、gate 结果和审计证据。
 - `SubAgentExecutionContext`：把授权后的 skill/tool、能力卡、写入边界和验收要求打成子代理执行上下文。
 - `SubAgentRunnerResult`：记录一次子代理 runner 调用的模式、结果、状态和证据文件。
 
@@ -252,8 +253,9 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `python3 -m agent_py_agent subagents-patches` 默认 dry-run；显式 `--apply` 才会写回 patch `review_status` 和审计日志。
 - `SimpleAgent.dispatch_subagents()` 会执行一轮父代理调度：due-check、action apply、capability route、runner、patch review、acceptance。
 - `SimpleAgent.watch_subagents()` 会用运行锁持续执行 dispatch，并写 heartbeat / watch log。
+- `SimpleAgent.run_parent_planner()` 会在 gate 发现待处理事项时触发完整父代理 LLM turn，并阻断空心 `HEARTBEAT_OK`。
 - `write_dispatch_report()` 会写出 `subagent_dispatch_report.json` 和 `SUBAGENT_DISPATCH.md`，apply 时追加调度审计日志。
-- `python3 -m agent_py_agent subagents-dispatch` 默认 dry-run；`--watch` 可常驻循环；`--apply --execute-runners` 才会真实调用 runner 模型。
+- `python3 -m agent_py_agent subagents-dispatch` 默认 dry-run；`--watch` 可常驻循环；`--planner` 可触发父代理 LLM planner；`--apply --execute-runners` 才会真实调用 runner 模型。
 - `build_execution_context()` 会把当前 run 的授权、能力卡、验收要求和写入边界压成最小上下文。
 - `write_execution_context()` 会写出 `execution_context.json` 和 `EXECUTION_CONTEXT.md`。
 - `python3 -m agent_py_agent subagent-context <run_id>` 可以生成单个子代理执行上下文包。
@@ -331,6 +333,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - subagent patch 审核是否能批准 applied patch，并阻断 planned / blocked / 未知状态 patch。
 - subagent dispatch 是否能把 runner、patch review 和 acceptance 串成一轮父代理调度。
 - subagent dispatch watch 是否能安全循环、写 heartbeat，并用 lock 阻止双父代理。
+- parent planner 是否能在 gate 非空时调用 LLM，并阻止空心 HEARTBEAT_OK。
 
 ### `.gitattributes`
 

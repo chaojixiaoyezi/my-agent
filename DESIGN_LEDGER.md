@@ -819,3 +819,24 @@ suggested_tool: 是否建议开发成 tool
 后续方向：
 - 增加 gateway 命令族：`my-agent gateway start/status/stop`。
 - gateway 负责后台常驻、pid/lock/heartbeat、日志和外部控制；现有 `subagents-dispatch --watch` 作为 gateway 的核心工作循环。
+
+## 2026-04-29 / 父代理 LLM planner
+
+状态：已落地
+
+思路：
+- 仅靠 heartbeat 容易变成“报平安”，不能保证进入完整 LLM 决策链。
+- watch 的规则调度器能推进 runner/验收/能力路由，但缺少父代理自己读状态并给出行动建议的一层。
+- planner 必须有 gate：有 active/pending/stalled/needs-intervention 时，不允许模型只返回 `HEARTBEAT_OK`。
+
+已落地：
+- 新增 `ParentPlannerParsedOutput` / `ParentPlannerRecord` / `ParentPlannerReport`。
+- 新增 `SimpleAgent.run_parent_planner()`，通过 `SimpleAgent.run()` 触发完整父代理 LLM turn，允许只读工具核对状态。
+- `subagents-dispatch --planner` 会先收集 board、due-check、action plan、runner candidates、patch review、acceptance、open capability request/gap。
+- gate 非空时调用父代理 LLM；如果模型只回 `HEARTBEAT_OK`，记录为失败。
+- planner 输出 `runner_instruction` 可作为本轮 runner 的补充指令；`suggested_max_runners` 只能降低 CLI 上限，不能提高。
+- 新增 planner prompt/response/report/log 审计文件。
+
+后续方向：
+- 让 planner 的 action plan 接入更丰富的受控动作，如 spawn-subagents、reassign、takeover。
+- gateway 后台化后，把 planner tick 作为后台事件的一等公民。

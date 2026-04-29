@@ -15,7 +15,11 @@ from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.skills import SkillRegistry
-from agent_py_agent.agent.subagent import VerificationEvidence, parse_subagent_runner_output
+from agent_py_agent.agent.subagent import (
+    VerificationEvidence,
+    parse_parent_planner_output,
+    parse_subagent_runner_output,
+)
 
 
 class StructuredSubagentBackend(BaseBackend):
@@ -90,6 +94,40 @@ class AcceptedSubagentBackend(BaseBackend):
                 '  "failure_type": ""\n'
                 "}\n"
                 "[/SUBAGENT_RESULT]"
+            ),
+            backend=self.name,
+        )
+
+
+class ParentPlannerBackend(BaseBackend):
+    """测试用后端：返回父代理 planner 结构化结果。"""
+
+    name = "parent_planner_backend"
+
+    def __init__(self, *, decision: str = "DISPATCH"):
+        self.decision = decision
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str) -> ModelResponse:
+        self.prompts.append(prompt)
+        assert "[PARENT_PLANNER_RESULT]" in prompt
+        return ModelResponse(
+            text=(
+                "[PARENT_PLANNER_RESULT]\n"
+                "{\n"
+                f'  "decision": "{self.decision}",\n'
+                '  "summary": "父代理 planner 已看到待处理任务。",\n'
+                f'  "should_dispatch": {str(self.decision != "HEARTBEAT_OK").lower()},\n'
+                '  "runner_instruction": "优先产出可验收证据。",\n'
+                '  "suggested_max_runners": 1,\n'
+                '  "actions": [\n'
+                '    {"action": "execute_runner", "run_id": "", "priority": 1, "reason": "存在 active task"}\n'
+                "  ],\n"
+                '  "blockers": [],\n'
+                '  "risks": [],\n'
+                '  "notes": ["planner-test"]\n'
+                "}\n"
+                "[/PARENT_PLANNER_RESULT]"
             ),
             backend=self.name,
         )
@@ -1416,6 +1454,93 @@ def test_subagent_dispatch_apply_executes_runner_and_accepts():
         assert loaded.status == "DONE"
         assert loaded.verification_status == "VERIFIED"
         assert loaded.evidence[0].summary == "调度器结构化执行证据"
+
+
+def test_parent_planner_parser_reads_structured_result():
+    parsed = parse_parent_planner_output(
+        "[PARENT_PLANNER_RESULT]\n"
+        "{\n"
+        '  "decision": "DISPATCH",\n'
+        '  "summary": "需要继续推进。",\n'
+        '  "should_dispatch": true,\n'
+        '  "runner_instruction": "补充证据。",\n'
+        '  "suggested_max_runners": 1,\n'
+        '  "actions": [{"action": "execute_runner", "run_id": "r1"}],\n'
+        '  "blockers": [],\n'
+        '  "risks": ["api_budget"],\n'
+        '  "notes": ["ok"]\n'
+        "}\n"
+        "[/PARENT_PLANNER_RESULT]"
+    )
+
+    assert parsed.found
+    assert parsed.ok
+    assert parsed.decision == "DISPATCH"
+    assert parsed.runner_instruction == "补充证据。"
+    assert parsed.actions[0]["action"] == "execute_runner"
+    assert parsed.risks == ["api_budget"]
+
+
+def test_subagent_dispatch_parent_planner_runs_when_gate_has_work():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        backend = ParentPlannerBackend()
+        agent.backend = backend
+        agent.subagents.create_run(
+            goal="planner 需要看到的 active task",
+            thought="等待父代理 planner 判断。",
+            plan=["planner", "dispatch"],
+        )
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+
+        report = agent.dispatch_subagents(
+            router,
+            CapabilityConfig(),
+            apply=True,
+            planner=True,
+            execute_runners=False,
+            max_runners=1,
+        )
+
+        assert len(backend.prompts) == 1
+        assert any(item.step == "parent_planner" and item.ok for item in report.records)
+        assert any(item.step == "runner" and item.action == "runner_dry_run" for item in report.records)
+        planner_record = next(item for item in report.records if item.step == "parent_planner")
+        assert planner_record.action == "dispatch"
+        assert (root / "subs" / "parent_planner_report.json").exists()
+        assert (root / "subs" / "PARENT_PLANNER.md").exists()
+        assert (root / "subs" / "PARENT_PLANNER_LOG.md").exists()
+
+
+def test_subagent_dispatch_parent_planner_blocks_empty_heartbeat_ok_when_gate_has_work():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        backend = ParentPlannerBackend(decision="HEARTBEAT_OK")
+        agent.backend = backend
+        agent.subagents.create_run(
+            goal="不能空心 OK 的 active task",
+            thought="需要父代理继续推进。",
+            plan=["dispatch"],
+        )
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+
+        report = agent.dispatch_subagents(
+            router,
+            CapabilityConfig(),
+            apply=False,
+            planner=True,
+            max_runners=0,
+        )
+
+        planner_record = next(item for item in report.records if item.step == "parent_planner")
+        assert len(backend.prompts) == 1
+        assert not planner_record.ok
+        assert planner_record.action == "heartbeat_ok"
+        assert "禁止" in planner_record.message
 
 
 def test_subagent_dispatch_watch_runs_one_cycle_and_releases_lock():

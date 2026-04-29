@@ -44,6 +44,7 @@ python -m agent_py_agent --help
 | 交互聊天 | `my-agent chat` | 前台交互 | 是，用户发送消息时调用 |
 | 一轮父代理调度 | `my-agent subagents-dispatch` | 否 | 否，默认 dry-run |
 | 持续父代理调度 | `my-agent subagents-dispatch --watch --interval 30` | 前台常驻 | 否，除非加 `--apply --execute-runners` |
+| 父代理 LLM planner 调度 | `my-agent subagents-dispatch --watch --planner --interval 30` | 前台常驻 | 是，有待处理事项时调用父代理 planner |
 | 真实 runner 调度 | `my-agent subagents-dispatch --apply --execute-runners` | 否 | 是 |
 | 子代理单次执行 | `my-agent subagent-run <run_id> --execute` | 否 | 是 |
 
@@ -63,10 +64,16 @@ my-agent subagents-dispatch --watch --max-cycles 1 --interval 0 --max-runners 0
 my-agent subagents-dispatch --watch --interval 30
 ```
 
+持续巡检，并在有待处理事项时唤醒父代理 LLM planner：
+
+```powershell
+my-agent subagents-dispatch --watch --planner --interval 30
+```
+
 持续巡检并允许真实推进 runner：
 
 ```powershell
-my-agent subagents-dispatch --watch --apply --execute-runners --interval 30 --max-runners 1
+my-agent subagents-dispatch --watch --planner --apply --execute-runners --interval 30 --max-runners 1
 ```
 
 停止前台 watch：
@@ -291,7 +298,7 @@ my-agent subagents-patches --apply --reviewer parent
 my-agent subagents-dispatch
 my-agent subagents-dispatch --apply
 my-agent subagents-dispatch --apply --execute-runners
-my-agent subagents-dispatch --watch --interval 30
+my-agent subagents-dispatch --watch --planner --interval 30
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -300,6 +307,7 @@ my-agent subagents-dispatch --watch --interval 30
 | `--dry-run` | 默认模式 | 只生成调度报告，不修改记录。 |
 | `--apply` | `false` | 执行低风险调度动作并写审计日志。 |
 | `--execute-runners` | `false` | 配合 `--apply` 调用真实模型执行 runner；不能单独使用。 |
+| `--planner` | `false` | 有 active/pending/stalled/needs-intervention 事项时调用父代理 LLM planner；如果模型只回 `HEARTBEAT_OK`，会被 gate 标记为失败。 |
 | `--max-runners <n>` | `1` | 本轮最多推进多少个 runner。 |
 | `--limit <n>` | `20` | 每个阶段最多处理多少条记录。 |
 | `--watch` | `false` | 持续循环执行 dispatch。 |
@@ -323,6 +331,17 @@ agent_py_agent/data/subagents/subagent_dispatch_watch_report.json
 agent_py_agent/data/subagents/SUBAGENT_DISPATCH_WATCH.md
 agent_py_agent/data/subagents/subagent_dispatch_watch_log.jsonl
 agent_py_agent/data/subagents/DISPATCH_WATCH_LOG.md
+```
+
+planner 输出位置：
+
+```text
+agent_py_agent/data/subagents/parent_planner_report.json
+agent_py_agent/data/subagents/PARENT_PLANNER.md
+agent_py_agent/data/subagents/parent_planner_prompt.md
+agent_py_agent/data/subagents/parent_planner_response.md
+agent_py_agent/data/subagents/parent_planner_log.jsonl
+agent_py_agent/data/subagents/PARENT_PLANNER_LOG.md
 ```
 
 ## `subagent-context`
@@ -387,6 +406,7 @@ $env:AGENT_API_KEY="你的 key"
 - 默认调度命令都是 dry-run，先写报告，不修改任务。
 - `subagent-run --execute` 会调用真实 API。
 - `subagents-dispatch --apply --execute-runners` 会调用真实 API。
+- `subagents-dispatch --planner` 在 gate 发现有待处理事项时会调用父代理 LLM。
 - `--execute-runners` 必须和 `--apply` 一起使用。
 - `--watch` 是前台常驻，终端关闭或 `Ctrl+C` 后进程停止。
 - `--force-lock` 只用于确认旧 watch 进程异常退出后的残留 lock。
