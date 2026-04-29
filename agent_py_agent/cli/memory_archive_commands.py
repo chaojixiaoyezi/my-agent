@@ -123,6 +123,9 @@ def cmd_memory_resume(args) -> int:
         "resume": resume,
         "brief": brief,
     }
+    if getattr(args, "context_only", False):
+        print(brief["context_block"])
+        return 0
     _print_memory_resume(payload, json_output=args.json)
     return 0
 

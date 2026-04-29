@@ -339,9 +339,12 @@ my-agent memory-archive-search "继续" --since 2026-04-30 --layer raw
 my-agent memory-resume "继续 README 那个任务"
 my-agent memory-resume --run-id subagent-xxx --json
 my-agent memory-resume --request-id gwreq-xxx --limit 10
+my-agent memory-resume "继续" --context-only
 ```
 
 从归档线索、LocalStore 检索结果和 subagent 任务目录中生成恢复简报。它会列出 archive clues、LocalStore clues、任务事实源路径和下一步建议，提醒你先读 `STATUS.md`、`WORK_LOG.md`、`HANDOFF.md`、`TEST_CHECKLIST.md` 等权威文件后再继续。
+
+`--context-only` 只打印稳定格式的 `Recovery Brief` 文本块，不打印外层说明。这个输出适合复制给真实环境测试、人工 handoff，后续也可以作为自动上下文注入的复用入口。
 
 JSON 输出里会额外包含 `brief`：
 
@@ -373,6 +376,7 @@ JSON 输出里会额外包含 `brief`：
 | `--tool-name <name>` | - | 按工具名精确过滤。 |
 | `--source <source>` | - | 按来源精确过滤。 |
 | `--limit <n>` | `20` | 最多显示多少条线索。 |
+| `--context-only` | `false` | 只输出可交接/注入的恢复上下文块。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 
 ## `local-store-status`
