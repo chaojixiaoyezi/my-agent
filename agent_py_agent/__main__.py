@@ -728,7 +728,7 @@ def build_parser() -> argparse.ArgumentParser:
     """构建 CLI 参数解析器。"""
 
     parser = argparse.ArgumentParser(
-        prog="agent_py_agent",
+        prog="my-agent",
         description="Simple Python3 CLI Agent with memory, dynamic prompt and subagents.",
     )
     parser.add_argument(
