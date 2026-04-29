@@ -142,6 +142,9 @@ Ctrl+C
 | `memory-search` | 搜索记忆 | 否 | 否 |
 | `memory-route` | 按长期规则索引预览 memory 路由命中 | 否 | 否 |
 | `memory-doctor` | 诊断 memory 配置、路由索引和归档目录 | 否 | 否 |
+| `memory-archive-list` | 列出 raw/hook 归档记录 | 否 | 否 |
+| `memory-archive-search` | 按字段搜索 raw/hook 归档 | 否 | 否 |
+| `memory-resume` | 从归档、LocalStore 和任务目录生成恢复线索 | 否 | 否 |
 | `local-store-status` | 查看本地事实源状态 | 否 | 否 |
 | `local-search` | 搜索 SQLite/FTS5 本地事实源 | 否 | 否 |
 | `local-index-memory` | 把旧 JSONL 记忆补建到本地事实源 | 是 | 否 |
@@ -280,6 +283,83 @@ my-agent memory-doctor --json
 | --- | --- | --- |
 | `--index <path>` | `memory/routing/INDEX.md` | 指定路由索引文件；相对路径按 agent workspace root 解析。 |
 | `--json` | `false` | 输出机器可读 JSON，包含 `warnings`、`routing.routes` 和 archive 目录状态。 |
+
+## `memory-archive-list`
+
+```powershell
+my-agent memory-archive-list
+my-agent memory-archive-list --layer raw --limit 20
+my-agent memory-archive-list --date 2026-04-30 --json
+```
+
+列出 `memory/raw` 和 `memory/hooks` 里的最近归档记录。它只读 JSONL，不调用模型；输出会标明 layer、记录 ID、run/request/session、文件路径和行号。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--layer <layer>` | `all` | 查看哪一层归档，可选 `all`、`raw`、`hook`。 |
+| `--date <YYYY-MM-DD>` | - | 只查看某一天的归档文件。 |
+| `--limit <n>` | `20` | 最多显示多少条记录。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `memory-archive-search`
+
+```powershell
+my-agent memory-archive-search "README" --speaker tool
+my-agent memory-archive-search --run-id subagent-xxx --status ok --json
+my-agent memory-archive-search "继续" --since 2026-04-30 --layer raw
+```
+
+按关键词和结构化字段搜索 `memory/raw` / `memory/hooks`。这层是恢复线索，不是任务最终事实源；查到线索后仍应继续读任务目录、LocalStore 记录或 authority 文件。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `query` | 空 | 搜索关键词，可不传，只用字段过滤。 |
+| `--layer <layer>` | `all` | 搜索哪一层归档，可选 `all`、`raw`、`hook`。 |
+| `--date <YYYY-MM-DD>` | - | 只搜索某一天。 |
+| `--since <time>` | - | 只看此时间之后的记录，支持 ISO 时间或日期。 |
+| `--until <time>` | - | 只看此时间之前的记录，支持 ISO 时间或日期。 |
+| `--session-id <id>` | - | 按 session_id 精确过滤。 |
+| `--request-id <id>` | - | 按 request_id 精确过滤。 |
+| `--run-id <id>` | - | 按 run_id 精确过滤。 |
+| `--task-id <id>` | - | 按 task_id 精确过滤。 |
+| `--speaker <name>` | - | 按 speaker 精确过滤，如 `user`、`assistant`、`tool`。 |
+| `--target <name>` | - | 按 target 精确过滤。 |
+| `--action <name>` | - | 按 action 精确过滤，如 `message`、`response`、`tool_call`。 |
+| `--status <status>` | - | 按 status 精确过滤，如 `ok`、`failed`。 |
+| `--tool-name <name>` | - | 按工具名精确过滤。 |
+| `--source <source>` | - | 按来源精确过滤，如 `run`、`gateway`、`subagent`。 |
+| `--limit <n>` | `20` | 最多显示多少条记录。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `memory-resume`
+
+```powershell
+my-agent memory-resume "继续 README 那个任务"
+my-agent memory-resume --run-id subagent-xxx --json
+my-agent memory-resume --request-id gwreq-xxx --limit 10
+```
+
+从归档线索、LocalStore 检索结果和 subagent 任务目录中生成恢复简报。它会列出 archive clues、LocalStore clues、任务事实源路径和下一步建议，提醒你先读 `STATUS.md`、`WORK_LOG.md`、`HANDOFF.md`、`TEST_CHECKLIST.md` 等权威文件后再继续。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `query` | 空 | 恢复关键词，可不传，只用 request/run/session 等字段过滤。 |
+| `--layer <layer>` | `all` | 从哪一层归档找线索，可选 `all`、`raw`、`hook`。 |
+| `--date <YYYY-MM-DD>` | - | 只看某一天。 |
+| `--since <time>` | - | 只看此时间之后的归档线索。 |
+| `--until <time>` | - | 只看此时间之前的归档线索。 |
+| `--session-id <id>` | - | 按 session_id 精确过滤。 |
+| `--request-id <id>` | - | 按 request_id 精确过滤。 |
+| `--run-id <id>` | - | 按 run_id 精确过滤。 |
+| `--task-id <id>` | - | 按 task_id 精确过滤。 |
+| `--speaker <name>` | - | 按 speaker 精确过滤。 |
+| `--target <name>` | - | 按 target 精确过滤。 |
+| `--action <name>` | - | 按 action 精确过滤。 |
+| `--status <status>` | - | 按 status 精确过滤。 |
+| `--tool-name <name>` | - | 按工具名精确过滤。 |
+| `--source <source>` | - | 按来源精确过滤。 |
+| `--limit <n>` | `20` | 最多显示多少条线索。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
 
 ## `local-store-status`
 

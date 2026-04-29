@@ -1,12 +1,16 @@
 # STATUS
 
-更新时间：2026-04-29
+更新时间：2026-04-30
 
-当前阶段：`v0.3.x / 本地可恢复工作台底座`
+当前阶段：`v0.4-dev / memory resume and archive observability`
 
 总体状态：核心骨架已可运行，真实 API 全流程已通过；当前重点已经从“能跑”进入“可常驻、可观察、可恢复、可审计”。
 
 最新推进：
+- 已完成完整从头到尾真实链路测试：CLI、memory、LocalStore、gateway、scenario、真实 API runner、父代理验收全部通过。
+- 修复默认 gateway 入口缺少 chat handler 的回归；`my-agent` 默认入口可自动进入 gateway chat。
+- scenario-test 已按当前写入边界核对子代理 `task_dir/scenario_outputs/` 产物，避免旧路径误判。
+- 完整冒烟脚本最后统一改用 pytest 正常运行，避免跳过 pytest fixture 机制。
 - 新增 workstream 并行开发工作台：用 git worktree 隔离 memory、runtime、tools-boundary、live-lab 等开发线，并提供状态查看、可见终端打开和 handoff 模板。
 - 新增 Live Lab 可见真实环境测试台：可以新开 Terminal 观察 prompt、命令、响应和证据路径，并默认使用隔离 workspace。
 - 已新增 `local-doctor` / `local-rebuild`，可从 memory、gateway、subagent 文件事实源诊断并重建 LocalStore。
@@ -16,6 +20,9 @@
 - 已新增 `adapter file` 文件协议，外部聊天工具/TUI 可通过 inbox/outbox 复用 gateway。
 
 最近已推送提交：
+- `43303c8 test: harden full smoke regression coverage`
+- `84813a7 merge: integrate tool boundary hardening`
+- `d6e31b2 merge: integrate framework runtime hardening`
 - `22efdce feat: add status and timeline views`
 - `519492b feat: index gateway and subagent logs`
 - `f30cc08 feat: add local sqlite store`
@@ -161,13 +168,13 @@ my-agent timeline --event-type gateway_request_completed --details
 
 ## 测试状态
 
-最近完整验证：2026-04-29
+最近完整验证：2026-04-30
 
 已通过：
 - `py_compile`
 - `CLI_REFERENCE` 命令/参数覆盖测试
 - LocalStore 定向测试
-- 自动发现测试：`68` 个测试通过
+- pytest 全量测试：`123 passed`
 - 标准完整冒烟：`ALL_TESTS_PASS`
 - 真实 API gateway ask
 - 真实 API scenario-test happy path
@@ -216,17 +223,17 @@ scripts/workstream_status.sh
 
 优先级建议：
 
-1. `local-rebuild` / `local-doctor`
-   - 从现有 `memory.jsonl`、gateway 文件队列、subagent 目录重建 LocalStore。
-   - 检查 SQLite、JSONL、文件系统之间是否不一致。
+1. memory archive / hook 可观察入口
+   - 能列出 `memory/hooks` 和 `memory/raw` 最近记录。
+   - 能按 session/request/run/tool/status 等字段搜索。
 
-2. `status` 增强
-   - 增加 blocked / awaiting_acceptance / stale gateway 的更明确提示。
-   - 增加“建议下一步动作”。
+2. memory resume 恢复线索
+   - 用户说“继续”或给出关键词时，能找出相关归档、LocalStore 记录和任务目录引用。
+   - 输出恢复摘要、事实源路径和下一步建议，但不把 archive 当最终事实源。
 
-3. gateway 恢复增强
-   - 对超时 processing 请求做自动标记。
-   - 增加请求级重试和失败归档策略。
+3. 压缩前 hook 标准化
+   - 把 run/chat/gateway/subagent-run 的结束点统一写 recovery snapshot。
+   - 默认按 `memory_hook_archive_level=3` 保存恢复必需字段。
 
 4. worker 并发模型设计
    - 明确 runner 并发、启动速率、超时和自适应策略。
@@ -244,6 +251,8 @@ my-agent status
 my-agent timeline --limit 20
 my-agent local-doctor
 my-agent local-rebuild
+my-agent memory-doctor
+my-agent memory-route "任务恢复规则"
 my-agent local-search "关键词"
 my-agent local-search "任务目标" --source-type subagent_run
 my-agent local-search "gateway" --source-type gateway_request

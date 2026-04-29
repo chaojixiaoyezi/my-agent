@@ -35,6 +35,11 @@ from .local_commands import (
     cmd_status,
     cmd_timeline,
 )
+from .memory_archive_commands import (
+    cmd_memory_archive_list,
+    cmd_memory_archive_search,
+    cmd_memory_resume,
+)
 from .memory_commands import cmd_memory_doctor, cmd_memory_route
 from .scenario import cmd_scenario_test
 from .subagents import (
@@ -119,6 +124,53 @@ def build_parser() -> argparse.ArgumentParser:
     memory_doctor.add_argument("--index", help="路由索引文件；相对路径按 workspace root 解析")
     memory_doctor.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     memory_doctor.set_defaults(func=cmd_memory_doctor)
+
+    memory_archive_list = sub.add_parser("memory-archive-list", help="列出 memory raw/hook 归档记录")
+    memory_archive_list.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="查看哪一层归档")
+    memory_archive_list.add_argument("--date", help="只查看某一天，格式 YYYY-MM-DD")
+    memory_archive_list.add_argument("--limit", type=int, default=20, help="最多显示多少条记录")
+    memory_archive_list.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    memory_archive_list.set_defaults(func=cmd_memory_archive_list)
+
+    memory_archive_search = sub.add_parser("memory-archive-search", help="按字段搜索 memory raw/hook 归档")
+    memory_archive_search.add_argument("query", nargs="?", default="", help="搜索关键词；可配合字段过滤")
+    memory_archive_search.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="搜索哪一层归档")
+    memory_archive_search.add_argument("--date", help="只搜索某一天，格式 YYYY-MM-DD")
+    memory_archive_search.add_argument("--since", help="只看此时间之后的记录，支持 ISO 时间或日期")
+    memory_archive_search.add_argument("--until", help="只看此时间之前的记录，支持 ISO 时间或日期")
+    memory_archive_search.add_argument("--session-id", help="按 session_id 精确过滤")
+    memory_archive_search.add_argument("--request-id", help="按 request_id 精确过滤")
+    memory_archive_search.add_argument("--run-id", help="按 run_id 精确过滤")
+    memory_archive_search.add_argument("--task-id", help="按 task_id 精确过滤")
+    memory_archive_search.add_argument("--speaker", help="按 speaker 精确过滤，如 user/assistant/tool")
+    memory_archive_search.add_argument("--target", help="按 target 精确过滤")
+    memory_archive_search.add_argument("--action", help="按 action 精确过滤，如 message/response/tool_call")
+    memory_archive_search.add_argument("--status", help="按 status 精确过滤，如 ok/failed")
+    memory_archive_search.add_argument("--tool-name", help="按工具名精确过滤")
+    memory_archive_search.add_argument("--source", help="按来源精确过滤，如 run/gateway/subagent")
+    memory_archive_search.add_argument("--limit", type=int, default=20, help="最多显示多少条记录")
+    memory_archive_search.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    memory_archive_search.set_defaults(func=cmd_memory_archive_search)
+
+    memory_resume = sub.add_parser("memory-resume", help="从归档和事实源生成恢复线索")
+    memory_resume.add_argument("query", nargs="?", default="", help="恢复关键词；也可只传 request/run/session 过滤")
+    memory_resume.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="从哪一层归档找线索")
+    memory_resume.add_argument("--date", help="只看某一天，格式 YYYY-MM-DD")
+    memory_resume.add_argument("--since", help="只看此时间之后的归档线索")
+    memory_resume.add_argument("--until", help="只看此时间之前的归档线索")
+    memory_resume.add_argument("--session-id", help="按 session_id 精确过滤")
+    memory_resume.add_argument("--request-id", help="按 request_id 精确过滤")
+    memory_resume.add_argument("--run-id", help="按 run_id 精确过滤")
+    memory_resume.add_argument("--task-id", help="按 task_id 精确过滤")
+    memory_resume.add_argument("--speaker", help="按 speaker 精确过滤")
+    memory_resume.add_argument("--target", help="按 target 精确过滤")
+    memory_resume.add_argument("--action", help="按 action 精确过滤")
+    memory_resume.add_argument("--status", help="按 status 精确过滤")
+    memory_resume.add_argument("--tool-name", help="按工具名精确过滤")
+    memory_resume.add_argument("--source", help="按来源精确过滤")
+    memory_resume.add_argument("--limit", type=int, default=20, help="最多显示多少条线索")
+    memory_resume.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    memory_resume.set_defaults(func=cmd_memory_resume)
 
     local_store_status = sub.add_parser("local-store-status", help="查看本地事实源状态")
     local_store_status.set_defaults(func=cmd_local_store_status)
