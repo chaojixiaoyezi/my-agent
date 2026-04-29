@@ -993,6 +993,16 @@ def test_subagent_runner_dry_run_and_execute():
         assert "read_file [filesystem]" in prompt
         assert "write_file [filesystem]" not in prompt
         assert "echo 后端" in response
+        hook_files = sorted((root / "memory" / "hooks").glob("*.jsonl"))
+        assert len(hook_files) == 1
+        snapshots = [
+            json.loads(line)
+            for line in hook_files[0].read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert snapshots[-1]["dispatch_events"][0]["source"] == "subagent_run"
+        assert snapshots[-1]["dispatch_events"][0]["run_id"] == task.id
+        assert loaded.status_file in snapshots[-1]["content_paths"]
 
 
 def test_subagent_runner_parses_structured_output():

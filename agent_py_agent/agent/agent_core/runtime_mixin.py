@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 
-from ..memory_archive import archive_run_turn
+from ..memory_archive import archive_run_turn, write_recovery_snapshot
 from ..memory_routing import build_routed_memory_context
 from ..tools import ToolExecutionResult
 from .models import AgentRunResult
@@ -32,6 +32,14 @@ class SimpleAgentRuntimeMixin:
         save: bool | None = None,
         allowed_tools: list[str] | None = None,
         write_boundary: dict[str, object] | None = None,
+        request_id: str = "",
+        run_id: str = "",
+        task_id: str = "",
+        source: str = "run",
+        recovery_snapshot: bool | None = None,
+        recovery_task_refs: list[str] | None = None,
+        recovery_content_paths: list[str] | None = None,
+        recovery_next_actions: list[str] | None = None,
     ) -> AgentRunResult:
         """执行一轮智能体请求。"""
 
@@ -140,22 +148,54 @@ class SimpleAgentRuntimeMixin:
 
         assert final_response is not None
         do_save = self.config.auto_save_memory if save is None else save
+        run_request_id = request_id or f"run-{time.time_ns()}"
         if do_save:
             self.memory.add("user", user_prompt)
             self.memory.add("agent", final_response.text, tags=[final_response.backend])
             archive_result = archive_run_turn(
                 self.root,
                 session_id=getattr(self, "session_id", self.config.agent_name),
-                request_id=f"run-{time.time_ns()}",
+                request_id=run_request_id,
+                run_id=run_id,
+                task_id=task_id,
                 user_prompt=user_prompt,
                 response_text=final_response.text,
                 backend=final_response.backend,
                 tool_calls=archive_tool_calls,
-                source="run",
+                source=source,
                 archive_level=int(getattr(self.config, "memory_archive_level", 3)),
             )
         else:
             archive_result = None
+        should_write_snapshot = (
+            bool(getattr(self.config, "memory_hook_enabled", True))
+            and (do_save if recovery_snapshot is None else bool(recovery_snapshot))
+        )
+        snapshot_result = (
+            write_recovery_snapshot(
+                self.root,
+                session_id=getattr(self, "session_id", self.config.agent_name),
+                request_id=run_request_id,
+                run_id=run_id,
+                task_id=task_id,
+                user_prompt=user_prompt,
+                response_text=final_response.text,
+                backend=final_response.backend,
+                source=source,
+                status="ok",
+                tool_calls=archive_tool_calls,
+                task_refs=recovery_task_refs or [],
+                content_paths=[
+                    *(recovery_content_paths or []),
+                    *(routed_context.required_read_paths or []),
+                    *(routed_context.candidate_paths or []),
+                ],
+                next_actions=recovery_next_actions or [],
+                archive_level=int(getattr(self.config, "memory_hook_archive_level", 3)),
+            )
+            if should_write_snapshot
+            else None
+        )
 
         return AgentRunResult(
             prompt=final_prompt,
@@ -171,6 +211,10 @@ class SimpleAgentRuntimeMixin:
             ],
             archive_events=archive_result.event_count if archive_result else 0,
             archive_token_estimate=archive_result.token_estimate if archive_result else 0,
+            recovery_snapshot_id=snapshot_result.snapshot_id if snapshot_result else "",
+            recovery_snapshot_path=snapshot_result.path if snapshot_result else "",
+            recovery_snapshot_error=snapshot_result.error if snapshot_result else "",
+            recovery_snapshot_token_estimate=snapshot_result.token_estimate if snapshot_result else 0,
         )
 
     def remember(self, content: str, *, kind: str = "note"):

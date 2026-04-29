@@ -314,6 +314,7 @@ def _normalize_archive_record(layer: str, path: Path, line_no: int, payload: dic
     统一后，搜索命令就能按同一套字段工作。
     """
 
+    derived = _derived_archive_fields(payload)
     created_at = str(payload.get("created_at", "") or "")
     record_id = str(payload.get("event_id") or payload.get("snapshot_id") or f"{path.name}:{line_no}")
     return {
@@ -321,18 +322,18 @@ def _normalize_archive_record(layer: str, path: Path, line_no: int, payload: dic
         "kind": "hook_snapshot" if layer == "hook" else "raw_event",
         "id": record_id,
         "session_id": str(payload.get("session_id", "") or ""),
-        "request_id": str(payload.get("request_id", "") or ""),
-        "run_id": str(payload.get("run_id", "") or ""),
-        "task_id": str(payload.get("task_id", "") or ""),
+        "request_id": str(payload.get("request_id") or derived.get("request_id") or ""),
+        "run_id": str(payload.get("run_id") or derived.get("run_id") or ""),
+        "task_id": str(payload.get("task_id") or derived.get("task_id") or ""),
         "speaker": str(payload.get("speaker", "") or ""),
         "target": str(payload.get("target", "") or ""),
         "action": str(payload.get("action", "snapshot" if layer == "hook" else "") or ""),
-        "status": str(payload.get("status", "") or ""),
-        "error_code": str(payload.get("error_code", "") or ""),
+        "status": str(payload.get("status") or derived.get("status") or ""),
+        "error_code": str(payload.get("error_code") or derived.get("error_code") or ""),
         "is_dispatch": bool(payload.get("is_dispatch", False)),
         "tool_name": str(payload.get("tool_name", "") or ""),
         "tool_success": payload.get("tool_success"),
-        "source": str(payload.get("source", "") or ""),
+        "source": str(payload.get("source") or derived.get("source") or ""),
         "created_at": created_at,
         "created_at_sort": _created_at_sort(created_at, fallback=path.stat().st_mtime),
         "content_preview": _archive_preview(payload),
@@ -344,6 +345,30 @@ def _normalize_archive_record(layer: str, path: Path, line_no: int, payload: dic
         "line_no": line_no,
         "payload": payload,
     }
+
+
+def _derived_archive_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    """LLM: derive request/run/task/status/source fields from hook internals.
+
+    大白话：hook snapshot 没有顶层 request_id/run_id。
+    这些字段通常藏在 `turn_range` 或 `dispatch_events` 里，恢复搜索时要提出来，否则 `--run-id` 会漏掉 hook。
+    """
+
+    fields: dict[str, Any] = {}
+    turn_range = payload.get("turn_range")
+    if isinstance(turn_range, dict):
+        for key in ("request_id", "run_id", "task_id", "source", "status", "error_code"):
+            if turn_range.get(key):
+                fields[key] = turn_range.get(key)
+    dispatch_events = payload.get("dispatch_events")
+    if isinstance(dispatch_events, list):
+        for event in dispatch_events:
+            if not isinstance(event, dict):
+                continue
+            for key in ("request_id", "run_id", "task_id", "source", "status", "error_code"):
+                if event.get(key) and not fields.get(key):
+                    fields[key] = event.get(key)
+    return fields
 
 
 def _archive_preview(payload: dict[str, Any]) -> str:

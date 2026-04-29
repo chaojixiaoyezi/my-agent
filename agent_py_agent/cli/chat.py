@@ -145,6 +145,8 @@ def cmd_chat(args) -> int:
                         inject=job.inject,
                         prompt_files=job.prompt_files,
                         save=not args.no_save,
+                        source="chat",
+                        recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
                     )
                     elapsed = time.perf_counter() - started_at
                     if job.show_prompt:

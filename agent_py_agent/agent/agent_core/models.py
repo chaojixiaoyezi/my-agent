@@ -24,3 +24,7 @@ class AgentRunResult:
     memory_route_paths: list[str] | None = None
     archive_events: int = 0
     archive_token_estimate: int = 0
+    recovery_snapshot_id: str = ""
+    recovery_snapshot_path: str = ""
+    recovery_snapshot_error: str = ""
+    recovery_snapshot_token_estimate: int = 0

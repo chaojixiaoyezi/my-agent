@@ -22,6 +22,7 @@ from .memory_archive_query import (
     resume_local_query,
     strip_sort_keys,
 )
+from .memory_resume_brief import build_resume_brief
 
 
 def cmd_memory_archive_list(args) -> int:
@@ -103,6 +104,14 @@ def cmd_memory_resume(args) -> int:
     local_payloads = [local_hit_payload(hit) for hit in local_hits]
     task_ids = collect_resume_task_ids(args, archive_matches, local_payloads)
     task_payloads = collect_task_payloads(agent, task_ids, limit=args.limit)
+    resume = build_resume_guidance(archive_matches, local_payloads, task_payloads)
+    brief = build_resume_brief(
+        archive_matches,
+        local_payloads,
+        task_payloads,
+        recommended_read_paths=resume["recommended_read_paths"],
+        next_actions=resume["next_actions"],
+    )
     payload = {
         "ok": True,
         "workspace_root": str(agent.root),
@@ -111,7 +120,8 @@ def cmd_memory_resume(args) -> int:
         "archive_matches": archive_matches,
         "local_matches": local_payloads,
         "task_fact_sources": task_payloads,
-        "resume": build_resume_guidance(archive_matches, local_payloads, task_payloads),
+        "resume": resume,
+        "brief": brief,
     }
     _print_memory_resume(payload, json_output=args.json)
     return 0
@@ -174,6 +184,17 @@ def _print_memory_resume(payload: dict[str, Any], *, json_output: bool) -> None:
             sort_keys=True,
         )
     )
+    brief = payload["brief"]
+    print("Recovery Brief")
+    print(f"- latest_user_intent: {brief['latest_user_intent'] or 'unknown'}")
+    print(f"- latest_assistant_action: {brief['latest_assistant_action'] or 'unknown'}")
+    print("- related_ids=" + json.dumps(brief["related_ids"], ensure_ascii=False, sort_keys=True))
+    if brief["likely_task_statuses"]:
+        for item in brief["likely_task_statuses"][:5]:
+            print(f"- task_status: {item['run_id']} {item['status']}/{item['verification_status']} :: {item['goal']}")
+    else:
+        print("- task_status: none")
+    print(f"- authority: {brief['authority_note']}")
     print("Archive Clues")
     _print_archive_record_lines(payload["archive_matches"][:5])
     print("Task Fact Sources")
