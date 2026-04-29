@@ -31,6 +31,10 @@ class AgentConfig:
     memory_path: str = "data/memory.jsonl"
     memory_top_k: int = 5
     auto_save_memory: bool = True
+    local_store_path: str = "data/local_store/local.db"
+    local_store_files_dir: str = "data/local_store/files"
+    local_store_events_path: str = "data/local_store/events.jsonl"
+    local_store_fts_enabled: bool = True
     enable_self_learning: bool = False
     prompt_files: list[str] = field(default_factory=list)
     enable_subagents: bool = True

@@ -23,7 +23,8 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- capability_config.py              # 能力路由配置结构，管理 skill/tool 授权和子代理上抛参数
 |   |   |-- config.py                          # 配置结构和简化 YAML 加载器
 |   |   |-- core.py                            # 智能体主调度器，把 prompt、记忆、后端、工具循环和 subagent runner 串起来
-|   |   |-- memory.py                          # 本地 JSONL 记忆系统，负责写入和检索历史内容
+|   |   |-- local_store.py                     # 本地事实源，负责 SQLite/FTS5 索引、正文文件和 JSONL 审计事件
+|   |   |-- memory.py                          # 本地记忆系统，JSONL 记原始流水，LocalStore 负责索引检索
 |   |   |-- prompting.py                       # prompt 拼装器，负责把人格、记忆、工具信息和用户任务合成最终上下文
 |   |   |-- skills.py                          # Skill Card 扫描和读取模块，负责把 SKILL.md 变成轻量索引
 |   |   |-- subagent.py                        # 子代理运行树模块，记录父子关系、能力请求、授权、缺口、看板和 due-check
@@ -34,6 +35,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |-- data/                                  # 运行时数据目录
 |   |   |-- memory.jsonl                       # 长期记忆文件
 |   |   |-- gateway/                           # gateway pid/state/heartbeat/log/stop request、inbox 和 response 输出目录
+|   |   |-- local_store/                       # SQLite 本地事实源、正文文件和追加式事件流水
 |   |   `-- subagents/                         # 子任务记录输出目录
 |   |-- extensions/                            # 预留扩展目录
 |   |-- prompts/                               # prompt 规则文件目录
@@ -44,6 +46,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |       |-- test_backends.py                   # 后端适配测试
 |       |-- test_capabilities.py               # skill/tool 统一能力路由测试
 |       |-- test_cli_reference.py              # CLI_REFERENCE 与 argparse 命令/参数覆盖测试
+|       |-- test_local_store.py                # SQLite/FTS5/JSONL/记忆索引回归测试
 |       |-- test_packaging.py                  # console script、workspace_root 等安装与配置行为测试
 |       `-- test_tools.py                      # 工具目录、工具调用和工具能力测试
 |-- .gitattributes                             # 跨平台文本编码和换行约定
@@ -130,9 +133,32 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - 比全量注入更省 prompt
 - 比只给工具名更不容易选错工具
 
+### `agent_py_agent/agent/local_store.py`
+
+这是第一版本地事实源。
+
+它把本地数据分成四层：
+- SQLite 普通表：保存记录卡片、来源、路径、元数据和审计事件。
+- SQLite FTS5：保存标题和正文全文索引；如果运行环境不支持 FTS5，会退回 LIKE 检索。
+- 文件系统：保存正文和未来大 artifact，避免数据库越来越臃肿。
+- JSONL：保存追加式审计流水，方便人直接排查，也方便以后做上传同步。
+
+当前已接入记忆系统：新记忆会继续写 `memory.jsonl`，同时索引到 LocalStore。
+旧记忆可以通过 `my-agent local-index-memory` 补建索引。
+
 ### `agent_py_agent/agent/config.py`
 
 这个文件定义项目的配置总表，并提供一个轻量 YAML 读取器。
+
+本轮新增了本地事实源配置项：
+- `local_store_path`
+  SQLite 数据库路径。
+- `local_store_files_dir`
+  正文和未来 artifact 的文件目录。
+- `local_store_events_path`
+  追加式审计 JSONL 路径。
+- `local_store_fts_enabled`
+  是否尝试启用 SQLite FTS5；关闭后仍可用 LIKE 检索。
 
 本轮新增了与工具检索相关的配置项：
 - `tool_catalog_limit`

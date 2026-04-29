@@ -16,6 +16,18 @@
 - [ ] 确认不会意外打印 API key
 - [ ] 不使用 echo/fake backend 作为最终通过依据
 
+## 修改本地事实源 / 记忆时
+
+- [ ] JSONL 记忆仍然能直接写入和读取
+- [ ] 新记忆会索引到 SQLite/FTS5 LocalStore
+- [ ] FTS5 不可用或关闭时，LIKE fallback 仍能搜到内容
+- [ ] 正文文件写入 `local_store_files_dir`
+- [ ] 审计事件追加到 `local_store_events_path`
+- [ ] `my-agent local-store-status` 输出路径、记录数、事件数和 FTS5 状态
+- [ ] `my-agent local-index-memory` 能补建旧 `memory.jsonl`
+- [ ] `my-agent local-search "关键词" --source-type memory` 能返回命中
+- [ ] 完整冒烟配置会隔离 `local_store_path`、`local_store_files_dir` 和 `local_store_events_path`
+
 ## 修改工具系统时
 
 - [ ] 工具目录仍能渲染

@@ -78,6 +78,7 @@ my-agent scenario-test --case all --count 1
 当前项目重点不是“做一个简单聊天脚本”，而是在逐步搭一个可审计、可扩展、能承载多层子代理工作的基础设施：
 - 普通 chat / run，以及 `chat --gateway` 客户端模式。
 - 长期记忆。
+- 本地事实源：SQLite 结构化账本、FTS5 全文索引、正文文件和 JSONL 审计流水。
 - 工具目录和工具调用循环，兼容标准 `[TOOL_CALL]` JSON 以及 Qwen/通道运行时 常见的 XML-ish 工具调用方言。
 - skill / tool 统一能力路由。
 - subagent 工单、看板、due-check、通道探测。
@@ -140,6 +141,14 @@ python3 -m agent_py_agent spawn-subagents "开发一个可验收的功能" --cou
 python3 -m agent_py_agent subagents
 ```
 
+查看本地事实源状态，并把旧 JSONL 记忆补建到 SQLite/FTS5：
+
+```bash
+python3 -m agent_py_agent local-store-status
+python3 -m agent_py_agent local-index-memory
+python3 -m agent_py_agent local-search "表格" --source-type memory
+```
+
 生成单个子代理执行上下文：
 
 ```bash
@@ -184,6 +193,7 @@ agent_py_agent/config/agent_config.yaml
 - 模型后端。
 - API 地址和 key 环境变量名。
 - 记忆路径。
+- 本地事实源路径：`local_store_path`、`local_store_files_dir`、`local_store_events_path`。
 - 工具开关和工具返回长度。
 - chat / run 通用行为。
 - 自学习总开关预留项。

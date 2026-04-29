@@ -19,6 +19,29 @@
 暂停         暂时不做，但保留背景
 ```
 
+## 2026-04-29 / 本地事实源
+
+状态：部分落地
+
+思路：
+- 本地 agent 先保留“文件优先”的可读性，但补一层结构化账本。
+- SQLite 负责记录卡片、来源、元数据、更新时间和审计事件。
+- FTS5 负责本地全文检索；如果运行环境不支持，就自动退回 LIKE。
+- 文件系统保存正文和未来大 artifact，避免数据库变成一个难维护的大黑盒。
+- JSONL 保存追加式事件流水，适合人工排查、备份和未来上传同步。
+
+已落地：
+- `agent_py_agent/agent/local_store.py`：LocalStore 第一版。
+- `JsonlMemory` 双写：记忆继续写 JSONL，同时索引到 LocalStore。
+- `local-store-status`、`local-search`、`local-index-memory` 三个 CLI 命令。
+- 配置项：`local_store_path`、`local_store_files_dir`、`local_store_events_path`、`local_store_fts_enabled`。
+
+后续方向：
+- gateway request/response、subagent run、验收报告也逐步接入 LocalStore。
+- 增加定期 compact/rebuild/backup 命令。
+- 公司级使用时，本地仍为第一事实源，远端只做同步、备份、组织视图和跨设备协作。
+- 向量检索后续可以作为附加索引，而不是替代 SQLite/FTS5/文件/JSONL 这一层。
+
 ## 2026-04-28 / chat 交互体验
 
 ### 后台队列

@@ -49,6 +49,9 @@ chat                        启动交互循环
 remember                    手动写入记忆
 memory-list                 列出最近记忆
 memory-search               搜索记忆
+local-store-status          查看 SQLite/FTS5 本地事实源状态
+local-search                搜索本地事实源
+local-index-memory          把旧 JSONL 记忆补建到本地事实源
 spawn-subagents             创建子代理工单
 subagents                   查看子代理红绿灯看板
 subagent                    查看单个子代理详情
@@ -160,6 +163,20 @@ python3 -m agent_py_agent memory-search "表格" --limit 5
 
 ```text
 agent_py_agent/data/memory.jsonl
+```
+
+本地事实源默认保存在：
+
+```text
+agent_py_agent/data/local_store/
+```
+
+它包含 SQLite 数据库、正文文件目录和追加式审计 JSONL。新记忆会继续写 `memory.jsonl`，同时索引到本地事实源。旧记忆可以补建：
+
+```bash
+python3 -m agent_py_agent local-store-status
+python3 -m agent_py_agent local-index-memory
+python3 -m agent_py_agent local-search "表格" --source-type memory
 ```
 
 这个目录默认被 Git 忽略。
