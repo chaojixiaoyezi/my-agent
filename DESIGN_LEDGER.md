@@ -1687,8 +1687,13 @@ def example(...):
 
 导航：新的模块级长期文档入口是 [docs/modules/README.md](docs/modules/README.md)。每个功能模块使用四件套：`01-discussion.md` 记录灵感和讨论，`02-progress.md` 记录推进、解决的问题和测试，`03-purpose.md` 解释初心和设计想法，`04-structure.md` 说明结构树、核心文件、数据流和新手学习路径。
 
-首批模块索引已建立：
+模块索引已建立：
 - [docs/modules/subagent/](docs/modules/subagent/)：链接 subagent 质量契约、受控派工、workflow preview 和旧 runbook。
 - [docs/modules/log-analysis/](docs/modules/log-analysis/)：链接日志分析 design、backlog、acceptance、evidence 和当前 work order 方向。
+- [docs/modules/memory/](docs/modules/memory/)：链接长期记忆、规则路由、raw archive、恢复和诊断。
+- [docs/modules/gateway/](docs/modules/gateway/)：链接后台 gateway、本地请求队列、chat attach、恢复和 adapter。
+- [docs/modules/live-lab/](docs/modules/live-lab/)：链接可见真实环境演练、离线 replay、suite/case 产物。
+
+同步门：`scripts/check_doc_sync.py` 已覆盖 `log-analysis`、`subagent`、`memory`、`gateway`、`live-lab`。covered module 改代码时，需要同步更新模块 `02-progress.md`、`04-structure.md`，实现代码新增时还要同文件补注释或 docstring。
 
 维护约定：旧文档暂不搬迁；本台账继续只放摘要和导航，模块细节后续优先追加到 `docs/modules/<module>/`。

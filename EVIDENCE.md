@@ -152,3 +152,24 @@
   - `python -m pytest agent_py_agent\tests\test_doc_sync.py` -> `3 passed`.
   - `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
   - `git diff --check` -> passed.
+
+## 2026-04-30 / Module Docs Expansion and Sync Gate Coverage Evidence
+
+- Added module four-piece docs:
+  - `docs/modules/memory/01-discussion.md` through `04-structure.md`.
+  - `docs/modules/gateway/01-discussion.md` through `04-structure.md`.
+  - `docs/modules/live-lab/01-discussion.md` through `04-structure.md`.
+- Extended `scripts/check_doc_sync.py`:
+  - New covered module: `memory` for memory store, routing, archive, settings, and CLI paths.
+  - New covered module: `gateway` for gateway compatibility layer, `gateway_parts`, gateway CLI, and adapter CLI paths.
+  - New covered module: `live-lab` for `scripts/live_agent_lab.py`, `scripts/live_lab/`, and `scripts/open_live_lab.sh`.
+- Extended `agent_py_agent/tests/test_doc_sync.py`:
+  - Verifies required docs exist for every module rule.
+  - Verifies memory/gateway/live-lab paths are covered by the sync gate.
+- Updated navigation:
+  - `docs/modules/README.md`, `CODEBASE_TREE.md`, and `DESIGN_LEDGER.md`.
+- Verification:
+  - `python -m pytest agent_py_agent\tests\test_doc_sync.py` -> `5 passed`.
+  - `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
+  - `python -m pytest` -> `241 passed`.
+  - `git diff --check` -> passed.
