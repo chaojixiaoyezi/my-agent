@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """LLM: builds optional auto-injected recovery context from memory archive evidence.
 
-给人看的解释：
+新手说明:
 这个文件负责“用户说继续时，要不要自动把恢复线索塞进 prompt”。
 它只读归档、LocalStore 和任务事实源，不写任何业务状态；默认配置关闭，避免拖慢普通对话。
 """
@@ -59,9 +59,14 @@ _STOP_TERMS = {
 class ResumeContextResult:
     """LLM: result of optional recovery context lookup for one run.
 
-    给人看的解释：
+    新手说明:
     这不是模型回答，只是“有没有找到可注入的恢复块”的结果。
     运行主流程会用它决定是否往 prompt 的 Runtime Injection 里加内容。
+
+    字段说明:
+    `context_block` 是可注入 prompt 的恢复块；`query` 是实际用于检索的关键词；
+    `archive_match_count`、`local_match_count`、`task_fact_source_count` 是线索数量；
+    `reason` 说明为什么注入或不注入；`error` 保存非致命错误。
     """
 
     context_block: str = ""
@@ -76,8 +81,11 @@ class ResumeContextResult:
     def injected(self) -> bool:
         """LLM: true when a non-empty recovery block should enter the prompt.
 
-        给人看的解释：
+        新手说明:
         只要 `context_block` 有内容，就说明这轮确实找到了恢复线索，可以注入。
+
+        返回说明:
+        返回布尔值。
         """
 
         return bool(self.context_block.strip())
@@ -91,9 +99,16 @@ def build_auto_resume_context(
 ) -> ResumeContextResult:
     """LLM: conditionally build a recovery context block from recent archive evidence.
 
-    给人看的解释：
+    新手说明:
     默认不开。配置打开后，只有“继续/恢复/刚刚/request_id/run_id”这类场景才查归档。
     如果查归档或 LocalStore 出错，不影响主对话，只返回 error 让结果里可观察。
+
+    参数说明:
+    `agent` 是当前 agent 对象，必须有 config/root/local_store/subagents；
+    `user_prompt` 是用户当前输入；`enabled` 可在测试或调用点强制开关。
+
+    返回说明:
+    返回 `ResumeContextResult`，不会把异常抛给主对话。
     """
 
     effective_enabled = (
@@ -119,9 +134,15 @@ def build_auto_resume_context(
 def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
     """LLM: query archive/local/task fact sources and render one stable recovery block.
 
-    给人看的解释：
+    新手说明:
     这一步和 `memory-resume --context-only` 是同一套思路：
     archive 是线索，任务目录才是事实源，最终输出一段短小稳定的 `Recovery Brief`。
+
+    参数说明:
+    `agent` 是当前 agent 对象；`user_prompt` 是用户当前输入。
+
+    返回说明:
+    返回带 context block 或原因说明的 `ResumeContextResult`。
     """
 
     limit = int(getattr(agent.config, "memory_resume_auto_context_limit", 5) or 5)
@@ -160,9 +181,15 @@ def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
 def _first_archive_matches(records: list[dict[str, Any]], user_prompt: str, *, limit: int) -> tuple[list[dict[str, Any]], str]:
     """LLM: try precise IDs, full prompt, then useful terms before falling back to recent trigger context.
 
-    给人看的解释：
+    新手说明:
     用户经常说“继续 README 那个任务”，归档里未必有“那个”两个字。
     所以这里会先试完整句，没命中再试 README、request_id、run_id 这类更稳的词。
+
+    参数说明:
+    `records` 是已加载的归档记录；`user_prompt` 是用户输入；`limit` 是最多返回多少条。
+
+    返回说明:
+    返回 `(matches, query)`；query 是实际命中的搜索词。
     """
 
     for query in _candidate_queries(user_prompt):
@@ -177,9 +204,15 @@ def _first_archive_matches(records: list[dict[str, Any]], user_prompt: str, *, l
 def _candidate_queries(user_prompt: str) -> list[str]:
     """LLM: derive small archive search terms from one user prompt.
 
-    给人看的解释：
+    新手说明:
     不做复杂分词，只提取明显 ID、完整句和空格/标点切开的关键词。
     这样实现轻，不会为了恢复上下文引入重依赖。
+
+    参数说明:
+    `user_prompt` 是用户输入。
+
+    返回说明:
+    返回按尝试顺序排列的候选搜索词。
     """
 
     text = user_prompt.strip()
@@ -199,8 +232,14 @@ def _candidate_queries(user_prompt: str) -> list[str]:
 def _has_resume_trigger(user_prompt: str) -> bool:
     """LLM: detect prompts that are likely asking for recovery/continuation.
 
-    给人看的解释：
+    新手说明:
     自动注入只在这些明显场景触发，避免每句普通聊天都去扫归档。
+
+    参数说明:
+    `user_prompt` 是用户输入。
+
+    返回说明:
+    判断为继续/恢复类请求时返回 True。
     """
 
     lowered = user_prompt.lower()
@@ -210,9 +249,15 @@ def _has_resume_trigger(user_prompt: str) -> bool:
 def _resume_args(query: str) -> SimpleNamespace:
     """LLM: build the minimal args-like object reused by resume query helpers.
 
-    给人看的解释：
+    新手说明:
     原来的恢复查询函数是给 CLI 用的，会从 `args.query/run_id` 这些字段读参数。
     自动注入不是命令行，所以这里造一个最小对象，让两边复用同一套逻辑。
+
+    参数说明:
+    `query` 是自动选择出的 LocalStore/Archive 查询词。
+
+    返回说明:
+    返回带 query/run_id/request_id/session_id/task_id 字段的 `SimpleNamespace`。
     """
 
     return SimpleNamespace(
@@ -227,9 +272,15 @@ def _resume_args(query: str) -> SimpleNamespace:
 def _append(items: list[str], value: str) -> None:
     """LLM: append a non-empty string once while preserving order.
 
-    给人看的解释：
+    新手说明:
     候选搜索词要保持顺序，也不要重复。
     这个小函数就是“有内容才加、加过就不再加”。
+
+    参数说明:
+    `items` 是候选词列表；`value` 是候选值。
+
+    返回说明:
+    不返回值；可能原地追加一项。
     """
 
     text = str(value or "").strip()

@@ -204,3 +204,29 @@
   - `python -m pytest agent_py_agent\tests\test_memory_config.py agent_py_agent\tests\test_memory_routing.py agent_py_agent\tests\test_memory_routing_context.py agent_py_agent\tests\test_memory_runtime.py agent_py_agent\tests\test_memory_cli.py agent_py_agent\tests\test_local_store.py agent_py_agent\tests\test_doc_sync.py` -> `50 passed`.
   - `python -m pytest` -> `241 passed`.
   - `git diff --check` -> passed.
+
+## 2026-04-30 / Memory Archive Routing CLI Teaching Comments and Readback Evidence
+
+- Updated memory archive files:
+  - `agent_py_agent/agent/memory_archive/models.py`: field-level explanations for snapshots and raw events.
+  - `agent_py_agent/agent/memory_archive/storage.py`: write-path, retention, readback, and date-coercion comments; raw event readback verification.
+  - `agent_py_agent/agent/memory_archive/runtime.py`: run-turn, message, tool, hash, preview, and compatibility helper comments.
+  - `agent_py_agent/agent/memory_archive/snapshots.py`: recovery snapshot result, write behavior, tool snapshot, preview, ID, and hash comments.
+  - `agent_py_agent/agent/memory_archive/query.py`: archive collection, filtering, resume clue, task fact-source, and malformed-line comments.
+  - `agent_py_agent/agent/memory_archive/resume_brief.py`: brief synthesis, ID collection, task status, context block, and dedupe comments.
+  - `agent_py_agent/agent/memory_archive/resume_context.py`: auto resume trigger, query selection, non-throwing result, and injection comments.
+  - `agent_py_agent/agent/memory_archive/tokens.py`: conservative estimation helper comments.
+- Updated routing and CLI files:
+  - `agent_py_agent/agent/memory_routing/loader.py`: loader/parser/coercion comments and separator coverage.
+  - `agent_py_agent/agent/memory_routing/context.py`: context bundle, safe path resolution, authority read, receipt, and finding comments.
+  - `agent_py_agent/cli/memory_commands.py`: route/doctor report comments.
+  - `agent_py_agent/cli/memory_archive_commands.py`: list/search/resume report comments.
+- Added tests:
+  - `test_append_raw_event_readback_failure_is_reported`.
+  - `test_markdown_routes_split_common_human_list_separators`.
+- Verification:
+  - `python -m pytest agent_py_agent\tests\test_memory_archive.py agent_py_agent\tests\test_memory_routing.py` -> `16 passed`.
+  - `python -m py_compile <touched memory archive/routing/CLI files>` -> passed.
+  - `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
+  - `python -m pytest agent_py_agent\tests\test_memory_config.py agent_py_agent\tests\test_memory_routing.py agent_py_agent\tests\test_memory_routing_context.py agent_py_agent\tests\test_memory_runtime.py agent_py_agent\tests\test_memory_cli.py agent_py_agent\tests\test_memory_archive.py agent_py_agent\tests\test_memory_archive_runtime.py agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_local_store.py agent_py_agent\tests\test_doc_sync.py` -> `67 passed`.
+  - `python -m pytest` -> `243 passed`.
