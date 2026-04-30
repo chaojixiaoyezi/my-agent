@@ -17,9 +17,10 @@ DEFAULT_RUNS_DIR = REPO_ROOT / "validation" / "live_lab"
 SUITES = {
     "health": ["health"],
     "bad-weather": ["bad_weather"],
+    "log-analysis": ["log_analysis_replay"],
     "smoke": ["health", "bad_weather"],
     "real": ["health", "gateway_ask", "long_subagent"],
-    "all": ["health", "bad_weather", "gateway_ask", "long_subagent"],
+    "all": ["health", "bad_weather", "log_analysis_replay", "gateway_ask", "long_subagent"],
 }
 
 REAL_CASES = {"gateway_ask", "long_subagent"}

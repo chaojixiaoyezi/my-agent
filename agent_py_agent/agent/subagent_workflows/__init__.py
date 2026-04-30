@@ -5,6 +5,7 @@ from __future__ import annotations
 from .acceptance import ParentAcceptanceItem, ParentAcceptancePlan, plan_parent_acceptance
 from .compiler import WorkflowDispatchPlan, WorkflowWorkerSpec, compile_workflow
 from .models import WorkflowLoadIssue, WorkflowPhase, WorkflowTemplate
+from .planner import WorkflowPlanningResult, plan_workflow_for_goal
 from .router import WorkflowRouteDecision, route_workflow
 from .store import (
     WorkflowTemplateStore,
@@ -19,6 +20,7 @@ __all__ = [
     "WorkflowDispatchPlan",
     "WorkflowLoadIssue",
     "WorkflowPhase",
+    "WorkflowPlanningResult",
     "WorkflowRouteDecision",
     "WorkflowTemplate",
     "WorkflowTemplateStore",
@@ -26,6 +28,7 @@ __all__ = [
     "compile_workflow",
     "load_template_store",
     "load_workflow_templates",
+    "plan_workflow_for_goal",
     "plan_parent_acceptance",
     "route_workflow",
     "validate_template_data",

@@ -130,3 +130,30 @@ Remaining:
 - [ ] Align storage query max limit with config instead of hard-coded `MAX_QUERY_LIMIT=500`.
 - [ ] Wire `logs/security` granted capability into normal run/chat runtime.
 - [ ] Build Live Lab scenario replay for first-response reports.
+
+## 2026-04-30 / Runtime Capability and Live Lab Integration Acceptance
+
+Status:
+- [x] Runtime `logs/security` capability auto-wiring landed.
+- [x] Log query max-limit config alignment landed.
+- [x] Offline SecurityAlertV1 Live Lab replay landed.
+- [x] Workflow router/compiler/parent-gate dry-run planner landed.
+
+Problems solved:
+- [x] Ordinary `run` prompts no longer need the user to explicitly pass `granted_capabilities=["logs/security"]` for obvious security-log analysis tasks.
+- [x] Security tools are still hidden for ordinary tasks, so the default tool surface stays quiet and safe.
+- [x] Chinese security-log wording is covered by regression tests, not only English trigger phrases.
+- [x] CLI query limits now honor `query_max_limit` instead of being silently capped by storage's previous hard-coded limit.
+- [x] The log-analysis chain now has a one-command offline replay that produces case, route, evidence, report, and forensic-package artifacts without a real LLM call.
+- [x] Workflow planning now has a single dry-run API that composes route -> compile -> parent acceptance before real worker creation.
+
+Accepted evidence:
+- [x] Focused integration tests passed: `python -m pytest agent_py_agent\tests\test_runtime_capabilities.py agent_py_agent\tests\test_log_analysis_query.py agent_py_agent\tests\test_log_analysis_cli.py agent_py_agent\tests\test_live_lab_log_analysis_replay.py agent_py_agent\tests\test_subagent_workflow_planner.py` -> `23 passed`.
+- [x] Offline replay passed: `python scripts\live_lab\log_analysis_replay.py --output-root $env:TEMP\openclaw-log-replay-codex` -> `ok=true`, `total_events=3`, `case_count=1`, `finding_count=1`, all replay stages pass.
+- [x] Full regression passed: `python -m pytest` -> `223 passed`.
+- [x] Whitespace check passed: `git diff --check`.
+
+Remaining:
+- [ ] Wire `plan_workflow_for_goal()` into real chat/gateway/spawn dispatch instead of keeping it as a dry-run planning helper.
+- [ ] Add richer log-analysis Live Lab fixtures beyond the minimal SecurityAlertV1 replay.
+- [ ] Add user-facing logs quickstart docs once the runtime path is wired into the visible agent workflow.

@@ -10,7 +10,6 @@ from typing import Any
 from ..agent.log_analysis.config import load_log_analysis_config, resolve_log_analysis_data_dir
 from ..agent.log_analysis.doctor import collect_doctor_status
 from ..agent.log_analysis.ingest.pipeline import ingest_file
-from ..agent.log_analysis.storage import MAX_QUERY_LIMIT
 from ..agent.log_analysis.tools import hunt_ip, security_query, trace_case
 
 
@@ -67,6 +66,7 @@ def cmd_logs_query(args) -> int:
         start_time=args.start_time,
         end_time=args.end_time,
         limit=limit,
+        max_limit=config.query_max_limit,
     )
     payload = {
         "ok": True,
@@ -91,6 +91,7 @@ def cmd_logs_hunt_ip(args) -> int:
         start_time=args.start_time,
         end_time=args.end_time,
         limit=limit,
+        max_limit=config.query_max_limit,
     )
     payload = {
         "ok": True,
@@ -114,6 +115,7 @@ def cmd_logs_trace_case(args) -> int:
         start_time=args.start_time,
         end_time=args.end_time,
         limit=limit,
+        max_limit=config.query_max_limit,
     )
     payload = {
         "ok": True,
@@ -136,16 +138,6 @@ def _resolve_root(raw_root: str | None, configured_data_dir: str) -> Path:
 def _resolve_query_limit(raw_limit: int | None, default_limit: int, max_limit: int) -> tuple[int, list[dict[str, Any]]]:
     warnings: list[dict[str, Any]] = []
     requested = default_limit if raw_limit is None else raw_limit
-    effective_max = min(max_limit, MAX_QUERY_LIMIT)
-    if max_limit > MAX_QUERY_LIMIT:
-        warnings.append(
-            {
-                "field_name": "query_max_limit",
-                "raw_value": max_limit,
-                "effective_value": effective_max,
-                "reason": f"storage backend currently caps query limits at {MAX_QUERY_LIMIT}",
-            }
-        )
     if requested <= 0:
         warnings.append(
             {
@@ -156,16 +148,16 @@ def _resolve_query_limit(raw_limit: int | None, default_limit: int, max_limit: i
             }
         )
         requested = default_limit
-    if requested > effective_max:
+    if requested > max_limit:
         warnings.append(
             {
                 "field_name": "limit",
                 "raw_value": requested,
-                "effective_value": effective_max,
+                "effective_value": max_limit,
                 "reason": "requested limit exceeded query_max_limit and was truncated",
             }
         )
-        requested = effective_max
+        requested = max_limit
     return requested, warnings
 
 

@@ -195,3 +195,13 @@
 - Solves: bad JSONL lines are no longer silently skipped with no trail. Reads now produce a `JsonlReadAudit`, persist corrupt/non-object samples to `corrupt_lines.jsonl`, and include skipped/corrupt counts in query summaries and query records.
 - Parent acceptance: this proves the local JSONL backend is still tolerant of bad rows, while giving reviewers evidence about what was skipped.
 - Remaining after this slice: runtime capability auto-wiring, storage limit config alignment, Live Lab scenario replay, and user-facing quickstart docs.
+
+## 2026-04-30 Implementation Note: Runtime Capability, Limits, and Replay
+
+- Status: landed in code and full regression.
+- Runtime capability solves: obvious security-log analysis prompts now auto-grant `logs/security` for ordinary `SimpleAgent.run()` calls, while normal tasks still keep security tools hidden.
+- Runtime capability guardrail: explicit grants still work; implicit grants are limited to explicit/obvious security-log phrasing and tested for both English and Chinese prompts.
+- Query-limit solves: CLI commands now pass configured `query_max_limit` into the storage query path, removing the mismatch between config defaults and storage's old hard-coded cap.
+- Live Lab replay solves: `scripts/live_lab/log_analysis_replay.py` can run the SecurityAlertV1 fixture through ingest, detector, case, route, evidence, report, and forensic-package generation without a real model call.
+- Dry-run note: the replay uses a local offline store and does not call a real LLM; on a fresh output root it reports `dry_run=true`, `total_events=3`, and `stored_events=3`.
+- Remaining after this slice: add richer fixtures, wire real analyst subagent dispatch, and publish a user-facing quickstart once runtime routing is visible from chat/gateway.

@@ -5,8 +5,35 @@ import json
 import pytest
 
 from agent_py_agent.agent.log_analysis.models import Case, EvidenceRef, Finding, NormalizedEvent
-from agent_py_agent.agent.log_analysis.storage import LocalLogStore, QueryCriteria, execute_security_query
+from agent_py_agent.agent.log_analysis.storage import (
+    DEFAULT_QUERY_LIMIT,
+    MAX_QUERY_LIMIT,
+    LocalLogStore,
+    QueryCriteria,
+    execute_security_query,
+)
 from agent_py_agent.agent.log_analysis.tools import hunt_ip, security_query, trace_case
+
+
+def _matching_events(count: int, *, attacker_ip: str = "198.51.100.80"):
+    for index in range(count):
+        hour = 10 + index // 60
+        minute = index % 60
+        yield {
+            "event_id": f"evt-limit-{index}",
+            "event_time": f"2026-04-30T{hour:02d}:{minute:02d}:00Z",
+            "source_id": "limit-test",
+            "alert_type": "web_attack",
+            "attacker_ip": attacker_ip,
+        }
+
+
+def _write_matching_events(store: LocalLogStore, count: int, *, attacker_ip: str = "198.51.100.80") -> None:
+    lines = [
+        json.dumps(event, ensure_ascii=False, sort_keys=True)
+        for event in _matching_events(count, attacker_ip=attacker_ip)
+    ]
+    store.events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def test_local_store_upserts_and_queries_security_fields(tmp_path):
@@ -128,6 +155,88 @@ def test_large_query_writes_limited_evidence_and_returns_limited_preview(tmp_pat
     assert query_record["row_count"] == 12
     assert query_record["truncated"] is True
     assert query_record["evidence_path"] == response["evidence_path"]
+
+
+def test_query_uses_default_limit_when_criteria_limit_is_omitted(tmp_path):
+    store = LocalLogStore(tmp_path)
+    _write_matching_events(store, 120)
+
+    result = execute_security_query(
+        store,
+        QueryCriteria(
+            attacker_ip="198.51.100.80",
+            start_time="2026-04-30T00:00:00Z",
+            end_time="2026-05-01T00:00:00Z",
+        ),
+    )
+
+    assert result.row_count == 120
+    assert result.parameters["limit"] == DEFAULT_QUERY_LIMIT
+    assert len(result.rows) == DEFAULT_QUERY_LIMIT
+    assert result.truncated is True
+
+
+def test_query_accepts_configured_max_limit_above_storage_fallback(tmp_path):
+    store = LocalLogStore(tmp_path)
+    _write_matching_events(store, 520)
+
+    result = execute_security_query(
+        store,
+        QueryCriteria(
+            attacker_ip="198.51.100.80",
+            start_time="2026-04-30T00:00:00Z",
+            end_time="2026-05-01T00:00:00Z",
+            limit=520,
+        ),
+        max_limit=1000,
+    )
+
+    assert result.row_count == 520
+    assert result.parameters["limit"] == 520
+    assert len(result.rows) == 520
+    assert result.truncated is False
+
+
+def test_query_truncates_to_configured_max_limit(tmp_path):
+    store = LocalLogStore(tmp_path)
+    _write_matching_events(store, 12)
+
+    result = execute_security_query(
+        store,
+        QueryCriteria(
+            attacker_ip="198.51.100.80",
+            start_time="2026-04-30T00:00:00Z",
+            end_time="2026-05-01T00:00:00Z",
+            limit=10,
+        ),
+        max_limit=4,
+    )
+
+    assert result.row_count == 12
+    assert result.parameters["limit"] == 4
+    assert len(result.rows) == 4
+    assert result.summary["returned_row_count"] == 4
+    assert result.truncated is True
+
+
+def test_query_uses_storage_max_fallback_without_configured_max_limit(tmp_path):
+    store = LocalLogStore(tmp_path)
+    _write_matching_events(store, 520)
+
+    result = execute_security_query(
+        store,
+        QueryCriteria(
+            attacker_ip="198.51.100.80",
+            start_time="2026-04-30T00:00:00Z",
+            end_time="2026-05-01T00:00:00Z",
+            limit=520,
+        ),
+    )
+
+    assert result.row_count == 520
+    assert result.parameters["limit"] == MAX_QUERY_LIMIT
+    assert len(result.rows) == MAX_QUERY_LIMIT
+    assert result.truncated is True
 
 
 def test_local_store_skips_bad_jsonl_lines_during_query(tmp_path):

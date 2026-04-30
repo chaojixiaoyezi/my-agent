@@ -2592,3 +2592,17 @@ WAF generic anomaly + EDR process anomaly + rare egress -> suspected_zero_day_in
 - Storage Audit slice landed: bad JSONL lines now produce a read audit, sampled corrupt/non-object rows are persisted to `corrupt_lines.jsonl`, and query summaries include skipped/corrupt counts.
 - This resolves the earlier backlog item where local JSONL reads skipped bad lines without an audit or metric.
 - Next recommended log-analysis slices: align storage query limits with config, wire `logs/security` capabilities into normal run/chat runtime, then build Live Lab scenario replay.
+
+## 2026-04-30 Current Landing Note: Runtime Wiring and Replay
+
+- Runtime capability slice landed: obvious security-log prompts now auto-grant `logs/security` in normal `SimpleAgent.run()` calls, while ordinary prompts still hide security tools.
+- Chinese prompt coverage landed: security-log wording such as "security logs / attack / suspicious intrusion" in Chinese is covered by regression tests.
+- Query-limit alignment landed: CLI query/hunt/trace commands pass configured `query_max_limit` through tools and storage.
+- Live Lab replay landed: `scripts/live_lab/log_analysis_replay.py` runs SecurityAlertV1 fixture through ingest, detector, case, route, evidence, report, and forensic package generation without a real LLM call.
+- Accepted evidence: focused tests `23 passed`, full regression `223 passed`, replay on a fresh output root `ok=true`, `dry_run=true`, `total_events=3`, `stored_events=3`, `case_count=1`, `finding_count=1`.
+
+Next recommended worker slices:
+- Real analyst dispatch: connect detected cases to controlled analyst/reviewer subagent tasks with evidence refs and parent acceptance.
+- Richer replay fixtures: add more attack paths, bad/missing fields, and negative controls.
+- User quickstart: document `logs status/ingest/query/hunt-ip/trace-case` plus when runtime auto-grants `logs/security`.
+- Workflow entry wiring: let log-analysis development/investigation goals call `plan_workflow_for_goal()` before creating real worker tasks.
