@@ -321,5 +321,28 @@ Accepted evidence:
 - [x] Whitespace check passed: `git diff --check`.
 
 Remaining:
-- [ ] Continue the same teaching-comment pass for `memory_archive/`, `memory_routing/loader.py`, `memory_routing/context.py`, and memory CLI commands.
+- [x] Continue the same teaching-comment pass for `memory_archive/`, `memory_routing/loader.py`, `memory_routing/context.py`, and memory CLI commands.
 - [ ] Run a real cross-day resume/handoff drill when behavior changes beyond comments.
+
+## 2026-04-30 / Memory Archive Routing CLI Teaching Comments and Readback Acceptance
+
+Status:
+- [x] Memory second teaching-comment pass landed for archive, routing loader/context, and memory CLI commands.
+- [x] Raw archive event writes now use readback verification like hook snapshots.
+- [x] Markdown route list parsing now covers common human separators.
+
+Problems solved:
+- [x] Beginner readers can now follow memory archive from DTOs -> storage -> runtime events -> recovery snapshots -> query/resume -> CLI output.
+- [x] LLM maintainers can see which memory functions write files, which only normalize/search, which return non-throwing recovery results, and which mutate nothing.
+- [x] Raw archive no longer treats a partial or mismatched JSONL append as a successful recovery clue.
+- [x] Human-written route indexes are less brittle when users mix English comma, Chinese comma, semicolon, Chinese semicolon, or pipe separators.
+
+Accepted evidence:
+- [x] Focused archive/routing tests passed: `python -m pytest agent_py_agent\tests\test_memory_archive.py agent_py_agent\tests\test_memory_routing.py` -> `16 passed`.
+- [x] Syntax check passed for touched memory archive, routing context/loader, and memory CLI files.
+- [x] Memory focused tests passed: `python -m pytest agent_py_agent\tests\test_memory_config.py agent_py_agent\tests\test_memory_routing.py agent_py_agent\tests\test_memory_routing_context.py agent_py_agent\tests\test_memory_runtime.py agent_py_agent\tests\test_memory_cli.py agent_py_agent\tests\test_memory_archive.py agent_py_agent\tests\test_memory_archive_runtime.py agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_local_store.py agent_py_agent\tests\test_doc_sync.py` -> `67 passed`.
+- [x] Sync gate passed: `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
+- [x] Full regression passed: `python -m pytest` -> `243 passed`.
+
+Remaining:
+- [ ] Add real cross-day resume/handoff drills with archived task facts.

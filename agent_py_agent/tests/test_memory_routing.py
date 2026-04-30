@@ -79,6 +79,31 @@ last_verified_at: 2026-04-30
     assert any("别名" in reason for reason in hits[0].reasons)
 
 
+def test_markdown_routes_split_common_human_list_separators(tmp_path):
+    index_path = tmp_path / "routes.md"
+    index_path.write_text(
+        """## memory.human-list
+topic: 人工索引
+trigger_keywords: 英文逗号, 中文逗号，英文分号; 中文分号；竖线|最后一个
+aliases: alpha|beta，gamma
+authority_path: references/memory/human-list.md
+""",
+        encoding="utf-8",
+    )
+
+    routes = load_memory_routes(index_path)
+
+    assert routes[0].trigger_keywords == [
+        "英文逗号",
+        "中文逗号",
+        "英文分号",
+        "中文分号",
+        "竖线",
+        "最后一个",
+    ]
+    assert routes[0].aliases == ["alpha", "beta", "gamma"]
+
+
 def test_match_routes_honors_limit_and_priority():
     routes = [
         MemoryRoute(

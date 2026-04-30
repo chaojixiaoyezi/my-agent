@@ -5,6 +5,9 @@ import tempfile
 from datetime import date
 from pathlib import Path
 
+import pytest
+
+import agent_py_agent.agent.memory_archive.storage as archive_storage
 from agent_py_agent.agent.memory_archive import (
     CompressionSnapshot,
     RawMemoryEvent,
@@ -106,6 +109,17 @@ def test_append_raw_event_writes_archive_fields():
         assert records[0]["speaker"] == "user"
         assert records[0]["tool_success"] is None
         assert records[0]["content_hash"] == "sha256:demo"
+
+
+def test_append_raw_event_readback_failure_is_reported(monkeypatch, tmp_path):
+    def append_incomplete_record(path: Path, payload: dict, **kwargs) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"event_id": payload["event_id"]}, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(archive_storage, "append_jsonl", append_incomplete_record)
+
+    with pytest.raises(archive_storage.MemoryArchiveError, match="readback payload mismatch"):
+        archive_storage.append_raw_event(tmp_path, _demo_raw_event())
 
 
 def test_retention_seven_days_deletes_old_hook_files_only():

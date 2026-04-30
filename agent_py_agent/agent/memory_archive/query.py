@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """LLM: query helpers for memory raw archive, hook snapshots, and resume evidence.
 
-给人看的解释：
+新手说明:
 这个文件只做“找线索”和“整理恢复依据”。
 命令怎么打印放在 `memory_archive_commands.py`，这样查询逻辑可以单独测试，也不会把 CLI 文件堆大。
 """
@@ -27,8 +27,16 @@ def collect_archive_records(
 ) -> list[dict[str, Any]]:
     """LLM: load and normalize archive JSONL records from selected layers.
 
-    大白话：raw 和 hook 的字段不一样。
+    新手说明:
+    raw 和 hook 的字段不一样。
     这里统一成同一种“可搜索卡片”，后面的 list/search/resume 就不用关心原始格式差异。
+
+    参数说明:
+    `root` 是工作区根目录；`layer` 是 `raw`、`hook` 或 `all`；
+    `date_key` 是指定日期字符串，例如 `2026-04-30`；`limit` 是返回上限，0 表示不截断。
+
+    返回说明:
+    返回按时间倒序排列的标准化归档记录列表。
     """
 
     records: list[dict[str, Any]] = []
@@ -41,8 +49,15 @@ def collect_archive_records(
 def archive_filters_from_args(args) -> dict[str, str]:
     """LLM: extract exact-match archive filters from argparse args.
 
-    大白话：只把用户真的传了的字段放进过滤器。
+    新手说明:
+    只把用户真的传了的字段放进过滤器。
     空字符串不参与过滤，避免用户没填某个字段时误把所有记录过滤掉。
+
+    参数说明:
+    `args` 是 argparse 参数对象，可能带 session_id、request_id、run_id 等字段。
+
+    返回说明:
+    返回需要精确匹配的字段和值。
     """
 
     fields = [
@@ -74,8 +89,16 @@ def filter_archive_records(
 ) -> list[dict[str, Any]]:
     """LLM: apply keyword, exact-field, and time-window filters to normalized records.
 
-    大白话：先按字段精准过滤，再按时间窗口过滤，最后按关键词在关键字段里搜。
+    新手说明:
+    先按字段精准过滤，再按时间窗口过滤，最后按关键词在关键字段里搜。
     这样 `--run-id xxx` 这类精确恢复不会被普通关键词噪声干扰。
+
+    参数说明:
+    `records` 是标准化归档记录；`query` 是关键词；`filters` 是精确字段过滤；
+    `since` 和 `until` 是可选时间边界。
+
+    返回说明:
+    返回匹配到的记录列表，顺序沿用输入顺序。
     """
 
     query_text = query.strip().lower()
@@ -99,8 +122,15 @@ def filter_archive_records(
 def resume_local_query(args, archive_matches: list[dict[str, Any]]) -> str:
     """LLM: choose the LocalStore query used by memory-resume.
 
-    大白话：用户明确给关键词就搜关键词；没给关键词但给了 run_id/request_id，就搜这个 ID。
+    新手说明:
+    用户明确给关键词就搜关键词；没给关键词但给了 run_id/request_id，就搜这个 ID。
     如果 archive 已经命中了 run_id，也用 run_id 去 LocalStore 里找权威任务记录。
+
+    参数说明:
+    `args` 是 CLI 或自动恢复构造的参数对象；`archive_matches` 是已命中的归档线索。
+
+    返回说明:
+    返回 LocalStore 搜索关键词；没有可用线索时返回空字符串。
     """
 
     for value in (args.query, args.run_id, args.request_id, args.session_id, args.task_id):
@@ -118,8 +148,15 @@ def resume_local_query(args, archive_matches: list[dict[str, Any]]) -> str:
 def local_hit_payload(hit) -> dict[str, Any]:
     """LLM: serialize a LocalStore search hit for resume output.
 
-    大白话：恢复命令只需要来源、标题、正文预览、metadata 和路径。
+    新手说明:
+    恢复命令只需要来源、标题、正文预览、metadata 和路径。
     完整正文仍然留在 LocalStore 文件里，避免命令输出过大。
+
+    参数说明:
+    `hit` 是 LocalStore 返回的搜索命中对象。
+
+    返回说明:
+    返回 JSON 友好的命中字典。
     """
 
     return {
@@ -138,8 +175,15 @@ def local_hit_payload(hit) -> dict[str, Any]:
 def collect_resume_task_ids(args, archive_matches: list[dict[str, Any]], local_hits: list[dict[str, Any]]) -> list[str]:
     """LLM: derive candidate subagent run IDs from filters, archive records, and LocalStore hits.
 
-    大白话：恢复任务时最重要的是找到任务目录。
+    新手说明:
+    恢复任务时最重要的是找到任务目录。
     这里尽量从 run_id、task_id、LocalStore 的 subagent source_id 里提取 `subagent-*`。
+
+    参数说明:
+    `args` 是恢复参数；`archive_matches` 是归档线索；`local_hits` 是 LocalStore 命中字典。
+
+    返回说明:
+    返回去重后的候选 subagent run id 列表。
     """
 
     ids: list[str] = []
@@ -162,8 +206,15 @@ def collect_resume_task_ids(args, archive_matches: list[dict[str, Any]], local_h
 def collect_task_payloads(agent, task_ids: list[str], *, limit: int) -> list[dict[str, Any]]:
     """LLM: load task fact-source paths for candidate subagent IDs.
 
-    大白话：这里读的是任务目录事实源。
+    新手说明:
+    这里读的是任务目录事实源。
     archive 只能提示“可能相关”，真正判断完成没完成，要回到 STATUS、WORK_LOG、HANDOFF、TESTS 这些文件。
+
+    参数说明:
+    `agent` 是当前 agent 对象；`task_ids` 是候选 subagent run id；`limit` 控制最多读取几个任务。
+
+    返回说明:
+    返回任务事实源摘要列表；任务不存在时返回带 `exists=False` 的记录。
     """
 
     payloads: list[dict[str, Any]] = []
@@ -202,8 +253,15 @@ def build_resume_guidance(
 ) -> dict[str, Any]:
     """LLM: summarize recovery clues into next reads and safe next actions.
 
-    大白话：恢复命令不能直接替用户下结论。
+    新手说明:
+    恢复命令不能直接替用户下结论。
     它应该告诉你“找到了哪些线索、先读哪些权威文件、下一步怎么核对”。
+
+    参数说明:
+    `archive_matches`、`local_hits`、`task_payloads` 分别是归档线索、LocalStore 线索和任务事实源。
+
+    返回说明:
+    返回恢复指导字典，包含数量摘要、推荐阅读路径和下一步动作。
     """
 
     recommended_reads: list[str] = []
@@ -233,8 +291,15 @@ def build_resume_guidance(
 def strip_sort_keys(payload: Any) -> Any:
     """LLM: remove internal sort keys from JSON output recursively.
 
-    大白话：`created_at_sort` 只是命令内部排序用的数字。
+    新手说明:
+    `created_at_sort` 只是命令内部排序用的数字。
     输出给用户时去掉它，避免用户误以为这是正式业务字段。
+
+    参数说明:
+    `payload` 可以是 dict、list 或普通值。
+
+    返回说明:
+    返回递归移除 `created_at_sort` 后的新对象。
     """
 
     if isinstance(payload, list):
@@ -247,8 +312,15 @@ def strip_sort_keys(payload: Any) -> Any:
 def _archive_files(root: Path, *, layer: str, date_key: str | None) -> list[tuple[str, Path]]:
     """LLM: return existing archive files for raw/hook layers in newest-first order.
 
-    大白话：如果指定日期，就只看那天的文件；没指定日期，就看最近若干个 JSONL 文件。
+    新手说明:
+    如果指定日期，就只看那天的文件；没指定日期，就看最近若干个 JSONL 文件。
     这样不会为了一个 list/search 命令把多年归档一次性翻完。
+
+    参数说明:
+    `root` 是工作区根目录；`layer` 是 `raw`、`hook` 或 `all`；`date_key` 是可选日期。
+
+    返回说明:
+    返回 `(layer, path)` 元组列表，按最近优先排列。
     """
 
     layers = ["raw", "hook"] if layer == "all" else [layer]
@@ -273,8 +345,15 @@ def _archive_files(root: Path, *, layer: str, date_key: str | None) -> list[tupl
 def _archive_dir(root: Path, layer: str) -> Path:
     """LLM: resolve the directory for one archive layer through public path helpers.
 
-    大白话：目录规则不要散落在 CLI 里。
+    新手说明:
+    目录规则不要散落在 CLI 里。
     hook 用 `snapshot_path_for`，raw 用 `raw_event_path_for`，以后路径变了这里也能跟着变。
+
+    参数说明:
+    `root` 是工作区根目录；`layer` 是 `hook` 或 `raw`。
+
+    返回说明:
+    返回对应归档目录路径。
     """
 
     return snapshot_path_for(root).parent if layer == "hook" else raw_event_path_for(root).parent
@@ -283,8 +362,15 @@ def _archive_dir(root: Path, layer: str) -> Path:
 def _read_archive_file(layer: str, path: Path) -> list[dict[str, Any]]:
     """LLM: parse one archive JSONL file and skip malformed lines without crashing.
 
-    大白话：归档是排障兜底层。
+    新手说明:
+    归档是排障兜底层。
     即使里面有一行坏 JSON，命令也应该继续读其他行，并把坏行标出来，而不是直接中断。
+
+    参数说明:
+    `layer` 是当前层名；`path` 是 JSONL 文件路径。
+
+    返回说明:
+    返回标准化记录列表；坏行会变成 `archive_error` 记录。
     """
 
     records: list[dict[str, Any]] = []
@@ -310,8 +396,15 @@ def _read_archive_file(layer: str, path: Path) -> list[dict[str, Any]]:
 def _normalize_archive_record(layer: str, path: Path, line_no: int, payload: dict[str, Any]) -> dict[str, Any]:
     """LLM: map raw event or hook snapshot payloads to a shared search/display shape.
 
-    大白话：raw 事件有 event_id、speaker、tool_name；hook 快照有 snapshot_id、user_intents、next_actions。
+    新手说明:
+    raw 事件有 event_id、speaker、tool_name；hook 快照有 snapshot_id、user_intents、next_actions。
     统一后，搜索命令就能按同一套字段工作。
+
+    参数说明:
+    `layer` 是 raw/hook；`path` 是来源文件；`line_no` 是行号；`payload` 是原始 JSON 对象。
+
+    返回说明:
+    返回标准化归档记录。
     """
 
     derived = _derived_archive_fields(payload)
@@ -350,8 +443,15 @@ def _normalize_archive_record(layer: str, path: Path, line_no: int, payload: dic
 def _derived_archive_fields(payload: dict[str, Any]) -> dict[str, Any]:
     """LLM: derive request/run/task/status/source fields from hook internals.
 
-    大白话：hook snapshot 没有顶层 request_id/run_id。
+    新手说明:
+    hook snapshot 没有顶层 request_id/run_id。
     这些字段通常藏在 `turn_range` 或 `dispatch_events` 里，恢复搜索时要提出来，否则 `--run-id` 会漏掉 hook。
+
+    参数说明:
+    `payload` 是 hook/raw 原始记录。
+
+    返回说明:
+    返回推导出的 request/run/task/status/source 字段字典。
     """
 
     fields: dict[str, Any] = {}
@@ -374,8 +474,15 @@ def _derived_archive_fields(payload: dict[str, Any]) -> dict[str, Any]:
 def _archive_preview(payload: dict[str, Any]) -> str:
     """LLM: derive a compact human-readable preview from raw or hook payloads.
 
-    大白话：不同类型的归档正文位置不一样。
+    新手说明:
+    不同类型的归档正文位置不一样。
     这里优先拿 content_preview；如果没有，就从意图、动作、决策、下一步里拼一个短摘要。
+
+    参数说明:
+    `payload` 是原始归档记录。
+
+    返回说明:
+    返回最多 500 字符的预览文本。
     """
 
     preview = str(payload.get("content_preview", "") or "").strip()
@@ -392,8 +499,15 @@ def _archive_preview(payload: dict[str, Any]) -> str:
 def _archive_error_record(layer: str, path: Path, *, line_no: int, message: str) -> dict[str, Any]:
     """LLM: represent malformed archive lines as searchable diagnostic records.
 
-    大白话：坏行也算一种线索。
+    新手说明:
+    坏行也算一种线索。
     用户至少应该知道哪个文件第几行坏了，而不是看到命令静悄悄漏掉内容。
+
+    参数说明:
+    `layer` 是 raw/hook；`path` 是出错文件；`line_no` 是行号；`message` 是错误说明。
+
+    返回说明:
+    返回一条标准化错误记录。
     """
 
     return {
@@ -429,8 +543,15 @@ def _archive_error_record(layer: str, path: Path, *, line_no: int, message: str)
 def _archive_search_text(record: dict[str, Any]) -> str:
     """LLM: build the searchable text blob for one normalized archive record.
 
-    大白话：关键词不只搜正文预览，也搜 ID、工具名、状态、任务引用和原始 payload。
+    新手说明:
+    关键词不只搜正文预览，也搜 ID、工具名、状态、任务引用和原始 payload。
     这样用户记得某个 request_id 时也能找回来。
+
+    参数说明:
+    `record` 是标准化归档记录。
+
+    返回说明:
+    返回用于小写关键词匹配的大文本。
     """
 
     parts = [
@@ -456,8 +577,15 @@ def _archive_search_text(record: dict[str, Any]) -> str:
 def _append_run_id(items: list[str], value: object) -> None:
     """LLM: extract and append one subagent run ID from a loose text value.
 
-    大白话：有些地方存的是完整句子，比如“请看 subagent-xxx”。
+    新手说明:
+    有些地方存的是完整句子，比如“请看 subagent-xxx”。
     这个函数把里面真正的 `subagent-*` ID 挖出来，避免恢复时找不到任务目录。
+
+    参数说明:
+    `items` 是要追加的 ID 列表；`value` 是可能包含 subagent ID 的任意值。
+
+    返回说明:
+    不返回值；可能原地追加一个 ID。
     """
 
     text = str(value or "").strip()
@@ -471,8 +599,15 @@ def _append_run_id(items: list[str], value: object) -> None:
 def _created_at_sort(value: str, *, fallback: float) -> float:
     """LLM: convert an ISO-like timestamp to a sortable epoch value.
 
-    大白话：归档记录要按时间倒序显示。
+    新手说明:
+    归档记录要按时间倒序显示。
     如果时间字符串坏了，就用文件修改时间这类 fallback，保证命令还能继续跑。
+
+    参数说明:
+    `value` 是 ISO-like 时间字符串；`fallback` 是解析失败时使用的时间戳。
+
+    返回说明:
+    返回 epoch 秒数。
     """
 
     text = str(value or "").strip()
@@ -495,8 +630,15 @@ def _created_at_sort(value: str, *, fallback: float) -> float:
 def _list_value(value: object) -> list[object]:
     """LLM: normalize a scalar-or-list payload field into a list.
 
-    大白话：JSON 里有些字段可能是单个字符串，也可能已经是列表。
+    新手说明:
+    JSON 里有些字段可能是单个字符串，也可能已经是列表。
     这里统一成列表，后面搜索和展示就不用到处判断类型。
+
+    参数说明:
+    `value` 是待归一化字段。
+
+    返回说明:
+    返回列表；空值返回空列表。
     """
 
     if isinstance(value, list):

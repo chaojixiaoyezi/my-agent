@@ -13,20 +13,27 @@ agent_py_agent/agent/
 
 agent_py_agent/cli/
 |-- memory_commands.py                # memory-route / memory-doctor 等可见诊断命令
-`-- memory_archive_commands.py        # memory archive 相关命令
+`-- memory_archive_commands.py        # memory-archive-list/search/resume 命令
 ```
 
 ## 核心文件
 
 - `memory_store/jsonl.py`：读写长期记忆 JSONL，是最朴素的事实落盘层；LocalStore 只是索引，不替代 JSONL。
 - `settings/memory.py`：解析配置，处理非法值回退和 warning；会原地更新 AgentConfig-like 对象。
-- `memory_routing/loader.py`：读取 route index。
+- `memory_routing/loader.py`：读取 route index；JSON 面向程序稳定性，Markdown 面向人工维护，并兼容常见中英文列表分隔符。
 - `memory_routing/models.py`：定义 route、match、path resolution、read receipt 等票据结构。
 - `memory_routing/matcher.py`：根据用户输入匹配可能需要读取的长期规则，并区分 required/candidate path。
 - `memory_routing/context.py`：把命中的规则变成运行时可注入的上下文片段。
-- `memory_archive/storage.py`：保存 raw archive 和 hook snapshot。
-- `memory_archive/runtime.py`：把 run turn 的元数据写入归档。
+- `memory_archive/models.py`：定义 `CompressionSnapshot` 和 `RawMemoryEvent` 两类归档数据形状。
+- `memory_archive/storage.py`：保存 raw archive 和 hook snapshot；两类写入都做 readback 校验。
+- `memory_archive/runtime.py`：把 run turn 的用户、助手、工具元数据写成 raw archive 事件。
+- `memory_archive/snapshots.py`：在 run/gateway/subagent 完成点写轻量恢复 snapshot。
+- `memory_archive/query.py`：把 raw/hook JSONL 读成统一可搜索记录，并整理 resume 线索。
+- `memory_archive/resume_brief.py`：把归档、LocalStore、任务事实源压成恢复简报。
+- `memory_archive/resume_context.py`：在“继续/恢复”类提示里按配置构造自动注入的恢复上下文。
+- `memory_archive/tokens.py`：为归档预算提供保守 token 估算。
 - `cli/memory_commands.py`：给用户和开发者看 route/doctor 结果。
+- `cli/memory_archive_commands.py`：给用户查看归档列表、搜索归档和生成恢复简报。
 
 ## 数据流
 
@@ -35,7 +42,9 @@ agent_py_agent/cli/
 3. 当新任务需要规则时，memory routing 根据 query 匹配 route index。
 4. 匹配到的 authority path 会被安全读取成上下文片段。
 5. 长任务或压缩前，archive 写 raw event / snapshot，方便后续恢复和审计。
-6. doctor 命令检查配置、route index、hook/raw 目录和潜在 warning。
+6. raw event 和 hook snapshot 写完后都会读回校验，确保恢复线索真实落盘。
+7. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore 和任务事实源生成恢复块。
+8. doctor 命令检查配置、route index、hook/raw 目录和潜在 warning。
 
 ## 给初学编程学生的学习路径
 
@@ -44,9 +53,11 @@ agent_py_agent/cli/
 3. 再看 `agent_py_agent/agent/memory_store/jsonl.py`，理解 JSONL 事实流水和 LocalStore 索引的区别。
 4. 再看 `memory_routing/models.py`，认识 route、match、required/candidate path 和 read receipt 的数据形状。
 5. 再看 `memory_routing/matcher.py`，理解关键词和别名如何命中规则。
-6. 再看 `memory_archive/models.py` 和 `storage.py`，理解归档保存什么。
-7. 最后看 `agent_py_agent/tests/test_memory_*.py`，用测试反推每一层必须保证的行为。
+6. 再看 `memory_routing/loader.py` 和 `context.py`，理解人工索引怎么读入，authority 文件怎么安全注入。
+7. 再看 `memory_archive/models.py`、`storage.py`、`runtime.py` 和 `snapshots.py`，理解归档保存什么、怎么写入、怎么验收。
+8. 再看 `memory_archive/query.py`、`resume_brief.py` 和 `resume_context.py`，理解“继续任务”时怎么找回线索。
+9. 最后看 `agent_py_agent/tests/test_memory_*.py`，用测试反推每一层必须保证的行为。
 
 ## 当前第一版索引 / 待补齐
 
-本页先讲主结构和阅读路径。后续需要补真实 route index 样例、raw archive 样例、doctor 输出样例、LocalStore 命中样例和恢复链路图。
+本页先讲主结构和阅读路径。后续需要补真实 route index 样例、raw archive 样例、doctor 输出样例、LocalStore 命中样例、跨天恢复 fixture 和恢复链路图。
