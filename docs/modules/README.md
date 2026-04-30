@@ -30,6 +30,29 @@ docs/modules/<module>/
 - 发现新的用户痛点、设计取舍或失败样本时，更新 `01-discussion.md` 或 `03-purpose.md`。
 - 新增核心文件、数据流变化或学习路径变化时，更新 `04-structure.md`。
 
+## 代码、文档、注释同步门
+
+后续改功能时，不能只改代码。最小同步要求：
+
+- 改实现代码时，同一批 diff 必须更新对应模块的 `02-progress.md`，说明做了什么、解决什么、跑了什么测试、还有什么没跑。
+- 改核心文件、数据流、入口、任务边界或新增/删除文件时，同一批 diff 必须更新对应模块的 `04-structure.md`。
+- 改 class / def 行为、新增 class / def、调整重要参数时，同一个 Python 文件里必须同步更新 docstring 或注释，保留 `LLM:`、`新手说明:`、`参数说明:`、`返回说明:` 这类说明。
+- 如果只是修 typo 或纯测试数据，可以在提交说明里写明为什么没有代码文档同步；默认仍先跑检查脚本。
+
+提交前运行：
+
+```powershell
+python scripts\check_doc_sync.py
+```
+
+如果只想检查已暂存内容：
+
+```powershell
+python scripts\check_doc_sync.py --staged
+```
+
+当前脚本先覆盖 `log-analysis` 和 `subagent` 两个活跃模块。新模块进入开发时，要先建四件套，再把模块路径加入 `scripts/check_doc_sync.py` 的 `MODULE_RULES`。
+
 ## 测试记录怎么写
 
 `02-progress.md` 必须保留这六个小节：

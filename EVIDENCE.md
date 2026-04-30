@@ -136,3 +136,19 @@
 - Full verification:
   - `python -m pytest` -> `236 passed`.
   - `git diff --check` -> passed.
+
+## 2026-04-30 / Code Docs Comment Sync Gate Evidence
+
+- Added `scripts/check_doc_sync.py`:
+  - Checks current git diff or staged diff.
+  - Covered modules in the first slice: `log-analysis` and `subagent`.
+  - Requires matching `docs/modules/<module>/02-progress.md` and `04-structure.md` when covered module code changes.
+  - Requires same-file comment/doc additions when covered implementation Python code adds implementation lines.
+- Added `agent_py_agent/tests/test_doc_sync.py` for pure evaluation cases.
+- Updated docs and checklist:
+  - `docs/modules/README.md` documents the sync gate.
+  - `TEST_CHECKLIST.md` includes `python scripts/check_doc_sync.py`.
+- Verification:
+  - `python -m pytest agent_py_agent\tests\test_doc_sync.py` -> `3 passed`.
+  - `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
+  - `git diff --check` -> passed.

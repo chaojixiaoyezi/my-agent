@@ -236,3 +236,23 @@ Remaining:
 - [ ] Replace placeholder `evidence_read` with a bounded, audited evidence-ref reader before real analyst execution.
 - [ ] Persist reviewer decisions and parent acceptance reports for completed LOG analyst/reviewer runs.
 - [ ] Continue moving module knowledge from root docs into `docs/modules/<module>/` during real feature work.
+
+## 2026-04-30 / Code Docs Comment Sync Gate Acceptance
+
+Status:
+- [x] First code/docs/comment sync gate landed.
+
+Problems solved:
+- [x] Known module implementation changes can be checked before commit for matching module progress and structure docs.
+- [x] Same-file comment/doc updates are required when implementation code is added in covered modules.
+- [x] The module docs convention now names the synchronization rule instead of relying on memory.
+- [x] The minimum test checklist now includes `python scripts/check_doc_sync.py`.
+
+Accepted evidence:
+- [x] Focused tests passed: `python -m pytest agent_py_agent\tests\test_doc_sync.py` -> `3 passed`.
+- [x] Manual gate passed: `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
+- [x] Whitespace check passed: `git diff --check`.
+
+Remaining:
+- [ ] Add more module rules as `memory`, `gateway`, `live-lab`, and other modules get their four-piece docs.
+- [ ] Consider wiring the script into a local pre-commit hook or CI step once the module map is broader.
