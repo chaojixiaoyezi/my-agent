@@ -26,3 +26,14 @@
 - 全量测试：`python -m pytest`，结果 `172 passed`。
 - 手工命令：`python -m agent_py_agent logs status --json`，结果显示 `enabled=false`、`state=disabled`、`heavy_dependencies_loaded=false`。
 - 手工闭环：`python -m agent_py_agent logs ingest validation/security_fixtures/security_alert_v1.jsonl --root <temp> --source-id cli-fixture --json` 后，`python -m agent_py_agent logs query --root <temp> --start-time 2026-04-30T00:00:00Z --end-time 2026-05-01T00:00:00Z --limit 5 --json` 返回 `row_count=3`。
+
+## 2026-04-30 / Subagent Workflow Phase 1 验收证据
+
+- 三路 worker：
+  - 配置与开关：`agent_py_agent/agent/settings/config.py`、`agent_py_agent/config/agent_config.yaml`、`test_subagent_workflow_config.py`。
+  - 模板 store：`agent_py_agent/agent/subagent_workflows/`、`test_subagent_workflow_templates.py`、`pyproject.toml` package data。
+  - QualityContract / Context Pack：`agent_py_agent/agent/subagents/*`、`test_subagent_quality_contract.py`。
+- 专项组合测试：`python -m pytest agent_py_agent\tests\test_subagent_workflow_config.py agent_py_agent\tests\test_subagent_workflow_templates.py agent_py_agent\tests\test_subagent_quality_contract.py`，结果 `14 passed`。
+- 父会话相关回归：`python -m pytest agent_py_agent\tests\test_packaging.py agent_py_agent\tests\test_agent.py agent_py_agent\tests\test_tools.py`，结果 `63 passed`。
+- 全量测试：`python -m pytest`，结果 `186 passed`。
+- 格式检查：`git diff --check` 通过。

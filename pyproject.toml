@@ -23,4 +23,5 @@ include = ["agent_py_agent*"]
 agent_py_agent = [
   "config/*.yaml",
   "prompts/*.md",
+  "agent/subagent_workflows/builtin/*.json",
 ]

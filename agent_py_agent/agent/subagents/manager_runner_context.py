@@ -127,6 +127,9 @@ class SubAgentRunnerContextMixin:
             grants=grants,
             acceptance_checks=task.acceptance_checks,
             evidence=[asdict(item) for item in task.evidence],
+            quality_contract=task.quality_contract,
+            context_manifest=task.context_manifest,
+            context_packs=task.context_packs,
             write_boundary={
                 "task_dir": task.task_dir,
                 "allowed_write_roots": task.allowed_write_roots,
@@ -178,4 +181,3 @@ class SubAgentRunnerContextMixin:
         )
         self._index_execution_context(context)
         return context
-

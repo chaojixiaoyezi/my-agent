@@ -64,6 +64,7 @@
 
 - [ ] 创建 run 后有标准目录和关键文件
 - [ ] `task.json` / `run.json` 可读
+- [ ] `QualityContract`、`ContextManifest` 和 `context_packs` 能写入 `task.json`，旧 task 缺字段时仍能读取
 - [ ] 高质量/主观交付任务必须有 `QualityContract` 或等价验收说明，不能只写动作目标
 - [ ] 质量契约写清 `user_visible_goal`、对标样本、坏版条件、禁止交付条件、必须检查项和最终裁决人
 - [ ] 子代理角色明确为 producer / critic / repairer / reviewer 之一，不能默认让一个子代理既生产又自证质量
@@ -96,6 +97,7 @@
 - [ ] runner prompt 明确子代理不能定义完成标准，最终只能提交待验收材料
 - [ ] runner prompt 要求不确定性进入 risks / needs_parent_decision，不能吞掉模糊边界
 - [ ] 如果有 context manifest，必须记录本轮给了哪些上下文包、必读文件和质量标准
+- [ ] `execution_context.json` 和 `EXECUTION_CONTEXT.md` 包含 `QualityContract`、`ContextManifest`、context packs 和 parent final gate 规则
 - [ ] 未授权工具调用会失败
 - [ ] `[SUBAGENT_RESULT]` 缺失或 JSON 错误会被记录
 - [ ] `[SUBAGENT_RESULT]` 前文提到协议标记或 JSON 带 Markdown fence 时仍能解析最终结果块
@@ -158,6 +160,15 @@
 - [ ] `my-agent chat --gateway` 会把普通聊天消息投递给后台 gateway，并且 `/status` 会显示 gateway 队列状态
 - [ ] 无子命令 `my-agent` 会自动启动 gateway 并进入 gateway chat；退出 chat 不会关闭 gateway
 - [ ] `my-agent adapter file --help` 可用，文件 adapter 能把 inbox JSON 转成 gateway 请求并把响应写到 outbox
+
+## 修改 subagent workflow 模板时
+
+- [ ] `subagent_workflow_mode` 支持 `auto/manual/off`，非法值会回退并记录 warning
+- [ ] `subagent_builtin_workflows` 和 `subagent_user_workflow_dirs` 配置能被安全解析
+- [ ] 内置模板能被加载，用户模板同 id 能覆盖内置模板
+- [ ] 每个 workflow 模板必须有 `solves` 字段，说明解决什么问题
+- [ ] 坏模板必须生成 validation issue，不能静默进入模板库
+- [ ] 新增模板资源后，`pyproject.toml` package data 保证安装包能带上模板文件
 
 ## 修改文档时
 

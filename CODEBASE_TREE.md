@@ -84,6 +84,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- security/                          # 未来权限、输入净化、可信度、安全默认策略目录
 |   |   |-- skills.py                          # Skill Card 兼容入口，真实实现已拆到 capability/skills.py
 |   |   |-- subagent.py                        # 子代理兼容入口，真实实现已拆到 subagents/
+|   |   |-- subagent_workflows/                # 子代理 workflow 模板模型、加载器和内置模板资源
 |   |   |-- subagents/                         # 子代理模型、报告、manager mixin、验收、dispatch、runner、索引等
 |   |   |-- tools.py                           # 工具兼容入口，真实实现已拆到 tooling/
 |   |   |-- tooling/                           # 工具模型、文件工具、HTTP 工具、解析器、注册表、写边界
@@ -121,6 +122,9 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |       |-- test_memory_routing_context.py     # runtime rule routing context 安全读取和 prompt 片段测试
 |       |-- test_memory_runtime.py             # SimpleAgent.run 接入 routed memory 与 raw archive 的回归测试
 |       |-- test_packaging.py                  # console script、workspace_root 等安装与配置行为测试
+|       |-- test_subagent_quality_contract.py  # 子代理 QualityContract / ContextManifest 落盘和执行上下文测试
+|       |-- test_subagent_workflow_config.py   # subagent workflow auto/manual/off 配置规范化测试
+|       |-- test_subagent_workflow_templates.py # workflow 模板加载、覆盖和校验测试
 |       `-- test_tools.py                      # 工具目录、工具调用和工具能力测试
 |-- .gitattributes                             # 跨平台文本编码和换行约定
 |-- .gitignore                                 # Git 忽略规则
@@ -453,7 +457,7 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - `python3 -m agent_py_agent daemon` 会读取主配置里的 `daemon_*` 配置，作为配置驱动的前台常驻入口；`daemon_max_runners: "auto"` 当前映射成保守值 1。
 - `python3 -m agent_py_agent gateway start/status/stop/restart/logs` 会管理第一版后台 gateway 进程。
 - `python3 -m agent_py_agent gateway ask/result` 会通过 `data/gateway/requests` 和 `data/gateway/responses` 与常驻 gateway 交换消息。
-- `build_execution_context()` 会把当前 run 的授权、能力卡、验收要求和写入边界压成最小上下文。
+- `build_execution_context()` 会把当前 run 的授权、能力卡、验收要求、质量契约、context manifest、context packs 和写入边界压成最小上下文。
 - `write_execution_context()` 会写出 `execution_context.json` 和 `EXECUTION_CONTEXT.md`。
 - `python3 -m agent_py_agent subagent-context <run_id>` 可以生成单个子代理执行上下文包。
 - `record_runner_result()` 会把 runner 输出写回 `output.json`、`RUNNER_RESULT.md` 和任务日志。
@@ -465,12 +469,21 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - `python3 -m agent_py_agent subagent-run <run_id>` 默认 dry-run；显式 `--execute` 才会调用模型。
 - `SimpleAgent.run(..., allowed_tools=[...])` 会限制 prompt 里的工具目录和实际工具调用。
 
+### `agent_py_agent/agent/subagent_workflows/`
+
+这是第一版 subagent workflow 模板库骨架：
+- `models.py` 定义 `WorkflowTemplate`、`WorkflowPhase` 和 `WorkflowLoadIssue`。
+- `store.py` 负责加载内置 JSON 模板、加载用户 JSON 模板、校验必填字段并让用户模板覆盖同 id 内置模板。
+- `builtin/*.json` 当前包含 `single_worker_verified`、`code_feature_split` 和 `producer_critic_repair`。
+- 每个模板必须写 `solves`，说明它解决哪些用户痛点或系统风险。
+
 ### `agent_py_agent/config/agent_config.yaml`
 
 这是给人改的配置文件，不是给代码看的结构定义。
 
 你后续调工具策略时，优先会改这里：
 - 用户层任务规模：`task_max_subagents`、`task_max_grandchildren`，0 表示不设硬上限。
+- Subagent workflow：`subagent_workflow_mode` 支持 `auto/manual/off`，`subagent_builtin_workflows` 控制是否加载内置模板，`subagent_user_workflow_dirs` 指向用户可覆盖模板目录。
 - 未来 gateway 自适应策略：`scheduler_mode`、`runner_concurrency`、`runner_start_rate`、`runner_timeout_seconds` 和 `runner_failure_policy`，默认都是 `auto`。
 - 第一版 gateway 控制面：`gateway_workspace`、`gateway_heartbeat_interval`、`gateway_stale_seconds`、`gateway_stop_timeout`、`gateway_request_timeout` 和 `gateway_request_poll_interval`。
 - 当前前台 daemon 高级参数：`daemon_*`，用于在 gateway 完整实现前控制 watch 调度。
@@ -478,6 +491,28 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - 工具详情注入数量
 - 是否打开向量检索开关
 - 是否打开自学习候选草稿生成
+
+### `agent_py_agent/tests/test_subagent_workflow_config.py`
+
+这个测试文件重点验证：
+- workflow 开关默认是 `auto`。
+- `manual/off` 可以被配置。
+- 非法 mode、非法用户模板目录和非法 review rounds 会回退默认值并生成 warning receipt。
+
+### `agent_py_agent/tests/test_subagent_workflow_templates.py`
+
+这个测试文件重点验证：
+- 内置模板能加载。
+- 用户模板同 id 能覆盖内置模板。
+- 坏模板会生成 validation issue。
+- 每个内置模板都有 `solves` 字段。
+
+### `agent_py_agent/tests/test_subagent_quality_contract.py`
+
+这个测试文件重点验证：
+- `create_run()` 能把 `QualityContract`、`ContextManifest` 和 `context_packs` 落进 `task.json`。
+- 旧 `task.json` 缺少这些字段时仍能读取。
+- `execution_context.json` 和 `EXECUTION_CONTEXT.md` 会包含质量契约、context manifest 和“子代理不能自判完成”的规则。
 
 ### `agent_py_agent/config/capability_config.yaml`
 

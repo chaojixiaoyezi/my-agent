@@ -54,6 +54,11 @@ class AgentConfig:
     enable_subagents: bool = True
     max_subagents: int = 5
     subagent_workspace: str = "data/subagents"
+    subagent_workflow_mode: str = "auto"
+    subagent_builtin_workflows: bool = True
+    subagent_user_workflow_dirs: list[str] = field(default_factory=lambda: [".agent/workflows/user"])
+    subagent_workflow_review_rounds: int = 1
+    subagent_workflow_config_warnings: list[dict[str, Any]] = field(default_factory=list)
     task_max_subagents: int = 0
     task_max_grandchildren: int = 0
     scheduler_mode: str = "auto"
@@ -171,6 +176,7 @@ def load_config(config_path: str | Path) -> AgentConfig:
     clean = {key: value for key, value in raw.items() if key in allowed}
     config = AgentConfig(**clean)
     normalize_agent_memory_config(config)
+    normalize_subagent_workflow_config(config)
 
     # 优先从环境变量读取密钥。
     # 大白话解释：仓库里只留“去哪里拿 key”的说明，不再把真 key 写进代码仓库。
@@ -181,3 +187,94 @@ def load_config(config_path: str | Path) -> AgentConfig:
             config.api_key = env_value
 
     return config
+
+
+def normalize_subagent_workflow_config(config: AgentConfig) -> list[dict[str, Any]]:
+    """Normalize Subagent Workflow config values after YAML loading."""
+
+    warnings: list[dict[str, Any]] = []
+    defaults = AgentConfig()
+
+    raw_mode = config.subagent_workflow_mode
+    if isinstance(raw_mode, str) and raw_mode.strip().lower() in {"auto", "manual", "off"}:
+        config.subagent_workflow_mode = raw_mode.strip().lower()
+    else:
+        config.subagent_workflow_mode = defaults.subagent_workflow_mode
+        _add_subagent_workflow_warning(
+            warnings,
+            "subagent_workflow_mode",
+            raw_mode,
+            defaults.subagent_workflow_mode,
+            "expected one of ['auto', 'manual', 'off']",
+        )
+
+    raw_builtin = config.subagent_builtin_workflows
+    if isinstance(raw_builtin, bool):
+        config.subagent_builtin_workflows = raw_builtin
+    else:
+        config.subagent_builtin_workflows = defaults.subagent_builtin_workflows
+        _add_subagent_workflow_warning(
+            warnings,
+            "subagent_builtin_workflows",
+            raw_builtin,
+            defaults.subagent_builtin_workflows,
+            "expected a boolean value",
+        )
+
+    raw_dirs = config.subagent_user_workflow_dirs
+    if (
+        isinstance(raw_dirs, list)
+        and all(isinstance(item, str) and item.strip() for item in raw_dirs)
+    ):
+        config.subagent_user_workflow_dirs = [item.strip() for item in raw_dirs]
+    else:
+        config.subagent_user_workflow_dirs = list(defaults.subagent_user_workflow_dirs)
+        _add_subagent_workflow_warning(
+            warnings,
+            "subagent_user_workflow_dirs",
+            raw_dirs,
+            list(defaults.subagent_user_workflow_dirs),
+            "expected a list of non-empty strings",
+        )
+
+    raw_review_rounds = config.subagent_workflow_review_rounds
+    if isinstance(raw_review_rounds, bool):
+        review_rounds: int | None = None
+    elif isinstance(raw_review_rounds, int):
+        review_rounds = raw_review_rounds
+    elif isinstance(raw_review_rounds, str) and raw_review_rounds.strip().isdigit():
+        review_rounds = int(raw_review_rounds.strip())
+    else:
+        review_rounds = None
+
+    if review_rounds is not None and 0 <= review_rounds <= 5:
+        config.subagent_workflow_review_rounds = review_rounds
+    else:
+        config.subagent_workflow_review_rounds = defaults.subagent_workflow_review_rounds
+        _add_subagent_workflow_warning(
+            warnings,
+            "subagent_workflow_review_rounds",
+            raw_review_rounds,
+            defaults.subagent_workflow_review_rounds,
+            "expected an integer between 0 and 5",
+        )
+
+    config.subagent_workflow_config_warnings = warnings
+    return warnings
+
+
+def _add_subagent_workflow_warning(
+    warnings: list[dict[str, Any]],
+    field_name: str,
+    raw_value: Any,
+    fallback_value: Any,
+    reason: str,
+) -> None:
+    warnings.append(
+        {
+            "field_name": field_name,
+            "raw_value": raw_value,
+            "fallback_value": fallback_value,
+            "reason": reason,
+        }
+    )
