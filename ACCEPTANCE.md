@@ -345,4 +345,26 @@ Accepted evidence:
 - [x] Full regression passed: `python -m pytest` -> `243 passed`.
 
 Remaining:
-- [ ] Add real cross-day resume/handoff drills with archived task facts.
+- [x] Add real cross-day resume/handoff drills with archived task facts.
+
+## 2026-04-30 / Memory Cross-Day Resume Handoff Acceptance
+
+Status:
+- [x] Cross-day memory resume fixture landed.
+- [x] Runtime auto-resume now has a cross-day handoff regression.
+- [x] Date-only `--until YYYY-MM-DD` now includes the whole day.
+
+Problems solved:
+- [x] Memory resume is no longer only proven in same-day happy-path fixtures.
+- [x] Archive clues, LocalStore task indexes, and subagent task fact sources are verified together across day boundaries.
+- [x] A user writing `--until 2026-04-30` no longer accidentally excludes records later on April 30, 2026.
+- [x] Auto recovery context proves it can inject a Recovery Brief that points back to `STATUS.md` and `HANDOFF.md`.
+
+Accepted evidence:
+- [x] Focused tests passed: `python -m pytest agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_memory_runtime.py` -> `14 passed`.
+- [x] Sync gate passed: `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
+- [x] Memory focused tests passed: `python -m pytest agent_py_agent\tests\test_memory_config.py agent_py_agent\tests\test_memory_routing.py agent_py_agent\tests\test_memory_routing_context.py agent_py_agent\tests\test_memory_runtime.py agent_py_agent\tests\test_memory_cli.py agent_py_agent\tests\test_memory_archive.py agent_py_agent\tests\test_memory_archive_runtime.py agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_local_store.py agent_py_agent\tests\test_doc_sync.py` -> `69 passed`.
+- [x] Full regression passed: `python -m pytest` -> `245 passed`.
+
+Remaining:
+- [ ] Add gateway request cross-day recovery and real parent/subagent runner recovery drills.

@@ -43,8 +43,29 @@ agent_py_agent/cli/
 4. 匹配到的 authority path 会被安全读取成上下文片段。
 5. 长任务或压缩前，archive 写 raw event / snapshot，方便后续恢复和审计。
 6. raw event 和 hook snapshot 写完后都会读回校验，确保恢复线索真实落盘。
-7. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore 和任务事实源生成恢复块。
+7. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore 和任务事实源生成恢复块；跨天时会同时扫描最近 raw/hook 文件。
 8. doctor 命令检查配置、route index、hook/raw 目录和潜在 warning。
+
+## 跨天恢复链路
+
+```text
+2026-04-29 raw event
+  -> 记录用户当时的任务意图、request_id、run_id、task_id
+
+2026-04-30 hook snapshot
+  -> 记录压缩/交接后的恢复锚点、next_actions、task_refs、content_paths
+
+LocalStore subagent_run
+  -> 保存可搜索的任务索引，不作为最终事实，只帮助找到 run_id
+
+subagents/<run_id>/
+  -> STATUS.md / WORK_LOG.md / HANDOFF.md / ACCEPTANCE.md / TEST_CHECKLIST.md 是最终恢复事实源
+
+memory-resume 或 run(auto resume)
+  -> 输出 Recovery Brief，把推荐阅读路径和下一步动作带回父会话
+```
+
+日期窗口说明：`--since YYYY-MM-DD` 从当天 00:00 开始；`--until YYYY-MM-DD` 包含当天全天。这样用户按自然日期查跨天交接时，不会漏掉当天白天的 hook snapshot。
 
 ## 给初学编程学生的学习路径
 
@@ -56,8 +77,9 @@ agent_py_agent/cli/
 6. 再看 `memory_routing/loader.py` 和 `context.py`，理解人工索引怎么读入，authority 文件怎么安全注入。
 7. 再看 `memory_archive/models.py`、`storage.py`、`runtime.py` 和 `snapshots.py`，理解归档保存什么、怎么写入、怎么验收。
 8. 再看 `memory_archive/query.py`、`resume_brief.py` 和 `resume_context.py`，理解“继续任务”时怎么找回线索。
-9. 最后看 `agent_py_agent/tests/test_memory_*.py`，用测试反推每一层必须保证的行为。
+9. 再看 `agent_py_agent/tests/test_memory_archive_cli.py::test_memory_resume_cross_day_handoff_uses_task_fact_sources` 和 `test_memory_runtime.py::test_auto_resume_context_recovers_cross_day_handoff_task`，理解跨天恢复如何从线索回到事实源。
+10. 最后看 `agent_py_agent/tests/test_memory_*.py`，用测试反推每一层必须保证的行为。
 
 ## 当前第一版索引 / 待补齐
 
-本页先讲主结构和阅读路径。后续需要补真实 route index 样例、raw archive 样例、doctor 输出样例、LocalStore 命中样例、跨天恢复 fixture 和恢复链路图。
+本页先讲主结构和阅读路径。后续需要补真实 route index 样例、raw archive 样例、doctor 输出样例、LocalStore 命中样例、gateway 跨天恢复 fixture 和 parent/subagent runner 完整恢复链路图。
