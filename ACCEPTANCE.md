@@ -157,3 +157,30 @@ Remaining:
 - [ ] Wire `plan_workflow_for_goal()` into real chat/gateway/spawn dispatch instead of keeping it as a dry-run planning helper.
 - [ ] Add richer log-analysis Live Lab fixtures beyond the minimal SecurityAlertV1 replay.
 - [ ] Add user-facing logs quickstart docs once the runtime path is wired into the visible agent workflow.
+
+## 2026-04-30 / Workflow Plan CLI and LOG Replay Gate Acceptance
+
+Status:
+- [x] `subagents-workflow-plan` dry-run CLI landed.
+- [x] LOG Live Lab replay now has a readable no-finding negative fixture.
+- [x] LOG quickstart is documented in README and CLI reference.
+
+Problems solved:
+- [x] Users and the parent session can preview automatic workflow routing, worker split, and parent acceptance checks without creating or running subagents.
+- [x] The workflow planner is now visible from the CLI, reducing the gap between Python-only planning and real user-facing dispatch.
+- [x] LOG replay can now fail at the `detector` stage with a clear negative fixture instead of only proving the happy path.
+- [x] Replay summaries now include parsed, stored, duplicate, dead-letter, skipped, error type, and error message fields for parent/reviewer inspection.
+- [x] User-facing docs now explain explicit LOG commands, ordinary-language runtime capability behavior, and offline replay expectations.
+
+Accepted evidence:
+- [x] Focused tests passed: `python -m pytest agent_py_agent\tests\test_live_lab_log_analysis_replay.py agent_py_agent\tests\test_subagent_workflow_planner.py agent_py_agent\tests\test_cli_reference.py` -> `9 passed`.
+- [x] Workflow CLI preview passed: `python -m agent_py_agent subagents-workflow-plan "Fix API bug and add tests" --json` -> selected `code_feature_split`, 3 worker specs, 8 parent acceptance checks.
+- [x] Fresh positive replay passed: `python scripts\live_lab\log_analysis_replay.py --output-root <fresh temp>` -> `ok=true`, `parsed_events=3`, `stored_events=3`, all stages pass.
+- [x] Live Lab suite passed: `python scripts\live_agent_lab.py --suite log-analysis --runs-dir <temp> --run-id <id>` -> `LIVE_LAB_PASS`.
+- [x] Full regression passed: `python -m pytest` -> `226 passed`.
+- [x] Whitespace check passed: `git diff --check`.
+
+Remaining:
+- [ ] Wire workflow preview into actual task creation with a manual/auto confirmation policy.
+- [ ] Persist workflow-plan previews and parent acceptance decisions for real dispatches.
+- [ ] Add case/evidence-stage negative replay fixtures after the next LOG dispatch bridge exists.

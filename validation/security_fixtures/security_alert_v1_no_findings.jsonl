@@ -1,0 +1,2 @@
+{"alert_id":"benign-heartbeat-001","event_time":"2026-04-30T10:06:00Z","source_id":"health-audit","source_product":"audit","user":"healthcheck","host":"web-01","src_ip":"10.10.5.20","dst_ip":"10.10.0.10","protocol":"https","dst_port":"443","login_result":"ok"}
+{"alert_id":"benign-heartbeat-002","event_time":"2026-04-30T10:07:00Z","source_id":"health-audit","source_product":"audit","user":"healthcheck","host":"web-02","src_ip":"10.10.5.21","dst_ip":"10.10.0.10","protocol":"https","dst_port":"443","login_result":"ok"}

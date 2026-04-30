@@ -510,3 +510,12 @@ Phase 10：失败沉淀
 - Guardrail: it does not create or run subagents yet. This keeps the first integration safe while giving the gateway/chat/spawn layer a single place to call later.
 - User effect: moves us closer to "user only states the goal" because the system can infer workflow shape and acceptance gates before asking the user for dispatch details.
 - Remaining after this slice: connect this facade to real task creation, persist the selected plan, and expose a small explanation to users when auto/manual/off changes behavior.
+
+## 2026-04-30 Implementation Note: Workflow Plan CLI
+
+- Status: dry-run CLI preview landed.
+- Command: `my-agent subagents-workflow-plan "<goal>" [--template-id <id>] [--json]`.
+- Solves: users and the parent session can inspect the selected workflow, worker split, and parent acceptance checklist before creating any subagent task.
+- Guardrail: the command does not create files, create subagents, call runners, or mark anything accepted.
+- User effect: this is the first visible bridge from "user only states the goal" to "system explains the controlled dispatch plan".
+- Remaining after this slice: add an apply path that creates real work orders only after policy/confirmation, and persist the preview used for each real dispatch.

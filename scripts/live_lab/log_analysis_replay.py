@@ -37,6 +37,7 @@ def run_security_alert_v1_replay(
     *,
     output_root: str | Path,
     fixture_path: str | Path = DEFAULT_FIXTURE,
+    fixture_format: str | None = None,
     source_id: str = "security-alert-v1-live-lab",
     start_time: str = DEFAULT_START_TIME,
     end_time: str = DEFAULT_END_TIME,
@@ -54,12 +55,17 @@ def run_security_alert_v1_replay(
         "scenario": "SecurityAlertV1",
         "dry_run": dry_run,
         "fixture_path": str(Path(fixture_path)),
+        "fixture_format": fixture_format,
         "output_root": str(output_root),
         "store_root": str(store_root),
         "failed_stage": None,
         "stages": {},
         "stored_events": 0,
         "total_events": 0,
+        "parsed_events": 0,
+        "dead_letter_events": 0,
+        "duplicate_events": 0,
+        "skipped_events": 0,
         "stored_event_ids": [],
         "finding_count": 0,
         "finding_ids": [],
@@ -83,9 +89,14 @@ def run_security_alert_v1_replay(
             fixture_path,
             root=store_root,
             source_id=source_id,
-            file_format="jsonl",
+            file_format=fixture_format,
         )
+        summary["fixture_format"] = ingest_result.file_format
+        summary["parsed_events"] = ingest_result.parsed_count
         summary["stored_events"] = ingest_result.stored_count
+        summary["dead_letter_events"] = ingest_result.dead_letter_count
+        summary["duplicate_events"] = ingest_result.duplicate_count
+        summary["skipped_events"] = ingest_result.skipped_count
         summary["stored_event_ids"] = list(ingest_result.stored_event_ids)
         summary["manifest_path"] = ingest_result.manifest_path
         summary["checkpoint_path"] = ingest_result.checkpoint_path
@@ -192,6 +203,8 @@ def run_security_alert_v1_replay(
         summary["ok"] = False
         summary["failed_stage"] = stage
         summary["stages"][stage] = "fail"
+        summary["error_type"] = type(exc).__name__
+        summary["error_message"] = str(exc)
         summary["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         Path(summary["summary_path"]).write_text(
@@ -209,6 +222,7 @@ def new_output_root() -> Path:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Replay the SecurityAlertV1 log-analysis scenario offline.")
     parser.add_argument("--fixture", default=str(DEFAULT_FIXTURE), help="SecurityAlertV1 JSONL fixture path.")
+    parser.add_argument("--fixture-format", default=None, help="Fixture format override: jsonl, csv, or log.")
     parser.add_argument("--output-root", default=str(new_output_root()), help="Replay output directory.")
     parser.add_argument("--source-id", default="security-alert-v1-live-lab", help="Ingest source id.")
     parser.add_argument("--start-time", default=DEFAULT_START_TIME, help="Trace/query start time.")
@@ -222,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = run_security_alert_v1_replay(
         output_root=args.output_root,
         fixture_path=args.fixture,
+        fixture_format=args.fixture_format,
         source_id=args.source_id,
         start_time=args.start_time,
         end_time=args.end_time,

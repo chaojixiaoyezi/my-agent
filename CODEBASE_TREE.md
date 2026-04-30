@@ -667,3 +667,12 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - `agent_py_agent/tests/test_runtime_capabilities.py`: verifies ordinary prompts hide security tools, explicit grants expose them, and English/Chinese security-log prompts auto-grant them.
 - `agent_py_agent/tests/test_live_lab_log_analysis_replay.py`: verifies offline replay artifacts and failure-stage semantics.
 - `agent_py_agent/tests/test_subagent_workflow_planner.py`: verifies the planner facade for auto, manual, and off workflow modes.
+
+## 2026-04-30 Tree Update: Workflow Plan CLI and Replay Gates
+
+- `agent_py_agent/cli/subagents.py`: adds `cmd_subagents_workflow_plan`, a dry-run workflow preview that prints selected template, worker specs, parent acceptance checklist, and issues.
+- `agent_py_agent/cli/parser.py`: adds the `subagents-workflow-plan` command with `goal`, `--template-id`, and `--json`.
+- `agent_py_agent/__main__.py`: re-exports `cmd_subagents_workflow_plan` for compatibility with the split CLI entrypoint.
+- `validation/security_fixtures/security_alert_v1_no_findings.jsonl`: readable negative fixture that should ingest but fail at detector stage with no findings.
+- `scripts/live_lab/log_analysis_replay.py`: replay summary now includes fixture format, parsed/stored/dead-letter/duplicate/skipped counts, and structured error fields.
+- `README.md` and `CLI_REFERENCE.md`: document LOG quickstart, ordinary-language runtime capability behavior, offline replay, and `subagents-workflow-plan`.

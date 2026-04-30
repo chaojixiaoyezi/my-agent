@@ -64,6 +64,7 @@ from .subagents import (
     cmd_subagents_plan_actions,
     cmd_subagents_probe,
     cmd_subagents_route_capabilities,
+    cmd_subagents_workflow_plan,
 )
 
 
@@ -282,6 +283,12 @@ def build_parser() -> argparse.ArgumentParser:
     subagents.add_argument("--root-id", help="按根任务 ID 过滤")
     subagents.add_argument("--limit", type=int, default=20, help="最多显示多少条")
     subagents.set_defaults(func=cmd_subagents)
+
+    workflow_plan = sub.add_parser("subagents-workflow-plan", help="Preview automatic subagent workflow routing")
+    workflow_plan.add_argument("goal", help="Parent goal to route into a workflow")
+    workflow_plan.add_argument("--template-id", help="Force a workflow template id for the preview")
+    workflow_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    workflow_plan.set_defaults(func=cmd_subagents_workflow_plan)
 
     due_check = sub.add_parser("subagents-due-check", help="巡检 subagent 并输出父代理待处理项")
     due_check.add_argument(

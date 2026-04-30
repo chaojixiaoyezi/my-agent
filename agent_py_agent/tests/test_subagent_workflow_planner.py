@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
+from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.subagent import QualityContract
 from agent_py_agent.agent.subagent_workflows.models import WorkflowPhase, WorkflowTemplate
 from agent_py_agent.agent.subagent_workflows.planner import plan_workflow_for_goal
@@ -33,6 +36,17 @@ def _template(template_id: str) -> WorkflowTemplate:
 
 def _store(*template_ids: str) -> WorkflowTemplateStore:
     return WorkflowTemplateStore(templates={template_id: _template(template_id) for template_id in template_ids})
+
+
+def _write_config(tmp_path: Path, mode: str = "auto") -> Path:
+    config_path = tmp_path / "agent_config.yaml"
+    config_path.write_text(
+        'workspace_root: "workspace"\n'
+        'model_backend: "echo"\n'
+        f'subagent_workflow_mode: "{mode}"\n',
+        encoding="utf-8",
+    )
+    return config_path
 
 
 def test_plan_workflow_for_goal_composes_router_compiler_and_parent_gate():
@@ -89,3 +103,56 @@ def test_plan_workflow_for_goal_manual_mode_marks_confirmation():
     assert result.ok is True
     assert result.decision.needs_confirmation is True
     assert result.dispatch_plan is not None
+
+
+def test_subagents_workflow_plan_cli_json_previews_without_dispatch(tmp_path, capsys):
+    config_path = _write_config(tmp_path)
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--config",
+            str(config_path),
+            "subagents-workflow-plan",
+            "Fix API bug and add tests",
+            "--json",
+        ]
+    )
+
+    code = args.func(args)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert args.command == "subagents-workflow-plan"
+    assert payload["selected_template_id"] == "code_feature_split"
+    assert payload["mode"] == "auto"
+    assert payload["enabled"] is True
+    assert payload["ok"] is True
+    assert payload["needs_confirmation"] is False
+    assert payload["worker_count"] >= 1
+    assert payload["workers"][0]["role"]
+    assert payload["parent_acceptance_check_count"] >= 1
+    assert payload["issues"] == []
+
+
+def test_subagents_workflow_plan_cli_accepts_template_override(tmp_path, capsys):
+    config_path = _write_config(tmp_path, mode="manual")
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--config",
+            str(config_path),
+            "subagents-workflow-plan",
+            "Fix API bug and add tests",
+            "--template-id",
+            "single_worker_verified",
+            "--json",
+        ]
+    )
+
+    code = args.func(args)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["selected_template_id"] == "single_worker_verified"
+    assert payload["mode"] == "manual"
+    assert payload["needs_confirmation"] is True

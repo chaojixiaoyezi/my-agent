@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.live_lab.log_analysis_replay import run_security_alert_v1_replay
+from scripts.live_lab.log_analysis_replay import REPO_ROOT, run_security_alert_v1_replay
+
+
+NO_FINDINGS_FIXTURE = REPO_ROOT / "validation" / "security_fixtures" / "security_alert_v1_no_findings.jsonl"
 
 
 def test_security_alert_v1_live_lab_replay_success(tmp_path):
@@ -12,6 +15,8 @@ def test_security_alert_v1_live_lab_replay_success(tmp_path):
     assert summary["failed_stage"] is None
     assert summary["stored_events"] == 3
     assert summary["total_events"] == 3
+    assert summary["parsed_events"] == 3
+    assert summary["fixture_format"] == "jsonl"
     assert summary["finding_count"] >= 1
     assert summary["case_id"]
     assert summary["route_path"]
@@ -36,5 +41,26 @@ def test_security_alert_v1_live_lab_replay_reports_failed_stage(tmp_path):
     assert summary["ok"] is False
     assert summary["failed_stage"] == "ingest"
     assert summary["stages"]["ingest"] == "fail"
+    assert summary["error_type"] == "FileNotFoundError"
     assert summary["stored_events"] == 0
+    assert Path(summary["summary_path"]).exists()
+
+
+def test_security_alert_v1_live_lab_replay_no_findings_reports_detector_stage(tmp_path):
+    summary = run_security_alert_v1_replay(
+        output_root=tmp_path / "replay",
+        fixture_path=NO_FINDINGS_FIXTURE,
+    )
+
+    assert summary["ok"] is False
+    assert summary["failed_stage"] == "detector"
+    assert summary["stages"]["ingest"] == "pass"
+    assert summary["stages"]["detector"] == "fail"
+    assert summary["parsed_events"] == 2
+    assert summary["stored_events"] == 2
+    assert summary["total_events"] == 2
+    assert summary["finding_count"] == 0
+    assert summary["case_count"] == 0
+    assert summary["error_type"] == "ReplayStageError"
+    assert summary["error_message"] == "detectors produced no findings"
     assert Path(summary["summary_path"]).exists()
