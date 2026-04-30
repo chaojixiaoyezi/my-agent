@@ -651,3 +651,19 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - `agent_py_agent/agent/subagent_workflows/acceptance.py`: builds parent final-gate acceptance plans from workflow templates and quality contracts.
 - `agent_py_agent/agent/log_analysis/storage/base.py`: now includes `JsonlReadAudit` for local JSONL read auditing.
 - `agent_py_agent/agent/log_analysis/storage/local_store.py`: records last read audits and writes corrupt/non-object JSONL samples to `corrupt_lines.jsonl`.
+
+## 2026-04-30 Tree Update: Runtime LOG Wiring
+
+- `agent_py_agent/agent/agent_core/runtime_capabilities.py`: infers runtime capabilities from normal user prompts, currently focused on explicit or obvious `logs/security` tasks.
+- `agent_py_agent/agent/agent_core/runtime_mixin.py`: passes inferred/granted capabilities into tool catalog rendering, recommendation rendering, and tool execution.
+- `agent_py_agent/agent/log_analysis/storage/base.py`: `normalize_limit()` now accepts an optional configured `max_limit`.
+- `agent_py_agent/agent/log_analysis/storage/query.py`: `execute_security_query()` passes the configured max limit into storage normalization.
+- `agent_py_agent/agent/log_analysis/tools.py`: security query/hunt/trace tools accept optional `max_limit`.
+- `agent_py_agent/cli/logs.py`: LOG CLI query commands honor `query_max_limit` from log-analysis config.
+- `scripts/live_lab/log_analysis_replay.py`: offline SecurityAlertV1 replay command that emits case, route, report, forensic package, and replay summary artifacts.
+- `scripts/live_lab/cases.py`: adds the `log_analysis_replay` Live Lab case.
+- `scripts/live_lab/constants.py`: adds the `log-analysis` suite and includes it in the `all` suite.
+- `agent_py_agent/agent/subagent_workflows/planner.py`: composes workflow routing, compilation, and parent acceptance into one dry-run planning facade.
+- `agent_py_agent/tests/test_runtime_capabilities.py`: verifies ordinary prompts hide security tools, explicit grants expose them, and English/Chinese security-log prompts auto-grant them.
+- `agent_py_agent/tests/test_live_lab_log_analysis_replay.py`: verifies offline replay artifacts and failure-stage semantics.
+- `agent_py_agent/tests/test_subagent_workflow_planner.py`: verifies the planner facade for auto, manual, and off workflow modes.

@@ -23,9 +23,8 @@ def security_query(
     alert_type: str | None = None,
     start_time: str | None = None,
     end_time: str | None = None,
-    # TODO: Wire query_default_limit/query_max_limit from runtime config when that
-    # configuration surface lands; storage.normalize_limit enforces MAX_QUERY_LIMIT.
-    limit: int = DEFAULT_QUERY_LIMIT,
+    limit: int | None = DEFAULT_QUERY_LIMIT,
+    max_limit: int | None = None,
 ) -> dict[str, Any]:
     local_store = _store(store, root)
     result = execute_security_query(
@@ -40,6 +39,7 @@ def security_query(
             end_time=end_time,
             limit=limit,
         ),
+        max_limit=max_limit,
     )
     return _tool_response(result)
 
@@ -52,7 +52,8 @@ def hunt_ip(
     role: str = "any",
     start_time: str | None = None,
     end_time: str | None = None,
-    limit: int = DEFAULT_QUERY_LIMIT,
+    limit: int | None = DEFAULT_QUERY_LIMIT,
+    max_limit: int | None = None,
 ) -> dict[str, Any]:
     if role not in {"any", "attacker", "victim"}:
         raise ValueError("role must be one of: any, attacker, victim")
@@ -64,6 +65,7 @@ def hunt_ip(
             start_time=start_time,
             end_time=end_time,
             limit=limit,
+            max_limit=max_limit,
         )
     if role == "victim":
         return security_query(
@@ -73,15 +75,18 @@ def hunt_ip(
             start_time=start_time,
             end_time=end_time,
             limit=limit,
+            max_limit=max_limit,
         )
     local_store = _store(store, root)
     attacker = execute_security_query(
         local_store,
         QueryCriteria(attacker_ip=ip, start_time=start_time, end_time=end_time, limit=limit),
+        max_limit=max_limit,
     )
     victim = execute_security_query(
         local_store,
         QueryCriteria(victim_ip=ip, start_time=start_time, end_time=end_time, limit=limit),
+        max_limit=max_limit,
     )
     return {
         "tool": "security_hunt_ip",
@@ -107,7 +112,8 @@ def trace_case(
     root: str | Path | None = None,
     start_time: str | None = None,
     end_time: str | None = None,
-    limit: int = DEFAULT_QUERY_LIMIT,
+    limit: int | None = DEFAULT_QUERY_LIMIT,
+    max_limit: int | None = None,
     max_queries: int = MAX_TRACE_CASE_QUERIES,
 ) -> dict[str, Any]:
     local_store = _store(store, root)
@@ -125,6 +131,7 @@ def trace_case(
                 "start_time": start_time,
                 "end_time": end_time,
                 "limit": limit,
+                "max_limit": max_limit,
             }
             queries.append(security_query(store=local_store, **kwargs))
         if len(queries) >= max_queries:
@@ -227,7 +234,8 @@ class SecurityQueryTool(BaseTool):
                 "domain": "Optional domain/host filter.",
                 "uri": "Optional URI/path/API filter.",
                 "alert_type": "Optional alert type filter.",
-                "limit": "Maximum evidence rows to persist; capped by storage.",
+                "limit": "Maximum evidence rows to persist.",
+                "max_limit": "Optional configured upper bound for evidence rows.",
                 "root": "Optional log-analysis store root.",
             },
             examples=[
@@ -260,7 +268,8 @@ class SecurityHuntIpTool(BaseTool):
                 "role": "Optional: any, attacker, or victim.",
                 "start_time": "Required ISO timestamp lower bound.",
                 "end_time": "Required ISO timestamp upper bound.",
-                "limit": "Maximum evidence rows per query; capped by storage.",
+                "limit": "Maximum evidence rows per query.",
+                "max_limit": "Optional configured upper bound for evidence rows.",
                 "root": "Optional log-analysis store root.",
             },
             examples=[
@@ -293,7 +302,8 @@ class SecurityTraceCaseTool(BaseTool):
                 "case_id": "Required case id from the local log-analysis store.",
                 "start_time": "Required ISO timestamp lower bound.",
                 "end_time": "Required ISO timestamp upper bound.",
-                "limit": "Maximum evidence rows per query; capped by storage.",
+                "limit": "Maximum evidence rows per query.",
+                "max_limit": "Optional configured upper bound for evidence rows.",
                 "max_queries": "Maximum related seed queries to run.",
                 "root": "Optional log-analysis store root.",
             },
@@ -322,17 +332,18 @@ def _query_params(params: dict[str, Any]) -> dict[str, Any]:
         "start_time",
         "end_time",
         "limit",
+        "max_limit",
     )
     return {key: params[key] for key in keys if key in params}
 
 
 def _hunt_params(params: dict[str, Any]) -> dict[str, Any]:
-    payload = {key: params[key] for key in ("role", "start_time", "end_time", "limit") if key in params}
+    payload = {key: params[key] for key in ("role", "start_time", "end_time", "limit", "max_limit") if key in params}
     return payload
 
 
 def _trace_params(params: dict[str, Any]) -> dict[str, Any]:
-    return {key: params[key] for key in ("start_time", "end_time", "limit", "max_queries") if key in params}
+    return {key: params[key] for key in ("start_time", "end_time", "limit", "max_limit", "max_queries") if key in params}
 
 
 def _required_text(params: dict[str, Any], key: str) -> str:

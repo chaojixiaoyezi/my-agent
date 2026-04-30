@@ -58,13 +58,14 @@ def execute_security_query(
     *,
     require_time_range: bool = True,
     preview_limit: int = DEFAULT_PREVIEW_LIMIT,
+    max_limit: int | None = None,
 ) -> QueryResult:
     query = _criteria(criteria)
     if require_time_range and (not query.start_time or not query.end_time):
         raise ValueError("start_time and end_time are required for controlled security queries")
 
     start = time.perf_counter()
-    limit = normalize_limit(query.limit)
+    limit = normalize_limit(query.limit, max_limit=max_limit)
     parameters = _criteria_to_parameters(query, limit)
     rows = [row for row in store.list_events() if _matches(row, query)]
     event_read_audit = store.last_read_audit(store.events_path)

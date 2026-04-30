@@ -7,6 +7,7 @@ from __future__ import annotations
 以后要加“记忆长任务”“工具边界任务”“问题任务”，优先在这里加一个新的 case。
 """
 
+import json
 import sys
 import textwrap
 
@@ -24,6 +25,7 @@ def run_case(lab, case_name: str) -> None:
     handlers = {
         "health": case_health,
         "bad_weather": case_bad_weather,
+        "log_analysis_replay": case_log_analysis_replay,
         "gateway_ask": case_gateway_ask,
         "long_subagent": case_long_subagent,
     }
@@ -75,6 +77,24 @@ def case_bad_weather(lab) -> None:
             ),
             timeout=lab.args.timeout + 90,
         )
+
+
+def case_log_analysis_replay(lab) -> None:
+    """Run the offline SecurityAlertV1 replay without a model call."""
+
+    lab.section("CASE log_analysis_replay")
+    from .log_analysis_replay import run_security_alert_v1_replay
+
+    summary = run_security_alert_v1_replay(output_root=lab.run_root / "log_analysis_replay")
+    lab.log(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    lab.log(f"stored_events={summary.get('stored_events')} total_events={summary.get('total_events')}")
+    lab.log(f"case_path={summary.get('case_path')}")
+    lab.log(f"route_path={summary.get('route_path')}")
+    lab.log(f"report_path={summary.get('report_path')}")
+    lab.log(f"evidence_paths={summary.get('evidence_paths')}")
+    lab.log(f"failed_stage={summary.get('failed_stage')}")
+    if not summary.get("ok"):
+        raise RuntimeError(f"log analysis replay failed at {summary.get('failed_stage')}: {summary.get('error')}")
 
 
 def case_gateway_ask(lab) -> None:

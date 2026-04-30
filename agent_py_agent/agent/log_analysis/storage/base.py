@@ -93,7 +93,7 @@ class QueryCriteria:
     alert_type: str | None = None
     start_time: str | None = None
     end_time: str | None = None
-    limit: int = DEFAULT_QUERY_LIMIT
+    limit: int | None = DEFAULT_QUERY_LIMIT
 
 
 @dataclass
@@ -174,10 +174,10 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def normalize_limit(limit: int | None) -> int:
-    if limit is None or limit <= 0:
-        return DEFAULT_QUERY_LIMIT
-    return min(limit, MAX_QUERY_LIMIT)
+def normalize_limit(limit: int | None, *, max_limit: int | None = None) -> int:
+    effective_max = max_limit if max_limit is not None and max_limit > 0 else MAX_QUERY_LIMIT
+    requested = DEFAULT_QUERY_LIMIT if limit is None or limit <= 0 else limit
+    return min(requested, effective_max)
 
 
 def model_to_dict(value: Any) -> dict[str, Any]:

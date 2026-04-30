@@ -38,6 +38,18 @@ scripts/open_live_lab.sh --suite real --real-llm --timeout 300 --count 1 --max-c
 touch validation/live_lab/<run-id>/STOP
 ```
 
+### Log Analysis Live Lab replay
+
+```bash
+# Offline SecurityAlertV1 replay; no real LLM or network call.
+python3 scripts/live_agent_lab.py --suite log-analysis
+
+# Direct replay entry if you only need the log-analysis artifacts.
+python3 scripts/live_lab/log_analysis_replay.py
+```
+
+The JSON summary prints `stored_events`, `failed_stage`, `case_path`, `route_path`, `report_path`, and `evidence_paths`.
+
 ## 并行开发工作台检查
 
 workstream 脚本不直接修改主仓库代码；用于创建、打开和检查隔离 `git worktree`：
@@ -257,3 +269,29 @@ my-agent gateway stop --kill
 - HTTP 后端 payload/header/解析
 
 这些记录的旧证据文件在 `validation/` 下。当前开发判断以真实 API 完整冒烟和本文件的定向测试共同为准；最终收口以真实 API 路径为准。
+## 2026-04-30 Runtime LOG Integration Checks
+
+Focused integration:
+
+```bash
+python -m pytest agent_py_agent\tests\test_runtime_capabilities.py agent_py_agent\tests\test_log_analysis_query.py agent_py_agent\tests\test_log_analysis_cli.py agent_py_agent\tests\test_live_lab_log_analysis_replay.py agent_py_agent\tests\test_subagent_workflow_planner.py
+```
+
+Expected result: `23 passed`.
+
+Offline Live Lab replay:
+
+```bash
+python scripts\live_lab\log_analysis_replay.py --output-root %TEMP%\通道运行时-log-replay-会话运行时
+```
+
+Expected result: JSON summary with `ok=true`, `dry_run=true`, `total_events=3`, `stored_events=3` on a fresh output root, `case_count=1`, and all stages marked `pass`.
+
+Full regression:
+
+```bash
+python -m pytest
+git diff --check
+```
+
+Expected result for this landing: `223 passed`, then no whitespace errors.

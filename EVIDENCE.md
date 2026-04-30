@@ -56,3 +56,25 @@
   - `python -m pytest agent_py_agent\tests\test_subagent_workflow_router.py agent_py_agent\tests\test_subagent_workflow_compiler.py agent_py_agent\tests\test_subagent_workflow_acceptance.py agent_py_agent\tests\test_subagent_workflow_templates.py agent_py_agent\tests\test_subagent_workflow_config.py` -> `29 passed`.
 - Full verification:
   - `python -m pytest` -> `207 passed`.
+
+## 2026-04-30 / Runtime Capability, Query Limits, Live Lab, and Workflow Planner Evidence
+
+- Three-worker batch:
+  - Runtime capability worker: `agent_py_agent/agent/agent_core/runtime_mixin.py`, `agent_py_agent/agent/agent_core/runtime_capabilities.py`, `agent_py_agent/tests/test_runtime_capabilities.py`.
+  - Query-limit worker: `agent_py_agent/agent/log_analysis/storage/base.py`, `agent_py_agent/agent/log_analysis/storage/query.py`, `agent_py_agent/agent/log_analysis/tools.py`, `agent_py_agent/cli/logs.py`, `agent_py_agent/tests/test_log_analysis_query.py`, `agent_py_agent/tests/test_log_analysis_cli.py`.
+  - Live Lab replay worker: `scripts/live_lab/log_analysis_replay.py`, `scripts/live_lab/cases.py`, `scripts/live_lab/constants.py`, `agent_py_agent/tests/test_live_lab_log_analysis_replay.py`, `TESTS.md`.
+- Parent integration:
+  - Added `plan_workflow_for_goal()` in `agent_py_agent/agent/subagent_workflows/planner.py`.
+  - Exported the planner from `agent_py_agent.agent.subagent_workflows`.
+  - Added `agent_py_agent/tests/test_subagent_workflow_planner.py`.
+  - Added Chinese runtime-capability regression coverage for security-log prompts.
+- Focused verification:
+  - `python -m pytest agent_py_agent\tests\test_runtime_capabilities.py agent_py_agent\tests\test_log_analysis_query.py agent_py_agent\tests\test_log_analysis_cli.py agent_py_agent\tests\test_live_lab_log_analysis_replay.py agent_py_agent\tests\test_subagent_workflow_planner.py` -> `23 passed`.
+  - Inline runtime check: `resolve_runtime_capabilities("<Chinese security-log prompt>")` -> `["logs/security"]`.
+- Live Lab verification:
+  - `python scripts\live_lab\log_analysis_replay.py --output-root $env:TEMP\通道运行时-log-replay-会话运行时` -> `ok=true`.
+  - Replay summary on a fresh output root: `scenario=SecurityAlertV1`, `dry_run=true`, `total_events=3`, `stored_events=3`, `case_count=1`, `finding_count=1`, `evidence_paths=3`.
+  - Replay artifacts: `case.json`, `route.json`, `first_response_report.md`, `forensic_package.json`, and `replay_summary.json`.
+- Full verification:
+  - `python -m pytest` -> `223 passed`.
+  - `git diff --check` -> passed.

@@ -14,6 +14,7 @@ from ..memory_routing import build_routed_memory_context
 from ..tools import ToolExecutionResult
 from .models import AgentRunResult
 from .parameters import _one_shot_tool_call_key
+from .runtime_capabilities import resolve_runtime_capabilities
 
 
 class SimpleAgentRuntimeMixin:
@@ -31,6 +32,7 @@ class SimpleAgentRuntimeMixin:
         prompt_files: list[str] | None = None,
         save: bool | None = None,
         allowed_tools: list[str] | None = None,
+        granted_capabilities: list[str] | None = None,
         write_boundary: dict[str, object] | None = None,
         request_id: str = "",
         run_id: str = "",
@@ -68,13 +70,25 @@ class SimpleAgentRuntimeMixin:
             *([resume_context_section] if resume_context_section else []),
             *routed_context.injected_sections,
         ]
+        runtime_capabilities = resolve_runtime_capabilities(
+            user_prompt,
+            inject=inject,
+            granted_capabilities=granted_capabilities,
+        )
         tool_catalog_section = (
-            self.tools.render_catalog_section(allowed_tools=allowed_tools)
+            self.tools.render_catalog_section(
+                allowed_tools=allowed_tools,
+                granted_capabilities=runtime_capabilities,
+            )
             if self.config.enable_tools
             else ""
         )
         tool_recommendations_section = (
-            self.tools.render_recommended_tools_section(user_prompt, allowed_tools=allowed_tools)
+            self.tools.render_recommended_tools_section(
+                user_prompt,
+                allowed_tools=allowed_tools,
+                granted_capabilities=runtime_capabilities,
+            )
             if self.config.enable_tools
             else ""
         )
@@ -136,6 +150,7 @@ class SimpleAgentRuntimeMixin:
                     result = self.tools.execute_call(
                         payload,
                         allowed_tools=allowed_tools,
+                        granted_capabilities=runtime_capabilities,
                         write_boundary=write_boundary,
                     )
                     if one_shot_key and result.ok:

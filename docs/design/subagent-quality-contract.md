@@ -501,3 +501,12 @@ Phase 10：失败沉淀
 - Compiler: turns workflow phases into worker specs with dependencies, write boundaries, evidence requirements, non-rollback warnings, and `cannot_self_accept`.
 - Parent gate: merges template acceptance and `QualityContract` checks, adds anti-worker-PASS checks, and requires a critic gate for producer/critic/repair workflows.
 - Remaining after this slice: wire these plans into real chat/gateway/spawn dispatch, add more built-in workflow templates, and persist structured acceptance reports.
+
+## 2026-04-30 Implementation Note: Workflow Planner Facade
+
+- Status: dry-run planning facade landed.
+- Solves: parent code no longer has to call router, compiler, and parent-gate planner separately for every workflow experiment.
+- API: `plan_workflow_for_goal()` returns one `WorkflowPlanningResult` with the route decision, selected template, dispatch plan, parent acceptance plan, and accumulated issues.
+- Guardrail: it does not create or run subagents yet. This keeps the first integration safe while giving the gateway/chat/spawn layer a single place to call later.
+- User effect: moves us closer to "user only states the goal" because the system can infer workflow shape and acceptance gates before asking the user for dispatch details.
+- Remaining after this slice: connect this facade to real task creation, persist the selected plan, and expose a small explanation to users when auto/manual/off changes behavior.
