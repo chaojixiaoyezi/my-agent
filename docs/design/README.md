@@ -21,6 +21,7 @@
 
 | 文档 | 模块 | 状态 | 说明 |
 | --- | --- | --- | --- |
+| [log-analysis.md](log-analysis.md) | 日志分析模块 | 部分落地 | 第一版验收状态、剩余缺口和下一批 worker 切片 |
 | [subagent-quality-contract.md](subagent-quality-contract.md) | subagent 派工与验收 | 设计中 | 质量契约、受控施工队、context pack、producer/critic/reviewer、用户少说模式 |
 
 ## 后续待拆模块
@@ -29,7 +30,6 @@
 | --- | --- | --- |
 | `memory.md` | 记忆系统 | 继续扩展 compression、routing、raw archive、HOT/INDEX 规则时 |
 | `gateway.md` | gateway 常驻与外部协议 | `GATEWAY_DESIGN.md` 和主台账之间出现重复设计时 |
-| `log-analysis.md` | 日志分析模块 | `LOG_ANALYSIS_BACKLOG.md` 进入 schema、pipeline、report 细节实现时 |
 
 ## 维护要求
 

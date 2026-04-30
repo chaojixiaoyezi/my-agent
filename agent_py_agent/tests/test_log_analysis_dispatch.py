@@ -15,6 +15,8 @@ from agent_py_agent.agent.log_analysis.agents.summaries import (
     case_summary_for_prompt,
     summarize_case,
 )
+from agent_py_agent.agent.log_analysis.interfaces import DispatchEngine as DispatchEngineProtocol
+from agent_py_agent.agent.log_analysis.models import EvidenceRef
 from agent_py_agent.agent.log_analysis.dispatch import (
     PENDING_INVESTIGATION,
     DispatchBudget,
@@ -121,6 +123,45 @@ def test_reviewer_accepts_evidence_backed_report():
     assert decision.decision == "APPROVE"
 
 
+def test_evidence_ref_dataclass_normalizes_to_id_in_analyst_input_and_summary():
+    evidence = EvidenceRef(
+        evidence_id="ev-model-1",
+        kind="query_result",
+        path="/tmp/ev-model-1.json",
+        sha256="abc123",
+        row_count=3,
+    )
+
+    analyst_input = validate_analyst_input(
+        {
+            "case_id": "case-001",
+            "case_summary": "compact summary",
+            "evidence_refs": [evidence],
+        }
+    ).to_dict()
+    rendered = case_summary_for_prompt({"case_id": "case-001", "evidence_refs": [evidence]})
+
+    assert analyst_input["evidence_refs"] == ["ev-model-1"]
+    assert "EvidenceRef(" not in rendered
+    assert "ev-model-1" in rendered
+    assert "/tmp/ev-model-1.json" in rendered
+    assert "abc123" in rendered
+
+
+def test_reviewer_known_refs_accepts_evidence_ref_dataclass_boundary():
+    report = AnalystReport(
+        case_id="case-001",
+        summary="Evidence-backed fact.",
+        facts=["ev-model-1 shows a suspicious query result"],
+        evidence_refs=[EvidenceRef(evidence_id="ev-model-1")],
+    )
+
+    decision = review_analyst_report(report, known_evidence_refs=[EvidenceRef(evidence_id="ev-model-1")])
+
+    assert decision.approved
+    assert decision.evidence_refs == ["ev-model-1"]
+
+
 def test_dispatch_engine_default_budget_only_writes_pending_queue():
     engine = DispatchEngine()
 
@@ -131,6 +172,23 @@ def test_dispatch_engine_default_budget_only_writes_pending_queue():
     assert result.request.reason == "max_parallel_analyst_agents=0 disables analyst dispatch"
     assert engine.queue.agent_backlog()["pending_investigation"] == 1
     assert engine.queue.agent_backlog()["active_analyst_agents"] == 0
+
+
+def test_dispatch_engine_public_protocol_contract_is_minimally_usable():
+    engine = DispatchEngine()
+
+    result = engine.enqueue_case(_case_fixture(), context={"source": "test"})
+    payload = result.to_dict()
+    health = engine.health()
+
+    assert isinstance(engine, DispatchEngineProtocol)
+    assert result.case_id == "case-001"
+    assert result.status == PENDING_INVESTIGATION
+    assert result.run_id.startswith("logdisp-")
+    assert result.message == "max_parallel_analyst_agents=0 disables analyst dispatch"
+    assert payload["case_id"] == "case-001"
+    assert payload["metadata"]["request_id"] == result.request.request_id
+    assert health["agent_backlog"]["pending_investigation"] == 1
 
 
 def test_dispatch_engine_respects_enabled_budget():

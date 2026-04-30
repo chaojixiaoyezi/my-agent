@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import json
 
-from agent_py_agent.agent.log_analysis.analytics.detectors import run_soft_detectors
-from agent_py_agent.agent.log_analysis.cases.case_store import CaseStore
+from agent_py_agent.agent.log_analysis.analytics.detectors import (
+    bruteforce_then_success,
+    run_soft_detectors,
+    waf_attack_success_candidate,
+)
+from agent_py_agent.agent.log_analysis.cases.case_store import CaseStore, dedup_key_for_finding
 from agent_py_agent.agent.log_analysis.models import EvidenceRef, Finding
 from agent_py_agent.agent.log_analysis.reports import first_response_report_content, forensic_package_content
 from agent_py_agent.agent.log_analysis.security.correlation import build_route_draft
@@ -175,3 +179,124 @@ def test_route_and_reports_separate_facts_inferences_gaps(tmp_path):
     assert package["inferences"]
     assert package["gaps"]
     assert package["evidence_refs"]
+
+
+def test_missing_event_time_does_not_create_window_correlation():
+    events = [
+        {
+            "event_id": "waf-missing-time-1",
+            "event_time": "2026-04-30T10:00:00Z",
+            "source_product": "waf",
+            "event_class": "alert",
+            "event_action": "detected",
+            "severity": "high",
+            "alert_type": "web_attack",
+            "uri": "/upload.php",
+            "attacker_ip": "198.51.100.10",
+            "victim_ip": "10.0.0.5",
+        },
+        {
+            "event_id": "edr-missing-time-1",
+            "source_product": "edr",
+            "event_class": "process",
+            "event_action": "process_start",
+            "victim_ip": "10.0.0.5",
+            "parent_process_name": "nginx",
+            "process_name": "bash",
+        },
+    ]
+
+    assert waf_attack_success_candidate(events) == []
+
+
+def test_bruteforce_requires_timed_failures_in_window():
+    events = [
+        {
+            "event_id": f"auth-missing-time-{index}",
+            "source_product": "sso",
+            "event_class": "auth",
+            "event_action": "login",
+            "event_outcome": "failure",
+            "user": "alice",
+            "src_ip": "198.51.100.44",
+        }
+        for index in range(5)
+    ]
+    events.append(
+        {
+            "event_id": "auth-success-with-time",
+            "event_time": "2026-04-30T11:06:00Z",
+            "source_product": "sso",
+            "event_class": "auth",
+            "event_action": "login",
+            "event_outcome": "success",
+            "user": "alice",
+            "src_ip": "198.51.100.44",
+        }
+    )
+
+    assert bruteforce_then_success(events) == []
+
+
+def test_credential_case_dedup_includes_account_but_web_dedup_stays_asset_based(tmp_path):
+    store = CaseStore(tmp_path, min_case_confidence=0.6)
+    findings = [
+        finding
+        for finding in run_soft_detectors(
+            [
+                {
+                    "event_id": "vpn-alice",
+                    "event_time": "2026-04-30T11:00:00Z",
+                    "source_product": "vpn",
+                    "event_class": "auth",
+                    "event_action": "login",
+                    "event_outcome": "success",
+                    "user": "alice",
+                    "src_ip": "198.51.100.30",
+                    "country": "ZZ",
+                    "new_geo": True,
+                },
+                {
+                    "event_id": "vpn-bob",
+                    "event_time": "2026-04-30T11:01:00Z",
+                    "source_product": "vpn",
+                    "event_class": "auth",
+                    "event_action": "login",
+                    "event_outcome": "success",
+                    "user": "bob",
+                    "src_ip": "198.51.100.30",
+                    "country": "ZZ",
+                    "new_geo": True,
+                },
+            ]
+        )
+        if finding.detector_id == "vpn_new_geo_login"
+    ]
+
+    assert len(findings) == 2
+    assert {dedup_key_for_finding(finding) for finding in findings} == {
+        "attack=198.51.100.30|account=alice|victim=unknown|bucket=2026-04-30T11:00:00Z",
+        "attack=198.51.100.30|account=bob|victim=unknown|bucket=2026-04-30T11:00:00Z",
+    }
+    cases = store.record_findings(findings)
+    assert len(cases) == 2
+
+    web_findings = [finding for finding in run_soft_detectors(_events()) if finding.detector_id == "waf_attack_success_candidate"]
+    assert len(web_findings) == 1
+    assert dedup_key_for_finding(web_findings[0]) == "attack=198.51.100.10|victim=10.0.0.5|bucket=2026-04-30T10:00:00Z"
+
+
+def test_route_and_forensic_package_filter_all_findings_to_case_refs(tmp_path):
+    store = CaseStore(tmp_path, min_case_confidence=0.6)
+    store.record_findings(run_soft_detectors(_events()))
+    cases = store.list_cases()
+    case = next(item for item in cases if any("alice" in values for values in item.entities.values()))
+    all_findings = store.load_findings()
+
+    route = build_route_draft(case, findings=all_findings)
+    assert route.entry_candidates
+    assert {item["detector_id"] for item in route.entry_candidates} == {"vpn_new_geo_login"}
+    assert all("198.51.100.10" not in values for values in route.impacted_entities.values())
+
+    package = json.loads(forensic_package_content(case, findings=all_findings, frozen=True))
+    assert {finding["finding_id"] for finding in package["findings"]} == set(case.finding_refs)

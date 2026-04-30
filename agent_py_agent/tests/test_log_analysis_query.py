@@ -84,7 +84,7 @@ def test_local_store_upserts_and_queries_security_fields(tmp_path):
     assert store.list_query_records()[0]["query_id"] == result.query_id
 
 
-def test_large_query_writes_full_evidence_and_returns_limited_preview(tmp_path):
+def test_large_query_writes_limited_evidence_and_returns_limited_preview(tmp_path):
     store = LocalLogStore(tmp_path)
     store.upsert_events(
         {
@@ -117,13 +117,46 @@ def test_large_query_writes_full_evidence_and_returns_limited_preview(tmp_path):
 
     evidence = json.loads((tmp_path / "evidence" / f"{response['query_id']}.json").read_text(encoding="utf-8"))
     assert evidence["row_count"] == 12
-    assert len(evidence["rows"]) == 12
+    assert evidence["truncated"] is True
+    assert evidence["summary"]["row_count"] == 12
+    assert evidence["summary"]["returned_row_count"] == 5
+    assert evidence["summary"]["truncated"] is True
+    assert len(evidence["rows"]) == 5
     assert evidence["rows"][0]["raw_fields"]["secret"] == "keep-in-evidence-only"
 
     query_record = store.list_query_records()[0]
     assert query_record["row_count"] == 12
     assert query_record["truncated"] is True
     assert query_record["evidence_path"] == response["evidence_path"]
+
+
+def test_local_store_skips_bad_jsonl_lines_during_query(tmp_path):
+    store = LocalLogStore(tmp_path)
+    store.upsert_event(
+        {
+            "event_id": "evt-good",
+            "event_time": "2026-04-30T10:00:00Z",
+            "source_id": "waf-prod",
+            "alert_type": "web_attack",
+            "attacker_ip": "198.51.100.50",
+        }
+    )
+    store.events_path.write_text(
+        store.events_path.read_text(encoding="utf-8") + "not-json\n[1, 2, 3]\n",
+        encoding="utf-8",
+    )
+
+    result = execute_security_query(
+        store,
+        QueryCriteria(
+            attacker_ip="198.51.100.50",
+            start_time="2026-04-30T09:59:00Z",
+            end_time="2026-04-30T10:01:00Z",
+        ),
+    )
+
+    assert result.row_count == 1
+    assert result.rows[0]["event_id"] == "evt-good"
 
 
 def test_tools_require_time_range_and_support_hunt_and_trace_case(tmp_path):

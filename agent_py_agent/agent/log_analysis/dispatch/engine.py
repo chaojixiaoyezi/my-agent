@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from ..agents.contracts import normalize_evidence_refs, review_analyst_report
 from ..agents.summaries import render_case_summary, summarize_case
 from .budgets import DispatchBudget
+from .health import build_health_summary
 from .queue import DispatchRequest, InvestigationQueue
 
 
@@ -19,9 +20,44 @@ class DispatchResult:
     reason: str
     agent_id: str = ""
 
+    @property
+    def case_id(self) -> str:
+        return self.request.case_id
+
+    @property
+    def status(self) -> str:
+        return self.request.status
+
+    @property
+    def run_id(self) -> str:
+        return self.agent_id or self.request.request_id
+
+    @property
+    def message(self) -> str:
+        return self.reason
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request.request_id,
+            "dispatched": self.dispatched,
+            "agent_id": self.agent_id,
+            "priority": self.request.priority,
+            "evidence_refs": list(self.request.evidence_refs),
+        }
+
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["request"] = self.request.to_dict()
+        payload.update(
+            {
+                "case_id": self.case_id,
+                "status": self.status,
+                "run_id": self.run_id,
+                "message": self.message,
+                "metadata": self.metadata,
+            }
+        )
         return payload
 
 
@@ -100,6 +136,24 @@ class DispatchEngine:
         agent_id = f"analyst-{request.request_id}"
         self.queue.mark_dispatched(request.request_id, agent_id=agent_id)
         return DispatchResult(request=request, dispatched=True, reason="dispatched", agent_id=agent_id)
+
+    def enqueue_case(
+        self,
+        case: Any,
+        *,
+        context: Mapping[str, Any] | None = None,
+    ) -> DispatchResult:
+        """Public protocol alias for submit_case.
+
+        The current local engine does not need context to enqueue a case, but
+        accepting it keeps the pluggable interface stable.
+        """
+
+        _ = context
+        return self.submit_case(case)
+
+    def health(self) -> dict[str, Any]:
+        return build_health_summary(queue=self.queue, budget=self.budget).to_dict()
 
     def build_analyst_input(self, request: DispatchRequest) -> dict[str, Any]:
         """Return the small object sent to an analyst subagent."""

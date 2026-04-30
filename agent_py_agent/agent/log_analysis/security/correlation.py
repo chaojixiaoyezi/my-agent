@@ -82,9 +82,19 @@ def route_from_case(case: CaseRecord | Mapping[str, Any]) -> RouteDraft:
 
 def _extract_findings(case: CaseRecord, findings: Sequence[Finding | Mapping[str, Any]] | None) -> list[Finding]:
     if findings is not None:
-        return [item if isinstance(item, Finding) else Finding.from_dict(item) for item in findings]
+        return _filter_findings_for_case(case, [item if isinstance(item, Finding) else Finding.from_dict(item) for item in findings])
     attributes = case.attributes if isinstance(case.attributes, Mapping) else {}
-    return [Finding.from_dict(item) for item in attributes.get("finding_summaries", []) if isinstance(item, Mapping)]
+    return _filter_findings_for_case(
+        case,
+        [Finding.from_dict(item) for item in attributes.get("finding_summaries", []) if isinstance(item, Mapping)],
+    )
+
+
+def _filter_findings_for_case(case: CaseRecord, findings: Sequence[Finding]) -> list[Finding]:
+    refs = {str(ref) for ref in case.finding_refs if str(ref or "").strip()}
+    if not refs:
+        return list(findings)
+    return [finding for finding in findings if finding.finding_id in refs]
 
 
 def _fact_for_finding(finding: Finding) -> dict[str, Any]:

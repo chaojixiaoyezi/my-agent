@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .storage import LocalLogStore, QueryCriteria, QueryResult, execute_security_query
+from .storage import DEFAULT_QUERY_LIMIT, LocalLogStore, QueryCriteria, QueryResult, execute_security_query
 
 
 def security_query(
@@ -19,7 +19,9 @@ def security_query(
     alert_type: str | None = None,
     start_time: str | None = None,
     end_time: str | None = None,
-    limit: int = 100,
+    # TODO: Wire query_default_limit/query_max_limit from runtime config when that
+    # configuration surface lands; storage.normalize_limit enforces MAX_QUERY_LIMIT.
+    limit: int = DEFAULT_QUERY_LIMIT,
 ) -> dict[str, Any]:
     local_store = _store(store, root)
     result = execute_security_query(
@@ -46,7 +48,7 @@ def hunt_ip(
     role: str = "any",
     start_time: str | None = None,
     end_time: str | None = None,
-    limit: int = 100,
+    limit: int = DEFAULT_QUERY_LIMIT,
 ) -> dict[str, Any]:
     if role not in {"any", "attacker", "victim"}:
         raise ValueError("role must be one of: any, attacker, victim")
@@ -101,7 +103,7 @@ def trace_case(
     root: str | Path | None = None,
     start_time: str | None = None,
     end_time: str | None = None,
-    limit: int = 100,
+    limit: int = DEFAULT_QUERY_LIMIT,
 ) -> dict[str, Any]:
     local_store = _store(store, root)
     case = local_store.get_case(case_id)

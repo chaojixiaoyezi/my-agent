@@ -10,3 +10,12 @@
 - HTTP 后端测试：`agent_py_agent/tests/test_backends.py`
 - HTTP 后端回归日志：`validation/test-report-http-backends.txt`
 - 循环智能体测试：`validation/test-report-chat-loop.txt`
+
+## 2026-04-30 / 日志分析第一版验收证据
+
+- 阶段提交：`97b8bc4 Add log analysis foundation`
+- 全量测试：`python -m pytest`，初验 `155 passed`，修复后复验 `164 passed`。
+- LOG 专项测试：`python -m pytest agent_py_agent\tests\test_log_analysis_models.py agent_py_agent\tests\test_log_analysis_ingest.py agent_py_agent\tests\test_log_analysis_query.py agent_py_agent\tests\test_log_analysis_dispatch.py agent_py_agent\tests\test_log_analysis_detectors.py`，初验 `24 passed`，修复后 `33 passed`。
+- 语法检查：`python -m py_compile` 覆盖 `agent_py_agent/agent/log_analysis/**/*.py`，通过。
+- 父验收复现失败：`ingest_file(fixture, root=td)` 默认写入 3 条事件后，`security_query(root=td, start_time=..., end_time=...)` 返回 `row_count=0`，说明 ingest/query 默认路径断裂。
+- 修复后复现：同一脚本返回 `stored=3`、`events_path=<td>/events.jsonl`、`query_rows=3`、`preview_rows=3`。
