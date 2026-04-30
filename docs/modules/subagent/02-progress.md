@@ -8,6 +8,7 @@
 - workflow router、compiler、parent acceptance planner 已有 dry-run 规划链路。
 - `my-agent subagents-workflow-plan "<goal>"` 可预览 worker 拆分和父级验收清单。
 - LOG 模块已经验证了一条专项 apply path：把受控 work-order plan 落成真实 `SubAgentTask`，但不自动执行。
+- 第一版代码/文档/注释同步门已落地：`scripts/check_doc_sync.py` 会检查 covered module 的代码改动是否同步更新模块文档和同文件注释。
 
 ## 解决的问题
 
@@ -15,6 +16,7 @@
 - 用户可以少说任务怎么拆，系统先用模板和 dry-run 预览补足常见派工结构。
 - worker 自述完成不会直接变成最终完成，父级验收门被放进计划和任务结构里。
 - 文档四件套给后续模块讨论、推进、初心、结构说明提供固定位置，减少散乱文档继续膨胀。
+- 同步门把“改功能就更新文档和注释”从口头约定变成可执行检查，降低 worker 并行开发时漏补文档的概率。
 
 ## 下一步
 
@@ -22,6 +24,7 @@
 - 将已保存的 workflow preview 附到真实 dispatch 记录。
 - 持久化结构化 acceptance report，区分 worker 自述和父级验收结论。
 - 补更多内置 workflow 模板和失败样本回归。
+- 给 memory、gateway、live-lab 等模块补四件套后，把它们加入 `scripts/check_doc_sync.py` 的 `MODULE_RULES`。
 
 ## 已跑测试
 
@@ -31,11 +34,14 @@
 - 父会话 focused 组合验收：`python -m pytest agent_py_agent\tests\test_log_analysis_dispatch.py agent_py_agent\tests\test_subagent_workflow_planner.py` -> `26 passed`。
 - 父会话全量回归：`python -m pytest` -> `236 passed`。
 - 空白检查：`git diff --check` -> passed。
+- 同步门 focused 验收：`python -m pytest agent_py_agent\tests\test_doc_sync.py` -> `3 passed`。
+- 同步门手工检查：`python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`。
 
 ## 未跑测试
 
 - 当前尚未为通用 workflow apply path 增加测试，因为本轮只做 LOG 专项任务创建。
 - 后续如果接入真实 dispatch，需要补跑 subagent workflow 专项测试和全量 pytest。
+- 同步门目前只覆盖 `log-analysis` 和 `subagent` 两个模块；其它模块还需要先补四件套和规则映射。
 
 ## 风险
 

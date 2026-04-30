@@ -5,6 +5,7 @@
 - [ ] `python3 -m py_compile agent_py_agent/agent/*.py agent_py_agent/__main__.py`
 - [ ] `python3 -m agent_py_agent --help`
 - [ ] `git diff --check`
+- [ ] `python scripts/check_doc_sync.py`，确认代码、模块文档和同文件注释同步更新
 - [ ] 收口前运行 `python3 agent_py_agent/tests/run_tests.py`，并确认它使用真实 API
 - [ ] 确认完整冒烟打印 `FULL_SMOKE_TEST_WORKSPACE=...`，测试数据没有污染默认 `agent_py_agent/data/`
 - [ ] 确认完整冒烟脚本自动发现并运行了所有 `test_*.py` / `test_` 函数
