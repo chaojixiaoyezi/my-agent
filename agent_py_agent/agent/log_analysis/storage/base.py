@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, fields, is_dataclass
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Protocol, TypeVar, runtime_checkable
@@ -120,6 +120,19 @@ class QueryResult:
     summary: dict[str, Any]
     rows: list[dict[str, Any]]
     preview_rows: list[dict[str, Any]]
+
+
+@dataclass
+class JsonlReadAudit:
+    path: str
+    read_at: str
+    total_lines: int = 0
+    blank_lines: int = 0
+    valid_records: int = 0
+    corrupt_lines: int = 0
+    non_object_lines: int = 0
+    skipped_lines: int = 0
+    samples: list[dict[str, Any]] = field(default_factory=list)
 
 
 @runtime_checkable

@@ -2587,3 +2587,8 @@ WAF generic anomaly + EDR process anomaly + rare egress -> suspected_zero_day_in
 - 自动执行隔离主机、封禁账号、封禁 IP 等高风险处置。
 
 大白话：先让这个系统能在单机上可靠处理不断增长的日志，并把异常派给 agent 查清楚；再把存储、计算和 ML 后端替换成集群。
+## 2026-04-30 Current Landing Note
+
+- Storage Audit slice landed: bad JSONL lines now produce a read audit, sampled corrupt/non-object rows are persisted to `corrupt_lines.jsonl`, and query summaries include skipped/corrupt counts.
+- This resolves the earlier backlog item where local JSONL reads skipped bad lines without an audit or metric.
+- Next recommended log-analysis slices: align storage query limits with config, wire `logs/security` capabilities into normal run/chat runtime, then build Live Lab scenario replay.

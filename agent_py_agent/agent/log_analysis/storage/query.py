@@ -67,6 +67,7 @@ def execute_security_query(
     limit = normalize_limit(query.limit)
     parameters = _criteria_to_parameters(query, limit)
     rows = [row for row in store.list_events() if _matches(row, query)]
+    event_read_audit = store.last_read_audit(store.events_path)
     rows.sort(key=lambda row: str(event_time_value(row) or ""))
     row_count = len(rows)
     truncated = row_count > limit
@@ -74,6 +75,10 @@ def execute_security_query(
     summary = summarize_rows(rows, parameters)
     summary["returned_row_count"] = len(limited_rows)
     summary["truncated"] = truncated
+    if event_read_audit:
+        summary["storage_read_audit"] = event_read_audit
+        summary["skipped_storage_lines"] = event_read_audit.get("skipped_lines", 0)
+        summary["corrupt_storage_lines"] = event_read_audit.get("corrupt_lines", 0)
     query_id = _query_id(parameters)
     evidence = LocalEvidenceStore(store.root).write_query_result(
         query_id=query_id,

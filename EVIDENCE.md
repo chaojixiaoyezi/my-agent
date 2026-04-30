@@ -37,3 +37,22 @@
 - 父会话相关回归：`python -m pytest agent_py_agent\tests\test_packaging.py agent_py_agent\tests\test_agent.py agent_py_agent\tests\test_tools.py`，结果 `63 passed`。
 - 全量测试：`python -m pytest`，结果 `186 passed`。
 - 格式检查：`git diff --check` 通过。
+## 2026-04-30 / Subagent Workflow Phase 3 and Log Storage Audit Evidence
+
+- Three-worker batch:
+  - Router worker: `agent_py_agent/agent/subagent_workflows/router.py`, `agent_py_agent/tests/test_subagent_workflow_router.py`.
+  - Compiler worker: `agent_py_agent/agent/subagent_workflows/compiler.py`, `agent_py_agent/tests/test_subagent_workflow_compiler.py`.
+  - Parent gate worker: `agent_py_agent/agent/subagent_workflows/acceptance.py`, `agent_py_agent/tests/test_subagent_workflow_acceptance.py`.
+- Parent integration:
+  - Exported router/compiler/acceptance APIs from `agent_py_agent.agent.subagent_workflows`.
+  - Added Chinese routing regressions for quality delivery and log-analysis development tasks.
+  - Fixed a `tooling.registry` / `log_analysis.tools` import cycle by lazily importing security tools during registry construction.
+- Log storage audit:
+  - Added `JsonlReadAudit`.
+  - `LocalLogStore` records last read audits and persists corrupt/non-object JSONL samples to `corrupt_lines.jsonl`.
+  - Query summaries and persisted query records include `storage_read_audit`, `skipped_storage_lines`, and `corrupt_storage_lines`.
+- Focused verification:
+  - `python -m pytest agent_py_agent\tests\test_log_analysis_query.py agent_py_agent\tests\test_log_analysis_ingest.py` -> `9 passed`.
+  - `python -m pytest agent_py_agent\tests\test_subagent_workflow_router.py agent_py_agent\tests\test_subagent_workflow_compiler.py agent_py_agent\tests\test_subagent_workflow_acceptance.py agent_py_agent\tests\test_subagent_workflow_templates.py agent_py_agent\tests\test_subagent_workflow_config.py` -> `29 passed`.
+- Full verification:
+  - `python -m pytest` -> `207 passed`.

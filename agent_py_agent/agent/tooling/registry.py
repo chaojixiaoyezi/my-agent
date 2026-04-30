@@ -21,7 +21,6 @@ from .filesystem import (
     WriteFileTool,
 )
 from ..log_analysis.capabilities import SECURITY_TOOL_NAMES, has_security_tool_capability
-from ..log_analysis.tools import SecurityHuntIpTool, SecurityQueryTool, SecurityTraceCaseTool
 from .models import (
     BaseTool,
     HybridToolRetriever,
@@ -86,6 +85,8 @@ class ToolRegistry:
         self.register(ReplaceInFileTool(self.workspace_root))
         self.register(FetchUrlTool(max_chars=web_max_chars, timeout=http_timeout))
         self.register(HttpRequestTool(max_chars=web_max_chars, timeout=http_timeout))
+        from ..log_analysis.tools import SecurityHuntIpTool, SecurityQueryTool, SecurityTraceCaseTool
+
         self.register(SecurityQueryTool(self.workspace_root))
         self.register(SecurityHuntIpTool(self.workspace_root))
         self.register(SecurityTraceCaseTool(self.workspace_root))

@@ -493,3 +493,11 @@ Phase 10：失败沉淀
 - PDF 翻译类：抽第一页、中段、后半段、附录、参考文献、图表密集页。
 - 日志分析类：抽异常时间线、错误栈、来源证据、建议动作。
 - 代码补丁类：抽 diff 范围、测试结果、兼容入口、未解决风险。
+## 2026-04-30 Implementation Note: Workflow Router / Compiler / Parent Gate
+
+- Status: Phase 3 first slice landed in code and focused tests.
+- Solves: users can describe the task in natural language while the system selects a workflow template, compiles template phases into reviewable worker dispatch specs, and creates a parent-side acceptance plan before trusting worker output.
+- Router: supports `auto`, `manual`, and `off`; honors explicit template ids; falls back safely; recognizes English and common Chinese code/quality task wording.
+- Compiler: turns workflow phases into worker specs with dependencies, write boundaries, evidence requirements, non-rollback warnings, and `cannot_self_accept`.
+- Parent gate: merges template acceptance and `QualityContract` checks, adds anti-worker-PASS checks, and requires a critic gate for producer/critic/repair workflows.
+- Remaining after this slice: wire these plans into real chat/gateway/spawn dispatch, add more built-in workflow templates, and persist structured acceptance reports.

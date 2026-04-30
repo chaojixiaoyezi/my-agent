@@ -15,12 +15,14 @@ from .base import (
     Case,
     EvidenceRef,
     Finding,
+    JsonlReadAudit,
     NormalizedEvent,
     QueryRecord,
     canonical_json,
     default_log_analysis_root,
     model_to_dict,
     record_identity,
+    utc_now,
 )
 
 
@@ -31,6 +33,7 @@ class LocalLogStore:
         self.root = Path(root) if root is not None else default_log_analysis_root()
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "evidence").mkdir(parents=True, exist_ok=True)
+        self._last_read_audits: dict[str, dict[str, Any]] = {}
 
     @property
     def events_path(self) -> Path:
@@ -51,6 +54,15 @@ class LocalLogStore:
     @property
     def queries_path(self) -> Path:
         return self.root / "queries.jsonl"
+
+    @property
+    def corrupt_lines_path(self) -> Path:
+        return self.root / "corrupt_lines.jsonl"
+
+    def last_read_audit(self, path: str | Path | None = None) -> dict[str, Any]:
+        if path is None:
+            return dict(self._last_read_audits)
+        return dict(self._last_read_audits.get(str(Path(path)), {}))
 
     def upsert_event(self, event: NormalizedEvent | dict[str, Any]) -> bool:
         return self._upsert_one(self.events_path, event, EVENT_ID_FIELDS)
@@ -123,16 +135,53 @@ class LocalLogStore:
         return records
 
     def _read_jsonl(self, path: Path) -> list[dict[str, Any]]:
+        audit = JsonlReadAudit(path=str(path), read_at=utc_now())
         if not path.exists():
+            self._last_read_audits[str(path)] = model_to_dict(audit)
             return []
         records: list[dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
+        for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            audit.total_lines += 1
             if not line.strip():
+                audit.blank_lines += 1
                 continue
             try:
                 payload = json.loads(line)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                audit.corrupt_lines += 1
+                audit.skipped_lines += 1
+                _add_audit_sample(audit, line_no, "invalid_json", line, str(exc))
                 continue
             if isinstance(payload, dict):
                 records.append(payload)
+                audit.valid_records += 1
+                continue
+            audit.non_object_lines += 1
+            audit.skipped_lines += 1
+            _add_audit_sample(audit, line_no, "non_object_json", line)
+        audit_payload = model_to_dict(audit)
+        self._last_read_audits[str(path)] = audit_payload
+        if path != self.corrupt_lines_path and (audit.corrupt_lines or audit.non_object_lines):
+            append_jsonl(self.corrupt_lines_path, audit_payload, sort_keys=True)
         return records
+
+
+def _add_audit_sample(
+    audit: JsonlReadAudit,
+    line_no: int,
+    reason: str,
+    line: str,
+    detail: str = "",
+    *,
+    max_samples: int = 5,
+) -> None:
+    if len(audit.samples) >= max_samples:
+        return
+    sample: dict[str, Any] = {
+        "line_no": line_no,
+        "reason": reason,
+        "preview": line[:200],
+    }
+    if detail:
+        sample["detail"] = detail
+    audit.samples.append(sample)
