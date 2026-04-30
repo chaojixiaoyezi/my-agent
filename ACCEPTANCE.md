@@ -211,3 +211,28 @@ Remaining:
 - [ ] Add an apply/manual-confirm path that turns LOG work-order plans into real `SubAgentTask` records.
 - [ ] Connect persisted workflow previews to real dispatch records.
 - [ ] Add parent acceptance reports for completed LOG analyst/reviewer runs.
+
+## 2026-04-30 / LOG SubAgentTask Apply Path and Module Docs Acceptance
+
+Status:
+- [x] Explicit LOG work-order apply path landed.
+- [x] Module-level four-piece documentation convention landed.
+
+Problems solved:
+- [x] LOG analyst/reviewer work-order plans can now be materialized into real `SubAgentTask` records after the parent session opts in with `apply=True`.
+- [x] The apply path creates auditable task records only; it does not invoke a runner, call a model, or mark work as verified.
+- [x] Created LOG tasks carry role, allowed tools, evidence refs, acceptance checks, quality contract, context manifest, context packs, and parent final gate metadata.
+- [x] Plans without evidence refs refuse task creation, so unsupported LOG analysis is not silently delegated.
+- [x] Docs now have a module home under `docs/modules/`, with discussion, progress, purpose, and structure docs for `subagent` and `log-analysis`.
+- [x] Progress docs now include a "Solved problems" section so each development slice records why it mattered, not only what changed.
+
+Accepted evidence:
+- [x] Focused tests passed: `python -m pytest agent_py_agent\tests\test_log_analysis_dispatch.py agent_py_agent\tests\test_subagent_workflow_planner.py` -> `26 passed`.
+- [x] Full regression passed: `python -m pytest` -> `236 passed`.
+- [x] Whitespace check passed: `git diff --check`.
+
+Remaining:
+- [ ] Add a CLI or parent-session manual-confirm command for the LOG apply path.
+- [ ] Replace placeholder `evidence_read` with a bounded, audited evidence-ref reader before real analyst execution.
+- [ ] Persist reviewer decisions and parent acceptance reports for completed LOG analyst/reviewer runs.
+- [ ] Continue moving module knowledge from root docs into `docs/modules/<module>/` during real feature work.

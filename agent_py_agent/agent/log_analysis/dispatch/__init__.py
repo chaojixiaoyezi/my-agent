@@ -18,7 +18,9 @@ from .queue import (
 from .work_orders import (
     LogAnalysisWorkOrderPlan,
     SubagentWorkOrder,
+    SubagentWorkOrderCreationResult,
     build_log_analysis_work_orders,
+    create_subagent_tasks_from_work_order_plan,
     plan_case_subagent_work_orders,
 )
 
@@ -40,8 +42,10 @@ __all__ = [
     "REJECTED",
     "REVIEWED",
     "SubagentWorkOrder",
+    "SubagentWorkOrderCreationResult",
     "build_health_summary",
     "build_log_analysis_work_orders",
+    "create_subagent_tasks_from_work_order_plan",
     "plan_case_subagent_work_orders",
     "render_health_summary",
 ]

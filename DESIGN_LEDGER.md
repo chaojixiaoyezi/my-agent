@@ -1681,3 +1681,14 @@ def example(...):
 不建议：
 - 不在当前大文件状态下把 650 个函数一次性塞长注释；这会让 `__main__.py` 和 `subagent.py` 更难读。
 - 不把注释当设计替代品；复杂流程仍应通过类型、报告 JSON、测试和 runbook 表达。
+## 2026-04-30 / 模块文档四件套导航
+
+状态：部分落地
+
+导航：新的模块级长期文档入口是 [docs/modules/README.md](docs/modules/README.md)。每个功能模块使用四件套：`01-discussion.md` 记录灵感和讨论，`02-progress.md` 记录推进、解决的问题和测试，`03-purpose.md` 解释初心和设计想法，`04-structure.md` 说明结构树、核心文件、数据流和新手学习路径。
+
+首批模块索引已建立：
+- [docs/modules/subagent/](docs/modules/subagent/)：链接 subagent 质量契约、受控派工、workflow preview 和旧 runbook。
+- [docs/modules/log-analysis/](docs/modules/log-analysis/)：链接日志分析 design、backlog、acceptance、evidence 和当前 work order 方向。
+
+维护约定：旧文档暂不搬迁；本台账继续只放摘要和导航，模块细节后续优先追加到 `docs/modules/<module>/`。

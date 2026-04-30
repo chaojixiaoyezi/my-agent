@@ -684,3 +684,19 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - `agent_py_agent/agent/subagent_workflows/planner.py`: adds audit-friendly `WorkflowPlanningResult.to_dict()` and `write_workflow_plan_preview()`.
 - `agent_py_agent/cli/subagents.py`: `subagents-workflow-plan` can write JSON/Markdown previews with `--output-dir`.
 - `scripts/live_lab/log_analysis_replay.py`: validation-only `simulate_failure_stage` can exercise evidence/report failure gates from tests.
+## 2026-04-30 文档结构补充
+
+新增模块文档入口：`docs/modules/`。这里按功能模块保存四件套文档，不移动旧文档，只做新入口和逐步补齐。
+
+```text
+docs/
+|-- README.md                         # docs 顶层导航，说明 design 与 modules 的关系
+|-- design/                           # 旧有长篇设计文档索引，继续承接 DESIGN_LEDGER 的长设计细节
+`-- modules/                          # 按功能模块组织的四件套文档
+    |-- README.md                     # 四件套规范、命名、更新时机和测试记录要求
+    |-- _template/                    # 新模块可复制的 01-04 模板
+    |-- subagent/                     # subagent 首批四件套索引
+    `-- log-analysis/                 # log-analysis 首批四件套索引
+```
+
+模块四件套固定为：`01-discussion.md`、`02-progress.md`、`03-purpose.md`、`04-structure.md`。其中 `02-progress.md` 必须保留“已完成 / 解决的问题 / 下一步 / 已跑测试 / 未跑测试 / 风险”六段，方便并行 worker 和初学者快速判断模块状态。

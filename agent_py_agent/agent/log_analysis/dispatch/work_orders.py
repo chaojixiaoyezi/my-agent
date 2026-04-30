@@ -3,7 +3,7 @@ from __future__ import annotations
 """Dry-run work-order planning for log-analysis subagents."""
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
 
 from ..agents.contracts import (
     DEFAULT_ACCEPTANCE_CHECKS,
@@ -17,6 +17,12 @@ DEFAULT_REVIEWER_TOOLS = ["evidence_read"]
 
 PARENT_FINAL_GATE = "parent_session_final_approval_required"
 NO_EVIDENCE_ISSUE = "case has no evidence_refs; analyst/reviewer work orders are not ready"
+PLAN_NOT_READY_ISSUE = "work-order plan is not ready; refusing to create subagent tasks"
+
+
+class SubAgentTaskCreator(Protocol):
+    def create_run(self, **kwargs: Any) -> Any:
+        ...
 
 
 @dataclass
@@ -62,6 +68,24 @@ class LogAnalysisWorkOrderPlan:
         payload = asdict(self)
         payload["work_orders"] = [order.to_dict() for order in self.work_orders]
         return payload
+
+
+@dataclass
+class SubagentWorkOrderCreationResult:
+    """Result from optionally materializing work orders into SubAgentTask records."""
+
+    case_id: str
+    ready: bool
+    apply: bool
+    dry_run: bool
+    mode: str
+    created: list[dict[str, Any]] = field(default_factory=list)
+    task_ids: list[str] = field(default_factory=list)
+    issues: list[str] = field(default_factory=list)
+    risks: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def _get(source: Any, key: str, default: Any = None) -> Any:
@@ -187,12 +211,146 @@ def plan_case_subagent_work_orders(
 build_log_analysis_work_orders = plan_case_subagent_work_orders
 
 
+def _work_order_quality_contract(order: SubagentWorkOrder) -> dict[str, Any]:
+    source = order.context.get("quality_contract")
+    inherited = dict(source) if isinstance(source, Mapping) else {}
+    evidence_required = _merge_unique(inherited.get("evidence_required"), order.evidence_refs)
+    must_check = list(order.acceptance_checks)
+    for item in inherited.get("must_check", []):
+        text = str(item or "").strip()
+        if text and text not in must_check:
+            must_check.append(text)
+    return {
+        **inherited,
+        "user_visible_goal": inherited.get("user_visible_goal") or order.goal,
+        "quality_bar": inherited.get("quality_bar") or "Evidence-backed log analysis for parent final review.",
+        "evidence_required": evidence_required,
+        "must_check": must_check,
+        "final_judge": "parent_final_gate",
+        "cannot_self_accept": True,
+        "parent_final_gate": True,
+    }
+
+
+def _work_order_context_pack(order: SubagentWorkOrder) -> dict[str, Any]:
+    return {
+        "name": "log-analysis-work-order",
+        "case_id": order.case_id,
+        "role": order.role,
+        "evidence_refs": list(order.evidence_refs),
+        "route_summary": dict(order.context.get("route_summary") or {}),
+        "quality_contract": _work_order_quality_contract(order),
+        "cannot_self_accept": order.cannot_self_accept,
+        "parent_final_gate": order.parent_final_gate,
+        "case_summary": order.context.get("case_summary", ""),
+        "handoff_contract": order.context.get("handoff_contract", ""),
+        "expected_input": order.context.get("expected_input", ""),
+        "expected_output": order.context.get("expected_output", ""),
+    }
+
+
+def _work_order_plan_steps(order: SubagentWorkOrder) -> list[str]:
+    steps = [
+        f"Read the focused context pack for case {order.case_id}.",
+        "Use only allowed tools and retained evidence_refs.",
+        "Produce the role-specific contract output without claiming final acceptance.",
+        "Leave final approval to the parent session gate.",
+    ]
+    if order.role == "reviewer":
+        steps.insert(1, "Check the analyst report against the evidence boundary before any approval recommendation.")
+    return steps
+
+
+def create_subagent_tasks_from_work_order_plan(
+    subagents: SubAgentTaskCreator,
+    plan: LogAnalysisWorkOrderPlan,
+    *,
+    apply: bool = False,
+    parent_id: str = "",
+    root_id: str = "",
+    final_owner: str = "parent",
+) -> SubagentWorkOrderCreationResult:
+    """Create SubAgentTask records from a log-analysis work-order plan.
+
+    This is a manual materialization step only. It never invokes a runner,
+    model, or analysis loop.
+    """
+
+    mode = "apply" if apply else "dry_run"
+    issues = list(plan.issues)
+    risks = list(plan.risks)
+    if not plan.ready and PLAN_NOT_READY_ISSUE not in issues:
+        issues.append(PLAN_NOT_READY_ISSUE)
+    result = SubagentWorkOrderCreationResult(
+        case_id=plan.case_id,
+        ready=plan.ready,
+        apply=apply,
+        dry_run=not apply,
+        mode=mode,
+        issues=issues,
+        risks=risks,
+    )
+    if not apply or not plan.ready:
+        return result
+
+    for order in plan.work_orders:
+        if not order.ready:
+            issue = f"{order.role} work order is not ready; skipped"
+            if issue not in result.issues:
+                result.issues.append(issue)
+            continue
+        quality_contract = _work_order_quality_contract(order)
+        context_pack = _work_order_context_pack(order)
+        task = subagents.create_run(
+            goal=order.goal,
+            thought=(
+                f"Manual LOG {order.role} work order for {order.case_id}; "
+                "stay evidence-bound and leave final acceptance to the parent."
+            ),
+            plan=_work_order_plan_steps(order),
+            agent_name=f"log-{order.role}",
+            role=order.role,
+            parent_id=parent_id,
+            root_id=root_id,
+            allowed_tools=list(order.allowed_tools),
+            owner=order.role,
+            supervisor=parent_id or "parent",
+            final_owner=final_owner,
+            acceptance_checks=list(order.acceptance_checks),
+            quality_contract=quality_contract,
+            context_manifest={
+                "task_pack_refs": [
+                    f"log-analysis-case:{order.case_id}",
+                    *[f"evidence:{ref}" for ref in order.evidence_refs],
+                ],
+                "role_pack": f"log-analysis-{order.role}",
+                "quality_contract_ref": "context_packs[0].quality_contract",
+                "omitted_context": ["raw_events", "transcript", "runner_result"],
+            },
+            context_packs=[context_pack],
+        )
+        result.task_ids.append(str(task.id))
+        result.created.append(
+            {
+                "task_id": str(task.id),
+                "case_id": order.case_id,
+                "role": order.role,
+                "status": getattr(task, "status", ""),
+                "verification_status": getattr(task, "verification_status", ""),
+            }
+        )
+    return result
+
+
 __all__ = [
     "DEFAULT_REVIEWER_TOOLS",
     "LogAnalysisWorkOrderPlan",
     "NO_EVIDENCE_ISSUE",
     "PARENT_FINAL_GATE",
+    "PLAN_NOT_READY_ISSUE",
     "SubagentWorkOrder",
+    "SubagentWorkOrderCreationResult",
     "build_log_analysis_work_orders",
+    "create_subagent_tasks_from_work_order_plan",
     "plan_case_subagent_work_orders",
 ]

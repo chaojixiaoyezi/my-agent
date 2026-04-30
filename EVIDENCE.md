@@ -120,3 +120,19 @@
 - Full verification:
   - `python -m pytest` -> `233 passed`.
   - `git diff --check` -> passed.
+
+## 2026-04-30 / LOG SubAgentTask Apply Path and Module Docs Evidence
+
+- Two-worker batch:
+  - LOG apply worker `019ddd12-4cd2-7f62-9a6d-2a7a3f87d054`: `agent_py_agent/agent/log_analysis/dispatch/work_orders.py`, dispatch exports, and dispatch tests.
+  - Module docs worker `019ddd12-8e7d-77b1-bdfa-f47251b8d3b5`: `docs/README.md`, `docs/modules/`, `DESIGN_LEDGER.md`, and `CODEBASE_TREE.md`.
+- Parent integration:
+  - Added `create_subagent_tasks_from_work_order_plan(..., apply=True)` for explicit LOG task materialization.
+  - Verified default dry-run behavior creates no tasks.
+  - Verified not-ready/no-evidence plans refuse creation.
+  - Updated module progress docs to include solved problems, current test status, and remaining risks.
+- Focused verification:
+  - `python -m pytest agent_py_agent\tests\test_log_analysis_dispatch.py agent_py_agent\tests\test_subagent_workflow_planner.py` -> `26 passed`.
+- Full verification:
+  - `python -m pytest` -> `236 passed`.
+  - `git diff --check` -> passed.
