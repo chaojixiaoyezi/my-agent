@@ -41,6 +41,22 @@
 - Phase 1 从 `SubAgentTask` / `execution_context` 的质量契约、角色字段、context manifest 和默认 core context pack 开始。
 - 详细开发步骤、内置项、开关项和用户必须表达的内容见模块设计文档。
 
+## 2026-04-30 / Log Analysis 第一版验收与 worker 切片
+
+状态：部分落地
+
+模块设计文档：[docs/design/log-analysis.md](docs/design/log-analysis.md)
+
+摘要：
+- 日志分析第一版已经有 SecurityAlertV1 接入、JSONL store、受控 query、软检测器、case、route/report 和 analyst/reviewer 合同。
+- 父会话初验发现 ingest/query 默认路径、EvidenceRef、dispatch contract、case dedup、缺时间戳关联、report finding 过滤等 P0/P1 问题。
+- 已拆给 worker 修复并复验：LOG 专项 33 passed，全量 164 passed，手工 ingest->query 闭环从 0 rows 修到 3 rows。
+- 剩余主要是 CLI、tool registry、安全 prompt profile、结构化 query plan、storage audit 和 Live Lab replay。
+
+后续方向：
+- 下一批 worker 优先做 CLI/配置贯通、主工具 registry 接入、结构化 next query、storage audit、Live Lab replay。
+- 是否引入 DuckDB/Parquet/Kafka/ML 依赖仍由父会话裁决，不交给 worker 默认决定。
+
 ## 2026-04-29 / 可见真实环境测试台 Live Lab
 
 状态：部分落地

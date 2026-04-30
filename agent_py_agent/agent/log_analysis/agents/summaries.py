@@ -3,7 +3,7 @@ from __future__ import annotations
 """Compact summaries for parent-session and subagent handoff."""
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Mapping
 
 from .contracts import normalize_evidence_refs
@@ -44,7 +44,10 @@ EVIDENCE_REF_FIELDS = (
     "query_id",
     "path",
     "uri",
+    "content_hash",
+    "sha256",
     "source",
+    "source_id",
     "summary",
     "row_count",
     "truncated",
@@ -73,10 +76,21 @@ def _get(source: Any, key: str, default: Any = None) -> Any:
     return getattr(source, key, default)
 
 
+def _to_mapping(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    if hasattr(value, "to_dict") and callable(value.to_dict):
+        payload = value.to_dict()
+        return payload if isinstance(payload, Mapping) else {}
+    if is_dataclass(value):
+        return asdict(value)
+    return {}
+
+
 def _items(source: Any) -> list[Any]:
     if source is None:
         return []
-    if isinstance(source, (str, Mapping)):
+    if isinstance(source, str) or _to_mapping(source):
         return [source]
     try:
         return list(source)
@@ -153,13 +167,22 @@ def _summarize_evidence(evidence: Any) -> list[dict[str, Any] | str]:
     output: list[dict[str, Any] | str] = []
     seen: set[str] = set()
     for item in _items(evidence)[:12]:
-        if isinstance(item, Mapping):
+        mapping = _to_mapping(item)
+        if mapping:
             compact: dict[str, Any] = {}
             for field_name in EVIDENCE_REF_FIELDS:
-                value = item.get(field_name)
+                value = mapping.get(field_name)
                 if value in (None, "", [], {}):
                     continue
                 compact[field_name] = _compact_text(value)
+            metadata = mapping.get("metadata")
+            if isinstance(metadata, Mapping):
+                evidence_path = metadata.get("evidence_path") or metadata.get("path")
+                if evidence_path and "path" not in compact:
+                    compact["path"] = _compact_text(evidence_path)
+                sha256 = metadata.get("sha256") or metadata.get("content_hash")
+                if sha256 and "sha256" not in compact and "content_hash" not in compact:
+                    compact["sha256"] = _compact_text(sha256)
             ref_key = json.dumps(compact, ensure_ascii=False, sort_keys=True)
             if compact and ref_key not in seen:
                 output.append(compact)

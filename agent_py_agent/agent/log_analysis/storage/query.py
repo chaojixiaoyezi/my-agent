@@ -72,11 +72,13 @@ def execute_security_query(
     truncated = row_count > limit
     limited_rows = rows[:limit]
     summary = summarize_rows(rows, parameters)
+    summary["returned_row_count"] = len(limited_rows)
+    summary["truncated"] = truncated
     query_id = _query_id(parameters)
     evidence = LocalEvidenceStore(store.root).write_query_result(
         query_id=query_id,
         parameters=parameters,
-        rows=rows,
+        rows=limited_rows,
         row_count=row_count,
         truncated=truncated,
         summary=summary,

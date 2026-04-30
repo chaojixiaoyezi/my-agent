@@ -22,6 +22,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |-- docs/                                      # 长篇项目文档目录
 |   `-- design/                                # 模块设计文档，承载 DESIGN_LEDGER 的长篇细节
 |       |-- README.md                          # 模块设计文档索引和拆分规则
+|       |-- log-analysis.md                    # 日志分析模块验收状态、剩余缺口和 worker 切片
 |       `-- subagent-quality-contract.md       # subagent 质量契约、受控施工队和用户少说派工设计
 |-- scripts/                                   # 开发辅助脚本，放可见测试台和 workstream 管理入口
 |   |-- live_agent_lab.py                      # Live Lab 薄入口，启动可见真实环境测试台
@@ -69,6 +70,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- gateway_parts/                     # gateway 路径、IO、进程控制、恢复、运行时、adapter、索引日志
 |   |   |-- local_store.py                     # LocalStore 兼容组合入口，真实实现已拆到 local_storage/
 |   |   |-- local_storage/                     # LocalStore models/schema/records/search/events/maintenance
+|   |   |-- log_analysis/                      # 可选日志分析底座，负责安全日志接入、解析、查询、检测、case、报告和 analyst 派工
 |   |   |-- memory.py                          # 记忆兼容入口，真实实现已拆到 memory_store/
 |   |   |-- memory_settings.py                 # memory 配置安全解析兼容入口，真实实现已拆到 settings/memory.py
 |   |   |-- memory_store/                      # 长期记忆存储，当前是 JSONL + LocalStore 索引
@@ -87,7 +89,8 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   `-- validators/                        # 未来跨领域校验规则目录，目前用 README 定义边界
 |   |-- config/                                # 配置目录
 |   |   |-- agent_config.yaml                  # 运行配置文件，控制模型、记忆、工具和检索参数
-|   |   `-- capability_config.yaml            # 能力路由配置文件，控制 skill/tool 授权、上抛和候选数量
+|   |   |-- capability_config.yaml            # 能力路由配置文件，控制 skill/tool 授权、上抛和候选数量
+|   |   `-- log_analysis_config.yaml          # 日志分析模块独立配置，默认关闭高影响能力
 |   |-- data/                                  # 运行时数据目录
 |   |   |-- memory.jsonl                       # 长期记忆文件
 |   |   |-- gateway/                           # gateway pid/state/heartbeat/log/stop request、inbox 和 response 输出目录
@@ -103,6 +106,11 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |       |-- test_capabilities.py               # skill/tool 统一能力路由测试
 |       |-- test_cli_reference.py              # CLI_REFERENCE 与 argparse 命令/参数覆盖测试
 |       |-- test_local_store.py                # SQLite/FTS5/JSONL/记忆索引回归测试
+|       |-- test_log_analysis_detectors.py     # 日志分析软检测器、case、route 和报告测试
+|       |-- test_log_analysis_dispatch.py      # 日志分析 analyst/reviewer 合同和 dispatch 测试
+|       |-- test_log_analysis_ingest.py        # SecurityAlertV1 CSV/JSONL 接入、checkpoint、dedup 和 dead letter 测试
+|       |-- test_log_analysis_models.py        # 日志分析模型和配置测试
+|       |-- test_log_analysis_query.py         # 本地日志查询、evidence 和 hunting tool 测试
 |       |-- test_memory_archive.py             # 压缩前快照、raw 冷归档、留存策略和 token 估算测试
 |       |-- test_memory_archive_runtime.py     # run turn 冷归档 helper、稳定 event_id/hash 和工具元数据测试
 |       |-- test_memory_cli.py                 # memory-route / memory-doctor CLI 可见诊断测试
@@ -129,6 +137,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |-- TESTS.md                                   # 测试说明
 |-- TEST_CHECKLIST.md                          # 测试检查清单
 `-- validation/                                # 验证输出目录
+    `-- security_fixtures/                     # 日志分析 SecurityAlertV1 最小回放样本
 ```
 
 ## 关键文件说明
@@ -564,6 +573,12 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 
 后续改 subagent 主链路时，除了 `DESIGN_LEDGER.md` 和 `docs/design/subagent-quality-contract.md`，也要同步检查这份 runbook 是否需要更新。
 
+### `LOG_ANALYSIS_BACKLOG.md`
+
+这是长期后台日志分析助手的规划入口。
+
+它记录第一版 SecurityAlertV1、安全日志接入、软检测器、case、analyst subagent、3 分钟第一响应、0day 弱信号和未来 ML/集群后端的路线。当前代码已经有第一版底座，但父会话验收仍保留若干 P0/P1 修复项，详见 `ACCEPTANCE.md`。
+
 ### `DESIGN_LEDGER.md`
 
 这是项目的设计思路台账。
@@ -578,7 +593,7 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 
 这是模块级设计文档目录。
 
-它负责承载会长期扩展的设计细节，例如模块背景、痛点、schema、配置开关、分阶段开发计划和验收策略。当前已有 subagent 质量契约设计，后续 memory、gateway、log analysis 等模块如果设计内容继续膨胀，也应按同样方式拆出独立文档。
+它负责承载会长期扩展的设计细节，例如模块背景、痛点、schema、配置开关、分阶段开发计划和验收策略。当前已有 subagent 质量契约设计和 log analysis 模块设计，后续 memory、gateway 等模块如果设计内容继续膨胀，也应按同样方式拆出独立文档。
 
 ## 跨平台兼容性
 

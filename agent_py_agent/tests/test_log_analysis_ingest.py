@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 from agent_py_agent.agent.log_analysis.ingest.pipeline import ingest_file
+from agent_py_agent.agent.log_analysis.tools import security_query
 
 
 def _project_root() -> Path:
@@ -66,6 +67,26 @@ def test_security_alert_v1_jsonl_ingest_manifest_checkpoint_and_dedup():
         assert duplicate.stored_count == 0
         assert duplicate.duplicate_count == 3
         assert len(_read_jsonl(result.events_path)) == 3
+
+
+def test_ingest_file_default_store_can_be_queried_end_to_end():
+    fixture = _project_root() / "validation" / "security_fixtures" / "security_alert_v1.jsonl"
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        result = ingest_file(fixture, root=root, source_id="query-fixture")
+
+        response = security_query(
+            root=root,
+            start_time="2026-04-30T00:00:00Z",
+            end_time="2026-04-30T23:59:59Z",
+            limit=10,
+        )
+
+        assert result.events_path == str(root / "events.jsonl")
+        assert response["row_count"] == result.stored_count == 3
+        assert response["truncated"] is False
+        assert len(response["preview_rows"]) == 3
 
 
 def test_security_alert_v1_csv_ingest_maps_three_security_sources():

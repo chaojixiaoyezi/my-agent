@@ -659,7 +659,7 @@ def _within_after(start: Mapping[str, Any], candidate: Mapping[str, Any], minute
     start_time = _event_time(start)
     candidate_time = _event_time(candidate)
     if start_time is None or candidate_time is None:
-        return True
+        return False
     return start_time <= candidate_time <= start_time + timedelta(minutes=minutes)
 
 
@@ -667,7 +667,7 @@ def _within_before(candidate: Mapping[str, Any], end: Mapping[str, Any], minutes
     candidate_time = _event_time(candidate)
     end_time = _event_time(end)
     if candidate_time is None or end_time is None:
-        return True
+        return False
     return end_time - timedelta(minutes=minutes) <= candidate_time <= end_time
 
 

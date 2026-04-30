@@ -186,8 +186,15 @@ def _route_or_build(
 def _finding_dicts(case: CaseRecord, findings: Sequence[Finding | Mapping[str, Any]] | None) -> list[dict[str, Any]]:
     if findings is None:
         attributes = case.attributes if isinstance(case.attributes, Mapping) else {}
-        return [dict(item) for item in attributes.get("finding_summaries", []) if isinstance(item, Mapping)]
-    return [item.to_dict() if isinstance(item, Finding) else dict(item) for item in findings]
+        return _filter_finding_dicts_for_case(case, [dict(item) for item in attributes.get("finding_summaries", []) if isinstance(item, Mapping)])
+    return _filter_finding_dicts_for_case(case, [item.to_dict() if isinstance(item, Finding) else dict(item) for item in findings])
+
+
+def _filter_finding_dicts_for_case(case: CaseRecord, findings: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    refs = {str(ref) for ref in case.finding_refs if str(ref or "").strip()}
+    if not refs:
+        return list(findings)
+    return [finding for finding in findings if str(finding.get("finding_id") or "") in refs]
 
 
 def _bullet_facts(items: Sequence[Mapping[str, Any]]) -> list[str]:

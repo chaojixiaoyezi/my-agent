@@ -150,6 +150,9 @@ def dedup_key_for_finding(finding: Finding | Mapping[str, Any], window_minutes: 
     attacker = _primary_attacker(normalized) or "unknown"
     victim = _primary_victim(normalized) or "unknown"
     bucket = _time_bucket(normalized.window[0] if normalized.window else "", window_minutes)
+    if normalized.detector_id in {"vpn_new_geo_login", "bruteforce_then_success"}:
+        account = _primary_account(normalized) or "unknown"
+        return f"attack={attacker}|account={account}|victim={victim}|bucket={bucket}"
     return f"attack={attacker}|victim={victim}|bucket={bucket}"
 
 
@@ -193,6 +196,11 @@ def _primary_victim(finding: Finding) -> str:
         return values[0]
     source_values = _entity_values(finding.entities, "src_ip")
     return source_values[0] if source_values and not _primary_attacker(finding) else ""
+
+
+def _primary_account(finding: Finding) -> str:
+    values = _entity_values(finding.entities, "user", "account", "principal")
+    return values[0] if values else ""
 
 
 def _entity_values(entities: Mapping[str, Sequence[Any]], *keys: str) -> list[str]:

@@ -189,17 +189,31 @@ class EvidenceRef(JsonRoundTripMixin):
     evidence_id: str
     kind: str = "query"
     uri: str = ""
+    path: str = ""
     source_id: str = ""
     query_id: str = ""
     raw_ref: str = ""
     sample_ref: str = ""
     time_range: list[str] = field(default_factory=list)
     content_hash: str = ""
+    sha256: str = ""
     row_count: int = 0
     truncated: bool = False
     created_at: str = field(default_factory=utc_now_iso)
     summary: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.path:
+            self.path = str(self.metadata.get("evidence_path") or self.metadata.get("path") or "")
+        if not self.sha256:
+            self.sha256 = str(self.metadata.get("sha256") or self.content_hash or "")
+        if not self.content_hash:
+            self.content_hash = self.sha256
+        if self.path and "evidence_path" not in self.metadata:
+            self.metadata["evidence_path"] = self.path
+        if self.sha256 and "sha256" not in self.metadata:
+            self.metadata["sha256"] = self.sha256
 
 
 def _coerce_evidence_refs(value: Any) -> list[EvidenceRef]:

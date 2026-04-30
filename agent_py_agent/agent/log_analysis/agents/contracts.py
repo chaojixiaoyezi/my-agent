@@ -7,7 +7,7 @@ roles. Raw events, long query output, and transcripts stay behind tools and
 evidence references.
 """
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Mapping
 
 
@@ -37,6 +37,17 @@ class ContractValidationError(ValueError):
 
 def _as_mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _to_mapping(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    if hasattr(value, "to_dict") and callable(value.to_dict):
+        payload = value.to_dict()
+        return payload if isinstance(payload, Mapping) else {}
+    if is_dataclass(value):
+        return asdict(value)
+    return {}
 
 
 def _get(value: Any, key: str, default: Any = None) -> Any:
@@ -74,6 +85,7 @@ def _string_list(value: Any, *, limit: int = 50) -> list[str]:
 
 
 def _evidence_ref_from_mapping(value: Mapping[str, Any]) -> str:
+    metadata = value.get("metadata")
     for key in (
         "evidence_ref",
         "evidence_id",
@@ -86,6 +98,11 @@ def _evidence_ref_from_mapping(value: Mapping[str, Any]) -> str:
         text = _compact_string(value.get(key), limit=300)
         if text:
             return text
+    if isinstance(metadata, Mapping):
+        for key in ("evidence_id", "evidence_ref", "ref", "id", "query_id", "path", "evidence_path", "uri"):
+            text = _compact_string(metadata.get(key), limit=300)
+            if text:
+                return text
     return ""
 
 
@@ -94,7 +111,7 @@ def normalize_evidence_refs(value: Any, *, limit: int = 50) -> list[str]:
 
     if value is None:
         return []
-    if isinstance(value, (str, Mapping)):
+    if isinstance(value, str) or _to_mapping(value):
         items = [value]
     else:
         try:
@@ -105,8 +122,9 @@ def normalize_evidence_refs(value: Any, *, limit: int = 50) -> list[str]:
     refs: list[str] = []
     seen: set[str] = set()
     for item in items[:limit]:
-        if isinstance(item, Mapping):
-            ref = _evidence_ref_from_mapping(item)
+        mapping = _to_mapping(item)
+        if mapping:
+            ref = _evidence_ref_from_mapping(mapping)
         else:
             ref = _compact_string(item, limit=300)
         if ref and ref not in seen:

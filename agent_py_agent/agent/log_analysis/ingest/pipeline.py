@@ -41,7 +41,7 @@ class JsonlEventSink:
 
     def __init__(self, root: str | Path):
         self.root = Path(root)
-        self.events_path = self.root / "events" / "security_alert_v1.jsonl"
+        self.events_path = self.root / "events.jsonl"
 
     def write_events(self, events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         count = 0
@@ -67,10 +67,15 @@ class IngestPipeline:
         self.payload_max_chars = payload_max_chars
         self.write_batch_size = max(1, write_batch_size)
         self.registry = registry or default_registry(payload_max_chars=payload_max_chars)
-        self.store = store
         self.fallback_sink = JsonlEventSink(self.root)
+        self.store = store or self._default_store()
         self.checkpoints = CheckpointStore(self.root)
         self.dedup = DedupStore(self.root / "dedup.sqlite3")
+
+    def _default_store(self) -> Any:
+        from ..storage.local_store import LocalLogStore
+
+        return LocalLogStore(self.root)
 
     def ingest_file(
         self,
