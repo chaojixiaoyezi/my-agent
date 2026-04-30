@@ -205,3 +205,10 @@
 - Live Lab replay solves: `scripts/live_lab/log_analysis_replay.py` can run the SecurityAlertV1 fixture through ingest, detector, case, route, evidence, report, and forensic-package generation without a real model call.
 - Dry-run note: the replay uses a local offline store and does not call a real LLM; on a fresh output root it reports `dry_run=true`, `total_events=3`, and `stored_events=3`.
 - Remaining after this slice: add richer fixtures, wire real analyst subagent dispatch, and publish a user-facing quickstart once runtime routing is visible from chat/gateway.
+
+## 2026-04-30 User-Facing Note: LOG Quickstart
+
+- Published user path: README and CLI_REFERENCE now describe both explicit `my-agent logs status/ingest/query/hunt-ip/trace-case` and ordinary-language `run/chat/gateway` usage.
+- Runtime visibility rule: normal tasks keep security tools hidden; obvious security-log tasks or explicit `logs/security` grants expose only `security_query`, `security_hunt_ip`, and `security_trace_case`.
+- Positioning: this is documented as a local lightweight log-analysis base for first-response replay and bounded evidence queries, not a production SIEM.
+- Replay expectation: `python scripts/live_lab/log_analysis_replay.py` remains offline and should report `ok=true`, `dry_run=true`, `total_events=3`, `stored_events=3`, `case_count=1`, plus case/route/report/evidence artifact paths.

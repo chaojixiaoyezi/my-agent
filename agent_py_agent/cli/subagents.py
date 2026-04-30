@@ -11,7 +11,9 @@ import json
 import sys
 
 from ..agent.capability_config import load_capability_config
+from ..agent.config import load_config
 from ..agent.subagent import filter_board_items
+from ..agent.subagent_workflows import WorkflowPlanningResult, plan_workflow_for_goal
 from .common import make_agent, make_capability_router
 
 
@@ -360,6 +362,95 @@ def cmd_subagents_dispatch(args) -> int:
         print(f"planner: {agent.subagents.workspace / 'parent_planner_report.json'}")
         print(f"planner: {agent.subagents.workspace / 'PARENT_PLANNER.md'}")
     return 0
+
+
+def cmd_subagents_workflow_plan(args) -> int:
+    """Preview automatic subagent workflow routing without dispatching workers."""
+
+    config = load_config(args.config)
+    result = plan_workflow_for_goal(
+        args.goal,
+        config=config,
+        explicit_template_id=args.template_id or "",
+    )
+    payload = _workflow_plan_payload(result)
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+
+    print("SUBAGENT WORKFLOW PLAN")
+    print(
+        f"mode={payload['mode']} enabled={payload['enabled']} ok={payload['ok']} "
+        f"needs_confirmation={payload['needs_confirmation']}"
+    )
+    print(
+        f"selected_template_id={payload['selected_template_id'] or 'none'} "
+        f"task_type={payload['task_type']}"
+    )
+    print(f"reason={payload['reason']}")
+    print(f"workers={payload['worker_count']}")
+    for worker in payload["workers"]:
+        depends_on = ",".join(worker["depends_on"]) if worker["depends_on"] else "none"
+        print(
+            f"- {worker['phase_id']} role={worker['role']} kind={worker['kind']} "
+            f"depends_on={depends_on} checks={worker['acceptance_check_count']} :: {worker['task']}"
+        )
+    print(f"parent_acceptance_checks={payload['parent_acceptance_check_count']}")
+    for check in payload["parent_acceptance_checklist"]:
+        print(f"- {check}")
+    if payload["issues"]:
+        print("issues=" + json.dumps(payload["issues"], ensure_ascii=False))
+    return 0
+
+
+def _workflow_plan_payload(result: WorkflowPlanningResult) -> dict[str, object]:
+    dispatch_plan = result.dispatch_plan
+    parent_acceptance_plan = result.parent_acceptance_plan
+    template_phase_tasks = {
+        phase.id: phase.task for phase in result.template.phases
+    } if result.template is not None else {}
+    workers = []
+    if dispatch_plan is not None:
+        workers = [
+            {
+                "phase_id": worker.phase_id,
+                "role": worker.role,
+                "kind": worker.kind,
+                "task": _worker_task_summary(worker, template_phase_tasks),
+                "acceptance_check_count": len(worker.acceptance_checks),
+                "acceptance_checks": list(worker.acceptance_checks),
+                "depends_on": list(worker.depends_on),
+            }
+            for worker in dispatch_plan.worker_specs
+        ]
+    parent_checklist = parent_acceptance_plan.checklist if parent_acceptance_plan is not None else []
+    return {
+        "goal": result.goal,
+        "selected_template_id": result.selected_template_id,
+        "mode": result.decision.mode,
+        "needs_confirmation": result.decision.needs_confirmation,
+        "enabled": result.enabled,
+        "ok": result.ok,
+        "reason": result.decision.reason,
+        "task_type": result.decision.task_type,
+        "risk_tags": list(result.decision.risk_tags),
+        "worker_count": len(workers),
+        "workers": workers,
+        "parent_acceptance_check_count": len(parent_checklist),
+        "parent_acceptance_checklist": list(parent_checklist),
+        "issues": list(result.issues),
+    }
+
+
+def _worker_task_summary(worker, template_phase_tasks: dict[str, str]) -> str:
+    task = template_phase_tasks.get(worker.phase_id)
+    if task:
+        return task
+    for line in worker.instructions.splitlines():
+        if line.startswith("Phase task: "):
+            return line.removeprefix("Phase task: ")
+    return worker.instructions.splitlines()[0] if worker.instructions else ""
+
 
 def cmd_subagent_context(args) -> int:
     """生成单个 subagent 的执行上下文包。"""

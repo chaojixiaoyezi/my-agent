@@ -137,6 +137,7 @@ from .cli.subagents import (
     cmd_subagents_plan_actions,
     cmd_subagents_probe,
     cmd_subagents_route_capabilities,
+    cmd_subagents_workflow_plan,
 )
 
 if __name__ == "__main__":

@@ -41,14 +41,26 @@ touch validation/live_lab/<run-id>/STOP
 ### Log Analysis Live Lab replay
 
 ```bash
-# Offline SecurityAlertV1 replay; no real LLM or network call.
+# SecurityAlertV1 离线 replay；不调用真实 LLM 或网络。
 python3 scripts/live_agent_lab.py --suite log-analysis
 
-# Direct replay entry if you only need the log-analysis artifacts.
-python3 scripts/live_lab/log_analysis_replay.py
+# 只验收日志分析产物时可直接跑这个入口。
+python3 scripts/live_lab/log_analysis_replay.py --output-root /tmp/通道运行时-log-replay
 ```
 
-The JSON summary prints `stored_events`, `failed_stage`, `case_path`, `route_path`, `report_path`, and `evidence_paths`.
+预期 JSON 摘要：`ok=true`、`dry_run=true`、`total_events=3`、`stored_events=3`、`case_count=1`，`stages` 全部为 `pass`，并打印 `parsed_events`、`failed_stage`、`error_type`、`error_message`、`case_path`、`route_path`、`report_path`、`evidence_paths`。失败时 `failed_stage` 会指出卡在 ingest、detector、case、route、evidence 或 report。默认 fixture 是正向 replay；`validation/security_fixtures/security_alert_v1_no_findings.jsonl` 是可读负向 fixture，应该在 `detector` 阶段因无 finding 失败。
+
+CLI quickstart 验收：
+
+```bash
+my-agent logs status
+my-agent logs ingest validation/security_fixtures/security_alert_v1.jsonl --source-id fixture --format jsonl
+my-agent logs query --start-time 2026-04-30T09:30:00Z --end-time 2026-04-30T10:30:00Z --attacker-ip 198.51.100.23
+my-agent logs hunt-ip 198.51.100.23 --start-time 2026-04-30T09:30:00Z --end-time 2026-04-30T10:30:00Z
+my-agent logs trace-case case-1 --start-time 2026-04-30T09:30:00Z --end-time 2026-04-30T10:30:00Z
+```
+
+验收重点：`ingest` 存入 3 条 fixture event；`query` 和 `hunt-ip` 能返回可读摘要与 evidence path；`trace-case` 能围绕 case seed 返回 evidence。普通 `run/chat` 任务不应出现安全工具；明显安全日志话术或显式 `logs/security` grant 才会出现 `security_query`、`security_hunt_ip`、`security_trace_case`。
 
 ## 并行开发工作台检查
 

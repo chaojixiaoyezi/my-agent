@@ -158,6 +158,7 @@ Ctrl+C
 | `subagents-probe` | 检查 subagent 通道健康 | 写 probe 报告和单任务记录 | 否 |
 | `subagents-plan-actions` | 根据 due-check 生成动作计划 | 写 action plan 报告 | 否 |
 | `subagents-apply-actions` | dry-run 或执行低风险动作 | `--apply` 时写回任务和审计日志 | 否 |
+| `subagents-workflow-plan` | 预览目标会命中哪个内置 subagent workflow | 否 | 否 |
 | `subagents-route-capabilities` | 路由 capability request | `--apply` 时写 grant/gap | 否 |
 | `subagents-acceptance` | 验收等待验收的 subagent | `--apply` 时写回状态和审计日志 | 否 |
 | `subagents-patches` | 审核 runner 输出的 patch 记录 | `--apply` 时写 patch 审核状态和日志 | 否 |
@@ -486,7 +487,20 @@ my-agent logs hunt-ip 198.51.100.23 --start-time 2026-04-30T00:00:00Z --end-time
 my-agent logs trace-case case-1 --start-time 2026-04-30T00:00:00Z --end-time 2026-04-30T23:59:59Z
 ```
 
-`logs` 是 log analysis 的最小 CLI 面。`status` 只读取 `agent_py_agent/config/log_analysis_config.yaml` 并显示 disabled/enabled、capability level、data dir 和 warnings，不启动 worker。`ingest` 写入配置里的 `data_dir`，除非传 `--root`。`query`、`hunt-ip`、`trace-case` 读取同一目录；`--limit` 未传时使用 `query_default_limit`，超过 `query_max_limit` 时会截断并在输出里显示 warning。
+`logs` 是 log analysis 的最小 CLI 面，适合本地轻量第一响应 replay 和受控查询，不是生产 SIEM。最小闭环是：先 `status` 确认配置和 data dir，再 `ingest` 导入 SecurityAlertV1 JSONL/CSV，接着用 `query` 查时间窗内事件，用 `hunt-ip` 围绕 IP 扩展，用 `trace-case` 从 case seed 生成 evidence。
+
+`status` 只读取 `agent_py_agent/config/log_analysis_config.yaml` 并显示 disabled/enabled、capability level、data dir 和 warnings，不启动 worker。`ingest` 写入配置里的 `data_dir`，除非传 `--root`。`query`、`hunt-ip`、`trace-case` 读取同一目录；`--limit` 未传时使用 `query_default_limit`，超过 `query_max_limit` 时会截断并在输出里显示 warning。
+
+自然语言路径也可用：在 `run`、`chat` 或 gateway 里提出明显安全日志任务，例如“分析这批 security logs”“追一下 WAF 日志里的攻击 IP”“帮我看安全日志里的可疑登录”。普通聊天和普通开发任务不会暴露安全工具；只有显式 grant `logs/security`，或运行时识别到 security log / audit log / firewall log / WAF log / 安全日志 / 审计日志等明确任务时，才会自动授权 `security_query`、`security_hunt_ip`、`security_trace_case`。
+
+离线 Live Lab replay：
+
+```powershell
+python scripts\live_agent_lab.py --suite log-analysis
+python scripts\live_lab\log_analysis_replay.py --output-root %TEMP%\通道运行时-log-replay
+```
+
+这条 replay 不调用真实 LLM 或网络；新输出目录下预期摘要包含 `ok=true`、`dry_run=true`、`total_events=3`、`stored_events=3`、`case_count=1`，并打印 `case_path`、`route_path`、`report_path`、`evidence_paths`。
 
 | 子命令 | 参数 | 说明 |
 | --- | --- | --- |
@@ -625,6 +639,19 @@ my-agent subagents-apply-actions --apply --action reopen_for_evidence
 | `--limit <n>` | `20` | 最多处理多少条动作。 |
 | `--take-over-by <name>` | - | 接管动作的接管者，apply takeover 时必填。 |
 | `--locked-file <path>` | - | 接管时锁定的文件，可多次传入。 |
+
+## `subagents-workflow-plan`
+
+```powershell
+my-agent subagents-workflow-plan "开发一个可验收的功能"
+my-agent subagents-workflow-plan "开发一个可验收的功能" --template-id single_worker_verified --json
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `goal` | - | 必填，待路由的父任务目标。 |
+| `--template-id <id>` | - | 强制使用指定 workflow 模板做预览。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
 
 ## `subagents-route-capabilities`
 

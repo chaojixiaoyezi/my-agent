@@ -78,3 +78,25 @@
 - Full verification:
   - `python -m pytest` -> `223 passed`.
   - `git diff --check` -> passed.
+
+## 2026-04-30 / Workflow Plan CLI and LOG Replay Gate Evidence
+
+- Three-worker batch:
+  - Replay gate worker: `validation/security_fixtures/security_alert_v1_no_findings.jsonl`, `scripts/live_lab/log_analysis_replay.py`, `agent_py_agent/tests/test_live_lab_log_analysis_replay.py`, `TESTS.md`.
+  - User quickstart worker: `README.md`, `CLI_REFERENCE.md`, `TESTS.md`, `docs/design/log-analysis.md`.
+  - Workflow-plan CLI worker: `agent_py_agent/cli/subagents.py`, `agent_py_agent/cli/parser.py`, `agent_py_agent/tests/test_subagent_workflow_planner.py`.
+- Parent integration:
+  - Added compatibility re-export for `cmd_subagents_workflow_plan` in `agent_py_agent/__main__.py`.
+  - Verified shared doc edits in `TESTS.md` kept both replay negative-fixture notes and quickstart commands.
+- Focused verification:
+  - `python -m pytest agent_py_agent\tests\test_live_lab_log_analysis_replay.py agent_py_agent\tests\test_subagent_workflow_planner.py agent_py_agent\tests\test_cli_reference.py` -> `9 passed`.
+- Manual verification:
+  - `python -m agent_py_agent subagents-workflow-plan "Fix API bug and add tests" --json` -> `selected_template_id=code_feature_split`, `worker_count=3`, `parent_acceptance_check_count=8`.
+  - `python scripts\live_lab\log_analysis_replay.py --output-root <fresh temp>` -> `ok=true`, `fixture_format=jsonl`, `parsed_events=3`, `stored_events=3`, `case_count=1`, `finding_count=1`, all stages pass.
+- Live Lab verification:
+  - `python scripts\live_agent_lab.py --suite log-analysis --runs-dir <temp> --run-id <id>` -> `LIVE_LAB_PASS`.
+- New negative replay coverage:
+  - `security_alert_v1_no_findings.jsonl` is readable and stores 2 events, then fails at `failed_stage=detector` with `error_type=ReplayStageError`.
+- Full verification:
+  - `python -m pytest` -> `226 passed`.
+  - `git diff --check` -> passed.

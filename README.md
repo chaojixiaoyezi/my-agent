@@ -291,6 +291,43 @@ my-agent local-search "gateway" --source-type gateway_request
 # 在 LocalStore 里搜索 gateway 请求记录；不调用模型。
 ```
 
+### 日志分析 quickstart
+
+当前 LOG 能力是本地轻量底座，用来做 SecurityAlertV1 这类日志的第一响应 replay 和受控查询；它不是生产 SIEM。
+
+显式命令路径：
+
+```bash
+my-agent logs status
+# 查看日志分析配置、data_dir、query 默认/最大限制；不调用模型。
+
+my-agent logs ingest validation/security_fixtures/security_alert_v1.jsonl --source-id fixture --format jsonl
+# 导入本地 fixture；写入 log analysis data_dir。
+
+my-agent logs query --start-time 2026-04-30T09:30:00Z --end-time 2026-04-30T10:30:00Z --attacker-ip 198.51.100.23
+# 按时间窗和攻击方 IP 查事件。
+
+my-agent logs hunt-ip 198.51.100.23 --start-time 2026-04-30T09:30:00Z --end-time 2026-04-30T10:30:00Z
+# 围绕一个 IP 同时查 attacker/victim 角色。
+
+my-agent logs trace-case case-1 --start-time 2026-04-30T09:30:00Z --end-time 2026-04-30T10:30:00Z
+# 从 case seed 扩展查询并生成 evidence。
+```
+
+普通话术路径：你可以直接在 `run`、`chat` 或 gateway 里说“帮我分析这批安全日志”“追一下这个攻击 IP 的安全事件”。普通任务不会暴露安全查询工具；只有明显 security log / audit log / firewall log / WAF 日志等任务，或显式授予 `logs/security` 时，运行时才会把 `security_query`、`security_hunt_ip`、`security_trace_case` 加进可用工具。
+
+离线第一响应 replay：
+
+```bash
+python3 scripts/live_agent_lab.py --suite log-analysis
+# 跑 SecurityAlertV1 离线 replay，不调用真实 LLM 或网络。
+
+python3 scripts/live_lab/log_analysis_replay.py
+# 只需要日志分析产物时可直接跑这个入口。
+```
+
+预期 JSON 摘要里能看到 `ok=true`、`dry_run=true`、`total_events=3`、`stored_events=3`、`case_count=1`，以及 `case_path`、`route_path`、`report_path`、`evidence_paths`。
+
 ### Subagent 多代理工作流
 
 ```bash

@@ -2606,3 +2606,14 @@ Next recommended worker slices:
 - Richer replay fixtures: add more attack paths, bad/missing fields, and negative controls.
 - User quickstart: document `logs status/ingest/query/hunt-ip/trace-case` plus when runtime auto-grants `logs/security`.
 - Workflow entry wiring: let log-analysis development/investigation goals call `plan_workflow_for_goal()` before creating real worker tasks.
+
+## 2026-04-30 Current Landing Note: Replay Gate and Quickstart
+
+- Replay negative fixture landed: `security_alert_v1_no_findings.jsonl` is readable, stores 2 events, then fails at the `detector` stage because no finding is produced.
+- Replay summary fields expanded: `fixture_format`, `parsed_events`, `dead_letter_events`, `duplicate_events`, `skipped_events`, `error_type`, and `error_message`.
+- User quickstart landed in README and CLI_REFERENCE for explicit LOG commands, ordinary-language runtime capability behavior, and offline replay expectations.
+
+Next recommended worker slices:
+- Real analyst dispatch bridge: turn a detected case into controlled analyst/reviewer subagent work orders, still default dry-run/manual.
+- Case/evidence negative fixtures: after the dispatch bridge exists, add replay fixtures that fail later than detector.
+- LOG workflow plan integration: use `subagents-workflow-plan` as the preview layer before creating investigation workers.
