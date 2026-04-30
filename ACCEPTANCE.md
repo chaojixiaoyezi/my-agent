@@ -184,3 +184,30 @@ Remaining:
 - [ ] Wire workflow preview into actual task creation with a manual/auto confirmation policy.
 - [ ] Persist workflow-plan previews and parent acceptance decisions for real dispatches.
 - [ ] Add case/evidence-stage negative replay fixtures after the next LOG dispatch bridge exists.
+
+## 2026-04-30 / LOG Work Orders and Workflow Preview Persistence Acceptance
+
+Status:
+- [x] LOG case analyst/reviewer dry-run work-order planning landed.
+- [x] Workflow-plan preview JSON/Markdown persistence landed behind explicit `--output-dir`.
+- [x] Live Lab replay can now simulate evidence/report stage failures for validation tests.
+
+Problems solved:
+- [x] A LOG case can be converted into two controlled, reviewable work-order specs before any real subagent is created.
+- [x] Analyst and reviewer work orders carry evidence refs, allowed tools, acceptance checks, `cannot_self_accept`, and parent final gate rules.
+- [x] Cases without evidence refs are not marked ready, avoiding unsupported analyst work.
+- [x] Workflow preview output can be persisted, so future real dispatches can reference the plan that defined the worker split and parent acceptance bar.
+- [x] Replay validation now covers detector, evidence, and report failure gates, not only the happy path.
+
+Accepted evidence:
+- [x] Focused tests passed: `python -m pytest agent_py_agent\tests\test_log_analysis_dispatch.py agent_py_agent\tests\test_subagent_workflow_planner.py agent_py_agent\tests\test_live_lab_log_analysis_replay.py` -> `28 passed`.
+- [x] Workflow preview persistence passed: `python -m agent_py_agent subagents-workflow-plan "Fix API bug and add tests" --output-dir <fresh temp> --json` -> preview JSON/Markdown paths written and reported.
+- [x] Fresh positive replay passed: `python scripts\live_lab\log_analysis_replay.py --output-root <fresh temp>` -> `ok=true`, `parsed_events=3`, `stored_events=3`, all stages pass.
+- [x] Live Lab suite passed: `python scripts\live_agent_lab.py --suite log-analysis --runs-dir <temp> --run-id <id>` -> `LIVE_LAB_PASS`.
+- [x] Full regression passed: `python -m pytest` -> `233 passed`.
+- [x] Whitespace check passed: `git diff --check`.
+
+Remaining:
+- [ ] Add an apply/manual-confirm path that turns LOG work-order plans into real `SubAgentTask` records.
+- [ ] Connect persisted workflow previews to real dispatch records.
+- [ ] Add parent acceptance reports for completed LOG analyst/reviewer runs.

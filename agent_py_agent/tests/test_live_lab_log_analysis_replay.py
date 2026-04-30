@@ -64,3 +64,46 @@ def test_security_alert_v1_live_lab_replay_no_findings_reports_detector_stage(tm
     assert summary["error_type"] == "ReplayStageError"
     assert summary["error_message"] == "detectors produced no findings"
     assert Path(summary["summary_path"]).exists()
+
+
+def test_security_alert_v1_live_lab_replay_reports_evidence_stage_failure(tmp_path):
+    summary = run_security_alert_v1_replay(
+        output_root=tmp_path / "replay",
+        simulate_failure_stage="evidence",
+    )
+
+    assert summary["ok"] is False
+    assert summary["failed_stage"] == "evidence"
+    assert summary["stages"]["ingest"] == "pass"
+    assert summary["stages"]["detector"] == "pass"
+    assert summary["stages"]["case"] == "pass"
+    assert summary["stages"]["route"] == "pass"
+    assert summary["stages"]["evidence"] == "fail"
+    assert summary["case_id"]
+    assert summary["route_path"]
+    assert summary["evidence_paths"] == []
+    assert summary["error_type"] == "ReplayStageError"
+    assert summary["error_message"] == "simulated evidence stage failure"
+    assert Path(summary["summary_path"]).exists()
+
+
+def test_security_alert_v1_live_lab_replay_reports_report_stage_failure(tmp_path):
+    summary = run_security_alert_v1_replay(
+        output_root=tmp_path / "replay",
+        simulate_failure_stage="report",
+    )
+
+    assert summary["ok"] is False
+    assert summary["failed_stage"] == "report"
+    assert summary["stages"]["ingest"] == "pass"
+    assert summary["stages"]["detector"] == "pass"
+    assert summary["stages"]["case"] == "pass"
+    assert summary["stages"]["route"] == "pass"
+    assert summary["stages"]["evidence"] == "pass"
+    assert summary["stages"]["report"] == "fail"
+    assert summary["evidence_paths"]
+    assert summary["report_path"] == ""
+    assert summary["forensic_package_path"] == ""
+    assert summary["error_type"] == "ReplayStageError"
+    assert summary["error_message"] == "simulated report stage failure"
+    assert Path(summary["summary_path"]).exists()

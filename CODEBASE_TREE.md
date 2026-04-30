@@ -676,3 +676,11 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - `validation/security_fixtures/security_alert_v1_no_findings.jsonl`: readable negative fixture that should ingest but fail at detector stage with no findings.
 - `scripts/live_lab/log_analysis_replay.py`: replay summary now includes fixture format, parsed/stored/dead-letter/duplicate/skipped counts, and structured error fields.
 - `README.md` and `CLI_REFERENCE.md`: document LOG quickstart, ordinary-language runtime capability behavior, offline replay, and `subagents-workflow-plan`.
+
+## 2026-04-30 Tree Update: LOG Work Orders and Preview Persistence
+
+- `agent_py_agent/agent/log_analysis/dispatch/work_orders.py`: dry-run planner that turns one LOG case into analyst/reviewer work-order specs without creating real subagents.
+- `agent_py_agent/agent/log_analysis/dispatch/__init__.py`: exports LOG work-order planning helpers.
+- `agent_py_agent/agent/subagent_workflows/planner.py`: adds audit-friendly `WorkflowPlanningResult.to_dict()` and `write_workflow_plan_preview()`.
+- `agent_py_agent/cli/subagents.py`: `subagents-workflow-plan` can write JSON/Markdown previews with `--output-dir`.
+- `scripts/live_lab/log_analysis_replay.py`: validation-only `simulate_failure_stage` can exercise evidence/report failure gates from tests.

@@ -105,6 +105,35 @@ def test_plan_workflow_for_goal_manual_mode_marks_confirmation():
     assert result.dispatch_plan is not None
 
 
+def test_workflow_planning_result_serializes_audit_preview():
+    result = plan_workflow_for_goal(
+        "Fix the API bug and add regression tests",
+        config=_Config("auto"),
+        template_store=_store("single_worker_verified", "code_feature_split"),
+    )
+
+    payload = result.to_dict()
+
+    assert payload["goal"] == "Fix the API bug and add regression tests"
+    assert payload["selected_template_id"] == "code_feature_split"
+    assert payload["mode"] == "auto"
+    assert payload["needs_confirmation"] is False
+    assert payload["worker_count"] == 1
+    assert payload["workers"] == [
+        {
+            "phase_id": "implement",
+            "role": "worker",
+            "kind": "worker",
+            "task": "Implement the requested change.",
+            "acceptance_check_count": 1,
+            "acceptance_checks": ["focused tests pass"],
+            "depends_on": [],
+        }
+    ]
+    assert payload["parent_acceptance_checklist"][0] == "parent checks evidence"
+    assert payload["issues"] == []
+
+
 def test_subagents_workflow_plan_cli_json_previews_without_dispatch(tmp_path, capsys):
     config_path = _write_config(tmp_path)
     parser = build_parser()
@@ -132,6 +161,64 @@ def test_subagents_workflow_plan_cli_json_previews_without_dispatch(tmp_path, ca
     assert payload["workers"][0]["role"]
     assert payload["parent_acceptance_check_count"] >= 1
     assert payload["issues"] == []
+
+
+def test_subagents_workflow_plan_cli_writes_preview_files(tmp_path, capsys):
+    config_path = _write_config(tmp_path)
+    output_dir = tmp_path / "workflow-preview"
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--config",
+            str(config_path),
+            "subagents-workflow-plan",
+            "Fix API bug and add tests",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    code = args.func(args)
+    output = capsys.readouterr().out
+    json_path = output_dir / "subagent_workflow_plan_preview.json"
+    markdown_path = output_dir / "SUBAGENT_WORKFLOW_PLAN_PREVIEW.md"
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    markdown = markdown_path.read_text(encoding="utf-8")
+
+    assert code == 0
+    assert json_path.exists()
+    assert markdown_path.exists()
+    assert "preview_json=" in output
+    assert "preview_markdown=" in output
+    assert payload["goal"] == "Fix API bug and add tests"
+    assert payload["selected_template_id"] == "code_feature_split"
+    assert payload["worker_count"] >= 1
+    assert "# Subagent Workflow Plan Preview" in markdown
+    assert "## Parent Acceptance Checklist" in markdown
+
+
+def test_subagents_workflow_plan_cli_json_reports_written_preview_paths(tmp_path, capsys):
+    config_path = _write_config(tmp_path)
+    output_dir = tmp_path / "workflow-preview"
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--config",
+            str(config_path),
+            "subagents-workflow-plan",
+            "Fix API bug and add tests",
+            "--output-dir",
+            str(output_dir),
+            "--json",
+        ]
+    )
+
+    code = args.func(args)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert Path(payload["preview_paths"]["json"]).exists()
+    assert Path(payload["preview_paths"]["markdown"]).exists()
 
 
 def test_subagents_workflow_plan_cli_accepts_template_override(tmp_path, capsys):

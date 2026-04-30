@@ -519,3 +519,11 @@ Phase 10：失败沉淀
 - Guardrail: the command does not create files, create subagents, call runners, or mark anything accepted.
 - User effect: this is the first visible bridge from "user only states the goal" to "system explains the controlled dispatch plan".
 - Remaining after this slice: add an apply path that creates real work orders only after policy/confirmation, and persist the preview used for each real dispatch.
+
+## 2026-04-30 Implementation Note: Preview Persistence
+
+- Status: explicit dry-run preview persistence landed.
+- Command: `my-agent subagents-workflow-plan "<goal>" --output-dir <dir>`.
+- Solves: parent acceptance can now reference the exact JSON/Markdown workflow preview used before dispatch, instead of relying on memory of the conversation.
+- Guardrail: persistence is opt-in and still does not create subagents or run workers.
+- Remaining after this slice: attach persisted preview paths to real dispatch records when an apply path lands.

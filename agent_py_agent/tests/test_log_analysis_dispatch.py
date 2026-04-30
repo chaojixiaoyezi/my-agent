@@ -22,6 +22,7 @@ from agent_py_agent.agent.log_analysis.dispatch import (
     DispatchBudget,
     DispatchEngine,
     build_health_summary,
+    plan_case_subagent_work_orders,
 )
 
 
@@ -222,6 +223,56 @@ def test_dispatch_engine_builds_security_tool_names_for_analyst_input():
     assert "security_hunt_ip" in analyst_input["available_tools"]
     assert "security_trace_case" in analyst_input["available_tools"]
     assert "traffic_query" not in analyst_input["available_tools"]
+
+
+def test_work_order_plan_builds_manual_dry_run_analyst_and_reviewer_orders():
+    plan = plan_case_subagent_work_orders(
+        _case_fixture(),
+        quality_contract={"acceptance_checks": ["Reviewer must enforce parent final gate."]},
+    )
+    payload = plan.to_dict()
+
+    assert plan.ready
+    assert plan.dry_run
+    assert plan.mode == "manual"
+    assert [order.role for order in plan.work_orders] == ["analyst", "reviewer"]
+    assert payload["work_orders"][0]["evidence_refs"] == ["ev-waf-1", "ev-edr-1"]
+    assert payload["work_orders"][1]["evidence_refs"] == ["ev-waf-1", "ev-edr-1"]
+
+    analyst = payload["work_orders"][0]
+    reviewer = payload["work_orders"][1]
+    assert analyst["allowed_tools"] == [
+        "security_query",
+        "security_hunt_ip",
+        "security_trace_case",
+        "evidence_read",
+    ]
+    assert reviewer["allowed_tools"] == ["evidence_read"]
+    assert analyst["cannot_self_accept"]
+    assert reviewer["cannot_self_accept"]
+    assert analyst["parent_final_gate"] == "parent_session_final_approval_required"
+    assert reviewer["context"]["expected_input"] == "AnalystReport from analyst work order"
+    assert "Reviewer must enforce parent final gate." in reviewer["acceptance_checks"]
+    assert not plan.issues
+
+
+def test_work_order_plan_without_evidence_refs_is_not_ready_and_reports_risk():
+    case = {
+        "case_id": "case-no-evidence",
+        "title": "Suspicious signal without retained evidence",
+        "route_draft": {"gaps": ["Need source query evidence"]},
+    }
+
+    plan = plan_case_subagent_work_orders(case)
+    payload = plan.to_dict()
+
+    assert not plan.ready
+    assert plan.dry_run
+    assert "no evidence_refs" in plan.issues[0]
+    assert "unsupported analysis" in plan.risks[0]
+    assert all(not order["ready"] for order in payload["work_orders"])
+    assert all(order["evidence_refs"] == [] for order in payload["work_orders"])
+    assert all(order["issues"] == plan.issues for order in payload["work_orders"])
 
 
 def test_case_summary_is_compact_and_excludes_raw_events_and_transcript():

@@ -100,3 +100,23 @@
 - Full verification:
   - `python -m pytest` -> `226 passed`.
   - `git diff --check` -> passed.
+
+## 2026-04-30 / LOG Work Orders and Workflow Preview Persistence Evidence
+
+- Three-worker batch:
+  - LOG work-order bridge: `agent_py_agent/agent/log_analysis/dispatch/work_orders.py`, dispatch exports, and dispatch tests.
+  - Workflow preview persistence: `agent_py_agent/agent/subagent_workflows/planner.py`, `subagents-workflow-plan --output-dir`, and planner tests.
+  - Replay later-stage gates: `scripts/live_lab/log_analysis_replay.py` and replay tests.
+- Parent integration:
+  - `subagents-workflow-plan --json --output-dir <dir>` now reports the written preview JSON/Markdown paths in JSON output.
+  - CLI reference documents `--output-dir`.
+- Focused verification:
+  - `python -m pytest agent_py_agent\tests\test_log_analysis_dispatch.py agent_py_agent\tests\test_subagent_workflow_planner.py agent_py_agent\tests\test_live_lab_log_analysis_replay.py` -> `28 passed`.
+- Manual verification:
+  - `python -m agent_py_agent subagents-workflow-plan "Fix API bug and add tests" --output-dir <fresh temp> --json` -> `preview_paths.json` and `preview_paths.markdown` exist.
+  - `python scripts\live_lab\log_analysis_replay.py --output-root <fresh temp>` -> `ok=true`, `parsed_events=3`, `stored_events=3`, `case_count=1`, `finding_count=1`.
+- Live Lab verification:
+  - `python scripts\live_agent_lab.py --suite log-analysis --runs-dir <temp> --run-id <id>` -> `LIVE_LAB_PASS`.
+- Full verification:
+  - `python -m pytest` -> `233 passed`.
+  - `git diff --check` -> passed.
