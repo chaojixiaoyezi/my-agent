@@ -189,3 +189,9 @@
 - 真实响应动作是否允许自动执行。
 - 3 分钟目标下速度、证据完整性和误报之间的取舍。
 - 是否引入 DuckDB / Parquet / Kafka / ML 依赖。
+## 2026-04-30 Implementation Note: Storage Audit
+
+- Status: landed in code and focused tests.
+- Solves: bad JSONL lines are no longer silently skipped with no trail. Reads now produce a `JsonlReadAudit`, persist corrupt/non-object samples to `corrupt_lines.jsonl`, and include skipped/corrupt counts in query summaries and query records.
+- Parent acceptance: this proves the local JSONL backend is still tolerant of bad rows, while giving reviewers evidence about what was skipped.
+- Remaining after this slice: runtime capability auto-wiring, storage limit config alignment, Live Lab scenario replay, and user-facing quickstart docs.

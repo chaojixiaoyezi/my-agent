@@ -87,3 +87,46 @@
 - [ ] workflow compiler 尚未把模板 phase 编译成真实多 worker 派工单。
 - [ ] parent acceptance planner 尚未按 workflow 自动生成结构化验收报告。
 - [ ] 用户模板第一版只支持 JSON，YAML 仍未支持。
+## 2026-04-30 / Subagent Workflow Phase 3 Parent Acceptance
+
+Status:
+- [x] Workflow router first slice landed.
+- [x] Workflow compiler first slice landed.
+- [x] Parent acceptance planner first slice landed.
+
+Problems solved:
+- [x] User no longer has to explicitly spell out the first workflow shape for common code/quality tasks.
+- [x] Worker prompts can now be compiled from templates with dependencies, write boundaries, evidence requirements, and non-self-acceptance rules.
+- [x] Parent acceptance can be planned before worker output arrives, reducing blind trust in worker PASS summaries.
+- [x] Chinese task wording is covered for common quality-delivery and log-analysis development routing.
+
+Accepted evidence:
+- [x] Subagent workflow focused tests passed: `29 passed`.
+- [x] Router/compiler/acceptance APIs exported from `agent_py_agent.agent.subagent_workflows`.
+- [x] Full regression passed: `python -m pytest` -> `207 passed`.
+
+Remaining:
+- [ ] Wire router/compiler/parent gate into real chat/gateway/spawn dispatch.
+- [ ] Persist structured acceptance reports for real runs.
+- [ ] Add more built-in templates beyond the first three.
+
+## 2026-04-30 / Log Analysis Storage Audit Parent Acceptance
+
+Status:
+- [x] Storage audit first slice landed.
+
+Problems solved:
+- [x] Bad JSONL lines are no longer only skipped silently.
+- [x] Query summary records corrupt/skipped counts for parent/reviewer inspection.
+- [x] A corrupt-line audit JSONL trail records sampled bad rows without breaking existing local-store behavior.
+- [x] The previous `log_analysis.tools` import cycle is fixed for focused log-analysis tests.
+
+Accepted evidence:
+- [x] Log focused tests passed: `9 passed`.
+- [x] Bad JSONL fixture confirms one invalid JSON row and one non-object JSON row are counted and persisted.
+- [x] Full regression passed: `python -m pytest` -> `207 passed`.
+
+Remaining:
+- [ ] Align storage query max limit with config instead of hard-coded `MAX_QUERY_LIMIT=500`.
+- [ ] Wire `logs/security` granted capability into normal run/chat runtime.
+- [ ] Build Live Lab scenario replay for first-response reports.

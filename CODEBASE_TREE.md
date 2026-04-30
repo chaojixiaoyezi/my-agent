@@ -644,3 +644,10 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 这意味着：
 - 在三大平台上都能直接跑纯 Python 主链路
 - 后续如果要加命令执行类工具，需要继续保持这一层跨平台约束
+## 2026-04-30 Tree Update
+
+- `agent_py_agent/agent/subagent_workflows/router.py`: routes task text and explicit template ids to workflow templates under auto/manual/off config.
+- `agent_py_agent/agent/subagent_workflows/compiler.py`: compiles template phases into worker dispatch specs with dependencies, boundaries, evidence rules, and `cannot_self_accept`.
+- `agent_py_agent/agent/subagent_workflows/acceptance.py`: builds parent final-gate acceptance plans from workflow templates and quality contracts.
+- `agent_py_agent/agent/log_analysis/storage/base.py`: now includes `JsonlReadAudit` for local JSONL read auditing.
+- `agent_py_agent/agent/log_analysis/storage/local_store.py`: records last read audits and writes corrupt/non-object JSONL samples to `corrupt_lines.jsonl`.

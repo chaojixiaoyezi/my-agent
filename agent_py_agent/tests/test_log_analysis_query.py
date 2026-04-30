@@ -157,6 +157,25 @@ def test_local_store_skips_bad_jsonl_lines_during_query(tmp_path):
 
     assert result.row_count == 1
     assert result.rows[0]["event_id"] == "evt-good"
+    assert result.summary["corrupt_storage_lines"] == 1
+    assert result.summary["skipped_storage_lines"] == 2
+
+    audit = result.summary["storage_read_audit"]
+    assert audit["path"] == str(store.events_path)
+    assert audit["valid_records"] == 1
+    assert audit["corrupt_lines"] == 1
+    assert audit["non_object_lines"] == 1
+    assert audit["skipped_lines"] == 2
+    assert [sample["reason"] for sample in audit["samples"]] == ["invalid_json", "non_object_json"]
+
+    persisted_audits = [
+        json.loads(line)
+        for line in store.corrupt_lines_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert persisted_audits[-1]["path"] == str(store.events_path)
+    assert persisted_audits[-1]["skipped_lines"] == 2
+    assert store.list_query_records()[0]["summary"]["storage_read_audit"]["skipped_lines"] == 2
 
 
 def test_tools_require_time_range_and_support_hunt_and_trace_case(tmp_path):
