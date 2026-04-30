@@ -38,6 +38,26 @@ agent_py_agent/cli/
 4. 成功后写 response 文件，并把请求归档到 done。
 5. 失败或超时后，根据 attempts 和 lease 退回 pending 或归档 failed。
 6. status/local-doctor/timeline 从 gateway state、heartbeat、history 和 LocalStore 读取可观察状态。
+7. `memory-resume` 或自动恢复命中 gateway_request 时，会把 request/response JSON 作为事实源推荐阅读。
+
+## 跨天恢复
+
+gateway 的跨天恢复和 subagent 恢复遵循同一个原则：LocalStore 只负责帮忙找到 request_id，真正要读的是 gateway 文件事实源。
+
+```text
+gateway request archive/raw clue
+  -> request_id / prompt / status
+
+LocalStore gateway_request
+  -> 可搜索索引，metadata 里保留 request_path / response_path
+
+gateway/requests/.../<request_id>.json
+gateway/responses/<request_id>.json
+  -> 请求和响应事实源
+
+memory-resume 或 run(auto resume)
+  -> Recovery Brief 推荐读取 request/response JSON
+```
 
 ## 给初学编程学生的学习路径
 
@@ -46,8 +66,9 @@ agent_py_agent/cli/
 3. 再看 `gateway_parts/io.py`，学习请求文件怎么从 pending 移到 processing/done。
 4. 再看 `gateway_parts/runtime.py`，理解 worker 如何处理请求并写响应。
 5. 再看 `gateway_parts/recovery.py`，理解程序崩溃后怎么恢复。
-6. 最后看 `agent_py_agent/tests/test_gateway_client.py` 和 scenario 测试，理解怎样证明协议没坏。
+6. 再看 `agent_py_agent/tests/test_memory_archive_cli.py::test_memory_resume_cross_day_gateway_request_uses_response_fact_source`，理解 gateway 请求如何进入跨天恢复。
+7. 最后看 `agent_py_agent/tests/test_gateway_client.py` 和 scenario 测试，理解怎样证明协议没坏。
 
 ## 当前第一版索引 / 待补齐
 
-本页先描述单机文件协议。后续应补充真实目录样例、请求 JSON schema、response JSON schema、失败恢复时序图和 gateway chat 的用户路径。
+本页先描述单机文件协议。后续应补充真实目录样例、请求 JSON schema、response JSON schema、失败恢复时序图、真实后台进程跨天恢复演练和 gateway chat 的用户路径。

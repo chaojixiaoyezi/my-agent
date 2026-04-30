@@ -6,6 +6,7 @@ from pathlib import Path
 from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts import gateway_paths, gateway_response_path, log_gateway_payload
 from agent_py_agent.agent.memory_archive import (
     CompressionSnapshot,
     RawMemoryEvent,
@@ -151,6 +152,87 @@ def _write_cross_day_handoff_fixture(root: Path, *, run_id: str) -> None:
             created_at="2026-04-30T00:05:00+00:00",
         ),
     )
+
+
+def _write_cross_day_gateway_fixture(agent: SimpleAgent, *, request_id: str = "gwreq-cross-day") -> tuple[Path, Path]:
+    root = agent.root
+    paths = gateway_paths(agent)
+    request_path = paths.done / f"{request_id}.json"
+    response_path = gateway_response_path(paths, request_id)
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    response_path.parent.mkdir(parents=True, exist_ok=True)
+    request_payload = {
+        "id": request_id,
+        "kind": "ask",
+        "prompt": "gateway handoff：昨天的网关请求今天要继续恢复。",
+        "save": True,
+        "status": "done",
+        "created_at": 1777507080.0,
+    }
+    response_payload = {
+        "id": request_id,
+        "kind": "ask",
+        "ok": True,
+        "status": "done",
+        "prompt": "gateway handoff：昨天的网关请求今天要继续恢复。",
+        "response": "gateway handoff 已完成，下一轮应读取 response JSON 和 LocalStore 记录。",
+        "backend": "echo",
+        "tool_rounds": 0,
+        "created_at": 1777507080.0,
+        "started_at": 1777507100.0,
+        "ended_at": 1777507120.0,
+    }
+    request_path.write_text(json.dumps(request_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    response_path.write_text(json.dumps(response_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    log_gateway_payload(
+        agent,
+        response_payload,
+        event_type="gateway_request_completed",
+        request_path=request_path,
+        response_path=response_path,
+    )
+    append_raw_event(
+        root,
+        RawMemoryEvent(
+            event_id="raw-gateway-cross-day-1",
+            session_id="session-gateway-cross-day",
+            request_id=request_id,
+            run_id="",
+            speaker="user",
+            target="assistant",
+            action="message",
+            status="ok",
+            content_preview="gateway handoff：昨天的网关请求今天要继续恢复。",
+            source="gateway",
+            created_at="2026-04-29T23:58:00+00:00",
+        ),
+    )
+    append_snapshot(
+        root,
+        CompressionSnapshot(
+            snapshot_id="snapshot-gateway-cross-day-1",
+            session_id="session-gateway-cross-day",
+            compression_id="compression-gateway-cross-day",
+            turn_range={
+                "kind": "recovery_snapshot",
+                "source": "gateway",
+                "request_id": request_id,
+            },
+            user_intents=["gateway handoff：继续昨天网关请求"],
+            assistant_actions=["已经写好 gateway response，等待下一轮恢复。"],
+            dispatch_events=[
+                {
+                    "source": "gateway",
+                    "request_id": request_id,
+                    "status": "done",
+                }
+            ],
+            next_actions=["读取 gateway response JSON 和 LocalStore gateway_request 记录。"],
+            content_paths=[str(request_path), str(response_path)],
+            created_at="2026-04-30T00:05:00+00:00",
+        ),
+    )
+    return request_path, response_path
 
 
 def test_memory_archive_list_json_reads_raw_layer(tmp_path, capsys):
@@ -335,3 +417,45 @@ def test_memory_resume_cross_day_handoff_uses_task_fact_sources(tmp_path, capsys
     assert payload["brief"]["related_ids"]["run_ids"] == [task.id]
     assert task.id in payload["brief"]["context_block"]
     assert "HANDOFF.md" in payload["brief"]["context_block"]
+
+
+def test_memory_resume_cross_day_gateway_request_uses_response_fact_source(tmp_path, capsys):
+    config_path = _write_config(tmp_path)
+    root = _workspace(config_path)
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            gateway_workspace="gateway",
+            local_store_path="local_store/local.db",
+            local_store_files_dir="local_store/files",
+            local_store_events_path="local_store/events.jsonl",
+        ),
+        root,
+    )
+    request_path, response_path = _write_cross_day_gateway_fixture(agent)
+
+    code, payload = _run_cli_json(
+        capsys,
+        config_path,
+        "memory-resume",
+        "gateway handoff",
+        "--since",
+        "2026-04-29",
+        "--until",
+        "2026-04-30",
+    )
+
+    assert code == 0
+    assert {item["id"] for item in payload["archive_matches"]} == {
+        "raw-gateway-cross-day-1",
+        "snapshot-gateway-cross-day-1",
+    }
+    assert payload["task_fact_sources"] == []
+    assert payload["gateway_fact_sources"][0]["request_id"] == "gwreq-cross-day"
+    assert payload["gateway_fact_sources"][0]["response_path"] == str(response_path)
+    assert str(request_path) in payload["resume"]["recommended_read_paths"]
+    assert str(response_path) in payload["resume"]["recommended_read_paths"]
+    assert payload["resume"]["gateway_fact_source_count"] == 1
+    assert payload["brief"]["related_ids"]["request_ids"] == ["gwreq-cross-day"]
+    assert "gateway handoff：继续昨天网关请求" in payload["brief"]["context_block"]
+    assert str(response_path) in payload["brief"]["context_block"]

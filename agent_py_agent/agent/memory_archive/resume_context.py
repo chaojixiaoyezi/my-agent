@@ -15,6 +15,7 @@ from typing import Any
 from .query import (
     build_resume_guidance,
     collect_archive_records,
+    collect_gateway_payloads,
     collect_resume_task_ids,
     collect_task_payloads,
     filter_archive_records,
@@ -137,6 +138,8 @@ def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
     新手说明:
     这一步和 `memory-resume --context-only` 是同一套思路：
     archive 是线索，任务目录才是事实源，最终输出一段短小稳定的 `Recovery Brief`。
+    gateway 请求也走同一条恢复路径：LocalStore 负责找到 request_id，Recovery Brief
+    负责把 gateway request/response JSON 作为必须阅读的事实源带回 prompt。
 
     参数说明:
     `agent` 是当前 agent 对象；`user_prompt` 是用户当前输入。
@@ -158,9 +161,11 @@ def _build_resume_context(agent: Any, user_prompt: str) -> ResumeContextResult:
     local_payloads = [local_hit_payload(hit) for hit in local_hits]
     task_ids = collect_resume_task_ids(args, archive_matches, local_payloads)
     task_payloads = collect_task_payloads(agent, task_ids, limit=limit)
-    if not archive_matches and not local_payloads and not task_payloads:
+    # Gateway 恢复也必须回到 request/response JSON，而不是只注入 LocalStore 摘要。
+    gateway_payloads = collect_gateway_payloads(local_payloads, limit=limit)
+    if not archive_matches and not local_payloads and not task_payloads and not gateway_payloads:
         return ResumeContextResult(query=query, reason="no_evidence")
-    resume = build_resume_guidance(archive_matches, local_payloads, task_payloads)
+    resume = build_resume_guidance(archive_matches, local_payloads, task_payloads, gateway_payloads)
     brief = build_resume_brief(
         archive_matches,
         local_payloads,
