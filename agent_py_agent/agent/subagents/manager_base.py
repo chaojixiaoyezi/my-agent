@@ -9,7 +9,7 @@ Human version:
 
 import json
 import time
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -67,6 +67,68 @@ from ..file_io import append_jsonl
 if TYPE_CHECKING:
     from ..local_store import LocalStore
 
+
+def _field_names(model: type) -> set[str]:
+    return {item.name for item in fields(model)}
+
+
+def _list_value(value: object) -> list[object]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _string_list_value(value: object) -> list[str]:
+    return [str(item) for item in _list_value(value) if item not in (None, "")]
+
+
+def _normalize_quality_contract(value: object) -> QualityContract:
+    if isinstance(value, QualityContract):
+        return value
+    if not isinstance(value, dict):
+        return QualityContract()
+    payload = {key: value[key] for key in _field_names(QualityContract) if key in value}
+    for key in [
+        "failure_conditions",
+        "forbidden_delivery",
+        "must_check",
+        "sampling_plan",
+        "evidence_required",
+        "allowed_degradation",
+    ]:
+        payload[key] = _string_list_value(payload.get(key))
+    payload["cannot_self_accept"] = bool(payload.get("cannot_self_accept", True))
+    payload["parent_final_gate"] = bool(payload.get("parent_final_gate", True))
+    return QualityContract(**payload)
+
+
+def _normalize_context_manifest(value: object) -> ContextManifest:
+    if isinstance(value, ContextManifest):
+        return value
+    if not isinstance(value, dict):
+        return ContextManifest()
+    payload = {key: value[key] for key in _field_names(ContextManifest) if key in value}
+    for key in ["task_pack_refs", "required_read_paths", "omitted_context"]:
+        payload[key] = _string_list_value(payload.get(key))
+    try:
+        payload["token_budget"] = int(payload.get("token_budget") or 0)
+    except (TypeError, ValueError):
+        payload["token_budget"] = 0
+    return ContextManifest(**payload)
+
+
+def _normalize_context_packs(value: object) -> list[dict[str, object]]:
+    if isinstance(value, dict):
+        return [value]
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
 class SubAgentBaseMixin:
     def __init__(self, workspace: str | Path, local_store: "LocalStore | None" = None):
         self.workspace = Path(workspace)
@@ -114,6 +176,9 @@ class SubAgentBaseMixin:
         supervisor: str = "",
         final_owner: str = "",
         acceptance_checks: list[str] | None = None,
+        quality_contract: QualityContract | dict[str, object] | None = None,
+        context_manifest: ContextManifest | dict[str, object] | None = None,
+        context_packs: list[dict[str, object]] | dict[str, object] | None = None,
     ) -> SubAgentTask:
         """创建一条子代理运行记录。"""
 
@@ -136,6 +201,9 @@ class SubAgentBaseMixin:
             allowed_skills=allowed_skills or [],
             allowed_tools=allowed_tools or [],
             acceptance_checks=acceptance_checks or [],
+            quality_contract=_normalize_quality_contract(quality_contract),
+            context_manifest=_normalize_context_manifest(context_manifest),
+            context_packs=_normalize_context_packs(context_packs),
             created_at=now,
             updated_at=now,
             heartbeat_at=now,
@@ -153,22 +221,26 @@ class SubAgentBaseMixin:
         if not path.exists():
             raise FileNotFoundError(f"子代理记录不存在: {run_id}")
         data = json.loads(path.read_text(encoding="utf-8"))
+        data = {key: value for key, value in data.items() if key in _field_names(SubAgentTask)}
         data["capability_requests"] = [
-            CapabilityRequest(**item) for item in data.get("capability_requests", [])
+            CapabilityRequest(**item) for item in data.get("capability_requests", []) if isinstance(item, dict)
         ]
         data["capability_grants"] = [
-            CapabilityGrant(**item) for item in data.get("capability_grants", [])
+            CapabilityGrant(**item) for item in data.get("capability_grants", []) if isinstance(item, dict)
         ]
         data["capability_gaps"] = [
-            CapabilityGap(**item) for item in data.get("capability_gaps", [])
+            CapabilityGap(**item) for item in data.get("capability_gaps", []) if isinstance(item, dict)
         ]
-        data["evidence"] = [VerificationEvidence(**item) for item in data.get("evidence", [])]
+        data["evidence"] = [VerificationEvidence(**item) for item in data.get("evidence", []) if isinstance(item, dict)]
         data["takeover_records"] = [
-            TakeoverRecord(**item) for item in data.get("takeover_records", [])
+            TakeoverRecord(**item) for item in data.get("takeover_records", []) if isinstance(item, dict)
         ]
         data["channel_checks"] = [
-            ChannelProbeCheck(**item) for item in data.get("channel_checks", [])
+            ChannelProbeCheck(**item) for item in data.get("channel_checks", []) if isinstance(item, dict)
         ]
+        data["quality_contract"] = _normalize_quality_contract(data.get("quality_contract"))
+        data["context_manifest"] = _normalize_context_manifest(data.get("context_manifest"))
+        data["context_packs"] = _normalize_context_packs(data.get("context_packs"))
         return SubAgentTask(**data)
 
     def add_child(self, parent_id: str, child_id: str) -> None:
@@ -480,4 +552,3 @@ class SubAgentBaseMixin:
         self.save(task)
         self._write_takeover_file(task, record)
         return record
-

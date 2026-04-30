@@ -114,6 +114,20 @@ python3 -c "from agent_py_agent.tests import test_agent; tests=[fn for name, fn 
 - dispatch apply 后的 runner 执行和验收闭环。
 - evidence / capability_requests / artifacts / tests / patches / lessons / next_actions 写回。
 
+### Subagent Workflow
+
+```bash
+python -m pytest agent_py_agent/tests/test_subagent_workflow_config.py agent_py_agent/tests/test_subagent_workflow_templates.py agent_py_agent/tests/test_subagent_quality_contract.py
+```
+
+覆盖：
+- `subagent_workflow_mode` 的 `auto/manual/off` 配置和非法值回退。
+- 内置 workflow 模板加载、用户 JSON 模板覆盖和坏模板校验。
+- 每个模板必须声明 `solves`，避免只写 workflow 名称而不说明解决问题。
+- `QualityContract`、`ContextManifest` 和 `context_packs` 能落进 `task.json`。
+- 旧子代理 task 缺少新字段时仍能读取。
+- `execution_context.json` 和 `EXECUTION_CONTEXT.md` 包含质量契约、上下文清单和父会话 final gate 规则。
+
 ### Tools
 
 ```bash

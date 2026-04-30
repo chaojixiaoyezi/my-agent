@@ -22,7 +22,7 @@
 
 ## 2026-04-30 / Subagent 质量契约与用户少说派工
 
-状态：设计中
+状态：部分落地
 
 模块设计文档：[docs/design/subagent-quality-contract.md](docs/design/subagent-quality-contract.md)
 
@@ -30,16 +30,27 @@
 - 子代理质量差的核心原因通常不是能力不足，而是父会话没有把目标质量、成功样本、交付红线和验收标准结构化传下去。
 - 子代理应从“独立负责人”降级为“受控施工队”：负责生产材料、局部检查、挑错和修指定缺陷；不能定义完成标准，不能决定最终交付。
 - 后续引入 `QualityContract`、context pack、context manifest、producer/critic/reviewer 角色拆分和父会话反验收。
+- 新增痛点到解决项映射：防 fake done、防机械 PASS、防长 prompt 稀释重点、防多个 worker 各自当总负责人、防成功样本只留在聊天记忆里。
+- 设计方向调整为“内置 workflow 模板，不内置固定 subagent 角色”：模板描述拆工拓扑、证据要求和验收闸门，worker 职责在运行时动态生成。
+- workflow 支持 `auto | manual | off` 三档；默认可以自动套模板，用户也可以关闭、手动指定或复制内置模板到用户目录后修改。
 - 用户少说模式是目标：用户只表达任务和偏好，系统自动选 profile、写质量契约、派 producer/critic、落证据和验收报告。
+- 规范补充：后续每一个开发项都要显式写“解决问题”，说明它解决哪个用户痛点、系统风险或交付缺口，避免只罗列模块名和 workflow 名。
+- 这条规范追溯适用于已经写进模块设计文档的旧 Phase；旧 Phase 后续被补录、拆工或复盘时，也要补上“解决问题”，不只约束新增 workflow。
 
 已落地：
 - `SUBAGENT_RUNBOOK.md` 已记录质量契约、受控施工队、上下文包、反验收和阶段路线。
 - `TEST_CHECKLIST.md` 已补充相关检查项。
 - `docs/design/subagent-quality-contract.md` 承载完整模块设计。
+- Phase 1 已落地：
+  - `AgentConfig` 增加 `subagent_workflow_mode: auto | manual | off`、内置模板开关、用户模板目录和 review rounds，非法值会回退并记录 warning。
+  - 新增 `agent_py_agent/agent/subagent_workflows/`，支持加载内置 JSON workflow、用户 JSON 覆盖模板、模板校验和 `solves` 字段。
+  - `SubAgentTask` / `SubAgentExecutionContext` 增加 `QualityContract`、`ContextManifest` 和 `context_packs`，执行上下文 Markdown 明确子代理不能自判最终完成。
+  - 验证：Subagent workflow 专项组合 14 passed；packaging/agent/tools 回归 63 passed；全量 `python -m pytest` 186 passed。
 
 后续方向：
-- Phase 1 从 `SubAgentTask` / `execution_context` 的质量契约、角色字段、context manifest 和默认 core context pack 开始。
-- 详细开发步骤、内置项、开关项和用户必须表达的内容见模块设计文档。
+- 第一批并行 worker 已完成：配置与开关、模板 schema/store、QualityContract/Context Pack。解决问题：先把用户少说模式、可控开关、模板持久化和交付质量契约打底，缓解“父会话说不清、worker 各干各的、成功标准只在聊天里”的痛点。
+- 第二批并行 worker 建议拆为 Workflow Router、Workflow Compiler、Parent Gate / Acceptance Planner。解决问题：把自然语言任务稳定路由到合适 workflow，并在派工前生成可执行计划和父级验收闸门，缓解“派错工、漏验收、机械 PASS、fake done”的痛点。
+- 详细开发步骤、内置项、开关项、用户必须表达的内容和 workflow 模板库计划见模块设计文档。
 
 ## 2026-04-30 / Log Analysis 第一版验收与 worker 切片
 

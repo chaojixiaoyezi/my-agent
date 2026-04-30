@@ -87,6 +87,22 @@ max_subagents: 5
 # 子任务记录输出目录
 subagent_workspace: "data/subagents"
 
+# Subagent Workflow 工作流开关（第一阶段配置骨架）：
+# - auto: 由主代理按任务复杂度自动选择是否套用工作流模板。
+# - manual: 只在用户或上层调度明确指定时使用工作流。
+# - off: 关闭工作流选择与模板套用，只保留普通 subagent 能力。
+subagent_workflow_mode: "auto"
+
+# 是否启用内置工作流模板；关闭后只会考虑用户模板目录。
+subagent_builtin_workflows: true
+
+# 用户自定义工作流模板目录；可配置多个目录，按列表顺序扫描。
+subagent_user_workflow_dirs:
+  - ".agent/workflows/user"
+
+# 工作流结果复核轮数上限；0 表示不额外复核，默认保持保守。
+subagent_workflow_review_rounds: 1
+
 # 任务规模策略（用户层）：
 # - 这是你和主代理聊天时“最多开多少子代理/孙代理”的默认边界。
 # - 0 表示不设硬上限，让主代理按任务复杂度决定；如果用户在聊天里明确说“最多 20 个子代理”，那条任务可以覆盖这里。

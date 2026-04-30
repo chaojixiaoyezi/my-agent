@@ -15,6 +15,8 @@ from .subagents.models import (
     ChannelProbeCheck,
     ChannelProbeReport,
     ChannelProbeResult,
+    ContextManifest,
+    QualityContract,
     SubAgentCard,
     SubAgentExecutionContext,
     SubAgentParsedOutput,

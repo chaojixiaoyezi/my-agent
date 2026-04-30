@@ -1,0 +1,47 @@
+{
+  "id": "code_feature_split",
+  "name": "Code Feature Split",
+  "solves": [
+    "Feature work that can be split across implementation and test/documentation lanes",
+    "Parallelizable changes with a shared parent acceptance contract"
+  ],
+  "fit_for": [
+    "medium sized code changes",
+    "separable model/store/ui or implementation/test ownership",
+    "workstreams with explicit write boundaries"
+  ],
+  "phases": [
+    {
+      "id": "design_contract",
+      "kind": "planning",
+      "task": "Define the shared feature contract, write boundaries, and acceptance checks.",
+      "acceptance": [
+        "Boundaries are explicit",
+        "Acceptance criteria are testable"
+      ]
+    },
+    {
+      "id": "implementation",
+      "kind": "worker",
+      "task": "Build the feature behavior inside the implementation boundary.",
+      "depends_on": ["design_contract"],
+      "acceptance": [
+        "Implementation satisfies the shared contract"
+      ]
+    },
+    {
+      "id": "tests",
+      "kind": "worker",
+      "task": "Add focused tests or fixtures for the shared feature contract.",
+      "depends_on": ["design_contract"],
+      "acceptance": [
+        "Tests cover the parent acceptance criteria"
+      ]
+    }
+  ],
+  "parent_acceptance": [
+    "Implementation and tests agree on the same contract",
+    "Focused verification passes",
+    "Any cross-worker conflicts are resolved by the parent"
+  ]
+}

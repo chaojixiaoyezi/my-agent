@@ -85,6 +85,52 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
     lines.extend(["", "## Acceptance Checks", ""])
     lines.extend(f"- [ ] {item}" for item in context.acceptance_checks or ["未设置"])
 
+    contract = context.quality_contract
+    lines.extend(["", "## Quality Contract", ""])
+    lines.append(f"- user_visible_goal: {contract.user_visible_goal or 'none'}")
+    lines.append(f"- benchmark_sample: {contract.benchmark_sample or 'none'}")
+    lines.append(f"- quality_bar: {contract.quality_bar or 'none'}")
+    lines.append(f"- final_judge: {contract.final_judge or 'parent_final_gate'}")
+    lines.append(f"- cannot_self_accept: {contract.cannot_self_accept}")
+    lines.append(f"- parent_final_gate: {contract.parent_final_gate}")
+    lines.append("- failure_conditions:")
+    lines.extend(f"  - {item}" for item in contract.failure_conditions or ["none"])
+    lines.append("- forbidden_delivery:")
+    lines.extend(f"  - {item}" for item in contract.forbidden_delivery or ["none"])
+    lines.append("- must_check:")
+    lines.extend(f"  - {item}" for item in contract.must_check or ["none"])
+    lines.append("- sampling_plan:")
+    lines.extend(f"  - {item}" for item in contract.sampling_plan or ["none"])
+    lines.append("- evidence_required:")
+    lines.extend(f"  - {item}" for item in contract.evidence_required or ["none"])
+    lines.append(f"- risk_report_required: {contract.risk_report_required or 'none'}")
+    lines.append("- allowed_degradation:")
+    lines.extend(f"  - {item}" for item in contract.allowed_degradation or ["none"])
+
+    manifest = context.context_manifest
+    lines.extend(["", "## Context Manifest", ""])
+    lines.append(f"- core_pack_version: {manifest.core_pack_version}")
+    lines.append(f"- role_pack: {manifest.role_pack or 'none'}")
+    lines.append(f"- quality_contract_ref: {manifest.quality_contract_ref or 'none'}")
+    lines.append(f"- token_budget: {manifest.token_budget}")
+    lines.append("- task_pack_refs:")
+    lines.extend(f"  - {item}" for item in manifest.task_pack_refs or ["none"])
+    lines.append("- required_read_paths:")
+    lines.extend(f"  - {item}" for item in manifest.required_read_paths or ["none"])
+    lines.append("- omitted_context:")
+    lines.extend(f"  - {item}" for item in manifest.omitted_context or ["none"])
+
+    lines.extend(["", "## Context Packs", ""])
+    if context.context_packs:
+        for item in context.context_packs:
+            name = item.get("name") or item.get("id") or item.get("kind") or "pack"
+            lines.append(f"- {name}")
+            for key in ["kind", "summary", "path", "ref", "role"]:
+                if item.get(key):
+                    lines.append(f"  - {key}: {item[key]}")
+    else:
+        lines.append("- none")
+
     lines.extend(["", "## Evidence", ""])
     if context.evidence:
         for item in context.evidence:
@@ -120,6 +166,10 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
         lines.append("- none")
 
     lines.extend(["", "## Execution Rules", ""])
+    lines.append(
+        "- Subagents cannot self-accept or declare final completion; only the parent "
+        "session final_judge/parent_final_gate can make the final acceptance decision."
+    )
     lines.extend(f"- {item}" for item in context.instructions)
     return "\n".join(lines) + "\n"
 
@@ -255,5 +305,3 @@ def _render_runner_item_line(item: dict[str, object]) -> str:
             details.append(f"{key}={item[key]}")
     suffix = f" ({'; '.join(details)})" if details else ""
     return f"- {title}{suffix}"
-
-

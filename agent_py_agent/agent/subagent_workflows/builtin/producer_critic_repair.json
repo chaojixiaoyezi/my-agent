@@ -1,0 +1,48 @@
+{
+  "id": "producer_critic_repair",
+  "name": "Producer Critic Repair",
+  "solves": [
+    "Quality-sensitive work that benefits from independent critique",
+    "Changes where a repair pass should respond to concrete findings"
+  ],
+  "fit_for": [
+    "bug fixes with ambiguous failure modes",
+    "design-sensitive implementation",
+    "high-risk edits that need review before acceptance"
+  ],
+  "phases": [
+    {
+      "id": "produce",
+      "kind": "worker",
+      "task": "Create the first complete implementation or artifact.",
+      "acceptance": [
+        "The artifact is complete enough for review"
+      ]
+    },
+    {
+      "id": "critic",
+      "kind": "review",
+      "task": "Review the produced artifact for correctness, missing tests, and contract gaps.",
+      "depends_on": ["produce"],
+      "acceptance": [
+        "Findings are specific and actionable",
+        "No unrelated rewrite requests are introduced"
+      ]
+    },
+    {
+      "id": "repair",
+      "kind": "worker",
+      "task": "Address accepted critic findings and rerun focused verification.",
+      "depends_on": ["critic"],
+      "acceptance": [
+        "Accepted findings are resolved or explicitly deferred",
+        "Verification result is reported"
+      ]
+    }
+  ],
+  "parent_acceptance": [
+    "Critic findings are considered",
+    "Repair pass reports what changed",
+    "Final verification is recorded"
+  ]
+}

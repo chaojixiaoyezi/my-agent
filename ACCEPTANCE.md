@@ -62,3 +62,28 @@
 
 父会话保留：
 - 决定 runtime capability 自动接线、storage audit 和 Live Lab replay 的下一批派工。
+
+## 2026-04-30 / Subagent Workflow Phase 1 父会话验收
+
+状态：
+- [x] Phase 1 基础骨架已落地：配置开关、模板 store、QualityContract / Context Pack。
+
+已通过：
+- [x] `python -m pytest agent_py_agent\tests\test_subagent_workflow_config.py agent_py_agent\tests\test_subagent_workflow_templates.py agent_py_agent\tests\test_subagent_quality_contract.py`：14 passed。
+- [x] `python -m pytest agent_py_agent\tests\test_packaging.py agent_py_agent\tests\test_agent.py agent_py_agent\tests\test_tools.py`：63 passed。
+- [x] `python -m pytest`：186 passed。
+- [x] `git diff --check` 通过。
+
+已落地：
+- [x] `subagent_workflow_mode: auto | manual | off` 配置和非法值回退。
+- [x] 内置 workflow 模板加载器，支持 JSON 内置模板和用户 JSON 覆盖模板。
+- [x] 首批内置模板：`single_worker_verified`、`code_feature_split`、`producer_critic_repair`。
+- [x] 模板 schema 要求 `solves`，每个开发项必须说明解决问题。
+- [x] `SubAgentTask` / `SubAgentExecutionContext` 接入 `QualityContract`、`ContextManifest` 和 `context_packs`。
+- [x] `EXECUTION_CONTEXT.md` 明确子代理不能自判最终完成，父会话 final gate 才能最终验收。
+
+验收未通过项：
+- [ ] workflow router 尚未接入 chat / gateway / spawn 入口。
+- [ ] workflow compiler 尚未把模板 phase 编译成真实多 worker 派工单。
+- [ ] parent acceptance planner 尚未按 workflow 自动生成结构化验收报告。
+- [ ] 用户模板第一版只支持 JSON，YAML 仍未支持。
