@@ -301,3 +301,25 @@ Accepted evidence:
 Remaining:
 - [ ] Continue the same teaching-comment pass for LOG `models.py`, `storage/query.py`, `ingest/`, and `analytics/`.
 - [ ] Run Live Lab replay again if future edits change replay behavior rather than comments only.
+
+## 2026-04-30 / Memory Settings Store Routing Teaching Comments Acceptance
+
+Status:
+- [x] Memory settings, JSONL store, and routing teaching comments landed.
+
+Problems solved:
+- [x] Memory config fields now explain archive levels, hook settings, route modes, receipt behavior, and resume context limits.
+- [x] Config normalization helpers now document which functions mutate config, which only coerce values, and why bad values fall back safely.
+- [x] JSONL memory store now documents JSONL as the fact stream and LocalStore as an optional search index.
+- [x] Memory routing models and matcher now explain route, match, required/candidate paths, read receipts, deterministic scoring, and strict/soft behavior.
+- [x] Memory module docs were updated in the same diff, exercising the code/docs/comment sync gate.
+
+Accepted evidence:
+- [x] Sync gate passed: `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
+- [x] Focused tests passed: `python -m pytest agent_py_agent\tests\test_memory_config.py agent_py_agent\tests\test_memory_routing.py agent_py_agent\tests\test_memory_routing_context.py agent_py_agent\tests\test_memory_runtime.py agent_py_agent\tests\test_memory_cli.py agent_py_agent\tests\test_local_store.py agent_py_agent\tests\test_doc_sync.py` -> `50 passed`.
+- [x] Full regression passed: `python -m pytest` -> `241 passed`.
+- [x] Whitespace check passed: `git diff --check`.
+
+Remaining:
+- [ ] Continue the same teaching-comment pass for `memory_archive/`, `memory_routing/loader.py`, `memory_routing/context.py`, and memory CLI commands.
+- [ ] Run a real cross-day resume/handoff drill when behavior changes beyond comments.

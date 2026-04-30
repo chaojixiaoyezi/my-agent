@@ -188,3 +188,19 @@
   - `python -m pytest agent_py_agent\tests\test_log_analysis_models.py agent_py_agent\tests\test_log_analysis_query.py agent_py_agent\tests\test_log_analysis_cli.py agent_py_agent\tests\test_tools.py agent_py_agent\tests\test_doc_sync.py` -> `45 passed`.
   - `python -m pytest` -> `241 passed`.
   - `git diff --check` -> passed.
+
+## 2026-04-30 / Memory Settings Store Routing Teaching Comments Evidence
+
+- Updated memory core boundary files:
+  - `agent_py_agent/agent/settings/memory.py`: memory settings, warning payloads, normalization, config mutation, lookup, warning, bool/choice/int coercion now include field/parameter/return explanations.
+  - `agent_py_agent/agent/memory_store/jsonl.py`: MemoryRecord, JsonlMemory, JSONL read/write/search/index helpers now document JSONL fact stream, LocalStore index fallback, side effects, and return values.
+  - `agent_py_agent/agent/memory_routing/models.py`: route, match, path resolution, read receipt, and dedupe helper now explain route tickets and receipt fields.
+  - `agent_py_agent/agent/memory_routing/matcher.py`: match, score, resolve, receipt, normalize/token/path helpers now document deterministic scoring and strict/soft path behavior.
+- Updated module docs in the same diff:
+  - `docs/modules/memory/02-progress.md`.
+  - `docs/modules/memory/04-structure.md`.
+- Verification:
+  - `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
+  - `python -m pytest agent_py_agent\tests\test_memory_config.py agent_py_agent\tests\test_memory_routing.py agent_py_agent\tests\test_memory_routing_context.py agent_py_agent\tests\test_memory_runtime.py agent_py_agent\tests\test_memory_cli.py agent_py_agent\tests\test_local_store.py agent_py_agent\tests\test_doc_sync.py` -> `50 passed`.
+  - `python -m pytest` -> `241 passed`.
+  - `git diff --check` -> passed.
