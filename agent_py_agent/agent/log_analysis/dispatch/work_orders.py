@@ -32,6 +32,10 @@ class SubAgentTaskCreator(Protocol):
     新手说明:
     Protocol 像一份“接口约定”：只要传进来的对象有 create_run 这个方法，就可以被这里使用。
     这样测试时可以传假的对象，真实运行时可以传真正的子代理管理器，函数本身不用知道细节。
+
+    参数说明:
+    这个类本身没有构造参数。它只描述“传进来的对象应该长什么样”。
+    如果一个对象实现了 create_run(**kwargs)，它就满足这个接口。
     """
 
     def create_run(self, **kwargs: Any) -> Any:
@@ -40,6 +44,15 @@ class SubAgentTaskCreator(Protocol):
         新手说明:
         输入是一组关键字参数，例如 goal、role、allowed_tools 和 context_packs。
         输出通常是任务对象，至少要能读到 id；本模块不会启动任务，只保存创建结果。
+
+        参数说明:
+        **kwargs 是一包命名参数，具体字段由真实的 SubAgentManager.create_run 接收。
+        常见字段包括 goal、thought、plan、agent_name、role、allowed_tools、acceptance_checks、
+        quality_contract、context_manifest、context_packs 等。
+        这里使用 **kwargs 是为了让本模块只依赖“能创建任务”这件事，而不绑定某个具体 manager 类。
+
+        返回说明:
+        返回值通常是 SubAgentTask。调用方至少会读取 task.id、task.status 和 task.verification_status。
         """
         ...
 
@@ -51,6 +64,22 @@ class SubagentWorkOrder:
     新手说明:
     这像一张任务卡片，告诉某个角色“要做什么、能看哪些证据、能用哪些工具、完成后按什么标准检查”。
     dry_run 表示当前只是计划，ready 表示证据和前置条件是否足够；cannot_self_accept 和 parent_final_gate 防止子代理自己宣布最终通过。
+
+    字段说明:
+    role: 子代理角色名，例如 analyst 或 reviewer；不同角色拿到的工具和任务重点不同。
+    case_id: 日志分析 case 的唯一标识，方便以后把任务、证据、报告和审计记录关联起来。
+    goal: 给子代理看的任务目标，应该描述“要产出什么”，而不是只写“处理一下”。
+    mode: 派工模式，目前通常是 manual，表示需要父会话控制和确认。
+    dry_run: True 表示只是计划或预览；False 表示这张工单来自真实创建流程。
+    ready: True 表示证据和前置条件足够，可以进入创建任务阶段；False 表示不能派发。
+    allowed_tools: 子代理允许使用的工具白名单，比如 evidence_read；没列出的工具不应该使用。
+    evidence_refs: 子代理可以依据的证据引用列表；这是安全分析的边界，不是原始日志全文。
+    context: 给子代理的上下文包来源，通常包含 case_summary、route_summary、质量契约等。
+    acceptance_checks: 父级或 reviewer 要检查的清单，子代理不能跳过。
+    cannot_self_accept: True 表示子代理不能自己宣布最终通过。
+    parent_final_gate: 父级最终验收门的名字，用来提醒所有角色最终裁决在父会话。
+    issues: 已知阻塞问题，例如没有证据引用。
+    risks: 还没阻塞但需要注意的风险，例如证据不足可能导致 unsupported analysis。
     """
 
     role: str
@@ -74,6 +103,12 @@ class SubagentWorkOrder:
         新手说明:
         dataclass 对象读起来方便，但传给前端、日志或测试时字典更通用。
         这个方法不改变工单内容，只把字段展开成 dict。
+
+        参数说明:
+        这个方法没有输入参数，只读取当前对象自己的字段。
+
+        返回说明:
+        返回 dict，里面包含 role、case_id、goal、allowed_tools、evidence_refs 等全部字段。
         """
         return asdict(self)
 
@@ -85,6 +120,15 @@ class LogAnalysisWorkOrderPlan:
     新手说明:
     一个 case 通常需要先分析、再复核，所以计划里会有 analyst 和 reviewer 两张工单。
     计划本身不会创建任务、不会调用模型、不会改队列；它让父流程先看到“准备好了没有”和“风险在哪里”。
+
+    字段说明:
+    case_id: 这份计划对应哪个日志分析 case。
+    ready: 整体计划是否可以进入真实创建任务阶段；只要缺关键证据就应该是 False。
+    dry_run: True 表示计划只是预览，不能理解成任务已经派出。
+    mode: 当前派工模式，和每张 SubagentWorkOrder 的 mode 保持一致。
+    work_orders: 计划包含的具体工单列表，目前通常是 analyst 和 reviewer 两张。
+    issues: 阻止计划进入下一步的问题，会同步到结果里给父会话看。
+    risks: 不一定阻止创建、但需要父会话知道的风险。
     """
 
     case_id: str
@@ -101,6 +145,12 @@ class LogAnalysisWorkOrderPlan:
         新手说明:
         plan 里面套着 work_orders，直接 asdict 虽然也能展开，但这里显式调用每张工单的 to_dict。
         这样以后工单序列化逻辑变复杂时，计划输出仍然走同一条路径。
+
+        参数说明:
+        这个方法没有输入参数，只读取当前计划对象自己的字段。
+
+        返回说明:
+        返回 dict，其中 work_orders 会是由每张工单 to_dict() 生成的列表。
         """
         payload = asdict(self)
         payload["work_orders"] = [order.to_dict() for order in self.work_orders]
@@ -114,6 +164,17 @@ class SubagentWorkOrderCreationResult:
     新手说明:
     创建任务是有开关的：apply=False 只返回“如果创建会怎样”，apply=True 才真的调用 create_run。
     这个结果对象把是否 ready、创建了哪些任务、为什么没创建等信息集中返回，方便上层展示或测试。
+
+    字段说明:
+    case_id: 本次创建结果对应哪个 case。
+    ready: 原始计划是否 ready；如果 False，通常不会创建任何任务。
+    apply: 调用方这次是否请求真实创建任务。
+    dry_run: apply 的反面；True 表示没有真实创建任务。
+    mode: 结果模式，通常是 dry_run 或 apply，方便 UI 或日志直接展示。
+    created: 已创建任务的摘要列表，包含 task_id、case_id、role、status、verification_status。
+    task_ids: 已创建任务 id 列表，方便后续 load 或展示。
+    issues: 创建过程中遇到的问题，例如计划未 ready。
+    risks: 从计划继承或创建阶段发现的风险。
     """
 
     case_id: str
@@ -131,6 +192,12 @@ class SubagentWorkOrderCreationResult:
 
         新手说明:
         这一步不再创建任何东西，只是把结果包装成更容易打印、返回 JSON 或写测试断言的格式。
+
+        参数说明:
+        这个方法没有输入参数，只读取当前结果对象自己的字段。
+
+        返回说明:
+        返回 dict，适合给 CLI、API、测试或审计日志使用。
         """
         return asdict(self)
 
@@ -141,6 +208,14 @@ def _get(source: Any, key: str, default: Any = None) -> Any:
     新手说明:
     有些调用方传字典，有些传对象；字典用 source["key"] 或 get，对象用 source.key。
     这个小函数把两种写法统一起来，找不到时返回 default，避免主流程里到处写判断。
+
+    参数说明:
+    source: 要读取的对象，可以是 dict、dataclass 实例或普通 Python 对象。
+    key: 想读取的字段名，例如 "case_id"、"evidence_refs"。
+    default: 找不到字段时返回的备用值，默认是 None。
+
+    返回说明:
+    如果 source 是 Mapping，就返回 source.get(key, default)；否则返回 getattr(source, key, default)。
     """
     if isinstance(source, Mapping):
         return source.get(key, default)
@@ -153,6 +228,15 @@ def _case_id(case: Any, summary: Mapping[str, Any]) -> str:
     新手说明:
     工单必须知道自己属于哪个 case，但不同输入可能把编号放在 case_id、id 或 summary["case"] 里。
     这里集中处理这些兼容路径，让后面的工单创建不用重复猜字段名。
+
+    参数说明:
+    case: 原始 case 对象，可能是 dict，也可能是带属性的对象。
+    summary: summarize_case(case).to_dict() 的结果，是已经整理过的摘要字典。
+
+    返回说明:
+    返回字符串形式的 case id。优先使用 case.case_id / case["case_id"]，
+    其次使用 case.id / case["id"]，再看 summary["case"]["case_id"]。
+    都没有时返回 "unknown-case"，保证后续工单仍有可显示的标识。
     """
     summary_case = summary.get("case", {})
     if not isinstance(summary_case, Mapping):
@@ -166,6 +250,13 @@ def _merge_unique(*values: Any) -> list[str]:
     新手说明:
     证据引用可能来自好几个地方，而且格式可能不完全一样。
     这个函数会先调用 normalize_evidence_refs 做清洗，再按第一次出现的顺序去重，避免同一证据重复塞进工单。
+
+    参数说明:
+    *values: 任意数量的证据引用来源。每个来源可以是字符串、列表、None，或 normalize_evidence_refs 支持的格式。
+    传多个来源是为了把“用户显式给的 evidence_refs”“case 自带的 evidence_refs”“summary 里的 evidence”合并起来。
+
+    返回说明:
+    返回去重后的证据引用列表，顺序按第一次出现的位置保留。
     """
     output: list[str] = []
     seen: set[str] = set()
@@ -183,6 +274,13 @@ def _acceptance_checks(quality_contract: Mapping[str, Any] | None) -> list[str]:
     新手说明:
     默认检查项像最低标准，quality_contract 里可以再加本次 case 特有的要求。
     函数会过滤空字符串并去重，避免验收列表里出现无意义或重复的项目。
+
+    参数说明:
+    quality_contract: 上游传来的质量契约字典，可以包含 acceptance_checks。
+    如果是 None，就只使用 DEFAULT_ACCEPTANCE_CHECKS。
+
+    返回说明:
+    返回最终检查清单。它总是先包含默认检查项，再追加 quality_contract.acceptance_checks 里的非空新项目。
     """
     checks = list(DEFAULT_ACCEPTANCE_CHECKS)
     if quality_contract:
@@ -208,6 +306,18 @@ def plan_case_subagent_work_orders(
     输入是一个 case，以及可选的证据 refs、路由摘要和质量契约；输出是 LogAnalysisWorkOrderPlan。
     如果没有 evidence_refs，计划会标记为 not ready 并写入 issue/risk，因为没有证据就派发分析会产生没有依据的结论。
     dry_run 参数会写进工单，提醒调用方当前只是规划；真正创建任务要走 create_subagent_tasks_from_work_order_plan。
+
+    参数说明:
+    case: 日志分析 case。可以是 dict 或对象；函数会从里面提取 case_id、evidence_refs、route 等摘要信息。
+    evidence_refs: 调用方显式指定的证据引用。它会和 case 里的证据合并；显式传入适合父会话收窄证据范围。
+    route_summary: 路由摘要，例如攻击入口、时间线、下一步查询建议。没有传时会尝试使用 case summary 里的 route。
+    quality_contract: 本次派工的质量要求，例如额外 acceptance_checks、must_check、evidence_required。
+    mode: 派工模式字符串，目前通常是 "manual"，表示由父会话手动控制。
+    dry_run: 是否只是预览。True 表示只生成计划；False 也不会自动创建任务，只会写入工单状态供上层区分。
+
+    返回说明:
+    返回 LogAnalysisWorkOrderPlan。ready=True 时才适合交给 create_subagent_tasks_from_work_order_plan(apply=True)。
+    ready=False 时必须先处理 issues/risks，尤其是缺少 evidence_refs 的情况。
     """
 
     summary_obj = summarize_case(case)
@@ -295,6 +405,14 @@ def _work_order_quality_contract(order: SubagentWorkOrder) -> dict[str, Any]:
     新手说明:
     子代理需要知道“必须看哪些证据、按哪些标准检查、谁有最终决定权”。
     这里把工单自身的证据和验收项并入契约，同时固定最终验收属于父级，避免 analyst/reviewer 自己给自己盖章。
+
+    参数说明:
+    order: 单张 SubagentWorkOrder。函数会读取 order.context["quality_contract"]、order.evidence_refs、
+    order.acceptance_checks 和 order.goal。
+
+    返回说明:
+    返回 quality_contract 字典，后续会写进 SubAgentTask.quality_contract 和 context_pack。
+    返回值会强制包含 cannot_self_accept=True、parent_final_gate=True、final_judge="parent_final_gate"。
     """
     source = order.context.get("quality_contract")
     inherited = dict(source) if isinstance(source, Mapping) else {}
@@ -322,6 +440,13 @@ def _work_order_context_pack(order: SubagentWorkOrder) -> dict[str, Any]:
     新手说明:
     子代理不需要拿到整个 case 的所有数据，只需要完成任务所需的摘要、证据引用和质量要求。
     这样上下文更小，也更容易控制边界：它知道可以依据哪些 evidence_refs，但不能凭空扩展范围。
+
+    参数说明:
+    order: 要转换的 SubagentWorkOrder。它的 role、case_id、evidence_refs、context 和验收门会被打包。
+
+    返回说明:
+    返回 context pack 字典。这个字典会放进 SubAgentTask.context_packs，
+    给子代理运行时读取；它只包含摘要和引用，不包含原始日志全文。
     """
     return {
         "name": "log-analysis-work-order",
@@ -345,6 +470,12 @@ def _work_order_plan_steps(order: SubagentWorkOrder) -> list[str]:
     新手说明:
     任务系统通常需要一个步骤列表，告诉子代理先看上下文、再按工具和证据边界产出结果。
     reviewer 的风险点不同，它要检查 analyst 报告有没有越过证据，所以这里给 reviewer 多加一步。
+
+    参数说明:
+    order: 要生成步骤的工单。函数会使用 order.case_id 显示目标 case，并用 order.role 判断是否是 reviewer。
+
+    返回说明:
+    返回字符串列表，每一项是一条给 SubAgentTask.plan 的执行步骤。
     """
     steps = [
         f"Read the focused context pack for case {order.case_id}.",
@@ -372,6 +503,18 @@ def create_subagent_tasks_from_work_order_plan(
     输入是前一步生成的 plan 和一个会 create_run 的 subagents 对象；输出是创建结果。
     apply=False 时只返回 dry-run 结果，不会创建任务；plan 缺证据或 not ready 时也会拒绝创建，并记录 issue。
     即使创建成功，它也只是保存 SubAgentTask 记录，不启动 runner、模型或分析循环；最终验收仍由父级负责。
+
+    参数说明:
+    subagents: 负责创建 SubAgentTask 的对象，通常是真实 SubAgentManager，也可以是测试替身。
+    plan: plan_case_subagent_work_orders 生成的计划，里面包含 analyst/reviewer 工单和 ready 状态。
+    apply: 是否真的创建任务。默认 False，表示只返回 dry-run 结果；只有 True 才会调用 subagents.create_run。
+    parent_id: 父任务或父会话 id，会写入新任务的 parent_id 和 supervisor，方便追踪谁派的工。
+    root_id: 整条任务树的根 id；如果为空，SubAgentManager 会为每个任务使用自己的 id 或默认规则。
+    final_owner: 最终验收负责人，默认 "parent"，表示最后由父会话裁决。
+
+    返回说明:
+    返回 SubagentWorkOrderCreationResult。created 和 task_ids 只在 apply=True 且 plan.ready=True 时有内容。
+    如果 apply=False、plan.ready=False 或某张 order.ready=False，结果会保留 issues/risks 来解释为什么没创建。
     """
 
     mode = "apply" if apply else "dry_run"
