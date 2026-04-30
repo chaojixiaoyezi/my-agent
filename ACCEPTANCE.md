@@ -376,17 +376,24 @@ Status:
 - [x] Gateway request cross-day resume fixture landed.
 - [x] `memory-resume` now reports `gateway_fact_sources`.
 - [x] Auto resume context can inject gateway request/response JSON paths.
+- [x] Real background gateway process cross-day recovery scenario landed.
+- [x] Gateway worker can continue when processing lease write fails.
 
 Problems solved:
 - [x] Gateway recovery no longer stops at LocalStore summaries; request/response JSON files are now first-class recovery fact sources.
 - [x] Cross-day gateway clues can be found through archive + LocalStore and returned as Recovery Brief recommended reads.
 - [x] Ordinary gateway requests now share the same recovery principle as subagent tasks: archive is clue, file fact source is authority.
+- [x] Recovery is now proven through gateway start/ask/worker/response, not only hand-written fixture files.
+- [x] If LocalStore captured a transient processing request path, resume can point back to the terminal done/failed request file.
+- [x] Processing lease observability failures no longer strand the user request in processing.
 
 Accepted evidence:
 - [x] Focused tests passed: `python -m pytest agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_memory_runtime.py` -> `16 passed`.
 - [x] Sync gate passed: `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
-- [x] Memory/gateway focused tests passed: `python -m pytest agent_py_agent\tests\test_memory_config.py agent_py_agent\tests\test_memory_routing.py agent_py_agent\tests\test_memory_routing_context.py agent_py_agent\tests\test_memory_runtime.py agent_py_agent\tests\test_memory_cli.py agent_py_agent\tests\test_memory_archive.py agent_py_agent\tests\test_memory_archive_runtime.py agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_local_store.py agent_py_agent\tests\test_gateway_client.py agent_py_agent\tests\test_doc_sync.py` -> `72 passed`.
-- [x] Full regression passed: `python -m pytest` -> `247 passed`.
+- [x] Memory/gateway focused tests passed: `python -m pytest agent_py_agent\tests\test_memory_config.py agent_py_agent\tests\test_memory_routing.py agent_py_agent\tests\test_memory_routing_context.py agent_py_agent\tests\test_memory_runtime.py agent_py_agent\tests\test_memory_cli.py agent_py_agent\tests\test_memory_archive.py agent_py_agent\tests\test_memory_archive_runtime.py agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_local_store.py agent_py_agent\tests\test_gateway_client.py agent_py_agent\tests\test_scenario_gateway_resume.py agent_py_agent\tests\test_cli_reference.py agent_py_agent\tests\test_doc_sync.py` -> `76 passed`.
+- [x] Full regression passed: `python -m pytest` -> `250 passed`.
+- [x] Real gateway scenario focused tests passed: `python -m pytest agent_py_agent\tests\test_gateway_client.py agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_scenario_gateway_resume.py agent_py_agent\tests\test_cli_reference.py agent_py_agent\tests\test_doc_sync.py` -> `16 passed`.
 
 Remaining:
-- [ ] Add real background gateway process cross-day recovery drill.
+- [ ] Add parent/subagent runner full recovery drill.
+- [ ] Add multi-request-worker and delayed-response gateway scenarios.

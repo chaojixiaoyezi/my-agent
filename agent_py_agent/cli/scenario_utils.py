@@ -175,21 +175,47 @@ def build_scenario_runner_instruction() -> str:
     )
 
 
-def run_scenario_gateway_ask(paths: ScenarioPaths, prompt: str, *, timeout: float) -> dict[str, object]:
-    """用隔离配置启动 gateway、投递一次 ask，然后关闭 gateway。"""
+def scenario_command(paths: ScenarioPaths, *parts: str) -> list[str]:
+    """LLM: build an isolated scenario CLI command that uses the generated config.
 
-    def command(*parts: str) -> list[str]:
-        return [sys.executable, "-m", "agent_py_agent", "--config", str(paths.config), *parts]
+    新手说明:
+    场景测试不能直接使用开发仓库的默认配置，否则会把 gateway、memory、subagent
+    写到真实项目里。这个小函数统一把 `--config <scenario_agent_config.yaml>` 带上，
+    后面启动 gateway、投递 ask、执行 memory-resume 都走同一个隔离工作区。
+    参数说明:
+    `paths` 是本次 scenario 的目录集合；`parts` 是 `my-agent` 子命令和参数。
+    返回说明:
+    返回可以交给 `subprocess.run()` 的命令列表。
+    """
+
+    return [sys.executable, "-m", "agent_py_agent", "--config", str(paths.config), *parts]
+
+
+def run_scenario_gateway_ask(
+    paths: ScenarioPaths,
+    prompt: str,
+    *,
+    timeout: float,
+    save: bool = False,
+) -> dict[str, object]:
+    """用隔离配置启动 gateway、投递一次 ask，然后关闭 gateway。
+
+    `save=False` 保持普通 scenario happy path 不污染 archive；需要验证恢复链路时传
+    `save=True`，让真实 gateway 请求写入 raw archive 和 recovery snapshot。
+    """
 
     env = os.environ.copy()
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
-    start = run_scenario_subprocess(command("gateway", "start", "--force"), env=env, timeout=60)
+    start = run_scenario_subprocess(scenario_command(paths, "gateway", "start", "--force"), env=env, timeout=60)
     if start.returncode != 0:
         return {"ok": False, "error": "gateway start failed", "stdout": start.stdout, "stderr": start.stderr}
     try:
+        ask_command = scenario_command(paths, "gateway", "ask", prompt, "--timeout", str(timeout), "--json")
+        if not save:
+            ask_command.append("--no-save")
         ask = run_scenario_subprocess(
-            command("gateway", "ask", prompt, "--timeout", str(timeout), "--no-save", "--json"),
+            ask_command,
             env=env,
             timeout=timeout + 30,
         )
@@ -202,7 +228,7 @@ def run_scenario_gateway_ask(paths: ScenarioPaths, prompt: str, *, timeout: floa
         return payload
     finally:
         run_scenario_subprocess(
-            command("gateway", "stop", "--timeout", "10", "--kill", "--reason", "scenario-test done"),
+            scenario_command(paths, "gateway", "stop", "--timeout", "10", "--kill", "--reason", "scenario-test done"),
             env=env,
             timeout=30,
         )

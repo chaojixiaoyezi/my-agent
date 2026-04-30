@@ -459,3 +459,67 @@ def test_memory_resume_cross_day_gateway_request_uses_response_fact_source(tmp_p
     assert payload["brief"]["related_ids"]["request_ids"] == ["gwreq-cross-day"]
     assert "gateway handoff：继续昨天网关请求" in payload["brief"]["context_block"]
     assert str(response_path) in payload["brief"]["context_block"]
+
+
+def test_memory_resume_gateway_processing_path_falls_back_to_done_request(tmp_path, capsys):
+    config_path = _write_config(tmp_path)
+    root = _workspace(config_path)
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            subagent_workspace="subagents",
+            gateway_workspace="gateway",
+            local_store_path="local_store/local.db",
+            local_store_files_dir="local_store/files",
+            local_store_events_path="local_store/events.jsonl",
+        ),
+        root,
+    )
+    request_id = "gwreq-processing-moved"
+    paths = gateway_paths(agent)
+    processing_path = paths.processing / f"{request_id}.json"
+    done_path = paths.done / f"{request_id}.json"
+    response_path = gateway_response_path(paths, request_id)
+    processing_path.parent.mkdir(parents=True, exist_ok=True)
+    done_path.parent.mkdir(parents=True, exist_ok=True)
+    response_path.parent.mkdir(parents=True, exist_ok=True)
+    processing_path.write_text(
+        json.dumps({"id": request_id, "kind": "ask", "status": "processing"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    done_path.write_text(
+        json.dumps({"id": request_id, "kind": "ask", "status": "done"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    response_path.write_text(
+        json.dumps({"id": request_id, "kind": "ask", "ok": True, "status": "done"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    log_gateway_payload(
+        agent,
+        {
+            "id": request_id,
+            "kind": "ask",
+            "ok": True,
+            "status": "done",
+            "response": "completed after processing path moved",
+        },
+        event_type="gateway_request_completed",
+        request_path=processing_path,
+        response_path=response_path,
+    )
+
+    code, payload = _run_cli_json(
+        capsys,
+        config_path,
+        "memory-resume",
+        "processing moved",
+        "--request-id",
+        request_id,
+    )
+
+    reads = payload["resume"]["recommended_read_paths"]
+    assert code == 0
+    assert str(done_path) in reads
+    assert str(processing_path) not in reads
+    assert payload["gateway_fact_sources"][0]["request_path"] == str(done_path)

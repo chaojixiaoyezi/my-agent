@@ -40,6 +40,21 @@ agent_py_agent/cli/
 6. status/local-doctor/timeline 从 gateway state、heartbeat、history 和 LocalStore 读取可观察状态。
 7. `memory-resume` 或自动恢复命中 gateway_request 时，会把 request/response JSON 作为事实源推荐阅读。
 
+### processing lease 降级
+
+worker 抢占 pending 后会尝试写 processing lease，方便 local-doctor 判断请求是否卡住。这个 lease 是观测层，不是任务本体：
+
+```text
+pending/<id>.json
+  -> move to processing/<id>.json
+  -> try write lease heartbeat
+  -> if lease write fails, continue agent.run without lease refresh
+  -> write responses/<id>.json
+  -> archive request to done/failed
+```
+
+这样 Windows 深路径、临时文件写入失败或监控层抖动不会把用户请求卡死在 processing。
+
 ## 跨天恢复
 
 gateway 的跨天恢复和 subagent 恢复遵循同一个原则：LocalStore 只负责帮忙找到 request_id，真正要读的是 gateway 文件事实源。
@@ -67,8 +82,9 @@ memory-resume 或 run(auto resume)
 4. 再看 `gateway_parts/runtime.py`，理解 worker 如何处理请求并写响应。
 5. 再看 `gateway_parts/recovery.py`，理解程序崩溃后怎么恢复。
 6. 再看 `agent_py_agent/tests/test_memory_archive_cli.py::test_memory_resume_cross_day_gateway_request_uses_response_fact_source`，理解 gateway 请求如何进入跨天恢复。
-7. 最后看 `agent_py_agent/tests/test_gateway_client.py` 和 scenario 测试，理解怎样证明协议没坏。
+7. 再看 `agent_py_agent/tests/test_scenario_gateway_resume.py`，理解真实后台 gateway 进程如何被场景测试启动、投递、恢复和验收。
+8. 最后看 `agent_py_agent/tests/test_gateway_client.py`，理解怎样证明协议边界和失败降级没坏。
 
 ## 当前第一版索引 / 待补齐
 
-本页先描述单机文件协议。后续应补充真实目录样例、请求 JSON schema、response JSON schema、失败恢复时序图、真实后台进程跨天恢复演练和 gateway chat 的用户路径。
+本页先描述单机文件协议。后续应补充真实目录样例、请求 JSON schema、response JSON schema、失败恢复时序图和 gateway chat 的用户路径。

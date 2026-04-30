@@ -271,7 +271,7 @@ def collect_gateway_payloads(local_hits: list[dict[str, Any]], *, limit: int) ->
         request_id = str(metadata.get("request_id") or source_id or "").strip()
         if source_type != "gateway_request" and not request_id.startswith("gwreq-"):
             continue
-        request_path = str(metadata.get("request_path", "") or "").strip()
+        request_path = _gateway_terminal_request_path(str(metadata.get("request_path", "") or "").strip())
         response_path = str(metadata.get("response_path", "") or "").strip()
         content_path = str(hit.get("content_path", "") or "").strip()
         recommended_paths = _dedupe_strings([request_path, response_path, content_path])
@@ -290,6 +290,45 @@ def collect_gateway_payloads(local_hits: list[dict[str, Any]], *, limit: int) ->
         if len(payloads) >= max(limit, 0):
             break
     return payloads
+
+
+def _gateway_terminal_request_path(request_path: str) -> str:
+    """LLM: prefer completed gateway request archive paths over transient processing paths.
+
+    新手说明:
+    真实 gateway 会先把请求放在 `requests/processing/`，处理完成后再移动到
+    `requests/done/` 或 `requests/failed/`。LocalStore 可能记录的是处理中的临时路径，
+    恢复时应该优先指向最终还存在的归档文件，避免第二天按提示去读一个已经被移动走的路径。
+    参数说明:
+    `request_path` 是 LocalStore metadata 里记录的请求 JSON 路径，可能为空、可能是 processing 路径。
+    返回说明:
+    返回最适合恢复读取的路径；如果找不到更好的终态文件，就保持原值。
+    """
+
+    if not request_path:
+        return ""
+    path = Path(request_path)
+    parts = list(path.parts)
+    try:
+        requests_index = parts.index("requests")
+        state_index = requests_index + 1
+    except ValueError:
+        if path.exists():
+            return request_path
+        return request_path
+    if state_index >= len(parts) or parts[state_index] != "processing":
+        if path.exists():
+            return request_path
+        return request_path
+    candidates: list[Path] = []
+    for terminal_state in ("done", "failed"):
+        updated_parts = parts[:]
+        updated_parts[state_index] = terminal_state
+        candidates.append(Path(*updated_parts))
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return request_path
 
 
 def build_resume_guidance(

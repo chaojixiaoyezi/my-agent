@@ -64,8 +64,11 @@ LocalStore gateway_request
 subagents/<run_id>/
   -> STATUS.md / WORK_LOG.md / HANDOFF.md / ACCEPTANCE.md / TEST_CHECKLIST.md 是最终恢复事实源
 
+gateway/requests/done/<request_id>.json 或 gateway/requests/failed/<request_id>.json
+  -> gateway 请求的终态请求事实源；如果 LocalStore 里还是 processing 路径，resume 会尽量纠偏到这里
+
 gateway/responses/<request_id>.json
-  -> gateway 请求的响应事实源；必要时和 request JSON 一起读
+  -> gateway 请求的响应事实源；通常要和 request JSON 一起读
 
 memory-resume 或 run(auto resume)
   -> 输出 Recovery Brief，把推荐阅读路径和下一步动作带回父会话
@@ -83,8 +86,9 @@ memory-resume 或 run(auto resume)
 6. 再看 `memory_routing/loader.py` 和 `context.py`，理解人工索引怎么读入，authority 文件怎么安全注入。
 7. 再看 `memory_archive/models.py`、`storage.py`、`runtime.py` 和 `snapshots.py`，理解归档保存什么、怎么写入、怎么验收。
 8. 再看 `memory_archive/query.py`、`resume_brief.py` 和 `resume_context.py`，理解“继续任务”时怎么找回线索。
-9. 再看 `agent_py_agent/tests/test_memory_archive_cli.py::test_memory_resume_cross_day_handoff_uses_task_fact_sources` 和 `test_memory_runtime.py::test_auto_resume_context_recovers_cross_day_handoff_task`，理解跨天恢复如何从线索回到事实源。
-10. 最后看 `agent_py_agent/tests/test_memory_*.py`，用测试反推每一层必须保证的行为。
+9. 再看 `agent_py_agent/tests/test_memory_archive_cli.py::test_memory_resume_cross_day_handoff_uses_task_fact_sources` 和 `test_memory_runtime.py::test_auto_resume_context_recovers_cross_day_handoff_task`，理解 subagent 跨天恢复如何从线索回到事实源。
+10. 再看 `agent_py_agent/tests/test_scenario_gateway_resume.py`，理解真实 gateway 请求如何通过跨天恢复回到 request/response JSON。
+11. 最后看 `agent_py_agent/tests/test_memory_*.py`，用测试反推每一层必须保证的行为。
 
 ## 当前第一版索引 / 待补齐
 
