@@ -4,6 +4,7 @@ __pycache__/
 .DS_Store
 
 agent_py_agent/data/
+agent_py_agent/memory/
 agent_py_agent/*/__pycache__/
 .env
 .env.*

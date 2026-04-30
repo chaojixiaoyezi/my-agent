@@ -459,7 +459,8 @@ agent_py_agent/config/capability_config.yaml
 - [WORKSTREAMS.md](WORKSTREAMS.md)：并行开发线和 worktree 规则。
 - [AGENTS.md](AGENTS.md)：后续 AI 开发者必须遵守的开发规范。
 - [CODEBASE_TREE.md](CODEBASE_TREE.md)：目录树和关键文件职责。
-- [DESIGN_LEDGER.md](DESIGN_LEDGER.md)：设计想法、落地状态和后续方向。
+- [DESIGN_LEDGER.md](DESIGN_LEDGER.md)：设计想法、落地状态和后续方向的主导航。
+- [docs/design/](docs/design/)：模块级长篇设计文档。
 - [TESTS.md](TESTS.md)：测试说明。
 
 ## 本地验证

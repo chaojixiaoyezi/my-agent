@@ -19,6 +19,10 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |-- MEMORY_BACKLOG.md                          # 记忆系统痛点、去重分类和后续设计讨论入口
 |-- WORKSTREAMS.md                             # 并行开发工作台说明，定义 worktree、职责边界和集成流程
 |-- HANDOFF_TEMPLATE.md                        # 并行开发线完成后的交接模板
+|-- docs/                                      # 长篇项目文档目录
+|   `-- design/                                # 模块设计文档，承载 DESIGN_LEDGER 的长篇细节
+|       |-- README.md                          # 模块设计文档索引和拆分规则
+|       `-- subagent-quality-contract.md       # subagent 质量契约、受控施工队和用户少说派工设计
 |-- scripts/                                   # 开发辅助脚本，放可见测试台和 workstream 管理入口
 |   |-- live_agent_lab.py                      # Live Lab 薄入口，启动可见真实环境测试台
 |   |-- live_lab/                              # Live Lab 参数解析、运行器、case 和常量
@@ -558,7 +562,7 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - evidence、capability request、artifacts、tests、patches、lessons、next_actions 的写回规则。
 - runner 的安全边界和后续缺口。
 
-后续改 subagent 主链路时，除了 `DESIGN_LEDGER.md`，也要同步检查这份 runbook 是否需要更新。
+后续改 subagent 主链路时，除了 `DESIGN_LEDGER.md` 和 `docs/design/subagent-quality-contract.md`，也要同步检查这份 runbook 是否需要更新。
 
 ### `DESIGN_LEDGER.md`
 
@@ -566,7 +570,15 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 
 它专门记录交流中形成的新想法、是否已经落地、落地位置和后续方向。
 
+主台账只放导航和决策摘要。超过约 100 行或明显属于单个模块的详细设计，应拆到 `docs/design/`，并在这里保留链接。
+
 后续 AI 如果听到用户提出新的架构想法，例如 skill 路由、tool 授权、能力上抛、自学习策略、命令语义变化，都要更新这份文件。
+
+### `docs/design/`
+
+这是模块级设计文档目录。
+
+它负责承载会长期扩展的设计细节，例如模块背景、痛点、schema、配置开关、分阶段开发计划和验收策略。当前已有 subagent 质量契约设计，后续 memory、gateway、log analysis 等模块如果设计内容继续膨胀，也应按同样方式拆出独立文档。
 
 ## 跨平台兼容性
 

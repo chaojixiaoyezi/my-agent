@@ -64,6 +64,9 @@
 
 - [ ] 创建 run 后有标准目录和关键文件
 - [ ] `task.json` / `run.json` 可读
+- [ ] 高质量/主观交付任务必须有 `QualityContract` 或等价验收说明，不能只写动作目标
+- [ ] 质量契约写清 `user_visible_goal`、对标样本、坏版条件、禁止交付条件、必须检查项和最终裁决人
+- [ ] 子代理角色明确为 producer / critic / repairer / reviewer 之一，不能默认让一个子代理既生产又自证质量
 - [ ] `STATUS.md` / `WORK_LOG.md` / `ACCEPTANCE.md` / `DEBRIEF.md` 存在
 - [ ] `ACTION_RECEIPTS.md` / `TEST_CHECKLIST.md` / `BUGS.md` / `SKILL_USAGE.md` / `HANDOFF.md` 存在
 - [ ] `output.json` / `dependencies.json` 存在
@@ -89,10 +92,15 @@
 - [ ] 执行前默认 channel probe
 - [ ] BROKEN 通道不会继续模型调用
 - [ ] runner prompt 只包含 allowed tools
+- [ ] runner prompt 包含必要的 core context、task context、role context，不无脑注入全量长上下文
+- [ ] runner prompt 明确子代理不能定义完成标准，最终只能提交待验收材料
+- [ ] runner prompt 要求不确定性进入 risks / needs_parent_decision，不能吞掉模糊边界
+- [ ] 如果有 context manifest，必须记录本轮给了哪些上下文包、必读文件和质量标准
 - [ ] 未授权工具调用会失败
 - [ ] `[SUBAGENT_RESULT]` 缺失或 JSON 错误会被记录
 - [ ] `[SUBAGENT_RESULT]` 前文提到协议标记或 JSON 带 Markdown fence 时仍能解析最终结果块
 - [ ] evidence 会写入 `task.evidence`
+- [ ] 输出必须包含 checks_performed / evidence / failures / risks，不能只写“看起来可以”
 - [ ] capability_requests 会写成 open request
 - [ ] artifacts / tests / patches 会写入 `output.json`
 - [ ] lessons / next_actions 会写入 `output.json` 和 `DEBRIEF.md`
@@ -105,6 +113,10 @@
 - [ ] `subagents-acceptance` 默认 dry-run
 - [ ] `subagents-acceptance --apply` 只验收等待验收的任务
 - [ ] 缺 evidence 时不会标记 DONE
+- [ ] 有质量契约时，验收必须检查 evidence 是否覆盖 `must_check` 和 `sampling_plan`
+- [ ] 子代理自称 PASS 不能作为通过依据，必须检查产物、路径、截图、日志或抽查结果
+- [ ] critic / reviewer 缺失时，高质量任务不能自动标记最终交付完成
+- [ ] 对 PDF/文档类交付，至少抽查第一页、中间正文、后半段、appendix、图表密集页和参考文献页
 - [ ] 有 blocker、失败 tests、未处理 patches 或未审核 applied patch 时不会标记 DONE
 - [ ] 验收通过时状态变为 `DONE` 且 verification 为 `VERIFIED`
 - [ ] 每次验收都会写全局报告和单任务 `ACCEPTANCE_REVIEW.md`
@@ -122,6 +134,10 @@
 
 - [ ] `subagents-dispatch` 默认 dry-run
 - [ ] `subagents-dispatch --apply` 会写 `SUBAGENT_DISPATCH.md` 和审计日志
+- [ ] dispatch 不把子代理当独立负责人；父代理保留质量标准、综合判断和最终收口
+- [ ] 高质量任务优先生成 producer + critic 两类任务，critic 不能和 producer 共享“证明完成”的目标
+- [ ] dispatch 能把用户/父会话给出的质量契约传入 execution context
+- [ ] dispatch 不默认给所有子代理塞完整长上下文；按角色注入相关 context pack
 - [ ] `--execute-runners` 不传时，不会调用模型 runner
 - [ ] `--apply --execute-runners` 才会推进真实 runner，并可能消耗 API
 - [ ] dispatch 顺序保持为 due-check / action apply / capability route / runner / patch review / acceptance
