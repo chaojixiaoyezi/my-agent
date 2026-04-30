@@ -7,6 +7,7 @@
 - request 队列已有 pending、processing、done、failed、responses 目录语义。
 - CLI 已有 gateway process/client 相关命令，包括 start/status/stop/restart/logs、ask/result、run。
 - processing 请求恢复、LocalStore 索引重建、adapter file 协议已有基础实现和测试记录。
+- gateway 请求跨天恢复已通过 memory resume 链路验证：request/response JSON 会作为事实源进入恢复推荐路径。
 
 ## 解决的问题
 
@@ -14,6 +15,7 @@
 - 前台 chat 可以作为 gateway 客户端，向后台投递普通消息。
 - gateway 崩溃遗留的 processing 请求不再只能人工猜状态，可以按 attempts 和超时退回或归档。
 - LocalStore 能看到 gateway request 和生命周期事件，方便 status/timeline/local-doctor 统一观察。
+- gateway request 的 LocalStore 命中现在不再只是“可搜索摘要”，还能把 request/response JSON 带回 `memory-resume` 和自动恢复上下文。
 
 ## 下一步
 
@@ -30,11 +32,14 @@
 - 同步门手工检查：`python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`。
 - 父会话全量回归：`python -m pytest` -> `241 passed`。
 - 空白检查：`git diff --check` -> passed。
+- gateway 跨天恢复 focused 验收：`python -m pytest agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_memory_runtime.py` -> `16 passed`。
+- gateway 跨天恢复宽 focused 验收：`python -m pytest agent_py_agent\tests\test_memory_config.py agent_py_agent\tests\test_memory_routing.py agent_py_agent\tests\test_memory_routing_context.py agent_py_agent\tests\test_memory_runtime.py agent_py_agent\tests\test_memory_cli.py agent_py_agent\tests\test_memory_archive.py agent_py_agent\tests\test_memory_archive_runtime.py agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_local_store.py agent_py_agent\tests\test_gateway_client.py agent_py_agent\tests\test_doc_sync.py` -> `72 passed`。
+- gateway 跨天恢复全量回归：`python -m pytest` -> `247 passed`。
 
 ## 未跑测试
 
 - 本文档第一版没有单独启动真实 gateway 后台进程做手工 ask/result。
-- 暂未做多 gateway 组织或跨机器通信演练。
+- 暂未做多 gateway 组织、跨机器通信或真实后台进程跨天恢复手工演练。
 
 ## 风险
 

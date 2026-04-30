@@ -85,6 +85,97 @@ def _write_cross_day_handoff_archive(root: Path, run_id: str) -> None:
     )
 
 
+def _write_cross_day_gateway_archive(agent: SimpleAgent, request_id: str = "gwreq-runtime-cross-day") -> Path:
+    root = agent.root
+    response_path = root / "gateway" / "responses" / f"{request_id}.json"
+    request_path = root / "gateway" / "requests" / "done" / f"{request_id}.json"
+    response_path.parent.mkdir(parents=True, exist_ok=True)
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    response_path.write_text(
+        json.dumps(
+            {
+                "id": request_id,
+                "kind": "ask",
+                "ok": True,
+                "status": "done",
+                "prompt": "gateway handoff runtime：昨天的 gateway 请求需要恢复。",
+                "response": "已完成 gateway 请求，下一轮请读取 response JSON。",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    request_path.write_text(
+        json.dumps(
+            {
+                "id": request_id,
+                "kind": "ask",
+                "prompt": "gateway handoff runtime：昨天的 gateway 请求需要恢复。",
+                "status": "done",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    agent.local_store.log_record(
+        source_type="gateway_request",
+        source_id=request_id,
+        title=f"Gateway ask {request_id}",
+        content="gateway handoff runtime：昨天的 gateway 请求需要恢复。",
+        metadata={
+            "request_id": request_id,
+            "status": "done",
+            "ok": True,
+            "request_path": str(request_path),
+            "response_path": str(response_path),
+        },
+        event_type="gateway_request_completed",
+    )
+    append_raw_event(
+        root,
+        RawMemoryEvent(
+            event_id="raw-runtime-gateway-cross-day",
+            session_id="session-runtime-gateway-cross-day",
+            request_id=request_id,
+            speaker="user",
+            target="assistant",
+            action="message",
+            status="ok",
+            content_preview="gateway handoff runtime：昨天的 gateway 请求需要恢复。",
+            source="gateway",
+            created_at="2026-04-29T23:40:00+00:00",
+        ),
+    )
+    append_snapshot(
+        root,
+        CompressionSnapshot(
+            snapshot_id="snapshot-runtime-gateway-cross-day",
+            session_id="session-runtime-gateway-cross-day",
+            compression_id="compression-runtime-gateway-cross-day",
+            turn_range={
+                "kind": "recovery_snapshot",
+                "source": "gateway",
+                "request_id": request_id,
+            },
+            user_intents=["gateway handoff runtime：继续昨天 gateway 请求"],
+            assistant_actions=["gateway response 已落盘，下一轮应读响应 JSON。"],
+            dispatch_events=[
+                {
+                    "source": "gateway",
+                    "request_id": request_id,
+                    "status": "done",
+                }
+            ],
+            content_paths=[str(request_path), str(response_path)],
+            next_actions=["读取 gateway response JSON。"],
+            created_at="2026-04-30T00:20:00+00:00",
+        ),
+    )
+    return response_path
+
+
 def test_run_injects_routed_memory_authority_context(tmp_path):
     _write_route(tmp_path)
     agent = SimpleAgent(
@@ -257,3 +348,24 @@ def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
     assert task.id in result.prompt
     assert "HANDOFF.md" in result.prompt
     assert "latest_user_intent: 跨天 handoff runtime：继续昨天 worker" in result.prompt
+
+
+def test_auto_resume_context_recovers_cross_day_gateway_request(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            memory_resume_auto_context_enabled=True,
+            memory_resume_auto_context_limit=5,
+        ),
+        tmp_path,
+    )
+    response_path = _write_cross_day_gateway_archive(agent)
+
+    result = agent.run("继续 gateway handoff runtime", save=False)
+
+    assert result.memory_resume_context_injected is True
+    assert result.memory_resume_context_matches >= 2
+    assert "### Auto Recovery Context" in result.prompt
+    assert "gwreq-runtime-cross-day" in result.prompt
+    assert str(response_path) in result.prompt
+    assert "latest_user_intent: gateway handoff runtime：继续昨天 gateway 请求" in result.prompt

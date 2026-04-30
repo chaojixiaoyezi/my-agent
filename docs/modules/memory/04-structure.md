@@ -58,8 +58,14 @@ agent_py_agent/cli/
 LocalStore subagent_run
   -> 保存可搜索的任务索引，不作为最终事实，只帮助找到 run_id
 
+LocalStore gateway_request
+  -> 保存可搜索的 gateway 请求索引，不作为最终事实，只帮助找到 request_id
+
 subagents/<run_id>/
   -> STATUS.md / WORK_LOG.md / HANDOFF.md / ACCEPTANCE.md / TEST_CHECKLIST.md 是最终恢复事实源
+
+gateway/responses/<request_id>.json
+  -> gateway 请求的响应事实源；必要时和 request JSON 一起读
 
 memory-resume 或 run(auto resume)
   -> 输出 Recovery Brief，把推荐阅读路径和下一步动作带回父会话
@@ -82,4 +88,4 @@ memory-resume 或 run(auto resume)
 
 ## 当前第一版索引 / 待补齐
 
-本页先讲主结构和阅读路径。后续需要补真实 route index 样例、raw archive 样例、doctor 输出样例、LocalStore 命中样例、gateway 跨天恢复 fixture 和 parent/subagent runner 完整恢复链路图。
+本页先讲主结构和阅读路径。后续需要补真实 route index 样例、raw archive 样例、doctor 输出样例、LocalStore 命中样例和 parent/subagent runner 完整恢复链路图。

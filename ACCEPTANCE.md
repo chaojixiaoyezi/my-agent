@@ -367,4 +367,26 @@ Accepted evidence:
 - [x] Full regression passed: `python -m pytest` -> `245 passed`.
 
 Remaining:
-- [ ] Add gateway request cross-day recovery and real parent/subagent runner recovery drills.
+- [x] Add gateway request cross-day recovery.
+- [ ] Add real parent/subagent runner recovery drills.
+
+## 2026-04-30 / Gateway Cross-Day Resume Fact Source Acceptance
+
+Status:
+- [x] Gateway request cross-day resume fixture landed.
+- [x] `memory-resume` now reports `gateway_fact_sources`.
+- [x] Auto resume context can inject gateway request/response JSON paths.
+
+Problems solved:
+- [x] Gateway recovery no longer stops at LocalStore summaries; request/response JSON files are now first-class recovery fact sources.
+- [x] Cross-day gateway clues can be found through archive + LocalStore and returned as Recovery Brief recommended reads.
+- [x] Ordinary gateway requests now share the same recovery principle as subagent tasks: archive is clue, file fact source is authority.
+
+Accepted evidence:
+- [x] Focused tests passed: `python -m pytest agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_memory_runtime.py` -> `16 passed`.
+- [x] Sync gate passed: `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
+- [x] Memory/gateway focused tests passed: `python -m pytest agent_py_agent\tests\test_memory_config.py agent_py_agent\tests\test_memory_routing.py agent_py_agent\tests\test_memory_routing_context.py agent_py_agent\tests\test_memory_runtime.py agent_py_agent\tests\test_memory_cli.py agent_py_agent\tests\test_memory_archive.py agent_py_agent\tests\test_memory_archive_runtime.py agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_local_store.py agent_py_agent\tests\test_gateway_client.py agent_py_agent\tests\test_doc_sync.py` -> `72 passed`.
+- [x] Full regression passed: `python -m pytest` -> `247 passed`.
+
+Remaining:
+- [ ] Add real background gateway process cross-day recovery drill.

@@ -248,10 +248,55 @@ def collect_task_payloads(agent, task_ids: list[str], *, limit: int) -> list[dic
     return payloads
 
 
+def collect_gateway_payloads(local_hits: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    """LLM: derive gateway request fact-source paths from LocalStore hits.
+
+    新手说明:
+    gateway 的最终事实源不是 LocalStore 摘要，而是请求/响应 JSON 文件。
+    LocalStore 命中负责帮我们找到 request_id，这里再把 metadata 里的 request_path、response_path、
+    content_path 收成一张“该读哪些文件”的清单。
+
+    参数说明:
+    `local_hits` 是 `local_hit_payload()` 返回的命中字典列表；`limit` 控制最多返回多少条。
+
+    返回说明:
+    返回 gateway fact-source 摘要列表；没有 gateway 命中时返回空列表。
+    """
+
+    payloads: list[dict[str, Any]] = []
+    for hit in local_hits:
+        source_type = str(hit.get("source_type", "") or "")
+        source_id = str(hit.get("source_id", "") or "")
+        metadata = hit.get("metadata", {}) if isinstance(hit.get("metadata"), dict) else {}
+        request_id = str(metadata.get("request_id") or source_id or "").strip()
+        if source_type != "gateway_request" and not request_id.startswith("gwreq-"):
+            continue
+        request_path = str(metadata.get("request_path", "") or "").strip()
+        response_path = str(metadata.get("response_path", "") or "").strip()
+        content_path = str(hit.get("content_path", "") or "").strip()
+        recommended_paths = _dedupe_strings([request_path, response_path, content_path])
+        payloads.append(
+            {
+                "request_id": request_id,
+                "source_id": source_id,
+                "status": str(metadata.get("status", "") or ""),
+                "ok": bool(metadata.get("ok", False)),
+                "request_path": request_path,
+                "response_path": response_path,
+                "content_path": content_path,
+                "recommended_read_paths": recommended_paths,
+            }
+        )
+        if len(payloads) >= max(limit, 0):
+            break
+    return payloads
+
+
 def build_resume_guidance(
     archive_matches: list[dict[str, Any]],
     local_hits: list[dict[str, Any]],
     task_payloads: list[dict[str, Any]],
+    gateway_payloads: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """LLM: summarize recovery clues into next reads and safe next actions.
 
@@ -261,6 +306,7 @@ def build_resume_guidance(
 
     参数说明:
     `archive_matches`、`local_hits`、`task_payloads` 分别是归档线索、LocalStore 线索和任务事实源。
+    `gateway_payloads` 是可选的 gateway request/response 事实源摘要。
 
     返回说明:
     返回恢复指导字典，包含数量摘要、推荐阅读路径和下一步动作。
@@ -271,6 +317,10 @@ def build_resume_guidance(
         for path in task.get("recommended_read_paths", []) or []:
             if path and path not in recommended_reads:
                 recommended_reads.append(path)
+    for gateway in gateway_payloads or []:
+        for path in gateway.get("recommended_read_paths", []) or []:
+            if path and path not in recommended_reads:
+                recommended_reads.append(path)
     for hit in local_hits:
         path = str(hit.get("content_path", "") or "")
         if path and path not in recommended_reads:
@@ -279,12 +329,13 @@ def build_resume_guidance(
         "先读取 task_fact_sources 里的 STATUS/WORK_LOG/HANDOFF/TESTS，再判断任务是否能继续。",
         "把 archive_matches 当恢复线索，不要把其中的历史摘要当最终事实。",
     ]
-    if not task_payloads:
+    if not task_payloads and not gateway_payloads:
         next_actions.append("如果没有任务目录，先用 memory-archive-search 缩小 request_id/run_id/session_id。")
     return {
         "archive_match_count": len(archive_matches),
         "local_match_count": len(local_hits),
         "task_fact_source_count": len(task_payloads),
+        "gateway_fact_source_count": len(gateway_payloads or []),
         "recommended_read_paths": recommended_reads[:20],
         "next_actions": next_actions,
     }
@@ -596,6 +647,28 @@ def _append_run_id(items: list[str], value: object) -> None:
     run_id = text[text.find("subagent-") :].split()[0].strip("`'\",)")
     if run_id and run_id not in items:
         items.append(run_id)
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    """LLM: keep non-empty strings once while preserving order.
+
+    新手说明:
+    gateway 的 request_path、response_path、content_path 可能有空值，也可能重复。
+    这里收成干净列表，给 Recovery Brief 和 CLI 输出直接使用。
+
+    参数说明:
+    `values` 是候选路径字符串列表。
+
+    返回说明:
+    返回去空、去重后的字符串列表。
+    """
+
+    items: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in items:
+            items.append(text)
+    return items
 
 
 def _created_at_sort(value: str, *, fallback: float) -> float:

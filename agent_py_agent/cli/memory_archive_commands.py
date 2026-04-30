@@ -15,6 +15,7 @@ from ..agent.memory_archive.query import (
     archive_filters_from_args,
     build_resume_guidance,
     collect_archive_records,
+    collect_gateway_payloads,
     collect_resume_task_ids,
     collect_task_payloads,
     filter_archive_records,
@@ -98,6 +99,7 @@ def cmd_memory_resume(args) -> int:
     新手说明:
     用户说“继续”时，最怕模型只靠印象猜。
     这条命令先把可检索线索找出来，再把任务目录这些权威事实源列出来，帮助下一步真正恢复现场。
+    如果线索来自 gateway 请求，它会额外列出 gateway request/response JSON，避免用户只看 LocalStore 摘要。
 
     参数说明:
     `args` 是 argparse 对象，包含 query、过滤字段、layer/date/limit/json/context_only 等。
@@ -125,7 +127,9 @@ def cmd_memory_resume(args) -> int:
     local_payloads = [local_hit_payload(hit) for hit in local_hits]
     task_ids = collect_resume_task_ids(args, archive_matches, local_payloads)
     task_payloads = collect_task_payloads(agent, task_ids, limit=args.limit)
-    resume = build_resume_guidance(archive_matches, local_payloads, task_payloads)
+    # Gateway 请求的权威事实源是 request/response JSON，CLI 要把这些路径显式列出来。
+    gateway_payloads = collect_gateway_payloads(local_payloads, limit=args.limit)
+    resume = build_resume_guidance(archive_matches, local_payloads, task_payloads, gateway_payloads)
     brief = build_resume_brief(
         archive_matches,
         local_payloads,
@@ -141,6 +145,7 @@ def cmd_memory_resume(args) -> int:
         "archive_matches": archive_matches,
         "local_matches": local_payloads,
         "task_fact_sources": task_payloads,
+        "gateway_fact_sources": gateway_payloads,
         "resume": resume,
         "brief": brief,
     }
@@ -251,6 +256,13 @@ def _print_memory_resume(payload: dict[str, Any], *, json_output: bool) -> None:
             continue
         print(f"- {task['run_id']} {task['status']}/{task['verification_status']} :: {task['goal']}")
         print(f"  task_dir={task['task_dir']}")
+    print("Gateway Fact Sources")
+    if not payload["gateway_fact_sources"]:
+        print("- none")
+    for gateway in payload["gateway_fact_sources"]:
+        print(f"- {gateway['request_id']} status={gateway['status'] or '-'} ok={gateway['ok']}")
+        for path in gateway["recommended_read_paths"]:
+            print(f"  - {path}")
     print("Recommended Reads")
     for path in payload["resume"]["recommended_read_paths"] or ["none"]:
         print(f"- {path}")

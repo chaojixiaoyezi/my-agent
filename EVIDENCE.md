@@ -244,3 +244,18 @@
   - `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
   - `python -m pytest agent_py_agent\tests\test_memory_config.py agent_py_agent\tests\test_memory_routing.py agent_py_agent\tests\test_memory_routing_context.py agent_py_agent\tests\test_memory_runtime.py agent_py_agent\tests\test_memory_cli.py agent_py_agent\tests\test_memory_archive.py agent_py_agent\tests\test_memory_archive_runtime.py agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_local_store.py agent_py_agent\tests\test_doc_sync.py` -> `69 passed`.
   - `python -m pytest` -> `245 passed`.
+
+## 2026-04-30 / Gateway Cross-Day Resume Fact Source Evidence
+
+- Updated memory resume behavior:
+  - Added `collect_gateway_payloads()` to derive gateway request/response fact-source paths from LocalStore hits.
+  - `memory-resume` JSON/text output now includes `gateway_fact_sources`.
+  - Auto resume context passes gateway fact-source paths into the Recovery Brief recommended reads.
+- Added gateway recovery fixture coverage:
+  - `test_memory_resume_cross_day_gateway_request_uses_response_fact_source` creates previous-day gateway archive clues, next-day hook snapshot, LocalStore gateway_request record, and real request/response JSON files.
+  - `test_auto_resume_context_recovers_cross_day_gateway_request` verifies `SimpleAgent.run()` injects the gateway response JSON path in Auto Recovery Context.
+- Verification:
+  - `python -m pytest agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_memory_runtime.py` -> `16 passed`.
+  - `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
+  - `python -m pytest agent_py_agent\tests\test_memory_config.py agent_py_agent\tests\test_memory_routing.py agent_py_agent\tests\test_memory_routing_context.py agent_py_agent\tests\test_memory_runtime.py agent_py_agent\tests\test_memory_cli.py agent_py_agent\tests\test_memory_archive.py agent_py_agent\tests\test_memory_archive_runtime.py agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_local_store.py agent_py_agent\tests\test_gateway_client.py agent_py_agent\tests\test_doc_sync.py` -> `72 passed`.
+  - `python -m pytest` -> `247 passed`.
