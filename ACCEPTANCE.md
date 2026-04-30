@@ -25,8 +25,12 @@
 
 已通过：
 - [x] `python -m pytest`：初验 155 passed，修复后复验 164 passed。
+- [x] LOG CLI / tool registry / structured query plan 接入后，`python -m pytest` 复验 172 passed。
 - [x] LOG 模块 `py_compile` 通过。
 - [x] `SecurityAlertV1` ingest / query / dispatch / detector 专项测试通过，修复后 33 passed。
+- [x] LOG CLI / tools / dispatch / detector / model 组合测试通过，52 passed。
+- [x] 手工执行 `my-agent logs status --json`，确认默认 disabled 且不创建重型后台任务。
+- [x] 手工执行 `my-agent logs ingest` 后 `my-agent logs query`，3 条 fixture 可查回。
 - [x] LOG 模块默认配置为关闭，不影响普通命令。
 
 已修复并复验：
@@ -38,17 +42,23 @@
 - [x] identity 类 case dedup 没纳入 user，可能把同源 IP、同时间桶的不同账号合并。
 - [x] detector 缺时间戳时会把时间窗口判断放行，可能跨任意时间错误关联。
 - [x] route/report 接收批量 findings 时缺少按 `case.finding_refs` 过滤。
+- [x] LOG 模块没有 CLI 子命令，用户只能 import Python API。
+- [x] LOG 安全工具没有接入主工具 registry，且 analyst prompt 仍混用旧 `traffic_*` 名称。
+- [x] detector 的 `next_queries` 是自然语言字符串，不是结构化 query plan。
 
 验收未通过项：
-- [ ] LOG 模块还没有 CLI 子命令，也没有接入主工具 registry。
-- [ ] `query_default_limit/query_max_limit/data_dir` 还没有完整贯穿 CLI/tool/runtime，只做了局部默认值和硬限制。
+- [ ] `query_default_limit/query_max_limit/data_dir` 已贯穿 CLI 最小链路，但 storage 层仍有 `MAX_QUERY_LIMIT=500` 硬上限，与配置默认 `query_max_limit=1000` 存在可见 warning。
 - [ ] 坏 JSONL 行目前只跳过，没有独立 corrupt-line audit/metric。
-- [ ] detector 的 `next_queries` 仍是自然语言字符串，还不是结构化 query plan。
+- [ ] `logs/security` 场景如何自动把 `granted_capabilities` 传入普通 run/chat runtime 还未接线；当前 CLI 和显式工具授权可用。
+- [ ] 还没有 Live Lab / scenario replay，把 SecurityAlertV1 fixture 跑成可见第一响应报告。
 
 已拆给 worker：
 - storage/ingest/query 闭环修复。
 - evidence/ref 与 dispatch 合同修复。
 - detector 时间关联、case dedup、route/report 过滤修复。
+- CLI 与配置贯通。
+- Tool registry 与安全 prompt profile。
+- 结构化 query plan。
 
 父会话保留：
-- 决定 CLI / tool registry / profile / 文档拆分的下一批派工。
+- 决定 runtime capability 自动接线、storage audit 和 Live Lab replay 的下一批派工。

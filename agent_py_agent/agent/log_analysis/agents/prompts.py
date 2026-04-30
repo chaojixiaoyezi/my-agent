@@ -105,7 +105,8 @@ def security_prompt_fragment(
             [
                 "- Every conclusion must cite evidence_refs.",
                 "- Separate facts, inferences, gaps, and next actions.",
-                "- Use bounded tools such as traffic_query, traffic_sample, traffic_topn, traffic_timeseries, traffic_related, and evidence_read.",
+                "- Use only authorized bounded tools such as security_query, security_hunt_ip, and security_trace_case.",
+                "- Security tools return summary, preview_rows, and evidence_refs; do not request or paste full raw rows into the prompt.",
             ]
         )
 

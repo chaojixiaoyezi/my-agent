@@ -170,11 +170,9 @@ class DispatchEngine:
             "evidence_refs": list(request.evidence_refs),
             "route_summary": dict(request.route_summary),
             "available_tools": [
-                "traffic_query",
-                "traffic_topn",
-                "traffic_sample",
-                "traffic_timeseries",
-                "traffic_related",
+                "security_query",
+                "security_hunt_ip",
+                "security_trace_case",
                 "evidence_read",
             ],
             "budget": {

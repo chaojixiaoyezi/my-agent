@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from .capabilities import effective_feature_gates
-from .config import LogAnalysisConfig, LogAnalysisConfigWarning, default_log_analysis_config_path, load_log_analysis_config
+from .config import (
+    LogAnalysisConfig,
+    LogAnalysisConfigWarning,
+    default_log_analysis_config_path,
+    load_log_analysis_config,
+    resolve_log_analysis_data_dir,
+)
 
 
 RUNTIME_DIRS = [
@@ -54,7 +60,7 @@ def collect_doctor_status(
     if load_warning is not None:
         config_warnings.append(load_warning.to_dict())
 
-    data_dir = _resolve_data_dir(config.data_dir, root)
+    data_dir = resolve_log_analysis_data_dir(config.data_dir, workspace_root=root)
     paths = {"base": _path_status(data_dir)}
     for name in RUNTIME_DIRS:
         paths[name] = _path_status(data_dir / name)
@@ -83,13 +89,6 @@ def collect_doctor_status(
         "paths": paths,
         "feature_gates": effective_feature_gates(config),
     }
-
-
-def _resolve_data_dir(data_dir: str, workspace_root: Path) -> Path:
-    path = Path(data_dir)
-    if path.is_absolute():
-        return path
-    return workspace_root / path
 
 
 def _path_status(path: Path) -> dict[str, Any]:

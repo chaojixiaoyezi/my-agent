@@ -150,6 +150,7 @@ Ctrl+C
 | `local-index-memory` | 把旧 JSONL 记忆补建到本地事实源 | 是 | 否 |
 | `local-doctor` | 诊断 LocalStore、gateway 队列和 subagent 文件事实源 | 可选 `--repair` | 否 |
 | `local-rebuild` | 从 memory/gateway/subagent 文件事实源重建 LocalStore | 是 | 否 |
+| `logs` | log analysis 状态、文件导入和安全查询入口 | status/query 只读；ingest 写 log analysis 数据目录 | 否 |
 | `chat` | 启动交互循环 | 默认写记忆，可用 `--no-save` 关闭 | 是；加 `--gateway` 时由后台 gateway 调用 |
 | `spawn-subagents` | 拆分并创建 subagent 工单 | 是 | 否 |
 | `subagents` | 查看 subagent 看板 | 否 | 否 |
@@ -473,6 +474,43 @@ my-agent local-rebuild --reset
 | --- | --- | --- |
 | `--source <name>` | `all` | 只重建指定来源，可多次传入；可选 `all`、`memory`、`gateway`、`subagent`、`fts`。 |
 | `--reset` | `false` | 先清空 LocalStore records/events/FTS 再重建。 |
+
+## `logs`
+
+```powershell
+my-agent logs status
+my-agent logs status --json
+my-agent logs ingest validation/security_fixtures/security_alert_v1.jsonl --source-id fixture --format jsonl
+my-agent logs query --start-time 2026-04-30T00:00:00Z --end-time 2026-04-30T23:59:59Z --attacker-ip 198.51.100.23
+my-agent logs hunt-ip 198.51.100.23 --start-time 2026-04-30T00:00:00Z --end-time 2026-04-30T23:59:59Z
+my-agent logs trace-case case-1 --start-time 2026-04-30T00:00:00Z --end-time 2026-04-30T23:59:59Z
+```
+
+`logs` 是 log analysis 的最小 CLI 面。`status` 只读取 `agent_py_agent/config/log_analysis_config.yaml` 并显示 disabled/enabled、capability level、data dir 和 warnings，不启动 worker。`ingest` 写入配置里的 `data_dir`，除非传 `--root`。`query`、`hunt-ip`、`trace-case` 读取同一目录；`--limit` 未传时使用 `query_default_limit`，超过 `query_max_limit` 时会截断并在输出里显示 warning。
+
+| 子命令 | 参数 | 说明 |
+| --- | --- | --- |
+| `status` | `--json` | 输出机器可读 JSON。 |
+| `ingest` | `file` | 必填，待导入的本地日志文件。 |
+| `ingest` | `--root <path>` | 覆盖 log analysis 数据目录；未传时使用配置 `data_dir`。 |
+| `ingest` | `--source-id <id>` | 导入源 ID，用于 checkpoint、manifest 和去重。 |
+| `ingest` | `--format <jsonl|json|csv|log>` | 覆盖输入格式；未传时按文件后缀推断。 |
+| `ingest` | `--json` | 输出机器可读 JSON。 |
+| `query` | `--root <path>` | 覆盖 log analysis 数据目录。 |
+| `query` | `--start-time <iso>` | 查询起始时间；受控安全查询建议始终传时间窗。 |
+| `query` | `--end-time <iso>` | 查询结束时间。 |
+| `query` | `--attacker-ip <ip>` | 按攻击方或源 IP 过滤。 |
+| `query` | `--victim-ip <ip>` | 按受害方或目的 IP 过滤。 |
+| `query` | `--domain <name>` | 按 domain/host/SNI/DNS query 过滤。 |
+| `query` | `--uri <path>` | 按 URI/URL/path/API 过滤。 |
+| `query` | `--alert-type <type>` | 按告警类型过滤。 |
+| `query` | `--limit <n>` | 覆盖查询返回上限。 |
+| `query` | `--json` | 输出机器可读 JSON。 |
+| `hunt-ip` | `ip` | 必填，围绕一个 IP 同时查 attacker/victim 角色。 |
+| `hunt-ip` | `--role <any|attacker|victim>` | 限制 IP 角色；默认 `any`。 |
+| `hunt-ip` | `--root`, `--start-time`, `--end-time`, `--limit`, `--json` | 与 `query` 同义。 |
+| `trace-case` | `case_id` | 必填，从 case seed 扩展查询。 |
+| `trace-case` | `--root`, `--start-time`, `--end-time`, `--limit`, `--json` | 与 `query` 同义。 |
 
 ## `chat`
 

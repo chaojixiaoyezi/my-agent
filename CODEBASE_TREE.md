@@ -50,6 +50,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- scenario_cases.py                  # verification/gateway-restart/structured-repair/runner-retry 专项场景
 |   |   |-- scenario_utils.py                  # scenario fixture、隔离配置、子进程和摘要工具
 |   |   |-- chat.py                            # 交互 chat 队列和斜杠命令
+|   |   |-- logs.py                            # 日志分析 logs status/ingest/query/hunt/trace CLI 命令
 |   |   `-- parser.py                          # argparse 命令树和 main()
 |   |-- agent/                                 # 智能体核心模块目录
 |   |   |-- __init__.py                        # 包初始化文件
@@ -106,6 +107,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |       |-- test_capabilities.py               # skill/tool 统一能力路由测试
 |       |-- test_cli_reference.py              # CLI_REFERENCE 与 argparse 命令/参数覆盖测试
 |       |-- test_local_store.py                # SQLite/FTS5/JSONL/记忆索引回归测试
+|       |-- test_log_analysis_cli.py           # 日志分析 logs CLI 状态、接入和查询测试
 |       |-- test_log_analysis_detectors.py     # 日志分析软检测器、case、route 和报告测试
 |       |-- test_log_analysis_dispatch.py      # 日志分析 analyst/reviewer 合同和 dispatch 测试
 |       |-- test_log_analysis_ingest.py        # SecurityAlertV1 CSV/JSONL 接入、checkpoint、dedup 和 dead letter 测试

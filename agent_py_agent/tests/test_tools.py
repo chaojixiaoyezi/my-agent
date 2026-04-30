@@ -9,6 +9,7 @@ import threading
 from agent_py_agent.agent.backend import BaseBackend, ModelResponse
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.log_analysis.storage import LocalLogStore
 from agent_py_agent.agent.tools import (
     AppendFileTool,
     FetchUrlTool,
@@ -402,6 +403,68 @@ def test_tool_allowlist_limits_prompt_and_execution():
         assert "write_file [filesystem]" not in result.prompt
         assert not blocked.ok
         assert "未授权" in blocked.output
+
+
+def test_security_tools_are_hidden_by_default_and_require_authorization():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        registry = make_tool_registry(workspace)
+
+        catalog = registry.render_catalog_section()
+        recommended = registry.render_recommended_tools_section("investigate security logs for attacker ip")
+        blocked = registry.execute_call(
+            {
+                "tool": "security_query",
+                "start_time": "2026-04-30T09:00:00Z",
+                "end_time": "2026-04-30T11:00:00Z",
+                "limit": 10,
+            }
+        )
+
+        assert "security_query [log_analysis]" not in catalog
+        assert "security_query" not in recommended
+        assert not blocked.ok
+        assert "not authorized" in blocked.output
+
+
+def test_security_tools_are_exposed_for_security_capability_or_tool_grant():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        registry = make_tool_registry(workspace)
+        store = LocalLogStore(workspace)
+        store.upsert_event(
+            {
+                "event_id": "evt-1",
+                "event_time": "2026-04-30T10:00:00Z",
+                "source_id": "waf-prod",
+                "alert_type": "web_attack",
+                "attacker_ip": "198.51.100.10",
+                "payload": "A" * 500,
+            }
+        )
+
+        capability_catalog = registry.render_catalog_section(granted_capabilities=["logs/security"])
+        allowed_catalog = registry.render_catalog_section(allowed_tools=["security_query"])
+        result = registry.execute_call(
+            {
+                "tool": "security_query",
+                "attacker_ip": "198.51.100.10",
+                "start_time": "2026-04-30T09:00:00Z",
+                "end_time": "2026-04-30T11:00:00Z",
+                "limit": 10,
+            },
+            granted_capabilities=["logs/security"],
+        )
+        payload = json.loads(result.output)
+
+        assert "security_query [log_analysis]" in capability_catalog
+        assert "security_query [log_analysis]" in allowed_catalog
+        assert result.ok
+        assert payload["tool"] == "security_query"
+        assert payload["row_count"] == 1
+        assert payload["evidence_refs"]
+        assert "rows" not in payload
+        assert "preview_rows" in payload
 
 
 def test_write_boundary_blocks_subagent_writes_outside_allowed_roots():

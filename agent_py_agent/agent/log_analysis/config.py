@@ -68,6 +68,22 @@ def default_log_analysis_config_path() -> Path:
     return Path(__file__).resolve().parents[2] / "config" / "log_analysis_config.yaml"
 
 
+def default_log_analysis_workspace_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def resolve_log_analysis_data_dir(
+    data_dir: str | Path,
+    *,
+    workspace_root: str | Path | None = None,
+) -> Path:
+    path = Path(data_dir).expanduser()
+    if path.is_absolute():
+        return path
+    root = Path(workspace_root).expanduser() if workspace_root is not None else default_log_analysis_workspace_root()
+    return root / path
+
+
 def load_log_analysis_config(
     config_path: str | Path | None = None,
     *,
@@ -370,6 +386,8 @@ __all__ = [
     "LogAnalysisConfig",
     "LogAnalysisConfigWarning",
     "default_log_analysis_config_path",
+    "default_log_analysis_workspace_root",
     "load_log_analysis_config",
     "normalize_log_analysis_config",
+    "resolve_log_analysis_data_dir",
 ]

@@ -15,11 +15,9 @@ ANALYST_ROLE = "analyst"
 REVIEWER_ROLE = "reviewer"
 
 DEFAULT_ANALYST_TOOLS = [
-    "traffic_query",
-    "traffic_topn",
-    "traffic_sample",
-    "traffic_timeseries",
-    "traffic_related",
+    "security_query",
+    "security_hunt_ip",
+    "security_trace_case",
     "evidence_read",
 ]
 

@@ -51,7 +51,7 @@ def first_response_report_content(
         *_bullet_text(route_dict.get("gaps", [])),
         "",
         "## Next Queries",
-        *_bullet_text(route_dict.get("next_queries", [])),
+        *_bullet_query_plans(route_dict.get("next_queries", [])),
         "",
         "## Evidence References",
         *_bullet_text(route_dict.get("evidence_refs", [])),
@@ -251,6 +251,39 @@ def _bullet_text(items: Sequence[Any]) -> list[str]:
     return [f"- {item}" for item in values] if values else ["- None recorded."]
 
 
+def _bullet_query_plans(items: Sequence[Any]) -> list[str]:
+    values = _unique_items(items)
+    if not values:
+        return ["- None recorded."]
+    return [f"- {_format_query_plan(item)}" for item in values]
+
+
+def _format_query_plan(item: Any) -> str:
+    if not isinstance(item, Mapping):
+        return str(item)
+    display = str(item.get("display") or item.get("purpose") or "Query plan").strip()
+    details: list[str] = []
+    source_products = item.get("source_products") or []
+    if source_products:
+        details.append(f"sources={', '.join(str(value) for value in source_products)}")
+    start_time = str(item.get("start_time") or "").strip()
+    end_time = str(item.get("end_time") or "").strip()
+    if start_time or end_time:
+        details.append(f"time={start_time or '*'}..{end_time or '*'}")
+    filters = item.get("filters")
+    if isinstance(filters, Mapping) and filters:
+        rendered = ", ".join(f"{key}={value}" for key, value in sorted(filters.items()) if value not in (None, "", [], {}))
+        if rendered:
+            details.append(f"filters: {rendered}")
+    evidence_needed = item.get("evidence_needed") or []
+    if evidence_needed:
+        details.append(f"evidence={', '.join(str(value) for value in evidence_needed)}")
+    limit = item.get("limit")
+    if limit:
+        details.append(f"limit={limit}")
+    return f"{display} ({'; '.join(details)})" if details else display
+
+
 def _raw_like_refs(refs: Sequence[Any], ref_ids: Sequence[str]) -> list[str]:
     raw: list[str] = []
     for ref in refs:
@@ -283,6 +316,18 @@ def _unique(values: Sequence[Any]) -> list[str]:
             continue
         seen.add(text)
         result.append(text)
+    return result
+
+
+def _unique_items(values: Sequence[Any]) -> list[Any]:
+    result: list[Any] = []
+    seen: set[str] = set()
+    for value in values:
+        marker = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        if marker in seen or value in ("", None, [], {}):
+            continue
+        seen.add(marker)
+        result.append(value)
     return result
 
 

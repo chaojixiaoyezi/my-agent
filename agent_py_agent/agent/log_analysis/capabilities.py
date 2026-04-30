@@ -8,6 +8,15 @@ from typing import Any
 
 from .config import LogAnalysisConfig
 
+SECURITY_TOOL_NAMES = ("security_query", "security_hunt_ip", "security_trace_case")
+SECURITY_TOOL_CAPABILITIES = (
+    "log_analysis",
+    "logs",
+    "security",
+    "security_logs",
+    "logs/security",
+)
+
 
 class CapabilityLevel(str, Enum):
     L0 = "L0"
@@ -135,17 +144,36 @@ def describe_feature_gates(config: LogAnalysisConfig | None = None) -> list[dict
     return rows
 
 
+def has_security_tool_capability(grants: list[str] | tuple[str, ...] | set[str] | None) -> bool:
+    if not grants:
+        return False
+    normalized = {str(item).strip().lower() for item in grants if str(item).strip()}
+    return bool(normalized.intersection(SECURITY_TOOL_CAPABILITIES))
+
+
+def security_tool_names_for_capabilities(
+    grants: list[str] | tuple[str, ...] | set[str] | None,
+) -> list[str]:
+    if has_security_tool_capability(grants):
+        return list(SECURITY_TOOL_NAMES)
+    return []
+
+
 __all__ = [
     "CapabilityLevel",
     "FEATURE_GATES",
     "FeatureGate",
     "LEVELS",
     "LevelInfo",
+    "SECURITY_TOOL_CAPABILITIES",
+    "SECURITY_TOOL_NAMES",
     "describe_capability_levels",
     "describe_feature_gates",
     "effective_feature_gates",
     "feature_gate_for",
+    "has_security_tool_capability",
     "is_feature_enabled",
     "level_rank",
     "normalize_level",
+    "security_tool_names_for_capabilities",
 ]

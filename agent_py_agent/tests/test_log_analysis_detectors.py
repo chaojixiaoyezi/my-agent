@@ -8,7 +8,7 @@ from agent_py_agent.agent.log_analysis.analytics.detectors import (
     waf_attack_success_candidate,
 )
 from agent_py_agent.agent.log_analysis.cases.case_store import CaseStore, dedup_key_for_finding
-from agent_py_agent.agent.log_analysis.models import EvidenceRef, Finding
+from agent_py_agent.agent.log_analysis.models import EvidenceRef, Finding, QueryPlan
 from agent_py_agent.agent.log_analysis.reports import first_response_report_content, forensic_package_content
 from agent_py_agent.agent.log_analysis.security.correlation import build_route_draft
 
@@ -128,6 +128,74 @@ def test_soft_detectors_emit_required_finding_fields():
         assert finding.rule_version == "v1"
 
 
+def test_detector_next_queries_are_structured_and_round_trip_readable():
+    finding = next(item for item in run_soft_detectors(_events()) if item.detector_id == "waf_attack_success_candidate")
+    query = finding.next_queries[0]
+
+    assert isinstance(query, dict)
+    assert {
+        "purpose",
+        "source_products",
+        "start_time",
+        "end_time",
+        "filters",
+        "limit",
+        "evidence_needed",
+        "display",
+    }.issubset(query)
+    assert query["source_products"]
+    assert query["start_time"] <= "2026-04-30T10:00:00Z" <= query["end_time"]
+    assert query["filters"]["src_ip"] == "198.51.100.10"
+    assert query["filters"]["victim_ip"] == "10.0.0.5"
+    assert query["limit"] > 0
+
+    loaded = Finding.from_json(finding.to_json())
+    assert loaded.to_dict() == finding.to_dict()
+    assert loaded.attributes["gap_details"]
+    gap_detail = loaded.attributes["gap_details"][0]
+    assert "time_window" in gap_detail
+    assert "entity" in gap_detail
+    assert gap_detail.get("missing_telemetry") or gap_detail.get("missing_field")
+
+
+def test_report_renders_structured_query_plan_as_human_text():
+    finding = Finding(
+        finding_id="finding-query-plan",
+        detector_id="manual",
+        risk_score=0.7,
+        confidence=0.7,
+        evidence_refs=[EvidenceRef(evidence_id="raw-1")],
+        hypothesis="manual hypothesis",
+        gaps=["needs EDR process evidence"],
+        next_queries=[
+            QueryPlan(
+                purpose="Trace process tree",
+                source_products=["edr"],
+                start_time="2026-04-30T09:45:00Z",
+                end_time="2026-04-30T10:30:00Z",
+                filters={"victim_ip": "10.0.0.5"},
+                limit=50,
+                evidence_needed=["process_tree"],
+            ).to_dict()
+        ],
+    )
+    route = build_route_draft(
+        {
+            "case_id": "case-query-plan",
+            "title": "query plan render",
+            "finding_refs": [finding.finding_id],
+            "attributes": {"finding_summaries": [finding.to_dict()]},
+        }
+    )
+
+    report = first_response_report_content({"case_id": "case-query-plan", "title": "query plan render"}, route)
+    assert "Trace process tree" in report
+    assert "sources=edr" in report
+    assert "filters: victim_ip=10.0.0.5" in report
+    assert "{'purpose'" not in report
+    assert '"purpose"' not in report
+
+
 def test_findings_merge_to_case_and_low_confidence_only_records(tmp_path):
     store = CaseStore(tmp_path, min_case_confidence=0.6)
     findings = run_soft_detectors(_events())
@@ -138,6 +206,7 @@ def test_findings_merge_to_case_and_low_confidence_only_records(tmp_path):
     assert len(merged.finding_refs) >= 3
     assert "10.0.0.5" in merged.entities["victim_ip"]
     assert any(item["detector_id"] == "waf_attack_success_candidate" for item in merged.attributes["finding_summaries"])
+    assert any(isinstance(query, dict) and query.get("purpose") for query in merged.next_queries)
 
     low = Finding(
         finding_id="finding-low",

@@ -168,3 +168,10 @@
 - [ ] CLI 命令或参数变化时更新 `CLI_REFERENCE.md`
 - [ ] 新增测试策略后更新 `TESTS.md`
 - [ ] 文档里的验收级测试说明真实 API 要求和必要环境变量
+
+## LOG tool registry / security prompt profile
+- [ ] Default ToolRegistry catalog and recommendations do not expose `security_query`, `security_hunt_ip`, or `security_trace_case`.
+- [ ] Logs/security capability or explicit tool grants expose LOG security tools.
+- [ ] Unauthorized LOG security tool calls fail before execution.
+- [ ] LOG security tool prompt output contains bounded `summary`, `preview_rows`, and `evidence_refs`, not full `rows`.
+- [ ] Analyst security prompt names match registered LOG security tools and do not mention legacy `traffic_*` names.

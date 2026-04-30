@@ -9,7 +9,7 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
-from ..models import EvidenceRef, Finding, utc_now_iso
+from ..models import EvidenceRef, Finding, QueryPlan, utc_now_iso
 from .baselines import SecurityBaselines, ensure_baselines
 from .security_rules import get_rule
 
@@ -478,7 +478,7 @@ def _make_finding(
     hypothesis: str,
     confidence: float,
     gaps: Sequence[str],
-    next_queries: Sequence[str],
+    next_queries: Sequence[Any],
     features: Mapping[str, Any] | None = None,
     severity_hint: str | None = None,
     extra_entities: Mapping[str, Sequence[Any]] | None = None,
@@ -512,11 +512,11 @@ def _make_finding(
         hypothesis=hypothesis,
         confidence=_clamp_float(confidence),
         gaps=_unique_texts(gaps),
-        next_queries=_unique_texts(next_queries),
+        next_queries=_unique_json_values(next_queries),
         rule_version=rule.version,
         created_at=utc_now_iso(),
         updated_at=utc_now_iso(),
-        attributes={"mode": rule.mode},
+        attributes={"mode": rule.mode, "gap_details": _gap_details(gaps, window, entities, evidence_events)},
     )
     setattr(finding, "mode", rule.mode)
     return finding
@@ -983,6 +983,66 @@ def _unique_texts(values: Sequence[Any] | Any) -> list[str]:
     return result
 
 
+def _unique_json_values(values: Sequence[Any]) -> list[Any]:
+    result: list[Any] = []
+    seen: set[str] = set()
+    for value in values:
+        if isinstance(value, QueryPlan):
+            item: Any = value.to_dict()
+        elif isinstance(value, Mapping):
+            item = dict(value)
+        else:
+            item = _text(value)
+        marker = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+        if marker in seen or item in ("", None, [], {}):
+            continue
+        seen.add(marker)
+        result.append(item)
+    return result
+
+
+def _gap_details(
+    gaps: Sequence[str],
+    window: Sequence[str],
+    entities: Mapping[str, Sequence[Any]],
+    evidence_events: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    products = _unique_texts(_source_product(event) for event in evidence_events if _source_product(event))
+    primary_entity = _first_entity(entities)
+    details: list[dict[str, Any]] = []
+    for gap in gaps:
+        text = _text(gap)
+        detail: dict[str, Any] = {
+            "description": text,
+            "source_products": products,
+            "time_window": list(window),
+            "entity": primary_entity,
+        }
+        lower = text.lower()
+        if "edr" in lower or "process" in lower or "host" in lower:
+            detail["missing_telemetry"] = "edr_process"
+        elif "outbound" in lower or "dns" in lower or "proxy" in lower or "netflow" in lower or "network" in lower:
+            detail["missing_telemetry"] = "network_egress"
+        elif "file" in lower:
+            detail["missing_telemetry"] = "file_activity"
+        elif "mfa" in lower:
+            detail["missing_telemetry"] = "identity_mfa"
+        elif "geoip" in lower or "country" in lower:
+            detail["missing_field"] = "country"
+        elif "asn" in lower:
+            detail["missing_field"] = "asn"
+        details.append(detail)
+    return details
+
+
+def _first_entity(entities: Mapping[str, Sequence[Any]]) -> dict[str, str]:
+    for key in ("victim_ip", "host", "user", "attacker_ip", "src_ip", "dst_ip"):
+        values = entities.get(key)
+        if values:
+            return {"field": key, "value": _text(values[0])}
+    return {}
+
+
 def _evidence_id(event: Mapping[str, Any]) -> str:
     for field_name in ("raw_ref", "evidence_ref", "event_id", "security_event_id", "alert_id", "id"):
         value = _text(_field(event, field_name))
@@ -1007,21 +1067,73 @@ def _evidence_ref(event: Mapping[str, Any]) -> EvidenceRef:
     )
 
 
-def _query(prefix: str, event: Mapping[str, Any]) -> str:
-    parts = [prefix]
-    when = _canonical_time(_event_time(event))
-    if when:
-        parts.append(f"time={when}")
-    for label, value in (
+def _query(prefix: str, event: Mapping[str, Any]) -> dict[str, Any]:
+    when = _event_time(event)
+    filters = {
+        label: value
+        for label, value in (
         ("src_ip", _source_ip(event)),
         ("victim_ip", _victim_ip(event)),
         ("host", _host(event)),
         ("user", _user(event)),
         ("domain", _domain(event)),
+        )
+        if value
+    }
+    source_products = _query_source_products(prefix, event)
+    plan = QueryPlan(
+        purpose=prefix,
+        source_products=source_products,
+        start_time=_canonical_time(when - timedelta(minutes=15)) if when else "",
+        end_time=_canonical_time(when + timedelta(minutes=30)) if when else "",
+        filters=filters,
+        limit=100,
+        evidence_needed=_query_evidence_needed(prefix),
+    )
+    return plan.to_dict()
+
+
+def _query_source_products(prefix: str, event: Mapping[str, Any]) -> list[str]:
+    text = prefix.lower()
+    products: list[str] = []
+    for token, product in (
+        ("waf", "waf"),
+        ("web", "web"),
+        ("edr", "edr"),
+        ("process", "edr"),
+        ("host", "edr"),
+        ("file", "edr"),
+        ("dns", "dns"),
+        ("proxy", "proxy"),
+        ("netflow", "netflow"),
+        ("outbound", "netflow"),
+        ("vpn", "vpn"),
+        ("auth", "sso"),
+        ("mfa", "identity"),
+        ("password", "identity"),
     ):
-        if value:
-            parts.append(f"{label}={value}")
-    return " | ".join(parts)
+        if token in text:
+            products.append(product)
+    current = _source_product(event)
+    if current:
+        products.append(current)
+    return _unique_texts(products)
+
+
+def _query_evidence_needed(prefix: str) -> list[str]:
+    text = prefix.lower()
+    needed: list[str] = []
+    if "process" in text or "edr" in text or "host" in text:
+        needed.append("process_tree")
+    if "dns" in text or "proxy" in text or "netflow" in text or "outbound" in text:
+        needed.append("network_flow")
+    if "auth" in text or "vpn" in text or "mfa" in text or "password" in text:
+        needed.append("identity_events")
+    if "web" in text or "waf" in text or "http" in text:
+        needed.append("web_request")
+    if "timeline" in text:
+        needed.append("cross_source_timeline")
+    return needed or ["corroborating_events"]
 
 
 def _stable_id(prefix: str, payload: Any) -> str:
