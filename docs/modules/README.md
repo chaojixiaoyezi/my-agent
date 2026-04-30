@@ -51,7 +51,7 @@ python scripts\check_doc_sync.py
 python scripts\check_doc_sync.py --staged
 ```
 
-当前脚本先覆盖 `log-analysis` 和 `subagent` 两个活跃模块。新模块进入开发时，要先建四件套，再把模块路径加入 `scripts/check_doc_sync.py` 的 `MODULE_RULES`。
+当前脚本先覆盖 `log-analysis`、`subagent`、`memory`、`gateway`、`live-lab` 这几个活跃模块。新模块进入开发时，要先建四件套，再把模块路径加入 `scripts/check_doc_sync.py` 的 `MODULE_RULES`。
 
 ## 测试记录怎么写
 
@@ -77,6 +77,9 @@ python scripts\check_doc_sync.py --staged
 | --- | --- | --- |
 | subagent | [subagent/](subagent/) | 子代理、受控派工、质量契约、workflow 规划。 |
 | log-analysis | [log-analysis/](log-analysis/) | 安全日志接入、查询、检测、case、报告和 analyst work order。 |
+| memory | [memory/](memory/) | 长期记忆、规则路由、raw archive、恢复和诊断。 |
+| gateway | [gateway/](gateway/) | 后台 gateway、本地请求队列、chat attach、恢复和 adapter。 |
+| live-lab | [live-lab/](live-lab/) | 可见真实环境演练、离线 replay、suite/case 产物。 |
 
 ## 与旧文档的关系
 

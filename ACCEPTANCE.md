@@ -254,5 +254,28 @@ Accepted evidence:
 - [x] Whitespace check passed: `git diff --check`.
 
 Remaining:
-- [ ] Add more module rules as `memory`, `gateway`, `live-lab`, and other modules get their four-piece docs.
+- [x] Add module rules for `memory`, `gateway`, and `live-lab` once their four-piece docs exist.
+- [ ] Add more module rules as other modules get their four-piece docs.
 - [ ] Consider wiring the script into a local pre-commit hook or CI step once the module map is broader.
+
+## 2026-04-30 / Module Docs Expansion and Sync Gate Coverage Acceptance
+
+Status:
+- [x] Memory, gateway, and Live Lab four-piece module docs landed.
+- [x] Code/docs/comment sync gate now covers memory, gateway, and live-lab in addition to log-analysis and subagent.
+
+Problems solved:
+- [x] Memory, gateway, and Live Lab no longer depend only on scattered root docs and long design ledger entries.
+- [x] New module docs explain discussion, progress/tests, purpose, structure, and beginner learning paths for each module.
+- [x] `scripts/check_doc_sync.py` now fails covered code changes in memory/gateway/live-lab when their module progress and structure docs are not updated.
+- [x] `test_doc_sync.py` now checks required docs exist for all rules and verifies memory/gateway/live-lab path coverage.
+
+Accepted evidence:
+- [x] Focused tests passed: `python -m pytest agent_py_agent\tests\test_doc_sync.py` -> `5 passed`.
+- [x] Manual gate passed: `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
+- [x] Full regression passed: `python -m pytest` -> `241 passed`.
+- [x] Whitespace check passed: `git diff --check`.
+
+Remaining:
+- [ ] Add four-piece docs and sync rules for any future major module before feature work starts there.
+- [ ] Consider wiring the sync gate into a pre-commit hook or CI step after the module map stabilizes.

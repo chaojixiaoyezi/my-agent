@@ -56,6 +56,49 @@ MODULE_RULES = (
             "docs/modules/subagent/04-structure.md",
         ),
     ),
+    ModuleDocRule(
+        name="memory",
+        code_prefixes=(
+            "agent_py_agent/agent/memory.py",
+            "agent_py_agent/agent/memory_settings.py",
+            "agent_py_agent/agent/settings/memory.py",
+            "agent_py_agent/agent/memory_store/",
+            "agent_py_agent/agent/memory_archive/",
+            "agent_py_agent/agent/memory_routing/",
+            "agent_py_agent/cli/memory_commands.py",
+            "agent_py_agent/cli/memory_archive_commands.py",
+        ),
+        required_docs=(
+            "docs/modules/memory/02-progress.md",
+            "docs/modules/memory/04-structure.md",
+        ),
+    ),
+    ModuleDocRule(
+        name="gateway",
+        code_prefixes=(
+            "agent_py_agent/agent/gateway.py",
+            "agent_py_agent/agent/gateway_parts/",
+            "agent_py_agent/cli/gateway_process.py",
+            "agent_py_agent/cli/gateway_client.py",
+            "agent_py_agent/cli/adapter.py",
+        ),
+        required_docs=(
+            "docs/modules/gateway/02-progress.md",
+            "docs/modules/gateway/04-structure.md",
+        ),
+    ),
+    ModuleDocRule(
+        name="live-lab",
+        code_prefixes=(
+            "scripts/live_agent_lab.py",
+            "scripts/live_lab/",
+            "scripts/open_live_lab.sh",
+        ),
+        required_docs=(
+            "docs/modules/live-lab/02-progress.md",
+            "docs/modules/live-lab/04-structure.md",
+        ),
+    ),
 )
 
 

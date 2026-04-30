@@ -696,7 +696,16 @@ docs/
     |-- README.md                     # 四件套规范、命名、更新时机和测试记录要求
     |-- _template/                    # 新模块可复制的 01-04 模板
     |-- subagent/                     # subagent 首批四件套索引
-    `-- log-analysis/                 # log-analysis 首批四件套索引
+    |-- log-analysis/                 # log-analysis 首批四件套索引
+    |-- memory/                       # memory 四件套索引
+    |-- gateway/                      # gateway 四件套索引
+    `-- live-lab/                     # Live Lab 四件套索引
 ```
 
 模块四件套固定为：`01-discussion.md`、`02-progress.md`、`03-purpose.md`、`04-structure.md`。其中 `02-progress.md` 必须保留“已完成 / 解决的问题 / 下一步 / 已跑测试 / 未跑测试 / 风险”六段，方便并行 worker 和初学者快速判断模块状态。
+
+## 2026-04-30 文档同步门补充
+
+- `scripts/check_doc_sync.py`: 检查 covered module 的代码改动是否同步更新 `docs/modules/<module>/02-progress.md` 和 `04-structure.md`，并要求实现代码改动同文件补注释或 docstring。
+- 当前 covered module：`log-analysis`、`subagent`、`memory`、`gateway`、`live-lab`。
+- `agent_py_agent/tests/test_doc_sync.py`: 覆盖同步门规则、必需文档存在性和缺注释/缺文档的失败路径。
