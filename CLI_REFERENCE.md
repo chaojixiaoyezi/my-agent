@@ -644,13 +644,14 @@ my-agent subagents-apply-actions --apply --action reopen_for_evidence
 
 ```powershell
 my-agent subagents-workflow-plan "开发一个可验收的功能"
-my-agent subagents-workflow-plan "开发一个可验收的功能" --template-id single_worker_verified --json
+my-agent subagents-workflow-plan "开发一个可验收的功能" --template-id single_worker_verified --output-dir .agent/workflow-previews --json
 ```
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `goal` | - | 必填，待路由的父任务目标。 |
 | `--template-id <id>` | - | 强制使用指定 workflow 模板做预览。 |
+| `--output-dir <path>` | - | 显式写出 JSON / Markdown dry-run 预览，不创建 subagent。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 
 ## `subagents-route-capabilities`

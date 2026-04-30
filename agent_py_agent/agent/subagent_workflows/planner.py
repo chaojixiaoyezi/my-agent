@@ -2,7 +2,9 @@ from __future__ import annotations
 
 """Compose workflow routing, compilation, and parent acceptance planning."""
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .acceptance import ParentAcceptancePlan, plan_parent_acceptance
@@ -31,6 +33,46 @@ class WorkflowPlanningResult:
     @property
     def selected_template_id(self) -> str:
         return self.decision.selected_template_id
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the audit-friendly dry-run preview payload."""
+
+        dispatch_plan = self.dispatch_plan
+        parent_acceptance_plan = self.parent_acceptance_plan
+        template_phase_tasks = {
+            phase.id: phase.task for phase in self.template.phases
+        } if self.template is not None else {}
+        workers = []
+        if dispatch_plan is not None:
+            workers = [
+                {
+                    "phase_id": worker.phase_id,
+                    "role": worker.role,
+                    "kind": worker.kind,
+                    "task": _worker_task_summary(worker, template_phase_tasks),
+                    "acceptance_check_count": len(worker.acceptance_checks),
+                    "acceptance_checks": list(worker.acceptance_checks),
+                    "depends_on": list(worker.depends_on),
+                }
+                for worker in dispatch_plan.worker_specs
+            ]
+        parent_checklist = parent_acceptance_plan.checklist if parent_acceptance_plan is not None else []
+        return {
+            "goal": self.goal,
+            "selected_template_id": self.selected_template_id,
+            "mode": self.decision.mode,
+            "needs_confirmation": self.decision.needs_confirmation,
+            "enabled": self.enabled,
+            "ok": self.ok,
+            "reason": self.decision.reason,
+            "task_type": self.decision.task_type,
+            "risk_tags": list(self.decision.risk_tags),
+            "worker_count": len(workers),
+            "workers": workers,
+            "parent_acceptance_check_count": len(parent_checklist),
+            "parent_acceptance_checklist": list(parent_checklist),
+            "issues": list(self.issues),
+        }
 
 
 def plan_workflow_for_goal(
@@ -96,3 +138,86 @@ def plan_workflow_for_goal(
         parent_acceptance_plan=parent_acceptance_plan,
         issues=issues,
     )
+
+
+def write_workflow_plan_preview(
+    result: WorkflowPlanningResult,
+    output_dir: str | Path,
+) -> dict[str, Path]:
+    """Write the dry-run workflow plan preview as JSON and Markdown."""
+
+    preview_dir = Path(output_dir)
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    json_path = preview_dir / "subagent_workflow_plan_preview.json"
+    markdown_path = preview_dir / "SUBAGENT_WORKFLOW_PLAN_PREVIEW.md"
+    payload = result.to_dict()
+
+    json_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    markdown_path.write_text(_render_workflow_plan_preview_markdown(payload), encoding="utf-8")
+    return {"json": json_path, "markdown": markdown_path}
+
+
+def _render_workflow_plan_preview_markdown(payload: dict[str, object]) -> str:
+    lines = [
+        "# Subagent Workflow Plan Preview",
+        "",
+        f"- goal: {payload['goal']}",
+        f"- selected_template_id: {payload['selected_template_id'] or 'none'}",
+        f"- mode: {payload['mode']}",
+        f"- needs_confirmation: {payload['needs_confirmation']}",
+        f"- enabled: {payload['enabled']}",
+        f"- ok: {payload['ok']}",
+        f"- task_type: {payload['task_type']}",
+        f"- reason: {payload['reason']}",
+        "",
+        "## Workers",
+    ]
+    workers = payload.get("workers")
+    if isinstance(workers, list) and workers:
+        for worker in workers:
+            if not isinstance(worker, dict):
+                continue
+            depends_on = ", ".join(str(item) for item in worker.get("depends_on", [])) or "none"
+            lines.extend(
+                [
+                    "",
+                    f"### {worker.get('phase_id', '')}",
+                    f"- role: {worker.get('role', '')}",
+                    f"- kind: {worker.get('kind', '')}",
+                    f"- depends_on: {depends_on}",
+                    f"- task: {worker.get('task', '')}",
+                    f"- acceptance_check_count: {worker.get('acceptance_check_count', 0)}",
+                ]
+            )
+    else:
+        lines.append("")
+        lines.append("No workers would be planned.")
+
+    lines.extend(["", "## Parent Acceptance Checklist"])
+    checklist = payload.get("parent_acceptance_checklist")
+    if isinstance(checklist, list) and checklist:
+        lines.extend(f"- {item}" for item in checklist)
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Issues"])
+    issues = payload.get("issues")
+    if isinstance(issues, list) and issues:
+        lines.extend(f"- {item}" for item in issues)
+    else:
+        lines.append("- none")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _worker_task_summary(worker: Any, template_phase_tasks: dict[str, str]) -> str:
+    task = template_phase_tasks.get(worker.phase_id)
+    if task:
+        return task
+    for line in worker.instructions.splitlines():
+        if line.startswith("Phase task: "):
+            return line.removeprefix("Phase task: ")
+    return worker.instructions.splitlines()[0] if worker.instructions else ""

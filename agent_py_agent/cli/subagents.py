@@ -13,7 +13,11 @@ import sys
 from ..agent.capability_config import load_capability_config
 from ..agent.config import load_config
 from ..agent.subagent import filter_board_items
-from ..agent.subagent_workflows import WorkflowPlanningResult, plan_workflow_for_goal
+from ..agent.subagent_workflows import (
+    WorkflowPlanningResult,
+    plan_workflow_for_goal,
+    write_workflow_plan_preview,
+)
 from .common import make_agent, make_capability_router
 
 
@@ -374,6 +378,10 @@ def cmd_subagents_workflow_plan(args) -> int:
         explicit_template_id=args.template_id or "",
     )
     payload = _workflow_plan_payload(result)
+    written_paths = None
+    if args.output_dir:
+        written_paths = write_workflow_plan_preview(result, args.output_dir)
+        payload["preview_paths"] = {key: str(value) for key, value in written_paths.items()}
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
@@ -400,56 +408,14 @@ def cmd_subagents_workflow_plan(args) -> int:
         print(f"- {check}")
     if payload["issues"]:
         print("issues=" + json.dumps(payload["issues"], ensure_ascii=False))
+    if written_paths is not None:
+        print(f"preview_json={written_paths['json']}")
+        print(f"preview_markdown={written_paths['markdown']}")
     return 0
 
 
 def _workflow_plan_payload(result: WorkflowPlanningResult) -> dict[str, object]:
-    dispatch_plan = result.dispatch_plan
-    parent_acceptance_plan = result.parent_acceptance_plan
-    template_phase_tasks = {
-        phase.id: phase.task for phase in result.template.phases
-    } if result.template is not None else {}
-    workers = []
-    if dispatch_plan is not None:
-        workers = [
-            {
-                "phase_id": worker.phase_id,
-                "role": worker.role,
-                "kind": worker.kind,
-                "task": _worker_task_summary(worker, template_phase_tasks),
-                "acceptance_check_count": len(worker.acceptance_checks),
-                "acceptance_checks": list(worker.acceptance_checks),
-                "depends_on": list(worker.depends_on),
-            }
-            for worker in dispatch_plan.worker_specs
-        ]
-    parent_checklist = parent_acceptance_plan.checklist if parent_acceptance_plan is not None else []
-    return {
-        "goal": result.goal,
-        "selected_template_id": result.selected_template_id,
-        "mode": result.decision.mode,
-        "needs_confirmation": result.decision.needs_confirmation,
-        "enabled": result.enabled,
-        "ok": result.ok,
-        "reason": result.decision.reason,
-        "task_type": result.decision.task_type,
-        "risk_tags": list(result.decision.risk_tags),
-        "worker_count": len(workers),
-        "workers": workers,
-        "parent_acceptance_check_count": len(parent_checklist),
-        "parent_acceptance_checklist": list(parent_checklist),
-        "issues": list(result.issues),
-    }
-
-
-def _worker_task_summary(worker, template_phase_tasks: dict[str, str]) -> str:
-    task = template_phase_tasks.get(worker.phase_id)
-    if task:
-        return task
-    for line in worker.instructions.splitlines():
-        if line.startswith("Phase task: "):
-            return line.removeprefix("Phase task: ")
-    return worker.instructions.splitlines()[0] if worker.instructions else ""
+    return result.to_dict()
 
 
 def cmd_subagent_context(args) -> int:

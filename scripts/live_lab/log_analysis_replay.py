@@ -27,6 +27,7 @@ DEFAULT_FIXTURE = REPO_ROOT / "validation" / "security_fixtures" / "security_ale
 DEFAULT_OUTPUTS_DIR = REPO_ROOT / "validation" / "live_lab" / "log_analysis_replay"
 DEFAULT_START_TIME = "2026-04-30T09:30:00Z"
 DEFAULT_END_TIME = "2026-04-30T10:30:00Z"
+SIMULATED_FAILURE_STAGES = frozenset({"evidence", "report"})
 
 
 class ReplayStageError(RuntimeError):
@@ -43,6 +44,7 @@ def run_security_alert_v1_replay(
     end_time: str = DEFAULT_END_TIME,
     limit: int = 50,
     dry_run: bool = True,
+    simulate_failure_stage: str | None = None,
 ) -> dict[str, Any]:
     output_root = Path(output_root)
     store_root = output_root / "store"
@@ -83,6 +85,10 @@ def run_security_alert_v1_replay(
 
     stage = "setup"
     try:
+        if simulate_failure_stage and simulate_failure_stage not in SIMULATED_FAILURE_STAGES:
+            allowed = ", ".join(sorted(SIMULATED_FAILURE_STAGES))
+            raise ValueError(f"simulate_failure_stage must be one of: {allowed}")
+
         stage = "ingest"
         summary["stages"][stage] = "running"
         ingest_result = ingest_file(
@@ -154,6 +160,8 @@ def run_security_alert_v1_replay(
 
         stage = "evidence"
         summary["stages"][stage] = "running"
+        if simulate_failure_stage == stage:
+            raise ReplayStageError("simulated evidence stage failure")
         traced = trace_case(
             case.case_id,
             root=store_root,
@@ -180,6 +188,8 @@ def run_security_alert_v1_replay(
 
         stage = "report"
         summary["stages"][stage] = "running"
+        if simulate_failure_stage == stage:
+            raise ReplayStageError("simulated report stage failure")
         report_path = artifacts_root / "first_response_report.md"
         report_path.write_text(first_response_report_content(case, route, findings=findings), encoding="utf-8")
         package_path = artifacts_root / "forensic_package.json"

@@ -212,3 +212,11 @@
 - Runtime visibility rule: normal tasks keep security tools hidden; obvious security-log tasks or explicit `logs/security` grants expose only `security_query`, `security_hunt_ip`, and `security_trace_case`.
 - Positioning: this is documented as a local lightweight log-analysis base for first-response replay and bounded evidence queries, not a production SIEM.
 - Replay expectation: `python scripts/live_lab/log_analysis_replay.py` remains offline and should report `ok=true`, `dry_run=true`, `total_events=3`, `stored_events=3`, `case_count=1`, plus case/route/report/evidence artifact paths.
+
+## 2026-04-30 Implementation Note: LOG Analyst Work Orders
+
+- Status: dry-run work-order planning landed.
+- Solves: detected cases can be translated into controlled analyst/reviewer specs before any real subagent is created.
+- Safety: work orders include evidence refs, bounded tool lists, acceptance checks, `cannot_self_accept`, and parent final gate rules.
+- Failure behavior: cases without evidence refs are not ready for analyst dispatch and return explicit issue/risk fields.
+- Remaining after this slice: add manual apply to real `SubAgentTask` records and replace placeholder `evidence_read` with a bounded evidence-ref reader.

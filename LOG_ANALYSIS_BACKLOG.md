@@ -2617,3 +2617,14 @@ Next recommended worker slices:
 - Real analyst dispatch bridge: turn a detected case into controlled analyst/reviewer subagent work orders, still default dry-run/manual.
 - Case/evidence negative fixtures: after the dispatch bridge exists, add replay fixtures that fail later than detector.
 - LOG workflow plan integration: use `subagents-workflow-plan` as the preview layer before creating investigation workers.
+
+## 2026-04-30 Current Landing Note: Work-Order Bridge
+
+- Dry-run LOG work-order bridge landed: `plan_case_subagent_work_orders()` turns a case into analyst and reviewer specs with evidence refs, allowed tools, acceptance checks, and parent final gate rules.
+- Safety behavior: cases without evidence refs are not marked ready and carry explicit issue/risk messages.
+- Replay gate expanded: tests can simulate evidence/report stage failures without exposing that hook in the normal CLI.
+
+Next recommended worker slices:
+- Apply path: add an explicit manual-confirm command/API that creates real `SubAgentTask` records from these work-order plans.
+- Reviewer close loop: persist reviewer decisions and parent acceptance reports back to the case/replay artifacts.
+- Evidence reader tool: replace placeholder `evidence_read` with a bounded, audited evidence-ref reader before real analyst execution.

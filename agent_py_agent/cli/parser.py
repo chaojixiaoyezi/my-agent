@@ -287,6 +287,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_plan = sub.add_parser("subagents-workflow-plan", help="Preview automatic subagent workflow routing")
     workflow_plan.add_argument("goal", help="Parent goal to route into a workflow")
     workflow_plan.add_argument("--template-id", help="Force a workflow template id for the preview")
+    workflow_plan.add_argument("--output-dir", help="Write JSON and Markdown dry-run previews to this directory")
     workflow_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     workflow_plan.set_defaults(func=cmd_subagents_workflow_plan)
 
