@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+import json
 from typing import Any, Mapping, Sequence
 
-from ..models import CaseRecord, EvidenceRef, Finding
+from ..models import CaseRecord, EvidenceRef, Finding, QueryPlan
 from .attack_chain import build_attack_chain, lateral_movement_signs
 
 
@@ -20,7 +21,7 @@ class RouteDraft:
     facts: list[dict[str, Any]] = field(default_factory=list)
     inferences: list[dict[str, Any]] = field(default_factory=list)
     gaps: list[str] = field(default_factory=list)
-    next_queries: list[str] = field(default_factory=list)
+    next_queries: list[Any] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
     generated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -40,11 +41,21 @@ def build_route_draft(
     inferences = [_inference_for_finding(finding) for finding in finding_objs]
     entry_candidates = _entry_candidates(finding_objs)
     gaps = _unique([*case_obj.gaps, *(gap for finding in finding_objs for gap in finding.gaps)])
-    next_queries = _unique([*case_obj.next_queries, *(query for finding in finding_objs for query in finding.next_queries)])
+    next_queries = _unique_values([*case_obj.next_queries, *(query for finding in finding_objs for query in finding.next_queries)])
 
     if not entry_candidates:
         gaps.append("Entry point is not identified; rank candidate source IP, VPN account, WAF URI, and first host touch.")
-        next_queries.append("Build an entry-candidate query across WAF, VPN, SSO, exposed services, and first host activity.")
+        next_queries.append(
+            QueryPlan(
+                purpose="Build entry-candidate query across WAF, VPN, SSO, exposed services, and first host activity",
+                source_products=["waf", "vpn", "sso", "edr"],
+                start_time=case_obj.created_at,
+                end_time=case_obj.updated_at,
+                filters=_first_entity_filters(impacted_entities),
+                limit=100,
+                evidence_needed=["entry_candidate", "first_host_touch", "identity_session"],
+            ).to_dict()
+        )
     if any(finding.detector_id == "waf_attack_success_candidate" for finding in finding_objs) and not any(
         finding.detector_id == "web_to_process_anomaly" for finding in finding_objs
     ):
@@ -64,7 +75,7 @@ def build_route_draft(
         facts=facts,
         inferences=inferences,
         gaps=_unique(gaps),
-        next_queries=_unique(next_queries),
+        next_queries=_unique_values(next_queries),
         evidence_refs=_unique([*_ref_ids(case_obj.evidence_refs), *(ref for finding in finding_objs for ref in _ref_ids(finding.evidence_refs))]),
     )
     attributes = case_obj.attributes if isinstance(case_obj.attributes, Mapping) else {}
@@ -164,6 +175,28 @@ def _ref_ids(refs: Sequence[Any]) -> list[str]:
         else:
             result.append(str(ref))
     return _unique(result)
+
+
+def _first_entity_filters(entities: Mapping[str, Sequence[Any]]) -> dict[str, Any]:
+    filters: dict[str, Any] = {}
+    for key in ("victim_ip", "host", "user", "attacker_ip", "src_ip"):
+        values = entities.get(key)
+        if values:
+            filters[key] = str(values[0])
+    return filters
+
+
+def _unique_values(values: Sequence[Any]) -> list[Any]:
+    result: list[Any] = []
+    seen: set[str] = set()
+    for value in values:
+        item: Any = value.to_dict() if isinstance(value, QueryPlan) else dict(value) if isinstance(value, Mapping) else str(value or "").strip()
+        marker = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+        if not item or marker in seen:
+            continue
+        seen.add(marker)
+        result.append(item)
+    return result
 
 
 def _unique(values: Sequence[Any]) -> list[str]:

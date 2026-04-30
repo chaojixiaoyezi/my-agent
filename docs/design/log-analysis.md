@@ -1,6 +1,6 @@
 # Log Analysis 模块设计与 worker 切片
 
-状态：部分落地，第一版已复验
+状态：部分落地，CLI / tool registry / structured query plan 已复验
 
 相关文档：
 - `LOG_ANALYSIS_BACKLOG.md`
@@ -27,11 +27,13 @@
 - `config.py` / `log_analysis_config.yaml`：独立配置，默认关闭高影响能力。
 - `parsers/` / `ingest/`：SecurityAlertV1 CSV/JSONL 解析、checkpoint、dedup、dead letter。
 - `storage/` / `tools.py`：本地 JSONL store、受控 query、hunt、trace。
+- `cli/logs.py`：`my-agent logs status/ingest/query/hunt-ip/trace-case`。
+- `tooling/registry.py`：安全查询工具默认隐藏，按授权或 `logs/security` capability 暴露。
 - `analytics/` / `cases/` / `security/`：软检测器、case merge、route draft。
 - `agents/` / `dispatch/`：analyst/reviewer 合同和本地 dispatch 队列。
 - `reports.py`：第一响应报告和取证包内容渲染。
 - `validation/security_fixtures/`：最小安全日志 fixture。
-- `agent_py_agent/tests/test_log_analysis_*.py`：当前 33 个 LOG 专项测试。
+- `agent_py_agent/tests/test_log_analysis_*.py`：LOG 专项、CLI 和工具注册测试。
 
 ## 父验收结果
 
@@ -53,21 +55,26 @@
 - 全量测试：`164 passed`。
 - 手工闭环：`ingest_file` 写入 3 条，`security_query` 查回 3 条。
 
+第二轮复验：
+- LOG CLI / tools / dispatch / detector / model 组合测试：`52 passed`。
+- 全量测试：`172 passed`。
+- 手工 CLI 闭环：`logs ingest` 写入 3 条，`logs query` 查回 3 条。
+
 ## 仍未完成
 
 这些不是第一版阻断项，但会决定模块能不能进入可用体验：
-- CLI 入口还没有接：`my-agent logs ...` / `my-agent security ...`。
-- LOG tools 还没有注册进主循环 tool registry。
-- `query_default_limit` / `query_max_limit` / `data_dir` 还没有贯穿 CLI、tools 和 runtime。
+- `logs/security` 场景还没有自动把 `granted_capabilities` 传进普通 run/chat runtime。
+- `query_default_limit` / `query_max_limit` / `data_dir` 已贯穿 CLI 最小链路，但 storage 层仍有 `MAX_QUERY_LIMIT=500` 硬上限。
 - 坏 JSONL 行只跳过，没有 corrupt-line audit / metric。
-- `next_queries` 仍是自然语言字符串，不是结构化 query plan。
-- detector gaps 还缺机器可验字段，例如 source_products、time_window、filters、missing_telemetry。
+- detector gaps 已有 `gap_details`，但 reviewer 还没有自动判定 gap 是否关闭。
 - 还没有 Live Lab / scenario replay，把 SecurityAlertV1 fixture 跑成可见第一响应。
-- 还没有用户-facing CLI 文档。
+- README 里还没有面向普通用户的 logs 快速开始。
 
 ## 下一批 worker 切片
 
 ### Worker 1：CLI 与配置贯通
+
+状态（2026-04-30）：已完成。新增 `logs status/ingest/query/hunt-ip/trace-case`，CLI 最小接入 `data_dir`、`query_default_limit`、`query_max_limit`，CLI_REFERENCE 已更新。
 
 写入范围：
 - `agent_py_agent/cli/`
@@ -90,6 +97,8 @@
 - ingest 后 query 能查回 fixture。
 
 ### Worker 2：Tool Registry 与安全 prompt profile
+
+状态（2026-04-30）：已完成。LOG 安全工具已注册进 ToolRegistry，但默认隐藏；`logs/security` capability 或显式 allowed tool 才暴露；analyst prompt 已统一为 `security_query` / `security_hunt_ip` / `security_trace_case`。
 
 写入范围：
 - `agent_py_agent/agent/tooling/`
@@ -118,6 +127,10 @@
 - `agent_py_agent/agent/log_analysis/security/correlation.py`
 - `agent_py_agent/agent/log_analysis/reports.py`
 - `agent_py_agent/tests/test_log_analysis_detectors.py`
+
+状态（2026-04-30）：已完成。`Finding.next_queries` 支持最小结构化 query plan，同时兼容旧字符串；detector gaps 增加 `attributes["gap_details"]`，report 会把结构化 plan 渲染成人类可读文本。
+
+残留风险：已由父会话集成修补，`CaseRecord.next_queries` 现在保留结构化 dict。
 
 任务：
 - 把 `Finding.next_queries` 从纯字符串升级为兼容结构化 query plan。

@@ -41,7 +41,7 @@ def _case_fixture() -> dict:
             "entry_candidates": ["waf_uri:/login"],
             "timeline": ["2026-04-30T01:00Z WAF hit", "2026-04-30T01:04Z EDR alert"],
             "gaps": ["Need VPN account context"],
-            "next_queries": ["traffic_related ip=198.51.100.1"],
+            "next_queries": ["security_hunt_ip ip=198.51.100.1"],
         },
         "raw_events": [{"payload": "RAW_MARKER_SHOULD_NOT_APPEAR"}],
         "transcript": "TRANSCRIPT_MARKER_SHOULD_NOT_APPEAR" * 100,
@@ -71,7 +71,11 @@ def test_security_prompt_analyst_mode_is_scoped_and_evidence_driven():
 
     assert "# Security Log Analysis Context" in rendered
     assert "evidence_refs" in rendered
-    assert "traffic_query" in rendered
+    assert "security_query" in rendered
+    assert "security_hunt_ip" in rendered
+    assert "traffic_query" not in rendered
+    assert "traffic_sample" not in rendered
+    assert "traffic_topn" not in rendered
     assert "raw events" in rendered
 
 
@@ -206,6 +210,18 @@ def test_dispatch_engine_respects_enabled_budget():
     assert result.dispatched
     assert result.agent_id.startswith("analyst-logdisp-")
     assert engine.queue.agent_backlog()["active_analyst_agents"] == 1
+
+
+def test_dispatch_engine_builds_security_tool_names_for_analyst_input():
+    engine = DispatchEngine()
+    result = engine.submit_case(_case_fixture())
+
+    analyst_input = engine.build_analyst_input(result.request)
+
+    assert "security_query" in analyst_input["available_tools"]
+    assert "security_hunt_ip" in analyst_input["available_tools"]
+    assert "security_trace_case" in analyst_input["available_tools"]
+    assert "traffic_query" not in analyst_input["available_tools"]
 
 
 def test_case_summary_is_compact_and_excludes_raw_events_and_transcript():

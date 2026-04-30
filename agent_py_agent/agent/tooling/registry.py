@@ -20,6 +20,8 @@ from .filesystem import (
     SearchTextTool,
     WriteFileTool,
 )
+from ..log_analysis.capabilities import SECURITY_TOOL_NAMES, has_security_tool_capability
+from ..log_analysis.tools import SecurityHuntIpTool, SecurityQueryTool, SecurityTraceCaseTool
 from .models import (
     BaseTool,
     HybridToolRetriever,
@@ -61,9 +63,12 @@ class ToolRegistry:
         catalog_limit: int,
         retrieval_limit: int,
         vector_search_enabled: bool,
+        expose_security_tools: bool = False,
     ):
         self.workspace_root = workspace_root.resolve()
         self.tools: dict[str, BaseTool] = {}
+        self.expose_security_tools = expose_security_tools
+        self.security_tool_names = set(SECURITY_TOOL_NAMES)
         self.catalog_limit = catalog_limit
         self.retrieval_limit = retrieval_limit
         self.retriever = HybridToolRetriever(
@@ -81,6 +86,9 @@ class ToolRegistry:
         self.register(ReplaceInFileTool(self.workspace_root))
         self.register(FetchUrlTool(max_chars=web_max_chars, timeout=http_timeout))
         self.register(HttpRequestTool(max_chars=web_max_chars, timeout=http_timeout))
+        self.register(SecurityQueryTool(self.workspace_root))
+        self.register(SecurityHuntIpTool(self.workspace_root))
+        self.register(SecurityTraceCaseTool(self.workspace_root))
 
     def register(self, tool: BaseTool) -> None:
         """注册一个工具。"""
@@ -91,19 +99,31 @@ class ToolRegistry:
         self,
         *,
         allowed_tools: list[str] | None = None,
+        granted_capabilities: list[str] | None = None,
         include_orchestration: bool = False,
     ) -> list[ToolSpec]:
         """按注册顺序返回所有工具说明。"""
 
         allowed = _allowed_tool_set(allowed_tools)
         specs = [tool.spec for tool in self.tools.values()]
+        if not _security_tools_visible(
+            self.expose_security_tools,
+            allowed=allowed,
+            granted_capabilities=granted_capabilities,
+        ):
+            specs = [spec for spec in specs if spec.name not in self.security_tool_names]
         if not include_orchestration:
             specs = [spec for spec in specs if spec.category != "orchestration"]
         if allowed is None:
             return specs
         return [spec for spec in specs if spec.name in allowed]
 
-    def render_catalog_section(self, *, allowed_tools: list[str] | None = None) -> str:
+    def render_catalog_section(
+        self,
+        *,
+        allowed_tools: list[str] | None = None,
+        granted_capabilities: list[str] | None = None,
+    ) -> str:
         """生成常驻 prompt 的工具目录。
 
         这里给的是中等详细度版本：
@@ -111,7 +131,11 @@ class ToolRegistry:
         但不会把每个参数的长篇说明全塞进去。
         """
 
-        specs = self.specs(allowed_tools=allowed_tools, include_orchestration=True)
+        specs = self.specs(
+            allowed_tools=allowed_tools,
+            granted_capabilities=granted_capabilities,
+            include_orchestration=True,
+        )
         entries = [spec.render_catalog_entry() for spec in specs[: self.catalog_limit]]
         if not entries:
             entries = ["- none：当前执行上下文没有授权任何工具；缺能力时请上抛 capability_request。"]
@@ -132,10 +156,15 @@ class ToolRegistry:
         query: str,
         *,
         allowed_tools: list[str] | None = None,
+        granted_capabilities: list[str] | None = None,
     ) -> list[ToolSpec]:
         """根据当前任务挑出最相关的少量工具。"""
 
-        specs = self.specs(allowed_tools=allowed_tools, include_orchestration=True)
+        specs = self.specs(
+            allowed_tools=allowed_tools,
+            granted_capabilities=granted_capabilities,
+            include_orchestration=True,
+        )
         hits = self.retriever.search(query, specs, self.retrieval_limit)
         if not hits:
             return []
@@ -147,10 +176,15 @@ class ToolRegistry:
         query: str,
         *,
         allowed_tools: list[str] | None = None,
+        granted_capabilities: list[str] | None = None,
     ) -> str:
         """生成当前任务的候选工具详情区块。"""
 
-        specs = self.specs(allowed_tools=allowed_tools, include_orchestration=True)
+        specs = self.specs(
+            allowed_tools=allowed_tools,
+            granted_capabilities=granted_capabilities,
+            include_orchestration=True,
+        )
         if not specs:
             return (
                 "# Recommended Tools\n"
@@ -223,6 +257,7 @@ class ToolRegistry:
         payload: object,
         *,
         allowed_tools: list[str] | None = None,
+        granted_capabilities: list[str] | None = None,
         write_boundary: dict[str, object] | None = None,
     ) -> ToolExecutionResult:
         """执行单个工具调用。"""
@@ -244,6 +279,14 @@ class ToolRegistry:
         allowed = _allowed_tool_set(allowed_tools)
         if allowed is not None and tool_name not in allowed:
             return ToolExecutionResult(tool_name, False, f"工具未授权: {tool_name}")
+
+        if tool_name in self.security_tool_names and not _security_tool_call_authorized(
+            tool_name,
+            self.expose_security_tools,
+            allowed=allowed,
+            granted_capabilities=granted_capabilities,
+        ):
+            return ToolExecutionResult(tool_name, False, f"tool not authorized: {tool_name}")
 
         tool = self.tools.get(tool_name)
         if tool is None:
@@ -272,6 +315,33 @@ def _allowed_tool_set(allowed_tools: list[str] | None) -> set[str] | None:
     if allowed_tools is None:
         return None
     return {str(item) for item in allowed_tools if str(item).strip()}
+
+
+def _security_tools_visible(
+    expose_security_tools: bool,
+    *,
+    allowed: set[str] | None,
+    granted_capabilities: list[str] | None,
+) -> bool:
+    return bool(
+        expose_security_tools
+        or (allowed is not None and bool(allowed.intersection(SECURITY_TOOL_NAMES)))
+        or has_security_tool_capability(granted_capabilities)
+    )
+
+
+def _security_tool_call_authorized(
+    tool_name: str,
+    expose_security_tools: bool,
+    *,
+    allowed: set[str] | None,
+    granted_capabilities: list[str] | None,
+) -> bool:
+    return bool(
+        expose_security_tools
+        or (allowed is not None and tool_name in allowed)
+        or has_security_tool_capability(granted_capabilities)
+    )
 
 
 def _parse_error_payload(error: str, raw: str) -> dict[str, str]:

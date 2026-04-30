@@ -111,6 +111,63 @@ context_manifest:
 - `PARENT_ACCEPTED`：父会话验收通过。
 - `DONE` / `VERIFIED`：只能由父会话或最终验收链路写入。
 
+## Worker 拆分算法
+
+拆 worker 的目标不是“同时开很多会话”，而是把大任务切成局部可检查、写入边界清楚、能并行推进的施工单。
+
+推荐顺序：
+
+1. 先写质量契约。
+   - 用户可见目标是什么。
+   - 哪些情况不准交。
+   - 必须产出哪些证据。
+   - 必须跑哪些测试。
+   - 谁拥有最终裁决权。
+
+2. 再按写入范围拆。
+   - CLI worker 只改 CLI 和 CLI 测试。
+   - storage worker 只改 storage 和 storage 测试。
+   - detector worker 只改 detector / case / report。
+   - docs worker 只改文档和索引。
+   - reviewer worker 默认只读，不改文件。
+
+3. 再按产物类型拆。
+   - producer 负责产出代码、fixture、文档或报告。
+   - critic 负责找问题，不修。
+   - repairer 只修父会话指定的问题。
+   - reviewer 按质量契约验收，但不能宣布最终交付。
+
+4. 最后由父会话集成。
+   - 看 diff。
+   - 跑组合测试。
+   - 复现关键链路。
+   - 更新验收记录。
+   - 决定是否提交。
+
+一个 worker 派工单必须包含：
+- 当前仓库路径。
+- 它不是唯一 worker，不能回滚别人改动。
+- 明确写入范围。
+- 明确禁止修改范围。
+- 明确验收测试。
+- 明确输出格式：改动文件、测试结果、残留风险。
+
+适合交给 worker 的任务：
+- 独立 CLI 子命令。
+- 独立 parser / adapter / backend。
+- fixture 和测试补充。
+- 局部 bug 修复。
+- 局部文档或索引维护。
+- 只读 review / critic。
+
+不适合直接交给 worker 独立裁决的任务：
+- 最终质量标准。
+- 用户是否会满意。
+- 是否引入重依赖。
+- public API 的长期取舍。
+- 多模块大重构的最终边界。
+- 高审美或高风险交付的最终验收。
+
 ## 反验收机制
 
 子代理汇报不是结论，只是待审核材料。

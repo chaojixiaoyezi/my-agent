@@ -238,6 +238,31 @@ def _coerce_evidence_refs(value: Any) -> list[EvidenceRef]:
 
 
 @dataclass
+class QueryPlan(JsonRoundTripMixin):
+    purpose: str
+    source_products: list[str] = field(default_factory=list)
+    start_time: str = ""
+    end_time: str = ""
+    filters: dict[str, Any] = field(default_factory=dict)
+    limit: int = 100
+    evidence_needed: list[str] = field(default_factory=list)
+    display: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.display:
+            parts = [self.purpose]
+            if self.source_products:
+                parts.append(f"sources={','.join(self.source_products)}")
+            if self.start_time or self.end_time:
+                parts.append(f"time={self.start_time or '*'}..{self.end_time or '*'}")
+            if self.filters:
+                filters = " ".join(f"{key}={value}" for key, value in sorted(self.filters.items()) if value not in (None, "", [], {}))
+                if filters:
+                    parts.append(filters)
+            self.display = " | ".join(part for part in parts if part)
+
+
+@dataclass
 class Finding(JsonRoundTripMixin):
     finding_id: str
     detector_id: str
@@ -252,7 +277,7 @@ class Finding(JsonRoundTripMixin):
     hypothesis: str = ""
     confidence: float | None = None
     gaps: list[str] = field(default_factory=list)
-    next_queries: list[str] = field(default_factory=list)
+    next_queries: list[Any] = field(default_factory=list)
     rule_version: str = ""
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
@@ -284,7 +309,7 @@ class CaseRecord(JsonRoundTripMixin):
     facts: list[str] = field(default_factory=list)
     inferences: list[str] = field(default_factory=list)
     gaps: list[str] = field(default_factory=list)
-    next_queries: list[str] = field(default_factory=list)
+    next_queries: list[Any] = field(default_factory=list)
     route_refs: list[str] = field(default_factory=list)
     attributes: dict[str, Any] = field(default_factory=dict)
 
@@ -307,6 +332,7 @@ __all__ = [
     "Finding",
     "JsonValue",
     "NormalizedEvent",
+    "QueryPlan",
     "RawBatch",
     "SECURITY_ALERT_V1_FIELD_ALIASES",
     "SecurityAlertV1",

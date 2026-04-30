@@ -49,12 +49,13 @@
 
 摘要：
 - 日志分析第一版已经有 SecurityAlertV1 接入、JSONL store、受控 query、软检测器、case、route/report 和 analyst/reviewer 合同。
-- 父会话初验发现 ingest/query 默认路径、EvidenceRef、dispatch contract、case dedup、缺时间戳关联、report finding 过滤等 P0/P1 问题。
-- 已拆给 worker 修复并复验：LOG 专项 33 passed，全量 164 passed，手工 ingest->query 闭环从 0 rows 修到 3 rows。
-- 剩余主要是 CLI、tool registry、安全 prompt profile、结构化 query plan、storage audit 和 Live Lab replay。
+- 父会话初验发现 ingest/query 默认路径、EvidenceRef、dispatch contract、case dedup、缺时间戳关联、report finding 过滤等 P0/P1 问题，并已修复复验。
+- 第二轮已接入 `my-agent logs status/ingest/query/hunt-ip/trace-case`、ToolRegistry 安全工具授权、结构化 query plan 和 prompt 工具名统一。
+- 当前复验：LOG CLI/tools/detector/model 组合测试 52 passed，全量 172 passed，手工 logs ingest -> query 查回 3 rows。
+- 剩余主要是 runtime capability 自动接线、storage audit、Live Lab replay 和 README 快速开始。
 
 后续方向：
-- 下一批 worker 优先做 CLI/配置贯通、主工具 registry 接入、结构化 next query、storage audit、Live Lab replay。
+- 下一批 worker 优先做 runtime capability 自动接线、storage audit、Live Lab replay 和用户文档。
 - 是否引入 DuckDB/Parquet/Kafka/ML 依赖仍由父会话裁决，不交给 worker 默认决定。
 
 ## 2026-04-29 / 可见真实环境测试台 Live Lab

@@ -3,11 +3,12 @@ from __future__ import annotations
 """Finding-to-case persistence on top of the local log-analysis store."""
 
 import hashlib
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from ..models import CaseRecord, EvidenceRef, Finding, utc_now_iso
+from ..models import CaseRecord, EvidenceRef, Finding, QueryPlan, utc_now_iso
 from ..storage.local_store import LocalLogStore
 
 
@@ -119,7 +120,7 @@ class CaseStore:
         if finding.hypothesis:
             case.inferences = _unique([*case.inferences, finding.hypothesis])
         case.gaps = _unique([*case.gaps, *finding.gaps])
-        case.next_queries = _unique([*case.next_queries, *finding.next_queries])
+        case.next_queries = _unique_values([*case.next_queries, *finding.next_queries])
         attributes = case.attributes if isinstance(case.attributes, dict) else {}
         summaries = list(attributes.get("finding_summaries", []))
         if not any(item.get("finding_id") == finding.finding_id for item in summaries if isinstance(item, dict)):
@@ -259,6 +260,26 @@ def _unique(values: Sequence[Any]) -> list[str]:
             continue
         seen.add(text)
         result.append(text)
+    return result
+
+
+def _unique_values(values: Sequence[Any]) -> list[Any]:
+    result: list[Any] = []
+    seen: set[str] = set()
+    for value in values:
+        if isinstance(value, QueryPlan):
+            item: Any = value.to_dict()
+        elif isinstance(value, Mapping):
+            item = dict(value)
+        else:
+            item = str(value or "").strip()
+        if not item:
+            continue
+        marker = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+        if marker in seen:
+            continue
+        seen.add(marker)
+        result.append(item)
     return result
 
 
