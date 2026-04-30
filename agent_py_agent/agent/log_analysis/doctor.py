@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-"""Lightweight doctor/status checks for log analysis."""
+"""LLM: 本模块提供 LOG 轻量体检，不加载 storage/ML/worker 重依赖，只报告配置、路径和 feature gates。
+
+新手说明:
+doctor 像“体检命令”。用户想知道日志分析模块现在开没开、配置有没有问题、目录是否存在时，
+就走这里。它故意不导入重型后端，避免只是看状态就启动 worker、加载 ML 或触发实际分析。
+"""
 
 from pathlib import Path
 from typing import Any
@@ -38,7 +43,25 @@ def collect_doctor_status(
     *,
     workspace_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Return structured status without importing storage, ML, or worker backends."""
+    """LLM: 收集 LOG 模块的轻量状态快照，作为 CLI status/doctor 的结构化返回。
+
+    新手说明:
+    这个函数只回答“模块配置是什么、目录在哪里、功能门现在是什么状态”。
+    它不会读取真实日志、不会跑检测器、不会启动子代理，也不会加载 ML 或集群后端。
+
+    参数说明:
+    config_path: 可选配置文件路径；不传时使用默认 `config/log_analysis_config.yaml`。
+    workspace_root: 可选工作区根目录；用于把相对 data_dir 解析到指定工作区，测试时常传临时目录。
+
+    返回说明:
+    返回 dict，包含 module、state、enabled、capability_level、heavy_dependencies_loaded、
+    config、paths 和 feature_gates。
+    `heavy_dependencies_loaded` 固定为 False，表示这个体检路径保持轻量。
+
+    失败处理:
+    如果配置文件损坏或读取失败，函数不会崩掉 doctor，而是使用 LogAnalysisConfig 安全默认值，
+    并把失败原因写进 config.warnings，方便用户修配置。
+    """
 
     root = Path(workspace_root) if workspace_root is not None else Path(__file__).resolve().parents[2]
     path = Path(config_path) if config_path is not None else default_log_analysis_config_path()
@@ -92,6 +115,17 @@ def collect_doctor_status(
 
 
 def _path_status(path: Path) -> dict[str, Any]:
+    """LLM: 把一个路径转成 doctor 可展示的 path/exists/is_dir 三元状态。
+
+    新手说明:
+    doctor 不需要读取目录内容，只要告诉用户这个路径存在吗、是不是目录。
+
+    参数说明:
+    path: 要检查的本地路径。
+
+    返回说明:
+    返回 dict，包含字符串 path、exists 布尔值、is_dir 布尔值。
+    """
     return {
         "path": str(path),
         "exists": path.exists(),

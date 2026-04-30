@@ -173,3 +173,18 @@
   - `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
   - `python -m pytest` -> `241 passed`.
   - `git diff --check` -> passed.
+
+## 2026-04-30 / LOG Tool Config Doctor Teaching Comments Evidence
+
+- Updated LOG core boundary files:
+  - `agent_py_agent/agent/log_analysis/tools.py`: module, query/hunt/trace helpers, tool wrappers, execute methods, and parameter filtering helpers now include `LLM:` / `新手说明:` / parameter and return explanations.
+  - `agent_py_agent/agent/log_analysis/doctor.py`: doctor collection and path status helpers now document lightweight status behavior and failure fallback.
+  - `agent_py_agent/agent/log_analysis/config.py`: config dataclasses, loaders, coercion helpers, warning helper, and path resolution now document safe defaults and parameter meaning.
+- Updated module docs in the same diff:
+  - `docs/modules/log-analysis/02-progress.md`.
+  - `docs/modules/log-analysis/04-structure.md`.
+- Verification:
+  - `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
+  - `python -m pytest agent_py_agent\tests\test_log_analysis_models.py agent_py_agent\tests\test_log_analysis_query.py agent_py_agent\tests\test_log_analysis_cli.py agent_py_agent\tests\test_tools.py agent_py_agent\tests\test_doc_sync.py` -> `45 passed`.
+  - `python -m pytest` -> `241 passed`.
+  - `git diff --check` -> passed.

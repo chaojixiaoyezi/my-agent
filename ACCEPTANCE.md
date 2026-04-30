@@ -279,3 +279,25 @@ Accepted evidence:
 Remaining:
 - [ ] Add four-piece docs and sync rules for any future major module before feature work starts there.
 - [ ] Consider wiring the sync gate into a pre-commit hook or CI step after the module map stabilizes.
+
+## 2026-04-30 / LOG Tool Config Doctor Teaching Comments Acceptance
+
+Status:
+- [x] LOG `tools.py`, `doctor.py`, and `config.py` teaching comments landed.
+
+Problems solved:
+- [x] Security tool functions now explain filters, bounds, evidence refs, return payloads, and failure modes for beginner readers.
+- [x] Tool wrapper classes now document how ToolSpec and execute bridge plain functions into the agent tool registry.
+- [x] Doctor status now documents that it is lightweight and does not load storage, ML, worker, or runner backends.
+- [x] Config normalization now documents safe defaults, warning receipts, dangerous feature gates, and parameter coercion helpers.
+- [x] Log-analysis module docs were updated in the same diff, exercising the code/docs/comment sync gate.
+
+Accepted evidence:
+- [x] Sync gate passed: `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
+- [x] Focused tests passed: `python -m pytest agent_py_agent\tests\test_log_analysis_models.py agent_py_agent\tests\test_log_analysis_query.py agent_py_agent\tests\test_log_analysis_cli.py agent_py_agent\tests\test_tools.py agent_py_agent\tests\test_doc_sync.py` -> `45 passed`.
+- [x] Full regression passed: `python -m pytest` -> `241 passed`.
+- [x] Whitespace check passed: `git diff --check`.
+
+Remaining:
+- [ ] Continue the same teaching-comment pass for LOG `models.py`, `storage/query.py`, `ingest/`, and `analytics/`.
+- [ ] Run Live Lab replay again if future edits change replay behavior rather than comments only.

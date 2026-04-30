@@ -8,6 +8,7 @@
 - `logs/security` capability 控制安全工具暴露，普通任务默认隐藏安全工具。
 - runtime capability、query limit、storage audit、Live Lab replay、LOG analyst work orders 已有落地记录。
 - analyst/reviewer work-order plan 现在可以显式 `apply=True` 落成真实 `SubAgentTask` 记录，但不会调用 runner、模型或自动验收。
+- `tools.py`、`doctor.py`、`config.py` 已补齐 `LLM:` / `新手说明:` / `参数说明:` / `返回说明:` 风格的中文注释。
 
 ## 解决的问题
 
@@ -16,6 +17,8 @@
 - 无 evidence refs 的 case 会拒绝创建 analyst/reviewer 任务，减少无证据分析。
 - 创建出的任务带有 allowed tools、evidence refs、quality contract、context pack、父级最终验收门，解决 worker 自己宣布完成的问题。
 - 任务保持 `PLANNING` / `UNVERIFIED`，解决“创建任务”和“真正执行/验收”混在一起的风险。
+- LOG 的工具边界、体检边界和配置边界现在更适合小白学习，也更方便后续 LLM 在不重新扫全代码的情况下理解参数含义。
+- 注释明确了 security tools 只返回摘要和 evidence refs、doctor 不加载重依赖、配置坏值会 warning 后回退安全默认值。
 
 ## 下一步
 
@@ -24,6 +27,7 @@
 - 在真实 analyst/reviewer 执行前，把 reviewer decision 和 parent acceptance report 的持久化格式定下来。
 - 增加更丰富的安全 fixture 和回归场景。
 - 继续明确 JSONL dev/local 后端与未来 DuckDB / Parquet / SQLite 后端的边界。
+- 继续给 `models.py`、`storage/query.py`、`ingest/`、`analytics/` 等核心文件补同等级中文注释。
 
 ## 已跑测试
 
@@ -33,10 +37,14 @@
 - 父会话 focused 组合验收：`python -m pytest agent_py_agent\tests\test_log_analysis_dispatch.py agent_py_agent\tests\test_subagent_workflow_planner.py` -> `26 passed`。
 - 父会话全量回归：`python -m pytest` -> `236 passed`。
 - 空白检查：`git diff --check` -> passed。
+- 本轮注释同步 focused 验收：`python -m pytest agent_py_agent\tests\test_log_analysis_models.py agent_py_agent\tests\test_log_analysis_query.py agent_py_agent\tests\test_log_analysis_cli.py agent_py_agent\tests\test_tools.py agent_py_agent\tests\test_doc_sync.py` -> `45 passed`。
+- 本轮同步门检查：`python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`。
+- 本轮全量回归：`python -m pytest` -> `241 passed`。
 
 ## 未跑测试
 
 - 本轮没有真实执行 analyst/reviewer runner，因为当前目标只是创建受控任务记录。
+- 本轮注释工作没有重新跑真实 LOG Live Lab replay；如后续改 replay 行为，需要补跑。
 - 后续如果修改 storage 后端或 CLI 行为，需要补跑 LOG CLI、Live Lab replay 和全量 pytest。
 
 ## 风险
