@@ -6,8 +6,9 @@
 - `AGENTS.md`
 - `CODEBASE_TREE.md`
 - 本文件
+- 必要时读取 `docs/design/` 下对应模块设计文档
 
-每次出现新的架构想法、命令语义、能力边界或长期方向，都要在这里追加记录，并标明是否已经落地。
+每次出现新的架构想法、命令语义、能力边界或长期方向，都要在这里追加记录，并标明是否已经落地。主设计台账只放导航和摘要；超过约 100 行的模块细节放到 `docs/design/`。
 
 ## 状态标记
 
@@ -18,6 +19,27 @@
 待验证       已写代码，但还需要真实场景验证
 暂停         暂时不做，但保留背景
 ```
+
+## 2026-04-30 / Subagent 质量契约与用户少说派工
+
+状态：设计中
+
+模块设计文档：[docs/design/subagent-quality-contract.md](docs/design/subagent-quality-contract.md)
+
+摘要：
+- 子代理质量差的核心原因通常不是能力不足，而是父会话没有把目标质量、成功样本、交付红线和验收标准结构化传下去。
+- 子代理应从“独立负责人”降级为“受控施工队”：负责生产材料、局部检查、挑错和修指定缺陷；不能定义完成标准，不能决定最终交付。
+- 后续引入 `QualityContract`、context pack、context manifest、producer/critic/reviewer 角色拆分和父会话反验收。
+- 用户少说模式是目标：用户只表达任务和偏好，系统自动选 profile、写质量契约、派 producer/critic、落证据和验收报告。
+
+已落地：
+- `SUBAGENT_RUNBOOK.md` 已记录质量契约、受控施工队、上下文包、反验收和阶段路线。
+- `TEST_CHECKLIST.md` 已补充相关检查项。
+- `docs/design/subagent-quality-contract.md` 承载完整模块设计。
+
+后续方向：
+- Phase 1 从 `SubAgentTask` / `execution_context` 的质量契约、角色字段、context manifest 和默认 core context pack 开始。
+- 详细开发步骤、内置项、开关项和用户必须表达的内容见模块设计文档。
 
 ## 2026-04-29 / 可见真实环境测试台 Live Lab
 

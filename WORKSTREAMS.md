@@ -33,6 +33,7 @@ scripts/workstream_create.sh memory
 scripts/workstream_create.sh framework-runtime
 scripts/workstream_create.sh tools-boundary
 scripts/workstream_create.sh live-lab-test
+scripts/workstream_create.sh log-analysis
 ```
 
 查看所有主仓库和 worktree 状态：
@@ -63,6 +64,7 @@ scripts/open_workstream.sh memory "git status --short && python3 agent_py_agent/
 | `framework-runtime` | `workstream/framework-runtime` | `../my-agent-worktrees/framework-runtime` | gateway scheduler、daemon、subagent dispatch、runner 并发和恢复 | 记忆语义、工具安全策略、UI 文档之外的测试台 |
 | `tools-boundary` | `workstream/tools-boundary` | `../my-agent-worktrees/tools-boundary` | tools allowlist、写边界、权限、安全默认、输入/模型输出校验 | LocalStore schema、大规模 gateway 调度 |
 | `live-lab-test` | `workstream/live-lab-test` | `../my-agent-worktrees/live-lab-test` | Live Lab、真实任务套件、长任务/问题任务回归、测试文档 | 核心业务逻辑，除非为了暴露测试入口 |
+| `log-analysis` | `workstream/log-analysis` | `../my-agent-worktrees/log-analysis` | 长期后台日志分析底座：file/API/syslog/Kafka 接入、去重、parser、DuckDB/Parquet、detector、case 派遣、ML/集群接口预留；规划见 `LOG_ANALYSIS_BACKLOG.md` | 现有 memory 语义、通用工具安全策略、gateway 进程控制的大改动 |
 
 ## 单条线的启动提示词
 

@@ -38,6 +38,359 @@
 - DONE 需要证据。
 - runner 不直接标记 DONE，只进入待验收。
 
+## 质量契约与受控施工队模式
+
+这轮讨论确认了一个重要边界：子代理不是“平行主代理”，而是受控施工队。
+
+子代理可以更像主代理，拿到足够的上下文、记忆和质量标准；但它不能成为项目经理，不能自己定义完成标准，也不能直接决定最终交付。父会话负责定义标准、裁决边界、验收产物和决定是否交付。
+
+完整模块设计见 `docs/design/subagent-quality-contract.md`；本 runbook 保留操作层规则和落地检查。
+
+典型痛点：
+- 子代理只收到“动作目标”，例如下载、翻译、生成、检查，却没有收到“成品质量目标”。
+- 子代理容易把文件存在、命令成功、页数匹配、检查脚本通过当成任务成功。
+- 模糊边界处最容易出错，例如主论文/附录/系统卡判定，正文/参考文献/补充材料判定，原文排版问题/翻译破坏判定。
+- 父会话派工和验收如果只写工程化指标，会把低质量结果放大成“已完成”。
+- 子代理总结不是结论，只是待审核材料；不能因为它说 PASS 就信。
+- 全量塞入长 prompt 不等于继承责任感，反而可能稀释重点、增加成本和让多个子代理都误以为自己是总负责人。
+
+因此，以后主代理派工前应尽量生成一份 `QualityContract`：
+
+```text
+user_visible_goal        用户真正要的交付效果，而不是动作列表
+reference_standard       对标样本，例如 DeepSeek PDF V19
+bad_version_conditions   什么算坏版、半成品或不可交付
+must_check               必须执行的人工/机器检查
+must_not_ship            出现哪些问题绝对不能交付
+sampling_plan            抽查策略，例如前/中/后/附录/图表/参考文献
+evidence_required        必须提交的证据、截图、路径、命令或日志
+risk_reporting           哪些不确定性必须列风险，不能吞掉
+final_decider            最终裁决人，默认父会话/用户
+```
+
+高质量任务不能只写“完成 X”。例如 PDF 翻译类任务要写清楚：
+
+```text
+对标 DeepSeek PDF V19。
+不允许大片英文正文。
+不允许只看页数匹配。
+Appendix 不能一刀切保留，必须判断是不是正文型附录。
+发现排版差、乱码、重叠、工具痕迹必须标红，不准说 PASS。
+子代理只能提交 AWAITING_REVIEW，最终交付由父会话裁决。
+```
+
+### 上下文包策略
+
+不要给每个子代理无脑塞完整 50K prompt。更稳的结构是三层上下文包：
+
+```text
+Core Context Pack      固定硬规则，约 2K-5K
+Task Context Pack      当前任务关键背景，约 5K-15K
+Role Context Pack      当前角色专用规则，约 2K-10K
+```
+
+Core Context Pack 应包含：
+- 不能 fake done。
+- 不能只说完成，必须落盘证据。
+- 不确定必须列风险。
+- 不准擅自降级目标。
+- 只能提交待验收材料，最终裁决属于父会话/用户。
+- 子代理输出必须足够让父代理复核，不能把关键事实只留在自己的推理里。
+
+Task Context Pack 应包含：
+- 用户原话和最终目标。
+- 成功样本和失败样本。
+- 当前任务目录、SPEC、已知坑和交付红线。
+- 本轮必须检查的文件、页面、路径、命令或证据。
+
+Role Context Pack 应按角色裁剪：
+- 收集型：真实 URL、错链排除、主件/附件判定。
+- 生产型：具体生成规则、不可改边界、输出路径。
+- QA 型：只负责挑错，发现坏页/漏翻/乱码/错链必须 FAIL。
+- 修复型：只修指定问题，不扩大范围。
+- Reviewer 型：审查 evidence 和质量契约，不替施工方辩护。
+
+每次派工最好落一个 context manifest，记录：
+- 给了哪些上下文包。
+- 哪些文件是必读。
+- 哪些质量标准生效。
+- 哪些内容故意没有给。
+- 本子代理的角色和写入边界。
+
+这样子代理做差时，可以追溯是执行失败、上下文缺失，还是质量契约没有写清楚。
+
+### 角色拆分
+
+不要让同一个子代理既生产又证明自己质量好。高质量任务至少拆成两类：
+
+```text
+producer / 施工小傻妞   负责产出材料、文件、候选清单、初步报告
+critic / 挑错小傻妞     负责找问题，不能修，不能替 producer 辩护
+```
+
+必要时再加：
+
+```text
+repairer / 修复小傻妞   只修父会话指定的问题
+reviewer / 验收小傻妞   按质量契约审查，但仍不能代替用户最终审美
+```
+
+critic 的提示词要和 producer 不同。它的目标不是证明完成，而是找哪里不合格：
+
+```text
+你的任务不是证明它完成，而是找它哪里烂。
+发现大片英文、错链、坏页、工具痕迹、偷懒，一律 FAIL。
+不要给面子。
+只提交证据和 FAIL/PASS，不许修。
+```
+
+### 反验收原则
+
+子代理汇报必须反着验：
+- 它说清单完整，父代理要查有没有漏、有没有错链。
+- 它说 PDF 好了，父代理要抽后半段、图表页、参考文献页。
+- 它说 QA PASS，父代理要看它到底测了什么。
+- 它说没有问题，父代理默认先怀疑一次，直到 evidence 支撑。
+
+机器验收只能证明“不坏”的一部分：
+- 文件存在。
+- 能打开。
+- 页数一致。
+- 命令成功。
+- contact sheet 存在。
+
+它不能证明：
+- 好不好看。
+- 顺不顺眼。
+- 有没有偷懒。
+- 是否像正式交付。
+- 用户打开后是否舒服。
+
+所以最终验收必须保留父会话/用户审美权。对于 PDF/文档交付，最终抽查至少覆盖：
+- 第一页。
+- 中间正文。
+- 后半段。
+- appendix 开头。
+- 图表密集页。
+- 参考文献页。
+- 用户最可能打开看的部分。
+- 最终 zip 或交付包。
+
+### 成功样本库
+
+像 DeepSeek PDF V19 这种成功版本，应沉淀成质量 profile，而不是只留在聊天里。
+
+建议后续增加：
+
+```text
+agent_py_agent/quality_profiles/
+  pdf_translation_deepseek_v19.md
+  code_patch_safe.md
+  log_analysis_first_response.md
+```
+
+同类任务派工时引用 profile：
+
+```text
+本任务质量对标：DeepSeek 2025 PDF V19。
+不得低于该版本的中文覆盖、目录处理、排版观感和 QA 标准。
+```
+
+### 用户/父会话必须指定的内容
+
+系统可以提供默认模板，但不能替用户猜主观质量标准。以下内容必须由用户或父会话在派工前说明：
+- 对标哪个成功样本。
+- 什么叫精品、半成品、坏版。
+- 哪些内容必须翻译、哪些可以保留原文。
+- 速度优先还是质量优先。
+- 是否需要独立 critic。
+- 是否允许自动返工，以及最多几轮。
+- 最终是否必须等用户亲自看过才交付。
+
+### 建议实现路线
+
+短期：
+- 在 `SubAgentTask` / `execution_context` 增加质量契约字段。
+- runner prompt 明确“不能定义完成标准，只能提交待验收材料”。
+- acceptance 报告显示质量契约是否存在、证据是否覆盖抽查计划。
+- dispatch 支持 `producer` / `critic` / `reviewer` 角色。
+
+中期：
+- 增加 context pack / context manifest。
+- 增加 quality profile 目录和引用机制。
+- 增加 critic 阶段：producer 完成后默认生成挑错任务。
+- 把质量失败沉淀成 eval/fixture，后续回归测试。
+
+长期：
+- 支持按任务类型自动选择质量 profile。
+- 支持多轮 evaluator-optimizer：生产 -> 挑错 -> 修复 -> 再验收。
+- 对高风险/高审美任务强制 human-in-the-loop，不允许自动交付。
+
+### 用户少说模式
+
+目标不是让用户学会怎么派工，而是让用户只说任务、灵感和偏好。系统负责把任务转换成质量契约、角色拆分、上下文包、验收闸门和落盘文件。
+
+用户理想输入应该像这样：
+
+```text
+把这批 PDF 翻成可交付中文版，质量对标昨天那个 DeepSeek V19。
+```
+
+而不是这样：
+
+```text
+请创建 producer/critic/reviewer 三个子代理，分别注入 Core Context Pack、
+Task Context Pack、Role Context Pack，并按 sampling_plan 抽查后半段和 appendix。
+```
+
+系统应自动完成：
+- 识别任务类型：PDF 翻译、代码修改、日志分析、资料收集、报告写作、批量 QA 等。
+- 选择 quality profile：例如 PDF 翻译默认使用 `pdf_translation`，如果用户提到 DeepSeek V19 则绑定该成功样本。
+- 生成 `QualityContract`：把用户目标转成坏版条件、禁止交付条件、必须检查项和抽查计划。
+- 决定派工拓扑：普通任务只派 producer；高质量交付默认 producer + critic；高风险或用户可见交付再加 reviewer。
+- 生成 context packs：只给子代理相关上下文，不把全量 50K prompt 无脑复制给每个子代理。
+- 落 context manifest：让父代理后续能追溯每个子代理拿到了什么标准和证据。
+- 强制输出契约：子代理只能提交材料和证据，不能自行宣布最终交付。
+- 自动反验收：critic / acceptance 不看总结先看证据、产物和抽查覆盖。
+
+#### 哪些应该内置
+
+这些属于系统默认能力，不应该要求用户每次说：
+- 子代理不能定义完成标准，不能直接 `DONE/VERIFIED`。
+- 子代理必须提交 evidence、checks、failures、risks 和 needs_parent_decision。
+- producer 与 critic 的目标必须分离。
+- critic 默认站在找问题的立场，不替 producer 辩护。
+- 高质量交付默认有抽查计划和反验收。
+- execution context 默认包含 core context pack。
+- dispatch 默认写 context manifest。
+- acceptance 默认检查质量契约覆盖情况。
+- 子代理输出和父代理验收全部落盘，便于恢复和复查。
+
+#### 哪些应该做成开关
+
+这些会影响成本、速度、模型调用或用户体验，应该可配置：
+- `subagent_quality_mode`: `off|advisory|strict`。默认建议 `advisory`，重要交付可升 `strict`。
+- `subagent_auto_critic`: 是否在 producer 后自动派 critic。默认可按任务类型开启。
+- `subagent_auto_repair`: critic 失败后是否自动派 repairer。默认关闭或限制轮数。
+- `subagent_max_review_rounds`: 最多生产/挑错/修复几轮，避免无限循环。
+- `subagent_context_budget`: 每个子代理上下文预算。
+- `subagent_full_context`: 调试或特殊任务才允许全量上下文。
+- `subagent_require_human_final`: 高审美/高风险任务是否必须人工最终确认。
+- `subagent_quality_profile`: 用户或父会话指定质量 profile。
+- `subagent_dispatch_topology`: `single|producer_critic|producer_critic_repairer|custom`。
+
+#### 哪些仍需要用户或父会话表达
+
+系统可以推断和提供默认值，但这些主观标准不能完全自动猜：
+- 对标哪个成功样本。
+- 最终交付给谁看。
+- 速度优先、成本优先还是质量优先。
+- 哪些内容属于“必须好看”的核心区域。
+- 哪些降级可以接受，哪些不能接受。
+- 是否允许外部下载、联网、调用真实模型或长时间运行。
+- 是否必须等用户亲自打开看过才算完成。
+
+如果用户没有说，父代理应该用模板先生成保守默认，并在关键不确定时只问一个短问题，而不是把派工细节甩给用户。
+
+### 后续开发步骤
+
+#### Phase 1: 契约字段和模板骨架
+
+目标：
+- 让每个 subagent 工单都能携带质量契约、角色和上下文 manifest。
+
+主要改动：
+- `SubAgentTask` 增加 `role`、`quality_contract`、`context_manifest`、`quality_profile`。
+- `execution_context.json` 增加质量契约和角色上下文。
+- 新增 `agent_py_agent/agent/subagents/quality.py`，定义 `QualityContract`、`ContextPack`、`ContextManifest`。
+- 增加默认 core context pack。
+
+验收：
+- 创建工单后能看到质量契约字段。
+- runner prompt 能显示“不能定义完成标准，只能提交待验收材料”。
+- 旧工单缺字段时兼容读取。
+
+#### Phase 2: 质量 profile 和自动任务分类
+
+目标：
+- 用户少说时，系统能自动选择模板。
+
+主要改动：
+- 新增 `agent_py_agent/quality_profiles/` 或 `agent_py_agent/config/quality_profiles/`。
+- 内置 profile：`generic_delivery`、`pdf_translation`、`code_patch`、`log_analysis_case`、`research_collection`。
+- dispatcher 根据用户目标、文件类型、关键词和风险等级选择 profile。
+- 支持命令/配置覆盖 profile。
+
+验收：
+- “翻译 PDF”自动命中 `pdf_translation`。
+- “修代码并测试”自动命中 `code_patch`。
+- “日志分析 case”自动命中 `log_analysis_case`。
+- 未命中时回落 `generic_delivery`，不崩溃。
+
+#### Phase 3: producer / critic 编排
+
+目标：
+- 让系统自动把高质量任务拆成施工和挑错，而不是让用户手写。
+
+主要改动：
+- dispatch 增加 role-aware planner。
+- producer 完成后，根据质量模式自动创建 critic 工单。
+- critic 只读 producer 产物和质量契约，默认不写生产文件。
+- critic 输出 `failures`、`evidence`、`sampling_coverage` 和 `recommended_repairs`。
+
+验收：
+- 高质量任务能自动生成 producer + critic。
+- critic 不允许把自己的 PASS 当最终交付。
+- producer 与 critic 的上下文包不同。
+
+#### Phase 4: 质量验收器
+
+目标：
+- acceptance 从“是否有 evidence”升级到“evidence 是否覆盖质量契约”。
+
+主要改动：
+- acceptance 检查 `must_check`、`sampling_plan`、`must_not_ship`。
+- 报告里显示：覆盖了哪些检查，缺哪些检查，哪些失败阻断交付。
+- 对文档/PDF 类 profile，默认要求前/中/后/appendix/图表/参考文献抽查证据。
+- 对代码类 profile，默认要求测试命令、diff 摘要、风险说明。
+
+验收：
+- 只有文件存在但没抽查证据时不能 VERIFIED。
+- critic 发现阻断问题时不能 VERIFIED。
+- 父代理可以明确 override，但必须写审计原因。
+
+#### Phase 5: 用户少说的入口体验
+
+目标：
+- 用户自然语言任务自动触发质量派工，除非配置关闭。
+
+主要改动：
+- 主代理创建子代理前先运行 `quality planner`。
+- `spawn-subagents` / orchestration tool 支持自动 quality contract。
+- `status` / `subagents` 显示质量模式、profile、critic 状态和阻断原因。
+- chat/gateway 中只在必要时问短问题，不暴露内部派工细节。
+
+验收：
+- 用户只说任务目标时，系统能生成合理质量契约。
+- 用户提到“对标某版本”时，该样本进入 reference_standard。
+- 用户不需要手写 producer/critic/reviewer。
+
+#### Phase 6: 回归样本和持续改进
+
+目标：
+- 把失败案例变成可复测资产，而不是只靠记忆。
+
+主要改动：
+- 质量失败写入 `validation/quality_cases/` 或 future eval store。
+- 增加 PDF/文档、代码、日志分析三类质量 fixture。
+- Live Lab 增加“高质量交付任务”case。
+- 失败样本可生成 profile 改进草稿，但不自动改 profile。
+
+验收：
+- 曾经的坏模式有回归测试。
+- profile 修改前后能比较质量检查结果。
+- 质量检查失败能变成明确 backlog，而不是聊天里的一句抱歉。
+
 ## 核心概念
 
 ### SubAgentTask
