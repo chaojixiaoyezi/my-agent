@@ -22,8 +22,10 @@ from agent_py_agent.agent.log_analysis.dispatch import (
     DispatchBudget,
     DispatchEngine,
     build_health_summary,
+    create_subagent_tasks_from_work_order_plan,
     plan_case_subagent_work_orders,
 )
+from agent_py_agent.agent.subagent import SubAgentManager
 
 
 def _case_fixture() -> dict:
@@ -273,6 +275,86 @@ def test_work_order_plan_without_evidence_refs_is_not_ready_and_reports_risk():
     assert all(not order["ready"] for order in payload["work_orders"])
     assert all(order["evidence_refs"] == [] for order in payload["work_orders"])
     assert all(order["issues"] == plan.issues for order in payload["work_orders"])
+
+
+def test_work_order_plan_apply_creates_analyst_and_reviewer_subagent_tasks(tmp_path):
+    subagents = SubAgentManager(tmp_path / "subagents")
+    plan = plan_case_subagent_work_orders(
+        _case_fixture(),
+        quality_contract={"acceptance_checks": ["Reviewer must enforce parent final gate."]},
+    )
+
+    result = create_subagent_tasks_from_work_order_plan(
+        subagents,
+        plan,
+        apply=True,
+        parent_id="parent-run",
+        root_id="root-run",
+        final_owner="parent",
+    )
+    tasks = [subagents.load(task_id) for task_id in result.task_ids]
+
+    assert result.apply
+    assert not result.dry_run
+    assert result.mode == "apply"
+    assert len(result.created) == 2
+    assert [task.role for task in tasks] == ["analyst", "reviewer"]
+    assert [task.agent_name for task in tasks] == ["log-analyst", "log-reviewer"]
+    assert tasks[0].allowed_tools == [
+        "security_query",
+        "security_hunt_ip",
+        "security_trace_case",
+        "evidence_read",
+    ]
+    assert tasks[1].allowed_tools == ["evidence_read"]
+    for task in tasks:
+        assert task.status == "PLANNING"
+        assert task.verification_status == "UNVERIFIED"
+        assert task.runner_attempts == 0
+        assert task.parent_id == "parent-run"
+        assert task.root_id == "root-run"
+        assert task.final_owner == "parent"
+        assert task.quality_contract.cannot_self_accept is True
+        assert task.quality_contract.parent_final_gate is True
+        assert "ev-waf-1" in task.quality_contract.evidence_required
+        assert task.context_packs[0]["case_id"] == "case-001"
+        assert task.context_packs[0]["evidence_refs"] == ["ev-waf-1", "ev-edr-1"]
+        assert task.context_packs[0]["cannot_self_accept"] is True
+        assert task.context_packs[0]["parent_final_gate"] == "parent_session_final_approval_required"
+
+
+def test_work_order_plan_dry_run_does_not_create_subagent_tasks(tmp_path):
+    subagents = SubAgentManager(tmp_path / "subagents")
+    plan = plan_case_subagent_work_orders(_case_fixture())
+
+    result = create_subagent_tasks_from_work_order_plan(subagents, plan)
+
+    assert result.dry_run
+    assert not result.apply
+    assert result.mode == "dry_run"
+    assert result.created == []
+    assert result.task_ids == []
+    assert list((tmp_path / "subagents").glob("*/task.json")) == []
+
+
+def test_work_order_plan_apply_without_evidence_refuses_and_creates_no_tasks(tmp_path):
+    subagents = SubAgentManager(tmp_path / "subagents")
+    plan = plan_case_subagent_work_orders(
+        {
+            "case_id": "case-no-evidence",
+            "title": "Suspicious signal without retained evidence",
+        }
+    )
+
+    result = create_subagent_tasks_from_work_order_plan(subagents, plan, apply=True)
+
+    assert not result.ready
+    assert result.apply
+    assert not result.dry_run
+    assert result.created == []
+    assert result.task_ids == []
+    assert "not ready" in result.issues[-1]
+    assert list((tmp_path / "subagents").glob("*/task.json")) == []
 
 
 def test_case_summary_is_compact_and_excludes_raw_events_and_transcript():

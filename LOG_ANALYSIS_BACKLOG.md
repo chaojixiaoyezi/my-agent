@@ -2628,3 +2628,16 @@ Next recommended worker slices:
 - Apply path: add an explicit manual-confirm command/API that creates real `SubAgentTask` records from these work-order plans.
 - Reviewer close loop: persist reviewer decisions and parent acceptance reports back to the case/replay artifacts.
 - Evidence reader tool: replace placeholder `evidence_read` with a bounded, audited evidence-ref reader before real analyst execution.
+
+## 2026-04-30 Current Landing Note: Work-Order Apply Path
+
+- Explicit apply API landed: `create_subagent_tasks_from_work_order_plan(..., apply=True)` turns ready LOG analyst/reviewer plans into real `SubAgentTask` records.
+- Safety behavior: default calls remain dry-run; not-ready plans and cases without evidence refs refuse creation.
+- Created task records keep the work in `PLANNING` / `UNVERIFIED`, include allowed tools, evidence refs, quality contract, context manifest, context packs, and parent final gate metadata, and never invoke a runner by themselves.
+- Documentation landing: `docs/modules/log-analysis/` now has discussion, progress, purpose, and structure docs for the module.
+
+Next recommended worker slices:
+- CLI/manual confirm: expose the apply path through a user-visible command or parent-session confirmation flow.
+- Evidence reader tool: replace placeholder `evidence_read` with a bounded, audited evidence-ref reader before real analyst execution.
+- Reviewer close loop: persist reviewer decisions and parent acceptance reports back to case/replay artifacts.
+- Richer fixtures: add replay cases that exercise analyst/reviewer handoff failures after evidence/report generation.
