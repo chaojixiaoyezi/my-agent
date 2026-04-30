@@ -423,9 +423,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scenario.add_argument(
         "--case",
-        choices=["happy", "verification", "gateway-restart", "structured-repair", "runner-retry", "all"],
+        choices=[
+            "happy",
+            "verification",
+            "gateway-restart",
+            "gateway-cross-day-resume",
+            "structured-repair",
+            "runner-retry",
+            "all",
+        ],
         default="happy",
-        help="场景类型：happy 跑真实全流程；verification 测验收防作弊；gateway-restart 测重启恢复；structured-repair 测坏结构化输出修复；runner-retry 测 runner 失败重试；all 连续运行",
+        help="场景类型：happy 跑真实全流程；verification 测验收防作弊；gateway-restart 测重启恢复；gateway-cross-day-resume 测真实 gateway 请求跨天恢复；structured-repair 测坏结构化输出修复；runner-retry 测 runner 失败重试；all 连续运行",
     )
     scenario.add_argument("--workspace", help="保存场景测试结果的父目录；不传则使用系统临时目录")
     scenario.add_argument("--count", type=int, default=2, help="本场景创建多少个子代理")

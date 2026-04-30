@@ -338,8 +338,12 @@ def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths, *, worker
             write_json_file_atomic(processing_path, request_payload)
         except OSError as exc:
             _report_gateway_side_effect_error("prepare_gateway_request_lease", request_id, exc)
-            continue
-        response = _handle_gateway_request(agent, processing_path, refresh_lease=True, worker_id=worker_id)
+            # The lease heartbeat is observability, not the user's work itself. Very deep Windows paths can make
+            # the atomic temp filename too long, so keep processing the request without lease refresh instead of
+            # stranding it in requests/processing.
+            response = _handle_gateway_request(agent, processing_path, refresh_lease=False, worker_id=worker_id)
+        else:
+            response = _handle_gateway_request(agent, processing_path, refresh_lease=True, worker_id=worker_id)
         response_path = gateway_response_path(paths, str(response.get("id", processing_path.stem)))
         if not response_path.exists():
             write_json_file(response_path, response)
