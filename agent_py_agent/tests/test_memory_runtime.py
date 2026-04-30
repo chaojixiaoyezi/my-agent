@@ -7,6 +7,7 @@ from pathlib import Path
 
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.memory_archive import CompressionSnapshot, RawMemoryEvent, append_raw_event, append_snapshot
 
 
 def _write_route(root: Path) -> None:
@@ -33,6 +34,55 @@ priority: 30
 
 def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _write_cross_day_handoff_archive(root: Path, run_id: str) -> None:
+    append_raw_event(
+        root,
+        RawMemoryEvent(
+            event_id="raw-runtime-cross-day",
+            session_id="session-runtime-cross-day",
+            request_id="request-runtime-cross-day",
+            run_id=run_id,
+            speaker="user",
+            target="assistant",
+            action="message",
+            status="ok",
+            task_id=run_id,
+            content_preview="跨天 handoff runtime：昨天的 worker 需要继续。",
+            source="run",
+            created_at="2026-04-29T23:50:00+00:00",
+        ),
+    )
+    append_snapshot(
+        root,
+        CompressionSnapshot(
+            snapshot_id="snapshot-runtime-cross-day",
+            session_id="session-runtime-cross-day",
+            compression_id="compression-runtime-cross-day",
+            turn_range={
+                "kind": "recovery_snapshot",
+                "source": "subagent_run",
+                "request_id": "request-runtime-cross-day",
+                "run_id": run_id,
+                "task_id": run_id,
+            },
+            user_intents=["跨天 handoff runtime：继续昨天 worker"],
+            assistant_actions=["已留下恢复锚点，下一轮应读任务事实源。"],
+            dispatch_events=[
+                {
+                    "source": "subagent_run",
+                    "request_id": "request-runtime-cross-day",
+                    "run_id": run_id,
+                    "task_id": run_id,
+                    "status": "awaiting_acceptance",
+                }
+            ],
+            task_refs=[run_id],
+            next_actions=["读取 STATUS.md 和 HANDOFF.md。"],
+            created_at="2026-04-30T00:10:00+00:00",
+        ),
+    )
 
 
 def test_run_injects_routed_memory_authority_context(tmp_path):
@@ -172,3 +222,38 @@ def test_auto_resume_context_can_be_disabled_per_run(tmp_path):
 
     assert result.memory_resume_context_injected is False
     assert "### Auto Recovery Context" not in result.prompt
+
+
+def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            memory_resume_auto_context_enabled=True,
+            memory_resume_auto_context_limit=5,
+        ),
+        tmp_path,
+    )
+    task = agent.subagents.create_run(
+        goal="跨天 handoff runtime worker 验收",
+        thought="验证 run() 能自动注入跨天恢复上下文。",
+        plan=["读 archive", "读 HANDOFF", "继续验收"],
+    )
+    Path(task.status_file).write_text(
+        "# STATUS\n\n- status: AWAITING_ACCEPTANCE\n- next: 继续验收\n",
+        encoding="utf-8",
+    )
+    Path(task.handoff_file).write_text(
+        "# HANDOFF\n\n## Next Step\n\n- 继续跨天 worker 验收。\n",
+        encoding="utf-8",
+    )
+    _write_cross_day_handoff_archive(tmp_path, task.id)
+
+    result = agent.run("继续跨天 handoff runtime", save=False)
+
+    assert result.memory_resume_context_injected is True
+    assert result.memory_resume_context_query in {"继续跨天 handoff runtime", "handoff", "runtime"}
+    assert result.memory_resume_context_matches >= 2
+    assert "### Auto Recovery Context" in result.prompt
+    assert task.id in result.prompt
+    assert "HANDOFF.md" in result.prompt
+    assert "latest_user_intent: 跨天 handoff runtime：继续昨天 worker" in result.prompt

@@ -100,6 +100,59 @@ def _write_archive_fixture(root: Path, *, run_id: str = "subagent-archive-demo")
     )
 
 
+def _write_cross_day_handoff_fixture(root: Path, *, run_id: str) -> None:
+    append_raw_event(
+        root,
+        RawMemoryEvent(
+            event_id="raw-cross-day-1",
+            session_id="session-cross-day",
+            request_id="request-cross-day",
+            run_id=run_id,
+            speaker="user",
+            target="assistant",
+            action="message",
+            status="ok",
+            task_id=run_id,
+            content_preview="跨天 handoff：昨天派了 memory worker，今天要继续验收。",
+            source="run",
+            created_at="2026-04-29T23:58:00+00:00",
+        ),
+    )
+    append_snapshot(
+        root,
+        CompressionSnapshot(
+            snapshot_id="snapshot-cross-day-1",
+            session_id="session-cross-day",
+            compression_id="compression-cross-day",
+            turn_range={
+                "kind": "recovery_snapshot",
+                "source": "subagent_run",
+                "request_id": "request-cross-day",
+                "run_id": run_id,
+                "task_id": run_id,
+            },
+            user_intents=["跨天 handoff：继续 memory worker 验收"],
+            assistant_actions=["已经写好 HANDOFF，等待父会话继续读事实源。"],
+            dispatch_events=[
+                {
+                    "source": "subagent_run",
+                    "request_id": "request-cross-day",
+                    "run_id": run_id,
+                    "task_id": run_id,
+                    "status": "awaiting_acceptance",
+                }
+            ],
+            next_actions=["读取 STATUS.md、WORK_LOG.md、HANDOFF.md 后继续。"],
+            task_refs=[run_id],
+            content_paths=[
+                f"subagents/{run_id}/STATUS.md",
+                f"subagents/{run_id}/HANDOFF.md",
+            ],
+            created_at="2026-04-30T00:05:00+00:00",
+        ),
+    )
+
+
 def test_memory_archive_list_json_reads_raw_layer(tmp_path, capsys):
     config_path = _write_config(tmp_path)
     root = _workspace(config_path)
@@ -226,3 +279,59 @@ def test_memory_resume_context_only_prints_recovery_block(tmp_path, capsys):
     assert "latest_user_intent: 继续 README 场景测试任务" in output
     assert "must_read" in output
     assert "MY-AGENT MEMORY RESUME" not in output
+
+
+def test_memory_resume_cross_day_handoff_uses_task_fact_sources(tmp_path, capsys):
+    config_path = _write_config(tmp_path)
+    root = _workspace(config_path)
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            subagent_workspace="subagents",
+            local_store_path="local_store/local.db",
+            local_store_files_dir="local_store/files",
+            local_store_events_path="local_store/events.jsonl",
+        ),
+        root,
+    )
+    task = agent.subagents.create_run(
+        goal="跨天 handoff memory worker 验收",
+        thought="验证跨天恢复能回到任务事实源。",
+        plan=["读取昨天归档", "读取今天 handoff", "继续验收"],
+    )
+    Path(task.status_file).write_text(
+        "# STATUS\n\n- status: AWAITING_ACCEPTANCE\n- next: 读取 HANDOFF.md 后继续验收\n",
+        encoding="utf-8",
+    )
+    Path(task.handoff_file).write_text(
+        "# HANDOFF\n\n## Current State\n\n- 跨天 handoff 已准备好。\n\n"
+        "## Next Step\n\n- 父会话读取 STATUS/WORK_LOG/HANDOFF 后继续验收。\n",
+        encoding="utf-8",
+    )
+    _write_cross_day_handoff_fixture(root, run_id=task.id)
+
+    code, payload = _run_cli_json(
+        capsys,
+        config_path,
+        "memory-resume",
+        "跨天 handoff",
+        "--since",
+        "2026-04-29",
+        "--until",
+        "2026-04-30",
+    )
+
+    assert code == 0
+    assert {item["id"] for item in payload["archive_matches"]} == {
+        "raw-cross-day-1",
+        "snapshot-cross-day-1",
+    }
+    assert payload["task_fact_sources"][0]["exists"] is True
+    assert payload["task_fact_sources"][0]["run_id"] == task.id
+    assert any(path.endswith("STATUS.md") for path in payload["resume"]["recommended_read_paths"])
+    assert any(path.endswith("HANDOFF.md") for path in payload["resume"]["recommended_read_paths"])
+    assert payload["brief"]["latest_user_intent"] == "跨天 handoff：继续 memory worker 验收"
+    assert payload["brief"]["related_ids"]["request_ids"] == ["request-cross-day"]
+    assert payload["brief"]["related_ids"]["run_ids"] == [task.id]
+    assert task.id in payload["brief"]["context_block"]
+    assert "HANDOFF.md" in payload["brief"]["context_block"]

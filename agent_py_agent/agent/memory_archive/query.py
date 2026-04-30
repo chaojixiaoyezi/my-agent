@@ -104,6 +104,8 @@ def filter_archive_records(
     query_text = query.strip().lower()
     since_ts = _created_at_sort(since or "", fallback=0.0) if since else None
     until_ts = _created_at_sort(until or "", fallback=0.0) if until else None
+    if until_ts is not None and _is_date_only(until or ""):
+        until_ts += 86399.999999
     matches: list[dict[str, Any]] = []
     for record in records:
         if any(str(record.get(field, "")) != value for field, value in filters.items()):
@@ -625,6 +627,30 @@ def _created_at_sort(value: str, *, fallback: float) -> float:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.timestamp()
+
+
+def _is_date_only(value: str) -> bool:
+    """LLM: detect `YYYY-MM-DD` filters that should mean the whole day.
+
+    新手说明:
+    用户写 `--until 2026-04-30` 时，通常想包含 4 月 30 日全天，而不是只到当天 00:00。
+    这个 helper 只识别最朴素的日期格式，让 `filter_archive_records()` 可以把 until 推到当天末尾。
+
+    参数说明:
+    `value` 是用户传入的 since/until 字符串。
+
+    返回说明:
+    形如 `YYYY-MM-DD` 时返回 True，否则 False。
+    """
+
+    text = str(value or "").strip()
+    if len(text) != 10:
+        return False
+    try:
+        datetime.fromisoformat(text)
+    except ValueError:
+        return False
+    return text[4] == "-" and text[7] == "-"
 
 
 def _list_value(value: object) -> list[object]:

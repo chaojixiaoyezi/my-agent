@@ -230,3 +230,17 @@
   - `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
   - `python -m pytest agent_py_agent\tests\test_memory_config.py agent_py_agent\tests\test_memory_routing.py agent_py_agent\tests\test_memory_routing_context.py agent_py_agent\tests\test_memory_runtime.py agent_py_agent\tests\test_memory_cli.py agent_py_agent\tests\test_memory_archive.py agent_py_agent\tests\test_memory_archive_runtime.py agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_local_store.py agent_py_agent\tests\test_doc_sync.py` -> `67 passed`.
   - `python -m pytest` -> `243 passed`.
+
+## 2026-04-30 / Memory Cross-Day Resume Handoff Evidence
+
+- Updated memory archive query behavior:
+  - `filter_archive_records()` now treats date-only `until` values as inclusive through the end of that date.
+  - Added `_is_date_only()` with teaching comments so the behavior is explicit.
+- Added cross-day resume fixture coverage:
+  - `test_memory_resume_cross_day_handoff_uses_task_fact_sources` creates a previous-day raw event, next-day hook snapshot, LocalStore-indexed subagent task, and real `STATUS.md` / `HANDOFF.md` fact files.
+  - `test_auto_resume_context_recovers_cross_day_handoff_task` verifies `SimpleAgent.run()` injects an Auto Recovery Context for a cross-day handoff prompt.
+- Verification:
+  - `python -m pytest agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_memory_runtime.py` -> `14 passed`.
+  - `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
+  - `python -m pytest agent_py_agent\tests\test_memory_config.py agent_py_agent\tests\test_memory_routing.py agent_py_agent\tests\test_memory_routing_context.py agent_py_agent\tests\test_memory_runtime.py agent_py_agent\tests\test_memory_cli.py agent_py_agent\tests\test_memory_archive.py agent_py_agent\tests\test_memory_archive_runtime.py agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_local_store.py agent_py_agent\tests\test_doc_sync.py` -> `69 passed`.
+  - `python -m pytest` -> `245 passed`.
