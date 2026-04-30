@@ -1,6 +1,12 @@
-from __future__ import annotations
+"""LLM: 本模块把一个日志分析 case 转成 analyst/reviewer 工单，并用 dry-run/apply 边界防止子代理绕过父级最终验收。
 
-"""Dry-run work-order planning for log-analysis subagents."""
+新手说明:
+这里不直接分析日志，也不直接跑子代理；它只负责准备“工作说明书”。
+先生成可以检查的计划，确认有 evidence_refs 等必要证据后，才允许调用外部 subagent creator 创建任务。
+这样拆开可以让系统在执行前看清目标、证据、工具权限、验收要求和风险。
+"""
+
+from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping, Protocol
@@ -21,13 +27,31 @@ PLAN_NOT_READY_ISSUE = "work-order plan is not ready; refusing to create subagen
 
 
 class SubAgentTaskCreator(Protocol):
+    """LLM: 这个 Protocol 说明本模块只依赖 create_run，不关心具体任务存储或调度实现。
+
+    新手说明:
+    Protocol 像一份“接口约定”：只要传进来的对象有 create_run 这个方法，就可以被这里使用。
+    这样测试时可以传假的对象，真实运行时可以传真正的子代理管理器，函数本身不用知道细节。
+    """
+
     def create_run(self, **kwargs: Any) -> Any:
+        """LLM: create_subagent_tasks_from_work_order_plan 通过它把已审核的工单落成 SubAgentTask。
+
+        新手说明:
+        输入是一组关键字参数，例如 goal、role、allowed_tools 和 context_packs。
+        输出通常是任务对象，至少要能读到 id；本模块不会启动任务，只保存创建结果。
+        """
         ...
 
 
 @dataclass
 class SubagentWorkOrder:
-    """Small, auditable work order prepared for a subagent role."""
+    """LLM: 它承载 analyst 或 reviewer 的目标、证据 refs、工具白名单、验收条件和父级最终验收门。
+
+    新手说明:
+    这像一张任务卡片，告诉某个角色“要做什么、能看哪些证据、能用哪些工具、完成后按什么标准检查”。
+    dry_run 表示当前只是计划，ready 表示证据和前置条件是否足够；cannot_self_accept 和 parent_final_gate 防止子代理自己宣布最终通过。
+    """
 
     role: str
     case_id: str
@@ -45,15 +69,22 @@ class SubagentWorkOrder:
     risks: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """LLM: 为 API 返回、测试断言和审计日志提供稳定的可序列化结构。
+
+        新手说明:
+        dataclass 对象读起来方便，但传给前端、日志或测试时字典更通用。
+        这个方法不改变工单内容，只把字段展开成 dict。
+        """
         return asdict(self)
 
 
 @dataclass
 class LogAnalysisWorkOrderPlan:
-    """Dry-run plan for analyst/reviewer handoff.
+    """LLM: 它聚合 case 的两张工单和整体 ready/issue/risk 状态，默认只是描述性 dry-run。
 
-    The plan is descriptive only: it does not create subagent runs, invoke a
-    runner, or mutate queue state.
+    新手说明:
+    一个 case 通常需要先分析、再复核，所以计划里会有 analyst 和 reviewer 两张工单。
+    计划本身不会创建任务、不会调用模型、不会改队列；它让父流程先看到“准备好了没有”和“风险在哪里”。
     """
 
     case_id: str
@@ -65,6 +96,12 @@ class LogAnalysisWorkOrderPlan:
     risks: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """LLM: 输出完整的计划快照，便于调用方检查 dry-run 结果或写入审计记录。
+
+        新手说明:
+        plan 里面套着 work_orders，直接 asdict 虽然也能展开，但这里显式调用每张工单的 to_dict。
+        这样以后工单序列化逻辑变复杂时，计划输出仍然走同一条路径。
+        """
         payload = asdict(self)
         payload["work_orders"] = [order.to_dict() for order in self.work_orders]
         return payload
@@ -72,7 +109,12 @@ class LogAnalysisWorkOrderPlan:
 
 @dataclass
 class SubagentWorkOrderCreationResult:
-    """Result from optionally materializing work orders into SubAgentTask records."""
+    """LLM: 它记录 apply/dry-run 模式、创建出的 task ids，以及拒绝创建时的 issue/risk。
+
+    新手说明:
+    创建任务是有开关的：apply=False 只返回“如果创建会怎样”，apply=True 才真的调用 create_run。
+    这个结果对象把是否 ready、创建了哪些任务、为什么没创建等信息集中返回，方便上层展示或测试。
+    """
 
     case_id: str
     ready: bool
@@ -85,16 +127,33 @@ class SubagentWorkOrderCreationResult:
     risks: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """LLM: 为调用方提供可序列化的 task_ids、created、issues 和 risks。
+
+        新手说明:
+        这一步不再创建任何东西，只是把结果包装成更容易打印、返回 JSON 或写测试断言的格式。
+        """
         return asdict(self)
 
 
 def _get(source: Any, key: str, default: Any = None) -> Any:
+    """LLM: 让规划函数能读取 dict case、dataclass case 或普通对象 case 的同名字段。
+
+    新手说明:
+    有些调用方传字典，有些传对象；字典用 source["key"] 或 get，对象用 source.key。
+    这个小函数把两种写法统一起来，找不到时返回 default，避免主流程里到处写判断。
+    """
     if isinstance(source, Mapping):
         return source.get(key, default)
     return getattr(source, key, default)
 
 
 def _case_id(case: Any, summary: Mapping[str, Any]) -> str:
+    """LLM: 它按优先级补齐工单必须携带的 case 标识，缺失时降级为 unknown-case。
+
+    新手说明:
+    工单必须知道自己属于哪个 case，但不同输入可能把编号放在 case_id、id 或 summary["case"] 里。
+    这里集中处理这些兼容路径，让后面的工单创建不用重复猜字段名。
+    """
     summary_case = summary.get("case", {})
     if not isinstance(summary_case, Mapping):
         summary_case = {}
@@ -102,6 +161,12 @@ def _case_id(case: Any, summary: Mapping[str, Any]) -> str:
 
 
 def _merge_unique(*values: Any) -> list[str]:
+    """LLM: 它把显式参数、case 字段和 summary 里的证据引用归一成同一份边界列表。
+
+    新手说明:
+    证据引用可能来自好几个地方，而且格式可能不完全一样。
+    这个函数会先调用 normalize_evidence_refs 做清洗，再按第一次出现的顺序去重，避免同一证据重复塞进工单。
+    """
     output: list[str] = []
     seen: set[str] = set()
     for value in values:
@@ -113,6 +178,12 @@ def _merge_unique(*values: Any) -> list[str]:
 
 
 def _acceptance_checks(quality_contract: Mapping[str, Any] | None) -> list[str]:
+    """LLM: 它确保所有工单至少包含默认质量门，并保留调用方补充的检查要求。
+
+    新手说明:
+    默认检查项像最低标准，quality_contract 里可以再加本次 case 特有的要求。
+    函数会过滤空字符串并去重，避免验收列表里出现无意义或重复的项目。
+    """
     checks = list(DEFAULT_ACCEPTANCE_CHECKS)
     if quality_contract:
         for item in quality_contract.get("acceptance_checks", []):
@@ -131,7 +202,13 @@ def plan_case_subagent_work_orders(
     mode: str = "manual",
     dry_run: bool = True,
 ) -> LogAnalysisWorkOrderPlan:
-    """Build analyst and reviewer work orders without executing them."""
+    """LLM: 这是 LOG dispatch 的主要规划入口，生成证据受限、不可自验收、受父级最终门控制的两阶段工单。
+
+    新手说明:
+    输入是一个 case，以及可选的证据 refs、路由摘要和质量契约；输出是 LogAnalysisWorkOrderPlan。
+    如果没有 evidence_refs，计划会标记为 not ready 并写入 issue/risk，因为没有证据就派发分析会产生没有依据的结论。
+    dry_run 参数会写进工单，提醒调用方当前只是规划；真正创建任务要走 create_subagent_tasks_from_work_order_plan。
+    """
 
     summary_obj = summarize_case(case)
     summary = summary_obj.to_dict()
@@ -147,6 +224,7 @@ def plan_case_subagent_work_orders(
         issues.append(NO_EVIDENCE_ISSUE)
         risks.append("dispatching without evidence_refs would invite unsupported analysis")
 
+    # context_pack 后续会交给子代理；这里只放摘要和引用，避免把原始日志或 runner 结果整包塞进去。
     common_context = {
         "case_summary": render_case_summary(
             {
@@ -212,6 +290,12 @@ build_log_analysis_work_orders = plan_case_subagent_work_orders
 
 
 def _work_order_quality_contract(order: SubagentWorkOrder) -> dict[str, Any]:
+    """LLM: 它继承上游 quality_contract，并强制补上 evidence_required、cannot_self_accept 和 parent_final_gate。
+
+    新手说明:
+    子代理需要知道“必须看哪些证据、按哪些标准检查、谁有最终决定权”。
+    这里把工单自身的证据和验收项并入契约，同时固定最终验收属于父级，避免 analyst/reviewer 自己给自己盖章。
+    """
     source = order.context.get("quality_contract")
     inherited = dict(source) if isinstance(source, Mapping) else {}
     evidence_required = _merge_unique(inherited.get("evidence_required"), order.evidence_refs)
@@ -233,6 +317,12 @@ def _work_order_quality_contract(order: SubagentWorkOrder) -> dict[str, Any]:
 
 
 def _work_order_context_pack(order: SubagentWorkOrder) -> dict[str, Any]:
+    """LLM: 它把工单压缩成 role/case/evidence/route/quality 等安全字段，避免泄露不该交给子代理的原始上下文。
+
+    新手说明:
+    子代理不需要拿到整个 case 的所有数据，只需要完成任务所需的摘要、证据引用和质量要求。
+    这样上下文更小，也更容易控制边界：它知道可以依据哪些 evidence_refs，但不能凭空扩展范围。
+    """
     return {
         "name": "log-analysis-work-order",
         "case_id": order.case_id,
@@ -250,6 +340,12 @@ def _work_order_context_pack(order: SubagentWorkOrder) -> dict[str, Any]:
 
 
 def _work_order_plan_steps(order: SubagentWorkOrder) -> list[str]:
+    """LLM: 它把工单职责转成 SubAgentTask.plan，并为 reviewer 额外加入证据边界复核步骤。
+
+    新手说明:
+    任务系统通常需要一个步骤列表，告诉子代理先看上下文、再按工具和证据边界产出结果。
+    reviewer 的风险点不同，它要检查 analyst 报告有没有越过证据，所以这里给 reviewer 多加一步。
+    """
     steps = [
         f"Read the focused context pack for case {order.case_id}.",
         "Use only allowed tools and retained evidence_refs.",
@@ -270,10 +366,12 @@ def create_subagent_tasks_from_work_order_plan(
     root_id: str = "",
     final_owner: str = "parent",
 ) -> SubagentWorkOrderCreationResult:
-    """Create SubAgentTask records from a log-analysis work-order plan.
+    """LLM: 这是唯一会调用 subagents.create_run 的入口，但只有 apply=True 且 plan.ready 时才会创建任务。
 
-    This is a manual materialization step only. It never invokes a runner,
-    model, or analysis loop.
+    新手说明:
+    输入是前一步生成的 plan 和一个会 create_run 的 subagents 对象；输出是创建结果。
+    apply=False 时只返回 dry-run 结果，不会创建任务；plan 缺证据或 not ready 时也会拒绝创建，并记录 issue。
+    即使创建成功，它也只是保存 SubAgentTask 记录，不启动 runner、模型或分析循环；最终验收仍由父级负责。
     """
 
     mode = "apply" if apply else "dry_run"
