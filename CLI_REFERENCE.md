@@ -830,6 +830,7 @@ my-agent scenario-test --workspace .\tmp-scenarios --count 2 --max-runners 2
 my-agent scenario-test --case verification
 my-agent scenario-test --case gateway-restart
 my-agent scenario-test --case gateway-cross-day-resume
+my-agent scenario-test --case gateway-multi-worker
 my-agent scenario-test --case gateway-stale-lease
 my-agent scenario-test --case parent-subagent-cross-day-resume
 my-agent scenario-test --case structured-repair
@@ -857,11 +858,12 @@ my-agent scenario-test --dry-run
 | `verification` | 构造“模型声称写了 artifact 但文件不存在”的伪完成记录，确认验收必须拒绝 | 否 |
 | `gateway-restart` | 模拟旧 gateway 崩溃时遗留的 `processing` 请求，确认重启恢复会退回 `pending` | 否 |
 | `gateway-cross-day-resume` | 启动真实后台 gateway，投递一次 ask，再模拟跨天线索，确认 `memory-resume` 能读回 request/response JSON | 取决于配置；echo 后端不调用 |
+| `gateway-multi-worker` | 启动两个 request worker 并发抢占多条 pending 请求，确认每条只完成一次、不重复归档 | 否 |
 | `gateway-stale-lease` | 模拟 worker 中断留下的旧 `processing` lease，确认恢复会重排并由 worker 完成请求 | 否 |
 | `parent-subagent-cross-day-resume` | 跑一次真实 subagent runner 工具回合，模拟跨天线索，确认 `memory-resume` 能回到 task fact sources | 否 |
 | `structured-repair` | 模拟 runner 输出损坏的 `[SUBAGENT_RESULT]`，确认修复回合补齐 JSON 并通过验收 | 否 |
 | `runner-retry` | 模拟 runner 第一次模型调用失败，确认下一轮 dispatch 会有限重试并完成验收 | 否 |
-| `all` | 依次跑 `verification`、`gateway-restart`、`gateway-cross-day-resume`、`gateway-stale-lease`、`parent-subagent-cross-day-resume`、`structured-repair`、`runner-retry`、`happy` | `happy` 会调用 |
+| `all` | 依次跑 `verification`、`gateway-restart`、`gateway-cross-day-resume`、`gateway-multi-worker`、`gateway-stale-lease`、`parent-subagent-cross-day-resume`、`structured-repair`、`runner-retry`、`happy` | `happy` 会调用 |
 
 | 参数 | 说明 |
 | --- | --- |

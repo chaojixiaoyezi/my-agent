@@ -73,6 +73,32 @@ def test_scenario_gateway_stale_lease_requeues_and_completes(tmp_path, capsys):
     assert "SCENARIO_PASS" in output
 
 
+def test_scenario_gateway_multi_worker_processes_each_request_once(tmp_path, capsys):
+    """The scenario case should prove concurrent gateway workers do not duplicate queue claims."""
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--config",
+            str(_write_echo_config(tmp_path)),
+            "scenario-test",
+            "--case",
+            "gateway-multi-worker",
+            "--workspace",
+            str(tmp_path / "scenario-runs"),
+            "--count",
+            "4",
+        ]
+    )
+
+    code = args.func(args)
+    output = capsys.readouterr().out
+
+    assert code == 0, output
+    assert "case=gateway-multi-worker" in output
+    assert "SCENARIO_PASS" in output
+
+
 def test_scenario_parent_subagent_cross_day_resume_uses_runner_task_facts(tmp_path, capsys):
     """The scenario case should recover a real subagent runner result from task fact sources."""
 

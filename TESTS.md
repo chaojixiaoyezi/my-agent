@@ -7,7 +7,7 @@
 - 纯解析、纯函数和局部单元测试可以作为定位辅助，但收口时必须补跑真实 API 路径。
 - `agent_py_agent/tests/run_tests.py` 是当前标准完整冒烟入口，会按当前配置请求真实模型 API，使用临时配置隔离 memory/subagent 数据，并自动发现运行 `agent_py_agent/tests/test_*.py` 里的所有 `test_` 函数。
 - `my-agent scenario-test` 是当前推荐的可观察全流程入口：它会新建临时 fixture，走 gateway ask、主代理派工、真实 runner、父代理验收，并把所有状态关进 `workspace_root`。
-- `my-agent scenario-test --case verification`、`--case gateway-restart`、`--case gateway-cross-day-resume`、`--case gateway-stale-lease`、`--case parent-subagent-cross-day-resume`、`--case structured-repair` 和 `--case runner-retry` 是坏天气/恢复场景入口，分别覆盖验收防作弊、gateway processing 请求恢复、gateway 跨天恢复、stale lease 重排恢复、parent/subagent runner 跨天恢复、结构化输出损坏修复和 runner 临时失败重试。
+- `my-agent scenario-test --case verification`、`--case gateway-restart`、`--case gateway-cross-day-resume`、`--case gateway-multi-worker`、`--case gateway-stale-lease`、`--case parent-subagent-cross-day-resume`、`--case structured-repair` 和 `--case runner-retry` 是坏天气/恢复场景入口，分别覆盖验收防作弊、gateway processing 请求恢复、gateway 跨天恢复、多 worker 并发抢占、stale lease 重排恢复、parent/subagent runner 跨天恢复、结构化输出损坏修复和 runner 临时失败重试。
 - 运行前确认 `AGENT_API_KEY`、`api_base`、`model_name` 指向本轮要验收的真实后端。
 
 ## 推荐快速检查
