@@ -397,7 +397,8 @@ Accepted evidence:
 Remaining:
 - [x] Add parent/subagent runner full recovery drill.
 - [x] Add gateway stale lease recovery scenario.
-- [ ] Add multi-request-worker and delayed-response gateway scenarios.
+- [x] Add multi-request-worker gateway scenario.
+- [ ] Add delayed-response gateway scenario.
 
 ## 2026-05-01 / Parent Subagent Runner Cross-Day Resume Acceptance
 
@@ -434,4 +435,22 @@ Accepted evidence:
 - [x] Gateway/scenario/doc focused tests passed: `python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py agent_py_agent/tests/test_cli_reference.py agent_py_agent/tests/test_doc_sync.py -q` -> `9 passed`.
 - [x] Sync gate passed: `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`.
 - [x] Full regression passed: `python3 -m pytest -q` -> `252 passed`.
+- [x] Whitespace check passed: `git diff --check` -> passed.
+
+## 2026-05-01 / Gateway Multi-Worker Scenario Acceptance
+
+Status:
+- [x] `scenario-test --case gateway-multi-worker` landed.
+- [x] The scenario enqueues multiple pending requests, starts two concurrent workers with independent `SimpleAgent` instances, and verifies every request has one response and one done archive.
+- [x] CLI reference and full smoke entry include the new scenario case.
+
+Problems solved:
+- [x] Gateway worker pool behavior is now covered by a visible scenario, not only by configuration fields.
+- [x] Concurrent pending-claim behavior is checked through filesystem rename semantics, including no duplicate responses and no leftover pending/processing files.
+
+Accepted evidence:
+- [x] Focused scenario tests passed: `python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py -q` -> `4 passed`.
+- [x] Gateway/scenario/doc focused tests passed: `python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py agent_py_agent/tests/test_cli_reference.py agent_py_agent/tests/test_doc_sync.py -q` -> `10 passed`.
+- [x] Sync gate passed: `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`.
+- [x] Full regression passed: `python3 -m pytest -q` -> `253 passed`.
 - [x] Whitespace check passed: `git diff --check` -> passed.

@@ -40,6 +40,22 @@ agent_py_agent/cli/
 6. status/local-doctor/timeline 从 gateway state、heartbeat、history 和 LocalStore 读取可观察状态。
 7. `memory-resume` 或自动恢复命中 gateway_request 时，会把 request/response JSON 作为事实源推荐阅读。
 
+### 多 worker 抢占
+
+gateway request worker pool 通过文件 rename 抢占 pending 请求，而不是靠共享内存锁：
+
+```text
+worker-0 sees pending/a.json
+worker-1 sees pending/a.json
+
+one worker wins:
+  pending/a.json -> processing/a.json
+
+the other worker gets an OSError and skips that file
+```
+
+每个 worker 有独立 `SimpleAgent` 实例。`scenario-test --case gateway-multi-worker` 会同时启动两个 worker，投递多条 pending 请求，并验证每条请求只产生一个 response 和一个 done archive。
+
 ### processing lease 降级
 
 worker 抢占 pending 后会尝试写 processing lease，方便 local-doctor 判断请求是否卡住。这个 lease 是观测层，不是任务本体：
@@ -102,7 +118,7 @@ memory-resume 或 run(auto resume)
 4. 再看 `gateway_parts/runtime.py`，理解 worker 如何处理请求并写响应。
 5. 再看 `gateway_parts/recovery.py`，理解程序崩溃后怎么恢复。
 6. 再看 `agent_py_agent/tests/test_memory_archive_cli.py::test_memory_resume_cross_day_gateway_request_uses_response_fact_source`，理解 gateway 请求如何进入跨天恢复。
-7. 再看 `agent_py_agent/tests/test_scenario_gateway_resume.py`，理解真实后台 gateway 进程和 stale lease 如何被场景测试启动、投递、恢复和验收。
+7. 再看 `agent_py_agent/tests/test_scenario_gateway_resume.py`，理解真实后台 gateway 进程、多 worker 和 stale lease 如何被场景测试启动、投递、恢复和验收。
 8. 最后看 `agent_py_agent/tests/test_gateway_client.py`，理解怎样证明协议边界和失败降级没坏。
 
 ## 当前第一版索引 / 待补齐

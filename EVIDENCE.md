@@ -303,3 +303,20 @@
   - `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`.
   - `git diff --check` -> passed.
   - `python3 -m pytest -q` -> `252 passed`.
+
+## 2026-05-01 / Gateway Multi-Worker Scenario Evidence
+
+- Added gateway bad-weather scenario coverage:
+  - `scenario-test --case gateway-multi-worker` enqueues multiple pending requests.
+  - The scenario starts two concurrent worker threads, each with its own `SimpleAgent` instance and a short artificial run delay to force overlapping claims.
+  - Final assertions verify every request has exactly one response, exactly one done archive, no leftover pending/processing/failed files, and both workers processed at least one request.
+- Updated user-visible references:
+  - CLI parser and `CLI_REFERENCE.md` list the new scenario case.
+  - `README.md`, `TESTS.md`, gateway module docs, and `agent_py_agent/tests/run_tests.py` include the new scenario.
+- Verification:
+  - `python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py -q` -> `4 passed`.
+  - `python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py agent_py_agent/tests/test_cli_reference.py agent_py_agent/tests/test_doc_sync.py -q` -> `10 passed`.
+  - `python3 -m py_compile agent_py_agent/cli/scenario_cases.py agent_py_agent/cli/scenario.py agent_py_agent/cli/parser.py` -> passed.
+  - `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`.
+  - `git diff --check` -> passed.
+  - `python3 -m pytest -q` -> `253 passed`.
