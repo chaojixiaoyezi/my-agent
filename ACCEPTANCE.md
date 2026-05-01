@@ -395,5 +395,24 @@ Accepted evidence:
 - [x] Real gateway scenario focused tests passed: `python -m pytest agent_py_agent\tests\test_gateway_client.py agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_scenario_gateway_resume.py agent_py_agent\tests\test_cli_reference.py agent_py_agent\tests\test_doc_sync.py` -> `16 passed`.
 
 Remaining:
-- [ ] Add parent/subagent runner full recovery drill.
+- [x] Add parent/subagent runner full recovery drill.
 - [ ] Add multi-request-worker and delayed-response gateway scenarios.
+
+## 2026-05-01 / Parent Subagent Runner Cross-Day Resume Acceptance
+
+Status:
+- [x] `scenario-test --case parent-subagent-cross-day-resume` landed.
+- [x] The scenario creates a real `SubAgentTask`, runs a real runner/tool loop with a deterministic backend, stops before parent acceptance, simulates cross-day archive clues, and verifies `memory-resume` returns task fact sources.
+- [x] CLI reference and full smoke entry include the new scenario case.
+
+Problems solved:
+- [x] Parent/subagent recovery is no longer covered only by hand-written archive fixtures.
+- [x] Runner result recovery now proves the path from runner writeback -> archive clue -> new parent session -> `memory-resume` -> task fact-source reads.
+
+Accepted evidence:
+- [x] Focused scenario tests passed: `python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py -q` -> `2 passed`.
+- [x] CLI reference test passed: `python3 -m pytest agent_py_agent/tests/test_cli_reference.py -q` -> `1 passed`.
+- [x] Focused combined tests passed: `python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py agent_py_agent/tests/test_cli_reference.py agent_py_agent/tests/test_doc_sync.py -q` -> `8 passed`.
+- [x] Sync gate passed: `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`.
+- [x] Full regression passed: `python3 -m pytest -q` -> `251 passed`.
+- [x] Whitespace check passed: `git diff --check` -> passed.

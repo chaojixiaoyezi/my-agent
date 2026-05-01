@@ -16,6 +16,7 @@ from .common import make_capability_router
 from .scenario_cases import (
     run_scenario_gateway_cross_day_resume_case,
     run_scenario_gateway_restart_case,
+    run_scenario_parent_subagent_cross_day_resume_case,
     run_scenario_runner_retry_case,
     run_scenario_structured_repair_case,
     run_scenario_verification_case,
@@ -63,6 +64,8 @@ def cmd_scenario_test(args) -> int:
         return run_scenario_gateway_restart_case(args)
     if args.case == "gateway-cross-day-resume":
         return run_scenario_gateway_cross_day_resume_case(args)
+    if args.case == "parent-subagent-cross-day-resume":
+        return run_scenario_parent_subagent_cross_day_resume_case(args)
     if args.case == "structured-repair":
         return run_scenario_structured_repair_case(args)
     if args.case == "runner-retry":
@@ -186,7 +189,16 @@ def cmd_scenario_test(args) -> int:
 def run_scenario_suite(args) -> int:
     """连续运行一组隔离场景。"""
 
-    cases = ["verification", "gateway-restart", "gateway-cross-day-resume", "structured-repair", "runner-retry", "happy"]
+    # Keep all cheap deterministic recovery cases before the happy path, which may call a real model.
+    cases = [
+        "verification",
+        "gateway-restart",
+        "gateway-cross-day-resume",
+        "parent-subagent-cross-day-resume",
+        "structured-repair",
+        "runner-retry",
+        "happy",
+    ]
     results: list[dict[str, object]] = []
     for case in cases:
         print(f"\n######## SCENARIO CASE: {case} ########")

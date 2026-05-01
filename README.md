@@ -380,6 +380,12 @@ my-agent scenario-test --case verification
 my-agent scenario-test --case gateway-restart
 # 验证 gateway 崩溃遗留 processing 请求能恢复；不调用真实模型。
 
+my-agent scenario-test --case gateway-cross-day-resume
+# 验证真实后台 gateway 请求跨天恢复到 request/response JSON；echo 后端不调用真实模型。
+
+my-agent scenario-test --case parent-subagent-cross-day-resume
+# 验证真实 subagent runner 写回后跨天恢复到任务事实源；使用测试后端，不调用真实模型。
+
 my-agent scenario-test --case structured-repair
 # 验证坏 SUBAGENT_RESULT 能触发修复回合；使用测试后端，不调用真实模型。
 
