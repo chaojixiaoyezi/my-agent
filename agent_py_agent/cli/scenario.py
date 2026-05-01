@@ -15,6 +15,7 @@ from ..agent.capability_config import load_capability_config
 from .common import make_capability_router
 from .scenario_cases import (
     run_scenario_gateway_cross_day_resume_case,
+    run_scenario_gateway_delayed_response_case,
     run_scenario_gateway_multi_worker_case,
     run_scenario_gateway_restart_case,
     run_scenario_gateway_stale_lease_case,
@@ -66,6 +67,8 @@ def cmd_scenario_test(args) -> int:
         return run_scenario_gateway_restart_case(args)
     if args.case == "gateway-cross-day-resume":
         return run_scenario_gateway_cross_day_resume_case(args)
+    if args.case == "gateway-delayed-response":
+        return run_scenario_gateway_delayed_response_case(args)
     if args.case == "gateway-multi-worker":
         return run_scenario_gateway_multi_worker_case(args)
     if args.case == "gateway-stale-lease":
@@ -200,6 +203,7 @@ def run_scenario_suite(args) -> int:
         "verification",
         "gateway-restart",
         "gateway-cross-day-resume",
+        "gateway-delayed-response",
         "gateway-multi-worker",
         "gateway-stale-lease",
         "parent-subagent-cross-day-resume",

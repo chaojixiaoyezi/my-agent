@@ -320,3 +320,20 @@
   - `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`.
   - `git diff --check` -> passed.
   - `python3 -m pytest -q` -> `253 passed`.
+
+## 2026-05-01 / Gateway Delayed Response Scenario Evidence
+
+- Added gateway bad-weather scenario coverage:
+  - `scenario-test --case gateway-delayed-response` writes a pending request and a pre-existing `responses/<id>.json`.
+  - The scenario replaces `agent.run()` with a failure stub and verifies `_process_gateway_requests()` does not call it when the response already exists.
+  - Final assertions verify the pending request is archived to done, response content stays unchanged, and no pending/processing/failed files remain.
+- Updated user-visible references:
+  - CLI parser and `CLI_REFERENCE.md` list the new scenario case.
+  - `README.md`, `TESTS.md`, gateway module docs, and `agent_py_agent/tests/run_tests.py` include the new scenario.
+- Verification:
+  - `python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py -q` -> `5 passed`.
+  - `python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py agent_py_agent/tests/test_cli_reference.py agent_py_agent/tests/test_doc_sync.py -q` -> `11 passed`.
+  - `python3 -m py_compile agent_py_agent/cli/scenario_cases.py agent_py_agent/cli/scenario.py agent_py_agent/cli/parser.py` -> passed.
+  - `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`.
+  - `git diff --check` -> passed.
+  - `python3 -m pytest -q` -> `254 passed`.

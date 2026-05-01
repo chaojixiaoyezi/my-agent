@@ -99,6 +99,30 @@ def test_scenario_gateway_multi_worker_processes_each_request_once(tmp_path, cap
     assert "SCENARIO_PASS" in output
 
 
+def test_scenario_gateway_delayed_response_archives_duplicate_without_rerun(tmp_path, capsys):
+    """The scenario case should archive a duplicate request when its response already exists."""
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--config",
+            str(_write_echo_config(tmp_path)),
+            "scenario-test",
+            "--case",
+            "gateway-delayed-response",
+            "--workspace",
+            str(tmp_path / "scenario-runs"),
+        ]
+    )
+
+    code = args.func(args)
+    output = capsys.readouterr().out
+
+    assert code == 0, output
+    assert "case=gateway-delayed-response" in output
+    assert "SCENARIO_PASS" in output
+
+
 def test_scenario_parent_subagent_cross_day_resume_uses_runner_task_facts(tmp_path, capsys):
     """The scenario case should recover a real subagent runner result from task fact sources."""
 

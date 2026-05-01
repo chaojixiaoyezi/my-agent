@@ -12,6 +12,7 @@
 - gateway request worker 在 processing lease 写入失败时会降级继续处理请求，避免 Windows 深路径或临时文件失败把请求卡死在 processing。
 - `scenario-test --case gateway-stale-lease` 已能模拟 worker 中断留下旧 processing lease，验证恢复会重排到 pending，并由活跃 worker 完成请求。
 - `scenario-test --case gateway-multi-worker` 已能启动两个并发 request worker，验证多条 pending 请求只会各自完成一次，不重复响应或归档。
+- `scenario-test --case gateway-delayed-response` 已能模拟 response 先到、pending 请求副本迟到，验证 worker 不重复调用模型，只把请求归档到 done。
 
 ## 解决的问题
 
@@ -24,11 +25,12 @@
 - lease 降级解决了“监控心跳文件写失败会放大成用户请求失败”的问题；lease 是可观测性，不应比请求本身更重要。
 - stale lease 场景解决了“只在单元测试里证明旧 processing 可恢复，缺少可观察 scenario 入口”的问题。
 - multi-worker 场景解决了“配置已有 worker pool，但缺少并发抢占不重复的可观察验证”的问题。
+- delayed-response 场景解决了“响应已经落盘但队列里还有迟到请求副本时，可能重复执行模型”的回归风险。
 
 ## 下一步
 
 - 给 gateway 核心函数补齐和 LOG work-order 同级别的 `LLM:` / `新手说明:` / 参数说明。
-- 把更多 gateway 场景加入隔离测试：取消/优先级、迟到响应、processing 中 stop/restart。
+- 把更多 gateway 场景加入隔离测试：取消/优先级、processing 中 stop/restart。
 - 稳定默认入口体验，让普通 `my-agent` 更自然地确保 gateway 存活并进入 gateway chat。
 - 如果 gateway 协议路径或数据流变化，同步更新本文件和 `04-structure.md`。
 
@@ -53,6 +55,9 @@
 - gateway multi-worker scenario focused 验收：`python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py -q` -> `4 passed`。
 - gateway multi-worker focused 组合验收：`python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py agent_py_agent/tests/test_cli_reference.py agent_py_agent/tests/test_doc_sync.py -q` -> `10 passed`。
 - gateway multi-worker 全量回归：`python3 -m pytest -q` -> `253 passed`。
+- gateway delayed-response scenario focused 验收：`python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py -q` -> `5 passed`。
+- gateway delayed-response focused 组合验收：`python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py agent_py_agent/tests/test_cli_reference.py agent_py_agent/tests/test_doc_sync.py -q` -> `11 passed`。
+- gateway delayed-response 全量回归：`python3 -m pytest -q` -> `254 passed`。
 
 ## 未跑测试
 

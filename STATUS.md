@@ -14,6 +14,7 @@
 
 - `memory-resume` 已能把 gateway request/response JSON 当成恢复事实源。
 - `scenario-test --case gateway-cross-day-resume` 已能启动真实后台 gateway、投递真实 `gateway ask`、模拟跨天线索，并验证恢复能回到 request/response JSON。
+- `scenario-test --case gateway-delayed-response` 已能验证 response 已落盘时，迟到 pending 请求副本只归档、不重复调用模型。
 - `scenario-test --case gateway-multi-worker` 已能用两个 request worker 并发处理多条 pending 请求，验证不重复响应或归档。
 - `scenario-test --case gateway-stale-lease` 已能模拟 worker 中断留下旧 processing lease，验证恢复会重排并完成请求。
 - `scenario-test --case parent-subagent-cross-day-resume` 已能创建真实子代理任务、执行 runner 工具回合、模拟跨天线索，并验证恢复能回到任务事实源。
@@ -22,7 +23,7 @@
 
 最新验收：
 
-- `python3 -m pytest -q` -> `253 passed`
+- `python3 -m pytest -q` -> `254 passed`
 - `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`
 - `git diff --check` -> passed
 - focused gateway/memory/doc tests -> `16 passed`
@@ -30,12 +31,13 @@
 - parent/subagent runner recovery focused tests -> `2 passed`
 - gateway stale lease focused tests -> `3 passed`
 - gateway multi-worker focused tests -> `4 passed`
-- gateway/scenario/doc focused tests -> `10 passed`
+- gateway delayed-response focused tests -> `5 passed`
+- gateway/scenario/doc focused tests -> `11 passed`
 - CLI reference focused test -> `1 passed`
 
 下一版优先级：
 
-1. 补 gateway 坏天气场景：迟到 response、processing 中 stop/restart。
+1. 补 gateway 坏天气场景：processing 中 stop/restart。
 2. 把 subagent workflow router/compiler/parent gate 接到真实 task creation，默认 dry-run 或 manual-confirm。
 3. 推进 LOG work-order 到真实 SubAgentTask 执行桥，并补 bounded evidence reader。
 4. 用真实外部模型补跑 parent/subagent runner 跨天恢复冒烟。
