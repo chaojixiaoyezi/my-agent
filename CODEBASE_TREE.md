@@ -47,7 +47,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- gateway_client.py                  # gateway ask/result/default 客户端命令
 |   |   |-- adapter.py                         # 文件 adapter：外部 inbox/outbox JSON 与 gateway ask 转换
 |   |   |-- scenario.py                        # scenario-test 命令入口和 happy path
-|   |   |-- scenario_cases.py                  # verification/gateway/recovery/structured-repair/runner-retry 专项场景
+|   |   |-- scenario_cases.py                  # verification/gateway 坏天气/recovery/structured-repair/runner-retry 专项场景
 |   |   |-- scenario_utils.py                  # scenario fixture、隔离配置、子进程和摘要工具
 |   |   |-- chat.py                            # 交互 chat 队列和斜杠命令
 |   |   |-- logs.py                            # 日志分析 logs status/ingest/query/hunt/trace CLI 命令

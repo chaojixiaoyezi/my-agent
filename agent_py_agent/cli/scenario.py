@@ -16,6 +16,7 @@ from .common import make_capability_router
 from .scenario_cases import (
     run_scenario_gateway_cross_day_resume_case,
     run_scenario_gateway_restart_case,
+    run_scenario_gateway_stale_lease_case,
     run_scenario_parent_subagent_cross_day_resume_case,
     run_scenario_runner_retry_case,
     run_scenario_structured_repair_case,
@@ -64,6 +65,8 @@ def cmd_scenario_test(args) -> int:
         return run_scenario_gateway_restart_case(args)
     if args.case == "gateway-cross-day-resume":
         return run_scenario_gateway_cross_day_resume_case(args)
+    if args.case == "gateway-stale-lease":
+        return run_scenario_gateway_stale_lease_case(args)
     if args.case == "parent-subagent-cross-day-resume":
         return run_scenario_parent_subagent_cross_day_resume_case(args)
     if args.case == "structured-repair":
@@ -194,6 +197,7 @@ def run_scenario_suite(args) -> int:
         "verification",
         "gateway-restart",
         "gateway-cross-day-resume",
+        "gateway-stale-lease",
         "parent-subagent-cross-day-resume",
         "structured-repair",
         "runner-retry",

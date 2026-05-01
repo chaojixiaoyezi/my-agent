@@ -396,6 +396,7 @@ Accepted evidence:
 
 Remaining:
 - [x] Add parent/subagent runner full recovery drill.
+- [x] Add gateway stale lease recovery scenario.
 - [ ] Add multi-request-worker and delayed-response gateway scenarios.
 
 ## 2026-05-01 / Parent Subagent Runner Cross-Day Resume Acceptance
@@ -415,4 +416,22 @@ Accepted evidence:
 - [x] Focused combined tests passed: `python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py agent_py_agent/tests/test_cli_reference.py agent_py_agent/tests/test_doc_sync.py -q` -> `8 passed`.
 - [x] Sync gate passed: `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`.
 - [x] Full regression passed: `python3 -m pytest -q` -> `251 passed`.
+- [x] Whitespace check passed: `git diff --check` -> passed.
+
+## 2026-05-01 / Gateway Stale Lease Scenario Acceptance
+
+Status:
+- [x] `scenario-test --case gateway-stale-lease` landed.
+- [x] The scenario writes an old `requests/processing/<id>.json` lease, verifies `gateway_stale_processing()` can see it, runs recovery back to pending, then lets a live worker complete the request.
+- [x] CLI reference and full smoke entry include the new scenario case.
+
+Problems solved:
+- [x] Stale processing recovery is now visible through scenario-test, not only lower-level unit tests.
+- [x] The gateway bad-weather plan now has one concrete scenario for interrupted workers and stale lease recovery.
+
+Accepted evidence:
+- [x] Focused scenario tests passed: `python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py -q` -> `3 passed`.
+- [x] Gateway/scenario/doc focused tests passed: `python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py agent_py_agent/tests/test_cli_reference.py agent_py_agent/tests/test_doc_sync.py -q` -> `9 passed`.
+- [x] Sync gate passed: `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`.
+- [x] Full regression passed: `python3 -m pytest -q` -> `252 passed`.
 - [x] Whitespace check passed: `git diff --check` -> passed.

@@ -42,18 +42,21 @@ python -m agent_py_agent scenario-test --case gateway-cross-day-resume
 - `memory-resume` reports `gateway_fact_sources`.
 - Auto recovery context can include gateway request/response JSON paths.
 - `scenario-test --case gateway-cross-day-resume` starts a real background gateway, sends a real `gateway ask`, simulates cross-day archive clues, then verifies `memory-resume` can recover the request/response JSON.
+- `scenario-test --case gateway-stale-lease` simulates an interrupted worker's stale processing lease, requeues it, and verifies a live worker completes the request.
 - `scenario-test --case parent-subagent-cross-day-resume` creates a real subagent task, runs a real runner/tool loop with a deterministic backend, simulates cross-day archive clues, then verifies `memory-resume` can recover task fact sources.
 - Gateway request worker now continues if processing lease writing fails, so observability file failures do not strand user work in `processing`.
 - If LocalStore captured a transient `requests/processing/<id>.json` path, resume prefers terminal `requests/done` or `requests/failed` request files.
 
 ## Verified Tests
 
-- `python3 -m pytest -q` -> `251 passed`.
+- `python3 -m pytest -q` -> `252 passed`.
 - `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`.
 - `git diff --check` -> passed.
 - Focused gateway/memory/doc test set -> `16 passed`.
 - Wider memory/gateway focused set -> `76 passed`.
 - Parent/subagent runner recovery focused test set -> `2 passed`.
+- Gateway stale lease focused test set -> `3 passed`.
+- Gateway/scenario/doc focused test set -> `9 passed`.
 - CLI reference focused test -> `1 passed`.
 
 ## Recovery Map
@@ -75,6 +78,7 @@ my-agent status
 my-agent timeline --limit 20
 my-agent memory-resume "继续 gateway 恢复" --json
 my-agent scenario-test --case gateway-cross-day-resume
+my-agent scenario-test --case gateway-stale-lease
 my-agent scenario-test --case parent-subagent-cross-day-resume
 ```
 
@@ -86,7 +90,6 @@ Recommended next slice:
    - Multi request worker.
    - Delayed response.
    - Stop/restart while a request is in processing.
-   - Stale lease recovery after worker interruption.
 
 2. Subagent workflow integration.
    - Wire workflow router/compiler/parent gate into real task creation with manual-confirm or dry-run-first policy.

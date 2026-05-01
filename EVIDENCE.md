@@ -286,3 +286,20 @@
   - `git diff --check` -> passed.
   - `python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py agent_py_agent/tests/test_cli_reference.py agent_py_agent/tests/test_doc_sync.py -q` -> `8 passed`.
   - `python3 -m pytest -q` -> `251 passed`.
+
+## 2026-05-01 / Gateway Stale Lease Scenario Evidence
+
+- Added gateway bad-weather scenario coverage:
+  - `scenario-test --case gateway-stale-lease` writes a stale `requests/processing/<id>.json` request with an old `lease_heartbeat_at`.
+  - The scenario verifies `gateway_stale_processing()` reports the stale request, `recover_gateway_processing_requests()` moves it back to pending, and `_process_gateway_requests()` completes it through the live worker path.
+  - The final assertions check response JSON, done archive, attempt count, and the new worker's lease owner.
+- Updated user-visible references:
+  - CLI parser and `CLI_REFERENCE.md` list the new scenario case.
+  - `README.md`, `TESTS.md`, gateway module docs, and `agent_py_agent/tests/run_tests.py` include the new scenario.
+- Verification:
+  - `python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py -q` -> `3 passed`.
+  - `python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py agent_py_agent/tests/test_cli_reference.py agent_py_agent/tests/test_doc_sync.py -q` -> `9 passed`.
+  - `python3 -m py_compile agent_py_agent/cli/scenario_cases.py agent_py_agent/cli/scenario.py agent_py_agent/cli/parser.py` -> passed.
+  - `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`.
+  - `git diff --check` -> passed.
+  - `python3 -m pytest -q` -> `252 passed`.
