@@ -383,6 +383,9 @@ my-agent scenario-test --case gateway-restart
 my-agent scenario-test --case gateway-cross-day-resume
 # 验证真实后台 gateway 请求跨天恢复到 request/response JSON；echo 后端不调用真实模型。
 
+my-agent scenario-test --case gateway-stale-lease
+# 验证 worker 中断留下的旧 processing lease 会重排并完成；不调用真实模型。
+
 my-agent scenario-test --case parent-subagent-cross-day-resume
 # 验证真实 subagent runner 写回后跨天恢复到任务事实源；使用测试后端，不调用真实模型。
 

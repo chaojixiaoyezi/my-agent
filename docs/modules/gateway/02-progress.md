@@ -10,6 +10,7 @@
 - gateway 请求跨天恢复已通过 memory resume 链路验证：request/response JSON 会作为事实源进入恢复推荐路径。
 - `scenario-test --case gateway-cross-day-resume` 已能启动真实后台 gateway、投递 ask、模拟跨天恢复线索，并验证 `memory-resume` 能把终态 request/response JSON 找回来。
 - gateway request worker 在 processing lease 写入失败时会降级继续处理请求，避免 Windows 深路径或临时文件失败把请求卡死在 processing。
+- `scenario-test --case gateway-stale-lease` 已能模拟 worker 中断留下旧 processing lease，验证恢复会重排到 pending，并由活跃 worker 完成请求。
 
 ## 解决的问题
 
@@ -20,11 +21,12 @@
 - gateway request 的 LocalStore 命中现在不再只是“可搜索摘要”，还能把 request/response JSON 带回 `memory-resume` 和自动恢复上下文。
 - 真实后台进程演练解决了“fixture 证明恢复可行，但未证明 gateway start/ask/worker/response 真能贯通”的问题。
 - lease 降级解决了“监控心跳文件写失败会放大成用户请求失败”的问题；lease 是可观测性，不应比请求本身更重要。
+- stale lease 场景解决了“只在单元测试里证明旧 processing 可恢复，缺少可观察 scenario 入口”的问题。
 
 ## 下一步
 
 - 给 gateway 核心函数补齐和 LOG work-order 同级别的 `LLM:` / `新手说明:` / 参数说明。
-- 把更多 gateway 场景加入隔离测试：多 request worker、取消/优先级、迟到响应、租约续期。
+- 把更多 gateway 场景加入隔离测试：多 request worker、取消/优先级、迟到响应、processing 中 stop/restart。
 - 稳定默认入口体验，让普通 `my-agent` 更自然地确保 gateway 存活并进入 gateway chat。
 - 如果 gateway 协议路径或数据流变化，同步更新本文件和 `04-structure.md`。
 
@@ -42,6 +44,10 @@
 - 真实 gateway 跨天恢复场景 focused 验收：`python -m pytest agent_py_agent\tests\test_gateway_client.py agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_scenario_gateway_resume.py agent_py_agent\tests\test_cli_reference.py agent_py_agent\tests\test_doc_sync.py` -> `16 passed`。
 - 真实 gateway 跨天恢复宽 focused 验收：`python -m pytest agent_py_agent\tests\test_memory_config.py agent_py_agent\tests\test_memory_routing.py agent_py_agent\tests\test_memory_routing_context.py agent_py_agent\tests\test_memory_runtime.py agent_py_agent\tests\test_memory_cli.py agent_py_agent\tests\test_memory_archive.py agent_py_agent\tests\test_memory_archive_runtime.py agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_local_store.py agent_py_agent\tests\test_gateway_client.py agent_py_agent\tests\test_scenario_gateway_resume.py agent_py_agent\tests\test_cli_reference.py agent_py_agent\tests\test_doc_sync.py` -> `76 passed`。
 - 真实 gateway 跨天恢复全量回归：`python -m pytest` -> `250 passed`。
+- gateway stale lease scenario focused 验收：`python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py -q` -> `3 passed`。
+- 本轮 gateway/scenario/doc focused 验收：`python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py agent_py_agent/tests/test_cli_reference.py agent_py_agent/tests/test_doc_sync.py -q` -> `9 passed`。
+- 本轮同步门验收：`python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`。
+- 本轮全量回归：`python3 -m pytest -q` -> `252 passed`。
 
 ## 未跑测试
 

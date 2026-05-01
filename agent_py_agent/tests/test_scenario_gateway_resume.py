@@ -49,6 +49,30 @@ def test_scenario_gateway_cross_day_resume_uses_real_gateway_process(tmp_path, c
     assert "SCENARIO_PASS" in output
 
 
+def test_scenario_gateway_stale_lease_requeues_and_completes(tmp_path, capsys):
+    """The scenario case should recover an interrupted processing lease and complete the request."""
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--config",
+            str(_write_echo_config(tmp_path)),
+            "scenario-test",
+            "--case",
+            "gateway-stale-lease",
+            "--workspace",
+            str(tmp_path / "scenario-runs"),
+        ]
+    )
+
+    code = args.func(args)
+    output = capsys.readouterr().out
+
+    assert code == 0, output
+    assert "case=gateway-stale-lease" in output
+    assert "SCENARIO_PASS" in output
+
+
 def test_scenario_parent_subagent_cross_day_resume_uses_runner_task_facts(tmp_path, capsys):
     """The scenario case should recover a real subagent runner result from task fact sources."""
 

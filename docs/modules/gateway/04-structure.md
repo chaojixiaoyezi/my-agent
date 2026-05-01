@@ -55,6 +55,26 @@ pending/<id>.json
 
 这样 Windows 深路径、临时文件写入失败或监控层抖动不会把用户请求卡死在 processing。
 
+### stale lease 恢复
+
+如果 worker 中断，`processing/<id>.json` 里的 `lease_heartbeat_at` 会停住。恢复逻辑按 lease 新鲜度判断下一步：
+
+```text
+fresh lease
+  -> 保持 processing，不抢正在工作的请求
+
+stale lease 且 attempts < max_attempts
+  -> 写 last_error / requeued_at
+  -> move back to pending
+  -> 由活跃 worker 重新处理
+
+stale lease 且 attempts >= max_attempts
+  -> 写 responses/<id>.json 失败响应
+  -> archive request to failed
+```
+
+`scenario-test --case gateway-stale-lease` 是这个流程的可观察入口。
+
 ## 跨天恢复
 
 gateway 的跨天恢复和 subagent 恢复遵循同一个原则：LocalStore 只负责帮忙找到 request_id，真正要读的是 gateway 文件事实源。
@@ -82,7 +102,7 @@ memory-resume 或 run(auto resume)
 4. 再看 `gateway_parts/runtime.py`，理解 worker 如何处理请求并写响应。
 5. 再看 `gateway_parts/recovery.py`，理解程序崩溃后怎么恢复。
 6. 再看 `agent_py_agent/tests/test_memory_archive_cli.py::test_memory_resume_cross_day_gateway_request_uses_response_fact_source`，理解 gateway 请求如何进入跨天恢复。
-7. 再看 `agent_py_agent/tests/test_scenario_gateway_resume.py`，理解真实后台 gateway 进程如何被场景测试启动、投递、恢复和验收。
+7. 再看 `agent_py_agent/tests/test_scenario_gateway_resume.py`，理解真实后台 gateway 进程和 stale lease 如何被场景测试启动、投递、恢复和验收。
 8. 最后看 `agent_py_agent/tests/test_gateway_client.py`，理解怎样证明协议边界和失败降级没坏。
 
 ## 当前第一版索引 / 待补齐
