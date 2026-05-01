@@ -267,3 +267,22 @@
   - `python -m pytest agent_py_agent\tests\test_memory_config.py agent_py_agent\tests\test_memory_routing.py agent_py_agent\tests\test_memory_routing_context.py agent_py_agent\tests\test_memory_runtime.py agent_py_agent\tests\test_memory_cli.py agent_py_agent\tests\test_memory_archive.py agent_py_agent\tests\test_memory_archive_runtime.py agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_local_store.py agent_py_agent\tests\test_gateway_client.py agent_py_agent\tests\test_scenario_gateway_resume.py agent_py_agent\tests\test_cli_reference.py agent_py_agent\tests\test_doc_sync.py` -> `76 passed`.
   - `python -m pytest` -> `250 passed`.
   - `python -m pytest agent_py_agent\tests\test_gateway_client.py agent_py_agent\tests\test_memory_archive_cli.py agent_py_agent\tests\test_scenario_gateway_resume.py agent_py_agent\tests\test_cli_reference.py agent_py_agent\tests\test_doc_sync.py` -> `16 passed`.
+
+## 2026-05-01 / Parent Subagent Runner Cross-Day Resume Evidence
+
+- Added scenario-test coverage:
+  - `scenario-test --case parent-subagent-cross-day-resume` creates a real `SubAgentTask`.
+  - The scenario runs the real subagent runner path with a deterministic backend that first calls `read_file README.md`, then writes an `AWAITING_ACCEPTANCE` `[SUBAGENT_RESULT]`.
+  - It simulates a day boundary with raw archive and hook snapshot clues, reloads a fresh parent agent, and verifies `memory-resume --run-id <id>` returns task fact-source paths.
+- Updated user-visible references:
+  - CLI parser and `CLI_REFERENCE.md` list the new scenario case.
+  - `agent_py_agent/tests/run_tests.py` includes the new scenario in the full smoke sequence.
+  - Memory/subagent module progress and structure docs point readers to the new recovery drill.
+- Verification:
+  - `python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py -q` -> `2 passed`.
+  - `python3 -m pytest agent_py_agent/tests/test_cli_reference.py -q` -> `1 passed`.
+  - `python3 -m py_compile agent_py_agent/cli/scenario_cases.py agent_py_agent/cli/scenario.py agent_py_agent/cli/parser.py` -> passed.
+  - `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`.
+  - `git diff --check` -> passed.
+  - `python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py agent_py_agent/tests/test_cli_reference.py agent_py_agent/tests/test_doc_sync.py -q` -> `8 passed`.
+  - `python3 -m pytest -q` -> `251 passed`.

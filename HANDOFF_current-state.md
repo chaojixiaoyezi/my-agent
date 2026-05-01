@@ -42,16 +42,19 @@ python -m agent_py_agent scenario-test --case gateway-cross-day-resume
 - `memory-resume` reports `gateway_fact_sources`.
 - Auto recovery context can include gateway request/response JSON paths.
 - `scenario-test --case gateway-cross-day-resume` starts a real background gateway, sends a real `gateway ask`, simulates cross-day archive clues, then verifies `memory-resume` can recover the request/response JSON.
+- `scenario-test --case parent-subagent-cross-day-resume` creates a real subagent task, runs a real runner/tool loop with a deterministic backend, simulates cross-day archive clues, then verifies `memory-resume` can recover task fact sources.
 - Gateway request worker now continues if processing lease writing fails, so observability file failures do not strand user work in `processing`.
 - If LocalStore captured a transient `requests/processing/<id>.json` path, resume prefers terminal `requests/done` or `requests/failed` request files.
 
 ## Verified Tests
 
-- `python -m pytest` -> `250 passed`.
-- `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`.
+- `python3 -m pytest -q` -> `251 passed`.
+- `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`.
 - `git diff --check` -> passed.
 - Focused gateway/memory/doc test set -> `16 passed`.
 - Wider memory/gateway focused set -> `76 passed`.
+- Parent/subagent runner recovery focused test set -> `2 passed`.
+- CLI reference focused test -> `1 passed`.
 
 ## Recovery Map
 
@@ -60,6 +63,7 @@ Read these first in a new session:
 - `STATUS.md`: broad project status and next-step map.
 - `HANDOFF_current-state.md`: this cross-session recovery note.
 - `docs/modules/memory/02-progress.md`: memory recovery progress, solved problems, tests, remaining work.
+- `docs/modules/subagent/02-progress.md`: subagent runner/workflow progress, solved problems, tests, remaining work.
 - `docs/modules/gateway/02-progress.md`: gateway process/recovery progress, solved problems, tests, remaining work.
 - `ACCEPTANCE.md`: parent-session acceptance record.
 - `EVIDENCE.md`: commands and evidence behind acceptance.
@@ -71,30 +75,29 @@ my-agent status
 my-agent timeline --limit 20
 my-agent memory-resume "继续 gateway 恢复" --json
 my-agent scenario-test --case gateway-cross-day-resume
+my-agent scenario-test --case parent-subagent-cross-day-resume
 ```
 
 ## Next Version Prep
 
 Recommended next slice:
 
-1. Parent/subagent runner full recovery drill.
-   - Goal: prove a real subagent runner task can be stopped, recovered across a simulated day boundary, and resumed from task fact sources.
-   - Why: gateway cross-day recovery is now covered; subagent runner recovery is the next missing high-value recovery loop.
-   - Likely tests: new scenario case plus focused memory/subagent/runtime tests.
-
-2. More gateway bad-weather scenarios.
+1. More gateway bad-weather scenarios.
    - Multi request worker.
    - Delayed response.
    - Stop/restart while a request is in processing.
    - Stale lease recovery after worker interruption.
 
-3. Subagent workflow integration.
+2. Subagent workflow integration.
    - Wire workflow router/compiler/parent gate into real task creation with manual-confirm or dry-run-first policy.
    - Keep the user-facing goal simple; the system should choose templates, contracts, context packs, and worker topology.
 
-4. Log-analysis execution bridge.
+3. Log-analysis execution bridge.
    - Add manual-confirm CLI or parent-session command that turns LOG work-order plans into real `SubAgentTask` records.
    - Replace placeholder evidence readers with bounded audited evidence-ref reading before real analyst execution.
+
+4. Real-model parent/subagent recovery smoke.
+   - Re-run `parent-subagent-cross-day-resume` or an equivalent manual drill with the configured external model, not only the deterministic scenario backend.
 
 ## Remaining Risks
 

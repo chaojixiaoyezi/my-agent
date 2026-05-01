@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-04-30 最新恢复入口
+## 2026-05-01 最新恢复入口
 
 如果下次换电脑、换会话、换 IDE，先看这一段和 [HANDOFF_current-state.md](HANDOFF_current-state.md)。
 
@@ -8,33 +8,36 @@
 
 - branch: `main`
 - remote: `origin/main`
-- latest pushed commit: `ab85a70 Add gateway cross-day resume scenario`
+- latest pulled commit: `4fea1eb Document current handoff and next version prep`
 
 最新可恢复能力：
 
 - `memory-resume` 已能把 gateway request/response JSON 当成恢复事实源。
 - `scenario-test --case gateway-cross-day-resume` 已能启动真实后台 gateway、投递真实 `gateway ask`、模拟跨天线索，并验证恢复能回到 request/response JSON。
+- `scenario-test --case parent-subagent-cross-day-resume` 已能创建真实子代理任务、执行 runner 工具回合、模拟跨天线索，并验证恢复能回到任务事实源。
 - gateway worker 在 processing lease 写失败时会继续处理请求，不会因为观测文件失败把用户请求卡死。
 - 如果 LocalStore 记录了临时 `requests/processing/<id>.json`，恢复时会优先纠偏到现存的 `requests/done` 或 `requests/failed`。
 
 最新验收：
 
-- `python -m pytest` -> `250 passed`
-- `python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`
+- `python3 -m pytest -q` -> `251 passed`
+- `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`
 - `git diff --check` -> passed
 - focused gateway/memory/doc tests -> `16 passed`
 - wide memory/gateway focused tests -> `76 passed`
+- parent/subagent runner recovery focused tests -> `2 passed`
+- CLI reference focused test -> `1 passed`
 
 下一版优先级：
 
-1. 做 parent/subagent runner 完整跨天恢复演练。
-2. 补 gateway 坏天气场景：多 request worker、迟到 response、processing 中 stop/restart、stale lease。
-3. 把 subagent workflow router/compiler/parent gate 接到真实 task creation，默认 dry-run 或 manual-confirm。
-4. 推进 LOG work-order 到真实 SubAgentTask 执行桥，并补 bounded evidence reader。
+1. 补 gateway 坏天气场景：多 request worker、迟到 response、processing 中 stop/restart、stale lease。
+2. 把 subagent workflow router/compiler/parent gate 接到真实 task creation，默认 dry-run 或 manual-confirm。
+3. 推进 LOG work-order 到真实 SubAgentTask 执行桥，并补 bounded evidence reader。
+4. 用真实外部模型补跑 parent/subagent runner 跨天恢复冒烟。
 
-详细交接见 [HANDOFF_current-state.md](HANDOFF_current-state.md)，模块细节见 `docs/modules/memory/02-progress.md` 和 `docs/modules/gateway/02-progress.md`。
+详细交接见 [HANDOFF_current-state.md](HANDOFF_current-state.md)，模块细节见 `docs/modules/memory/02-progress.md`、`docs/modules/subagent/02-progress.md` 和 `docs/modules/gateway/02-progress.md`。
 
-更新时间：2026-04-30
+更新时间：2026-05-01
 
 当前阶段：`v0.4-dev / memory resume and auto recovery context`
 

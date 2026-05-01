@@ -87,9 +87,9 @@ memory-resume 或 run(auto resume)
 7. 再看 `memory_archive/models.py`、`storage.py`、`runtime.py` 和 `snapshots.py`，理解归档保存什么、怎么写入、怎么验收。
 8. 再看 `memory_archive/query.py`、`resume_brief.py` 和 `resume_context.py`，理解“继续任务”时怎么找回线索。
 9. 再看 `agent_py_agent/tests/test_memory_archive_cli.py::test_memory_resume_cross_day_handoff_uses_task_fact_sources` 和 `test_memory_runtime.py::test_auto_resume_context_recovers_cross_day_handoff_task`，理解 subagent 跨天恢复如何从线索回到事实源。
-10. 再看 `agent_py_agent/tests/test_scenario_gateway_resume.py`，理解真实 gateway 请求如何通过跨天恢复回到 request/response JSON。
+10. 再看 `agent_py_agent/tests/test_scenario_gateway_resume.py`，理解真实 gateway 请求和 parent/subagent runner 结果如何通过跨天恢复回到文件事实源。
 11. 最后看 `agent_py_agent/tests/test_memory_*.py`，用测试反推每一层必须保证的行为。
 
 ## 当前第一版索引 / 待补齐
 
-本页先讲主结构和阅读路径。后续需要补真实 route index 样例、raw archive 样例、doctor 输出样例、LocalStore 命中样例和 parent/subagent runner 完整恢复链路图。
+本页先讲主结构和阅读路径。后续需要补真实 route index 样例、raw archive 样例、doctor 输出样例、LocalStore 命中样例，以及更长时间的真实跨午夜恢复链路图。

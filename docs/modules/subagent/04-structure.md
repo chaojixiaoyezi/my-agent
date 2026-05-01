@@ -32,7 +32,9 @@ agent_py_agent/agent/
 3. store 加载内置或用户覆盖的模板。
 4. compiler 生成 worker 派工规格，包含写入范围、证据要求和不能自验收的规则。
 5. acceptance planner 生成父级验收清单。
-6. 目前 dry-run CLI 可以展示计划；后续真实 dispatch 会创建 worker 任务并保存验收报告。
+6. runner 根据 execution context 调模型和工具，把 `RUNNER_RESULT.md`、`reports/runner_result.json`、`output.json` 写回任务目录。
+7. `memory-resume` 在跨天恢复时用 archive/LocalStore 作为线索，最终推荐读取任务目录里的事实源，再由父级决定是否验收。
+8. 目前 workflow dry-run CLI 可以展示计划；通用 workflow apply path 仍在推进中，LOG 专项 apply path 和 runner 恢复 scenario 已先行验证真实任务记录。
 
 ## 给初学编程学生的学习路径
 
@@ -40,8 +42,9 @@ agent_py_agent/agent/
 2. 再看 `planner.py`，理解一个“规划结果”包含哪些部分。
 3. 再看 `router.py`，学习如何把自然语言目标映射到模板。
 4. 再看 `compiler.py`，学习模板怎样变成具体工作单。
-5. 最后看 `agent_py_agent/tests/test_subagent_workflow_*.py`，理解怎么证明路由、模板和编译没有坏。
+5. 再看 `agent_py_agent/tests/test_scenario_gateway_resume.py::test_scenario_parent_subagent_cross_day_resume_uses_runner_task_facts`，理解 runner 写回后如何跨天恢复到任务事实源。
+6. 最后看 `agent_py_agent/tests/test_subagent_workflow_*.py`，理解怎么证明路由、模板和编译没有坏。
 
 ## 当前第一版索引 / 待补齐
 
-本页先解释主结构和学习路径。更细的类字段、状态机和真实 dispatch 链路，需要等后续 apply path 落地后补齐。
+本页先解释主结构和学习路径。更细的类字段、状态机和通用 workflow apply 链路，需要等后续 apply path 落地后补齐。

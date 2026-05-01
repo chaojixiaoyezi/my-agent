@@ -9,6 +9,7 @@
 - `my-agent subagents-workflow-plan "<goal>"` 可预览 worker 拆分和父级验收清单。
 - LOG 模块已经验证了一条专项 apply path：把受控 work-order plan 落成真实 `SubAgentTask`，但不自动执行。
 - 第一版代码/文档/注释同步门已落地：`scripts/check_doc_sync.py` 会检查 covered module 的代码改动是否同步更新模块文档和同文件注释。
+- parent/subagent runner 跨天恢复场景已落地：`scenario-test --case parent-subagent-cross-day-resume` 会创建真实任务、执行 runner 工具回合、模拟跨天线索，并验证恢复回到任务事实源。
 
 ## 解决的问题
 
@@ -17,6 +18,7 @@
 - worker 自述完成不会直接变成最终完成，父级验收门被放进计划和任务结构里。
 - 文档四件套给后续模块讨论、推进、初心、结构说明提供固定位置，减少散乱文档继续膨胀。
 - 同步门把“改功能就更新文档和注释”从口头约定变成可执行检查，降低 worker 并行开发时漏补文档的概率。
+- runner 写回后的恢复不再只停留在单元 fixture：现在有可观察 scenario 证明父级恢复入口会推荐 `STATUS/WORK_LOG/HANDOFF/TEST_CHECKLIST/output.json` 等任务事实源。
 
 ## 下一步
 
@@ -36,12 +38,18 @@
 - 空白检查：`git diff --check` -> passed。
 - 同步门 focused 验收：`python -m pytest agent_py_agent\tests\test_doc_sync.py` -> `3 passed`。
 - 同步门手工检查：`python scripts\check_doc_sync.py` -> `DOC_SYNC_PASS`。
+- parent/subagent runner 跨天恢复 focused 验收：`python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py -q` -> `2 passed`。
+- CLI reference focused 验收：`python3 -m pytest agent_py_agent/tests/test_cli_reference.py -q` -> `1 passed`。
+- 本轮 focused 组合验收：`python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py agent_py_agent/tests/test_cli_reference.py agent_py_agent/tests/test_doc_sync.py -q` -> `8 passed`。
+- 本轮同步门验收：`python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`。
+- 本轮全量回归：`python3 -m pytest -q` -> `251 passed`。
 
 ## 未跑测试
 
 - 当前尚未为通用 workflow apply path 增加测试，因为本轮只做 LOG 专项任务创建。
 - 后续如果接入真实 dispatch，需要补跑 subagent workflow 专项测试和全量 pytest。
 - 同步门目前只覆盖 `log-analysis` 和 `subagent` 两个模块；其它模块还需要先补四件套和规则映射。
+- parent/subagent 跨天恢复 scenario 当前使用确定性 backend，不烧真实外部模型；后续真实 API 冒烟可作为交付级补验。
 
 ## 风险
 
