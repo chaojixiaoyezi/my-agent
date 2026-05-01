@@ -42,6 +42,7 @@ python -m agent_py_agent scenario-test --case gateway-cross-day-resume
 - `memory-resume` reports `gateway_fact_sources`.
 - Auto recovery context can include gateway request/response JSON paths.
 - `scenario-test --case gateway-cross-day-resume` starts a real background gateway, sends a real `gateway ask`, simulates cross-day archive clues, then verifies `memory-resume` can recover the request/response JSON.
+- `scenario-test --case gateway-delayed-response` proves a late duplicate pending request is archived without calling the model again when its response file already exists.
 - `scenario-test --case gateway-multi-worker` runs two concurrent request workers against one pending queue and verifies each request completes exactly once.
 - `scenario-test --case gateway-stale-lease` simulates an interrupted worker's stale processing lease, requeues it, and verifies a live worker completes the request.
 - `scenario-test --case parent-subagent-cross-day-resume` creates a real subagent task, runs a real runner/tool loop with a deterministic backend, simulates cross-day archive clues, then verifies `memory-resume` can recover task fact sources.
@@ -50,7 +51,7 @@ python -m agent_py_agent scenario-test --case gateway-cross-day-resume
 
 ## Verified Tests
 
-- `python3 -m pytest -q` -> `253 passed`.
+- `python3 -m pytest -q` -> `254 passed`.
 - `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`.
 - `git diff --check` -> passed.
 - Focused gateway/memory/doc test set -> `16 passed`.
@@ -58,7 +59,8 @@ python -m agent_py_agent scenario-test --case gateway-cross-day-resume
 - Parent/subagent runner recovery focused test set -> `2 passed`.
 - Gateway stale lease focused test set -> `3 passed`.
 - Gateway multi-worker focused test set -> `4 passed`.
-- Gateway/scenario/doc focused test set -> `10 passed`.
+- Gateway delayed-response focused test set -> `5 passed`.
+- Gateway/scenario/doc focused test set -> `11 passed`.
 - CLI reference focused test -> `1 passed`.
 
 ## Recovery Map
@@ -80,6 +82,7 @@ my-agent status
 my-agent timeline --limit 20
 my-agent memory-resume "继续 gateway 恢复" --json
 my-agent scenario-test --case gateway-cross-day-resume
+my-agent scenario-test --case gateway-delayed-response
 my-agent scenario-test --case gateway-multi-worker
 my-agent scenario-test --case gateway-stale-lease
 my-agent scenario-test --case parent-subagent-cross-day-resume
@@ -90,7 +93,6 @@ my-agent scenario-test --case parent-subagent-cross-day-resume
 Recommended next slice:
 
 1. More gateway bad-weather scenarios.
-   - Delayed response.
    - Stop/restart while a request is in processing.
 
 2. Subagent workflow integration.

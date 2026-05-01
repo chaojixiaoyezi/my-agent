@@ -383,6 +383,9 @@ my-agent scenario-test --case gateway-restart
 my-agent scenario-test --case gateway-cross-day-resume
 # 验证真实后台 gateway 请求跨天恢复到 request/response JSON；echo 后端不调用真实模型。
 
+my-agent scenario-test --case gateway-delayed-response
+# 验证响应已落盘但 pending 请求副本迟到时不会重复调用模型；不调用真实模型。
+
 my-agent scenario-test --case gateway-multi-worker
 # 验证两个 request worker 并发抢占多条 pending 请求；不调用真实模型。
 

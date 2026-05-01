@@ -610,6 +610,114 @@ def run_scenario_gateway_multi_worker_case(args) -> int:
     return 0 if final_ok else 2
 
 
+def run_scenario_gateway_delayed_response_case(args) -> int:
+    """Simulate a response arriving before a duplicate pending request is claimed."""
+
+    paths = create_scenario_workspace(args)
+    print("MY-AGENT SCENARIO TEST")
+    print("case=gateway-delayed-response")
+    print(f"run_root={paths.run_root}")
+    print(f"fixture_root={paths.fixture_root}")
+    print(f"config={paths.config}")
+
+    agent = load_scenario_agent(paths.config)
+    gpaths = gateway_paths(agent)
+    for path in (gpaths.inbox, gpaths.processing, gpaths.done, gpaths.failed, gpaths.responses):
+        path.mkdir(parents=True, exist_ok=True)
+
+    request_id = new_gateway_request_id()
+    request_path = write_gateway_request(
+        gpaths,
+        {
+            "id": request_id,
+            "kind": "ask",
+            "prompt": "gateway delayed response scenario: this should not run twice.",
+            "inject": [],
+            "prompt_files": [],
+            "save": False,
+            "include_prompt": False,
+            "created_at": time.time(),
+            "status": "pending",
+            "attempts": 1,
+        },
+    )
+    response_path = gateway_response_path(gpaths, request_id)
+    write_json_file(
+        response_path,
+        {
+            "id": request_id,
+            "kind": "ask",
+            "ok": True,
+            "status": "done",
+            "response": "late response already arrived",
+            "backend": "scenario-delayed-response",
+            "tool_rounds": 0,
+            "attempts": 1,
+        },
+    )
+
+    print_scenario_step(1, "Create a pending request with an already-arrived response")
+    print(f"request_path={request_path} exists={request_path.exists()}")
+    print(f"response_path={response_path} exists={response_path.exists()}")
+
+    run_called = {"value": False}
+
+    def fail_if_called(user_prompt: str, **kwargs) -> AgentRunResult:
+        run_called["value"] = True
+        raise AssertionError("agent.run should not be called when response already exists")
+
+    agent.run = fail_if_called  # type: ignore[method-assign]
+
+    print_scenario_step(2, "Let worker claim the duplicate request")
+    processed = _process_gateway_requests(agent, gpaths, worker_id="scenario-delayed-response-worker")
+    done_path = gpaths.done / request_path.name
+    done_payload = read_json_file(done_path)
+    response = read_json_file(response_path)
+    pending_left = sorted(path.name for path in gpaths.inbox.glob("*.json"))
+    processing_left = sorted(path.name for path in gpaths.processing.glob("*.json"))
+    failed_left = sorted(path.name for path in gpaths.failed.glob("*.json"))
+    print(f"processed={processed} run_called={run_called['value']}")
+    print(f"done_path={done_path} exists={done_path.exists()}")
+    print(
+        "queue_left="
+        + json.dumps(
+            {"pending": pending_left, "processing": processing_left, "failed": failed_left},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+
+    final_ok = (
+        processed == 1
+        and run_called["value"] is False
+        and done_path.exists()
+        and response.get("response") == "late response already arrived"
+        and response.get("backend") == "scenario-delayed-response"
+        and done_payload.get("id") == request_id
+        and not pending_left
+        and not processing_left
+        and not failed_left
+    )
+    write_scenario_summary(
+        paths,
+        ok=final_ok,
+        reason="gateway delayed response handling passed" if final_ok else "gateway delayed response handling failed",
+        extra={
+            "case": "gateway-delayed-response",
+            "request_id": request_id,
+            "processed": processed,
+            "run_called": run_called["value"],
+            "done_path": str(done_path),
+            "response_path": str(response_path),
+            "response": response,
+        },
+    )
+    print(f"\nsummary_json={paths.summary_json}")
+    print(f"summary_md={paths.summary_md}")
+    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
+    return 0 if final_ok else 2
+
+
 class ScenarioParentSubagentRecoveryBackend:
     """场景测试用后端：先读 README，再输出可恢复的 runner 结构化结果。"""
 
