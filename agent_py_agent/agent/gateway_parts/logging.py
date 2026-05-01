@@ -150,3 +150,11 @@ def _report_gateway_side_effect_error(operation: str, request_id: str, exc: Exce
     有些失败不该打断主请求，比如写索引失败、归档失败。但也不能悄悄吃掉，所以统一把
     operation、request_id、错误类型和错误内容写到 stderr。
     """
+    try:
+        print(
+            f"[gateway-side-effect-error] operation={operation} request_id={request_id} "
+            f"error_type={type(exc).__name__} error={exc}",
+            file=sys.stderr,
+        )
+    except Exception:
+        pass

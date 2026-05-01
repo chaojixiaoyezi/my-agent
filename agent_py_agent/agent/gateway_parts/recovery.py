@@ -91,7 +91,9 @@ def recover_gateway_processing_requests(
             summary["archived"] += 1
             continue
         lease_at = _gateway_processing_lease_at(payload, request_path)
-        stale = startup or not lease_at or now - lease_at >= timeout_seconds
+        from .runtime import is_heartbeat_alive_for_request
+        heartbeat_alive = is_heartbeat_alive_for_request(request_id)
+        stale = startup or not lease_at or (now - lease_at >= timeout_seconds and not heartbeat_alive)
         if not stale:
             continue
         attempts = _gateway_request_attempts(payload)

@@ -15,6 +15,9 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+# Liveness registry: tracks which request IDs have an active heartbeat thread.
+_active_heartbeat_request_ids: set[str] = set()
+
 from .io import (
     append_gateway_history,
     gateway_request_counts,
@@ -265,6 +268,12 @@ def _touch_gateway_processing_lease(request_path: Path, *, request_id: str, work
     return True
 
 
+def is_heartbeat_alive_for_request(request_id: str) -> bool:
+    """Check whether a heartbeat thread is currently active for the given request."""
+
+    return request_id in _active_heartbeat_request_ids
+
+
 def _start_gateway_processing_lease_heartbeat(
     agent: SimpleAgent,
     request_path: Path,
@@ -276,11 +285,31 @@ def _start_gateway_processing_lease_heartbeat(
 
     stop_event = threading.Event()
     interval = _gateway_processing_lease_interval(agent)
+    consecutive_failures = 0
+    max_failures = 3
+    _active_heartbeat_request_ids.add(request_id)
 
     def heartbeat_loop() -> None:
-        while not stop_event.wait(interval):
-            if not _touch_gateway_processing_lease(request_path, request_id=request_id, worker_id=worker_id):
-                return
+        nonlocal consecutive_failures
+        try:
+            while not stop_event.wait(interval):
+                try:
+                    if not _touch_gateway_processing_lease(request_path, request_id=request_id, worker_id=worker_id):
+                        return
+                    consecutive_failures = 0
+                except Exception as exc:
+                    consecutive_failures += 1
+                    _report_gateway_side_effect_error("heartbeat", request_id, exc)
+                    if consecutive_failures >= max_failures:
+                        log_gateway_payload(
+                            agent,
+                            {"id": request_id, "status": "heartbeat_abandoned", "failures": consecutive_failures},
+                            event_type="gateway_heartbeat_abandoned",
+                            request_path=request_path,
+                        )
+                        return
+        finally:
+            _active_heartbeat_request_ids.discard(request_id)
 
     thread = threading.Thread(
         target=heartbeat_loop,
