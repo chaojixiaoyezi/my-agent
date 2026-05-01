@@ -8,6 +8,7 @@ from __future__ import annotations
 它是外部文件协议和内部 gateway 协议之间的转换层。
 """
 
+import json
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -101,6 +102,7 @@ def process_file_adapter_once(
                 "response": "",
                 "request_file": str(request_path),
             }
+            _record_late_pending(adapter_paths_obj, request_id, timeout)
         adapter_response = {
             "adapter_message_id": message_id,
             "conversation_id": payload.get("conversation_id", ""),
@@ -173,3 +175,68 @@ def _adapter_output_path(paths: AdapterPaths, message_id: str) -> Path:
     """
 
     return paths.outbox / f"{message_id}.json"
+
+
+def _record_late_pending(paths: AdapterPaths, request_id: str, original_timeout: float) -> None:
+    """Record a timed-out request so late responses can be detected later."""
+
+    late_path = paths.root / "late_pending.jsonl"
+    entry = {
+        "request_id": request_id,
+        "timeout_at": time.time(),
+        "original_timeout": original_timeout,
+        "checked": False,
+    }
+    try:
+        with late_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        _report_gateway_side_effect_error("record_late_pending", request_id, exc)
+
+
+def check_late_responses(paths: AdapterPaths) -> list[dict]:
+    """Scan late_pending.jsonl and check if responses have arrived in gateway responses.
+
+    Human version:
+    调用方超时后，响应可能迟到。这里扫描 late_pending.jsonl，检查 gateway responses 目录是否有对应响应。
+    找到的响应会被标记为已检查，未找到的保留在索引中。
+    """
+
+    late_path = paths.root / "late_pending.jsonl"
+    if not late_path.exists():
+        return []
+    results: list[dict] = []
+    remaining: list[dict] = []
+    for line in late_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("checked"):
+            continue
+        request_id = entry.get("request_id", "")
+        # Check gateway responses directory for the response
+        from .io import gateway_response_path
+        from .paths import gateway_paths
+        # We need to check the gateway responses directory
+        # The paths.root is the adapter root, not gateway root
+        # We'll check if a response file exists in the gateway responses
+        # For now, we'll use a simple check based on the request_id
+        gateway_responses_dir = paths.root.parent / "gateway" / "responses"
+        response_path = gateway_responses_dir / f"{request_id}.json"
+        if response_path.exists():
+            entry["checked"] = True
+            entry["late_response_at"] = time.time()
+            results.append(entry)
+        remaining.append(entry)
+    # Rewrite file with only unchecked entries
+    try:
+        with late_path.open("w", encoding="utf-8") as f:
+            for entry in remaining:
+                if not entry.get("checked"):
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        _report_gateway_side_effect_error("check_late_responses_cleanup", "", exc)
+    return results

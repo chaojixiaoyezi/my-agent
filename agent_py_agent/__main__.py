@@ -104,6 +104,7 @@ from .cli.scenario_cases import (
     ScenarioRetryBackend,
     ScenarioStructuredRepairBackend,
     run_scenario_gateway_restart_case,
+    run_scenario_real_model_recovery_case,
     run_scenario_runner_retry_case,
     run_scenario_structured_repair_case,
     run_scenario_verification_case,

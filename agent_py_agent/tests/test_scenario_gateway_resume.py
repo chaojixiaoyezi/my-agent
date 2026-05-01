@@ -2,6 +2,7 @@ from __future__ import annotations
 
 """scenario-test gateway resume regressions."""
 
+import os
 from pathlib import Path
 
 from agent_py_agent.__main__ import build_parser
@@ -12,6 +13,33 @@ def _write_echo_config(tmp_path: Path) -> Path:
     config_path.write_text(
         'workspace_root: "workspace"\n'
         'model_backend: "echo"\n'
+        'subagent_workspace: ".my_agent/subagents"\n'
+        'gateway_workspace: ".my_agent/gateway"\n'
+        'memory_path: ".my_agent/memory.jsonl"\n'
+        'local_store_path: ".my_agent/local_store/local.db"\n'
+        'local_store_files_dir: ".my_agent/local_store/files"\n'
+        'local_store_events_path: ".my_agent/local_store/events.jsonl"\n',
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _write_real_model_config(tmp_path: Path) -> Path | None:
+    """Write a config for real model testing; return None if AGENT_API_KEY is missing."""
+    api_key = os.environ.get("AGENT_API_KEY", "").strip()
+    if not api_key:
+        return None
+    config_path = tmp_path / "agent_config.yaml"
+    config_path.write_text(
+        'workspace_root: "workspace"\n'
+        'model_backend: "anthropic_compatible"\n'
+        'api_base: "https://api.minimaxi.com/anthropic"\n'
+        'api_key_env: "AGENT_API_KEY"\n'
+        'model_name: "MiniMax-M2.7"\n'
+        'request_timeout: 60\n'
+        'max_tokens: 1024\n'
+        'temperature: 0.2\n'
+        'anthropic_version: "2023-06-01"\n'
         'subagent_workspace: ".my_agent/subagents"\n'
         'gateway_workspace: ".my_agent/gateway"\n'
         'memory_path: ".my_agent/memory.jsonl"\n'
@@ -144,4 +172,35 @@ def test_scenario_parent_subagent_cross_day_resume_uses_runner_task_facts(tmp_pa
 
     assert code == 0, output
     assert "case=parent-subagent-cross-day-resume" in output
+    assert "SCENARIO_PASS" in output
+
+
+def test_scenario_real_model_recovery_smoke(tmp_path, capsys):
+    """The scenario case should prove a real model API round-trip survives cross-day recovery."""
+
+    config_path = _write_real_model_config(tmp_path)
+    if config_path is None:
+        import pytest
+        pytest.skip("AGENT_API_KEY not configured; skipping real model smoke test")
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--config",
+            str(config_path),
+            "scenario-test",
+            "--case",
+            "real-model-recovery",
+            "--workspace",
+            str(tmp_path / "scenario-runs"),
+            "--timeout",
+            "120",
+        ]
+    )
+
+    code = args.func(args)
+    output = capsys.readouterr().out
+
+    assert code == 0, output
+    assert "case=real-model-recovery" in output
     assert "SCENARIO_PASS" in output
