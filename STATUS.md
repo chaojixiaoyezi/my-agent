@@ -8,7 +8,7 @@
 
 - branch: `main`
 - remote: `origin/main`
-- latest pushed recovery checkpoint: `947b2d2 Add parent subagent recovery scenario`
+- latest pushed recovery checkpoint: parent/subagent recovery scenario + gateway stale lease scenario
 
 最新可恢复能力：
 
