@@ -19,6 +19,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+from typing import Callable
 
 from .thinking_phrases import random_phrase
 
@@ -35,10 +36,18 @@ class ThinkingSpinner:
     等模型开始输出内容后，这行会自动消失。
     """
 
-    def __init__(self, *, enabled: bool | None = None):
+    def __init__(
+        self,
+        *,
+        enabled: bool | None = None,
+        on_update: Callable[[str], None] | None = None,
+        on_stop: Callable[[], None] | None = None,
+    ):
         if enabled is None:
             enabled = bool(getattr(sys.stdout, "isatty", lambda: False)())
         self._enabled = enabled
+        self._on_update = on_update
+        self._on_stop = on_stop
         self._running = False
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -69,6 +78,9 @@ class ThinkingSpinner:
         if self._thread is not None:
             self._thread.join(timeout=1.0)
             self._thread = None
+        if self._on_stop is not None:
+            self._on_stop()
+            return
         # LLM: clear the spinner line and move to next line.
         sys.stdout.write("\r" + " " * 80 + "\r\n")
         sys.stdout.flush()
@@ -86,8 +98,11 @@ class ThinkingSpinner:
             elapsed = time.perf_counter() - self._start_time
             char = _SPINNER_CHARS[idx % len(_SPINNER_CHARS)]
             frame = f"\r╭ 蛐蛐人：{self._phrase}... {char} {elapsed:.1f}s"
-            sys.stdout.write(frame)
-            sys.stdout.flush()
+            if self._on_update is not None:
+                self._on_update(frame.lstrip("\r"))
+            else:
+                sys.stdout.write(frame)
+                sys.stdout.flush()
             idx += 1
             time.sleep(0.12)
 
