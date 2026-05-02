@@ -34,6 +34,7 @@ def mock_paths(tmp_path):
     return GatewayPaths(
         root=tmp_path,
         pid=tmp_path / "gateway.pid",
+        adapter_pid=tmp_path / "adapter.pid",
         state=tmp_path / "gateway_state.json",
         heartbeat=tmp_path / "gateway_heartbeat.json",
         stop_request=tmp_path / "gateway_stop.request",

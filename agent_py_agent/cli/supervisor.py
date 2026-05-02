@@ -151,6 +151,9 @@ def cmd_start_all(args) -> int:
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)
 
+    # Determine adapter channel (default: all)
+    adapter_channel = getattr(args, 'adapter_channel', 'all')
+
     # Start supervisor (which starts and monitors gateway)
     if is_supervisor_running(args.config):
         print("supervisor 已在运行")
@@ -197,5 +200,33 @@ def cmd_start_all(args) -> int:
         return 2
 
     print(f"gateway 就绪: pid={gpid}")
+
+    # Start adapters if requested
+    if adapter_channel not in (None, 'none'):
+        print(f"启动通道适配器: {adapter_channel}")
+        adapter_cmd = [
+            sys.executable,
+            "-m",
+            "agent_py_agent",
+            "--config",
+            args.config,
+            "adapter",
+            "start",
+            "--channel",
+            adapter_channel,
+            "--daemon",
+        ]
+        with paths.log.open("ab") as log_file:
+            subprocess.Popen(
+                adapter_cmd,
+                cwd=ROOT.parent,
+                stdin=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                creationflags=creationflags,
+                start_new_session=start_new_session,
+            )
+        print(f"适配器启动中...")
+
     print("start-all 完成。运行 `my-agent gateway status` 查看状态。")
     return 0

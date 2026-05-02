@@ -25,6 +25,7 @@ class MockGatewayPaths:
         self.stop_request = self.root / "gateway_stop.request"
         self.state = self.root / "gateway_state.json"
         self.pid = self.root / "gateway.pid"
+        self.adapter_pid = self.root / "adapter.pid"
         self.heartbeat = self.root / "gateway_heartbeat.json"
         self.log = self.root / "gateway.log"
         # Create directories
