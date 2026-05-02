@@ -1,0 +1,263 @@
+# LLM_GUIDE
+
+这份文档是给 LLM/AI 开发者读的项目入口指南。
+
+**开工前必须读，收工后必须改。**
+
+---
+
+## 铁律
+
+1. **开工前**：读 `docs/ROADMAP.md`，确认你要做的事在列表里，了解它的"解决问题"和当前状态。
+2. **收工后**：更新 `docs/ROADMAP.md`（改状态或删除已完成条目），把已落地的功能写入 `docs/COMPLETED.md`。
+3. **每个功能必须写"解决问题"**：不能只罗列模块名和 workflow 名，必须说明它解决哪个用户痛点、系统风险或交付缺口。
+4. **不改设计文档就不能改设计**：如果实现方向与 DESIGN_LEDGER.md 有冲突，先更新设计文档再写代码。
+
+---
+
+## 项目结构速览
+
+```
+my-agent/                          ← 项目根目录
+├── LLM_GUIDE.md                   ← 【你正在读的文件】LLM 入口
+├── DESIGN_LEDGER.md               ← 设计台账（所有设计决策的来源）
+├── STATUS.md                      ← 当前状态、测试基线、推荐下一步
+├── GATEWAY_DESIGN.md              ← Gateway 架构设计
+├── MEMORY_BACKLOG.md              ← 记忆系统痛点和设计原则
+├── LOG_ANALYSIS_BACKLOG.md        ← 日志分析 backlog
+├── DISCUSSION_BACKLOG.md          ← 系统问题讨论
+├── docs/
+│   ├── ROADMAP.md                 ← 【必读】待做/进行中功能清单
+│   ├── COMPLETED.md               ← 【必读】已落地功能清单
+│   ├── design/                    ← 模块设计文档
+│   │   ├── README.md              ← 模块设计文档索引
+│   │   ├── subagent-quality-contract.md
+│   │   └── log-analysis.md
+│   └── modules/                   ← 模块四件套（discussion/progress/purpose/structure）
+│       ├── README.md
+│       ├── subagent/
+│       ├── log-analysis/
+│       ├── memory/
+│       ├── gateway/
+│       └── live-lab/
+├── agent_py_agent/                ← Python 包源码
+│   ├── README.md                  ← 包级使用说明
+│   ├── __main__.py                ← CLI 入口（兼容门面）
+│   ├── agent/                     ← 核心 agent 代码
+│   │   ├── DIRECTORY_GUIDE.md     ← 【必读】目录职责地图
+│   │   ├── agent_core/            ← 主代理编排
+│   │   ├── backends/              ← 模型后端适配
+│   │   ├── capability/            ← 能力路由
+│   │   ├── gateway_parts/         ← Gateway 文件协议
+│   │   ├── io/                    ← 底层 I/O 原语
+│   │   ├── local_storage/         ← SQLite 本地事实源
+│   │   ├── memory_store/          ← 记忆存储
+│   │   ├── memory_archive/        ← 记忆冷归档
+│   │   ├── memory_routing/        ← 长期规则路由
+│   │   ├── prompting_parts/       ← Prompt 构造
+│   │   ├── settings/              ← 配置
+│   │   ├── subagents/             ← 子代理领域
+│   │   ├── subagent_workflows/    ← Workflow 模板
+│   │   └── tooling/               ← 工具实现
+│   ├── cli/                       ← CLI 子命令
+│   ├── config/                    ← YAML 配置文件
+│   ├── data/                      ← 运行时数据和 prompt 模板
+│   ├── log_analysis/              ← 日志分析模块
+│   ├── tests/                     ← 测试
+│   └── prompts/                   ← Prompt 模板
+└── scripts/                       ← 工具脚本
+```
+
+---
+
+## 开工前：必读清单
+
+按顺序读，每个文件解决一个问题：
+
+| 顺序 | 文件 | 解决什么问题 |
+|------|------|-------------|
+| 1 | `LLM_GUIDE.md` | 你在哪、该读什么、怎么改 |
+| 2 | `docs/ROADMAP.md` | 要做的事在不在列表里、当前状态 |
+| 3 | `DESIGN_LEDGER.md` | 设计决策来源、是否有冲突的设计原则 |
+| 4 | `agent/DIRECTORY_GUIDE.md` | 代码放哪里、边界是什么 |
+| 5 | `docs/design/` 对应模块 | 模块级详细设计（如果改动涉及特定模块） |
+| 6 | `docs/modules/<module>/02-progress.md` | 模块最近推进了什么 |
+| 7 | `docs/modules/<module>/04-structure.md` | 模块结构和核心文件 |
+
+如果改动涉及测试：
+- 读 `TESTS.md` 了解测试策略
+- 读 `TEST_CHECKLIST.md` 了解收口检查项
+
+如果改动涉及 subagent/capability/runner：
+- 读 `SUBAGENT_RUNBOOK.md` 了解运行协议
+
+---
+
+## 收工后：必改清单
+
+### 1. 更新 `docs/ROADMAP.md`
+
+- 如果你完成了某个条目：把状态改为"已落地"，或直接删除条目（已移入 COMPLETED.md）。
+- 如果你在做某个条目但没做完：更新"当前进展"和"待做"。
+- 如果你发现了新问题或新需求：在 ROADMAP.md 末尾新增条目，必须写"解决问题"。
+- 如果你发现设计冲突：先更新 DESIGN_LEDGER.md，再更新 ROADMAP.md。
+
+### 2. 更新 `docs/COMPLETED.md`
+
+- 新增一条记录，包含：解决问题、落地内容、验证方式。
+- 不要写太长，每条 10-20 行足够。
+
+### 3. 更新 `DESIGN_LEDGER.md`（如果涉及设计决策）
+
+- 新增条目写清楚：日期、状态、摘要、已落地、后续方向。
+- 超过 100 行的细节拆到 `docs/design/<module>.md`。
+
+### 4. 更新 `STATUS.md`（如果改动影响测试基线或可用能力）
+
+- 更新测试状态（通过数量）。
+- 更新"当前可用能力"或"当前主要限制"。
+- 更新"最新恢复入口"（如果改动影响恢复链路）。
+
+### 5. 更新模块四件套（如果改动涉及特定模块）
+
+- `docs/modules/<module>/02-progress.md`：记录本次推进。
+- `docs/modules/<module>/04-structure.md`：如果结构变了。
+
+---
+
+## 编码规范
+
+### 注释格式（两层注释）
+
+```python
+def example(...):
+    """LLM: technical summary of the contract, side effects and invariants.
+
+    人话说明：
+    这个函数用来做什么，什么时候会被调用。
+    """
+```
+
+- 第一行给 LLM 读，写清 contract / invariant / side effects。
+- 第二行给人读，用大白话。
+- 有副作用的函数必须写清：会不会写文件、调用 API、启动进程、改状态。
+- 测试函数不强求长注释。
+
+### 测试要求
+
+- 新增测试用 `test_*.py` 或 `test_` 前缀，`run_tests.py` 会自动发现。
+- 完整冒烟默认调用真实 API，echo/fake backend 只用于纯函数定位。
+- 冒烟测试必须隔离 workspace，不污染开发仓库。
+- 测试通过后更新 `STATUS.md` 的测试数量。
+
+### 代码放置决策
+
+按这个顺序问：
+
+1. 外部协议客户端？→ `backends/` 或 `clients/`
+2. 主代理流程编排？→ `agent_core/`
+3. 子代理领域规则？→ `subagents/`
+4. 工具实现或安全边界？→ `tooling/`
+5. Gateway 文件协议？→ `gateway_parts/`
+6. 本地事实源持久化？→ `local_storage/`
+7. 记忆存储？→ `memory_store/`
+8. Prompt 上下文构造？→ `prompting_parts/`
+9. 配置 schema？→ `settings/`
+10. 底层无业务含义的 I/O？→ `io/`
+
+都不是？先写清楚变化原因，再决定是否需要新目录。不要塞进 `utils/common/shared`。
+
+---
+
+## 文档体系
+
+### 设计层
+
+| 文档 | 用途 | 更新频率 |
+|------|------|---------|
+| `DESIGN_LEDGER.md` | 设计决策主台账，只放摘要和导航 | 每次设计决策变更 |
+| `docs/design/*.md` | 模块级详细设计 | 模块设计变更时 |
+| `GATEWAY_DESIGN.md` | Gateway 专项设计 | Gateway 架构变更时 |
+| `*_BACKLOG.md` | 痛点收集和设计原则 | 发现新痛点时 |
+
+### 状态层
+
+| 文档 | 用途 | 更新频率 |
+|------|------|---------|
+| `STATUS.md` | 当前状态、测试基线、推荐下一步 | 每次测试基线或能力变更 |
+| `docs/ROADMAP.md` | 待做/进行中功能清单 | 开工前读后、收工后改 |
+| `docs/COMPLETED.md` | 已落地功能清单 | 功能完成时 |
+
+### 运行层
+
+| 文档 | 用途 | 更新频率 |
+|------|------|---------|
+| `SUBAGENT_RUNBOOK.md` | subagent/capability/runner 运行协议 | 主链路变更时 |
+| `TESTS.md` | 测试策略 | 测试策略变更时 |
+| `TEST_CHECKLIST.md` | 收口检查项 | 新增检查项时 |
+| `CLI_REFERENCE.md` | CLI 命令参考 | 新增/变更命令时 |
+| `CODEBASE_TREE.md` | 代码树说明 | 结构变更时 |
+
+### 模块四件套（docs/modules/<module>/）
+
+| 文件 | 用途 |
+|------|------|
+| `01-discussion.md` | 灵感和讨论 |
+| `02-progress.md` | 推进、解决的问题和测试 |
+| `03-purpose.md` | 初心和设计想法 |
+| `04-structure.md` | 结构树、核心文件、数据流 |
+
+同步门：`scripts/check_doc_sync.py` 会检查 covered module 的文档是否与代码同步。
+
+---
+
+## 设计原则
+
+从 DESIGN_LEDGER.md 提炼的核心约束：
+
+1. **"受控施工队"模型**：子代理负责生产材料、局部检查、挑错和修指定缺陷；不能定义完成标准，不能决定最终交付。
+2. **Fake Done 防护**：没有 evidence 的任务不能标记为 DONE。
+3. **独立验收**：runner 完成后只能进入 AWAITING_ACCEPTANCE，不能自己标记 DONE。
+4. **patch 不自动应用**：patch 审核器只审核状态，不自动应用 diff（除非有独立审核链路）。
+5. **自学习必须用户确认**：学习候选必须经过用户确认才能变成正式 skill。
+6. **默认 dry-run**：所有调度/执行命令默认 dry-run，只有显式开关才改状态。
+7. **不删文件**：action apply 不删除文件，不覆盖已有内容。
+8. **文件第一事实源**：机器判断必须读 JSON/JSONL，Markdown 台账不是事实源。
+9. **每个功能写"解决问题"**：不能只罗列模块名。
+10. **通道故障 ≠ 任务失败**：runtime/session/adapter 故障不等于任务本身失败。
+
+---
+
+## 常见场景
+
+### 我要加一个新功能
+
+1. 读 `docs/ROADMAP.md`，确认是否已有相关条目。
+2. 读 `DESIGN_LEDGER.md`，确认没有设计冲突。
+3. 读 `agent/DIRECTORY_GUIDE.md`，确认代码放哪里。
+4. 写代码、写测试。
+5. 跑 `python3 -m pytest -q` 确认全量通过。
+6. 更新 `docs/ROADMAP.md`（改状态）和 `docs/COMPLETED.md`（新增记录）。
+7. 如果涉及设计决策，更新 `DESIGN_LEDGER.md`。
+
+### 我要修一个 bug
+
+1. 读相关代码和测试。
+2. 修 bug、补测试。
+3. 跑 `python3 -m pytest -q` 确认全量通过。
+4. 如果 bug 揭示了设计问题，更新 `DESIGN_LEDGER.md`。
+
+### 我要重构代码
+
+1. 读 `agent/DIRECTORY_GUIDE.md`，确认边界。
+2. 读 `DESIGN_LEDGER.md` "代码体检与后续拆分计划"条目。
+3. 只移动一个低耦合区域，先保持 import 兼容。
+4. 跑完整测试后再继续。
+5. 不在同一轮同时改行为和大移动文件。
+
+### 我不确定该不该改
+
+1. 读 `docs/ROADMAP.md`，看优先级。
+2. 读 `DESIGN_LEDGER.md`，看设计原则。
+3. 读 `STATUS.md` "当前主要限制"，看是否在限制列表里。
+4. 如果都不确定，在 `DISCUSSION_BACKLOG.md` 里记录问题，等确认后再动。

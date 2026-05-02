@@ -11,6 +11,7 @@
 
 ```text
 simple-python-agent-v0.3/                      # 项目根目录，放代码、说明文档和验证记录
+|-- LLM_GUIDE.md                               # LLM/AI 开发者总入口，含开工前/收工后清单和编码规范
 |-- pyproject.toml                             # Python packaging 配置，提供 my-agent console script
 |-- CLI_REFERENCE.md                           # 完整 CLI 参数手册，说明每个命令和参数
 |-- ARCHITECTURE_GUIDE.md                      # 架构边界、拆分顺序和两层注释规则，给人和 LLM 都看
@@ -20,6 +21,8 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |-- WORKSTREAMS.md                             # 并行开发工作台说明，定义 worktree、职责边界和集成流程
 |-- HANDOFF_TEMPLATE.md                        # 并行开发线完成后的交接模板
 |-- docs/                                      # 长篇项目文档目录
+|   |-- ROADMAP.md                             # 待做/进行中功能清单，开工前必读
+|   |-- COMPLETED.md                           # 已落地功能清单，收工后必改
 |   `-- design/                                # 模块设计文档，承载 DESIGN_LEDGER 的长篇细节
 |       |-- README.md                          # 模块设计文档索引和拆分规则
 |       |-- log-analysis.md                    # 日志分析模块验收状态、剩余缺口和 worker 切片
