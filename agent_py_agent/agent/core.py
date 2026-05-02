@@ -101,6 +101,7 @@ class SimpleAgent(
             self.root / config.subagent_workspace,
             local_store=self.local_store,
             workspace_root=self.root,
+            enable_self_learning=config.enable_self_learning,
         )
 
         workspace_root = self.root.parent if (self.root / "__main__.py").exists() else self.root

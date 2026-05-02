@@ -152,6 +152,7 @@ Ctrl+C
 | `local-rebuild` | 从 memory/gateway/subagent 文件事实源重建 LocalStore | 是 | 否 |
 | `logs` | log analysis 状态、文件导入和安全查询入口 | status/query 只读；ingest 写 log analysis 数据目录 | 否 |
 | `chat` | 启动交互循环 | 默认写记忆，可用 `--no-save` 关闭 | 是；加 `--gateway` 时由后台 gateway 调用 |
+| `learn` | 查看和确认自动生成的 learning draft 候选 | 读取或更新 `data/learning_drafts/*.json` | 否 |
 | `spawn-subagents` | 拆分并创建 subagent 工单 | 是 | 否 |
 | `subagents` | 查看 subagent 看板 | 否 | 否 |
 | `subagents-due-check` | 巡检 subagent 风险 | 写全局 due-check 报告 | 否 |
@@ -238,6 +239,24 @@ my-agent remember "我喜欢清晰的表格" --kind preference
 | --- | --- |
 | `content` | 必填，记忆内容。 |
 | `--kind <kind>` | 记忆类型，默认 `note`，常用值如 `note`、`preference`、`fact`。 |
+
+## `learn`
+
+```powershell
+my-agent learn list
+my-agent learn accept <candidate_id>
+my-agent learn reject <candidate_id>
+my-agent learn stats --json
+```
+
+当 `agent_config.yaml` 里打开 `enable_self_learning: true` 后，runner 结构化输出中的 `lessons` 会自动沉淀为 `data/learning_drafts/*.json` 候选草稿。`learn` 命令只管理这些候选，不会自动改正式 skill。
+
+| 子命令 | 说明 |
+| --- | --- |
+| `learn list` | 列出当前 learning draft，显示状态、置信度、出现次数和证据数。 |
+| `learn accept <candidate_id>` | 把一个候选标记为 `accepted`，表示这条 lesson 值得后续人工提升。 |
+| `learn reject <candidate_id>` | 把一个候选标记为 `rejected`。 |
+| `learn stats` | 输出 draft/accepted/rejected 汇总；可加 `--json`。 |
 
 ## `memory-list`
 

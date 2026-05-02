@@ -16,6 +16,7 @@ from .subagents.models import (
     ChannelProbeReport,
     ChannelProbeResult,
     ContextManifest,
+    LearningCandidate,
     QualityContract,
     SubAgentCard,
     SubAgentExecutionContext,

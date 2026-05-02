@@ -327,6 +327,8 @@ class SubAgentTask:
     runner_attempts: int = 0
     runner_last_attempt_at: float = 0.0
     runner_last_error: str = ""
+    runner_active_attempt_id: str = ""
+    runner_abandoned_attempt_ids: list[str] = field(default_factory=list)
     created_at: float = 0.0
     updated_at: float = 0.0
     heartbeat_at: float = 0.0
@@ -373,3 +375,25 @@ class SubAgentTask:
     last_probe_at: float = 0.0
     channel_checks: list[ChannelProbeCheck] = field(default_factory=list)
     channel_probe_file: str = ""
+
+
+@dataclass
+class LearningCandidate:
+    """自学习候选草稿。
+
+    这是“可能值得沉淀”的 lesson 草稿，不代表已经自动升级成正式 skill。
+    只有在用户显式 accept 后，状态才会从 draft 变成 accepted。
+    """
+
+    id: str
+    lesson: str
+    normalized_key: str
+    status: str = "draft"
+    confidence: float = 0.5
+    occurrence_count: int = 1
+    evidence_count: int = 1
+    source_runs: list[str] = field(default_factory=list)
+    evidence: list[dict[str, object]] = field(default_factory=list)
+    variants: list[str] = field(default_factory=list)
+    created_at: float = 0.0
+    updated_at: float = 0.0

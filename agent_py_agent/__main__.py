@@ -84,6 +84,7 @@ from .cli.local_commands import (
     cmd_status,
     cmd_timeline,
 )
+from .cli.learning import cmd_learn_accept, cmd_learn_list, cmd_learn_reject, cmd_learn_stats
 from .cli.local_doctor import (
     _add_doctor_check,
     build_local_doctor_report,

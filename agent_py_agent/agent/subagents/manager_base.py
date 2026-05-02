@@ -184,12 +184,14 @@ class SubAgentBaseMixin:
         workspace: str | Path,
         local_store: "LocalStore | None" = None,
         workspace_root: str | Path | None = None,
+        enable_self_learning: bool = False,
     ):
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.cards: dict[str, SubAgentCard] = {}
         self.local_store = local_store
         self.workspace_root = Path(workspace_root).resolve() if workspace_root else self.workspace.resolve().parent
+        self.enable_self_learning = bool(enable_self_learning)
 
     def split(self, goal: str, count: int, *, workflow_mode: str = "off") -> list[SubAgentTask]:
         """把一个目标拆成若干子任务记录。

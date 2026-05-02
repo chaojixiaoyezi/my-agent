@@ -65,6 +65,7 @@ class SimpleAgentSubagentMixin:
         max_cards: int = 0,
         probe: bool = True,
         retry_reason: str = "",
+        attempt_id: str = "",
     ) -> SubAgentRunnerResult:
         """按执行上下文运行一个子代理入口。
 
@@ -72,14 +73,17 @@ class SimpleAgentSubagentMixin:
         这条最小链路打通。默认 dry-run，避免误触真实模型接口。
         """
 
-        if not dry_run:
-            self.subagents.prepare_runner_attempt(run_id, retry_reason=retry_reason)
+        active_attempt_id = str(attempt_id or "").strip()
+        if not dry_run and not active_attempt_id:
+            prepared = self.subagents.prepare_runner_attempt(run_id, retry_reason=retry_reason)
+            active_attempt_id = prepared.runner_active_attempt_id
 
         context = self.subagents.write_execution_context(run_id, max_cards=max_cards)
         prompt = _build_subagent_runner_prompt(context, instruction)
         if dry_run:
             return self.subagents.record_runner_result(
                 run_id,
+                attempt_id=active_attempt_id,
                 dry_run=True,
                 ok=True,
                 message="dry-run: 已生成执行上下文和 runner prompt，未调用模型。",
@@ -93,6 +97,7 @@ class SimpleAgentSubagentMixin:
                 prompt = _build_subagent_runner_prompt(context, instruction)
                 return self.subagents.record_runner_result(
                     run_id,
+                    attempt_id=active_attempt_id,
                     dry_run=False,
                     ok=False,
                     message="通道健康检查为 BROKEN，未启动模型执行。",
@@ -116,6 +121,7 @@ class SimpleAgentSubagentMixin:
         except Exception as exc:
             failed_result = self.subagents.record_runner_result(
                 run_id,
+                attempt_id=active_attempt_id,
                 dry_run=False,
                 ok=False,
                 message=f"runner 执行失败: {exc}",
@@ -175,6 +181,7 @@ class SimpleAgentSubagentMixin:
                     structured_repair_error = repaired.parse_error or "repair response still missing structured output"
         runner_result = self.subagents.record_runner_result(
             run_id,
+            attempt_id=active_attempt_id,
             dry_run=False,
             ok=structured.ok if structured.found else True,
             message=message,

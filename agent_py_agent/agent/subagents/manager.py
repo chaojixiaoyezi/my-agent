@@ -15,6 +15,7 @@ from .manager_board import SubAgentBoardMixin
 from .manager_capabilities import SubAgentCapabilityMixin
 from .manager_dispatch import SubAgentDispatchMixin
 from .manager_indexing import SubAgentIndexingMixin
+from .manager_learning import SubAgentLearningMixin
 from .manager_lifecycle import SubAgentLifecycleMixin
 from .manager_patch import SubAgentPatchMixin
 from .manager_channel_probe import SubAgentChannelProbeMixin
@@ -35,6 +36,7 @@ class SubAgentManager(
     SubAgentRunnerContextMixin,
     SubAgentRunnerResultMixin,
     SubAgentChannelProbeMixin,
+    SubAgentLearningMixin,
     SubAgentIndexingMixin,
 ):
     """LLM contract: public subagent orchestration facade composed from focused mixins.

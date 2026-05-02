@@ -8,6 +8,36 @@
 
 ## 基础设施
 
+### 并行 Worker Pool
+
+解决问题：`subagents-dispatch --apply --execute-runners` 虽然已经能推进 runner，但默认还是串行心智，`runner_concurrency` / `runner_start_rate` / `runner_timeout_seconds` 没有真正接到 dispatch worker pool，单个 worker 卡住时还可能拖垮整轮调度。
+
+落地内容：
+- `dispatch_subagents()` 现在会真实读取 `runner_concurrency` 和 `runner_start_rate`，用 `ThreadPoolExecutor.submit()` / `as_completed()` 执行并行 runner
+- `runner_start_rate` 会限制“本轮最多启动多少个 runner”，避免一次 dispatch 把所有候选都排进队列
+- 新增 `runner_timeout_seconds` 解析和超时处理；超时时会把该 attempt 标成 `TIMEOUT`，并阻止迟到结果覆盖账本
+- 新增 attempt 级状态：`runner_active_attempt_id` / `runner_abandoned_attempt_ids`，解决超时后晚到回包污染状态的问题
+- 并行分支会把单个 worker 异常收口成该 run 的失败记录，不再让整个 dispatch 因一个 future 抛错而中断
+- `runner_timeout` 被纳入可重试 failure_type，后续可继续走现有 retry policy
+
+验证方式：
+- `python3 -m pytest -q agent_py_agent/tests/test_agent/test_subagent_worker_pool.py agent_py_agent/tests/test_agent/test_dispatch_and_planner.py agent_py_agent/tests/test_subagent_learning.py agent_py_agent/tests/test_cli_reference.py`
+
+### Lessons 自动生成自学习草稿
+
+解决问题：runner 输出里的 `lessons` 之前只会落到 `output.json` 和 `DEBRIEF.md`，无法跨任务聚合、无法做人工确认，也没有独立的自学习候选池。
+
+落地内容：
+- 新增 `LearningCandidate` 和 `SubAgentLearningMixin`，把 learning draft 独立存到 `data/learning_drafts/*.json`
+- `record_runner_result()` 现在会在 `enable_self_learning=true` 且 runner 成功产出 `lessons` 时自动生成或更新候选草稿
+- 同类 lesson 会按相似度做去重聚合，并累计 `occurrence_count`、`evidence_count`、`confidence`
+- 每条候选都保留 `run_id`、`output.json` 路径、任务目录和变体文案，方便后续人工核查
+- 新增 `my-agent learn list|accept|reject|stats`，允许查看、确认和拒绝候选，但不会自动提升正式 skill
+- 同步更新 `CLI_REFERENCE.md`
+
+验证方式：
+- `python3 -m pytest -q agent_py_agent/tests/test_subagent_learning.py agent_py_agent/tests/test_cli_reference.py agent_py_agent/tests/test_agent/test_subagent_acceptance.py`
+
 ### Patch 自动应用
 
 解决问题：runner 输出的 patches 之前只是一组计划/状态记录，父代理必须人工接手改文件，无法做独立的 apply 审核、diff 审计、越界拦截、测试验证和失败回滚。

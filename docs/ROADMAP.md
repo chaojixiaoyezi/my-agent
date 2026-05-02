@@ -17,50 +17,7 @@
 
 ## 下一版优先级
 
-来自 STATUS.md，当前最急迫的两项：
-
-### 1. Lessons 自动生成自学习草稿
-
-状态：设计中
-
-解决问题：runner 输出的 lessons 只写到 output.json 和 DEBRIEF.md，无法聚合、无法被后续任务引用、无法沉淀成 skill。
-
-设计原则：必须走"生成候选草稿 → 用户确认 → 进入 skill"路径，不能自动提升。`enable_self_learning` 配置开关已存在但代码未实现。
-
-当前进展：
-- runner 结构化输出中 `lessons` / `next_actions` 已写进 `output.json` 和 `DEBRIEF.md`
-- `enable_self_learning` 配置开关存在，默认关闭
-- `MEMORY_BACKLOG.md` 明确"自学习先不开发，只预留接口和沉淀队列位置"
-
-待做：
-- `agent_py_agent/data/learning_drafts/` 保存学习候选草稿
-- 从 runner output.json 提取 lessons → 生成 LearningCandidate 结构
-- `/learn` 查看候选、`/learn accept <id>` 确认写入 skill、`/learn reject <id>` 拒绝
-- 与 capability_gap 关联：未解决或反复出现的问题自动生成候选
-
-设计文档：[docs/design/subagent-quality-contract.md](design/subagent-quality-contract.md)
-设计台账：DESIGN_LEDGER.md "自学习"
-
-### 2. 并行 Worker Pool
-
-状态：部分落地
-
-解决问题：当前 `threading.ThreadPoolExecutor` 默认 concurrency=1，多任务串行执行，效率低。`runner_concurrency` 和 `runner_start_rate` 配置已存在但未接到后台 worker pool。
-
-当前进展：
-- `runner_concurrency` 配置已存在，默认 `auto -> 1`
-- `runner_start_rate` 配置已存在
-- gateway 请求队列已有保守 worker pool（默认 1 个 worker）
-- `subagents-dispatch --apply --execute-runners` 已能执行 runner
-
-待做：
-- 把 `runner_concurrency` 接到后台 worker pool
-- 进程级隔离、session 复用
-- 超时硬中断和跨进程锁
-- 自适应并发和 per-model 限流
-- API 预算、启动速率策略
-
-设计台账：DESIGN_LEDGER.md "Gateway 参数分层"、"本地恢复、诊断、worker 和 adapter 第一版"
+来自 STATUS.md，当前最急迫的任务已清空，下面保留中长期项。
 
 ---
 
