@@ -70,6 +70,7 @@ from .subagents import (
 )
 from .task_commands import cmd_task_list, cmd_task_lookup
 from .notifications_cmd import cmd_notifications
+from .audit_log_cmd import cmd_audit_log
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -625,6 +626,20 @@ def build_parser() -> argparse.ArgumentParser:
     notifications.add_argument("--flush", action="store_true", help="推送所有离线存储的通知")
     notifications.add_argument("--limit", type=int, default=20, help="最多显示多少条")
     notifications.set_defaults(func=cmd_notifications)
+
+    audit = sub.add_parser("audit-log", help="查询审计日志")
+    audit.add_argument("--user", help="按用户 ID 过滤")
+    audit.add_argument("--action", help="按动作类型过滤")
+    audit.add_argument("--target", help="按目标 ID 过滤")
+    audit.add_argument("--target-type", help="按目标类型过滤")
+    audit.add_argument("--status", help="按状态过滤（success/denied/error）")
+    audit.add_argument("--limit", type=int, default=100, help="最多显示多少条（默认100）")
+    audit.add_argument("--offset", type=int, default=0, help="跳过多少条（用于分页）")
+    audit.add_argument("--recent-users", action="store_true", help="显示最近活跃用户")
+    audit.add_argument("--summary", action="store_true", help="显示统计摘要")
+    audit.add_argument("--cleanup", action="store_true", help="清理旧审计记录")
+    audit.add_argument("--days", type=int, default=90, help="清理时保留天数（默认90天）")
+    audit.set_defaults(func=cmd_audit_log)
 
     return parser
 
