@@ -1,0 +1,116 @@
+[
+  {
+    "case_id": "case-web-attack-001",
+    "severity": "high",
+    "event_class": "web_attack",
+    "trigger_entities": {
+      "attacker_ip": ["198.51.100.23"],
+      "victim_ip": ["10.1.2.3"],
+      "victim_asset_group": ["生产Web"],
+      "domain": ["www.example.com"],
+      "uri": ["/api/v1/admin"]
+    },
+    "initial_evidence": [
+      {
+        "evidence_id": "evidence-waf-001",
+        "kind": "alert",
+        "uri": "waf:alert-001",
+        "path": "validation/security_fixtures/security_alert_v1.jsonl",
+        "source_id": "waf-prod",
+        "raw_ref": "raw-batch-001:line-45",
+        "time_range": ["2026-04-30T09:30:00Z", "2026-04-30T09:30:01Z"],
+        "summary": "WAF 命中疑似 SQL 注入规则",
+        "metadata": {
+          "rule_id": "sigma-xxx",
+          "rule_name": "Suspicious SQL Injection",
+          "technique_ids": ["T1190"]
+        },
+        "created_at": "2026-04-30T09:31:00Z"
+      }
+    ],
+    "detector_id": "waf_sql_injection_detector",
+    "created_at": "2026-04-30T09:31:00Z",
+    "attributes": {
+      "attack_type": "sql_injection",
+      "confidence": 0.85,
+      "mitre_tactics": ["Initial Access", "Execution"],
+      "mitre_techniques": ["T1190", "T1059.001"]
+    }
+  },
+  {
+    "case_id": "case-brute-force-002",
+    "severity": "medium",
+    "event_class": "brute_force",
+    "trigger_entities": {
+      "attacker_ip": ["203.0.113.45", "203.0.113.46"],
+      "victim_ip": ["10.1.2.10"],
+      "victim_asset_group": ["VPN网关"],
+      "user": ["admin", "root"]
+    },
+    "initial_evidence": [
+      {
+        "evidence_id": "evidence-vpn-001",
+        "kind": "alert",
+        "uri": "vpn:alert-002",
+        "path": "validation/security_fixtures/vpn_failed_logins.jsonl",
+        "source_id": "vpn-prod",
+        "raw_ref": "raw-batch-002:line-120",
+        "time_range": ["2026-04-30T10:15:00Z", "2026-04-30T10:20:00Z"],
+        "summary": "检测到 50 次失败登录尝试",
+        "metadata": {
+          "failed_attempts": 50,
+          "target_users": ["admin", "root"],
+          "time_window_minutes": 5
+        },
+        "created_at": "2026-04-30T10:21:00Z"
+      }
+    ],
+    "detector_id": "vpn_brute_force_detector",
+    "created_at": "2026-04-30T10:21:00Z",
+    "attributes": {
+      "attack_type": "credential_stuffing",
+      "confidence": 0.72,
+      "failed_attempts": 50,
+      "unique_attacker_ips": 2,
+      "target_users": ["admin", "root"]
+    }
+  },
+  {
+    "case_id": "case-file-upload-003",
+    "severity": "high",
+    "event_class": "webshell_upload",
+    "trigger_entities": {
+      "attacker_ip": ["198.51.100.99"],
+      "victim_ip": ["10.1.2.5"],
+      "victim_asset_group": ["文件服务器"],
+      "uri": ["/upload.php", "/uploads/shell.php"]
+    },
+    "initial_evidence": [
+      {
+        "evidence_id": "evidence-edr-001",
+        "kind": "alert",
+        "uri": "edr:alert-003",
+        "path": "validation/security_fixtures/edr_file_events.jsonl",
+        "source_id": "edr-prod",
+        "raw_ref": "raw-batch-003:line-78",
+        "time_range": ["2026-04-30T11:00:00Z", "2026-04-30T11:00:05Z"],
+        "summary": "检测到可疑的 PHP 文件上传和执行",
+        "metadata": {
+          "file_sha256": "abc123...",
+          "file_path": "/var/www/html/uploads/shell.php",
+          "process_name": "php-fpm",
+          "parent_process": "nginx"
+        },
+        "created_at": "2026-04-30T11:01:00Z"
+      }
+    ],
+    "detector_id": "edr_webshell_detector",
+    "created_at": "2026-04-30T11:01:00Z",
+    "attributes": {
+      "attack_type": "webshell",
+      "confidence": 0.91,
+      "file_type": "PHP",
+      "suspicious_behavior": ["upload", "execution", "remote_access"]
+    }
+  }
+]

@@ -75,6 +75,19 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- local_store.py                     # LocalStore 兼容组合入口，真实实现已拆到 local_storage/
 |   |   |-- local_storage/                     # LocalStore models/schema/records/search/events/maintenance
 |   |   |-- log_analysis/                      # 可选日志分析底座，负责安全日志接入、解析、查询、检测、case、报告和 analyst 派工
+|   |   |   |-- models.py                      # 核心数据模型：Case/LogWorkOrder/SecurityCase/QueryResult/SecurityAlertV1 等
+|   |   |   |-- work_order.py                  # LogWorkOrder -> SubAgentTask 转换器，桥接日志补查到子代理系统
+|   |   |   |-- bounded_query.py               # 受控查询工具，提供时间窗口和结果数量限制的日志查询功能
+|   |   |   |-- agents/                        # 日志分析子代理合同和 runner 模板
+|   |   |   |-- analytics/                     # 检测、ML、统计和特征提取
+|   |   |   |-- cases/                         # Case 创建、更新、状态流转和检索
+|   |   |   |-- config/                        # 日志分析配置加载和验证
+|   |   |   |-- dispatch/                      # 日志分析任务调度和子代理派遣
+|   |   |   |-- ingest/                        # 日志接入、解析、去重和 checkpoint
+|   |   |   |-- parsers/                       # 日志解析器注册表和实现
+|   |   |   |-- security/                      # 安全检测器和规则
+|   |   |   |-- storage/                       # 日志分析专用存储接口
+|   |   |   `-- tools/                         # 日志分析专用工具
 |   |   |-- memory.py                          # 记忆兼容入口，真实实现已拆到 memory_store/
 |   |   |-- memory_settings.py                 # memory 配置安全解析兼容入口，真实实现已拆到 settings/memory.py
 |   |   |-- memory_store/                      # 长期记忆存储，当前是 JSONL + LocalStore 索引
@@ -100,6 +113,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- memory.jsonl                       # 长期记忆文件
 |   |   |-- gateway/                           # gateway pid/state/heartbeat/log/stop request、inbox 和 response 输出目录
 |   |   |-- local_store/                       # SQLite 本地事实源、正文文件和追加式事件流水
+|   |   |-- log_fixtures/                      # 日志分析测试用 fixture，包含 sample_cases.json 等
 |   |   `-- subagents/                         # 子任务记录输出目录
 |   |-- extensions/                            # 预留扩展目录
 |   |-- prompts/                               # prompt 规则文件目录
@@ -114,6 +128,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |       |-- test_log_analysis_cli.py           # 日志分析 logs CLI 状态、接入和查询测试
 |       |-- test_log_analysis_detectors.py     # 日志分析软检测器、case、route 和报告测试
 |       |-- test_log_analysis_dispatch.py      # 日志分析 analyst/reviewer 合同和 dispatch 测试
+|       |-- test_log_analysis_first_loop.py    # 日志分析第一轮循环：SecurityCase/LogWorkOrder/work_order->subagent/bounded_query
 |       |-- test_log_analysis_ingest.py        # SecurityAlertV1 CSV/JSONL 接入、checkpoint、dedup 和 dead letter 测试
 |       |-- test_log_analysis_models.py        # 日志分析模型和配置测试
 |       |-- test_log_analysis_query.py         # 本地日志查询、evidence 和 hunting tool 测试

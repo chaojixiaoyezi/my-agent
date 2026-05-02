@@ -324,18 +324,84 @@ class CaseRecord(JsonRoundTripMixin):
 Case = CaseRecord
 
 
+@dataclass
+class SecurityCase(JsonRoundTripMixin):
+    """安全检测器产出的 case 模型。
+
+    由检测器创建，包含基本的案件信息、触发实体、初始证据和来源。
+    用于桥接到 LogWorkOrder 并最终转换为 SubAgentTask。
+    """
+    case_id: str
+    severity: str = "medium"
+    event_class: str = "alert"
+    trigger_entities: dict[str, list[str]] = field(default_factory=dict)
+    initial_evidence: list[EvidenceRef] = field(default_factory=list)
+    detector_id: str = ""
+    created_at: str = field(default_factory=utc_now_iso)
+    attributes: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, values: Mapping[str, Any]) -> "SecurityCase":
+        allowed = {item.name for item in fields(cls)}
+        clean = {key: value for key, value in values.items() if key in allowed}
+        clean["initial_evidence"] = _coerce_evidence_refs(clean.get("initial_evidence", []))
+        return cls(**clean)
+
+
+@dataclass
+class LogWorkOrder(JsonRoundTripMixin):
+    """日志补查工单模型。
+
+    从 SecurityCase 创建，包含补查目标、时间窗口、查询限制和证据预算。
+    负责桥接到 SubAgentTask 执行系统。
+    """
+    work_order_id: str
+    case_id: str
+    investigation_goal: str
+    start_time: str
+    end_time: str
+    allowed_query_templates: list[str] = field(default_factory=list)
+    max_results: int = 100
+    evidence_budget: int = 1000
+    created_at: str = field(default_factory=utc_now_iso)
+    status: str = "OPEN"
+    assigned_run_id: str = ""
+    attributes: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class QueryResult(JsonRoundTripMixin):
+    """受控查询的结果。
+
+    包含查询内容、结果列表、数量统计和截断标志。
+    """
+    query_template: str
+    query_params: dict[str, Any] = field(default_factory=dict)
+    time_window: dict[str, str] = field(default_factory=dict)
+    results: list[dict[str, Any]] = field(default_factory=list)
+    result_count: int = 0
+    truncated: bool = False
+    max_limit: int = 100
+    created_at: str = field(default_factory=utc_now_iso)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 __all__ = [
     "Case",
     "CaseRecord",
     "Checkpoint",
     "EvidenceRef",
     "Finding",
+    "JsonRoundTripMixin",
     "JsonValue",
+    "LogWorkOrder",
     "NormalizedEvent",
     "QueryPlan",
+    "QueryResult",
     "RawBatch",
     "SECURITY_ALERT_V1_FIELD_ALIASES",
     "SecurityAlertV1",
+    "SecurityCase",
     "SourceSpec",
     "utc_now_iso",
 ]

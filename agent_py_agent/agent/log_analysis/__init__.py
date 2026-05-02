@@ -17,11 +17,19 @@ from .models import (
     Checkpoint,
     EvidenceRef,
     Finding,
+    JsonRoundTripMixin,
+    LogWorkOrder,
     NormalizedEvent,
+    QueryResult,
     RawBatch,
+    SECURITY_ALERT_V1_FIELD_ALIASES,
     SecurityAlertV1,
+    SecurityCase,
     SourceSpec,
+    utc_now_iso,
 )
+from .work_order import work_order_to_subagent_task
+from .bounded_query import bounded_query
 
 
 __all__ = [
@@ -31,11 +39,17 @@ __all__ = [
     "Checkpoint",
     "EvidenceRef",
     "Finding",
+    "JsonRoundTripMixin",
     "LogAnalysisConfig",
+    "LogWorkOrder",
     "NormalizedEvent",
+    "QueryResult",
     "RawBatch",
+    "SECURITY_ALERT_V1_FIELD_ALIASES",
     "SecurityAlertV1",
+    "SecurityCase",
     "SourceSpec",
+    "bounded_query",
     "collect_doctor_status",
     "describe_capability_levels",
     "describe_feature_gates",
@@ -43,4 +57,6 @@ __all__ = [
     "is_feature_enabled",
     "load_log_analysis_config",
     "normalize_log_analysis_config",
+    "utc_now_iso",
+    "work_order_to_subagent_task",
 ]
