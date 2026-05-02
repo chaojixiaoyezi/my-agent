@@ -114,36 +114,35 @@ def outgoing_to_feishu(msg: OutgoingMessage) -> dict[str, Any]:
 def qq_to_incoming(payload: dict[str, Any]) -> IncomingMessage | None:
     """把 QQ 机器人回调 payload 转换成 IncomingMessage。
 
-    QQ 消息事件格式（简化版）：
-    {
-        "event": {
-            "user_id": 123456789,
-            "channel_id": 987654321,
-            "guild_id": 111111,
-            "content": "hello",
-            "msg_id": "aaa",
-            "timestamp": "1234567890"
-        }
-    }
-    或新版 Open API 格式：
-    {
-        "d": {
-            "author": {"id": "123"},
-            "content": "hello",
-            "msg_id": "aaa",
-            "timestamp": 1234567890
-        },
-        "s": "READY"
-    }
+    支持两种格式：
+    1. QQ 官方 WebSocket 事件（t= MESSAGE_CREATE）：
+       {"t": "MESSAGE_CREATE", "d": {"id": "...", "channel_id": "...",
+         "content": "...", "author": {"user_openid": "..."}, "timestamp": "..."}}
+    2. 旧版简化格式（字段在 event 或 d 里）：
+       {"event": {...}} 或 {"d": {"author": {"id": "..."}, ...}}
     """
     try:
-        # 新版 OneBot 格式（字段在 d 里）
+        # event_type = payload.get("t", "")  # 新格式用 t 字段
         d = payload.get("d", {})
         if d:
-            user_id = str(d.get("author", {}).get("id", d.get("user_id", "")))
+            # 优先用 user_openid（QQ 官方 WebSocket 格式）
+            author = d.get("author", {})
+            user_id = str(
+                author.get("user_openid", "")
+                or author.get("id", "")
+                or d.get("user_id", "")
+            )
             content = d.get("content", "").strip()
-            msg_id = d.get("msg_id", "")
-            timestamp = float(d.get("timestamp", time.time()))
+            msg_id = d.get("id", d.get("msg_id", ""))
+            raw_ts = d.get("timestamp", time.time())
+            # timestamp 可以是 ISO 字符串或数字
+            try:
+                if isinstance(raw_ts, str):
+                    ts = _parse_iso_timestamp(raw_ts)
+                else:
+                    ts = float(raw_ts)
+            except Exception:
+                ts = time.time()
             metadata = {
                 "qq_guild_id": d.get("guild_id", ""),
                 "qq_channel_id": d.get("channel_id", ""),
@@ -154,7 +153,7 @@ def qq_to_incoming(payload: dict[str, Any]) -> IncomingMessage | None:
             user_id = str(event.get("user_id", ""))
             content = event.get("content", "").strip()
             msg_id = event.get("msg_id", "")
-            timestamp = float(event.get("timestamp", time.time()))
+            ts = float(event.get("timestamp", time.time()))
             metadata = {
                 "qq_guild_id": event.get("guild_id", ""),
                 "qq_channel_id": event.get("channel_id", ""),
@@ -168,11 +167,30 @@ def qq_to_incoming(payload: dict[str, Any]) -> IncomingMessage | None:
             user_id=user_id,
             content=content,
             message_id=str(msg_id),
-            timestamp=timestamp,
+            timestamp=ts,
             metadata=metadata,
         )
     except (ValueError, KeyError, TypeError):
         return None
+
+
+def _parse_iso_timestamp(ts_str: str) -> float:
+    """解析 ISO 格式时间字符串为 Unix 时间戳。"""
+    # "2024-01-01T00:00:00+08:00" → float
+    ts_str = ts_str.strip()
+    if ts_str.endswith("Z"):
+        ts_str = ts_str[:-1] + "+00:00"
+    # 移除时区，只保留 UTC 时间
+    if "+" in ts_str:
+        ts_str = ts_str.split("+")[0]
+    elif "-" in ts_str and ts_str.count("-") > 2:
+        ts_str = ts_str.rsplit("-", 1)[0]
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(ts_str)
+        return dt.timestamp()
+    except Exception:
+        return time.time()
 
 
 def outgoing_to_qq(msg: OutgoingMessage) -> dict[str, Any]:

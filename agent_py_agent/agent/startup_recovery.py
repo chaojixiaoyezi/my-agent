@@ -24,6 +24,8 @@ class ActiveWorkSummary:
     recent_tasks: list[dict] = None
     processing_requests: list[str] = None
     pending_notifications: int = 0
+    dispatch_pending: bool = False
+    dispatch_rounds: int = 0
 
     def __post_init__(self) -> None:
         if self.recent_tasks is None:
@@ -97,6 +99,16 @@ def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
     except Exception:
         summary.pending_notifications = 0
 
+    # 7. 检测是否有未完成的 dispatch 循环
+    try:
+        has_pending = getattr(agent, "_has_pending_work", False)
+        rounds = getattr(agent, "_consecutive_dispatch_rounds", 0)
+        summary.dispatch_pending = has_pending and rounds > 0
+        summary.dispatch_rounds = rounds
+    except Exception:
+        summary.dispatch_pending = False
+        summary.dispatch_rounds = 0
+
     return summary
 
 
@@ -130,6 +142,10 @@ def format_active_work_summary(summary: ActiveWorkSummary) -> str:
         lines.append(f"📬 有 {summary.pending_notifications} 条未读通知")
         lines.append("  运行 my-agent notifications 查看详情")
 
+    if summary.dispatch_pending:
+        lines.append(f"⚠ 有未完成的 dispatch 循环（已运行 {summary.dispatch_rounds} 轮）")
+        lines.append("  是否继续？使用 my-agent daemon --continue 继续调度")
+
     if summary.recent_tasks:
         lines.append("最近任务:")
         for task in summary.recent_tasks:
@@ -151,6 +167,7 @@ def has_active_work(summary: ActiveWorkSummary) -> bool:
     return (
         summary.active_task_count > 0
         or summary.stale_request_count > 0
+        or summary.dispatch_pending
     )
 
 

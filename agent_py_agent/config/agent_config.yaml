@@ -126,6 +126,12 @@ auto_bench_model_on_first_use: true
 user_id: "admin"
 user_data_root: "data/users"
 
+# 多租户鉴权配置
+# - auth_enabled: 是否启用鉴权，默认开启；关闭后所有人都有 admin 权限（方便本地开发）
+# - admin_user_id: 管理员用户 ID，外部通道携带此 user_id 时也获得 admin 权限
+auth_enabled: true
+admin_user_id: "admin"
+
 # 单次最多拆出多少个子任务
 max_subagents: 5
 
@@ -224,13 +230,8 @@ feishu_callback_port: 8421
 
 # QQ 机器人通道适配器配置
 # - qq_app_id / qq_app_secret: QQ 机器人应用凭证
-# - qq_token: QQ 机器人 access_token（可选，支持自动刷新）
-# - qq_guild_id / qq_channel_id: 默认频道/公会 ID，轮询时会用这些
 qq_app_id: ""
 qq_app_secret: ""
-qq_token: ""
-qq_guild_id: ""
-qq_channel_id: ""
 
 # 会话工作区：
 # - 会话持久化目录，存储 session.json 和会话级别的上下文文件
@@ -245,6 +246,18 @@ session_workspace: "data/sessions"
 notification_enabled: true
 notification_store_path: "data/notifications"
 notification_channel_timeout_seconds: 300
+
+# 并发控制配置：
+# - concurrency_lock_enabled: 是否启用任务级读写锁，防止并发调度冲突
+# - task_lock_timeout_seconds: 获取任务锁超时时间（秒）
+concurrency_lock_enabled: true
+task_lock_timeout_seconds: 30
+
+# 审计日志配置：
+# - audit_enabled: 是否启用审计日志
+# - audit_log_path: 审计日志存储路径
+audit_enabled: true
+audit_log_path: "data/audit"
 
 # 前台 daemon 默认策略（高级 / 过渡期）：
 # - my-agent daemon 会读取这些配置，减少启动时的长参数。
@@ -347,3 +360,21 @@ tool_retrieval_limit: 3
 # 是否启用向量检索预留开关
 # 当前代码已经把接口留好了，但默认仍以关键词检索为主
 tool_vector_search_enabled: false
+
+# Dispatch 闭环保证配置：
+# - dispatch_max_consecutive_rounds: 最大连续调度轮数，防止无限循环
+# - dispatch_active_interval: 有任务变化时的调度间隔（秒）
+# - dispatch_idle_interval: 无任务变化时的调度间隔（秒）
+dispatch_max_consecutive_rounds: 20
+dispatch_active_interval: 5
+dispatch_idle_interval: 30
+
+# Watchdog 监控配置：
+# - watchdog_enabled: 是否启用 watchdog 监控 daemon 进程存活
+# - watchdog_interval: 检查间隔（秒）
+# - watchdog_max_restarts: 最多自动重启次数
+# - watchdog_restart_delay: 重启前等待时间（秒）
+watchdog_enabled: false
+watchdog_interval: 60
+watchdog_max_restarts: 3
+watchdog_restart_delay: 10

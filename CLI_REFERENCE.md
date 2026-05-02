@@ -171,6 +171,7 @@ Ctrl+C
 | `subagent-context` | 生成单个 subagent 执行上下文 | 是 | 否 |
 | `subagent-run` | 按执行上下文运行一个 subagent | 是 | 只有 `--execute` 会调用 |
 | `subagent` | 查看单个 subagent 详情 | 否 | 否 |
+| `audit-log` | 查询审计日志 | `--cleanup` 时写回 | 否 |
 
 ## `status`
 
@@ -1270,6 +1271,33 @@ my-agent adapter stop
 | `status` | 查看通道适配器状态 |
 | `stop` | 停止所有通道适配器 |
 | `file` | 文件协议适配器（inbox JSON → gateway → outbox JSON） |
+
+## `audit-log`
+
+查询审计日志，支持按用户、动作、目标过滤，显示最近活跃用户和摘要统计。
+
+```powershell
+my-agent audit-log
+my-agent audit-log --user admin --action create_task --limit 50
+my-agent audit-log --target-type task --offset 10
+my-agent audit-log --recent-users --limit 10
+my-agent audit-log --summary
+my-agent audit-log --cleanup --days 90
+```
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--user <id>` | 全部 | 按用户 ID 过滤 |
+| `--action <name>` | 全部 | 按动作类型过滤，如 `create_task`、`access_denied` |
+| `--target <id>` | 全部 | 按目标 ID 过滤 |
+| `--target-type <type>` | 全部 | 按目标类型过滤，如 `task` |
+| `--status <status>` | 全部 | 按状态过滤，如 `success`、`denied` |
+| `--limit <n>` | `100` | 最多显示条数 |
+| `--offset <n>` | `0` | 分页偏移 |
+| `--recent-users` | `false` | 显示最近活跃用户列表 |
+| `--summary` | `false` | 显示审计统计摘要 |
+| `--cleanup` | `false` | 清理旧审计条目 |
+| `--days <n>` | `90` | cleanup 时清理多少天前的记录 |
 
 ## 安全约定
 

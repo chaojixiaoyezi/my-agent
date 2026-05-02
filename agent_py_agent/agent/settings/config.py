@@ -76,6 +76,9 @@ class AgentConfig:
     auto_bench_model_on_first_use: bool = True
     user_id: str = "admin"
     user_data_root: str = "data/users"
+    # 多租户鉴权配置
+    auth_enabled: bool = True
+    admin_user_id: str = "admin"
     scheduler_mode: str = "auto"
     runner_concurrency: str = "auto"
     runner_start_rate: str = "auto"
@@ -101,13 +104,13 @@ class AgentConfig:
     # QQ 适配器配置
     qq_app_id: str = ""
     qq_app_secret: str = ""
-    qq_token: str = ""
-    qq_guild_id: str = ""
-    qq_channel_id: str = ""
     session_workspace: str = "data/sessions"
     notification_enabled: bool = True
     notification_store_path: str = "data/notifications"
     notification_channel_timeout_seconds: int = 300
+    concurrency_lock_enabled: bool = True
+    audit_enabled: bool = True
+    audit_log_path: str = "data/audit/audit.jsonl"
     daemon_planner: bool = True
     daemon_apply: bool = True
     daemon_execute_runners: bool = True
@@ -143,6 +146,15 @@ class AgentConfig:
     tool_catalog_limit: int = 20
     tool_retrieval_limit: int = 3
     tool_vector_search_enabled: bool = False
+    # Dispatch 闭环保证配置
+    dispatch_max_consecutive_rounds: int = 20
+    dispatch_active_interval: int = 5
+    dispatch_idle_interval: int = 30
+    # Watchdog 配置
+    watchdog_enabled: bool = False
+    watchdog_interval: int = 60
+    watchdog_max_restarts: int = 3
+    watchdog_restart_delay: int = 10
     config_warnings: list[str] = field(default_factory=list)
 
 
@@ -377,7 +389,7 @@ def normalize_agent_config(data: dict[str, object]) -> tuple[dict[str, object], 
     _apply("feishu_callback_port", v, w)
 
     # QQ 配置（字符串，直接透传）
-    for key in ("qq_app_id", "qq_app_secret", "qq_token", "qq_guild_id", "qq_channel_id"):
+    for key in ("qq_app_id", "qq_app_secret"):
         val = out.get(key, defaults.qq_app_id if key == "qq_app_id" else "")
         if isinstance(val, str):
             out[key] = val
@@ -558,6 +570,17 @@ def normalize_agent_config(data: dict[str, object]) -> tuple[dict[str, object], 
     else:
         out["model_speed_profile_path"] = defaults.model_speed_profile_path
         warnings.append(f"model_speed_profile_path: expected a non-empty string, got {raw_path!r}; using default")
+
+    # auth_enabled
+    v, w = _coerce_bool_config("auth_enabled", out.get("auth_enabled"), defaults.auth_enabled)
+    _apply("auth_enabled", v, w)
+
+    # admin_user_id
+    raw_admin = out.get("admin_user_id", defaults.admin_user_id)
+    if isinstance(raw_admin, str) and raw_admin.strip():
+        out["admin_user_id"] = raw_admin.strip()
+    else:
+        out["admin_user_id"] = defaults.admin_user_id
 
     return out, warnings
 

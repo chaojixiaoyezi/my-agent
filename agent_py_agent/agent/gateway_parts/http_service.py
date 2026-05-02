@@ -5,6 +5,7 @@ from __future__ import annotations
 给人看的解释：
 这个文件实现 gateway 的 HTTP 接口：POST /ask、GET /result/<id>、GET /status、POST /stop。
 用标准库 http.server + threading 实现并发。
+支持多租户鉴权：外部通道请求需要 X-User-Id / X-Channel header。
 """
 
 import json
@@ -17,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from ..agent.core import SimpleAgent
+    from ..auth.middleware import AuthMiddleware
     from .paths import GatewayPaths
     from ..session.cross_channel import CrossChannelSession
     from ..session.admin_query import AdminCrossChannelQuery
@@ -26,36 +28,25 @@ if TYPE_CHECKING:
 _server_instance: Optional["GatewayHTTPServer"] = None
 
 
-class GatewayHTTPRequest:
-    """Parsed HTTP request for gateway."""
-
-    def __init__(self, request_id: str, goal: str, metadata: dict[str, Any] | None = None):
-        self.request_id = request_id
-        self.goal = goal
-        self.metadata = metadata or {}
-
-
-class GatewayHTTPResponse:
-    """HTTP response from gateway."""
-
-    def __init__(self, status: int, body: dict[str, Any]):
-        self.status = status
-        self.body = body
-
-
 def _generate_request_id() -> str:
     """Generate a unique request ID."""
     return f"req_{int(time.time() * 1000)}_{os.getpid()}"
 
 
 class GatewayHTTPHandler(BaseHTTPRequestHandler):
-    """HTTP request handler for gateway."""
+    """HTTP request handler for gateway。"""
 
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args: Any) -> None:
-        """Override to reduce noise."""
+        """Override to reduce noise。"""
         pass
+
+    def _inject_auth_middleware(self) -> None:
+        """每个请求进来时，从 server 注入 auth_middleware 到 handler 实例。"""
+        server = _server_instance
+        if server is not None and server.auth_middleware is not None:
+            self._auth_middleware = server.auth_middleware
 
     def _send_json(self, status: int, body: dict[str, Any]) -> None:
         """Send JSON response."""
@@ -76,7 +67,8 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         return json.loads(body.decode("utf-8"))
 
     def do_GET(self) -> None:
-        """Handle GET requests."""
+        """Handle GET requests。"""
+        self._inject_auth_middleware()
         if self.path == "/status":
             self._handle_status()
         elif self.path.startswith("/result/"):
@@ -89,7 +81,8 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
-        """Handle POST requests."""
+        """Handle POST requests。"""
+        self._inject_auth_middleware()
         if self.path == "/ask":
             self._handle_ask()
         elif self.path == "/stop":
@@ -133,12 +126,21 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         self._send_json(200, response)
 
     def _handle_result(self) -> None:
-        """GET /result/<request_id> - return request result."""
+        """GET /result/<request_id> - return request result。"""
         request_id = self.path[len("/result/"):]
         server = _server_instance
         if server is None:
             self._send_json(500, {"error": "server not initialized"})
             return
+
+        # 从 header 提取当前用户身份
+        mw = getattr(self, "_auth_middleware", None)
+        if mw is not None:
+            user_id, _ = mw.extract_identity(dict(self.headers))
+            permission = mw.get_permission(dict(self.headers))
+        else:
+            user_id = "admin"
+            permission = None
 
         # Check responses directory
         response_path = server.paths.responses / f"{request_id}.json"
@@ -146,24 +148,46 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             # Check if still processing
             processing_path = server.paths.processing / f"{request_id}.json"
             if processing_path.exists():
+                # 读取 processing 文件检查 user_id
+                try:
+                    proc_data = json.loads(processing_path.read_text(encoding="utf-8"))
+                    req_user = proc_data.get("user_id", "")
+                    if permission and not permission.can_access_all_users and req_user != user_id:
+                        self._send_json(403, {"error": "forbidden", "request_id": request_id})
+                        return
+                except (json.JSONDecodeError, OSError):
+                    pass
                 self._send_json(202, {"status": "processing", "request_id": request_id})
                 return
             # Check if queued in inbox
             inbox_path = server.paths.inbox / f"{request_id}.json"
             if inbox_path.exists():
+                try:
+                    inbox_data = json.loads(inbox_path.read_text(encoding="utf-8"))
+                    req_user = inbox_data.get("user_id", "")
+                    if permission and not permission.can_access_all_users and req_user != user_id:
+                        self._send_json(403, {"error": "forbidden", "request_id": request_id})
+                        return
+                except (json.JSONDecodeError, OSError):
+                    pass
                 self._send_json(202, {"status": "queued", "request_id": request_id})
                 return
             self._send_json(404, {"error": "not found", "request_id": request_id})
             return
 
+        # 读取响应文件，检查 user_id 是否匹配
         try:
             result = json.loads(response_path.read_text(encoding="utf-8"))
+            req_user = result.get("user_id", result.get("metadata", {}).get("user_id", ""))
+            if permission and not permission.can_access_all_users and req_user != user_id:
+                self._send_json(403, {"error": "forbidden", "request_id": request_id})
+                return
             self._send_json(200, result)
         except (json.JSONDecodeError, OSError) as e:
             self._send_json(500, {"error": f"failed to read result: {e}"})
 
     def _handle_ask(self) -> None:
-        """POST /ask - submit a new request."""
+        """POST /ask - submit a new request。"""
         try:
             body = self._read_json()
         except json.JSONDecodeError as e:
@@ -180,13 +204,24 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": "server not initialized"})
             return
 
+        # 从 header 提取 user_id 和 channel，纳入 metadata
+        mw = getattr(self, "_auth_middleware", None)
+        if mw is not None:
+            user_id, channel = mw.extract_identity(dict(self.headers))
+        else:
+            user_id, channel = "admin", "chat"
+
         # Generate request ID and write to pending queue
         request_id = _generate_request_id()
+        metadata = body.get("metadata", {})
+        metadata["user_id"] = user_id
+        metadata["channel"] = channel
         request_data = {
             "request_id": request_id,
             "goal": goal,
-            "metadata": body.get("metadata", {}),
+            "metadata": metadata,
             "submitted_at": time.time(),
+            "user_id": user_id,
         }
         pending_path = server.paths.inbox / f"{request_id}.json"
         try:
@@ -221,8 +256,13 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         self._send_json(200, {"status": "stopping"})
 
     def _handle_session_channels(self) -> None:
-        """GET /sessions/{session_id}/channels - query session channel bindings."""
-        # Extract session_id from path: /sessions/{session_id}/channels
+        """GET /sessions/{session_id}/channels - query session channel bindings。"""
+        # 需要管理员权限
+        from ..auth.middleware import require_admin_handler
+
+        if require_admin_handler(self):
+            return
+
         parts = self.path.split("/")
         if len(parts) >= 4:
             session_id = parts[2]
@@ -237,7 +277,13 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "invalid path"})
 
     def _handle_session_bind(self) -> None:
-        """POST /sessions/{session_id}/bind - bind session to new channel."""
+        """POST /sessions/{session_id}/bind - bind session to new channel。"""
+        # 需要管理员权限
+        from ..auth.middleware import require_admin_handler
+
+        if require_admin_handler(self):
+            return
+
         parts = self.path.split("/")
         if len(parts) >= 4:
             session_id = parts[2]
@@ -264,25 +310,38 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "invalid path"})
 
     def _handle_admin_summary(self) -> None:
-        """GET /admin/summary - admin global summary."""
+        """GET /admin/summary - admin global summary。"""
+        # 需要管理员权限
+        from ..auth.middleware import require_admin_handler
+
+        if require_admin_handler(self):
+            return
+
         server = _server_instance
         if server is None or server.admin_query is None:
             self._send_json(500, {"error": "admin query not initialized"})
             return
 
-        # Get admin summary as formatted text
         summary = server.admin_query.format_admin_summary("admin")
         self._send_json(200, {"summary": summary})
 
 
 class GatewayHTTPServer:
-    """HTTP server for gateway."""
+    """HTTP server for gateway。"""
 
-    def __init__(self, port: int, paths: GatewayPaths, cross_channel: CrossChannelSession | None = None, admin_query: AdminCrossChannelQuery | None = None):
+    def __init__(
+        self,
+        port: int,
+        paths: GatewayPaths,
+        cross_channel: CrossChannelSession | None = None,
+        admin_query: AdminCrossChannelQuery | None = None,
+        auth_middleware: AuthMiddleware | None = None,
+    ):
         self.port = port
         self.paths = paths
         self.cross_channel = cross_channel
         self.admin_query = admin_query
+        self.auth_middleware = auth_middleware
         self.server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -321,8 +380,14 @@ class GatewayHTTPServer:
         _server_instance = None
 
 
-def start_http_server(port: int, paths: GatewayPaths, cross_channel: CrossChannelSession | None = None, admin_query: AdminCrossChannelQuery | None = None) -> GatewayHTTPServer:
+def start_http_server(
+    port: int,
+    paths: GatewayPaths,
+    cross_channel: CrossChannelSession | None = None,
+    admin_query: AdminCrossChannelQuery | None = None,
+    auth_middleware: AuthMiddleware | None = None,
+) -> GatewayHTTPServer:
     """Start HTTP server and return handle."""
-    server = GatewayHTTPServer(port, paths, cross_channel, admin_query)
+    server = GatewayHTTPServer(port, paths, cross_channel, admin_query, auth_middleware)
     server.start()
     return server

@@ -36,9 +36,13 @@ class SimpleAgentDispatchMixin:
     """LLM: mixin for audited parent dispatch and recurring watch mode.
 
     给人看的解释：
-    用户说“推进一下子代理”或 daemon 定时巡检，都会走这里。
+    用户说"推进一下子代理"或 daemon 定时巡检，都会走这里。
     它负责串阶段，不把底层文件操作和规则判断都塞在自己身上。
     """
+
+    # 闭环检测相关属性
+    _has_pending_work: bool = False
+    _consecutive_dispatch_rounds: int = 0
 
     def dispatch_subagents(
         self,
@@ -431,6 +435,14 @@ class SimpleAgentDispatchMixin:
                     )
                 )
 
+                # 失败自动触发：如果 runner 执行失败（BLOCKED/TIMEOUT）且任务仍可重试，
+                # 在当前 dispatch 循环内标记需要重调度，让下一轮立即捡起
+                if not result.ok and execute_runners:
+                    failure_type = str(result.status or "").strip().upper()
+                    if failure_type in {"BLOCKED", "TIMEOUT"} and retry_reason:
+                        # 设置 _has_pending_work 让闭环检测知道还有工作要做
+                        self._has_pending_work = True
+
         patch_run_ids = _dispatch_patch_review_run_ids(self.subagents.list_runs())
         if patch_run_ids:
             patch_report = (
@@ -504,7 +516,31 @@ class SimpleAgentDispatchMixin:
         if apply:
             self._notify_completed_tasks(records)
 
+        # 闭环检测：检查是否还有可调度的任务
+        self._update_pending_work_state()
+
         return report
+
+    def _update_pending_work_state(self) -> None:
+        """更新待处理工作状态。
+
+        在 dispatch_subagents 末尾调用，检查是否还有可调度的 runner 候选任务。
+        """
+        runner_max_attempts = _runner_max_attempts(self.config.runner_failure_policy)
+        candidates = _dispatch_runner_candidates(
+            self.subagents.list_runs(),
+            max_runners=999,  # 用较大值确保不遗漏
+            runner_max_attempts=runner_max_attempts,
+        )
+        self._has_pending_work = len(candidates) > 0
+
+    def _increment_dispatch_rounds(self) -> None:
+        """递增连续 dispatch 轮数。"""
+        self._consecutive_dispatch_rounds += 1
+
+    def _reset_dispatch_rounds(self) -> None:
+        """重置连续 dispatch 轮数。"""
+        self._consecutive_dispatch_rounds = 0
 
     def _notify_completed_tasks(self, records: list) -> None:
         """对达到终态的任务触发通知。"""
@@ -594,8 +630,18 @@ class SimpleAgentDispatchMixin:
         records = []
         lock_path = self.subagents.workspace / "subagent_dispatch_watch.lock"
         stop_path = Path(stop_file) if stop_file else None
+
+        # 自适应间隔配置
+        active_interval = getattr(self.config, "dispatch_active_interval", 5)
+        idle_interval = getattr(self.config, "dispatch_idle_interval", 30)
+        max_consecutive = getattr(self.config, "dispatch_max_consecutive_rounds", 20)
+
+        # 重置连续轮数计数
+        self._reset_dispatch_rounds()
+
         with _DispatchWatchLock(lock_path, force=force_lock) as lock:
             cycle = 0
+            last_dispatch_had_changes = False
             while max_cycles == 0 or cycle < max_cycles:
                 if stop_path and stop_path.exists():
                     break
@@ -634,12 +680,17 @@ class SimpleAgentDispatchMixin:
                         str(self.subagents.workspace / "subagent_dispatch_report.json"),
                         str(self.subagents.workspace / "SUBAGENT_DISPATCH.md"),
                     ]
+
+                    # 检查本轮是否有状态变化
+                    last_dispatch_had_changes = record_count > 0
+
                 except Exception as exc:
                     ok = False
                     message = f"dispatch cycle failed: {exc}"
                     record_count = 0
                     dispatch_summary = {}
                     evidence_paths = []
+                    last_dispatch_had_changes = False
 
                 ended_at = time.time()
                 record = self.subagents.make_dispatch_watch_record(
@@ -656,6 +707,21 @@ class SimpleAgentDispatchMixin:
                 records.append(record)
                 self.subagents.append_dispatch_watch_log(record)
 
+                # 递增连续轮数
+                self._increment_dispatch_rounds()
+
+                # 检查是否达到最大轮数限制
+                if self._consecutive_dispatch_rounds >= max_consecutive:
+                    message = f"{message} 已达到最大连续轮数限制 ({max_consecutive})，停止调度。"
+                    self.subagents.write_dispatch_watch_heartbeat(
+                        cycle=cycle,
+                        status="stopped_by_limit",
+                        lock_path=str(lock_path),
+                        pid=os.getpid(),
+                        message=message,
+                    )
+                    break
+
                 more_cycles = max_cycles == 0 or cycle < max_cycles
                 stop_requested = bool(stop_path and stop_path.exists())
                 if stop_requested:
@@ -670,7 +736,11 @@ class SimpleAgentDispatchMixin:
                 )
                 if not more_cycles:
                     break
-                if _sleep_with_stop(interval, stop_path):
+
+                # 自适应间隔：有变化时用短间隔，无变化时用长间隔
+                current_interval = active_interval if last_dispatch_had_changes else idle_interval
+
+                if _sleep_with_stop(current_interval, stop_path):
                     break
 
             self.subagents.write_dispatch_watch_heartbeat(
