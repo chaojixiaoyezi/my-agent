@@ -26,7 +26,7 @@
 
 最新验收：
 
-- `python3 -m pytest -q` -> `391 passed`
+- `python3 -m pytest -q` -> `749 passed`
 - `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`
 - `git diff --check` -> passed
 - focused gateway/memory/doc tests -> `16 passed`
@@ -70,9 +70,16 @@
 - gateway 请求队列新增 `failed` 归档、processing lease、超时重排/失败归档和保守 request worker pool。
 - runner 并发已有第一版配置入口：默认 1；显式设置 `runner_concurrency` 为数字后才并行执行多个 run。
 - 已新增 `adapter file` 文件协议，外部聊天工具/TUI 可通过 inbox/outbox 复用 gateway。
+- 已新增 Round 5 Gateway 常驻稳定性功能：
+  - Hermes 风格 PID 记录（start_time tracking + scoped locks）
+  - Watchdog Supervisor 自动监控并重启崩溃 gateway
+  - Adapter 守护进程模式（`--daemon` + PID 文件）
+  - `gateway start-all --adapter` 一键启动 gateway + 适配器
+  - 系统服务安装（`gateway install` systemd/launchd）
 
 最近已推送提交：
-- `43303c8 test: harden full smoke regression coverage`
+- `45bbd08 feat: Round 5 continued — adapter daemon, PID tracking, one-click start, test fixes`
+- `37e046d feat: Round 5 gateway stability — Hermes-style daemon control, supervisor, service install`
 - `84813a7 merge: integrate tool boundary hardening`
 - `d6e31b2 merge: integrate framework runtime hardening`
 - `22efdce feat: add status and timeline views`
