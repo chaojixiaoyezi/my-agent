@@ -86,6 +86,7 @@ def test_tool_specs_become_capability_cards():
         catalog_limit=20,
         retrieval_limit=3,
         vector_search_enabled=False,
+        shell_tool_timeout=30,
     )
     router = CapabilityRouter(
         config=CapabilityConfig(capability_candidate_limit=2),
@@ -121,6 +122,7 @@ def test_zero_limit_means_unlimited():
         catalog_limit=20,
         retrieval_limit=3,
         vector_search_enabled=False,
+        shell_tool_timeout=30,
     )
     router = CapabilityRouter(config=config, tool_specs=registry.specs())
 

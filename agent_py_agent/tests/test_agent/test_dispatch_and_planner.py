@@ -165,13 +165,14 @@ def test_subagent_dispatch_apply_reviews_patch_then_accepts():
         assert (root / "subs" / "DISPATCH_LOG.md").exists()
 
 
-def test_subagent_dispatch_apply_executes_runner_and_accepts():
+def test_subagent_dispatch_apply_executes_runner_and_accepts(monkeypatch):
     """LLM: Verifies apply dispatch executes a real runner and then accepts."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
+        backend = AcceptedSubagentBackend()
+        monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: backend)
         cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
-        agent.backend = AcceptedSubagentBackend()
         task = agent.subagents.create_run(
             goal="调度器执行 runner",
             thought="等待 dispatch 调用真实 runner 路径。",
@@ -197,14 +198,14 @@ def test_subagent_dispatch_apply_executes_runner_and_accepts():
         assert loaded.evidence[0].summary == "调度器结构化执行证据"
 
 
-def test_subagent_dispatch_retries_transient_runner_failure():
+def test_subagent_dispatch_retries_transient_runner_failure(monkeypatch):
     """LLM: Verifies dispatch retries a transient runner failure on the second call."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
+        backend = FlakyThenAcceptedSubagentBackend()
+        monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: backend)
         cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
-        backend = FlakyThenAcceptedSubagentBackend()
-        agent.backend = backend
         task = agent.subagents.create_run(
             goal="调度器重试临时 runner 失败",
             thought="第一次模型调用失败后，下一轮 dispatch 应该自动重试。",

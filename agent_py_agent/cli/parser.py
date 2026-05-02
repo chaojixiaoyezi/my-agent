@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 
 from .adapter import cmd_adapter, cmd_adapter_file
+from .bench_model import cmd_bench_model
 from .chat import cmd_chat
 from .common import DEFAULT_CAPABILITY_CONFIG, DEFAULT_CONFIG, add_resume_context_switches, configure_stdio
 from .daemon import cmd_daemon
@@ -97,6 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
     timeline.add_argument("--details", action="store_true", help="显示事件 payload 摘要")
     timeline.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     timeline.set_defaults(func=cmd_timeline)
+
+    bench = sub.add_parser("bench-model", help="运行模型速度基准测试或查看已有速度模型")
+    bench.add_argument("--show", action="store_true", help="查看已有速度模型，不运行测试")
+    bench.add_argument("--profile", help="速度模型文件路径；默认使用 data/model_speed_profile.json")
+    bench.set_defaults(func=cmd_bench_model)
 
     run = sub.add_parser("run", help="运行一次智能体对话")
     run.add_argument("prompt", help="用户任务 / prompt")

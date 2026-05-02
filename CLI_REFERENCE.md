@@ -188,6 +188,14 @@ my-agent status --json
 | `--recent` | `false` | 额外显示最近子代理列表。 |
 | `--json` | `false` | 输出机器可读 JSON，方便后续 TUI/聊天工具复用。 |
 
+显示进行中任务摘要：
+- gateway 是否存活
+- 活跃子代理任务数
+- 遗留的 processing 请求数
+- 最近 3 个任务的 ID、目标、状态
+
+此功能由配置项 `auto_detect_work_on_startup` 控制，默认为 true。
+
 ## `timeline`
 
 ```powershell
@@ -1135,6 +1143,39 @@ my-agent subagent-run <run_id> --execute
 | `--instruction <text>` | - | 给本次 runner 的额外指令。 |
 | `--max-cards <n>` | `0` | 最多注入多少张能力卡，`0` 表示不限制。 |
 | `--no-probe` | `false` | 执行前不做通道健康检查。 |
+
+## `bench-model`
+
+```powershell
+my-agent bench-model
+my-agent bench-model --show
+my-agent bench-model --profile /path/to/profile.json
+```
+
+运行模型速度基准测试或查看已有速度模型。速度模型用于动态计算 runner 超时时间。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--show` | `false` | 只查看已有速度模型，不运行测试。 |
+| `--profile <path>` | `data/model_speed_profile.json` | 速度模型文件路径。 |
+
+示例输出：
+
+```
+Backend: anthropic_compatible
+Model: claude-sonnet-4-20250514
+Tested at: 2026-05-02T10:00:00Z
+Interpolation: log_linear
+
+Samples:
+  Input  1000,  Output  500:  10.0s (150 tok/s)
+  Input  5000,  Output  500:  20.0s (275 tok/s)
+  Input 10000,  Output  500:  35.0s (300 tok/s)
+  Input 50000,  Output  500:  82.0s (616 tok/s)
+  Input 100000,  Output  500: 153.0s (676 tok/s)
+
+Speed model saved to: data/model_speed_profile.json
+```
 
 ## `subagent`
 

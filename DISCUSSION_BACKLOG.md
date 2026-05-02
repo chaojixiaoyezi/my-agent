@@ -38,19 +38,15 @@ JSONL 是一行一条记录的流水账，比如记忆、LocalStore 事件、gat
 
 `worker` 可以理解成后台干活的人。gateway 收到请求后，不是主程序一个个慢慢处理，而是把请求放进队列，让 worker 去领任务做。
 
-`lease` 可以理解成任务的“临时领取凭证”。某个 worker 领走任务后，系统会标记：这个任务现在有人在做，别人先别碰。这个凭证通常有过期时间，目的是防止 worker 崩掉后任务永远卡在处理中。
+`lease` 可以理解成任务的”临时领取凭证”。某个 worker 领走任务后，系统会标记：这个任务现在有人在做，别人先别碰。这个凭证通常有过期时间，目的是防止 worker 崩掉后任务永远卡在处理中。
 
-现在的问题是：
+本轮已处理：
 
-worker 领任务时会写一个 lease，但如果任务跑得很久，它不会定期刷新这个 lease。这样系统可能误以为 worker 已经挂了，然后把任务重新放回队列，让另一个 worker 再做一遍。
+新增了两个配置项 `lease_heartbeat_interval_seconds`（默认 60 秒）和 `lease_stale_without_heartbeat_seconds`（默认 300 秒）。前者控制 worker 刷新一次 lease heartbeat 的间隔，后者控制超过此时间没有收到 heartbeat 就认为 lease 失效。
 
-风险是：
+gateway worker 在处理请求时会启动一个心跳线程，定期刷新 `lease_heartbeat_at` 字段，防止被误判为卡死。恢复逻辑 `recover_gateway_processing_requests()` 优先使用 `lease_heartbeat_at` 判断 stale，如果传入了 `lease_stale_seconds` 参数则用它作为超时判断依据。
 
-同一个请求可能被重复执行；两个 worker 可能同时写同一个响应；日志里看起来像失败或重试，但实际只是任务太慢。
-
-后面可以讨论：
-
-worker 处理长任务时要不要定期刷新 `lease_started_at` 或新增 `lease_heartbeat_at`；超过多久才算真的卡死；恢复逻辑看到旧 lease 时，是直接重试，还是先检查响应文件、日志文件和 worker 心跳。
+安全边界保持：dry-run 优先，高风险操作需要确认。默认配置下 gateway 会自动启动调度，但用户仍可通过配置关闭。
 
 ### 3. adapter file 超时后，晚到的结果要能接住
 

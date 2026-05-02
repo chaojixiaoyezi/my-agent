@@ -40,6 +40,12 @@ def cmd_status(args) -> int:
     if alive and heartbeat_at and heartbeat_age > agent.config.gateway_stale_seconds:
         gateway_status = "stale"
 
+    # 检测进行中任务
+    active_work_summary = None
+    if agent.config.auto_detect_work_on_startup:
+        from ..agent.startup_recovery import detect_active_work, format_active_work_summary
+        active_work_summary = detect_active_work(agent)
+
     payload = {
         "agent_name": agent.config.agent_name,
         "workspace_root": str(agent.root),
@@ -59,6 +65,12 @@ def cmd_status(args) -> int:
             "hot": [item.__dict__ for item in board.hot_list[: args.limit]],
             "recent": [item.__dict__ for item in board.recent[: args.limit]],
         },
+        "active_work": {
+            "gateway_alive": active_work_summary.gateway_alive if active_work_summary else False,
+            "active_task_count": active_work_summary.active_task_count if active_work_summary else 0,
+            "stale_request_count": active_work_summary.stale_request_count if active_work_summary else 0,
+            "recent_tasks": active_work_summary.recent_tasks if active_work_summary else [],
+        } if active_work_summary else None,
         "timeline": [item.__dict__ for item in timeline],
     }
     payload["suggested_actions"] = build_status_suggestions(agent, payload)
@@ -80,6 +92,18 @@ def cmd_status(args) -> int:
     print("Local Store")
     print(f"- records={local_stats['record_count']} events={local_stats['event_count']} fts5={local_stats['fts5_enabled']}")
     print(f"- db={local_stats['db_path']}")
+    print("")
+    # 显示进行中任务
+    if active_work_summary:
+        from ..agent.startup_recovery import has_active_work
+        print("进行中任务")
+        print("-" + format_active_work_summary(active_work_summary).replace("\n", "\n  - "))
+        if active_work_summary.active_task_count > 0:
+            from ..agent.startup_recovery import has_active_work
+            print("  运行 my-agent subagents-dispatch 可继续调度")
+    else:
+        print("进行中任务")
+        print("- 暂无")
     print("")
     print("Subagents")
     print("- summary=" + json.dumps(board.summary, ensure_ascii=False, sort_keys=True))

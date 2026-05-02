@@ -144,3 +144,42 @@ def test_load_config_coerces_string_numbers(tmp_path):
     config = load_config(config_path)
     assert config.request_timeout == 120
     assert config.max_tokens == 2048
+
+
+def test_daemon_defaults_are_true():
+    """验证 daemon_apply 和 daemon_execute_runners 默认值为 True。"""
+    defaults_normalized, _ = normalize_agent_config({})
+    assert defaults_normalized.get("daemon_apply") is True, "daemon_apply 默认应为 True"
+    assert defaults_normalized.get("daemon_execute_runners") is True, "daemon_execute_runners 默认应为 True"
+
+
+def test_lease_config_defaults():
+    """验证 lease 心跳续期配置项的默认值和 coerce 规则。"""
+    defaults_normalized, _ = normalize_agent_config({})
+    assert defaults_normalized.get("lease_heartbeat_interval_seconds") == 60
+    assert defaults_normalized.get("lease_stale_without_heartbeat_seconds") == 300
+
+
+def test_lease_config_coercion():
+    """验证 lease 配置项能接受合法值并拒绝越界值。"""
+    data = {
+        "lease_heartbeat_interval_seconds": "30",
+        "lease_stale_without_heartbeat_seconds": "600",
+    }
+    normalized, warnings = normalize_agent_config(data)
+    assert warnings == []
+    assert normalized["lease_heartbeat_interval_seconds"] == 30
+    assert normalized["lease_stale_without_heartbeat_seconds"] == 600
+
+
+def test_lease_config_out_of_range():
+    """验证 lease 配置项对过小值会报警并回退到默认值。"""
+    data = {
+        "lease_heartbeat_interval_seconds": "5",
+        "lease_stale_without_heartbeat_seconds": "10",
+    }
+    normalized, warnings = normalize_agent_config(data)
+    assert len(warnings) == 2
+    defaults_normalized, _ = normalize_agent_config({})
+    assert normalized["lease_heartbeat_interval_seconds"] == defaults_normalized["lease_heartbeat_interval_seconds"]
+    assert normalized["lease_stale_without_heartbeat_seconds"] == defaults_normalized["lease_stale_without_heartbeat_seconds"]

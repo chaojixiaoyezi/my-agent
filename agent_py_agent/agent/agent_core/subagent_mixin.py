@@ -3,9 +3,11 @@ from __future__ import annotations
 """LLM: implements SimpleAgent subagent spawning, runner execution, and parent-planner turns.
 
 给人看的解释：
-这个文件只管“主代理怎么和子代理互动”。
+这个文件只管"主代理怎么和子代理互动"。
 包括创建工单、跑一个子代理 runner、以及让父代理 planner 做一次完整模型判断。
 """
+
+import logging
 
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
@@ -17,6 +19,7 @@ from ..subagent import (
     parse_parent_planner_output,
     parse_subagent_runner_output,
 )
+from .automation_guard import SubagentAutomationGuard
 from .planner import PARENT_PLANNER_READ_TOOLS, _build_parent_planner_prompt, _build_parent_planner_state
 from .runner_prompts import (
     _append_runner_repair_failure,
@@ -25,6 +28,10 @@ from .runner_prompts import (
     _build_subagent_runner_prompt,
     _build_subagent_runner_repair_prompt,
 )
+from .task_complexity import TaskComplexityEstimate, estimate_task_complexity
+
+
+logger = logging.getLogger(__name__)
 
 
 def _config_workflow_dispatch_mode(value: object) -> str:
@@ -41,7 +48,7 @@ class SimpleAgentSubagentMixin:
     """LLM: mixin for subagent lifecycle orchestration reachable from SimpleAgent.
 
     给人看的解释：
-    这些方法不直接写文件细节，而是调用 SubAgentManager，让主代理保留“编排者”的角色。
+    这些方法不直接写文件细节，而是调用 SubAgentManager，让主代理保留"编排者"的角色。
     """
 
     def spawn_subagents(self, goal: str, count: int | None = None) -> list[SubAgentTask]:
@@ -49,12 +56,36 @@ class SimpleAgentSubagentMixin:
 
         if not self.config.enable_subagents:
             raise RuntimeError("配置已禁用 subagent。")
-        n = min(count or self.config.max_subagents, self.config.max_subagents)
-        return self.subagents.split(
-            goal,
-            n,
-            workflow_mode=_config_workflow_dispatch_mode(self.config.subagent_workflow_mode),
-        )
+
+        # 如果调用者显式指定了数量，优先使用调用者的意图
+        # 只有当 count 为 None 时才使用复杂度预估判断
+        if count is None:
+            allowed_tools = getattr(self.config, "subagent_allowed_tools", [])
+            complexity = estimate_task_complexity(goal, plan=[], allowed_tools=allowed_tools)
+            guard = SubagentAutomationGuard(self.config)
+            should_delegate = guard.should_delegate(complexity)
+            delegated = False
+
+            if should_delegate:
+                n = self.config.max_subagents
+                tasks = self.subagents.split(
+                    goal,
+                    n,
+                    workflow_mode=_config_workflow_dispatch_mode(self.config.subagent_workflow_mode),
+                )
+                delegated = len(tasks) > 0
+            else:
+                tasks = []
+
+            guard.warn_if_not_delegating(complexity, delegated)
+            return tasks
+        else:
+            n = min(count, self.config.max_subagents)
+            return self.subagents.split(
+                goal,
+                n,
+                workflow_mode=_config_workflow_dispatch_mode(self.config.subagent_workflow_mode),
+            )
 
     def run_subagent(
         self,
@@ -69,7 +100,7 @@ class SimpleAgentSubagentMixin:
     ) -> SubAgentRunnerResult:
         """按执行上下文运行一个子代理入口。
 
-        第一版 runner 不负责并行调度，只负责把“上下文 -> 模型执行 -> 工单回写”
+        第一版 runner 不负责并行调度，只负责把"上下文 -> 模型执行 -> 工单回写"
         这条最小链路打通。默认 dry-run，避免误触真实模型接口。
         """
 

@@ -38,6 +38,7 @@ from .agent.gateway import (
     write_json_file,
 )
 from .cli.adapter import cmd_adapter, cmd_adapter_file
+from .cli.bench_model import cmd_bench_model
 from .cli.chat import cmd_chat
 from .cli.common import (
     CHAT_PROMPT,
