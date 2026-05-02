@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent_py_agent.__main__ import build_parser
+from agent_py_agent.agent.config import load_config
+from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagent import QualityContract
 from agent_py_agent.agent.subagent_workflows.models import WorkflowPhase, WorkflowTemplate
 from agent_py_agent.agent.subagent_workflows.planner import plan_workflow_for_goal
@@ -41,8 +43,9 @@ def _store(*template_ids: str) -> WorkflowTemplateStore:
 def _write_config(tmp_path: Path, mode: str = "auto") -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
-        'workspace_root: "workspace"\n'
+        'workspace_root: "."\n'
         'model_backend: "echo"\n'
+        'subagent_workspace: "subs"\n'
         f'subagent_workflow_mode: "{mode}"\n',
         encoding="utf-8",
     )
@@ -243,3 +246,66 @@ def test_subagents_workflow_plan_cli_accepts_template_override(tmp_path, capsys)
     assert payload["selected_template_id"] == "single_worker_verified"
     assert payload["mode"] == "manual"
     assert payload["needs_confirmation"] is True
+
+
+def test_subagents_dispatch_cli_plan_writes_workflow_plan_into_existing_task(tmp_path):
+    config_path = _write_config(tmp_path, mode="off")
+    agent = SimpleAgent(load_config(config_path), tmp_path)
+    parent = agent.subagents.create_run(
+        goal="Fix API bug and add regression tests",
+        thought="等待 CLI dispatch 补做 workflow 规划。",
+        plan=["等待规划"],
+    )
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--config",
+            str(config_path),
+            "subagents-dispatch",
+            "--apply",
+            "--workflow-mode",
+            "plan",
+            "--max-runners",
+            "0",
+        ]
+    )
+    code = args.func(args)
+    loaded = agent.subagents.load(parent.id)
+
+    assert code == 0
+    assert loaded.workflow_mode == "plan"
+    assert loaded.workflow_template_id == "code_feature_split"
+    assert loaded.workflow_plan["ok"] is True
+    assert loaded.workflow_child_run_ids == []
+
+
+def test_subagents_dispatch_cli_auto_spawns_workflow_workers(tmp_path):
+    config_path = _write_config(tmp_path, mode="off")
+    agent = SimpleAgent(load_config(config_path), tmp_path)
+    parent = agent.subagents.create_run(
+        goal="Fix API bug and add regression tests",
+        thought="等待 CLI dispatch 自动派工。",
+        plan=["等待自动派工"],
+    )
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--config",
+            str(config_path),
+            "subagents-dispatch",
+            "--apply",
+            "--workflow-mode",
+            "auto",
+            "--max-runners",
+            "0",
+        ]
+    )
+    code = args.func(args)
+    loaded = agent.subagents.load(parent.id)
+
+    assert code == 0
+    assert loaded.workflow_mode == "auto"
+    assert loaded.workflow_plan["ok"] is True
+    assert len(loaded.workflow_child_run_ids) == 3

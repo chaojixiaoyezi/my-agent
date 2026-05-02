@@ -41,10 +41,10 @@ class ScenarioRealModelRecoveryBackend:
         self.calls = 0
         self.real_response_text = ""
 
-    def generate(self, prompt: str) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
-            real = self.real_backend.generate(prompt)
+            real = self.real_backend.generate(prompt, on_chunk=on_chunk)
             self.real_response_text = real.text
             return ModelResponse(
                 text=(

@@ -36,7 +36,7 @@ class ScenarioParentSubagentRecoveryBackend:
     def __init__(self) -> None:
         self.calls = 0
 
-    def generate(self, prompt: str) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(

@@ -127,3 +127,23 @@ def test_execution_context_markdown_states_parent_final_gate_rule(tmp_path):
     assert "final_judge/parent_final_gate" in text
     assert "Quality Contract" in text
     assert "Context Manifest" in text
+
+
+def test_create_run_workflow_plan_persists_without_raw_json(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+
+    task = manager.create_run(
+        goal="Fix API bug and add tests",
+        thought="Let workflow compiler produce the worker contract first.",
+        plan=["route", "compile", "review"],
+        workflow_mode="plan",
+    )
+    payload = json.loads((Path(task.task_dir) / "task.json").read_text(encoding="utf-8"))
+
+    assert task.workflow_mode == "plan"
+    assert task.workflow_plan["ok"] is True
+    assert task.workflow_template_id == "code_feature_split"
+    assert payload["workflow_mode"] == "plan"
+    assert payload["workflow_plan"]["selected_template_id"] == "code_feature_split"
+    assert "Implementation satisfies the shared contract" in task.acceptance_checks
+    assert "Focused verification passes" in task.acceptance_checks

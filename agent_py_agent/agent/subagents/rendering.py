@@ -309,6 +309,73 @@ def render_patch_review_record_markdown(record: PatchReviewRecord) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_patch_apply_markdown(report: PatchApplyReport) -> str:
+    """渲染批量 patch apply 报告。"""
+
+    mode = "dry-run" if report.dry_run else "apply"
+    lines = [
+        "# SUBAGENT PATCH APPLY",
+        "",
+        f"- generated_at: {report.generated_at}",
+        f"- mode: {mode}",
+        f"- total_records: {report.summary.get('total', 0)}",
+        "",
+        "## Summary",
+        "",
+    ]
+    for key in sorted(report.summary):
+        lines.append(f"- {key}: {report.summary[key]}")
+    lines.extend(["", "## Records", ""])
+    if not report.records:
+        lines.append("- 暂无 patch 需要 apply")
+    for record in report.records[:100]:
+        status = "OK" if record.ok else "FAIL"
+        lines.append(
+            f"- [{status}] `{record.run_id}` decision={record.decision} "
+            f"patches={record.patch_count} applied={record.applied_count} blocked={record.blocked_count} "
+            f"rollback={record.rollback_performed}"
+        )
+        lines.append(f"  - {record.message}")
+    return "\n".join(lines) + "\n"
+
+
+def render_patch_apply_record_markdown(record: PatchApplyRecord) -> str:
+    """渲染单个 patch apply 记录。"""
+
+    lines = [
+        "# PATCH APPLY",
+        "",
+        f"- id: {record.id}",
+        f"- run_id: {record.run_id}",
+        f"- mode: {'dry-run' if record.dry_run else 'apply'}",
+        f"- decision: {record.decision}",
+        f"- ok: {record.ok}",
+        f"- applied: {record.applied}",
+        f"- applied_count: {record.applied_count}",
+        f"- blocked_count: {record.blocked_count}",
+        f"- rollback_performed: {record.rollback_performed}",
+        f"- applier: {record.applier or 'none'}",
+        f"- note: {record.note or 'none'}",
+        f"- message: {record.message}",
+        "",
+        "## Test Commands",
+        "",
+    ]
+    if record.test_commands:
+        lines.extend(f"- {item}" for item in record.test_commands)
+    else:
+        lines.append("- none")
+    lines.extend(["", "## Patches", ""])
+    if not record.patches:
+        lines.append("- none")
+    for item in record.patches:
+        lines.append(
+            f"- [{item.get('apply_status', 'UNKNOWN')}] {item.get('path', 'unknown')} "
+            f"status={item.get('status', 'unknown')} review={item.get('review_status', 'UNREVIEWED')} :: {item.get('message', item.get('summary', ''))}"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def render_dispatch_markdown(report: DispatchReport) -> str:
     """渲染父代理调度器报告。"""
 
@@ -420,5 +487,4 @@ def _render_board_line(item: SubAgentBoardItem) -> str:
         f"evidence={item.evidence_count} requests={item.open_request_count} "
         f"gaps={item.open_gap_count} flags={flags} :: {goal}"
     )
-
 

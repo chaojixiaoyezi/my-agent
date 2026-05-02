@@ -63,6 +63,8 @@ from .subagents.reports import (
     ParentPlannerReport,
     PatchReviewRecord,
     PatchReviewReport,
+    PatchApplyRecord,
+    PatchApplyReport,
     SubAgentBoard,
     SubAgentBoardItem,
 )

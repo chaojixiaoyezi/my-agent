@@ -97,7 +97,11 @@ class SimpleAgent(
         self.memory = JsonlMemory(self.root / config.memory_path, local_store=self.local_store)
         self.prompts = PromptBuilder(config, self.root)
         self.backend = get_backend(config.model_backend, config)
-        self.subagents = SubAgentManager(self.root / config.subagent_workspace, local_store=self.local_store)
+        self.subagents = SubAgentManager(
+            self.root / config.subagent_workspace,
+            local_store=self.local_store,
+            workspace_root=self.root,
+        )
 
         workspace_root = self.root.parent if (self.root / "__main__.py").exists() else self.root
         self.tools = ToolRegistry(
