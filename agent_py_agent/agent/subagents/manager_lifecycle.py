@@ -243,17 +243,41 @@ class SubAgentLifecycleMixin:
 
         task = self.load(run_id)
         previous = f"{task.status}/{task.failure_type or 'none'}"
+        attempt_id = _new_id("attempt")
         task.status = "RUNNING"
         task.verification_status = "UNVERIFIED"
         task.failure_type = ""
         task.ended_at = 0.0
+        task.runner_active_attempt_id = attempt_id
         task.updated_at = time.time()
         task.heartbeat_at = task.updated_at
         self.save(task)
         suffix = f" retry_reason={retry_reason}" if retry_reason else ""
         self._append_task_work_log(
             task,
-            f"runner_attempt: start previous={previous} attempt={task.runner_attempts + 1}{suffix}",
+            (
+                f"runner_attempt: start previous={previous} attempt={task.runner_attempts + 1} "
+                f"attempt_id={attempt_id}{suffix}"
+            ),
         )
         return task
 
+    def abandon_runner_attempt(self, run_id: str, attempt_id: str, *, reason: str = "") -> SubAgentTask:
+        """标记一个 runner attempt 已被放弃，后续迟到结果不再覆盖账本。"""
+
+        task = self.load(run_id)
+        normalized = str(attempt_id or "").strip()
+        if not normalized:
+            return task
+        if normalized not in task.runner_abandoned_attempt_ids:
+            task.runner_abandoned_attempt_ids.append(normalized)
+        if task.runner_active_attempt_id == normalized:
+            task.runner_active_attempt_id = ""
+        task.updated_at = time.time()
+        self.save(task)
+        if reason:
+            self._append_task_work_log(
+                task,
+                f"runner_attempt: abandon attempt_id={normalized} reason={reason}",
+            )
+        return task

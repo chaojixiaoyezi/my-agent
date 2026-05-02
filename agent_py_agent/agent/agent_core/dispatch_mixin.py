@@ -22,6 +22,8 @@ from .runner_dispatch import (
     _dispatch_patch_review_run_ids,
     _dispatch_runner_candidates,
     _resolve_runner_concurrency,
+    _resolve_runner_start_rate,
+    _resolve_runner_timeout_seconds,
     _run_subagent_worker,
     _runner_dispatch_record,
     _runner_max_attempts,
@@ -314,7 +316,11 @@ class SimpleAgentDispatchMixin:
 
             pending_runner_jobs.append((task.id, before, retry_reason))
 
+        runner_start_rate = _resolve_runner_start_rate(self.config.runner_start_rate, len(pending_runner_jobs))
+        if runner_start_rate and runner_start_rate < len(pending_runner_jobs):
+            pending_runner_jobs = pending_runner_jobs[:runner_start_rate]
         runner_concurrency = _resolve_runner_concurrency(self.config.runner_concurrency, len(pending_runner_jobs))
+        runner_timeout_seconds = _resolve_runner_timeout_seconds(self.config.runner_timeout_seconds)
         if pending_runner_jobs and runner_concurrency > 1 and execute_runners:
             future_to_job = {}
             with ThreadPoolExecutor(max_workers=runner_concurrency) as executor:
@@ -329,12 +335,24 @@ class SimpleAgentDispatchMixin:
                         max_cards,
                         probe,
                         retry_reason,
+                        runner_timeout_seconds,
                     )
                     future_to_job[future] = (run_id, before, retry_reason)
                 completed: dict[str, tuple[SubAgentRunnerResult, object]] = {}
                 for future in as_completed(future_to_job):
                     run_id, before, retry_reason = future_to_job[future]
-                    result = future.result()
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        result = self.subagents.record_runner_result(
+                            run_id,
+                            dry_run=False,
+                            ok=False,
+                            message=f"runner worker failed: {exc}",
+                            status="BLOCKED",
+                            verification_status="UNVERIFIED",
+                            failure_type="runner_worker_error",
+                        )
                     after = self.subagents.load(run_id)
                     completed[run_id] = (result, after)
             for run_id, before, retry_reason in pending_runner_jobs:
@@ -352,14 +370,27 @@ class SimpleAgentDispatchMixin:
                 )
         else:
             for run_id, before, retry_reason in pending_runner_jobs:
-                result = self.run_subagent(
-                    run_id,
-                    instruction=effective_runner_instruction,
-                    dry_run=not execute_runners,
-                    max_cards=max_cards,
-                    probe=probe,
-                    retry_reason=retry_reason,
-                )
+                if execute_runners and runner_timeout_seconds > 0:
+                    result = _run_subagent_worker(
+                        self.config,
+                        self.root,
+                        run_id,
+                        effective_runner_instruction,
+                        False,
+                        max_cards,
+                        probe,
+                        retry_reason,
+                        runner_timeout_seconds,
+                    )
+                else:
+                    result = self.run_subagent(
+                        run_id,
+                        instruction=effective_runner_instruction,
+                        dry_run=not execute_runners,
+                        max_cards=max_cards,
+                        probe=probe,
+                        retry_reason=retry_reason,
+                    )
                 after = self.subagents.load(run_id)
                 records.append(
                     _runner_dispatch_record(

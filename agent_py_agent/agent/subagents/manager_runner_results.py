@@ -79,6 +79,7 @@ class SubAgentRunnerResultMixin:
         self,
         run_id: str,
         *,
+        attempt_id: str = "",
         dry_run: bool,
         ok: bool,
         message: str,
@@ -103,6 +104,47 @@ class SubAgentRunnerResultMixin:
         """
 
         task = self.load(run_id)
+        normalized_attempt_id = str(attempt_id or "").strip()
+        if normalized_attempt_id:
+            if normalized_attempt_id in task.runner_abandoned_attempt_ids:
+                return SubAgentRunnerResult(
+                    run_id=task.id,
+                    dry_run=dry_run,
+                    ok=False,
+                    status=task.status,
+                    verification_status=task.verification_status,
+                    message=f"ignored stale runner result for abandoned attempt {normalized_attempt_id}",
+                    runner_attempts=task.runner_attempts,
+                    runner_last_error=task.runner_last_error,
+                    execution_context_json=task.execution_context_json,
+                    execution_context_file=task.execution_context_file,
+                    prompt_file=task.runner_prompt_file,
+                    response_file=task.runner_response_file,
+                    result_file=task.runner_result_file,
+                    result_json=task.runner_result_json,
+                    output_json=task.output_json,
+                    created_at=time.time(),
+                )
+            active_attempt_id = str(task.runner_active_attempt_id or "").strip()
+            if active_attempt_id and active_attempt_id != normalized_attempt_id:
+                return SubAgentRunnerResult(
+                    run_id=task.id,
+                    dry_run=dry_run,
+                    ok=False,
+                    status=task.status,
+                    verification_status=task.verification_status,
+                    message=f"ignored stale runner result for non-active attempt {normalized_attempt_id}",
+                    runner_attempts=task.runner_attempts,
+                    runner_last_error=task.runner_last_error,
+                    execution_context_json=task.execution_context_json,
+                    execution_context_file=task.execution_context_file,
+                    prompt_file=task.runner_prompt_file,
+                    response_file=task.runner_response_file,
+                    result_file=task.runner_result_file,
+                    result_json=task.runner_result_json,
+                    output_json=task.output_json,
+                    created_at=time.time(),
+                )
         _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
         self.save(task)
         now = time.time()
@@ -173,6 +215,8 @@ class SubAgentRunnerResultMixin:
                 task.runner_last_error = message
             else:
                 task.runner_last_error = ""
+            if normalized_attempt_id and task.runner_active_attempt_id == normalized_attempt_id:
+                task.runner_active_attempt_id = ""
         blockers = []
         if not ok or task.status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
             blockers = [parsed.blocked_reason or message]
@@ -233,9 +277,15 @@ class SubAgentRunnerResultMixin:
         self.save(task)
         if parsed.found and parsed.ok:
             _append_runner_debrief_content(task, parsed)
+        learning_candidates = []
+        if not dry_run and parsed.found and parsed.ok and lessons:
+            learning_candidates = self.record_learning_candidates(task, lessons)
         self._append_task_work_log(
             task,
-            f"subagent_runner: dry_run={dry_run} ok={ok} status={task.status} message={message}",
+            (
+                f"subagent_runner: dry_run={dry_run} ok={ok} status={task.status} "
+                f"message={message} learning_candidates={len(learning_candidates)}"
+            ),
         )
         self._index_runner_result(result, output_payload)
         return result

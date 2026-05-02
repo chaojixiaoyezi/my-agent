@@ -8,6 +8,7 @@ dispatch 阶段不应该把“谁能跑、能不能重试、并发 worker 怎么
 """
 
 import json
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,7 @@ RETRYABLE_RUNNER_FAILURE_TYPES = {
     "model_error",
     "api_error",
     "transient_error",
+    "runner_timeout",
 }
 
 
@@ -92,6 +94,46 @@ def _resolve_runner_concurrency(value: object, job_count: int) -> int:
     return max(1, min(parsed, job_count))
 
 
+def _resolve_runner_start_rate(value: object, job_count: int) -> int:
+    """把 runner_start_rate 配置转成本轮最多启动多少个 runner。"""
+
+    if job_count <= 0:
+        return 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"", "auto"}:
+            return job_count
+        try:
+            parsed = int(normalized)
+        except ValueError:
+            return job_count
+    else:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return job_count
+    return max(0, min(parsed, job_count))
+
+
+def _resolve_runner_timeout_seconds(value: object) -> float:
+    """把 runner_timeout_seconds 配置转成超时秒数；0 表示不启用。"""
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"", "auto", "off", "none", "disabled", "false", "no"}:
+            return 0.0
+        try:
+            parsed = float(normalized)
+        except ValueError:
+            return 0.0
+    else:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+    return max(0.0, parsed)
+
+
 def _run_subagent_worker(
     config: AgentConfig,
     root: Path,
@@ -101,6 +143,7 @@ def _run_subagent_worker(
     max_cards: int,
     probe: bool,
     retry_reason: str,
+    timeout_seconds: float = 0.0,
 ) -> SubAgentRunnerResult:
     """LLM: run one subagent in an isolated worker SimpleAgent instance.
 
@@ -112,14 +155,54 @@ def _run_subagent_worker(
     from ..core import SimpleAgent
 
     worker = SimpleAgent(config, root)
-    return worker.run_subagent(
-        run_id,
-        instruction=instruction,
-        dry_run=dry_run,
-        max_cards=max_cards,
-        probe=probe,
-        retry_reason=retry_reason,
-    )
+    if dry_run or timeout_seconds <= 0:
+        return worker.run_subagent(
+            run_id,
+            instruction=instruction,
+            dry_run=dry_run,
+            max_cards=max_cards,
+            probe=probe,
+            retry_reason=retry_reason,
+        )
+
+    prepared = worker.subagents.prepare_runner_attempt(run_id, retry_reason=retry_reason)
+    attempt_id = prepared.runner_active_attempt_id
+    payload: dict[str, object] = {}
+
+    def _target() -> None:
+        try:
+            payload["result"] = worker.run_subagent(
+                run_id,
+                instruction=instruction,
+                dry_run=False,
+                max_cards=max_cards,
+                probe=probe,
+                retry_reason=retry_reason,
+                attempt_id=attempt_id,
+            )
+        except Exception as exc:  # pragma: no cover - defensive wrapper
+            payload["error"] = exc
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    thread.join(timeout_seconds)
+    if thread.is_alive():
+        timeout_message = f"runner timed out after {timeout_seconds:.2f}s"
+        timeout_result = worker.subagents.record_runner_result(
+            run_id,
+            attempt_id=attempt_id,
+            dry_run=False,
+            ok=False,
+            message=timeout_message,
+            status="TIMEOUT",
+            verification_status="UNVERIFIED",
+            failure_type="runner_timeout",
+        )
+        worker.subagents.abandon_runner_attempt(run_id, attempt_id, reason=timeout_message)
+        return timeout_result
+    if "error" in payload:
+        raise payload["error"]  # type: ignore[misc]
+    return payload["result"]  # type: ignore[return-value]
 
 
 def _runner_dispatch_record(
