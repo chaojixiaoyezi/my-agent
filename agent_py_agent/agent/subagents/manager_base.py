@@ -206,12 +206,42 @@ class SubAgentBaseMixin:
         context_manifest: ContextManifest | dict[str, object] | None = None,
         context_packs: list[dict[str, object]] | dict[str, object] | None = None,
         extra_write_roots: list[str] | None = None,
+        workflow_mode: str = "off",
     ) -> SubAgentTask:
-        """创建一条子代理运行记录。"""
+        """创建一条子代理运行记录。
+
+        workflow_mode 控制是否启用工作流规划：
+          - "off"  : 默认，不启用工作流（完全向后兼容）
+          - "plan" : 运行工作流规划，结果写入 task.raw_json["workflow_plan"]
+          - "auto" : 运行工作流规划，自动将 worker spec 的 acceptance_checks 合并到任务
+        """
 
         now = time.time()
         run_id = _new_id("subagent")
         paths = self._build_work_order_paths(run_id, extra_write_roots=extra_write_roots)
+
+        # --- Workflow planning (optional) ---
+        workflow_plan_dict: dict[str, object] | None = None
+        merged_acceptance = list(acceptance_checks or [])
+        if workflow_mode != "off":
+            workflow_plan_dict = self._try_workflow_plan(
+                goal,
+                quality_contract=quality_contract,
+                context_manifest=context_manifest,
+                allowed_write_roots=extra_write_roots,
+            )
+            if workflow_plan_dict and workflow_plan_dict.get("ok"):
+                workers = workflow_plan_dict.get("workers") or []
+                if workers and isinstance(workers[0], dict):
+                    worker_checks = workers[0].get("acceptance_checks") or []
+                    for check in worker_checks:
+                        if check not in merged_acceptance:
+                            merged_acceptance.append(check)
+                parent_checks = workflow_plan_dict.get("parent_acceptance_checklist") or []
+                for check in parent_checks:
+                    if check not in merged_acceptance:
+                        merged_acceptance.append(check)
+
         task = SubAgentTask(
             id=run_id,
             goal=goal,
@@ -227,7 +257,7 @@ class SubAgentBaseMixin:
             depth=depth,
             allowed_skills=allowed_skills or [],
             allowed_tools=allowed_tools or [],
-            acceptance_checks=acceptance_checks or [],
+            acceptance_checks=merged_acceptance,
             quality_contract=_normalize_quality_contract(quality_contract),
             context_manifest=_normalize_context_manifest(context_manifest),
             context_packs=_normalize_context_packs(context_packs),
@@ -236,10 +266,36 @@ class SubAgentBaseMixin:
             heartbeat_at=now,
             **paths,
         )
+        if workflow_plan_dict:
+            task.raw_json["workflow_plan"] = workflow_plan_dict
+            task.raw_json["workflow_mode"] = workflow_mode
         self.save(task)
         if parent_id:
             self.add_child(parent_id, task.id)
         return task
+
+    @staticmethod
+    def _try_workflow_plan(
+        goal: str,
+        *,
+        quality_contract: object | None = None,
+        context_manifest: object | None = None,
+        allowed_write_roots: list[str] | None = None,
+    ) -> dict[str, object] | None:
+        """尝试运行工作流规划，失败时返回 None。"""
+
+        try:
+            from ..subagent_workflows.planner import plan_workflow_for_goal
+
+            result = plan_workflow_for_goal(
+                goal,
+                quality_contract=quality_contract,
+                context_manifest=context_manifest,
+                allowed_write_roots=allowed_write_roots,
+            )
+            return result.to_dict()
+        except Exception:
+            return None
 
     def load(self, run_id: str) -> SubAgentTask:
         """从磁盘读取一条运行记录。"""
