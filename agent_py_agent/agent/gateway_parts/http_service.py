@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from ..agent.core import SimpleAgent
     from .paths import GatewayPaths
+    from ..session.cross_channel import CrossChannelSession
+    from ..session.admin_query import AdminCrossChannelQuery
 
 
 # Global server instance for signal handler access
@@ -79,6 +81,10 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             self._handle_status()
         elif self.path.startswith("/result/"):
             self._handle_result()
+        elif self.path.startswith("/sessions/") and self.path.endswith("/channels"):
+            self._handle_session_channels()
+        elif self.path == "/admin/summary":
+            self._handle_admin_summary()
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -88,6 +94,8 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             self._handle_ask()
         elif self.path == "/stop":
             self._handle_stop()
+        elif self.path.startswith("/sessions/") and self.path.endswith("/bind"):
+            self._handle_session_bind()
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -212,13 +220,69 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         )
         self._send_json(200, {"status": "stopping"})
 
+    def _handle_session_channels(self) -> None:
+        """GET /sessions/{session_id}/channels - query session channel bindings."""
+        # Extract session_id from path: /sessions/{session_id}/channels
+        parts = self.path.split("/")
+        if len(parts) >= 4:
+            session_id = parts[2]
+            server = _server_instance
+            if server is None or server.cross_channel is None:
+                self._send_json(500, {"error": "cross channel not initialized"})
+                return
+            bound = server.cross_channel.get_bound_sessions(session_id)
+            primary = server.cross_channel.get_primary_channel(session_id)
+            self._send_json(200, {"session_id": session_id, "bound_channels": bound, "primary_channel": primary})
+        else:
+            self._send_json(400, {"error": "invalid path"})
+
+    def _handle_session_bind(self) -> None:
+        """POST /sessions/{session_id}/bind - bind session to new channel."""
+        parts = self.path.split("/")
+        if len(parts) >= 4:
+            session_id = parts[2]
+            try:
+                body = self._read_json()
+            except json.JSONDecodeError as e:
+                self._send_json(400, {"error": f"invalid JSON: {e}"})
+                return
+
+            channel = body.get("channel")
+            user_id = body.get("user_id", "admin")
+            if not channel:
+                self._send_json(400, {"error": "channel is required"})
+                return
+
+            server = _server_instance
+            if server is None or server.cross_channel is None:
+                self._send_json(500, {"error": "cross channel not initialized"})
+                return
+
+            success = server.cross_channel.bind_session(session_id, channel, user_id)
+            self._send_json(200, {"success": success, "session_id": session_id, "channel": channel})
+        else:
+            self._send_json(400, {"error": "invalid path"})
+
+    def _handle_admin_summary(self) -> None:
+        """GET /admin/summary - admin global summary."""
+        server = _server_instance
+        if server is None or server.admin_query is None:
+            self._send_json(500, {"error": "admin query not initialized"})
+            return
+
+        # Get admin summary as formatted text
+        summary = server.admin_query.format_admin_summary("admin")
+        self._send_json(200, {"summary": summary})
+
 
 class GatewayHTTPServer:
     """HTTP server for gateway."""
 
-    def __init__(self, port: int, paths: GatewayPaths):
+    def __init__(self, port: int, paths: GatewayPaths, cross_channel: CrossChannelSession | None = None, admin_query: AdminCrossChannelQuery | None = None):
         self.port = port
         self.paths = paths
+        self.cross_channel = cross_channel
+        self.admin_query = admin_query
         self.server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -257,8 +321,8 @@ class GatewayHTTPServer:
         _server_instance = None
 
 
-def start_http_server(port: int, paths: GatewayPaths) -> GatewayHTTPServer:
+def start_http_server(port: int, paths: GatewayPaths, cross_channel: CrossChannelSession | None = None, admin_query: AdminCrossChannelQuery | None = None) -> GatewayHTTPServer:
     """Start HTTP server and return handle."""
-    server = GatewayHTTPServer(port, paths)
+    server = GatewayHTTPServer(port, paths, cross_channel, admin_query)
     server.start()
     return server

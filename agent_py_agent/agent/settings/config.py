@@ -92,7 +92,22 @@ class AgentConfig:
     gateway_request_max_attempts: int = 2
     gateway_port: int = 8420
     adapter_workspace: str = "data/adapters/file"
+    # 飞书适配器配置
+    feishu_app_id: str = ""
+    feishu_app_secret: str = ""
+    feishu_verification_token: str = ""
+    feishu_encrypt_key: str = ""
+    feishu_callback_port: int = 8421
+    # QQ 适配器配置
+    qq_app_id: str = ""
+    qq_app_secret: str = ""
+    qq_token: str = ""
+    qq_guild_id: str = ""
+    qq_channel_id: str = ""
     session_workspace: str = "data/sessions"
+    notification_enabled: bool = True
+    notification_store_path: str = "data/notifications"
+    notification_channel_timeout_seconds: int = 300
     daemon_planner: bool = True
     daemon_apply: bool = True
     daemon_execute_runners: bool = True
@@ -345,6 +360,29 @@ def normalize_agent_config(data: dict[str, object]) -> tuple[dict[str, object], 
         defaults.gateway_port, min_val=0, max_val=65535,
     )
     _apply("gateway_port", v, w)
+
+    # 飞书配置（字符串，直接透传）
+    for key in ("feishu_app_id", "feishu_app_secret", "feishu_verification_token", "feishu_encrypt_key"):
+        val = out.get(key, defaults.feishu_app_id if key == "feishu_app_id" else "")
+        if isinstance(val, str):
+            out[key] = val
+        else:
+            out[key] = ""
+
+    # feishu_callback_port
+    v, w = _coerce_int_config(
+        "feishu_callback_port", out.get("feishu_callback_port"),
+        defaults.feishu_callback_port, min_val=1024, max_val=65535,
+    )
+    _apply("feishu_callback_port", v, w)
+
+    # QQ 配置（字符串，直接透传）
+    for key in ("qq_app_id", "qq_app_secret", "qq_token", "qq_guild_id", "qq_channel_id"):
+        val = out.get(key, defaults.qq_app_id if key == "qq_app_id" else "")
+        if isinstance(val, str):
+            out[key] = val
+        else:
+            out[key] = ""
 
     # user_id - validate non-empty string
     raw_user_id = out.get("user_id", defaults.user_id)

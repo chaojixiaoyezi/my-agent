@@ -23,6 +23,7 @@ class ActiveWorkSummary:
     stale_request_count: int = 0
     recent_tasks: list[dict] = None
     processing_requests: list[str] = None
+    pending_notifications: int = 0
 
     def __post_init__(self) -> None:
         if self.recent_tasks is None:
@@ -87,6 +88,15 @@ def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
         summary.active_task_count = 0
         summary.recent_tasks = []
 
+    # 6. 检测未读通知
+    try:
+        from .notification import NotificationManager
+        if agent.config.notification_enabled:
+            notif_manager = NotificationManager(agent.config)
+            summary.pending_notifications = notif_manager.get_pending_count(agent.config.user_id)
+    except Exception:
+        summary.pending_notifications = 0
+
     return summary
 
 
@@ -115,6 +125,10 @@ def format_active_work_summary(summary: ActiveWorkSummary) -> str:
         lines.append(f"⚠ 发现 {summary.stale_request_count} 个遗留的 processing 请求")
         if summary.processing_requests:
             lines.append(f"  请求 IDs: {', '.join(summary.processing_requests[:3])}")
+
+    if summary.pending_notifications > 0:
+        lines.append(f"📬 有 {summary.pending_notifications} 条未读通知")
+        lines.append("  运行 my-agent notifications 查看详情")
 
     if summary.recent_tasks:
         lines.append("最近任务:")
