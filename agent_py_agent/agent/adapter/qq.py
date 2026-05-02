@@ -22,6 +22,8 @@ import ssl
 import struct
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from socket import socket as _socket
 from typing import Any
@@ -182,8 +184,10 @@ class _QQWebSocketClient:
         import secrets
 
         key = base64.b64encode(secrets.token_bytes(16)).decode()
+        query = self.url.split("?", 1)[1] if "?" in self.url else ""
+        request_target = f"{path}?{query}" if query else path
         handshake = (
-            f"GET {path}?{self.url.split('?', 1)[1] if '?' in self.url else ''} HTTP/1.1\r\n"
+            f"GET {request_target} HTTP/1.1\r\n"
             f"Host: {host}:{port}\r\n"
             f"Upgrade: websocket\r\n"
             f"Connection: Upgrade\r\n"
@@ -250,7 +254,7 @@ class _QQWebSocketClient:
             if opcode == _WebSocketFrame.OPCODE_PING:
                 # 自动回应 Pong
                 if self._sock:
-                    self._sock.sendall(_WebSocketFrame.build_close_frame())
+                    self._sock.sendall(bytes([0x8A, 0x00]))
                 return None
             return None
         except Exception:
@@ -436,6 +440,9 @@ class QQAdapter(BaseChannelAdapter):
 
         if op == 0:
             # 事件消息
+            seq = payload.get("s", 0)
+            if seq:
+                self._last_seq = seq
             t = payload.get("t", "")
             if t == "MESSAGE_CREATE":
                 self._process_qq_message(d)
@@ -601,7 +608,3 @@ class QQAdapter(BaseChannelAdapter):
         except Exception as exc:
             logger.error(f"获取 QQ gateway URL 失败: {exc}")
         return None
-
-
-import urllib.error
-import urllib.request
