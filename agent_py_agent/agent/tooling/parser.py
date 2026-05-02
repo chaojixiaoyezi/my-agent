@@ -19,6 +19,15 @@ _XMLISH_TOOL_BLOCK_RE = re.compile(
     r"<tool_call\b[^>]*>(?P<body>.*?)</tool_call\s*>",
     re.IGNORECASE | re.DOTALL,
 )
+_XMLISH_BARE_FUNCTION_RE = re.compile(
+    r"<function(?:\s*=\s*['\"]?(?P<name1>[^'\">\s]+)['\"]?|\s+name\s*=\s*['\"](?P<name2>[^'\"]+)['\"])\s*>(?P<body>.*?)</function\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_XMLISH_BARE_FUNCTION_OPEN_RE = re.compile(
+    r"<function(?:\s*=\s*['\"]?(?P<name1>[^'\">\s]+)['\"]?|\s+name\s*=\s*['\"](?P<name2>[^'\"]+)['\"])\s*>",
+    re.IGNORECASE,
+)
+
 _XMLISH_FUNCTION_EQ_RE = re.compile(
     r"<function\s*=\s*['\"]?(?P<name>[^'\">\s]+)['\"]?\s*>",
     re.IGNORECASE,
@@ -90,6 +99,22 @@ def parse_xmlish_tool_calls(text: str) -> list[tuple[int, dict[str, Any]]]:
         )
         cursor = match.end()
 
+    closed_positions: set[int] = set()
+    for match in _XMLISH_BARE_FUNCTION_RE.finditer(text):
+        closed_positions.add(match.start())
+        name = match.group("name1") or match.group("name2")
+        body = match.group("body")
+        payload: dict[str, Any] = {"tool": _normalize_xmlish_tool_name(name)}
+        for param_match in _XMLISH_PARAMETER_EQ_RE.finditer(body):
+            pname = _normalize_xmlish_parameter_name(param_match.group("name"))
+            payload[pname] = _decode_xmlish_parameter_value(param_match.group("value"))
+        for param_match in _XMLISH_PARAMETER_NAME_RE.finditer(body):
+            pname = _normalize_xmlish_parameter_name(param_match.group("name"))
+            payload[pname] = _decode_xmlish_parameter_value(param_match.group("value"))
+        calls.append((match.start(), payload))
+
+    _handle_bare_function_opens_without_close(text, calls, closed_positions)
+
     tail_start = text.lower().find("<tool_call", cursor)
     if tail_start != -1:
         calls.append(
@@ -103,6 +128,67 @@ def parse_xmlish_tool_calls(text: str) -> list[tuple[int, dict[str, Any]]]:
             )
         )
     return calls
+
+
+
+def _handle_bare_function_opens_without_close(
+    text: str,
+    calls: list[tuple[int, dict[str, Any]]],
+    closed_positions: set[int],
+) -> None:
+    """Handle bare function opens that lack a closing tag.
+
+    新手说明:
+    有些模型输出不带闭合标签的格式。这个函数在两个 open 之间截取
+    body 并解析。最后一个没有闭合标签的块会标记为 parse error。
+    """
+
+    opens = list(_XMLISH_BARE_FUNCTION_OPEN_RE.finditer(text))
+    for i, match in enumerate(opens):
+        if match.start() in closed_positions:
+            continue
+        name = match.group("name1") or match.group("name2")
+        body_start = match.end()
+        next_open = opens[i + 1].start() if i + 1 < len(opens) else len(text)
+        body = text[body_start:next_open]
+        if not body.strip():
+            calls.append(
+                (
+                    match.start(),
+                    {
+                        "tool": "__parse_error__",
+                        "error": "XML-ish bare function call has empty body",
+                        "raw": _truncate_raw(text[match.start():next_open].strip()),
+                    },
+                )
+            )
+            continue
+        payload: dict[str, Any] = {"tool": _normalize_xmlish_tool_name(name)}
+        for param_match in _XMLISH_PARAMETER_EQ_RE.finditer(body):
+            pname = _normalize_xmlish_parameter_name(param_match.group("name"))
+            payload[pname] = _decode_xmlish_parameter_value(param_match.group("value"))
+        for param_match in _XMLISH_PARAMETER_NAME_RE.finditer(body):
+            pname = _normalize_xmlish_parameter_name(param_match.group("name"))
+            payload[pname] = _decode_xmlish_parameter_value(param_match.group("value"))
+        calls.append((match.start(), payload))
+
+    # The last bare function open without a closing tag is a parse error
+    if opens:
+        last = opens[-1]
+        if last.start() not in closed_positions:
+            after_last = text[last.end():]
+            if "</function" not in after_last.lower():
+                calls[:] = [(pos, pl) for pos, pl in calls if pos != last.start()]
+                calls.append(
+                    (
+                        last.start(),
+                        {
+                            "tool": "__parse_error__",
+                            "error": "XML-ish bare function call is missing a closing tag",
+                            "raw": _truncate_raw(text[last.start():].strip()),
+                        },
+                    )
+                )
 
 
 def _parse_xmlish_tool_call_body(body: str, raw: str) -> dict[str, Any]:

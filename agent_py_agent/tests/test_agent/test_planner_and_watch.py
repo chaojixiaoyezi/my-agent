@@ -1,0 +1,200 @@
+"""LLM: Tests for parent-planner dispatch and watch: planner parsing, gate
+enforcement, zero-limit context, watch cycle, and lock prevention.
+
+给人看的解释：
+测试父代理 planner 调度和 watch：planner 解析与门控、零限制上下文、
+watch 周期、锁防重入。
+"""
+
+from pathlib import Path
+import json
+import time
+import tempfile
+
+from agent_py_agent.agent.capabilities import CapabilityRouter
+from agent_py_agent.agent.capability_config import CapabilityConfig
+from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.subagent import parse_parent_planner_output
+
+from .backends import ParentPlannerBackend
+
+
+def test_parent_planner_parser_reads_structured_result():
+    """LLM: Verifies parse_parent_planner_output extracts decision, actions, risks, etc."""
+    parsed = parse_parent_planner_output(
+        "[PARENT_PLANNER_RESULT]\n"
+        "{\n"
+        '  "decision": "DISPATCH",\n'
+        '  "summary": "需要继续推进。",\n'
+        '  "should_dispatch": true,\n'
+        '  "runner_instruction": "补充证据。",\n'
+        '  "suggested_max_runners": 1,\n'
+        '  "actions": [{"action": "execute_runner", "run_id": "r1"}],\n'
+        '  "blockers": [],\n'
+        '  "risks": ["api_budget"],\n'
+        '  "notes": ["ok"]\n'
+        "}\n"
+        "[/PARENT_PLANNER_RESULT]"
+    )
+
+    assert parsed.found
+    assert parsed.ok
+    assert parsed.decision == "DISPATCH"
+    assert parsed.runner_instruction == "补充证据。"
+    assert parsed.actions[0]["action"] == "execute_runner"
+    assert parsed.risks == ["api_budget"]
+
+
+def test_subagent_dispatch_parent_planner_runs_when_gate_has_work():
+    """LLM: Verifies parent planner runs dispatch when there are active tasks in the gate."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        backend = ParentPlannerBackend()
+        agent.backend = backend
+        agent.subagents.create_run(
+            goal="planner 需要看到的 active task",
+            thought="等待父代理 planner 判断。",
+            plan=["planner", "dispatch"],
+        )
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+
+        report = agent.dispatch_subagents(
+            router,
+            CapabilityConfig(),
+            apply=True,
+            planner=True,
+            execute_runners=False,
+            max_runners=1,
+        )
+
+        assert len(backend.prompts) == 1
+        assert any(item.step == "parent_planner" and item.ok for item in report.records)
+        assert any(item.step == "runner" and item.action == "runner_dry_run" for item in report.records)
+        planner_record = next(item for item in report.records if item.step == "parent_planner")
+        assert planner_record.action == "dispatch"
+        assert (root / "subs" / "parent_planner_report.json").exists()
+        assert (root / "subs" / "PARENT_PLANNER.md").exists()
+        assert (root / "subs" / "PARENT_PLANNER_LOG.md").exists()
+
+
+def test_subagent_dispatch_parent_planner_blocks_empty_heartbeat_ok_when_gate_has_work():
+    """LLM: Verifies parent planner blocks HEARTBEAT_OK when there is active work."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        backend = ParentPlannerBackend(decision="HEARTBEAT_OK")
+        agent.backend = backend
+        agent.subagents.create_run(
+            goal="不能空心 OK 的 active task",
+            thought="需要父代理继续推进。",
+            plan=["dispatch"],
+        )
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+
+        report = agent.dispatch_subagents(
+            router,
+            CapabilityConfig(),
+            apply=False,
+            planner=True,
+            max_runners=0,
+        )
+
+        planner_record = next(item for item in report.records if item.step == "parent_planner")
+        assert len(backend.prompts) == 1
+        assert not planner_record.ok
+        assert planner_record.action == "heartbeat_ok"
+        assert "禁止" in planner_record.message
+
+
+def test_subagent_dispatch_parent_planner_zero_limit_means_unlimited_context():
+    """LLM: Verifies limit=0 passes all active tasks to planner prompt (unlimited context)."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        backend = ParentPlannerBackend()
+        agent.backend = backend
+        agent.subagents.create_run(
+            goal="zero limit active task should appear in planner prompt",
+            thought="验证 limit=0 不会把 planner 上下文切空。",
+            plan=["dispatch"],
+        )
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+
+        report = agent.dispatch_subagents(
+            router,
+            CapabilityConfig(),
+            apply=False,
+            planner=True,
+            max_runners=0,
+            limit=0,
+        )
+
+        assert len(backend.prompts) == 1
+        assert "zero limit active task should appear in planner prompt" in backend.prompts[0]
+        assert any(item.step == "parent_planner" and item.ok for item in report.records)
+
+
+def test_subagent_dispatch_watch_runs_one_cycle_and_releases_lock():
+    """LLM: Verifies watch runs one dispatch cycle and releases the lock file."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        agent.subagents.create_run(
+            goal="watch 调度 dry-run",
+            thought="等待 watch 调度一轮。",
+            plan=["dispatch"],
+        )
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+
+        report = agent.watch_subagents(
+            router,
+            CapabilityConfig(),
+            apply=False,
+            max_cycles=1,
+            interval=0,
+            max_runners=1,
+        )
+        workspace = root / "subs"
+
+        assert report.summary["total"] == 1
+        assert report.records[0].ok
+        assert report.records[0].dispatch_record_count >= 1
+        assert (workspace / "subagent_dispatch_watch_report.json").exists()
+        assert (workspace / "SUBAGENT_DISPATCH_WATCH.md").exists()
+        assert (workspace / "subagent_dispatch_watch_heartbeat.json").exists()
+        assert (workspace / "DISPATCH_WATCH_LOG.md").exists()
+        assert not (workspace / "subagent_dispatch_watch.lock").exists()
+
+
+def test_subagent_dispatch_watch_lock_prevents_second_parent():
+    """LLM: Verifies watch raises RuntimeError when a lock file already exists."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+        workspace = root / "subs"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "subagent_dispatch_watch.lock").write_text(
+            json.dumps({"token": "other", "pid": 123, "created_at": time.time()}),
+            encoding="utf-8",
+        )
+
+        try:
+            agent.watch_subagents(
+                router,
+                CapabilityConfig(),
+                apply=False,
+                max_cycles=1,
+                interval=0,
+            )
+        except RuntimeError as exc:
+            assert "dispatch watch lock 已存在" in str(exc)
+        else:
+            raise AssertionError("watch lock should block a second parent")

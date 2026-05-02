@@ -1,72 +1,94 @@
+"""LLM: High-level soft detector rules and finding construction.
+
+给人看的解释：
+本模块包含 6 个高层检测器规则（WAF 攻击成功、Web 进程异常、VPN 新地理登录、
+暴力破解后成功、告警后罕见外连、多源弱信号汇聚）以及 Finding 构造辅助函数。
+底层字段访问和事件分类函数来自 field_access、field_extractors、classifiers 子模块。
+"""
+
 from __future__ import annotations
 
-"""First-pass soft detectors for local log analysis."""
-
 import hashlib
-import ipaddress
 import json
-from dataclasses import asdict, is_dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any, Mapping, Sequence
 
-from ..models import EvidenceRef, Finding, QueryPlan, utc_now_iso
-from .baselines import SecurityBaselines, ensure_baselines
-from .security_rules import get_rule
+from ...models import EvidenceRef, Finding, QueryPlan, utc_now_iso
+from ..baselines import SecurityBaselines, ensure_baselines
+from ..security_rules import get_rule
+
+from .field_access import (
+    EventLike,
+    JsonDict,
+    _canonical_time,
+    _clamp_float,
+    _event_dict,
+    _event_time,
+    _field,
+    _sort_time,
+    _text,
+    _time_bucket,
+    _truthy,
+    _within_after,
+    _within_before,
+    _window_for_events,
+)
+from .field_extractors import (
+    _asset_ip,
+    _cmdline,
+    _destination_ip,
+    _domain,
+    _dst_port,
+    _host,
+    _parent_process_name,
+    _process_name,
+    _severity,
+    _source_ip,
+    _source_product,
+    _user,
+    _victim_ip,
+)
+from .classifiers import (
+    _destination,
+    _entities_from_events,
+    _gap_details,
+    _is_alert_event,
+    _is_auth_event,
+    _is_egress_event,
+    _is_failure,
+    _is_http_success_or_error,
+    _is_suspicious_file_write,
+    _is_suspicious_web_process_event,
+    _is_success,
+    _is_vpn_event,
+    _is_waf_event,
+    _normalize_entities,
+    _primary_asset,
+    _same_asset,
+    _same_auth_scope,
+    _same_source,
+    _same_user,
+    _unique_json_values,
+    _unique_texts,
+    _weak_signal,
+    _gap_details,
+)
 
 
-JsonDict = dict[str, Any]
-EventLike = Mapping[str, Any] | object
-
-
-WEB_PARENT_PROCESSES = {
-    "apache",
-    "apache2",
-    "caddy",
-    "gunicorn",
-    "httpd",
-    "iisexpress",
-    "java",
-    "nginx",
-    "node",
-    "php-cgi",
-    "php-fpm",
-    "python",
-    "tomcat",
-    "uwsgi",
-    "w3wp.exe",
-}
-
-SUSPICIOUS_CHILD_PROCESSES = {
-    "bash",
-    "bitsadmin.exe",
-    "certutil.exe",
-    "cmd.exe",
-    "curl",
-    "curl.exe",
-    "mshta.exe",
-    "nc",
-    "ncat",
-    "netcat",
-    "perl",
-    "php",
-    "powershell.exe",
-    "pwsh",
-    "python",
-    "python.exe",
-    "regsvr32.exe",
-    "ruby",
-    "sh",
-    "wget",
-    "wget.exe",
-    "wmic.exe",
-}
-
+# ---------------------------------------------------------------------------
+# High-level detector rules
+# ---------------------------------------------------------------------------
 
 def run_soft_detectors(
     events: Sequence[EventLike],
     *,
     baselines: SecurityBaselines | dict[str, Any] | None = None,
 ) -> list[Finding]:
+    """LLM: Run all soft detectors on *events* and return deduplicated findings.
+
+    新手说明:
+    对一组事件运行所有软检测器，返回去重后的发现列表。
+    """
     baseline_obj = ensure_baselines(baselines)
     findings: list[Finding] = []
     for detector in (
@@ -87,6 +109,11 @@ def waf_attack_success_candidate(
     baselines: SecurityBaselines | dict[str, Any] | None = None,
     window_minutes: int = 15,
 ) -> list[Finding]:
+    """LLM: Detect WAF alerts followed by HTTP success, suspicious processes, file writes, or egress.
+
+    新手说明:
+    检测 WAF 告警后是否出现 HTTP 成功、可疑进程、文件写入或外连——可能表示攻击成功。
+    """
     del baselines
     normalized = [_event_dict(event) for event in events]
     findings: list[Finding] = []
@@ -158,6 +185,11 @@ def web_to_process_anomaly(
     baselines: SecurityBaselines | dict[str, Any] | None = None,
     window_minutes: int = 10,
 ) -> list[Finding]:
+    """LLM: Detect web server processes spawning suspicious child processes.
+
+    新手说明:
+    检测 Web 服务器进程（如 nginx/apache）是否启动了可疑子进程（如 bash/sh/curl）。
+    """
     del baselines, window_minutes
     findings: list[Finding] = []
     for event in [_event_dict(item) for item in events]:
@@ -175,7 +207,7 @@ def web_to_process_anomaly(
             _make_finding(
                 "web_to_process_anomaly",
                 [event],
-                hypothesis=f"Possible post-exploit command execution: web parent {parent or 'unknown'} launched {child or 'unknown'}.",
+                hypothesis=f"Possible post-exploit command execution: web parent {parent or "unknown"} launched {child or "unknown"}.",
                 confidence=min(confidence, 0.9),
                 gaps=[
                     "The initiating HTTP request is not confirmed unless web access/WAF evidence is linked.",
@@ -205,6 +237,11 @@ def vpn_new_geo_login(
     baselines: SecurityBaselines | dict[str, Any] | None = None,
     window_minutes: int = 60,
 ) -> list[Finding]:
+    """LLM: Detect successful VPN logins from new geo/ASN/device or unusual hours.
+
+    新手说明:
+    检测 VPN 成功登录是否来自新的地理位置、ASN、设备或异常时段。
+    """
     del window_minutes
     baseline_obj = ensure_baselines(baselines)
     findings: list[Finding] = []
@@ -286,6 +323,11 @@ def bruteforce_then_success(
     window_minutes: int = 15,
     failure_threshold: int = 5,
 ) -> list[Finding]:
+    """LLM: Detect repeated auth failures followed by a successful login (credential compromise).
+
+    新手说明:
+    检测多次认证失败后出现成功登录——可能是暴力破解成功或凭据泄露。
+    """
     del baselines
     normalized = sorted((_event_dict(item) for item in events), key=_sort_time)
     auth_events = [event for event in normalized if _is_auth_event(event)]
@@ -348,6 +390,11 @@ def rare_egress_after_alert(
     baselines: SecurityBaselines | dict[str, Any] | None = None,
     window_minutes: int = 30,
 ) -> list[Finding]:
+    """LLM: Detect rare outbound connections from alerted assets.
+
+    新手说明:
+    检测告警资产是否发起了罕见的出站连接——可能是 C2 回连或数据外泄。
+    """
     baseline_obj = ensure_baselines(baselines)
     normalized = [_event_dict(item) for item in events]
     alerts = [event for event in normalized if _is_alert_event(event)]
@@ -408,6 +455,11 @@ def multi_source_weak_signal(
     baselines: SecurityBaselines | dict[str, Any] | None = None,
     window_minutes: int = 15,
 ) -> list[Finding]:
+    """LLM: Detect overlapping weak signals from multiple sources on the same entity.
+
+    新手说明:
+    检测同一实体在同一时间窗口内是否有来自不同来源的弱信号汇聚——可能表示入侵路径。
+    """
     del baselines
     normalized = sorted((_event_dict(item) for item in events), key=_sort_time)
     weak_signals = [signal for signal in (_weak_signal(event) for event in normalized) if signal]
@@ -453,6 +505,7 @@ def multi_source_weak_signal(
     return findings
 
 
+# Backward-compatible aliases
 detect_waf_attack_success_candidate = waf_attack_success_candidate
 detect_web_to_process_anomaly = web_to_process_anomaly
 detect_vpn_new_geo_login = vpn_new_geo_login
@@ -471,6 +524,10 @@ DETECTORS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Finding construction helpers
+# ---------------------------------------------------------------------------
+
 def _make_finding(
     detector_id: str,
     evidence_events: Sequence[JsonDict],
@@ -483,6 +540,11 @@ def _make_finding(
     severity_hint: str | None = None,
     extra_entities: Mapping[str, Sequence[Any]] | None = None,
 ) -> Finding:
+    """LLM: Build a Finding object from detector output.
+
+    新手说明:
+    把检测器的输出组装成标准的 Finding 对象（包含证据、置信度、下一步查询等）。
+    """
     rule = get_rule(detector_id)
     entities = _entities_from_events(evidence_events)
     for key, values in (extra_entities or {}).items():
@@ -522,528 +584,12 @@ def _make_finding(
     return finding
 
 
-def _event_dict(event: EventLike) -> JsonDict:
-    if isinstance(event, Mapping):
-        return dict(event)
-    if is_dataclass(event):
-        return asdict(event)
-    to_dict = getattr(event, "to_dict", None)
-    if callable(to_dict):
-        value = to_dict()
-        if isinstance(value, Mapping):
-            return dict(value)
-    try:
-        return dict(vars(event))
-    except TypeError:
-        return {"value": event}
-
-
-def _field(payload: Mapping[str, Any], *names: str) -> Any:
-    for name in names:
-        value = _path_value(payload, name)
-        if _present(value):
-            return value
-    for bag_name in ("attributes", "raw_fields", "event", "security", "network", "http", "process", "file", "rule"):
-        bag = _path_value(payload, bag_name)
-        if isinstance(bag, Mapping):
-            for name in names:
-                value = _path_value(bag, name)
-                if _present(value):
-                    return value
-    return None
-
-
-def _path_value(payload: Mapping[str, Any], path: str) -> Any:
-    if path in payload:
-        return payload[path]
-    lower_map = {str(key).lower(): key for key in payload}
-    direct_key = lower_map.get(path.lower())
-    if direct_key is not None:
-        return payload[direct_key]
-    value: Any = payload
-    for part in path.split("."):
-        if not isinstance(value, Mapping):
-            return None
-        lower = {str(key).lower(): key for key in value}
-        key = lower.get(part.lower())
-        if key is None:
-            return None
-        value = value[key]
-    return value
-
-
-def _present(value: Any) -> bool:
-    return value is not None and value != "" and value != [] and value != {}
-
-
-def _text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value).strip()
-
-
-def _truthy(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    text = _text(value).lower()
-    return text in {"1", "true", "yes", "y", "new", "rare", "unusual"}
-
-
-def _to_int(value: Any) -> int | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _to_float(value: Any) -> float | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _clamp_float(value: Any) -> float:
-    clean = _to_float(value)
-    if clean is None:
-        return 0.0
-    return max(0.0, min(1.0, clean))
-
-
-def _event_time(event: Mapping[str, Any]) -> datetime | None:
-    return _parse_time(_field(event, "event_time", "@timestamp", "timestamp", "time", "created_at", "ingest_time"))
-
-
-def _parse_time(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    if isinstance(value, bool) or value is None:
-        return None
-    if isinstance(value, (int, float)):
-        try:
-            return datetime.fromtimestamp(value, tz=timezone.utc)
-        except (OSError, OverflowError, ValueError):
-            return None
-    text = _text(value)
-    if not text:
-        return None
-    if text.endswith("Z"):
-        text = f"{text[:-1]}+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-
-
-def _canonical_time(value: datetime | None) -> str:
-    if value is None:
-        return ""
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _sort_time(event: Mapping[str, Any]) -> tuple[int, str]:
-    when = _event_time(event)
-    return (0, _canonical_time(when)) if when is not None else (1, _evidence_id(event))
-
-
-def _within_after(start: Mapping[str, Any], candidate: Mapping[str, Any], minutes: int) -> bool:
-    start_time = _event_time(start)
-    candidate_time = _event_time(candidate)
-    if start_time is None or candidate_time is None:
-        return False
-    return start_time <= candidate_time <= start_time + timedelta(minutes=minutes)
-
-
-def _within_before(candidate: Mapping[str, Any], end: Mapping[str, Any], minutes: int) -> bool:
-    candidate_time = _event_time(candidate)
-    end_time = _event_time(end)
-    if candidate_time is None or end_time is None:
-        return False
-    return end_time - timedelta(minutes=minutes) <= candidate_time <= end_time
-
-
-def _window_for_events(events: Sequence[Mapping[str, Any]]) -> tuple[str, str]:
-    times = sorted(time for time in (_event_time(event) for event in events) if time is not None)
-    if not times:
-        stamp = utc_now_iso()
-        return (stamp, stamp)
-    return (_canonical_time(times[0]), _canonical_time(times[-1]))
-
-
-def _time_bucket(value: datetime | None, minutes: int) -> str:
-    if value is None:
-        return "unknown-time"
-    minute = (value.minute // max(minutes, 1)) * max(minutes, 1)
-    bucket = value.astimezone(timezone.utc).replace(minute=minute, second=0, microsecond=0)
-    return _canonical_time(bucket)
-
-
-def _source_product(event: Mapping[str, Any]) -> str:
-    return _text(_field(event, "source_product", "product", "source", "source_id")).lower()
-
-
-def _event_class(event: Mapping[str, Any]) -> str:
-    return _text(_field(event, "event_class", "class", "category", "type", "event_type")).lower()
-
-
-def _event_action(event: Mapping[str, Any]) -> str:
-    return _text(_field(event, "event_action", "action", "operation")).lower()
-
-
-def _outcome(event: Mapping[str, Any]) -> str:
-    return _text(_field(event, "event_outcome", "outcome", "result", "auth_result", "login_result")).lower()
-
-
-def _severity(event: Mapping[str, Any]) -> str:
-    return _text(_field(event, "severity", "severity_hint", "level", "risk_level")).lower()
-
-
-def _source_ip(event: Mapping[str, Any]) -> str:
-    return _text(_field(event, "attacker_ip", "src_ip", "source_ip", "client_ip", "remote_ip", "source.ip"))
-
-
-def _destination_ip(event: Mapping[str, Any]) -> str:
-    return _text(_field(event, "dst_ip", "destination_ip", "dest_ip", "destination.ip"))
-
-
-def _victim_ip(event: Mapping[str, Any]) -> str:
-    return _text(_field(event, "victim_ip", "asset_ip", "host_ip", "dst_ip", "destination_ip"))
-
-
-def _asset_ip(event: Mapping[str, Any]) -> str:
-    return _text(_field(event, "victim_ip", "asset_ip", "host_ip", "src_ip", "dst_ip"))
-
-
-def _host(event: Mapping[str, Any]) -> str:
-    return _text(_field(event, "host", "hostname", "asset_id", "device_name", "computer_name"))
-
-
-def _user(event: Mapping[str, Any]) -> str:
-    return _text(_field(event, "user", "username", "account", "principal", "user.name"))
-
-
-def _domain(event: Mapping[str, Any]) -> str:
-    return _text(_field(event, "domain", "dns_query", "query", "host_header", "sni", "network.domain"))
-
-
-def _dst_port(event: Mapping[str, Any]) -> int | None:
-    return _to_int(_field(event, "dst_port", "destination_port", "port", "network.dst_port"))
-
-
-def _process_name(event: Mapping[str, Any]) -> str:
-    return _basename(_field(event, "process.name", "process_name", "image", "process", "child_process"))
-
-
-def _parent_process_name(event: Mapping[str, Any]) -> str:
-    return _basename(_field(event, "process.parent_name", "parent_process_name", "parent_process", "parent.name"))
-
-
-def _cmdline(event: Mapping[str, Any]) -> str:
-    return _text(_field(event, "process.cmdline", "cmdline", "command_line", "process_command_line"))
-
-
-def _basename(value: Any) -> str:
-    text = _text(value).replace("\\", "/")
-    if "/" in text:
-        text = text.rsplit("/", 1)[-1]
-    return text.strip().lower()
-
-
-def _is_alert_event(event: Mapping[str, Any]) -> bool:
-    if _event_class(event) == "alert":
-        return True
-    if _present(_field(event, "alert_type", "threat_name", "alert_rule", "ioc_or_rule_id")):
-        return True
-    return _severity(event) in {"high", "critical"}
-
-
-def _is_waf_event(event: Mapping[str, Any]) -> bool:
-    product = _source_product(event)
-    alert_text = " ".join(
-        _text(_field(event, name))
-        for name in ("alert_type", "threat_name", "alert_rule", "api_threat_type", "owasp_type")
-    ).lower()
-    has_web_fields = _present(_field(event, "uri", "api", "url", "payload", "http.url"))
-    return "waf" in product or ("web" in alert_text and has_web_fields) or ("injection" in alert_text and has_web_fields)
-
-
-def _is_http_success_or_error(event: Mapping[str, Any]) -> bool:
-    status = _to_int(_field(event, "status_code", "http_status", "http.status_code", "response_status"))
-    if status is None:
-        return False
-    return 200 <= status < 300 or status >= 500
-
-
-def _is_suspicious_web_process_event(event: Mapping[str, Any]) -> bool:
-    parent = _parent_process_name(event)
-    child = _process_name(event)
-    action = _event_action(event)
-    event_class = _event_class(event)
-    if event_class and event_class not in {"process", "alert", "endpoint", "edr"}:
-        return False
-    if action and not any(token in action for token in ("exec", "process", "start", "spawn", "create")):
-        return False
-    return parent in WEB_PARENT_PROCESSES and child in SUSPICIOUS_CHILD_PROCESSES
-
-
-def _is_suspicious_file_write(event: Mapping[str, Any]) -> bool:
-    event_class = _event_class(event)
-    action = _event_action(event)
-    if event_class and event_class not in {"file", "alert", "endpoint", "edr"}:
-        return False
-    if action and not any(token in action for token in ("write", "create", "modify", "drop")):
-        return False
-    path = _text(_field(event, "file.path", "path", "file_path", "target_path")).lower()
-    if not path:
-        return False
-    web_ext = (".php", ".jsp", ".jspx", ".asp", ".aspx", ".ashx", ".war", ".js", ".sh", ".ps1")
-    web_dirs = ("/var/www", "/usr/share/nginx", "/webapps", "\\inetpub", "/inetpub", "/tmp", "/uploads")
-    return path.endswith(web_ext) or any(item in path for item in web_dirs)
-
-
-def _is_egress_event(event: Mapping[str, Any]) -> bool:
-    event_class = _event_class(event)
-    action = _event_action(event)
-    if event_class and event_class not in {"network", "dns", "proxy", "netflow", "alert", "connection"}:
-        return False
-    if action and not any(token in action for token in ("connect", "dns", "http", "flow", "request")):
-        return False
-    src = _text(_field(event, "src_ip", "source_ip", "source.ip"))
-    dst = _destination_ip(event)
-    domain = _domain(event)
-    if not (dst or domain):
-        return False
-    if dst:
-        return bool(src) and not _is_internal_ip(dst)
-    return bool(src and domain)
-
-
-def _is_internal_ip(value: str) -> bool:
-    try:
-        ip = ipaddress.ip_address(value)
-    except ValueError:
-        return False
-    private_networks = (
-        ipaddress.ip_network("10.0.0.0/8"),
-        ipaddress.ip_network("172.16.0.0/12"),
-        ipaddress.ip_network("192.168.0.0/16"),
-        ipaddress.ip_network("127.0.0.0/8"),
-        ipaddress.ip_network("169.254.0.0/16"),
-        ipaddress.ip_network("::1/128"),
-        ipaddress.ip_network("fc00::/7"),
-        ipaddress.ip_network("fe80::/10"),
-    )
-    return any(ip in network for network in private_networks)
-
-
-def _is_vpn_event(event: Mapping[str, Any]) -> bool:
-    product = _source_product(event)
-    return "vpn" in product or ("vpn" in _event_action(event) and _is_auth_event(event))
-
-
-def _is_auth_event(event: Mapping[str, Any]) -> bool:
-    event_class = _event_class(event)
-    action = _event_action(event)
-    product = _source_product(event)
-    return event_class in {"auth", "authentication", "identity"} or "login" in action or "auth" in action or "vpn" in product
-
-
-def _is_success(event: Mapping[str, Any]) -> bool:
-    return _outcome(event) in {"success", "succeeded", "successful", "allowed", "ok", "accepted", "pass"}
-
-
-def _is_failure(event: Mapping[str, Any]) -> bool:
-    return _outcome(event) in {"failure", "failed", "fail", "denied", "blocked", "rejected", "invalid"}
-
-
-def _same_auth_scope(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    left_user = _user(left)
-    right_user = _user(right)
-    left_src = _source_ip(left)
-    right_src = _source_ip(right)
-    if left_user and right_user and left_src and right_src:
-        return left_user == right_user and left_src == right_src
-    if left_user and right_user:
-        return left_user == right_user
-    return bool(left_src and right_src and left_src == right_src)
-
-
-def _same_user(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    left_user = _user(left)
-    return bool(left_user and left_user == _user(right))
-
-
-def _same_source(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    left_src = _source_ip(left)
-    return bool(left_src and left_src == _source_ip(right))
-
-
-def _same_asset(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
-    left_assets = set(_asset_candidates(left))
-    right_assets = set(_asset_candidates(right))
-    return bool(left_assets and right_assets and left_assets.intersection(right_assets))
-
-
-def _asset_candidates(event: Mapping[str, Any]) -> list[str]:
-    values = [
-        _text(_field(event, "victim_ip")),
-        _text(_field(event, "asset_ip")),
-        _text(_field(event, "host_ip")),
-        _text(_field(event, "dst_ip")) if not _is_egress_event(event) else "",
-        _text(_field(event, "src_ip")) if _is_egress_event(event) else "",
-        _host(event),
-        _text(_field(event, "asset_id")),
-    ]
-    return _unique_texts(values)
-
-
-def _primary_asset(event: Mapping[str, Any]) -> str:
-    candidates = _asset_candidates(event)
-    return candidates[0] if candidates else ""
-
-
-def _destination(event: Mapping[str, Any]) -> str:
-    return _destination_ip(event) or _domain(event)
-
-
-def _weak_signal(event: JsonDict) -> JsonDict | None:
-    signal_type = ""
-    if _is_waf_event(event):
-        signal_type = "waf_web_alert"
-    elif _is_vpn_event(event) and _is_success(event):
-        if _truthy(_field(event, "new_geo", "new_asn", "new_device", "unusual_hour")):
-            signal_type = "vpn_novel_login"
-    elif _is_auth_event(event) and _is_failure(event):
-        signal_type = "auth_failure"
-    elif _is_suspicious_web_process_event(event):
-        signal_type = "web_process"
-    elif _is_suspicious_file_write(event):
-        signal_type = "file_write"
-    elif _is_egress_event(event) and (
-        _truthy(_field(event, "rare", "is_rare", "new_dst", "new_destination")) or _destination_ip(event)
-    ):
-        signal_type = "egress"
-    elif _is_alert_event(event) and _severity(event) in {"low", "medium", "high", "critical"}:
-        signal_type = "alert"
-    if not signal_type:
-        return None
-    return {"signal_type": signal_type, "source_product": _source_product(event), "event": event}
-
-
-def _entities_from_events(events: Sequence[Mapping[str, Any]]) -> dict[str, list[str]]:
-    entities: dict[str, list[str]] = {}
-    for event in events:
-        candidates: dict[str, list[str]] = {
-            "src_ip": [_text(_field(event, "src_ip", "source_ip", "client_ip", "source.ip"))],
-            "dst_ip": [_destination_ip(event)],
-            "victim_ip": [_victim_ip(event)],
-            "host": [_host(event)],
-            "user": [_user(event)],
-            "domain": [_domain(event)],
-            "process": [_process_name(event)],
-            "parent_process": [_parent_process_name(event)],
-        }
-        explicit_attacker = _text(_field(event, "attacker_ip"))
-        if explicit_attacker:
-            candidates["attacker_ip"] = [explicit_attacker]
-        for key, values in candidates.items():
-            entities.setdefault(key, [])
-            entities[key].extend(value for value in values if value)
-    return _normalize_entities(entities)
-
-
-def _normalize_entities(entities: Mapping[str, Sequence[Any]]) -> dict[str, list[str]]:
-    normalized: dict[str, list[str]] = {}
-    for key, values in entities.items():
-        clean_key = _text(key)
-        if not clean_key:
-            continue
-        normalized[clean_key] = _unique_texts(_text(value) for value in values if _text(value))
-    return {key: values for key, values in sorted(normalized.items()) if values}
-
-
-def _unique_texts(values: Sequence[Any] | Any) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        text = _text(value)
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        result.append(text)
-    return result
-
-
-def _unique_json_values(values: Sequence[Any]) -> list[Any]:
-    result: list[Any] = []
-    seen: set[str] = set()
-    for value in values:
-        if isinstance(value, QueryPlan):
-            item: Any = value.to_dict()
-        elif isinstance(value, Mapping):
-            item = dict(value)
-        else:
-            item = _text(value)
-        marker = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
-        if marker in seen or item in ("", None, [], {}):
-            continue
-        seen.add(marker)
-        result.append(item)
-    return result
-
-
-def _gap_details(
-    gaps: Sequence[str],
-    window: Sequence[str],
-    entities: Mapping[str, Sequence[Any]],
-    evidence_events: Sequence[Mapping[str, Any]],
-) -> list[dict[str, Any]]:
-    products = _unique_texts(_source_product(event) for event in evidence_events if _source_product(event))
-    primary_entity = _first_entity(entities)
-    details: list[dict[str, Any]] = []
-    for gap in gaps:
-        text = _text(gap)
-        detail: dict[str, Any] = {
-            "description": text,
-            "source_products": products,
-            "time_window": list(window),
-            "entity": primary_entity,
-        }
-        lower = text.lower()
-        if "edr" in lower or "process" in lower or "host" in lower:
-            detail["missing_telemetry"] = "edr_process"
-        elif "outbound" in lower or "dns" in lower or "proxy" in lower or "netflow" in lower or "network" in lower:
-            detail["missing_telemetry"] = "network_egress"
-        elif "file" in lower:
-            detail["missing_telemetry"] = "file_activity"
-        elif "mfa" in lower:
-            detail["missing_telemetry"] = "identity_mfa"
-        elif "geoip" in lower or "country" in lower:
-            detail["missing_field"] = "country"
-        elif "asn" in lower:
-            detail["missing_field"] = "asn"
-        details.append(detail)
-    return details
-
-
-def _first_entity(entities: Mapping[str, Sequence[Any]]) -> dict[str, str]:
-    for key in ("victim_ip", "host", "user", "attacker_ip", "src_ip", "dst_ip"):
-        values = entities.get(key)
-        if values:
-            return {"field": key, "value": _text(values[0])}
-    return {}
-
-
 def _evidence_id(event: Mapping[str, Any]) -> str:
+    """LLM: Return a stable evidence identifier for *event*.
+
+    新手说明:
+    从事件中提取证据 ID，优先使用已有字段，否则生成哈希 ID。
+    """
     for field_name in ("raw_ref", "evidence_ref", "event_id", "security_event_id", "alert_id", "id"):
         value = _text(_field(event, field_name))
         if value:
@@ -1052,6 +598,11 @@ def _evidence_id(event: Mapping[str, Any]) -> str:
 
 
 def _evidence_ref(event: Mapping[str, Any]) -> EvidenceRef:
+    """LLM: Build an EvidenceRef from *event*.
+
+    新手说明:
+    把事件包装成标准的 EvidenceRef 对象，用于 Finding 的证据列表。
+    """
     evidence_id = _evidence_id(event)
     raw_ref = _text(_field(event, "raw_ref"))
     source_id = _text(_field(event, "source_id"))
@@ -1068,6 +619,11 @@ def _evidence_ref(event: Mapping[str, Any]) -> EvidenceRef:
 
 
 def _query(prefix: str, event: Mapping[str, Any]) -> dict[str, Any]:
+    """LLM: Build a follow-up QueryPlan dict for *event*.
+
+    新手说明:
+    根据事件信息生成下一步查询计划（用于分析师或自动化后续调查）。
+    """
     when = _event_time(event)
     filters = {
         label: value
@@ -1094,6 +650,11 @@ def _query(prefix: str, event: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _query_source_products(prefix: str, event: Mapping[str, Any]) -> list[str]:
+    """LLM: Infer relevant source products from the query prefix text.
+
+    新手说明:
+    根据查询描述推断需要搜索的日志源产品（WAF、EDR、DNS 等）。
+    """
     text = prefix.lower()
     products: list[str] = []
     for token, product in (
@@ -1121,6 +682,11 @@ def _query_source_products(prefix: str, event: Mapping[str, Any]) -> list[str]:
 
 
 def _query_evidence_needed(prefix: str) -> list[str]:
+    """LLM: Infer what evidence types the query needs from its prefix text.
+
+    新手说明:
+    根据查询描述推断需要的证据类型（进程树、网络流、身份事件等）。
+    """
     text = prefix.lower()
     needed: list[str] = []
     if "process" in text or "edr" in text or "host" in text:
@@ -1137,12 +703,22 @@ def _query_evidence_needed(prefix: str) -> list[str]:
 
 
 def _stable_id(prefix: str, payload: Any) -> str:
+    """LLM: Generate a stable SHA-256-based ID from *payload*.
+
+    新手说明:
+    用 JSON 序列化 + SHA-256 生成稳定的唯一 ID。
+    """
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return f"{prefix}-{digest[:16]}"
 
 
 def _dedupe_findings(findings: Sequence[Finding]) -> list[Finding]:
+    """LLM: Remove duplicate findings by finding_id.
+
+    新手说明:
+    对 Finding 列表按 finding_id 去重。
+    """
     result: list[Finding] = []
     seen: set[str] = set()
     for finding in findings:
@@ -1155,9 +731,6 @@ def _dedupe_findings(findings: Sequence[Finding]) -> list[Finding]:
 
 __all__ = [
     "DETECTORS",
-    "Finding",
-    "SUSPICIOUS_CHILD_PROCESSES",
-    "WEB_PARENT_PROCESSES",
     "bruteforce_then_success",
     "detect_bruteforce_then_success",
     "detect_multi_source_weak_signal",

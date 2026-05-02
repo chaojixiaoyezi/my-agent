@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """LLM contract: runner result recording and debrief persistence.
 
-Human version:
+给人看的解释：
 这个 mixin 只放一类 SubAgentManager 能力。它不单独实例化，
 由 public SubAgentManager 组合使用，避免单个文件重新长成大杂烩。
 """
@@ -60,6 +60,13 @@ from .utils import (
     _write_if_missing,
     _write_json_if_missing,
 )
+from .result_processors import (
+    _append_runner_debrief_content,
+    _build_output_payload,
+    _build_runner_result,
+    _process_structured_output,
+    _write_runner_result_files,
+)
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..file_io import append_jsonl
@@ -88,7 +95,12 @@ class SubAgentRunnerResultMixin:
         structured_repair_ok: bool = False,
         structured_repair_error: str = "",
     ) -> SubAgentRunnerResult:
-        """把 runner 调用结果写回标准工单。"""
+        """LLM: record a runner invocation result back into the standard work order.
+
+        新手说明:
+        把 runner 调用结果写回标准工单。包括解析结构化输出、更新任务状态、
+        写 output.json 和 runner_result.json、追加 debrief 段落等。
+        """
 
         task = self.load(run_id)
         _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
@@ -106,92 +118,23 @@ class SubAgentRunnerResultMixin:
         lessons: list[str] = []
         next_actions: list[str] = []
 
-        if prompt:
-            Path(task.runner_prompt_file).write_text(prompt, encoding="utf-8")
-        if response:
-            Path(task.runner_response_file).write_text(response, encoding="utf-8")
-
         if parsed.found and parsed.ok:
-            allowed_tools = set(task.allowed_tools)
-            allowed_skills = set(task.allowed_skills)
-            used_tools, ignored_tools = _split_allowed_items(parsed.used_tools, allowed_tools)
-            used_skills, ignored_skills = _split_allowed_items(parsed.used_skills, allowed_skills)
-            if actual_tools is not None:
-                actual_allowed_tools = [item for item in actual_tools if item in allowed_tools]
-                task.used_tools = _merge_list(task.used_tools, actual_allowed_tools)
-                ignored_tools = _merge_list(
-                    ignored_tools,
-                    [item for item in used_tools if item not in actual_allowed_tools],
-                )
-                for tool_name in actual_allowed_tools:
-                    if not any(
-                        item.ok
-                        and (
-                            item.kind == tool_name
-                            or item.command == tool_name
-                            or item.command.startswith(f"{tool_name} ")
-                        )
-                        for item in task.evidence
-                    ):
-                        task.evidence.append(
-                            VerificationEvidence(
-                                kind=tool_name,
-                                summary=f"系统记录 runner 实际执行过 {tool_name}。",
-                                command=tool_name,
-                                ok=True,
-                                created_at=now,
-                            )
-                        )
-            else:
-                task.used_tools = _merge_list(task.used_tools, used_tools)
-            task.used_skills = _merge_list(task.used_skills, used_skills)
-
-            for item in parsed.evidence:
-                summary = str(item.get("summary", "")).strip()
-                if not summary:
-                    continue
-                task.evidence.append(
-                    VerificationEvidence(
-                        kind=str(item.get("kind", "note") or "note"),
-                        summary=summary,
-                        command=str(item.get("command", "") or ""),
-                        path=str(item.get("path", "") or ""),
-                        url=str(item.get("url", "") or ""),
-                        ok=bool(item.get("ok", True)),
-                        created_at=now,
-                    )
-                )
-                structured_evidence_count += 1
-
-            for item in parsed.capability_requests:
-                problem = str(item.get("problem", "")).strip()
-                needed = str(item.get("needed_capability", "")).strip()
-                if not problem or not needed:
-                    continue
-                request = CapabilityRequest(
-                    id=_new_id("capreq"),
-                    from_run_id=task.id,
-                    problem=problem,
-                    needed_capability=needed,
-                    expected_output=str(item.get("expected_output", "") or ""),
-                    tried=_string_list(item.get("tried", [])),
-                    evidence=_string_list(item.get("evidence", [])),
-                    constraints=_string_dict(item.get("constraints", {})),
-                    created_at=now,
-                )
-                task.capability_requests.append(request)
-                created_request_ids.append(request.id)
-                structured_request_count += 1
+            proc = _process_structured_output(task, parsed, now, actual_tools)
+            ignored_tools = proc["ignored_tools"]
+            ignored_skills = proc["ignored_skills"]
+            structured_evidence_count = proc["structured_evidence_count"]
+            structured_request_count = proc["structured_request_count"]
+            created_request_ids = proc["created_request_ids"]
+            artifacts = proc["artifacts"]
+            tests = proc["tests"]
+            patches = proc["patches"]
+            lessons = proc["lessons"]
+            next_actions = proc["next_actions"]
 
             if parsed.summary:
                 message = parsed.summary
             if parsed.blocked_reason:
                 message = f"{message} / blocked: {parsed.blocked_reason}" if message else parsed.blocked_reason
-            artifacts = _normalize_runner_items(parsed.artifacts)
-            tests = _normalize_runner_items(parsed.tests)
-            patches = _normalize_runner_items(parsed.patches)
-            lessons = parsed.lessons
-            next_actions = parsed.next_actions
             if not failure_type and parsed.failure_type:
                 failure_type = parsed.failure_type
             if structured_request_count and not failure_type:
@@ -234,107 +177,62 @@ class SubAgentRunnerResultMixin:
         if not ok or task.status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
             blockers = [parsed.blocked_reason or message]
 
-        output_payload = {
-            "run_id": task.id,
-            "dry_run": dry_run,
-            "ok": ok,
-            "status": task.status,
-            "verification_status": task.verification_status,
-            "message": message,
-            "backend": backend,
-            "tool_rounds": tool_rounds,
-            "runner_attempts": task.runner_attempts,
-            "runner_last_error": task.runner_last_error,
-            "response": response,
-            "structured_output": {
-                "found": parsed.found,
-                "ok": parsed.ok,
-                "parse_error": parsed.parse_error,
-                "repair_attempted": structured_repair_attempted,
-                "repair_ok": structured_repair_ok,
-                "repair_error": structured_repair_error,
-                "summary": parsed.summary,
-                "status": parsed.status,
-                "blocked_reason": parsed.blocked_reason,
-                "evidence_count": structured_evidence_count,
-                "capability_request_count": structured_request_count,
-                "capability_request_ids": created_request_ids,
-                "artifact_count": len(artifacts),
-                "test_count": len(tests),
-                "patch_count": len(patches),
-                "lesson_count": len(lessons),
-                "actual_tools": actual_tools or [],
-                "ignored_unauthorized_tools": ignored_tools,
-                "ignored_unauthorized_skills": ignored_skills,
-            },
-            "used_tools": task.used_tools,
-            "used_skills": task.used_skills,
-            "artifacts": artifacts,
-            "tests": tests,
-            "patches": patches,
-            "acceptance": [item.summary for item in task.evidence],
-            "lessons": lessons,
-            "blockers": blockers,
-            "next_action": _runner_next_action(
-                dry_run=dry_run,
-                ok=ok,
-                status=task.status,
-                capability_request_count=structured_request_count,
-                next_actions=next_actions,
-            ),
-            "next_actions": next_actions,
-            "created_at": now,
-        }
-        Path(task.output_json).write_text(
-            json.dumps(output_payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-        result = SubAgentRunnerResult(
-            run_id=task.id,
+        output_payload = _build_output_payload(
+            task,
             dry_run=dry_run,
             ok=ok,
-            status=task.status,
-            verification_status=task.verification_status,
             message=message,
             backend=backend,
             tool_rounds=tool_rounds,
-            runner_attempts=task.runner_attempts,
-            runner_last_error=task.runner_last_error,
-            execution_context_json=task.execution_context_json,
-            execution_context_file=task.execution_context_file,
-            prompt_file=task.runner_prompt_file if prompt else "",
-            response_file=task.runner_response_file if response else "",
-            result_file=task.runner_result_file,
-            result_json=task.runner_result_json,
-            output_json=task.output_json,
-            structured_output_found=parsed.found,
-            structured_output_ok=parsed.ok,
-            structured_parse_error=parsed.parse_error,
+            parsed=parsed,
+            actual_tools=actual_tools,
+            structured_evidence_count=structured_evidence_count,
+            structured_request_count=structured_request_count,
+            created_request_ids=created_request_ids,
+            ignored_tools=ignored_tools,
+            ignored_skills=ignored_skills,
+            artifacts=artifacts,
+            tests=tests,
+            patches=patches,
+            lessons=lessons,
+            blockers=blockers,
+            next_actions=next_actions,
             structured_repair_attempted=structured_repair_attempted,
             structured_repair_ok=structured_repair_ok,
             structured_repair_error=structured_repair_error,
-            structured_summary=parsed.summary,
-            evidence_count=structured_evidence_count,
-            capability_request_count=structured_request_count,
+            now=now,
+        )
+
+        result = _build_runner_result(
+            task,
+            dry_run=dry_run,
+            ok=ok,
+            message=message,
+            backend=backend,
+            tool_rounds=tool_rounds,
+            prompt=prompt,
+            response=response,
+            parsed=parsed,
+            structured_repair_attempted=structured_repair_attempted,
+            structured_repair_ok=structured_repair_ok,
+            structured_repair_error=structured_repair_error,
+            structured_evidence_count=structured_evidence_count,
+            structured_request_count=structured_request_count,
             artifact_count=len(artifacts),
             test_count=len(tests),
             patch_count=len(patches),
             lesson_count=len(lessons),
-            blocked_reason=parsed.blocked_reason,
-            created_at=now,
+            now=now,
         )
-        Path(task.runner_result_json).write_text(
-            json.dumps(asdict(result), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+
+        _write_runner_result_files(task, result, output_payload, prompt=prompt, response=response)
         Path(task.runner_result_file).write_text(
             render_runner_result_markdown(result),
             encoding="utf-8",
         )
         self.save(task)
         if parsed.found and parsed.ok:
-            self._append_runner_debrief(task, parsed)
+            _append_runner_debrief_content(task, parsed)
         self._append_task_work_log(
             task,
             f"subagent_runner: dry_run={dry_run} ok={ok} status={task.status} message={message}",
@@ -347,35 +245,10 @@ class SubAgentRunnerResultMixin:
         task: SubAgentTask,
         parsed: SubAgentParsedOutput,
     ) -> None:
-        """把结构化 runner 产出追加到 DEBRIEF，方便人接管。"""
+        """LLM: delegate to result_processors._append_runner_debrief_content.
 
-        sections: list[str] = []
-        if parsed.artifacts:
-            sections.append("## Runner Artifacts")
-            sections.extend(_render_runner_item_line(item) for item in parsed.artifacts)
-        if parsed.tests:
-            sections.append("## Runner Tests")
-            sections.extend(_render_runner_item_line(item) for item in parsed.tests)
-        if parsed.patches:
-            sections.append("## Runner Patches")
-            sections.extend(_render_runner_item_line(item) for item in parsed.patches)
-        if parsed.lessons:
-            sections.append("## Runner Lessons")
-            sections.extend(f"- {item}" for item in parsed.lessons)
-        if parsed.next_actions:
-            sections.append("## Runner Next Actions")
-            sections.extend(f"- {item}" for item in parsed.next_actions)
-        if not sections:
-            return
+        新手说明:
+        把结构化 runner 产出追加到 DEBRIEF，方便人接管。
+        """
 
-        path = Path(task.debrief_file)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists():
-            path.write_text("# DEBRIEF\n\n", encoding="utf-8")
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write("\n## Runner Structured Output\n\n")
-            handle.write(f"- created_at: {time.time()}\n")
-            handle.write(f"- run_id: {task.id}\n\n")
-            handle.write("\n\n".join(sections))
-            handle.write("\n")
-
+        _append_runner_debrief_content(task, parsed)
