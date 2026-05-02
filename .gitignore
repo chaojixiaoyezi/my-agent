@@ -12,3 +12,6 @@ agent_py_agent/*/__pycache__/
 validation/live_lab/
 my-agent-worktrees/
 .chat_history
+
+# Live Lab test scenario outputs
+validation/live_lab/
