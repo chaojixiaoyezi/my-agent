@@ -506,6 +506,9 @@ agent_py_agent/config/capability_config.yaml
 
 ## 关键文档
 
+- [LLM_GUIDE.md](LLM_GUIDE.md)：**LLM/AI 开发者总入口**，含开工前/收工后清单、编码规范和设计原则。
+- [docs/ROADMAP.md](docs/ROADMAP.md)：待做/进行中功能清单，开工前必读。
+- [docs/COMPLETED.md](docs/COMPLETED.md)：已落地功能清单，收工后必改。
 - [CLI_REFERENCE.md](CLI_REFERENCE.md)：完整命令和参数手册。
 - [SUBAGENT_RUNBOOK.md](SUBAGENT_RUNBOOK.md)：subagent、capability 和 runner 详细手册。
 - [WORKSTREAMS.md](WORKSTREAMS.md)：并行开发线和 worktree 规则。
