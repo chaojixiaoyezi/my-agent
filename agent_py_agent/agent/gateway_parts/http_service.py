@@ -194,7 +194,14 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": f"invalid JSON: {e}"})
             return
 
-        goal = body.get("goal", "")
+        # 支持 kind=ask + prompt（adapter 用） 或 goal（兼容旧格式）
+        kind = body.get("kind", "ask")
+        if kind != "ask":
+            self._send_json(400, {"error": f"unsupported kind: {kind}"})
+            return
+
+        prompt = body.get("prompt", "")
+        goal = body.get("goal", prompt)
         if not goal:
             self._send_json(400, {"error": "goal is required"})
             return
@@ -217,7 +224,9 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         metadata["user_id"] = user_id
         metadata["channel"] = channel
         request_data = {
+            "id": request_id,
             "request_id": request_id,
+            "kind": "ask",
             "goal": goal,
             "metadata": metadata,
             "submitted_at": time.time(),

@@ -388,13 +388,19 @@ def normalize_agent_config(data: dict[str, object]) -> tuple[dict[str, object], 
     )
     _apply("feishu_callback_port", v, w)
 
-    # QQ 配置（字符串，直接透传）
+    # QQ 配置（字符串，直接透传，支持环境变量覆盖）
+    import os as _os
     for key in ("qq_app_id", "qq_app_secret"):
-        val = out.get(key, defaults.qq_app_id if key == "qq_app_id" else "")
-        if isinstance(val, str):
-            out[key] = val
+        env_key = key.upper()
+        env_val = _os.environ.get(env_key, "")
+        if env_val:
+            out[key] = env_val
         else:
-            out[key] = ""
+            val = out.get(key, defaults.qq_app_id if key == "qq_app_id" else "")
+            if isinstance(val, str):
+                out[key] = val
+            else:
+                out[key] = ""
 
     # user_id - validate non-empty string
     raw_user_id = out.get("user_id", defaults.user_id)
