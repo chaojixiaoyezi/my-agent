@@ -402,6 +402,9 @@ def _handle_gateway_request(
     request = read_json_file(request_path)
     request_id = str(request.get("id") or request_path.stem)
     kind = str(request.get("kind") or "").strip()
+    # 兼容旧格式（无 kind 字段但有 request_id 的文件，视为 ask 类型）
+    if not kind and request_id:
+        kind = "ask"
     response_path = gateway_response_path(gateway_paths(agent), request_id)
     existing_response = read_json_file(response_path)
     if existing_response:
@@ -471,10 +474,10 @@ def _handle_gateway_request(
         if kind != "ask":
             response["error_code"] = "UNSUPPORTED_KIND"
             raise ValueError(f"unsupported gateway request kind: {kind or 'empty'}")
-        prompt = str(request.get("prompt") or "").strip()
+        prompt = str(request.get("prompt") or request.get("goal") or "").strip()
         if not prompt:
             response["error_code"] = "EMPTY_PROMPT"
-            raise ValueError("gateway ask prompt 不能为空。")
+            raise ValueError("gateway ask prompt/goal 不能为空。")
         result = agent.run(
             prompt,
             inject=[str(item) for item in request.get("inject", [])],

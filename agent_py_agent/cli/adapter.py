@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 """LLM: implements file-adapter CLI commands that bridge external inbox/outbox JSON with gateway ask.
 
 给人看的解释：
@@ -117,15 +119,13 @@ def cmd_adapter_start(args) -> int:
             if agent.config.workspace_root
             else Path.cwd(),
         )
+        feishu.on_message(lambda msg: manager.route_message(msg))
         manager.register_adapter(feishu)
 
     if args.channel in ("qq", "all"):
         qq_cfg = {
             "qq_app_id": agent.config.qq_app_id or "",
             "qq_app_secret": agent.config.qq_app_secret or "",
-            "qq_token": agent.config.qq_token or "",
-            "qq_guild_id": getattr(agent.config, "qq_guild_id", ""),
-            "qq_channel_id": getattr(agent.config, "qq_channel_id", ""),
         }
         qq = QQAdapter(
             config=qq_cfg,
@@ -133,6 +133,7 @@ def cmd_adapter_start(args) -> int:
             if agent.config.workspace_root
             else Path.cwd(),
         )
+        qq.on_message(lambda msg: manager.route_message(msg))
         manager.register_adapter(qq)
 
     # 把 manager 存到全局（后续 stop/status 需要用到）
@@ -142,6 +143,23 @@ def cmd_adapter_start(args) -> int:
     print(f"启动通道适配器: {args.channel}", file=sys.stderr)
     manager.start_all()
     print(f"已启动: {manager.list_adapters()}", file=sys.stderr)
+
+    # 前台保持运行，Ctrl+C 退出
+    try:
+        import signal
+        stop_event = threading.Event()
+
+        def _sig_handler(signum, frame):
+            stop_event.set()
+
+        signal.signal(signal.SIGINT, _sig_handler)
+        signal.signal(signal.SIGTERM, _sig_handler)
+        stop_event.wait()
+    except KeyboardInterrupt:
+        pass
+
+    manager.stop_all()
+    print("适配器已停止。", file=sys.stderr)
     return 0
 
 

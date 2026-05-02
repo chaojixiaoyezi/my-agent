@@ -128,8 +128,8 @@ class TestQQIntents:
             workspace_root=Path(tempfile.gettempdir()),
         )
         intents = adapter._intents_for_qq()
-        # GUILD_MESSAGES = 1 << 30
-        assert intents == 1 << 30
+        # (1 << 25) | (1 << 30) | (1 << 12) = C2C_GROUP_AT + PUBLIC_GUILD + DIRECT
+        assert intents == (1 << 25) | (1 << 30) | (1 << 12)
 
 
 class TestQQWebSocketMessageHandling:

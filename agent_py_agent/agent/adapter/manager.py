@@ -81,7 +81,8 @@ class ChannelManager:
         try:
             # 构造 gateway ask 请求
             ask_payload = {
-                "goal": msg.content,
+                "kind": "ask",
+                "prompt": msg.content,
                 "metadata": {
                     "channel": msg.channel,
                     "user_id": msg.user_id,
