@@ -165,10 +165,12 @@ def _route_from_mapping(data: dict[str, Any], *, source_path: str | Path = "") -
         aliases=_as_list(data.get("aliases")),
         when_to_read=str(data.get("when_to_read") or "").strip(),
         authority_path=str(data.get("authority_path") or "").strip(),
+        inject_mode=str(data.get("inject_mode") or "on_hit").strip().lower(),
         scope=str(data.get("scope") or "global").strip(),
         priority=_as_int(data.get("priority"), default=0),
         stale_check=str(data.get("stale_check") or "").strip(),
         last_verified_at=str(data.get("last_verified_at") or "").strip(),
+        source_file=str(data.get("source_file") or "").strip(),
         source_path=str(source_path),
     )
 

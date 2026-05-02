@@ -108,6 +108,8 @@ class CapabilityGap:
     needed_outputs: list[str] = field(default_factory=list)
     suggested_skill: str = ""
     suggested_tool: str = ""
+    memory_routes: list[dict[str, str]] = field(default_factory=list)
+    injected_rule_paths: list[str] = field(default_factory=list)
     status: str = "OPEN"
     created_at: float = 0.0
 

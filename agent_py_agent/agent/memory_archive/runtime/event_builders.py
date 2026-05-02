@@ -63,7 +63,7 @@ def _message_event(
             "content_hash": content_hash,
         }
     )
-    return RawMemoryEvent(
+    event = RawMemoryEvent(
         event_id=event_id,
         session_id=session_id,
         request_id=request_id,
@@ -79,7 +79,9 @@ def _message_event(
         content_hash=content_hash,
         visibility="private",
         source=source,
+        archive_level=_normalize_archive_level(archive_level),
     )
+    return _apply_archive_level_to_message_event(event, content=content)
 
 
 def _tool_event(
@@ -132,7 +134,7 @@ def _tool_event(
             "content_hash": content_hash,
         }
     )
-    return RawMemoryEvent(
+    event = RawMemoryEvent(
         event_id=event_id,
         session_id=session_id,
         request_id=request_id,
@@ -153,7 +155,9 @@ def _tool_event(
         content_hash=content_hash,
         visibility="private",
         source=source,
+        archive_level=_normalize_archive_level(archive_level),
     )
+    return _apply_archive_level_to_tool_event(event, tool_call=tool_call, metadata=metadata)
 
 
 def _tool_metadata(
@@ -184,13 +188,83 @@ def _tool_metadata(
         if key in tool_call:
             text = str(tool_call[key])
             metadata[f"{key}_hash"] = _content_hash(text)
-            metadata[f"{key}_preview"] = _preview(text, 3)
+            metadata[f"{key}_preview"] = _preview(text, 2)
             break
     for key in ("parameters", "params", "arguments", "args"):
         if key in tool_call:
             metadata[key] = tool_call[key]
             break
     return metadata
+
+
+def _apply_archive_level_to_message_event(event: RawMemoryEvent, *, content: str) -> RawMemoryEvent:
+    """LLM: shape message archive granularity according to the configured archive level.
+
+    新手说明:
+    0 最完整，3 最精简。这里不改 JSONL 格式，只改字段保留多少细节。
+    """
+
+    if event.archive_level == 0:
+        return event
+    if event.archive_level == 1:
+        if event.speaker == "assistant":
+            event.content_hash = ""
+        return event
+    if event.archive_level == 2:
+        event.content_preview = _summarize_text(content, fallback=event.action)
+        event.content_hash = ""
+        return event
+    event.content_preview = _preview(content, event.archive_level)
+    return event
+
+
+def _apply_archive_level_to_tool_event(
+    event: RawMemoryEvent,
+    *,
+    tool_call: dict[str, Any],
+    metadata: dict[str, Any],
+) -> RawMemoryEvent:
+    """LLM: downsample tool archive detail according to archive level.
+
+    新手说明:
+    级别越高，越只保留恢复最小集，避免把大段工具输出预览反复写进 raw archive。
+    """
+
+    if event.archive_level == 0:
+        return event
+    if event.archive_level == 1:
+        event.content_preview = _stable_display_json(
+            {
+                "tool_name": metadata.get("tool_name", ""),
+                "tool_call_id": metadata.get("tool_call_id", ""),
+                "success": metadata.get("success"),
+                "status": metadata.get("status", ""),
+                "error_code": metadata.get("error_code", ""),
+            }
+        )
+        return event
+    if event.archive_level == 2:
+        event.content_preview = f"{event.tool_name}:{event.status or 'unknown'}"
+        event.content_hash = ""
+        return event
+    event.content_preview = _preview(_stable_display_json(metadata), event.archive_level)
+    return event
+
+
+def _summarize_text(content: str, *, fallback: str) -> str:
+    """LLM: build a short event-style summary when full previews should not be stored.
+
+    新手说明:
+    这不是智能摘要，只是稳定的压缩版，保证归档最少还能看出这条消息大概是什么。
+    """
+
+    compact = " ".join(str(content).split())
+    if not compact:
+        return fallback
+    short = compact[:96]
+    if len(compact) > 96:
+        short += "..."
+    return short
 
 
 def _normalize_tool_call(call: Any) -> dict[str, Any]:

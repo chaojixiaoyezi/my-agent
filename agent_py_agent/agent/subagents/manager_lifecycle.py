@@ -63,6 +63,7 @@ from .utils import (
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..file_io import append_jsonl
+from ..memory_routing import load_routes, match_routes, resolve_required_paths
 
 if TYPE_CHECKING:
     from ..local_store import LocalStore
@@ -147,6 +148,35 @@ class SubAgentLifecycleMixin:
         """给某个子代理记录一条能力缺口。"""
 
         task = self.load(run_id)
+        injected_rule_paths: list[str] = []
+        memory_routes: list[dict[str, str]] = []
+        route_query = " ".join([missing_capability, why_failed, task.goal]).strip()
+        route_mode = "soft"
+        if route_query and route_mode != "off":
+            try:
+                index_path = (self.workspace_root / "memory" / "routing" / "INDEX.md").resolve()
+                if index_path.exists():
+                    routes = load_routes(index_path)
+                    matches = match_routes(route_query, routes, limit=5)
+                    resolution = resolve_required_paths(
+                        matches,
+                        mode="strict",
+                        auto_read_limit=3,
+                    )
+                    injected_rule_paths = list(dict.fromkeys(
+                        [*resolution.required_read_paths, *resolution.candidate_paths]
+                    ))
+                    memory_routes = [
+                        {
+                            "route_id": match.route.route_id,
+                            "source_file": match.route.authority_file(),
+                            "inject_mode": match.route.inject_mode,
+                        }
+                        for match in matches
+                    ]
+            except Exception:
+                injected_rule_paths = []
+                memory_routes = []
         gap = CapabilityGap(
             id=_new_id("capgap"),
             run_id=run_id,
@@ -158,9 +188,16 @@ class SubAgentLifecycleMixin:
             needed_outputs=needed_outputs or [],
             suggested_skill=suggested_skill,
             suggested_tool=suggested_tool,
+            memory_routes=memory_routes,
+            injected_rule_paths=injected_rule_paths,
             created_at=time.time(),
         )
         task.capability_gaps.append(gap)
+        if injected_rule_paths:
+            task.context_manifest.required_read_paths = _merge_list(
+                task.context_manifest.required_read_paths,
+                injected_rule_paths,
+            )
         task.updated_at = time.time()
         self.save(task)
         return gap

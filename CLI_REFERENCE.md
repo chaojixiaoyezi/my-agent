@@ -284,6 +284,7 @@ my-agent memory-search "表格" --limit 5
 ```powershell
 my-agent memory-route "上下文压缩前要不要读长期规则"
 my-agent memory-route "memory index" --index memory/routing/INDEX.md --mode strict --limit 5 --auto-read-limit 2
+my-agent memory-route --validate --json
 my-agent memory-route "任务恢复规则" --json
 ```
 
@@ -291,9 +292,10 @@ my-agent memory-route "任务恢复规则" --json
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `query` | - | 必填，要路由的查询或用户任务。 |
+| `query` | - | 可选，要路由的查询或用户任务；配合 `--validate` 时可以省略。 |
 | `--index <path>` | `memory/routing/INDEX.md` | 指定路由索引文件；相对路径按 agent workspace root 解析。 |
 | `--mode <mode>` | 配置 `memory_rule_routing_mode` | 路由模式，可选 `off`、`soft`、`strict`。 |
+| `--validate` | `false` | 只校验 route index 的重复关键词、冲突关键词、死链和非法 `inject_mode`。 |
 | `--limit <n>` | `5` | 最多显示多少条命中 route；`0` 表示不截断。 |
 | `--auto-read-limit <n>` | 配置 `memory_rule_auto_read_limit` | 最多升级多少条规则路径到 required/candidate。 |
 | `--json` | `false` | 输出机器可读 JSON，包含 `matches`、`required_read_paths`、`candidate_paths` 和诊断信息。 |
@@ -318,6 +320,7 @@ my-agent memory-doctor --json
 ```powershell
 my-agent memory-archive-list
 my-agent memory-archive-list --layer raw --limit 20
+my-agent memory-archive-list --layer raw --level 3 --json
 my-agent memory-archive-list --date 2026-04-30 --json
 ```
 
@@ -327,6 +330,7 @@ my-agent memory-archive-list --date 2026-04-30 --json
 | --- | --- | --- |
 | `--layer <layer>` | `all` | 查看哪一层归档，可选 `all`、`raw`、`hook`。 |
 | `--date <YYYY-MM-DD>` | - | 只查看某一天的归档文件。 |
+| `--level <0|1|2|3>` | - | 只查看指定 `archive_level` 的记录。 |
 | `--limit <n>` | `20` | 最多显示多少条记录。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 

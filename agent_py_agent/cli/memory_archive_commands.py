@@ -41,12 +41,19 @@ def cmd_memory_archive_list(args) -> int:
     """
 
     agent = make_agent(args)
-    records = collect_archive_records(agent.root, layer=args.layer, date_key=args.date, limit=args.limit)
+    records = collect_archive_records(
+        agent.root,
+        layer=args.layer,
+        date_key=args.date,
+        limit=args.limit,
+        level=getattr(args, "level", None),
+    )
     payload = {
         "ok": True,
         "workspace_root": str(agent.root),
         "layer": args.layer,
         "date": args.date or "",
+        "level": getattr(args, "level", None),
         "limit": args.limit,
         "records": records,
     }
@@ -77,6 +84,7 @@ def cmd_memory_archive_search(args) -> int:
         filters=filters,
         since=args.since,
         until=args.until,
+        level=getattr(args, "level", None),
     )[: args.limit]
     payload = {
         "ok": True,
@@ -117,6 +125,7 @@ def cmd_memory_resume(args) -> int:
         filters=filters,
         since=args.since,
         until=args.until,
+        level=getattr(args, "level", None),
     )[: args.limit]
     local_query = resume_local_query(args, archive_matches)
     local_hits = (
@@ -175,7 +184,11 @@ def _print_archive_list(payload: dict[str, Any], *, json_output: bool) -> None:
         return
     print("MY-AGENT MEMORY ARCHIVE LIST")
     print(f"workspace={payload['workspace_root']}")
-    print(f"layer={payload['layer']} date={payload['date'] or '-'} records={len(payload['records'])}")
+    level_text = payload.get("level", None)
+    print(
+        f"layer={payload['layer']} date={payload['date'] or '-'} "
+        f"level={level_text if level_text is not None else '-'} records={len(payload['records'])}"
+    )
     _print_archive_record_lines(payload["records"])
 
 

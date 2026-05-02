@@ -10,8 +10,16 @@ from __future__ import annotations
 import sys
 import time
 
-from ..memory_archive import archive_run_turn, build_auto_resume_context, estimate_tokens, write_recovery_snapshot
+from ..memory_archive import (
+    archive_run_turn,
+    build_auto_resume_context,
+    estimate_tokens,
+    write_compression_snapshot,
+    write_recovery_snapshot,
+)
+from ..memory_archive.tokens import append_session_token_usage
 from ..memory_routing import build_routed_memory_context
+from ..memory_store.jsonl import MemoryRecord
 from ..tools import ToolExecutionResult
 from .models import AgentRunResult
 from .parameters import _one_shot_tool_call_key
@@ -101,9 +109,67 @@ class SimpleAgentRuntimeMixin:
         one_shot_tool_calls: set[str] = set()
         executed_tools: list[str] = []
         archive_tool_calls: list[dict[str, object]] = []
+        compression_snapshot_id = ""
+        compression_snapshot_path = ""
+        cumulative_token_estimate = 0
+        turn_token_estimate = 0
+        compression_applied = False
 
         # LLM: only stream when the caller explicitly provides a callback.
         effective_on_chunk = on_chunk
+
+        full_prompt_estimate = estimate_tokens(
+            {
+                "user_prompt": user_prompt,
+                "memories": [getattr(memory, "content", "") for memory in memories],
+                "inject": runtime_injections,
+                "prompt_files": prompt_files or [],
+            }
+        )
+        if full_prompt_estimate > int(getattr(self.config, "max_tokens", 1024)):
+            turn_id = request_id or run_id or task_id or f"turn-{time.time_ns()}"
+            snapshot_content = self._build_compression_snapshot_content(
+                user_prompt=user_prompt,
+                memories=memories,
+                runtime_injections=runtime_injections,
+                routed_context=routed_context,
+                resume_context_section=resume_context_section,
+            )
+            try:
+                hook_result = write_compression_snapshot(
+                    self.root,
+                    session_id=getattr(self, "session_id", self.config.agent_name),
+                    turn_id=turn_id,
+                    role="system",
+                    content=snapshot_content,
+                    archive_level=int(getattr(self.config, "memory_hook_archive_level", 3)),
+                    request_id=request_id,
+                    run_id=run_id,
+                    task_id=task_id,
+                    source=source,
+                    content_paths=[
+                        *(routed_context.required_read_paths or []),
+                        *(routed_context.candidate_paths or []),
+                    ],
+                    next_actions=["先校验 task 事实源，再使用 compression snapshot 恢复上下文。"],
+                )
+            except Exception as exc:
+                if getattr(self, "local_store", None):
+                    self.local_store.record_event(
+                        "memory_compression_snapshot_failed",
+                        payload={
+                            "request_id": request_id,
+                            "run_id": run_id,
+                            "task_id": task_id,
+                            "source": source,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        },
+                    )
+                raise RuntimeError(f"compression blocked: pre-compression snapshot failed: {exc}") from exc
+            compression_snapshot_id = hook_result.snapshot_id
+            compression_snapshot_path = hook_result.snapshot_file_path
+            memories = self._compress_memories(memories, keep_recent=max(self.config.memory_top_k, 2))
+            compression_applied = True
 
         while True:
             final_prompt = self.prompts.build(
@@ -225,6 +291,23 @@ class SimpleAgentRuntimeMixin:
             if should_write_snapshot
             else None
         )
+        turn_id = run_request_id or run_id or task_id or f"turn-{time.time_ns()}"
+        input_tokens = estimate_tokens(user_prompt) + estimate_tokens(runtime_injections) + estimate_tokens(
+            [getattr(memory, "content", "") for memory in memories]
+        )
+        output_tokens = estimate_tokens(final_response.text)
+        tool_tokens = estimate_tokens(archive_tool_calls)
+        ledger = append_session_token_usage(
+            self.root,
+            session_id=getattr(self, "session_id", self.config.agent_name),
+            turn_id=turn_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            tool_tokens=tool_tokens,
+            created_at=str(time.time()),
+        )
+        turn_token_estimate = int(ledger["turn_total"])
+        cumulative_token_estimate = int(ledger["cumulative_tokens"])
 
         return AgentRunResult(
             prompt=final_prompt,
@@ -257,7 +340,66 @@ class SimpleAgentRuntimeMixin:
             if resume_context_result.injected
             else 0,
             memory_resume_context_error=resume_context_result.error,
+            compression_snapshot_id=compression_snapshot_id,
+            compression_snapshot_path=compression_snapshot_path,
+            compression_applied=compression_applied,
+            turn_token_estimate=turn_token_estimate,
+            cumulative_token_estimate=cumulative_token_estimate,
         )
+
+    def _compress_memories(self, memories: list[object], *, keep_recent: int) -> list[object]:
+        """LLM: keep recent turns intact and replace older turns with one bounded summary record.
+
+        给人看的解释：
+        这里先做保守版组合压缩：最近 N 轮完整保留，更早的内容压成一条 summary 记忆。
+        raw archive 和 compression snapshot 仍然是冷存和恢复锚点，不靠这条摘要当权威事实。
+        """
+
+        if len(memories) <= keep_recent:
+            return memories
+        older = memories[:-keep_recent]
+        recent = memories[-keep_recent:]
+        summary_lines = [f"{getattr(item, 'role', 'memory')}: {getattr(item, 'content', '')}" for item in older[-12:]]
+        summary = MemoryRecord(
+            role="system",
+            kind="summary",
+            content="历史轮次摘要（恢复时必须回到 task/route 权威文件核验）:\n" + "\n".join(summary_lines),
+            tags=["compression", "summary"],
+        )
+        return [summary, *recent]
+
+    def _build_compression_snapshot_content(
+        self,
+        *,
+        user_prompt: str,
+        memories: list[object],
+        runtime_injections: list[str],
+        routed_context: object,
+        resume_context_section: str,
+    ) -> str:
+        """LLM: assemble the bounded snapshot body captured before context compression.
+
+        给人看的解释：
+        快照正文不追求完整 prompt 复刻，只保留压缩决策前最重要的上下文块，供恢复和审计使用。
+        """
+
+        lines = [
+            f"user_prompt={user_prompt}",
+            f"memory_count={len(memories)}",
+            f"routed_required={getattr(routed_context, 'required_read_paths', [])}",
+            f"routed_candidates={getattr(routed_context, 'candidate_paths', [])}",
+        ]
+        if resume_context_section:
+            lines.append("resume_context=" + resume_context_section[:800])
+        if runtime_injections:
+            lines.append("runtime_injections=" + "\n---\n".join(runtime_injections)[:2000])
+        history = [
+            f"{getattr(memory, 'role', 'memory')}: {getattr(memory, 'content', '')}"
+            for memory in memories[-12:]
+        ]
+        if history:
+            lines.append("recent_memories=" + "\n".join(history)[:3000])
+        return "\n".join(lines)
 
     def remember(self, content: str, *, kind: str = "note"):
         """手动写入一条记忆。"""
