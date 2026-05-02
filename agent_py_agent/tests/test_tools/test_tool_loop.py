@@ -172,6 +172,7 @@ def test_tool_call_parser_accepts_subagent_call_alias():
         catalog_limit=20,
         retrieval_limit=3,
         vector_search_enabled=False,
+        shell_tool_timeout=30,
     )
     calls = registry.parse_tool_calls(
         '[SUBAGENT_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
@@ -196,6 +197,7 @@ def test_tool_call_parser_accepts_qwen_xmlish_read_call():
         catalog_limit=20,
         retrieval_limit=3,
         vector_search_enabled=False,
+        shell_tool_timeout=30,
     )
     calls = registry.parse_tool_calls(
         "\n"
@@ -224,6 +226,7 @@ def test_tool_call_parser_accepts_qwen_xmlish_write_call():
         catalog_limit=20,
         retrieval_limit=3,
         vector_search_enabled=False,
+        shell_tool_timeout=30,
     )
     calls = registry.parse_tool_calls(
         '<function name="write">'
@@ -251,6 +254,7 @@ def test_tool_call_parser_reports_incomplete_qwen_xmlish_call():
         catalog_limit=20,
         retrieval_limit=3,
         vector_search_enabled=False,
+        shell_tool_timeout=30,
     )
     calls = registry.parse_tool_calls(
         "<function=read><parameter=file_path>A.md</parameter>\n"

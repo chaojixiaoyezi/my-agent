@@ -73,6 +73,36 @@ def cmd_default(args) -> int:
     code = ensure_gateway_started(args)
     if code:
         return code
+
+    # 启动后检测未完成任务
+    if agent := make_agent(args):
+        if agent.config.auto_detect_work_on_startup:
+            from ..agent.startup_recovery import (
+                detect_active_work,
+                format_active_work_summary,
+                has_active_work,
+            )
+
+            summary = detect_active_work(agent)
+            if has_active_work(summary):
+                print("\n" + "=" * 60)
+                print("进行中任务检测")
+                print("=" * 60)
+                print(format_active_work_summary(summary))
+                print("=" * 60 + "\n")
+
+                # 询问用户是否继续
+                if summary.active_task_count > 0:
+                    try:
+                        response = input("是否继续调度这些任务？[Y/n] ").strip().lower()
+                        if response and response not in {"y", "yes", ""}:
+                            print("已取消自动调度。")
+                            # 不进入 chat，让用户手动决定
+                            return 0
+                    except (EOFError, KeyboardInterrupt):
+                        print("\n已取消。")
+                        return 0
+
     args.gateway = True
     args.gateway_timeout = None
     args.inject = None

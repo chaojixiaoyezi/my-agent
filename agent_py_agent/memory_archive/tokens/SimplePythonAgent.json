@@ -1,0 +1,15 @@
+{
+  "cumulative_tokens": 423,
+  "session_id": "SimplePythonAgent",
+  "turn_count": 1,
+  "turns": [
+    {
+      "created_at": "1777725807.117192",
+      "input_tokens": 18,
+      "output_tokens": 349,
+      "tool_tokens": 56,
+      "turn_id": "run-1777725807117112000",
+      "turn_total": 423
+    }
+  ]
+}

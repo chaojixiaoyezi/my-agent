@@ -20,6 +20,7 @@ from .filesystem import (
     SearchTextTool,
     WriteFileTool,
 )
+from .shell import ShellTool
 from ..log_analysis.capabilities import SECURITY_TOOL_NAMES, has_security_tool_capability
 from .models import (
     BaseTool,
@@ -62,6 +63,7 @@ class ToolRegistry:
         catalog_limit: int,
         retrieval_limit: int,
         vector_search_enabled: bool,
+        shell_tool_timeout: int = 30,
         expose_security_tools: bool = False,
     ):
         self.workspace_root = workspace_root.resolve()
@@ -85,6 +87,7 @@ class ToolRegistry:
         self.register(ReplaceInFileTool(self.workspace_root))
         self.register(FetchUrlTool(max_chars=web_max_chars, timeout=http_timeout))
         self.register(HttpRequestTool(max_chars=web_max_chars, timeout=http_timeout))
+        self.register(ShellTool(self.workspace_root, default_timeout=shell_tool_timeout))
         from ..log_analysis.tools import SecurityHuntIpTool, SecurityQueryTool, SecurityTraceCaseTool
 
         self.register(SecurityQueryTool(self.workspace_root))

@@ -36,6 +36,7 @@ from ..agent.gateway import (
     wait_for_pid_exit,
     write_json_file,
 )
+from ..agent.gateway_parts.http_service import GatewayHTTPServer, start_http_server
 from .common import ROOT, make_agent, make_capability_router
 from .daemon import _resolve_daemon_options
 from .models import DaemonOptions
@@ -170,44 +171,52 @@ def cmd_gateway_run(args) -> int:
         daemon=True,
     )
     request_thread.start()
-    write_json_file(
-        paths.state,
-        {
-            "status": "running",
-            "pid": pid,
-            "started_at": time.time(),
-            "gateway_workspace": str(paths.root),
-            "subagent_workspace": str(agent.subagents.workspace),
-            "apply": options.apply,
-            "execute_runners": options.execute_runners,
-            "planner": options.planner,
-            "interval": options.interval,
-            "max_runners": options.max_runners,
-            "max_cycles": options.max_cycles,
-            "requeued_requests": requeued,
-            "failed_processing_requests": recovery["failed"],
-            "request_workers": max(1, int(agent.config.gateway_request_workers or 1)),
-        },
-    )
-    log_gateway_event(
-        agent,
-        "gateway_run_running",
-        {
-            "status": "running",
-            "pid": pid,
-            "gateway_workspace": str(paths.root),
-            "subagent_workspace": str(agent.subagents.workspace),
-            "apply": options.apply,
-            "execute_runners": options.execute_runners,
-            "planner": options.planner,
-            "interval": options.interval,
-            "max_runners": options.max_runners,
-            "max_cycles": options.max_cycles,
-            "requeued_requests": requeued,
-            "failed_processing_requests": recovery["failed"],
-            "request_workers": max(1, int(agent.config.gateway_request_workers or 1)),
-        },
-    )
+
+    # Start HTTP server if configured
+    http_server: GatewayHTTPServer | None = None
+    http_port = getattr(agent.config, "gateway_port", 0) or 0
+    if http_port > 0:
+        http_server = start_http_server(http_port, paths)
+        write_json_file(
+            paths.state,
+            {
+                "status": "running",
+                "pid": pid,
+                "started_at": time.time(),
+                "gateway_workspace": str(paths.root),
+                "subagent_workspace": str(agent.subagents.workspace),
+                "apply": options.apply,
+                "execute_runners": options.execute_runners,
+                "planner": options.planner,
+                "interval": options.interval,
+                "max_runners": options.max_runners,
+                "max_cycles": options.max_cycles,
+                "requeued_requests": requeued,
+                "failed_processing_requests": recovery["failed"],
+                "request_workers": max(1, int(agent.config.gateway_request_workers or 1)),
+                "http_port": http_port,
+            },
+        )
+        log_gateway_event(
+            agent,
+            "gateway_run_running",
+            {
+                "status": "running",
+                "pid": pid,
+                "gateway_workspace": str(paths.root),
+                "subagent_workspace": str(agent.subagents.workspace),
+                "apply": options.apply,
+                "execute_runners": options.execute_runners,
+                "planner": options.planner,
+                "interval": options.interval,
+                "max_runners": options.max_runners,
+                "max_cycles": options.max_cycles,
+                "requeued_requests": requeued,
+                "failed_processing_requests": recovery["failed"],
+                "request_workers": max(1, int(agent.config.gateway_request_workers or 1)),
+                "http_port": http_port,
+            },
+        )
 
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)
@@ -269,6 +278,8 @@ def cmd_gateway_run(args) -> int:
         stop_event.set()
         heartbeat_thread.join(timeout=2)
         request_thread.join(timeout=2)
+        if http_server:
+            http_server.stop()
         try:
             paths.pid.unlink()
         except OSError:

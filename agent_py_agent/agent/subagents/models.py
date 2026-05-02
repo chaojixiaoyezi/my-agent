@@ -377,6 +377,7 @@ class SubAgentTask:
     last_probe_at: float = 0.0
     channel_checks: list[ChannelProbeCheck] = field(default_factory=list)
     channel_probe_file: str = ""
+    attributes: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass

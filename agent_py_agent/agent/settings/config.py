@@ -33,6 +33,7 @@ class AgentConfig:
     agent_name: str = "SimplePythonAgent"
     system_prompt: str = "你是一个谨慎、可扩展、会记录记忆、会在必要时调用工具的 Python CLI 智能体。先理解任务，再给出结构化回答。"
     workspace_root: str = ""
+    auto_detect_work_on_startup: bool = True
     model_backend: str = "echo"
     memory_path: str = "data/memory.jsonl"
     memory_top_k: int = 5
@@ -65,6 +66,14 @@ class AgentConfig:
     subagent_workflow_config_warnings: list[dict[str, Any]] = field(default_factory=list)
     task_max_subagents: int = 0
     task_max_grandchildren: int = 0
+    subagent_automation_level: int = 2
+    dynamic_timeout_safety_margin: float = 2.0
+    dynamic_timeout_min: int = 30
+    dynamic_timeout_max: int = 600
+    max_auto_split_depth: int = 2
+    max_auto_retry_attempts: int = 3
+    model_speed_profile_path: str = "data/model_speed_profile.json"
+    auto_bench_model_on_first_use: bool = True
     scheduler_mode: str = "auto"
     runner_concurrency: str = "auto"
     runner_start_rate: str = "auto"
@@ -79,10 +88,11 @@ class AgentConfig:
     gateway_request_workers: int = 1
     gateway_processing_timeout_seconds: int = 900
     gateway_request_max_attempts: int = 2
+    gateway_port: int = 8420
     adapter_workspace: str = "data/adapters/file"
     daemon_planner: bool = True
-    daemon_apply: bool = False
-    daemon_execute_runners: bool = False
+    daemon_apply: bool = True
+    daemon_execute_runners: bool = True
     daemon_interval: int = 30
     daemon_max_runners: str = "auto"
     daemon_limit: int = 0
@@ -91,6 +101,8 @@ class AgentConfig:
     daemon_probe: bool = True
     daemon_reviewer: str = "parent-daemon"
     daemon_runner_instruction: str = ""
+    lease_heartbeat_interval_seconds: int = 60
+    lease_stale_without_heartbeat_seconds: int = 300
     log_level: str = "info"
     extensions_dir: str = "extensions"
     api_base: str = "https://api.openai.com/v1"
@@ -108,6 +120,7 @@ class AgentConfig:
     tool_search_max_matches: int = 50
     tool_web_max_chars: int = 12000
     tool_http_timeout: int = 30
+    tool_shell_timeout: int = 30
     stream_enabled: bool = True
     tool_catalog_limit: int = 20
     tool_retrieval_limit: int = 3
@@ -323,6 +336,13 @@ def normalize_agent_config(data: dict[str, object]) -> tuple[dict[str, object], 
     )
     _apply("gateway_request_max_attempts", v, w)
 
+    # gateway_port
+    v, w = _coerce_int_config(
+        "gateway_port", out.get("gateway_port"),
+        defaults.gateway_port, min_val=0, max_val=65535,
+    )
+    _apply("gateway_port", v, w)
+
     # daemon_interval
     v, w = _coerce_int_config(
         "daemon_interval", out.get("daemon_interval"),
@@ -351,6 +371,32 @@ def normalize_agent_config(data: dict[str, object]) -> tuple[dict[str, object], 
     )
     _apply("daemon_max_cards", v, w)
 
+    # daemon_apply
+    v, w = _coerce_bool_config(
+        "daemon_apply", out.get("daemon_apply"), defaults.daemon_apply,
+    )
+    _apply("daemon_apply", v, w)
+
+    # daemon_execute_runners
+    v, w = _coerce_bool_config(
+        "daemon_execute_runners", out.get("daemon_execute_runners"), defaults.daemon_execute_runners,
+    )
+    _apply("daemon_execute_runners", v, w)
+
+    # lease_heartbeat_interval_seconds
+    v, w = _coerce_int_config(
+        "lease_heartbeat_interval_seconds", out.get("lease_heartbeat_interval_seconds"),
+        defaults.lease_heartbeat_interval_seconds, min_val=10,
+    )
+    _apply("lease_heartbeat_interval_seconds", v, w)
+
+    # lease_stale_without_heartbeat_seconds
+    v, w = _coerce_int_config(
+        "lease_stale_without_heartbeat_seconds", out.get("lease_stale_without_heartbeat_seconds"),
+        defaults.lease_stale_without_heartbeat_seconds, min_val=30,
+    )
+    _apply("lease_stale_without_heartbeat_seconds", v, w)
+
     # max_tool_rounds
     v, w = _coerce_int_config(
         "max_tool_rounds", out.get("max_tool_rounds"),
@@ -372,6 +418,13 @@ def normalize_agent_config(data: dict[str, object]) -> tuple[dict[str, object], 
     )
     _apply("tool_http_timeout", v, w)
 
+    # tool_shell_timeout
+    v, w = _coerce_int_config(
+        "tool_shell_timeout", out.get("tool_shell_timeout"),
+        defaults.tool_shell_timeout, min_val=1,
+    )
+    _apply("tool_shell_timeout", v, w)
+
     # stream_enabled
     v, w = _coerce_bool_config(
         "stream_enabled", out.get("stream_enabled"), defaults.stream_enabled,
@@ -391,6 +444,63 @@ def normalize_agent_config(data: dict[str, object]) -> tuple[dict[str, object], 
         defaults.max_subagents, min_val=0,
     )
     _apply("max_subagents", v, w)
+
+    # subagent_automation_level
+    v, w = _coerce_int_config(
+        "subagent_automation_level", out.get("subagent_automation_level"),
+        defaults.subagent_automation_level, min_val=1, max_val=3,
+    )
+    _apply("subagent_automation_level", v, w)
+
+    # dynamic_timeout_safety_margin
+    v, w = _coerce_float_config(
+        "dynamic_timeout_safety_margin", out.get("dynamic_timeout_safety_margin"),
+        defaults.dynamic_timeout_safety_margin, min_val=1.0, max_val=10.0,
+    )
+    _apply("dynamic_timeout_safety_margin", v, w)
+
+    # dynamic_timeout_min
+    v, w = _coerce_int_config(
+        "dynamic_timeout_min", out.get("dynamic_timeout_min"),
+        defaults.dynamic_timeout_min, min_val=10,
+    )
+    _apply("dynamic_timeout_min", v, w)
+
+    # dynamic_timeout_max
+    v, w = _coerce_int_config(
+        "dynamic_timeout_max", out.get("dynamic_timeout_max"),
+        defaults.dynamic_timeout_max, min_val=60,
+    )
+    _apply("dynamic_timeout_max", v, w)
+
+    # max_auto_split_depth
+    v, w = _coerce_int_config(
+        "max_auto_split_depth", out.get("max_auto_split_depth"),
+        defaults.max_auto_split_depth, min_val=0,
+    )
+    _apply("max_auto_split_depth", v, w)
+
+    # max_auto_retry_attempts
+    v, w = _coerce_int_config(
+        "max_auto_retry_attempts", out.get("max_auto_retry_attempts"),
+        defaults.max_auto_retry_attempts, min_val=1, max_val=10,
+    )
+    _apply("max_auto_retry_attempts", v, w)
+
+    # auto_bench_model_on_first_use
+    v, w = _coerce_bool_config(
+        "auto_bench_model_on_first_use", out.get("auto_bench_model_on_first_use"),
+        defaults.auto_bench_model_on_first_use,
+    )
+    _apply("auto_bench_model_on_first_use", v, w)
+
+    # model_speed_profile_path - just validate non-empty string
+    raw_path = out.get("model_speed_profile_path", defaults.model_speed_profile_path)
+    if isinstance(raw_path, str) and raw_path.strip():
+        out["model_speed_profile_path"] = raw_path.strip()
+    else:
+        out["model_speed_profile_path"] = defaults.model_speed_profile_path
+        warnings.append(f"model_speed_profile_path: expected a non-empty string, got {raw_path!r}; using default")
 
     return out, warnings
 

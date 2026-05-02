@@ -29,6 +29,7 @@ from .runner_dispatch import (
     _runner_max_attempts,
     _runner_retry_reason,
 )
+from .dynamic_timeout import calculate_dynamic_timeout, estimate_task_tokens
 
 
 class SimpleAgentDispatchMixin:
@@ -321,10 +322,32 @@ class SimpleAgentDispatchMixin:
             pending_runner_jobs = pending_runner_jobs[:runner_start_rate]
         runner_concurrency = _resolve_runner_concurrency(self.config.runner_concurrency, len(pending_runner_jobs))
         runner_timeout_seconds = _resolve_runner_timeout_seconds(self.config.runner_timeout_seconds)
+
+        # 为每个任务计算动态超时的辅助函数
+        def _get_task_timeout(before: SubAgentTask) -> float:
+            # 检查任务是否有预先计算的动态超时
+            if before.attributes and "dynamic_timeout_seconds" in before.attributes:
+                timeout = float(before.attributes["dynamic_timeout_seconds"])
+                if timeout > 0:
+                    return timeout
+
+            # 如果没有，使用配置的静态超时
+            if runner_timeout_seconds > 0:
+                return runner_timeout_seconds
+
+            # 否则动态计算
+            estimated_input_tokens, estimated_output_tokens = estimate_task_tokens(before.goal, before.plan)
+            return calculate_dynamic_timeout(
+                self.config,
+                estimated_input_tokens,
+                estimated_output_tokens,
+            )
+
         if pending_runner_jobs and runner_concurrency > 1 and execute_runners:
             future_to_job = {}
             with ThreadPoolExecutor(max_workers=runner_concurrency) as executor:
                 for run_id, before, retry_reason in pending_runner_jobs:
+                    task_timeout = _get_task_timeout(before)
                     future = executor.submit(
                         _run_subagent_worker,
                         self.config,
@@ -335,7 +358,8 @@ class SimpleAgentDispatchMixin:
                         max_cards,
                         probe,
                         retry_reason,
-                        runner_timeout_seconds,
+                        task_timeout,
+                        local_store=self.local_store,
                     )
                     future_to_job[future] = (run_id, before, retry_reason)
                 completed: dict[str, tuple[SubAgentRunnerResult, object]] = {}
@@ -355,6 +379,7 @@ class SimpleAgentDispatchMixin:
                         )
                     after = self.subagents.load(run_id)
                     completed[run_id] = (result, after)
+
             for run_id, before, retry_reason in pending_runner_jobs:
                 result, after = completed[run_id]
                 records.append(
@@ -370,7 +395,8 @@ class SimpleAgentDispatchMixin:
                 )
         else:
             for run_id, before, retry_reason in pending_runner_jobs:
-                if execute_runners and runner_timeout_seconds > 0:
+                task_timeout = _get_task_timeout(before)
+                if execute_runners and task_timeout > 0:
                     result = _run_subagent_worker(
                         self.config,
                         self.root,
@@ -380,7 +406,8 @@ class SimpleAgentDispatchMixin:
                         max_cards,
                         probe,
                         retry_reason,
-                        runner_timeout_seconds,
+                        task_timeout,
+                        local_store=self.local_store,
                     )
                 else:
                     result = self.run_subagent(

@@ -59,12 +59,16 @@ def recover_gateway_processing_requests(
     timeout_seconds: int = 900,
     startup: bool = False,
     agent: SimpleAgent | None = None,
+    lease_stale_seconds: int | None = None,
 ) -> dict[str, int]:
     """LLM contract: requeue or fail stale gateway processing requests.
 
     Human version:
     如果 gateway 崩在半路，请求会留在 `processing`。启动时我们把旧请求退回 pending；
     运行中只处理超过超时时间的请求。重试次数太多的请求会归档到 failed，并写失败响应。
+
+    lease_stale_seconds：如果传入此参数，恢复逻辑会优先用它判断 lease 是否过期，
+    而不是只用 lease_heartbeat_at。这样可以兼容外部传入的动态配置。
     """
 
     paths.inbox.mkdir(parents=True, exist_ok=True)
@@ -93,7 +97,14 @@ def recover_gateway_processing_requests(
         lease_at = _gateway_processing_lease_at(payload, request_path)
         from .runtime import is_heartbeat_alive_for_request
         heartbeat_alive = is_heartbeat_alive_for_request(request_id)
-        stale = startup or not lease_at or (now - lease_at >= timeout_seconds and not heartbeat_alive)
+        # Determine stale threshold: prefer lease_stale_seconds if provided, otherwise
+        # use the gap between lease_started_at and now as the implicit stale window.
+        effective_timeout = (
+            lease_stale_seconds
+            if lease_stale_seconds is not None
+            else timeout_seconds
+        )
+        stale = startup or not lease_at or (now - lease_at >= effective_timeout and not heartbeat_alive)
         if not stale:
             continue
         attempts = _gateway_request_attempts(payload)

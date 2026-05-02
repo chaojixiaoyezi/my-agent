@@ -1698,3 +1698,53 @@ def example(...):
 同步门：`scripts/check_doc_sync.py` 已覆盖 `log-analysis`、`subagent`、`memory`、`gateway`、`live-lab`。covered module 改代码时，需要同步更新模块 `02-progress.md`、`04-structure.md`，实现代码新增时还要同文件补注释或 docstring。
 
 维护约定：旧文档暂不搬迁；本台账继续只放摘要和导航，模块细节后续优先追加到 `docs/modules/<module>/`。
+
+## 2026-05-02 / Subagent Autonomous Dispatch 自动化派发
+
+状态：设计中
+
+模块设计文档：[docs/design/subagent-autonomous-dispatch.md](docs/design/subagent-autonomous-dispatch.md)
+
+摘要：
+
+新增 `subagent_automation_level` 配置（1/2/3），控制主代理多大程度优先使用子代理完成任务：
+- 级别1：几乎所有多轮任务都派子代理（>= 2 轮就派）
+- 级别2：中型任务派子代理（>= 4 轮就派）
+- 级别3：大型/超大型或用户指定才派（>= 8 轮）
+
+核心机制：
+1. **任务规模预判**：基于 goal 关键词、plan 步骤数、工具数量估算任务轮数
+2. **模型速度感知**：`bench-model` 命令测试不同上下文大小的速度，建立速度模型
+3. **动态超时**：根据输入 token 数和速度模型计算合理超时，避免"一刀切"
+4. **失败分析器**：分析子代理失败根因（超时/能力缺口/任务太大等），给出建议
+5. **自适应重派**：根据分析结果调整策略（提高超时/拆分任务/补充能力），不是机械重派
+6. **主代理代劳防护**：级别1时主代理不能绕过子代理直接执行多轮任务
+
+待做：
+- 实现 estimate_task_complexity()
+- 实现 bench-model CLI
+- 实现 SubAgentFailureAnalyzer
+- 实现 adaptive_retry() 和 split_task()
+- 集成到 dispatch 循环
+
+## 2026-05-02 / Acceptance Real Execution 验收真实执行
+
+状态：设计中
+
+模块设计文档：[docs/design/acceptance-real-execution.md](docs/design/acceptance-real-execution.md)
+
+摘要：
+
+验收不能只看子代理"填表"，必须有系统级真实执行验证：
+1. **TestExecutionRecord**：记录测试命令的真实退出码/stdout/stderr
+2. **TestExecutor**：执行测试命令，支持三种验证方式（command/file_check/content_check）
+3. **命令安全**：allowlist + 阻止高风险 shell 字符 + 超时限制
+4. **集成验收**：验收时自动执行测试，结果作为验收依据
+5. **存储**：test_execution.json 保存执行记录，支持 CLI 查看
+
+待做：
+- 实现 TestExecutor 类
+- 集成到 acceptance_helpers.py
+- 新增 test_execution.json 存储
+- 新增 subagents-tests CLI 命令
+- 更新配置项

@@ -68,13 +68,18 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- settings/                          # 配置结构、简化 YAML 加载器和环境变量覆盖
 |   |   |-- core.py                            # SimpleAgent 兼容组合入口，真实实现已拆到 agent_core/
 |   |   |-- agent_core/                        # 主循环、子代理 runner、planner、dispatch、编排工具、runner 规则
+|   |   |   |-- task_complexity.py            # 任务规模预判：基于 goal 关键词、plan 步骤数、工具数量估算轮数
+|   |   |   |-- automation_guard.py            # 主代理代劳防护：根据自动化级别判断是否应派子代理
 |   |   |-- file_io.py                         # 文件 I/O 兼容入口，真实实现已拆到 io/
 |   |   |-- io/                                # 无业务含义的底层文件 I/O 原语，例如 locked JSONL append
 |   |   |-- gateway.py                         # gateway 兼容入口，真实协议实现已拆到 gateway_parts/
 |   |   |-- gateway_parts/                     # gateway 路径、IO、进程控制、恢复、运行时、adapter、索引日志
+|   |   |   |-- daemon_control.py            # 守护进程控制：fork、 PID 文件、优雅关闭
+|   |   |   |-- http_service.py              # HTTP 服务：POST /ask、GET /result/<id>、GET /status、POST /stop
 |   |   |-- local_store.py                     # LocalStore 兼容组合入口，真实实现已拆到 local_storage/
 |   |   |-- local_storage/                     # LocalStore models/schema/records/search/events/maintenance
 |   |   |-- log_analysis/                      # 可选日志分析底座，负责安全日志接入、解析、查询、检测、case、报告和 analyst 派工
+|   |   |   |-- startup_recovery.py               # 启动时恢复检测，检测未完成的子代理任务和遗留 gateway 请求
 |   |   |   |-- models.py                      # 核心数据模型：Case/LogWorkOrder/SecurityCase/QueryResult/SecurityAlertV1 等
 |   |   |   |-- work_order.py                  # LogWorkOrder -> SubAgentTask 转换器，桥接日志补查到子代理系统
 |   |   |   |-- bounded_query.py               # 受控查询工具，提供时间窗口和结果数量限制的日志查询功能
@@ -142,6 +147,9 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |       |-- test_packaging.py                  # console script、workspace_root 等安装与配置行为测试
 |       |-- test_subagent_quality_contract.py  # 子代理 QualityContract / ContextManifest 落盘和执行上下文测试
 |       |-- test_subagent_workflow_config.py   # subagent workflow auto/manual/off 配置规范化测试
+|       |-- test_task_complexity.py            # 任务规模预判测试
+|       |-- test_automation_guard.py           # 主代理代劳防护测试
+|       |-- test_gateway_http.py               # gateway HTTP 服务测试
 |       |-- test_subagent_workflow_templates.py # workflow 模板加载、覆盖和校验测试
 |       `-- test_tools.py                      # 工具目录、工具调用和工具能力测试
 |-- .gitattributes                             # 跨平台文本编码和换行约定
@@ -727,3 +735,68 @@ docs/
 - `scripts/check_doc_sync.py`: 检查 covered module 的代码改动是否同步更新 `docs/modules/<module>/02-progress.md` 和 `04-structure.md`，并要求实现代码改动同文件补注释或 docstring。
 - 当前 covered module：`log-analysis`、`subagent`、`memory`、`gateway`、`live-lab`。
 - `agent_py_agent/tests/test_doc_sync.py`: 覆盖同步门规则、必需文档存在性和缺注释/缺文档的失败路径。
+
+## 2026-05-02 Tree Update: Model Speed Profiling and Adaptive Retry
+
+- `agent_py_agent/agent/model_speed/` (新目录): 模型速度基准测试和速度配置文件管理
+  - `models.py`: SpeedProfile、SpeedSample 数据类，支持对数线性插值
+  - `benchmark.py`: run_speed_benchmark() 函数，运行速度测试
+  - `storage.py`: 保存和加载 speed_profile.json
+  - `__init__.py`: 模块导出
+
+- `agent_py_agent/agent/agent_core/dynamic_timeout.py`: 动态超时计算模块
+  - `calculate_dynamic_timeout()`: 根据输入大小和速度模型计算超时
+  - `estimate_tokens_from_text()`: 粗略估算文本 token 数
+  - `estimate_task_tokens()`: 根据任务描述和计划估算 token 数
+
+- `agent_py_agent/agent/agent_core/failure_analyzer.py`: 失败分析器模块
+  - `FailureAnalysis` 数据类，包含失败根因、建议动作和重试/拆分标志
+  - `SubAgentFailureAnalyzer` 类，支持超时、能力缺口、解析错误、工具失败、模型错误、通道损坏、验收失败等多种失败类型
+  - `_suggest_splits()`: 根据任务内容生成拆分建议
+
+- `agent_py_agent/agent/agent_core/adaptive_retry.py`: 自适应重派模块
+  - `adaptive_retry()`: 根据分析结果决定重试、拆分或停止
+  - `split_task()`: 把大任务拆分成多个小任务
+  - `should_auto_split()`: 判断是否应该自动拆分
+  - `estimate_split_count()`: 估算应该拆分成几个子任务
+
+- `agent_py_agent/cli/bench_model.py`: 模型速度测试 CLI 命令
+  - `cmd_bench_model()`: 运行速度测试或查看已有速度模型
+
+- `agent_py_agent/agent/subagents/models.py`: SubAgentTask 新增 `attributes: dict[str, object]` 字段
+  - 用于存储动态超时、拆分信息等运行时属性
+
+- `agent_py_agent/agent/agent_core/runner_dispatch.py`: 集成动态超时
+  - 新增导入 `calculate_dynamic_timeout`
+  - 支持从任务 attributes 读取动态超时
+
+- `agent_py_agent/agent/agent_core/dispatch_mixin.py`: 集成失败分析和自适应重派
+  - 新增导入 `adaptive_retry`、`calculate_dynamic_timeout`、`SubAgentFailureAnalyzer`
+  - 在 runner 失败后调用失败分析和自适应重派逻辑
+  - 新增动态超时计算函数 `_get_task_timeout()`
+
+- `agent_py_agent/cli/parser.py`: 添加 `bench-model` 子命令
+  - 新增导入 `cmd_bench_model`
+  - 支持 `--show` 参数查看已有速度模型
+
+- `agent_py_agent/__main__.py`: 导出 `cmd_bench_model`
+
+- `agent_py_agent/config/agent_config.yaml`: 新增动态超时和自适应相关配置项
+  - `subagent_automation_level`: 子代理自动化级别
+  - `dynamic_timeout_safety_margin`: 动态超时安全边际
+  - `dynamic_timeout_min`: 动态超时下限
+  - `dynamic_timeout_max`: 动态超时上限
+  - `max_auto_split_depth`: 失败后最大自动拆分次数
+  - `model_speed_profile_path`: 模型速度配置文件路径
+  - `auto_bench_model_on_first_use`: 是否在首次使用时自动运行速度测试
+
+- `agent_py_agent/agent/settings/config.py`: AgentConfig 新增对应字段
+
+- `agent_py_agent/tests/test_dynamic_timeout.py`: 动态超时测试（13 tests）
+  - 测试 token 估算、任务 token 估算、动态超时计算、边界情况、自定义参数
+
+- `agent_py_agent/tests/test_failure_analyzer.py`: 失败分析器测试（15 tests）
+  - 测试各种失败类型的分析结果、拆分建议生成
+
+- `agent_py_agent/tests/test_adaptive_retry.py`: 自适应重派测试（18 tests）
+  - 测试自适应重派策略、任务拆分、自动拆分判断、拆分数量估算

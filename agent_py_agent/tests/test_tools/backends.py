@@ -204,4 +204,5 @@ def make_tool_registry(workspace: Path) -> ToolRegistry:
         catalog_limit=20,
         retrieval_limit=3,
         vector_search_enabled=False,
+        shell_tool_timeout=30,
     )

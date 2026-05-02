@@ -139,3 +139,70 @@ def test_stale_check_respects_heartbeat_liveness(tmp_path):
         assert summary["checked"] == 1
     finally:
         gateway_runtime._active_heartbeat_request_ids.discard(request_id)
+
+
+def test_stale_check_with_lease_stale_seconds_param(tmp_path):
+    """When lease_stale_seconds is provided, it overrides timeout_seconds for stale判断."""
+    from agent_py_agent.agent.gateway_parts.recovery import recover_gateway_processing_requests
+
+    agent = _make_agent(tmp_path)
+    paths = gateway_paths(agent)
+    request_id = "test-lease-stale-param"
+    request_path = paths.processing / f"{request_id}.json"
+    paths.processing.mkdir(parents=True, exist_ok=True)
+
+    # Write a request with heartbeat 100 seconds ago
+    old_heartbeat = time.time() - 100
+    write_json_file(request_path, {
+        "id": request_id,
+        "kind": "ask",
+        "prompt": "test with lease_stale_seconds param",
+        "status": "processing",
+        "lease_heartbeat_at": old_heartbeat,
+        "lease_started_at": old_heartbeat,
+        "attempts": 0,
+    })
+
+    # Use lease_stale_seconds=60 (shorter than the 100s age) - should requeue
+    summary = recover_gateway_processing_requests(
+        paths, timeout_seconds=900, startup=False, lease_stale_seconds=60
+    )
+    assert summary["checked"] == 1
+    assert summary["requeued"] == 1
+    assert summary["failed"] == 0
+
+
+def test_stale_check_heartbeat_alive_prevents_requeue_even_with_old_heartbeat(tmp_path):
+    """Even with old lease_heartbeat_at, if heartbeat thread is alive, don't requeue."""
+    from agent_py_agent.agent.gateway_parts.recovery import recover_gateway_processing_requests
+
+    agent = _make_agent(tmp_path)
+    paths = gateway_paths(agent)
+    request_id = "test-heartbeat-alive-old-lease"
+    request_path = paths.processing / f"{request_id}.json"
+    paths.processing.mkdir(parents=True, exist_ok=True)
+
+    # Write a request with heartbeat 100 seconds ago but thread IS alive
+    old_heartbeat = time.time() - 100
+    write_json_file(request_path, {
+        "id": request_id,
+        "kind": "ask",
+        "prompt": "test heartbeat alive despite old lease",
+        "status": "processing",
+        "lease_heartbeat_at": old_heartbeat,
+        "lease_started_at": old_heartbeat,
+        "attempts": 0,
+    })
+
+    # Register heartbeat as alive (thread running)
+    gateway_runtime._active_heartbeat_request_ids.add(request_id)
+    try:
+        # Even with lease_stale_seconds=60 and heartbeat 100s old, should NOT requeue
+        summary = recover_gateway_processing_requests(
+            paths, timeout_seconds=900, startup=False, lease_stale_seconds=60
+        )
+        assert summary["checked"] == 1
+        assert summary["requeued"] == 0
+        assert summary["failed"] == 0
+    finally:
+        gateway_runtime._active_heartbeat_request_ids.discard(request_id)

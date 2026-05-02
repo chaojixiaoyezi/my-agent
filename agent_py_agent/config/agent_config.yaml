@@ -10,6 +10,11 @@ agent_name: "SimplePythonAgent"
 # 系统人格：每次请求都会放进最终 prompt 的 System 段
 system_prompt: "你是一个谨慎、可扩展、会记录记忆、会在必要时调用工具的 Python CLI 智能体。先理解任务，再给出结构化回答。"
 
+# 启动时是否自动检测未完成任务
+# - true: my-agent 启动时自动检测 gateway 状态、子代理任务和遗留请求，并提示用户
+# - false: 关闭自动检测，直接进入默认模式
+auto_detect_work_on_startup: true
+
 # 工作区根目录：
 # - 留空时使用项目默认根目录，保持普通开发体验。
 # - 场景测试、外部聊天工具或未来多项目模式可以把它指向某个独立目录。
@@ -81,6 +86,40 @@ prompt_files:
 # 是否启用子任务记录
 enable_subagents: true
 
+# 子代理自动化级别
+# - 1: 极大优先子代理。预估 >= 2 轮的任务都派子代理。
+# - 2: 中等优先。预估 >= 4 轮的任务派子代理。
+# - 3: 保守优先。预估 >= 8 轮或用户明确指定才派子代理。
+subagent_automation_level: 2
+
+# 动态超时安全边际
+# - 实际超时 = 预估耗时 * safety_margin
+# - 默认 2.0，即预估 10 秒的任务给 20 秒超时
+dynamic_timeout_safety_margin: 2.0
+
+# 动态超时下限（秒）
+dynamic_timeout_min: 30
+
+# 动态超时上限（秒）
+dynamic_timeout_max: 600
+
+# 失败后最大自动拆分次数
+# - 避免无限拆分
+# - 0 表示不自动拆分
+max_auto_split_depth: 2
+
+# 失败后最大自动重试次数
+# - 每次重试会引入 LLM 分析失败原因，根据分析结果调整策略
+# - 超过此次数后放弃自动重试，通知用户介入
+# - 默认 3 次
+max_auto_retry_attempts: 3
+
+# 模型速度配置文件路径
+model_speed_profile_path: "data/model_speed_profile.json"
+
+# 是否在首次使用时自动运行速度测试
+auto_bench_model_on_first_use: true
+
 # 单次最多拆出多少个子任务
 max_subagents: 5
 
@@ -118,6 +157,7 @@ scheduler_mode: "auto"
 runner_concurrency: "auto"
 runner_start_rate: "auto"
 runner_timeout_seconds: "auto"
+
 # runner_failure_policy 控制 runner 临时失败后的总尝试次数：
 # - "auto": 当前等价于最多 2 次，也就是首次失败后下一轮 dispatch 再试一次
 # - "off" / "none" / "disabled": 不自动重试，总尝试次数为 1
@@ -156,6 +196,11 @@ gateway_request_workers: 1
 gateway_processing_timeout_seconds: 900
 gateway_request_max_attempts: 2
 
+# HTTP 服务端口（gateway 守护进程用）
+# - 默认 8420
+# - 设置为 0 则禁用 HTTP 服务
+gateway_port: 8420
+
 # 外部聊天工具 / TUI 文件适配器工作区。
 # 第一版 adapter file 会从 inbox 读 JSON 消息，把结果写到 outbox。
 adapter_workspace: "data/adapters/file"
@@ -163,17 +208,18 @@ adapter_workspace: "data/adapters/file"
 # 前台 daemon 默认策略（高级 / 过渡期）：
 # - my-agent daemon 会读取这些配置，减少启动时的长参数。
 # - 当前 daemon 还不是完整 gateway/service；它是一个前台 watch 调度循环。
-# - 默认不写回、不执行 runner，避免刚安装后误触真实任务推进；确认要自动推进后，把 daemon_apply 和 daemon_execute_runners 改成 true。
-# - daemon_max_runners 是当前前台调度器的“每轮最多推进多少 runner”，不是未来 worker 并发数。
-# - daemon_max_runners: "auto" 当前会映射成保守值 1；未来 gateway 会改成自适应并发。
-# - 数字项里的 0 是显式策略值，不是“未设置”：
+# - 默认开启自动调度（apply=true, execute_runners=true），确保 gateway 启动后自动推进子代理任务。
+# - 安全边界：dry-run 优先；高风险操作（写文件、执行 runner）需要用户确认或显式配置。
+# - daemon_max_runners 是当前前台调度器的”每轮最多推进多少 runner”，不是未来 worker 并发数。
+# - daemon_max_runners: “auto” 当前会映射成保守值 1；未来 gateway 会改成自适应并发。
+# - 数字项里的 0 是显式策略值，不是”未设置”：
 #   daemon_max_cycles=0 表示持续运行
 #   daemon_limit=0 表示每个阶段不设记录条数上限
 #   daemon_max_cards=0 表示不限制能力卡数量
 #   daemon_interval=0 表示每轮之间不等待，通常只用于测试或单轮验证
 daemon_planner: true
-daemon_apply: false
-daemon_execute_runners: false
+daemon_apply: true
+daemon_execute_runners: true
 daemon_interval: 30
 daemon_max_runners: "auto"
 daemon_limit: 0
@@ -182,6 +228,13 @@ daemon_max_cards: 0
 daemon_probe: true
 daemon_reviewer: "parent-daemon"
 daemon_runner_instruction: ""
+
+# Gateway lease 心跳续期配置：
+# - lease_heartbeat_interval_seconds: worker 刷新一次 lease heartbeat 的间隔（默认 60 秒）。
+# - lease_stale_without_heartbeat_seconds: 超过此时间没有收到 heartbeat 就认为 lease 失效（默认 300 秒）。
+# - 这两个配置协同工作： heartbeat 定期刷新防止被误判为卡死，stale 检测确保真正卡死的请求能回收。
+lease_heartbeat_interval_seconds: 60
+lease_stale_without_heartbeat_seconds: 300
 
 # 日志级别预留字段
 log_level: "info"
@@ -238,6 +291,9 @@ tool_web_max_chars: 12000
 
 # fetch_url / http_request 工具默认超时秒数
 tool_http_timeout: 30
+
+# run_command 工具默认超时秒数
+tool_shell_timeout: 30
 
 # 工具目录里最多展示多少个工具条目
 # 这个值偏大也没问题，因为目录只放中等详细度信息，不会像完整手册那么占 prompt
