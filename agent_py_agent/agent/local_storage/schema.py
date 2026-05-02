@@ -74,6 +74,38 @@ class LocalStoreSchemaMixin:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS task_registry (
+                    task_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    goal TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_task_registry_session ON task_registry(session_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_task_registry_user ON task_registry(user_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_task_registry_status ON task_registry(status)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_task_registry_updated ON task_registry(updated_at)"
+            )
+            conn.execute(
+                """
+                INSERT INTO metadata(key, value)
+                VALUES('task_registry_enabled', 'true')
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                """,
+            )
             if self.enable_fts:
                 try:
                     conn.execute(
@@ -85,14 +117,6 @@ class LocalStoreSchemaMixin:
                     self._fts_available = True
                 except sqlite3.OperationalError:
                     self._fts_available = False
-            conn.execute(
-                """
-                INSERT INTO metadata(key, value)
-                VALUES('fts5_enabled', ?)
-                ON CONFLICT(key) DO UPDATE SET value=excluded.value
-                """,
-                ("true" if self.fts_available else "false",),
-            )
             conn.commit()
 
     def _connect(self) -> sqlite3.Connection:

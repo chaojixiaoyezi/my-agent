@@ -99,6 +99,11 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- memory_archive/                    # 压缩前 hook 快照和 raw 冷归档 JSONL 存储骨架
 |   |   |-- memory_routing/                    # 长期规则索引化路由，负责 MEMORY -> index -> authority file 的确定性匹配
 |   |   |-- observability/                     # 未来 request_id、耗时、状态、错误码、metrics、trace 目录
+|   |   |   `-- user_space/                    # 用户数据隔离：路径解析、目录管理、迁移工具
+|   |   |       |-- __init__.py               # 模块导出
+|   |   |       |-- paths.py                 # UserPaths 数据类和 get_user_paths() 函数
+|   |   |       |-- manager.py               # UserSpaceManager：用户目录创建、访问控制、列表
+|   |   |       `-- migration.py              # migrate_to_user_space() 迁移工具
 |   |   |-- prompting.py                       # prompt 兼容入口，真实实现已拆到 prompting_parts/
 |   |   |-- prompting_parts/                   # prompt 构造、工具 transcript、未来上下文预算策略
 |   |   |-- repositories/                      # 未来领域仓储接口目录，目前用 README 定义边界
@@ -150,6 +155,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |       |-- test_task_complexity.py            # 任务规模预判测试
 |       |-- test_automation_guard.py           # 主代理代劳防护测试
 |       |-- test_gateway_http.py               # gateway HTTP 服务测试
+|       `-- test_user_space.py                 # 用户数据隔离测试
 |       |-- test_subagent_workflow_templates.py # workflow 模板加载、覆盖和校验测试
 |       `-- test_tools.py                      # 工具目录、工具调用和工具能力测试
 |-- .gitattributes                             # 跨平台文本编码和换行约定

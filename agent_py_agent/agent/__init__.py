@@ -11,4 +11,5 @@ __all__ = [
     "core",
     "skills",
     "startup_recovery",
+    "session",
 ]

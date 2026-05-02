@@ -296,6 +296,14 @@ class SubAgentBaseMixin:
             **paths,
         )
         self.save(task)
+        if self.local_store:
+            self.local_store.task_registry.register_task(
+                task_id=task.id,
+                session_id=task.root_id,
+                user_id=task.owner or "",
+                status=task.status,
+                goal=task.goal,
+            )
         if parent_id:
             self.add_child(parent_id, task.id)
         return task
@@ -563,6 +571,14 @@ class SubAgentBaseMixin:
             encoding="utf-8",
         )
         self._index_task(task)
+        if self.local_store:
+            self.local_store.task_registry.register_task(
+                task_id=task.id,
+                session_id=task.root_id,
+                user_id=task.owner or "",
+                status=task.status,
+                goal=task.goal,
+            )
 
     def _build_work_order_paths(
         self,

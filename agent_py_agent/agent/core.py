@@ -64,6 +64,7 @@ from .memory import JsonlMemory
 from .prompting import PromptBuilder
 from .subagent import SubAgentManager
 from .tools import ToolRegistry
+from .user_space.paths import get_user_paths
 
 
 class SimpleAgent(
@@ -83,22 +84,46 @@ class SimpleAgent(
 
         给人看的解释：
         创建主代理时会准备本地账本、记忆、prompt 构造器、模型后端、子代理管理器和工具注册表。
-        最后把“创建子代理、看板、dispatch”这三个编排工具也注册进去。
+        最后把"创建子代理、看板、dispatch"这三个编排工具也注册进去。
         """
 
         self.config = config
         self.root = Path(root)
+
+        # 检查是否使用用户空间隔离
+        user_id = getattr(config, "user_id", "admin") or "admin"
+        user_data_root = getattr(config, "user_data_root", "data/users") or "data/users"
+
+        if user_id != "admin":
+            # 使用用户空间路径
+            user_paths = get_user_paths(user_id, self.root / user_data_root)
+            local_store_path = user_paths.local_store_path
+            local_store_files_dir = user_paths.local_store_files_dir
+            local_store_events_path = user_paths.local_store_events_path
+            memory_path = user_paths.memory_path
+            subagent_workspace = user_paths.subagent_workspace
+            # gateway 路径保持原配置，不隔离
+            gateway_workspace = self.root / config.gateway_workspace
+        else:
+            # 默认行为：使用配置中的路径
+            local_store_path = self.root / config.local_store_path
+            local_store_files_dir = self.root / config.local_store_files_dir
+            local_store_events_path = self.root / config.local_store_events_path
+            memory_path = self.root / config.memory_path
+            subagent_workspace = self.root / config.subagent_workspace
+            gateway_workspace = self.root / config.gateway_workspace
+
         self.local_store = LocalStore(
-            self.root / config.local_store_path,
-            files_dir=self.root / config.local_store_files_dir,
-            events_path=self.root / config.local_store_events_path,
+            local_store_path,
+            files_dir=local_store_files_dir,
+            events_path=local_store_events_path,
             enable_fts=config.local_store_fts_enabled,
         )
-        self.memory = JsonlMemory(self.root / config.memory_path, local_store=self.local_store)
+        self.memory = JsonlMemory(memory_path, local_store=self.local_store)
         self.prompts = PromptBuilder(config, self.root)
         self.backend = get_backend(config.model_backend, config)
         self.subagents = SubAgentManager(
-            self.root / config.subagent_workspace,
+            subagent_workspace,
             local_store=self.local_store,
             workspace_root=self.root,
             enable_self_learning=config.enable_self_learning,

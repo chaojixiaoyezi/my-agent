@@ -20,6 +20,7 @@ from .local_storage import (
     LocalTimelineItem,
     PREVIEW_CHARS,
 )
+from .task_registry import TaskRegistry
 
 
 class LocalStore(
@@ -61,6 +62,7 @@ class LocalStore(
         self.enable_fts = enable_fts
         self._fts_available = False
         self._init_schema()
+        self.task_registry = TaskRegistry(self)
 
     @property
     def fts_available(self) -> bool:
@@ -80,4 +82,5 @@ __all__ = [
     "LocalStoreEvent",
     "LocalTimelineItem",
     "PREVIEW_CHARS",
+    "TaskRegistry",
 ]

@@ -1207,6 +1207,33 @@ API key 默认从 `AGENT_API_KEY` 环境变量读取。PowerShell 示例：
 $env:AGENT_API_KEY="你的 key"
 ```
 
+## `task-lookup`
+
+查询单个任务详情，跨会话可用。
+
+```powershell
+my-agent task-lookup <task_id>
+```
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `task_id` | 是 | 任务 ID |
+
+## `task-list`
+
+列出任务列表，支持按用户和状态过滤。
+
+```powershell
+my-agent task-list
+my-agent task-list --user-id admin --status RUNNING --limit 20
+```
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--user-id` | 当前用户 | 按用户 ID 过滤 |
+| `--status` | 全部 | 按状态过滤，如 PLANNING/RUNNING/DONE |
+| `--limit` | 50 | 最多显示多少条 |
+
 ## 安全约定
 
 - 默认调度命令都是 dry-run，先写报告，不修改任务。

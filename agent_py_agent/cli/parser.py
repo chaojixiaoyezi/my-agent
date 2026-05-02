@@ -68,6 +68,7 @@ from .subagents import (
     cmd_subagents_route_capabilities,
     cmd_subagents_workflow_plan,
 )
+from .task_commands import cmd_task_list, cmd_task_lookup
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -277,6 +278,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--no-save", action="store_true", help="交互对话不自动保存到记忆")
     chat.add_argument("--gateway", action="store_true", help="把普通聊天消息投递给后台 gateway，而不是在当前前台进程里调用模型")
     chat.add_argument("--gateway-timeout", type=float, help="gateway 模式等待单条响应的秒数，默认使用配置 gateway_request_timeout")
+    chat.add_argument("--session-id", help="恢复指定会话，不传则创建新会话")
     add_resume_context_switches(chat)
     chat.set_defaults(func=cmd_chat)
 
@@ -591,6 +593,17 @@ def build_parser() -> argparse.ArgumentParser:
     subagent = sub.add_parser("subagent", help="查看单个 subagent 运行详情")
     subagent.add_argument("run_id", help="子代理运行 ID")
     subagent.set_defaults(func=cmd_subagent_detail)
+
+    task_lookup = sub.add_parser("task-lookup", help="查询单个任务详情")
+    task_lookup.add_argument("task_id", help="任务 ID")
+    task_lookup.set_defaults(func=cmd_task_lookup)
+
+    task_list = sub.add_parser("task-list", help="列出任务列表")
+    task_list.add_argument("--user-id", help="按用户 ID 过滤")
+    task_list.add_argument("--status", help="按状态过滤，如 PLANNING/RUNNING/DONE")
+    task_list.add_argument("--limit", type=int, default=50, help="最多显示多少条")
+    task_list.set_defaults(func=cmd_task_list)
+
     return parser
 
 
