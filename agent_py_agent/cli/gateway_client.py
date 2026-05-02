@@ -33,7 +33,7 @@ from .thinking_spinner import ThinkingSpinner
 def cmd_gateway(args) -> int:
     """gateway 命令族入口。"""
 
-    print("请指定 gateway 子命令：start / status / stop / restart / logs / ask / result。", file=sys.stderr)
+    print("请指定 gateway 子命令：start / supervisor-start / status / stop / restart / logs / ask / result / start-all。", file=sys.stderr)
     return 2
 
 

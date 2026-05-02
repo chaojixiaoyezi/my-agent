@@ -28,6 +28,7 @@ from .io import (
 )
 from .logging import _index_gateway_payload, _report_gateway_side_effect_error, log_gateway_event, log_gateway_payload
 from .paths import AdapterPaths, GatewayPaths, adapter_paths, gateway_chunk_path, gateway_paths
+from .daemon_control import get_running_pid, read_pid_record
 from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
 from .recovery import (
     _archive_gateway_request,
@@ -62,6 +63,7 @@ __all__ = [
     "gateway_request_counts",
     "gateway_response_path",
     "gateway_running",
+    "get_running_pid",
     "gateway_stale_processing",
     "is_pid_alive",
     "is_heartbeat_alive_for_request",
@@ -72,6 +74,7 @@ __all__ = [
     "process_file_adapter_once",
     "read_json_file",
     "read_pid",
+    "read_pid_record",
     "rebuild_gateway_index",
     "recover_gateway_processing_requests",
     "render_gateway_status",

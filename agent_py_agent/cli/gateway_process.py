@@ -28,7 +28,6 @@ from ..agent.gateway import (
     is_pid_alive,
     log_gateway_event,
     read_json_file,
-    read_pid,
     recover_gateway_processing_requests,
     tail_lines,
     terminate_pid,
@@ -36,10 +35,34 @@ from ..agent.gateway import (
     wait_for_pid_exit,
     write_json_file,
 )
+from ..agent.gateway_parts.daemon_control import (
+    get_running_pid,
+    read_pid_record,
+    read_runtime_status,
+    remove_pid_file_if_owned,
+    write_pid_record,
+    write_runtime_status,
+)
 from ..agent.gateway_parts.http_service import GatewayHTTPServer, start_http_server
 from .common import ROOT, make_agent, make_capability_router
 from .daemon import _resolve_daemon_options
+from .gateway_service import (
+    install_service,
+    uninstall_service,
+)
 from .models import DaemonOptions
+
+
+def cmd_gateway_install(args) -> int:
+    """Install the gateway as a system service (systemd or launchd)."""
+    success = install_service(force=args.force)
+    return 0 if success else 1
+
+
+def cmd_gateway_uninstall(args) -> int:
+    """Uninstall the gateway system service (systemd or launchd)."""
+    success = uninstall_service()
+    return 0 if success else 1
 
 
 def cmd_gateway_start(args) -> int:
@@ -48,10 +71,13 @@ def cmd_gateway_start(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)
-    pid = read_pid(paths.pid)
+    pid = get_running_pid(paths.pid)
     if pid and is_pid_alive(pid) and not args.force:
+        record = read_pid_record(paths.pid)
         print(f"gateway 已在运行 pid={pid}")
         print(f"status: {paths.state}")
+        if record:
+            print(f"start_time: {record.get('start_time')}")
         return 0
     if pid and is_pid_alive(pid) and args.force:
         paths.stop_request.write_text(
@@ -98,7 +124,7 @@ def cmd_gateway_start(args) -> int:
             start_new_session=start_new_session,
         )
 
-    paths.pid.write_text(str(process.pid), encoding="utf-8")
+    write_pid_record(paths.pid)
     write_json_file(
         paths.state,
         {
@@ -133,7 +159,7 @@ def cmd_gateway_run(args) -> int:
     )
     requeued = recovery["requeued"]
     pid = os.getpid()
-    paths.pid.write_text(str(pid), encoding="utf-8")
+    write_pid_record(paths.pid)
     log_gateway_event(
         agent,
         "gateway_run_started",
@@ -281,7 +307,7 @@ def cmd_gateway_run(args) -> int:
         if http_server:
             http_server.stop()
         try:
-            paths.pid.unlink()
+            remove_pid_file_if_owned(paths.pid)
         except OSError:
             pass
         try:
@@ -305,6 +331,7 @@ def cmd_gateway_status(args) -> int:
     pid, alive = gateway_running(paths)
     state = read_json_file(paths.state)
     heartbeat = read_json_file(paths.heartbeat)
+    runtime = read_runtime_status(paths.state)
     heartbeat_at = float(heartbeat.get("updated_at", 0) or 0)
     age = time.time() - heartbeat_at if heartbeat_at else 0
     stale = bool(heartbeat_at and age > agent.config.gateway_stale_seconds)
@@ -312,10 +339,16 @@ def cmd_gateway_status(args) -> int:
     if alive and stale:
         status = "stale"
 
+    pid_record = read_pid_record(paths.pid)
+
     print("MY-AGENT GATEWAY")
     print(f"status={status} pid={pid if pid else '-'} alive={alive}")
     if heartbeat_at:
         print(f"heartbeat_age_seconds={age:.1f}")
+    if pid_record:
+        print(f"gateway_start_time={pid_record.get('start_time', 'unknown')}")
+    if runtime:
+        print(f"gateway_state={runtime.get('gateway_state', 'unknown')}")
     if state:
         print("state=" + json.dumps(state, ensure_ascii=False, sort_keys=True))
     counts = gateway_request_counts(paths)
@@ -336,12 +369,9 @@ def cmd_gateway_stop(args) -> int:
 
     agent = make_agent(args)
     paths = gateway_paths(agent)
-    pid = read_pid(paths.pid)
-    if not pid or not is_pid_alive(pid):
-        try:
-            paths.pid.unlink()
-        except OSError:
-            pass
+    pid = get_running_pid(paths.pid)
+    if not pid:
+        remove_pid_file_if_owned(paths.pid)
         print("gateway 未在运行")
         return 0
 

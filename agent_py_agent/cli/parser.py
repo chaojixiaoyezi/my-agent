@@ -16,12 +16,14 @@ from .common import DEFAULT_CAPABILITY_CONFIG, DEFAULT_CONFIG, add_resume_contex
 from .daemon import cmd_daemon
 from .gateway_client import cmd_default, cmd_gateway, cmd_gateway_ask, cmd_gateway_result
 from .gateway_process import (
+    cmd_gateway_install,
     cmd_gateway_logs,
     cmd_gateway_restart,
     cmd_gateway_run,
     cmd_gateway_start,
     cmd_gateway_status,
     cmd_gateway_stop,
+    cmd_gateway_uninstall,
 )
 from .learning import cmd_learn_accept, cmd_learn_list, cmd_learn_reject, cmd_learn_stats
 from .local_commands import (
@@ -561,6 +563,37 @@ def build_parser() -> argparse.ArgumentParser:
     gateway_result.add_argument("--show-prompt", action="store_true", help="打印响应中保存的最终 prompt")
     gateway_result.add_argument("--json", action="store_true", help="输出完整响应 JSON，方便脚本或聊天适配器读取")
     gateway_result.set_defaults(func=cmd_gateway_result)
+
+    from .supervisor import (
+        cmd_start_all,
+        cmd_supervisor_run,
+        cmd_supervisor_start,
+        cmd_supervisor_status,
+        cmd_supervisor_stop,
+    )
+
+    gateway_supervisor_start = gateway_sub.add_parser("supervisor-start", help="启动 gateway 看门狗进程（自动重启崩溃的 gateway）")
+    gateway_supervisor_start.set_defaults(func=cmd_supervisor_start)
+
+    gateway_supervisor_stop = gateway_sub.add_parser("supervisor-stop", help="停止 gateway 看门狗进程")
+    gateway_supervisor_stop.add_argument("--timeout", type=float, help="等待停止的秒数")
+    gateway_supervisor_stop.set_defaults(func=cmd_supervisor_stop)
+
+    gateway_supervisor_status = gateway_sub.add_parser("supervisor-status", help="查看 supervisor 和 gateway 状态")
+    gateway_supervisor_status.set_defaults(func=cmd_supervisor_status)
+
+    gateway_supervisor_run = gateway_sub.add_parser("supervisor", help="内部命令：前台运行 supervisor 循环")
+    gateway_supervisor_run.set_defaults(func=cmd_supervisor_run)
+
+    gateway_start_all = gateway_sub.add_parser("start-all", help="一键启动 gateway（带 supervisor） + 所有适配器")
+    gateway_start_all.set_defaults(func=cmd_start_all)
+
+    gateway_install = gateway_sub.add_parser("install", help="安装 gateway 系统服务（Linux systemd 或 macOS launchd）")
+    gateway_install.add_argument("--force", action="store_true", help="强制重新安装已存在的服务")
+    gateway_install.set_defaults(func=cmd_gateway_install)
+
+    gateway_uninstall = gateway_sub.add_parser("uninstall", help="卸载 gateway 系统服务（Linux systemd 或 macOS launchd）")
+    gateway_uninstall.set_defaults(func=cmd_gateway_uninstall)
 
     adapter = sub.add_parser("adapter", help="外部聊天工具 / TUI 适配器")
     adapter_sub = adapter.add_subparsers(dest="adapter_command")
