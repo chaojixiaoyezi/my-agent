@@ -18,13 +18,13 @@ from typing import TYPE_CHECKING
 # Liveness registry: tracks which request IDs have an active heartbeat thread.
 _active_heartbeat_request_ids: set[str] = set()
 
+from .daemon_control import get_running_pid, read_pid_record
 from .io import (
     append_gateway_history,
     gateway_request_counts,
     gateway_response_path,
     new_gateway_request_id,
     read_json_file,
-    read_pid,
     write_gateway_request,
     write_json_file,
     write_json_file_atomic,
@@ -135,8 +135,8 @@ def gateway_running(paths: GatewayPaths) -> tuple[int, bool]:
     `pid` 是文件里记录的进程号，`alive` 是系统层面确认它还活着。两者分开返回，方便状态页说清楚。
     """
 
-    pid = read_pid(paths.pid)
-    return pid, bool(pid and is_pid_alive(pid))
+    pid = get_running_pid(paths.pid)
+    return pid, bool(pid)
 
 
 def wait_for_gateway_running(paths: GatewayPaths, timeout: float = 10.0) -> tuple[int, bool]:

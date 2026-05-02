@@ -14,12 +14,21 @@ from .common import DEFAULT_CAPABILITY_CONFIG, add_resume_context_switches
 from .daemon import cmd_daemon
 from .gateway_client import cmd_gateway, cmd_gateway_ask, cmd_gateway_result
 from .gateway_process import (
+    cmd_gateway_install,
     cmd_gateway_logs,
     cmd_gateway_restart,
     cmd_gateway_run,
     cmd_gateway_start,
     cmd_gateway_status,
     cmd_gateway_stop,
+    cmd_gateway_uninstall,
+)
+from .supervisor import (
+    cmd_start_all,
+    cmd_supervisor_run,
+    cmd_supervisor_start,
+    cmd_supervisor_status,
+    cmd_supervisor_stop,
 )
 from .logs import (
     cmd_logs,
@@ -251,6 +260,38 @@ def add_gateway_subcommands(sub: argparse._SubParsersAction) -> None:
     gateway_result.add_argument("--show-prompt", action="store_true", help="打印响应中保存的最终 prompt")
     gateway_result.add_argument("--json", action="store_true", help="输出完整响应 JSON，方便脚本或聊天适配器读取")
     gateway_result.set_defaults(func=cmd_gateway_result)
+
+    # Supervisor subcommands
+    supervisor_start = gateway_sub.add_parser("supervisor-start", help="启动 gateway 看门狗进程（自动重启崩溃的 gateway）")
+    supervisor_start.set_defaults(func=cmd_supervisor_start)
+
+    supervisor_stop = gateway_sub.add_parser("supervisor-stop", help="停止 gateway 看门狗进程")
+    supervisor_stop.add_argument("--timeout", type=float, help="等待停止的秒数")
+    supervisor_stop.set_defaults(func=cmd_supervisor_stop)
+
+    supervisor_status = gateway_sub.add_parser("supervisor-status", help="查看 supervisor 和 gateway 状态")
+    supervisor_status.set_defaults(func=cmd_supervisor_status)
+
+    # Supervisor run (internal: foreground supervisor loop)
+    supervisor_run = gateway_sub.add_parser("supervisor", help="内部命令：前台运行 supervisor 循环")
+    supervisor_run.add_argument("--workspace-root", help="工作区根目录")
+    supervisor_run.add_argument("--heartbeat-timeout", type=float, default=120.0, help="心跳超时秒数")
+    supervisor_run.add_argument("--check-interval", type=float, default=10.0, help="健康检查间隔秒数")
+    supervisor_run.add_argument("--max-restart-attempts", type=int, default=5, help="最大重启次数")
+    supervisor_run.add_argument("--restart-cooldown", type=float, default=30.0, help="重启冷却时间（秒）")
+    supervisor_run.set_defaults(func=cmd_supervisor_run)
+
+    # Start-all
+    start_all = gateway_sub.add_parser("start-all", help="一键启动 gateway（带 supervisor）+ 所有适配器")
+    start_all.set_defaults(func=cmd_start_all)
+
+    # Service install/uninstall
+    gateway_install = gateway_sub.add_parser("install", help="安装 gateway 系统服务（Linux systemd 或 macOS launchd）")
+    gateway_install.add_argument("--force", action="store_true", help="强制重新安装已存在的服务")
+    gateway_install.set_defaults(func=cmd_gateway_install)
+
+    gateway_uninstall = gateway_sub.add_parser("uninstall", help="卸载 gateway 系统服务（Linux systemd 或 macOS launchd）")
+    gateway_uninstall.set_defaults(func=cmd_gateway_uninstall)
 
 
 def add_adapter_subcommand(sub: argparse._SubParsersAction) -> None:
