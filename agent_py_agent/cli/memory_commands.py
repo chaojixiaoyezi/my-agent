@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..agent.memory_archive import raw_event_path_for, snapshot_path_for
+from ..agent.memory_archive import compression_snapshot_dir, raw_event_path_for, snapshot_path_for
 from ..agent.memory_routing import (
     MemoryRoute,
     MemoryRouteMatch,
@@ -62,6 +62,14 @@ def cmd_memory_route(args) -> int:
     if not index_path.exists():
         ok = False
         diagnostics["messages"].append(f"memory route index not found: {index_path}")
+    elif bool(getattr(args, "validate", False)):
+        try:
+            routes = load_routes(index_path)
+            diagnostics["route_warnings"] = validate_routes(routes, agent.root)
+            diagnostics["messages"].append("memory route validation completed.")
+        except Exception as exc:
+            ok = False
+            diagnostics["messages"].append(f"memory route index could not be loaded: {type(exc).__name__}: {exc}")
     elif mode == "off":
         diagnostics["messages"].append("memory routing mode is off; route matching skipped.")
     else:
@@ -84,6 +92,7 @@ def cmd_memory_route(args) -> int:
         "ok": ok,
         "workspace_root": str(agent.root),
         "query": args.query,
+        "validate": bool(getattr(args, "validate", False)),
         "mode": mode,
         "limit": args.limit,
         "auto_read_limit": auto_read_limit,
@@ -241,6 +250,7 @@ def _build_archive_doctor(root: Path, config: object) -> dict[str, Any]:
 
     hook_today_path = snapshot_path_for(root)
     raw_today_path = raw_event_path_for(root)
+    snapshot_dir = compression_snapshot_dir(root)
     return {
         "retention": {
             "memory_hook_retention_days": int(getattr(config, "memory_hook_retention_days", 7)),
@@ -250,6 +260,8 @@ def _build_archive_doctor(root: Path, config: object) -> dict[str, Any]:
         },
         "hook": _archive_dir_payload(hook_today_path.parent, hook_today_path),
         "raw": _archive_dir_payload(raw_today_path.parent, raw_today_path),
+        "snapshots": _snapshot_dir_payload(snapshot_dir),
+        "consistency_warnings": _archive_consistency_warnings(hook_today_path.parent, snapshot_dir),
     }
 
 
@@ -301,6 +313,53 @@ def _archive_file_payload(path: Path) -> dict[str, Any]:
         "size_bytes": stat.st_size,
         "modified_at": stat.st_mtime,
     }
+
+
+def _snapshot_dir_payload(directory: Path) -> dict[str, Any]:
+    """LLM: inspect authoritative compression snapshot JSON files for doctor output.
+
+    新手说明:
+    这层是压缩真正依赖的权威快照目录，doctor 需要确认这些 JSON 至少都能被解析。
+    """
+
+    files = sorted(
+        [path for path in directory.glob("*.json") if path.is_file()] if directory.exists() else [],
+        key=lambda path: (path.stat().st_mtime, path.name),
+        reverse=True,
+    )
+    invalid_json_files: list[str] = []
+    for path in files:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            invalid_json_files.append(str(path))
+            continue
+        if not isinstance(payload, dict):
+            invalid_json_files.append(str(path))
+    return {
+        "dir": str(directory),
+        "exists": directory.exists(),
+        "file_count": len(files),
+        "invalid_json_files": invalid_json_files,
+        "recent_files": [_archive_file_payload(path) for path in files[:RECENT_ARCHIVE_FILE_LIMIT]],
+    }
+
+
+def _archive_consistency_warnings(hook_dir: Path, snapshot_dir: Path) -> list[str]:
+    """LLM: report shallow consistency problems between hook and authoritative snapshot layers.
+
+    新手说明:
+    第一批先检查“两层是否一起在动”，防止只写了一边还以为压缩链是完整的。
+    """
+
+    warnings: list[str] = []
+    hook_exists = hook_dir.exists() and any(hook_dir.glob("*.jsonl"))
+    snapshot_exists = snapshot_dir.exists() and any(snapshot_dir.glob("*.json"))
+    if hook_exists and not snapshot_exists:
+        warnings.append("hook layer has records but memory_archive/snapshots is empty")
+    if snapshot_exists and not hook_exists:
+        warnings.append("snapshot JSON files exist but hook JSONL layer is empty")
+    return warnings
 
 
 def _memory_config_payload(config: object) -> dict[str, Any]:
@@ -398,6 +457,8 @@ def _route_payload(route: MemoryRoute) -> dict[str, Any]:
         "aliases": route.aliases,
         "when_to_read": route.when_to_read,
         "authority_path": route.authority_path,
+        "source_file": route.source_file,
+        "inject_mode": route.inject_mode,
         "scope": route.scope,
         "priority": route.priority,
         "stale_check": route.stale_check,
@@ -422,7 +483,7 @@ def _match_payload(match: MemoryRouteMatch) -> dict[str, Any]:
     return {
         "route_id": match.route.route_id,
         "topic": match.route.topic,
-        "authority_path": match.route.authority_path,
+        "authority_path": match.route.authority_file(),
         "scope": match.route.scope,
         "priority": match.route.priority,
         "score": match.score,

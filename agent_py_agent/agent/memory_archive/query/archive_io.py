@@ -143,6 +143,7 @@ def _normalize_archive_record(layer: str, path: Path, line_no: int, payload: dic
         "tool_name": str(payload.get("tool_name", "") or ""),
         "tool_success": payload.get("tool_success"),
         "source": str(payload.get("source") or derived.get("source") or ""),
+        "archive_level": _archive_level_value(payload.get("archive_level", 3)),
         "created_at": created_at,
         "created_at_sort": _created_at_sort(created_at, fallback=path.stat().st_mtime),
         "content_preview": _archive_preview(payload),
@@ -154,6 +155,19 @@ def _normalize_archive_record(layer: str, path: Path, line_no: int, payload: dic
         "line_no": line_no,
         "payload": payload,
     }
+
+
+def _archive_level_value(value: Any) -> int:
+    """LLM: keep archive level stable even when the stored value is numeric zero.
+
+    新手说明:
+    `0` 是合法 archive level，不能被 Python 的 `or 3` 误判成空值。
+    """
+
+    try:
+        return int(3 if value is None else value)
+    except (TypeError, ValueError):
+        return 3
 
 
 def _gateway_terminal_request_path(request_path: str) -> str:

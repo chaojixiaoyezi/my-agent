@@ -24,6 +24,7 @@ def collect_archive_records(
     layer: str,
     date_key: str | None,
     limit: int,
+    level: int | None = None,
 ) -> list[dict[str, Any]]:
     """LLM: load and normalize archive JSONL records from selected layers.
 
@@ -42,6 +43,8 @@ def collect_archive_records(
     records: list[dict[str, Any]] = []
     for current_layer, path in _archive_files(root, layer=layer, date_key=date_key):
         records.extend(_read_archive_file(current_layer, path))
+    if level is not None:
+        records = [record for record in records if int(record.get("archive_level", -1)) == int(level)]
     records.sort(key=lambda item: (item["created_at_sort"], item["file_path"], item["line_no"]), reverse=True)
     return records[:limit] if limit > 0 else records
 
@@ -86,6 +89,7 @@ def filter_archive_records(
     filters: dict[str, str],
     since: str | None,
     until: str | None,
+    level: int | None = None,
 ) -> list[dict[str, Any]]:
     """LLM: apply keyword, exact-field, and time-window filters to normalized records.
 
@@ -109,6 +113,8 @@ def filter_archive_records(
     matches: list[dict[str, Any]] = []
     for record in records:
         if any(str(record.get(field, "")) != value for field, value in filters.items()):
+            continue
+        if level is not None and int(record.get("archive_level", -1)) != int(level):
             continue
         created_at = float(record.get("created_at_sort", 0.0) or 0.0)
         if since_ts is not None and created_at < since_ts:
@@ -243,9 +249,33 @@ def collect_task_payloads(agent, task_ids: list[str], *, limit: int) -> list[dic
                     task.test_checklist_file,
                     task.output_json,
                 ],
+                "authority_validation": _validate_task_fact_sources(
+                    [
+                        task.status_file,
+                        task.work_log_file,
+                        task.handoff_file,
+                        task.acceptance_file,
+                        task.test_checklist_file,
+                        task.output_json,
+                    ]
+                ),
             }
         )
     return payloads
+
+
+def _validate_task_fact_sources(paths: list[str]) -> dict[str, Any]:
+    """LLM: verify whether task-directory authority files still exist for resume validation.
+
+    新手说明:
+    恢复流程不能只看摘要，所以这里顺手校验权威文件路径，防止 snapshot 指向已经失效的 task 现场。
+    """
+
+    missing = [path for path in paths if path and not Path(path).exists()]
+    return {
+        "ok": not missing,
+        "missing_paths": missing,
+    }
 
 
 def collect_gateway_payloads(local_hits: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
@@ -368,6 +398,15 @@ def build_resume_guidance(
         "先读取 task_fact_sources 里的 STATUS/WORK_LOG/HANDOFF/TESTS，再判断任务是否能继续。",
         "把 archive_matches 当恢复线索，不要把其中的历史摘要当最终事实。",
     ]
+    invalid_authority = [
+        task.get("run_id", "")
+        for task in task_payloads
+        if isinstance(task.get("authority_validation"), dict) and not task["authority_validation"].get("ok", False)
+    ]
+    if invalid_authority:
+        next_actions.append(
+            "发现部分 task 权威文件缺失，恢复前必须先修复事实源：" + ", ".join(invalid_authority[:5])
+        )
     if not task_payloads and not gateway_payloads:
         next_actions.append("如果没有任务目录，先用 memory-archive-search 缩小 request_id/run_id/session_id。")
     return {
@@ -519,6 +558,7 @@ def _normalize_archive_record(layer: str, path: Path, line_no: int, payload: dic
         "tool_name": str(payload.get("tool_name", "") or ""),
         "tool_success": payload.get("tool_success"),
         "source": str(payload.get("source") or derived.get("source") or ""),
+        "archive_level": _archive_level_value(payload.get("archive_level", 3)),
         "created_at": created_at,
         "created_at_sort": _created_at_sort(created_at, fallback=path.stat().st_mtime),
         "content_preview": _archive_preview(payload),
@@ -530,6 +570,19 @@ def _normalize_archive_record(layer: str, path: Path, line_no: int, payload: dic
         "line_no": line_no,
         "payload": payload,
     }
+
+
+def _archive_level_value(value: Any) -> int:
+    """LLM: keep archive level stable even when the stored value is numeric zero.
+
+    新手说明:
+    `0` 是合法 archive level，不能因为布尔短路被误回退到 3。
+    """
+
+    try:
+        return int(3 if value is None else value)
+    except (TypeError, ValueError):
+        return 3
 
 
 def _derived_archive_fields(payload: dict[str, Any]) -> dict[str, Any]:

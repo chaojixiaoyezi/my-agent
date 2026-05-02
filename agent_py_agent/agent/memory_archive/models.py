@@ -67,7 +67,25 @@ class CompressionSnapshot:
     token_usage: dict[str, Any] = field(default_factory=dict)
     archive_level: int = 3
     content_paths: list[str] = field(default_factory=list)
+    turn_id: str = ""
+    role: str = "system"
+    content: str = ""
+    token_estimate: int = 0
+    timestamp: str = ""
     created_at: str = field(default_factory=utc_now_iso)
+
+    def __post_init__(self) -> None:
+        """LLM: keep legacy created_at and explicit timestamp fields synchronized.
+
+        新手说明:
+        老代码主要看 `created_at`，新压缩链路更喜欢 `timestamp`。
+        这里把两个字段保持同步，避免查询层和测试层看到两套时间语义。
+        """
+
+        if not self.timestamp:
+            self.timestamp = self.created_at
+        if not self.created_at:
+            self.created_at = self.timestamp or utc_now_iso()
 
     def to_dict(self) -> dict[str, Any]:
         """LLM: serialize this snapshot into a JSON-ready mapping.
@@ -124,6 +142,7 @@ class RawMemoryEvent:
     content_hash: str = ""
     visibility: str = "private"
     source: str = ""
+    archive_level: int = 3
 
     def to_dict(self) -> dict[str, Any]:
         """LLM: serialize this raw archive event into a JSON-ready mapping.

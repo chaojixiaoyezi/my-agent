@@ -21,7 +21,7 @@ class MemoryArchiveError(RuntimeError):
 
     新手说明:
     快照和 raw event 写完必须能读回来。
-    如果写了却读不到，说明这次恢复锚点不可靠，要明确报错，不能假装“记住了”。
+    如果写了却读不到，说明这次恢复锚点不可靠，要明确报错，不能假装"记住了"。
     """
 
 
@@ -43,6 +43,29 @@ def snapshot_path_for(root: str | Path, created_at: str | int | float | None = N
     return Path(root) / "memory" / "hooks" / f"{_date_key(created_at)}.jsonl"
 
 
+def compression_snapshot_dir(root: str | Path) -> Path:
+    """LLM: return the directory that stores authoritative compression snapshot JSON files.
+
+    新手说明:
+    `memory/hooks/*.jsonl` 适合按天浏览和搜索，
+    但真正阻断压缩的权威快照需要一文件一对象，方便 readback 和恢复校验。
+    所以这里单独固定到 `memory_archive/snapshots/`。
+    """
+
+    return Path(root) / "memory_archive" / "snapshots"
+
+
+def compression_snapshot_file_for(root: str | Path, snapshot: CompressionSnapshot) -> Path:
+    """LLM: map one compression snapshot to its authoritative JSON file path.
+
+    新手说明:
+    文件名优先带时间，再带 snapshot_id，方便人按日期扫，也能保证唯一性。
+    """
+
+    safe_id = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in snapshot.snapshot_id)
+    return compression_snapshot_dir(root) / f"{_date_key(snapshot.created_at)}--{safe_id}.json"
+
+
 def raw_event_path_for(root: str | Path, created_at: str | int | float | None = None) -> Path:
     """LLM: map a raw archive event timestamp to `memory/raw/YYYY-MM-DD.jsonl`.
 
@@ -59,6 +82,67 @@ def raw_event_path_for(root: str | Path, created_at: str | int | float | None = 
     """
 
     return Path(root) / "memory" / "raw" / f"{_date_key(created_at)}.jsonl"
+
+
+def filter_snapshot_for_level(payload: dict[str, Any], level: int) -> dict[str, Any]:
+    """LLM: strip snapshot fields according to archive level before persistence.
+
+    新手说明:
+    archive level 越高，存的内容越少。
+    level 0 保留全部字段；level 3 只保留恢复必需的标识符和摘要。
+    这样不同等级的用户不会因为归档粒度不同而丢失恢复锚点，也不会浪费磁盘存没用的大字段。
+
+    参数说明:
+    `payload` 是 snapshot.to_dict() 之后的字典；`level` 是 0-3 的归档等级。
+
+    返回说明:
+    返回过滤后的新字典，不修改原始对象。
+    """
+
+    level = max(0, min(3, level))
+    if level == 0:
+        return dict(payload)
+    result = dict(payload)
+    if level >= 1:
+        for tc in result.get("tool_calls", []):
+            if isinstance(tc, dict) and "parameters_preview" in tc:
+                tc["parameters_preview"] = ""
+    if level >= 2:
+        result["user_intents"] = result.get("user_intents", [])[:1]
+        result["assistant_actions"] = result.get("assistant_actions", [])[:1]
+        result["decisions"] = []
+        result["open_questions"] = []
+    if level >= 3:
+        result["user_intents"] = []
+        result["assistant_actions"] = []
+        result["tool_calls"] = []
+        result["content"] = ""
+    return result
+
+
+def filter_raw_event_for_level(payload: dict[str, Any], level: int) -> dict[str, Any]:
+    """LLM: strip raw event fields according to archive level before persistence.
+
+    新手说明:
+    和 snapshot 过滤类似，raw event 也会按等级裁剪。
+    level 3 只留标识和动作类型，不存内容预览和正文路径，省空间也减少敏感数据暴露。
+
+    参数说明:
+    `payload` 是 raw_event.to_dict() 之后的字典；`level` 是 0-3 的归档等级。
+
+    返回说明:
+    返回过滤后的新字典，不修改原始对象。
+    """
+
+    level = max(0, min(3, level))
+    if level == 0:
+        return dict(payload)
+    result = dict(payload)
+    if level >= 2:
+        result["content_path"] = ""
+    if level >= 3:
+        result["content_path"] = ""
+    return result
 
 
 def append_snapshot(root: str | Path, snapshot: CompressionSnapshot) -> Path:
@@ -85,6 +169,23 @@ def append_snapshot(root: str | Path, snapshot: CompressionSnapshot) -> Path:
     return path
 
 
+def write_compression_snapshot_file(root: str | Path, snapshot: CompressionSnapshot) -> Path:
+    """LLM: write one authoritative compression snapshot JSON file and verify readback.
+
+    新手说明:
+    这份 JSON 文件是压缩流程真正依赖的恢复锚点。
+    它保留完整字段，不过滤 archive level，因为恢复时需要所有信息。
+    如果写完读不回来，调用方必须把这次压缩当失败处理。
+    """
+
+    path = compression_snapshot_file_for(root, snapshot)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = snapshot.to_dict()
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    _verify_json_file_payload(path, expected=payload)
+    return path
+
+
 def append_raw_event(root: str | Path, event: RawMemoryEvent) -> Path:
     """LLM: append one raw memory event to the daily cold archive JSONL.
 
@@ -103,7 +204,7 @@ def append_raw_event(root: str | Path, event: RawMemoryEvent) -> Path:
     """
 
     path = raw_event_path_for(root, event.created_at)
-    payload = event.to_dict()
+    payload = filter_raw_event_for_level(event.to_dict(), event.archive_level)
     append_jsonl(path, payload, sort_keys=True)
     _verify_record_exists(path, key="event_id", value=event.event_id, expected=payload)
     return path
@@ -119,7 +220,7 @@ def enforce_retention(root: str | Path, retention_days: Any, today: date | str |
 
     参数说明:
     `root` 是工作区根目录；`retention_days` 是要保留的天数；
-    `today` 是测试或手工复现时指定的“今天”，真实运行通常不传。
+    `today` 是测试或手工复现时指定的"今天"，真实运行通常不传。
 
     返回说明:
     返回被删除的 hook JSONL 文件路径列表；没有删除时返回空列表。
@@ -181,11 +282,26 @@ def _verify_record_exists(path: Path, *, key: str, value: str, expected: dict[st
     raise MemoryArchiveError(f"readback failed for {key}={value} in {path}")
 
 
+def _verify_json_file_payload(path: Path, *, expected: dict[str, Any]) -> None:
+    """LLM: ensure an authoritative JSON snapshot file can be read back exactly.
+
+    新手说明:
+    JSON 文件不像 JSONL 那样要按行找记录，但同样要确认"写进去的"和"读出来的"完全一致。
+    """
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MemoryArchiveError(f"readback failed for snapshot file {path}: {exc}") from exc
+    if _normalized_json(payload) != _normalized_json(expected):
+        raise MemoryArchiveError(f"readback payload mismatch for snapshot file {path}")
+
+
 def _normalized_json(payload: dict[str, Any]) -> str:
     """LLM: serialize JSON payloads into a canonical string for equality checks.
 
     新手说明:
-    普通字典的字段顺序可能不同。这里把字段排序并去掉多余空格，让“内容相同”能稳定比较。
+    普通字典的字段顺序可能不同。这里把字段排序并去掉多余空格，让"内容相同"能稳定比较。
 
     参数说明:
     `payload` 是要比较的 JSON 字典。
@@ -293,7 +409,7 @@ def _coerce_today(value: date | str | None) -> date | None:
     """LLM: normalize an optional test override for today's date.
 
     新手说明:
-    留存测试需要固定“今天”是哪一天。真实运行不传这个值时，会使用系统日期。
+    留存测试需要固定"今天"是哪一天。真实运行不传这个值时，会使用系统日期。
 
     参数说明:
     `value` 可以是 `date`、`datetime`、ISO 日期字符串或空值。

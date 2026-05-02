@@ -39,11 +39,23 @@ class MemoryRoute:
     aliases: list[str] = field(default_factory=list)
     when_to_read: str = ""
     authority_path: str = ""
+    inject_mode: str = "on_hit"
     scope: str = "global"
     priority: int = 0
     stale_check: str = ""
     last_verified_at: str = ""
+    source_file: str = ""
     source_path: str = ""
+
+    def authority_file(self) -> str:
+        """LLM contract: return the effective authority/rule file for this route.
+
+        新手说明:
+        新字段叫 `source_file`，旧索引里还是 `authority_path`。
+        这里统一兜底，保证加载器、matcher 和 doctor 不用到处写兼容逻辑。
+        """
+
+        return (self.source_file or self.authority_path).strip()
 
     def trigger_terms(self) -> list[str]:
         """LLM contract: returns normalized trigger terms in priority order for matching.

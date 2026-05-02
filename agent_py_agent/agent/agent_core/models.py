@@ -30,8 +30,13 @@ class AgentRunResult:
     recovery_snapshot_path: str = ""
     recovery_snapshot_error: str = ""
     recovery_snapshot_token_estimate: int = 0
+    compression_snapshot_id: str = ""
+    compression_snapshot_path: str = ""
+    compression_applied: bool = False
     memory_resume_context_injected: bool = False
     memory_resume_context_query: str = ""
     memory_resume_context_matches: int = 0
     memory_resume_context_token_estimate: int = 0
     memory_resume_context_error: str = ""
+    turn_token_estimate: int = 0
+    cumulative_token_estimate: int = 0

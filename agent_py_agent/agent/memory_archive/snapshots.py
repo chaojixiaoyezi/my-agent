@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: lightweight recovery snapshot builder for run/gateway/subagent completion points.
 
 新手说明:
-这个文件专门负责写“恢复锚点”。
+这个文件专门负责写"恢复锚点"。
 它不保存大段工具输出，只保存用户意图、助手动作、工具摘要、任务/请求 ID、恢复路径和 token 估算。
 """
 
@@ -11,10 +11,10 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, Protocol
 
 from .models import CompressionSnapshot, utc_now_iso
-from .storage import append_snapshot
+from .storage import append_snapshot, write_compression_snapshot_file
 from .tokens import estimate_tokens
 
 
@@ -24,6 +24,101 @@ SNAPSHOT_PREVIEW_LIMITS = {
     2: 512,
     3: 160,
 }
+
+
+class CompressionHook(Protocol):
+    """LLM: protocol for external systems that need to run before compression.
+
+    新手说明:
+    任何需要在压缩前执行的逻辑（比如保存外部状态、通知监控、写审计日志）
+    都可以实现这个接口并注册进来。hook 失败会阻断压缩。
+    """
+
+    def __call__(self, *, session_id: str, turn_id: str, archive_level: int) -> None:
+        """LLM: called before compression proceeds. Raise to block compression."""
+        ...
+
+
+_compression_hooks: list[CompressionHook] = []
+
+
+def register_compression_hook(hook: CompressionHook) -> None:
+    """LLM: register a callback that runs before every compression.
+
+    新手说明:
+    外部模块调用这个函数注册自己的 hook。
+    hook 会在每次压缩前按注册顺序依次执行，任何一个抛异常都会阻断压缩。
+
+    参数说明:
+    `hook` 是实现了 CompressionHook 协议的可调用对象。
+    """
+
+    _compression_hooks.append(hook)
+
+
+def clear_compression_hooks() -> None:
+    """LLM: remove all registered compression hooks.
+
+    新手说明:
+    测试时用来清理 hook 注册表，避免测试之间互相污染。
+    """
+
+    _compression_hooks.clear()
+
+
+def on_before_compression(
+    root: str | Path,
+    *,
+    session_id: str,
+    turn_id: str,
+    role: str,
+    content: str,
+    tool_calls: Iterable[Mapping[str, Any]] | None = None,
+    archive_level: int = 3,
+    request_id: str = "",
+    run_id: str = "",
+    task_id: str = "",
+    source: str = "compression",
+    backend: str = "",
+    content_paths: Iterable[str] | None = None,
+    task_refs: Iterable[str] | None = None,
+    next_actions: Iterable[str] | None = None,
+    created_at: str | None = None,
+) -> CompressionHookResult:
+    """LLM: the mandatory pre-compression hook entry point.
+
+    新手说明:
+    压缩前必须调用这个函数，不能直接调 write_compression_snapshot。
+    它会先执行所有注册的外部 hook，再写权威快照。
+    任何一步失败都会抛异常，让上层阻断压缩流程。
+
+    参数说明:
+    参数和 write_compression_snapshot 完全一致，透传即可。
+
+    返回说明:
+    返回 CompressionHookResult；失败时直接抛出，不返回。
+    """
+
+    for hook in _compression_hooks:
+        hook(session_id=session_id, turn_id=turn_id, archive_level=archive_level)
+    return write_compression_snapshot(
+        root,
+        session_id=session_id,
+        turn_id=turn_id,
+        role=role,
+        content=content,
+        tool_calls=tool_calls,
+        archive_level=archive_level,
+        request_id=request_id,
+        run_id=run_id,
+        task_id=task_id,
+        source=source,
+        backend=backend,
+        content_paths=content_paths,
+        task_refs=task_refs,
+        next_actions=next_actions,
+        created_at=created_at,
+    )
 
 
 @dataclass(frozen=True)
@@ -45,6 +140,22 @@ class RecoverySnapshotResult:
     path: str = ""
     token_estimate: int = 0
     error: str = ""
+
+
+@dataclass(frozen=True)
+class CompressionHookResult:
+    """LLM: result of the pre-compression hook that must succeed before compression proceeds.
+
+    新手说明:
+    和恢复快照不同，这个结果不是 best-effort。
+    调用方只有在拿到它时，才能继续做真正的上下文压缩。
+    """
+
+    snapshot_id: str
+    hook_path: str
+    snapshot_file_path: str
+    token_estimate: int
+    archive_level: int
 
 
 def write_recovery_snapshot(
@@ -169,6 +280,111 @@ def write_recovery_snapshot(
         snapshot_id=snapshot_id,
         path=str(path),
         token_estimate=token_estimate,
+    )
+
+
+def write_compression_snapshot(
+    root: str | Path,
+    *,
+    session_id: str,
+    turn_id: str,
+    role: str,
+    content: str,
+    tool_calls: Iterable[Mapping[str, Any]] | None = None,
+    archive_level: int = 3,
+    request_id: str = "",
+    run_id: str = "",
+    task_id: str = "",
+    source: str = "compression",
+    backend: str = "",
+    content_paths: Iterable[str] | None = None,
+    task_refs: Iterable[str] | None = None,
+    next_actions: Iterable[str] | None = None,
+    created_at: str | None = None,
+) -> CompressionHookResult:
+    """LLM: write the authoritative pre-compression snapshot and the searchable hook JSONL entry.
+
+    新手说明:
+    真实压缩前必须先调用这个函数。
+    它会同时写两份东西：
+    1. `memory_archive/snapshots/*.json` 权威快照
+    2. `memory/hooks/*.jsonl` 可搜索 hook 记录
+    任意一步失败都直接抛错，让上层阻断压缩。
+    """
+
+    timestamp = created_at or utc_now_iso()
+    level = _normalize_archive_level(archive_level)
+    normalized_tools = [_tool_snapshot(item, level) for item in tool_calls or []]
+    token_estimate = estimate_tokens(
+        {
+            "turn_id": turn_id,
+            "role": role,
+            "content": content,
+            "tool_calls": normalized_tools,
+            "request_id": request_id,
+            "run_id": run_id,
+            "task_id": task_id,
+        }
+    )
+    snapshot_id = _snapshot_id(
+        {
+            "created_at": timestamp,
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "role": role,
+            "source": source,
+            "request_id": request_id,
+            "run_id": run_id,
+            "task_id": task_id,
+            "content_hash": _content_hash(content),
+        }
+    )
+    snapshot = CompressionSnapshot(
+        snapshot_id=snapshot_id,
+        session_id=str(session_id),
+        compression_id=f"compression:{request_id or run_id or task_id or turn_id or snapshot_id[-8:]}",
+        turn_range={
+            "kind": "compression_snapshot",
+            "turn_id": turn_id,
+            "source": source,
+            "request_id": request_id,
+            "run_id": run_id,
+            "task_id": task_id,
+        },
+        participants=[role] if role else ["system"],
+        user_intents=[_preview(content, level)] if role == "user" and content else [],
+        assistant_actions=[_preview(content, level)] if role == "assistant" and content else [],
+        tool_calls=normalized_tools,
+        dispatch_events=[
+            {
+                "source": source,
+                "request_id": request_id,
+                "run_id": run_id,
+                "task_id": task_id,
+                "backend": backend,
+                "status": "snapshot_written",
+            }
+        ],
+        task_refs=_dedupe_texts([run_id, task_id, *(task_refs or [])]),
+        next_actions=_dedupe_texts(next_actions or []),
+        token_usage={"estimate": token_estimate, "archive_level": level, "backend": backend},
+        archive_level=level,
+        content_paths=_dedupe_texts(content_paths or []),
+        turn_id=str(turn_id),
+        role=str(role or "system"),
+        content=_preview(content, level),
+        token_estimate=token_estimate,
+        timestamp=timestamp,
+        created_at=timestamp,
+    )
+    snapshot_file = write_compression_snapshot_file(root, snapshot)
+    hook_path = append_snapshot(root, snapshot)
+    return CompressionHookResult(
+        snapshot_id=snapshot_id,
+        hook_path=str(hook_path),
+        snapshot_file_path=str(snapshot_file),
+        token_estimate=token_estimate,
+        archive_level=level,
     )
 
 

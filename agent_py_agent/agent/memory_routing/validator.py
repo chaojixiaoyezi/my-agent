@@ -10,6 +10,8 @@ from pathlib import Path
 
 from .models import MemoryRoute
 
+VALID_INJECT_MODES = {"always", "on_hit", "never"}
+
 
 def validate_routes(routes: list[MemoryRoute], root: str | Path) -> list[str]:
     """LLM contract: returns human-readable findings for invalid route indexes.
@@ -20,6 +22,7 @@ def validate_routes(routes: list[MemoryRoute], root: str | Path) -> list[str]:
 
     findings: list[str] = []
     seen_route_ids: dict[str, int] = {}
+    keyword_owners: dict[str, str] = {}
     root_path = Path(root)
     try:
         resolved_root = root_path.resolve()
@@ -42,8 +45,24 @@ def validate_routes(routes: list[MemoryRoute], root: str | Path) -> list[str]:
             findings.append(f"route '{label}': topic is empty")
         if not route.trigger_keywords and not route.aliases:
             findings.append(f"route '{label}': trigger_keywords and aliases are both empty")
-        if not route.authority_path.strip():
-            findings.append(f"route '{label}': authority_path is empty")
+        if route.inject_mode not in VALID_INJECT_MODES:
+            findings.append(f"route '{label}': inject_mode must be one of {sorted(VALID_INJECT_MODES)}")
+        seen_terms: set[str] = set()
+        for term in [*route.trigger_keywords, *route.aliases]:
+            normalized = term.strip().lower()
+            if not normalized:
+                continue
+            if normalized in seen_terms:
+                findings.append(f"route '{label}': duplicate keyword '{term}'")
+                continue
+            seen_terms.add(normalized)
+            owner = keyword_owners.get(normalized)
+            if owner and owner != label:
+                findings.append(f"route keyword conflict '{term}': routes '{owner}' and '{label}'")
+            else:
+                keyword_owners[normalized] = label
+        if not route.authority_file():
+            findings.append(f"route '{label}': authority_path/source_file is empty")
             continue
         _validate_authority_path(route, resolved_root, findings)
     return findings
@@ -60,19 +79,19 @@ def _validate_authority_path(
     也避免未来自动读取规则时读到项目外面的奇怪文件。
     """
 
-    raw_path = route.authority_path.strip()
+    raw_path = route.authority_file()
     route_label = route.route_id or "<empty route_id>"
     candidate = Path(raw_path)
     if candidate.is_absolute():
-        findings.append(f"route '{route_label}': authority_path must be relative, got {raw_path}")
+        findings.append(f"route '{route_label}': source_file must be relative, got {raw_path}")
         return
     try:
         resolved_candidate = (resolved_root / candidate).resolve()
     except OSError as exc:
-        findings.append(f"route '{route_label}': authority_path cannot be resolved ({exc})")
+        findings.append(f"route '{route_label}': source_file cannot be resolved ({exc})")
         return
     if not resolved_candidate.is_relative_to(resolved_root):
-        findings.append(f"route '{route_label}': authority_path escapes root: {raw_path}")
+        findings.append(f"route '{route_label}': source_file escapes root: {raw_path}")
         return
     if not resolved_candidate.exists():
         findings.append(f"route '{route_label}': authority_path does not exist: {raw_path}")

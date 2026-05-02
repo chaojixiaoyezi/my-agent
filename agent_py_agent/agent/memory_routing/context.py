@@ -240,13 +240,13 @@ def _read_targets_from_matches(
     targets: list[_ReadTarget] = []
     seen_paths: set[str] = set()
     for match in matches:
-        raw_path = match.route.authority_path.strip()
+        raw_path = match.route.authority_file()
         if not raw_path:
             continue
         absolute_path, normalized_path, error = _resolve_relative_path(
             root,
             raw_path,
-            label="authority_path",
+            label="source_file",
         )
         if error:
             _append_finding(findings, _authority_path_finding(match, error, raw_path))
@@ -348,7 +348,8 @@ def _match_to_dict(match: MemoryRouteMatch) -> dict[str, Any]:
     return {
         "route_id": route.route_id,
         "topic": route.topic,
-        "authority_path": route.authority_path,
+        "authority_path": route.authority_file(),
+        "inject_mode": route.inject_mode,
         "scope": route.scope,
         "priority": route.priority,
         "score": match.score,

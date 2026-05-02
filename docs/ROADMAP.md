@@ -23,45 +23,15 @@
 
 ## 设计中（未开工）
 
-### Memory 第一批痛点归档
+### Memory 第二批：恢复权威源细化与更多联合场景
 
 状态：设计中
 
-解决问题：记忆系统的层级、召回、任务状态、flush、lesson 抽象和未来 skill 沉淀之间没有稳定同步。
+解决问题：第一批闭环已经打通 archive、route、compression 和 doctor，但更多跨天、跨入口、异常恢复场景还需要继续扩展，避免只在标准 happy path 上可靠。
 
-待做：memory 最小闭环、分层和写入验证规则。
+待做：补更多 route 冲突/缺文件/损坏 snapshot 场景，扩展 gateway、subagent、local-doctor 联合恢复演练。
 
 设计台账：DESIGN_LEDGER.md "Memory 第一批痛点归档"
-
-### Memory 全量归档等级与压缩前 Hook
-
-状态：设计中
-
-解决问题：多轮上下文压缩后会遗忘，压缩前必须有 hook 保存结构化恢复快照。
-
-待做：`memory_archive_level` 配置项、compression snapshot 存储格式、脱敏策略。
-
-设计台账：DESIGN_LEDGER.md "Memory 全量归档等级与压缩前 Hook"
-
-### Memory 长期规则索引化与强制路由
-
-状态：设计中
-
-解决问题：长期规则不能一条条塞进常驻 memory，需要确定性 memory router 在命中时才注入。
-
-待做：`MemoryRoute` 数据结构、`memory-route` 最小版本、接入 chat/gateway/任务恢复。
-
-设计台账：DESIGN_LEDGER.md "Memory 长期规则索引化与强制路由"
-
-### Memory 压缩方式调研
-
-状态：设计中
-
-解决问题：直接截断太危险，纯摘要会漂移，纯 RAG 不可靠。需要组合策略。
-
-待做：compression snapshot JSON schema、摘要 prompt、token budget 估算器。
-
-设计台账：DESIGN_LEDGER.md "Memory 压缩方式调研"
 
 ### 用户真实痛点：Subagent 假完成与失控
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM contract: deterministic matcher and path resolver for memory routes.
 
 新手说明:
-这里做的是“代码先找路”。用户输入进来后，先用可解释的关键词和别名规则找候选，
+这里做的是"代码先找路"。用户输入进来后，先用可解释的关键词和别名规则找候选，
 再把候选分成必须读和可选读，减少长期规则只能靠模型自觉遵守的问题。
 """
 
@@ -24,7 +24,7 @@ def match_routes(
 
     新手说明:
     这不是向量搜索，也不是让模型判断，而是普通代码按词命中打分。
-    好处是稳定、可测试、能解释：比如“命中别名 memory index，所以建议读这个规则文件”。
+    好处是稳定、可测试、能解释：比如"命中别名 memory index，所以建议读这个规则文件"。
 
     参数说明:
     query: 用户输入或任务描述。
@@ -36,12 +36,27 @@ def match_routes(
     """
 
     normalized_query = _normalize(query)
-    if not normalized_query:
-        return []
 
     hits: list[MemoryRouteMatch] = []
     for route in routes:
+        if route.inject_mode == "never":
+            continue
+        if not normalized_query:
+            if route.inject_mode == "always":
+                hits.append(
+                    MemoryRouteMatch(
+                        route=route,
+                        score=1.0 + min(max(route.priority, 0), 100) / 100,
+                        reasons=["默认注入规则"],
+                        matched_terms=[],
+                    )
+                )
+            continue
         score, reasons, terms = score_route(normalized_query, route)
+        if score <= 0 and route.inject_mode == "always":
+            score = 1.0 + min(max(route.priority, 0), 100) / 100
+            reasons = ["默认注入规则"]
+            terms = []
         if score <= 0:
             continue
         hits.append(
@@ -64,7 +79,7 @@ def score_route(normalized_query: str, route: MemoryRoute) -> tuple[float, list[
     """LLM contract: scores one route against an already-normalized query string.
 
     新手说明:
-    别名比普通关键词更像“明确指路”，所以分数更高；topic 和 when_to_read
+    别名比普通关键词更像"明确指路"，所以分数更高；topic 和 when_to_read
     也会参与，但权重较低。最后返回分数、理由和命中的词，方便日志解释。
 
     参数说明:
@@ -79,25 +94,41 @@ def score_route(normalized_query: str, route: MemoryRoute) -> tuple[float, list[
     reasons: list[str] = []
     matched_terms: list[str] = []
 
+    exact_hit = False
+    fuzzy_hit = False
+
     for alias in route.aliases:
         term = _normalize(alias)
-        if term and term in normalized_query:
-            score += 8.0 + min(len(term) / 20, 1.5)
-            reasons.append(f"命中别名“{alias}”")
+        if term and term == normalized_query:
+            score += 20.0 + min(len(term) / 20, 2.0)
+            reasons.append(f"精确命中别名“{alias}”")
             matched_terms.append(alias)
+            exact_hit = True
+        elif term and term in normalized_query:
+            score += 10.0 + min(len(term) / 20, 1.5)
+            reasons.append(f"模糊命中别名“{alias}”")
+            matched_terms.append(alias)
+            fuzzy_hit = True
 
     for keyword in route.trigger_keywords:
         term = _normalize(keyword)
-        if term and term in normalized_query:
-            score += 6.0 + min(len(term) / 20, 1.0)
-            reasons.append(f"命中关键词“{keyword}”")
+        if term and term == normalized_query:
+            score += 16.0 + min(len(term) / 20, 1.5)
+            reasons.append(f"精确命中关键词“{keyword}”")
             matched_terms.append(keyword)
+            exact_hit = True
+        elif term and term in normalized_query:
+            score += 8.0 + min(len(term) / 20, 1.0)
+            reasons.append(f"模糊命中关键词“{keyword}”")
+            matched_terms.append(keyword)
+            fuzzy_hit = True
 
     topic = _normalize(route.topic)
     if topic and topic in normalized_query:
         score += 3.0
         reasons.append(f"命中主题“{route.topic}”")
         matched_terms.append(route.topic)
+        fuzzy_hit = True
 
     when_tokens = _tokens(route.when_to_read)
     query_tokens = set(_tokens(normalized_query))
@@ -109,6 +140,9 @@ def score_route(normalized_query: str, route: MemoryRoute) -> tuple[float, list[
 
     if score > 0 and route.priority:
         score += min(max(route.priority, 0), 100) / 100
+    if score > 0 and route.inject_mode == "always" and not exact_hit and not fuzzy_hit:
+        score += 0.5
+        reasons.append("默认注入补位")
 
     return score, _dedupe(reasons), _dedupe(matched_terms)
 
@@ -122,8 +156,8 @@ def resolve_required_paths(
     """LLM contract: converts route matches into required and candidate authority paths.
 
     新手说明:
-    soft 模式只说“这些文件可能相关”；strict 模式会把前几个高分文件升级成
-    “必须读”。`auto_read_limit=0` 表示本轮不自动读任何正文，只保留 matches 证据。
+    soft 模式只说"这些文件可能相关"；strict 模式会把前几个高分文件升级成
+    "必须读"。`auto_read_limit=0` 表示本轮不自动读任何正文，只保留 matches 证据。
     后续正式任务、安全边界、工具权限这类场景就可以用 strict 卡住模型乱猜。
 
     参数说明:
@@ -140,14 +174,14 @@ def resolve_required_paths(
 
     if mode not in VALID_MODES:
         raise ValueError(f"memory route mode must be one of {sorted(VALID_MODES)}, got {mode!r}")
-    ordered = [match for match in matches if match.route.authority_path.strip()]
+    ordered = [match for match in matches if match.route.authority_file()]
     if auto_read_limit <= 0:
         selected = []
     else:
         selected = ordered[:auto_read_limit]
 
-    selected_paths = _unique_paths([match.route.authority_path for match in selected])
-    all_paths = _unique_paths([match.route.authority_path for match in ordered])
+    selected_paths = _unique_paths([match.route.authority_file() for match in selected])
+    all_paths = _unique_paths([match.route.authority_file() for match in ordered])
     if mode == "strict":
         return MemoryPathResolution(
             mode=mode,
@@ -190,7 +224,7 @@ def build_read_receipt(
 
     return MemoryReadReceipt(
         route_id=match.route.route_id,
-        authority_path=match.route.authority_path,
+        authority_path=match.route.authority_file(),
         status=status,
         reasons=match.reasons,
         content_hash=content_hash,
@@ -220,7 +254,7 @@ def _tokens(text: str) -> list[str]:
 
     新手说明:
     这个 tokenizer 很轻量，只服务普通规则匹配。中文长句会额外切 2-4 字片段，
-    让“任务恢复”这类短词也能从长句里被命中。
+    让"任务恢复"这类短词也能从长句里被命中。
 
     参数说明:
     text: 原始或已归一化文本。
@@ -262,19 +296,21 @@ def _dedupe(items: list[str]) -> list[str]:
 
     新手说明:
     理由、命中词和路径都需要稳定顺序，这样测试输出和调试日志不会来回跳。
+    和 models.py 的 _dedupe 保持一致：先 strip 再去重。
 
     参数说明:
     items: 原始字符串列表。
 
     返回说明:
-    返回去掉空字符串和重复项后的列表。
+    返回去掉空白和重复项后的列表。
     """
 
     seen: set[str] = set()
     result: list[str] = []
     for item in items:
-        if not item or item in seen:
+        cleaned = item.strip() if isinstance(item, str) else str(item)
+        if not cleaned or cleaned in seen:
             continue
-        seen.add(item)
-        result.append(item)
+        seen.add(cleaned)
+        result.append(cleaned)
     return result

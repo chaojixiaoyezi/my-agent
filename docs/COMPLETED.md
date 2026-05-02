@@ -8,6 +8,24 @@
 
 ## 基础设施
 
+### 记忆系统第一批闭环
+
+解决问题：记忆层级、召回、任务状态、压缩、长期规则和恢复校验之前只是骨架，压缩可能丢信息，规则可能长到塞不进 prompt，恢复也缺少权威源校验。
+
+落地内容：
+- `memory_archive_level` 现在真正接到 raw archive 写入路径，`0/1/2/3` 会写出不同粒度的 message/tool 记录；`memory-archive-list --level <N>` 可以直接验证
+- 新增权威 compression snapshot JSON 落盘：`memory_archive/snapshots/*.json`，字段包含 `turn_id`、`role`、`content`、`tool_calls`、`token_estimate`、`timestamp`、`archive_level`
+- `SimpleAgent.run()` 接入 pre-compression hook：token 预算超阈值时先写 compression snapshot，再执行保守组合压缩；snapshot 失败会阻断压缩，并向 `events.jsonl` 写 `memory_compression_snapshot_failed`
+- 新增 session token 账本：`memory_archive/tokens/<session>.json`，记录每轮 input/output/tool token 和累计 token
+- `MemoryRoute` 扩展 `inject_mode`、`source_file`；matcher 支持精确命中 > 模糊命中 > 默认注入；`memory-route --validate` 能检查冲突关键词、重复关键词和死链
+- `capability_gap` 会自动查 memory route，并把相关规则路径注入到子代理 `context_manifest.required_read_paths`
+- `memory-doctor` 扩展 snapshot 目录可读性和 hook/snapshot 层级一致性检查；resume/task payload 会回到 task 目录事实源做权威文件存在性校验
+- 补齐联合回归：archive level 过滤、compression snapshot 权威文件、hook 失败阻断审计、route validate、capability gap 路由注入
+
+验证方式：
+- `python3 -m pytest -q agent_py_agent/tests/test_memory_first_loop.py agent_py_agent/tests/test_memory_archive.py agent_py_agent/tests/test_memory_archive_runtime.py agent_py_agent/tests/test_memory_cli.py agent_py_agent/tests/test_memory_archive_cli.py agent_py_agent/tests/test_memory_routing.py agent_py_agent/tests/test_memory_runtime_basics.py agent_py_agent/tests/test_memory_runtime_archive.py agent_py_agent/tests/test_memory_routing_context.py agent_py_agent/tests/test_agent/test_subagent_lifecycle.py`
+- `python3 -m pytest -q`
+
 ### 并行 Worker Pool
 
 解决问题：`subagents-dispatch --apply --execute-runners` 虽然已经能推进 runner，但默认还是串行心智，`runner_concurrency` / `runner_start_rate` / `runner_timeout_seconds` 没有真正接到 dispatch worker pool，单个 worker 卡住时还可能拖垮整轮调度。

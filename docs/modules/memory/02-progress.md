@@ -5,7 +5,13 @@
 - `memory_store/` 已承接长期记忆 JSONL 存储，根层 `memory.py` 保留兼容入口。
 - `memory_routing/` 已有 route index 加载、匹配、校验、上下文读取和 receipt 结构。
 - `memory_archive/` 已有压缩前 snapshot、raw event、每日 hook/raw JSONL、留存和 token 估算骨架。
+- compression hook 已接入 `SimpleAgent.run()`：token 超阈值时先写 `memory_archive/snapshots/*.json` 权威快照，再做保守组合压缩。
+- `memory_archive/tokens/` 已开始按 session 记录每轮 input/output/tool token 和累计 token。
 - `memory-route`、`memory-doctor`、`memory archive` 相关 CLI 和测试已存在。
+- `memory-route --validate` 已能检查重复关键词、跨 route 冲突、死链和非法 `inject_mode`。
+- `memory-archive-list --level <N>` 已能按 archive level 验证不同粒度落盘。
+- capability gap 已接通 memory route，把相关长期规则路径补进子代理 `context_manifest.required_read_paths`。
+- `memory-doctor` 已扩展 snapshot JSON 可读性和 hook/snapshot 层级一致性检查。
 - `SimpleAgent.run()` 已有 routed memory 和 raw archive 的回归测试覆盖。
 - `settings/memory.py`、`memory_store/jsonl.py`、`memory_routing/models.py`、`memory_routing/matcher.py` 已补齐更详细的 `LLM:` / `新手说明:` / 参数和返回说明。
 - `memory_archive/` 整圈、`memory_routing/loader.py`、`memory_routing/context.py`、`cli/memory_commands.py`、`cli/memory_archive_commands.py` 已补齐同等级中文教学注释、字段说明、参数说明和返回说明。
@@ -35,12 +41,17 @@
 - 真实 gateway 演练解决了“恢复测试只覆盖伪造请求，没有覆盖后台进程、request worker、response 落盘”的问题。
 - processing 路径纠偏解决了“LocalStore 记录的是处理中文件，但第二天文件已经归档到 done/failed”的恢复断链问题。
 - parent/subagent runner 演练解决了“只有手写跨天 fixture，还没证明真实 runner 写回后能被恢复入口找回”的缺口。
+- compression hook 门禁解决了“压缩前没有可靠快照也会继续执行，导致恢复锚点缺失”的问题。
+- authoritative snapshot JSON 解决了“hook JSONL 适合搜索但不适合作为严格恢复锚点”的问题。
+- capability gap 与长期规则联动解决了“子代理已经发现自己缺什么，但相关规则没有自动回流到执行上下文”的问题。
+- archive level 过滤和 session token 账本解决了“不同粒度无法直接验收、token 只能估一轮”的问题。
 
 ## 下一步
 
 - 把更多真实恢复场景写成 fixture：route 冲突、权威文件缺失、snapshot/raw 读回失败、任务目录缺失但 archive 有线索。
 - 把 memory 模块接入更多场景测试，验证 gateway、subagent、local-doctor 共同恢复时的数据一致性。
 - 扩展 `scripts/check_doc_sync.py` 后续规则时，继续保持 memory 的 `02-progress.md` 和 `04-structure.md` 同步更新。
+- 继续补损坏 snapshot、task 权威文件缺失、默认注入过多等异常场景联合测试。
 
 ## 已跑测试
 
@@ -73,6 +84,8 @@
 - 本轮 focused 组合验收：`python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py agent_py_agent/tests/test_cli_reference.py agent_py_agent/tests/test_doc_sync.py -q` -> `8 passed`。
 - 本轮同步门验收：`python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`。
 - 本轮全量回归：`python3 -m pytest -q` -> `251 passed`。
+- 本轮记忆闭环 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_memory_first_loop.py agent_py_agent/tests/test_memory_archive.py agent_py_agent/tests/test_memory_archive_runtime.py agent_py_agent/tests/test_memory_cli.py agent_py_agent/tests/test_memory_archive_cli.py agent_py_agent/tests/test_memory_routing.py agent_py_agent/tests/test_memory_runtime_basics.py agent_py_agent/tests/test_memory_runtime_archive.py agent_py_agent/tests/test_memory_routing_context.py agent_py_agent/tests/test_agent/test_subagent_lifecycle.py` -> `59 passed`。
+- 本轮记忆闭环全量回归：`python3 -m pytest -q` -> `365 passed`。
 
 ## 未跑测试
 
