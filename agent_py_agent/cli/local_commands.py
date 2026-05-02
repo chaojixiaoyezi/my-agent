@@ -20,6 +20,7 @@ from ..agent.gateway import (
 )
 from .common import format_local_time, make_agent, resume_context_override
 from .local_doctor import build_local_doctor_report, build_status_suggestions, rebuild_local_store
+from .thinking_spinner import ThinkingSpinner
 
 
 def cmd_status(args) -> int:
@@ -144,15 +145,27 @@ def cmd_run(args) -> int:
     """执行一次单轮请求。"""
 
     agent = make_agent(args)
-    result = agent.run(
-        args.prompt,
-        inject=args.inject or [],
-        prompt_files=args.prompt_file or [],
-        save=args.save,
-        source="cli_run",
-        resume_context=resume_context_override(args),
-        recovery_next_actions=["如需恢复本次单轮 run，先查看 memory-resume 和 LocalStore 记录。"],
-    )
+    spinner = ThinkingSpinner()
+    spinner.start()
+
+    def _on_run_chunk(chunk: str) -> None:
+        spinner.stop()
+        sys.stdout.write(chunk)
+        sys.stdout.flush()
+
+    try:
+        result = agent.run(
+            args.prompt,
+            inject=args.inject or [],
+            prompt_files=args.prompt_file or [],
+            save=args.save,
+            source="cli_run",
+            resume_context=resume_context_override(args),
+            recovery_next_actions=["如需恢复本次单轮 run，先查看 memory-resume 和 LocalStore 记录。"],
+            on_chunk=_on_run_chunk,
+        )
+    finally:
+        spinner.stop()
     if args.show_prompt:
         print("===== FINAL PROMPT =====")
         print(result.prompt)

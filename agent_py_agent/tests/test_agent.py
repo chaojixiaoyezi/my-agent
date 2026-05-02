@@ -27,7 +27,7 @@ class StructuredSubagentBackend(BaseBackend):
 
     name = "structured_subagent_backend"
 
-    def generate(self, prompt: str) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         assert "[SUBAGENT_RESULT]" in prompt
         return ModelResponse(
             text=(
@@ -69,7 +69,7 @@ class AcceptedSubagentBackend(BaseBackend):
 
     name = "accepted_subagent_backend"
 
-    def generate(self, prompt: str) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         assert "[SUBAGENT_RESULT]" in prompt
         return ModelResponse(
             text=(
@@ -107,7 +107,7 @@ class BoundaryWriteSubagentBackend(BaseBackend):
     def __init__(self):
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.prompts.append(prompt)
         if len(self.prompts) == 1:
             assert "allowed_write_roots" in prompt
@@ -155,7 +155,7 @@ class FlakyThenAcceptedSubagentBackend(BaseBackend):
     def __init__(self):
         self.calls = 0
 
-    def generate(self, prompt: str) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
             raise RuntimeError("temporary runner backend outage")
@@ -197,7 +197,7 @@ class RepairingSubagentBackend(BaseBackend):
     def __init__(self):
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.prompts.append(prompt)
         if len(self.prompts) == 1:
             assert "[SUBAGENT_RESULT]" in prompt
@@ -242,7 +242,7 @@ class ParentPlannerBackend(BaseBackend):
         self.decision = decision
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.prompts.append(prompt)
         assert "[PARENT_PLANNER_RESULT]" in prompt
         return ModelResponse(

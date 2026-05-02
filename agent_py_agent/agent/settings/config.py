@@ -108,6 +108,7 @@ class AgentConfig:
     tool_search_max_matches: int = 50
     tool_web_max_chars: int = 12000
     tool_http_timeout: int = 30
+    stream_enabled: bool = True
     tool_catalog_limit: int = 20
     tool_retrieval_limit: int = 3
     tool_vector_search_enabled: bool = False
@@ -370,6 +371,12 @@ def normalize_agent_config(data: dict[str, object]) -> tuple[dict[str, object], 
         defaults.tool_http_timeout, min_val=1,
     )
     _apply("tool_http_timeout", v, w)
+
+    # stream_enabled
+    v, w = _coerce_bool_config(
+        "stream_enabled", out.get("stream_enabled"), defaults.stream_enabled,
+    )
+    _apply("stream_enabled", v, w)
 
     # memory_top_k
     v, w = _coerce_int_config(

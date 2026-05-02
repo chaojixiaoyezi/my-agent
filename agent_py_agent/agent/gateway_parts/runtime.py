@@ -30,7 +30,7 @@ from .io import (
     write_json_file_atomic,
 )
 from .logging import _index_gateway_payload, _report_gateway_side_effect_error, log_gateway_payload
-from .paths import GatewayPaths, gateway_paths
+from .paths import GatewayPaths, gateway_chunk_path, gateway_paths
 from .process_control import is_pid_alive
 from .recovery import _archive_gateway_request, _gateway_request_attempts
 
@@ -455,6 +455,18 @@ def _handle_gateway_request(
             request_id=request_id,
             worker_id=lease_worker,
         )
+    # LLM: chunk file for streaming output — daemon writes chunks, CLI polls and displays.
+    _paths = gateway_paths(agent)
+    chunk_path = gateway_chunk_path(_paths, request_id)
+
+    def _on_gateway_chunk(chunk: str) -> None:
+        try:
+            line = json.dumps({"t": time.time(), "text": chunk}, ensure_ascii=False)
+            with open(chunk_path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+
     try:
         if kind != "ask":
             response["error_code"] = "UNSUPPORTED_KIND"
@@ -474,6 +486,7 @@ def _handle_gateway_request(
             resume_context=request.get("resume_context") if "resume_context" in request else None,
             recovery_next_actions=["如需恢复本次 gateway 请求，先读取 gateway response 和 LocalStore gateway_request 记录。"],
             recovery_content_paths=[str(request_path), str(response_path)],
+            on_chunk=_on_gateway_chunk,
         )
         response.update(
             {
@@ -510,6 +523,10 @@ def _handle_gateway_request(
             lease_stop.set()
         if lease_thread is not None:
             lease_thread.join(timeout=2)
+        try:
+            chunk_path.unlink(missing_ok=True)
+        except OSError:
+            pass
     ended_at = time.time()
     final_request = read_json_file(request_path)
     if final_request:

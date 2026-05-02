@@ -7,15 +7,17 @@ chat 模式要一边接收用户输入，一边让模型在后台跑。
 这个文件只处理交互体验、队列和内置斜杠命令，真正模型调用仍然走 SimpleAgent 或 gateway。
 """
 
+import json
 import queue
 import sys
 import threading
 import time
-from contextlib import nullcontext
 
 from ..agent.gateway import (
+    gateway_chunk_path,
     gateway_paths,
     gateway_running,
+    read_json_file,
     render_gateway_status,
     submit_gateway_ask,
     wait_for_gateway_response,
@@ -23,13 +25,24 @@ from ..agent.gateway import (
 )
 from .common import CHAT_PROMPT, FALLBACK_CHAT_PROMPT, make_agent, resume_context_override
 from .models import ChatJob
+from .thinking_spinner import ThinkingSpinner
 
 try:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.patch_stdout import patch_stdout
-except ImportError:  # pragma: no cover - 让项目在无额外依赖时仍能跑
+except ImportError:  # pragma: no cover
     PromptSession = None
-    patch_stdout = None
+
+# LLM: maximum conversation turns kept in the chat history buffer.
+_MAX_HISTORY_TURNS = 8
+
+# LLM: approximate context window for progress bar display.
+_CONTEXT_WINDOW = 200_000
+
+
+def _progress_bar(ratio: float, width: int = 10) -> str:
+    filled = int(ratio * width)
+    return "█" * filled + "░" * (width - filled)
 
 
 def cmd_chat(args) -> int:
@@ -43,14 +56,11 @@ def cmd_chat(args) -> int:
         if not alive:
             print("gateway 未在运行。请先执行: my-agent gateway start", file=sys.stderr)
             return 2
-    print(
-        f"{agent.config.agent_name} 交互循环已启动。"
-        "输入 /help 查看命令，输入 /exit 或 /logout 退出，也可以直接按 Ctrl+C。"
-    )
-    if use_gateway:
-        print("当前模式: gateway 客户端。普通消息会投递给后台 gateway 处理。")
+
     runtime_inject: list[str] = args.inject or []
     prompt_files: list[str] = args.prompt_file or []
+    conversation_history: list[tuple[str, str]] = []
+    history_lock = threading.Lock()
     jobs: queue.Queue[ChatJob] = queue.Queue()
     state_lock = threading.Lock()
     is_running = False
@@ -58,37 +68,429 @@ def cmd_chat(args) -> int:
     shutting_down = False
     running_prompt = ""
     running_started_at = 0.0
-    prompt_session = (
-        PromptSession()
-        if PromptSession is not None and sys.stdin.isatty() and sys.stdout.isatty()
-        else None
+    last_token_estimate = 0
+
+    def _build_history_context() -> str:
+        with history_lock:
+            if not conversation_history:
+                return ""
+            recent = conversation_history[-_MAX_HISTORY_TURNS:]
+        lines = ["## 最近对话上下文（供参考，按时间倒序）"]
+        for user_msg, agent_msg in reversed(recent):
+            lines.append(f"用户: {user_msg}")
+            lines.append(f"助手: {agent_msg[:500]}")
+        return "\n".join(lines)
+
+    # ── prompt_toolkit mode ──────────────────────────────────────────────
+
+    if PromptSession is not None and sys.stdin.isatty() and sys.stdout.isatty():
+        return _run_tui(
+            agent=agent,
+            args=args,
+            use_gateway=use_gateway,
+            paths=paths,
+            runtime_inject=runtime_inject,
+            prompt_files=prompt_files,
+            conversation_history=conversation_history,
+            history_lock=history_lock,
+            jobs=jobs,
+            state_lock=state_lock,
+            is_running_ref=[is_running],
+            pending_jobs_ref=[pending_jobs],
+            shutting_down_ref=[shutting_down],
+            running_prompt_ref=[running_prompt],
+            running_started_at_ref=[running_started_at],
+            last_token_estimate_ref=[last_token_estimate],
+            build_history_context=_build_history_context,
+        )
+
+    # ── fallback mode (no prompt_toolkit) ────────────────────────────────
+
+    return _run_fallback(
+        agent=agent,
+        args=args,
+        use_gateway=use_gateway,
+        paths=paths,
+        runtime_inject=runtime_inject,
+        prompt_files=prompt_files,
+        conversation_history=conversation_history,
+        history_lock=history_lock,
+        jobs=jobs,
+        state_lock=state_lock,
+        build_history_context=_build_history_context,
     )
-    fallback_interactive = prompt_session is None and sys.stdin.isatty() and sys.stdout.isatty()
+
+
+# ============================================================================
+# prompt_toolkit mode — PromptSession + print() for terminal-native scrolling
+# ============================================================================
+
+
+def _run_tui(
+    *,
+    agent,
+    args,
+    use_gateway,
+    paths,
+    runtime_inject,
+    prompt_files,
+    conversation_history,
+    history_lock,
+    jobs,
+    state_lock,
+    is_running_ref,
+    pending_jobs_ref,
+    shutting_down_ref,
+    running_prompt_ref,
+    running_started_at_ref,
+    last_token_estimate_ref,
+    build_history_context,
+) -> int:
+    """PromptSession-based chat loop. Output via print() for terminal-native scrolling."""
+
+    session = PromptSession()
+
+    def write_output(text: str = "") -> None:
+        print(text, flush=True)
+
+    def _print_status() -> None:
+        with state_lock:
+            active = pending_jobs_ref[0] + (1 if is_running_ref[0] else 0)
+            elapsed = time.perf_counter() - running_started_at_ref[0] if is_running_ref[0] else 0
+            tokens = last_token_estimate_ref[0]
+        model = agent.config.model_name
+        pct = tokens / _CONTEXT_WINDOW if _CONTEXT_WINDOW else 0
+        bar = _progress_bar(pct)
+        parts = [model]
+        if tokens:
+            parts.append(f"{tokens / 1000:.1f}K/{_CONTEXT_WINDOW / 1000:.0f}K │ [{bar}] {pct:.0%}")
+        if is_running_ref[0]:
+            parts.append(f"思考中 {elapsed:.0f}s")
+        if pending_jobs_ref[0]:
+            parts.append(f"队列 {pending_jobs_ref[0]}")
+        print(f"\033[90m{' │ '.join(parts)}\033[0m", flush=True)
+
+    def handle_command(user: str) -> bool:
+        """Process a slash command.  Return True if handled, False to enqueue."""
+        nonlocal shutting_down_ref
+
+        if user.lower() in {"/exit", "/logout", "/quit", "exit", "logout", "退出"}:
+            shutting_down_ref[0] = True
+            with state_lock:
+                active = pending_jobs_ref[0] + (1 if is_running_ref[0] else 0)
+            if active:
+                write_output(f"还有 {active} 个后台任务，等待完成后退出。按 Ctrl+C 可强制退出。")
+                jobs.join()
+            write_output("再见。")
+            return True
+
+        if user == "/help":
+            write_output(
+                "可用命令：\n"
+                "/help                         显示帮助\n"
+                "/status                       查看后台任务状态\n"
+                "/exit                         退出\n"
+                "/memory [关键词]              搜索记忆\n"
+                "/remember <内容>              手动写入记忆\n"
+                "/btw                          显示运行时 prompt 注入\n"
+                "/btw <内容>                   增加运行时 prompt 注入\n"
+                "/btw-clear                    清空运行时 prompt 注入\n"
+                "/prompt-file <路径>           增加动态 prompt 文件\n"
+                "/subagents <数量> <目标>      生成 subagent 任务记录\n"
+                "/show-prompt <问题>           显示最终 prompt 并回答\n"
+                "Ctrl+C / Ctrl+D               退出\n"
+                "其他输入                       正常对话\n"
+            )
+            return True
+
+        if user == "/status":
+            with state_lock:
+                active = pending_jobs_ref[0] + (1 if is_running_ref[0] else 0)
+                prompt = running_prompt_ref[0]
+                elapsed = time.perf_counter() - running_started_at_ref[0] if is_running_ref[0] else 0
+            if not active:
+                write_output("当前没有后台任务。")
+            elif is_running_ref[0]:
+                write_output(f"正在响应中，已等待 {elapsed:.0f}s；队列中还有 {pending_jobs_ref[0]} 个任务。")
+                write_output(f"当前任务: {prompt}")
+            else:
+                write_output(f"当前没有运行中的任务；队列中还有 {pending_jobs_ref[0]} 个任务。")
+            if use_gateway:
+                for line in render_gateway_status(agent, paths):
+                    write_output(line)
+            return True
+
+        if user.startswith("/remember "):
+            rec = agent.remember(user[len("/remember "):], kind="note")
+            write_output(f"已记忆: {rec.content}")
+            return True
+
+        if user.startswith("/memory"):
+            query = user[len("/memory"):].strip()
+            records = (
+                agent.recall(query, args.memory_limit)
+                if query
+                else agent.memory.all()[-args.memory_limit:]
+            )
+            if not records:
+                write_output("没有找到记忆。")
+            for rec in records:
+                write_output(f"- [{rec.kind}] {rec.role}: {rec.content}")
+            return True
+
+        if user == "/btw":
+            if not runtime_inject:
+                write_output("当前没有运行时 prompt 注入。")
+            else:
+                write_output("当前运行时 prompt 注入：")
+                for index, item in enumerate(runtime_inject, 1):
+                    write_output(f"{index}. {item}")
+            return True
+
+        if user.startswith("/btw "):
+            runtime_inject.append(user[len("/btw "):])
+            write_output(f"已加入注入 prompt，当前 {len(runtime_inject)} 条。")
+            return True
+
+        if user == "/btw-clear":
+            runtime_inject.clear()
+            write_output("已清空运行时 prompt 注入。")
+            return True
+
+        if user.startswith("/prompt-file "):
+            prompt_files.append(user[len("/prompt-file "):].strip())
+            write_output(f"已加入 prompt 文件，当前 {len(prompt_files)} 个。")
+            return True
+
+        if user.startswith("/subagents "):
+            parts = user.split(maxsplit=2)
+            if len(parts) < 3 or not parts[1].isdigit():
+                write_output("用法: /subagents <数量> <目标>")
+                return True
+            tasks = agent.spawn_subagents(parts[2], int(parts[1]))
+            for task in tasks:
+                write_output(f"- {task.id}: {task.goal}")
+            return True
+
+        return False
+
+    def enqueue_job(user: str, *, show_prompt: bool = False) -> None:
+        job = ChatJob(
+            user=user,
+            show_prompt=show_prompt,
+            inject=list(runtime_inject),
+            prompt_files=list(prompt_files),
+        )
+        with state_lock:
+            active = pending_jobs_ref[0] + (1 if is_running_ref[0] else 0)
+            pending_jobs_ref[0] += 1
+        jobs.put(job)
+        if active:
+            write_output(f"已加入任务队列，前面还有 {active} 个任务。")
+        else:
+            write_output("已发送到后台，模型响应期间可以继续输入。")
+
+    # ── worker ───────────────────────────────────────────────────────────
+
+    def worker() -> None:
+        while True:
+            job = jobs.get()
+            with state_lock:
+                pending_jobs_ref[0] -= 1
+                is_running_ref[0] = True
+                running_prompt_ref[0] = job.user
+                running_started_at_ref[0] = time.perf_counter()
+            try:
+                started_at = running_started_at_ref[0]
+                write_output(f"\n正在处理: {job.user}")
+                history_ctx = build_history_context()
+                turn_inject = list(job.inject) + ([history_ctx] if history_ctx else [])
+                agent_response_text = ""
+                if use_gateway:
+                    _, alive = gateway_running(paths)
+                    if not alive:
+                        raise RuntimeError("gateway 已停止。请先执行: my-agent gateway start")
+                    request_id, _, response_path = submit_gateway_ask(
+                        paths,
+                        prompt=job.user,
+                        inject=turn_inject,
+                        prompt_files=job.prompt_files,
+                        save=not args.no_save,
+                        include_prompt=job.show_prompt,
+                        resume_context=resume_context_override(args),
+                        agent=agent,
+                    )
+                    timeout = (
+                        args.gateway_timeout
+                        if args.gateway_timeout is not None
+                        else agent.config.gateway_request_timeout
+                    )
+                    chunk_path = gateway_chunk_path(paths, request_id)
+                    spinner = ThinkingSpinner()
+                    spinner.start()
+                    chunks_printed = 0
+                    deadline = time.time() + max(0.0, timeout)
+                    response = {}
+                    while time.time() <= deadline:
+                        if chunk_path.exists():
+                            try:
+                                lines = chunk_path.read_text(encoding="utf-8").splitlines()
+                                for cline in lines[chunks_printed:]:
+                                    if not cline.strip():
+                                        continue
+                                    cobj = json.loads(cline)
+                                    sys.stdout.write(cobj.get("text", ""))
+                                    sys.stdout.flush()
+                                    chunks_printed += 1
+                            except (OSError, json.JSONDecodeError):
+                                pass
+                        response = read_json_file(response_path)
+                        if response:
+                            break
+                        time.sleep(0.1)
+                    spinner.stop()
+                    elapsed = time.perf_counter() - started_at
+                    if not response:
+                        raise TimeoutError(
+                            f"gateway 请求等待超时: request_id={request_id} response={response_path}"
+                        )
+                    if job.show_prompt and response.get("prompt"):
+                        print("\n===== FINAL PROMPT =====")
+                        print(response.get("prompt", ""))
+                        print("===== RESPONSE =====")
+                    _print_status()
+                    print(
+                        f"[耗时 {elapsed:.2f}s; gateway_request={request_id}; "
+                        f"工具轮数 {response.get('tool_rounds', 0)}; "
+                        f"prompt_tokens≈{response.get('prompt_token_estimate', 0)}; "
+                        f"resume_context={1 if response.get('memory_resume_context_injected') else 0}]"
+                    )
+                    if response.get("ok"):
+                        agent_response_text = response.get("response", "")
+                        with state_lock:
+                            last_token_estimate_ref[0] = response.get("prompt_token_estimate", 0)
+                        print(f"{agent.config.agent_name}> {agent_response_text}")
+                    else:
+                        print(f"错误: {response.get('error', 'gateway 请求失败')}")
+                else:
+                    spinner = ThinkingSpinner()
+                    spinner.start()
+
+                    def _on_chat_chunk(chunk: str) -> None:
+                        sys.stdout.write(chunk)
+                        sys.stdout.flush()
+
+                    try:
+                        result = agent.run(
+                            job.user,
+                            inject=turn_inject,
+                            prompt_files=job.prompt_files,
+                            save=not args.no_save,
+                            source="chat",
+                            resume_context=resume_context_override(args),
+                            recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
+                            on_chunk=_on_chat_chunk,
+                        )
+                    finally:
+                        spinner.stop()
+                    elapsed = time.perf_counter() - started_at
+                    if job.show_prompt:
+                        print("\n===== FINAL PROMPT =====")
+                        print(result.prompt)
+                        print("===== RESPONSE =====")
+                    _print_status()
+                    print(
+                        f"[耗时 {elapsed:.2f}s; 工具轮数 {result.tool_rounds}; "
+                        f"prompt_tokens≈{result.prompt_token_estimate}; "
+                        f"resume_context={1 if result.memory_resume_context_injected else 0}]"
+                    )
+                    agent_response_text = result.response
+                    with state_lock:
+                        last_token_estimate_ref[0] = result.prompt_token_estimate
+                    print(f"{agent.config.agent_name}> {agent_response_text}")
+            except Exception as exc:
+                print(f"错误: {exc}")
+            finally:
+                if agent_response_text:
+                    with history_lock:
+                        conversation_history.append((job.user, agent_response_text))
+                        if len(conversation_history) > _MAX_HISTORY_TURNS * 2:
+                            conversation_history[:] = conversation_history[-_MAX_HISTORY_TURNS:]
+                with state_lock:
+                    is_running_ref[0] = False
+                    running_prompt_ref[0] = ""
+                    running_started_at_ref[0] = 0.0
+                jobs.task_done()
+
+    # ── startup ──────────────────────────────────────────────────────────
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    print(f"{agent.config.agent_name} 交互循环已启动 [v2 inline模式]。输入 /help 查看命令，输入 /exit 退出。")
+    if use_gateway:
+        print("当前模式: gateway 客户端。普通消息会投递给后台 gateway 处理。")
+
+    with patch_stdout():
+        while True:
+            try:
+                user = session.prompt(CHAT_PROMPT).strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n再见。")
+                return 0
+            if not user:
+                continue
+            if user.lower() in {"/exit", "/logout", "/quit", "exit", "logout", "退出"}:
+                shutting_down_ref[0] = True
+                with state_lock:
+                    active = pending_jobs_ref[0] + (1 if is_running_ref[0] else 0)
+                if active:
+                    print(f"还有 {active} 个后台任务，等待完成后退出。按 Ctrl+C 可强制退出。")
+                    jobs.join()
+                print("再见。")
+                return 0
+            if not handle_command(user):
+                show_prompt = False
+                if user.startswith("/show-prompt "):
+                    show_prompt = True
+                    user = user[len("/show-prompt "):]
+                enqueue_job(user, show_prompt=show_prompt)
+
+
+# ============================================================================
+# fallback mode — stdlib input() based, no prompt_toolkit
+# ============================================================================
+
+
+def _run_fallback(
+    *,
+    agent,
+    args,
+    use_gateway,
+    paths,
+    runtime_inject,
+    prompt_files,
+    conversation_history,
+    history_lock,
+    jobs,
+    state_lock,
+    build_history_context,
+) -> int:
+    """Plain input()-based chat loop for terminals without prompt_toolkit."""
+
+    is_running = False
+    pending_jobs = 0
+    shutting_down = False
+    running_prompt = ""
+    running_started_at = 0.0
+    last_token_estimate = 0
     fallback_waiting_for_input = False
 
-    def bottom_toolbar() -> str:
-        with state_lock:
-            active_count = pending_jobs + (1 if is_running else 0)
-            elapsed = time.perf_counter() - running_started_at if is_running else 0
-        if not active_count:
-            return ""
-        if is_running:
-            return f"思考中... {elapsed:.0f}s | 队列 {pending_jobs}"
-        return f"等待处理 | 队列 {pending_jobs}"
-
     def redraw_fallback_prompt() -> None:
-        """Redraw the plain input prompt after background output.
-
-        prompt_toolkit handles this automatically. The stdlib input() fallback
-        does not, so a background reply can leave the terminal without a visible
-        `user> ` prompt even though input is still waiting.
-        """
-
-        if not fallback_interactive:
+        if not sys.stdin.isatty():
             return
         with state_lock:
-            should_redraw = fallback_waiting_for_input and not shutting_down
-        if should_redraw:
+            should = fallback_waiting_for_input and not shutting_down
+        if should:
             print(FALLBACK_CHAT_PROMPT, end="", flush=True)
 
     def worker() -> None:
@@ -103,6 +505,9 @@ def cmd_chat(args) -> int:
             try:
                 started_at = running_started_at
                 print(f"\n正在处理: {job.user}", flush=True)
+                history_ctx = build_history_context()
+                turn_inject = list(job.inject) + ([history_ctx] if history_ctx else [])
+                agent_response_text = ""
                 if use_gateway:
                     _, alive = gateway_running(paths)
                     if not alive:
@@ -110,7 +515,7 @@ def cmd_chat(args) -> int:
                     request_id, _, response_path = submit_gateway_ask(
                         paths,
                         prompt=job.user,
-                        inject=job.inject,
+                        inject=turn_inject,
                         prompt_files=job.prompt_files,
                         save=not args.no_save,
                         include_prompt=job.show_prompt,
@@ -122,7 +527,27 @@ def cmd_chat(args) -> int:
                         if args.gateway_timeout is not None
                         else agent.config.gateway_request_timeout
                     )
-                    response = wait_for_gateway_response(paths, request_id, timeout)
+                    chunk_path = gateway_chunk_path(paths, request_id)
+                    chunks_printed = 0
+                    deadline = time.time() + max(0.0, timeout)
+                    response = {}
+                    while time.time() <= deadline:
+                        if chunk_path.exists():
+                            try:
+                                lines = chunk_path.read_text(encoding="utf-8").splitlines()
+                                for cline in lines[chunks_printed:]:
+                                    if not cline.strip():
+                                        continue
+                                    cobj = json.loads(cline)
+                                    sys.stdout.write(cobj.get("text", ""))
+                                    sys.stdout.flush()
+                                    chunks_printed += 1
+                            except (OSError, json.JSONDecodeError):
+                                pass
+                        response = read_json_file(response_path)
+                        if response:
+                            break
+                        time.sleep(0.1)
                     elapsed = time.perf_counter() - started_at
                     if not response:
                         raise TimeoutError(
@@ -139,18 +564,24 @@ def cmd_chat(args) -> int:
                         f"resume_context={1 if response.get('memory_resume_context_injected') else 0}]"
                     )
                     if response.get("ok"):
-                        print(f"{agent.config.agent_name}> {response.get('response', '')}")
+                        agent_response_text = response.get("response", "")
+                        print(f"{agent.config.agent_name}> {agent_response_text}")
                     else:
                         print(f"错误: {response.get('error', 'gateway 请求失败')}")
                 else:
+                    def _on_chat_chunk(chunk: str) -> None:
+                        sys.stdout.write(chunk)
+                        sys.stdout.flush()
+
                     result = agent.run(
                         job.user,
-                        inject=job.inject,
+                        inject=turn_inject,
                         prompt_files=job.prompt_files,
                         save=not args.no_save,
                         source="chat",
                         resume_context=resume_context_override(args),
                         recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
+                        on_chunk=_on_chat_chunk,
                     )
                     elapsed = time.perf_counter() - started_at
                     if job.show_prompt:
@@ -162,10 +593,16 @@ def cmd_chat(args) -> int:
                         f"prompt_tokens≈{result.prompt_token_estimate}; "
                         f"resume_context={1 if result.memory_resume_context_injected else 0}]"
                     )
-                    print(f"{agent.config.agent_name}> {result.response}")
+                    agent_response_text = result.response
+                    print(f"{agent.config.agent_name}> {agent_response_text}")
             except Exception as exc:
                 print(f"错误: {exc}")
             finally:
+                if agent_response_text:
+                    with history_lock:
+                        conversation_history.append((job.user, agent_response_text))
+                        if len(conversation_history) > _MAX_HISTORY_TURNS * 2:
+                            conversation_history[:] = conversation_history[-_MAX_HISTORY_TURNS:]
                 with state_lock:
                     is_running = False
                     running_prompt = ""
@@ -175,8 +612,125 @@ def cmd_chat(args) -> int:
 
     threading.Thread(target=worker, daemon=True).start()
 
-    def enqueue_job(user: str, *, show_prompt: bool = False) -> None:
-        nonlocal pending_jobs
+    print(
+        f"{agent.config.agent_name} 交互循环已启动 [v2 fallback模式]。"
+        "输入 /help 查看命令，输入 /exit 退出。"
+    )
+    if use_gateway:
+        print("当前模式: gateway 客户端。普通消息会投递给后台 gateway 处理。")
+
+    while True:
+        try:
+            if sys.stdin.isatty():
+                print(FALLBACK_CHAT_PROMPT, end="", flush=True)
+                with state_lock:
+                    fallback_waiting_for_input = True
+                try:
+                    user = input().strip()
+                finally:
+                    with state_lock:
+                        fallback_waiting_for_input = False
+            else:
+                user = input(FALLBACK_CHAT_PROMPT).strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n再见。")
+            return 0
+        if not user:
+            continue
+        if user.lower() in {"/exit", "/logout", "/quit", "exit", "logout", "退出"}:
+            shutting_down = True
+            with state_lock:
+                active = pending_jobs + (1 if is_running else 0)
+            if active:
+                print(f"还有 {active} 个后台任务，等待完成后退出。按 Ctrl+C 可强制退出。")
+                jobs.join()
+            print("再见。")
+            return 0
+        if user == "/help":
+            print(
+                "可用命令：\n"
+                "/help                         显示帮助\n"
+                "/status                       查看后台任务状态\n"
+                "/exit                         退出\n"
+                "/memory [关键词]              搜索记忆\n"
+                "/remember <内容>              手动写入记忆\n"
+                "/btw                          显示运行时 prompt 注入\n"
+                "/btw <内容>                   增加运行时 prompt 注入\n"
+                "/btw-clear                    清空运行时 prompt 注入\n"
+                "/prompt-file <路径>           增加动态 prompt 文件\n"
+                "/subagents <数量> <目标>      生成 subagent 任务记录\n"
+                "/show-prompt <问题>           显示最终 prompt 并回答\n"
+                "Ctrl+C                        退出\n"
+                "其他输入                       正常对话\n"
+            )
+            continue
+        if user == "/status":
+            with state_lock:
+                active = pending_jobs + (1 if is_running else 0)
+                prompt = running_prompt
+                elapsed = time.perf_counter() - running_started_at if is_running else 0
+            if not active:
+                print("当前没有后台任务。")
+            elif is_running:
+                print(f"正在响应中，已等待 {elapsed:.0f}s；队列中还有 {pending_jobs} 个任务。")
+                print(f"当前任务: {prompt}")
+            else:
+                print(f"当前没有运行中的任务；队列中还有 {pending_jobs} 个任务。")
+            if use_gateway:
+                for line in render_gateway_status(agent, paths):
+                    print(line)
+            continue
+        if user.startswith("/remember "):
+            rec = agent.remember(user[len("/remember "):], kind="note")
+            print(f"已记忆: {rec.content}")
+            continue
+        if user.startswith("/memory"):
+            query = user[len("/memory"):].strip()
+            records = (
+                agent.recall(query, args.memory_limit)
+                if query
+                else agent.memory.all()[-args.memory_limit:]
+            )
+            if not records:
+                print("没有找到记忆。")
+            for rec in records:
+                print(f"- [{rec.kind}] {rec.role}: {rec.content}")
+            continue
+        if user == "/btw":
+            if not runtime_inject:
+                print("当前没有运行时 prompt 注入。")
+            else:
+                print("当前运行时 prompt 注入：")
+                for index, item in enumerate(runtime_inject, 1):
+                    print(f"{index}. {item}")
+            continue
+        if user.startswith("/btw "):
+            runtime_inject.append(user[len("/btw "):])
+            print(f"已加入注入 prompt，当前 {len(runtime_inject)} 条。")
+            continue
+        if user == "/btw-clear":
+            runtime_inject.clear()
+            print("已清空运行时 prompt 注入。")
+            continue
+        if user.startswith("/prompt-file "):
+            prompt_files.append(user[len("/prompt-file "):].strip())
+            print(f"已加入 prompt 文件，当前 {len(prompt_files)} 个。")
+            continue
+        if user.startswith("/subagents "):
+            parts = user.split(maxsplit=2)
+            if len(parts) < 3 or not parts[1].isdigit():
+                print("用法: /subagents <数量> <目标>")
+                continue
+            tasks = agent.spawn_subagents(parts[2], int(parts[1]))
+            for task in tasks:
+                print(f"- {task.id}: {task.goal}")
+            continue
+
+        show_prompt = False
+        if user.startswith("/show-prompt "):
+            show_prompt = True
+            user = user[len("/show-prompt "):]
+
         job = ChatJob(
             user=user,
             show_prompt=show_prompt,
@@ -184,140 +738,14 @@ def cmd_chat(args) -> int:
             prompt_files=list(prompt_files),
         )
         with state_lock:
-            active_count = pending_jobs + (1 if is_running else 0)
+            active = pending_jobs + (1 if is_running else 0)
             pending_jobs += 1
         jobs.put(job)
-        if active_count:
-            print(f"已加入任务队列，前面还有 {active_count} 个任务。")
+        if active:
+            print(f"已加入任务队列，前面还有 {active} 个任务。")
         else:
             if use_gateway:
                 print("已发送到 gateway 后台，模型响应期间可以继续输入。")
             else:
                 print("已发送到后台，模型响应期间可以继续输入。")
-
-    output_context = patch_stdout() if prompt_session is not None else nullcontext()
-    with output_context:
-        while True:
-            try:
-                if prompt_session is not None:
-                    user = prompt_session.prompt(
-                        CHAT_PROMPT,
-                        bottom_toolbar=bottom_toolbar,
-                        refresh_interval=1,
-                    ).strip()
-                else:
-                    if fallback_interactive:
-                        print(FALLBACK_CHAT_PROMPT, end="", flush=True)
-                        with state_lock:
-                            fallback_waiting_for_input = True
-                        try:
-                            user = input().strip()
-                        finally:
-                            with state_lock:
-                                fallback_waiting_for_input = False
-                    else:
-                        user = input(FALLBACK_CHAT_PROMPT).strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\n再见。")
-                return 0
-            if not user:
-                continue
-            if user.lower() in {"/exit", "/logout", "/quit", "exit", "logout", "退出"}:
-                shutting_down = True
-                with state_lock:
-                    active_count = pending_jobs + (1 if is_running else 0)
-                if active_count:
-                    print(f"还有 {active_count} 个后台任务，等待完成后退出。按 Ctrl+C 可强制退出。")
-                    jobs.join()
-                print("再见。")
-                return 0
-            if user == "/help":
-                print(
-                    """可用命令：
-/help                         显示帮助
-/status                       查看后台任务状态；gateway 模式会额外显示 gateway 状态
-/exit                         退出
-/logout                       退出
-exit / logout                 兼容旧习惯
-/memory [关键词]              搜索记忆；不带关键词显示最近记忆
-/remember <内容>              手动写入记忆
-/btw                         显示当前运行时 prompt 注入
-/btw <内容>                   增加运行时 prompt 注入
-/btw-clear                   清空运行时 prompt 注入
-/prompt-file <路径>           增加动态 prompt 文件
-/subagents <数量> <目标>      生成 subagent 任务记录
-/show-prompt <问题>           显示最终 prompt 并回答
-Ctrl+C                        退出
-其他输入                       正常对话
-"""
-                )
-                continue
-            if user == "/status":
-                with state_lock:
-                    active_count = pending_jobs + (1 if is_running else 0)
-                    prompt = running_prompt
-                    elapsed = time.perf_counter() - running_started_at if is_running else 0
-                if not active_count:
-                    print("当前没有后台任务。")
-                elif is_running:
-                    print(f"正在响应中，已等待 {elapsed:.0f}s；队列中还有 {pending_jobs} 个任务。")
-                    print(f"当前任务: {prompt}")
-                else:
-                    print(f"当前没有运行中的任务；队列中还有 {pending_jobs} 个任务。")
-                if use_gateway:
-                    for line in render_gateway_status(agent, paths):
-                        print(line)
-                continue
-            if user.startswith("/remember "):
-                rec = agent.remember(user[len("/remember ") :], kind="note")
-                print(f"已记忆: {rec.content}")
-                continue
-            if user.startswith("/memory"):
-                query = user[len("/memory") :].strip()
-                records = (
-                    agent.recall(query, args.memory_limit)
-                    if query
-                    else agent.memory.all()[-args.memory_limit :]
-                )
-                if not records:
-                    print("没有找到记忆。")
-                for rec in records:
-                    print(f"- [{rec.kind}] {rec.role}: {rec.content}")
-                continue
-            if user == "/btw":
-                if not runtime_inject:
-                    print("当前没有运行时 prompt 注入。")
-                else:
-                    print("当前运行时 prompt 注入：")
-                    for index, item in enumerate(runtime_inject, 1):
-                        print(f"{index}. {item}")
-                continue
-            if user.startswith("/btw "):
-                runtime_inject.append(user[len("/btw ") :])
-                print(f"已加入注入 prompt，当前 {len(runtime_inject)} 条。")
-                continue
-            if user == "/btw-clear":
-                runtime_inject.clear()
-                print("已清空运行时 prompt 注入。")
-                continue
-            if user.startswith("/prompt-file "):
-                prompt_files.append(user[len("/prompt-file ") :].strip())
-                print(f"已加入 prompt 文件，当前 {len(prompt_files)} 个。")
-                continue
-            if user.startswith("/subagents "):
-                parts = user.split(maxsplit=2)
-                if len(parts) < 3 or not parts[1].isdigit():
-                    print("用法: /subagents <数量> <目标>")
-                    continue
-                tasks = agent.spawn_subagents(parts[2], int(parts[1]))
-                for task in tasks:
-                    print(f"- {task.id}: {task.goal}")
-                continue
-
-            show_prompt = False
-            if user.startswith("/show-prompt "):
-                show_prompt = True
-                user = user[len("/show-prompt ") :]
-
-            enqueue_job(user, show_prompt=show_prompt)
     return 0

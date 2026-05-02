@@ -31,7 +31,7 @@ class ToolCallingBackend(BaseBackend):
     def __init__(self):
         self.calls = 0
 
-    def generate(self, prompt: str) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
             assert "# Tool Catalog" in prompt
@@ -54,7 +54,7 @@ class SubagentDelegationBackend(BaseBackend):
     def __init__(self):
         self.calls = 0
 
-    def generate(self, prompt: str) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
             assert "create_subagents [orchestration]" in prompt
@@ -85,7 +85,7 @@ class DuplicateSubagentDelegationBackend(BaseBackend):
     def __init__(self):
         self.calls = 0
 
-    def generate(self, prompt: str) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls <= 2:
             return ModelResponse(
@@ -113,7 +113,7 @@ class MaxToolRoundBackend(BaseBackend):
     def __init__(self):
         self.calls = 0
 
-    def generate(self, prompt: str) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(

@@ -72,6 +72,21 @@ def validate_write_boundary(
     forbidden_roots = _boundary_paths(write_boundary.get("forbidden_write_roots"), workspace_root)
     for root in forbidden_roots:
         if _is_relative_to(target, root):
+            # LLM: An allowed root that itself sits inside a forbidden root is an
+            # explicit grant from the parent agent (e.g. user said "write to
+            # ~/my_project" while ~ is forbidden).  Files inside such a root
+            # should be writable.  But a forbidden sub-root inside an allowed
+            # root (e.g. allowed=task_dir, forbidden=task_dir/private) still
+            # blocks.  We distinguish by checking whether the forbidden root is
+            # also inside some allowed root: if so, the forbidden rule wins.
+            forbidden_inside_allowed = any(
+                _is_relative_to(root, aroot) for aroot in allowed_roots
+            )
+            if not forbidden_inside_allowed:
+                # The forbidden root is NOT inside an allowed root — it's a
+                # general prohibition (e.g. ~).  Since the target passed the
+                # allowed check above, let it through.
+                continue
             return (
                 "写入被阻止: 目标路径落在 forbidden_write_roots 内。"
                 f" target={_display_path(target, workspace_root)} forbidden={_display_path(root, workspace_root)}"

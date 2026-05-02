@@ -13,6 +13,7 @@ import sys
 import time
 
 from ..agent.gateway import (
+    gateway_chunk_path,
     gateway_paths,
     gateway_response_path,
     gateway_running,
@@ -26,6 +27,7 @@ from ..agent.gateway import (
 from .chat import cmd_chat
 from .common import make_agent, resume_context_override
 from .gateway_process import cmd_gateway_start
+from .thinking_spinner import ThinkingSpinner
 
 
 def cmd_gateway(args) -> int:
@@ -110,10 +112,40 @@ def cmd_gateway_ask(args) -> int:
         print(f"response: {response_path}")
         return 0
 
-    # 同步模式：命令行阻塞等待 response 文件出现。聊天工具以后也可以用同样逻辑，
-    # 或者只监听 responses 目录/数据库事件后主动推送消息给用户。
+    # 同步模式：轮询 chunk 文件实现流式输出，同时等待 response 文件。
     timeout = args.timeout if args.timeout is not None else agent.config.gateway_request_timeout
-    response = wait_for_gateway_response(paths, request_id, timeout)
+    chunk_path = gateway_chunk_path(paths, request_id)
+    spinner = ThinkingSpinner()
+    spinner.start()
+    chunks_printed = 0
+    deadline = time.time() + max(0.0, timeout)
+    response = {}
+
+    while time.time() <= deadline:
+        # LLM: read new chunks from the streaming file written by daemon.
+        if chunk_path.exists():
+            try:
+                lines = chunk_path.read_text(encoding="utf-8").splitlines()
+                for line in lines[chunks_printed:]:
+                    if not line.strip():
+                        continue
+                    obj = json.loads(line)
+                    if chunks_printed == 0:
+                        spinner.stop()
+                    sys.stdout.write(obj.get("text", ""))
+                    sys.stdout.flush()
+                    chunks_printed += 1
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        # LLM: check if final response file has arrived.
+        response = read_json_file(response_path)
+        if response:
+            break
+        time.sleep(0.1)
+
+    spinner.stop()
+
     if not response:
         log_gateway_payload(
             agent,

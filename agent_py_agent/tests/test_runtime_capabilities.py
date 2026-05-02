@@ -16,7 +16,7 @@ class StaticBackend(BaseBackend):
         self.text = text
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.prompts.append(prompt)
         return ModelResponse(text=self.text, backend=self.name)
 
@@ -28,7 +28,7 @@ class SecurityQueryCallingBackend(BaseBackend):
         self.calls = 0
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         self.prompts.append(prompt)
         if self.calls == 1:

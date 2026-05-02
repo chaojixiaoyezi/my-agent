@@ -82,6 +82,16 @@ def gateway_paths(agent: SimpleAgent) -> GatewayPaths:
     )
 
 
+def gateway_chunk_path(paths: GatewayPaths, request_id: str) -> Path:
+    """LLM: resolve the streaming chunk file for a processing request.
+
+    Human version:
+    流式输出时，daemon 把每个 chunk 追加到这个文件。CLI 轮询读取后显示给用户。
+    请求完成后由 daemon 删除。
+    """
+    return paths.processing / f"{request_id}.chunks.jsonl"
+
+
 def adapter_paths(agent: SimpleAgent) -> AdapterPaths:
     """LLM contract: resolve file-adapter paths from agent config.
 
