@@ -11,6 +11,7 @@ import json
 import time
 import tempfile
 
+from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagent import VerificationEvidence
@@ -226,3 +227,251 @@ def test_subagent_patch_review_rejects_invalid_patch_status():
         )
         assert acceptance.records[0].decision == "REJECT"
         assert any(item.name == "patch_status_valid" and not item.ok for item in acceptance.records[0].findings)
+
+
+def test_subagent_patch_apply_dry_run_shows_diff_for_write_file_patch():
+    """LLM: Verifies patch apply dry-run renders the diff without mutating files."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        target = root / "workspace.txt"
+        target.write_text("before\n", encoding="utf-8")
+        task = agent.subagents.create_run(
+            goal="预览 patch apply diff",
+            thought="先只看 diff。",
+            plan=["dry-run apply"],
+            extra_write_roots=[str(target)],
+            acceptance_checks=["command: python3 -c \"print('ok')\""],
+        )
+        Path(task.output_json).write_text(
+            json.dumps(
+                {
+                    "run_id": task.id,
+                    "patches": [
+                        {
+                            "path": "workspace.txt",
+                            "tool": "write_file",
+                            "status": "planned",
+                            "summary": "把文件内容改成 after",
+                            "content": "after\n",
+                        }
+                    ],
+                    "tests": [],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        report = agent.subagents.write_patch_apply_report(
+            run_ids=[task.id],
+            apply=False,
+            applier="tester",
+        )
+
+        assert report.records[0].ok
+        assert report.records[0].decision == "WOULD_APPLY"
+        assert "a/workspace.txt" in report.records[0].patches[0]["diff_preview"]
+        assert target.read_text(encoding="utf-8") == "before\n"
+
+
+def test_subagent_patch_apply_writes_file_and_marks_patch_reviewed():
+    """LLM: Verifies patch apply writes the file, records audit, and approves the patch."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        target = root / "workspace.txt"
+        target.write_text("before\n", encoding="utf-8")
+        task = agent.subagents.create_run(
+            goal="真正 apply patch",
+            thought="把 planned patch 落地。",
+            plan=["apply"],
+            extra_write_roots=[str(target)],
+            acceptance_checks=["command: python3 -c \"from pathlib import Path; assert Path('workspace.txt').read_text() == 'after\\n'\""],
+        )
+        Path(task.output_json).write_text(
+            json.dumps(
+                {
+                    "run_id": task.id,
+                    "patches": [
+                        {
+                            "path": "workspace.txt",
+                            "tool": "write_file",
+                            "status": "planned",
+                            "summary": "把文件内容改成 after",
+                            "content": "after\n",
+                        }
+                    ],
+                    "tests": [],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        report = agent.subagents.write_patch_apply_report(
+            run_ids=[task.id],
+            apply=True,
+            applier="tester",
+        )
+        output = json.loads(Path(task.output_json).read_text(encoding="utf-8"))
+
+        assert report.records[0].ok
+        assert report.records[0].decision == "APPLIED"
+        assert target.read_text(encoding="utf-8") == "after\n"
+        assert output["patches"][0]["status"] == "applied"
+        assert output["patches"][0]["review_status"] == "APPROVED"
+        assert Path(task.task_dir, "PATCH_APPLY.md").exists()
+        assert Path(task.reports_dir, "patch_apply.json").exists()
+
+
+def test_subagent_patch_apply_rejects_outside_allowed_write_roots():
+    """LLM: Verifies patch apply blocks writes outside allowed roots and leaves files untouched."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        outside = root / "outside.txt"
+        outside.write_text("before\n", encoding="utf-8")
+        task = agent.subagents.create_run(
+            goal="阻止越界 patch",
+            thought="不允许写出边界。",
+            plan=["apply"],
+        )
+        Path(task.output_json).write_text(
+            json.dumps(
+                {
+                    "run_id": task.id,
+                    "patches": [
+                        {
+                            "path": "outside.txt",
+                            "tool": "write_file",
+                            "status": "planned",
+                            "summary": "试图越界写文件",
+                            "content": "after\n",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        report = agent.subagents.write_patch_apply_report(
+            run_ids=[task.id],
+            apply=True,
+            applier="tester",
+        )
+
+        assert not report.records[0].ok
+        assert report.records[0].decision == "REJECT"
+        assert "allowed_write_roots" in report.records[0].patches[0]["message"]
+        assert outside.read_text(encoding="utf-8") == "before\n"
+
+
+def test_subagent_patch_apply_rolls_back_when_post_apply_test_fails():
+    """LLM: Verifies patch apply rolls back file changes when allowlisted tests fail."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        target = root / "workspace.txt"
+        target.write_text("before\n", encoding="utf-8")
+        task = agent.subagents.create_run(
+            goal="apply 失败后回滚",
+            thought="测试失败时必须恢复原状。",
+            plan=["apply", "test", "rollback"],
+            extra_write_roots=[str(target)],
+            acceptance_checks=["command: python3 -c \"import sys; sys.exit(1)\""],
+        )
+        Path(task.output_json).write_text(
+            json.dumps(
+                {
+                    "run_id": task.id,
+                    "patches": [
+                        {
+                            "path": "workspace.txt",
+                            "tool": "write_file",
+                            "status": "planned",
+                            "summary": "把文件内容改成 after",
+                            "content": "after\n",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        report = agent.subagents.write_patch_apply_report(
+            run_ids=[task.id],
+            apply=True,
+            applier="tester",
+        )
+
+        assert not report.records[0].ok
+        assert report.records[0].decision == "ROLLBACK"
+        assert report.records[0].rollback_performed is True
+        assert target.read_text(encoding="utf-8") == "before\n"
+
+
+def test_subagents_patches_cli_apply_dry_run_writes_patch_apply_report(tmp_path, capsys):
+    """LLM: Verifies CLI apply-dry-run goes through the patch-apply preview path."""
+    config_path = tmp_path / "agent_config.yaml"
+    config_path.write_text(
+        'workspace_root: "."\n'
+        'model_backend: "echo"\n'
+        'subagent_workspace: "subs"\n',
+        encoding="utf-8",
+    )
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+    target = tmp_path / "workspace.txt"
+    target.write_text("before\n", encoding="utf-8")
+    task = agent.subagents.create_run(
+        goal="CLI 预览 patch apply",
+        thought="命令行 dry-run apply。",
+        plan=["apply-dry-run"],
+        extra_write_roots=[str(target)],
+    )
+    Path(task.output_json).write_text(
+        json.dumps(
+            {
+                "run_id": task.id,
+                "patches": [
+                    {
+                        "path": "workspace.txt",
+                        "tool": "write_file",
+                        "status": "planned",
+                        "summary": "把文件内容改成 after",
+                        "content": "after\n",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--config",
+            str(config_path),
+            "subagents-patches",
+            "--apply-dry-run",
+        ]
+    )
+    code = args.func(args)
+    output = capsys.readouterr().out
+
+    assert code == 0
+    assert "SUBAGENT PATCH APPLY" in output
+    assert "mode=apply-dry-run" in output
+    assert (tmp_path / "subs" / "subagent_patch_apply_report.json").exists()

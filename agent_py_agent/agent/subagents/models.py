@@ -358,6 +358,13 @@ class SubAgentTask:
     runner_response_file: str = ""
     allowed_write_roots: list[str] = field(default_factory=list)
     forbidden_write_roots: list[str] = field(default_factory=list)
+    workflow_mode: str = "off"
+    workflow_template_id: str = ""
+    workflow_plan: dict[str, object] = field(default_factory=dict)
+    workflow_parent_run_id: str = ""
+    workflow_phase_id: str = ""
+    workflow_depends_on: list[str] = field(default_factory=list)
+    workflow_child_run_ids: list[str] = field(default_factory=list)
     takeover_by: str = ""
     takeover_reason: str = ""
     locked_files: list[str] = field(default_factory=list)
@@ -366,4 +373,3 @@ class SubAgentTask:
     last_probe_at: float = 0.0
     channel_checks: list[ChannelProbeCheck] = field(default_factory=list)
     channel_probe_file: str = ""
-

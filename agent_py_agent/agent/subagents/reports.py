@@ -260,6 +260,40 @@ class PatchReviewReport:
 
 
 @dataclass
+class PatchApplyRecord:
+    """独立 patch apply 审核链的一次记录。"""
+
+    id: str
+    run_id: str
+    dry_run: bool
+    applied: bool
+    ok: bool
+    decision: str
+    message: str
+    patch_count: int
+    applied_count: int = 0
+    blocked_count: int = 0
+    rollback_performed: bool = False
+    applier: str = ""
+    note: str = ""
+    evidence_paths: list[str] = field(default_factory=list)
+    test_commands: list[str] = field(default_factory=list)
+    test_results: list[dict[str, object]] = field(default_factory=list)
+    patches: list[dict[str, object]] = field(default_factory=list)
+    created_at: float = 0.0
+
+
+@dataclass
+class PatchApplyReport:
+    """批量 patch apply 报告。"""
+
+    generated_at: float
+    dry_run: bool
+    summary: dict[str, int]
+    records: list[PatchApplyRecord]
+
+
+@dataclass
 class DispatchRecord:
     """父代理调度器的一步审计记录。"""
 
@@ -369,5 +403,4 @@ class ParentPlannerReport:
     dry_run: bool
     summary: dict[str, int]
     records: list[ParentPlannerRecord]
-
 

@@ -8,6 +8,39 @@
 
 ## 基础设施
 
+### Patch 自动应用
+
+解决问题：runner 输出的 patches 之前只是一组计划/状态记录，父代理必须人工接手改文件，无法做独立的 apply 审核、diff 审计、越界拦截、测试验证和失败回滚。
+
+落地内容：
+- 新增 `PatchApplyRecord` / `PatchApplyReport`，把独立 patch apply 审核链和原来的 patch review 链分开
+- `SubAgentManager` 现在保存 `workspace_root`，patch apply 可以复用真实 `write_boundary` 门禁去检查 `allowed_write_roots`、`forbidden_write_roots` 和 `locked_files`
+- 新增 `apply_patches()` / `write_patch_apply_report()`：dry-run 生成统一 diff，真实 apply 只处理 `write_file` patch，并把 apply 结果写入任务目录和全局审计日志
+- apply 后会执行 allowlist 测试命令；测试失败或写入异常时自动回滚到 apply 前内容
+- `subagents-patches` CLI 增加 `--review-apply`、`--apply-dry-run`、`--apply`，把“审核状态写回”和“真正落文件”拆成两条显式操作
+- 补齐 `PATCH_APPLY.md` / `patch_apply.json` / `subagent_patch_apply_report.json` / `PATCH_APPLY_LOG.md` 等审计产物
+
+验证方式：
+- `python3 -m pytest -q agent_py_agent/tests/test_agent/test_subagent_patch_review.py agent_py_agent/tests/test_cli_reference.py`
+- `python3 -m pytest -q agent_py_agent/tests/test_agent/test_dispatch_and_planner.py agent_py_agent/tests/test_agent/test_subagent_acceptance.py agent_py_agent/tests/test_agent/test_subagent_runner.py agent_py_agent/tests/test_cli_reference.py`
+- `python3 -m pytest -q`
+
+### Workflow Router/Compiler 集成
+
+解决问题：用户必须手写 goal 和 acceptance，workflow 集成后需要能从模板自动生成 worker spec 和父级验收条件，减少人工配置，缓解派错工、漏验收和 fake done。
+
+落地内容：
+- 修复 `SubAgentManager.create_run()` 的 `task.raw_json` 崩溃路径，改为把计划持久化到 `SubAgentTask.workflow_plan` / `workflow_mode` / `workflow_template_id`
+- `create_run()` 和 `dispatch` 现在都会把 workflow worker 验收项与 parent gate checklist 合并进父任务 `acceptance_checks`
+- `dispatch_subagents` CLI 和编排工具新增 `workflow_mode=off|plan|auto`，`plan` 只写计划，`auto` 会把内置模板落成 worker 子工单
+- `spawn_subagents` / `create_subagents` 已接通配置型 workflow 模式，`subagent_workflow_mode=manual` 会映射到建单时的 `plan`
+- 自动派工会把 phase、依赖关系和 worker 子工单写回任务目录，避免重复创建
+- 同步补齐 `CLI_REFERENCE.md`，并修正场景测试 backend 的 `generate(..., on_chunk=None)` 签名
+
+验证方式：
+- `python3 -m pytest -q agent_py_agent/tests/test_subagent_quality_contract.py agent_py_agent/tests/test_subagent_workflow_planner.py agent_py_agent/tests/test_agent/test_dispatch_and_planner.py`
+- `python3 -m pytest -q`
+
 ### 大文件按职责拆分完成
 
 解决问题：`subagent.py`(4.8k行)、`__main__.py`(2.7k行)、`core.py`(1.6k行) 等文件职责混杂，难以维护。

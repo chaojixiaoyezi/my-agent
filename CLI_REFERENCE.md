@@ -161,7 +161,7 @@ Ctrl+C
 | `subagents-workflow-plan` | 预览目标会命中哪个内置 subagent workflow | 否 | 否 |
 | `subagents-route-capabilities` | 路由 capability request | `--apply` 时写 grant/gap | 否 |
 | `subagents-acceptance` | 验收等待验收的 subagent | `--apply` 时写回状态和审计日志 | 否 |
-| `subagents-patches` | 审核 runner 输出的 patch 记录 | `--apply` 时写 patch 审核状态和日志 | 否 |
+| `subagents-patches` | 审核或 apply runner 输出的 patch 记录 | 默认 review dry-run；`--review-apply` 只写审核状态；`--apply` 真正落文件 | 否 |
 | `subagents-dispatch` | 执行父代理调度 | dry-run 写报告；`--apply` 写回 | 只有 `--apply --execute-runners` 会调用 |
 | `daemon` | 按 `agent_config.yaml` 的 `daemon_*` 配置启动前台常驻调度 | 取决于配置 | 取决于配置 |
 | `scenario-test` | 跑一轮隔离的 gateway/chat/subagent/runner/验收全流程 | 写临时 fixture 和报告 | 默认调用真实 API，可用 `--dry-run` 跳过 runner |
@@ -690,13 +690,17 @@ my-agent subagents-acceptance --apply --reviewer parent
 
 ```powershell
 my-agent subagents-patches --dry-run
-my-agent subagents-patches --apply --reviewer parent
+my-agent subagents-patches --review-apply --reviewer parent
+my-agent subagents-patches --apply-dry-run --run-id <run_id>
+my-agent subagents-patches --apply --run-id <run_id> --reviewer parent
 ```
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--dry-run` | 默认模式 | 只生成 patch 审核报告，不修改记录。 |
-| `--apply` | `false` | 写回 patch 审核状态。 |
+| `--review-apply` | `false` | 写回 patch 审核状态，但不真正 apply 文件。 |
+| `--apply-dry-run` | `false` | 展示将要 apply 的 diff，不真正写文件。 |
+| `--apply` | `false` | 真正 apply `write_file` patch、跑 allowlist 测试并记录审计日志。 |
 | `--run-id <id>` | - | 只审核指定子代理运行 ID，可多次传入。 |
 | `--limit <n>` | `20` | 最多处理多少条记录。 |
 | `--reviewer <name>` | `parent` | 审核者标识。 |
@@ -718,6 +722,7 @@ my-agent subagents-dispatch --watch --planner --interval 30
 | `--apply` | `false` | 执行低风险调度动作并写审计日志。 |
 | `--execute-runners` | `false` | 配合 `--apply` 调用真实模型执行 runner；不能单独使用。 |
 | `--planner` | `false` | 有 active/pending/stalled/needs-intervention 事项时调用父代理 LLM planner；如果模型只回 `HEARTBEAT_OK`，会被 gate 标记为失败。 |
+| `--workflow-mode <off\|plan\|auto>` | `off` | dispatch 前对父任务执行 workflow 规划；`plan` 只写计划，`auto` 还会自动派出 workflow worker 子工单。 |
 | `--max-runners <n>` | `1` | 本轮最多推进多少个 runner；`0` 表示不执行 runner。 |
 | `--limit <n>` | `20` | 每个阶段最多处理多少条记录；`0` 表示不限制。 |
 | `--watch` | `false` | 持续循环执行 dispatch。 |

@@ -17,53 +17,9 @@
 
 ## 下一版优先级
 
-来自 STATUS.md，当前最急迫的四项：
+来自 STATUS.md，当前最急迫的两项：
 
-### 1. Workflow Router/Compiler 集成
-
-状态：部分落地
-
-解决问题：用户必须手写 goal 和 acceptance，workflow 集成后可以从模板自动生成 worker spec 和验收条件，减少人工配置，缓解"派错工、漏验收、机械 PASS、fake done"。
-
-当前进展：
-- `AgentConfig` 已有 `subagent_workflow_mode: auto | manual | off`
-- `agent_py_agent/agent/subagent_workflows/` 已有模板加载和校验
-- `QualityContract`、`ContextManifest`、`context_packs` 已在 `SubAgentTask`/`SubAgentExecutionContext` 中
-- `create_run()` 已有 `workflow_mode` 参数，但存在 `task.raw_json` bug（SubAgentTask 没有该字段）
-- 没有调用方传 `workflow_mode != "off"`，功能处于休眠状态
-
-待做：
-- 修复 `task.raw_json` bug
-- 至少一个调用方传 `workflow_mode`
-- Workflow Router：自然语言任务 → 匹配 workflow 模板
-- Workflow Compiler：模板 → worker spec + acceptance checklist
-- Parent Gate：派工前生成可执行计划和父级验收闸门
-
-设计文档：[docs/design/subagent-quality-contract.md](design/subagent-quality-contract.md)
-设计台账：DESIGN_LEDGER.md "Subagent 质量契约与用户少说派工"
-
-### 2. Patch 自动应用
-
-状态：设计中
-
-解决问题：runner 输出的 patches 目前只是计划/状态记录，必须由父代理或集成器验收后手动处理，无法自动应用和集成验证。
-
-**注意**：当前设计原则明确"patch 审核器不自动应用 diff"、"patch apply 需要独立审核链路"。如需打破此原则，必须先更新设计文档，增加 allowlist、沙箱、回滚等约束。
-
-当前进展：
-- `PatchReviewRecord` / `PatchReviewReport` 已有
-- `subagents-patches` 可以审核 runner 声明的 patch 状态
-- 验收器会检查 `patches_reviewed` 和 `patch_status_valid`
-
-待做：
-- 设计独立 patch apply 审核链路
-- 命令 allowlist 和超时审计
-- diff 审计和写入边界
-- 集成验收（apply 后跑测试）
-
-设计台账：DESIGN_LEDGER.md "真实 API E2E、测试隔离和 patch 审核链"、"Subagent Runner Entry"
-
-### 3. Lessons 自动生成自学习草稿
+### 1. Lessons 自动生成自学习草稿
 
 状态：设计中
 
@@ -85,7 +41,7 @@
 设计文档：[docs/design/subagent-quality-contract.md](design/subagent-quality-contract.md)
 设计台账：DESIGN_LEDGER.md "自学习"
 
-### 4. 并行 Worker Pool
+### 2. 并行 Worker Pool
 
 状态：部分落地
 

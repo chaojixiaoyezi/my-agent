@@ -117,13 +117,16 @@ def add_subagents_subcommands(sub: argparse._SubParsersAction) -> None:
     acceptance.set_defaults(func=cmd_subagents_acceptance, apply=False)
 
     patches = sub.add_parser("subagents-patches", help="审核 runner 输出里的 patch 记录")
-    patches.add_argument("--dry-run", action="store_false", dest="apply", help="只生成 patch 审核报告，不修改记录")
-    patches.add_argument("--apply", action="store_true", help="写回 patch 审核状态")
+    patch_action = patches.add_mutually_exclusive_group()
+    patch_action.add_argument("--dry-run", action="store_const", const="review_dry_run", dest="patch_action", help="只生成 patch 审核报告，不修改记录")
+    patch_action.add_argument("--review-apply", action="store_const", const="review_apply", dest="patch_action", help="写回 patch 审核状态，但不真正 apply 文件")
+    patch_action.add_argument("--apply-dry-run", action="store_const", const="apply_dry_run", dest="patch_action", help="展示将要 apply 的 diff，不真正写文件")
+    patch_action.add_argument("--apply", action="store_const", const="apply", dest="patch_action", help="真正 apply patch、跑 allowlist 测试并记录审计日志")
     patches.add_argument("--run-id", nargs="*", help="只审核指定子代理运行 ID")
     patches.add_argument("--limit", type=int, default=20, help="最多处理多少条记录")
     patches.add_argument("--reviewer", default="parent", help="审核者标识")
     patches.add_argument("--note", help="写入 patch 审核记录的备注")
-    patches.set_defaults(func=cmd_subagents_patches, apply=False)
+    patches.set_defaults(func=cmd_subagents_patches, patch_action="review_dry_run")
 
     dispatch = sub.add_parser("subagents-dispatch", help="执行一轮父代理调度，默认 dry-run")
     _add_capability_config_arg(dispatch)
@@ -131,6 +134,7 @@ def add_subagents_subcommands(sub: argparse._SubParsersAction) -> None:
     dispatch.add_argument("--apply", action="store_true", help="执行低风险调度动作并写审计日志")
     dispatch.add_argument("--execute-runners", action="store_true", help="配合 --apply 调用真实模型执行 runner")
     dispatch.add_argument("--planner", action="store_true", help="有待处理事项时调用父代理 LLM planner，禁止空心 HEARTBEAT_OK")
+    dispatch.add_argument("--workflow-mode", choices=["off", "plan", "auto"], default="off", help="dispatch 前对父任务执行 workflow 规划；plan 只写计划，auto 还会自动派工")
     dispatch.add_argument("--max-runners", type=int, default=1, help="本轮最多推进多少个 runner，0 表示不执行 runner")
     dispatch.add_argument("--limit", type=int, default=20, help="每个阶段最多处理多少条记录，0 表示不限制")
     dispatch.add_argument("--watch", action="store_true", help="持续循环执行 dispatch")
@@ -164,4 +168,3 @@ def add_subagents_subcommands(sub: argparse._SubParsersAction) -> None:
     subagent = sub.add_parser("subagent", help="查看单个 subagent 运行详情")
     subagent.add_argument("run_id", help="子代理运行 ID")
     subagent.set_defaults(func=cmd_subagent_detail)
-

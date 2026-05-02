@@ -30,6 +30,20 @@ CODING_SUBAGENT_TOOLS = [
 ]
 
 
+def _tool_workflow_mode(explicit_mode: object, config_mode: object) -> str:
+    if isinstance(explicit_mode, str):
+        normalized = explicit_mode.strip().lower()
+        if normalized in {"off", "plan", "auto"}:
+            return normalized
+    if isinstance(config_mode, str):
+        normalized = config_mode.strip().lower()
+        if normalized == "auto":
+            return "auto"
+        if normalized == "manual":
+            return "plan"
+    return "off"
+
+
 class CreateSubagentsTool(BaseTool):
     """主代理工具：把自然语言里的派工意图落成 subagent 工单。"""
 
@@ -64,6 +78,7 @@ class CreateSubagentsTool(BaseTool):
                 "allowed_tools": "显式工具列表；传了它就覆盖 tool_preset",
                 "acceptance_checks": "验收标准列表",
                 "plan": "每个子代理的初始步骤列表",
+                "workflow_mode": "off/plan/auto；决定是否在建工单时挂 workflow 计划",
             },
             parameter_details={
                 "goal": "写清楚子代理要交付什么，不要只写一个空泛标题。",
@@ -72,9 +87,10 @@ class CreateSubagentsTool(BaseTool):
                 "allowed_tools": "JSON 数组，例如 [\"read_file\", \"write_file\"]。如果需要写代码，通常至少给 read_file/search_text/write_file/replace_in_file。",
                 "acceptance_checks": "JSON 数组或多行文本，说明父代理后续怎样判断任务完成。",
                 "plan": "JSON 数组或多行文本，给子代理的初始执行步骤。",
+                "workflow_mode": "默认跟随配置：auto->auto，manual->plan，off->off。显式传值会覆盖配置。",
             },
             examples=[
-                '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"tool_preset":"coding","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',
+                '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"tool_preset":"coding","workflow_mode":"auto","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',
                 '{"tool":"create_subagents","goal":"调研 gateway 失败场景","count":2,"tool_preset":"read_only"}',
             ],
         )
@@ -111,6 +127,7 @@ class CreateSubagentsTool(BaseTool):
         owner = str(params.get("owner") or "").strip()
         supervisor = str(params.get("supervisor") or "parent").strip()
         final_owner = str(params.get("final_owner") or "").strip()
+        workflow_mode = _tool_workflow_mode(params.get("workflow_mode"), self.agent.config.subagent_workflow_mode)
 
         tasks = []
         for index in range(1, count + 1):
@@ -126,6 +143,7 @@ class CreateSubagentsTool(BaseTool):
                 supervisor=supervisor,
                 final_owner=final_owner,
                 acceptance_checks=acceptance_checks,
+                workflow_mode=workflow_mode,
             )
             tasks.append(task)
 
@@ -233,6 +251,7 @@ class DispatchSubagentsTool(BaseTool):
                 "apply": "是否写回低风险动作，默认 false",
                 "execute_runners": "是否真实调用模型执行 runner，必须配合 apply=true",
                 "planner": "是否启用父代理 planner，默认 false",
+                "workflow_mode": "off/plan/auto；是否在 dispatch 前补做 workflow 规划或自动派工",
                 "max_runners": "本轮最多推进多少个 runner，默认 1；0 表示不执行 runner",
                 "limit": "每阶段最多处理多少条记录，默认 20；0 表示不限制",
                 "runner_instruction": "给 runner 的额外指令",
@@ -241,11 +260,12 @@ class DispatchSubagentsTool(BaseTool):
                 "apply": "false 只生成计划和报告；true 会写审计日志并可能改变任务状态。",
                 "execute_runners": "true 会消耗真实 API；只有用户明确要求开跑/真实执行/完整测试时才打开。",
                 "planner": "true 会额外调用父代理 LLM planner；适合长任务统筹，但会多消耗一次模型调用。",
+                "workflow_mode": "plan 只把 workflow 计划写回父任务；auto 会在计划 OK 时落成 worker 子工单。",
                 "max_runners": "用来限制本轮推进数量，避免一次把太多子代理同时跑起来。",
             },
             examples=[
-                '{"tool":"dispatch_subagents","apply":false,"max_runners":1}',
-                '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"max_runners":2,"runner_instruction":"只在隔离 fixture 目录内写文件，并输出可验收证据"}',
+                '{"tool":"dispatch_subagents","apply":false,"workflow_mode":"plan","max_runners":1}',
+                '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"workflow_mode":"auto","max_runners":2,"runner_instruction":"只在隔离 fixture 目录内写文件，并输出可验收证据"}',
             ],
         )
 
@@ -274,6 +294,7 @@ class DispatchSubagentsTool(BaseTool):
             apply=apply,
             execute_runners=execute_runners,
             planner=_bool_param(params.get("planner"), default=False),
+            workflow_mode=_tool_workflow_mode(params.get("workflow_mode"), self.agent.config.subagent_workflow_mode),
             max_runners=_non_negative_int(params.get("max_runners"), default=1),
             limit=_non_negative_int(params.get("limit"), default=20),
             reviewer=str(params.get("reviewer") or "chat-tool").strip(),

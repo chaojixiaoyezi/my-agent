@@ -27,6 +27,16 @@ from .runner_prompts import (
 )
 
 
+def _config_workflow_dispatch_mode(value: object) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "auto":
+            return "auto"
+        if normalized == "manual":
+            return "plan"
+    return "off"
+
+
 class SimpleAgentSubagentMixin:
     """LLM: mixin for subagent lifecycle orchestration reachable from SimpleAgent.
 
@@ -40,7 +50,11 @@ class SimpleAgentSubagentMixin:
         if not self.config.enable_subagents:
             raise RuntimeError("配置已禁用 subagent。")
         n = min(count or self.config.max_subagents, self.config.max_subagents)
-        return self.subagents.split(goal, n)
+        return self.subagents.split(
+            goal,
+            n,
+            workflow_mode=_config_workflow_dispatch_mode(self.config.subagent_workflow_mode),
+        )
 
     def run_subagent(
         self,
