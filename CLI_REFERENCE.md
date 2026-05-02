@@ -861,7 +861,10 @@ my-agent scenario-test --case gateway-cross-day-resume
 my-agent scenario-test --case gateway-delayed-response
 my-agent scenario-test --case gateway-multi-worker
 my-agent scenario-test --case gateway-stale-lease
+my-agent scenario-test --case gateway-processing-stop
 my-agent scenario-test --case parent-subagent-cross-day-resume
+my-agent scenario-test --case real-model-recovery
+my-agent scenario-test --case real-model-recovery-multi-round
 my-agent scenario-test --case structured-repair
 my-agent scenario-test --case runner-retry
 my-agent scenario-test --case all --count 1
@@ -890,10 +893,13 @@ my-agent scenario-test --dry-run
 | `gateway-delayed-response` | 模拟 response 已经落盘但 pending 请求副本迟到，确认 worker 只归档请求、不重复调用模型 | 否 |
 | `gateway-multi-worker` | 启动两个 request worker 并发抢占多条 pending 请求，确认每条只完成一次、不重复归档 | 否 |
 | `gateway-stale-lease` | 模拟 worker 中断留下的旧 `processing` lease，确认恢复会重排并由 worker 完成请求 | 否 |
+| `gateway-processing-stop` | 模拟 worker 已领任务并正在调模型时 gateway stop/restart，确认重启后不卡死、不丢请求、不留半截 JSON | 否 |
 | `parent-subagent-cross-day-resume` | 跑一次真实 subagent runner 工具回合，模拟跨天线索，确认 `memory-resume` 能回到 task fact sources | 否 |
+| `real-model-recovery` | 用真实 API 跑一次 subagent，验证 `memory-resume` 能找回真实模型响应内容 | 是 |
+| `real-model-recovery-multi-round` | 用真实 API 跑多轮工具调用（read_file + search_text），验证 `memory-resume` 能找回每轮 evidence 和 output.json | 是 |
 | `structured-repair` | 模拟 runner 输出损坏的 `[SUBAGENT_RESULT]`，确认修复回合补齐 JSON 并通过验收 | 否 |
 | `runner-retry` | 模拟 runner 第一次模型调用失败，确认下一轮 dispatch 会有限重试并完成验收 | 否 |
-| `all` | 依次跑 `verification`、`gateway-restart`、`gateway-cross-day-resume`、`gateway-delayed-response`、`gateway-multi-worker`、`gateway-stale-lease`、`parent-subagent-cross-day-resume`、`structured-repair`、`runner-retry`、`happy` | `happy` 会调用 |
+| `all` | 依次跑 `verification`、`gateway-restart`、`gateway-cross-day-resume`、`gateway-delayed-response`、`gateway-multi-worker`、`gateway-stale-lease`、`gateway-processing-stop`、`parent-subagent-cross-day-resume`、`real-model-recovery-multi-round`、`structured-repair`、`runner-retry`、`happy` | `happy` 和 multi-round 会调用 |
 
 | 参数 | 说明 |
 | --- | --- |

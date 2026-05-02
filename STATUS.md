@@ -1,6 +1,6 @@
 # STATUS
 
-## 2026-05-01 最新恢复入口
+## 2026-05-02 最新恢复入口
 
 如果下次换电脑、换会话、换 IDE，先看这一段和 [HANDOFF_current-state.md](HANDOFF_current-state.md)。
 
@@ -17,13 +17,16 @@
 - `scenario-test --case gateway-delayed-response` 已能验证 response 已落盘时，迟到 pending 请求副本只归档、不重复调用模型。
 - `scenario-test --case gateway-multi-worker` 已能用两个 request worker 并发处理多条 pending 请求，验证不重复响应或归档。
 - `scenario-test --case gateway-stale-lease` 已能模拟 worker 中断留下旧 processing lease，验证恢复会重排并完成请求。
+- `scenario-test --case gateway-processing-stop` 已能模拟 worker 正在处理请求时 gateway stop/restart，验证重启后不卡死、不丢请求、不留半截 JSON。
 - `scenario-test --case parent-subagent-cross-day-resume` 已能创建真实子代理任务、执行 runner 工具回合、模拟跨天线索，并验证恢复能回到任务事实源。
+- `scenario-test --case real-model-recovery-multi-round` 已能用真实 API 跑多轮工具调用（read_file + search_text），验证 memory-resume 能找回每轮 evidence 和 output.json。
 - gateway worker 在 processing lease 写失败时会继续处理请求，不会因为观测文件失败把用户请求卡死。
 - 如果 LocalStore 记录了临时 `requests/processing/<id>.json`，恢复时会优先纠偏到现存的 `requests/done` 或 `requests/failed`。
+- 日志分析模块第一版已落地：SecurityCase → LogWorkOrder → SubAgentTask 转换链 + bounded_query 受控查询工具。
 
 最新验收：
 
-- `python3 -m pytest -q` -> `254 passed`
+- `python3 -m pytest -q` -> `391 passed`
 - `python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`
 - `git diff --check` -> passed
 - focused gateway/memory/doc tests -> `16 passed`
@@ -34,13 +37,14 @@
 - gateway delayed-response focused tests -> `5 passed`
 - gateway/scenario/doc focused tests -> `11 passed`
 - CLI reference focused test -> `1 passed`
+- log analysis first loop tests -> `26 passed`
 
 下一版优先级：
 
-1. 补 gateway 坏天气场景：processing 中 stop/restart。
-2. 把 subagent workflow router/compiler/parent gate 接到真实 task creation，默认 dry-run 或 manual-confirm。
-3. 推进 LOG work-order 到真实 SubAgentTask 执行桥，并补 bounded evidence reader。
-4. 用真实外部模型补跑 parent/subagent runner 跨天恢复冒烟。
+1. ~~补 gateway 坏天气场景：processing 中 stop/restart。~~ ✅ 已完成 `gateway-processing-stop`
+2. ~~把 subagent workflow router/compiler/parent gate 接到真实 task creation，默认 dry-run 或 manual-confirm。~~ ✅ 已完成
+3. ~~推进 LOG work-order 到真实 SubAgentTask 执行桥，并补 bounded evidence reader。~~ ✅ 已完成第一版
+4. ~~用真实外部模型补跑 parent/subagent runner 跨天恢复冒烟。~~ ✅ 已完成 `real-model-recovery-multi-round`
 
 详细交接见 [HANDOFF_current-state.md](HANDOFF_current-state.md)，模块细节见 `docs/modules/memory/02-progress.md`、`docs/modules/subagent/02-progress.md` 和 `docs/modules/gateway/02-progress.md`。
 

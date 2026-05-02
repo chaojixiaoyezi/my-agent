@@ -17,10 +17,12 @@ from .scenario_cases import (
     run_scenario_gateway_cross_day_resume_case,
     run_scenario_gateway_delayed_response_case,
     run_scenario_gateway_multi_worker_case,
+    run_scenario_gateway_processing_stop_case,
     run_scenario_gateway_restart_case,
     run_scenario_gateway_stale_lease_case,
     run_scenario_parent_subagent_cross_day_resume_case,
     run_scenario_real_model_recovery_case,
+    run_scenario_real_model_recovery_multi_round_case,
     run_scenario_runner_retry_case,
     run_scenario_structured_repair_case,
     run_scenario_verification_case,
@@ -74,10 +76,14 @@ def cmd_scenario_test(args) -> int:
         return run_scenario_gateway_multi_worker_case(args)
     if args.case == "gateway-stale-lease":
         return run_scenario_gateway_stale_lease_case(args)
+    if args.case == "gateway-processing-stop":
+        return run_scenario_gateway_processing_stop_case(args)
     if args.case == "parent-subagent-cross-day-resume":
         return run_scenario_parent_subagent_cross_day_resume_case(args)
     if args.case == "real-model-recovery":
         return run_scenario_real_model_recovery_case(args)
+    if args.case == "real-model-recovery-multi-round":
+        return run_scenario_real_model_recovery_multi_round_case(args)
     if args.case == "structured-repair":
         return run_scenario_structured_repair_case(args)
     if args.case == "runner-retry":
