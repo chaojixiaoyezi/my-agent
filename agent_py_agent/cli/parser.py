@@ -618,12 +618,35 @@ def build_parser() -> argparse.ArgumentParser:
         default="all",
         help="指定要启动的通道，默认 all",
     )
+    adapter_start.add_argument(
+        "--daemon",
+        action="store_true",
+        help="以后台守护进程模式运行，写入 PID 文件",
+    )
+    adapter_start.add_argument(
+        "--pid-file",
+        help="指定 PID 文件路径；默认为 gateway workspace 下的 adapter.pid",
+    )
     adapter_start.set_defaults(func=cmd_adapter_start)
 
     adapter_status = adapter_sub.add_parser("status", help="查看通道适配器状态")
+    adapter_status.add_argument(
+        "--pid-file",
+        help="指定 PID 文件路径；默认为 gateway workspace 下的 adapter.pid",
+    )
     adapter_status.set_defaults(func=cmd_adapter_status)
 
     adapter_stop = adapter_sub.add_parser("stop", help="停止所有通道适配器")
+    adapter_stop.add_argument(
+        "--pid-file",
+        help="指定 PID 文件路径；默认为 gateway workspace 下的 adapter.pid",
+    )
+    adapter_stop.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="等待优雅停止的超时秒数",
+    )
     adapter_stop.set_defaults(func=cmd_adapter_stop)
 
     subagent_context = sub.add_parser("subagent-context", help="生成单个 subagent 执行上下文包")

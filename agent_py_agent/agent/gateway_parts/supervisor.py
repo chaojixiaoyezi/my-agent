@@ -146,6 +146,31 @@ class GatewaySupervisor:
 
         return False
 
+    def _check_adapter_health(self) -> bool:
+        """Check if the adapter is healthy (running and state file valid)."""
+        self._resolve_agent_and_paths()
+
+        # Check adapter PID file
+        pid = get_running_pid(self._paths.adapter_pid)
+        if not pid:
+            return False
+
+        if not is_pid_alive(pid):
+            return False
+
+        # Check adapter state file
+        state_path = self._paths.root / "adapter_state.json"
+        if state_path.exists():
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                # Check if state is "running"
+                if state.get("state") == "running":
+                    return True
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        return True  # PID alive, assume healthy if no state file
+
     def _start_gateway(self) -> Optional[int]:
         """Start the gateway process. Returns the gateway PID or None on failure."""
         self._resolve_agent_and_paths()
@@ -316,16 +341,18 @@ class GatewaySupervisor:
             last_check = now
 
             healthy = self._is_gateway_healthy()
+            adapter_healthy = self._check_adapter_health()
 
             if healthy:
                 consecutive_failures = 0
-                continue
-
-            consecutive_failures += 1
-            self._log_warn(
-                f"Gateway health check failed (consecutive={consecutive_failures}): "
-                "PID file missing, process dead, or heartbeat stale"
-            )
+            else:
+                consecutive_failures += 1
+                self._log_warn(
+                    f"Gateway health check failed (consecutive={consecutive_failures}): "
+                    "PID file missing, process dead, or heartbeat stale"
+                )
+                if not adapter_healthy:
+                    self._log_warn("Adapter is also not running")
 
             if consecutive_failures >= 3:
                 self._restart_gateway()

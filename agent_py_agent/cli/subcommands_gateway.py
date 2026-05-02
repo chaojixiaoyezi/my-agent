@@ -283,6 +283,12 @@ def add_gateway_subcommands(sub: argparse._SubParsersAction) -> None:
 
     # Start-all
     start_all = gateway_sub.add_parser("start-all", help="一键启动 gateway（带 supervisor）+ 所有适配器")
+    start_all.add_argument(
+        "--adapter",
+        choices=["feishu", "qq", "all", "none"],
+        default="all",
+        help="启动哪些通道适配器；默认 all；none 表示不启动适配器",
+    )
     start_all.set_defaults(func=cmd_start_all)
 
     # Service install/uninstall

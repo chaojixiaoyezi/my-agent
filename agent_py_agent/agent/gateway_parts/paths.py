@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: resolves typed gateway and adapter filesystem path contracts from config.
 
 给人看的解释：
-这个文件只负责“gateway 和 adapter 的文件都放在哪”。
+这个文件只负责"gateway 和 adapter 的文件都放在哪"。
 以后命令行、后台进程、测试都从这里拿路径，不需要到处手写目录名。
 """
 
@@ -20,13 +20,14 @@ class GatewayPaths:
     """LLM contract: all filesystem endpoints used by the gateway queue.
 
     Human version:
-    这里集中保存 gateway 会读写的所有文件夹和文件。比如 `inbox` 是待处理请求，
-    `processing` 是正在处理的请求，`responses` 是结果。CLI 不需要自己拼路径，
-    只要拿到这组对象就知道 gateway 的“现场”在哪里。
+    这里集中保存 gateway 会读写的所有文件夹和文件。比如 inbox 是待处理请求，
+    processing 是正在处理的请求，responses 是结果。CLI 不需要自己拼路径，
+    只要拿到这组对象就知道 gateway 的现场在哪里。
     """
 
     root: Path
     pid: Path
+    adapter_pid: Path
     state: Path
     heartbeat: Path
     stop_request: Path
@@ -44,8 +45,8 @@ class AdapterPaths:
     """LLM contract: file-adapter inbox/outbox directory set.
 
     Human version:
-    文件适配器是给外部聊天工具/TUI 用的。外部程序把消息 JSON 放进 `inbox`，
-    my-agent 处理后把回复 JSON 放到 `outbox`。中间的 `processing/done/failed`
+    文件适配器是给外部聊天工具/TUI 用的。外部程序把消息 JSON 放进 inbox，
+    my-agent 处理后把回复 JSON 放到 outbox。中间的 processing/done/failed
     让人可以直接看目录判断消息走到哪一步。
     """
 
@@ -62,13 +63,14 @@ def gateway_paths(agent: SimpleAgent) -> GatewayPaths:
 
     Human version:
     根据配置算出 gateway 的工作目录。测试环境可以把它指到临时目录，真实运行时
-    默认落到 `agent_py_agent/data/gateway`，这样不会把路径写死在命令逻辑里。
+    默认落到 agent_py_agent/data/gateway，这样不会把路径写死在命令逻辑里。
     """
 
     root = agent.root / agent.config.gateway_workspace
     return GatewayPaths(
         root=root,
         pid=root / "gateway.pid",
+        adapter_pid=root / "adapter.pid",
         state=root / "gateway_state.json",
         heartbeat=root / "gateway_heartbeat.json",
         stop_request=root / "gateway_stop.request",
@@ -96,7 +98,7 @@ def adapter_paths(agent: SimpleAgent) -> AdapterPaths:
     """LLM contract: resolve file-adapter paths from agent config.
 
     Human version:
-    和 `gateway_paths()` 类似，只是这里服务外部消息适配器。以后如果 adapter
+    和 gateway_paths() 类似，只是这里服务外部消息适配器。以后如果 adapter
     从文件协议换成别的协议，CLI 入口也不需要知道太多底层细节。
     """
 
