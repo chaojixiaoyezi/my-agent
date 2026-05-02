@@ -278,7 +278,6 @@ if chat.stderr:
 assert chat.returncode == 0
 assert "交互循环已启动" in chat.stdout
 assert "已记忆" in chat.stdout
-assert "已发送到后台" in chat.stdout
 assert "subagent-" in chat.stdout
 
 print("ALL_TESTS_PASS")

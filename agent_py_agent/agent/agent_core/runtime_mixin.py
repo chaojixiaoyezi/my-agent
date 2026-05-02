@@ -102,12 +102,8 @@ class SimpleAgentRuntimeMixin:
         executed_tools: list[str] = []
         archive_tool_calls: list[dict[str, object]] = []
 
-        # LLM: streaming callback — use external on_chunk if provided, else print to stdout.
-        def _default_on_chunk(chunk: str) -> None:
-            sys.stdout.write(chunk)
-            sys.stdout.flush()
-
-        effective_on_chunk = on_chunk if on_chunk is not None else _default_on_chunk
+        # LLM: only stream when the caller explicitly provides a callback.
+        effective_on_chunk = on_chunk
 
         while True:
             final_prompt = self.prompts.build(
