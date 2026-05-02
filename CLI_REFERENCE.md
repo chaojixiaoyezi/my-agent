@@ -967,6 +967,12 @@ gateway run                     内部调试入口，平时不用直接敲
 | `ask` | 把一条聊天/任务请求写入本地 inbox，由后台 gateway 调用模型处理。 |
 | `result` | 根据 request id 读取 `ask --no-wait` 留下的响应。 |
 | `run` | 内部/调试命令，前台运行 gateway 循环；通常由 `start` 调用。 |
+| `supervisor-start` | 启动看门狗进程，自动监控并重启崩溃的 gateway。 |
+| `supervisor-stop` | 停止看门狗进程。 |
+| `supervisor-status` | 查看 supervisor 和 gateway 状态。 |
+| `start-all` | 一键启动 gateway（带 supervisor）+ 所有适配器。 |
+| `install` | 安装系统服务（Linux systemd 或 macOS launchd），开机自启。 |
+| `uninstall` | 卸载系统服务。 |
 
 ### `gateway ask` 的两种用法
 
@@ -1259,6 +1265,7 @@ my-agent notifications --flush
 my-agent adapter start --channel feishu
 my-agent adapter start --channel qq
 my-agent adapter start --channel all
+my-agent adapter start --daemon
 my-agent adapter status
 my-agent adapter stop
 ```
@@ -1268,8 +1275,13 @@ my-agent adapter stop
 | 子命令 | 说明 |
 |--------|------|
 | `start --channel <name>` | 启动指定通道适配器（feishu/qq/all） |
+| `start --daemon` | 后台守护进程模式运行，写入 PID 文件 |
+| `start --pid-file <path>` | 指定 PID 文件路径 |
 | `status` | 查看通道适配器状态 |
+| `status --pid-file <path>` | 指定 PID 文件路径 |
 | `stop` | 停止所有通道适配器 |
+| `stop --pid-file <path>` | 指定 PID 文件路径 |
+| `stop --timeout <seconds>` | 等待优雅停止的超时秒数 |
 | `file` | 文件协议适配器（inbox JSON → gateway → outbox JSON） |
 
 ## `audit-log`
