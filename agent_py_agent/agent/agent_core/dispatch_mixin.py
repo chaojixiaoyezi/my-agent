@@ -498,7 +498,67 @@ class SimpleAgentDispatchMixin:
             )
 
         report = self.subagents.build_dispatch_report(records, dry_run=not apply)
-        return self.subagents.write_dispatch_report(report, append_log=apply)
+        report = self.subagents.write_dispatch_report(report, append_log=apply)
+
+        # 任务达到终态时触发通知
+        if apply:
+            self._notify_completed_tasks(records)
+
+        return report
+
+    def _notify_completed_tasks(self, records: list) -> None:
+        """对达到终态的任务触发通知。"""
+
+        if not getattr(self.config, "notification_enabled", False):
+            return
+
+        final_statuses = {"DONE", "FAILED", "TIMEOUT"}
+        notified_run_ids: set[str] = set()
+
+        for record in records:
+            if record.step not in {"runner", "acceptance"}:
+                continue
+            if not record.applied:
+                continue
+            run_id = record.run_id
+            if run_id in notified_run_ids:
+                continue
+
+            after_status = getattr(record, "after_status", "")
+            if after_status not in final_statuses:
+                continue
+
+            try:
+                task = self.subagents.load(run_id)
+            except FileNotFoundError:
+                continue
+
+            if task.status not in final_statuses:
+                continue
+
+            notified_run_ids.add(run_id)
+
+            try:
+                from ..notification import NotificationManager, NotificationRouter
+                notif_manager = NotificationManager(self.config)
+                channel = getattr(task, "last_active_channel", "") or "chat"
+                message = (
+                    f"任务 {run_id} 已完成\n"
+                    f"状态: {task.status}\n"
+                    f"目标: {task.goal[:100]}\n"
+                    f"尝试次数: {task.runner_attempts}"
+                )
+                notification = notif_manager.create_notification(
+                    task_id=run_id,
+                    user_id=getattr(self.config, "user_id", "admin"),
+                    session_id=task.root_id or "",
+                    channel=channel,
+                    message=message,
+                )
+                router = NotificationRouter(notif_manager, self.config)
+                router.deliver(notification.notification_id)
+            except Exception:
+                pass
 
     def watch_subagents(
         self,

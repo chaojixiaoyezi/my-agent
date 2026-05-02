@@ -1234,6 +1234,43 @@ my-agent task-list --user-id admin --status RUNNING --limit 20
 | `--status` | 全部 | 按状态过滤，如 PLANNING/RUNNING/DONE |
 | `--limit` | 50 | 最多显示多少条 |
 
+## `notifications`
+
+查看任务完成通知。
+
+```powershell
+my-agent notifications
+my-agent notifications --all
+my-agent notifications --flush
+```
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--all` | 否 | 列出所有通知（含已读） |
+| `--flush` | 否 | 推送所有离线存储的通知 |
+| `--limit` | 20 | 最多显示多少条 |
+
+## `adapter`
+
+外部通道适配器（飞书/QQ/文件）。
+
+```powershell
+my-agent adapter start --channel feishu
+my-agent adapter start --channel qq
+my-agent adapter start --channel all
+my-agent adapter status
+my-agent adapter stop
+```
+
+子命令：
+
+| 子命令 | 说明 |
+|--------|------|
+| `start --channel <name>` | 启动指定通道适配器（feishu/qq/all） |
+| `status` | 查看通道适配器状态 |
+| `stop` | 停止所有通道适配器 |
+| `file` | 文件协议适配器（inbox JSON → gateway → outbox JSON） |
+
 ## 安全约定
 
 - 默认调度命令都是 dry-run，先写报告，不修改任务。

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 
-from .adapter import cmd_adapter, cmd_adapter_file
+from .adapter import cmd_adapter, cmd_adapter_file, cmd_adapter_start, cmd_adapter_status, cmd_adapter_stop
 from .bench_model import cmd_bench_model
 from .chat import cmd_chat
 from .common import DEFAULT_CAPABILITY_CONFIG, DEFAULT_CONFIG, add_resume_context_switches, configure_stdio
@@ -69,6 +69,7 @@ from .subagents import (
     cmd_subagents_workflow_plan,
 )
 from .task_commands import cmd_task_list, cmd_task_lookup
+from .notifications_cmd import cmd_notifications
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -576,6 +577,21 @@ def build_parser() -> argparse.ArgumentParser:
     adapter_file.add_argument("--no-start-gateway", action="store_true", help="不自动启动 gateway；未运行时直接失败")
     adapter_file.set_defaults(func=cmd_adapter_file)
 
+    adapter_start = adapter_sub.add_parser("start", help="启动通道适配器（feishu / qq / all）")
+    adapter_start.add_argument(
+        "--channel",
+        choices=["feishu", "qq", "all"],
+        default="all",
+        help="指定要启动的通道，默认 all",
+    )
+    adapter_start.set_defaults(func=cmd_adapter_start)
+
+    adapter_status = adapter_sub.add_parser("status", help="查看通道适配器状态")
+    adapter_status.set_defaults(func=cmd_adapter_status)
+
+    adapter_stop = adapter_sub.add_parser("stop", help="停止所有通道适配器")
+    adapter_stop.set_defaults(func=cmd_adapter_stop)
+
     subagent_context = sub.add_parser("subagent-context", help="生成单个 subagent 执行上下文包")
     subagent_context.add_argument("run_id", help="子代理运行 ID")
     subagent_context.add_argument("--max-cards", type=int, default=0, help="最多注入多少张能力卡，0 表示不限制")
@@ -603,6 +619,12 @@ def build_parser() -> argparse.ArgumentParser:
     task_list.add_argument("--status", help="按状态过滤，如 PLANNING/RUNNING/DONE")
     task_list.add_argument("--limit", type=int, default=50, help="最多显示多少条")
     task_list.set_defaults(func=cmd_task_list)
+
+    notifications = sub.add_parser("notifications", help="查看未读通知")
+    notifications.add_argument("--all", action="store_true", help="列出所有通知（含已读）")
+    notifications.add_argument("--flush", action="store_true", help="推送所有离线存储的通知")
+    notifications.add_argument("--limit", type=int, default=20, help="最多显示多少条")
+    notifications.set_defaults(func=cmd_notifications)
 
     return parser
 

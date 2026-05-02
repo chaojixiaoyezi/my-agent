@@ -15,6 +15,7 @@ from pathlib import Path
 from ..agent.gateway import AdapterPaths, adapter_paths, gateway_paths, gateway_running, process_file_adapter_once
 from .common import make_agent
 from .gateway_client import ensure_gateway_started
+from ..agent.adapter import ChannelManager, FeishuAdapter, QQAdapter
 
 
 def cmd_adapter(args) -> int:
@@ -84,4 +85,89 @@ def cmd_adapter_file(args) -> int:
             sort_keys=True,
         )
     )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# 通道适配器子命令
+# ---------------------------------------------------------------------------
+
+
+def cmd_adapter_start(args) -> int:
+    """启动指定通道的适配器（feishu / qq / all）。"""
+    import sys
+    from pathlib import Path
+
+    agent = make_agent(args)
+
+    manager = ChannelManager(gateway_port=agent.config.gateway_port)
+
+    # 注册所需适配器
+    if args.channel in ("feishu", "all"):
+        feishu_cfg = {
+            "feishu_app_id": agent.config.feishu_app_id or "",
+            "feishu_app_secret": agent.config.feishu_app_secret or "",
+            "feishu_verification_token": agent.config.feishu_verification_token or "",
+            "feishu_encrypt_key": getattr(agent.config, "feishu_encrypt_key", ""),
+        }
+        feishu = FeishuAdapter(
+            config=feishu_cfg,
+            callback_port=agent.config.feishu_callback_port or 8421,
+            workspace_root=Path(agent.config.workspace_root or ".").resolve()
+            if agent.config.workspace_root
+            else Path.cwd(),
+        )
+        manager.register_adapter(feishu)
+
+    if args.channel in ("qq", "all"):
+        qq_cfg = {
+            "qq_app_id": agent.config.qq_app_id or "",
+            "qq_app_secret": agent.config.qq_app_secret or "",
+            "qq_token": agent.config.qq_token or "",
+            "qq_guild_id": getattr(agent.config, "qq_guild_id", ""),
+            "qq_channel_id": getattr(agent.config, "qq_channel_id", ""),
+        }
+        qq = QQAdapter(
+            config=qq_cfg,
+            workspace_root=Path(agent.config.workspace_root or ".").resolve()
+            if agent.config.workspace_root
+            else Path.cwd(),
+        )
+        manager.register_adapter(qq)
+
+    # 把 manager 存到全局（后续 stop/status 需要用到）
+    _global_manager = manager
+    globals()["_adapter_manager"] = _global_manager
+
+    print(f"启动通道适配器: {args.channel}", file=sys.stderr)
+    manager.start_all()
+    print(f"已启动: {manager.list_adapters()}", file=sys.stderr)
+    return 0
+
+
+def cmd_adapter_status(args) -> int:
+    """查看已注册适配器的运行状态。"""
+    import sys
+
+    manager: ChannelManager | None = globals().get("_adapter_manager")
+    if manager is None:
+        print("没有正在运行的适配器管理器。", file=sys.stderr)
+        return 1
+    for name in manager.list_adapters():
+        adapter = manager.get_adapter(name)
+        status = "running" if adapter and adapter.running else "stopped"
+        print(f"  {name}: {status}")
+    return 0
+
+
+def cmd_adapter_stop(args) -> int:
+    """停止所有已启动的通道适配器。"""
+    import sys
+
+    manager: ChannelManager | None = globals().get("_adapter_manager")
+    if manager is None:
+        print("没有正在运行的适配器管理器。", file=sys.stderr)
+        return 1
+    manager.stop_all()
+    print("所有适配器已停止。", file=sys.stderr)
     return 0

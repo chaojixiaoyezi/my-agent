@@ -211,11 +211,40 @@ gateway_port: 8420
 # 第一版 adapter file 会从 inbox 读 JSON 消息，把结果写到 outbox。
 adapter_workspace: "data/adapters/file"
 
+# 飞书（Lark）通道适配器配置
+# - feishu_app_id / feishu_app_secret: 飞书应用凭证，从环境变量或配置文件读取
+# - feishu_verification_token: 飞书回调地址配置时的验证 token
+# - feishu_encrypt_key: 飞书消息加密 key（可选）
+# - feishu_callback_port: 本地 HTTP 回调服务端口，飞书会往这个地址推送事件
+feishu_app_id: ""
+feishu_app_secret: ""
+feishu_verification_token: ""
+feishu_encrypt_key: ""
+feishu_callback_port: 8421
+
+# QQ 机器人通道适配器配置
+# - qq_app_id / qq_app_secret: QQ 机器人应用凭证
+# - qq_token: QQ 机器人 access_token（可选，支持自动刷新）
+# - qq_guild_id / qq_channel_id: 默认频道/公会 ID，轮询时会用这些
+qq_app_id: ""
+qq_app_secret: ""
+qq_token: ""
+qq_guild_id: ""
+qq_channel_id: ""
+
 # 会话工作区：
 # - 会话持久化目录，存储 session.json 和会话级别的上下文文件
 # - 每个会话对应一个目录：data/sessions/{session_id}/
 # - session.json 包含会话元数据：session_id、user_id、created_at、updated_at、last_active_channel、metadata
 session_workspace: "data/sessions"
+
+# 通知系统配置：
+# - notification_enabled: 是否启用通知推送
+# - notification_store_path: 通知存储目录，每个通知一个 JSON 文件
+# - notification_channel_timeout_seconds: 通道多久没活跃视为离线（秒）
+notification_enabled: true
+notification_store_path: "data/notifications"
+notification_channel_timeout_seconds: 300
 
 # 前台 daemon 默认策略（高级 / 过渡期）：
 # - my-agent daemon 会读取这些配置，减少启动时的长参数。
