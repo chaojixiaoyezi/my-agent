@@ -26,6 +26,7 @@ from ..agent.gateway import (
     wait_for_gateway_response,
     wait_for_gateway_running,
 )
+from ..agent.session import SessionManager, generate_session_id
 from .common import CHAT_PROMPT, FALLBACK_CHAT_PROMPT, make_agent, resume_context_override
 from .models import ChatJob
 from .thinking_spinner import ThinkingSpinner
@@ -135,6 +136,26 @@ def cmd_chat(args) -> int:
         if not alive:
             print("gateway 未在运行。请先执行: my-agent gateway start", file=sys.stderr)
             return 2
+
+    # 会话管理
+    from ..agent.session import SessionManager, generate_session_id
+    session_manager = SessionManager(agent.config)
+
+    if hasattr(args, "session_id") and args.session_id:
+        # 恢复已有会话
+        session = session_manager.load_session(args.session_id)
+        if session is None:
+            print(f"会话 {args.session_id} 不存在，将创建新会话。", file=sys.stderr)
+            session = session_manager.create_session(channel="chat")
+        else:
+            session_manager.touch_session(session.session_id, channel="chat")
+            print(f"已恢复会话: {session.session_id}")
+    else:
+        # 创建新会话
+        session = session_manager.create_session(channel="chat")
+        print(f"新会话: {session.session_id}")
+
+    current_session_id = session.session_id
 
     runtime_inject: list[str] = args.inject or []
     prompt_files: list[str] = args.prompt_file or []
@@ -728,6 +749,10 @@ def _run_tui(
 
     stop_event.set()
     _cprint("\n再见。")
+
+    # 保存会话
+    session_manager.touch_session(current_session_id, channel="chat")
+
     return 0
 
 
@@ -1099,4 +1124,8 @@ def _run_fallback(
         jobs.put(job)
         print(f"\n{_terminal_rule()}")
         print(f"{_BLUE}●{_RESET}  {_BLUE}{_BOLD}{user}{_RESET}")
+
+    # 保存会话
+    session_manager.touch_session(current_session_id, channel="chat")
+
     return 0

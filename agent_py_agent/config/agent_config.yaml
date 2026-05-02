@@ -120,6 +120,12 @@ model_speed_profile_path: "data/model_speed_profile.json"
 # 是否在首次使用时自动运行速度测试
 auto_bench_model_on_first_use: true
 
+# 用户数据隔离配置
+# - user_id: 当前用户标识，默认为 admin
+# - user_data_root: 用户数据根目录，所有用户数据都放在这里
+user_id: "admin"
+user_data_root: "data/users"
+
 # 单次最多拆出多少个子任务
 max_subagents: 5
 
@@ -204,6 +210,12 @@ gateway_port: 8420
 # 外部聊天工具 / TUI 文件适配器工作区。
 # 第一版 adapter file 会从 inbox 读 JSON 消息，把结果写到 outbox。
 adapter_workspace: "data/adapters/file"
+
+# 会话工作区：
+# - 会话持久化目录，存储 session.json 和会话级别的上下文文件
+# - 每个会话对应一个目录：data/sessions/{session_id}/
+# - session.json 包含会话元数据：session_id、user_id、created_at、updated_at、last_active_channel、metadata
+session_workspace: "data/sessions"
 
 # 前台 daemon 默认策略（高级 / 过渡期）：
 # - my-agent daemon 会读取这些配置，减少启动时的长参数。

@@ -74,6 +74,8 @@ class AgentConfig:
     max_auto_retry_attempts: int = 3
     model_speed_profile_path: str = "data/model_speed_profile.json"
     auto_bench_model_on_first_use: bool = True
+    user_id: str = "admin"
+    user_data_root: str = "data/users"
     scheduler_mode: str = "auto"
     runner_concurrency: str = "auto"
     runner_start_rate: str = "auto"
@@ -90,6 +92,7 @@ class AgentConfig:
     gateway_request_max_attempts: int = 2
     gateway_port: int = 8420
     adapter_workspace: str = "data/adapters/file"
+    session_workspace: str = "data/sessions"
     daemon_planner: bool = True
     daemon_apply: bool = True
     daemon_execute_runners: bool = True
@@ -342,6 +345,22 @@ def normalize_agent_config(data: dict[str, object]) -> tuple[dict[str, object], 
         defaults.gateway_port, min_val=0, max_val=65535,
     )
     _apply("gateway_port", v, w)
+
+    # user_id - validate non-empty string
+    raw_user_id = out.get("user_id", defaults.user_id)
+    if isinstance(raw_user_id, str) and raw_user_id.strip():
+        out["user_id"] = raw_user_id.strip()
+    else:
+        out["user_id"] = defaults.user_id
+        warnings.append(f"user_id: expected a non-empty string, got {raw_user_id!r}; using default")
+
+    # user_data_root - validate non-empty string
+    raw_user_data_root = out.get("user_data_root", defaults.user_data_root)
+    if isinstance(raw_user_data_root, str) and raw_user_data_root.strip():
+        out["user_data_root"] = raw_user_data_root.strip()
+    else:
+        out["user_data_root"] = defaults.user_data_root
+        warnings.append(f"user_data_root: expected a non-empty string, got {raw_user_data_root!r}; using default")
 
     # daemon_interval
     v, w = _coerce_int_config(
