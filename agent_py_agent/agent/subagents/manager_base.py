@@ -8,6 +8,7 @@ Human version:
 """
 
 import json
+import re
 import time
 from dataclasses import asdict, fields
 from pathlib import Path
@@ -129,6 +130,28 @@ def _normalize_context_packs(value: object) -> list[dict[str, object]]:
     return [item for item in value if isinstance(item, dict)]
 
 
+# LLM: patterns for extracting directory paths from user goal text.
+_DIR_PATTERN = re.compile(r"(?:/[\w.\-]+){2,}")
+_HOME_DIR_PATTERN = re.compile(r"(?:~/[\w.\-]+(?:/[\w.\-]+)*)")
+_ABSOLUTE_DIR_PATTERN = re.compile(r"(?:/[\w.\-]+(?:/[\w.\-]+)*)(?=/|$)")
+
+
+def _extract_write_dirs(goal: str) -> list[str]:
+    """从用户目标文本中提取目录路径，用于自动授权子代理写入。
+
+    匹配规则：
+    - /path/to/dir 形式的绝对路径
+    - ~/path 形式的 home 目录路径
+    """
+    dirs: list[str] = []
+    for pattern in [_DIR_PATTERN, _HOME_DIR_PATTERN]:
+        for match in pattern.finditer(goal):
+            path = match.group().strip()
+            if path and path not in dirs:
+                dirs.append(path)
+    return dirs
+
+
 class SubAgentBaseMixin:
     def __init__(self, workspace: str | Path, local_store: "LocalStore | None" = None):
         self.workspace = Path(workspace)
@@ -140,8 +163,10 @@ class SubAgentBaseMixin:
         """把一个目标拆成若干子任务记录。
 
         这里暂时还是模板化拆分，不做复杂规划。
-        目的不是“真的很聪明地拆”，而是先把整个数据流打通。
+        目的不是"真的很聪明地拆"，而是先把整个数据流打通。
         """
+        # LLM: auto-detect directories from user goal for write permission.
+        extra_roots = _extract_write_dirs(goal)
 
         count = max(1, count)
         tasks: list[SubAgentTask] = []
@@ -150,6 +175,7 @@ class SubAgentBaseMixin:
                 goal=f"{goal} / 子任务{i}",
                 thought="先缩小任务边界，明确输入、输出和验证证据，再执行。",
                 plan=["理解目标", "列出交付物", "执行最小验证", "汇报结果和证据"],
+                extra_write_roots=extra_roots,
             )
             tasks.append(task)
         return tasks
@@ -179,12 +205,13 @@ class SubAgentBaseMixin:
         quality_contract: QualityContract | dict[str, object] | None = None,
         context_manifest: ContextManifest | dict[str, object] | None = None,
         context_packs: list[dict[str, object]] | dict[str, object] | None = None,
+        extra_write_roots: list[str] | None = None,
     ) -> SubAgentTask:
         """创建一条子代理运行记录。"""
 
         now = time.time()
         run_id = _new_id("subagent")
-        paths = self._build_work_order_paths(run_id)
+        paths = self._build_work_order_paths(run_id, extra_write_roots=extra_write_roots)
         task = SubAgentTask(
             id=run_id,
             goal=goal,
@@ -317,7 +344,12 @@ class SubAgentBaseMixin:
         )
         self._index_task(task)
 
-    def _build_work_order_paths(self, run_id: str, task_dir: str | Path | None = None) -> dict[str, object]:
+    def _build_work_order_paths(
+        self,
+        run_id: str,
+        task_dir: str | Path | None = None,
+        extra_write_roots: list[str] | None = None,
+    ) -> dict[str, object]:
         """生成标准工单目录路径。"""
 
         task_dir = Path(task_dir) if task_dir else self.workspace / run_id
@@ -349,7 +381,7 @@ class SubAgentBaseMixin:
             "runner_prompt_file": str(task_dir / "logs" / "runner_prompt.md"),
             "runner_response_file": str(task_dir / "logs" / "runner_response.md"),
         }
-        paths["allowed_write_roots"] = [str(task_dir)]
+        paths["allowed_write_roots"] = [str(task_dir)] + list(extra_write_roots or [])
         paths["forbidden_write_roots"] = _default_forbidden_write_roots()
         return paths
 

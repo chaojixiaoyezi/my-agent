@@ -7,6 +7,7 @@ from __future__ import annotations
 它不处理子代理调度细节，那些已经拆到别的 mixin。
 """
 
+import sys
 import time
 
 from ..memory_archive import archive_run_turn, build_auto_resume_context, estimate_tokens, write_recovery_snapshot
@@ -43,6 +44,7 @@ class SimpleAgentRuntimeMixin:
         recovery_task_refs: list[str] | None = None,
         recovery_content_paths: list[str] | None = None,
         recovery_next_actions: list[str] | None = None,
+        on_chunk: object = None,
     ) -> AgentRunResult:
         """执行一轮智能体请求。"""
 
@@ -100,6 +102,13 @@ class SimpleAgentRuntimeMixin:
         executed_tools: list[str] = []
         archive_tool_calls: list[dict[str, object]] = []
 
+        # LLM: streaming callback — use external on_chunk if provided, else print to stdout.
+        def _default_on_chunk(chunk: str) -> None:
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+
+        effective_on_chunk = on_chunk if on_chunk is not None else _default_on_chunk
+
         while True:
             final_prompt = self.prompts.build(
                 user_prompt,
@@ -110,7 +119,7 @@ class SimpleAgentRuntimeMixin:
                 tool_recommendations_section=tool_recommendations_section,
                 tool_context=tool_context,
             )
-            response = self.backend.generate(final_prompt)
+            response = self.backend.generate(final_prompt, on_chunk=effective_on_chunk)
             final_response = response
 
             if not self.config.enable_tools:
@@ -131,7 +140,7 @@ class SimpleAgentRuntimeMixin:
                     tool_recommendations_section=tool_recommendations_section,
                     tool_context=tool_context,
                 )
-                final_response = self.backend.generate(final_prompt)
+                final_response = self.backend.generate(final_prompt, on_chunk=effective_on_chunk)
                 break
 
             tool_rounds += 1
