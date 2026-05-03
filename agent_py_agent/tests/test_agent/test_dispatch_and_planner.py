@@ -243,7 +243,8 @@ def test_subagent_dispatch_retries_transient_runner_failure(monkeypatch):
 
         assert any(item.step == "runner" and item.action == "retry_runner" and item.ok for item in second.records)
         assert any(item.step == "acceptance" and item.applied and item.ok for item in second.records)
-        assert backend.calls == 2
+        # Backend called 3 times: (1) first runner attempt fails, (2) failure introspection, (3) retry succeeds
+        assert backend.calls == 3
         assert loaded.status == "DONE"
         assert loaded.verification_status == "VERIFIED"
         assert loaded.runner_attempts == 2
