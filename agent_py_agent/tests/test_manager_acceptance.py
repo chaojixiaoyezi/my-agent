@@ -38,7 +38,7 @@ class TestSubAgentAcceptanceMixin:
 
         manager.load = MagicMock(return_value=task)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
-        manager._acceptance_findings = MagicMock(return_value=[])
+        manager.acceptance_findings = MagicMock(return_value=[])
         manager.save = MagicMock()
         manager._append_task_work_log = MagicMock()
 
@@ -78,7 +78,7 @@ class TestSubAgentAcceptanceMixin:
 
         manager.load = MagicMock(return_value=task)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
-        manager._acceptance_findings = MagicMock(return_value=[])
+        manager.acceptance_findings = MagicMock(return_value=[])
         manager.save = MagicMock()
         manager._append_task_work_log = MagicMock()
 
@@ -126,7 +126,7 @@ class TestSubAgentAcceptanceMixin:
         finding_mock.message = "test"
         finding_mock.evidence_path = None
         finding_mock.created_at = time.time()
-        manager._acceptance_findings = MagicMock(return_value=[finding_mock])
+        manager.acceptance_findings = MagicMock(return_value=[finding_mock])
         manager.save = MagicMock()
         manager._append_task_work_log = MagicMock()
 
@@ -174,7 +174,7 @@ class TestSubAgentAcceptanceMixin:
         finding_mock.message = "缺少验收证据"
         finding_mock.evidence_path = None
         finding_mock.created_at = time.time()
-        manager._acceptance_findings = MagicMock(return_value=[finding_mock])
+        manager.acceptance_findings = MagicMock(return_value=[finding_mock])
         manager.save = MagicMock()
         manager._append_task_work_log = MagicMock()
 
@@ -216,7 +216,7 @@ class TestSubAgentAcceptanceMixin:
 
         manager.load = MagicMock(return_value=task)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
-        manager._acceptance_findings = MagicMock(return_value=[])
+        manager.acceptance_findings = MagicMock(return_value=[])
         manager.save = MagicMock()
         manager._append_task_work_log = MagicMock()
 

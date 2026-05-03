@@ -89,7 +89,7 @@ def dispatch_loop(
         })
 
         # 检查是否有待处理工作
-        if not agent._has_pending_work:
+        if not agent.has_pending_work:
             # 没有可调度任务，退出循环
             break
 

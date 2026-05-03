@@ -516,9 +516,115 @@ agent_py_agent/config/capability_config.yaml
 - [CODEBASE_TREE.md](CODEBASE_TREE.md)：目录树和关键文件职责。
 - [DESIGN_LEDGER.md](DESIGN_LEDGER.md)：设计想法、落地状态和后续方向的主导航。
 - [docs/design/](docs/design/)：模块级长篇设计文档。
-- [TESTS.md](TESTS.md)：测试说明。
+- [TESTS.md](TESTS.md)：测试说明和覆盖率报告。
 
-## 本地验证
+## 测试
+
+### 运行测试
+
+```bash
+# 跑全部测试（约 5000+ 个，耗时 ~40 秒）
+python3 -m pytest -q
+
+# 跑某个模块的测试
+python3 -m pytest agent_py_agent/tests/test_log_analysis_*.py -q
+
+# 跑压力测试（标记为 slow 的测试）
+python3 -m pytest -m slow -q
+
+# 查看覆盖率（需要先安装 pytest-cov）
+pip install pytest-cov
+python3 -m pytest --cov=agent_py_agent/agent --cov-report=term-missing -q
+```
+
+### 测试结构
+
+```text
+agent_py_agent/tests/
+├── conftest.py                  # 共享 fixture（mock 对象、临时文件等）
+├── test_log_analysis_*.py       # 日志分析模块测试（42+ 文件）
+├── test_subagent_*.py           # 子代理模块测试
+├── test_manager_*.py            # 子代理管理器测试
+├── test_gateway_*.py            # gateway 模块测试
+├── test_session_*.py            # session 模块测试
+├── test_memory_*.py             # 记忆模块测试
+├── test_archive_*.py            # 记忆归档测试
+├── test_capability_*.py         # 能力路由测试
+├── test_auth_*.py               # 认证模块测试
+├── test_notification_*.py       # 通知模块测试
+├── test_adapter_*.py            # 通道适配器测试
+├── test_cli_*.py / test_subcommands_*.py  # CLI 命令测试
+├── test_e2e_*.py                # 端到端流程测试
+├── test_scenario_*.py           # 场景测试
+├── test_stress_*.py             # 压力测试
+└── test_regression_fixes.py     # 已知 bug 回归测试
+```
+
+### 更新测试文档
+
+当以下情况发生时，必须同步更新 [TESTS.md](TESTS.md)：
+
+1. **新增测试文件** — 在 TESTS.md 的"测试文件清单"中添加条目
+2. **删除或重命名测试文件** — 更新对应条目
+3. **新增压力测试或回归测试** — 在对应章节添加说明
+4. **覆盖率发生变化** — 更新覆盖率数据
+5. **测试策略变更** — 更新"测试策略"章节
+
+更新命令：
+
+```bash
+# 查看当前测试统计
+python3 -m pytest -q --co | tail -1
+
+# 查看测试文件列表
+ls agent_py_agent/tests/test_*.py | wc -l
+```
+
+CI/CD 会在每次 push 时自动运行测试并检查 TESTS.md 是否与实际测试文件同步。
+
+### CI/CD 状态
+
+**查看 CI 运行状态**：
+- 打开 GitHub 仓库页面 → Actions 选项卡
+- 或直接访问：`https://github.com/<owner>/<repo>/actions`
+
+**Badge 状态徽章**（添加到仓库 README 顶部）：
+
+```markdown
+[![Test](https://github.com/<owner>/<repo>/actions/workflows/test.yml/badge.svg)](https://github.com/<owner>/<repo>/actions/workflows/test.yml)
+[![Lint](https://github.com/<owner>/<repo>/actions/workflows/lint.yml/badge.svg)](https://github.com/<owner>/<repo>/actions/workflows/lint.yml)
+```
+
+将 `<owner>` 和 `<repo>` 替换为实际的用户名和仓库名。
+
+**PR 合并要求**：Push 到 main 或打开 PR 时，两个 workflow（Test 和 Lint）必须全部通过才能合并。
+
+### 本地复现 CI 失败
+
+如果 CI 失败，先在本地复现：
+
+```bash
+# 1. 拉取最新代码
+git pull
+
+# 2. 安装依赖
+python3 -m pip install -e .
+
+# 3. 运行完整测试（与 CI 同款）
+python3 -m pytest -q --tb=short
+
+# 4. 运行 lint 检查（与 CI 同款）
+python3 scripts/check_doc_sync.py
+python3 -m py_compile agent_py_agent/**/*.py
+python3 -m py_compile scripts/*.py
+```
+
+如果本地测试通过但 CI 失败，常见原因：
+- **Python 版本差异**：CI 使用 3.10/3.11/3.12，本地确认版本 `python3 --version`
+- **依赖版本差异**：删除 `.venv` 重建，或 `pip install -e .` 重新安装
+- **并行状态污染**：某些测试依赖串行执行，用 `python3 -m pytest -q --tb=short -p no:randomly` 禁用随机顺序
+
+### 本地验证
 
 ```bash
 python3 -m py_compile agent_py_agent/agent/*.py agent_py_agent/__main__.py

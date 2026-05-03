@@ -62,6 +62,10 @@ class BaseChannelAdapter(ABC):
         if self._message_callback:
             self._message_callback(msg)
 
+    def dispatch(self, msg: IncomingMessage) -> None:
+        """公开的消息分发方法。"""
+        self._dispatch(msg)
+
     @property
     def running(self) -> bool:
         """适配器是否正在运行。"""

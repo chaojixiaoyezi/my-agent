@@ -27,6 +27,16 @@ class ChannelManager:
         self.gateway_port = gateway_port
         self._session_channel_file: Path | None = None  # 用于持久化活跃通道
 
+    @property
+    def session_channel_file(self) -> Path | None:
+        """返回活跃通道存储文件路径。"""
+        return self._session_channel_file
+
+    @session_channel_file.setter
+    def session_channel_file(self, path: Path | None) -> None:
+        """设置活跃通道存储文件路径（供测试和外部注入）。"""
+        self._session_channel_file = path
+
     # -------------------------------------------------------------------------
     # 适配器注册
     # -------------------------------------------------------------------------
@@ -190,6 +200,7 @@ class ChannelManager:
 
     def _update_active_channel(self, user_id: str, channel: str) -> None:
         """更新用户当前活跃通道到本地文件。"""
+
         if self._session_channel_file is None:
             return
         try:
@@ -201,3 +212,7 @@ class ChannelManager:
             self._session_channel_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning(f"更新活跃通道失败: {exc}")
+
+    def update_active_channel(self, user_id: str, channel: str) -> None:
+        """公开的更新活跃通道方法。"""
+        self._update_active_channel(user_id, channel)

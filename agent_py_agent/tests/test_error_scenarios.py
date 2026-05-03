@@ -23,7 +23,7 @@ class TestDispatchLoopExceptions:
 
         agent.subagents.load.side_effect = load_side_effect
         agent.subagents.list_runs.return_value = []
-        agent._has_pending_work = False
+        agent.has_pending_work = False
 
         mock_report = MagicMock()
         mock_report.records = []
@@ -45,7 +45,7 @@ class TestDispatchLoopExceptions:
 
         agent.subagents.load.side_effect = load_side_effect
         agent.subagents.list_runs.return_value = []
-        agent._has_pending_work = False
+        agent.has_pending_work = False
 
         mock_report = MagicMock()
         mock_report.records = []
@@ -126,7 +126,7 @@ class TestDispatchLoopExceptions:
 
         agent.dispatch_subagents.return_value = mock_report
         agent.subagents.list_runs.return_value = []
-        agent._has_pending_work = False
+        agent.has_pending_work = False
 
         result = dispatch_loop(agent, router=None, max_consecutive_rounds=20)
         assert isinstance(result, DispatchLoopReport)

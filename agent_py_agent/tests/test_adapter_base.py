@@ -226,7 +226,7 @@ class TestBaseChannelAdapter:
         test_msg = IncomingMessage(
             channel="test", user_id="u1", content="hello", message_id="m1"
         )
-        adapter._dispatch(test_msg)
+        adapter.dispatch(test_msg)
 
         assert len(calls) == 1
         assert calls[0].content == "hello"

@@ -16,7 +16,7 @@ class TestDispatchLoopClass:
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
-        agent._has_pending_work = False
+        agent.has_pending_work = False
         agent.subagents.list_runs.return_value = []
 
         mock_report = MagicMock()
@@ -42,9 +42,9 @@ class TestDispatchLoopClass:
         def dispatch_side_effect(*args, **kwargs):
             call_count[0] += 1
             if call_count[0] >= 3:
-                agent._has_pending_work = False
+                agent.has_pending_work = False
             else:
-                agent._has_pending_work = True
+                agent.has_pending_work = True
 
             mock_report = MagicMock()
             mock_report.records = [MagicMock()]
@@ -67,7 +67,7 @@ class TestDispatchLoopClass:
         mock_report = MagicMock()
         mock_report.records = [MagicMock()]
         agent.dispatch_subagents.return_value = mock_report
-        agent._has_pending_work = True
+        agent.has_pending_work = True
         agent.subagents.list_runs.return_value = [MagicMock()]
 
         result = dispatch_loop(agent, router=None, max_consecutive_rounds=5)
@@ -83,7 +83,7 @@ class TestDispatchLoopClass:
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
         agent.subagents.list_runs.return_value = []
-        agent._has_pending_work = False
+        agent.has_pending_work = False
 
         mock_report = MagicMock()
         mock_report.records = []
@@ -108,18 +108,18 @@ class TestDispatchLoopClass:
         agent.dispatch_subagents.return_value = mock_report1
         agent.subagents.list_runs.return_value = []
 
-        # 手动控制 _has_pending_work 的变化
+        # 手动控制 has_pending_work 的变化
         call_count = [0]
         original_dispatch = agent.dispatch_subagents
         def side_effect(*args, **kwargs):
             call_count[0] += 1
             if call_count[0] >= 2:
-                agent._has_pending_work = False
+                agent.has_pending_work = False
             return mock_report1
         agent.dispatch_subagents.side_effect = side_effect
 
         # 设置初始状态
-        agent._has_pending_work = True
+        agent.has_pending_work = True
 
         result = dispatch_loop(agent, router=None, max_consecutive_rounds=20)
 
@@ -132,7 +132,7 @@ class TestDispatchLoopClass:
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
-        agent._has_pending_work = False
+        agent.has_pending_work = False
 
         mock_report = MagicMock()
         mock_report.records = []
@@ -160,11 +160,11 @@ class TestDispatchLoopClass:
         agent.dispatch_subagents.return_value = mock_report
         agent.subagents.list_runs.return_value = []
 
-        # 初始 _has_pending_work = True，但 dispatch 后变为 False
-        agent._has_pending_work = True
+        # 初始 has_pending_work = True，但 dispatch 后变为 False
+        agent.has_pending_work = True
 
         def side_effect(*args, **kwargs):
-            agent._has_pending_work = False
+            agent.has_pending_work = False
             return mock_report
         agent.dispatch_subagents.side_effect = side_effect
 
@@ -180,7 +180,7 @@ class TestDispatchLoopClass:
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
-        agent._has_pending_work = False
+        agent.has_pending_work = False
 
         mock_report = MagicMock()
         mock_report.records = []

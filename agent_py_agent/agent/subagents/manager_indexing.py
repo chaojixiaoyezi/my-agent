@@ -336,3 +336,36 @@ class SubAgentIndexingMixin:
                 continue
         return runs
 
+    # Public aliases for internal indexing methods
+    def select_runs(self, run_ids: list[str] | None) -> list[SubAgentTask]:
+        """公开的选择运行记录方法。"""
+        return self._select_runs(run_ids)
+
+    def index_task(self, task: SubAgentTask) -> None:
+        """公开的任务索引方法。"""
+        return self._index_task(task)
+
+    def index_dispatch_record(self, record: DispatchRecord) -> None:
+        """公开的调度记录索引方法。"""
+        return self._index_dispatch_record(record)
+
+    def index_dispatch_watch_record(self, record: DispatchWatchRecord) -> None:
+        """公开的调度观察记录索引方法。"""
+        return self._index_dispatch_watch_record(record)
+
+    def index_parent_planner_record(self, record: ParentPlannerRecord) -> None:
+        """公开的父计划者记录索引方法。"""
+        return self._index_parent_planner_record(record)
+
+    def index_execution_context(self, context: SubAgentExecutionContext) -> None:
+        """公开的执行上下文索引方法。"""
+        return self._index_execution_context(context)
+
+    def index_report(self, source_type: str, source_id: str, title: str, report: object, *, event_type: str) -> None:
+        """公开的报告索引方法。"""
+        return self._index_report(source_type, source_id, title, report, event_type=event_type)
+
+    def log_local_record(self, *, source_type: str, source_id: str, title: str, content: str, metadata: dict[str, object] | None = None, event_type: str) -> None:
+        """公开的本地记录方法。"""
+        return self._log_local_record(source_type=source_type, source_id=source_id, title=title, content=content, metadata=metadata, event_type=event_type)
+

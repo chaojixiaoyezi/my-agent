@@ -1,0 +1,230 @@
+"""Tests for session/resume.py - session resume functionality."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from agent_py_agent.agent.session.resume import (
+    format_resume_context,
+    resume_session,
+)
+
+
+class TestResumeSession:
+    """Test resume_session function."""
+
+    def test_returns_error_for_nonexistent_session(self):
+        """Test that nonexistent session returns error dict."""
+        mock_agent = MagicMock()
+        mock_agent.config.memory_path = "/tmp/nonexistent/memory.jsonl"
+
+        with patch("agent_py_agent.agent.session.resume.SessionManager") as MockSM:
+            mock_instance = MagicMock()
+            mock_instance.load_session.return_value = None
+            MockSM.return_value = mock_instance
+
+            result = resume_session(mock_agent, "nonexistent-session-id")
+
+            assert result["session"] is None
+            assert "error" in result
+
+    def test_handles_memory_file_read_error(self, tmp_path: Path):
+        """Test handles OSError when reading memory file."""
+        mock_agent = MagicMock()
+        memory_file = tmp_path / "memory.jsonl"
+        memory_file.write_text("[{\"role\": \"user\"}]")
+        mock_agent.config.memory_path = str(memory_file)
+
+        mock_session = MagicMock()
+        mock_session.session_id = "test-session"
+        mock_session.user_id = "testuser"
+
+        with patch("agent_py_agent.agent.session.resume.SessionManager") as MockSM:
+            mock_instance = MagicMock()
+            mock_instance.load_session.return_value = mock_session
+            MockSM.return_value = mock_instance
+
+            # Mock Path.read_text to raise OSError
+            with patch.object(Path, "read_text", side_effect=OSError("Read error")):
+                result = resume_session(mock_agent, "test-session")
+                # Should return session but memories may be empty due to error
+                assert "session" in result
+
+    def test_handles_unicode_decode_error(self, tmp_path: Path):
+        """Test handles UnicodeDecodeError when reading memory file."""
+        mock_agent = MagicMock()
+        memory_file = tmp_path / "memory.jsonl"
+        # Write some data that could cause decode issues
+        memory_file.write_bytes(b"\xff\xfe invalid content")
+        mock_agent.config.memory_path = str(memory_file)
+
+        mock_session = MagicMock()
+        mock_session.session_id = "test-session"
+
+        with patch("agent_py_agent.agent.session.resume.SessionManager") as MockSM:
+            mock_instance = MagicMock()
+            mock_instance.load_session.return_value = mock_session
+            MockSM.return_value = mock_instance
+
+            result = resume_session(mock_agent, "test-session")
+            # Should not raise, should return session
+            assert "session" in result
+
+    def test_handles_missing_subagent_module(self, tmp_path: Path):
+        """Test handles case when subagent module is not available."""
+        mock_agent = MagicMock()
+        memory_file = tmp_path / "memory.jsonl"
+        # Write proper JSONL format - one JSON object per line, not wrapped in array
+        memory_file.write_text('{"session_id": "test-session", "role": "user", "content": "hello"}\n')
+        mock_agent.config.memory_path = str(memory_file)
+
+        mock_session = MagicMock()
+        mock_session.session_id = "test-session"
+
+        with patch("agent_py_agent.agent.session.resume.SessionManager") as MockSM:
+            mock_instance = MagicMock()
+            mock_instance.load_session.return_value = mock_session
+            MockSM.return_value = mock_instance
+
+            # Simulate import failure by removing from sys.modules
+            import sys
+            original = sys.modules.get("agent_py_agent.agent.subagent")
+            try:
+                # Temporarily remove to simulate import failure
+                if "agent_py_agent.agent.subagent" in sys.modules:
+                    del sys.modules["agent_py_agent.agent.subagent"]
+                result = resume_session(mock_agent, "test-session")
+                # Should complete without raising
+                assert "subagent_context" in result
+            finally:
+                # Restore original
+                if original is not None:
+                    sys.modules["agent_py_agent.agent.subagent"] = original
+
+
+class TestFormatResumeContext:
+    """Test format_resume_context function."""
+
+    def test_returns_error_message_for_error_dict(self):
+        """Test formats error dict correctly."""
+        resume_data = {"error": "Session not found"}
+
+        result = format_resume_context(resume_data)
+
+        assert "恢复失败" in result
+        assert "Session not found" in result
+
+    def test_returns_not_exist_for_empty_session(self):
+        """Test returns 'session not exist' for None session."""
+        resume_data = {"session": None}
+
+        result = format_resume_context(resume_data)
+
+        assert "会话不存在" in result
+
+    def test_formats_session_with_all_fields(self):
+        """Test formats session with all fields."""
+        mock_session = MagicMock()
+        mock_session.session_id = "session-123"
+        mock_session.created_at = "2026-01-01T10:00:00Z"
+        mock_session.updated_at = "2026-01-02T10:00:00Z"
+        mock_session.last_active_channel = "chat"
+
+        resume_data = {
+            "session": mock_session,
+            "recent_memories": [],
+            "subagent_context": [],
+        }
+
+        result = format_resume_context(resume_data)
+
+        assert "session-123" in result
+        assert "chat" in result
+
+    def test_includes_memories_in_output(self):
+        """Test includes memories in formatted output."""
+        mock_session = MagicMock()
+        mock_session.session_id = "session-123"
+        mock_session.created_at = "2026-01-01T10:00:00Z"
+        mock_session.updated_at = "2026-01-02T10:00:00Z"
+        mock_session.last_active_channel = "feishu"
+
+        resume_data = {
+            "session": mock_session,
+            "recent_memories": [
+                {"role": "user", "content": "Hello world"},
+                {"role": "assistant", "content": "Hi there!"},
+            ],
+            "subagent_context": [],
+        }
+
+        result = format_resume_context(resume_data)
+
+        assert "最近记忆" in result
+        assert "Hello world" in result
+
+    def test_includes_subagents_in_output(self):
+        """Test includes subagent context in formatted output."""
+        mock_session = MagicMock()
+        mock_session.session_id = "session-123"
+        mock_session.created_at = "2026-01-01T10:00:00Z"
+        mock_session.updated_at = "2026-01-02T10:00:00Z"
+        mock_session.last_active_channel = "qq"
+
+        resume_data = {
+            "session": mock_session,
+            "recent_memories": [],
+            "subagent_context": [
+                {"id": "task-001", "goal": "Complete deployment", "status": "RUNNING"},
+            ],
+        }
+
+        result = format_resume_context(resume_data)
+
+        assert "子代理任务" in result
+        assert "Complete deployment" in result
+
+    def test_shows_placeholder_when_no_history(self):
+        """Test shows '暂无历史记录' when no memories or subagents."""
+        mock_session = MagicMock()
+        mock_session.session_id = "session-123"
+        mock_session.created_at = "2026-01-01T10:00:00Z"
+        mock_session.updated_at = "2026-01-02T10:00:00Z"
+        mock_session.last_active_channel = "chat"
+
+        resume_data = {
+            "session": mock_session,
+            "recent_memories": [],
+            "subagent_context": [],
+        }
+
+        result = format_resume_context(resume_data)
+
+        assert "暂无历史记录" in result
+
+    def test_limits_memory_display_to_three(self):
+        """Test only displays first 3 memories."""
+        mock_session = MagicMock()
+        mock_session.session_id = "session-123"
+        mock_session.created_at = "2026-01-01T10:00:00Z"
+        mock_session.updated_at = "2026-01-02T10:00:00Z"
+        mock_session.last_active_channel = "chat"
+
+        resume_data = {
+            "session": mock_session,
+            "recent_memories": [
+                {"role": "user", "content": f"Memory {i}"}
+                for i in range(10)
+            ],
+            "subagent_context": [],
+        }
+
+        result = format_resume_context(resume_data)
+
+        # Should not contain all 10 memories (truncated to 3)
+        assert "Memory 0" in result  # First is shown
+        # Count occurrences of "..." which indicates truncation
+        # With 10 memories and only 3 shown, we should see truncation

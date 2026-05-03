@@ -16,6 +16,7 @@
   - `MemoryType` 枚举支持 LESSON_GENERAL/LESSON_TASK/LESSON_TEMP/CONTEXT/FACT
   - dispatch_mixin 失败后自动注入教训记忆
   - failure_analyzer 增加 `relevant_memories` 字段
+- 内部方法公开别名：`manager_acceptance_findings.py`、`manager_indexing.py`、`manager_patch.py` 为测试需要，将部分 `_` 前缀内部方法添加了公开别名（如 `acceptance_findings`、`select_runs`、`resolve_patch_target`）。
 
 ## 解决的问题
 

@@ -67,7 +67,7 @@ class TestDispatchLoop:
         # Mock agent
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
-        agent._has_pending_work = False
+        agent.has_pending_work = False
         agent.subagents.list_runs.return_value = []
 
         # Mock dispatch_report
@@ -103,11 +103,11 @@ class TestDispatchLoop:
             call_count[0] += 1
             if call_count[0] == 1:
                 # 第一次调用后还有待处理工作
-                agent._has_pending_work = True
+                agent.has_pending_work = True
                 return mock_report_1
             else:
                 # 第二次调用后没有待处理工作
-                agent._has_pending_work = False
+                agent.has_pending_work = False
                 return mock_report_2
 
         agent.dispatch_subagents.side_effect = dispatch_side_effect
@@ -128,7 +128,7 @@ class TestDispatchLoop:
         mock_report = MagicMock()
         mock_report.records = [MagicMock()]
         agent.dispatch_subagents.return_value = mock_report
-        agent._has_pending_work = True
+        agent.has_pending_work = True
         agent.subagents.list_runs.return_value = [MagicMock()]  # 永远有候选
 
         result = dispatch_loop(agent, router=None, max_consecutive_rounds=5)
@@ -218,7 +218,7 @@ class TestFailureAutoTrigger:
         if not result.ok:
             failure_type = str(result.status or "").strip().upper()
             if failure_type in {"BLOCKED", "TIMEOUT"} and retry_reason:
-                agent._has_pending_work = True
+                agent.has_pending_work = True
 
         assert agent._has_pending_work is False
 
@@ -420,10 +420,10 @@ class TestDispatchLoopExceptions:
                 failed_record.status = "FAILED"
                 failed_record.step = "runner"
                 mock_report.records = [failed_record]
-                agent._has_pending_work = True
+                agent.has_pending_work = True
             else:
                 mock_report.records = []
-                agent._has_pending_work = False
+                agent.has_pending_work = False
             return mock_report
 
         agent.dispatch_subagents.side_effect = dispatch_side_effect
@@ -470,7 +470,7 @@ class TestDispatchLoopExceptions:
         mock_task.status = "RUNNING"
         mock_task.runner_attempts = 0
         agent.subagents.list_runs.return_value = [mock_task]
-        agent._has_pending_work = True
+        agent.has_pending_work = True
 
         mock_report = MagicMock()
         mock_report.records = [MagicMock()]  # 有记录
@@ -495,7 +495,7 @@ class TestDispatchLoopExceptions:
 
         agent.dispatch_subagents.return_value = mock_report
         agent.subagents.list_runs.return_value = []
-        agent._has_pending_work = False
+        agent.has_pending_work = False
 
         result = dispatch_loop(agent, router=None, max_consecutive_rounds=20)
         assert isinstance(result, DispatchLoopReport)
@@ -553,7 +553,7 @@ class TestDispatchLoopExceptions:
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
         agent.subagents.list_runs.return_value = []  # 无候选
-        agent._has_pending_work = False
+        agent.has_pending_work = False
 
         mock_report = MagicMock()
         mock_report.records = []
@@ -573,7 +573,7 @@ class TestDispatchLoopExceptions:
         mock_report = MagicMock()
         mock_report.records = []
         agent.dispatch_subagents.return_value = mock_report
-        agent._has_pending_work = False
+        agent.has_pending_work = False
         agent.subagents.list_runs.return_value = []
 
         # 负数 max_rounds 应该安全处理（视为无效，不执行循环）

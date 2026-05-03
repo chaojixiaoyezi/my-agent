@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     from ..local_store import LocalStore
 
 class SubAgentAcceptanceFindingMixin:
-    def _acceptance_findings(
+    def acceptance_findings(
         self,
         task: SubAgentTask,
         output: dict[str, object],
@@ -386,4 +386,8 @@ class SubAgentAcceptanceFindingMixin:
             if self.workspace.name == "subagents" and self.workspace.parent.name == ".my_agent":
                 candidates.append(self.workspace.parent.parent / path)
         return any(candidate.exists() for candidate in candidates)
+
+    # Backward-compatible alias for internal callers
+    def _acceptance_findings(self, task, output, runner, created_at):
+        return self.acceptance_findings(task, output, runner, created_at)
 

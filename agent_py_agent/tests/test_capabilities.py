@@ -131,3 +131,95 @@ def test_zero_limit_means_unlimited():
     assert config.capability_candidate_limit == 0
     assert config.capability_request_max_tokens == 0
     assert len(hits) > 1
+
+
+class TestRouterMutationCoverage:
+    """Tests to cover mutation-prone logic in router.py."""
+
+    def test_name_match_score_is_6(self):
+        """Name match should score 6 points, not 3.
+
+        Mutation: token_score += 6.0 changed to += 3.0
+        This would underweight name matches.
+        """
+        from agent_py_agent.agent.capability.router import score_card, CapabilityCard
+
+        card = CapabilityCard(
+            id="test",
+            kind="skill",
+            name="file_writer",
+            description="writes files to disk"
+        )
+
+        score, reasons = score_card("file_writer", card)
+
+        # "file_writer" appears in name, should get 6 points for name match
+        assert score >= 6.0, f"Name match should contribute at least 6 points, got {score}"
+
+    def test_capabilities_match_score_is_5(self):
+        """Capabilities match should score 5 points.
+
+        Mutation: token_score += 5.0 changed to += 2.0
+        This would underweight capabilities matches.
+        """
+        from agent_py_agent.agent.capability.router import score_card, CapabilityCard
+
+        card = CapabilityCard(
+            id="test",
+            kind="skill",
+            name="data_processor",
+            description="processes data",
+            capabilities=["analysis", "transformation"]
+        )
+
+        score, reasons = score_card("analysis", card)
+
+        # "analysis" appears in capabilities, should get 5 points
+        assert score >= 5.0, f"Capabilities match should contribute at least 5 points, got {score}"
+
+    def test_score_threshold_is_zero(self):
+        """Minimum score threshold should be 0, not 5.
+
+        Mutation: 'if score > 0:' changed to 'if score > 5:'
+        This would skip cards with low but valid scores.
+        """
+        from agent_py_agent.agent.capability.router import score_card, CapabilityCard
+
+        card = CapabilityCard(
+            id="test",
+            kind="skill",
+            name="basic_tool",
+            description="a basic tool"
+        )
+
+        score, reasons = score_card("tool", card)
+
+        # Even a partial match should return score > 0
+        assert score > 0, f"Score should be > 0 for partial match, got {score}"
+
+    def test_search_respects_custom_limit_not_hardcoded_10(self):
+        """Search should respect the config's capability_candidate_limit.
+
+        Mutation: Config value ignored, hardcoded to 10
+        """
+        from agent_py_agent.agent.capability.router import CapabilityRouter, CapabilityCard
+        from agent_py_agent.agent.capability.config import CapabilityConfig
+
+        config = CapabilityConfig(capability_candidate_limit=2)
+        router = CapabilityRouter(config=config)
+
+        # Add multiple cards
+        for i in range(5):
+            card = CapabilityCard(
+                id=f"skill_{i}",
+                kind="skill",
+                name=f"skill_{i}",
+                description=f"test skill {i}"
+            )
+            router.register(card)
+
+        hits = router.search("test")
+
+        # With candidate_limit=2, should return at most 2
+        assert len(hits) <= 2, f"Expected max 2 candidates with limit=2, got {len(hits)}"
+
