@@ -13,9 +13,11 @@ dist/
 coverage.xml
 htmlcov/
 .ruff_cache/
+.mypy_cache/
 
 # OS/editor local files
 .DS_Store
+**/.DS_Store
 .env
 .env.*
 !.env.example

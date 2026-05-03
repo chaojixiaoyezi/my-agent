@@ -3,19 +3,50 @@
 LLM: Prefer layered dependencies over direct cross-module mutation.
 
 给人看的解释：
-本 ADR 记录项目长期分层方向。
+本 ADR 记录项目的长期分层方向。新代码必须遵循层间依赖规则。
 
 ## Status
 
 Accepted
 
+## Context
+
+The project has grown into a multi-module system with CLI, orchestration, subagent management, memory, gateway, and tooling. Without explicit layering, modules reach into each other's internals, creating circular dependencies and making refactoring risky. CLI modules directly mutate agent core state; subagent mixins reach into memory internals; gateway depends on CLI formatting.
+
 ## Decision
 
-The project will keep CLI, orchestration, subagent state, memory routing, memory archive, and tooling as separate ownership areas. New code should depend inward through explicit functions or services, not by reaching into another module's runtime files.
+Adopt a layered architecture with downward-only dependency flow:
+
+```
+Interfaces (contracts: ExtensionPlugin, Repository, WriteBoundary)
+    v
+Application (cli/, gateway.py -- thin entry points)
+    v
+Domain (agent_core/, subagents/, memory*, session/ -- business logic)
+    v
+Infrastructure (local_store, memory_store/, backends/, clients/)
+    v
+Extensions (log_analysis/, plugins -- optional capabilities)
+    v
+Shared (models, config, constants, validators -- no business logic)
+```
+
+### Dependency Rules
+
+1. Dependencies flow downward only.
+2. Shared must not import from any other layer.
+3. Domain must not import from application or extensions.
+4. Extensions register via interfaces; domain calls them through interface methods.
+5. Infrastructure implements domain-defined repository interfaces.
 
 ## Consequences
 
-- CLI registration can migrate incrementally into `cli/commands/`.
-- Large compatibility facades may remain temporarily, but new behavior should be placed behind named services.
-- Architecture guardrails enforce no new star imports, no committed runtime artifacts, and no new vague filenames.
+- Clear ownership: new features belong to a specific layer.
+- Testability: domain logic can be tested without CLI or gateway.
+- Incremental migration: existing code moves layer by layer during refactoring.
+- Some indirection and initial migration cost as existing cross-cutting imports are untangled.
+- `scripts/check_architecture_boundaries.py` enforces import rules; violations tracked in ARCHITECTURE_EXEMPTIONS.md.
 
+### References
+
+- ARCHITECTURE_BOUNDARY.md, CODE_SIZE_POLICY.md, REFACTORING_BACKLOG.md
