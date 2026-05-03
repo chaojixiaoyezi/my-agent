@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-import tomllib
 import tempfile
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib  # Python 3.10 backport
 
 
 def test_pyproject_exposes_my_agent_console_script():
