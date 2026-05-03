@@ -27,31 +27,25 @@ class TestMissing:
 class TestLookup:
     """_lookup 函数测试。"""
 
-    def test_lookup_from_mapping_found(self):
-        """从 Mapping 中找到字段。"""
-        source = {"key": "value"}
-        result = _lookup(source, "key")
-        assert result == "value"
+    @pytest.mark.parametrize("source,key,expected", [
+        ({"key": "value"}, "key", "value"),
+        ({"key": "value"}, "nonexistent", _MISSING),
+    ], ids=["found", "missing"])
+    def test_lookup_from_mapping(self, source, key, expected):
+        """从 Mapping 中查找字段。"""
+        result = _lookup(source, key)
+        assert result is expected
 
-    def test_lookup_from_mapping_missing(self):
-        """从 Mapping 中未找到字段返回 _MISSING。"""
-        source = {"key": "value"}
-        result = _lookup(source, "nonexistent")
-        assert result is _MISSING
-
-    def test_lookup_from_object_attribute(self):
+    @pytest.mark.parametrize("attr,expected", [
+        ("attr", "value"),
+        ("nonexistent", _MISSING),
+    ], ids=["attribute_found", "attribute_missing"])
+    def test_lookup_from_object(self, attr, expected):
         """从对象中读取属性。"""
         class Obj:
             attr = "value"
-        result = _lookup(Obj(), "attr")
-        assert result == "value"
-
-    def test_lookup_from_object_missing(self):
-        """从对象中未找到属性返回 _MISSING。"""
-        class Obj:
-            attr = "value"
-        result = _lookup(Obj(), "nonexistent")
-        assert result is _MISSING
+        result = _lookup(Obj(), attr)
+        assert result is expected
 
 
 class TestWarn:
@@ -85,37 +79,29 @@ class TestCoerceBool:
         assert result is True
         assert len(warnings) == 0
 
-    def test_bool_true(self):
-        """布尔值 True。"""
+    @pytest.mark.parametrize("value,expected", [
+        (True, True),
+        (False, False),
+        (1, True),
+        (0, False),
+    ], ids=["bool_true", "bool_false", "int_1", "int_0"])
+    def test_bool_int_conversion(self, value, expected):
+        """布尔值和整数转换。"""
         warnings: list[LogAnalysisConfigWarning] = []
-        assert _coerce_bool("field", True, default=False, warnings=warnings) is True
+        result = _coerce_bool("field", value, default=not expected, warnings=warnings)
+        assert result is expected
 
-    def test_bool_false(self):
-        """布尔值 False。"""
-        warnings: list[LogAnalysisConfigWarning] = []
-        assert _coerce_bool("field", False, default=True, warnings=warnings) is False
-
-    def test_int_1(self):
-        """整数 1 转为 True。"""
-        warnings: list[LogAnalysisConfigWarning] = []
-        assert _coerce_bool("field", 1, default=False, warnings=warnings) is True
-
-    def test_int_0(self):
-        """整数 0 转为 False。"""
-        warnings: list[LogAnalysisConfigWarning] = []
-        assert _coerce_bool("field", 0, default=True, warnings=warnings) is False
-
-    def test_string_true_values(self):
+    @pytest.mark.parametrize("value", ["true", "True", "TRUE", "yes", "Yes", "on", "ON", "1"], ids=["true", "True", "TRUE", "yes", "Yes", "on", "ON", "1"])
+    def test_string_true_values(self, value):
         """字符串 true/yes/on 返回 True。"""
         warnings: list[LogAnalysisConfigWarning] = []
-        for val in ["true", "True", "TRUE", "yes", "Yes", "on", "ON", "1"]:
-            assert _coerce_bool("field", val, default=False, warnings=warnings) is True
+        assert _coerce_bool("field", value, default=False, warnings=warnings) is True
 
-    def test_string_false_values(self):
+    @pytest.mark.parametrize("value", ["false", "False", "FALSE", "no", "No", "off", "OFF", "0"], ids=["false", "False", "FALSE", "no", "No", "off", "OFF", "0"])
+    def test_string_false_values(self, value):
         """字符串 false/no/off 返回 False。"""
         warnings: list[LogAnalysisConfigWarning] = []
-        for val in ["false", "False", "FALSE", "no", "No", "off", "OFF", "0"]:
-            assert _coerce_bool("field", val, default=True, warnings=warnings) is False
+        assert _coerce_bool("field", value, default=True, warnings=warnings) is False
 
     def test_invalid_value_warns(self):
         """无效值回退默认值并警告。"""
@@ -140,18 +126,17 @@ class TestCoerceChoice:
         result = _coerce_choice("field", _MISSING, default="a", choices={"a", "b"}, warnings=warnings)
         assert result == "a"
 
-    def test_valid_choice(self):
-        """有效选项返回。"""
+    @pytest.mark.parametrize("value,expected", [
+        ("a", "a"),
+        ("c", "a"),
+    ], ids=["valid_choice", "invalid_choice_warns"])
+    def test_choice_conversion(self, value, expected):
+        """选项转换测试。"""
         warnings: list[LogAnalysisConfigWarning] = []
-        result = _coerce_choice("field", "a", default="b", choices={"a", "b"}, warnings=warnings)
-        assert result == "a"
-
-    def test_invalid_choice_warns(self):
-        """无效选项回退并警告。"""
-        warnings: list[LogAnalysisConfigWarning] = []
-        result = _coerce_choice("field", "c", default="a", choices={"a", "b"}, warnings=warnings)
-        assert result == "a"
-        assert len(warnings) == 1
+        result = _coerce_choice("field", value, default="a", choices={"a", "b"}, warnings=warnings)
+        assert result == expected
+        if value == "c":
+            assert len(warnings) == 1
 
     def test_uppercase_mode(self):
         """大写模式转换。"""
@@ -175,47 +160,32 @@ class TestCoerceInt:
         result = _coerce_int("field", _MISSING, default=100, min_value=0, max_value=1000, warnings=warnings)
         assert result == 100
 
-    def test_bool_rejected(self):
-        """布尔值被拒绝。"""
+    @pytest.mark.parametrize("value,expected,warns", [
+        (True, 0, True),
+        (50, 50, False),
+        ("42", 42, False),
+        (-5, -5, False),
+    ], ids=["bool_rejected", "valid_int", "valid_string_int", "negative_int"])
+    def test_int_conversion(self, value, expected, warns):
+        """整数转换测试。"""
         warnings: list[LogAnalysisConfigWarning] = []
-        result = _coerce_int("field", True, default=0, min_value=0, max_value=100, warnings=warnings)
-        assert result == 0
-        assert len(warnings) == 1
+        result = _coerce_int("field", value, default=0, min_value=-10, max_value=100, warnings=warnings)
+        assert result == expected
+        if warns:
+            assert len(warnings) == 1
 
-    def test_valid_int(self):
-        """有效整数。"""
+    @pytest.mark.parametrize("value,expected,warns", [
+        (-100, 0, True),
+        (200, 0, True),  # 越界返回 default，不是 clamp
+        ("not_a_number", 0, True),
+    ], ids=["below_min", "above_max", "invalid_string"])
+    def test_int_bounds(self, value, expected, warns):
+        """整数边界测试。"""
         warnings: list[LogAnalysisConfigWarning] = []
-        assert _coerce_int("field", 50, default=0, min_value=0, max_value=100, warnings=warnings) == 50
-
-    def test_valid_string_int(self):
-        """有效数字字符串。"""
-        warnings: list[LogAnalysisConfigWarning] = []
-        assert _coerce_int("field", "42", default=0, min_value=0, max_value=100, warnings=warnings) == 42
-
-    def test_negative_int(self):
-        """负数在范围内。"""
-        warnings: list[LogAnalysisConfigWarning] = []
-        assert _coerce_int("field", -5, default=0, min_value=-10, max_value=100, warnings=warnings) == -5
-
-    def test_below_min_warns(self):
-        """低于最小值回退。"""
-        warnings: list[LogAnalysisConfigWarning] = []
-        result = _coerce_int("field", -100, default=0, min_value=-10, max_value=100, warnings=warnings)
-        assert result == 0
-        assert len(warnings) == 1
-
-    def test_above_max_warns(self):
-        """高于最大值回退。"""
-        warnings: list[LogAnalysisConfigWarning] = []
-        result = _coerce_int("field", 200, default=100, min_value=0, max_value=150, warnings=warnings)
-        assert result == 100
-        assert len(warnings) == 1
-
-    def test_invalid_string_warns(self):
-        """无效字符串回退。"""
-        warnings: list[LogAnalysisConfigWarning] = []
-        result = _coerce_int("field", "not_a_number", default=0, min_value=0, max_value=100, warnings=warnings)
-        assert result == 0
+        result = _coerce_int("field", value, default=0, min_value=-10, max_value=100, warnings=warnings)
+        assert result == expected
+        if warns:
+            assert len(warnings) == 1
 
     def test_unbounded_max(self):
         """无上限时接受大数。"""
@@ -232,41 +202,28 @@ class TestCoercePathString:
         result = _coerce_path_string("field", _MISSING, default="/default/path", warnings=warnings)
         assert result == "/default/path"
 
-    def test_valid_path(self):
-        """有效路径字符串。"""
+    @pytest.mark.parametrize("value,expected,warns", [
+        ("/valid/path", "/valid/path", False),
+        ("", "/default", True),
+        ("   ", "/default", True),
+    ], ids=["valid_path", "empty_string", "whitespace_only"])
+    def test_path_string_conversion(self, value, expected, warns):
+        """路径字符串转换测试。"""
         warnings: list[LogAnalysisConfigWarning] = []
-        result = _coerce_path_string("field", "/valid/path", default="/default", warnings=warnings)
-        assert result == "/valid/path"
+        result = _coerce_path_string("field", value, default="/default", warnings=warnings)
+        assert result == expected
+        if warns:
+            assert len(warnings) == 1
 
-    def test_empty_string_warns(self):
-        """空字符串回退。"""
+    @pytest.mark.parametrize("value", [
+        "/path/with\x00null",
+        "/path/with\nnewline",
+        "/path/with\rreturn",
+    ], ids=["null_char", "newline", "carriage_return"])
+    def test_invalid_chars_warn(self, value):
+        """无效字符回退。"""
         warnings: list[LogAnalysisConfigWarning] = []
-        result = _coerce_path_string("field", "", default="/default", warnings=warnings)
-        assert result == "/default"
-        assert len(warnings) == 1
-
-    def test_whitespace_only_warns(self):
-        """纯空白回退。"""
-        warnings: list[LogAnalysisConfigWarning] = []
-        result = _coerce_path_string("field", "   ", default="/default", warnings=warnings)
-        assert result == "/default"
-
-    def test_null_char_warns(self):
-        """包含 NUL 字符回退。"""
-        warnings: list[LogAnalysisConfigWarning] = []
-        result = _coerce_path_string("field", "/path/with\x00null", default="/default", warnings=warnings)
-        assert result == "/default"
-
-    def test_newline_warns(self):
-        """包含换行符回退。"""
-        warnings: list[LogAnalysisConfigWarning] = []
-        result = _coerce_path_string("field", "/path/with\nnewline", default="/default", warnings=warnings)
-        assert result == "/default"
-
-    def test_carriage_return_warns(self):
-        """包含回车符回退。"""
-        warnings: list[LogAnalysisConfigWarning] = []
-        result = _coerce_path_string("field", "/path/with\rreturn", default="/default", warnings=warnings)
+        result = _coerce_path_string("field", value, default="/default", warnings=warnings)
         assert result == "/default"
 
     def test_whitespace_trimmed(self):

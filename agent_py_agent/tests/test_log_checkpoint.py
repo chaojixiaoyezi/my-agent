@@ -21,10 +21,6 @@ from agent_py_agent.agent.log_analysis.ingest.checkpoint import (
 )
 
 
-# ============================================================
-# 测试用例：Checkpoint 数据结构
-# ============================================================
-
 class TestCheckpoint:
     """测试 Checkpoint 数据结构"""
 
@@ -73,10 +69,6 @@ class TestCheckpoint:
         assert cp.cursor["offset"] == 50
 
 
-# ============================================================
-# 测试用例：CheckpointStore 初始化
-# ============================================================
-
 class TestCheckpointStoreInit:
     """测试 CheckpointStore 初始化"""
 
@@ -93,73 +85,47 @@ class TestCheckpointStoreInit:
         assert store.checkpoints_dir.parent == tmp_path
 
 
-# ============================================================
-# 测试用例：CheckpointStore.path_for
-# ============================================================
-
 class TestCheckpointStorePathFor:
     """测试 path_for 方法"""
 
-    def test_simple_source_id(self, tmp_path):
-        """测试简单来源 ID"""
+    @pytest.mark.parametrize("source_id,expected_name", [
+        ("waf-prod", "waf-prod.json"),
+        ("waf prod", "waf_prod.json"),
+        ("waf@prod#1", None),  # special chars sanitized
+    ], ids=["simple", "spaces", "special_chars"])
+    def test_path_for(self, tmp_path, source_id, expected_name):
+        """测试路径生成"""
         store = CheckpointStore(tmp_path)
-        path = store.path_for("waf-prod")
-        assert path.name == "waf-prod.json"
+        path = store.path_for(source_id)
+        if expected_name:
+            assert path.name == expected_name
+        else:
+            assert "/" not in path.name
+            assert "@" not in path.name
+            assert "#" not in path.name
 
-    def test_spaces_replaced(self, tmp_path):
-        """测试空格被替换"""
-        store = CheckpointStore(tmp_path)
-        path = store.path_for("waf prod")
-        assert "waf_prod" in path.name or path.name == "waf-prod.json"
-
-    def test_special_chars_sanitized(self, tmp_path):
-        """测试特殊字符被清理"""
-        store = CheckpointStore(tmp_path)
-        path = store.path_for("waf@prod#1")
-        # 特殊字符应该被替换
-        assert "/" not in path.name
-        assert "@" not in path.name
-        assert "#" not in path.name
-
-
-# ============================================================
-# 测试用例：safe_source_id
-# ============================================================
 
 class TestSafeSourceId:
     """测试 safe_source_id 函数"""
 
-    def test_valid_id_unchanged(self):
-        """测试有效 ID 不变"""
-        assert safe_source_id("waf-prod") == "waf-prod"
-        assert safe_source_id("source_123") == "source_123"
-        assert safe_source_id("firewall.log") == "firewall.log"
+    @pytest.mark.parametrize("input_val,expected", [
+        ("waf-prod", "waf-prod"),
+        ("source_123", "source_123"),
+        ("firewall.log", "firewall.log"),
+        ("waf prod", "waf_prod"),
+        ("log source", "log_source"),
+        ("waf@prod", "waf_prod"),
+        ("log#1", "log_1"),
+        ("test/file", "test_file"),
+        ("", "unknown"),
+        ("   ", "unknown"),
+        ("@@@", "_"),
+        ("###", "_"),
+    ], ids=["valid_hyphen", "valid_underscore", "valid_dot", "spaces", "spaces2", "at_sign", "hash", "slash", "empty", "whitespace", "only_at", "only_hash"])
+    def test_safe_source_id(self, input_val, expected):
+        """测试来源 ID 安全化"""
+        assert safe_source_id(input_val) == expected
 
-    def test_spaces_replaced(self):
-        """测试空格被替换"""
-        assert safe_source_id("waf prod") == "waf_prod"
-        assert safe_source_id("log source") == "log_source"
-
-    def test_special_chars_replaced(self):
-        """测试特殊字符被替换"""
-        assert safe_source_id("waf@prod") == "waf_prod"
-        assert safe_source_id("log#1") == "log_1"
-        assert safe_source_id("test/file") == "test_file"
-
-    def test_empty_becomes_unknown(self):
-        """测试空字符串变成 unknown"""
-        assert safe_source_id("") == "unknown"
-        assert safe_source_id("   ") == "unknown"
-
-    def test_only_special_chars_becomes_unknown(self):
-        """测试只有特殊字符变成 unknown"""
-        assert safe_source_id("@@@") == "_"
-        assert safe_source_id("###") == "_"
-
-
-# ============================================================
-# 测试用例：CheckpointStore.load
-# ============================================================
 
 class TestCheckpointStoreLoad:
     """测试 load 方法"""
@@ -173,7 +139,6 @@ class TestCheckpointStoreLoad:
     def test_load_existing(self, tmp_path):
         """测试加载已存在的检查点"""
         store = CheckpointStore(tmp_path)
-        # 先写入
         store.commit(
             source_id="existing-source",
             cursor_kind="offset",
@@ -181,7 +146,6 @@ class TestCheckpointStoreLoad:
             last_committed_batch_id="batch-001",
             last_event_time="2026-05-01T10:00:00Z",
         )
-        # 再加载
         result = store.load("existing-source")
         assert result["source_id"] == "existing-source"
         assert result["cursor"]["offset"] == 100
@@ -202,18 +166,12 @@ class TestCheckpointStoreLoad:
     def test_load_corrupted_json(self, tmp_path):
         """测试加载损坏的 JSON 文件"""
         store = CheckpointStore(tmp_path)
-        # 手动写入损坏的 JSON
         path = store.path_for("corrupted-source")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{ invalid json", encoding="utf-8")
-        # 应该返回空字典而不是抛出异常
         result = store.load("corrupted-source")
         assert result == {}
 
-
-# ============================================================
-# 测试用例：CheckpointStore.commit
-# ============================================================
 
 class TestCheckpointStoreCommit:
     """测试 commit 方法"""
@@ -248,7 +206,6 @@ class TestCheckpointStoreCommit:
     def test_commit_updates_existing(self, tmp_path):
         """测试 commit 更新已存在的检查点"""
         store = CheckpointStore(tmp_path)
-        # 第一次提交
         store.commit(
             source_id="update-test",
             cursor_kind="offset",
@@ -256,7 +213,6 @@ class TestCheckpointStoreCommit:
             last_committed_batch_id="batch-001",
             last_event_time="2026-05-01T10:00:00Z",
         )
-        # 第二次提交
         store.commit(
             source_id="update-test",
             cursor_kind="offset",
@@ -264,22 +220,25 @@ class TestCheckpointStoreCommit:
             last_committed_batch_id="batch-002",
             last_event_time="2026-05-01T11:00:00Z",
         )
-        # 验证更新
         result = store.load("update-test")
         assert result["cursor"]["offset"] == 200
         assert result["last_committed_batch_id"] == "batch-002"
 
-    def test_commit_with_none_last_event_time(self, tmp_path):
-        """测试 commit 时 last_event_time 为 None"""
+    @pytest.mark.parametrize("last_event_time,expected_none", [
+        (None, True),
+        ("2026-05-01T10:00:00Z", False),
+    ], ids=["none_event_time", "valid_event_time"])
+    def test_commit_last_event_time(self, tmp_path, last_event_time, expected_none):
+        """测试 commit 时 last_event_time 处理"""
         store = CheckpointStore(tmp_path)
         cp = store.commit(
-            source_id="none-time-test",
+            source_id="time-test",
             cursor_kind="offset",
             cursor={"offset": 50},
             last_committed_batch_id="batch-003",
-            last_event_time=None,
+            last_event_time=last_event_time,
         )
-        assert cp.last_event_time is None
+        assert (cp.last_event_time is None) == expected_none
 
     def test_commit_timestamp_set(self, tmp_path):
         """测试 commit 设置 updated_at"""
@@ -294,28 +253,25 @@ class TestCheckpointStoreCommit:
         assert cp.updated_at != ""
 
 
-# ============================================================
-# 测试用例：write_json_atomic
-# ============================================================
-
 class TestWriteJsonAtomic:
     """测试 write_json_atomic 函数"""
 
-    def test_atomic_write_creates_file(self, tmp_path):
-        """测试原子写入创建文件"""
-        target = tmp_path / "atomic_test.json"
-        write_json_atomic(target, {"key": "value"})
-        assert target.exists()
-
-    def test_atomic_write_content(self, tmp_path):
+    @pytest.mark.parametrize("data", [
+        {"key": "value"},
+        {"test": "content", "number": 42},
+        {"nested": True},
+        {"v": 1},
+        {"items": list(range(1000))},
+        {"chinese": "中文", "unicode": "🎉"},
+    ], ids=["simple", "multi_field", "nested", "overwrite", "large_payload", "special_chars"])
+    def test_atomic_write_content(self, tmp_path, data):
         """测试原子写入内容正确"""
-        target = tmp_path / "atomic_content.json"
-        data = {"test": "content", "number": 42}
+        target = tmp_path / f"atomic_{id(data)}.json"
         write_json_atomic(target, data)
+        assert target.exists()
         with open(target, encoding="utf-8") as f:
             loaded = json.load(f)
-        assert loaded["test"] == "content"
-        assert loaded["number"] == 42
+        assert loaded == data
 
     def test_atomic_write_creates_parent_dirs(self, tmp_path):
         """测试原子写入创建父目录"""
@@ -332,29 +288,6 @@ class TestWriteJsonAtomic:
             data = json.load(f)
         assert data["v"] == 2
 
-    def test_atomic_write_large_payload(self, tmp_path):
-        """测试原子写入大 payload"""
-        target = tmp_path / "large.json"
-        data = {"items": list(range(1000))}
-        write_json_atomic(target, data)
-        with open(target, encoding="utf-8") as f:
-            loaded = json.load(f)
-        assert len(loaded["items"]) == 1000
-
-    def test_atomic_write_special_chars(self, tmp_path):
-        """测试原子写入特殊字符"""
-        target = tmp_path / "special.json"
-        data = {"chinese": "中文", "unicode": "🎉"}
-        write_json_atomic(target, data)
-        with open(target, encoding="utf-8") as f:
-            loaded = json.load(f)
-        assert loaded["chinese"] == "中文"
-        assert loaded["unicode"] == "🎉"
-
-
-# ============================================================
-# 测试用例：边界场景
-# ====================================
 
 class TestBoundaryCases:
     """测试边界场景"""
@@ -439,9 +372,7 @@ class TestBoundaryCases:
     def test_empty_checkpoint_dir_on_init(self, tmp_path):
         """测试初始化不创建 checkpoint 目录（直到第一次 commit）"""
         store = CheckpointStore(tmp_path)
-        # 不应该自动创建目录
         assert not store.checkpoints_dir.exists()
-        # commit 后才创建
         store.commit(
             source_id="lazy-test",
             cursor_kind="offset",
