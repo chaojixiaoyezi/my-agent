@@ -7,10 +7,19 @@ from __future__ import annotations
 大部分实现已经拆分到 request_worker、queue_service、response_renderer、audit_service 等模块。
 """
 
+from .lease import (
+    _active_heartbeat_request_ids,
+    _gateway_processing_lease_interval,
+    _start_gateway_processing_lease_heartbeat,
+    _touch_gateway_processing_lease,
+    is_heartbeat_alive_for_request,
+)
+from .lease_service import (
+    get_active_heartbeat_request_ids,
+)
 from .queue_service import (
     ensure_gateway_folders,
     gateway_running,
-    is_heartbeat_alive_for_request,
     rebuild_gateway_index,
     render_gateway_status,
     wait_for_gateway_running,
@@ -24,10 +33,15 @@ from .request_worker import (
 from .response_renderer import print_gateway_response
 
 __all__ = [
+    "_active_heartbeat_request_ids",
+    "_gateway_processing_lease_interval",
     "_handle_gateway_request",
     "_process_gateway_requests",
+    "_start_gateway_processing_lease_heartbeat",
+    "_touch_gateway_processing_lease",
     "ensure_gateway_folders",
     "gateway_running",
+    "get_active_heartbeat_request_ids",
     "is_heartbeat_alive_for_request",
     "print_gateway_response",
     "rebuild_gateway_index",

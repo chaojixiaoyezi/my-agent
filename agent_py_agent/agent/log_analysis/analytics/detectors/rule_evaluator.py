@@ -12,6 +12,7 @@ from typing import Any
 
 from .classifiers import (
     _destination,
+    _entities_from_events,
     _is_alert_event,
     _is_auth_event,
     _is_egress_event,
@@ -27,12 +28,15 @@ from .classifiers import (
     _same_auth_scope,
     _same_source,
     _same_user,
+    _unique_texts,
     _weak_signal,
 )
 from .field_access import (
     EventLike,
     JsonDict,
+    _canonical_time,
     _event_dict,
+    _event_time,
     _field,
     _sort_time,
     _text,

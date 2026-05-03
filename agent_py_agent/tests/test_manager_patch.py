@@ -224,7 +224,7 @@ class TestNormalizePatchApplySpec:
         task.forbidden_write_roots = []
         task.locked_files = []
 
-        patch_item = {"path": "test.txt", "status": "applied", "content": "test"}
+        patch_item = {"path": "test.txt", "status": "rejected", "content": "test"}
         result = manager._normalize_patch_apply_spec(task, patch_item)
 
         assert result["ok"] is False

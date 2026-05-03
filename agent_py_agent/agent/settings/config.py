@@ -17,10 +17,21 @@ from pathlib import Path
 from typing import Any
 
 from .memory import normalize_agent_memory_config
-from .normalize import normalize_agent_config, normalize_subagent_workflow_config
+from .normalize import (
+    _coerce_bool_config,
+    _coerce_choice_config,
+    _coerce_float_config,
+    _coerce_int_config,
+    normalize_agent_config,
+    normalize_subagent_workflow_config,
+)
 
 __all__ = [
     "AgentConfig",
+    "_coerce_bool_config",
+    "_coerce_choice_config",
+    "_coerce_float_config",
+    "_coerce_int_config",
     "load_config",
     "load_simple_yaml",
     "parse_scalar",
