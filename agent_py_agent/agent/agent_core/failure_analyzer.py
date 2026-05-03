@@ -7,8 +7,8 @@ from __future__ import annotations
 业务逻辑已移至 failure_analysis_service.py。
 """
 
-from .failure_analysis_service import FailureAnalysis, FailureAnalysisService, _suggest_splits
 from ..subagents.models import SubAgentTask
+from .failure_analysis_service import FailureAnalysis, FailureAnalysisService, _suggest_splits
 
 
 class SubAgentFailureAnalyzer:
@@ -19,8 +19,8 @@ class SubAgentFailureAnalyzer:
 
     def analyze(
         self,
-        task: "SubAgentTask",
-        runner_result: "SubAgentRunnerResult",
+        task: SubAgentTask,
+        runner_result: SubAgentRunnerResult,
     ) -> FailureAnalysis:
         """分析失败原因并给出建议。"""
         failure_type = task.failure_type or ""
