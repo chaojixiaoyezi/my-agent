@@ -18,11 +18,11 @@ from .io import (
     gateway_response_path,
     read_json_file,
 )
-from .paths import GatewayPaths, gateway_paths
-from .recovery import _archive_gateway_request, _gateway_request_attempts
 
 # Re-export heartbeat liveness check for backward compatibility
 from .lease_service import is_heartbeat_alive_for_request
+from .paths import GatewayPaths, gateway_paths
+from .recovery import _archive_gateway_request, _gateway_request_attempts
 
 if TYPE_CHECKING:
     from ...core import SimpleAgent

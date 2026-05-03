@@ -28,14 +28,14 @@ from .input_loop import (
 from .renderer import (
     BLUE,
     BOLD,
+    COLLAPSE_PREVIEW_CHARS,
+    COLLAPSE_PREVIEW_LINES,
+    CONTEXT_WINDOW,
     CYAN,
     GRAY,
     GREEN,
     RESET,
     YELLOW,
-    COLLAPSE_PREVIEW_CHARS,
-    COLLAPSE_PREVIEW_LINES,
-    CONTEXT_WINDOW,
     collapse_response_text,
     progress_bar,
     startup_banner,
@@ -59,8 +59,8 @@ from ...agent.gateway import (
     render_gateway_status,
     wait_for_gateway_running,
 )
-from ..common import CHAT_PROMPT, FALLBACK_CHAT_PROMPT, make_agent, resume_context_override
 from ...cli.models import ChatJob
+from ..common import CHAT_PROMPT, FALLBACK_CHAT_PROMPT, make_agent, resume_context_override
 
 
 def _collapse_response_text(text: str):

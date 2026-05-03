@@ -13,6 +13,8 @@ from collections.abc import Sequence
 from datetime import timedelta
 from typing import Any
 
+from agent_py_agent.agent.log_analysis.analytics.security_rules import get_rule
+
 from ...models import EvidenceRef, QueryPlan, utc_now_iso
 from .classifiers import (
     _entities_from_events,
@@ -38,7 +40,6 @@ from .field_extractors import (
     _user,
     _victim_ip,
 )
-from agent_py_agent.agent.log_analysis.analytics.security_rules import get_rule
 
 
 def _make_finding(

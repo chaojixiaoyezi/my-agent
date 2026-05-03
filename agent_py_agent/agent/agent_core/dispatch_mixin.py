@@ -19,8 +19,6 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
     from ..subagent import SubAgentRunnerResult, SubAgentTask
 
-from .failure_introspector import FailureIntrospector
-
 from .dispatch_service import (
     build_workflow_records,
     make_acceptance_records,
@@ -31,6 +29,8 @@ from .dispatch_service import (
     make_patch_review_records,
     update_pending_work_state,
 )
+from .failure_introspector import FailureIntrospector
+from .parameters import _sleep_with_stop
 from .planner_service import combine_runner_instruction
 from .runner_dispatch import (
     _dispatch_patch_review_run_ids,
@@ -42,8 +42,13 @@ from .runner_dispatch import (
     _runner_max_attempts,
     _runner_retry_reason,
 )
-from .runner_gate import get_task_timeout, handle_runner_failure, resolve_runner_config, run_concurrent_runners, run_single_runner
-from .parameters import _sleep_with_stop
+from .runner_gate import (
+    get_task_timeout,
+    handle_runner_failure,
+    resolve_runner_config,
+    run_concurrent_runners,
+    run_single_runner,
+)
 
 
 class SimpleAgentDispatchMixin:

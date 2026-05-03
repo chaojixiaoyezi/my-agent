@@ -35,6 +35,14 @@ from .logging import (
 )
 from .paths import AdapterPaths, GatewayPaths, adapter_paths, gateway_chunk_path, gateway_paths
 from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
+from .queue_service import (
+    ensure_gateway_folders,
+    gateway_running,
+    is_heartbeat_alive_for_request,
+    rebuild_gateway_index,
+    render_gateway_status,
+    wait_for_gateway_running,
+)
 from .recovery import (
     _archive_gateway_request,
     _gateway_processing_started_at,
@@ -43,14 +51,6 @@ from .recovery import (
     gateway_stale_processing,
     recover_gateway_processing_requests,
     requeue_gateway_processing_requests,
-)
-from .queue_service import (
-    ensure_gateway_folders,
-    gateway_running,
-    is_heartbeat_alive_for_request,
-    rebuild_gateway_index,
-    render_gateway_status,
-    wait_for_gateway_running,
 )
 from .request_worker import (
     _handle_gateway_request,

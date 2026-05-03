@@ -9,8 +9,16 @@ chat 模式要一边接收用户输入，一边让模型在后台跑。
 from __future__ import annotations
 
 import queue
-import threading
 import sys
+import threading
+
+# Gateway imports
+from ..agent.gateway import (
+    gateway_paths,
+    render_gateway_status,
+    wait_for_gateway_running,
+)
+from ..agent.session import SessionManager, generate_session_id
 
 # Re-export public symbols from chat_parts for backward compatibility
 from .chat_parts import (
@@ -19,37 +27,33 @@ from .chat_parts import (
     CYAN,
     GRAY,
     GREEN,
+    MAX_HISTORY_TURNS,
     RESET,
     YELLOW,
     ChatJob,
-    MAX_HISTORY_TURNS,
     collapse_response_text,
     progress_bar,
     startup_banner,
     terminal_rule,
 )
+from .chat_parts.fallback import FALLBACK_CHAT_PROMPT, run_fallback
 
 # Backward compatibility imports from chat_parts
-from .chat_parts.history import build_history_context, append_conversation_turn
+from .chat_parts.history import append_conversation_turn, build_history_context
 from .chat_parts.input_loop import handle_common_slash_command
 from .chat_parts.rendering import (
     COLLAPSE_PREVIEW_CHARS as _COLLAPSE_PREVIEW_CHARS,
+)
+from .chat_parts.rendering import (
     COLLAPSE_PREVIEW_LINES as _COLLAPSE_PREVIEW_LINES,
+)
+from .chat_parts.rendering import (
     CONTEXT_WINDOW as _CONTEXT_WINDOW,
 )
 from .chat_parts.tui import run_tui
-from .chat_parts.fallback import run_fallback, FALLBACK_CHAT_PROMPT
 from .common import make_agent, resume_context_override
 from .models import ChatJob
 from .thinking_spinner import ThinkingSpinner
-
-# Gateway imports
-from ..agent.gateway import (
-    gateway_paths,
-    wait_for_gateway_running,
-    render_gateway_status,
-)
-from ..agent.session import SessionManager, generate_session_id
 
 # Constants for backward compatibility
 _CHAT_RESPONSE_STYLE_INJECT = (
