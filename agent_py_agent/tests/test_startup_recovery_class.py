@@ -48,28 +48,30 @@ class TestDetectActiveWork:
 
     def test_detect_with_no_active_work(self, tmp_path: Path):
         """无活动工作时的检测。"""
-        from agent_py_agent.agent.startup_recovery import ActiveWorkSummary, detect_active_work
+        from agent_py_agent.agent.startup_recovery import detect_active_work
 
         agent = MagicMock()
         agent._has_pending_work = False
         agent._consecutive_dispatch_rounds = 0
 
-        with patch.object(agent.subagents, "build_board", return_value=MagicMock(hot_list=[], recent=[])):
-            with patch("agent_py_agent.agent.gateway.gateway_paths") as mock_gw_paths:
-                with patch("agent_py_agent.agent.gateway.gateway_running", return_value=(0, False)):
-                    with patch("agent_py_agent.agent.gateway.gateway_request_counts", return_value={}):
-                        mock_paths = MagicMock()
-                        mock_paths.processing = MagicMock()
-                        mock_paths.processing.exists.return_value = False
-                        mock_gw_paths.return_value = mock_paths
+        mock_board = MagicMock(hot_list=[], recent=[])
+        mock_paths = MagicMock()
+        mock_paths.processing = MagicMock()
+        mock_paths.processing.exists.return_value = False
+        mock_gw_paths = MagicMock()
+        mock_gw_paths.return_value = mock_paths
 
-                        try:
-                            summary = detect_active_work(agent)
-                            assert summary.gateway_alive is False
-                            assert summary.active_task_count == 0
-                        except Exception:
-                            # 至少验证不崩溃
-                            pass
+        with patch.object(agent.subagents, "build_board", return_value=mock_board), \
+             patch("agent_py_agent.agent.gateway.gateway_paths", return_value=mock_gw_paths), \
+             patch("agent_py_agent.agent.gateway.gateway_running", return_value=(0, False)), \
+             patch("agent_py_agent.agent.gateway.gateway_request_counts", return_value={}):
+            try:
+                summary = detect_active_work(agent)
+                assert summary.gateway_alive is False
+                assert summary.active_task_count == 0
+            except Exception:
+                # 至少验证不崩溃
+                pass
 
     def test_detect_with_pending_dispatch(self, tmp_path: Path):
         """有待处理 dispatch 时的检测。"""
@@ -79,22 +81,24 @@ class TestDetectActiveWork:
         agent._has_pending_work = True
         agent._consecutive_dispatch_rounds = 5
 
-        with patch.object(agent.subagents, "build_board", return_value=MagicMock(hot_list=[], recent=[])):
-            with patch("agent_py_agent.agent.gateway.gateway_paths") as mock_gw_paths:
-                with patch("agent_py_agent.agent.gateway.gateway_running", return_value=(0, False)):
-                    with patch("agent_py_agent.agent.gateway.gateway_request_counts", return_value={}):
-                        mock_paths = MagicMock()
-                        mock_paths.processing = MagicMock()
-                        mock_paths.processing.exists.return_value = False
-                        mock_gw_paths.return_value = mock_paths
+        mock_board = MagicMock(hot_list=[], recent=[])
+        mock_paths = MagicMock()
+        mock_paths.processing = MagicMock()
+        mock_paths.processing.exists.return_value = False
+        mock_gw_paths = MagicMock()
+        mock_gw_paths.return_value = mock_paths
 
-                        try:
-                            summary = detect_active_work(agent)
-                            assert summary.dispatch_pending is True
-                            assert summary.dispatch_rounds == 5
-                        except Exception:
-                            # 至少验证属性存在
-                            pass
+        with patch.object(agent.subagents, "build_board", return_value=mock_board), \
+             patch("agent_py_agent.agent.gateway.gateway_paths", return_value=mock_gw_paths), \
+             patch("agent_py_agent.agent.gateway.gateway_running", return_value=(0, False)), \
+             patch("agent_py_agent.agent.gateway.gateway_request_counts", return_value={}):
+            try:
+                summary = detect_active_work(agent)
+                assert summary.dispatch_pending is True
+                assert summary.dispatch_rounds == 5
+            except Exception:
+                # 至少验证属性存在
+                pass
 
 
 class TestFormatActiveWorkSummary:

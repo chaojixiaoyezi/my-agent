@@ -324,13 +324,13 @@ def test_handle_signal_sets_stop_requested(supervisor_instance):
 
 def test_is_supervisor_running_no_pid_file():
     """测试无 PID 文件时返回未运行。"""
-    with patch.object(sv, "read_pid_file", return_value=None):
-        with patch.object(sv, "is_pid_alive", return_value=False):
-            with patch("agent_py_agent.agent.core.SimpleAgent"):
-                with patch("agent_py_agent.agent.config.load_config"):
-                    with patch("agent_py_agent.agent.gateway_parts.gateway_paths") as mock_gp:
-                        mock_gp.return_value = MagicMock(root=Path("/tmp"))
-                        result = sv.is_supervisor_running("dummy.yaml")
+    mock_gp = MagicMock(root=Path("/tmp"))
+    with patch.object(sv, "read_pid_file", return_value=None), \
+         patch.object(sv, "is_pid_alive", return_value=False), \
+         patch("agent_py_agent.agent.core.SimpleAgent"), \
+         patch("agent_py_agent.agent.config.load_config"), \
+         patch("agent_py_agent.agent.gateway_parts.gateway_paths", return_value=mock_gp):
+        result = sv.is_supervisor_running("dummy.yaml")
     assert result is False
 
 
