@@ -269,4 +269,4 @@ class TestGenerateSessionId:
         from agent_py_agent.agent.session.models import generate_session_id
 
         ids = [generate_session_id() for _ in range(100)]
-        assert len(set(ids)) >= 95  # 4位hex有碰撞概率，允许少量重复
+        assert len(set(ids)) == 100  # 8位hex (32 bits) 碰撞概率可忽略
