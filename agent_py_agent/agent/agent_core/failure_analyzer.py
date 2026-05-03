@@ -414,13 +414,13 @@ class SubAgentFailureAnalyzer:
         suggestions = []
 
         # 根据 plan 步骤拆分
-        if len(task.plan) > 3:
+        if task.plan and len(task.plan) > 3:
             mid = len(task.plan) // 2
             suggestions.append(f"前 {mid} 步：{task.plan[:mid]}")
             suggestions.append(f"后 {len(task.plan) - mid} 步：{task.plan[mid:]}")
         else:
             # 如果 plan 太短，按任务类型拆分
-            goal_lower = task.goal.lower()
+            goal_lower = (task.goal or "").lower()
             if "翻译" in goal_lower:
                 suggestions.append("翻译前半部分")
                 suggestions.append("翻译后半部分")

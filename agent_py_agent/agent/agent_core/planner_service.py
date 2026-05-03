@@ -59,6 +59,22 @@ def build_parent_planner_state(
         if task.status not in {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
         or task.verification_status == "NEEDS_ACCEPTANCE"
     ]
+    open_requests, open_gaps = _collect_open_capability_items(tasks)
+    gate_summary = _build_gate_summary(
+        tasks, active_tasks, due_report, action_plan,
+        runner_candidates, patch_run_ids, acceptance_report,
+        open_requests, open_gaps
+    )
+    state = _build_planner_state_dict(
+        gate_summary, board, active_tasks, due_report, action_plan,
+        runner_candidates, patch_run_ids, acceptance_report,
+        open_requests, open_gaps, limit
+    )
+    return state
+
+
+def _collect_open_capability_items(tasks):
+    """Collect open capability requests and gaps from tasks."""
     open_requests = []
     open_gaps = []
     for task in tasks:
@@ -79,7 +95,11 @@ def build_parent_planner_state(
                     "needed_capability": gap.needed_capability,
                     "problem": gap.problem,
                 })
+    return open_requests, open_gaps
 
+
+def _build_gate_summary(tasks, active_tasks, due_report, action_plan, runner_candidates, patch_run_ids, acceptance_report, open_requests, open_gaps):
+    """Build the gate summary dict."""
     gate_summary = {
         "total_tasks": len(tasks),
         "active_tasks": len(active_tasks),
@@ -106,8 +126,11 @@ def build_parent_planner_state(
             )
         )
     )
+    return gate_summary
 
-    from .planner import _limit_items as limit_items_aliased
+
+def _build_planner_state_dict(gate_summary, board, active_tasks, due_report, action_plan, runner_candidates, patch_run_ids, acceptance_report, open_requests, open_gaps, limit):
+    """Build the full planner state dictionary."""
     from .runner_dispatch import _limit_items
 
     return {
