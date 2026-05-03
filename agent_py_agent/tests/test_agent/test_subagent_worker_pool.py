@@ -62,7 +62,7 @@ class OneSlowOneFastBackend(BaseBackend):
             self.calls += 1
             call_no = self.calls
         if call_no == 1:
-            time.sleep(0.20)
+            time.sleep(2.0)
             return _accepted_result("slow worker eventually finished")
         return _accepted_result("fast worker finished")
 
@@ -114,7 +114,7 @@ def test_dispatch_parallel_runner_pool_timeout_does_not_block_other_workers(monk
         subagent_workspace="subs",
         runner_concurrency="2",
         runner_start_rate="2",
-        runner_timeout_seconds="0.1",
+        runner_timeout_seconds="0.5",
     )
     agent = SimpleAgent(cfg, root)
     tasks = [
