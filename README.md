@@ -639,3 +639,22 @@ python3 scripts/live_agent_lab.py --suite smoke
 python3 agent_py_agent/tests/run_tests.py
 # 跑完整测试；当前测试策略可能调用真实 API，跑前确认 key 和成本。
 ```
+
+---
+
+## 文档导航
+
+| 文档 | 说明 |
+|------|------|
+| [ONBOARDING.md](ONBOARDING.md) | **新 LLM / 新开发者开工指南** — 先读这个 |
+| [AGENTS.md](AGENTS.md) | LLM 开发者行为规范 |
+| [CODEBASE_TREE.md](CODEBASE_TREE.md) | 目录树逐文件说明 |
+| [CLI_REFERENCE.md](CLI_REFERENCE.md) | CLI 命令和参数手册 |
+| [docs/architecture/BOUNDARY_RULES.md](docs/architecture/BOUNDARY_RULES.md) | 分层导入矩阵 |
+| [docs/architecture/MODULE_OWNERSHIP.md](docs/architecture/MODULE_OWNERSHIP.md) | 模块职责归属表 |
+| [docs/development/DEVELOPMENT_RULES.md](docs/development/DEVELOPMENT_RULES.md) | 编码规则 |
+| [TESTING_POLICY.md](TESTING_POLICY.md) | 测试分层和规范 |
+| [CODE_SIZE_POLICY.md](CODE_SIZE_POLICY.md) | 代码尺寸限制 |
+| [CLEAN_PACKAGE_POLICY.md](CLEAN_PACKAGE_POLICY.md) | 打包洁净度规范 |
+| [docs/decisions/](docs/decisions/) | 架构决策记录 (ADR) |
+| [docs/architecture/SUBAGENT_SERVICE_REFACTOR_PLAN.md](docs/architecture/SUBAGENT_SERVICE_REFACTOR_PLAN.md) | SubAgent 服务化重构计划 |
