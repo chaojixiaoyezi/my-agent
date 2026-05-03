@@ -5,13 +5,17 @@ from __future__ import annotations
 
 给人看的解释：
 这个脚本先以 warn 模式暴露历史技术债，并生成 CODE_SIZE_REPORT.md。
-strict 模式用于后续 CI 收紧，阻断新增星号导入、垃圾命名和新增超硬上限文件。
+strict 模式用于后续 CI 收紧，阻断新增违规。
+支持 baseline 机制：历史违规不阻断，新增/恶化的违规阻断。
 """
 
 import argparse
 import ast
+import json
 import subprocess
-from dataclasses import dataclass
+import sys
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,7 +60,6 @@ JUNK_NAME_BASELINE = {
 }
 
 # High-risk files frozen by architecture guardrails.
-# These files must NOT grow; new code goes to extracted modules.
 HIGH_RISK_FILES: dict[str, int] = {
     "agent_py_agent/cli/chat.py": 1017,
     "agent_py_agent/agent/agent_core/dispatch_mixin.py": 895,
@@ -71,6 +74,20 @@ HIGH_RISK_FILES: dict[str, int] = {
     "agent_py_agent/cli/memory_commands.py": 609,
 }
 
+# Patterns to exclude from scanning
+EXCLUDE_PARTS = {
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    "htmlcov",
+    ".coverage",
+}
+EXCLUDE_PREFIXES = ("._",)
+EXCLUDE_SUFFIXES = {".pyc", ".pyo"}
+EXCLUDE_NAMES = {".DS_Store", ".AppleDouble", ".LSOverride"}
+
 
 @dataclass
 class Finding:
@@ -81,6 +98,23 @@ class Finding:
     limit: int
     severity: str
     message: str
+
+    def identity(self) -> str:
+        return f"{self.kind}:{self.path}:{self.name}"
+
+
+def _is_excluded(path: Path) -> bool:
+    """Check if a path should be excluded from scanning."""
+    for part in path.parts:
+        if part in EXCLUDE_PARTS:
+            return True
+        if part in EXCLUDE_NAMES:
+            return True
+        if any(part.startswith(p) for p in EXCLUDE_PREFIXES):
+            return True
+        if any(part.endswith(s) for s in EXCLUDE_SUFFIXES):
+            return True
+    return False
 
 
 def _git_added_files() -> set[str]:
@@ -108,9 +142,14 @@ def _source_files() -> list[Path]:
     for root_name in SOURCE_ROOTS:
         root = ROOT / root_name
         if root.is_file() and root.suffix == ".py":
-            files.append(root)
+            if not _is_excluded(root):
+                files.append(root)
         elif root.exists():
-            files.extend(path for path in root.rglob("*.py") if ".git" not in path.parts)
+            files.extend(
+                path
+                for path in root.rglob("*.py")
+                if not _is_excluded(path)
+            )
     return sorted(files)
 
 
@@ -146,9 +185,20 @@ def _max_nesting(node: ast.AST) -> int:
     return walk(node, 0)
 
 
+def _read_text_safe(path: Path) -> str | None:
+    """Read a file as UTF-8, returning None on decode error."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def _check_file_size(path: Path) -> list[Finding]:
     rel = _relative(path)
-    line_count = len(path.read_text(encoding="utf-8").splitlines())
+    text = _read_text_safe(path)
+    if text is None:
+        return [Finding("decode_error", rel, path.name, 0, 0, "hard", "failed to decode source file as UTF-8")]
+    line_count = len(text.splitlines())
     is_test = "/tests/" in f"/{rel}" or rel.startswith("test")
     soft = TEST_SOFT_LIMIT if is_test else FILE_SOFT_LIMIT
     hard = TEST_HARD_LIMIT if is_test else FILE_HARD_LIMIT
@@ -172,8 +222,11 @@ def _check_file_size(path: Path) -> list[Finding]:
 def _check_ast(path: Path) -> list[Finding]:
     rel = _relative(path)
     findings: list[Finding] = []
+    text = _read_text_safe(path)
+    if text is None:
+        return [Finding("decode_error", rel, path.name, 0, 0, "hard", "failed to decode source file as UTF-8")]
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        tree = ast.parse(text, filename=rel)
     except SyntaxError as exc:
         return [Finding("syntax", rel, path.name, exc.lineno or 0, 0, "hard", str(exc))]
 
@@ -222,7 +275,10 @@ def _check_high_risk_files() -> list[Finding]:
         path = ROOT / rel_path
         if not path.exists():
             continue
-        current = len(path.read_text(encoding="utf-8").splitlines())
+        text = _read_text_safe(path)
+        if text is None:
+            continue
+        current = len(text.splitlines())
         if current > baseline:
             findings.append(
                 Finding(
@@ -249,64 +305,124 @@ def collect_findings() -> list[Finding]:
     return sorted(findings, key=lambda item: (item.severity != "hard", item.kind, item.path, item.name))
 
 
-def _format_table(findings: list[Finding]) -> list[str]:
+def load_baseline(baseline_path: Path) -> dict[str, str]:
+    """Load baseline file mapping finding identity -> severity."""
+    if not baseline_path.exists():
+        return {}
+    data = json.loads(baseline_path.read_text(encoding="utf-8"))
+    return {item["identity"]: item["severity"] for item in data.get("findings", [])}
+
+
+def write_baseline(findings: list[Finding], baseline_path: Path) -> None:
+    """Write current findings as baseline."""
+    data = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "total_findings": len(findings),
+        "findings": [
+            {"identity": f.identity(), "severity": f.severity, "kind": f.kind, "path": f.path, "name": f.name}
+            for f in findings
+        ],
+    }
+    baseline_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def compute_strict_blockers(findings: list[Finding], baseline: dict[str, str] | None) -> list[Finding]:
+    """Compute which findings should block in strict mode.
+
+    Without baseline: all hard findings block.
+    With baseline: only new or worsened hard findings block.
+    """
+    blockers: list[Finding] = []
+    for f in findings:
+        if f.severity != "hard":
+            continue
+        if baseline is None:
+            blockers.append(f)
+            continue
+        # With baseline: block if finding is new (not in baseline)
+        # or if it's high_risk_growth (always blocks)
+        fid = f.identity()
+        if fid not in baseline or f.kind == "high_risk_growth":
+            blockers.append(f)
+    return blockers
+
+
+def _format_table(findings: list[Finding], limit: int = 0) -> list[str]:
     if not findings:
         return ["- none"]
     lines = ["| Severity | Kind | Path | Name | Value | Limit | Message |", "| --- | --- | --- | --- | ---: | ---: | --- |"]
-    for item in findings:
+    items = findings[:limit] if limit > 0 else findings
+    for item in items:
         lines.append(
             f"| {item.severity} | {item.kind} | `{item.path}` | `{item.name}` | "
             f"{item.value} | {item.limit} | {item.message} |"
         )
+    if limit > 0 and len(findings) > limit:
+        lines.append(f"| ... | ... | ... | ... | ... | ... | *{len(findings) - limit} more* |")
     return lines
 
 
-def write_report(findings: list[Finding], *, mode: str, blocked: bool) -> None:
+def write_report(
+    findings: list[Finding],
+    *,
+    mode: str,
+    blocked: bool,
+    baseline_path: str | None,
+    baseline_loaded: bool,
+) -> None:
     hard = [item for item in findings if item.severity == "hard"]
     soft = [item for item in findings if item.severity != "hard"]
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     lines = [
         "# CODE SIZE REPORT",
         "",
-        "LLM: Generated by `python scripts/check_code_size.py`.",
-        "",
-        "给人看的解释：",
-        "这份报告列出代码规模、函数长度、类长度、参数数量、嵌套深度和命名风险。",
+        f"Generated at: {now}",
+        f"Generated by: `python scripts/check_code_size.py --mode {mode}`",
         "",
         f"- mode: {mode}",
+        f"- baseline: {baseline_path or 'none'}",
+        f"- baseline_loaded: {baseline_loaded}",
         f"- blocked: {blocked}",
         f"- total_findings: {len(findings)}",
         f"- hard_findings: {len(hard)}",
         f"- soft_findings: {len(soft)}",
         "",
-        "## 1. 超长文件列表",
-        *_format_table([item for item in findings if item.kind == "file"]),
+        "## 1. 超长文件 Top 20",
+        *_format_table([item for item in findings if item.kind == "file"], 20),
         "",
-        "## 2. 超长函数列表",
-        *_format_table([item for item in findings if item.kind == "function"]),
+        "## 2. 超长函数 Top 20",
+        *_format_table([item for item in findings if item.kind == "function"], 20),
         "",
-        "## 3. 超长类列表",
-        *_format_table([item for item in findings if item.kind == "class"]),
+        "## 3. 超长类 Top 20",
+        *_format_table([item for item in findings if item.kind == "class"], 20),
         "",
-        "## 4. 高复杂度函数列表",
-        *_format_table([item for item in findings if item.kind == "nesting"]),
+        "## 4. 高复杂度函数 Top 20",
+        *_format_table([item for item in findings if item.kind == "nesting"], 20),
         "",
         "## 5. 高危文件增长",
         *_format_table([item for item in findings if item.kind == "high_risk_growth"]),
-
-        "## 6. 新增违规项",
-        *_format_table([item for item in hard if item.kind in {"import_star", "junk_name", "syntax"}]),
         "",
-        "## 7. 历史遗留项",
+        "## 6. import * 违规",
+        *_format_table([item for item in findings if item.kind == "import_star"]),
+        "",
+        "## 7. decode error 违规",
+        *_format_table([item for item in findings if item.kind == "decode_error"]),
+        "",
+        "## 8. junk file / junk name 违规",
+        *_format_table([item for item in findings if item.kind == "junk_name"]),
+        "",
+        "## 9. 历史遗留项 (soft)",
         *_format_table(soft[:100]),
         "",
-        "## 8. 建议拆分路径",
+        "## 10. 下一步建议",
         "- Keep `cli/parser.py` thin and route registration through `cli/commands/`.",
         "- Continue extracting `cli/chat.py` into chat session, input loop, renderer, and gateway client modules.",
         "- Move SubAgent mixin logic into services and repositories behind the manager facade.",
         "- Split memory archive query/runtime and log analysis tools by query, rendering, and persistence responsibilities.",
+        "- Run `--write-baseline` to capture current state, then use `--mode strict --baseline` to block only new violations.",
         "",
-        "## 9. 本次是否阻断",
-        f"- {'yes' if blocked else 'no'}",
+        "## 11. 本次是否阻断",
+        f"- {'**yes**' if blocked else 'no'}",
         "",
     ]
     REPORT_PATH.write_text("\n".join(lines), encoding="utf-8")
@@ -315,15 +431,38 @@ def write_report(findings: list[Finding], *, mode: str, blocked: bool) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check code-size engineering guardrails.")
     parser.add_argument("--mode", choices=["warn", "strict"], default="warn")
+    parser.add_argument("--baseline", type=str, default=None, help="Path to baseline JSON file")
+    parser.add_argument("--write-baseline", type=str, default=None, help="Write current findings as baseline")
     args = parser.parse_args()
+
     findings = collect_findings()
-    strict_blockers = [item for item in findings if item.severity == "hard" and item.kind in {"import_star", "junk_name", "syntax", "high_risk_growth"}]
-    blocked = args.mode == "strict" and bool(strict_blockers)
-    write_report(findings, mode=args.mode, blocked=blocked)
-    print(f"code-size findings: total={len(findings)} report={REPORT_PATH.relative_to(ROOT)} blocked={blocked}")
+
+    # Write baseline if requested
+    if args.write_baseline:
+        write_baseline(findings, Path(args.write_baseline))
+        print(f"baseline written to {args.write_baseline}")
+
+    # Load baseline if provided
+    baseline: dict[str, str] | None = None
+    baseline_loaded = False
+    if args.baseline:
+        bp = Path(args.baseline)
+        if bp.exists():
+            baseline = load_baseline(bp)
+            baseline_loaded = True
+        else:
+            print(f"WARNING: baseline file not found: {args.baseline}", file=sys.stderr)
+
+    blockers = compute_strict_blockers(findings, baseline)
+    blocked = args.mode == "strict" and bool(blockers)
+
+    write_report(findings, mode=args.mode, blocked=blocked, baseline_path=args.baseline, baseline_loaded=baseline_loaded)
+
+    print(f"code-size findings: total={len(findings)} hard={len([f for f in findings if f.severity == 'hard'])} report={REPORT_PATH.relative_to(ROOT)} blocked={blocked}")
+
     if blocked:
-        for item in strict_blockers:
-            print(f"{item.severity}: {item.kind}: {item.path}:{item.name} {item.message}")
+        for item in blockers:
+            print(f"BLOCKED: {item.severity}: {item.kind}: {item.path}:{item.name} {item.message}")
         return 1
     return 0
 

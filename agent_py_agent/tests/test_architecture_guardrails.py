@@ -60,14 +60,27 @@ JUNK_FILE_NAMES = {
 
 
 def _tracked_files() -> list[str]:
+    """Get list of tracked files, with fallback for non-git environments."""
     result = subprocess.run(
         ["git", "ls-files"],
         cwd=REPO_ROOT,
-        check=True,
         text=True,
         capture_output=True,
     )
-    return [line for line in result.stdout.splitlines() if line]
+    if result.returncode == 0:
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+    # fallback for source tarball / non-git environments
+    return [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in REPO_ROOT.rglob("*")
+        if path.is_file()
+        and ".git" not in path.parts
+        and "__pycache__" not in path.parts
+        and not path.name.startswith("._")
+        and path.name != ".DS_Store"
+        and path.suffix != ".pyc"
+    ]
 
 
 def _python_source_files() -> list[Path]:
@@ -75,7 +88,12 @@ def _python_source_files() -> list[Path]:
     for package in ("agent_py_agent", "scripts"):
         root = REPO_ROOT / package
         if root.exists():
-            files.extend(path for path in root.rglob("*.py") if ".git" not in path.parts)
+            files.extend(
+                path for path in root.rglob("*.py")
+                if ".git" not in path.parts
+                and "__pycache__" not in path.parts
+                and not path.name.startswith("._")
+            )
     return files
 
 
@@ -116,6 +134,8 @@ def test_large_entrypoints_do_not_grow_past_baseline() -> None:
     offenders = []
     for relative_path, max_lines in ENTRYPOINT_LINE_LIMITS.items():
         path = REPO_ROOT / relative_path
+        if not path.exists():
+            continue
         line_count = len(path.read_text(encoding="utf-8").splitlines())
         if line_count > max_lines:
             offenders.append(f"{relative_path}: {line_count} > {max_lines}")
@@ -148,7 +168,7 @@ def test_compileall_succeeds() -> None:
         quiet=2,
         force=True,
     )
-    assert result is not None
+    assert result is True
 
 
 def test_no_new_forbidden_globals() -> None:
@@ -177,3 +197,40 @@ def test_no_new_forbidden_globals() -> None:
                     offenders.append(key)
 
     assert offenders == []
+
+
+def test_no_macos_or_python_cache_artifacts() -> None:
+    """Source tree must not contain tracked macOS metadata or Python cache files."""
+
+    tracked = set(_tracked_files())
+    bad: list[str] = []
+    for path in REPO_ROOT.rglob("*"):
+        if ".git" in path.parts:
+            continue
+        if not path.is_file():
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        # Only check tracked files (untracked dirty files are in .gitignore)
+        if rel not in tracked:
+            continue
+        if path.name.startswith("._") or path.name == ".DS_Store":
+            bad.append(rel)
+        if "__pycache__" in path.parts or path.suffix == ".pyc":
+            bad.append(rel)
+
+    assert not bad, f"Found dirty tracked artifacts: {bad}"
+
+
+def test_governance_docs_exist() -> None:
+    """Key governance documents must be present in the repo."""
+
+    required_docs = [
+        "CODE_SIZE_POLICY.md",
+        "CODE_SIZE_REPORT.md",
+        "ARCHITECTURE_EXEMPTIONS.md",
+        "REFACTORING_BACKLOG.md",
+        "CLEAN_PACKAGE_POLICY.md",
+        "TESTING_POLICY.md",
+    ]
+    missing = [name for name in required_docs if not (REPO_ROOT / name).exists()]
+    assert not missing, f"Missing governance docs: {missing}"
