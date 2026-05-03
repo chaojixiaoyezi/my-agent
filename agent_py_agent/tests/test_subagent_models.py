@@ -159,7 +159,7 @@ class TestSubAgentCard:
         assert card.can_write is False
         assert card.can_spawn_children is False
         assert card.can_request_capability is True
-        assert card.max_depth == 2
+        assert card.max_depth == 0
         assert card.result_contract == []
 
 
