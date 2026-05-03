@@ -32,7 +32,6 @@ from .classifiers import (
     _unique_texts,
     _weak_signal,
 )
-
 from .field_access import (
     EventLike,
     JsonDict,
@@ -47,7 +46,6 @@ from .field_access import (
     _within_after,
     _within_before,
 )
-
 from .field_extractors import (
     _asset_ip,
     _cmdline,
@@ -63,7 +61,6 @@ from .field_extractors import (
     _user,
     _victim_ip,
 )
-
 from .rule_helpers import (
     _dedupe_findings,
     _evidence_ref,
