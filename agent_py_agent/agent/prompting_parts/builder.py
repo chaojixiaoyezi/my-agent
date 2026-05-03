@@ -80,12 +80,14 @@ class PromptBuilder:
                 "# Tool Transcript\n（无）\n\n"
                 f"# User Task\n{user_prompt}"
             )
+        default_tools = "# Tools\n（当前未启用工具）"
+        default_recommendations = "# Recommended Tools\n（当前无候选工具详情）"
         return (
             f"# System\n{self.config.system_prompt}\n\n"
             f"# Related Memory\n{memory_text}\n\n"
             f"# Dynamic Prompt Files\n{dynamic or '（无）'}\n\n"
             f"# Runtime Injection\n{injected or '（无）'}\n\n"
-            f"{tool_catalog_section or '# Tools\\n（当前未启用工具）'}\n\n"
-            f"{tool_recommendations_section or '# Recommended Tools\\n（当前无候选工具详情）'}\n\n"
+            f"{tool_catalog_section or default_tools}\n\n"
+            f"{tool_recommendations_section or default_recommendations}\n\n"
             f"{task_and_transcript}\n"
         )
