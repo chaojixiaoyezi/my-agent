@@ -4,10 +4,10 @@ from __future__ import annotations
 
 新手说明:
 这个包只做"找线索"和"整理恢复依据"。
-命令怎么打印放在 `memory_archive_commands.py`，这样查询逻辑可以单独测试，也不会把 CLI 文件堆大。
+命令怎么打印放在 `rendering_adapter.py`，这样查询逻辑可以单独测试，也不会把 CLI 文件堆大。
 """
 
-from .query_logic import (
+from .query import (
     archive_filters_from_args,
     build_resume_guidance,
     collect_archive_records,

@@ -8,5 +8,13 @@ from __future__ import annotations
 """
 
 from .config import AgentConfig, load_config, load_simple_yaml, parse_scalar
+from .normalize import normalize_agent_config, normalize_subagent_workflow_config
 
-__all__ = ["AgentConfig", "load_config", "load_simple_yaml", "parse_scalar"]
+__all__ = [
+    "AgentConfig",
+    "load_config",
+    "load_simple_yaml",
+    "parse_scalar",
+    "normalize_agent_config",
+    "normalize_subagent_workflow_config",
+]

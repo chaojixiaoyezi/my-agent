@@ -1,89 +1,32 @@
-from __future__ import annotations
-
-"""LLM contract: SubAgentLifecycleMixin methods grouped by one subagent responsibility.
+"""LLM contract: SubAgentLifecycleMixin - thin facade delegating to lifecycle service.
 
 Human version:
 这个 mixin 是 SubAgentManager 的一块业务能力，不单独实例化。
-拆成 mixin 是为了让每个文件只有一个变化原因，而不是把所有父代理逻辑塞进一个巨型文件。
+内部已委托给 services/lifecycle.py 中的 SubAgentLifecycleService。
+本文件只做薄包装，保持向后兼容。
 """
+
+from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..capabilities import CapabilityRouter
-from ..capability_config import CapabilityConfig
-from ..file_io import append_jsonl
-from ..memory_routing import load_routes, match_routes, resolve_required_paths
-from .models import (
-    CapabilityGap,
-    CapabilityGrant,
-    CapabilityRequest,
-    SubAgentTask,
-    VerificationEvidence,
-)
-from .parsing import (
-    _dict_list,
-    _normalize_runner_items,
-    _split_allowed_items,
-    _string_dict,
-    _string_list,
-)
-from .policies import (
-    _action_for_issue,
-    _capability_request_query,
-    _commands_for_action,
-    _dedupe_granted_cards,
-    _default_forbidden_write_roots,
-    _execution_context_instructions,
-    _filter_action_plan_items,
-    _is_active,
-    _issue_weight,
-    _make_due_issue,
-    _risk_weight,
-    _route_card_payload,
-    _runner_next_action,
-    _select_capability_hits,
-    _severity_weight,
-    _status_from_structured_output,
-    _verification_from_runner_status,
-)
-from .probe import (
-    _channel_status,
-    _probe_fail,
-    _probe_json_file,
-    _probe_ok,
-    _probe_writable_dir,
-)
-from .runner_rendering import _render_runner_item_line
-from .utils import (
-    _apply_missing_paths,
-    _apply_paths,
-    _merge_list,
-    _new_id,
-    _read_json_object,
-    _write_if_missing,
-    _write_json_if_missing,
-)
+from .services.lifecycle import SubAgentLifecycleService
 
 if TYPE_CHECKING:
     from ..local_store import LocalStore
 
-class SubAgentLifecycleMixin:
-    def _lifecycle_service(self):
-        """LLM: lazily create lifecycle service for legacy mixin-only tests.
 
-        人话说明：
-        正常 SubAgentManager 初始化时会设置 self.lifecycle；一些旧测试会直接
-        `__new__` mixin 并手动挂 load/save，所以这里保留兼容懒加载。
-        """
+class SubAgentLifecycleMixin:
+    """Thin facade for lifecycle operations delegating to SubAgentLifecycleService."""
+
+    def _lifecycle_service(self):
+        """Lazily get or create the lifecycle service."""
 
         lifecycle = getattr(self, "lifecycle", None)
         if lifecycle is None:
-            from .services.lifecycle import SubAgentLifecycleService
-
             lifecycle = SubAgentLifecycleService(self)
             self.lifecycle = lifecycle
         return lifecycle
@@ -95,11 +38,11 @@ class SubAgentLifecycleMixin:
         problem: str,
         needed_capability: str,
         expected_output: str = "",
-        tried: list[str] | None = None,
-        evidence: list[str] | None = None,
-        constraints: dict[str, str] | None = None,
-    ) -> CapabilityRequest:
-        """给某个子代理记录一条能力请求。"""
+        tried=None,
+        evidence=None,
+        constraints=None,
+    ):
+        """Record a capability request on a subagent task."""
 
         return self._lifecycle_service().record_capability_request(
             run_id,
@@ -116,14 +59,14 @@ class SubAgentLifecycleMixin:
         run_id: str,
         *,
         request_id: str,
-        skills: list[str] | None = None,
-        tools: list[str] | None = None,
-        capability_cards: list[dict[str, str]] | None = None,
-        reason: str = "",
-        constraints: dict[str, str] | None = None,
-        expires_after_task: bool = True,
-    ) -> CapabilityGrant:
-        """给某个子代理记录一条能力授权。"""
+        skills=None,
+        tools=None,
+        capability_cards=None,
+        reason="",
+        constraints=None,
+        expires_after_task=True,
+    ):
+        """Record a capability grant on a subagent task."""
 
         return self._lifecycle_service().record_capability_grant(
             run_id,
@@ -142,13 +85,13 @@ class SubAgentLifecycleMixin:
         *,
         missing_capability: str,
         why_failed: str,
-        attempted_skills: list[str] | None = None,
-        attempted_tools: list[str] | None = None,
-        needed_outputs: list[str] | None = None,
-        suggested_skill: str = "",
-        suggested_tool: str = "",
-    ) -> CapabilityGap:
-        """给某个子代理记录一条能力缺口。"""
+        attempted_skills=None,
+        attempted_tools=None,
+        needed_outputs=None,
+        suggested_skill="",
+        suggested_tool="",
+    ):
+        """Record a capability gap on a subagent task."""
 
         return self._lifecycle_service().record_capability_gap(
             run_id,
@@ -167,12 +110,12 @@ class SubAgentLifecycleMixin:
         *,
         kind: str,
         summary: str,
-        command: str = "",
-        path: str = "",
-        url: str = "",
-        ok: bool = True,
-    ) -> VerificationEvidence:
-        """记录一条验收证据。"""
+        command="",
+        path="",
+        url="",
+        ok=True,
+    ):
+        """Record verification evidence on a subagent task."""
 
         return self._lifecycle_service().record_evidence(
             run_id,
@@ -185,7 +128,7 @@ class SubAgentLifecycleMixin:
         )
 
     def touch_heartbeat(self, run_id: str) -> None:
-        """刷新子代理心跳时间。"""
+        """Refresh subagent heartbeat timestamp."""
 
         self._lifecycle_service().touch_heartbeat(run_id)
 
@@ -197,12 +140,8 @@ class SubAgentLifecycleMixin:
         result: str = "",
         failure_type: str = "",
         require_evidence: bool = False,
-    ) -> SubAgentTask:
-        """更新任务状态。
-
-        `require_evidence=True` 时，没有验收证据不能标记为 DONE。
-        这是防 Fake Done 的第一道硬约束。
-        """
+    ):
+        """Update task status with optional evidence requirement."""
 
         return self._lifecycle_service().set_status(
             run_id,
@@ -212,14 +151,11 @@ class SubAgentLifecycleMixin:
             require_evidence=require_evidence,
         )
 
-    def prepare_runner_attempt(self, run_id: str, *, retry_reason: str = "") -> SubAgentTask:
-        """把任务切到 RUNNING，准备启动一次 runner。
+    def prepare_runner_attempt(self, run_id: str, *, retry_reason: str = ""):
+        """Prepare task for runner execution (set RUNNING, reset verification)."""
 
-        初次执行和重试都走这里。大白话说：
-        - 旧的失败原因保留在 runner_last_error / 日志里；
-        - 当前状态先恢复成 RUNNING，避免 runner 看到 BLOCKED 后误以为任务已经不能做；
-        - 真正成功或失败由 record_runner_result 再写回。
-        """
+        from .models import SubAgentTask
+        from .utils import _new_id
 
         task = self.load(run_id)
         previous = f"{task.status}/{task.failure_type or 'none'}"
@@ -235,15 +171,13 @@ class SubAgentLifecycleMixin:
         suffix = f" retry_reason={retry_reason}" if retry_reason else ""
         self._append_task_work_log(
             task,
-            (
-                f"runner_attempt: start previous={previous} attempt={task.runner_attempts + 1} "
-                f"attempt_id={attempt_id}{suffix}"
-            ),
+            f"runner_attempt: start previous={previous} attempt={task.runner_attempts + 1} "
+            f"attempt_id={attempt_id}{suffix}",
         )
         return task
 
-    def abandon_runner_attempt(self, run_id: str, attempt_id: str, *, reason: str = "") -> SubAgentTask:
-        """标记一个 runner attempt 已被放弃，后续迟到结果不再覆盖账本。"""
+    def abandon_runner_attempt(self, run_id: str, attempt_id: str, *, reason: str = ""):
+        """Mark a runner attempt as abandoned."""
 
         task = self.load(run_id)
         normalized = str(attempt_id or "").strip()
