@@ -50,8 +50,8 @@ def watch_subagents(
     if interval < 0:
         raise ValueError("interval 不能小于 0。")
 
-    from ..subagent import DispatchWatchReport
-    from .dispatch_lock import _DispatchWatchLock
+    from ...subagent import DispatchWatchReport
+    from ..dispatch_lock import _DispatchWatchLock
 
     cfg = capability_config or CapabilityConfig()
     records = []
@@ -120,8 +120,8 @@ def _run_single_watch_cycle(
     max_cycles: int = 0,
 ):
     """Run a single watch cycle and return the dispatch watch record."""
-    from .dispatch_service import make_dispatch_watch_record
-    from .parameters import _sleep_with_stop
+    from ..dispatch_service import make_dispatch_watch_record
+    from ..parameters import _sleep_with_stop
 
     started_at = time_module.time()
     agent.subagents.write_dispatch_watch_heartbeat(
