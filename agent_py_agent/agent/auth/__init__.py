@@ -8,7 +8,7 @@
 """
 
 from .manager import AuthManager
-from .models import Action, Permission, Role
 from .middleware import AuthMiddleware
+from .models import Action, Permission, Role
 
 __all__ = ["Role", "Permission", "Action", "AuthManager", "AuthMiddleware"]

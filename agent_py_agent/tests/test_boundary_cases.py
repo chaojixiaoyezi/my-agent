@@ -12,7 +12,7 @@ class TestEmptyInputCases:
 
     def test_empty_task_list(self, tmp_path: Path):
         """空任务列表的处理。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import dispatch_loop, DispatchLoopReport
+        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -44,7 +44,7 @@ class TestEmptyInputCases:
 
     def test_empty_goal_not_crash_dispatch(self, tmp_path: Path):
         """空目标任务在 dispatch 中不会崩溃。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import dispatch_loop, DispatchLoopReport
+        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -75,8 +75,8 @@ class TestEmptyInputCases:
 
     def test_unicode_goal_handling(self, tmp_path: Path):
         """Unicode 目标字符串的处理。"""
-        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
         from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
+        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
 
         agent = MagicMock()
         agent.run.return_value = MagicMock(response='{"analysis_reason": "测试中文", "root_cause": "unknown", "should_retry": true}')
@@ -151,7 +151,7 @@ class TestConcurrentStateTransitions:
 
     def test_race_between_dispatch_and_complete(self, tmp_path: Path):
         """dispatch 和任务完成之间的竞态。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import dispatch_loop, DispatchLoopReport
+        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -197,8 +197,11 @@ class TestParameterBoundaryCases:
 
     def test_max_tool_rounds_negative(self, tmp_path: Path):
         """max_tool_rounds 为负数时的处理。"""
-        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector, FailureIntrospection
         from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
+        from agent_py_agent.agent.agent_core.failure_introspector import (
+            FailureIntrospection,
+            FailureIntrospector,
+        )
 
         agent = MagicMock()
         agent.run.return_value = MagicMock(response='{"analysis_reason": "test", "root_cause": "ok", "should_retry": true}')
@@ -241,7 +244,7 @@ class TestParameterBoundaryCases:
 
     def test_limit_zero(self, tmp_path: Path):
         """limit=0 时的处理。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import dispatch_loop, DispatchLoopReport
+        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -257,7 +260,7 @@ class TestParameterBoundaryCases:
 
     def test_max_runners_zero(self, tmp_path: Path):
         """max_runners=0 时的处理。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import dispatch_loop, DispatchLoopReport
+        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -273,8 +276,8 @@ class TestParameterBoundaryCases:
 
     def test_empty_string_goal(self, tmp_path: Path):
         """空字符串目标的处理。"""
-        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
         from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
+        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
 
         agent = MagicMock()
         agent.run.return_value = MagicMock(response='{"analysis_reason": "empty", "root_cause": "no_goal", "should_retry": false}')
@@ -299,7 +302,7 @@ class TestParameterBoundaryCases:
 
     def test_extremely_large_max_rounds(self, tmp_path: Path):
         """极大 max_rounds 值的处理（应该被限制）。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import dispatch_loop, DispatchLoopReport
+        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"

@@ -9,13 +9,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 
 from .planning import (
     PLAN_NOT_READY_ISSUE,
-    SubagentWorkOrder,
     LogAnalysisWorkOrderPlan,
+    SubagentWorkOrder,
     _merge_unique,
 )
 

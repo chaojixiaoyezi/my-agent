@@ -7,7 +7,13 @@ runner 相关输出更偏执行现场，所以单独放在这里。这样验收�
 执行上下文渲染不会互相搅在一个文件里。
 """
 
-from .models import ChannelProbeResult, ChannelProbeReport, SubAgentExecutionContext, SubAgentRunnerResult
+from .models import (
+    ChannelProbeReport,
+    ChannelProbeResult,
+    SubAgentExecutionContext,
+    SubAgentRunnerResult,
+)
+
 
 def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
     """渲染给子代理执行器读取的人类版上下文。"""

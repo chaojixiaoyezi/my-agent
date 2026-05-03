@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from agent_py_agent.agent.log_analysis.security import (
     HuntQuery,
-    build_seed_hunt_queries,
     build_case_hunt_plan,
+    build_seed_hunt_queries,
     next_query_plan,
     retrohunt_query_plan,
 )

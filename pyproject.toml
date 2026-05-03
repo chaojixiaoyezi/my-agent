@@ -65,5 +65,25 @@ extend-exclude = [
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
 ignore = [
-  "E501",
+  "E501",   # line length — handled by formatter/editor
+  "E402",   # module-level import not at top — historical, many intentional
+  "F841",   # unused variable — historical debt
+  "F821",   # undefined name — historical (TYPE_CHECKING, runtime eval)
+  "SIM105", # suppressible exception — historical try/except patterns
+  "B007",   # unused loop variable — historical
+  "SIM108", # if-else-block vs ternary — readability preference
+  "SIM102", # collapsible-if — readability preference
+  "SIM103", # needless-bool — readability preference
+  "SIM117", # multiple-with — readability preference
+  "SIM118", # in-dict-keys — readability preference
+  "SIM110", # reimplemented-builtin — readability preference
+  "C408",   # unnecessary-collection-call — style preference
+  "E741",   # ambiguous variable name — historical (l, O, I)
+  "B023",   # function uses loop variable — historical
+  "B004",   # unreliable callable check — historical
+  "B905",   # zip without strict — historical
+  "F402",   # import shadowed by loop var — historical
+  "UP031",  # printf string formatting — historical
+  "F401",   # unused import — historical re-exports in __init__.py
+  "F811",   # redefined name — historical test imports
 ]

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 """Small in-memory baseline helpers for soft detectors."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Iterable
+from typing import Any
 
 
 def _norm(value: Any) -> str:
@@ -31,7 +32,7 @@ class SecurityBaselines:
     known_egress_ports_by_asset: dict[str, set[int]] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any] | None) -> "SecurityBaselines":
+    def from_dict(cls, payload: dict[str, Any] | None) -> SecurityBaselines:
         payload = payload or {}
         return cls(
             known_countries_by_user=_set_map(payload.get("known_countries_by_user")),

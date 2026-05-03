@@ -23,7 +23,6 @@ from agent_py_agent.cli.memory_doctor import (
     _route_payload,
 )
 
-
 # ── _resolve_index_path 测试 ───────────────────────────────────────────────
 
 def test_resolve_index_path_default():

@@ -3,8 +3,8 @@
 给人看的解释：
 测试子代理调度模块：dispatch 记录生成、parent planner 报告、日志写入。
 """
-from pathlib import Path
 import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest

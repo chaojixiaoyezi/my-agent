@@ -11,7 +11,7 @@ import math
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..model_speed import load_speed_profile, SpeedProfile
+from ..model_speed import SpeedProfile, load_speed_profile
 
 if TYPE_CHECKING:
     from ..settings import AgentConfig

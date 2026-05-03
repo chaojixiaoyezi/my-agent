@@ -19,7 +19,6 @@ from .config import (
     resolve_log_analysis_data_dir,
 )
 
-
 RUNTIME_DIRS = [
     "sources",
     "checkpoints",

@@ -13,8 +13,6 @@ import json
 import re
 from typing import Any
 
-
-
 _XMLISH_TOOL_BLOCK_RE = re.compile(
     r"<tool_call\b[^>]*>(?P<body>.*?)</tool_call\s*>",
     re.IGNORECASE | re.DOTALL,

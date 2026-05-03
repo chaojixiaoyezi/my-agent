@@ -18,7 +18,6 @@ from agent_py_agent.cli.local_doctor import (
     rebuild_subagent_index,
 )
 
-
 # ── _add_doctor_check 测试 ─────────────────────────────────────────────────
 
 def test_add_doctor_check_ok():

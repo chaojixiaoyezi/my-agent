@@ -5,10 +5,10 @@
 测试用例里需要一个能模拟工具调用 / 子代理派工 / 最大轮数等行为的后端时，从这里导入即可。
 """
 
-from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
-from pathlib import Path
 import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
 from agent_py_agent.agent.backend import BaseBackend, ModelResponse
 from agent_py_agent.agent.tools import ToolRegistry

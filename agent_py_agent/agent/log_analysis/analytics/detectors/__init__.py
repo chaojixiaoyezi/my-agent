@@ -13,54 +13,7 @@
 
 from __future__ import annotations
 
-# Re-export from sub-modules for backward compatibility.
-# Existing ``from .detectors import X`` and ``from .analytics.detectors import X``
-# statements will continue to work after the file→package migration.
-
-from .field_access import (  # noqa: F401
-    EventLike,
-    JsonDict,
-    SUSPICIOUS_CHILD_PROCESSES,
-    WEB_PARENT_PROCESSES,
-    _canonical_time,
-    _clamp_float,
-    _event_dict,
-    _event_time,
-    _field,
-    _parse_time,
-    _path_value,
-    _present,
-    _sort_time,
-    _text,
-    _time_bucket,
-    _to_float,
-    _to_int,
-    _truthy,
-    _within_after,
-    _within_before,
-    _window_for_events,
-)
-
-from .field_extractors import (  # noqa: F401
-    _asset_ip,
-    _basename,
-    _cmdline,
-    _destination_ip,
-    _domain,
-    _dst_port,
-    _event_action,
-    _event_class,
-    _host,
-    _outcome,
-    _parent_process_name,
-    _process_name,
-    _severity,
-    _source_ip,
-    _source_product,
-    _user,
-    _victim_ip,
-)
-
+from ...models import Finding  # noqa: F401
 from .classifiers import (  # noqa: F401
     _asset_candidates,
     _destination,
@@ -89,6 +42,51 @@ from .classifiers import (  # noqa: F401
     _weak_signal,
 )
 
+# Re-export from sub-modules for backward compatibility.
+# Existing ``from .detectors import X`` and ``from .analytics.detectors import X``
+# statements will continue to work after the file→package migration.
+from .field_access import (  # noqa: F401
+    SUSPICIOUS_CHILD_PROCESSES,
+    WEB_PARENT_PROCESSES,
+    EventLike,
+    JsonDict,
+    _canonical_time,
+    _clamp_float,
+    _event_dict,
+    _event_time,
+    _field,
+    _parse_time,
+    _path_value,
+    _present,
+    _sort_time,
+    _text,
+    _time_bucket,
+    _to_float,
+    _to_int,
+    _truthy,
+    _window_for_events,
+    _within_after,
+    _within_before,
+)
+from .field_extractors import (  # noqa: F401
+    _asset_ip,
+    _basename,
+    _cmdline,
+    _destination_ip,
+    _domain,
+    _dst_port,
+    _event_action,
+    _event_class,
+    _host,
+    _outcome,
+    _parent_process_name,
+    _process_name,
+    _severity,
+    _source_ip,
+    _source_product,
+    _user,
+    _victim_ip,
+)
 from .rules import (  # noqa: F401
     DETECTORS,
     bruteforce_then_success,
@@ -105,8 +103,6 @@ from .rules import (  # noqa: F401
     waf_attack_success_candidate,
     web_to_process_anomaly,
 )
-
-from ...models import Finding  # noqa: F401
 
 __all__ = [
     "DETECTORS",

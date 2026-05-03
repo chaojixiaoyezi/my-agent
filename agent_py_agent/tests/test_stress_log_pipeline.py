@@ -11,9 +11,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from agent_py_agent.agent.log_analysis.ingest.dead_letter import DeadLetterWriter
 from agent_py_agent.agent.log_analysis.ingest.pipeline import IngestPipeline
 from agent_py_agent.agent.log_analysis.ingest.pipeline_enrich import flush_events
-from agent_py_agent.agent.log_analysis.ingest.dead_letter import DeadLetterWriter
 
 
 class TestLargeFileIngest:

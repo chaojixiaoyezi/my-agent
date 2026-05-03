@@ -16,6 +16,8 @@ import pytest
 from agent_py_agent.agent.subagents.models import (
     CapabilityGrant,
     CapabilityRequest,
+    ChannelProbeCheck,
+    ChannelProbeResult,
     QualityContract,
     SubAgentCard,
     SubAgentExecutionContext,
@@ -24,10 +26,6 @@ from agent_py_agent.agent.subagents.models import (
     SubAgentTask,
     TaskStatus,
     VerificationEvidence,
-)
-from agent_py_agent.agent.subagents.models import (
-    ChannelProbeCheck,
-    ChannelProbeResult,
 )
 
 

@@ -9,9 +9,10 @@
 from __future__ import annotations
 
 import ipaddress
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from ...models import utc_now_iso
 

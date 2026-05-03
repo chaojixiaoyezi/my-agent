@@ -1,27 +1,28 @@
 from __future__ import annotations
 
-import pytest
+import os
 from pathlib import Path
 from unittest.mock import patch
-import os
 
-from agent_py_agent.agent.memory_routing.validator import (
-    VALID_INJECT_MODES,
-    validate_routes,
-    _validate_authority_path,
-)
+import pytest
+
 from agent_py_agent.agent.memory_routing.models import (
-    MemoryRoute,
-    MemoryRouteMatch,
     MemoryPathResolution,
     MemoryReadReceipt,
+    MemoryRoute,
+    MemoryRouteMatch,
     _dedupe,
+)
+from agent_py_agent.agent.memory_routing.validator import (
+    VALID_INJECT_MODES,
+    _validate_authority_path,
+    validate_routes,
 )
 
 
 class TestValidInjectModes:
     def test_valid_inject_modes_contains_expected_values(self):
-        assert VALID_INJECT_MODES == {"always", "on_hit", "never"}
+        assert {"always", "on_hit", "never"} == VALID_INJECT_MODES
 
     def test_valid_inject_modes_is_set(self):
         assert isinstance(VALID_INJECT_MODES, set)

@@ -1,7 +1,7 @@
 """skill/tool 统一能力路由测试。"""
 
-from pathlib import Path
 import tempfile
+from pathlib import Path
 
 from agent_py_agent.agent.capabilities import CapabilityRouter
 from agent_py_agent.agent.capability_config import CapabilityConfig, load_capability_config
@@ -142,7 +142,7 @@ class TestRouterMutationCoverage:
         Mutation: token_score += 6.0 changed to += 3.0
         This would underweight name matches.
         """
-        from agent_py_agent.agent.capability.router import score_card, CapabilityCard
+        from agent_py_agent.agent.capability.router import CapabilityCard, score_card
 
         card = CapabilityCard(
             id="test",
@@ -162,7 +162,7 @@ class TestRouterMutationCoverage:
         Mutation: token_score += 5.0 changed to += 2.0
         This would underweight capabilities matches.
         """
-        from agent_py_agent.agent.capability.router import score_card, CapabilityCard
+        from agent_py_agent.agent.capability.router import CapabilityCard, score_card
 
         card = CapabilityCard(
             id="test",
@@ -183,7 +183,7 @@ class TestRouterMutationCoverage:
         Mutation: 'if score > 0:' changed to 'if score > 5:'
         This would skip cards with low but valid scores.
         """
-        from agent_py_agent.agent.capability.router import score_card, CapabilityCard
+        from agent_py_agent.agent.capability.router import CapabilityCard, score_card
 
         card = CapabilityCard(
             id="test",
@@ -202,8 +202,8 @@ class TestRouterMutationCoverage:
 
         Mutation: Config value ignored, hardcoded to 10
         """
-        from agent_py_agent.agent.capability.router import CapabilityRouter, CapabilityCard
         from agent_py_agent.agent.capability.config import CapabilityConfig
+        from agent_py_agent.agent.capability.router import CapabilityCard, CapabilityRouter
 
         config = CapabilityConfig(capability_candidate_limit=2)
         router = CapabilityRouter(config=config)

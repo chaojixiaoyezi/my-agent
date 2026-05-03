@@ -3,7 +3,8 @@ from __future__ import annotations
 """Local file content renderers for first response and forensic packages."""
 
 import json
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from .models import CaseRecord, EvidenceRef, Finding, utc_now_iso
 from .security.correlation import RouteDraft, build_route_draft

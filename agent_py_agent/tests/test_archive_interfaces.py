@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 
@@ -60,7 +61,10 @@ class TestRegisterCompressionHook:
 
     def test_register_single_hook(self):
         """测试注册单个钩子。"""
-        from agent_py_agent.agent.memory_archive.snapshots import clear_compression_hooks, register_compression_hook
+        from agent_py_agent.agent.memory_archive.snapshots import (
+            clear_compression_hooks,
+            register_compression_hook,
+        )
 
         clear_compression_hooks()
 
@@ -79,7 +83,10 @@ class TestRegisterCompressionHook:
 
     def test_register_multiple_hooks(self):
         """测试注册多个钩子。"""
-        from agent_py_agent.agent.memory_archive.snapshots import clear_compression_hooks, register_compression_hook
+        from agent_py_agent.agent.memory_archive.snapshots import (
+            clear_compression_hooks,
+            register_compression_hook,
+        )
 
         clear_compression_hooks()
 
@@ -99,7 +106,10 @@ class TestRegisterCompressionHook:
 
     def test_register_lambda_hook(self):
         """测试注册 lambda 钩子。"""
-        from agent_py_agent.agent.memory_archive.snapshots import clear_compression_hooks, register_compression_hook
+        from agent_py_agent.agent.memory_archive.snapshots import (
+            clear_compression_hooks,
+            register_compression_hook,
+        )
 
         clear_compression_hooks()
 
@@ -116,7 +126,10 @@ class TestClearCompressionHooks:
 
     def test_clear_empties_hooks(self):
         """测试清理后钩子列表为空。"""
-        from agent_py_agent.agent.memory_archive.snapshots import clear_compression_hooks, register_compression_hook
+        from agent_py_agent.agent.memory_archive.snapshots import (
+            clear_compression_hooks,
+            register_compression_hook,
+        )
 
         clear_compression_hooks()
 
@@ -177,7 +190,10 @@ class TestHookExecutionOrder:
 
     def test_hooks_execute_in_order(self):
         """测试钩子按注册顺序执行。"""
-        from agent_py_agent.agent.memory_archive.snapshots import clear_compression_hooks, register_compression_hook
+        from agent_py_agent.agent.memory_archive.snapshots import (
+            clear_compression_hooks,
+            register_compression_hook,
+        )
 
         clear_compression_hooks()
 
@@ -203,7 +219,10 @@ class TestHookExecutionOrder:
 
     def test_hook_failure_stops_subsequent(self):
         """测试一个钩子失败会阻断后续钩子。"""
-        from agent_py_agent.agent.memory_archive.snapshots import clear_compression_hooks, register_compression_hook
+        from agent_py_agent.agent.memory_archive.snapshots import (
+            clear_compression_hooks,
+            register_compression_hook,
+        )
 
         clear_compression_hooks()
 
@@ -234,7 +253,10 @@ class TestHookEdgeCases:
 
     def test_hook_with_all_archive_levels(self):
         """测试所有归档级别都可正常传给钩子。"""
-        from agent_py_agent.agent.memory_archive.snapshots import clear_compression_hooks, register_compression_hook
+        from agent_py_agent.agent.memory_archive.snapshots import (
+            clear_compression_hooks,
+            register_compression_hook,
+        )
 
         clear_compression_hooks()
 
@@ -255,7 +277,10 @@ class TestHookEdgeCases:
 
     def test_hook_with_empty_ids(self):
         """测试空字符串 session_id 和 turn_id。"""
-        from agent_py_agent.agent.memory_archive.snapshots import clear_compression_hooks, register_compression_hook
+        from agent_py_agent.agent.memory_archive.snapshots import (
+            clear_compression_hooks,
+            register_compression_hook,
+        )
 
         clear_compression_hooks()
 

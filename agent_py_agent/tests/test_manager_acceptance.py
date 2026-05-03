@@ -296,6 +296,7 @@ class TestSubAgentAcceptanceMixin:
         (tmp_path / "acceptance.json").write_text("[]", encoding="utf-8")
 
         from dataclasses import asdict
+
         from agent_py_agent.agent.subagents.reports import AcceptanceReviewReport
 
         record_data = {

@@ -15,12 +15,11 @@ import pytest
 
 from agent_py_agent.agent.subagents.models import (
     CapabilityGrant,
-    SubAgentTask,
-    SubAgentExecutionContext,
-    QualityContract,
     ContextManifest,
+    QualityContract,
+    SubAgentExecutionContext,
+    SubAgentTask,
 )
-
 
 # ── 测试夹具 ──────────────────────────────────────────────────────────────
 

@@ -17,23 +17,22 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_py_agent.agent.log_analysis.dispatch.budgets import DispatchBudget, BudgetDecision
-from agent_py_agent.agent.log_analysis.dispatch.queue import (
-    InvestigationQueue,
-    DispatchRequest,
-    PENDING_INVESTIGATION,
-    DISPATCHED,
-    QUEUED,
-)
+from agent_py_agent.agent.log_analysis.dispatch.budgets import BudgetDecision, DispatchBudget
 from agent_py_agent.agent.log_analysis.dispatch.engine import (
     DispatchEngine,
     DispatchResult,
-    _get,
     _case_id,
-    _priority,
     _evidence_refs_from_summary,
+    _get,
+    _priority,
 )
-
+from agent_py_agent.agent.log_analysis.dispatch.queue import (
+    DISPATCHED,
+    PENDING_INVESTIGATION,
+    QUEUED,
+    DispatchRequest,
+    InvestigationQueue,
+)
 
 # ============================================================
 # 测试用例：DispatchEngine 初始化

@@ -31,6 +31,8 @@ from .memory_archive_commands import (
 )
 from .memory_commands import cmd_memory_route
 from .memory_doctor import cmd_memory_doctor
+
+
 def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
     """LLM: add the --capability-config argument with its default.
 

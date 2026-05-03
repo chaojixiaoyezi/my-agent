@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-import pytest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from agent_py_agent.agent.tooling.write_boundary import (
-    WRITE_TOOL_NAMES,
     _MAX_BOUNDARY_PATH_CHARS,
-    _path_text,
-    _is_relative_to,
-    _display_path,
+    WRITE_TOOL_NAMES,
     _boundary_paths,
+    _display_path,
+    _is_relative_to,
+    _path_text,
     _resolve_boundary_path,
     validate_write_boundary,
 )

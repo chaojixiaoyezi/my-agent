@@ -12,7 +12,12 @@ import sys
 from pathlib import Path
 
 from ..agent.core import SimpleAgent
-from ..agent.gateway import gateway_paths, gateway_request_counts, gateway_stale_processing, rebuild_gateway_index
+from ..agent.gateway import (
+    gateway_paths,
+    gateway_request_counts,
+    gateway_stale_processing,
+    rebuild_gateway_index,
+)
 from .common import _memory_record_count
 
 

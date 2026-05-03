@@ -16,7 +16,6 @@ from pathlib import Path
 from .models import LearningCandidate, SubAgentTask
 from .utils import _new_id
 
-
 _LEARNING_STATUSES = {"draft", "accepted", "rejected"}
 
 

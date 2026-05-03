@@ -6,12 +6,16 @@ from __future__ import annotations
 测试 LLM 失败自省器的各种场景：调用成功、JSON解析、参数提取、降级逻辑。
 """
 
-import pytest
 from unittest.mock import MagicMock, patch
 
-from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospection, FailureIntrospector
+import pytest
+
 from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
-from agent_py_agent.agent.subagents.models import SubAgentTask, SubAgentRunnerResult
+from agent_py_agent.agent.agent_core.failure_introspector import (
+    FailureIntrospection,
+    FailureIntrospector,
+)
+from agent_py_agent.agent.subagents.models import SubAgentRunnerResult, SubAgentTask
 
 
 class TestFailureIntrospection:

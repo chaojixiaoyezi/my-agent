@@ -44,12 +44,12 @@ class GatewaySupervisor:
         self,
         config_path: str,
         *,
-        workspace_root: Optional[str] = None,
+        workspace_root: str | None = None,
         heartbeat_timeout: float = 120.0,
         check_interval: float = 10.0,
         max_restart_attempts: int = 5,
         restart_cooldown: float = 30.0,
-        log_path: Optional[Path] = None,
+        log_path: Path | None = None,
     ):
         self.config_path = config_path
         self.workspace_root = workspace_root
@@ -60,7 +60,7 @@ class GatewaySupervisor:
         self.log_path = log_path
 
         self._supervisor_pid: int = os.getpid()
-        self._gateway_pid: Optional[int] = None
+        self._gateway_pid: int | None = None
         self._restart_count: int = 0
         self._last_restart_at: float = 0.0
         self._stop_requested: bool = False
@@ -73,8 +73,8 @@ class GatewaySupervisor:
             return
 
         # Import lazily to avoid circular dependencies
-        from ..core import SimpleAgent
         from ..config import load_config
+        from ..core import SimpleAgent
 
         config = load_config(self.config_path)
         root = Path(self.config_path).resolve().parent
@@ -105,7 +105,7 @@ class GatewaySupervisor:
     def _log_error(self, msg: str) -> None:
         self._log("ERROR", msg)
 
-    def _read_gateway_heartbeat(self) -> Optional[dict]:
+    def _read_gateway_heartbeat(self) -> dict | None:
         """Read gateway heartbeat file, returning None if missing or stale."""
         self._resolve_agent_and_paths()
         heartbeat_path = self._paths.heartbeat
@@ -171,7 +171,7 @@ class GatewaySupervisor:
 
         return True  # PID alive, assume healthy if no state file
 
-    def _start_gateway(self) -> Optional[int]:
+    def _start_gateway(self) -> int | None:
         """Start the gateway process. Returns the gateway PID or None on failure."""
         self._resolve_agent_and_paths()
 
@@ -387,8 +387,8 @@ def run_supervisor(config_path: str, **kwargs) -> int:
 
 def is_supervisor_running(config_path: str) -> bool:
     """Check if a supervisor is running for the given config."""
-    from ..core import SimpleAgent
     from ..config import load_config
+    from ..core import SimpleAgent
 
     config = load_config(config_path)
     root = Path(config_path).resolve().parent
@@ -408,8 +408,8 @@ def is_supervisor_running(config_path: str) -> bool:
 
 def stop_supervisor(config_path: str, timeout: float = 10.0) -> bool:
     """Stop the supervisor for the given config."""
-    from ..core import SimpleAgent
     from ..config import load_config
+    from ..core import SimpleAgent
 
     config = load_config(config_path)
     root = Path(config_path).resolve().parent

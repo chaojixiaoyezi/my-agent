@@ -29,13 +29,6 @@ from .gateway_process import (
     cmd_gateway_stop,
     cmd_gateway_uninstall,
 )
-from .supervisor import (
-    cmd_start_all,
-    cmd_supervisor_run,
-    cmd_supervisor_start,
-    cmd_supervisor_status,
-    cmd_supervisor_stop,
-)
 from .logs import (
     cmd_logs,
     cmd_logs_hunt_ip,
@@ -45,6 +38,13 @@ from .logs import (
     cmd_logs_trace_case,
 )
 from .scenario import cmd_scenario_test
+from .supervisor import (
+    cmd_start_all,
+    cmd_supervisor_run,
+    cmd_supervisor_start,
+    cmd_supervisor_status,
+    cmd_supervisor_stop,
+)
 
 
 def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:

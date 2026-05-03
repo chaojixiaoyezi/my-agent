@@ -13,7 +13,6 @@ import pytest
 
 from agent_py_agent.agent.gateway_parts import lease as lease_module
 
-
 # ── 测试夹具 ──────────────────────────────────────────────────────────────
 
 @pytest.fixture

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ..settings.config import AgentConfig
 
-from .logger import AuditEntry, AuditAction
+from .logger import AuditAction, AuditEntry
 
 
 @dataclass
@@ -87,7 +87,7 @@ class AuditQuery:
         action_str = action.value if isinstance(action, AuditAction) else action
 
         try:
-            with open(self._audit_file, "r", encoding="utf-8") as f:
+            with open(self._audit_file, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -161,7 +161,7 @@ class AuditQuery:
         last_action_time = 0.0
 
         try:
-            with open(self._audit_file, "r", encoding="utf-8") as f:
+            with open(self._audit_file, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -211,7 +211,7 @@ class AuditQuery:
         user_last_time: dict[str, float] = {}
 
         try:
-            with open(self._audit_file, "r", encoding="utf-8") as f:
+            with open(self._audit_file, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -256,7 +256,7 @@ class AuditQuery:
         deleted_count = 0
 
         try:
-            with open(self._audit_file, "r", encoding="utf-8") as f_in:
+            with open(self._audit_file, encoding="utf-8") as f_in:
                 with open(temp_file, "w", encoding="utf-8") as f_out:
                     for line in f_in:
                         line = line.strip()

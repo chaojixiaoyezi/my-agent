@@ -19,18 +19,17 @@ import pytest
 from agent_py_agent.agent.log_analysis.dispatch.work_orders.creation import (
     SubAgentTaskCreator,
     SubagentWorkOrderCreationResult,
-    create_subagent_tasks_from_work_order_plan,
-    _work_order_quality_contract,
     _work_order_context_pack,
     _work_order_plan_steps,
+    _work_order_quality_contract,
+    create_subagent_tasks_from_work_order_plan,
 )
 from agent_py_agent.agent.log_analysis.dispatch.work_orders.planning import (
-    SubagentWorkOrder,
-    LogAnalysisWorkOrderPlan,
     PARENT_FINAL_GATE,
     PLAN_NOT_READY_ISSUE,
+    LogAnalysisWorkOrderPlan,
+    SubagentWorkOrder,
 )
-
 
 # ============================================================
 # 测试用例：SubagentWorkOrderCreationResult 数据结构

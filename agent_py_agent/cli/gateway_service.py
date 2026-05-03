@@ -72,7 +72,7 @@ def get_service_name() -> str:
 
 def _get_launchd_label() -> str:
     """Return the launchd label (reverse-domain style)."""
-    return f"ai.my-agent.gateway"
+    return "ai.my-agent.gateway"
 
 
 def get_systemd_unit_path(system: bool = False) -> Path:
@@ -464,8 +464,8 @@ def install_launchd(force: bool = False) -> bool:
     print("✓ Service installed and loaded!")
     print()
     print("Next steps:")
-    print("  launchctl bootout gui/$(id -u)/{label}     # Unload the service".format(label=label))
-    print("  launchctl print gui/$(id -u)/{label}      # Check status".format(label=label))
+    print(f"  launchctl bootout gui/$(id -u)/{label}     # Unload the service")
+    print(f"  launchctl print gui/$(id -u)/{label}      # Check status")
     print(f"  tail -f /tmp/{label}.stdout.log          # View stdout logs")
 
     return True

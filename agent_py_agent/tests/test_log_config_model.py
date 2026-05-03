@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from agent_py_agent.agent.log_analysis.config.config_model import (
-    LogAnalysisConfigWarning,
     LogAnalysisConfig,
+    LogAnalysisConfigWarning,
     default_log_analysis_config_path,
     default_log_analysis_workspace_root,
     resolve_log_analysis_data_dir,

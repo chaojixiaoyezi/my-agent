@@ -4,16 +4,16 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import time
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .memory_store import JsonlMemory
     from .local_store import LocalStore
+    from .memory_store import JsonlMemory
 
 
 class MemoryType(str, Enum):
@@ -33,7 +33,7 @@ class MemoryType(str, Enum):
     FACT = "fact"
 
     @classmethod
-    def from_string(cls, value: str) -> "MemoryType":
+    def from_string(cls, value: str) -> MemoryType:
         """从字符串创建 MemoryType，兼容旧记忆（无 type 标签的当作 LESSON_GENERAL）。"""
         if not value:
             return cls.LESSON_GENERAL
@@ -81,7 +81,7 @@ class MemoryEntry:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "MemoryEntry":
+    def from_dict(cls, data: dict) -> MemoryEntry:
         type_val = data.get("type", "lesson_general")
         if isinstance(type_val, str):
             mem_type = MemoryType.from_string(type_val)
@@ -165,12 +165,7 @@ def push_relevant_memories(
             )
 
             # 根据触发类型过滤
-            if trigger_type == "timeout":
-                if entry.type in {MemoryType.LESSON_GENERAL, MemoryType.LESSON_TASK}:
-                    text = entry.to_memory_record_content()
-                    if text and len(text) <= 200:
-                        memories_text.append(text)
-            elif trigger_type == "failure":
+            if trigger_type == "timeout" or trigger_type == "failure":
                 if entry.type in {MemoryType.LESSON_GENERAL, MemoryType.LESSON_TASK}:
                     text = entry.to_memory_record_content()
                     if text and len(text) <= 200:
@@ -225,7 +220,7 @@ def push_planning_memories(agent, task_id: str, goal: str) -> list[str]:
 
 
 def write_memory_with_type(
-    memory: "JsonlMemory",
+    memory: JsonlMemory,
     content: str,
     mem_type: MemoryType,
     trigger_type: str = "",

@@ -59,7 +59,13 @@ from .cli.daemon import (
     _validate_daemon_numbers,
     cmd_daemon,
 )
-from .cli.gateway_client import cmd_default, cmd_gateway, cmd_gateway_ask, cmd_gateway_result, ensure_gateway_started
+from .cli.gateway_client import (
+    cmd_default,
+    cmd_gateway,
+    cmd_gateway_ask,
+    cmd_gateway_result,
+    ensure_gateway_started,
+)
 from .cli.gateway_process import (
     _gateway_heartbeat_loop,
     _gateway_request_loop,
@@ -72,6 +78,7 @@ from .cli.gateway_process import (
     cmd_gateway_status,
     cmd_gateway_stop,
 )
+from .cli.learning import cmd_learn_accept, cmd_learn_list, cmd_learn_reject, cmd_learn_stats
 from .cli.local_commands import (
     cmd_local_doctor,
     cmd_local_index_memory,
@@ -85,7 +92,6 @@ from .cli.local_commands import (
     cmd_status,
     cmd_timeline,
 )
-from .cli.learning import cmd_learn_accept, cmd_learn_list, cmd_learn_reject, cmd_learn_stats
 from .cli.local_doctor import (
     _add_doctor_check,
     build_local_doctor_report,

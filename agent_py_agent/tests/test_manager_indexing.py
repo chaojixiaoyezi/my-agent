@@ -4,8 +4,8 @@
 测试子代理索引模块：_select_runs() 状态过滤、_index_task() 索引写入、
 DISPATCH_INELIGIBLE_STATUSES 过滤。
 """
-from pathlib import Path
 import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest

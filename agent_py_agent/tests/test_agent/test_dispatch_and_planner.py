@@ -5,10 +5,10 @@ runner/patch/acceptance, and transient-failure retry.
 测试子代理调度：dry-run 规划、apply 执行 runner/patch/验收、临时失败重试。
 """
 
-from pathlib import Path
 import json
-import time
 import tempfile
+import time
+from pathlib import Path
 
 from agent_py_agent.agent.capabilities import CapabilityRouter
 from agent_py_agent.agent.capability_config import CapabilityConfig

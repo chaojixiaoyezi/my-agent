@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import pytest
+
 from agent_py_agent.agent.log_analysis.analytics.security_rules import (
-    DetectorRule,
     RULE_VERSION,
     SOFT_DETECTOR_RULES,
-    get_rule,
+    DetectorRule,
     detector_ids,
+    get_rule,
 )
 
 

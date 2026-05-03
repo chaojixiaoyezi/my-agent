@@ -16,12 +16,11 @@ import pytest
 
 from agent_py_agent.agent.log_analysis.dispatch.health import (
     DispatchHealthSummary,
-    build_health_summary,
-    render_health_summary,
     _case_backlog_from_cases,
     _get,
+    build_health_summary,
+    render_health_summary,
 )
-
 
 # ============================================================
 # 测试用例：DispatchHealthSummary 数据结构
@@ -172,7 +171,10 @@ class TestBuildHealthSummary:
 
     def test_build_with_queue(self):
         """测试传入队列"""
-        from agent_py_agent.agent.log_analysis.dispatch.queue import InvestigationQueue, DispatchRequest
+        from agent_py_agent.agent.log_analysis.dispatch.queue import (
+            DispatchRequest,
+            InvestigationQueue,
+        )
         queue = InvestigationQueue()
         request = DispatchRequest(case_id="queued-case")
         queue.add(request)

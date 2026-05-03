@@ -12,7 +12,11 @@ from typing import TYPE_CHECKING
 
 from ..capability_config import CapabilityConfig
 from ..subagent import SubAgentTask
-from .runner_dispatch import _dispatch_patch_review_run_ids, _dispatch_runner_candidates, _limit_items
+from .runner_dispatch import (
+    _dispatch_patch_review_run_ids,
+    _dispatch_runner_candidates,
+    _limit_items,
+)
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent

@@ -2,11 +2,16 @@ from __future__ import annotations
 
 """gateway client regression tests."""
 
-from agent_py_agent.cli import gateway_client
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.gateway_parts import gateway_paths, gateway_response_path, read_json_file, write_gateway_request
+from agent_py_agent.agent.gateway_parts import (
+    gateway_paths,
+    gateway_response_path,
+    read_json_file,
+    write_gateway_request,
+)
 from agent_py_agent.agent.gateway_parts import runtime as gateway_runtime
+from agent_py_agent.cli import gateway_client
 
 
 def test_default_gateway_entry_can_reach_chat_handler():

@@ -269,8 +269,8 @@ class TestAppendSnapshot:
     def test_snapshot_path_for_with_timestamp(self, tmp_path: Path):
         """Test snapshot path generation with timestamp."""
         from agent_py_agent.agent.memory_archive.storage import (
-            snapshot_path_for,
             compression_snapshot_file_for,
+            snapshot_path_for,
         )
 
         snapshot = MagicMock(spec=CompressionSnapshot)

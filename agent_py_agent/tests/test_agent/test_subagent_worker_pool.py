@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import tempfile
 import threading
 import time
 from pathlib import Path
-import tempfile
 
 from agent_py_agent.agent.backend import BaseBackend, ModelResponse
 from agent_py_agent.agent.capabilities import CapabilityRouter

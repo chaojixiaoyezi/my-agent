@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Protocol, TypeVar, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 try:  # Worker A owns these models; keep this module compatible while it lands.
     from ..models import Case, EvidenceRef, Finding, NormalizedEvent

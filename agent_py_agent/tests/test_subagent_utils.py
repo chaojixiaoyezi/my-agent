@@ -9,11 +9,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_py_agent.agent.subagents.utils import (
-    _new_id,
-    _merge_list,
-    _read_json_object,
-    _apply_paths,
     _apply_missing_paths,
+    _apply_paths,
+    _merge_list,
+    _new_id,
+    _read_json_object,
     _write_if_missing,
     _write_json_if_missing,
 )

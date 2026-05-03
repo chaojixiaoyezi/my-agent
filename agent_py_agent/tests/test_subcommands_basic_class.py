@@ -7,8 +7,9 @@ from __future__ import annotations
 """
 
 import argparse
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 
 class TestSubcommandsBasicImports:
@@ -18,8 +19,8 @@ class TestSubcommandsBasicImports:
         """测试模块能成功导入。"""
         from agent_py_agent.cli.subcommands_basic import (
             add_basic_subcommands,
-            add_memory_subcommands,
             add_local_store_subcommands,
+            add_memory_subcommands,
         )
         assert callable(add_basic_subcommands)
         assert callable(add_memory_subcommands)

@@ -1,27 +1,28 @@
 """检测器规则测试 - rules.py 规则匹配、告警触发、阈值判断。"""
 from __future__ import annotations
 
-import pytest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from agent_py_agent.agent.log_analysis.analytics.baselines import SecurityBaselines
 from agent_py_agent.agent.log_analysis.analytics.detectors.rules import (
+    DETECTORS,
+    _dedupe_findings,
+    _evidence_id,
+    _evidence_ref,
+    _make_finding,
+    _query,
+    _stable_id,
+    bruteforce_then_success,
+    multi_source_weak_signal,
+    rare_egress_after_alert,
     run_soft_detectors,
+    vpn_new_geo_login,
     waf_attack_success_candidate,
     web_to_process_anomaly,
-    vpn_new_geo_login,
-    bruteforce_then_success,
-    rare_egress_after_alert,
-    multi_source_weak_signal,
-    _make_finding,
-    _evidence_ref,
-    _evidence_id,
-    _query,
-    _dedupe_findings,
-    _stable_id,
-    DETECTORS,
 )
-from agent_py_agent.agent.log_analysis.analytics.baselines import SecurityBaselines
 
 
 class TestRunSoftDetectors:

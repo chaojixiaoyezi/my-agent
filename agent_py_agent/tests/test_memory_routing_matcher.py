@@ -7,20 +7,19 @@ from __future__ import annotations
 import pytest
 
 from agent_py_agent.agent.memory_routing.matcher import (
+    _dedupe,
+    _normalize,
+    _tokens,
+    _unique_paths,
     build_read_receipt,
     match_routes,
     resolve_required_paths,
     score_route,
-    _normalize,
-    _tokens,
-    _unique_paths,
-    _dedupe,
 )
 from agent_py_agent.agent.memory_routing.models import (
     MemoryRoute,
     MemoryRouteMatch,
 )
-
 
 # ── _normalize 测试 ────────────────────────────────────────────────────────
 

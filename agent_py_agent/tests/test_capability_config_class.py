@@ -11,7 +11,6 @@ import pytest
 
 from agent_py_agent.agent.capability.config import CapabilityConfig, load_capability_config
 
-
 # ── CapabilityConfig 默认值测试 ───────────────────────────────────────────
 
 def test_capability_config_defaults():

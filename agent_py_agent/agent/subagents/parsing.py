@@ -12,6 +12,7 @@ import json
 from .models import SubAgentParsedOutput
 from .reports import ParentPlannerParsedOutput
 
+
 def parse_subagent_runner_output(text: str) -> SubAgentParsedOutput:
     """解析 runner 模型回复中的结构化结果块。"""
 

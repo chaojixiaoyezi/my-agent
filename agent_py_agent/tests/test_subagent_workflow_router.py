@@ -88,7 +88,7 @@ def test_missing_explicit_template_records_issue_and_falls_back():
     )
 
     assert decision.selected_template_id == "single_worker_verified"
-    assert any("explicit workflow template not found: missing_template" == issue for issue in decision.issues)
+    assert any(issue == "explicit workflow template not found: missing_template" for issue in decision.issues)
 
 
 def test_code_or_bugfix_task_selects_code_feature_split():
@@ -145,4 +145,4 @@ def test_missing_target_template_records_issue_and_falls_back_to_available_templ
     )
 
     assert decision.selected_template_id == "single_worker_verified"
-    assert any("preferred workflow template not available: code_feature_split" == issue for issue in decision.issues)
+    assert any(issue == "preferred workflow template not available: code_feature_split" for issue in decision.issues)

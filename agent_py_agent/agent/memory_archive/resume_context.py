@@ -7,8 +7,8 @@ from __future__ import annotations
 它只读归档、LocalStore 和任务事实源，不写任何业务状态；默认配置关闭，避免拖慢普通对话。
 """
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -23,7 +23,6 @@ from .query import (
     resume_local_query,
 )
 from .resume_brief import build_resume_brief
-
 
 _ID_PATTERN = re.compile(r"(subagent-[A-Za-z0-9_.:-]+|gwreq-[A-Za-z0-9_.:-]+|request-[A-Za-z0-9_.:-]+)")
 _TRIGGER_KEYWORDS = (

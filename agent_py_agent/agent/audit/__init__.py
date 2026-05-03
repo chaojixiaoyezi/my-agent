@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from .logger import AuditLogger, AuditEntry, AuditAction
+from .logger import AuditAction, AuditEntry, AuditLogger
 from .query import AuditQuery
 
 __all__ = [

@@ -17,8 +17,8 @@ class TestBuildBoard:
 
     def test_build_board_returns_subagent_board(self, tmp_path: Path):
         """验证返回 SubAgentBoard。"""
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask
 
         class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
@@ -36,8 +36,8 @@ class TestBuildBoard:
 
     def test_board_counts_tasks_by_status(self, tmp_path: Path):
         """验证按状态统计。"""
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask
 
         class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
@@ -86,8 +86,8 @@ class TestToBoardItem:
 
     def test_converts_task_to_board_item(self, tmp_path: Path):
         """验证任务转换为看板行。"""
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask
 
         class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
@@ -137,8 +137,8 @@ class TestRiskFlags:
 
     def test_blocked_status_flag(self, tmp_path: Path):
         """BLOCKED 状态添加风险标记。"""
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask
 
         class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
@@ -177,9 +177,9 @@ class TestRiskFlags:
 
     def test_open_capability_request_flag(self, tmp_path: Path):
         """有未处理能力请求时添加标记。"""
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.models import SubAgentTask, CapabilityRequest
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
+        from agent_py_agent.agent.subagents.models import CapabilityRequest, SubAgentTask
 
         class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
             def __init__(self, workspace: Path):
@@ -227,8 +227,8 @@ class TestRiskFlags:
 
     def test_channel_broken_flag(self, tmp_path: Path):
         """通道损坏时添加标记。"""
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask
 
         class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
@@ -271,9 +271,9 @@ class TestDueCheck:
 
     def test_due_check_empty(self, tmp_path: Path):
         """无任务时返回空报告。"""
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
-        from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
         from agent_py_agent.agent.capability_config import CapabilityConfig
+        from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
 
         class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
             def __init__(self, workspace: Path):
@@ -290,8 +290,8 @@ class TestDueCheck:
 
     def test_due_check_detects_failed_task(self, tmp_path: Path):
         """检测失败任务。"""
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask
 
         class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
@@ -339,8 +339,8 @@ class TestPlanActions:
 
     def test_plan_actions_empty(self, tmp_path: Path):
         """无问题时返回空计划。"""
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
 
         class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
             def __init__(self, workspace: Path):
@@ -361,8 +361,8 @@ class TestWriteBoard:
 
     def test_writes_json_and_markdown(self, tmp_path: Path):
         """写出 JSON 和 Markdown 看板。"""
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
 
         class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
             def __init__(self, workspace: Path):
@@ -386,8 +386,8 @@ class TestBoardHotList:
 
     def test_hot_list_contains_risky_tasks(self, tmp_path: Path):
         """热榜包含风险任务。"""
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask
 
         class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
@@ -435,8 +435,8 @@ class TestBoardRecent:
 
     def test_respects_recent_limit(self, tmp_path: Path):
         """限制最近条目数。"""
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask
 
         class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):

@@ -8,12 +8,11 @@ agents; later workers can plug in concrete ingestion and query backends without
 changing the contract.
 """
 
+import json
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from datetime import datetime, timezone
-import json
 from typing import Any, TypeVar
-
 
 JsonValue = dict[str, Any] | list[Any] | str | int | float | bool | None
 T = TypeVar("T", bound="JsonRoundTripMixin")
@@ -284,7 +283,7 @@ class Finding(JsonRoundTripMixin):
     attributes: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, values: Mapping[str, Any]) -> "Finding":
+    def from_dict(cls, values: Mapping[str, Any]) -> Finding:
         allowed = {item.name for item in fields(cls)}
         clean = {key: value for key, value in values.items() if key in allowed}
         clean["evidence_refs"] = _coerce_evidence_refs(clean.get("evidence_refs", []))
@@ -314,7 +313,7 @@ class CaseRecord(JsonRoundTripMixin):
     attributes: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, values: Mapping[str, Any]) -> "CaseRecord":
+    def from_dict(cls, values: Mapping[str, Any]) -> CaseRecord:
         allowed = {item.name for item in fields(cls)}
         clean = {key: value for key, value in values.items() if key in allowed}
         clean["evidence_refs"] = _coerce_evidence_refs(clean.get("evidence_refs", []))
@@ -341,7 +340,7 @@ class SecurityCase(JsonRoundTripMixin):
     attributes: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, values: Mapping[str, Any]) -> "SecurityCase":
+    def from_dict(cls, values: Mapping[str, Any]) -> SecurityCase:
         allowed = {item.name for item in fields(cls)}
         clean = {key: value for key, value in values.items() if key in allowed}
         clean["initial_evidence"] = _coerce_evidence_refs(clean.get("initial_evidence", []))

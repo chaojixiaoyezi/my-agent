@@ -2,23 +2,24 @@
 from __future__ import annotations
 
 import pytest
+
 from agent_py_agent.agent.log_analysis.analytics.detectors.field_extractors import (
-    _source_product,
-    _event_class,
-    _event_action,
-    _outcome,
-    _severity,
-    _source_ip,
-    _destination_ip,
-    _victim_ip,
     _asset_ip,
-    _host,
-    _user,
+    _cmdline,
+    _destination_ip,
     _domain,
     _dst_port,
-    _process_name,
+    _event_action,
+    _event_class,
+    _host,
+    _outcome,
     _parent_process_name,
-    _cmdline,
+    _process_name,
+    _severity,
+    _source_ip,
+    _source_product,
+    _user,
+    _victim_ip,
 )
 
 

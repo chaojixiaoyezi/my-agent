@@ -18,14 +18,14 @@ from agent_py_agent.agent.log_analysis.agents.summaries import (
     case_summary_for_prompt,
     summarize_case,
 )
-from agent_py_agent.agent.log_analysis.interfaces import DispatchEngine as DispatchEngineProtocol
-from agent_py_agent.agent.log_analysis.models import EvidenceRef
 from agent_py_agent.agent.log_analysis.dispatch import (
     PENDING_INVESTIGATION,
     DispatchBudget,
     DispatchEngine,
     build_health_summary,
 )
+from agent_py_agent.agent.log_analysis.interfaces import DispatchEngine as DispatchEngineProtocol
+from agent_py_agent.agent.log_analysis.models import EvidenceRef
 
 
 def _case_fixture() -> dict:

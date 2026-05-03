@@ -55,7 +55,9 @@ class TestSubAgentAcceptanceFindingMixin:
 
     def test_work_order_validation(self, tmp_path: Path):
         """工单现场验证。"""
-        from agent_py_agent.agent.subagents.manager_acceptance_findings import SubAgentAcceptanceFindingMixin
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
 
         class MockManager(SubAgentAcceptanceFindingMixin):
             def __init__(self):
@@ -92,7 +94,9 @@ class TestSubAgentAcceptanceFindingMixin:
 
     def test_ready_for_acceptance_check(self, tmp_path: Path):
         """验收就绪状态检查。"""
-        from agent_py_agent.agent.subagents.manager_acceptance_findings import SubAgentAcceptanceFindingMixin
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
 
         class MockManager(SubAgentAcceptanceFindingMixin):
             def __init__(self):
@@ -131,7 +135,9 @@ class TestSubAgentAcceptanceFindingMixin:
 
     def test_channel_not_broken(self, tmp_path: Path):
         """通道未损坏检查。"""
-        from agent_py_agent.agent.subagents.manager_acceptance_findings import SubAgentAcceptanceFindingMixin
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
 
         class MockManager(SubAgentAcceptanceFindingMixin):
             def __init__(self):
@@ -169,7 +175,9 @@ class TestSubAgentAcceptanceFindingMixin:
 
     def test_channel_broken_blocks(self, tmp_path: Path):
         """通道损坏阻止验收。"""
-        from agent_py_agent.agent.subagents.manager_acceptance_findings import SubAgentAcceptanceFindingMixin
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
 
         class MockManager(SubAgentAcceptanceFindingMixin):
             def __init__(self):
@@ -207,7 +215,9 @@ class TestSubAgentAcceptanceFindingMixin:
 
     def test_evidence_present_check(self, tmp_path: Path):
         """验收证据存在检查。"""
-        from agent_py_agent.agent.subagents.manager_acceptance_findings import SubAgentAcceptanceFindingMixin
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
 
         class MockManager(SubAgentAcceptanceFindingMixin):
             def __init__(self):
@@ -245,7 +255,9 @@ class TestSubAgentAcceptanceFindingMixin:
 
     def test_evidence_not_failed(self, tmp_path: Path):
         """没有失败证据检查。"""
-        from agent_py_agent.agent.subagents.manager_acceptance_findings import SubAgentAcceptanceFindingMixin
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
 
         class MockManager(SubAgentAcceptanceFindingMixin):
             def __init__(self):
@@ -283,7 +295,9 @@ class TestSubAgentAcceptanceFindingMixin:
 
     def test_no_open_capability_requests(self, tmp_path: Path):
         """没有待处理 capability 请求检查。"""
-        from agent_py_agent.agent.subagents.manager_acceptance_findings import SubAgentAcceptanceFindingMixin
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
 
         class MockManager(SubAgentAcceptanceFindingMixin):
             def __init__(self):
@@ -321,7 +335,9 @@ class TestSubAgentAcceptanceFindingMixin:
 
     def test_no_output_blockers(self, tmp_path: Path):
         """output.json 没有 blocker 检查。"""
-        from agent_py_agent.agent.subagents.manager_acceptance_findings import SubAgentAcceptanceFindingMixin
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
 
         class MockManager(SubAgentAcceptanceFindingMixin):
             def __init__(self):
@@ -360,7 +376,9 @@ class TestSubAgentAcceptanceFindingMixin:
 
     def test_tests_passed_check(self, tmp_path: Path):
         """测试通过检查。"""
-        from agent_py_agent.agent.subagents.manager_acceptance_findings import SubAgentAcceptanceFindingMixin
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
 
         class MockManager(SubAgentAcceptanceFindingMixin):
             def __init__(self):
@@ -399,7 +417,9 @@ class TestSubAgentAcceptanceFindingMixin:
 
     def test_artifact_paths_exist(self, tmp_path: Path):
         """artifact 路径存在检查。"""
-        from agent_py_agent.agent.subagents.manager_acceptance_findings import SubAgentAcceptanceFindingMixin
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
 
         class MockManager(SubAgentAcceptanceFindingMixin):
             def __init__(self):
@@ -443,7 +463,9 @@ class TestSeverityLevels:
 
     def test_p0_blocks_acceptance(self, tmp_path: Path):
         """P0 严重程度阻止验收。"""
-        from agent_py_agent.agent.subagents.manager_acceptance_findings import SubAgentAcceptanceFindingMixin
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
 
         class MockManager(SubAgentAcceptanceFindingMixin):
             def __init__(self):
@@ -482,7 +504,9 @@ class TestSeverityLevels:
 
     def test_p1_warns_but_not_blocks(self, tmp_path: Path):
         """P1 严重程度警告但不阻止。"""
-        from agent_py_agent.agent.subagents.manager_acceptance_findings import SubAgentAcceptanceFindingMixin
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
 
         class MockManager(SubAgentAcceptanceFindingMixin):
             def __init__(self):

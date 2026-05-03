@@ -27,7 +27,7 @@ class SubagentAutomationGuard:
     # 级别对应的派子代理阈值（预估轮数）
     _THRESHOLDS = {1: 2, 2: 4, 3: 8}
 
-    def __init__(self, config: "AgentConfig"):
+    def __init__(self, config: AgentConfig):
         self.level = config.subagent_automation_level
         self.threshold = self._THRESHOLDS.get(self.level, 8)
 

@@ -9,6 +9,7 @@ Human version:
 
 from dataclasses import dataclass, field
 
+
 @dataclass
 class SubAgentBoardItem:
     """子代理看板里的一行机器事实。"""

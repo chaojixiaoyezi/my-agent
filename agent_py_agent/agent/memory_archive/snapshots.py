@@ -7,16 +7,16 @@ from __future__ import annotations
 它不保存大段工具输出，只保存用户意图、助手动作、工具摘要、任务/请求 ID、恢复路径和 token 估算。
 """
 
-from dataclasses import dataclass
 import hashlib
 import json
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Protocol
+from typing import Any, Protocol
 
 from .models import CompressionSnapshot, utc_now_iso
 from .storage import append_snapshot, write_compression_snapshot_file
 from .tokens import estimate_tokens
-
 
 SNAPSHOT_PREVIEW_LIMITS = {
     0: 2048,

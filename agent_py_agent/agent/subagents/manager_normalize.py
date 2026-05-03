@@ -50,7 +50,7 @@ def _string_list_value(value: object) -> list[str]:
     return [str(item) for item in _list_value(value) if item not in (None, "")]
 
 
-def _normalize_quality_contract(value: object) -> "QualityContract":
+def _normalize_quality_contract(value: object) -> QualityContract:
     """LLM: Normalize a value into a QualityContract instance.
 
     新手说明:
@@ -80,7 +80,7 @@ def _normalize_quality_contract(value: object) -> "QualityContract":
     return QualityContract(**payload)
 
 
-def _normalize_context_manifest(value: object) -> "ContextManifest":
+def _normalize_context_manifest(value: object) -> ContextManifest:
     """LLM: Normalize a value into a ContextManifest instance.
 
     新手说明:

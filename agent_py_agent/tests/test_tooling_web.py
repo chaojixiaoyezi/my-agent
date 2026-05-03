@@ -32,8 +32,9 @@ class TestFetchUrlTool:
     @patch("urllib.request.urlopen")
     def test_fetch_url_with_http_error(self, mock_urlopen, tmp_path: Path):
         """HTTP 错误响应处理。"""
-        from agent_py_agent.agent.tooling.web import FetchUrlTool
         import urllib.error
+
+        from agent_py_agent.agent.tooling.web import FetchUrlTool
 
         mock_error = urllib.error.HTTPError(
             url="https://example.com",
@@ -54,8 +55,9 @@ class TestFetchUrlTool:
     @patch("urllib.request.urlopen")
     def test_fetch_url_timeout(self, mock_urlopen, tmp_path: Path):
         """请求超时处理。"""
-        from agent_py_agent.agent.tooling.web import FetchUrlTool
         import urllib.error
+
+        from agent_py_agent.agent.tooling.web import FetchUrlTool
 
         mock_urlopen.side_effect = urllib.error.URLError("Timeout")
 
@@ -268,8 +270,9 @@ class TestHttpRequestTool:
     @patch("urllib.request.urlopen")
     def test_http_request_http_error_response(self, mock_urlopen, tmp_path: Path):
         """HTTP 错误响应处理。"""
-        from agent_py_agent.agent.tooling.web import HttpRequestTool
         import urllib.error
+
+        from agent_py_agent.agent.tooling.web import HttpRequestTool
 
         mock_error = urllib.error.HTTPError(
             url="https://api.example.com",

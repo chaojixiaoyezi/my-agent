@@ -13,53 +13,6 @@
 
 from __future__ import annotations
 
-# Re-export everything from the three sub-modules so existing
-# ``from .helpers import _xxx`` statements keep working.
-
-from .field_access import (  # noqa: F401
-    EventLike,
-    JsonDict,
-    SUSPICIOUS_CHILD_PROCESSES,
-    WEB_PARENT_PROCESSES,
-    _canonical_time,
-    _clamp_float,
-    _event_dict,
-    _event_time,
-    _field,
-    _parse_time,
-    _path_value,
-    _present,
-    _sort_time,
-    _text,
-    _time_bucket,
-    _to_float,
-    _to_int,
-    _truthy,
-    _within_after,
-    _within_before,
-    _window_for_events,
-)
-
-from .field_extractors import (  # noqa: F401
-    _asset_ip,
-    _basename,
-    _cmdline,
-    _destination_ip,
-    _domain,
-    _dst_port,
-    _event_action,
-    _event_class,
-    _host,
-    _outcome,
-    _parent_process_name,
-    _process_name,
-    _severity,
-    _source_ip,
-    _source_product,
-    _user,
-    _victim_ip,
-)
-
 from .classifiers import (  # noqa: F401
     _asset_candidates,
     _destination,
@@ -86,4 +39,49 @@ from .classifiers import (  # noqa: F401
     _unique_json_values,
     _unique_texts,
     _weak_signal,
+)
+
+# Re-export everything from the three sub-modules so existing
+# ``from .helpers import _xxx`` statements keep working.
+from .field_access import (  # noqa: F401
+    SUSPICIOUS_CHILD_PROCESSES,
+    WEB_PARENT_PROCESSES,
+    EventLike,
+    JsonDict,
+    _canonical_time,
+    _clamp_float,
+    _event_dict,
+    _event_time,
+    _field,
+    _parse_time,
+    _path_value,
+    _present,
+    _sort_time,
+    _text,
+    _time_bucket,
+    _to_float,
+    _to_int,
+    _truthy,
+    _window_for_events,
+    _within_after,
+    _within_before,
+)
+from .field_extractors import (  # noqa: F401
+    _asset_ip,
+    _basename,
+    _cmdline,
+    _destination_ip,
+    _domain,
+    _dst_port,
+    _event_action,
+    _event_class,
+    _host,
+    _outcome,
+    _parent_process_name,
+    _process_name,
+    _severity,
+    _source_ip,
+    _source_product,
+    _user,
+    _victim_ip,
 )

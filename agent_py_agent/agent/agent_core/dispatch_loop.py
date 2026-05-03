@@ -8,9 +8,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..subagent import SubAgent
     from ..capabilities import CapabilityRouter
     from ..capability_config import CapabilityConfig
+    from ..subagent import SubAgent
 
 
 @dataclass
@@ -26,8 +26,8 @@ class DispatchLoopReport:
 
 def dispatch_loop(
     agent,
-    router: "CapabilityRouter",
-    capability_config: "CapabilityConfig | None" = None,
+    router: CapabilityRouter,
+    capability_config: CapabilityConfig | None = None,
     *,
     max_consecutive_rounds: int = 20,
     apply: bool = False,
@@ -101,7 +101,7 @@ def dispatch_loop(
     # 获取最终待处理数
     runner_max_attempts = 2  # 默认值
     try:
-        from .runner_dispatch import _runner_max_attempts, _dispatch_runner_candidates
+        from .runner_dispatch import _dispatch_runner_candidates, _runner_max_attempts
 
         runner_max_attempts = _runner_max_attempts(agent.config.runner_failure_policy)
         candidates = _dispatch_runner_candidates(

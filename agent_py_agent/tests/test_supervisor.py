@@ -12,12 +12,11 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
 from agent_py_agent.agent.gateway_parts import supervisor as sv
-
 
 # ── 测试夹具 ──────────────────────────────────────────────────────────────
 

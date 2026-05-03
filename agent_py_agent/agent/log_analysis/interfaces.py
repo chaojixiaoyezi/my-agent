@@ -6,7 +6,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from .models import CaseRecord, Checkpoint, EvidenceRef, Finding, NormalizedEvent, RawBatch, SourceSpec
+from .models import (
+    CaseRecord,
+    Checkpoint,
+    EvidenceRef,
+    Finding,
+    NormalizedEvent,
+    RawBatch,
+    SourceSpec,
+)
 
 
 @dataclass

@@ -173,7 +173,7 @@ class LocalStoreRecordMixin:
     def make_record_id(source_type: str, source_id: str) -> str:
         """按来源生成稳定记录 ID。"""
 
-        digest = hashlib.sha256(f"{source_type}\0{source_id}".encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(f"{source_type}\0{source_id}".encode()).hexdigest()
         return f"rec-{digest[:24]}"
 
     def _row_to_result(self, row: sqlite3.Row, *, score: float = 0.0) -> LocalSearchResult:

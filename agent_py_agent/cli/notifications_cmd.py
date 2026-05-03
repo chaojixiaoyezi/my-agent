@@ -22,7 +22,7 @@ def cmd_notifications(args) -> int:
     Returns:
         退出码
     """
-    from .common import load_config, resolve_workspace_root, DEFAULT_CONFIG
+    from .common import DEFAULT_CONFIG, load_config, resolve_workspace_root
 
     config_path = getattr(args, "config", str(DEFAULT_CONFIG))
     config = load_config(config_path)

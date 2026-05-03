@@ -2,8 +2,9 @@ from __future__ import annotations
 
 """Dispatch budget rules for log-analysis subagents."""
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from typing import Any, Mapping
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -31,7 +32,7 @@ class DispatchBudget:
     max_case_rounds: int = 1
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, Any] | None) -> "DispatchBudget":
+    def from_mapping(cls, payload: Mapping[str, Any] | None) -> DispatchBudget:
         if not payload:
             return cls()
         hourly_budget = payload.get(

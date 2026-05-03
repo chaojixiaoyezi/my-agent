@@ -7,8 +7,9 @@ from __future__ import annotations
 从 pipeline.py 拆出来，让解析/迭代和写入/去重各归一处。
 """
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from ..parsers.base import LogParser, ParserError
 from ..parsers.common import sha256_json, utc_now

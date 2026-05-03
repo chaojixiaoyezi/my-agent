@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 
 from agent_py_agent.agent.log_analysis.capabilities import is_feature_enabled
-from agent_py_agent.agent.log_analysis.config import load_log_analysis_config, normalize_log_analysis_config
+from agent_py_agent.agent.log_analysis.config import (
+    load_log_analysis_config,
+    normalize_log_analysis_config,
+)
 from agent_py_agent.agent.log_analysis.doctor import collect_doctor_status
 from agent_py_agent.agent.log_analysis.models import (
     CaseRecord,

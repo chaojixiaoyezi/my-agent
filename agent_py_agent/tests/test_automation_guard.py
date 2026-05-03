@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+
 import pytest
 
 from agent_py_agent.agent.agent_core.automation_guard import SubagentAutomationGuard

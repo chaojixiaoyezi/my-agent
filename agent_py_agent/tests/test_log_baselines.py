@@ -1,18 +1,20 @@
 """基线管理测试 - baselines.py 基线建立、偏差检测、异常报警。"""
 from __future__ import annotations
 
-import pytest
 from datetime import datetime, timezone
+
+import pytest
+
 from agent_py_agent.agent.log_analysis.analytics.baselines import (
     SecurityBaselines,
-    ensure_baselines,
-    _norm,
     _as_set,
-    _is_new_value,
-    _set_map,
     _int_set_map,
-    _sorted_map,
+    _is_new_value,
+    _norm,
+    _set_map,
     _sorted_int_map,
+    _sorted_map,
+    ensure_baselines,
 )
 
 

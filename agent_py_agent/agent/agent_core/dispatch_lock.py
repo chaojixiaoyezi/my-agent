@@ -23,7 +23,7 @@ class _DispatchWatchLock:
         self.token = uuid.uuid4().hex
         self.acquired = False
 
-    def __enter__(self) -> "_DispatchWatchLock":
+    def __enter__(self) -> _DispatchWatchLock:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.force and self.path.exists():
             self.path.unlink()

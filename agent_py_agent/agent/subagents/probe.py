@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .models import ChannelProbeCheck
 
+
 def _probe_ok(
     name: str,
     summary: str,

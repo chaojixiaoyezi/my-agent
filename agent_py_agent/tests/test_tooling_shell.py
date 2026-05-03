@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -211,8 +211,9 @@ class TestShellToolTimeout:
 
     def test_timeout_returns_error(self, tmp_path: Path):
         """超时时应返回错误。"""
-        from agent_py_agent.agent.tooling.shell import ShellTool
         import subprocess
+
+        from agent_py_agent.agent.tooling.shell import ShellTool
 
         workspace = tmp_path / "workspace"
         workspace.mkdir()

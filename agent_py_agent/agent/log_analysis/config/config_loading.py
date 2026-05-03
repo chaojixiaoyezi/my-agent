@@ -7,27 +7,26 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from collections.abc import Mapping
-
 from ...settings.config import load_simple_yaml
-from .config_model import (
-    LogAnalysisConfig,
-    LogAnalysisConfigWarning,
-    default_log_analysis_config_path,
-)
 from .config_coercers import (  # noqa: F401 — re-export for backward compatibility
-    _MISSING,
     _INT_PATTERN,
     _LEVELS,
-    _lookup,
-    _warn,
+    _MISSING,
     _coerce_bool,
     _coerce_choice,
     _coerce_int,
     _coerce_path_string,
+    _lookup,
+    _warn,
+)
+from .config_model import (
+    LogAnalysisConfig,
+    LogAnalysisConfigWarning,
+    default_log_analysis_config_path,
 )
 
 

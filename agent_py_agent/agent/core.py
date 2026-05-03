@@ -19,6 +19,7 @@ from .agent_core import (
     SubagentBoardTool,
 )
 from .agent_core.dispatch_lock import _DispatchWatchLock
+from .agent_core.orchestration_tools import CODING_SUBAGENT_TOOLS, READ_ONLY_SUBAGENT_TOOLS
 from .agent_core.parameters import (
     ONE_SHOT_TOOL_NAMES,
     _bool_param,
@@ -56,7 +57,6 @@ from .agent_core.runner_prompts import (
     _build_subagent_runner_prompt,
     _build_subagent_runner_repair_prompt,
 )
-from .agent_core.orchestration_tools import CODING_SUBAGENT_TOOLS, READ_ONLY_SUBAGENT_TOOLS
 from .backend import get_backend
 from .config import AgentConfig
 from .local_store import LocalStore

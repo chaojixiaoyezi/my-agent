@@ -3,8 +3,8 @@
 给人看的解释：
 测试配置模块：配置加载、字段验证、默认值处理。
 """
-from pathlib import Path
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -240,7 +240,7 @@ class TestLoadConfig:
             config = load_config(path)
             assert config.model_backend == "echo"
             # invalid_field 应该被忽略
-            assert not hasattr(config, "invalid_field") or getattr(config, "invalid_field") is None
+            assert not hasattr(config, "invalid_field") or config.invalid_field is None
         finally:
             path.unlink()
 

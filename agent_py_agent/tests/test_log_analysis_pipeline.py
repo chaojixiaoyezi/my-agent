@@ -14,7 +14,6 @@ import pytest
 
 from agent_py_agent.agent.log_analysis.parsers.base import ParserError
 
-
 # ---------------------------------------------------------------------------
 # normalize_file_format
 # ---------------------------------------------------------------------------

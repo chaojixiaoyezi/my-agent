@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import pytest
 
+from agent_py_agent.agent.log_analysis.models import EvidenceRef
 from agent_py_agent.agent.log_analysis.security.attack_chain import (
     AttackChainStep,
     build_attack_chain,
     lateral_movement_signs,
 )
-from agent_py_agent.agent.log_analysis.models import EvidenceRef
 
 
 class TestAttackChainStep:

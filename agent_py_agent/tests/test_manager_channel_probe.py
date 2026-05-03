@@ -3,8 +3,8 @@
 给人看的解释：
 测试子代理通道探测模块：通道健康检查、probe 结果记录、状态判断。
 """
-from pathlib import Path
 import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest

@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ..settings.config import AgentConfig
     from ..local_store import LocalStore
+    from ..settings.config import AgentConfig
 
 
 class AuditAction(str, Enum):

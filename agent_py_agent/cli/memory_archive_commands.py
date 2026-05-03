@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .common import make_agent
 from ..agent.memory_archive.query import (
     archive_filters_from_args,
     build_resume_guidance,
@@ -24,6 +23,7 @@ from ..agent.memory_archive.query import (
     strip_sort_keys,
 )
 from ..agent.memory_archive.resume_brief import build_resume_brief
+from .common import make_agent
 
 
 def cmd_memory_archive_list(args) -> int:
@@ -184,7 +184,7 @@ def _print_archive_list(payload: dict[str, Any], *, json_output: bool) -> None:
         return
     print("MY-AGENT MEMORY ARCHIVE LIST")
     print(f"workspace={payload['workspace_root']}")
-    level_text = payload.get("level", None)
+    level_text = payload.get("level")
     print(
         f"layer={payload['layer']} date={payload['date'] or '-'} "
         f"level={level_text if level_text is not None else '-'} records={len(payload['records'])}"

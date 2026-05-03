@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Any, Mapping
-
+from typing import Any
 
 DEFAULT_PAYLOAD_MAX_CHARS = 512
 
@@ -200,7 +200,7 @@ def normalize_security_alert_v1(
             attributes[_to_snake(raw_key)] = value
 
     now = ingest_time or utc_now()
-    event: dict[str, Any] = {key: None for key in SECURITY_ALERT_V1_KEYS}
+    event: dict[str, Any] = dict.fromkeys(SECURITY_ALERT_V1_KEYS)
     event.update(mapped)
 
     event["source_id"] = clean_value(event.get("source_id")) or source_id or "unknown"

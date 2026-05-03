@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 from agent_py_agent.agent.log_analysis.analytics.detectors import run_soft_detectors
@@ -20,7 +20,6 @@ from agent_py_agent.agent.log_analysis.reports import (
 from agent_py_agent.agent.log_analysis.security.correlation import build_route_draft
 from agent_py_agent.agent.log_analysis.storage.local_store import LocalLogStore
 from agent_py_agent.agent.log_analysis.tools import trace_case
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_FIXTURE = REPO_ROOT / "validation" / "security_fixtures" / "security_alert_v1.jsonl"

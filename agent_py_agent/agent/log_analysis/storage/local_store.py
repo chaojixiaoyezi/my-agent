@@ -3,8 +3,9 @@ from __future__ import annotations
 """JSONL-backed local store for the first log-analysis milestone."""
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ...io import append_jsonl
 from .base import (

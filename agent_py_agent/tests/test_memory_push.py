@@ -483,7 +483,8 @@ class TestMemoryPushMutationCoverage:
         This would return one extra memory item.
         """
         from unittest.mock import MagicMock
-        from agent_py_agent.agent.memory_push import push_relevant_memories, MemoryType, MemoryEntry
+
+        from agent_py_agent.agent.memory_push import MemoryEntry, MemoryType, push_relevant_memories
 
         mock_agent = MagicMock()
         mock_agent.memory = MagicMock()
@@ -514,6 +515,7 @@ class TestMemoryPushMutationCoverage:
         This would allow shorter (potentially meaningless) memories through.
         """
         from unittest.mock import MagicMock
+
         from agent_py_agent.agent.memory_push import push_relevant_memories
 
         mock_agent = MagicMock()
@@ -541,7 +543,8 @@ class TestMemoryPushMutationCoverage:
         This would miss valuable LESSON_TASK memories.
         """
         from unittest.mock import MagicMock
-        from agent_py_agent.agent.memory_push import push_relevant_memories, MemoryType
+
+        from agent_py_agent.agent.memory_push import MemoryType, push_relevant_memories
 
         mock_agent = MagicMock()
         mock_agent.memory = MagicMock()
@@ -568,6 +571,7 @@ class TestMemoryPushMutationCoverage:
         This would return one extra memory item.
         """
         from unittest.mock import MagicMock
+
         from agent_py_agent.agent.memory_push import push_relevant_memories
 
         mock_agent = MagicMock()
@@ -599,6 +603,7 @@ class TestMemoryPushMutationCoverage:
         This would extract shorter (less useful) keywords.
         """
         from unittest.mock import MagicMock
+
         from agent_py_agent.agent.memory_push import push_relevant_memories
 
         mock_agent = MagicMock()
@@ -635,6 +640,7 @@ class TestMemoryPushMutationCoverage:
         This would return more memories than requested.
         """
         from unittest.mock import MagicMock
+
         from agent_py_agent.agent.memory_push import push_relevant_memories
 
         mock_agent = MagicMock()

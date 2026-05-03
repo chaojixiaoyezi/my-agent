@@ -1,11 +1,11 @@
 """仓库内置的本地冒烟测试入口。"""
 
-from pathlib import Path
 import json
 import os
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT.parent

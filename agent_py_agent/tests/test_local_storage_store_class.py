@@ -6,12 +6,13 @@ from __future__ import annotations
 测试 LocalStore 组合类及其 mixin 的 CRUD 操作、索引查询、事件记录功能。
 """
 
-import pytest
 import sqlite3
 import tempfile
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from agent_py_agent.agent.local_store import LocalStore
 

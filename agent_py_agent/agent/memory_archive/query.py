@@ -14,7 +14,6 @@ from typing import Any
 
 from .storage import raw_event_path_for, snapshot_path_for
 
-
 ARCHIVE_SEARCH_FILE_LIMIT = 30
 
 

@@ -74,7 +74,7 @@ class TestAuditLogger:
 
     def test_log_creates_entry(self, tmp_path: Path):
         """log 方法创建审计条目。"""
-        from agent_py_agent.agent.audit.logger import AuditLogger, AuditAction, AuditStatus
+        from agent_py_agent.agent.audit.logger import AuditAction, AuditLogger, AuditStatus
 
         class MockConfig:
             audit_log_path = str(tmp_path / "audit")
@@ -96,7 +96,7 @@ class TestAuditLogger:
 
     def test_log_writes_to_file(self, tmp_path: Path):
         """日志写入文件。"""
-        from agent_py_agent.agent.audit.logger import AuditLogger, AuditAction, AuditStatus
+        from agent_py_agent.agent.audit.logger import AuditAction, AuditLogger, AuditStatus
 
         class MockConfig:
             audit_log_path = str(tmp_path / "audit")
@@ -179,7 +179,7 @@ class TestAuditLogger:
 
     def test_log_access_denied_helper(self, tmp_path: Path):
         """log_access_denied 便捷方法。"""
-        from agent_py_agent.agent.audit.logger import AuditLogger, AuditAction
+        from agent_py_agent.agent.audit.logger import AuditAction, AuditLogger
 
         class MockConfig:
             audit_log_path = str(tmp_path / "audit")
@@ -200,7 +200,7 @@ class TestAuditLogger:
 
     def test_log_error_helper(self, tmp_path: Path):
         """log_error 便捷方法。"""
-        from agent_py_agent.agent.audit.logger import AuditLogger, AuditAction
+        from agent_py_agent.agent.audit.logger import AuditAction, AuditLogger
 
         class MockConfig:
             audit_log_path = str(tmp_path / "audit")
@@ -221,7 +221,7 @@ class TestAuditLogger:
 
     def test_multiple_logs_append_to_file(self, tmp_path: Path):
         """多次写入追加到文件。"""
-        from agent_py_agent.agent.audit.logger import AuditLogger, AuditAction
+        from agent_py_agent.agent.audit.logger import AuditAction, AuditLogger
 
         class MockConfig:
             audit_log_path = str(tmp_path / "audit")

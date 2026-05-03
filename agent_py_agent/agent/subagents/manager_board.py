@@ -13,10 +13,10 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..capabilities import CapabilityRouter
+from ..capability_config import CapabilityConfig
+from ..file_io import append_jsonl
 from .models import SubAgentTask
-from .reports import ActionPlanItem, ActionPlanReport, DueCheckIssue, DueCheckReport, SubAgentBoard, SubAgentBoardItem
-from .rendering import render_action_plan_markdown, render_board_markdown, render_due_check_markdown
-from .runner_rendering import _render_runner_item_line
 from .parsing import (
     _dict_list,
     _normalize_runner_items,
@@ -37,9 +37,9 @@ from .policies import (
     _make_due_issue,
     _risk_weight,
     _route_card_payload,
-    _severity_weight,
     _runner_next_action,
     _select_capability_hits,
+    _severity_weight,
     _status_from_structured_output,
     _verification_from_runner_status,
 )
@@ -50,6 +50,16 @@ from .probe import (
     _probe_ok,
     _probe_writable_dir,
 )
+from .rendering import render_action_plan_markdown, render_board_markdown, render_due_check_markdown
+from .reports import (
+    ActionPlanItem,
+    ActionPlanReport,
+    DueCheckIssue,
+    DueCheckReport,
+    SubAgentBoard,
+    SubAgentBoardItem,
+)
+from .runner_rendering import _render_runner_item_line
 from .utils import (
     _apply_missing_paths,
     _apply_paths,
@@ -59,9 +69,6 @@ from .utils import (
     _write_if_missing,
     _write_json_if_missing,
 )
-from ..capabilities import CapabilityRouter
-from ..capability_config import CapabilityConfig
-from ..file_io import append_jsonl
 
 if TYPE_CHECKING:
     from ..local_store import LocalStore

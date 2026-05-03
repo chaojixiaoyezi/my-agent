@@ -15,6 +15,7 @@ from .adapter import (
     check_late_responses,
     process_file_adapter_once,
 )
+from .daemon_control import get_running_pid, read_pid_record
 from .io import (
     append_gateway_history,
     gateway_request_counts,
@@ -26,9 +27,13 @@ from .io import (
     write_gateway_request,
     write_json_file,
 )
-from .logging import _index_gateway_payload, _report_gateway_side_effect_error, log_gateway_event, log_gateway_payload
+from .logging import (
+    _index_gateway_payload,
+    _report_gateway_side_effect_error,
+    log_gateway_event,
+    log_gateway_payload,
+)
 from .paths import AdapterPaths, GatewayPaths, adapter_paths, gateway_chunk_path, gateway_paths
-from .daemon_control import get_running_pid, read_pid_record
 from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
 from .recovery import (
     _archive_gateway_request,

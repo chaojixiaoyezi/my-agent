@@ -14,12 +14,12 @@ from pathlib import Path
 
 import pytest
 
+from agent_py_agent.agent.tooling.models import ToolExecutionResult
 from agent_py_agent.agent.tooling.shell import (
+    ShellTool,
     _is_dangerous_command,
     _validate_command,
-    ShellTool,
 )
-from agent_py_agent.agent.tooling.models import ToolExecutionResult
 
 
 @pytest.fixture

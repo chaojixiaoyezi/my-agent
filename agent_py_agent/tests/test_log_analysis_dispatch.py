@@ -15,8 +15,6 @@ from agent_py_agent.agent.log_analysis.agents.summaries import (
     case_summary_for_prompt,
     summarize_case,
 )
-from agent_py_agent.agent.log_analysis.interfaces import DispatchEngine as DispatchEngineProtocol
-from agent_py_agent.agent.log_analysis.models import EvidenceRef
 from agent_py_agent.agent.log_analysis.dispatch import (
     PENDING_INVESTIGATION,
     DispatchBudget,
@@ -25,6 +23,8 @@ from agent_py_agent.agent.log_analysis.dispatch import (
     create_subagent_tasks_from_work_order_plan,
     plan_case_subagent_work_orders,
 )
+from agent_py_agent.agent.log_analysis.interfaces import DispatchEngine as DispatchEngineProtocol
+from agent_py_agent.agent.log_analysis.models import EvidenceRef
 from agent_py_agent.agent.subagent import SubAgentManager
 
 

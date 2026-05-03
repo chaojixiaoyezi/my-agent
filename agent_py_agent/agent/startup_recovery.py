@@ -45,7 +45,7 @@ def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
     Returns:
         ActiveWorkSummary 包含 gateway 状态、活跃任务数、遗留请求数和最近任务列表
     """
-    from .gateway import gateway_paths, gateway_running, gateway_request_counts
+    from .gateway import gateway_paths, gateway_request_counts, gateway_running
     from .gateway_parts.process_control import is_pid_alive
 
     paths = gateway_paths(agent)
@@ -128,7 +128,7 @@ def format_active_work_summary(summary: ActiveWorkSummary) -> str:
     if summary.gateway_alive:
         lines.append(f"✓ Gateway 运行中 (pid={summary.gateway_pid})")
     else:
-        lines.append(f"✗ Gateway 未运行")
+        lines.append("✗ Gateway 未运行")
 
     if summary.active_task_count > 0:
         lines.append(f"✓ 发现 {summary.active_task_count} 个进行中任务")

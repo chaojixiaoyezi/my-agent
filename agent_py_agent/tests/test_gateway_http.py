@@ -203,7 +203,10 @@ class TestDaemonControl:
 
     def test_remove_pid_file(self, tmp_path: Path):
         """remove_pid_file removes existing file."""
-        from agent_py_agent.agent.gateway_parts.daemon_control import remove_pid_file, write_pid_file
+        from agent_py_agent.agent.gateway_parts.daemon_control import (
+            remove_pid_file,
+            write_pid_file,
+        )
 
         pid_path = tmp_path / "test.pid"
         write_pid_file(pid_path, 12345)
@@ -212,7 +215,10 @@ class TestDaemonControl:
 
     def test_check_already_running_no_process(self, tmp_path: Path):
         """check_already_running returns False for dead PID."""
-        from agent_py_agent.agent.gateway_parts.daemon_control import check_already_running, write_pid_file
+        from agent_py_agent.agent.gateway_parts.daemon_control import (
+            check_already_running,
+            write_pid_file,
+        )
 
         pid_path = tmp_path / "test.pid"
         write_pid_file(pid_path, 99999)  # Non-existent PID
@@ -226,7 +232,10 @@ class TestConcurrency:
 
     def test_concurrent_requests(self, tmp_path: Path):
         """HTTP server handles concurrent requests."""
-        from agent_py_agent.agent.gateway_parts.http_service import GatewayHTTPServer, start_http_server
+        from agent_py_agent.agent.gateway_parts.http_service import (
+            GatewayHTTPServer,
+            start_http_server,
+        )
 
         paths = MockGatewayPaths(tmp_path)
         port = find_free_port()

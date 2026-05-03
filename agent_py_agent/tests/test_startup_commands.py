@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 
@@ -14,7 +15,7 @@ class TestCmdDaemon:
 
     def test_daemon_resolves_options(self, tmp_path: Path):
         """测试 daemon 选项解析。"""
-        from agent_py_agent.cli.daemon import cmd_daemon, _resolve_daemon_options
+        from agent_py_agent.cli.daemon import _resolve_daemon_options, cmd_daemon
 
         args = MagicMock()
         args.config = str(tmp_path / "config.yaml")
@@ -174,7 +175,7 @@ class TestResolveDaemonOptions:
 
     def test_resolve_daemon_options_execute_runners_without_apply(self, tmp_path: Path):
         """测试 execute_runners 必须和 apply 一起使用。"""
-        from agent_py_agent.cli.daemon import _resolve_daemon_options, _resolve_daemon_options
+        from agent_py_agent.cli.daemon import _resolve_daemon_options
 
         mock_agent = MagicMock()
         mock_agent.config.daemon_apply = False

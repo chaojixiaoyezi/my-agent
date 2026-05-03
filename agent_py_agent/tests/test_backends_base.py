@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-import pytest
 import json
-from unittest.mock import patch, MagicMock
 from io import BytesIO
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from agent_py_agent.agent.backends.base import (
+    AnthropicCompatibleBackend,
     BaseBackend,
     EchoBackend,
     HttpBackend,
-    OpenAICompatibleBackend,
-    AnthropicCompatibleBackend,
-    get_backend,
     ModelResponse,
+    OpenAICompatibleBackend,
+    get_backend,
 )
 
 

@@ -16,7 +16,8 @@ from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..subagent import DispatchReport, DispatchWatchReport, SubAgentRunnerResult
 from .dispatch_lock import _DispatchWatchLock
-from .failure_introspector import FailureIntrospector, FailureIntrospection
+from .dynamic_timeout import calculate_dynamic_timeout, estimate_task_tokens
+from .failure_introspector import FailureIntrospection, FailureIntrospector
 from .parameters import _sleep_with_stop
 from .planner import _combine_runner_instruction
 from .runner_dispatch import (
@@ -30,7 +31,6 @@ from .runner_dispatch import (
     _runner_max_attempts,
     _runner_retry_reason,
 )
-from .dynamic_timeout import calculate_dynamic_timeout, estimate_task_tokens
 
 
 class SimpleAgentDispatchMixin:
@@ -411,7 +411,10 @@ class SimpleAgentDispatchMixin:
                     if failure_type in {"BLOCKED", "TIMEOUT"} and retry_reason:
                         self._has_pending_work = True
                         try:
-                            from ..memory_push import push_relevant_memories, format_memories_for_injection
+                            from ..memory_push import (
+                                format_memories_for_injection,
+                                push_relevant_memories,
+                            )
 
                             task_context = {
                                 "task_id": run_id,
@@ -477,7 +480,10 @@ class SimpleAgentDispatchMixin:
 
                         # 注入相关记忆（推模式）
                         try:
-                            from ..memory_push import push_relevant_memories, format_memories_for_injection
+                            from ..memory_push import (
+                                format_memories_for_injection,
+                                push_relevant_memories,
+                            )
 
                             task_context = {
                                 "task_id": run_id,

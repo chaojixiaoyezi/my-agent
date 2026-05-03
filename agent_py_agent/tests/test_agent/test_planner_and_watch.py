@@ -6,10 +6,10 @@ enforcement, zero-limit context, watch cycle, and lock prevention.
 watch 周期、锁防重入。
 """
 
-from pathlib import Path
 import json
-import time
 import tempfile
+import time
+from pathlib import Path
 
 from agent_py_agent.agent.capabilities import CapabilityRouter
 from agent_py_agent.agent.capability_config import CapabilityConfig

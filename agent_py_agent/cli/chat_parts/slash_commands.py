@@ -10,7 +10,6 @@ TUI 和 fallback 两套聊天循环都支持同一批斜杠命令。这里统一
 from collections.abc import Callable
 from typing import Any
 
-
 CHAT_HELP_TEXT = (
     "可用命令：\n"
     "/help                         显示帮助\n"

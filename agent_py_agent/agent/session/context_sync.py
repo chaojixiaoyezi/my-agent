@@ -67,7 +67,7 @@ def format_context_for_channel(context: dict, channel: str) -> str:
     # 待回复内容
     pending_reply = context.get("pending_reply")
     if pending_reply:
-        lines.append(f"**待回复内容:**")
+        lines.append("**待回复内容:**")
         lines.append(pending_reply)
         lines.append("")
 

@@ -8,15 +8,15 @@ from __future__ import annotations
 """
 
 import argparse
-from dataclasses import dataclass
 import json
 import os
-from pathlib import Path
 import shlex
 import subprocess
 import sys
 import time
 import uuid
+from dataclasses import dataclass
+from pathlib import Path
 
 from .constants import REAL_CASES, REPO_ROOT, SUITES
 

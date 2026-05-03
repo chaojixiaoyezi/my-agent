@@ -8,9 +8,10 @@ from __future__ import annotations
 我们会回到保守默认值，并把原因记录成 warning，后面 memory doctor 可以拿这些 warning 提醒用户。
 """
 
-from dataclasses import asdict, dataclass
 import re
-from typing import Any, Mapping
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
+from typing import Any
 
 __all__ = [
     "MemoryConfigWarning",
@@ -221,7 +222,7 @@ def normalize_agent_memory_config(config: object) -> list[MemoryConfigWarning]:
     settings, warnings = normalize_memory_settings(config)
     for field_name, value in asdict(settings).items():
         setattr(config, field_name, value)
-    setattr(config, "memory_config_warnings", [warning.to_dict() for warning in warnings])
+    config.memory_config_warnings = [warning.to_dict() for warning in warnings]
     return warnings
 
 

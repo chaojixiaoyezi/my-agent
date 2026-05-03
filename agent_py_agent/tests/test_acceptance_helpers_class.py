@@ -254,7 +254,9 @@ class TestBuildOutputAndCapabilityFindings:
 
     def test_no_open_capability_requests(self, tmp_path: Path):
         """没有待处理 capability 请求。"""
-        from agent_py_agent.agent.subagents.acceptance_helpers import _build_output_and_capability_findings
+        from agent_py_agent.agent.subagents.acceptance_helpers import (
+            _build_output_and_capability_findings,
+        )
 
         task = MagicMock()
         task.capability_requests = []
@@ -269,7 +271,9 @@ class TestBuildOutputAndCapabilityFindings:
 
     def test_has_open_capability_requests(self, tmp_path: Path):
         """有待处理 capability 请求。"""
-        from agent_py_agent.agent.subagents.acceptance_helpers import _build_output_and_capability_findings
+        from agent_py_agent.agent.subagents.acceptance_helpers import (
+            _build_output_and_capability_findings,
+        )
 
         task = MagicMock()
         task.capability_requests = [MagicMock(status="OPEN")]
@@ -284,7 +288,9 @@ class TestBuildOutputAndCapabilityFindings:
 
     def test_no_output_blockers(self, tmp_path: Path):
         """output.json 没有 blocker。"""
-        from agent_py_agent.agent.subagents.acceptance_helpers import _build_output_and_capability_findings
+        from agent_py_agent.agent.subagents.acceptance_helpers import (
+            _build_output_and_capability_findings,
+        )
 
         task = MagicMock()
         task.capability_requests = []
@@ -299,7 +305,9 @@ class TestBuildOutputAndCapabilityFindings:
 
     def test_has_output_blockers(self, tmp_path: Path):
         """output.json 有 blocker。"""
-        from agent_py_agent.agent.subagents.acceptance_helpers import _build_output_and_capability_findings
+        from agent_py_agent.agent.subagents.acceptance_helpers import (
+            _build_output_and_capability_findings,
+        )
 
         task = MagicMock()
         task.capability_requests = []
@@ -314,7 +322,9 @@ class TestBuildOutputAndCapabilityFindings:
 
     def test_tests_passed(self, tmp_path: Path):
         """所有测试通过。"""
-        from agent_py_agent.agent.subagents.acceptance_helpers import _build_output_and_capability_findings
+        from agent_py_agent.agent.subagents.acceptance_helpers import (
+            _build_output_and_capability_findings,
+        )
 
         task = MagicMock()
         task.capability_requests = []
@@ -329,7 +339,9 @@ class TestBuildOutputAndCapabilityFindings:
 
     def test_has_failed_tests(self, tmp_path: Path):
         """有失败的测试。"""
-        from agent_py_agent.agent.subagents.acceptance_helpers import _build_output_and_capability_findings
+        from agent_py_agent.agent.subagents.acceptance_helpers import (
+            _build_output_and_capability_findings,
+        )
 
         task = MagicMock()
         task.capability_requests = []
@@ -344,7 +356,9 @@ class TestBuildOutputAndCapabilityFindings:
 
     def test_artifact_paths_exist(self, tmp_path: Path):
         """artifact 路径存在。"""
-        from agent_py_agent.agent.subagents.acceptance_helpers import _build_output_and_capability_findings
+        from agent_py_agent.agent.subagents.acceptance_helpers import (
+            _build_output_and_capability_findings,
+        )
 
         task = MagicMock()
         task.capability_requests = []
@@ -359,7 +373,9 @@ class TestBuildOutputAndCapabilityFindings:
 
     def test_missing_artifact_paths(self, tmp_path: Path):
         """artifact 路径不存在。"""
-        from agent_py_agent.agent.subagents.acceptance_helpers import _build_output_and_capability_findings
+        from agent_py_agent.agent.subagents.acceptance_helpers import (
+            _build_output_and_capability_findings,
+        )
 
         task = MagicMock()
         task.capability_requests = []

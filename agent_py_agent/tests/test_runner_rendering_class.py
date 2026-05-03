@@ -12,8 +12,8 @@ import pytest
 
 from agent_py_agent.agent.subagents.models import (
     ChannelProbeCheck,
-    ChannelProbeResult,
     ChannelProbeReport,
+    ChannelProbeResult,
     ContextManifest,
     QualityContract,
     SubAgentExecutionContext,

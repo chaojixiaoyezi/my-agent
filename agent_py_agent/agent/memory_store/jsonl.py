@@ -78,7 +78,7 @@ class JsonlMemory:
     local_store: 可选 LocalStore；有它时 add/index_all/search 可以同步索引和优先搜索索引。
     """
 
-    def __init__(self, path: str | Path, local_store: "LocalStore | None" = None):
+    def __init__(self, path: str | Path, local_store: LocalStore | None = None):
         """LLM: 初始化 JSONL 记忆文件位置，并确保父目录存在。
 
         新手说明:
@@ -316,7 +316,7 @@ class JsonlMemory:
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
         return f"{record.created_at:.6f}:{record.role}:{record.kind}:{digest}"
 
-    def _memory_from_hit(self, hit: "LocalSearchResult") -> MemoryRecord:
+    def _memory_from_hit(self, hit: LocalSearchResult) -> MemoryRecord:
         """LLM: 把 LocalStore search hit 还原成 MemoryRecord。
 
         新手说明:

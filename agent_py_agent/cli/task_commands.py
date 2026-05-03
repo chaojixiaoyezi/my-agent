@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import time
 
-from ..agent.task_registry import get_task_summary, format_task_list, TaskRegistry
-from .common import resolve_workspace_root, ROOT
 from ..agent.config import load_config
 from ..agent.local_store import LocalStore
 from ..agent.subagents.models import TaskStatus
+from ..agent.task_registry import TaskRegistry, format_task_list, get_task_summary
+from .common import ROOT, resolve_workspace_root
 
 
 def cmd_task_list(args) -> int:
@@ -147,9 +147,7 @@ def cmd_task_search(args) -> int:
         task_id = task.get("task_id", "").lower()
         status = task.get("status", "").lower()
         # 简单模糊匹配：query 是 goal 的子串，或 query 长度 >= 3 时 goal 包含 query
-        if query in goal or query in task_id:
-            matched.append(task)
-        elif len(query) >= 3 and any(word in goal for word in query.split()):
+        if query in goal or query in task_id or len(query) >= 3 and any(word in goal for word in query.split()):
             matched.append(task)
 
     if not matched:

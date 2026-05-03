@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_py_agent.agent.log_analysis.ingest.dead_letter import (
-    DeadLetterWriter,
     DeadLetterRef,
+    DeadLetterWriter,
     _preview,
 )
 from agent_py_agent.agent.log_analysis.parsers.common import sha256_text

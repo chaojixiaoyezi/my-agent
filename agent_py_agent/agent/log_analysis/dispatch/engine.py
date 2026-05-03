@@ -3,8 +3,9 @@ from __future__ import annotations
 """Local dispatch engine for log-analysis analyst work."""
 
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from ..agents.contracts import normalize_evidence_refs, review_analyst_report
 from ..agents.summaries import render_case_summary, summarize_case

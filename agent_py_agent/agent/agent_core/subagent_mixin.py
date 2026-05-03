@@ -20,7 +20,11 @@ from ..subagent import (
     parse_subagent_runner_output,
 )
 from .automation_guard import SubagentAutomationGuard
-from .planner import PARENT_PLANNER_READ_TOOLS, _build_parent_planner_prompt, _build_parent_planner_state
+from .planner import (
+    PARENT_PLANNER_READ_TOOLS,
+    _build_parent_planner_prompt,
+    _build_parent_planner_state,
+)
 from .runner_prompts import (
     _append_runner_repair_failure,
     _append_runner_repair_prompt,
@@ -29,7 +33,6 @@ from .runner_prompts import (
     _build_subagent_runner_repair_prompt,
 )
 from .task_complexity import TaskComplexityEstimate, estimate_task_complexity
-
 
 logger = logging.getLogger(__name__)
 

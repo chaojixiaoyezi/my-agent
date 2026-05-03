@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 
 from agent_py_agent.agent.log_analysis import (
-    bounded_query,
     LogWorkOrder,
     SecurityCase,
+    bounded_query,
     work_order_to_subagent_task,
 )
 from agent_py_agent.agent.log_analysis.bounded_query import (
@@ -28,7 +28,7 @@ def sample_cases_data():
     fixture_path = Path("agent_py_agent/data/log_fixtures/sample_cases.json")
     if not fixture_path.exists():
         pytest.skip(f"fixture 不存在: {fixture_path}")
-    with open(fixture_path, "r", encoding="utf-8") as f:
+    with open(fixture_path, encoding="utf-8") as f:
         return json.load(f)
 
 

@@ -3,16 +3,16 @@
 给人看的解释：
 测试配置归一化模块：配置归一化、旧字段兼容、错误提示。
 """
-from pathlib import Path
 import tempfile
+from pathlib import Path
 
 import pytest
 
+from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.settings.config_normalize import (
     normalize_agent_config,
     normalize_subagent_workflow_config,
 )
-from agent_py_agent.agent.settings.config import AgentConfig
 
 
 class TestNormalizeAgentConfig:

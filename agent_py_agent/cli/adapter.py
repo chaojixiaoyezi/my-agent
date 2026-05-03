@@ -9,17 +9,23 @@ import threading
 import time
 from pathlib import Path
 
-from ..agent.gateway import AdapterPaths, adapter_paths, gateway_paths, gateway_running, process_file_adapter_once
+from ..agent.adapter import ChannelManager, FeishuAdapter, QQAdapter
+from ..agent.gateway import (
+    AdapterPaths,
+    adapter_paths,
+    gateway_paths,
+    gateway_running,
+    process_file_adapter_once,
+)
 from ..agent.gateway_parts.daemon_control import (
     get_running_pid,
     is_pid_alive,
-    write_pid_record,
     remove_pid_file_if_owned,
+    write_pid_record,
 )
 from ..agent.gateway_parts.process_control import terminate_pid, wait_for_pid_exit
 from .common import make_agent
 from .gateway_client import ensure_gateway_started
-from ..agent.adapter import ChannelManager, FeishuAdapter, QQAdapter
 
 
 def cmd_adapter(args) -> int:
@@ -248,7 +254,7 @@ def _run_adapter_foreground(agent, args, gpaths) -> int:
 
 def _write_adapter_state(gpaths, state: str, extra: dict = None) -> None:
     """Write adapter runtime state to adapter_state.json."""
-    from ..agent.gateway_parts.daemon_control import _utc_now_iso, _get_process_start_time
+    from ..agent.gateway_parts.daemon_control import _get_process_start_time, _utc_now_iso
 
     state_path = gpaths.root / "adapter_state.json"
     payload = {

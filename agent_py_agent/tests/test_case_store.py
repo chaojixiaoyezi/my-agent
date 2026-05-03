@@ -9,16 +9,15 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_py_agent.agent.log_analysis.cases.case_store import (
-    CaseStore,
     CaseRecord,
-    Finding,
+    CaseStore,
     EvidenceRef,
+    Finding,
     dedup_key_for_finding,
     min_priority,
     priority_for_score,
 )
 from agent_py_agent.agent.log_analysis.storage.local_store import LocalLogStore
-
 
 # ============================================================
 # 辅助函数：创建测试 Finding

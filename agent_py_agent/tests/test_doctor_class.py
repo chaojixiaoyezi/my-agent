@@ -18,7 +18,6 @@ from agent_py_agent.agent.log_analysis.doctor import (
     get_log_analysis_status,
 )
 
-
 # ── _path_status 测试 ───────────────────────────────────────────────────────
 
 def test_path_status_exists_file(tmp_path):

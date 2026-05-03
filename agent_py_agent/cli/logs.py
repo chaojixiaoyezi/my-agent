@@ -2,8 +2,8 @@ from __future__ import annotations
 
 """CLI commands for the optional log-analysis module."""
 
-from dataclasses import asdict, is_dataclass
 import json
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 

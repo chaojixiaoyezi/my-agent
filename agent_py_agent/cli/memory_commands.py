@@ -7,8 +7,8 @@ from __future__ import annotations
 路由索引和 hook/raw 归档目录。命令只读文件，不调用模型，也不写业务数据。
 """
 
-from dataclasses import asdict
 import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +22,6 @@ from ..agent.memory_routing import (
     validate_routes,
 )
 from .common import make_agent
-
 
 DEFAULT_ROUTE_INDEX = Path("memory") / "routing" / "INDEX.md"
 RECENT_ARCHIVE_FILE_LIMIT = 5

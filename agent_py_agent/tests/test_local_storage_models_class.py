@@ -6,15 +6,16 @@ from __future__ import annotations
 测试 LocalStore 数据模型：LocalStoreEvent、LocalTimelineItem、LocalSearchResult。
 """
 
-import pytest
-from dataclasses import asdict
 import time
+from dataclasses import asdict
+
+import pytest
 
 from agent_py_agent.agent.local_storage.models import (
+    PREVIEW_CHARS,
+    LocalSearchResult,
     LocalStoreEvent,
     LocalTimelineItem,
-    LocalSearchResult,
-    PREVIEW_CHARS,
 )
 
 
