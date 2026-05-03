@@ -34,7 +34,11 @@ def build_parent_planner_state(
     This is a pure read-only operation - no state is modified.
     Returns a dict with gate summary, board summary, and per-category items.
     """
-    from .runner_dispatch import _dispatch_patch_review_run_ids, _dispatch_runner_candidates, _limit_items
+    from .runner_dispatch import (
+        _dispatch_patch_review_run_ids,
+        _dispatch_runner_candidates,
+        _limit_items,
+    )
 
     tasks = agent.subagents.list_runs()
     board_limit = limit if limit > 0 else len(tasks)

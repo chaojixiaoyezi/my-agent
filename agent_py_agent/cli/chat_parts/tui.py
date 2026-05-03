@@ -12,8 +12,14 @@ import queue
 import re
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
+from .gateway_client import (
+    check_gateway_alive,
+    poll_gateway_chunks,
+    submit_chat_request,
+)
 from .input_loop import (
     handle_common_slash_command,
     is_exit_command,
@@ -31,11 +37,6 @@ from .rendering import (
     progress_bar,
     startup_banner,
     terminal_rule,
-)
-from .gateway_client import (
-    check_gateway_alive,
-    poll_gateway_chunks,
-    submit_chat_request,
 )
 from .session_state import ConversationHistory
 

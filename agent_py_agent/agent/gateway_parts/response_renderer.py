@@ -9,8 +9,8 @@ functions that were previously in that file.
 import json
 from typing import Any
 
-from .paths import GatewayPaths
 from .io import gateway_response_path, read_json_file
+from .paths import GatewayPaths
 
 
 def print_gateway_response(payload: dict, *, json_mode: bool = False, show_prompt: bool = False) -> int:

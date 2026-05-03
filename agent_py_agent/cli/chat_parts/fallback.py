@@ -10,15 +10,14 @@ from __future__ import annotations
 import sys
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
-from .rendering import (
-    BLUE,
-    BOLD,
-    GRAY,
-    GREEN,
-    collapse_response_text,
-    terminal_rule,
+from .gateway_client import (
+    check_gateway_alive,
+    format_gateway_timing,
+    poll_gateway_chunks,
+    submit_chat_request,
 )
 from .input_loop import (
     handle_common_slash_command,
@@ -26,11 +25,13 @@ from .input_loop import (
     is_show_prompt_command,
     parse_expand_target,
 )
-from .gateway_client import (
-    check_gateway_alive,
-    format_gateway_timing,
-    poll_gateway_chunks,
-    submit_chat_request,
+from .rendering import (
+    BLUE,
+    BOLD,
+    GRAY,
+    GREEN,
+    collapse_response_text,
+    terminal_rule,
 )
 
 

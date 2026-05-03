@@ -22,7 +22,25 @@ from .archive_io import (
     _normalize_archive_record,
     _read_archive_file,
 )
-from .filter_policy import evaluate_filters, filter_by_fields, filter_by_level, filter_by_query_text, filter_by_time_window
+from .filter_policy import (
+    evaluate_filters,
+    filter_by_fields,
+    filter_by_level,
+    filter_by_query_text,
+    filter_by_time_window,
+)
+
+# Re-export from query_logic for backward compatibility
+from .query_logic import (
+    archive_filters_from_args,
+    build_resume_guidance,
+    collect_archive_records,
+    collect_resume_task_ids,
+    filter_archive_records,
+    local_hit_payload,
+    resume_local_query,
+    strip_sort_keys,
+)
 from .query_models import (
     ArchiveQueryRequest,
     ArchiveQueryResponse,
@@ -41,18 +59,6 @@ from .rendering_adapter import (
     format_archive_records_table,
     format_query_response_json,
     render_resume_guidance,
-)
-
-# Re-export from query_logic for backward compatibility
-from .query_logic import (
-    archive_filters_from_args,
-    build_resume_guidance,
-    collect_archive_records,
-    collect_resume_task_ids,
-    filter_archive_records,
-    local_hit_payload,
-    resume_local_query,
-    strip_sort_keys,
 )
 
 __all__ = [

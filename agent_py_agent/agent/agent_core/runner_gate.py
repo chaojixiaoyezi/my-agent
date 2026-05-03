@@ -58,7 +58,11 @@ def resolve_runner_config(config: Any, job_count: int) -> tuple[float, int, int]
 
     Returns (runner_timeout_seconds, runner_concurrency, runner_start_rate).
     """
-    from .runner_dispatch import _resolve_runner_concurrency, _resolve_runner_start_rate, _resolve_runner_timeout_seconds
+    from .runner_dispatch import (
+        _resolve_runner_concurrency,
+        _resolve_runner_start_rate,
+        _resolve_runner_timeout_seconds,
+    )
 
     runner_start_rate = _resolve_runner_start_rate(config.runner_start_rate, job_count)
     if runner_start_rate and runner_start_rate < job_count:

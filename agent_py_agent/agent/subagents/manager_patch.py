@@ -202,9 +202,10 @@ class SubAgentPatchMixin:
                 task, output=output, patches=patches, apply=apply, applier=applier, note=note
             )
         # Backward compatibility: inline minimal implementation for tests
+        import time
+
         from .patch.patch_file_ops import rollback_patch_apply
         from .reports import PatchApplyRecord
-        import time
         now = time.time()
         blocked = [
             item for item in patches
