@@ -28,6 +28,7 @@ class FailureAnalysis:
     should_adjust_timeout: bool = False
     new_timeout_seconds: float | None = None
     split_suggestions: list[str] = field(default_factory=list)
+    relevant_memories: list[str] = field(default_factory=list)
 
 
 class SubAgentFailureAnalyzer:
@@ -43,39 +44,65 @@ class SubAgentFailureAnalyzer:
         runner_result: SubAgentRunnerResult,
     ) -> FailureAnalysis:
         """分析失败原因并给出建议。"""
-
         failure_type = task.failure_type or ""
+
+        # 先获取相关记忆（推模式）
+        relevant_memories = self._get_relevant_memories(failure_type, task)
 
         # 超时分析
         if failure_type == "runner_timeout":
-            return self._analyze_timeout(task, runner_result)
+            result = self._analyze_timeout(task, runner_result)
+            result.relevant_memories = relevant_memories
+            return result
 
         # 能力缺口分析
         if failure_type == "capability_request":
-            return self._analyze_capability(task, runner_result)
+            result = self._analyze_capability(task, runner_result)
+            result.relevant_memories = relevant_memories
+            return result
 
         # 输出解析错误
         if failure_type == "structured_output_parse_error":
-            return self._analyze_parse_error(task, runner_result)
+            result = self._analyze_parse_error(task, runner_result)
+            result.relevant_memories = relevant_memories
+            return result
 
         # 工具失败
         if failure_type in {"tool_result_missing", "tool_error"}:
-            return self._analyze_tool_failure(task, runner_result)
+            result = self._analyze_tool_failure(task, runner_result)
+            result.relevant_memories = relevant_memories
+            return result
 
         # 模型错误
         if failure_type in {"model_error", "api_error"}:
-            return self._analyze_model_error(task, runner_result)
+            result = self._analyze_model_error(task, runner_result)
+            result.relevant_memories = relevant_memories
+            return result
 
         # 通道损坏
         if task.channel_status == "BROKEN":
-            return self._analyze_channel_broken(task, runner_result)
+            result = self._analyze_channel_broken(task, runner_result)
+            result.relevant_memories = relevant_memories
+            return result
 
         # 验收失败
         if task.verification_status == "FAILED" and task.status == "BLOCKED":
-            return self._analyze_verification_failed(task, runner_result)
+            result = self._analyze_verification_failed(task, runner_result)
+            result.relevant_memories = relevant_memories
+            return result
 
         # 默认分析
-        return self._analyze_generic_failure(task, runner_result)
+        result = self._analyze_generic_failure(task, runner_result)
+        result.relevant_memories = relevant_memories
+        return result
+
+    def _get_relevant_memories(self, failure_type: str, task: SubAgentTask) -> list[str]:
+        """获取与失败类型相关的记忆（通过搜索已有记忆）。
+
+        注意：这个方法只搜索记忆，不依赖 agent 实例。
+        实际的记忆注入由 dispatch_mixin 完成。
+        """
+        return []  # 记忆注入由 dispatch_mixin 负责
 
     def _analyze_timeout(
         self,

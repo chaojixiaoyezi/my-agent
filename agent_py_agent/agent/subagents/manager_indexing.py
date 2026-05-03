@@ -316,16 +316,22 @@ class SubAgentIndexingMixin:
         )
 
     def _select_runs(self, run_ids: list[str] | None) -> list[SubAgentTask]:
-        """按 run id 选择运行记录。"""
+        """按 run id 选择运行记录，过滤掉不可调度的状态。"""
+
+        from .models import DISPATCH_INELIGIBLE_STATUSES
 
         if run_ids is None:
-            return self.list_runs()
+            all_runs = self.list_runs()
+            # 过滤掉 DISPATCH_INELIGIBLE 状态
+            return [r for r in all_runs if r.status not in DISPATCH_INELIGIBLE_STATUSES]
         if not run_ids:
             return []
         runs: list[SubAgentTask] = []
         for run_id in run_ids:
             try:
-                runs.append(self.load(run_id))
+                task = self.load(run_id)
+                if task.status not in DISPATCH_INELIGIBLE_STATUSES:
+                    runs.append(task)
             except FileNotFoundError:
                 continue
         return runs

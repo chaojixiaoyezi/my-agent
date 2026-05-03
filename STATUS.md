@@ -1,8 +1,8 @@
 # STATUS
 
-## 2026-05-02 最新恢复入口
+## 2026-05-03 最新恢复入口
 
-如果下次换电脑、换会话、换 IDE，先看这一段和 [HANDOFF_current-state.md](HANDOFF_current-state.md)。
+如果下次换电脑、换会话、换 IDE，先看这一段和模块文档。
 
 当前远端已同步到：
 
@@ -31,6 +31,7 @@
 - `git diff --check` -> passed
 - focused gateway/memory/doc tests -> `16 passed`
 - wide memory/gateway focused tests -> `76 passed`
+- **推模式 focused 验收**：`python3 -m pytest agent_py_agent/tests/test_memory_push.py agent_py_agent/tests/test_dispatch_loop.py -q` -> `39 passed`
 - parent/subagent runner recovery focused tests -> `2 passed`
 - gateway stale lease focused tests -> `3 passed`
 - gateway multi-worker focused tests -> `4 passed`
@@ -46,7 +47,7 @@
 3. ~~推进 LOG work-order 到真实 SubAgentTask 执行桥，并补 bounded evidence reader。~~ ✅ 已完成第一版
 4. ~~用真实外部模型补跑 parent/subagent runner 跨天恢复冒烟。~~ ✅ 已完成 `real-model-recovery-multi-round`
 
-详细交接见 [HANDOFF_current-state.md](HANDOFF_current-state.md)，模块细节见 `docs/modules/memory/02-progress.md`、`docs/modules/subagent/02-progress.md` 和 `docs/modules/gateway/02-progress.md`。
+详细交接见 `docs/tasks/HANDOFF_*.md`，模块细节见 `docs/modules/memory/02-progress.md`、`docs/modules/subagent/02-progress.md` 和 `docs/modules/gateway/02-progress.md`。
 
 更新时间：2026-05-01
 
@@ -56,6 +57,7 @@
 
 最新推进：
 - 已完成完整从头到尾真实链路测试：CLI、memory、LocalStore、gateway、scenario、真实 API runner、父代理验收全部通过。
+- 已新增任务生命周期管理（ABANDONED/PAUSED/RESUMED）：用户可通过 `task-abandon`、`task-pause`、`task-resume` 命令主动控制任务；Dispatch 调度会跳过 PAUSED/ABANDONED/COMPLETED/FAILED 状态任务。
 - 已新增轻量 recovery snapshot 自动写入：普通 run/chat/gateway 默认随保存写 hook，subagent-run 在 runner 结果写回后写 run_id 恢复锚点。
 - `memory-resume` 已支持 `--context-only`，可以只输出稳定恢复块，方便人工 handoff、真实环境测试和后续自动注入。
 - 已新增可选恢复上下文自动注入：默认关闭；打开后在“继续/恢复/刚刚/run_id”等场景读取归档和事实源，把短 `Recovery Brief` 注入本轮 prompt。
@@ -76,6 +78,16 @@
   - Adapter 守护进程模式（`--daemon` + PID 文件）
   - `gateway start-all --adapter` 一键启动 gateway + 适配器
   - 系统服务安装（`gateway install` systemd/launchd）
+- **记忆推模式** (`memory_push.py`)：在关键决策点自动注入相关记忆
+  - `MemoryType` 枚举支持 LESSON_GENERAL/LESSON_TASK/LESSON_TEMP/CONTEXT/FACT
+  - `push_relevant_memories()` 根据触发类型搜索相关记忆
+  - dispatch_mixin 失败后自动注入教训记忆
+  - failure_analyzer 增加 `relevant_memories` 字段
+- **Dispatch 闭环保证**：防止长任务中途失活
+  - 闭环检测：`dispatch_loop()` 循环直到无任务或达到上限
+  - 自适应间隔：有变化 5 秒，无变化 30 秒
+  - 最大轮数保护：`dispatch_max_consecutive_rounds=20`
+  - Watchdog 进程监控 daemon 存活
 
 最近已推送提交：
 - `45bbd08 feat: Round 5 continued — adapter daemon, PID tracking, one-click start, test fixes`

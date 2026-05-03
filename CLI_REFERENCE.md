@@ -1241,6 +1241,67 @@ my-agent task-list --user-id admin --status RUNNING --limit 20
 | `--status` | 全部 | 按状态过滤，如 PLANNING/RUNNING/DONE |
 | `--limit` | 50 | 最多显示多少条 |
 
+## `task-show`
+
+显示单个任务详情。
+
+```powershell
+my-agent task-show <task_id>
+```
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `task_id` | 是 | 任务 ID |
+
+## `task-abandon`
+
+标记任务为 ABANDONED，Dispatch 不再调度。
+
+```powershell
+my-agent task-abandon <task_id>
+```
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `task_id` | 是 | 任务 ID |
+
+## `task-pause`
+
+暂停任务，可用 `task-resume` 恢复。
+
+```powershell
+my-agent task-pause <task_id>
+```
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `task_id` | 是 | 任务 ID |
+
+## `task-resume`
+
+恢复已暂停的任务。
+
+```powershell
+my-agent task-resume <task_id>
+```
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `task_id` | 是 | 任务 ID |
+
+## `task-search`
+
+搜索任务，支持模糊描述。
+
+```powershell
+my-agent task-search "gateway"
+my-agent task-search --query "修复"
+```
+
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `--query` | 是 | 搜索关键词或模糊描述 |
+
 ## `notifications`
 
 查看任务完成通知。

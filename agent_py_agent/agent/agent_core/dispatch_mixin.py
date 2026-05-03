@@ -16,6 +16,7 @@ from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..subagent import DispatchReport, DispatchWatchReport, SubAgentRunnerResult
 from .dispatch_lock import _DispatchWatchLock
+from .failure_introspector import FailureIntrospector, FailureIntrospection
 from .parameters import _sleep_with_stop
 from .planner import _combine_runner_instruction
 from .runner_dispatch import (
@@ -397,6 +398,32 @@ class SimpleAgentDispatchMixin:
                         execute_runners=execute_runners,
                     )
                 )
+
+                # 失败自动触发：如果 runner 执行失败（BLOCKED/TIMEOUT）且任务仍可重试，
+                # 在当前 dispatch 循环内标记需要重调度，让下一轮立即捡起
+                if not result.ok and execute_runners:
+                    failure_type = str(result.status or "").strip().upper()
+                    if failure_type in {"BLOCKED", "TIMEOUT"} and retry_reason:
+                        self._has_pending_work = True
+                        try:
+                            from ..memory_push import push_relevant_memories, format_memories_for_injection
+
+                            task_context = {
+                                "task_id": run_id,
+                                "goal": before.goal if hasattr(before, "goal") else "",
+                                "failure_type": failure_type.lower(),
+                            }
+                            relevant_memories = push_relevant_memories(self, failure_type.lower(), task_context, limit=3)
+                            if relevant_memories:
+                                memory_hint = format_memories_for_injection(relevant_memories)
+                                if effective_runner_instruction:
+                                    effective_runner_instruction = f"{effective_runner_instruction}\n\n{memory_hint}"
+                                else:
+                                    effective_runner_instruction = memory_hint
+                        except Exception:
+                            pass
+                        # LLM 自省：分析失败原因并给出调参建议
+                        self._handle_failure_introspection(run_id, before, result)
         else:
             for run_id, before, retry_reason in pending_runner_jobs:
                 task_timeout = _get_task_timeout(before)
@@ -442,6 +469,29 @@ class SimpleAgentDispatchMixin:
                     if failure_type in {"BLOCKED", "TIMEOUT"} and retry_reason:
                         # 设置 _has_pending_work 让闭环检测知道还有工作要做
                         self._has_pending_work = True
+
+                        # 注入相关记忆（推模式）
+                        try:
+                            from ..memory_push import push_relevant_memories, format_memories_for_injection
+
+                            task_context = {
+                                "task_id": run_id,
+                                "goal": before.goal if hasattr(before, "goal") else "",
+                                "failure_type": failure_type.lower(),
+                            }
+                            relevant_memories = push_relevant_memories(self, failure_type.lower(), task_context, limit=3)
+                            if relevant_memories:
+                                memory_hint = format_memories_for_injection(relevant_memories)
+                                # 把记忆提示追加到 runner_instruction
+                                if effective_runner_instruction:
+                                    effective_runner_instruction = f"{effective_runner_instruction}\n\n{memory_hint}"
+                                else:
+                                    effective_runner_instruction = memory_hint
+                        except Exception:
+                            pass  # 记忆注入失败不影响主流程
+
+                        # LLM 自省：分析失败原因并给出调参建议
+                        self._handle_failure_introspection(run_id, before, result)
 
         patch_run_ids = _dispatch_patch_review_run_ids(self.subagents.list_runs())
         if patch_run_ids:
@@ -533,6 +583,85 @@ class SimpleAgentDispatchMixin:
             runner_max_attempts=runner_max_attempts,
         )
         self._has_pending_work = len(candidates) > 0
+
+    def _handle_failure_introspection(
+        self,
+        run_id: str,
+        task_before: SubAgentTask,
+        runner_result: SubAgentRunnerResult,
+    ) -> None:
+        """失败后调用 LLM 自省，分析原因并给出调参建议。
+
+        分析结果存入 task.attributes['failure_introspection_data']，
+        如果 LLM 建议调整参数，应用到任务属性中。
+        """
+        try:
+            from .failure_analyzer import SubAgentFailureAnalyzer
+
+            task = self.subagents.load(run_id)
+            analyzer = SubAgentFailureAnalyzer()
+            failure_analysis = analyzer.analyze(task, runner_result)
+
+            introspector = FailureIntrospector(agent=self)
+            introspection = introspector.introspect(task, runner_result, failure_analysis)
+
+            # 存储自省结果到 attributes
+            introspection_data = {
+                "analysis_reason": introspection.analysis_reason,
+                "root_cause": introspection.root_cause,
+                "suggested_params": introspection.suggested_params,
+                "should_retry": introspection.should_retry,
+                "should_split": introspection.should_split,
+                "confidence": introspection.confidence,
+            }
+            task.attributes["failure_introspection_data"] = introspection_data
+
+            # 如果 LLM 建议调整参数，应用到任务
+            if introspection.suggested_params:
+                self._apply_introspection_params(task, introspection.suggested_params)
+
+            self.subagents.save(task)
+
+        except Exception as exc:
+            # 自省失败不影响主流程
+            import logging
+            logging.getLogger(__name__).warning(f"Failure introspection failed: {exc}")
+
+    def _apply_introspection_params(
+        self,
+        task: SubAgentTask,
+        params: dict,
+    ) -> SubAgentTask:
+        """根据 LLM 自省结果调整任务参数。
+
+        Args:
+            task: 任务
+            params: LLM 建议的参数调整
+
+        Returns:
+            调整后的任务
+        """
+        applied = []
+        if "new_timeout_seconds" in params:
+            timeout = float(params["new_timeout_seconds"])
+            task.attributes["dynamic_timeout_seconds"] = timeout
+            applied.append(f"timeout={timeout}s")
+        if "max_tool_rounds" in params:
+            task.attributes["max_tool_rounds"] = int(params["max_tool_rounds"])
+            applied.append(f"max_tool_rounds={params['max_tool_rounds']}")
+        if "split_goal" in params:
+            split_goal = str(params["split_goal"])
+            if split_goal and task.goal:
+                task.goal = f"{task.goal} | {split_goal}"
+                applied.append(f"goal_adjustment={split_goal}")
+
+        if applied:
+            import logging
+            logging.getLogger(__name__).info(
+                f"Applied LLM introspection params to {task.id}: {applied}"
+            )
+
+        return task
 
     def _increment_dispatch_rounds(self) -> None:
         """递增连续 dispatch 轮数。"""

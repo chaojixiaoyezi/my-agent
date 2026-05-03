@@ -12,6 +12,19 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..local_store import LocalStore
 
+_TASK_STATUS_EMOJI = {
+    "PLANNING": "⏳",
+    "RUNNING": "🔄",
+    "BLOCKED": "⚠️",
+    "PAUSED": "⏸️",
+    "ABANDONED": "🗑️",
+    "COMPLETED": "✅",
+    "FAILED": "❌",
+    "DONE": "✅",
+    "TIMEOUT": "⏰",
+    "SPLIT": "🔀",
+}
+
 
 def get_task_summary(store: LocalStore, task_id: str) -> str:
     """获取任务摘要文本。
@@ -29,21 +42,17 @@ def get_task_summary(store: LocalStore, task_id: str) -> str:
     if not task_info:
         return f"任务 {task_id} 不存在。"
 
-    status_emoji = {
-        "PLANNING": "⏳",
-        "RUNNING": "🔄",
-        "BLOCKED": "⚠️",
-        "FAILED": "❌",
-        "DONE": "✅",
-        "TIMEOUT": "⏰",
-        "SPLIT": "🔀",
-    }.get(task_info["status"], "❓")
+    status_emoji = _TASK_STATUS_EMOJI.get(task_info["status"], "❓")
 
     lines = [
         f"任务 ID: {task_info['task_id']}",
         f"状态: {status_emoji} {task_info['status']}",
-        f"目标: {task_info['goal'][:100]}..." if len(task_info['goal']) > 100 else task_info['goal'],
     ]
+
+    # 显示 description（存在 goal 字段前 100 字）
+    goal = task_info["goal"]
+    if goal:
+        lines.append(f"描述: {goal[:100]}")
 
     # 添加创建和更新时间
     if task_info["created_at"]:
@@ -77,22 +86,14 @@ def format_task_list(tasks: list[dict]) -> str:
     if not tasks:
         return "没有找到任务。"
 
-    lines = []
-    status_emoji = {
-        "PLANNING": "⏳",
-        "RUNNING": "🔄",
-        "BLOCKED": "⚠️",
-        "FAILED": "❌",
-        "DONE": "✅",
-        "TIMEOUT": "⏰",
-        "SPLIT": "🔀",
-    }
+    lines = ["任务列表："]
 
     for task in tasks[:20]:  # 最多显示 20 个
-        status_symbol = status_emoji.get(task["status"], "❓")
+        status_symbol = _TASK_STATUS_EMOJI.get(task["status"], "❓")
         goal_preview = task["goal"][:80] + "..." if len(task["goal"]) > 80 else task["goal"]
+        task_id = task["task_id"]
 
-        lines.append(f"{status_symbol} [{task['task_id']}] {goal_preview}")
+        lines.append(f"  [{task['status']}] {task_id}  {goal_preview}")
 
     if len(tasks) > 20:
         lines.append(f"... 还有 {len(tasks) - 20} 个任务")
