@@ -7,7 +7,7 @@ Human version:
 业务逻辑已移至 services/board.py。
 """
 
-from .services.board import SubAgentBoardService, _to_board_item, _build_risk_flags
+from .services.board import SubAgentBoardService, _build_risk_flags, _to_board_item
 
 
 class SubAgentBoardMixin:
