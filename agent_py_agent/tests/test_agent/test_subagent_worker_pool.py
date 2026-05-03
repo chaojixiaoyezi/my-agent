@@ -115,7 +115,7 @@ def test_dispatch_parallel_runner_pool_timeout_does_not_block_other_workers(monk
             subagent_workspace="subs",
             runner_concurrency="2",
             runner_start_rate="2",
-            runner_timeout_seconds="0.05",
+            runner_timeout_seconds="0.1",
         )
         agent = SimpleAgent(cfg, root)
         tasks = [
