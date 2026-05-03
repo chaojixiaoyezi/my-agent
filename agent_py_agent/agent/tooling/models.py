@@ -237,7 +237,7 @@ def _tokenize(text: str) -> list[str]:
     - 中文按连续中文片段保留，再拆出 2 到 4 字的小片段补召回
     """
 
-    lowered = text.lower()
+    lowered = (text or "").lower()
     tokens = re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]+", lowered)
     expanded: list[str] = []
     for token in tokens:

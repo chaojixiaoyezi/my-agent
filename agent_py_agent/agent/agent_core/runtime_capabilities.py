@@ -125,7 +125,7 @@ def resolve_runtime_capabilities(
     if has_security_tool_capability(capabilities):
         return capabilities
 
-    text = "\n".join([user_prompt, *(str(item) for item in (inject or []))])
+    text = "\n".join([user_prompt or "", *(str(item) for item in (inject or []))])
     if _looks_like_security_log_task(text):
         capabilities.append(SECURITY_RUNTIME_CAPABILITY)
     return capabilities

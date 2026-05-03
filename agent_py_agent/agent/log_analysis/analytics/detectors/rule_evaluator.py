@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+# Import classification predicates and entity helpers from classifiers module
 from .classifiers import (
     _destination,
     _entities_from_events,
@@ -31,6 +32,7 @@ from .classifiers import (
     _unique_texts,
     _weak_signal,
 )
+
 from .field_access import (
     EventLike,
     JsonDict,
@@ -45,6 +47,7 @@ from .field_access import (
     _within_after,
     _within_before,
 )
+
 from .field_extractors import (
     _asset_ip,
     _cmdline,
@@ -60,6 +63,7 @@ from .field_extractors import (
     _user,
     _victim_ip,
 )
+
 from .rule_helpers import (
     _dedupe_findings,
     _evidence_ref,

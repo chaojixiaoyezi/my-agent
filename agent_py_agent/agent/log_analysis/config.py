@@ -204,6 +204,169 @@ def load_log_analysis_config(
     return config
 
 
+def _normalize_core_bool_fields(
+    source: Mapping[str, Any],
+    defaults: LogAnalysisConfig,
+    warnings: list[LogAnalysisConfigWarning],
+) -> dict[str, Any]:
+    """Normalize core boolean fields (enabled, worker, security, dispatch, ml, cluster)."""
+    return {
+        "enabled": _coerce_bool(
+            "enabled", _lookup(source, "enabled"),
+            default=defaults.enabled, warnings=warnings
+        ),
+        "worker_enabled": _coerce_bool(
+            "worker_enabled", _lookup(source, "worker_enabled"),
+            default=defaults.worker_enabled, warnings=warnings
+        ),
+        "security_prompt_enabled": _coerce_bool(
+            "security_prompt_enabled", _lookup(source, "security_prompt_enabled"),
+            default=defaults.security_prompt_enabled, warnings=warnings
+        ),
+        "auto_dispatch_enabled": _coerce_bool(
+            "auto_dispatch_enabled", _lookup(source, "auto_dispatch_enabled"),
+            default=defaults.auto_dispatch_enabled, warnings=warnings
+        ),
+        "ml_enabled": _coerce_bool(
+            "ml_enabled", _lookup(source, "ml_enabled"),
+            default=defaults.ml_enabled, warnings=warnings
+        ),
+        "cluster_enabled": _coerce_bool(
+            "cluster_enabled", _lookup(source, "cluster_enabled"),
+            default=defaults.cluster_enabled, warnings=warnings
+        ),
+        "response_execution_enabled": _coerce_bool(
+            "response_execution_enabled", _lookup(source, "response_execution_enabled"),
+            default=defaults.response_execution_enabled, warnings=warnings
+        ),
+    }
+
+
+def _normalize_choice_fields(
+    source: Mapping[str, Any],
+    defaults: LogAnalysisConfig,
+    warnings: list[LogAnalysisConfigWarning],
+) -> dict[str, Any]:
+    """Normalize choice/select fields (capability_level, response_mode, local_store_backend)."""
+    return {
+        "capability_level": _coerce_choice(
+            "capability_level", _lookup(source, "capability_level"),
+            default=defaults.capability_level, choices=_LEVELS,
+            warnings=warnings, uppercase=True,
+        ),
+        "response_mode": _coerce_choice(
+            "response_mode", _lookup(source, "response_mode"),
+            default=defaults.response_mode,
+            choices={"recommend", "dry_run", "execute"},
+            warnings=warnings,
+        ),
+        "local_store_backend": _coerce_choice(
+            "local_store_backend", _lookup(source, "local_store_backend"),
+            default=defaults.local_store_backend,
+            choices={"jsonl", "sqlite", "duckdb", "parquet"},
+            warnings=warnings,
+        ),
+    }
+
+
+def _normalize_path_and_version_fields(
+    source: Mapping[str, Any],
+    defaults: LogAnalysisConfig,
+    warnings: list[LogAnalysisConfigWarning],
+) -> dict[str, Any]:
+    """Normalize path and version fields (data_dir, config_version)."""
+    return {
+        "data_dir": _coerce_path_string(
+            "data_dir", _lookup(source, "data_dir"),
+            default=defaults.data_dir, warnings=warnings,
+        ),
+        "config_version": _coerce_int(
+            "config_version", _lookup(source, "config_version"),
+            default=defaults.config_version,
+            min_value=1, max_value=100,
+            warnings=warnings,
+        ),
+    }
+
+
+def _normalize_query_limit_fields(
+    source: Mapping[str, Any],
+    defaults: LogAnalysisConfig,
+    warnings: list[LogAnalysisConfigWarning],
+) -> dict[str, Any]:
+    """Normalize query limit fields (query_default_limit, query_max_limit)."""
+    return {
+        "query_default_limit": _coerce_int(
+            "query_default_limit", _lookup(source, "query_default_limit"),
+            default=defaults.query_default_limit,
+            min_value=1, max_value=10000,
+            warnings=warnings,
+        ),
+        "query_max_limit": _coerce_int(
+            "query_max_limit", _lookup(source, "query_max_limit"),
+            default=defaults.query_max_limit,
+            min_value=1, max_value=100000,
+            warnings=warnings,
+        ),
+    }
+
+
+def _normalize_retention_and_preview_fields(
+    source: Mapping[str, Any],
+    defaults: LogAnalysisConfig,
+    warnings: list[LogAnalysisConfigWarning],
+) -> dict[str, Any]:
+    """Normalize retention and preview limit fields (source_retention_days, payload_preview_max_chars)."""
+    return {
+        "source_retention_days": _coerce_int(
+            "source_retention_days", _lookup(source, "source_retention_days"),
+            default=defaults.source_retention_days,
+            min_value=1, max_value=3650,
+            warnings=warnings,
+        ),
+        "payload_preview_max_chars": _coerce_int(
+            "payload_preview_max_chars", _lookup(source, "payload_preview_max_chars"),
+            default=defaults.payload_preview_max_chars,
+            min_value=0, max_value=100000,
+            warnings=warnings,
+        ),
+    }
+
+
+def _normalize_dispatch_and_window_fields(
+    source: Mapping[str, Any],
+    defaults: LogAnalysisConfig,
+    warnings: list[LogAnalysisConfigWarning],
+) -> dict[str, Any]:
+    """Normalize dispatch and time window fields (max_parallel_analyst_agents, dispatch_budget_per_hour, case_merge_window_minutes, detector_window_minutes)."""
+    return {
+        "max_parallel_analyst_agents": _coerce_int(
+            "max_parallel_analyst_agents", _lookup(source, "max_parallel_analyst_agents"),
+            default=defaults.max_parallel_analyst_agents,
+            min_value=0, max_value=100,
+            warnings=warnings,
+        ),
+        "dispatch_budget_per_hour": _coerce_int(
+            "dispatch_budget_per_hour", _lookup(source, "dispatch_budget_per_hour"),
+            default=defaults.dispatch_budget_per_hour,
+            min_value=0, max_value=10000,
+            warnings=warnings,
+        ),
+        "case_merge_window_minutes": _coerce_int(
+            "case_merge_window_minutes", _lookup(source, "case_merge_window_minutes"),
+            default=defaults.case_merge_window_minutes,
+            min_value=1, max_value=10080,
+            warnings=warnings,
+        ),
+        "detector_window_minutes": _coerce_int(
+            "detector_window_minutes", _lookup(source, "detector_window_minutes"),
+            default=defaults.detector_window_minutes,
+            min_value=1, max_value=1440,
+            warnings=warnings,
+        ),
+    }
+
+
 def normalize_log_analysis_config(
     values: Mapping[str, Any] | object | None = None,
 ) -> tuple[LogAnalysisConfig, list[LogAnalysisConfigWarning]]:
@@ -226,145 +389,19 @@ def normalize_log_analysis_config(
     warnings: list[LogAnalysisConfigWarning] = []
     defaults = LogAnalysisConfig()
 
-    config = LogAnalysisConfig(
-        enabled=_coerce_bool("enabled", _lookup(source, "enabled"), default=defaults.enabled, warnings=warnings),
-        capability_level=_coerce_choice(
-            "capability_level",
-            _lookup(source, "capability_level"),
-            default=defaults.capability_level,
-            choices=_LEVELS,
-            warnings=warnings,
-            uppercase=True,
-        ),
-        data_dir=_coerce_path_string(
-            "data_dir",
-            _lookup(source, "data_dir"),
-            default=defaults.data_dir,
-            warnings=warnings,
-        ),
-        config_version=_coerce_int(
-            "config_version",
-            _lookup(source, "config_version"),
-            default=defaults.config_version,
-            min_value=1,
-            max_value=100,
-            warnings=warnings,
-        ),
-        worker_enabled=_coerce_bool(
-            "worker_enabled",
-            _lookup(source, "worker_enabled"),
-            default=defaults.worker_enabled,
-            warnings=warnings,
-        ),
-        security_prompt_enabled=_coerce_bool(
-            "security_prompt_enabled",
-            _lookup(source, "security_prompt_enabled"),
-            default=defaults.security_prompt_enabled,
-            warnings=warnings,
-        ),
-        auto_dispatch_enabled=_coerce_bool(
-            "auto_dispatch_enabled",
-            _lookup(source, "auto_dispatch_enabled"),
-            default=defaults.auto_dispatch_enabled,
-            warnings=warnings,
-        ),
-        ml_enabled=_coerce_bool(
-            "ml_enabled",
-            _lookup(source, "ml_enabled"),
-            default=defaults.ml_enabled,
-            warnings=warnings,
-        ),
-        cluster_enabled=_coerce_bool(
-            "cluster_enabled",
-            _lookup(source, "cluster_enabled"),
-            default=defaults.cluster_enabled,
-            warnings=warnings,
-        ),
-        response_execution_enabled=_coerce_bool(
-            "response_execution_enabled",
-            _lookup(source, "response_execution_enabled"),
-            default=defaults.response_execution_enabled,
-            warnings=warnings,
-        ),
-        response_mode=_coerce_choice(
-            "response_mode",
-            _lookup(source, "response_mode"),
-            default=defaults.response_mode,
-            choices={"recommend", "dry_run", "execute"},
-            warnings=warnings,
-        ),
-        local_store_backend=_coerce_choice(
-            "local_store_backend",
-            _lookup(source, "local_store_backend"),
-            default=defaults.local_store_backend,
-            choices={"jsonl", "sqlite", "duckdb", "parquet"},
-            warnings=warnings,
-        ),
-        query_default_limit=_coerce_int(
-            "query_default_limit",
-            _lookup(source, "query_default_limit"),
-            default=defaults.query_default_limit,
-            min_value=1,
-            max_value=10000,
-            warnings=warnings,
-        ),
-        query_max_limit=_coerce_int(
-            "query_max_limit",
-            _lookup(source, "query_max_limit"),
-            default=defaults.query_max_limit,
-            min_value=1,
-            max_value=100000,
-            warnings=warnings,
-        ),
-        source_retention_days=_coerce_int(
-            "source_retention_days",
-            _lookup(source, "source_retention_days"),
-            default=defaults.source_retention_days,
-            min_value=1,
-            max_value=3650,
-            warnings=warnings,
-        ),
-        payload_preview_max_chars=_coerce_int(
-            "payload_preview_max_chars",
-            _lookup(source, "payload_preview_max_chars"),
-            default=defaults.payload_preview_max_chars,
-            min_value=0,
-            max_value=100000,
-            warnings=warnings,
-        ),
-        max_parallel_analyst_agents=_coerce_int(
-            "max_parallel_analyst_agents",
-            _lookup(source, "max_parallel_analyst_agents"),
-            default=defaults.max_parallel_analyst_agents,
-            min_value=0,
-            max_value=100,
-            warnings=warnings,
-        ),
-        dispatch_budget_per_hour=_coerce_int(
-            "dispatch_budget_per_hour",
-            _lookup(source, "dispatch_budget_per_hour"),
-            default=defaults.dispatch_budget_per_hour,
-            min_value=0,
-            max_value=10000,
-            warnings=warnings,
-        ),
-        case_merge_window_minutes=_coerce_int(
-            "case_merge_window_minutes",
-            _lookup(source, "case_merge_window_minutes"),
-            default=defaults.case_merge_window_minutes,
-            min_value=1,
-            max_value=10080,
-            warnings=warnings,
-        ),
-        detector_window_minutes=_coerce_int(
-            "detector_window_minutes",
-            _lookup(source, "detector_window_minutes"),
-            default=defaults.detector_window_minutes,
-            min_value=1,
-            max_value=1440,
-            warnings=warnings,
-        ),
-    )
+    # Apply per-domain normalization in sequence
+    core_fields = _normalize_core_bool_fields(source, defaults, warnings)
+    choice_fields = _normalize_choice_fields(source, defaults, warnings)
+    path_version_fields = _normalize_path_and_version_fields(source, defaults, warnings)
+    query_limit_fields = _normalize_query_limit_fields(source, defaults, warnings)
+    retention_preview_fields = _normalize_retention_and_preview_fields(source, defaults, warnings)
+    dispatch_window_fields = _normalize_dispatch_and_window_fields(source, defaults, warnings)
+
+    # Merge all normalized fields
+    normalized = {**core_fields, **choice_fields, **path_version_fields,
+                  **query_limit_fields, **retention_preview_fields, **dispatch_window_fields}
+
+    config = LogAnalysisConfig(**normalized)
 
     if config.query_default_limit > config.query_max_limit:
         _warn(

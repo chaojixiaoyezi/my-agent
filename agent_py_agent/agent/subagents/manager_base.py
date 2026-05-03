@@ -1,70 +1,27 @@
 from __future__ import annotations
 
-"""LLM contract: SubAgentBaseMixin methods grouped by one subagent responsibility.
+"""LLM contract: SubAgentBaseMixin - thin facade delegating core task lifecycle to services.
 
 Human version:
 这个 mixin 是 SubAgentManager 的一块业务能力，不单独实例化。
 拆成 mixin 是为了让每个文件只有一个变化原因，而不是把所有父代理逻辑塞进一个巨型文件。
+业务逻辑已移至 services/base.py, services/persistence.py, services/workflow.py。
 """
 
-import json
-import re
 import time
-from dataclasses import fields
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..capabilities import CapabilityRouter
-from ..capability_config import CapabilityConfig
-from ..file_io import append_jsonl
 from .models import (
-    ContextManifest,
-    QualityContract,
     SubAgentCard,
     SubAgentTask,
     TakeoverRecord,
     WorkOrderValidation,
 )
-from .parsing import (
-    _dict_list,
-    _normalize_runner_items,
-    _split_allowed_items,
-    _string_dict,
-    _string_list,
-)
-from .policies import (
-    _action_for_issue,
-    _capability_request_query,
-    _commands_for_action,
-    _dedupe_granted_cards,
-    _default_forbidden_write_roots,
-    _execution_context_instructions,
-    _filter_action_plan_items,
-    _is_active,
-    _issue_weight,
-    _make_due_issue,
-    _risk_weight,
-    _route_card_payload,
-    _runner_next_action,
-    _select_capability_hits,
-    _severity_weight,
-    _status_from_structured_output,
-    _verification_from_runner_status,
-)
-from .probe import (
-    _channel_status,
-    _probe_fail,
-    _probe_json_file,
-    _probe_ok,
-    _probe_writable_dir,
-)
-from .runner_rendering import _render_runner_item_line
+from .policies import _default_forbidden_write_roots
 from .utils import (
     _apply_missing_paths,
-    _apply_paths,
-    _merge_list,
     _new_id,
-    _read_json_object,
     _write_if_missing,
     _write_json_if_missing,
 )
@@ -73,116 +30,9 @@ if TYPE_CHECKING:
     from ..local_store import LocalStore
 
 
-def _field_names(model: type) -> set[str]:
-    return {item.name for item in fields(model)}
-
-
-def _list_value(value: object) -> list[object]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    if isinstance(value, tuple):
-        return list(value)
-    return [value]
-
-
-def _string_list_value(value: object) -> list[str]:
-    return [str(item) for item in _list_value(value) if item not in (None, "")]
-
-
-def _normalize_quality_contract(value: object) -> QualityContract:
-    if isinstance(value, QualityContract):
-        return value
-    if not isinstance(value, dict):
-        return QualityContract()
-    payload = {key: value[key] for key in _field_names(QualityContract) if key in value}
-    for key in [
-        "failure_conditions",
-        "forbidden_delivery",
-        "must_check",
-        "sampling_plan",
-        "evidence_required",
-        "allowed_degradation",
-    ]:
-        payload[key] = _string_list_value(payload.get(key))
-    payload["cannot_self_accept"] = bool(payload.get("cannot_self_accept", True))
-    payload["parent_final_gate"] = bool(payload.get("parent_final_gate", True))
-    return QualityContract(**payload)
-
-
-def _normalize_context_manifest(value: object) -> ContextManifest:
-    if isinstance(value, ContextManifest):
-        return value
-    if not isinstance(value, dict):
-        return ContextManifest()
-    payload = {key: value[key] for key in _field_names(ContextManifest) if key in value}
-    for key in ["task_pack_refs", "required_read_paths", "omitted_context"]:
-        payload[key] = _string_list_value(payload.get(key))
-    try:
-        payload["token_budget"] = int(payload.get("token_budget") or 0)
-    except (TypeError, ValueError):
-        payload["token_budget"] = 0
-    return ContextManifest(**payload)
-
-
-def _normalize_context_packs(value: object) -> list[dict[str, object]]:
-    if isinstance(value, dict):
-        return [value]
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
-
-# LLM: patterns for extracting directory paths from user goal text.
-_DIR_PATTERN = re.compile(r"(?:/[\w.\-]+){2,}")
-_HOME_DIR_PATTERN = re.compile(r"(?:~/[\w.\-]+(?:/[\w.\-]+)*)")
-_ABSOLUTE_DIR_PATTERN = re.compile(r"(?:/[\w.\-]+(?:/[\w.\-]+)*)(?=/|$)")
-_WORKFLOW_MODES = {"off", "plan", "auto"}
-_READ_ONLY_SUBAGENT_TOOLS = ["list_files", "read_file", "search_text"]
-_CODING_SUBAGENT_TOOLS = [
-    "list_files",
-    "read_file",
-    "search_text",
-    "write_file",
-    "append_file",
-    "replace_in_file",
-]
-
-
-def _extract_write_dirs(goal: str) -> list[str]:
-    """从用户目标文本中提取目录路径，用于自动授权子代理写入。
-
-    匹配规则：
-    - /path/to/dir 形式的绝对路径
-    - ~/path 形式的 home 目录路径
-    """
-    dirs: list[str] = []
-    for pattern in [_DIR_PATTERN, _HOME_DIR_PATTERN]:
-        for match in pattern.finditer(goal):
-            path = match.group().strip()
-            if path and path not in dirs:
-                dirs.append(path)
-    return dirs
-
-
-def _normalize_workflow_mode_value(value: object) -> str:
-    if isinstance(value, str):
-        mode = value.strip().lower()
-        if mode in _WORKFLOW_MODES:
-            return mode
-    return "off"
-
-
-def _workflow_worker_tools(parent_tools: list[str], worker_kind: str) -> list[str]:
-    if parent_tools:
-        return list(parent_tools)
-    if worker_kind in {"review", "verification", "planning"}:
-        return list(_READ_ONLY_SUBAGENT_TOOLS)
-    return list(_CODING_SUBAGENT_TOOLS)
-
-
 class SubAgentBaseMixin:
+    """Thin facade delegating core task lifecycle to SubAgentBaseService and SubAgentPersistenceService."""
+
     def __init__(
         self,
         workspace: str | Path,
@@ -198,294 +48,45 @@ class SubAgentBaseMixin:
         self.enable_self_learning = bool(enable_self_learning)
         from .services.lifecycle import SubAgentLifecycleService
         from .services.persistence import SubAgentPersistenceService
+        from .services.base import SubAgentBaseService
 
         self.lifecycle = SubAgentLifecycleService(self)
         self.persistence = SubAgentPersistenceService(self)
+        self.base_service = SubAgentBaseService(self)
+
+    # --- Core task operations delegated to base_service ---
 
     def split(self, goal: str, count: int, *, workflow_mode: str = "off") -> list[SubAgentTask]:
-        """把一个目标拆成若干子任务记录。
-
-        这里暂时还是模板化拆分，不做复杂规划。
-        目的不是"真的很聪明地拆"，而是先把整个数据流打通。
-        """
-        # LLM: auto-detect directories from user goal for write permission.
-        extra_roots = _extract_write_dirs(goal)
-
-        count = max(1, count)
-        tasks: list[SubAgentTask] = []
-        for i in range(1, count + 1):
-            task = self.create_run(
-                goal=f"{goal} / 子任务{i}",
-                thought="先缩小任务边界，明确输入、输出和验证证据，再执行。",
-                plan=["理解目标", "列出交付物", "执行最小验证", "汇报结果和证据"],
-                extra_write_roots=extra_roots,
-                workflow_mode=workflow_mode,
-            )
-            tasks.append(task)
-        return tasks
+        return self.base_service.split(goal, count, workflow_mode=workflow_mode)
 
     def register_card(self, card: SubAgentCard) -> None:
-        """注册一张子代理角色卡。"""
-
         self.cards[card.name] = card
 
-    def create_run(
+    def create_run(self, **kwargs) -> SubAgentTask:
+        return self.base_service.create_run(**kwargs)
+
+    def record_takeover(
         self,
+        run_id: str,
         *,
-        goal: str,
-        thought: str,
-        plan: list[str],
-        agent_name: str = "general",
-        role: str = "general",
-        parent_id: str = "",
-        root_id: str = "",
-        depth: int = 0,
-        allowed_skills: list[str] | None = None,
-        allowed_tools: list[str] | None = None,
-        owner: str = "",
-        supervisor: str = "",
-        final_owner: str = "",
-        acceptance_checks: list[str] | None = None,
-        quality_contract: QualityContract | dict[str, object] | None = None,
-        context_manifest: ContextManifest | dict[str, object] | None = None,
-        context_packs: list[dict[str, object]] | dict[str, object] | None = None,
-        extra_write_roots: list[str] | None = None,
-        workflow_mode: str = "off",
-    ) -> SubAgentTask:
-        """创建一条子代理运行记录。
+        take_over_by: str,
+        reason: str,
+        locked_files: list[str] | None = None,
+    ):
+        return self.base_service.record_takeover(run_id, take_over_by=take_over_by, reason=reason, locked_files=locked_files)
 
-        workflow_mode 控制是否启用工作流规划：
-          - "off"  : 默认，不启用工作流（完全向后兼容）
-          - "plan" : 运行工作流规划，把结果写入 task.workflow_plan
-          - "auto" : 运行工作流规划，自动把 worker spec 和父级 gate 合并进验收清单
-        """
-
-        now = time.time()
-        run_id = _new_id("subagent")
-        paths = self._build_work_order_paths(run_id, extra_write_roots=extra_write_roots)
-        normalized_workflow_mode = _normalize_workflow_mode_value(workflow_mode)
-
-        # --- Workflow planning (optional) ---
-        workflow_plan_dict: dict[str, object] | None = None
-        merged_acceptance = list(acceptance_checks or [])
-        if normalized_workflow_mode != "off":
-            workflow_plan_dict = self._try_workflow_plan(
-                goal,
-                quality_contract=quality_contract,
-                context_manifest=context_manifest,
-                allowed_write_roots=extra_write_roots,
-            )
-            merged_acceptance = self._merge_workflow_acceptance_checks(merged_acceptance, workflow_plan_dict)
-
-        task = SubAgentTask(
-            id=run_id,
-            goal=goal,
-            thought=thought,
-            plan=plan,
-            agent_name=agent_name,
-            role=role,
-            owner=owner,
-            supervisor=supervisor,
-            final_owner=final_owner,
-            parent_id=parent_id,
-            root_id=root_id or run_id,
-            depth=depth,
-            allowed_skills=allowed_skills or [],
-            allowed_tools=allowed_tools or [],
-            acceptance_checks=merged_acceptance,
-            quality_contract=_normalize_quality_contract(quality_contract),
-            context_manifest=_normalize_context_manifest(context_manifest),
-            context_packs=_normalize_context_packs(context_packs),
-            created_at=now,
-            updated_at=now,
-            heartbeat_at=now,
-            workflow_mode=normalized_workflow_mode,
-            workflow_template_id=str((workflow_plan_dict or {}).get("selected_template_id") or ""),
-            workflow_plan=workflow_plan_dict or {},
-            **paths,
-        )
-        self.save(task)
-        if self.local_store:
-            self.local_store.task_registry.register_task(
-                task_id=task.id,
-                session_id=task.root_id,
-                user_id=task.owner or "",
-                status=task.status,
-                goal=task.goal,
-            )
-        if parent_id:
-            self.add_child(parent_id, task.id)
-        return task
-
-    @staticmethod
-    def _try_workflow_plan(
-        goal: str,
-        *,
-        quality_contract: object | None = None,
-        context_manifest: object | None = None,
-        allowed_write_roots: list[str] | None = None,
-    ) -> dict[str, object] | None:
-        """尝试运行工作流规划，失败时返回 None。"""
-
-        try:
-            from ..subagent_workflows.planner import plan_workflow_for_goal
-
-            result = plan_workflow_for_goal(
-                goal,
-                quality_contract=quality_contract,
-                context_manifest=context_manifest,
-                allowed_write_roots=allowed_write_roots,
-            )
-            return result.to_dict()
-        except Exception:
-            return None
-
-    @staticmethod
-    def _merge_workflow_acceptance_checks(
-        acceptance_checks: list[str],
-        workflow_plan_dict: dict[str, object] | None,
-    ) -> list[str]:
-        merged = list(acceptance_checks)
-        if not workflow_plan_dict or not workflow_plan_dict.get("ok"):
-            return merged
-        workers = workflow_plan_dict.get("workers") or []
-        if isinstance(workers, list):
-            for worker in workers:
-                if not isinstance(worker, dict):
-                    continue
-                for check in worker.get("acceptance_checks") or []:
-                    if isinstance(check, str) and check not in merged:
-                        merged.append(check)
-        for check in workflow_plan_dict.get("parent_acceptance_checklist") or []:
-            if isinstance(check, str) and check not in merged:
-                merged.append(check)
-        return merged
-
-    def ensure_workflow_plan(self, run_id: str, *, workflow_mode: str) -> SubAgentTask:
-        """LLM: refresh and persist a workflow plan onto an existing parent run.
-
-        人话说明：
-        已有父工单最初可能不是按 workflow 模式创建的。
-        dispatch 收口时可以补做一次规划，把模板、worker 预览和父级验收清单写回任务。
-        """
-
-        task = self.load(run_id)
-        normalized_workflow_mode = _normalize_workflow_mode_value(workflow_mode)
-        if normalized_workflow_mode == "off":
-            task.workflow_mode = "off"
-            self.save(task)
-            return task
-
-        workflow_plan_dict = self._try_workflow_plan(
-            task.goal,
-            quality_contract=task.quality_contract,
-            context_manifest=task.context_manifest,
-            allowed_write_roots=self._workflow_extra_write_roots(task),
-        ) or {}
-        task.workflow_mode = normalized_workflow_mode
-        task.workflow_template_id = str(workflow_plan_dict.get("selected_template_id") or "")
-        task.workflow_plan = workflow_plan_dict
-        task.acceptance_checks = self._merge_workflow_acceptance_checks(task.acceptance_checks, workflow_plan_dict)
-        self.save(task)
-        return task
-
-    def realize_workflow_plan(self, run_id: str) -> tuple[SubAgentTask, list[SubAgentTask]]:
-        """LLM: materialize persisted workflow worker specs into child runs exactly once.
-
-        人话说明：
-        `auto` 模式不在 create_run 时直接撒出一堆子工单，而是等 dispatch 真正推进时再创建。
-        这样父任务先有可审查计划，再按计划派工，避免状态在创建瞬间扩散。
-        """
-
-        parent = self.load(run_id)
-        if parent.workflow_child_run_ids:
-            children = [self.load(child_id) for child_id in parent.workflow_child_run_ids if child_id]
-            return parent, children
-
-        workers = parent.workflow_plan.get("workers") or []
-        if not isinstance(workers, list):
-            return parent, []
-
-        created: list[SubAgentTask] = []
-        phase_to_child_id: dict[str, str] = {}
-        for worker in workers:
-            if not isinstance(worker, dict):
-                continue
-            phase_id = str(worker.get("phase_id") or "").strip()
-            role = str(worker.get("role") or worker.get("kind") or "worker").strip() or "worker"
-            kind = str(worker.get("kind") or role or "worker").strip() or "worker"
-            phase_task = str(worker.get("task") or parent.goal).strip() or parent.goal
-            depends_on = [str(item).strip() for item in worker.get("depends_on") or [] if str(item).strip()]
-            child_plan = [
-                phase_task,
-                "保留命令、文件和测试证据。",
-                "不要自判最终完成，等待父代理验收。",
-            ]
-            if depends_on:
-                child_plan.append("先确认依赖 phase 已提交结果：" + ", ".join(depends_on))
-            child = self.create_run(
-                goal=f"{parent.goal}\n\nWorkflow phase {phase_id}: {phase_task}",
-                thought=(
-                    f"执行 workflow phase {phase_id}（{kind}）。"
-                    " 先遵守质量契约和写入边界，再提交待父代理验收的材料。"
-                ),
-                plan=child_plan,
-                agent_name=parent.agent_name,
-                role=role,
-                parent_id=parent.id,
-                root_id=parent.root_id,
-                depth=parent.depth + 1,
-                allowed_skills=list(parent.allowed_skills),
-                allowed_tools=_workflow_worker_tools(parent.allowed_tools, kind),
-                owner=parent.owner,
-                supervisor=parent.supervisor,
-                final_owner=parent.final_owner,
-                acceptance_checks=[str(item) for item in worker.get("acceptance_checks") or [] if str(item).strip()],
-                quality_contract=parent.quality_contract,
-                context_manifest=parent.context_manifest,
-                context_packs=parent.context_packs,
-                extra_write_roots=self._workflow_extra_write_roots(parent),
-                workflow_mode="off",
-            )
-            child.workflow_parent_run_id = parent.id
-            child.workflow_phase_id = phase_id
-            child.workflow_depends_on = depends_on
-            self.save(child)
-            created.append(child)
-            if phase_id:
-                phase_to_child_id[phase_id] = child.id
-
-        for child in created:
-            dependency_run_ids = [phase_to_child_id[item] for item in child.workflow_depends_on if item in phase_to_child_id]
-            Path(child.dependencies_json).write_text(
-                json.dumps(
-                    {
-                        "run_id": child.id,
-                        "dependencies": dependency_run_ids,
-                        "workflow_depends_on": child.workflow_depends_on,
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-
-        parent.workflow_child_run_ids = [child.id for child in created]
-        self.save(parent)
-        return parent, created
-
-    @staticmethod
-    def _workflow_extra_write_roots(task: SubAgentTask) -> list[str]:
-        return [item for item in task.allowed_write_roots if item and item != task.task_dir]
+    # --- Persistence delegated to persistence service ---
 
     def load(self, run_id: str) -> SubAgentTask:
-        """从磁盘读取一条运行记录。"""
-
         return self.persistence.load(run_id)
 
-    def add_child(self, parent_id: str, child_id: str) -> None:
-        """把子运行挂到父运行下面。"""
+    def list_runs(self) -> list[SubAgentTask]:
+        return self.persistence.list_runs()
 
+    def save(self, task: SubAgentTask) -> None:
+        self.persistence.save(task)
+
+    def add_child(self, parent_id: str, child_id: str) -> None:
         try:
             parent = self.load(parent_id)
         except FileNotFoundError:
@@ -495,19 +96,7 @@ class SubAgentBaseMixin:
             parent.updated_at = time.time()
             self.save(parent)
 
-    def list_runs(self) -> list[SubAgentTask]:
-        """扫描当前工作区内所有子代理运行记录。"""
-
-        return self.persistence.list_runs()
-
-    def save(self, task: SubAgentTask) -> None:
-        """保存子任务记录。
-
-        一份存成 JSON，方便程序继续处理；
-        一份存成 Markdown，方便人直接打开看。
-        """
-
-        self.persistence.save(task)
+    # --- Work order utilities (used by persistence service) ---
 
     def _build_work_order_paths(
         self,
@@ -515,8 +104,7 @@ class SubAgentBaseMixin:
         task_dir: str | Path | None = None,
         extra_write_roots: list[str] | None = None,
     ) -> dict[str, object]:
-        """生成标准工单目录路径。"""
-
+        """Generate standard work order directory paths."""
         task_dir = Path(task_dir) if task_dir else self.workspace / run_id
         paths = {
             "task_dir": str(task_dir),
@@ -551,118 +139,39 @@ class SubAgentBaseMixin:
         return paths
 
     def _ensure_work_order_files(self, task: SubAgentTask) -> None:
-        """初始化标准工单目录和最小文件。"""
-
+        """Initialize standard work order directories and minimal files."""
         for directory in [
-            task.data_dir,
-            task.output_dir,
-            task.tests_dir,
-            task.reports_dir,
-            task.logs_dir,
-            task.scratch_dir,
+            task.data_dir, task.output_dir, task.tests_dir,
+            task.reports_dir, task.logs_dir, task.scratch_dir,
         ]:
             Path(directory).mkdir(parents=True, exist_ok=True)
 
-        _write_if_missing(
-            Path(task.status_file),
-            "# STATUS\n\n"
-            f"- id: {task.id}\n"
-            f"- status: {task.status}\n"
-            f"- owner: {task.owner or 'none'}\n"
-            f"- supervisor: {task.supervisor or 'none'}\n"
-            f"- final_owner: {task.final_owner or 'none'}\n"
-            f"- updated_at: {task.updated_at or task.created_at}\n",
-        )
-        _write_if_missing(
-            Path(task.work_log_file),
-            "# WORK_LOG\n\n"
-            f"- {time.strftime('%Y-%m-%d %H:%M:%S')} 创建工单 {task.id}\n",
-        )
-        _write_if_missing(
-            Path(task.action_receipts_file),
-            "# ACTION_RECEIPTS\n\n"
-            "每轮推进后追加一条 receipt，避免压缩或跨天后丢失现场。\n\n"
-            "## Template\n\n"
-            "- time: \n"
-            "- action: \n"
-            "- evidence: \n"
-            "- failure_or_fallback: \n"
-            "- next: \n",
-        )
-        _write_if_missing(
-            Path(task.acceptance_file),
-            "# ACCEPTANCE\n\n"
-            "## Checks\n"
-            + "\n".join(f"- [ ] {item}" for item in task.acceptance_checks or ["未设置"])
-            + "\n\n## Evidence\n\n- 暂无\n",
-        )
-        _write_if_missing(
-            Path(task.test_checklist_file),
-            "# TEST_CHECKLIST\n\n"
-            "## From Requirement\n\n"
-            "- [ ] 原始需求已转成可测试清单\n"
-            "- [ ] P0/P1 验收标准已明确\n\n"
-            "## Entrypoints\n\n"
-            "- [ ] CLI/API/Web/文件入口已实际运行\n"
-            "- [ ] 异常路径和边界输入已覆盖\n\n"
-            "## Evidence\n\n"
-            "- [ ] 测试命令、日志、截图或报告路径已记录\n",
-        )
-        _write_if_missing(
-            Path(task.bugs_file),
-            "# BUGS\n\n"
-            "## Open P0/P1\n\n- 暂无\n\n"
-            "## Non-blocking\n\n- 暂无\n",
-        )
-        _write_if_missing(
-            Path(task.skill_usage_file),
-            "# SKILL_USAGE\n\n"
-            "记录本任务匹配、读取和实际使用过的 skill / references / 外部知识库。\n\n"
-            "## Used\n\n- 暂无\n\n"
-            "## Considered But Not Used\n\n- 暂无\n",
-        )
-        _write_if_missing(
-            Path(task.handoff_file),
-            "# HANDOFF\n\n"
-            "## Current State\n\n- 待填写\n\n"
-            "## Done\n\n- 待填写\n\n"
-            "## Not Done\n\n- 待填写\n\n"
-            "## Next Step\n\n- 待填写\n\n"
-            "## Recovery Entry\n\n"
-            f"- status: {task.status_file}\n"
-            f"- acceptance: {task.acceptance_file}\n"
-            f"- tests: {task.test_checklist_file}\n",
-        )
-        _write_if_missing(
-            Path(task.debrief_file),
-            "# DEBRIEF\n\n"
-            "## 方法\n\n- 待填写\n\n"
-            "## 结果\n\n- 待填写\n\n"
-            "## 可沉淀经验\n\n- 待填写\n",
-        )
-        _write_json_if_missing(
-            Path(task.output_json),
-            {
-                "run_id": task.id,
-                "status": task.status,
-                "artifacts": [],
-                "tests": [],
-                "acceptance": [],
-                "blockers": [],
-                "next_action": "",
-            },
-        )
-        _write_json_if_missing(
-            Path(task.dependencies_json),
-            {
-                "run_id": task.id,
-                "dependencies": [],
-            },
-        )
+        _write_if_missing(Path(task.status_file), _STATUS_TMPL.format(
+            task_id=task.id, status=task.status,
+            owner=task.owner or 'none', supervisor=task.supervisor or 'none',
+            final_owner=task.final_owner or 'none',
+            updated_at=task.updated_at or task.created_at,
+        ))
+        _write_if_missing(Path(task.work_log_file), _WORK_LOG_TMPL.format(
+            time_str=time.strftime('%Y-%m-%d %H:%M:%S'), task_id=task.id,
+        ))
+        _write_if_missing(Path(task.action_receipts_file), _ACTION_RECEIPTS_TMPL)
+        _write_if_missing(Path(task.acceptance_file), _ACCEPTANCE_TMPL.format(
+            checks="\n".join(f"- [ ] {item}" for item in task.acceptance_checks or ["未设置"]),
+        ))
+        _write_if_missing(Path(task.test_checklist_file), _TEST_CHECKLIST_TMPL)
+        _write_if_missing(Path(task.bugs_file), _BUGS_TMPL)
+        _write_if_missing(Path(task.skill_usage_file), _SKILL_USAGE_TMPL)
+        _write_if_missing(Path(task.handoff_file), _HANDOFF_TMPL.format(
+            status_file=task.status_file,
+            acceptance_file=task.acceptance_file,
+            test_checklist_file=task.test_checklist_file,
+        ))
+        _write_if_missing(Path(task.debrief_file), _DEBRIEF_TMPL)
+        _write_json_if_missing(Path(task.output_json), _OUTPUT_JSON_TMPL.format(task_id=task.id, status=task.status))
+        _write_json_if_missing(Path(task.dependencies_json), _DEPS_JSON_TMPL.format(task_id=task.id))
 
     def _write_takeover_file(self, task: SubAgentTask, record: TakeoverRecord) -> None:
-        """写入接管记录文件。"""
-
         content = (
             "# TAKEOVER\n\n"
             f"- takeover_id: {record.id}\n"
@@ -681,29 +190,16 @@ class SubAgentBaseMixin:
         Path(task.takeover_file).write_text(content, encoding="utf-8")
 
     def validate_work_order(self, run_id: str) -> WorkOrderValidation:
-        """检查子代理工单目录是否具备最小可接管结构。"""
-
+        """Check if subagent work order directory has minimum takeable structure."""
         task = self.load(run_id)
         _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
         required_paths = [
-            task.task_dir,
-            task.data_dir,
-            task.output_dir,
-            task.tests_dir,
-            task.reports_dir,
-            task.logs_dir,
-            task.scratch_dir,
-            task.status_file,
-            task.work_log_file,
-            task.action_receipts_file,
-            task.acceptance_file,
-            task.test_checklist_file,
-            task.bugs_file,
-            task.skill_usage_file,
-            task.handoff_file,
-            task.debrief_file,
-            task.output_json,
-            task.dependencies_json,
+            task.task_dir, task.data_dir, task.output_dir, task.tests_dir,
+            task.reports_dir, task.logs_dir, task.scratch_dir,
+            task.status_file, task.work_log_file, task.action_receipts_file,
+            task.acceptance_file, task.test_checklist_file, task.bugs_file,
+            task.skill_usage_file, task.handoff_file, task.debrief_file,
+            task.output_json, task.dependencies_json,
         ]
         if task.takeover_by:
             required_paths.append(task.takeover_file)
@@ -715,37 +211,25 @@ class SubAgentBaseMixin:
             warnings.append("未设置 forbidden_write_roots")
         return WorkOrderValidation(run_id=run_id, ok=not missing, missing=missing, warnings=warnings)
 
-    def record_takeover(
-        self,
-        run_id: str,
-        *,
-        take_over_by: str,
-        reason: str,
-        locked_files: list[str] | None = None,
-    ) -> TakeoverRecord:
-        """记录一次接管，并写入 TAKEOVER.md。
+    # --- ID generation helper for other mixins ---
+    def _new_id(self, prefix: str) -> str:
+        return _new_id(prefix)
 
-        这一步不真的杀掉子代理进程，但会把所有权和锁文件写成事实。
-        后续执行器看到 `TAKEN_OVER` 或 locked files 时，就能避免双写。
-        """
 
-        task = self.load(run_id)
-        record = TakeoverRecord(
-            id=_new_id("takeover"),
-            run_id=run_id,
-            take_over_by=take_over_by,
-            reason=reason,
-            locked_files=locked_files or [],
-            previous_owner=task.owner,
-            created_at=time.time(),
-        )
-        task.takeover_records.append(record)
-        task.takeover_by = take_over_by
-        task.takeover_reason = reason
-        task.locked_files = _merge_list(task.locked_files, record.locked_files)
-        task.final_owner = take_over_by
-        task.status = "TAKEN_OVER"
-        task.updated_at = time.time()
-        self.save(task)
-        self._write_takeover_file(task, record)
-        return record
+# Re-export helpers from services for backward compatibility and tests
+from .services.persistence import _field_names, _list_value, _string_list_value
+from .services.persistence import _normalize_quality_contract, _normalize_context_manifest, _normalize_context_packs
+from .services.base import _extract_write_dirs
+
+# Work order file templates (concise, readable)
+_STATUS_TMPL = "# STATUS\n\n- id: {task_id}\n- status: {status}\n- owner: {owner}\n- supervisor: {supervisor}\n- final_owner: {final_owner}\n- updated_at: {updated_at}\n"
+_WORK_LOG_TMPL = "# WORK_LOG\n\n- {time_str} 创建工单 {task_id}\n"
+_ACTION_RECEIPTS_TMPL = "# ACTION_RECEIPTS\n\n每轮推进后追加一条 receipt.\n\n## Template\n\n- time:\n- action:\n- evidence:\n- failure_or_fallback:\n- next:\n"
+_ACCEPTANCE_TMPL = "# ACCEPTANCE\n\n## Checks\n{checks}\n\n## Evidence\n\n- 暂无\n"
+_TEST_CHECKLIST_TMPL = "# TEST_CHECKLIST\n\n## From Requirement\n\n- [ ] 原始需求已转成可测试清单\n- [ ] P0/P1 验收标准已明确\n\n## Entrypoints\n\n- [ ] CLI/API/Web/文件入口已实际运行\n- [ ] 异常路径和边界输入已覆盖\n\n## Evidence\n\n- [ ] 测试命令、日志、截图或报告路径已记录\n"
+_BUGS_TMPL = "# BUGS\n\n## Open P0/P1\n\n- 暂无\n\n## Non-blocking\n\n- 暂无\n"
+_SKILL_USAGE_TMPL = "# SKILL_USAGE\n\n记录本任务匹配、读取和实际使用过的 skill / references / 外部知识库。\n\n## Used\n\n- 暂无\n\n## Considered But Not Used\n\n- 暂无\n"
+_HANDOFF_TMPL = "# HANDOFF\n\n## Current State\n\n- 待填写\n\n## Done\n\n- 待填写\n\n## Not Done\n\n- 待填写\n\n## Next Step\n\n- 待填写\n\n## Recovery Entry\n\n- status: {status_file}\n- acceptance: {acceptance_file}\n- tests: {test_checklist_file}\n"
+_DEBRIEF_TMPL = "# DEBRIEF\n\n## 方法\n\n- 待填写\n\n## 结果\n\n- 待填写\n\n## 可沉淀经验\n\n- 待填写\n"
+_OUTPUT_JSON_TMPL = '{{"run_id": "{task_id}", "status": "{status}", "artifacts": [], "tests": [], "acceptance": [], "blockers": [], "next_action": ""}}'
+_DEPS_JSON_TMPL = '{{"run_id": "{task_id}", "dependencies": []}}'

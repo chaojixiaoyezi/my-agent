@@ -86,7 +86,7 @@ class FailureIntrospector:
 
         prompt = f"""分析以下任务失败原因，给出调参建议：
 
-任务目标: {task.goal[:200]}
+任务目标: {(task.goal or "")[:200]}
 失败类型: {failure_analysis.failure_type}
 规则分类根因: {failure_analysis.root_cause}
 规则建议动作: {failure_analysis.suggested_action}
