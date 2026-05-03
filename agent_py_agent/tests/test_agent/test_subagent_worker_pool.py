@@ -105,42 +105,41 @@ def test_dispatch_parallel_runner_pool_respects_start_rate(monkeypatch):
         assert len(planning) == 1
 
 
-def test_dispatch_parallel_runner_pool_timeout_does_not_block_other_workers(monkeypatch):
-    with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
-        backend = OneSlowOneFastBackend()
-        monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: backend)
-        cfg = AgentConfig(
-            model_backend="worker-pool-test",
-            subagent_workspace="subs",
-            runner_concurrency="2",
-            runner_start_rate="2",
-            runner_timeout_seconds="0.1",
-        )
-        agent = SimpleAgent(cfg, root)
-        tasks = [
-            agent.subagents.create_run(goal=f"超时隔离任务 {index}", thought="等待 worker pool。", plan=["执行", "验收"])
-            for index in range(2)
-        ]
+def test_dispatch_parallel_runner_pool_timeout_does_not_block_other_workers(monkeypatch, tmp_path):
+    root = tmp_path
+    backend = OneSlowOneFastBackend()
+    monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: backend)
+    cfg = AgentConfig(
+        model_backend="worker-pool-test",
+        subagent_workspace="subs",
+        runner_concurrency="2",
+        runner_start_rate="2",
+        runner_timeout_seconds="0.1",
+    )
+    agent = SimpleAgent(cfg, root)
+    tasks = [
+        agent.subagents.create_run(goal=f"超时隔离任务 {index}", thought="等待 worker pool。", plan=["执行", "验收"])
+        for index in range(2)
+    ]
 
-        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
-        report = agent.dispatch_subagents(
-            router,
-            CapabilityConfig(),
-            apply=True,
-            execute_runners=True,
-            max_runners=2,
-            probe=False,
-            reviewer="worker-pool-timeout-test",
-        )
+    router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+    report = agent.dispatch_subagents(
+        router,
+        CapabilityConfig(),
+        apply=True,
+        execute_runners=True,
+        max_runners=2,
+        probe=False,
+        reviewer="worker-pool-timeout-test",
+    )
 
-        loaded = [agent.subagents.load(task.id) for task in tasks]
-        statuses = sorted(item.status for item in loaded)
-        runner_records = [item for item in report.records if item.step == "runner"]
+    loaded = [agent.subagents.load(task.id) for task in tasks]
+    statuses = sorted(item.status for item in loaded)
+    runner_records = [item for item in report.records if item.step == "runner"]
 
-        assert len(runner_records) == 2
-        assert any(item.status == "TIMEOUT" for item in loaded)
-        assert any(item.status == "DONE" for item in loaded)
-        assert statuses == ["DONE", "TIMEOUT"]
-        assert any(not item.ok and "timed out" in item.message for item in runner_records)
-        assert any(item.ok for item in runner_records)
+    assert len(runner_records) == 2
+    assert any(item.status == "TIMEOUT" for item in loaded)
+    assert any(item.status == "DONE" for item in loaded)
+    assert statuses == ["DONE", "TIMEOUT"]
+    assert any(not item.ok and "timed out" in item.message for item in runner_records)
+    assert any(item.ok for item in runner_records)
