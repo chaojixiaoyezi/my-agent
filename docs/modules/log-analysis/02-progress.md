@@ -9,6 +9,7 @@
 - runtime capability、query limit、storage audit、Live Lab replay、LOG analyst work orders 已有落地记录。
 - analyst/reviewer work-order plan 现在可以显式 `apply=True` 落成真实 `SubAgentTask` 记录，但不会调用 runner、模型或自动验收。
 - `tools.py`、`doctor.py`、`config.py` 已补齐 `LLM:` / `新手说明:` / `参数说明:` / `返回说明:` 风格的中文注释。
+- `storage/__init__.py` 使用 lazy import 解决 `query.py → cases.evidence → storage.base` 循环依赖。
 
 ## 解决的问题
 

@@ -25,6 +25,7 @@ agent_py_agent/agent/log_analysis/
 - `config.py`：理解 LOG 模块为什么默认关闭，以及坏配置如何回退为安全默认值。
 - `doctor.py`：理解轻量体检如何只看配置、路径和 feature gates，不启动重型后端。
 - `parsers/security_alert_v1.py`：把 CSV / JSONL 变成统一事件。
+- `storage/__init__.py`：使用 lazy import 解决 `query → evidence → base` 循环依赖。
 - `storage/local_store.py` 和 `storage/query.py`：保存事件并按条件查回来。
 - `tools.py`：把 query、hunt、trace 包装成 agent 工具，只返回摘要、预览行和 evidence refs。
 - `analytics/detectors.py`：从事件里找可疑 finding。

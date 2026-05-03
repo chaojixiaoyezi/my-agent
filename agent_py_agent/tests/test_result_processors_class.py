@@ -1,0 +1,755 @@
+"""result_processors 模块测试。
+
+测试 _process_structured_output、_build_output_payload、_build_runner_result、
+_write_runner_result_files、_append_runner_debrief_content 等函数。
+"""
+from __future__ import annotations
+
+import json
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+from agent_py_agent.agent.subagents.models import (
+    CapabilityRequest,
+    SubAgentParsedOutput,
+    SubAgentRunnerResult,
+    SubAgentTask,
+    VerificationEvidence,
+)
+from agent_py_agent.agent.subagents.result_processors import (
+    _append_runner_debrief_content,
+    _build_output_payload,
+    _build_runner_result,
+    _process_structured_output,
+    _write_runner_result_files,
+)
+
+
+# ── 测试夹具 ──────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def mock_task(tmp_path):
+    """创建模拟的 SubAgentTask。"""
+    task = MagicMock(spec=SubAgentTask)
+    task.id = "test-run-123"
+    task.status = "RUNNING"
+    task.verification_status = "UNVERIFIED"
+    task.failure_type = ""
+    task.result = ""
+    task.ended_at = 0.0
+    task.updated_at = 0.0
+    task.heartbeat_at = 0.0
+    task.runner_attempts = 0
+    task.runner_last_attempt_at = 0.0
+    task.runner_last_error = ""
+    task.runner_active_attempt_id = ""
+    task.runner_abandoned_attempt_ids = []
+    task.used_tools = []
+    task.used_skills = []
+    task.evidence = []
+    task.capability_requests = []
+    task.capability_grants = []
+    task.allowed_tools = ["tool_a", "tool_b"]
+    task.allowed_skills = ["skill_x"]
+    task.runner_prompt_file = str(tmp_path / "prompt.txt")
+    task.runner_response_file = str(tmp_path / "response.txt")
+    task.runner_result_file = str(tmp_path / "result.md")
+    task.runner_result_json = str(tmp_path / "result.json")
+    task.output_json = str(tmp_path / "output.json")
+    task.debrief_file = str(tmp_path / "debrief.md")
+    task.execution_context_file = str(tmp_path / "context.md")
+    task.execution_context_json = str(tmp_path / "context.json")
+    return task
+
+
+# ── _process_structured_output 测试 ────────────────────────────────────────
+
+def test_process_structured_output_basic(mock_task):
+    """测试基本结构化输出处理。"""
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        summary="任务完成",
+        blocked_reason="",
+        failure_type="",
+        used_skills=[],
+        used_tools=[],
+        evidence=[{"summary": "写入文件成功", "kind": "file_write", "ok": True}],
+        capability_requests=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=["学到新技能"],
+        next_actions=["继续优化"],
+    )
+
+    result = _process_structured_output(mock_task, parsed, 123456.0, None)
+
+    assert result["structured_evidence_count"] == 1
+    assert result["structured_request_count"] == 0
+    assert len(result["lessons"]) == 1
+    assert len(result["next_actions"]) == 1
+
+
+def test_process_structured_output_ignores_unauthorized_tools(mock_task):
+    """测试忽略未授权工具。"""
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="RUNNING",
+        used_skills=[],
+        used_tools=["tool_c", "tool_a"],  # tool_c 未授权
+        evidence=[],
+        capability_requests=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=[],
+        next_actions=[],
+    )
+
+    result = _process_structured_output(mock_task, parsed, 123456.0, None)
+
+    assert "tool_c" in result["ignored_tools"]
+    assert "tool_a" not in result["ignored_tools"]
+
+
+def test_process_structured_output_creates_capability_requests(mock_task):
+    """测试创建能力请求。"""
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="RUNNING",
+        used_skills=[],
+        used_tools=[],
+        evidence=[],
+        capability_requests=[{
+            "problem": "缺少图像处理能力",
+            "needed_capability": "图像处理",
+            "expected_output": "图像处理结果",
+        }],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=[],
+        next_actions=[],
+    )
+
+    result = _process_structured_output(mock_task, parsed, 123456.0, None)
+
+    assert result["structured_request_count"] == 1
+    assert len(mock_task.capability_requests) == 1
+
+
+def test_process_structured_output_skips_empty_requests(mock_task):
+    """测试跳过空的能力请求。"""
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="RUNNING",
+        used_skills=[],
+        used_tools=[],
+        evidence=[],
+        capability_requests=[{"problem": "", "needed_capability": ""}],  # 空的
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=[],
+        next_actions=[],
+    )
+
+    result = _process_structured_output(mock_task, parsed, 123456.0, None)
+
+    assert result["structured_request_count"] == 0
+
+
+def test_process_structured_output_with_actual_tools(mock_task):
+    """测试实际工具记录。"""
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="RUNNING",
+        used_skills=[],
+        used_tools=["tool_a"],
+        evidence=[],
+        capability_requests=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=[],
+        next_actions=[],
+    )
+
+    result = _process_structured_output(
+        mock_task, parsed, 123456.0, actual_tools=["tool_a", "tool_b"]
+    )
+
+    # 实际使用的工具被记录
+    assert len(mock_task.used_tools) >= 1
+
+
+# ── _build_output_payload 测试 ──────────────────────────────────────────────
+
+def test_build_output_payload_basic(mock_task):
+    """测试基本 payload 构建。"""
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        summary="完成",
+        blocked_reason="",
+        failure_type="",
+        used_skills=[],
+        used_tools=[],
+        evidence=[],
+        capability_requests=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=[],
+        next_actions=[],
+    )
+
+    payload = _build_output_payload(
+        task=mock_task,
+        dry_run=False,
+        ok=True,
+        message="成功",
+        backend="test-backend",
+        tool_rounds=5,
+        parsed=parsed,
+        actual_tools=["tool_a"],
+        structured_evidence_count=0,
+        structured_request_count=0,
+        created_request_ids=[],
+        ignored_tools=[],
+        ignored_skills=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=[],
+        blockers=[],
+        next_actions=[],
+        structured_repair_attempted=False,
+        structured_repair_ok=False,
+        structured_repair_error="",
+        now=123456.0,
+    )
+
+    assert payload["run_id"] == "test-run-123"
+    assert payload["ok"] is True
+    assert payload["backend"] == "test-backend"
+    assert payload["tool_rounds"] == 5
+    assert "next_action" in payload
+
+
+def test_build_output_payload_with_blockers(mock_task):
+    """测试带阻断因素的结果。"""
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=False,
+        parse_error="解析失败",
+        status="FAILED",
+        blocked_reason="资源不足",
+        failure_type="",
+        used_skills=[],
+        used_tools=[],
+        evidence=[],
+        capability_requests=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=[],
+        next_actions=[],
+    )
+
+    payload = _build_output_payload(
+        task=mock_task,
+        dry_run=False,
+        ok=False,
+        message="失败",
+        backend="test",
+        tool_rounds=0,
+        parsed=parsed,
+        actual_tools=None,
+        structured_evidence_count=0,
+        structured_request_count=0,
+        created_request_ids=[],
+        ignored_tools=[],
+        ignored_skills=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=[],
+        blockers=["资源不足"],
+        next_actions=[],
+        structured_repair_attempted=False,
+        structured_repair_ok=False,
+        structured_repair_error="",
+        now=123456.0,
+    )
+
+    assert payload["blockers"] == ["资源不足"]
+
+
+# ── _build_runner_result 测试 ──────────────────────────────────────────────
+
+def test_build_runner_result_basic(mock_task):
+    """测试基本结果构建。"""
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        summary="完成",
+        blocked_reason="",
+        failure_type="",
+        used_skills=[],
+        used_tools=[],
+        evidence=[],
+        capability_requests=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=[],
+        next_actions=[],
+    )
+
+    result = _build_runner_result(
+        task=mock_task,
+        dry_run=False,
+        ok=True,
+        message="成功",
+        backend="test-backend",
+        tool_rounds=3,
+        prompt="test prompt",
+        response="test response",
+        parsed=parsed,
+        structured_repair_attempted=False,
+        structured_repair_ok=False,
+        structured_repair_error="",
+        structured_evidence_count=0,
+        structured_request_count=0,
+        artifact_count=0,
+        test_count=0,
+        patch_count=0,
+        lesson_count=0,
+        now=123456.0,
+    )
+
+    assert isinstance(result, SubAgentRunnerResult)
+    assert result.run_id == "test-run-123"
+    assert result.ok is True
+    assert result.backend == "test-backend"
+    assert result.tool_rounds == 3
+
+
+def test_build_runner_result_with_structured_output(mock_task):
+    """测试带结构化输出的结果。"""
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        summary="完成",
+        blocked_reason="",
+        failure_type="",
+        used_skills=[],
+        used_tools=[],
+        evidence=[],
+        capability_requests=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=[],
+        next_actions=[],
+    )
+
+    result = _build_runner_result(
+        task=mock_task,
+        dry_run=False,
+        ok=True,
+        message="成功",
+        backend="test",
+        tool_rounds=0,
+        prompt="",
+        response="",
+        parsed=parsed,
+        structured_repair_attempted=True,
+        structured_repair_ok=True,
+        structured_repair_error="",
+        structured_evidence_count=2,
+        structured_request_count=1,
+        artifact_count=3,
+        test_count=1,
+        patch_count=0,
+        lesson_count=2,
+        now=123456.0,
+    )
+
+    assert result.structured_output_found is True
+    assert result.structured_output_ok is True
+    assert result.evidence_count == 2
+    assert result.capability_request_count == 1
+
+
+# ── _write_runner_result_files 测试 ────────────────────────────────────────
+
+def test_write_runner_result_files_basic(tmp_path, mock_task):
+    """测试写入结果文件。"""
+    # 设置文件路径
+    mock_task.runner_prompt_file = str(tmp_path / "prompt.txt")
+    mock_task.runner_response_file = str(tmp_path / "response.txt")
+    mock_task.runner_result_file = str(tmp_path / "result.md")
+    mock_task.runner_result_json = str(tmp_path / "result.json")
+    mock_task.output_json = str(tmp_path / "output.json")
+
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        summary="完成",
+        blocked_reason="",
+        failure_type="",
+        used_skills=[],
+        used_tools=[],
+        evidence=[],
+        capability_requests=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=[],
+        next_actions=[],
+    )
+
+    result = SubAgentRunnerResult(
+        run_id="test-run-123",
+        dry_run=False,
+        ok=True,
+        status="DONE",
+        verification_status="NEEDS_ACCEPTANCE",
+        message="成功",
+        backend="test",
+        tool_rounds=1,
+        runner_attempts=1,
+        runner_last_error="",
+        execution_context_json="",
+        execution_context_file="",
+        prompt_file="",
+        response_file="",
+        result_file="",
+        result_json="",
+        output_json="",
+        structured_output_found=True,
+        structured_output_ok=True,
+        structured_parse_error="",
+        structured_repair_attempted=False,
+        structured_repair_ok=False,
+        structured_repair_error="",
+        structured_summary="完成",
+        evidence_count=0,
+        capability_request_count=0,
+        artifact_count=0,
+        test_count=0,
+        patch_count=0,
+        lesson_count=0,
+        blocked_reason="",
+        created_at=123456.0,
+    )
+
+    output_payload = {"run_id": "test-run-123", "ok": True}
+
+    _write_runner_result_files(
+        mock_task, result, output_payload,
+        prompt="test prompt content",
+        response="test response content",
+    )
+
+    # 验证文件被创建
+    assert (tmp_path / "prompt.txt").exists()
+    assert (tmp_path / "response.txt").exists()
+    assert (tmp_path / "output.json").exists()
+    assert (tmp_path / "result.json").exists()
+
+    # 验证内容
+    assert (tmp_path / "prompt.txt").read_text() == "test prompt content"
+    assert (tmp_path / "response.txt").read_text() == "test response content"
+
+
+def test_write_runner_result_files_empty_prompt_response(tmp_path, mock_task):
+    """测试空 prompt/response 不写入文件。"""
+    mock_task.runner_prompt_file = str(tmp_path / "prompt.txt")
+    mock_task.runner_response_file = str(tmp_path / "response.txt")
+    mock_task.runner_result_file = str(tmp_path / "result.md")
+    mock_task.runner_result_json = str(tmp_path / "result.json")
+    mock_task.output_json = str(tmp_path / "output.json")
+
+    parsed = SubAgentParsedOutput(
+        found=False,
+        ok=False,
+        parse_error="",
+        status="",
+        blocked_reason="",
+        failure_type="",
+        used_skills=[],
+        used_tools=[],
+        evidence=[],
+        capability_requests=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=[],
+        next_actions=[],
+    )
+
+    result = SubAgentRunnerResult(
+        run_id="test-run-123",
+        dry_run=False,
+        ok=False,
+        status="FAILED",
+        verification_status="UNVERIFIED",
+        message="",
+        backend="",
+        tool_rounds=0,
+        runner_attempts=1,
+        runner_last_error="",
+        execution_context_json="",
+        execution_context_file="",
+        prompt_file="",
+        response_file="",
+        result_file="",
+        result_json="",
+        output_json="",
+        structured_output_found=False,
+        structured_output_ok=False,
+        structured_parse_error="",
+        structured_repair_attempted=False,
+        structured_repair_ok=False,
+        structured_repair_error="",
+        structured_summary="",
+        evidence_count=0,
+        capability_request_count=0,
+        artifact_count=0,
+        test_count=0,
+        patch_count=0,
+        lesson_count=0,
+        blocked_reason="",
+        created_at=123456.0,
+    )
+
+    output_payload = {"run_id": "test-run-123"}
+
+    _write_runner_result_files(
+        mock_task, result, output_payload,
+        prompt="",
+        response="",
+    )
+
+    # 文件不应该被创建（因为内容为空）
+    assert not (tmp_path / "prompt.txt").exists()
+    assert not (tmp_path / "response.txt").exists()
+    # 但 output 和 result json 应该存在
+    assert (tmp_path / "output.json").exists()
+
+
+# ── _append_runner_debrief_content 测试 ─────────────────────────────────────
+
+def test_append_runner_debrief_content_basic(tmp_path):
+    """测试追加 debrief 内容。"""
+    task = MagicMock(spec=SubAgentTask)
+    task.id = "test-run"
+    task.debrief_file = str(tmp_path / "debrief.md")
+
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        summary="完成",
+        blocked_reason="",
+        failure_type="",
+        used_skills=[],
+        used_tools=[],
+        evidence=[],
+        capability_requests=[],
+        artifacts=[{"path": "output.txt", "summary": "生成文件"}],
+        tests=[],
+        patches=[],
+        lessons=["学到经验"],
+        next_actions=["下一步"],
+    )
+
+    # 确保父目录存在
+    Path(tmp_path / "debrief.md").parent.mkdir(parents=True, exist_ok=True)
+
+    _append_runner_debrief_content(task, parsed)
+
+    content = Path(task.debrief_file).read_text()
+    assert "Runner Structured Output" in content
+    assert "Runner Artifacts" in content
+    assert "Runner Lessons" in content
+    assert "Runner Next Actions" in content
+
+
+def test_append_runner_debrief_content_empty_sections(tmp_path):
+    """测试无内容时不追加。"""
+    task = MagicMock(spec=SubAgentTask)
+    task.id = "test-run"
+    task.debrief_file = str(tmp_path / "debrief.md")
+
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        summary="",
+        blocked_reason="",
+        failure_type="",
+        used_skills=[],
+        used_tools=[],
+        evidence=[],
+        capability_requests=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=[],
+        next_actions=[],
+    )
+
+    # 确保文件存在
+    Path(tmp_path / "debrief.md").parent.mkdir(parents=True, exist_ok=True)
+    Path(task.debrief_file).write_text("# DEBRIEF\n\n", encoding="utf-8")
+
+    _append_runner_debrief_content(task, parsed)
+
+    # 无内容时不追加，只保留原有内容
+    content = Path(task.debrief_file).read_text()
+    assert content == "# DEBRIEF\n\n"
+
+
+def test_append_runner_debrief_content_creates_debrief_if_missing(tmp_path):
+    """测试 debrief 文件不存在时创建。"""
+    task = MagicMock(spec=SubAgentTask)
+    task.id = "test-run"
+    task.debrief_file = str(tmp_path / "new" / "debrief.md")
+
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        summary="",
+        blocked_reason="",
+        failure_type="",
+        used_skills=[],
+        used_tools=[],
+        evidence=[],
+        capability_requests=[],
+        artifacts=[{"path": "f.txt", "summary": "f"}],
+        tests=[],
+        patches=[],
+        lessons=[],
+        next_actions=[],
+    )
+
+    _append_runner_debrief_content(task, parsed)
+
+    assert Path(task.debrief_file).exists()
+    content = Path(task.debrief_file).read_text()
+    assert "# DEBRIEF" in content
+    assert "Runner Artifacts" in content
+
+
+# ── 边界场景测试 ──────────────────────────────────────────────────────────
+
+def test_process_structured_output_handles_raw_json(mock_task):
+    """测试处理原始 JSON 数据。"""
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        used_skills=[],
+        used_tools=[],
+        evidence=[{
+            "summary": "证据1",
+            "kind": "test",
+            "command": "run test",
+            "path": "/test/path",
+            "url": "",
+            "ok": True,
+        }],
+        capability_requests=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=[],
+        next_actions=[],
+    )
+
+    result = _process_structured_output(mock_task, parsed, 123456.0, None)
+
+    assert result["structured_evidence_count"] == 1
+    assert len(mock_task.evidence) == 1
+
+
+def test_build_output_payload_with_lessons_and_next_actions(mock_task):
+    """测试 lessons 和 next_actions 被正确传递。"""
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        summary="",
+        blocked_reason="",
+        failure_type="",
+        used_skills=[],
+        used_tools=[],
+        evidence=[],
+        capability_requests=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=["经验1", "经验2"],
+        next_actions=["行动1", "行动2", "行动3"],
+    )
+
+    payload = _build_output_payload(
+        task=mock_task,
+        dry_run=False,
+        ok=True,
+        message="",
+        backend="",
+        tool_rounds=0,
+        parsed=parsed,
+        actual_tools=None,
+        structured_evidence_count=0,
+        structured_request_count=0,
+        created_request_ids=[],
+        ignored_tools=[],
+        ignored_skills=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=["经验1", "经验2"],
+        blockers=[],
+        next_actions=["行动1", "行动2", "行动3"],
+        structured_repair_attempted=False,
+        structured_repair_ok=False,
+        structured_repair_error="",
+        now=123456.0,
+    )
+
+    assert payload["lessons"] == ["经验1", "经验2"]
+    assert payload["next_actions"] == ["行动1", "行动2", "行动3"]
