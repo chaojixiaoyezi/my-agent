@@ -13,10 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .models import *
-from .reports import *
-from .rendering import *
-from .runner_rendering import *
+from .models import CapabilityGap, CapabilityGrant, CapabilityRequest, SubAgentTask, VerificationEvidence
 from .runner_rendering import _render_runner_item_line
 from .parsing import (
     _dict_list,
@@ -69,6 +66,22 @@ if TYPE_CHECKING:
     from ..local_store import LocalStore
 
 class SubAgentLifecycleMixin:
+    def _lifecycle_service(self):
+        """LLM: lazily create lifecycle service for legacy mixin-only tests.
+
+        人话说明：
+        正常 SubAgentManager 初始化时会设置 self.lifecycle；一些旧测试会直接
+        `__new__` mixin 并手动挂 load/save，所以这里保留兼容懒加载。
+        """
+
+        lifecycle = getattr(self, "lifecycle", None)
+        if lifecycle is None:
+            from .services.lifecycle import SubAgentLifecycleService
+
+            lifecycle = SubAgentLifecycleService(self)
+            self.lifecycle = lifecycle
+        return lifecycle
+
     def record_capability_request(
         self,
         run_id: str,
@@ -82,22 +95,15 @@ class SubAgentLifecycleMixin:
     ) -> CapabilityRequest:
         """给某个子代理记录一条能力请求。"""
 
-        task = self.load(run_id)
-        request = CapabilityRequest(
-            id=_new_id("capreq"),
-            from_run_id=run_id,
+        return self._lifecycle_service().record_capability_request(
+            run_id,
             problem=problem,
             needed_capability=needed_capability,
             expected_output=expected_output,
-            tried=tried or [],
-            evidence=evidence or [],
-            constraints=constraints or {},
-            created_at=time.time(),
+            tried=tried,
+            evidence=evidence,
+            constraints=constraints,
         )
-        task.capability_requests.append(request)
-        task.updated_at = time.time()
-        self.save(task)
-        return request
 
     def record_capability_grant(
         self,
@@ -113,25 +119,16 @@ class SubAgentLifecycleMixin:
     ) -> CapabilityGrant:
         """给某个子代理记录一条能力授权。"""
 
-        task = self.load(run_id)
-        grant = CapabilityGrant(
-            id=_new_id("capgrant"),
+        return self._lifecycle_service().record_capability_grant(
+            run_id,
             request_id=request_id,
-            grant_to_run_id=run_id,
-            skills=skills or [],
-            tools=tools or [],
-            capability_cards=capability_cards or [],
+            skills=skills,
+            tools=tools,
+            capability_cards=capability_cards,
             reason=reason,
-            constraints=constraints or {},
+            constraints=constraints,
             expires_after_task=expires_after_task,
-            created_at=time.time(),
         )
-        task.capability_grants.append(grant)
-        task.allowed_skills = _merge_list(task.allowed_skills, grant.skills)
-        task.allowed_tools = _merge_list(task.allowed_tools, grant.tools)
-        task.updated_at = time.time()
-        self.save(task)
-        return grant
 
     def record_capability_gap(
         self,
@@ -147,60 +144,16 @@ class SubAgentLifecycleMixin:
     ) -> CapabilityGap:
         """给某个子代理记录一条能力缺口。"""
 
-        task = self.load(run_id)
-        injected_rule_paths: list[str] = []
-        memory_routes: list[dict[str, str]] = []
-        route_query = " ".join([missing_capability, why_failed, task.goal]).strip()
-        route_mode = "soft"
-        if route_query and route_mode != "off":
-            try:
-                index_path = (self.workspace_root / "memory" / "routing" / "INDEX.md").resolve()
-                if index_path.exists():
-                    routes = load_routes(index_path)
-                    matches = match_routes(route_query, routes, limit=5)
-                    resolution = resolve_required_paths(
-                        matches,
-                        mode="strict",
-                        auto_read_limit=3,
-                    )
-                    injected_rule_paths = list(dict.fromkeys(
-                        [*resolution.required_read_paths, *resolution.candidate_paths]
-                    ))
-                    memory_routes = [
-                        {
-                            "route_id": match.route.route_id,
-                            "source_file": match.route.authority_file(),
-                            "inject_mode": match.route.inject_mode,
-                        }
-                        for match in matches
-                    ]
-            except Exception:
-                injected_rule_paths = []
-                memory_routes = []
-        gap = CapabilityGap(
-            id=_new_id("capgap"),
-            run_id=run_id,
+        return self._lifecycle_service().record_capability_gap(
+            run_id,
             missing_capability=missing_capability,
-            source_task=task.goal,
             why_failed=why_failed,
-            attempted_skills=attempted_skills or [],
-            attempted_tools=attempted_tools or [],
-            needed_outputs=needed_outputs or [],
+            attempted_skills=attempted_skills,
+            attempted_tools=attempted_tools,
+            needed_outputs=needed_outputs,
             suggested_skill=suggested_skill,
             suggested_tool=suggested_tool,
-            memory_routes=memory_routes,
-            injected_rule_paths=injected_rule_paths,
-            created_at=time.time(),
         )
-        task.capability_gaps.append(gap)
-        if injected_rule_paths:
-            task.context_manifest.required_read_paths = _merge_list(
-                task.context_manifest.required_read_paths,
-                injected_rule_paths,
-            )
-        task.updated_at = time.time()
-        self.save(task)
-        return gap
 
     def record_evidence(
         self,
@@ -215,29 +168,20 @@ class SubAgentLifecycleMixin:
     ) -> VerificationEvidence:
         """记录一条验收证据。"""
 
-        task = self.load(run_id)
-        evidence = VerificationEvidence(
+        return self._lifecycle_service().record_evidence(
+            run_id,
             kind=kind,
             summary=summary,
             command=command,
             path=path,
             url=url,
             ok=ok,
-            created_at=time.time(),
         )
-        task.evidence.append(evidence)
-        task.verification_status = "VERIFIED" if ok else "FAILED"
-        task.updated_at = time.time()
-        self.save(task)
-        return evidence
 
     def touch_heartbeat(self, run_id: str) -> None:
         """刷新子代理心跳时间。"""
 
-        task = self.load(run_id)
-        task.heartbeat_at = time.time()
-        task.updated_at = task.heartbeat_at
-        self.save(task)
+        self._lifecycle_service().touch_heartbeat(run_id)
 
     def set_status(
         self,
@@ -254,20 +198,13 @@ class SubAgentLifecycleMixin:
         这是防 Fake Done 的第一道硬约束。
         """
 
-        task = self.load(run_id)
-        normalized = status.upper()
-        if require_evidence and normalized == "DONE" and not task.evidence:
-            raise ValueError("缺少验收证据，不能标记为 DONE。")
-        task.status = normalized
-        if result:
-            task.result = result
-        if failure_type:
-            task.failure_type = failure_type
-        if normalized in {"DONE", "FAILED", "BLOCKED", "CHANNEL_ERROR", "TIMEOUT"}:
-            task.ended_at = time.time()
-        task.updated_at = time.time()
-        self.save(task)
-        return task
+        return self._lifecycle_service().set_status(
+            run_id,
+            status,
+            result=result,
+            failure_type=failure_type,
+            require_evidence=require_evidence,
+        )
 
     def prepare_runner_attempt(self, run_id: str, *, retry_reason: str = "") -> SubAgentTask:
         """把任务切到 RUNNING，准备启动一次 runner。

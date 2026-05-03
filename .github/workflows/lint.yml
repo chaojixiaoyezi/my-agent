@@ -28,11 +28,16 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip
           python3 -m pip install -e .
+          python3 -m pip install pytest
 
       - name: Check doc sync
         run: python3 scripts/check_doc_sync.py
 
       - name: Check Python syntax
-        run: |
-          python3 -m py_compile agent_py_agent/**/*.py
-          python3 -m py_compile scripts/*.py
+        run: python3 -m compileall -q agent_py_agent scripts
+
+      - name: Check code size guardrails
+        run: python3 scripts/check_code_size.py --mode warn
+
+      - name: Run focused CLI and filesystem tests
+        run: python3 -m pytest agent_py_agent/tests/test_packaging.py agent_py_agent/tests/test_cli_parser.py agent_py_agent/tests/test_tooling_filesystem.py -q

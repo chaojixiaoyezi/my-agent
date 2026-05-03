@@ -152,7 +152,7 @@ def cmd_start_all(args) -> int:
     paths.root.mkdir(parents=True, exist_ok=True)
 
     # Determine adapter channel (default: all)
-    adapter_channel = getattr(args, 'adapter_channel', 'all')
+    adapter_channel = getattr(args, "adapter_channel", getattr(args, "adapter", "all"))
 
     # Start supervisor (which starts and monitors gateway)
     if is_supervisor_running(args.config):

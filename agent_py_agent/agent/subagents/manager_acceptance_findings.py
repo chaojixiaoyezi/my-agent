@@ -13,10 +13,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .models import *
-from .reports import *
-from .rendering import *
-from .runner_rendering import *
+from .models import SubAgentTask
+from .reports import AcceptanceReviewFinding
 from .runner_rendering import _render_runner_item_line
 from .parsing import (
     _dict_list,
@@ -390,4 +388,3 @@ class SubAgentAcceptanceFindingMixin:
     # Backward-compatible alias for internal callers
     def _acceptance_findings(self, task, output, runner, created_at):
         return self.acceptance_findings(task, output, runner, created_at)
-
