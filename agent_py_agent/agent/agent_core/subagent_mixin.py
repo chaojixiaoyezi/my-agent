@@ -140,6 +140,11 @@ class SimpleAgentSubagentMixin:
             context = self.subagents.write_execution_context(run_id, max_cards=max_cards)
             prompt = _build_subagent_runner_prompt(context, instruction)
 
+        # 设置任务属性供 runtime_mixin.run() 读取（用于 max_tool_rounds 等任务级别配置）。
+        # 每个 worker SimpleAgent 是独立实例，所以 self._current_task_attributes 不会相互干扰。
+        task_for_attrs = self.subagents.load(run_id)
+        self._current_task_attributes = task_for_attrs.attributes
+
         try:
             result = self.run(
                 prompt,
