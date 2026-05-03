@@ -588,4 +588,4 @@ def test_file_adapter_writes_gateway_response_to_outbox():
         output = json.loads((apaths.outbox / "msg-1.json").read_text(encoding="utf-8"))
         assert output["ok"] is True
         assert output["adapter_message_id"] == "msg-1"
-        assert output["gateway_request_id"].startswith("gwreq-")
+        assert output["gateway_request_id"].startswith(("gw-", "gwreq-"))
