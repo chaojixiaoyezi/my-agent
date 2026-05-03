@@ -19,15 +19,21 @@ TEST_LOCAL_STORE = TEST_TMP / "local_store"
 TEST_SUBAGENTS = TEST_TMP / "subagents"
 TEST_GATEWAY = TEST_TMP / "gateway"
 TEST_CONFIG = TEST_TMP / "agent_config.yaml"
+_memory_path = str(TEST_MEMORY).replace("\\", "/")
+_local_store_db = str(TEST_LOCAL_STORE / "local.db").replace("\\", "/")
+_local_store_files = str(TEST_LOCAL_STORE / "files").replace("\\", "/")
+_local_store_events = str(TEST_LOCAL_STORE / "events.jsonl").replace("\\", "/")
+_subagent_ws = str(TEST_SUBAGENTS).replace("\\", "/")
+_gateway_ws = str(TEST_GATEWAY).replace("\\", "/")
 TEST_CONFIG.write_text(
     (ROOT / "config" / "agent_config.yaml").read_text(encoding="utf-8")
     + "\n# full smoke test isolation\n"
-    + f'memory_path: "{str(TEST_MEMORY).replace("\\", "/")}"\n'
-    + f'local_store_path: "{str(TEST_LOCAL_STORE / "local.db").replace("\\", "/")}"\n'
-    + f'local_store_files_dir: "{str(TEST_LOCAL_STORE / "files").replace("\\", "/")}"\n'
-    + f'local_store_events_path: "{str(TEST_LOCAL_STORE / "events.jsonl").replace("\\", "/")}"\n'
-    + f'subagent_workspace: "{str(TEST_SUBAGENTS).replace("\\", "/")}"\n'
-    + f'gateway_workspace: "{str(TEST_GATEWAY).replace("\\", "/")}"\n'
+    + f'memory_path: "{_memory_path}"\n'
+    + f'local_store_path: "{_local_store_db}"\n'
+    + f'local_store_files_dir: "{_local_store_files}"\n'
+    + f'local_store_events_path: "{_local_store_events}"\n'
+    + f'subagent_workspace: "{_subagent_ws}"\n'
+    + f'gateway_workspace: "{_gateway_ws}"\n'
     + "daemon_planner: false\n"
     + "daemon_max_runners: 0\n"
     + "daemon_interval: 1\n"
