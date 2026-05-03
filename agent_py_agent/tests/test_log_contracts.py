@@ -10,20 +10,19 @@ from typing import Any
 import pytest
 
 from agent_py_agent.agent.log_analysis.agents.contracts import (
+    DEFAULT_ACCEPTANCE_CHECKS,
+    DEFAULT_ANALYST_TOOLS,
     AnalystInput,
     AnalystReport,
-    ReviewerInput,
-    ReviewerDecision,
     ContractValidationError,
+    ReviewerDecision,
+    ReviewerInput,
     normalize_evidence_refs,
     require_evidence_refs,
+    review_analyst_report,
     validate_analyst_input,
     validate_analyst_report,
-    review_analyst_report,
-    DEFAULT_ANALYST_TOOLS,
-    DEFAULT_ACCEPTANCE_CHECKS,
 )
-
 
 # ============================================================
 # 辅助函数

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .io import append_gateway_history, gateway_response_path, read_json_file, write_json_file
-from .logging import log_gateway_payload, _report_gateway_side_effect_error
+from .logging import _report_gateway_side_effect_error, log_gateway_payload
 from .paths import GatewayPaths
 
 if TYPE_CHECKING:

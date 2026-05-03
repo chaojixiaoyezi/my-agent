@@ -19,13 +19,13 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from ..agent.core import SimpleAgent
     from ..auth.middleware import AuthMiddleware
-    from .paths import GatewayPaths
-    from ..session.cross_channel import CrossChannelSession
     from ..session.admin_query import AdminCrossChannelQuery
+    from ..session.cross_channel import CrossChannelSession
+    from .paths import GatewayPaths
 
 
 # Global server instance for signal handler access
-_server_instance: Optional["GatewayHTTPServer"] = None
+_server_instance: GatewayHTTPServer | None = None
 
 
 def _generate_request_id() -> str:

@@ -28,23 +28,51 @@ from ..agent.gateway import (
 from ..agent.session import SessionManager, generate_session_id
 from .chat_parts.history import (
     MAX_HISTORY_TURNS as _MAX_HISTORY_TURNS,
+)
+from .chat_parts.history import (
     append_conversation_turn,
     build_history_context,
 )
 from .chat_parts.rendering import (
     BLUE as _BLUE,
+)
+from .chat_parts.rendering import (
     BOLD as _BOLD,
+)
+from .chat_parts.rendering import (
     COLLAPSE_PREVIEW_CHARS as _COLLAPSE_PREVIEW_CHARS,
+)
+from .chat_parts.rendering import (
     COLLAPSE_PREVIEW_LINES as _COLLAPSE_PREVIEW_LINES,
+)
+from .chat_parts.rendering import (
     CONTEXT_WINDOW as _CONTEXT_WINDOW,
+)
+from .chat_parts.rendering import (
     CYAN as _CYAN,
+)
+from .chat_parts.rendering import (
     GRAY as _GRAY,
+)
+from .chat_parts.rendering import (
     GREEN as _GREEN,
+)
+from .chat_parts.rendering import (
     RESET as _RESET,
+)
+from .chat_parts.rendering import (
     YELLOW as _YELLOW,
+)
+from .chat_parts.rendering import (
     collapse_response_text as _collapse_response_text,
+)
+from .chat_parts.rendering import (
     progress_bar as _progress_bar,
+)
+from .chat_parts.rendering import (
     startup_banner as _startup_banner,
+)
+from .chat_parts.rendering import (
     terminal_rule as _terminal_rule,
 )
 from .chat_parts.slash_commands import handle_common_slash_command
@@ -62,9 +90,9 @@ try:
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import FormattedTextControl, HSplit, Layout, Window
     from prompt_toolkit.layout.dimension import Dimension
-    from prompt_toolkit.widgets import TextArea
     from prompt_toolkit.patch_stdout import patch_stdout
     from prompt_toolkit.styles import Style
+    from prompt_toolkit.widgets import TextArea
 except ImportError:  # pragma: no cover
     PromptSession = None
 

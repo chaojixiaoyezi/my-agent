@@ -9,8 +9,8 @@ doctor 会告诉你配置最终生效成什么、配置有没有回退 warning�
 route 相关的功能在 memory_commands.py。
 """
 
-from dataclasses import asdict
 import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +21,6 @@ from ..agent.memory_routing import (
     validate_routes,
 )
 from .common import make_agent
-
 
 DEFAULT_ROUTE_INDEX = Path("memory") / "routing" / "INDEX.md"
 RECENT_ARCHIVE_FILE_LIMIT = 5

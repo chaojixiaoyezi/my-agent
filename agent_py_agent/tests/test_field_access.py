@@ -1,29 +1,31 @@
 """字段访问控制测试 - field_access.py 字段访问控制、权限校验。"""
 from __future__ import annotations
 
-import pytest
 from datetime import datetime, timezone
+
+import pytest
+
 from agent_py_agent.agent.log_analysis.analytics.detectors.field_access import (
+    SUSPICIOUS_CHILD_PROCESSES,
+    WEB_PARENT_PROCESSES,
+    _basename,
+    _canonical_time,
+    _clamp_float,
     _event_dict,
+    _event_time,
     _field,
+    _parse_time,
     _path_value,
     _present,
-    _text,
-    _truthy,
-    _to_int,
-    _to_float,
-    _clamp_float,
-    _event_time,
-    _parse_time,
-    _canonical_time,
     _sort_time,
+    _text,
+    _time_bucket,
+    _to_float,
+    _to_int,
+    _truthy,
+    _window_for_events,
     _within_after,
     _within_before,
-    _window_for_events,
-    _time_bucket,
-    _basename,
-    WEB_PARENT_PROCESSES,
-    SUSPICIOUS_CHILD_PROCESSES,
 )
 
 

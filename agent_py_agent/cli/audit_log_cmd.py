@@ -23,7 +23,7 @@ def cmd_audit_log(args) -> int:
     Returns:
         退出码
     """
-    from .common import load_config, resolve_workspace_root, DEFAULT_CONFIG
+    from .common import DEFAULT_CONFIG, load_config, resolve_workspace_root
 
     config_path = getattr(args, "config", str(DEFAULT_CONFIG))
     config = load_config(config_path)
@@ -61,12 +61,12 @@ def cmd_audit_log(args) -> int:
         print(f"  总操作数: {stats['total_actions']}", file=sys.stdout)
 
         if stats["by_action"]:
-            print(f"  按动作类型：", file=sys.stdout)
+            print("  按动作类型：", file=sys.stdout)
             for action, count in sorted(stats["by_action"].items(), key=lambda x: -x[1]):
                 print(f"    {action}: {count}", file=sys.stdout)
 
         if stats["by_status"]:
-            print(f"  按状态：", file=sys.stdout)
+            print("  按状态：", file=sys.stdout)
             for status, count in sorted(stats["by_status"].items()):
                 print(f"    {status}: {count}", file=sys.stdout)
 

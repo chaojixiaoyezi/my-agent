@@ -9,10 +9,11 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
 import hashlib
 import json
-from typing import Any, Mapping
+from collections.abc import Mapping
+from dataclasses import asdict, is_dataclass
+from typing import Any
 
 from ..models import RawMemoryEvent
 

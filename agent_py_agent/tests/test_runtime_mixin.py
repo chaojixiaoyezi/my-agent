@@ -6,8 +6,9 @@ from __future__ import annotations
 测试 SimpleAgentRuntimeMixin 的 run() 方法、memory 压缩、token 估算等功能。
 """
 
+from unittest.mock import MagicMock, PropertyMock, patch
+
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
 
 
 class TestRuntimeMixinCompress:

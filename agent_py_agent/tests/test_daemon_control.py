@@ -12,12 +12,11 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from agent_py_agent.agent.gateway_parts import daemon_control as dc
-
 
 # ── 测试夹具 ──────────────────────────────────────────────────────────────
 

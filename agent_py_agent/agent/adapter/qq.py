@@ -29,7 +29,7 @@ from socket import socket as _socket
 from typing import Any
 
 from .base import BaseChannelAdapter
-from .protocol import IncomingMessage, OutgoingMessage, qq_to_incoming, outgoing_to_qq
+from .protocol import IncomingMessage, OutgoingMessage, outgoing_to_qq, qq_to_incoming
 
 logger = logging.getLogger(__name__)
 

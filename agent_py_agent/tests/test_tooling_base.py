@@ -331,7 +331,7 @@ class TestVectorToolSearchProvider:
 
     def test_vector_provider_disabled(self):
         """禁用时返回空。"""
-        from agent_py_agent.agent.tooling.models import VectorToolSearchProvider, ToolSpec
+        from agent_py_agent.agent.tooling.models import ToolSpec, VectorToolSearchProvider
 
         provider = VectorToolSearchProvider(enabled=False)
 
@@ -353,7 +353,7 @@ class TestVectorToolSearchProvider:
 
     def test_vector_provider_enabled(self):
         """启用时（当前是占位实现）返回空。"""
-        from agent_py_agent.agent.tooling.models import VectorToolSearchProvider, ToolSpec
+        from agent_py_agent.agent.tooling.models import ToolSpec, VectorToolSearchProvider
 
         provider = VectorToolSearchProvider(enabled=True)
 
@@ -383,8 +383,8 @@ class TestHybridToolRetriever:
         from agent_py_agent.agent.tooling.models import (
             HybridToolRetriever,
             KeywordToolSearchProvider,
-            VectorToolSearchProvider,
             ToolSpec,
+            VectorToolSearchProvider,
         )
 
         keyword_provider = KeywordToolSearchProvider()
@@ -414,8 +414,8 @@ class TestHybridToolRetriever:
         from agent_py_agent.agent.tooling.models import (
             HybridToolRetriever,
             KeywordToolSearchProvider,
-            VectorToolSearchProvider,
             ToolSpec,
+            VectorToolSearchProvider,
         )
 
         keyword_provider = KeywordToolSearchProvider()

@@ -12,13 +12,12 @@ import pytest
 
 from agent_py_agent.agent.agent_core.runtime_capabilities import (
     SECURITY_RUNTIME_CAPABILITY,
-    resolve_runtime_capabilities,
-    _looks_like_security_log_task,
-    _normalize_capabilities,
     _contains_keyword,
     _contains_single_keyword,
+    _looks_like_security_log_task,
+    _normalize_capabilities,
+    resolve_runtime_capabilities,
 )
-
 
 # ============================================================
 # 测试用例：SECURITY_RUNTIME_CAPABILITY 常量

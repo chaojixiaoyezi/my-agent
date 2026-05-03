@@ -484,8 +484,8 @@ class TestCorrelationMutationCoverage:
         Mutation: reverse=True removed from sorted()
         This would produce incorrect ascending order.
         """
-        from agent_py_agent.agent.log_analysis.security.correlation import _entry_candidates
         from agent_py_agent.agent.log_analysis.models import Finding
+        from agent_py_agent.agent.log_analysis.security.correlation import _entry_candidates
 
         # Create findings with different confidence levels
         finding1 = Finding(
@@ -513,8 +513,8 @@ class TestCorrelationMutationCoverage:
         Mutation: 'if not refs: return list(findings)' removed
         This would return all findings regardless of case's finding_refs.
         """
-        from agent_py_agent.agent.log_analysis.security.correlation import _filter_findings_for_case
         from agent_py_agent.agent.log_analysis.models import CaseRecord, Finding
+        from agent_py_agent.agent.log_analysis.security.correlation import _filter_findings_for_case
 
         case = CaseRecord(
             case_id="c1",
@@ -547,8 +547,8 @@ class TestCorrelationMutationCoverage:
         Mutation: Always uses risk_score instead of confidence
         This would ignore explicit confidence values.
         """
-        from agent_py_agent.agent.log_analysis.security.correlation import _inference_for_finding
         from agent_py_agent.agent.log_analysis.models import Finding
+        from agent_py_agent.agent.log_analysis.security.correlation import _inference_for_finding
 
         finding = Finding(
             finding_id="f1",
@@ -569,8 +569,8 @@ class TestCorrelationMutationCoverage:
         Mutation: case_obj.attributes = {...} line commented out
         This would lose the route_draft when case is used further.
         """
-        from agent_py_agent.agent.log_analysis.security.correlation import build_route_draft
         from agent_py_agent.agent.log_analysis.models import CaseRecord, Finding
+        from agent_py_agent.agent.log_analysis.security.correlation import build_route_draft
 
         # Create a case with existing attributes
         case = CaseRecord(

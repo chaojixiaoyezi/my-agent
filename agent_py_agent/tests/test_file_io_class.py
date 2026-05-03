@@ -6,9 +6,10 @@ from __future__ import annotations
 测试 agent/file_io.py 的兼容层导入和底层 IO 函数。
 """
 
-import pytest
-from unittest.mock import MagicMock, patch
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 
 class TestFileIoFacade:
@@ -42,6 +43,7 @@ class TestAppendJsonlSignature:
     def test_function_takes_two_args(self) -> None:
         """测试函数接受两个参数。"""
         import inspect
+
         from agent_py_agent.agent.io import append_jsonl
         sig = inspect.signature(append_jsonl)
         assert len(sig.parameters) >= 2
@@ -58,6 +60,7 @@ class TestAppendLineLockedSignature:
     def test_function_takes_path_and_line(self) -> None:
         """测试函数接受 path 和 line 参数。"""
         import inspect
+
         from agent_py_agent.agent.io import append_line_locked
         sig = inspect.signature(append_line_locked)
         params = list(sig.parameters.keys())
@@ -69,8 +72,9 @@ class TestAppendJsonlBehavior:
 
     def test_appends_json_line_with_lock(self) -> None:
         """测试追加 JSON 行带锁。"""
-        import tempfile
         import json
+        import tempfile
+
         from agent_py_agent.agent.io import append_jsonl
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -84,6 +88,7 @@ class TestAppendJsonlBehavior:
     def test_append_jsonl_creates_parent_dir(self) -> None:
         """测试追加时创建父目录。"""
         import tempfile
+
         from agent_py_agent.agent.io import append_jsonl
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -94,6 +99,7 @@ class TestAppendJsonlBehavior:
     def test_append_multiple_lines(self) -> None:
         """测试追加多行。"""
         import tempfile
+
         from agent_py_agent.agent.io import append_jsonl
 
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from .filesystem import (
-    FileSystemTool,
     _MAX_WRITE_TEXT_CHARS,
+    FileSystemTool,
     _int_param,
     _required_path,
     _text_param,

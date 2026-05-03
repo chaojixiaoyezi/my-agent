@@ -28,7 +28,7 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _get_process_start_time(pid: int) -> Optional[int]:
+def _get_process_start_time(pid: int) -> int | None:
     """Return the kernel start time for a process when available (Linux only)."""
     if sys.platform == "win32":
         return None
@@ -46,7 +46,7 @@ def _scope_hash(identity: str) -> str:
 
 # ── PID file management ──────────────────────────────────────────────────────
 
-def read_pid_file(pid_path: Path) -> Optional[int]:
+def read_pid_file(pid_path: Path) -> int | None:
     """Read PID from a pid file path.
 
     Supports both plain-text (just the number) and JSON record formats.
@@ -78,7 +78,7 @@ def remove_pid_file(pid_path: Path) -> None:
         pass
 
 
-def check_already_running(pid_path: Path) -> tuple[bool, Optional[int]]:
+def check_already_running(pid_path: Path) -> tuple[bool, int | None]:
     """Check if another instance is already running.
 
     Returns (is_running, existing_pid).
@@ -105,7 +105,7 @@ def _build_pid_record() -> dict:
     }
 
 
-def _read_json_file(path: Path) -> Optional[dict]:
+def _read_json_file(path: Path) -> dict | None:
     if not path.exists():
         return None
     try:
@@ -131,12 +131,12 @@ def write_pid_record(pid_path: Path) -> None:
     _write_json_file(pid_path, _build_pid_record())
 
 
-def read_pid_record(pid_path: Path) -> Optional[dict]:
+def read_pid_record(pid_path: Path) -> dict | None:
     """Read PID record from file, returning None if missing or invalid."""
     return _read_json_file(pid_path)
 
 
-def get_running_pid(pid_path: Path, *, cleanup_stale: bool = True) -> Optional[int]:
+def get_running_pid(pid_path: Path, *, cleanup_stale: bool = True) -> int | None:
     """Return the PID of a running gateway instance, or None.
 
     Checks the PID file and verifies the process is actually alive.
@@ -222,7 +222,7 @@ def _get_scope_lock_path(scope: str, identity: str) -> Path:
     return _get_lock_dir() / f"{scope}-{_scope_hash(identity)}.lock"
 
 
-def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, Any]] = None) -> tuple[bool, Optional[dict]]:
+def acquire_scoped_lock(scope: str, identity: str, metadata: dict[str, Any] | None = None) -> tuple[bool, dict | None]:
     """Acquire a machine-local lock keyed by scope + identity.
 
     Used to prevent multiple gateways from using the same external identity
@@ -351,10 +351,10 @@ def write_runtime_status(
     exit_reason: Any = None,
     restart_requested: bool = False,
     active_agents: int = 0,
-    platform: Optional[str] = None,
-    platform_state: Optional[str] = None,
-    error_code: Optional[str] = None,
-    error_message: Optional[str] = None,
+    platform: str | None = None,
+    platform_state: str | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
     **extra: Any,
 ) -> None:
     """Persist gateway runtime health information for diagnostics/status.
@@ -401,7 +401,7 @@ def write_runtime_status(
     _write_json_file(status_path, payload)
 
 
-def read_runtime_status(status_path: Path) -> Optional[dict]:
+def read_runtime_status(status_path: Path) -> dict | None:
     """Read the persisted gateway runtime health/status information."""
     return _read_json_file(status_path)
 

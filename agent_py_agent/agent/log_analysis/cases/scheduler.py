@@ -2,9 +2,10 @@ from __future__ import annotations
 
 """Small case scheduler for detector output."""
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from ..models import CaseRecord, Finding
 from .case_store import CaseStore

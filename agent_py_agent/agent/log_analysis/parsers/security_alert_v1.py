@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from .base import ParsedRecord, ParserError
 from .common import DEFAULT_PAYLOAD_MAX_CHARS, normalize_security_alert_v1

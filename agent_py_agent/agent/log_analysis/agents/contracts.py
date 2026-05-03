@@ -7,9 +7,9 @@ roles. Raw events, long query output, and transcripts stay behind tools and
 evidence references.
 """
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
-from typing import Any, Mapping
-
+from typing import Any
 
 ANALYST_ROLE = "analyst"
 REVIEWER_ROLE = "reviewer"
@@ -164,7 +164,7 @@ class AnalystInput:
         return asdict(self)
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, Any]) -> "AnalystInput":
+    def from_mapping(cls, payload: Mapping[str, Any]) -> AnalystInput:
         route_summary = _as_mapping(payload.get("route_summary") or payload.get("route"))
         item = cls(
             case_id=_compact_string(payload.get("case_id") or payload.get("id"), limit=120),
@@ -209,7 +209,7 @@ class AnalystReport:
         return asdict(self)
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, Any]) -> "AnalystReport":
+    def from_mapping(cls, payload: Mapping[str, Any]) -> AnalystReport:
         item = cls(
             case_id=_compact_string(payload.get("case_id") or payload.get("id"), limit=120),
             summary=_compact_string(payload.get("summary")),

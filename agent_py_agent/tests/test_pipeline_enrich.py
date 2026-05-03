@@ -7,17 +7,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent_py_agent.agent.log_analysis.ingest.pipeline import IngestPipeline
 from agent_py_agent.agent.log_analysis.ingest.pipeline_enrich import (
+    _storage_result,
+    _storage_summary,
     enrich_ingest_file,
     flush_events,
     make_batch_id,
     normalize_file_format,
     write_events,
     write_manifest,
-    _storage_result,
-    _storage_summary,
 )
-from agent_py_agent.agent.log_analysis.ingest.pipeline import IngestPipeline
 from agent_py_agent.agent.log_analysis.parsers.base import ParserError
 
 

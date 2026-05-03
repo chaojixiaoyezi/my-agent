@@ -4,7 +4,6 @@ from pathlib import Path
 
 from scripts.live_lab.log_analysis_replay import REPO_ROOT, run_security_alert_v1_replay
 
-
 NO_FINDINGS_FIXTURE = REPO_ROOT / "validation" / "security_fixtures" / "security_alert_v1_no_findings.jsonl"
 
 

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .models import SubAgentTask
 
+
 def _new_id(prefix: str) -> str:
     """生成短 ID。"""
 

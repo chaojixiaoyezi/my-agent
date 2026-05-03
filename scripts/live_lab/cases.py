@@ -151,7 +151,10 @@ def case_long_subagent(lab) -> None:
 
     lab.section("CASE long_subagent")
     sys.path.insert(0, str(REPO_ROOT))
-    from agent_py_agent.cli.scenario_utils import build_scenario_prompt, build_scenario_runner_instruction
+    from agent_py_agent.cli.scenario_utils import (
+        build_scenario_prompt,
+        build_scenario_runner_instruction,
+    )
 
     lab.record_prompt("long_subagent_main", build_scenario_prompt(max(lab.args.count, 1)))
     lab.record_prompt(

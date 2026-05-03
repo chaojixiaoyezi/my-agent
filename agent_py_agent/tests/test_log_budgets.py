@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+
 from agent_py_agent.agent.log_analysis.dispatch.budgets import (
     BudgetDecision,
     DispatchBudget,

@@ -183,8 +183,8 @@ class TestSessionContextSync:
 
     def test_sync_to_channel(self, tmp_path: Path):
         """同步上下文到目标通道。"""
-        from agent_py_agent.agent.session.cross_channel import CrossChannelSession
         from agent_py_agent.agent.session.context_sync import SessionContextSync
+        from agent_py_agent.agent.session.cross_channel import CrossChannelSession
 
         class MockConfig:
             session_workspace = str(tmp_path / "sessions")
@@ -211,8 +211,8 @@ class TestSessionContextSync:
 
     def test_update_session_context(self, tmp_path: Path):
         """更新会话上下文。"""
-        from agent_py_agent.agent.session.cross_channel import CrossChannelSession
         from agent_py_agent.agent.session.context_sync import SessionContextSync
+        from agent_py_agent.agent.session.cross_channel import CrossChannelSession
 
         class MockConfig:
             session_workspace = str(tmp_path / "sessions")
@@ -313,9 +313,9 @@ class TestAdminCrossChannelQuery:
 
     def test_non_admin_cannot_query(self, tmp_path: Path):
         """非管理员不能使用查询接口。"""
+        from agent_py_agent.agent.session.admin_query import AdminCrossChannelQuery
         from agent_py_agent.agent.session.cross_channel import CrossChannelSession
         from agent_py_agent.agent.session.manager import SessionManager
-        from agent_py_agent.agent.session.admin_query import AdminCrossChannelQuery
 
         class MockConfig:
             session_workspace = str(tmp_path / "sessions")
@@ -340,9 +340,9 @@ class TestAdminCrossChannelQuery:
 
     def test_admin_can_query_all_sessions(self, tmp_path: Path):
         """管理员可以查询所有会话。"""
+        from agent_py_agent.agent.session.admin_query import AdminCrossChannelQuery
         from agent_py_agent.agent.session.cross_channel import CrossChannelSession
         from agent_py_agent.agent.session.manager import SessionManager
-        from agent_py_agent.agent.session.admin_query import AdminCrossChannelQuery
 
         class MockConfig:
             session_workspace = str(tmp_path / "sessions")
@@ -364,9 +364,9 @@ class TestAdminCrossChannelQuery:
 
     def test_get_all_tasks_empty(self, tmp_path: Path):
         """获取所有任务（无 store）。"""
+        from agent_py_agent.agent.session.admin_query import AdminCrossChannelQuery
         from agent_py_agent.agent.session.cross_channel import CrossChannelSession
         from agent_py_agent.agent.session.manager import SessionManager
-        from agent_py_agent.agent.session.admin_query import AdminCrossChannelQuery
 
         class MockConfig:
             session_workspace = str(tmp_path / "sessions")
@@ -383,9 +383,9 @@ class TestAdminCrossChannelQuery:
 
     def test_format_admin_summary(self, tmp_path: Path):
         """格式化管理员摘要。"""
+        from agent_py_agent.agent.session.admin_query import AdminCrossChannelQuery
         from agent_py_agent.agent.session.cross_channel import CrossChannelSession
         from agent_py_agent.agent.session.manager import SessionManager
-        from agent_py_agent.agent.session.admin_query import AdminCrossChannelQuery
 
         class MockConfig:
             session_workspace = str(tmp_path / "sessions")
@@ -410,8 +410,11 @@ class TestChannelBindingProtocol:
 
     def test_admin_switch_from_chat_to_feishu(self, tmp_path: Path):
         """管理员从 chat 切换到 feishu。"""
+        from agent_py_agent.agent.session.context_sync import (
+            SessionContextSync,
+            format_context_for_channel,
+        )
         from agent_py_agent.agent.session.cross_channel import CrossChannelSession
-        from agent_py_agent.agent.session.context_sync import SessionContextSync, format_context_for_channel
 
         class MockConfig:
             session_workspace = str(tmp_path / "sessions")
@@ -447,8 +450,11 @@ class TestChannelBindingProtocol:
 
     def test_admin_with_tasks_in_context(self, tmp_path: Path):
         """带任务状态的上下文同步。"""
+        from agent_py_agent.agent.session.context_sync import (
+            SessionContextSync,
+            format_context_for_channel,
+        )
         from agent_py_agent.agent.session.cross_channel import CrossChannelSession
-        from agent_py_agent.agent.session.context_sync import SessionContextSync, format_context_for_channel
 
         class MockConfig:
             session_workspace = str(tmp_path / "sessions")

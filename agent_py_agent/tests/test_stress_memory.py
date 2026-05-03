@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent_py_agent.agent.memory_archive.models import CompressionSnapshot, utc_now_iso
 from agent_py_agent.agent.memory_archive.snapshots import (
     _compression_hooks,
     _dedupe_texts,
@@ -23,7 +24,6 @@ from agent_py_agent.agent.memory_archive.snapshots import (
     write_compression_snapshot,
     write_recovery_snapshot,
 )
-from agent_py_agent.agent.memory_archive.models import CompressionSnapshot, utc_now_iso
 
 
 class TestSnapshotWriteStress:

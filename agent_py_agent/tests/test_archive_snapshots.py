@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 
@@ -219,7 +220,10 @@ class TestCompressionHooks:
 
     def test_register_and_clear_hooks(self):
         """测试钩子注册和清理。"""
-        from agent_py_agent.agent.memory_archive.snapshots import clear_compression_hooks, register_compression_hook
+        from agent_py_agent.agent.memory_archive.snapshots import (
+            clear_compression_hooks,
+            register_compression_hook,
+        )
 
         clear_compression_hooks()
 
@@ -237,7 +241,10 @@ class TestCompressionHooks:
 
     def test_multiple_hooks_registered(self):
         """测试可以注册多个钩子。"""
-        from agent_py_agent.agent.memory_archive.snapshots import clear_compression_hooks, register_compression_hook
+        from agent_py_agent.agent.memory_archive.snapshots import (
+            clear_compression_hooks,
+            register_compression_hook,
+        )
 
         clear_compression_hooks()
 

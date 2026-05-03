@@ -5,12 +5,12 @@ import json
 import tempfile
 import threading
 import time
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
-from agent_py_agent.agent.io.jsonl import append_jsonl, append_line_locked, _LOCKS, _LOCKS_GUARD
+from agent_py_agent.agent.io.jsonl import _LOCKS, _LOCKS_GUARD, append_jsonl, append_line_locked
 
 
 @pytest.fixture

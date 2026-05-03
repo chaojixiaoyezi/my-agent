@@ -57,7 +57,7 @@ class TestDispatchFailureMemoryInjection:
 
     def test_failure_memory_content_contains_failure_info(self, tmp_path: Path):
         """验证记忆内容与失败原因相关。"""
-        from agent_py_agent.agent.memory_push import push_failure_memories, MemoryEntry
+        from agent_py_agent.agent.memory_push import MemoryEntry, push_failure_memories
         from agent_py_agent.agent.memory_store import MemoryRecord
 
         agent = MagicMock()

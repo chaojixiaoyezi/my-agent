@@ -10,10 +10,10 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from .models import CapabilityGrant, CapabilityRequest, SubAgentParsedOutput, SubAgentTask
-from .reports import ActionPlanItem, DueCheckIssue, SubAgentBoardItem
 from ..capabilities import CapabilitySearchHit
 from ..capability_config import CapabilityConfig
+from .models import CapabilityGrant, CapabilityRequest, SubAgentParsedOutput, SubAgentTask
+from .reports import ActionPlanItem, DueCheckIssue, SubAgentBoardItem
 
 
 def _risk_weight(flags: list[str]) -> int:

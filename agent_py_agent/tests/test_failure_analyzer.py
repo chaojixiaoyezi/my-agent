@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import pytest
 
-from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis, SubAgentFailureAnalyzer
-from agent_py_agent.agent.subagents.models import SubAgentTask, SubAgentRunnerResult
+from agent_py_agent.agent.agent_core.failure_analyzer import (
+    FailureAnalysis,
+    SubAgentFailureAnalyzer,
+)
+from agent_py_agent.agent.subagents.models import SubAgentRunnerResult, SubAgentTask
 
 
 class TestSubAgentFailureAnalyzer:
@@ -241,7 +244,7 @@ class TestFailureAnalyzerMutationCoverage:
         This would cause timeout to increase faster than intended.
         """
         from agent_py_agent.agent.agent_core.failure_analyzer import SubAgentFailureAnalyzer
-        from agent_py_agent.agent.subagents.models import SubAgentTask, SubAgentRunnerResult
+        from agent_py_agent.agent.subagents.models import SubAgentRunnerResult, SubAgentTask
 
         analyzer = SubAgentFailureAnalyzer(max_timeout=600.0, max_retry_attempts=3)
 
@@ -276,7 +279,7 @@ class TestFailureAnalyzerMutationCoverage:
         This would allow one more retry when timeout equals max_timeout.
         """
         from agent_py_agent.agent.agent_core.failure_analyzer import SubAgentFailureAnalyzer
-        from agent_py_agent.agent.subagents.models import SubAgentTask, SubAgentRunnerResult
+        from agent_py_agent.agent.subagents.models import SubAgentRunnerResult, SubAgentTask
 
         analyzer = SubAgentFailureAnalyzer(max_timeout=600.0, max_retry_attempts=3)
 

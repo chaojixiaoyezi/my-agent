@@ -3,10 +3,10 @@
 提供时间窗口和结果数量限制的日志查询功能，防止子代理无限制查询。
 第一版实现 file_tail 模板，后续可扩展 parquet_scan、sql_query 等。
 """
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import os
 from pathlib import Path
 from typing import Any
 
@@ -338,7 +338,7 @@ def _execute_file_tail(
     try:
         # 简单实现：读取所有行然后取尾部
         # 生产环境应该用更高效的方式（如直接 seek）
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        with open(file_path, encoding="utf-8", errors="replace") as f:
             all_lines = f.readlines()
             total_lines = len(all_lines)
 
@@ -349,7 +349,7 @@ def _execute_file_tail(
                 line = line.strip()
                 if line:
                     parsed_lines.append(_parse_log_line(line))
-    except (IOError, OSError) as e:
+    except OSError as e:
         return QueryResult(
             query_template="file_tail",
             query_params={"file_path": file_path},

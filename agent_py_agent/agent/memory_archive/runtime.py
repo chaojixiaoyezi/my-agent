@@ -7,16 +7,16 @@ from __future__ import annotations
 它只接收一轮 run 已经产生的用户输入、助手输出和工具元数据，然后统一生成可检索的 raw 事件，避免主循环里到处手写字段。
 """
 
-from dataclasses import asdict, dataclass, is_dataclass
 import hashlib
 import json
+from collections.abc import Iterable, Mapping
+from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from .models import RawMemoryEvent, utc_now_iso
 from .storage import append_raw_event
 from .tokens import estimate_tokens
-
 
 _PREVIEW_LIMITS = {
     0: 2048,

@@ -8,7 +8,12 @@ from pathlib import Path
 
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.memory_archive import CompressionSnapshot, RawMemoryEvent, append_raw_event, append_snapshot
+from agent_py_agent.agent.memory_archive import (
+    CompressionSnapshot,
+    RawMemoryEvent,
+    append_raw_event,
+    append_snapshot,
+)
 
 
 def _write_route(root: Path) -> None:

@@ -7,9 +7,9 @@ channel probe status recording.
 看板、巡检、通道状态探测。
 """
 
-from pathlib import Path
-import time
 import tempfile
+import time
+from pathlib import Path
 
 from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.config import AgentConfig

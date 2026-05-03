@@ -3,8 +3,9 @@ from __future__ import annotations
 """Query-plan drafts for analyst and hunt agents."""
 
 import hashlib
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from ..models import CaseRecord
 from .correlation import RouteDraft
@@ -52,7 +53,7 @@ def build_seed_hunt_queries(
         ("Find entities related to the seed before and after the case window.", products),
         ("Search peer assets or accounts for the same behavior.", products),
     )
-    seed_digest = hashlib.sha256(f"{clean_type}:{clean_value}".encode("utf-8")).hexdigest()[:8]
+    seed_digest = hashlib.sha256(f"{clean_type}:{clean_value}".encode()).hexdigest()[:8]
     return [
         HuntQuery(
             query_id=f"hunt-{clean_type}-{seed_digest}-{index + 1}",

@@ -7,7 +7,6 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-
 PENDING_INVESTIGATION = "PENDING_INVESTIGATION"
 QUEUED = "QUEUED"
 DISPATCHED = "DISPATCHED"

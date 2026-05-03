@@ -10,13 +10,37 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from datetime import timedelta
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from ...models import EvidenceRef, Finding, QueryPlan, utc_now_iso
 from ..baselines import SecurityBaselines, ensure_baselines
 from ..security_rules import get_rule
-
+from .classifiers import (
+    _destination,
+    _entities_from_events,
+    _gap_details,
+    _is_alert_event,
+    _is_auth_event,
+    _is_egress_event,
+    _is_failure,
+    _is_http_success_or_error,
+    _is_success,
+    _is_suspicious_file_write,
+    _is_suspicious_web_process_event,
+    _is_vpn_event,
+    _is_waf_event,
+    _normalize_entities,
+    _primary_asset,
+    _same_asset,
+    _same_auth_scope,
+    _same_source,
+    _same_user,
+    _unique_json_values,
+    _unique_texts,
+    _weak_signal,
+)
 from .field_access import (
     EventLike,
     JsonDict,
@@ -29,9 +53,9 @@ from .field_access import (
     _text,
     _time_bucket,
     _truthy,
+    _window_for_events,
     _within_after,
     _within_before,
-    _window_for_events,
 )
 from .field_extractors import (
     _asset_ip,
@@ -48,32 +72,6 @@ from .field_extractors import (
     _user,
     _victim_ip,
 )
-from .classifiers import (
-    _destination,
-    _entities_from_events,
-    _gap_details,
-    _is_alert_event,
-    _is_auth_event,
-    _is_egress_event,
-    _is_failure,
-    _is_http_success_or_error,
-    _is_suspicious_file_write,
-    _is_suspicious_web_process_event,
-    _is_success,
-    _is_vpn_event,
-    _is_waf_event,
-    _normalize_entities,
-    _primary_asset,
-    _same_asset,
-    _same_auth_scope,
-    _same_source,
-    _same_user,
-    _unique_json_values,
-    _unique_texts,
-    _weak_signal,
-    _gap_details,
-)
-
 
 # ---------------------------------------------------------------------------
 # High-level detector rules
@@ -580,7 +578,7 @@ def _make_finding(
         updated_at=utc_now_iso(),
         attributes={"mode": rule.mode, "gap_details": _gap_details(gaps, window, entities, evidence_events)},
     )
-    setattr(finding, "mode", rule.mode)
+    finding.mode = rule.mode
     return finding
 
 

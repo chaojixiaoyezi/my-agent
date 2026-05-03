@@ -17,7 +17,6 @@ from agent_py_agent.agent.capability.router import (
     tokenize,
 )
 
-
 # ── CapabilityCard 测试 ────────────────────────────────────────────────────
 
 def test_capability_card_basic():
@@ -301,6 +300,7 @@ def test_capability_router_render_candidates_empty():
 def test_from_skill_card():
     """测试从 SkillCard 转换。"""
     from pathlib import Path
+
     from agent_py_agent.agent.capability.skills import SkillCard
 
     skill = SkillCard(

@@ -7,9 +7,9 @@ from __future__ import annotations
 安全控制：危险命令黑名单、基本校验、subprocess 超时处理。
 """
 
-import subprocess
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 

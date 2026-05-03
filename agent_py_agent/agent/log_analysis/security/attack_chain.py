@@ -2,8 +2,9 @@ from __future__ import annotations
 
 """Attack-chain draft generation from soft findings."""
 
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from ..models import CaseRecord, EvidenceRef, Finding
 

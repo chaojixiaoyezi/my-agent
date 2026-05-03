@@ -7,12 +7,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import re
+from collections.abc import Mapping
 from typing import Any
 
 from .config_model import LogAnalysisConfigWarning
-
 
 _MISSING = object()
 _INT_PATTERN = re.compile(r"-?[0-9]+")

@@ -5,12 +5,12 @@ import pytest
 
 from agent_py_agent.agent.log_analysis.config.config_coercers import (
     _MISSING,
-    _lookup,
-    _warn,
     _coerce_bool,
     _coerce_choice,
     _coerce_int,
     _coerce_path_string,
+    _lookup,
+    _warn,
 )
 from agent_py_agent.agent.log_analysis.config.config_model import LogAnalysisConfigWarning
 
@@ -21,7 +21,7 @@ class TestMissing:
     def test_missing_is_unique_sentinel(self):
         """验证 _MISSING 是唯一对象。"""
         assert _MISSING is not None
-        assert _MISSING is not ""
+        assert _MISSING != ""
 
 
 class TestLookup:

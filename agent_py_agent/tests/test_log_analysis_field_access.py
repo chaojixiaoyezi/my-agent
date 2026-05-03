@@ -31,7 +31,6 @@ from agent_py_agent.agent.log_analysis.analytics.detectors.field_access import (
     _within_before,
 )
 
-
 # ---------------------------------------------------------------------------
 # _event_dict tests
 # ---------------------------------------------------------------------------

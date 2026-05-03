@@ -10,7 +10,6 @@ from __future__ import annotations
 from agent_py_agent.agent.auth import Action, AuthManager, AuthMiddleware, Permission, Role
 from agent_py_agent.agent.auth.models import build_permission, infer_role
 
-
 # ---------------------------------------------------------------------------
 # Role 推断测试
 # ---------------------------------------------------------------------------

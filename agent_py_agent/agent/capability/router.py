@@ -10,9 +10,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..tools import ToolSpec
 from .config import CapabilityConfig
 from .skills import SkillCard, SkillRegistry
-from ..tools import ToolSpec
 
 
 @dataclass

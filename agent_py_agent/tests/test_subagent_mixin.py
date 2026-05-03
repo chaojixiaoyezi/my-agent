@@ -6,11 +6,15 @@ from __future__ import annotations
 测试子代理生命周期管理：spawn、run_subagent、run_parent_planner、recovery snapshot 等。
 """
 
-import pytest
-from unittest.mock import MagicMock, patch, PropertyMock, NonCallableMock
 from pathlib import Path
+from unittest.mock import MagicMock, NonCallableMock, PropertyMock, patch
 
-from agent_py_agent.agent.agent_core.subagent_mixin import SimpleAgentSubagentMixin, _config_workflow_dispatch_mode
+import pytest
+
+from agent_py_agent.agent.agent_core.subagent_mixin import (
+    SimpleAgentSubagentMixin,
+    _config_workflow_dispatch_mode,
+)
 
 
 class TestSubagentMixinSpawn:

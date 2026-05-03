@@ -10,7 +10,8 @@
 from __future__ import annotations
 
 import ipaddress
-from typing import Any, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from .field_access import (
     SUSPICIOUS_CHILD_PROCESSES,
@@ -37,7 +38,6 @@ from .field_extractors import (
     _user,
     _victim_ip,
 )
-
 
 # ---------------------------------------------------------------------------
 # Event classification predicates

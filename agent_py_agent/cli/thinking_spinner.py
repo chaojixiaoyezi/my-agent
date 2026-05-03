@@ -19,7 +19,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
-from typing import Callable
+from collections.abc import Callable
 
 from .thinking_phrases import random_phrase
 

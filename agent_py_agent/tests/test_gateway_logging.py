@@ -19,6 +19,7 @@ class TestReportGatewaySideEffectError:
         """验证错误输出格式。"""
         import sys
         from io import StringIO
+
         from agent_py_agent.agent.gateway_parts.logging import _report_gateway_side_effect_error
 
         old_stderr = sys.stderr

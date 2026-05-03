@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 
@@ -14,8 +15,8 @@ class TestCapabilityRequestQuery:
 
     def test_capability_request_query_basic(self):
         """测试基本查询构建。"""
+        from agent_py_agent.agent.subagents.models import CapabilityRequest, SubAgentTask
         from agent_py_agent.agent.subagents.policies import _capability_request_query
-        from agent_py_agent.agent.subagents.models import SubAgentTask, CapabilityRequest
 
         task = SubAgentTask(
             id="task_001",
@@ -99,8 +100,8 @@ class TestCapabilityRoutingPolicies:
 
     def test_dedupe_granted_cards_empty(self):
         """测试空授权卡列表去重。"""
-        from agent_py_agent.agent.subagents.policies import _dedupe_granted_cards
         from agent_py_agent.agent.subagents.models import CapabilityGrant
+        from agent_py_agent.agent.subagents.policies import _dedupe_granted_cards
 
         grants = []
         result = _dedupe_granted_cards(grants)
@@ -108,8 +109,8 @@ class TestCapabilityRoutingPolicies:
 
     def test_dedupe_granted_cards_with_duplicates(self):
         """测试带重复卡的去重。"""
-        from agent_py_agent.agent.subagents.policies import _dedupe_granted_cards
         from agent_py_agent.agent.subagents.models import CapabilityGrant
+        from agent_py_agent.agent.subagents.policies import _dedupe_granted_cards
 
         grant1 = CapabilityGrant(
             id="grant_001",
@@ -226,7 +227,7 @@ class TestCapabilityRoutingDryRun:
     def test_route_capability_request_no_hits_returns_would_gap(self, tmp_path: Path):
         """测试无命中时返回 WOULD_GAP。"""
         from agent_py_agent.agent.subagents.manager_capabilities import SubAgentCapabilityMixin
-        from agent_py_agent.agent.subagents.models import SubAgentTask, CapabilityRequest
+        from agent_py_agent.agent.subagents.models import CapabilityRequest, SubAgentTask
 
         class MockManager(SubAgentCapabilityMixin):
             def __init__(self):
@@ -269,7 +270,7 @@ class TestCapabilityRoutingDryRun:
     def test_route_capability_request_with_hits_returns_would_grant(self, tmp_path: Path):
         """测试有命中时返回 WOULD_GRANT。"""
         from agent_py_agent.agent.subagents.manager_capabilities import SubAgentCapabilityMixin
-        from agent_py_agent.agent.subagents.models import SubAgentTask, CapabilityRequest
+        from agent_py_agent.agent.subagents.models import CapabilityRequest, SubAgentTask
 
         class MockManager(SubAgentCapabilityMixin):
             def __init__(self):

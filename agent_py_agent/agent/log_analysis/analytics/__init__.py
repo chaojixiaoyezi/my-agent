@@ -14,7 +14,7 @@ from .detectors import (
     waf_attack_success_candidate,
     web_to_process_anomaly,
 )
-from .security_rules import DetectorRule, SOFT_DETECTOR_RULES, detector_ids, get_rule
+from .security_rules import SOFT_DETECTOR_RULES, DetectorRule, detector_ids, get_rule
 
 __all__ = [
     "DETECTORS",

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 """Tests for agent_py_agent.agent.log_analysis.cases.case_store."""
 
-import pytest
 from pathlib import Path
+
+import pytest
 
 from agent_py_agent.agent.log_analysis.cases.case_store import (
     CaseStore,
@@ -16,7 +17,6 @@ from agent_py_agent.agent.log_analysis.models import (
     EvidenceRef,
     Finding,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

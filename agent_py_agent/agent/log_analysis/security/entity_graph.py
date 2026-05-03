@@ -2,8 +2,9 @@ from __future__ import annotations
 
 """Entity graph projection for findings and cases."""
 
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from ..models import CaseRecord, EvidenceRef, Finding
 

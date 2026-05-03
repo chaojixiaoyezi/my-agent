@@ -16,7 +16,12 @@ from ...agent.gateway import (
     gateway_response_path,
     new_gateway_request_id,
 )
-from ...agent.memory_archive import CompressionSnapshot, RawMemoryEvent, append_raw_event, append_snapshot
+from ...agent.memory_archive import (
+    CompressionSnapshot,
+    RawMemoryEvent,
+    append_raw_event,
+    append_snapshot,
+)
 from ..scenario_utils import (
     create_scenario_workspace,
     load_scenario_agent,

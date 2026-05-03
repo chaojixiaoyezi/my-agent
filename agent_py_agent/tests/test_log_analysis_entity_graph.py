@@ -12,7 +12,6 @@ from agent_py_agent.agent.log_analysis.security.entity_graph import (
     build_entity_graph,
 )
 
-
 # ---------------------------------------------------------------------------
 # EntityNode tests
 # ---------------------------------------------------------------------------

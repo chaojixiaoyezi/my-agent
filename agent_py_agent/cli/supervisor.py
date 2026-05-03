@@ -16,14 +16,14 @@ import sys
 import time
 from pathlib import Path
 
+from ..agent.gateway import gateway_paths, gateway_running
+from ..agent.gateway_parts.daemon_control import get_running_pid, read_pid_record
 from ..agent.gateway_parts.supervisor import (
     is_supervisor_running,
     run_supervisor,
     stop_supervisor,
 )
-from .common import make_agent, ROOT
-from ..agent.gateway import gateway_paths, gateway_running
-from ..agent.gateway_parts.daemon_control import get_running_pid, read_pid_record
+from .common import ROOT, make_agent
 
 
 def cmd_supervisor_start(args) -> int:
@@ -32,7 +32,7 @@ def cmd_supervisor_start(args) -> int:
     paths = gateway_paths(agent)
 
     if is_supervisor_running(args.config):
-        print(f"supervisor 已在运行")
+        print("supervisor 已在运行")
         return 0
 
     supervisor_pid_path = paths.root / "supervisor.pid"
@@ -226,7 +226,7 @@ def cmd_start_all(args) -> int:
                 creationflags=creationflags,
                 start_new_session=start_new_session,
             )
-        print(f"适配器启动中...")
+        print("适配器启动中...")
 
     print("start-all 完成。运行 `my-agent gateway status` 查看状态。")
     return 0

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from agent_py_agent.agent.subagents.models import CapabilityRequest, SubAgentParsedOutput
 from agent_py_agent.agent.subagents.policy_checks import (
     _action_for_issue,
     _commands_for_action,
@@ -19,9 +20,7 @@ from agent_py_agent.agent.subagents.policy_checks import (
     _status_from_structured_output,
     _verification_from_runner_status,
 )
-from agent_py_agent.agent.subagents.models import CapabilityRequest, SubAgentParsedOutput
 from agent_py_agent.agent.subagents.reports import DueCheckIssue
-
 
 # ── _status_from_structured_output 测试 ───────────────────────────────────
 

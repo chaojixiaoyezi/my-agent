@@ -9,7 +9,7 @@ LocalStore 已经拆成几个职责清楚的小文件。
 
 from .events import LocalStoreEventMixin
 from .maintenance import LocalStoreMaintenanceMixin
-from .models import LocalSearchResult, LocalStoreEvent, LocalTimelineItem, PREVIEW_CHARS
+from .models import PREVIEW_CHARS, LocalSearchResult, LocalStoreEvent, LocalTimelineItem
 from .records import LocalStoreRecordMixin
 from .schema import LocalStoreSchemaMixin
 from .search import LocalStoreSearchMixin

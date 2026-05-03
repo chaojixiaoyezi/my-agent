@@ -5,6 +5,7 @@
 import json
 from pathlib import Path
 from unittest.mock import Mock, patch
+
 import pytest
 
 from agent_py_agent.agent.startup_recovery import (
@@ -419,8 +420,8 @@ class TestStatusCommand:
         """测试 status 命令显示进行中任务区块。"""
         # 这个测试需要完整的命令行集成测试
         # 这里只测试数据模型部分
-        from agent_py_agent.cli.local_commands import cmd_status
         from agent_py_agent.agent.startup_recovery import ActiveWorkSummary
+        from agent_py_agent.cli.local_commands import cmd_status
 
         # 验证导入成功
         assert cmd_status is not None

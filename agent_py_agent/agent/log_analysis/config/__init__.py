@@ -5,16 +5,16 @@
 __init__.py 把两个子模块的公开名称全部 re-export，保证拆包后上游代码不需要修改。
 """
 
+from .config_loading import (
+    load_log_analysis_config,
+    normalize_log_analysis_config,
+)
 from .config_model import (
     LogAnalysisConfig,
     LogAnalysisConfigWarning,
     default_log_analysis_config_path,
     default_log_analysis_workspace_root,
     resolve_log_analysis_data_dir,
-)
-from .config_loading import (
-    load_log_analysis_config,
-    normalize_log_analysis_config,
 )
 
 __all__ = [

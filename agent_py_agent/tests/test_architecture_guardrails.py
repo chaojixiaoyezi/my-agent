@@ -11,16 +11,15 @@ import ast
 import subprocess
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 STAR_IMPORT_BASELINE: dict[str, int] = {}
 
 ENTRYPOINT_LINE_LIMITS = {
     "agent_py_agent/cli/parser.py": 120,
-    "agent_py_agent/cli/chat.py": 989,
-    "agent_py_agent/agent/agent_core/dispatch_mixin.py": 889,
-    "agent_py_agent/agent/subagents/manager_base.py": 744,
+    "agent_py_agent/cli/chat.py": 1017,
+    "agent_py_agent/agent/agent_core/dispatch_mixin.py": 895,
+    "agent_py_agent/agent/subagents/manager_base.py": 751,
     "agent_py_agent/agent/subagents/manager_patch.py": 794,
     "agent_py_agent/agent/settings/config.py": 751,
     "agent_py_agent/agent/memory_archive/query.py": 839,

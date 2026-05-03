@@ -13,7 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from ..tooling.models import BaseTool, ToolExecutionResult, ToolSpec
-from .storage import DEFAULT_QUERY_LIMIT, LocalLogStore, QueryCriteria, QueryResult, execute_security_query
+from .storage import (
+    DEFAULT_QUERY_LIMIT,
+    LocalLogStore,
+    QueryCriteria,
+    QueryResult,
+    execute_security_query,
+)
 
 MAX_TRACE_CASE_QUERIES = 20
 

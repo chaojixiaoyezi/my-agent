@@ -8,7 +8,10 @@ import json
 from agent_py_agent.agent.log_analysis.analytics.detectors import run_soft_detectors
 from agent_py_agent.agent.log_analysis.cases.case_store import CaseStore
 from agent_py_agent.agent.log_analysis.models import EvidenceRef, Finding
-from agent_py_agent.agent.log_analysis.reports import first_response_report_content, forensic_package_content
+from agent_py_agent.agent.log_analysis.reports import (
+    first_response_report_content,
+    forensic_package_content,
+)
 from agent_py_agent.agent.log_analysis.security.correlation import build_route_draft
 
 

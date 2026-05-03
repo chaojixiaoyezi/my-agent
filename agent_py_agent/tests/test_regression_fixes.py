@@ -21,7 +21,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-
 # ============================================================
 # Regression 1: max_tool_rounds from task_attributes (a413083)
 # ============================================================
@@ -236,8 +235,9 @@ def test_regression_tool_path_no_control_chars():
 
 def test_regression_tool_registry_rejects_non_dict_payload():
     """验证工具注册层拒绝非对象 payload"""
-    from agent_py_agent.agent.tooling.registry import ToolRegistry
     from pathlib import Path
+
+    from agent_py_agent.agent.tooling.registry import ToolRegistry
 
     registry = ToolRegistry(
         Path.cwd(),
@@ -267,8 +267,9 @@ def test_regression_tool_registry_rejects_non_dict_payload():
 
 def test_regression_tool_registry_rejects_unknown_tool():
     """验证工具注册层拒绝未知工具名"""
-    from agent_py_agent.agent.tooling.registry import ToolRegistry
     from pathlib import Path
+
+    from agent_py_agent.agent.tooling.registry import ToolRegistry
 
     registry = ToolRegistry(
         Path.cwd(),
@@ -351,8 +352,8 @@ def test_regression_write_boundary_symlink_resolution():
 
 def test_regression_jsonl_append_with_lock():
     """验证 JSONL 追加使用锁机制"""
-    import tempfile
     import os
+    import tempfile
     import threading
 
     jsonl_path = Path(tempfile.mktemp(suffix=".jsonl"))
@@ -428,10 +429,11 @@ def test_regression_qq_adapter_urllib_import():
     """验证 QQ adapter 的 urllib import 在文件顶部（可在任何函数外导入）"""
     # 修复前：urllib 在文件底部 import，导致某些情况下 ImportError
     # 修复后：在文件顶部导入，可在任何地方使用
-    import agent_py_agent.agent.adapter.qq as qq_module
     # urllib.error 和 urllib.request 应该在模块级别可用
     # 检查模块源码中 urllib import 位置
     import inspect
+
+    import agent_py_agent.agent.adapter.qq as qq_module
     source = inspect.getsource(qq_module)
     # urllib 应该在文件前 500 字符内导入（顶部），而不是在文件末尾
     import_pos = source.find("import urllib")

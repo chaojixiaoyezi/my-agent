@@ -144,7 +144,7 @@ class MemoryReadReceipt:
     elapsed_ms: float = 0.0
     error: str = ""
 
-    def mark_now(self) -> "MemoryReadReceipt":
+    def mark_now(self) -> MemoryReadReceipt:
         """LLM contract: fills `read_at` with the current timestamp when it is empty.
 
         新手说明:

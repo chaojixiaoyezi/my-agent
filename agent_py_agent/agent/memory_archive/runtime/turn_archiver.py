@@ -7,21 +7,22 @@ archive_run_turn 是 SimpleAgent.run() 完成后用来把一轮对话写入冷�
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ..models import RawMemoryEvent, utc_now_iso
 from ..storage import append_raw_event
 from ..tokens import estimate_tokens
 from .event_builders import (
-    _message_event,
-    _tool_event,
     _content_hash,
     _event_id,
+    _message_event,
     _normalize_archive_level,
     _normalize_tool_call,
     _preview,
+    _tool_event,
 )
 
 

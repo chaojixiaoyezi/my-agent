@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import time
+
 from agent_py_agent.agent.local_storage.models import (
     PREVIEW_CHARS,
+    LocalSearchResult,
     LocalStoreEvent,
     LocalTimelineItem,
-    LocalSearchResult,
 )
 
 

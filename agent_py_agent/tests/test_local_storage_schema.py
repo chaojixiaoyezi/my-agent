@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import pytest
 import sqlite3
 import time
 from pathlib import Path
+
+import pytest
 
 from agent_py_agent.agent.local_storage.schema import LocalStoreSchemaMixin
 

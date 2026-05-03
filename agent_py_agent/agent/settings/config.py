@@ -10,10 +10,10 @@ from __future__ import annotations
 这里坚持只用标准库，目的是让项目在 Windows / Linux / macOS 上都能轻装运行。
 """
 
-from dataclasses import dataclass, field
 import os
-from pathlib import Path
 import re
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .memory import normalize_agent_memory_config

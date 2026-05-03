@@ -8,8 +8,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 
 from ..agents.contracts import (
     DEFAULT_ACCEPTANCE_CHECKS,
@@ -17,7 +18,6 @@ from ..agents.contracts import (
     normalize_evidence_refs,
 )
 from ..agents.summaries import render_case_summary, summarize_case
-
 
 DEFAULT_REVIEWER_TOOLS = ["evidence_read"]
 

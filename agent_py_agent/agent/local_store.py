@@ -10,6 +10,7 @@ LocalStore 的真实能力已经按 schema、records、search、events、mainten
 from pathlib import Path
 
 from .local_storage import (
+    PREVIEW_CHARS,
     LocalSearchResult,
     LocalStoreEvent,
     LocalStoreEventMixin,
@@ -18,7 +19,6 @@ from .local_storage import (
     LocalStoreSchemaMixin,
     LocalStoreSearchMixin,
     LocalTimelineItem,
-    PREVIEW_CHARS,
 )
 from .task_registry import TaskRegistry
 

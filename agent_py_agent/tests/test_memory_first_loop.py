@@ -12,11 +12,16 @@ from pathlib import Path
 
 import pytest
 
+import agent_py_agent.agent.agent_core.runtime_mixin as runtime_mixin
 from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.memory_archive import CompressionSnapshot, RawMemoryEvent, append_raw_event, write_compression_snapshot
-import agent_py_agent.agent.agent_core.runtime_mixin as runtime_mixin
+from agent_py_agent.agent.memory_archive import (
+    CompressionSnapshot,
+    RawMemoryEvent,
+    append_raw_event,
+    write_compression_snapshot,
+)
 
 
 def _read_jsonl(path: Path) -> list[dict]:

@@ -7,14 +7,13 @@ from __future__ import annotations
 这里负责把 YAML 里的字符串、数字、开关整理成 LogAnalysisConfig，并记录哪些字段被回退。
 """
 
+import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-import re
 from typing import Any
 
 from ..settings.config import load_simple_yaml
-
 
 _MISSING = object()
 _INT_PATTERN = re.compile(r"-?[0-9]+")

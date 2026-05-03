@@ -9,13 +9,20 @@ from pathlib import Path
 
 import pytest
 
+from agent_py_agent.agent.capability.router import CapabilityCard, CapabilitySearchHit
+from agent_py_agent.agent.capability_config import CapabilityConfig
+from agent_py_agent.agent.subagents.models import (
+    CapabilityRequest,
+    SubAgentParsedOutput,
+    SubAgentTask,
+)
 from agent_py_agent.agent.subagents.policies import (
     _action_for_issue,
     _capability_hit_is_confident,
     _capability_request_query,
     _commands_for_action,
-    _default_forbidden_write_roots,
     _dedupe_granted_cards,
+    _default_forbidden_write_roots,
     _execution_context_instructions,
     _filter_action_plan_items,
     _is_active,
@@ -26,11 +33,7 @@ from agent_py_agent.agent.subagents.policies import (
     _severity_weight,
     filter_board_items,
 )
-from agent_py_agent.agent.subagents.models import SubAgentTask, SubAgentParsedOutput, CapabilityRequest
 from agent_py_agent.agent.subagents.reports import ActionPlanItem, DueCheckIssue, SubAgentBoardItem
-from agent_py_agent.agent.capability.router import CapabilityCard, CapabilitySearchHit
-from agent_py_agent.agent.capability_config import CapabilityConfig
-
 
 # ── filter_board_items 测试 ────────────────────────────────────────────────
 

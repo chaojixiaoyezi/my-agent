@@ -10,11 +10,10 @@ from pathlib import Path
 import pytest
 
 from agent_py_agent.agent.memory_routing.context import (
-    _resolve_root,
     _resolve_relative_path,
+    _resolve_root,
     build_routed_memory_context,
 )
-
 
 # ── _resolve_root 测试 ─────────────────────────────────────────────────────
 

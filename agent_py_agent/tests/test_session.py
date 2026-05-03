@@ -3,14 +3,15 @@
 测试 Session 数据类、SessionManager 和 resume_session 功能。
 """
 import json
+import time
 from pathlib import Path
 from unittest.mock import Mock, patch
-import pytest
-import time
 
-from agent_py_agent.agent.session import Session, generate_session_id, SessionManager
+import pytest
+
+from agent_py_agent.agent.session import Session, SessionManager, generate_session_id
 from agent_py_agent.agent.session.manager import SessionManager
-from agent_py_agent.agent.session.resume import resume_session, format_resume_context
+from agent_py_agent.agent.session.resume import format_resume_context, resume_session
 
 
 @pytest.fixture

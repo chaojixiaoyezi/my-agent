@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import json
-import pytest
 import sqlite3
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from agent_py_agent.agent.local_storage.schema import LocalStoreSchemaMixin
-from agent_py_agent.agent.local_storage.records import LocalStoreRecordMixin
-from agent_py_agent.agent.local_storage.search import LocalStoreSearchMixin
+import pytest
+
 from agent_py_agent.agent.local_storage.events import LocalStoreEventMixin
 from agent_py_agent.agent.local_storage.models import LocalSearchResult
+from agent_py_agent.agent.local_storage.records import LocalStoreRecordMixin
+from agent_py_agent.agent.local_storage.schema import LocalStoreSchemaMixin
+from agent_py_agent.agent.local_storage.search import LocalStoreSearchMixin
 
 
 class MinimalStore(

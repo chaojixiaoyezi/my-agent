@@ -11,7 +11,13 @@ import time
 from typing import Any
 
 from ...memory_routing import load_routes, match_routes, resolve_required_paths
-from ..models import CapabilityGap, CapabilityGrant, CapabilityRequest, SubAgentTask, VerificationEvidence
+from ..models import (
+    CapabilityGap,
+    CapabilityGrant,
+    CapabilityRequest,
+    SubAgentTask,
+    VerificationEvidence,
+)
 from ..utils import _merge_list, _new_id
 
 

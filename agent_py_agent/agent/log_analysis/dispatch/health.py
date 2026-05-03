@@ -2,8 +2,9 @@ from __future__ import annotations
 
 """Parent-session health summaries for log-analysis dispatch."""
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from typing import Any, Mapping
+from typing import Any
 
 from ..agents.prompts import SecurityPromptConfig
 from .budgets import DispatchBudget

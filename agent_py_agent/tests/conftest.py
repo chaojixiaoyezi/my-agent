@@ -14,7 +14,6 @@ from agent_py_agent.agent.log_analysis.models import CaseRecord, EvidenceRef, Fi
 from agent_py_agent.agent.log_analysis.security.attack_chain import AttackChainStep
 from agent_py_agent.agent.subagents.models import SubAgentTask
 
-
 # ---------------------------------------------------------------------------
 # Finding / Evidence fixtures
 # ---------------------------------------------------------------------------

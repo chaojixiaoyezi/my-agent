@@ -2,20 +2,21 @@
 from __future__ import annotations
 
 import pytest
+
 from agent_py_agent.agent.log_analysis.agents.summaries import (
+    CASE_FIELDS,
+    EVIDENCE_REF_FIELDS,
+    ROUTE_FIELDS,
     CaseSummary,
-    summarize_case,
-    render_case_summary,
-    case_summary_for_prompt,
-    _compact_text,
     _compact_list,
     _compact_mapping,
+    _compact_text,
     _summarize_case_fields,
     _summarize_evidence,
     _summarize_route,
-    CASE_FIELDS,
-    ROUTE_FIELDS,
-    EVIDENCE_REF_FIELDS,
+    case_summary_for_prompt,
+    render_case_summary,
+    summarize_case,
 )
 
 

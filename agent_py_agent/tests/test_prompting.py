@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from agent_py_agent.agent.memory_store import MemoryRecord
 from agent_py_agent.agent.prompting import PromptBuilder
 from agent_py_agent.agent.settings import AgentConfig
-from agent_py_agent.agent.memory_store import MemoryRecord
 
 
 class TestPromptBuilderInit:

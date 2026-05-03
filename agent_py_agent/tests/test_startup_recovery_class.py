@@ -102,7 +102,10 @@ class TestFormatActiveWorkSummary:
 
     def test_format_empty_summary(self, tmp_path: Path):
         """空摘要格式化。"""
-        from agent_py_agent.agent.startup_recovery import ActiveWorkSummary, format_active_work_summary
+        from agent_py_agent.agent.startup_recovery import (
+            ActiveWorkSummary,
+            format_active_work_summary,
+        )
 
         summary = ActiveWorkSummary()
 
@@ -112,7 +115,10 @@ class TestFormatActiveWorkSummary:
 
     def test_format_gateway_alive(self, tmp_path: Path):
         """Gateway 运行中时格式化。"""
-        from agent_py_agent.agent.startup_recovery import ActiveWorkSummary, format_active_work_summary
+        from agent_py_agent.agent.startup_recovery import (
+            ActiveWorkSummary,
+            format_active_work_summary,
+        )
 
         summary = ActiveWorkSummary(gateway_alive=True, gateway_pid=12345)
 
@@ -123,7 +129,10 @@ class TestFormatActiveWorkSummary:
 
     def test_format_gateway_dead(self, tmp_path: Path):
         """Gateway 未运行时格式化。"""
-        from agent_py_agent.agent.startup_recovery import ActiveWorkSummary, format_active_work_summary
+        from agent_py_agent.agent.startup_recovery import (
+            ActiveWorkSummary,
+            format_active_work_summary,
+        )
 
         summary = ActiveWorkSummary(gateway_alive=False)
 
@@ -133,7 +142,10 @@ class TestFormatActiveWorkSummary:
 
     def test_format_active_tasks(self, tmp_path: Path):
         """有活动任务时格式化。"""
-        from agent_py_agent.agent.startup_recovery import ActiveWorkSummary, format_active_work_summary
+        from agent_py_agent.agent.startup_recovery import (
+            ActiveWorkSummary,
+            format_active_work_summary,
+        )
 
         summary = ActiveWorkSummary(active_task_count=3)
 
@@ -144,7 +156,10 @@ class TestFormatActiveWorkSummary:
 
     def test_format_stale_requests(self, tmp_path: Path):
         """有遗留请求时格式化。"""
-        from agent_py_agent.agent.startup_recovery import ActiveWorkSummary, format_active_work_summary
+        from agent_py_agent.agent.startup_recovery import (
+            ActiveWorkSummary,
+            format_active_work_summary,
+        )
 
         summary = ActiveWorkSummary(
             stale_request_count=2,
@@ -157,7 +172,10 @@ class TestFormatActiveWorkSummary:
 
     def test_format_pending_notifications(self, tmp_path: Path):
         """有待处理通知时格式化。"""
-        from agent_py_agent.agent.startup_recovery import ActiveWorkSummary, format_active_work_summary
+        from agent_py_agent.agent.startup_recovery import (
+            ActiveWorkSummary,
+            format_active_work_summary,
+        )
 
         summary = ActiveWorkSummary(pending_notifications=5)
 
@@ -167,7 +185,10 @@ class TestFormatActiveWorkSummary:
 
     def test_format_pending_dispatch(self, tmp_path: Path):
         """有待处理 dispatch 时格式化。"""
-        from agent_py_agent.agent.startup_recovery import ActiveWorkSummary, format_active_work_summary
+        from agent_py_agent.agent.startup_recovery import (
+            ActiveWorkSummary,
+            format_active_work_summary,
+        )
 
         summary = ActiveWorkSummary(dispatch_pending=True, dispatch_rounds=10)
 
@@ -178,7 +199,10 @@ class TestFormatActiveWorkSummary:
 
     def test_format_recent_tasks(self, tmp_path: Path):
         """最近任务列表格式化。"""
-        from agent_py_agent.agent.startup_recovery import ActiveWorkSummary, format_active_work_summary
+        from agent_py_agent.agent.startup_recovery import (
+            ActiveWorkSummary,
+            format_active_work_summary,
+        )
 
         summary = ActiveWorkSummary(
             recent_tasks=[

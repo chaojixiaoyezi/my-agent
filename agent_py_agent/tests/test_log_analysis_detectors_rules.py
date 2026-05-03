@@ -12,7 +12,10 @@ from agent_py_agent.agent.log_analysis.analytics.detectors import (
 )
 from agent_py_agent.agent.log_analysis.cases.case_store import CaseStore, dedup_key_for_finding
 from agent_py_agent.agent.log_analysis.models import EvidenceRef, Finding, QueryPlan
-from agent_py_agent.agent.log_analysis.reports import first_response_report_content, forensic_package_content
+from agent_py_agent.agent.log_analysis.reports import (
+    first_response_report_content,
+    forensic_package_content,
+)
 from agent_py_agent.agent.log_analysis.security.correlation import build_route_draft
 
 

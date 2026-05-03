@@ -2,9 +2,9 @@ from __future__ import annotations
 
 """Security prompt switch for log-analysis workflows."""
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from typing import Any, Mapping
-
+from typing import Any
 
 SECURITY_PROMPT_MODES = {"off", "minimal", "analyst", "incident"}
 SECURITY_SUBAGENT_ROLES = {
@@ -27,7 +27,7 @@ class SecurityPromptConfig:
     security_prompt_mode: str = "off"
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, Any] | None) -> "SecurityPromptConfig":
+    def from_mapping(cls, payload: Mapping[str, Any] | None) -> SecurityPromptConfig:
         if not payload:
             return cls()
         enabled = bool(payload.get("security_prompt_enabled", False))

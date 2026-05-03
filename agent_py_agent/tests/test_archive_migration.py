@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 
@@ -15,7 +16,9 @@ class TestDerivedArchiveFields:
 
     def test_derive_from_turn_range(self):
         """测试从 turn_range 推导字段。"""
-        from agent_py_agent.agent.memory_archive.query.archive_helpers import _derived_archive_fields
+        from agent_py_agent.agent.memory_archive.query.archive_helpers import (
+            _derived_archive_fields,
+        )
 
         payload = {
             "turn_range": {
@@ -36,7 +39,9 @@ class TestDerivedArchiveFields:
 
     def test_derive_from_dispatch_events(self):
         """测试从 dispatch_events 推导字段。"""
-        from agent_py_agent.agent.memory_archive.query.archive_helpers import _derived_archive_fields
+        from agent_py_agent.agent.memory_archive.query.archive_helpers import (
+            _derived_archive_fields,
+        )
 
         payload = {
             "dispatch_events": [
@@ -59,7 +64,9 @@ class TestDerivedArchiveFields:
 
     def test_derive_prefers_turn_range(self):
         """测试 turn_range 优先于 dispatch_events。"""
-        from agent_py_agent.agent.memory_archive.query.archive_helpers import _derived_archive_fields
+        from agent_py_agent.agent.memory_archive.query.archive_helpers import (
+            _derived_archive_fields,
+        )
 
         payload = {
             "turn_range": {"request_id": "turn_range_req"},
@@ -72,14 +79,18 @@ class TestDerivedArchiveFields:
 
     def test_derive_empty_payload(self):
         """测试空 payload。"""
-        from agent_py_agent.agent.memory_archive.query.archive_helpers import _derived_archive_fields
+        from agent_py_agent.agent.memory_archive.query.archive_helpers import (
+            _derived_archive_fields,
+        )
 
         result = _derived_archive_fields({})
         assert result == {}
 
     def test_derive_ignores_non_dict(self):
         """测试忽略非字典类型的字段。"""
-        from agent_py_agent.agent.memory_archive.query.archive_helpers import _derived_archive_fields
+        from agent_py_agent.agent.memory_archive.query.archive_helpers import (
+            _derived_archive_fields,
+        )
 
         payload = {
             "turn_range": "not a dict",

@@ -3,11 +3,11 @@ from __future__ import annotations
 """Compact summaries for parent-session and subagent handoff."""
 
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from .contracts import normalize_evidence_refs
-
 
 CASE_FIELDS = (
     "case_id",

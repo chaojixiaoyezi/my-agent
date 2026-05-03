@@ -27,7 +27,6 @@ from agent_py_agent.agent.subagents.result_processors import (
     _write_runner_result_files,
 )
 
-
 # ── 测试夹具 ──────────────────────────────────────────────────────────────
 
 @pytest.fixture

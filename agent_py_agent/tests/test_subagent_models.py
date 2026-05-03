@@ -2,26 +2,27 @@
 from __future__ import annotations
 
 import time
+
 from agent_py_agent.agent.subagents.models import (
-    TaskStatus,
     DISPATCH_INELIGIBLE_STATUSES,
-    QualityContract,
-    ContextManifest,
-    SubAgentCard,
-    CapabilityRequest,
-    CapabilityGrant,
     CapabilityGap,
+    CapabilityGrant,
+    CapabilityRequest,
+    ChannelProbeCheck,
+    ChannelProbeReport,
+    ChannelProbeResult,
+    ContextManifest,
+    LearningCandidate,
+    QualityContract,
+    SubAgentCard,
+    SubAgentExecutionContext,
+    SubAgentParsedOutput,
+    SubAgentRunnerResult,
+    SubAgentTask,
+    TakeoverRecord,
+    TaskStatus,
     VerificationEvidence,
     WorkOrderValidation,
-    TakeoverRecord,
-    ChannelProbeCheck,
-    ChannelProbeResult,
-    ChannelProbeReport,
-    SubAgentExecutionContext,
-    SubAgentRunnerResult,
-    SubAgentParsedOutput,
-    SubAgentTask,
-    LearningCandidate,
 )
 
 

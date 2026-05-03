@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import random
 import time
+from collections.abc import Callable
 from functools import wraps
-from typing import TYPE_CHECKING, Callable, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from .exceptions import ConcurrencyConflictError
 

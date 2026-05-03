@@ -15,15 +15,15 @@ from agent_py_agent.agent.log_analysis.dispatch.work_orders import (
     NO_EVIDENCE_ISSUE,
     PARENT_FINAL_GATE,
     PLAN_NOT_READY_ISSUE,
+    LogAnalysisWorkOrderPlan,
     SubagentWorkOrder,
     SubagentWorkOrderCreationResult,
-    LogAnalysisWorkOrderPlan,
 )
 from agent_py_agent.agent.log_analysis.dispatch.work_orders.planning import (
-    _get,
-    _case_id,
-    _merge_unique,
     _acceptance_checks,
+    _case_id,
+    _get,
+    _merge_unique,
 )
 
 

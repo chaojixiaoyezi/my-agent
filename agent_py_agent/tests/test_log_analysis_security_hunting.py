@@ -17,7 +17,6 @@ from agent_py_agent.agent.log_analysis.security.hunting import (
     retrohunt_query_plan,
 )
 
-
 # ---------------------------------------------------------------------------
 # HuntQuery dataclass
 # ---------------------------------------------------------------------------
@@ -100,7 +99,7 @@ class TestBuildSeedHuntQueries:
         assert len(ids) == len(set(ids))
 
     def test_ip_seed_query_ids_contain_seed_digest(self) -> None:
-        seed_digest = hashlib.sha256("ip:10.0.0.1".encode("utf-8")).hexdigest()[:8]
+        seed_digest = hashlib.sha256(b"ip:10.0.0.1").hexdigest()[:8]
         queries = build_seed_hunt_queries("ip", "10.0.0.1")
         for q in queries:
             assert seed_digest in q.query_id

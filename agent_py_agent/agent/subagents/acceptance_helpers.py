@@ -7,12 +7,12 @@ from __future__ import annotations
 主 mixin 只需要调用这些函数并拼接结果。
 """
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from .models import SubAgentTask
-from .reports import AcceptanceReviewFinding
 from .parsing import _dict_list, _string_list
+from .reports import AcceptanceReviewFinding
 
 
 def _build_readiness_findings(

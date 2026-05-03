@@ -12,7 +12,7 @@ class TestDispatchLoopExceptions:
 
     def test_task_not_found_during_dispatch(self, tmp_path: Path):
         """任务不存在时的异常处理。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import dispatch_loop, DispatchLoopReport
+        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -34,7 +34,7 @@ class TestDispatchLoopExceptions:
 
     def test_corrupted_task_file(self, tmp_path: Path):
         """任务文件损坏时的行为。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import dispatch_loop, DispatchLoopReport
+        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -56,8 +56,11 @@ class TestDispatchLoopExceptions:
 
     def test_llm_call_failure_in_dispatch(self, tmp_path: Path):
         """LLM 调用失败时的降级处理。"""
-        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector, FailureIntrospection
         from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
+        from agent_py_agent.agent.agent_core.failure_introspector import (
+            FailureIntrospection,
+            FailureIntrospector,
+        )
 
         # 模拟 agent 为 None
         introspector = FailureIntrospector(agent=None)
@@ -82,8 +85,11 @@ class TestDispatchLoopExceptions:
 
     def test_llm_json_parse_failure(self, tmp_path: Path):
         """LLM 返回 JSON 解析失败时的降级。"""
-        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector, FailureIntrospection
         from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
+        from agent_py_agent.agent.agent_core.failure_introspector import (
+            FailureIntrospection,
+            FailureIntrospector,
+        )
 
         agent = MagicMock()
         # 模拟 LLM 返回无效 JSON
@@ -112,7 +118,7 @@ class TestDispatchLoopExceptions:
 
     def test_all_tasks_failed_and_no_retry(self, tmp_path: Path):
         """所有任务都失败且不允许重试时的处理。"""
-        from agent_py_agent.agent.agent_core.dispatch_loop import dispatch_loop, DispatchLoopReport
+        from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "no_retry"  # 不重试策略
@@ -211,8 +217,8 @@ class TestFailureIntrospectorDegradation:
 
     def test_introspector_no_agent_fallback(self, tmp_path: Path):
         """agent 未设置时降级到规则分类。"""
-        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
         from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
+        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
 
         introspector = FailureIntrospector(agent=None)
 
@@ -233,8 +239,8 @@ class TestFailureIntrospectorDegradation:
 
     def test_introspector_llm_exception_fallback(self, tmp_path: Path):
         """LLM 调用抛出异常时降级。"""
-        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
         from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
+        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
 
         agent = MagicMock()
         agent.run.side_effect = RuntimeError("LLM API failed")
@@ -262,8 +268,8 @@ class TestFailureIntrospectorDegradation:
 
     def test_introspector_invalid_json_response(self, tmp_path: Path):
         """LLM 返回无效 JSON 时的降级。"""
-        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
         from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
+        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
 
         agent = MagicMock()
         agent.run.return_value = MagicMock(response="This is not JSON at all")
@@ -290,8 +296,8 @@ class TestFailureIntrospectorDegradation:
 
     def test_introspector_missing_keys_in_response(self, tmp_path: Path):
         """LLM 返回 JSON 缺少必需字段时的降级。"""
-        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
         from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
+        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
 
         agent = MagicMock()
         # JSON 缺少必需字段
@@ -317,8 +323,8 @@ class TestFailureIntrospectorDegradation:
 
     def test_introspector_fallback_includes_params(self, tmp_path: Path):
         """降级时包含规则分类的参数建议。"""
-        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
         from agent_py_agent.agent.agent_core.failure_analyzer import FailureAnalysis
+        from agent_py_agent.agent.agent_core.failure_introspector import FailureIntrospector
 
         introspector = FailureIntrospector(agent=None)
 

@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..log_analysis.capabilities import SECURITY_TOOL_NAMES, has_security_tool_capability
 from .filesystem import (
     AppendFileTool,
     ListFilesTool,
@@ -20,8 +21,6 @@ from .filesystem import (
     SearchTextTool,
     WriteFileTool,
 )
-from .shell import ShellTool
-from ..log_analysis.capabilities import SECURITY_TOOL_NAMES, has_security_tool_capability
 from .models import (
     BaseTool,
     HybridToolRetriever,
@@ -31,6 +30,7 @@ from .models import (
     VectorToolSearchProvider,
 )
 from .parser import parse_xmlish_tool_calls
+from .shell import ShellTool
 from .web import FetchUrlTool, HttpRequestTool
 from .write_boundary import validate_write_boundary
 
@@ -88,7 +88,11 @@ class ToolRegistry:
         self.register(FetchUrlTool(max_chars=web_max_chars, timeout=http_timeout))
         self.register(HttpRequestTool(max_chars=web_max_chars, timeout=http_timeout))
         self.register(ShellTool(self.workspace_root, default_timeout=shell_tool_timeout))
-        from ..log_analysis.tools import SecurityHuntIpTool, SecurityQueryTool, SecurityTraceCaseTool
+        from ..log_analysis.tools import (
+            SecurityHuntIpTool,
+            SecurityQueryTool,
+            SecurityTraceCaseTool,
+        )
 
         self.register(SecurityQueryTool(self.workspace_root))
         self.register(SecurityHuntIpTool(self.workspace_root))

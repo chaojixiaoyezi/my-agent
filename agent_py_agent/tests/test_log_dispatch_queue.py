@@ -17,19 +17,18 @@ from typing import Any
 import pytest
 
 from agent_py_agent.agent.log_analysis.dispatch.queue import (
-    InvestigationQueue,
-    DispatchRequest,
+    ACTIVE_STATUSES,
+    AWAITING_REVIEW,
+    DISPATCHED,
+    FAILED,
     PENDING_INVESTIGATION,
     QUEUED,
-    DISPATCHED,
-    AWAITING_REVIEW,
-    REVIEWED,
     REJECTED,
-    FAILED,
-    ACTIVE_STATUSES,
+    REVIEWED,
+    DispatchRequest,
+    InvestigationQueue,
     _new_request_id,
 )
-
 
 # ============================================================
 # 测试用例：InvestigatonQueue 初始化

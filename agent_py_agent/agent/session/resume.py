@@ -98,7 +98,7 @@ def format_resume_context(resume_data: dict) -> str:
         return "会话不存在"
 
     lines = [
-        f"## 会话恢复上下文",
+        "## 会话恢复上下文",
         f"会话 ID: {session.session_id}",
         f"创建时间: {session.created_at}",
         f"最后活跃: {session.updated_at}",

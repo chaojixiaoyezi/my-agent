@@ -2,10 +2,11 @@ from __future__ import annotations
 
 """Correlation helpers that turn a case into a route draft."""
 
+import json
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-import json
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from ..models import CaseRecord, EvidenceRef, Finding, QueryPlan
 from .attack_chain import build_attack_chain, lateral_movement_signs

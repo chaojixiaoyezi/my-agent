@@ -6,13 +6,14 @@ from __future__ import annotations
 测试父代理调度逻辑：dispatch_subagents、watch mode、failure introspection、闭环检测。
 """
 
-import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
 from pathlib import Path
+from unittest.mock import MagicMock, PropertyMock, patch
+
+import pytest
 
 from agent_py_agent.agent.agent_core.dispatch_mixin import SimpleAgentDispatchMixin
-from agent_py_agent.agent.subagents.models import SubAgentTask, SubAgentRunnerResult
 from agent_py_agent.agent.subagent import DispatchReport
+from agent_py_agent.agent.subagents.models import SubAgentRunnerResult, SubAgentTask
 
 
 class TestDispatchMixinBasics:

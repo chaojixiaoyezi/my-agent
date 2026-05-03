@@ -8,10 +8,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 from .field_access import _basename, _field, _text, _to_int
-
 
 # ---------------------------------------------------------------------------
 # Field extractors

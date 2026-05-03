@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from agent_py_agent.agent.log_analysis.parsers.security_alert_v1 import SecurityAlertV1Parser
 from agent_py_agent.agent.log_analysis.parsers.base import ParserError
+from agent_py_agent.agent.log_analysis.parsers.security_alert_v1 import SecurityAlertV1Parser
 
 
 class TestSecurityAlertV1ParserInit:

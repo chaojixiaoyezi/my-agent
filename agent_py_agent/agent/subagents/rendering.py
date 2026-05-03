@@ -23,6 +23,7 @@ from .reports import (
     SubAgentBoardItem,
 )
 
+
 def render_board_markdown(board: SubAgentBoard) -> str:
     """渲染人类可扫视的红绿灯看板。"""
 

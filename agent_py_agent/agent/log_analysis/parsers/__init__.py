@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from .base import LogParser, ParsedRecord, ParseFailure, ParserError
 from .common import (
-    DEFAULT_PAYLOAD_MAX_CHARS,
     CHINESE_SECURITY_ALERT_FIELD_MAP,
+    DEFAULT_PAYLOAD_MAX_CHARS,
     SECURITY_ALERT_V1_KEYS,
     normalize_security_alert_v1,
 )

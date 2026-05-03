@@ -11,10 +11,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_py_agent.agent.subagents.rendering import (
-    render_action_apply_markdown,
-    render_action_plan_markdown,
     render_acceptance_record_markdown,
     render_acceptance_review_markdown,
+    render_action_apply_markdown,
+    render_action_plan_markdown,
     render_board_markdown,
     render_capability_route_markdown,
     render_due_check_markdown,

@@ -2,18 +2,19 @@
 
 测试通知模型、管理器、路由器和通道状态检测功能。
 """
+import time
 from pathlib import Path
 from unittest.mock import Mock, patch
+
 import pytest
-import time
 
 from agent_py_agent.agent.notification import (
+    ChannelStatusChecker,
     Notification,
     NotificationDelivery,
-    generate_notification_id,
     NotificationManager,
     NotificationRouter,
-    ChannelStatusChecker,
+    generate_notification_id,
 )
 
 
@@ -385,8 +386,9 @@ class TestNotificationRouter:
 
     def test_route_fallback_to_active_channel(self, router, tmp_path):
         """测试路由策略：发起通道离线，转活跃通道。"""
-        from agent_py_agent.agent.notification.models import Notification
         import json
+
+        from agent_py_agent.agent.notification.models import Notification
 
         # 发起通道离线，但有活跃的 feishu 会话
         router._channel_checker.register_status("chat", False)

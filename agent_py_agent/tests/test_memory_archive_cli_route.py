@@ -9,7 +9,11 @@ from pathlib import Path
 from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.gateway_parts import gateway_paths, gateway_response_path, log_gateway_payload
+from agent_py_agent.agent.gateway_parts import (
+    gateway_paths,
+    gateway_response_path,
+    log_gateway_payload,
+)
 from agent_py_agent.agent.memory_archive import (
     CompressionSnapshot,
     RawMemoryEvent,

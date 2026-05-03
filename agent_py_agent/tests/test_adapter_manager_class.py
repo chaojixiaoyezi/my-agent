@@ -170,8 +170,9 @@ class TestActiveChannel:
 
     def test_get_active_channel(self, tmp_path: Path):
         """验证获取活跃通道。"""
-        from agent_py_agent.agent.adapter.manager import ChannelManager
         import json
+
+        from agent_py_agent.agent.adapter.manager import ChannelManager
 
         session_file = tmp_path / "active_channels.json"
         session_file.write_text(json.dumps({"user_123": "feishu"}), encoding="utf-8")
@@ -184,8 +185,9 @@ class TestActiveChannel:
 
     def test_get_active_channel_missing_user(self, tmp_path: Path):
         """用户不存在时返回 None。"""
-        from agent_py_agent.agent.adapter.manager import ChannelManager
         import json
+
+        from agent_py_agent.agent.adapter.manager import ChannelManager
 
         session_file = tmp_path / "active_channels.json"
         session_file.write_text(json.dumps({"other_user": "feishu"}), encoding="utf-8")

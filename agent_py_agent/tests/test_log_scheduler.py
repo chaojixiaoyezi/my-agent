@@ -6,15 +6,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from agent_py_agent.agent.log_analysis.cases.case_store import CaseStore
 from agent_py_agent.agent.log_analysis.cases.scheduler import (
     CaseScheduler,
     ScheduleResult,
-    schedule_findings,
     findings_to_cases,
+    schedule_findings,
 )
-from agent_py_agent.agent.log_analysis.cases.case_store import CaseStore
-from agent_py_agent.agent.log_analysis.models import Finding, CaseRecord
-
+from agent_py_agent.agent.log_analysis.models import CaseRecord, Finding
 
 # ============================================================
 # 辅助函数

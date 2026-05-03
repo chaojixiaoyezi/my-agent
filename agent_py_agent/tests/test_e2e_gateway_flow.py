@@ -20,8 +20,8 @@ from agent_py_agent.agent.gateway_parts import (
     gateway_response_path,
     is_pid_alive,
     new_gateway_request_id,
-    write_gateway_request,
     read_json_file,
+    write_gateway_request,
 )
 from agent_py_agent.agent.gateway_parts.io import write_json_file
 

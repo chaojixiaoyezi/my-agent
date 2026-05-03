@@ -1,12 +1,12 @@
 """攻击链分析测试 - attack_chain.py 攻击链分析、阶段关联、因果推断。"""
 from __future__ import annotations
 
+from agent_py_agent.agent.log_analysis.models import CaseRecord, EvidenceRef, Finding
 from agent_py_agent.agent.log_analysis.security import (
     AttackChainStep,
     build_attack_chain,
     lateral_movement_signs,
 )
-from agent_py_agent.agent.log_analysis.models import CaseRecord, Finding, EvidenceRef
 
 
 class TestAttackChainStep:

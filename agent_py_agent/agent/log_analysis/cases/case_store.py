@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from ..models import CaseRecord, EvidenceRef, Finding, QueryPlan, utc_now_iso
 from ..storage.local_store import LocalLogStore
-
 
 Case = CaseRecord
 

@@ -93,7 +93,9 @@ class TestBuildSubagentRunnerRepairPrompt:
 
     def test_repair_prompt_contains_parse_error(self):
         """验证修复 prompt 包含解析错误信息。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_repair_prompt
+        from agent_py_agent.agent.agent_core.runner_prompts import (
+            _build_subagent_runner_repair_prompt,
+        )
 
         context = self._make_context("run_repair", task_dir="/tmp")
         prompt = _build_subagent_runner_repair_prompt(
@@ -109,7 +111,9 @@ class TestBuildSubagentRunnerRepairPrompt:
 
     def test_repair_prompt_default_error_message(self):
         """验证使用默认错误信息。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_repair_prompt
+        from agent_py_agent.agent.agent_core.runner_prompts import (
+            _build_subagent_runner_repair_prompt,
+        )
 
         context = self._make_context("run_default_error", task_dir="/tmp")
         prompt = _build_subagent_runner_repair_prompt(
@@ -122,7 +126,9 @@ class TestBuildSubagentRunnerRepairPrompt:
 
     def test_repair_prompt_includes_execution_context(self):
         """验证修复 prompt 包含执行上下文。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_repair_prompt
+        from agent_py_agent.agent.agent_core.runner_prompts import (
+            _build_subagent_runner_repair_prompt,
+        )
 
         context = self._make_context("run_ctx", "测试上下文", task_dir="/tmp", allowed_tools=["read_file"])
         prompt = _build_subagent_runner_repair_prompt(
@@ -268,7 +274,9 @@ class TestPromptOutputRequirements:
 
     def test_repair_prompt_forbids_tool_calls(self):
         """验证修复 prompt 要求不调用工具。"""
-        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_repair_prompt
+        from agent_py_agent.agent.agent_core.runner_prompts import (
+            _build_subagent_runner_repair_prompt,
+        )
 
         context = self._make_context("run_no_tool", task_dir="/tmp")
         prompt = _build_subagent_runner_repair_prompt(
