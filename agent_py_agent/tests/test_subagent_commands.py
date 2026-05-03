@@ -1,0 +1,464 @@
+"""subagent_commands CLI 命令测试。
+
+测试 subagent list/show/run/workflow 命令。
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+import pytest
+
+
+class TestCmdSubagents:
+    """测试 cmd_subagents 命令（子代理看板）。"""
+
+    def test_cmd_subagents_basic(self, tmp_path: Path):
+        """正常显示子代理看板。"""
+        from agent_py_agent.cli.subagents import cmd_subagents
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.capability_config = str(tmp_path / "capability.yaml")
+        args.limit = 10
+        args.all = False
+        args.status = None
+        args.owner = None
+        args.root_id = None
+        args.skill_dir = None
+
+        mock_agent = MagicMock()
+        mock_board = MagicMock()
+        mock_board.summary = {"total": 0}
+        mock_board.hot_list = []
+        mock_board.recent = []
+        mock_agent.subagents.write_board.return_value = mock_board
+
+        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent):
+            result = cmd_subagents(args)
+            assert result == 0
+
+    def test_cmd_subagents_with_items(self, tmp_path: Path):
+        """显示带有子代理项的看板。"""
+        from agent_py_agent.cli.subagents import cmd_subagents
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.capability_config = str(tmp_path / "capability.yaml")
+        args.limit = 10
+        args.all = False
+        args.status = None
+        args.owner = None
+        args.root_id = None
+        args.skill_dir = None
+
+        mock_item = MagicMock()
+        mock_item.id = "run_001"
+        mock_item.status = "RUNNING"
+        mock_item.verification_status = "pending"
+        mock_item.channel_status = "ok"
+        mock_item.depth = 0
+        mock_item.owner = "parent_agent"
+        mock_item.final_owner = None
+        mock_item.evidence_count = 2
+        mock_item.open_request_count = 0
+        mock_item.open_gap_count = 0
+        mock_item.risk_flags = []
+        mock_item.goal = "测试子代理任务"
+
+        mock_board = MagicMock()
+        mock_board.summary = {"total": 1, "running": 1}
+        mock_board.hot_list = [mock_item]
+        mock_board.recent = []
+        mock_agent = MagicMock()
+        mock_agent.subagents.write_board.return_value = mock_board
+
+        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent):
+            result = cmd_subagents(args)
+            assert result == 0
+
+
+class TestCmdSubagentsDueCheck:
+    """测试 cmd_subagents_due_check 命令。"""
+
+    def test_cmd_subagents_due_check_no_issues(self, tmp_path: Path):
+        """没有问题时显示提示。"""
+        from agent_py_agent.cli.subagents import cmd_subagents_due_check
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.capability_config = str(tmp_path / "capability.yaml")
+        args.limit = 10
+        args.all = False
+        args.skill_dir = None
+
+        mock_agent = MagicMock()
+        mock_report = MagicMock()
+        mock_report.summary = {"total": 0}
+        mock_report.issues = []
+        mock_agent.subagents.write_due_check.return_value = mock_report
+
+        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli.subagents.load_capability_config", return_value=MagicMock()):
+            result = cmd_subagents_due_check(args)
+            assert result == 0
+
+
+class TestCmdSubagentsProbe:
+    """测试 cmd_subagents_probe 命令。"""
+
+    def test_cmd_subagents_probe_no_results(self, tmp_path: Path):
+        """没有可检查的子代理时显示提示。"""
+        from agent_py_agent.cli.subagents import cmd_subagents_probe
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.limit = 10
+        args.run_id = None
+
+        mock_agent = MagicMock()
+        mock_report = MagicMock()
+        mock_report.summary = {"total": 0}
+        mock_report.results = []
+        mock_agent.subagents.write_channel_probe_report.return_value = mock_report
+
+        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent):
+            result = cmd_subagents_probe(args)
+            assert result == 0
+
+
+class TestCmdSubagentsPlanActions:
+    """测试 cmd_subagents_plan_actions 命令。"""
+
+    def test_cmd_subagents_plan_actions_no_actions(self, tmp_path: Path):
+        """没有建议动作时显示提示。"""
+        from agent_py_agent.cli.subagents import cmd_subagents_plan_actions
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.capability_config = str(tmp_path / "capability.yaml")
+        args.limit = 10
+        args.all = False
+        args.skill_dir = None
+
+        mock_agent = MagicMock()
+        mock_report = MagicMock()
+        mock_report.summary = {"total": 0}
+        mock_report.actions = []
+        mock_agent.subagents.write_action_plan.return_value = mock_report
+
+        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli.subagents.load_capability_config", return_value=MagicMock()):
+            result = cmd_subagents_plan_actions(args)
+            assert result == 0
+
+
+class TestCmdSubagentsApplyActions:
+    """测试 cmd_subagents_apply_actions 命令。"""
+
+    def test_cmd_subagents_apply_actions_dry_run(self, tmp_path: Path):
+        """Dry-run 模式执行动作计划。"""
+        from agent_py_agent.cli.subagents import cmd_subagents_apply_actions
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.capability_config = str(tmp_path / "capability.yaml")
+        args.apply = False
+        args.action = None
+        args.run_id = None
+        args.take_over_by = None
+        args.locked_file = None
+        args.limit = 10
+        args.skill_dir = None
+
+        mock_agent = MagicMock()
+        mock_report = MagicMock()
+        mock_report.summary = {"total": 0}
+        mock_report.records = []
+        mock_agent.subagents.write_action_apply_report.return_value = mock_report
+
+        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli.subagents.load_capability_config", return_value=MagicMock()):
+            result = cmd_subagents_apply_actions(args)
+            assert result == 0
+
+
+class TestCmdSubagentsRouteCapabilities:
+    """测试 cmd_subagents_route_capabilities 命令。"""
+
+    def test_cmd_subagents_route_capabilities_no_records(self, tmp_path: Path):
+        """没有 capability request 时显示提示。"""
+        from agent_py_agent.cli.subagents import cmd_subagents_route_capabilities
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.capability_config = str(tmp_path / "capability.yaml")
+        args.apply = False
+        args.run_id = None
+        args.limit = 10
+        args.skill_dir = None
+
+        mock_agent = MagicMock()
+        mock_router = MagicMock()
+        mock_report = MagicMock()
+        mock_report.summary = {"total": 0}
+        mock_report.records = []
+        mock_agent.subagents.write_capability_route_report.return_value = mock_report
+
+        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli.subagents.load_capability_config", return_value=MagicMock()), \
+             patch("agent_py_agent.cli.subagents.make_capability_router", return_value=mock_router):
+            result = cmd_subagents_route_capabilities(args)
+            assert result == 0
+
+
+class TestCmdSubagentsAcceptance:
+    """测试 cmd_subagents_acceptance 命令。"""
+
+    def test_cmd_subagents_acceptance_no_records(self, tmp_path: Path):
+        """没有等待验收的子代理时显示提示。"""
+        from agent_py_agent.cli.subagents import cmd_subagents_acceptance
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.apply = False
+        args.run_id = None
+        args.reviewer = None
+        args.note = ""
+        args.limit = 10
+
+        mock_agent = MagicMock()
+        mock_report = MagicMock()
+        mock_report.summary = {"total": 0}
+        mock_report.records = []
+        mock_agent.subagents.write_acceptance_review_report.return_value = mock_report
+
+        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent):
+            result = cmd_subagents_acceptance(args)
+            assert result == 0
+
+
+class TestCmdSubagentsPatches:
+    """测试 cmd_subagents_patches 命令。"""
+
+    def test_cmd_subagents_patches_review_dry_run(self, tmp_path: Path):
+        """Patch 审核 dry-run 模式。"""
+        from agent_py_agent.cli.subagents import cmd_subagents_patches
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.patch_action = "review"
+        args.run_id = None
+        args.reviewer = None
+        args.note = ""
+        args.limit = 10
+
+        mock_agent = MagicMock()
+        mock_report = MagicMock()
+        mock_report.summary = {"total": 0}
+        mock_report.records = []
+        mock_agent.subagents.write_patch_review_report.return_value = mock_report
+
+        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent):
+            result = cmd_subagents_patches(args)
+            assert result == 0
+
+
+class TestCmdSubagentsDispatch:
+    """测试 cmd_subagents_dispatch 命令。"""
+
+    def test_cmd_subagents_dispatch_no_records(self, tmp_path: Path):
+        """没有调度动作时显示提示。"""
+        from agent_py_agent.cli.subagents import cmd_subagents_dispatch
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.capability_config = str(tmp_path / "capability.yaml")
+        args.apply = False
+        args.execute_runners = False
+        args.planner = False
+        args.workflow_mode = None
+        args.max_runners = None
+        args.limit = 10
+        args.reviewer = None
+        args.note = ""
+        args.instruction = None
+        args.max_cards = None
+        args.no_probe = False
+        args.take_over_by = None
+        args.locked_file = None
+        args.interval = None
+        args.max_cycles = None
+        args.force_lock = False
+        args.watch = False
+        args.skill_dir = None
+
+        mock_agent = MagicMock()
+        mock_router = MagicMock()
+        mock_report = MagicMock()
+        mock_report.summary = {"total": 0}
+        mock_report.records = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+
+        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli.subagents.load_capability_config", return_value=MagicMock()), \
+             patch("agent_py_agent.cli.subagents.make_capability_router", return_value=mock_router):
+            result = cmd_subagents_dispatch(args)
+            assert result == 0
+
+    def test_cmd_subagents_dispatch_execute_runners_requires_apply(self, tmp_path: Path):
+        """execute_runners 必须和 apply 一起使用。"""
+        from agent_py_agent.cli.subagents import cmd_subagents_dispatch
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.capability_config = str(tmp_path / "capability.yaml")
+        args.apply = False
+        args.execute_runners = True  # 错误组合
+        args.planner = False
+        args.workflow_mode = None
+        args.max_runners = None
+        args.limit = 10
+        args.reviewer = None
+        args.note = ""
+        args.instruction = None
+        args.max_cards = None
+        args.no_probe = False
+        args.take_over_by = None
+        args.locked_file = None
+        args.interval = None
+        args.max_cycles = None
+        args.force_lock = False
+        args.watch = False
+        args.skill_dir = None
+
+        with patch("agent_py_agent.cli.subagents.make_agent", return_value=MagicMock()):
+            result = cmd_subagents_dispatch(args)
+            assert result == 2
+
+
+class TestCmdSubagentRun:
+    """测试 cmd_subagent_run 命令。"""
+
+    def test_cmd_subagent_run_dry_run(self, tmp_path: Path):
+        """Dry-run 运行子代理。"""
+        from agent_py_agent.cli.subagents import cmd_subagent_run
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.run_id = "run_001"
+        args.instruction = None
+        args.execute = False
+        args.max_cards = None
+        args.no_probe = False
+
+        mock_agent = MagicMock()
+        mock_result = MagicMock()
+        mock_result.ok = True
+        mock_result.run_id = "run_001"
+        mock_result.status = "RUNNING"
+        mock_result.verification_status = "pending"
+        mock_result.message = "Dry-run 成功"
+        mock_result.execution_context_json = tmp_path / "exec.json"
+        mock_result.result_json = tmp_path / "result.json"
+        mock_result.result_file = tmp_path / "result.md"
+        mock_result.prompt_file = None
+        mock_result.response_file = None
+        mock_agent.run_subagent.return_value = mock_result
+
+        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent):
+            result = cmd_subagent_run(args)
+            assert result == 0
+
+    def test_cmd_subagent_run_failure(self, tmp_path: Path):
+        """子代理运行失败。"""
+        from agent_py_agent.cli.subagents import cmd_subagent_run
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.run_id = "run_001"
+        args.instruction = None
+        args.execute = False
+        args.max_cards = None
+        args.no_probe = False
+
+        mock_agent = MagicMock()
+        mock_result = MagicMock()
+        mock_result.ok = False
+        mock_result.run_id = "run_001"
+        mock_result.status = "FAILED"
+        mock_result.verification_status = "pending"
+        mock_result.message = "运行失败"
+        mock_result.execution_context_json = tmp_path / "exec.json"
+        mock_result.result_json = tmp_path / "result.json"
+        mock_result.result_file = tmp_path / "result.md"
+        mock_result.prompt_file = None
+        mock_result.response_file = None
+        mock_agent.run_subagent.return_value = mock_result
+
+        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent):
+            result = cmd_subagent_run(args)
+            assert result == 1
+
+
+class TestCmdSubagentDetail:
+    """测试 cmd_subagent_detail 命令。"""
+
+    def test_cmd_subagent_detail_success(self, tmp_path: Path, capsys):
+        """显示子代理详情。"""
+        from agent_py_agent.cli.subagents import cmd_subagent_detail
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.run_id = "run_001"
+
+        mock_agent = MagicMock()
+
+        # 创建一个简单的 mock 对象，其 __dict__ 可以被 json 序列化
+        class SimpleMockTask:
+            def __init__(self):
+                self.task_id = "run_001"
+                self.status = "RUNNING"
+                self.goal = "测试任务"
+
+        mock_agent.subagents.load.return_value = SimpleMockTask()
+
+        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent):
+            result = cmd_subagent_detail(args)
+            assert result == 0
+
+
+class TestCmdSubagentsWorkflowPlan:
+    """测试 cmd_subagents_workflow_plan 命令。"""
+
+    def test_cmd_subagents_workflow_plan_basic(self, tmp_path: Path):
+        """正常生成 workflow plan。"""
+        from agent_py_agent.cli.subagents import cmd_subagents_workflow_plan
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.goal = "测试工作流"
+        args.template_id = None
+        args.output_dir = None
+        args.json = False
+
+        mock_result = MagicMock()
+        mock_result.to_dict.return_value = {
+            "mode": "auto",
+            "enabled": True,
+            "ok": True,
+            "needs_confirmation": False,
+            "selected_template_id": "template_001",
+            "task_type": "sequential",
+            "reason": "测试",
+            "worker_count": 2,
+            "workers": [],
+            "parent_acceptance_check_count": 0,
+            "parent_acceptance_checklist": [],
+            "issues": []
+        }
+
+        with patch("agent_py_agent.cli.subagents.load_config", return_value=MagicMock()), \
+             patch("agent_py_agent.cli.subagents.plan_workflow_for_goal", return_value=mock_result):
+            result = cmd_subagents_workflow_plan(args)
+            assert result == 0

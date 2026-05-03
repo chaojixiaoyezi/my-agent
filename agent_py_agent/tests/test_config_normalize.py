@@ -1,0 +1,247 @@
+"""Tests for settings/config_normalize.py: config normalization, old field compatibility, and error messages.
+
+给人看的解释：
+测试配置归一化模块：配置归一化、旧字段兼容、错误提示。
+"""
+from pathlib import Path
+import tempfile
+
+import pytest
+
+from agent_py_agent.agent.settings.config_normalize import (
+    normalize_agent_config,
+    normalize_subagent_workflow_config,
+)
+from agent_py_agent.agent.settings.config import AgentConfig
+
+
+class TestNormalizeAgentConfig:
+    """测试 normalize_agent_config 配置归一化。"""
+
+    def test_normalize_valid_model_backend_echo(self):
+        """验证有效的 echo 后端。"""
+        data = {"model_backend": "echo"}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["model_backend"] == "echo"
+        assert len(warnings) == 0
+
+    def test_normalize_valid_model_backend_openai(self):
+        """验证有效的 openai_compatible 后端。"""
+        data = {"model_backend": "openai_compatible"}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["model_backend"] == "openai_compatible"
+        assert len(warnings) == 0
+
+    def test_normalize_invalid_model_backend_falls_back(self):
+        """验证无效后端回退到默认值。"""
+        data = {"model_backend": "invalid"}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["model_backend"] == "echo"  # 默认值
+        assert len(warnings) > 0
+
+    def test_normalize_request_timeout_valid(self):
+        """验证有效的 request_timeout。"""
+        data = {"request_timeout": 120}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["request_timeout"] == 120
+        assert len(warnings) == 0
+
+    def test_normalize_request_timeout_too_low(self):
+        """验证过小的 request_timeout 回退。"""
+        data = {"request_timeout": 0}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["request_timeout"] == 60  # 默认值
+        assert len(warnings) > 0
+
+    def test_normalize_request_timeout_too_high(self):
+        """验证过大的 request_timeout 回退。"""
+        data = {"request_timeout": 999}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["request_timeout"] == 60  # 默认值（上限600）
+        assert len(warnings) > 0
+
+    def test_normalize_max_tokens_valid(self):
+        """验证有效的 max_tokens。"""
+        data = {"max_tokens": 2048}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["max_tokens"] == 2048
+        assert len(warnings) == 0
+
+    def test_normalize_max_tokens_invalid(self):
+        """验证无效的 max_tokens 回退。"""
+        data = {"max_tokens": -100}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["max_tokens"] == 1024  # 默认值
+        assert len(warnings) > 0
+
+    def test_normalize_temperature_valid(self):
+        """验证有效的 temperature。"""
+        data = {"temperature": "0.7"}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["temperature"] == "0.7"
+        assert len(warnings) == 0
+
+    def test_normalize_temperature_too_high(self):
+        """验证过高的 temperature 回退。"""
+        data = {"temperature": "3.0"}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["temperature"] == "0.2"  # 默认值
+        assert len(warnings) > 0
+
+    def test_normalize_temperature_negative(self):
+        """验证负数 temperature 回退。"""
+        data = {"temperature": "-1.0"}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["temperature"] == "0.2"  # 默认值
+        assert len(warnings) > 0
+
+    def test_normalize_gateway_stale_seconds_valid(self):
+        """验证有效的 gateway_stale_seconds。"""
+        data = {"gateway_stale_seconds": 300}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["gateway_stale_seconds"] == 300
+        assert len(warnings) == 0
+
+    def test_normalize_gateway_stale_seconds_too_low(self):
+        """验证过小的 gateway_stale_seconds 回退。"""
+        data = {"gateway_stale_seconds": 10}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["gateway_stale_seconds"] == 120  # 默认值（最小30）
+        assert len(warnings) > 0
+
+    def test_normalize_max_tool_rounds_valid(self):
+        """验证有效的 max_tool_rounds。"""
+        data = {"max_tool_rounds": 10}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["max_tool_rounds"] == 10
+        assert len(warnings) == 0
+
+    def test_normalize_max_tool_rounds_invalid(self):
+        """验证无效的 max_tool_rounds 回退。"""
+        data = {"max_tool_rounds": 0}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["max_tool_rounds"] == 5  # 默认值（最小1）
+        assert len(warnings) > 0
+
+    def test_normalize_memory_top_k_valid(self):
+        """验证有效的 memory_top_k。"""
+        data = {"memory_top_k": 10}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["memory_top_k"] == 10
+        assert len(warnings) == 0
+
+    def test_normalize_empty_dict(self):
+        """验证空字典使用所有默认值。"""
+        normalized, warnings = normalize_agent_config({})
+        assert normalized["model_backend"] == "echo"
+        assert normalized["request_timeout"] == 60
+        assert len(warnings) == 0
+
+
+class TestNormalizeSubagentWorkflowConfig:
+    """测试 normalize_subagent_workflow_config 子代理工作流配置归一化。"""
+
+    def test_normalize_workflow_mode_off(self):
+        """验证 off 模式保持不变。"""
+        config = AgentConfig()
+        config.subagent_workflow_mode = "off"
+        warnings = normalize_subagent_workflow_config(config)
+        assert config.subagent_workflow_mode == "off"
+
+    def test_normalize_workflow_mode_auto(self):
+        """验证 auto 模式保持不变。"""
+        config = AgentConfig()
+        config.subagent_workflow_mode = "auto"
+        warnings = normalize_subagent_workflow_config(config)
+        assert config.subagent_workflow_mode == "auto"
+
+    def test_normalize_workflow_mode_manual(self):
+        """验证 manual 模式保持不变。"""
+        config = AgentConfig()
+        config.subagent_workflow_mode = "manual"
+        warnings = normalize_subagent_workflow_config(config)
+        assert config.subagent_workflow_mode == "manual"
+
+    def test_normalize_workflow_mode_invalid(self):
+        """验证无效模式回退到默认值。"""
+        config = AgentConfig()
+        config.subagent_workflow_mode = "unknown"
+        warnings = normalize_subagent_workflow_config(config)
+        assert config.subagent_workflow_mode == "auto"  # 默认值
+        assert len(warnings) > 0
+
+    def test_normalize_builtin_workflows_true(self):
+        """验证 builtin_workflows 为 true。"""
+        config = AgentConfig()
+        config.subagent_builtin_workflows = True
+        normalize_subagent_workflow_config(config)
+        assert config.subagent_builtin_workflows is True
+
+    def test_normalize_builtin_workflows_false(self):
+        """验证 builtin_workflows 为 false。"""
+        config = AgentConfig()
+        config.subagent_builtin_workflows = False
+        normalize_subagent_workflow_config(config)
+        assert config.subagent_builtin_workflows is False
+
+    def test_normalize_review_rounds_valid(self):
+        """验证有效的 review_rounds。"""
+        config = AgentConfig()
+        config.subagent_workflow_review_rounds = 3
+        normalize_subagent_workflow_config(config)
+        assert config.subagent_workflow_review_rounds == 3
+
+    def test_normalize_review_rounds_out_of_range(self):
+        """验证超出范围的 review_rounds 回退到默认值。"""
+        config = AgentConfig()
+        config.subagent_workflow_review_rounds = 10
+        normalize_subagent_workflow_config(config)
+        assert config.subagent_workflow_review_rounds == 1  # 默认值
+
+
+class TestNormalizeAgentConfigIntegration:
+    """测试 normalize_agent_config 和 normalize_subagent_workflow_config 集成。"""
+
+    def test_both_normalizations_together(self):
+        """验证两个归一化一起使用。"""
+        data = {
+            "model_backend": "echo",
+            "max_tool_rounds": 10,
+        }
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["model_backend"] == "echo"
+        assert normalized["max_tool_rounds"] == 10
+
+
+class TestConfigWarnings:
+    """测试配置警告生成。"""
+
+    def test_warnings_list_populated_for_invalid_values(self):
+        """验证无效值产生警告。"""
+        data = {
+            "model_backend": "invalid",
+            "max_tool_rounds": -1,
+        }
+        normalized, warnings = normalize_agent_config(data)
+        assert len(warnings) >= 2  # 至少两个警告
+
+    def test_warnings_list_empty_for_valid_values(self):
+        """验证有效值不产生警告。"""
+        data = {
+            "model_backend": "echo",
+            "max_tool_rounds": 10,
+        }
+        normalized, warnings = normalize_agent_config(data)
+        assert len(warnings) == 0
+
+    def test_warning_message_contains_field_name(self):
+        """验证警告消息包含字段名。"""
+        data = {"model_backend": "bad_backend"}
+        normalized, warnings = normalize_agent_config(data)
+        assert any("model_backend" in w for w in warnings)
+
+    def test_warning_message_contains_fallback_value(self):
+        """验证警告消息包含回退值。"""
+        data = {"model_backend": "bad"}
+        normalized, warnings = normalize_agent_config(data)
+        assert any("echo" in w for w in warnings)

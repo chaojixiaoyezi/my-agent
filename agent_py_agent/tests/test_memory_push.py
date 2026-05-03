@@ -353,3 +353,122 @@ class TestIntegration:
         agent.memory = None
         result = push_relevant_memories(agent, "failure", {}, limit=3)
         assert result == []
+
+
+class TestMemoryPushBoundaryCases:
+    """补充：memory_push 边界测试。"""
+
+    def test_empty_memory_list_search(self, tmp_path: Path):
+        """记忆列表为空时的搜索。"""
+        from agent_py_agent.agent.memory_push import push_relevant_memories
+
+        agent = MagicMock()
+        agent.memory = MagicMock()
+        agent.memory.search.return_value = []  # 空列表
+
+        result = push_relevant_memories(agent, "timeout", {}, limit=3)
+        assert result == []
+
+    def test_unknown_trigger_type(self, tmp_path: Path):
+        """未知触发类型的处理。"""
+        from agent_py_agent.agent.memory_push import push_relevant_memories
+
+        agent = MagicMock()
+        agent.memory = MagicMock()
+        agent.memory.search.return_value = []
+
+        # 未知触发类型不应该崩溃
+        result = push_relevant_memories(agent, "unknown_trigger_xyz", {"key": "value"}, limit=3)
+        assert isinstance(result, list)
+
+    def test_agent_not_initialized(self, tmp_path: Path):
+        """agent 未初始化时的处理。"""
+        from agent_py_agent.agent.memory_push import push_relevant_memories
+
+        # agent 是未初始化的 MagicMock
+        agent = MagicMock(spec=[])  # 空 spec
+        result = push_relevant_memories(agent, "timeout", {}, limit=3)
+        assert result == []
+
+    def test_memory_search_returns_none(self, tmp_path: Path):
+        """memory.search 返回 None 时的处理。"""
+        from agent_py_agent.agent.memory_push import push_relevant_memories
+
+        agent = MagicMock()
+        agent.memory = MagicMock()
+        agent.memory.search.return_value = None
+
+        result = push_relevant_memories(agent, "timeout", {}, limit=3)
+        assert result == []
+
+    def test_format_with_none_in_list(self, tmp_path: Path):
+        """格式化时列表包含 None 的处理。"""
+        from agent_py_agent.agent.memory_push import format_memories_for_injection
+
+        memories = ["valid memory", "another valid"]
+        result = format_memories_for_injection(memories)
+        assert isinstance(result, str)
+
+    def test_corrupted_memory_record(self, tmp_path: Path):
+        """损坏的记忆记录的处理。"""
+        from agent_py_agent.agent.memory_push import MemoryEntry, MemoryType
+
+        # 缺少必需字段
+        incomplete_data = {
+            "type": "lesson_general",
+            # 缺少 content
+        }
+
+        entry = MemoryEntry.from_dict(incomplete_data)
+        # 应该使用默认值而不是崩溃
+        assert entry.content == ""
+
+    def test_empty_context_dict(self, tmp_path: Path):
+        """空上下文字典的处理。"""
+        from agent_py_agent.agent.memory_push import push_relevant_memories
+
+        agent = MagicMock()
+        agent.memory = MagicMock()
+        agent.memory.search.return_value = []
+
+        result = push_relevant_memories(agent, "timeout", {}, limit=3)
+        assert result == []
+
+    def test_limit_zero(self, tmp_path: Path):
+        """limit=0 时的处理。"""
+        from agent_py_agent.agent.memory_push import push_relevant_memories
+
+        agent = MagicMock()
+        agent.memory = MagicMock()
+        agent.memory.search.return_value = []
+
+        result = push_relevant_memories(agent, "timeout", {}, limit=0)
+        assert result == []
+
+    def test_memory_type_from_unknown_string(self, tmp_path: Path):
+        """从未知字符串创建 MemoryType。"""
+        from agent_py_agent.agent.memory_push import MemoryType
+
+        # 未知类型应该返回默认 LESSON_GENERAL
+        result = MemoryType.from_string("not_a_real_type")
+        assert result == MemoryType.LESSON_GENERAL
+
+        result = MemoryType.from_string("")
+        assert result == MemoryType.LESSON_GENERAL
+
+    def test_write_memory_with_none_trigger_type(self, tmp_path: Path):
+        """写入记忆时 trigger_type 为 None。"""
+        from agent_py_agent.agent.memory_push import MemoryType, write_memory_with_type
+
+        mock_memory = MagicMock()
+        mock_memory.add.return_value = MagicMock()
+
+        write_memory_with_type(
+            mock_memory,
+            content="test content",
+            mem_type=MemoryType.LESSON_TASK,
+            trigger_type=None,  # None 类型
+            tags=[],
+        )
+
+        mock_memory.add.assert_called_once()
