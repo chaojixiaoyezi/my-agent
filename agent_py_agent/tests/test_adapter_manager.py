@@ -116,19 +116,19 @@ class TestChannelManagerActiveChannel:
 
     def test_no_session_file_returns_none(self) -> None:
         manager = ChannelManager()
-        manager._session_channel_file = Path("/nonexistent/file.json")
+        manager.session_channel_file = Path("/nonexistent/file.json")
         assert manager.get_active_channel("user_1") is None
 
     def test_update_and_query_active_channel(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             manager = ChannelManager()
             session_file = Path(td) / "sessions.json"
-            manager._session_channel_file = session_file
+            manager.session_channel_file = session_file
 
-            manager._update_active_channel("user_1", "feishu")
+            manager.update_active_channel("user_1", "feishu")
             assert manager.get_active_channel("user_1") == "feishu"
 
-            manager._update_active_channel("user_1", "qq")
+            manager.update_active_channel("user_1", "qq")
             assert manager.get_active_channel("user_1") == "qq"
 
 

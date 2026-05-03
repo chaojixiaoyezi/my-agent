@@ -45,6 +45,11 @@ class SimpleAgentDispatchMixin:
     _has_pending_work: bool = False
     _consecutive_dispatch_rounds: int = 0
 
+    @property
+    def has_pending_work(self) -> bool:
+        """公开的待处理工作状态属性。"""
+        return self._has_pending_work
+
     def dispatch_subagents(
         self,
         router: CapabilityRouter,

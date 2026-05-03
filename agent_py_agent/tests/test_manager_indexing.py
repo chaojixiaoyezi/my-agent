@@ -69,7 +69,7 @@ class TestSelectRuns:
                 plan=["step1"],
             )
 
-            selected = agent.subagents._select_runs(None)
+            selected = agent.subagents.select_runs(None)
 
             selected_ids = [t.id for t in selected]
             assert task1.id in selected_ids
@@ -82,7 +82,7 @@ class TestSelectRuns:
             cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
             agent = SimpleAgent(cfg, root)
 
-            selected = agent.subagents._select_runs([])
+            selected = agent.subagents.select_runs([])
 
             assert selected == []
 
@@ -109,7 +109,7 @@ class TestSelectRuns:
                 plan=["step1"],
             )
 
-            selected = agent.subagents._select_runs([task1.id, task2.id, task3.id])
+            selected = agent.subagents.select_runs([task1.id, task2.id, task3.id])
 
             assert len(selected) == 3
             selected_ids = [t.id for t in selected]
@@ -131,7 +131,7 @@ class TestSelectRuns:
             )
 
             # 使用一个不存在的 ID
-            selected = agent.subagents._select_runs([task1.id, "non-existent-id"])
+            selected = agent.subagents.select_runs([task1.id, "non-existent-id"])
 
             assert len(selected) == 1
             assert selected[0].id == task1.id
@@ -155,7 +155,7 @@ class TestIndexTask:
             )
 
             # 不应该抛出异常
-            agent.subagents._index_task(task)
+            agent.subagents.index_task(task)
 
     def test_index_task_without_local_store(self):
         """验证没有 LocalStore 时不崩溃。"""
@@ -172,7 +172,7 @@ class TestIndexTask:
             )
 
             # 不应该抛出异常
-            agent.subagents._index_task(task)
+            agent.subagents.index_task(task)
 
 
 class TestIndexDispatchRecord:
@@ -193,7 +193,7 @@ class TestIndexDispatchRecord:
             )
 
             # 不应该抛出异常
-            agent.subagents._index_dispatch_record(record)
+            agent.subagents.index_dispatch_record(record)
 
 
 class TestIndexDispatchWatchRecord:
@@ -215,7 +215,7 @@ class TestIndexDispatchWatchRecord:
             )
 
             # 不应该抛出异常
-            agent.subagents._index_dispatch_watch_record(record)
+            agent.subagents.index_dispatch_watch_record(record)
 
 
 class TestIndexParentPlannerRecord:
@@ -237,7 +237,7 @@ class TestIndexParentPlannerRecord:
             )
 
             # 不应该抛出异常
-            agent.subagents._index_parent_planner_record(record)
+            agent.subagents.index_parent_planner_record(record)
 
 
 class TestIndexExecutionContext:
@@ -259,7 +259,7 @@ class TestIndexExecutionContext:
             context = agent.subagents.write_execution_context(task.id)
 
             # 不应该抛出异常
-            agent.subagents._index_execution_context(context)
+            agent.subagents.index_execution_context(context)
 
 
 class TestLogLocalRecord:
@@ -274,7 +274,7 @@ class TestLogLocalRecord:
             agent.subagents.local_store = None
 
             # 不应该抛出异常
-            agent.subagents._log_local_record(
+            agent.subagents.log_local_record(
                 source_type="test",
                 source_id="test-id",
                 title="Test Title",
@@ -299,7 +299,7 @@ class TestLogLocalRecord:
                 agent.subagents.local_store.log_record = failing_log_record
 
                 # 不应该抛出异常
-                agent.subagents._log_local_record(
+                agent.subagents.log_local_record(
                     source_type="test",
                     source_id="test-id",
                     title="Test Title",

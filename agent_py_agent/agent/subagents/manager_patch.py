@@ -610,6 +610,11 @@ class SubAgentPatchMixin:
             target = self.workspace_root / target
         return target.resolve(strict=False)
 
+    def resolve_patch_target(self, raw_path: str) -> Path:
+        """公开的补丁目标路径解析方法（委托给 _resolve_patch_target）。"""
+        # 委托给内部实现 _resolve_patch_target
+        return self._resolve_patch_target(raw_path)
+
     @staticmethod
     def _build_unified_diff(path: str, before_text: str, after_text: str) -> str:
         lines = list(

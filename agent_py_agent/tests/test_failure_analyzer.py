@@ -229,3 +229,78 @@ class TestSubAgentFailureAnalyzer:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestFailureAnalyzerMutationCoverage:
+    """Tests to cover mutation-prone logic in failure_analyzer.py."""
+
+    def test_timeout_multiplier_exactly_1_5x(self):
+        """Timeout should be exactly 1.5x, not 2.0x.
+
+        Mutation: new_timeout = min(current_timeout * 2.0, self.max_timeout)
+        This would cause timeout to increase faster than intended.
+        """
+        from agent_py_agent.agent.agent_core.failure_analyzer import SubAgentFailureAnalyzer
+        from agent_py_agent.agent.subagents.models import SubAgentTask, SubAgentRunnerResult
+
+        analyzer = SubAgentFailureAnalyzer(max_timeout=600.0, max_retry_attempts=3)
+
+        task = SubAgentTask(
+            id="test",
+            goal="test",
+            thought="test",
+            plan=["step1", "step2"],
+            runner_attempts=0,
+            failure_type="runner_timeout",  # Must set failure_type
+        )
+        task.attributes = {"dynamic_timeout_seconds": 100.0}
+
+        runner_result = SubAgentRunnerResult(
+            run_id="test",
+            dry_run=False,
+            ok=False,
+            status="timeout",
+            verification_status="",
+            message=""
+        )
+
+        result = analyzer.analyze(task, runner_result)
+        assert result.failure_type == "runner_timeout"
+        assert result.should_adjust_timeout
+        assert result.new_timeout_seconds == 150.0, f"Expected 150.0 (100 * 1.5), got {result.new_timeout_seconds}"
+
+    def test_max_timeout_check_uses_gte(self):
+        """When current_timeout >= max_timeout, should split (not retry).
+
+        Mutation: if current_timeout > self.max_timeout (changed >= to >)
+        This would allow one more retry when timeout equals max_timeout.
+        """
+        from agent_py_agent.agent.agent_core.failure_analyzer import SubAgentFailureAnalyzer
+        from agent_py_agent.agent.subagents.models import SubAgentTask, SubAgentRunnerResult
+
+        analyzer = SubAgentFailureAnalyzer(max_timeout=600.0, max_retry_attempts=3)
+
+        task = SubAgentTask(
+            id="test",
+            goal="test",
+            thought="test",
+            plan=["step1", "step2"],
+            runner_attempts=1,  # Less than max_retry_attempts
+            failure_type="runner_timeout",  # Must set failure_type
+        )
+        task.attributes = {"dynamic_timeout_seconds": 600.0}  # Exactly at max
+
+        runner_result = SubAgentRunnerResult(
+            run_id="test",
+            dry_run=False,
+            ok=False,
+            status="timeout",
+            verification_status="",
+            message=""
+        )
+
+        result = analyzer.analyze(task, runner_result)
+        # At max_timeout, should suggest split_task, not increase_timeout_and_retry
+        assert result.suggested_action == "split_task", f"Expected split_task at max_timeout, got {result.suggested_action}"
+        assert not result.should_retry
+

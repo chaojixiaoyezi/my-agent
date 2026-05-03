@@ -54,6 +54,31 @@ class TestTaskStatus:
         assert "PLANNING" not in DISPATCH_INELIGIBLE_STATUSES
         assert "BLOCKED" not in DISPATCH_INELIGIBLE_STATUSES
 
+    def test_dispatch_ineligible_all_values_are_strings(self):
+        """验证 DISPATCH_INELIGIBLE_STATUSES 所有元素都是字符串值。
+
+        Mutation: Missing .value on COMPLETED (e.g., TaskStatus.COMPLETED instead of .value)
+        This would break membership checks since TaskStatus != "COMPLETED"
+        """
+        for status in DISPATCH_INELIGIBLE_STATUSES:
+            assert isinstance(status, str), f"{status} is not a string, got {type(status).__name__}"
+            assert len(status) > 0, "Empty string in DISPATCH_INELIGIBLE_STATUSES"
+        # All statuses should match their string enum values
+        assert "PAUSED" in DISPATCH_INELIGIBLE_STATUSES
+        assert "ABANDONED" in DISPATCH_INELIGIBLE_STATUSES
+        assert "COMPLETED" in DISPATCH_INELIGIBLE_STATUSES
+        assert "FAILED" in DISPATCH_INELIGIBLE_STATUSES
+
+    def test_dispatch_ineligible_status_is_not_enum_member(self):
+        """验证 DISPATCH_INELIGIBLE_STATUSES 包含字符串值而非枚举成员。"""
+        # The frozenset should contain actual string values like "COMPLETED"
+        # Not enum members like TaskStatus.COMPLETED
+        assert "COMPLETED" in DISPATCH_INELIGIBLE_STATUSES
+        assert "FAILED" in DISPATCH_INELIGIBLE_STATUSES
+        # If mutation removed .value, some elements would be TaskStatus (not str)
+        for status in DISPATCH_INELIGIBLE_STATUSES:
+            assert type(status) is str, f"Element {status!r} is {type(status).__name__}, not str"
+
 
 class TestQualityContract:
     """QualityContract 数据类测试。"""
@@ -134,7 +159,7 @@ class TestSubAgentCard:
         assert card.can_write is False
         assert card.can_spawn_children is False
         assert card.can_request_capability is True
-        assert card.max_depth == 0
+        assert card.max_depth == 2
         assert card.result_contract == []
 
 

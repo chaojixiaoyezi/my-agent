@@ -84,7 +84,7 @@ class TestSubAgentAcceptanceFindingMixin:
 
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager._acceptance_findings(task, {}, {}, time.time())
+        findings = manager.acceptance_findings(task, {}, {}, time.time())
 
         # 第一个 finding 应该是 work_order
         assert findings[0].name == "work_order"
@@ -123,7 +123,7 @@ class TestSubAgentAcceptanceFindingMixin:
 
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager._acceptance_findings(task, {}, {}, time.time())
+        findings = manager.acceptance_findings(task, {}, {}, time.time())
 
         ready_finding = next((f for f in findings if f.name == "ready_for_acceptance"), None)
         assert ready_finding is not None
@@ -162,7 +162,7 @@ class TestSubAgentAcceptanceFindingMixin:
 
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager._acceptance_findings(task, {}, {}, time.time())
+        findings = manager.acceptance_findings(task, {}, {}, time.time())
 
         channel_finding = next((f for f in findings if f.name == "channel_not_broken"), None)
         assert channel_finding.ok is True
@@ -200,7 +200,7 @@ class TestSubAgentAcceptanceFindingMixin:
 
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager._acceptance_findings(task, {}, {}, time.time())
+        findings = manager.acceptance_findings(task, {}, {}, time.time())
 
         channel_finding = next((f for f in findings if f.name == "channel_not_broken"), None)
         assert channel_finding.ok is False
@@ -238,7 +238,7 @@ class TestSubAgentAcceptanceFindingMixin:
 
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager._acceptance_findings(task, {}, {}, time.time())
+        findings = manager.acceptance_findings(task, {}, {}, time.time())
 
         evidence_finding = next((f for f in findings if f.name == "evidence_present"), None)
         assert evidence_finding.ok is True
@@ -276,7 +276,7 @@ class TestSubAgentAcceptanceFindingMixin:
 
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager._acceptance_findings(task, {}, {}, time.time())
+        findings = manager.acceptance_findings(task, {}, {}, time.time())
 
         failed_finding = next((f for f in findings if f.name == "evidence_not_failed"), None)
         assert failed_finding.ok is False
@@ -314,7 +314,7 @@ class TestSubAgentAcceptanceFindingMixin:
 
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager._acceptance_findings(task, {}, {}, time.time())
+        findings = manager.acceptance_findings(task, {}, {}, time.time())
 
         request_finding = next((f for f in findings if f.name == "no_open_capability_requests"), None)
         assert request_finding.ok is True
@@ -474,7 +474,7 @@ class TestSeverityLevels:
 
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager._acceptance_findings(task, {}, {}, time.time())
+        findings = manager.acceptance_findings(task, {}, {}, time.time())
 
         # 验收应该失败，因为 evidence_present P0 为 False
         ok = all(item.ok or item.severity == "P2" for item in findings)
@@ -513,7 +513,7 @@ class TestSeverityLevels:
 
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager._acceptance_findings(task, {}, {}, time.time())
+        findings = manager.acceptance_findings(task, {}, {}, time.time())
 
         # 验证 P1 severity 的存在（no_open_capability_gaps 是 P1）
         p1_findings = [f for f in findings if f.severity == "P1"]

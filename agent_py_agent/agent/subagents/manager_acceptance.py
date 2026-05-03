@@ -193,7 +193,8 @@ class SubAgentAcceptanceMixin:
         before_verification = task.verification_status
         output = _read_json_object(Path(task.output_json))
         runner = _read_json_object(Path(task.runner_result_json))
-        findings = self._acceptance_findings(task, output, runner, now)
+        # 调用公开方法 acceptance_findings（原 _acceptance_findings 已重命名）
+        findings = self.acceptance_findings(task, output, runner, now)
         ok = all(item.ok or item.severity == "P2" for item in findings)
         ready = task.status == "AWAITING_ACCEPTANCE" or task.verification_status == "NEEDS_ACCEPTANCE"
         decision = "ACCEPT" if ok else "REJECT"
