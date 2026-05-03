@@ -102,7 +102,7 @@ class PatchApplyService:
     ) -> PatchApplyReport:
         """Write patch apply report to disk."""
 
-        from ..file_io import append_jsonl
+        from ...file_io import append_jsonl
         from .patch_renderer import render_patch_apply_markdown
 
         report = self.apply_patches(
@@ -420,7 +420,7 @@ class PatchApplyService:
     def _append_patch_apply_log(self, record: PatchApplyRecord) -> None:
         """Append patch apply record to global audit log."""
 
-        from ..file_io import append_jsonl
+        from ...file_io import append_jsonl
 
         jsonl = self.manager.workspace / "subagent_patch_apply_log.jsonl"
         append_jsonl(jsonl, patch_apply_record_to_dict(record))

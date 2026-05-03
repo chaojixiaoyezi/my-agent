@@ -22,6 +22,7 @@ from .memory_query_cmd import (
 from .memory_doctor_cmd import (
     _build_routing_doctor,
     _build_archive_doctor,
+    _memory_config_payload,
 )
 
 __all__ = [
@@ -34,6 +35,7 @@ __all__ = [
     "_resolve_auto_read_limit",
     "_config_warnings",
     "_index_payload",
+    "_memory_config_payload",
     "_print_path_list",
     "_build_routing_doctor",
     "_build_archive_doctor",

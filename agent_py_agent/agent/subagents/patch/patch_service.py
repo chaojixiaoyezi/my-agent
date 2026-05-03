@@ -93,7 +93,7 @@ class PatchReviewService:
     ) -> PatchReviewReport:
         """Write patch review report to disk."""
 
-        from ..file_io import append_jsonl
+        from ...file_io import append_jsonl
         from .patch_renderer import render_patch_review_markdown
 
         report = self.review_patches(
@@ -292,7 +292,7 @@ class PatchReviewService:
     def _append_patch_review_log(self, record: PatchReviewRecord) -> None:
         """Append patch review record to global audit log."""
 
-        from ..file_io import append_jsonl
+        from ...file_io import append_jsonl
 
         jsonl = self.manager.workspace / "subagent_patch_review_log.jsonl"
         append_jsonl(

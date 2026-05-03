@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
     from ..subagent import SubAgentRunnerResult, SubAgentTask
 
+from .failure_introspector import FailureIntrospector
+
 from .dispatch_service import (
     build_workflow_records,
     make_acceptance_records,
