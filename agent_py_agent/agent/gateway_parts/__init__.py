@@ -44,18 +44,21 @@ from .recovery import (
     recover_gateway_processing_requests,
     requeue_gateway_processing_requests,
 )
-from .runtime import (
-    _handle_gateway_request,
-    _process_gateway_requests,
+from .queue_service import (
+    ensure_gateway_folders,
     gateway_running,
     is_heartbeat_alive_for_request,
-    print_gateway_response,
     rebuild_gateway_index,
     render_gateway_status,
-    submit_gateway_ask,
-    wait_for_gateway_response,
     wait_for_gateway_running,
 )
+from .request_worker import (
+    _handle_gateway_request,
+    _process_gateway_requests,
+    submit_gateway_ask,
+    wait_for_gateway_response,
+)
+from .response_renderer import print_gateway_response
 
 __all__ = [
     "AdapterPaths",

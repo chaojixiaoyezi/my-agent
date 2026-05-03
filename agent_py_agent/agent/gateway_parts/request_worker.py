@@ -1,0 +1,269 @@
+from __future__ import annotations
+
+"""Request execution and handling for gateway.
+
+This module is derived from runtime.py split. It contains the core request
+execution logic that was previously in that file.
+"""
+
+import threading
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from .audit_service import (
+    audit_request_completed,
+    audit_request_processing,
+    audit_request_queued,
+)
+from .chunk_service import close_chunk_stream, open_chunk_stream, write_chunk
+from .io import (
+    append_gateway_history,
+    gateway_response_path,
+    read_json_file,
+    write_json_file,
+)
+from .lease_service import (
+    refresh_processing_lease,
+    start_lease_heartbeat,
+)
+from .paths import GatewayPaths, gateway_paths
+from .queue_service import (
+    archive_request,
+    claim_request,
+    ensure_gateway_folders,
+)
+from .recovery import _gateway_request_attempts
+
+if TYPE_CHECKING:
+    from ...core import SimpleAgent
+
+
+def submit_gateway_ask(
+    paths: GatewayPaths,
+    *,
+    prompt: str,
+    inject: list[str] | None = None,
+    prompt_files: list[str] | None = None,
+    save: bool = True,
+    include_prompt: bool = False,
+    resume_context: bool | None = None,
+    agent: SimpleAgent | None = None,
+) -> tuple[str, Path, Path]:
+    """LLM contract: enqueue one ask request and return request/response paths."""
+    from .io import write_gateway_request
+
+    request_id_obj = str(time.time() * 1000)[:13]
+    request_id = f"gw-{request_id_obj}"
+
+    payload = {
+        "id": request_id,
+        "kind": "ask",
+        "prompt": prompt,
+        "inject": inject or [],
+        "prompt_files": prompt_files or [],
+        "save": save,
+        "include_prompt": include_prompt,
+        "created_at": time.time(),
+        "client_pid": 0,
+        "status": "pending",
+        "attempts": 0,
+    }
+    if resume_context is not None:
+        payload["resume_context"] = bool(resume_context)
+    request_path = write_gateway_request(paths, payload)
+    response_path = gateway_response_path(paths, request_id)
+    if agent is not None:
+        audit_request_queued(
+            agent,
+            {**payload, "status": "queued", "ok": False},
+            request_path,
+            response_path,
+        )
+    return request_id, request_path, response_path
+
+
+def wait_for_gateway_response(paths: GatewayPaths, request_id: str, timeout: float) -> dict:
+    """LLM contract: poll for a gateway response JSON until timeout."""
+    path = gateway_response_path(paths, request_id)
+    deadline = time.time() + max(0.0, timeout)
+    while time.time() <= deadline:
+        payload = read_json_file(path)
+        if payload:
+            return payload
+        time.sleep(0.2)
+    return {}
+
+
+def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths, *, worker_id: str = "gw-worker") -> int:
+    """LLM contract: claim and process all currently pending gateway requests."""
+    from .io import write_json_file_atomic
+    from .logging import _report_gateway_side_effect_error
+
+    ensure_gateway_folders(paths)
+    processed = 0
+    for request_path in sorted(paths.inbox.glob("*.json")):
+        processing_path = claim_request(paths, request_path)
+        if processing_path is None:
+            continue
+        request_payload = read_json_file(processing_path)
+        request_id = str(request_payload.get("id") or processing_path.stem)
+        request_payload.setdefault("id", request_id)
+        response_path = gateway_response_path(paths, request_id)
+        if response_path.exists():
+            archive_request(processing_path, paths.done, request_id)
+            processed += 1
+            continue
+        lease_now = time.time()
+        request_payload.update({
+            "status": "processing",
+            "attempts": _gateway_request_attempts(request_payload) + 1,
+            "lease_owner": worker_id,
+            "lease_started_at": lease_now,
+            "lease_heartbeat_at": lease_now,
+            "updated_at": lease_now,
+        })
+        try:
+            write_json_file_atomic(processing_path, request_payload)
+        except OSError as exc:
+            _report_gateway_side_effect_error("prepare_gateway_request_lease", request_id, exc)
+            response = _handle_gateway_request(agent, processing_path, refresh_lease=False, worker_id=worker_id)
+        else:
+            response = _handle_gateway_request(agent, processing_path, refresh_lease=True, worker_id=worker_id)
+        response_path = gateway_response_path(paths, str(response.get("id", processing_path.stem)))
+        if not response_path.exists():
+            write_json_file(response_path, response)
+        append_gateway_history(paths, response)
+        target_folder = paths.done if response.get("ok") else paths.failed
+        archive_request(processing_path, target_folder, request_id)
+        processed += 1
+    return processed
+
+
+def _handle_gateway_request(
+    agent: SimpleAgent,
+    request_path: Path,
+    *,
+    refresh_lease: bool = False,
+    worker_id: str = "",
+) -> dict:
+    """LLM contract: execute one gateway request file and return response payload."""
+    request = read_json_file(request_path)
+    request_id = str(request.get("id") or request_path.stem)
+    kind = str(request.get("kind") or "").strip()
+    if not kind and request_id:
+        kind = "ask"
+    response_path = gateway_response_path(gateway_paths(agent), request_id)
+    existing_response = read_json_file(response_path)
+    if existing_response:
+        return existing_response
+    started_at = time.time()
+    response = {
+        "id": request_id,
+        "kind": kind or "unknown",
+        "ok": False,
+        "status": "failed",
+        "created_at": request.get("created_at", 0),
+        "started_at": started_at,
+        "ended_at": 0,
+        "duration_seconds": 0,
+        "response": "",
+        "error_code": "",
+        "error": "",
+        "backend": "",
+        "used_memories": 0,
+        "tool_rounds": 0,
+        "prompt": "",
+        "request_file": str(request_path),
+        "attempts": _gateway_request_attempts(request),
+        "lease_owner": request.get("lease_owner", ""),
+        "lease_started_at": request.get("lease_started_at", 0),
+        "lease_heartbeat_at": request.get("lease_heartbeat_at", 0),
+    }
+    audit_request_processing(agent, request, request_id, kind, started_at, request_path, response_path)
+    lease_stop: threading.Event | None = None
+    lease_thread: threading.Thread | None = None
+    should_refresh_lease = refresh_lease or str(request.get("status") or "") == "processing"
+    if should_refresh_lease:
+        lease_worker = worker_id or str(request.get("lease_owner") or "")
+        refresh_processing_lease(request_path, request_id=request_id, worker_id=lease_worker)
+        lease_stop, lease_thread = start_lease_heartbeat(
+            agent,
+            request_path,
+            request_id=request_id,
+            worker_id=lease_worker,
+        )
+    _paths = gateway_paths(agent)
+    from .paths import gateway_chunk_path
+    chunk_path = gateway_chunk_path(_paths, request_id)
+    chunk_path_abs, _ = open_chunk_stream(chunk_path)
+
+    def _on_gateway_chunk(chunk: str) -> None:
+        write_chunk(chunk_path_abs, chunk)
+
+    try:
+        if kind != "ask":
+            response["error_code"] = "UNSUPPORTED_KIND"
+            raise ValueError(f"unsupported gateway request kind: {kind or 'empty'}")
+        prompt = str(request.get("prompt") or request.get("goal") or "").strip()
+        if not prompt:
+            response["error_code"] = "EMPTY_PROMPT"
+            raise ValueError("gateway ask prompt/goal 不能为空。")
+        result = agent.run(
+            prompt,
+            inject=[str(item) for item in request.get("inject", [])],
+            prompt_files=[str(item) for item in request.get("prompt_files", [])],
+            save=bool(request.get("save", True)),
+            request_id=request_id,
+            source="gateway",
+            recovery_snapshot=bool(request.get("save", True)),
+            resume_context=request.get("resume_context") if "resume_context" in request else None,
+            recovery_next_actions=["如需恢复本次 gateway 请求，先读取 gateway response 和 LocalStore gateway_request 记录。"],
+            recovery_content_paths=[str(request_path), str(response_path)],
+            on_chunk=_on_gateway_chunk,
+        )
+        response.update({
+            "ok": True,
+            "status": "done",
+            "response": result.response,
+            "backend": result.backend,
+            "used_memories": result.used_memories,
+            "tool_rounds": result.tool_rounds,
+            "prompt": result.prompt if request.get("include_prompt") else "",
+            "prompt_token_estimate": result.prompt_token_estimate,
+            "runtime_injection_token_estimate": result.runtime_injection_token_estimate,
+            "recovery_snapshot_id": result.recovery_snapshot_id,
+            "recovery_snapshot_path": result.recovery_snapshot_path,
+            "recovery_snapshot_error": result.recovery_snapshot_error,
+            "memory_resume_context_injected": result.memory_resume_context_injected,
+            "memory_resume_context_query": result.memory_resume_context_query,
+            "memory_resume_context_matches": result.memory_resume_context_matches,
+            "memory_resume_context_token_estimate": result.memory_resume_context_token_estimate,
+            "memory_resume_context_error": result.memory_resume_context_error,
+        })
+    except Exception as exc:
+        response.update({
+            "ok": False,
+            "status": "failed",
+            "error_code": response.get("error_code") or type(exc).__name__.upper(),
+            "error": f"{type(exc).__name__}: {exc}",
+        })
+    finally:
+        if lease_stop is not None:
+            lease_stop.set()
+        if lease_thread is not None:
+            lease_thread.join(timeout=2)
+        close_chunk_stream(chunk_path_abs)
+    ended_at = time.time()
+    final_request = read_json_file(request_path)
+    if final_request:
+        response["lease_owner"] = final_request.get("lease_owner", response.get("lease_owner", ""))
+        response["lease_started_at"] = final_request.get("lease_started_at", response.get("lease_started_at", 0))
+        response["lease_heartbeat_at"] = final_request.get(
+            "lease_heartbeat_at",
+            response.get("lease_heartbeat_at", 0),
+        )
+    response["ended_at"] = ended_at
+    response["duration_seconds"] = round(ended_at - started_at, 3)
+    audit_request_completed(agent, response, request, request_path, response_path)
+    return response

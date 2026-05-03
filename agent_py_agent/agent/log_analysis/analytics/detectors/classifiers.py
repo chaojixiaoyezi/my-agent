@@ -17,6 +17,7 @@ from .field_access import (
     SUSPICIOUS_CHILD_PROCESSES,
     WEB_PARENT_PROCESSES,
     JsonDict,
+    _event_time,
     _field,
     _present,
     _text,

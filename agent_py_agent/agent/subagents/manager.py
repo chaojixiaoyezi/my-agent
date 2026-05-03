@@ -4,7 +4,7 @@ from __future__ import annotations
 
 Human version:
 SubAgentManager 仍然是外部代码使用的入口，但具体能力已经分散到按职责命名的 mixin。
-这不是为了凑行数，而是让看板、验收、runner、能力路由、索引这些变化能各自维护。
+它本身不写业务逻辑，只组合那些已经按职责拆开的能力。
 """
 
 from .manager_acceptance import SubAgentAcceptanceMixin
@@ -46,4 +46,6 @@ class SubAgentManager(
     它本身不写业务逻辑，只组合那些已经按职责拆开的能力。
     """
 
-    pass
+    def __init__(self, workspace, local_store=None, workspace_root=None, enable_self_learning=False):
+        super().__init__(workspace, local_store, workspace_root, enable_self_learning)
+        self._init_patch_services()
