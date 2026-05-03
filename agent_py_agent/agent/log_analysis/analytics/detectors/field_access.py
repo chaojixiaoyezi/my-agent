@@ -167,14 +167,19 @@ def _truthy(value: Any) -> bool:
     """LLM: Return True if *value* looks like a truthy flag.
 
     新手说明:
-    判断值是否为"真"——布尔/数值按常规，字符串匹配 1/true/yes/y/new/rare/unusual。
+    判断值是否为"真"——布尔/数值按常规，字符串非空即真。
     """
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
         return value != 0
-    text = _text(value).lower()
-    return text in {"1", "true", "yes", "y", "new", "rare", "unusual"}
+    text = _text(value).strip()
+    if not text:
+        return False
+    text_lower = text.lower()
+    if text_lower in {"false", "no", "n", "0", "off", "disabled"}:
+        return False
+    return True
 
 
 def _to_int(value: Any) -> int | None:
