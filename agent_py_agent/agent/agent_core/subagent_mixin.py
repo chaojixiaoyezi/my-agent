@@ -160,8 +160,10 @@ class SimpleAgentSubagentMixin:
     def _finalize_subagent_run(self, run_id, active_attempt_id, result, context, prompt):
         """Finalize subagent run: parse output, repair if needed, record result."""
         from .runner_prompts import (
-            _append_runner_repair_failure, _append_runner_repair_prompt,
-            _append_runner_repair_response, _build_subagent_runner_repair_prompt,
+            _append_runner_repair_failure,
+            _append_runner_repair_prompt,
+            _append_runner_repair_response,
+            _build_subagent_runner_repair_prompt,
         )
         structured = parse_subagent_runner_output(result.response)
         prompt_for_log = result.prompt
@@ -208,8 +210,10 @@ class SimpleAgentSubagentMixin:
     def _handle_subagent_repair(self, context, result, structured, prompt_for_log, response_for_log, backend_name, message):
         """Handle structured output repair when initial parse fails."""
         from .runner_prompts import (
-            _append_runner_repair_failure, _append_runner_repair_prompt,
-            _append_runner_repair_response, _build_subagent_runner_repair_prompt,
+            _append_runner_repair_failure,
+            _append_runner_repair_prompt,
+            _append_runner_repair_response,
+            _build_subagent_runner_repair_prompt,
         )
         structured_repair_attempted = True
         structured_repair_ok = False
