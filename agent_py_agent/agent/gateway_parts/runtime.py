@@ -7,6 +7,7 @@ from __future__ import annotations
 大部分实现已经拆分到 request_worker、queue_service、response_renderer、audit_service 等模块。
 """
 
+from .io import write_json_file_atomic
 from .lease import (
     _active_heartbeat_request_ids,
     _gateway_processing_lease_interval,
@@ -49,4 +50,5 @@ __all__ = [
     "submit_gateway_ask",
     "wait_for_gateway_response",
     "wait_for_gateway_running",
+    "write_json_file_atomic",
 ]
