@@ -10,7 +10,6 @@ chat 模式要一边接收用户输入，一边让模型在后台跑。
 import json
 import queue
 import re
-import shutil
 import sys
 import threading
 import time
@@ -27,6 +26,28 @@ from ..agent.gateway import (
     wait_for_gateway_running,
 )
 from ..agent.session import SessionManager, generate_session_id
+from .chat_parts.history import (
+    MAX_HISTORY_TURNS as _MAX_HISTORY_TURNS,
+    append_conversation_turn,
+    build_history_context,
+)
+from .chat_parts.rendering import (
+    BLUE as _BLUE,
+    BOLD as _BOLD,
+    COLLAPSE_PREVIEW_CHARS as _COLLAPSE_PREVIEW_CHARS,
+    COLLAPSE_PREVIEW_LINES as _COLLAPSE_PREVIEW_LINES,
+    CONTEXT_WINDOW as _CONTEXT_WINDOW,
+    CYAN as _CYAN,
+    GRAY as _GRAY,
+    GREEN as _GREEN,
+    RESET as _RESET,
+    YELLOW as _YELLOW,
+    collapse_response_text as _collapse_response_text,
+    progress_bar as _progress_bar,
+    startup_banner as _startup_banner,
+    terminal_rule as _terminal_rule,
+)
+from .chat_parts.slash_commands import handle_common_slash_command
 from .common import CHAT_PROMPT, FALLBACK_CHAT_PROMPT, make_agent, resume_context_override
 from .models import ChatJob
 from .thinking_spinner import ThinkingSpinner
@@ -47,16 +68,6 @@ try:
 except ImportError:  # pragma: no cover
     PromptSession = None
 
-# LLM: maximum conversation turns kept in the chat history buffer.
-_MAX_HISTORY_TURNS = 8
-
-# LLM: approximate context window for progress bar display.
-_CONTEXT_WINDOW = 200_000
-
-# LLM: collapse very long assistant replies to keep terminal history readable.
-_COLLAPSE_PREVIEW_LINES = 12
-_COLLAPSE_PREVIEW_CHARS = 900
-
 _CHAT_RESPONSE_STYLE_INJECT = (
     "这是 CLI 聊天界面。回答风格要求："
     "1. 不要用模板化欢迎词；"
@@ -66,16 +77,6 @@ _CHAT_RESPONSE_STYLE_INJECT = (
     "5. 默认优先用简短自然语言回答，不要动不动列 1、2、3。"
 )
 
-# ANSI color helpers
-_BLUE = "\033[38;2;59;130;246m"
-_GRAY = "\033[90m"
-_GREEN = "\033[38;2;34;197;94m"
-_YELLOW = "\033[38;2;234;179;8m"
-_CYAN = "\033[38;2;6;182;212m"
-_RESET = "\033[0m"
-_BOLD = "\033[1m"
-
-
 def _cprint(text: str) -> None:
     """Print ANSI-colored text through prompt_toolkit's native renderer.
 
@@ -84,45 +85,6 @@ def _cprint(text: str) -> None:
     prompt_toolkit parse the escapes and render real colors.
     """
     _pt_print(_PT_ANSI(text))
-
-
-def _progress_bar(ratio: float, width: int = 10) -> str:
-    filled = int(ratio * width)
-    return "█" * filled + "░" * (width - filled)
-
-
-def _collapse_response_text(text: str) -> tuple[str, bool]:
-    """Return a terminal-friendly preview plus whether the text was collapsed."""
-
-    lines = text.splitlines()
-    if len(lines) <= _COLLAPSE_PREVIEW_LINES and len(text) <= _COLLAPSE_PREVIEW_CHARS:
-        return text, False
-
-    preview = "\n".join(lines[:_COLLAPSE_PREVIEW_LINES]).strip()
-    if len(preview) > _COLLAPSE_PREVIEW_CHARS:
-        preview = preview[:_COLLAPSE_PREVIEW_CHARS].rstrip()
-    if len(preview) < len(text):
-        preview += "\n..."
-    return preview, True
-
-
-def _startup_banner(agent_name: str, *, use_gateway: bool) -> str:
-    """Build a compact startup banner inspired by terminal agents like 长期助手."""
-
-    mode = "gateway client" if use_gateway else "local runtime"
-    return "\n".join(
-        [
-            f"{_CYAN}    /\\_/\\{_RESET}",
-            f"{_CYAN}   ( o.o ){_RESET}   {_BOLD}{agent_name}{_RESET}",
-            f"{_CYAN}    > ^ <{_RESET}    {_GRAY}{mode}{_RESET}",
-            "",
-        ]
-    )
-
-
-def _terminal_rule(char: str = "─", *, fallback: int = 119) -> str:
-    width = max(20, shutil.get_terminal_size(fallback=(fallback, 24)).columns)
-    return f"{_GRAY}{char * width}{_RESET}"
 
 
 def cmd_chat(args) -> int:
@@ -171,15 +133,11 @@ def cmd_chat(args) -> int:
     last_token_estimate = 0
 
     def _build_history_context() -> str:
-        with history_lock:
-            if not conversation_history:
-                return ""
-            recent = conversation_history[-_MAX_HISTORY_TURNS:]
-        lines = ["## 最近对话上下文（供参考，按时间倒序）"]
-        for user_msg, agent_msg in reversed(recent):
-            lines.append(f"用户: {user_msg}")
-            lines.append(f"助手: {agent_msg[:500]}")
-        return "\n".join(lines)
+        return build_history_context(
+            conversation_history,
+            history_lock,
+            max_turns=_MAX_HISTORY_TURNS,
+        )
 
     # ── prompt_toolkit mode ──────────────────────────────────────────────
 
@@ -360,23 +318,6 @@ def _run_tui(
             return True
         if user == "/expand" or user.startswith("/expand "):
             return _handle_expand_command(user)
-        if user == "/help":
-            _cprint(
-                "可用命令：\n"
-                "/help                         显示帮助\n"
-                "/status                       查看后台任务状态\n"
-                "/expand [last|编号]           展开被自动折叠的助手回复\n"
-                "/exit                         退出\n"
-                "/memory [关键词]              搜索记忆\n"
-                "/remember <内容>              手动写入记忆\n"
-                "/btw                          显示运行时 prompt 注入\n"
-                "/btw <内容>                   增加运行时 prompt 注入\n"
-                "/btw-clear                    清空运行时 prompt 注入\n"
-                "/prompt-file <路径>           增加动态 prompt 文件\n"
-                "/subagents <数量> <目标>      生成 subagent 任务记录\n"
-                "/show-prompt <问题>           显示最终 prompt 并回答\n"
-            )
-            return True
         if user == "/status":
             with state_lock:
                 active = pending_jobs_ref[0] + (1 if is_running_ref[0] else 0)
@@ -393,49 +334,14 @@ def _run_tui(
                 for line in render_gateway_status(agent, paths):
                     _cprint(line)
             return True
-        if user.startswith("/remember "):
-            rec = agent.remember(user[len("/remember "):], kind="note")
-            _cprint(f"已记忆: {rec.content}")
-            return True
-        if user.startswith("/memory"):
-            query = user[len("/memory"):].strip()
-            records = agent.recall(query, args.memory_limit) if query else agent.memory.all()[-args.memory_limit:]
-            if not records:
-                _cprint("没有找到记忆。")
-            else:
-                for rec in records:
-                    _cprint(f"- [{rec.kind}] {rec.role}: {rec.content}")
-            return True
-        if user == "/btw":
-            if not runtime_inject:
-                _cprint("当前没有运行时 prompt 注入。")
-            else:
-                _cprint("当前运行时 prompt 注入：")
-                for index, item in enumerate(runtime_inject, 1):
-                    _cprint(f"{index}. {item}")
-            return True
-        if user.startswith("/btw "):
-            runtime_inject.append(user[len("/btw "):])
-            _cprint(f"已加入注入 prompt，当前 {len(runtime_inject)} 条。")
-            return True
-        if user == "/btw-clear":
-            runtime_inject.clear()
-            _cprint("已清空运行时 prompt 注入。")
-            return True
-        if user.startswith("/prompt-file "):
-            prompt_files.append(user[len("/prompt-file "):].strip())
-            _cprint(f"已加入 prompt 文件，当前 {len(prompt_files)} 个。")
-            return True
-        if user.startswith("/subagents "):
-            parts = user.split(maxsplit=2)
-            if len(parts) < 3 or not parts[1].isdigit():
-                _cprint("用法: /subagents <数量> <目标>")
-                return True
-            tasks = agent.spawn_subagents(parts[2], int(parts[1]))
-            for task in tasks:
-                _cprint(f"- {task.id}: {task.goal}")
-            return True
-        return False
+        return handle_common_slash_command(
+            user,
+            agent=agent,
+            memory_limit=args.memory_limit,
+            runtime_inject=runtime_inject,
+            prompt_files=prompt_files,
+            print_line=_cprint,
+        )
 
     def _set_thinking_line(text: str) -> None:
         if not text:
@@ -620,10 +526,13 @@ def _run_tui(
                 if agent_response_text:
                     if not response_recorded:
                         assistant_outputs.append(agent_response_text)
-                    with history_lock:
-                        conversation_history.append((job.user, agent_response_text))
-                        if len(conversation_history) > _MAX_HISTORY_TURNS * 2:
-                            conversation_history[:] = conversation_history[-_MAX_HISTORY_TURNS:]
+                    append_conversation_turn(
+                        conversation_history,
+                        history_lock,
+                        job.user,
+                        agent_response_text,
+                        max_turns=_MAX_HISTORY_TURNS,
+                    )
                 with state_lock:
                     is_running_ref[0] = False
                     running_prompt_ref[0] = ""
@@ -975,10 +884,13 @@ def _run_fallback(
                 if agent_response_text:
                     if stream_started:
                         assistant_outputs.append(agent_response_text)
-                    with history_lock:
-                        conversation_history.append((job.user, agent_response_text))
-                        if len(conversation_history) > _MAX_HISTORY_TURNS * 2:
-                            conversation_history[:] = conversation_history[-_MAX_HISTORY_TURNS:]
+                    append_conversation_turn(
+                        conversation_history,
+                        history_lock,
+                        job.user,
+                        agent_response_text,
+                        max_turns=_MAX_HISTORY_TURNS,
+                    )
                 with state_lock:
                     is_running = False
                     running_prompt = ""
@@ -1026,25 +938,6 @@ def _run_fallback(
         if user == "/expand" or user.startswith("/expand "):
             handle_expand_command(user)
             continue
-        if user == "/help":
-            print(
-                "可用命令：\n"
-                "/help                         显示帮助\n"
-                "/status                       查看后台任务状态\n"
-                "/expand [last|编号]           展开被自动折叠的助手回复\n"
-                "/exit                         退出\n"
-                "/memory [关键词]              搜索记忆\n"
-                "/remember <内容>              手动写入记忆\n"
-                "/btw                          显示运行时 prompt 注入\n"
-                "/btw <内容>                   增加运行时 prompt 注入\n"
-                "/btw-clear                    清空运行时 prompt 注入\n"
-                "/prompt-file <路径>           增加动态 prompt 文件\n"
-                "/subagents <数量> <目标>      生成 subagent 任务记录\n"
-                "/show-prompt <问题>           显示最终 prompt 并回答\n"
-                "Ctrl+C                        退出\n"
-                "其他输入                       正常对话\n"
-            )
-            continue
         if user == "/status":
             with state_lock:
                 active = pending_jobs + (1 if is_running else 0)
@@ -1061,50 +954,15 @@ def _run_fallback(
                 for line in render_gateway_status(agent, paths):
                     print(line)
             continue
-        if user.startswith("/remember "):
-            rec = agent.remember(user[len("/remember "):], kind="note")
-            print(f"已记忆: {rec.content}")
-            continue
-        if user.startswith("/memory"):
-            query = user[len("/memory"):].strip()
-            records = (
-                agent.recall(query, args.memory_limit)
-                if query
-                else agent.memory.all()[-args.memory_limit:]
-            )
-            if not records:
-                print("没有找到记忆。")
-            for rec in records:
-                print(f"- [{rec.kind}] {rec.role}: {rec.content}")
-            continue
-        if user == "/btw":
-            if not runtime_inject:
-                print("当前没有运行时 prompt 注入。")
-            else:
-                print("当前运行时 prompt 注入：")
-                for index, item in enumerate(runtime_inject, 1):
-                    print(f"{index}. {item}")
-            continue
-        if user.startswith("/btw "):
-            runtime_inject.append(user[len("/btw "):])
-            print(f"已加入注入 prompt，当前 {len(runtime_inject)} 条。")
-            continue
-        if user == "/btw-clear":
-            runtime_inject.clear()
-            print("已清空运行时 prompt 注入。")
-            continue
-        if user.startswith("/prompt-file "):
-            prompt_files.append(user[len("/prompt-file "):].strip())
-            print(f"已加入 prompt 文件，当前 {len(prompt_files)} 个。")
-            continue
-        if user.startswith("/subagents "):
-            parts = user.split(maxsplit=2)
-            if len(parts) < 3 or not parts[1].isdigit():
-                print("用法: /subagents <数量> <目标>")
-                continue
-            tasks = agent.spawn_subagents(parts[2], int(parts[1]))
-            for task in tasks:
-                print(f"- {task.id}: {task.goal}")
+        if handle_common_slash_command(
+            user,
+            agent=agent,
+            memory_limit=args.memory_limit,
+            runtime_inject=runtime_inject,
+            prompt_files=prompt_files,
+            print_line=print,
+            include_fallback_help=True,
+        ):
             continue
 
         show_prompt = False

@@ -9,7 +9,13 @@ from __future__ import annotations
 
 import argparse
 
-from .adapter import cmd_adapter, cmd_adapter_file
+from .adapter import (
+    cmd_adapter,
+    cmd_adapter_file,
+    cmd_adapter_start,
+    cmd_adapter_status,
+    cmd_adapter_stop,
+)
 from .common import DEFAULT_CAPABILITY_CONFIG, add_resume_context_switches
 from .daemon import cmd_daemon
 from .gateway_client import cmd_gateway, cmd_gateway_ask, cmd_gateway_result
@@ -301,10 +307,10 @@ def add_gateway_subcommands(sub: argparse._SubParsersAction) -> None:
 
 
 def add_adapter_subcommand(sub: argparse._SubParsersAction) -> None:
-    """LLM: register the adapter subcommand with its file-protocol sub-subparser.
+    """LLM: register the adapter subcommand tree.
 
     新手说明:
-    注册 adapter 子命令组：adapter file（文件协议适配器）。
+    注册 adapter 子命令组：adapter file/start/status/stop。
     """
     adapter = sub.add_parser("adapter", help="外部聊天工具 / TUI 适配器")
     adapter_sub = adapter.add_subparsers(dest="adapter_command")
@@ -321,3 +327,23 @@ def add_adapter_subcommand(sub: argparse._SubParsersAction) -> None:
     adapter_file.add_argument("--timeout", type=float, help="等待 gateway 响应的秒数，默认使用配置 gateway_request_timeout")
     adapter_file.add_argument("--no-start-gateway", action="store_true", help="不自动启动 gateway；未运行时直接失败")
     adapter_file.set_defaults(func=cmd_adapter_file)
+
+    adapter_start = adapter_sub.add_parser("start", help="启动通道适配器（feishu / qq / all）")
+    adapter_start.add_argument(
+        "--channel",
+        choices=["feishu", "qq", "all"],
+        default="all",
+        help="指定要启动的通道，默认 all",
+    )
+    adapter_start.add_argument("--daemon", action="store_true", help="以后台守护进程模式运行，写入 PID 文件")
+    adapter_start.add_argument("--pid-file", help="指定 PID 文件路径；默认为 gateway workspace 下的 adapter.pid")
+    adapter_start.set_defaults(func=cmd_adapter_start)
+
+    adapter_status = adapter_sub.add_parser("status", help="查看通道适配器状态")
+    adapter_status.add_argument("--pid-file", help="指定 PID 文件路径；默认为 gateway workspace 下的 adapter.pid")
+    adapter_status.set_defaults(func=cmd_adapter_status)
+
+    adapter_stop = adapter_sub.add_parser("stop", help="停止所有通道适配器")
+    adapter_stop.add_argument("--pid-file", help="指定 PID 文件路径；默认为 gateway workspace 下的 adapter.pid")
+    adapter_stop.add_argument("--timeout", type=float, default=10.0, help="等待优雅停止的超时秒数")
+    adapter_stop.set_defaults(func=cmd_adapter_stop)

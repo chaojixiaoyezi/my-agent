@@ -10,14 +10,11 @@ Human version:
 import json
 import re
 import time
-from dataclasses import asdict, fields
+from dataclasses import fields
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .models import *
-from .reports import *
-from .rendering import *
-from .runner_rendering import *
+from .models import ContextManifest, QualityContract, SubAgentCard, SubAgentTask, TakeoverRecord, WorkOrderValidation
 from .runner_rendering import _render_runner_item_line
 from .parsing import (
     _dict_list,
@@ -192,6 +189,11 @@ class SubAgentBaseMixin:
         self.local_store = local_store
         self.workspace_root = Path(workspace_root).resolve() if workspace_root else self.workspace.resolve().parent
         self.enable_self_learning = bool(enable_self_learning)
+        from .services.persistence import SubAgentPersistenceService
+        from .services.lifecycle import SubAgentLifecycleService
+
+        self.lifecycle = SubAgentLifecycleService(self)
+        self.persistence = SubAgentPersistenceService(self)
 
     def split(self, goal: str, count: int, *, workflow_mode: str = "off") -> list[SubAgentTask]:
         """把一个目标拆成若干子任务记录。
@@ -472,31 +474,7 @@ class SubAgentBaseMixin:
     def load(self, run_id: str) -> SubAgentTask:
         """从磁盘读取一条运行记录。"""
 
-        path = self.workspace / run_id / "task.json"
-        if not path.exists():
-            raise FileNotFoundError(f"子代理记录不存在: {run_id}")
-        data = json.loads(path.read_text(encoding="utf-8"))
-        data = {key: value for key, value in data.items() if key in _field_names(SubAgentTask)}
-        data["capability_requests"] = [
-            CapabilityRequest(**item) for item in data.get("capability_requests", []) if isinstance(item, dict)
-        ]
-        data["capability_grants"] = [
-            CapabilityGrant(**item) for item in data.get("capability_grants", []) if isinstance(item, dict)
-        ]
-        data["capability_gaps"] = [
-            CapabilityGap(**item) for item in data.get("capability_gaps", []) if isinstance(item, dict)
-        ]
-        data["evidence"] = [VerificationEvidence(**item) for item in data.get("evidence", []) if isinstance(item, dict)]
-        data["takeover_records"] = [
-            TakeoverRecord(**item) for item in data.get("takeover_records", []) if isinstance(item, dict)
-        ]
-        data["channel_checks"] = [
-            ChannelProbeCheck(**item) for item in data.get("channel_checks", []) if isinstance(item, dict)
-        ]
-        data["quality_contract"] = _normalize_quality_contract(data.get("quality_contract"))
-        data["context_manifest"] = _normalize_context_manifest(data.get("context_manifest"))
-        data["context_packs"] = _normalize_context_packs(data.get("context_packs"))
-        return SubAgentTask(**data)
+        return self.persistence.load(run_id)
 
     def add_child(self, parent_id: str, child_id: str) -> None:
         """把子运行挂到父运行下面。"""
@@ -513,14 +491,7 @@ class SubAgentBaseMixin:
     def list_runs(self) -> list[SubAgentTask]:
         """扫描当前工作区内所有子代理运行记录。"""
 
-        runs: list[SubAgentTask] = []
-        for task_file in sorted(self.workspace.glob("*/task.json")):
-            try:
-                runs.append(self.load(task_file.parent.name))
-            except (FileNotFoundError, json.JSONDecodeError, TypeError):
-                continue
-        runs.sort(key=lambda item: item.updated_at or item.created_at, reverse=True)
-        return runs
+        return self.persistence.list_runs()
 
     def save(self, task: SubAgentTask) -> None:
         """保存子任务记录。
@@ -529,56 +500,7 @@ class SubAgentBaseMixin:
         一份存成 Markdown，方便人直接打开看。
         """
 
-        _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
-        task_dir = Path(task.task_dir)
-        task_dir.mkdir(parents=True, exist_ok=True)
-        self._ensure_work_order_files(task)
-        task.updated_at = task.updated_at or time.time()
-        (task_dir / "task.json").write_text(
-            json.dumps(asdict(task), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        (task_dir / "run.json").write_text(
-            json.dumps(asdict(task), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        (task_dir / "thought.md").write_text(
-            "# Thought\n\n"
-            f"{task.thought}\n\n"
-            "## Plan\n"
-            + "\n".join(f"- {item}" for item in task.plan)
-            + "\n\n"
-            "## Capability Boundary\n"
-            f"- Agent: {task.agent_name}\n"
-            f"- Role: {task.role}\n"
-            f"- Owner: {task.owner or 'none'}\n"
-            f"- Supervisor: {task.supervisor or 'none'}\n"
-            f"- Final owner: {task.final_owner or 'none'}\n"
-            f"- Parent: {task.parent_id or 'none'}\n"
-            f"- Depth: {task.depth}\n"
-            f"- Allowed skills: {', '.join(task.allowed_skills) or 'none'}\n"
-            f"- Allowed tools: {', '.join(task.allowed_tools) or 'none'}\n\n"
-            "## Write Boundary\n"
-            f"- Task dir: {task.task_dir}\n"
-            f"- Allowed write roots: {', '.join(task.allowed_write_roots) or 'none'}\n"
-            f"- Forbidden write roots: {', '.join(task.forbidden_write_roots) or 'none'}\n\n"
-            "## Acceptance Checks\n"
-            + "\n".join(f"- {item}" for item in task.acceptance_checks or ["未设置"])
-            + "\n\n"
-            "## Evidence\n"
-            + "\n".join(f"- [{item.kind}] {item.summary}" for item in task.evidence or [])
-            + ("\n" if task.evidence else "- 暂无\n"),
-            encoding="utf-8",
-        )
-        self._index_task(task)
-        if self.local_store:
-            self.local_store.task_registry.register_task(
-                task_id=task.id,
-                session_id=task.root_id,
-                user_id=task.owner or "",
-                status=task.status,
-                goal=task.goal,
-            )
+        self.persistence.save(task)
 
     def _build_work_order_paths(
         self,
