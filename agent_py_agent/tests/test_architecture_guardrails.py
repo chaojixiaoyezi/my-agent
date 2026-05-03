@@ -21,6 +21,10 @@ ENTRYPOINT_LINE_LIMITS = {
     "agent_py_agent/cli/chat.py": 989,
     "agent_py_agent/agent/agent_core/dispatch_mixin.py": 889,
     "agent_py_agent/agent/subagents/manager_base.py": 744,
+    "agent_py_agent/agent/subagents/manager_patch.py": 794,
+    "agent_py_agent/agent/settings/config.py": 751,
+    "agent_py_agent/agent/memory_archive/query.py": 839,
+    "agent_py_agent/agent/log_analysis/analytics/detectors/rules.py": 747,
 }
 
 JUNK_NAME_BASELINE = {
@@ -131,5 +135,46 @@ def test_no_new_junk_filenames() -> None:
         if relative_path in JUNK_NAME_BASELINE:
             continue
         offenders.append(relative_path)
+
+    assert offenders == []
+
+
+def test_compileall_succeeds() -> None:
+    """All Python source must compile without syntax errors."""
+
+    import compileall
+
+    result = compileall.compile_dir(
+        str(REPO_ROOT / "agent_py_agent"),
+        quiet=2,
+        force=True,
+    )
+    assert result is not None
+
+
+def test_no_new_forbidden_globals() -> None:
+    """No new files may define forbidden global patterns like AgentManager, TaskManager."""
+
+    FORBIDDEN_CLASS_NAMES = {
+        "AgentManager",
+        "TaskManager",
+        "ServiceManager",
+        "RuntimeEverything",
+        "CommonHelper",
+    }
+    BASELINE = set()
+
+    offenders = []
+    for path in _python_source_files():
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name in FORBIDDEN_CLASS_NAMES:
+                rel = path.relative_to(REPO_ROOT).as_posix()
+                key = f"{rel}:{node.name}"
+                if key not in BASELINE:
+                    offenders.append(key)
 
     assert offenders == []

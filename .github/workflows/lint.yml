@@ -28,7 +28,7 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip
           python3 -m pip install -e .
-          python3 -m pip install pytest
+          python3 -m pip install pytest ruff
 
       - name: Check doc sync
         run: python3 scripts/check_doc_sync.py
@@ -36,8 +36,14 @@ jobs:
       - name: Check Python syntax
         run: python3 -m compileall -q agent_py_agent scripts
 
+      - name: Lint with ruff
+        run: python3 -m ruff check agent_py_agent scripts
+
       - name: Check code size guardrails
         run: python3 scripts/check_code_size.py --mode warn
+
+      - name: Run architecture guardrails
+        run: python3 -m pytest agent_py_agent/tests/test_architecture_guardrails.py -q
 
       - name: Run focused CLI and filesystem tests
         run: python3 -m pytest agent_py_agent/tests/test_packaging.py agent_py_agent/tests/test_cli_parser.py agent_py_agent/tests/test_tooling_filesystem.py -q

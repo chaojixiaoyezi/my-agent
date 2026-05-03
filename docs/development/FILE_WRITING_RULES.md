@@ -1,21 +1,157 @@
-# File Writing Rules
+# File Writing Rules / 文件写入规则
 
-LLM: Any new write path must have one clear owner and one clear storage class.
+File writes are the most common source of ghost state, orphaned data, and security
+holes.  Every write in my-agent must have a clear owner, a clear storage class,
+and a clear lifecycle.
 
-给人看的解释：
-文件写入最容易制造幽灵状态。本规则要求写入位置、格式、生命周期都可解释。
+文件写入是"幽灵状态"最常见的来源。本规则要求每次写入都有明确的归属、存储类别和生命周期。
 
-## Storage Classes
+---
 
-- Source code: committed under package or script directories.
-- Governance docs: committed under `docs/`.
-- Runtime state: ignored under `agent_py_agent/data/`, `agent_py_agent/memory/`, or `agent_py_agent/memory_archive/`.
-- Test output: written to pytest `tmp_path` or temporary sandbox only.
+## 1. Storage Class Categories / 存储类别
 
-## Rules
+Every write in the system falls into exactly one of these categories:
 
-- Do not write runtime state next to source files.
-- Do not commit local DBs, token profiles, raw memory, cache directories, or generated reports.
-- If a feature needs a new durable format, document it before implementation.
-- If a write can fail, surface the failure to the caller unless the caller explicitly accepts best effort.
+| Category             | Target Path Pattern                         | Committed? | Lifecycle          |
+|----------------------|---------------------------------------------|------------|--------------------|
+| **SourceCode**       | `agent_py_agent/**/*.py`                    | Yes        | Permanent          |
+| **Test**             | `agent_py_agent/tests/**/*.py`              | Yes        | Permanent          |
+| **Documentation**    | `docs/**/*.md`, `*.md`                      | Yes        | Permanent          |
+| **TaskRecord**       | `docs/tasks/active/`, `docs/tasks/completed/` | Yes     | Until archived     |
+| **RuntimeData**      | `agent_py_agent/data/`, `agent_py_agent/memory/`, `agent_py_agent/memory_archive/` | **No** | Session-bound |
+| **Audit**            | `agent_py_agent/data/audit/`                | **No**     | Rotated/pruned     |
+| **GeneratedArtifact**| `tmp/`, `build/`, pytest `tmp_path`         | **No**     | Ephemeral          |
 
+- **RuntimeData** includes: memory JSONL files, task state DBs, token profiles,
+  adapter session state, cached indices, lock files.
+- **Audit** includes: dispatch audit logs, state-change event logs, gateway I/O logs.
+- **GeneratedArtifact** includes: build outputs, coverage reports, generated docs.
+
+---
+
+## 2. The Write Boundary / 写入边界
+
+All writes from business logic must go through the write-boundary utility defined
+in `agent_py_agent/tooling/filesystem.py`.  This utility enforces:
+
+1. **Workspace root containment** — the resolved path must be under the project root.
+2. **No path traversal** — `..` segments are rejected after resolution.
+3. **No system paths** — writes to `/etc`, `/usr`, `/bin`, `/var`, `/tmp` (system),
+   or any absolute path outside the workspace are blocked.
+4. **No symlink escapes** — the final resolved path is checked, not the raw string.
+
+```python
+# CORRECT — go through the write boundary
+from agent_py_agent.tooling.filesystem import safe_write
+safe_write(target_path, content)
+
+# WRONG — direct filesystem access from business code
+target_path.write_text(content)  # FORBIDDEN in business code
+```
+
+---
+
+## 3. Atomic Write Pattern / 原子写入模式
+
+For any durable write (RuntimeData, Audit), use the atomic pattern:
+
+```
+1. Write to a temporary file in the same directory (same filesystem)
+2. fsync the temporary file
+3. os.replace(tmp_path, target_path)  — atomic on POSIX
+4. fsync the parent directory (optional, for crash safety)
+```
+
+Why: a crash mid-write should never leave a half-written file.  `os.replace` is
+atomic on POSIX and will not corrupt the target if the process is killed.
+
+The `safe_write()` helper in `tooling/filesystem.py` implements this pattern.
+Do not re-implement it elsewhere.
+
+---
+
+## 4. Business Code Must Not Write Directly / 业务代码禁止直接写入
+
+Business code (anything under `agent/`, `cli/`, or command handlers) must **not**
+use any of the following directly:
+
+- `Path.write_text()` / `Path.write_bytes()`
+- `open(path, "w")` / `open(path, "wb")`
+- `shutil.copy()` / `shutil.move()` for state files
+- `os.makedirs()` for state directories
+
+Instead, use the appropriate repository or service:
+
+| Need                        | Use                            |
+|-----------------------------|--------------------------------|
+| Write memory entry          | `MemoryArchive` or `LocalStore`|
+| Write task record           | `TaskRepository`               |
+| Write audit event           | `Audit` class                  |
+| Write config change         | `ConfigManager`                |
+| Write temp/test file        | pytest `tmp_path` fixture      |
+| Write generated artifact    | `safe_write()` with explicit path |
+
+---
+
+## 5. Runtime Data Must Not Be Committed / 运行时数据禁止提交
+
+The `.gitignore` must exclude:
+
+```
+agent_py_agent/data/
+agent_py_agent/memory/
+agent_py_agent/memory_archive/
+*.db
+*.sqlite
+.coverage
+.pytest_cache/
+__pycache__/
+```
+
+If you introduce a new durable format, add the path to `.gitignore` **and** document
+the format in `docs/design/` before implementation.
+
+The architecture guardrails test (`test_architecture_guardrails.py`) scans for
+accidental commits of runtime artifacts (`.pyc`, `.coverage`, `__pycache__`, etc.).
+
+---
+
+## 6. Test File Writes / 测试中的文件写入
+
+- Tests must **never** write to the project directory.
+- Use the pytest `tmp_path` fixture for all filesystem tests.
+- The `tmp_path` fixture provides a unique temporary directory per test function,
+  automatically cleaned up after the test.
+
+```python
+def test_something(tmp_path):
+    target = tmp_path / "output.json"
+    safe_write(target, '{"key": "value"}')
+    assert target.exists()
+```
+
+If a test needs to exercise the real data directory, use a monkeypatch to redirect
+the base path to `tmp_path`.
+
+---
+
+## 7. Write Failure Handling / 写入失败处理
+
+- If a write can fail and the caller does not explicitly accept best-effort, the
+  failure must be raised (not swallowed).
+- Log the target path, the error, and enough context for diagnosis.
+- For atomic writes: clean up the temporary file on failure.
+- The caller is responsible for retry or user notification.
+
+---
+
+## 8. Adding a New Write Path / 新增写入路径
+
+Before adding a new write path:
+
+1. Determine the storage class (see table above).
+2. Document the path, format, and lifecycle in a design note.
+3. Add the path to `.gitignore` if it is RuntimeData, Audit, or GeneratedArtifact.
+4. Implement through `safe_write()` or an existing repository.
+5. Add a test that exercises the write using `tmp_path`.
+6. Update the architecture guardrails baseline if needed.

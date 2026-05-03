@@ -56,6 +56,22 @@ JUNK_NAME_BASELINE = {
     "agent_py_agent/cli/common.py",
 }
 
+# High-risk files frozen by architecture guardrails.
+# These files must NOT grow; new code goes to extracted modules.
+HIGH_RISK_FILES: dict[str, int] = {
+    "agent_py_agent/cli/chat.py": 989,
+    "agent_py_agent/agent/agent_core/dispatch_mixin.py": 889,
+    "agent_py_agent/agent/memory_archive/query.py": 839,
+    "agent_py_agent/agent/subagents/manager_patch.py": 794,
+    "agent_py_agent/agent/settings/config.py": 751,
+    "agent_py_agent/agent/subagents/manager_base.py": 744,
+    "agent_py_agent/agent/log_analysis/analytics/detectors/rules.py": 747,
+    "agent_py_agent/agent/log_analysis/tools.py": 666,
+    "agent_py_agent/agent/memory_archive/runtime.py": 657,
+    "agent_py_agent/agent/adapter/qq.py": 613,
+    "agent_py_agent/cli/memory_commands.py": 609,
+}
+
 
 @dataclass
 class Finding:
@@ -200,6 +216,29 @@ def _check_junk_names(paths: list[Path]) -> list[Finding]:
     return findings
 
 
+def _check_high_risk_files() -> list[Finding]:
+    """Check that frozen high-risk files have not grown past their baseline."""
+    findings: list[Finding] = []
+    for rel_path, baseline in HIGH_RISK_FILES.items():
+        path = ROOT / rel_path
+        if not path.exists():
+            continue
+        current = len(path.read_text(encoding="utf-8").splitlines())
+        if current > baseline:
+            findings.append(
+                Finding(
+                    "high_risk_growth",
+                    rel_path,
+                    path.name,
+                    current,
+                    baseline,
+                    "hard",
+                    f"{rel_path} grew from {baseline} to {current} lines",
+                )
+            )
+    return findings
+
+
 def collect_findings() -> list[Finding]:
     files = _source_files()
     findings: list[Finding] = []
@@ -207,6 +246,7 @@ def collect_findings() -> list[Finding]:
         findings.extend(_check_file_size(path))
         findings.extend(_check_ast(path))
     findings.extend(_check_junk_names(files))
+    findings.extend(_check_high_risk_files())
     return sorted(findings, key=lambda item: (item.severity != "hard", item.kind, item.path, item.name))
 
 
@@ -251,19 +291,22 @@ def write_report(findings: list[Finding], *, mode: str, blocked: bool) -> None:
         "## 4. 高复杂度函数列表",
         *_format_table([item for item in findings if item.kind == "nesting"]),
         "",
-        "## 5. 新增违规项",
+        "## 5. 高危文件增长",
+        *_format_table([item for item in findings if item.kind == "high_risk_growth"]),
+
+        "## 6. 新增违规项",
         *_format_table([item for item in hard if item.kind in {"import_star", "junk_name", "syntax"}]),
         "",
-        "## 6. 历史遗留项",
+        "## 7. 历史遗留项",
         *_format_table(soft[:100]),
         "",
-        "## 7. 建议拆分路径",
+        "## 8. 建议拆分路径",
         "- Keep `cli/parser.py` thin and route registration through `cli/commands/`.",
         "- Continue extracting `cli/chat.py` into chat session, input loop, renderer, and gateway client modules.",
         "- Move SubAgent mixin logic into services and repositories behind the manager facade.",
         "- Split memory archive query/runtime and log analysis tools by query, rendering, and persistence responsibilities.",
         "",
-        "## 8. 本次是否阻断",
+        "## 9. 本次是否阻断",
         f"- {'yes' if blocked else 'no'}",
         "",
     ]
@@ -275,7 +318,7 @@ def main() -> int:
     parser.add_argument("--mode", choices=["warn", "strict"], default="warn")
     args = parser.parse_args()
     findings = collect_findings()
-    strict_blockers = [item for item in findings if item.severity == "hard" and item.kind in {"import_star", "junk_name", "syntax"}]
+    strict_blockers = [item for item in findings if item.severity == "hard" and item.kind in {"import_star", "junk_name", "syntax", "high_risk_growth"}]
     blocked = args.mode == "strict" and bool(strict_blockers)
     write_report(findings, mode=args.mode, blocked=blocked)
     print(f"code-size findings: total={len(findings)} report={REPORT_PATH.relative_to(ROOT)} blocked={blocked}")
