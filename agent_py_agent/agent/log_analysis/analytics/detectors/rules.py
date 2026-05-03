@@ -207,7 +207,7 @@ def web_to_process_anomaly(
             _make_finding(
                 "web_to_process_anomaly",
                 [event],
-                hypothesis=f"Possible post-exploit command execution: web parent {parent or "unknown"} launched {child or "unknown"}.",
+                hypothesis=f"Possible post-exploit command execution: web parent {parent or 'unknown'} launched {child or 'unknown'}.",
                 confidence=min(confidence, 0.9),
                 gaps=[
                     "The initiating HTTP request is not confirmed unless web access/WAF evidence is linked.",
