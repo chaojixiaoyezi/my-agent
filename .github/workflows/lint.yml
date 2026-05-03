@@ -39,7 +39,7 @@ jobs:
         run: python3 scripts/check_clean_package.py .
 
       - name: Lint with ruff
-        run: python3 -m ruff check agent_py_agent scripts
+        run: ruff check agent_py_agent scripts
 
       - name: Check code size guardrails
         run: python3 scripts/check_code_size.py --mode warn

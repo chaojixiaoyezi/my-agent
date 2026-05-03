@@ -7,8 +7,6 @@ from __future__ import annotations
 保持 mixin 签名完全兼容，业务逻辑委托给 dispatch_service、planner_service、runner_gate、acceptance_gate。
 """
 
-import os
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..capabilities import CapabilityRouter
@@ -30,7 +28,6 @@ from .dispatch_service import (
     update_pending_work_state,
 )
 from .failure_introspector import FailureIntrospector
-from .parameters import _sleep_with_stop
 from .planner_service import combine_runner_instruction
 from .runner_dispatch import (
     _dispatch_patch_review_run_ids,
@@ -49,6 +46,8 @@ from .runner_gate import (
     run_concurrent_runners,
     run_single_runner,
 )
+from .services import notify_completed_tasks
+from .services import watch_subagents as _watch_subagents
 
 
 class SimpleAgentDispatchMixin:
@@ -129,7 +128,6 @@ class SimpleAgentDispatchMixin:
         max_runners, limit, reviewer, note, take_over_by, locked_files, router
     ):
         """Collect records for non-runner dispatch steps."""
-        from .planner_service import combine_runner_instruction
         records = []
 
         if planner:
@@ -260,9 +258,13 @@ class SimpleAgentDispatchMixin:
         report = self.subagents.build_dispatch_report(records, dry_run=not apply)
         report = self.subagents.write_dispatch_report(report, append_log=apply)
         if apply:
-            self._notify_completed_tasks(records)
+            notify_completed_tasks(self, records)
         self._has_pending_work = update_pending_work_state(self)
         return report
+
+    def _notify_completed_tasks(self, records: list) -> None:
+        """Thin wrapper for backward compatibility — delegates to services.notify_completed_tasks."""
+        notify_completed_tasks(self, records)
 
     def _update_pending_work_state(self) -> None:
         """更新待处理工作状态。"""
@@ -333,60 +335,6 @@ class SimpleAgentDispatchMixin:
         """重置连续 dispatch 轮数。"""
         self._consecutive_dispatch_rounds = 0
 
-    def _notify_completed_tasks(self, records: list) -> None:
-        """对达到终态的任务触发通知。"""
-        if not getattr(self.config, "notification_enabled", False):
-            return
-
-        final_statuses = {"DONE", "FAILED", "TIMEOUT"}
-        notified_run_ids: set[str] = set()
-
-        for record in records:
-            if record.step not in {"runner", "acceptance"}:
-                continue
-            if not record.applied:
-                continue
-            run_id = record.run_id
-            if run_id in notified_run_ids:
-                continue
-
-            after_status = getattr(record, "after_status", "")
-            if after_status not in final_statuses:
-                continue
-
-            try:
-                task = self.subagents.load(run_id)
-            except FileNotFoundError:
-                continue
-
-            if task.status not in final_statuses:
-                continue
-
-            notified_run_ids.add(run_id)
-
-            try:
-                from ..notification import NotificationManager, NotificationRouter
-
-                notif_manager = NotificationManager(self.config)
-                channel = getattr(task, "last_active_channel", "") or "chat"
-                message = (
-                    f"任务 {run_id} 已完成\n"
-                    f"状态: {task.status}\n"
-                    f"目标: {task.goal[:100]}\n"
-                    f"尝试次数: {task.runner_attempts}"
-                )
-                notification = notif_manager.create_notification(
-                    task_id=run_id,
-                    user_id=getattr(self.config, "user_id", "admin"),
-                    session_id=task.root_id or "",
-                    channel=channel,
-                    message=message,
-                )
-                router = NotificationRouter(notif_manager, self.config)
-                router.deliver(notification.notification_id)
-            except Exception:
-                pass
-
     def watch_subagents(
         self,
         router: CapabilityRouter,
@@ -410,122 +358,29 @@ class SimpleAgentDispatchMixin:
         force_lock: bool = False,
         stop_file: str | Path | None = None,
     ) -> DispatchWatchReport:
-        """以 watch 模式持续执行父代理调度。"""
-        if max_cycles < 0:
-            raise ValueError("max_cycles 不能小于 0。")
-        if interval < 0:
-            raise ValueError("interval 不能小于 0。")
+        """以 watch 模式持续执行父代理调度。
 
-        cfg = capability_config or CapabilityConfig()
-        records = []
-        lock_path = self.subagents.workspace / "subagent_dispatch_watch.lock"
-        stop_path = Path(stop_file) if stop_file else None
-
-        active_interval = getattr(self.config, "dispatch_active_interval", 5)
-        idle_interval = getattr(self.config, "dispatch_idle_interval", 30)
-        max_consecutive = getattr(self.config, "dispatch_max_consecutive_rounds", 20)
-
-        self._reset_dispatch_rounds()
-
-        from .dispatch_lock import _DispatchWatchLock
-
-        with _DispatchWatchLock(lock_path, force=force_lock) as lock:
-            cycle = 0
-            last_dispatch_had_changes = False
-            while max_cycles == 0 or cycle < max_cycles:
-                if stop_path and stop_path.exists():
-                    break
-                cycle += 1
-                record = self._run_single_watch_cycle(
-                    cycle, lock_path, stop_path, router, cfg, apply, execute_runners,
-                    planner, workflow_mode, max_runners, limit, reviewer, note,
-                    runner_instruction, max_cards, probe, take_over_by, locked_files,
-                    active_interval, idle_interval, max_consecutive, last_dispatch_had_changes,
-                    max_cycles=max_cycles,
-                )
-                records.append(record)
-                last_dispatch_had_changes = getattr(record, 'dispatch_record_count', 0) > 0
-
-            self.subagents.write_dispatch_watch_heartbeat(
-                cycle=cycle,
-                status="stopped",
-                lock_path=str(lock_path),
-                pid=os.getpid(),
-                message=f"watch stopped; lock={lock.token}",
-            )
-
-        report = self.subagents.build_dispatch_watch_report(records, dry_run=not apply)
-        return self.subagents.write_dispatch_watch_report(report)
-
-    def _run_single_watch_cycle(
-        self, cycle, lock_path, stop_path, router, cfg, apply, execute_runners,
-        planner, workflow_mode, max_runners, limit, reviewer, note,
-        runner_instruction, max_cards, probe, take_over_by, locked_files,
-        active_interval, idle_interval, max_consecutive, last_dispatch_had_changes,
-        max_cycles: int = 0,
-    ):
-        """Run a single watch cycle and return the dispatch watch record."""
-        import time as time_module
-
-        started_at = time_module.time()
-        self.subagents.write_dispatch_watch_heartbeat(
-            cycle=cycle, status="running", lock_path=str(lock_path),
-            pid=os.getpid(), message="dispatch cycle started",
+        Thin facade that delegates to watch_service.
+        """
+        return _watch_subagents(
+            self,
+            router=router,
+            capability_config=capability_config,
+            apply=apply,
+            execute_runners=execute_runners,
+            planner=planner,
+            workflow_mode=workflow_mode,
+            max_runners=max_runners,
+            limit=limit,
+            reviewer=reviewer,
+            note=note,
+            runner_instruction=runner_instruction,
+            max_cards=max_cards,
+            probe=probe,
+            take_over_by=take_over_by,
+            locked_files=locked_files,
+            interval=interval,
+            max_cycles=max_cycles,
+            force_lock=force_lock,
+            stop_file=stop_file,
         )
-        try:
-            dispatch_report = self.dispatch_subagents(
-                router, cfg, apply=apply, execute_runners=execute_runners,
-                planner=planner, workflow_mode=workflow_mode, max_runners=max_runners,
-                limit=limit, reviewer=reviewer, note=note, runner_instruction=runner_instruction,
-                max_cards=max_cards, probe=probe, take_over_by=take_over_by,
-                locked_files=locked_files or [],
-            )
-            ok = all(item.ok for item in dispatch_report.records)
-            message = f"完成一轮 dispatch，records={len(dispatch_report.records)}。"
-            record_count = len(dispatch_report.records)
-            dispatch_summary = dispatch_report.summary
-            evidence_paths = [
-                str(self.subagents.workspace / "subagent_dispatch_report.json"),
-                str(self.subagents.workspace / "SUBAGENT_DISPATCH.md"),
-            ]
-        except Exception as exc:
-            ok = False
-            message = f"dispatch cycle failed: {exc}"
-            record_count = 0
-            dispatch_summary = {}
-            evidence_paths = []
-
-        ended_at = time_module.time()
-        record = make_dispatch_watch_record(
-            self, cycle=cycle, dry_run=not apply, ok=ok, message=message,
-            dispatch_record_count=record_count, dispatch_summary=dispatch_summary,
-            started_at=started_at, ended_at=ended_at, evidence_paths=evidence_paths,
-        )
-        self.subagents.append_dispatch_watch_log(record)
-        self._increment_dispatch_rounds()
-
-        if self._consecutive_dispatch_rounds >= max_consecutive:
-            message = f"{message} 已达到最大连续轮数限制 ({max_consecutive})，停止调度。"
-            self.subagents.write_dispatch_watch_heartbeat(
-                cycle=cycle, status="stopped_by_limit", lock_path=str(lock_path),
-                pid=os.getpid(), message=message,
-            )
-            return record
-
-        more_cycles = max_cycles == 0 or cycle < max_cycles
-        stop_requested = bool(stop_path and stop_path.exists())
-        if stop_requested:
-            more_cycles = False
-            message = f"{message} stop requested."
-        self.subagents.write_dispatch_watch_heartbeat(
-            cycle=cycle, status="sleeping" if more_cycles else "stopping",
-            lock_path=str(lock_path), pid=os.getpid(), message=message,
-        )
-        if not more_cycles:
-            return record
-
-        current_interval = active_interval if last_dispatch_had_changes else idle_interval
-        if _sleep_with_stop(current_interval, stop_path):
-            return record
-
-        return record

@@ -1,0 +1,103 @@
+"""Subagent workflow normalization service."""
+
+from __future__ import annotations
+
+
+class SubagentWorkflowWarningService:
+    """Service for handling subagent workflow config warnings."""
+
+    @staticmethod
+    def add_warning(
+        warnings: list[dict[str, object]],
+        field_name: str,
+        raw_value: object,
+        fallback_value: object,
+        reason: str,
+    ) -> None:
+        """Append a structured warning dict for a subagent workflow config field."""
+        warnings.append(
+            {
+                "field_name": field_name,
+                "raw_value": raw_value,
+                "fallback_value": fallback_value,
+                "reason": reason,
+            }
+        )
+
+
+class SubagentWorkflowConfigService:
+    """Service for validating and coercing subagent workflow config fields."""
+
+    @staticmethod
+    def normalize(config: object) -> list[dict[str, object]]:
+        """Validate and coerce subagent workflow config fields on an AgentConfig instance."""
+        from ..config import AgentConfig
+        warnings: list[dict[str, object]] = []
+        defaults = AgentConfig()
+
+        raw_mode = config.subagent_workflow_mode
+        if isinstance(raw_mode, str) and raw_mode.strip().lower() in {"auto", "manual", "off"}:
+            config.subagent_workflow_mode = raw_mode.strip().lower()
+        else:
+            config.subagent_workflow_mode = defaults.subagent_workflow_mode
+            SubagentWorkflowWarningService.add_warning(
+                warnings,
+                "subagent_workflow_mode",
+                raw_mode,
+                defaults.subagent_workflow_mode,
+                "expected one of ['auto', 'manual', 'off']",
+            )
+
+        raw_builtin = config.subagent_builtin_workflows
+        if isinstance(raw_builtin, bool):
+            config.subagent_builtin_workflows = raw_builtin
+        else:
+            config.subagent_builtin_workflows = defaults.subagent_builtin_workflows
+            SubagentWorkflowWarningService.add_warning(
+                warnings,
+                "subagent_builtin_workflows",
+                raw_builtin,
+                defaults.subagent_builtin_workflows,
+                "expected a boolean value",
+            )
+
+        raw_dirs = config.subagent_user_workflow_dirs
+        if (
+            isinstance(raw_dirs, list)
+            and all(isinstance(item, str) and item.strip() for item in raw_dirs)
+        ):
+            config.subagent_user_workflow_dirs = [item.strip() for item in raw_dirs]
+        else:
+            config.subagent_user_workflow_dirs = list(defaults.subagent_user_workflow_dirs)
+            SubagentWorkflowWarningService.add_warning(
+                warnings,
+                "subagent_user_workflow_dirs",
+                raw_dirs,
+                list(defaults.subagent_user_workflow_dirs),
+                "expected a list of non-empty strings",
+            )
+
+        raw_review_rounds = config.subagent_workflow_review_rounds
+        if isinstance(raw_review_rounds, bool):
+            review_rounds: int | None = None
+        elif isinstance(raw_review_rounds, int):
+            review_rounds = raw_review_rounds
+        elif isinstance(raw_review_rounds, str) and raw_review_rounds.strip().isdigit():
+            review_rounds = int(raw_review_rounds.strip())
+        else:
+            review_rounds = None
+
+        if review_rounds is not None and 0 <= review_rounds <= 5:
+            config.subagent_workflow_review_rounds = review_rounds
+        else:
+            config.subagent_workflow_review_rounds = defaults.subagent_workflow_review_rounds
+            SubagentWorkflowWarningService.add_warning(
+                warnings,
+                "subagent_workflow_review_rounds",
+                raw_review_rounds,
+                defaults.subagent_workflow_review_rounds,
+                "expected an integer between 0 and 5",
+            )
+
+        config.subagent_workflow_config_warnings = warnings
+        return warnings
