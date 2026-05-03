@@ -3,15 +3,15 @@
 LLM: Keep this backlog concrete and executable. Each entry must have a verification command.
 
 给人看的解释：
-这里列出最应该拆的文件，按严重程度排序。每项包含问题、目标结构、步骤、风险和验收命令。当前基线：411 findings (149 hard, 262 soft)。
+这里列出最应该拆的文件，按严重程度排序。每项包含问题、目标结构、步骤、风险和验收命令。当前基线：414 findings (149 hard, 265 soft)。
 
 ---
 
 ## Priority 1: Hard-limit violations (600+ lines, merge blockers)
 
-### 1. `cli/chat.py` -- 989 lines
+### 1. `cli/chat.py` -- 1017 lines
 
-- **Current Problem**: 989 lines, 15+ functions, handles TUI loop, fallback loop, streaming, session state, gateway client, slash commands, and rendering. Single file owns the entire interactive chat experience.
+- **Current Problem**: 1017 lines, 15+ functions, handles TUI loop, fallback loop, streaming, session state, gateway client, slash commands, and rendering. Single file owns the entire interactive chat experience.
 - **Function Count**: ~18 functions, 4 over 100-line hard limit.
 - **Target Structure**:
   - `chat_parts/tui.py` -- TUI input loop and prompt_toolkit integration
@@ -29,9 +29,9 @@ LLM: Keep this backlog concrete and executable. Each entry must have a verificat
 - **Risk**: High -- interactive behavior, streaming output, and prompt_toolkit compatibility are fragile. Each extraction needs manual TUI testing.
 - **Verification**: `python3 -m pytest agent_py_agent/tests/test_cli_chat.py agent_py_agent/tests/test_chat_parts.py -q`
 
-### 2. `agent/agent_core/dispatch_mixin.py` -- 889 lines
+### 2. `agent/agent_core/dispatch_mixin.py` -- 895 lines
 
-- **Current Problem**: 889 lines, distributed god mixin handling dispatch orchestration, planner logic, runner gate, acceptance gate, and audit logging. Mixin pattern makes it hard to test in isolation.
+- **Current Problem**: 895 lines, distributed god mixin handling dispatch orchestration, planner logic, runner gate, acceptance gate, and audit logging. Mixin pattern makes it hard to test in isolation.
 - **Function Count**: ~22 functions, 6 over 100-line hard limit.
 - **Target Structure**:
   - `dispatch_service.py` -- dispatch orchestration and step sequencing
@@ -48,9 +48,9 @@ LLM: Keep this backlog concrete and executable. Each entry must have a verificat
 - **Risk**: High -- dispatch ordering and audit log sequence must not change. Gateway and subagent integration paths are complex.
 - **Verification**: `python3 -m pytest agent_py_agent/tests -q -k "dispatch or gateway"`
 
-### 3. `agent/memory_archive/query.py` -- 839 lines
+### 3. `agent/memory_archive/query.py` -- 838 lines
 
-- **Current Problem**: 839 lines, handles query construction, filter predicates, result parsing, pagination, and CLI rendering. Query logic is interleaved with presentation.
+- **Current Problem**: 838 lines, handles query construction, filter predicates, result parsing, pagination, and CLI rendering. Query logic is interleaved with presentation.
 - **Function Count**: ~16 functions, 4 over 100-line hard limit.
 - **Target Structure**:
   - `query_models.py` -- query request/response dataclasses
@@ -102,9 +102,9 @@ LLM: Keep this backlog concrete and executable. Each entry must have a verificat
 - **Risk**: High -- config compatibility and default value changes break existing users silently.
 - **Verification**: `python3 -m pytest agent_py_agent/tests -q -k "config or packaging"`
 
-### 6. `agent/subagents/manager_base.py` -- 744 lines
+### 6. `agent/subagents/manager_base.py` -- 751 lines
 
-- **Current Problem**: 744 lines, base manager with state machine, lifecycle hooks, tool registration, and compatibility shims.
+- **Current Problem**: 751 lines, base manager with state machine, lifecycle hooks, tool registration, and compatibility shims.
 - **Function Count**: ~18 functions, 3 over 100-line limit.
 - **Target Structure**:
   - `lifecycle_service.py` -- start/stop/health/recovery
@@ -117,9 +117,9 @@ LLM: Keep this backlog concrete and executable. Each entry must have a verificat
 - **Risk**: Medium -- state file format and CLI behavior must stay stable.
 - **Verification**: `python3 -m pytest agent_py_agent/tests -q -k "subagent"`
 
-### 7. `agent/memory_routing/rules.py` -- 747 lines
+### 7. `agent/log_analysis/analytics/detectors/rules.py` -- 745 lines
 
-- **Current Problem**: 747 lines, routing rule evaluation, match scoring, and rule loading all in one file.
+- **Current Problem**: 745 lines, routing rule evaluation, match scoring, and rule loading all in one file.
 - **Function Count**: ~12 functions, 2 over 100-line limit.
 - **Target Structure**:
   - `rule_models.py` -- rule dataclasses and enums
@@ -137,9 +137,9 @@ LLM: Keep this backlog concrete and executable. Each entry must have a verificat
 
 ## Priority 2: Near-hard-limit violations (500-600 lines)
 
-### 8. `agent/log_analysis/tools.py` -- 666 lines
+### 8. `agent/log_analysis/tools.py` -- 672 lines
 
-- **Current Problem**: 666 lines, tool registration and handler implementations for log analysis extension. Should be plugin-ized.
+- **Current Problem**: 672 lines, tool registration and handler implementations for log analysis extension. Should be plugin-ized.
 - **Target Structure**: `LogAnalysisPlugin` with `register_tools()`, separated handler functions.
 - **Split Steps**:
   1. Define `ExtensionPlugin` interface (see ADR-0003)
@@ -149,9 +149,9 @@ LLM: Keep this backlog concrete and executable. Each entry must have a verificat
 - **Risk**: Medium -- log analysis commands and test fixtures are numerous.
 - **Verification**: `python3 -m pytest agent_py_agent/tests -q -k "log_analysis"`
 
-### 9. `cli/memory_commands.py` -- 609 lines
+### 9. `cli/memory_commands.py` -- 608 lines
 
-- **Current Problem**: 609 lines, memory CLI commands with query, archive, routing, and doctor subcommands.
+- **Current Problem**: 608 lines, memory CLI commands with query, archive, routing, and doctor subcommands.
 - **Target Structure**: Split into `memory_query_cmd.py`, `memory_archive_cmd.py`, `memory_doctor_cmd.py`.
 - **Split Steps**:
   1. Extract query commands

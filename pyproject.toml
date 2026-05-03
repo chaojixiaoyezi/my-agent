@@ -17,6 +17,8 @@ dependencies = [
 dev = [
   "coverage>=7.6",
   "pytest>=8.0",
+  "pytest-timeout>=2",
+  "pytest-cov>=5",
   "ruff>=0.8",
 ]
 
@@ -39,6 +41,11 @@ python_files = ["test_*.py"]
 addopts = "-q"
 markers = [
   "slow: stress or long-running scenario tests",
+  "e2e: end-to-end workflow tests",
+  "integration: integration tests across modules",
+  "security: permission, auth, and boundary tests",
+  "contract: schema and interface contract tests",
+  "regression: tests for previously fixed bugs",
 ]
 
 [tool.coverage.run]

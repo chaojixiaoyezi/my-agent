@@ -15,9 +15,14 @@ htmlcov/
 .ruff_cache/
 .mypy_cache/
 
-# OS/editor local files
+# macOS
 .DS_Store
 **/.DS_Store
+._*
+.AppleDouble
+.LSOverride
+
+# OS/editor local files
 .env
 .env.*
 !.env.example
