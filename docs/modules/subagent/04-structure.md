@@ -19,10 +19,13 @@ agent_py_agent/agent/
 
 ## 核心文件
 
-- `agent_py_agent/agent/subagent_workflows/router.py`：回答“这个任务适合哪种 workflow”。
+- `agent_py_agent/agent/subagent_workflows/router.py`：回答”这个任务适合哪种 workflow”。
 - `agent_py_agent/agent/subagent_workflows/compiler.py`：把抽象模板变成具体 worker 任务说明。
 - `agent_py_agent/agent/subagent_workflows/acceptance.py`：生成父会话要检查什么。
 - `agent_py_agent/agent/subagents/`：保存真实 subagent 管理、运行、报告和验收相关代码。
+- `agent_py_agent/agent/subagents/models.py`：定义 `SubAgentTask`、`TaskStatus`、`DISPATCH_INELIGIBLE_STATUSES` 等核心数据结构。
+- `agent_py_agent/agent/subagents/manager_indexing.py`：实现 `_select_runs()` 等索引和过滤逻辑。
+- `agent_py_agent/agent/memory_push.py`：实现记忆推模式，在决策点自动注入相关记忆。
 - `agent_py_agent/cli/subagents.py`：用户从 CLI 预览或操作 subagent 的入口。
 
 ## 数据流

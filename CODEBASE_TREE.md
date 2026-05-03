@@ -14,12 +14,12 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |-- LLM_GUIDE.md                               # LLM/AI 开发者总入口，含开工前/收工后清单和编码规范
 |-- pyproject.toml                             # Python packaging 配置，提供 my-agent console script
 |-- CLI_REFERENCE.md                           # 完整 CLI 参数手册，说明每个命令和参数
-|-- ARCHITECTURE_GUIDE.md                      # 架构边界、拆分顺序和两层注释规则，给人和 LLM 都看
-|-- GATEWAY_DESIGN.md                          # gateway 常驻形态、外部方案对比和本项目目标设计
-|-- GATEWAY_RESEARCH.md                        # gateway 大调研，比较 daemon、任务队列、workflow、Notebook 和 AI gateway 方案
-|-- MEMORY_BACKLOG.md                          # 记忆系统痛点、去重分类和后续设计讨论入口
-|-- WORKSTREAMS.md                             # 并行开发工作台说明，定义 worktree、职责边界和集成流程
-|-- HANDOFF_TEMPLATE.md                        # 并行开发线完成后的交接模板
+|-- ARCHITECTURE_GUIDE.md                      # 架构边界、拆分顺序和两层注释规则，给人和 LLM 都看（已移至 docs/design/）
+|-- GATEWAY_DESIGN.md                          # gateway 常驻形态、外部方案对比和本项目目标设计（已移至 docs/design/）
+|-- GATEWAY_RESEARCH.md                        # gateway 大调研，比较 daemon、任务队列、workflow、Notebook 和 AI gateway 方案（已移至 docs/design/）
+|-- MEMORY_BACKLOG.md                          # 记忆系统痛点、去重分类和后续设计讨论入口（已移至 docs/）
+|-- WORKSTREAMS.md                             # 并行开发工作台说明，定义 worktree、职责边界和集成流程（已移至 docs/）
+|-- HANDOFF_TEMPLATE.md                        # 并行开发线完成后的交接模板（已移至 docs/tasks/）
 |-- docs/                                      # 长篇项目文档目录
 |   |-- ROADMAP.md                             # 待做/进行中功能清单，开工前必读
 |   |-- COMPLETED.md                           # 已落地功能清单，收工后必改
@@ -164,14 +164,14 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |-- AGENTS.md                                  # AI 开发规范，约束后续开发、配置、文档和自学习改动
 |-- CODEBASE_TREE.md                           # 当前这份目录树说明
 |-- DESIGN_LEDGER.md                           # 设计思路台账，记录新想法、落地状态和后续方向
-|-- DISCUSSION_BACKLOG.md                      # 功能开发之外的系统问题讨论清单
+|-- DISCUSSION_BACKLOG.md                      # 功能开发之外的系统问题讨论清单（已移至 docs/）
 |-- EVIDENCE.md                                # 过程证据记录
 |-- RESULT.md                                  # 结果记录
 |-- RUNLOG.md                                  # 运行日志说明
 |-- SKILL_SPARK.yaml                           # 项目任务描述
 |-- SPEC.md                                    # 原始需求规格
 |-- STATUS.md                                  # 当前阶段状态说明
-|-- SUBAGENT_RUNBOOK.md                        # subagent、capability 和 runner 详细运行手册
+|-- SUBAGENT_RUNBOOK.md                        # subagent、capability 和 runner 详细运行手册（已移至 docs/modules/subagent/）
 |-- TESTS.md                                   # 测试说明
 |-- TEST_CHECKLIST.md                          # 测试检查清单
 `-- validation/                                # 验证输出目录
@@ -208,7 +208,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `fetch_url`：抓取网页或文本接口内容，适合查在线文档。
 - `http_request`：发送 HTTP 请求，适合测试 REST API、Webhook 和普通接口。
 
-### `WORKSTREAMS.md`
+### `WORKSTREAMS.md`（已移至 `docs/WORKSTREAMS.md`）
 
 这是并行开发工作台的规则入口。
 
@@ -224,7 +224,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `tools-boundary`
 - `live-lab-test`
 
-### `MEMORY_BACKLOG.md`
+### `MEMORY_BACKLOG.md`（已移至 `docs/MEMORY_BACKLOG.md`）
 
 这是记忆系统的专门讨论入口。
 
@@ -627,7 +627,7 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - 自学习功能默认关闭，开启后也只能先生成学习候选草稿，不能自动改正式 skill。
 - skill 体系后续优先采用“索引 → 正文 → 附件”的渐进加载方向。
 
-### `SUBAGENT_RUNBOOK.md`
+### `SUBAGENT_RUNBOOK.md`（已移至 `docs/modules/subagent/SUBAGENT_RUNBOOK.md`）
 
 这是当前 subagent / capability / runner 的详细手册。
 
@@ -642,7 +642,7 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 
 后续改 subagent 主链路时，除了 `DESIGN_LEDGER.md` 和 `docs/design/subagent-quality-contract.md`，也要同步检查这份 runbook 是否需要更新。
 
-### `LOG_ANALYSIS_BACKLOG.md`
+### `LOG_ANALYSIS_BACKLOG.md`（已移至 `docs/LOG_ANALYSIS_BACKLOG.md`）
 
 这是长期后台日志分析助手的规划入口。
 

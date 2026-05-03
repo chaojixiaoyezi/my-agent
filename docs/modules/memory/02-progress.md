@@ -23,6 +23,14 @@
 - gateway 真实后台进程跨天恢复演练已接入 `scenario-test --case gateway-cross-day-resume`，不再只依赖手写 fixture 证明恢复逻辑。
 - `memory-resume` 会把已移动的 gateway processing 请求路径纠偏到现存的 done/failed 终态路径，避免恢复提示指向过期临时文件。
 - parent/subagent runner 跨天恢复演练已接入 `scenario-test --case parent-subagent-cross-day-resume`：真实 runner 工具回合写回后，`memory-resume` 能回到任务事实源路径。
+- **记忆推模式** (`memory_push.py`)：在关键决策点自动查询并注入相关记忆，实现"推模式"记忆系统。
+  - `MemoryType` 枚举：`LESSON_GENERAL`、`LESSON_TASK`、`LESSON_TEMP`、`CONTEXT`、`FACT`
+  - `push_relevant_memories()` 函数：根据触发类型搜索相关记忆
+  - `push_timeout_memories()`、`push_failure_memories()`、`push_planning_memories()` 快捷函数
+  - `write_memory_with_type()` 写入带类型标签的记忆
+  - `format_memories_for_injection()` 格式化记忆供上下文注入
+- **dispatch_mixin 记忆注入**：runner 失败（BLOCKED/TIMEOUT）后自动注入相关教训记忆
+- **failure_analyzer 记忆支持**：`FailureAnalysis` 增加 `relevant_memories` 字段
 
 ## 解决的问题
 
@@ -48,10 +56,10 @@
 
 ## 下一步
 
-- 把更多真实恢复场景写成 fixture：route 冲突、权威文件缺失、snapshot/raw 读回失败、任务目录缺失但 archive 有线索。
-- 把 memory 模块接入更多场景测试，验证 gateway、subagent、local-doctor 共同恢复时的数据一致性。
 - 扩展 `scripts/check_doc_sync.py` 后续规则时，继续保持 memory 的 `02-progress.md` 和 `04-structure.md` 同步更新。
 - 继续补损坏 snapshot、task 权威文件缺失、默认注入过多等异常场景联合测试。
+- 记忆推模式接入更多决策点：planner 决策前自动注入 context 类型记忆
+- 验证推模式记忆注入后 agent 行为是否正确改善
 
 ## 已跑测试
 
@@ -86,6 +94,7 @@
 - 本轮全量回归：`python3 -m pytest -q` -> `251 passed`。
 - 本轮记忆闭环 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_memory_first_loop.py agent_py_agent/tests/test_memory_archive.py agent_py_agent/tests/test_memory_archive_runtime.py agent_py_agent/tests/test_memory_cli.py agent_py_agent/tests/test_memory_archive_cli.py agent_py_agent/tests/test_memory_routing.py agent_py_agent/tests/test_memory_runtime_basics.py agent_py_agent/tests/test_memory_runtime_archive.py agent_py_agent/tests/test_memory_routing_context.py agent_py_agent/tests/test_agent/test_subagent_lifecycle.py` -> `59 passed`。
 - 本轮记忆闭环全量回归：`python3 -m pytest -q` -> `365 passed`。
+- 本轮推模式 focused 验收：`python3 -m pytest agent_py_agent/tests/test_memory_push.py agent_py_agent/tests/test_dispatch_loop.py -q` -> `39 passed`。
 
 ## 未跑测试
 

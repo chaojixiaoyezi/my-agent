@@ -157,3 +157,64 @@ class TaskRegistry:
         with self._store._connection() as conn:
             conn.execute("DELETE FROM task_registry WHERE task_id = ?", (task_id,))
             conn.commit()
+
+    def update_task_status(self, task_id: str, status: str) -> bool:
+        """更新任务状态。
+
+        Args:
+            task_id: 任务 ID
+            status: 新状态
+
+        Returns:
+            是否更新成功
+        """
+
+        now = time.time()
+        with self._store._connection() as conn:
+            cursor = conn.execute(
+                "UPDATE task_registry SET status = ?, updated_at = ? WHERE task_id = ?",
+                (status, now, task_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def update_task_description(self, task_id: str, description: str) -> bool:
+        """更新任务描述。
+
+        Args:
+            task_id: 任务 ID
+            description: 新描述（最多 100 字）
+
+        Returns:
+            是否更新成功
+        """
+
+        now = time.time()
+        # description 存到 goal 字段的前 100 字符，或者新建专门的 description 字段
+        # 为兼容现有结构，把 description 截断后存到 goal 后面
+        truncated = description[:100] if description else ""
+        with self._store._connection() as conn:
+            # 尝试更新 goal 字段（存 description）
+            cursor = conn.execute(
+                "UPDATE task_registry SET goal = ?, updated_at = ? WHERE task_id = ?",
+                (truncated, now, task_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_task_timestamps(self, task_id: str) -> dict | None:
+        """获取任务的时间戳信息。"""
+
+        with self._store._connection() as conn:
+            cursor = conn.execute(
+                "SELECT created_at, updated_at FROM task_registry WHERE task_id = ?",
+                (task_id,),
+            )
+            row = cursor.fetchone()
+
+        if row:
+            return {
+                "created_at": row[0],
+                "updated_at": row[1],
+            }
+        return None

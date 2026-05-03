@@ -8,6 +8,29 @@ Human version:
 """
 
 from dataclasses import dataclass, field
+from enum import Enum
+
+
+class TaskStatus(str, Enum):
+    """任务状态枚举。"""
+
+    PLANNING = "PLANNING"  # 刚创建，还没开始执行
+    RUNNING = "RUNNING"  # 正在执行
+    BLOCKED = "BLOCKED"  # 被阻塞（等待某个条件）
+    PAUSED = "PAUSED"  # 用户暂停 later 可 resume
+    ABANDONED = "ABANDONED"  # 用户主动放弃，不再重试
+    COMPLETED = "COMPLETED"  # 完成了
+    FAILED = "FAILED"  # 穷尽策略后失败
+
+
+# 调度时会忽略这些状态的任务
+DISPATCH_INELIGIBLE_STATUSES = frozenset({
+    TaskStatus.PAUSED.value,
+    TaskStatus.ABANDONED.value,
+    TaskStatus.COMPLETED.value,
+    TaskStatus.FAILED.value,
+})
+
 
 @dataclass
 class QualityContract:
@@ -322,7 +345,10 @@ class SubAgentTask:
     context_manifest: ContextManifest = field(default_factory=ContextManifest)
     context_packs: list[dict[str, object]] = field(default_factory=list)
     child_ids: list[str] = field(default_factory=list)
-    status: str = "PLANNING"
+    status: str = TaskStatus.PLANNING.value
+    description: str = ""  # 用户可见任务描述，最多 100 字
+    paused_at: float = 0.0
+    abandoned_at: float = 0.0
     verification_status: str = "UNVERIFIED"
     failure_type: str = ""
     result: str = ""
@@ -377,7 +403,7 @@ class SubAgentTask:
     last_probe_at: float = 0.0
     channel_checks: list[ChannelProbeCheck] = field(default_factory=list)
     channel_probe_file: str = ""
-    attributes: dict[str, object] = field(default_factory=dict)
+    attributes: dict[str, object] = field(default_factory=dict)  # 可存 failure_introspection_data 等
 
 
 @dataclass
