@@ -20,7 +20,6 @@ from ..policies import (
     _risk_weight,
     _severity_weight,
 )
-from ..utils import _merge_list
 from ..reports import (
     ActionPlanItem,
     ActionPlanReport,
@@ -29,6 +28,7 @@ from ..reports import (
     SubAgentBoard,
     SubAgentBoardItem,
 )
+from ..utils import _merge_list
 
 if TYPE_CHECKING:
     from ..capability_config import CapabilityConfig
@@ -119,7 +119,7 @@ class SubAgentBoardService:
             items=items,
         )
 
-    def due_check(self, config: "CapabilityConfig | None" = None) -> DueCheckReport:
+    def due_check(self, config: CapabilityConfig | None = None) -> DueCheckReport:
         """Inspect all subagent runs to find issues needing parent intervention."""
         if config is None and hasattr(self.manager, "_make_default_capability_config"):
             config = self.manager._make_default_capability_config()
@@ -270,7 +270,7 @@ class SubAgentBoardService:
             summary[issue.kind] = summary.get(issue.kind, 0) + 1
         return DueCheckReport(generated_at=now, summary=summary, issues=issues)
 
-    def plan_actions(self, config: "CapabilityConfig | None" = None) -> ActionPlanReport:
+    def plan_actions(self, config: CapabilityConfig | None = None) -> ActionPlanReport:
         """Convert due-check issues into a dry-run action plan."""
         due_report = self.due_check(config)
         merged: dict[tuple[str, str], ActionPlanItem] = {}

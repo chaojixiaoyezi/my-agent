@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ..models import SubAgentTask, ActionPlanItem, ActionApplyRecord
+    from ..models import ActionApplyRecord, ActionPlanItem, SubAgentTask
     from ..reports import ActionApplyRecord
 
 
@@ -32,7 +32,7 @@ class SubAgentActionService:
         take_over_by: str = "",
         locked_files: list[str] | None = None,
         limit: int = 0,
-    ) -> "ActionApplyReport":
+    ) -> ActionApplyReport:
         """Execute or dry-run an action plan."""
         from ..reports import ActionApplyReport
 
@@ -43,7 +43,7 @@ class SubAgentActionService:
             run_id=run_id,
             limit=limit,
         )
-        records: list["ActionApplyRecord"] = []
+        records: list[ActionApplyRecord] = []
         for action in actions:
             record = self._apply_action_item(
                 action,
@@ -73,12 +73,12 @@ class SubAgentActionService:
 
     def _apply_action_item(
         self,
-        action: "ActionPlanItem",
+        action: ActionPlanItem,
         *,
         apply: bool,
         take_over_by: str,
         locked_files: list[str],
-    ) -> "ActionApplyRecord":
+    ) -> ActionApplyRecord:
         """Execute a single action plan item."""
         from ..reports import ActionApplyRecord
 
@@ -265,14 +265,14 @@ class SubAgentActionService:
 
     def _record_after_task_action(
         self,
-        action: "ActionPlanItem",
-        task: "SubAgentTask",
+        action: ActionPlanItem,
+        task: SubAgentTask,
         before_status: str,
         before_channel_status: str,
         message: str,
         *,
         evidence_paths: list[str] | None = None,
-    ) -> "ActionApplyRecord":
+    ) -> ActionApplyRecord:
         """Create an apply record after task modification."""
         from ..reports import ActionApplyRecord
 
@@ -293,9 +293,10 @@ class SubAgentActionService:
             created_at=time.time(),
         )
 
-    def _append_action_apply_log(self, record: "ActionApplyRecord") -> None:
+    def _append_action_apply_log(self, record: ActionApplyRecord) -> None:
         """Write global action apply audit log."""
         from dataclasses import asdict
+
         from ...file_io import append_jsonl
 
         jsonl = self.manager.workspace / "subagent_action_apply_log.jsonl"
@@ -312,7 +313,7 @@ class SubAgentActionService:
             )
         self.manager._index_action_apply(record)
 
-    def _append_task_work_log(self, task: "SubAgentTask", message: str) -> None:
+    def _append_task_work_log(self, task: SubAgentTask, message: str) -> None:
         """Write apply progress to task's own WORK_LOG."""
         from dataclasses import asdict
 

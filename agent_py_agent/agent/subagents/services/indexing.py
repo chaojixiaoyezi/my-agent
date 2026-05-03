@@ -13,10 +13,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ..models import SubAgentTask, SubAgentExecutionContext
+    from ..models import ChannelProbeResult, SubAgentExecutionContext, SubAgentTask
     from ..reports import (
-        ActionApplyRecord,
         AcceptanceReviewRecord,
+        ActionApplyRecord,
         CapabilityRouteRecord,
         DispatchRecord,
         DispatchWatchRecord,
@@ -24,7 +24,6 @@ if TYPE_CHECKING:
         PatchReviewRecord,
         SubAgentRunnerResult,
     )
-    from ..models import ChannelProbeResult
 
 
 class SubAgentIndexingService:
@@ -70,7 +69,7 @@ class SubAgentIndexingService:
         except Exception:
             return
 
-    def index_task(self, task: "SubAgentTask") -> None:
+    def index_task(self, task: SubAgentTask) -> None:
         """Index a task into the local store."""
         content = "\n".join(
             [
@@ -182,35 +181,35 @@ class SubAgentIndexingService:
             event_type=event_type,
         )
 
-    def index_action_apply(self, record: "ActionApplyRecord") -> None:
+    def index_action_apply(self, record: ActionApplyRecord) -> None:
         self._index_dataclass_record(
             "subagent_action_apply", record.id,
             f"Action apply {record.action} {record.run_id or 'global'}",
             record, "subagent_action_apply_logged",
         )
 
-    def index_capability_route(self, record: "CapabilityRouteRecord") -> None:
+    def index_capability_route(self, record: CapabilityRouteRecord) -> None:
         self._index_dataclass_record(
             "subagent_capability_route", record.id,
             f"Capability route {record.request_id} {record.status}",
             record, "subagent_capability_route_logged",
         )
 
-    def index_acceptance_review(self, record: "AcceptanceReviewRecord") -> None:
+    def index_acceptance_review(self, record: AcceptanceReviewRecord) -> None:
         self._index_dataclass_record(
             "subagent_acceptance_review", record.id,
             f"Acceptance {record.decision} {record.run_id}",
             record, "subagent_acceptance_review_logged",
         )
 
-    def index_patch_review(self, record: "PatchReviewRecord") -> None:
+    def index_patch_review(self, record: PatchReviewRecord) -> None:
         self._index_dataclass_record(
             "subagent_patch_review", record.id,
             f"Patch review {record.decision} {record.run_id}",
             record, "subagent_patch_review_logged",
         )
 
-    def index_dispatch_record(self, record: "DispatchRecord") -> None:
+    def index_dispatch_record(self, record: DispatchRecord) -> None:
         if hasattr(self.manager, "_index_dataclass_record"):
             self.manager._index_dataclass_record(
                 "subagent_dispatch", record.id,
@@ -224,7 +223,7 @@ class SubAgentIndexingService:
             record, "subagent_dispatch_logged",
         )
 
-    def index_dispatch_watch_record(self, record: "DispatchWatchRecord") -> None:
+    def index_dispatch_watch_record(self, record: DispatchWatchRecord) -> None:
         if hasattr(self.manager, "_index_dataclass_record"):
             self.manager._index_dataclass_record(
                 "subagent_dispatch_watch", record.id,
@@ -238,7 +237,7 @@ class SubAgentIndexingService:
             record, "subagent_dispatch_watch_logged",
         )
 
-    def index_parent_planner_record(self, record: "ParentPlannerRecord") -> None:
+    def index_parent_planner_record(self, record: ParentPlannerRecord) -> None:
         if hasattr(self.manager, "_index_dataclass_record"):
             self.manager._index_dataclass_record(
                 "parent_planner", record.id,
@@ -252,7 +251,7 @@ class SubAgentIndexingService:
             record, "parent_planner_logged",
         )
 
-    def index_execution_context(self, context: "SubAgentExecutionContext") -> None:
+    def index_execution_context(self, context: SubAgentExecutionContext) -> None:
         if hasattr(self.manager, "_index_dataclass_record"):
             self.manager._index_dataclass_record(
                 "subagent_execution_context", context.run_id,
@@ -266,7 +265,7 @@ class SubAgentIndexingService:
             context, "subagent_execution_context_written",
         )
 
-    def index_runner_result(self, result: "SubAgentRunnerResult", output_payload: dict[str, object]) -> None:
+    def index_runner_result(self, result: SubAgentRunnerResult, output_payload: dict[str, object]) -> None:
         content = "\n".join(
             [
                 json.dumps(asdict(result), ensure_ascii=False, indent=2),
@@ -294,7 +293,7 @@ class SubAgentIndexingService:
             event_type="subagent_runner_result_logged",
         )
 
-    def index_channel_probe(self, result: "ChannelProbeResult") -> None:
+    def index_channel_probe(self, result: ChannelProbeResult) -> None:
         self._index_dataclass_record(
             "subagent_channel_probe",
             f"{result.run_id}:{result.created_at:.6f}",
@@ -302,7 +301,7 @@ class SubAgentIndexingService:
             result, "subagent_channel_probe_logged",
         )
 
-    def select_runs(self, run_ids: list[str] | None) -> list["SubAgentTask"]:
+    def select_runs(self, run_ids: list[str] | None) -> list[SubAgentTask]:
         """Select runs by id, filtering out ineligible statuses."""
         from ..models import DISPATCH_INELIGIBLE_STATUSES
 
@@ -311,7 +310,7 @@ class SubAgentIndexingService:
             return [r for r in all_runs if r.status not in DISPATCH_INELIGIBLE_STATUSES]
         if not run_ids:
             return []
-        runs: list["SubAgentTask"] = []
+        runs: list[SubAgentTask] = []
         for run_id in run_ids:
             try:
                 task = self.manager.load(run_id)

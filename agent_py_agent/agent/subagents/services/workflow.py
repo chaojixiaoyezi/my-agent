@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ..models import SubAgentTask
     from ..capability_config import CapabilityConfig
+    from ..models import SubAgentTask
 
 
 _WORKFLOW_MODES = {"off", "plan", "auto"}
