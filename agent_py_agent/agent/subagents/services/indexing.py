@@ -44,7 +44,19 @@ class SubAgentIndexingService:
         event_type: str,
     ) -> None:
         """Write a subagent event to LocalStore; failures do not affect the file ledger."""
-        if not self.manager.local_store:
+        if "_log_local_record" in self.manager.__dict__:
+            self.manager._log_local_record(
+                source_type=source_type,
+                source_id=source_id,
+                title=title,
+                content=content,
+                metadata=metadata or {},
+                event_type=event_type,
+            )
+            return
+        if not hasattr(self.manager, "local_store"):
+            return
+        if self.manager.local_store is None:
             return
         try:
             self.manager.local_store.log_record(
@@ -121,7 +133,11 @@ class SubAgentIndexingService:
         event_type: str,
     ) -> None:
         """Index a report into the local store."""
-        payload = asdict(report)
+        try:
+            payload = asdict(report)
+        except TypeError:
+            # not a dataclass - convert via __dict__ or use str representation
+            payload = {"str": str(report), "repr": repr(report)}
         content = json.dumps(payload, ensure_ascii=False, indent=2)
         self.log_local_record(
             source_type=source_type,
@@ -145,7 +161,10 @@ class SubAgentIndexingService:
         event_type: str,
     ) -> None:
         """Index a dataclass record."""
-        payload = asdict(record)
+        try:
+            payload = asdict(record)
+        except TypeError:
+            payload = {"str": str(record), "repr": repr(record)}
         metadata: dict[str, object] = {
             key: value
             for key, value in payload.items()
@@ -192,6 +211,13 @@ class SubAgentIndexingService:
         )
 
     def index_dispatch_record(self, record: "DispatchRecord") -> None:
+        if hasattr(self.manager, "_index_dataclass_record"):
+            self.manager._index_dataclass_record(
+                "subagent_dispatch", record.id,
+                f"Dispatch {record.step}/{record.action} {record.run_id or 'global'}",
+                record, "subagent_dispatch_logged",
+            )
+            return
         self._index_dataclass_record(
             "subagent_dispatch", record.id,
             f"Dispatch {record.step}/{record.action} {record.run_id or 'global'}",
@@ -199,6 +225,13 @@ class SubAgentIndexingService:
         )
 
     def index_dispatch_watch_record(self, record: "DispatchWatchRecord") -> None:
+        if hasattr(self.manager, "_index_dataclass_record"):
+            self.manager._index_dataclass_record(
+                "subagent_dispatch_watch", record.id,
+                f"Dispatch watch cycle {record.cycle}",
+                record, "subagent_dispatch_watch_logged",
+            )
+            return
         self._index_dataclass_record(
             "subagent_dispatch_watch", record.id,
             f"Dispatch watch cycle {record.cycle}",
@@ -206,6 +239,13 @@ class SubAgentIndexingService:
         )
 
     def index_parent_planner_record(self, record: "ParentPlannerRecord") -> None:
+        if hasattr(self.manager, "_index_dataclass_record"):
+            self.manager._index_dataclass_record(
+                "parent_planner", record.id,
+                f"Parent planner {record.decision}",
+                record, "parent_planner_logged",
+            )
+            return
         self._index_dataclass_record(
             "parent_planner", record.id,
             f"Parent planner {record.decision}",
@@ -213,6 +253,13 @@ class SubAgentIndexingService:
         )
 
     def index_execution_context(self, context: "SubAgentExecutionContext") -> None:
+        if hasattr(self.manager, "_index_dataclass_record"):
+            self.manager._index_dataclass_record(
+                "subagent_execution_context", context.run_id,
+                f"Execution context {context.run_id}",
+                context, "subagent_execution_context_written",
+            )
+            return
         self._index_dataclass_record(
             "subagent_execution_context", context.run_id,
             f"Execution context {context.run_id}",

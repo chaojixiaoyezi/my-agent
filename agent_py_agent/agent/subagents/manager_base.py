@@ -220,6 +220,13 @@ class SubAgentBaseMixin:
 from .services.persistence import _field_names, _list_value, _string_list_value
 from .services.persistence import _normalize_quality_contract, _normalize_context_manifest, _normalize_context_packs
 from .services.base import _extract_write_dirs
+from .services.workflow import (
+    _normalize_workflow_mode_value,
+    _workflow_worker_tools,
+    _WORKFLOW_MODES,
+    _READ_ONLY_SUBAGENT_TOOLS,
+    _CODING_SUBAGENT_TOOLS,
+)
 
 # Work order file templates (concise, readable)
 _STATUS_TMPL = "# STATUS\n\n- id: {task_id}\n- status: {status}\n- owner: {owner}\n- supervisor: {supervisor}\n- final_owner: {final_owner}\n- updated_at: {updated_at}\n"

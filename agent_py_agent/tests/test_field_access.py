@@ -189,7 +189,16 @@ class TestTruthy:
         """验证字符串假值。"""
         assert _truthy("false") is False
         assert _truthy("no") is False
-        assert _truthy("unknown") is False
+        assert _truthy("n") is False
+        assert _truthy("0") is False
+        assert _truthy("off") is False
+        assert _truthy("disabled") is False
+
+    def test_truthy_string_non_empty(self):
+        """非空字符串（不是明确假值）返回 True。"""
+        assert _truthy("unknown") is True
+        assert _truthy("random") is True
+        assert _truthy("sql_injection") is True
 
 
 class TestToInt:

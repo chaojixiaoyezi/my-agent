@@ -56,7 +56,7 @@ class SimpleAgentRuntimeMixin:
         on_chunk: object = None,
     ) -> AgentRunResult:
         """执行一轮智能体请求。"""
-        memories, runtime_injections, routed_context = self._prepare_runtime_context(
+        memories, runtime_injections, routed_context, resume_context_result = self._prepare_runtime_context(
             user_prompt, inject, resume_context
         )
         tool_catalog_section, tool_recommendations_section = self._resolve_tool_sections(
@@ -92,7 +92,7 @@ class SimpleAgentRuntimeMixin:
 
         return self._finalize_run_result(
             user_prompt, final_prompt, final_response, memories, executed_tools,
-            archive_tool_calls, routed_context, resume_context_result=None,
+            archive_tool_calls, routed_context, resume_context_result,
             runtime_injections=runtime_injections,
             compression_snapshot_id=compression_snapshot_id,
             compression_snapshot_path=compression_snapshot_path,
@@ -131,7 +131,7 @@ class SimpleAgentRuntimeMixin:
             *([resume_context_section] if resume_context_section else []),
             *routed_context.injected_sections,
         ]
-        return memories, runtime_injections, routed_context
+        return memories, runtime_injections, routed_context, resume_context_result
 
     def _resolve_tool_sections(self, allowed_tools, granted_capabilities):
         """Resolve tool catalog and recommendations sections."""

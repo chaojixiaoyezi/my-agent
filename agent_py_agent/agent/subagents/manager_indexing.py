@@ -15,9 +15,9 @@ class SubAgentIndexingMixin:
 
     @property
     def _indexing_service(self):
-        if not hasattr(self, "__indexing_service"):
-            self.__indexing_service = SubAgentIndexingService(self)
-        return self.__indexing_service
+        if "_indexing_service" not in self.__dict__:
+            self.__dict__["_indexing_service"] = SubAgentIndexingService(self)
+        return self.__dict__["_indexing_service"]
 
     def _log_local_record(self, **kwargs):
         return self._indexing_service.log_local_record(**kwargs)
