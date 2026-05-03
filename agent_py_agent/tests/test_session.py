@@ -39,8 +39,8 @@ class TestSessionModel:
         assert len(parts) == 3
         # 第二部分是时间戳
         assert parts[1].isdigit()
-        # 第三部分是 4 位十六进制
-        assert len(parts[2]) == 4
+        # 第三部分是 8 位十六进制
+        assert len(parts[2]) == 8
 
     def test_session_creation(self):
         """测试 Session 创建。"""
