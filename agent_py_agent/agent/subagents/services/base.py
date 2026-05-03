@@ -12,7 +12,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ..models import SubAgentCard, SubAgentTask, QualityContract, ContextManifest
+    from ..models import ContextManifest, QualityContract, SubAgentCard, SubAgentTask
 
 
 # LLM: patterns for extracting directory paths from user goal text.
@@ -37,7 +37,7 @@ class SubAgentBaseService:
     def __init__(self, manager: Any):
         self.manager = manager
 
-    def split(self, goal: str, count: int, *, workflow_mode: str = "off") -> list["SubAgentTask"]:
+    def split(self, goal: str, count: int, *, workflow_mode: str = "off") -> list[SubAgentTask]:
         """Split a goal into multiple subagent task records.
 
         Currently uses template-based splitting for simplicity.
@@ -46,7 +46,7 @@ class SubAgentBaseService:
 
         extra_roots = _extract_write_dirs(goal)
         count = max(1, count)
-        tasks: list["SubAgentTask"] = []
+        tasks: list[SubAgentTask] = []
         for i in range(1, count + 1):
             task = self.create_run(
                 goal=f"{goal} / 子任务{i}",
@@ -58,7 +58,7 @@ class SubAgentBaseService:
             tasks.append(task)
         return tasks
 
-    def register_card(self, card: "SubAgentCard") -> None:
+    def register_card(self, card: SubAgentCard) -> None:
         """Register a subagent role card."""
         self.manager.cards[card.name] = card
 
@@ -79,12 +79,12 @@ class SubAgentBaseService:
         supervisor: str = "",
         final_owner: str = "",
         acceptance_checks: list[str] | None = None,
-        quality_contract: "QualityContract | dict[str, object] | None" = None,
-        context_manifest: "ContextManifest | dict[str, object] | None" = None,
+        quality_contract: QualityContract | dict[str, object] | None = None,
+        context_manifest: ContextManifest | dict[str, object] | None = None,
         context_packs: list[dict[str, object]] | dict[str, object] | None = None,
         extra_write_roots: list[str] | None = None,
         workflow_mode: str = "off",
-    ) -> "SubAgentTask":
+    ) -> SubAgentTask:
         """Create a subagent task record.
 
         workflow_mode controls workflow planning:
@@ -92,7 +92,11 @@ class SubAgentBaseService:
           - "plan" : run workflow planning, write result to task.workflow_plan
           - "auto" : run workflow planning, auto-merge worker spec and parent gate into acceptance checklist
         """
-        from ..services.workflow import _normalize_workflow_mode_value, _try_workflow_plan, _merge_workflow_acceptance_checks
+        from ..services.workflow import (
+            _merge_workflow_acceptance_checks,
+            _normalize_workflow_mode_value,
+            _try_workflow_plan,
+        )
 
         now = time.time()
         run_id = self.manager._new_id("subagent")
@@ -111,7 +115,11 @@ class SubAgentBaseService:
             merged_acceptance = _merge_workflow_acceptance_checks(merged_acceptance, workflow_plan_dict)
 
         from ..models import SubAgentTask
-        from ..services.persistence import _normalize_quality_contract, _normalize_context_manifest, _normalize_context_packs
+        from ..services.persistence import (
+            _normalize_context_manifest,
+            _normalize_context_packs,
+            _normalize_quality_contract,
+        )
 
         task = SubAgentTask(
             id=run_id,
@@ -160,7 +168,7 @@ class SubAgentBaseService:
         take_over_by: str,
         reason: str,
         locked_files: list[str] | None = None,
-    ) -> "TakeoverRecord":
+    ) -> TakeoverRecord:
         """Record a takeover and write TAKEOVER.md.
 
         This does not actually kill the subagent process, but records ownership and lock files.

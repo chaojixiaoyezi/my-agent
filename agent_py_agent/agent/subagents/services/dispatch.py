@@ -44,7 +44,7 @@ class SubAgentDispatchService:
         before_verification_status: str = "",
         after_verification_status: str = "",
         evidence_paths: list[str] | None = None,
-    ) -> "DispatchRecord":
+    ) -> DispatchRecord:
         """Create a dispatch audit record."""
         from ..reports import DispatchRecord
 
@@ -67,10 +67,10 @@ class SubAgentDispatchService:
 
     def build_dispatch_report(
         self,
-        records: list["DispatchRecord"],
+        records: list[DispatchRecord],
         *,
         dry_run: bool,
-    ) -> "DispatchReport":
+    ) -> DispatchReport:
         """Summarize dispatch audit records."""
         from ..reports import DispatchReport
 
@@ -93,10 +93,10 @@ class SubAgentDispatchService:
 
     def write_dispatch_report(
         self,
-        report: "DispatchReport",
+        report: DispatchReport,
         *,
         append_log: bool = False,
-    ) -> "DispatchReport":
+    ) -> DispatchReport:
         """Write dispatch report and optional audit log."""
         import json
 
@@ -120,7 +120,7 @@ class SubAgentDispatchService:
         )
         return report
 
-    def _append_dispatch_log(self, record: "DispatchRecord") -> None:
+    def _append_dispatch_log(self, record: DispatchRecord) -> None:
         """Write global dispatch audit log."""
         from ...file_io import append_jsonl
 
@@ -151,7 +151,7 @@ class SubAgentDispatchService:
         started_at: float = 0.0,
         ended_at: float = 0.0,
         evidence_paths: list[str] | None = None,
-    ) -> "DispatchWatchRecord":
+    ) -> DispatchWatchRecord:
         """Create a watch loop record."""
         from ..reports import DispatchWatchRecord
 
@@ -170,10 +170,10 @@ class SubAgentDispatchService:
 
     def build_dispatch_watch_report(
         self,
-        records: list["DispatchWatchRecord"],
+        records: list[DispatchWatchRecord],
         *,
         dry_run: bool,
-    ) -> "DispatchWatchReport":
+    ) -> DispatchWatchReport:
         """Summarize watch loop records."""
         from ..reports import DispatchWatchReport
 
@@ -193,7 +193,7 @@ class SubAgentDispatchService:
             records=records,
         )
 
-    def write_dispatch_watch_report(self, report: "DispatchWatchReport") -> "DispatchWatchReport":
+    def write_dispatch_watch_report(self, report: DispatchWatchReport) -> DispatchWatchReport:
         """Write watch mode report."""
         import json
 
@@ -267,7 +267,7 @@ class SubAgentDispatchService:
         prompt_path: str = "",
         response_path: str = "",
         evidence_paths: list[str] | None = None,
-    ) -> "ParentPlannerRecord":
+    ) -> ParentPlannerRecord:
         """Create a parent planner audit record."""
         from ..reports import ParentPlannerRecord
 
@@ -297,10 +297,10 @@ class SubAgentDispatchService:
 
     def build_parent_planner_report(
         self,
-        records: list["ParentPlannerRecord"],
+        records: list[ParentPlannerRecord],
         *,
         dry_run: bool,
-    ) -> "ParentPlannerReport":
+    ) -> ParentPlannerReport:
         """Summarize parent planner records."""
         from ..reports import ParentPlannerReport
 
@@ -322,10 +322,10 @@ class SubAgentDispatchService:
 
     def write_parent_planner_report(
         self,
-        report: "ParentPlannerReport",
+        report: ParentPlannerReport,
         *,
         append_log: bool = False,
-    ) -> "ParentPlannerReport":
+    ) -> ParentPlannerReport:
         """Write parent planner report and optional audit log."""
         import json
 
@@ -349,7 +349,7 @@ class SubAgentDispatchService:
         )
         return report
 
-    def append_dispatch_watch_log(self, record: "DispatchWatchRecord") -> None:
+    def append_dispatch_watch_log(self, record: DispatchWatchRecord) -> None:
         """Write global watch audit log."""
         from ...file_io import append_jsonl
 
@@ -367,7 +367,7 @@ class SubAgentDispatchService:
             )
         self.manager._index_dispatch_watch_record(record)
 
-    def append_parent_planner_log(self, record: "ParentPlannerRecord") -> None:
+    def append_parent_planner_log(self, record: ParentPlannerRecord) -> None:
         """Write global parent planner audit log."""
         from ...file_io import append_jsonl
 

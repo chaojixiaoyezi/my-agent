@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from ..reports import AcceptanceReviewFinding
 
 
-def _artifact_exists(manager: Any, task: "SubAgentTask", raw_path: str) -> bool:
+def _artifact_exists(manager: Any, task: SubAgentTask, raw_path: str) -> bool:
     """Check if a runner-reported local artifact actually exists.
 
     Artifact paths may be relative to the task directory or workspace root.
@@ -52,7 +52,7 @@ class SubAgentAcceptanceFindingService:
     def __init__(self, manager: Any):
         self.manager = manager
 
-    def _artifact_exists(self, task: "SubAgentTask", raw_path: str) -> bool:
+    def _artifact_exists(self, task: SubAgentTask, raw_path: str) -> bool:
         """Check if a runner-reported local artifact actually exists.
 
         Delegates to manager._artifact_exists if available (for backward compatibility
@@ -64,11 +64,11 @@ class SubAgentAcceptanceFindingService:
 
     def acceptance_findings(
         self,
-        task: "SubAgentTask",
+        task: SubAgentTask,
         output: dict[str, object],
         runner: dict[str, object],
         created_at: float,
-    ) -> list["AcceptanceReviewFinding"]:
+    ) -> list[AcceptanceReviewFinding]:
         """Generate acceptance check findings."""
         from ..reports import AcceptanceReviewFinding
 
