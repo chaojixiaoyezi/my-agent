@@ -88,7 +88,7 @@ def _try_workflow_plan(
         return None
 
 
-def _workflow_extra_write_roots(task: "SubAgentTask") -> list[str]:
+def _workflow_extra_write_roots(task: SubAgentTask) -> list[str]:
     return [item for item in task.allowed_write_roots if item and item != task.task_dir]
 
 
@@ -98,7 +98,7 @@ class SubAgentWorkflowService:
     def __init__(self, manager: Any):
         self.manager = manager
 
-    def plan_workflow(self, run_id: str, *, workflow_mode: str) -> "SubAgentTask":
+    def plan_workflow(self, run_id: str, *, workflow_mode: str) -> SubAgentTask:
         """Refresh and persist a workflow plan onto an existing parent run."""
         task = self.manager.load(run_id)
         normalized = _normalize_workflow_mode_value(workflow_mode)
@@ -120,7 +120,7 @@ class SubAgentWorkflowService:
         self.manager.save(task)
         return task
 
-    def realize_workflow_plan(self, run_id: str) -> tuple["SubAgentTask", list["SubAgentTask"]]:
+    def realize_workflow_plan(self, run_id: str) -> tuple[SubAgentTask, list[SubAgentTask]]:
         """Materialize persisted workflow worker specs into child runs exactly once."""
         parent = self.manager.load(run_id)
         if parent.workflow_child_run_ids:
@@ -131,7 +131,7 @@ class SubAgentWorkflowService:
         if not isinstance(workers, list):
             return parent, []
 
-        created: list["SubAgentTask"] = []
+        created: list[SubAgentTask] = []
         phase_to_child_id: dict[str, str] = {}
         for worker in workers:
             if not isinstance(worker, dict):
