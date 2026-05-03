@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import agent_py_agent.agent.agent_core.runtime_mixin as runtime_mixin
+import agent_py_agent.agent.agent_core.runtime_services as runtime_services
 from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
@@ -132,7 +133,7 @@ def test_compression_hook_failure_blocks_run_and_audits_event(tmp_path, monkeypa
     def boom(*args, **kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(runtime_mixin, "write_compression_snapshot", boom)
+    monkeypatch.setattr(runtime_services, "write_compression_snapshot", boom)
     agent = SimpleAgent(
         AgentConfig(
             model_backend="echo",
