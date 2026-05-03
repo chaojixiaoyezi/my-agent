@@ -46,9 +46,9 @@ class SubAgentBaseMixin:
         self.local_store = local_store
         self.workspace_root = Path(workspace_root).resolve() if workspace_root else self.workspace.resolve().parent
         self.enable_self_learning = bool(enable_self_learning)
+        from .services.base import SubAgentBaseService
         from .services.lifecycle import SubAgentLifecycleService
         from .services.persistence import SubAgentPersistenceService
-        from .services.base import SubAgentBaseService
 
         self.lifecycle = SubAgentLifecycleService(self)
         self.persistence = SubAgentPersistenceService(self)
@@ -217,15 +217,21 @@ class SubAgentBaseMixin:
 
 
 # Re-export helpers from services for backward compatibility and tests
-from .services.persistence import _field_names, _list_value, _string_list_value
-from .services.persistence import _normalize_quality_contract, _normalize_context_manifest, _normalize_context_packs
 from .services.base import _extract_write_dirs
+from .services.persistence import (
+    _field_names,
+    _list_value,
+    _normalize_context_manifest,
+    _normalize_context_packs,
+    _normalize_quality_contract,
+    _string_list_value,
+)
 from .services.workflow import (
+    _CODING_SUBAGENT_TOOLS,
+    _READ_ONLY_SUBAGENT_TOOLS,
+    _WORKFLOW_MODES,
     _normalize_workflow_mode_value,
     _workflow_worker_tools,
-    _WORKFLOW_MODES,
-    _READ_ONLY_SUBAGENT_TOOLS,
-    _CODING_SUBAGENT_TOOLS,
 )
 
 # Work order file templates (concise, readable)
