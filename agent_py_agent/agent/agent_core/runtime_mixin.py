@@ -46,6 +46,7 @@ class SimpleAgentRuntimeMixin:
         request_id: str = "",
         run_id: str = "",
         task_id: str = "",
+        task_attributes: dict | None = None,
         source: str = "run",
         recovery_snapshot: bool | None = None,
         resume_context: bool | None = None,
@@ -191,7 +192,16 @@ class SimpleAgentRuntimeMixin:
             if not calls:
                 break
 
-            if tool_rounds >= self.config.max_tool_rounds:
+            # 优先使用任务级别的 max_tool_rounds（来自 LLM 自省调参），
+            # 这样 failure introspection 建议调整 max_tool_rounds 时才能真正生效。
+            # 向后兼容：没有任务级别配置时，使用全局配置。
+            # 优先用传入的 task_attributes，其次用 self._current_task_attributes（run_subagent 设置）。
+            effective_max_tool_rounds = self.config.max_tool_rounds
+            attrs_to_check = task_attributes if task_attributes else getattr(self, '_current_task_attributes', None)
+            if attrs_to_check and "max_tool_rounds" in attrs_to_check:
+                effective_max_tool_rounds = int(attrs_to_check["max_tool_rounds"])
+
+            if tool_rounds >= effective_max_tool_rounds:
                 tool_context.append("[tool-system]\n已达到最大工具轮数限制，停止继续调用工具。")
                 final_prompt = self.prompts.build(
                     user_prompt,

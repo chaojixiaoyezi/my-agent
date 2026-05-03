@@ -58,7 +58,7 @@
 
 - 扩展 `scripts/check_doc_sync.py` 后续规则时，继续保持 memory 的 `02-progress.md` 和 `04-structure.md` 同步更新。
 - 继续补损坏 snapshot、task 权威文件缺失、默认注入过多等异常场景联合测试。
-- 记忆推模式接入更多决策点：planner 决策前自动注入 context 类型记忆
+- 记忆推模式接入更多决策点：planner 决策前自动注入 context 类型记忆（已实现：subagent_mixin.py run_parent_planner 前调用 push_planning_memories）
 - 验证推模式记忆注入后 agent 行为是否正确改善
 
 ## 已跑测试
