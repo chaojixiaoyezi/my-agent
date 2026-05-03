@@ -51,11 +51,11 @@ class Session:
 def generate_session_id() -> str:
     """生成新的会话 ID。
 
-    格式：sess_{timestamp}_{random4位}
-    例如：sess_1714681234_a3b7
+    格式：sess_{timestamp}_{random8位}
+    例如：sess_1714681234_a3b7c9d1
     """
     timestamp = int(time.time())
-    random_part = secrets.token_hex(2)  # 4 位十六进制
+    random_part = secrets.token_hex(4)  # 8 位十六进制 (32 bits)
     return f"sess_{timestamp}_{random_part}"
 
 
