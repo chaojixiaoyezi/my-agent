@@ -11,23 +11,38 @@
 
 ```text
 simple-python-agent-v0.3/                      # 项目根目录，放代码、说明文档和验证记录
+|-- ONBOARDING.md                             # 新 LLM / 新开发者开工指南（先读这个）
 |-- LLM_GUIDE.md                               # LLM/AI 开发者总入口，含开工前/收工后清单和编码规范
+|-- AGENTS.md                                  # LLM 开发者行为规范（语言、注释、配置、自学习约束）
 |-- pyproject.toml                             # Python packaging 配置，提供 my-agent console script
 |-- CLI_REFERENCE.md                           # 完整 CLI 参数手册，说明每个命令和参数
-|-- ARCHITECTURE_GUIDE.md                      # 架构边界、拆分顺序和两层注释规则，给人和 LLM 都看（已移至 docs/design/）
-|-- GATEWAY_DESIGN.md                          # gateway 常驻形态、外部方案对比和本项目目标设计（已移至 docs/design/）
-|-- GATEWAY_RESEARCH.md                        # gateway 大调研，比较 daemon、任务队列、workflow、Notebook 和 AI gateway 方案（已移至 docs/design/）
-|-- MEMORY_BACKLOG.md                          # 记忆系统痛点、去重分类和后续设计讨论入口（已移至 docs/）
-|-- WORKSTREAMS.md                             # 并行开发工作台说明，定义 worktree、职责边界和集成流程（已移至 docs/）
-|-- HANDOFF_TEMPLATE.md                        # 并行开发线完成后的交接模板（已移至 docs/tasks/）
+|-- CODE_SIZE_POLICY.md                        # 代码尺寸限制政策
+|-- CODE_SIZE_REPORT.md                        # 自动生成的代码规模报告
+|-- CODE_SIZE_BASELINE.json                    # 严格模式基线（历史违规不阻断）
+|-- ARCHITECTURE_EXEMPTIONS.md                 # 大文件/大类临时豁免登记
+|-- REFACTORING_BACKLOG.md                     # 待拆文件优先级排序
+|-- TESTING_POLICY.md                          # 测试分层和规范
+|-- CLEAN_PACKAGE_POLICY.md                    # 打包洁净度规范
 |-- docs/                                      # 长篇项目文档目录
 |   |-- ROADMAP.md                             # 待做/进行中功能清单，开工前必读
 |   |-- COMPLETED.md                           # 已落地功能清单，收工后必改
-|   `-- design/                                # 模块设计文档，承载 DESIGN_LEDGER 的长篇细节
-|       |-- README.md                          # 模块设计文档索引和拆分规则
-|       |-- log-analysis.md                    # 日志分析模块验收状态、剩余缺口和 worker 切片
-|       `-- subagent-quality-contract.md       # subagent 质量契约、受控施工队和用户少说派工设计
-|-- scripts/                                   # 开发辅助脚本，放可见测试台和 workstream 管理入口
+|   |-- architecture/                          # 架构文档
+|   |   |-- BOUNDARY_RULES.md                  # 分层导入矩阵
+|   |   |-- MODULE_OWNERSHIP.md                # 模块职责归属表
+|   |   |-- CHAT_REFACTOR_PLAN.md              # chat.py 重构计划
+|   |   `-- SUBAGENT_SERVICE_REFACTOR_PLAN.md  # SubAgent 服务化重构计划
+|   |-- development/                           # 开发规范
+|   |   |-- DEVELOPMENT_RULES.md               # 编码规则
+|   |   |-- TESTING_RULES.md                   # 测试规则
+|   |   `-- CODE_REVIEW_CHECKLIST.md           # Review 检查清单
+|   |-- decisions/                             # 架构决策记录 (ADR)
+|   `-- design/                                # 模块设计文档
+|       |-- log-analysis.md                    # 日志分析模块设计
+|       `-- subagent-quality-contract.md       # subagent 质量契约
+|-- scripts/                                   # 开发辅助脚本和治理检查工具
+|   |-- check_code_size.py                     # 代码规模检查（warn/strict 模式，支持 baseline）
+|   |-- check_clean_package.py                 # 脏文件检查（目录和 tar.gz）
+|   |-- check_doc_sync.py                      # 文档同步检查
 |   |-- live_agent_lab.py                      # Live Lab 薄入口，启动可见真实环境测试台
 |   |-- live_lab/                              # Live Lab 参数解析、运行器、case 和常量
 |   |-- open_live_lab.sh                       # macOS 新开可见 Terminal 跑 Live Lab

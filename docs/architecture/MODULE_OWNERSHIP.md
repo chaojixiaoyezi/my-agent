@@ -13,7 +13,7 @@ LLM: Use this table to decide where new code belongs.
 | `cli/main_entry.py` | argparse 顶层入口，分发到子命令 | 业务逻辑、配置加载 | 28 | OK |
 | `cli/parser.py` | 根解析器，委托给 commands/ | 命令执行逻辑 | 71 | OK |
 | `cli/parser_subcommands.py` | 子命令注册辅助 | 命令执行 | 38 | OK |
-| `cli/chat.py` | 交互式聊天主循环 | 已部分拆分到 chat_parts/ | 989 | FROZEN |
+| `cli/chat.py` | 交互式聊天主循环 | 已部分拆分到 chat_parts/ | 1017 | FROZEN |
 | `cli/chat_parts/history.py` | 会话历史管理（MAX_HISTORY_TURNS, append/build） | 模型调用、渲染 | 48 | OK |
 | `cli/chat_parts/rendering.py` | 终端渲染（颜色、进度条、banner、折叠） | 业务逻辑、会话管理 | 64 | OK |
 | `cli/chat_parts/slash_commands.py` | 公共斜杠命令处理 | 业务执行、渲染 | 89 | OK |
@@ -29,7 +29,7 @@ LLM: Use this table to decide where new code belongs.
 | `cli/gateway_process.py` | gateway 进程管理 CLI | 进程监管逻辑 | 539 | SOFT |
 | `cli/gateway_loops.py` | gateway 交互循环 | 模型调用 | 134 | OK |
 | `cli/local_commands.py` | /memory, /status, /doctor 本地命令实现 | 持久化逻辑 | 336 | OK |
-| `cli/memory_commands.py` | 记忆管理命令实现 | 记忆存储逻辑 | 609 | SOFT |
+| `cli/memory_commands.py` | 记忆管理命令实现 | 记忆存储逻辑 | 608 | SOFT |
 | `cli/memory_archive_commands.py` | 归档命令实现 | 归档逻辑 | 312 | OK |
 | `cli/memory_doctor.py` | 记忆诊断命令 | 存储操作 | 346 | OK |
 | `cli/subagents.py` | 子代理 CLI 命令实现 | 子代理管理逻辑 | 525 | SOFT |
@@ -54,7 +54,7 @@ LLM: Use this table to decide where new code belongs.
 | 模块 | 唯一职责 | 不可承担 | 当前行数 | 状态 |
 |---|---|---|---|---|
 | `agent_core/runtime_mixin.py` | 主代理模型/工具执行循环（run 方法） | 子代理调度、CLI 渲染 | 350+ | OK |
-| `agent_core/dispatch_mixin.py` | 父代理调度主循环（due-check, 派工, 验收） | 模型调用、CLI 输出 | 889 | FROZEN |
+| `agent_core/dispatch_mixin.py` | 父代理调度主循环（due-check, 派工, 验收） | 模型调用、CLI 输出 | 895 | FROZEN |
 | `agent_core/subagent_mixin.py` | 子代理相关入口 mixin | 具体子代理管理 | 200+ | OK |
 | `agent_core/failure_introspector.py` | 失败自省引擎（LLM 分析失败原因） | 调度决策 | 150+ | OK |
 | `agent_core/failure_analyzer.py` | 失败模式分析 | 自省 | 100+ | OK |
@@ -81,7 +81,7 @@ LLM: Use this table to decide where new code belongs.
 | 模块 | 唯一职责 | 不可承担 | 当前行数 | 状态 |
 |---|---|---|---|---|
 | `manager.py` | SubAgentManager 入口（纯组合类） | 业务逻辑 | 49 | OK |
-| `manager_base.py` | 基础 CRUD + 卡片管理 | patch 审核、看板渲染 | 744 | FROZEN |
+| `manager_base.py` | 基础 CRUD + 卡片管理 | patch 审核、看板渲染 | 751 | FROZEN |
 | `manager_patch.py` | patch 审核 + 应用 | 基础 CRUD、看板 | 794 | FROZEN |
 | `manager_dispatch.py` | 调度派工逻辑 | 验收、patch | 423 | SOFT |
 | `manager_board.py` | 看板渲染（HTML + 终端） | 调度、验收 | 471 | SOFT |
@@ -161,8 +161,8 @@ LLM: Use this table to decide where new code belongs.
 
 | 模块 | 唯一职责 | 不可承担 | 当前行数 | 状态 |
 |---|---|---|---|---|
-| `query.py` | 归档查询 | 存储操作 | 839 | FROZEN |
-| `runtime.py` | 归档运行时 | 查询 | 200+ | OK |
+| `query.py` | 归档查询 | 存储操作 | 838 | FROZEN |
+| `runtime.py` | 归档运行时 | 查询 | 657 | SOFT |
 | `snapshots.py` | 快照管理 | 查询 | 150+ | OK |
 | `storage.py` | 归档存储 | 查询 | 100+ | OK |
 | `tokens.py` | token 计量 | 无 | 100+ | OK |
@@ -227,18 +227,20 @@ LLM: Use this table to decide where new code belongs.
 ### FROZEN Files (must refactor before adding code)
 | 文件 | 行数 | 拆分目标 |
 |---|---|---|
-| `cli/chat.py` | 989 | chat_parts/ 继续拆分 |
-| `agent_core/dispatch_mixin.py` | 889 | dispatch/planner + runner + loop |
-| `memory_archive/query.py` | 839 | query_builder + query_executor |
+| `cli/chat.py` | 1017 | chat_parts/ 继续拆分 |
+| `agent_core/dispatch_mixin.py` | 895 | dispatch/planner + runner + loop |
+| `memory_archive/query.py` | 838 | query_builder + query_executor |
 | `subagents/manager_patch.py` | 794 | subagent_services/patch.py |
 | `settings/config.py` | 751 | shared/config/ + 加载逻辑 |
-| `log_analysis/analytics/detectors/rules.py` | 747 | rule_engine + rule_loader |
-| `subagents/manager_base.py` | 744 | subagent_services/persistence + board |
+| `subagents/manager_base.py` | 751 | subagent_services/persistence + board |
+| `log_analysis/analytics/detectors/rules.py` | 745 | rule_engine + rule_loader |
 
 ### SOFT Warning Files (consider splitting)
 | 文件 | 行数 | 建议 |
 |---|---|---|
-| `cli/memory_commands.py` | 609 | 拆分记忆子命令 |
+| `log_analysis/tools.py` | 672 | 插件化拆分 |
+| `memory_archive/runtime.py` | 657 | 拆分归档运行时 |
+| `cli/memory_commands.py` | 608 | 拆分记忆子命令 |
 | `gateway_parts/runtime.py` | 551 | 拆分请求处理 |
 | `cli/gateway_service.py` | 547 | 拆分服务封装 |
 | `cli/gateway_process.py` | 539 | 拆分进程管理 |
