@@ -245,6 +245,13 @@ def run_tui(
             _emit_stream_line(buf)
             stream_buf_ref[0] = ""
 
+    def _maybe_record_response(text: str, stream_has_visible_text: bool) -> bool:
+        """Conditionally render and record assistant response. Returns True if recorded."""
+        if text and (not stream_has_visible_text) and text.strip():
+            _render_assistant_response(text)
+            return True
+        return False
+
     def _append_stream_text(chunk: str) -> None:
         if not chunk:
             return
@@ -252,6 +259,17 @@ def run_tui(
         while "\n" in stream_buf_ref[0]:
             line, stream_buf_ref[0] = stream_buf_ref[0].split("\n", 1)
             _emit_stream_line(line)
+
+    def _update_response_state(
+        response: dict,
+        state_lock: threading.Lock,
+        last_token_estimate_ref: list,
+    ) -> str:
+        """Update shared state after a successful gateway response. Returns the response text."""
+        agent_response_text = response.get("response", "")
+        with state_lock:
+            last_token_estimate_ref[0] = response.get("prompt_token_estimate", 0)
+        return agent_response_text
 
     def worker() -> None:
         while not stop_event.is_set():
@@ -338,12 +356,14 @@ def run_tui(
                         f"resume_context={1 if response.get('memory_resume_context_injected') else 0}]{RESET}"
                     )
                     if response.get("ok"):
-                        agent_response_text = response.get("response", "")
-                        with state_lock:
-                            last_token_estimate_ref[0] = response.get("prompt_token_estimate", 0)
-                        if (not stream_has_visible_text) and agent_response_text.strip():
-                            _render_assistant_response(agent_response_text)
-                            response_recorded = True
+                        agent_response_text = _update_response_state(
+                            response,
+                            state_lock,
+                            last_token_estimate_ref,
+                        )
+                        response_recorded = _maybe_record_response(
+                            agent_response_text, stream_has_visible_text
+                        )
                     else:
                         _cprint(f"错误: {response.get('error', 'gateway 请求失败')}")
                 else:

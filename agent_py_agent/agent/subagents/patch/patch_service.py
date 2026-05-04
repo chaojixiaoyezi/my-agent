@@ -199,40 +199,17 @@ class PatchReviewService:
         reviewed_patches = [dict(item) for item in patches]
         if apply and patches:
             if ok:
-                for item in reviewed_patches:
-                    item["review_status"] = "APPROVED"
-                    item["reviewed_by"] = reviewer
-                    item["reviewed_at"] = now
-                    if note:
-                        item["review_note"] = note
-                output["patches"] = reviewed_patches
-                Path(task.output_json).write_text(
-                    json.dumps(output, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                self.manager._append_task_work_log(
-                    task,
-                    f"patch_review: approved={len(reviewed_patches)} reviewer={reviewer}",
-                )
-                applied = True
+                self._apply_approved_patches(reviewed_patches, reviewer, now, note)
             else:
-                for item in reviewed_patches:
-                    if str(item.get("status", "")).lower() != "applied":
-                        item["review_status"] = "NEEDS_ACTION"
-                        item["reviewed_by"] = reviewer
-                        item["reviewed_at"] = now
-                        if note:
-                            item["review_note"] = note
-                output["patches"] = reviewed_patches
-                Path(task.output_json).write_text(
-                    json.dumps(output, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                self.manager._append_task_work_log(
-                    task,
-                    f"patch_review: blocked={len(blocked) + len(invalid)} reviewer={reviewer}",
-                )
-                applied = True
+                self._apply_rejected_patches(reviewed_patches, reviewer, now, note)
+            output["patches"] = reviewed_patches
+            Path(task.output_json).write_text(
+                json.dumps(output, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            log_msg = f"patch_review: {'approved' if ok else 'blocked'}={len(reviewed_patches)} reviewer={reviewer}"
+            self.manager._append_task_work_log(task, log_msg)
+            applied = True
 
         return PatchReviewRecord(
             id=_new_id("patchreview"),
@@ -288,6 +265,25 @@ class PatchReviewService:
             encoding="utf-8",
         )
         record_md.write_text(render_patch_review_record_markdown(record), encoding="utf-8")
+
+    def _apply_approved_patches(self, patches: list[dict], reviewer: str, now: float, note: str) -> None:
+        """Mark patches as approved."""
+        for item in patches:
+            item["review_status"] = "APPROVED"
+            item["reviewed_by"] = reviewer
+            item["reviewed_at"] = now
+            if note:
+                item["review_note"] = note
+
+    def _apply_rejected_patches(self, patches: list[dict], reviewer: str, now: float, note: str) -> None:
+        """Mark patches as needing action."""
+        for item in patches:
+            if str(item.get("status", "")).lower() != "applied":
+                item["review_status"] = "NEEDS_ACTION"
+                item["reviewed_by"] = reviewer
+                item["reviewed_at"] = now
+                if note:
+                    item["review_note"] = note
 
     def _append_patch_review_log(self, record: PatchReviewRecord) -> None:
         """Append patch review record to global audit log."""

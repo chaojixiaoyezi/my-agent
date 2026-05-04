@@ -240,50 +240,45 @@ class AuditQuery:
         ]
 
     def cleanup_old_entries(self, days: int = 90) -> int:
-        """清理旧审计条目。
-
-        Args:
-            days: 保留最近多少天的审计日志
-
-        Returns:
-            删除的条目数量
-        """
+        """清理旧审计条目."""
         if not self._audit_file.exists():
             return 0
-
         cutoff_time = time.time() - (days * 24 * 60 * 60)
         temp_file = self._audit_file.with_suffix(".tmp")
+        deleted_count = self._cleanup_entries(cutoff_time, temp_file)
+        if deleted_count > 0:
+            temp_file.replace(self._audit_file)
+        return deleted_count
+
+    def _cleanup_entries(self, cutoff_time: float, temp_file: Path) -> int:
+        """Clean up entries older than cutoff_time; return deleted count."""
         deleted_count = 0
-
         try:
-            with open(self._audit_file, encoding="utf-8") as f_in:
-                with open(temp_file, "w", encoding="utf-8") as f_out:
-                    for line in f_in:
-                        line = line.strip()
-                        if not line:
-                            continue
-
-                        try:
-                            data = json.loads(line)
-                        except json.JSONDecodeError:
-                            deleted_count += 1
-                            continue
-
-                        timestamp = data.get("timestamp", 0)
-                        if timestamp < cutoff_time:
-                            deleted_count += 1
-                        else:
-                            f_out.write(line + "\n")
-
-            if deleted_count > 0:
-                temp_file.replace(self._audit_file)
-
+            with open(self._audit_file, encoding="utf-8") as f_in, \
+                 open(temp_file, "w", encoding="utf-8") as f_out:
+                for line in f_in:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    deleted = self._process_cleanup_line(line, cutoff_time)
+                    if deleted:
+                        deleted_count += 1
+                    else:
+                        f_out.write(line + "\n")
         except OSError:
             if temp_file.exists():
                 temp_file.unlink()
             return 0
-
         return deleted_count
+
+    def _process_cleanup_line(self, line: str, cutoff_time: float) -> bool:
+        """Return True if line should be deleted, False to keep."""
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return True
+        timestamp = data.get("timestamp", 0)
+        return timestamp < cutoff_time
 
 
 __all__ = ["AuditQuery", "AuditQueryResult"]

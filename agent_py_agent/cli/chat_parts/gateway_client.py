@@ -61,25 +61,32 @@ def poll_gateway_chunks(
     chunks_printed = chunks_printed_ref[0]
     response = {}
     while time.time() <= deadline:
-        if chunk_path.exists():
-            try:
-                lines = chunk_path.read_text(encoding="utf-8").splitlines()
-                for cline in lines[chunks_printed:]:
-                    if not cline.strip():
-                        continue
-                    cobj = json.loads(cline)
-                    chunk_text = cobj.get("text", "")
-                    if chunk_text:
-                        on_chunk(chunk_text)
-                    chunks_printed += 1
-            except (OSError, json.JSONDecodeError):
-                pass
+        chunks_printed = _poll_chunk_file(chunk_path, on_chunk, chunks_printed)
         response = read_json_file(response_path)
         if response:
             break
         time.sleep(0.1)
     chunks_printed_ref[0] = chunks_printed
     return response
+
+
+def _poll_chunk_file(chunk_path: Path, on_chunk: callable, chunks_printed: int) -> int:
+    """Poll one chunk file, calling on_chunk for new lines. Returns updated count."""
+    if not chunk_path.exists():
+        return chunks_printed
+    try:
+        lines = chunk_path.read_text(encoding="utf-8").splitlines()
+        for cline in lines[chunks_printed:]:
+            if not cline.strip():
+                continue
+            cobj = json.loads(cline)
+            chunk_text = cobj.get("text", "")
+            if chunk_text:
+                on_chunk(chunk_text)
+            chunks_printed += 1
+    except (OSError, json.JSONDecodeError):
+        pass
+    return chunks_printed
 
 
 def check_gateway_alive(paths) -> bool:

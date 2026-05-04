@@ -258,17 +258,26 @@ def _normalize_runner_items(items: list[dict[str, object]]) -> list[dict[str, ob
 
     normalized: list[dict[str, object]] = []
     for item in items:
-        payload: dict[str, object] = {}
-        for key, value in item.items():
-            if isinstance(value, (str, int, float, bool)) or value is None:
-                payload[str(key)] = value
-            elif isinstance(value, list):
-                payload[str(key)] = [str(entry) for entry in value]
-            elif isinstance(value, dict):
-                payload[str(key)] = {str(k): str(v) for k, v in value.items()}
-            else:
-                payload[str(key)] = str(value)
-        normalized.append(payload)
+        normalized.append(_normalize_single_runner_item(item))
     return normalized
+
+
+def _normalize_single_runner_item(item: dict[str, object]) -> dict[str, object]:
+    """Normalize one runner item dict to JSON-serializable form."""
+    payload: dict[str, object] = {}
+    for key, value in item.items():
+        payload[str(key)] = _normalize_runner_value(value)
+    return payload
+
+
+def _normalize_runner_value(value: object) -> object:
+    """Normalize a single runner field value to JSON-serializable form."""
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        return [str(entry) for entry in value]
+    if isinstance(value, dict):
+        return {str(k): str(v) for k, v in value.items()}
+    return str(value)
 
 

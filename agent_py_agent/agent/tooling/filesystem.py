@@ -95,6 +95,24 @@ def _bool_param(value: Any, *, default: bool = False) -> bool:
     return default
 
 
+def _read_text_safe(path: Path) -> str | None:
+    """Read text file as UTF-8, returning None on error."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _parse_count_param(value: Any) -> int:
+    """Parse count parameter, returning 1 on error."""
+    if value is None:
+        return 1
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 1
+
+
 class FileSystemTool(BaseTool):
     """文件系统类工具的安全边界。
 
@@ -286,46 +304,57 @@ class SearchTextTool(FileSystemTool):
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
-            query = _text_param(
-                params.get("query"),
-                name="query",
-                max_chars=_MAX_SEARCH_QUERY_CHARS,
-                strip=True,
-            )
+            query = _text_param(params.get("query"), name="query", max_chars=_MAX_SEARCH_QUERY_CHARS, strip=True)
             raw_path = _optional_path(params.get("path"), default=".")
             target = self.resolve_path(raw_path)
         except ValueError as exc:
             return ToolExecutionResult("search_text", False, str(exc))
         if not target.exists():
             return ToolExecutionResult("search_text", False, f"路径不存在: {self.display_path(target)}")
-
         search_root = target if target.is_dir() else target.parent
         candidates = [target] if target.is_file() else list(search_root.rglob("*"))
         matches: list[str] = []
         for item in candidates:
             if not item.is_file():
                 continue
-            try:
-                safe_item = self.resolve_path(item)
-            except ValueError:
-                continue
-            try:
-                for idx, line in enumerate(safe_item.read_text(encoding="utf-8").splitlines(), start=1):
-                    if query in line:
-                        try:
-                            rel = item.relative_to(self.workspace_root)
-                        except ValueError:
-                            rel = safe_item.relative_to(self.workspace_root)
-                        snippet = line.strip()
-                        if len(snippet) > _MAX_SEARCH_LINE_CHARS:
-                            snippet = snippet[:_MAX_SEARCH_LINE_CHARS] + "... 已截断"
-                        matches.append(f"{rel}:{idx}: {snippet}")
-                        if len(matches) >= self.max_matches:
-                            matches.append(f"... 已截断，最多显示 {self.max_matches} 条")
-                            return ToolExecutionResult("search_text", True, "\n".join(matches))
-            except UnicodeDecodeError:
-                continue
+            found = self._search_item_for_query(item, query, matches)
+            if found == "full":
+                return ToolExecutionResult("search_text", True, "\n".join(matches))
         return ToolExecutionResult("search_text", True, "\n".join(matches) or "没有找到匹配项")
+
+    def _search_item_for_query(self, item: Path, query: str, matches: list[str]) -> str:
+        """Search one file item for query; return 'full' if max matches reached, '' otherwise."""
+        try:
+            safe_item = self.resolve_path(item)
+        except ValueError:
+            return ""
+        try:
+            for idx, line in enumerate(safe_item.read_text(encoding="utf-8").splitlines(), start=1):
+                if query not in line:
+                    continue
+                snippet = self._make_snippet(line)
+                rel = self._item_relative_path(item, safe_item)
+                matches.append(f"{rel}:{idx}: {snippet}")
+                if len(matches) >= self.max_matches:
+                    matches.append(f"... 已截断，最多显示 {self.max_matches} 条")
+                    return "full"
+        except UnicodeDecodeError:
+            pass
+        return ""
+
+    def _make_snippet(self, line: str) -> str:
+        """Make a truncated snippet from a line."""
+        snippet = line.strip()
+        if len(snippet) > _MAX_SEARCH_LINE_CHARS:
+            snippet = snippet[:_MAX_SEARCH_LINE_CHARS] + "... 已截断"
+        return snippet
+
+    def _item_relative_path(self, item: Path, safe_item: Path) -> Path:
+        """Get relative path, trying item first then safe_item."""
+        try:
+            return item.relative_to(self.workspace_root)
+        except ValueError:
+            return safe_item.relative_to(self.workspace_root)
 
 
 class WriteFileTool(FileSystemTool):
@@ -487,17 +516,8 @@ class ReplaceInFileTool(FileSystemTool):
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
             raw_path = _required_path(params.get("path"))
-            old_text = _text_param(
-                params.get("old"),
-                name="old",
-                max_chars=_MAX_WRITE_TEXT_CHARS,
-            )
-            new_text = _text_param(
-                params.get("new"),
-                name="new",
-                max_chars=_MAX_WRITE_TEXT_CHARS,
-                allow_empty=True,
-            )
+            old_text = _text_param(params.get("old"), name="old", max_chars=_MAX_WRITE_TEXT_CHARS)
+            new_text = _text_param(params.get("new"), name="new", max_chars=_MAX_WRITE_TEXT_CHARS, allow_empty=True)
             target = self.resolve_path(raw_path)
         except ValueError as exc:
             return ToolExecutionResult("replace_in_file", False, str(exc))
@@ -505,26 +525,18 @@ class ReplaceInFileTool(FileSystemTool):
             return ToolExecutionResult("replace_in_file", False, f"文件不存在: {self.display_path(target)}")
         if not target.is_file():
             return ToolExecutionResult("replace_in_file", False, f"目标不是文件: {self.display_path(target)}")
-
-        try:
-            content = target.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
+        content = _read_text_safe(target)
+        if content is None:
             return ToolExecutionResult("replace_in_file", False, "文件不是有效 UTF-8 文本，无法替换。")
-
         matches = content.count(old_text)
         if matches == 0:
             return ToolExecutionResult("replace_in_file", False, "没有找到要替换的原文，请先 read_file 确认上下文")
-
-        try:
-            raw_count = _int_param(params.get("count"), name="count", default=1)
-        except ValueError as exc:
-            return ToolExecutionResult("replace_in_file", False, str(exc))
+        raw_count = _parse_count_param(params.get("count"))
         replace_count = matches if raw_count <= 0 else raw_count
         updated = content.replace(old_text, new_text, replace_count)
         changed = min(matches, replace_count)
         target.write_text(updated, encoding="utf-8")
         return ToolExecutionResult(
-            "replace_in_file",
-            True,
+            "replace_in_file", True,
             f"已修改文件: {self.display_path(target)}；替换 {changed} 处；原文共命中 {matches} 处",
         )
