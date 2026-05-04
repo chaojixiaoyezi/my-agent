@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..models import CompressionSnapshot, utc_now_iso
+from ..storage import append_snapshot, write_compression_snapshot_file
+from ..tokens import estimate_tokens
 from ._helpers import (
     _content_hash,
     _dedupe_texts,
@@ -23,8 +25,6 @@ from ._helpers import (
     _stable_json,
     _tool_snapshot,
 )
-from ..storage import append_snapshot, write_compression_snapshot_file
-from ..tokens import estimate_tokens
 
 
 class CompressionHook(Protocol):
