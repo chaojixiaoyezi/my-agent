@@ -8,7 +8,7 @@ SubAgentManager 通过 facade 方法委托到这里。
 """
 
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +21,61 @@ if TYPE_CHECKING:
         ParentPlannerRecord,
         ParentPlannerReport,
     )
+
+
+@dataclass(frozen=True)
+class DispatchRecordParams:
+    """Bundle of make_dispatch_record parameters."""
+    step: str
+    action: str
+    run_id: str = ""
+    dry_run: bool = True
+    applied: bool = False
+    ok: bool = True
+    message: str = ""
+    before_status: str = ""
+    after_status: str = ""
+    before_verification_status: str = ""
+    after_verification_status: str = ""
+    evidence_paths: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class DispatchWatchRecordParams:
+    """Bundle of make_dispatch_watch_record parameters."""
+    cycle: int
+    dry_run: bool
+    ok: bool
+    message: str
+    dispatch_record_count: int
+    dispatch_summary: dict[str, int] | None = None
+    started_at: float = 0.0
+    ended_at: float = 0.0
+    evidence_paths: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class ParentPlannerRecordParams:
+    """Bundle of make_parent_planner_record parameters."""
+    dry_run: bool
+    triggered: bool
+    ok: bool
+    decision: str
+    message: str
+    gate_summary: dict[str, int] | None = None
+    backend: str = ""
+    tool_rounds: int = 0
+    parse_error: str = ""
+    summary: str = ""
+    actions: list[dict[str, object]] | None = None
+    blockers: list[str] | None = None
+    risks: list[str] | None = None
+    notes: list[str] | None = None
+    runner_instruction: str = ""
+    suggested_max_runners: int = 0
+    prompt_path: str = ""
+    response_path: str = ""
+    evidence_paths: list[str] | None = None
 
 
 class SubAgentDispatchService:
@@ -48,8 +103,7 @@ class SubAgentDispatchService:
         """Create a dispatch audit record."""
         from ..reports import DispatchRecord
 
-        return DispatchRecord(
-            id=self.manager._new_id("dispatch"),
+        params = DispatchRecordParams(
             step=step,
             action=action,
             run_id=run_id,
@@ -61,7 +115,28 @@ class SubAgentDispatchService:
             after_status=after_status,
             before_verification_status=before_verification_status,
             after_verification_status=after_verification_status,
-            evidence_paths=evidence_paths or [],
+            evidence_paths=evidence_paths,
+        )
+        return self._make_dispatch_record(params)
+
+    def _make_dispatch_record(self, params: DispatchRecordParams) -> DispatchRecord:
+        """Internal: create a dispatch audit record from params bundle."""
+        from ..reports import DispatchRecord
+
+        return DispatchRecord(
+            id=self.manager._new_id("dispatch"),
+            step=params.step,
+            action=params.action,
+            run_id=params.run_id,
+            dry_run=params.dry_run,
+            applied=params.applied,
+            ok=params.ok,
+            message=params.message,
+            before_status=params.before_status,
+            after_status=params.after_status,
+            before_verification_status=params.before_verification_status,
+            after_verification_status=params.after_verification_status,
+            evidence_paths=params.evidence_paths or [],
             created_at=time.time(),
         )
 

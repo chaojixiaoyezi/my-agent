@@ -197,56 +197,55 @@ def push_planning_memories(agent, task_id: str, goal: str) -> list[str]:
     return push_relevant_memories(agent, TriggerType.PLANNING.value, context, limit=3)
 
 
+@dataclass
+class MemoryWriteContext:
+    """Context for writing a typed memory entry."""
+
+    content: str
+    mem_type: MemoryType
+    trigger_type: str = ""
+    tags: list[str] | None = None
+    lesson: str = ""
+    action: str = ""
+    result: str = ""
+    trigger_conditions: dict | None = None
+    role: str = "system"
+
+
 def write_memory_with_type(
     memory: JsonlMemory,
-    content: str,
-    mem_type: MemoryType,
-    trigger_type: str = "",
-    tags: list[str] | None = None,
-    lesson: str = "",
-    action: str = "",
-    result: str = "",
-    trigger_conditions: dict | None = None,
-    role: str = "system",
+    ctx: MemoryWriteContext,
 ) -> None:
     """写入带类型标签的记忆。
 
     Args:
         memory: JsonlMemory 实例
-        content: 记忆正文
-        mem_type: 记忆类型
-        trigger_type: 触发类型
-        tags: 标签列表
-        lesson: 教训内容
-        action: 建议动作
-        result: 结果
-        trigger_conditions: 触发条件
-        role: 来源角色
+        ctx: MemoryWriteContext 包含 content、mem_type 等字段
     """
     # 构建扩展记忆内容（包含结构化字段）
-    extended_content = content
-    if lesson or action:
-        parts = [content]
-        if lesson:
-            parts.append(f"Lesson: {lesson}")
-        if action:
-            parts.append(f"Action: {action}")
-        if result:
-            parts.append(f"Result: {result}")
+    extended_content = ctx.content
+    if ctx.lesson or ctx.action:
+        parts = [ctx.content]
+        if ctx.lesson:
+            parts.append(f"Lesson: {ctx.lesson}")
+        if ctx.action:
+            parts.append(f"Action: {ctx.action}")
+        if ctx.result:
+            parts.append(f"Result: {ctx.result}")
         extended_content = " | ".join(parts)
 
     # 构建标签
-    all_tags = tags or []
-    if trigger_type:
-        all_tags.append(trigger_type)
-    if mem_type.value:
-        all_tags.append(mem_type.value)
+    all_tags = ctx.tags or []
+    if ctx.trigger_type:
+        all_tags.append(ctx.trigger_type)
+    if ctx.mem_type.value:
+        all_tags.append(ctx.mem_type.value)
 
     # 写入记忆
     record = memory.add(
-        role=role,
+        role=ctx.role,
         content=extended_content,
-        kind=mem_type.value,
+        kind=ctx.mem_type.value,
         tags=all_tags,
     )
 

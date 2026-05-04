@@ -66,6 +66,47 @@ def clear_compression_hooks() -> None:
     _compression_hooks.clear()
 
 
+@dataclass(frozen=True)
+class CompressionSnapshotInput:
+    """Input bundle for write_compression_snapshot and on_before_compression."""
+    session_id: str
+    turn_id: str
+    role: str
+    content: str
+    archive_level: int = 3
+    request_id: str = ""
+    run_id: str = ""
+    task_id: str = ""
+    source: str = "compression"
+    backend: str = ""
+    tool_calls: Iterable[Mapping[str, Any]] | None = None
+    content_paths: Iterable[str] | None = None
+    task_refs: Iterable[str] | None = None
+    next_actions: Iterable[str] | None = None
+    created_at: str | None = None
+
+
+@dataclass(frozen=True)
+class RecoverySnapshotInput:
+    """Input bundle for write_recovery_snapshot."""
+    session_id: str
+    user_prompt: str
+    response_text: str
+    backend: str
+    source: str
+    request_id: str = ""
+    run_id: str = ""
+    task_id: str = ""
+    status: str = "ok"
+    error_code: str = ""
+    tool_calls: Iterable[Mapping[str, Any]] | None = None
+    task_refs: Iterable[str] | None = None
+    content_paths: Iterable[str] | None = None
+    next_actions: Iterable[str] | None = None
+    archive_level: int = 3
+    created_at: str | None = None
+
+
 def on_before_compression(
     root: str | Path,
     *,
@@ -227,44 +268,25 @@ def write_recovery_snapshot(
             "response_hash": _content_hash(response_text),
         }
     )
-    snapshot = CompressionSnapshot(
+    snapshot = _build_recovery_snapshot(
         snapshot_id=snapshot_id,
-        session_id=str(session_id),
-        compression_id=f"recovery:{source}:{request_id or run_id or task_id or snapshot_id[-8:]}",
-        turn_range={
-            "kind": "recovery_snapshot",
-            "source": source,
-            "request_id": request_id,
-            "run_id": run_id,
-            "task_id": task_id,
-        },
-        participants=_participants(normalized_tools),
-        user_intents=[_preview(user_prompt, level)] if user_prompt else [],
-        assistant_actions=[_preview(response_text, level)] if response_text else [],
-        tool_calls=normalized_tools,
-        dispatch_events=[
-            {
-                "source": source,
-                "request_id": request_id,
-                "run_id": run_id,
-                "task_id": task_id,
-                "status": status,
-                "error_code": error_code,
-                "backend": backend,
-            }
-        ],
-        task_refs=clean_task_refs,
-        decisions=[],
-        open_questions=[],
-        next_actions=clean_next_actions,
-        token_usage={
-            "estimate": token_estimate,
-            "archive_level": level,
-            "backend": backend,
-        },
-        archive_level=level,
-        content_paths=clean_content_paths,
-        created_at=timestamp,
+        session_id=session_id,
+        request_id=request_id,
+        run_id=run_id,
+        task_id=task_id,
+        source=source,
+        status=status,
+        error_code=error_code,
+        backend=backend,
+        normalized_tools=normalized_tools,
+        user_prompt=user_prompt,
+        response_text=response_text,
+        level=level,
+        token_estimate=token_estimate,
+        clean_task_refs=clean_task_refs,
+        clean_next_actions=clean_next_actions,
+        clean_content_paths=clean_content_paths,
+        timestamp=timestamp,
     )
     try:
         path = append_snapshot(root, snapshot)
@@ -339,43 +361,24 @@ def write_compression_snapshot(
             "content_hash": _content_hash(content),
         }
     )
-    snapshot = CompressionSnapshot(
+    snapshot = _build_compression_snapshot(
         snapshot_id=snapshot_id,
-        session_id=str(session_id),
-        compression_id=f"compression:{request_id or run_id or task_id or turn_id or snapshot_id[-8:]}",
-        turn_range={
-            "kind": "compression_snapshot",
-            "turn_id": turn_id,
-            "source": source,
-            "request_id": request_id,
-            "run_id": run_id,
-            "task_id": task_id,
-        },
-        participants=[role] if role else ["system"],
-        user_intents=[_preview(content, level)] if role == "user" and content else [],
-        assistant_actions=[_preview(content, level)] if role == "assistant" and content else [],
-        tool_calls=normalized_tools,
-        dispatch_events=[
-            {
-                "source": source,
-                "request_id": request_id,
-                "run_id": run_id,
-                "task_id": task_id,
-                "backend": backend,
-                "status": "snapshot_written",
-            }
-        ],
-        task_refs=_dedupe_texts([run_id, task_id, *(task_refs or [])]),
-        next_actions=_dedupe_texts(next_actions or []),
-        token_usage={"estimate": token_estimate, "archive_level": level, "backend": backend},
-        archive_level=level,
-        content_paths=_dedupe_texts(content_paths or []),
-        turn_id=str(turn_id),
-        role=str(role or "system"),
-        content=_preview(content, level),
+        session_id=session_id,
+        turn_id=turn_id,
+        source=source,
+        request_id=request_id,
+        run_id=run_id,
+        task_id=task_id,
+        backend=backend,
+        role=role,
+        normalized_tools=normalized_tools,
         token_estimate=token_estimate,
+        level=level,
+        clean_task_refs=_dedupe_texts([run_id, task_id, *(task_refs or [])]),
+        clean_next_actions=_dedupe_texts(next_actions or []),
+        clean_content_paths=_dedupe_texts(content_paths or []),
+        content=content,
         timestamp=timestamp,
-        created_at=timestamp,
     )
     snapshot_file = write_compression_snapshot_file(root, snapshot)
     hook_path = append_snapshot(root, snapshot)
@@ -511,6 +514,132 @@ def _snapshot_id(payload: Mapping[str, Any]) -> str:
 
     digest = hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
     return f"snapshot:{digest[:32]}"
+
+
+# ---- internal helpers (build functions only, not public API) ----
+
+def _build_recovery_snapshot(
+    *,
+    snapshot_id: str,
+    session_id: str,
+    request_id: str,
+    run_id: str,
+    task_id: str,
+    source: str,
+    status: str,
+    error_code: str,
+    backend: str,
+    normalized_tools: list[dict[str, Any]],
+    user_prompt: str,
+    response_text: str,
+    level: int,
+    token_estimate: int,
+    clean_task_refs: list[str],
+    clean_next_actions: list[str],
+    clean_content_paths: list[str],
+    timestamp: str,
+) -> CompressionSnapshot:
+    """Build a CompressionSnapshot for recovery snapshot."""
+    return CompressionSnapshot(
+        snapshot_id=snapshot_id,
+        session_id=str(session_id),
+        compression_id=f"recovery:{source}:{request_id or run_id or task_id or snapshot_id[-8:]}",
+        turn_range={
+            "kind": "recovery_snapshot",
+            "source": source,
+            "request_id": request_id,
+            "run_id": run_id,
+            "task_id": task_id,
+        },
+        participants=_participants(normalized_tools),
+        user_intents=[_preview(user_prompt, level)] if user_prompt else [],
+        assistant_actions=[_preview(response_text, level)] if response_text else [],
+        tool_calls=normalized_tools,
+        dispatch_events=[
+            {
+                "source": source,
+                "request_id": request_id,
+                "run_id": run_id,
+                "task_id": task_id,
+                "status": status,
+                "error_code": error_code,
+                "backend": backend,
+            }
+        ],
+        task_refs=clean_task_refs,
+        decisions=[],
+        open_questions=[],
+        next_actions=clean_next_actions,
+        token_usage={
+            "estimate": token_estimate,
+            "archive_level": level,
+            "backend": backend,
+        },
+        archive_level=level,
+        content_paths=clean_content_paths,
+        created_at=timestamp,
+    )
+
+
+def _build_compression_snapshot(
+    *,
+    snapshot_id: str,
+    session_id: str,
+    turn_id: str,
+    source: str,
+    request_id: str,
+    run_id: str,
+    task_id: str,
+    backend: str,
+    role: str,
+    normalized_tools: list[dict[str, Any]],
+    token_estimate: int,
+    level: int,
+    clean_task_refs: list[str],
+    clean_next_actions: list[str],
+    clean_content_paths: list[str],
+    content: str,
+    timestamp: str,
+) -> CompressionSnapshot:
+    """Build a CompressionSnapshot for compression snapshot."""
+    return CompressionSnapshot(
+        snapshot_id=snapshot_id,
+        session_id=str(session_id),
+        compression_id=f"compression:{request_id or run_id or task_id or turn_id or snapshot_id[-8:]}",
+        turn_range={
+            "kind": "compression_snapshot",
+            "turn_id": turn_id,
+            "source": source,
+            "request_id": request_id,
+            "run_id": run_id,
+            "task_id": task_id,
+        },
+        participants=[role] if role else ["system"],
+        user_intents=[_preview(content, level)] if role == "user" and content else [],
+        assistant_actions=[_preview(content, level)] if role == "assistant" and content else [],
+        tool_calls=normalized_tools,
+        dispatch_events=[
+            {
+                "source": source,
+                "request_id": request_id,
+                "run_id": run_id,
+                "task_id": task_id,
+                "backend": backend,
+                "status": "snapshot_written",
+            }
+        ],
+        task_refs=clean_task_refs,
+        next_actions=clean_next_actions,
+        token_usage={"estimate": token_estimate, "archive_level": level, "backend": backend},
+        archive_level=level,
+        content_paths=clean_content_paths,
+        turn_id=str(turn_id),
+        role=str(role or "system"),
+        content=_preview(content, level),
+        token_estimate=token_estimate,
+        timestamp=timestamp,
+        created_at=timestamp,
+    )
 
 
 def _content_hash(content: str) -> str:

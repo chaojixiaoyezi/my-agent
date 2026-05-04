@@ -291,6 +291,78 @@ def _acceptance_checks(quality_contract: Mapping[str, Any] | None) -> list[str]:
     return checks
 
 
+def _build_work_order_context(
+    summary: dict[str, Any],
+    refs: list[str],
+    route: dict[str, Any],
+    quality_contract: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Build the common context for analyst and reviewer work orders."""
+    return {
+        "case_summary": render_case_summary(
+            {
+                "case": summary.get("case", {}),
+                "evidence": refs,
+                "route": route,
+            }
+        ),
+        "route_summary": route,
+        "quality_contract": dict(quality_contract or {}),
+    }
+
+
+def _create_work_orders(
+    case_id: str,
+    common_context: dict[str, Any],
+    refs: list[str],
+    checks: list[str],
+    issues: list[str],
+    risks: list[str],
+    mode: str,
+    dry_run: bool,
+    ready: bool,
+) -> tuple[SubagentWorkOrder, SubagentWorkOrder]:
+    """Create analyst and reviewer work orders from common data."""
+    analyst = SubagentWorkOrder(
+        role="analyst",
+        case_id=case_id,
+        goal="Prepare an evidence-backed log analysis report for reviewer gate.",
+        mode=mode,
+        dry_run=dry_run,
+        ready=ready,
+        allowed_tools=list(DEFAULT_ANALYST_TOOLS),
+        evidence_refs=list(refs),
+        context={
+            **common_context,
+            "handoff_contract": "AnalystInput",
+            "expected_output": "AnalystReport",
+        },
+        acceptance_checks=list(checks),
+        issues=list(issues),
+        risks=list(risks),
+    )
+    reviewer = SubagentWorkOrder(
+        role="reviewer",
+        case_id=case_id,
+        goal="Review the analyst report against evidence boundaries before parent final approval.",
+        mode=mode,
+        dry_run=dry_run,
+        ready=ready,
+        allowed_tools=list(DEFAULT_REVIEWER_TOOLS),
+        evidence_refs=list(refs),
+        context={
+            **common_context,
+            "handoff_contract": "ReviewerInput",
+            "expected_input": "AnalystReport from analyst work order",
+            "expected_output": "ReviewerDecision",
+        },
+        acceptance_checks=list(checks),
+        issues=list(issues),
+        risks=list(risks),
+    )
+    return analyst, reviewer
+
+
 def plan_case_subagent_work_orders(
     case: Any,
     *,
@@ -334,55 +406,17 @@ def plan_case_subagent_work_orders(
         issues.append(NO_EVIDENCE_ISSUE)
         risks.append("dispatching without evidence_refs would invite unsupported analysis")
 
-    # context_pack 后续会交给子代理；这里只放摘要和引用，避免把原始日志或 runner 结果整包塞进去。
-    common_context = {
-        "case_summary": render_case_summary(
-            {
-                "case": summary.get("case", {}),
-                "evidence": refs,
-                "route": route,
-            }
-        ),
-        "route_summary": route,
-        "quality_contract": dict(quality_contract or {}),
-    }
-
-    analyst = SubagentWorkOrder(
-        role="analyst",
-        case_id=case_id,
-        goal="Prepare an evidence-backed log analysis report for reviewer gate.",
-        mode=mode,
-        dry_run=dry_run,
-        ready=ready,
-        allowed_tools=list(DEFAULT_ANALYST_TOOLS),
-        evidence_refs=list(refs),
-        context={
-            **common_context,
-            "handoff_contract": "AnalystInput",
-            "expected_output": "AnalystReport",
-        },
-        acceptance_checks=list(checks),
-        issues=list(issues),
-        risks=list(risks),
-    )
-    reviewer = SubagentWorkOrder(
-        role="reviewer",
-        case_id=case_id,
-        goal="Review the analyst report against evidence boundaries before parent final approval.",
-        mode=mode,
-        dry_run=dry_run,
-        ready=ready,
-        allowed_tools=list(DEFAULT_REVIEWER_TOOLS),
-        evidence_refs=list(refs),
-        context={
-            **common_context,
-            "handoff_contract": "ReviewerInput",
-            "expected_input": "AnalystReport from analyst work order",
-            "expected_output": "ReviewerDecision",
-        },
-        acceptance_checks=list(checks),
-        issues=list(issues),
-        risks=list(risks),
+    common_context = _build_work_order_context(summary, refs, route, quality_contract)
+    analyst, reviewer = _create_work_orders(
+        case_id,
+        common_context,
+        refs,
+        checks,
+        issues,
+        risks,
+        mode,
+        dry_run,
+        ready,
     )
 
     return LogAnalysisWorkOrderPlan(

@@ -153,6 +153,72 @@ def cmd_gateway_start(args) -> int:
     return 0
 
 
+def _resolve_gateway_options(agent, args):
+    """Resolve daemon options for gateway run."""
+    return _resolve_daemon_options(agent, args)
+
+
+def _write_gateway_state(paths, data: dict) -> None:
+    """Write gateway state file."""
+    write_json_file(paths.state, data)
+
+
+def _update_gateway_state_running(
+    paths,
+    agent,
+    options,
+    pid: int,
+    requeued: int,
+    failed: int,
+    http_port: int,
+) -> None:
+    """Update state file for running status."""
+    write_json_file(
+        paths.state,
+        {
+            "status": "running",
+            "pid": pid,
+            "started_at": time.time(),
+            "gateway_workspace": str(paths.root),
+            "subagent_workspace": str(agent.subagents.workspace),
+            "apply": options.apply,
+            "execute_runners": options.execute_runners,
+            "planner": options.planner,
+            "interval": options.interval,
+            "max_runners": options.max_runners,
+            "max_cycles": options.max_cycles,
+            "requeued_requests": requeued,
+            "failed_processing_requests": failed,
+            "request_workers": max(1, int(agent.config.gateway_request_workers or 1)),
+            "http_port": http_port,
+        },
+    )
+
+
+def _log_gateway_running(agent, options, pid, requeued, failed, http_port) -> None:
+    """Log gateway_run_running event."""
+    log_gateway_event(
+        agent,
+        "gateway_run_running",
+        {
+            "status": "running",
+            "pid": pid,
+            "gateway_workspace": str(agent.subagents.workspace),
+            "subagent_workspace": str(agent.subagents.workspace),
+            "apply": options.apply,
+            "execute_runners": options.execute_runners,
+            "planner": options.planner,
+            "interval": options.interval,
+            "max_runners": options.max_runners,
+            "max_cycles": options.max_cycles,
+            "requeued_requests": requeued,
+            "failed_processing_requests": failed,
+            "request_workers": max(1, int(agent.config.gateway_request_workers or 1)),
+            "http_port": http_port,
+        },
+    )
+
+
 def cmd_gateway_run(args) -> int:
     """内部命令：前台运行 gateway 后台循环。"""
 
@@ -184,9 +250,9 @@ def cmd_gateway_run(args) -> int:
         },
     )
     try:
-        options = _resolve_daemon_options(agent, args)
+        options = _resolve_gateway_options(agent, args)
     except ValueError as exc:
-        write_json_file(paths.state, {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()})
+        _write_gateway_state(paths, {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()})
         log_gateway_event(
             agent,
             "gateway_run_failed",
@@ -214,46 +280,8 @@ def cmd_gateway_run(args) -> int:
     http_port = getattr(agent.config, "gateway_port", 0) or 0
     if http_port > 0:
         http_server = start_http_server(http_port, paths)
-        write_json_file(
-            paths.state,
-            {
-                "status": "running",
-                "pid": pid,
-                "started_at": time.time(),
-                "gateway_workspace": str(paths.root),
-                "subagent_workspace": str(agent.subagents.workspace),
-                "apply": options.apply,
-                "execute_runners": options.execute_runners,
-                "planner": options.planner,
-                "interval": options.interval,
-                "max_runners": options.max_runners,
-                "max_cycles": options.max_cycles,
-                "requeued_requests": requeued,
-                "failed_processing_requests": recovery["failed"],
-                "request_workers": max(1, int(agent.config.gateway_request_workers or 1)),
-                "http_port": http_port,
-            },
-        )
-        log_gateway_event(
-            agent,
-            "gateway_run_running",
-            {
-                "status": "running",
-                "pid": pid,
-                "gateway_workspace": str(paths.root),
-                "subagent_workspace": str(agent.subagents.workspace),
-                "apply": options.apply,
-                "execute_runners": options.execute_runners,
-                "planner": options.planner,
-                "interval": options.interval,
-                "max_runners": options.max_runners,
-                "max_cycles": options.max_cycles,
-                "requeued_requests": requeued,
-                "failed_processing_requests": recovery["failed"],
-                "request_workers": max(1, int(agent.config.gateway_request_workers or 1)),
-                "http_port": http_port,
-            },
-        )
+        _update_gateway_state_running(paths, agent, options, pid, requeued, recovery["failed"], http_port)
+        _log_gateway_running(agent, options, pid, requeued, recovery["failed"], http_port)
 
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)
@@ -280,22 +308,19 @@ def cmd_gateway_run(args) -> int:
             stop_file=paths.stop_request,
         )
         final_status = "stopped" if paths.stop_request.exists() else "exited"
-        write_json_file(
-            paths.state,
-            {
-                "status": final_status,
-                "pid": pid,
-                "stopped_at": time.time(),
-                "summary": report.summary,
-            },
-        )
+        _write_gateway_state(paths, {
+            "status": final_status,
+            "pid": pid,
+            "stopped_at": time.time(),
+            "summary": report.summary,
+        })
         log_gateway_event(
             agent,
             "gateway_run_stopped",
             {"status": final_status, "pid": pid, "stopped_at": time.time(), "summary": report.summary},
         )
     except KeyboardInterrupt:
-        write_json_file(paths.state, {"status": "interrupted", "pid": pid, "stopped_at": time.time()})
+        _write_gateway_state(paths, {"status": "interrupted", "pid": pid, "stopped_at": time.time()})
         log_gateway_event(
             agent,
             "gateway_run_interrupted",
@@ -303,7 +328,7 @@ def cmd_gateway_run(args) -> int:
         )
         exit_code = 130
     except Exception as exc:
-        write_json_file(paths.state, {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()})
+        _write_gateway_state(paths, {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()})
         log_gateway_event(
             agent,
             "gateway_run_failed",

@@ -7,7 +7,9 @@ from __future__ import annotations
 保持 mixin 签名完全兼容，业务逻辑委托给 dispatch_service、planner_service、runner_gate、acceptance_gate。
 """
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
@@ -16,6 +18,65 @@ from ..subagent import DispatchReport, DispatchWatchReport
 if TYPE_CHECKING:
     from ..core import SimpleAgent
     from ..subagent import SubAgentRunnerResult, SubAgentTask
+
+
+@dataclass(frozen=True)
+class DispatchParams:
+    """Bundle of all dispatch_subagents parameters into a single object."""
+    apply: bool = False
+    execute_runners: bool = False
+    planner: bool = False
+    workflow_mode: str = "off"
+    max_runners: int = 1
+    limit: int = 20
+    reviewer: str = "parent-dispatch"
+    note: str = ""
+    runner_instruction: str = ""
+    max_cards: int = 0
+    probe: bool = True
+    take_over_by: str = ""
+    locked_files: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class WatchParams:
+    """Bundle of all watch_subagents parameters into a single object."""
+    apply: bool = False
+    execute_runners: bool = False
+    planner: bool = False
+    workflow_mode: str = "off"
+    max_runners: int = 1
+    limit: int = 20
+    reviewer: str = "parent-dispatch"
+    note: str = ""
+    runner_instruction: str = ""
+    max_cards: int = 0
+    probe: bool = True
+    take_over_by: str = ""
+    locked_files: list[str] | None = None
+    interval: float = 30.0
+    max_cycles: int = 0
+    force_lock: bool = False
+    stop_file: str | Path | None = None
+
+
+@dataclass
+class DispatchContext:
+    """Internal context bundle for dispatch helpers."""
+    cfg: Any
+    normalized_workflow_mode: str
+    apply: bool
+    planner: bool
+    runner_instruction: str
+    max_runners: int
+    limit: int
+    reviewer: str
+    note: str
+    take_over_by: str
+    locked_files: list[str] | None
+    router: CapabilityRouter
+    records: list = field(default_factory=list)
+
 
 from .dispatch_service import (
     build_workflow_records,
@@ -97,11 +158,23 @@ class SimpleAgentDispatchMixin:
         effective_runner_instruction = runner_instruction
         effective_max_runners = max_runners
 
-        records = self._collect_dispatch_records(
-            cfg, normalized_workflow_mode, apply, planner, effective_runner_instruction,
-            effective_max_runners, limit, reviewer, note, take_over_by, locked_files, router
+        ctx = DispatchContext(
+            cfg=cfg,
+            normalized_workflow_mode=normalized_workflow_mode,
+            apply=apply,
+            planner=planner,
+            runner_instruction=effective_runner_instruction,
+            max_runners=effective_max_runners,
+            limit=limit,
+            reviewer=reviewer,
+            note=note,
+            take_over_by=take_over_by,
+            locked_files=locked_files,
+            router=router,
         )
+        records = self._collect_dispatch_records(ctx)
 
+        effective_max_runners = max_runners
         if planner:
             planner_record = records[0] if records else None
             if planner_record and planner_record.step == "parent_planner":
@@ -112,10 +185,10 @@ class SimpleAgentDispatchMixin:
                 if hasattr(planner_record, 'suggested_max_runners') and planner_record.suggested_max_runners > 0:
                     effective_max_runners = min(max_runners, planner_record.suggested_max_runners)
 
-        records, effective_runner_instruction = self._execute_runner_jobs(
-            cfg, apply, execute_runners, effective_runner_instruction,
-            effective_max_runners, limit, max_cards, probe, records
-        )
+        records = self._execute_runner_jobs(ctx, execute_runners, max_cards, probe, records)
+        ctx.records = records
+        ctx.runner_instruction = effective_runner_instruction
+        ctx.max_runners = effective_max_runners
 
         records = self._finalize_dispatch(
             cfg, apply, reviewer, note, limit, records
@@ -123,24 +196,21 @@ class SimpleAgentDispatchMixin:
 
         return self._build_and_write_report(records, apply)
 
-    def _collect_dispatch_records(
-        self, cfg, normalized_workflow_mode, apply, planner, runner_instruction,
-        max_runners, limit, reviewer, note, take_over_by, locked_files, router
-    ):
+    def _collect_dispatch_records(self, ctx: DispatchContext):
         """Collect records for non-runner dispatch steps."""
         records = []
 
-        if planner:
+        if ctx.planner:
             planner_record = self.run_parent_planner(
-                router, cfg, apply=apply, execute_runners=False,
-                max_runners=max_runners, limit=limit,
-                reviewer=reviewer, note=note, runner_instruction=runner_instruction,
+                ctx.router, ctx.cfg, apply=ctx.apply, execute_runners=False,
+                max_runners=ctx.max_runners, limit=ctx.limit,
+                reviewer=ctx.reviewer, note=ctx.note, runner_instruction=ctx.runner_instruction,
             )
             records.append(
                 self.subagents.make_dispatch_record(
                     step="parent_planner",
                     action=planner_record.decision.lower(),
-                    dry_run=not apply,
+                    dry_run=not ctx.apply,
                     applied=False,
                     ok=planner_record.ok,
                     message=planner_record.message,
@@ -148,34 +218,33 @@ class SimpleAgentDispatchMixin:
                 )
             )
 
-        if normalized_workflow_mode in {"plan", "auto"}:
+        if ctx.normalized_workflow_mode in {"plan", "auto"}:
             workflow_records = build_workflow_records(
-                self, self.subagents.list_runs(), normalized_workflow_mode, limit, apply
+                self, self.subagents.list_runs(), ctx.normalized_workflow_mode, ctx.limit, ctx.apply
             )
             records.extend(workflow_records)
 
-        records.append(make_due_check_record(self, cfg, apply))
+        records.append(make_due_check_record(self, ctx.cfg, ctx.apply))
 
         action_records = make_action_apply_records(
-            self, cfg, apply, take_over_by, locked_files, limit
+            self, ctx.cfg, ctx.apply, ctx.take_over_by, ctx.locked_files, ctx.limit
         )
         records.extend(action_records)
 
-        route_records = make_capability_route_records(self, router, cfg, apply, limit)
+        route_records = make_capability_route_records(self, ctx.router, ctx.cfg, ctx.apply, ctx.limit)
         records.extend(route_records)
 
         return records
 
     def _execute_runner_jobs(
-        self, cfg, apply, execute_runners, runner_instruction,
-        max_runners, limit, max_cards, probe, existing_records
-    ):
+        self, ctx: DispatchContext, execute_runners: bool, max_cards: int, probe: bool, existing_records: list
+    ) -> list:
         """Execute runner jobs and return updated records."""
         records = list(existing_records)
-        effective_runner_instruction = runner_instruction
+        effective_runner_instruction = ctx.runner_instruction
         runner_max_attempts = _runner_max_attempts(self.config.runner_failure_policy)
         runner_candidates = _dispatch_runner_candidates(
-            self.subagents.list_runs(), max_runners, runner_max_attempts=runner_max_attempts
+            self.subagents.list_runs(), ctx.max_runners, runner_max_attempts=runner_max_attempts
         )
         pending_runner_jobs = []
 
@@ -183,7 +252,7 @@ class SimpleAgentDispatchMixin:
             before = self.subagents.load(task.id)
             retry_reason = _runner_retry_reason(before, runner_max_attempts)
             action_name = "retry_runner" if retry_reason else "execute_runner"
-            if not apply:
+            if not ctx.apply:
                 records.append(
                     self.subagents.make_dispatch_record(
                         step="runner", action=action_name, run_id=task.id,
@@ -240,7 +309,8 @@ class SimpleAgentDispatchMixin:
                             self, run_id, before, result, effective_runner_instruction
                         )
 
-        return records, effective_runner_instruction
+        ctx.runner_instruction = effective_runner_instruction
+        return records
 
     def _finalize_dispatch(self, cfg, apply, reviewer, note, limit, existing_records):
         """Add patch review and acceptance records."""

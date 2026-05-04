@@ -14,76 +14,54 @@ import time
 from ..agent.audit import AuditAction, AuditQuery
 
 
-def cmd_audit_log(args) -> int:
-    """查询审计日志。
+def _show_recent_users(query: AuditQuery, args) -> int:
+    """Show recent active users."""
+    limit = getattr(args, "limit", 10)
+    users = query.recent_users(limit=limit)
 
-    Args:
-        args: 解析后的命令行参数
+    if not users:
+        print("暂无活跃用户。", file=sys.stdout)
+        return 0
 
-    Returns:
-        退出码
-    """
-    from .common import DEFAULT_CONFIG, load_config, resolve_workspace_root
+    print(f"最近活跃用户（共 {len(users)} 人）：", file=sys.stdout)
+    print()
 
-    config_path = getattr(args, "config", str(DEFAULT_CONFIG))
-    config = load_config(config_path)
-
-    root = resolve_workspace_root(config, config_path)
-
-    query = AuditQuery(config)
-
-    # 最近活跃用户
-    if getattr(args, "recent_users", False):
-        limit = getattr(args, "limit", 10)
-        users = query.recent_users(limit=limit)
-
-        if not users:
-            print("暂无活跃用户。", file=sys.stdout)
-            return 0
-
-        print(f"最近活跃用户（共 {len(users)} 人）：", file=sys.stdout)
+    for i, u in enumerate(users, 1):
+        last_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(u["last_action_time"]))
+        print(f"{i}. {u['user_id']}", file=sys.stdout)
+        print(f"   最后活动: {last_time}", file=sys.stdout)
         print()
 
-        for i, u in enumerate(users, 1):
-            last_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(u["last_action_time"]))
-            print(f"{i}. {u['user_id']}", file=sys.stdout)
-            print(f"   最后活动: {last_time}", file=sys.stdout)
-            print()
+    return 0
 
-        return 0
 
-    # 摘要统计
-    if getattr(args, "summary", False):
-        user_id = getattr(args, "user", None)
-        stats = query.summary(user_id=user_id)
+def _show_summary(query: AuditQuery, args) -> int:
+    """Show audit summary statistics."""
+    user_id = getattr(args, "user", None)
+    stats = query.summary(user_id=user_id)
 
-        print(f"审计统计（用户: {user_id or '全部'}）：", file=sys.stdout)
-        print(f"  总操作数: {stats['total_actions']}", file=sys.stdout)
+    print(f"审计统计（用户: {user_id or '全部'}）：", file=sys.stdout)
+    print(f"  总操作数: {stats['total_actions']}", file=sys.stdout)
 
-        if stats["by_action"]:
-            print("  按动作类型：", file=sys.stdout)
-            for action, count in sorted(stats["by_action"].items(), key=lambda x: -x[1]):
-                print(f"    {action}: {count}", file=sys.stdout)
+    if stats["by_action"]:
+        print("  按动作类型：", file=sys.stdout)
+        for action, count in sorted(stats["by_action"].items(), key=lambda x: -x[1]):
+            print(f"    {action}: {count}", file=sys.stdout)
 
-        if stats["by_status"]:
-            print("  按状态：", file=sys.stdout)
-            for status, count in sorted(stats["by_status"].items()):
-                print(f"    {status}: {count}", file=sys.stdout)
+    if stats["by_status"]:
+        print("  按状态：", file=sys.stdout)
+        for status, count in sorted(stats["by_status"].items()):
+            print(f"    {status}: {count}", file=sys.stdout)
 
-        if stats["last_action_time"]:
-            last_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stats["last_action_time"]))
-            print(f"  最后操作: {last_str}", file=sys.stdout)
+    if stats["last_action_time"]:
+        last_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stats["last_action_time"]))
+        print(f"  最后操作: {last_str}", file=sys.stdout)
 
-        return 0
+    return 0
 
-    # 清理旧条目
-    if getattr(args, "cleanup", False):
-        days = getattr(args, "days", 90)
-        count = query.cleanup_old_entries(days=days)
-        print(f"已清理 {count} 条超过 {days} 天的审计记录。", file=sys.stdout)
-        return 0
 
-    # 查询日志
+def _show_entries(query: AuditQuery, args) -> int:
+    """Show audit log entries."""
     user_id = getattr(args, "user", None)
     action_str = getattr(args, "action", None)
     target_id = getattr(args, "target", None)
@@ -135,6 +113,43 @@ def cmd_audit_log(args) -> int:
         print()
 
     return 0
+
+
+def cmd_audit_log(args) -> int:
+    """查询审计日志。
+
+    Args:
+        args: 解析后的命令行参数
+
+    Returns:
+        退出码
+    """
+    from .common import DEFAULT_CONFIG, load_config, resolve_workspace_root
+
+    config_path = getattr(args, "config", str(DEFAULT_CONFIG))
+    config = load_config(config_path)
+
+    root = resolve_workspace_root(config, config_path)
+
+    query = AuditQuery(config)
+
+    # 最近活跃用户
+    if getattr(args, "recent_users", False):
+        return _show_recent_users(query, args)
+
+    # 摘要统计
+    if getattr(args, "summary", False):
+        return _show_summary(query, args)
+
+    # 清理旧条目
+    if getattr(args, "cleanup", False):
+        days = getattr(args, "days", 90)
+        count = query.cleanup_old_entries(days=days)
+        print(f"已清理 {count} 条超过 {days} 天的审计记录。", file=sys.stdout)
+        return 0
+
+    # 查询日志
+    return _show_entries(query, args)
 
 
 __all__ = ["cmd_audit_log"]

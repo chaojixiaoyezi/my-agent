@@ -30,6 +30,71 @@ if TYPE_CHECKING:
 
 _PATCH_APPLY_WRITE_TYPES = {"write_file"}
 
+from ..utils import _read_json_object
+
+
+def _execute_patch_apply(
+    patch_specs,
+    review_status_updates,
+    task,
+    manager,
+    applier,
+    note,
+    test_commands,
+):
+    """Execute patch apply with rollback on failure."""
+    touched_files = {}
+    applied_count = 0
+    rollback_performed = False
+    test_results = []
+
+    try:
+        applied_count, touched_files = do_apply_patches(
+            patch_specs, review_status_updates, task, manager, applier, note
+        )
+        if test_commands:
+            test_results = run_patch_apply_tests(test_commands, manager.workspace_root)
+            failed = [item for item in test_results if not item.get("ok")]
+            if failed:
+                raise RuntimeError(f"{len(failed)} 个 apply 后测试失败。")
+
+        output = _read_json_object(Path(task.output_json))
+        output["patches"] = review_status_updates
+        Path(task.output_json).write_text(
+            json.dumps(output, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        manager._append_task_work_log(
+            task,
+            f"patch_apply: applied={applied_count} tests={len(test_results)} applier={applier}",
+        )
+    except Exception as exc:
+        rollback_performed = bool(touched_files)
+        rollback_patch_apply(touched_files)
+        for spec in patch_specs:
+            spec["audit"]["apply_status"] = "ROLLED_BACK" if rollback_performed else "FAILED"
+            spec["audit"]["message"] = f"apply 失败: {exc}"
+            spec["patch_ref"]["apply_status"] = spec["audit"]["apply_status"]
+        raise RuntimeError(str(exc)) from exc
+
+    return applied_count, touched_files, rollback_performed, test_results
+
+
+def _decide_patch_apply(
+    patches,
+    patch_specs,
+    blocked_count,
+    apply,
+):
+    """Determine patch apply decision based on conditions."""
+    if not patches:
+        return ("NO_PATCHES", False, "没有 patch 可以 apply。")
+    if blocked_count:
+        return ("REJECT", False, f"{blocked_count} 项 patch/test 不满足 apply 条件。")
+    if not apply:
+        return ("WOULD_APPLY", True, f"dry-run: 将 apply {len(patch_specs)} 个 patch。")
+    return ("APPLIED", True, f"已 apply {len(patch_specs)} 个 patch。")
+
 
 class PatchApplyService:
     """Execute patch apply with write boundary enforcement and rollback support."""
@@ -190,22 +255,7 @@ class PatchApplyService:
             )
 
         patch_count = len(patches)
-        if not patches:
-            decision = "NO_PATCHES"
-            ok = False
-            message = "没有 patch 可以 apply。"
-        elif blocked_count:
-            decision = "REJECT"
-            ok = False
-            message = f"{blocked_count} 项 patch/test 不满足 apply 条件。"
-        elif not apply:
-            decision = "WOULD_APPLY"
-            ok = True
-            message = f"dry-run: 将 apply {len(patch_specs)} 个 patch。"
-        else:
-            decision = "APPLIED"
-            ok = True
-            message = f"已 apply {len(patch_specs)} 个 patch。"
+        decision, ok, message = _decide_patch_apply(patches, patch_specs, blocked_count, apply)
 
         rollback_performed = False
         test_results = []
@@ -213,29 +263,17 @@ class PatchApplyService:
 
         if apply and ok and patch_specs:
             try:
-                applied_count, touched_files = do_apply_patches(
-                    patch_specs, review_status_updates, task, self.manager, applier, note
-                )
-                if test_commands:
-                    test_results = run_patch_apply_tests(
-                        test_commands, self.manager.workspace_root
-                    )
-                    failed = [item for item in test_results if not item.get("ok")]
-                    if failed:
-                        raise RuntimeError(f"{len(failed)} 个 apply 后测试失败。")
-
-                output["patches"] = review_status_updates
-                Path(task.output_json).write_text(
-                    json.dumps(output, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                self.manager._append_task_work_log(
+                applied_count, touched_files, rollback_performed, test_results = _execute_patch_apply(
+                    patch_specs,
+                    review_status_updates,
                     task,
-                    f"patch_apply: applied={applied_count} tests={len(test_results)} applier={applier}",
+                    self.manager,
+                    applier,
+                    note,
+                    test_commands,
                 )
             except Exception as exc:
                 rollback_performed = bool(touched_files)
-                rollback_patch_apply(touched_files)
                 for spec in patch_specs:
                     spec["audit"]["apply_status"] = "ROLLED_BACK" if rollback_performed else "FAILED"
                     spec["audit"]["message"] = f"apply 失败: {exc}"

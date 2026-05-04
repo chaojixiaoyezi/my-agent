@@ -66,6 +66,113 @@ from .utils import (
 if TYPE_CHECKING:
     from ..local_store import LocalStore
 
+def _route_capability_gap(
+    task,
+    request,
+    query,
+    hits,
+    gap,
+):
+    """Build a GAP record when no hits found and apply=True."""
+    now = time.time()
+    return CapabilityRouteRecord(
+        id=_new_id("route"),
+        run_id=task.id,
+        request_id=request.id,
+        status="GAP",
+        dry_run=False,
+        query=query,
+        candidate_count=len(hits),
+        gap_id=gap.id,
+        message="未找到足够可信的 skill/tool card，已记录 capability gap。",
+        created_at=now,
+    )
+
+
+def _route_capability_grant(
+    task,
+    request,
+    query,
+    hits,
+    selected_hits,
+    granted_skills,
+    granted_tools,
+    selected_cards,
+    reasons,
+    grant,
+):
+    """Build a GRANTED record when hits found and apply=True."""
+    now = time.time()
+    return CapabilityRouteRecord(
+        id=_new_id("route"),
+        run_id=task.id,
+        request_id=request.id,
+        status="GRANTED",
+        dry_run=False,
+        query=query,
+        candidate_count=len(hits),
+        granted_skills=granted_skills,
+        granted_tools=granted_tools,
+        selected_cards=selected_cards,
+        reasons=reasons,
+        grant_id=grant.id,
+        message="已生成 capability grant。",
+        created_at=now,
+    )
+
+
+def _route_capability_no_hits(
+    task,
+    request,
+    query,
+    hits,
+    apply,
+):
+    """Build a record when no hits found (dry-run WOULD_GAP or real GAP)."""
+    now = time.time()
+    if not apply:
+        return CapabilityRouteRecord(
+            id=_new_id("route"),
+            run_id=task.id,
+            request_id=request.id,
+            status="WOULD_GAP",
+            dry_run=True,
+            query=query,
+            candidate_count=len(hits),
+            message="未找到足够可信的 skill/tool card；apply 时会记录 capability gap。",
+            created_at=now,
+        )
+    gap = _record_capability_gap_for_task(
+        task,
+        request,
+    )
+    return CapabilityRouteRecord(
+        id=_new_id("route"),
+        run_id=task.id,
+        request_id=request.id,
+        status="GAP",
+        dry_run=False,
+        query=query,
+        candidate_count=len(hits),
+        gap_id=gap.id,
+        message="未找到足够可信的 skill/tool card，已记录 capability gap。",
+        created_at=now,
+    )
+
+
+def _record_capability_gap_for_task(task, request):
+    """Record capability gap for a task."""
+    from .capabilities import record_capability_gap
+
+    return record_capability_gap(
+        task.id,
+        missing_capability=request.needed_capability,
+        why_failed="CapabilityRouter 没有找到匹配的 skill/tool card。",
+        attempted_tools=request.tried,
+        needed_outputs=[request.expected_output] if request.expected_output else [],
+    )
+
+
 class SubAgentCapabilityMixin:
     def route_capability_requests(
         self,
@@ -170,52 +277,16 @@ class SubAgentCapabilityMixin:
     ) -> CapabilityRouteRecord:
         """路由单条 capability request。"""
 
-        now = time.time()
         selected_cards = [_route_card_payload(hit) for hit in selected_hits]
         granted_skills = [hit.card.name for hit in selected_hits if hit.card.kind == "skill"]
         granted_tools = [hit.card.name for hit in selected_hits if hit.card.kind == "tool"]
         reasons = _merge_list([], [reason for hit in selected_hits for reason in hit.reasons])
 
         if not selected_hits:
-            if not apply:
-                return CapabilityRouteRecord(
-                    id=_new_id("route"),
-                    run_id=task.id,
-                    request_id=request.id,
-                    status="WOULD_GAP",
-                    dry_run=True,
-                    query=query,
-                    candidate_count=len(hits),
-                    message="未找到足够可信的 skill/tool card；apply 时会记录 capability gap。",
-                    created_at=now,
-                )
-            gap = self.record_capability_gap(
-                task.id,
-                missing_capability=request.needed_capability,
-                why_failed="CapabilityRouter 没有找到匹配的 skill/tool card。",
-                attempted_tools=request.tried,
-                needed_outputs=[request.expected_output] if request.expected_output else [],
-            )
-            self._mark_capability_request_status(task.id, request.id, "GAP")
-            routed_task = self.load(task.id)
-            self._append_task_work_log(
-                routed_task,
-                f"capability_route: request {request.id} 未命中能力卡，已记录 gap {gap.id}。",
-            )
-            return CapabilityRouteRecord(
-                id=_new_id("route"),
-                run_id=task.id,
-                request_id=request.id,
-                status="GAP",
-                dry_run=False,
-                query=query,
-                candidate_count=len(hits),
-                gap_id=gap.id,
-                message="未找到足够可信的 skill/tool card，已记录 capability gap。",
-                created_at=now,
-            )
+            return _route_capability_no_hits(task, request, query, hits, apply)
 
         if not apply:
+            now = time.time()
             return CapabilityRouteRecord(
                 id=_new_id("route"),
                 run_id=task.id,
@@ -248,21 +319,17 @@ class SubAgentCapabilityMixin:
             f"capability_route: request {request.id} 已生成 grant {grant.id}，"
             f"skills={','.join(granted_skills) or 'none'} tools={','.join(granted_tools) or 'none'}。",
         )
-        return CapabilityRouteRecord(
-            id=_new_id("route"),
-            run_id=task.id,
-            request_id=request.id,
-            status="GRANTED",
-            dry_run=False,
-            query=query,
-            candidate_count=len(hits),
-            granted_skills=granted_skills,
-            granted_tools=granted_tools,
-            selected_cards=selected_cards,
-            reasons=reasons,
-            grant_id=grant.id,
-            message="已生成 capability grant。",
-            created_at=now,
+        return _route_capability_grant(
+            task,
+            request,
+            query,
+            hits,
+            selected_hits,
+            granted_skills,
+            granted_tools,
+            selected_cards,
+            reasons,
+            grant,
         )
 
     def _mark_capability_request_status(self, run_id: str, request_id: str, status: str) -> None:

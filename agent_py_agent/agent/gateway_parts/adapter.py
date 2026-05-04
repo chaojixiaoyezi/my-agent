@@ -23,6 +23,86 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
+def _process_single_adapter_message(
+    agent: SimpleAgent,
+    processing_path: Path,
+    payload: dict,
+    gateway_paths_obj: GatewayPaths,
+    adapter_paths_obj: AdapterPaths,
+    timeout: float,
+) -> bool:
+    """Process a single claimed adapter message. Returns True if processed."""
+    message_id = _adapter_message_id(payload, processing_path)
+    prompt = _adapter_message_prompt(payload)
+    output_path = _adapter_output_path(adapter_paths_obj, message_id)
+    started_at = time.time()
+    if not prompt:
+        response = {
+            "id": message_id,
+            "ok": False,
+            "status": "failed",
+            "error_code": "ADAPTER_EMPTY_PROMPT",
+            "error": "adapter message 缺少 prompt/text/message/content 字段。",
+            "created_at": payload.get("created_at", 0),
+            "started_at": started_at,
+            "ended_at": time.time(),
+            "source_file": str(processing_path),
+        }
+        write_json_file(output_path, response)
+        _archive_adapter_message(processing_path, adapter_paths_obj.failed)
+        return True
+
+    request_id, request_path, gateway_response = submit_gateway_ask(
+        gateway_paths_obj,
+        prompt=prompt,
+        inject=[str(item) for item in payload.get("inject", [])],
+        prompt_files=[str(item) for item in payload.get("prompt_files", [])],
+        save=not bool(payload.get("no_save", False)),
+        include_prompt=bool(payload.get("include_prompt", False)),
+        agent=agent,
+    )
+    response = wait_for_gateway_response(gateway_paths_obj, request_id, timeout)
+    if not response:
+        response = {
+            "id": request_id,
+            "kind": "ask",
+            "ok": False,
+            "status": "timeout",
+            "error_code": "GATEWAY_TIMEOUT",
+            "error": f"timeout after {timeout}s",
+            "created_at": payload.get("created_at", 0),
+            "started_at": started_at,
+            "ended_at": time.time(),
+            "response": "",
+            "request_file": str(request_path),
+        }
+        _record_late_pending(adapter_paths_obj, request_id, timeout)
+    adapter_response = {
+        "adapter_message_id": message_id,
+        "conversation_id": payload.get("conversation_id", ""),
+        "user": payload.get("user", ""),
+        "gateway_request_id": request_id,
+        "gateway_request_file": str(request_path),
+        "gateway_response_file": str(gateway_response),
+        "source_file": str(processing_path),
+        "ok": bool(response.get("ok", False)),
+        "status": response.get("status", "unknown"),
+        "error_code": response.get("error_code", ""),
+        "response": response.get("response", ""),
+        "error": response.get("error", ""),
+        "payload": response,
+        "created_at": payload.get("created_at", 0),
+        "started_at": started_at,
+        "ended_at": time.time(),
+    }
+    write_json_file(output_path, adapter_response)
+    _archive_adapter_message(
+        processing_path,
+        adapter_paths_obj.done if adapter_response["ok"] else adapter_paths_obj.failed,
+    )
+    return True
+
+
 def process_file_adapter_once(
     agent: SimpleAgent,
     *,
@@ -57,74 +137,13 @@ def process_file_adapter_once(
             _report_gateway_side_effect_error("adapter_claim_message", message_path.stem, exc)
             continue
         payload = read_json_file(processing_path)
-        message_id = _adapter_message_id(payload, processing_path)
-        prompt = _adapter_message_prompt(payload)
-        output_path = _adapter_output_path(adapter_paths_obj, message_id)
-        started_at = time.time()
-        if not prompt:
-            response = {
-                "id": message_id,
-                "ok": False,
-                "status": "failed",
-                "error_code": "ADAPTER_EMPTY_PROMPT",
-                "error": "adapter message 缺少 prompt/text/message/content 字段。",
-                "created_at": payload.get("created_at", 0),
-                "started_at": started_at,
-                "ended_at": time.time(),
-                "source_file": str(processing_path),
-            }
-            write_json_file(output_path, response)
-            _archive_adapter_message(processing_path, adapter_paths_obj.failed)
-            processed += 1
-            continue
-
-        request_id, request_path, gateway_response = submit_gateway_ask(
-            gateway_paths_obj,
-            prompt=prompt,
-            inject=[str(item) for item in payload.get("inject", [])],
-            prompt_files=[str(item) for item in payload.get("prompt_files", [])],
-            save=not bool(payload.get("no_save", False)),
-            include_prompt=bool(payload.get("include_prompt", False)),
-            agent=agent,
-        )
-        response = wait_for_gateway_response(gateway_paths_obj, request_id, timeout)
-        if not response:
-            response = {
-                "id": request_id,
-                "kind": "ask",
-                "ok": False,
-                "status": "timeout",
-                "error_code": "GATEWAY_TIMEOUT",
-                "error": f"timeout after {timeout}s",
-                "created_at": payload.get("created_at", 0),
-                "started_at": started_at,
-                "ended_at": time.time(),
-                "response": "",
-                "request_file": str(request_path),
-            }
-            _record_late_pending(adapter_paths_obj, request_id, timeout)
-        adapter_response = {
-            "adapter_message_id": message_id,
-            "conversation_id": payload.get("conversation_id", ""),
-            "user": payload.get("user", ""),
-            "gateway_request_id": request_id,
-            "gateway_request_file": str(request_path),
-            "gateway_response_file": str(gateway_response),
-            "source_file": str(processing_path),
-            "ok": bool(response.get("ok", False)),
-            "status": response.get("status", "unknown"),
-            "error_code": response.get("error_code", ""),
-            "response": response.get("response", ""),
-            "error": response.get("error", ""),
-            "payload": response,
-            "created_at": payload.get("created_at", 0),
-            "started_at": started_at,
-            "ended_at": time.time(),
-        }
-        write_json_file(output_path, adapter_response)
-        _archive_adapter_message(
+        _process_single_adapter_message(
+            agent,
             processing_path,
-            adapter_paths_obj.done if adapter_response["ok"] else adapter_paths_obj.failed,
+            payload,
+            gateway_paths_obj,
+            adapter_paths_obj,
+            timeout,
         )
         processed += 1
     return processed

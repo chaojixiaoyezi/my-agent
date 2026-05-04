@@ -174,19 +174,12 @@ def _build_evidence_findings(
     return findings
 
 
-def _build_output_and_capability_findings(
+def _build_capability_and_blocker_findings(
     task: SubAgentTask,
     output: dict[str, object],
     created_at: float,
-    artifact_exists_fn: Callable[[str], bool],
 ) -> list[AcceptanceReviewFinding]:
-    """LLM: build capability-gap, blocker, test, artifact, and patch findings.
-
-    新手说明:
-    检查是否还有未关闭的能力请求/缺口、output.json 里的 blocker 和测试失败、
-    artifact 路径是否真实存在、以及 patch 的状态和审核情况。
-    """
-
+    """Build findings for capability requests/gaps and output blockers."""
     findings: list[AcceptanceReviewFinding] = []
 
     open_requests = [item for item in task.capability_requests if item.status == "OPEN"]
@@ -231,6 +224,17 @@ def _build_output_and_capability_findings(
             created_at=created_at,
         )
     )
+    return findings
+
+
+def _build_test_and_artifact_findings(
+    task: SubAgentTask,
+    output: dict[str, object],
+    created_at: float,
+    artifact_exists_fn: Callable[[str], bool],
+) -> list[AcceptanceReviewFinding]:
+    """Build findings for tests and artifacts."""
+    findings: list[AcceptanceReviewFinding] = []
 
     tests = _dict_list(output.get("tests", []))
     failed_tests = [item for item in tests if not bool(item.get("ok", False))]
@@ -272,6 +276,16 @@ def _build_output_and_capability_findings(
             created_at=created_at,
         )
     )
+    return findings
+
+
+def _build_patch_findings(
+    task: SubAgentTask,
+    output: dict[str, object],
+    created_at: float,
+) -> list[AcceptanceReviewFinding]:
+    """Build findings for patches."""
+    findings: list[AcceptanceReviewFinding] = []
 
     patches = _dict_list(output.get("patches", []))
     valid_patch_statuses = {"applied", "planned", "blocked"}
@@ -331,6 +345,26 @@ def _build_output_and_capability_findings(
             created_at=created_at,
         )
     )
+    return findings
+
+
+def _build_output_and_capability_findings(
+    task: SubAgentTask,
+    output: dict[str, object],
+    created_at: float,
+    artifact_exists_fn: Callable[[str], bool],
+) -> list[AcceptanceReviewFinding]:
+    """LLM: build capability-gap, blocker, test, artifact, and patch findings.
+
+    新手说明:
+    检查是否还有未关闭的能力请求/缺口、output.json 里的 blocker 和测试失败、
+    artifact 路径是否真实存在、以及 patch 的状态和审核情况。
+    """
+
+    findings: list[AcceptanceReviewFinding] = []
+    findings.extend(_build_capability_and_blocker_findings(task, output, created_at))
+    findings.extend(_build_test_and_artifact_findings(task, output, created_at, artifact_exists_fn))
+    findings.extend(_build_patch_findings(task, output, created_at))
     return findings
 
 

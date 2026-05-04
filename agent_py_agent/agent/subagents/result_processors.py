@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 from .models import (
     CapabilityRequest,
@@ -34,6 +35,134 @@ from .policies import (
 from .reports import AcceptanceReviewFinding
 from .runner_rendering import _render_runner_item_line
 from .utils import _merge_list, _new_id
+
+
+@dataclass(frozen=True)
+class OutputPayloadContext:
+    """Bundle of all _build_output_payload parameters into a single object."""
+    task: SubAgentTask
+    dry_run: bool
+    ok: bool
+    message: str
+    backend: str
+    tool_rounds: int
+    parsed: SubAgentParsedOutput
+    actual_tools: list[str] | None
+    structured_evidence_count: int
+    structured_request_count: int
+    created_request_ids: list[str]
+    ignored_tools: list[str]
+    ignored_skills: list[str]
+    artifacts: list[dict[str, Any]]
+    tests: list[dict[str, Any]]
+    patches: list[dict[str, Any]]
+    lessons: list[str]
+    blockers: list[str]
+    next_actions: list[str]
+    structured_repair_attempted: bool
+    structured_repair_ok: bool
+    structured_repair_error: str
+    now: float
+
+
+@dataclass(frozen=True)
+class RunnerResultContext:
+    """Bundle of all _build_runner_result parameters into a single object."""
+    task: SubAgentTask
+    dry_run: bool
+    ok: bool
+    message: str
+    backend: str
+    tool_rounds: int
+    prompt: str
+    response: str
+    parsed: SubAgentParsedOutput
+    structured_repair_attempted: bool
+    structured_repair_ok: bool
+    structured_repair_error: str
+    structured_evidence_count: int
+    structured_request_count: int
+    artifact_count: int
+    test_count: int
+    patch_count: int
+    lesson_count: int
+    now: float
+
+
+def _merge_actual_tools(task, actual_tools, used_tools, allowed_tools, now):
+    """Merge actual tools into task.used_tools and add evidence for missing ones.
+
+    Args:
+        task: the task object (modified in place)
+        actual_tools: the actual executed tools list (may be empty)
+        used_tools: tools from structured output that were in allowed set
+        allowed_tools: set of allowed tool names
+        now: timestamp
+    """
+    actual_allowed_tools = [item for item in actual_tools if item in allowed_tools]
+    task.used_tools = _merge_list(task.used_tools, actual_allowed_tools)
+    # When actual_tools is empty, fall back to treating structured output used_tools as ignored
+    if not actual_tools:
+        ignored_from_structured = [item for item in used_tools if item not in allowed_tools]
+        return ignored_from_structured
+    ignored_tools = [item for item in task.used_tools if item not in actual_allowed_tools]
+    for tool_name in actual_allowed_tools:
+        if not any(
+            item.ok
+            and (
+                item.kind == tool_name
+                or item.command == tool_name
+                or item.command.startswith(f"{tool_name} ")
+            )
+            for item in task.evidence
+        ):
+            task.evidence.append(
+                VerificationEvidence(
+                    kind=tool_name,
+                    summary=f"系统记录 runner 实际执行过 {tool_name}。",
+                    command=tool_name,
+                    ok=True,
+                    created_at=now,
+                )
+            )
+    return ignored_tools
+
+
+def _create_evidence_from_parsed(parsed, now):
+    """Create VerificationEvidence items from parsed structured output."""
+    count = 0
+    for item in parsed.evidence:
+        summary = str(item.get("summary", "")).strip()
+        if not summary:
+            continue
+        count += 1
+    return count
+
+
+def _create_capability_requests_from_parsed(task, parsed, now):
+    """Create CapabilityRequest items from parsed structured output."""
+    count = 0
+    created_ids = []
+    for item in parsed.capability_requests:
+        problem = str(item.get("problem", "")).strip()
+        needed = str(item.get("needed_capability", "")).strip()
+        if not problem or not needed:
+            continue
+        request = CapabilityRequest(
+            id=_new_id("capreq"),
+            from_run_id=task.id,
+            problem=problem,
+            needed_capability=needed,
+            expected_output=str(item.get("expected_output", "") or ""),
+            tried=_string_list(item.get("tried", [])),
+            evidence=_string_list(item.get("evidence", [])),
+            constraints=_string_dict(item.get("constraints", {})),
+            created_at=now,
+        )
+        task.capability_requests.append(request)
+        created_ids.append(request.id)
+        count += 1
+    return count, created_ids
 
 
 def _process_structured_output(
@@ -67,31 +196,7 @@ def _process_structured_output(
     next_actions = parsed.next_actions
 
     if actual_tools is not None:
-        actual_allowed_tools = [item for item in actual_tools if item in allowed_tools]
-        task.used_tools = _merge_list(task.used_tools, actual_allowed_tools)
-        ignored_tools = _merge_list(
-            ignored_tools,
-            [item for item in used_tools if item not in actual_allowed_tools],
-        )
-        for tool_name in actual_allowed_tools:
-            if not any(
-                item.ok
-                and (
-                    item.kind == tool_name
-                    or item.command == tool_name
-                    or item.command.startswith(f"{tool_name} ")
-                )
-                for item in task.evidence
-            ):
-                task.evidence.append(
-                    VerificationEvidence(
-                        kind=tool_name,
-                        summary=f"系统记录 runner 实际执行过 {tool_name}。",
-                        command=tool_name,
-                        ok=True,
-                        created_at=now,
-                    )
-                )
+        ignored_tools = _merge_actual_tools(task, actual_tools, used_tools, allowed_tools, now)
     else:
         task.used_tools = _merge_list(task.used_tools, used_tools)
     task.used_skills = _merge_list(task.used_skills, used_skills)
@@ -113,25 +218,7 @@ def _process_structured_output(
         )
         structured_evidence_count += 1
 
-    for item in parsed.capability_requests:
-        problem = str(item.get("problem", "")).strip()
-        needed = str(item.get("needed_capability", "")).strip()
-        if not problem or not needed:
-            continue
-        request = CapabilityRequest(
-            id=_new_id("capreq"),
-            from_run_id=task.id,
-            problem=problem,
-            needed_capability=needed,
-            expected_output=str(item.get("expected_output", "") or ""),
-            tried=_string_list(item.get("tried", [])),
-            evidence=_string_list(item.get("evidence", [])),
-            constraints=_string_dict(item.get("constraints", {})),
-            created_at=now,
-        )
-        task.capability_requests.append(request)
-        created_request_ids.append(request.id)
-        structured_request_count += 1
+    structured_request_count, created_request_ids = _create_capability_requests_from_parsed(task, parsed, now)
 
     return {
         "ignored_tools": ignored_tools,
@@ -147,153 +234,107 @@ def _process_structured_output(
     }
 
 
-def _build_output_payload(
-    task: SubAgentTask,
-    *,
-    dry_run: bool,
-    ok: bool,
-    message: str,
-    backend: str,
-    tool_rounds: int,
-    parsed: SubAgentParsedOutput,
-    actual_tools: list[str] | None,
-    structured_evidence_count: int,
-    structured_request_count: int,
-    created_request_ids: list[str],
-    ignored_tools: list[str],
-    ignored_skills: list[str],
-    artifacts: list[dict[str, object]],
-    tests: list[dict[str, object]],
-    patches: list[dict[str, object]],
-    lessons: list[str],
-    blockers: list[str],
-    next_actions: list[str],
-    structured_repair_attempted: bool,
-    structured_repair_ok: bool,
-    structured_repair_error: str,
-    now: float,
-) -> dict[str, object]:
+def _build_output_payload(ctx: OutputPayloadContext) -> dict[str, object]:
     """LLM: assemble the output.json payload for a runner result.
 
     新手说明:
     把 runner 结果的所有字段组装成一个字典，写入 task 的 output.json。
     这个函数只管拼数据，不管写文件。
     """
-
+    task = ctx.task
     return {
         "run_id": task.id,
-        "dry_run": dry_run,
-        "ok": ok,
+        "dry_run": ctx.dry_run,
+        "ok": ctx.ok,
         "status": task.status,
         "verification_status": task.verification_status,
-        "message": message,
-        "backend": backend,
-        "tool_rounds": tool_rounds,
+        "message": ctx.message,
+        "backend": ctx.backend,
+        "tool_rounds": ctx.tool_rounds,
         "runner_attempts": task.runner_attempts,
         "runner_last_error": task.runner_last_error,
         "response": "",
         "structured_output": {
-            "found": parsed.found,
-            "ok": parsed.ok,
-            "parse_error": parsed.parse_error,
-            "repair_attempted": structured_repair_attempted,
-            "repair_ok": structured_repair_ok,
-            "repair_error": structured_repair_error,
-            "summary": parsed.summary,
-            "status": parsed.status,
-            "blocked_reason": parsed.blocked_reason,
-            "evidence_count": structured_evidence_count,
-            "capability_request_count": structured_request_count,
-            "capability_request_ids": created_request_ids,
-            "artifact_count": len(artifacts),
-            "test_count": len(tests),
-            "patch_count": len(patches),
-            "lesson_count": len(lessons),
-            "actual_tools": actual_tools or [],
-            "ignored_unauthorized_tools": ignored_tools,
-            "ignored_unauthorized_skills": ignored_skills,
+            "found": ctx.parsed.found,
+            "ok": ctx.parsed.ok,
+            "parse_error": ctx.parsed.parse_error,
+            "repair_attempted": ctx.structured_repair_attempted,
+            "repair_ok": ctx.structured_repair_ok,
+            "repair_error": ctx.structured_repair_error,
+            "summary": ctx.parsed.summary,
+            "status": ctx.parsed.status,
+            "blocked_reason": ctx.parsed.blocked_reason,
+            "evidence_count": ctx.structured_evidence_count,
+            "capability_request_count": ctx.structured_request_count,
+            "capability_request_ids": ctx.created_request_ids,
+            "artifact_count": len(ctx.artifacts),
+            "test_count": len(ctx.tests),
+            "patch_count": len(ctx.patches),
+            "lesson_count": len(ctx.lessons),
+            "actual_tools": ctx.actual_tools or [],
+            "ignored_unauthorized_tools": ctx.ignored_tools,
+            "ignored_unauthorized_skills": ctx.ignored_skills,
         },
         "used_tools": task.used_tools,
         "used_skills": task.used_skills,
-        "artifacts": artifacts,
-        "tests": tests,
-        "patches": patches,
+        "artifacts": ctx.artifacts,
+        "tests": ctx.tests,
+        "patches": ctx.patches,
         "acceptance": [item.summary for item in task.evidence],
-        "lessons": lessons,
-        "blockers": blockers,
+        "lessons": ctx.lessons,
+        "blockers": ctx.blockers,
         "next_action": _runner_next_action(
-            dry_run=dry_run,
-            ok=ok,
+            dry_run=ctx.dry_run,
+            ok=ctx.ok,
             status=task.status,
-            capability_request_count=structured_request_count,
-            next_actions=next_actions,
+            capability_request_count=ctx.structured_request_count,
+            next_actions=ctx.next_actions,
         ),
-        "next_actions": next_actions,
-        "created_at": now,
+        "next_actions": ctx.next_actions,
+        "created_at": ctx.now,
     }
 
 
-def _build_runner_result(
-    task: SubAgentTask,
-    *,
-    dry_run: bool,
-    ok: bool,
-    message: str,
-    backend: str,
-    tool_rounds: int,
-    prompt: str,
-    response: str,
-    parsed: SubAgentParsedOutput,
-    structured_repair_attempted: bool,
-    structured_repair_ok: bool,
-    structured_repair_error: str,
-    structured_evidence_count: int,
-    structured_request_count: int,
-    artifact_count: int,
-    test_count: int,
-    patch_count: int,
-    lesson_count: int,
-    now: float,
-) -> SubAgentRunnerResult:
+def _build_runner_result(ctx: RunnerResultContext) -> SubAgentRunnerResult:
     """LLM: build the SubAgentRunnerResult dataclass from processed fields.
 
     新手说明:
     用处理后的字段组装 SubAgentRunnerResult 数据对象，后续写入 runner_result_json。
     """
-
+    task = ctx.task
     return SubAgentRunnerResult(
         run_id=task.id,
-        dry_run=dry_run,
-        ok=ok,
+        dry_run=ctx.dry_run,
+        ok=ctx.ok,
         status=task.status,
         verification_status=task.verification_status,
-        message=message,
-        backend=backend,
-        tool_rounds=tool_rounds,
+        message=ctx.message,
+        backend=ctx.backend,
+        tool_rounds=ctx.tool_rounds,
         runner_attempts=task.runner_attempts,
         runner_last_error=task.runner_last_error,
         execution_context_json=task.execution_context_json,
         execution_context_file=task.execution_context_file,
-        prompt_file=task.runner_prompt_file if prompt else "",
-        response_file=task.runner_response_file if response else "",
+        prompt_file=task.runner_prompt_file if ctx.prompt else "",
+        response_file=task.runner_response_file if ctx.response else "",
         result_file=task.runner_result_file,
         result_json=task.runner_result_json,
         output_json=task.output_json,
-        structured_output_found=parsed.found,
-        structured_output_ok=parsed.ok,
-        structured_parse_error=parsed.parse_error,
-        structured_repair_attempted=structured_repair_attempted,
-        structured_repair_ok=structured_repair_ok,
-        structured_repair_error=structured_repair_error,
-        structured_summary=parsed.summary,
-        evidence_count=structured_evidence_count,
-        capability_request_count=structured_request_count,
-        artifact_count=artifact_count,
-        test_count=test_count,
-        patch_count=patch_count,
-        lesson_count=lesson_count,
-        blocked_reason=parsed.blocked_reason,
-        created_at=now,
+        structured_output_found=ctx.parsed.found,
+        structured_output_ok=ctx.parsed.ok,
+        structured_parse_error=ctx.parsed.parse_error,
+        structured_repair_attempted=ctx.structured_repair_attempted,
+        structured_repair_ok=ctx.structured_repair_ok,
+        structured_repair_error=ctx.structured_repair_error,
+        structured_summary=ctx.parsed.summary,
+        evidence_count=ctx.structured_evidence_count,
+        capability_request_count=ctx.structured_request_count,
+        artifact_count=ctx.artifact_count,
+        test_count=ctx.test_count,
+        patch_count=ctx.patch_count,
+        lesson_count=ctx.lesson_count,
+        blocked_reason=ctx.parsed.blocked_reason,
+        created_at=ctx.now,
     )
 
 

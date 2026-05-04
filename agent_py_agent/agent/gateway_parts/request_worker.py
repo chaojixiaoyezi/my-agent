@@ -140,25 +140,15 @@ def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths, *, worker
     return processed
 
 
-def _handle_gateway_request(
-    agent: SimpleAgent,
+def _build_gateway_response_base(
+    request: dict,
     request_path: Path,
-    *,
-    refresh_lease: bool = False,
-    worker_id: str = "",
+    request_id: str,
+    kind: str,
+    started_at: float,
 ) -> dict:
-    """LLM contract: execute one gateway request file and return response payload."""
-    request = read_json_file(request_path)
-    request_id = str(request.get("id") or request_path.stem)
-    kind = str(request.get("kind") or "").strip()
-    if not kind and request_id:
-        kind = "ask"
-    response_path = gateway_response_path(gateway_paths(agent), request_id)
-    existing_response = read_json_file(response_path)
-    if existing_response:
-        return existing_response
-    started_at = time.time()
-    response = {
+    """Build base gateway response dict."""
+    return {
         "id": request_id,
         "kind": kind or "unknown",
         "ok": False,
@@ -180,6 +170,54 @@ def _handle_gateway_request(
         "lease_started_at": request.get("lease_started_at", 0),
         "lease_heartbeat_at": request.get("lease_heartbeat_at", 0),
     }
+
+
+def _update_response_from_result(
+    response: dict,
+    result,
+    request: dict,
+) -> None:
+    """Update response dict with successful agent.run result fields."""
+    response.update({
+        "ok": True,
+        "status": "done",
+        "response": result.response,
+        "backend": result.backend,
+        "used_memories": result.used_memories,
+        "tool_rounds": result.tool_rounds,
+        "prompt": result.prompt if request.get("include_prompt") else "",
+        "prompt_token_estimate": result.prompt_token_estimate,
+        "runtime_injection_token_estimate": result.runtime_injection_token_estimate,
+        "recovery_snapshot_id": result.recovery_snapshot_id,
+        "recovery_snapshot_path": result.recovery_snapshot_path,
+        "recovery_snapshot_error": result.recovery_snapshot_error,
+        "memory_resume_context_injected": result.memory_resume_context_injected,
+        "memory_resume_context_query": result.memory_resume_context_query,
+        "memory_resume_context_matches": result.memory_resume_context_matches,
+        "memory_resume_context_token_estimate": result.memory_resume_context_token_estimate,
+        "memory_resume_context_error": result.memory_resume_context_error,
+    })
+
+
+def _handle_gateway_request(
+    agent: SimpleAgent,
+    request_path: Path,
+    *,
+    refresh_lease: bool = False,
+    worker_id: str = "",
+) -> dict:
+    """LLM contract: execute one gateway request file and return response payload."""
+    request = read_json_file(request_path)
+    request_id = str(request.get("id") or request_path.stem)
+    kind = str(request.get("kind") or "").strip()
+    if not kind and request_id:
+        kind = "ask"
+    response_path = gateway_response_path(gateway_paths(agent), request_id)
+    existing_response = read_json_file(response_path)
+    if existing_response:
+        return existing_response
+    started_at = time.time()
+    response = _build_gateway_response_base(request, request_path, request_id, kind, started_at)
     audit_request_processing(agent, request, request_id, kind, started_at, request_path, response_path)
     lease_stop: threading.Event | None = None
     lease_thread: threading.Thread | None = None
@@ -222,25 +260,7 @@ def _handle_gateway_request(
             recovery_content_paths=[str(request_path), str(response_path)],
             on_chunk=_on_gateway_chunk,
         )
-        response.update({
-            "ok": True,
-            "status": "done",
-            "response": result.response,
-            "backend": result.backend,
-            "used_memories": result.used_memories,
-            "tool_rounds": result.tool_rounds,
-            "prompt": result.prompt if request.get("include_prompt") else "",
-            "prompt_token_estimate": result.prompt_token_estimate,
-            "runtime_injection_token_estimate": result.runtime_injection_token_estimate,
-            "recovery_snapshot_id": result.recovery_snapshot_id,
-            "recovery_snapshot_path": result.recovery_snapshot_path,
-            "recovery_snapshot_error": result.recovery_snapshot_error,
-            "memory_resume_context_injected": result.memory_resume_context_injected,
-            "memory_resume_context_query": result.memory_resume_context_query,
-            "memory_resume_context_matches": result.memory_resume_context_matches,
-            "memory_resume_context_token_estimate": result.memory_resume_context_token_estimate,
-            "memory_resume_context_error": result.memory_resume_context_error,
-        })
+        _update_response_from_result(response, result, request)
     except Exception as exc:
         response.update({
             "ok": False,
