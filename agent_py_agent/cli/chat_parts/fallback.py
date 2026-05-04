@@ -48,6 +48,8 @@ def run_fallback(
     jobs,  # queue.Queue
     state_lock: threading.Lock,
     build_history_context: Callable[[], str],
+    session_manager,
+    current_session_id: str,
 ) -> int:
     """Plain input()-based chat loop for terminals without prompt_toolkit."""
 
