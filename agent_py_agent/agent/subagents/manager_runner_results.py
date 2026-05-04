@@ -54,6 +54,8 @@ from .result_processors import (
     _append_runner_debrief_content,
     _build_output_payload,
     _build_runner_result,
+    OutputPayloadContext,
+    RunnerResultContext,
     _process_structured_output,
     _write_runner_result_files,
 )
@@ -114,7 +116,29 @@ class SubAgentRunnerResultMixin:
         status_context = {"status": status, "verification_status": verification_status, "failure_type": failure_type}
         self._apply_runner_result_fields(task, result_meta, status_context, parsed, now)
         output_payload = self._build_output_payload_wrapper(task, runner_meta, cap_data, tools_info, output_items)
-        result = _build_runner_result(task, dry_run=dry_run, ok=result_meta["ok"], message=result_meta["message"], backend=backend, tool_rounds=tool_rounds, prompt=prompt, response=response, parsed=parsed, structured_repair_attempted=structured_repair_attempted, structured_repair_ok=structured_repair_ok, structured_repair_error=structured_repair_error, structured_evidence_count=structured_evidence_count, structured_request_count=structured_request_count, artifact_count=len(artifacts), test_count=len(tests), patch_count=len(patches), lesson_count=len(lessons), now=now)
+        result = _build_runner_result(
+            RunnerResultContext(
+                task=task,
+                dry_run=dry_run,
+                ok=result_meta["ok"],
+                message=result_meta["message"],
+                backend=backend,
+                tool_rounds=tool_rounds,
+                prompt=prompt,
+                response=response,
+                parsed=parsed,
+                structured_repair_attempted=structured_repair_attempted,
+                structured_repair_ok=structured_repair_ok,
+                structured_repair_error=structured_repair_error,
+                structured_evidence_count=structured_evidence_count,
+                structured_request_count=structured_request_count,
+                artifact_count=len(artifacts),
+                test_count=len(tests),
+                patch_count=len(patches),
+                lesson_count=len(lessons),
+                now=now,
+            )
+        )
         _write_runner_result_files(task, result, output_payload, prompt=prompt, response=response)
         Path(task.runner_result_file).write_text(render_runner_result_markdown(result), encoding="utf-8")
         self.save(task)
@@ -247,18 +271,32 @@ class SubAgentRunnerResultMixin:
         lessons = output_items["lessons"]
         blockers = output_items["blockers"]
         next_actions = output_items["next_actions"]
-        return _build_output_payload(
-            task, dry_run=dry_run, ok=ok, message=message, backend=backend, tool_rounds=tool_rounds,
-            parsed=parsed, actual_tools=actual_tools, structured_evidence_count=structured_evidence_count,
-            structured_request_count=structured_request_count, created_request_ids=created_request_ids,
-            ignored_tools=ignored_tools, ignored_skills=ignored_skills, artifacts=artifacts,
-            tests=tests, patches=patches, lessons=lessons, blockers=blockers,
+        ctx = OutputPayloadContext(
+            task=task,
+            dry_run=dry_run,
+            ok=ok,
+            message=message,
+            backend=backend,
+            tool_rounds=tool_rounds,
+            parsed=parsed,
+            actual_tools=actual_tools,
+            structured_evidence_count=structured_evidence_count,
+            structured_request_count=structured_request_count,
+            created_request_ids=created_request_ids,
+            ignored_tools=ignored_tools,
+            ignored_skills=ignored_skills,
+            artifacts=artifacts,
+            tests=tests,
+            patches=patches,
+            lessons=lessons,
+            blockers=blockers,
             next_actions=next_actions,
             structured_repair_attempted=cap_data.get("structured_repair_attempted", False),
             structured_repair_ok=cap_data.get("structured_repair_ok", False),
             structured_repair_error=cap_data.get("structured_repair_error", ""),
             now=now,
         )
+        return _build_output_payload(ctx)
 
     def _append_runner_debrief(self, task, parsed):
         _append_runner_debrief_content(task, parsed)

@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import time as time_module
+from dataclasses import dataclass
+from typing import Any
 
 from ..memory_archive import (
     archive_run_turn,
@@ -15,10 +17,38 @@ from ..memory_archive import (
     write_compression_snapshot,
     write_recovery_snapshot,
 )
+from ..memory_archive.runtime.turn_archiver import ArchiveTurnContext
 from ..memory_archive.tokens import append_session_token_usage
 from ..tools import ToolExecutionResult
 from .models import AgentRunResult
 from .parameters import _one_shot_tool_call_key
+
+
+@dataclass(frozen=True)
+class FinalizeContext:
+    """Bundle of all finalize() parameters into a single object."""
+    user_prompt: str
+    final_prompt: str
+    final_response: Any
+    memories: list
+    executed_tools: list
+    archive_tool_calls: list
+    routed_context: Any
+    resume_context_result: Any
+    runtime_injections: list
+    compression_snapshot_id: str
+    compression_snapshot_path: str
+    compression_applied: bool
+    request_id: str
+    run_id: str
+    task_id: str
+    source: str
+    do_save: bool
+    recovery_snapshot: Any
+    recovery_task_refs: list | None
+    recovery_content_paths: list | None
+    recovery_next_actions: list | None
+    tool_rounds: int = 0
 
 
 class ToolLoopService:
@@ -128,35 +158,46 @@ class ToolLoopService:
         return final_prompt, final_response, tool_rounds
 
 
+@dataclass(frozen=True)
+class CompressionContext:
+    """Bundle of check_and_apply parameters."""
+    user_prompt: str
+    memories: list
+    runtime_injections: list
+    routed_context: Any
+    resume_context_section: str
+    request_id: str
+    run_id: str
+    task_id: str
+    source: str
+
+
 class CompressionService:
     """Service for compression checking, snapshot writing, and memory compression."""
 
     def __init__(self, agent):
         self._agent = agent
 
-    def check_and_apply(
-        self, user_prompt, memories, runtime_injections, routed_context,
-        resume_context_section, request_id, run_id, task_id, source
-    ):
+    def check_and_apply(self, ctx: CompressionContext):
         """Check prompt size and apply compression if needed."""
         full_prompt_estimate = estimate_tokens(
             {
-                "user_prompt": user_prompt,
-                "memories": [getattr(memory, "content", "") for memory in memories],
-                "inject": runtime_injections,
+                "user_prompt": ctx.user_prompt,
+                "memories": [getattr(memory, "content", "") for memory in ctx.memories],
+                "inject": ctx.runtime_injections,
                 "prompt_files": [],
             }
         )
         if full_prompt_estimate <= int(getattr(self._agent.config, "max_tokens", 1024)):
-            return memories, "", "", False
+            return ctx.memories, "", "", False
 
-        turn_id = request_id or run_id or task_id or f"turn-{time_module.time_ns()}"
+        turn_id = ctx.request_id or ctx.run_id or ctx.task_id or f"turn-{time_module.time_ns()}"
         snapshot_content = self._build_compression_snapshot_content(
-            user_prompt=user_prompt,
-            memories=memories,
-            runtime_injections=runtime_injections,
-            routed_context=routed_context,
-            resume_context_section=resume_context_section,
+            user_prompt=ctx.user_prompt,
+            memories=ctx.memories,
+            runtime_injections=ctx.runtime_injections,
+            routed_context=ctx.routed_context,
+            resume_context_section=ctx.resume_context_section,
         )
         try:
             hook_result = write_compression_snapshot(
@@ -166,13 +207,13 @@ class CompressionService:
                 role="system",
                 content=snapshot_content,
                 archive_level=int(getattr(self._agent.config, "memory_hook_archive_level", 3)),
-                request_id=request_id,
-                run_id=run_id,
-                task_id=task_id,
-                source=source,
+                request_id=ctx.request_id,
+                run_id=ctx.run_id,
+                task_id=ctx.task_id,
+                source=ctx.source,
                 content_paths=[
-                    *(getattr(routed_context, "required_read_paths", None) or []),
-                    *(getattr(routed_context, "candidate_paths", None) or []),
+                    *(getattr(ctx.routed_context, "required_read_paths", None) or []),
+                    *(getattr(ctx.routed_context, "candidate_paths", None) or []),
                 ],
                 next_actions=["先校验 task 事实源，再使用 compression snapshot 恢复上下文。"],
             )
@@ -181,15 +222,15 @@ class CompressionService:
                 self._agent.local_store.record_event(
                     "memory_compression_snapshot_failed",
                     payload={
-                        "request_id": request_id,
-                        "run_id": run_id,
-                        "task_id": task_id,
-                        "source": source,
+                        "request_id": ctx.request_id,
+                        "run_id": ctx.run_id,
+                        "task_id": ctx.task_id,
+                        "source": ctx.source,
                         "error": f"{type(exc).__name__}: {exc}",
                     },
                 )
             raise RuntimeError(f"compression blocked: pre-compression snapshot failed: {exc}") from exc
-        compressed_memories = self._compress_memories(memories, keep_recent=max(self._agent.config.memory_top_k, 2))
+        compressed_memories = self._compress_memories(ctx.memories, keep_recent=max(self._agent.config.memory_top_k, 2))
         return compressed_memories, hook_result.snapshot_id, hook_result.snapshot_file_path, True
 
     def _compress_memories(self, memories: list[object], *, keep_recent: int) -> list[object]:
@@ -253,39 +294,27 @@ class FinalizationService:
     def __init__(self, agent):
         self._agent = agent
 
-    def finalize(
-        self, user_prompt, final_prompt, final_response, memories, executed_tools,
-        archive_tool_calls, routed_context, resume_context_result, runtime_injections,
-        compression_snapshot_id, compression_snapshot_path, compression_applied,
-        request_id, run_id, task_id, source, do_save,
-        recovery_snapshot, recovery_task_refs, recovery_content_paths, recovery_next_actions,
-        tool_rounds: int = 0,
-    ):
+    def finalize(self, ctx: FinalizeContext):
         """Finalize run result: archive, snapshots, token estimation, and return value."""
-        assert final_response is not None
-        run_request_id = request_id or f"run-{time_module.time_ns()}"
+        assert ctx.final_response is not None
+        run_request_id = ctx.request_id or f"run-{time_module.time_ns()}"
 
         archive_result = self._archive_run_if_needed(
-            do_save, user_prompt, final_response, archive_tool_calls,
-            run_request_id, run_id, task_id, source
+            ctx.do_save, ctx.user_prompt, ctx.final_response, ctx.archive_tool_calls,
+            run_request_id, ctx.run_id, ctx.task_id, ctx.source
         )
         snapshot_result = self._write_recovery_snapshot_if_needed(
-            do_save, recovery_snapshot, user_prompt, final_response, archive_tool_calls,
-            run_request_id, run_id, task_id, source, recovery_task_refs,
-            recovery_content_paths, recovery_next_actions, routed_context
+            ctx.do_save, ctx.recovery_snapshot, ctx.user_prompt, ctx.final_response, ctx.archive_tool_calls,
+            run_request_id, ctx.run_id, ctx.task_id, ctx.source, ctx.recovery_task_refs,
+            ctx.recovery_content_paths, ctx.recovery_next_actions, ctx.routed_context
         )
-        turn_id = run_request_id or run_id or task_id or f"turn-{time_module.time_ns()}"
+        turn_id = run_request_id or ctx.run_id or ctx.task_id or f"turn-{time_module.time_ns()}"
         token_ledger = self._estimate_token_usage(
-            user_prompt, runtime_injections, memories, final_response,
-            archive_tool_calls, run_request_id, turn_id
+            ctx.user_prompt, ctx.runtime_injections, ctx.memories, ctx.final_response,
+            ctx.archive_tool_calls, run_request_id, turn_id
         )
 
-        return self._build_agent_run_result(
-            final_prompt, final_response, memories, executed_tools, routed_context,
-            archive_result, snapshot_result, token_ledger, compression_snapshot_id,
-            compression_snapshot_path, compression_applied, resume_context_result, runtime_injections,
-            tool_rounds=tool_rounds,
-        )
+        return self._build_agent_run_result(ctx, archive_result, snapshot_result, token_ledger)
 
     def _archive_run_if_needed(self, do_save, user_prompt, final_response, archive_tool_calls,
                                run_request_id, run_id, task_id, source):
@@ -296,11 +325,18 @@ class FinalizationService:
         self._agent.memory.add("agent", final_response.text, tags=[final_response.backend])
         return archive_run_turn(
             self._agent.root,
-            session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
-            request_id=run_request_id, run_id=run_id, task_id=task_id,
-            user_prompt=user_prompt, response_text=final_response.text,
-            backend=final_response.backend, tool_calls=archive_tool_calls, source=source,
-            archive_level=int(getattr(self._agent.config, "memory_archive_level", 3)),
+            ArchiveTurnContext(
+                session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
+                request_id=run_request_id,
+                run_id=run_id,
+                task_id=task_id,
+                user_prompt=user_prompt,
+                response_text=final_response.text,
+                backend=final_response.backend,
+                tool_calls=archive_tool_calls or [],
+                source=source,
+                archive_level=int(getattr(self._agent.config, "memory_archive_level", 3)),
+            ),
         )
 
     def _write_recovery_snapshot_if_needed(self, do_save, recovery_snapshot, user_prompt,
@@ -352,19 +388,16 @@ class FinalizationService:
             "cumulative": int(ledger["cumulative_tokens"]),
         }
 
-    def _build_agent_run_result(self, final_prompt, final_response, memories, executed_tools,
-                                 routed_context, archive_result, snapshot_result, token_ledger,
-                                 compression_snapshot_id, compression_snapshot_path,
-                                 compression_applied, resume_context_result, runtime_injections,
-                                 tool_rounds: int = 0):
+    def _build_agent_run_result(self, ctx: FinalizeContext, archive_result, snapshot_result, token_ledger):
         """Build the final AgentRunResult object."""
+        routed_context = ctx.routed_context
         return AgentRunResult(
-            prompt=final_prompt,
-            response=final_response.text,
-            backend=final_response.backend,
-            used_memories=len(memories),
-            tool_rounds=tool_rounds,
-            executed_tools=executed_tools,
+            prompt=ctx.final_prompt,
+            response=ctx.final_response.text,
+            backend=ctx.final_response.backend,
+            used_memories=len(ctx.memories),
+            tool_rounds=ctx.tool_rounds,
+            executed_tools=ctx.executed_tools,
             memory_route_matches=len(routed_context.matches),
             memory_route_paths=[
                 *routed_context.required_read_paths,
@@ -372,26 +405,26 @@ class FinalizationService:
             ],
             archive_events=archive_result.event_count if archive_result else 0,
             archive_token_estimate=archive_result.token_estimate if archive_result else 0,
-            prompt_token_estimate=estimate_tokens(final_prompt),
-            runtime_injection_token_estimate=estimate_tokens(runtime_injections) if runtime_injections else 0,
+            prompt_token_estimate=estimate_tokens(ctx.final_prompt),
+            runtime_injection_token_estimate=estimate_tokens(ctx.runtime_injections) if ctx.runtime_injections else 0,
             recovery_snapshot_id=snapshot_result.snapshot_id if snapshot_result else "",
             recovery_snapshot_path=snapshot_result.path if snapshot_result else "",
             recovery_snapshot_error=snapshot_result.error if snapshot_result else "",
             recovery_snapshot_token_estimate=snapshot_result.token_estimate if snapshot_result else 0,
-            memory_resume_context_injected=resume_context_result.injected if resume_context_result else False,
-            memory_resume_context_query=resume_context_result.query if resume_context_result else "",
+            memory_resume_context_injected=ctx.resume_context_result.injected if ctx.resume_context_result else False,
+            memory_resume_context_query=ctx.resume_context_result.query if ctx.resume_context_result else "",
             memory_resume_context_matches=(
-                resume_context_result.archive_match_count
-                + resume_context_result.local_match_count
-                + resume_context_result.task_fact_source_count
-            ) if resume_context_result else 0,
-            memory_resume_context_token_estimate=estimate_tokens(resume_context_result.context_block)
-            if resume_context_result and resume_context_result.injected
+                ctx.resume_context_result.archive_match_count
+                + ctx.resume_context_result.local_match_count
+                + ctx.resume_context_result.task_fact_source_count
+            ) if ctx.resume_context_result else 0,
+            memory_resume_context_token_estimate=estimate_tokens(ctx.resume_context_result.context_block)
+            if ctx.resume_context_result and ctx.resume_context_result.injected
             else 0,
-            memory_resume_context_error=resume_context_result.error if resume_context_result else "",
-            compression_snapshot_id=compression_snapshot_id,
-            compression_snapshot_path=compression_snapshot_path,
-            compression_applied=compression_applied,
+            memory_resume_context_error=ctx.resume_context_result.error if ctx.resume_context_result else "",
+            compression_snapshot_id=ctx.compression_snapshot_id,
+            compression_snapshot_path=ctx.compression_snapshot_path,
+            compression_applied=ctx.compression_applied,
             turn_token_estimate=token_ledger["turn"],
             cumulative_token_estimate=token_ledger["cumulative"],
         )

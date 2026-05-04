@@ -23,6 +23,52 @@ from .local_doctor import build_local_doctor_report, build_status_suggestions, r
 from .thinking_spinner import ThinkingSpinner
 
 
+def _format_gateway_section(gateway_status: str, pid: int | None, alive: bool, heartbeat_age: float, paths) -> None:
+    """Format and print gateway section."""
+    print("Gateway")
+    print(f"- status={gateway_status} pid={pid if pid else '-'} alive={alive}")
+    if heartbeat_age:
+        print(f"- heartbeat_age_seconds={heartbeat_age:.1f}")
+    print("- requests=" + json.dumps(gateway_request_counts(paths), ensure_ascii=False, sort_keys=True))
+    print(f"- workspace={paths.root}")
+
+
+def _format_active_work(active_work_summary) -> None:
+    """Format and print active work section."""
+    from ..agent.startup_recovery import format_active_work_summary
+    print("进行中任务")
+    print("-" + format_active_work_summary(active_work_summary).replace("\n", "\n  - "))
+    if active_work_summary.active_task_count > 0:
+        print("  运行 my-agent subagents-dispatch 可继续调度")
+
+
+def _format_subagents_section(board, limit: int) -> None:
+    """Format and print subagents section."""
+    print("Subagents")
+    print("- summary=" + json.dumps(board.summary, ensure_ascii=False, sort_keys=True))
+    if board.hot_list:
+        print(f"- hot={len(board.hot_list)}")
+        for item in board.hot_list[: limit]:
+            flags = ",".join(item.risk_flags) if item.risk_flags else "ok"
+            print(f"  - {item.id} {item.status}/{item.verification_status} flags={flags} :: {item.goal}")
+    else:
+        print("- hot=0")
+    if board.recent:
+        print("- recent:")
+        for item in board.recent[: limit]:
+            print(f"  - {item.id} {item.status}/{item.verification_status} :: {item.goal}")
+
+
+def _format_timeline(timeline) -> None:
+    """Format and print timeline section."""
+    print("Timeline")
+    if not timeline:
+        print("- 暂无事件")
+    for item in timeline:
+        source = f"{item.source_type}/{item.source_id}".strip("/")
+        print(f"- {format_local_time(item.created_at)} {item.event_type} {source} :: {item.title}")
+
+
 def cmd_status(args) -> int:
     """显示 my-agent 当前全局状态。"""
 
@@ -43,7 +89,7 @@ def cmd_status(args) -> int:
     # 检测进行中任务
     active_work_summary = None
     if agent.config.auto_detect_work_on_startup:
-        from ..agent.startup_recovery import detect_active_work, format_active_work_summary
+        from ..agent.startup_recovery import detect_active_work
         active_work_summary = detect_active_work(agent)
 
     payload = {
@@ -82,12 +128,7 @@ def cmd_status(args) -> int:
     print(f"agent={agent.config.agent_name}")
     print(f"workspace={agent.root}")
     print("")
-    print("Gateway")
-    print(f"- status={gateway_status} pid={pid if pid else '-'} alive={alive}")
-    if heartbeat_at:
-        print(f"- heartbeat_age_seconds={heartbeat_age:.1f}")
-    print("- requests=" + json.dumps(gateway_request_counts(paths), ensure_ascii=False, sort_keys=True))
-    print(f"- workspace={paths.root}")
+    _format_gateway_section(gateway_status, pid, alive, heartbeat_age, paths)
     print("")
     print("Local Store")
     print(f"- records={local_stats['record_count']} events={local_stats['event_count']} fts5={local_stats['fts5_enabled']}")
@@ -95,36 +136,14 @@ def cmd_status(args) -> int:
     print("")
     # 显示进行中任务
     if active_work_summary:
-        from ..agent.startup_recovery import has_active_work
-        print("进行中任务")
-        print("-" + format_active_work_summary(active_work_summary).replace("\n", "\n  - "))
-        if active_work_summary.active_task_count > 0:
-            from ..agent.startup_recovery import has_active_work
-            print("  运行 my-agent subagents-dispatch 可继续调度")
+        _format_active_work(active_work_summary)
     else:
         print("进行中任务")
         print("- 暂无")
     print("")
-    print("Subagents")
-    print("- summary=" + json.dumps(board.summary, ensure_ascii=False, sort_keys=True))
-    if board.hot_list:
-        print(f"- hot={len(board.hot_list)}")
-        for item in board.hot_list[: args.limit]:
-            flags = ",".join(item.risk_flags) if item.risk_flags else "ok"
-            print(f"  - {item.id} {item.status}/{item.verification_status} flags={flags} :: {item.goal}")
-    else:
-        print("- hot=0")
-    if args.recent:
-        print("- recent:")
-        for item in board.recent[: args.limit]:
-            print(f"  - {item.id} {item.status}/{item.verification_status} :: {item.goal}")
+    _format_subagents_section(board, args.limit)
     print("")
-    print("Timeline")
-    if not timeline:
-        print("- 暂无事件")
-    for item in timeline:
-        source = f"{item.source_type}/{item.source_id}".strip("/")
-        print(f"- {format_local_time(item.created_at)} {item.event_type} {source} :: {item.title}")
+    _format_timeline(timeline)
     print("")
     print("Suggested Actions")
     if payload["suggested_actions"]:

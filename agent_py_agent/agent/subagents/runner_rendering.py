@@ -15,10 +15,9 @@ from .models import (
 )
 
 
-def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
-    """渲染给子代理执行器读取的人类版上下文。"""
-
-    lines = [
+def _render_execution_context_header(context):
+    """Render the header section of execution context markdown."""
+    return [
         "# SUBAGENT EXECUTION CONTEXT",
         "",
         f"- run_id: {context.run_id}",
@@ -49,19 +48,14 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
         "## Plan",
         "",
     ]
-    lines.extend(f"- {item}" for item in context.plan or ["未设置"])
-    lines.extend(
-        [
-            "",
-            "## Allowed Capabilities",
-            "",
-            f"- skills: {', '.join(context.allowed_skills) or 'none'}",
-            f"- tools: {', '.join(context.allowed_tools) or 'none'}",
-            "",
-            "## Granted Cards",
-            "",
-        ]
-    )
+
+
+def _render_capabilities_section(context):
+    """Render allowed capabilities section."""
+    lines = ["## Allowed Capabilities", ""]
+    lines.append(f"- skills: {', '.join(context.allowed_skills) or 'none'}")
+    lines.append(f"- tools: {', '.join(context.allowed_tools) or 'none'}")
+    lines.extend(["", "## Granted Cards", ""])
     if context.granted_cards:
         for card in context.granted_cards:
             lines.append(
@@ -76,8 +70,12 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
                 lines.append(f"  - reasons: {card['reasons']}")
     else:
         lines.append("- none")
+    return lines
 
-    lines.extend(["", "## Write Boundary", ""])
+
+def _render_write_boundary_section(context):
+    """Render write boundary section."""
+    lines = ["", "## Write Boundary", ""]
     allowed_roots = context.write_boundary.get("allowed_write_roots") or []
     forbidden_roots = context.write_boundary.get("forbidden_write_roots") or []
     locked_files = context.write_boundary.get("locked_files") or []
@@ -87,12 +85,12 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
         f"- forbidden_write_roots: {', '.join(forbidden_roots) if forbidden_roots else 'none'}"
     )
     lines.append(f"- locked_files: {', '.join(locked_files) if locked_files else 'none'}")
+    return lines
 
-    lines.extend(["", "## Acceptance Checks", ""])
-    lines.extend(f"- [ ] {item}" for item in context.acceptance_checks or ["未设置"])
 
-    contract = context.quality_contract
-    lines.extend(["", "## Quality Contract", ""])
+def _render_quality_contract_section(contract):
+    """Render quality contract section."""
+    lines = ["", "## Quality Contract", ""]
     lines.append(f"- user_visible_goal: {contract.user_visible_goal or 'none'}")
     lines.append(f"- benchmark_sample: {contract.benchmark_sample or 'none'}")
     lines.append(f"- quality_bar: {contract.quality_bar or 'none'}")
@@ -112,9 +110,12 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
     lines.append(f"- risk_report_required: {contract.risk_report_required or 'none'}")
     lines.append("- allowed_degradation:")
     lines.extend(f"  - {item}" for item in contract.allowed_degradation or ["none"])
+    return lines
 
-    manifest = context.context_manifest
-    lines.extend(["", "## Context Manifest", ""])
+
+def _render_context_manifest_section(manifest):
+    """Render context manifest section."""
+    lines = ["", "## Context Manifest", ""]
     lines.append(f"- core_pack_version: {manifest.core_pack_version}")
     lines.append(f"- role_pack: {manifest.role_pack or 'none'}")
     lines.append(f"- quality_contract_ref: {manifest.quality_contract_ref or 'none'}")
@@ -125,8 +126,12 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
     lines.extend(f"  - {item}" for item in manifest.required_read_paths or ["none"])
     lines.append("- omitted_context:")
     lines.extend(f"  - {item}" for item in manifest.omitted_context or ["none"])
+    return lines
 
-    lines.extend(["", "## Context Packs", ""])
+
+def _render_context_packs_section(context):
+    """Render context packs section."""
+    lines = ["", "## Context Packs", ""]
     if context.context_packs:
         for item in context.context_packs:
             name = item.get("name") or item.get("id") or item.get("kind") or "pack"
@@ -136,8 +141,12 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
                     lines.append(f"  - {key}: {item[key]}")
     else:
         lines.append("- none")
+    return lines
 
-    lines.extend(["", "## Evidence", ""])
+
+def _render_evidence_section(context):
+    """Render evidence section."""
+    lines = ["", "## Evidence", ""]
     if context.evidence:
         for item in context.evidence:
             status = "OK" if item.get("ok") else "FAIL"
@@ -150,8 +159,12 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
                 lines.append(f"  - url: {item['url']}")
     else:
         lines.append("- 暂无")
+    return lines
 
-    lines.extend(["", "## Pending Capability Requests", ""])
+
+def _render_pending_requests_section(context):
+    """Render pending capability requests section."""
+    lines = ["", "## Pending Capability Requests", ""]
     if context.pending_requests:
         for item in context.pending_requests:
             lines.append(
@@ -160,8 +173,12 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
             )
     else:
         lines.append("- none")
+    return lines
 
-    lines.extend(["", "## Open Capability Gaps", ""])
+
+def _render_open_gaps_section(context):
+    """Render open capability gaps section."""
+    lines = ["", "## Open Capability Gaps", ""]
     if context.open_gaps:
         for item in context.open_gaps:
             lines.append(
@@ -170,6 +187,26 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
             )
     else:
         lines.append("- none")
+    return lines
+
+
+def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
+    """渲染给子代理执行器读取的人类版上下文。"""
+
+    lines = _render_execution_context_header(context)
+    lines.extend(f"- {item}" for item in context.plan or ["未设置"])
+    lines.extend(_render_capabilities_section(context))
+    lines.extend(_render_write_boundary_section(context))
+
+    lines.extend(["", "## Acceptance Checks", ""])
+    lines.extend(f"- [ ] {item}" for item in context.acceptance_checks or ["未设置"])
+
+    lines.extend(_render_quality_contract_section(context.quality_contract))
+    lines.extend(_render_context_manifest_section(context.context_manifest))
+    lines.extend(_render_context_packs_section(context))
+    lines.extend(_render_evidence_section(context))
+    lines.extend(_render_pending_requests_section(context))
+    lines.extend(_render_open_gaps_section(context))
 
     lines.extend(["", "## Execution Rules", ""])
     lines.append(

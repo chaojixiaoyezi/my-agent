@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: normalize memory-related runtime config with safe defaults and fallback warnings.
 
 给人看的解释：
-用户会手动改配置文件，所以这里专门负责把 memory 配置“洗干净”。
+用户会手动改配置文件，所以这里专门负责把 memory 配置"洗干净"。
 比如用户把数字写成 abcd、把开关写成乱码，程序不能崩，也不能把权限越放越大。
 我们会回到保守默认值，并把原因记录成 warning，后面 memory doctor 可以拿这些 warning 提醒用户。
 """
@@ -41,7 +41,7 @@ class MemorySettings:
     memory_rule_routing_enabled: 是否启用长期规则路由。
     memory_rule_routing_mode: 路由模式，off/soft/strict；soft 给候选，strict 要求读取。
     memory_rule_auto_read_limit: 自动读取的规则文件数量上限；0 表示不自动读取正文。
-    memory_rule_receipt_enabled: 是否记录规则读取 receipt，方便审计“读过哪些规则”。
+    memory_rule_receipt_enabled: 是否记录规则读取 receipt，方便审计"读过哪些规则"。
     memory_resume_auto_context_enabled: 恢复任务时是否自动准备 memory 上下文。
     memory_resume_auto_context_mode: 恢复上下文模式，off/trigger/always。
     memory_resume_auto_context_limit: 恢复时最多带多少条 memory context。
@@ -65,7 +65,7 @@ class MemoryConfigWarning:
     """LLM: structured warning emitted when a memory config value falls back to default.
 
     新手说明:
-    这不是程序报错，而是“我发现用户写的配置不靠谱，所以帮他用了默认值”。
+    这不是程序报错，而是"我发现用户写的配置不靠谱，所以帮他用了默认值"。
     后面做配置体检时，可以把这些 warning 展示出来，让用户知道哪一项写错了。
 
     字段说明:
@@ -96,13 +96,101 @@ class MemoryConfigWarning:
         return asdict(self)
 
 
+def _build_memory_settings_dict(
+    source,
+    defaults,
+    warnings,
+) -> dict[str, Any]:
+    """Build a dict of validated memory settings field values."""
+    return {
+        "memory_archive_level": _coerce_int(
+            "memory_archive_level",
+            _lookup(source, "memory_archive_level"),
+            default=defaults.memory_archive_level,
+            min_value=0,
+            max_value=3,
+            warnings=warnings,
+        ),
+        "memory_hook_enabled": _coerce_bool(
+            "memory_hook_enabled",
+            _lookup(source, "memory_hook_enabled"),
+            default=defaults.memory_hook_enabled,
+            warnings=warnings,
+        ),
+        "memory_hook_archive_level": _coerce_int(
+            "memory_hook_archive_level",
+            _lookup(source, "memory_hook_archive_level"),
+            default=defaults.memory_hook_archive_level,
+            min_value=0,
+            max_value=3,
+            warnings=warnings,
+        ),
+        "memory_hook_retention_days": _coerce_int(
+            "memory_hook_retention_days",
+            _lookup(source, "memory_hook_retention_days"),
+            default=defaults.memory_hook_retention_days,
+            min_value=0,
+            max_value=None,
+            warnings=warnings,
+        ),
+        "memory_rule_routing_enabled": _coerce_bool(
+            "memory_rule_routing_enabled",
+            _lookup(source, "memory_rule_routing_enabled"),
+            default=defaults.memory_rule_routing_enabled,
+            warnings=warnings,
+        ),
+        "memory_rule_routing_mode": _coerce_choice(
+            "memory_rule_routing_mode",
+            _lookup(source, "memory_rule_routing_mode"),
+            default=defaults.memory_rule_routing_mode,
+            choices={"off", "soft", "strict"},
+            warnings=warnings,
+        ),
+        "memory_rule_auto_read_limit": _coerce_int(
+            "memory_rule_auto_read_limit",
+            _lookup(source, "memory_rule_auto_read_limit"),
+            default=defaults.memory_rule_auto_read_limit,
+            min_value=0,
+            max_value=None,
+            warnings=warnings,
+        ),
+        "memory_rule_receipt_enabled": _coerce_bool(
+            "memory_rule_receipt_enabled",
+            _lookup(source, "memory_rule_receipt_enabled"),
+            default=defaults.memory_rule_receipt_enabled,
+            warnings=warnings,
+        ),
+        "memory_resume_auto_context_enabled": _coerce_bool(
+            "memory_resume_auto_context_enabled",
+            _lookup(source, "memory_resume_auto_context_enabled"),
+            default=defaults.memory_resume_auto_context_enabled,
+            warnings=warnings,
+        ),
+        "memory_resume_auto_context_mode": _coerce_choice(
+            "memory_resume_auto_context_mode",
+            _lookup(source, "memory_resume_auto_context_mode"),
+            default=defaults.memory_resume_auto_context_mode,
+            choices={"off", "trigger", "always"},
+            warnings=warnings,
+        ),
+        "memory_resume_auto_context_limit": _coerce_int(
+            "memory_resume_auto_context_limit",
+            _lookup(source, "memory_resume_auto_context_limit"),
+            default=defaults.memory_resume_auto_context_limit,
+            min_value=1,
+            max_value=50,
+            warnings=warnings,
+        ),
+    }
+
+
 def normalize_memory_settings(values: Mapping[str, Any] | object | None = None) -> tuple[MemorySettings, list[MemoryConfigWarning]]:
     """LLM: coerce raw memory config fields into effective MemorySettings plus fallback warnings.
 
     新手说明:
-    这个函数是 memory 配置的“安检口”。
+    这个函数是 memory 配置的"安检口"。
     它会逐项检查：等级是不是 0-3，天数是不是非负整数，模式是不是 off/soft/strict。
-    写对了就采用，写错了就回到默认值，并告诉调用方“哪一项为什么被回退”。
+    写对了就采用，写错了就回到默认值，并告诉调用方"哪一项为什么被回退"。
 
     参数说明:
     values: 原始配置，可以是 dict、AgentConfig 一类对象，或者 None。None 表示使用全默认值。
@@ -118,86 +206,7 @@ def normalize_memory_settings(values: Mapping[str, Any] | object | None = None) 
     warnings: list[MemoryConfigWarning] = []
     defaults = MemorySettings()
 
-    settings = MemorySettings(
-        memory_archive_level=_coerce_int(
-            "memory_archive_level",
-            _lookup(source, "memory_archive_level"),
-            default=defaults.memory_archive_level,
-            min_value=0,
-            max_value=3,
-            warnings=warnings,
-        ),
-        memory_hook_enabled=_coerce_bool(
-            "memory_hook_enabled",
-            _lookup(source, "memory_hook_enabled"),
-            default=defaults.memory_hook_enabled,
-            warnings=warnings,
-        ),
-        memory_hook_archive_level=_coerce_int(
-            "memory_hook_archive_level",
-            _lookup(source, "memory_hook_archive_level"),
-            default=defaults.memory_hook_archive_level,
-            min_value=0,
-            max_value=3,
-            warnings=warnings,
-        ),
-        memory_hook_retention_days=_coerce_int(
-            "memory_hook_retention_days",
-            _lookup(source, "memory_hook_retention_days"),
-            default=defaults.memory_hook_retention_days,
-            min_value=0,
-            max_value=None,
-            warnings=warnings,
-        ),
-        memory_rule_routing_enabled=_coerce_bool(
-            "memory_rule_routing_enabled",
-            _lookup(source, "memory_rule_routing_enabled"),
-            default=defaults.memory_rule_routing_enabled,
-            warnings=warnings,
-        ),
-        memory_rule_routing_mode=_coerce_choice(
-            "memory_rule_routing_mode",
-            _lookup(source, "memory_rule_routing_mode"),
-            default=defaults.memory_rule_routing_mode,
-            choices={"off", "soft", "strict"},
-            warnings=warnings,
-        ),
-        memory_rule_auto_read_limit=_coerce_int(
-            "memory_rule_auto_read_limit",
-            _lookup(source, "memory_rule_auto_read_limit"),
-            default=defaults.memory_rule_auto_read_limit,
-            min_value=0,
-            max_value=None,
-            warnings=warnings,
-        ),
-        memory_rule_receipt_enabled=_coerce_bool(
-            "memory_rule_receipt_enabled",
-            _lookup(source, "memory_rule_receipt_enabled"),
-            default=defaults.memory_rule_receipt_enabled,
-            warnings=warnings,
-        ),
-        memory_resume_auto_context_enabled=_coerce_bool(
-            "memory_resume_auto_context_enabled",
-            _lookup(source, "memory_resume_auto_context_enabled"),
-            default=defaults.memory_resume_auto_context_enabled,
-            warnings=warnings,
-        ),
-        memory_resume_auto_context_mode=_coerce_choice(
-            "memory_resume_auto_context_mode",
-            _lookup(source, "memory_resume_auto_context_mode"),
-            default=defaults.memory_resume_auto_context_mode,
-            choices={"off", "trigger", "always"},
-            warnings=warnings,
-        ),
-        memory_resume_auto_context_limit=_coerce_int(
-            "memory_resume_auto_context_limit",
-            _lookup(source, "memory_resume_auto_context_limit"),
-            default=defaults.memory_resume_auto_context_limit,
-            min_value=1,
-            max_value=50,
-            warnings=warnings,
-        ),
-    )
+    settings = MemorySettings(**_build_memory_settings_dict(source, defaults, warnings))
 
     return settings, warnings
 
@@ -231,14 +240,14 @@ def _lookup(source: Mapping[str, Any] | object, field_name: str) -> Any:
 
     新手说明:
     测试里可能直接传字典，正式启动时会传 `AgentConfig` 对象。
-    这个小函数统一取值方式，字段没出现就返回一个内部的“缺失”标记。
+    这个小函数统一取值方式，字段没出现就返回一个内部的"缺失"标记。
 
     参数说明:
     source: 原始配置来源，可以是 Mapping 或普通对象。
     field_name: 要读取的字段名。
 
     返回说明:
-    找到字段时返回原始值；找不到时返回 `_MISSING`，用来区分“没写”和“写了 None”。
+    找到字段时返回原始值；找不到时返回 `_MISSING`，用来区分"没写"和"写了 None"。
     """
 
     if isinstance(source, Mapping):
@@ -331,7 +340,7 @@ def _coerce_choice(
 
     新手说明:
     路由模式只能是 off、soft、strict。
-    这里不用“看起来差不多就算”的模糊判断，避免用户写错后系统进入意外模式。
+    这里不用"看起来差不多就算"的模糊判断，避免用户写错后系统进入意外模式。
 
     参数说明:
     field_name: 字段名，用于 warning。

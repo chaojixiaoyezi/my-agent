@@ -24,6 +24,35 @@ if TYPE_CHECKING:
 PARENT_PLANNER_READ_TOOLS = ["list_files", "read_file", "search_text"]
 
 
+def _collect_open_requests_and_gaps(tasks: list[SubAgentTask]) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Collect OPEN capability requests and gaps from tasks."""
+    open_requests = []
+    open_gaps = []
+    for task in tasks:
+        for request in task.capability_requests:
+            if request.status == "OPEN":
+                open_requests.append(
+                    {
+                        "run_id": task.id,
+                        "request_id": request.id,
+                        "needed_capability": request.needed_capability,
+                        "problem": request.problem,
+                        "expected_output": request.expected_output,
+                    }
+                )
+        for gap in task.capability_gaps:
+            if gap.status == "OPEN":
+                open_gaps.append(
+                    {
+                        "run_id": task.id,
+                        "gap_id": gap.id,
+                        "needed_capability": gap.needed_capability,
+                        "problem": gap.problem,
+                    }
+                )
+    return open_requests, open_gaps
+
+
 def _build_parent_planner_state(
     agent: SimpleAgent,
     cfg: CapabilityConfig,
@@ -54,56 +83,12 @@ def _build_parent_planner_state(
         if task.status not in {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
         or task.verification_status == "NEEDS_ACCEPTANCE"
     ]
-    open_requests = []
-    open_gaps = []
-    for task in tasks:
-        for request in task.capability_requests:
-            if request.status == "OPEN":
-                open_requests.append(
-                    {
-                        "run_id": task.id,
-                        "request_id": request.id,
-                        "needed_capability": request.needed_capability,
-                        "problem": request.problem,
-                        "expected_output": request.expected_output,
-                    }
-                )
-        for gap in task.capability_gaps:
-            if gap.status == "OPEN":
-                open_gaps.append(
-                    {
-                        "run_id": task.id,
-                        "gap_id": gap.id,
-                        "needed_capability": gap.needed_capability,
-                        "problem": gap.problem,
-                    }
-                )
+    open_requests, open_gaps = _collect_open_requests_and_gaps(tasks)
 
-    gate_summary = {
-        "total_tasks": len(tasks),
-        "active_tasks": len(active_tasks),
-        "due_issues": due_report.summary.get("total", 0),
-        "action_items": action_plan.summary.get("total", 0),
-        "runner_candidates": len(runner_candidates),
-        "patch_reviews": len(patch_run_ids),
-        "acceptance_records": len(acceptance_report.records),
-        "open_capability_requests": len(open_requests),
-        "open_capability_gaps": len(open_gaps),
-    }
-    gate_summary["needs_planner"] = int(
-        any(
-            gate_summary[key] > 0
-            for key in (
-                "active_tasks",
-                "due_issues",
-                "action_items",
-                "runner_candidates",
-                "patch_reviews",
-                "acceptance_records",
-                "open_capability_requests",
-                "open_capability_gaps",
-            )
-        )
+    gate_summary = _build_gate_summary(
+        tasks, active_tasks, due_report, action_plan,
+        runner_candidates, patch_run_ids, acceptance_report,
+        open_requests, open_gaps,
     )
 
     return {
@@ -150,6 +135,47 @@ def _build_parent_planner_state(
         "open_capability_requests": _limit_items(open_requests, limit),
         "open_capability_gaps": _limit_items(open_gaps, limit),
     }
+
+
+def _build_gate_summary(
+    tasks,
+    active_tasks,
+    due_report,
+    action_plan,
+    runner_candidates,
+    patch_run_ids,
+    acceptance_report,
+    open_requests,
+    open_gaps,
+) -> dict[str, int]:
+    """Build the gate_summary dict from collected reports."""
+    gate_summary = {
+        "total_tasks": len(tasks),
+        "active_tasks": len(active_tasks),
+        "due_issues": due_report.summary.get("total", 0),
+        "action_items": action_plan.summary.get("total", 0),
+        "runner_candidates": len(runner_candidates),
+        "patch_reviews": len(patch_run_ids),
+        "acceptance_records": len(acceptance_report.records),
+        "open_capability_requests": len(open_requests),
+        "open_capability_gaps": len(open_gaps),
+    }
+    gate_summary["needs_planner"] = int(
+        any(
+            gate_summary[key] > 0
+            for key in (
+                "active_tasks",
+                "due_issues",
+                "action_items",
+                "runner_candidates",
+                "patch_reviews",
+                "acceptance_records",
+                "open_capability_requests",
+                "open_capability_gaps",
+            )
+        )
+    )
+    return gate_summary
 
 
 def _build_parent_planner_prompt(

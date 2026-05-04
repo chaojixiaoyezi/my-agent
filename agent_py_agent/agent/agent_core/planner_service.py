@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..capability_config import CapabilityConfig
@@ -18,6 +19,19 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Planner state collection
 # ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PlannerInputContext:
+    """Bundle of all state items needed for planner decision making."""
+    tasks: list
+    active_tasks: list
+    due_report: Any
+    action_plan: Any
+    runner_candidates: list
+    patch_run_ids: list
+    acceptance_report: Any
+    open_requests: list
+    open_gaps: list
 
 
 def build_parent_planner_state(
@@ -60,16 +74,19 @@ def build_parent_planner_state(
         or task.verification_status == "NEEDS_ACCEPTANCE"
     ]
     open_requests, open_gaps = _collect_open_capability_items(tasks)
-    gate_summary = _build_gate_summary(
-        tasks, active_tasks, due_report, action_plan,
-        runner_candidates, patch_run_ids, acceptance_report,
-        open_requests, open_gaps
+    ctx = PlannerInputContext(
+        tasks=tasks,
+        active_tasks=active_tasks,
+        due_report=due_report,
+        action_plan=action_plan,
+        runner_candidates=runner_candidates,
+        patch_run_ids=patch_run_ids,
+        acceptance_report=acceptance_report,
+        open_requests=open_requests,
+        open_gaps=open_gaps,
     )
-    state = _build_planner_state_dict(
-        gate_summary, board, active_tasks, due_report, action_plan,
-        runner_candidates, patch_run_ids, acceptance_report,
-        open_requests, open_gaps, limit
-    )
+    gate_summary = _build_gate_summary(ctx)
+    state = _build_planner_state_dict(gate_summary, board, ctx, limit)
     return state
 
 
@@ -98,18 +115,18 @@ def _collect_open_capability_items(tasks):
     return open_requests, open_gaps
 
 
-def _build_gate_summary(tasks, active_tasks, due_report, action_plan, runner_candidates, patch_run_ids, acceptance_report, open_requests, open_gaps):
+def _build_gate_summary(ctx: PlannerInputContext) -> dict[str, Any]:
     """Build the gate summary dict."""
     gate_summary = {
-        "total_tasks": len(tasks),
-        "active_tasks": len(active_tasks),
-        "due_issues": due_report.summary.get("total", 0),
-        "action_items": action_plan.summary.get("total", 0),
-        "runner_candidates": len(runner_candidates),
-        "patch_reviews": len(patch_run_ids),
-        "acceptance_records": len(acceptance_report.records),
-        "open_capability_requests": len(open_requests),
-        "open_capability_gaps": len(open_gaps),
+        "total_tasks": len(ctx.tasks),
+        "active_tasks": len(ctx.active_tasks),
+        "due_issues": ctx.due_report.summary.get("total", 0),
+        "action_items": ctx.action_plan.summary.get("total", 0),
+        "runner_candidates": len(ctx.runner_candidates),
+        "patch_reviews": len(ctx.patch_run_ids),
+        "acceptance_records": len(ctx.acceptance_report.records),
+        "open_capability_requests": len(ctx.open_requests),
+        "open_capability_gaps": len(ctx.open_gaps),
     }
     gate_summary["needs_planner"] = int(
         any(
@@ -129,14 +146,14 @@ def _build_gate_summary(tasks, active_tasks, due_report, action_plan, runner_can
     return gate_summary
 
 
-def _build_planner_state_dict(gate_summary, board, active_tasks, due_report, action_plan, runner_candidates, patch_run_ids, acceptance_report, open_requests, open_gaps, limit):
+def _build_planner_state_dict(gate_summary: dict[str, Any], board: Any, ctx: PlannerInputContext, limit: int) -> dict[str, Any]:
     """Build the full planner state dictionary."""
     from .runner_dispatch import _limit_items
 
     return {
         "gate": gate_summary,
         "board_summary": board.summary,
-        "active_tasks": [_task_state_for_planner(task) for task in _limit_items(active_tasks, limit)],
+        "active_tasks": [_task_state_for_planner(task) for task in _limit_items(ctx.active_tasks, limit)],
         "due_issues": [
             {
                 "run_id": issue.run_id,
@@ -148,7 +165,7 @@ def _build_planner_state_dict(gate_summary, board, active_tasks, due_report, act
                 "goal": issue.goal,
                 "risk_flags": issue.risk_flags,
             }
-            for issue in _limit_items(due_report.issues, limit)
+            for issue in _limit_items(ctx.due_report.issues, limit)
         ],
         "action_items": [
             {
@@ -159,10 +176,10 @@ def _build_planner_state_dict(gate_summary, board, active_tasks, due_report, act
                 "reason": item.reason,
                 "would_change_status_to": item.would_change_status_to,
             }
-            for item in _limit_items(action_plan.actions, limit)
+            for item in _limit_items(ctx.action_plan.actions, limit)
         ],
-        "runner_candidates": [_task_state_for_planner(task) for task in runner_candidates],
-        "patch_review_run_ids": patch_run_ids,
+        "runner_candidates": [_task_state_for_planner(task) for task in ctx.runner_candidates],
+        "patch_review_run_ids": ctx.patch_run_ids,
         "acceptance_records": [
             {
                 "run_id": record.run_id,
@@ -172,10 +189,10 @@ def _build_planner_state_dict(gate_summary, board, active_tasks, due_report, act
                 "evidence_count": record.evidence_count,
                 "test_count": record.test_count,
             }
-            for record in _limit_items(acceptance_report.records, limit)
+            for record in _limit_items(ctx.acceptance_report.records, limit)
         ],
-        "open_capability_requests": _limit_items(open_requests, limit),
-        "open_capability_gaps": _limit_items(open_gaps, limit),
+        "open_capability_requests": _limit_items(ctx.open_requests, limit),
+        "open_capability_gaps": _limit_items(ctx.open_gaps, limit),
     }
 
 

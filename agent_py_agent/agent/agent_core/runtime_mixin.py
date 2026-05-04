@@ -88,15 +88,24 @@ class SimpleAgentRuntimeMixin:
             allowed_tools, granted_capabilities
         )
         compression_svc = self._get_compression_service()
+        from .runtime_services import CompressionContext
+        compression_ctx = CompressionContext(
+            user_prompt=user_prompt,
+            memories=memories,
+            runtime_injections=runtime_injections,
+            routed_context=routed_context,
+            resume_context_section="",
+            request_id=request_id,
+            run_id=run_id,
+            task_id=task_id,
+            source=source,
+        )
         (
             memories,
             compression_snapshot_id,
             compression_snapshot_path,
             compression_applied,
-        ) = compression_svc.check_and_apply(
-            user_prompt, memories, runtime_injections, routed_context, resume_context_section="",
-            request_id=request_id, run_id=run_id, task_id=task_id, source=source
-        )
+        ) = compression_svc.check_and_apply(compression_ctx)
 
         effective_on_chunk = on_chunk
         tool_context: list[str] = []
@@ -118,20 +127,32 @@ class SimpleAgentRuntimeMixin:
         )
 
         finalization_svc = self._get_finalization_service()
-        return finalization_svc.finalize(
-            user_prompt, final_prompt, final_response, memories, executed_tools,
-            archive_tool_calls, routed_context, resume_context_result,
+        from .runtime_services import FinalizeContext
+        ctx = FinalizeContext(
+            user_prompt=user_prompt,
+            final_prompt=final_prompt,
+            final_response=final_response,
+            memories=memories,
+            executed_tools=executed_tools,
+            archive_tool_calls=archive_tool_calls,
+            routed_context=routed_context,
+            resume_context_result=resume_context_result,
             runtime_injections=runtime_injections,
             compression_snapshot_id=compression_snapshot_id,
             compression_snapshot_path=compression_snapshot_path,
             compression_applied=compression_applied,
-            request_id=request_id, run_id=run_id, task_id=task_id, source=source,
+            request_id=request_id,
+            run_id=run_id,
+            task_id=task_id,
+            source=source,
             do_save=self.config.auto_save_memory if save is None else save,
-            recovery_snapshot=recovery_snapshot, recovery_task_refs=recovery_task_refs,
+            recovery_snapshot=recovery_snapshot,
+            recovery_task_refs=recovery_task_refs,
             recovery_content_paths=recovery_content_paths,
             recovery_next_actions=recovery_next_actions,
             tool_rounds=tool_rounds,
         )
+        return finalization_svc.finalize(ctx)
 
     def _prepare_runtime_context(self, user_prompt, inject, resume_context):
         """Prepare memories, routing, and injections for a run."""

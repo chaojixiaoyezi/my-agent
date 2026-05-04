@@ -7,8 +7,8 @@ archive_run_turn 是 SimpleAgent.run() 完成后用来把一轮对话写入冷�
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable  # noqa: F401  # re-exported for backwards compatibility
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -181,13 +181,31 @@ def _build_run_turn_events(
     return events
 
 
+@dataclass(frozen=True)
+class ArchiveTurnContext:
+    """Context for archiving a single turn."""
+    session_id: str
+    user_prompt: str
+    response_text: str
+    backend: str
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    request_id: str = ""
+    run_id: str = ""
+    task_id: str = ""
+    source: str = "run"
+    archive_level: int = 3
+    created_at: str | None = None
+
+
 def archive_run_turn(
     root: str | Path,
+    ctx: ArchiveTurnContext | None = None,
     *,
-    session_id: str,
-    user_prompt: str,
-    response_text: str,
-    backend: str,
+    # Deprecated kwargs-style parameters for backwards compatibility
+    session_id: str = "",
+    user_prompt: str = "",
+    response_text: str = "",
+    backend: str = "",
     tool_calls: Iterable[Any] | None = None,
     request_id: str = "",
     run_id: str = "",
@@ -203,10 +221,9 @@ def archive_run_turn(
     这里不会保存 system prompt 或内置 prompt，也不会把长正文写成 blob；目前只保留短预览、hash 和空的正文路径占位。
 
     参数说明:
-    `root` 是工作区根目录；`session_id` 标识会话；`user_prompt` 和 `response_text` 是本轮用户输入和助手输出。
-    `backend` 记录使用的模型后端；`tool_calls` 是本轮工具调用元数据。
-    `request_id`、`run_id`、`task_id` 用于把事件串回请求、运行和任务。
-    `source` 标识来源；`archive_level` 控制预览长度；`created_at` 可固定事件时间，便于测试。
+    `root` 是工作区根目录；`ctx` 包含 session_id、user_prompt、response_text 等归档所需字段。
+    `ctx.tool_calls` 是本轮工具调用元数据；`ctx.request_id`、`ctx.run_id`、`ctx.task_id` 用于把事件串回请求、运行和任务。
+    `ctx.source` 标识来源；`ctx.archive_level` 控制预览长度；`ctx.created_at` 可固定事件时间，便于测试。
 
     返回说明:
     返回 `ArchiveRunTurnResult`，包含写入路径、事件数、hash 和事件对象。
@@ -214,23 +231,38 @@ def archive_run_turn(
     副作用说明:
     会向 `memory/raw/YYYY-MM-DD.jsonl` 追加 raw event，并由 storage 层读回校验。
     """
+    # Backwards-compatible kwargs-style invocation
+    if ctx is None:
+        ctx = ArchiveTurnContext(
+            session_id=session_id,
+            user_prompt=user_prompt,
+            response_text=response_text,
+            backend=backend,
+            tool_calls=list(tool_calls) if tool_calls else [],
+            request_id=request_id,
+            run_id=run_id,
+            task_id=task_id,
+            source=source,
+            archive_level=archive_level,
+            created_at=created_at,
+        )
 
-    normalized_level = _normalize_archive_level(archive_level)
-    timestamp = created_at or utc_now_iso()
-    normalized_tool_calls = [_normalize_tool_call(call) for call in tool_calls or []]
+    normalized_level = _normalize_archive_level(ctx.archive_level)
+    timestamp = ctx.created_at or utc_now_iso()
+    normalized_tool_calls = [_normalize_tool_call(call) for call in ctx.tool_calls or []]
     events = _build_run_turn_events(
-        session_id=str(session_id),
+        session_id=str(ctx.session_id),
         turn=TurnData(
-            user_prompt=str(user_prompt),
-            response_text=str(response_text),
+            user_prompt=str(ctx.user_prompt),
+            response_text=str(ctx.response_text),
             tool_calls=normalized_tool_calls,
         ),
         ctx=RunContext(
-            backend=str(backend),
-            request_id=str(request_id),
-            run_id=str(run_id),
-            task_id=str(task_id),
-            source=str(source),
+            backend=str(ctx.backend),
+            request_id=str(ctx.request_id),
+            run_id=str(ctx.run_id),
+            task_id=str(ctx.task_id),
+            source=str(ctx.source),
             archive_level=normalized_level,
             created_at=timestamp,
         ),
@@ -244,9 +276,9 @@ def archive_run_turn(
 
     token_estimate = estimate_tokens(
         {
-            "user_prompt": user_prompt,
-            "response_text": response_text,
-            "backend": backend,
+            "user_prompt": ctx.user_prompt,
+            "response_text": ctx.response_text,
+            "backend": ctx.backend,
             "tool_calls": normalized_tool_calls,
         }
     )
