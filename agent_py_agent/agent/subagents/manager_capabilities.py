@@ -121,59 +121,43 @@ def _route_capability_grant(
     )
 
 
-def _route_capability_no_hits(
-    task,
-    request,
-    query,
-    hits,
-    apply,
-):
-    """Build a record when no hits found (dry-run WOULD_GAP or real GAP)."""
-    now = time.time()
-    if not apply:
+class SubAgentCapabilityMixin:
+    def _route_capability_no_hits(self, task, request, query, hits, apply):
+        """Build a record when no hits found (dry-run WOULD_GAP or real GAP)."""
+        now = time.time()
+        if not apply:
+            return CapabilityRouteRecord(
+                id=_new_id("route"),
+                run_id=task.id,
+                request_id=request.id,
+                status="WOULD_GAP",
+                dry_run=True,
+                query=query,
+                candidate_count=len(hits),
+                message="未找到足够可信的 skill/tool card；apply 时会记录 capability gap。",
+                created_at=now,
+            )
+        gap = self.record_capability_gap(
+            run_id=task.id,
+            missing_capability=request.needed_capability,
+            why_failed="CapabilityRouter 没有找到匹配的 skill/tool card。",
+            attempted_tools=request.tried,
+            needed_outputs=[request.expected_output] if request.expected_output else [],
+        )
+        self._mark_capability_request_status(task.id, request.id, "GAP")
         return CapabilityRouteRecord(
             id=_new_id("route"),
             run_id=task.id,
             request_id=request.id,
-            status="WOULD_GAP",
-            dry_run=True,
+            status="GAP",
+            dry_run=False,
             query=query,
             candidate_count=len(hits),
-            message="未找到足够可信的 skill/tool card；apply 时会记录 capability gap。",
+            gap_id=gap.id,
+            message="未找到足够可信的 skill/tool card，已记录 capability gap。",
             created_at=now,
         )
-    gap = _record_capability_gap_for_task(
-        task,
-        request,
-    )
-    return CapabilityRouteRecord(
-        id=_new_id("route"),
-        run_id=task.id,
-        request_id=request.id,
-        status="GAP",
-        dry_run=False,
-        query=query,
-        candidate_count=len(hits),
-        gap_id=gap.id,
-        message="未找到足够可信的 skill/tool card，已记录 capability gap。",
-        created_at=now,
-    )
 
-
-def _record_capability_gap_for_task(task, request):
-    """Record capability gap for a task."""
-    from .capabilities import record_capability_gap
-
-    return record_capability_gap(
-        task.id,
-        missing_capability=request.needed_capability,
-        why_failed="CapabilityRouter 没有找到匹配的 skill/tool card。",
-        attempted_tools=request.tried,
-        needed_outputs=[request.expected_output] if request.expected_output else [],
-    )
-
-
-class SubAgentCapabilityMixin:
     def route_capability_requests(
         self,
         router: CapabilityRouter,
@@ -283,7 +267,7 @@ class SubAgentCapabilityMixin:
         reasons = _merge_list([], [reason for hit in selected_hits for reason in hit.reasons])
 
         if not selected_hits:
-            return _route_capability_no_hits(task, request, query, hits, apply)
+            return self._route_capability_no_hits(task, request, query, hits, apply)
 
         if not apply:
             now = time.time()
