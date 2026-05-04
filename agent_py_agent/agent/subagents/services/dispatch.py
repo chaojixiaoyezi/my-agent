@@ -7,8 +7,9 @@ from __future__ import annotations
 SubAgentManager 通过 facade 方法委托到这里。
 """
 
+import json
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -21,61 +22,6 @@ if TYPE_CHECKING:
         ParentPlannerRecord,
         ParentPlannerReport,
     )
-
-
-@dataclass(frozen=True)
-class DispatchRecordParams:
-    """Bundle of make_dispatch_record parameters."""
-    step: str
-    action: str
-    run_id: str = ""
-    dry_run: bool = True
-    applied: bool = False
-    ok: bool = True
-    message: str = ""
-    before_status: str = ""
-    after_status: str = ""
-    before_verification_status: str = ""
-    after_verification_status: str = ""
-    evidence_paths: list[str] | None = None
-
-
-@dataclass(frozen=True)
-class DispatchWatchRecordParams:
-    """Bundle of make_dispatch_watch_record parameters."""
-    cycle: int
-    dry_run: bool
-    ok: bool
-    message: str
-    dispatch_record_count: int
-    dispatch_summary: dict[str, int] | None = None
-    started_at: float = 0.0
-    ended_at: float = 0.0
-    evidence_paths: list[str] | None = None
-
-
-@dataclass(frozen=True)
-class ParentPlannerRecordParams:
-    """Bundle of make_parent_planner_record parameters."""
-    dry_run: bool
-    triggered: bool
-    ok: bool
-    decision: str
-    message: str
-    gate_summary: dict[str, int] | None = None
-    backend: str = ""
-    tool_rounds: int = 0
-    parse_error: str = ""
-    summary: str = ""
-    actions: list[dict[str, object]] | None = None
-    blockers: list[str] | None = None
-    risks: list[str] | None = None
-    notes: list[str] | None = None
-    runner_instruction: str = ""
-    suggested_max_runners: int = 0
-    prompt_path: str = ""
-    response_path: str = ""
-    evidence_paths: list[str] | None = None
 
 
 class SubAgentDispatchService:
@@ -102,6 +48,7 @@ class SubAgentDispatchService:
     ) -> DispatchRecord:
         """Create a dispatch audit record."""
         from ..reports import DispatchRecord
+        from .dispatch_params import DispatchRecordParams
 
         params = DispatchRecordParams(
             step=step,
@@ -121,24 +68,9 @@ class SubAgentDispatchService:
 
     def _make_dispatch_record(self, params: DispatchRecordParams) -> DispatchRecord:
         """Internal: create a dispatch audit record from params bundle."""
-        from ..reports import DispatchRecord
+        from .dispatch_record_builder import DispatchRecordBuilder
 
-        return DispatchRecord(
-            id=self.manager._new_id("dispatch"),
-            step=params.step,
-            action=params.action,
-            run_id=params.run_id,
-            dry_run=params.dry_run,
-            applied=params.applied,
-            ok=params.ok,
-            message=params.message,
-            before_status=params.before_status,
-            after_status=params.after_status,
-            before_verification_status=params.before_verification_status,
-            after_verification_status=params.after_verification_status,
-            evidence_paths=params.evidence_paths or [],
-            created_at=time.time(),
-        )
+        return DispatchRecordBuilder.make_record(self.manager, params)
 
     def build_dispatch_report(
         self,
@@ -148,17 +80,9 @@ class SubAgentDispatchService:
     ) -> DispatchReport:
         """Summarize dispatch audit records."""
         from ..reports import DispatchReport
+        from .dispatch_record_builder import DispatchRecordBuilder
 
-        summary: dict[str, int] = {"total": len(records)}
-        for record in records:
-            summary[record.step] = summary.get(record.step, 0) + 1
-            summary[record.action] = summary.get(record.action, 0) + 1
-            summary["ok" if record.ok else "failed"] = summary.get(
-                "ok" if record.ok else "failed", 0,
-            ) + 1
-            summary["applied" if record.applied else "dry_run"] = summary.get(
-                "applied" if record.applied else "dry_run", 0,
-            ) + 1
+        summary = DispatchRecordBuilder.build_summary(records)
         return DispatchReport(
             generated_at=time.time(),
             dry_run=dry_run,
@@ -173,8 +97,6 @@ class SubAgentDispatchService:
         append_log: bool = False,
     ) -> DispatchReport:
         """Write dispatch report and optional audit log."""
-        import json
-
         (self.manager.workspace / "subagent_dispatch_report.json").write_text(
             json.dumps(asdict(report), ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -184,8 +106,10 @@ class SubAgentDispatchService:
             encoding="utf-8",
         )
         if append_log:
+            from .dispatch_log_appender import DispatchLogAppender
+
             for record in report.records:
-                self._append_dispatch_log(record)
+                DispatchLogAppender.append(record, self.manager.workspace)
         for record in report.records:
             self.manager._index_dispatch_record(record)
         self.manager._index_report(
@@ -194,25 +118,6 @@ class SubAgentDispatchService:
             event_type="subagent_dispatch_report_written",
         )
         return report
-
-    def _append_dispatch_log(self, record: DispatchRecord) -> None:
-        """Write global dispatch audit log."""
-        from ...file_io import append_jsonl
-
-        jsonl = self.manager.workspace / "subagent_dispatch_log.jsonl"
-        append_jsonl(jsonl, asdict(record))
-
-        markdown = self.manager.workspace / "DISPATCH_LOG.md"
-        if not markdown.exists():
-            markdown.write_text("# DISPATCH LOG\n\n", encoding="utf-8")
-        with markdown.open("a", encoding="utf-8") as handle:
-            status = "OK" if record.ok else "FAIL"
-            run = record.run_id or "global"
-            handle.write(
-                f"- [{status}] {record.id} step={record.step} action={record.action} "
-                f"run={run} applied={record.applied} message={record.message}\n"
-            )
-        self.manager._index_dispatch_record(record)
 
     def make_dispatch_watch_record(
         self,
@@ -228,19 +133,19 @@ class SubAgentDispatchService:
         evidence_paths: list[str] | None = None,
     ) -> DispatchWatchRecord:
         """Create a watch loop record."""
-        from ..reports import DispatchWatchRecord
+        from .dispatch_watch_builder import DispatchWatchBuilder
 
-        return DispatchWatchRecord(
-            id=self.manager._new_id("watch"),
+        return DispatchWatchBuilder.make_record(
+            self.manager,
             cycle=cycle,
             dry_run=dry_run,
             ok=ok,
             message=message,
             dispatch_record_count=dispatch_record_count,
-            dispatch_summary=dispatch_summary or {},
+            dispatch_summary=dispatch_summary,
             started_at=started_at,
             ended_at=ended_at,
-            evidence_paths=evidence_paths or [],
+            evidence_paths=evidence_paths,
         )
 
     def build_dispatch_watch_report(
@@ -251,16 +156,9 @@ class SubAgentDispatchService:
     ) -> DispatchWatchReport:
         """Summarize watch loop records."""
         from ..reports import DispatchWatchReport
+        from .dispatch_watch_builder import DispatchWatchBuilder
 
-        summary: dict[str, int] = {"total": len(records)}
-        for record in records:
-            summary["ok" if record.ok else "failed"] = summary.get(
-                "ok" if record.ok else "failed", 0,
-            ) + 1
-            summary["dry_run" if record.dry_run else "applied"] = summary.get(
-                "dry_run" if record.dry_run else "applied", 0,
-            ) + 1
-            summary["dispatch_records"] = summary.get("dispatch_records", 0) + record.dispatch_record_count
+        summary = DispatchWatchBuilder.build_summary(records)
         return DispatchWatchReport(
             generated_at=time.time(),
             dry_run=dry_run,
@@ -270,8 +168,6 @@ class SubAgentDispatchService:
 
     def write_dispatch_watch_report(self, report: DispatchWatchReport) -> DispatchWatchReport:
         """Write watch mode report."""
-        import json
-
         (self.manager.workspace / "subagent_dispatch_watch_report.json").write_text(
             json.dumps(asdict(report), ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -297,8 +193,6 @@ class SubAgentDispatchService:
         message: str = "",
     ) -> Path:
         """Write watch heartbeat for external process monitoring."""
-        import json
-
         path = self.manager.workspace / "subagent_dispatch_watch_heartbeat.json"
         payload = {
             "cycle": cycle,
@@ -344,30 +238,29 @@ class SubAgentDispatchService:
         evidence_paths: list[str] | None = None,
     ) -> ParentPlannerRecord:
         """Create a parent planner audit record."""
-        from ..reports import ParentPlannerRecord
+        from .parent_planner_builder import ParentPlannerBuilder
 
-        return ParentPlannerRecord(
-            id=self.manager._new_id("planner"),
+        return ParentPlannerBuilder.make_record(
+            self.manager,
             dry_run=dry_run,
             triggered=triggered,
             ok=ok,
             decision=decision,
             message=message,
-            gate_summary=gate_summary or {},
+            gate_summary=gate_summary,
             backend=backend,
             tool_rounds=tool_rounds,
             parse_error=parse_error,
             summary=summary,
-            actions=actions or [],
-            blockers=blockers or [],
-            risks=risks or [],
-            notes=notes or [],
+            actions=actions,
+            blockers=blockers,
+            risks=risks,
+            notes=notes,
             runner_instruction=runner_instruction,
             suggested_max_runners=suggested_max_runners,
             prompt_path=prompt_path,
             response_path=response_path,
-            evidence_paths=evidence_paths or [],
-            created_at=time.time(),
+            evidence_paths=evidence_paths,
         )
 
     def build_parent_planner_report(
@@ -378,16 +271,9 @@ class SubAgentDispatchService:
     ) -> ParentPlannerReport:
         """Summarize parent planner records."""
         from ..reports import ParentPlannerReport
+        from .parent_planner_builder import ParentPlannerBuilder
 
-        summary: dict[str, int] = {"total": len(records)}
-        for record in records:
-            summary["triggered" if record.triggered else "skipped"] = summary.get(
-                "triggered" if record.triggered else "skipped", 0,
-            ) + 1
-            summary["ok" if record.ok else "failed"] = summary.get(
-                "ok" if record.ok else "failed", 0,
-            ) + 1
-            summary[record.decision] = summary.get(record.decision, 0) + 1
+        summary = ParentPlannerBuilder.build_summary(records)
         return ParentPlannerReport(
             generated_at=time.time(),
             dry_run=dry_run,
@@ -402,8 +288,6 @@ class SubAgentDispatchService:
         append_log: bool = False,
     ) -> ParentPlannerReport:
         """Write parent planner report and optional audit log."""
-        import json
-
         (self.manager.workspace / "parent_planner_report.json").write_text(
             json.dumps(asdict(report), ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -413,8 +297,10 @@ class SubAgentDispatchService:
             encoding="utf-8",
         )
         if append_log:
+            from .parent_planner_builder import ParentPlannerLogAppender
+
             for record in report.records:
-                self.manager.append_parent_planner_log(record)
+                ParentPlannerLogAppender.append(record, self.manager.workspace, self.manager)
         for record in report.records:
             self.manager._index_parent_planner_record(record)
         self.manager._index_report(
@@ -426,36 +312,12 @@ class SubAgentDispatchService:
 
     def append_dispatch_watch_log(self, record: DispatchWatchRecord) -> None:
         """Write global watch audit log."""
-        from ...file_io import append_jsonl
+        from .dispatch_watch_log_appender import DispatchWatchLogAppender
 
-        jsonl = self.manager.workspace / "subagent_dispatch_watch_log.jsonl"
-        append_jsonl(jsonl, asdict(record))
-
-        markdown = self.manager.workspace / "DISPATCH_WATCH_LOG.md"
-        if not markdown.exists():
-            markdown.write_text("# DISPATCH WATCH LOG\n\n", encoding="utf-8")
-        with markdown.open("a", encoding="utf-8") as handle:
-            status = "OK" if record.ok else "FAIL"
-            handle.write(
-                f"- [{status}] {record.id} cycle={record.cycle} "
-                f"records={record.dispatch_record_count} message={record.message}\n"
-            )
-        self.manager._index_dispatch_watch_record(record)
+        DispatchWatchLogAppender.append(record, self.manager.workspace, self.manager)
 
     def append_parent_planner_log(self, record: ParentPlannerRecord) -> None:
         """Write global parent planner audit log."""
-        from ...file_io import append_jsonl
+        from .parent_planner_builder import ParentPlannerLogAppender
 
-        jsonl = self.manager.workspace / "parent_planner_log.jsonl"
-        append_jsonl(jsonl, asdict(record))
-
-        markdown = self.manager.workspace / "PARENT_PLANNER_LOG.md"
-        if not markdown.exists():
-            markdown.write_text("# PARENT PLANNER LOG\n\n", encoding="utf-8")
-        with markdown.open("a", encoding="utf-8") as handle:
-            status = "OK" if record.ok else "FAIL"
-            handle.write(
-                f"- [{status}] {record.id} decision={record.decision} "
-                f"triggered={record.triggered} message={record.message}\n"
-            )
-        self.manager._index_parent_planner_record(record)
+        ParentPlannerLogAppender.append(record, self.manager.workspace, self.manager)

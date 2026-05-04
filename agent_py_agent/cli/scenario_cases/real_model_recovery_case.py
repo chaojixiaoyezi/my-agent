@@ -86,14 +86,8 @@ class ScenarioRealModelRecoveryBackend:
         )
 
 
-def run_scenario_real_model_recovery_case(args) -> int:
-    """LLM: run a subagent with a real model API, then prove memory-resume recovers real response content.
-
-    新手说明:
-    用真实模型 API 跑一轮子代理，验证模型响应内容能在 memory-resume 恢复后找回。
-    这比 stub 后端测试更接近真实使用场景。
-    """
-
+def _real_model_recovery_setup(args):
+    """Setup for real model recovery: create workspace, agent, backend, task, and run subagent."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=real-model-recovery")
@@ -133,14 +127,16 @@ def run_scenario_real_model_recovery_case(args) -> int:
         f"tool_rounds={runner.tool_rounds} backend_calls={backend.calls} "
         f"real_response_len={len(backend.real_response_text)}"
     )
+    return paths, agent, backend, task, loaded
 
-    print_scenario_step(3, "Simulate cross-day archive clues for a resumed parent session")
+
+def _real_model_recovery_resume(paths, task, loaded):
+    """Run memory-resume for real model recovery. Returns resume_payload."""
     _append_parent_subagent_cross_day_resume_clues(agent.root, loaded)
     reloaded_agent = load_scenario_agent(paths.config)
     reloaded_task = reloaded_agent.subagents.load(task.id)
     print(f"reloaded_status={reloaded_task.status} task_dir={reloaded_task.task_dir}")
 
-    print_scenario_step(4, "Run memory-resume and require task fact-source reads")
     env = os.environ.copy()
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
@@ -164,6 +160,21 @@ def run_scenario_real_model_recovery_case(args) -> int:
         resume_payload = json.loads(resume.stdout)
     except json.JSONDecodeError as exc:
         resume_payload = {"ok": False, "error": f"memory-resume JSON parse failed: {exc}", "stdout": resume.stdout}
+    return resume_payload
+
+
+def run_scenario_real_model_recovery_case(args) -> int:
+    """LLM: run a subagent with a real model API, then prove memory-resume recovers real response content.
+
+    新手说明:
+    用真实模型 API 跑一轮子代理，验证模型响应内容能在 memory-resume 恢复后找回。
+    这比 stub 后端测试更接近真实使用场景。
+    """
+
+    paths, agent, backend, task, loaded = _real_model_recovery_setup(args)
+
+    print_scenario_step(3, "Simulate cross-day archive clues for a resumed parent session")
+    resume_payload = _real_model_recovery_resume(paths, task, loaded)
 
     task_sources = resume_payload.get("task_fact_sources", []) if isinstance(resume_payload, dict) else []
     recommended_reads = resume_payload.get("resume", {}).get("recommended_read_paths", []) if isinstance(resume_payload, dict) else []
@@ -294,14 +305,8 @@ class ScenarioRealModelMultiRoundBackend:
         )
 
 
-def run_scenario_real_model_recovery_multi_round_case(args) -> int:
-    """LLM: run a subagent with a real model API through 2+ tool call rounds, then prove memory-resume recovers multi-round evidence.
-
-    新手说明:
-    用真实模型 API 跑多轮子代理（至少 2 轮工具调用：read_file + search_text），
-    验证模型响应内容能在 memory-resume 恢复后找回，包括每轮工具调用的 evidence。
-    """
-
+def _multi_round_setup(args):
+    """Setup for multi-round recovery: create workspace, agent, backend, task, and run subagent."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=real-model-recovery-multi-round")
@@ -342,37 +347,21 @@ def run_scenario_real_model_recovery_multi_round_case(args) -> int:
         f"real_response_len={len(backend.real_response_text)} "
         f"tool_sequence={backend.tool_sequence}"
     )
+    return paths, agent, backend, task, loaded
+
+
+def run_scenario_real_model_recovery_multi_round_case(args) -> int:
+    """LLM: run a subagent with a real model API through 2+ tool call rounds, then prove memory-resume recovers multi-round evidence.
+
+    新手说明:
+    用真实模型 API 跑多轮子代理（至少 2 轮工具调用：read_file + search_text），
+    验证模型响应内容能在 memory-resume 恢复后找回，包括每轮工具调用的 evidence。
+    """
+
+    paths, agent, backend, task, loaded = _multi_round_setup(args)
 
     print_scenario_step(3, "Simulate cross-day archive clues for a resumed parent session")
-    _append_parent_subagent_cross_day_resume_clues(agent.root, loaded)
-    reloaded_agent = load_scenario_agent(paths.config)
-    reloaded_task = reloaded_agent.subagents.load(task.id)
-    print(f"reloaded_status={reloaded_task.status} task_dir={reloaded_task.task_dir}")
-
-    print_scenario_step(4, "Run memory-resume and verify multi-round evidence in recovery context")
-    env = os.environ.copy()
-    env.setdefault("PYTHONUTF8", "1")
-    env.setdefault("PYTHONIOENCODING", "utf-8")
-    resume = run_scenario_subprocess(
-        scenario_command(
-            paths,
-            "memory-resume",
-            "parent subagent cross-day multi-round resume",
-            "--run-id",
-            task.id,
-            "--since",
-            "2026-04-29",
-            "--until",
-            "2026-04-30",
-            "--json",
-        ),
-        env=env,
-        timeout=120,
-    )
-    try:
-        resume_payload = json.loads(resume.stdout)
-    except json.JSONDecodeError as exc:
-        resume_payload = {"ok": False, "error": f"memory-resume JSON parse failed: {exc}", "stdout": resume.stdout}
+    resume_payload = _real_model_recovery_resume(paths, task, loaded)
 
     task_sources = resume_payload.get("task_fact_sources", []) if isinstance(resume_payload, dict) else []
     recommended_reads = resume_payload.get("resume", {}).get("recommended_read_paths", []) if isinstance(resume_payload, dict) else []

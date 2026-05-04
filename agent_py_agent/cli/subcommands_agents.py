@@ -41,15 +41,8 @@ def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
     )
 
 
-def add_subagents_subcommands(sub: argparse._SubParsersAction) -> None:
-    """LLM: register spawn, subagents, workflow, due-check, probe, dispatch and related subcommands.
-
-    新手说明:
-    注册子代理相关子命令组：spawn-subagents、subagents、subagents-workflow-plan、
-    subagents-due-check、subagents-probe、subagents-plan-actions、
-    subagents-apply-actions、subagents-route-capabilities、subagents-acceptance、
-    subagents-patches、subagents-dispatch、subagent-context、subagent-run、subagent。
-    """
+def _add_agents_basic_subcommands(sub):
+    """Register basic subagent subcommands: spawn, subagents, workflow-plan, due-check, probe."""
     spawn = sub.add_parser("spawn-subagents", help="拆分并创建 subagent 任务记录")
     spawn.add_argument("goal", help="要拆分的目标")
     spawn.add_argument("--count", type=int, default=3, help="子代理数量")
@@ -87,6 +80,9 @@ def add_subagents_subcommands(sub: argparse._SubParsersAction) -> None:
     action_plan.add_argument("--limit", type=int, default=20, help="最多显示多少条动作")
     action_plan.set_defaults(func=cmd_subagents_plan_actions)
 
+
+def _add_agents_action_subcommands(sub):
+    """Register action subcommands: apply-actions, route-capabilities, acceptance, patches."""
     apply_actions = sub.add_parser("subagents-apply-actions", help="执行或 dry-run 执行 action plan")
     _add_capability_config_arg(apply_actions)
     apply_actions.add_argument("--dry-run", action="store_false", dest="apply", help="只预览动作，不修改记录")
@@ -128,6 +124,9 @@ def add_subagents_subcommands(sub: argparse._SubParsersAction) -> None:
     patches.add_argument("--note", help="写入 patch 审核记录的备注")
     patches.set_defaults(func=cmd_subagents_patches, patch_action="review_dry_run")
 
+
+def _add_agents_dispatch_subcommands(sub):
+    """Register dispatch subcommand."""
     dispatch = sub.add_parser("subagents-dispatch", help="执行一轮父代理调度，默认 dry-run")
     _add_capability_config_arg(dispatch)
     dispatch.add_argument("--dry-run", action="store_false", dest="apply", help="只生成调度报告，不修改记录")
@@ -151,6 +150,9 @@ def add_subagents_subcommands(sub: argparse._SubParsersAction) -> None:
     dispatch.add_argument("--skill-dir", action="append", help="额外 skill 目录，可多次传入")
     dispatch.set_defaults(func=cmd_subagents_dispatch, apply=False)
 
+
+def _add_agents_context_subcommands(sub):
+    """Register context/run/detail subcommands."""
     subagent_context = sub.add_parser("subagent-context", help="生成单个 subagent 执行上下文包")
     subagent_context.add_argument("run_id", help="子代理运行 ID")
     subagent_context.add_argument("--max-cards", type=int, default=0, help="最多注入多少张能力卡，0 表示不限制")
@@ -168,3 +170,18 @@ def add_subagents_subcommands(sub: argparse._SubParsersAction) -> None:
     subagent = sub.add_parser("subagent", help="查看单个 subagent 运行详情")
     subagent.add_argument("run_id", help="子代理运行 ID")
     subagent.set_defaults(func=cmd_subagent_detail)
+
+
+def add_subagents_subcommands(sub: argparse._SubParsersAction) -> None:
+    """LLM: register spawn, subagents, workflow, due-check, probe, dispatch and related subcommands.
+
+    新手说明:
+    注册子代理相关子命令组：spawn-subagents、subagents、subagents-workflow-plan、
+    subagents-due-check、subagents-probe、subagents-plan-actions、
+    subagents-apply-actions、subagents-route-capabilities、subagents-acceptance、
+    subagents-patches、subagents-dispatch、subagent-context、subagent-run、subagent。
+    """
+    _add_agents_basic_subcommands(sub)
+    _add_agents_action_subcommands(sub)
+    _add_agents_dispatch_subcommands(sub)
+    _add_agents_context_subcommands(sub)

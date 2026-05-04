@@ -7,10 +7,13 @@
 
 from __future__ import annotations
 
+import json
+import queue
 import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from .gateway_client import (
@@ -34,6 +37,66 @@ from .rendering import (
     terminal_rule,
 )
 
+
+@dataclass
+class FallbackWorkerConfig:
+    """Bundle of all _fallback_worker parameters."""
+
+    jobs: Any  # queue.Queue
+    state_lock: threading.Lock
+    is_running_ref: list
+    pending_jobs_ref: list
+    running_prompt_ref: list
+    running_started_at_ref: list
+    agent: Any
+    args: Any
+    paths: Any
+    use_gateway: bool
+    assistant_outputs: list[str]
+    conversation_history: list[tuple[str, str]]
+    history_lock: threading.Lock
+    build_history_context: Callable[[], str]
+
+
+@dataclass
+class FallbackHandleCommandConfig:
+    """Bundle of all _fallback_handle_command parameters."""
+
+    user: str
+    agent: Any
+    args: Any
+    runtime_inject: list[str]
+    prompt_files: list[str]
+    use_gateway: bool
+    state_lock: threading.Lock
+    is_running_ref: list
+    pending_jobs_ref: list
+    running_prompt_ref: list
+    running_started_at_ref: list
+    paths: Any
+    assistant_outputs: list[str]
+    jobs: Any  # queue.Queue
+
+
+@dataclass
+class RunFallbackConfig:
+    """Bundle of all run_fallback parameters."""
+
+    agent: Any
+    args: Any
+    use_gateway: bool
+    paths: Any
+    runtime_inject: list[str]
+    prompt_files: list[str]
+    conversation_history: list[tuple[str, str]]
+    history_lock: threading.Lock
+    jobs: Any  # queue.Queue
+    state_lock: threading.Lock
+    build_history_context: Callable[[], str]
+    session_manager: Any
+    current_session_id: str
+
+
 # Constants and helpers needed by fallback (imported from chat.py context)
 _CHAT_RESPONSE_STYLE_INJECT = (
     "这是 CLI 聊天界面。回答风格要求："
@@ -51,6 +114,7 @@ MAX_HISTORY_TURNS = 8
 def _startup_banner(agent_name: str, *, use_gateway: bool) -> str:
     """Build startup banner."""
     from .rendering import startup_banner as _sb
+
     return _sb(agent_name, use_gateway=use_gateway)
 
 
@@ -72,6 +136,7 @@ def append_conversation_turn(
 def render_gateway_status(agent, paths):
     """Render gateway status lines."""
     from ...agent.gateway import render_gateway_status as _rgs
+
     return _rgs(agent, paths)
 
 
@@ -84,9 +149,12 @@ def resume_context_override(args) -> str | None:
 
 class ChatJob:
     """Job for the chat worker queue."""
+
     __slots__ = ("user", "show_prompt", "inject", "prompt_files")
 
-    def __init__(self, *, user: str, show_prompt: bool, inject: list[str], prompt_files: list[str]) -> None:
+    def __init__(
+        self, *, user: str, show_prompt: bool, inject: list[str], prompt_files: list[str]
+    ) -> None:
         self.user = user
         self.show_prompt = show_prompt
         self.inject = inject
@@ -126,7 +194,9 @@ def _render_assistant_response(text: str, assistant_outputs: list[str], agent_na
     message_id = len(assistant_outputs)
     if collapsed:
         print(f"{GREEN}{agent_name}#{message_id}>{RESET} {preview}")
-        print(f"{GRAY}[回复较长，已自动折叠。输入 /expand {message_id} 或 /expand last 查看全文。]{RESET}")
+        print(
+            f"{GRAY}[回复较长，已自动折叠。输入 /expand {message_id} 或 /expand last 查看全文。]{RESET}"
+        )
         return
     print(f"{GREEN}{agent_name}#{message_id}>{RESET} {text}")
 
@@ -175,7 +245,9 @@ def _fallback_gateway_handle(
     if not check_gateway_alive(paths):
         raise RuntimeError("gateway 已停止。请先执行: my-agent gateway start")
     history_ctx = build_history_context()
-    turn_inject = list(job.inject) + [_CHAT_RESPONSE_STYLE_INJECT] + ([history_ctx] if history_ctx else [])
+    turn_inject = (
+        list(job.inject) + [_CHAT_RESPONSE_STYLE_INJECT] + ([history_ctx] if history_ctx else [])
+    )
     next_message_id = len(assistant_outputs) + 1
     on_chunk, stream_started_ref = _make_chunk_handler(agent.config.agent_name, next_message_id)
     request_id, chunk_path, response_path = submit_chat_request(
@@ -208,7 +280,9 @@ def _fallback_local_handle(
 ) -> tuple[str, bool]:
     """Handle local-mode job. Returns (response_text, stream_started)."""
     history_ctx = build_history_context()
-    turn_inject = list(job.inject) + [_CHAT_RESPONSE_STYLE_INJECT] + ([history_ctx] if history_ctx else [])
+    turn_inject = (
+        list(job.inject) + [_CHAT_RESPONSE_STYLE_INJECT] + ([history_ctx] if history_ctx else [])
+    )
     next_message_id = len(assistant_outputs) + 1
     on_chunk, stream_started_ref = _make_chunk_handler(agent.config.agent_name, next_message_id)
     result = agent.run(
@@ -227,61 +301,51 @@ def _fallback_local_handle(
     return agent_response_text, stream_started_ref[0]
 
 
-def _fallback_worker(
-    jobs,  # queue.Queue
-    state_lock: threading.Lock,
-    is_running_ref: list,
-    pending_jobs_ref: list,
-    running_prompt_ref: list,
-    running_started_at_ref: list,
-    agent,
-    args,
-    paths,
-    use_gateway: bool,
-    assistant_outputs: list[str],
-    conversation_history: list[tuple[str, str]],
-    history_lock: threading.Lock,
-    build_history_context: Callable[[], str],
-) -> None:
+def _fallback_worker(cfg: FallbackWorkerConfig) -> None:
     """Worker loop for fallback mode. Runs in a separate daemon thread."""
     while True:
-        job = jobs.get()
-        with state_lock:
-            pending_jobs_ref[0] -= 1
-            is_running_ref[0] = True
-            running_prompt_ref[0] = job.user
-            running_started_at_ref[0] = time.perf_counter()
+        job = cfg.jobs.get()
+        with cfg.state_lock:
+            cfg.pending_jobs_ref[0] -= 1
+            cfg.is_running_ref[0] = True
+            cfg.running_prompt_ref[0] = job.user
+            cfg.running_started_at_ref[0] = time.perf_counter()
         agent_response_text = ""
         stream_started = False
         try:
-            started_at = running_started_at_ref[0]
+            started_at = cfg.running_started_at_ref[0]
             print(f"\n正在处理: {job.user}", flush=True)
-            if use_gateway:
+            if cfg.use_gateway:
                 agent_response_text, stream_started = _fallback_gateway_handle(
-                    job, agent, args, paths, assistant_outputs, build_history_context
+                    job,
+                    cfg.agent,
+                    cfg.args,
+                    cfg.paths,
+                    cfg.assistant_outputs,
+                    cfg.build_history_context,
                 )
             else:
                 agent_response_text, stream_started = _fallback_local_handle(
-                    job, agent, args, assistant_outputs, build_history_context
+                    job, cfg.agent, cfg.args, cfg.assistant_outputs, cfg.build_history_context
                 )
         except Exception as exc:
             print(f"错误: {exc}")
         finally:
             if agent_response_text:
                 if stream_started:
-                    assistant_outputs.append(agent_response_text)
+                    cfg.assistant_outputs.append(agent_response_text)
                 append_conversation_turn(
-                    conversation_history,
-                    history_lock,
+                    cfg.conversation_history,
+                    cfg.history_lock,
                     job.user,
                     agent_response_text,
                     max_turns=MAX_HISTORY_TURNS,
                 )
-            with state_lock:
-                is_running_ref[0] = False
-                running_prompt_ref[0] = ""
-                running_started_at_ref[0] = 0.0
-            jobs.task_done()
+            with cfg.state_lock:
+                cfg.is_running_ref[0] = False
+                cfg.running_prompt_ref[0] = ""
+                cfg.running_started_at_ref[0] = 0.0
+            cfg.jobs.task_done()
 
 
 def _show_status(
@@ -311,115 +375,150 @@ def _show_status(
             print(line)
 
 
-def run_fallback(
-    *,
-    agent,
-    args,
-    use_gateway: bool,
-    paths,
-    runtime_inject: list[str],
-    prompt_files: list[str],
-    conversation_history: list[tuple[str, str]],
-    history_lock: threading.Lock,
-    jobs,  # queue.Queue
+def _fallback_handle_command(cfg: FallbackHandleCommandConfig) -> bool:
+    """Handle a single user command. Returns True if should exit."""
+    if is_exit_command(cfg.user):
+        shutting_down = [True]
+        with cfg.state_lock:
+            active = cfg.pending_jobs_ref[0] + (1 if cfg.is_running_ref[0] else 0)
+        if active:
+            print(f"还有 {active} 个后台任务，等待完成后退出。按 Ctrl+C 可强制退出。")
+            cfg.jobs.join()
+        print("再见。")
+        return True
+    if cfg.user == "/expand" or cfg.user.startswith("/expand "):
+        _handle_expand_command(cfg.user, cfg.assistant_outputs)
+        return False
+    if cfg.user == "/status":
+        _show_status(
+            cfg.state_lock,
+            cfg.is_running_ref,
+            cfg.pending_jobs_ref,
+            cfg.running_prompt_ref,
+            cfg.running_started_at_ref,
+            cfg.agent,
+            cfg.paths,
+            cfg.use_gateway,
+        )
+        return False
+    if handle_common_slash_command(
+        cfg.user,
+        agent=cfg.agent,
+        memory_limit=cfg.args.memory_limit,
+        runtime_inject=cfg.runtime_inject,
+        prompt_files=cfg.prompt_files,
+        print_line=print,
+        include_fallback_help=True,
+    ):
+        return False
+    return None
+
+
+def _fallback_enqueue_job(
+    user: str,
+    jobs: queue.Queue,
     state_lock: threading.Lock,
-    build_history_context: Callable[[], str],
-    session_manager,
-    current_session_id: str,
-) -> int:
+    pending_jobs_ref: list,
+    runtime_inject_list: list[str],
+    prompt_files: list[str],
+) -> ChatJob:
+    """Create and enqueue a chat job."""
+    show_prompt, text = is_show_prompt_command(user)
+    job = ChatJob(
+        user=text,
+        show_prompt=show_prompt,
+        inject=list(runtime_inject_list),
+        prompt_files=list(prompt_files),
+    )
+    with state_lock:
+        pending_jobs_ref[0] += 1
+    jobs.put(job)
+    return job
+
+
+def run_fallback(cfg: RunFallbackConfig) -> int:
     """Plain input()-based chat loop for terminals without prompt_toolkit."""
 
     is_running_ref = [False]
     pending_jobs_ref = [0]
-    shutting_down_ref = [False]
     running_prompt_ref = [""]
     running_started_at_ref = [0.0]
     fallback_waiting_for_input_ref = [False]
     assistant_outputs: list[str] = []
 
-    # Start worker thread
+    worker_cfg = FallbackWorkerConfig(
+        jobs=cfg.jobs,
+        state_lock=cfg.state_lock,
+        is_running_ref=is_running_ref,
+        pending_jobs_ref=pending_jobs_ref,
+        running_prompt_ref=running_prompt_ref,
+        running_started_at_ref=running_started_at_ref,
+        agent=cfg.agent,
+        args=cfg.args,
+        paths=cfg.paths,
+        use_gateway=cfg.use_gateway,
+        assistant_outputs=assistant_outputs,
+        conversation_history=cfg.conversation_history,
+        history_lock=cfg.history_lock,
+        build_history_context=cfg.build_history_context,
+    )
     threading.Thread(
         target=_fallback_worker,
-        args=(
-            jobs,
-            state_lock,
-            is_running_ref,
-            pending_jobs_ref,
-            running_prompt_ref,
-            running_started_at_ref,
-            agent,
-            args,
-            paths,
-            use_gateway,
-            assistant_outputs,
-            conversation_history,
-            history_lock,
-            build_history_context,
-        ),
+        args=(worker_cfg,),
         daemon=True,
     ).start()
 
-    print(_startup_banner(agent.config.agent_name, use_gateway=use_gateway))
+    print(_startup_banner(cfg.agent.config.agent_name, use_gateway=cfg.use_gateway))
     print(
-        f"{agent.config.agent_name} 交互循环已启动 [v2 fallback模式]。"
+        f"{cfg.agent.config.agent_name} 交互循环已启动 [v2 fallback模式]。"
         "输入 /help 查看命令，输入 /exit 退出。"
     )
-    if use_gateway:
+    if cfg.use_gateway:
         print("当前模式: gateway 客户端。普通消息会投递给后台 gateway 处理。")
 
     while True:
         try:
-            user = _read_user_input(state_lock, fallback_waiting_for_input_ref)
+            user = _read_user_input(cfg.state_lock, fallback_waiting_for_input_ref)
         except (EOFError, KeyboardInterrupt):
             print("\n再见。")
             break
         if not user:
             continue
-        if is_exit_command(user):
-            shutting_down_ref[0] = True
-            with state_lock:
-                active = pending_jobs_ref[0] + (1 if is_running_ref[0] else 0)
-            if active:
-                print(f"还有 {active} 个后台任务，等待完成后退出。按 Ctrl+C 可强制退出。")
-                jobs.join()
-            print("再见。")
-            break
-        if user == "/expand" or user.startswith("/expand "):
-            _handle_expand_command(user, assistant_outputs)
-            continue
-        if user == "/status":
-            _show_status(
-                state_lock, is_running_ref, pending_jobs_ref,
-                running_prompt_ref, running_started_at_ref,
-                agent, paths, use_gateway,
-            )
-            continue
-        if handle_common_slash_command(
-            user,
-            agent=agent,
-            memory_limit=args.memory_limit,
-            runtime_inject=runtime_inject,
-            prompt_files=prompt_files,
-            print_line=print,
-            include_fallback_help=True,
-        ):
-            continue
 
-        show_prompt, user = is_show_prompt_command(user)
-
-        job = ChatJob(
+        handle_cfg = FallbackHandleCommandConfig(
             user=user,
-            show_prompt=show_prompt,
-            inject=list(runtime_inject),
-            prompt_files=list(prompt_files),
+            agent=cfg.agent,
+            args=cfg.args,
+            runtime_inject=cfg.runtime_inject,
+            prompt_files=cfg.prompt_files,
+            use_gateway=cfg.use_gateway,
+            state_lock=cfg.state_lock,
+            is_running_ref=is_running_ref,
+            pending_jobs_ref=pending_jobs_ref,
+            running_prompt_ref=running_prompt_ref,
+            running_started_at_ref=running_started_at_ref,
+            paths=cfg.paths,
+            assistant_outputs=assistant_outputs,
+            jobs=cfg.jobs,
         )
-        with state_lock:
-            pending_jobs_ref[0] += 1
-        jobs.put(job)
+        exit_result = _fallback_handle_command(handle_cfg)
+        if exit_result is not None:
+            if exit_result:
+                break
+            continue
+
+        _fallback_enqueue_job(
+            user,
+            cfg.jobs,
+            cfg.state_lock,
+            pending_jobs_ref,
+            cfg.runtime_inject,
+            cfg.prompt_files,
+        )
         print(f"\n{terminal_rule()}")
         print(f"{BLUE}●{RESET}  {BLUE}{BOLD}{user}{RESET}")
 
-    session_manager.touch_session(current_session_id, channel="chat")
+    cfg.session_manager.touch_session(cfg.current_session_id, channel="chat")
     return 0
 
 

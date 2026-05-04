@@ -95,14 +95,8 @@ def run_scenario_gateway_restart_case(args) -> int:
     return 0 if final_ok else 2
 
 
-def run_scenario_gateway_stale_lease_case(args) -> int:
-    """LLM: simulate an interrupted worker lease, then recover and finish the gateway request.
-
-    新手说明:
-    模拟 worker 租约过期后请求卡在 processing 目录的情况。
-    验证系统能检测过期租约、恢复请求、重新处理并成功完成。
-    """
-
+def _stale_lease_setup(args):
+    """Setup for stale lease scenario: create workspace, agent, gateway paths and stale processing request."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=gateway-stale-lease")
@@ -137,6 +131,18 @@ def run_scenario_gateway_stale_lease_case(args) -> int:
             "updated_at": stale_at,
         },
     )
+    return paths, agent, gpaths, request_id, processing_path
+
+
+def run_scenario_gateway_stale_lease_case(args) -> int:
+    """LLM: simulate an interrupted worker lease, then recover and finish the gateway request.
+
+    新手说明:
+    模拟 worker 租约过期后请求卡在 processing 目录的情况。
+    验证系统能检测过期租约、恢复请求、重新处理并成功完成。
+    """
+
+    paths, agent, gpaths, request_id, processing_path = _stale_lease_setup(args)
 
     print_scenario_step(1, "Create an old processing lease")
     stale_before = gateway_stale_processing(gpaths, timeout_seconds=1)
@@ -199,14 +205,8 @@ def run_scenario_gateway_stale_lease_case(args) -> int:
     return 0 if final_ok else 2
 
 
-def run_scenario_gateway_delayed_response_case(args) -> int:
-    """LLM: simulate a response arriving before a duplicate pending request is claimed.
-
-    新手说明:
-    当 gateway 响应已经存在时，worker 不应该再次调用模型。
-    验证系统能检测已有响应、直接归档请求、不重复执行。
-    """
-
+def _delayed_response_setup(args):
+    """Setup for delayed response scenario: create workspace, agent, gateway paths, request and response."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=gateway-delayed-response")
@@ -249,6 +249,18 @@ def run_scenario_gateway_delayed_response_case(args) -> int:
             "attempts": 1,
         },
     )
+    return paths, agent, gpaths, request_id, request_path, response_path
+
+
+def run_scenario_gateway_delayed_response_case(args) -> int:
+    """LLM: simulate a response arriving before a duplicate pending request is claimed.
+
+    新手说明:
+    当 gateway 响应已经存在时，worker 不应该再次调用模型。
+    验证系统能检测已有响应、直接归档请求、不重复执行。
+    """
+
+    paths, agent, gpaths, request_id, request_path, response_path = _delayed_response_setup(args)
 
     print_scenario_step(1, "Create a pending request with an already-arrived response")
     print(f"request_path={request_path} exists={request_path.exists()}")
@@ -312,14 +324,8 @@ def run_scenario_gateway_delayed_response_case(args) -> int:
     return 0 if final_ok else 2
 
 
-def run_scenario_gateway_processing_stop_case(args) -> int:
-    """LLM: verify gateway handles stop/restart correctly when a worker is mid-request (has claimed and is calling the model).
-
-    新手说明:
-    模拟 gateway 正在处理请求时（worker 已领任务、正在调模型）收到主动 stop/restart。
-    验证：不卡死、不丢请求、不留半截 JSON、重启后能正确恢复。
-    """
-
+def _processing_stop_setup(args):
+    """Setup for processing stop scenario: create workspace, agent, gateway paths and pending request."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=gateway-processing-stop")
@@ -348,11 +354,11 @@ def run_scenario_gateway_processing_stop_case(args) -> int:
         "client_pid": os.getpid(),
     }
     write_json_file(pending_path, payload)
+    return paths, agent, gpaths, request_id, pending_path, payload
 
-    print_scenario_step(1, "Submit request to gateway inbox")
-    print(f"pending_before={pending_path.exists()} request_id={request_id}")
 
-    print_scenario_step(2, "Simulate: worker claims request and starts agent.run (lease active)")
+def _processing_stop_simulate_lease(gpaths, pending_path, payload):
+    """Simulate worker claiming the request (move to processing with lease)."""
     processing_path = gpaths.processing / pending_path.name
     try:
         pending_path.rename(processing_path)
@@ -375,6 +381,24 @@ def run_scenario_gateway_processing_stop_case(args) -> int:
     response_path = gateway_response_path(gpaths, request_id)
     print(f"processing_path={processing_path} exists={processing_path.exists()}")
     print(f"processing_before_stop={read_json_file(processing_path).get('status')}")
+    return processing_path, response_path
+
+
+def run_scenario_gateway_processing_stop_case(args) -> int:
+    """LLM: verify gateway handles stop/restart correctly when a worker is mid-request (has claimed and is calling the model).
+
+    新手说明:
+    模拟 gateway 正在处理请求时（worker 已领任务、正在调模型）收到主动 stop/restart。
+    验证：不卡死、不丢请求、不留半截 JSON、重启后能正确恢复。
+    """
+
+    paths, agent, gpaths, request_id, pending_path, payload = _processing_stop_setup(args)
+
+    print_scenario_step(1, "Submit request to gateway inbox")
+    print(f"pending_before={pending_path.exists()} request_id={request_id}")
+
+    print_scenario_step(2, "Simulate: worker claims request and starts agent.run (lease active)")
+    processing_path, response_path = _processing_stop_simulate_lease(gpaths, pending_path, payload)
 
     print_scenario_step(3, "Simulate gateway stop/restart mid-processing (requeue stale leases)")
     requeued = requeue_gateway_processing_requests(gpaths)

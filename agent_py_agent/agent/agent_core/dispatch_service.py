@@ -8,6 +8,7 @@ action_apply、capability_route、runner、patch_review、acceptance。
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..capabilities import CapabilityRouter
@@ -19,8 +20,23 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# Workflow step helpers
+# Watch mode helpers
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MakeDispatchWatchRecordParams:
+    """Bundle of all make_dispatch_watch_record parameters."""
+
+    cycle: int
+    dry_run: bool
+    ok: bool
+    message: str
+    dispatch_record_count: int
+    dispatch_summary: dict[str, int] | None = None
+    started_at: float = 0.0
+    ended_at: float = 0.0
+    evidence_paths: list[str] | None = None
 
 
 def build_workflow_records(agent, tasks, workflow_mode, limit, apply):
@@ -44,24 +60,33 @@ def build_workflow_records(agent, tasks, workflow_mode, limit, apply):
 def _build_single_workflow_records(agent, task, workflow_mode, apply):
     """Build workflow records for a single task."""
     records = []
-    preview = task.workflow_plan or _try_workflow_plan(
-        task.goal,
-        quality_contract=task.quality_contract,
-        context_manifest=task.context_manifest,
-        allowed_write_roots=_workflow_extra_write_roots(task),
-    ) or {}
+    preview = (
+        task.workflow_plan
+        or _try_workflow_plan(
+            task.goal,
+            quality_contract=task.quality_contract,
+            context_manifest=task.context_manifest,
+            allowed_write_roots=_workflow_extra_write_roots(task),
+        )
+        or {}
+    )
     worker_count = len(preview.get("workers") or []) if isinstance(preview, dict) else 0
 
     if not apply:
         records.append(
             agent.subagents.make_dispatch_record(
-                step="workflow", action="plan_workflow", run_id=task.id,
-                dry_run=True, applied=False, ok=bool(preview),
+                step="workflow",
+                action="plan_workflow",
+                run_id=task.id,
+                dry_run=True,
+                applied=False,
+                ok=bool(preview),
                 message=(
                     f"dry-run: 将为父任务写入 workflow 计划，template="
                     f"{preview.get('selected_template_id', '') or 'none'} workers={worker_count}。"
                 ),
-                before_status=task.status, after_status=task.status,
+                before_status=task.status,
+                after_status=task.status,
                 before_verification_status=task.verification_status,
                 after_verification_status=task.verification_status,
                 evidence_paths=[task.task_dir],
@@ -70,10 +95,15 @@ def _build_single_workflow_records(agent, task, workflow_mode, apply):
         if workflow_mode == "auto" and preview.get("ok"):
             records.append(
                 agent.subagents.make_dispatch_record(
-                    step="workflow", action="spawn_workflow_workers", run_id=task.id,
-                    dry_run=True, applied=False, ok=True,
+                    step="workflow",
+                    action="spawn_workflow_workers",
+                    run_id=task.id,
+                    dry_run=True,
+                    applied=False,
+                    ok=True,
                     message=f"dry-run: apply 时会根据 workflow 计划创建 {worker_count} 个 worker 子工单。",
-                    before_status=task.status, after_status=task.status,
+                    before_status=task.status,
+                    after_status=task.status,
                     before_verification_status=task.verification_status,
                     after_verification_status=task.verification_status,
                     evidence_paths=[task.task_dir],
@@ -84,8 +114,11 @@ def _build_single_workflow_records(agent, task, workflow_mode, apply):
     planned = agent.subagents.ensure_workflow_plan(task.id, workflow_mode=workflow_mode)
     records.append(
         agent.subagents.make_dispatch_record(
-            step="workflow", action="plan_workflow", run_id=task.id,
-            dry_run=False, applied=bool(planned.workflow_plan),
+            step="workflow",
+            action="plan_workflow",
+            run_id=task.id,
+            dry_run=False,
+            applied=bool(planned.workflow_plan),
             ok=bool(planned.workflow_plan),
             message=(
                 f"已写入 workflow 计划，template={planned.workflow_template_id or 'none'} "
@@ -93,7 +126,8 @@ def _build_single_workflow_records(agent, task, workflow_mode, apply):
                 if planned.workflow_plan
                 else "未能生成 workflow 计划。"
             ),
-            before_status=task.status, after_status=planned.status,
+            before_status=task.status,
+            after_status=planned.status,
             before_verification_status=task.verification_status,
             after_verification_status=planned.verification_status,
             evidence_paths=[planned.task_dir],
@@ -104,14 +138,19 @@ def _build_single_workflow_records(agent, task, workflow_mode, apply):
         planned, created_children = agent.subagents.realize_workflow_plan(task.id)
         records.append(
             agent.subagents.make_dispatch_record(
-                step="workflow", action="spawn_workflow_workers", run_id=task.id,
-                dry_run=False, applied=bool(created_children) or before_child_count > 0, ok=True,
+                step="workflow",
+                action="spawn_workflow_workers",
+                run_id=task.id,
+                dry_run=False,
+                applied=bool(created_children) or before_child_count > 0,
+                ok=True,
                 message=(
                     f"已创建 {len(created_children)} 个 workflow worker 子工单。"
                     if created_children
                     else "workflow worker 子工单已存在，本轮未重复创建。"
                 ),
-                before_status=task.status, after_status=planned.status,
+                before_status=task.status,
+                after_status=planned.status,
                 before_verification_status=task.verification_status,
                 after_verification_status=planned.verification_status,
                 evidence_paths=[planned.task_dir, *[child.task_dir for child in created_children]],
@@ -205,7 +244,9 @@ def make_capability_route_records(agent, router, cfg, apply, limit):
                 applied=not item.dry_run,
                 ok=item.status in {"WOULD_GRANT", "GRANTED"},
                 message=item.message,
-                evidence_paths=[str(agent.subagents.workspace / "subagent_capability_route_report.json")],
+                evidence_paths=[
+                    str(agent.subagents.workspace / "subagent_capability_route_report.json")
+                ],
             )
         )
     return records
@@ -310,22 +351,27 @@ def update_pending_work_state(agent) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def make_dispatch_watch_record(agent, cycle, dry_run, ok, message, dispatch_record_count, dispatch_summary, started_at, ended_at, evidence_paths):
+def make_dispatch_watch_record(
+    agent,
+    params: MakeDispatchWatchRecordParams,
+) -> DispatchWatchRecord:
     """Create a dispatch watch heartbeat record."""
     return agent.subagents.make_dispatch_watch_record(
-        cycle=cycle,
-        dry_run=dry_run,
-        ok=ok,
-        message=message,
-        dispatch_record_count=dispatch_record_count,
-        dispatch_summary=dispatch_summary,
-        started_at=started_at,
-        ended_at=ended_at,
-        evidence_paths=evidence_paths,
+        cycle=params.cycle,
+        dry_run=params.dry_run,
+        ok=params.ok,
+        message=params.message,
+        dispatch_record_count=params.dispatch_record_count,
+        dispatch_summary=params.dispatch_summary,
+        started_at=params.started_at,
+        ended_at=params.ended_at,
+        evidence_paths=params.evidence_paths,
     )
 
 
-def check_watch_stopping(cycle, max_cycles, stop_path, max_consecutive_rounds, consecutive_rounds, lock_path, lock):
+def check_watch_stopping(
+    cycle, max_cycles, stop_path, max_consecutive_rounds, consecutive_rounds, lock_path, lock
+):
     """Check if watch loop should stop."""
     more_cycles = max_cycles == 0 or cycle < max_cycles
     stop_requested = bool(stop_path and stop_path.exists())

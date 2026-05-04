@@ -20,14 +20,8 @@ from ..scenario_utils import (
 )
 
 
-def run_scenario_verification_case(args) -> int:
-    """LLM: verify that the parent agent rejects forged artifacts and self-declared completion.
-
-    新手说明:
-    验证系统防作弊机制——子代理声称完成了任务但实际上文件不存在时，
-    父代理的验收逻辑必须能识别并拒绝这种伪造。
-    """
-
+def _verification_setup(args):
+    """Setup for verification case: create workspace, agent, and forge a fake completed task."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=verification")
@@ -101,6 +95,18 @@ def run_scenario_verification_case(args) -> int:
         ),
         encoding="utf-8",
     )
+    return paths, agent, task
+
+
+def run_scenario_verification_case(args) -> int:
+    """LLM: verify that the parent agent rejects forged artifacts and self-declared completion.
+
+    新手说明:
+    验证系统防作弊机制——子代理声称完成了任务但实际上文件不存在时，
+    父代理的验收逻辑必须能识别并拒绝这种伪造。
+    """
+
+    paths, agent, task = _verification_setup(args)
 
     print_scenario_step(2, "执行父代理验收")
     report = agent.subagents.write_acceptance_review_report(

@@ -1,0 +1,239 @@
+"""Pipeline stage components extracted from IngestPipeline for size governance."""
+
+from __future__ import annotations
+
+import csv
+import json
+from collections.abc import Iterable, Mapping
+from pathlib import Path
+from typing import Any
+
+from ..parsers.base import LogParser, ParserError
+
+
+class RecordIterator:
+    """Yields parsed records (or None for skipped lines) from JSONL / CSV sources."""
+
+    def __init__(
+        self,
+        source_path: Path,
+        *,
+        file_format: str,
+        parser: LogParser,
+        batch_id: str,
+        source_id: str,
+        source_product: str | None,
+        dead_letters: Any,
+    ):
+        self.source_path = source_path
+        self.file_format = file_format
+        self.parser = parser
+        self.batch_id = batch_id
+        self.source_id = source_id
+        self.source_product = source_product
+        self.dead_letters = dead_letters
+
+    def iter_records(self):
+        """Dispatch to format-specific iterator."""
+        if self.file_format in {"jsonl", "log"}:
+            yield from self._iter_jsonl()
+            return
+        if self.file_format == "csv":
+            yield from self._iter_csv()
+            return
+        raise ParserError(f"unsupported ingest file format: {self.file_format}")
+
+    def _iter_jsonl(self):
+        """Parse a JSONL / .log file line by line."""
+        with self.source_path.open("r", encoding="utf-8-sig", errors="replace") as handle:
+            for line_no, raw_line in enumerate(handle, start=1):
+                text = raw_line.rstrip("\n")
+                raw_ref = f"{self.batch_id}:line-{line_no}"
+                if not text.strip():
+                    yield None
+                    continue
+                try:
+                    yield self.parser.parse_json_line(
+                        text,
+                        raw_ref=raw_ref,
+                        source_id=self.source_id,
+                        source_product=self.source_product,
+                        line_no=line_no,
+                    )
+                except ParserError as exc:
+                    self.dead_letters.write(
+                        reason=str(exc),
+                        raw_ref=raw_ref,
+                        line_no=line_no,
+                        raw_line=text,
+                        parser_id=self.parser.parser_id,
+                    )
+
+    def _iter_csv(self):
+        """Parse a CSV file row by row via the registered LogParser."""
+        with self.source_path.open(
+            "r", encoding="utf-8-sig", newline="", errors="replace"
+        ) as handle:
+            reader = csv.DictReader(handle)
+            if not reader.fieldnames:
+                self.dead_letters.write(
+                    reason="CSV file has no header",
+                    raw_ref=f"{self.batch_id}:line-1",
+                    line_no=1,
+                    raw_line="",
+                    parser_id=self.parser.parser_id,
+                )
+                return
+            for row in reader:
+                line_no = reader.line_num
+                raw_ref = f"{self.batch_id}:line-{line_no}"
+                try:
+                    yield self.parser.parse_csv_row(
+                        row,
+                        raw_ref=raw_ref,
+                        source_id=self.source_id,
+                        source_product=self.source_product,
+                        line_no=line_no,
+                    )
+                except ParserError as exc:
+                    self.dead_letters.write(
+                        reason=str(exc),
+                        raw_ref=raw_ref,
+                        line_no=line_no,
+                        raw_line=json.dumps(
+                            _jsonable_mapping(row), ensure_ascii=False, sort_keys=True
+                        ),
+                        raw_fields=_jsonable_mapping(row),
+                        parser_id=self.parser.parser_id,
+                    )
+                except csv.Error as exc:
+                    self.dead_letters.write(
+                        reason=f"invalid CSV: {exc}",
+                        raw_ref=raw_ref,
+                        line_no=line_no,
+                        parser_id=self.parser.parser_id,
+                    )
+
+
+class EventWriter:
+    """Write events to a store (or JsonlEventSink fallback) and return storage metadata."""
+
+    def __init__(self, store: Any, fallback_sink: Any):
+        self.store = store
+        self.fallback_sink = fallback_sink
+
+    def write(self, events: list[dict[str, Any]]) -> dict[str, Any]:
+        """Dispatch to the first available write method on the store."""
+        if not events:
+            return {"count": 0, "path": str(self.fallback_sink.events_path)}
+
+        if self.store is None:
+            return self.fallback_sink.write_events(events)
+
+        for method_name in ("write_events", "append_events", "upsert_events"):
+            method = getattr(self.store, method_name, None)
+            if callable(method):
+                result = method(events)
+                return _storage_result(result, count=len(events), store=self.store)
+
+        for method_name in ("write_event", "append_event", "upsert_event"):
+            method = getattr(self.store, method_name, None)
+            if callable(method):
+                for event in events:
+                    method(event)
+                return {"count": len(events), "path": None}
+
+        return self.fallback_sink.write_events(events)
+
+
+class ManifestWriter:
+    """Build and atomically write a batch manifest JSON file."""
+
+    def __init__(self, root: Path):
+        self.root = root
+
+    def write(
+        self,
+        *,
+        batch_id: str,
+        source_id: str,
+        source_path: Path,
+        file_format: str,
+        parser: LogParser,
+        started_at: str,
+        content_hash: str,
+        size_bytes: int,
+        first_event_time: str | None,
+        last_event_time: str | None,
+        parsed_count: int,
+        stored_count: int,
+        duplicate_count: int,
+        skipped_count: int,
+        dead_letter_count: int,
+        dead_letter_refs: list[dict[str, Any]],
+        cursor_before: Mapping[str, Any],
+        storage_info: Mapping[str, Any],
+    ) -> Path:
+        """Write the manifest JSON file and return its path."""
+        from ..parsers.common import utc_now
+        from .checkpoint import safe_source_id, write_json_atomic
+
+        safe_source = safe_source_id(source_id)
+        manifest_path = self.root / "manifests" / safe_source / f"{batch_id}.json"
+        cursor_after = {
+            "path": str(source_path),
+            "format": file_format,
+            "size_bytes": size_bytes,
+            "content_hash": content_hash,
+            "batch_id": batch_id,
+        }
+        manifest = {
+            "batch_id": batch_id,
+            "source_id": source_id,
+            "source_kind": "file",
+            "source_path": str(source_path),
+            "format": file_format,
+            "parser_id": parser.parser_id,
+            "parser_schema": parser.schema,
+            "received_at": started_at,
+            "completed_at": utc_now(),
+            "time_range": [first_event_time, last_event_time],
+            "raw_refs": [str(source_path)],
+            "size_bytes": size_bytes,
+            "content_hash": content_hash,
+            "cursor_before": dict(cursor_before),
+            "cursor_after": cursor_after,
+            "dedup_policy": "source_event_fingerprint",
+            "checkpoint_policy": "after_durable_write",
+            "status": "stored",
+            "counts": {
+                "parsed": parsed_count,
+                "stored": stored_count,
+                "duplicates": duplicate_count,
+                "skipped": skipped_count,
+                "dead_letter": dead_letter_count,
+            },
+            "storage": dict(storage_info),
+            "dead_letter_refs": dead_letter_refs,
+        }
+        write_json_atomic(manifest_path, manifest)
+        return manifest_path
+
+
+def _storage_result(result: Any, *, count: int, store: Any | None = None) -> dict[str, Any]:
+    store_path = getattr(store, "events_path", None)
+    if isinstance(result, Mapping):
+        payload = dict(result)
+        payload.setdefault("count", count)
+        if payload.get("path") is None and store_path is not None:
+            payload["path"] = str(store_path)
+        return payload
+    if isinstance(result, (str, Path)):
+        return {"count": count, "path": str(result)}
+    if isinstance(result, int):
+        return {"count": result, "path": str(store_path) if store_path is not None else None}
+    return {"count": count, "path": str(store_path) if store_path is not None else None}
+
+
+def _jsonable_mapping(mapping: Mapping[Any, Any]) -> dict[str, Any]:
+    return {str(key): value for key, value in mapping.items()}

@@ -7,6 +7,23 @@ from __future__ import annotations
 """
 
 import shutil
+import sys
+
+# prompt_toolkit is optional
+try:
+    from prompt_toolkit import print_formatted_text as _pt_print
+    from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
+except Exception:
+    _pt_print = None
+    _PT_ANSI = None
+
+
+def _cprint(text: str) -> None:
+    """Print ANSI-colored text via prompt_toolkit or fall back to print."""
+    if _pt_print is not None and _PT_ANSI is not None:
+        _pt_print(_PT_ANSI(text))
+    else:
+        print(text)
 
 BLUE = "\033[38;2;59;130;246m"
 GRAY = "\033[90m"
@@ -55,6 +72,13 @@ def startup_banner(agent_name: str, *, use_gateway: bool) -> str:
             "",
         ]
     )
+
+
+# Backward-compat wrapper: original signature was _tui_print_banner(agent, use_gateway)
+def _tui_print_banner(agent, use_gateway: bool) -> None:
+    text = startup_banner(agent.config.agent_name, use_gateway=use_gateway)
+    for line in text.splitlines():
+        print(line)
 
 
 def terminal_rule(char: str = "─", *, fallback: int = 119) -> str:

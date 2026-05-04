@@ -184,14 +184,8 @@ def _append_parent_subagent_cross_day_resume_clues(root: Path, task) -> None:
     )
 
 
-def run_scenario_parent_subagent_cross_day_resume_case(args) -> int:
-    """LLM: run a real subagent runner turn, then prove memory-resume returns task fact sources.
-
-    新手说明:
-    让子代理真正执行一轮（读 README），然后模拟跨天恢复。
-    验证 memory-resume 命令能找回子代理的任务事实源文件路径。
-    """
-
+def _parent_subagent_setup(args):
+    """Setup for parent subagent cross-day resume: create workspace, agent, task, and run subagent."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=parent-subagent-cross-day-resume")
@@ -229,6 +223,18 @@ def run_scenario_parent_subagent_cross_day_resume_case(args) -> int:
         f"runner_ok={runner.ok} status={loaded.status} verify={loaded.verification_status} "
         f"tool_rounds={runner.tool_rounds} backend_calls={backend.calls}"
     )
+    return paths, agent, backend, task, loaded
+
+
+def run_scenario_parent_subagent_cross_day_resume_case(args) -> int:
+    """LLM: run a real subagent runner turn, then prove memory-resume returns task fact sources.
+
+    新手说明:
+    让子代理真正执行一轮（读 README），然后模拟跨天恢复。
+    验证 memory-resume 命令能找回子代理的任务事实源文件路径。
+    """
+
+    paths, agent, backend, task, loaded = _parent_subagent_setup(args)
 
     print_scenario_step(3, "Simulate cross-day archive clues for a resumed parent session")
     _append_parent_subagent_cross_day_resume_clues(agent.root, loaded)

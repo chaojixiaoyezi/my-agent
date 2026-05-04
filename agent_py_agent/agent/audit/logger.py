@@ -4,6 +4,7 @@
 - 存储到 data/audit/audit.jsonl
 - 同时写入 LocalStore 的 events 表
 """
+
 from __future__ import annotations
 
 import json
@@ -73,6 +74,21 @@ class AuditEntry:
         return cls(**data)
 
 
+@dataclass(frozen=True)
+class LogParams:
+    """Bundle of AuditLogger.log parameters."""
+
+    action: AuditAction | str
+    user_id: str
+    channel: str
+    target_type: str
+    target_id: str
+    status: AuditStatus | str = AuditStatus.SUCCESS
+    details: dict[str, Any] | None = None
+    ip_address: str = ""
+    user_agent: str = ""
+
+
 class AuditLogger:
     """审计日志记录器。
 
@@ -97,50 +113,69 @@ class AuditLogger:
     def _generate_entry_id(self) -> str:
         """生成条目 ID。"""
         import secrets
+
         timestamp = int(time.time())
         random_part = secrets.token_hex(2)
         return f"audit_{timestamp}_{random_part}"
 
-    def log(
-        self,
-        action: AuditAction | str,
-        user_id: str,
-        channel: str,
-        target_type: str,
-        target_id: str,
-        status: AuditStatus | str = AuditStatus.SUCCESS,
-        details: dict[str, Any] | None = None,
-        ip_address: str = "",
-        user_agent: str = "",
-    ) -> AuditEntry:
+    def log(self, params: LogParams | AuditAction | str = None, **kwargs) -> AuditEntry:
         """记录审计日志。
 
         Args:
-            action: 动作类型
-            user_id: 用户 ID
-            channel: 通道（chat/feishu/qq）
-            target_type: 目标类型（task/session/user/gateway）
-            target_id: 目标 ID
-            status: 状态（success/denied/error）
-            details: 额外详情
-            ip_address: IP 地址
-            user_agent: User Agent
+            params: LogParams对象，或action（向后兼容）
+            **kwargs: 向后兼容的其他参数
 
         Returns:
             创建的 AuditEntry
         """
+        # Backward compatibility: if called with keyword arguments, construct LogParams
+        if isinstance(params, LogParams):
+            log_params = params
+        elif params is not None:
+            # Backward compatible mode: params is actually the action
+            log_params = LogParams(
+                action=params,
+                user_id=kwargs.pop("user_id", ""),
+                channel=kwargs.pop("channel", ""),
+                target_type=kwargs.pop("target_type", ""),
+                target_id=kwargs.pop("target_id", ""),
+                status=kwargs.pop("status", AuditStatus.SUCCESS),
+                details=kwargs.pop("details", None),
+                ip_address=kwargs.pop("ip_address", ""),
+                user_agent=kwargs.pop("user_agent", ""),
+            )
+        elif kwargs:
+            # All kwargs provided
+            log_params = LogParams(
+                action=kwargs.pop("action", AuditAction.QUERY),
+                user_id=kwargs.pop("user_id", ""),
+                channel=kwargs.pop("channel", ""),
+                target_type=kwargs.pop("target_type", ""),
+                target_id=kwargs.pop("target_id", ""),
+                status=kwargs.pop("status", AuditStatus.SUCCESS),
+                details=kwargs.pop("details", None),
+                ip_address=kwargs.pop("ip_address", ""),
+                user_agent=kwargs.pop("user_agent", ""),
+            )
+        else:
+            raise TypeError("log() requires either params: LogParams or keyword arguments")
+
         entry = AuditEntry(
             entry_id=self._generate_entry_id(),
             timestamp=time.time(),
-            action=action.value if isinstance(action, AuditAction) else action,
-            user_id=user_id,
-            channel=channel,
-            target_type=target_type,
-            target_id=target_id,
-            status=status.value if isinstance(status, AuditStatus) else status,
-            details=details or {},
-            ip_address=ip_address,
-            user_agent=user_agent,
+            action=log_params.action.value
+            if isinstance(log_params.action, AuditAction)
+            else log_params.action,
+            user_id=log_params.user_id,
+            channel=log_params.channel,
+            target_type=log_params.target_type,
+            target_id=log_params.target_id,
+            status=log_params.status.value
+            if isinstance(log_params.status, AuditStatus)
+            else log_params.status,
+            details=log_params.details or {},
+            ip_address=log_params.ip_address,
+            user_agent=log_params.user_agent,
         )
 
         # 写入 JSONL 文件
@@ -200,12 +235,14 @@ class AuditLogger:
     ) -> AuditEntry:
         """记录创建任务。"""
         return self.log(
-            action=AuditAction.CREATE_TASK,
-            user_id=user_id,
-            channel=channel,
-            target_type="task",
-            target_id=task_id,
-            details=details,
+            LogParams(
+                action=AuditAction.CREATE_TASK,
+                user_id=user_id,
+                channel=channel,
+                target_type="task",
+                target_id=task_id,
+                details=details,
+            )
         )
 
     def log_update_task(
@@ -219,16 +256,18 @@ class AuditLogger:
     ) -> AuditEntry:
         """记录更新任务。"""
         return self.log(
-            action=AuditAction.UPDATE_TASK,
-            user_id=user_id,
-            channel=channel,
-            target_type="task",
-            target_id=task_id,
-            details={
-                "status_before": status_before,
-                "status_after": status_after,
-                **(details or {}),
-            },
+            LogParams(
+                action=AuditAction.UPDATE_TASK,
+                user_id=user_id,
+                channel=channel,
+                target_type="task",
+                target_id=task_id,
+                details={
+                    "status_before": status_before,
+                    "status_after": status_after,
+                    **(details or {}),
+                },
+            )
         )
 
     def log_dispatch(
@@ -240,12 +279,14 @@ class AuditLogger:
     ) -> AuditEntry:
         """记录调度操作。"""
         return self.log(
-            action=AuditAction.DISPATCH,
-            user_id=user_id,
-            channel=channel,
-            target_type="task",
-            target_id=task_id,
-            details=details,
+            LogParams(
+                action=AuditAction.DISPATCH,
+                user_id=user_id,
+                channel=channel,
+                target_type="task",
+                target_id=task_id,
+                details=details,
+            )
         )
 
     def log_access_denied(
@@ -259,13 +300,15 @@ class AuditLogger:
     ) -> AuditEntry:
         """记录访问拒绝。"""
         return self.log(
-            action=action,
-            user_id=user_id,
-            channel=channel,
-            target_type=target_type,
-            target_id=target_id,
-            status=AuditStatus.DENIED,
-            details={"reason": reason},
+            LogParams(
+                action=action,
+                user_id=user_id,
+                channel=channel,
+                target_type=target_type,
+                target_id=target_id,
+                status=AuditStatus.DENIED,
+                details={"reason": reason},
+            )
         )
 
     def log_error(
@@ -279,13 +322,15 @@ class AuditLogger:
     ) -> AuditEntry:
         """记录错误。"""
         return self.log(
-            action=action,
-            user_id=user_id,
-            channel=channel,
-            target_type=target_type,
-            target_id=target_id,
-            status=AuditStatus.ERROR,
-            details={"error": error},
+            LogParams(
+                action=action,
+                user_id=user_id,
+                channel=channel,
+                target_type=target_type,
+                target_id=target_id,
+                status=AuditStatus.ERROR,
+                details={"error": error},
+            )
         )
 
 

@@ -188,22 +188,32 @@ def add_scenario_subcommand(sub: argparse._SubParsersAction) -> None:
 
 
 
-def add_gateway_subcommands(sub: argparse._SubParsersAction) -> None:
-    """LLM: register the gateway subcommand tree with start/run/status/stop/restart/logs/ask/result.
-
-    新手说明:
-    注册 gateway 子命令组：gateway start、gateway run、gateway status、
-    gateway stop、gateway restart、gateway logs、gateway ask、gateway result。
-    """
-    gateway = sub.add_parser("gateway", help="管理后台 gateway 进程")
-    gateway_sub = gateway.add_subparsers(dest="gateway_command")
-    gateway.set_defaults(func=cmd_gateway)
-
+def _add_gateway_start_stop_subcommands(gateway_sub):
+    """Register gateway start/stop/restart/logs subcommands."""
     gateway_start = gateway_sub.add_parser("start", help="启动后台 gateway")
     gateway_start.add_argument("--force", action="store_true", help="已有 gateway 运行时先尝试停止再启动")
     gateway_start.add_argument("--force-lock", action="store_true", help="传给内部 daemon，强制覆盖已有 dispatch watch lock")
     gateway_start.set_defaults(func=cmd_gateway_start)
 
+    gateway_stop = gateway_sub.add_parser("stop", help="请求 gateway 停止")
+    gateway_stop.add_argument("--timeout", type=float, help="等待正常停止的秒数，默认使用配置")
+    gateway_stop.add_argument("--kill", action="store_true", help="超时后强制终止进程")
+    gateway_stop.add_argument("--reason", help="写入 stop request 的原因")
+    gateway_stop.set_defaults(func=cmd_gateway_stop)
+
+    gateway_restart = gateway_sub.add_parser("restart", help="重启 gateway")
+    gateway_restart.add_argument("--timeout", type=float, help="等待正常停止的秒数，默认使用配置")
+    gateway_restart.add_argument("--force", action="store_true", help="停止超时后强制终止旧进程")
+    gateway_restart.add_argument("--force-lock", action="store_true", help="传给内部 daemon，强制覆盖已有 dispatch watch lock")
+    gateway_restart.set_defaults(func=cmd_gateway_restart)
+
+    gateway_logs = gateway_sub.add_parser("logs", help="显示 gateway 日志尾部")
+    gateway_logs.add_argument("--lines", type=int, default=80, help="显示最后多少行日志，0 表示全部")
+    gateway_logs.set_defaults(func=cmd_gateway_logs)
+
+
+def _add_gateway_run_subcommand(gateway_sub):
+    """Register gateway run subcommand."""
     gateway_run = gateway_sub.add_parser("run", help="内部命令：前台运行 gateway 循环")
     _add_capability_config_arg(gateway_run)
     gateway_run.add_argument("--dry-run", action="store_false", dest="apply", default=None, help="覆盖配置：只生成报告，不写回")
@@ -230,22 +240,9 @@ def add_gateway_subcommands(sub: argparse._SubParsersAction) -> None:
     gateway_status = gateway_sub.add_parser("status", help="查看 gateway 状态")
     gateway_status.set_defaults(func=cmd_gateway_status)
 
-    gateway_stop = gateway_sub.add_parser("stop", help="请求 gateway 停止")
-    gateway_stop.add_argument("--timeout", type=float, help="等待正常停止的秒数，默认使用配置")
-    gateway_stop.add_argument("--kill", action="store_true", help="超时后强制终止进程")
-    gateway_stop.add_argument("--reason", help="写入 stop request 的原因")
-    gateway_stop.set_defaults(func=cmd_gateway_stop)
 
-    gateway_restart = gateway_sub.add_parser("restart", help="重启 gateway")
-    gateway_restart.add_argument("--timeout", type=float, help="等待正常停止的秒数，默认使用配置")
-    gateway_restart.add_argument("--force", action="store_true", help="停止超时后强制终止旧进程")
-    gateway_restart.add_argument("--force-lock", action="store_true", help="传给内部 daemon，强制覆盖已有 dispatch watch lock")
-    gateway_restart.set_defaults(func=cmd_gateway_restart)
-
-    gateway_logs = gateway_sub.add_parser("logs", help="显示 gateway 日志尾部")
-    gateway_logs.add_argument("--lines", type=int, default=80, help="显示最后多少行日志，0 表示全部")
-    gateway_logs.set_defaults(func=cmd_gateway_logs)
-
+def _add_gateway_ask_result_subcommands(gateway_sub):
+    """Register gateway ask/result subcommands."""
     gateway_ask = gateway_sub.add_parser(
         "ask",
         help="向后台 gateway 投递一条聊天请求；未来聊天工具/TUI 会复用这条通道",
@@ -267,7 +264,9 @@ def add_gateway_subcommands(sub: argparse._SubParsersAction) -> None:
     gateway_result.add_argument("--json", action="store_true", help="输出完整响应 JSON，方便脚本或聊天适配器读取")
     gateway_result.set_defaults(func=cmd_gateway_result)
 
-    # Supervisor subcommands
+
+def _add_gateway_supervisor_subcommands(gateway_sub):
+    """Register supervisor subcommands."""
     supervisor_start = gateway_sub.add_parser("supervisor-start", help="启动 gateway 看门狗进程（自动重启崩溃的 gateway）")
     supervisor_start.set_defaults(func=cmd_supervisor_start)
 
@@ -278,7 +277,6 @@ def add_gateway_subcommands(sub: argparse._SubParsersAction) -> None:
     supervisor_status = gateway_sub.add_parser("supervisor-status", help="查看 supervisor 和 gateway 状态")
     supervisor_status.set_defaults(func=cmd_supervisor_status)
 
-    # Supervisor run (internal: foreground supervisor loop)
     supervisor_run = gateway_sub.add_parser("supervisor", help="内部命令：前台运行 supervisor 循环")
     supervisor_run.add_argument("--workspace-root", help="工作区根目录")
     supervisor_run.add_argument("--heartbeat-timeout", type=float, default=120.0, help="心跳超时秒数")
@@ -287,7 +285,9 @@ def add_gateway_subcommands(sub: argparse._SubParsersAction) -> None:
     supervisor_run.add_argument("--restart-cooldown", type=float, default=30.0, help="重启冷却时间（秒）")
     supervisor_run.set_defaults(func=cmd_supervisor_run)
 
-    # Start-all
+
+def _add_gateway_service_subcommands(gateway_sub):
+    """Register install/uninstall and start-all subcommands."""
     start_all = gateway_sub.add_parser("start-all", help="一键启动 gateway（带 supervisor）+ 所有适配器")
     start_all.add_argument(
         "--adapter",
@@ -297,13 +297,30 @@ def add_gateway_subcommands(sub: argparse._SubParsersAction) -> None:
     )
     start_all.set_defaults(func=cmd_start_all)
 
-    # Service install/uninstall
     gateway_install = gateway_sub.add_parser("install", help="安装 gateway 系统服务（Linux systemd 或 macOS launchd）")
     gateway_install.add_argument("--force", action="store_true", help="强制重新安装已存在的服务")
     gateway_install.set_defaults(func=cmd_gateway_install)
 
     gateway_uninstall = gateway_sub.add_parser("uninstall", help="卸载 gateway 系统服务（Linux systemd 或 macOS launchd）")
     gateway_uninstall.set_defaults(func=cmd_gateway_uninstall)
+
+
+def add_gateway_subcommands(sub: argparse._SubParsersAction) -> None:
+    """LLM: register the gateway subcommand tree with start/run/status/stop/restart/logs/ask/result.
+
+    新手说明:
+    注册 gateway 子命令组：gateway start、gateway run、gateway status、
+    gateway stop、gateway restart、gateway logs、gateway ask、gateway result。
+    """
+    gateway = sub.add_parser("gateway", help="管理后台 gateway 进程")
+    gateway_sub = gateway.add_subparsers(dest="gateway_command")
+    gateway.set_defaults(func=cmd_gateway)
+
+    _add_gateway_start_stop_subcommands(gateway_sub)
+    _add_gateway_run_subcommand(gateway_sub)
+    _add_gateway_ask_result_subcommands(gateway_sub)
+    _add_gateway_supervisor_subcommands(gateway_sub)
+    _add_gateway_service_subcommands(gateway_sub)
 
 
 def add_adapter_subcommand(sub: argparse._SubParsersAction) -> None:
