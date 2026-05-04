@@ -369,12 +369,12 @@ def _apply_gap_telemetry(detail: dict[str, Any], text: str) -> None:
     """Apply telemetry or field classification to a gap detail based on text content."""
     lower = text.lower()
     _set_by_keywords(detail, lower, (
-        ("edr", "process", "host"), "missing_telemetry", "edr_process",
-        ("outbound", "dns", "proxy", "netflow", "network"), "missing_telemetry", "network_egress",
-        ("file",), "missing_telemetry", "file_activity",
-        ("mfa",), "missing_telemetry", "identity_mfa",
-        ("geoip", "country"), "missing_field", "country",
-        ("asn",), "missing_field", "asn",
+        (("edr", "process", "host"), "missing_telemetry", "edr_process"),
+        (("outbound", "dns", "proxy", "netflow", "network"), "missing_telemetry", "network_egress"),
+        (("file",), "missing_telemetry", "file_activity"),
+        (("mfa",), "missing_telemetry", "identity_mfa"),
+        (("geoip", "country"), "missing_field", "country"),
+        (("asn",), "missing_field", "asn"),
     ))
 
 

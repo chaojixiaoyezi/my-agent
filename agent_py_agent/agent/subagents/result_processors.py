@@ -89,7 +89,7 @@ class RunnerResultContext:
     now: float
 
 
-def _merge_actual_tools(task, actual_tools, used_tools, allowed_tools, now):
+def _merge_actual_tools(task, actual_tools, used_tools, allowed_tools, parsed_used_tools, now):
     """Merge actual tools into task.used_tools and add evidence for missing ones.
 
     Args:
@@ -97,13 +97,15 @@ def _merge_actual_tools(task, actual_tools, used_tools, allowed_tools, now):
         actual_tools: the actual executed tools list (may be empty)
         used_tools: tools from structured output that were in allowed set
         allowed_tools: set of allowed tool names
+        parsed_used_tools: ALL tools from structured output (before filtering)
         now: timestamp
     """
     actual_allowed_tools = [item for item in actual_tools if item in allowed_tools]
     task.used_tools = _merge_list(task.used_tools, actual_allowed_tools)
-    # When actual_tools is empty, fall back to treating structured output used_tools as ignored
+    # When actual_tools is empty, fall back to treating ALL structured output tools as ignored
+    # since there's no execution proof to validate any of them.
     if not actual_tools:
-        ignored_from_structured = [item for item in used_tools if item not in allowed_tools]
+        ignored_from_structured = list(parsed_used_tools)
         return ignored_from_structured
     ignored_tools = [item for item in task.used_tools if item not in actual_allowed_tools]
     for tool_name in actual_allowed_tools:
@@ -196,7 +198,7 @@ def _process_structured_output(
     next_actions = parsed.next_actions
 
     if actual_tools is not None:
-        ignored_tools = _merge_actual_tools(task, actual_tools, used_tools, allowed_tools, now)
+        ignored_tools = _merge_actual_tools(task, actual_tools, used_tools, allowed_tools, parsed.used_tools, now)
     else:
         task.used_tools = _merge_list(task.used_tools, used_tools)
     task.used_skills = _merge_list(task.used_skills, used_skills)
