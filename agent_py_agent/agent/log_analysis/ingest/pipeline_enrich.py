@@ -13,6 +13,7 @@ from typing import Any
 
 from ..parsers.base import LogParser
 from ..parsers.common import utc_now
+from .checkpoint import safe_source_id, write_json_atomic
 from .dead_letter import DeadLetterWriter
 from .pipeline import IngestResult, file_digest
 from .pipeline_helpers import (
@@ -305,65 +306,47 @@ def flush_events(
 
 
 def write_manifest(
-    pipeline,
     *,
-    batch_id: str,
-    source_id: str,
-    source_path: Path,
-    file_format: str,
-    parser: LogParser,
-    started_at: str,
-    content_hash: str,
-    size_bytes: int,
-    first_event_time: str | None,
-    last_event_time: str | None,
-    parsed_count: int,
-    stored_count: int,
-    duplicate_count: int,
-    skipped_count: int,
-    dead_letter_count: int,
-    dead_letter_refs: list[dict[str, Any]],
-    cursor_before: dict[str, Any],
-    storage_info: dict[str, Any],
+    params: WriteManifestParams,
 ) -> Path:
     """Write a manifest JSON file summarizing the ingest batch results."""
-    safe_source = safe_source_id(source_id)
-    manifest_path = pipeline.root / "manifests" / safe_source / f"{batch_id}.json"
+    safe_source = safe_source_id(params.source_id)
+    manifest_path = params.pipeline.root / "manifests" / safe_source / f"{params.batch_id}.json"
     cursor_after = {
-        "path": str(source_path),
-        "format": file_format,
-        "size_bytes": size_bytes,
-        "content_hash": content_hash,
-        "batch_id": batch_id,
+        "path": str(params.source_path),
+        "format": params.file_format,
+        "size_bytes": params.size_bytes,
+        "content_hash": params.content_hash,
+        "batch_id": params.batch_id,
     }
     manifest = {
-        "batch_id": batch_id,
-        "source_id": source_id,
+        "batch_id": params.batch_id,
+        "source_id": params.source_id,
         "source_kind": "file",
-        "source_path": str(source_path),
-        "format": file_format,
-        "parser_id": parser.parser_id,
-        "parser_schema": parser.schema,
-        "received_at": started_at,
+        "source_path": str(params.source_path),
+        "format": params.file_format,
+        "parser_id": params.parser.parser_id,
+        "parser_schema": params.parser.schema,
+        "received_at": params.started_at,
         "completed_at": utc_now(),
-        "time_range": [first_event_time, last_event_time],
-        "raw_refs": [str(source_path)],
-        "size_bytes": size_bytes,
-        "content_hash": content_hash,
-        "cursor_before": dict(cursor_before),
+        "time_range": [params.first_event_time, params.last_event_time],
+        "raw_refs": [str(params.source_path)],
+        "size_bytes": params.size_bytes,
+        "content_hash": params.content_hash,
+        "cursor_before": dict(params.cursor_before),
         "cursor_after": cursor_after,
         "dedup_policy": "source_event_fingerprint",
         "checkpoint_policy": "after_durable_write",
         "status": "stored",
         "counts": {
-            "parsed": parsed_count,
-            "stored": stored_count,
-            "duplicates": duplicate_count,
-            "skipped": skipped_count,
-            "dead_letter": dead_letter_count,
+            "parsed": params.parsed_count,
+            "stored": params.stored_count,
+            "duplicates": params.duplicate_count,
+            "skipped": params.skipped_count,
+            "dead_letter": params.dead_letter_count,
         },
-        "storage": dict(storage_info),
-        "dead_letter_refs": dead_letter_refs,
+        "storage": dict(params.storage_info),
+        "dead_letter_refs": params.dead_letter_refs,
     }
     write_json_atomic(manifest_path, manifest)
     return manifest_path

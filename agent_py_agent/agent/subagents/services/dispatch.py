@@ -13,6 +13,9 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .dispatch_params import DispatchRecordParams
+from .parent_planner_builder import ParentPlannerBuilder
+
 if TYPE_CHECKING:
     from ..reports import (
         DispatchRecord,
@@ -33,37 +36,9 @@ class SubAgentDispatchService:
     def make_dispatch_record(
         self,
         *,
-        step: str,
-        action: str,
-        run_id: str = "",
-        dry_run: bool = True,
-        applied: bool = False,
-        ok: bool = True,
-        message: str = "",
-        before_status: str = "",
-        after_status: str = "",
-        before_verification_status: str = "",
-        after_verification_status: str = "",
-        evidence_paths: list[str] | None = None,
+        params: DispatchRecordParams,
     ) -> DispatchRecord:
         """Create a dispatch audit record."""
-        from ..reports import DispatchRecord
-        from .dispatch_params import DispatchRecordParams
-
-        params = DispatchRecordParams(
-            step=step,
-            action=action,
-            run_id=run_id,
-            dry_run=dry_run,
-            applied=applied,
-            ok=ok,
-            message=message,
-            before_status=before_status,
-            after_status=after_status,
-            before_verification_status=before_verification_status,
-            after_verification_status=after_verification_status,
-            evidence_paths=evidence_paths,
-        )
         return self._make_dispatch_record(params)
 
     def _make_dispatch_record(self, params: DispatchRecordParams) -> DispatchRecord:
@@ -122,31 +97,12 @@ class SubAgentDispatchService:
     def make_dispatch_watch_record(
         self,
         *,
-        cycle: int,
-        dry_run: bool,
-        ok: bool,
-        message: str,
-        dispatch_record_count: int,
-        dispatch_summary: dict[str, int] | None = None,
-        started_at: float = 0.0,
-        ended_at: float = 0.0,
-        evidence_paths: list[str] | None = None,
+        params: DispatchWatchRecordParams,
     ) -> DispatchWatchRecord:
         """Create a watch loop record."""
         from .dispatch_watch_builder import DispatchWatchBuilder
 
-        return DispatchWatchBuilder.make_record(
-            self.manager,
-            cycle=cycle,
-            dry_run=dry_run,
-            ok=ok,
-            message=message,
-            dispatch_record_count=dispatch_record_count,
-            dispatch_summary=dispatch_summary,
-            started_at=started_at,
-            ended_at=ended_at,
-            evidence_paths=evidence_paths,
-        )
+        return DispatchWatchBuilder.make_record(self.manager, params=params)
 
     def build_dispatch_watch_report(
         self,
@@ -217,51 +173,12 @@ class SubAgentDispatchService:
     def make_parent_planner_record(
         self,
         *,
-        dry_run: bool,
-        triggered: bool,
-        ok: bool,
-        decision: str,
-        message: str,
-        gate_summary: dict[str, int] | None = None,
-        backend: str = "",
-        tool_rounds: int = 0,
-        parse_error: str = "",
-        summary: str = "",
-        actions: list[dict[str, object]] | None = None,
-        blockers: list[str] | None = None,
-        risks: list[str] | None = None,
-        notes: list[str] | None = None,
-        runner_instruction: str = "",
-        suggested_max_runners: int = 0,
-        prompt_path: str = "",
-        response_path: str = "",
-        evidence_paths: list[str] | None = None,
+        params: ParentPlannerRecordParams,
     ) -> ParentPlannerRecord:
         """Create a parent planner audit record."""
         from .parent_planner_builder import ParentPlannerBuilder
 
-        return ParentPlannerBuilder.make_record(
-            self.manager,
-            dry_run=dry_run,
-            triggered=triggered,
-            ok=ok,
-            decision=decision,
-            message=message,
-            gate_summary=gate_summary,
-            backend=backend,
-            tool_rounds=tool_rounds,
-            parse_error=parse_error,
-            summary=summary,
-            actions=actions,
-            blockers=blockers,
-            risks=risks,
-            notes=notes,
-            runner_instruction=runner_instruction,
-            suggested_max_runners=suggested_max_runners,
-            prompt_path=prompt_path,
-            response_path=response_path,
-            evidence_paths=evidence_paths,
-        )
+        return ParentPlannerBuilder.make_record(self.manager, params=params)
 
     def build_parent_planner_report(
         self,

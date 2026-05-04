@@ -13,6 +13,10 @@ from dataclasses import dataclass
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..memory_archive import write_recovery_snapshot
+from ..memory_archive.snapshots import (
+    CompressionSnapshotInput,
+    RecoverySnapshotInput,
+)
 from ..subagent import (
     ParentPlannerRecord,
     SubAgentRunnerResult,
@@ -20,6 +24,7 @@ from ..subagent import (
     parse_parent_planner_output,
     parse_subagent_runner_output,
 )
+from ..subagents.services.dispatch_params import ParentPlannerRecordParams
 from .automation_guard import SubagentAutomationGuard
 from .planner import (
     PARENT_PLANNER_READ_TOOLS,
@@ -373,21 +378,23 @@ class _SubagentRepairMixin:
             ]
         write_recovery_snapshot(
             self.root,
-            session_id=getattr(self, "session_id", self.config.agent_name),
-            request_id=f"subagent-run:{run_id}",
-            run_id=run_id,
-            task_id=run_id,
-            user_prompt=user_prompt,
-            response_text=response_text,
-            backend=backend,
-            source="subagent_run",
-            status=status.lower() or "unknown",
-            error_code=error_code,
-            tool_calls=tool_calls,
-            task_refs=[run_id],
-            content_paths=content_paths,
-            next_actions=next_actions,
-            archive_level=int(getattr(self.config, "memory_hook_archive_level", 3)),
+            params=RecoverySnapshotInput(
+                session_id=getattr(self, "session_id", self.config.agent_name),
+                user_prompt=user_prompt,
+                response_text=response_text,
+                backend=backend,
+                source="subagent_run",
+                request_id=f"subagent-run:{run_id}",
+                run_id=run_id,
+                task_id=run_id,
+                status=status.lower() or "unknown",
+                error_code=error_code,
+                tool_calls=tool_calls,
+                task_refs=[run_id],
+                content_paths=content_paths,
+                next_actions=next_actions,
+                archive_level=int(getattr(self.config, "memory_hook_archive_level", 3)),
+            ),
         )
 
 
@@ -450,13 +457,15 @@ class _ParentPlannerMixin:
     def _make_heartbeat_ok_record(self, dry_run, gate_summary):
         """Make heartbeat OK record when no planner needed."""
         record = self.subagents.make_parent_planner_record(
-            dry_run=dry_run,
-            triggered=False,
-            ok=True,
-            decision="HEARTBEAT_OK",
-            message="planner gate 确认无 active/pending/stalled/needs-intervention 事项，允许 HEARTBEAT_OK。",
-            gate_summary=gate_summary,
-            summary="no work",
+            params=ParentPlannerRecordParams(
+                dry_run=dry_run,
+                triggered=False,
+                ok=True,
+                decision="HEARTBEAT_OK",
+                message="planner gate 确认无 active/pending/stalled/needs-intervention 事项，允许 HEARTBEAT_OK。",
+                gate_summary=gate_summary,
+                summary="no work",
+            ),
         )
         report = self.subagents.build_parent_planner_report([record], dry_run=dry_run)
         self.subagents.write_parent_planner_report(report, append_log=False)
@@ -482,14 +491,16 @@ class _ParentPlannerMixin:
     def _make_planner_error_record(self, gate_summary, runner_instruction, apply):
         """Make planner error record after LLM failure."""
         record = self.subagents.make_parent_planner_record(
-            dry_run=not apply,
-            triggered=True,
-            ok=False,
-            decision="PLANNER_ERROR",
-            message="父代理 planner 调用失败",
-            gate_summary=gate_summary,
-            runner_instruction=runner_instruction,
-            evidence_paths=[],
+            params=ParentPlannerRecordParams(
+                dry_run=not apply,
+                triggered=True,
+                ok=False,
+                decision="PLANNER_ERROR",
+                message="父代理 planner 调用失败",
+                gate_summary=gate_summary,
+                runner_instruction=runner_instruction,
+                evidence_paths=[],
+            ),
         )
         report = self.subagents.build_parent_planner_report([record], dry_run=not apply)
         self.subagents.write_parent_planner_report(report, append_log=apply)
@@ -520,25 +531,27 @@ class _ParentPlannerMixin:
             message = "状态门禁发现仍有待处理事项，禁止 planner 只返回 HEARTBEAT_OK。"
 
         record = self.subagents.make_parent_planner_record(
-            dry_run=not apply,
-            triggered=True,
-            ok=ok,
-            decision=decision,
-            message=message,
-            gate_summary=gate_summary,
-            backend=result.backend,
-            tool_rounds=result.tool_rounds,
-            parse_error=parse_error,
-            summary=parsed.summary,
-            actions=parsed.actions,
-            blockers=parsed.blockers,
-            risks=parsed.risks,
-            notes=parsed.notes,
-            runner_instruction=parsed.runner_instruction,
-            suggested_max_runners=parsed.suggested_max_runners,
-            prompt_path=prompt_path,
-            response_path=response_path,
-            evidence_paths=[prompt_path, response_path],
+            params=ParentPlannerRecordParams(
+                dry_run=not apply,
+                triggered=True,
+                ok=ok,
+                decision=decision,
+                message=message,
+                gate_summary=gate_summary,
+                backend=result.backend,
+                tool_rounds=result.tool_rounds,
+                parse_error=parse_error,
+                summary=parsed.summary,
+                actions=parsed.actions,
+                blockers=parsed.blockers,
+                risks=parsed.risks,
+                notes=parsed.notes,
+                runner_instruction=parsed.runner_instruction,
+                suggested_max_runners=parsed.suggested_max_runners,
+                prompt_path=prompt_path,
+                response_path=response_path,
+                evidence_paths=[prompt_path, response_path],
+            ),
         )
         report = self.subagents.build_parent_planner_report([record], dry_run=not apply)
         self.subagents.write_parent_planner_report(report, append_log=apply)

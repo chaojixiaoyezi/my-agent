@@ -4,26 +4,28 @@ from __future__ import annotations
 
 import time
 
+from .dispatch_params import DispatchWatchRecordParams
+
 
 class DispatchWatchBuilder:
     """Build dispatch watch records and reports."""
 
     @staticmethod
-    def make_record(manager, *, cycle, dry_run, ok, message, dispatch_record_count, dispatch_summary, started_at, ended_at, evidence_paths) -> DispatchWatchRecord:
+    def make_record(manager, *, params: DispatchWatchRecordParams) -> DispatchWatchRecord:
         """Create a watch loop record."""
         from agent_py_agent.agent.subagents.reports import DispatchWatchRecord
 
         return DispatchWatchRecord(
             id=manager._new_id("watch"),
-            cycle=cycle,
-            dry_run=dry_run,
-            ok=ok,
-            message=message,
-            dispatch_record_count=dispatch_record_count,
-            dispatch_summary=dispatch_summary or {},
-            started_at=started_at,
-            ended_at=ended_at,
-            evidence_paths=evidence_paths or [],
+            cycle=params.cycle,
+            dry_run=params.dry_run,
+            ok=params.ok,
+            message=params.message,
+            dispatch_record_count=params.dispatch_record_count,
+            dispatch_summary=params.dispatch_summary or {},
+            started_at=params.started_at,
+            ended_at=params.ended_at,
+            evidence_paths=params.evidence_paths or [],
         )
 
     @staticmethod

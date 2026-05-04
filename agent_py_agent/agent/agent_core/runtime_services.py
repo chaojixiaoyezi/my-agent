@@ -14,10 +14,15 @@ from typing import Any
 from ..memory_archive import (
     archive_run_turn,
     estimate_tokens,
+    snapshots,
     write_compression_snapshot,
     write_recovery_snapshot,
 )
 from ..memory_archive.runtime.turn_archiver import ArchiveTurnContext
+from ..memory_archive.snapshots import (
+    CompressionSnapshotInput,
+    RecoverySnapshotInput,
+)
 from ..memory_archive.tokens import append_session_token_usage
 from ..tools import ToolExecutionResult
 from .models import AgentRunResult
@@ -219,20 +224,22 @@ class CompressionService:
         try:
             hook_result = write_compression_snapshot(
                 self._agent.root,
-                session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
-                turn_id=turn_id,
-                role="system",
-                content=snapshot_content,
-                archive_level=int(getattr(self._agent.config, "memory_hook_archive_level", 3)),
-                request_id=ctx.request_id,
-                run_id=ctx.run_id,
-                task_id=ctx.task_id,
-                source=ctx.source,
-                content_paths=[
-                    *(getattr(ctx.routed_context, "required_read_paths", None) or []),
-                    *(getattr(ctx.routed_context, "candidate_paths", None) or []),
-                ],
-                next_actions=["先校验 task 事实源，再使用 compression snapshot 恢复上下文。"],
+                params=CompressionSnapshotInput(
+                    session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
+                    turn_id=turn_id,
+                    role="system",
+                    content=snapshot_content,
+                    archive_level=int(getattr(self._agent.config, "memory_hook_archive_level", 3)),
+                    request_id=ctx.request_id,
+                    run_id=ctx.run_id,
+                    task_id=ctx.task_id,
+                    source=ctx.source,
+                    content_paths=[
+                        *(getattr(ctx.routed_context, "required_read_paths", None) or []),
+                        *(getattr(ctx.routed_context, "candidate_paths", None) or []),
+                    ],
+                    next_actions=["先校验 task 事实源，再使用 compression snapshot 恢复上下文。"],
+                ),
             )
         except Exception as exc:
             if getattr(self._agent, "local_store", None):
@@ -445,24 +452,26 @@ class FinalizationService:
             return None
         return write_recovery_snapshot(
             self._agent.root,
-            session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
-            request_id=params.run_request_id,
-            run_id=params.run_id,
-            task_id=params.task_id,
-            user_prompt=params.user_prompt,
-            response_text=params.final_response.text,
-            backend=params.final_response.backend,
-            source=params.source,
-            status="ok",
-            tool_calls=params.archive_tool_calls,
-            task_refs=params.recovery_task_refs or [],
-            content_paths=[
-                *(params.recovery_content_paths or []),
-                *(getattr(params.routed_context, "required_read_paths", None) or []),
-                *(getattr(params.routed_context, "candidate_paths", None) or []),
-            ],
-            next_actions=params.recovery_next_actions or [],
-            archive_level=int(getattr(self._agent.config, "memory_hook_archive_level", 3)),
+            params=RecoverySnapshotInput(
+                session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
+                user_prompt=params.user_prompt,
+                response_text=params.final_response.text,
+                backend=params.final_response.backend,
+                source=params.source,
+                request_id=params.run_request_id,
+                run_id=params.run_id,
+                task_id=params.task_id,
+                status="ok",
+                tool_calls=params.archive_tool_calls,
+                task_refs=params.recovery_task_refs or [],
+                content_paths=[
+                    *(params.recovery_content_paths or []),
+                    *(getattr(params.routed_context, "required_read_paths", None) or []),
+                    *(getattr(params.routed_context, "candidate_paths", None) or []),
+                ],
+                next_actions=params.recovery_next_actions or [],
+                archive_level=int(getattr(self._agent.config, "memory_hook_archive_level", 3)),
+            ),
         )
 
     def _estimate_token_usage(self, params: EstimateTokenParams):

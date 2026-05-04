@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
+from ..subagents.services.base import CreateRunParams
 from ..tools import BaseTool, ToolExecutionResult, ToolSpec
 from .parameters import _bool_param, _non_negative_int, _positive_int, _string_list
 
@@ -133,17 +134,19 @@ class CreateSubagentsTool(BaseTool):
         for index in range(1, count + 1):
             task_goal = goal if count == 1 else f"{goal} / 子任务{index}"
             task = self.agent.subagents.create_run(
-                goal=task_goal,
-                thought=thought,
-                plan=plan,
-                agent_name=agent_name,
-                role=role,
-                allowed_tools=allowed_tools,
-                owner=owner,
-                supervisor=supervisor,
-                final_owner=final_owner,
-                acceptance_checks=acceptance_checks,
-                workflow_mode=workflow_mode,
+                params=CreateRunParams(
+                    goal=task_goal,
+                    thought=thought,
+                    plan=plan,
+                    agent_name=agent_name,
+                    role=role,
+                    allowed_tools=allowed_tools,
+                    owner=owner,
+                    supervisor=supervisor,
+                    final_owner=final_owner,
+                    acceptance_checks=acceptance_checks,
+                    workflow_mode=workflow_mode,
+                ),
             )
             tasks.append(task)
 

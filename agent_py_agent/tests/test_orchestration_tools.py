@@ -175,7 +175,7 @@ class TestCreateSubagentsToolExecute:
 
         # 验证调用时使用了默认的只读工具
         call_kwargs = mock_agent.subagents.create_run.call_args[1]
-        assert "read_file" in call_kwargs["allowed_tools"]
+        assert "read_file" in call_kwargs["params"].allowed_tools
 
 
 class TestSubagentBoardToolExecute:

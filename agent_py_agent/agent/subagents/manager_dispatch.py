@@ -8,6 +8,11 @@ Human version:
 """
 
 from .services.dispatch import SubAgentDispatchService
+from .services.dispatch_params import (
+    DispatchRecordParams,
+    DispatchWatchRecordParams,
+    ParentPlannerRecordParams,
+)
 
 
 class SubAgentDispatchMixin:
@@ -20,7 +25,9 @@ class SubAgentDispatchMixin:
         return self.__dispatch_service
 
     def make_dispatch_record(self, **kwargs):
-        return self._dispatch_service.make_dispatch_record(**kwargs)
+        if "params" in kwargs:
+            return self._dispatch_service.make_dispatch_record(params=kwargs["params"])
+        return self._dispatch_service.make_dispatch_record(params=DispatchRecordParams(**kwargs))
 
     def build_dispatch_report(self, records, *, dry_run):
         return self._dispatch_service.build_dispatch_report(records, dry_run=dry_run)
@@ -32,7 +39,9 @@ class SubAgentDispatchMixin:
         self._dispatch_service._append_dispatch_log(record)
 
     def make_dispatch_watch_record(self, **kwargs):
-        return self._dispatch_service.make_dispatch_watch_record(**kwargs)
+        if "params" in kwargs:
+            return self._dispatch_service.make_dispatch_watch_record(params=kwargs["params"])
+        return self._dispatch_service.make_dispatch_watch_record(params=DispatchWatchRecordParams(**kwargs))
 
     def build_dispatch_watch_report(self, records, *, dry_run):
         return self._dispatch_service.build_dispatch_watch_report(records, dry_run=dry_run)
@@ -47,7 +56,9 @@ class SubAgentDispatchMixin:
         return self._dispatch_service.write_parent_planner_exchange(prompt, response)
 
     def make_parent_planner_record(self, **kwargs):
-        return self._dispatch_service.make_parent_planner_record(**kwargs)
+        if "params" in kwargs:
+            return self._dispatch_service.make_parent_planner_record(params=kwargs["params"])
+        return self._dispatch_service.make_parent_planner_record(params=ParentPlannerRecordParams(**kwargs))
 
     def build_parent_planner_report(self, records, *, dry_run):
         return self._dispatch_service.build_parent_planner_report(records, dry_run=dry_run)
