@@ -7,6 +7,7 @@ from __future__ import annotations
 从 pipeline.py 拆出来，让解析/迭代和写入/去重各归一处。
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,84 +27,89 @@ from .pipeline_helpers import (
 )
 
 
-def _finalize_ingest_result(
-    pipeline,
-    batch_id: str,
-    batch_source_id: str,
-    source_path: Path,
-    fmt: str,
-    parser,
-    started_at: str,
-    content_hash: str,
-    size_bytes: int,
-    counts,
-    event_ids: list[str],
-    dead_letters,
-    storage_summary: dict[str, Any],
-    cursor_before: dict,
-):
+@dataclass
+class _FinalizeIngestParams:
+    """Bundle of all _finalize_ingest_result parameters."""
+
+    pipeline: Any
+    batch_id: str
+    batch_source_id: str
+    source_path: Path
+    fmt: str
+    parser: LogParser
+    started_at: str
+    content_hash: str
+    size_bytes: int
+    counts: _EnrichCounts
+    event_ids: list[str]
+    dead_letters: DeadLetterWriter
+    storage_summary: dict[str, Any]
+    cursor_before: dict
+
+
+def _finalize_ingest_result(params: _FinalizeIngestParams) -> IngestResult:
     """Write manifest, finish dedup batch, commit checkpoint, return IngestResult."""
     manifest_params = WriteManifestParams(
-        pipeline=pipeline,
-        batch_id=batch_id,
-        source_id=batch_source_id,
-        source_path=source_path,
-        file_format=fmt,
-        parser=parser,
-        started_at=started_at,
-        content_hash=content_hash,
-        size_bytes=size_bytes,
-        first_event_time=counts.first_event_time,
-        last_event_time=counts.last_event_time,
-        parsed_count=counts.parsed_count,
-        stored_count=len(event_ids),
-        duplicate_count=counts.duplicate_count,
-        skipped_count=counts.skipped_count,
-        dead_letter_count=dead_letters.count,
-        dead_letter_refs=dead_letters.refs(),
-        cursor_before=cursor_before,
-        storage_info=storage_summary,
+        pipeline=params.pipeline,
+        batch_id=params.batch_id,
+        source_id=params.batch_source_id,
+        source_path=params.source_path,
+        file_format=params.fmt,
+        parser=params.parser,
+        started_at=params.started_at,
+        content_hash=params.content_hash,
+        size_bytes=params.size_bytes,
+        first_event_time=params.counts.first_event_time,
+        last_event_time=params.counts.last_event_time,
+        parsed_count=params.counts.parsed_count,
+        stored_count=len(params.event_ids),
+        duplicate_count=params.counts.duplicate_count,
+        skipped_count=params.counts.skipped_count,
+        dead_letter_count=params.dead_letters.count,
+        dead_letter_refs=params.dead_letters.refs(),
+        cursor_before=params.cursor_before,
+        storage_info=params.storage_summary,
     )
     manifest_path = _write_manifest(manifest_params)
-    pipeline.dedup.finish_batch(
-        batch_id=batch_id,
+    params.pipeline.dedup.finish_batch(
+        batch_id=params.batch_id,
         status="stored",
-        event_count=len(event_ids),
-        duplicate_count=counts.duplicate_count,
-        dead_letter_count=dead_letters.count,
+        event_count=len(params.event_ids),
+        duplicate_count=params.counts.duplicate_count,
+        dead_letter_count=params.dead_letters.count,
         manifest_path=str(manifest_path),
     )
-    checkpoint = pipeline.checkpoints.commit(
-        source_id=batch_source_id,
+    checkpoint = params.pipeline.checkpoints.commit(
+        source_id=params.batch_source_id,
         cursor_kind="file_content_hash",
         cursor={
-            "path": str(source_path),
-            "format": fmt,
-            "size_bytes": size_bytes,
-            "content_hash": content_hash,
-            "batch_id": batch_id,
+            "path": str(params.source_path),
+            "format": params.fmt,
+            "size_bytes": params.size_bytes,
+            "content_hash": params.content_hash,
+            "batch_id": params.batch_id,
         },
-        last_committed_batch_id=batch_id,
-        last_event_time=counts.last_event_time,
+        last_committed_batch_id=params.batch_id,
+        last_event_time=params.counts.last_event_time,
     )
 
     return IngestResult(
-        batch_id=batch_id,
-        source_id=batch_source_id,
-        source_path=str(source_path),
-        file_format=fmt,
+        batch_id=params.batch_id,
+        source_id=params.batch_source_id,
+        source_path=str(params.source_path),
+        file_format=params.fmt,
         status="stored",
-        parsed_count=counts.parsed_count,
-        stored_count=len(event_ids),
-        duplicate_count=counts.duplicate_count,
-        dead_letter_count=dead_letters.count,
-        skipped_count=counts.skipped_count,
-        content_hash=content_hash,
+        parsed_count=params.counts.parsed_count,
+        stored_count=len(params.event_ids),
+        duplicate_count=params.counts.duplicate_count,
+        dead_letter_count=params.dead_letters.count,
+        skipped_count=params.counts.skipped_count,
+        content_hash=params.content_hash,
         manifest_path=str(manifest_path),
-        checkpoint_path=str(pipeline.checkpoints.path_for(checkpoint.source_id)),
-        events_path=storage_summary.get("path"),
-        dead_letter_refs=dead_letters.refs(),
-        stored_event_ids=event_ids,
+        checkpoint_path=str(params.pipeline.checkpoints.path_for(checkpoint.source_id)),
+        events_path=params.storage_summary.get("path"),
+        dead_letter_refs=params.dead_letters.refs(),
+        stored_event_ids=params.event_ids,
     )
 
 
@@ -162,20 +168,22 @@ def enrich_ingest_file(
         storage_infos, fallback_path=pipeline.fallback_sink.events_path
     )
     return _finalize_ingest_result(
-        pipeline,
-        batch_id,
-        batch_source_id,
-        source_path,
-        fmt,
-        parser,
-        started_at,
-        content_hash,
-        size_bytes,
-        counts,
-        event_ids,
-        dead_letters,
-        storage_summary,
-        cursor_before,
+        _FinalizeIngestParams(
+            pipeline=pipeline,
+            batch_id=batch_id,
+            batch_source_id=batch_source_id,
+            source_path=source_path,
+            fmt=fmt,
+            parser=parser,
+            started_at=started_at,
+            content_hash=content_hash,
+            size_bytes=size_bytes,
+            counts=counts,
+            event_ids=event_ids,
+            dead_letters=dead_letters,
+            storage_summary=storage_summary,
+            cursor_before=cursor_before,
+        )
     )
 
 

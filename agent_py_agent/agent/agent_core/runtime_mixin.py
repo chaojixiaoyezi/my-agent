@@ -49,6 +49,45 @@ class RunParams:
 
 
 @dataclass
+class _RuntimeLoopParams:
+    """Bundle of all _execute_runtime_loop parameters."""
+
+    user_prompt: str
+    memories: list
+    runtime_injections: list
+    allowed_tools: list | None = None
+    granted_capabilities: list | None = None
+    prompt_files: list | None = None
+    write_boundary: dict | None = None
+    task_attributes: dict | None = None
+    on_chunk: object = None
+    request_id: str = ""
+    run_id: str = ""
+    task_id: str = ""
+    source: str = "run"
+
+
+@dataclass
+class _FinalizeParams:
+    """Bundle of all _build_finalize_context parameters."""
+
+    user_prompt: str
+    final_prompt: str
+    final_response: Any
+    memories: list
+    executed_tools: list[str]
+    archive_tool_calls: list[dict[str, object]]
+    routed_context: Any
+    resume_context_result: Any
+    runtime_injections: list
+    compression_snapshot_id: str
+    compression_snapshot_path: str
+    compression_applied: bool
+    run_params: RunParams
+    tool_rounds: int
+
+
+@dataclass
 class _RuntimeServices:
     """Bundles the three lazy-initialized service instances."""
 
@@ -114,31 +153,26 @@ class SimpleAgentRuntimeMixin:
         memories, runtime_injections, routed_context, resume_context_result = (
             _prepare_runtime_context(self, user_prompt, params.inject, params.resume_context)
         )
+        loop_params = _RuntimeLoopParams(
+            user_prompt=user_prompt,
+            memories=memories,
+            runtime_injections=runtime_injections,
+            allowed_tools=params.allowed_tools,
+            granted_capabilities=params.granted_capabilities,
+            prompt_files=params.prompt_files,
+            write_boundary=params.write_boundary,
+            task_attributes=params.task_attributes,
+            on_chunk=params.on_chunk,
+            request_id=params.request_id,
+            run_id=params.run_id,
+            task_id=params.task_id,
+            source=params.source,
+        )
         final_prompt, final_response, tool_rounds, compression_snapshot_id, compression_snapshot_path, compression_applied, executed_tools, archive_tool_calls = (
-            _execute_runtime_loop(
-                self, user_prompt, memories, runtime_injections,
-                params.allowed_tools, params.granted_capabilities,
-                params.prompt_files, params.write_boundary, params.task_attributes,
-                params.on_chunk, params.request_id, params.run_id, params.task_id, params.source,
-            )
+            _execute_runtime_loop(self, loop_params)
         )
 
-        ctx = self._build_finalize_context(
-            user_prompt, final_prompt, final_response, memories,
-            executed_tools, archive_tool_calls, routed_context, resume_context_result,
-            runtime_injections, compression_snapshot_id, compression_snapshot_path,
-            compression_applied, params, tool_rounds,
-        )
-        return self._get_services().finalization.finalize(ctx)
-
-    def _build_finalize_context(
-        self, user_prompt, final_prompt, final_response, memories,
-        executed_tools, archive_tool_calls, routed_context, resume_context_result,
-        runtime_injections, compression_snapshot_id, compression_snapshot_path,
-        compression_applied, params, tool_rounds,
-    ):
-        from .runtime_services import FinalizeContext
-        return FinalizeContext(
+        finalize_params = _FinalizeParams(
             user_prompt=user_prompt,
             final_prompt=final_prompt,
             final_response=final_response,
@@ -151,16 +185,38 @@ class SimpleAgentRuntimeMixin:
             compression_snapshot_id=compression_snapshot_id,
             compression_snapshot_path=compression_snapshot_path,
             compression_applied=compression_applied,
-            request_id=params.request_id,
-            run_id=params.run_id,
-            task_id=params.task_id,
-            source=params.source,
-            do_save=self.config.auto_save_memory if params.save is None else params.save,
-            recovery_snapshot=params.recovery_snapshot,
-            recovery_task_refs=params.recovery_task_refs,
-            recovery_content_paths=params.recovery_content_paths,
-            recovery_next_actions=params.recovery_next_actions,
+            run_params=params,
             tool_rounds=tool_rounds,
+        )
+        ctx = self._build_finalize_context(finalize_params)
+        return self._get_services().finalization.finalize(ctx)
+
+    def _build_finalize_context(self, params: _FinalizeParams):
+        from .runtime_services import FinalizeContext
+        rp = params.run_params
+        return FinalizeContext(
+            user_prompt=params.user_prompt,
+            final_prompt=params.final_prompt,
+            final_response=params.final_response,
+            memories=params.memories,
+            executed_tools=params.executed_tools,
+            archive_tool_calls=params.archive_tool_calls,
+            routed_context=params.routed_context,
+            resume_context_result=params.resume_context_result,
+            runtime_injections=params.runtime_injections,
+            compression_snapshot_id=params.compression_snapshot_id,
+            compression_snapshot_path=params.compression_snapshot_path,
+            compression_applied=params.compression_applied,
+            request_id=rp.request_id,
+            run_id=rp.run_id,
+            task_id=rp.task_id,
+            source=rp.source,
+            do_save=self.config.auto_save_memory if rp.save is None else rp.save,
+            recovery_snapshot=rp.recovery_snapshot,
+            recovery_task_refs=rp.recovery_task_refs,
+            recovery_content_paths=rp.recovery_content_paths,
+            recovery_next_actions=rp.recovery_next_actions,
+            tool_rounds=params.tool_rounds,
         )
 
     def remember(self, content: str, *, kind: str = "note"):
@@ -214,22 +270,20 @@ def _prepare_runtime_context(agent, user_prompt, inject, resume_context):
     return memories, runtime_injections, routed_context, resume_context_result
 
 
-def _execute_runtime_loop(
-    agent, user_prompt, memories, runtime_injections,
-    allowed_tools, granted_capabilities, prompt_files, write_boundary,
-    task_attributes, on_chunk, request_id, run_id, task_id, source,
-):
+def _execute_runtime_loop(agent, params: _RuntimeLoopParams):
     """Execute the core tool loop and compression for a run."""
     tool_catalog_section, tool_recommendations_section = _resolve_tool_sections(
-        agent, allowed_tools, granted_capabilities,
+        agent, params.allowed_tools, params.granted_capabilities,
     )
     compression_svc = agent._get_services().compression
     from .runtime_services import CompressionContext
 
     compression_ctx = CompressionContext(
-        user_prompt=user_prompt, memories=memories, runtime_injections=runtime_injections,
+        user_prompt=params.user_prompt, memories=params.memories,
+        runtime_injections=params.runtime_injections,
         routed_context=None, resume_context_section="",
-        request_id=request_id, run_id=run_id, task_id=task_id, source=source,
+        request_id=params.request_id, run_id=params.run_id,
+        task_id=params.task_id, source=params.source,
     )
     memories, compression_snapshot_id, compression_snapshot_path, compression_applied = (
         compression_svc.check_and_apply(compression_ctx)
@@ -245,14 +299,20 @@ def _execute_runtime_loop(
 
     from .runtime_services import ToolLoopExecuteParams
     loop_params = ToolLoopExecuteParams(
-        user_prompt=user_prompt, memories=memories, runtime_injections=runtime_injections,
-        prompt_files=prompt_files, tool_catalog_section=tool_catalog_section,
+        user_prompt=params.user_prompt, memories=memories,
+        runtime_injections=params.runtime_injections,
+        prompt_files=params.prompt_files,
+        tool_catalog_section=tool_catalog_section,
         tool_recommendations_section=tool_recommendations_section,
-        tool_context=tool_context, effective_on_chunk=on_chunk,
-        allowed_tools=allowed_tools, granted_capabilities=granted_capabilities,
-        write_boundary=write_boundary, task_attributes=task_attributes,
-        one_shot_tool_calls=one_shot_tool_calls, executed_tools=executed_tools,
-        archive_tool_calls=archive_tool_calls, tool_rounds=tool_rounds,
+        tool_context=tool_context, effective_on_chunk=params.on_chunk,
+        allowed_tools=params.allowed_tools,
+        granted_capabilities=params.granted_capabilities,
+        write_boundary=params.write_boundary,
+        task_attributes=params.task_attributes,
+        one_shot_tool_calls=one_shot_tool_calls,
+        executed_tools=executed_tools,
+        archive_tool_calls=archive_tool_calls,
+        tool_rounds=tool_rounds,
     )
     final_prompt, final_response, tool_rounds = agent._get_services().tool_loop.execute(loop_params)
     return final_prompt, final_response, tool_rounds, compression_snapshot_id, compression_snapshot_path, compression_applied, executed_tools, archive_tool_calls
