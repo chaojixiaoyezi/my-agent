@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..models import SubAgentTask
-    from ..reports import AcceptanceReviewFinding
+
+from ..reports import AcceptanceReviewFinding
 
 
 def _artifact_exists(manager: Any, task: SubAgentTask, raw_path: str) -> bool:
