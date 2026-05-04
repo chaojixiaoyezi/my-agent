@@ -149,40 +149,9 @@ def watch_subagents(
     return agent.subagents.write_dispatch_watch_report(report)
 
 
-def _run_single_watch_cycle(
-    agent: SimpleAgent,
-    params: RunSingleWatchCycleParams,
-) -> DispatchWatchRecord:
-    """Run a single watch cycle and return the dispatch watch record."""
-    from ..dispatch_service import MakeDispatchWatchRecordParams, make_dispatch_watch_record
-    from ..parameters import _sleep_with_stop
-
-    started_at = time_module.time()
-    agent.subagents.write_dispatch_watch_heartbeat(
-        cycle=params.cycle,
-        status="running",
-        lock_path=str(params.lock_path),
-        pid=os.getpid(),
-        message="dispatch cycle started",
-    )
+def _execute_watch_dispatch(agent, params):
+    """Execute dispatch for a single watch cycle and return dispatch result."""
     try:
-        from ..dispatch_mixin import DispatchParams
-
-        dispatch_params = DispatchParams(
-            apply=params.apply,
-            execute_runners=params.execute_runners,
-            planner=params.planner,
-            workflow_mode=params.workflow_mode,
-            max_runners=params.max_runners,
-            limit=params.limit,
-            reviewer=params.reviewer,
-            note=params.note,
-            runner_instruction=params.runner_instruction,
-            max_cards=params.max_cards,
-            probe=params.probe,
-            take_over_by=params.take_over_by,
-            locked_files=params.locked_files,
-        )
         dispatch_report = agent.dispatch_subagents(
             router=params.router,
             capability_config=params.cfg,
@@ -214,6 +183,29 @@ def _run_single_watch_cycle(
         record_count = 0
         dispatch_summary = {}
         evidence_paths = []
+    return ok, message, record_count, dispatch_summary, evidence_paths
+
+
+def _run_single_watch_cycle(
+    agent: SimpleAgent,
+    params: RunSingleWatchCycleParams,
+) -> DispatchWatchRecord:
+    """Run a single watch cycle and return the dispatch watch record."""
+    from ..dispatch_service import MakeDispatchWatchRecordParams, make_dispatch_watch_record
+    from ..parameters import _sleep_with_stop
+
+    started_at = time_module.time()
+    agent.subagents.write_dispatch_watch_heartbeat(
+        cycle=params.cycle,
+        status="running",
+        lock_path=str(params.lock_path),
+        pid=os.getpid(),
+        message="dispatch cycle started",
+    )
+
+    ok, message, record_count, dispatch_summary, evidence_paths = _execute_watch_dispatch(
+        agent, params
+    )
 
     ended_at = time_module.time()
     watch_record_params = MakeDispatchWatchRecordParams(

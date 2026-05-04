@@ -45,6 +45,27 @@ class DispatchLoopReport:
     rounds: list[dict] = field(default_factory=list)
 
 
+def _run_single_dispatch(agent, router, capability_config, params):
+    """执行单轮 dispatch 并返回报告。"""
+    return agent.dispatch_subagents(
+        router,
+        capability_config,
+        apply=params.apply,
+        execute_runners=params.execute_runners,
+        planner=params.planner,
+        workflow_mode=params.workflow_mode,
+        max_runners=params.max_runners,
+        limit=params.limit,
+        reviewer=params.reviewer,
+        note=params.note,
+        runner_instruction=params.runner_instruction,
+        max_cards=params.max_cards,
+        probe=params.probe,
+        take_over_by=params.take_over_by,
+        locked_files=params.locked_files,
+    )
+
+
 def dispatch_loop(
     agent,
     router: CapabilityRouter,
@@ -53,42 +74,16 @@ def dispatch_loop(
     params: DispatchLoopParams = None,
     **kwargs,
 ) -> DispatchLoopReport:
-    """循环执行 dispatch 直到没有可调度任务或达到上限。
-
-    Args:
-        agent: SimpleAgent 实例（包含 dispatch_subagents 方法）
-        router: CapabilityRouter 实例
-        capability_config: CapabilityConfig 实例
-        params: DispatchLoopParams 包含所有调度参数
-        **kwargs: 向后兼容的关键字参数
-
-    Returns:
-        DispatchLoopReport 包含轮数、记录总数和最终待处理数
-    """
-    # Backward compatibility: accept kwargs and merge into DispatchLoopParams
+    """循环执行 dispatch 直到没有可调度任务或达到上限。"""
     if params is None:
         params = DispatchLoopParams()
-    elif isinstance(params, DispatchLoopParams):
-        pass
-    else:
+    elif not isinstance(params, DispatchLoopParams):
         raise TypeError("dispatch_loop() requires params: DispatchLoopParams keyword argument")
 
-    # Merge kwargs for backward compatibility
     for key in [
-        "max_consecutive_rounds",
-        "apply",
-        "execute_runners",
-        "planner",
-        "workflow_mode",
-        "max_runners",
-        "limit",
-        "reviewer",
-        "note",
-        "runner_instruction",
-        "max_cards",
-        "probe",
-        "take_over_by",
-        "locked_files",
+        "max_consecutive_rounds", "apply", "execute_runners", "planner",
+        "workflow_mode", "max_runners", "limit", "reviewer", "note",
+        "runner_instruction", "max_cards", "probe", "take_over_by", "locked_files",
     ]:
         if key in kwargs:
             setattr(params, key, kwargs[key])
@@ -97,59 +92,18 @@ def dispatch_loop(
     max_rounds = params.max_consecutive_rounds
 
     for round_num in range(1, max_rounds + 1):
-        # 执行一轮 dispatch
-        from ..agent_core.dispatch_mixin import DispatchParams
-
-        dispatch_params = DispatchParams(
-            apply=params.apply,
-            execute_runners=params.execute_runners,
-            planner=params.planner,
-            workflow_mode=params.workflow_mode,
-            max_runners=params.max_runners,
-            limit=params.limit,
-            reviewer=params.reviewer,
-            note=params.note,
-            runner_instruction=params.runner_instruction,
-            max_cards=params.max_cards,
-            probe=params.probe,
-            take_over_by=params.take_over_by,
-            locked_files=params.locked_files,
+        dispatch_report = _run_single_dispatch(
+            agent, router, capability_config, params
         )
-        dispatch_report = agent.dispatch_subagents(
-            router,
-            capability_config,
-            apply=params.apply,
-            execute_runners=params.execute_runners,
-            planner=params.planner,
-            workflow_mode=params.workflow_mode,
-            max_runners=params.max_runners,
-            limit=params.limit,
-            reviewer=params.reviewer,
-            note=params.note,
-            runner_instruction=params.runner_instruction,
-            max_cards=params.max_cards,
-            probe=params.probe,
-            take_over_by=params.take_over_by,
-            locked_files=params.locked_files,
-        )
-
-        # 更新报告
         report.rounds_count = round_num
         report.total_records += len(dispatch_report.records)
-        report.rounds.append(
-            {
-                "round": round_num,
-                "record_count": len(dispatch_report.records),
-                "ok": all(item.ok for item in dispatch_report.records),
-            }
-        )
-
-        # 检查是否有待处理工作
+        report.rounds.append({
+            "round": round_num,
+            "record_count": len(dispatch_report.records),
+            "ok": all(item.ok for item in dispatch_report.records),
+        })
         if not agent.has_pending_work:
-            # 没有可调度任务，退出循环
             break
-
-        # 检查是否达到最大轮数限制
         if round_num >= max_rounds:
             report.stopped_by_limit = True
             break

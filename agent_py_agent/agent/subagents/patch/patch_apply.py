@@ -141,6 +141,26 @@ class PatchApplyService:
         )
         return report
 
+    def _extract_patch_test_info(self, task, output):
+        """Extract test commands and blocked test reasons from task output."""
+        from agent_py_agent.agent.subagents.services.patch_apply_test_commands import (
+            PatchApplyTestCommands,
+        )
+        test_commands, blocked_test_reasons = PatchApplyTestCommands.extract(task, output)
+        blocked_count = len(blocked_test_reasons)
+        patch_entries = []
+        if blocked_test_reasons:
+            patch_entries.extend(
+                {
+                    "path": "",
+                    "status": "test_command",
+                    "apply_status": "BLOCKED",
+                    "message": reason,
+                }
+                for reason in blocked_test_reasons
+            )
+        return test_commands, blocked_count, patch_entries
+
     def _apply_patch_task(
         self,
         task: SubAgentTask,
@@ -167,22 +187,9 @@ class PatchApplyService:
             else:
                 blocked_count += 1
 
-        from agent_py_agent.agent.subagents.services.patch_apply_test_commands import (
-            PatchApplyTestCommands,
-        )
-
-        test_commands, blocked_test_reasons = PatchApplyTestCommands.extract(task, output)
-        if blocked_test_reasons:
-            blocked_count += len(blocked_test_reasons)
-            patch_entries.extend(
-                {
-                    "path": "",
-                    "status": "test_command",
-                    "apply_status": "BLOCKED",
-                    "message": reason,
-                }
-                for reason in blocked_test_reasons
-            )
+        test_commands, test_blocked_count, test_entries = self._extract_patch_test_info(task, output)
+        blocked_count += test_blocked_count
+        patch_entries.extend(test_entries)
 
         patch_count = len(patches)
         from agent_py_agent.agent.subagents.services.patch_apply_decision import PatchApplyDecision
