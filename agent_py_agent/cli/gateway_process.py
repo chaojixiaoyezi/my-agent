@@ -124,7 +124,18 @@ def cmd_gateway_start(args) -> int:
             start_new_session=start_new_session,
         )
 
-    write_pid_record(paths.pid)
+    # Note: write_pid_record() writes os.getpid() which is the parent
+    # cmd_gateway_start process, NOT the actual daemon. Write process.pid
+    # and the child's start_time.
+    from ..agent.gateway_parts.daemon_control import _get_process_start_time, _utc_now_iso
+    paths.pid.parent.mkdir(parents=True, exist_ok=True)
+    write_json_file(paths.pid, {
+        "pid": process.pid,
+        "kind": "my-agent-gateway",
+        "argv": command,
+        "start_time": _get_process_start_time(process.pid),
+        "updated_at": _utc_now_iso(),
+    })
     write_json_file(
         paths.state,
         {
