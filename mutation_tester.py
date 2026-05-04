@@ -7,13 +7,13 @@ Usage:
 Each module gets 5 manual mutations applied. Survived mutations get tests added.
 """
 
-import os
-import sys
-import subprocess
-import tempfile
-import shutil
-import re
 import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -39,7 +39,7 @@ class MutationTester:
         self._backup_dir = project_root / ".mutation_backups"
         self._backup_dir.mkdir(exist_ok=True)
 
-    def _create_mutated_copy(self, source_path: Path, old: str, new: str) -> Optional[Path]:
+    def _create_mutated_copy(self, source_path: Path, old: str, new: str) -> Path | None:
         """Create a mutated copy of a file."""
         try:
             content = source_path.read_text()

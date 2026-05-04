@@ -33,6 +33,7 @@ agent_py_agent/data/
 agent_py_agent/memory/
 agent_py_agent/memory_archive/
 data/notifications/
+data/sessions/
 logs/
 *.log
 

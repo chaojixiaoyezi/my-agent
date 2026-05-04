@@ -8,15 +8,16 @@ This script performs mutation testing by:
 4. Adding tests to capture survived mutations
 """
 
-import os
-import sys
-import subprocess
-import tempfile
-import shutil
-import re
 import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 
 class MutationTestResult:
@@ -57,7 +58,7 @@ class MutationTestFramework:
 
         Each mutation is (old_code, new_code) tuple.
         """
-        with open(source_path, 'r') as f:
+        with open(source_path) as f:
             original = f.read()
 
         mutated_files = []
@@ -310,12 +311,12 @@ def run_mutation_test_for_module(module_name: str, module_path: str,
         print(f"\n[{i+1}/{len(mutations)}] {description}")
 
         # Read original file
-        with open(module_path, 'r') as f:
+        with open(module_path) as f:
             original = f.read()
 
         # Check if mutation applies
         if old_code not in original:
-            print(f"  SKIP: Could not find target code in module")
+            print("  SKIP: Could not find target code in module")
             continue
 
         # Create mutated version
