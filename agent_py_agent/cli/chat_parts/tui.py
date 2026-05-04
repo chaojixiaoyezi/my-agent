@@ -279,7 +279,7 @@ def run_tui(
                     if app_ref[0] is not None:
                         app_ref[0].invalidate()
 
-                from .thinking_spinner import ThinkingSpinner
+                from ..thinking_spinner import ThinkingSpinner
                 spinner = ThinkingSpinner(
                     on_update=on_spinner_update,
                     on_stop=lambda: (_set_thinking_line(""), app_ref[0].invalidate() if app_ref[0] else None),
