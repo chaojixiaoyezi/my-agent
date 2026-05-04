@@ -259,6 +259,11 @@ def write_recovery_snapshot(
             archive_level=archive_level,
             created_at=created_at,
         )
+    return _write_recovery_snapshot_impl(root, params)
+
+
+def _write_recovery_snapshot_impl(root: Path, params: RecoverySnapshotInput) -> RecoverySnapshotResult:
+    """Implementation for write_recovery_snapshot — extracted to stay under 100 lines."""
     timestamp = params.created_at or utc_now_iso()
     level = _normalize_archive_level(params.archive_level)
     normalized_tools = [_tool_snapshot(item, level) for item in params.tool_calls or []]
@@ -275,7 +280,10 @@ def write_recovery_snapshot(
             "task_id": params.task_id,
         }
     )
-    snapshot_id = _make_recovery_snapshot_id(timestamp, params.session_id, params.request_id, params.run_id, params.task_id, params.source, params.status, params.user_prompt, params.response_text)
+    snapshot_id = _make_recovery_snapshot_id(
+        timestamp, params.session_id, params.request_id, params.run_id,
+        params.task_id, params.source, params.status, params.user_prompt, params.response_text,
+    )
     snapshot = _build_recovery_snapshot(
         snapshot_id=snapshot_id,
         session_id=params.session_id,
@@ -364,7 +372,13 @@ def write_compression_snapshot(
         )
     elif isinstance(params, dict):
         params = CompressionSnapshotInput(**params)
+    return _write_compression_snapshot_impl(root, params)
 
+
+def _write_compression_snapshot_impl(
+    root: Path, params: CompressionSnapshotInput
+) -> CompressionHookResult:
+    """Implementation for write_compression_snapshot — extracted to stay under 100 lines."""
     timestamp = params.created_at or utc_now_iso()
     level = _normalize_archive_level(params.archive_level)
     normalized_tools = [_tool_snapshot(item, level) for item in params.tool_calls or []]

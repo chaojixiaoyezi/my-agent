@@ -130,7 +130,7 @@ def _real_model_recovery_setup(args):
     return paths, agent, backend, task, loaded
 
 
-def _real_model_recovery_resume(paths, task, loaded):
+def _real_model_recovery_resume(paths, agent, task, loaded):
     """Run memory-resume for real model recovery. Returns resume_payload."""
     _append_parent_subagent_cross_day_resume_clues(agent.root, loaded)
     reloaded_agent = load_scenario_agent(paths.config)
@@ -174,7 +174,7 @@ def run_scenario_real_model_recovery_case(args) -> int:
     paths, agent, backend, task, loaded = _real_model_recovery_setup(args)
 
     print_scenario_step(3, "Simulate cross-day archive clues for a resumed parent session")
-    resume_payload = _real_model_recovery_resume(paths, task, loaded)
+    resume_payload = _real_model_recovery_resume(paths, agent, task, loaded)
 
     task_sources = resume_payload.get("task_fact_sources", []) if isinstance(resume_payload, dict) else []
     recommended_reads = resume_payload.get("resume", {}).get("recommended_read_paths", []) if isinstance(resume_payload, dict) else []
@@ -361,7 +361,7 @@ def run_scenario_real_model_recovery_multi_round_case(args) -> int:
     paths, agent, backend, task, loaded = _multi_round_setup(args)
 
     print_scenario_step(3, "Simulate cross-day archive clues for a resumed parent session")
-    resume_payload = _real_model_recovery_resume(paths, task, loaded)
+    resume_payload = _real_model_recovery_resume(paths, agent, task, loaded)
 
     task_sources = resume_payload.get("task_fact_sources", []) if isinstance(resume_payload, dict) else []
     recommended_reads = resume_payload.get("resume", {}).get("recommended_read_paths", []) if isinstance(resume_payload, dict) else []
