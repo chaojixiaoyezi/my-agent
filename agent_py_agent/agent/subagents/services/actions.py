@@ -106,10 +106,10 @@ class SubAgentActionService:
                 evidence_paths=[task.task_dir], created_at=now,
             )
 
-        handler = self._action_dispatch.get(action.action)
+        handler = self._action_dispatch().get(action.action)
         if handler:
             apply_context = (take_over_by, locked_files)
-            return handler(self, action, task, before_status, before_channel_status, now, apply, apply_context)
+            return handler(action, task, before_status, before_channel_status, now, apply, apply_context)
 
         return ActionApplyRecord(
             id=self.manager._new_id("apply"),

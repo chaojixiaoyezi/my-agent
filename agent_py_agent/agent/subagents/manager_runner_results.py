@@ -108,13 +108,13 @@ class SubAgentRunnerResultMixin:
         blockers = self._compute_blockers(ok, task.status, parsed, message)
         result_meta = {"ok": ok, "message": message, "response": response, "dry_run": dry_run}
         runner_meta = {"dry_run": dry_run, "ok": ok, "message": message, "backend": backend, "tool_rounds": tool_rounds, "now": now}
-        cap_data = {"parsed": parsed, "structured_evidence_count": structured_evidence_count, "structured_request_count": structured_request_count, "created_request_ids": created_request_ids}
+        cap_data = {"parsed": parsed, "structured_evidence_count": structured_evidence_count, "structured_request_count": structured_request_count, "created_request_ids": created_request_ids, "structured_repair_attempted": structured_repair_attempted, "structured_repair_ok": structured_repair_ok, "structured_repair_error": structured_repair_error}
         tools_info = {"actual_tools": actual_tools, "ignored_tools": ignored_tools, "ignored_skills": ignored_skills}
         output_items = {"artifacts": artifacts, "tests": tests, "patches": patches, "lessons": lessons, "blockers": blockers, "next_actions": next_actions}
         status_context = {"status": status, "verification_status": verification_status, "failure_type": failure_type}
         self._apply_runner_result_fields(task, result_meta, status_context, parsed, now)
         output_payload = self._build_output_payload_wrapper(task, runner_meta, cap_data, tools_info, output_items)
-        result = _build_runner_result(task, dry_run=dry_run, ok=ok, message=message, backend=backend, tool_rounds=tool_rounds, prompt=prompt, response=response, parsed=parsed, structured_repair_attempted=structured_repair_attempted, structured_repair_ok=structured_repair_ok, structured_repair_error=structured_repair_error, structured_evidence_count=structured_evidence_count, structured_request_count=structured_request_count, artifact_count=len(artifacts), test_count=len(tests), patch_count=len(patches), lesson_count=len(lessons), now=now)
+        result = _build_runner_result(task, dry_run=dry_run, ok=result_meta["ok"], message=result_meta["message"], backend=backend, tool_rounds=tool_rounds, prompt=prompt, response=response, parsed=parsed, structured_repair_attempted=structured_repair_attempted, structured_repair_ok=structured_repair_ok, structured_repair_error=structured_repair_error, structured_evidence_count=structured_evidence_count, structured_request_count=structured_request_count, artifact_count=len(artifacts), test_count=len(tests), patch_count=len(patches), lesson_count=len(lessons), now=now)
         _write_runner_result_files(task, result, output_payload, prompt=prompt, response=response)
         Path(task.runner_result_file).write_text(render_runner_result_markdown(result), encoding="utf-8")
         self.save(task)
@@ -123,7 +123,7 @@ class SubAgentRunnerResultMixin:
         learning_candidates = []
         if not dry_run and parsed.found and parsed.ok and lessons:
             learning_candidates = self.record_learning_candidates(task, lessons)
-        self._append_task_work_log(task, f"subagent_runner: dry_run={dry_run} ok={ok} status={task.status} message={message} learning_candidates={len(learning_candidates)}")
+        self._append_task_work_log(task, f"subagent_runner: dry_run={dry_run} ok={result_meta['ok']} status={task.status} message={result_meta['message']} learning_candidates={len(learning_candidates)}")
         self._index_runner_result(result, output_payload)
         return result
 
@@ -218,6 +218,9 @@ class SubAgentRunnerResultMixin:
             normalized_attempt_id = str(task.runner_active_attempt_id or "").strip()
             if normalized_attempt_id:
                 task.runner_active_attempt_id = ""
+        # Write back modified ok and message so caller gets the corrected values
+        result_meta["ok"] = ok
+        result_meta["message"] = message
 
     def _compute_blockers(self, ok, status, parsed, message):
         if not ok or status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
@@ -250,8 +253,11 @@ class SubAgentRunnerResultMixin:
             structured_request_count=structured_request_count, created_request_ids=created_request_ids,
             ignored_tools=ignored_tools, ignored_skills=ignored_skills, artifacts=artifacts,
             tests=tests, patches=patches, lessons=lessons, blockers=blockers,
-            next_actions=next_actions, structured_repair_attempted=False,
-            structured_repair_ok=False, structured_repair_error="", now=now,
+            next_actions=next_actions,
+            structured_repair_attempted=cap_data.get("structured_repair_attempted", False),
+            structured_repair_ok=cap_data.get("structured_repair_ok", False),
+            structured_repair_error=cap_data.get("structured_repair_error", ""),
+            now=now,
         )
 
     def _append_runner_debrief(self, task, parsed):
