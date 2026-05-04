@@ -12,7 +12,6 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 from .manager import SessionManager
-from ..subagent import SubagentRegistry
 
 
 def resume_session(agent: SimpleAgent, session_id: str) -> dict:
@@ -59,6 +58,8 @@ def _load_subagent_context(agent: SimpleAgent, session_id: str) -> list[dict]:
     """Load subagent context for a session."""
     subagent_context: list[dict] = []
     try:
+        from ..subagent import SubagentRegistry
+
         registry = SubagentRegistry(agent)
         board = registry.build_board(recent_limit=5)
         for item in board.recent:
