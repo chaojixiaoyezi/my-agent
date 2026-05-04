@@ -88,13 +88,8 @@ class SubAgentActionService:
         except FileNotFoundError as exc:
             return ActionApplyRecord(
                 id=self.manager._new_id("apply"),
-                action_id=action.id,
-                run_id=action.run_id,
-                action=action.action,
-                dry_run=not apply,
-                applied=False,
-                ok=False,
-                message=str(exc),
+                action_id=action.id, run_id=action.run_id, action=action.action,
+                dry_run=not apply, applied=False, ok=False, message=str(exc),
                 created_at=now,
             )
 
@@ -103,165 +98,126 @@ class SubAgentActionService:
         if not apply:
             return ActionApplyRecord(
                 id=self.manager._new_id("apply"),
-                action_id=action.id,
-                run_id=action.run_id,
-                action=action.action,
-                dry_run=True,
-                applied=False,
-                ok=True,
+                action_id=action.id, run_id=action.run_id, action=action.action,
+                dry_run=True, applied=False, ok=True,
                 message=f"dry-run: would {action.action}",
-                before_status=before_status,
-                after_status=before_status,
-                before_channel_status=before_channel_status,
-                after_channel_status=before_channel_status,
-                evidence_paths=[task.task_dir],
-                created_at=now,
+                before_status=before_status, after_status=before_status,
+                before_channel_status=before_channel_status, after_channel_status=before_channel_status,
+                evidence_paths=[task.task_dir], created_at=now,
             )
 
-        if action.action in {"probe_or_repair_channel", "inspect_channel_probe"}:
-            result = self.manager.probe_channel(action.run_id)
-            task = self.manager.load(action.run_id)
-            return ActionApplyRecord(
-                id=self.manager._new_id("apply"),
-                action_id=action.id,
-                run_id=action.run_id,
-                action=action.action,
-                dry_run=False,
-                applied=True,
-                ok=True,
-                message=f"已执行 channel probe，结果为 {result.channel_status}。",
-                before_status=before_status,
-                after_status=task.status,
-                before_channel_status=before_channel_status,
-                after_channel_status=task.channel_status,
-                evidence_paths=[task.channel_probe_file, str(Path(task.logs_dir) / "last_channel_probe.json")],
-                created_at=now,
-            )
-
-        if action.action == "repair_work_order":
-            self.manager.save(task)
-            validation = self.manager.validate_work_order(action.run_id)
-            task = self.manager.load(action.run_id)
-            ok = validation.ok
-            message = "已补齐标准工单现场。" if ok else f"工单仍缺少 {len(validation.missing)} 个路径。"
-            self._append_task_work_log(task, f"action_apply repair_work_order: {message}")
-            return ActionApplyRecord(
-                id=self.manager._new_id("apply"),
-                action_id=action.id,
-                run_id=action.run_id,
-                action=action.action,
-                dry_run=False,
-                applied=ok,
-                ok=ok,
-                message=message,
-                before_status=before_status,
-                after_status=task.status,
-                before_channel_status=before_channel_status,
-                after_channel_status=task.channel_status,
-                evidence_paths=[task.task_dir, task.work_log_file],
-                created_at=now,
-            )
-
-        if action.action == "reopen_for_evidence":
-            task.status = "BLOCKED"
-            task.failure_type = "missing_evidence"
-            task.verification_status = "UNVERIFIED"
-            task.updated_at = now
-            task.result = task.result or "缺少验收证据，等待补充 evidence 后再完成。"
-            self.manager.save(task)
-            self._append_task_work_log(task, "action_apply reopen_for_evidence: 已重开任务并等待验收证据。")
-            return self._record_after_task_action(
-                action, task, before_status, before_channel_status,
-                "已把缺证据的 DONE 任务改为 BLOCKED。",
-            )
-
-        if action.action == "run_acceptance":
-            task.verification_status = "NEEDS_ACCEPTANCE"
-            task.updated_at = now
-            self.manager.save(task)
-            self._append_task_work_log(task, "action_apply run_acceptance: 已标记为需要验收。")
-            return self._record_after_task_action(
-                action, task, before_status, before_channel_status,
-                "已标记为需要验收，未自动执行未知命令。",
-            )
-
-        if action.action == "takeover_or_reassign":
-            if not take_over_by:
-                return ActionApplyRecord(
-                    id=self.manager._new_id("apply"),
-                    action_id=action.id,
-                    run_id=action.run_id,
-                    action=action.action,
-                    dry_run=False,
-                    applied=False,
-                    ok=False,
-                    message="takeover_or_reassign 需要 --take-over-by。",
-                    before_status=before_status,
-                    after_status=before_status,
-                    before_channel_status=before_channel_status,
-                    after_channel_status=before_channel_status,
-                    evidence_paths=[task.task_dir],
-                    created_at=now,
-                )
-            if task.channel_status != "OK":
-                self.manager.probe_channel(action.run_id)
-                task = self.manager.load(action.run_id)
-            if task.channel_status != "OK":
-                return ActionApplyRecord(
-                    id=self.manager._new_id("apply"),
-                    action_id=action.id,
-                    run_id=action.run_id,
-                    action=action.action,
-                    dry_run=False,
-                    applied=False,
-                    ok=False,
-                    message=f"通道状态为 {task.channel_status}，未接管。请先修复通道。",
-                    before_status=before_status,
-                    after_status=task.status,
-                    before_channel_status=before_channel_status,
-                    after_channel_status=task.channel_status,
-                    evidence_paths=[task.channel_probe_file],
-                    created_at=now,
-                )
-            self.manager.record_takeover(
-                action.run_id,
-                take_over_by=take_over_by,
-                reason=action.reason,
-                locked_files=locked_files,
-            )
-            task = self.manager.load(action.run_id)
-            self._append_task_work_log(task, f"action_apply takeover_or_reassign: 已由 {take_over_by} 接管。")
-            return self._record_after_task_action(
-                action, task, before_status, before_channel_status,
-                f"已由 {take_over_by} 接管任务。",
-                evidence_paths=[task.takeover_file, task.work_log_file],
-            )
-
-        if action.action in {"route_capability_request", "triage_capability_gap", "inspect_failure", "classify_blocker"}:
-            task.updated_at = now
-            self.manager.save(task)
-            self._append_task_work_log(task, f"action_apply {action.action}: 已记录待人工处理，不自动修改能力授权。")
-            return self._record_after_task_action(
-                action, task, before_status, before_channel_status,
-                f"已记录 {action.action} 待人工处理。",
-            )
+        handler = self._action_dispatch.get(action.action)
+        if handler:
+            apply_context = (take_over_by, locked_files)
+            return handler(self, action, task, before_status, before_channel_status, now, apply, apply_context)
 
         return ActionApplyRecord(
             id=self.manager._new_id("apply"),
-            action_id=action.id,
-            run_id=action.run_id,
-            action=action.action,
-            dry_run=False,
-            applied=False,
-            ok=False,
+            action_id=action.id, run_id=action.run_id, action=action.action,
+            dry_run=False, applied=False, ok=False,
             message=f"暂不支持 apply 动作: {action.action}",
-            before_status=before_status,
-            after_status=before_status,
-            before_channel_status=before_channel_status,
-            after_channel_status=before_channel_status,
-            evidence_paths=[task.task_dir],
+            before_status=before_status, after_status=before_status,
+            before_channel_status=before_channel_status, after_channel_status=before_channel_status,
+            evidence_paths=[task.task_dir], created_at=now,
+        )
+
+    def _action_dispatch(self) -> dict[str, callable]:
+        return {
+            "probe_or_repair_channel": self._apply_probe_or_repair_channel,
+            "inspect_channel_probe": self._apply_probe_or_repair_channel,
+            "repair_work_order": self._apply_repair_work_order,
+            "reopen_for_evidence": self._apply_reopen_for_evidence,
+            "run_acceptance": self._apply_run_acceptance,
+            "takeover_or_reassign": self._apply_takeover_or_reassign,
+            "route_capability_request": self._apply_record_only_action,
+            "triage_capability_gap": self._apply_record_only_action,
+            "inspect_failure": self._apply_record_only_action,
+            "classify_blocker": self._apply_record_only_action,
+        }
+
+    def _apply_probe_or_repair_channel(self, action, task, before_status, before_channel_status, now, apply, apply_context):
+        from ..reports import ActionApplyRecord
+        result = self.manager.probe_channel(action.run_id)
+        task = self.manager.load(action.run_id)
+        return ActionApplyRecord(
+            id=self.manager._new_id("apply"), action_id=action.id, run_id=action.run_id, action=action.action,
+            dry_run=False, applied=True, ok=True,
+            message=f"已执行 channel probe，结果为 {result.channel_status}。",
+            before_status=before_status, after_status=task.status,
+            before_channel_status=before_channel_status, after_channel_status=task.channel_status,
+            evidence_paths=[task.channel_probe_file, str(Path(task.logs_dir) / "last_channel_probe.json")],
             created_at=now,
         )
+
+    def _apply_repair_work_order(self, action, task, before_status, before_channel_status, now, apply, apply_context):
+        from ..reports import ActionApplyRecord
+        self.manager.save(task)
+        validation = self.manager.validate_work_order(action.run_id)
+        task = self.manager.load(action.run_id)
+        ok = validation.ok
+        message = "已补齐标准工单现场。" if ok else f"工单仍缺少 {len(validation.missing)} 个路径。"
+        self._append_task_work_log(task, f"action_apply repair_work_order: {message}")
+        return ActionApplyRecord(
+            id=self.manager._new_id("apply"), action_id=action.id, run_id=action.run_id, action=action.action,
+            dry_run=False, applied=ok, ok=ok, message=message,
+            before_status=before_status, after_status=task.status,
+            before_channel_status=before_channel_status, after_channel_status=task.channel_status,
+            evidence_paths=[task.task_dir, task.work_log_file], created_at=now,
+        )
+
+    def _apply_reopen_for_evidence(self, action, task, before_status, before_channel_status, now, apply, apply_context):
+        from ..reports import ActionApplyRecord
+        task.status = "BLOCKED"
+        task.failure_type = "missing_evidence"
+        task.verification_status = "UNVERIFIED"
+        task.updated_at = now
+        task.result = task.result or "缺少验收证据，等待补充 evidence 后再完成。"
+        self.manager.save(task)
+        self._append_task_work_log(task, "action_apply reopen_for_evidence: 已重开任务并等待验收证据。")
+        return self._record_after_task_action(action, task, before_status, before_channel_status, "已把缺证据的 DONE 任务改为 BLOCKED。")
+
+    def _apply_run_acceptance(self, action, task, before_status, before_channel_status, now, apply, apply_context):
+        from ..reports import ActionApplyRecord
+        task.verification_status = "NEEDS_ACCEPTANCE"
+        task.updated_at = now
+        self.manager.save(task)
+        self._append_task_work_log(task, "action_apply run_acceptance: 已标记为需要验收。")
+        return self._record_after_task_action(action, task, before_status, before_channel_status, "已标记为需要验收，未自动执行未知命令。")
+
+    def _apply_takeover_or_reassign(self, action, task, before_status, before_channel_status, now, apply, apply_context):
+        from ..reports import ActionApplyRecord
+        take_over_by, locked_files = apply_context
+        if not take_over_by:
+            return ActionApplyRecord(
+                id=self.manager._new_id("apply"), action_id=action.id, run_id=action.run_id, action=action.action,
+                dry_run=False, applied=False, ok=False, message="takeover_or_reassign 需要 --take-over-by。",
+                before_status=before_status, after_status=before_status,
+                before_channel_status=before_channel_status, after_channel_status=before_channel_status,
+                evidence_paths=[task.task_dir], created_at=now,
+            )
+        if task.channel_status != "OK":
+            self.manager.probe_channel(action.run_id)
+            task = self.manager.load(action.run_id)
+        if task.channel_status != "OK":
+            return ActionApplyRecord(
+                id=self.manager._new_id("apply"), action_id=action.id, run_id=action.run_id, action=action.action,
+                dry_run=False, applied=False, ok=False,
+                message=f"通道状态为 {task.channel_status}，未接管。请先修复通道。",
+                before_status=before_status, after_status=task.status,
+                before_channel_status=before_channel_status, after_channel_status=task.channel_status,
+                evidence_paths=[task.channel_probe_file], created_at=now,
+            )
+        self.manager.record_takeover(action.run_id, take_over_by=take_over_by, reason=action.reason, locked_files=locked_files)
+        task = self.manager.load(action.run_id)
+        self._append_task_work_log(task, f"action_apply takeover_or_reassign: 已由 {take_over_by} 接管。")
+        return self._record_after_task_action(action, task, before_status, before_channel_status, f"已由 {take_over_by} 接管任务。", evidence_paths=[task.takeover_file, task.work_log_file])
+
+    def _apply_record_only_action(self, action, task, before_status, before_channel_status, now, apply, apply_context):
+        from ..reports import ActionApplyRecord
+        task.updated_at = now
+        self.manager.save(task)
+        self._append_task_work_log(task, f"action_apply {action.action}: 已记录待人工处理，不自动修改能力授权。")
+        return self._record_after_task_action(action, task, before_status, before_channel_status, f"已记录 {action.action} 待人工处理。")
 
     def _record_after_task_action(
         self,
@@ -275,7 +231,6 @@ class SubAgentActionService:
     ) -> ActionApplyRecord:
         """Create an apply record after task modification."""
         from ..reports import ActionApplyRecord
-
         return ActionApplyRecord(
             id=self.manager._new_id("apply"),
             action_id=action.id,
