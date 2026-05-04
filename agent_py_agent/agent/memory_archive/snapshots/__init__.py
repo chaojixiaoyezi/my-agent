@@ -16,6 +16,7 @@ from ..models import CompressionSnapshot, utc_now_iso
 from ..storage import append_snapshot, write_compression_snapshot_file
 from ..tokens import estimate_tokens
 from ._helpers import (
+    SNAPSHOT_PREVIEW_LIMITS,
     _content_hash,
     _dedupe_texts,
     _normalize_archive_level,
