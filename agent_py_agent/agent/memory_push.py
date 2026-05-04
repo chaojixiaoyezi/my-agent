@@ -113,49 +113,16 @@ def push_relevant_memories(
     context: dict,
     limit: int = 3,
 ) -> list[str]:
-    """查询并返回与当前上下文相关的记忆文本。
-
-    Args:
-        agent: SimpleAgent 实例
-        trigger_type: 触发类型（"timeout", "failure", "planning"）
-        context: 当前任务上下文，包含 task_id, goal, failure_type 等
-        limit: 最多返回几条记忆
-
-    Returns:
-        记忆文本列表，每条最多 200 字
-    """
+    """查询并返回与当前上下文相关的记忆文本."""
     if not hasattr(agent, "memory") or agent.memory is None:
         return []
-
     memories_text: list[str] = []
-
     try:
-        # 构建搜索查询
-        query_parts = [trigger_type]
-
-        # 添加上下文相关信息
-        if context.get("task_id"):
-            query_parts.append(context["task_id"])
-        if context.get("failure_type"):
-            query_parts.append(context["failure_type"])
-        if context.get("goal"):
-            # 从 goal 中提取关键词
-            goal = context["goal"]
-            if len(goal) > 50:
-                query_parts.append(goal[:50])
-
-        query = " ".join(query_parts)
-
-        # 搜索记忆
-        records = agent.memory.search(query, top_k=limit * 2)  # 多搜一些再过滤
-
-        # 过滤和转换记忆
+        query = _build_memory_query(trigger_type, context)
+        records = agent.memory.search(query, top_k=limit * 2)
         for record in records:
-            # 跳过太短的记录
             if not record.content or len(record.content) < 10:
                 continue
-
-            # 构建 MemoryEntry
             entry = MemoryEntry(
                 type=MemoryType.from_string(record.kind),
                 trigger_type=trigger_type,
@@ -163,31 +130,42 @@ def push_relevant_memories(
                 content=record.content,
                 created_at=record.created_at,
             )
-
-            # 根据触发类型过滤
-            if trigger_type == "timeout" or trigger_type == "failure":
-                if entry.type in {MemoryType.LESSON_GENERAL, MemoryType.LESSON_TASK}:
-                    text = entry.to_memory_record_content()
-                    if text and len(text) <= 200:
-                        memories_text.append(text)
-            elif trigger_type == "planning":
-                if entry.type in {MemoryType.CONTEXT, MemoryType.LESSON_GENERAL}:
-                    text = entry.to_memory_record_content()
-                    if text and len(text) <= 200:
-                        memories_text.append(text)
-            else:
-                # general 查询
-                text = entry.to_memory_record_content()
-                if text and len(text) <= 200:
-                    memories_text.append(text)
-
+            text = _extract_memory_text(entry, trigger_type)
+            if text:
+                memories_text.append(text)
             if len(memories_text) >= limit:
                 break
-
     except Exception:
         pass
-
     return memories_text[:limit]
+
+
+def _build_memory_query(trigger_type: str, context: dict) -> str:
+    """Build search query from trigger type and context."""
+    query_parts = [trigger_type]
+    if context.get("task_id"):
+        query_parts.append(context["task_id"])
+    if context.get("failure_type"):
+        query_parts.append(context["failure_type"])
+    goal = context.get("goal", "")
+    if len(goal) > 50:
+        query_parts.append(goal[:50])
+    return " ".join(query_parts)
+
+
+def _extract_memory_text(entry: MemoryEntry, trigger_type: str) -> str:
+    """Extract and filter memory text based on trigger type."""
+    desired: set[MemoryType] = {
+        "timeout": {MemoryType.LESSON_GENERAL, MemoryType.LESSON_TASK},
+        "failure": {MemoryType.LESSON_GENERAL, MemoryType.LESSON_TASK},
+        "planning": {MemoryType.CONTEXT, MemoryType.LESSON_GENERAL},
+    }.get(trigger_type, set())
+    if not desired or entry.type not in desired:
+        return ""
+    text = entry.to_memory_record_content()
+    if text and len(text) <= 200:
+        return text
+    return ""
 
 
 def push_timeout_memories(agent, task_id: str, goal: str, timeout_count: int = 0) -> list[str]:

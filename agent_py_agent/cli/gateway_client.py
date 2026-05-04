@@ -69,40 +69,14 @@ def ensure_gateway_started(args) -> int:
 
 def cmd_default(args) -> int:
     """无子命令默认入口：自动启动 gateway，然后进入 gateway chat。"""
-
     code = ensure_gateway_started(args)
     if code:
         return code
-
-    # 启动后检测未完成任务
     if agent := make_agent(args):
         if agent.config.auto_detect_work_on_startup:
-            from ..agent.startup_recovery import (
-                detect_active_work,
-                format_active_work_summary,
-                has_active_work,
-            )
-
-            summary = detect_active_work(agent)
-            if has_active_work(summary):
-                print("\n" + "=" * 60)
-                print("进行中任务检测")
-                print("=" * 60)
-                print(format_active_work_summary(summary))
-                print("=" * 60 + "\n")
-
-                # 询问用户是否继续
-                if summary.active_task_count > 0:
-                    try:
-                        response = input("是否继续调度这些任务？[Y/n] ").strip().lower()
-                        if response and response not in {"y", "yes", ""}:
-                            print("已取消自动调度。")
-                            # 不进入 chat，让用户手动决定
-                            return 0
-                    except (EOFError, KeyboardInterrupt):
-                        print("\n已取消。")
-                        return 0
-
+            code = _handle_active_work_prompt(agent)
+            if code:
+                return code
     args.gateway = True
     args.gateway_timeout = None
     args.inject = None
@@ -110,6 +84,55 @@ def cmd_default(args) -> int:
     args.memory_limit = 5
     args.no_save = False
     return cmd_chat(args)
+
+
+def _handle_active_work_prompt(agent) -> int | None:
+    """Detect active work on startup and prompt user; return exit code or None to continue."""
+    from ..agent.startup_recovery import (
+        detect_active_work,
+        format_active_work_summary,
+        has_active_work,
+    )
+    summary = detect_active_work(agent)
+    if not has_active_work(summary):
+        return None
+    print("\n" + "=" * 60)
+    print("进行中任务检测")
+    print("=" * 60)
+    print(format_active_work_summary(summary))
+    print("=" * 60 + "\n")
+    if summary.active_task_count <= 0:
+        return None
+    try:
+        response = input("是否继续调度这些任务？[Y/n] ").strip().lower()
+        if response and response not in {"y", "yes", ""}:
+            print("已取消自动调度。")
+            return 0
+    except (EOFError, KeyboardInterrupt):
+        print("\n已取消。")
+        return 0
+    return None
+
+
+def _stream_chunk_lines(chunk_path: Path, chunks_printed: int, spinner) -> int:
+    """Stream chunk lines from chunk file; return updated count."""
+    if not chunk_path.exists():
+        return chunks_printed
+    try:
+        lines = chunk_path.read_text(encoding="utf-8").splitlines()
+        for line in lines[chunks_printed:]:
+            if not line.strip():
+                continue
+            obj = json.loads(line)
+            if chunks_printed == 0:
+                spinner.stop()
+            sys.stdout.write(obj.get("text", ""))
+            sys.stdout.flush()
+            chunks_printed += 1
+    except (OSError, json.JSONDecodeError):
+        pass
+    return chunks_printed
+
 
 def cmd_gateway_ask(args) -> int:
     """向正在运行的 gateway 投递一条聊天请求。
@@ -153,21 +176,7 @@ def cmd_gateway_ask(args) -> int:
 
     while time.time() <= deadline:
         # LLM: read new chunks from the streaming file written by daemon.
-        if chunk_path.exists():
-            try:
-                lines = chunk_path.read_text(encoding="utf-8").splitlines()
-                for line in lines[chunks_printed:]:
-                    if not line.strip():
-                        continue
-                    obj = json.loads(line)
-                    if chunks_printed == 0:
-                        spinner.stop()
-                    sys.stdout.write(obj.get("text", ""))
-                    sys.stdout.flush()
-                    chunks_printed += 1
-            except (OSError, json.JSONDecodeError):
-                pass
-
+        chunks_printed = _stream_chunk_lines(chunk_path, chunks_printed, spinner)
         # LLM: check if final response file has arrived.
         response = read_json_file(response_path)
         if response:

@@ -317,29 +317,36 @@ def release_all_scoped_locks() -> int:
     gateway processes. Returns the number of lock files removed.
     """
     lock_dir = _get_lock_dir()
+    if not lock_dir.exists():
+        return 0
     removed = 0
-    if lock_dir.exists():
-        for lock_file in lock_dir.glob("*.lock"):
-            try:
-                # Only remove locks owned by dead processes
-                record = _read_json_file(lock_file)
-                if record:
-                    try:
-                        pid = int(record["pid"])
-                        os.kill(pid, 0)
-                    except (ProcessLookupError, PermissionError, ValueError):
-                        # Process is dead, safe to remove
-                        lock_file.unlink()
-                        removed += 1
-                        continue
-                    # Process alive but different start_time (PID reused)
-                    current_start = _get_process_start_time(pid)
-                    if current_start != record.get("start_time"):
-                        lock_file.unlink()
-                        removed += 1
-            except Exception:
-                pass
+    for lock_file in lock_dir.glob("*.lock"):
+        if not _release_lock_if_stale(lock_file):
+            continue
+        removed += 1
     return removed
+
+
+def _release_lock_if_stale(lock_file: Path) -> bool:
+    """Remove a lock file if its owning process is dead or PID was reused."""
+    try:
+        record = _read_json_file(lock_file)
+    except Exception:
+        return False
+    if not record:
+        return False
+    try:
+        pid = int(record["pid"])
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError, ValueError):
+        lock_file.unlink()
+        return True
+    # Process alive but different start_time (PID reused)
+    current_start = _get_process_start_time(pid)
+    if current_start != record.get("start_time"):
+        lock_file.unlink()
+        return True
+    return False
 
 
 # ── Runtime status (Hermes pattern) ────────────────────────────────────────

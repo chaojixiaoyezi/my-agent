@@ -16,6 +16,9 @@ from ..models import RawMemoryEvent, utc_now_iso
 from ..storage import append_raw_event
 from ..tokens import estimate_tokens
 from .event_builders import (
+    EventIdentity,
+    MessageContext,
+    ToolCallContext,
     _content_hash,
     _event_id,
     _message_event,
@@ -83,19 +86,30 @@ class ArchiveRunTurnResult:
         return self.to_dict()[key]
 
 
+@dataclass(frozen=True)
+class TurnData:
+    """Bundle of user/assistant content for one turn."""
+    user_prompt: str
+    response_text: str
+    tool_calls: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class RunContext:
+    """Shared runtime fields for turn archiving."""
+    backend: str
+    request_id: str
+    run_id: str
+    task_id: str
+    source: str
+    archive_level: int
+    created_at: str
+
+
 def _build_run_turn_events(
-    *,
     session_id: str,
-    user_prompt: str,
-    response_text: str,
-    backend: str,
-    tool_calls: list[dict[str, Any]],
-    request_id: str,
-    run_id: str,
-    task_id: str,
-    source: str,
-    archive_level: int,
-    created_at: str,
+    turn: TurnData,
+    ctx: RunContext,
 ) -> list[RawMemoryEvent]:
     """LLM: convert one run turn into ordered RawMemoryEvent objects without writing them.
 
@@ -105,50 +119,62 @@ def _build_run_turn_events(
 
     events = [
         _message_event(
-            sequence=1,
-            session_id=session_id,
-            request_id=request_id,
-            run_id=run_id,
-            task_id=task_id,
-            speaker="user",
-            target="assistant",
-            action="message",
-            content=user_prompt,
-            backend=backend,
-            source=source,
-            archive_level=archive_level,
-            created_at=created_at,
+            EventIdentity(
+                sequence=1,
+                session_id=session_id,
+                request_id=ctx.request_id,
+                run_id=ctx.run_id,
+                task_id=ctx.task_id,
+            ),
+            MessageContext(
+                speaker="user",
+                target="assistant",
+                action="message",
+                backend=ctx.backend,
+                source=ctx.source,
+                archive_level=ctx.archive_level,
+                created_at=ctx.created_at,
+                content=turn.user_prompt,
+            ),
         ),
         _message_event(
-            sequence=2,
-            session_id=session_id,
-            request_id=request_id,
-            run_id=run_id,
-            task_id=task_id,
-            speaker="assistant",
-            target="user",
-            action="response",
-            content=response_text,
-            backend=backend,
-            source=source,
-            archive_level=archive_level,
-            created_at=created_at,
+            EventIdentity(
+                sequence=2,
+                session_id=session_id,
+                request_id=ctx.request_id,
+                run_id=ctx.run_id,
+                task_id=ctx.task_id,
+            ),
+            MessageContext(
+                speaker="assistant",
+                target="user",
+                action="response",
+                backend=ctx.backend,
+                source=ctx.source,
+                archive_level=ctx.archive_level,
+                created_at=ctx.created_at,
+                content=turn.response_text,
+            ),
         ),
     ]
 
-    for index, tool_call in enumerate(tool_calls, start=1):
+    for index, tool_call in enumerate(turn.tool_calls, start=1):
         events.append(
             _tool_event(
-                sequence=index,
-                session_id=session_id,
-                request_id=request_id,
-                run_id=run_id,
-                task_id=task_id,
-                backend=backend,
-                tool_call=tool_call,
-                source=source,
-                archive_level=archive_level,
-                created_at=created_at,
+                EventIdentity(
+                    sequence=index,
+                    session_id=session_id,
+                    request_id=ctx.request_id,
+                    run_id=ctx.run_id,
+                    task_id=ctx.task_id,
+                ),
+                ToolCallContext(
+                    backend=ctx.backend,
+                    tool_call=tool_call,
+                    source=ctx.source,
+                    archive_level=ctx.archive_level,
+                    created_at=ctx.created_at,
+                ),
             )
         )
 
@@ -194,16 +220,20 @@ def archive_run_turn(
     normalized_tool_calls = [_normalize_tool_call(call) for call in tool_calls or []]
     events = _build_run_turn_events(
         session_id=str(session_id),
-        user_prompt=str(user_prompt),
-        response_text=str(response_text),
-        backend=str(backend),
-        tool_calls=normalized_tool_calls,
-        request_id=str(request_id),
-        run_id=str(run_id),
-        task_id=str(task_id),
-        source=str(source),
-        archive_level=normalized_level,
-        created_at=timestamp,
+        turn=TurnData(
+            user_prompt=str(user_prompt),
+            response_text=str(response_text),
+            tool_calls=normalized_tool_calls,
+        ),
+        ctx=RunContext(
+            backend=str(backend),
+            request_id=str(request_id),
+            run_id=str(run_id),
+            task_id=str(task_id),
+            source=str(source),
+            archive_level=normalized_level,
+            created_at=timestamp,
+        ),
     )
 
     paths: list[Path] = []

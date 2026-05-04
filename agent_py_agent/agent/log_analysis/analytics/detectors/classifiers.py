@@ -241,27 +241,29 @@ def _destination(event: Mapping[str, Any]) -> str:
 
 def _weak_signal(event: JsonDict) -> JsonDict | None:
     """Classify event as a weak signal and return its metadata, or None."""
-    signal_type = ""
-    if _is_waf_event(event):
-        signal_type = "waf_web_alert"
-    elif _is_vpn_event(event) and _is_success(event):
-        if _truthy(_field(event, "new_geo", "new_asn", "new_device", "unusual_hour")):
-            signal_type = "vpn_novel_login"
-    elif _is_auth_event(event) and _is_failure(event):
-        signal_type = "auth_failure"
-    elif _is_suspicious_web_process_event(event):
-        signal_type = "web_process"
-    elif _is_suspicious_file_write(event):
-        signal_type = "file_write"
-    elif _is_egress_event(event) and (
-        _truthy(_field(event, "rare", "is_rare", "new_dst", "new_destination")) or _destination_ip(event)
-    ):
-        signal_type = "egress"
-    elif _is_alert_event(event) and _severity(event) in {"low", "medium", "high", "critical"}:
-        signal_type = "alert"
+    signal_type = _classify_weak_signal(event)
     if not signal_type:
         return None
     return {"signal_type": signal_type, "source_product": _source_product(event), "event": event}
+
+
+def _classify_weak_signal(event: JsonDict) -> str:
+    """Return signal type string for a weak signal event, or empty string."""
+    if _is_waf_event(event):
+        return "waf_web_alert"
+    if _is_vpn_event(event) and _is_success(event) and _truthy(_field(event, "new_geo", "new_asn", "new_device", "unusual_hour")):
+        return "vpn_novel_login"
+    if _is_auth_event(event) and _is_failure(event):
+        return "auth_failure"
+    if _is_suspicious_web_process_event(event):
+        return "web_process"
+    if _is_suspicious_file_write(event):
+        return "file_write"
+    if _is_egress_event(event) and (_truthy(_field(event, "rare", "is_rare", "new_dst", "new_destination")) or _destination_ip(event)):
+        return "egress"
+    if _is_alert_event(event) and _severity(event) in {"low", "medium", "high", "critical"}:
+        return "alert"
+    return ""
 
 
 def _entities_from_events(events: Sequence[Mapping[str, Any]]) -> dict[str, list[str]]:
@@ -345,28 +347,43 @@ def _gap_details(
     primary_entity = _first_entity(entities)
     details: list[dict[str, Any]] = []
     for gap in gaps:
-        text = _text(gap)
-        detail: dict[str, Any] = {
-            "description": text,
-            "source_products": products,
-            "time_window": list(window),
-            "entity": primary_entity,
-        }
-        lower = text.lower()
-        if "edr" in lower or "process" in lower or "host" in lower:
-            detail["missing_telemetry"] = "edr_process"
-        elif "outbound" in lower or "dns" in lower or "proxy" in lower or "netflow" in lower or "network" in lower:
-            detail["missing_telemetry"] = "network_egress"
-        elif "file" in lower:
-            detail["missing_telemetry"] = "file_activity"
-        elif "mfa" in lower:
-            detail["missing_telemetry"] = "identity_mfa"
-        elif "geoip" in lower or "country" in lower:
-            detail["missing_field"] = "country"
-        elif "asn" in lower:
-            detail["missing_field"] = "asn"
+        detail = _build_gap_detail(gap, products, window, primary_entity)
         details.append(detail)
     return details
+
+
+def _build_gap_detail(gap: str, products: Sequence[str], window: Sequence[str], primary_entity: dict[str, str]) -> dict[str, Any]:
+    """Build one gap detail dict."""
+    text = _text(gap)
+    detail: dict[str, Any] = {
+        "description": text,
+        "source_products": list(products),
+        "time_window": list(window),
+        "entity": primary_entity,
+    }
+    _apply_gap_telemetry(detail, text)
+    return detail
+
+
+def _apply_gap_telemetry(detail: dict[str, Any], text: str) -> None:
+    """Apply telemetry or field classification to a gap detail based on text content."""
+    lower = text.lower()
+    _set_by_keywords(detail, lower, (
+        ("edr", "process", "host"), "missing_telemetry", "edr_process",
+        ("outbound", "dns", "proxy", "netflow", "network"), "missing_telemetry", "network_egress",
+        ("file",), "missing_telemetry", "file_activity",
+        ("mfa",), "missing_telemetry", "identity_mfa",
+        ("geoip", "country"), "missing_field", "country",
+        ("asn",), "missing_field", "asn",
+    ))
+
+
+def _set_by_keywords(detail: dict[str, Any], text: str, rules: tuple[tuple[tuple[str, ...], str, str], ...]) -> None:
+    """Set detail fields based on keyword match rules."""
+    for keywords, key, value in rules:
+        if any(kw in text for kw in keywords):
+            detail[key] = value
+            return
 
 
 def _first_entity(entities: Mapping[str, Sequence[Any]]) -> dict[str, str]:

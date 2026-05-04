@@ -209,57 +209,64 @@ class AdminCrossChannelQuery:
         }
 
     def format_admin_summary(self, user_id: str) -> str:
-        """获取管理员全局摘要（格式化文本）。
-
-        Args:
-            user_id: 用户 ID（必须为 admin）
-
-        Returns:
-            格式化的摘要文本
-        """
+        """获取管理员全局摘要（格式化文本）."""
         if not self._check_admin(user_id):
             return "权限不足：只有 admin 用户可以使用此功能"
-
         lines = ["=== 管理员全局摘要 ===", ""]
+        self._append_channel_summaries(user_id, lines)
+        self._append_active_tasks(user_id, lines)
+        self._append_recent_activity(user_id, lines)
+        return "\n".join(lines)
 
-        # 各通道会话概览
+    def _append_channel_summaries(self, user_id: str, lines: list[str]) -> None:
+        """Append per-channel summaries to lines list."""
         for channel in ["chat", "feishu", "qq", "web"]:
             summary = self.get_channel_summary(user_id, channel)
-            if summary.get("session_count", 0) > 0:
-                lines.append(f"## {channel.upper()} 通道")
-                lines.append(f"会话数: {summary['session_count']}")
-                lines.append(f"活跃任务: {summary['active_task_count']}")
-                if summary.get("sessions"):
-                    lines.append("最近会话:")
-                    for sess in summary["sessions"][:3]:
-                        lines.append(f"  - {sess['session_id']}: {sess['primary']}")
-                lines.append("")
-
-        # 全部活跃任务
-        active_tasks = self.get_all_tasks(user_id, status="RUNNING")
-        if active_tasks:
-            lines.append(f"## 活跃任务 ({len(active_tasks)} 个)")
-            for task in active_tasks[:10]:
-                lines.append(f"- [{task['task_id']}] {task['goal'][:60]}...")
-            if len(active_tasks) > 10:
-                lines.append(f"  ... 还有 {len(active_tasks) - 10} 个任务")
+            if not summary.get("session_count", 0):
+                continue
+            lines.extend([
+                f"## {channel.upper()} 通道",
+                f"会话数: {summary['session_count']}",
+                f"活跃任务: {summary['active_task_count']}",
+            ])
+            if summary.get("sessions"):
+                lines.append("最近会话:")
+                for sess in summary["sessions"][:3]:
+                    lines.append(f"  - {sess['session_id']}: {sess['primary']}")
             lines.append("")
 
-        # 最近活动时间线
-        timeline = self.get_recent_activity(user_id, limit=10)
-        if timeline:
-            lines.append("## 最近活动")
-            for item in timeline[:10]:
-                ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(item.get("timestamp", 0)))
-                if item["type"] == "session_update":
-                    lines.append(f"- [{ts}] 会话 {item['session_id'][:16]}... 在 {item['channel']}")
-                elif item["type"] == "task_update":
-                    lines.append(f"- [{ts}] 任务 {item['task_id']} -> {item['status']}")
-                elif item["type"] == "channel_activity":
-                    active_str = "活跃" if item.get("active") else "非活跃"
-                    lines.append(f"- [{ts}] 通道 {item['channel']} ({active_str})")
+    def _append_active_tasks(self, user_id: str, lines: list[str]) -> None:
+        """Append active tasks summary."""
+        active_tasks = self.get_all_tasks(user_id, status="RUNNING")
+        if not active_tasks:
+            return
+        lines.append(f"## 活跃任务 ({len(active_tasks)} 个)")
+        for task in active_tasks[:10]:
+            lines.append(f"- [{task['task_id']}] {task['goal'][:60]}...")
+        if len(active_tasks) > 10:
+            lines.append(f"  ... 还有 {len(active_tasks) - 10} 个任务")
+        lines.append("")
 
-        return "\n".join(lines)
+    def _append_recent_activity(self, user_id: str, lines: list[str]) -> None:
+        """Append recent activity timeline."""
+        timeline = self.get_recent_activity(user_id, limit=10)
+        if not timeline:
+            return
+        lines.append("## 最近活动")
+        for item in timeline[:10]:
+            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(item.get("timestamp", 0)))
+            self._append_activity_line(lines, item, ts)
+
+    def _append_activity_line(self, lines: list[str], item: dict, ts: str) -> None:
+        """Format and append a single activity timeline entry."""
+        item_type = item["type"]
+        if item_type == "session_update":
+            lines.append(f"- [{ts}] 会话 {item['session_id'][:16]}... 在 {item['channel']}")
+        elif item_type == "task_update":
+            lines.append(f"- [{ts}] 任务 {item['task_id']} -> {item['status']}")
+        elif item_type == "channel_activity":
+            active_str = "活跃" if item.get("active") else "非活跃"
+            lines.append(f"- [{ts}] 通道 {item['channel']} ({active_str})")
 
 
 __all__ = ["AdminCrossChannelQuery"]

@@ -154,33 +154,35 @@ class ChannelManager:
 
         deadline = time.time() + timeout
         while time.time() < deadline:
-            try:
-                url = f"http://127.0.0.1:{self.gateway_port}/result/{request_id}"
-                req = urllib.request.Request(url)
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    body = json.loads(resp.read().decode("utf-8"))
-
-                if resp.status == 200:
-                    if body.get("ok"):
-                        return body.get("response", "")
-                    elif "error" in body:
-                        return f"错误: {body.get('error', 'unknown')}"
-                elif resp.status == 404:
-                    time.sleep(interval)
-                    continue
-                else:
-                    time.sleep(interval)
-
-            except urllib.error.HTTPError as exc:
-                if exc.code == 404:
-                    time.sleep(interval)
-                    continue
-                return f"HTTP 错误: {exc.code}"
-            except Exception:
-                time.sleep(interval)
-                continue
-
+            result = self._poll_gateway_once(request_id, interval)
+            if result is not None:
+                return result
         return "gateway 响应超时"
+
+    def _poll_gateway_once(self, request_id: str, interval: float) -> str | None:
+        """Poll gateway once; return response string, error string, or None to retry."""
+        import urllib.error
+        import urllib.request
+
+        try:
+            url = f"http://127.0.0.1:{self.gateway_port}/result/{request_id}"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            if resp.status == 200 and body.get("ok"):
+                return body.get("response", "")
+            if resp.status == 200 and "error" in body:
+                return f"错误: {body.get('error', 'unknown')}"
+            time.sleep(interval)
+            return None
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                time.sleep(interval)
+                return None
+            return f"HTTP 错误: {exc.code}"
+        except Exception:
+            time.sleep(interval)
+            return None
 
     # -------------------------------------------------------------------------
     # 活跃通道查询

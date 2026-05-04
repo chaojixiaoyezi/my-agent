@@ -54,61 +54,66 @@ def validate_template_data(
     source_path: str = "",
 ) -> list[WorkflowLoadIssue]:
     """Validate raw template JSON data without constructing dataclasses."""
-
     if not isinstance(data, dict):
-        return [
-            WorkflowLoadIssue(
-                message="workflow template must be an object",
-                source_path=source_path,
-            )
-        ]
-
+        return [WorkflowLoadIssue(message="workflow template must be an object", source_path=source_path)]
     template_id = _clean_str(data.get("id"))
+    issues: list[WorkflowLoadIssue] = _check_required_fields(data, template_id, source_path)
+    issues.extend(_validate_phases(data.get("phases"), template_id, source_path))
+    return issues
+
+
+def _check_required_fields(data: dict, template_id: str, source_path: str) -> list[WorkflowLoadIssue]:
+    """Check that all required top-level fields are present."""
     issues: list[WorkflowLoadIssue] = []
     for field_name in REQUIRED_TEMPLATE_FIELDS:
         if _is_missing(data.get(field_name)):
-            issues.append(
-                WorkflowLoadIssue(
-                    message=f"missing required field: {field_name}",
-                    source_path=source_path,
-                    template_id=template_id,
-                    field=field_name,
-                )
-            )
-
-    phases = data.get("phases")
-    if not _is_missing(phases) and not isinstance(phases, list):
-        issues.append(
-            WorkflowLoadIssue(
-                message="phases must be a list",
+            issues.append(WorkflowLoadIssue(
+                message=f"missing required field: {field_name}",
                 source_path=source_path,
                 template_id=template_id,
-                field="phases",
-            )
-        )
-    elif isinstance(phases, list):
-        for idx, phase in enumerate(phases):
-            field_prefix = f"phases[{idx}]"
-            if not isinstance(phase, dict):
-                issues.append(
-                    WorkflowLoadIssue(
-                        message="phase must be an object",
-                        source_path=source_path,
-                        template_id=template_id,
-                        field=field_prefix,
-                    )
-                )
-                continue
-            for field_name in REQUIRED_PHASE_FIELDS:
-                if _is_missing(phase.get(field_name)):
-                    issues.append(
-                        WorkflowLoadIssue(
-                            message=f"phase missing required field: {field_name}",
-                            source_path=source_path,
-                            template_id=template_id,
-                            field=f"{field_prefix}.{field_name}",
-                        )
-                    )
+                field=field_name,
+            ))
+    return issues
+
+
+def _validate_phases(phases: Any, template_id: str, source_path: str) -> list[WorkflowLoadIssue]:
+    """Validate phases field and its contents."""
+    issues: list[WorkflowLoadIssue] = []
+    if _is_missing(phases):
+        return issues
+    if not isinstance(phases, list):
+        issues.append(WorkflowLoadIssue(
+            message="phases must be a list",
+            source_path=source_path,
+            template_id=template_id,
+            field="phases",
+        ))
+        return issues
+    for idx, phase in enumerate(phases):
+        issues.extend(_validate_single_phase(phase, idx, template_id, source_path))
+    return issues
+
+
+def _validate_single_phase(phase: Any, idx: int, template_id: str, source_path: str) -> list[WorkflowLoadIssue]:
+    """Validate one phase entry."""
+    issues: list[WorkflowLoadIssue] = []
+    field_prefix = f"phases[{idx}]"
+    if not isinstance(phase, dict):
+        issues.append(WorkflowLoadIssue(
+            message="phase must be an object",
+            source_path=source_path,
+            template_id=template_id,
+            field=field_prefix,
+        ))
+        return issues
+    for field_name in REQUIRED_PHASE_FIELDS:
+        if _is_missing(phase.get(field_name)):
+            issues.append(WorkflowLoadIssue(
+                message=f"phase missing required field: {field_name}",
+                source_path=source_path,
+                template_id=template_id,
+                field=f"{field_prefix}.{field_name}",
+            ))
     return issues
 
 

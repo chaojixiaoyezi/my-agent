@@ -99,6 +99,32 @@ def run_fallback(
         if should:
             print(FALLBACK_CHAT_PROMPT, end="", flush=True)
 
+    def _make_chunk_handler(agent_name: str, next_message_id: int):
+        """Factory for streaming chunk handlers — defined once outside if/else to avoid nesting depth 5."""
+        stream_started_ref = [False]
+        stream_visible_chars_ref = [0]
+        stream_truncated_ref = [False]
+
+        def on_chunk(chunk: str) -> None:
+            if not stream_started_ref[0]:
+                sys.stdout.write(f"{GREEN}{agent_name}#{next_message_id}>{RESET} ")
+                sys.stdout.flush()
+                stream_started_ref[0] = True
+            remaining = max(0, 900 - stream_visible_chars_ref[0])
+            if remaining > 0:
+                visible = chunk[:remaining]
+                sys.stdout.write(visible)
+                sys.stdout.flush()
+                stream_visible_chars_ref[0] += len(visible)
+            if remaining < len(chunk) and not stream_truncated_ref[0]:
+                sys.stdout.write(
+                    f"{GRAY}[回复较长，后续内容已折叠。完成后可用 /expand last 查看全文。]{RESET}"
+                )
+                sys.stdout.flush()
+                stream_truncated_ref[0] = True
+
+        return on_chunk, stream_started_ref
+
     def worker() -> None:
         nonlocal is_running, pending_jobs, running_prompt, running_started_at
         while True:
@@ -114,10 +140,10 @@ def run_fallback(
                 history_ctx = build_history_context()
                 turn_inject = list(job.inject) + [_CHAT_RESPONSE_STYLE_INJECT] + ([history_ctx] if history_ctx else [])
                 agent_response_text = ""
-                stream_started = False
-                stream_visible_chars = 0
-                stream_truncated = False
                 next_message_id = len(assistant_outputs) + 1
+                on_chunk, stream_started_ref = _make_chunk_handler(
+                    agent.config.agent_name, next_message_id
+                )
                 if use_gateway:
                     if not check_gateway_alive(paths):
                         raise RuntimeError("gateway 已停止。请先执行: my-agent gateway start")
@@ -131,43 +157,17 @@ def run_fallback(
                         resume_context=resume_context_override(args),
                         agent=agent,
                     )
-                    timeout = (
-                        args.gateway_timeout
-                        if args.gateway_timeout is not None
-                        else agent.config.gateway_request_timeout
-                    )
+                    timeout = getattr(args, "gateway_timeout", None) or agent.config.gateway_request_timeout
                     chunks_printed_ref = [0]
                     deadline = time.time() + max(0.0, timeout)
-
-                    def on_chunk(chunk: str) -> None:
-                        nonlocal stream_started, stream_visible_chars, stream_truncated
-                        if not stream_started:
-                            sys.stdout.write(f"{GREEN}{agent.config.agent_name}#{next_message_id}>{RESET} ")
-                            sys.stdout.flush()
-                            stream_started = True
-                        remaining = max(0, 900 - stream_visible_chars)
-                        if remaining > 0:
-                            visible = chunk[:remaining]
-                            sys.stdout.write(visible)
-                            sys.stdout.flush()
-                            stream_visible_chars += len(visible)
-                        if remaining < len(chunk) and not stream_truncated:
-                            sys.stdout.write(
-                                f"\n\n{GRAY}[回复较长，后续内容已折叠。完成后可用 /expand last 查看全文。]{RESET}"
-                            )
-                            sys.stdout.flush()
-                            stream_truncated = True
-
                     response = poll_gateway_chunks(
                         chunk_path, response_path, deadline, on_chunk, chunks_printed_ref=chunks_printed_ref
                     )
                     elapsed = time.perf_counter() - started_at
-                    if stream_started:
+                    if stream_started_ref[0]:
                         print()
                     if not response:
-                        raise TimeoutError(
-                            f"gateway 请求等待超时: request_id={request_id} response={response_path}"
-                        )
+                        raise TimeoutError(f"gateway 请求等待超时: request_id={request_id}")
                     if job.show_prompt and response.get("prompt"):
                         print("===== FINAL PROMPT =====")
                         print(response.get("prompt", ""))
@@ -180,30 +180,10 @@ def run_fallback(
                     )
                     if response.get("ok"):
                         agent_response_text = response.get("response", "")
-                        if not stream_started:
-                            render_assistant_response(agent_response_text)
                     else:
                         print(f"错误: {response.get('error', 'gateway 请求失败')}")
+                        agent_response_text = ""
                 else:
-                    def on_chunk(chunk: str) -> None:
-                        nonlocal stream_started, stream_visible_chars, stream_truncated
-                        if not stream_started:
-                            sys.stdout.write(f"{GREEN}{agent.config.agent_name}#{next_message_id}>{RESET} ")
-                            sys.stdout.flush()
-                            stream_started = True
-                        remaining = max(0, 900 - stream_visible_chars)
-                        if remaining > 0:
-                            visible = chunk[:remaining]
-                            sys.stdout.write(visible)
-                            sys.stdout.flush()
-                            stream_visible_chars += len(visible)
-                        if remaining < len(chunk) and not stream_truncated:
-                            sys.stdout.write(
-                                f"{GRAY}[回复较长，后续内容已折叠。完成后可用 /expand last 查看全文。]{RESET}"
-                            )
-                            sys.stdout.flush()
-                            stream_truncated = True
-
                     result = agent.run(
                         job.user,
                         inject=turn_inject,
@@ -215,6 +195,7 @@ def run_fallback(
                         on_chunk=on_chunk,
                     )
                     elapsed = time.perf_counter() - started_at
+                    stream_started = get_stream_started()
                     if stream_started:
                         print()
                     if job.show_prompt:
@@ -259,19 +240,22 @@ def run_fallback(
     if use_gateway:
         print("当前模式: gateway 客户端。普通消息会投递给后台 gateway 处理。")
 
+    def _read_user_input() -> str:
+        """Read a line of input, handling both tty and non-tty cases."""
+        if sys.stdin.isatty():
+            print(FALLBACK_CHAT_PROMPT, end="", flush=True)
+            with state_lock:
+                fallback_waiting_for_input = True
+            try:
+                return input().strip()
+            finally:
+                with state_lock:
+                    fallback_waiting_for_input = False
+        return input(FALLBACK_CHAT_PROMPT).strip()
+
     while True:
         try:
-            if sys.stdin.isatty():
-                print(FALLBACK_CHAT_PROMPT, end="", flush=True)
-                with state_lock:
-                    fallback_waiting_for_input = True
-                try:
-                    user = input().strip()
-                finally:
-                    with state_lock:
-                        fallback_waiting_for_input = False
-            else:
-                user = input(FALLBACK_CHAT_PROMPT).strip()
+            user = _read_user_input()
         except (EOFError, KeyboardInterrupt):
             print("\n再见。")
             return 0

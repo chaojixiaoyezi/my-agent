@@ -12,59 +12,56 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 from .manager import SessionManager
+from ..subagent import SubagentRegistry
 
 
 def resume_session(agent: SimpleAgent, session_id: str) -> dict:
-    """恢复会话上下文。
-
-    从会话的历史记忆和任务上下文中恢复信息。
-
-    Args:
-        agent: SimpleAgent 实例
-        session_id: 会话 ID
-
-    Returns:
-        包含恢复上下文的字典，包括：
-        - session: Session 对象
-        - recent_memories: 最近记忆列表
-        - subagent_context: 子代理上下文
-    """
+    """恢复会话上下文."""
     manager = SessionManager(agent.config)
     session = manager.load_session(session_id)
-
     if session is None:
-        return {
-            "session": None,
-            "error": f"会话 {session_id} 不存在",
-        }
+        return {"session": None, "error": f"会话 {session_id} 不存在"}
+    recent_memories = _load_recent_memories(agent.config, session_id)
+    subagent_context = _load_subagent_context(agent, session_id)
+    return {"session": session, "recent_memories": recent_memories, "subagent_context": subagent_context}
 
-    # 查询该会话的记忆
-    # 假设记忆中有 session_id 字段
-    recent_memories = []
+
+def _load_recent_memories(config, session_id: str) -> list[dict]:
+    """Load recent memories for a session from memory.jsonl."""
+    recent_memories: list[dict] = []
     try:
-        # 从 memory.jsonl 中查找该 session 的记录
-        memory_path = Path(agent.config.memory_path)
+        memory_path = Path(config.memory_path)
         if memory_path.exists():
             lines = memory_path.read_text(encoding="utf-8").strip().split("\n")
-            for line in reversed(lines[-10:]):  # 最近 10 条
-                try:
-                    import json
-                    record = json.loads(line)
-                    if record.get("session_id") == session_id:
-                        recent_memories.append(record)
-                except (json.JSONDecodeError, KeyError):
-                    continue
+            for line in reversed(lines[-10:]):
+                record = _parse_memory_line(line, session_id)
+                if record:
+                    recent_memories.append(record)
     except (OSError, UnicodeDecodeError):
         pass
+    return recent_memories
 
-    # 查询该会话的子代理任务
-    subagent_context = []
+
+def _parse_memory_line(line: str, session_id: str) -> dict | None:
+    """Parse one memory line and return it if session_id matches."""
+    if not line:
+        return None
     try:
-        from ..subagent import SubagentRegistry
+        record = json.loads(line)
+        if record.get("session_id") == session_id:
+            return record
+    except (json.JSONDecodeError, KeyError):
+        pass
+    return None
+
+
+def _load_subagent_context(agent: SimpleAgent, session_id: str) -> list[dict]:
+    """Load subagent context for a session."""
+    subagent_context: list[dict] = []
+    try:
         registry = SubagentRegistry(agent)
         board = registry.build_board(recent_limit=5)
         for item in board.recent:
-            # 假设子代理记录中有 session_id
             if hasattr(item, "metadata") and item.metadata.get("session_id") == session_id:
                 subagent_context.append({
                     "id": item.id,
@@ -73,12 +70,7 @@ def resume_session(agent: SimpleAgent, session_id: str) -> dict:
                 })
     except Exception:
         pass
-
-    return {
-        "session": session,
-        "recent_memories": recent_memories,
-        "subagent_context": subagent_context,
-    }
+    return subagent_context
 
 
 def format_resume_context(resume_data: dict) -> str:

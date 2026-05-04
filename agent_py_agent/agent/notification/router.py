@@ -79,50 +79,39 @@ class NotificationRouter:
         user_id: str,
         exclude_channel: str | None = None,
     ) -> str | None:
-        """查找会话最近活跃通道。
-
-        Args:
-            user_id: 用户 ID
-            exclude_channel: 要排除的通道
-
-        Returns:
-            活跃通道名称
-        """
+        """查找会话最近活跃通道."""
         if not self._session_workspace.exists():
             return None
-
-        now = time.time()
         timeout = getattr(self.config, "notification_channel_timeout_seconds", 300)
         best_channel: str | None = None
         best_time = 0.0
-
-        try:
-            for session_dir in self._session_workspace.iterdir():
-                if not session_dir.is_dir():
-                    continue
-
-                session_file = session_dir / "session.json"
-                if not session_file.exists():
-                    continue
-
-                try:
-                    data = json.loads(session_file.read_text(encoding="utf-8"))
-                    if data.get("user_id") != user_id:
-                        continue
-
-                    channel = data.get("last_active_channel", "")
-                    if channel and channel != exclude_channel:
-                        updated_at = data.get("updated_at", 0)
-                        # 找最近活跃的通道
-                        if now - updated_at < timeout and updated_at > best_time:
-                            best_time = updated_at
-                            best_channel = channel
-                except (json.JSONDecodeError, KeyError, OSError):
-                    continue
-        except OSError:
-            pass
-
+        for session_dir in self._session_workspace.iterdir():
+            channel, updated_at = self._eval_session_for_router(session_dir, user_id, exclude_channel, timeout)
+            if updated_at > best_time:
+                best_time = updated_at
+                best_channel = channel
         return best_channel
+
+    def _eval_session_for_router(self, session_dir: Path, user_id: str, exclude_channel: str | None, timeout: float) -> tuple[str | None, float]:
+        """Evaluate session dir for active channel; return (channel, updated_at)."""
+        if not session_dir.is_dir():
+            return None, 0.0
+        session_file = session_dir / "session.json"
+        if not session_file.exists():
+            return None, 0.0
+        try:
+            data = json.loads(session_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, KeyError, OSError):
+            return None, 0.0
+        if data.get("user_id") != user_id:
+            return None, 0.0
+        channel = data.get("last_active_channel", "")
+        if not channel or channel == exclude_channel:
+            return None, 0.0
+        updated_at = data.get("updated_at", 0)
+        if (time.time() - updated_at) < timeout:
+            return channel, updated_at
+        return None, 0.0
 
     def is_channel_online(self, channel: str, user_id: str | None = None) -> bool:
         """检查通道是否在线。

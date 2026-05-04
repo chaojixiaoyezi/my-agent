@@ -58,41 +58,31 @@ class ChannelStatusChecker:
             return False
 
     def _check_chat_online(self, user_id: str | None = None) -> bool:
-        """检查 chat 通道是否在线。
-
-        检查 data/sessions/ 下是否有 updated_at 在超时时间内的 chat 会话。
-        """
+        """检查 chat 通道是否在线."""
         if not self._session_workspace.exists():
             return False
-
-        now = time.time()
         timeout = self._channel_timeout
+        for session_dir in self._session_workspace.iterdir():
+            if self._is_chat_session_online(session_dir, user_id, timeout):
+                return True
+        return False
 
+    def _is_chat_session_online(self, session_dir: Path, user_id: str | None, timeout: float) -> bool:
+        """Return True if session dir has a chat session active within timeout."""
+        if not session_dir.is_dir():
+            return False
+        session_file = session_dir / "session.json"
+        if not session_file.exists():
+            return False
         try:
-            for session_dir in self._session_workspace.iterdir():
-                if not session_dir.is_dir():
-                    continue
-
-                session_file = session_dir / "session.json"
-                if not session_file.exists():
-                    continue
-
-                try:
-                    data = json.loads(session_file.read_text(encoding="utf-8"))
-                    # 过滤用户
-                    if user_id and data.get("user_id") != user_id:
-                        continue
-
-                    # 检查是否 chat 通道且最近活跃
-                    if data.get("last_active_channel") == "chat":
-                        updated_at = data.get("updated_at", 0)
-                        if now - updated_at < timeout:
-                            return True
-                except (json.JSONDecodeError, KeyError, OSError):
-                    continue
-        except OSError:
-            pass
-
+            data = json.loads(session_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, KeyError, OSError):
+            return False
+        if user_id and data.get("user_id") != user_id:
+            return False
+        if data.get("last_active_channel") == "chat":
+            updated_at = data.get("updated_at", 0)
+            return (time.time() - updated_at) < timeout
         return False
 
     def _check_adapter_online(self, channel: str) -> bool:

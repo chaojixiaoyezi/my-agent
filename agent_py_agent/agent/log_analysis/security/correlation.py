@@ -133,28 +133,31 @@ def _inference_for_finding(finding: Finding) -> dict[str, Any]:
 def _entry_candidates(findings: Sequence[Finding]) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     for finding in findings:
-        kind = ""
-        if finding.detector_id == "waf_attack_success_candidate":
-            kind = "web_exploit_candidate"
-        elif finding.detector_id == "web_to_process_anomaly":
-            kind = "web_post_exploit_execution_candidate"
-        elif finding.detector_id == "vpn_new_geo_login":
-            kind = "vpn_credential_abuse_candidate"
-        elif finding.detector_id == "bruteforce_then_success":
-            kind = "bruteforce_credential_abuse_candidate"
+        kind = _detector_kind(finding.detector_id)
         if not kind:
             continue
-        candidates.append(
-            {
-                "kind": kind,
-                "detector_id": finding.detector_id,
-                "confidence": finding.confidence if finding.confidence is not None else finding.risk_score,
-                "entities": finding.entities,
-                "evidence_refs": _ref_ids(finding.evidence_refs),
-                "basis": "inference",
-            }
-        )
+        candidates.append({
+            "kind": kind,
+            "detector_id": finding.detector_id,
+            "confidence": finding.confidence if finding.confidence is not None else finding.risk_score,
+            "entities": finding.entities,
+            "evidence_refs": _ref_ids(finding.evidence_refs),
+            "basis": "inference",
+        })
     return sorted(candidates, key=lambda item: float(item.get("confidence", 0.0)), reverse=True)
+
+
+def _detector_kind(detector_id: str) -> str:
+    """Map detector ID to candidate kind string."""
+    if detector_id == "waf_attack_success_candidate":
+        return "web_exploit_candidate"
+    if detector_id == "web_to_process_anomaly":
+        return "web_post_exploit_execution_candidate"
+    if detector_id == "vpn_new_geo_login":
+        return "vpn_credential_abuse_candidate"
+    if detector_id == "bruteforce_then_success":
+        return "bruteforce_credential_abuse_candidate"
+    return ""
 
 
 def _merge_entities(entity_sets: Sequence[Mapping[str, Sequence[Any]]]) -> dict[str, list[str]]:

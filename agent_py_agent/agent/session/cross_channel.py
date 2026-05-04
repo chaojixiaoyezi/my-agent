@@ -155,39 +155,35 @@ class CrossChannelSession:
         return result
 
     def get_active_session(self, user_id: str, channel: str | None = None) -> str | None:
-        """获取用户在某通道的活跃会话。
-
-        Args:
-            user_id: 用户 ID
-            channel: 通道名称，为 None 时查找任意通道的活跃会话
-
-        Returns:
-            活跃会话 ID，不存在返回 None
-        """
+        """获取用户在某通道的活跃会话."""
         if not self._session_root.exists():
             return None
-
         for session_dir in self._session_root.iterdir():
             if not session_dir.is_dir():
                 continue
-            channels_file = session_dir / "channels.json"
-            if not channels_file.exists():
-                continue
+            session_id = self._find_session_in_dir(session_dir, user_id, channel)
+            if session_id:
+                return session_id
+        return None
 
-            try:
-                data = json.loads(channels_file.read_text(encoding="utf-8"))
-                # 检查用户匹配
-                if data.get("user_id") != user_id:
-                    continue
+    def _find_session_in_dir(self, session_dir: Path, user_id: str, channel: str | None) -> str | None:
+        """Find active session ID in a session dir, or None."""
+        channels_file = session_dir / "channels.json"
+        if not channels_file.exists():
+            return None
+        try:
+            data = json.loads(channels_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        if data.get("user_id") != user_id:
+            return None
+        return self._find_active_channel_session(data, channel)
 
-                # 查找活跃通道
-                for ch, info in data.get("channels", {}).items():
-                    if info.get("active"):
-                        if channel is None or ch == channel:
-                            return data.get("session_id")
-            except (json.JSONDecodeError, OSError):
-                continue
-
+    def _find_active_channel_session(self, data: dict, channel: str | None) -> str | None:
+        """Find active session from channel data."""
+        for ch, info in data.get("channels", {}).items():
+            if info.get("active") and (channel is None or ch == channel):
+                return data.get("session_id")
         return None
 
     def transfer_session(self, session_id: str, from_channel: str, to_channel: str) -> bool:

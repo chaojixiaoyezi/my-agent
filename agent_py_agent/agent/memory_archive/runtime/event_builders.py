@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any
 
 from ..models import RawMemoryEvent
@@ -25,21 +25,42 @@ _PREVIEW_LIMITS = {
 }
 
 
+@dataclass
+class EventIdentity:
+    """Shared identity fields for message and tool events."""
+    sequence: int
+    session_id: str
+    request_id: str
+    run_id: str
+    task_id: str
+
+
+@dataclass
+class MessageContext:
+    """Context fields specific to a message event."""
+    speaker: str
+    target: str
+    action: str
+    backend: str
+    source: str
+    archive_level: int
+    created_at: str
+    content: str
+
+
+@dataclass
+class ToolCallContext:
+    """Context fields specific to a tool-call event."""
+    backend: str
+    tool_call: dict[str, Any]
+    source: str
+    archive_level: int
+    created_at: str
+
+
 def _message_event(
-    *,
-    sequence: int,
-    session_id: str,
-    request_id: str,
-    run_id: str,
-    task_id: str,
-    speaker: str,
-    target: str,
-    action: str,
-    content: str,
-    backend: str,
-    source: str,
-    archive_level: int,
-    created_at: str,
+    identity: EventIdentity,
+    ctx: MessageContext,
 ) -> RawMemoryEvent:
     """LLM: create one user or assistant message archive event.
 
@@ -47,56 +68,48 @@ def _message_event(
     用户消息和助手回复字段形状基本一样，只是 speaker、target 和 action 不同。
     这里统一生成 event_id、短预览和内容 hash，避免两边格式漂移。
     """
+    content = ctx.content
     content_hash = _content_hash(content)
     event_id = _event_id(
         {
             "kind": "message",
-            "sequence": sequence,
-            "session_id": session_id,
-            "request_id": request_id,
-            "run_id": run_id,
-            "task_id": task_id,
-            "speaker": speaker,
-            "target": target,
-            "action": action,
-            "backend": backend,
-            "source": source,
+            "sequence": identity.sequence,
+            "session_id": identity.session_id,
+            "request_id": identity.request_id,
+            "run_id": identity.run_id,
+            "task_id": identity.task_id,
+            "speaker": ctx.speaker,
+            "target": ctx.target,
+            "action": ctx.action,
+            "backend": ctx.backend,
+            "source": ctx.source,
             "content_hash": content_hash,
         }
     )
     event = RawMemoryEvent(
         event_id=event_id,
-        session_id=session_id,
-        request_id=request_id,
-        run_id=run_id,
-        speaker=speaker,
-        target=target,
-        action=action,
-        created_at=created_at,
+        session_id=identity.session_id,
+        request_id=identity.request_id,
+        run_id=identity.run_id,
+        speaker=ctx.speaker,
+        target=ctx.target,
+        action=ctx.action,
+        created_at=ctx.created_at,
         status="ok",
-        task_id=task_id,
-        content_preview=_preview(content, archive_level),
+        task_id=identity.task_id,
+        content_preview=_preview(content, ctx.archive_level),
         content_path="",
         content_hash=content_hash,
         visibility="private",
-        source=source,
-        archive_level=_normalize_archive_level(archive_level),
+        source=ctx.source,
+        archive_level=_normalize_archive_level(ctx.archive_level),
     )
     return _apply_archive_level_to_message_event(event, content=content)
 
 
 def _tool_event(
-    *,
-    sequence: int,
-    session_id: str,
-    request_id: str,
-    run_id: str,
-    task_id: str,
-    backend: str,
-    tool_call: dict[str, Any],
-    source: str,
-    archive_level: int,
-    created_at: str,
+    identity: EventIdentity,
+    ctx: ToolCallContext,
 ) -> RawMemoryEvent:
     """LLM: create one tool-call archive event from normalized tool metadata.
 
@@ -104,6 +117,7 @@ def _tool_event(
     工具调用可能来自不同后端，字段名不完全一样。这个函数先提取常见字段，
     再把输出正文变成 hash 和短预览，避免 raw archive 暴涨。
     """
+    tool_call = ctx.tool_call
     tool_name = _first_text(tool_call, "tool_name", "tool", "name") or "unknown"
     tool_call_id = _first_text(tool_call, "tool_call_id", "call_id", "id")
     tool_success = _first_bool(tool_call, "tool_success", "success", "ok")
@@ -116,47 +130,47 @@ def _tool_event(
         tool_success=tool_success,
         status=status,
         error_code=error_code,
-        backend=backend,
+        backend=ctx.backend,
     )
     metadata_text = _stable_display_json(metadata)
     content_hash = _content_hash(_canonical_json(tool_call))
     event_id = _event_id(
         {
             "kind": "tool",
-            "sequence": sequence,
-            "session_id": session_id,
-            "request_id": request_id,
-            "run_id": run_id,
-            "task_id": task_id,
+            "sequence": identity.sequence,
+            "session_id": identity.session_id,
+            "request_id": identity.request_id,
+            "run_id": identity.run_id,
+            "task_id": identity.task_id,
             "tool_name": tool_name,
             "tool_call_id": tool_call_id,
-            "backend": backend,
-            "source": source,
+            "backend": ctx.backend,
+            "source": ctx.source,
             "content_hash": content_hash,
         }
     )
     event = RawMemoryEvent(
         event_id=event_id,
-        session_id=session_id,
-        request_id=request_id,
-        run_id=run_id,
+        session_id=identity.session_id,
+        request_id=identity.request_id,
+        run_id=identity.run_id,
         speaker="tool",
         target="assistant",
         action="tool_call",
-        created_at=created_at,
+        created_at=ctx.created_at,
         status=status,
         error_code=error_code,
         is_dispatch=bool(tool_call.get("is_dispatch", False)),
-        task_id=task_id,
+        task_id=identity.task_id,
         tool_name=tool_name,
         tool_call_id=tool_call_id,
         tool_success=tool_success,
-        content_preview=_preview(metadata_text, archive_level),
+        content_preview=_preview(metadata_text, ctx.archive_level),
         content_path="",
         content_hash=content_hash,
         visibility="private",
-        source=source,
-        archive_level=_normalize_archive_level(archive_level),
+        source=ctx.source,
+        archive_level=_normalize_archive_level(ctx.archive_level),
     )
     return _apply_archive_level_to_tool_event(event, tool_call=tool_call, metadata=metadata)
 

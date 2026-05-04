@@ -10,6 +10,8 @@ import pytest
 
 from agent_py_agent.agent.memory_archive.runtime.turn_archiver import (
     ArchiveRunTurnResult,
+    RunContext,
+    TurnData,
     _build_run_turn_events,
     archive_run_turn,
 )
@@ -79,16 +81,20 @@ class TestBuildRunTurnEvents:
         """验证用户消息在第一位"""
         events = _build_run_turn_events(
             session_id="s1",
-            user_prompt="hello",
-            response_text="hi",
-            backend="test",
-            tool_calls=[],
-            request_id="r1",
-            run_id="run1",
-            task_id="t1",
-            source="run",
-            archive_level=3,
-            created_at="2026-05-01T10:00:00Z",
+            turn=TurnData(
+                user_prompt="hello",
+                response_text="hi",
+                tool_calls=[],
+            ),
+            ctx=RunContext(
+                backend="test",
+                request_id="r1",
+                run_id="run1",
+                task_id="t1",
+                source="run",
+                archive_level=3,
+                created_at="2026-05-01T10:00:00Z",
+            ),
         )
 
         assert events[0].speaker == "user"
@@ -98,16 +104,20 @@ class TestBuildRunTurnEvents:
         """验证助手回复在第二位"""
         events = _build_run_turn_events(
             session_id="s1",
-            user_prompt="hello",
-            response_text="hi there",
-            backend="test",
-            tool_calls=[],
-            request_id="r1",
-            run_id="run1",
-            task_id="t1",
-            source="run",
-            archive_level=3,
-            created_at="2026-05-01T10:00:00Z",
+            turn=TurnData(
+                user_prompt="hello",
+                response_text="hi there",
+                tool_calls=[],
+            ),
+            ctx=RunContext(
+                backend="test",
+                request_id="r1",
+                run_id="run1",
+                task_id="t1",
+                source="run",
+                archive_level=3,
+                created_at="2026-05-01T10:00:00Z",
+            ),
         )
 
         assert events[1].speaker == "assistant"
@@ -120,16 +130,20 @@ class TestBuildRunTurnEvents:
         ]
         events = _build_run_turn_events(
             session_id="s1",
-            user_prompt="hello",
-            response_text="hi",
-            backend="test",
-            tool_calls=tool_calls,
-            request_id="r1",
-            run_id="run1",
-            task_id="t1",
-            source="run",
-            archive_level=3,
-            created_at="2026-05-01T10:00:00Z",
+            turn=TurnData(
+                user_prompt="hello",
+                response_text="hi",
+                tool_calls=tool_calls,
+            ),
+            ctx=RunContext(
+                backend="test",
+                request_id="r1",
+                run_id="run1",
+                task_id="t1",
+                source="run",
+                archive_level=3,
+                created_at="2026-05-01T10:00:00Z",
+            ),
         )
 
         tool_events = [e for e in events if e.speaker == "tool"]
@@ -140,16 +154,20 @@ class TestBuildRunTurnEvents:
         """验证事件 ID 唯一"""
         events = _build_run_turn_events(
             session_id="s1",
-            user_prompt="hello",
-            response_text="hi",
-            backend="test",
-            tool_calls=[],
-            request_id="r1",
-            run_id="run1",
-            task_id="t1",
-            source="run",
-            archive_level=3,
-            created_at="2026-05-01T10:00:00Z",
+            turn=TurnData(
+                user_prompt="hello",
+                response_text="hi",
+                tool_calls=[],
+            ),
+            ctx=RunContext(
+                backend="test",
+                request_id="r1",
+                run_id="run1",
+                task_id="t1",
+                source="run",
+                archive_level=3,
+                created_at="2026-05-01T10:00:00Z",
+            ),
         )
 
         event_ids = [e.event_id for e in events]
@@ -159,16 +177,20 @@ class TestBuildRunTurnEvents:
         """验证 session_id 传播到所有事件"""
         events = _build_run_turn_events(
             session_id="my-session",
-            user_prompt="hello",
-            response_text="hi",
-            backend="test",
-            tool_calls=[],
-            request_id="r1",
-            run_id="run1",
-            task_id="t1",
-            source="run",
-            archive_level=3,
-            created_at="2026-05-01T10:00:00Z",
+            turn=TurnData(
+                user_prompt="hello",
+                response_text="hi",
+                tool_calls=[],
+            ),
+            ctx=RunContext(
+                backend="test",
+                request_id="r1",
+                run_id="run1",
+                task_id="t1",
+                source="run",
+                archive_level=3,
+                created_at="2026-05-01T10:00:00Z",
+            ),
         )
 
         assert all(e.session_id == "my-session" for e in events)
