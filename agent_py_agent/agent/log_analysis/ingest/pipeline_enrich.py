@@ -26,60 +26,23 @@ from .pipeline_helpers import (
 )
 
 
-def enrich_ingest_file(
-    pipeline,  # IngestPipeline — lazy to avoid circular import
-    path: str | Path,
-    *,
-    source_id: str | None = None,
-    source_product: str | None = None,
-    parser_id: str = "security_alert_v1",
-    file_format: str | None = None,
-) -> IngestResult:
-    """LLM: Main orchestration for ingesting a single file — dedup, storage, manifest, checkpoint.
-
-    新手说明:
-    一个文件的完整导入流程：选解析器、读文件、去重、写存储、写 manifest、
-    写 checkpoint。这是 pipeline.ingest_file 的实际实现，拆到这里避免
-    pipeline.py 太长。
-    """
-    source_path = Path(path)
-    if not source_path.exists():
-        raise FileNotFoundError(source_path)
-
-    fmt = normalize_file_format(file_format or source_path.suffix.lstrip("."))
-    batch_source_id = source_id or source_path.stem
-    size_bytes, content_hash = file_digest(source_path)
-    batch_id = make_batch_id(
-        source_id=batch_source_id,
-        source_path=str(source_path.resolve()),
-        content_hash=content_hash,
-    )
-    parser = pipeline.registry.choose(parser_id=parser_id, file_format=fmt)
-    dead_letters = DeadLetterWriter(pipeline.root, source_id=batch_source_id, batch_id=batch_id)
-    started_at = utc_now()
-    cursor_before = pipeline.checkpoints.load(batch_source_id).get("cursor", {})
-
-    pipeline.dedup.begin_batch(
-        batch_id=batch_id,
-        source_id=batch_source_id,
-        content_hash=content_hash,
-        source_path=str(source_path),
-    )
-
-    counts, event_ids, storage_infos = _process_records(
-        pipeline,
-        source_path=source_path,
-        file_format=fmt,
-        parser=parser,
-        batch_id=batch_id,
-        source_id=batch_source_id,
-        source_product=source_product,
-        dead_letters=dead_letters,
-    )
-
-    storage_summary = _storage_summary(
-        storage_infos, fallback_path=pipeline.fallback_sink.events_path
-    )
+def _finalize_ingest_result(
+    pipeline,
+    batch_id: str,
+    batch_source_id: str,
+    source_path: Path,
+    fmt: str,
+    parser,
+    started_at: str,
+    content_hash: str,
+    size_bytes: int,
+    counts,
+    event_ids: list[str],
+    dead_letters,
+    storage_summary: dict[str, Any],
+    cursor_before: dict,
+):
+    """Write manifest, finish dedup batch, commit checkpoint, return IngestResult."""
     manifest_params = WriteManifestParams(
         pipeline=pipeline,
         batch_id=batch_id,
@@ -141,6 +104,78 @@ def enrich_ingest_file(
         events_path=storage_summary.get("path"),
         dead_letter_refs=dead_letters.refs(),
         stored_event_ids=event_ids,
+    )
+
+
+def enrich_ingest_file(
+    pipeline,  # IngestPipeline — lazy to avoid circular import
+    path: str | Path,
+    *,
+    source_id: str | None = None,
+    source_product: str | None = None,
+    parser_id: str = "security_alert_v1",
+    file_format: str | None = None,
+) -> IngestResult:
+    """LLM: Main orchestration for ingesting a single file — dedup, storage, manifest, checkpoint.
+
+    新手说明:
+    一个文件的完整导入流程：选解析器、读文件、去重、写存储、写 manifest、
+    写 checkpoint。这是 pipeline.ingest_file 的实际实现，拆到这里避免
+    pipeline.py 太长。
+    """
+    source_path = Path(path)
+    if not source_path.exists():
+        raise FileNotFoundError(source_path)
+
+    fmt = normalize_file_format(file_format or source_path.suffix.lstrip("."))
+    batch_source_id = source_id or source_path.stem
+    size_bytes, content_hash = file_digest(source_path)
+    batch_id = make_batch_id(
+        source_id=batch_source_id,
+        source_path=str(source_path.resolve()),
+        content_hash=content_hash,
+    )
+    parser = pipeline.registry.choose(parser_id=parser_id, file_format=fmt)
+    dead_letters = DeadLetterWriter(pipeline.root, source_id=batch_source_id, batch_id=batch_id)
+    started_at = utc_now()
+    cursor_before = pipeline.checkpoints.load(batch_source_id).get("cursor", {})
+
+    pipeline.dedup.begin_batch(
+        batch_id=batch_id,
+        source_id=batch_source_id,
+        content_hash=content_hash,
+        source_path=str(source_path),
+    )
+
+    counts, event_ids, storage_infos = _process_records(
+        pipeline,
+        source_path=source_path,
+        file_format=fmt,
+        parser=parser,
+        batch_id=batch_id,
+        source_id=batch_source_id,
+        source_product=source_product,
+        dead_letters=dead_letters,
+    )
+
+    storage_summary = _storage_summary(
+        storage_infos, fallback_path=pipeline.fallback_sink.events_path
+    )
+    return _finalize_ingest_result(
+        pipeline,
+        batch_id,
+        batch_source_id,
+        source_path,
+        fmt,
+        parser,
+        started_at,
+        content_hash,
+        size_bytes,
+        counts,
+        event_ids,
+        dead_letters,
+        storage_summary,
+        cursor_before,
     )
 
 

@@ -180,29 +180,21 @@ class _DispatchCollectionMixin:
     # _execute_runner_jobs
     # ------------------------------------------------------------------ #
 
-    def _execute_runner_jobs(
+    def _collect_runner_candidates(
         self,
         ctx: DispatchContext,
-        execute_runners: bool,
-        max_cards: int,
-        probe: bool,
-        existing_records: list,
-    ) -> list:
-        """Execute runner jobs and return updated records."""
-        records = list(existing_records)
-        effective_runner_instruction = ctx.runner_instruction
-        runner_max_attempts = _runner_max_attempts(self.config.runner_failure_policy)
-        runner_candidates = _dispatch_runner_candidates(
-            self.subagents.list_runs(), ctx.max_runners, runner_max_attempts=runner_max_attempts
-        )
+        runner_max_attempts: int,
+        runner_candidates: list,
+    ) -> tuple[list, list]:
+        """Collect runner candidates and pending jobs."""
         pending_runner_jobs = []
-
+        dry_records = []
         for task in runner_candidates:
             before = self.subagents.load(task.id)
             retry_reason = _runner_retry_reason(before, runner_max_attempts)
             action_name = "retry_runner" if retry_reason else "execute_runner"
             if not ctx.apply:
-                records.append(
+                dry_records.append(
                     self.subagents.make_dispatch_record(
                         step="runner",
                         action=action_name,
@@ -224,6 +216,28 @@ class _DispatchCollectionMixin:
                 )
                 continue
             pending_runner_jobs.append((task.id, before, retry_reason))
+        return dry_records, pending_runner_jobs
+
+    def _execute_runner_jobs(
+        self,
+        ctx: DispatchContext,
+        execute_runners: bool,
+        max_cards: int,
+        probe: bool,
+        existing_records: list,
+    ) -> list:
+        """Execute runner jobs and return updated records."""
+        records = list(existing_records)
+        effective_runner_instruction = ctx.runner_instruction
+        runner_max_attempts = _runner_max_attempts(self.config.runner_failure_policy)
+        runner_candidates = _dispatch_runner_candidates(
+            self.subagents.list_runs(), ctx.max_runners, runner_max_attempts=runner_max_attempts
+        )
+
+        dry_records, pending_runner_jobs = self._collect_runner_candidates(
+            ctx, runner_max_attempts, runner_candidates
+        )
+        records.extend(dry_records)
 
         if pending_runner_jobs:
             runner_timeout_seconds, runner_concurrency, runner_start_rate = resolve_runner_config(
