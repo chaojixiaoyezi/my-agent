@@ -27,6 +27,7 @@ from .parameters import _one_shot_tool_call_key
 @dataclass(frozen=True)
 class FinalizeContext:
     """Bundle of all finalize() parameters into a single object."""
+
     user_prompt: str
     final_prompt: str
     final_response: Any
@@ -51,46 +52,53 @@ class FinalizeContext:
     tool_rounds: int = 0
 
 
+@dataclass(frozen=True)
+class ToolLoopExecuteParams:
+    """Bundle of all ToolLoopService.execute parameters."""
+
+    user_prompt: str
+    memories: list
+    runtime_injections: list
+    prompt_files: list
+    tool_catalog_section: str
+    tool_recommendations_section: str
+    tool_context: list
+    effective_on_chunk: Any
+    allowed_tools: Any
+    granted_capabilities: Any
+    write_boundary: Any
+    task_attributes: dict | None
+    one_shot_tool_calls: set
+    executed_tools: list
+    archive_tool_calls: list
+    tool_rounds: int = 0
+
+
 class ToolLoopService:
     """Service for executing the main tool-calling loop."""
 
     def __init__(self, agent):
         self._agent = agent
 
-    def execute(
-        self,
-        user_prompt,
-        memories,
-        runtime_injections,
-        prompt_files,
-        tool_catalog_section,
-        tool_recommendations_section,
-        tool_context,
-        effective_on_chunk,
-        allowed_tools,
-        granted_capabilities,
-        write_boundary,
-        task_attributes,
-        one_shot_tool_calls,
-        executed_tools,
-        archive_tool_calls,
-        tool_rounds: int = 0,
-    ):
+    def execute(self, params: ToolLoopExecuteParams):
         """Execute the main tool-calling loop."""
         final_prompt = ""
         final_response = None
+        tool_rounds = params.tool_rounds
 
         while True:
             final_prompt = self._agent.prompts.build(
-                user_prompt,
-                memories,
-                inject=runtime_injections,
-                prompt_files=prompt_files,
-                tool_catalog_section=tool_catalog_section,
-                tool_recommendations_section=tool_recommendations_section,
-                tool_context=tool_context,
+                params.user_prompt,
+                params.memories,
+                inject=params.runtime_injections,
+                prompt_files=params.prompt_files,
+                tool_catalog_section=params.tool_catalog_section,
+                tool_recommendations_section=params.tool_recommendations_section,
+                tool_context=params.tool_context,
             )
-            response = self._agent.backend.generate(final_prompt, on_chunk=effective_on_chunk)
+            response = self._agent.backend.generate(
+                final_prompt, on_chunk=params.effective_on_chunk
+            )
             final_response = response
 
             if not self._agent.config.enable_tools:
@@ -101,29 +109,37 @@ class ToolLoopService:
                 break
 
             effective_max_tool_rounds = self._agent.config.max_tool_rounds
-            attrs_to_check = task_attributes if task_attributes else getattr(self._agent, '_current_task_attributes', None)
+            attrs_to_check = (
+                params.task_attributes
+                if params.task_attributes
+                else getattr(self._agent, "_current_task_attributes", None)
+            )
             if attrs_to_check and "max_tool_rounds" in attrs_to_check:
                 effective_max_tool_rounds = int(attrs_to_check["max_tool_rounds"])
 
             if tool_rounds >= effective_max_tool_rounds:
-                tool_context.append("[tool-system]\n已达到最大工具轮数限制，停止继续调用工具。")
-                final_prompt = self._agent.prompts.build(
-                    user_prompt,
-                    memories,
-                    inject=runtime_injections,
-                    prompt_files=prompt_files,
-                    tool_catalog_section=tool_catalog_section,
-                    tool_recommendations_section=tool_recommendations_section,
-                    tool_context=tool_context,
+                params.tool_context.append(
+                    "[tool-system]\n已达到最大工具轮数限制，停止继续调用工具。"
                 )
-                final_response = self._agent.backend.generate(final_prompt, on_chunk=effective_on_chunk)
+                final_prompt = self._agent.prompts.build(
+                    params.user_prompt,
+                    params.memories,
+                    inject=params.runtime_injections,
+                    prompt_files=params.prompt_files,
+                    tool_catalog_section=params.tool_catalog_section,
+                    tool_recommendations_section=params.tool_recommendations_section,
+                    tool_context=params.tool_context,
+                )
+                final_response = self._agent.backend.generate(
+                    final_prompt, on_chunk=params.effective_on_chunk
+                )
                 break
 
             tool_rounds += 1
-            tool_context.append(f"[assistant-tool-round-{tool_rounds}]\n{response.text}")
+            params.tool_context.append(f"[assistant-tool-round-{tool_rounds}]\n{response.text}")
             for idx, payload in enumerate(calls, start=1):
                 one_shot_key = _one_shot_tool_call_key(payload)
-                if one_shot_key and one_shot_key in one_shot_tool_calls:
+                if one_shot_key and one_shot_key in params.one_shot_tool_calls:
                     tool_name = str(payload.get("tool") or "unknown")
                     result = ToolExecutionResult(
                         tool_name,
@@ -134,15 +150,15 @@ class ToolLoopService:
                 else:
                     result = self._agent.tools.execute_call(
                         payload,
-                        allowed_tools=allowed_tools,
-                        granted_capabilities=granted_capabilities,
-                        write_boundary=write_boundary,
+                        allowed_tools=params.allowed_tools,
+                        granted_capabilities=params.granted_capabilities,
+                        write_boundary=params.write_boundary,
                     )
                     if one_shot_key and result.ok:
-                        one_shot_tool_calls.add(one_shot_key)
+                        params.one_shot_tool_calls.add(one_shot_key)
                 if result.ok and result.tool not in {"__parse_error__", "unknown"}:
-                    executed_tools.append(result.tool)
-                archive_tool_calls.append(
+                    params.executed_tools.append(result.tool)
+                params.archive_tool_calls.append(
                     {
                         "tool": result.tool,
                         "id": f"{tool_rounds}-{idx}",
@@ -150,7 +166,7 @@ class ToolLoopService:
                         "parameters": payload,
                     }
                 )
-                tool_context.append(
+                params.tool_context.append(
                     f"[tool-call-{tool_rounds}-{idx}]\n{payload}\n"
                     f"[tool-result-{tool_rounds}-{idx}]\n{result.render_for_prompt()}"
                 )
@@ -161,6 +177,7 @@ class ToolLoopService:
 @dataclass(frozen=True)
 class CompressionContext:
     """Bundle of check_and_apply parameters."""
+
     user_prompt: str
     memories: list
     runtime_injections: list
@@ -229,8 +246,12 @@ class CompressionService:
                         "error": f"{type(exc).__name__}: {exc}",
                     },
                 )
-            raise RuntimeError(f"compression blocked: pre-compression snapshot failed: {exc}") from exc
-        compressed_memories = self._compress_memories(ctx.memories, keep_recent=max(self._agent.config.memory_top_k, 2))
+            raise RuntimeError(
+                f"compression blocked: pre-compression snapshot failed: {exc}"
+            ) from exc
+        compressed_memories = self._compress_memories(
+            ctx.memories, keep_recent=max(self._agent.config.memory_top_k, 2)
+        )
         return compressed_memories, hook_result.snapshot_id, hook_result.snapshot_file_path, True
 
     def _compress_memories(self, memories: list[object], *, keep_recent: int) -> list[object]:
@@ -246,11 +267,15 @@ class CompressionService:
             return memories
         older = memories[:-keep_recent]
         recent = memories[-keep_recent:]
-        summary_lines = [f"{getattr(item, 'role', 'memory')}: {getattr(item, 'content', '')}" for item in older[-12:]]
+        summary_lines = [
+            f"{getattr(item, 'role', 'memory')}: {getattr(item, 'content', '')}"
+            for item in older[-12:]
+        ]
         summary = MemoryRecord(
             role="system",
             kind="summary",
-            content="历史轮次摘要（恢复时必须回到 task/route 权威文件核验）:\n" + "\n".join(summary_lines),
+            content="历史轮次摘要（恢复时必须回到 task/route 权威文件核验）:\n"
+            + "\n".join(summary_lines),
             tags=["compression", "summary"],
         )
         return [summary, *recent]
@@ -288,6 +313,52 @@ class CompressionService:
         return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class ArchiveRunParams:
+    """Bundle of _archive_run_if_needed parameters."""
+
+    do_save: bool
+    user_prompt: str
+    final_response: Any
+    archive_tool_calls: list
+    run_request_id: str
+    run_id: str
+    task_id: str
+    source: str
+
+
+@dataclass(frozen=True)
+class WriteRecoverySnapshotParams:
+    """Bundle of _write_recovery_snapshot_if_needed parameters."""
+
+    do_save: bool
+    recovery_snapshot: Any
+    user_prompt: str
+    final_response: Any
+    archive_tool_calls: list
+    run_request_id: str
+    run_id: str
+    task_id: str
+    source: str
+    recovery_task_refs: list | None
+    recovery_content_paths: list | None
+    recovery_next_actions: list | None
+    routed_context: Any
+
+
+@dataclass(frozen=True)
+class EstimateTokenParams:
+    """Bundle of _estimate_token_usage parameters."""
+
+    user_prompt: str
+    runtime_injections: list
+    memories: list
+    final_response: Any
+    archive_tool_calls: list
+    run_request_id: str
+    turn_id: str
+
+
 class FinalizationService:
     """Service for result finalization, archiving, and token estimation."""
 
@@ -299,85 +370,114 @@ class FinalizationService:
         assert ctx.final_response is not None
         run_request_id = ctx.request_id or f"run-{time_module.time_ns()}"
 
-        archive_result = self._archive_run_if_needed(
-            ctx.do_save, ctx.user_prompt, ctx.final_response, ctx.archive_tool_calls,
-            run_request_id, ctx.run_id, ctx.task_id, ctx.source
+        archive_params = ArchiveRunParams(
+            do_save=ctx.do_save,
+            user_prompt=ctx.user_prompt,
+            final_response=ctx.final_response,
+            archive_tool_calls=ctx.archive_tool_calls,
+            run_request_id=run_request_id,
+            run_id=ctx.run_id,
+            task_id=ctx.task_id,
+            source=ctx.source,
         )
-        snapshot_result = self._write_recovery_snapshot_if_needed(
-            ctx.do_save, ctx.recovery_snapshot, ctx.user_prompt, ctx.final_response, ctx.archive_tool_calls,
-            run_request_id, ctx.run_id, ctx.task_id, ctx.source, ctx.recovery_task_refs,
-            ctx.recovery_content_paths, ctx.recovery_next_actions, ctx.routed_context
+        archive_result = self._archive_run_if_needed(archive_params)
+
+        recovery_params = WriteRecoverySnapshotParams(
+            do_save=ctx.do_save,
+            recovery_snapshot=ctx.recovery_snapshot,
+            user_prompt=ctx.user_prompt,
+            final_response=ctx.final_response,
+            archive_tool_calls=ctx.archive_tool_calls,
+            run_request_id=run_request_id,
+            run_id=ctx.run_id,
+            task_id=ctx.task_id,
+            source=ctx.source,
+            recovery_task_refs=ctx.recovery_task_refs,
+            recovery_content_paths=ctx.recovery_content_paths,
+            recovery_next_actions=ctx.recovery_next_actions,
+            routed_context=ctx.routed_context,
         )
+        snapshot_result = self._write_recovery_snapshot_if_needed(recovery_params)
         turn_id = run_request_id or ctx.run_id or ctx.task_id or f"turn-{time_module.time_ns()}"
-        token_ledger = self._estimate_token_usage(
-            ctx.user_prompt, ctx.runtime_injections, ctx.memories, ctx.final_response,
-            ctx.archive_tool_calls, run_request_id, turn_id
+        token_params = EstimateTokenParams(
+            user_prompt=ctx.user_prompt,
+            runtime_injections=ctx.runtime_injections,
+            memories=ctx.memories,
+            final_response=ctx.final_response,
+            archive_tool_calls=ctx.archive_tool_calls,
+            run_request_id=run_request_id,
+            turn_id=turn_id,
         )
+        token_ledger = self._estimate_token_usage(token_params)
 
         return self._build_agent_run_result(ctx, archive_result, snapshot_result, token_ledger)
 
-    def _archive_run_if_needed(self, do_save, user_prompt, final_response, archive_tool_calls,
-                               run_request_id, run_id, task_id, source):
+    def _archive_run_if_needed(self, params: ArchiveRunParams):
         """Archive run turn if do_save is enabled."""
-        if not do_save:
+        if not params.do_save:
             return None
-        self._agent.memory.add("user", user_prompt)
-        self._agent.memory.add("agent", final_response.text, tags=[final_response.backend])
+        self._agent.memory.add("user", params.user_prompt)
+        self._agent.memory.add(
+            "agent", params.final_response.text, tags=[params.final_response.backend]
+        )
         return archive_run_turn(
             self._agent.root,
             ArchiveTurnContext(
                 session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
-                request_id=run_request_id,
-                run_id=run_id,
-                task_id=task_id,
-                user_prompt=user_prompt,
-                response_text=final_response.text,
-                backend=final_response.backend,
-                tool_calls=archive_tool_calls or [],
-                source=source,
+                request_id=params.run_request_id,
+                run_id=params.run_id,
+                task_id=params.task_id,
+                user_prompt=params.user_prompt,
+                response_text=params.final_response.text,
+                backend=params.final_response.backend,
+                tool_calls=params.archive_tool_calls or [],
+                source=params.source,
                 archive_level=int(getattr(self._agent.config, "memory_archive_level", 3)),
             ),
         )
 
-    def _write_recovery_snapshot_if_needed(self, do_save, recovery_snapshot, user_prompt,
-                                           final_response, archive_tool_calls, run_request_id,
-                                           run_id, task_id, source, recovery_task_refs,
-                                           recovery_content_paths, recovery_next_actions, routed_context):
+    def _write_recovery_snapshot_if_needed(self, params: WriteRecoverySnapshotParams):
         """Write recovery snapshot if enabled."""
-        should_write = (
-            bool(getattr(self._agent.config, "memory_hook_enabled", True))
-            and (do_save if recovery_snapshot is None else bool(recovery_snapshot))
+        should_write = bool(getattr(self._agent.config, "memory_hook_enabled", True)) and (
+            params.do_save if params.recovery_snapshot is None else bool(params.recovery_snapshot)
         )
         if not should_write:
             return None
         return write_recovery_snapshot(
             self._agent.root,
             session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
-            request_id=run_request_id, run_id=run_id, task_id=task_id,
-            user_prompt=user_prompt, response_text=final_response.text,
-            backend=final_response.backend, source=source, status="ok",
-            tool_calls=archive_tool_calls, task_refs=recovery_task_refs or [],
+            request_id=params.run_request_id,
+            run_id=params.run_id,
+            task_id=params.task_id,
+            user_prompt=params.user_prompt,
+            response_text=params.final_response.text,
+            backend=params.final_response.backend,
+            source=params.source,
+            status="ok",
+            tool_calls=params.archive_tool_calls,
+            task_refs=params.recovery_task_refs or [],
             content_paths=[
-                *(recovery_content_paths or []),
-                *(getattr(routed_context, "required_read_paths", None) or []),
-                *(getattr(routed_context, "candidate_paths", None) or []),
+                *(params.recovery_content_paths or []),
+                *(getattr(params.routed_context, "required_read_paths", None) or []),
+                *(getattr(params.routed_context, "candidate_paths", None) or []),
             ],
-            next_actions=recovery_next_actions or [],
+            next_actions=params.recovery_next_actions or [],
             archive_level=int(getattr(self._agent.config, "memory_hook_archive_level", 3)),
         )
 
-    def _estimate_token_usage(self, user_prompt, runtime_injections, memories,
-                              final_response, archive_tool_calls, run_request_id, turn_id):
+    def _estimate_token_usage(self, params: EstimateTokenParams):
         """Estimate and record token usage."""
-        input_tokens = estimate_tokens(user_prompt) + estimate_tokens(runtime_injections) + estimate_tokens(
-            [getattr(memory, "content", "") for memory in memories]
+        input_tokens = (
+            estimate_tokens(params.user_prompt)
+            + estimate_tokens(params.runtime_injections)
+            + estimate_tokens([getattr(memory, "content", "") for memory in params.memories])
         )
-        output_tokens = estimate_tokens(final_response.text)
-        tool_tokens = estimate_tokens(archive_tool_calls)
+        output_tokens = estimate_tokens(params.final_response.text)
+        tool_tokens = estimate_tokens(params.archive_tool_calls)
         ledger = append_session_token_usage(
             self._agent.root,
             session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
-            turn_id=turn_id,
+            turn_id=params.turn_id,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             tool_tokens=tool_tokens,
@@ -388,7 +488,9 @@ class FinalizationService:
             "cumulative": int(ledger["cumulative_tokens"]),
         }
 
-    def _build_agent_run_result(self, ctx: FinalizeContext, archive_result, snapshot_result, token_ledger):
+    def _build_agent_run_result(
+        self, ctx: FinalizeContext, archive_result, snapshot_result, token_ledger
+    ):
         """Build the final AgentRunResult object."""
         routed_context = ctx.routed_context
         return AgentRunResult(
@@ -406,22 +508,36 @@ class FinalizationService:
             archive_events=archive_result.event_count if archive_result else 0,
             archive_token_estimate=archive_result.token_estimate if archive_result else 0,
             prompt_token_estimate=estimate_tokens(ctx.final_prompt),
-            runtime_injection_token_estimate=estimate_tokens(ctx.runtime_injections) if ctx.runtime_injections else 0,
+            runtime_injection_token_estimate=estimate_tokens(ctx.runtime_injections)
+            if ctx.runtime_injections
+            else 0,
             recovery_snapshot_id=snapshot_result.snapshot_id if snapshot_result else "",
             recovery_snapshot_path=snapshot_result.path if snapshot_result else "",
             recovery_snapshot_error=snapshot_result.error if snapshot_result else "",
-            recovery_snapshot_token_estimate=snapshot_result.token_estimate if snapshot_result else 0,
-            memory_resume_context_injected=ctx.resume_context_result.injected if ctx.resume_context_result else False,
-            memory_resume_context_query=ctx.resume_context_result.query if ctx.resume_context_result else "",
+            recovery_snapshot_token_estimate=snapshot_result.token_estimate
+            if snapshot_result
+            else 0,
+            memory_resume_context_injected=ctx.resume_context_result.injected
+            if ctx.resume_context_result
+            else False,
+            memory_resume_context_query=ctx.resume_context_result.query
+            if ctx.resume_context_result
+            else "",
             memory_resume_context_matches=(
                 ctx.resume_context_result.archive_match_count
                 + ctx.resume_context_result.local_match_count
                 + ctx.resume_context_result.task_fact_source_count
-            ) if ctx.resume_context_result else 0,
-            memory_resume_context_token_estimate=estimate_tokens(ctx.resume_context_result.context_block)
+            )
+            if ctx.resume_context_result
+            else 0,
+            memory_resume_context_token_estimate=estimate_tokens(
+                ctx.resume_context_result.context_block
+            )
             if ctx.resume_context_result and ctx.resume_context_result.injected
             else 0,
-            memory_resume_context_error=ctx.resume_context_result.error if ctx.resume_context_result else "",
+            memory_resume_context_error=ctx.resume_context_result.error
+            if ctx.resume_context_result
+            else "",
             compression_snapshot_id=ctx.compression_snapshot_id,
             compression_snapshot_path=ctx.compression_snapshot_path,
             compression_applied=ctx.compression_applied,

@@ -8,6 +8,7 @@ from __future__ import annotations
 """
 
 import logging
+from dataclasses import dataclass
 
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
@@ -47,12 +48,13 @@ def _config_workflow_dispatch_mode(value: object) -> str:
     return "off"
 
 
-class SimpleAgentSubagentMixin:
-    """LLM: mixin for subagent lifecycle orchestration reachable from SimpleAgent.
+# ---------------------------------------------------------------------------
+# Internal mixin classes – each ≤ 250 lines
+# ---------------------------------------------------------------------------
 
-    给人看的解释：
-    这些方法不直接写文件细节，而是调用 SubAgentManager，让主代理保留"编排者"的角色。
-    """
+
+class _SubagentLifecycleMixin:
+    """Internal: subagent spawning and runner execution (spawn, run, failure, finalize)."""
 
     def spawn_subagents(self, goal: str, count: int | None = None) -> list[SubAgentTask]:
         """生成子任务记录。"""
@@ -74,7 +76,9 @@ class SimpleAgentSubagentMixin:
                 tasks = self.subagents.split(
                     goal,
                     n,
-                    workflow_mode=_config_workflow_dispatch_mode(self.config.subagent_workflow_mode),
+                    workflow_mode=_config_workflow_dispatch_mode(
+                        self.config.subagent_workflow_mode
+                    ),
                 )
                 delegated = len(tasks) > 0
             else:
@@ -115,8 +119,12 @@ class SimpleAgentSubagentMixin:
         prompt = _build_subagent_runner_prompt(context, instruction)
         if dry_run:
             return self.subagents.record_runner_result(
-                run_id, attempt_id=active_attempt_id, dry_run=True, ok=True,
-                message="dry-run: 已生成执行上下文和 runner prompt，未调用模型。", prompt=prompt,
+                run_id,
+                attempt_id=active_attempt_id,
+                dry_run=True,
+                ok=True,
+                message="dry-run: 已生成执行上下文和 runner prompt，未调用模型。",
+                prompt=prompt,
             )
 
         if probe:
@@ -125,9 +133,15 @@ class SimpleAgentSubagentMixin:
                 context = self.subagents.write_execution_context(run_id, max_cards=max_cards)
                 prompt = _build_subagent_runner_prompt(context, instruction)
                 return self.subagents.record_runner_result(
-                    run_id, attempt_id=active_attempt_id, dry_run=False, ok=False,
-                    message="通道健康检查为 BROKEN，未启动模型执行。", prompt=prompt,
-                    status="CHANNEL_ERROR", verification_status="UNVERIFIED", failure_type="channel",
+                    run_id,
+                    attempt_id=active_attempt_id,
+                    dry_run=False,
+                    ok=False,
+                    message="通道健康检查为 BROKEN，未启动模型执行。",
+                    prompt=prompt,
+                    status="CHANNEL_ERROR",
+                    verification_status="UNVERIFIED",
+                    failure_type="channel",
                 )
             context = self.subagents.write_execution_context(run_id, max_cards=max_cards)
             prompt = _build_subagent_runner_prompt(context, instruction)
@@ -136,24 +150,42 @@ class SimpleAgentSubagentMixin:
         self._current_task_attributes = task_for_attrs.attributes
 
         try:
-            result = self.run(prompt, save=False, allowed_tools=context.allowed_tools,
-                write_boundary=context.write_boundary, source="subagent_run_model_turn", recovery_snapshot=False)
+            result = self.run(
+                prompt,
+                save=False,
+                allowed_tools=context.allowed_tools,
+                write_boundary=context.write_boundary,
+                source="subagent_run_model_turn",
+                recovery_snapshot=False,
+            )
         except Exception as exc:
-            return self._handle_subagent_run_failure(run_id, active_attempt_id, exc, context, prompt)
+            return self._handle_subagent_run_failure(
+                run_id, active_attempt_id, exc, context, prompt
+            )
 
         return self._finalize_subagent_run(run_id, active_attempt_id, result, context, prompt)
 
     def _handle_subagent_run_failure(self, run_id, active_attempt_id, exc, context, prompt):
         """Handle subagent run failure by recording error result."""
         failed_result = self.subagents.record_runner_result(
-            run_id, attempt_id=active_attempt_id, dry_run=False, ok=False,
-            message=f"runner 执行失败: {exc}", prompt=prompt,
-            status="BLOCKED", verification_status="UNVERIFIED", failure_type="runner_error",
+            run_id,
+            attempt_id=active_attempt_id,
+            dry_run=False,
+            ok=False,
+            message=f"runner 执行失败: {exc}",
+            prompt=prompt,
+            status="BLOCKED",
+            verification_status="UNVERIFIED",
+            failure_type="runner_error",
         )
         self._write_subagent_recovery_snapshot(
-            run_id, user_prompt=context.goal, response_text=failed_result.message,
-            backend="", status=failed_result.status,
-            error_code=failed_result.runner_last_error or "runner_error", tool_calls=[],
+            run_id,
+            user_prompt=context.goal,
+            response_text=failed_result.message,
+            backend="",
+            status=failed_result.status,
+            error_code=failed_result.runner_last_error or "runner_error",
+            tool_calls=[],
         )
         return failed_result
 
@@ -165,6 +197,7 @@ class SimpleAgentSubagentMixin:
             _append_runner_repair_response,
             _build_subagent_runner_repair_prompt,
         )
+
         structured = parse_subagent_runner_output(result.response)
         prompt_for_log = result.prompt
         response_for_log = result.response
@@ -176,30 +209,50 @@ class SimpleAgentSubagentMixin:
         structured_repair_error = ""
 
         if not (structured.found and structured.ok):
-            structured, structured_repair_ok, structured_repair_error, backend_name, prompt_for_log, response_for_log, message = \
-                self._handle_subagent_repair(
-                    context, result, structured,
-                    prompt_for_log, response_for_log, backend_name, message
-                )
+            (
+                structured,
+                structured_repair_ok,
+                structured_repair_error,
+                backend_name,
+                prompt_for_log,
+                response_for_log,
+                message,
+            ) = self._handle_subagent_repair(
+                context, result, structured, prompt_for_log, response_for_log, backend_name, message
+            )
             structured_repair_attempted = True
         else:
             structured_repair_attempted = False
 
         runner_result = self.subagents.record_runner_result(
-            run_id, attempt_id=active_attempt_id, dry_run=False,
-            ok=structured.ok if structured.found else True, message=message,
-            prompt=prompt_for_log, response=response_for_log, backend=backend_name,
+            run_id,
+            attempt_id=active_attempt_id,
+            dry_run=False,
+            ok=structured.ok if structured.found else True,
+            message=message,
+            prompt=prompt_for_log,
+            response=response_for_log,
+            backend=backend_name,
             tool_rounds=result.tool_rounds,
             status="" if structured.found else "AWAITING_ACCEPTANCE",
             verification_status="" if structured.found else "NEEDS_ACCEPTANCE",
-            structured_output=structured, actual_tools=result.executed_tools or [],
-            structured_repair_attempted=structured_repair_attempted if 'structured_repair_attempted' in dir() else False,
-            structured_repair_ok=structured_repair_ok if 'structured_repair_ok' in dir() else False,
-            structured_repair_error=structured_repair_error if 'structured_repair_error' in dir() else "",
+            structured_output=structured,
+            actual_tools=result.executed_tools or [],
+            structured_repair_attempted=structured_repair_attempted
+            if "structured_repair_attempted" in dir()
+            else False,
+            structured_repair_ok=structured_repair_ok if "structured_repair_ok" in dir() else False,
+            structured_repair_error=structured_repair_error
+            if "structured_repair_error" in dir()
+            else "",
         )
         self._write_subagent_recovery_snapshot(
-            run_id, user_prompt=context.goal, response_text=message, backend=backend_name,
-            status=runner_result.status, error_code=runner_result.runner_last_error,
+            run_id,
+            user_prompt=context.goal,
+            response_text=message,
+            backend=backend_name,
+            status=runner_result.status,
+            error_code=runner_result.runner_last_error,
             tool_calls=[
                 {"tool": tool_name, "id": f"{run_id}:{index}", "ok": True}
                 for index, tool_name in enumerate(result.executed_tools or [], start=1)
@@ -207,7 +260,20 @@ class SimpleAgentSubagentMixin:
         )
         return runner_result
 
-    def _handle_subagent_repair(self, context, result, structured, prompt_for_log, response_for_log, backend_name, message):
+
+class _SubagentRepairMixin:
+    """Internal: structured output repair and recovery snapshot writing."""
+
+    def _handle_subagent_repair(
+        self,
+        context,
+        result,
+        structured,
+        prompt_for_log,
+        response_for_log,
+        backend_name,
+        message,
+    ):
         """Handle structured output repair when initial parse fails."""
         from .runner_prompts import (
             _append_runner_repair_failure,
@@ -215,12 +281,15 @@ class SimpleAgentSubagentMixin:
             _append_runner_repair_response,
             _build_subagent_runner_repair_prompt,
         )
+
         structured_repair_attempted = True
         structured_repair_ok = False
         structured_repair_error = ""
 
         repair_prompt = _build_subagent_runner_repair_prompt(
-            context, original_prompt=result.prompt, original_response=result.response,
+            context,
+            original_prompt=result.prompt,
+            original_response=result.response,
             parse_error=structured.parse_error,
         )
         try:
@@ -228,7 +297,15 @@ class SimpleAgentSubagentMixin:
         except Exception as exc:
             structured_repair_error = str(exc)
             response_for_log = _append_runner_repair_failure(result.response, exc)
-            return structured, structured_repair_ok, structured_repair_error, backend_name, prompt_for_log, response_for_log, message
+            return (
+                structured,
+                structured_repair_ok,
+                structured_repair_error,
+                backend_name,
+                prompt_for_log,
+                response_for_log,
+                message,
+            )
 
         repaired = parse_subagent_runner_output(repair_response.text)
         prompt_for_log = _append_runner_repair_prompt(result.prompt, repair_prompt)
@@ -243,9 +320,19 @@ class SimpleAgentSubagentMixin:
             structured = repaired
             structured_repair_error = repaired.parse_error
         else:
-            structured_repair_error = repaired.parse_error or "repair response still missing structured output"
+            structured_repair_error = (
+                repaired.parse_error or "repair response still missing structured output"
+            )
 
-        return structured, structured_repair_ok, structured_repair_error, backend_name, prompt_for_log, response_for_log, message
+        return (
+            structured,
+            structured_repair_ok,
+            structured_repair_error,
+            backend_name,
+            prompt_for_log,
+            response_for_log,
+            message,
+        )
 
     def _write_subagent_recovery_snapshot(
         self,
@@ -272,7 +359,9 @@ class SimpleAgentSubagentMixin:
         except (FileNotFoundError, TypeError):
             task = None
         content_paths = []
-        next_actions = ["先读取子代理 STATUS/WORK_LOG/RUNNER_RESULT/output.json，再判断是否可以验收或重跑。"]
+        next_actions = [
+            "先读取子代理 STATUS/WORK_LOG/RUNNER_RESULT/output.json，再判断是否可以验收或重跑。"
+        ]
         if task is not None:
             content_paths = [
                 task.status_file,
@@ -301,46 +390,73 @@ class SimpleAgentSubagentMixin:
             archive_level=int(getattr(self.config, "memory_hook_archive_level", 3)),
         )
 
-    def run_parent_planner(
-        self,
-        router: CapabilityRouter,
-        capability_config: CapabilityConfig | None = None,
-        *,
-        apply: bool = False,
-        execute_runners: bool = False,
-        max_runners: int = 1,
-        limit: int = 20,
-        reviewer: str = "parent-dispatch",
-        note: str = "",
-        runner_instruction: str = "",
-    ) -> ParentPlannerRecord:
+
+@dataclass(frozen=True)
+class RunParentPlannerParams:
+    """Bundle of run_parent_planner parameters."""
+
+    router: CapabilityRouter
+    capability_config: CapabilityConfig | None
+    apply: bool
+    execute_runners: bool
+    max_runners: int
+    limit: int
+    reviewer: str
+    note: str
+    runner_instruction: str
+
+
+class _ParentPlannerMixin:
+    """Internal: parent planner LLM turn orchestration (run, heartbeat, error, build)."""
+
+    def run_parent_planner(self, params: RunParentPlannerParams) -> ParentPlannerRecord:
         """运行一轮父代理 LLM planner，并写出审计报告。
 
         planner 不是 heartbeat 的浅层 OK，而是一个完整模型 turn。只有状态门禁发现
         有 active/pending/stalled/needs-intervention 事项时，才真正调用模型；如果模型
         在有事时只回 HEARTBEAT_OK，会被标记为失败。
         """
-
-        cfg = capability_config or CapabilityConfig()
+        cfg = params.capability_config or CapabilityConfig()
         state = _build_parent_planner_state(
-            self, cfg, max_runners=max_runners, limit=limit, reviewer=reviewer, note=note
+            self,
+            cfg,
+            max_runners=params.max_runners,
+            limit=params.limit,
+            reviewer=params.reviewer,
+            note=params.note,
         )
-        gate_summary = {key: int(value) for key, value in state["gate"].items() if isinstance(value, int)}
+        gate_summary = {
+            key: int(value) for key, value in state["gate"].items() if isinstance(value, int)
+        }
 
         if not state["gate"].get("needs_planner", 0):
-            return self._make_heartbeat_ok_record(not apply, gate_summary)
+            return self._make_heartbeat_ok_record(not params.apply, gate_summary)
 
-        result = self._execute_planner_llm(state, apply, execute_runners, max_runners, runner_instruction)
+        result = self._execute_planner_llm(
+            state,
+            params.apply,
+            params.execute_runners,
+            params.max_runners,
+            params.runner_instruction,
+        )
         if result is None:
-            return self._make_planner_error_record(gate_summary, runner_instruction, apply)
-        return self._build_planner_record(result, state, gate_summary, apply, runner_instruction)
+            return self._make_planner_error_record(
+                gate_summary, params.runner_instruction, params.apply
+            )
+        return self._build_planner_record(
+            result, state, gate_summary, params.apply, params.runner_instruction
+        )
 
     def _make_heartbeat_ok_record(self, dry_run, gate_summary):
         """Make heartbeat OK record when no planner needed."""
         record = self.subagents.make_parent_planner_record(
-            dry_run=dry_run, triggered=False, ok=True, decision="HEARTBEAT_OK",
+            dry_run=dry_run,
+            triggered=False,
+            ok=True,
+            decision="HEARTBEAT_OK",
             message="planner gate 确认无 active/pending/stalled/needs-intervention 事项，允许 HEARTBEAT_OK。",
-            gate_summary=gate_summary, summary="no work",
+            gate_summary=gate_summary,
+            summary="no work",
         )
         report = self.subagents.build_parent_planner_report([record], dry_run=dry_run)
         self.subagents.write_parent_planner_report(report, append_log=False)
@@ -349,9 +465,13 @@ class SimpleAgentSubagentMixin:
     def _execute_planner_llm(self, state, apply, execute_runners, max_runners, runner_instruction):
         """Execute the parent planner LLM call."""
         from .planner import _build_parent_planner_prompt
+
         prompt = _build_parent_planner_prompt(
-            state, apply=apply, execute_runners=execute_runners,
-            max_runners=max_runners, runner_instruction=runner_instruction,
+            state,
+            apply=apply,
+            execute_runners=execute_runners,
+            max_runners=max_runners,
+            runner_instruction=runner_instruction,
         )
         self.subagents.write_parent_planner_exchange(prompt)
         try:
@@ -362,9 +482,14 @@ class SimpleAgentSubagentMixin:
     def _make_planner_error_record(self, gate_summary, runner_instruction, apply):
         """Make planner error record after LLM failure."""
         record = self.subagents.make_parent_planner_record(
-            dry_run=not apply, triggered=True, ok=False, decision="PLANNER_ERROR",
-            message="父代理 planner 调用失败", gate_summary=gate_summary,
-            runner_instruction=runner_instruction, evidence_paths=[],
+            dry_run=not apply,
+            triggered=True,
+            ok=False,
+            decision="PLANNER_ERROR",
+            message="父代理 planner 调用失败",
+            gate_summary=gate_summary,
+            runner_instruction=runner_instruction,
+            evidence_paths=[],
         )
         report = self.subagents.build_parent_planner_report([record], dry_run=not apply)
         self.subagents.write_parent_planner_report(report, append_log=apply)
@@ -373,8 +498,10 @@ class SimpleAgentSubagentMixin:
     def _build_planner_record(self, result, state, gate_summary, apply, runner_instruction):
         """Build parent planner record from LLM result."""
         from ..subagents.parsing import parse_parent_planner_output
+
         prompt_path, response_path = self.subagents.write_parent_planner_exchange(
-            result.prompt, result.response,
+            result.prompt,
+            result.response,
         )
         parsed = parse_parent_planner_output(result.response)
         ok = parsed.found and parsed.ok
@@ -393,13 +520,38 @@ class SimpleAgentSubagentMixin:
             message = "状态门禁发现仍有待处理事项，禁止 planner 只返回 HEARTBEAT_OK。"
 
         record = self.subagents.make_parent_planner_record(
-            dry_run=not apply, triggered=True, ok=ok, decision=decision, message=message,
-            gate_summary=gate_summary, backend=result.backend, tool_rounds=result.tool_rounds,
-            parse_error=parse_error, summary=parsed.summary, actions=parsed.actions,
-            blockers=parsed.blockers, risks=parsed.risks, notes=parsed.notes,
-            runner_instruction=parsed.runner_instruction, suggested_max_runners=parsed.suggested_max_runners,
-            prompt_path=prompt_path, response_path=response_path, evidence_paths=[prompt_path, response_path],
+            dry_run=not apply,
+            triggered=True,
+            ok=ok,
+            decision=decision,
+            message=message,
+            gate_summary=gate_summary,
+            backend=result.backend,
+            tool_rounds=result.tool_rounds,
+            parse_error=parse_error,
+            summary=parsed.summary,
+            actions=parsed.actions,
+            blockers=parsed.blockers,
+            risks=parsed.risks,
+            notes=parsed.notes,
+            runner_instruction=parsed.runner_instruction,
+            suggested_max_runners=parsed.suggested_max_runners,
+            prompt_path=prompt_path,
+            response_path=response_path,
+            evidence_paths=[prompt_path, response_path],
         )
         report = self.subagents.build_parent_planner_report([record], dry_run=not apply)
         self.subagents.write_parent_planner_report(report, append_log=apply)
         return record
+
+
+class SimpleAgentSubagentMixin(
+    _SubagentLifecycleMixin,
+    _SubagentRepairMixin,
+    _ParentPlannerMixin,
+):
+    """LLM: mixin for subagent lifecycle orchestration reachable from SimpleAgent.
+
+    给人看的解释：
+    这些方法不直接写文件细节，而是调用 SubAgentManager，让主代理保留"编排者"的角色。
+    """

@@ -28,14 +28,8 @@ from ..scenario_utils import (
 )
 
 
-def run_scenario_gateway_multi_worker_case(args) -> int:
-    """LLM: run two gateway workers against one pending queue and prove every request completes once.
-
-    新手说明:
-    启动两个 worker 同时处理同一队列中的请求。
-    验证每个请求只被处理一次，不会出现重复处理或遗漏。
-    """
-
+def _multi_worker_setup(args):
+    """Setup for multi-worker scenario: create workspace, agent, gateway paths, and enqueue requests."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=gateway-multi-worker")
@@ -70,6 +64,53 @@ def run_scenario_gateway_multi_worker_case(args) -> int:
             },
         )
     print("request_ids=" + json.dumps(request_ids, ensure_ascii=False))
+    return paths, gpaths, request_ids, request_count
+
+
+def _multi_worker_verify(gpaths, request_ids, request_count, processed_by_worker, run_prompts_by_worker, errors, alive_threads):
+    """Verify multi-worker results: check responses, done archives, and queue state."""
+    responses = {request_id: read_json_file(gateway_response_path(gpaths, request_id)) for request_id in request_ids}
+    done_payloads = {request_id: read_json_file(gpaths.done / f"{request_id}.json") for request_id in request_ids}
+    response_backends = sorted(str(payload.get("backend") or "") for payload in responses.values())
+    done_owners = sorted(str(payload.get("lease_owner") or "") for payload in done_payloads.values())
+    pending_left = sorted(path.name for path in gpaths.inbox.glob("*.json"))
+    processing_left = sorted(path.name for path in gpaths.processing.glob("*.json"))
+    failed_left = sorted(path.name for path in gpaths.failed.glob("*.json"))
+    print("response_backends=" + json.dumps(response_backends, ensure_ascii=False))
+    print("done_owners=" + json.dumps(done_owners, ensure_ascii=False))
+    print(
+        "queue_left="
+        + json.dumps(
+            {"pending": pending_left, "processing": processing_left, "failed": failed_left},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return (
+        not errors
+        and not alive_threads
+        and sum(processed_by_worker.values()) == request_count
+        and len([count for count in processed_by_worker.values() if count > 0]) == 2
+        and all(payload.get("ok") is True for payload in responses.values())
+        and all(payload.get("status") == "done" for payload in responses.values())
+        and all(payload.get("attempts") == 1 for payload in responses.values())
+        and set(response_backends) == {"scenario-worker-0", "scenario-worker-1"}
+        and set(done_owners) == {"scenario-worker-0", "scenario-worker-1"}
+        and not pending_left
+        and not processing_left
+        and not failed_left
+    ), responses, done_payloads
+
+
+def run_scenario_gateway_multi_worker_case(args) -> int:
+    """LLM: run two gateway workers against one pending queue and prove every request completes once.
+
+    新手说明:
+    启动两个 worker 同时处理同一队列中的请求。
+    验证每个请求只被处理一次，不会出现重复处理或遗漏。
+    """
+
+    paths, gpaths, request_ids, request_count = _multi_worker_setup(args)
 
     print_scenario_step(2, "Run two live workers concurrently")
     lock = threading.Lock()
@@ -120,37 +161,8 @@ def run_scenario_gateway_multi_worker_case(args) -> int:
         print("worker_threads_still_alive=" + json.dumps(alive_threads, ensure_ascii=False))
 
     print_scenario_step(3, "Verify every request has one response and one done archive")
-    responses = {request_id: read_json_file(gateway_response_path(gpaths, request_id)) for request_id in request_ids}
-    done_payloads = {request_id: read_json_file(gpaths.done / f"{request_id}.json") for request_id in request_ids}
-    response_backends = sorted(str(payload.get("backend") or "") for payload in responses.values())
-    done_owners = sorted(str(payload.get("lease_owner") or "") for payload in done_payloads.values())
-    pending_left = sorted(path.name for path in gpaths.inbox.glob("*.json"))
-    processing_left = sorted(path.name for path in gpaths.processing.glob("*.json"))
-    failed_left = sorted(path.name for path in gpaths.failed.glob("*.json"))
-    print("response_backends=" + json.dumps(response_backends, ensure_ascii=False))
-    print("done_owners=" + json.dumps(done_owners, ensure_ascii=False))
-    print(
-        "queue_left="
-        + json.dumps(
-            {"pending": pending_left, "processing": processing_left, "failed": failed_left},
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-    )
-
-    final_ok = (
-        not errors
-        and not alive_threads
-        and sum(processed_by_worker.values()) == request_count
-        and len([count for count in processed_by_worker.values() if count > 0]) == 2
-        and all(payload.get("ok") is True for payload in responses.values())
-        and all(payload.get("status") == "done" for payload in responses.values())
-        and all(payload.get("attempts") == 1 for payload in responses.values())
-        and set(response_backends) == {"scenario-worker-0", "scenario-worker-1"}
-        and set(done_owners) == {"scenario-worker-0", "scenario-worker-1"}
-        and not pending_left
-        and not processing_left
-        and not failed_left
+    final_ok, responses, done_payloads = _multi_worker_verify(
+        gpaths, request_ids, request_count, processed_by_worker, run_prompts_by_worker, errors, alive_threads
     )
     write_scenario_summary(
         paths,
@@ -163,7 +175,7 @@ def run_scenario_gateway_multi_worker_case(args) -> int:
             "run_prompts_by_worker": run_prompts_by_worker,
             "errors": errors,
             "responses": responses,
-            "done_owners": done_owners,
+            "done_owners": [str(payload.get("lease_owner") or "") for payload in done_payloads.values()],
         },
     )
     print(f"\nsummary_json={paths.summary_json}")

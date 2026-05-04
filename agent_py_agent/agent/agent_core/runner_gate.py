@@ -88,21 +88,22 @@ def run_single_runner(
     retry_reason: str,
 ) -> SubAgentRunnerResult:
     """Execute a single runner with timeout."""
-    from .runner_dispatch import _run_subagent_worker
+    from .runner_dispatch import RunSubagentWorkerParams, _run_subagent_worker
 
     if execute_runners and task_timeout > 0:
-        return _run_subagent_worker(
-            agent.config,
-            agent.root,
-            run_id,
-            instruction,
-            False,  # dry_run
-            max_cards,
-            probe,
-            retry_reason,
-            task_timeout,
+        params = RunSubagentWorkerParams(
+            config=agent.config,
+            root=agent.root,
+            run_id=run_id,
+            instruction=instruction,
+            dry_run=False,
+            max_cards=max_cards,
+            probe=probe,
+            retry_reason=retry_reason,
+            timeout_seconds=task_timeout,
             local_store=agent.local_store,
         )
+        return _run_subagent_worker(params)
     else:
         return agent.run_subagent(
             run_id,
@@ -128,25 +129,25 @@ def run_concurrent_runners(
 
     Returns a dict mapping run_id to (result, after_task).
     """
-    from .runner_dispatch import _run_subagent_worker
+    from .runner_dispatch import RunSubagentWorkerParams, _run_subagent_worker
 
     future_to_job = {}
     with ThreadPoolExecutor(max_workers=runner_concurrency) as executor:
         for run_id, before, retry_reason in pending_jobs:
             task_timeout = get_task_timeout(before, runner_timeout_seconds, agent.config)
-            future = executor.submit(
-                _run_subagent_worker,
-                agent.config,
-                agent.root,
-                run_id,
-                instruction,
-                not execute_runners,
-                max_cards,
-                probe,
-                retry_reason,
-                task_timeout,
+            params = RunSubagentWorkerParams(
+                config=agent.config,
+                root=agent.root,
+                run_id=run_id,
+                instruction=instruction,
+                dry_run=not execute_runners,
+                max_cards=max_cards,
+                probe=probe,
+                retry_reason=retry_reason,
+                timeout_seconds=task_timeout,
                 local_store=agent.local_store,
             )
+            future = executor.submit(_run_subagent_worker, params)
             future_to_job[future] = (run_id, before, retry_reason)
 
         completed: dict[str, tuple[SubAgentRunnerResult, Any]] = {}
@@ -202,7 +203,9 @@ def handle_runner_failure(
             "goal": getattr(before, "goal", ""),
             "failure_type": failure_type.lower(),
         }
-        relevant_memories = push_relevant_memories(agent, failure_type.lower(), task_context, limit=3)
+        relevant_memories = push_relevant_memories(
+            agent, failure_type.lower(), task_context, limit=3
+        )
         if relevant_memories:
             memory_hint = format_memories_for_injection(relevant_memories)
             if effective_instruction:

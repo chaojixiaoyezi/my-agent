@@ -9,6 +9,7 @@ dispatch 阶段不应该把"谁能跑、能不能重试、并发 worker 怎么�
 
 import json
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -135,18 +136,23 @@ def _resolve_runner_timeout_seconds(value: object) -> float:
     return max(0.0, parsed)
 
 
-def _run_subagent_worker(
-    config: AgentConfig,
-    root: Path,
-    run_id: str,
-    instruction: str,
-    dry_run: bool,
-    max_cards: int,
-    probe: bool,
-    retry_reason: str,
-    timeout_seconds: float = 0.0,
-    local_store: object | None = None,
-) -> SubAgentRunnerResult:
+@dataclass(frozen=True)
+class RunSubagentWorkerParams:
+    """Bundle of _run_subagent_worker parameters."""
+
+    config: AgentConfig
+    root: Path
+    run_id: str
+    instruction: str
+    dry_run: bool
+    max_cards: int
+    probe: bool
+    retry_reason: str
+    timeout_seconds: float = 0.0
+    local_store: object | None = None
+
+
+def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResult:
     """LLM: run one subagent in an isolated worker SimpleAgent instance.
 
     给人看的解释：
@@ -157,34 +163,36 @@ def _run_subagent_worker(
 
     from ..core import SimpleAgent
 
-    worker = SimpleAgent(config, root)
-    if local_store is not None:
-        worker.local_store = local_store
-        worker.subagents.local_store = local_store
-        worker.memory.local_store = local_store
-    if dry_run or timeout_seconds <= 0:
+    worker = SimpleAgent(params.config, params.root)
+    if params.local_store is not None:
+        worker.local_store = params.local_store
+        worker.subagents.local_store = params.local_store
+        worker.memory.local_store = params.local_store
+    if params.dry_run or params.timeout_seconds <= 0:
         return worker.run_subagent(
-            run_id,
-            instruction=instruction,
-            dry_run=dry_run,
-            max_cards=max_cards,
-            probe=probe,
-            retry_reason=retry_reason,
+            params.run_id,
+            instruction=params.instruction,
+            dry_run=params.dry_run,
+            max_cards=params.max_cards,
+            probe=params.probe,
+            retry_reason=params.retry_reason,
         )
 
-    prepared = worker.subagents.prepare_runner_attempt(run_id, retry_reason=retry_reason)
+    prepared = worker.subagents.prepare_runner_attempt(
+        params.run_id, retry_reason=params.retry_reason
+    )
     attempt_id = prepared.runner_active_attempt_id
     payload: dict[str, object] = {}
 
     def _target() -> None:
         try:
             payload["result"] = worker.run_subagent(
-                run_id,
-                instruction=instruction,
+                params.run_id,
+                instruction=params.instruction,
                 dry_run=False,
-                max_cards=max_cards,
-                probe=probe,
-                retry_reason=retry_reason,
+                max_cards=params.max_cards,
+                probe=params.probe,
+                retry_reason=params.retry_reason,
                 attempt_id=attempt_id,
             )
         except Exception as exc:  # pragma: no cover - defensive wrapper
@@ -192,11 +200,11 @@ def _run_subagent_worker(
 
     thread = threading.Thread(target=_target, daemon=True)
     thread.start()
-    thread.join(timeout_seconds)
+    thread.join(params.timeout_seconds)
     if thread.is_alive():
-        timeout_message = f"runner timed out after {timeout_seconds:.2f}s"
+        timeout_message = f"runner timed out after {params.timeout_seconds:.2f}s"
         timeout_result = worker.subagents.record_runner_result(
-            run_id,
+            params.run_id,
             attempt_id=attempt_id,
             dry_run=False,
             ok=False,
@@ -205,7 +213,7 @@ def _run_subagent_worker(
             verification_status="UNVERIFIED",
             failure_type="runner_timeout",
         )
-        worker.subagents.abandon_runner_attempt(run_id, attempt_id, reason=timeout_message)
+        worker.subagents.abandon_runner_attempt(params.run_id, attempt_id, reason=timeout_message)
         return timeout_result
     if "error" in payload:
         raise payload["error"]  # type: ignore[misc]

@@ -59,47 +59,22 @@ def print_dispatch_report(report) -> None:
         )
 
 
-def cmd_scenario_test(args) -> int:
-    """跑一轮可观察、隔离的真实任务全流程。"""
-
-    if args.case == "all":
-        return run_scenario_suite(args)
-    if args.case == "verification":
-        return run_scenario_verification_case(args)
-    if args.case == "gateway-restart":
-        return run_scenario_gateway_restart_case(args)
-    if args.case == "gateway-cross-day-resume":
-        return run_scenario_gateway_cross_day_resume_case(args)
-    if args.case == "gateway-delayed-response":
-        return run_scenario_gateway_delayed_response_case(args)
-    if args.case == "gateway-multi-worker":
-        return run_scenario_gateway_multi_worker_case(args)
-    if args.case == "gateway-stale-lease":
-        return run_scenario_gateway_stale_lease_case(args)
-    if args.case == "gateway-processing-stop":
-        return run_scenario_gateway_processing_stop_case(args)
-    if args.case == "parent-subagent-cross-day-resume":
-        return run_scenario_parent_subagent_cross_day_resume_case(args)
-    if args.case == "real-model-recovery":
-        return run_scenario_real_model_recovery_case(args)
-    if args.case == "real-model-recovery-multi-round":
-        return run_scenario_real_model_recovery_multi_round_case(args)
-    if args.case == "structured-repair":
-        return run_scenario_structured_repair_case(args)
-    if args.case == "runner-retry":
-        return run_scenario_runner_retry_case(args)
-
+def _cmd_scenario_validate_args(args) -> bool:
+    """Validate scenario args. Returns True if valid, False otherwise."""
     if args.count <= 0:
         print("--count 必须大于 0。", file=sys.stderr)
-        return 2
+        return False
     if args.max_runners <= 0 and not args.dry_run:
         print("--max-runners 必须大于 0；如果只想预览，请加 --dry-run。", file=sys.stderr)
-        return 2
+        return False
     if args.max_cycles <= 0:
         print("--max-cycles 必须大于 0。", file=sys.stderr)
-        return 2
+        return False
+    return True
 
-    paths = create_scenario_workspace(args)
+
+def _cmd_scenario_happy_path(args, paths):
+    """Run the happy-path scenario. Returns exit code."""
     print("MY-AGENT SCENARIO TEST")
     print(f"run_root={paths.run_root}")
     print(f"fixture_root={paths.fixture_root}")
@@ -133,6 +108,13 @@ def cmd_scenario_test(args) -> int:
         write_scenario_summary(paths, ok=False, reason=reason, extra={"created_via": created_via})
         return 2
 
+    final_ok = _cmd_scenario_dispatch(agent, args, paths, created_via, gateway_payload)
+    _cmd_scenario_verify_files(agent, args, paths, final_ok)
+    return 0 if final_ok else 2
+
+
+def _cmd_scenario_dispatch(agent, args, paths, created_via, gateway_payload):
+    """Run dispatch cycles. Returns final_ok."""
     print_scenario_step(3, "父代理调度 runner 和验收")
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)
@@ -174,8 +156,11 @@ def cmd_scenario_test(args) -> int:
         final_ok = scenario_tasks_verified(agent, args.count)
         if final_ok:
             break
+    return final_ok
 
-    print_scenario_step(4, "核对隔离文件和最终报告")
+
+def _cmd_scenario_verify_files(agent, args, paths, final_ok):
+    """Verify output files and write summary."""
     report_files = collect_scenario_report_files(agent, paths.fixture_root, args.count)
     if args.dry_run:
         files_ok = True
@@ -192,16 +177,49 @@ def cmd_scenario_test(args) -> int:
         ok=final_ok,
         reason=reason,
         extra={
-            "created_via": created_via,
-            "gateway": gateway_payload,
-            "dispatch": dispatch_summaries,
             "report_files": [str(item) for item in report_files],
         },
     )
     print(f"\nsummary_json={paths.summary_json}")
     print(f"summary_md={paths.summary_md}")
     print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
-    return 0 if final_ok else 2
+
+
+def cmd_scenario_test(args) -> int:
+    """跑一轮可观察、隔离的真实任务全流程。"""
+
+    if args.case == "all":
+        return run_scenario_suite(args)
+    if args.case == "verification":
+        return run_scenario_verification_case(args)
+    if args.case == "gateway-restart":
+        return run_scenario_gateway_restart_case(args)
+    if args.case == "gateway-cross-day-resume":
+        return run_scenario_gateway_cross_day_resume_case(args)
+    if args.case == "gateway-delayed-response":
+        return run_scenario_gateway_delayed_response_case(args)
+    if args.case == "gateway-multi-worker":
+        return run_scenario_gateway_multi_worker_case(args)
+    if args.case == "gateway-stale-lease":
+        return run_scenario_gateway_stale_lease_case(args)
+    if args.case == "gateway-processing-stop":
+        return run_scenario_gateway_processing_stop_case(args)
+    if args.case == "parent-subagent-cross-day-resume":
+        return run_scenario_parent_subagent_cross_day_resume_case(args)
+    if args.case == "real-model-recovery":
+        return run_scenario_real_model_recovery_case(args)
+    if args.case == "real-model-recovery-multi-round":
+        return run_scenario_real_model_recovery_multi_round_case(args)
+    if args.case == "structured-repair":
+        return run_scenario_structured_repair_case(args)
+    if args.case == "runner-retry":
+        return run_scenario_runner_retry_case(args)
+
+    if not _cmd_scenario_validate_args(args):
+        return 2
+
+    paths = create_scenario_workspace(args)
+    return _cmd_scenario_happy_path(args, paths)
 
 
 def run_scenario_suite(args) -> int:

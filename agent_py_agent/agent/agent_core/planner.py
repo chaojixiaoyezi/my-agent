@@ -8,7 +8,8 @@ from __future__ import annotations
 """
 
 import json
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from ..capability_config import CapabilityConfig
 from ..subagent import SubAgentTask
@@ -24,7 +25,24 @@ if TYPE_CHECKING:
 PARENT_PLANNER_READ_TOOLS = ["list_files", "read_file", "search_text"]
 
 
-def _collect_open_requests_and_gaps(tasks: list[SubAgentTask]) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+@dataclass(frozen=True)
+class BuildGateSummaryParams:
+    """Bundle of all _build_gate_summary parameters."""
+
+    tasks: list
+    active_tasks: list
+    due_report: Any
+    action_plan: Any
+    runner_candidates: list
+    patch_run_ids: list
+    acceptance_report: Any
+    open_requests: list
+    open_gaps: list
+
+
+def _collect_open_requests_and_gaps(
+    tasks: list[SubAgentTask],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Collect OPEN capability requests and gaps from tasks."""
     open_requests = []
     open_gaps = []
@@ -86,15 +104,25 @@ def _build_parent_planner_state(
     open_requests, open_gaps = _collect_open_requests_and_gaps(tasks)
 
     gate_summary = _build_gate_summary(
-        tasks, active_tasks, due_report, action_plan,
-        runner_candidates, patch_run_ids, acceptance_report,
-        open_requests, open_gaps,
+        BuildGateSummaryParams(
+            tasks=tasks,
+            active_tasks=active_tasks,
+            due_report=due_report,
+            action_plan=action_plan,
+            runner_candidates=runner_candidates,
+            patch_run_ids=patch_run_ids,
+            acceptance_report=acceptance_report,
+            open_requests=open_requests,
+            open_gaps=open_gaps,
+        )
     )
 
     return {
         "gate": gate_summary,
         "board_summary": board.summary,
-        "active_tasks": [_task_state_for_planner(task) for task in _limit_items(active_tasks, limit)],
+        "active_tasks": [
+            _task_state_for_planner(task) for task in _limit_items(active_tasks, limit)
+        ],
         "due_issues": [
             {
                 "run_id": issue.run_id,
@@ -137,28 +165,18 @@ def _build_parent_planner_state(
     }
 
 
-def _build_gate_summary(
-    tasks,
-    active_tasks,
-    due_report,
-    action_plan,
-    runner_candidates,
-    patch_run_ids,
-    acceptance_report,
-    open_requests,
-    open_gaps,
-) -> dict[str, int]:
+def _build_gate_summary(params: BuildGateSummaryParams) -> dict[str, int]:
     """Build the gate_summary dict from collected reports."""
     gate_summary = {
-        "total_tasks": len(tasks),
-        "active_tasks": len(active_tasks),
-        "due_issues": due_report.summary.get("total", 0),
-        "action_items": action_plan.summary.get("total", 0),
-        "runner_candidates": len(runner_candidates),
-        "patch_reviews": len(patch_run_ids),
-        "acceptance_records": len(acceptance_report.records),
-        "open_capability_requests": len(open_requests),
-        "open_capability_gaps": len(open_gaps),
+        "total_tasks": len(params.tasks),
+        "active_tasks": len(params.active_tasks),
+        "due_issues": params.due_report.summary.get("total", 0),
+        "action_items": params.action_plan.summary.get("total", 0),
+        "runner_candidates": len(params.runner_candidates),
+        "patch_reviews": len(params.patch_run_ids),
+        "acceptance_records": len(params.acceptance_report.records),
+        "open_capability_requests": len(params.open_requests),
+        "open_capability_gaps": len(params.open_gaps),
     }
     gate_summary["needs_planner"] = int(
         any(

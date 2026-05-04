@@ -219,12 +219,8 @@ def _log_gateway_running(agent, options, pid, requeued, failed, http_port) -> No
     )
 
 
-def cmd_gateway_run(args) -> int:
-    """内部命令：前台运行 gateway 后台循环。"""
-
-    agent = make_agent(args)
-    paths = gateway_paths(agent)
-    paths.root.mkdir(parents=True, exist_ok=True)
+def _cmd_gateway_run_setup(args, agent, paths):
+    """Setup gateway run: recovery and initial logging. Returns requeued count."""
     for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         path.mkdir(parents=True, exist_ok=True)
     recovery = recover_gateway_processing_requests(
@@ -249,18 +245,11 @@ def cmd_gateway_run(args) -> int:
             "failed_processing_requests": recovery["failed"],
         },
     )
-    try:
-        options = _resolve_gateway_options(agent, args)
-    except ValueError as exc:
-        _write_gateway_state(paths, {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()})
-        log_gateway_event(
-            agent,
-            "gateway_run_failed",
-            {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()},
-        )
-        print(str(exc), file=sys.stderr)
-        return 2
+    return requeued, pid
 
+
+def _cmd_gateway_run_threads(args, paths, agent, options, requeued, failed, http_port):
+    """Start heartbeat and request threads. Returns (heartbeat_thread, request_thread, http_server)."""
     stop_event = threading.Event()
     heartbeat_thread = threading.Thread(
         target=_gateway_heartbeat_loop,
@@ -274,14 +263,60 @@ def cmd_gateway_run(args) -> int:
         daemon=True,
     )
     request_thread.start()
-
-    # Start HTTP server if configured
     http_server: GatewayHTTPServer | None = None
-    http_port = getattr(agent.config, "gateway_port", 0) or 0
     if http_port > 0:
         http_server = start_http_server(http_port, paths)
-        _update_gateway_state_running(paths, agent, options, pid, requeued, recovery["failed"], http_port)
-        _log_gateway_running(agent, options, pid, requeued, recovery["failed"], http_port)
+        _update_gateway_state_running(paths, agent, options, os.getpid(), requeued, failed, http_port)
+        _log_gateway_running(agent, options, os.getpid(), requeued, failed, http_port)
+    return stop_event, heartbeat_thread, request_thread, http_server
+
+
+def _cmd_gateway_run_cleanup(stop_event, heartbeat_thread, request_thread, http_server, paths, agent, options, pid):
+    """Cleanup gateway run: stop threads, remove pid file, write heartbeat."""
+    stop_event.set()
+    heartbeat_thread.join(timeout=2)
+    request_thread.join(timeout=2)
+    if http_server:
+        http_server.stop()
+    try:
+        remove_pid_file_if_owned(paths.pid)
+    except OSError:
+        pass
+    try:
+        paths.stop_request.unlink()
+    except OSError:
+        pass
+    _write_gateway_heartbeat(paths, agent, options, status="stopped", pid=pid)
+    log_gateway_event(
+        agent,
+        "gateway_run_cleanup",
+        {"status": "cleanup", "pid": pid, "updated_at": time.time()},
+    )
+
+
+def cmd_gateway_run(args) -> int:
+    """内部命令：前台运行 gateway 后台循环。"""
+
+    agent = make_agent(args)
+    paths = gateway_paths(agent)
+    paths.root.mkdir(parents=True, exist_ok=True)
+    requeued, pid = _cmd_gateway_run_setup(args, agent, paths)
+    try:
+        options = _resolve_gateway_options(agent, args)
+    except ValueError as exc:
+        _write_gateway_state(paths, {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()})
+        log_gateway_event(
+            agent,
+            "gateway_run_failed",
+            {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()},
+        )
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    http_port = getattr(agent.config, "gateway_port", 0) or 0
+    stop_event, heartbeat_thread, request_thread, http_server = _cmd_gateway_run_threads(
+        args, paths, agent, options, requeued, 0, http_port,
+    )
 
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)
@@ -337,25 +372,7 @@ def cmd_gateway_run(args) -> int:
         print(str(exc), file=sys.stderr)
         exit_code = 2
     finally:
-        stop_event.set()
-        heartbeat_thread.join(timeout=2)
-        request_thread.join(timeout=2)
-        if http_server:
-            http_server.stop()
-        try:
-            remove_pid_file_if_owned(paths.pid)
-        except OSError:
-            pass
-        try:
-            paths.stop_request.unlink()
-        except OSError:
-            pass
-        _write_gateway_heartbeat(paths, agent, options, status="stopped", pid=pid)
-        log_gateway_event(
-            agent,
-            "gateway_run_cleanup",
-            {"status": "cleanup", "pid": pid, "updated_at": time.time()},
-        )
+        _cmd_gateway_run_cleanup(stop_event, heartbeat_thread, request_thread, http_server, paths, agent, options, pid)
     return exit_code
 
 

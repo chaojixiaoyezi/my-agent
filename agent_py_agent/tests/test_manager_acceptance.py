@@ -8,8 +8,73 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# ─── Setup Mixin ────────────────────────────────────────────────────────────────
 
-class TestSubAgentAcceptanceMixin:
+
+class _AcceptSetupMixin:
+    """Setup helpers for acceptance tests (tests 1-5 share identical task fixture)."""
+
+    def _make_standard_task(self, tmp_path: Path, status: str = "AWAITING_ACCEPTANCE", verification_status: str = "NEEDS_ACCEPTANCE", channel_status: str = "OK", evidence: list | None = None) -> MagicMock:
+        """Create a standard task mock with all required fields."""
+        task = MagicMock()
+        task.id = "test_task"
+        task.status = status
+        task.verification_status = verification_status
+        task.output_json = str(tmp_path / "output.json")
+        task.runner_result_json = str(tmp_path / "runner.json")
+        task.evidence = evidence if evidence is not None else []
+        task.task_dir = str(tmp_path / "task_dir")
+        task.channel_status = channel_status
+        task.channel_probe_file = str(tmp_path / "probe.json")
+        task.acceptance_file = str(tmp_path / "acceptance.json")
+        task.capability_requests = []
+        task.capability_gaps = []
+        return task
+
+    def _write_standard_files(self, tmp_path: Path, output_data: dict | None = None) -> None:
+        """Write standard JSON files for acceptance tests."""
+        data = output_data or {"tests": [], "artifacts": [], "blockers": []}
+        (tmp_path / "output.json").write_text(json.dumps(data), encoding="utf-8")
+        (tmp_path / "runner.json").write_text(json.dumps({"structured_output_found": False}), encoding="utf-8")
+        (tmp_path / "probe.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "acceptance.json").write_text("[]", encoding="utf-8")
+
+
+# ─── Run Mixin ──────────────────────────────────────────────────────────────────
+
+
+class _AcceptRunMixin:
+    """Logic helpers for acceptance tests."""
+
+    def _review_with_fixtures(self, manager: MagicMock, task: MagicMock, tmp_path: Path, findings: list | None = None, apply: bool = False) -> MagicMock:
+        """Configure manager mocks and call review_acceptance."""
+        manager.load = MagicMock(return_value=task)
+        manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
+        manager.acceptance_findings = MagicMock(return_value=findings or [])
+        manager.save = MagicMock()
+        manager._append_task_work_log = MagicMock()
+        return manager.review_acceptance("test_task", apply=apply, reviewer="parent")
+
+
+# ─── Assert Mixin ───────────────────────────────────────────────────────────────
+
+
+class _AcceptAssertMixin:
+    """Assertion helpers for acceptance tests."""
+
+    def _assert_record_basic(self, record: MagicMock, expected_run_id: str = "test_task") -> None:
+        """Assert basic record fields."""
+        assert record.run_id == expected_run_id
+
+    def _assert_record_applied(self, record: MagicMock, expected_applied: bool) -> None:
+        """Assert applied field."""
+        assert record.applied is expected_applied
+
+
+# ─── Main Test Class (composes the three mixins) ────────────────────────────────
+
+
+class TestSubAgentAcceptanceMixin(_AcceptSetupMixin, _AcceptRunMixin, _AcceptAssertMixin):
     """测试 SubAgentAcceptanceMixin 类。"""
 
     def test_review_acceptance_loads_task(self, tmp_path: Path):
@@ -22,27 +87,10 @@ class TestSubAgentAcceptanceMixin:
 
         manager = MockManager()
 
-        # 创建 mock 任务
-        task = MagicMock()
-        task.id = "test_task"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
-        task.output_json = str(tmp_path / "output.json")
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.evidence = []
-        task.task_dir = str(tmp_path / "task_dir")
+        task = self._make_standard_task(tmp_path)
+        self._write_standard_files(tmp_path)
 
-        output_data = {"tests": [], "artifacts": []}
-        (tmp_path / "output.json").write_text(json.dumps(output_data), encoding="utf-8")
-        (tmp_path / "runner.json").write_text(json.dumps({"structured_output_found": False}), encoding="utf-8")
-
-        manager.load = MagicMock(return_value=task)
-        manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
-        manager.acceptance_findings = MagicMock(return_value=[])
-        manager.save = MagicMock()
-        manager._append_task_work_log = MagicMock()
-
-        record = manager.review_acceptance("test_task", apply=False, reviewer="test")
+        record = self._review_with_fixtures(manager, task, tmp_path)
 
         assert record.run_id == "test_task"
         assert record.dry_run is True
@@ -57,32 +105,10 @@ class TestSubAgentAcceptanceMixin:
 
         manager = MockManager()
 
-        task = MagicMock()
-        task.id = "test_task"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
-        task.output_json = str(tmp_path / "output.json")
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.evidence = []
-        task.task_dir = str(tmp_path / "task_dir")
-        task.channel_status = "OK"
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.channel_probe_file = str(tmp_path / "probe.json")
-        task.acceptance_file = str(tmp_path / "acceptance.json")
+        task = self._make_standard_task(tmp_path)
+        self._write_standard_files(tmp_path)
 
-        output_data = {"tests": [], "artifacts": [], "blockers": []}
-        (tmp_path / "output.json").write_text(json.dumps(output_data), encoding="utf-8")
-        (tmp_path / "runner.json").write_text(json.dumps({"structured_output_found": False}), encoding="utf-8")
-        (tmp_path / "probe.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "acceptance.json").write_text("[]", encoding="utf-8")
-
-        manager.load = MagicMock(return_value=task)
-        manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
-        manager.acceptance_findings = MagicMock(return_value=[])
-        manager.save = MagicMock()
-        manager._append_task_work_log = MagicMock()
-
-        record = manager.review_acceptance("test_task", apply=False, reviewer="parent")
+        record = self._review_with_fixtures(manager, task, tmp_path)
 
         assert record.dry_run is True
         assert record.applied is False
@@ -97,40 +123,17 @@ class TestSubAgentAcceptanceMixin:
 
         manager = MockManager()
 
-        task = MagicMock()
-        task.id = "test_task"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
-        task.output_json = str(tmp_path / "output.json")
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.evidence = [MagicMock(ok=True)]
-        task.task_dir = str(tmp_path / "task_dir")
-        task.channel_status = "OK"
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.channel_probe_file = str(tmp_path / "probe.json")
-        task.acceptance_file = str(tmp_path / "acceptance.json")
-        task.capability_requests = []
-        task.capability_gaps = []
+        task = self._make_standard_task(tmp_path, evidence=[MagicMock(ok=True)])
+        self._write_standard_files(tmp_path)
 
-        output_data = {"tests": [], "artifacts": [], "blockers": []}
-        (tmp_path / "output.json").write_text(json.dumps(output_data), encoding="utf-8")
-        (tmp_path / "runner.json").write_text(json.dumps({"structured_output_found": False}), encoding="utf-8")
-        (tmp_path / "probe.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "acceptance.json").write_text("[]", encoding="utf-8")
-
-        manager.load = MagicMock(return_value=task)
-        manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
         finding_mock = MagicMock()
         finding_mock.ok = True
         finding_mock.severity = "P2"
         finding_mock.message = "test"
         finding_mock.evidence_path = None
         finding_mock.created_at = time.time()
-        manager.acceptance_findings = MagicMock(return_value=[finding_mock])
-        manager.save = MagicMock()
-        manager._append_task_work_log = MagicMock()
 
-        record = manager.review_acceptance("test_task", apply=True, reviewer="parent")
+        record = self._review_with_fixtures(manager, task, tmp_path, findings=[finding_mock], apply=True)
 
         assert record.decision == "ACCEPT"
         assert record.applied is True
@@ -145,40 +148,17 @@ class TestSubAgentAcceptanceMixin:
 
         manager = MockManager()
 
-        task = MagicMock()
-        task.id = "test_task"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
-        task.output_json = str(tmp_path / "output.json")
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.evidence = []
-        task.task_dir = str(tmp_path / "task_dir")
-        task.channel_status = "OK"
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.channel_probe_file = str(tmp_path / "probe.json")
-        task.acceptance_file = str(tmp_path / "acceptance.json")
-        task.capability_requests = []
-        task.capability_gaps = []
+        task = self._make_standard_task(tmp_path)
+        self._write_standard_files(tmp_path)
 
-        output_data = {"tests": [], "artifacts": [], "blockers": []}
-        (tmp_path / "output.json").write_text(json.dumps(output_data), encoding="utf-8")
-        (tmp_path / "runner.json").write_text(json.dumps({"structured_output_found": False}), encoding="utf-8")
-        (tmp_path / "probe.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "acceptance.json").write_text("[]", encoding="utf-8")
-
-        manager.load = MagicMock(return_value=task)
-        manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
         finding_mock = MagicMock()
         finding_mock.ok = False
-        finding_mock.severity = "P0"  # P0 必须通过
+        finding_mock.severity = "P0"
         finding_mock.message = "缺少验收证据"
         finding_mock.evidence_path = None
         finding_mock.created_at = time.time()
-        manager.acceptance_findings = MagicMock(return_value=[finding_mock])
-        manager.save = MagicMock()
-        manager._append_task_work_log = MagicMock()
 
-        record = manager.review_acceptance("test_task", apply=True, reviewer="parent")
+        record = self._review_with_fixtures(manager, task, tmp_path, findings=[finding_mock], apply=True)
 
         assert record.decision == "REJECT"
         assert record.applied is True
@@ -193,34 +173,10 @@ class TestSubAgentAcceptanceMixin:
 
         manager = MockManager()
 
-        task = MagicMock()
-        task.id = "test_task"
-        task.status = "RUNNING"  # 不是等待验收状态
-        task.verification_status = "UNVERIFIED"
-        task.output_json = str(tmp_path / "output.json")
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.evidence = []
-        task.task_dir = str(tmp_path / "task_dir")
-        task.channel_status = "OK"
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.channel_probe_file = str(tmp_path / "probe.json")
-        task.acceptance_file = str(tmp_path / "acceptance.json")
-        task.capability_requests = []
-        task.capability_gaps = []
+        task = self._make_standard_task(tmp_path, status="RUNNING", verification_status="UNVERIFIED")
+        self._write_standard_files(tmp_path)
 
-        output_data = {"tests": [], "artifacts": [], "blockers": []}
-        (tmp_path / "output.json").write_text(json.dumps(output_data), encoding="utf-8")
-        (tmp_path / "runner.json").write_text(json.dumps({"structured_output_found": False}), encoding="utf-8")
-        (tmp_path / "probe.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "acceptance.json").write_text("[]", encoding="utf-8")
-
-        manager.load = MagicMock(return_value=task)
-        manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
-        manager.acceptance_findings = MagicMock(return_value=[])
-        manager.save = MagicMock()
-        manager._append_task_work_log = MagicMock()
-
-        record = manager.review_acceptance("test_task", apply=True, reviewer="parent")
+        record = self._review_with_fixtures(manager, task, tmp_path, apply=True)
 
         assert record.applied is False
         assert "未写回" in record.message
@@ -235,28 +191,17 @@ class TestSubAgentAcceptanceMixin:
 
         manager = MockManager()
 
-        task1 = MagicMock()
-        task1.id = "task1"
-        task1.status = "AWAITING_ACCEPTANCE"
-        task1.verification_status = "NEEDS_ACCEPTANCE"
-        task1.output_json = str(tmp_path / "output1.json")
-        task1.runner_result_json = str(tmp_path / "runner1.json")
-        task1.evidence = []
-        task1.task_dir = str(tmp_path / "task1")
-        task1.channel_status = "OK"
-        task1.runner_result_json = str(tmp_path / "runner1.json")
-        task1.channel_probe_file = str(tmp_path / "probe1.json")
-        task1.acceptance_file = str(tmp_path / "acc1.json")
-        task1.capability_requests = []
-        task1.capability_gaps = []
-
-        (tmp_path / "output1.json").write_text(json.dumps({"tests": [], "artifacts": [], "blockers": []}), encoding="utf-8")
-        (tmp_path / "runner1.json").write_text(json.dumps({"structured_output_found": False}), encoding="utf-8")
-        (tmp_path / "probe1.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "acc1.json").write_text("[]", encoding="utf-8")
+        task1 = self._make_standard_task(tmp_path)
+        self._write_standard_files(tmp_path)
 
         manager._select_runs = MagicMock(return_value=[task1])
-        manager._review_acceptance_task = MagicMock(return_value=MagicMock(decision="ACCEPT", ok=True, dry_run=True, applied=False, run_id="task1", message="验收通过。", before_status="AWAITING_ACCEPTANCE", after_status="AWAITING_ACCEPTANCE", before_verification_status="NEEDS_ACCEPTANCE", after_verification_status="NEEDS_ACCEPTANCE", evidence_count=0, test_count=0, artifact_count=0, findings=[], evidence_paths=[], created_at=time.time(), id="accept_1", reviewer="parent", note=""))
+        manager._review_acceptance_task = MagicMock(return_value=MagicMock(
+            decision="ACCEPT", ok=True, dry_run=True, applied=False, run_id="task1", message="验收通过。",
+            before_status="AWAITING_ACCEPTANCE", after_status="AWAITING_ACCEPTANCE",
+            before_verification_status="NEEDS_ACCEPTANCE", after_verification_status="NEEDS_ACCEPTANCE",
+            evidence_count=0, test_count=0, artifact_count=0, findings=[], evidence_paths=[],
+            created_at=time.time(), id="accept_1", reviewer="parent", note="",
+        ))
 
         report = manager.review_acceptances(run_ids=["task1"], apply=False, reviewer="parent")
 
@@ -272,28 +217,10 @@ class TestSubAgentAcceptanceMixin:
 
         manager = MockManager()
 
-        task = MagicMock()
-        task.id = "test_task"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
-        task.output_json = str(tmp_path / "output.json")
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.evidence = []
-        task.task_dir = str(tmp_path / "task_dir")
+        task = self._make_standard_task(tmp_path)
         task.reports_dir = str(tmp_path / "reports")
-        task.channel_status = "OK"
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.channel_probe_file = str(tmp_path / "probe.json")
-        task.acceptance_file = str(tmp_path / "acceptance.json")
-        task.capability_requests = []
-        task.capability_gaps = []
         Path(task.reports_dir).mkdir(parents=True, exist_ok=True)
-
-        output_data = {"tests": [], "artifacts": [], "blockers": []}
-        (tmp_path / "output.json").write_text(json.dumps(output_data), encoding="utf-8")
-        (tmp_path / "runner.json").write_text(json.dumps({"structured_output_found": False}), encoding="utf-8")
-        (tmp_path / "probe.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "acceptance.json").write_text("[]", encoding="utf-8")
+        self._write_standard_files(tmp_path)
 
         from dataclasses import asdict
 

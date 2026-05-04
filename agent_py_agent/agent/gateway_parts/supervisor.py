@@ -19,6 +19,7 @@ from typing import Optional
 
 from .daemon_control import (
     GATEWAY_SERVICE_RESTART_EXIT_CODE,
+    WriteRuntimeStatusParams,
     acquire_scoped_lock,
     get_running_pid,
     read_pid_file,
@@ -129,7 +130,9 @@ class GatewaySupervisor:
                 if age <= self.heartbeat_timeout:
                     return True  # Gateway is alive and responsive
                 else:
-                    self._log_warn(f"Gateway heartbeat stale: age={age:.1f}s > {self.heartbeat_timeout}s")
+                    self._log_warn(
+                        f"Gateway heartbeat stale: age={age:.1f}s > {self.heartbeat_timeout}s"
+                    )
 
         # Fallback: check PID file directly
         pid = get_running_pid(self._paths.pid)
@@ -188,7 +191,9 @@ class GatewaySupervisor:
         creationflags = 0
         start_new_session = False
         if os.name == "nt":
-            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
+                subprocess, "CREATE_NO_WINDOW", 0
+            )
         else:
             start_new_session = True
 
@@ -241,7 +246,9 @@ class GatewaySupervisor:
         # Write stop request
         self._paths.stop_request.parent.mkdir(parents=True, exist_ok=True)
         self._paths.stop_request.write_text(
-            json.dumps({"requested_at": time.time(), "reason": "supervisor shutdown"}, ensure_ascii=False),
+            json.dumps(
+                {"requested_at": time.time(), "reason": "supervisor shutdown"}, ensure_ascii=False
+            ),
             encoding="utf-8",
         )
 
@@ -312,10 +319,12 @@ class GatewaySupervisor:
 
         # Write initial status
         write_runtime_status(
-            self._paths.state,
-            gateway_state="supervisor_running",
-            restart_requested=False,
-            active_agents=0,
+            WriteRuntimeStatusParams(
+                status_path=self._paths.state,
+                gateway_state="supervisor_running",
+                restart_requested=False,
+                active_agents=0,
+            )
         )
 
         # Start gateway if not already running
@@ -369,10 +378,12 @@ class GatewaySupervisor:
             pass
 
         write_runtime_status(
-            self._paths.state,
-            gateway_state="supervisor_stopped",
-            restart_requested=False,
-            active_agents=0,
+            WriteRuntimeStatusParams(
+                status_path=self._paths.state,
+                gateway_state="supervisor_stopped",
+                restart_requested=False,
+                active_agents=0,
+            )
         )
 
         self._log_info("Supervisor stopped")

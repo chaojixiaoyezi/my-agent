@@ -2,6 +2,7 @@
 
 测试 daemon_control.py 中的 PID 管理、scoped locks、进程检测、启停控制功能。
 """
+
 from __future__ import annotations
 
 import json
@@ -20,6 +21,7 @@ from agent_py_agent.agent.gateway_parts import daemon_control as dc
 
 # ── 测试夹具 ──────────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def tmp_pid_path(tmp_path):
     """创建临时 PID 文件路径。"""
@@ -35,6 +37,7 @@ def tmp_lock_dir(tmp_path):
 
 
 # ── PID 文件读写测试 ──────────────────────────────────────────────────────
+
 
 def test_read_pid_file_nonexistent(tmp_pid_path):
     """测试读取不存在的 PID 文件返回 None。"""
@@ -75,6 +78,7 @@ def test_remove_pid_file_nonexistent(tmp_pid_path):
 
 # ── 检查重复启动测试 ──────────────────────────────────────────────────────
 
+
 def test_check_already_running_no_file(tmp_pid_path):
     """测试无 PID 文件时返回未运行。"""
     is_running, existing_pid = dc.check_already_running(tmp_pid_path)
@@ -101,6 +105,7 @@ def test_check_already_running_alive(mock_alive, tmp_pid_path):
 
 
 # ── PID 记录读写测试 ──────────────────────────────────────────────────────
+
 
 def test_write_pid_record(tmp_pid_path):
     """测试写入 PID 记录。"""
@@ -141,6 +146,7 @@ def test_get_running_pid_invalid_pid_cleanup(mock_kill, tmp_pid_path):
 
 
 # ── Scoped Locks 测试 ─────────────────────────────────────────────────────
+
 
 @patch.object(dc, "_get_lock_dir")
 def test_acquire_scoped_lock_success(mock_lock_dir, tmp_lock_dir):
@@ -203,13 +209,16 @@ def test_scope_hash_different_inputs():
 
 # ── Runtime Status 测试 ───────────────────────────────────────────────────
 
+
 def test_write_runtime_status(tmp_path):
     """测试写入运行时状态。"""
     status_path = tmp_path / "status.json"
     dc.write_runtime_status(
-        status_path,
-        gateway_state="running",
-        active_agents=3,
+        dc.WriteRuntimeStatusParams(
+            status_path=status_path,
+            gateway_state="running",
+            active_agents=3,
+        )
     )
     status = dc.read_runtime_status(status_path)
     assert status is not None
@@ -227,15 +236,19 @@ def test_write_runtime_status_merge_platform(tmp_path):
     """测试写入运行时状态时合并 platform 信息。"""
     status_path = tmp_path / "status.json"
     dc.write_runtime_status(
-        status_path,
-        gateway_state="running",
+        dc.WriteRuntimeStatusParams(
+            status_path=status_path,
+            gateway_state="running",
+        )
     )
     dc.write_runtime_status(
-        status_path,
-        platform="feishu",
-        platform_state="connected",
-        error_code=None,
-        error_message=None,
+        dc.WriteRuntimeStatusParams(
+            status_path=status_path,
+            platform="feishu",
+            platform_state="connected",
+            error_code=None,
+            error_message=None,
+        )
     )
     status = dc.read_runtime_status(status_path)
     assert "platforms" in status
@@ -243,6 +256,7 @@ def test_write_runtime_status_merge_platform(tmp_path):
 
 
 # ── 优雅关闭测试 ──────────────────────────────────────────────────────────
+
 
 @patch.object(dc, "is_pid_alive", return_value=False)
 def test_request_graceful_shutdown_not_running(mock_alive, tmp_pid_path, tmp_path):
@@ -264,6 +278,7 @@ def test_request_graceful_shutdown_success(mock_read, mock_alive, tmp_pid_path, 
 
 # ── 移除owned PID文件测试 ─────────────────────────────────────────────────
 
+
 def test_remove_pid_file_if_owned_not_owned(tmp_path):
     """测试不属于自己的 PID 文件不会被删除。"""
     pid_path = tmp_path / "pid.json"
@@ -277,12 +292,16 @@ def test_remove_pid_file_if_owned_owned(tmp_path):
     """测试属于自己的 PID 文件会被删除。"""
     pid_path = tmp_path / "owned_pid.json"
     my_pid = os.getpid()
-    pid_path.write_text(json.dumps({"pid": my_pid, "start_time": dc._get_process_start_time(my_pid)}), encoding="utf-8")
+    pid_path.write_text(
+        json.dumps({"pid": my_pid, "start_time": dc._get_process_start_time(my_pid)}),
+        encoding="utf-8",
+    )
     dc.remove_pid_file_if_owned(pid_path)
     assert not pid_path.exists()
 
 
 # ── 异常场景测试 ──────────────────────────────────────────────────────────
+
 
 def test_write_pid_file(tmp_path):
     """测试写入纯文本 PID 文件。"""

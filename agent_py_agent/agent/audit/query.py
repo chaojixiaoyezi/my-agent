@@ -2,6 +2,7 @@
 
 提供审计日志的查询和统计功能。
 """
+
 from __future__ import annotations
 
 import json
@@ -25,6 +26,21 @@ class AuditQueryResult:
     query_time_ms: float
 
 
+@dataclass(frozen=True)
+class AuditQueryParams:
+    """Bundle of AuditQuery.query parameters."""
+
+    user_id: str | None = None
+    action: AuditAction | str | None = None
+    target_id: str | None = None
+    target_type: str | None = None
+    status: str | None = None
+    start_time: float | None = None
+    end_time: float | None = None
+    limit: int = 100
+    offset: int = 0
+
+
 class AuditQuery:
     """审计日志查询器。
 
@@ -44,34 +60,34 @@ class AuditQuery:
         self._audit_root = Path(getattr(config, "audit_log_path", "data/audit"))
         self._audit_file = self._audit_root / "audit.jsonl"
 
-    def query(
-        self,
-        user_id: str | None = None,
-        action: AuditAction | str | None = None,
-        target_id: str | None = None,
-        target_type: str | None = None,
-        status: str | None = None,
-        start_time: float | None = None,
-        end_time: float | None = None,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> AuditQueryResult:
+    def query(self, params: AuditQueryParams | None = None, **kwargs) -> AuditQueryResult:
         """查询审计日志。
 
         Args:
-            user_id: 用户 ID 过滤
-            action: 动作类型过滤
-            target_id: 目标 ID 过滤
-            target_type: 目标类型过滤
-            status: 状态过滤
-            start_time: 开始时间（时间戳）
-            end_time: 结束时间（时间戳）
-            limit: 最多返回多少条
-            offset: 跳过多少条
+            params: AuditQueryParams对象，或None（向后兼容）
+            **kwargs: 向后兼容的关键字参数
 
         Returns:
             AuditQueryResult 包含条目列表和总数
         """
+        if params is None and not kwargs:
+            params = AuditQueryParams()
+        elif isinstance(params, AuditQueryParams):
+            pass
+        else:
+            # Backward compatibility: convert kwargs to AuditQueryParams
+            params = AuditQueryParams(
+                user_id=kwargs.pop("user_id", None),
+                action=kwargs.pop("action", None),
+                target_id=kwargs.pop("target_id", None),
+                target_type=kwargs.pop("target_type", None),
+                status=kwargs.pop("status", None),
+                start_time=kwargs.pop("start_time", None),
+                end_time=kwargs.pop("end_time", None),
+                limit=kwargs.pop("limit", 100),
+                offset=kwargs.pop("offset", 0),
+            )
+
         start_query = time.time()
 
         if not self._audit_file.exists():
@@ -84,7 +100,9 @@ class AuditQuery:
         entries: list[AuditEntry] = []
         total_count = 0
 
-        action_str = action.value if isinstance(action, AuditAction) else action
+        action_str = (
+            params.action.value if isinstance(params.action, AuditAction) else params.action
+        )
 
         try:
             with open(self._audit_file, encoding="utf-8") as f:
@@ -101,21 +119,21 @@ class AuditQuery:
                     total_count += 1
 
                     # 过滤条件
-                    if user_id and data.get("user_id") != user_id:
+                    if params.user_id and data.get("user_id") != params.user_id:
                         continue
                     if action_str and data.get("action") != action_str:
                         continue
-                    if target_id and data.get("target_id") != target_id:
+                    if params.target_id and data.get("target_id") != params.target_id:
                         continue
-                    if target_type and data.get("target_type") != target_type:
+                    if params.target_type and data.get("target_type") != params.target_type:
                         continue
-                    if status and data.get("status") != status:
+                    if params.status and data.get("status") != params.status:
                         continue
 
                     timestamp = data.get("timestamp", 0)
-                    if start_time and timestamp < start_time:
+                    if params.start_time and timestamp < params.start_time:
                         continue
-                    if end_time and timestamp > end_time:
+                    if params.end_time and timestamp > params.end_time:
                         continue
 
                     entries.append(AuditEntry.from_dict(data))
@@ -128,7 +146,7 @@ class AuditQuery:
 
         # 应用分页
         total = len(entries)
-        entries = entries[offset : offset + limit]
+        entries = entries[params.offset : params.offset + params.limit]
 
         query_time_ms = (time.time() - start_query) * 1000
 
@@ -254,8 +272,10 @@ class AuditQuery:
         """Clean up entries older than cutoff_time; return deleted count."""
         deleted_count = 0
         try:
-            with open(self._audit_file, encoding="utf-8") as f_in, \
-                 open(temp_file, "w", encoding="utf-8") as f_out:
+            with (
+                open(self._audit_file, encoding="utf-8") as f_in,
+                open(temp_file, "w", encoding="utf-8") as f_out,
+            ):
                 for line in f_in:
                     line = line.strip()
                     if not line:

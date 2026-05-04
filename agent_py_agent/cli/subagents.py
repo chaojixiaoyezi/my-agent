@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sys
 
+from ..agent.agent_core.dispatch_mixin import DispatchParams
 from ..agent.capability_config import load_capability_config
 from ..agent.config import load_config
 from ..agent.subagent import filter_board_items
@@ -191,7 +192,9 @@ def cmd_subagents_route_capabilities(args) -> int:
     if not report.records:
         print("暂时没有 OPEN capability request。")
     for record in report.records:
-        cards = ", ".join(f"{item['kind']}:{item['name']}" for item in record.selected_cards) or "none"
+        cards = (
+            ", ".join(f"{item['kind']}:{item['name']}" for item in record.selected_cards) or "none"
+        )
         print(
             f"- [{record.status}] {record.run_id} request={record.request_id} "
             f"cards={cards} :: {record.message}"
@@ -311,7 +314,7 @@ def cmd_subagents_patches(args) -> int:
             f"- [{status}] {record.run_id} decision={record.decision} "
             f"patches={record.patch_count} approved={record.approved_count} "
             f"blocked={record.blocked_count} applied={record.applied} :: {record.message}"
-    )
+        )
     print(f"\n已写入: {agent.subagents.workspace / 'subagent_patch_review_report.json'}")
     print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_PATCH_REVIEW.md'}")
     if args.patch_action == "review_apply":
@@ -521,5 +524,9 @@ def cmd_subagent_detail(args) -> int:
 
     agent = make_agent(args)
     task = agent.subagents.load(args.run_id)
-    print(json.dumps(task.__dict__, ensure_ascii=False, indent=2, default=lambda value: value.__dict__))
+    print(
+        json.dumps(
+            task.__dict__, ensure_ascii=False, indent=2, default=lambda value: value.__dict__
+        )
+    )
     return 0

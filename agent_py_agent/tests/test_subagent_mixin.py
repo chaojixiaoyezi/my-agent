@@ -81,7 +81,9 @@ class TestSubagentMixinRun:
     def test_run_subagent_dry_run(self, mock_mixin: SimpleAgentSubagentMixin) -> None:
         """测试 dry-run 模式。"""
         mock_mixin.subagents = MagicMock()
-        mock_mixin.subagents.prepare_runner_attempt.return_value = MagicMock(runner_active_attempt_id="")
+        mock_mixin.subagents.prepare_runner_attempt.return_value = MagicMock(
+            runner_active_attempt_id=""
+        )
 
         mock_mixin.subagents.write_execution_context.return_value = MagicMock(
             allowed_tools=["tool1"],
@@ -94,7 +96,9 @@ class TestSubagentMixinRun:
         mock_result.run_id = "test-run"
         mock_mixin.subagents.record_runner_result.return_value = mock_result
 
-        with patch('agent_py_agent.agent.agent_core.subagent_mixin._build_subagent_runner_prompt') as mock_prompt_builder:
+        with patch(
+            "agent_py_agent.agent.agent_core.subagent_mixin._build_subagent_runner_prompt"
+        ) as mock_prompt_builder:
             mock_prompt_builder.return_value = "built prompt"
 
             result = mock_mixin.run_subagent(
@@ -111,7 +115,9 @@ class TestSubagentMixinRun:
     def test_run_subagent_with_attempt_id(self, mock_mixin: SimpleAgentSubagentMixin) -> None:
         """测试带 attempt_id 的 run。"""
         mock_mixin.subagents = MagicMock()
-        mock_mixin.subagents.prepare_runner_attempt.return_value = MagicMock(runner_active_attempt_id="attempt-123")
+        mock_mixin.subagents.prepare_runner_attempt.return_value = MagicMock(
+            runner_active_attempt_id="attempt-123"
+        )
         mock_mixin.subagents.write_execution_context.return_value = MagicMock(
             allowed_tools=[],
             write_boundary={},
@@ -121,7 +127,9 @@ class TestSubagentMixinRun:
         mock_result.run_id = "run-id"
         mock_mixin.subagents.record_runner_result.return_value = mock_result
 
-        with patch('agent_py_agent.agent.agent_core.subagent_mixin._build_subagent_runner_prompt') as mock_prompt_builder:
+        with patch(
+            "agent_py_agent.agent.agent_core.subagent_mixin._build_subagent_runner_prompt"
+        ) as mock_prompt_builder:
             mock_prompt_builder.return_value = "built prompt"
 
             result = mock_mixin.run_subagent(
@@ -135,7 +143,9 @@ class TestSubagentMixinRun:
     def test_run_subagent_channel_broken(self, mock_mixin: SimpleAgentSubagentMixin) -> None:
         """测试通道健康检查失败。"""
         mock_mixin.subagents = MagicMock()
-        mock_mixin.subagents.prepare_runner_attempt.return_value = MagicMock(runner_active_attempt_id="")
+        mock_mixin.subagents.prepare_runner_attempt.return_value = MagicMock(
+            runner_active_attempt_id=""
+        )
         mock_mixin.subagents.write_execution_context.return_value = MagicMock(
             allowed_tools=[],
             write_boundary={},
@@ -146,7 +156,9 @@ class TestSubagentMixinRun:
         mock_result.run_id = "test"
         mock_mixin.subagents.record_runner_result.return_value = mock_result
 
-        with patch('agent_py_agent.agent.agent_core.subagent_mixin._build_subagent_runner_prompt') as mock_prompt_builder:
+        with patch(
+            "agent_py_agent.agent.agent_core.subagent_mixin._build_subagent_runner_prompt"
+        ) as mock_prompt_builder:
             mock_prompt_builder.return_value = "built prompt"
 
             result = mock_mixin.run_subagent(
@@ -186,14 +198,27 @@ class TestSubagentMixinParentPlanner:
         mock_mixin.subagents.build_parent_planner_report.return_value = MagicMock()
         mock_mixin.subagents.write_parent_planner_report.return_value = None
 
-        with patch('agent_py_agent.agent.agent_core.subagent_mixin._build_parent_planner_state') as mock_state:
+        with patch(
+            "agent_py_agent.agent.agent_core.subagent_mixin._build_parent_planner_state"
+        ) as mock_state:
             mock_state.return_value = {
                 "gate": {"needs_planner": 0},
                 "tasks": [],
             }
+            from agent_py_agent.agent.agent_core.subagent_mixin import RunParentPlannerParams
+
             result = mock_mixin.run_parent_planner(
-                router=MagicMock(),
-                apply=False,
+                RunParentPlannerParams(
+                    router=MagicMock(),
+                    capability_config=None,
+                    apply=False,
+                    execute_runners=False,
+                    max_runners=1,
+                    limit=20,
+                    reviewer="parent-dispatch",
+                    note="",
+                    runner_instruction="",
+                )
             )
 
         assert result.decision == "HEARTBEAT_OK"
@@ -217,7 +242,9 @@ class TestSubagentMixinRecoverySnapshot:
         """测试 memory hook 禁用时不写 snapshot。"""
         mock_mixin.config.memory_hook_enabled = False
 
-        with patch('agent_py_agent.agent.agent_core.subagent_mixin.write_recovery_snapshot') as mock_write:
+        with patch(
+            "agent_py_agent.agent.agent_core.subagent_mixin.write_recovery_snapshot"
+        ) as mock_write:
             mock_mixin._write_subagent_recovery_snapshot(
                 run_id="test-run",
                 user_prompt="test prompt",
@@ -229,12 +256,16 @@ class TestSubagentMixinRecoverySnapshot:
             )
             mock_write.assert_not_called()
 
-    def test_write_recovery_snapshot_task_not_found(self, mock_mixin: SimpleAgentSubagentMixin) -> None:
+    def test_write_recovery_snapshot_task_not_found(
+        self, mock_mixin: SimpleAgentSubagentMixin
+    ) -> None:
         """测试任务不存在时的处理。"""
         mock_mixin.subagents = MagicMock()
         mock_mixin.subagents.load.side_effect = FileNotFoundError()
 
-        with patch('agent_py_agent.agent.agent_core.subagent_mixin.write_recovery_snapshot') as mock_write:
+        with patch(
+            "agent_py_agent.agent.agent_core.subagent_mixin.write_recovery_snapshot"
+        ) as mock_write:
             mock_write.return_value = MagicMock()
             mock_mixin._write_subagent_recovery_snapshot(
                 run_id="test-run",
@@ -259,7 +290,9 @@ class TestSubagentMixinRecoverySnapshot:
         mock_task.handoff_file = "/handoff/file"
         mock_mixin.subagents.load.return_value = mock_task
 
-        with patch('agent_py_agent.agent.agent_core.subagent_mixin.write_recovery_snapshot') as mock_write:
+        with patch(
+            "agent_py_agent.agent.agent_core.subagent_mixin.write_recovery_snapshot"
+        ) as mock_write:
             mock_write.return_value = MagicMock()
             mock_mixin._write_subagent_recovery_snapshot(
                 run_id="test-run",

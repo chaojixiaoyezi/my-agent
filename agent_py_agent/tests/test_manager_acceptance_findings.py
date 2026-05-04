@@ -50,7 +50,71 @@ class TestAcceptanceReviewFinding:
         assert data["severity"] == "P0"
 
 
-class TestSubAgentAcceptanceFindingMixin:
+# ─── Findings Setup Mixin ───────────────────────────────────────────────────────
+
+
+class _FindingSetupMixin:
+    """Shared task mock factory for findings tests."""
+
+    def _make_findings_task(self, tmp_path: Path, **overrides) -> MagicMock:
+        """Create a standard task mock for acceptance findings tests."""
+        task = MagicMock()
+        task.id = "test"
+        task.status = overrides.get("status", "AWAITING_ACCEPTANCE")
+        task.verification_status = overrides.get("verification_status", "NEEDS_ACCEPTANCE")
+        task.output_json = str(tmp_path / "output.json")
+        task.runner_result_json = str(tmp_path / "runner.json")
+        task.evidence = overrides.get("evidence", [])
+        task.task_dir = str(tmp_path / "task_dir")
+        task.channel_status = overrides.get("channel_status", "OK")
+        task.channel_probe_file = str(tmp_path / "probe.json")
+        task.acceptance_file = str(tmp_path / "acceptance.json")
+        task.capability_requests = overrides.get("capability_requests", [])
+        task.capability_gaps = overrides.get("capability_gaps", [])
+        task.acceptance_checks = overrides.get("acceptance_checks", [])
+        task.used_tools = overrides.get("used_tools", [])
+        return task
+
+    def _write_findings_files(self, tmp_path: Path, output_data: dict | None = None) -> None:
+        """Write standard JSON files for findings tests."""
+        (tmp_path / "output.json").write_text(json.dumps(output_data or {}), encoding="utf-8")
+        (tmp_path / "runner.json").write_text(json.dumps({}), encoding="utf-8")
+        (tmp_path / "probe.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "acceptance.json").write_text("[]", encoding="utf-8")
+
+    def _call_findings(self, manager: MagicMock, task: MagicMock, tmp_path: Path, output_data: dict | None = None) -> list:
+        """Call acceptance_findings with standard args."""
+        if output_data is not None:
+            return manager._acceptance_findings(task, output_data, {}, time.time())
+        return manager.acceptance_findings(task, {}, {}, time.time())
+
+
+# ─── Findings Assert Mixin ──────────────────────────────────────────────────────
+
+
+class _FindingAssertMixin:
+    """Shared assertion helpers for findings tests."""
+
+    def _assert_finding(self, findings: list, name: str, expected_ok: bool) -> None:
+        """Assert a finding by name has the expected ok status."""
+        finding = next((f for f in findings if f.name == name), None)
+        assert finding is not None, f"Finding '{name}' not found"
+        assert finding.ok is expected_ok
+
+
+# ─── Findings Report Mixin ──────────────────────────────────────────────────────
+
+
+class _FindingReportMixin:
+    """Report helpers (unused in current tests but reserved for future extension)."""
+
+    pass
+
+
+# ─── Main Test Class ────────────────────────────────────────────────────────────
+
+
+class TestSubAgentAcceptanceFindingMixin(_FindingSetupMixin, _FindingAssertMixin, _FindingReportMixin):
     """测试 _acceptance_findings 方法。"""
 
     def test_work_order_validation(self, tmp_path: Path):
@@ -64,33 +128,13 @@ class TestSubAgentAcceptanceFindingMixin:
                 self.workspace = tmp_path
 
         manager = MockManager()
-
-        task = MagicMock()
-        task.id = "test"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
-        task.output_json = str(tmp_path / "output.json")
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.evidence = []
-        task.task_dir = str(tmp_path / "task_dir")
-        task.channel_status = "OK"
-        task.channel_probe_file = str(tmp_path / "probe.json")
-        task.acceptance_file = str(tmp_path / "acceptance.json")
-        task.capability_requests = []
-        task.capability_gaps = []
-        task.acceptance_checks = []
-        task.used_tools = []
-
-        (tmp_path / "output.json").write_text(json.dumps({}), encoding="utf-8")
-        (tmp_path / "runner.json").write_text(json.dumps({}), encoding="utf-8")
-
+        task = self._make_findings_task(tmp_path)
+        self._write_findings_files(tmp_path)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager.acceptance_findings(task, {}, {}, time.time())
+        findings = self._call_findings(manager, task, tmp_path)
 
-        # 第一个 finding 应该是 work_order
-        assert findings[0].name == "work_order"
-        assert findings[0].ok is True
+        self._assert_finding(findings, "work_order", expected_ok=True)
 
     def test_ready_for_acceptance_check(self, tmp_path: Path):
         """验收就绪状态检查。"""
@@ -103,35 +147,13 @@ class TestSubAgentAcceptanceFindingMixin:
                 self.workspace = tmp_path
 
         manager = MockManager()
-
-        task = MagicMock()
-        task.id = "test"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
-        task.output_json = str(tmp_path / "output.json")
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.evidence = []
-        task.task_dir = str(tmp_path / "task_dir")
-        task.channel_status = "OK"
-        task.channel_probe_file = str(tmp_path / "probe.json")
-        task.acceptance_file = str(tmp_path / "acceptance.json")
-        task.capability_requests = []
-        task.capability_gaps = []
-        task.acceptance_checks = []
-        task.used_tools = []
-
-        (tmp_path / "output.json").write_text(json.dumps({}), encoding="utf-8")
-        (tmp_path / "runner.json").write_text(json.dumps({}), encoding="utf-8")
-        (tmp_path / "probe.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "acceptance.json").write_text("[]", encoding="utf-8")
-
+        task = self._make_findings_task(tmp_path)
+        self._write_findings_files(tmp_path)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager.acceptance_findings(task, {}, {}, time.time())
+        findings = self._call_findings(manager, task, tmp_path)
 
-        ready_finding = next((f for f in findings if f.name == "ready_for_acceptance"), None)
-        assert ready_finding is not None
-        assert ready_finding.ok is True
+        self._assert_finding(findings, "ready_for_acceptance", expected_ok=True)
 
     def test_channel_not_broken(self, tmp_path: Path):
         """通道未损坏检查。"""
@@ -144,34 +166,13 @@ class TestSubAgentAcceptanceFindingMixin:
                 self.workspace = tmp_path
 
         manager = MockManager()
-
-        task = MagicMock()
-        task.id = "test"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
-        task.output_json = str(tmp_path / "output.json")
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.evidence = []
-        task.task_dir = str(tmp_path / "task_dir")
-        task.channel_status = "OK"
-        task.channel_probe_file = str(tmp_path / "probe.json")
-        task.acceptance_file = str(tmp_path / "acceptance.json")
-        task.capability_requests = []
-        task.capability_gaps = []
-        task.acceptance_checks = []
-        task.used_tools = []
-
-        (tmp_path / "output.json").write_text(json.dumps({}), encoding="utf-8")
-        (tmp_path / "runner.json").write_text(json.dumps({}), encoding="utf-8")
-        (tmp_path / "probe.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "acceptance.json").write_text("[]", encoding="utf-8")
-
+        task = self._make_findings_task(tmp_path)
+        self._write_findings_files(tmp_path)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager.acceptance_findings(task, {}, {}, time.time())
+        findings = self._call_findings(manager, task, tmp_path)
 
-        channel_finding = next((f for f in findings if f.name == "channel_not_broken"), None)
-        assert channel_finding.ok is True
+        self._assert_finding(findings, "channel_not_broken", expected_ok=True)
 
     def test_channel_broken_blocks(self, tmp_path: Path):
         """通道损坏阻止验收。"""
@@ -184,34 +185,13 @@ class TestSubAgentAcceptanceFindingMixin:
                 self.workspace = tmp_path
 
         manager = MockManager()
-
-        task = MagicMock()
-        task.id = "test"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
-        task.output_json = str(tmp_path / "output.json")
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.evidence = []
-        task.task_dir = str(tmp_path / "task_dir")
-        task.channel_status = "BROKEN"  # 通道损坏
-        task.channel_probe_file = str(tmp_path / "probe.json")
-        task.acceptance_file = str(tmp_path / "acceptance.json")
-        task.capability_requests = []
-        task.capability_gaps = []
-        task.acceptance_checks = []
-        task.used_tools = []
-
-        (tmp_path / "output.json").write_text(json.dumps({}), encoding="utf-8")
-        (tmp_path / "runner.json").write_text(json.dumps({}), encoding="utf-8")
-        (tmp_path / "probe.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "acceptance.json").write_text("[]", encoding="utf-8")
-
+        task = self._make_findings_task(tmp_path, channel_status="BROKEN")
+        self._write_findings_files(tmp_path)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager.acceptance_findings(task, {}, {}, time.time())
+        findings = self._call_findings(manager, task, tmp_path)
 
-        channel_finding = next((f for f in findings if f.name == "channel_not_broken"), None)
-        assert channel_finding.ok is False
+        self._assert_finding(findings, "channel_not_broken", expected_ok=False)
 
     def test_evidence_present_check(self, tmp_path: Path):
         """验收证据存在检查。"""
@@ -224,34 +204,13 @@ class TestSubAgentAcceptanceFindingMixin:
                 self.workspace = tmp_path
 
         manager = MockManager()
-
-        task = MagicMock()
-        task.id = "test"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
-        task.output_json = str(tmp_path / "output.json")
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.evidence = [MagicMock(ok=True), MagicMock(ok=True)]  # 有可用证据
-        task.task_dir = str(tmp_path / "task_dir")
-        task.channel_status = "OK"
-        task.channel_probe_file = str(tmp_path / "probe.json")
-        task.acceptance_file = str(tmp_path / "acceptance.json")
-        task.capability_requests = []
-        task.capability_gaps = []
-        task.acceptance_checks = []
-        task.used_tools = []
-
-        (tmp_path / "output.json").write_text(json.dumps({}), encoding="utf-8")
-        (tmp_path / "runner.json").write_text(json.dumps({}), encoding="utf-8")
-        (tmp_path / "probe.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "acceptance.json").write_text("[]", encoding="utf-8")
-
+        task = self._make_findings_task(tmp_path, evidence=[MagicMock(ok=True), MagicMock(ok=True)])
+        self._write_findings_files(tmp_path)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager.acceptance_findings(task, {}, {}, time.time())
+        findings = self._call_findings(manager, task, tmp_path)
 
-        evidence_finding = next((f for f in findings if f.name == "evidence_present"), None)
-        assert evidence_finding.ok is True
+        self._assert_finding(findings, "evidence_present", expected_ok=True)
 
     def test_evidence_not_failed(self, tmp_path: Path):
         """没有失败证据检查。"""
@@ -264,34 +223,13 @@ class TestSubAgentAcceptanceFindingMixin:
                 self.workspace = tmp_path
 
         manager = MockManager()
-
-        task = MagicMock()
-        task.id = "test"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
-        task.output_json = str(tmp_path / "output.json")
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.evidence = [MagicMock(ok=True), MagicMock(ok=False)]  # 有一个失败的证据
-        task.task_dir = str(tmp_path / "task_dir")
-        task.channel_status = "OK"
-        task.channel_probe_file = str(tmp_path / "probe.json")
-        task.acceptance_file = str(tmp_path / "acceptance.json")
-        task.capability_requests = []
-        task.capability_gaps = []
-        task.acceptance_checks = []
-        task.used_tools = []
-
-        (tmp_path / "output.json").write_text(json.dumps({}), encoding="utf-8")
-        (tmp_path / "runner.json").write_text(json.dumps({}), encoding="utf-8")
-        (tmp_path / "probe.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "acceptance.json").write_text("[]", encoding="utf-8")
-
+        task = self._make_findings_task(tmp_path, evidence=[MagicMock(ok=True), MagicMock(ok=False)])
+        self._write_findings_files(tmp_path)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager.acceptance_findings(task, {}, {}, time.time())
+        findings = self._call_findings(manager, task, tmp_path)
 
-        failed_finding = next((f for f in findings if f.name == "evidence_not_failed"), None)
-        assert failed_finding.ok is False
+        self._assert_finding(findings, "evidence_not_failed", expected_ok=False)
 
     def test_no_open_capability_requests(self, tmp_path: Path):
         """没有待处理 capability 请求检查。"""
@@ -304,34 +242,13 @@ class TestSubAgentAcceptanceFindingMixin:
                 self.workspace = tmp_path
 
         manager = MockManager()
-
-        task = MagicMock()
-        task.id = "test"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
-        task.output_json = str(tmp_path / "output.json")
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.evidence = []
-        task.task_dir = str(tmp_path / "task_dir")
-        task.channel_status = "OK"
-        task.channel_probe_file = str(tmp_path / "probe.json")
-        task.acceptance_file = str(tmp_path / "acceptance.json")
-        task.capability_requests = []  # 没有 OPEN 请求
-        task.capability_gaps = []
-        task.acceptance_checks = []
-        task.used_tools = []
-
-        (tmp_path / "output.json").write_text(json.dumps({}), encoding="utf-8")
-        (tmp_path / "runner.json").write_text(json.dumps({}), encoding="utf-8")
-        (tmp_path / "probe.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "acceptance.json").write_text("[]", encoding="utf-8")
-
+        task = self._make_findings_task(tmp_path)
+        self._write_findings_files(tmp_path)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager.acceptance_findings(task, {}, {}, time.time())
+        findings = self._call_findings(manager, task, tmp_path)
 
-        request_finding = next((f for f in findings if f.name == "no_open_capability_requests"), None)
-        assert request_finding.ok is True
+        self._assert_finding(findings, "no_open_capability_requests", expected_ok=True)
 
     def test_no_output_blockers(self, tmp_path: Path):
         """output.json 没有 blocker 检查。"""
@@ -344,35 +261,13 @@ class TestSubAgentAcceptanceFindingMixin:
                 self.workspace = tmp_path
 
         manager = MockManager()
-
-        task = MagicMock()
-        task.id = "test"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
-        task.output_json = str(tmp_path / "output.json")
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.evidence = []
-        task.task_dir = str(tmp_path / "task_dir")
-        task.channel_status = "OK"
-        task.channel_probe_file = str(tmp_path / "probe.json")
-        task.acceptance_file = str(tmp_path / "acceptance.json")
-        task.capability_requests = []
-        task.capability_gaps = []
-        task.acceptance_checks = []
-        task.used_tools = []
-
-        output_data = {"blockers": []}  # 没有 blocker
-        (tmp_path / "output.json").write_text(json.dumps(output_data), encoding="utf-8")
-        (tmp_path / "runner.json").write_text(json.dumps({}), encoding="utf-8")
-        (tmp_path / "probe.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "acceptance.json").write_text("[]", encoding="utf-8")
-
+        task = self._make_findings_task(tmp_path)
+        self._write_findings_files(tmp_path)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager._acceptance_findings(task, output_data, {}, time.time())
+        findings = manager._acceptance_findings(task, {"blockers": []}, {}, time.time())
 
-        blocker_finding = next((f for f in findings if f.name == "no_output_blockers"), None)
-        assert blocker_finding.ok is True
+        self._assert_finding(findings, "no_output_blockers", expected_ok=True)
 
     def test_tests_passed_check(self, tmp_path: Path):
         """测试通过检查。"""
@@ -385,35 +280,13 @@ class TestSubAgentAcceptanceFindingMixin:
                 self.workspace = tmp_path
 
         manager = MockManager()
-
-        task = MagicMock()
-        task.id = "test"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
-        task.output_json = str(tmp_path / "output.json")
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.evidence = []
-        task.task_dir = str(tmp_path / "task_dir")
-        task.channel_status = "OK"
-        task.channel_probe_file = str(tmp_path / "probe.json")
-        task.acceptance_file = str(tmp_path / "acceptance.json")
-        task.capability_requests = []
-        task.capability_gaps = []
-        task.acceptance_checks = []
-        task.used_tools = []
-
-        output_data = {"tests": [{"ok": True}, {"ok": True}]}  # 所有测试通过
-        (tmp_path / "output.json").write_text(json.dumps(output_data), encoding="utf-8")
-        (tmp_path / "runner.json").write_text(json.dumps({}), encoding="utf-8")
-        (tmp_path / "probe.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "acceptance.json").write_text("[]", encoding="utf-8")
-
+        task = self._make_findings_task(tmp_path)
+        self._write_findings_files(tmp_path)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
 
-        findings = manager._acceptance_findings(task, output_data, {}, time.time())
+        findings = manager._acceptance_findings(task, {"tests": [{"ok": True}, {"ok": True}]}, {}, time.time())
 
-        test_finding = next((f for f in findings if f.name == "tests_passed"), None)
-        assert test_finding.ok is True
+        self._assert_finding(findings, "tests_passed", expected_ok=True)
 
     def test_artifact_paths_exist(self, tmp_path: Path):
         """artifact 路径存在检查。"""
@@ -426,36 +299,14 @@ class TestSubAgentAcceptanceFindingMixin:
                 self.workspace = tmp_path
 
         manager = MockManager()
-
-        task = MagicMock()
-        task.id = "test"
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
-        task.output_json = str(tmp_path / "output.json")
-        task.runner_result_json = str(tmp_path / "runner.json")
-        task.evidence = []
-        task.task_dir = str(tmp_path / "task_dir")
-        task.channel_status = "OK"
-        task.channel_probe_file = str(tmp_path / "probe.json")
-        task.acceptance_file = str(tmp_path / "acceptance.json")
-        task.capability_requests = []
-        task.capability_gaps = []
-        task.acceptance_checks = []
-        task.used_tools = []
-
-        output_data = {"artifacts": [{"path": "/tmp/exists.txt"}]}
-        (tmp_path / "output.json").write_text(json.dumps(output_data), encoding="utf-8")
-        (tmp_path / "runner.json").write_text(json.dumps({}), encoding="utf-8")
-        (tmp_path / "probe.json").write_text("{}", encoding="utf-8")
-        (tmp_path / "acceptance.json").write_text("[]", encoding="utf-8")
-
+        task = self._make_findings_task(tmp_path)
+        self._write_findings_files(tmp_path)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
         manager._artifact_exists = MagicMock(return_value=True)
 
-        findings = manager._acceptance_findings(task, output_data, {}, time.time())
+        findings = manager._acceptance_findings(task, {"artifacts": [{"path": "/tmp/exists.txt"}]}, {}, time.time())
 
-        artifact_finding = next((f for f in findings if f.name == "artifact_paths_exist"), None)
-        assert artifact_finding.ok is True
+        self._assert_finding(findings, "artifact_paths_exist", expected_ok=True)
 
 
 class TestSeverityLevels:
