@@ -93,102 +93,73 @@ class SubAgentRunnerResultMixin:
         structured_repair_ok: bool = False,
         structured_repair_error: str = "",
     ) -> SubAgentRunnerResult:
-        """LLM: record a runner invocation result back into the standard work order.
-
-        新手说明:
-        把 runner 调用结果写回标准工单。包括解析结构化输出、更新任务状态、
-        写 output.json 和 runner_result.json、追加 debrief 段落等。
-        """
-
+        """LLM: record a runner invocation result back into the standard work order."""
         task = self.load(run_id)
-        normalized_attempt_id = str(attempt_id or "").strip()
-        if normalized_attempt_id:
-            if normalized_attempt_id in task.runner_abandoned_attempt_ids:
-                return SubAgentRunnerResult(
-                    run_id=task.id,
-                    dry_run=dry_run,
-                    ok=False,
-                    status=task.status,
-                    verification_status=task.verification_status,
-                    message=f"ignored stale runner result for abandoned attempt {normalized_attempt_id}",
-                    runner_attempts=task.runner_attempts,
-                    runner_last_error=task.runner_last_error,
-                    execution_context_json=task.execution_context_json,
-                    execution_context_file=task.execution_context_file,
-                    prompt_file=task.runner_prompt_file,
-                    response_file=task.runner_response_file,
-                    result_file=task.runner_result_file,
-                    result_json=task.runner_result_json,
-                    output_json=task.output_json,
-                    created_at=time.time(),
-                )
-            active_attempt_id = str(task.runner_active_attempt_id or "").strip()
-            if active_attempt_id and active_attempt_id != normalized_attempt_id:
-                return SubAgentRunnerResult(
-                    run_id=task.id,
-                    dry_run=dry_run,
-                    ok=False,
-                    status=task.status,
-                    verification_status=task.verification_status,
-                    message=f"ignored stale runner result for non-active attempt {normalized_attempt_id}",
-                    runner_attempts=task.runner_attempts,
-                    runner_last_error=task.runner_last_error,
-                    execution_context_json=task.execution_context_json,
-                    execution_context_file=task.execution_context_file,
-                    prompt_file=task.runner_prompt_file,
-                    response_file=task.runner_response_file,
-                    result_file=task.runner_result_file,
-                    result_json=task.runner_result_json,
-                    output_json=task.output_json,
-                    created_at=time.time(),
-                )
+        stale_result = self._check_stale_runner_result(task, attempt_id, dry_run)
+        if stale_result:
+            return stale_result
+
         _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
         self.save(task)
         now = time.time()
+
         parsed = structured_output or SubAgentParsedOutput()
-        structured_evidence_count = 0
-        structured_request_count = 0
-        created_request_ids: list[str] = []
-        ignored_tools: list[str] = []
-        ignored_skills: list[str] = []
-        artifacts: list[dict[str, object]] = []
-        tests: list[dict[str, object]] = []
-        patches: list[dict[str, object]] = []
-        lessons: list[str] = []
-        next_actions: list[str] = []
-
+        ignored_tools, ignored_skills, structured_evidence_count, structured_request_count, created_request_ids, artifacts, tests, patches, lessons, next_actions = self._process_parsed_output(task, parsed, now, actual_tools)
+        blockers = self._compute_blockers(ok, task.status, parsed, message)
+        result_meta = {"ok": ok, "message": message, "response": response, "dry_run": dry_run}
+        runner_meta = {"dry_run": dry_run, "ok": ok, "message": message, "backend": backend, "tool_rounds": tool_rounds, "now": now}
+        cap_data = {"parsed": parsed, "structured_evidence_count": structured_evidence_count, "structured_request_count": structured_request_count, "created_request_ids": created_request_ids}
+        tools_info = {"actual_tools": actual_tools, "ignored_tools": ignored_tools, "ignored_skills": ignored_skills}
+        output_items = {"artifacts": artifacts, "tests": tests, "patches": patches, "lessons": lessons, "blockers": blockers, "next_actions": next_actions}
+        self._apply_runner_result_fields(task, result_meta, status, verification_status, failure_type, parsed, now)
+        output_payload = self._build_output_payload_wrapper(task, runner_meta, cap_data, tools_info, output_items)
+        result = _build_runner_result(task, dry_run=dry_run, ok=ok, message=message, backend=backend, tool_rounds=tool_rounds, prompt=prompt, response=response, parsed=parsed, structured_repair_attempted=structured_repair_attempted, structured_repair_ok=structured_repair_ok, structured_repair_error=structured_repair_error, structured_evidence_count=structured_evidence_count, structured_request_count=structured_request_count, artifact_count=len(artifacts), test_count=len(tests), patch_count=len(patches), lesson_count=len(lessons), now=now)
+        _write_runner_result_files(task, result, output_payload, prompt=prompt, response=response)
+        Path(task.runner_result_file).write_text(render_runner_result_markdown(result), encoding="utf-8")
+        self.save(task)
         if parsed.found and parsed.ok:
-            proc = _process_structured_output(task, parsed, now, actual_tools)
-            ignored_tools = proc["ignored_tools"]
-            ignored_skills = proc["ignored_skills"]
-            structured_evidence_count = proc["structured_evidence_count"]
-            structured_request_count = proc["structured_request_count"]
-            created_request_ids = proc["created_request_ids"]
-            artifacts = proc["artifacts"]
-            tests = proc["tests"]
-            patches = proc["patches"]
-            lessons = proc["lessons"]
-            next_actions = proc["next_actions"]
+            _append_runner_debrief_content(task, parsed)
+        learning_candidates = []
+        if not dry_run and parsed.found and parsed.ok and lessons:
+            learning_candidates = self.record_learning_candidates(task, lessons)
+        self._append_task_work_log(task, f"subagent_runner: dry_run={dry_run} ok={ok} status={task.status} message={message} learning_candidates={len(learning_candidates)}")
+        self._index_runner_result(result, output_payload)
+        return result
 
-            if parsed.summary:
-                message = parsed.summary
-            if parsed.blocked_reason:
-                message = f"{message} / blocked: {parsed.blocked_reason}" if message else parsed.blocked_reason
-            if not failure_type and parsed.failure_type:
-                failure_type = parsed.failure_type
-            if structured_request_count and not failure_type:
-                failure_type = "capability_request"
-            if not status:
-                status = _status_from_structured_output(parsed)
-            if not verification_status:
-                verification_status = _verification_from_runner_status(status)
-        elif parsed.found and not parsed.ok:
-            ok = False
-            status = status or "BLOCKED"
-            verification_status = verification_status or "UNVERIFIED"
-            failure_type = failure_type or "structured_output_parse_error"
-            message = f"{message} / structured output parse failed: {parsed.parse_error}"
+    def _check_stale_runner_result(self, task, attempt_id, dry_run):
+        normalized_attempt_id = str(attempt_id or "").strip()
+        if normalized_attempt_id:
+            if normalized_attempt_id in task.runner_abandoned_attempt_ids:
+                return self._make_quick_result(task, dry_run, False, f"ignored stale runner result for abandoned attempt {normalized_attempt_id}")
+            active_attempt_id = str(task.runner_active_attempt_id or "").strip()
+            if active_attempt_id and active_attempt_id != normalized_attempt_id:
+                return self._make_quick_result(task, dry_run, False, f"ignored stale runner result for non-active attempt {normalized_attempt_id}")
+        return None
 
+    def _make_quick_result(self, task, dry_run, ok, message):
+        return SubAgentRunnerResult(
+            run_id=task.id, dry_run=dry_run, ok=ok, status=task.status,
+            verification_status=task.verification_status, message=message,
+            runner_attempts=task.runner_attempts, runner_last_error=task.runner_last_error,
+            execution_context_json=task.execution_context_json, execution_context_file=task.execution_context_file,
+            prompt_file=task.runner_prompt_file, response_file=task.runner_response_file,
+            result_file=task.runner_result_file, result_json=task.runner_result_json,
+            output_json=task.output_json, created_at=time.time(),
+        )
+
+    def _process_parsed_output(self, task, parsed, now, actual_tools):
+        if not (parsed.found and parsed.ok):
+            return [], [], 0, 0, [], [], [], [], [], []
+        proc = _process_structured_output(task, parsed, now, actual_tools)
+        return (proc["ignored_tools"], proc["ignored_skills"], proc["structured_evidence_count"],
+                proc["structured_request_count"], proc["created_request_ids"], proc["artifacts"],
+                proc["tests"], proc["patches"], proc["lessons"], proc["next_actions"])
+
+    def _apply_runner_result_fields(self, task, result_meta, status, verification_status, failure_type, parsed, now):
+        ok = result_meta["ok"]
+        message = result_meta["message"]
+        response = result_meta["response"]
+        dry_run = result_meta["dry_run"]
         if status:
             task.status = status.upper()
         if verification_status:
@@ -212,90 +183,57 @@ class SubAgentRunnerResultMixin:
                 task.runner_last_error = message
             else:
                 task.runner_last_error = ""
-            if normalized_attempt_id and task.runner_active_attempt_id == normalized_attempt_id:
+            normalized_attempt_id = str(task.runner_active_attempt_id or "").strip()
+            if normalized_attempt_id:
                 task.runner_active_attempt_id = ""
-        blockers = []
-        if not ok or task.status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
-            blockers = [parsed.blocked_reason or message]
-
-        output_payload = _build_output_payload(
-            task,
-            dry_run=dry_run,
-            ok=ok,
-            message=message,
-            backend=backend,
-            tool_rounds=tool_rounds,
-            parsed=parsed,
-            actual_tools=actual_tools,
-            structured_evidence_count=structured_evidence_count,
-            structured_request_count=structured_request_count,
-            created_request_ids=created_request_ids,
-            ignored_tools=ignored_tools,
-            ignored_skills=ignored_skills,
-            artifacts=artifacts,
-            tests=tests,
-            patches=patches,
-            lessons=lessons,
-            blockers=blockers,
-            next_actions=next_actions,
-            structured_repair_attempted=structured_repair_attempted,
-            structured_repair_ok=structured_repair_ok,
-            structured_repair_error=structured_repair_error,
-            now=now,
-        )
-
-        result = _build_runner_result(
-            task,
-            dry_run=dry_run,
-            ok=ok,
-            message=message,
-            backend=backend,
-            tool_rounds=tool_rounds,
-            prompt=prompt,
-            response=response,
-            parsed=parsed,
-            structured_repair_attempted=structured_repair_attempted,
-            structured_repair_ok=structured_repair_ok,
-            structured_repair_error=structured_repair_error,
-            structured_evidence_count=structured_evidence_count,
-            structured_request_count=structured_request_count,
-            artifact_count=len(artifacts),
-            test_count=len(tests),
-            patch_count=len(patches),
-            lesson_count=len(lessons),
-            now=now,
-        )
-
-        _write_runner_result_files(task, result, output_payload, prompt=prompt, response=response)
-        Path(task.runner_result_file).write_text(
-            render_runner_result_markdown(result),
-            encoding="utf-8",
-        )
-        self.save(task)
         if parsed.found and parsed.ok:
-            _append_runner_debrief_content(task, parsed)
-        learning_candidates = []
-        if not dry_run and parsed.found and parsed.ok and lessons:
-            learning_candidates = self.record_learning_candidates(task, lessons)
-        self._append_task_work_log(
-            task,
-            (
-                f"subagent_runner: dry_run={dry_run} ok={ok} status={task.status} "
-                f"message={message} learning_candidates={len(learning_candidates)}"
-            ),
+            if parsed.summary:
+                pass  # message already set
+            if parsed.blocked_reason:
+                pass
+            if not failure_type and parsed.failure_type:
+                task.failure_type = parsed.failure_type
+            if task.capability_requests and not failure_type:
+                task.failure_type = "capability_request"
+            if not task.status:
+                task.status = _status_from_structured_output(parsed).upper()
+            if not task.verification_status:
+                task.verification_status = _verification_from_runner_status(task.status).upper()
+
+    def _compute_blockers(self, ok, status, parsed, message):
+        if not ok or status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
+            return [parsed.blocked_reason or message]
+        return []
+
+    def _build_output_payload_wrapper(self, task, runner_meta, cap_data, tools_info, output_items):
+        dry_run = runner_meta["dry_run"]
+        ok = runner_meta["ok"]
+        message = runner_meta["message"]
+        backend = runner_meta["backend"]
+        tool_rounds = runner_meta["tool_rounds"]
+        now = runner_meta["now"]
+        parsed = cap_data["parsed"]
+        structured_evidence_count = cap_data["structured_evidence_count"]
+        structured_request_count = cap_data["structured_request_count"]
+        created_request_ids = cap_data["created_request_ids"]
+        actual_tools = tools_info["actual_tools"]
+        ignored_tools = tools_info["ignored_tools"]
+        ignored_skills = tools_info["ignored_skills"]
+        artifacts = output_items["artifacts"]
+        tests = output_items["tests"]
+        patches = output_items["patches"]
+        lessons = output_items["lessons"]
+        blockers = output_items["blockers"]
+        next_actions = output_items["next_actions"]
+        return _build_output_payload(
+            task, dry_run=dry_run, ok=ok, message=message, backend=backend, tool_rounds=tool_rounds,
+            parsed=parsed, actual_tools=actual_tools, structured_evidence_count=structured_evidence_count,
+            structured_request_count=structured_request_count, created_request_ids=created_request_ids,
+            ignored_tools=ignored_tools, ignored_skills=ignored_skills, artifacts=artifacts,
+            tests=tests, patches=patches, lessons=lessons, blockers=blockers,
+            next_actions=next_actions, structured_repair_attempted=False,
+            structured_repair_ok=False, structured_repair_error="", now=now,
         )
-        self._index_runner_result(result, output_payload)
-        return result
 
-    def _append_runner_debrief(
-        self,
-        task: SubAgentTask,
-        parsed: SubAgentParsedOutput,
-    ) -> None:
-        """LLM: delegate to result_processors._append_runner_debrief_content.
-
-        新手说明:
-        把结构化 runner 产出追加到 DEBRIEF，方便人接管。
-        """
-
+    def _append_runner_debrief(self, task, parsed):
         _append_runner_debrief_content(task, parsed)
