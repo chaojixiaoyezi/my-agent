@@ -106,8 +106,9 @@ my-agent/
 
 1. **不许 `import *`** — 每个 import 必须写明符号名
 2. **不许新文件叫 `utils.py` / `common.py` / `helpers.py`** — 用具体名字
-3. **新文件不超过 300 行，新函数不超过 100 行** — 超了就拆
-4. **所有文件写入必须走 `tooling/filesystem_write.py`** — 不许直接 `Path.write_text()`
+3. **新文件不超过 400 行，新函数不超过 100 行，类不超过 250 行（Mixin 不超过 200 行）** — 超了就拆
+4. **参数超过 8 个的函数必须用 dataclass bundling 模式** — 用 `params: SomeParams` 而不是展开 kwargs
+5. **所有文件写入必须走 `tooling/filesystem_write.py`** — 不许直接 `Path.write_text()`
 5. **Python 3.10+** — f-string 里不许用反斜杠
 6. **中文写注释和文档，英文写代码**
 

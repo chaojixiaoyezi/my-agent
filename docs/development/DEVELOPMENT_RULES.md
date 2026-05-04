@@ -53,14 +53,16 @@ before changing code.
 
 | Dimension       | Limit   | Enforcement                                   |
 |-----------------|---------|-----------------------------------------------|
-| New file        | <= 300 lines | `scripts/check_code_size.py`             |
+| New file        | <= 400 lines (test <= 700) | `scripts/check_code_size.py` |
 | New function    | <= 100 lines | `scripts/check_code_size.py`             |
-| New class       | <= 250 lines | `scripts/check_code_size.py`             |
-| Entrypoint file | frozen baseline | `test_architecture_guardrails.py`      |
+| New class       | <= 250 lines (Mixin <= 200) | `scripts/check_code_size.py` |
+| Function params | <= 8 (use dataclass bundling if more) | `scripts/check_code_size.py` |
+| Entry-point file | frozen baseline | `test_architecture_guardrails.py` |
 
 - These limits apply to **new** code.  Existing files that exceed limits are tracked
   as baselines; they must not grow further without a refactoring plan.
 - If a function approaches 80 lines, start decomposing it into named helpers.
+- Params over 8 must use dataclass bundling: `def f(*, params: SomeParams)`.
 
 ---
 
