@@ -523,7 +523,11 @@ class TestWriteMemoryWithType:
 
     def test_write_memory_with_type_lesson_task(self, tmp_path: Path):
         """测试写入 LESSON_TASK 类型记忆。"""
-        from agent_py_agent.agent.memory_push import MemoryType, MemoryWriteContext, write_memory_with_type
+        from agent_py_agent.agent.memory_push import (
+            MemoryType,
+            MemoryWriteContext,
+            write_memory_with_type,
+        )
 
         mock_memory = MagicMock()
         mock_memory.add.return_value = MagicMock()
@@ -548,7 +552,11 @@ class TestWriteMemoryWithType:
 
     def test_write_memory_with_type_extends_content(self, tmp_path: Path):
         """测试写入时 content 被扩展包含 lesson 和 action。"""
-        from agent_py_agent.agent.memory_push import MemoryType, MemoryWriteContext, write_memory_with_type
+        from agent_py_agent.agent.memory_push import (
+            MemoryType,
+            MemoryWriteContext,
+            write_memory_with_type,
+        )
 
         mock_memory = MagicMock()
         mock_memory.add.return_value = MagicMock()
@@ -573,7 +581,11 @@ class TestWriteMemoryWithType:
 
     def test_write_memory_with_type_adds_trigger_tag(self, tmp_path: Path):
         """测试写入时自动添加 trigger_type 到 tags。"""
-        from agent_py_agent.agent.memory_push import MemoryType, MemoryWriteContext, write_memory_with_type
+        from agent_py_agent.agent.memory_push import (
+            MemoryType,
+            MemoryWriteContext,
+            write_memory_with_type,
+        )
 
         mock_memory = MagicMock()
         mock_memory.add.return_value = MagicMock()

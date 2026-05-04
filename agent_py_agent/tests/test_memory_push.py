@@ -247,7 +247,11 @@ class TestWriteMemoryWithType:
 
     def test_write_memory_with_type(self, tmp_path: Path):
         """写入带类型的记忆。"""
-        from agent_py_agent.agent.memory_push import MemoryType, MemoryWriteContext, write_memory_with_type
+        from agent_py_agent.agent.memory_push import (
+            MemoryType,
+            MemoryWriteContext,
+            write_memory_with_type,
+        )
 
         # 创建临时记忆文件
         memory_path = tmp_path / "memory.jsonl"
@@ -460,7 +464,11 @@ class TestMemoryPushBoundaryCases:
 
     def test_write_memory_with_none_trigger_type(self, tmp_path: Path):
         """写入记忆时 trigger_type 为 None。"""
-        from agent_py_agent.agent.memory_push import MemoryType, MemoryWriteContext, write_memory_with_type
+        from agent_py_agent.agent.memory_push import (
+            MemoryType,
+            MemoryWriteContext,
+            write_memory_with_type,
+        )
 
         mock_memory = MagicMock()
         mock_memory.add.return_value = MagicMock()
