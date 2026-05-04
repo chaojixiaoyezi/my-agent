@@ -9,6 +9,7 @@ SubAgentManager 通过 facade 方法委托到这里。
 
 import re
 import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -18,6 +19,31 @@ if TYPE_CHECKING:
 # LLM: patterns for extracting directory paths from user goal text.
 _DIR_PATTERN = re.compile(r"(?:/[\w.\-]+){2,}")
 _HOME_DIR_PATTERN = re.compile(r"(?:~/[\w.\-]+(?:/[\w.\-]+)*)")
+
+
+@dataclass(frozen=True)
+class CreateRunParams:
+    """Bundle of create_run parameters."""
+
+    goal: str
+    thought: str
+    plan: list[str]
+    agent_name: str = "general"
+    role: str = "general"
+    parent_id: str = ""
+    root_id: str = ""
+    depth: int = 0
+    allowed_skills: list[str] | None = None
+    allowed_tools: list[str] | None = None
+    owner: str = ""
+    supervisor: str = ""
+    final_owner: str = ""
+    acceptance_checks: list[str] | None = None
+    quality_contract: Any = None
+    context_manifest: Any = None
+    context_packs: Any = None
+    extra_write_roots: list[str] | None = None
+    workflow_mode: str = "off"
 
 
 def _extract_write_dirs(goal: str) -> list[str]:
@@ -42,18 +68,18 @@ class SubAgentBaseService:
 
         Currently uses template-based splitting for simplicity.
         """
-        from ..services.workflow import _normalize_workflow_mode_value
-
         extra_roots = _extract_write_dirs(goal)
         count = max(1, count)
         tasks: list[SubAgentTask] = []
         for i in range(1, count + 1):
             task = self.create_run(
-                goal=f"{goal} / 子任务{i}",
-                thought="先缩小任务边界，明确输入、输出和验证证据，再执行。",
-                plan=["理解目标", "列出交付物", "执行最小验证", "汇报结果和证据"],
-                extra_write_roots=extra_roots,
-                workflow_mode=workflow_mode,
+                params=CreateRunParams(
+                    goal=f"{goal} / 子任务{i}",
+                    thought="先缩小任务边界，明确输入、输出和验证证据，再执行。",
+                    plan=["理解目标", "列出交付物", "执行最小验证", "汇报结果和证据"],
+                    extra_write_roots=extra_roots,
+                    workflow_mode=workflow_mode,
+                ),
             )
             tasks.append(task)
         return tasks
@@ -65,25 +91,7 @@ class SubAgentBaseService:
     def create_run(
         self,
         *,
-        goal: str,
-        thought: str,
-        plan: list[str],
-        agent_name: str = "general",
-        role: str = "general",
-        parent_id: str = "",
-        root_id: str = "",
-        depth: int = 0,
-        allowed_skills: list[str] | None = None,
-        allowed_tools: list[str] | None = None,
-        owner: str = "",
-        supervisor: str = "",
-        final_owner: str = "",
-        acceptance_checks: list[str] | None = None,
-        quality_contract: QualityContract | dict[str, object] | None = None,
-        context_manifest: ContextManifest | dict[str, object] | None = None,
-        context_packs: list[dict[str, object]] | dict[str, object] | None = None,
-        extra_write_roots: list[str] | None = None,
-        workflow_mode: str = "off",
+        params: CreateRunParams,
     ) -> SubAgentTask:
         """Create a subagent task record.
 
@@ -100,6 +108,26 @@ class SubAgentBaseService:
 
         now = time.time()
         run_id = self.manager._new_id("subagent")
+        goal = params.goal
+        thought = params.thought
+        plan = params.plan
+        agent_name = params.agent_name
+        role = params.role
+        parent_id = params.parent_id
+        root_id = params.root_id
+        depth = params.depth
+        allowed_skills = params.allowed_skills
+        allowed_tools = params.allowed_tools
+        owner = params.owner
+        supervisor = params.supervisor
+        final_owner = params.final_owner
+        acceptance_checks = params.acceptance_checks
+        quality_contract = params.quality_contract
+        context_manifest = params.context_manifest
+        context_packs = params.context_packs
+        extra_write_roots = params.extra_write_roots
+        workflow_mode = params.workflow_mode
+
         paths = self.manager._build_work_order_paths(run_id, extra_write_roots=extra_write_roots)
         normalized_workflow_mode = _normalize_workflow_mode_value(workflow_mode)
 

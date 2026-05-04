@@ -305,8 +305,8 @@ class TestSubagentMixinRecoverySnapshot:
             )
             mock_write.assert_called_once()
             call_kwargs = mock_write.call_args[1]
-            assert call_kwargs["source"] == "subagent_run"
-            assert call_kwargs["run_id"] == "test-run"
+            assert call_kwargs["params"].source == "subagent_run"
+            assert call_kwargs["params"].run_id == "test-run"
 
 
 class TestSubagentMixinWorkflowDispatch:

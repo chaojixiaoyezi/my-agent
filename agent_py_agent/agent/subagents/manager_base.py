@@ -29,6 +29,8 @@ from .utils import (
 if TYPE_CHECKING:
     from ..local_store import LocalStore
 
+from .services.base import CreateRunParams
+
 
 class SubAgentBaseMixin:
     """Thin facade delegating core task lifecycle to SubAgentBaseService and SubAgentPersistenceService."""
@@ -63,7 +65,9 @@ class SubAgentBaseMixin:
         self.cards[card.name] = card
 
     def create_run(self, **kwargs) -> SubAgentTask:
-        return self.base_service.create_run(**kwargs)
+        if "params" in kwargs:
+            return self.base_service.create_run(params=kwargs["params"])
+        return self.base_service.create_run(params=CreateRunParams(**kwargs))
 
     def record_takeover(
         self,

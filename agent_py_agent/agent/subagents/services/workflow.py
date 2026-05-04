@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .base import CreateRunParams
+
 if TYPE_CHECKING:
     from ..capability_config import CapabilityConfig
     from ..models import SubAgentTask
@@ -149,28 +151,30 @@ class SubAgentWorkflowService:
             if depends_on:
                 child_plan.append("先确认依赖 phase 已提交结果：" + ", ".join(depends_on))
             child = self.manager.create_run(
-                goal=f"{parent.goal}\n\nWorkflow phase {phase_id}: {phase_task}",
-                thought=(
-                    f"执行 workflow phase {phase_id}（{kind}）。"
-                    " 先遵守质量契约和写入边界，再提交待父代理验收的材料。"
-                ),
-                plan=child_plan,
-                agent_name=parent.agent_name,
-                role=role,
-                parent_id=parent.id,
-                root_id=parent.root_id,
-                depth=parent.depth + 1,
-                allowed_skills=list(parent.allowed_skills),
-                allowed_tools=_workflow_worker_tools(parent.allowed_tools, kind),
-                owner=parent.owner,
-                supervisor=parent.supervisor,
-                final_owner=parent.final_owner,
-                acceptance_checks=[str(item) for item in worker.get("acceptance_checks") or [] if str(item).strip()],
-                quality_contract=parent.quality_contract,
-                context_manifest=parent.context_manifest,
-                context_packs=parent.context_packs,
-                extra_write_roots=_workflow_extra_write_roots(parent),
-                workflow_mode="off",
+                params=CreateRunParams(
+                    goal=f"{parent.goal}\n\nWorkflow phase {phase_id}: {phase_task}",
+                    thought=(
+                        f"执行 workflow phase {phase_id}（{kind}）。"
+                        " 先遵守质量契约和写入边界，再提交待父代理验收的材料。"
+                    ),
+                    plan=child_plan,
+                    agent_name=parent.agent_name,
+                    role=role,
+                    parent_id=parent.id,
+                    root_id=parent.root_id,
+                    depth=parent.depth + 1,
+                    allowed_skills=list(parent.allowed_skills),
+                    allowed_tools=_workflow_worker_tools(parent.allowed_tools, kind),
+                    owner=parent.owner,
+                    supervisor=parent.supervisor,
+                    final_owner=parent.final_owner,
+                    acceptance_checks=[str(item) for item in worker.get("acceptance_checks") or [] if str(item).strip()],
+                    quality_contract=parent.quality_contract,
+                    context_manifest=parent.context_manifest,
+                    context_packs=parent.context_packs,
+                    extra_write_roots=_workflow_extra_write_roots(parent),
+                    workflow_mode="off",
+                )
             )
             child.workflow_parent_run_id = parent.id
             child.workflow_phase_id = phase_id
