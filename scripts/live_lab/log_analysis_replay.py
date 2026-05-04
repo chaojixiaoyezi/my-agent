@@ -117,6 +117,10 @@ def run_security_alert_v1_replay(
 
     ok, findings = _run_stage(summary, "detector", lambda: run_detector_stage(store_root))
     if not ok:
+        # Ensure total_events is preserved even when detector stage fails
+        from agent_py_agent.agent.log_analysis.storage.local_store import LocalLogStore
+        store = LocalLogStore(store_root)
+        summary["total_events"] = len(store.list_events())
         return _write_and_return(summary)
 
     ok, case = _run_stage(
