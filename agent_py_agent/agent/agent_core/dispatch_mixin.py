@@ -521,19 +521,8 @@ class SimpleAgentDispatchMixin(
         router: CapabilityRouter,
         capability_config: CapabilityConfig | None = None,
         *,
-        apply: bool = False,
-        execute_runners: bool = False,
-        planner: bool = False,
-        workflow_mode: str = "off",
-        max_runners: int = 1,
-        limit: int = 20,
-        reviewer: str = "parent-dispatch",
-        note: str = "",
-        runner_instruction: str = "",
-        max_cards: int = 0,
-        probe: bool = True,
-        take_over_by: str = "",
-        locked_files: list[str] | None = None,
+        params: DispatchParams | None = None,
+        **kwargs,
     ) -> DispatchReport:
         """执行一轮父代理调度。
 
@@ -541,33 +530,44 @@ class SimpleAgentDispatchMixin(
         runner、patch 审核和父代理验收。真实模型调用还需要额外打开
         `execute_runners`，避免普通 apply 意外消耗 API。
         """
+        if params is None:
+            params = DispatchParams()
+        elif not isinstance(params, DispatchParams):
+            raise TypeError("dispatch_subagents() requires params: DispatchParams keyword argument")
+        for key in [
+            "apply", "execute_runners", "planner", "workflow_mode",
+            "max_runners", "limit", "reviewer", "note", "runner_instruction",
+            "max_cards", "probe", "take_over_by", "locked_files",
+        ]:
+            if key in kwargs:
+                setattr(params, key, kwargs[key])
+
         cfg = capability_config or CapabilityConfig()
-        normalized_workflow_mode = str(workflow_mode or "off").strip().lower()
-        effective_runner_instruction = runner_instruction
-        effective_max_runners = max_runners
+        normalized_workflow_mode = str(params.workflow_mode or "off").strip().lower()
+        effective_runner_instruction = params.runner_instruction
+        effective_max_runners = params.max_runners
 
         ctx = DispatchContext(
             cfg=cfg,
             normalized_workflow_mode=normalized_workflow_mode,
-            apply=apply,
-            planner=planner,
+            apply=params.apply,
+            planner=params.planner,
             runner_instruction=effective_runner_instruction,
             max_runners=effective_max_runners,
-            limit=limit,
-            reviewer=reviewer,
-            note=note,
-            take_over_by=take_over_by,
-            locked_files=locked_files,
+            limit=params.limit,
+            reviewer=params.reviewer,
+            note=params.note,
+            take_over_by=params.take_over_by,
+            locked_files=params.locked_files,
             router=router,
         )
         records = self._collect_dispatch_records(ctx)
 
-        effective_max_runners = max_runners
-        if planner:
+        if params.planner:
             planner_record = records[0] if records else None
             if planner_record and planner_record.step == "parent_planner":
                 effective_runner_instruction = combine_runner_instruction(
-                    runner_instruction,
+                    params.runner_instruction,
                     getattr(planner_record, "message", "").split("instruction:")[-1].strip()
                     if "instruction:" in planner_record.message
                     else "",
@@ -577,18 +577,18 @@ class SimpleAgentDispatchMixin(
                     and planner_record.suggested_max_runners > 0
                 ):
                     effective_max_runners = min(
-                        max_runners, planner_record.suggested_max_runners
+                        params.max_runners, planner_record.suggested_max_runners
                     )
 
         records = self._execute_runner_jobs(
-            ctx, execute_runners, max_cards, probe, records
+            ctx, params.execute_runners, params.max_cards, params.probe, records
         )
         ctx.records = records
         ctx.runner_instruction = effective_runner_instruction
         ctx.max_runners = effective_max_runners
 
         records = self._finalize_dispatch(
-            cfg, apply, reviewer, note, limit, records
+            cfg, params.apply, params.reviewer, params.note, params.limit, records
         )
 
-        return self._build_and_write_report(records, apply)
+        return self._build_and_write_report(records, params.apply)
