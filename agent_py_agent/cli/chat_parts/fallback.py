@@ -34,7 +34,6 @@ from .rendering import (
     terminal_rule,
 )
 
-
 # Constants and helpers needed by fallback (imported from chat.py context)
 _CHAT_RESPONSE_STYLE_INJECT = (
     "这是 CLI 聊天界面。回答风格要求："
