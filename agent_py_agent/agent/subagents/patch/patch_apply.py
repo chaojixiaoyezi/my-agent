@@ -273,7 +273,10 @@ class PatchApplyService:
                     test_commands,
                 )
             except Exception as exc:
-                rollback_performed = bool(touched_files)
+                # Note: rollback already happened inside _execute_patch_apply via
+                # rollback_patch_apply(touched_files) before this exception was raised.
+                # We must set rollback_performed=True since files were definitely restored.
+                rollback_performed = True
                 for spec in patch_specs:
                     spec["audit"]["apply_status"] = "ROLLED_BACK" if rollback_performed else "FAILED"
                     spec["audit"]["message"] = f"apply 失败: {exc}"

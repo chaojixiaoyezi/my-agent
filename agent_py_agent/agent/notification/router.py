@@ -85,11 +85,14 @@ class NotificationRouter:
         timeout = getattr(self.config, "notification_channel_timeout_seconds", 300)
         best_channel: str | None = None
         best_time = 0.0
-        for session_dir in self._session_workspace.iterdir():
-            channel, updated_at = self._eval_session_for_router(session_dir, user_id, exclude_channel, timeout)
-            if updated_at > best_time:
-                best_time = updated_at
-                best_channel = channel
+        try:
+            for session_dir in self._session_workspace.iterdir():
+                channel, updated_at = self._eval_session_for_router(session_dir, user_id, exclude_channel, timeout)
+                if updated_at > best_time:
+                    best_time = updated_at
+                    best_channel = channel
+        except OSError:
+            return None
         return best_channel
 
     def _eval_session_for_router(self, session_dir: Path, user_id: str, exclude_channel: str | None, timeout: float) -> tuple[str | None, float]:
