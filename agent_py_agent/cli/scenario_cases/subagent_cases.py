@@ -223,7 +223,7 @@ def _parent_subagent_setup(args):
         f"runner_ok={runner.ok} status={loaded.status} verify={loaded.verification_status} "
         f"tool_rounds={runner.tool_rounds} backend_calls={backend.calls}"
     )
-    return paths, agent, backend, task, loaded
+    return paths, agent, backend, task, loaded, runner
 
 
 def run_scenario_parent_subagent_cross_day_resume_case(args) -> int:
@@ -234,7 +234,7 @@ def run_scenario_parent_subagent_cross_day_resume_case(args) -> int:
     验证 memory-resume 命令能找回子代理的任务事实源文件路径。
     """
 
-    paths, agent, backend, task, loaded = _parent_subagent_setup(args)
+    paths, agent, backend, task, loaded, runner = _parent_subagent_setup(args)
 
     print_scenario_step(3, "Simulate cross-day archive clues for a resumed parent session")
     _append_parent_subagent_cross_day_resume_clues(agent.root, loaded)
