@@ -1,7 +1,7 @@
 {
-  "cumulative_tokens": 2085702,
+  "cumulative_tokens": 2167998,
   "session_id": "SimplePythonAgent",
-  "turn_count": 201,
+  "turn_count": 209,
   "turns": [
     {
       "created_at": "1777725807.117192",
@@ -1610,6 +1610,70 @@
       "tool_tokens": 108,
       "turn_id": "run-1777890058592997000",
       "turn_total": 9689
+    },
+    {
+      "created_at": "1777900383.302505",
+      "input_tokens": 8901,
+      "output_tokens": 1132,
+      "tool_tokens": 46,
+      "turn_id": "run-1777900383298409000",
+      "turn_total": 10079
+    },
+    {
+      "created_at": "1777900463.941694",
+      "input_tokens": 8899,
+      "output_tokens": 1159,
+      "tool_tokens": 114,
+      "turn_id": "run-1777900463938079000",
+      "turn_total": 10172
+    },
+    {
+      "created_at": "1777900550.579967",
+      "input_tokens": 8900,
+      "output_tokens": 1964,
+      "tool_tokens": 2,
+      "turn_id": "run-1777900550576913000",
+      "turn_total": 10866
+    },
+    {
+      "created_at": "1777900591.6933918",
+      "input_tokens": 8901,
+      "output_tokens": 1502,
+      "tool_tokens": 2,
+      "turn_id": "run-1777900591690518000",
+      "turn_total": 10405
+    },
+    {
+      "created_at": "1777900648.918247",
+      "input_tokens": 8900,
+      "output_tokens": 1302,
+      "tool_tokens": 85,
+      "turn_id": "run-1777900648914487000",
+      "turn_total": 10287
+    },
+    {
+      "created_at": "1777900728.880577",
+      "input_tokens": 8900,
+      "output_tokens": 1196,
+      "tool_tokens": 85,
+      "turn_id": "run-1777900728876752000",
+      "turn_total": 10181
+    },
+    {
+      "created_at": "1777900811.834453",
+      "input_tokens": 8900,
+      "output_tokens": 1091,
+      "tool_tokens": 92,
+      "turn_id": "run-1777900811831167000",
+      "turn_total": 10083
+    },
+    {
+      "created_at": "1777900876.130503",
+      "input_tokens": 8900,
+      "output_tokens": 1321,
+      "tool_tokens": 2,
+      "turn_id": "run-1777900876125379000",
+      "turn_total": 10223
     }
   ]
 }
