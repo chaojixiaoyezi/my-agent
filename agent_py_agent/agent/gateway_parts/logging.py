@@ -38,49 +38,70 @@ def log_gateway_payload(
     try:
         status = str(payload.get("status") or "queued")
         kind = str(payload.get("kind") or "unknown")
-        content = "\n".join(
-            [
-                "# Gateway Request",
-                f"id: {request_id}",
-                f"kind: {kind}",
-                f"status: {status}",
-                f"ok: {payload.get('ok', '')}",
-                f"backend: {payload.get('backend', '')}",
-                f"tool_rounds: {payload.get('tool_rounds', '')}",
-                f"prompt: {payload.get('prompt', '')}",
-                f"response: {payload.get('response', '')}",
-                f"error_code: {payload.get('error_code', '')}",
-                f"error: {payload.get('error', '')}",
-                f"request_file: {request_path or payload.get('request_file', '')}",
-                f"response_file: {response_path or ''}",
-                "",
-                "## Payload",
-                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
-            ]
-        )
         agent.local_store.log_record(
             source_type="gateway_request",
             source_id=request_id,
             title=f"Gateway {kind} {status} {request_id}",
-            content=content,
-            metadata={
-                "request_id": request_id,
-                "kind": kind,
-                "status": status,
-                "ok": bool(payload.get("ok", False)),
-                "backend": str(payload.get("backend", "")),
-                "tool_rounds": int(payload.get("tool_rounds", 0) or 0),
-                "error_code": str(payload.get("error_code", "")),
-                "created_at": float(payload.get("created_at", 0) or 0),
-                "started_at": float(payload.get("started_at", 0) or 0),
-                "ended_at": float(payload.get("ended_at", 0) or 0),
-                "request_path": str(request_path or payload.get("request_file", "")),
-                "response_path": str(response_path or ""),
-            },
+            content=_gateway_payload_content(payload, request_id, kind, status, request_path, response_path),
+            metadata=_gateway_payload_metadata(payload, request_id, kind, status, request_path, response_path),
             event_type=event_type,
         )
     except Exception as exc:
         _report_gateway_side_effect_error("log_gateway_payload", request_id, exc)
+
+
+def _gateway_payload_content(
+    payload: dict,
+    request_id: str,
+    kind: str,
+    status: str,
+    request_path: Path | None,
+    response_path: Path | None,
+) -> str:
+    return "\n".join(
+        [
+            "# Gateway Request",
+            f"id: {request_id}",
+            f"kind: {kind}",
+            f"status: {status}",
+            f"ok: {payload.get('ok', '')}",
+            f"backend: {payload.get('backend', '')}",
+            f"tool_rounds: {payload.get('tool_rounds', '')}",
+            f"prompt: {payload.get('prompt', '')}",
+            f"response: {payload.get('response', '')}",
+            f"error_code: {payload.get('error_code', '')}",
+            f"error: {payload.get('error', '')}",
+            f"request_file: {request_path or payload.get('request_file', '')}",
+            f"response_file: {response_path or ''}",
+            "",
+            "## Payload",
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        ]
+    )
+
+
+def _gateway_payload_metadata(
+    payload: dict,
+    request_id: str,
+    kind: str,
+    status: str,
+    request_path: Path | None,
+    response_path: Path | None,
+) -> dict:
+    return {
+        "request_id": request_id,
+        "kind": kind,
+        "status": status,
+        "ok": bool(payload.get("ok", False)),
+        "backend": str(payload.get("backend", "")),
+        "tool_rounds": int(payload.get("tool_rounds", 0) or 0),
+        "error_code": str(payload.get("error_code", "")),
+        "created_at": float(payload.get("created_at", 0) or 0),
+        "started_at": float(payload.get("started_at", 0) or 0),
+        "ended_at": float(payload.get("ended_at", 0) or 0),
+        "request_path": str(request_path or payload.get("request_file", "")),
+        "response_path": str(response_path or ""),
+    }
 
 
 def log_gateway_event(agent: SimpleAgent, event_type: str, payload: dict) -> None:

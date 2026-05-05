@@ -7,42 +7,36 @@ from __future__ import annotations
 还包含 Hermes 风格的功能：start time tracking 检测 PID 重用、scoped locks 防止多实例冲突。
 """
 
-import hashlib
 import json
 import os
 import signal
-import sys
 import time
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
+
+from .daemon_metadata import (
+    _build_pid_record,
+    _get_process_start_time,
+    _read_json_file,
+    _scope_hash,
+    _utc_now_iso,
+    _write_json_file,
+)
 
 # Re-export from process_control for convenience
 from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
+from .runtime_status import WriteRuntimeStatusParams, read_runtime_status, write_runtime_status
+from .scoped_locks import (
+    _get_lock_dir,
+    _get_scope_lock_path,
+    _release_lock_if_stale,
+    acquire_scoped_lock,
+    release_all_scoped_locks,
+    release_scoped_lock,
+)
 
 # Exit code to signal service manager should restart (Hermes: EX_TEMPFAIL = 75)
 GATEWAY_SERVICE_RESTART_EXIT_CODE = 75
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _get_process_start_time(pid: int) -> int | None:
-    """Return the kernel start time for a process when available (Linux only)."""
-    if sys.platform == "win32":
-        return None
-    stat_path = Path(f"/proc/{pid}/stat")
-    try:
-        # Field 22 in /proc/<pid>/stat is process start time (clock ticks)
-        return int(stat_path.read_text().split()[21])
-    except (FileNotFoundError, IndexError, PermissionError, ValueError, OSError):
-        return None
-
-
-def _scope_hash(identity: str) -> str:
-    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
 
 
 # ── PID file management ──────────────────────────────────────────────────────
@@ -95,37 +89,6 @@ def check_already_running(pid_path: Path) -> tuple[bool, int | None]:
 
 
 # ── PID record with start time (Hermes pattern) ─────────────────────────────
-
-
-def _build_pid_record() -> dict:
-    """Build a PID record with metadata for start-time tracking."""
-    return {
-        "pid": os.getpid(),
-        "kind": "my-agent-gateway",
-        "argv": list(sys.argv),
-        "start_time": _get_process_start_time(os.getpid()),
-        "updated_at": _utc_now_iso(),
-    }
-
-
-def _read_json_file(path: Path) -> dict | None:
-    if not path.exists():
-        return None
-    try:
-        raw = path.read_text().strip()
-    except OSError:
-        return None
-    if not raw:
-        return None
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-
-
-def _write_json_file(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload))
 
 
 def write_pid_record(pid_path: Path) -> None:
@@ -213,217 +176,7 @@ def remove_pid_file_if_owned(pid_path: Path) -> None:
         pass
 
 
-# ── Scoped locks (Hermes pattern) ───────────────────────────────────────────
-
-
-def _get_lock_dir() -> Path:
-    """Return the machine-local directory for scoped gateway locks."""
-    state_home = Path(os.getenv("XDG_STATE_HOME", Path.home() / ".local" / "state"))
-    return state_home / "my-agent" / "locks"
-
-
-def _get_scope_lock_path(scope: str, identity: str) -> Path:
-    return _get_lock_dir() / f"{scope}-{_scope_hash(identity)}.lock"
-
-
-def acquire_scoped_lock(
-    scope: str, identity: str, metadata: dict[str, Any] | None = None
-) -> tuple[bool, dict | None]:
-    """Acquire a machine-local lock keyed by scope + identity.
-
-    Used to prevent multiple gateways from using the same external identity
-    at once (e.g. the same QQ bot token or Feishu app across different runs).
-
-    Returns (acquired, existing) where:
-    - acquired=True, existing=None: lock acquired successfully
-    - acquired=False, existing=<record>: lock held by another process
-    """
-    lock_path = _get_scope_lock_path(scope, identity)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    record = {
-        **_build_pid_record(),
-        "scope": scope,
-        "identity_hash": _scope_hash(identity),
-        "metadata": metadata or {},
-        "updated_at": _utc_now_iso(),
-    }
-
-    existing = _read_json_file(lock_path)
-    if existing:
-        try:
-            existing_pid = int(existing["pid"])
-        except (KeyError, TypeError, ValueError):
-            existing_pid = None
-
-        # Check if we already own this lock (same PID + start_time)
-        if existing_pid == os.getpid() and existing.get("start_time") == record.get("start_time"):
-            _write_json_file(lock_path, record)
-            return True, existing
-
-        # Check if the existing process is still alive
-        stale = existing_pid is None
-        if not stale:
-            try:
-                os.kill(existing_pid, 0)
-            except (ProcessLookupError, PermissionError):
-                stale = True
-            else:
-                # Check start_time for PID reuse
-                current_start = _get_process_start_time(existing_pid)
-                if (
-                    existing.get("start_time") is not None
-                    and current_start is not None
-                    and current_start != existing.get("start_time")
-                ):
-                    stale = True
-        if stale:
-            try:
-                lock_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        else:
-            return False, existing
-
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        return False, _read_json_file(lock_path)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(record, handle)
-    except Exception:
-        try:
-            lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-    return True, None
-
-
-def release_scoped_lock(scope: str, identity: str) -> None:
-    """Release a previously-acquired scope lock when owned by this process."""
-    lock_path = _get_scope_lock_path(scope, identity)
-    existing = _read_json_file(lock_path)
-    if not existing:
-        return
-    if existing.get("pid") != os.getpid():
-        return
-    if existing.get("start_time") != _get_process_start_time(os.getpid()):
-        return
-    try:
-        lock_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def release_all_scoped_locks() -> int:
-    """Remove all scoped lock files in the lock directory.
-
-    Called during --replace to clean up stale locks left by stopped/killed
-    gateway processes. Returns the number of lock files removed.
-    """
-    lock_dir = _get_lock_dir()
-    if not lock_dir.exists():
-        return 0
-    removed = 0
-    for lock_file in lock_dir.glob("*.lock"):
-        if not _release_lock_if_stale(lock_file):
-            continue
-        removed += 1
-    return removed
-
-
-def _release_lock_if_stale(lock_file: Path) -> bool:
-    """Remove a lock file if its owning process is dead or PID was reused."""
-    try:
-        record = _read_json_file(lock_file)
-    except Exception:
-        return False
-    if not record:
-        return False
-    try:
-        pid = int(record["pid"])
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError, ValueError):
-        lock_file.unlink()
-        return True
-    # Process alive but different start_time (PID reused)
-    current_start = _get_process_start_time(pid)
-    if current_start != record.get("start_time"):
-        lock_file.unlink()
-        return True
-    return False
-
-
-# ── Runtime status (Hermes pattern) ────────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class WriteRuntimeStatusParams:
-    """Bundle of write_runtime_status parameters."""
-
-    status_path: Path
-    gateway_state: Any = None
-    exit_reason: Any = None
-    restart_requested: bool = False
-    active_agents: int = 0
-    platform: str | None = None
-    platform_state: str | None = None
-    error_code: str | None = None
-    error_message: str | None = None
-    extra: dict[str, Any] | None = None
-
-
-def write_runtime_status(params: WriteRuntimeStatusParams) -> None:
-    """Persist gateway runtime health information for diagnostics/status.
-
-    This mirrors Hermes's write_runtime_status() pattern.
-    """
-    status_path = params.status_path
-    payload = _read_json_file(status_path) or {
-        "kind": "my-agent-gateway",
-        "pid": os.getpid(),
-        "start_time": _get_process_start_time(os.getpid()),
-        "gateway_state": "unknown",
-        "exit_reason": None,
-        "restart_requested": False,
-        "active_agents": 0,
-        "platforms": {},
-        "updated_at": _utc_now_iso(),
-    }
-    payload.setdefault("platforms", {})
-    payload["pid"] = os.getpid()
-    payload["start_time"] = _get_process_start_time(os.getpid())
-    payload["updated_at"] = _utc_now_iso()
-
-    if params.gateway_state is not None:
-        payload["gateway_state"] = params.gateway_state
-    if params.exit_reason is not None:
-        payload["exit_reason"] = params.exit_reason
-    payload["restart_requested"] = params.restart_requested
-    payload["active_agents"] = max(0, int(params.active_agents))
-    if params.extra:
-        for k, v in params.extra.items():
-            if v is not None:
-                payload[k] = v
-
-    if params.platform is not None:
-        platform_payload = payload["platforms"].get(params.platform, {})
-        if params.platform_state is not None:
-            platform_payload["state"] = params.platform_state
-        if params.error_code is not None:
-            platform_payload["error_code"] = params.error_code
-        if params.error_message is not None:
-            platform_payload["error_message"] = params.error_message
-        platform_payload["updated_at"] = _utc_now_iso()
-        payload["platforms"][params.platform] = platform_payload
-
-    _write_json_file(status_path, payload)
-
-
-def read_runtime_status(status_path: Path) -> dict | None:
-    """Read the persisted gateway runtime health/status information."""
-    return _read_json_file(status_path)
+# ── Scoped locks and runtime status are re-exported from focused modules. ───
 
 
 # ── Legacy API compatibility ────────────────────────────────────────────────

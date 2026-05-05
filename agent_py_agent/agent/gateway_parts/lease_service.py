@@ -89,31 +89,53 @@ def start_lease_heartbeat(
     """Start a daemon thread that keeps one processing lease alive during agent.run."""
     stop_event = threading.Event()
     interval = _lease_interval(agent)
-    consecutive_failures = 0
-    max_failures = 3
     _active_heartbeat_request_ids.add(request_id)
-
-    def heartbeat_loop() -> None:
-        nonlocal consecutive_failures
-        try:
-            while not stop_event.wait(interval):
-                try:
-                    if not refresh_processing_lease(request_path, request_id=request_id, worker_id=worker_id):
-                        return
-                    consecutive_failures = 0
-                except Exception as exc:
-                    consecutive_failures += 1
-                    _report_gateway_side_effect_error("heartbeat", request_id, exc)
-                    if consecutive_failures >= max_failures:
-                        audit_heartbeat_abandoned(agent, request_id, consecutive_failures, request_path)
-                        return
-        finally:
-            _active_heartbeat_request_ids.discard(request_id)
-
     thread = threading.Thread(
-        target=heartbeat_loop,
+        target=_heartbeat_loop,
+        args=(agent, request_path, request_id, worker_id, stop_event, interval),
         name=f"gateway-lease-{request_id}",
         daemon=True,
     )
     thread.start()
     return stop_event, thread
+
+
+def _heartbeat_loop(
+    agent: SimpleAgent,
+    request_path: Path,
+    request_id: str,
+    worker_id: str,
+    stop_event: threading.Event,
+    interval: float,
+) -> None:
+    """Refresh one gateway processing lease until stopped or abandoned."""
+    consecutive_failures = 0
+    try:
+        while not stop_event.wait(interval):
+            ok, consecutive_failures = _refresh_or_count_failure(
+                request_path, request_id, worker_id, consecutive_failures
+            )
+            if ok:
+                continue
+            if consecutive_failures <= 0:
+                return
+            if consecutive_failures >= 3:
+                audit_heartbeat_abandoned(agent, request_id, consecutive_failures, request_path)
+                return
+    finally:
+        _active_heartbeat_request_ids.discard(request_id)
+
+
+def _refresh_or_count_failure(
+    request_path: Path,
+    request_id: str,
+    worker_id: str,
+    consecutive_failures: int,
+) -> tuple[bool, int]:
+    try:
+        if not refresh_processing_lease(request_path, request_id=request_id, worker_id=worker_id):
+            return False, 0
+        return True, 0
+    except Exception as exc:
+        _report_gateway_side_effect_error("heartbeat", request_id, exc)
+        return False, consecutive_failures + 1

@@ -13,8 +13,17 @@ import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
+
+from .http_handlers import (
+    handle_admin_summary,
+    handle_ask,
+    handle_result,
+    handle_session_bind,
+    handle_session_channels,
+    handle_status,
+    handle_stop,
+)
 
 if TYPE_CHECKING:
     from ..agent.core import SimpleAgent
@@ -71,268 +80,59 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         self._inject_auth_middleware()
         if self.path == "/status":
             self._handle_status()
-        elif self.path.startswith("/result/"):
+            return
+        if self.path.startswith("/result/"):
             self._handle_result()
-        elif self.path.startswith("/sessions/") and self.path.endswith("/channels"):
+            return
+        if self.path.startswith("/sessions/") and self.path.endswith("/channels"):
             self._handle_session_channels()
-        elif self.path == "/admin/summary":
+            return
+        if self.path == "/admin/summary":
             self._handle_admin_summary()
-        else:
-            self._send_json(404, {"error": "not found"})
+            return
+        self._send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
         """Handle POST requests。"""
         self._inject_auth_middleware()
         if self.path == "/ask":
             self._handle_ask()
-        elif self.path == "/stop":
+            return
+        if self.path == "/stop":
             self._handle_stop()
-        elif self.path.startswith("/sessions/") and self.path.endswith("/bind"):
+            return
+        if self.path.startswith("/sessions/") and self.path.endswith("/bind"):
             self._handle_session_bind()
-        else:
-            self._send_json(404, {"error": "not found"})
+            return
+        self._send_json(404, {"error": "not found"})
 
     def _handle_status(self) -> None:
         """GET /status - return gateway status."""
-        server = _server_instance
-        if server is None:
-            self._send_json(500, {"error": "server not initialized"})
-            return
-
-        paths = server.paths
-        state = {}
-        if paths.state.exists():
-            try:
-                state = json.loads(paths.state.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                pass
-
-        counts = {"pending": 0, "processing": 0, "done": 0, "failed": 0}
-        for name, dir_path in [
-            ("pending", paths.inbox),
-            ("processing", paths.processing),
-            ("done", paths.done),
-            ("failed", paths.failed),
-        ]:
-            if dir_path.exists():
-                counts[name] = len(list(dir_path.iterdir()))
-
-        response = {
-            "status": state.get("status", "unknown"),
-            "pid": state.get("pid"),
-            "uptime": time.time() - state.get("started_at", time.time()),
-            "requests": counts,
-        }
-        self._send_json(200, response)
+        handle_status(self, _server_instance)
 
     def _handle_result(self) -> None:
         """GET /result/<request_id> - return request result。"""
-        request_id = self.path[len("/result/"):]
-        server = _server_instance
-        if server is None:
-            self._send_json(500, {"error": "server not initialized"})
-            return
-
-        # 从 header 提取当前用户身份
-        mw = getattr(self, "_auth_middleware", None)
-        if mw is not None:
-            user_id, _ = mw.extract_identity(dict(self.headers))
-            permission = mw.get_permission(dict(self.headers))
-        else:
-            user_id = "admin"
-            permission = None
-
-        # Check responses directory
-        response_path = server.paths.responses / f"{request_id}.json"
-        if not response_path.exists():
-            # Check if still processing
-            processing_path = server.paths.processing / f"{request_id}.json"
-            if processing_path.exists():
-                # 读取 processing 文件检查 user_id
-                try:
-                    proc_data = json.loads(processing_path.read_text(encoding="utf-8"))
-                    req_user = proc_data.get("user_id", "")
-                    if permission and not permission.can_access_all_users and req_user != user_id:
-                        self._send_json(403, {"error": "forbidden", "request_id": request_id})
-                        return
-                except (json.JSONDecodeError, OSError):
-                    pass
-                self._send_json(202, {"status": "processing", "request_id": request_id})
-                return
-            # Check if queued in inbox
-            inbox_path = server.paths.inbox / f"{request_id}.json"
-            if inbox_path.exists():
-                try:
-                    inbox_data = json.loads(inbox_path.read_text(encoding="utf-8"))
-                    req_user = inbox_data.get("user_id", "")
-                    if permission and not permission.can_access_all_users and req_user != user_id:
-                        self._send_json(403, {"error": "forbidden", "request_id": request_id})
-                        return
-                except (json.JSONDecodeError, OSError):
-                    pass
-                self._send_json(202, {"status": "queued", "request_id": request_id})
-                return
-            self._send_json(404, {"error": "not found", "request_id": request_id})
-            return
-
-        # 读取响应文件，检查 user_id 是否匹配
-        try:
-            result = json.loads(response_path.read_text(encoding="utf-8"))
-            req_user = result.get("user_id", result.get("metadata", {}).get("user_id", ""))
-            if permission and not permission.can_access_all_users and req_user != user_id:
-                self._send_json(403, {"error": "forbidden", "request_id": request_id})
-                return
-            self._send_json(200, result)
-        except (json.JSONDecodeError, OSError) as e:
-            self._send_json(500, {"error": f"failed to read result: {e}"})
+        handle_result(self, _server_instance)
 
     def _handle_ask(self) -> None:
         """POST /ask - submit a new request。"""
-        try:
-            body = self._read_json()
-        except json.JSONDecodeError as e:
-            self._send_json(400, {"error": f"invalid JSON: {e}"})
-            return
-
-        # 支持 kind=ask + prompt（adapter 用） 或 goal（兼容旧格式）
-        kind = body.get("kind", "ask")
-        if kind != "ask":
-            self._send_json(400, {"error": f"unsupported kind: {kind}"})
-            return
-
-        prompt = body.get("prompt", "")
-        goal = body.get("goal", prompt)
-        if not goal:
-            self._send_json(400, {"error": "goal is required"})
-            return
-
-        server = _server_instance
-        if server is None:
-            self._send_json(500, {"error": "server not initialized"})
-            return
-
-        # 从 header 提取 user_id 和 channel，纳入 metadata
-        mw = getattr(self, "_auth_middleware", None)
-        if mw is not None:
-            user_id, channel = mw.extract_identity(dict(self.headers))
-        else:
-            user_id, channel = "admin", "chat"
-
-        # Generate request ID and write to pending queue
-        request_id = _generate_request_id()
-        metadata = body.get("metadata", {})
-        metadata["user_id"] = user_id
-        metadata["channel"] = channel
-        request_data = {
-            "id": request_id,
-            "request_id": request_id,
-            "kind": "ask",
-            "goal": goal,
-            "metadata": metadata,
-            "submitted_at": time.time(),
-            "user_id": user_id,
-        }
-        pending_path = server.paths.inbox / f"{request_id}.json"
-        try:
-            pending_path.write_text(
-                json.dumps(request_data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError as e:
-            self._send_json(500, {"error": f"failed to write request: {e}"})
-            return
-
-        self._send_json(202, {"request_id": request_id, "status": "queued"})
+        handle_ask(self, _server_instance, _generate_request_id)
 
     def _handle_stop(self) -> None:
         """POST /stop - request graceful shutdown."""
-        server = _server_instance
-        if server is None:
-            self._send_json(500, {"error": "server not initialized"})
-            return
-
-        # Write stop request file
-        import json as json_module
-
-        server.paths.root.mkdir(parents=True, exist_ok=True)
-        server.paths.stop_request.write_text(
-            json_module.dumps(
-                {"requested_at": time.time(), "reason": "http stop request"},
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-        self._send_json(200, {"status": "stopping"})
+        handle_stop(self, _server_instance)
 
     def _handle_session_channels(self) -> None:
         """GET /sessions/{session_id}/channels - query session channel bindings。"""
-        # 需要管理员权限
-        from ..auth.middleware import require_admin_handler
-
-        if require_admin_handler(self):
-            return
-
-        parts = self.path.split("/")
-        if len(parts) >= 4:
-            session_id = parts[2]
-            server = _server_instance
-            if server is None or server.cross_channel is None:
-                self._send_json(500, {"error": "cross channel not initialized"})
-                return
-            bound = server.cross_channel.get_bound_sessions(session_id)
-            primary = server.cross_channel.get_primary_channel(session_id)
-            self._send_json(200, {"session_id": session_id, "bound_channels": bound, "primary_channel": primary})
-        else:
-            self._send_json(400, {"error": "invalid path"})
+        handle_session_channels(self, _server_instance)
 
     def _handle_session_bind(self) -> None:
         """POST /sessions/{session_id}/bind - bind session to new channel。"""
-        # 需要管理员权限
-        from ..auth.middleware import require_admin_handler
-
-        if require_admin_handler(self):
-            return
-
-        parts = self.path.split("/")
-        if len(parts) >= 4:
-            session_id = parts[2]
-            try:
-                body = self._read_json()
-            except json.JSONDecodeError as e:
-                self._send_json(400, {"error": f"invalid JSON: {e}"})
-                return
-
-            channel = body.get("channel")
-            user_id = body.get("user_id", "admin")
-            if not channel:
-                self._send_json(400, {"error": "channel is required"})
-                return
-
-            server = _server_instance
-            if server is None or server.cross_channel is None:
-                self._send_json(500, {"error": "cross channel not initialized"})
-                return
-
-            success = server.cross_channel.bind_session(session_id, channel, user_id)
-            self._send_json(200, {"success": success, "session_id": session_id, "channel": channel})
-        else:
-            self._send_json(400, {"error": "invalid path"})
+        handle_session_bind(self, _server_instance)
 
     def _handle_admin_summary(self) -> None:
         """GET /admin/summary - admin global summary。"""
-        # 需要管理员权限
-        from ..auth.middleware import require_admin_handler
-
-        if require_admin_handler(self):
-            return
-
-        server = _server_instance
-        if server is None or server.admin_query is None:
-            self._send_json(500, {"error": "admin query not initialized"})
-            return
-
-        summary = server.admin_query.format_admin_summary("admin")
-        self._send_json(200, {"summary": summary})
+        handle_admin_summary(self, _server_instance)
 
 
 class GatewayHTTPServer:
