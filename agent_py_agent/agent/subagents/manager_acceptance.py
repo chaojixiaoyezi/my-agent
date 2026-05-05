@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..file_io import append_jsonl
+from .acceptance_review_service import review_acceptance_task
 from .models import SubAgentTask
 from .parsing import (
     _dict_list,
@@ -52,7 +53,6 @@ from .probe import (
 )
 from .rendering import render_acceptance_record_markdown, render_acceptance_review_markdown
 from .reports import AcceptanceReviewRecord, AcceptanceReviewReport
-from .acceptance_review_service import review_acceptance_task
 from .runner_rendering import _render_runner_item_line
 from .utils import (
     _apply_missing_paths,

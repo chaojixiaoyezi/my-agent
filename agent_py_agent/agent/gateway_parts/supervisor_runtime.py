@@ -10,7 +10,12 @@ import sys
 import time
 from pathlib import Path
 
-from .daemon_control import WriteRuntimeStatusParams, get_running_pid, write_pid_file, write_runtime_status
+from .daemon_control import (
+    WriteRuntimeStatusParams,
+    get_running_pid,
+    write_pid_file,
+    write_runtime_status,
+)
 from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
 
 

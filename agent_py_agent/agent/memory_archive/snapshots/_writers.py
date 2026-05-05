@@ -15,7 +15,13 @@ from ._builders import (
     _build_recovery_snapshot,
     _make_recovery_snapshot_id,
 )
-from ._helpers import _content_hash, _dedupe_texts, _normalize_archive_level, _snapshot_id, _tool_snapshot
+from ._helpers import (
+    _content_hash,
+    _dedupe_texts,
+    _normalize_archive_level,
+    _snapshot_id,
+    _tool_snapshot,
+)
 from ._types import (
     CompressionHookResult,
     CompressionSnapshotInput,

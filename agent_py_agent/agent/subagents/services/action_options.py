@@ -21,7 +21,7 @@ class ActionApplyOptions:
     limit: int = 0
 
     @classmethod
-    def from_values(cls, options: "ActionApplyOptions | None" = None, **overrides):
+    def from_values(cls, options: ActionApplyOptions | None = None, **overrides):
         """Build options while preserving old keyword-call compatibility."""
 
         base = options or cls()

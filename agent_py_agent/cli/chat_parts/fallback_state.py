@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+
 @dataclass
 class FallbackWorkerConfig:
     """Bundle of all _fallback_worker parameters."""

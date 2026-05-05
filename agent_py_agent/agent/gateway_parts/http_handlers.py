@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 
 def _request_identity(handler) -> tuple[str, Any]:

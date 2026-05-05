@@ -17,7 +17,20 @@ from .classifiers import (
     _same_user,
     _weak_signal,
 )
-from .field_access import EventLike, JsonDict, _canonical_time, _event_dict, _event_time, _field, _sort_time, _text, _time_bucket, _truthy, _within_after, _within_before
+from .field_access import (
+    EventLike,
+    JsonDict,
+    _canonical_time,
+    _event_dict,
+    _event_time,
+    _field,
+    _sort_time,
+    _text,
+    _time_bucket,
+    _truthy,
+    _within_after,
+    _within_before,
+)
 from .field_extractors import _host, _source_ip, _user, _victim_ip
 from .rule_helpers import MakeFindingParams, _make_finding, _query
 

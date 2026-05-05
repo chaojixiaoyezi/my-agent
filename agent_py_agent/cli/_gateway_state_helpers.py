@@ -18,7 +18,11 @@ from ..agent.gateway_parts.daemon_control import (
     write_pid_record,
 )
 from ..agent.gateway_parts.http_service import GatewayHTTPServer, start_http_server
-from ._gateway_process_service import _gateway_heartbeat_loop, _gateway_request_loop, _write_gateway_heartbeat
+from ._gateway_process_service import (
+    _gateway_heartbeat_loop,
+    _gateway_request_loop,
+    _write_gateway_heartbeat,
+)
 
 
 def _build_run_state(context: dict, status: str = "running") -> dict:

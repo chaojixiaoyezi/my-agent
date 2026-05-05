@@ -13,6 +13,7 @@ from .fallback_state import FALLBACK_CHAT_PROMPT
 from .input_loop import parse_expand_target
 from .rendering import GRAY, GREEN, RESET, collapse_response_text
 
+
 def _make_chunk_handler(agent_name: str, next_message_id: int):
     """Factory for streaming chunk handlers."""
     stream_started_ref = [False]

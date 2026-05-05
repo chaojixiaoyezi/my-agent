@@ -65,7 +65,9 @@ def apply_patch_task(manager, task, *, output, patches, apply, applier, note) ->
 
     if apply and ok and patch_specs:
         try:
-            from agent_py_agent.agent.subagents.services.patch_apply_executor import PatchApplyExecutor
+            from agent_py_agent.agent.subagents.services.patch_apply_executor import (
+                PatchApplyExecutor,
+            )
 
             applied_count, _touched_files, rollback_performed, test_results = PatchApplyExecutor.execute(
                 patch_specs,

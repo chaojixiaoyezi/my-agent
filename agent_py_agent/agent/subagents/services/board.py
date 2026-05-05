@@ -11,7 +11,13 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from ..models import SubAgentTask
-from ..policies import _action_for_issue, _commands_for_action, _issue_weight, _risk_weight, _severity_weight
+from ..policies import (
+    _action_for_issue,
+    _commands_for_action,
+    _issue_weight,
+    _risk_weight,
+    _severity_weight,
+)
 from ..reports import (
     ActionPlanItem,
     ActionPlanReport,

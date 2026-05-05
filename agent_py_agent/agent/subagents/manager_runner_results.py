@@ -59,8 +59,8 @@ from .result_processors import (
     _process_structured_output,
     _write_runner_result_files,
 )
-from .runner_result_state import apply_runner_result_fields
 from .runner_rendering import _render_runner_item_line, render_runner_result_markdown
+from .runner_result_state import apply_runner_result_fields
 from .utils import (
     _apply_missing_paths,
     _apply_paths,
