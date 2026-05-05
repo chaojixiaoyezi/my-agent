@@ -11,7 +11,6 @@ from __future__ import annotations
 也已经有结构化账本可以接。
 """
 
-import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass
@@ -19,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..io import append_jsonl
+from ._jsonl_indexing import JsonlMemoryIndexMixin
 
 if TYPE_CHECKING:
     from ..local_store import LocalSearchResult, LocalStore
@@ -66,7 +66,7 @@ class MemoryRecord:
         return json.dumps(asdict(self), ensure_ascii=False)
 
 
-class JsonlMemory:
+class JsonlMemory(JsonlMemoryIndexMixin):
     """LLM: JSONL-backed memory store with optional LocalStore indexing and search fallback.
 
     新手说明:
@@ -203,138 +203,3 @@ class JsonlMemory:
             self._index_record(record)
             count += 1
         return count
-
-    def _search_jsonl(self, query: str, top_k: int = 5) -> list[MemoryRecord]:
-        """LLM: 使用简单关键词评分在 JSONL 事实流水中搜索。
-
-        新手说明:
-        这是 LocalStore 不可用时的兜底搜索。它不是高级搜索，只按词包含和整句包含打分。
-
-        参数说明:
-        query: 搜索文本；为空时返回按时间排序的前 top_k 条。
-        top_k: 最多返回多少条。
-
-        返回说明:
-        返回按分数和创建时间倒序排列的 MemoryRecord 列表。
-        """
-        query_terms = {term.lower() for term in query.split() if term.strip()}
-        scored: list[tuple[int, float, MemoryRecord]] = []
-        for rec in self.all():
-            text = rec.content.lower()
-            score = sum(1 for term in query_terms if term in text)
-            if query and query.lower() in text:
-                score += 3
-            if score > 0 or not query_terms:
-                scored.append((score, rec.created_at, rec))
-        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        return [record for _, _, record in scored[:top_k]]
-
-    def _search_local_store(self, query: str, top_k: int) -> list[MemoryRecord]:
-        """LLM: 尝试通过 LocalStore 搜索 memory source_type。
-
-        新手说明:
-        LocalStore 搜索更快、更结构化，但它只是索引层。失败时应该安静退回 JSONL 搜索。
-
-        参数说明:
-        query: 搜索文本。
-        top_k: 最多返回多少条。
-
-        返回说明:
-        返回从 LocalStore hit 还原出的 MemoryRecord 列表；没有 local_store 或搜索失败时返回空列表。
-        """
-        if not self.local_store:
-            return []
-        try:
-            hits = self.local_store.search(query, limit=top_k, source_type="memory")
-        except Exception:
-            return []
-        return [self._memory_from_hit(hit) for hit in hits]
-
-    def _try_index_record(self, record: MemoryRecord) -> None:
-        """LLM: 尽力索引一条 memory record，索引失败不影响主写入。
-
-        新手说明:
-        写记忆时最重要的是 JSONL 成功。索引只是加速搜索的副本，坏了不能拖垮 chat/runner。
-
-        参数说明:
-        record: 已经写入或准备写入的 MemoryRecord。
-
-        返回说明:
-        没有返回值。
-        """
-        if not self.local_store:
-            return
-        try:
-            self._index_record(record)
-        except Exception:
-            # 记忆 JSONL 是主流水，索引失败不能让 chat/runner 主链路中断。
-            return
-
-    def _index_record(self, record: MemoryRecord) -> None:
-        """LLM: 把一条 MemoryRecord 写入 LocalStore 索引。
-
-        新手说明:
-        这里把记忆转换成 LocalStore 统一记录格式：source_type、source_id、title、content、metadata。
-
-        参数说明:
-        record: 要索引的 MemoryRecord。
-
-        返回说明:
-        没有返回值；local_store 为空时直接返回。
-
-        副作用说明:
-        会调用 local_store.upsert_record。
-        """
-        if not self.local_store:
-            return
-        self.local_store.upsert_record(
-            source_type="memory",
-            source_id=self._source_id(record),
-            title=f"{record.kind}:{record.role}",
-            content=record.content,
-            metadata={
-                "role": record.role,
-                "kind": record.kind,
-                "tags": record.tags or [],
-                "created_at": record.created_at,
-            },
-        )
-
-    def _source_id(self, record: MemoryRecord) -> str:
-        """LLM: 为 memory record 生成稳定的 LocalStore source_id。
-
-        新手说明:
-        LocalStore 需要一个 id 来判断同一条记录。这里用时间、role、kind 和内容 hash 组合。
-
-        参数说明:
-        record: 要生成 id 的 MemoryRecord。
-
-        返回说明:
-        返回字符串，形如 `<created_at>:<role>:<kind>:<digest>`。
-        """
-        payload = json.dumps(asdict(record), ensure_ascii=False, sort_keys=True)
-        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
-        return f"{record.created_at:.6f}:{record.role}:{record.kind}:{digest}"
-
-    def _memory_from_hit(self, hit: LocalSearchResult) -> MemoryRecord:
-        """LLM: 把 LocalStore search hit 还原成 MemoryRecord。
-
-        新手说明:
-        搜索索引返回的是 LocalSearchResult，不是 MemoryRecord。这个函数负责把 metadata 里的 role、
-        kind、tags、created_at 取回来，重新拼成记忆记录。
-
-        参数说明:
-        hit: LocalStore.search 返回的单条命中。
-
-        返回说明:
-        返回 MemoryRecord。metadata 缺字段时使用保守默认值。
-        """
-        metadata = hit.metadata
-        tags = metadata.get("tags")
-        return MemoryRecord(
-            role=str(metadata.get("role") or "unknown"),
-            content=hit.content,
-            kind=str(metadata.get("kind") or "dialogue"),
-            tags=tags if isinstance(tags, list) else [],
-            created_at=float(metadata.get("created_at") or hit.created_at),
-        )

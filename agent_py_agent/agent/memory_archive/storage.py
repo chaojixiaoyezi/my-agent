@@ -8,21 +8,23 @@ from __future__ import annotations
 """
 
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 from ..io import append_jsonl
+from ._storage_dates import (
+    _coerce_retention_days,
+    _coerce_today,
+    _date_from_filename,
+    _date_key,
+)
+from ._storage_verify import (
+    MemoryArchiveError,
+    _verify_json_file_payload,
+    _verify_record_exists,
+)
 from .models import CompressionSnapshot, RawMemoryEvent
-
-
-class MemoryArchiveError(RuntimeError):
-    """LLM: raised when archive writes cannot be verified after append.
-
-    新手说明:
-    快照和 raw event 写完必须能读回来。
-    如果写了却读不到，说明这次恢复锚点不可靠，要明确报错，不能假装"记住了"。
-    """
 
 
 def snapshot_path_for(root: str | Path, created_at: str | int | float | None = None) -> Path:
@@ -250,202 +252,3 @@ def enforce_retention(root: str | Path, retention_days: Any, today: date | str |
 
     return deleted
 
-
-def _verify_record_exists(path: Path, *, key: str, value: str, expected: dict[str, Any]) -> None:
-    """LLM: read a JSONL file backwards and confirm the just-written record is present.
-
-    新手说明:
-    JSONL 是一行一个 JSON。刚写入的记录通常在文件最后，所以从后往前找更快。
-    找到同一个 ID 后还要比较完整 payload，避免只写了一半或字段被改坏也算通过。
-
-    参数说明:
-    `path` 是要读回的 JSONL 文件；`key` 是唯一字段名，例如 `snapshot_id` 或 `event_id`；
-    `value` 是唯一字段值；`expected` 是写入前的完整字典。
-
-    返回说明:
-    成功时不返回值；找不到或内容不一致时抛出 `MemoryArchiveError`。
-    """
-
-    normalized_expected = _normalized_json(expected)
-    for line in reversed(path.read_text(encoding="utf-8").splitlines()):
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if payload.get(key) != value:
-            continue
-        if _normalized_json(payload) != normalized_expected:
-            raise MemoryArchiveError(f"readback payload mismatch for {key}={value}")
-        return
-    raise MemoryArchiveError(f"readback failed for {key}={value} in {path}")
-
-
-def _verify_json_file_payload(path: Path, *, expected: dict[str, Any]) -> None:
-    """LLM: ensure an authoritative JSON snapshot file can be read back exactly.
-
-    新手说明:
-    JSON 文件不像 JSONL 那样要按行找记录，但同样要确认"写进去的"和"读出来的"完全一致。
-    """
-
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise MemoryArchiveError(f"readback failed for snapshot file {path}: {exc}") from exc
-    if _normalized_json(payload) != _normalized_json(expected):
-        raise MemoryArchiveError(f"readback payload mismatch for snapshot file {path}")
-
-
-def _normalized_json(payload: dict[str, Any]) -> str:
-    """LLM: serialize JSON payloads into a canonical string for equality checks.
-
-    新手说明:
-    普通字典的字段顺序可能不同。这里把字段排序并去掉多余空格，让"内容相同"能稳定比较。
-
-    参数说明:
-    `payload` 是要比较的 JSON 字典。
-
-    返回说明:
-    返回稳定排序后的 JSON 字符串。
-    """
-
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _date_key(created_at: str | int | float | None) -> str:
-    """LLM: convert an optional timestamp-like value into a daily archive key.
-
-    新手说明:
-    归档文件名只需要日期，不需要小时分钟。这个 helper 把各种时间输入统一成 `YYYY-MM-DD`。
-
-    参数说明:
-    `created_at` 可以是 ISO 字符串、Unix timestamp、空值或非法值。
-
-    返回说明:
-    返回日期字符串；无法解析时返回今天日期。
-    """
-
-    parsed = _coerce_datetime(created_at)
-    if parsed is None:
-        return date.today().isoformat()
-    return parsed.date().isoformat()
-
-
-def _coerce_datetime(value: str | int | float | None) -> datetime | None:
-    """LLM: safely coerce a caller timestamp into a timezone-aware datetime.
-
-    新手说明:
-    外层可能传 ISO 字符串、纯日期、Unix timestamp，也可能传坏值。
-    这里尽量解析，解析不了就返回 `None`，让调用方使用安全默认值。
-
-    参数说明:
-    `value` 是待解析时间；布尔值虽然是 int 子类，但这里明确拒绝。
-
-    返回说明:
-    返回带时区的 `datetime`，或在非法输入时返回 `None`。
-    """
-
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int | float):
-        try:
-            return datetime.fromtimestamp(value, tz=timezone.utc)
-        except (OverflowError, OSError, ValueError):
-            return None
-    if not isinstance(value, str):
-        return None
-
-    text = value.strip()
-    if not text:
-        return None
-    if text.endswith("Z"):
-        text = f"{text[:-1]}+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        try:
-            return datetime.combine(date.fromisoformat(text[:10]), datetime.min.time())
-        except ValueError:
-            return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def _coerce_retention_days(value: Any) -> int | None:
-    """LLM: normalize retention-days config without throwing on bad user input.
-
-    新手说明:
-    留存天数写坏时，最安全的行为是不删文件。这里只接受非负整数或纯数字字符串。
-
-    参数说明:
-    `value` 是配置里的留存天数，可能来自 YAML、CLI 或测试。
-
-    返回说明:
-    返回非负整数；非法值返回 `None`，调用方会跳过删除。
-    """
-
-    if isinstance(value, bool) or value is None:
-        return None
-    if isinstance(value, int):
-        days = value
-    elif isinstance(value, str):
-        text = value.strip()
-        if not text.isdecimal():
-            return None
-        days = int(text)
-    else:
-        return None
-
-    if days < 0:
-        return None
-    return days
-
-
-def _coerce_today(value: date | str | None) -> date | None:
-    """LLM: normalize an optional test override for today's date.
-
-    新手说明:
-    留存测试需要固定"今天"是哪一天。真实运行不传这个值时，会使用系统日期。
-
-    参数说明:
-    `value` 可以是 `date`、`datetime`、ISO 日期字符串或空值。
-
-    返回说明:
-    返回 `date`；非法字符串返回 `None`。
-    """
-
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    if isinstance(value, str):
-        try:
-            return date.fromisoformat(value[:10])
-        except ValueError:
-            return None
-    return None
-
-
-def _date_from_filename(path: Path) -> date | None:
-    """LLM: parse `YYYY-MM-DD.jsonl` filenames for retention decisions.
-
-    新手说明:
-    retention 只按规范日期文件名删除。名字不是日期的 JSONL 会被跳过，避免误删手工文件。
-
-    参数说明:
-    `path` 是候选 hook 文件路径。
-
-    返回说明:
-    文件名能解析时返回日期，否则返回 `None`。
-    """
-
-    try:
-        return date.fromisoformat(path.stem)
-    except ValueError:
-        return None

@@ -19,19 +19,7 @@ def build_resume_brief(
     recommended_read_paths: list[str],
     next_actions: list[str],
 ) -> dict[str, Any]:
-    """LLM: synthesize a compact recovery brief from existing resume evidence.
-
-    新手说明:
-    这一步把一堆线索变成“能直接看懂的恢复摘要”：
-    最近用户想干什么、助手刚做了什么、关联哪些 ID、任务现在大概在哪个状态、必须先读哪些权威文件。
-
-    参数说明:
-    `archive_matches` 是归档线索；`local_hits` 是 LocalStore 线索；`task_payloads` 是任务事实源。
-    `recommended_read_paths` 是建议优先读取的权威文件；`next_actions` 是恢复后的下一步动作。
-
-    返回说明:
-    返回简报字典，包含结构化字段、短 summary 和可注入的 `context_block`。
-    """
+    """Synthesize a compact recovery brief from existing resume evidence."""
 
     latest_user_intents = _latest_user_intents(archive_matches)
     latest_assistant_actions = _latest_assistant_actions(archive_matches)
