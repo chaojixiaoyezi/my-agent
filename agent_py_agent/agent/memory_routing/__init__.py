@@ -1,6 +1,6 @@
 """LLM contract: public API for deterministic long-term memory rule routing.
 
-这个包负责把“用户这句话可能需要读哪些长期规则文件”算出来，并提供一个
+这个包负责把'用户这句话可能需要读哪些长期规则文件'算出来，并提供一个
 runtime context 服务按安全边界读取短正文。它不修改主循环，也不写长期规则文件。
 """
 

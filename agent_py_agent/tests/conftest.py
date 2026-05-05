@@ -131,6 +131,44 @@ def disabled_dispatch_budget() -> DispatchBudget:
 
 
 # ---------------------------------------------------------------------------
+# SubAgentTask mock fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def mock_task(tmp_path: Path) -> MagicMock:
+    """Create a mock SubAgentTask with file paths set under tmp_path."""
+    from agent_py_agent.agent.subagents.models import SubAgentTask
+    task = MagicMock(spec=SubAgentTask)
+    task.id = "test-run-123"
+    task.status = "RUNNING"
+    task.verification_status = "UNVERIFIED"
+    task.failure_type = ""
+    task.result = ""
+    task.ended_at = 0.0
+    task.updated_at = 0.0
+    task.heartbeat_at = 0.0
+    task.runner_attempts = 0
+    task.runner_last_attempt_at = 0.0
+    task.runner_last_error = ""
+    task.runner_active_attempt_id = ""
+    task.runner_abandoned_attempt_ids = []
+    task.used_tools = []
+    task.used_skills = []
+    task.evidence = []
+    task.capability_requests = []
+    task.capability_grants = []
+    task.allowed_tools = ["tool_a", "tool_b"]
+    task.allowed_skills = ["skill_x"]
+    task.runner_prompt_file = str(tmp_path / "prompt.txt")
+    task.runner_response_file = str(tmp_path / "response.txt")
+    task.runner_result_file = str(tmp_path / "result.md")
+    task.runner_result_json = str(tmp_path / "result.json")
+    task.output_json = str(tmp_path / "output.json")
+    task.debrief_file = str(tmp_path / "debrief.md")
+    return task
+
+
+# ---------------------------------------------------------------------------
 # LocalStore mock fixtures
 # ---------------------------------------------------------------------------
 

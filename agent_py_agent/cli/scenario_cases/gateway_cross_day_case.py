@@ -33,6 +33,66 @@ from ..scenario_utils import (
 )
 
 
+def _cross_day_setup(paths, args):
+    """Run a real gateway ask and resolve request/response paths."""
+    prompt = "gateway cross-day resume drill: please return a short recoverable gateway response."
+    print_scenario_step(1, "Run a real background gateway ask")
+    gateway_payload = run_scenario_gateway_ask(paths, prompt, timeout=args.timeout, save=True)
+    if not gateway_payload.get("ok"):
+        write_scenario_summary(
+            paths, ok=False, reason="gateway ask failed",
+            extra={"case": "gateway-cross-day-resume", "gateway": gateway_payload},
+        )
+        return None
+    request_id = str(gateway_payload.get("id") or "")
+    agent = load_scenario_agent(paths.config)
+    gpaths = gateway_paths(agent)
+    request_path = gpaths.done / f"{request_id}.json"
+    if not request_path.exists():
+        request_path = gpaths.failed / f"{request_id}.json"
+    response_path = gateway_response_path(gpaths, request_id)
+    print(f"request_id={request_id}")
+    print(f"request_path={request_path} exists={request_path.exists()}")
+    print(f"response_path={response_path} exists={response_path.exists()}")
+    return agent, request_id, request_path, response_path, gateway_payload
+
+
+def _run_cross_day_resume(paths, request_id):
+    """Run memory-resume subprocess and return parsed payload."""
+    env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    resume = run_scenario_subprocess(
+        scenario_command(
+            paths, "memory-resume", "gateway cross-day resume",
+            "--request-id", request_id,
+            "--since", "2026-04-29", "--until", "2026-04-30", "--json",
+        ),
+        env=env, timeout=30,
+    )
+    try:
+        return json.loads(resume.stdout), resume.returncode
+    except json.JSONDecodeError as exc:
+        return {"ok": False, "error": f"memory-resume JSON parse failed: {exc}", "stdout": resume.stdout}, resume.returncode
+
+
+def _verify_cross_day_resume(resume_payload, returncode, request_id, request_path, response_path):
+    """Verify cross-day resume found the gateway fact sources."""
+    gateway_sources = resume_payload.get("gateway_fact_sources", []) if isinstance(resume_payload, dict) else []
+    recommended_reads = resume_payload.get("resume", {}).get("recommended_read_paths", []) if isinstance(resume_payload, dict) else []
+    context_block = resume_payload.get("brief", {}).get("context_block", "") if isinstance(resume_payload, dict) else ""
+    return (
+        returncode == 0
+        and bool(request_id)
+        and request_path.exists()
+        and response_path.exists()
+        and any(item.get("request_id") == request_id for item in gateway_sources if isinstance(item, dict))
+        and str(request_path) in recommended_reads
+        and str(response_path) in recommended_reads
+        and str(response_path) in context_block
+    )
+
+
 def run_scenario_gateway_cross_day_resume_case(args) -> int:
     """LLM: run a real gateway ask, then verify cross-day memory-resume can recover its JSON facts.
 
@@ -48,74 +108,20 @@ def run_scenario_gateway_cross_day_resume_case(args) -> int:
     print(f"fixture_root={paths.fixture_root}")
     print(f"config={paths.config}")
 
-    prompt = "gateway cross-day resume drill: please return a short recoverable gateway response."
-    print_scenario_step(1, "Run a real background gateway ask")
-    gateway_payload = run_scenario_gateway_ask(paths, prompt, timeout=args.timeout, save=True)
-    if not gateway_payload.get("ok"):
-        write_scenario_summary(
-            paths,
-            ok=False,
-            reason="gateway ask failed",
-            extra={"case": "gateway-cross-day-resume", "gateway": gateway_payload},
-        )
+    setup = _cross_day_setup(paths, args)
+    if setup is None:
         return 2
-    request_id = str(gateway_payload.get("id") or "")
-    agent = load_scenario_agent(paths.config)
-    gpaths = gateway_paths(agent)
-    request_path = gpaths.done / f"{request_id}.json"
-    if not request_path.exists():
-        request_path = gpaths.failed / f"{request_id}.json"
-    response_path = gateway_response_path(gpaths, request_id)
-    print(f"request_id={request_id}")
-    print(f"request_path={request_path} exists={request_path.exists()}")
-    print(f"response_path={response_path} exists={response_path.exists()}")
+    agent, request_id, request_path, response_path, gateway_payload = setup
 
     print_scenario_step(2, "Simulate a previous-day clue and next-day recovery snapshot")
     _append_gateway_cross_day_resume_clues(
-        agent.root,
-        request_id=request_id,
-        request_path=request_path,
-        response_path=response_path,
+        agent.root, request_id=request_id, request_path=request_path, response_path=response_path,
     )
 
     print_scenario_step(3, "Run memory-resume against the real gateway request id")
-    env = os.environ.copy()
-    env.setdefault("PYTHONUTF8", "1")
-    env.setdefault("PYTHONIOENCODING", "utf-8")
-    resume = run_scenario_subprocess(
-        scenario_command(
-            paths,
-            "memory-resume",
-            "gateway cross-day resume",
-            "--request-id",
-            request_id,
-            "--since",
-            "2026-04-29",
-            "--until",
-            "2026-04-30",
-            "--json",
-        ),
-        env=env,
-        timeout=30,
-    )
-    try:
-        resume_payload = json.loads(resume.stdout)
-    except json.JSONDecodeError as exc:
-        resume_payload = {"ok": False, "error": f"memory-resume JSON parse failed: {exc}", "stdout": resume.stdout}
+    resume_payload, returncode = _run_cross_day_resume(paths, request_id)
 
-    gateway_sources = resume_payload.get("gateway_fact_sources", []) if isinstance(resume_payload, dict) else []
-    recommended_reads = resume_payload.get("resume", {}).get("recommended_read_paths", []) if isinstance(resume_payload, dict) else []
-    context_block = resume_payload.get("brief", {}).get("context_block", "") if isinstance(resume_payload, dict) else ""
-    final_ok = (
-        resume.returncode == 0
-        and bool(request_id)
-        and request_path.exists()
-        and response_path.exists()
-        and any(item.get("request_id") == request_id for item in gateway_sources if isinstance(item, dict))
-        and str(request_path) in recommended_reads
-        and str(response_path) in recommended_reads
-        and str(response_path) in context_block
-    )
+    final_ok = _verify_cross_day_resume(resume_payload, returncode, request_id, request_path, response_path)
     write_scenario_summary(
         paths,
         ok=final_ok,

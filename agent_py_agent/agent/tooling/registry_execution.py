@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: parsing and execution helpers for ToolRegistry.
 
 给人看的解释：
-ToolRegistry 本身保持“服务台”职责；这里集中放工具调用解析、授权检查和异常格式化，
+ToolRegistry 本身保持'服务台'职责；这里集中放工具调用解析、授权检查和异常格式化，
 避免注册表类继续变厚。
 """
 

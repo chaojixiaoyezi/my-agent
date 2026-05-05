@@ -27,9 +27,10 @@ from agent_py_agent.agent.subagents.result_processors import (
 
 # ── 测试夹具 ──────────────────────────────────────────────────────────────
 
-@pytest.fixture
-def mock_task(tmp_path):
-    """创建模拟的 SubAgentTask。"""
+# ── Shared fixture builders ──────────────────────────────────────────────────
+
+def _mock_task_with_files(tmp_path: Path) -> MagicMock:
+    """Create a mock SubAgentTask with file paths set under tmp_path."""
     task = MagicMock(spec=SubAgentTask)
     task.id = "test-run-123"
     task.status = "RUNNING"
@@ -60,6 +61,121 @@ def mock_task(tmp_path):
     task.execution_context_file = str(tmp_path / "context.md")
     task.execution_context_json = str(tmp_path / "context.json")
     return task
+
+
+def _sample_parsed_output_ok() -> SubAgentParsedOutput:
+    return SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        summary="完成",
+        blocked_reason="",
+        failure_type="",
+        used_skills=[],
+        used_tools=[],
+        evidence=[],
+        capability_requests=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=[],
+        next_actions=[],
+    )
+
+
+def _sample_parsed_output_empty() -> SubAgentParsedOutput:
+    return SubAgentParsedOutput(
+        found=False,
+        ok=False,
+        parse_error="",
+        status="",
+        blocked_reason="",
+        failure_type="",
+        used_skills=[],
+        used_tools=[],
+        evidence=[],
+        capability_requests=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=[],
+        next_actions=[],
+    )
+
+
+def _sample_runner_result_ok() -> SubAgentRunnerResult:
+    return SubAgentRunnerResult(
+        run_id="test-run-123",
+        dry_run=False,
+        ok=True,
+        status="DONE",
+        verification_status="NEEDS_ACCEPTANCE",
+        message="成功",
+        backend="test",
+        tool_rounds=1,
+        runner_attempts=1,
+        runner_last_error="",
+        execution_context_json="",
+        execution_context_file="",
+        prompt_file="",
+        response_file="",
+        result_file="",
+        result_json="",
+        output_json="",
+        structured_output_found=True,
+        structured_output_ok=True,
+        structured_parse_error="",
+        structured_repair_attempted=False,
+        structured_repair_ok=False,
+        structured_repair_error="",
+        structured_summary="完成",
+        evidence_count=0,
+        capability_request_count=0,
+        artifact_count=0,
+        test_count=0,
+        patch_count=0,
+        lesson_count=0,
+        blocked_reason="",
+        created_at=123456.0,
+    )
+
+
+def _sample_runner_result_empty() -> SubAgentRunnerResult:
+    return SubAgentRunnerResult(
+        run_id="test-run-123",
+        dry_run=False,
+        ok=False,
+        status="FAILED",
+        verification_status="UNVERIFIED",
+        message="",
+        backend="",
+        tool_rounds=0,
+        runner_attempts=1,
+        runner_last_error="",
+        execution_context_json="",
+        execution_context_file="",
+        prompt_file="",
+        response_file="",
+        result_file="",
+        result_json="",
+        output_json="",
+        structured_output_found=False,
+        structured_output_ok=False,
+        structured_parse_error="",
+        structured_repair_attempted=False,
+        structured_repair_ok=False,
+        structured_repair_error="",
+        structured_summary="",
+        evidence_count=0,
+        capability_request_count=0,
+        artifact_count=0,
+        test_count=0,
+        patch_count=0,
+        lesson_count=0,
+        blocked_reason="",
+        created_at=123456.0,
+    )
 
 
 # ── _process_structured_output 测试 ────────────────────────────────────────
@@ -410,73 +526,12 @@ def test_build_runner_result_with_structured_output(mock_task):
 
 # ── _write_runner_result_files 测试 ────────────────────────────────────────
 
-def test_write_runner_result_files_basic(tmp_path, mock_task):
+def test_write_runner_result_files_basic(tmp_path):
     """测试写入结果文件。"""
-    # 设置文件路径
-    mock_task.runner_prompt_file = str(tmp_path / "prompt.txt")
-    mock_task.runner_response_file = str(tmp_path / "response.txt")
-    mock_task.runner_result_file = str(tmp_path / "result.md")
-    mock_task.runner_result_json = str(tmp_path / "result.json")
-    mock_task.output_json = str(tmp_path / "output.json")
-
-    parsed = SubAgentParsedOutput(
-        found=True,
-        ok=True,
-        parse_error="",
-        status="DONE",
-        summary="完成",
-        blocked_reason="",
-        failure_type="",
-        used_skills=[],
-        used_tools=[],
-        evidence=[],
-        capability_requests=[],
-        artifacts=[],
-        tests=[],
-        patches=[],
-        lessons=[],
-        next_actions=[],
-    )
-
-    result = SubAgentRunnerResult(
-        run_id="test-run-123",
-        dry_run=False,
-        ok=True,
-        status="DONE",
-        verification_status="NEEDS_ACCEPTANCE",
-        message="成功",
-        backend="test",
-        tool_rounds=1,
-        runner_attempts=1,
-        runner_last_error="",
-        execution_context_json="",
-        execution_context_file="",
-        prompt_file="",
-        response_file="",
-        result_file="",
-        result_json="",
-        output_json="",
-        structured_output_found=True,
-        structured_output_ok=True,
-        structured_parse_error="",
-        structured_repair_attempted=False,
-        structured_repair_ok=False,
-        structured_repair_error="",
-        structured_summary="完成",
-        evidence_count=0,
-        capability_request_count=0,
-        artifact_count=0,
-        test_count=0,
-        patch_count=0,
-        lesson_count=0,
-        blocked_reason="",
-        created_at=123456.0,
-    )
-
-    output_payload = {"run_id": "test-run-123", "ok": True}
+    mock_task = _mock_task_with_files(tmp_path)
 
     _write_runner_result_files(
-        mock_task, result, output_payload,
+        mock_task, _sample_runner_result_ok(), {"run_id": "test-run-123", "ok": True},
         prompt="test prompt content",
         response="test response content",
     )
@@ -492,71 +547,12 @@ def test_write_runner_result_files_basic(tmp_path, mock_task):
     assert (tmp_path / "response.txt").read_text() == "test response content"
 
 
-def test_write_runner_result_files_empty_prompt_response(tmp_path, mock_task):
+def test_write_runner_result_files_empty_prompt_response(tmp_path):
     """测试空 prompt/response 不写入文件。"""
-    mock_task.runner_prompt_file = str(tmp_path / "prompt.txt")
-    mock_task.runner_response_file = str(tmp_path / "response.txt")
-    mock_task.runner_result_file = str(tmp_path / "result.md")
-    mock_task.runner_result_json = str(tmp_path / "result.json")
-    mock_task.output_json = str(tmp_path / "output.json")
-
-    parsed = SubAgentParsedOutput(
-        found=False,
-        ok=False,
-        parse_error="",
-        status="",
-        blocked_reason="",
-        failure_type="",
-        used_skills=[],
-        used_tools=[],
-        evidence=[],
-        capability_requests=[],
-        artifacts=[],
-        tests=[],
-        patches=[],
-        lessons=[],
-        next_actions=[],
-    )
-
-    result = SubAgentRunnerResult(
-        run_id="test-run-123",
-        dry_run=False,
-        ok=False,
-        status="FAILED",
-        verification_status="UNVERIFIED",
-        message="",
-        backend="",
-        tool_rounds=0,
-        runner_attempts=1,
-        runner_last_error="",
-        execution_context_json="",
-        execution_context_file="",
-        prompt_file="",
-        response_file="",
-        result_file="",
-        result_json="",
-        output_json="",
-        structured_output_found=False,
-        structured_output_ok=False,
-        structured_parse_error="",
-        structured_repair_attempted=False,
-        structured_repair_ok=False,
-        structured_repair_error="",
-        structured_summary="",
-        evidence_count=0,
-        capability_request_count=0,
-        artifact_count=0,
-        test_count=0,
-        patch_count=0,
-        lesson_count=0,
-        blocked_reason="",
-        created_at=123456.0,
-    )
-
-    output_payload = {"run_id": "test-run-123"}
+    mock_task = _mock_task_with_files(tmp_path)
 
     _write_runner_result_files(
-        mock_task, result, output_payload,
+        mock_task, _sample_runner_result_empty(), {"run_id": "test-run-123"},
         prompt="",
         response="",
     )

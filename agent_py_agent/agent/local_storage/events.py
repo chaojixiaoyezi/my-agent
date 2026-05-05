@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: implements LocalStore audit event persistence and timeline row hydration.
 
 给人看的解释：
-这个文件只管“流水账”。
+这个文件只管'流水账'。
 每次重要写入都会进 SQLite events 表，也会追加到 JSONL 文件，方便程序查也方便人排查。
 """
 
@@ -21,7 +21,7 @@ class LocalStoreEventMixin:
     """LLM: mixin for audit events and timeline projection.
 
     给人看的解释：
-    这个 mixin 把“发生过什么事”保存下来，后面 status、timeline、doctor 都能复用这份证据。
+    这个 mixin 把'发生过什么事'保存下来，后面 status、timeline、doctor 都能复用这份证据。
     """
 
     def timeline(

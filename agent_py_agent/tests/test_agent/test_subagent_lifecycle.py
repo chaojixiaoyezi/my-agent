@@ -27,59 +27,34 @@ def test_subagent_capability_records():
         cfg = AgentConfig(subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
         parent = agent.subagents.create_run(
-            goal="审查项目",
-            thought="先拆分风险面。",
-            plan=["拆任务", "分配能力"],
-            agent_name="review-parent",
-            role="coordinator",
-            owner="parent-owner",
-            supervisor="root-supervisor",
-            final_owner="final-owner",
+            goal="审查项目", thought="先拆分风险面。", plan=["拆任务", "分配能力"],
+            agent_name="review-parent", role="coordinator",
+            owner="parent-owner", supervisor="root-supervisor", final_owner="final-owner",
             acceptance_checks=["必须有真实命令或文件证据"],
         )
         child = agent.subagents.create_run(
-            goal="检查 API 调用",
-            thought="先确认接口行为。",
-            plan=["读取代码", "请求能力"],
-            agent_name="api-checker",
-            role="worker",
-            parent_id=parent.id,
-            root_id=parent.root_id,
-            depth=1,
-            allowed_tools=["read_file"],
+            goal="检查 API 调用", thought="先确认接口行为。", plan=["读取代码", "请求能力"],
+            agent_name="api-checker", role="worker", parent_id=parent.id, root_id=parent.root_id,
+            depth=1, allowed_tools=["read_file"],
         )
 
         request = agent.subagents.record_capability_request(
-            child.id,
-            problem="当前只有 read_file，无法确认接口是否可访问。",
-            needed_capability="http_check",
-            expected_output="判断接口状态码和返回体",
-            tried=["read_file"],
+            child.id, problem="当前只有 read_file，无法确认接口是否可访问。",
+            needed_capability="http_check", expected_output="判断接口状态码和返回体", tried=["read_file"],
         )
-        grant = agent.subagents.record_capability_grant(
-            child.id,
-            RecordCapabilityGrantParams(
-                request_id=request.id,
-                tools=["fetch_url"],
-                reason="允许低风险 GET 检查。",
-            ),
-        )
-        gap = agent.subagents.record_capability_gap(
-            child.id,
-            RecordCapabilityGapParams(
-                missing_capability="authenticated_api_check",
-                why_failed="缺少登录态和安全授权。",
-                attempted_tools=["fetch_url"],
-                suggested_skill="api-auth-debugging",
-            ),
-        )
+        grant = agent.subagents.record_capability_grant(child.id, RecordCapabilityGrantParams(
+            request_id=request.id, tools=["fetch_url"], reason="允许低风险 GET 检查。",
+        ))
+        gap = agent.subagents.record_capability_gap(child.id, RecordCapabilityGapParams(
+            missing_capability="authenticated_api_check", why_failed="缺少登录态和安全授权。",
+            attempted_tools=["fetch_url"], suggested_skill="api-auth-debugging",
+        ))
 
         loaded_child = agent.subagents.load(child.id)
         loaded_parent = agent.subagents.load(parent.id)
 
         assert child.id in loaded_parent.child_ids
-        assert loaded_parent.owner == "parent-owner"
-        assert loaded_parent.final_owner == "final-owner"
+        assert loaded_parent.owner == "parent-owner" and loaded_parent.final_owner == "final-owner"
         assert loaded_child.capability_requests[0].id == request.id
         assert loaded_child.capability_grants[0].id == grant.id
         assert loaded_child.capability_gaps[0].id == gap.id

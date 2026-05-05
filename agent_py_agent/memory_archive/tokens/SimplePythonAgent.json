@@ -1,7 +1,7 @@
 {
-  "cumulative_tokens": 8070162,
+  "cumulative_tokens": 9593914,
   "session_id": "SimplePythonAgent",
-  "turn_count": 774,
+  "turn_count": 920,
   "turns": [
     {
       "created_at": "1777725807.117192",
@@ -6194,6 +6194,1174 @@
       "tool_tokens": 2,
       "turn_id": "run-1777975302253923000",
       "turn_total": 11115
+    },
+    {
+      "created_at": "1777976488.577588",
+      "input_tokens": 8901,
+      "output_tokens": 1389,
+      "tool_tokens": 2,
+      "turn_id": "run-1777976488576451000",
+      "turn_total": 10292
+    },
+    {
+      "created_at": "1777976588.2824872",
+      "input_tokens": 8900,
+      "output_tokens": 1605,
+      "tool_tokens": 105,
+      "turn_id": "run-1777976588281324000",
+      "turn_total": 10610
+    },
+    {
+      "created_at": "1777976634.8789241",
+      "input_tokens": 8900,
+      "output_tokens": 1292,
+      "tool_tokens": 2,
+      "turn_id": "run-1777976634875489000",
+      "turn_total": 10194
+    },
+    {
+      "created_at": "1777976670.4192262",
+      "input_tokens": 8900,
+      "output_tokens": 1413,
+      "tool_tokens": 2,
+      "turn_id": "run-1777976670418075000",
+      "turn_total": 10315
+    },
+    {
+      "created_at": "1777976723.6309152",
+      "input_tokens": 8900,
+      "output_tokens": 1214,
+      "tool_tokens": 118,
+      "turn_id": "run-1777976723627297000",
+      "turn_total": 10232
+    },
+    {
+      "created_at": "1777976777.623771",
+      "input_tokens": 8900,
+      "output_tokens": 1431,
+      "tool_tokens": 2,
+      "turn_id": "run-1777976777619944000",
+      "turn_total": 10333
+    },
+    {
+      "created_at": "1777976850.7140212",
+      "input_tokens": 8901,
+      "output_tokens": 2050,
+      "tool_tokens": 73,
+      "turn_id": "run-1777976850709844000",
+      "turn_total": 11024
+    },
+    {
+      "created_at": "1777976937.7944021",
+      "input_tokens": 8900,
+      "output_tokens": 1264,
+      "tool_tokens": 135,
+      "turn_id": "run-1777976937789655000",
+      "turn_total": 10299
+    },
+    {
+      "created_at": "1777976991.7073972",
+      "input_tokens": 8900,
+      "output_tokens": 1620,
+      "tool_tokens": 2,
+      "turn_id": "run-1777976991703331000",
+      "turn_total": 10522
+    },
+    {
+      "created_at": "1777977055.020066",
+      "input_tokens": 8900,
+      "output_tokens": 1424,
+      "tool_tokens": 2,
+      "turn_id": "run-1777977055015890000",
+      "turn_total": 10326
+    },
+    {
+      "created_at": "1777977096.832489",
+      "input_tokens": 8901,
+      "output_tokens": 1439,
+      "tool_tokens": 2,
+      "turn_id": "run-1777977096828754000",
+      "turn_total": 10342
+    },
+    {
+      "created_at": "1777977248.9433842",
+      "input_tokens": 8900,
+      "output_tokens": 1259,
+      "tool_tokens": 239,
+      "turn_id": "run-1777977248940691000",
+      "turn_total": 10398
+    },
+    {
+      "created_at": "1777977306.635023",
+      "input_tokens": 8901,
+      "output_tokens": 1842,
+      "tool_tokens": 93,
+      "turn_id": "run-1777977306631412000",
+      "turn_total": 10836
+    },
+    {
+      "created_at": "1777977394.75885",
+      "input_tokens": 8900,
+      "output_tokens": 1466,
+      "tool_tokens": 338,
+      "turn_id": "run-1777977394754702000",
+      "turn_total": 10704
+    },
+    {
+      "created_at": "1777977429.516054",
+      "input_tokens": 8900,
+      "output_tokens": 1179,
+      "tool_tokens": 2,
+      "turn_id": "run-1777977429511937000",
+      "turn_total": 10081
+    },
+    {
+      "created_at": "1777977488.3960152",
+      "input_tokens": 8900,
+      "output_tokens": 2312,
+      "tool_tokens": 2,
+      "turn_id": "run-1777977488392380000",
+      "turn_total": 11214
+    },
+    {
+      "created_at": "1777977539.770061",
+      "input_tokens": 8901,
+      "output_tokens": 1577,
+      "tool_tokens": 2,
+      "turn_id": "run-1777977539765615000",
+      "turn_total": 10480
+    },
+    {
+      "created_at": "1777977594.922069",
+      "input_tokens": 8901,
+      "output_tokens": 1784,
+      "tool_tokens": 2,
+      "turn_id": "run-1777977594919908000",
+      "turn_total": 10687
+    },
+    {
+      "created_at": "1777977687.811384",
+      "input_tokens": 8900,
+      "output_tokens": 1544,
+      "tool_tokens": 222,
+      "turn_id": "run-1777977687807562000",
+      "turn_total": 10666
+    },
+    {
+      "created_at": "1777977742.71556",
+      "input_tokens": 8901,
+      "output_tokens": 1643,
+      "tool_tokens": 2,
+      "turn_id": "run-1777977742714409000",
+      "turn_total": 10546
+    },
+    {
+      "created_at": "1777977786.4792058",
+      "input_tokens": 8901,
+      "output_tokens": 1159,
+      "tool_tokens": 2,
+      "turn_id": "run-1777977786478061000",
+      "turn_total": 10062
+    },
+    {
+      "created_at": "1777977846.3243341",
+      "input_tokens": 8900,
+      "output_tokens": 1646,
+      "tool_tokens": 2,
+      "turn_id": "run-1777977846323155000",
+      "turn_total": 10548
+    },
+    {
+      "created_at": "1777977897.5155609",
+      "input_tokens": 8901,
+      "output_tokens": 1807,
+      "tool_tokens": 2,
+      "turn_id": "run-1777977897514436000",
+      "turn_total": 10710
+    },
+    {
+      "created_at": "1777977956.1764832",
+      "input_tokens": 8900,
+      "output_tokens": 835,
+      "tool_tokens": 119,
+      "turn_id": "run-1777977956175395000",
+      "turn_total": 9854
+    },
+    {
+      "created_at": "1777977992.209344",
+      "input_tokens": 8900,
+      "output_tokens": 1582,
+      "tool_tokens": 2,
+      "turn_id": "run-1777977992205734000",
+      "turn_total": 10484
+    },
+    {
+      "created_at": "1777978045.635558",
+      "input_tokens": 8900,
+      "output_tokens": 1401,
+      "tool_tokens": 196,
+      "turn_id": "run-1777978045634416000",
+      "turn_total": 10497
+    },
+    {
+      "created_at": "1777978096.013889",
+      "input_tokens": 8901,
+      "output_tokens": 1153,
+      "tool_tokens": 2,
+      "turn_id": "run-1777978096012212000",
+      "turn_total": 10056
+    },
+    {
+      "created_at": "1777978163.323457",
+      "input_tokens": 8900,
+      "output_tokens": 1960,
+      "tool_tokens": 2,
+      "turn_id": "run-1777978163318745000",
+      "turn_total": 10862
+    },
+    {
+      "created_at": "1777978230.229779",
+      "input_tokens": 8900,
+      "output_tokens": 2110,
+      "tool_tokens": 2,
+      "turn_id": "run-1777978230226155000",
+      "turn_total": 11012
+    },
+    {
+      "created_at": "1777978266.5418859",
+      "input_tokens": 8900,
+      "output_tokens": 1327,
+      "tool_tokens": 2,
+      "turn_id": "run-1777978266539026000",
+      "turn_total": 10229
+    },
+    {
+      "created_at": "1777978343.5415921",
+      "input_tokens": 8900,
+      "output_tokens": 1680,
+      "tool_tokens": 2,
+      "turn_id": "run-1777978343537748000",
+      "turn_total": 10582
+    },
+    {
+      "created_at": "1777978390.0078661",
+      "input_tokens": 8901,
+      "output_tokens": 1154,
+      "tool_tokens": 40,
+      "turn_id": "run-1777978390003257000",
+      "turn_total": 10095
+    },
+    {
+      "created_at": "1777978424.648757",
+      "input_tokens": 8900,
+      "output_tokens": 1548,
+      "tool_tokens": 2,
+      "turn_id": "run-1777978424644991000",
+      "turn_total": 10450
+    },
+    {
+      "created_at": "1777978462.333663",
+      "input_tokens": 8901,
+      "output_tokens": 1501,
+      "tool_tokens": 2,
+      "turn_id": "run-1777978462330703000",
+      "turn_total": 10404
+    },
+    {
+      "created_at": "1777978522.764645",
+      "input_tokens": 8901,
+      "output_tokens": 1490,
+      "tool_tokens": 2,
+      "turn_id": "run-1777978522760401000",
+      "turn_total": 10393
+    },
+    {
+      "created_at": "1777978560.956342",
+      "input_tokens": 8900,
+      "output_tokens": 969,
+      "tool_tokens": 2,
+      "turn_id": "run-1777978560952414000",
+      "turn_total": 9871
+    },
+    {
+      "created_at": "1777978619.3114822",
+      "input_tokens": 8900,
+      "output_tokens": 1750,
+      "tool_tokens": 2,
+      "turn_id": "run-1777978619307871000",
+      "turn_total": 10652
+    },
+    {
+      "created_at": "1777978691.300895",
+      "input_tokens": 8900,
+      "output_tokens": 1678,
+      "tool_tokens": 2,
+      "turn_id": "run-1777978691297890000",
+      "turn_total": 10580
+    },
+    {
+      "created_at": "1777978748.024797",
+      "input_tokens": 8901,
+      "output_tokens": 1649,
+      "tool_tokens": 2,
+      "turn_id": "run-1777978748023335000",
+      "turn_total": 10552
+    },
+    {
+      "created_at": "1777978814.616768",
+      "input_tokens": 8900,
+      "output_tokens": 1456,
+      "tool_tokens": 2,
+      "turn_id": "run-1777978814613898000",
+      "turn_total": 10358
+    },
+    {
+      "created_at": "1777978855.4517262",
+      "input_tokens": 8901,
+      "output_tokens": 1702,
+      "tool_tokens": 2,
+      "turn_id": "run-1777978855447443000",
+      "turn_total": 10605
+    },
+    {
+      "created_at": "1777978901.225033",
+      "input_tokens": 8900,
+      "output_tokens": 1405,
+      "tool_tokens": 2,
+      "turn_id": "run-1777978901220195000",
+      "turn_total": 10307
+    },
+    {
+      "created_at": "1777978950.887041",
+      "input_tokens": 8900,
+      "output_tokens": 1633,
+      "tool_tokens": 2,
+      "turn_id": "run-1777978950884881000",
+      "turn_total": 10535
+    },
+    {
+      "created_at": "1777979004.7959738",
+      "input_tokens": 8901,
+      "output_tokens": 1320,
+      "tool_tokens": 2,
+      "turn_id": "run-1777979004791720000",
+      "turn_total": 10223
+    },
+    {
+      "created_at": "1777979054.5375948",
+      "input_tokens": 8900,
+      "output_tokens": 1532,
+      "tool_tokens": 2,
+      "turn_id": "run-1777979054533664000",
+      "turn_total": 10434
+    },
+    {
+      "created_at": "1777979128.048918",
+      "input_tokens": 8900,
+      "output_tokens": 1689,
+      "tool_tokens": 56,
+      "turn_id": "run-1777979128045153000",
+      "turn_total": 10645
+    },
+    {
+      "created_at": "1777979184.129965",
+      "input_tokens": 8901,
+      "output_tokens": 1415,
+      "tool_tokens": 2,
+      "turn_id": "run-1777979184125817000",
+      "turn_total": 10318
+    },
+    {
+      "created_at": "1777979253.5358112",
+      "input_tokens": 8900,
+      "output_tokens": 1059,
+      "tool_tokens": 95,
+      "turn_id": "run-1777979253532421000",
+      "turn_total": 10054
+    },
+    {
+      "created_at": "1777979305.7325408",
+      "input_tokens": 8901,
+      "output_tokens": 1855,
+      "tool_tokens": 46,
+      "turn_id": "run-1777979305729688000",
+      "turn_total": 10802
+    },
+    {
+      "created_at": "1777979339.196921",
+      "input_tokens": 8900,
+      "output_tokens": 1235,
+      "tool_tokens": 2,
+      "turn_id": "run-1777979339193673000",
+      "turn_total": 10137
+    },
+    {
+      "created_at": "1777979393.7008362",
+      "input_tokens": 8901,
+      "output_tokens": 1408,
+      "tool_tokens": 2,
+      "turn_id": "run-1777979393699716000",
+      "turn_total": 10311
+    },
+    {
+      "created_at": "1777979430.5738509",
+      "input_tokens": 8901,
+      "output_tokens": 1555,
+      "tool_tokens": 2,
+      "turn_id": "run-1777979430569899000",
+      "turn_total": 10458
+    },
+    {
+      "created_at": "1777979473.650164",
+      "input_tokens": 8900,
+      "output_tokens": 952,
+      "tool_tokens": 2,
+      "turn_id": "run-1777979473646703000",
+      "turn_total": 9854
+    },
+    {
+      "created_at": "1777979530.353163",
+      "input_tokens": 8900,
+      "output_tokens": 1288,
+      "tool_tokens": 111,
+      "turn_id": "run-1777979530349612000",
+      "turn_total": 10299
+    },
+    {
+      "created_at": "1777979600.626976",
+      "input_tokens": 8900,
+      "output_tokens": 1712,
+      "tool_tokens": 2,
+      "turn_id": "run-1777979600622973000",
+      "turn_total": 10614
+    },
+    {
+      "created_at": "1777979660.4231958",
+      "input_tokens": 8901,
+      "output_tokens": 1452,
+      "tool_tokens": 2,
+      "turn_id": "run-1777979660418373000",
+      "turn_total": 10355
+    },
+    {
+      "created_at": "1777979741.690911",
+      "input_tokens": 8900,
+      "output_tokens": 984,
+      "tool_tokens": 90,
+      "turn_id": "run-1777979741686507000",
+      "turn_total": 9974
+    },
+    {
+      "created_at": "1777979762.9322848",
+      "input_tokens": 8900,
+      "output_tokens": 1168,
+      "tool_tokens": 2,
+      "turn_id": "run-1777979762929538000",
+      "turn_total": 10070
+    },
+    {
+      "created_at": "1777979808.713932",
+      "input_tokens": 8900,
+      "output_tokens": 1511,
+      "tool_tokens": 2,
+      "turn_id": "run-1777979808710495000",
+      "turn_total": 10413
+    },
+    {
+      "created_at": "1777979851.60547",
+      "input_tokens": 8900,
+      "output_tokens": 1743,
+      "tool_tokens": 2,
+      "turn_id": "run-1777979851601523000",
+      "turn_total": 10645
+    },
+    {
+      "created_at": "1777979905.398155",
+      "input_tokens": 8900,
+      "output_tokens": 1366,
+      "tool_tokens": 2,
+      "turn_id": "run-1777979905393959000",
+      "turn_total": 10268
+    },
+    {
+      "created_at": "1777979958.180421",
+      "input_tokens": 8900,
+      "output_tokens": 1154,
+      "tool_tokens": 107,
+      "turn_id": "run-1777979958176137000",
+      "turn_total": 10161
+    },
+    {
+      "created_at": "1777979994.770091",
+      "input_tokens": 8901,
+      "output_tokens": 1663,
+      "tool_tokens": 2,
+      "turn_id": "run-1777979994765756000",
+      "turn_total": 10566
+    },
+    {
+      "created_at": "1777980045.816725",
+      "input_tokens": 8900,
+      "output_tokens": 1828,
+      "tool_tokens": 2,
+      "turn_id": "run-1777980045812977000",
+      "turn_total": 10730
+    },
+    {
+      "created_at": "1777980086.8792992",
+      "input_tokens": 8901,
+      "output_tokens": 797,
+      "tool_tokens": 85,
+      "turn_id": "run-1777980086875641000",
+      "turn_total": 9783
+    },
+    {
+      "created_at": "1777980186.464501",
+      "input_tokens": 8900,
+      "output_tokens": 1174,
+      "tool_tokens": 182,
+      "turn_id": "run-1777980186461503000",
+      "turn_total": 10256
+    },
+    {
+      "created_at": "1777980259.515808",
+      "input_tokens": 8900,
+      "output_tokens": 1245,
+      "tool_tokens": 46,
+      "turn_id": "run-1777980259512710000",
+      "turn_total": 10191
+    },
+    {
+      "created_at": "1777980315.795006",
+      "input_tokens": 8900,
+      "output_tokens": 1427,
+      "tool_tokens": 107,
+      "turn_id": "run-1777980315791974000",
+      "turn_total": 10434
+    },
+    {
+      "created_at": "1777980441.751113",
+      "input_tokens": 8900,
+      "output_tokens": 1468,
+      "tool_tokens": 93,
+      "turn_id": "run-1777980441747608000",
+      "turn_total": 10461
+    },
+    {
+      "created_at": "1777980510.881334",
+      "input_tokens": 8901,
+      "output_tokens": 1399,
+      "tool_tokens": 46,
+      "turn_id": "run-1777980510877238000",
+      "turn_total": 10346
+    },
+    {
+      "created_at": "1777980555.208937",
+      "input_tokens": 8900,
+      "output_tokens": 1285,
+      "tool_tokens": 2,
+      "turn_id": "run-1777980555206510000",
+      "turn_total": 10187
+    },
+    {
+      "created_at": "1777980610.113869",
+      "input_tokens": 8900,
+      "output_tokens": 1417,
+      "tool_tokens": 2,
+      "turn_id": "run-1777980610112450000",
+      "turn_total": 10319
+    },
+    {
+      "created_at": "1777980657.8181279",
+      "input_tokens": 8900,
+      "output_tokens": 1757,
+      "tool_tokens": 2,
+      "turn_id": "run-1777980657813994000",
+      "turn_total": 10659
+    },
+    {
+      "created_at": "1777980740.159656",
+      "input_tokens": 8900,
+      "output_tokens": 1385,
+      "tool_tokens": 110,
+      "turn_id": "run-1777980740154915000",
+      "turn_total": 10395
+    },
+    {
+      "created_at": "1777980874.032418",
+      "input_tokens": 8900,
+      "output_tokens": 1618,
+      "tool_tokens": 200,
+      "turn_id": "run-1777980874030659000",
+      "turn_total": 10718
+    },
+    {
+      "created_at": "1777980917.5937972",
+      "input_tokens": 8900,
+      "output_tokens": 1881,
+      "tool_tokens": 2,
+      "turn_id": "run-1777980917591041000",
+      "turn_total": 10783
+    },
+    {
+      "created_at": "1777980970.7532449",
+      "input_tokens": 8900,
+      "output_tokens": 1239,
+      "tool_tokens": 43,
+      "turn_id": "run-1777980970751890000",
+      "turn_total": 10182
+    },
+    {
+      "created_at": "1777981037.722514",
+      "input_tokens": 8901,
+      "output_tokens": 1384,
+      "tool_tokens": 43,
+      "turn_id": "run-1777981037721378000",
+      "turn_total": 10328
+    },
+    {
+      "created_at": "1777981080.706781",
+      "input_tokens": 8900,
+      "output_tokens": 1040,
+      "tool_tokens": 101,
+      "turn_id": "run-1777981080703348000",
+      "turn_total": 10041
+    },
+    {
+      "created_at": "1777981160.7077398",
+      "input_tokens": 8901,
+      "output_tokens": 2096,
+      "tool_tokens": 2,
+      "turn_id": "run-1777981160704714000",
+      "turn_total": 10999
+    },
+    {
+      "created_at": "1777981202.595499",
+      "input_tokens": 8901,
+      "output_tokens": 1461,
+      "tool_tokens": 2,
+      "turn_id": "run-1777981202592998000",
+      "turn_total": 10364
+    },
+    {
+      "created_at": "1777981255.66503",
+      "input_tokens": 8900,
+      "output_tokens": 1032,
+      "tool_tokens": 52,
+      "turn_id": "run-1777981255663380000",
+      "turn_total": 9984
+    },
+    {
+      "created_at": "1777981302.021724",
+      "input_tokens": 8900,
+      "output_tokens": 1501,
+      "tool_tokens": 2,
+      "turn_id": "run-1777981302018317000",
+      "turn_total": 10403
+    },
+    {
+      "created_at": "1777981345.644232",
+      "input_tokens": 8900,
+      "output_tokens": 1307,
+      "tool_tokens": 2,
+      "turn_id": "run-1777981345641486000",
+      "turn_total": 10209
+    },
+    {
+      "created_at": "1777981389.170214",
+      "input_tokens": 8900,
+      "output_tokens": 1458,
+      "tool_tokens": 2,
+      "turn_id": "run-1777981389169058000",
+      "turn_total": 10360
+    },
+    {
+      "created_at": "1777981456.984222",
+      "input_tokens": 8900,
+      "output_tokens": 1531,
+      "tool_tokens": 132,
+      "turn_id": "run-1777981456980537000",
+      "turn_total": 10563
+    },
+    {
+      "created_at": "1777981506.6214368",
+      "input_tokens": 8901,
+      "output_tokens": 1461,
+      "tool_tokens": 2,
+      "turn_id": "run-1777981506617276000",
+      "turn_total": 10364
+    },
+    {
+      "created_at": "1777981550.8928509",
+      "input_tokens": 8901,
+      "output_tokens": 1385,
+      "tool_tokens": 2,
+      "turn_id": "run-1777981550889148000",
+      "turn_total": 10288
+    },
+    {
+      "created_at": "1777981624.89433",
+      "input_tokens": 8901,
+      "output_tokens": 1606,
+      "tool_tokens": 95,
+      "turn_id": "run-1777981624890334000",
+      "turn_total": 10602
+    },
+    {
+      "created_at": "1777981741.098551",
+      "input_tokens": 8901,
+      "output_tokens": 3469,
+      "tool_tokens": 2,
+      "turn_id": "run-1777981741094217000",
+      "turn_total": 12372
+    },
+    {
+      "created_at": "1777981809.1855",
+      "input_tokens": 8900,
+      "output_tokens": 1139,
+      "tool_tokens": 88,
+      "turn_id": "run-1777981809180956000",
+      "turn_total": 10127
+    },
+    {
+      "created_at": "1777981850.698859",
+      "input_tokens": 8901,
+      "output_tokens": 1170,
+      "tool_tokens": 2,
+      "turn_id": "run-1777981850696372000",
+      "turn_total": 10073
+    },
+    {
+      "created_at": "1777981897.207663",
+      "input_tokens": 8900,
+      "output_tokens": 1758,
+      "tool_tokens": 2,
+      "turn_id": "run-1777981897203742000",
+      "turn_total": 10660
+    },
+    {
+      "created_at": "1777981940.550442",
+      "input_tokens": 8901,
+      "output_tokens": 1790,
+      "tool_tokens": 2,
+      "turn_id": "run-1777981940549274000",
+      "turn_total": 10693
+    },
+    {
+      "created_at": "1777982107.299169",
+      "input_tokens": 8901,
+      "output_tokens": 1132,
+      "tool_tokens": 2,
+      "turn_id": "run-1777982107295361000",
+      "turn_total": 10035
+    },
+    {
+      "created_at": "1777982155.8434749",
+      "input_tokens": 8900,
+      "output_tokens": 1653,
+      "tool_tokens": 2,
+      "turn_id": "run-1777982155839454000",
+      "turn_total": 10555
+    },
+    {
+      "created_at": "1777982203.102802",
+      "input_tokens": 8900,
+      "output_tokens": 1221,
+      "tool_tokens": 55,
+      "turn_id": "run-1777982203099076000",
+      "turn_total": 10176
+    },
+    {
+      "created_at": "1777982252.298704",
+      "input_tokens": 8900,
+      "output_tokens": 1669,
+      "tool_tokens": 2,
+      "turn_id": "run-1777982252295358000",
+      "turn_total": 10571
+    },
+    {
+      "created_at": "1777982292.777712",
+      "input_tokens": 8900,
+      "output_tokens": 960,
+      "tool_tokens": 2,
+      "turn_id": "run-1777982292773143000",
+      "turn_total": 9862
+    },
+    {
+      "created_at": "1777982362.259451",
+      "input_tokens": 8900,
+      "output_tokens": 1667,
+      "tool_tokens": 130,
+      "turn_id": "run-1777982362254426000",
+      "turn_total": 10697
+    },
+    {
+      "created_at": "1777982426.167126",
+      "input_tokens": 8900,
+      "output_tokens": 1584,
+      "tool_tokens": 46,
+      "turn_id": "run-1777982426163167000",
+      "turn_total": 10530
+    },
+    {
+      "created_at": "1777982467.452348",
+      "input_tokens": 8901,
+      "output_tokens": 1404,
+      "tool_tokens": 2,
+      "turn_id": "run-1777982467448299000",
+      "turn_total": 10307
+    },
+    {
+      "created_at": "1777982538.910184",
+      "input_tokens": 8901,
+      "output_tokens": 1695,
+      "tool_tokens": 85,
+      "turn_id": "run-1777982538906436000",
+      "turn_total": 10681
+    },
+    {
+      "created_at": "1777982578.207307",
+      "input_tokens": 8901,
+      "output_tokens": 1405,
+      "tool_tokens": 2,
+      "turn_id": "run-1777982578204116000",
+      "turn_total": 10308
+    },
+    {
+      "created_at": "1777982634.351541",
+      "input_tokens": 8900,
+      "output_tokens": 1114,
+      "tool_tokens": 2,
+      "turn_id": "run-1777982634346854000",
+      "turn_total": 10016
+    },
+    {
+      "created_at": "1777982680.275481",
+      "input_tokens": 8900,
+      "output_tokens": 1488,
+      "tool_tokens": 2,
+      "turn_id": "run-1777982680273577000",
+      "turn_total": 10390
+    },
+    {
+      "created_at": "1777982748.3419678",
+      "input_tokens": 8900,
+      "output_tokens": 1227,
+      "tool_tokens": 50,
+      "turn_id": "run-1777982748337816000",
+      "turn_total": 10177
+    },
+    {
+      "created_at": "1777982795.014035",
+      "input_tokens": 8900,
+      "output_tokens": 1714,
+      "tool_tokens": 2,
+      "turn_id": "run-1777982795010524000",
+      "turn_total": 10616
+    },
+    {
+      "created_at": "1777982840.067321",
+      "input_tokens": 8901,
+      "output_tokens": 1347,
+      "tool_tokens": 2,
+      "turn_id": "run-1777982840066238000",
+      "turn_total": 10250
+    },
+    {
+      "created_at": "1777982883.9427881",
+      "input_tokens": 8900,
+      "output_tokens": 1464,
+      "tool_tokens": 2,
+      "turn_id": "run-1777982883939943000",
+      "turn_total": 10366
+    },
+    {
+      "created_at": "1777982948.554704",
+      "input_tokens": 8900,
+      "output_tokens": 1248,
+      "tool_tokens": 2,
+      "turn_id": "run-1777982948551251000",
+      "turn_total": 10150
+    },
+    {
+      "created_at": "1777983026.794838",
+      "input_tokens": 8901,
+      "output_tokens": 1470,
+      "tool_tokens": 82,
+      "turn_id": "run-1777983026791221000",
+      "turn_total": 10453
+    },
+    {
+      "created_at": "1777983070.9045079",
+      "input_tokens": 8900,
+      "output_tokens": 1258,
+      "tool_tokens": 2,
+      "turn_id": "run-1777983070900736000",
+      "turn_total": 10160
+    },
+    {
+      "created_at": "1777983123.0118132",
+      "input_tokens": 8901,
+      "output_tokens": 1568,
+      "tool_tokens": 2,
+      "turn_id": "run-1777983123007829000",
+      "turn_total": 10471
+    },
+    {
+      "created_at": "1777983226.94135",
+      "input_tokens": 8900,
+      "output_tokens": 1996,
+      "tool_tokens": 46,
+      "turn_id": "run-1777983226936931000",
+      "turn_total": 10942
+    },
+    {
+      "created_at": "1777983387.057906",
+      "input_tokens": 8900,
+      "output_tokens": 1284,
+      "tool_tokens": 287,
+      "turn_id": "run-1777983387055007000",
+      "turn_total": 10471
+    },
+    {
+      "created_at": "1777983412.684026",
+      "input_tokens": 8901,
+      "output_tokens": 1083,
+      "tool_tokens": 2,
+      "turn_id": "run-1777983412682364000",
+      "turn_total": 9986
+    },
+    {
+      "created_at": "1777983454.77337",
+      "input_tokens": 8900,
+      "output_tokens": 1353,
+      "tool_tokens": 2,
+      "turn_id": "run-1777983454769593000",
+      "turn_total": 10255
+    },
+    {
+      "created_at": "1777983505.67571",
+      "input_tokens": 8900,
+      "output_tokens": 1922,
+      "tool_tokens": 2,
+      "turn_id": "run-1777983505671792000",
+      "turn_total": 10824
+    },
+    {
+      "created_at": "1777983566.6958919",
+      "input_tokens": 8900,
+      "output_tokens": 1612,
+      "tool_tokens": 2,
+      "turn_id": "run-1777983566693998000",
+      "turn_total": 10514
+    },
+    {
+      "created_at": "1777983633.07884",
+      "input_tokens": 8900,
+      "output_tokens": 1932,
+      "tool_tokens": 2,
+      "turn_id": "run-1777983633074579000",
+      "turn_total": 10834
+    },
+    {
+      "created_at": "1777983700.371943",
+      "input_tokens": 8900,
+      "output_tokens": 1705,
+      "tool_tokens": 2,
+      "turn_id": "run-1777983700369288000",
+      "turn_total": 10607
+    },
+    {
+      "created_at": "1777983745.952829",
+      "input_tokens": 8901,
+      "output_tokens": 1348,
+      "tool_tokens": 2,
+      "turn_id": "run-1777983745948044000",
+      "turn_total": 10251
+    },
+    {
+      "created_at": "1777983813.2790341",
+      "input_tokens": 8900,
+      "output_tokens": 2564,
+      "tool_tokens": 2,
+      "turn_id": "run-1777983813274184000",
+      "turn_total": 11466
+    },
+    {
+      "created_at": "1777983859.994269",
+      "input_tokens": 8900,
+      "output_tokens": 1280,
+      "tool_tokens": 88,
+      "turn_id": "run-1777983859990250000",
+      "turn_total": 10268
+    },
+    {
+      "created_at": "1777983895.293843",
+      "input_tokens": 8901,
+      "output_tokens": 1411,
+      "tool_tokens": 2,
+      "turn_id": "run-1777983895290147000",
+      "turn_total": 10314
+    },
+    {
+      "created_at": "1777983940.568376",
+      "input_tokens": 8900,
+      "output_tokens": 1947,
+      "tool_tokens": 2,
+      "turn_id": "run-1777983940565101000",
+      "turn_total": 10849
+    },
+    {
+      "created_at": "1777983984.279823",
+      "input_tokens": 8900,
+      "output_tokens": 1367,
+      "tool_tokens": 2,
+      "turn_id": "run-1777983984277141000",
+      "turn_total": 10269
+    },
+    {
+      "created_at": "1777984037.590731",
+      "input_tokens": 8900,
+      "output_tokens": 1685,
+      "tool_tokens": 2,
+      "turn_id": "run-1777984037589385000",
+      "turn_total": 10587
+    },
+    {
+      "created_at": "1777984077.416032",
+      "input_tokens": 8900,
+      "output_tokens": 1053,
+      "tool_tokens": 2,
+      "turn_id": "run-1777984077412200000",
+      "turn_total": 9955
+    },
+    {
+      "created_at": "1777984235.181211",
+      "input_tokens": 8900,
+      "output_tokens": 1484,
+      "tool_tokens": 349,
+      "turn_id": "run-1777984235180033000",
+      "turn_total": 10733
+    },
+    {
+      "created_at": "1777984278.199178",
+      "input_tokens": 8900,
+      "output_tokens": 1379,
+      "tool_tokens": 2,
+      "turn_id": "run-1777984278195201000",
+      "turn_total": 10281
+    },
+    {
+      "created_at": "1777984325.4320488",
+      "input_tokens": 8900,
+      "output_tokens": 1246,
+      "tool_tokens": 2,
+      "turn_id": "run-1777984325428286000",
+      "turn_total": 10148
+    },
+    {
+      "created_at": "1777984405.324927",
+      "input_tokens": 8900,
+      "output_tokens": 2147,
+      "tool_tokens": 2,
+      "turn_id": "run-1777984405321391000",
+      "turn_total": 11049
+    },
+    {
+      "created_at": "1777984464.1361868",
+      "input_tokens": 8901,
+      "output_tokens": 1607,
+      "tool_tokens": 2,
+      "turn_id": "run-1777984464135029000",
+      "turn_total": 10510
+    },
+    {
+      "created_at": "1777984516.567611",
+      "input_tokens": 8900,
+      "output_tokens": 1354,
+      "tool_tokens": 48,
+      "turn_id": "run-1777984516564146000",
+      "turn_total": 10302
+    },
+    {
+      "created_at": "1777984589.719058",
+      "input_tokens": 8901,
+      "output_tokens": 2302,
+      "tool_tokens": 2,
+      "turn_id": "run-1777984589715933000",
+      "turn_total": 11205
+    },
+    {
+      "created_at": "1777984770.1073332",
+      "input_tokens": 8901,
+      "output_tokens": 1671,
+      "tool_tokens": 62,
+      "turn_id": "run-1777984770106204000",
+      "turn_total": 10634
+    },
+    {
+      "created_at": "1777984809.928849",
+      "input_tokens": 8900,
+      "output_tokens": 1713,
+      "tool_tokens": 2,
+      "turn_id": "run-1777984809927569000",
+      "turn_total": 10615
+    },
+    {
+      "created_at": "1777984843.897677",
+      "input_tokens": 8900,
+      "output_tokens": 1385,
+      "tool_tokens": 2,
+      "turn_id": "run-1777984843894326000",
+      "turn_total": 10287
+    },
+    {
+      "created_at": "1777984907.315551",
+      "input_tokens": 8901,
+      "output_tokens": 1738,
+      "tool_tokens": 2,
+      "turn_id": "run-1777984907311826000",
+      "turn_total": 10641
+    },
+    {
+      "created_at": "1777984987.5053172",
+      "input_tokens": 8900,
+      "output_tokens": 1913,
+      "tool_tokens": 46,
+      "turn_id": "run-1777984987502682000",
+      "turn_total": 10859
+    },
+    {
+      "created_at": "1777985025.152229",
+      "input_tokens": 8901,
+      "output_tokens": 1229,
+      "tool_tokens": 2,
+      "turn_id": "run-1777985025149768000",
+      "turn_total": 10132
+    },
+    {
+      "created_at": "1777985067.758226",
+      "input_tokens": 8901,
+      "output_tokens": 1527,
+      "tool_tokens": 2,
+      "turn_id": "run-1777985067753902000",
+      "turn_total": 10430
+    },
+    {
+      "created_at": "1777985134.7400389",
+      "input_tokens": 8900,
+      "output_tokens": 1213,
+      "tool_tokens": 93,
+      "turn_id": "run-1777985134737902000",
+      "turn_total": 10206
+    },
+    {
+      "created_at": "1777985181.380843",
+      "input_tokens": 8900,
+      "output_tokens": 1381,
+      "tool_tokens": 2,
+      "turn_id": "run-1777985181376215000",
+      "turn_total": 10283
     }
   ]
 }

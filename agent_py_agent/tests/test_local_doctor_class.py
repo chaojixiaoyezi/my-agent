@@ -65,10 +65,8 @@ def test_add_doctor_check_not_ok_sets_severity():
     assert checks[0]["severity"] == "P2"
 
 
-# ── build_local_doctor_report 测试 ─────────────────────────────────────────
-
-def test_build_local_doctor_report_basic(tmp_path):
-    """测试基本报告构建。"""
+def _mock_agent_for_doctor(tmp_path, missing_files=None, source_counts=None, request_counts=None, stale_processing=None, memory_count=5, subagent_runs=None):
+    """Build a fully mocked agent for local_doctor tests."""
     db_file = tmp_path / "test.db"
     files_dir = tmp_path / "files"
     events_file = tmp_path / "events.jsonl"
@@ -84,25 +82,33 @@ def test_build_local_doctor_report_basic(tmp_path):
             "events_path": str(events_file),
             "record_count": 10,
         },
-        "local_store.source_counts.return_value": {"memory": 5, "gateway": 3},
+        "local_store.source_counts.return_value": source_counts or {"memory": 5, "gateway": 3},
         "memory.path": tmp_path / "memory",
         "subagents.workspace": tmp_path / "subagents",
         "config.gateway_processing_timeout_seconds": 300,
     })
-    mock_agent.local_store.missing_content_files.return_value = []
+    mock_agent.local_store.missing_content_files.return_value = missing_files or []
+    mock_agent.subagents.list_runs.return_value = subagent_runs or []
+    return mock_agent
 
+
+def _build_doctor_report_with_mocks(mock_agent, tmp_path, request_counts=None, stale_processing=None, memory_count=5):
+    """Call build_local_doctor_report with all required patches."""
     with patch("agent_py_agent.cli.local_doctor.gateway_paths") as mock_paths:
         mock_paths.return_value = MagicMock(root=tmp_path)
         with patch("agent_py_agent.cli.local_doctor.gateway_request_counts") as mock_counts:
-            mock_counts.return_value = {"pending": 0, "processing": 0, "done": 5}
+            mock_counts.return_value = request_counts or {"pending": 0, "processing": 0, "done": 5}
             with patch("agent_py_agent.cli.local_doctor.gateway_stale_processing") as mock_stale:
-                mock_stale.return_value = []
+                mock_stale.return_value = stale_processing or []
                 with patch("agent_py_agent.cli.local_doctor._memory_record_count") as mock_mem:
-                    mock_mem.return_value = 5
-                    mock_agent.subagents.list_runs.return_value = []
+                    mock_mem.return_value = memory_count
+                    return build_local_doctor_report(mock_agent)
 
-                    result = build_local_doctor_report(mock_agent)
 
+def test_build_local_doctor_report_basic(tmp_path):
+    """测试基本报告构建。"""
+    mock_agent = _mock_agent_for_doctor(tmp_path)
+    result = _build_doctor_report_with_mocks(mock_agent, tmp_path)
     assert result["ok"] is True
     assert "checks" in result
     assert "suggestions" in result
@@ -110,80 +116,20 @@ def test_build_local_doctor_report_basic(tmp_path):
 
 def test_build_local_doctor_report_with_stale_processing(tmp_path):
     """测试存在 stale processing 时的报告。"""
-    db_file = tmp_path / "test.db"
-    files_dir = tmp_path / "files"
-    events_file = tmp_path / "events.jsonl"
-    files_dir.mkdir()
-    db_file.touch()
-    events_file.touch()
-
-    mock_agent = MagicMock()
-    mock_agent.configure_mock(**{
-        "local_store.stats.return_value": {
-            "db_path": str(db_file),
-            "files_dir": str(files_dir),
-            "events_path": str(events_file),
-            "record_count": 10,
-        },
-        "local_store.source_counts.return_value": {"memory": 5, "gateway": 3},
-        "memory.path": tmp_path / "memory",
-        "subagents.workspace": tmp_path / "subagents",
-        "config.gateway_processing_timeout_seconds": 300,
-    })
-    mock_agent.local_store.missing_content_files.return_value = []
-
-    with patch("agent_py_agent.cli.local_doctor.gateway_paths") as mock_paths:
-        mock_paths.return_value = MagicMock(root=tmp_path)
-        with patch("agent_py_agent.cli.local_doctor.gateway_request_counts") as mock_counts:
-            mock_counts.return_value = {"pending": 2, "processing": 1, "done": 5}
-            with patch("agent_py_agent.cli.local_doctor.gateway_stale_processing") as mock_stale:
-                mock_stale.return_value = [{"id": "stale-1"}]
-                with patch("agent_py_agent.cli.local_doctor._memory_record_count") as mock_mem:
-                    mock_mem.return_value = 5
-                    mock_agent.subagents.list_runs.return_value = []
-
-                    result = build_local_doctor_report(mock_agent)
-
+    mock_agent = _mock_agent_for_doctor(tmp_path)
+    result = _build_doctor_report_with_mocks(
+        mock_agent, tmp_path,
+        request_counts={"pending": 2, "processing": 1, "done": 5},
+        stale_processing=[{"id": "stale-1"}],
+    )
     assert result["ok"] is False
     assert any("processing" in s.lower() for s in result["suggestions"])
 
 
 def test_build_local_doctor_report_missing_content_files(tmp_path):
     """测试存在缺失正文文件时的报告。"""
-    db_file = tmp_path / "test.db"
-    files_dir = tmp_path / "files"
-    events_file = tmp_path / "events.jsonl"
-    files_dir.mkdir()
-    db_file.touch()
-    events_file.touch()
-
-    mock_agent = MagicMock()
-    mock_agent.configure_mock(**{
-        "local_store.stats.return_value": {
-            "db_path": str(db_file),
-            "files_dir": str(files_dir),
-            "events_path": str(events_file),
-            "record_count": 5,
-        },
-        "local_store.source_counts.return_value": {"memory": 5},
-        "local_store.missing_content_files.return_value": ["file1.txt", "file2.txt"],
-        "memory.path": tmp_path / "memory",
-        "subagents.workspace": tmp_path / "subagents",
-        "config.gateway_processing_timeout_seconds": 300,
-    })
-
-    with patch("agent_py_agent.cli.local_doctor.gateway_paths") as mock_paths:
-        mock_paths.return_value = MagicMock(root=tmp_path)
-        with patch("agent_py_agent.cli.local_doctor.gateway_request_counts") as mock_counts:
-            mock_counts.return_value = {}
-            with patch("agent_py_agent.cli.local_doctor.gateway_stale_processing") as mock_stale:
-                mock_stale.return_value = []
-                with patch("agent_py_agent.cli.local_doctor._memory_record_count") as mock_mem:
-                    mock_mem.return_value = 5
-                    mock_agent.subagents.list_runs.return_value = []
-
-                    result = build_local_doctor_report(mock_agent)
-
+    mock_agent = _mock_agent_for_doctor(tmp_path, missing_files=["file1.txt", "file2.txt"], source_counts={"memory": 5})
+    result = _build_doctor_report_with_mocks(mock_agent, tmp_path, request_counts={})
     assert result["ok"] is False
     content_check = next(c for c in result["checks"] if c["name"] == "local_store_content_files")
     assert content_check["ok"] is False
@@ -372,38 +318,8 @@ def test_build_status_suggestions_no_timeline():
 
 def test_build_local_doctor_report_empty_local_store_with_sources(tmp_path):
     """测试本地存储为空但有其他来源时的建议。"""
-    db_file = tmp_path / "test.db"
-    files_dir = tmp_path / "files"
-    events_file = tmp_path / "events.jsonl"
-    files_dir.mkdir()
-    db_file.touch()
-    events_file.touch()
-
-    mock_agent = MagicMock()
-    mock_agent.configure_mock(**{
-        "local_store.stats.return_value": {
-            "db_path": str(db_file),
-            "files_dir": str(files_dir),
-            "events_path": str(events_file),
-            "record_count": 0,
-        },
-        "local_store.source_counts.return_value": {},
-        "memory.path": tmp_path / "memory",
-        "subagents.workspace": tmp_path / "subagents",
-        "config.gateway_processing_timeout_seconds": 300,
-    })
-    mock_agent.subagents.list_runs.return_value = [MagicMock()]  # 有 subagent
-
-    with patch("agent_py_agent.cli.local_doctor.gateway_paths") as mock_paths:
-        mock_paths.return_value = MagicMock(root=tmp_path)
-        with patch("agent_py_agent.cli.local_doctor.gateway_request_counts") as mock_counts:
-            mock_counts.return_value = {"pending": 1}  # 有请求
-            with patch("agent_py_agent.cli.local_doctor.gateway_stale_processing") as mock_stale:
-                mock_stale.return_value = []
-                with patch("agent_py_agent.cli.local_doctor._memory_record_count") as mock_mem:
-                    mock_mem.return_value = 10
-                    result = build_local_doctor_report(mock_agent)
-
+    mock_agent = _mock_agent_for_doctor(tmp_path, source_counts={}, subagent_runs=[MagicMock()])
+    result = _build_doctor_report_with_mocks(mock_agent, tmp_path, request_counts={"pending": 1}, memory_count=10)
     assert any("local-rebuild" in s for s in result["suggestions"])
 
 

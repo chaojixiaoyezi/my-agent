@@ -45,86 +45,95 @@ class TuiCreateKeybindingsParams:
     pending_jobs_ref_for_enqueue: list[int]
 
 
+def _tui_enqueue_job(
+    params: TuiCreateKeybindingsParams,
+    text: str,
+) -> None:
+    """Enqueue a chat job and render the user entry."""
+    show_prompt, text = is_show_prompt_command(text)
+    job = ChatJob(
+        user=text,
+        show_prompt=show_prompt,
+        inject=list(params.runtime_inject),
+        prompt_files=list(params.prompt_files),
+    )
+    with params.state_lock:
+        params.pending_jobs_ref_for_enqueue[0] += 1
+    params.jobs.put(job)
+    from .rendering import terminal_rule
+
+    lines = [line.rstrip() for line in text.splitlines()] or [text]
+    _cprint(f"\n{terminal_rule()}")
+    for index, line in enumerate(lines):
+        ball = "\033[38;2;59;130;246m●\033[0m" if index == 0 else " "
+        _cprint(f"{ball}  \033[38;2;59;130;246m\033[1m{line}\033[0m")
+    _cprint("")
+    _cprint("")
+
+
+def _handle_enter_keybinding(event, params):
+    """Handle Enter key: process command or enqueue job."""
+    text = params.input_area.text.strip()
+    if not text:
+        return
+    params.input_area.text = ""
+    if _tui_handle_command(
+        params=TuiHandleCommandParams(
+            user=text,
+            agent=params.agent,
+            args=params.args,
+            runtime_inject=params.runtime_inject,
+            prompt_files=params.prompt_files,
+            use_gateway=params.use_gateway,
+            paths=params.paths,
+            state_lock=params.state_lock,
+            is_running_ref=params.is_running_ref,
+            pending_jobs_ref=params.pending_jobs_ref,
+            running_prompt_ref=params.running_prompt_ref,
+            running_started_at_ref=params.running_started_at_ref,
+            shutting_down_ref=params.shutting_down_ref,
+            stop_event=params.stop_event,
+            assistant_outputs=params.assistant_outputs,
+        )
+    ):
+        if params.stop_event.is_set():
+            event.app.exit()
+        return
+    _tui_enqueue_job(params, text)
+
+
+def _handle_ctrl_c_keybinding(event, params):
+    """Handle Ctrl+C: request exit."""
+    _tui_request_exit(
+        params.shutting_down_ref,
+        params.state_lock,
+        params.is_running_ref,
+        params.pending_jobs_ref,
+        params.stop_event,
+    )
+    event.app.exit()
+
+
+def _handle_ctrl_d_keybinding(event, params):
+    """Handle Ctrl+D: request exit."""
+    _tui_request_exit(
+        params.shutting_down_ref,
+        params.state_lock,
+        params.is_running_ref,
+        params.pending_jobs_ref,
+        params.stop_event,
+    )
+    event.app.exit()
+
+
 def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
     """Create prompt_toolkit KeyBindings with enter/c-c/c-d handlers."""
     from prompt_toolkit.key_binding import KeyBindings
 
     kb = KeyBindings()
-
-    def _handle_enter(event):
-        text = params.input_area.text.strip()
-        if not text:
-            return
-        params.input_area.text = ""
-        if _tui_handle_command(
-            params=TuiHandleCommandParams(
-                user=text,
-                agent=params.agent,
-                args=params.args,
-                runtime_inject=params.runtime_inject,
-                prompt_files=params.prompt_files,
-                use_gateway=params.use_gateway,
-                paths=params.paths,
-                state_lock=params.state_lock,
-                is_running_ref=params.is_running_ref,
-                pending_jobs_ref=params.pending_jobs_ref,
-                running_prompt_ref=params.running_prompt_ref,
-                running_started_at_ref=params.running_started_at_ref,
-                shutting_down_ref=params.shutting_down_ref,
-                stop_event=params.stop_event,
-                assistant_outputs=params.assistant_outputs,
-            )
-        ):
-            if params.stop_event.is_set():
-                event.app.exit()
-            return
-        show_prompt, text = is_show_prompt_command(text)
-
-        job = ChatJob(
-            user=text,
-            show_prompt=show_prompt,
-            inject=list(params.runtime_inject),
-            prompt_files=list(params.prompt_files),
-        )
-        with params.state_lock:
-            params.pending_jobs_ref_for_enqueue[0] += 1
-        params.jobs.put(job)
-        from .rendering import terminal_rule
-
-        lines = [line.rstrip() for line in text.splitlines()] or [text]
-        _cprint(f"\n{terminal_rule()}")
-        for index, line in enumerate(lines):
-            ball = "\033[38;2;59;130;246m●\033[0m" if index == 0 else " "
-            _cprint(f"{ball}  \033[38;2;59;130;246m\033[1m{line}\033[0m")
-        _cprint("")
-        _cprint("")
-
-    kb.add("enter")(_handle_enter)
-
-    def _handle_ctrl_c(event):
-        _tui_request_exit(
-            params.shutting_down_ref,
-            params.state_lock,
-            params.is_running_ref,
-            params.pending_jobs_ref,
-            params.stop_event,
-        )
-        event.app.exit()
-
-    kb.add("c-c")(_handle_ctrl_c)
-
-    def _handle_ctrl_d(event):
-        _tui_request_exit(
-            params.shutting_down_ref,
-            params.state_lock,
-            params.is_running_ref,
-            params.pending_jobs_ref,
-            params.stop_event,
-        )
-        event.app.exit()
-
-    kb.add("c-d")(_handle_ctrl_d)
-
+    kb.add("enter")(lambda e: _handle_enter_keybinding(e, params))
+    kb.add("c-c")(lambda e: _handle_ctrl_c_keybinding(e, params))
+    kb.add("c-d")(lambda e: _handle_ctrl_d_keybinding(e, params))
     return kb
 
 

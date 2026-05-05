@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: builds concise human/LLM-readable recovery briefs for memory-resume.
 
 新手说明:
-这个文件只负责把归档线索、LocalStore 线索和任务事实源压成一份“恢复简报”。
+这个文件只负责把归档线索、LocalStore 线索和任务事实源压成一份'恢复简报'。
 它不读取文件、不修改状态，只帮人和后续自动化快速知道下一步该看哪里。
 """
 

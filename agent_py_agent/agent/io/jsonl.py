@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -52,16 +52,14 @@ def _locked_text_file(path: Path) -> Iterator[TextIO]:
     """Open an append target after taking both thread and OS file locks."""
 
     process_lock = _thread_lock_for(path)
-    with process_lock:
+    with process_lock, ExitStack() as stack:
         lock_path = path.with_name(path.name + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("a+", encoding="utf-8") as lock_handle:
-            _lock_os_file(lock_handle)
-            try:
-                with path.open("a", encoding="utf-8") as target:
-                    yield target
-            finally:
-                _unlock_os_file(lock_handle)
+        lock_handle = stack.enter_context(lock_path.open("a+", encoding="utf-8"))
+        _lock_os_file(lock_handle)
+        stack.callback(_unlock_os_file, lock_handle)
+        target = stack.enter_context(path.open("a", encoding="utf-8"))
+        yield target
 
 
 def _thread_lock_for(path: Path) -> threading.Lock:

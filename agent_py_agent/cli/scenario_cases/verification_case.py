@@ -20,16 +20,8 @@ from ..scenario_utils import (
 )
 
 
-def _verification_setup(args):
-    """Setup for verification case: create workspace, agent, and forge a fake completed task."""
-    paths = create_scenario_workspace(args)
-    print("MY-AGENT SCENARIO TEST")
-    print("case=verification")
-    print(f"run_root={paths.run_root}")
-    print(f"fixture_root={paths.fixture_root}")
-    print(f"config={paths.config}")
-
-    agent = load_scenario_agent(paths.config)
+def _forge_task_evidence(agent):
+    """Create a fake completed task with forged evidence and output files."""
     print_scenario_step(1, "构造伪造完成的子代理记录")
     task = agent.subagents.create_run(
         goal="极端场景：runner 声称写了 artifact，但文件实际不存在",
@@ -42,59 +34,51 @@ def _verification_setup(args):
     task.verification_status = "NEEDS_ACCEPTANCE"
     task.channel_status = "OK"
     task.used_tools = ["read_file", "write_file"]
-    task.evidence.append(
-        VerificationEvidence(
-            kind="file_read",
-            summary="伪造证据：声称 read_file 成功",
-            path="README.md",
-            ok=True,
-            created_at=time.time(),
-        )
-    )
-    task.evidence.append(
-        VerificationEvidence(
-            kind="file_write",
-            summary="伪造证据：声称 write_file 写入 scenario_outputs/forged.md",
-            path="scenario_outputs/forged.md",
-            ok=True,
-            created_at=time.time(),
-        )
-    )
+    task.evidence.append(VerificationEvidence(
+        kind="file_read", summary="伪造证据：声称 read_file 成功",
+        path="README.md", ok=True, created_at=time.time(),
+    ))
+    task.evidence.append(VerificationEvidence(
+        kind="file_write", summary="伪造证据：声称 write_file 写入 scenario_outputs/forged.md",
+        path="scenario_outputs/forged.md", ok=True, created_at=time.time(),
+    ))
     agent.subagents.save(task)
+    _write_forged_output_files(task)
+    return task
+
+
+def _write_forged_output_files(task):
+    """Write fake output.json and runner_result_json for the forged task."""
     Path(task.output_json).write_text(
-        json.dumps(
-            {
-                "run_id": task.id,
-                "status": "AWAITING_ACCEPTANCE",
-                "artifacts": [
-                    {
-                        "path": "scenario_outputs/forged.md",
-                        "kind": "report",
-                        "summary": "这个文件被故意留空不存在，用来测试验收防作弊。",
-                    }
-                ],
-                "tests": [{"name": "fake-test", "command": "echo ok", "ok": True}],
-                "patches": [],
-                "blockers": [],
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
+        json.dumps({
+            "run_id": task.id, "status": "AWAITING_ACCEPTANCE",
+            "artifacts": [{"path": "scenario_outputs/forged.md", "kind": "report",
+                           "summary": "这个文件被故意留空不存在，用来测试验收防作弊。"}],
+            "tests": [{"name": "fake-test", "command": "echo ok", "ok": True}],
+            "patches": [], "blockers": [],
+        }, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     Path(task.runner_result_json).write_text(
-        json.dumps(
-            {
-                "run_id": task.id,
-                "structured_output_found": True,
-                "structured_output_ok": True,
-                "structured_parse_error": "",
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
+        json.dumps({
+            "run_id": task.id, "structured_output_found": True,
+            "structured_output_ok": True, "structured_parse_error": "",
+        }, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _verification_setup(args):
+    """Setup for verification case: create workspace, agent, and forge a fake completed task."""
+    paths = create_scenario_workspace(args)
+    print("MY-AGENT SCENARIO TEST")
+    print("case=verification")
+    print(f"run_root={paths.run_root}")
+    print(f"fixture_root={paths.fixture_root}")
+    print(f"config={paths.config}")
+
+    agent = load_scenario_agent(paths.config)
+    task = _forge_task_evidence(agent)
     return paths, agent, task
 
 

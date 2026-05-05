@@ -288,7 +288,7 @@ def collect_scenario_report_files(agent: SimpleAgent, fixture_root: Path, expect
 
     给人看的解释：
     真实 runner 现在不能随便往 fixture 项目根目录写文件，只能写自己的 task_dir。
-    这个函数负责去“真实允许写入的位置”找报告，同时兼容旧的 fixture_root/scenario_outputs。
+    这个函数负责去'真实允许写入的位置'找报告，同时兼容旧的 fixture_root/scenario_outputs。
     """
 
     report_files: list[Path] = []

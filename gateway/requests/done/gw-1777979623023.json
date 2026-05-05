@@ -1,0 +1,17 @@
+{
+  "attempts": 1,
+  "client_pid": 0,
+  "created_at": 1777979623.023703,
+  "id": "gw-1777979623023",
+  "include_prompt": false,
+  "inject": [],
+  "kind": "ask",
+  "lease_heartbeat_at": 1777979626.792941,
+  "lease_owner": "test-worker",
+  "lease_started_at": 1777979623.0241,
+  "prompt": "长任务 lease heartbeat 测试",
+  "prompt_files": [],
+  "save": false,
+  "status": "processing",
+  "updated_at": 1777979626.792941
+}

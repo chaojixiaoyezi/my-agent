@@ -26,6 +26,48 @@ from ..agent.gateway_parts.supervisor import (
 from .common import ROOT, make_agent
 
 
+def _spawn_daemon(cmd: list[str], log_path: Path) -> subprocess.Popen:
+    """在后台启动守护进程，stdout/stderr 重定向到日志文件。"""
+    creationflags = 0
+    start_new_session = False
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    else:
+        start_new_session = True
+    with log_path.open("ab") as log_file:
+        return subprocess.Popen(
+            cmd, cwd=ROOT.parent, stdin=subprocess.DEVNULL,
+            stdout=log_file, stderr=subprocess.STDOUT,
+            creationflags=creationflags, start_new_session=start_new_session,
+        )
+
+
+def _wait_for_gateway_ready(paths, timeout: float = 30.0) -> tuple[int, bool] | None:
+    """等待 gateway 就绪，返回 (pid, alive) 或超时返回 None。"""
+    print("等待 gateway 就绪...")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        gpid, galive = gateway_running(paths)
+        if gpid and galive:
+            return gpid, galive
+        time.sleep(1.0)
+    return None
+
+
+def _wait_for_supervisor_start(supervisor_pid_path: Path, process: subprocess.Popen, deadline: float) -> bool:
+    """Wait for supervisor to write its PID file and confirm it matches our process."""
+    while time.time() < deadline:
+        if supervisor_pid_path.exists():
+            try:
+                pid = int(supervisor_pid_path.read_text(encoding="utf-8").strip())
+                if pid and pid == process.pid:
+                    return True
+            except (OSError, ValueError):
+                pass
+        time.sleep(0.2)
+    return False
+
+
 def cmd_supervisor_start(args) -> int:
     """启动 gateway 看门狗进程（supervisor）。"""
     agent = make_agent(args)
@@ -36,51 +78,14 @@ def cmd_supervisor_start(args) -> int:
         return 0
 
     supervisor_pid_path = paths.root / "supervisor.pid"
+    cmd = [sys.executable, "-m", "agent_py_agent", "--config", args.config, "gateway", "supervisor"]
+    process = _spawn_daemon(cmd, paths.log)
 
-    cmd = [
-        sys.executable,
-        "-m",
-        "agent_py_agent",
-        "--config",
-        args.config,
-        "gateway",
-        "supervisor",
-    ]
-
-    creationflags = 0
-    start_new_session = False
-    if os.name == "nt":
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    else:
-        start_new_session = True
-
-    config_path = Path(args.config).resolve()
-    with paths.log.open("ab") as log_file:
-        process = subprocess.Popen(
-            cmd,
-            cwd=ROOT.parent,
-            stdin=subprocess.DEVNULL,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            creationflags=creationflags,
-            start_new_session=start_new_session,
-        )
-
-    # Wait for supervisor to start
     deadline = time.time() + 10.0
-    started = False
-    while time.time() < deadline:
-        if supervisor_pid_path.exists():
-            try:
-                pid = int(supervisor_pid_path.read_text(encoding="utf-8").strip())
-                if pid and pid == process.pid:
-                    started = True
-                    break
-            except (OSError, ValueError):
-                pass
-        time.sleep(0.2)
-
-    print(f"supervisor starting pid={process.pid}")
+    if _wait_for_supervisor_start(supervisor_pid_path, process, deadline):
+        print(f"supervisor starting pid={process.pid}")
+    else:
+        print(f"supervisor starting (pid file not yet confirmed) pid={process.pid}")
     print(f"workspace: {paths.root}")
     return 0
 
@@ -150,82 +155,27 @@ def cmd_start_all(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)
-
-    # Determine adapter channel (default: all)
     adapter_channel = getattr(args, "adapter_channel", getattr(args, "adapter", "all"))
 
-    # Start supervisor (which starts and monitors gateway)
     if is_supervisor_running(args.config):
         print("supervisor 已在运行")
     else:
-        cmd = [
-            sys.executable,
-            "-m",
-            "agent_py_agent",
-            "--config",
-            args.config,
-            "supervisor",
-            "run",
-        ]
-        creationflags = 0
-        start_new_session = False
-        if os.name == "nt":
-            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        else:
-            start_new_session = True
-
-        config_path = Path(args.config).resolve()
-        with paths.log.open("ab") as log_file:
-            subprocess.Popen(
-                cmd,
-                cwd=ROOT.parent,
-                stdin=subprocess.DEVNULL,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                creationflags=creationflags,
-                start_new_session=start_new_session,
-            )
+        cmd = [sys.executable, "-m", "agent_py_agent", "--config", args.config, "supervisor", "run"]
+        _spawn_daemon(cmd, paths.log)
         print("supervisor 启动中...")
 
-    # Wait for gateway to be ready
-    print("等待 gateway 就绪...")
-    deadline = time.time() + 30.0
-    while time.time() < deadline:
-        gpid, galive = gateway_running(paths)
-        if gpid and galive:
-            break
-        time.sleep(1.0)
-    else:
+    result = _wait_for_gateway_ready(paths)
+    if result is None:
         print("gateway 启动超时，请检查日志", file=sys.stderr)
         return 2
-
+    gpid, _ = result
     print(f"gateway 就绪: pid={gpid}")
 
-    # Start adapters if requested
     if adapter_channel not in (None, 'none'):
         print(f"启动通道适配器: {adapter_channel}")
-        adapter_cmd = [
-            sys.executable,
-            "-m",
-            "agent_py_agent",
-            "--config",
-            args.config,
-            "adapter",
-            "start",
-            "--channel",
-            adapter_channel,
-            "--daemon",
-        ]
-        with paths.log.open("ab") as log_file:
-            subprocess.Popen(
-                adapter_cmd,
-                cwd=ROOT.parent,
-                stdin=subprocess.DEVNULL,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                creationflags=creationflags,
-                start_new_session=start_new_session,
-            )
+        adapter_cmd = [sys.executable, "-m", "agent_py_agent", "--config", args.config,
+                       "adapter", "start", "--channel", adapter_channel, "--daemon"]
+        _spawn_daemon(adapter_cmd, paths.log)
         print("适配器启动中...")
 
     print("start-all 完成。运行 `my-agent gateway status` 查看状态。")

@@ -23,6 +23,16 @@ def _check_action_options(action, reference, missing):
             missing.append(option)
 
 
+def _collect_subparser_options(action, reference):
+    """Collect missing --options from a subparser action."""
+    missing = []
+    for sub_action in action._actions:
+        for sub_option in sub_action.option_strings:
+            if sub_option.startswith("--") and sub_option not in reference:
+                missing.append(f"{action.title} {sub_option}")
+    return missing
+
+
 def test_cli_reference_mentions_all_commands_and_long_options():
     """Every --long option and subcommand in the parser appears in CLI_REFERENCE.md."""
     project_root = Path(__file__).resolve().parents[2]
@@ -36,6 +46,6 @@ def test_cli_reference_mentions_all_commands_and_long_options():
             for command, subparser in action.choices.items():
                 if f"`{command}`" not in reference:
                     missing.append(command)
-                missing.extend(_collect_subparser_missing(subparser, command, reference))
+                missing.extend(_collect_subparser_options(subparser, reference))
 
     assert missing == []

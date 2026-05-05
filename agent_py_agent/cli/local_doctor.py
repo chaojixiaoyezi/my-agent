@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: builds LocalStore/gateway/subagent diagnostics and rebuild plans.
 
 给人看的解释：
-这里负责“体检”和“重建索引”的业务规则。
+这里负责'体检'和'重建索引'的业务规则。
 命令函数只负责打印，真正判断哪里坏了、该建议什么修复动作，都放在这里。
 """
 

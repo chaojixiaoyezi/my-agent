@@ -41,7 +41,7 @@ def configure_stdio() -> None:
     """把标准输出尽量固定到 UTF-8。
 
     这样做主要是为了避免 Windows 终端在打印模型返回内容时再次乱码。
-    说白了，就是先把“字能不能正常显示”这个基础问题兜住。
+    说白了，就是先把'字能不能正常显示'这个基础问题兜住。
     """
 
     for stream_name in ("stdout", "stderr"):

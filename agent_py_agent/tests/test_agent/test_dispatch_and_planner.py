@@ -22,6 +22,30 @@ from .backends import (
 )
 
 
+def _make_router(agent):
+    return CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+
+
+def _setup_review_task(agent, task, *, patch_status="applied", patch_summary="已应用"):
+    """Helper to set up a task in AWAITING_ACCEPTANCE state with evidence and output JSON."""
+    task.status = "AWAITING_ACCEPTANCE"
+    task.verification_status = "NEEDS_ACCEPTANCE"
+    task.channel_status = "OK"
+    task.evidence.append(
+        VerificationEvidence(kind="note", summary="有验收证据", ok=True, created_at=time.time())
+    )
+    agent.subagents.save(task)
+    Path(task.output_json).write_text(
+        json.dumps({
+            "run_id": task.id,
+            "tests": [{"name": "smoke", "command": "", "ok": True}],
+            "patches": [{"path": "agent_py_agent/agent/demo.py", "status": patch_status, "summary": patch_summary}],
+            "blockers": [],
+        }, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
+    return task
+
+
 def test_subagent_dispatch_dry_run_plans_runner_patch_and_acceptance():
     """LLM: Verifies dry-run dispatch plans runner, patch_review, and acceptance steps without mutating state."""
     with tempfile.TemporaryDirectory() as td:
@@ -29,54 +53,17 @@ def test_subagent_dispatch_dry_run_plans_runner_patch_and_acceptance():
         cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
         runner_task = agent.subagents.create_run(
-            goal="调度 runner dry-run",
-            thought="等待父代理调度。",
-            plan=["执行 runner"],
+            goal="调度 runner dry-run", thought="等待父代理调度。", plan=["执行 runner"],
         )
-        review_task = agent.subagents.create_run(
-            goal="调度 patch 和验收 dry-run",
-            thought="runner 已完成，等待审核。",
-            plan=["审核 patch", "验收"],
-        )
-        review_task.status = "AWAITING_ACCEPTANCE"
-        review_task.verification_status = "NEEDS_ACCEPTANCE"
-        review_task.channel_status = "OK"
-        review_task.evidence.append(
-            VerificationEvidence(
-                kind="note",
-                summary="有验收证据",
-                ok=True,
-                created_at=time.time(),
-            )
-        )
-        agent.subagents.save(review_task)
-        Path(review_task.output_json).write_text(
-            json.dumps(
-                {
-                    "run_id": review_task.id,
-                    "tests": [{"name": "smoke", "command": "", "ok": True}],
-                    "patches": [
-                        {
-                            "path": "agent_py_agent/agent/demo.py",
-                            "status": "applied",
-                            "summary": "已应用但未审核",
-                        }
-                    ],
-                    "blockers": [],
-                },
-                ensure_ascii=False,
-                indent=2,
+        review_task = _setup_review_task(
+            agent,
+            agent.subagents.create_run(
+                goal="调度 patch 和验收 dry-run", thought="runner 已完成，等待审核。", plan=["审核 patch", "验收"],
             ),
-            encoding="utf-8",
+            patch_status="applied", patch_summary="已应用但未审核",
         )
 
-        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
-        report = agent.dispatch_subagents(
-            router,
-            CapabilityConfig(),
-            apply=False,
-            max_runners=1,
-        )
+        report = agent.dispatch_subagents(_make_router(agent), CapabilityConfig(), apply=False, max_runners=1)
         output = json.loads(Path(review_task.output_json).read_text(encoding="utf-8"))
 
         assert report.dry_run
@@ -95,63 +82,21 @@ def test_subagent_dispatch_apply_reviews_patch_then_accepts():
         root = Path(td)
         cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
-        task = agent.subagents.create_run(
-            goal="调度 patch 审核后验收",
-            thought="runner 已完成，等待调度器收口。",
-            plan=["审核 patch", "验收"],
-        )
-        task.status = "AWAITING_ACCEPTANCE"
-        task.verification_status = "NEEDS_ACCEPTANCE"
-        task.channel_status = "OK"
-        task.evidence.append(
-            VerificationEvidence(
-                kind="note",
-                summary="有验收证据",
-                ok=True,
-                created_at=time.time(),
-            )
-        )
-        agent.subagents.save(task)
-        Path(task.output_json).write_text(
-            json.dumps(
-                {
-                    "run_id": task.id,
-                    "tests": [{"name": "smoke", "command": "", "ok": True}],
-                    "patches": [
-                        {
-                            "path": "agent_py_agent/agent/demo.py",
-                            "status": "applied",
-                            "summary": "已应用",
-                        }
-                    ],
-                    "blockers": [],
-                },
-                ensure_ascii=False,
-                indent=2,
+        task = _setup_review_task(
+            agent,
+            agent.subagents.create_run(
+                goal="调度 patch 审核后验收", thought="runner 已完成，等待调度器收口。", plan=["审核 patch", "验收"],
             ),
-            encoding="utf-8",
         )
         Path(task.runner_result_json).write_text(
-            json.dumps(
-                {
-                    "run_id": task.id,
-                    "structured_output_found": True,
-                    "structured_output_ok": True,
-                    "structured_parse_error": "",
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
+            json.dumps({
+                "run_id": task.id, "structured_output_found": True,
+                "structured_output_ok": True, "structured_parse_error": "",
+            }, ensure_ascii=False, indent=2), encoding="utf-8",
         )
 
-        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
         report = agent.dispatch_subagents(
-            router,
-            CapabilityConfig(),
-            apply=True,
-            max_runners=0,
-            reviewer="dispatch-test",
+            _make_router(agent), CapabilityConfig(), apply=True, max_runners=0, reviewer="dispatch-test",
         )
         loaded = agent.subagents.load(task.id)
         output = json.loads(Path(task.output_json).read_text(encoding="utf-8"))

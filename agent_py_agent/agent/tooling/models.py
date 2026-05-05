@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: defines stable tool metadata, retrieval hits, and base execution contracts.
 
 给人看的解释：
-这个文件只放工具系统最基础的“名词”和“接口”。
+这个文件只放工具系统最基础的'名词'和'接口'。
 比如一个工具叫什么、适合干什么、执行后返回什么格式，以及工具检索结果长什么样。
 后面无论是文件工具、网络工具还是编排工具，都应该沿用这里的结构。
 """
@@ -23,8 +23,8 @@ class ToolSpec:
 
     字段设计上尽量说人话，方便你后面继续扩展：
     - `description` 是一句话总述
-    - `use_cases` 是“什么时候该用它”
-    - `avoid_when` 是“什么时候别用它”
+    - `use_cases` 是'什么时候该用它'
+    - `avoid_when` 是'什么时候别用它'
     - `keywords` 给检索器做召回
     - `parameters` / `parameter_details` 负责把参数说明拆成简版和详版
     """
@@ -43,7 +43,7 @@ class ToolSpec:
         """渲染工具目录里的中等详细条目。
 
         这里故意不把所有细节都展开，只保留足够帮助模型做初步判断的信息。
-        简单说，就是先给它看“工具菜单”，别一上来就把整本说明书塞过去。
+        简单说，就是先给它看'工具菜单'，别一上来就把整本说明书塞过去。
         """
 
         params = "、".join(self.parameters.keys()) or "无"
@@ -164,7 +164,7 @@ class HybridToolRetriever:
     逻辑很简单：
     - 先把多个召回器的结果合并
     - 再按总分排
-    - 最后给出“为什么推荐这个工具”
+    - 最后给出'为什么推荐这个工具'
 
     现在真正起作用的是关键词层，向量层只是接口预留。
     """
@@ -264,9 +264,9 @@ def _score_keyword_token(token: str, haystacks: dict[str, str]) -> tuple[float, 
     score = 0.0
     reasons: list[str] = []
     checks = [
-        ("name", 6.0, f"命中工具名“{token}”"),
-        ("keywords", 4.0, f"命中关键词“{token}”"),
-        ("category", 2.5, f"命中类别“{token}”"),
+        ("name", 6.0, f"命中工具名'{token}'"),
+        ("keywords", 4.0, f"命中关键词'{token}'"),
+        ("category", 2.5, f"命中类别'{token}'"),
     ]
     for key, weight, reason in checks:
         if token in haystacks[key]:
@@ -274,7 +274,7 @@ def _score_keyword_token(token: str, haystacks: dict[str, str]) -> tuple[float, 
             reasons.append(reason)
     if token in haystacks["description"] or token in haystacks["use_cases"]:
         score += 1.5
-        reasons.append(f"命中用途描述“{token}”")
+        reasons.append(f"命中用途描述'{token}'")
     return score, reasons
 
 

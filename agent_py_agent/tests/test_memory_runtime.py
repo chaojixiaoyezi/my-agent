@@ -90,12 +90,11 @@ def _write_cross_day_handoff_archive(root: Path, run_id: str) -> None:
     )
 
 
-def _write_cross_day_gateway_archive(agent: SimpleAgent, request_id: str = "gwreq-runtime-cross-day") -> Path:
-    root = agent.root
-    response_path = root / "gateway" / "responses" / f"{request_id}.json"
-    request_path = root / "gateway" / "requests" / "done" / f"{request_id}.json"
+# ── Gateway archive helpers ────────────────────────────────────────────────────
+
+def _write_gateway_response_file(response_path: Path, request_id: str) -> None:
+    """Write the gateway response JSON file."""
     response_path.parent.mkdir(parents=True, exist_ok=True)
-    request_path.parent.mkdir(parents=True, exist_ok=True)
     response_path.write_text(
         json.dumps(
             {
@@ -111,6 +110,11 @@ def _write_cross_day_gateway_archive(agent: SimpleAgent, request_id: str = "gwre
         ),
         encoding="utf-8",
     )
+
+
+def _write_gateway_request_file(request_path: Path, request_id: str) -> None:
+    """Write the gateway request JSON file (done status)."""
+    request_path.parent.mkdir(parents=True, exist_ok=True)
     request_path.write_text(
         json.dumps(
             {
@@ -124,6 +128,10 @@ def _write_cross_day_gateway_archive(agent: SimpleAgent, request_id: str = "gwre
         ),
         encoding="utf-8",
     )
+
+
+def _log_gateway_request_to_local_store(agent: SimpleAgent, request_id: str, request_path: Path, response_path: Path) -> None:
+    """Log gateway request to LocalStore."""
     agent.local_store.log_record(
         source_type="gateway_request",
         source_id=request_id,
@@ -138,6 +146,10 @@ def _write_cross_day_gateway_archive(agent: SimpleAgent, request_id: str = "gwre
         },
         event_type="gateway_request_completed",
     )
+
+
+def _append_gateway_archive_events(root: Path, request_id: str, request_path: Path, response_path: Path) -> None:
+    """Append raw event and snapshot for gateway cross-day archive."""
     append_raw_event(
         root,
         RawMemoryEvent(
@@ -178,6 +190,16 @@ def _write_cross_day_gateway_archive(agent: SimpleAgent, request_id: str = "gwre
             created_at="2026-04-30T00:20:00+00:00",
         ),
     )
+
+
+def _write_cross_day_gateway_archive(agent: SimpleAgent, request_id: str = "gwreq-runtime-cross-day") -> Path:
+    root = agent.root
+    response_path = root / "gateway" / "responses" / f"{request_id}.json"
+    request_path = root / "gateway" / "requests" / "done" / f"{request_id}.json"
+    _write_gateway_response_file(response_path, request_id)
+    _write_gateway_request_file(request_path, request_id)
+    _log_gateway_request_to_local_store(agent, request_id, request_path, response_path)
+    _append_gateway_archive_events(root, request_id, request_path, response_path)
     return response_path
 
 

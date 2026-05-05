@@ -54,7 +54,7 @@ def read_json_file(path: Path) -> dict:
 
     Human version:
     gateway 目录里有些文件可能还没生成，或者进程崩溃时只写了一半。这里返回空 dict
-    代表“没有可用内容”，调用方再决定是跳过、重排还是失败归档。
+    代表'没有可用内容'，调用方再决定是跳过、重排还是失败归档。
     """
 
     try:

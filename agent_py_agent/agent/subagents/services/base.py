@@ -100,48 +100,45 @@ class SubAgentBaseService:
           - "plan" : run workflow planning, write result to task.workflow_plan
           - "auto" : run workflow planning, auto-merge worker spec and parent gate into acceptance checklist
         """
+        prepared = self._prepare_run(params)
+        task = self._build_task(params, prepared)
+        self._finalize_task(task, params.parent_id)
+        return task
+
+    def _prepare_run(self, params: CreateRunParams) -> dict[str, object]:
+        """Prepare run context: paths, workflow planning, merged acceptance checks."""
         from ..services.workflow import (
             _merge_workflow_acceptance_checks,
             _normalize_workflow_mode_value,
             _try_workflow_plan,
         )
 
-        now = time.time()
         run_id = self.manager._new_id("subagent")
-        goal = params.goal
-        thought = params.thought
-        plan = params.plan
-        agent_name = params.agent_name
-        role = params.role
-        parent_id = params.parent_id
-        root_id = params.root_id
-        depth = params.depth
-        allowed_skills = params.allowed_skills
-        allowed_tools = params.allowed_tools
-        owner = params.owner
-        supervisor = params.supervisor
-        final_owner = params.final_owner
-        acceptance_checks = params.acceptance_checks
-        quality_contract = params.quality_contract
-        context_manifest = params.context_manifest
-        context_packs = params.context_packs
-        extra_write_roots = params.extra_write_roots
-        workflow_mode = params.workflow_mode
-
-        paths = self.manager._build_work_order_paths(run_id, extra_write_roots=extra_write_roots)
-        normalized_workflow_mode = _normalize_workflow_mode_value(workflow_mode)
+        paths = self.manager._build_work_order_paths(run_id, extra_write_roots=params.extra_write_roots)
+        normalized_workflow_mode = _normalize_workflow_mode_value(params.workflow_mode)
 
         workflow_plan_dict: dict[str, object] | None = None
-        merged_acceptance = list(acceptance_checks or [])
+        merged_acceptance = list(params.acceptance_checks or [])
         if normalized_workflow_mode != "off":
             workflow_plan_dict = _try_workflow_plan(
-                goal,
-                quality_contract=quality_contract,
-                context_manifest=context_manifest,
-                allowed_write_roots=extra_write_roots,
+                params.goal,
+                quality_contract=params.quality_contract,
+                context_manifest=params.context_manifest,
+                allowed_write_roots=params.extra_write_roots,
             )
             merged_acceptance = _merge_workflow_acceptance_checks(merged_acceptance, workflow_plan_dict)
 
+        return {
+            "run_id": run_id,
+            "paths": paths,
+            "normalized_workflow_mode": normalized_workflow_mode,
+            "workflow_plan_dict": workflow_plan_dict,
+            "merged_acceptance": merged_acceptance,
+            "now": time.time(),
+        }
+
+    def _build_task(self, params: CreateRunParams, prepared: dict[str, object]) -> SubAgentTask:
+        """Build SubAgentTask from params and prepared context."""
         from ..models import SubAgentTask
         from ..services.persistence import (
             _normalize_context_manifest,
@@ -149,33 +146,40 @@ class SubAgentBaseService:
             _normalize_quality_contract,
         )
 
-        task = SubAgentTask(
+        run_id = prepared["run_id"]
+        now = prepared["now"]
+        workflow_plan_dict = prepared["workflow_plan_dict"]
+
+        return SubAgentTask(
             id=run_id,
-            goal=goal,
-            thought=thought,
-            plan=plan,
-            agent_name=agent_name,
-            role=role,
-            owner=owner,
-            supervisor=supervisor,
-            final_owner=final_owner,
-            parent_id=parent_id,
-            root_id=root_id or run_id,
-            depth=depth,
-            allowed_skills=allowed_skills or [],
-            allowed_tools=allowed_tools or [],
-            acceptance_checks=merged_acceptance,
-            quality_contract=_normalize_quality_contract(quality_contract),
-            context_manifest=_normalize_context_manifest(context_manifest),
-            context_packs=_normalize_context_packs(context_packs),
+            goal=params.goal,
+            thought=params.thought,
+            plan=params.plan,
+            agent_name=params.agent_name,
+            role=params.role,
+            owner=params.owner,
+            supervisor=params.supervisor,
+            final_owner=params.final_owner,
+            parent_id=params.parent_id,
+            root_id=params.root_id or run_id,
+            depth=params.depth,
+            allowed_skills=params.allowed_skills or [],
+            allowed_tools=params.allowed_tools or [],
+            acceptance_checks=prepared["merged_acceptance"],
+            quality_contract=_normalize_quality_contract(params.quality_contract),
+            context_manifest=_normalize_context_manifest(params.context_manifest),
+            context_packs=_normalize_context_packs(params.context_packs),
             created_at=now,
             updated_at=now,
             heartbeat_at=now,
-            workflow_mode=normalized_workflow_mode,
+            workflow_mode=prepared["normalized_workflow_mode"],
             workflow_template_id=str((workflow_plan_dict or {}).get("selected_template_id") or ""),
             workflow_plan=workflow_plan_dict or {},
-            **paths,
+            **prepared["paths"],
         )
+
+    def _finalize_task(self, task: SubAgentTask, parent_id: str) -> None:
+        """Save task, register in local store, and link to parent if needed."""
         self.manager.save(task)
         if self.manager.local_store:
             self.manager.local_store.task_registry.register_task(
@@ -187,7 +191,6 @@ class SubAgentBaseService:
             )
         if parent_id:
             self.manager.add_child(parent_id, task.id)
-        return task
 
     def record_takeover(
         self,

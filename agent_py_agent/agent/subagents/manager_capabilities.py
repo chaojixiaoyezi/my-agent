@@ -83,6 +83,20 @@ class RouteCapabilityGrantParams:
     grant: CapabilityGrant
 
 
+@dataclass(frozen=True)
+class RouteCapabilityApplyParams:
+    """Params bundle for _route_capability_apply."""
+    task: SubAgentTask
+    request: CapabilityRequest
+    query: str
+    hits: list[CapabilitySearchHit]
+    selected_hits: list[CapabilitySearchHit]
+    granted_skills: list[str]
+    granted_tools: list[str]
+    selected_cards: list[dict[str, str]]
+    reasons: list[str]
+
+
 def _route_capability_gap(
     task,
     request,
@@ -267,6 +281,56 @@ class SubAgentCapabilityMixin:
                 self._append_capability_route_log(record)
         return report
 
+    def _extract_selected_hits_data(
+        self,
+        selected_hits: list[CapabilitySearchHit],
+    ) -> tuple[list[dict[str, str]], list[str], list[str], list[str]]:
+        """Extract cards, skills, tools, and reasons from selected hits."""
+        selected_cards = [_route_card_payload(hit) for hit in selected_hits]
+        granted_skills = [hit.card.name for hit in selected_hits if hit.card.kind == "skill"]
+        granted_tools = [hit.card.name for hit in selected_hits if hit.card.kind == "tool"]
+        reasons = _merge_list([], [reason for hit in selected_hits for reason in hit.reasons])
+        return selected_cards, granted_skills, granted_tools, reasons
+
+    def _route_capability_apply(
+        self,
+        *,
+        params: RouteCapabilityApplyParams,
+    ) -> CapabilityRouteRecord:
+        """Handle apply=true path: record grant and return GRANTED record."""
+        grant = self.record_capability_grant(
+            params.task.id,
+            RecordCapabilityGrantParams(
+                request_id=params.request.id,
+                skills=params.granted_skills,
+                tools=params.granted_tools,
+                capability_cards=params.selected_cards,
+                reason=f"CapabilityRouter 命中 {len(params.selected_hits)} 张能力卡。",
+                expires_after_task=True,
+            ),
+        )
+        self._mark_capability_request_status(params.task.id, params.request.id, "GRANTED")
+        routed_task = self.load(params.task.id)
+        self._append_task_work_log(
+            routed_task,
+            f"capability_route: request {params.request.id} 已生成 grant {grant.id}，"
+            f"skills={','.join(params.granted_skills) or 'none'} tools={','.join(params.granted_tools) or 'none'}。",
+        )
+        return _route_capability_grant(
+            params=RouteCapabilityGrantParams(
+                task=params.task,
+                request=params.request,
+                query=params.query,
+                hits=params.hits,
+                selected_hits=params.selected_hits,
+                granted_skills=params.granted_skills,
+                granted_tools=params.granted_tools,
+                selected_cards=params.selected_cards,
+                reasons=params.reasons,
+                grant=grant,
+            )
+        )
+
     def _route_capability_request(
         self,
         task: SubAgentTask,
@@ -279,10 +343,9 @@ class SubAgentCapabilityMixin:
     ) -> CapabilityRouteRecord:
         """路由单条 capability request。"""
 
-        selected_cards = [_route_card_payload(hit) for hit in selected_hits]
-        granted_skills = [hit.card.name for hit in selected_hits if hit.card.kind == "skill"]
-        granted_tools = [hit.card.name for hit in selected_hits if hit.card.kind == "tool"]
-        reasons = _merge_list([], [reason for hit in selected_hits for reason in hit.reasons])
+        selected_cards, granted_skills, granted_tools, reasons = self._extract_selected_hits_data(
+            selected_hits
+        )
 
         if not selected_hits:
             return self._route_capability_no_hits(task, request, query, hits, apply)
@@ -305,26 +368,8 @@ class SubAgentCapabilityMixin:
                 created_at=now,
             )
 
-        grant = self.record_capability_grant(
-            task.id,
-            RecordCapabilityGrantParams(
-                request_id=request.id,
-                skills=granted_skills,
-                tools=granted_tools,
-                capability_cards=selected_cards,
-                reason=f"CapabilityRouter 命中 {len(selected_hits)} 张能力卡。",
-                expires_after_task=True,
-            ),
-        )
-        self._mark_capability_request_status(task.id, request.id, "GRANTED")
-        routed_task = self.load(task.id)
-        self._append_task_work_log(
-            routed_task,
-            f"capability_route: request {request.id} 已生成 grant {grant.id}，"
-            f"skills={','.join(granted_skills) or 'none'} tools={','.join(granted_tools) or 'none'}。",
-        )
-        return _route_capability_grant(
-            params=RouteCapabilityGrantParams(
+        return self._route_capability_apply(
+            params=RouteCapabilityApplyParams(
                 task=task,
                 request=request,
                 query=query,
@@ -334,7 +379,6 @@ class SubAgentCapabilityMixin:
                 granted_tools=granted_tools,
                 selected_cards=selected_cards,
                 reasons=reasons,
-                grant=grant,
             )
         )
 

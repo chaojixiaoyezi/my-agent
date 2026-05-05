@@ -102,6 +102,39 @@ def _multi_worker_verify(gpaths, request_ids, request_count, processed_by_worker
     ), responses, done_payloads
 
 
+def _multi_worker_finish(paths, gpaths, request_ids, request_count, processed_by_worker, run_prompts_by_worker, errors, alive_threads):
+    """Complete multi-worker run: print diagnostics and verify results."""
+    print("processed_by_worker=" + json.dumps(processed_by_worker, ensure_ascii=False, sort_keys=True))
+    print("run_prompts_by_worker=" + json.dumps(run_prompts_by_worker, ensure_ascii=False, sort_keys=True))
+    if errors:
+        print("worker_errors=" + json.dumps(errors, ensure_ascii=False))
+    if alive_threads:
+        print("worker_threads_still_alive=" + json.dumps(alive_threads, ensure_ascii=False))
+
+    print_scenario_step(3, "Verify every request has one response and one done archive")
+    final_ok, responses, done_payloads = _multi_worker_verify(
+        gpaths, request_ids, request_count, processed_by_worker, run_prompts_by_worker, errors, alive_threads
+    )
+    write_scenario_summary(
+        paths,
+        ok=final_ok,
+        reason="gateway multi-worker processing passed" if final_ok else "gateway multi-worker processing failed",
+        extra={
+            "case": "gateway-multi-worker",
+            "request_ids": request_ids,
+            "processed_by_worker": processed_by_worker,
+            "run_prompts_by_worker": run_prompts_by_worker,
+            "errors": errors,
+            "responses": responses,
+            "done_owners": [str(payload.get("lease_owner") or "") for payload in done_payloads.values()],
+        },
+    )
+    print(f"\nsummary_json={paths.summary_json}")
+    print(f"summary_md={paths.summary_md}")
+    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
+    return 0 if final_ok else 2
+
+
 def run_scenario_gateway_multi_worker_case(args) -> int:
     """LLM: run two gateway workers against one pending queue and prove every request completes once.
 
@@ -153,32 +186,6 @@ def run_scenario_gateway_multi_worker_case(args) -> int:
         thread.join(timeout=10)
     alive_threads = [thread.name for thread in threads if thread.is_alive()]
 
-    print("processed_by_worker=" + json.dumps(processed_by_worker, ensure_ascii=False, sort_keys=True))
-    print("run_prompts_by_worker=" + json.dumps(run_prompts_by_worker, ensure_ascii=False, sort_keys=True))
-    if errors:
-        print("worker_errors=" + json.dumps(errors, ensure_ascii=False))
-    if alive_threads:
-        print("worker_threads_still_alive=" + json.dumps(alive_threads, ensure_ascii=False))
-
-    print_scenario_step(3, "Verify every request has one response and one done archive")
-    final_ok, responses, done_payloads = _multi_worker_verify(
-        gpaths, request_ids, request_count, processed_by_worker, run_prompts_by_worker, errors, alive_threads
+    return _multi_worker_finish(
+        paths, gpaths, request_ids, request_count, processed_by_worker, run_prompts_by_worker, errors, alive_threads,
     )
-    write_scenario_summary(
-        paths,
-        ok=final_ok,
-        reason="gateway multi-worker processing passed" if final_ok else "gateway multi-worker processing failed",
-        extra={
-            "case": "gateway-multi-worker",
-            "request_ids": request_ids,
-            "processed_by_worker": processed_by_worker,
-            "run_prompts_by_worker": run_prompts_by_worker,
-            "errors": errors,
-            "responses": responses,
-            "done_owners": [str(payload.get("lease_owner") or "") for payload in done_payloads.values()],
-        },
-    )
-    print(f"\nsummary_json={paths.summary_json}")
-    print(f"summary_md={paths.summary_md}")
-    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
-    return 0 if final_ok else 2

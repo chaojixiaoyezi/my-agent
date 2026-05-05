@@ -81,140 +81,123 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
         assert any(item["name"] == "memory_index" for item in doctor["checks"])
 
 
+# ── Shared gateway fixture helpers ─────────────────────────────────────────────
+
+def _setup_agent_with_gateway(cfg_overrides: dict | None = None) -> tuple[Path, SimpleAgent, AdapterPaths]:
+    """Create agent with gateway workspace and all directory paths created."""
+    cfg = AgentConfig(
+        model_backend="echo",
+        gateway_workspace="gateway",
+        local_store_path="local_store/local.db",
+        local_store_files_dir="local_store/files",
+        local_store_events_path="local_store/events.jsonl",
+        **(cfg_overrides or {}),
+    )
+    agent = SimpleAgent(cfg, Path())
+    paths = gateway_paths(agent)
+    for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
+        path.mkdir(parents=True, exist_ok=True)
+    return agent.root, agent, paths
+
+
+def _submit_idle_request(paths, prompt: str) -> tuple[str, Path, Path]:
+    return submit_gateway_ask(paths, prompt=prompt, save=False, agent=None)
+
+
+def _write_processing_request(paths, request_id: str, attempts: int, lease_age: float = 10) -> Path:
+    path = paths.processing / f"{request_id}.json"
+    write_json_file(
+        path,
+        {
+            "id": request_id,
+            "kind": "ask",
+            "prompt": f"request {request_id}",
+            "attempts": attempts,
+            "lease_started_at": time.time() - lease_age,
+        },
+    )
+    return path
+
+
+def _assert_requeued(paths, recovered: dict, request_path: Path) -> None:
+    assert recovered["requeued"] == 1
+    assert (paths.inbox / request_path.name).exists()
+
+
+def _assert_failed(paths, recovered: dict, request_path: Path, request_id: str) -> None:
+    assert recovered["failed"] == 1
+    assert (paths.failed / request_path.name).exists()
+    assert (paths.responses / f"{request_id}.json").exists()
+
+
+def _track_heartbeat_during_run(agent: SimpleAgent, paths, request_path: Path) -> list[float]:
+    """Poll lease_heartbeat_at before and during a slow run, return [initial, updated]."""
+    observed: list[float] = []
+    original_run = agent.run
+
+    def slow_run(user_prompt: str, **kwargs) -> AgentRunResult:
+        deadline = time.time() + 2
+        initial = 0.0
+        while time.time() < deadline:
+            initial = float(read_json_file(request_path).get("lease_heartbeat_at", 0) or 0)
+            if initial:
+                break
+            time.sleep(0.02)
+        updated = initial
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            time.sleep(0.05)
+            updated = float(read_json_file(request_path).get("lease_heartbeat_at", 0) or 0)
+            if updated > initial:
+                break
+        observed.extend([initial, updated])
+        return AgentRunResult(prompt=f"prompt: {user_prompt}", response="ok", backend="test", used_memories=0)
+
+    agent.run = slow_run  # type: ignore[method-assign]
+    try:
+        _process_gateway_requests(agent, paths, worker_id="test-worker")
+    finally:
+        agent.run = original_run  # type: ignore[method-assign]
+    return observed
+
+
+def _assert_heartbeat_refreshed(observed: list[float], paths, request_path, request_id) -> None:
+    archived = read_json_file(paths.done / request_path.name)
+    response = read_json_file(paths.responses / f"{request_id}.json")
+    assert observed[0] > 0
+    assert observed[1] > observed[0]
+    assert archived["status"] == "processing"
+    assert archived["lease_owner"] == "test-worker"
+    assert archived["lease_heartbeat_at"] >= observed[1]
+    assert response["ok"] is True
+    assert response["lease_heartbeat_at"] >= observed[1]
+
+
 def test_gateway_processing_recovery_requeues_then_fails_after_attempt_limit():
-    """LLM: Verify recovery requeues timed-out requests and fails after max attempts.
+    """LLM: Verify recovery requeues timed-out requests and fails after max attempts."""
+    root, agent, paths = _setup_agent_with_gateway(
+        {"gateway_processing_timeout_seconds": 1, "gateway_request_max_attempts": 2}
+    )
 
-    新手说明:
-    测试 gateway 请求恢复机制：超时未完成的请求会被重新放回 inbox
-    （requeued），而超过最大尝试次数的请求会被归档到 failed 目录
-    并生成失败响应。
-    """
-    with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
-        cfg = AgentConfig(
-            model_backend="echo",
-            gateway_workspace="gateway",
-            local_store_path="local_store/local.db",
-            local_store_files_dir="local_store/files",
-            local_store_events_path="local_store/events.jsonl",
-            gateway_processing_timeout_seconds=1,
-            gateway_request_max_attempts=2,
-        )
-        agent = SimpleAgent(cfg, root)
-        paths = gateway_paths(agent)
-        for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
-            path.mkdir(parents=True, exist_ok=True)
+    # First request: requeue (attempts=1, lease timed out)
+    request_path = _write_processing_request(paths, "gwreq-timeout", attempts=1)
+    recovered = recover_gateway_processing_requests(paths, startup=False, max_attempts=2, timeout_seconds=1, agent=agent)
+    _assert_requeued(paths, recovered, request_path)
 
-        request_path = paths.processing / "gwreq-timeout.json"
-        write_json_file(
-            request_path,
-            {
-                "id": "gwreq-timeout",
-                "kind": "ask",
-                "prompt": "会被重排的请求",
-                "attempts": 1,
-                "lease_started_at": time.time() - 10,
-            },
-        )
-        recovered = recover_gateway_processing_requests(
-            paths,
-            startup=False,
-            max_attempts=2,
-            timeout_seconds=1,
-            agent=agent,
-        )
-        assert recovered["requeued"] == 1
-        assert (paths.inbox / request_path.name).exists()
-
-        second_path = paths.processing / "gwreq-fail.json"
-        write_json_file(
-            second_path,
-            {
-                "id": "gwreq-fail",
-                "kind": "ask",
-                "prompt": "会失败归档的请求",
-                "attempts": 2,
-                "lease_started_at": time.time() - 10,
-            },
-        )
-        failed = recover_gateway_processing_requests(
-            paths,
-            startup=False,
-            max_attempts=2,
-            timeout_seconds=1,
-            agent=agent,
-        )
-        assert failed["failed"] == 1
-        assert (paths.failed / second_path.name).exists()
-        assert (paths.responses / "gwreq-fail.json").exists()
+    # Second request: fail (attempts=2, lease timed out, exhausted)
+    second_path = _write_processing_request(paths, "gwreq-fail", attempts=2)
+    failed = recover_gateway_processing_requests(paths, startup=False, max_attempts=2, timeout_seconds=1, agent=agent)
+    _assert_failed(paths, failed, second_path, "gwreq-fail")
 
 
 def test_gateway_worker_refreshes_processing_lease_heartbeat_during_long_run():
-    """LLM: Verify gateway worker refreshes lease heartbeat during long agent runs.
-
-    新手说明:
-    测试 gateway worker 在长时间运行的 agent.run 执行过程中
-    会持续刷新 processing 目录下请求文件的 lease_heartbeat_at
-    时间戳，防止被 recovery 误判为超时。
-    """
-    with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
-        cfg = AgentConfig(
-            model_backend="echo",
-            gateway_workspace="gateway",
-            gateway_heartbeat_interval=1,
-            gateway_processing_timeout_seconds=1,
-            local_store_path="local_store/local.db",
-            local_store_files_dir="local_store/files",
-            local_store_events_path="local_store/events.jsonl",
-        )
-        agent = SimpleAgent(cfg, root)
-        paths = gateway_paths(agent)
-        for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
-            path.mkdir(parents=True, exist_ok=True)
-        request_id, request_path, _ = submit_gateway_ask(paths, prompt="长任务 lease heartbeat 测试", save=False)
-        observed: list[float] = []
-        original_run = agent.run
-
-        def slow_run(user_prompt: str, **kwargs) -> AgentRunResult:
-            processing_path = paths.processing / request_path.name
-            deadline = time.time() + 2
-            initial = 0.0
-            while time.time() < deadline:
-                initial = float(read_json_file(processing_path).get("lease_heartbeat_at", 0) or 0)
-                if initial:
-                    break
-                time.sleep(0.02)
-            updated = initial
-            deadline = time.time() + 2
-            while time.time() < deadline:
-                time.sleep(0.05)
-                updated = float(read_json_file(processing_path).get("lease_heartbeat_at", 0) or 0)
-                if updated > initial:
-                    break
-            observed.extend([initial, updated])
-            return AgentRunResult(
-                prompt=f"prompt: {user_prompt}",
-                response="ok",
-                backend="test",
-                used_memories=0,
-            )
-
-        agent.run = slow_run  # type: ignore[method-assign]
-        try:
-            assert _process_gateway_requests(agent, paths, worker_id="test-worker") == 1
-        finally:
-            agent.run = original_run  # type: ignore[method-assign]
-
-        archived = read_json_file(paths.done / request_path.name)
-        response = read_json_file(paths.responses / f"{request_id}.json")
-        assert observed[0] > 0
-        assert observed[1] > observed[0]
-        assert archived["status"] == "processing"
-        assert archived["lease_owner"] == "test-worker"
-        assert archived["lease_heartbeat_at"] >= observed[1]
-        assert response["ok"] is True
-        assert response["lease_heartbeat_at"] >= observed[1]
+    """LLM: Verify gateway worker refreshes lease heartbeat during long agent runs."""
+    root, agent, paths = _setup_agent_with_gateway(
+        {"gateway_heartbeat_interval": 1, "gateway_processing_timeout_seconds": 1}
+    )
+    request_id, request_path, _ = submit_gateway_ask(paths, prompt="长任务 lease heartbeat 测试", save=False)
+    observed = _track_heartbeat_during_run(agent, paths, request_path)
+    _assert_heartbeat_refreshed(observed, paths, request_path, request_id)
 
 
 def test_gateway_recovery_uses_lease_heartbeat_before_started_at():

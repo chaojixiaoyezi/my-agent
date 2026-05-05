@@ -4,7 +4,7 @@ from __future__ import annotations
 
 给人看的解释：
 gateway 如果崩在半路，请求会留在 processing 目录。
-这个文件专门处理这种“卡住的请求”：能重试就退回 pending，重试太多就写失败响应并归档。
+这个文件专门处理这种'卡住的请求'：能重试就退回 pending，重试太多就写失败响应并归档。
 """
 
 import time

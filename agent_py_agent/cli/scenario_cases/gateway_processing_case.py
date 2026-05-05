@@ -87,6 +87,40 @@ def _processing_stop_simulate_lease(gpaths, request_id, pending_path, payload):
     return processing_path, response_path
 
 
+def _processing_stop_verify_results(paths, request_id, requeued, processed, done_path, response_path, final_response, response_json_valid):
+    """Verify processing stop scenario results."""
+    final_ok = (
+        requeued == 1
+        and not after_requeue_processing.exists()
+        and after_requeue_pending.exists()
+        and processed == 1
+        and done_path.exists()
+        and final_response.get("ok") is True
+        and final_response.get("status") == "done"
+        and done_payload.get("lease_owner") == "scenario-recovery-worker-after-stop"
+        and done_payload.get("attempts") == 2
+        and response_json_valid
+    )
+    write_scenario_summary(
+        paths,
+        ok=final_ok,
+        reason="gateway processing stop passed" if final_ok else "gateway processing stop failed",
+        extra={
+            "case": "gateway-processing-stop",
+            "request_id": request_id,
+            "requeued": requeued,
+            "processed": processed,
+            "done_path": str(done_path),
+            "response_path": str(response_path),
+            "response": final_response,
+        },
+    )
+    print(f"\nsummary_json={paths.summary_json}")
+    print(f"summary_md={paths.summary_md}")
+    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
+    return 0 if final_ok else 2
+
+
 def run_scenario_gateway_processing_stop_case(args) -> int:
     """LLM: verify gateway handles stop/restart correctly when a worker is mid-request (has claimed and is calling the model).
 
@@ -128,33 +162,6 @@ def run_scenario_gateway_processing_stop_case(args) -> int:
     except json.JSONDecodeError:
         response_json_valid = False
 
-    final_ok = (
-        requeued == 1
-        and not after_requeue_processing.exists()
-        and after_requeue_pending.exists()
-        and processed == 1
-        and done_path.exists()
-        and final_response.get("ok") is True
-        and final_response.get("status") == "done"
-        and done_payload.get("lease_owner") == "scenario-recovery-worker-after-stop"
-        and done_payload.get("attempts") == 2
-        and response_json_valid
+    return _processing_stop_verify_results(
+        paths, request_id, requeued, processed, done_path, response_path, final_response, response_json_valid,
     )
-    write_scenario_summary(
-        paths,
-        ok=final_ok,
-        reason="gateway processing stop passed" if final_ok else "gateway processing stop failed",
-        extra={
-            "case": "gateway-processing-stop",
-            "request_id": request_id,
-            "requeued": requeued,
-            "processed": processed,
-            "done_path": str(done_path),
-            "response_path": str(response_path),
-            "response": final_response,
-        },
-    )
-    print(f"\nsummary_json={paths.summary_json}")
-    print(f"summary_md={paths.summary_md}")
-    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
-    return 0 if final_ok else 2

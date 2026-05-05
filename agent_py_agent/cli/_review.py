@@ -39,10 +39,34 @@ def cmd_subagents_acceptance(args) -> int:
     return 0
 
 
+def _print_patch_report(report, mode: str, workspace, include_audit: bool = False) -> None:
+    """Print patch apply/review report in consistent format."""
+    print(f"SUBAGENT PATCH {mode.upper()}")
+    print(f"mode={mode} total_records={report.summary.get('total', 0)}")
+    print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
+    if not report.records:
+        print("暂时没有 patch 需要 apply。" if "apply" in mode else "暂时没有 patch 需要审核。")
+        return
+    for record in report.records:
+        status = "OK" if record.ok else "FAIL"
+        print(
+            f"- [{status}] {record.run_id} decision={record.decision} "
+            f"patches={record.patch_count} applied={record.applied_count} "
+            f"blocked={record.blocked_count} rollback={record.rollback_performed} :: {record.message}"
+        )
+    print(f"\n已写入: {workspace / f'subagent_patch_{mode}_report.json'}")
+    print(f"已写入: {workspace / f'SUBAGENT_PATCH_{mode.upper()}.md'}")
+    if include_audit:
+        print(f"审计日志: {workspace / f'subagent_patch_{mode}_log.jsonl'}")
+        print(f"审计日志: {workspace / f'PATCH_{mode.upper()}_LOG.md'}")
+
+
 def cmd_subagents_patches(args) -> int:
     """审核或 apply runner 输出里的 patch 记录。"""
 
     agent = make_agent(args)
+    workspace = agent.subagents.workspace
+
     if args.patch_action == "apply_dry_run":
         report = agent.subagents.write_patch_apply_report(
             run_ids=args.run_id or None,
@@ -51,21 +75,7 @@ def cmd_subagents_patches(args) -> int:
             note=args.note or "",
             limit=args.limit,
         )
-        mode = "apply-dry-run"
-        print("SUBAGENT PATCH APPLY")
-        print(f"mode={mode} total_records={report.summary.get('total', 0)}")
-        print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
-        if not report.records:
-            print("暂时没有 patch 需要 apply。")
-        for record in report.records:
-            status = "OK" if record.ok else "FAIL"
-            print(
-                f"- [{status}] {record.run_id} decision={record.decision} "
-                f"patches={record.patch_count} applied={record.applied_count} "
-                f"blocked={record.blocked_count} rollback={record.rollback_performed} :: {record.message}"
-            )
-        print(f"\n已写入: {agent.subagents.workspace / 'subagent_patch_apply_report.json'}")
-        print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_PATCH_APPLY.md'}")
+        _print_patch_report(report, "apply-dry-run", workspace, include_audit=False)
         return 0
 
     if args.patch_action == "apply":
@@ -76,23 +86,7 @@ def cmd_subagents_patches(args) -> int:
             note=args.note or "",
             limit=args.limit,
         )
-        mode = "apply"
-        print("SUBAGENT PATCH APPLY")
-        print(f"mode={mode} total_records={report.summary.get('total', 0)}")
-        print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
-        if not report.records:
-            print("暂时没有 patch 需要 apply。")
-        for record in report.records:
-            status = "OK" if record.ok else "FAIL"
-            print(
-                f"- [{status}] {record.run_id} decision={record.decision} "
-                f"patches={record.patch_count} applied={record.applied_count} "
-                f"blocked={record.blocked_count} rollback={record.rollback_performed} :: {record.message}"
-            )
-        print(f"\n已写入: {agent.subagents.workspace / 'subagent_patch_apply_report.json'}")
-        print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_PATCH_APPLY.md'}")
-        print(f"审计日志: {agent.subagents.workspace / 'subagent_patch_apply_log.jsonl'}")
-        print(f"审计日志: {agent.subagents.workspace / 'PATCH_APPLY_LOG.md'}")
+        _print_patch_report(report, "apply", workspace, include_audit=True)
         return 0
 
     report = agent.subagents.write_patch_review_report(
@@ -103,11 +97,18 @@ def cmd_subagents_patches(args) -> int:
         limit=args.limit,
     )
     mode = "review-apply" if args.patch_action == "review_apply" else "review-dry-run"
+    _print_review_report(report, mode, workspace, args.patch_action == "review_apply")
+    return 0
+
+
+def _print_review_report(report, mode: str, workspace, include_audit: bool) -> None:
+    """Print patch review report in consistent format."""
     print("SUBAGENT PATCH REVIEW")
     print(f"mode={mode} total_records={report.summary.get('total', 0)}")
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
     if not report.records:
         print("暂时没有 patch 需要审核。")
+        return
     for record in report.records:
         status = "OK" if record.ok else "FAIL"
         print(
@@ -115,9 +116,8 @@ def cmd_subagents_patches(args) -> int:
             f"patches={record.patch_count} approved={record.approved_count} "
             f"blocked={record.blocked_count} applied={record.applied} :: {record.message}"
         )
-    print(f"\n已写入: {agent.subagents.workspace / 'subagent_patch_review_report.json'}")
-    print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_PATCH_REVIEW.md'}")
-    if args.patch_action == "review_apply":
-        print(f"审计日志: {agent.subagents.workspace / 'subagent_patch_review_log.jsonl'}")
-        print(f"审计日志: {agent.subagents.workspace / 'PATCH_REVIEW_LOG.md'}")
-    return 0
+    print(f"\n已写入: {workspace / 'subagent_patch_review_report.json'}")
+    print(f"已写入: {workspace / 'SUBAGENT_PATCH_REVIEW.md'}")
+    if include_audit:
+        print(f"审计日志: {workspace / 'subagent_patch_review_log.jsonl'}")
+        print(f"审计日志: {workspace / 'PATCH_REVIEW_LOG.md'}")

@@ -69,19 +69,9 @@ if TYPE_CHECKING:
     from ..local_store import LocalStore
 
 class SubAgentChannelProbeMixin:
-    def probe_channel(self, run_id: str) -> ChannelProbeResult:
-        """检查单个子代理运行的通道健康状态。
-
-        这里的“通道”先指最基础的运行现场：
-        工单文件、机器 JSON、任务目录写入和 probe 证据落盘。
-        后续真正接入执行器时，再把模型 session、ACP adapter 等检查接进来。
-        """
-
-        task = self.load(run_id)
-        _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
-        now = time.time()
+    def _probe_work_order_check(self, run_id: str, task: SubAgentTask, now: float) -> list[ChannelProbeCheck]:
+        """Build checks for work order validation."""
         checks: list[ChannelProbeCheck] = []
-
         validation = self.validate_work_order(run_id)
         if validation.ok:
             checks.append(
@@ -104,19 +94,42 @@ class SubAgentChannelProbeMixin:
                     created_at=now,
                 )
             )
+        return checks
 
-        checks.append(
-            _probe_json_file("task_json_readable", Path(task.task_dir) / "task.json", "P0", now)
-        )
-        checks.append(
-            _probe_json_file("run_json_readable", Path(task.task_dir) / "run.json", "P1", now)
-        )
-        checks.append(
-            _probe_json_file("output_json_readable", Path(task.output_json), "P1", now)
-        )
-        checks.append(
-            _probe_json_file("dependencies_json_readable", Path(task.dependencies_json), "P1", now)
-        )
+    def _probe_json_files(self, task: SubAgentTask, now: float) -> list[ChannelProbeCheck]:
+        """Build checks for JSON file readability."""
+        return [
+            _probe_json_file("task_json_readable", Path(task.task_dir) / "task.json", "P0", now),
+            _probe_json_file("run_json_readable", Path(task.task_dir) / "run.json", "P1", now),
+            _probe_json_file("output_json_readable", Path(task.output_json), "P1", now),
+            _probe_json_file("dependencies_json_readable", Path(task.dependencies_json), "P1", now),
+        ]
+
+    def _update_task_from_probe(self, task: SubAgentTask, checks: list[ChannelProbeCheck], now: float) -> None:
+        """Update task with probe results and save."""
+        task.channel_checks = checks
+        task.channel_status = _channel_status(checks)
+        task.last_probe_at = now
+        task.updated_at = now
+        if task.channel_status == "BROKEN":
+            task.failure_type = "channel"
+        self.save(task)
+
+    def probe_channel(self, run_id: str) -> ChannelProbeResult:
+        """检查单个子代理运行的通道健康状态。
+
+        这里的'通道'先指最基础的运行现场：
+        工单文件、机器 JSON、任务目录写入和 probe 证据落盘。
+        后续真正接入执行器时，再把模型 session、ACP adapter 等检查接进来。
+        """
+
+        task = self.load(run_id)
+        _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
+        now = time.time()
+        checks: list[ChannelProbeCheck] = []
+
+        checks.extend(self._probe_work_order_check(run_id, task, now))
+        checks.extend(self._probe_json_files(task, now))
         checks.append(_probe_writable_dir("scratch_writable", Path(task.scratch_dir), "P0", now))
 
         status = _channel_status(checks)
@@ -133,11 +146,7 @@ class SubAgentChannelProbeMixin:
         task.channel_checks = result.checks
         task.channel_status = _channel_status(result.checks)
         result.channel_status = task.channel_status
-        task.last_probe_at = now
-        task.updated_at = now
-        if task.channel_status == "BROKEN":
-            task.failure_type = "channel"
-        self.save(task)
+        self._update_task_from_probe(task, result.checks, now)
         self._index_channel_probe(result)
         return result
 

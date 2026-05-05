@@ -4,7 +4,7 @@ from __future__ import annotations
 
 给人看的解释：
 这个文件只负责访问网络。
-`fetch_url` 偏向“简单打开一个网页”，`http_request` 偏向“调接口、带 header、带 body”。
+`fetch_url` 偏向'简单打开一个网页'，`http_request` 偏向'调接口、带 header、带 body'。
 这里统一限制超时时间和返回长度，避免一次请求把主流程卡死或把 prompt 撑爆。
 """
 

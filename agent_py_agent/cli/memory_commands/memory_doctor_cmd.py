@@ -63,20 +63,22 @@ def _resolve_index_path(root: Path, raw_index: str | None) -> Path:
     return (root / candidate).resolve()
 
 
+def _normalize_warning_item(item: Any) -> dict[str, Any]:
+    """Normalize a single config warning item to a dictionary."""
+    if isinstance(item, dict):
+        return dict(item)
+    elif hasattr(item, "to_dict"):
+        return item.to_dict()
+    elif hasattr(item, "__dataclass_fields__"):
+        return asdict(item)
+    else:
+        return {"message": str(item)}
+
+
 def _config_warnings(config: object) -> list[dict[str, Any]]:
     """Return normalized memory config fallback warnings as dictionaries."""
     warnings = getattr(config, "memory_config_warnings", []) or []
-    normalized: list[dict[str, Any]] = []
-    for item in warnings:
-        if isinstance(item, dict):
-            normalized.append(dict(item))
-        elif hasattr(item, "to_dict"):
-            normalized.append(item.to_dict())
-        elif hasattr(item, "__dataclass_fields__"):
-            normalized.append(asdict(item))
-        else:
-            normalized.append({"message": str(item)})
-    return normalized
+    return [_normalize_warning_item(item) for item in warnings]
 
 
 def _memory_config_payload(config: object) -> dict[str, Any]:

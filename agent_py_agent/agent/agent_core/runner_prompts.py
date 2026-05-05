@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: builds subagent runner execution prompts and structured-output repair audit text.
 
 给人看的解释：
-runner 真正调用模型前，需要把执行上下文压成明确任务；模型输出不合格式时，还要生成一次“只修格式”的补救 prompt。
+runner 真正调用模型前，需要把执行上下文压成明确任务；模型输出不合格式时，还要生成一次'只修格式'的补救 prompt。
 这些 prompt 模板都放这里，避免主流程函数越来越长。
 """
 

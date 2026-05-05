@@ -46,6 +46,13 @@ def _workflow_worker_tools(parent_tools: list[str], worker_kind: str) -> list[st
     return list(_CODING_SUBAGENT_TOOLS)
 
 
+def _add_worker_checks(merged: list[str], worker: dict[str, object]) -> None:
+    """Add acceptance checks from one worker into the merged list."""
+    for check in worker.get("acceptance_checks") or []:
+        if isinstance(check, str) and check not in merged:
+            merged.append(check)
+
+
 def _merge_workflow_acceptance_checks(
     acceptance_checks: list[str],
     workflow_plan_dict: dict[str, object] | None,
@@ -57,11 +64,8 @@ def _merge_workflow_acceptance_checks(
     workers = workflow_plan_dict.get("workers") or []
     if isinstance(workers, list):
         for worker in workers:
-            if not isinstance(worker, dict):
-                continue
-            for check in worker.get("acceptance_checks") or []:
-                if isinstance(check, str) and check not in merged:
-                    merged.append(check)
+            if isinstance(worker, dict):
+                _add_worker_checks(merged, worker)
     for check in workflow_plan_dict.get("parent_acceptance_checklist") or []:
         if isinstance(check, str) and check not in merged:
             merged.append(check)
@@ -133,57 +137,80 @@ class SubAgentWorkflowService:
         if not isinstance(workers, list):
             return parent, []
 
+        created, phase_to_child_id = self._create_workers(parent, workers)
+        self._update_dependencies(created, phase_to_child_id)
+
+        parent.workflow_child_run_ids = [child.id for child in created]
+        self.manager.save(parent)
+        return parent, created
+
+    def _create_workers(
+        self, parent: SubAgentTask, workers: list[object]
+    ) -> tuple[list[SubAgentTask], dict[str, str]]:
+        """Create child tasks from worker specs and return created tasks with phase mapping."""
         created: list[SubAgentTask] = []
         phase_to_child_id: dict[str, str] = {}
         for worker in workers:
             if not isinstance(worker, dict):
                 continue
-            phase_id = str(worker.get("phase_id") or "").strip()
-            role = str(worker.get("role") or worker.get("kind") or "worker").strip() or "worker"
-            kind = str(worker.get("kind") or role or "worker").strip() or "worker"
-            phase_task = str(worker.get("task") or parent.goal).strip() or parent.goal
-            depends_on = [str(item).strip() for item in worker.get("depends_on") or [] if str(item).strip()]
-            child_plan = [
-                phase_task,
-                "保留命令、文件和测试证据。",
-                "不要自判最终完成，等待父代理验收。",
-            ]
-            if depends_on:
-                child_plan.append("先确认依赖 phase 已提交结果：" + ", ".join(depends_on))
-            child = self.manager.create_run(
-                params=CreateRunParams(
-                    goal=f"{parent.goal}\n\nWorkflow phase {phase_id}: {phase_task}",
-                    thought=(
-                        f"执行 workflow phase {phase_id}（{kind}）。"
-                        " 先遵守质量契约和写入边界，再提交待父代理验收的材料。"
-                    ),
-                    plan=child_plan,
-                    agent_name=parent.agent_name,
-                    role=role,
-                    parent_id=parent.id,
-                    root_id=parent.root_id,
-                    depth=parent.depth + 1,
-                    allowed_skills=list(parent.allowed_skills),
-                    allowed_tools=_workflow_worker_tools(parent.allowed_tools, kind),
-                    owner=parent.owner,
-                    supervisor=parent.supervisor,
-                    final_owner=parent.final_owner,
-                    acceptance_checks=[str(item) for item in worker.get("acceptance_checks") or [] if str(item).strip()],
-                    quality_contract=parent.quality_contract,
-                    context_manifest=parent.context_manifest,
-                    context_packs=parent.context_packs,
-                    extra_write_roots=_workflow_extra_write_roots(parent),
-                    workflow_mode="off",
-                )
-            )
-            child.workflow_parent_run_id = parent.id
-            child.workflow_phase_id = phase_id
-            child.workflow_depends_on = depends_on
-            self.manager.save(child)
+            child = self._create_single_worker(parent, worker)
+            if child.workflow_phase_id:
+                phase_to_child_id[child.workflow_phase_id] = child.id
             created.append(child)
-            if phase_id:
-                phase_to_child_id[phase_id] = child.id
+        return created, phase_to_child_id
 
+    def _create_single_worker(self, parent: SubAgentTask, worker: dict[str, object]) -> SubAgentTask:
+        """Create a single child task from worker spec."""
+        phase_id = str(worker.get("phase_id") or "").strip()
+        role = str(worker.get("role") or worker.get("kind") or "worker").strip() or "worker"
+        kind = str(worker.get("kind") or role or "worker").strip() or "worker"
+        phase_task = str(worker.get("task") or parent.goal).strip() or parent.goal
+        depends_on = [str(item).strip() for item in worker.get("depends_on") or [] if str(item).strip()]
+
+        child_plan = [
+            phase_task,
+            "保留命令、文件和测试证据。",
+            "不要自判最终完成，等待父代理验收。",
+        ]
+        if depends_on:
+            child_plan.append("先确认依赖 phase 已提交结果：" + ", ".join(depends_on))
+
+        child = self.manager.create_run(
+            params=CreateRunParams(
+                goal=f"{parent.goal}\n\nWorkflow phase {phase_id}: {phase_task}",
+                thought=(
+                    f"执行 workflow phase {phase_id}（{kind}）。"
+                    " 先遵守质量契约和写入边界，再提交待父代理验收的材料。"
+                ),
+                plan=child_plan,
+                agent_name=parent.agent_name,
+                role=role,
+                parent_id=parent.id,
+                root_id=parent.root_id,
+                depth=parent.depth + 1,
+                allowed_skills=list(parent.allowed_skills),
+                allowed_tools=_workflow_worker_tools(parent.allowed_tools, kind),
+                owner=parent.owner,
+                supervisor=parent.supervisor,
+                final_owner=parent.final_owner,
+                acceptance_checks=[str(item) for item in worker.get("acceptance_checks") or [] if str(item).strip()],
+                quality_contract=parent.quality_contract,
+                context_manifest=parent.context_manifest,
+                context_packs=parent.context_packs,
+                extra_write_roots=_workflow_extra_write_roots(parent),
+                workflow_mode="off",
+            )
+        )
+        child.workflow_parent_run_id = parent.id
+        child.workflow_phase_id = phase_id
+        child.workflow_depends_on = depends_on
+        self.manager.save(child)
+        return child
+
+    def _update_dependencies(
+        self, created: list[SubAgentTask], phase_to_child_id: dict[str, str]
+    ) -> None:
+        """Write dependencies JSON for each created child task."""
         for child in created:
             dep_run_ids = [phase_to_child_id[item] for item in child.workflow_depends_on if item in phase_to_child_id]
             Path(child.dependencies_json).write_text(
@@ -198,7 +225,3 @@ class SubAgentWorkflowService:
                 ),
                 encoding="utf-8",
             )
-
-        parent.workflow_child_run_ids = [child.id for child in created]
-        self.manager.save(parent)
-        return parent, created

@@ -98,23 +98,57 @@ def plan_workflow_for_goal(
     issues = list(decision.issues)
 
     if decision.mode == "off" or not decision.selected_template_id:
-        return WorkflowPlanningResult(
-            goal=goal,
-            decision=decision,
-            enabled=False,
-            issues=issues,
-        )
+        return _make_disabled_result(goal, decision, issues)
 
     template = store.get(decision.selected_template_id)
     if template is None:
         issues.append(f"selected workflow template not found: {decision.selected_template_id}")
-        return WorkflowPlanningResult(
-            goal=goal,
-            decision=decision,
-            enabled=False,
-            issues=issues,
-        )
+        return _make_disabled_result(goal, decision, issues)
 
+    dispatch_plan, parent_acceptance_plan = _compile_plans(
+        template,
+        goal=goal,
+        quality_contract=quality_contract,
+        context_manifest=context_manifest,
+        allowed_write_roots=allowed_write_roots,
+        forbidden_write_roots=forbidden_write_roots,
+    )
+
+    return WorkflowPlanningResult(
+        goal=goal,
+        decision=decision,
+        enabled=True,
+        template=template,
+        dispatch_plan=dispatch_plan,
+        parent_acceptance_plan=parent_acceptance_plan,
+        issues=issues,
+    )
+
+
+def _make_disabled_result(
+    goal: str,
+    decision: WorkflowRouteDecision,
+    issues: list[str],
+) -> WorkflowPlanningResult:
+    """Return a disabled result for early-exit paths."""
+    return WorkflowPlanningResult(
+        goal=goal,
+        decision=decision,
+        enabled=False,
+        issues=issues,
+    )
+
+
+def _compile_plans(
+    template: WorkflowTemplate,
+    *,
+    goal: str,
+    quality_contract: Any,
+    context_manifest: Any,
+    allowed_write_roots: list[str] | None,
+    forbidden_write_roots: list[str] | None,
+) -> tuple[WorkflowDispatchPlan, ParentAcceptancePlan]:
+    """Compile both dispatch and parent-acceptance plans from a resolved template."""
     dispatch_plan = compile_workflow(
         template,
         goal=goal,
@@ -128,16 +162,7 @@ def plan_workflow_for_goal(
         goal=goal,
         quality_contract=quality_contract,
     )
-
-    return WorkflowPlanningResult(
-        goal=goal,
-        decision=decision,
-        enabled=True,
-        template=template,
-        dispatch_plan=dispatch_plan,
-        parent_acceptance_plan=parent_acceptance_plan,
-        issues=issues,
-    )
+    return dispatch_plan, parent_acceptance_plan
 
 
 def write_workflow_plan_preview(

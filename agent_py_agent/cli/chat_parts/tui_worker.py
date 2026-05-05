@@ -54,6 +54,53 @@ _CHAT_RESPONSE_STYLE_INJECT = (
 )
 
 
+def _tui_update_running_state(cfg, job):
+    """Update running state when starting to process a job."""
+    with cfg.state_lock:
+        cfg.pending_jobs_ref[0] -= 1
+        cfg.is_running_ref[0] = True
+        cfg.running_prompt_ref[0] = job.user
+        cfg.running_started_at_ref[0] = time.perf_counter()
+
+
+def _tui_cleanup_after_job(cfg, job, agent_response_text, response_recorded):
+    """Cleanup after job completes: record response, update history, reset state."""
+    if agent_response_text:
+        if not response_recorded:
+            cfg.assistant_outputs.append(agent_response_text)
+        _append_conversation_turn(
+            cfg.conversation_history,
+            cfg.history_lock,
+            job.user,
+            agent_response_text,
+        )
+    with cfg.state_lock:
+        cfg.is_running_ref[0] = False
+        cfg.running_prompt_ref[0] = ""
+        cfg.running_started_at_ref[0] = 0.0
+    cfg.thinking_line_ref[0] = ""
+    cfg.stream_buf_ref[0] = ""
+    cfg.jobs.task_done()
+
+
+def _tui_process_job(cfg, job):
+    """Process a single job. Returns (agent_response_text, response_recorded)."""
+    started_at = cfg.running_started_at_ref[0]
+    history_ctx = cfg.build_history_context()
+    turn_inject = list(job.inject) + [_CHAT_RESPONSE_STYLE_INJECT] + ([history_ctx] if history_ctx else [])
+    next_message_id = len(cfg.assistant_outputs) + 1
+
+    spinner, on_spinner_update = _make_spinner(cfg, next_message_id)
+    spinner.start()
+
+    begin_stream, on_stream_chunk = _make_stream_callbacks(cfg, next_message_id, spinner)
+
+    if cfg.use_gateway:
+        return _worker_gateway_path(cfg, job, turn_inject, started_at, on_stream_chunk)
+    else:
+        return _worker_local_path(cfg, job, turn_inject, started_at, on_stream_chunk)
+
+
 def _tui_worker_body(cfg: TuiWorkerConfig) -> None:
     """Worker loop for TUI mode. Runs in a separate daemon thread."""
     while not cfg.stop_event.is_set():
@@ -61,60 +108,18 @@ def _tui_worker_body(cfg: TuiWorkerConfig) -> None:
             job = cfg.jobs.get(timeout=0.5)
         except queue.Empty:
             continue
-        with cfg.state_lock:
-            cfg.pending_jobs_ref[0] -= 1
-            cfg.is_running_ref[0] = True
-            cfg.running_prompt_ref[0] = job.user
-            cfg.running_started_at_ref[0] = time.perf_counter()
+        _tui_update_running_state(cfg, job)
         agent_response_text = ""
         response_recorded = False
-        stream_started = False
-        stream_has_visible_text = False
         try:
-            started_at = cfg.running_started_at_ref[0]
-            history_ctx = cfg.build_history_context()
-            turn_inject = list(job.inject) + [_CHAT_RESPONSE_STYLE_INJECT] + ([history_ctx] if history_ctx else [])
-            next_message_id = len(cfg.assistant_outputs) + 1
-
-            spinner, on_spinner_update = _make_spinner(cfg, next_message_id)
-            spinner.start()
-
-            begin_stream, on_stream_chunk = _make_stream_callbacks(
-                cfg, next_message_id, spinner,
-            )
-
-            if cfg.use_gateway:
-                agent_response_text, response_recorded = _worker_gateway_path(
-                    cfg, job, turn_inject, started_at,
-                    on_stream_chunk, stream_started, stream_has_visible_text,
-                )
-            else:
-                agent_response_text, response_recorded = _worker_local_path(
-                    cfg, job, turn_inject, started_at,
-                    on_stream_chunk,
-                )
+            agent_response_text, response_recorded = _tui_process_job(cfg, job)
         except Exception as exc:
             _set_thinking_line("", cfg.thinking_line_ref)
             from .rendering import _cprint
             _cprint(f"错误: {exc}")
             agent_response_text = ""
         finally:
-            if agent_response_text:
-                if not response_recorded:
-                    cfg.assistant_outputs.append(agent_response_text)
-                _append_conversation_turn(
-                    cfg.conversation_history,
-                    cfg.history_lock,
-                    job.user,
-                    agent_response_text,
-                )
-            with cfg.state_lock:
-                cfg.is_running_ref[0] = False
-                cfg.running_prompt_ref[0] = ""
-                cfg.running_started_at_ref[0] = 0.0
-            cfg.thinking_line_ref[0] = ""
-            cfg.stream_buf_ref[0] = ""
-            cfg.jobs.task_done()
+            _tui_cleanup_after_job(cfg, job, agent_response_text, response_recorded)
 
 
 def _make_spinner(cfg: TuiWorkerConfig, next_message_id: int):
@@ -224,19 +229,16 @@ def _worker_local_path(
     """Handle local mode job processing. Returns (agent_response_text, response_recorded)."""
     from .rendering import _cprint, _render_assistant_response
 
-    try:
-        result = cfg.agent.run(
-            job.user,
-            inject=turn_inject,
-            prompt_files=job.prompt_files,
-            save=not cfg.args.no_save,
-            source="chat",
-            resume_context=resume_context_override(cfg.args),
-            recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
-            on_chunk=on_stream_chunk,
-        )
-    finally:
-        pass
+    result = cfg.agent.run(
+        job.user,
+        inject=turn_inject,
+        prompt_files=job.prompt_files,
+        save=not cfg.args.no_save,
+        source="chat",
+        resume_context=resume_context_override(cfg.args),
+        recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
+        on_chunk=on_stream_chunk,
+    )
     elapsed = time.perf_counter() - started_at
     _flush_stream_buf(cfg.stream_buf_ref)
     if job.show_prompt:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 给人看的解释：
 这个 mixin 只负责 learning draft 的保存、去重、确认和统计。
-它不会直接改正式 skill，只维护“候选草稿”这一层安全缓冲。
+它不会直接改正式 skill，只维护'候选草稿'这一层安全缓冲。
 """
 
 import json
@@ -154,6 +154,62 @@ class SubAgentLearningMixin:
         )
         return candidate
 
+    def _find_best_candidate(self, normalized: str, active_candidates: list[LearningCandidate]) -> tuple[LearningCandidate | None, float]:
+        """Find best matching candidate from active candidates."""
+        best: LearningCandidate | None = None
+        best_score = 0.0
+        for candidate in active_candidates:
+            score = _learning_similarity(normalized, candidate.normalized_key)
+            if score > best_score:
+                best = candidate
+                best_score = score
+        return best, best_score
+
+    def _update_candidate(self, candidate: LearningCandidate, text: str, normalized: str, task: SubAgentTask, now: float) -> LearningCandidate:
+        """Update an existing learning candidate with new evidence."""
+        evidence_item = {
+            "run_id": task.id,
+            "output_json": task.output_json,
+            "task_dir": task.task_dir,
+            "recorded_at": now,
+        }
+        candidate.occurrence_count += 1
+        candidate.confidence = _candidate_confidence(candidate.occurrence_count)
+        candidate.updated_at = now
+        candidate.source_runs.append(task.id)
+        if evidence_item not in candidate.evidence:
+            candidate.evidence.append(evidence_item)
+        if text not in candidate.variants:
+            candidate.variants.append(text)
+        if len(text) > len(candidate.lesson):
+            candidate.lesson = text
+            candidate.normalized_key = normalized
+        return self.save_learning_candidate(candidate)
+
+    def _create_candidate(self, text: str, normalized: str, task: SubAgentTask, now: float) -> tuple[LearningCandidate, dict]:
+        """Create a new learning candidate with initial values."""
+        evidence_item = {
+            "run_id": task.id,
+            "output_json": task.output_json,
+            "task_dir": task.task_dir,
+            "recorded_at": now,
+        }
+        candidate = LearningCandidate(
+            id=_new_id("learn"),
+            lesson=text,
+            normalized_key=normalized,
+            status="draft",
+            confidence=_candidate_confidence(1),
+            occurrence_count=1,
+            evidence_count=1,
+            source_runs=[task.id],
+            evidence=[evidence_item],
+            variants=[text],
+            created_at=now,
+            updated_at=now,
+        )
+        return self.save_learning_candidate(candidate), evidence_item
+
     def record_learning_candidates(
         self,
         task: SubAgentTask,
@@ -174,51 +230,13 @@ class SubAgentLearningMixin:
             normalized = _normalize_learning_text(text)
             if not normalized:
                 continue
-            best: LearningCandidate | None = None
-            best_score = 0.0
-            for candidate in active_candidates:
-                score = _learning_similarity(normalized, candidate.normalized_key)
-                if score > best_score:
-                    best = candidate
-                    best_score = score
-
-            evidence_item = {
-                "run_id": task.id,
-                "output_json": task.output_json,
-                "task_dir": task.task_dir,
-                "recorded_at": now,
-            }
+            best, best_score = self._find_best_candidate(normalized, active_candidates)
             if best is not None and best_score >= 0.45:
-                best.occurrence_count += 1
-                best.confidence = _candidate_confidence(best.occurrence_count)
-                best.updated_at = now
-                best.source_runs.append(task.id)
-                if evidence_item not in best.evidence:
-                    best.evidence.append(evidence_item)
-                if text not in best.variants:
-                    best.variants.append(text)
-                if len(text) > len(best.lesson):
-                    best.lesson = text
-                    best.normalized_key = normalized
-                saved = self.save_learning_candidate(best)
+                saved = self._update_candidate(best, text, normalized, task, now)
                 created_or_updated.append(saved)
                 continue
 
-            candidate = LearningCandidate(
-                id=_new_id("learn"),
-                lesson=text,
-                normalized_key=normalized,
-                status="draft",
-                confidence=_candidate_confidence(1),
-                occurrence_count=1,
-                evidence_count=1,
-                source_runs=[task.id],
-                evidence=[evidence_item],
-                variants=[text],
-                created_at=now,
-                updated_at=now,
-            )
-            saved = self.save_learning_candidate(candidate)
+            saved, _ = self._create_candidate(text, normalized, task, now)
             active_candidates.append(saved)
             created_or_updated.append(saved)
 

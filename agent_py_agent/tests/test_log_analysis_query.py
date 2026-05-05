@@ -37,64 +37,73 @@ def _write_matching_events(store: LocalLogStore, count: int, *, attacker_ip: str
     store.events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def test_local_store_upserts_and_queries_security_fields(tmp_path):
-    store = LocalLogStore(tmp_path)
-    inserted = store.upsert_events(
-        [
-            {
-                "event_id": "evt-1",
-                "event_time": "2026-04-30T10:00:00Z",
-                "source_id": "waf-prod",
-                "alert_type": "web_attack",
-                "attacker_ip": "198.51.100.10",
-                "victim_ip": "10.0.0.5",
-                "domain": "app.example.test",
-                "uri": "/upload.php",
-                "raw_ref": "raw-1:1",
-            },
-            {
-                "event_id": "evt-2",
-                "event_time": "2026-04-30T10:05:00Z",
-                "source_id": "edr-prod",
-                "alert_type": "process_alert",
-                "src_ip": "10.0.0.5",
-                "dst_ip": "203.0.113.9",
-                "raw_ref": "raw-2:1",
-            },
-        ]
+# ── Helper fixtures ───────────────────────────────────────────────────────────
+
+def _sample_waf_event() -> dict:
+    return {
+        "event_id": "evt-1",
+        "event_time": "2026-04-30T10:00:00Z",
+        "source_id": "waf-prod",
+        "alert_type": "web_attack",
+        "attacker_ip": "198.51.100.10",
+        "victim_ip": "10.0.0.5",
+        "domain": "app.example.test",
+        "uri": "/upload.php",
+        "raw_ref": "raw-1:1",
+    }
+
+
+def _sample_edr_event() -> dict:
+    return {
+        "event_id": "evt-2",
+        "event_time": "2026-04-30T10:05:00Z",
+        "source_id": "edr-prod",
+        "alert_type": "process_alert",
+        "src_ip": "10.0.0.5",
+        "dst_ip": "203.0.113.9",
+        "raw_ref": "raw-2:1",
+    }
+
+
+def _sample_normalized_event() -> NormalizedEvent:
+    return NormalizedEvent(
+        event_id="evt-model",
+        source_id="dns-prod",
+        event_time="2026-04-30T11:00:00Z",
+        event_type="dns",
+        attributes={"domain": "model.example.test"},
     )
 
-    assert inserted == 2
-    assert store.upsert_event(
-        {
-            "event_id": "evt-1",
-            "event_time": "2026-04-30T10:00:00Z",
-            "source_id": "waf-prod",
-            "alert_type": "web_attack",
-            "attacker_ip": "198.51.100.10",
-            "victim_ip": "10.0.0.5",
-            "domain": "app.example.test",
-            "uri": "/upload.php",
-            "raw_ref": "raw-1:1",
-        }
-    ) is False
+
+def _upsert_sample_events(store: LocalLogStore) -> None:
+    """Insert WAF and EDR sample events, plus NormalizedEvent, Finding, Case, EvidenceRef."""
+    store.upsert_events([_sample_waf_event(), _sample_edr_event()])
+    store.upsert_event(NormalizedEvent(
+        event_id="evt-model",
+        source_id="dns-prod",
+        event_time="2026-04-30T11:00:00Z",
+        event_type="dns",
+        attributes={"domain": "model.example.test"},
+    ))
+    store.upsert_finding(Finding(finding_id="finding-1", detector_id="detector-1"))
+    store.upsert_case(Case(case_id="case-model", title="model case"))
+    store.upsert_evidence_ref(EvidenceRef(evidence_id="evidence-1", query_id="query-1"))
+
+
+def test_local_store_upserts_and_queries_security_fields(tmp_path):
+    store = LocalLogStore(tmp_path)
+    _upsert_sample_events(store)
+
+    # Duplicate upsert returns False
+    assert store.upsert_event(_sample_waf_event()) is False
     assert len(store.list_events()) == 2
-    assert store.upsert_event(
-        NormalizedEvent(
-            event_id="evt-model",
-            source_id="dns-prod",
-            event_time="2026-04-30T11:00:00Z",
-            event_type="dns",
-            attributes={"domain": "model.example.test"},
-        )
-    ) is True
-    assert store.upsert_finding(Finding(finding_id="finding-1", detector_id="detector-1")) is True
-    assert store.upsert_case(Case(case_id="case-model", title="model case")) is True
-    assert store.upsert_evidence_ref(EvidenceRef(evidence_id="evidence-1", query_id="query-1")) is True
+
+    # Verify all record types are stored and retrievable
     assert store.get_finding("finding-1")["detector_id"] == "detector-1"
     assert store.get_case("case-model")["title"] == "model case"
     assert store.get_evidence_ref("evidence-1")["query_id"] == "query-1"
 
+    # Security query by attacker_ip and time window
     result = execute_security_query(
         store,
         QueryCriteria(

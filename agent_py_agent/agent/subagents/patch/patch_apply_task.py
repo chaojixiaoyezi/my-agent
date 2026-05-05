@@ -6,7 +6,9 @@ from __future__ import annotations
 这里处理单个任务里的 patch 规范化、边界检查、执行和回滚，PatchApplyService 只保留批量门面。
 """
 
+import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from agent_py_agent.agent.subagents.patch.patch_renderer import build_unified_diff
@@ -15,6 +17,21 @@ from agent_py_agent.agent.subagents.utils import _new_id
 from agent_py_agent.agent.tooling.write_boundary import validate_write_boundary
 
 _PATCH_APPLY_WRITE_TYPES = {"write_file"}
+
+
+@dataclass
+class _ExecuteApplyContext:
+    """Bundle for _execute_apply to reduce parameter count."""
+    manager: Any
+    task: Any
+    patch_specs: list
+    patches: list
+    applier: str
+    note: str
+    test_commands: list
+    decision: str
+    ok: bool
+    message: str
 
 
 def extract_patch_test_info(task, output):
@@ -39,19 +56,7 @@ def extract_patch_test_info(task, output):
 def apply_patch_task(manager, task, *, output, patches, apply, applier, note) -> PatchApplyRecord:
     """Execute single task patch apply dry-run or real apply."""
     now = time.time()
-    patch_entries = []
-    blocked_count = 0
-    patch_specs = []
-    review_status_updates = [dict(item) for item in patches]
-
-    for item in review_status_updates:
-        spec = normalize_patch_apply_spec(manager, task, item)
-        patch_entries.append(spec["audit"])
-        if spec["ok"]:
-            patch_specs.append(spec)
-        else:
-            blocked_count += 1
-
+    patch_entries, patch_specs, blocked_count = _normalize_all_patches(manager, task, patches)
     test_commands, test_blocked_count, test_entries = extract_patch_test_info(task, output)
     blocked_count += test_blocked_count
     patch_entries.extend(test_entries)
@@ -59,60 +64,75 @@ def apply_patch_task(manager, task, *, output, patches, apply, applier, note) ->
     from agent_py_agent.agent.subagents.services.patch_apply_decision import PatchApplyDecision
 
     decision, ok, message = PatchApplyDecision.decide(patches, patch_specs, blocked_count, apply)
-    rollback_performed = False
-    test_results = []
-    applied_count = 0
+    rollback_performed, test_results, applied_count = False, [], 0
 
     if apply and ok and patch_specs:
-        try:
-            from agent_py_agent.agent.subagents.services.patch_apply_executor import (
-                PatchApplyExecutor,
+        review_status_updates = [dict(item) for item in patches]
+        applied_count, rollback_performed, test_results, decision, ok, message = _execute_apply(
+            _ExecuteApplyContext(
+                manager=manager,
+                task=task,
+                patch_specs=patch_specs,
+                patches=review_status_updates,
+                applier=applier,
+                note=note,
+                test_commands=test_commands,
+                decision=decision,
+                ok=ok,
+                message=message,
             )
-
-            applied_count, _touched_files, rollback_performed, test_results = PatchApplyExecutor.execute(
-                patch_specs,
-                review_status_updates,
-                task,
-                manager,
-                applier,
-                note,
-                test_commands,
-            )
-        except Exception as exc:
-            rollback_performed = True
-            for spec in patch_specs:
-                spec["audit"]["apply_status"] = "ROLLED_BACK"
-                spec["audit"]["message"] = f"apply 失败: {exc}"
-                spec["patch_ref"]["apply_status"] = spec["audit"]["apply_status"]
-            decision = "ROLLBACK"
-            ok = False
-            message = f"patch apply 失败，已回滚: {exc}"
-            manager._append_task_work_log(task, f"patch_apply: rollback applier={applier} error={exc}")
+        )
+        output["patches"] = [spec["patch_ref"] for spec in patch_specs]
+        Path(task.output_json).write_text(
+            json.dumps(output, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     evidence_paths = [task.output_json, task.work_log_file]
     if apply:
         evidence_paths.append(str(manager.workspace / "subagent_patch_apply_log.jsonl"))
 
     return PatchApplyRecord(
-        id=_new_id("patchapply"),
-        run_id=task.id,
-        dry_run=not apply,
-        applied=apply and ok,
-        ok=ok,
-        decision=decision,
-        message=message,
-        patch_count=len(patches),
-        applied_count=applied_count,
-        blocked_count=blocked_count,
-        rollback_performed=rollback_performed,
-        applier=applier,
-        note=note,
-        evidence_paths=evidence_paths,
-        test_commands=test_commands,
-        test_results=test_results,
-        patches=patch_entries,
-        created_at=now,
+        id=_new_id("patchapply"), run_id=task.id, dry_run=not apply, applied=apply and ok,
+        ok=ok, decision=decision, message=message, patch_count=len(patches),
+        applied_count=applied_count, blocked_count=blocked_count, rollback_performed=rollback_performed,
+        applier=applier, note=note, evidence_paths=evidence_paths, test_commands=test_commands,
+        test_results=test_results, patches=patch_entries, created_at=now,
     )
+
+
+def _normalize_all_patches(manager, task, patches):
+    """Normalize all patches and return entries, specs, and blocked count."""
+    patch_entries, patch_specs, blocked_count = [], [], 0
+    for item in [dict(p) for p in patches]:
+        spec = normalize_patch_apply_spec(manager, task, item)
+        patch_entries.append(spec["audit"])
+        if spec["ok"]:
+            patch_specs.append(spec)
+        else:
+            blocked_count += 1
+    return patch_entries, patch_specs, blocked_count
+
+
+def _execute_apply(ctx: _ExecuteApplyContext):
+    """Execute the patch apply and handle rollback on failure."""
+    applied_count, rollback_performed, test_results = 0, False, []
+    try:
+        from agent_py_agent.agent.subagents.services.patch_apply_executor import (
+            PatchApplyExecutor,
+        )
+        applied_count, _, rollback_performed, test_results = PatchApplyExecutor.execute(
+            ctx.patch_specs, ctx.patches, ctx.task, ctx.manager, ctx.applier, ctx.note, ctx.test_commands,
+        )
+    except Exception as exc:
+        rollback_performed = True
+        for spec in ctx.patch_specs:
+            spec["audit"]["apply_status"] = "ROLLED_BACK"
+            spec["audit"]["message"] = f"apply 失败: {exc}"
+            spec["patch_ref"]["apply_status"] = spec["audit"]["apply_status"]
+        ctx.decision, ctx.ok, ctx.message = "ROLLBACK", False, f"patch apply 失败，已回滚: {exc}"
+        ctx.manager._append_task_work_log(ctx.task, f"patch_apply: rollback applier={ctx.applier} error={exc}")
+    return applied_count, rollback_performed, test_results, ctx.decision, ctx.ok, ctx.message
 
 
 def normalize_patch_apply_spec(manager, task, patch: dict) -> dict:

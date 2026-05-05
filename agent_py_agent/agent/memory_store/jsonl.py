@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: 本模块提供 JSONL 记忆事实流水，并可选同步索引到 LocalStore 方便搜索。
 
 新手说明:
-记忆现在采用“双轨落盘”：
+记忆现在采用'双轨落盘'：
 - JSONL 仍然是原始记忆流水，每行一条记录，方便直接打开查看。
 - 可选 LocalStore 会把同一条记忆索引到 SQLite + FTS5，方便更快检索。
 
@@ -29,7 +29,7 @@ class MemoryRecord:
     """LLM: 表示一条已经准备写入 JSONL 的记忆事实。
 
     新手说明:
-    MemoryRecord 是最小记忆单位。它记录“谁说的、说了什么、属于哪类、有哪些标签、什么时候创建”。
+    MemoryRecord 是最小记忆单位。它记录'谁说的、说了什么、属于哪类、有哪些标签、什么时候创建'。
 
     字段说明:
     role: 记忆来源角色，例如 user、assistant、tool、system。

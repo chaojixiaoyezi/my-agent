@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM contract: core subagent state and execution dataclasses.
 
 Human version:
-这里放“子代理运行本身”需要的数据结构，比如任务、证据、能力请求、执行上下文。
+这里放'子代理运行本身'需要的数据结构，比如任务、证据、能力请求、执行上下文。
 这些类只描述数据，不做调度、不写文件。
 """
 
@@ -38,7 +38,7 @@ DISPATCH_INELIGIBLE_STATUSES = frozenset({
 class SubAgentCard:
     """子代理角色卡。
 
-    它描述的是“这个子代理适合干什么，以及默认有哪些边界”。
+    它描述的是'这个子代理适合干什么，以及默认有哪些边界'。
     后续可以从文件加载，也可以由父代理临时生成。
     """
 
@@ -380,7 +380,7 @@ class SubAgentTask:
 class LearningCandidate:
     """自学习候选草稿。
 
-    这是“可能值得沉淀”的 lesson 草稿，不代表已经自动升级成正式 skill。
+    这是'可能值得沉淀'的 lesson 草稿，不代表已经自动升级成正式 skill。
     只有在用户显式 accept 后，状态才会从 draft 变成 accepted。
     """
 

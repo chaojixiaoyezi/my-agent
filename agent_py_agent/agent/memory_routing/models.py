@@ -3,8 +3,8 @@ from __future__ import annotations
 """LLM contract: dataclasses for memory route indexes, route matches, and read receipts.
 
 新手说明:
-这里放的是长期规则路由的“票据格式”。你可以把 `MemoryRoute` 理解成一张导航卡：
-它告诉程序“什么词触发我、应该去读哪个权威文件、这个规则适用于什么范围”。
+这里放的是长期规则路由的'票据格式'。你可以把 `MemoryRoute` 理解成一张导航卡：
+它告诉程序'什么词触发我、应该去读哪个权威文件、这个规则适用于什么范围'。
 """
 
 import time
@@ -16,7 +16,7 @@ class MemoryRoute:
     """LLM contract: describes one index entry from a memory routing index to an authority file.
 
     新手说明:
-    这就是长期规则的路牌。比如用户说“压缩前记忆怎么落盘”，
+    这就是长期规则的路牌。比如用户说'压缩前记忆怎么落盘'，
     这张卡可以告诉系统去读 `references/memory/compression.md`，而不是让模型凭印象猜。
 
     字段说明:
@@ -79,13 +79,13 @@ class MemoryRouteMatch:
     """LLM contract: stores an explainable match between user text and one memory route.
 
     新手说明:
-    这是“为什么建议读这个规则文件”的证据单。它会保存分数、
+    这是'为什么建议读这个规则文件'的证据单。它会保存分数、
     命中的词和推荐理由，方便日志、调试和以后给用户解释。
 
     字段说明:
     route: 被命中的 MemoryRoute。
     score: 匹配分数，越高越相关。
-    reasons: 命中理由，例如“命中别名”。
+    reasons: 命中理由，例如'命中别名'。
     matched_terms: 具体命中的词。
     """
 
@@ -121,7 +121,7 @@ class MemoryReadReceipt:
     """LLM contract: records that a routed memory authority file was read or attempted.
 
     新手说明:
-    这是一张“读过规则文件”的小票。以后如果模型说自己按某个规则做了，
+    这是一张'读过规则文件'的小票。以后如果模型说自己按某个规则做了，
     我们可以靠这张小票查它到底读了哪个文件、为什么读、有没有失败。
 
     字段说明:

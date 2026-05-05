@@ -115,42 +115,54 @@ def _create_capability_requests_from_parsed(task, parsed, now):
     return count, created_ids
 
 
-def _process_structured_output(
-    task: SubAgentTask,
-    parsed: SubAgentParsedOutput,
-    now: float,
-    actual_tools: list[str] | None,
-) -> dict[str, object]:
-    """LLM: extract evidence, capability requests, tool usage from structured output.
+def _split_tools_and_skills(parsed, allowed_tools, allowed_skills):
+    """Split parsed tools/skills into used and ignored sets.
 
-    新手说明:
-    当 runner 的模型回复能被解析成结构化输出时，这个函数负责：
-    - 拆分授权/未授权的工具和 skill
-    - 把结构化证据追加到 task.evidence
-    - 把能力请求创建并追加到 task.capability_requests
-    - 返回一个字典包含所有中间结果，供 record_runner_result 使用。
+    Args:
+        parsed: parsed structured output
+        allowed_tools: set of allowed tool names
+        allowed_skills: set of allowed skill names
+
+    Returns:
+        Tuple of (used_tools, ignored_tools, used_skills, ignored_skills)
     """
-
-    allowed_tools = set(task.allowed_tools)
-    allowed_skills = set(task.allowed_skills)
     used_tools, ignored_tools = _split_allowed_items(parsed.used_tools, allowed_tools)
     used_skills, ignored_skills = _split_allowed_items(parsed.used_skills, allowed_skills)
+    return used_tools, ignored_tools, used_skills, ignored_skills
 
-    structured_evidence_count = 0
-    structured_request_count = 0
-    created_request_ids: list[str] = []
-    artifacts = _normalize_runner_items(parsed.artifacts)
-    tests = _normalize_runner_items(parsed.tests)
-    patches = _normalize_runner_items(parsed.patches)
-    lessons = parsed.lessons
-    next_actions = parsed.next_actions
 
+def _merge_task_tools(task, used_tools, used_skills, actual_tools, parsed_used_tools, now):
+    """Merge tools into task, handling actual_tools override and evidence.
+
+    Args:
+        task: the task object (modified in place)
+        used_tools: tools from structured output that were in allowed set
+        used_skills: skills from structured output that were in allowed set
+        actual_tools: actual executed tools list (may be None)
+        parsed_used_tools: ALL tools from structured output (before filtering)
+        now: timestamp
+
+    Returns:
+        ignored_tools list
+    """
     if actual_tools is not None:
-        ignored_tools = _merge_actual_tools(task, actual_tools, used_tools, allowed_tools, parsed.used_tools, now)
-    else:
-        task.used_tools = _merge_list(task.used_tools, used_tools)
-    task.used_skills = _merge_list(task.used_skills, used_skills)
+        return _merge_actual_tools(task, actual_tools, used_tools, set(task.allowed_tools), parsed_used_tools, now)
+    task.used_tools = _merge_list(task.used_tools, used_tools)
+    return []
 
+
+def _process_evidence_items(parsed, task, now):
+    """Process evidence items from parsed structured output.
+
+    Args:
+        parsed: parsed structured output
+        task: the task object (modified in place)
+        now: timestamp
+
+    Returns:
+        count of evidence items processed
+    """
+    count = 0
     for item in parsed.evidence:
         summary = str(item.get("summary", "")).strip()
         if not summary:
@@ -166,9 +178,60 @@ def _process_structured_output(
                 created_at=now,
             )
         )
-        structured_evidence_count += 1
+        count += 1
+    return count
 
+
+def _normalize_parsed_fields(parsed):
+    """Normalize runner items from parsed structured output.
+
+    Args:
+        parsed: parsed structured output
+
+    Returns:
+        Dict with artifacts, tests, patches, lessons, next_actions
+    """
+    return {
+        "artifacts": _normalize_runner_items(parsed.artifacts),
+        "tests": _normalize_runner_items(parsed.tests),
+        "patches": _normalize_runner_items(parsed.patches),
+        "lessons": parsed.lessons,
+        "next_actions": parsed.next_actions,
+    }
+
+
+def _process_structured_output(
+    task: SubAgentTask,
+    parsed: SubAgentParsedOutput,
+    now: float,
+    actual_tools: list[str] | None,
+) -> dict[str, object]:
+    """LLM: extract evidence, capability requests, tool usage from structured output.
+
+    新手说明:
+    当 runner 的模型回复能被解析成结构化输出时，这个函数负责：
+    - 拆分授权/未授权的工具和 skill
+    - 把结构化证据追加到 task.evidence
+    - 把能力请求创建并追加到 task.capability_requests
+    - 返回一个字典包含所有中间结果，供 record_runner_result 使用。
+    """
+    allowed_tools = set(task.allowed_tools)
+    allowed_skills = set(task.allowed_skills)
+    used_tools, ignored_tools, used_skills, ignored_skills = _split_tools_and_skills(
+        parsed, allowed_tools, allowed_skills
+    )
+
+    if actual_tools is not None:
+        ignored_tools = _merge_task_tools(
+            task, used_tools, used_skills, actual_tools, parsed.used_tools, now
+        )
+    else:
+        task.used_tools = _merge_list(task.used_tools, used_tools)
+    task.used_skills = _merge_list(task.used_skills, used_skills)
+
+    structured_evidence_count = _process_evidence_items(parsed, task, now)
     structured_request_count, created_request_ids = _create_capability_requests_from_parsed(task, parsed, now)
+    normalized = _normalize_parsed_fields(parsed)
 
     return {
         "ignored_tools": ignored_tools,
@@ -176,11 +239,11 @@ def _process_structured_output(
         "structured_evidence_count": structured_evidence_count,
         "structured_request_count": structured_request_count,
         "created_request_ids": created_request_ids,
-        "artifacts": artifacts,
-        "tests": tests,
-        "patches": patches,
-        "lessons": lessons,
-        "next_actions": next_actions,
+        "artifacts": normalized["artifacts"],
+        "tests": normalized["tests"],
+        "patches": normalized["patches"],
+        "lessons": normalized["lessons"],
+        "next_actions": normalized["next_actions"],
     }
 
 

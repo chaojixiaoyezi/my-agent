@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM contract: load memory route indexes from simple JSON or Markdown files.
 
 新手说明:
-这里专门处理“人工维护的索引文件怎么变成 `MemoryRoute` 对象”。
+这里专门处理'人工维护的索引文件怎么变成 `MemoryRoute` 对象'。
 第一版不用第三方依赖，JSON 给程序最稳定，Markdown 给人更好改，二者都只支持很克制的字段。
 """
 

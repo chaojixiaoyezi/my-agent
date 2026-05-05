@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: resolves daemon options and runs foreground recurring parent dispatch.
 
 给人看的解释：
-daemon 是“前台常驻调度器”：按间隔循环跑父代理 dispatch。
+daemon 是'前台常驻调度器'：按间隔循环跑父代理 dispatch。
 这里负责把配置和命令行参数合并成最终选项，并启动 watch_subagents。
 """
 
