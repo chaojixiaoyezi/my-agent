@@ -18,27 +18,23 @@ if TYPE_CHECKING:
 
 def audit_request_processing(
     agent: SimpleAgent,
-    request: dict,
-    request_id: str,
-    kind: str,
-    started_at: float,
-    request_path: Path,
-    response_path: Path,
+    context: dict,
 ) -> None:
     """Log the start of gateway request processing."""
+    request = context["request"]
     log_gateway_payload(
         agent,
         {
             **request,
-            "id": request_id,
-            "kind": kind or "unknown",
+            "id": context["request_id"],
+            "kind": context["kind"] or "unknown",
             "status": "processing",
             "ok": False,
-            "started_at": started_at,
+            "started_at": context["started_at"],
         },
         event_type="gateway_request_processing",
-        request_path=request_path,
-        response_path=response_path,
+        request_path=context["request_path"],
+        response_path=context["response_path"],
     )
 
 

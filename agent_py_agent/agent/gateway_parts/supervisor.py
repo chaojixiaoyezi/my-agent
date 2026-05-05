@@ -10,8 +10,6 @@ from __future__ import annotations
 import json
 import os
 import signal
-import subprocess
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +30,12 @@ from .daemon_control import (
 from .io import read_json_file
 from .paths import gateway_paths
 from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
+from .supervisor_runtime import (
+    restart_gateway as _restart_gateway_impl,
+    run_supervisor_loop,
+    start_gateway as _start_gateway_impl,
+    stop_gateway as _stop_gateway_impl,
+)
 
 
 def _utc_now_iso() -> str:
@@ -70,7 +74,7 @@ class GatewaySupervisor:
 
     def _resolve_agent_and_paths(self):
         """Lazily resolve agent and paths to avoid import overhead in supervisor."""
-        if self._agent is not None:
+        if self._agent is not None or self._paths is not None:
             return
 
         # Import lazily to avoid circular dependencies
@@ -176,128 +180,15 @@ class GatewaySupervisor:
 
     def _start_gateway(self) -> int | None:
         """Start the gateway process. Returns the gateway PID or None on failure."""
-        self._resolve_agent_and_paths()
-
-        cmd = [
-            sys.executable,
-            "-m",
-            "agent_py_agent",
-            "--config",
-            self.config_path,
-            "gateway",
-            "run",
-        ]
-
-        creationflags = 0
-        start_new_session = False
-        if os.name == "nt":
-            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
-                subprocess, "CREATE_NO_WINDOW", 0
-            )
-        else:
-            start_new_session = True
-
-        self._log_info(f"Starting gateway: {' '.join(cmd)}")
-
-        try:
-            self._paths.root.mkdir(parents=True, exist_ok=True)
-            with self._paths.log.open("ab") as log_file:
-                process = subprocess.Popen(
-                    cmd,
-                    cwd=str(Path(self.config_path).resolve().parent.parent),
-                    stdin=subprocess.DEVNULL,
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    creationflags=creationflags,
-                    start_new_session=start_new_session,
-                )
-        except OSError as exc:
-            self._log_error(f"Failed to spawn gateway process: {exc}")
-            return None
-
-        # Wait for the gateway to write its PID file and become alive (allow up to 120s)
-        deadline = time.time() + 120.0
-        while time.time() < deadline:
-            pid = get_running_pid(self._paths.pid)
-            if pid and is_pid_alive(pid):
-                self._log_info(f"Gateway started successfully: pid={pid}")
-                return pid
-            # Also check if the subprocess itself is still alive (before PID file is written)
-            if not is_pid_alive(process.pid):
-                self._log_error(f"Gateway subprocess (pid={process.pid}) died during startup")
-                return None
-            time.sleep(0.5)
-
-        self._log_warn("Gateway started but PID not confirmed alive within 30s timeout")
-        # Return the subprocess PID anyway (gateway might still be initializing)
-        return process.pid
+        return _start_gateway_impl(self)
 
     def _stop_gateway(self, timeout: float = 20.0) -> bool:
         """Request graceful shutdown of the gateway. Returns True if stopped."""
-        self._resolve_agent_and_paths()
-
-        pid = get_running_pid(self._paths.pid)
-        if not pid:
-            self._log_info("Gateway already stopped")
-            return True
-
-        self._log_info(f"Requesting gateway shutdown: pid={pid}")
-
-        # Write stop request
-        self._paths.stop_request.parent.mkdir(parents=True, exist_ok=True)
-        self._paths.stop_request.write_text(
-            json.dumps(
-                {"requested_at": time.time(), "reason": "supervisor shutdown"}, ensure_ascii=False
-            ),
-            encoding="utf-8",
-        )
-
-        if wait_for_pid_exit(pid, timeout):
-            self._log_info("Gateway stopped gracefully")
-            return True
-
-        # Force kill
-        self._log_warn(f"Gateway did not stop gracefully, force killing pid={pid}")
-        terminate_pid(pid)
-        if wait_for_pid_exit(pid, 5):
-            self._log_info("Gateway force-killed")
-            return True
-
-        self._log_error("Failed to stop gateway even with force kill")
-        return False
+        return _stop_gateway_impl(self, timeout=timeout)
 
     def _restart_gateway(self) -> bool:
         """Restart the gateway. Returns True if restart was attempted."""
-        if self._restart_count >= self.max_restart_attempts:
-            self._log_error(
-                f"Max restart attempts ({self.max_restart_attempts}) reached. "
-                "Supervisor will continue monitoring but not restart."
-            )
-            return False
-
-        # Check cooldown
-        if time.time() - self._last_restart_at < self.restart_cooldown:
-            self._log_info(f"Restart cooldown active ({self.restart_cooldown}s). Skipping.")
-            return False
-
-        self._restart_count += 1
-        self._last_restart_at = time.time()
-
-        self._log_warn(
-            f"Gateway unhealthy. Restarting (attempt {self._restart_count}/{self.max_restart_attempts})..."
-        )
-
-        pid = get_running_pid(self._paths.pid)
-        if pid and is_pid_alive(pid):
-            self._stop_gateway(timeout=10.0)
-
-        gateway_pid = self._start_gateway()
-        if gateway_pid:
-            self._gateway_pid = gateway_pid
-            return True
-        else:
-            self._log_error("Failed to restart gateway")
-            return False
+        return _restart_gateway_impl(self)
 
     def _handle_signal(self, signum, frame) -> None:
         sig_name = signal.Signals(signum).name
@@ -306,88 +197,7 @@ class GatewaySupervisor:
 
     def run(self) -> int:
         """Run the supervisor loop. Blocks until stop is requested."""
-        self._log_info("Gateway supervisor starting")
-        self._resolve_agent_and_paths()
-
-        # Write supervisor PID file
-        supervisor_pid_path = self._paths.root / "supervisor.pid"
-        write_pid_file(supervisor_pid_path, os.getpid())
-
-        # Install signal handlers
-        signal.signal(signal.SIGTERM, self._handle_signal)
-        signal.signal(signal.SIGINT, self._handle_signal)
-
-        # Write initial status
-        write_runtime_status(
-            WriteRuntimeStatusParams(
-                status_path=self._paths.state,
-                gateway_state="supervisor_running",
-                restart_requested=False,
-                active_agents=0,
-            )
-        )
-
-        # Start gateway if not already running
-        if not self._is_gateway_healthy():
-            self._start_gateway()
-
-        self._log_info(
-            f"Supervisor active: check_interval={self.check_interval}s, "
-            f"heartbeat_timeout={self.heartbeat_timeout}s, "
-            f"max_restarts={self.max_restart_attempts}"
-        )
-
-        last_check = time.time()
-        consecutive_failures = 0
-
-        while not self._stop_requested:
-            time.sleep(1.0)
-
-            # Check health at configured interval
-            now = time.time()
-            if now - last_check < self.check_interval:
-                continue
-            last_check = now
-
-            healthy = self._is_gateway_healthy()
-            adapter_healthy = self._check_adapter_health()
-
-            if healthy:
-                consecutive_failures = 0
-            else:
-                consecutive_failures += 1
-                self._log_warn(
-                    f"Gateway health check failed (consecutive={consecutive_failures}): "
-                    "PID file missing, process dead, or heartbeat stale"
-                )
-                if not adapter_healthy:
-                    self._log_warn("Adapter is also not running")
-
-            if consecutive_failures >= 3:
-                self._restart_gateway()
-                consecutive_failures = 0
-
-        # Graceful shutdown
-        self._log_info("Supervisor shutting down...")
-        self._stop_gateway(timeout=15.0)
-
-        # Cleanup
-        try:
-            supervisor_pid_path.unlink()
-        except OSError:
-            pass
-
-        write_runtime_status(
-            WriteRuntimeStatusParams(
-                status_path=self._paths.state,
-                gateway_state="supervisor_stopped",
-                restart_requested=False,
-                active_agents=0,
-            )
-        )
-
-        self._log_info("Supervisor stopped")
-        return 0
+        return run_supervisor_loop(self)
 
 
 def run_supervisor(config_path: str, **kwargs) -> int:

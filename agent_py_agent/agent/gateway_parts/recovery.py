@@ -8,6 +8,7 @@ gateway 如果崩在半路，请求会留在 processing 目录。
 """
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,16 @@ from .paths import GatewayPaths
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
+
+
+@dataclass(frozen=True)
+class _RecoveryContext:
+    now: float
+    max_attempts: int
+    timeout_seconds: int
+    startup: bool
+    agent: SimpleAgent | None
+    lease_stale_seconds: int | None
 
 
 def gateway_stale_processing(paths: GatewayPaths, timeout_seconds: int) -> list[dict]:
@@ -71,80 +82,122 @@ def recover_gateway_processing_requests(
     而不是只用 lease_heartbeat_at。这样可以兼容外部传入的动态配置。
     """
 
-    paths.inbox.mkdir(parents=True, exist_ok=True)
-    paths.processing.mkdir(parents=True, exist_ok=True)
-    paths.done.mkdir(parents=True, exist_ok=True)
-    paths.failed.mkdir(parents=True, exist_ok=True)
-    paths.responses.mkdir(parents=True, exist_ok=True)
+    _ensure_recovery_dirs(paths)
     summary = {"requeued": 0, "failed": 0, "checked": 0, "archived": 0}
     now = time.time()
     max_attempts = max(1, int(max_attempts or 1))
     timeout_seconds = max(1, int(timeout_seconds or 1))
+    context = _RecoveryContext(now, max_attempts, timeout_seconds, startup, agent, lease_stale_seconds)
     for request_path in sorted(paths.processing.glob("*.json")):
-        payload = read_json_file(request_path)
-        if not payload:
-            payload = {"id": request_path.stem, "kind": "unknown", "created_at": 0}
         summary["checked"] += 1
-        request_id = str(payload.get("id") or request_path.stem)
-        if gateway_response_path(paths, request_id).exists():
-            try:
-                _archive_gateway_request(request_path, paths.done)
-            except OSError as exc:
-                _report_gateway_side_effect_error("archive_duplicate_gateway_processing_request", request_id, exc)
-                continue
-            summary["archived"] += 1
-            continue
-        lease_at = _gateway_processing_lease_at(payload, request_path)
-        from .runtime import is_heartbeat_alive_for_request
-        heartbeat_alive = is_heartbeat_alive_for_request(request_id)
-        # Determine stale threshold: prefer lease_stale_seconds if provided, otherwise
-        # use the gap between lease_started_at and now as the implicit stale window.
-        effective_timeout = (
-            lease_stale_seconds
-            if lease_stale_seconds is not None
-            else timeout_seconds
-        )
-        stale = startup or not lease_at or (now - lease_at >= effective_timeout and not heartbeat_alive)
-        if not stale:
-            continue
-        attempts = _gateway_request_attempts(payload)
-        if attempts >= max_attempts:
-            _write_gateway_failure_response(
-                paths,
-                request_path,
-                payload,
-                status="failed",
-                error_code="GATEWAY_PROCESSING_TIMEOUT",
-                error=f"gateway processing timeout after {timeout_seconds}s; attempts={attempts}",
-                event_type="gateway_request_processing_failed",
-                agent=agent,
-            )
-            try:
-                _archive_gateway_request(request_path, paths.failed)
-            except OSError as exc:
-                _report_gateway_side_effect_error("archive_gateway_failed_request", request_path.stem, exc)
-                continue
-            summary["failed"] += 1
-            continue
-        payload.update(
-            {
-                "status": "pending",
-                "requeued_at": now,
-                "last_error": (
-                    "gateway restarted before request completed"
-                    if startup
-                    else f"gateway processing timeout after {timeout_seconds}s"
-                ),
-            }
-        )
-        try:
-            write_json_file(request_path, payload)
-            request_path.replace(paths.inbox / request_path.name)
-        except OSError as exc:
-            _report_gateway_side_effect_error("requeue_gateway_request", request_path.stem, exc)
-            continue
-        summary["requeued"] += 1
+        action = _recover_one_processing_request(paths, request_path, context)
+        if action in summary:
+            summary[action] += 1
     return summary
+
+
+def _ensure_recovery_dirs(paths: GatewayPaths) -> None:
+    """Ensure request recovery directories exist before moving files."""
+    for folder in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
+        folder.mkdir(parents=True, exist_ok=True)
+
+
+def _recover_one_processing_request(
+    paths: GatewayPaths,
+    request_path: Path,
+    context: _RecoveryContext,
+) -> str:
+    """Recover one processing request and return the summary bucket name."""
+    payload = read_json_file(request_path) or {"id": request_path.stem, "kind": "unknown", "created_at": 0}
+    request_id = str(payload.get("id") or request_path.stem)
+    if gateway_response_path(paths, request_id).exists():
+        return _archive_completed_processing(paths, request_path, request_id)
+    if not _processing_request_stale(payload, request_path, context):
+        return ""
+    attempts = _gateway_request_attempts(payload)
+    if attempts >= context.max_attempts:
+        return _fail_stale_processing(paths, request_path, payload, context.timeout_seconds, attempts, context.agent)
+    return _requeue_stale_processing(paths, request_path, payload, context)
+
+
+def _archive_completed_processing(paths: GatewayPaths, request_path: Path, request_id: str) -> str:
+    try:
+        _archive_gateway_request(request_path, paths.done)
+    except OSError as exc:
+        _report_gateway_side_effect_error("archive_duplicate_gateway_processing_request", request_id, exc)
+        return ""
+    return "archived"
+
+
+def _processing_request_stale(
+    payload: dict,
+    request_path: Path,
+    context: _RecoveryContext,
+) -> bool:
+    from .runtime import is_heartbeat_alive_for_request
+
+    request_id = str(payload.get("id") or request_path.stem)
+    lease_at = _gateway_processing_lease_at(payload, request_path)
+    effective_timeout = context.lease_stale_seconds if context.lease_stale_seconds is not None else context.timeout_seconds
+    return (
+        context.startup
+        or not lease_at
+        or (context.now - lease_at >= effective_timeout and not is_heartbeat_alive_for_request(request_id))
+    )
+
+
+def _fail_stale_processing(
+    paths: GatewayPaths,
+    request_path: Path,
+    payload: dict,
+    timeout_seconds: int,
+    attempts: int,
+    agent: SimpleAgent | None,
+) -> str:
+    _write_gateway_failure_response(
+        paths,
+        {
+            "request_path": request_path,
+            "payload": payload,
+            "status": "failed",
+            "error_code": "GATEWAY_PROCESSING_TIMEOUT",
+            "error": f"gateway processing timeout after {timeout_seconds}s; attempts={attempts}",
+            "event_type": "gateway_request_processing_failed",
+            "agent": agent,
+        },
+    )
+    try:
+        _archive_gateway_request(request_path, paths.failed)
+    except OSError as exc:
+        _report_gateway_side_effect_error("archive_gateway_failed_request", request_path.stem, exc)
+        return ""
+    return "failed"
+
+
+def _requeue_stale_processing(
+    paths: GatewayPaths,
+    request_path: Path,
+    payload: dict,
+    context: _RecoveryContext,
+) -> str:
+    payload.update(
+        {
+            "status": "pending",
+            "requeued_at": context.now,
+            "last_error": (
+                "gateway restarted before request completed"
+                if context.startup
+                else f"gateway processing timeout after {context.timeout_seconds}s"
+            ),
+        }
+    )
+    try:
+        write_json_file(request_path, payload)
+        request_path.replace(paths.inbox / request_path.name)
+    except OSError as exc:
+        _report_gateway_side_effect_error("requeue_gateway_request", request_path.stem, exc)
+        return ""
+    return "requeued"
 
 
 def requeue_gateway_processing_requests(paths: GatewayPaths) -> int:
@@ -210,14 +263,7 @@ def _gateway_processing_timestamp(payload: dict, request_path: Path, keys: tuple
 
 def _write_gateway_failure_response(
     paths: GatewayPaths,
-    request_path: Path,
-    payload: dict,
-    *,
-    status: str,
-    error_code: str,
-    error: str,
-    event_type: str,
-    agent: SimpleAgent | None = None,
+    context: dict,
 ) -> dict:
     """LLM contract: write a terminal failure response for a queued request.
 
@@ -226,6 +272,8 @@ def _write_gateway_failure_response(
     让客户端可以通过 request_id 查到明确失败原因。
     """
 
+    request_path = context["request_path"]
+    payload = context["payload"]
     request_id = str(payload.get("id") or request_path.stem)
     now = time.time()
     started_at = _gateway_processing_started_at(payload, request_path) or now
@@ -233,14 +281,14 @@ def _write_gateway_failure_response(
         "id": request_id,
         "kind": str(payload.get("kind") or "unknown"),
         "ok": False,
-        "status": status,
+        "status": context["status"],
         "created_at": payload.get("created_at", 0),
         "started_at": started_at,
         "ended_at": now,
         "duration_seconds": round(now - started_at, 3),
         "response": "",
-        "error_code": error_code,
-        "error": error,
+        "error_code": context["error_code"],
+        "error": context["error"],
         "backend": "",
         "used_memories": 0,
         "tool_rounds": 0,
@@ -252,11 +300,12 @@ def _write_gateway_failure_response(
     if not response_path.exists():
         write_json_file(response_path, response)
     append_gateway_history(paths, response)
+    agent = context.get("agent")
     if agent:
         log_gateway_payload(
             agent,
             {**response, "prompt": payload.get("prompt", "")},
-            event_type=event_type,
+            event_type=context["event_type"],
             request_path=request_path,
             response_path=response_path,
         )

@@ -27,7 +27,7 @@ from .lease_service import (
     refresh_processing_lease,
     start_lease_heartbeat,
 )
-from .paths import GatewayPaths, gateway_paths
+from .paths import GatewayPaths, gateway_chunk_path, gateway_paths
 from .queue_service import (
     archive_request,
     claim_request,
@@ -199,6 +199,127 @@ def _update_response_from_result(
     })
 
 
+def _start_gateway_request_lease(
+    agent: SimpleAgent,
+    request: dict,
+    request_path: Path,
+    request_id: str,
+    *,
+    refresh_lease: bool,
+    worker_id: str,
+) -> tuple[threading.Event | None, threading.Thread | None]:
+    """Start lease refresh for a processing request when needed."""
+    should_refresh = refresh_lease or str(request.get("status") or "") == "processing"
+    if not should_refresh:
+        return None, None
+    lease_worker = worker_id or str(request.get("lease_owner") or "")
+    refresh_processing_lease(request_path, request_id=request_id, worker_id=lease_worker)
+    return start_lease_heartbeat(
+        agent,
+        request_path,
+        request_id=request_id,
+        worker_id=lease_worker,
+    )
+
+
+def _run_gateway_ask(
+    agent: SimpleAgent,
+    request: dict,
+    request_path: Path,
+    response_path: Path,
+    request_id: str,
+    on_chunk,
+):
+    """Execute a validated ask request through SimpleAgent.run."""
+    prompt = str(request.get("prompt") or request.get("goal") or "").strip()
+    if not prompt:
+        raise ValueError("gateway ask prompt/goal 不能为空。")
+    return agent.run(
+        prompt,
+        inject=[str(item) for item in request.get("inject", [])],
+        prompt_files=[str(item) for item in request.get("prompt_files", [])],
+        save=bool(request.get("save", True)),
+        request_id=request_id,
+        source="gateway",
+        recovery_snapshot=bool(request.get("save", True)),
+        resume_context=request.get("resume_context") if "resume_context" in request else None,
+        recovery_next_actions=["如需恢复本次 gateway 请求，先读取 gateway response 和 LocalStore gateway_request 记录。"],
+        recovery_content_paths=[str(request_path), str(response_path)],
+        on_chunk=on_chunk,
+    )
+
+
+def _stop_gateway_request_lease(
+    lease_stop: threading.Event | None,
+    lease_thread: threading.Thread | None,
+) -> None:
+    """Stop the request lease heartbeat thread if it was started."""
+    if lease_stop is not None:
+        lease_stop.set()
+    if lease_thread is not None:
+        lease_thread.join(timeout=2)
+
+
+def _copy_final_lease_fields(response: dict, request_path: Path) -> None:
+    """Copy final lease owner/timestamps from the processing request file."""
+    final_request = read_json_file(request_path)
+    if not final_request:
+        return
+    response["lease_owner"] = final_request.get("lease_owner", response.get("lease_owner", ""))
+    response["lease_started_at"] = final_request.get("lease_started_at", response.get("lease_started_at", 0))
+    response["lease_heartbeat_at"] = final_request.get(
+        "lease_heartbeat_at",
+        response.get("lease_heartbeat_at", 0),
+    )
+
+
+def _execute_gateway_request_body(context: dict, on_chunk) -> None:
+    """Validate and execute the request body, updating response on success."""
+    response = context["response"]
+    kind = str(response.get("kind") or "").strip()
+    if kind != "ask":
+        response["error_code"] = "UNSUPPORTED_KIND"
+        raise ValueError(f"unsupported gateway request kind: {kind or 'empty'}")
+    try:
+        result = _run_gateway_ask(
+            context["agent"],
+            context["request"],
+            context["request_path"],
+            context["response_path"],
+            context["request_id"],
+            on_chunk,
+        )
+    except ValueError as exc:
+        if str(exc) == "gateway ask prompt/goal 不能为空。":
+            response["error_code"] = "EMPTY_PROMPT"
+        raise
+    _update_response_from_result(response, result, context["request"])
+
+
+def _prepare_gateway_request_context(agent: SimpleAgent, request_path: Path) -> dict:
+    """Read request metadata, build response base, and audit processing start."""
+    request = read_json_file(request_path)
+    request_id = str(request.get("id") or request_path.stem)
+    kind = str(request.get("kind") or "").strip() or ("ask" if request_id else "")
+    response_path = gateway_response_path(gateway_paths(agent), request_id)
+    existing_response = read_json_file(response_path)
+    if existing_response:
+        return {"existing_response": existing_response}
+    started_at = time.time()
+    response = _build_gateway_response_base(request, request_path, request_id, kind, started_at)
+    context = {
+        "request": request,
+        "request_id": request_id,
+        "kind": kind,
+        "started_at": started_at,
+        "request_path": request_path,
+        "response_path": response_path,
+        "response": response,
+    }
+    audit_request_processing(agent, context)
+    return context
+
+
 def _handle_gateway_request(
     agent: SimpleAgent,
     request_path: Path,
@@ -207,60 +328,33 @@ def _handle_gateway_request(
     worker_id: str = "",
 ) -> dict:
     """LLM contract: execute one gateway request file and return response payload."""
-    request = read_json_file(request_path)
-    request_id = str(request.get("id") or request_path.stem)
-    kind = str(request.get("kind") or "").strip()
-    if not kind and request_id:
-        kind = "ask"
-    response_path = gateway_response_path(gateway_paths(agent), request_id)
-    existing_response = read_json_file(response_path)
-    if existing_response:
-        return existing_response
-    started_at = time.time()
-    response = _build_gateway_response_base(request, request_path, request_id, kind, started_at)
-    audit_request_processing(agent, request, request_id, kind, started_at, request_path, response_path)
-    lease_stop: threading.Event | None = None
-    lease_thread: threading.Thread | None = None
-    should_refresh_lease = refresh_lease or str(request.get("status") or "") == "processing"
-    if should_refresh_lease:
-        lease_worker = worker_id or str(request.get("lease_owner") or "")
-        refresh_processing_lease(request_path, request_id=request_id, worker_id=lease_worker)
-        lease_stop, lease_thread = start_lease_heartbeat(
-            agent,
-            request_path,
-            request_id=request_id,
-            worker_id=lease_worker,
-        )
-    _paths = gateway_paths(agent)
-    from .paths import gateway_chunk_path
-    chunk_path = gateway_chunk_path(_paths, request_id)
+    context = _prepare_gateway_request_context(agent, request_path)
+    if context.get("existing_response"):
+        return context["existing_response"]
+    request = context["request"]
+    request_id = context["request_id"]
+    response_path = context["response_path"]
+    response = context["response"]
+    started_at = context["started_at"]
+    lease_stop, lease_thread = _start_gateway_request_lease(
+        agent,
+        request,
+        request_path,
+        request_id,
+        refresh_lease=refresh_lease,
+        worker_id=worker_id,
+    )
+    chunk_path = gateway_chunk_path(gateway_paths(agent), request_id)
     chunk_path_abs, _ = open_chunk_stream(chunk_path)
 
-    def _on_gateway_chunk(chunk: str) -> None:
-        write_chunk(chunk_path_abs, chunk)
-
     try:
-        if kind != "ask":
-            response["error_code"] = "UNSUPPORTED_KIND"
-            raise ValueError(f"unsupported gateway request kind: {kind or 'empty'}")
-        prompt = str(request.get("prompt") or request.get("goal") or "").strip()
-        if not prompt:
-            response["error_code"] = "EMPTY_PROMPT"
-            raise ValueError("gateway ask prompt/goal 不能为空。")
-        result = agent.run(
-            prompt,
-            inject=[str(item) for item in request.get("inject", [])],
-            prompt_files=[str(item) for item in request.get("prompt_files", [])],
-            save=bool(request.get("save", True)),
-            request_id=request_id,
-            source="gateway",
-            recovery_snapshot=bool(request.get("save", True)),
-            resume_context=request.get("resume_context") if "resume_context" in request else None,
-            recovery_next_actions=["如需恢复本次 gateway 请求，先读取 gateway response 和 LocalStore gateway_request 记录。"],
-            recovery_content_paths=[str(request_path), str(response_path)],
-            on_chunk=_on_gateway_chunk,
+        _execute_gateway_request_body(
+            {
+                **context,
+                "agent": agent,
+            },
+            lambda chunk: write_chunk(chunk_path_abs, chunk),
         )
-        _update_response_from_result(response, result, request)
     except Exception as exc:
         response.update({
             "ok": False,
@@ -269,20 +363,10 @@ def _handle_gateway_request(
             "error": f"{type(exc).__name__}: {exc}",
         })
     finally:
-        if lease_stop is not None:
-            lease_stop.set()
-        if lease_thread is not None:
-            lease_thread.join(timeout=2)
+        _stop_gateway_request_lease(lease_stop, lease_thread)
         close_chunk_stream(chunk_path_abs)
     ended_at = time.time()
-    final_request = read_json_file(request_path)
-    if final_request:
-        response["lease_owner"] = final_request.get("lease_owner", response.get("lease_owner", ""))
-        response["lease_started_at"] = final_request.get("lease_started_at", response.get("lease_started_at", 0))
-        response["lease_heartbeat_at"] = final_request.get(
-            "lease_heartbeat_at",
-            response.get("lease_heartbeat_at", 0),
-        )
+    _copy_final_lease_fields(response, request_path)
     response["ended_at"] = ended_at
     response["duration_seconds"] = round(ended_at - started_at, 3)
     audit_request_completed(agent, response, request, request_path, response_path)

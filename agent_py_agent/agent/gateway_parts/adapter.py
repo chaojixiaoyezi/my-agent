@@ -37,22 +37,57 @@ def _process_single_adapter_message(
     output_path = _adapter_output_path(adapter_paths_obj, message_id)
     started_at = time.time()
     if not prompt:
-        response = {
-            "id": message_id,
-            "ok": False,
-            "status": "failed",
-            "error_code": "ADAPTER_EMPTY_PROMPT",
-            "error": "adapter message 缺少 prompt/text/message/content 字段。",
-            "created_at": payload.get("created_at", 0),
-            "started_at": started_at,
-            "ended_at": time.time(),
-            "source_file": str(processing_path),
-        }
-        write_json_file(output_path, response)
+        write_json_file(output_path, _empty_prompt_adapter_response(message_id, payload, processing_path, started_at))
         _archive_adapter_message(processing_path, adapter_paths_obj.failed)
         return True
+    request_id, request_path, gateway_response = _submit_adapter_gateway_request(
+        agent, gateway_paths_obj, payload, prompt
+    )
+    response = wait_for_gateway_response(gateway_paths_obj, request_id, timeout)
+    if not response:
+        response = _timeout_adapter_gateway_response(request_id, payload, request_path, started_at, timeout)
+        _record_late_pending(adapter_paths_obj, request_id, timeout)
+    adapter_response = _build_adapter_outbox_response(
+        {
+            "message_id": message_id,
+            "payload": payload,
+            "processing_path": processing_path,
+            "request_id": request_id,
+            "request_path": request_path,
+            "gateway_response": gateway_response,
+            "response": response,
+            "started_at": started_at,
+        }
+    )
+    write_json_file(output_path, adapter_response)
+    _archive_adapter_message(
+        processing_path,
+        adapter_paths_obj.done if adapter_response["ok"] else adapter_paths_obj.failed,
+    )
+    return True
 
-    request_id, request_path, gateway_response = submit_gateway_ask(
+
+def _empty_prompt_adapter_response(message_id: str, payload: dict, processing_path: Path, started_at: float) -> dict:
+    return {
+        "id": message_id,
+        "ok": False,
+        "status": "failed",
+        "error_code": "ADAPTER_EMPTY_PROMPT",
+        "error": "adapter message 缺少 prompt/text/message/content 字段。",
+        "created_at": payload.get("created_at", 0),
+        "started_at": started_at,
+        "ended_at": time.time(),
+        "source_file": str(processing_path),
+    }
+
+
+def _submit_adapter_gateway_request(
+    agent: SimpleAgent,
+    gateway_paths_obj: GatewayPaths,
+    payload: dict,
+    prompt: str,
+) -> tuple[str, Path, Path]:
+    return submit_gateway_ask(
         gateway_paths_obj,
         prompt=prompt,
         inject=[str(item) for item in payload.get("inject", [])],
@@ -61,30 +96,42 @@ def _process_single_adapter_message(
         include_prompt=bool(payload.get("include_prompt", False)),
         agent=agent,
     )
-    response = wait_for_gateway_response(gateway_paths_obj, request_id, timeout)
-    if not response:
-        response = {
-            "id": request_id,
-            "kind": "ask",
-            "ok": False,
-            "status": "timeout",
-            "error_code": "GATEWAY_TIMEOUT",
-            "error": f"timeout after {timeout}s",
-            "created_at": payload.get("created_at", 0),
-            "started_at": started_at,
-            "ended_at": time.time(),
-            "response": "",
-            "request_file": str(request_path),
-        }
-        _record_late_pending(adapter_paths_obj, request_id, timeout)
-    adapter_response = {
+
+
+def _timeout_adapter_gateway_response(
+    request_id: str,
+    payload: dict,
+    request_path: Path,
+    started_at: float,
+    timeout: float,
+) -> dict:
+    return {
+        "id": request_id,
+        "kind": "ask",
+        "ok": False,
+        "status": "timeout",
+        "error_code": "GATEWAY_TIMEOUT",
+        "error": f"timeout after {timeout}s",
+        "created_at": payload.get("created_at", 0),
+        "started_at": started_at,
+        "ended_at": time.time(),
+        "response": "",
+        "request_file": str(request_path),
+    }
+
+
+def _build_adapter_outbox_response(context: dict) -> dict:
+    message_id = context["message_id"]
+    payload = context["payload"]
+    response = context["response"]
+    return {
         "adapter_message_id": message_id,
         "conversation_id": payload.get("conversation_id", ""),
         "user": payload.get("user", ""),
-        "gateway_request_id": request_id,
-        "gateway_request_file": str(request_path),
-        "gateway_response_file": str(gateway_response),
-        "source_file": str(processing_path),
+        "gateway_request_id": context["request_id"],
+        "gateway_request_file": str(context["request_path"]),
+        "gateway_response_file": str(context["gateway_response"]),
+        "source_file": str(context["processing_path"]),
         "ok": bool(response.get("ok", False)),
         "status": response.get("status", "unknown"),
         "error_code": response.get("error_code", ""),
@@ -92,15 +139,9 @@ def _process_single_adapter_message(
         "error": response.get("error", ""),
         "payload": response,
         "created_at": payload.get("created_at", 0),
-        "started_at": started_at,
+        "started_at": context["started_at"],
         "ended_at": time.time(),
     }
-    write_json_file(output_path, adapter_response)
-    _archive_adapter_message(
-        processing_path,
-        adapter_paths_obj.done if adapter_response["ok"] else adapter_paths_obj.failed,
-    )
-    return True
 
 
 def process_file_adapter_once(
@@ -226,6 +267,17 @@ def check_late_responses(paths: AdapterPaths) -> list[dict]:
         return []
     results: list[dict] = []
     remaining: list[dict] = []
+    for entry in _iter_late_pending_entries(late_path):
+        updated = _mark_late_response_if_arrived(paths, entry)
+        if updated.get("checked"):
+            results.append(updated)
+        remaining.append(updated)
+    _rewrite_unchecked_late_entries(late_path, remaining)
+    return results
+
+
+def _iter_late_pending_entries(late_path: Path) -> list[dict]:
+    entries: list[dict] = []
     for line in late_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -233,29 +285,25 @@ def check_late_responses(paths: AdapterPaths) -> list[dict]:
             entry = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if entry.get("checked"):
-            continue
-        request_id = entry.get("request_id", "")
-        # Check gateway responses directory for the response
-        from .io import gateway_response_path
-        from .paths import gateway_paths
-        # We need to check the gateway responses directory
-        # The paths.root is the adapter root, not gateway root
-        # We'll check if a response file exists in the gateway responses
-        # For now, we'll use a simple check based on the request_id
-        gateway_responses_dir = paths.root.parent / "gateway" / "responses"
-        response_path = gateway_responses_dir / f"{request_id}.json"
-        if response_path.exists():
-            entry["checked"] = True
-            entry["late_response_at"] = time.time()
-            results.append(entry)
-        remaining.append(entry)
-    # Rewrite file with only unchecked entries
+        if not entry.get("checked"):
+            entries.append(entry)
+    return entries
+
+
+def _mark_late_response_if_arrived(paths: AdapterPaths, entry: dict) -> dict:
+    request_id = entry.get("request_id", "")
+    gateway_responses_dir = paths.root.parent / "gateway" / "responses"
+    response_path = gateway_responses_dir / f"{request_id}.json"
+    if response_path.exists():
+        entry["checked"] = True
+        entry["late_response_at"] = time.time()
+    return entry
+
+
+def _rewrite_unchecked_late_entries(late_path: Path, entries: list[dict]) -> None:
+    lines = [json.dumps(entry, ensure_ascii=False) for entry in entries if not entry.get("checked")]
+    content = "\n".join(lines) + ("\n" if lines else "")
     try:
-        with late_path.open("w", encoding="utf-8") as f:
-            for entry in remaining:
-                if not entry.get("checked"):
-                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        late_path.write_text(content, encoding="utf-8")
     except OSError as exc:
         _report_gateway_side_effect_error("check_late_responses_cleanup", "", exc)
-    return results
