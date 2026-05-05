@@ -7,10 +7,10 @@ import time as time_module
 from ..memory_archive import (
     estimate_tokens,
     snapshots,
-    write_compression_snapshot,
 )
 from ..memory_archive.snapshots import CompressionSnapshotInput
 from ._runtime_params import CompressionContext
+from . import runtime_services
 
 
 class CompressionService:
@@ -41,7 +41,7 @@ class CompressionService:
             resume_context_section=ctx.resume_context_section,
         )
         try:
-            hook_result = write_compression_snapshot(
+            hook_result = runtime_services.write_compression_snapshot(
                 self._agent.root,
                 params=CompressionSnapshotInput(
                     session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
