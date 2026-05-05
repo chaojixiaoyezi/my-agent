@@ -189,6 +189,7 @@ class TestConcurrentIngest:
     def test_multiple_pipelines_same_root(self, tmp_path):
         """验证多个 pipeline 共享同一 root 的并发写入"""
         results = []
+        errors = []
 
         def run_pipeline(pipeline_id):
             pipeline = IngestPipeline(root=tmp_path)
@@ -214,8 +215,12 @@ class TestConcurrentIngest:
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = [executor.submit(run_pipeline, i) for i in range(5)]
             for f in as_completed(futures):
-                pass
+                try:
+                    f.result()
+                except Exception as exc:
+                    errors.append(exc)
 
+        assert errors == []
         assert len(results) == 5
         assert all(r.parsed_count >= 45 for r in results)
 
