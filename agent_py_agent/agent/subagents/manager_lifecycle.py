@@ -11,9 +11,13 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from .services.lifecycle import SubAgentLifecycleService
+from .services.lifecycle import (
+    RecordCapabilityGrantParams,
+    RecordCapabilityGapParams,
+    SubAgentLifecycleService,
+)
 
 if TYPE_CHECKING:
     from ..local_store import LocalStore
@@ -58,51 +62,53 @@ class SubAgentLifecycleMixin:
         self,
         run_id: str,
         *,
-        request_id: str,
-        skills=None,
-        tools=None,
-        capability_cards=None,
-        reason="",
-        constraints=None,
-        expires_after_task=True,
+        params: RecordCapabilityGrantParams | None = None,
+        request_id: str | None = None,
+        skills: list[str] | None = None,
+        tools: list[str] | None = None,
+        capability_cards: list[dict[str, str]] | None = None,
+        reason: str = "",
+        constraints: dict[str, str] | None = None,
+        expires_after_task: bool = True,
     ):
         """Record a capability grant on a subagent task."""
-
-        return self._lifecycle_service().record_capability_grant(
-            run_id,
-            request_id=request_id,
-            skills=skills,
-            tools=tools,
-            capability_cards=capability_cards,
-            reason=reason,
-            constraints=constraints,
-            expires_after_task=expires_after_task,
-        )
+        if params is None:
+            params = RecordCapabilityGrantParams(
+                request_id=request_id or "",
+                skills=skills,
+                tools=tools,
+                capability_cards=capability_cards,
+                reason=reason,
+                constraints=constraints,
+                expires_after_task=expires_after_task,
+            )
+        return self._lifecycle_service().record_capability_grant(run_id, params=params)
 
     def record_capability_gap(
         self,
         run_id: str,
         *,
-        missing_capability: str,
-        why_failed: str,
-        attempted_skills=None,
-        attempted_tools=None,
-        needed_outputs=None,
-        suggested_skill="",
-        suggested_tool="",
+        params: RecordCapabilityGapParams | None = None,
+        missing_capability: str | None = None,
+        why_failed: str | None = None,
+        attempted_skills: list[str] | None = None,
+        attempted_tools: list[str] | None = None,
+        needed_outputs: list[str] | None = None,
+        suggested_skill: str = "",
+        suggested_tool: str = "",
     ):
         """Record a capability gap on a subagent task."""
-
-        return self._lifecycle_service().record_capability_gap(
-            run_id,
-            missing_capability=missing_capability,
-            why_failed=why_failed,
-            attempted_skills=attempted_skills,
-            attempted_tools=attempted_tools,
-            needed_outputs=needed_outputs,
-            suggested_skill=suggested_skill,
-            suggested_tool=suggested_tool,
-        )
+        if params is None:
+            params = RecordCapabilityGapParams(
+                missing_capability=missing_capability or "",
+                why_failed=why_failed or "",
+                attempted_skills=attempted_skills,
+                attempted_tools=attempted_tools,
+                needed_outputs=needed_outputs,
+                suggested_skill=suggested_skill,
+                suggested_tool=suggested_tool,
+            )
+        return self._lifecycle_service().record_capability_gap(run_id, params=params)
 
     def record_evidence(
         self,
