@@ -12,6 +12,25 @@ import threading
 import time
 from collections.abc import Callable
 
+from .fallback_state import (
+    _CHAT_RESPONSE_STYLE_INJECT,
+    FALLBACK_CHAT_PROMPT,
+    MAX_HISTORY_TURNS,
+    ChatJob,
+    FallbackHandleCommandConfig,
+    FallbackWorkerConfig,
+    RunFallbackConfig,
+    _startup_banner,
+    append_conversation_turn,
+    render_gateway_status,
+    resume_context_override,
+)
+from .fallback_ui import (
+    _handle_expand_command,
+    _make_chunk_handler,
+    _read_user_input,
+    _render_assistant_response,
+)
 from .gateway_client import (
     check_gateway_alive,
     poll_gateway_chunks,
@@ -27,25 +46,6 @@ from .rendering import (
     BOLD,
     RESET,
     terminal_rule,
-)
-from .fallback_state import (
-    FALLBACK_CHAT_PROMPT,
-    MAX_HISTORY_TURNS,
-    ChatJob,
-    FallbackHandleCommandConfig,
-    FallbackWorkerConfig,
-    RunFallbackConfig,
-    _CHAT_RESPONSE_STYLE_INJECT,
-    _startup_banner,
-    append_conversation_turn,
-    render_gateway_status,
-    resume_context_override,
-)
-from .fallback_ui import (
-    _handle_expand_command,
-    _make_chunk_handler,
-    _read_user_input,
-    _render_assistant_response,
 )
 
 

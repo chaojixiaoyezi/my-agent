@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+
 from ...agent.backend import ModelResponse
 from ...agent.backends.base import get_backend
 from ..scenario_utils import (

@@ -19,6 +19,8 @@ from ..scenario_utils import (
 )
 from .real_model_recovery_case import _real_model_recovery_resume
 from .subagent_cases import _write_parent_subagent_recovery_fact_files
+
+
 class ScenarioRealModelMultiRoundBackend:
     """LLM: wraps a real model backend for multi-round tool call verification.
 

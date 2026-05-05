@@ -32,8 +32,14 @@ from .paths import gateway_paths
 from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
 from .supervisor_runtime import (
     restart_gateway as _restart_gateway_impl,
+)
+from .supervisor_runtime import (
     run_supervisor_loop,
+)
+from .supervisor_runtime import (
     start_gateway as _start_gateway_impl,
+)
+from .supervisor_runtime import (
     stop_gateway as _stop_gateway_impl,
 )
 

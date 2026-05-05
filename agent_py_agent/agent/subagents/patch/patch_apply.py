@@ -68,7 +68,9 @@ class PatchApplyService:
     ) -> PatchApplyReport:
         """Write patch apply report to disk."""
         from agent_py_agent.agent.subagents.patch.patch_renderer import render_patch_apply_markdown
-        from agent_py_agent.agent.subagents.services.patch_apply_record_files import PatchApplyRecordFiles
+        from agent_py_agent.agent.subagents.services.patch_apply_record_files import (
+            PatchApplyRecordFiles,
+        )
 
         report = self.apply_patches(run_ids, apply=apply, applier=applier, note=note, limit=limit)
         (self.manager.workspace / "subagent_patch_apply_report.json").write_text(
@@ -100,7 +102,9 @@ class PatchApplyService:
 
     def _write_apply_records(self, report: PatchApplyReport, *, apply: bool) -> None:
         """Persist per-run patch apply records and append apply logs when requested."""
-        from agent_py_agent.agent.subagents.services.patch_apply_record_files import PatchApplyRecordFiles
+        from agent_py_agent.agent.subagents.services.patch_apply_record_files import (
+            PatchApplyRecordFiles,
+        )
 
         for record in report.records:
             PatchApplyRecordFiles.write_record(record, self.manager)

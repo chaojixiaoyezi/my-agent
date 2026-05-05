@@ -7,6 +7,11 @@ Human version:
 只负责展示格式，避免管理器里混入一堆字符串拼接。
 """
 
+from .rendering_dispatch import (
+    render_dispatch_markdown,
+    render_dispatch_watch_markdown,
+    render_parent_planner_markdown,
+)
 from .reports import (
     AcceptanceReviewRecord,
     AcceptanceReviewReport,
@@ -18,11 +23,6 @@ from .reports import (
     PatchReviewReport,
     SubAgentBoard,
     SubAgentBoardItem,
-)
-from .rendering_dispatch import (
-    render_dispatch_markdown,
-    render_dispatch_watch_markdown,
-    render_parent_planner_markdown,
 )
 
 

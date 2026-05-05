@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from ._context_paths import (
-    _ReadTarget,
     _append_finding,
     _read_targets_from_matches,
+    _ReadTarget,
     _resolve_relative_path,
     _resolve_root,
 )

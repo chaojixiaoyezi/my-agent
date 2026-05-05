@@ -7,7 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .daemon_metadata import _get_process_start_time, _read_json_file, _utc_now_iso, _write_json_file
+from .daemon_metadata import (
+    _get_process_start_time,
+    _read_json_file,
+    _utc_now_iso,
+    _write_json_file,
+)
 
 
 @dataclass(frozen=True)

@@ -25,6 +25,8 @@ from ..scenario_utils import (
     print_scenario_step,
     write_scenario_summary,
 )
+
+
 def _processing_stop_setup(args):
     """Setup for processing stop scenario: create workspace, agent, gateway paths and pending request."""
     paths = create_scenario_workspace(args)
