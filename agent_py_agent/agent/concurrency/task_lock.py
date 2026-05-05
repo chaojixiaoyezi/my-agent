@@ -166,15 +166,12 @@ class TaskLockManager:
         """
         with self._write_lock:
             now = time.time()
-            to_remove = []
-
-            for task_id, create_time in self._lock_creation_time.items():
-                if now - create_time > self._cleanup_timeout:
-                    lock = self._read_locks.get(task_id)
-                    if lock is not None:
-                        # 检查是否可以清理（RLock 允许多次 acquire）
-                        # 这里简化处理：如果创建时间超过超时时间就清理
-                        to_remove.append(task_id)
+            to_remove = [
+                task_id
+                for task_id, create_time in self._lock_creation_time.items()
+                if now - create_time > self._cleanup_timeout
+                and task_id in self._read_locks
+            ]
 
             for task_id in to_remove:
                 self._read_locks.pop(task_id, None)

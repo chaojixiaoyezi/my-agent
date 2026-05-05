@@ -27,8 +27,42 @@ def _write_config(root: Path, *, enable_self_learning: bool) -> Path:
     return config_path
 
 
-def test_record_runner_result_generates_and_dedupes_learning_candidates(tmp_path):
-    agent = SimpleAgent(
+# ── Shared fixture builders ──────────────────────────────────────────────────
+
+def _parsed_output_with_lessons(lesson_text: str) -> SubAgentParsedOutput:
+    return parse_subagent_runner_output(
+        "[SUBAGENT_RESULT]\n"
+        "{\n"
+        f'  "status": "AWAITING_ACCEPTANCE",\n'
+        f'  "summary": "整理出 lesson",\n'
+        f'  "lessons": [{json.dumps(lesson_text)}],\n'
+        f'  "evidence": [{{"kind": "note", "summary": "有 lesson", "ok": true}}],\n'
+        '  "artifacts": [],\n'
+        '  "tests": [],\n'
+        '  "patches": []\n'
+        "}\n"
+        "[/SUBAGENT_RESULT]"
+    )
+
+
+def _sample_parsed_output_with_lesson() -> SubAgentParsedOutput:
+    return parse_subagent_runner_output(
+        "[SUBAGENT_RESULT]\n"
+        "{\n"
+        '  "status": "AWAITING_ACCEPTANCE",\n'
+        '  "summary": "生成 lesson",\n'
+        '  "lessons": ["先读现有测试，再补最小回归，再改实现"],\n'
+        '  "evidence": [{"kind": "note", "summary": "有 lesson", "ok": true}],\n'
+        '  "artifacts": [],\n'
+        '  "tests": [],\n'
+        '  "patches": []\n'
+        "}\n"
+        "[/SUBAGENT_RESULT]"
+    )
+
+
+def _create_agent_with_learning(tmp_path: Path) -> SimpleAgent:
+    return SimpleAgent(
         AgentConfig(
             model_backend="echo",
             subagent_workspace="subs",
@@ -36,58 +70,24 @@ def test_record_runner_result_generates_and_dedupes_learning_candidates(tmp_path
         ),
         tmp_path,
     )
-    first = agent.subagents.create_run(
-        goal="总结 lessons",
-        thought="记录经验。",
-        plan=["执行", "沉淀 lesson"],
-    )
-    second = agent.subagents.create_run(
-        goal="再次总结 lessons",
-        thought="复用同一条经验。",
-        plan=["执行", "沉淀 lesson"],
-    )
 
-    parsed = parse_subagent_runner_output(
-        "[SUBAGENT_RESULT]\n"
-        "{\n"
-        '  "status": "AWAITING_ACCEPTANCE",\n'
-        '  "summary": "整理出 lesson",\n'
-        '  "lessons": ["先写失败复现，再改代码，最后补最小回归测试"],\n'
-        '  "evidence": [{"kind": "note", "summary": "有复现步骤", "ok": true}],\n'
-        '  "artifacts": [],\n'
-        '  "tests": [],\n'
-        '  "patches": []\n'
-        "}\n"
-        "[/SUBAGENT_RESULT]"
-    )
-    parsed_similar = parse_subagent_runner_output(
-        "[SUBAGENT_RESULT]\n"
-        "{\n"
-        '  "status": "AWAITING_ACCEPTANCE",\n'
-        '  "summary": "再次整理同类 lesson",\n'
-        '  "lessons": ["先复现失败，再改代码，最后补一个最小回归测试"],\n'
-        '  "evidence": [{"kind": "note", "summary": "第二次也遵循这个顺序", "ok": true}],\n'
-        '  "artifacts": [],\n'
-        '  "tests": [],\n'
-        '  "patches": []\n'
-        "}\n"
-        "[/SUBAGENT_RESULT]"
-    )
 
-    agent.subagents.record_runner_result(_rrr(
-        first.id,
-        dry_run=False,
-        ok=True,
-        message="done",
-        structured_output=parsed,
-    ))
-    agent.subagents.record_runner_result(_rrr(
-        second.id,
-        dry_run=False,
-        ok=True,
-        message="done",
-        structured_output=parsed_similar,
-    ))
+def _run_and_record_lesson(agent: SimpleAgent, goal: str, thought: str, lesson_text: str):
+    task = agent.subagents.create_run(goal=goal, thought=thought, plan=["执行", "沉淀 lesson"])
+    parsed = _parsed_output_with_lessons(lesson_text)
+    agent.subagents.record_runner_result(_rrr(task.id, dry_run=False, ok=True, message="done", structured_output=parsed))
+    return task
+
+
+def _setup_learning_candidate(agent: SimpleAgent, config_path: Path) -> tuple:
+    task = _run_and_record_lesson(agent, "产出 learning draft", "记录 lesson。", "先读现有测试，再补最小回归，再改实现")
+    return agent.subagents.list_learning_candidates()[0]
+
+
+def test_record_runner_result_generates_and_dedupes_learning_candidates(tmp_path):
+    agent = _create_agent_with_learning(tmp_path)
+    first = _run_and_record_lesson(agent, "总结 lessons", "记录经验。", "先写失败复现，再改代码，最后补最小回归测试")
+    second = _run_and_record_lesson(agent, "再次总结 lessons", "复用同一条经验。", "先复现失败，再改代码，最后补一个最小回归测试")
 
     candidates = agent.subagents.list_learning_candidates()
     assert len(candidates) == 1
@@ -104,40 +104,8 @@ def test_record_runner_result_generates_and_dedupes_learning_candidates(tmp_path
 
 def test_learn_cli_lists_accepts_rejects_and_reports_stats(tmp_path, capsys):
     config_path = _write_config(tmp_path, enable_self_learning=True)
-    agent = SimpleAgent(
-        AgentConfig(
-            model_backend="echo",
-            subagent_workspace="subs",
-            enable_self_learning=True,
-        ),
-        tmp_path,
-    )
-    task = agent.subagents.create_run(
-        goal="产出 learning draft",
-        thought="记录 lesson。",
-        plan=["执行", "沉淀"],
-    )
-    parsed = parse_subagent_runner_output(
-        "[SUBAGENT_RESULT]\n"
-        "{\n"
-        '  "status": "AWAITING_ACCEPTANCE",\n'
-        '  "summary": "生成 lesson",\n'
-        '  "lessons": ["先读现有测试，再补最小回归，再改实现"],\n'
-        '  "evidence": [{"kind": "note", "summary": "有 lesson", "ok": true}],\n'
-        '  "artifacts": [],\n'
-        '  "tests": [],\n'
-        '  "patches": []\n'
-        "}\n"
-        "[/SUBAGENT_RESULT]"
-    )
-    agent.subagents.record_runner_result(_rrr(
-        task.id,
-        dry_run=False,
-        ok=True,
-        message="done",
-        structured_output=parsed,
-    ))
-    candidate = agent.subagents.list_learning_candidates()[0]
+    agent = _create_agent_with_learning(tmp_path)
+    candidate = _setup_learning_candidate(agent, config_path)
     parser = build_parser()
 
     args = parser.parse_args(["--config", str(config_path), "learn", "list"])

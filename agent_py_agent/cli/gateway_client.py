@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: implements gateway command dispatch, default startup, ask/result client commands.
 
 给人看的解释：
-这个文件是 gateway 的“客户端侧”：确保后台进程启动、投递 ask 请求、读取某个请求结果。
+这个文件是 gateway 的'客户端侧'：确保后台进程启动、投递 ask 请求、读取某个请求结果。
 真正的进程生命周期在 gateway_process.py。
 """
 
@@ -134,6 +134,29 @@ def _stream_chunk_lines(chunk_path: Path, chunks_printed: int, spinner) -> int:
     return chunks_printed
 
 
+def _wait_for_gateway_response(
+    chunk_path: Path,
+    response_path: Path,
+    deadline: float,
+    spinner: ThinkingSpinner,
+) -> dict[str, Any]:
+    """Poll for gateway response, streaming chunks along the way.
+
+    Returns the response dict if available, or empty dict on timeout.
+    """
+    chunks_printed = 0
+    response: dict[str, Any] = {}
+
+    while time.time() <= deadline:
+        chunks_printed = _stream_chunk_lines(chunk_path, chunks_printed, spinner)
+        response = read_json_file(response_path)
+        if response:
+            break
+        time.sleep(0.1)
+
+    return response
+
+
 def cmd_gateway_ask(args) -> int:
     """向正在运行的 gateway 投递一条聊天请求。
 
@@ -159,30 +182,18 @@ def cmd_gateway_ask(args) -> int:
         agent=agent,
     )
     if args.no_wait:
-        # 异步模式：只告诉用户“请求已放进队列”，不在当前终端等模型结果。
         print(f"queued request_id={request_id}")
         print(f"request: {request_path}")
         print(f"response: {response_path}")
         return 0
 
-    # 同步模式：轮询 chunk 文件实现流式输出，同时等待 response 文件。
+    # Synchronous mode: poll for streaming chunks and response file.
     timeout = args.timeout if args.timeout is not None else agent.config.gateway_request_timeout
     chunk_path = gateway_chunk_path(paths, request_id)
     spinner = ThinkingSpinner()
     spinner.start()
-    chunks_printed = 0
     deadline = time.time() + max(0.0, timeout)
-    response = {}
-
-    while time.time() <= deadline:
-        # LLM: read new chunks from the streaming file written by daemon.
-        chunks_printed = _stream_chunk_lines(chunk_path, chunks_printed, spinner)
-        # LLM: check if final response file has arrived.
-        response = read_json_file(response_path)
-        if response:
-            break
-        time.sleep(0.1)
-
+    response = _wait_for_gateway_response(chunk_path, response_path, deadline, spinner)
     spinner.stop()
 
     if not response:

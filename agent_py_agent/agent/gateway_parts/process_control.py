@@ -46,7 +46,7 @@ def terminate_pid(pid: int) -> None:
     """LLM contract: send a normal termination signal to a live pid.
 
     Human version:
-    这是“礼貌关停”，不是强杀。进程不存在时直接返回，让 stop/restart 命令保持幂等。
+    这是'礼貌关停'，不是强杀。进程不存在时直接返回，让 stop/restart 命令保持幂等。
     """
 
     if pid <= 0:

@@ -13,6 +13,29 @@ from pathlib import Path
 from ..agent.notification import NotificationManager, NotificationRouter
 
 
+def _format_notification(n, include_delivery: bool = False) -> str:
+    """Format a single notification for text output."""
+    status_icon = {
+        "pending": "⏳",
+        "delivered": "✓",
+        "failed": "✗",
+        "stored": "📦",
+    }.get(n.status, "?")
+
+    lines = [
+        f"{status_icon} [{n.status.upper()}] {n.notification_id}",
+        f"  任务: {n.task_id}",
+        f"  消息: {n.message}",
+        f"  发起通道: {n.channel}",
+    ]
+
+    if include_delivery and n.status == "delivered":
+        lines.append(f"  投递通道: {n.delivery_channel}")
+        lines.append(f"  投递时间: {n.delivered_at}")
+
+    return "\n".join(lines)
+
+
 def cmd_notifications(args) -> int:
     """查看未读通知。
 
@@ -61,22 +84,7 @@ def cmd_notifications(args) -> int:
         print()
 
     for n in notifications:
-        status_icon = {
-            "pending": "⏳",
-            "delivered": "✓",
-            "failed": "✗",
-            "stored": "📦",
-        }.get(n.status, "?")
-
-        print(f"{status_icon} [{n.status.upper()}] {n.notification_id}", file=sys.stdout)
-        print(f"  任务: {n.task_id}", file=sys.stdout)
-        print(f"  消息: {n.message}", file=sys.stdout)
-        print(f"  发起通道: {n.channel}", file=sys.stdout)
-
-        if n.status == "delivered":
-            print(f"  投递通道: {n.delivery_channel}", file=sys.stdout)
-            print(f"  投递时间: {n.delivered_at}", file=sys.stdout)
-
+        print(_format_notification(n, include_delivery=True), file=sys.stdout)
         print()
 
     return 0

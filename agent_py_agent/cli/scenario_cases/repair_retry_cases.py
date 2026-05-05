@@ -94,14 +94,8 @@ class ScenarioStructuredRepairBackend:
         )
 
 
-def run_scenario_structured_repair_case(args) -> int:
-    """LLM: verify that a broken structured output triggers a repair round and then passes acceptance.
-
-    新手说明:
-    让 runner 故意输出损坏的 JSON，验证系统会自动触发修复回合。
-    修复后父代理应该能验收通过。
-    """
-
+def _structured_repair_setup(args):
+    """Setup for structured repair: workspace, agent, backend, capability router, and task."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=structured-repair")
@@ -123,17 +117,39 @@ def run_scenario_structured_repair_case(args) -> int:
         acceptance_checks=["必须触发 structured repair", "修复后必须有证据", "父代理必须验收通过"],
     )
     print(f"run_id={task.id}")
+    return paths, agent, backend, capability_config, router, task
+
+
+def _verify_structured_repair(backend, loaded, runner, output, report):
+    """Verify structured repair: backend calls, status, repair flags, acceptance."""
+    return (
+        backend.calls == 2
+        and loaded.status == "DONE"
+        and loaded.verification_status == "VERIFIED"
+        and runner.get("structured_output_found") is True
+        and runner.get("structured_output_ok") is True
+        and runner.get("structured_repair_attempted") is True
+        and runner.get("structured_repair_ok") is True
+        and output.get("structured_output", {}).get("repair_attempted") is True
+        and any(item.step == "acceptance" and item.ok for item in report.records)
+    )
+
+
+def run_scenario_structured_repair_case(args) -> int:
+    """LLM: verify that a broken structured output triggers a repair round and then passes acceptance.
+
+    新手说明:
+    让 runner 故意输出损坏的 JSON，验证系统会自动触发修复回合。
+    修复后父代理应该能验收通过。
+    """
+
+    paths, agent, backend, capability_config, router, task = _structured_repair_setup(args)
 
     print_scenario_step(2, "执行 dispatch：runner 输出坏 JSON 后修复并验收")
     report = agent.dispatch_subagents(
-        router,
-        capability_config,
-        apply=True,
-        execute_runners=True,
-        max_runners=1,
-        probe=False,
-        reviewer="scenario-structured-repair",
-        note="structured output damage should be repaired",
+        router, capability_config, apply=True, execute_runners=True,
+        max_runners=1, probe=False,
+        reviewer="scenario-structured-repair", note="structured output damage should be repaired",
     )
     print_dispatch_report(report)
     loaded = agent.subagents.load(task.id)
@@ -145,17 +161,7 @@ def run_scenario_structured_repair_case(args) -> int:
         f"repair_ok={runner.get('structured_repair_ok')}"
     )
 
-    final_ok = (
-        backend.calls == 2
-        and loaded.status == "DONE"
-        and loaded.verification_status == "VERIFIED"
-        and runner.get("structured_output_found") is True
-        and runner.get("structured_output_ok") is True
-        and runner.get("structured_repair_attempted") is True
-        and runner.get("structured_repair_ok") is True
-        and output.get("structured_output", {}).get("repair_attempted") is True
-        and any(item.step == "acceptance" and item.ok for item in report.records)
-    )
+    final_ok = _verify_structured_repair(backend, loaded, runner, output, report)
     write_scenario_summary(
         paths,
         ok=final_ok,
@@ -220,14 +226,8 @@ class ScenarioRetryBackend:
         )
 
 
-def run_scenario_runner_retry_case(args) -> int:
-    """LLM: verify that a transient runner failure is automatically retried on the next dispatch round.
-
-    新手说明:
-    让 runner 第一次执行失败，验证下一轮 dispatch 会自动重试。
-    重试成功后父代理应该能验收通过。
-    """
-
+def _runner_retry_setup(args):
+    """Setup for runner retry: workspace, agent, backend, capability router, and task."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=runner-retry")
@@ -249,46 +249,24 @@ def run_scenario_runner_retry_case(args) -> int:
         acceptance_checks=["第二次 runner 必须生成证据", "父代理必须验收通过"],
     )
     print(f"run_id={task.id}")
+    return paths, agent, backend, capability_config, router, task
 
-    print_scenario_step(2, "第一轮 dispatch：模拟 runner 临时失败")
-    first = agent.dispatch_subagents(
-        router,
-        capability_config,
-        apply=True,
-        execute_runners=True,
-        max_runners=1,
-        probe=False,
-        reviewer="scenario-runner-retry",
-        note="first attempt should fail",
-    )
-    print_dispatch_report(first)
-    after_first = agent.subagents.load(task.id)
-    print(
-        f"after_first status={after_first.status} failure_type={after_first.failure_type} "
-        f"attempts={after_first.runner_attempts}"
-    )
 
-    print_scenario_step(3, "第二轮 dispatch：自动重试并验收")
-    second = agent.dispatch_subagents(
-        router,
-        capability_config,
-        apply=True,
-        execute_runners=True,
-        max_runners=1,
-        probe=False,
-        reviewer="scenario-runner-retry",
-        note="retry should succeed",
+def _run_dispatch_round(agent, router, capability_config, reviewer, note):
+    """Run one dispatch round and return report and loaded task state."""
+    report = agent.dispatch_subagents(
+        router, capability_config, apply=True, execute_runners=True,
+        max_runners=1, probe=False, reviewer=reviewer, note=note,
     )
-    print_dispatch_report(second)
-    loaded = agent.subagents.load(task.id)
-    print(
-        f"final status={loaded.status} verify={loaded.verification_status} "
-        f"attempts={loaded.runner_attempts} backend_calls={backend.calls}"
-    )
+    print_dispatch_report(report)
+    return report
 
+
+def _verify_runner_retry(first, second, after_first, loaded, backend):
+    """Verify runner retry: first fails, second succeeds, correct attempt counts."""
     first_runner = [item for item in first.records if item.step == "runner"]
     second_runner = [item for item in second.records if item.step == "runner"]
-    final_ok = (
+    return (
         first_runner
         and first_runner[0].action == "execute_runner"
         and not first_runner[0].ok
@@ -303,6 +281,35 @@ def run_scenario_runner_retry_case(args) -> int:
         and loaded.runner_attempts == 2
         and backend.calls == 2
     )
+
+
+def run_scenario_runner_retry_case(args) -> int:
+    """LLM: verify that a transient runner failure is automatically retried on the next dispatch round.
+
+    新手说明:
+    让 runner 第一次执行失败，验证下一轮 dispatch 会自动重试。
+    重试成功后父代理应该能验收通过。
+    """
+
+    paths, agent, backend, capability_config, router, task = _runner_retry_setup(args)
+
+    print_scenario_step(2, "第一轮 dispatch：模拟 runner 临时失败")
+    first = _run_dispatch_round(agent, router, capability_config, "scenario-runner-retry", "first attempt should fail")
+    after_first = agent.subagents.load(task.id)
+    print(
+        f"after_first status={after_first.status} failure_type={after_first.failure_type} "
+        f"attempts={after_first.runner_attempts}"
+    )
+
+    print_scenario_step(3, "第二轮 dispatch：自动重试并验收")
+    second = _run_dispatch_round(agent, router, capability_config, "scenario-runner-retry", "retry should succeed")
+    loaded = agent.subagents.load(task.id)
+    print(
+        f"final status={loaded.status} verify={loaded.verification_status} "
+        f"attempts={loaded.runner_attempts} backend_calls={backend.calls}"
+    )
+
+    final_ok = _verify_runner_retry(first, second, after_first, loaded, backend)
     write_scenario_summary(
         paths,
         ok=final_ok,

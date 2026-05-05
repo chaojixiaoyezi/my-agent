@@ -171,6 +171,22 @@ def test_compileall_succeeds() -> None:
     assert result is True
 
 
+def _check_forbidden_class(path: Path, forbidden: set[str]) -> list[str]:
+    """Check one file for forbidden class definitions, excluding baseline entries."""
+    offenders = []
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except SyntaxError:
+        return offenders
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name in forbidden:
+            rel = path.relative_to(REPO_ROOT).as_posix()
+            key = f"{rel}:{node.name}"
+            if key not in BASELINE:
+                offenders.append(key)
+    return offenders
+
+
 def test_no_new_forbidden_globals() -> None:
     """No new files may define forbidden global patterns like AgentManager, TaskManager."""
 
@@ -181,20 +197,9 @@ def test_no_new_forbidden_globals() -> None:
         "RuntimeEverything",
         "CommonHelper",
     }
-    BASELINE = set()
-
     offenders = []
     for path in _python_source_files():
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        except SyntaxError:
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ClassDef) and node.name in FORBIDDEN_CLASS_NAMES:
-                rel = path.relative_to(REPO_ROOT).as_posix()
-                key = f"{rel}:{node.name}"
-                if key not in BASELINE:
-                    offenders.append(key)
+        offenders.extend(_check_forbidden_class(path, FORBIDDEN_CLASS_NAMES))
 
     assert offenders == []
 

@@ -1,13 +1,14 @@
 """result_processors 边界场景测试。"""
 from __future__ import annotations
 
+import pytest
+
 from agent_py_agent.agent.subagents.models import SubAgentParsedOutput
 from agent_py_agent.agent.subagents.result_processors import (
     OutputPayloadContext,
     _build_output_payload,
     _process_structured_output,
 )
-from agent_py_agent.tests.test_result_processors_class import mock_task
 
 
 def test_process_structured_output_handles_raw_json(mock_task):

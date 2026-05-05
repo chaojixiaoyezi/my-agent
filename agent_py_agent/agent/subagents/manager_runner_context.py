@@ -65,16 +65,8 @@ if TYPE_CHECKING:
     from ..local_store import LocalStore
 
 class SubAgentRunnerContextMixin:
-    def build_execution_context(
-        self,
-        run_id: str,
-        *,
-        max_cards: int = 0,
-    ) -> SubAgentExecutionContext:
-        """生成单个子代理执行器可读取的最小上下文。"""
-
-        task = self.load(run_id)
-        _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
+    def _extract_granted_caps(self, task: SubAgentTask) -> tuple[list[str], list[str], list[dict[str, object]]]:
+        """Extract skills, tools, and grants from capability grants."""
         granted_skills: list[str] = []
         granted_tools: list[str] = []
         grants: list[dict[str, object]] = []
@@ -93,7 +85,39 @@ class SubAgentRunnerContextMixin:
                     "created_at": grant.created_at,
                 }
             )
+        return granted_skills, granted_tools, grants
 
+    def _build_write_boundary(self, task: SubAgentTask) -> dict[str, str]:
+        """Build write boundary configuration dict."""
+        return {
+            "task_dir": task.task_dir,
+            "allowed_write_roots": task.allowed_write_roots,
+            "forbidden_write_roots": task.forbidden_write_roots,
+            "locked_files": task.locked_files,
+            "status_file": task.status_file,
+            "work_log_file": task.work_log_file,
+            "action_receipts_file": task.action_receipts_file,
+            "acceptance_file": task.acceptance_file,
+            "test_checklist_file": task.test_checklist_file,
+            "bugs_file": task.bugs_file,
+            "skill_usage_file": task.skill_usage_file,
+            "handoff_file": task.handoff_file,
+            "debrief_file": task.debrief_file,
+            "output_json": task.output_json,
+            "dependencies_json": task.dependencies_json,
+        }
+
+    def build_execution_context(
+        self,
+        run_id: str,
+        *,
+        max_cards: int = 0,
+    ) -> SubAgentExecutionContext:
+        """生成单个子代理执行器可读取的最小上下文。"""
+
+        task = self.load(run_id)
+        _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
+        granted_skills, granted_tools, grants = self._extract_granted_caps(task)
         allowed_skills = _merge_list(task.allowed_skills, granted_skills)
         allowed_tools = _merge_list(task.allowed_tools, granted_tools)
         return SubAgentExecutionContext(
@@ -127,23 +151,7 @@ class SubAgentRunnerContextMixin:
             quality_contract=task.quality_contract,
             context_manifest=task.context_manifest,
             context_packs=task.context_packs,
-            write_boundary={
-                "task_dir": task.task_dir,
-                "allowed_write_roots": task.allowed_write_roots,
-                "forbidden_write_roots": task.forbidden_write_roots,
-                "locked_files": task.locked_files,
-                "status_file": task.status_file,
-                "work_log_file": task.work_log_file,
-                "action_receipts_file": task.action_receipts_file,
-                "acceptance_file": task.acceptance_file,
-                "test_checklist_file": task.test_checklist_file,
-                "bugs_file": task.bugs_file,
-                "skill_usage_file": task.skill_usage_file,
-                "handoff_file": task.handoff_file,
-                "debrief_file": task.debrief_file,
-                "output_json": task.output_json,
-                "dependencies_json": task.dependencies_json,
-            },
+            write_boundary=self._build_write_boundary(task),
             pending_requests=[
                 asdict(item) for item in task.capability_requests if item.status == "OPEN"
             ],

@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: implements LocalStore FTS/LIKE search and record-filter SQL construction.
 
 给人看的解释：
-这个文件只管“怎么搜”。
+这个文件只管'怎么搜'。
 能用 FTS5 就走全文索引，不能用或语法出问题就退回 LIKE，保证本地检索尽量可用。
 """
 
@@ -32,7 +32,7 @@ class LocalStoreSearchMixin:
         """搜索本地记录。
 
         优先走 FTS5；如果 FTS5 不可用，或查询语法被 SQLite 拒绝，就退回 LIKE。
-        这里把“能搜到”放在第一位，不让检索语法的小毛刺影响主代理运行。
+        这里把'能搜到'放在第一位，不让检索语法的小毛刺影响主代理运行。
         """
 
         clean_query = query.strip()

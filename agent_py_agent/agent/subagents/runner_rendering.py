@@ -129,6 +129,15 @@ def _render_context_manifest_section(manifest):
     return lines
 
 
+def _render_context_pack_item_lines(item: dict[str, object]) -> list[str]:
+    """Render one context pack item's optional fields as lines."""
+    lines = []
+    for key in ["kind", "summary", "path", "ref", "role"]:
+        if item.get(key):
+            lines.append(f"  - {key}: {item[key]}")
+    return lines
+
+
 def _render_context_packs_section(context):
     """Render context packs section."""
     lines = ["", "## Context Packs", ""]
@@ -136,9 +145,7 @@ def _render_context_packs_section(context):
         for item in context.context_packs:
             name = item.get("name") or item.get("id") or item.get("kind") or "pack"
             lines.append(f"- {name}")
-            for key in ["kind", "summary", "path", "ref", "role"]:
-                if item.get(key):
-                    lines.append(f"  - {key}: {item[key]}")
+            lines.extend(_render_context_pack_item_lines(item))
     else:
         lines.append("- none")
     return lines

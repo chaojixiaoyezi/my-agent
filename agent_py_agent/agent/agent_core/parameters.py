@@ -20,7 +20,7 @@ def _one_shot_tool_call_key(payload: dict[str, object]) -> str:
     真实模型偶尔会在看见工具结果后重复同一个编排工具调用。
     `create_subagents` 多执行一次会多落一个真实工单；`subagent_board`
     重复读虽然不改状态，但会拖慢收口。这里仅在同一轮 `run()` 里拦住
-    完全相同的重复调用，保留“以后再次派工/查看”的自由。
+    完全相同的重复调用，保留'以后再次派工/查看'的自由。
     """
 
     tool_name = str(payload.get("tool") or "")

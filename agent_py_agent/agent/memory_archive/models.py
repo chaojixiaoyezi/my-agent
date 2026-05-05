@@ -3,9 +3,9 @@ from __future__ import annotations
 """LLM: DTOs for compression snapshots and raw memory archive events.
 
 新手说明:
-这个文件只定义“要存什么”，不负责“存到哪里”。可以把它理解成两张表的字段设计:
+这个文件只定义'要存什么'，不负责'存到哪里'。可以把它理解成两张表的字段设计:
 压缩前快照保存上下文压缩前必须保住的现场，冷归档事件保存用户、助手、工具、派工等流水。
-以后要查“刚才发生了什么”或“压缩前状态是什么”，其他模块就按这些字段找。
+以后要查'刚才发生了什么'或'压缩前状态是什么'，其他模块就按这些字段找。
 """
 
 from dataclasses import asdict, dataclass, field
@@ -34,7 +34,7 @@ class CompressionSnapshot:
     """LLM: structured pre-compression snapshot used as the recovery anchor.
 
     新手说明:
-    这是一张“压缩前拍照”。
+    这是一张'压缩前拍照'。
     比如上下文快满了，系统准备把聊天压短，在压之前先把任务状态、工具调用、下一步、token 估算等关键现场写下来。
     模型之后如果压缩漂了，可以回头读这张快照恢复。
 
@@ -105,9 +105,9 @@ class RawMemoryEvent:
     """LLM: structured cold-archive event for searchable conversation recovery.
 
     新手说明:
-    这是一条“原始会话流水”的索引卡。
+    这是一条'原始会话流水'的索引卡。
     它不一定保存完整正文，但会保存谁说的、对谁说、做了什么、工具是否成功、任务 ID 是什么、正文在哪里等字段。
-    以后用户说“刚刚那个工具失败在哪”，就能按这些字段找回来。
+    以后用户说'刚刚那个工具失败在哪'，就能按这些字段找回来。
 
     字段说明:
     `event_id` 是事件唯一编号；`session_id` 是会话编号；

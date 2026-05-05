@@ -33,44 +33,14 @@ def run_speed_benchmark(
 
     from ..backends import create_backend
 
-    samples = []
+    backend_instance = create_backend(effective_backend, config)
+    samples = [
+        sample
+        for input_tokens in input_sizes
+        if (sample := _benchmark_single(backend_instance, input_tokens, output_size)) is not None
+    ]
 
-    for input_tokens in input_sizes:
-        # 构造测试输入，估算 token 数
-        test_input = "x" * (input_tokens // 2)
-
-        # 构造测试输出
-        test_output = "y" * (output_size // 2)
-
-        # 实际调用模型
-        backend_instance = create_backend(effective_backend, config)
-
-        start_time = time.time()
-        try:
-            response = backend_instance.call(
-                system_prompt="测速测试，返回简短回复。",
-                user_prompt=test_input,
-                max_tokens=output_size,
-            )
-        except Exception as e:
-            # 如果调用失败，跳过此点
-            continue
-
-        end_time = time.time()
-        latency_seconds = end_time - start_time
-
-        # 估算实际 token 数（简化版，实际应该用 tokenizer）
-        actual_input_tokens = len(test_input)
-        actual_output_tokens = len(response) if response else 0
-
-        sample = SpeedSample(
-            input_tokens=actual_input_tokens,
-            output_tokens=actual_output_tokens,
-            latency_seconds=latency_seconds,
-        )
-        samples.append(sample)
-
-    profile = SpeedProfile(
+    return SpeedProfile(
         backend=effective_backend,
         model=effective_model,
         tested_at=datetime.utcnow().isoformat() + "Z",
@@ -78,4 +48,25 @@ def run_speed_benchmark(
         interpolation_method="log_linear",
     )
 
-    return profile
+
+def _benchmark_single(
+    backend_instance, input_tokens: int, output_size: int
+) -> SpeedSample | None:
+    """运行单次基准测试，失败返回 None。"""
+
+    test_input = "x" * (input_tokens // 2)
+    start_time = time.time()
+    try:
+        response = backend_instance.call(
+            system_prompt="测速测试，返回简短回复。",
+            user_prompt=test_input,
+            max_tokens=output_size,
+        )
+    except Exception:
+        return None
+
+    return SpeedSample(
+        input_tokens=len(test_input),
+        output_tokens=len(response) if response else 0,
+        latency_seconds=time.time() - start_time,
+    )

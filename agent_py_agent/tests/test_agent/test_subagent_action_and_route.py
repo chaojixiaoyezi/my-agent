@@ -50,6 +50,16 @@ def test_subagent_channel_probe_report():
         assert (root / "subs" / "SUBAGENT_CHANNEL_PROBE.md").exists()
 
 
+def _make_stale_task(agent):
+    """Helper to create a task with stale heartbeat."""
+    task = agent.subagents.create_run(goal="长时间未推进任务", thought="模拟需要接管或重派。", plan=["执行", "等待"])
+    loaded = agent.subagents.load(task.id)
+    loaded.created_at = time.time() - 30
+    loaded.heartbeat_at = time.time() - 30
+    agent.subagents.save(loaded)
+    return task
+
+
 def test_subagent_action_plan_dry_run():
     """LLM: Verifies action-plan produces takeover, reopen, route, and probe actions."""
     with tempfile.TemporaryDirectory() as td:
@@ -57,49 +67,19 @@ def test_subagent_action_plan_dry_run():
         cfg = AgentConfig(subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
 
-        stale = agent.subagents.create_run(
-            goal="长时间未推进任务",
-            thought="模拟需要接管或重派。",
-            plan=["执行", "等待"],
-        )
-        loaded = agent.subagents.load(stale.id)
-        loaded.created_at = time.time() - 30
-        loaded.heartbeat_at = time.time() - 30
-        agent.subagents.save(loaded)
-
-        fake_done = agent.subagents.create_run(
-            goal="无证据完成任务",
-            thought="模拟假完成。",
-            plan=["标记完成"],
-        )
+        stale = _make_stale_task(agent)
+        fake_done = agent.subagents.create_run(goal="无证据完成任务", thought="模拟假完成。", plan=["标记完成"])
         agent.subagents.set_status(fake_done.id, "DONE")
 
-        request_task = agent.subagents.create_run(
-            goal="等待能力路由任务",
-            thought="模拟缺少工具。",
-            plan=["请求能力"],
-        )
-        agent.subagents.record_capability_request(
-            request_task.id,
-            problem="缺少真实入口验收工具。",
-            needed_capability="browser_smoke_test",
-        )
+        request_task = agent.subagents.create_run(goal="等待能力路由任务", thought="模拟缺少工具。", plan=["请求能力"])
+        agent.subagents.record_capability_request(request_task.id, problem="缺少真实入口验收工具。", needed_capability="browser_smoke_test")
 
-        broken = agent.subagents.create_run(
-            goal="坏通道任务",
-            thought="模拟 output.json 损坏。",
-            plan=["probe"],
-        )
+        broken = agent.subagents.create_run(goal="坏通道任务", thought="模拟 output.json 损坏。", plan=["probe"])
         Path(broken.output_json).unlink()
         agent.subagents.probe_channel(broken.id)
 
-        report = agent.subagents.write_action_plan(
-            CapabilityConfig(
-                subagent_heartbeat_timeout=1,
-                subagent_run_timeout=1,
-                subagent_min_evidence_for_done=1,
-            )
-        )
+        cap = CapabilityConfig(subagent_heartbeat_timeout=1, subagent_run_timeout=1, subagent_min_evidence_for_done=1)
+        report = agent.subagents.write_action_plan(cap)
         actions = {(item.run_id, item.action): item for item in report.actions}
 
         assert (stale.id, "takeover_or_reassign") in actions
@@ -119,72 +99,36 @@ def test_subagent_action_apply_dry_run_and_apply():
         root = Path(td)
         cfg = AgentConfig(subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
-        capability_config = CapabilityConfig(
-            subagent_heartbeat_timeout=1,
-            subagent_run_timeout=1,
-            subagent_min_evidence_for_done=1,
-        )
+        cap = CapabilityConfig(subagent_heartbeat_timeout=1, subagent_run_timeout=1, subagent_min_evidence_for_done=1)
 
-        fake_done = agent.subagents.create_run(
-            goal="需要补证据",
-            thought="模拟缺证据完成。",
-            plan=["标记完成"],
-        )
+        # Test dry-run does not mutate
+        fake_done = agent.subagents.create_run(goal="需要补证据", thought="模拟缺证据完成。", plan=["标记完成"])
         agent.subagents.set_status(fake_done.id, "DONE")
-        dry_report = agent.subagents.write_action_apply_report(
-            capability_config,
-            action_filter="reopen_for_evidence",
-            run_id=fake_done.id,
-        )
-        assert dry_report.dry_run
-        assert dry_report.records[0].applied is False
+        dry_report = agent.subagents.write_action_apply_report(cap, action_filter="reopen_for_evidence", run_id=fake_done.id)
+        assert dry_report.dry_run and dry_report.records[0].applied is False
         assert agent.subagents.load(fake_done.id).status == "DONE"
 
-        apply_report = agent.subagents.write_action_apply_report(
-            capability_config,
-            apply=True,
-            action_filter="reopen_for_evidence",
-            run_id=fake_done.id,
-        )
+        # Test apply reopens
+        apply_report = agent.subagents.write_action_apply_report(cap, apply=True, action_filter="reopen_for_evidence", run_id=fake_done.id)
         reopened = agent.subagents.load(fake_done.id)
-        assert not apply_report.dry_run
-        assert apply_report.records[0].applied
-        assert reopened.status == "BLOCKED"
-        assert reopened.failure_type == "missing_evidence"
+        assert not apply_report.dry_run and apply_report.records[0].applied
+        assert reopened.status == "BLOCKED" and reopened.failure_type == "missing_evidence"
         assert (root / "subs" / "subagent_action_apply_log.jsonl").exists()
         assert (root / "subs" / "ACTION_APPLY_LOG.md").exists()
 
-        stale = agent.subagents.create_run(
-            goal="需要接管",
-            thought="模拟超时。",
-            plan=["执行"],
-        )
-        loaded = agent.subagents.load(stale.id)
-        loaded.created_at = time.time() - 30
-        loaded.heartbeat_at = time.time() - 30
-        agent.subagents.save(loaded)
-        missing_owner = agent.subagents.write_action_apply_report(
-            capability_config,
-            apply=True,
-            action_filter="takeover_or_reassign",
-            run_id=stale.id,
-        )
-        assert not missing_owner.records[0].ok
-        assert agent.subagents.load(stale.id).status == "PLANNING"
+        # Test takeover with missing owner fails
+        stale = _make_stale_task(agent)
+        missing = agent.subagents.write_action_apply_report(cap, apply=True, action_filter="takeover_or_reassign", run_id=stale.id)
+        assert not missing.records[0].ok and agent.subagents.load(stale.id).status == "PLANNING"
 
-        takeover_report = agent.subagents.write_action_apply_report(
-            capability_config,
-            apply=True,
-            action_filter="takeover_or_reassign",
-            run_id=stale.id,
-            take_over_by="parent-supervisor",
-            locked_files=["src/example.py"],
+        # Test takeover with owner succeeds
+        takeover = agent.subagents.write_action_apply_report(
+            cap, apply=True, action_filter="takeover_or_reassign", run_id=stale.id,
+            take_over_by="parent-supervisor", locked_files=["src/example.py"],
         )
         taken = agent.subagents.load(stale.id)
-        assert takeover_report.records[0].ok
-        assert taken.status == "TAKEN_OVER"
-        assert taken.takeover_by == "parent-supervisor"
-        assert "src/example.py" in taken.locked_files
+        assert takeover.records[0].ok and taken.status == "TAKEN_OVER"
+        assert taken.takeover_by == "parent-supervisor" and "src/example.py" in taken.locked_files
         assert Path(taken.takeover_file).exists()
 
 
@@ -338,44 +282,20 @@ def test_subagent_execution_context_uses_only_grants():
         cfg = AgentConfig(subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
         task = agent.subagents.create_run(
-            goal="检查接口健康",
-            thought="只允许读取文件，缺接口检查能力时向父代理请求。",
+            goal="检查接口健康", thought="只允许读取文件，缺接口检查能力时向父代理请求。",
             plan=["读取代码", "请求能力", "写验收证据"],
-            allowed_tools=["read_file"],
-            acceptance_checks=["必须有接口检查证据"],
+            allowed_tools=["read_file"], acceptance_checks=["必须有接口检查证据"],
         )
         request = agent.subagents.record_capability_request(
-            task.id,
-            problem="需要发起 HTTP GET 检查接口状态。",
-            needed_capability="http_request",
-            expected_output="接口状态码和摘要",
+            task.id, problem="需要发起 HTTP GET 检查接口状态。", needed_capability="http_request", expected_output="接口状态码和摘要",
         )
-        agent.subagents.record_capability_grant(
-            task.id,
-            RecordCapabilityGrantParams(
-                request_id=request.id,
-                skills=["api-check"],
-                tools=["http_request"],
-                capability_cards=[
-                    {
-                        "id": "tool:http_request",
-                        "kind": "tool",
-                        "name": "http_request",
-                        "description": "发起 HTTP 请求并返回状态码和响应摘要",
-                        "risk_level": "low",
-                        "source": "builtin",
-                        "path": "",
-                    }
-                ],
-                reason="父代理授权低风险接口健康检查。",
-            ),
-        )
-        agent.subagents.record_evidence(
-            task.id,
-            kind="command",
-            summary="接口 smoke test 通过",
-            command="python3 smoke_api.py",
-        )
+        agent.subagents.record_capability_grant(task.id, RecordCapabilityGrantParams(
+            request_id=request.id, skills=["api-check"], tools=["http_request"],
+            capability_cards=[{"id": "tool:http_request", "kind": "tool", "name": "http_request",
+                               "description": "发起 HTTP 请求并返回状态码和响应摘要", "risk_level": "low", "source": "builtin", "path": ""}],
+            reason="父代理授权低风险接口健康检查。",
+        ))
+        agent.subagents.record_evidence(task.id, kind="command", summary="接口 smoke test 通过", command="python3 smoke_api.py")
 
         context = agent.subagents.write_execution_context(task.id, max_cards=1)
         payload = json.loads(Path(context.execution_context_json).read_text(encoding="utf-8"))
@@ -388,7 +308,4 @@ def test_subagent_execution_context_uses_only_grants():
         assert "write_file" not in payload["allowed_tools"]
         assert payload["pending_requests"][0]["status"] == "OPEN"
         assert "不要读取或展开全局 skill/tool registry" in "\n".join(payload["instructions"])
-        assert Path(context.execution_context_json).exists()
-        assert Path(context.execution_context_file).exists()
-        assert "SUBAGENT EXECUTION CONTEXT" in markdown
-        assert "http_request" in markdown
+        assert "SUBAGENT EXECUTION CONTEXT" in markdown and "http_request" in markdown

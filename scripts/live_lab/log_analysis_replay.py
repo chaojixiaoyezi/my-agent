@@ -96,6 +96,91 @@ def _run_stage(
         return False, None
 
 
+def _write_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    """Write summary to disk and return it."""
+    Path(summary["summary_path"]).write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return summary
+
+
+def _run_stages_sequentially(
+    summary: dict[str, Any],
+    stages: list[tuple[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any] | None, Any]:
+    """Run multiple stages sequentially, aborting on first failure.
+
+    Returns:
+        Tuple of (updated summary, findings or None, case or route or None).
+    """
+    findings = case = route = traced = None
+
+    for stage_name, handler in stages:
+        ok, result = _run_stage(summary, stage_name, handler)
+        if not ok:
+            return summary, findings, case
+
+        # Capture results by stage name
+        if stage_name == "detector":
+            findings = result
+        elif stage_name == "case":
+            case = result
+        elif stage_name == "route":
+            route = result
+
+    return summary, findings, case
+
+
+def _run_replay_stages(
+    summary: dict[str, Any],
+    fixture_path: Path,
+    store_root: Path,
+    artifacts_root: Path,
+    params: RunSecurityAlertV1ReplayParams,
+) -> tuple[dict[str, Any], Any, Any, Any, Any]:
+    """Run all replay stages sequentially.
+
+    Returns:
+        Tuple of (summary, findings, case, route, traced).
+    """
+    findings = case = route = traced = None
+
+    ok, _ = _run_stage(
+        summary, "ingest",
+        lambda: run_ingest_stage(fixture_path, store_root, params.source_id, params.fixture_format),
+    )
+    if not ok:
+        return summary, findings, case, route, traced
+
+    ok, findings = _run_stage(summary, "detector", lambda: run_detector_stage(store_root))
+    if not ok:
+        from agent_py_agent.agent.log_analysis.storage.local_store import LocalLogStore
+        summary["total_events"] = len(LocalLogStore(store_root).list_events())
+        return summary, findings, case, route, traced
+
+    ok, case = _run_stage(summary, "case", lambda: run_case_stage(findings, store_root, artifacts_root))
+    if not ok:
+        return summary, findings, case, route, traced
+
+    ok, route = _run_stage(summary, "route", lambda: run_route_stage(case, findings, artifacts_root))
+    if not ok:
+        return summary, findings, case, route, traced
+
+    ok, traced = _run_stage(
+        summary, "evidence",
+        lambda: run_evidence_stage(case, store_root, params.start_time, params.end_time, params.limit, params.simulate_failure_stage),
+    )
+    if not ok:
+        return summary, findings, case, route, traced
+
+    ok, _ = _run_stage(
+        summary, "report",
+        lambda: run_report_stage(case, route, findings, traced, artifacts_root, params.simulate_failure_stage),
+    )
+    return summary, findings, case, route, traced
+
+
 def run_security_alert_v1_replay(
     params: RunSecurityAlertV1ReplayParams,
 ) -> dict[str, Any]:
@@ -111,58 +196,14 @@ def run_security_alert_v1_replay(
         raise ValueError(f"simulate_failure_stage must be one of: {allowed}")
 
     summary = _base_summary(output_root, fixture_path, params.fixture_format, params.dry_run)
-    findings = case = route = traced = None
-
-    ok, _ = _run_stage(
-        summary,
-        "ingest",
-        lambda: run_ingest_stage(fixture_path, store_root, params.source_id, params.fixture_format),
+    summary, findings, case, route, traced = _run_replay_stages(
+        summary, fixture_path, store_root, artifacts_root, params
     )
-    if not ok:
-        return _write_and_return(summary)
 
-    ok, findings = _run_stage(summary, "detector", lambda: run_detector_stage(store_root))
-    if not ok:
-        # Ensure total_events is preserved even when detector stage fails
-        from agent_py_agent.agent.log_analysis.storage.local_store import LocalLogStore
-        store = LocalLogStore(store_root)
-        summary["total_events"] = len(store.list_events())
-        return _write_and_return(summary)
+    if summary["stages"].get("report") == "pass":
+        summary["ok"] = True
 
-    ok, case = _run_stage(
-        summary, "case", lambda: run_case_stage(findings, store_root, artifacts_root)
-    )
-    if not ok:
-        return _write_and_return(summary)
-
-    ok, route = _run_stage(
-        summary, "route", lambda: run_route_stage(case, findings, artifacts_root)
-    )
-    if not ok:
-        return _write_and_return(summary)
-
-    ok, traced = _run_stage(
-        summary,
-        "evidence",
-        lambda: run_evidence_stage(
-            case, store_root, params.start_time, params.end_time, params.limit, params.simulate_failure_stage
-        ),
-    )
-    if not ok:
-        return _write_and_return(summary)
-
-    ok, _ = _run_stage(
-        summary,
-        "report",
-        lambda: run_report_stage(
-            case, route, findings, traced, artifacts_root, params.simulate_failure_stage
-        ),
-    )
-    if not ok:
-        return _write_and_return(summary)
-
-    summary["ok"] = True
-    return _write_and_return(summary)
+    return _write_summary(summary)
 
 
 def _record_failure(summary: dict[str, Any], stage: str, exc: Exception) -> None:

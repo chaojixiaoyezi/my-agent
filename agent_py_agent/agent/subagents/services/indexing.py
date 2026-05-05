@@ -209,57 +209,43 @@ class SubAgentIndexingService:
             record, "subagent_patch_review_logged",
         )
 
-    def index_dispatch_record(self, record: DispatchRecord) -> None:
+    def _index_via_manager_or_self(
+        self,
+        source_type: str,
+        source_id: str,
+        title: str,
+        record: object,
+        event_type: str,
+    ) -> None:
+        """Index a dataclass record via manager if available, otherwise via self."""
         if hasattr(self.manager, "_index_dataclass_record"):
-            self.manager._index_dataclass_record(
-                "subagent_dispatch", record.id,
-                f"Dispatch {record.step}/{record.action} {record.run_id or 'global'}",
-                record, "subagent_dispatch_logged",
-            )
-            return
-        self._index_dataclass_record(
+            self.manager._index_dataclass_record(source_type, source_id, title, record, event_type)
+        else:
+            self._index_dataclass_record(source_type, source_id, title, record, event_type)
+
+    def index_dispatch_record(self, record: DispatchRecord) -> None:
+        self._index_via_manager_or_self(
             "subagent_dispatch", record.id,
             f"Dispatch {record.step}/{record.action} {record.run_id or 'global'}",
             record, "subagent_dispatch_logged",
         )
 
     def index_dispatch_watch_record(self, record: DispatchWatchRecord) -> None:
-        if hasattr(self.manager, "_index_dataclass_record"):
-            self.manager._index_dataclass_record(
-                "subagent_dispatch_watch", record.id,
-                f"Dispatch watch cycle {record.cycle}",
-                record, "subagent_dispatch_watch_logged",
-            )
-            return
-        self._index_dataclass_record(
+        self._index_via_manager_or_self(
             "subagent_dispatch_watch", record.id,
             f"Dispatch watch cycle {record.cycle}",
             record, "subagent_dispatch_watch_logged",
         )
 
     def index_parent_planner_record(self, record: ParentPlannerRecord) -> None:
-        if hasattr(self.manager, "_index_dataclass_record"):
-            self.manager._index_dataclass_record(
-                "parent_planner", record.id,
-                f"Parent planner {record.decision}",
-                record, "parent_planner_logged",
-            )
-            return
-        self._index_dataclass_record(
+        self._index_via_manager_or_self(
             "parent_planner", record.id,
             f"Parent planner {record.decision}",
             record, "parent_planner_logged",
         )
 
     def index_execution_context(self, context: SubAgentExecutionContext) -> None:
-        if hasattr(self.manager, "_index_dataclass_record"):
-            self.manager._index_dataclass_record(
-                "subagent_execution_context", context.run_id,
-                f"Execution context {context.run_id}",
-                context, "subagent_execution_context_written",
-            )
-            return
-        self._index_dataclass_record(
+        self._index_via_manager_or_self(
             "subagent_execution_context", context.run_id,
             f"Execution context {context.run_id}",
             context, "subagent_execution_context_written",

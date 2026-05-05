@@ -22,69 +22,88 @@ from agent_py_agent.agent.tools import (
 from .backends import make_tool_registry, start_test_server
 
 
-def test_write_boundary_blocks_subagent_writes_outside_allowed_roots():
-    """LLM: verify that write_boundary restricts writes to allowed roots and blocks forbidden/locked paths.
+def _write_boundary_test_registry(workspace: Path) -> tuple:
+    registry = make_tool_registry(workspace)
+    task_dir = workspace / "subs" / "run-1"
+    task_dir.mkdir(parents=True)
+    (task_dir / "private").mkdir()
+    boundary = {
+        "allowed_write_roots": [str(task_dir)],
+        "forbidden_write_roots": [str(task_dir / "private")],
+        "locked_files": ["subs/run-1/LOCKED.md"],
+    }
+    return registry, task_dir, boundary
 
-    新手说明:
-    子代理写文件必须在 allowed_write_roots 内，不能写 forbidden_write_roots 和 locked_files，
-    非 string path 也应被拒绝。
-    """
+
+def _assert_allowed_write(registry, task_dir, boundary) -> None:
+    result = registry.execute_call(
+        {"tool": "write_file", "path": "subs/run-1/output.md", "content": "ok"},
+        allowed_tools=["write_file"],
+        write_boundary=boundary,
+    )
+    assert result.ok
+    assert (task_dir / "output.md").read_text(encoding="utf-8") == "ok"
+
+
+def _assert_blocked_outside_workspace(registry, workspace, boundary) -> None:
+    result = registry.execute_call(
+        {"tool": "write_file", "path": "README.md", "content": "bad"},
+        allowed_tools=["write_file"],
+        write_boundary=boundary,
+    )
+    assert not result.ok
+    assert "allowed_write_roots" in result.output
+    assert not (workspace / "README.md").exists()
+
+
+def _assert_blocked_forbidden_root(registry, task_dir, boundary) -> None:
+    result = registry.execute_call(
+        {"tool": "write_file", "path": "subs/run-1/private/secret.md", "content": "bad"},
+        allowed_tools=["write_file"],
+        write_boundary=boundary,
+    )
+    assert not result.ok
+    assert "forbidden_write_roots" in result.output
+
+
+def _assert_blocked_locked_file(registry, task_dir, boundary) -> None:
+    locked = registry.execute_call(
+        {"tool": "write_file", "path": "subs/run-1/LOCKED.md", "content": "bad"},
+        allowed_tools=["write_file"],
+        write_boundary=boundary,
+    )
+    assert not locked.ok
+    assert "locked_files" in locked.output
+    locked_child = registry.execute_call(
+        {"tool": "write_file", "path": "subs/run-1/LOCKED.md/child.txt", "content": "bad"},
+        allowed_tools=["write_file"],
+        write_boundary=boundary,
+    )
+    assert not locked_child.ok
+    assert "locked_files" in locked_child.output
+    assert not (task_dir / "LOCKED.md").exists()
+
+
+def _assert_blocked_non_string_path(registry, boundary) -> None:
+    result = registry.execute_call(
+        {"tool": "write_file", "path": {"unexpected": "object"}, "content": "bad"},
+        allowed_tools=["write_file"],
+        write_boundary=boundary,
+    )
+    assert not result.ok
+    assert "path 参数必须是字符串路径" in result.output
+
+
+def test_write_boundary_blocks_subagent_writes_outside_allowed_roots():
+    """LLM: verify that write_boundary restricts writes to allowed roots and blocks forbidden/locked paths."""
     with tempfile.TemporaryDirectory() as td:
         workspace = Path(td)
-        registry = make_tool_registry(workspace)
-        task_dir = workspace / "subs" / "run-1"
-        task_dir.mkdir(parents=True)
-        boundary = {
-            "allowed_write_roots": [str(task_dir)],
-            "forbidden_write_roots": [str(task_dir / "private")],
-            "locked_files": ["subs/run-1/LOCKED.md"],
-        }
-
-        ok = registry.execute_call(
-            {"tool": "write_file", "path": "subs/run-1/output.md", "content": "ok"},
-            allowed_tools=["write_file"],
-            write_boundary=boundary,
-        )
-        outside = registry.execute_call(
-            {"tool": "write_file", "path": "README.md", "content": "bad"},
-            allowed_tools=["write_file"],
-            write_boundary=boundary,
-        )
-        forbidden = registry.execute_call(
-            {"tool": "write_file", "path": "subs/run-1/private/secret.md", "content": "bad"},
-            allowed_tools=["write_file"],
-            write_boundary=boundary,
-        )
-        locked = registry.execute_call(
-            {"tool": "write_file", "path": "subs/run-1/LOCKED.md", "content": "bad"},
-            allowed_tools=["write_file"],
-            write_boundary=boundary,
-        )
-        locked_child = registry.execute_call(
-            {"tool": "write_file", "path": "subs/run-1/LOCKED.md/child.txt", "content": "bad"},
-            allowed_tools=["write_file"],
-            write_boundary=boundary,
-        )
-        weird_path = registry.execute_call(
-            {"tool": "write_file", "path": {"unexpected": "object"}, "content": "bad"},
-            allowed_tools=["write_file"],
-            write_boundary=boundary,
-        )
-
-        assert ok.ok
-        assert (task_dir / "output.md").read_text(encoding="utf-8") == "ok"
-        assert not outside.ok
-        assert "allowed_write_roots" in outside.output
-        assert not (workspace / "README.md").exists()
-        assert not forbidden.ok
-        assert "forbidden_write_roots" in forbidden.output
-        assert not locked.ok
-        assert "locked_files" in locked.output
-        assert not locked_child.ok
-        assert "locked_files" in locked_child.output
-        assert not (task_dir / "LOCKED.md").exists()
-        assert not weird_path.ok
-        assert "path 参数必须是字符串路径" in weird_path.output
+        registry, task_dir, boundary = _write_boundary_test_registry(workspace)
+        _assert_allowed_write(registry, task_dir, boundary)
+        _assert_blocked_outside_workspace(registry, workspace, boundary)
+        _assert_blocked_forbidden_root(registry, task_dir, boundary)
+        _assert_blocked_locked_file(registry, task_dir, boundary)
+        _assert_blocked_non_string_path(registry, boundary)
 
 
 def test_write_boundary_blocks_symlink_escape_under_allowed_root():

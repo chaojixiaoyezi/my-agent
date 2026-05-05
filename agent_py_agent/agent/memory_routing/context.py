@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM contract: build runtime prompt context from deterministic memory rule routes.
 
 新手说明:
-这里是长期规则路由的“读取服务层”：主循环以后可以调用它拿到匹配证据、待读路径、
+这里是长期规则路由的'读取服务层'：主循环以后可以调用它拿到匹配证据、待读路径、
 读取小票和可注入 prompt 的短正文，但它不修改主循环、不写规则文件、不调用模型。
 """
 

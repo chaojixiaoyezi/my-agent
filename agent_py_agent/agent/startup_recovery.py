@@ -36,6 +36,69 @@ class ActiveWorkSummary:
             self.processing_requests = []
 
 
+def _detect_gateway_state(paths, summary):
+    """检测 gateway 状态。"""
+    from .gateway import gateway_running
+    pid, alive = gateway_running(paths)
+    summary.gateway_alive = alive
+    summary.gateway_pid = pid
+
+
+def _detect_processing_requests(paths, summary):
+    """获取 processing 请求列表。"""
+    from .gateway import gateway_request_counts
+    request_counts = gateway_request_counts(paths)
+    summary.stale_request_count = request_counts.get("processing", 0)
+    if paths.processing.exists():
+        summary.processing_requests = [f.stem for f in paths.processing.glob("*.json")]
+
+
+def _detect_active_tasks(agent, summary):
+    """检测未完成的子代理任务和最近任务列表。"""
+    try:
+        board = agent.subagents.build_board(recent_limit=3)
+        final_statuses = {"DONE", "FAILED", "CANCELLED", "TIMEOUT"}
+        active_tasks = [item for item in board.hot_list if item.status not in final_statuses]
+        summary.active_task_count = len(active_tasks)
+        summary.recent_tasks = [
+            {
+                "id": item.id,
+                "goal": item.goal,
+                "status": item.status,
+                "verification_status": item.verification_status,
+                "created_at": item.created_at,
+                "updated_at": item.updated_at,
+            }
+            for item in board.recent[:3]
+        ]
+    except (AttributeError, TypeError):
+        summary.active_task_count = 0
+        summary.recent_tasks = []
+
+
+def _detect_pending_notifications(agent, summary):
+    """检测未读通知。"""
+    try:
+        from .notification import NotificationManager
+        if agent.config.notification_enabled:
+            notif_manager = NotificationManager(agent.config)
+            summary.pending_notifications = notif_manager.get_pending_count(agent.config.user_id)
+    except Exception:
+        summary.pending_notifications = 0
+
+
+def _detect_dispatch_status(agent, summary):
+    """检测未完成的 dispatch 循环状态。"""
+    try:
+        has_pending = getattr(agent, "_has_pending_work", False)
+        rounds = getattr(agent, "_consecutive_dispatch_rounds", 0)
+        summary.dispatch_pending = has_pending and rounds > 0
+        summary.dispatch_rounds = rounds
+    except Exception:
+        summary.dispatch_pending = False
+        summary.dispatch_rounds = 0
+
+
 def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
     """检测当前环境中的进行中任务。
 
@@ -45,71 +108,16 @@ def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
     Returns:
         ActiveWorkSummary 包含 gateway 状态、活跃任务数、遗留请求数和最近任务列表
     """
-    from .gateway import gateway_paths, gateway_request_counts, gateway_running
-    from .gateway_parts.process_control import is_pid_alive
+    from .gateway import gateway_paths
 
     paths = gateway_paths(agent)
     summary = ActiveWorkSummary()
 
-    # 1. 检测 gateway 状态
-    pid, alive = gateway_running(paths)
-    summary.gateway_alive = alive
-    summary.gateway_pid = pid
-
-    # 2. 检测 gateway 请求统计
-    request_counts = gateway_request_counts(paths)
-    summary.stale_request_count = request_counts.get("processing", 0)
-
-    # 3. 获取 processing 请求列表
-    if paths.processing.exists():
-        processing_files = list(paths.processing.glob("*.json"))
-        summary.processing_requests = [f.stem for f in processing_files]
-
-    # 4. 检测未完成的子代理任务
-    try:
-        board = agent.subagents.build_board(recent_limit=3)
-        # 统计非最终状态的任务（不是 DONE、FAILED、CANCELLED）
-        final_statuses = {"DONE", "FAILED", "CANCELLED", "TIMEOUT"}
-        active_tasks = [
-            item for item in board.hot_list
-            if item.status not in final_statuses
-        ]
-        summary.active_task_count = len(active_tasks)
-
-        # 5. 获取最近的任务列表
-        summary.recent_tasks = []
-        for item in board.recent[:3]:
-            summary.recent_tasks.append({
-                "id": item.id,
-                "goal": item.goal,
-                "status": item.status,
-                "verification_status": item.verification_status,
-                "created_at": item.created_at,
-                "updated_at": item.updated_at,
-            })
-    except (AttributeError, TypeError):
-        # 处理 board 为 None 或无效的情况
-        summary.active_task_count = 0
-        summary.recent_tasks = []
-
-    # 6. 检测未读通知
-    try:
-        from .notification import NotificationManager
-        if agent.config.notification_enabled:
-            notif_manager = NotificationManager(agent.config)
-            summary.pending_notifications = notif_manager.get_pending_count(agent.config.user_id)
-    except Exception:
-        summary.pending_notifications = 0
-
-    # 7. 检测是否有未完成的 dispatch 循环
-    try:
-        has_pending = getattr(agent, "_has_pending_work", False)
-        rounds = getattr(agent, "_consecutive_dispatch_rounds", 0)
-        summary.dispatch_pending = has_pending and rounds > 0
-        summary.dispatch_rounds = rounds
-    except Exception:
-        summary.dispatch_pending = False
-        summary.dispatch_rounds = 0
+    _detect_gateway_state(paths, summary)
+    _detect_processing_requests(paths, summary)
+    _detect_active_tasks(agent, summary)
+    _detect_pending_notifications(agent, summary)
+    _detect_dispatch_status(agent, summary)
 
     return summary
 

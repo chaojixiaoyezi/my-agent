@@ -30,7 +30,7 @@ def cmd_memory_archive_list(args) -> int:
     """LLM: list recent raw archive and hook snapshot records.
 
     新手说明:
-    这条命令用来回答“最近到底落盘了哪些记忆归档”。
+    这条命令用来回答'最近到底落盘了哪些记忆归档'。
     它会把 raw 事件和 hook 快照摊成统一字段，方便肉眼扫，也方便脚本继续处理。
 
     参数说明:
@@ -66,7 +66,7 @@ def cmd_memory_archive_search(args) -> int:
 
     新手说明:
     这条命令不是只搜一个关键词。
-    它可以同时按 session、request、run、工具名、状态、说话对象等字段过滤，适合排查“刚刚那轮到底发生了什么”。
+    它可以同时按 session、request、run、工具名、状态、说话对象等字段过滤，适合排查'刚刚那轮到底发生了什么'。
 
     参数说明:
     `args` 是 argparse 对象，包含关键词、字段过滤、时间窗口、layer/date/limit/json 等。
@@ -101,11 +101,31 @@ def cmd_memory_archive_search(args) -> int:
     return 0
 
 
+def _collect_resume_data(agent, args):
+    """收集 resume 所需的归档匹配、本地命中、任务事实源和 gateway 事实源。"""
+    archive_records = collect_archive_records(agent.root, layer=args.layer, date_key=args.date, limit=0)
+    filters = archive_filters_from_args(args)
+    archive_matches = filter_archive_records(
+        archive_records, query=args.query or "", filters=filters,
+        since=args.since, until=args.until, level=getattr(args, "level", None),
+    )[:args.limit]
+    local_query = resume_local_query(args, archive_matches)
+    local_hits = (
+        agent.local_store.search(local_query, limit=args.limit)
+        if local_query else agent.local_store.list_recent(limit=args.limit)
+    )
+    local_payloads = [local_hit_payload(hit) for hit in local_hits]
+    task_ids = collect_resume_task_ids(args, archive_matches, local_payloads)
+    task_payloads = collect_task_payloads(agent, task_ids, limit=args.limit)
+    gateway_payloads = collect_gateway_payloads(local_payloads, limit=args.limit)
+    return filters, archive_matches, local_payloads, task_payloads, gateway_payloads
+
+
 def cmd_memory_resume(args) -> int:
     """LLM: build a recovery brief from archive clues, LocalStore hits, and task fact sources.
 
     新手说明:
-    用户说“继续”时，最怕模型只靠印象猜。
+    用户说'继续'时，最怕模型只靠印象猜。
     这条命令先把可检索线索找出来，再把任务目录这些权威事实源列出来，帮助下一步真正恢复现场。
     如果线索来自 gateway 请求，它会额外列出 gateway request/response JSON，避免用户只看 LocalStore 摘要。
 
@@ -115,48 +135,19 @@ def cmd_memory_resume(args) -> int:
     返回说明:
     返回 CLI 退出码；`--context-only` 时只打印恢复块。
     """
-
     agent = make_agent(args)
-    archive_records = collect_archive_records(agent.root, layer=args.layer, date_key=args.date, limit=0)
-    filters = archive_filters_from_args(args)
-    archive_matches = filter_archive_records(
-        archive_records,
-        query=args.query or "",
-        filters=filters,
-        since=args.since,
-        until=args.until,
-        level=getattr(args, "level", None),
-    )[: args.limit]
-    local_query = resume_local_query(args, archive_matches)
-    local_hits = (
-        agent.local_store.search(local_query, limit=args.limit)
-        if local_query
-        else agent.local_store.list_recent(limit=args.limit)
-    )
-    local_payloads = [local_hit_payload(hit) for hit in local_hits]
-    task_ids = collect_resume_task_ids(args, archive_matches, local_payloads)
-    task_payloads = collect_task_payloads(agent, task_ids, limit=args.limit)
-    # Gateway 请求的权威事实源是 request/response JSON，CLI 要把这些路径显式列出来。
-    gateway_payloads = collect_gateway_payloads(local_payloads, limit=args.limit)
+    filters, archive_matches, local_payloads, task_payloads, gateway_payloads = _collect_resume_data(agent, args)
     resume = build_resume_guidance(archive_matches, local_payloads, task_payloads, gateway_payloads)
     brief = build_resume_brief(
-        archive_matches,
-        local_payloads,
-        task_payloads,
+        archive_matches, local_payloads, task_payloads,
         recommended_read_paths=resume["recommended_read_paths"],
         next_actions=resume["next_actions"],
     )
     payload = {
-        "ok": True,
-        "workspace_root": str(agent.root),
-        "query": args.query or "",
-        "filters": filters,
-        "archive_matches": archive_matches,
-        "local_matches": local_payloads,
-        "task_fact_sources": task_payloads,
-        "gateway_fact_sources": gateway_payloads,
-        "resume": resume,
-        "brief": brief,
+        "ok": True, "workspace_root": str(agent.root), "query": args.query or "",
+        "filters": filters, "archive_matches": archive_matches,
+        "local_matches": local_payloads, "task_fact_sources": task_payloads,
+        "gateway_fact_sources": gateway_payloads, "resume": resume, "brief": brief,
     }
     if getattr(args, "context_only", False):
         print(brief["context_block"])
@@ -216,38 +207,8 @@ def _print_archive_search(payload: dict[str, Any], *, json_output: bool) -> None
     _print_archive_record_lines(payload["matches"])
 
 
-def _print_memory_resume(payload: dict[str, Any], *, json_output: bool) -> None:
-    """LLM: render memory-resume payload as JSON or compact text.
-
-    新手说明:
-    文本输出按“线索 -> 事实源 -> 下一步”排，提醒人先读权威文件再继续干活。
-
-    参数说明:
-    `payload` 是 resume 命令报告；`json_output` 控制输出格式。
-
-    返回说明:
-    不返回值；直接打印。
-    """
-
-    if json_output:
-        print(json.dumps(strip_sort_keys(payload), ensure_ascii=False, indent=2, sort_keys=True))
-        return
-    print("MY-AGENT MEMORY RESUME")
-    print(f"workspace={payload['workspace_root']}")
-    print(f"query={payload['query'] or '-'}")
-    print(
-        "summary="
-        + json.dumps(
-            {
-                "archive": payload["resume"]["archive_match_count"],
-                "local": payload["resume"]["local_match_count"],
-                "tasks": payload["resume"]["task_fact_source_count"],
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-    )
-    brief = payload["brief"]
+def _print_resume_brief(brief: dict[str, Any]) -> None:
+    """打印 Recovery Brief 区段。"""
     print("Recovery Brief")
     print(f"- latest_user_intent: {brief['latest_user_intent'] or 'unknown'}")
     print(f"- latest_assistant_action: {brief['latest_assistant_action'] or 'unknown'}")
@@ -258,30 +219,72 @@ def _print_memory_resume(payload: dict[str, Any], *, json_output: bool) -> None:
     else:
         print("- task_status: none")
     print(f"- authority: {brief['authority_note']}")
-    print("Archive Clues")
-    _print_archive_record_lines(payload["archive_matches"][:5])
+
+
+def _print_task_fact_sources(task_payloads: list[dict[str, Any]]) -> None:
+    """打印 Task Fact Sources 区段。"""
     print("Task Fact Sources")
-    if not payload["task_fact_sources"]:
+    if not task_payloads:
         print("- none")
-    for task in payload["task_fact_sources"]:
+    for task in task_payloads:
         if not task.get("exists"):
             print(f"- {task['run_id']} missing :: {task.get('error', '')}")
             continue
         print(f"- {task['run_id']} {task['status']}/{task['verification_status']} :: {task['goal']}")
         print(f"  task_dir={task['task_dir']}")
+
+
+def _print_gateway_fact_sources(gateway_payloads: list[dict[str, Any]]) -> None:
+    """打印 Gateway Fact Sources 区段。"""
     print("Gateway Fact Sources")
-    if not payload["gateway_fact_sources"]:
+    if not gateway_payloads:
         print("- none")
-    for gateway in payload["gateway_fact_sources"]:
-        print(f"- {gateway['request_id']} status={gateway['status'] or '-'} ok={gateway['ok']}")
-        for path in gateway["recommended_read_paths"]:
+    for gw in gateway_payloads:
+        print(f"- {gw['request_id']} status={gw['status'] or '-'} ok={gw['ok']}")
+        for path in gw["recommended_read_paths"]:
             print(f"  - {path}")
+
+
+def _print_memory_resume_text(payload: dict[str, Any]) -> None:
+    """以文本格式打印 resume 报告。"""
+    print("MY-AGENT MEMORY RESUME")
+    print(f"workspace={payload['workspace_root']}")
+    print(f"query={payload['query'] or '-'}")
+    resume = payload["resume"]
+    print("summary=" + json.dumps({
+        "archive": resume["archive_match_count"],
+        "local": resume["local_match_count"],
+        "tasks": resume["task_fact_source_count"],
+    }, ensure_ascii=False, sort_keys=True))
+    _print_resume_brief(payload["brief"])
+    print("Archive Clues")
+    _print_archive_record_lines(payload["archive_matches"][:5])
+    _print_task_fact_sources(payload["task_fact_sources"])
+    _print_gateway_fact_sources(payload["gateway_fact_sources"])
     print("Recommended Reads")
-    for path in payload["resume"]["recommended_read_paths"] or ["none"]:
+    for path in resume["recommended_read_paths"] or ["none"]:
         print(f"- {path}")
     print("Next Actions")
-    for action in payload["resume"]["next_actions"]:
+    for action in resume["next_actions"]:
         print(f"- {action}")
+
+
+def _print_memory_resume(payload: dict[str, Any], *, json_output: bool) -> None:
+    """LLM: render memory-resume payload as JSON or compact text.
+
+    新手说明:
+    文本输出按'线索 -> 事实源 -> 下一步'排，提醒人先读权威文件再继续干活。
+
+    参数说明:
+    `payload` 是 resume 命令报告；`json_output` 控制输出格式。
+
+    返回说明:
+    不返回值；直接打印。
+    """
+    if json_output:
+        print(json.dumps(strip_sort_keys(payload), ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    _print_memory_resume_text(payload)
 
 
 def _print_archive_record_lines(records: list[dict[str, Any]]) -> None:

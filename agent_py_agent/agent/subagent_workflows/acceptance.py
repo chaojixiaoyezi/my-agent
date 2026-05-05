@@ -68,6 +68,7 @@ def plan_parent_acceptance(
     """Build the parent final-gate checklist for a selected workflow template."""
 
     items: list[ParentAcceptanceItem] = []
+    contract = _contract_mapping(quality_contract)
 
     _extend_items(
         items,
@@ -76,47 +77,8 @@ def plan_parent_acceptance(
         category="template",
         id_prefix="template",
     )
-
-    contract = _contract_mapping(quality_contract)
-    _extend_items(
-        items,
-        _as_list(contract.get("must_check")),
-        source="quality_contract.must_check",
-        category="quality_contract",
-        id_prefix="must_check",
-    )
-    _extend_items(
-        items,
-        _as_list(contract.get("sampling_plan")),
-        source="quality_contract.sampling_plan",
-        category="quality_contract",
-        id_prefix="sampling_plan",
-    )
-    _extend_items(
-        items,
-        _as_list(contract.get("evidence_required")),
-        source="quality_contract.evidence_required",
-        category="evidence",
-        id_prefix="evidence_required",
-    )
-    _extend_items(
-        items,
-        _as_list(contract.get("forbidden_delivery")),
-        source="quality_contract.forbidden_delivery",
-        category="forbidden_delivery",
-        id_prefix="forbidden_delivery",
-        transform=lambda text: f"Reject delivery if it includes forbidden condition: {text}",
-    )
-
-    for item_id, text in _DEFAULT_ANTI_ACCEPTANCE_ITEMS:
-        items.append(
-            ParentAcceptanceItem(
-                id=item_id,
-                text=text,
-                source="default.anti_acceptance",
-                category="anti_acceptance",
-            )
-        )
+    _extend_contract_items(items, contract)
+    _add_default_anti_acceptance_items(items)
 
     if _requires_reviewer_result(template, contract):
         items.append(
@@ -129,6 +91,51 @@ def plan_parent_acceptance(
         )
 
     return ParentAcceptancePlan(template_id=template.id, goal=goal, items=_dedupe_items(items))
+
+
+def _add_default_anti_acceptance_items(items: list[ParentAcceptanceItem]) -> None:
+    """Append the default anti-acceptance items that prevent self-acceptance."""
+    for item_id, text in _DEFAULT_ANTI_ACCEPTANCE_ITEMS:
+        items.append(
+            ParentAcceptanceItem(
+                id=item_id,
+                text=text,
+                source="default.anti_acceptance",
+                category="anti_acceptance",
+            )
+        )
+
+
+def _extend_contract_items(
+    items: list[ParentAcceptanceItem],
+    contract: dict[str, object],
+) -> None:
+    """Extend items from quality contract fields."""
+    field_configs = (
+        ("must_check", "quality_contract.must_check", "quality_contract", "must_check"),
+        ("sampling_plan", "quality_contract.sampling_plan", "quality_contract", "sampling_plan"),
+        ("evidence_required", "quality_contract.evidence_required", "evidence", "evidence_required"),
+        (
+            "forbidden_delivery",
+            "quality_contract.forbidden_delivery",
+            "forbidden_delivery",
+            "forbidden_delivery",
+        ),
+    )
+    for key, source, category, id_prefix in field_configs:
+        transform = (
+            (lambda text: f"Reject delivery if it includes forbidden condition: {text}")
+            if key == "forbidden_delivery"
+            else None
+        )
+        _extend_items(
+            items,
+            _as_list(contract.get(key)),
+            source=source,
+            category=category,
+            id_prefix=id_prefix,
+            transform=transform,
+        )
 
 
 def _extend_items(
@@ -205,7 +212,7 @@ def _dedupe_items(items: list[ParentAcceptanceItem]) -> list[ParentAcceptanceIte
     seen: set[tuple[str, str]] = set()
     deduped: list[ParentAcceptanceItem] = []
     for item in items:
-        key = (item.source, item.text.strip().lower())
+        key = (item.source or "", (item.text or "").strip().lower())
         if key in seen:
             continue
         seen.add(key)

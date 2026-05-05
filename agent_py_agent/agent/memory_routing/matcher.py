@@ -89,12 +89,12 @@ def score_route(normalized_query: str, route: MemoryRoute) -> tuple[float, list[
         term = _normalize(alias)
         if term and term == normalized_query:
             score += 20.0 + min(len(term) / 20, 2.0)
-            reasons.append(f"精确命中别名“{alias}”")
+            reasons.append(f"精确命中别名'{alias}'")
             matched_terms.append(alias)
             exact_hit = True
         elif term and term in normalized_query:
             score += 10.0 + min(len(term) / 20, 1.5)
-            reasons.append(f"模糊命中别名“{alias}”")
+            reasons.append(f"模糊命中别名'{alias}'")
             matched_terms.append(alias)
             fuzzy_hit = True
 
@@ -102,19 +102,19 @@ def score_route(normalized_query: str, route: MemoryRoute) -> tuple[float, list[
         term = _normalize(keyword)
         if term and term == normalized_query:
             score += 16.0 + min(len(term) / 20, 1.5)
-            reasons.append(f"精确命中关键词“{keyword}”")
+            reasons.append(f"精确命中关键词'{keyword}'")
             matched_terms.append(keyword)
             exact_hit = True
         elif term and term in normalized_query:
             score += 8.0 + min(len(term) / 20, 1.0)
-            reasons.append(f"模糊命中关键词“{keyword}”")
+            reasons.append(f"模糊命中关键词'{keyword}'")
             matched_terms.append(keyword)
             fuzzy_hit = True
 
     topic = _normalize(route.topic)
     if topic and topic in normalized_query:
         score += 3.0
-        reasons.append(f"命中主题“{route.topic}”")
+        reasons.append(f"命中主题'{route.topic}'")
         matched_terms.append(route.topic)
         fuzzy_hit = True
 
@@ -123,7 +123,7 @@ def score_route(normalized_query: str, route: MemoryRoute) -> tuple[float, list[
     overlap = [token for token in when_tokens if token in query_tokens and len(token) >= 2]
     if score > 0 and overlap:
         score += min(len(overlap), 3) * 1.0
-        reasons.append(f"命中阅读条件“{', '.join(overlap[:3])}”")
+        reasons.append(f"命中阅读条件'{', '.join(overlap[:3])}'")
         matched_terms.extend(overlap[:3])
 
     if score > 0 and route.priority:

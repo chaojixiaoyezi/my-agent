@@ -242,6 +242,22 @@ def _start_worker_threads(*, params: StartWorkerParams) -> None:
     threading.Thread(target=lambda: _refresh_loop(params.refresh_stop, params.app_ref), daemon=True).start()
 
 
+def _run_tui_loop(app, refresh_stop, stop_event, session_manager, current_session_id):
+    """Run the TUI loop, handling exceptions and cleanup."""
+    try:
+        with patch_stdout():
+            app.run()
+    except (EOFError, KeyboardInterrupt):
+        pass
+    finally:
+        refresh_stop.set()
+
+    stop_event.set()
+    _cprint("\n再见。")
+
+    session_manager.touch_session(current_session_id, channel="chat")
+
+
 def run_tui(*, params: TuiRunParams) -> int:
     from .tui_worker import TuiWorkerConfig, _tui_worker_body
 
@@ -302,18 +318,7 @@ def run_tui(*, params: TuiRunParams) -> int:
 
     _tui_print_banner(params.agent, params.use_gateway)
 
-    try:
-        with patch_stdout():
-            app.run()
-    except (EOFError, KeyboardInterrupt):
-        pass
-    finally:
-        refresh_stop.set()
-
-    stop_event.set()
-    _cprint("\n再见。")
-
-    params.session_manager.touch_session(params.current_session_id, channel="chat")
+    _run_tui_loop(app, refresh_stop, stop_event, params.session_manager, params.current_session_id)
 
     return 0
 

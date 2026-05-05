@@ -181,12 +181,12 @@ def _daemonize_adapter(agent, gpaths, pid_file: Path) -> int:
     return 1
 
 
-def _run_adapter_foreground(agent, args, gpaths) -> int:
-    """Run adapter in foreground mode (original behavior)."""
-    manager = ChannelManager(gateway_port=agent.config.gateway_port)
-
-    # 注册所需适配器
-    if args.channel in ("feishu", "all"):
+def _register_channel_adapter(manager: ChannelManager, channel: str, agent) -> None:
+    """Register a single channel adapter (feishu or qq) on the manager."""
+    workspace_root = (
+        Path(agent.config.workspace_root).resolve() if agent.config.workspace_root else Path.cwd()
+    )
+    if channel == "feishu":
         feishu_cfg = {
             "feishu_app_id": agent.config.feishu_app_id or "",
             "feishu_app_secret": agent.config.feishu_app_secret or "",
@@ -196,42 +196,46 @@ def _run_adapter_foreground(agent, args, gpaths) -> int:
         feishu = FeishuAdapter(
             config=feishu_cfg,
             callback_port=agent.config.feishu_callback_port or 8421,
-            workspace_root=Path(agent.config.workspace_root or ".").resolve()
-            if agent.config.workspace_root
-            else Path.cwd(),
+            workspace_root=workspace_root,
         )
         feishu.on_message(lambda msg: manager.route_message(msg))
         manager.register_adapter(feishu)
-
-    if args.channel in ("qq", "all"):
+    elif channel == "qq":
         qq_cfg = {
             "qq_app_id": agent.config.qq_app_id or "",
             "qq_app_secret": agent.config.qq_app_secret or "",
         }
         qq = QQAdapter(
             config=qq_cfg,
-            workspace_root=Path(agent.config.workspace_root or ".").resolve()
-            if agent.config.workspace_root
-            else Path.cwd(),
+            workspace_root=workspace_root,
         )
         qq.on_message(lambda msg: manager.route_message(msg))
         manager.register_adapter(qq)
 
-    # 把 manager 存到全局（后续 stop/status 需要用到）
-    _global_manager = manager
-    globals()["_adapter_manager"] = _global_manager
 
-    # Write adapter PID for supervisor monitoring (foreground mode too)
+def _run_adapter_foreground(agent, args, gpaths) -> int:
+    """Run adapter in foreground mode (original behavior)."""
+    manager = ChannelManager(gateway_port=agent.config.gateway_port)
+
+    # Register required adapters
+    if args.channel in ("feishu", "all"):
+        _register_channel_adapter(manager, "feishu", agent)
+
+    if args.channel in ("qq", "all"):
+        _register_channel_adapter(manager, "qq", agent)
+
+    # Store manager globally for stop/status commands
+    globals()["_adapter_manager"] = manager
+
+    # Write adapter PID and initial state
     write_pid_record(gpaths.adapter_pid)
-
-    # Write initial state
     _write_adapter_state(gpaths, "running", {"channel": args.channel})
 
     print(f"启动通道适配器: {args.channel}", file=sys.stderr)
     manager.start_all()
     print(f"已启动: {manager.list_adapters()}", file=sys.stderr)
 
-    # 前台保持运行，Ctrl+C 退出
+    # Wait for shutdown signal
     stop_event = threading.Event()
 
     def _sig_handler(signum, frame):

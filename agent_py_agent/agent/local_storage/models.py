@@ -18,7 +18,7 @@ class LocalStoreEvent:
     """LLM: immutable event DTO returned when LocalStore records an audit event.
 
     给人看的解释：
-    这表示“本地账本里发生过一件事”。比如写入了一条 memory，或者 gateway 处理完一个请求。
+    这表示'本地账本里发生过一件事'。比如写入了一条 memory，或者 gateway 处理完一个请求。
     """
 
     event_id: str
@@ -51,7 +51,7 @@ class LocalSearchResult:
     """LLM: searchable LocalStore record DTO with loaded content and ranking score.
 
     给人看的解释：
-    这是一次搜索或读取记录后返回的“卡片”。里面有来源、标题、正文、元数据、可见性和分数。
+    这是一次搜索或读取记录后返回的'卡片'。里面有来源、标题、正文、元数据、可见性和分数。
     """
 
     id: str

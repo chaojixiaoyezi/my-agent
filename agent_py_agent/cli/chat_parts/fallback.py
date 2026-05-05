@@ -117,6 +117,52 @@ def _fallback_local_handle(
     return agent_response_text, stream_started_ref[0]
 
 
+def _fallback_process_job(
+    cfg: FallbackWorkerConfig,
+    job,
+) -> tuple[str, bool]:
+    """Process a single fallback job. Returns (response_text, stream_started)."""
+    started_at = cfg.running_started_at_ref[0]
+    print(f"\n正在处理: {job.user}", flush=True)
+    if cfg.use_gateway:
+        return _fallback_gateway_handle(
+            job,
+            cfg.agent,
+            cfg.args,
+            cfg.paths,
+            cfg.assistant_outputs,
+            cfg.build_history_context,
+        )
+    else:
+        return _fallback_local_handle(
+            job, cfg.agent, cfg.args, cfg.assistant_outputs, cfg.build_history_context
+        )
+
+
+def _fallback_finish_job(
+    cfg: FallbackWorkerConfig,
+    job,
+    agent_response_text: str,
+    stream_started: bool,
+) -> None:
+    """Finish job: record response, update history, reset state."""
+    if agent_response_text:
+        if stream_started:
+            cfg.assistant_outputs.append(agent_response_text)
+        append_conversation_turn(
+            cfg.conversation_history,
+            cfg.history_lock,
+            job.user,
+            agent_response_text,
+            max_turns=MAX_HISTORY_TURNS,
+        )
+    with cfg.state_lock:
+        cfg.is_running_ref[0] = False
+        cfg.running_prompt_ref[0] = ""
+        cfg.running_started_at_ref[0] = 0.0
+    cfg.jobs.task_done()
+
+
 def _fallback_worker(cfg: FallbackWorkerConfig) -> None:
     """Worker loop for fallback mode. Runs in a separate daemon thread."""
     while True:
@@ -129,39 +175,11 @@ def _fallback_worker(cfg: FallbackWorkerConfig) -> None:
         agent_response_text = ""
         stream_started = False
         try:
-            started_at = cfg.running_started_at_ref[0]
-            print(f"\n正在处理: {job.user}", flush=True)
-            if cfg.use_gateway:
-                agent_response_text, stream_started = _fallback_gateway_handle(
-                    job,
-                    cfg.agent,
-                    cfg.args,
-                    cfg.paths,
-                    cfg.assistant_outputs,
-                    cfg.build_history_context,
-                )
-            else:
-                agent_response_text, stream_started = _fallback_local_handle(
-                    job, cfg.agent, cfg.args, cfg.assistant_outputs, cfg.build_history_context
-                )
+            agent_response_text, stream_started = _fallback_process_job(cfg, job)
         except Exception as exc:
             print(f"错误: {exc}")
         finally:
-            if agent_response_text:
-                if stream_started:
-                    cfg.assistant_outputs.append(agent_response_text)
-                append_conversation_turn(
-                    cfg.conversation_history,
-                    cfg.history_lock,
-                    job.user,
-                    agent_response_text,
-                    max_turns=MAX_HISTORY_TURNS,
-                )
-            with cfg.state_lock:
-                cfg.is_running_ref[0] = False
-                cfg.running_prompt_ref[0] = ""
-                cfg.running_started_at_ref[0] = 0.0
-            cfg.jobs.task_done()
+            _fallback_finish_job(cfg, job, agent_response_text, stream_started)
 
 
 def _show_status(

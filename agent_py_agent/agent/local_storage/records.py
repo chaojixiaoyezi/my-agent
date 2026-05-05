@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: owns LocalStore record upsert, lookup, content-file paths, and row hydration.
 
 给人看的解释：
-这个文件只管“记录本身”。
+这个文件只管'记录本身'。
 新增/更新一条记录、按 ID 读取、把数据库行变成搜索结果、正文文件放在哪，都归这里。
 """
 
@@ -214,8 +214,8 @@ class LocalStoreRecordMixin(_LocalStoreRecordHelpers):
     def log_record(self, **kwargs: Any) -> LocalSearchResult:
         """写一条可搜索记录，并追加一条语义化审计事件。
 
-        `upsert_record()` 只表达“索引里有这条记录”。
-        `log_record()` 额外表达“发生了一件事”，适合 gateway/subagent/runner
+        `upsert_record()` 只表达'索引里有这条记录'。
+        `log_record()` 额外表达'发生了一件事'，适合 gateway/subagent/runner
         这类流程日志使用。
         """
 

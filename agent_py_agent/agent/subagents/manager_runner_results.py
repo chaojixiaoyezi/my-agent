@@ -97,7 +97,57 @@ class RecordRunnerResultParams:
     structured_repair_error: str = ""
 
 
+@dataclass
+class BuildAndPersistContext:
+    """Bundle for _build_and_persist_result to reduce parameter count."""
+    task: SubAgentTask
+    params: RecordRunnerResultParams
+    parsed: SubAgentParsedOutput
+    output_payload: dict
+    structured_evidence_count: int
+    structured_request_count: int
+    artifacts: list
+    tests: list
+    patches: list
+    lessons: list
+    blockers: list
+    next_actions: list
+    now: float
+
+
 class SubAgentRunnerResultMixin:
+    def _build_and_persist_result(
+        self,
+        ctx: "BuildAndPersistContext",
+    ) -> SubAgentRunnerResult:
+        """Build runner result and persist files."""
+        result = _build_runner_result(
+            RunnerResultContext(
+                task=ctx.task,
+                dry_run=ctx.params.dry_run,
+                ok=ctx.params.ok,
+                message=ctx.params.message,
+                backend=ctx.params.backend,
+                tool_rounds=ctx.params.tool_rounds,
+                prompt=ctx.params.prompt,
+                response=ctx.params.response,
+                parsed=ctx.parsed,
+                structured_repair_attempted=ctx.params.structured_repair_attempted,
+                structured_repair_ok=ctx.params.structured_repair_ok,
+                structured_repair_error=ctx.params.structured_repair_error,
+                structured_evidence_count=ctx.structured_evidence_count,
+                structured_request_count=ctx.structured_request_count,
+                artifact_count=len(ctx.artifacts),
+                test_count=len(ctx.tests),
+                patch_count=len(ctx.patches),
+                lesson_count=len(ctx.lessons),
+                now=ctx.now,
+            )
+        )
+        _write_runner_result_files(ctx.task, result, ctx.output_payload, prompt=ctx.params.prompt, response=ctx.params.response)
+        Path(ctx.task.runner_result_file).write_text(render_runner_result_markdown(result), encoding="utf-8")
+        return result
+
     def record_runner_result(
         self,
         params: RecordRunnerResultParams,
@@ -131,8 +181,23 @@ class SubAgentRunnerResultMixin:
         now = time.time()
 
         parsed = structured_output or SubAgentParsedOutput()
-        ignored_tools, ignored_skills, structured_evidence_count, structured_request_count, created_request_ids, artifacts, tests, patches, lessons, next_actions = self._process_parsed_output(task, parsed, now, actual_tools)
-        blockers = self._compute_blockers(ok, task.status, parsed, message)
+        if parsed.found and parsed.ok:
+            proc = _process_structured_output(task, parsed, now, actual_tools)
+            ignored_tools = proc["ignored_tools"]
+            ignored_skills = proc["ignored_skills"]
+            structured_evidence_count = proc["structured_evidence_count"]
+            structured_request_count = proc["structured_request_count"]
+            created_request_ids = proc["created_request_ids"]
+            artifacts = proc["artifacts"]
+            tests = proc["tests"]
+            patches = proc["patches"]
+            lessons = proc["lessons"]
+            next_actions = proc["next_actions"]
+        else:
+            ignored_tools, ignored_skills, structured_evidence_count, structured_request_count = [], [], 0, 0
+            created_request_ids, artifacts, tests, patches, lessons, next_actions = [], [], [], [], [], []
+
+        blockers = [] if (ok and status not in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}) else [parsed.blocked_reason or message]
         result_meta = {"ok": ok, "message": message, "response": response, "dry_run": dry_run}
         runner_meta = {"dry_run": dry_run, "ok": ok, "message": message, "backend": backend, "tool_rounds": tool_rounds, "now": now}
         cap_data = {"parsed": parsed, "structured_evidence_count": structured_evidence_count, "structured_request_count": structured_request_count, "created_request_ids": created_request_ids, "structured_repair_attempted": structured_repair_attempted, "structured_repair_ok": structured_repair_ok, "structured_repair_error": structured_repair_error}
@@ -141,31 +206,23 @@ class SubAgentRunnerResultMixin:
         status_context = {"status": status, "verification_status": verification_status, "failure_type": failure_type}
         apply_runner_result_fields(task, result_meta, status_context, parsed, now)
         output_payload = self._build_output_payload_wrapper(task, runner_meta, cap_data, tools_info, output_items)
-        result = _build_runner_result(
-            RunnerResultContext(
+        result = self._build_and_persist_result(
+            BuildAndPersistContext(
                 task=task,
-                dry_run=dry_run,
-                ok=result_meta["ok"],
-                message=result_meta["message"],
-                backend=backend,
-                tool_rounds=tool_rounds,
-                prompt=prompt,
-                response=response,
+                params=params,
                 parsed=parsed,
-                structured_repair_attempted=structured_repair_attempted,
-                structured_repair_ok=structured_repair_ok,
-                structured_repair_error=structured_repair_error,
+                output_payload=output_payload,
                 structured_evidence_count=structured_evidence_count,
                 structured_request_count=structured_request_count,
-                artifact_count=len(artifacts),
-                test_count=len(tests),
-                patch_count=len(patches),
-                lesson_count=len(lessons),
+                artifacts=artifacts,
+                tests=tests,
+                patches=patches,
+                lessons=lessons,
+                blockers=blockers,
+                next_actions=next_actions,
                 now=now,
             )
         )
-        _write_runner_result_files(task, result, output_payload, prompt=prompt, response=response)
-        Path(task.runner_result_file).write_text(render_runner_result_markdown(result), encoding="utf-8")
         self.save(task)
         if parsed.found and parsed.ok:
             _append_runner_debrief_content(task, parsed)

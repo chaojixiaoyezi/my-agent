@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: public API for low-level local file IO primitives.
 
 给人看的解释：
-这里放“很底层、无业务含义”的本地文件读写能力。比如带锁追加 JSONL。
+这里放'很底层、无业务含义'的本地文件读写能力。比如带锁追加 JSONL。
 只要函数开始有业务语义，就应该放回对应业务目录，不要把这里变成杂物间。
 """
 

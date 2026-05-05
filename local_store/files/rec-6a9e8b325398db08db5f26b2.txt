@@ -1,0 +1,34 @@
+# Gateway Request
+id: gwreq-fail
+kind: ask
+status: failed
+ok: False
+backend: 
+tool_rounds: 0
+prompt: request gwreq-fail
+response: 
+error_code: GATEWAY_PROCESSING_TIMEOUT
+error: gateway processing timeout after 1s; attempts=2
+request_file: gateway/requests/processing/gwreq-fail.json
+response_file: gateway/responses/gwreq-fail.json
+
+## Payload
+{
+  "attempts": 2,
+  "backend": "",
+  "created_at": 0,
+  "duration_seconds": 10.0,
+  "ended_at": 1777979394.469192,
+  "error": "gateway processing timeout after 1s; attempts=2",
+  "error_code": "GATEWAY_PROCESSING_TIMEOUT",
+  "id": "gwreq-fail",
+  "kind": "ask",
+  "ok": false,
+  "prompt": "request gwreq-fail",
+  "request_file": "gateway/requests/processing/gwreq-fail.json",
+  "response": "",
+  "started_at": 1777979384.4690711,
+  "status": "failed",
+  "tool_rounds": 0,
+  "used_memories": 0
+}

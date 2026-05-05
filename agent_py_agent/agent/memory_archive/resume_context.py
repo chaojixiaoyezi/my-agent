@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: builds optional auto-injected recovery context from memory archive evidence.
 
 新手说明:
-这个文件负责“用户说继续时，要不要自动把恢复线索塞进 prompt”。
+这个文件负责'用户说继续时，要不要自动把恢复线索塞进 prompt'。
 它只读归档、LocalStore 和任务事实源，不写任何业务状态；默认配置关闭，避免拖慢普通对话。
 """
 
@@ -60,7 +60,7 @@ class ResumeContextResult:
     """LLM: result of optional recovery context lookup for one run.
 
     新手说明:
-    这不是模型回答，只是“有没有找到可注入的恢复块”的结果。
+    这不是模型回答，只是'有没有找到可注入的恢复块'的结果。
     运行主流程会用它决定是否往 prompt 的 Runtime Injection 里加内容。
 
     字段说明:
@@ -100,7 +100,7 @@ def build_auto_resume_context(
     """LLM: conditionally build a recovery context block from recent archive evidence.
 
     新手说明:
-    默认不开。配置打开后，只有“继续/恢复/刚刚/request_id/run_id”这类场景才查归档。
+    默认不开。配置打开后，只有'继续/恢复/刚刚/request_id/run_id'这类场景才查归档。
     如果查归档或 LocalStore 出错，不影响主对话，只返回 error 让结果里可观察。
 
     参数说明:
@@ -186,7 +186,7 @@ def _first_archive_matches(records: list[dict[str, Any]], user_prompt: str, *, l
     """LLM: try precise IDs, full prompt, then useful terms before falling back to recent trigger context.
 
     新手说明:
-    用户经常说“继续 README 那个任务”，归档里未必有“那个”两个字。
+    用户经常说'继续 README 那个任务'，归档里未必有'那个'两个字。
     所以这里会先试完整句，没命中再试 README、request_id、run_id 这类更稳的词。
 
     参数说明:
@@ -278,7 +278,7 @@ def _append(items: list[str], value: str) -> None:
 
     新手说明:
     候选搜索词要保持顺序，也不要重复。
-    这个小函数就是“有内容才加、加过就不再加”。
+    这个小函数就是'有内容才加、加过就不再加'。
 
     参数说明:
     `items` 是候选词列表；`value` 是候选值。

@@ -7,6 +7,7 @@ from __future__ import annotations
 """
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from ...agent.backend import ModelResponse
@@ -139,6 +140,89 @@ def _multi_round_setup(args):
     return paths, agent, backend, task, loaded, runner
 
 
+def _multi_round_build_expected_reads(loaded):
+    """Build list of expected read paths from loaded task."""
+    return [
+        loaded.status_file,
+        loaded.work_log_file,
+        loaded.handoff_file,
+        loaded.test_checklist_file,
+        loaded.output_json,
+    ]
+
+
+@dataclass
+class _MultiRoundVerifyContext:
+    """Bundle for _multi_round_verify to reduce parameter count."""
+    paths: Any
+    task: Any
+    loaded: Any
+    runner: Any
+    backend: Any
+    resume_payload: dict
+    task_sources: list
+    recommended_reads: list
+    context_block: str
+    archive_count: int
+    matching_task: dict
+
+
+def _multi_round_verify(ctx: _MultiRoundVerifyContext) -> int:
+    """Verify multi-round recovery results."""
+    expected_reads = _multi_round_build_expected_reads(ctx.loaded)
+    echo_signature = "这是 echo 后端的本地响应"
+    output_json_valid = False
+    try:
+        output_data = json.loads(Path(ctx.loaded.output_json).read_text(encoding="utf-8"))
+        output_json_valid = True
+    except (OSError, json.JSONDecodeError):
+        output_json_valid = False
+    final_ok = (
+        ctx.runner.ok
+        and ctx.loaded.status == "AWAITING_ACCEPTANCE"
+        and ctx.loaded.verification_status == "NEEDS_ACCEPTANCE"
+        and "read_file" in ctx.loaded.used_tools
+        and "search_text" in ctx.loaded.used_tools
+        and ctx.backend.calls >= 3
+        and len(ctx.backend.tool_sequence) >= 2
+        and "read_file" in ctx.backend.tool_sequence
+        and "search_text" in ctx.backend.tool_sequence
+        and bool(ctx.backend.real_response_text)
+        and echo_signature not in ctx.backend.real_response_text
+        and ctx.resume_payload.get("ok") is True
+        and ctx.archive_count >= 2
+        and ctx.matching_task.get("exists") is True
+        and ctx.matching_task.get("status") == "AWAITING_ACCEPTANCE"
+        and all(path in ctx.recommended_reads for path in expected_reads)
+        and ctx.task.id in ctx.context_block
+        and "AWAITING_ACCEPTANCE" in ctx.context_block
+        and output_json_valid
+    )
+    write_scenario_summary(
+        ctx.paths,
+        ok=final_ok,
+        reason="real model multi-round recovery smoke test passed" if final_ok else "real model multi-round recovery smoke test failed",
+        extra={
+            "case": "real-model-recovery-multi-round",
+            "run_id": ctx.task.id,
+            "runner": {
+                "ok": ctx.runner.ok,
+                "status": ctx.runner.status,
+                "verification_status": ctx.runner.verification_status,
+                "tool_rounds": ctx.runner.tool_rounds,
+                "backend_calls": ctx.backend.calls,
+                "real_response_len": len(ctx.backend.real_response_text),
+                "tool_sequence": ctx.backend.tool_sequence,
+            },
+            "resume": ctx.resume_payload,
+        },
+    )
+    print(f"\nsummary_json={ctx.paths.summary_json}")
+    print(f"summary_md={ctx.paths.summary_md}")
+    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
+    return 0 if final_ok else 2
+
+
 def run_scenario_real_model_recovery_multi_round_case(args) -> int:
     """LLM: run a subagent with a real model API through 2+ tool call rounds, then prove memory-resume recovers multi-round evidence.
 
@@ -156,65 +240,23 @@ def run_scenario_real_model_recovery_multi_round_case(args) -> int:
     recommended_reads = resume_payload.get("resume", {}).get("recommended_read_paths", []) if isinstance(resume_payload, dict) else []
     context_block = resume_payload.get("brief", {}).get("context_block", "") if isinstance(resume_payload, dict) else ""
     archive_count = resume_payload.get("resume", {}).get("archive_match_count", 0) if isinstance(resume_payload, dict) else 0
-    expected_reads = [
-        loaded.status_file,
-        loaded.work_log_file,
-        loaded.handoff_file,
-        loaded.test_checklist_file,
-        loaded.output_json,
-    ]
     matching_task = next(
         (item for item in task_sources if isinstance(item, dict) and item.get("run_id") == task.id),
         {},
     )
-    echo_signature = "这是 echo 后端的本地响应"
-    output_json_valid = False
-    try:
-        output_data = json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
-        output_json_valid = True
-    except (OSError, json.JSONDecodeError):
-        output_json_valid = False
-    final_ok = (
-        runner.ok
-        and loaded.status == "AWAITING_ACCEPTANCE"
-        and loaded.verification_status == "NEEDS_ACCEPTANCE"
-        and "read_file" in loaded.used_tools
-        and "search_text" in loaded.used_tools
-        and backend.calls >= 3
-        and len(backend.tool_sequence) >= 2
-        and "read_file" in backend.tool_sequence
-        and "search_text" in backend.tool_sequence
-        and bool(backend.real_response_text)
-        and echo_signature not in backend.real_response_text
-        and resume_payload.get("ok") is True
-        and archive_count >= 2
-        and matching_task.get("exists") is True
-        and matching_task.get("status") == "AWAITING_ACCEPTANCE"
-        and all(path in recommended_reads for path in expected_reads)
-        and task.id in context_block
-        and "AWAITING_ACCEPTANCE" in context_block
-        and output_json_valid
+
+    return _multi_round_verify(
+        _MultiRoundVerifyContext(
+            paths=paths,
+            task=task,
+            loaded=loaded,
+            runner=runner,
+            backend=backend,
+            resume_payload=resume_payload,
+            task_sources=task_sources,
+            recommended_reads=recommended_reads,
+            context_block=context_block,
+            archive_count=archive_count,
+            matching_task=matching_task,
+        )
     )
-    write_scenario_summary(
-        paths,
-        ok=final_ok,
-        reason="real model multi-round recovery smoke test passed" if final_ok else "real model multi-round recovery smoke test failed",
-        extra={
-            "case": "real-model-recovery-multi-round",
-            "run_id": task.id,
-            "runner": {
-                "ok": runner.ok,
-                "status": runner.status,
-                "verification_status": runner.verification_status,
-                "tool_rounds": runner.tool_rounds,
-                "backend_calls": backend.calls,
-                "real_response_len": len(backend.real_response_text),
-                "tool_sequence": backend.tool_sequence,
-            },
-            "resume": resume_payload,
-        },
-    )
-    print(f"\nsummary_json={paths.summary_json}")
-    print(f"summary_md={paths.summary_md}")
-    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
-    return 0 if final_ok else 2

@@ -126,21 +126,26 @@ def _build_path_entries() -> list[str]:
     return path_entries
 
 
-def generate_systemd_unit_text(system: bool = False) -> str:
-    """Generate systemd unit content for the gateway service.
+def _resolve_node_path() -> str | None:
+    """Resolve node binary path and return its directory, or None if not found."""
+    resolved_node = shutil.which("node")
+    if resolved_node:
+        return str(Path(resolved_node).resolve().parent)
+    return None
 
-    Args:
-        system: If True, generate a system service (requires root).
-                If False, generate a user service.
-    """
-    python_path = get_python_path()
-    working_dir = str(PROJECT_ROOT)
-    venv = _detect_venv_dir()
-    venv_dir = str(venv) if venv else str(PROJECT_ROOT / "venv")
-    venv_bin = str(venv / "bin") if venv else str(PROJECT_ROOT / "venv" / "bin")
+
+def _build_systemd_path_entries(venv_bin: str) -> str:
+    """Build the PATH entries string for systemd service."""
+    path_entries = [venv_bin]
+    # Add node bin if present
     node_bin = str(PROJECT_ROOT / "node_modules" / ".bin")
-
-    path_entries = [venv_bin, node_bin]
+    if Path(node_bin).exists():
+        path_entries.append(node_bin)
+    # Add resolved node path
+    resolved_node_dir = _resolve_node_path()
+    if resolved_node_dir and resolved_node_dir not in path_entries:
+        path_entries.append(resolved_node_dir)
+    # Add common system bin paths
     common_bin_paths = [
         "/usr/local/sbin",
         "/usr/local/bin",
@@ -149,35 +154,18 @@ def generate_systemd_unit_text(system: bool = False) -> str:
         "/sbin",
         "/bin",
     ]
-
-    # Resolve node path
-    resolved_node = shutil.which("node")
-    if resolved_node:
-        resolved_node_dir = str(Path(resolved_node).resolve().parent)
-        if resolved_node_dir not in path_entries:
-            path_entries.append(resolved_node_dir)
-
     path_entries.extend(common_bin_paths)
-    sane_path = ":".join(path_entries)
+    return ":".join(path_entries)
 
-    # Build the command - use config path from environment or default
-    config_path = os.environ.get("MY_AGENT_CONFIG", str(PROJECT_ROOT / "config" / "agent_config.yaml"))
 
-    if system:
-        # System service - use absolute paths
-        exec_start = f"{python_path} -m agent_py_agent --config {config_path} gateway run"
-    else:
-        # User service
-        exec_start = f"{python_path} -m agent_py_agent --config {config_path} gateway run"
+def _get_config_path() -> str:
+    """Get the config path from environment or default."""
+    return os.environ.get("MY_AGENT_CONFIG", str(PROJECT_ROOT / "config" / "agent_config.yaml"))
 
-    return f"""[Unit]
-Description={_SERVICE_DESCRIPTION}
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=600
-StartLimitBurst=5
 
-[Service]
+def _format_systemd_unit_section(exec_start: str, working_dir: str, sane_path: str) -> str:
+    """Format the [Service] section of systemd unit."""
+    return f"""[Service]
 Type=simple
 ExecStart={exec_start}
 WorkingDirectory={working_dir}
@@ -188,6 +176,34 @@ RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}
 KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=60
+"""
+
+
+def generate_systemd_unit_text(system: bool = False) -> str:
+    """Generate systemd unit content for the gateway service.
+
+    Args:
+        system: If True, generate a system service (requires root).
+                If False, generate a user service.
+    """
+    python_path = get_python_path()
+    working_dir = str(PROJECT_ROOT)
+    venv = _detect_venv_dir()
+    venv_bin = str(venv / "bin") if venv else str(PROJECT_ROOT / "venv" / "bin")
+    config_path = _get_config_path()
+    sane_path = _build_systemd_path_entries(venv_bin)
+
+    exec_start = f"{python_path} -m agent_py_agent --config {config_path} gateway run"
+
+    service_section = _format_systemd_unit_section(exec_start, working_dir, sane_path)
+
+    return f"""[Unit]
+Description={_SERVICE_DESCRIPTION}
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+{service_section}
 """
 
 

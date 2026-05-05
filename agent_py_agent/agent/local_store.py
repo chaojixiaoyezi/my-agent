@@ -34,10 +34,10 @@ class LocalStore(
 
     给人看的解释：
     你可以把它理解成本地账本的门面：
-    - records 表保存“有什么东西”
-    - FTS/LIKE 负责“怎么搜到它”
-    - files 目录保存“大正文”
-    - events 表和 JSONL 保存“发生过什么事”
+    - records 表保存'有什么东西'
+    - FTS/LIKE 负责'怎么搜到它'
+    - files 目录保存'大正文'
+    - events 表和 JSONL 保存'发生过什么事'
     """
 
     def __init__(

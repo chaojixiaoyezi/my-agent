@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM contract: subagent report, review, dispatch, and planner dataclasses.
 
 Human version:
-这里放“父代理看什么报告、怎么验收、怎么调度”的数据结构。
+这里放'父代理看什么报告、怎么验收、怎么调度'的数据结构。
 它们和 SubAgentTask 分开，是为了让运行状态和报告输出各自变化。
 """
 

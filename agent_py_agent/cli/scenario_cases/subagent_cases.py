@@ -144,6 +144,11 @@ def _append_parent_subagent_cross_day_resume_clues(root: Path, task) -> None:
             created_at="2026-04-29T23:55:00+00:00",
         ),
     )
+    _append_subagent_snapshot(root, task)
+
+
+def _append_subagent_snapshot(root: Path, task) -> None:
+    """Append a recovery snapshot for the subagent task."""
     append_snapshot(
         root,
         CompressionSnapshot(
@@ -170,13 +175,9 @@ def _append_parent_subagent_cross_day_resume_clues(root: Path, task) -> None:
             ],
             task_refs=[task.id],
             content_paths=[
-                task.status_file,
-                task.work_log_file,
-                task.handoff_file,
-                task.test_checklist_file,
-                task.runner_result_file,
-                task.runner_result_json,
-                task.output_json,
+                task.status_file, task.work_log_file, task.handoff_file,
+                task.test_checklist_file, task.runner_result_file,
+                task.runner_result_json, task.output_json,
             ],
             next_actions=["Read task fact sources, then run parent acceptance only after evidence is checked."],
             created_at="2026-04-30T00:07:00+00:00",
@@ -226,6 +227,51 @@ def _parent_subagent_setup(args):
     return paths, agent, backend, task, loaded, runner
 
 
+def _run_subagent_resume(paths, task):
+    """Run memory-resume subprocess for subagent cross-day recovery. Returns parsed payload."""
+    env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    resume = run_scenario_subprocess(
+        scenario_command(
+            paths, "memory-resume", "parent subagent cross-day resume",
+            "--run-id", task.id,
+            "--since", "2026-04-29", "--until", "2026-04-30", "--json",
+        ),
+        env=env, timeout=30,
+    )
+    try:
+        return json.loads(resume.stdout), resume.returncode
+    except json.JSONDecodeError as exc:
+        return {"ok": False, "error": f"memory-resume JSON parse failed: {exc}", "stdout": resume.stdout}, resume.returncode
+
+
+def _verify_subagent_resume(runner, loaded, backend, resume_payload, returncode, task, expected_reads):
+    """Verify subagent cross-day resume found task fact sources."""
+    task_sources = resume_payload.get("task_fact_sources", []) if isinstance(resume_payload, dict) else []
+    recommended_reads = resume_payload.get("resume", {}).get("recommended_read_paths", []) if isinstance(resume_payload, dict) else []
+    context_block = resume_payload.get("brief", {}).get("context_block", "") if isinstance(resume_payload, dict) else ""
+    archive_count = resume_payload.get("resume", {}).get("archive_match_count", 0) if isinstance(resume_payload, dict) else 0
+    matching_task = next(
+        (item for item in task_sources if isinstance(item, dict) and item.get("run_id") == task.id), {},
+    )
+    return (
+        runner.ok
+        and loaded.status == "AWAITING_ACCEPTANCE"
+        and loaded.verification_status == "NEEDS_ACCEPTANCE"
+        and "read_file" in loaded.used_tools
+        and runner.tool_rounds == 1
+        and backend.calls == 2
+        and returncode == 0
+        and archive_count >= 2
+        and matching_task.get("exists") is True
+        and matching_task.get("status") == "AWAITING_ACCEPTANCE"
+        and all(path in recommended_reads for path in expected_reads)
+        and task.id in context_block
+        and "AWAITING_ACCEPTANCE" in context_block
+    )
+
+
 def run_scenario_parent_subagent_cross_day_resume_case(args) -> int:
     """LLM: run a real subagent runner turn, then prove memory-resume returns task fact sources.
 
@@ -243,60 +289,13 @@ def run_scenario_parent_subagent_cross_day_resume_case(args) -> int:
     print(f"reloaded_status={reloaded_task.status} task_dir={reloaded_task.task_dir}")
 
     print_scenario_step(4, "Run memory-resume and require task fact-source reads")
-    env = os.environ.copy()
-    env.setdefault("PYTHONUTF8", "1")
-    env.setdefault("PYTHONIOENCODING", "utf-8")
-    resume = run_scenario_subprocess(
-        scenario_command(
-            paths,
-            "memory-resume",
-            "parent subagent cross-day resume",
-            "--run-id",
-            task.id,
-            "--since",
-            "2026-04-29",
-            "--until",
-            "2026-04-30",
-            "--json",
-        ),
-        env=env,
-        timeout=30,
-    )
-    try:
-        resume_payload = json.loads(resume.stdout)
-    except json.JSONDecodeError as exc:
-        resume_payload = {"ok": False, "error": f"memory-resume JSON parse failed: {exc}", "stdout": resume.stdout}
+    resume_payload, returncode = _run_subagent_resume(paths, task)
 
-    task_sources = resume_payload.get("task_fact_sources", []) if isinstance(resume_payload, dict) else []
-    recommended_reads = resume_payload.get("resume", {}).get("recommended_read_paths", []) if isinstance(resume_payload, dict) else []
-    context_block = resume_payload.get("brief", {}).get("context_block", "") if isinstance(resume_payload, dict) else ""
-    archive_count = resume_payload.get("resume", {}).get("archive_match_count", 0) if isinstance(resume_payload, dict) else 0
     expected_reads = [
-        loaded.status_file,
-        loaded.work_log_file,
-        loaded.handoff_file,
-        loaded.test_checklist_file,
-        loaded.output_json,
+        loaded.status_file, loaded.work_log_file, loaded.handoff_file,
+        loaded.test_checklist_file, loaded.output_json,
     ]
-    matching_task = next(
-        (item for item in task_sources if isinstance(item, dict) and item.get("run_id") == task.id),
-        {},
-    )
-    final_ok = (
-        runner.ok
-        and loaded.status == "AWAITING_ACCEPTANCE"
-        and loaded.verification_status == "NEEDS_ACCEPTANCE"
-        and "read_file" in loaded.used_tools
-        and runner.tool_rounds == 1
-        and backend.calls == 2
-        and resume.returncode == 0
-        and archive_count >= 2
-        and matching_task.get("exists") is True
-        and matching_task.get("status") == "AWAITING_ACCEPTANCE"
-        and all(path in recommended_reads for path in expected_reads)
-        and task.id in context_block
-        and "AWAITING_ACCEPTANCE" in context_block
-    )
+    final_ok = _verify_subagent_resume(runner, loaded, backend, resume_payload, returncode, task, expected_reads)
     write_scenario_summary(
         paths,
         ok=final_ok,

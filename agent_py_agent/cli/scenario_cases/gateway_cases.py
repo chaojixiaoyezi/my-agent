@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from dataclasses import dataclass
 
 from ...agent.agent_core.models import AgentRunResult
 from ...agent.gateway import (
@@ -30,6 +31,47 @@ from ..scenario_utils import (
     print_scenario_step,
     write_scenario_summary,
 )
+
+
+def _restart_case_write_processing_payload(gpaths, request_id):
+    """Write a processing payload that simulates gateway crash leftover."""
+    import os
+    import time
+
+    processing_path = gpaths.processing / f"{request_id}.json"
+    payload = {
+        "id": request_id,
+        "kind": "ask",
+        "prompt": "这个请求模拟 gateway 崩溃时卡在 processing。",
+        "inject": [],
+        "prompt_files": [],
+        "save": False,
+        "include_prompt": False,
+        "created_at": time.time(),
+        "client_pid": os.getpid(),
+    }
+    write_json_file(processing_path, payload)
+    return processing_path, payload
+
+
+def _restart_case_verify(paths, requeued, processing_path, pending_path):
+    """Verify restart recovery results."""
+    final_ok = requeued == 1 and not processing_path.exists() and pending_path.exists()
+    write_scenario_summary(
+        paths,
+        ok=final_ok,
+        reason="gateway restart requeue passed" if final_ok else "gateway restart requeue failed",
+        extra={
+            "case": "gateway-restart",
+            "pending_path": str(pending_path),
+            "processing_path": str(processing_path),
+            "requeued": requeued,
+        },
+    )
+    print(f"\nsummary_json={paths.summary_json}")
+    print(f"summary_md={paths.summary_md}")
+    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
+    return 0 if final_ok else 2
 
 
 def run_scenario_gateway_restart_case(args) -> int:
@@ -53,19 +95,7 @@ def run_scenario_gateway_restart_case(args) -> int:
         path.mkdir(parents=True, exist_ok=True)
 
     request_id = new_gateway_request_id()
-    processing_path = gpaths.processing / f"{request_id}.json"
-    payload = {
-        "id": request_id,
-        "kind": "ask",
-        "prompt": "这个请求模拟 gateway 崩溃时卡在 processing。",
-        "inject": [],
-        "prompt_files": [],
-        "save": False,
-        "include_prompt": False,
-        "created_at": time.time(),
-        "client_pid": os.getpid(),
-    }
-    write_json_file(processing_path, payload)
+    processing_path, _ = _restart_case_write_processing_payload(gpaths, request_id)
 
     print_scenario_step(1, "模拟旧 gateway 崩溃遗留 processing 请求")
     print(f"processing_before={processing_path.exists()} path={processing_path}")
@@ -76,23 +106,7 @@ def run_scenario_gateway_restart_case(args) -> int:
     print(f"processing_after={processing_path.exists()}")
     print(f"pending_after={pending_path.exists()} path={pending_path}")
 
-    final_ok = requeued == 1 and not processing_path.exists() and pending_path.exists()
-    write_scenario_summary(
-        paths,
-        ok=final_ok,
-        reason="gateway restart requeue passed" if final_ok else "gateway restart requeue failed",
-        extra={
-            "case": "gateway-restart",
-            "request_id": request_id,
-            "pending_path": str(pending_path),
-            "processing_path": str(processing_path),
-            "requeued": requeued,
-        },
-    )
-    print(f"\nsummary_json={paths.summary_json}")
-    print(f"summary_md={paths.summary_md}")
-    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
-    return 0 if final_ok else 2
+    return _restart_case_verify(paths, requeued, processing_path, pending_path)
 
 
 def _stale_lease_setup(args):
@@ -134,6 +148,59 @@ def _stale_lease_setup(args):
     return paths, agent, gpaths, request_id, processing_path
 
 
+@dataclass
+class _StaleLeaseVerifyContext:
+    """Bundle for _stale_lease_verify to reduce parameter count."""
+    paths: Any
+    request_id: str
+    processing_path: Any
+    pending_path: Any
+    stale_before: list
+    recovered: dict
+    processed: int
+    done_path: Any
+    response_path: Any
+    response: dict
+    done_payload: dict
+
+
+def _stale_lease_verify(ctx: _StaleLeaseVerifyContext) -> int:
+    """Verify stale lease recovery results."""
+    final_ok = (
+        ctx.stale_before
+        and ctx.stale_before[0].get("request_id") == ctx.request_id
+        and ctx.recovered["checked"] == 1
+        and ctx.recovered["requeued"] == 1
+        and ctx.pending_path.exists() is False
+        and ctx.processing_path.exists() is False
+        and ctx.processed == 1
+        and ctx.done_path.exists()
+        and ctx.response.get("ok") is True
+        and ctx.response.get("status") == "done"
+        and ctx.response.get("attempts") == 2
+        and ctx.done_payload.get("lease_owner") == "scenario-recovery-worker"
+    )
+    write_scenario_summary(
+        ctx.paths,
+        ok=final_ok,
+        reason="gateway stale lease recovery passed" if final_ok else "gateway stale lease recovery failed",
+        extra={
+            "case": "gateway-stale-lease",
+            "request_id": ctx.request_id,
+            "stale_before": ctx.stale_before,
+            "recovered": ctx.recovered,
+            "processed": ctx.processed,
+            "done_path": str(ctx.done_path),
+            "response_path": str(ctx.response_path),
+            "response": ctx.response,
+        },
+    )
+    print(f"\nsummary_json={ctx.paths.summary_json}")
+    print(f"summary_md={ctx.paths.summary_md}")
+    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
+    return 0 if final_ok else 2
+
+
 def run_scenario_gateway_stale_lease_case(args) -> int:
     """LLM: simulate an interrupted worker lease, then recover and finish the gateway request.
 
@@ -170,39 +237,21 @@ def run_scenario_gateway_stale_lease_case(args) -> int:
     print(f"done_path={done_path} exists={done_path.exists()}")
     print(f"response_path={response_path} exists={response_path.exists()} ok={response.get('ok')}")
 
-    final_ok = (
-        stale_before
-        and stale_before[0].get("request_id") == request_id
-        and recovered["checked"] == 1
-        and recovered["requeued"] == 1
-        and pending_path.exists() is False
-        and processing_path.exists() is False
-        and processed == 1
-        and done_path.exists()
-        and response.get("ok") is True
-        and response.get("status") == "done"
-        and response.get("attempts") == 2
-        and done_payload.get("lease_owner") == "scenario-recovery-worker"
+    return _stale_lease_verify(
+        _StaleLeaseVerifyContext(
+            paths=paths,
+            request_id=request_id,
+            processing_path=processing_path,
+            pending_path=pending_path,
+            stale_before=stale_before,
+            recovered=recovered,
+            processed=processed,
+            done_path=done_path,
+            response_path=response_path,
+            response=response,
+            done_payload=done_payload,
+        )
     )
-    write_scenario_summary(
-        paths,
-        ok=final_ok,
-        reason="gateway stale lease recovery passed" if final_ok else "gateway stale lease recovery failed",
-        extra={
-            "case": "gateway-stale-lease",
-            "request_id": request_id,
-            "stale_before": stale_before,
-            "recovered": recovered,
-            "processed": processed,
-            "done_path": str(done_path),
-            "response_path": str(response_path),
-            "response": response,
-        },
-    )
-    print(f"\nsummary_json={paths.summary_json}")
-    print(f"summary_md={paths.summary_md}")
-    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
-    return 0 if final_ok else 2
 
 
 def _delayed_response_setup(args):
@@ -252,6 +301,54 @@ def _delayed_response_setup(args):
     return paths, agent, gpaths, request_id, request_path, response_path
 
 
+@dataclass
+class _DelayedResponseVerifyContext:
+    """Bundle for _delayed_response_verify to reduce parameter count."""
+    paths: Any
+    request_id: str
+    processed: int
+    run_called: dict
+    done_path: Any
+    response: dict
+    pending_left: list
+    processing_left: list
+    failed_left: list
+    done_payload: dict = None  # type: ignore[assignment]
+
+
+def _delayed_response_verify(ctx: _DelayedResponseVerifyContext) -> int:
+    """Verify delayed response handling results."""
+    final_ok = (
+        ctx.processed == 1
+        and ctx.run_called["value"] is False
+        and ctx.done_path.exists()
+        and ctx.response.get("response") == "late response already arrived"
+        and ctx.response.get("backend") == "scenario-delayed-response"
+        and ctx.done_payload.get("id") == ctx.request_id
+        and not ctx.pending_left
+        and not ctx.processing_left
+        and not ctx.failed_left
+    )
+    write_scenario_summary(
+        ctx.paths,
+        ok=final_ok,
+        reason="gateway delayed response handling passed" if final_ok else "gateway delayed response handling failed",
+        extra={
+            "case": "gateway-delayed-response",
+            "request_id": ctx.request_id,
+            "processed": ctx.processed,
+            "run_called": ctx.run_called["value"],
+            "done_path": str(ctx.done_path),
+            "response_path": str(ctx.response_path) if hasattr(ctx, 'response_path') else "",
+            "response": ctx.response,
+        },
+    )
+    print(f"\nsummary_json={ctx.paths.summary_json}")
+    print(f"summary_md={ctx.paths.summary_md}")
+    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
+    return 0 if final_ok else 2
+
+
 def run_scenario_gateway_delayed_response_case(args) -> int:
     """LLM: simulate a response arriving before a duplicate pending request is claimed.
 
@@ -293,32 +390,17 @@ def run_scenario_gateway_delayed_response_case(args) -> int:
         )
     )
 
-    final_ok = (
-        processed == 1
-        and run_called["value"] is False
-        and done_path.exists()
-        and response.get("response") == "late response already arrived"
-        and response.get("backend") == "scenario-delayed-response"
-        and done_payload.get("id") == request_id
-        and not pending_left
-        and not processing_left
-        and not failed_left
+    return _delayed_response_verify(
+        _DelayedResponseVerifyContext(
+            paths=paths,
+            request_id=request_id,
+            processed=processed,
+            run_called=run_called,
+            done_path=done_path,
+            response=response,
+            pending_left=pending_left,
+            processing_left=processing_left,
+            failed_left=failed_left,
+            done_payload=done_payload,
+        )
     )
-    write_scenario_summary(
-        paths,
-        ok=final_ok,
-        reason="gateway delayed response handling passed" if final_ok else "gateway delayed response handling failed",
-        extra={
-            "case": "gateway-delayed-response",
-            "request_id": request_id,
-            "processed": processed,
-            "run_called": run_called["value"],
-            "done_path": str(done_path),
-            "response_path": str(response_path),
-            "response": response,
-        },
-    )
-    print(f"\nsummary_json={paths.summary_json}")
-    print(f"summary_md={paths.summary_md}")
-    print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
-    return 0 if final_ok else 2

@@ -3,7 +3,7 @@ from __future__ import annotations
 """LLM: exposes model-callable orchestration tools backed by SimpleAgent subagent workflows.
 
 给人看的解释：
-这些不是普通文件工具，而是“主代理让模型触发子代理流程”的工具。
+这些不是普通文件工具，而是'主代理让模型触发子代理流程'的工具。
 创建子代理、查看看板、执行 dispatch 都在这里，真实业务再转给 SimpleAgent 和 SubAgentManager。
 """
 

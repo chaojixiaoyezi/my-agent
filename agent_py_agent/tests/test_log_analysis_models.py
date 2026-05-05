@@ -20,8 +20,10 @@ from agent_py_agent.agent.log_analysis.models import (
 )
 
 
-def test_log_analysis_contracts_json_round_trip():
-    evidence = EvidenceRef(
+# ── Contract sample builders ──────────────────────────────────────────────────
+
+def _sample_evidence_ref() -> EvidenceRef:
+    return EvidenceRef(
         evidence_id="query-q1",
         kind="query",
         uri="evidence/query-q1.json",
@@ -30,87 +32,121 @@ def test_log_analysis_contracts_json_round_trip():
         truncated=False,
         summary="two matching WAF rows",
     )
-    samples = [
-        SourceSpec(source_id="waf-prod", kind="file", format="csv", options={"glob": "fixtures/*.csv"}),
-        Checkpoint(
-            source_id="waf-prod",
-            cursor_kind="file_offset",
-            cursor={"path": "fixtures/waf.csv", "offset": 42},
-            last_committed_batch_id="batch-1",
-            last_event_time="2026-04-30T10:15:00Z",
-            updated_at="2026-04-30T10:16:00Z",
-        ),
-        RawBatch(
-            batch_id="batch-1",
-            source_id="waf-prod",
-            source_kind="file",
-            received_at="2026-04-30T10:16:00Z",
-            time_range=["2026-04-30T10:15:00Z", "2026-04-30T10:16:00Z"],
-            raw_refs=["spool/waf-prod/batch-1.log"],
-            size_bytes=123,
-            content_hash="sha256:abc",
-        ),
-        NormalizedEvent(
-            event_id="evt-1",
-            source_id="waf-prod",
-            event_time="2026-04-30T10:15:12Z",
-            ingest_time="2026-04-30T10:15:15Z",
-            event_type="http",
-            src_ip="198.51.100.1",
-            dst_ip="10.1.2.3",
-            dst_port=443,
-            parser_id="security_alert_v1",
-            parser_confidence=0.98,
-            attributes={"uri": "/upload.php"},
-        ),
-        SecurityAlertV1(
-            alert_id="alert-1",
-            event_time="2026-04-30T10:15:12Z",
-            source_id="waf-prod",
-            source_product="waf",
-            alert_type="Web攻击",
-            threat_name="疑似命令执行",
-            dst_port=443,
-            attacker_ip="198.51.100.1",
-            victim_ip="10.1.2.3",
-            raw_ref="raw-batch-1:line-7",
-            raw_fields={"告警类型": "Web攻击", "攻击IP": "198.51.100.1"},
-        ),
+
+
+def _sample_source_spec() -> SourceSpec:
+    return SourceSpec(source_id="waf-prod", kind="file", format="csv", options={"glob": "fixtures/*.csv"})
+
+
+def _sample_checkpoint() -> Checkpoint:
+    return Checkpoint(
+        source_id="waf-prod",
+        cursor_kind="file_offset",
+        cursor={"path": "fixtures/waf.csv", "offset": 42},
+        last_committed_batch_id="batch-1",
+        last_event_time="2026-04-30T10:15:00Z",
+        updated_at="2026-04-30T10:16:00Z",
+    )
+
+
+def _sample_raw_batch() -> RawBatch:
+    return RawBatch(
+        batch_id="batch-1",
+        source_id="waf-prod",
+        source_kind="file",
+        received_at="2026-04-30T10:16:00Z",
+        time_range=["2026-04-30T10:15:00Z", "2026-04-30T10:16:00Z"],
+        raw_refs=["spool/waf-prod/batch-1.log"],
+        size_bytes=123,
+        content_hash="sha256:abc",
+    )
+
+
+def _sample_normalized_event() -> NormalizedEvent:
+    return NormalizedEvent(
+        event_id="evt-1",
+        source_id="waf-prod",
+        event_time="2026-04-30T10:15:12Z",
+        ingest_time="2026-04-30T10:15:15Z",
+        event_type="http",
+        src_ip="198.51.100.1",
+        dst_ip="10.1.2.3",
+        dst_port=443,
+        parser_id="security_alert_v1",
+        parser_confidence=0.98,
+        attributes={"uri": "/upload.php"},
+    )
+
+
+def _sample_security_alert_v1() -> SecurityAlertV1:
+    return SecurityAlertV1(
+        alert_id="alert-1",
+        event_time="2026-04-30T10:15:12Z",
+        source_id="waf-prod",
+        source_product="waf",
+        alert_type="Web攻击",
+        threat_name="疑似命令执行",
+        dst_port=443,
+        attacker_ip="198.51.100.1",
+        victim_ip="10.1.2.3",
+        raw_ref="raw-batch-1:line-7",
+        raw_fields={"告警类型": "Web攻击", "攻击IP": "198.51.100.1"},
+    )
+
+
+def _sample_finding(evidence: EvidenceRef) -> Finding:
+    return Finding(
+        finding_id="finding-1",
+        detector_id="waf_attack_success_candidate",
+        detector_kind="rule",
+        window=["2026-04-30T10:00:00Z", "2026-04-30T10:15:00Z"],
+        severity_hint="high",
+        risk_score=0.87,
+        entities={"attacker_ip": ["198.51.100.1"], "victim_ip": ["10.1.2.3"]},
+        features={"post_exploit_signals": 2},
+        evidence_refs=[evidence],
+        hypothesis="WAF hit followed by host-side activity",
+        confidence=0.72,
+        gaps=["missing EDR process tree"],
+        next_queries=["find EDR process events for victim_ip"],
+    )
+
+
+def _sample_case_record(evidence: EvidenceRef, finding_ref: Finding) -> CaseRecord:
+    return CaseRecord(
+        case_id="case-20260430-001",
+        title="WAF exploit candidate",
+        priority="P1",
+        risk_score=0.87,
+        finding_refs=["finding-1"],
+        evidence_refs=[evidence],
+        dedup_key="waf:10.1.2.3:2026-04-30T10",
+        facts=["WAF alert observed"],
+        inferences=["possible exploit attempt"],
+        gaps=["EDR telemetry missing"],
+        next_queries=["query EDR by victim_ip"],
+    )
+
+
+def _all_contract_samples() -> list:
+    evidence = _sample_evidence_ref()
+    return [
         evidence,
-        Finding(
-            finding_id="finding-1",
-            detector_id="waf_attack_success_candidate",
-            detector_kind="rule",
-            window=["2026-04-30T10:00:00Z", "2026-04-30T10:15:00Z"],
-            severity_hint="high",
-            risk_score=0.87,
-            entities={"attacker_ip": ["198.51.100.1"], "victim_ip": ["10.1.2.3"]},
-            features={"post_exploit_signals": 2},
-            evidence_refs=[evidence],
-            hypothesis="WAF hit followed by host-side activity",
-            confidence=0.72,
-            gaps=["missing EDR process tree"],
-            next_queries=["find EDR process events for victim_ip"],
-        ),
-        CaseRecord(
-            case_id="case-20260430-001",
-            title="WAF exploit candidate",
-            priority="P1",
-            risk_score=0.87,
-            finding_refs=["finding-1"],
-            evidence_refs=[evidence],
-            dedup_key="waf:10.1.2.3:2026-04-30T10",
-            facts=["WAF alert observed"],
-            inferences=["possible exploit attempt"],
-            gaps=["EDR telemetry missing"],
-            next_queries=["query EDR by victim_ip"],
-        ),
+        _sample_source_spec(),
+        _sample_checkpoint(),
+        _sample_raw_batch(),
+        _sample_normalized_event(),
+        _sample_security_alert_v1(),
+        evidence,  # duplicate reference is intentional (used in Finding.evidence_refs)
+        _sample_finding(evidence),
+        _sample_case_record(evidence, _sample_finding(evidence)),
     ]
 
-    for item in samples:
+
+def test_log_analysis_contracts_json_round_trip():
+    for item in _all_contract_samples():
         payload = item.to_json()
         loaded = type(item).from_json(payload)
-
         assert json.loads(payload) == item.to_dict()
         assert loaded.to_dict() == item.to_dict()
 

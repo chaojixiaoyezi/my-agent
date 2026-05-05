@@ -3,13 +3,15 @@ from __future__ import annotations
 """LLM: implements status, timeline, run, memory, local-search, local-doctor, and local-rebuild CLI commands.
 
 给人看的解释：
-这个文件只放和“本地状态/记忆/LocalStore”相关的命令。
+这个文件只放和'本地状态/记忆/LocalStore'相关的命令。
 它会调用 local_doctor 里的诊断规则，也会调用 gateway/subagent 的公开 API 取状态。
 """
 
 import json
 import sys
 import time
+from dataclasses import dataclass
+from typing import Any
 
 from ..agent.gateway import (
     gateway_paths,
@@ -69,6 +71,102 @@ def _format_timeline(timeline) -> None:
         print(f"- {format_local_time(item.created_at)} {item.event_type} {source} :: {item.title}")
 
 
+@dataclass
+class _StatusPayloadContext:
+    """Bundle for _build_status_payload to reduce parameter count."""
+    agent: Any
+    paths: Any
+    local_stats: dict
+    board: Any
+    timeline: list
+    pid: int | None
+    alive: bool
+    gateway_status: str
+    heartbeat_age: float
+    active_work_summary: Any
+
+
+def _build_status_payload(ctx: _StatusPayloadContext) -> dict:
+    """Build the status payload dict for JSON output."""
+    active_work = None
+    if ctx.active_work_summary:
+        active_work = {
+            "gateway_alive": ctx.active_work_summary.gateway_alive,
+            "active_task_count": ctx.active_work_summary.active_task_count,
+            "stale_request_count": ctx.active_work_summary.stale_request_count,
+            "recent_tasks": ctx.active_work_summary.recent_tasks,
+        }
+    return {
+        "agent_name": ctx.agent.config.agent_name,
+        "workspace_root": str(ctx.agent.root),
+        "gateway": {
+            "status": ctx.gateway_status,
+            "pid": ctx.pid,
+            "alive": ctx.alive,
+            "heartbeat_age_seconds": round(ctx.heartbeat_age, 1) if ctx.heartbeat_age else 0,
+            "request_counts": gateway_request_counts(ctx.paths),
+            "workspace": str(ctx.paths.root),
+        },
+        "local_store": ctx.local_stats,
+        "subagents": {
+            "summary": ctx.board.summary,
+            "hot_count": len(ctx.board.hot_list),
+            "recent_count": len(ctx.board.recent),
+            "hot": [item.__dict__ for item in ctx.board.hot_list[: ctx.agent.config.subagent_board_limit]],
+            "recent": [item.__dict__ for item in ctx.board.recent[: ctx.agent.config.subagent_board_limit]],
+        },
+        "active_work": active_work,
+        "timeline": [item.__dict__ for item in ctx.timeline],
+    }
+
+
+@dataclass
+class _StatusPrintContext:
+    """Bundle for _print_status_human to reduce parameter count."""
+    agent: Any
+    paths: Any
+    local_stats: dict
+    board: Any
+    timeline: list
+    gateway_status: str
+    pid: int | None
+    alive: bool
+    heartbeat_age: float
+    active_work_summary: Any
+    suggested_actions: list
+
+
+def _print_status_human(ctx: _StatusPrintContext):
+    """Print status in human-readable format."""
+    agent = ctx.agent
+    print("MY-AGENT STATUS")
+    print(f"agent={agent.config.agent_name}")
+    print(f"workspace={agent.root}")
+    print("")
+    _format_gateway_section(ctx.gateway_status, ctx.pid, ctx.alive, ctx.heartbeat_age, ctx.paths)
+    print("")
+    print("Local Store")
+    print(f"- records={ctx.local_stats['record_count']} events={ctx.local_stats['event_count']} fts5={ctx.local_stats['fts5_enabled']}")
+    print(f"- db={ctx.local_stats['db_path']}")
+    print("")
+    if ctx.active_work_summary:
+        _format_active_work(ctx.active_work_summary)
+    else:
+        print("进行中任务")
+        print("- 暂无")
+    print("")
+    _format_subagents_section(ctx.board, agent.config.subagent_board_limit)
+    print("")
+    _format_timeline(ctx.timeline)
+    print("")
+    print("Suggested Actions")
+    if ctx.suggested_actions:
+        for item in ctx.suggested_actions:
+            print(f"- {item}")
+    else:
+        print("- 暂无，当前没有明显需要立刻处理的事项。")
+
+
 def cmd_status(args) -> int:
     """显示 my-agent 当前全局状态。"""
 
@@ -92,65 +190,38 @@ def cmd_status(args) -> int:
         from ..agent.startup_recovery import detect_active_work
         active_work_summary = detect_active_work(agent)
 
-    payload = {
-        "agent_name": agent.config.agent_name,
-        "workspace_root": str(agent.root),
-        "gateway": {
-            "status": gateway_status,
-            "pid": pid,
-            "alive": alive,
-            "heartbeat_age_seconds": round(heartbeat_age, 1) if heartbeat_at else 0,
-            "request_counts": gateway_request_counts(paths),
-            "workspace": str(paths.root),
-        },
-        "local_store": local_stats,
-        "subagents": {
-            "summary": board.summary,
-            "hot_count": len(board.hot_list),
-            "recent_count": len(board.recent),
-            "hot": [item.__dict__ for item in board.hot_list[: args.limit]],
-            "recent": [item.__dict__ for item in board.recent[: args.limit]],
-        },
-        "active_work": {
-            "gateway_alive": active_work_summary.gateway_alive if active_work_summary else False,
-            "active_task_count": active_work_summary.active_task_count if active_work_summary else 0,
-            "stale_request_count": active_work_summary.stale_request_count if active_work_summary else 0,
-            "recent_tasks": active_work_summary.recent_tasks if active_work_summary else [],
-        } if active_work_summary else None,
-        "timeline": [item.__dict__ for item in timeline],
-    }
-    payload["suggested_actions"] = build_status_suggestions(agent, payload)
+    payload_ctx = _StatusPayloadContext(
+        agent=agent,
+        paths=paths,
+        local_stats=local_stats,
+        board=board,
+        timeline=timeline,
+        pid=pid,
+        alive=alive,
+        gateway_status=gateway_status,
+        heartbeat_age=heartbeat_age,
+        active_work_summary=active_work_summary,
+    )
+    payload = _build_status_payload(payload_ctx)
+    payload["suggestions"] = build_status_suggestions(agent, payload)
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
-    print("MY-AGENT STATUS")
-    print(f"agent={agent.config.agent_name}")
-    print(f"workspace={agent.root}")
-    print("")
-    _format_gateway_section(gateway_status, pid, alive, heartbeat_age, paths)
-    print("")
-    print("Local Store")
-    print(f"- records={local_stats['record_count']} events={local_stats['event_count']} fts5={local_stats['fts5_enabled']}")
-    print(f"- db={local_stats['db_path']}")
-    print("")
-    # 显示进行中任务
-    if active_work_summary:
-        _format_active_work(active_work_summary)
-    else:
-        print("进行中任务")
-        print("- 暂无")
-    print("")
-    _format_subagents_section(board, args.limit)
-    print("")
-    _format_timeline(timeline)
-    print("")
-    print("Suggested Actions")
-    if payload["suggested_actions"]:
-        for item in payload["suggested_actions"]:
-            print(f"- {item}")
-    else:
-        print("- 暂无，当前没有明显需要立刻处理的事项。")
+    print_ctx = _StatusPrintContext(
+        agent=agent,
+        paths=paths,
+        local_stats=local_stats,
+        board=board,
+        timeline=timeline,
+        gateway_status=gateway_status,
+        pid=pid,
+        alive=alive,
+        heartbeat_age=heartbeat_age,
+        active_work_summary=active_work_summary,
+        suggested_actions=payload["suggestions"],
+    )
+    _print_status_human(print_ctx)
     return 0
 
 

@@ -364,7 +364,7 @@ class TestTaskStateTransitions:
                     for t in threads:
                         t.join()
 
-                    assert len(update_calls) == 5
+        assert len(update_calls) == 5
 
 
 class TestTaskSearch:

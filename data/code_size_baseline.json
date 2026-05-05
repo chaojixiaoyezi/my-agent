@@ -1,0 +1,314 @@
+{
+  "generated_at": "2026-05-05T11:04:43.033526+00:00",
+  "total_findings": 44,
+  "findings": [
+    {
+      "identity": "class:agent_py_agent/agent/subagents/manager_capabilities.py:SubAgentCapabilityMixin",
+      "severity": "hard",
+      "kind": "class",
+      "path": "agent_py_agent/agent/subagents/manager_capabilities.py",
+      "name": "SubAgentCapabilityMixin"
+    },
+    {
+      "identity": "class:agent_py_agent/agent/subagents/manager_runner_results.py:SubAgentRunnerResultMixin",
+      "severity": "soft",
+      "kind": "class",
+      "path": "agent_py_agent/agent/subagents/manager_runner_results.py",
+      "name": "SubAgentRunnerResultMixin"
+    },
+    {
+      "identity": "class:agent_py_agent/agent/subagents/services/indexing.py:SubAgentIndexingService",
+      "severity": "soft",
+      "kind": "class",
+      "path": "agent_py_agent/agent/subagents/services/indexing.py",
+      "name": "SubAgentIndexingService"
+    },
+    {
+      "identity": "file:agent_py_agent/agent/subagents/manager_capabilities.py:manager_capabilities.py",
+      "severity": "soft",
+      "kind": "file",
+      "path": "agent_py_agent/agent/subagents/manager_capabilities.py",
+      "name": "manager_capabilities.py"
+    },
+    {
+      "identity": "file:agent_py_agent/agent/subagents/result_processors.py:result_processors.py",
+      "severity": "soft",
+      "kind": "file",
+      "path": "agent_py_agent/agent/subagents/result_processors.py",
+      "name": "result_processors.py"
+    },
+    {
+      "identity": "file:agent_py_agent/cli/local_commands.py:local_commands.py",
+      "severity": "soft",
+      "kind": "file",
+      "path": "agent_py_agent/cli/local_commands.py",
+      "name": "local_commands.py"
+    },
+    {
+      "identity": "file:agent_py_agent/cli/scenario_cases/gateway_cases.py:gateway_cases.py",
+      "severity": "soft",
+      "kind": "file",
+      "path": "agent_py_agent/cli/scenario_cases/gateway_cases.py",
+      "name": "gateway_cases.py"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/subagents/acceptance_helpers/evidence.py:_build_evidence_findings",
+      "severity": "soft",
+      "kind": "function",
+      "path": "agent_py_agent/agent/subagents/acceptance_helpers/evidence.py",
+      "name": "_build_evidence_findings"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/subagents/acceptance_helpers/patches.py:_build_patch_findings",
+      "severity": "soft",
+      "kind": "function",
+      "path": "agent_py_agent/agent/subagents/acceptance_helpers/patches.py",
+      "name": "_build_patch_findings"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/subagents/acceptance_helpers/readiness.py:_build_readiness_findings",
+      "severity": "soft",
+      "kind": "function",
+      "path": "agent_py_agent/agent/subagents/acceptance_helpers/readiness.py",
+      "name": "_build_readiness_findings"
+    },
+    {
+      "identity": "function:agent_py_agent/agent/subagents/manager_runner_results.py:record_runner_result",
+      "severity": "soft",
+      "kind": "function",
+      "path": "agent_py_agent/agent/subagents/manager_runner_results.py",
+      "name": "record_runner_result"
+    },
+    {
+      "identity": "function:agent_py_agent/cli/chat_parts/fallback.py:run_fallback",
+      "severity": "soft",
+      "kind": "function",
+      "path": "agent_py_agent/cli/chat_parts/fallback.py",
+      "name": "run_fallback"
+    },
+    {
+      "identity": "function:agent_py_agent/cli/chat_parts/tui.py:run_tui",
+      "severity": "soft",
+      "kind": "function",
+      "path": "agent_py_agent/cli/chat_parts/tui.py",
+      "name": "run_tui"
+    },
+    {
+      "identity": "nesting:agent_py_agent/cli/memory_commands/memory_query_cmd.py:_execute_route_logic",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "agent_py_agent/cli/memory_commands/memory_query_cmd.py",
+      "name": "_execute_route_logic"
+    },
+    {
+      "identity": "nesting:agent_py_agent/cli/supervisor.py:_wait_for_supervisor_start",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "agent_py_agent/cli/supervisor.py",
+      "name": "_wait_for_supervisor_start"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_cli_reference.py:test_cli_reference_mentions_all_commands_and_long_options",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_cli_reference.py",
+      "name": "test_cli_reference_mentions_all_commands_and_long_options"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_local_doctor_class.py:_build_doctor_report_with_mocks",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_local_doctor_class.py",
+      "name": "_build_doctor_report_with_mocks"
+    },
+    {
+      "identity": "nesting:agent_py_agent/tests/test_task_cli_ux.py:test_concurrent_state_transitions",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "agent_py_agent/tests/test_task_cli_ux.py",
+      "name": "test_concurrent_state_transitions"
+    },
+    {
+      "identity": "nesting:scripts/live_lab/log_analysis_replay.py:_run_stages_sequentially",
+      "severity": "soft",
+      "kind": "nesting",
+      "path": "scripts/live_lab/log_analysis_replay.py",
+      "name": "_run_stages_sequentially"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/gateway_parts/request_worker.py:submit_gateway_ask",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/agent/gateway_parts/request_worker.py",
+      "name": "submit_gateway_ask"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/gateway_parts/supervisor.py:__init__",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/agent/gateway_parts/supervisor.py",
+      "name": "__init__"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/memory_archive/resume_brief.py:_context_block",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/agent/memory_archive/resume_brief.py",
+      "name": "_context_block"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/memory_archive/runtime/event_builders.py:_tool_metadata",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/agent/memory_archive/runtime/event_builders.py",
+      "name": "_tool_metadata"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/memory_archive/tokens.py:append_session_token_usage",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/agent/memory_archive/tokens.py",
+      "name": "append_session_token_usage"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/memory_routing/context.py:build_routed_memory_context",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/agent/memory_routing/context.py",
+      "name": "build_routed_memory_context"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/prompting_parts/builder.py:build",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/agent/prompting_parts/builder.py",
+      "name": "build"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/subagent_workflows/planner.py:plan_workflow_for_goal",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/agent/subagent_workflows/planner.py",
+      "name": "plan_workflow_for_goal"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/subagents/manager_lifecycle.py:record_capability_request",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/agent/subagents/manager_lifecycle.py",
+      "name": "record_capability_request"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/subagents/manager_lifecycle.py:record_evidence",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/agent/subagents/manager_lifecycle.py",
+      "name": "record_evidence"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/subagents/patch/patch_apply_task.py:apply_patch_task",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/agent/subagents/patch/patch_apply_task.py",
+      "name": "apply_patch_task"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/subagents/services/lifecycle.py:record_capability_request",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/agent/subagents/services/lifecycle.py",
+      "name": "record_capability_request"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/subagents/services/lifecycle.py:record_evidence",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/agent/subagents/services/lifecycle.py",
+      "name": "record_evidence"
+    },
+    {
+      "identity": "params:agent_py_agent/agent/subagents/services/patch_apply_executor.py:execute",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/agent/subagents/services/patch_apply_executor.py",
+      "name": "execute"
+    },
+    {
+      "identity": "params:agent_py_agent/cli/chat_parts/fallback.py:_show_status",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/cli/chat_parts/fallback.py",
+      "name": "_show_status"
+    },
+    {
+      "identity": "params:agent_py_agent/cli/chat_parts/gateway_client.py:submit_chat_request",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/cli/chat_parts/gateway_client.py",
+      "name": "submit_chat_request"
+    },
+    {
+      "identity": "params:agent_py_agent/cli/chat_parts/input_loop.py:handle_common_slash_command",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/cli/chat_parts/input_loop.py",
+      "name": "handle_common_slash_command"
+    },
+    {
+      "identity": "params:agent_py_agent/cli/chat_parts/slash_commands.py:handle_common_slash_command",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/cli/chat_parts/slash_commands.py",
+      "name": "handle_common_slash_command"
+    },
+    {
+      "identity": "params:agent_py_agent/cli/chat_parts/tui.py:_tui_enqueue_job",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/cli/chat_parts/tui.py",
+      "name": "_tui_enqueue_job"
+    },
+    {
+      "identity": "params:agent_py_agent/cli/scenario_cases/gateway_multi_worker_case.py:_multi_worker_finish",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/cli/scenario_cases/gateway_multi_worker_case.py",
+      "name": "_multi_worker_finish"
+    },
+    {
+      "identity": "params:agent_py_agent/cli/scenario_cases/gateway_multi_worker_case.py:_multi_worker_verify",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/cli/scenario_cases/gateway_multi_worker_case.py",
+      "name": "_multi_worker_verify"
+    },
+    {
+      "identity": "params:agent_py_agent/cli/scenario_cases/gateway_processing_case.py:_processing_stop_verify_results",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/cli/scenario_cases/gateway_processing_case.py",
+      "name": "_processing_stop_verify_results"
+    },
+    {
+      "identity": "params:agent_py_agent/cli/scenario_cases/subagent_cases.py:_verify_subagent_resume",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/cli/scenario_cases/subagent_cases.py",
+      "name": "_verify_subagent_resume"
+    },
+    {
+      "identity": "params:agent_py_agent/tests/test_local_doctor_class.py:_mock_agent_for_doctor",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/tests/test_local_doctor_class.py",
+      "name": "_mock_agent_for_doctor"
+    },
+    {
+      "identity": "params:agent_py_agent/tests/test_startup_recovery.py:__init__",
+      "severity": "soft",
+      "kind": "params",
+      "path": "agent_py_agent/tests/test_startup_recovery.py",
+      "name": "__init__"
+    }
+  ]
+}

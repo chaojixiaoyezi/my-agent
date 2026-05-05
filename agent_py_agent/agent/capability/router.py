@@ -236,19 +236,19 @@ def score_card(query: str, card: CapabilityCard) -> tuple[float, list[str]]:
         token_score = 0.0
         if token in haystacks["name"]:
             token_score += 6.0
-            reasons.append(f"命中名称“{token}”")
+            reasons.append(f"命中名称'{token}'")
         if token in haystacks["capabilities"]:
             token_score += 5.0
-            reasons.append(f"命中能力“{token}”")
+            reasons.append(f"命中能力'{token}'")
         if token in haystacks["keywords"]:
             token_score += 4.0
-            reasons.append(f"命中关键词“{token}”")
+            reasons.append(f"命中关键词'{token}'")
         if token in haystacks["kind"]:
             token_score += 2.0
-            reasons.append(f"命中类型“{token}”")
+            reasons.append(f"命中类型'{token}'")
         if token in haystacks["description"] or token in haystacks["when_to_use"]:
             token_score += 1.5
-            reasons.append(f"命中描述“{token}”")
+            reasons.append(f"命中描述'{token}'")
         score += token_score
     return score, _dedupe(reasons)
 
@@ -262,10 +262,18 @@ def tokenize(text: str) -> list[str]:
     for token in tokens:
         expanded.append(token)
         if re.fullmatch(r"[\u4e00-\u9fff]+", token):
-            for size in (2, 3, 4):
-                for idx in range(0, max(len(token) - size + 1, 0)):
-                    expanded.append(token[idx : idx + size])
+            expanded.extend(_chinese_ngrams(token))
     return _dedupe(expanded)
+
+
+def _chinese_ngrams(token: str) -> list[str]:
+    """提取中文字符的 n-gram（2-4 gram）。"""
+
+    ngrams: list[str] = []
+    for size in (2, 3, 4):
+        for idx in range(0, max(len(token) - size + 1, 0)):
+            ngrams.append(token[idx : idx + size])
+    return ngrams
 
 
 def _dedupe(items: list[str]) -> list[str]:

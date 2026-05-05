@@ -103,6 +103,47 @@ def add_basic_subcommands(sub: argparse._SubParsersAction) -> None:
     chat.set_defaults(func=cmd_chat)
 
 
+def _add_archive_search_args(parser) -> None:
+    """Add archive-search specific arguments to a parser."""
+    parser.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="搜索哪一层归档")
+    parser.add_argument("--date", help="只搜索某一天，格式 YYYY-MM-DD")
+    parser.add_argument("--since", help="只看此时间之后的记录，支持 ISO 时间或日期")
+    parser.add_argument("--until", help="只看此时间之前的记录，支持 ISO 时间或日期")
+    parser.add_argument("--session-id", help="按 session_id 精确过滤")
+    parser.add_argument("--request-id", help="按 request_id 精确过滤")
+    parser.add_argument("--run-id", help="按 run_id 精确过滤")
+    parser.add_argument("--task-id", help="按 task_id 精确过滤")
+    parser.add_argument("--speaker", help="按 speaker 精确过滤，如 user/assistant/tool")
+    parser.add_argument("--target", help="按 target 精确过滤")
+    parser.add_argument("--action", help="按 action 精确过滤，如 message/response/tool_call")
+    parser.add_argument("--status", help="按 status 精确过滤，如 ok/failed")
+    parser.add_argument("--tool-name", help="按工具名精确过滤")
+    parser.add_argument("--source", help="按来源精确过滤，如 run/gateway/subagent")
+    parser.add_argument("--limit", type=int, default=20, help="最多显示多少条记录")
+    parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+
+
+def _add_archive_resume_args(parser) -> None:
+    """Add memory-resume specific arguments to a parser."""
+    parser.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="从哪一层归档找线索")
+    parser.add_argument("--date", help="只看某一天，格式 YYYY-MM-DD")
+    parser.add_argument("--since", help="只看此时间之后的归档线索")
+    parser.add_argument("--until", help="只看此时间之前的归档线索")
+    parser.add_argument("--session-id", help="按 session_id 精确过滤")
+    parser.add_argument("--request-id", help="按 request_id 精确过滤")
+    parser.add_argument("--run-id", help="按 run_id 精确过滤")
+    parser.add_argument("--task-id", help="按 task_id 精确过滤")
+    parser.add_argument("--speaker", help="按 speaker 精确过滤")
+    parser.add_argument("--target", help="按 target 精确过滤")
+    parser.add_argument("--action", help="按 action 精确过滤")
+    parser.add_argument("--status", help="按 status 精确过滤")
+    parser.add_argument("--tool-name", help="按工具名精确过滤")
+    parser.add_argument("--source", help="按来源精确过滤")
+    parser.add_argument("--limit", type=int, default=20, help="最多显示多少条线索")
+    parser.add_argument("--context-only", action="store_true", help="只输出可交接/注入的恢复上下文块")
+    parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+
+
 def add_memory_subcommands(sub: argparse._SubParsersAction) -> None:
     """LLM: register memory-route, memory-doctor and memory-archive subcommands.
 
@@ -135,43 +176,12 @@ def add_memory_subcommands(sub: argparse._SubParsersAction) -> None:
 
     memory_archive_search = sub.add_parser("memory-archive-search", help="按字段搜索 memory raw/hook 归档")
     memory_archive_search.add_argument("query", nargs="?", default="", help="搜索关键词；可配合字段过滤")
-    memory_archive_search.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="搜索哪一层归档")
-    memory_archive_search.add_argument("--date", help="只搜索某一天，格式 YYYY-MM-DD")
-    memory_archive_search.add_argument("--since", help="只看此时间之后的记录，支持 ISO 时间或日期")
-    memory_archive_search.add_argument("--until", help="只看此时间之前的记录，支持 ISO 时间或日期")
-    memory_archive_search.add_argument("--session-id", help="按 session_id 精确过滤")
-    memory_archive_search.add_argument("--request-id", help="按 request_id 精确过滤")
-    memory_archive_search.add_argument("--run-id", help="按 run_id 精确过滤")
-    memory_archive_search.add_argument("--task-id", help="按 task_id 精确过滤")
-    memory_archive_search.add_argument("--speaker", help="按 speaker 精确过滤，如 user/assistant/tool")
-    memory_archive_search.add_argument("--target", help="按 target 精确过滤")
-    memory_archive_search.add_argument("--action", help="按 action 精确过滤，如 message/response/tool_call")
-    memory_archive_search.add_argument("--status", help="按 status 精确过滤，如 ok/failed")
-    memory_archive_search.add_argument("--tool-name", help="按工具名精确过滤")
-    memory_archive_search.add_argument("--source", help="按来源精确过滤，如 run/gateway/subagent")
-    memory_archive_search.add_argument("--limit", type=int, default=20, help="最多显示多少条记录")
-    memory_archive_search.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    _add_archive_search_args(memory_archive_search)
     memory_archive_search.set_defaults(func=cmd_memory_archive_search)
 
     memory_resume = sub.add_parser("memory-resume", help="从归档和事实源生成恢复线索")
     memory_resume.add_argument("query", nargs="?", default="", help="恢复关键词；也可只传 request/run/session 过滤")
-    memory_resume.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="从哪一层归档找线索")
-    memory_resume.add_argument("--date", help="只看某一天，格式 YYYY-MM-DD")
-    memory_resume.add_argument("--since", help="只看此时间之后的归档线索")
-    memory_resume.add_argument("--until", help="只看此时间之前的归档线索")
-    memory_resume.add_argument("--session-id", help="按 session_id 精确过滤")
-    memory_resume.add_argument("--request-id", help="按 request_id 精确过滤")
-    memory_resume.add_argument("--run-id", help="按 run_id 精确过滤")
-    memory_resume.add_argument("--task-id", help="按 task_id 精确过滤")
-    memory_resume.add_argument("--speaker", help="按 speaker 精确过滤")
-    memory_resume.add_argument("--target", help="按 target 精确过滤")
-    memory_resume.add_argument("--action", help="按 action 精确过滤")
-    memory_resume.add_argument("--status", help="按 status 精确过滤")
-    memory_resume.add_argument("--tool-name", help="按工具名精确过滤")
-    memory_resume.add_argument("--source", help="按来源精确过滤")
-    memory_resume.add_argument("--limit", type=int, default=20, help="最多显示多少条线索")
-    memory_resume.add_argument("--context-only", action="store_true", help="只输出可交接/注入的恢复上下文块")
-    memory_resume.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    _add_archive_resume_args(memory_resume)
     memory_resume.set_defaults(func=cmd_memory_resume)
 
 

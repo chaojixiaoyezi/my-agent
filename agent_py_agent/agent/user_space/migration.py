@@ -31,53 +31,41 @@ def migrate_to_user_space(base_dir: Path | str, user_id: str = "admin") -> dict[
         base_dir = Path(base_dir)
     base_dir = base_dir.resolve()
 
-    user_data_root = base_dir / "data" / "users"
-    user_root = user_data_root / user_id
+    user_root = base_dir / "data" / "users" / user_id
 
-    result = {
+    result: dict[str, Any] = {
         "moved_files": [],
         "skipped_files": [],
         "errors": [],
     }
 
-    # 要迁移的文件/目录映射
     migrations = [
-        # (源路径, 目标路径, 是否目录)
-        ("data/memory.jsonl", user_root / "memory.jsonl", False),
-        ("data/subagents", user_root / "subagents", True),
-        ("data/gateway", user_root / "gateway", True),
-        ("data/local_store", user_root / "local_store", True),
+        ("data/memory.jsonl", user_root / "memory.jsonl"),
+        ("data/subagents", user_root / "subagents"),
+        ("data/gateway", user_root / "gateway"),
+        ("data/local_store", user_root / "local_store"),
     ]
 
-    for source_name, dest_path, is_dir in migrations:
-        source_path = base_dir / source_name
-        try:
-            if not source_path.exists():
-                result["skipped_files"].append(str(source_path))
-                continue
+    for source_name, dest_path in migrations:
+        _migrate_single(base_dir / source_name, dest_path, result)
 
-            # 如果目标已存在，只跳过已存在的
-            if dest_path.exists():
-                result["skipped_files"].append(str(source_path))
-                continue
-
-            # 创建目标父目录
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-
-            if is_dir:
-                shutil.move(str(source_path), str(dest_path))
-            else:
-                shutil.move(str(source_path), str(dest_path))
-
-            result["moved_files"].append(str(source_path))
-
-        except Exception as e:
-            result["errors"].append(f"{source_path}: {e}")
-
-    # 在原位置创建提示文件
     create_migration_marker(base_dir, user_id)
-
     return result
+
+
+def _migrate_single(source_path: Path, dest_path: Path, result: dict[str, Any]) -> None:
+    """迁移单个文件或目录。"""
+
+    if not source_path.exists() or dest_path.exists():
+        result["skipped_files"].append(str(source_path))
+        return
+
+    try:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source_path), str(dest_path))
+        result["moved_files"].append(str(source_path))
+    except Exception as e:
+        result["errors"].append(f"{source_path}: {e}")
 
 
 def create_migration_marker(base_dir: Path, user_id: str) -> None:

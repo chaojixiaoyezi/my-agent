@@ -1,0 +1,13 @@
+{
+  "attempts": 2,
+  "id": "gwreq-timeout",
+  "kind": "ask",
+  "last_error": "gateway processing timeout after 1s",
+  "lease_heartbeat_at": 1777979402.2614558,
+  "lease_owner": "test-worker",
+  "lease_started_at": 1777979398.5029042,
+  "prompt": "request gwreq-timeout",
+  "requeued_at": 1777979394.468895,
+  "status": "processing",
+  "updated_at": 1777979402.2614558
+}
