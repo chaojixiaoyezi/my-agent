@@ -99,25 +99,48 @@ def build_entity_graph(case_or_findings: CaseRecord | Mapping[str, Any] | Sequen
         refs = finding.evidence_refs
         when_start = finding.window[0] if finding.window else ""
         when_end = finding.window[1] if len(finding.window) > 1 else when_start
-        nodes_by_kind: dict[str, list[str]] = {}
-        for kind, values in finding.entities.items():
-            for value in values:
-                node_id = graph.add_node(kind, value, refs)
-                if node_id:
-                    nodes_by_kind.setdefault(kind, []).append(node_id)
-
-        for attacker in nodes_by_kind.get("attacker_ip", []):
-            for victim in nodes_by_kind.get("victim_ip", []) or nodes_by_kind.get("dst_ip", []) or nodes_by_kind.get("host", []):
-                graph.add_edge(attacker, victim, "targets", refs, first_seen=when_start, last_seen=when_end)
-        for user in nodes_by_kind.get("user", []):
-            for host in nodes_by_kind.get("host", []) or nodes_by_kind.get("victim_ip", []):
-                graph.add_edge(user, host, "authenticates_to", refs, first_seen=when_start, last_seen=when_end)
-        for victim in nodes_by_kind.get("victim_ip", []) or nodes_by_kind.get("host", []):
-            for process in nodes_by_kind.get("process", []):
-                graph.add_edge(victim, process, "executes", refs, first_seen=when_start, last_seen=when_end)
-            for dst in nodes_by_kind.get("dst_ip", []) + nodes_by_kind.get("domain", []):
-                graph.add_edge(victim, dst, "connects_to", refs, first_seen=when_start, last_seen=when_end)
+        nodes_by_kind = _add_finding_nodes(graph, finding, refs)
+        _add_finding_edges(graph, nodes_by_kind, refs, first_seen=when_start, last_seen=when_end)
     return graph
+
+
+def _add_finding_nodes(graph: EntityGraph, finding: Finding, refs: Sequence[Any]) -> dict[str, list[str]]:
+    nodes_by_kind: dict[str, list[str]] = {}
+    for kind, values in finding.entities.items():
+        for value in values:
+            node_id = graph.add_node(kind, value, refs)
+            if node_id:
+                nodes_by_kind.setdefault(kind, []).append(node_id)
+    return nodes_by_kind
+
+
+def _add_finding_edges(
+    graph: EntityGraph,
+    nodes_by_kind: dict[str, list[str]],
+    refs: Sequence[Any],
+    *,
+    first_seen: str,
+    last_seen: str,
+) -> None:
+    window = {"first_seen": first_seen, "last_seen": last_seen}
+    _add_edges(graph, nodes_by_kind.get("attacker_ip", []), _first_present(nodes_by_kind, "victim_ip", "dst_ip", "host"), "targets", refs, **window)
+    _add_edges(graph, nodes_by_kind.get("user", []), _first_present(nodes_by_kind, "host", "victim_ip"), "authenticates_to", refs, **window)
+    victims = _first_present(nodes_by_kind, "victim_ip", "host")
+    _add_edges(graph, victims, nodes_by_kind.get("process", []), "executes", refs, **window)
+    _add_edges(graph, victims, nodes_by_kind.get("dst_ip", []) + nodes_by_kind.get("domain", []), "connects_to", refs, **window)
+
+
+def _add_edges(graph: EntityGraph, sources: Sequence[str], targets: Sequence[str], relationship: str, refs: Sequence[Any], **window: str) -> None:
+    for source in sources:
+        for target in targets:
+            graph.add_edge(source, target, relationship, refs, first_seen=window.get("first_seen", ""), last_seen=window.get("last_seen", ""))
+
+
+def _first_present(values: dict[str, list[str]], *keys: str) -> list[str]:
+    for key in keys:
+        if values.get(key):
+            return values[key]
+    return []
 
 
 def _extract_findings(value: CaseRecord | Mapping[str, Any] | Sequence[Finding | Mapping[str, Any]]) -> list[Finding]:

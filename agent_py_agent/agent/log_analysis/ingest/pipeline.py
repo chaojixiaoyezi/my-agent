@@ -105,14 +105,14 @@ class IngestPipeline:
     def _iter_parsed_records(
         self,
         source_path: Path,
-        *,
-        file_format: str,
-        parser: LogParser,
-        batch_id: str,
-        source_id: str,
-        source_product: str | None,
-        dead_letters: DeadLetterWriter,
+        **kwargs: Any,
     ):
+        file_format = kwargs["file_format"]
+        parser = kwargs["parser"]
+        batch_id = kwargs["batch_id"]
+        source_id = kwargs["source_id"]
+        source_product = kwargs.get("source_product")
+        dead_letters = kwargs["dead_letters"]
         if file_format in {"jsonl", "log"}:
             yield from self._iter_jsonl_records(
                 source_path,
@@ -237,26 +237,19 @@ class IngestPipeline:
 
 def ingest_file(
     path: str | Path,
-    *,
-    root: str | Path | None = None,
-    source_id: str | None = None,
-    source_product: str | None = None,
-    parser_id: str = "security_alert_v1",
-    file_format: str | None = None,
-    payload_max_chars: int = DEFAULT_PAYLOAD_MAX_CHARS,
-    store: Any | None = None,
+    **kwargs: Any,
 ) -> IngestResult:
     pipeline = IngestPipeline(
-        root or default_log_analysis_root(),
-        store=store,
-        payload_max_chars=payload_max_chars,
+        kwargs.get("root") or default_log_analysis_root(),
+        store=kwargs.get("store"),
+        payload_max_chars=kwargs.get("payload_max_chars", DEFAULT_PAYLOAD_MAX_CHARS),
     )
     return pipeline.ingest_file(
         path,
-        source_id=source_id,
-        source_product=source_product,
-        parser_id=parser_id,
-        file_format=file_format,
+        source_id=kwargs.get("source_id"),
+        source_product=kwargs.get("source_product"),
+        parser_id=kwargs.get("parser_id", "security_alert_v1"),
+        file_format=kwargs.get("file_format"),
     )
 
 

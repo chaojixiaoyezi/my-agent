@@ -4,185 +4,36 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .field_aliases import (
+    CHINESE_SECURITY_ALERT_FIELD_MAP,
+    FIELD_ALIASES,
+    SECURITY_ALERT_V1_KEYS,
+    header_token,
+    strip_key,
+)
+
 DEFAULT_PAYLOAD_MAX_CHARS = 512
 
-SECURITY_ALERT_V1_BASE_KEYS: tuple[str, ...] = (
-    "alert_id",
-    "event_time",
-    "source_id",
-    "source_product",
-)
 
-SECURITY_ALERT_V1_ALERT_KEYS: tuple[str, ...] = (
-    "alert_type",
-    "threat_name",
-    "ioc_or_rule_id",
-    "uri",
-    "xff_proxy",
-    "payload",
-    "domain",
-    "referer",
-    "dst_port",
-    "protocol",
-    "victim_asset_group",
-    "attacker_asset_group",
-    "victim_ip",
-    "attacker_ip",
-    "src_ip",
-    "dst_ip",
-    "detection_location",
-    "detection_field",
-    "match_operator",
-    "matched_value",
-    "device_serial_number",
-    "alert_rule",
-    "api",
-    "api_threat_type",
-    "owasp_type",
-)
-
-SECURITY_ALERT_V1_EXTRA_KEYS: tuple[str, ...] = (
-    "user",
-    "host",
-    "process_name",
-    "process_cmdline",
-    "file_hash",
-    "login_result",
-    "geo",
-)
-
-SECURITY_ALERT_V1_KEYS: tuple[str, ...] = (
-    *SECURITY_ALERT_V1_BASE_KEYS,
-    *SECURITY_ALERT_V1_ALERT_KEYS,
-    *SECURITY_ALERT_V1_EXTRA_KEYS,
-)
-
-CHINESE_SECURITY_ALERT_FIELD_MAP: dict[str, str] = {
-    "告警类型": "alert_type",
-    "威胁名称": "threat_name",
-    "IOC/规则ID": "ioc_or_rule_id",
-    "URI": "uri",
-    "XFF代理": "xff_proxy",
-    "Payload": "payload",
-    "域名": "domain",
-    "referer": "referer",
-    "目的端口": "dst_port",
-    "协议": "protocol",
-    "受害资产组": "victim_asset_group",
-    "攻击资产组": "attacker_asset_group",
-    "受害IP": "victim_ip",
-    "攻击IP": "attacker_ip",
-    "源IP": "src_ip",
-    "目的IP": "dst_ip",
-    "检测位置": "detection_location",
-    "检测字段": "detection_field",
-    "匹配": "match_operator",
-    "值": "matched_value",
-    "设备序列号": "device_serial_number",
-    "告警规则": "alert_rule",
-    "API": "api",
-    "API威胁类型": "api_threat_type",
-    "OWASP类型": "owasp_type",
-}
-
-EXTRA_FIELD_ALIASES: dict[str, str] = {
-    "告警ID": "alert_id",
-    "告警编号": "alert_id",
-    "事件ID": "alert_id",
-    "事件时间": "event_time",
-    "告警时间": "event_time",
-    "发生时间": "event_time",
-    "时间": "event_time",
-    "数据源": "source_id",
-    "来源": "source_id",
-    "来源ID": "source_id",
-    "源ID": "source_id",
-    "设备ID": "source_id",
-    "产品": "source_product",
-    "源产品": "source_product",
-    "设备类型": "source_product",
-    "安全产品": "source_product",
-    "用户": "user",
-    "账号": "user",
-    "用户名": "user",
-    "主机": "host",
-    "主机名": "host",
-    "受害主机": "host",
-    "进程": "process_name",
-    "进程名": "process_name",
-    "命令行": "process_cmdline",
-    "进程命令行": "process_cmdline",
-    "文件Hash": "file_hash",
-    "文件哈希": "file_hash",
-    "登录结果": "login_result",
-    "结果": "login_result",
-    "地理位置": "geo",
-    "国家": "geo",
-}
-
-ENGLISH_ALIASES: dict[str, str] = {
-    "timestamp": "event_time",
-    "@timestamp": "event_time",
-    "time": "event_time",
-    "source": "source_id",
-    "sourceid": "source_id",
-    "product": "source_product",
-    "vendor_product": "source_product",
-    "rule_id": "ioc_or_rule_id",
-    "signature_id": "ioc_or_rule_id",
-    "signature": "ioc_or_rule_id",
-    "xff": "xff_proxy",
-    "x_forwarded_for": "xff_proxy",
-    "x-forwarded-for": "xff_proxy",
-    "referrer": "referer",
-    "dest_port": "dst_port",
-    "destination_port": "dst_port",
-    "dest_ip": "dst_ip",
-    "destination_ip": "dst_ip",
-    "source_ip": "src_ip",
-    "client_ip": "src_ip",
-    "rule_name": "alert_rule",
-    "process": "process_name",
-    "cmdline": "process_cmdline",
-    "command_line": "process_cmdline",
-    "hash": "file_hash",
-    "result": "login_result",
-    "country": "geo",
-}
-
-
-def _build_field_aliases() -> dict[str, str]:
-    aliases: dict[str, str] = {}
-    for stable_key in SECURITY_ALERT_V1_KEYS:
-        aliases[stable_key] = stable_key
-        aliases[_header_token(stable_key)] = stable_key
-    for raw_key, stable_key in CHINESE_SECURITY_ALERT_FIELD_MAP.items():
-        aliases[raw_key] = stable_key
-        aliases[_header_token(raw_key)] = stable_key
-    for raw_key, stable_key in EXTRA_FIELD_ALIASES.items():
-        aliases[raw_key] = stable_key
-        aliases[_header_token(raw_key)] = stable_key
-    for raw_key, stable_key in ENGLISH_ALIASES.items():
-        aliases[raw_key] = stable_key
-        aliases[_header_token(raw_key)] = stable_key
-    return aliases
-
+@dataclass(frozen=True)
+class _NormalizeOptions:
+    raw_ref: str
+    source_id: str | None
+    source_product: str | None
+    line_no: int | None
+    payload_max_chars: int
+    ingest_time: str | None
 
 def normalize_security_alert_v1(
-    record: Mapping[str, Any],
-    *,
-    raw_ref: str,
-    source_id: str | None = None,
-    source_product: str | None = None,
-    line_no: int | None = None,
-    payload_max_chars: int = DEFAULT_PAYLOAD_MAX_CHARS,
-    ingest_time: str | None = None,
+    record: Mapping[str, Any], **kwargs: Any,
 ) -> dict[str, Any]:
     """Normalize one SecurityAlertV1 mapping while preserving raw fields."""
 
+    options = _normalize_options(kwargs)
     raw_fields = _clean_raw_fields(record)
     mapped: dict[str, Any] = {}
     mapping_source: dict[str, str] = {}
@@ -199,14 +50,14 @@ def normalize_security_alert_v1(
         else:
             attributes[_to_snake(raw_key)] = value
 
-    now = ingest_time or utc_now()
+    now = options.ingest_time or utc_now()
     event: dict[str, Any] = dict.fromkeys(SECURITY_ALERT_V1_KEYS)
     event.update(mapped)
 
-    event["source_id"] = clean_value(event.get("source_id")) or source_id or "unknown"
+    event["source_id"] = clean_value(event.get("source_id")) or options.source_id or "unknown"
     event["source_product"] = (
         clean_value(event.get("source_product"))
-        or source_product
+        or options.source_product
         or infer_source_product(event, raw_fields)
     )
     event["event_time"] = normalize_timestamp(clean_value(event.get("event_time")) or now)
@@ -216,13 +67,13 @@ def normalize_security_alert_v1(
     event["event_type"] = "ids_alert"
     event["event_class"] = "alert"
     event["event_action"] = "detected"
-    event["raw_ref"] = raw_ref
-    event["raw_line_no"] = line_no
+    event["raw_ref"] = options.raw_ref
+    event["raw_line_no"] = options.line_no
     event["parser_id"] = "security_alert_v1"
 
     _copy_security_ip_semantics(event)
     _coerce_port_fields(event)
-    _apply_payload_policy(event, payload_max_chars=payload_max_chars)
+    _apply_payload_policy(event, payload_max_chars=options.payload_max_chars)
 
     event["raw_fields"] = raw_fields
     event["attributes"] = attributes
@@ -235,9 +86,20 @@ def normalize_security_alert_v1(
     return event
 
 
+def _normalize_options(kwargs: dict[str, Any]) -> _NormalizeOptions:
+    return _NormalizeOptions(
+        raw_ref=str(kwargs.pop("raw_ref")),
+        source_id=kwargs.pop("source_id", None),
+        source_product=kwargs.pop("source_product", None),
+        line_no=kwargs.pop("line_no", None),
+        payload_max_chars=int(kwargs.pop("payload_max_chars", DEFAULT_PAYLOAD_MAX_CHARS)),
+        ingest_time=kwargs.pop("ingest_time", None),
+    )
+
+
 def stable_field_key(raw_key: str) -> str:
     key = _strip_key(raw_key)
-    return FIELD_ALIASES.get(key) or FIELD_ALIASES.get(_header_token(key)) or _to_snake(key)
+    return FIELD_ALIASES.get(key) or FIELD_ALIASES.get(header_token(key)) or _to_snake(key)
 
 
 def mapping_source_for(raw_key: str, stable_key: str) -> str:
@@ -394,12 +256,11 @@ def _clean_raw_fields(record: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _strip_key(key: str) -> str:
-    return key.strip().lstrip("\ufeff")
+    return strip_key(key)
 
 
 def _header_token(key: str) -> str:
-    stripped = _strip_key(key).lower()
-    return re.sub(r"[\s_\-./]+", "", stripped)
+    return header_token(key)
 
 
 def _to_snake(key: str) -> str:
@@ -428,6 +289,3 @@ def _try_parse_datetime(value: str) -> datetime | None:
         except ValueError:
             continue
     return None
-
-
-FIELD_ALIASES = _build_field_aliases()

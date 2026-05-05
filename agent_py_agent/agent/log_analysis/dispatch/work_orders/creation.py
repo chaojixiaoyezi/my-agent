@@ -233,49 +233,75 @@ def create_subagent_tasks_from_work_order_plan(
         return result
 
     for order in plan.work_orders:
-        if not order.ready:
-            issue = f"{order.role} work order is not ready; skipped"
-            if issue not in result.issues:
-                result.issues.append(issue)
-            continue
-        quality_contract = _work_order_quality_contract(order)
-        context_pack = _work_order_context_pack(order)
-        task = subagents.create_run(
-            goal=order.goal,
-            thought=(
-                f"Manual LOG {order.role} work order for {order.case_id}; "
-                "stay evidence-bound and leave final acceptance to the parent."
-            ),
-            plan=_work_order_plan_steps(order),
-            agent_name=f"log-{order.role}",
-            role=order.role,
+        _create_ready_order(
+            subagents,
+            result,
+            order,
             parent_id=parent_id,
             root_id=root_id,
-            allowed_tools=list(order.allowed_tools),
-            owner=order.role,
-            supervisor=parent_id or "parent",
             final_owner=final_owner,
-            acceptance_checks=list(order.acceptance_checks),
-            quality_contract=quality_contract,
-            context_manifest={
-                "task_pack_refs": [
-                    f"log-analysis-case:{order.case_id}",
-                    *[f"evidence:{ref}" for ref in order.evidence_refs],
-                ],
-                "role_pack": f"log-analysis-{order.role}",
-                "quality_contract_ref": "context_packs[0].quality_contract",
-                "omitted_context": ["raw_events", "transcript", "runner_result"],
-            },
-            context_packs=[context_pack],
-        )
-        result.task_ids.append(str(task.id))
-        result.created.append(
-            {
-                "task_id": str(task.id),
-                "case_id": order.case_id,
-                "role": order.role,
-                "status": getattr(task, "status", ""),
-                "verification_status": getattr(task, "verification_status", ""),
-            }
         )
     return result
+
+
+def _create_ready_order(
+    subagents: SubAgentTaskCreator,
+    result: SubagentWorkOrderCreationResult,
+    order: SubagentWorkOrder,
+    **kwargs: str,
+) -> None:
+    if not order.ready:
+        _note_skipped_order(result, order)
+        return
+    task = subagents.create_run(**_create_run_payload(order, **kwargs))
+    result.task_ids.append(str(task.id))
+    result.created.append(_created_task_summary(task, order))
+
+
+def _note_skipped_order(result: SubagentWorkOrderCreationResult, order: SubagentWorkOrder) -> None:
+    issue = f"{order.role} work order is not ready; skipped"
+    if issue not in result.issues:
+        result.issues.append(issue)
+
+
+def _create_run_payload(order: SubagentWorkOrder, **kwargs: str) -> dict[str, Any]:
+    parent_id = kwargs.get("parent_id", "")
+    return {
+        "goal": order.goal,
+        "thought": f"Manual LOG {order.role} work order for {order.case_id}; stay evidence-bound and leave final acceptance to the parent.",
+        "plan": _work_order_plan_steps(order),
+        "agent_name": f"log-{order.role}",
+        "role": order.role,
+        "parent_id": parent_id,
+        "root_id": kwargs.get("root_id", ""),
+        "allowed_tools": list(order.allowed_tools),
+        "owner": order.role,
+        "supervisor": parent_id or "parent",
+        "final_owner": kwargs.get("final_owner", "parent"),
+        "acceptance_checks": list(order.acceptance_checks),
+        "quality_contract": _work_order_quality_contract(order),
+        "context_manifest": _context_manifest(order),
+        "context_packs": [_work_order_context_pack(order)],
+    }
+
+
+def _context_manifest(order: SubagentWorkOrder) -> dict[str, Any]:
+    return {
+        "task_pack_refs": [
+            f"log-analysis-case:{order.case_id}",
+            *[f"evidence:{ref}" for ref in order.evidence_refs],
+        ],
+        "role_pack": f"log-analysis-{order.role}",
+        "quality_contract_ref": "context_packs[0].quality_contract",
+        "omitted_context": ["raw_events", "transcript", "runner_result"],
+    }
+
+
+def _created_task_summary(task: Any, order: SubagentWorkOrder) -> dict[str, str]:
+    return {
+        "task_id": str(task.id),
+        "case_id": order.case_id,
+        "role": order.role,
+        "status": str(getattr(task, "status", "")),
+        "verification_status": str(getattr(task, "verification_status", "")),
+    }

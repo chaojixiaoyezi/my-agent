@@ -250,6 +250,18 @@ class CreateWorkOrdersParams:
     ready: bool
 
 
+@dataclass(frozen=True)
+class _PlanInputs:
+    summary: dict[str, Any]
+    case_id: str
+    route: dict[str, Any]
+    refs: list[str]
+    checks: list[str]
+    issues: list[str]
+    risks: list[str]
+    ready: bool
+
+
 def _create_work_orders(*, params: CreateWorkOrdersParams) -> tuple[SubagentWorkOrder, SubagentWorkOrder]:
     """Create analyst and reviewer work orders from common data."""
     case_id = params.case_id
@@ -330,44 +342,58 @@ def plan_case_subagent_work_orders(
     ready=False 时必须先处理 issues/risks，尤其是缺少 evidence_refs 的情况。
     """
 
-    summary_obj = summarize_case(case)
-    summary = summary_obj.to_dict()
-    case_id = _case_id(case, summary)
-    route = dict(route_summary or summary.get("route") or {})
-    refs = _merge_unique(evidence_refs, _get(case, "evidence_refs") or _get(case, "evidence"), summary.get("evidence"))
-    checks = _acceptance_checks(quality_contract)
-
-    issues: list[str] = []
-    risks: list[str] = []
-    ready = bool(refs)
-    if not ready:
-        issues.append(NO_EVIDENCE_ISSUE)
-        risks.append("dispatching without evidence_refs would invite unsupported analysis")
-
-    common_context = _build_work_order_context(summary, refs, route, quality_contract)
+    inputs = _plan_inputs(case, evidence_refs, route_summary, quality_contract)
+    common_context = _build_work_order_context(inputs.summary, inputs.refs, inputs.route, quality_contract)
     analyst, reviewer = _create_work_orders(
         params=CreateWorkOrdersParams(
-            case_id=case_id,
+            case_id=inputs.case_id,
             common_context=common_context,
-            refs=refs,
-            checks=checks,
-            issues=issues,
-            risks=risks,
+            refs=inputs.refs,
+            checks=inputs.checks,
+            issues=inputs.issues,
+            risks=inputs.risks,
             mode=mode,
             dry_run=dry_run,
-            ready=ready,
+            ready=inputs.ready,
         )
     )
 
     return LogAnalysisWorkOrderPlan(
-        case_id=case_id,
-        ready=ready,
+        case_id=inputs.case_id,
+        ready=inputs.ready,
         dry_run=dry_run,
         mode=mode,
         work_orders=[analyst, reviewer],
+        issues=inputs.issues,
+        risks=inputs.risks,
+    )
+
+
+def _plan_inputs(
+    case: Any,
+    evidence_refs: Any,
+    route_summary: Mapping[str, Any] | None,
+    quality_contract: Mapping[str, Any] | None,
+) -> _PlanInputs:
+    summary = summarize_case(case).to_dict()
+    refs = _merge_unique(evidence_refs, _get(case, "evidence_refs") or _get(case, "evidence"), summary.get("evidence"))
+    issues, risks = _readiness_notes(refs)
+    return _PlanInputs(
+        summary=summary,
+        case_id=_case_id(case, summary),
+        route=dict(route_summary or summary.get("route") or {}),
+        refs=refs,
+        checks=_acceptance_checks(quality_contract),
         issues=issues,
         risks=risks,
+        ready=bool(refs),
     )
+
+
+def _readiness_notes(refs: list[str]) -> tuple[list[str], list[str]]:
+    if refs:
+        return [], []
+    return [NO_EVIDENCE_ISSUE], ["dispatching without evidence_refs would invite unsupported analysis"]
 
 
 build_log_analysis_work_orders = plan_case_subagent_work_orders

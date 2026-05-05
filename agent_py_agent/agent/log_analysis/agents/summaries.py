@@ -169,30 +169,42 @@ def _summarize_evidence(evidence: Any) -> list[dict[str, Any] | str]:
     for item in _items(evidence)[:12]:
         mapping = _to_mapping(item)
         if mapping:
-            compact: dict[str, Any] = {}
-            for field_name in EVIDENCE_REF_FIELDS:
-                value = mapping.get(field_name)
-                if value in (None, "", [], {}):
-                    continue
-                compact[field_name] = _compact_text(value)
-            metadata = mapping.get("metadata")
-            if isinstance(metadata, Mapping):
-                evidence_path = metadata.get("evidence_path") or metadata.get("path")
-                if evidence_path and "path" not in compact:
-                    compact["path"] = _compact_text(evidence_path)
-                sha256 = metadata.get("sha256") or metadata.get("content_hash")
-                if sha256 and "sha256" not in compact and "content_hash" not in compact:
-                    compact["sha256"] = _compact_text(sha256)
-            ref_key = json.dumps(compact, ensure_ascii=False, sort_keys=True)
-            if compact and ref_key not in seen:
-                output.append(compact)
-                seen.add(ref_key)
+            _append_compact_evidence(output, seen, mapping)
         else:
             refs = normalize_evidence_refs(item, limit=1)
             if refs and refs[0] not in seen:
                 output.append(refs[0])
                 seen.add(refs[0])
     return output
+
+
+def _append_compact_evidence(output: list[dict[str, Any] | str], seen: set[str], mapping: Mapping[str, Any]) -> None:
+    compact = _compact_evidence_mapping(mapping)
+    ref_key = json.dumps(compact, ensure_ascii=False, sort_keys=True)
+    if compact and ref_key not in seen:
+        output.append(compact)
+        seen.add(ref_key)
+
+
+def _compact_evidence_mapping(mapping: Mapping[str, Any]) -> dict[str, Any]:
+    compact = {
+        field_name: _compact_text(mapping.get(field_name))
+        for field_name in EVIDENCE_REF_FIELDS
+        if mapping.get(field_name) not in (None, "", [], {})
+    }
+    metadata = mapping.get("metadata")
+    if isinstance(metadata, Mapping):
+        _merge_evidence_metadata(compact, metadata)
+    return compact
+
+
+def _merge_evidence_metadata(compact: dict[str, Any], metadata: Mapping[str, Any]) -> None:
+    evidence_path = metadata.get("evidence_path") or metadata.get("path")
+    if evidence_path and "path" not in compact:
+        compact["path"] = _compact_text(evidence_path)
+    sha256 = metadata.get("sha256") or metadata.get("content_hash")
+    if sha256 and "sha256" not in compact and "content_hash" not in compact:
+        compact["sha256"] = _compact_text(sha256)
 
 
 def _summarize_route(route: Any) -> dict[str, Any]:

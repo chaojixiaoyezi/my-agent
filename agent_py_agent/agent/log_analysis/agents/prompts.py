@@ -78,11 +78,7 @@ def security_prompt_fragment(
     is_logs_command: bool = False,
     is_security_case: bool = False,
 ) -> str:
-    prompt_config = (
-        config
-        if isinstance(config, SecurityPromptConfig)
-        else SecurityPromptConfig.from_mapping(config)
-    )
+    prompt_config = _prompt_config(config)
     if not should_inject_security_prompt(
         prompt_config,
         role=role,
@@ -92,57 +88,13 @@ def security_prompt_fragment(
     ):
         return ""
 
-    mode = prompt_config.security_prompt_mode
-    lines = [
-        "# Security Log Analysis Context",
-        "- Work from case summaries, route summaries, and evidence_refs only.",
-        "- Do not paste raw events, long query results, or long transcripts into the parent session.",
-        "- Treat evidence refs and evidence files as the auditable source of truth.",
-    ]
-
-    if mode in {"minimal", "analyst", "incident"}:
-        lines.extend(
-            [
-                "- Every conclusion must cite evidence_refs.",
-                "- Separate facts, inferences, gaps, and next actions.",
-                "- Use only authorized bounded tools such as security_query, security_hunt_ip, and security_trace_case.",
-                "- Security tools return summary, preview_rows, and evidence_refs; do not request or paste full raw rows into the prompt.",
-            ]
-        )
-
-    if mode in {"analyst", "incident"}:
-        lines.extend(
-            [
-                "- Analyst output must follow the AnalystReport contract: case_id, summary, evidence_refs, facts, inferences, gaps, next_actions, confidence.",
-                "- Reviewer output must reject reports without evidence_refs.",
-                "- Ask for targeted follow-up queries instead of expanding raw log context.",
-            ]
-        )
-
-    if mode == "incident":
-        lines.extend(
-            [
-                "- Prioritize P0/P1 routing, affected entities, containment options, and time-bounded gaps.",
-                "- Recommendations are recommend-only unless an explicit response authority is granted.",
-            ]
-        )
-
-    if case_summary:
-        lines.extend(["", "## Case Summary", case_summary.strip()])
+    lines = _security_prompt_lines(prompt_config.security_prompt_mode)
+    _append_case_summary(lines, case_summary)
 
     return "\n".join(lines).strip()
 
 
-def build_security_prompt(
-    base_prompt: str,
-    config: SecurityPromptConfig | Mapping[str, Any] | None = None,
-    *,
-    role: str = "",
-    case_summary: str = "",
-    is_security_command: bool = False,
-    is_logs_command: bool = False,
-    is_security_case: bool = False,
-) -> str:
+def build_security_prompt(base_prompt: str, config: SecurityPromptConfig | Mapping[str, Any] | None = None, **scope: Any) -> str:
     """Append security instructions only when explicitly enabled and scoped.
 
     With the default config, the return value is byte-for-byte the input prompt.
@@ -150,11 +102,11 @@ def build_security_prompt(
 
     fragment = security_prompt_fragment(
         config,
-        role=role,
-        case_summary=case_summary,
-        is_security_command=is_security_command,
-        is_logs_command=is_logs_command,
-        is_security_case=is_security_case,
+        role=str(scope.get("role", "")),
+        case_summary=str(scope.get("case_summary", "")),
+        is_security_command=bool(scope.get("is_security_command", False)),
+        is_logs_command=bool(scope.get("is_logs_command", False)),
+        is_security_case=bool(scope.get("is_security_case", False)),
     )
     if not fragment:
         return base_prompt
@@ -164,3 +116,52 @@ def build_security_prompt(
 
 
 append_security_prompt = build_security_prompt
+
+
+def _prompt_config(config: SecurityPromptConfig | Mapping[str, Any] | None) -> SecurityPromptConfig:
+    return config if isinstance(config, SecurityPromptConfig) else SecurityPromptConfig.from_mapping(config)
+
+
+def _security_prompt_lines(mode: str) -> list[str]:
+    lines = [
+        "# Security Log Analysis Context",
+        "- Work from case summaries, route summaries, and evidence_refs only.",
+        "- Do not paste raw events, long query results, or long transcripts into the parent session.",
+        "- Treat evidence refs and evidence files as the auditable source of truth.",
+    ]
+    if mode in {"minimal", "analyst", "incident"}:
+        lines.extend(_minimal_security_lines())
+    if mode in {"analyst", "incident"}:
+        lines.extend(_analyst_security_lines())
+    if mode == "incident":
+        lines.extend(_incident_security_lines())
+    return lines
+
+
+def _minimal_security_lines() -> list[str]:
+    return [
+        "- Every conclusion must cite evidence_refs.",
+        "- Separate facts, inferences, gaps, and next actions.",
+        "- Use only authorized bounded tools such as security_query, security_hunt_ip, and security_trace_case.",
+        "- Security tools return summary, preview_rows, and evidence_refs; do not request or paste full raw rows into the prompt.",
+    ]
+
+
+def _analyst_security_lines() -> list[str]:
+    return [
+        "- Analyst output must follow the AnalystReport contract: case_id, summary, evidence_refs, facts, inferences, gaps, next_actions, confidence.",
+        "- Reviewer output must reject reports without evidence_refs.",
+        "- Ask for targeted follow-up queries instead of expanding raw log context.",
+    ]
+
+
+def _incident_security_lines() -> list[str]:
+    return [
+        "- Prioritize P0/P1 routing, affected entities, containment options, and time-bounded gaps.",
+        "- Recommendations are recommend-only unless an explicit response authority is granted.",
+    ]
+
+
+def _append_case_summary(lines: list[str], case_summary: str) -> None:
+    if case_summary:
+        lines.extend(["", "## Case Summary", case_summary.strip()])

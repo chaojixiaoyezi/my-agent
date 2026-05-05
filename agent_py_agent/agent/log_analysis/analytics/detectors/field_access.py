@@ -107,13 +107,24 @@ def _field(payload: Mapping[str, Any], *names: str) -> Any:
         value = _path_value(payload, name)
         if _present(value):
             return value
+    return _field_from_nested_bags(payload, names)
+
+
+def _field_from_nested_bags(payload: Mapping[str, Any], names: Sequence[str]) -> Any:
     for bag_name in ("attributes", "raw_fields", "event", "security", "network", "http", "process", "file", "rule"):
-        bag = _path_value(payload, bag_name)
-        if isinstance(bag, Mapping):
-            for name in names:
-                value = _path_value(bag, name)
-                if _present(value):
-                    return value
+        value = _first_present_path(_path_value(payload, bag_name), names)
+        if _present(value):
+            return value
+    return None
+
+
+def _first_present_path(value: Any, names: Sequence[str]) -> Any:
+    if not isinstance(value, Mapping):
+        return None
+    for name in names:
+        candidate = _path_value(value, name)
+        if _present(candidate):
+            return candidate
     return None
 
 

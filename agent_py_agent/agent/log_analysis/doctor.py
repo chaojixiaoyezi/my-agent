@@ -62,30 +62,10 @@ def collect_doctor_status(
     并把失败原因写进 config.warnings，方便用户修配置。
     """
 
-    root = Path(workspace_root) if workspace_root is not None else Path(__file__).resolve().parents[2]
+    root = _workspace_root(workspace_root)
     path = Path(config_path) if config_path is not None else default_log_analysis_config_path()
-    config_exists = path.exists()
-    load_warning: LogAnalysisConfigWarning | None = None
-
-    try:
-        config = load_log_analysis_config(path, missing_ok=True)
-    except Exception as exc:  # pragma: no cover - defensive guard for corrupted config files
-        config = LogAnalysisConfig()
-        load_warning = LogAnalysisConfigWarning(
-            field_name="config_file",
-            raw_value=str(path),
-            fallback_value="safe defaults",
-            reason=f"failed to load config: {type(exc).__name__}: {exc}",
-        )
-
-    config_warnings = list(config.config_warnings)
-    if load_warning is not None:
-        config_warnings.append(load_warning.to_dict())
-
+    config, config_warnings = _load_doctor_config(path)
     data_dir = resolve_log_analysis_data_dir(config.data_dir, workspace_root=root)
-    paths = {"base": _path_status(data_dir)}
-    for name in RUNTIME_DIRS:
-        paths[name] = _path_status(data_dir / name)
 
     return {
         "module": "log_analysis",
@@ -95,22 +75,52 @@ def collect_doctor_status(
         "heavy_dependencies_loaded": False,
         "config": {
             "path": str(path),
-            "exists": config_exists,
+            "exists": path.exists(),
             "warnings": config_warnings,
-            "effective": {
-                "worker_enabled": config.worker_enabled,
-                "security_prompt_enabled": config.security_prompt_enabled,
-                "auto_dispatch_enabled": config.auto_dispatch_enabled,
-                "ml_enabled": config.ml_enabled,
-                "cluster_enabled": config.cluster_enabled,
-                "response_execution_enabled": config.response_execution_enabled,
-                "response_mode": config.response_mode,
-                "local_store_backend": config.local_store_backend,
-            },
+            "effective": _effective_config(config),
         },
-        "paths": paths,
+        "paths": _runtime_paths(data_dir),
         "feature_gates": effective_feature_gates(config),
     }
+
+
+def _workspace_root(workspace_root: str | Path | None) -> Path:
+    return Path(workspace_root) if workspace_root is not None else Path(__file__).resolve().parents[2]
+
+
+def _load_doctor_config(path: Path) -> tuple[LogAnalysisConfig, list[dict[str, Any]]]:
+    try:
+        config = load_log_analysis_config(path, missing_ok=True)
+        return config, list(config.config_warnings)
+    except Exception as exc:  # pragma: no cover - defensive guard for corrupted config files
+        config = LogAnalysisConfig()
+        warning = LogAnalysisConfigWarning(
+            field_name="config_file",
+            raw_value=str(path),
+            fallback_value="safe defaults",
+            reason=f"failed to load config: {type(exc).__name__}: {exc}",
+        )
+        return config, [warning.to_dict()]
+
+
+def _effective_config(config: LogAnalysisConfig) -> dict[str, Any]:
+    return {
+        "worker_enabled": config.worker_enabled,
+        "security_prompt_enabled": config.security_prompt_enabled,
+        "auto_dispatch_enabled": config.auto_dispatch_enabled,
+        "ml_enabled": config.ml_enabled,
+        "cluster_enabled": config.cluster_enabled,
+        "response_execution_enabled": config.response_execution_enabled,
+        "response_mode": config.response_mode,
+        "local_store_backend": config.local_store_backend,
+    }
+
+
+def _runtime_paths(data_dir: Path) -> dict[str, dict[str, Any]]:
+    paths = {"base": _path_status(data_dir)}
+    for name in RUNTIME_DIRS:
+        paths[name] = _path_status(data_dir / name)
+    return paths
 
 
 def _path_status(path: Path) -> dict[str, Any]:

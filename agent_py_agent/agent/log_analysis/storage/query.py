@@ -67,21 +67,15 @@ def execute_security_query(
     start = time.perf_counter()
     limit = normalize_limit(query.limit, max_limit=max_limit)
     parameters = _criteria_to_parameters(query, limit)
-    rows = [row for row in store.list_events() if _matches(row, query)]
+    rows = _matching_rows(store, query)
     event_read_audit = store.last_read_audit(store.events_path)
-    rows.sort(key=lambda row: str(event_time_value(row) or ""))
     row_count = len(rows)
     truncated = row_count > limit
     limited_rows = rows[:limit]
-    summary = summarize_rows(rows, parameters)
-    summary["returned_row_count"] = len(limited_rows)
-    summary["truncated"] = truncated
-    if event_read_audit:
-        summary["storage_read_audit"] = event_read_audit
-        summary["skipped_storage_lines"] = event_read_audit.get("skipped_lines", 0)
-        summary["corrupt_storage_lines"] = event_read_audit.get("corrupt_lines", 0)
+    summary = _query_summary(rows, parameters, len(limited_rows), truncated, event_read_audit)
     query_id = _query_id(parameters)
-    evidence = LocalEvidenceStore(store.root).write_query_result(
+    evidence = _write_query_evidence(
+        store,
         query_id=query_id,
         parameters=parameters,
         rows=limited_rows,
@@ -103,15 +97,59 @@ def execute_security_query(
         summary=summary,
     )
     store.save_query_record(record)
-    return QueryResult(
+    return _query_result(
         query_id=query_id,
         parameters=parameters,
         row_count=row_count,
         truncated=truncated,
         evidence_path=evidence_path,
-        evidence_ref=evidence,
+        evidence=evidence,
         duration_ms=duration_ms,
         summary=summary,
+        limited_rows=limited_rows,
+        preview_limit=preview_limit,
+    )
+
+
+def _matching_rows(store: LocalLogStore, query: QueryCriteria) -> list[dict[str, Any]]:
+    rows = [row for row in store.list_events() if _matches(row, query)]
+    rows.sort(key=lambda row: str(event_time_value(row) or ""))
+    return rows
+
+
+def _query_summary(
+    rows: list[dict[str, Any]],
+    parameters: dict[str, Any],
+    returned_row_count: int,
+    truncated: bool,
+    event_read_audit: dict[str, Any] | None,
+) -> dict[str, Any]:
+    summary = summarize_rows(rows, parameters)
+    summary["returned_row_count"] = returned_row_count
+    summary["truncated"] = truncated
+    if event_read_audit:
+        summary["storage_read_audit"] = event_read_audit
+        summary["skipped_storage_lines"] = event_read_audit.get("skipped_lines", 0)
+        summary["corrupt_storage_lines"] = event_read_audit.get("corrupt_lines", 0)
+    return summary
+
+
+def _write_query_evidence(store: LocalLogStore, **payload: Any):
+    return LocalEvidenceStore(store.root).write_query_result(**payload)
+
+
+def _query_result(**payload: Any) -> QueryResult:
+    limited_rows = payload["limited_rows"]
+    preview_limit = payload["preview_limit"]
+    return QueryResult(
+        query_id=payload["query_id"],
+        parameters=payload["parameters"],
+        row_count=payload["row_count"],
+        truncated=payload["truncated"],
+        evidence_path=payload["evidence_path"],
+        evidence_ref=payload["evidence"],
+        duration_ms=payload["duration_ms"],
+        summary=payload["summary"],
         rows=limited_rows,
         preview_rows=[sanitize_event_for_preview(row) for row in limited_rows[:preview_limit]],
     )
