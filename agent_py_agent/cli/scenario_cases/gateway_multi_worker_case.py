@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from dataclasses import dataclass
 
 from ...agent.agent_core.models import AgentRunResult
 from ...agent.gateway import (
@@ -26,6 +27,23 @@ from ..scenario_utils import (
     print_scenario_step,
     write_scenario_summary,
 )
+
+
+@dataclass
+class WorkerRunResults:
+    """Bundle of worker run results for multi-worker scenario."""
+    processed_by_worker: dict[str, int]
+    run_prompts_by_worker: dict[str, list[str]]
+    errors: list[str]
+    alive_threads: list[str]
+
+
+@dataclass
+class MultiWorkerScenarioSetup:
+    """Bundle of gateway setup data for multi-worker scenario."""
+    gpaths: object
+    request_ids: list[str]
+    request_count: int
 
 
 def _multi_worker_setup(args):
@@ -67,15 +85,15 @@ def _multi_worker_setup(args):
     return paths, gpaths, request_ids, request_count
 
 
-def _multi_worker_verify(gpaths, request_ids, request_count, processed_by_worker, run_prompts_by_worker, errors, alive_threads):
+def _multi_worker_verify(setup: MultiWorkerScenarioSetup, results: WorkerRunResults):
     """Verify multi-worker results: check responses, done archives, and queue state."""
-    responses = {request_id: read_json_file(gateway_response_path(gpaths, request_id)) for request_id in request_ids}
-    done_payloads = {request_id: read_json_file(gpaths.done / f"{request_id}.json") for request_id in request_ids}
+    responses = {request_id: read_json_file(gateway_response_path(setup.gpaths, request_id)) for request_id in setup.request_ids}
+    done_payloads = {request_id: read_json_file(setup.gpaths.done / f"{request_id}.json") for request_id in setup.request_ids}
     response_backends = sorted(str(payload.get("backend") or "") for payload in responses.values())
     done_owners = sorted(str(payload.get("lease_owner") or "") for payload in done_payloads.values())
-    pending_left = sorted(path.name for path in gpaths.inbox.glob("*.json"))
-    processing_left = sorted(path.name for path in gpaths.processing.glob("*.json"))
-    failed_left = sorted(path.name for path in gpaths.failed.glob("*.json"))
+    pending_left = sorted(path.name for path in setup.gpaths.inbox.glob("*.json"))
+    processing_left = sorted(path.name for path in setup.gpaths.processing.glob("*.json"))
+    failed_left = sorted(path.name for path in setup.gpaths.failed.glob("*.json"))
     print("response_backends=" + json.dumps(response_backends, ensure_ascii=False))
     print("done_owners=" + json.dumps(done_owners, ensure_ascii=False))
     print(
@@ -87,10 +105,10 @@ def _multi_worker_verify(gpaths, request_ids, request_count, processed_by_worker
         )
     )
     return (
-        not errors
-        and not alive_threads
-        and sum(processed_by_worker.values()) == request_count
-        and len([count for count in processed_by_worker.values() if count > 0]) == 2
+        not results.errors
+        and not results.alive_threads
+        and sum(results.processed_by_worker.values()) == setup.request_count
+        and len([count for count in results.processed_by_worker.values() if count > 0]) == 2
         and all(payload.get("ok") is True for payload in responses.values())
         and all(payload.get("status") == "done" for payload in responses.values())
         and all(payload.get("attempts") == 1 for payload in responses.values())
@@ -102,29 +120,27 @@ def _multi_worker_verify(gpaths, request_ids, request_count, processed_by_worker
     ), responses, done_payloads
 
 
-def _multi_worker_finish(paths, gpaths, request_ids, request_count, processed_by_worker, run_prompts_by_worker, errors, alive_threads):
+def _multi_worker_finish(paths, setup: MultiWorkerScenarioSetup, results: WorkerRunResults):
     """Complete multi-worker run: print diagnostics and verify results."""
-    print("processed_by_worker=" + json.dumps(processed_by_worker, ensure_ascii=False, sort_keys=True))
-    print("run_prompts_by_worker=" + json.dumps(run_prompts_by_worker, ensure_ascii=False, sort_keys=True))
-    if errors:
-        print("worker_errors=" + json.dumps(errors, ensure_ascii=False))
-    if alive_threads:
-        print("worker_threads_still_alive=" + json.dumps(alive_threads, ensure_ascii=False))
+    print("processed_by_worker=" + json.dumps(results.processed_by_worker, ensure_ascii=False, sort_keys=True))
+    print("run_prompts_by_worker=" + json.dumps(results.run_prompts_by_worker, ensure_ascii=False, sort_keys=True))
+    if results.errors:
+        print("worker_errors=" + json.dumps(results.errors, ensure_ascii=False))
+    if results.alive_threads:
+        print("worker_threads_still_alive=" + json.dumps(results.alive_threads, ensure_ascii=False))
 
     print_scenario_step(3, "Verify every request has one response and one done archive")
-    final_ok, responses, done_payloads = _multi_worker_verify(
-        gpaths, request_ids, request_count, processed_by_worker, run_prompts_by_worker, errors, alive_threads
-    )
+    final_ok, responses, done_payloads = _multi_worker_verify(setup, results)
     write_scenario_summary(
         paths,
         ok=final_ok,
         reason="gateway multi-worker processing passed" if final_ok else "gateway multi-worker processing failed",
         extra={
             "case": "gateway-multi-worker",
-            "request_ids": request_ids,
-            "processed_by_worker": processed_by_worker,
-            "run_prompts_by_worker": run_prompts_by_worker,
-            "errors": errors,
+            "request_ids": setup.request_ids,
+            "processed_by_worker": results.processed_by_worker,
+            "run_prompts_by_worker": results.run_prompts_by_worker,
+            "errors": results.errors,
             "responses": responses,
             "done_owners": [str(payload.get("lease_owner") or "") for payload in done_payloads.values()],
         },
@@ -187,5 +203,7 @@ def run_scenario_gateway_multi_worker_case(args) -> int:
     alive_threads = [thread.name for thread in threads if thread.is_alive()]
 
     return _multi_worker_finish(
-        paths, gpaths, request_ids, request_count, processed_by_worker, run_prompts_by_worker, errors, alive_threads,
+        paths,
+        MultiWorkerScenarioSetup(gpaths=gpaths, request_ids=request_ids, request_count=request_count),
+        WorkerRunResults(processed_by_worker=processed_by_worker, run_prompts_by_worker=run_prompts_by_worker, errors=errors, alive_threads=alive_threads),
     )

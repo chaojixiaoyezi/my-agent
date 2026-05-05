@@ -3,6 +3,7 @@
 测试 detect_active_work() 函数、status 命令显示和配置项。
 """
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -55,27 +56,39 @@ def sample_board():
     board = Mock()
 
     # 模拟 hot_list 和 recent
+    @dataclass
+    class Timestamps:
+        created_at: float
+        updated_at: float
+
+    @dataclass
     class BoardItem:
-        def __init__(self, id, goal, status, verification_status, created_at, updated_at, risk_flags=None):
-            self.id = id
-            self.goal = goal
-            self.status = status
-            self.verification_status = verification_status
-            self.created_at = created_at
-            self.updated_at = updated_at
-            self.risk_flags = risk_flags or []
+        id: str
+        goal: str
+        status: str
+        verification_status: str
+        timestamps: Timestamps
+        risk_flags: list = field(default_factory=list)
+
+        @property
+        def created_at(self):
+            return self.timestamps.created_at
+
+        @property
+        def updated_at(self):
+            return self.timestamps.updated_at
 
     # 模拟活跃任务
     board.hot_list = [
-        BoardItem("sub-001", "测试任务1", "RUNNING", "UNVERIFIED", 1234567890.0, 1234567891.0, ["timeout"]),
-        BoardItem("sub-002", "测试任务2", "BLOCKED", "FAILED", 1234567892.0, 1234567893.0, []),
+        BoardItem("sub-001", "测试任务1", "RUNNING", "UNVERIFIED", Timestamps(1234567890.0, 1234567891.0), ["timeout"]),
+        BoardItem("sub-002", "测试任务2", "BLOCKED", "FAILED", Timestamps(1234567892.0, 1234567893.0), []),
     ]
 
     # 模拟最近任务
     board.recent = [
-        BoardItem("sub-003", "测试任务3", "DONE", "VERIFIED", 1234567880.0, 1234567895.0, []),
-        BoardItem("sub-004", "测试任务4", "FAILED", "FAILED", 1234567885.0, 1234567898.0, []),
-        BoardItem("sub-005", "测试任务5", "PLANNING", "UNVERIFIED", 1234567890.0, 1234567900.0, ["new"]),
+        BoardItem("sub-003", "测试任务3", "DONE", "VERIFIED", Timestamps(1234567880.0, 1234567895.0), []),
+        BoardItem("sub-004", "测试任务4", "FAILED", "FAILED", Timestamps(1234567885.0, 1234567898.0), []),
+        BoardItem("sub-005", "测试任务5", "PLANNING", "UNVERIFIED", Timestamps(1234567890.0, 1234567900.0), ["new"]),
     ]
 
     board.summary = {

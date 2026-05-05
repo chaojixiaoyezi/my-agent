@@ -11,6 +11,46 @@ from ..models import SubAgentTask
 from ..reports import AcceptanceReviewFinding
 
 
+def _make_finding(
+    name: str,
+    ok: bool,
+    severity: str,
+    message: str,
+    evidence_path: str,
+    created_at: float,
+) -> AcceptanceReviewFinding:
+    """Create a single AcceptanceReviewFinding."""
+    return AcceptanceReviewFinding(
+        name=name,
+        ok=ok,
+        severity=severity,
+        message=message,
+        evidence_path=evidence_path,
+        created_at=created_at,
+    )
+
+
+def _has_tool_evidence(
+    tool_name: str,
+    kind_aliases: set[str],
+    extra_summary_keywords: list[str],
+    used_tools: list[str],
+    evidence: list,
+) -> bool:
+    """Check if tool has evidence in the task evidence list."""
+    if tool_name not in used_tools:
+        return False
+    return any(
+        item.ok and (
+            item.kind in kind_aliases
+            or tool_name in item.command.lower()
+            or tool_name in item.summary.lower()
+            or any(kw in item.summary for kw in extra_summary_keywords)
+        )
+        for item in evidence
+    )
+
+
 def _build_evidence_findings(
     task: SubAgentTask,
     created_at: float,
@@ -27,7 +67,7 @@ def _build_evidence_findings(
     ok_evidence = [item for item in task.evidence if item.ok]
     bad_evidence = [item for item in task.evidence if not item.ok]
     findings.append(
-        AcceptanceReviewFinding(
+        _make_finding(
             name="evidence_present",
             ok=bool(ok_evidence),
             severity="P0",
@@ -41,7 +81,7 @@ def _build_evidence_findings(
         )
     )
     findings.append(
-        AcceptanceReviewFinding(
+        _make_finding(
             name="evidence_not_failed",
             ok=not bad_evidence,
             severity="P1",
@@ -57,16 +97,15 @@ def _build_evidence_findings(
 
     acceptance_text = "；".join(task.acceptance_checks).lower()
     if "read_file" in acceptance_text:
-        has_read = "read_file" in task.used_tools and any(
-            item.ok and (
-                item.kind in {"read_file", "file_read", "file_content"}
-                or "read_file" in item.command.lower()
-                or "read_file" in item.summary.lower()
-            )
-            for item in task.evidence
+        has_read = _has_tool_evidence(
+            "read_file",
+            {"read_file", "file_read", "file_content"},
+            [],
+            task.used_tools,
+            task.evidence,
         )
         findings.append(
-            AcceptanceReviewFinding(
+            _make_finding(
                 name="acceptance_requires_read_file",
                 ok=has_read,
                 severity="P0",
@@ -80,17 +119,15 @@ def _build_evidence_findings(
             )
         )
     if "write_file" in acceptance_text:
-        has_write = "write_file" in task.used_tools and any(
-            item.ok and (
-                item.kind in {"write_file", "file_write", "file_written"}
-                or "write_file" in item.command.lower()
-                or "write_file" in item.summary.lower()
-                or "写入" in item.summary
-            )
-            for item in task.evidence
+        has_write = _has_tool_evidence(
+            "write_file",
+            {"write_file", "file_write", "file_written"},
+            ["写入"],
+            task.used_tools,
+            task.evidence,
         )
         findings.append(
-            AcceptanceReviewFinding(
+            _make_finding(
                 name="acceptance_requires_write_file",
                 ok=has_write,
                 severity="P0",

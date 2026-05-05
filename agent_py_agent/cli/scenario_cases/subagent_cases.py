@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from ...agent.backend import ModelResponse
@@ -26,6 +27,21 @@ from ..scenario_utils import (
     scenario_command,
     write_scenario_summary,
 )
+
+
+@dataclass
+class SubagentRunResults:
+    """Bundle of subagent runner results for _verify_subagent_resume."""
+    runner: object
+    loaded: object
+    backend: object
+
+
+@dataclass
+class ResumeCommandResults:
+    """Bundle of resume command results for _verify_subagent_resume."""
+    payload: object
+    returncode: int
 
 
 class ScenarioParentSubagentRecoveryBackend:
@@ -246,23 +262,23 @@ def _run_subagent_resume(paths, task):
         return {"ok": False, "error": f"memory-resume JSON parse failed: {exc}", "stdout": resume.stdout}, resume.returncode
 
 
-def _verify_subagent_resume(runner, loaded, backend, resume_payload, returncode, task, expected_reads):
+def _verify_subagent_resume(run: SubagentRunResults, resume: ResumeCommandResults, task, expected_reads):
     """Verify subagent cross-day resume found task fact sources."""
-    task_sources = resume_payload.get("task_fact_sources", []) if isinstance(resume_payload, dict) else []
-    recommended_reads = resume_payload.get("resume", {}).get("recommended_read_paths", []) if isinstance(resume_payload, dict) else []
-    context_block = resume_payload.get("brief", {}).get("context_block", "") if isinstance(resume_payload, dict) else ""
-    archive_count = resume_payload.get("resume", {}).get("archive_match_count", 0) if isinstance(resume_payload, dict) else 0
+    task_sources = resume.payload.get("task_fact_sources", []) if isinstance(resume.payload, dict) else []
+    recommended_reads = resume.payload.get("resume", {}).get("recommended_read_paths", []) if isinstance(resume.payload, dict) else []
+    context_block = resume.payload.get("brief", {}).get("context_block", "") if isinstance(resume.payload, dict) else ""
+    archive_count = resume.payload.get("resume", {}).get("archive_match_count", 0) if isinstance(resume.payload, dict) else 0
     matching_task = next(
         (item for item in task_sources if isinstance(item, dict) and item.get("run_id") == task.id), {},
     )
     return (
-        runner.ok
-        and loaded.status == "AWAITING_ACCEPTANCE"
-        and loaded.verification_status == "NEEDS_ACCEPTANCE"
-        and "read_file" in loaded.used_tools
-        and runner.tool_rounds == 1
-        and backend.calls == 2
-        and returncode == 0
+        run.runner.ok
+        and run.loaded.status == "AWAITING_ACCEPTANCE"
+        and run.loaded.verification_status == "NEEDS_ACCEPTANCE"
+        and "read_file" in run.loaded.used_tools
+        and run.runner.tool_rounds == 1
+        and run.backend.calls == 2
+        and resume.returncode == 0
         and archive_count >= 2
         and matching_task.get("exists") is True
         and matching_task.get("status") == "AWAITING_ACCEPTANCE"
@@ -295,7 +311,11 @@ def run_scenario_parent_subagent_cross_day_resume_case(args) -> int:
         loaded.status_file, loaded.work_log_file, loaded.handoff_file,
         loaded.test_checklist_file, loaded.output_json,
     ]
-    final_ok = _verify_subagent_resume(runner, loaded, backend, resume_payload, returncode, task, expected_reads)
+    final_ok = _verify_subagent_resume(
+        SubagentRunResults(runner=runner, loaded=loaded, backend=backend),
+        ResumeCommandResults(payload=resume_payload, returncode=returncode),
+        task, expected_reads,
+    )
     write_scenario_summary(
         paths,
         ok=final_ok,

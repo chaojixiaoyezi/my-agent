@@ -7,6 +7,6 @@ from __future__ import annotations
 模板版本、工具 transcript 摘要，都应该进这个目录。
 """
 
-from .builder import PromptBuilder
+from .builder import PromptBuilder, ToolSections
 
-__all__ = ["PromptBuilder"]
+__all__ = ["PromptBuilder", "ToolSections"]

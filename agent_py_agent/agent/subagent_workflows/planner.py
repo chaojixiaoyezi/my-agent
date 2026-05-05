@@ -15,6 +15,19 @@ from .store import WorkflowTemplateStore, load_template_store
 
 
 @dataclass
+class WorkflowPlanConstraints:
+    """Bundle for plan_workflow_for_goal keyword parameters (excluding goal)."""
+
+    config: Any = None
+    template_store: WorkflowTemplateStore | None = None
+    explicit_template_id: str = ""
+    quality_contract: Any = None
+    context_manifest: Any = None
+    allowed_write_roots: list[str] | None = None
+    forbidden_write_roots: list[str] | None = None
+
+
+@dataclass
 class WorkflowPlanningResult:
     """A parent-reviewable workflow plan for a user goal."""
 
@@ -78,22 +91,17 @@ class WorkflowPlanningResult:
 def plan_workflow_for_goal(
     goal: str,
     *,
-    config: Any = None,
-    template_store: WorkflowTemplateStore | None = None,
-    explicit_template_id: str = "",
-    quality_contract: Any = None,
-    context_manifest: Any = None,
-    allowed_write_roots: list[str] | None = None,
-    forbidden_write_roots: list[str] | None = None,
+    constraints: WorkflowPlanConstraints | None = None,
 ) -> WorkflowPlanningResult:
     """Create a dry-run workflow plan without creating subagent tasks."""
 
-    store = template_store or load_template_store()
+    _c = constraints or WorkflowPlanConstraints()
+    store = _c.template_store or load_template_store()
     decision = route_workflow(
         goal,
-        config=config,
+        config=_c.config,
         template_store=store,
-        explicit_template_id=explicit_template_id,
+        explicit_template_id=_c.explicit_template_id,
     )
     issues = list(decision.issues)
 
@@ -108,10 +116,10 @@ def plan_workflow_for_goal(
     dispatch_plan, parent_acceptance_plan = _compile_plans(
         template,
         goal=goal,
-        quality_contract=quality_contract,
-        context_manifest=context_manifest,
-        allowed_write_roots=allowed_write_roots,
-        forbidden_write_roots=forbidden_write_roots,
+        quality_contract=_c.quality_contract,
+        context_manifest=_c.context_manifest,
+        allowed_write_roots=_c.allowed_write_roots,
+        forbidden_write_roots=_c.forbidden_write_roots,
     )
 
     return WorkflowPlanningResult(

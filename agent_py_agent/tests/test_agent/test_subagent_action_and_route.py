@@ -17,7 +17,7 @@ from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.skills import SkillRegistry
-from agent_py_agent.agent.subagents.services.lifecycle import RecordCapabilityGrantParams
+from agent_py_agent.agent.subagents.services.lifecycle import RecordCapabilityGrantParams, RecordCapabilityRequestParams, RecordEvidenceParams
 
 
 def test_subagent_channel_probe_report():
@@ -72,7 +72,7 @@ def test_subagent_action_plan_dry_run():
         agent.subagents.set_status(fake_done.id, "DONE")
 
         request_task = agent.subagents.create_run(goal="等待能力路由任务", thought="模拟缺少工具。", plan=["请求能力"])
-        agent.subagents.record_capability_request(request_task.id, problem="缺少真实入口验收工具。", needed_capability="browser_smoke_test")
+        agent.subagents.record_capability_request(request_task.id, RecordCapabilityRequestParams(problem="缺少真实入口验收工具。", needed_capability="browser_smoke_test"))
 
         broken = agent.subagents.create_run(goal="坏通道任务", thought="模拟 output.json 损坏。", plan=["probe"])
         Path(broken.output_json).unlink()
@@ -171,9 +171,11 @@ def test_subagent_capability_route_grants_tool():
         )
         request = agent.subagents.record_capability_request(
             task.id,
-            problem="当前需要请求 REST API 并检查 HTTP 状态码和 JSON 返回。",
-            needed_capability="http_request",
-            expected_output="接口状态码和返回体摘要",
+            RecordCapabilityRequestParams(
+                problem="当前需要请求 REST API 并检查 HTTP 状态码和 JSON 返回。",
+                needed_capability="http_request",
+                expected_output="接口状态码和返回体摘要",
+            ),
         )
         router = CapabilityRouter(
             config=CapabilityConfig(capability_candidate_limit=3, capability_grant_max_tools=1),
@@ -228,9 +230,11 @@ risk_level: low
         )
         agent.subagents.record_capability_request(
             task.id,
-            problem="需要检查 REST API 返回和错误码。",
-            needed_capability="api_testing",
-            expected_output="API 检查报告",
+            RecordCapabilityRequestParams(
+                problem="需要检查 REST API 返回和错误码。",
+                needed_capability="api_testing",
+                expected_output="API 检查报告",
+            ),
         )
         router = CapabilityRouter(
             config=CapabilityConfig(capability_candidate_limit=3, capability_grant_max_skills=1),
@@ -258,9 +262,11 @@ def test_subagent_capability_route_creates_gap_when_no_match():
         )
         agent.subagents.record_capability_request(
             task.id,
-            problem="需要 zzz_unmatched_capability_999 完成一个不存在的能力。",
-            needed_capability="zzz_unmatched_capability_999",
-            expected_output="未知输出",
+            RecordCapabilityRequestParams(
+                problem="需要 zzz_unmatched_capability_999 完成一个不存在的能力。",
+                needed_capability="zzz_unmatched_capability_999",
+                expected_output="未知输出",
+            ),
         )
         router = CapabilityRouter(
             config=CapabilityConfig(capability_candidate_limit=3),
@@ -287,7 +293,7 @@ def test_subagent_execution_context_uses_only_grants():
             allowed_tools=["read_file"], acceptance_checks=["必须有接口检查证据"],
         )
         request = agent.subagents.record_capability_request(
-            task.id, problem="需要发起 HTTP GET 检查接口状态。", needed_capability="http_request", expected_output="接口状态码和摘要",
+            task.id, RecordCapabilityRequestParams(problem="需要发起 HTTP GET 检查接口状态。", needed_capability="http_request", expected_output="接口状态码和摘要"),
         )
         agent.subagents.record_capability_grant(task.id, RecordCapabilityGrantParams(
             request_id=request.id, skills=["api-check"], tools=["http_request"],
@@ -295,7 +301,7 @@ def test_subagent_execution_context_uses_only_grants():
                                "description": "发起 HTTP 请求并返回状态码和响应摘要", "risk_level": "low", "source": "builtin", "path": ""}],
             reason="父代理授权低风险接口健康检查。",
         ))
-        agent.subagents.record_evidence(task.id, kind="command", summary="接口 smoke test 通过", command="python3 smoke_api.py")
+        agent.subagents.record_evidence(task.id, RecordEvidenceParams(kind="command", summary="接口 smoke test 通过", command="python3 smoke_api.py"))
 
         context = agent.subagents.write_execution_context(task.id, max_cards=1)
         payload = json.loads(Path(context.execution_context_json).read_text(encoding="utf-8"))

@@ -9,13 +9,20 @@ Human version:
 
 import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
-from ..file_io import append_jsonl
+from .capability_route_helpers import (
+    RouteCapabilityApplyParams,
+    RouteCapabilityGrantParams,
+    _append_capability_route_log,
+    _mark_capability_request_status,
+    _route_capability_gap,
+    _route_capability_grant,
+)
 from .models import CapabilityRequest, SubAgentTask
 from .parsing import (
     _dict_list,
@@ -52,7 +59,6 @@ from .probe import (
 )
 from .rendering import render_capability_route_markdown
 from .reports import CapabilityRouteRecord, CapabilityRouteReport
-from .runner_rendering import _render_runner_item_line
 from .services.lifecycle import RecordCapabilityGapParams, RecordCapabilityGrantParams
 from .utils import (
     _apply_missing_paths,
@@ -66,89 +72,6 @@ from .utils import (
 
 if TYPE_CHECKING:
     from ..local_store import LocalStore
-
-
-@dataclass(frozen=True)
-class RouteCapabilityGrantParams:
-    """Params bundle for _route_capability_grant."""
-    task: SubAgentTask
-    request: CapabilityRequest
-    query: str
-    hits: list[CapabilitySearchHit]
-    selected_hits: list[CapabilitySearchHit]
-    granted_skills: list[str]
-    granted_tools: list[str]
-    selected_cards: list[dict[str, str]]
-    reasons: list[str]
-    grant: CapabilityGrant
-
-
-@dataclass(frozen=True)
-class RouteCapabilityApplyParams:
-    """Params bundle for _route_capability_apply."""
-    task: SubAgentTask
-    request: CapabilityRequest
-    query: str
-    hits: list[CapabilitySearchHit]
-    selected_hits: list[CapabilitySearchHit]
-    granted_skills: list[str]
-    granted_tools: list[str]
-    selected_cards: list[dict[str, str]]
-    reasons: list[str]
-
-
-def _route_capability_gap(
-    task,
-    request,
-    query,
-    hits,
-    gap,
-):
-    """Build a GAP record when no hits found and apply=True."""
-    now = time.time()
-    return CapabilityRouteRecord(
-        id=_new_id("route"),
-        run_id=task.id,
-        request_id=request.id,
-        status="GAP",
-        dry_run=False,
-        query=query,
-        candidate_count=len(hits),
-        gap_id=gap.id,
-        message="未找到足够可信的 skill/tool card，已记录 capability gap。",
-        created_at=now,
-    )
-
-
-def _route_capability_grant(*, params: RouteCapabilityGrantParams) -> CapabilityRouteRecord:
-    """Build a GRANTED record when hits found and apply=True."""
-    task = params.task
-    request = params.request
-    query = params.query
-    hits = params.hits
-    selected_hits = params.selected_hits
-    granted_skills = params.granted_skills
-    granted_tools = params.granted_tools
-    selected_cards = params.selected_cards
-    reasons = params.reasons
-    grant = params.grant
-    now = time.time()
-    return CapabilityRouteRecord(
-        id=_new_id("route"),
-        run_id=task.id,
-        request_id=request.id,
-        status="GRANTED",
-        dry_run=False,
-        query=query,
-        candidate_count=len(hits),
-        granted_skills=granted_skills,
-        granted_tools=granted_tools,
-        selected_cards=selected_cards,
-        reasons=reasons,
-        grant_id=grant.id,
-        message="已生成 capability grant。",
-        created_at=now,
-    )
 
 
 class SubAgentCapabilityMixin:
@@ -176,7 +99,7 @@ class SubAgentCapabilityMixin:
                 needed_outputs=[request.expected_output] if request.expected_output else [],
             ),
         )
-        self._mark_capability_request_status(task.id, request.id, "GAP")
+        _mark_capability_request_status(self, task.id, request.id, "GAP")
         return CapabilityRouteRecord(
             id=_new_id("route"),
             run_id=task.id,
@@ -278,7 +201,7 @@ class SubAgentCapabilityMixin:
         )
         if apply:
             for record in report.records:
-                self._append_capability_route_log(record)
+                _append_capability_route_log(self, record)
         return report
 
     def _extract_selected_hits_data(
@@ -309,7 +232,7 @@ class SubAgentCapabilityMixin:
                 expires_after_task=True,
             ),
         )
-        self._mark_capability_request_status(params.task.id, params.request.id, "GRANTED")
+        _mark_capability_request_status(self, params.task.id, params.request.id, "GRANTED")
         routed_task = self.load(params.task.id)
         self._append_task_work_log(
             routed_task,
@@ -381,30 +304,3 @@ class SubAgentCapabilityMixin:
                 reasons=reasons,
             )
         )
-
-    def _mark_capability_request_status(self, run_id: str, request_id: str, status: str) -> None:
-        """更新 capability request 状态。"""
-
-        task = self.load(run_id)
-        for request in task.capability_requests:
-            if request.id == request_id:
-                request.status = status
-        task.updated_at = time.time()
-        self.save(task)
-
-    def _append_capability_route_log(self, record: CapabilityRouteRecord) -> None:
-        """写入 capability route 审计日志。"""
-
-        jsonl = self.workspace / "subagent_capability_route_log.jsonl"
-        append_jsonl(jsonl, asdict(record))
-
-        markdown = self.workspace / "CAPABILITY_ROUTE_LOG.md"
-        if not markdown.exists():
-            markdown.write_text("# CAPABILITY ROUTE LOG\n\n", encoding="utf-8")
-        with markdown.open("a", encoding="utf-8") as handle:
-            handle.write(
-                f"- [{record.status}] {record.id} run={record.run_id} request={record.request_id} "
-                f"skills={','.join(record.granted_skills) or 'none'} "
-                f"tools={','.join(record.granted_tools) or 'none'} message={record.message}\n"
-            )
-        self._index_capability_route(record)

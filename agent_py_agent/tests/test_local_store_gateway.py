@@ -24,6 +24,7 @@ from agent_py_agent.__main__ import (
     read_json_file,
     rebuild_local_store,
     recover_gateway_processing_requests,
+    GatewayAskParams,
     submit_gateway_ask,
     write_json_file,
 )
@@ -61,9 +62,11 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
         gpaths = gateway_paths(agent)
         submit_gateway_ask(
             gpaths,
-            prompt="local-rebuild gateway 请求索引测试",
-            save=False,
-            agent=agent,
+            params=GatewayAskParams(
+                prompt="local-rebuild gateway 请求索引测试",
+                save=False,
+                agent=agent,
+            ),
         )
         assert _process_gateway_requests(agent, gpaths) == 1
 
@@ -105,7 +108,7 @@ def _setup_agent_with_gateway(cfg_overrides: dict | None = None) -> tuple[Path, 
 
 
 def _submit_idle_request(paths, prompt: str) -> tuple[str, Path, Path]:
-    return submit_gateway_ask(paths, prompt=prompt, save=False, agent=None)
+    return submit_gateway_ask(paths, params=GatewayAskParams(prompt=prompt, save=False))
 
 
 def _write_processing_request(paths, request_id: str, attempts: int, lease_age: float = 10) -> Path:
@@ -200,7 +203,7 @@ def test_gateway_worker_refreshes_processing_lease_heartbeat_during_long_run():
     root, agent, paths = _setup_agent_with_gateway(
         {"gateway_heartbeat_interval": 1, "gateway_processing_timeout_seconds": 1}
     )
-    request_id, request_path, _ = submit_gateway_ask(paths, prompt="长任务 lease heartbeat 测试", save=False)
+    request_id, request_path, _ = submit_gateway_ask(paths, params=GatewayAskParams(prompt="长任务 lease heartbeat 测试", save=False))
     observed = _track_heartbeat_during_run(agent, paths, request_path)
     _assert_heartbeat_refreshed(observed, paths, request_path, request_id)
 

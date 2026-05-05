@@ -117,6 +117,141 @@ class BuildAndPersistContext:
     now: float
 
 
+# ---------------------------------------------------------------------------
+# Internal helpers — promoted from SubAgentRunnerResultMixin to module scope
+# ---------------------------------------------------------------------------
+
+def _runner_compute_blockers(ok, status, parsed, message):
+    """Compute blockers list based on task state."""
+    if not ok or status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
+        return [parsed.blocked_reason or message]
+    return []
+
+
+def _runner_make_result_meta(ok, message, response, dry_run):
+    """Build result metadata dict."""
+    return {"ok": ok, "message": message, "response": response, "dry_run": dry_run}
+
+
+@dataclass
+class _CapDataParams:
+    """Bundle for _runner_make_cap_data to reduce parameter count."""
+    parsed: SubAgentParsedOutput
+    structured_evidence_count: int
+    structured_request_count: int
+    created_request_ids: list[str]
+    structured_repair_attempted: bool
+    structured_repair_ok: bool
+    structured_repair_error: str
+
+
+def _runner_make_cap_data(params: _CapDataParams):
+    """Build capability data dict."""
+    return {
+        "parsed": params.parsed,
+        "structured_evidence_count": params.structured_evidence_count,
+        "structured_request_count": params.structured_request_count,
+        "created_request_ids": params.created_request_ids,
+        "structured_repair_attempted": params.structured_repair_attempted,
+        "structured_repair_ok": params.structured_repair_ok,
+        "structured_repair_error": params.structured_repair_error,
+    }
+
+
+def _runner_make_runner_meta(dry_run, ok, message, backend, tool_rounds, now):
+    """Build runner metadata dict."""
+    return {"dry_run": dry_run, "ok": ok, "message": message, "backend": backend, "tool_rounds": tool_rounds, "now": now}
+
+
+def _runner_process_parsed_output(task, parsed, now, actual_tools):
+    """Process structured output and return all derived lists."""
+    if not (parsed.found and parsed.ok):
+        return [], [], 0, 0, [], [], [], [], [], []
+    proc = _process_structured_output(task, parsed, now, actual_tools)
+    return (proc["ignored_tools"], proc["ignored_skills"], proc["structured_evidence_count"],
+            proc["structured_request_count"], proc["created_request_ids"], proc["artifacts"],
+            proc["tests"], proc["patches"], proc["lessons"], proc["next_actions"])
+
+
+def _runner_build_output_payload_wrapper(task, runner_meta, cap_data, tools_info, output_items):
+    """Build output payload from structured metadata."""
+    dry_run = runner_meta["dry_run"]
+    ok = runner_meta["ok"]
+    message = runner_meta["message"]
+    backend = runner_meta["backend"]
+    tool_rounds = runner_meta["tool_rounds"]
+    now = runner_meta["now"]
+    parsed = cap_data["parsed"]
+    structured_evidence_count = cap_data["structured_evidence_count"]
+    structured_request_count = cap_data["structured_request_count"]
+    created_request_ids = cap_data["created_request_ids"]
+    actual_tools = tools_info["actual_tools"]
+    ignored_tools = tools_info["ignored_tools"]
+    ignored_skills = tools_info["ignored_skills"]
+    artifacts = output_items["artifacts"]
+    tests = output_items["tests"]
+    patches = output_items["patches"]
+    lessons = output_items["lessons"]
+    blockers = output_items["blockers"]
+    next_actions = output_items["next_actions"]
+    ctx = OutputPayloadContext(
+        task=task,
+        dry_run=dry_run,
+        ok=ok,
+        message=message,
+        backend=backend,
+        tool_rounds=tool_rounds,
+        parsed=parsed,
+        actual_tools=actual_tools,
+        structured_evidence_count=structured_evidence_count,
+        structured_request_count=structured_request_count,
+        created_request_ids=created_request_ids,
+        ignored_tools=ignored_tools,
+        ignored_skills=ignored_skills,
+        artifacts=artifacts,
+        tests=tests,
+        patches=patches,
+        lessons=lessons,
+        blockers=blockers,
+        next_actions=next_actions,
+        structured_repair_attempted=cap_data.get("structured_repair_attempted", False),
+        structured_repair_ok=cap_data.get("structured_repair_ok", False),
+        structured_repair_error=cap_data.get("structured_repair_error", ""),
+        now=now,
+    )
+    return _build_output_payload(ctx)
+
+
+def _runner_append_debrief(task, parsed):
+    """Append runner debrief content."""
+    _append_runner_debrief_content(task, parsed)
+
+
+def _make_build_context(
+    task, dry_run, final_ok, final_message, parsed, output_payload,
+    structured_evidence_count, structured_request_count,
+    artifacts, tests, patches, lessons, blockers, next_actions, now,
+):
+    """Build BuildAndPersistContext from computed values."""
+    return BuildAndPersistContext(
+        task=task,
+        params=RecordRunnerResultParams(run_id=task.id, dry_run=dry_run, ok=final_ok, message=final_message),
+        final_ok=final_ok,
+        final_message=final_message,
+        parsed=parsed,
+        output_payload=output_payload,
+        structured_evidence_count=structured_evidence_count,
+        structured_request_count=structured_request_count,
+        artifacts=artifacts,
+        tests=tests,
+        patches=patches,
+        lessons=lessons,
+        blockers=blockers,
+        next_actions=next_actions,
+        now=now,
+    )
+
+
 class SubAgentRunnerResultMixin:
     def _build_and_persist_result(
         self,
@@ -150,31 +285,132 @@ class SubAgentRunnerResultMixin:
         Path(ctx.task.runner_result_file).write_text(render_runner_result_markdown(result), encoding="utf-8")
         return result
 
+    def _extract_parsed_output(
+        self,
+        task: SubAgentTask,
+        structured_output: SubAgentParsedOutput | None,
+        now: float,
+        actual_tools: list[str] | None,
+    ) -> tuple[
+        SubAgentParsedOutput,
+        list[str],
+        list[str],
+        int,
+        int,
+        list[str],
+        list,
+        list,
+        list,
+        list,
+        list,
+    ]:
+        """Extract parsed output or return defaults."""
+        parsed = structured_output or SubAgentParsedOutput()
+        if parsed.found and parsed.ok:
+            proc = _process_structured_output(task, parsed, now, actual_tools)
+            return (
+                parsed,
+                proc["ignored_tools"],
+                proc["ignored_skills"],
+                proc["structured_evidence_count"],
+                proc["structured_request_count"],
+                proc["created_request_ids"],
+                proc["artifacts"],
+                proc["tests"],
+                proc["patches"],
+                proc["lessons"],
+                proc["next_actions"],
+            )
+        return parsed, [], [], 0, 0, [], [], [], [], [], []
+
+    def _apply_status_and_build_payload(
+        self,
+        task: SubAgentTask,
+        ok: bool,
+        message: str,
+        response: str,
+        dry_run: bool,
+        parsed: SubAgentParsedOutput,
+        status: str,
+        verification_status: str,
+        failure_type: str,
+        backend: str,
+        tool_rounds: int,
+        now: float,
+        structured_evidence_count: int,
+        structured_request_count: int,
+        created_request_ids: list[str],
+        structured_repair_attempted: bool,
+        structured_repair_ok: bool,
+        structured_repair_error: str,
+        actual_tools: list[str] | None,
+        ignored_tools: list[str],
+        ignored_skills: list[str],
+        artifacts: list,
+        tests: list,
+        patches: list,
+        lessons: list,
+        next_actions: list,
+    ) -> tuple[dict, BuildAndPersistContext]:
+        """Apply status to task and build output payload."""
+        result_meta = _runner_make_result_meta(ok, message, response, dry_run)
+        cap_data = _runner_make_cap_data(
+            _CapDataParams(
+                parsed=parsed,
+                structured_evidence_count=structured_evidence_count,
+                structured_request_count=structured_request_count,
+                created_request_ids=created_request_ids,
+                structured_repair_attempted=structured_repair_attempted,
+                structured_repair_ok=structured_repair_ok,
+                structured_repair_error=structured_repair_error,
+            )
+        )
+        tools_info = {"actual_tools": actual_tools, "ignored_tools": ignored_tools, "ignored_skills": ignored_skills}
+        status_context = {"status": status, "verification_status": verification_status, "failure_type": failure_type}
+        apply_runner_result_fields(task, result_meta, status_context, parsed, now)
+        final_ok = result_meta["ok"]
+        final_message = result_meta["message"]
+        blockers = _runner_compute_blockers(final_ok, task.status, parsed, final_message)
+        runner_meta = _runner_make_runner_meta(dry_run, final_ok, final_message, backend, tool_rounds, now)
+        output_items = {"artifacts": artifacts, "tests": tests, "patches": patches, "lessons": lessons, "blockers": blockers, "next_actions": next_actions}
+        output_payload = _runner_build_output_payload_wrapper(task, runner_meta, cap_data, tools_info, output_items)
+        return output_payload, _make_build_context(
+            task, dry_run, final_ok, final_message, parsed, output_payload,
+            structured_evidence_count, structured_request_count,
+            artifacts, tests, patches, lessons, blockers, next_actions, now,
+        )
+
+    def _post_result_side_effects(
+        self,
+        task: SubAgentTask,
+        result: SubAgentRunnerResult,
+        output_payload: dict,
+        dry_run: bool,
+        parsed: SubAgentParsedOutput,
+        lessons: list,
+    ) -> int:
+        """Handle save, debrief, learning side effects. Returns learning candidate count."""
+        self.save(task)
+        if parsed.found and parsed.ok:
+            _runner_append_debrief(task, parsed)
+        learning_candidates = []
+        if not dry_run and parsed.found and parsed.ok and lessons:
+            learning_candidates = self.record_learning_candidates(task, lessons)
+        self._append_task_work_log(
+            task,
+            f"subagent_runner: dry_run={dry_run} ok={result.ok} status={task.status} "
+            f"message={result.message} learning_candidates={len(learning_candidates)}",
+        )
+        self._index_runner_result(result, output_payload)
+        return len(learning_candidates)
+
     def record_runner_result(
         self,
         params: RecordRunnerResultParams,
     ) -> SubAgentRunnerResult:
         """LLM: record a runner invocation result back into the standard work order."""
-        run_id = params.run_id
-        dry_run = params.dry_run
-        ok = params.ok
-        message = params.message
-        attempt_id = params.attempt_id
-        prompt = params.prompt
-        response = params.response
-        backend = params.backend
-        tool_rounds = params.tool_rounds
-        status = params.status
-        verification_status = params.verification_status
-        failure_type = params.failure_type
-        structured_output = params.structured_output
-        actual_tools = params.actual_tools
-        structured_repair_attempted = params.structured_repair_attempted
-        structured_repair_ok = params.structured_repair_ok
-        structured_repair_error = params.structured_repair_error
-
-        task = self.load(run_id)
-        stale_result = self._check_stale_runner_result(task, attempt_id, dry_run)
+        task = self.load(params.run_id)
+        stale_result = self._check_stale_runner_result(task, params.attempt_id, params.dry_run)
         if stale_result:
             return stale_result
 
@@ -182,62 +418,52 @@ class SubAgentRunnerResultMixin:
         self.save(task)
         now = time.time()
 
-        parsed = structured_output or SubAgentParsedOutput()
-        if parsed.found and parsed.ok:
-            proc = _process_structured_output(task, parsed, now, actual_tools)
-            ignored_tools = proc["ignored_tools"]
-            ignored_skills = proc["ignored_skills"]
-            structured_evidence_count = proc["structured_evidence_count"]
-            structured_request_count = proc["structured_request_count"]
-            created_request_ids = proc["created_request_ids"]
-            artifacts = proc["artifacts"]
-            tests = proc["tests"]
-            patches = proc["patches"]
-            lessons = proc["lessons"]
-            next_actions = proc["next_actions"]
-        else:
-            ignored_tools, ignored_skills, structured_evidence_count, structured_request_count = [], [], 0, 0
-            created_request_ids, artifacts, tests, patches, lessons, next_actions = [], [], [], [], [], []
+        (
+            parsed,
+            ignored_tools,
+            ignored_skills,
+            structured_evidence_count,
+            structured_request_count,
+            created_request_ids,
+            artifacts,
+            tests,
+            patches,
+            lessons,
+            next_actions,
+        ) = self._extract_parsed_output(task, params.structured_output, now, params.actual_tools)
 
-        result_meta = {"ok": ok, "message": message, "response": response, "dry_run": dry_run}
-        cap_data = {"parsed": parsed, "structured_evidence_count": structured_evidence_count, "structured_request_count": structured_request_count, "created_request_ids": created_request_ids, "structured_repair_attempted": structured_repair_attempted, "structured_repair_ok": structured_repair_ok, "structured_repair_error": structured_repair_error}
-        tools_info = {"actual_tools": actual_tools, "ignored_tools": ignored_tools, "ignored_skills": ignored_skills}
-        status_context = {"status": status, "verification_status": verification_status, "failure_type": failure_type}
-        apply_runner_result_fields(task, result_meta, status_context, parsed, now)
-        # 结构化解析失败会在这里把最终状态降级为 BLOCKED/ok=False，后续输出必须沿用最终值。
-        final_ok = result_meta["ok"]
-        final_message = result_meta["message"]
-        blockers = [] if (final_ok and task.status not in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}) else [parsed.blocked_reason or final_message]
-        runner_meta = {"dry_run": dry_run, "ok": final_ok, "message": final_message, "backend": backend, "tool_rounds": tool_rounds, "now": now}
-        output_items = {"artifacts": artifacts, "tests": tests, "patches": patches, "lessons": lessons, "blockers": blockers, "next_actions": next_actions}
-        output_payload = self._build_output_payload_wrapper(task, runner_meta, cap_data, tools_info, output_items)
-        result = self._build_and_persist_result(
-            BuildAndPersistContext(
-                task=task,
-                params=params,
-                final_ok=final_ok,
-                final_message=final_message,
-                parsed=parsed,
-                output_payload=output_payload,
-                structured_evidence_count=structured_evidence_count,
-                structured_request_count=structured_request_count,
-                artifacts=artifacts,
-                tests=tests,
-                patches=patches,
-                lessons=lessons,
-                blockers=blockers,
-                next_actions=next_actions,
-                now=now,
-            )
+        output_payload, build_ctx = self._apply_status_and_build_payload(
+            task=task,
+            ok=params.ok,
+            message=params.message,
+            response=params.response,
+            dry_run=params.dry_run,
+            parsed=parsed,
+            status=params.status,
+            verification_status=params.verification_status,
+            failure_type=params.failure_type,
+            backend=params.backend,
+            tool_rounds=params.tool_rounds,
+            now=now,
+            structured_evidence_count=structured_evidence_count,
+            structured_request_count=structured_request_count,
+            created_request_ids=created_request_ids,
+            structured_repair_attempted=params.structured_repair_attempted,
+            structured_repair_ok=params.structured_repair_ok,
+            structured_repair_error=params.structured_repair_error,
+            actual_tools=params.actual_tools,
+            ignored_tools=ignored_tools,
+            ignored_skills=ignored_skills,
+            artifacts=artifacts,
+            tests=tests,
+            patches=patches,
+            lessons=lessons,
+            next_actions=next_actions,
         )
-        self.save(task)
-        if parsed.found and parsed.ok:
-            _append_runner_debrief_content(task, parsed)
-        learning_candidates = []
-        if not dry_run and parsed.found and parsed.ok and lessons:
-            learning_candidates = self.record_learning_candidates(task, lessons)
-        self._append_task_work_log(task, f"subagent_runner: dry_run={dry_run} ok={result_meta['ok']} status={task.status} message={result_meta['message']} learning_candidates={len(learning_candidates)}")
-        self._index_runner_result(result, output_payload)
+        # Override params in context with actual params object for full field access
+        build_ctx.params = params
+        result = self._build_and_persist_result(build_ctx)
+        self._post_result_side_effects(task, result, output_payload, params.dry_run, parsed, lessons)
         return result
 
     def _check_stale_runner_result(self, task, attempt_id, dry_run):
@@ -260,66 +486,3 @@ class SubAgentRunnerResultMixin:
             result_file=task.runner_result_file, result_json=task.runner_result_json,
             output_json=task.output_json, created_at=time.time(),
         )
-
-    def _process_parsed_output(self, task, parsed, now, actual_tools):
-        if not (parsed.found and parsed.ok):
-            return [], [], 0, 0, [], [], [], [], [], []
-        proc = _process_structured_output(task, parsed, now, actual_tools)
-        return (proc["ignored_tools"], proc["ignored_skills"], proc["structured_evidence_count"],
-                proc["structured_request_count"], proc["created_request_ids"], proc["artifacts"],
-                proc["tests"], proc["patches"], proc["lessons"], proc["next_actions"])
-
-    def _compute_blockers(self, ok, status, parsed, message):
-        if not ok or status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
-            return [parsed.blocked_reason or message]
-        return []
-
-    def _build_output_payload_wrapper(self, task, runner_meta, cap_data, tools_info, output_items):
-        dry_run = runner_meta["dry_run"]
-        ok = runner_meta["ok"]
-        message = runner_meta["message"]
-        backend = runner_meta["backend"]
-        tool_rounds = runner_meta["tool_rounds"]
-        now = runner_meta["now"]
-        parsed = cap_data["parsed"]
-        structured_evidence_count = cap_data["structured_evidence_count"]
-        structured_request_count = cap_data["structured_request_count"]
-        created_request_ids = cap_data["created_request_ids"]
-        actual_tools = tools_info["actual_tools"]
-        ignored_tools = tools_info["ignored_tools"]
-        ignored_skills = tools_info["ignored_skills"]
-        artifacts = output_items["artifacts"]
-        tests = output_items["tests"]
-        patches = output_items["patches"]
-        lessons = output_items["lessons"]
-        blockers = output_items["blockers"]
-        next_actions = output_items["next_actions"]
-        ctx = OutputPayloadContext(
-            task=task,
-            dry_run=dry_run,
-            ok=ok,
-            message=message,
-            backend=backend,
-            tool_rounds=tool_rounds,
-            parsed=parsed,
-            actual_tools=actual_tools,
-            structured_evidence_count=structured_evidence_count,
-            structured_request_count=structured_request_count,
-            created_request_ids=created_request_ids,
-            ignored_tools=ignored_tools,
-            ignored_skills=ignored_skills,
-            artifacts=artifacts,
-            tests=tests,
-            patches=patches,
-            lessons=lessons,
-            blockers=blockers,
-            next_actions=next_actions,
-            structured_repair_attempted=cap_data.get("structured_repair_attempted", False),
-            structured_repair_ok=cap_data.get("structured_repair_ok", False),
-            structured_repair_error=cap_data.get("structured_repair_error", ""),
-            now=now,
-        )
-        return _build_output_payload(ctx)
-
-    def _append_runner_debrief(self, task, parsed):
-        _append_runner_debrief_content(task, parsed)

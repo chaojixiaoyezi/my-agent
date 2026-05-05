@@ -13,10 +13,20 @@ from __future__ import annotations
 - 已经有工具记录时，最后放工具记录和继续指令，让模型从最新工具结果往下走
 """
 
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..config import AgentConfig
 from ..memory import MemoryRecord
+
+
+@dataclass
+class ToolSections:
+    """Bundle for PromptBuilder.build tool-related parameters."""
+
+    tool_catalog_section: str = ""
+    tool_recommendations_section: str = ""
+    tool_context: list[str] | None = None
 
 
 class PromptBuilder:
@@ -49,9 +59,7 @@ class PromptBuilder:
         *,
         inject: list[str] | None = None,
         prompt_files: list[str] | None = None,
-        tool_catalog_section: str = "",
-        tool_recommendations_section: str = "",
-        tool_context: list[str] | None = None,
+        tools: ToolSections | None = None,
     ) -> str:
         """拼出完整 prompt。
 
@@ -60,12 +68,13 @@ class PromptBuilder:
         - `tool_recommendations_section`：按当前任务筛出来的少量候选详情，告诉模型'这次大概率该用谁'
         """
 
+        _tools = tools or ToolSections()
         memory_text = "\n".join(
             f"- [{m.kind}] {m.role}: {m.content}" for m in memories
         ) or "（无相关记忆）"
         dynamic = "\n".join(self.read_prompt_files(prompt_files))
         injected = "\n".join(inject or [])
-        tools_history = "\n\n".join(tool_context or [])
+        tools_history = "\n\n".join(_tools.tool_context or [])
         if tools_history:
             task_and_transcript = (
                 f"# User Task\n{user_prompt}\n\n"
@@ -87,7 +96,7 @@ class PromptBuilder:
             f"# Related Memory\n{memory_text}\n\n"
             f"# Dynamic Prompt Files\n{dynamic or '（无）'}\n\n"
             f"# Runtime Injection\n{injected or '（无）'}\n\n"
-            f"{tool_catalog_section or default_tools}\n\n"
-            f"{tool_recommendations_section or default_recommendations}\n\n"
+            f"{_tools.tool_catalog_section or default_tools}\n\n"
+            f"{_tools.tool_recommendations_section or default_recommendations}\n\n"
             f"{task_and_transcript}\n"
         )

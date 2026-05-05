@@ -9,17 +9,13 @@ from __future__ import annotations
 from ..models import SubAgentTask
 from ..parsing import _dict_list
 from ..reports import AcceptanceReviewFinding
+from .evidence import _make_finding
 
 
-def _build_patch_findings(
-    task: SubAgentTask,
-    output: dict[str, object],
-    created_at: float,
-) -> list[AcceptanceReviewFinding]:
-    """Build findings for patches."""
-    findings: list[AcceptanceReviewFinding] = []
-
-    patches = _dict_list(output.get("patches", []))
+def _classify_patches(
+    patches: list[dict],
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Classify patches into unresolved, invalid, and unreviewed lists."""
     valid_patch_statuses = {"applied", "planned", "blocked"}
     unresolved_patches = [
         item for item in patches if str(item.get("status", "")).lower() in {"planned", "blocked"}
@@ -35,8 +31,22 @@ def _build_patch_findings(
         if str(item.get("status", "")).lower() == "applied"
         and str(item.get("review_status", "")).upper() != "APPROVED"
     ]
+    return unresolved_patches, invalid_patches, unreviewed_applied_patches
+
+
+def _build_patch_findings(
+    task: SubAgentTask,
+    output: dict[str, object],
+    created_at: float,
+) -> list[AcceptanceReviewFinding]:
+    """Build findings for patches."""
+    findings: list[AcceptanceReviewFinding] = []
+
+    patches = _dict_list(output.get("patches", []))
+    unresolved_patches, invalid_patches, unreviewed_applied_patches = _classify_patches(patches)
+
     findings.append(
-        AcceptanceReviewFinding(
+        _make_finding(
             name="no_unresolved_patches",
             ok=not unresolved_patches,
             severity="P1",
@@ -50,7 +60,7 @@ def _build_patch_findings(
         )
     )
     findings.append(
-        AcceptanceReviewFinding(
+        _make_finding(
             name="patch_status_valid",
             ok=not invalid_patches,
             severity="P1",
@@ -64,7 +74,7 @@ def _build_patch_findings(
         )
     )
     findings.append(
-        AcceptanceReviewFinding(
+        _make_finding(
             name="patches_reviewed",
             ok=not unreviewed_applied_patches,
             severity="P1",

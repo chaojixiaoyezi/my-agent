@@ -146,16 +146,18 @@ class TestAppendSessionTokenUsage:
 
     def test_append_creates_file(self, tmp_path: Path):
         """测试首次追加创建文件。"""
-        from agent_py_agent.agent.memory_archive.tokens import append_session_token_usage
+        from agent_py_agent.agent.memory_archive.tokens import TurnTokenUsage, append_session_token_usage
 
         result = append_session_token_usage(
             root=tmp_path,
-            session_id="sess_001",
-            turn_id="turn_001",
-            input_tokens=100,
-            output_tokens=200,
-            tool_tokens=50,
-            created_at="2026-05-03T10:00:00Z",
+            usage=TurnTokenUsage(
+                session_id="sess_001",
+                turn_id="turn_001",
+                input_tokens=100,
+                output_tokens=200,
+                tool_tokens=50,
+                created_at="2026-05-03T10:00:00Z",
+            ),
         )
 
         assert result["session_id"] == "sess_001"
@@ -164,26 +166,30 @@ class TestAppendSessionTokenUsage:
 
     def test_append_cumulative_tokens(self, tmp_path: Path):
         """测试多次追加累计 token。"""
-        from agent_py_agent.agent.memory_archive.tokens import append_session_token_usage
+        from agent_py_agent.agent.memory_archive.tokens import TurnTokenUsage, append_session_token_usage
 
         append_session_token_usage(
             root=tmp_path,
-            session_id="sess_001",
-            turn_id="turn_001",
-            input_tokens=100,
-            output_tokens=100,
-            tool_tokens=0,
-            created_at="2026-05-03T10:00:00Z",
+            usage=TurnTokenUsage(
+                session_id="sess_001",
+                turn_id="turn_001",
+                input_tokens=100,
+                output_tokens=100,
+                tool_tokens=0,
+                created_at="2026-05-03T10:00:00Z",
+            ),
         )
 
         result = append_session_token_usage(
             root=tmp_path,
-            session_id="sess_001",
-            turn_id="turn_002",
-            input_tokens=200,
-            output_tokens=200,
-            tool_tokens=0,
-            created_at="2026-05-03T10:01:00Z",
+            usage=TurnTokenUsage(
+                session_id="sess_001",
+                turn_id="turn_002",
+                input_tokens=200,
+                output_tokens=200,
+                tool_tokens=0,
+                created_at="2026-05-03T10:01:00Z",
+            ),
         )
 
         assert result["cumulative_tokens"] == 600
@@ -191,16 +197,18 @@ class TestAppendSessionTokenUsage:
 
     def test_append_negative_tokens(self, tmp_path: Path):
         """测试负数 token 被处理为 0。"""
-        from agent_py_agent.agent.memory_archive.tokens import append_session_token_usage
+        from agent_py_agent.agent.memory_archive.tokens import TurnTokenUsage, append_session_token_usage
 
         result = append_session_token_usage(
             root=tmp_path,
-            session_id="sess_001",
-            turn_id="turn_001",
-            input_tokens=-100,
-            output_tokens=-200,
-            tool_tokens=-50,
-            created_at="2026-05-03T10:00:00Z",
+            usage=TurnTokenUsage(
+                session_id="sess_001",
+                turn_id="turn_001",
+                input_tokens=-100,
+                output_tokens=-200,
+                tool_tokens=-50,
+                created_at="2026-05-03T10:00:00Z",
+            ),
         )
 
         assert result["turn_total"] == 0

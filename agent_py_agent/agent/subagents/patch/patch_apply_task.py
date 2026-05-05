@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from agent_py_agent.agent.subagents.patch.patch_renderer import build_unified_diff
@@ -34,6 +34,16 @@ class _ExecuteApplyContext:
     message: str
 
 
+@dataclass
+class ApplyPatchTaskParams:
+    """Bundle for apply_patch_task keyword-only parameters."""
+    output: dict
+    patches: list
+    apply: bool
+    applier: str
+    note: str
+
+
 def extract_patch_test_info(task, output):
     """Extract test commands and blocked test reasons from task output."""
     from agent_py_agent.agent.subagents.services.patch_apply_test_commands import (
@@ -53,50 +63,50 @@ def extract_patch_test_info(task, output):
     return test_commands, len(blocked_test_reasons), patch_entries
 
 
-def apply_patch_task(manager, task, *, output, patches, apply, applier, note) -> PatchApplyRecord:
+def apply_patch_task(manager, task, *, params: ApplyPatchTaskParams) -> PatchApplyRecord:
     """Execute single task patch apply dry-run or real apply."""
     now = time.time()
-    patch_entries, patch_specs, blocked_count = _normalize_all_patches(manager, task, patches)
-    test_commands, test_blocked_count, test_entries = extract_patch_test_info(task, output)
+    patch_entries, patch_specs, blocked_count = _normalize_all_patches(manager, task, params.patches)
+    test_commands, test_blocked_count, test_entries = extract_patch_test_info(task, params.output)
     blocked_count += test_blocked_count
     patch_entries.extend(test_entries)
 
     from agent_py_agent.agent.subagents.services.patch_apply_decision import PatchApplyDecision
 
-    decision, ok, message = PatchApplyDecision.decide(patches, patch_specs, blocked_count, apply)
+    decision, ok, message = PatchApplyDecision.decide(params.patches, patch_specs, blocked_count, params.apply)
     rollback_performed, test_results, applied_count = False, [], 0
 
-    if apply and ok and patch_specs:
-        review_status_updates = [dict(item) for item in patches]
+    if params.apply and ok and patch_specs:
+        review_status_updates = [dict(item) for item in params.patches]
         applied_count, rollback_performed, test_results, decision, ok, message = _execute_apply(
             _ExecuteApplyContext(
                 manager=manager,
                 task=task,
                 patch_specs=patch_specs,
                 patches=review_status_updates,
-                applier=applier,
-                note=note,
+                applier=params.applier,
+                note=params.note,
                 test_commands=test_commands,
                 decision=decision,
                 ok=ok,
                 message=message,
             )
         )
-        output["patches"] = [spec["patch_ref"] for spec in patch_specs]
+        params.output["patches"] = [spec["patch_ref"] for spec in patch_specs]
         Path(task.output_json).write_text(
-            json.dumps(output, ensure_ascii=False, indent=2),
+            json.dumps(params.output, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
     evidence_paths = [task.output_json, task.work_log_file]
-    if apply:
+    if params.apply:
         evidence_paths.append(str(manager.workspace / "subagent_patch_apply_log.jsonl"))
 
     return PatchApplyRecord(
-        id=_new_id("patchapply"), run_id=task.id, dry_run=not apply, applied=apply and ok,
-        ok=ok, decision=decision, message=message, patch_count=len(patches),
+        id=_new_id("patchapply"), run_id=task.id, dry_run=not params.apply, applied=params.apply and ok,
+        ok=ok, decision=decision, message=message, patch_count=len(params.patches),
         applied_count=applied_count, blocked_count=blocked_count, rollback_performed=rollback_performed,
-        applier=applier, note=note, evidence_paths=evidence_paths, test_commands=test_commands,
+        applier=params.applier, note=params.note, evidence_paths=evidence_paths, test_commands=test_commands,
         test_results=test_results, patches=patch_entries, created_at=now,
     )
 
@@ -120,9 +130,18 @@ def _execute_apply(ctx: _ExecuteApplyContext):
     try:
         from agent_py_agent.agent.subagents.services.patch_apply_executor import (
             PatchApplyExecutor,
+            PatchApplyParams,
         )
         applied_count, _, rollback_performed, test_results = PatchApplyExecutor.execute(
-            ctx.patch_specs, ctx.patches, ctx.task, ctx.manager, ctx.applier, ctx.note, ctx.test_commands,
+            PatchApplyParams(
+                patch_specs=ctx.patch_specs,
+                review_status_updates=ctx.patches,
+                task=ctx.task,
+                manager=ctx.manager,
+                applier=ctx.applier,
+                note=ctx.note,
+                test_commands=ctx.test_commands,
+            ),
         )
     except Exception as exc:
         rollback_performed = True

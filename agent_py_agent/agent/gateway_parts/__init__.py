@@ -53,6 +53,7 @@ from .recovery import (
     requeue_gateway_processing_requests,
 )
 from .request_worker import (
+    GatewayAskParams,
     _handle_gateway_request,
     _process_gateway_requests,
     submit_gateway_ask,
@@ -62,6 +63,7 @@ from .response_renderer import print_gateway_response
 
 __all__ = [
     "AdapterPaths",
+    "GatewayAskParams",
     "GatewayPaths",
     "adapter_paths",
     "append_gateway_history",

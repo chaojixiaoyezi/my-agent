@@ -11,6 +11,27 @@ import queue
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
+
+@dataclass
+class WorkerStateRefs:
+    """Bundle of shared worker state references for _show_status."""
+    state_lock: threading.Lock
+    is_running_ref: list
+    pending_jobs_ref: list
+    running_prompt_ref: list
+    running_started_at_ref: list
+
+
+@dataclass
+class FallbackInputRefs:
+    """Bundle of mutable refs passed to _fallback_handle_user_input (5 separate list refs)."""
+    is_running_ref: list
+    pending_jobs_ref: list
+    running_prompt_ref: list
+    running_started_at_ref: list
+    assistant_outputs: list[str]
+
 
 from .fallback_state import (
     _CHAT_RESPONSE_STYLE_INJECT,
@@ -32,6 +53,7 @@ from .fallback_ui import (
     _render_assistant_response,
 )
 from .gateway_client import (
+    ChatRequestContent,
     check_gateway_alive,
     poll_gateway_chunks,
     submit_chat_request,
@@ -41,6 +63,7 @@ from .input_loop import (
     is_exit_command,
     is_show_prompt_command,
 )
+from .slash_command_types import SlashCommandContext
 from .rendering import (
     BLUE,
     BOLD,
@@ -68,12 +91,14 @@ def _fallback_gateway_handle(
     on_chunk, stream_started_ref = _make_chunk_handler(agent.config.agent_name, next_message_id)
     request_id, chunk_path, response_path = submit_chat_request(
         paths,
-        prompt=job.user,
-        inject=turn_inject,
-        prompt_files=job.prompt_files,
-        save=not args.no_save,
-        show_prompt=job.show_prompt,
-        resume_context=resume_context_override(args),
+        content=ChatRequestContent(
+            prompt=job.user,
+            inject=turn_inject,
+            prompt_files=job.prompt_files,
+            save=not args.no_save,
+            show_prompt=job.show_prompt,
+            resume_context=resume_context_override(args),
+        ),
         agent=agent,
     )
     timeout = getattr(args, "gateway_timeout", None) or agent.config.gateway_request_timeout
@@ -183,27 +208,23 @@ def _fallback_worker(cfg: FallbackWorkerConfig) -> None:
 
 
 def _show_status(
-    state_lock: threading.Lock,
-    is_running_ref: list,
-    pending_jobs_ref: list,
-    running_prompt_ref: list,
-    running_started_at_ref: list,
+    state: WorkerStateRefs,
     agent,
     paths,
     use_gateway: bool,
 ) -> None:
     """Print status line."""
-    with state_lock:
-        active = pending_jobs_ref[0] + (1 if is_running_ref[0] else 0)
-        prompt = running_prompt_ref[0]
-        elapsed = time.perf_counter() - running_started_at_ref[0] if is_running_ref[0] else 0
+    with state.state_lock:
+        active = state.pending_jobs_ref[0] + (1 if state.is_running_ref[0] else 0)
+        prompt = state.running_prompt_ref[0]
+        elapsed = time.perf_counter() - state.running_started_at_ref[0] if state.is_running_ref[0] else 0
     if not active:
         print("当前没有后台任务。")
-    elif is_running_ref[0]:
-        print(f"正在响应中，已等待 {elapsed:.0f}s；队列中还有 {pending_jobs_ref[0]} 个任务。")
+    elif state.is_running_ref[0]:
+        print(f"正在响应中，已等待 {elapsed:.0f}s；队列中还有 {state.pending_jobs_ref[0]} 个任务。")
         print(f"当前任务: {prompt}")
     else:
-        print(f"当前没有运行中的任务；队列中还有 {pending_jobs_ref[0]} 个任务。")
+        print(f"当前没有运行中的任务；队列中还有 {state.pending_jobs_ref[0]} 个任务。")
     if use_gateway:
         for line in render_gateway_status(agent, paths):
             print(line)
@@ -225,11 +246,13 @@ def _fallback_handle_command(cfg: FallbackHandleCommandConfig) -> bool:
         return False
     if cfg.user == "/status":
         _show_status(
-            cfg.state_lock,
-            cfg.is_running_ref,
-            cfg.pending_jobs_ref,
-            cfg.running_prompt_ref,
-            cfg.running_started_at_ref,
+            WorkerStateRefs(
+                state_lock=cfg.state_lock,
+                is_running_ref=cfg.is_running_ref,
+                pending_jobs_ref=cfg.pending_jobs_ref,
+                running_prompt_ref=cfg.running_prompt_ref,
+                running_started_at_ref=cfg.running_started_at_ref,
+            ),
             cfg.agent,
             cfg.paths,
             cfg.use_gateway,
@@ -237,11 +260,13 @@ def _fallback_handle_command(cfg: FallbackHandleCommandConfig) -> bool:
         return False
     if handle_common_slash_command(
         cfg.user,
-        agent=cfg.agent,
-        memory_limit=cfg.args.memory_limit,
-        runtime_inject=cfg.runtime_inject,
-        prompt_files=cfg.prompt_files,
-        print_line=print,
+        ctx=SlashCommandContext(
+            agent=cfg.agent,
+            memory_limit=cfg.args.memory_limit,
+            runtime_inject=cfg.runtime_inject,
+            prompt_files=cfg.prompt_files,
+            print_line=print,
+        ),
         include_fallback_help=True,
     ):
         return False
@@ -270,17 +295,16 @@ def _fallback_enqueue_job(
     return job
 
 
-def run_fallback(cfg: RunFallbackConfig) -> int:
-    """Plain input()-based chat loop for terminals without prompt_toolkit."""
-
-    is_running_ref = [False]
-    pending_jobs_ref = [0]
-    running_prompt_ref = [""]
-    running_started_at_ref = [0.0]
-    fallback_waiting_for_input_ref = [False]
-    assistant_outputs: list[str] = []
-
-    worker_cfg = FallbackWorkerConfig(
+def _make_fallback_worker_cfg(
+    cfg: RunFallbackConfig,
+    is_running_ref: list,
+    pending_jobs_ref: list,
+    running_prompt_ref: list,
+    running_started_at_ref: list,
+    assistant_outputs: list[str],
+) -> FallbackWorkerConfig:
+    """Build worker config for fallback mode."""
+    return FallbackWorkerConfig(
         jobs=cfg.jobs,
         state_lock=cfg.state_lock,
         is_running_ref=is_running_ref,
@@ -296,12 +320,10 @@ def run_fallback(cfg: RunFallbackConfig) -> int:
         history_lock=cfg.history_lock,
         build_history_context=cfg.build_history_context,
     )
-    threading.Thread(
-        target=_fallback_worker,
-        args=(worker_cfg,),
-        daemon=True,
-    ).start()
 
+
+def _print_fallback_banner(cfg: RunFallbackConfig) -> None:
+    """Print startup banner for fallback mode."""
     print(_startup_banner(cfg.agent.config.agent_name, use_gateway=cfg.use_gateway))
     print(
         f"{cfg.agent.config.agent_name} 交互循环已启动 [v2 fallback模式]。"
@@ -309,6 +331,57 @@ def run_fallback(cfg: RunFallbackConfig) -> int:
     )
     if cfg.use_gateway:
         print("当前模式: gateway 客户端。普通消息会投递给后台 gateway 处理。")
+
+
+def _fallback_handle_user_input(
+    cfg: RunFallbackConfig,
+    user: str,
+    refs: FallbackInputRefs,
+) -> bool | None:
+    """Handle one user input. Returns True if should exit, False to continue, None for enqueue."""
+    handle_cfg = FallbackHandleCommandConfig(
+        user=user,
+        agent=cfg.agent,
+        args=cfg.args,
+        runtime_inject=cfg.runtime_inject,
+        prompt_files=cfg.prompt_files,
+        use_gateway=cfg.use_gateway,
+        state_lock=cfg.state_lock,
+        is_running_ref=refs.is_running_ref,
+        pending_jobs_ref=refs.pending_jobs_ref,
+        running_prompt_ref=refs.running_prompt_ref,
+        running_started_at_ref=refs.running_started_at_ref,
+        paths=cfg.paths,
+        assistant_outputs=refs.assistant_outputs,
+        jobs=cfg.jobs,
+    )
+    exit_result = _fallback_handle_command(handle_cfg)
+    if exit_result is not None:
+        return exit_result
+    return None
+
+
+def run_fallback(cfg: RunFallbackConfig) -> int:
+    """Plain input()-based chat loop for terminals without prompt_toolkit."""
+
+    is_running_ref = [False]
+    pending_jobs_ref = [0]
+    running_prompt_ref = [""]
+    running_started_at_ref = [0.0]
+    fallback_waiting_for_input_ref = [False]
+    assistant_outputs: list[str] = []
+
+    worker_cfg = _make_fallback_worker_cfg(
+        cfg, is_running_ref, pending_jobs_ref, running_prompt_ref,
+        running_started_at_ref, assistant_outputs,
+    )
+    threading.Thread(
+        target=_fallback_worker,
+        args=(worker_cfg,),
+        daemon=True,
+    ).start()
+
+    _print_fallback_banner(cfg)
 
     while True:
         try:
@@ -319,23 +392,14 @@ def run_fallback(cfg: RunFallbackConfig) -> int:
         if not user:
             continue
 
-        handle_cfg = FallbackHandleCommandConfig(
-            user=user,
-            agent=cfg.agent,
-            args=cfg.args,
-            runtime_inject=cfg.runtime_inject,
-            prompt_files=cfg.prompt_files,
-            use_gateway=cfg.use_gateway,
-            state_lock=cfg.state_lock,
+        input_refs = FallbackInputRefs(
             is_running_ref=is_running_ref,
             pending_jobs_ref=pending_jobs_ref,
             running_prompt_ref=running_prompt_ref,
             running_started_at_ref=running_started_at_ref,
-            paths=cfg.paths,
             assistant_outputs=assistant_outputs,
-            jobs=cfg.jobs,
         )
-        exit_result = _fallback_handle_command(handle_cfg)
+        exit_result = _fallback_handle_user_input(cfg, user, input_refs)
         if exit_result is not None:
             if exit_result:
                 break

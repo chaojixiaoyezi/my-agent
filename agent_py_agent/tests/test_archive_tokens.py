@@ -116,16 +116,18 @@ class TestAppendSessionTokenUsage:
 
     def test_new_session(self, tmp_path: Path):
         """测试新会话首次记录。"""
-        from agent_py_agent.agent.memory_archive.tokens import append_session_token_usage
+        from agent_py_agent.agent.memory_archive.tokens import TurnTokenUsage, append_session_token_usage
 
         result = append_session_token_usage(
             root=tmp_path,
-            session_id="new_session",
-            turn_id="turn_1",
-            input_tokens=150,
-            output_tokens=300,
-            tool_tokens=50,
-            created_at="2026-05-03T10:00:00Z",
+            usage=TurnTokenUsage(
+                session_id="new_session",
+                turn_id="turn_1",
+                input_tokens=150,
+                output_tokens=300,
+                tool_tokens=50,
+                created_at="2026-05-03T10:00:00Z",
+            ),
         )
 
         assert result["turn_total"] == 500
@@ -134,28 +136,32 @@ class TestAppendSessionTokenUsage:
 
     def test_existing_session(self, tmp_path: Path):
         """测试追加到已有会话。"""
-        from agent_py_agent.agent.memory_archive.tokens import append_session_token_usage
+        from agent_py_agent.agent.memory_archive.tokens import TurnTokenUsage, append_session_token_usage
 
         # 第一次
         append_session_token_usage(
             root=tmp_path,
-            session_id="existing",
-            turn_id="turn_1",
-            input_tokens=100,
-            output_tokens=100,
-            tool_tokens=0,
-            created_at="2026-05-03T10:00:00Z",
+            usage=TurnTokenUsage(
+                session_id="existing",
+                turn_id="turn_1",
+                input_tokens=100,
+                output_tokens=100,
+                tool_tokens=0,
+                created_at="2026-05-03T10:00:00Z",
+            ),
         )
 
         # 第二次
         result = append_session_token_usage(
             root=tmp_path,
-            session_id="existing",
-            turn_id="turn_2",
-            input_tokens=200,
-            output_tokens=200,
-            tool_tokens=0,
-            created_at="2026-05-03T10:01:00Z",
+            usage=TurnTokenUsage(
+                session_id="existing",
+                turn_id="turn_2",
+                input_tokens=200,
+                output_tokens=200,
+                tool_tokens=0,
+                created_at="2026-05-03T10:01:00Z",
+            ),
         )
 
         assert result["turn_count"] == 2
@@ -163,16 +169,18 @@ class TestAppendSessionTokenUsage:
 
     def test_zero_tokens(self, tmp_path: Path):
         """测试零 token 用量。"""
-        from agent_py_agent.agent.memory_archive.tokens import append_session_token_usage
+        from agent_py_agent.agent.memory_archive.tokens import TurnTokenUsage, append_session_token_usage
 
         result = append_session_token_usage(
             root=tmp_path,
-            session_id="zero_test",
-            turn_id="turn_1",
-            input_tokens=0,
-            output_tokens=0,
-            tool_tokens=0,
-            created_at="2026-05-03T10:00:00Z",
+            usage=TurnTokenUsage(
+                session_id="zero_test",
+                turn_id="turn_1",
+                input_tokens=0,
+                output_tokens=0,
+                tool_tokens=0,
+                created_at="2026-05-03T10:00:00Z",
+            ),
         )
 
         assert result["turn_total"] == 0
@@ -180,16 +188,18 @@ class TestAppendSessionTokenUsage:
 
     def test_large_token_values(self, tmp_path: Path):
         """测试大数值 token 处理。"""
-        from agent_py_agent.agent.memory_archive.tokens import append_session_token_usage
+        from agent_py_agent.agent.memory_archive.tokens import TurnTokenUsage, append_session_token_usage
 
         result = append_session_token_usage(
             root=tmp_path,
-            session_id="large",
-            turn_id="turn_1",
-            input_tokens=1000000,
-            output_tokens=2000000,
-            tool_tokens=500000,
-            created_at="2026-05-03T10:00:00Z",
+            usage=TurnTokenUsage(
+                session_id="large",
+                turn_id="turn_1",
+                input_tokens=1000000,
+                output_tokens=2000000,
+                tool_tokens=500000,
+                created_at="2026-05-03T10:00:00Z",
+            ),
         )
 
         assert result["turn_total"] == 3500000

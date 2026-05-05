@@ -8,6 +8,7 @@ prompt_toolkit 的 Application 封装、状态栏刷新、worker 线程管理，
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
 
 from .rendering import (
     _cprint,
@@ -30,7 +31,17 @@ try:
 except ImportError:  # pragma: no cover
     Application = None
 
-MAX_HISTORY_TURNS = 8
+@dataclass
+class TuiInputRefs:
+    """Bundle of mutable refs for _make_start_worker_params (5 separate list refs)."""
+    app_ref: list
+    refresh_stop: threading.Event
+    assistant_outputs: list[str]
+    thinking_line_ref: list[str]
+    stream_buf_ref: list[str]
+    stop_event: threading.Event
+
+
 CONTEXT_WINDOW = 200_000
 COLLAPSE_PREVIEW_CHARS = 900
 
@@ -125,6 +136,7 @@ def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
     import time
 
     from .input_loop import handle_common_slash_command, is_exit_command
+    from .slash_command_types import SlashCommandContext
 
     if is_exit_command(params.user):
         _tui_request_exit(
@@ -157,12 +169,22 @@ def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
         return True
     return handle_common_slash_command(
         params.user,
-        agent=params.agent,
-        memory_limit=params.args.memory_limit,
-        runtime_inject=params.runtime_inject,
-        prompt_files=params.prompt_files,
-        print_line=_cprint,
+        ctx=SlashCommandContext(
+            agent=params.agent,
+            memory_limit=params.args.memory_limit,
+            runtime_inject=params.runtime_inject,
+            prompt_files=params.prompt_files,
+            print_line=_cprint,
+        ),
     )
+
+
+@dataclass
+class EnqueueQueueState:
+    """Bundle of queue state references for _tui_enqueue_job."""
+    jobs: object
+    state_lock: threading.Lock
+    pending_jobs_ref: list
 
 
 def _tui_enqueue_job(
@@ -170,9 +192,7 @@ def _tui_enqueue_job(
     show_prompt: bool,
     runtime_inject: list[str],
     prompt_files: list[str],
-    jobs,
-    state_lock: threading.Lock,
-    pending_jobs_ref: list,
+    queue_state: EnqueueQueueState,
 ) -> None:
     from .fallback_state import ChatJob
 
@@ -182,9 +202,9 @@ def _tui_enqueue_job(
         inject=list(runtime_inject),
         prompt_files=list(prompt_files),
     )
-    with state_lock:
-        pending_jobs_ref[0] += 1
-    jobs.put(job)
+    with queue_state.state_lock:
+        queue_state.pending_jobs_ref[0] += 1
+    queue_state.jobs.put(job)
     _tui_render_user_entry(user)
 
 
@@ -258,6 +278,62 @@ def _run_tui_loop(app, refresh_stop, stop_event, session_manager, current_sessio
     session_manager.touch_session(current_session_id, channel="chat")
 
 
+def _make_tui_app_params(
+    params: TuiRunParams,
+    assistant_outputs: list[str],
+    stop_event: threading.Event,
+) -> MakeTuiAppParams:
+    """Build MakeTuiAppParams for TUI app creation."""
+    return MakeTuiAppParams(
+        agent=params.agent,
+        state_lock=params.state_lock,
+        is_running_ref=params.is_running_ref,
+        pending_jobs_ref=params.pending_jobs_ref,
+        running_started_at_ref=params.running_started_at_ref,
+        last_token_estimate_ref=params.last_token_estimate_ref,
+        jobs=params.jobs,
+        pending_jobs_ref_for_enqueue=params.pending_jobs_ref,
+        runtime_inject=params.runtime_inject,
+        prompt_files=params.prompt_files,
+        args=params.args,
+        use_gateway=params.use_gateway,
+        paths=params.paths,
+        assistant_outputs=assistant_outputs,
+        shutting_down_ref=params.shutting_down_ref,
+        running_prompt_ref=params.running_prompt_ref,
+        stop_event=stop_event,
+    )
+
+
+def _make_start_worker_params(
+    params: TuiRunParams,
+    refs: TuiInputRefs,
+) -> StartWorkerParams:
+    """Build StartWorkerParams for worker thread startup."""
+    return StartWorkerParams(
+        app_ref=refs.app_ref,
+        refresh_stop=refs.refresh_stop,
+        jobs=params.jobs,
+        state_lock=params.state_lock,
+        is_running_ref=params.is_running_ref,
+        pending_jobs_ref=params.pending_jobs_ref,
+        running_prompt_ref=params.running_prompt_ref,
+        running_started_at_ref=params.running_started_at_ref,
+        agent=params.agent,
+        args=params.args,
+        paths=params.paths,
+        use_gateway=params.use_gateway,
+        conversation_history=params.conversation_history,
+        history_lock=params.history_lock,
+        build_history_context=params.build_history_context,
+        assistant_outputs=refs.assistant_outputs,
+        thinking_line_ref=refs.thinking_line_ref,
+        stream_buf_ref=refs.stream_buf_ref,
+        last_token_estimate_ref=params.last_token_estimate_ref,
+        stop_event=refs.stop_event,
+    )
+
+
 def run_tui(*, params: TuiRunParams) -> int:
     from .tui_worker import TuiWorkerConfig, _tui_worker_body
 
@@ -268,52 +344,19 @@ def run_tui(*, params: TuiRunParams) -> int:
     app_ref: list = [None]
     refresh_stop = threading.Event()
 
-    app = _make_tui_app(
-        params=MakeTuiAppParams(
-            agent=params.agent,
-            state_lock=params.state_lock,
-            is_running_ref=params.is_running_ref,
-            pending_jobs_ref=params.pending_jobs_ref,
-            running_started_at_ref=params.running_started_at_ref,
-            last_token_estimate_ref=params.last_token_estimate_ref,
-            jobs=params.jobs,
-            pending_jobs_ref_for_enqueue=params.pending_jobs_ref,
-            runtime_inject=params.runtime_inject,
-            prompt_files=params.prompt_files,
-            args=params.args,
-            use_gateway=params.use_gateway,
-            paths=params.paths,
-            assistant_outputs=assistant_outputs,
-            shutting_down_ref=params.shutting_down_ref,
-            running_prompt_ref=params.running_prompt_ref,
-            stop_event=stop_event,
-        )
-    )
+    app = _make_tui_app(params=_make_tui_app_params(params, assistant_outputs, stop_event))
     app_ref[0] = app
 
+    refs = TuiInputRefs(
+        app_ref=app_ref,
+        refresh_stop=refresh_stop,
+        assistant_outputs=assistant_outputs,
+        thinking_line_ref=thinking_line_ref,
+        stream_buf_ref=stream_buf_ref,
+        stop_event=stop_event,
+    )
     _start_worker_threads(
-        params=StartWorkerParams(
-            app_ref=app_ref,
-            refresh_stop=refresh_stop,
-            jobs=params.jobs,
-            state_lock=params.state_lock,
-            is_running_ref=params.is_running_ref,
-            pending_jobs_ref=params.pending_jobs_ref,
-            running_prompt_ref=params.running_prompt_ref,
-            running_started_at_ref=params.running_started_at_ref,
-            agent=params.agent,
-            args=params.args,
-            paths=params.paths,
-            use_gateway=params.use_gateway,
-            conversation_history=params.conversation_history,
-            history_lock=params.history_lock,
-            build_history_context=params.build_history_context,
-            assistant_outputs=assistant_outputs,
-            thinking_line_ref=thinking_line_ref,
-            stream_buf_ref=stream_buf_ref,
-            last_token_estimate_ref=params.last_token_estimate_ref,
-            stop_event=stop_event,
-        )
+        params=_make_start_worker_params(params, refs)
     )
 
     _tui_print_banner(params.agent, params.use_gateway)

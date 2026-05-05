@@ -4,7 +4,7 @@
 runtime context 服务按安全边界读取短正文。它不修改主循环，也不写长期规则文件。
 """
 
-from .context import RoutedMemoryContext, build_routed_memory_context
+from .context import RouteContextOptions, RoutedMemoryContext, build_routed_memory_context
 from .loader import load_memory_routes, load_routes, parse_json_routes, parse_markdown_routes
 from .matcher import build_read_receipt, match_routes, resolve_required_paths
 from .models import MemoryPathResolution, MemoryReadReceipt, MemoryRoute, MemoryRouteMatch
@@ -15,6 +15,7 @@ __all__ = [
     "MemoryReadReceipt",
     "MemoryRoute",
     "MemoryRouteMatch",
+    "RouteContextOptions",
     "RoutedMemoryContext",
     "build_read_receipt",
     "build_routed_memory_context",

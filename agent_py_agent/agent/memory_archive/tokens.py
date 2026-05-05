@@ -15,6 +15,18 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class TurnTokenUsage:
+    """Bundle for append_session_token_usage keyword parameters."""
+
+    session_id: str
+    turn_id: str
+    input_tokens: int
+    output_tokens: int
+    tool_tokens: int
+    created_at: str
+
+
+@dataclass(frozen=True)
 class TokenBudgetResult:
     """LLM: result of a token budget check against configured limits.
 
@@ -134,12 +146,7 @@ def token_ledger_dir(root: str | Path) -> Path:
 def append_session_token_usage(
     root: str | Path,
     *,
-    session_id: str,
-    turn_id: str,
-    input_tokens: int,
-    output_tokens: int,
-    tool_tokens: int,
-    created_at: str,
+    usage: TurnTokenUsage,
 ) -> dict[str, Any]:
     """LLM: append one turn token estimate to the session ledger and return cumulative totals.
 
@@ -147,7 +154,7 @@ def append_session_token_usage(
     这里不追求数据库复杂度，只需要一个稳定 JSON 文件，让压缩判断知道"到目前为止大概用了多少"。
     """
 
-    path = token_ledger_dir(root) / f"{session_id}.json"
+    path = token_ledger_dir(root) / f"{usage.session_id}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         try:
@@ -159,20 +166,20 @@ def append_session_token_usage(
     turns = payload.get("turns", [])
     if not isinstance(turns, list):
         turns = []
-    turn_total = max(0, int(input_tokens)) + max(0, int(output_tokens)) + max(0, int(tool_tokens))
+    turn_total = max(0, int(usage.input_tokens)) + max(0, int(usage.output_tokens)) + max(0, int(usage.tool_tokens))
     turns.append(
         {
-            "turn_id": str(turn_id),
-            "created_at": str(created_at),
-            "input_tokens": max(0, int(input_tokens)),
-            "output_tokens": max(0, int(output_tokens)),
-            "tool_tokens": max(0, int(tool_tokens)),
+            "turn_id": str(usage.turn_id),
+            "created_at": str(usage.created_at),
+            "input_tokens": max(0, int(usage.input_tokens)),
+            "output_tokens": max(0, int(usage.output_tokens)),
+            "tool_tokens": max(0, int(usage.tool_tokens)),
             "turn_total": turn_total,
         }
     )
     cumulative = sum(int(item.get("turn_total", 0) or 0) for item in turns)
     written = {
-        "session_id": str(session_id),
+        "session_id": str(usage.session_id),
         "turn_count": len(turns),
         "cumulative_tokens": cumulative,
         "turns": turns,
@@ -180,8 +187,8 @@ def append_session_token_usage(
     path.write_text(json.dumps(written, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     return {
         "path": str(path),
-        "session_id": str(session_id),
-        "turn_id": str(turn_id),
+        "session_id": str(usage.session_id),
+        "turn_id": str(usage.turn_id),
         "turn_total": turn_total,
         "cumulative_tokens": cumulative,
         "turn_count": len(turns),

@@ -13,7 +13,7 @@ from ..memory_archive.runtime.turn_archiver import ArchiveRunTurnParams, Archive
 from ..memory_archive.snapshots import (
     RecoverySnapshotInput,
 )
-from ..memory_archive.tokens import append_session_token_usage
+from ..memory_archive.tokens import TurnTokenUsage, append_session_token_usage
 from ._runtime_params import (
     ArchiveRunParams,
     EstimateTokenParams,
@@ -144,12 +144,14 @@ class FinalizationService:
         tool_tokens = estimate_tokens(params.archive_tool_calls)
         ledger = append_session_token_usage(
             self._agent.root,
-            session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
-            turn_id=params.turn_id,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            tool_tokens=tool_tokens,
-            created_at=str(time_module.time()),
+            usage=TurnTokenUsage(
+                session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
+                turn_id=params.turn_id,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                tool_tokens=tool_tokens,
+                created_at=str(time_module.time()),
+            ),
         )
         return {
             "turn": int(ledger["turn_total"]),

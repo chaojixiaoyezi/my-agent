@@ -8,6 +8,7 @@ execution logic that was previously in that file.
 
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -39,16 +40,23 @@ if TYPE_CHECKING:
     from ...core import SimpleAgent
 
 
+@dataclass
+class GatewayAskParams:
+    """Bundle for submit_gateway_ask keyword parameters."""
+
+    prompt: str
+    inject: list[str] | None = None
+    prompt_files: list[str] | None = None
+    save: bool = True
+    include_prompt: bool = False
+    resume_context: bool | None = None
+    agent: SimpleAgent | None = field(default=None, repr=False)
+
+
 def submit_gateway_ask(
     paths: GatewayPaths,
     *,
-    prompt: str,
-    inject: list[str] | None = None,
-    prompt_files: list[str] | None = None,
-    save: bool = True,
-    include_prompt: bool = False,
-    resume_context: bool | None = None,
-    agent: SimpleAgent | None = None,
+    params: GatewayAskParams,
 ) -> tuple[str, Path, Path]:
     """LLM contract: enqueue one ask request and return request/response paths."""
     from .io import write_gateway_request
@@ -59,23 +67,23 @@ def submit_gateway_ask(
     payload = {
         "id": request_id,
         "kind": "ask",
-        "prompt": prompt,
-        "inject": inject or [],
-        "prompt_files": prompt_files or [],
-        "save": save,
-        "include_prompt": include_prompt,
+        "prompt": params.prompt,
+        "inject": params.inject or [],
+        "prompt_files": params.prompt_files or [],
+        "save": params.save,
+        "include_prompt": params.include_prompt,
         "created_at": time.time(),
         "client_pid": 0,
         "status": "pending",
         "attempts": 0,
     }
-    if resume_context is not None:
-        payload["resume_context"] = bool(resume_context)
+    if params.resume_context is not None:
+        payload["resume_context"] = bool(params.resume_context)
     request_path = write_gateway_request(paths, payload)
     response_path = gateway_response_path(paths, request_id)
-    if agent is not None:
+    if params.agent is not None:
         audit_request_queued(
-            agent,
+            params.agent,
             {**payload, "status": "queued", "ok": False},
             request_path,
             response_path,
