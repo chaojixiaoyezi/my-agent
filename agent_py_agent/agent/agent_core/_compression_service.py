@@ -9,6 +9,7 @@ from ..memory_archive import (
     snapshots,
     write_compression_snapshot,
 )
+from ..memory_archive.snapshots import CompressionSnapshotInput
 from ._runtime_params import CompressionContext
 
 
