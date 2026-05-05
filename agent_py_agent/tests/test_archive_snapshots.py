@@ -146,7 +146,10 @@ class TestAppendSessionTokenUsage:
 
     def test_append_creates_file(self, tmp_path: Path):
         """测试首次追加创建文件。"""
-        from agent_py_agent.agent.memory_archive.tokens import TurnTokenUsage, append_session_token_usage
+        from agent_py_agent.agent.memory_archive.tokens import (
+            TurnTokenUsage,
+            append_session_token_usage,
+        )
 
         result = append_session_token_usage(
             root=tmp_path,
@@ -166,7 +169,10 @@ class TestAppendSessionTokenUsage:
 
     def test_append_cumulative_tokens(self, tmp_path: Path):
         """测试多次追加累计 token。"""
-        from agent_py_agent.agent.memory_archive.tokens import TurnTokenUsage, append_session_token_usage
+        from agent_py_agent.agent.memory_archive.tokens import (
+            TurnTokenUsage,
+            append_session_token_usage,
+        )
 
         append_session_token_usage(
             root=tmp_path,
@@ -197,7 +203,10 @@ class TestAppendSessionTokenUsage:
 
     def test_append_negative_tokens(self, tmp_path: Path):
         """测试负数 token 被处理为 0。"""
-        from agent_py_agent.agent.memory_archive.tokens import TurnTokenUsage, append_session_token_usage
+        from agent_py_agent.agent.memory_archive.tokens import (
+            TurnTokenUsage,
+            append_session_token_usage,
+        )
 
         result = append_session_token_usage(
             root=tmp_path,

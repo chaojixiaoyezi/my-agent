@@ -14,7 +14,12 @@ from agent_py_agent.agent.subagents.reports import PatchApplyReport
 from agent_py_agent.agent.subagents.utils import _read_json_object
 
 from .patch_apply_reports import patch_apply_record_to_dict
-from .patch_apply_task import ApplyPatchTaskParams, apply_patch_task, normalize_patch_apply_spec, resolve_patch_target
+from .patch_apply_task import (
+    ApplyPatchTaskParams,
+    apply_patch_task,
+    normalize_patch_apply_spec,
+    resolve_patch_target,
+)
 
 
 class PatchApplyService:

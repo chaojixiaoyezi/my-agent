@@ -9,7 +9,11 @@ from __future__ import annotations
 import pytest
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.services.lifecycle import RecordCapabilityGrantParams, RecordCapabilityRequestParams, RecordEvidenceParams
+from agent_py_agent.agent.subagents.services.lifecycle import (
+    RecordCapabilityGrantParams,
+    RecordCapabilityRequestParams,
+    RecordEvidenceParams,
+)
 
 
 def test_subagent_lifecycle_service_records_capabilities_and_status(tmp_path) -> None:

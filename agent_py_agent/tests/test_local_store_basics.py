@@ -14,9 +14,9 @@ import threading
 from pathlib import Path
 
 from agent_py_agent.__main__ import (
+    GatewayAskParams,
     _handle_gateway_request,
     gateway_paths,
-    GatewayAskParams,
     submit_gateway_ask,
 )
 from agent_py_agent.agent.config import AgentConfig

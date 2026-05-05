@@ -380,7 +380,6 @@ def _make_tui_app(*, params: MakeTuiAppParams):
 
 
 __all__ = [
-    "MAX_HISTORY_TURNS",
     "CONTEXT_WINDOW",
     "COLLAPSE_PREVIEW_CHARS",
     "run_tui",

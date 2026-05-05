@@ -26,7 +26,6 @@ from .input_loop import (
     is_show_prompt_command,
     parse_expand_target,
 )
-from .slash_command_types import SlashCommandContext
 from .renderer import (
     BLUE,
     BOLD,
@@ -48,6 +47,7 @@ from .session_state import (
     create_or_resume_session,
     touch_session_on_exit,
 )
+from .slash_command_types import SlashCommandContext
 from .tui import run_tui
 
 # Import thinking spinner for backward compatibility

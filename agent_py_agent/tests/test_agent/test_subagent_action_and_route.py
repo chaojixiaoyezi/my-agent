@@ -17,7 +17,11 @@ from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.skills import SkillRegistry
-from agent_py_agent.agent.subagents.services.lifecycle import RecordCapabilityGrantParams, RecordCapabilityRequestParams, RecordEvidenceParams
+from agent_py_agent.agent.subagents.services.lifecycle import (
+    RecordCapabilityGrantParams,
+    RecordCapabilityRequestParams,
+    RecordEvidenceParams,
+)
 
 
 def test_subagent_channel_probe_report():
