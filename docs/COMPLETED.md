@@ -20,6 +20,7 @@
 - `CODE_SIZE_BASELINE.json` 从空基线补齐为当前历史遗留项基线，避免 nightly `strict` 模式把既有超长类误判成“新增阻断”。
 - `agent_py_agent/agent/log_analysis/ingest/dedup.py` 为共享 `dedup.sqlite3` 的并发初始化增加按路径串行化和更保守的 SQLite busy timeout，修复 `Full Tests` 慢测里偶发的 `database is locked`。
 - `agent_py_agent/tests/test_stress_log_pipeline.py` 改为显式 `future.result()`，让并发 ingest 再出异常时直接暴露真实栈，而不是只表现为结果数量变少。
+- `.github/workflows/full-tests.yml` 调整 `Run security tests`：当仓库当前没有 `@pytest.mark.security` 用例时，把 pytest 的退出码 `5` 视为跳过而不是失败，避免 workflow 因“0 tests collected”误报红灯。
 - 顺手修复了本轮 `ruff` 报出的 import 排序问题，并补齐 subagent 模块文档同步记录。
 
 验证方式：
@@ -34,6 +35,7 @@
 - `python3 -m pytest -q -m "not slow and not e2e" --tb=short`（本地环境缺少 `pytest-timeout`，因此去掉了 `--timeout` 参数；命令退出码为 0）
 - `python3 -m pytest -q agent_py_agent/tests/test_stress_log_pipeline.py::TestConcurrentIngest::test_multiple_pipelines_same_root -q`
 - 30 轮本地并发复现脚本：5 个 `IngestPipeline(root=同一 tmp_path)` 并发 ingest，共享 `dedup.sqlite3`，全部通过
+- `python3 -m pytest -q -m security --tb=short` 本地返回 `EXIT:5`，与 CI 失败现象一致；workflow 已改为对该退出码执行跳过分支
 
 ### 记忆系统第一批闭环
 
