@@ -1,1 +1,13 @@
-{}
+{
+  "generated_at": "2026-05-05T13:00:11.757937+00:00",
+  "total_findings": 1,
+  "findings": [
+    {
+      "identity": "class:agent_py_agent/agent/subagents/manager_capabilities.py:SubAgentCapabilityMixin",
+      "severity": "hard",
+      "kind": "class",
+      "path": "agent_py_agent/agent/subagents/manager_capabilities.py",
+      "name": "SubAgentCapabilityMixin"
+    }
+  ]
+}

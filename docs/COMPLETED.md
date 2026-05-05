@@ -8,6 +8,29 @@
 
 ## 基础设施
 
+### CI 回归修复（2026-05-05）
+
+解决问题：GitHub Actions 在 `Test` 和 `Lint` 工作流里同时暴露出几类问题，包括 gateway 测试共享仓库目录导致互相污染、heartbeat 测试读取了错误的队列路径、日志证据子进程测试缺少 `Path` 导入，以及 subagent runner 结构化解析失败后 `SubAgentRunnerResult` 仍沿用旧的 `ok=True`。
+
+落地内容：
+- `agent_py_agent/tests/test_local_store_gateway.py` 改为使用临时目录隔离 gateway 工作区，并在 heartbeat 断言时读取 `processing/` 中的请求文件，避免复用仓库根目录和 pending 路径造成误报。
+- `agent_py_agent/tests/test_log_analysis_query.py` 按当前 `LocalLogStore` 真实行为修正事件数量断言，允许 WAF/EDR/NormalizedEvent 三类样本并存。
+- `agent_py_agent/tests/test_log_evidence.py` 为子进程测试补上 `Path` 导入，避免 `NameError`。
+- `agent_py_agent/agent/subagents/manager_runner_results.py` 统一使用 `apply_runner_result_fields()` 产出的最终 `ok/message/status` 写回 `output.json` 和 `SubAgentRunnerResult`，确保结构化解析失败会稳定降级成 `BLOCKED` / `ok=False`。
+- `CODE_SIZE_BASELINE.json` 从空基线补齐为当前历史遗留项基线，避免 nightly `strict` 模式把既有超长类误判成“新增阻断”。
+- 顺手修复了本轮 `ruff` 报出的 import 排序问题，并补齐 subagent 模块文档同步记录。
+
+验证方式：
+- `python3 -m pytest -q agent_py_agent/tests/test_local_store_gateway.py::test_gateway_processing_recovery_requeues_then_fails_after_attempt_limit agent_py_agent/tests/test_local_store_gateway.py::test_gateway_worker_refreshes_processing_lease_heartbeat_during_long_run agent_py_agent/tests/test_log_analysis_query.py::test_local_store_upserts_and_queries_security_fields agent_py_agent/tests/test_log_evidence.py::TestEvidenceStoreIntegration::test_evidence_store_init agent_py_agent/tests/test_manager_runner_results.py::test_record_runner_result_handles_parse_failure`
+- `python3 scripts/check_doc_sync.py`
+- `python3 -m compileall -q agent_py_agent scripts`
+- `python3 scripts/check_clean_package.py .`
+- `ruff check agent_py_agent scripts`
+- `python3 -m pytest agent_py_agent/tests/test_architecture_guardrails.py -q`
+- `python3 -m pytest agent_py_agent/tests/test_packaging.py agent_py_agent/tests/test_cli_parser.py agent_py_agent/tests/test_tooling_filesystem.py -q`
+- `python3 scripts/check_code_size.py --mode warn`
+- `python3 -m pytest -q -m "not slow and not e2e" --tb=short`（本地环境缺少 `pytest-timeout`，因此去掉了 `--timeout` 参数；命令退出码为 0）
+
 ### 记忆系统第一批闭环
 
 解决问题：记忆层级、召回、任务状态、压缩、长期规则和恢复校验之前只是骨架，压缩可能丢信息，规则可能长到塞不进 prompt，恢复也缺少权威源校验。

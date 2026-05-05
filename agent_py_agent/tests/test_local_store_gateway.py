@@ -85,6 +85,8 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
 
 def _setup_agent_with_gateway(cfg_overrides: dict | None = None) -> tuple[Path, SimpleAgent, AdapterPaths]:
     """Create agent with gateway workspace and all directory paths created."""
+    temp_dir = tempfile.TemporaryDirectory()
+    root = Path(temp_dir.name)
     cfg = AgentConfig(
         model_backend="echo",
         gateway_workspace="gateway",
@@ -93,11 +95,13 @@ def _setup_agent_with_gateway(cfg_overrides: dict | None = None) -> tuple[Path, 
         local_store_events_path="local_store/events.jsonl",
         **(cfg_overrides or {}),
     )
-    agent = SimpleAgent(cfg, Path())
+    agent = SimpleAgent(cfg, root)
+    # Keep the temp dir alive for the whole test via the agent instance.
+    agent._test_temp_dir = temp_dir  # type: ignore[attr-defined]
     paths = gateway_paths(agent)
     for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         path.mkdir(parents=True, exist_ok=True)
-    return agent.root, agent, paths
+    return root, agent, paths
 
 
 def _submit_idle_request(paths, prompt: str) -> tuple[str, Path, Path]:
@@ -134,12 +138,13 @@ def _track_heartbeat_during_run(agent: SimpleAgent, paths, request_path: Path) -
     """Poll lease_heartbeat_at before and during a slow run, return [initial, updated]."""
     observed: list[float] = []
     original_run = agent.run
+    processing_path = paths.processing / request_path.name
 
     def slow_run(user_prompt: str, **kwargs) -> AgentRunResult:
         deadline = time.time() + 2
         initial = 0.0
         while time.time() < deadline:
-            initial = float(read_json_file(request_path).get("lease_heartbeat_at", 0) or 0)
+            initial = float(read_json_file(processing_path).get("lease_heartbeat_at", 0) or 0)
             if initial:
                 break
             time.sleep(0.02)
@@ -147,7 +152,7 @@ def _track_heartbeat_during_run(agent: SimpleAgent, paths, request_path: Path) -
         deadline = time.time() + 2
         while time.time() < deadline:
             time.sleep(0.05)
-            updated = float(read_json_file(request_path).get("lease_heartbeat_at", 0) or 0)
+            updated = float(read_json_file(processing_path).get("lease_heartbeat_at", 0) or 0)
             if updated > initial:
                 break
         observed.extend([initial, updated])

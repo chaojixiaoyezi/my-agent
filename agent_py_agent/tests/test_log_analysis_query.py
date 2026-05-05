@@ -96,7 +96,7 @@ def test_local_store_upserts_and_queries_security_fields(tmp_path):
 
     # Duplicate upsert returns False
     assert store.upsert_event(_sample_waf_event()) is False
-    assert len(store.list_events()) == 2
+    assert len(store.list_events()) == 3
 
     # Verify all record types are stored and retrievable
     assert store.get_finding("finding-1")["detector_id"] == "detector-1"

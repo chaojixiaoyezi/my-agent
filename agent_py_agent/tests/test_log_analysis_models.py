@@ -19,7 +19,6 @@ from agent_py_agent.agent.log_analysis.models import (
     SourceSpec,
 )
 
-
 # ── Contract sample builders ──────────────────────────────────────────────────
 
 def _sample_evidence_ref() -> EvidenceRef:
