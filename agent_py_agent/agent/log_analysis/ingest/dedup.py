@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -12,10 +13,26 @@ from ..parsers.common import utc_now
 class DedupStore:
     """SQLite-backed batch and event dedup ledger."""
 
+    _init_locks_guard = threading.Lock()
+    _init_locks: dict[str, threading.Lock] = {}
+
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
+        self._init_schema_once()
+
+    def _init_schema_once(self) -> None:
+        """Serialize first-time schema bootstrap for the same SQLite path.
+
+        并发 ingest 会在多个线程里同时 new `DedupStore(root/"dedup.sqlite3")`。
+        SQLite 在多个连接同时切 WAL / 建表时偶发 `database is locked`，这里
+        先按数据库路径串行化初始化，避免把启动竞态暴露给上层 pipeline。
+        """
+        key = str(self.db_path.resolve())
+        with self._init_locks_guard:
+            lock = self._init_locks.setdefault(key, threading.Lock())
+        with lock:
+            self._init_schema()
 
     def begin_batch(
         self,
@@ -173,8 +190,9 @@ class DedupStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         try:
+            conn.execute("PRAGMA busy_timeout=30000")
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
             yield conn
