@@ -179,28 +179,88 @@ def cmd_gateway_uninstall(args) -> int:
 
 
 def cmd_gateway_start(args) -> int:
-    """Start gateway in background via fork."""
-    import os
-    import subprocess
-    import sys
-    import time
-
-    from ..agent.gateway_parts.daemon_control import write_pid_record
+    """Start gateway in background."""
 
     agent = make_agent(args)
     paths = gateway_paths(agent)
-
-    pid = os.fork()
-    if pid == 0:
-        os.setsid()
-        for fd in (0, 1, 2):
-            os.close(fd)
-        os.execl(sys.executable, sys.executable, "-m", "agent_py_agent", "gateway", "run")
-    else:
-        time.sleep(0.5)
-        write_pid_record(paths.pid)
-        print(f"gateway started pid={pid}")
+    paths.root.mkdir(parents=True, exist_ok=True)
+    pid = get_running_pid(paths.pid)
+    if pid and is_pid_alive(pid) and not args.force:
+        record = read_pid_record(paths.pid)
+        print(f"gateway 已在运行 pid={pid}")
+        print(f"status: {paths.state}")
+        if record:
+            print(f"start_time: {record.get('start_time')}")
         return 0
+    if pid and is_pid_alive(pid) and args.force:
+        paths.stop_request.write_text(
+            json.dumps({"requested_at": time.time(), "reason": "force restart before start"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        if not wait_for_pid_exit(pid, agent.config.gateway_stop_timeout):
+            terminate_pid(pid)
+            wait_for_pid_exit(pid, 5)
+
+    try:
+        paths.stop_request.unlink()
+    except OSError:
+        pass
+
+    config_path = Path(args.config).resolve()
+    command = [
+        sys.executable,
+        "-m",
+        "agent_py_agent",
+        "--config",
+        str(config_path),
+        "gateway",
+        "run",
+    ]
+    if args.force_lock:
+        command.append("--force-lock")
+
+    creationflags = 0
+    start_new_session = False
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    else:
+        start_new_session = True
+
+    with paths.log.open("ab") as log_file:
+        process = subprocess.Popen(
+            command,
+            cwd=ROOT.parent,
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            creationflags=creationflags,
+            start_new_session=start_new_session,
+        )
+
+    from ..agent.gateway_parts.daemon_control import _get_process_start_time, _utc_now_iso
+    paths.pid.parent.mkdir(parents=True, exist_ok=True)
+    write_json_file(paths.pid, {
+        "pid": process.pid,
+        "kind": "my-agent-gateway",
+        "argv": command,
+        "start_time": _get_process_start_time(process.pid),
+        "updated_at": _utc_now_iso(),
+    })
+    write_json_file(
+        paths.state,
+        {
+            "status": "starting",
+            "pid": process.pid,
+            "started_at": time.time(),
+            "command": command,
+            "log": str(paths.log),
+        },
+    )
+    wait_for_gateway_running(paths, timeout=10.0)
+    print(f"gateway starting pid={process.pid}")
+    print(f"state: {paths.state}")
+    print(f"log: {paths.log}")
+    return 0
 
 
 def cmd_gateway_run(args) -> int:

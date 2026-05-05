@@ -15,6 +15,7 @@ def _write_echo_config(tmp_path: Path) -> Path:
         'model_backend: "echo"\n'
         'subagent_workspace: ".my_agent/subagents"\n'
         'gateway_workspace: ".my_agent/gateway"\n'
+        'gateway_port: 0\n'
         'memory_path: ".my_agent/memory.jsonl"\n'
         'local_store_path: ".my_agent/local_store/local.db"\n'
         'local_store_files_dir: ".my_agent/local_store/files"\n'

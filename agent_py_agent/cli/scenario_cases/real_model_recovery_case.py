@@ -127,7 +127,7 @@ def _real_model_recovery_setup(args):
         f"tool_rounds={runner.tool_rounds} backend_calls={backend.calls} "
         f"real_response_len={len(backend.real_response_text)}"
     )
-    return paths, agent, backend, task, loaded
+    return paths, agent, backend, task, loaded, runner
 
 
 def _real_model_recovery_resume(paths, agent, task, loaded):
@@ -171,7 +171,7 @@ def run_scenario_real_model_recovery_case(args) -> int:
     这比 stub 后端测试更接近真实使用场景。
     """
 
-    paths, agent, backend, task, loaded = _real_model_recovery_setup(args)
+    paths, agent, backend, task, loaded, runner = _real_model_recovery_setup(args)
 
     print_scenario_step(3, "Simulate cross-day archive clues for a resumed parent session")
     resume_payload = _real_model_recovery_resume(paths, agent, task, loaded)
@@ -200,7 +200,7 @@ def run_scenario_real_model_recovery_case(args) -> int:
         and backend.calls >= 2
         and bool(backend.real_response_text)
         and echo_signature not in backend.real_response_text
-        and resume.returncode == 0
+        and resume_payload.get("ok") is True
         and archive_count >= 2
         and matching_task.get("exists") is True
         and matching_task.get("status") == "AWAITING_ACCEPTANCE"
@@ -347,7 +347,7 @@ def _multi_round_setup(args):
         f"real_response_len={len(backend.real_response_text)} "
         f"tool_sequence={backend.tool_sequence}"
     )
-    return paths, agent, backend, task, loaded
+    return paths, agent, backend, task, loaded, runner
 
 
 def run_scenario_real_model_recovery_multi_round_case(args) -> int:
@@ -358,7 +358,7 @@ def run_scenario_real_model_recovery_multi_round_case(args) -> int:
     验证模型响应内容能在 memory-resume 恢复后找回，包括每轮工具调用的 evidence。
     """
 
-    paths, agent, backend, task, loaded = _multi_round_setup(args)
+    paths, agent, backend, task, loaded, runner = _multi_round_setup(args)
 
     print_scenario_step(3, "Simulate cross-day archive clues for a resumed parent session")
     resume_payload = _real_model_recovery_resume(paths, agent, task, loaded)
@@ -397,7 +397,7 @@ def run_scenario_real_model_recovery_multi_round_case(args) -> int:
         and "search_text" in backend.tool_sequence
         and bool(backend.real_response_text)
         and echo_signature not in backend.real_response_text
-        and resume.returncode == 0
+        and resume_payload.get("ok") is True
         and archive_count >= 2
         and matching_task.get("exists") is True
         and matching_task.get("status") == "AWAITING_ACCEPTANCE"
