@@ -19,6 +19,7 @@ from ._runtime_params import (
     WriteRecoverySnapshotParams,
 )
 from ._tool_loop_service import ToolLoopService
+from ..memory_archive import write_compression_snapshot, write_recovery_snapshot
 from .models import AgentRunResult
 
 __all__ = [
