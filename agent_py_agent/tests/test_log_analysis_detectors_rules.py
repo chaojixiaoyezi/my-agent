@@ -18,7 +18,6 @@ from agent_py_agent.agent.log_analysis.reports import (
 )
 from agent_py_agent.agent.log_analysis.security.correlation import build_route_draft
 
-
 # ── Shared event fixtures ─────────────────────────────────────────────────────
 
 _WAF_EVENT = {

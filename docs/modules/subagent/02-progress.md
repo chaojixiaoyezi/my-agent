@@ -2,6 +2,7 @@
 
 ## 已完成
 
+- 2026-05-05 CI 稳定性修复：修正 `manager_runner_results.py` 在结构化解析失败时仍把 `SubAgentRunnerResult.ok` 写成旧值的问题；同时补齐 `test_local_store_gateway.py` 的临时目录隔离和 heartbeat 读取路径，避免 gateway 测试互相污染。
 - workflow 配置和开关已落地：`auto`、`manual`、`off`。
 - 内置 workflow 模板、模板加载、覆盖和校验已有基础实现。
 - `QualityContract`、`ContextManifest`、`context_packs` 已进入 subagent 任务结构。
@@ -20,6 +21,7 @@
 
 ## 解决的问题
 
+- GitHub Actions 里的 subagent/gateway 相关回归不再因为测试共享仓库目录、读取错误队列路径或 runner 结果字段不同步而误报失败。
 - workflow 不再只是“多开 worker”的口头约定，而是能把质量标准、上下文包、写入边界和父级验收显式写出来。
 - 用户可以少说任务怎么拆，系统先用模板和 dry-run 预览补足常见派工结构。
 - worker 自述完成不会直接变成最终完成，父级验收门被放进计划和任务结构里。
@@ -50,6 +52,7 @@
 - 本轮 focused 组合验收：`python3 -m pytest agent_py_agent/tests/test_scenario_gateway_resume.py agent_py_agent/tests/test_cli_reference.py agent_py_agent/tests/test_doc_sync.py -q` -> `8 passed`。
 - 本轮同步门验收：`python3 scripts/check_doc_sync.py` -> `DOC_SYNC_PASS`。
 - 本轮全量回归：`python3 -m pytest -q` -> `251 passed`。
+- 本轮 CI 回归修复验收：`python3 -m pytest -q agent_py_agent/tests/test_local_store_gateway.py::test_gateway_processing_recovery_requeues_then_fails_after_attempt_limit agent_py_agent/tests/test_local_store_gateway.py::test_gateway_worker_refreshes_processing_lease_heartbeat_during_long_run agent_py_agent/tests/test_log_analysis_query.py::test_local_store_upserts_and_queries_security_fields agent_py_agent/tests/test_log_evidence.py::TestEvidenceStoreIntegration::test_evidence_store_init agent_py_agent/tests/test_manager_runner_results.py::test_record_runner_result_handles_parse_failure` -> `5 passed`。
 
 ## 未跑测试
 

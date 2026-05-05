@@ -20,6 +20,7 @@ def _run_evidence_code(code_body: str) -> None:
     code = (
         f'import sys\n'
         f'sys.path.insert(0, "{_ROOT}")\n'
+        f'from pathlib import Path\n'
         f'from agent_py_agent.agent.log_analysis.cases.evidence import LocalEvidenceStore\n'
         f'{code_body}'
     )

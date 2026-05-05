@@ -102,6 +102,8 @@ class BuildAndPersistContext:
     """Bundle for _build_and_persist_result to reduce parameter count."""
     task: SubAgentTask
     params: RecordRunnerResultParams
+    final_ok: bool
+    final_message: str
     parsed: SubAgentParsedOutput
     output_payload: dict
     structured_evidence_count: int
@@ -118,15 +120,15 @@ class BuildAndPersistContext:
 class SubAgentRunnerResultMixin:
     def _build_and_persist_result(
         self,
-        ctx: "BuildAndPersistContext",
+        ctx: BuildAndPersistContext,
     ) -> SubAgentRunnerResult:
         """Build runner result and persist files."""
         result = _build_runner_result(
             RunnerResultContext(
                 task=ctx.task,
                 dry_run=ctx.params.dry_run,
-                ok=ctx.params.ok,
-                message=ctx.params.message,
+                ok=ctx.final_ok,
+                message=ctx.final_message,
                 backend=ctx.params.backend,
                 tool_rounds=ctx.params.tool_rounds,
                 prompt=ctx.params.prompt,
@@ -197,19 +199,24 @@ class SubAgentRunnerResultMixin:
             ignored_tools, ignored_skills, structured_evidence_count, structured_request_count = [], [], 0, 0
             created_request_ids, artifacts, tests, patches, lessons, next_actions = [], [], [], [], [], []
 
-        blockers = [] if (ok and status not in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}) else [parsed.blocked_reason or message]
         result_meta = {"ok": ok, "message": message, "response": response, "dry_run": dry_run}
-        runner_meta = {"dry_run": dry_run, "ok": ok, "message": message, "backend": backend, "tool_rounds": tool_rounds, "now": now}
         cap_data = {"parsed": parsed, "structured_evidence_count": structured_evidence_count, "structured_request_count": structured_request_count, "created_request_ids": created_request_ids, "structured_repair_attempted": structured_repair_attempted, "structured_repair_ok": structured_repair_ok, "structured_repair_error": structured_repair_error}
         tools_info = {"actual_tools": actual_tools, "ignored_tools": ignored_tools, "ignored_skills": ignored_skills}
-        output_items = {"artifacts": artifacts, "tests": tests, "patches": patches, "lessons": lessons, "blockers": blockers, "next_actions": next_actions}
         status_context = {"status": status, "verification_status": verification_status, "failure_type": failure_type}
         apply_runner_result_fields(task, result_meta, status_context, parsed, now)
+        # 结构化解析失败会在这里把最终状态降级为 BLOCKED/ok=False，后续输出必须沿用最终值。
+        final_ok = result_meta["ok"]
+        final_message = result_meta["message"]
+        blockers = [] if (final_ok and task.status not in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}) else [parsed.blocked_reason or final_message]
+        runner_meta = {"dry_run": dry_run, "ok": final_ok, "message": final_message, "backend": backend, "tool_rounds": tool_rounds, "now": now}
+        output_items = {"artifacts": artifacts, "tests": tests, "patches": patches, "lessons": lessons, "blockers": blockers, "next_actions": next_actions}
         output_payload = self._build_output_payload_wrapper(task, runner_meta, cap_data, tools_info, output_items)
         result = self._build_and_persist_result(
             BuildAndPersistContext(
                 task=task,
                 params=params,
+                final_ok=final_ok,
+                final_message=final_message,
                 parsed=parsed,
                 output_payload=output_payload,
                 structured_evidence_count=structured_evidence_count,
