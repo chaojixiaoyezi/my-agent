@@ -35,7 +35,7 @@ class TestCmdSubagents:
         mock_board.recent = []
         mock_agent.subagents.write_board.return_value = mock_board
 
-        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent):
+        with patch("agent_py_agent.cli._board.make_agent", return_value=mock_agent):
             result = cmd_subagents(args)
             assert result == 0
 
@@ -74,7 +74,7 @@ class TestCmdSubagents:
         mock_agent = MagicMock()
         mock_agent.subagents.write_board.return_value = mock_board
 
-        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent):
+        with patch("agent_py_agent.cli._board.make_agent", return_value=mock_agent):
             result = cmd_subagents(args)
             assert result == 0
 
@@ -99,8 +99,8 @@ class TestCmdSubagentsDueCheck:
         mock_report.issues = []
         mock_agent.subagents.write_due_check.return_value = mock_report
 
-        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.subagents.load_capability_config", return_value=MagicMock()):
+        with patch("agent_py_agent.cli._inspection.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli._inspection.load_capability_config", return_value=MagicMock()):
             result = cmd_subagents_due_check(args)
             assert result == 0
 
@@ -123,7 +123,7 @@ class TestCmdSubagentsProbe:
         mock_report.results = []
         mock_agent.subagents.write_channel_probe_report.return_value = mock_report
 
-        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent):
+        with patch("agent_py_agent.cli._inspection.make_agent", return_value=mock_agent):
             result = cmd_subagents_probe(args)
             assert result == 0
 
@@ -148,8 +148,8 @@ class TestCmdSubagentsPlanActions:
         mock_report.actions = []
         mock_agent.subagents.write_action_plan.return_value = mock_report
 
-        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.subagents.load_capability_config", return_value=MagicMock()):
+        with patch("agent_py_agent.cli._actions.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli._actions.load_capability_config", return_value=MagicMock()):
             result = cmd_subagents_plan_actions(args)
             assert result == 0
 
@@ -178,8 +178,8 @@ class TestCmdSubagentsApplyActions:
         mock_report.records = []
         mock_agent.subagents.write_action_apply_report.return_value = mock_report
 
-        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.subagents.load_capability_config", return_value=MagicMock()):
+        with patch("agent_py_agent.cli._actions.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli._actions.load_capability_config", return_value=MagicMock()):
             result = cmd_subagents_apply_actions(args)
             assert result == 0
 
@@ -206,9 +206,9 @@ class TestCmdSubagentsRouteCapabilities:
         mock_report.records = []
         mock_agent.subagents.write_capability_route_report.return_value = mock_report
 
-        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.subagents.load_capability_config", return_value=MagicMock()), \
-             patch("agent_py_agent.cli.subagents.make_capability_router", return_value=mock_router):
+        with patch("agent_py_agent.cli._actions.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli._actions.load_capability_config", return_value=MagicMock()), \
+             patch("agent_py_agent.cli._actions.make_capability_router", return_value=mock_router):
             result = cmd_subagents_route_capabilities(args)
             assert result == 0
 
@@ -234,7 +234,7 @@ class TestCmdSubagentsAcceptance:
         mock_report.records = []
         mock_agent.subagents.write_acceptance_review_report.return_value = mock_report
 
-        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent):
+        with patch("agent_py_agent.cli._review.make_agent", return_value=mock_agent):
             result = cmd_subagents_acceptance(args)
             assert result == 0
 
@@ -260,7 +260,7 @@ class TestCmdSubagentsPatches:
         mock_report.records = []
         mock_agent.subagents.write_patch_review_report.return_value = mock_report
 
-        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent):
+        with patch("agent_py_agent.cli._review.make_agent", return_value=mock_agent):
             result = cmd_subagents_patches(args)
             assert result == 0
 
@@ -301,9 +301,9 @@ class TestCmdSubagentsDispatch:
         mock_report.records = []
         mock_agent.dispatch_subagents.return_value = mock_report
 
-        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.subagents.load_capability_config", return_value=MagicMock()), \
-             patch("agent_py_agent.cli.subagents.make_capability_router", return_value=mock_router):
+        with patch("agent_py_agent.cli._dispatch.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli._dispatch.load_capability_config", return_value=MagicMock()), \
+             patch("agent_py_agent.cli._dispatch.make_capability_router", return_value=mock_router):
             result = cmd_subagents_dispatch(args)
             assert result == 0
 
@@ -333,7 +333,7 @@ class TestCmdSubagentsDispatch:
         args.watch = False
         args.skill_dir = None
 
-        with patch("agent_py_agent.cli.subagents.make_agent", return_value=MagicMock()):
+        with patch("agent_py_agent.cli._dispatch.make_agent", return_value=MagicMock()):
             result = cmd_subagents_dispatch(args)
             assert result == 2
 
@@ -367,7 +367,7 @@ class TestCmdSubagentRun:
         mock_result.response_file = None
         mock_agent.run_subagent.return_value = mock_result
 
-        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent):
+        with patch("agent_py_agent.cli._dispatch.make_agent", return_value=mock_agent):
             result = cmd_subagent_run(args)
             assert result == 0
 
@@ -397,7 +397,7 @@ class TestCmdSubagentRun:
         mock_result.response_file = None
         mock_agent.run_subagent.return_value = mock_result
 
-        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent):
+        with patch("agent_py_agent.cli._dispatch.make_agent", return_value=mock_agent):
             result = cmd_subagent_run(args)
             assert result == 1
 
@@ -424,7 +424,7 @@ class TestCmdSubagentDetail:
 
         mock_agent.subagents.load.return_value = SimpleMockTask()
 
-        with patch("agent_py_agent.cli.subagents.make_agent", return_value=mock_agent):
+        with patch("agent_py_agent.cli._board.make_agent", return_value=mock_agent):
             result = cmd_subagent_detail(args)
             assert result == 0
 
@@ -459,7 +459,7 @@ class TestCmdSubagentsWorkflowPlan:
             "issues": []
         }
 
-        with patch("agent_py_agent.cli.subagents.load_config", return_value=MagicMock()), \
-             patch("agent_py_agent.cli.subagents.plan_workflow_for_goal", return_value=mock_result):
+        with patch("agent_py_agent.cli._dispatch.load_config", return_value=MagicMock()), \
+             patch("agent_py_agent.cli._dispatch.plan_workflow_for_goal", return_value=mock_result):
             result = cmd_subagents_workflow_plan(args)
             assert result == 0

@@ -34,7 +34,7 @@ class TestCmdGatewayStart:
         mock_paths.pid = tmp_path / "gateway.pid"
         mock_paths.stop_request = tmp_path / "stop.json"
 
-        with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=mock_agent), \
+        with patch("agent_py_agent.cli._gateway_commands.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=mock_paths), \
              patch("agent_py_agent.cli.gateway_process.get_running_pid", return_value=12345), \
              patch("agent_py_agent.cli.gateway_process.is_pid_alive", return_value=True), \
@@ -61,14 +61,12 @@ class TestCmdGatewayStart:
         mock_paths.pid = tmp_path / "gateway.pid"
         mock_paths.stop_request = tmp_path / "stop.json"
 
-        with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=mock_agent), \
+        with patch("agent_py_agent.cli._gateway_commands.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=mock_paths), \
              patch("agent_py_agent.cli.gateway_process.get_running_pid", return_value=12345), \
              patch("agent_py_agent.cli.gateway_process.is_pid_alive", return_value=True), \
              patch("agent_py_agent.cli.gateway_process.wait_for_pid_exit", return_value=True), \
-             patch("agent_py_agent.cli.gateway_process.terminate_pid"), \
-             patch("agent_py_agent.cli.gateway_process.gateway_paths") as mock_gw_paths:
-            mock_gw_paths.return_value = mock_paths
+             patch("agent_py_agent.cli.gateway_process.terminate_pid"):
             result = cmd_gateway_start(args)
             # force 模式会尝试停止旧进程然后启动新的
             assert result in (0, 1)
@@ -96,10 +94,10 @@ class TestCmdGatewayStop:
         mock_paths.pid = tmp_path / "gateway.pid"
         mock_paths.stop_request = tmp_path / "stop.json"
 
-        with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=mock_agent), \
+        with patch("agent_py_agent.cli._gateway_commands.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=mock_paths), \
-             patch("agent_py_agent.cli.gateway_process.get_running_pid", return_value=None), \
-             patch("agent_py_agent.cli.gateway_process.remove_pid_file_if_owned"):
+             patch("agent_py_agent.cli._gateway_commands.get_running_pid", return_value=None), \
+             patch("agent_py_agent.cli._gateway_commands.remove_pid_file_if_owned"):
             result = cmd_gateway_stop(args)
             assert result == 0
 
@@ -122,10 +120,10 @@ class TestCmdGatewayStop:
         mock_paths.pid = tmp_path / "gateway.pid"
         mock_paths.stop_request = tmp_path / "stop.json"
 
-        with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=mock_agent), \
+        with patch("agent_py_agent.cli._gateway_commands.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=mock_paths), \
-             patch("agent_py_agent.cli.gateway_process.get_running_pid", return_value=None), \
-             patch("agent_py_agent.cli.gateway_process.remove_pid_file_if_owned"):
+             patch("agent_py_agent.cli._gateway_commands.get_running_pid", return_value=None), \
+             patch("agent_py_agent.cli._gateway_commands.remove_pid_file_if_owned"):
             result = cmd_gateway_stop(args)
             assert result == 0
 
@@ -143,24 +141,22 @@ class TestCmdGatewayStatus:
         mock_agent = MagicMock()
         mock_agent.config = MagicMock()
         mock_agent.config.gateway_stale_seconds = 300
+        type(mock_agent.config).gateway_port = PropertyMock(return_value=0)
 
         mock_paths = MagicMock()
         mock_paths.root = tmp_path
         mock_paths.pid = tmp_path / "gateway.pid"
-        mock_paths.state = tmp_path / "state.json"
-        mock_paths.heartbeat = tmp_path / "heartbeat.json"
+        mock_paths.state = MagicMock()
+        mock_paths.heartbeat = MagicMock()
         mock_paths.log = tmp_path / "gateway.log"
+        mock_paths.state.exists = MagicMock(return_value=False)
 
-        # 准备空的 state 和 heartbeat 文件
-        mock_paths.state.write_text("{}", encoding="utf-8")
-        mock_paths.heartbeat.write_text("{}", encoding="utf-8")
-
-        with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=mock_paths), \
+        with patch("agent_py_agent.cli._gateway_commands.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli._gateway_commands.gateway_paths", return_value=mock_paths), \
+             patch("agent_py_agent.cli._gateway_commands.read_pid_record", return_value=None), \
+             patch("agent_py_agent.cli._gateway_commands.read_json_file", return_value={}), \
+             patch("agent_py_agent.cli._gateway_commands.read_runtime_status", return_value={}), \
              patch("agent_py_agent.cli.gateway_process.gateway_running", return_value=(None, False)), \
-             patch("agent_py_agent.cli.gateway_process.read_json_file", return_value={}), \
-             patch("agent_py_agent.cli.gateway_process.read_runtime_status", return_value={}), \
-             patch("agent_py_agent.cli.gateway_process.read_pid_record", return_value=None), \
              patch("agent_py_agent.cli.gateway_process.gateway_request_counts", return_value={}):
             result = cmd_gateway_status(args)
             assert result == 0
@@ -182,27 +178,31 @@ class TestCmdGatewayRestart:
         mock_agent = MagicMock()
         mock_agent.config = MagicMock()
         mock_agent.config.gateway_stop_timeout = 5
+        mock_agent.config.gateway_port = 0
 
         mock_paths = MagicMock()
         mock_paths.root = tmp_path
         mock_paths.pid = tmp_path / "gateway.pid"
-        mock_paths.state = tmp_path / "state.json"
+        mock_paths.state = MagicMock()
         mock_paths.stop_request = tmp_path / "stop.json"
-        mock_paths.heartbeat = tmp_path / "heartbeat.json"
+        mock_paths.heartbeat = MagicMock()
         mock_paths.log = tmp_path / "gateway.log"
+        mock_paths.state.exists = MagicMock(return_value=False)
+        mock_paths.heartbeat.exists = MagicMock(return_value=False)
 
-        mock_paths.state.write_text("{}", encoding="utf-8")
-        mock_paths.heartbeat.write_text("{}", encoding="utf-8")
-
-        with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=mock_agent), \
+        with patch("agent_py_agent.cli._gateway_commands.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=mock_paths), \
-             patch("agent_py_agent.cli.gateway_process.gateway_running", return_value=(None, False)), \
-             patch("agent_py_agent.cli.gateway_process.read_json_file", return_value={}), \
+             patch("agent_py_agent.cli._gateway_commands.read_pid_record", return_value=None), \
+             patch("agent_py_agent.cli._gateway_commands.read_json_file", return_value={}), \
              patch("agent_py_agent.cli.gateway_process.read_runtime_status", return_value={}), \
-             patch("agent_py_agent.cli.gateway_process.read_pid_record", return_value=None), \
+             patch("agent_py_agent.cli.gateway_process.gateway_running", return_value=(None, False)), \
              patch("agent_py_agent.cli.gateway_process.gateway_request_counts", return_value={}), \
+             patch("agent_py_agent.cli._gateway_commands.get_running_pid", return_value=None), \
              patch("agent_py_agent.cli.gateway_process.wait_for_gateway_running", return_value=True), \
-             patch("agent_py_agent.cli.gateway_process.cmd_gateway_start", return_value=0):
+             patch("agent_py_agent.cli._gateway_commands.cmd_gateway_run", return_value=0) as mock_run:
+            result = cmd_gateway_restart(args)
+            assert result == 0
+            mock_run.assert_called_once()
             result = cmd_gateway_restart(args)
             assert result == 0
 
@@ -226,7 +226,7 @@ class TestCmdGatewayLogs:
 
         # 不创建日志文件
 
-        with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=mock_agent), \
+        with patch("agent_py_agent.cli._gateway_commands.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=mock_paths):
             result = cmd_gateway_logs(args)
             assert result == 0
@@ -249,7 +249,7 @@ class TestCmdGatewayLogs:
         mock_paths.log.parent.mkdir(parents=True, exist_ok=True)
         mock_paths.log.write_text("line1\nline2\nline3\n", encoding="utf-8")
 
-        with patch("agent_py_agent.cli.gateway_process.make_agent", return_value=mock_agent), \
+        with patch("agent_py_agent.cli._gateway_commands.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli.gateway_process.gateway_paths", return_value=mock_paths):
             result = cmd_gateway_logs(args)
             assert result == 0
