@@ -59,7 +59,6 @@ def build_workflow_records(agent, tasks, workflow_mode, limit, apply):
 
 def _build_single_workflow_records(agent, task, workflow_mode, apply):
     """Build workflow records for a single task."""
-    records = []
     preview = (
         task.workflow_plan
         or _try_workflow_plan(
@@ -73,18 +72,45 @@ def _build_single_workflow_records(agent, task, workflow_mode, apply):
     worker_count = len(preview.get("workers") or []) if isinstance(preview, dict) else 0
 
     if not apply:
+        return _build_dry_run_workflow_records(agent, task, workflow_mode, preview, worker_count)
+
+    planned = agent.subagents.ensure_workflow_plan(task.id, workflow_mode=workflow_mode)
+    records = [_workflow_plan_record(agent, task, planned)]
+    if workflow_mode == "auto" and planned.workflow_plan.get("ok"):
+        records.append(_workflow_spawn_record(agent, task, planned))
+    return records
+
+
+def _build_dry_run_workflow_records(agent, task, workflow_mode, preview, worker_count):
+    records = [
+        agent.subagents.make_dispatch_record(
+            step="workflow",
+            action="plan_workflow",
+            run_id=task.id,
+            dry_run=True,
+            applied=False,
+            ok=bool(preview),
+            message=(
+                f"dry-run: 将为父任务写入 workflow 计划，template="
+                f"{preview.get('selected_template_id', '') or 'none'} workers={worker_count}。"
+            ),
+            before_status=task.status,
+            after_status=task.status,
+            before_verification_status=task.verification_status,
+            after_verification_status=task.verification_status,
+            evidence_paths=[task.task_dir],
+        )
+    ]
+    if workflow_mode == "auto" and preview.get("ok"):
         records.append(
             agent.subagents.make_dispatch_record(
                 step="workflow",
-                action="plan_workflow",
+                action="spawn_workflow_workers",
                 run_id=task.id,
                 dry_run=True,
                 applied=False,
-                ok=bool(preview),
-                message=(
-                    f"dry-run: 将为父任务写入 workflow 计划，template="
-                    f"{preview.get('selected_template_id', '') or 'none'} workers={worker_count}。"
-                ),
+                ok=True,
+                message=f"dry-run: apply 时会根据 workflow 计划创建 {worker_count} 个 worker 子工单。",
                 before_status=task.status,
                 after_status=task.status,
                 before_verification_status=task.verification_status,
@@ -92,71 +118,56 @@ def _build_single_workflow_records(agent, task, workflow_mode, apply):
                 evidence_paths=[task.task_dir],
             )
         )
-        if workflow_mode == "auto" and preview.get("ok"):
-            records.append(
-                agent.subagents.make_dispatch_record(
-                    step="workflow",
-                    action="spawn_workflow_workers",
-                    run_id=task.id,
-                    dry_run=True,
-                    applied=False,
-                    ok=True,
-                    message=f"dry-run: apply 时会根据 workflow 计划创建 {worker_count} 个 worker 子工单。",
-                    before_status=task.status,
-                    after_status=task.status,
-                    before_verification_status=task.verification_status,
-                    after_verification_status=task.verification_status,
-                    evidence_paths=[task.task_dir],
-                )
-            )
-        return records
-
-    planned = agent.subagents.ensure_workflow_plan(task.id, workflow_mode=workflow_mode)
-    records.append(
-        agent.subagents.make_dispatch_record(
-            step="workflow",
-            action="plan_workflow",
-            run_id=task.id,
-            dry_run=False,
-            applied=bool(planned.workflow_plan),
-            ok=bool(planned.workflow_plan),
-            message=(
-                f"已写入 workflow 计划，template={planned.workflow_template_id or 'none'} "
-                f"workers={len(planned.workflow_plan.get('workers') or []) if planned.workflow_plan else 0}。"
-                if planned.workflow_plan
-                else "未能生成 workflow 计划。"
-            ),
-            before_status=task.status,
-            after_status=planned.status,
-            before_verification_status=task.verification_status,
-            after_verification_status=planned.verification_status,
-            evidence_paths=[planned.task_dir],
-        )
-    )
-    if workflow_mode == "auto" and planned.workflow_plan.get("ok"):
-        before_child_count = len(planned.workflow_child_run_ids)
-        planned, created_children = agent.subagents.realize_workflow_plan(task.id)
-        records.append(
-            agent.subagents.make_dispatch_record(
-                step="workflow",
-                action="spawn_workflow_workers",
-                run_id=task.id,
-                dry_run=False,
-                applied=bool(created_children) or before_child_count > 0,
-                ok=True,
-                message=(
-                    f"已创建 {len(created_children)} 个 workflow worker 子工单。"
-                    if created_children
-                    else "workflow worker 子工单已存在，本轮未重复创建。"
-                ),
-                before_status=task.status,
-                after_status=planned.status,
-                before_verification_status=task.verification_status,
-                after_verification_status=planned.verification_status,
-                evidence_paths=[planned.task_dir, *[child.task_dir for child in created_children]],
-            )
-        )
     return records
+
+
+def _workflow_plan_record(agent, task, planned):
+    return agent.subagents.make_dispatch_record(
+        step="workflow",
+        action="plan_workflow",
+        run_id=task.id,
+        dry_run=False,
+        applied=bool(planned.workflow_plan),
+        ok=bool(planned.workflow_plan),
+        message=_workflow_plan_message(planned),
+        before_status=task.status,
+        after_status=planned.status,
+        before_verification_status=task.verification_status,
+        after_verification_status=planned.verification_status,
+        evidence_paths=[planned.task_dir],
+    )
+
+
+def _workflow_plan_message(planned) -> str:
+    if not planned.workflow_plan:
+        return "未能生成 workflow 计划。"
+    worker_count = len(planned.workflow_plan.get("workers") or [])
+    return f"已写入 workflow 计划，template={planned.workflow_template_id or 'none'} workers={worker_count}。"
+
+
+def _workflow_spawn_record(agent, task, planned):
+    before_child_count = len(planned.workflow_child_run_ids)
+    planned, created_children = agent.subagents.realize_workflow_plan(task.id)
+    return agent.subagents.make_dispatch_record(
+        step="workflow",
+        action="spawn_workflow_workers",
+        run_id=task.id,
+        dry_run=False,
+        applied=bool(created_children) or before_child_count > 0,
+        ok=True,
+        message=_workflow_spawn_message(created_children),
+        before_status=task.status,
+        after_status=planned.status,
+        before_verification_status=task.verification_status,
+        after_verification_status=planned.verification_status,
+        evidence_paths=[planned.task_dir, *[child.task_dir for child in created_children]],
+    )
+
+
+def _workflow_spawn_message(created_children) -> str:
+    if created_children:
+        return f"已创建 {len(created_children)} 个 workflow worker 子工单。"
+    return "workflow worker 子工单已存在，本轮未重复创建。"
 
 
 # ---------------------------------------------------------------------------
@@ -367,14 +378,3 @@ def make_dispatch_watch_record(
         ended_at=params.ended_at,
         evidence_paths=params.evidence_paths,
     )
-
-
-def check_watch_stopping(
-    cycle, max_cycles, stop_path, max_consecutive_rounds, consecutive_rounds, lock_path, lock
-):
-    """Check if watch loop should stop."""
-    more_cycles = max_cycles == 0 or cycle < max_cycles
-    stop_requested = bool(stop_path and stop_path.exists())
-    if stop_requested:
-        more_cycles = False
-    return more_cycles, stop_requested

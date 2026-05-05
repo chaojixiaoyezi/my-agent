@@ -2,61 +2,65 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from ..memory_archive import write_recovery_snapshot
 from ..memory_archive.snapshots import RecoverySnapshotInput
 from ..subagent import parse_subagent_runner_output
+from .runner_prompts import (
+    _append_runner_repair_failure,
+    _append_runner_repair_prompt,
+    _append_runner_repair_response,
+    _build_subagent_runner_repair_prompt,
+)
+
+
+@dataclass(frozen=True)
+class SubagentRepairParams:
+    context: object
+    result: object
+    structured: object
+    prompt_for_log: str
+    response_for_log: str
+    backend_name: str
+    message: str
 
 
 class _SubagentRepairMixin:
     """Internal: structured output repair and recovery snapshot writing."""
 
-    def _handle_subagent_repair(
-        self,
-        context,
-        result,
-        structured,
-        prompt_for_log,
-        response_for_log,
-        backend_name,
-        message,
-    ):
+    def _handle_subagent_repair(self, params: SubagentRepairParams):
         """Handle structured output repair when initial parse fails."""
-        from .runner_prompts import (
-            _append_runner_repair_failure,
-            _append_runner_repair_prompt,
-            _append_runner_repair_response,
-            _build_subagent_runner_repair_prompt,
-        )
-
-        structured_repair_attempted = True
         structured_repair_ok = False
         structured_repair_error = ""
 
         repair_prompt = _build_subagent_runner_repair_prompt(
-            context,
-            original_prompt=result.prompt,
-            original_response=result.response,
-            parse_error=structured.parse_error,
+            params.context,
+            original_prompt=params.result.prompt,
+            original_response=params.result.response,
+            parse_error=params.structured.parse_error,
         )
         try:
             repair_response = self.backend.generate(repair_prompt)
         except Exception as exc:
             structured_repair_error = str(exc)
-            response_for_log = _append_runner_repair_failure(result.response, exc)
+            response_for_log = _append_runner_repair_failure(params.result.response, exc)
             return (
-                structured,
+                params.structured,
                 structured_repair_ok,
                 structured_repair_error,
-                backend_name,
-                prompt_for_log,
+                params.backend_name,
+                params.prompt_for_log,
                 response_for_log,
-                message,
+                params.message,
             )
 
         repaired = parse_subagent_runner_output(repair_response.text)
-        prompt_for_log = _append_runner_repair_prompt(result.prompt, repair_prompt)
-        response_for_log = _append_runner_repair_response(result.response, repair_response.text)
-        backend_name = repair_response.backend or result.backend
+        prompt_for_log = _append_runner_repair_prompt(params.result.prompt, repair_prompt)
+        response_for_log = _append_runner_repair_response(params.result.response, repair_response.text)
+        backend_name = repair_response.backend or params.result.backend
+        structured = params.structured
+        message = params.message
 
         if repaired.found and repaired.ok:
             structured = repaired
@@ -83,13 +87,7 @@ class _SubagentRepairMixin:
     def _write_subagent_recovery_snapshot(
         self,
         run_id: str,
-        *,
-        user_prompt: str,
-        response_text: str,
-        backend: str,
-        status: str,
-        error_code: str,
-        tool_calls: list[dict[str, object]],
+        **kwargs,
     ) -> None:
         """LLM: write a best-effort run_id recovery snapshot after subagent-run finishes.
 
@@ -121,16 +119,16 @@ class _SubagentRepairMixin:
             self.root,
             params=RecoverySnapshotInput(
                 session_id=getattr(self, "session_id", self.config.agent_name),
-                user_prompt=user_prompt,
-                response_text=response_text,
-                backend=backend,
+                user_prompt=kwargs["user_prompt"],
+                response_text=kwargs["response_text"],
+                backend=kwargs["backend"],
                 source="subagent_run",
                 request_id=f"subagent-run:{run_id}",
                 run_id=run_id,
                 task_id=run_id,
-                status=status.lower() or "unknown",
-                error_code=error_code,
-                tool_calls=tool_calls,
+                status=str(kwargs["status"]).lower() or "unknown",
+                error_code=kwargs["error_code"],
+                tool_calls=kwargs["tool_calls"],
                 task_refs=[run_id],
                 content_paths=content_paths,
                 next_actions=next_actions,

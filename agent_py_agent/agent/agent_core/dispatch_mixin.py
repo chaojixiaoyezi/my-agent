@@ -30,6 +30,7 @@ from .dispatch_service import (
 from .failure_introspector import FailureIntrospector
 from .planner_service import combine_runner_instruction
 from .runner_dispatch import (
+    RunnerDispatchRecordParams,
     _dispatch_patch_review_run_ids,
     _dispatch_runner_candidates,
     _runner_dispatch_record,
@@ -37,6 +38,8 @@ from .runner_dispatch import (
     _runner_retry_reason,
 )
 from .runner_gate import (
+    ConcurrentRunnerParams,
+    SingleRunnerParams,
     get_task_timeout,
     handle_runner_failure,
     resolve_runner_config,
@@ -50,7 +53,7 @@ from .services import notify_completed_tasks
 # ---------------------------------------------------------------------------
 
 
-class _DispatchCollectionMixin:
+class _DispatchCollectionBase:
     """Internal: collect and finalize dispatch records."""
 
     def _collect_dispatch_records(self, ctx: DispatchContext):
@@ -174,15 +177,30 @@ class _DispatchCollectionMixin:
     def _run_concurrent_batch(self, ctx: RunnerBatchContext) -> tuple[list, str]:
         """Run runner jobs concurrently. Returns (records, updated_instruction)."""
         completed = run_concurrent_runners(
-            self, ctx.pending_runner_jobs, ctx.runner_concurrency, ctx.runner_timeout_seconds,
-            ctx.effective_runner_instruction, ctx.execute_runners, ctx.max_cards, ctx.probe,
+            ConcurrentRunnerParams(
+                agent=self,
+                pending_jobs=ctx.pending_runner_jobs,
+                runner_concurrency=ctx.runner_concurrency,
+                runner_timeout_seconds=ctx.runner_timeout_seconds,
+                instruction=ctx.effective_runner_instruction,
+                execute_runners=ctx.execute_runners,
+                max_cards=ctx.max_cards,
+                probe=ctx.probe,
+            )
         )
         for run_id, before, retry_reason in ctx.pending_runner_jobs:
             result, after = completed[run_id]
             ctx.records.append(
                 _runner_dispatch_record(
-                    self, run_id=run_id, before=before, after=after,
-                    result=result, retry_reason=retry_reason, execute_runners=ctx.execute_runners,
+                    RunnerDispatchRecordParams(
+                        agent=self,
+                        run_id=run_id,
+                        before=before,
+                        after=after,
+                        result=result,
+                        retry_reason=retry_reason,
+                        execute_runners=ctx.execute_runners,
+                    )
                 )
             )
             if not result.ok and ctx.execute_runners:
@@ -196,14 +214,29 @@ class _DispatchCollectionMixin:
         for run_id, before, retry_reason in ctx.pending_runner_jobs:
             task_timeout = get_task_timeout(before, ctx.runner_timeout_seconds, self.config)
             result = run_single_runner(
-                self, run_id, task_timeout, ctx.effective_runner_instruction,
-                ctx.execute_runners, ctx.max_cards, ctx.probe, retry_reason,
+                SingleRunnerParams(
+                    agent=self,
+                    run_id=run_id,
+                    task_timeout=task_timeout,
+                    instruction=ctx.effective_runner_instruction,
+                    execute_runners=ctx.execute_runners,
+                    max_cards=ctx.max_cards,
+                    probe=ctx.probe,
+                    retry_reason=retry_reason,
+                )
             )
             after = self.subagents.load(run_id)
             ctx.records.append(
                 _runner_dispatch_record(
-                    self, run_id=run_id, before=before, after=after,
-                    result=result, retry_reason=retry_reason, execute_runners=ctx.execute_runners,
+                    RunnerDispatchRecordParams(
+                        agent=self,
+                        run_id=run_id,
+                        before=before,
+                        after=after,
+                        result=result,
+                        retry_reason=retry_reason,
+                        execute_runners=ctx.execute_runners,
+                    )
                 )
             )
             if not result.ok and ctx.execute_runners:
@@ -242,7 +275,7 @@ class _DispatchReportMixin:
 
 class SimpleAgentDispatchMixin(
     _DispatchFacadeMixin,
-    _DispatchCollectionMixin,
+    _DispatchCollectionBase,
     _DispatchReportMixin,
     _DispatchFailureMixin,
 ):
@@ -252,6 +285,12 @@ class SimpleAgentDispatchMixin(
     用户说"推进一下子代理"或 daemon 定时巡检，都会走这里。
     它负责串阶段，不把底层文件操作和规则判断都塞在自己身上。
     """
+
+    _DISPATCH_PARAM_KEYS = [
+        "apply", "execute_runners", "planner", "workflow_mode",
+        "max_runners", "limit", "reviewer", "note", "runner_instruction",
+        "max_cards", "probe", "take_over_by", "locked_files",
+    ]
 
     def dispatch_subagents(
         self,
@@ -271,13 +310,7 @@ class SimpleAgentDispatchMixin(
             params = DispatchParams()
         elif not isinstance(params, DispatchParams):
             raise TypeError("dispatch_subagents() requires params: DispatchParams keyword argument")
-        for key in [
-            "apply", "execute_runners", "planner", "workflow_mode",
-            "max_runners", "limit", "reviewer", "note", "runner_instruction",
-            "max_cards", "probe", "take_over_by", "locked_files",
-        ]:
-            if key in kwargs:
-                setattr(params, key, kwargs[key])
+        self._apply_dispatch_kwargs(params, kwargs)
 
         cfg = capability_config or CapabilityConfig()
         normalized_workflow_mode = str(params.workflow_mode or "off").strip().lower()
@@ -296,18 +329,9 @@ class SimpleAgentDispatchMixin(
         records = self._collect_dispatch_records(ctx)
 
         if params.planner:
-            planner_record = records[0] if records else None
-            if planner_record and planner_record.step == "parent_planner":
-                effective_runner_instruction = combine_runner_instruction(
-                    params.runner_instruction,
-                    getattr(planner_record, "message", "").split("instruction:")[-1].strip()
-                    if "instruction:" in planner_record.message else "",
-                )
-                if (
-                    hasattr(planner_record, "suggested_max_runners")
-                    and planner_record.suggested_max_runners > 0
-                ):
-                    effective_max_runners = min(params.max_runners, planner_record.suggested_max_runners)
+            effective_runner_instruction, effective_max_runners = _planner_dispatch_overrides(
+                params, records
+            )
 
         records = self._execute_runner_jobs(
             ctx, params.execute_runners, params.max_cards, params.probe, records
@@ -320,3 +344,23 @@ class SimpleAgentDispatchMixin(
             cfg, params.apply, params.reviewer, params.note, params.limit, records
         )
         return self._build_and_write_report(records, params.apply)
+
+    def _apply_dispatch_kwargs(self, params: DispatchParams, kwargs: dict[str, object]) -> None:
+        for key in self._DISPATCH_PARAM_KEYS:
+            if key in kwargs:
+                setattr(params, key, kwargs[key])
+
+
+def _planner_dispatch_overrides(params: DispatchParams, records):
+    planner_record = records[0] if records else None
+    if not planner_record or planner_record.step != "parent_planner":
+        return params.runner_instruction, params.max_runners
+    instruction = combine_runner_instruction(
+        params.runner_instruction,
+        getattr(planner_record, "message", "").split("instruction:")[-1].strip()
+        if "instruction:" in planner_record.message else "",
+    )
+    max_runners = params.max_runners
+    if hasattr(planner_record, "suggested_max_runners") and planner_record.suggested_max_runners > 0:
+        max_runners = min(params.max_runners, planner_record.suggested_max_runners)
+    return instruction, max_runners

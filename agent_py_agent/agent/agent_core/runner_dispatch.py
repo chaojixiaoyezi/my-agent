@@ -152,6 +152,17 @@ class RunSubagentWorkerParams:
     local_store: object | None = None
 
 
+@dataclass(frozen=True)
+class RunnerDispatchRecordParams:
+    agent: SimpleAgent
+    run_id: str
+    before: SubAgentTask
+    after: SubAgentTask
+    result: SubAgentRunnerResult
+    retry_reason: str
+    execute_runners: bool
+
+
 def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResult:
     """LLM: run one subagent in an isolated worker SimpleAgent instance.
 
@@ -164,10 +175,7 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
     from ..core import SimpleAgent
 
     worker = SimpleAgent(params.config, params.root)
-    if params.local_store is not None:
-        worker.local_store = params.local_store
-        worker.subagents.local_store = params.local_store
-        worker.memory.local_store = params.local_store
+    _attach_worker_local_store(worker, params.local_store)
     if params.dry_run or params.timeout_seconds <= 0:
         return worker.run_subagent(
             params.run_id,
@@ -177,7 +185,18 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
             probe=params.probe,
             retry_reason=params.retry_reason,
         )
+    return _run_subagent_worker_with_timeout(worker, params)
 
+
+def _attach_worker_local_store(worker, local_store: object | None) -> None:
+    if local_store is None:
+        return
+    worker.local_store = local_store
+    worker.subagents.local_store = local_store
+    worker.memory.local_store = local_store
+
+
+def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams):
     prepared = worker.subagents.prepare_runner_attempt(
         params.run_id, retry_reason=params.retry_reason
     )
@@ -222,40 +241,31 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
     return payload["result"]  # type: ignore[return-value]
 
 
-def _runner_dispatch_record(
-    agent: SimpleAgent,
-    *,
-    run_id: str,
-    before: SubAgentTask,
-    after: SubAgentTask,
-    result: SubAgentRunnerResult,
-    retry_reason: str,
-    execute_runners: bool,
-):
+def _runner_dispatch_record(params: RunnerDispatchRecordParams):
     """把 runner 执行结果转成 dispatch record。"""
 
-    return agent.subagents.make_dispatch_record(
+    return params.agent.subagents.make_dispatch_record(
         step="runner",
         action=(
             "retry_runner"
-            if retry_reason and execute_runners
+            if params.retry_reason and params.execute_runners
             else "execute_runner"
-            if execute_runners
+            if params.execute_runners
             else "runner_dry_run"
         ),
-        run_id=run_id,
-        dry_run=result.dry_run,
-        applied=not result.dry_run,
-        ok=result.ok,
-        message=result.message,
-        before_status=before.status,
-        after_status=after.status,
-        before_verification_status=before.verification_status,
-        after_verification_status=after.verification_status,
+        run_id=params.run_id,
+        dry_run=params.result.dry_run,
+        applied=not params.result.dry_run,
+        ok=params.result.ok,
+        message=params.result.message,
+        before_status=params.before.status,
+        after_status=params.after.status,
+        before_verification_status=params.before.verification_status,
+        after_verification_status=params.after.verification_status,
         evidence_paths=[
-            result.execution_context_json,
-            result.result_json,
-            result.output_json,
+            params.result.execution_context_json,
+            params.result.result_json,
+            params.result.output_json,
         ],
     )
 

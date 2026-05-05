@@ -103,7 +103,7 @@ def _build_parent_planner_state(
     ]
     open_requests, open_gaps = _collect_open_requests_and_gaps(tasks)
 
-    gate_summary = _build_gate_summary(
+    gate_summary = _build_planner_gate_summary(
         BuildGateSummaryParams(
             tasks=tasks,
             active_tasks=active_tasks,
@@ -116,53 +116,70 @@ def _build_parent_planner_state(
             open_gaps=open_gaps,
         )
     )
-
     return {
         "gate": gate_summary,
         "board_summary": board.summary,
-        "active_tasks": [
-            _task_state_for_planner(task) for task in _limit_items(active_tasks, limit)
-        ],
-        "due_issues": [
-            {
-                "run_id": issue.run_id,
-                "severity": issue.severity,
-                "kind": issue.kind,
-                "message": issue.message,
-                "suggested_action": issue.suggested_action,
-                "status": issue.status,
-                "goal": issue.goal,
-                "risk_flags": issue.risk_flags,
-            }
-            for issue in _limit_items(due_report.issues, limit)
-        ],
-        "action_items": [
-            {
-                "run_id": item.run_id,
-                "severity": item.severity,
-                "priority": item.priority,
-                "action": item.action,
-                "reason": item.reason,
-                "would_change_status_to": item.would_change_status_to,
-            }
-            for item in _limit_items(action_plan.actions, limit)
-        ],
+        "active_tasks": _planner_task_states(active_tasks, limit),
+        "due_issues": _planner_due_issues(due_report.issues, limit),
+        "action_items": _planner_action_items(action_plan.actions, limit),
         "runner_candidates": [_task_state_for_planner(task) for task in runner_candidates],
         "patch_review_run_ids": patch_run_ids,
-        "acceptance_records": [
-            {
-                "run_id": record.run_id,
-                "decision": record.decision,
-                "ok": record.ok,
-                "message": record.message,
-                "evidence_count": record.evidence_count,
-                "test_count": record.test_count,
-            }
-            for record in _limit_items(acceptance_report.records, limit)
-        ],
+        "acceptance_records": _planner_acceptance_records(acceptance_report.records, limit),
         "open_capability_requests": _limit_items(open_requests, limit),
         "open_capability_gaps": _limit_items(open_gaps, limit),
     }
+
+
+def _build_planner_gate_summary(params: BuildGateSummaryParams) -> dict[str, int]:
+    return _build_gate_summary(params)
+
+
+def _planner_task_states(tasks: list[SubAgentTask], limit: int) -> list[dict[str, object]]:
+    return [_task_state_for_planner(task) for task in _limit_items(tasks, limit)]
+
+
+def _planner_due_issues(issues, limit: int) -> list[dict[str, object]]:
+    return [
+        {
+            "run_id": issue.run_id,
+            "severity": issue.severity,
+            "kind": issue.kind,
+            "message": issue.message,
+            "suggested_action": issue.suggested_action,
+            "status": issue.status,
+            "goal": issue.goal,
+            "risk_flags": issue.risk_flags,
+        }
+        for issue in _limit_items(issues, limit)
+    ]
+
+
+def _planner_action_items(actions, limit: int) -> list[dict[str, object]]:
+    return [
+        {
+            "run_id": item.run_id,
+            "severity": item.severity,
+            "priority": item.priority,
+            "action": item.action,
+            "reason": item.reason,
+            "would_change_status_to": item.would_change_status_to,
+        }
+        for item in _limit_items(actions, limit)
+    ]
+
+
+def _planner_acceptance_records(records, limit: int) -> list[dict[str, object]]:
+    return [
+        {
+            "run_id": record.run_id,
+            "decision": record.decision,
+            "ok": record.ok,
+            "message": record.message,
+            "evidence_count": record.evidence_count,
+            "test_count": record.test_count,
+        }
+        for record in _limit_items(records, limit)
+    ]
 
 
 def _build_gate_summary(params: BuildGateSummaryParams) -> dict[str, int]:

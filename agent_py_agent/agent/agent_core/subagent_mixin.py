@@ -18,7 +18,7 @@ from ..subagent import (
     parse_subagent_runner_output,
 )
 from ._subagent_planner_mixin import RunParentPlannerParams, _ParentPlannerMixin
-from ._subagent_repair_mixin import _SubagentRepairMixin
+from ._subagent_repair_mixin import SubagentRepairParams, _SubagentRepairMixin
 from .automation_guard import SubagentAutomationGuard
 from .planner import _build_parent_planner_state
 from .runner_prompts import (
@@ -43,7 +43,33 @@ def _config_workflow_dispatch_mode(value: object) -> str:
     return "off"
 
 
-class _SubagentLifecycleMixin:
+def _initial_repair_state(result) -> dict[str, object]:
+    return {
+        "prompt_for_log": result.prompt,
+        "response_for_log": result.response,
+        "backend_name": result.backend,
+        "message": "runner 已完成模型调用，等待独立验收。",
+        "attempted": False,
+        "ok": False,
+        "error": "",
+    }
+
+
+def _tuple_repair_state(value: tuple) -> dict[str, object]:
+    structured, ok, error, backend_name, prompt_for_log, response_for_log, message = value
+    return {
+        "structured": structured,
+        "prompt_for_log": prompt_for_log,
+        "response_for_log": response_for_log,
+        "backend_name": backend_name,
+        "message": message,
+        "attempted": True,
+        "ok": ok,
+        "error": error,
+    }
+
+
+class _SubagentLifecycleBase:
     """Internal: subagent spawning and runner execution (spawn, run, failure, finalize)."""
 
     def spawn_subagents(self, goal: str, count: int | None = None) -> list[SubAgentTask]:
@@ -85,55 +111,28 @@ class _SubagentLifecycleMixin:
     def run_subagent(
         self,
         run_id: str,
-        *,
-        instruction: str = "",
-        dry_run: bool = True,
-        max_cards: int = 0,
-        probe: bool = True,
-        retry_reason: str = "",
-        attempt_id: str = "",
+        **kwargs,
     ) -> SubAgentRunnerResult:
         """按执行上下文运行一个子代理入口。"""
+        instruction = str(kwargs.get("instruction", ""))
+        dry_run = bool(kwargs.get("dry_run", True))
+        max_cards = int(kwargs.get("max_cards", 0))
+        probe = bool(kwargs.get("probe", True))
+        retry_reason = str(kwargs.get("retry_reason", ""))
+        attempt_id = str(kwargs.get("attempt_id", ""))
         active_attempt_id = str(attempt_id or "").strip()
-        if not dry_run and not active_attempt_id:
-            prepared = self.subagents.prepare_runner_attempt(run_id, retry_reason=retry_reason)
-            active_attempt_id = prepared.runner_active_attempt_id
-
-        context = self.subagents.write_execution_context(run_id, max_cards=max_cards)
-        prompt = _build_subagent_runner_prompt(context, instruction)
+        active_attempt_id = self._prepare_subagent_attempt(
+            run_id, dry_run=dry_run, active_attempt_id=active_attempt_id, retry_reason=retry_reason
+        )
+        context, prompt = self._build_subagent_prompt(run_id, max_cards, instruction)
         if dry_run:
-            return self.subagents.record_runner_result(
-                RecordRunnerResultParams(
-                    run_id=run_id,
-                    attempt_id=active_attempt_id,
-                    dry_run=True,
-                    ok=True,
-                    message="dry-run: 已生成执行上下文和 runner prompt，未调用模型。",
-                    prompt=prompt,
-                )
-            )
+            return self._record_subagent_dry_run(run_id, active_attempt_id, prompt)
 
-        if probe:
-            probe_result = self.subagents.probe_channel(run_id)
-            if probe_result.channel_status == "BROKEN":
-                context = self.subagents.write_execution_context(run_id, max_cards=max_cards)
-                prompt = _build_subagent_runner_prompt(context, instruction)
-                return self.subagents.record_runner_result(
-                    RecordRunnerResultParams(
-                        run_id=run_id,
-                        attempt_id=active_attempt_id,
-                        dry_run=False,
-                        ok=False,
-                        message="通道健康检查为 BROKEN，未启动模型执行。",
-                        prompt=prompt,
-                        status="CHANNEL_ERROR",
-                        verification_status="UNVERIFIED",
-                        failure_type="channel",
-                    )
-                )
-            context = self.subagents.write_execution_context(run_id, max_cards=max_cards)
-            prompt = _build_subagent_runner_prompt(context, instruction)
+        probe_blocked = self._probe_subagent_channel(run_id, active_attempt_id, max_cards, instruction, probe)
+        if probe_blocked is not None:
+            return probe_blocked
 
+        context, prompt = self._build_subagent_prompt(run_id, max_cards, instruction)
         task_for_attrs = self.subagents.load(run_id)
         self._current_task_attributes = task_for_attrs.attributes
 
@@ -152,6 +151,50 @@ class _SubagentLifecycleMixin:
             )
 
         return self._finalize_subagent_run(run_id, active_attempt_id, result, context, prompt)
+
+    def _prepare_subagent_attempt(self, run_id, *, dry_run, active_attempt_id, retry_reason):
+        if dry_run or active_attempt_id:
+            return active_attempt_id
+        prepared = self.subagents.prepare_runner_attempt(run_id, retry_reason=retry_reason)
+        return prepared.runner_active_attempt_id
+
+    def _build_subagent_prompt(self, run_id, max_cards, instruction):
+        context = self.subagents.write_execution_context(run_id, max_cards=max_cards)
+        prompt = _build_subagent_runner_prompt(context, instruction)
+        return context, prompt
+
+    def _record_subagent_dry_run(self, run_id, active_attempt_id, prompt):
+        return self.subagents.record_runner_result(
+            RecordRunnerResultParams(
+                run_id=run_id,
+                attempt_id=active_attempt_id,
+                dry_run=True,
+                ok=True,
+                message="dry-run: 已生成执行上下文和 runner prompt，未调用模型。",
+                prompt=prompt,
+            )
+        )
+
+    def _probe_subagent_channel(self, run_id, active_attempt_id, max_cards, instruction, probe):
+        if not probe:
+            return None
+        probe_result = self.subagents.probe_channel(run_id)
+        if probe_result.channel_status != "BROKEN":
+            return None
+        context, prompt = self._build_subagent_prompt(run_id, max_cards, instruction)
+        return self.subagents.record_runner_result(
+            RecordRunnerResultParams(
+                run_id=run_id,
+                attempt_id=active_attempt_id,
+                dry_run=False,
+                ok=False,
+                message="通道健康检查为 BROKEN，未启动模型执行。",
+                prompt=prompt,
+                status="CHANNEL_ERROR",
+                verification_status="UNVERIFIED",
+                failure_type="channel",
+            )
+        )
 
     def _handle_subagent_run_failure(self, run_id, active_attempt_id, exc, context, prompt):
         """Handle subagent run failure by recording error result."""
@@ -182,29 +225,21 @@ class _SubagentLifecycleMixin:
     def _finalize_subagent_run(self, run_id, active_attempt_id, result, context, prompt):
         """Finalize subagent run: parse output, repair if needed, record result."""
         structured = parse_subagent_runner_output(result.response)
-        prompt_for_log = result.prompt
-        response_for_log = result.response
-        backend_name = result.backend
-        message = "runner 已完成模型调用，等待独立验收。"
-        structured_repair_attempted = False
-        structured_repair_ok = False
-        structured_repair_error = ""
-
+        repair_state = _initial_repair_state(result)
         if not (structured.found and structured.ok):
-            (
-                structured,
-                structured_repair_ok,
-                structured_repair_error,
-                backend_name,
-                prompt_for_log,
-                response_for_log,
-                message,
-            ) = self._handle_subagent_repair(
-                context, result, structured, prompt_for_log, response_for_log, backend_name, message
+            repair_state = self._handle_subagent_repair(
+                SubagentRepairParams(
+                    context=context,
+                    result=result,
+                    structured=structured,
+                    prompt_for_log=repair_state["prompt_for_log"],
+                    response_for_log=repair_state["response_for_log"],
+                    backend_name=repair_state["backend_name"],
+                    message=repair_state["message"],
+                )
             )
-            structured_repair_attempted = True
-        else:
-            structured_repair_attempted = False
+            structured = repair_state[0]
+            repair_state = _tuple_repair_state(repair_state)
 
         runner_result = self.subagents.record_runner_result(
             RecordRunnerResultParams(
@@ -212,25 +247,25 @@ class _SubagentLifecycleMixin:
                 attempt_id=active_attempt_id,
                 dry_run=False,
                 ok=structured.ok if structured.found else True,
-                message=message,
-                prompt=prompt_for_log,
-                response=response_for_log,
-                backend=backend_name,
+                message=repair_state["message"],
+                prompt=repair_state["prompt_for_log"],
+                response=repair_state["response_for_log"],
+                backend=repair_state["backend_name"],
                 tool_rounds=result.tool_rounds,
                 status="" if structured.found else "AWAITING_ACCEPTANCE",
                 verification_status="" if structured.found else "NEEDS_ACCEPTANCE",
                 structured_output=structured,
                 actual_tools=result.executed_tools or [],
-                structured_repair_attempted=structured_repair_attempted,
-                structured_repair_ok=structured_repair_ok,
-                structured_repair_error=structured_repair_error,
+                structured_repair_attempted=repair_state["attempted"],
+                structured_repair_ok=repair_state["ok"],
+                structured_repair_error=repair_state["error"],
             )
         )
         self._write_subagent_recovery_snapshot(
             run_id,
             user_prompt=context.goal,
-            response_text=message,
-            backend=backend_name,
+            response_text=repair_state["message"],
+            backend=repair_state["backend_name"],
             status=runner_result.status,
             error_code=runner_result.runner_last_error,
             tool_calls=[
@@ -242,7 +277,7 @@ class _SubagentLifecycleMixin:
 
 
 class SimpleAgentSubagentMixin(
-    _SubagentLifecycleMixin,
+    _SubagentLifecycleBase,
     _SubagentRepairMixin,
     _ParentPlannerMixin,
 ):
