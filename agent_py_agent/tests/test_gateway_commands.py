@@ -63,6 +63,9 @@ class TestCmdGatewayStart:
         mock_paths.stop_request = tmp_path / "stop.json"
         mock_paths.log = tmp_path / "gateway.log"
 
+        mock_process = MagicMock()
+        mock_process.pid = 99999
+
         with patch("agent_py_agent.cli._gateway_commands.make_agent", return_value=mock_agent), \
              patch("agent_py_agent.cli._gateway_commands.gateway_paths", return_value=mock_paths), \
              patch("agent_py_agent.cli._gateway_commands.get_running_pid", return_value=12345), \
@@ -71,7 +74,9 @@ class TestCmdGatewayStart:
              patch("agent_py_agent.cli._gateway_commands.terminate_pid"), \
              patch("agent_py_agent.cli._gateway_commands.wait_for_gateway_running", return_value=(12345, True)), \
              patch("agent_py_agent.cli._gateway_commands.write_json_file"), \
-             patch("subprocess.Popen"):
+             patch("subprocess.Popen", return_value=mock_process), \
+             patch("agent_py_agent.agent.gateway_parts.daemon_control._get_process_start_time", return_value="2026-01-01T00:00:00"), \
+             patch("agent_py_agent.agent.gateway_parts.daemon_control._utc_now_iso", return_value="2026-01-01T00:00:00"):
             result = cmd_gateway_start(args)
             # force 模式会尝试停止旧进程然后启动新的
             assert result in (0, 1)

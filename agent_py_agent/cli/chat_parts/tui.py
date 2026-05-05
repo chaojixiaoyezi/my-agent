@@ -7,7 +7,6 @@ prompt_toolkit 的 Application 封装、状态栏刷新、worker 线程管理，
 
 from __future__ import annotations
 
-import dataclasses
 import threading
 
 from .rendering import (
@@ -17,133 +16,23 @@ from .rendering import (
     progress_bar,
     terminal_rule,
 )
+from .tui_params import (
+    MakeTuiAppParams,
+    StartWorkerParams,
+    TuiHandleCommandParams,
+    TuiRunParams,
+    WorkerConfigParams,
+)
 
 try:
     from prompt_toolkit.application import Application
-    from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-    from prompt_toolkit.history import FileHistory
-    from prompt_toolkit.key_binding import KeyBindings
-    from prompt_toolkit.layout import FormattedTextControl, HSplit, Layout, Window
-    from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.patch_stdout import patch_stdout
-    from prompt_toolkit.styles import Style
-    from prompt_toolkit.widgets import TextArea
 except ImportError:  # pragma: no cover
     Application = None
 
 MAX_HISTORY_TURNS = 8
 CONTEXT_WINDOW = 200_000
 COLLAPSE_PREVIEW_CHARS = 900
-
-
-@dataclasses.dataclass(frozen=True)
-class TuiHandleCommandParams:
-    user: str
-    agent: object
-    args: object
-    runtime_inject: list[str]
-    prompt_files: list[str]
-    use_gateway: bool
-    paths: object
-    state_lock: threading.Lock
-    is_running_ref: list
-    pending_jobs_ref: list
-    running_prompt_ref: list
-    running_started_at_ref: list
-    shutting_down_ref: list
-    stop_event: threading.Event
-    assistant_outputs: list[str]
-
-
-@dataclasses.dataclass(frozen=True)
-class WorkerConfigParams:
-    jobs: object
-    state_lock: threading.Lock
-    is_running_ref: list
-    pending_jobs_ref: list
-    running_prompt_ref: list
-    running_started_at_ref: list
-    agent: object
-    args: object
-    paths: object
-    use_gateway: bool
-    conversation_history: list
-    history_lock: threading.Lock
-    build_history_context: object
-    assistant_outputs: list[str]
-    thinking_line_ref: list
-    stream_buf_ref: list
-    app_ref: list
-    last_token_estimate_ref: list
-    stop_event: threading.Event
-
-
-@dataclasses.dataclass(frozen=True)
-class StartWorkerParams:
-    app_ref: list
-    refresh_stop: threading.Event
-    jobs: object
-    state_lock: threading.Lock
-    is_running_ref: list
-    pending_jobs_ref: list
-    running_prompt_ref: list
-    running_started_at_ref: list
-    agent: object
-    args: object
-    paths: object
-    use_gateway: bool
-    conversation_history: list
-    history_lock: threading.Lock
-    build_history_context: object
-    assistant_outputs: list[str]
-    thinking_line_ref: list
-    stream_buf_ref: list
-    last_token_estimate_ref: list
-    stop_event: threading.Event
-
-
-@dataclasses.dataclass(frozen=True)
-class MakeTuiAppParams:
-    agent: object
-    state_lock: threading.Lock
-    is_running_ref: list
-    pending_jobs_ref: list
-    running_started_at_ref: list
-    last_token_estimate_ref: list
-    jobs: object
-    pending_jobs_ref_for_enqueue: list
-    runtime_inject: list[str]
-    prompt_files: list[str]
-    args: object
-    use_gateway: bool
-    paths: object
-    assistant_outputs: list[str]
-    shutting_down_ref: list
-    running_prompt_ref: list
-    stop_event: threading.Event
-
-
-@dataclasses.dataclass(frozen=True)
-class TuiRunParams:
-    agent: object
-    args: object
-    use_gateway: bool
-    paths: object
-    runtime_inject: list[str]
-    prompt_files: list[str]
-    conversation_history: list
-    history_lock: threading.Lock
-    jobs: object
-    state_lock: threading.Lock
-    is_running_ref: list
-    pending_jobs_ref: list
-    shutting_down_ref: list
-    running_prompt_ref: list
-    running_started_at_ref: list
-    last_token_estimate_ref: list
-    build_history_context: object
-    session_manager: object
-    current_session_id: str
 
 
 def _tui_get_status_text(
@@ -285,7 +174,7 @@ def _tui_enqueue_job(
     state_lock: threading.Lock,
     pending_jobs_ref: list,
 ) -> None:
-    from .fallback import ChatJob
+    from .fallback_state import ChatJob
 
     job = ChatJob(
         user=user,

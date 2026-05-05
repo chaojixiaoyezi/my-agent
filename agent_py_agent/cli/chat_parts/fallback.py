@@ -7,18 +7,13 @@
 
 from __future__ import annotations
 
-import json
 import queue
-import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any
 
 from .gateway_client import (
     check_gateway_alive,
-    format_gateway_timing,
     poll_gateway_chunks,
     submit_chat_request,
 )
@@ -26,211 +21,32 @@ from .input_loop import (
     handle_common_slash_command,
     is_exit_command,
     is_show_prompt_command,
-    parse_expand_target,
 )
 from .rendering import (
     BLUE,
     BOLD,
-    GRAY,
-    GREEN,
-    collapse_response_text,
+    RESET,
     terminal_rule,
 )
-
-
-@dataclass
-class FallbackWorkerConfig:
-    """Bundle of all _fallback_worker parameters."""
-
-    jobs: Any  # queue.Queue
-    state_lock: threading.Lock
-    is_running_ref: list
-    pending_jobs_ref: list
-    running_prompt_ref: list
-    running_started_at_ref: list
-    agent: Any
-    args: Any
-    paths: Any
-    use_gateway: bool
-    assistant_outputs: list[str]
-    conversation_history: list[tuple[str, str]]
-    history_lock: threading.Lock
-    build_history_context: Callable[[], str]
-
-
-@dataclass
-class FallbackHandleCommandConfig:
-    """Bundle of all _fallback_handle_command parameters."""
-
-    user: str
-    agent: Any
-    args: Any
-    runtime_inject: list[str]
-    prompt_files: list[str]
-    use_gateway: bool
-    state_lock: threading.Lock
-    is_running_ref: list
-    pending_jobs_ref: list
-    running_prompt_ref: list
-    running_started_at_ref: list
-    paths: Any
-    assistant_outputs: list[str]
-    jobs: Any  # queue.Queue
-
-
-@dataclass
-class RunFallbackConfig:
-    """Bundle of all run_fallback parameters."""
-
-    agent: Any
-    args: Any
-    use_gateway: bool
-    paths: Any
-    runtime_inject: list[str]
-    prompt_files: list[str]
-    conversation_history: list[tuple[str, str]]
-    history_lock: threading.Lock
-    jobs: Any  # queue.Queue
-    state_lock: threading.Lock
-    build_history_context: Callable[[], str]
-    session_manager: Any
-    current_session_id: str
-
-
-# Constants and helpers needed by fallback (imported from chat.py context)
-_CHAT_RESPONSE_STYLE_INJECT = (
-    "这是 CLI 聊天界面。回答风格要求："
-    "1. 不要用模板化欢迎词；"
-    "2. 不要在结尾主动列出'你可以问我这三个问题'这类建议问题；"
-    "3. 直接围绕用户当前输入回答，除非用户要求，否则不要做教学式铺垫；"
-    "4. 除非用户明确要求，不要先介绍你会什么、不要先列能力清单；"
-    "5. 默认优先用简短自然语言回答，不要动不动列 1、2、3。"
+from .fallback_state import (
+    FALLBACK_CHAT_PROMPT,
+    MAX_HISTORY_TURNS,
+    ChatJob,
+    FallbackHandleCommandConfig,
+    FallbackWorkerConfig,
+    RunFallbackConfig,
+    _CHAT_RESPONSE_STYLE_INJECT,
+    _startup_banner,
+    append_conversation_turn,
+    render_gateway_status,
+    resume_context_override,
 )
-
-FALLBACK_CHAT_PROMPT = "❯ "
-MAX_HISTORY_TURNS = 8
-
-
-def _startup_banner(agent_name: str, *, use_gateway: bool) -> str:
-    """Build startup banner."""
-    from .rendering import startup_banner as _sb
-
-    return _sb(agent_name, use_gateway=use_gateway)
-
-
-def append_conversation_turn(
-    conversation_history: list[tuple[str, str]],
-    history_lock: threading.Lock,
-    user_message: str,
-    assistant_message: str,
-    *,
-    max_turns: int = MAX_HISTORY_TURNS,
-) -> None:
-    """Append one turn and keep the in-memory buffer bounded."""
-    with history_lock:
-        conversation_history.append((user_message, assistant_message))
-        if len(conversation_history) > max_turns * 2:
-            conversation_history[:] = conversation_history[-max_turns:]
-
-
-def render_gateway_status(agent, paths):
-    """Render gateway status lines."""
-    from ...agent.gateway import render_gateway_status as _rgs
-
-    return _rgs(agent, paths)
-
-
-def resume_context_override(args) -> str | None:
-    """Get resume_context override from args."""
-    if hasattr(args, "resume_context"):
-        return args.resume_context
-    return None
-
-
-class ChatJob:
-    """Job for the chat worker queue."""
-
-    __slots__ = ("user", "show_prompt", "inject", "prompt_files")
-
-    def __init__(
-        self, *, user: str, show_prompt: bool, inject: list[str], prompt_files: list[str]
-    ) -> None:
-        self.user = user
-        self.show_prompt = show_prompt
-        self.inject = inject
-        self.prompt_files = prompt_files
-
-
-def _make_chunk_handler(agent_name: str, next_message_id: int):
-    """Factory for streaming chunk handlers."""
-    stream_started_ref = [False]
-    stream_visible_chars_ref = [0]
-    stream_truncated_ref = [False]
-
-    def on_chunk(chunk: str) -> None:
-        if not stream_started_ref[0]:
-            sys.stdout.write(f"{GREEN}{agent_name}#{next_message_id}>{RESET} ")
-            sys.stdout.flush()
-            stream_started_ref[0] = True
-        remaining = max(0, 900 - stream_visible_chars_ref[0])
-        if remaining > 0:
-            visible = chunk[:remaining]
-            sys.stdout.write(visible)
-            sys.stdout.flush()
-            stream_visible_chars_ref[0] += len(visible)
-        if remaining < len(chunk) and not stream_truncated_ref[0]:
-            sys.stdout.write(
-                f"{GRAY}[回复较长，后续内容已折叠。完成后可用 /expand last 查看全文。]{RESET}"
-            )
-            sys.stdout.flush()
-            stream_truncated_ref[0] = True
-
-    return on_chunk, stream_started_ref
-
-
-def _render_assistant_response(text: str, assistant_outputs: list[str], agent_name: str) -> None:
-    preview, collapsed = collapse_response_text(text)
-    assistant_outputs.append(text)
-    message_id = len(assistant_outputs)
-    if collapsed:
-        print(f"{GREEN}{agent_name}#{message_id}>{RESET} {preview}")
-        print(
-            f"{GRAY}[回复较长，已自动折叠。输入 /expand {message_id} 或 /expand last 查看全文。]{RESET}"
-        )
-        return
-    print(f"{GREEN}{agent_name}#{message_id}>{RESET} {text}")
-
-
-def _handle_expand_command(raw: str, assistant_outputs: list[str]) -> None:
-    target = parse_expand_target(raw)
-    if target is None:
-        print("用法: /expand [last|编号]")
-        return
-    if not assistant_outputs:
-        print("当前没有可展开的助手回复。")
-        return
-    if target == "last":
-        index = len(assistant_outputs)
-    else:
-        index = int(target)
-    if index < 1 or index > len(assistant_outputs):
-        print(f"没有编号为 {index} 的助手回复。当前共有 {len(assistant_outputs)} 条。")
-        return
-    print(f"===== ASSISTANT RESPONSE #{index} =====")
-    print(assistant_outputs[index - 1])
-    print("===== END RESPONSE =====")
-
-
-def _read_user_input(state_lock: threading.Lock, fallback_waiting_for_input_ref: list) -> str:
-    """Read a line of input, handling both tty and non-tty cases."""
-    if sys.stdin.isatty():
-        print(FALLBACK_CHAT_PROMPT, end="", flush=True)
-        fallback_waiting_for_input_ref[0] = True
-        try:
-            return input().strip()
-        finally:
-            fallback_waiting_for_input_ref[0] = False
-    return input(FALLBACK_CHAT_PROMPT).strip()
+from .fallback_ui import (
+    _handle_expand_command,
+    _make_chunk_handler,
+    _read_user_input,
+    _render_assistant_response,
+)
 
 
 def _fallback_gateway_handle(
