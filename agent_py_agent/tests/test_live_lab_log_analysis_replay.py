@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.live_lab.log_analysis_replay import REPO_ROOT, run_security_alert_v1_replay
+from scripts.live_lab.log_analysis_replay import (
+    REPO_ROOT,
+    RunSecurityAlertV1ReplayParams,
+    run_security_alert_v1_replay,
+)
 
 NO_FINDINGS_FIXTURE = REPO_ROOT / "validation" / "security_fixtures" / "security_alert_v1_no_findings.jsonl"
 
 
 def test_security_alert_v1_live_lab_replay_success(tmp_path):
-    summary = run_security_alert_v1_replay(output_root=tmp_path / "replay")
+    summary = run_security_alert_v1_replay(RunSecurityAlertV1ReplayParams(output_root=tmp_path / "replay"))
 
     assert summary["ok"] is True
     assert summary["failed_stage"] is None
@@ -33,8 +37,10 @@ def test_security_alert_v1_live_lab_replay_success(tmp_path):
 
 def test_security_alert_v1_live_lab_replay_reports_failed_stage(tmp_path):
     summary = run_security_alert_v1_replay(
-        output_root=tmp_path / "replay",
-        fixture_path=tmp_path / "missing.jsonl",
+        RunSecurityAlertV1ReplayParams(
+            output_root=tmp_path / "replay",
+            fixture_path=tmp_path / "missing.jsonl",
+        )
     )
 
     assert summary["ok"] is False
@@ -47,8 +53,10 @@ def test_security_alert_v1_live_lab_replay_reports_failed_stage(tmp_path):
 
 def test_security_alert_v1_live_lab_replay_no_findings_reports_detector_stage(tmp_path):
     summary = run_security_alert_v1_replay(
-        output_root=tmp_path / "replay",
-        fixture_path=NO_FINDINGS_FIXTURE,
+        RunSecurityAlertV1ReplayParams(
+            output_root=tmp_path / "replay",
+            fixture_path=NO_FINDINGS_FIXTURE,
+        )
     )
 
     assert summary["ok"] is False
@@ -67,8 +75,10 @@ def test_security_alert_v1_live_lab_replay_no_findings_reports_detector_stage(tm
 
 def test_security_alert_v1_live_lab_replay_reports_evidence_stage_failure(tmp_path):
     summary = run_security_alert_v1_replay(
-        output_root=tmp_path / "replay",
-        simulate_failure_stage="evidence",
+        RunSecurityAlertV1ReplayParams(
+            output_root=tmp_path / "replay",
+            simulate_failure_stage="evidence",
+        )
     )
 
     assert summary["ok"] is False
@@ -88,8 +98,10 @@ def test_security_alert_v1_live_lab_replay_reports_evidence_stage_failure(tmp_pa
 
 def test_security_alert_v1_live_lab_replay_reports_report_stage_failure(tmp_path):
     summary = run_security_alert_v1_replay(
-        output_root=tmp_path / "replay",
-        simulate_failure_stage="report",
+        RunSecurityAlertV1ReplayParams(
+            output_root=tmp_path / "replay",
+            simulate_failure_stage="report",
+        )
     )
 
     assert summary["ok"] is False

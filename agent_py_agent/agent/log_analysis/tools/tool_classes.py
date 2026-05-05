@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ...tooling.models import BaseTool, ToolExecutionResult, ToolSpec
+from ..tools_functions import SecurityQueryParams, security_query
 from .query_functions import security_hunt_ip, security_query, security_trace_case
 
 
@@ -90,7 +91,10 @@ class SecurityQueryTool(BaseTool):
         返回说明:
         返回 ToolExecutionResult，success=True 时 content 是格式化 JSON。
         """
-        payload = security_query(root=params.get("root") or self.store_root, **_query_params(params))
+        payload = security_query(SecurityQueryParams(
+            root=params.get("root") or self.store_root,
+            **_query_params(params),
+        ))
         return ToolExecutionResult(self.spec.name, True, _prompt_json(payload))
 
 
