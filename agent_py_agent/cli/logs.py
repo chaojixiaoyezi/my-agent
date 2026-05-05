@@ -10,7 +10,12 @@ from typing import Any
 from ..agent.log_analysis.config import load_log_analysis_config, resolve_log_analysis_data_dir
 from ..agent.log_analysis.doctor import collect_doctor_status
 from ..agent.log_analysis.ingest.pipeline import ingest_file
-from ..agent.log_analysis.tools_functions import hunt_ip, security_query, trace_case
+from ..agent.log_analysis.tools_functions import (
+    SecurityQueryParams,
+    hunt_ip,
+    security_query,
+    trace_case,
+)
 
 
 def cmd_logs(args) -> int:
@@ -57,16 +62,18 @@ def cmd_logs_query(args) -> int:
     root = _resolve_root(args.root, config.data_dir)
     limit, warnings = _resolve_query_limit(args.limit, config.query_default_limit, config.query_max_limit)
     response = security_query(
-        root=root,
-        attacker_ip=args.attacker_ip,
-        victim_ip=args.victim_ip,
-        domain=args.domain,
-        uri=args.uri,
-        alert_type=args.alert_type,
-        start_time=args.start_time,
-        end_time=args.end_time,
-        limit=limit,
-        max_limit=config.query_max_limit,
+        SecurityQueryParams(
+            root=root,
+            attacker_ip=args.attacker_ip,
+            victim_ip=args.victim_ip,
+            domain=args.domain,
+            uri=args.uri,
+            alert_type=args.alert_type,
+            start_time=args.start_time,
+            end_time=args.end_time,
+            limit=limit,
+            max_limit=config.query_max_limit,
+        )
     )
     payload = {
         "ok": True,
