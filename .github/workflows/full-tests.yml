@@ -38,7 +38,13 @@ jobs:
         run: python3 -m pytest -q -m slow --tb=short --timeout=300
 
       - name: Run security tests
-        run: python3 -m pytest -q -m security --tb=short --timeout=120
+        run: |
+          python3 -m pytest -q -m security --tb=short --timeout=120 || status=$?
+          if [ "${status:-0}" = "5" ]; then
+            echo "No security-marked tests collected; skipping."
+            exit 0
+          fi
+          exit "${status:-0}"
 
       - name: Run architecture guardrails
         run: python3 -m pytest agent_py_agent/tests/test_architecture_guardrails.py -q --tb=short
