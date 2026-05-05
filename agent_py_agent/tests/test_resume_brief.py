@@ -7,6 +7,7 @@ import json
 import pytest
 
 from agent_py_agent.agent.memory_archive.resume_brief import (
+    RecoveryBriefContext,
     _append,
     _context_block,
     _dedupe,
@@ -345,7 +346,7 @@ class TestContextBlock:
 
     def test_basic_format(self):
         """验证基本格式"""
-        result = _context_block(
+        ctx = RecoveryBriefContext(
             latest_user_intents=["用户意图"],
             latest_assistant_actions=["助手动作"],
             related_ids={"run_ids": ["run-1"]},
@@ -354,6 +355,7 @@ class TestContextBlock:
             next_actions=["查看状态"],
             authority_note="测试权威说明",
         )
+        result = _context_block(ctx)
 
         assert "# Recovery Brief" in result
         assert "authority: 测试权威说明" in result
@@ -361,7 +363,7 @@ class TestContextBlock:
 
     def test_empty_intents(self):
         """验证空意图时的处理"""
-        result = _context_block(
+        ctx = RecoveryBriefContext(
             latest_user_intents=[],
             latest_assistant_actions=[],
             related_ids={"run_ids": []},
@@ -370,13 +372,14 @@ class TestContextBlock:
             next_actions=[],
             authority_note="note",
         )
+        result = _context_block(ctx)
 
         assert "latest_user_intent: unknown" in result
         assert "latest_assistant_action: unknown" in result
 
     def test_task_statuses_listed(self):
         """验证任务状态列表"""
-        result = _context_block(
+        ctx = RecoveryBriefContext(
             latest_user_intents=[],
             latest_assistant_actions=[],
             related_ids={"run_ids": []},
@@ -387,12 +390,13 @@ class TestContextBlock:
             next_actions=[],
             authority_note="note",
         )
+        result = _context_block(ctx)
 
         assert "sub-1 RUNNING/UNVERIFIED" in result
 
     def test_must_read_paths(self):
         """验证必须阅读路径"""
-        result = _context_block(
+        ctx = RecoveryBriefContext(
             latest_user_intents=[],
             latest_assistant_actions=[],
             related_ids={"run_ids": []},
@@ -401,6 +405,7 @@ class TestContextBlock:
             next_actions=[],
             authority_note="note",
         )
+        result = _context_block(ctx)
 
         assert "- /status.md" in result
         assert "- /log.txt" in result

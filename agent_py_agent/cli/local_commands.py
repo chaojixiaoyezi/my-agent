@@ -22,7 +22,7 @@ from ..agent.gateway import (
 )
 from .common import format_local_time, make_agent, resume_context_override
 from .local_doctor import build_status_suggestions
-from .local_repair_commands import cmd_local_doctor, cmd_local_rebuild, rebuild_local_store
+from .local_repair_commands import build_local_doctor_report, cmd_local_doctor, cmd_local_rebuild, rebuild_local_store
 from .thinking_spinner import ThinkingSpinner
 
 

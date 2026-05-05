@@ -128,8 +128,8 @@ class TestCmdLocalDoctor:
             "suggestions": []
         }
 
-        with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.local_commands.build_local_doctor_report", return_value=mock_report):
+        with patch("agent_py_agent.cli.local_repair_commands.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli.local_repair_commands.build_local_doctor_report", return_value=mock_report):
             result = cmd_local_doctor(args)
             assert result == 0
 
@@ -156,9 +156,9 @@ class TestCmdLocalDoctor:
             "suggestions": []
         }
 
-        with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.local_commands.recover_gateway_processing_requests", return_value={}), \
-             patch("agent_py_agent.cli.local_commands.build_local_doctor_report", return_value=mock_report):
+        with patch("agent_py_agent.cli.local_repair_commands.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli.local_repair_commands.recover_gateway_processing_requests", return_value={}), \
+             patch("agent_py_agent.cli.local_repair_commands.build_local_doctor_report", return_value=mock_report):
             result = cmd_local_doctor(args)
             assert result == 0
 
@@ -185,8 +185,8 @@ class TestCmdLocalDoctor:
             "suggestions": []
         }
 
-        with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.local_commands.build_local_doctor_report", return_value=mock_report):
+        with patch("agent_py_agent.cli.local_repair_commands.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli.local_repair_commands.build_local_doctor_report", return_value=mock_report):
             result = cmd_local_doctor(args)
             assert result == 0
 
@@ -206,8 +206,8 @@ class TestCmdLocalRebuild:
         mock_agent = MagicMock()
         mock_agent.memory.index_all.return_value = 50
 
-        with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.local_commands.rebuild_local_store", return_value={"memory": 50}):
+        with patch("agent_py_agent.cli.local_repair_commands.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli.local_repair_commands.rebuild_local_store", return_value={"memory": 50}):
             result = cmd_local_rebuild(args)
             assert result == 0
 
@@ -222,8 +222,8 @@ class TestCmdLocalRebuild:
 
         mock_agent = MagicMock()
 
-        with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent), \
-             patch("agent_py_agent.cli.local_commands.rebuild_local_store", return_value={"memory": 50, "gateway": 30, "subagent": 20}):
+        with patch("agent_py_agent.cli.local_repair_commands.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli.local_repair_commands.rebuild_local_store", return_value={"memory": 50, "gateway": 30, "subagent": 20}):
             result = cmd_local_rebuild(args)
             assert result == 0
 
@@ -238,7 +238,7 @@ class TestCmdLocalRebuild:
 
         mock_agent = MagicMock()
 
-        with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent):
+        with patch("agent_py_agent.cli.local_repair_commands.make_agent", return_value=mock_agent):
             result = cmd_local_rebuild(args)
             assert result == 2
 

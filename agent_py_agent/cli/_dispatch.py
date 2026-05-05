@@ -9,6 +9,7 @@ from ..agent.agent_core.dispatch_mixin import DispatchParams
 from ..agent.capability_config import load_capability_config
 from ..agent.config import load_config
 from ..agent.subagent_workflows import (
+    WorkflowPlanConstraints,
     WorkflowPlanningResult,
     plan_workflow_for_goal,
     write_workflow_plan_preview,
@@ -124,8 +125,10 @@ def cmd_subagents_workflow_plan(args) -> int:
     config = load_config(args.config)
     result = plan_workflow_for_goal(
         args.goal,
-        config=config,
-        explicit_template_id=args.template_id or "",
+        constraints=WorkflowPlanConstraints(
+            config=config,
+            explicit_template_id=args.template_id or "",
+        ),
     )
     payload = result.to_dict()
     written_paths = None

@@ -9,7 +9,7 @@ from agent_py_agent.agent.config import load_config
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagent import QualityContract
 from agent_py_agent.agent.subagent_workflows.models import WorkflowPhase, WorkflowTemplate
-from agent_py_agent.agent.subagent_workflows.planner import plan_workflow_for_goal
+from agent_py_agent.agent.subagent_workflows.planner import WorkflowPlanConstraints, plan_workflow_for_goal
 from agent_py_agent.agent.subagent_workflows.store import WorkflowTemplateStore
 
 
@@ -61,10 +61,12 @@ def test_plan_workflow_for_goal_composes_router_compiler_and_parent_gate():
 
     result = plan_workflow_for_goal(
         "Fix the API bug and add regression tests",
-        config=_Config("auto"),
-        template_store=_store("single_worker_verified", "code_feature_split"),
-        quality_contract=contract,
-        allowed_write_roots=["agent_py_agent/agent/example.py"],
+        constraints=WorkflowPlanConstraints(
+            config=_Config("auto"),
+            template_store=_store("single_worker_verified", "code_feature_split"),
+            quality_contract=contract,
+            allowed_write_roots=["agent_py_agent/agent/example.py"],
+        ),
     )
 
     assert result.ok is True
@@ -84,8 +86,10 @@ def test_plan_workflow_for_goal_composes_router_compiler_and_parent_gate():
 def test_plan_workflow_for_goal_respects_off_mode():
     result = plan_workflow_for_goal(
         "Fix the API bug",
-        config=_Config("off"),
-        template_store=_store("single_worker_verified", "code_feature_split"),
+        constraints=WorkflowPlanConstraints(
+            config=_Config("off"),
+            template_store=_store("single_worker_verified", "code_feature_split"),
+        ),
     )
 
     assert result.ok is False
@@ -99,8 +103,10 @@ def test_plan_workflow_for_goal_respects_off_mode():
 def test_plan_workflow_for_goal_manual_mode_marks_confirmation():
     result = plan_workflow_for_goal(
         "small cleanup task",
-        config=_Config("manual"),
-        template_store=_store("single_worker_verified"),
+        constraints=WorkflowPlanConstraints(
+            config=_Config("manual"),
+            template_store=_store("single_worker_verified"),
+        ),
     )
 
     assert result.ok is True
@@ -111,8 +117,10 @@ def test_plan_workflow_for_goal_manual_mode_marks_confirmation():
 def test_workflow_planning_result_serializes_audit_preview():
     result = plan_workflow_for_goal(
         "Fix the API bug and add regression tests",
-        config=_Config("auto"),
-        template_store=_store("single_worker_verified", "code_feature_split"),
+        constraints=WorkflowPlanConstraints(
+            config=_Config("auto"),
+            template_store=_store("single_worker_verified", "code_feature_split"),
+        ),
     )
 
     payload = result.to_dict()

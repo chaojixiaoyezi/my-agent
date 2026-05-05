@@ -117,6 +117,47 @@ class BuildAndPersistContext:
     now: float
 
 
+@dataclass
+class _ApplyStatusParams:
+    """Bundle for _apply_status_and_build_payload to reduce parameter count."""
+    task: SubAgentTask
+    parsed: SubAgentParsedOutput
+    structured_evidence_count: int
+    structured_request_count: int
+    created_request_ids: list[str]
+    structured_repair_attempted: bool
+    structured_repair_ok: bool
+    structured_repair_error: str
+    actual_tools: list[str] | None
+    ignored_tools: list[str]
+    ignored_skills: list[str]
+    artifacts: list
+    tests: list
+    patches: list
+    lessons: list
+    next_actions: list
+
+
+@dataclass
+class _BuildContextParams:
+    """Bundle for _make_build_context to reduce parameter count."""
+    task: SubAgentTask
+    dry_run: bool
+    final_ok: bool
+    final_message: str
+    parsed: SubAgentParsedOutput
+    output_payload: dict
+    structured_evidence_count: int
+    structured_request_count: int
+    artifacts: list
+    tests: list
+    patches: list
+    lessons: list
+    blockers: list
+    next_actions: list
+    now: float
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers — promoted from SubAgentRunnerResultMixin to module scope
 # ---------------------------------------------------------------------------
@@ -228,27 +269,25 @@ def _runner_append_debrief(task, parsed):
 
 
 def _make_build_context(
-    task, dry_run, final_ok, final_message, parsed, output_payload,
-    structured_evidence_count, structured_request_count,
-    artifacts, tests, patches, lessons, blockers, next_actions, now,
-):
+    p: _BuildContextParams,
+) -> BuildAndPersistContext:
     """Build BuildAndPersistContext from computed values."""
     return BuildAndPersistContext(
-        task=task,
-        params=RecordRunnerResultParams(run_id=task.id, dry_run=dry_run, ok=final_ok, message=final_message),
-        final_ok=final_ok,
-        final_message=final_message,
-        parsed=parsed,
-        output_payload=output_payload,
-        structured_evidence_count=structured_evidence_count,
-        structured_request_count=structured_request_count,
-        artifacts=artifacts,
-        tests=tests,
-        patches=patches,
-        lessons=lessons,
-        blockers=blockers,
-        next_actions=next_actions,
-        now=now,
+        task=p.task,
+        params=RecordRunnerResultParams(run_id=p.task.id, dry_run=p.dry_run, ok=p.final_ok, message=p.final_message),
+        final_ok=p.final_ok,
+        final_message=p.final_message,
+        parsed=p.parsed,
+        output_payload=p.output_payload,
+        structured_evidence_count=p.structured_evidence_count,
+        structured_request_count=p.structured_request_count,
+        artifacts=p.artifacts,
+        tests=p.tests,
+        patches=p.patches,
+        lessons=p.lessons,
+        blockers=p.blockers,
+        next_actions=p.next_actions,
+        now=p.now,
     )
 
 
@@ -325,59 +364,50 @@ class SubAgentRunnerResultMixin:
 
     def _apply_status_and_build_payload(
         self,
-        task: SubAgentTask,
-        ok: bool,
-        message: str,
-        response: str,
-        dry_run: bool,
-        parsed: SubAgentParsedOutput,
-        status: str,
-        verification_status: str,
-        failure_type: str,
-        backend: str,
-        tool_rounds: int,
+        params: RecordRunnerResultParams,
+        extracted: _ApplyStatusParams,
         now: float,
-        structured_evidence_count: int,
-        structured_request_count: int,
-        created_request_ids: list[str],
-        structured_repair_attempted: bool,
-        structured_repair_ok: bool,
-        structured_repair_error: str,
-        actual_tools: list[str] | None,
-        ignored_tools: list[str],
-        ignored_skills: list[str],
-        artifacts: list,
-        tests: list,
-        patches: list,
-        lessons: list,
-        next_actions: list,
     ) -> tuple[dict, BuildAndPersistContext]:
         """Apply status to task and build output payload."""
-        result_meta = _runner_make_result_meta(ok, message, response, dry_run)
+        result_meta = _runner_make_result_meta(params.ok, params.message, params.response, params.dry_run)
         cap_data = _runner_make_cap_data(
             _CapDataParams(
-                parsed=parsed,
-                structured_evidence_count=structured_evidence_count,
-                structured_request_count=structured_request_count,
-                created_request_ids=created_request_ids,
-                structured_repair_attempted=structured_repair_attempted,
-                structured_repair_ok=structured_repair_ok,
-                structured_repair_error=structured_repair_error,
+                parsed=extracted.parsed,
+                structured_evidence_count=extracted.structured_evidence_count,
+                structured_request_count=extracted.structured_request_count,
+                created_request_ids=extracted.created_request_ids,
+                structured_repair_attempted=extracted.structured_repair_attempted,
+                structured_repair_ok=extracted.structured_repair_ok,
+                structured_repair_error=extracted.structured_repair_error,
             )
         )
-        tools_info = {"actual_tools": actual_tools, "ignored_tools": ignored_tools, "ignored_skills": ignored_skills}
-        status_context = {"status": status, "verification_status": verification_status, "failure_type": failure_type}
-        apply_runner_result_fields(task, result_meta, status_context, parsed, now)
+        tools_info = {"actual_tools": extracted.actual_tools, "ignored_tools": extracted.ignored_tools, "ignored_skills": extracted.ignored_skills}
+        status_context = {"status": params.status, "verification_status": params.verification_status, "failure_type": params.failure_type}
+        apply_runner_result_fields(extracted.task, result_meta, status_context, extracted.parsed, now)
         final_ok = result_meta["ok"]
         final_message = result_meta["message"]
-        blockers = _runner_compute_blockers(final_ok, task.status, parsed, final_message)
-        runner_meta = _runner_make_runner_meta(dry_run, final_ok, final_message, backend, tool_rounds, now)
-        output_items = {"artifacts": artifacts, "tests": tests, "patches": patches, "lessons": lessons, "blockers": blockers, "next_actions": next_actions}
-        output_payload = _runner_build_output_payload_wrapper(task, runner_meta, cap_data, tools_info, output_items)
+        blockers = _runner_compute_blockers(final_ok, extracted.task.status, extracted.parsed, final_message)
+        runner_meta = _runner_make_runner_meta(params.dry_run, final_ok, final_message, params.backend, params.tool_rounds, now)
+        output_items = {"artifacts": extracted.artifacts, "tests": extracted.tests, "patches": extracted.patches, "lessons": extracted.lessons, "blockers": blockers, "next_actions": extracted.next_actions}
+        output_payload = _runner_build_output_payload_wrapper(extracted.task, runner_meta, cap_data, tools_info, output_items)
         return output_payload, _make_build_context(
-            task, dry_run, final_ok, final_message, parsed, output_payload,
-            structured_evidence_count, structured_request_count,
-            artifacts, tests, patches, lessons, blockers, next_actions, now,
+            _BuildContextParams(
+                task=extracted.task,
+                dry_run=params.dry_run,
+                final_ok=final_ok,
+                final_message=final_message,
+                parsed=extracted.parsed,
+                output_payload=output_payload,
+                structured_evidence_count=extracted.structured_evidence_count,
+                structured_request_count=extracted.structured_request_count,
+                artifacts=extracted.artifacts,
+                tests=extracted.tests,
+                patches=extracted.patches,
+                lessons=extracted.lessons,
+                blockers=blockers,
+                next_actions=extracted.next_actions,
+                now=now,
+            )
         )
 
     def _post_result_side_effects(
@@ -433,32 +463,26 @@ class SubAgentRunnerResultMixin:
         ) = self._extract_parsed_output(task, params.structured_output, now, params.actual_tools)
 
         output_payload, build_ctx = self._apply_status_and_build_payload(
-            task=task,
-            ok=params.ok,
-            message=params.message,
-            response=params.response,
-            dry_run=params.dry_run,
-            parsed=parsed,
-            status=params.status,
-            verification_status=params.verification_status,
-            failure_type=params.failure_type,
-            backend=params.backend,
-            tool_rounds=params.tool_rounds,
-            now=now,
-            structured_evidence_count=structured_evidence_count,
-            structured_request_count=structured_request_count,
-            created_request_ids=created_request_ids,
-            structured_repair_attempted=params.structured_repair_attempted,
-            structured_repair_ok=params.structured_repair_ok,
-            structured_repair_error=params.structured_repair_error,
-            actual_tools=params.actual_tools,
-            ignored_tools=ignored_tools,
-            ignored_skills=ignored_skills,
-            artifacts=artifacts,
-            tests=tests,
-            patches=patches,
-            lessons=lessons,
-            next_actions=next_actions,
+            params,
+            _ApplyStatusParams(
+                task=task,
+                parsed=parsed,
+                structured_evidence_count=structured_evidence_count,
+                structured_request_count=structured_request_count,
+                created_request_ids=created_request_ids,
+                structured_repair_attempted=params.structured_repair_attempted,
+                structured_repair_ok=params.structured_repair_ok,
+                structured_repair_error=params.structured_repair_error,
+                actual_tools=params.actual_tools,
+                ignored_tools=ignored_tools,
+                ignored_skills=ignored_skills,
+                artifacts=artifacts,
+                tests=tests,
+                patches=patches,
+                lessons=lessons,
+                next_actions=next_actions,
+            ),
+            now,
         )
         # Override params in context with actual params object for full field access
         build_ctx.params = params

@@ -91,11 +91,13 @@ class WorkflowPlanningResult:
 def plan_workflow_for_goal(
     goal: str,
     *,
-    constraints: WorkflowPlanConstraints | None = None,
+    constraints: WorkflowPlanConstraints,
 ) -> WorkflowPlanningResult:
-    """Create a dry-run workflow plan without creating subagent tasks."""
+    """Create a dry-run workflow plan without creating subagent tasks.
 
-    _c = constraints or WorkflowPlanConstraints()
+    Use WorkflowPlanConstraints to bundle all parameters.
+    """
+    _c = constraints
     store = _c.template_store or load_template_store()
     decision = route_workflow(
         goal,

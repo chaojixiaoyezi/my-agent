@@ -175,7 +175,7 @@ class SubAgentLifecycleService:
             created_at=time.time(),
         )
         task.evidence.append(evidence)
-        task.verification_status = "VERIFIED" if ok else "FAILED"
+        task.verification_status = "VERIFIED" if params.ok else "FAILED"
         task.updated_at = time.time()
         self.manager.save(task)
         return evidence
