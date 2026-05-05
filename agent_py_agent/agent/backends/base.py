@@ -10,12 +10,11 @@ from __future__ import annotations
 """
 
 import json
-import sys
-import urllib.error
-import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+from .gateway_helpers import post_json, post_stream, post_stream_iter
 
 
 @dataclass
@@ -79,24 +78,14 @@ class EchoBackend(BaseBackend):
 class HttpBackend(BaseBackend):
     """真实模型后端共用的 HTTP 请求基础逻辑。"""
 
-    def __init__(
-        self,
-        *,
-        api_base: str,
-        api_key: str,
-        model_name: str,
-        request_timeout: int = 60,
-        max_tokens: int = 1024,
-        temperature: float = 0.2,
-        stream_enabled: bool = True,
-    ):
-        self.api_base = api_base.rstrip("/")
-        self.api_key = api_key
-        self.model_name = model_name
-        self.request_timeout = int(request_timeout)
-        self.max_tokens = int(max_tokens)
-        self.temperature = float(temperature)
-        self.stream_enabled = stream_enabled
+    def __init__(self, **kwargs: Any):
+        self.api_base = str(kwargs["api_base"]).rstrip("/")
+        self.api_key = str(kwargs["api_key"])
+        self.model_name = str(kwargs["model_name"])
+        self.request_timeout = int(kwargs.get("request_timeout", 60))
+        self.max_tokens = int(kwargs.get("max_tokens", 1024))
+        self.temperature = float(kwargs.get("temperature", 0.2))
+        self.stream_enabled = bool(kwargs.get("stream_enabled", True))
 
     def request_json(
         self, path: str, payload: dict[str, Any], headers: dict[str, str]
@@ -109,19 +98,14 @@ class HttpBackend(BaseBackend):
         if not self.api_key:
             raise ValueError("api_key 为空：请在配置文件中填写 API Key。")
 
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            self.api_base + path,
-            data=data,
-            method="POST",
-            headers=headers,
+        return post_json(
+            self.api_base,
+            self.api_key,
+            path,
+            payload,
+            headers,
+            timeout=self.request_timeout,
         )
-        try:
-            with urllib.request.urlopen(req, timeout=self.request_timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")
-            raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
 
     def request_stream(
         self, path: str, payload: dict[str, Any], headers: dict[str, str]
@@ -131,34 +115,14 @@ class HttpBackend(BaseBackend):
         超时是两个 chunk 之间的间隔（socket timeout），不是总时长。
         返回所有 data 行的原始字符串列表，由调用方解析具体内容。
         """
-        # LLM: enable streaming at the HTTP payload level.
-        payload["stream"] = True
-
-        if not self.api_key:
-            raise ValueError("api_key 为空：请在配置文件中填写 API Key。")
-
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            self.api_base + path,
-            data=data,
-            method="POST",
-            headers=headers,
+        return post_stream(
+            self.api_base,
+            self.api_key,
+            path,
+            payload,
+            headers,
+            timeout=self.request_timeout,
         )
-        data_lines: list[str] = []
-        try:
-            with urllib.request.urlopen(req, timeout=self.request_timeout) as resp:
-                for raw_line in resp:
-                    line = raw_line.decode("utf-8").strip()
-                    if not line or line.startswith(":"):
-                        continue
-                    if line.startswith("event:"):
-                        continue
-                    if line.startswith("data:"):
-                        data_lines.append(line[5:].strip())
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")
-            raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
-        return data_lines
 
     def request_stream_iter(
         self, path: str, payload: dict[str, Any], headers: dict[str, str]
@@ -168,32 +132,52 @@ class HttpBackend(BaseBackend):
         与 request_stream 相同的网络逻辑，但用生成器逐行返回，
         调用方可以在收到每行时立即处理（比如逐字打印）。
         """
-        # LLM: same SSE setup as request_stream.
-        payload["stream"] = True
-
-        if not self.api_key:
-            raise ValueError("api_key 为空：请在配置文件中填写 API Key。")
-
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            self.api_base + path,
-            data=data,
-            method="POST",
-            headers=headers,
+        yield from post_stream_iter(
+            self.api_base,
+            self.api_key,
+            path,
+            payload,
+            headers,
+            timeout=self.request_timeout,
         )
-        try:
-            with urllib.request.urlopen(req, timeout=self.request_timeout) as resp:
-                for raw_line in resp:
-                    line = raw_line.decode("utf-8").strip()
-                    if not line or line.startswith(":"):
-                        continue
-                    if line.startswith("event:"):
-                        continue
-                    if line.startswith("data:"):
-                        yield line[5:].strip()
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")
-            raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+
+
+def _openai_stream_contents(lines) -> list[str]:
+    contents: list[str] = []
+    for line in lines:
+        if line == "[DONE]":
+            break
+        obj = _json_object_or_none(line)
+        if obj is None:
+            continue
+        choices = obj.get("choices", [])
+        content = choices[0].get("delta", {}).get("content") if choices else None
+        if content:
+            contents.append(content)
+    return contents
+
+
+def _anthropic_stream_contents(lines) -> list[str]:
+    contents: list[str] = []
+    for line in lines:
+        obj = _json_object_or_none(line)
+        if obj is None:
+            continue
+        event_type = obj.get("type", "")
+        if event_type == "message_stop":
+            break
+        text = obj.get("delta", {}).get("text", "") if event_type == "content_block_delta" else ""
+        if text:
+            contents.append(text)
+    return contents
+
+
+def _json_object_or_none(line: str) -> dict[str, Any] | None:
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
 
 
 class OpenAICompatibleBackend(HttpBackend):
@@ -231,37 +215,11 @@ class OpenAICompatibleBackend(HttpBackend):
     ) -> ModelResponse:
         """流式解析 OpenAI SSE：逐行拼接 delta.content。"""
         parts: list[str] = []
-        if on_chunk is not None:
-            for line in self.request_stream_iter("/chat/completions", payload, headers):
-                if line == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                choices = obj.get("choices", [])
-                if not choices:
-                    continue
-                delta = choices[0].get("delta", {})
-                content = delta.get("content")
-                if content:
-                    parts.append(content)
-                    on_chunk(content)
-        else:
-            for line in self.request_stream("/chat/completions", payload, headers):
-                if line == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                choices = obj.get("choices", [])
-                if not choices:
-                    continue
-                delta = choices[0].get("delta", {})
-                content = delta.get("content")
-                if content:
-                    parts.append(content)
+        lines = self.request_stream_iter if on_chunk is not None else self.request_stream
+        for content in _openai_stream_contents(lines("/chat/completions", payload, headers)):
+            parts.append(content)
+            if on_chunk is not None:
+                on_chunk(content)
         return ModelResponse(text="".join(parts), backend=self.name)
 
 
@@ -316,35 +274,11 @@ class AnthropicCompatibleBackend(HttpBackend):
         # LLM: Anthropic SSE 用 event 行区分事件类型，data 行携带 JSON。
         # request_stream 已过滤 event 行，需从 data 行的 type 字段恢复事件类型。
         parts: list[str] = []
-        if on_chunk is not None:
-            for line in self.request_stream_iter("/v1/messages", payload, headers):
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                event_type = obj.get("type", "")
-                if event_type == "content_block_delta":
-                    delta = obj.get("delta", {})
-                    text = delta.get("text", "")
-                    if text:
-                        parts.append(text)
-                        on_chunk(text)
-                elif event_type == "message_stop":
-                    break
-        else:
-            for line in self.request_stream("/v1/messages", payload, headers):
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                event_type = obj.get("type", "")
-                if event_type == "content_block_delta":
-                    delta = obj.get("delta", {})
-                    text = delta.get("text", "")
-                    if text:
-                        parts.append(text)
-                elif event_type == "message_stop":
-                    break
+        lines = self.request_stream_iter if on_chunk is not None else self.request_stream
+        for text in _anthropic_stream_contents(lines("/v1/messages", payload, headers)):
+            parts.append(text)
+            if on_chunk is not None:
+                on_chunk(text)
         text = "".join(parts)
         if not text:
             raise RuntimeError("Anthropic-compatible 流式响应没有文本内容")

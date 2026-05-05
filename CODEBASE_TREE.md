@@ -40,6 +40,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |       |-- log-analysis.md                    # 日志分析模块设计
 |       `-- subagent-quality-contract.md       # subagent 质量契约
 |-- scripts/                                   # 开发辅助脚本和治理检查工具
+|   |-- code_size_report.py                    # 代码规模检查 Markdown 报告渲染辅助模块
 |   |-- check_code_size.py                     # 代码规模检查（warn/strict 模式，支持 baseline）
 |   |-- check_clean_package.py                 # 脏文件检查（目录和 tar.gz）
 |   |-- check_doc_sync.py                      # 文档同步检查
@@ -129,6 +130,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- subagents/                         # 子代理模型、报告、manager mixin、验收、dispatch、runner、索引等
 |   |   |-- tools.py                           # 工具兼容入口，真实实现已拆到 tooling/
 |   |   |-- tooling/                           # 工具模型、文件工具、HTTP 工具、解析器、注册表、写边界
+|   |   |   `-- registry_execution.py          # ToolRegistry 的工具调用解析、授权检查和执行分发 helper
 |   |   `-- validators/                        # 未来跨领域校验规则目录，目前用 README 定义边界
 |   |-- config/                                # 配置目录
 |   |   |-- agent_config.yaml                  # 运行配置文件，控制模型、记忆、工具和检索参数
@@ -212,6 +214,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 这次额外预留了混合检索框架：
 - 当前真正生效的是关键词检索。
 - 向量检索接口已经留好，后续接 embedding 时不用重写核心流程。
+- `agent_py_agent/agent/tooling/registry_execution.py` 承接工具调用块解析、payload 规范化、授权检查、写边界检查和异常格式化，避免注册表类继续膨胀。
 
 当前内置工具包括：
 - `list_files`：列目录，适合先摸清项目结构。

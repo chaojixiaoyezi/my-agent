@@ -27,18 +27,25 @@ def resume_session(agent: SimpleAgent, session_id: str) -> dict:
 
 def _load_recent_memories(config, session_id: str) -> list[dict]:
     """Load recent memories for a session from memory.jsonl."""
-    recent_memories: list[dict] = []
     try:
         memory_path = Path(config.memory_path)
-        if memory_path.exists():
-            lines = memory_path.read_text(encoding="utf-8").strip().split("\n")
-            for line in reversed(lines[-10:]):
-                record = _parse_memory_line(line, session_id)
-                if record:
-                    recent_memories.append(record)
     except (OSError, UnicodeDecodeError):
-        pass
-    return recent_memories
+        return []
+    if not memory_path.exists():
+        return []
+    return _recent_memory_records(memory_path, session_id)
+
+
+def _recent_memory_records(memory_path: Path, session_id: str) -> list[dict]:
+    try:
+        lines = memory_path.read_text(encoding="utf-8").strip().split("\n")
+    except (OSError, UnicodeDecodeError):
+        return []
+    return [
+        record
+        for line in reversed(lines[-10:])
+        if (record := _parse_memory_line(line, session_id))
+    ]
 
 
 def _parse_memory_line(line: str, session_id: str) -> dict | None:

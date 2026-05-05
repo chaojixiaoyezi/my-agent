@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Iterator
 from typing import Any
 
 
@@ -64,33 +64,7 @@ def post_stream(
     调用方再逐行解析具体内容。超时是两个 chunk 之间的间隔（socket timeout），不是总时长。
     """
 
-    payload["stream"] = True
-
-    if not api_key:
-        raise ValueError("api_key 为空：请在配置文件中填写 API Key。")
-
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        api_base + path,
-        data=data,
-        method="POST",
-        headers=headers,
-    )
-    data_lines: list[str] = []
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            for raw_line in resp:
-                line = raw_line.decode("utf-8").strip()
-                if not line or line.startswith(":"):
-                    continue
-                if line.startswith("event:"):
-                    continue
-                if line.startswith("data:"):
-                    data_lines.append(line[5:].strip())
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")
-        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
-    return data_lines
+    return list(_post_stream_lines(api_base, api_key, path, payload, headers, timeout=timeout))
 
 
 def post_stream_iter(
@@ -109,28 +83,38 @@ def post_stream_iter(
     调用方可以在收到每行时立即处理（比如逐字打印）。
     """
 
-    payload["stream"] = True
+    yield from _post_stream_lines(api_base, api_key, path, payload, headers, timeout=timeout)
 
+
+def _post_stream_lines(
+    api_base: str,
+    api_key: str,
+    path: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    *,
+    timeout: int,
+) -> Iterator[str]:
+    payload["stream"] = True
     if not api_key:
         raise ValueError("api_key 为空：请在配置文件中填写 API Key。")
-
-    data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         api_base + path,
-        data=data,
+        data=json.dumps(payload).encode("utf-8"),
         method="POST",
         headers=headers,
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            for raw_line in resp:
-                line = raw_line.decode("utf-8").strip()
-                if not line or line.startswith(":"):
-                    continue
-                if line.startswith("event:"):
-                    continue
-                if line.startswith("data:"):
-                    yield line[5:].strip()
+            yield from _iter_sse_data_lines(resp)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")
         raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+
+
+def _iter_sse_data_lines(response) -> Iterator[str]:
+    for raw_line in response:
+        line = raw_line.decode("utf-8").strip()
+        if line and not line.startswith(":") and not line.startswith("event:"):
+            if line.startswith("data:"):
+                yield line[5:].strip()

@@ -19,6 +19,19 @@ from .protocol import IncomingMessage, OutgoingMessage
 logger = logging.getLogger(__name__)
 
 
+def _gateway_ask_payload(msg: IncomingMessage) -> dict[str, object]:
+    return {
+        "kind": "ask",
+        "prompt": msg.content,
+        "metadata": {
+            "channel": msg.channel,
+            "user_id": msg.user_id,
+            "message_id": msg.message_id,
+            "adapter": msg.channel,
+        },
+    }
+
+
 class ChannelManager:
     """管理所有已注册的通道适配器，提供统一的启停和消息路由接口。"""
 
@@ -86,66 +99,52 @@ class ChannelManager:
     def route_message(self, msg: IncomingMessage) -> bool:
         """把外部消息路由到 gateway（POST /ask），异步等待结果并回复用户。"""
         import urllib.error
-        import urllib.request
 
         try:
-            # 构造 gateway ask 请求
-            ask_payload = {
-                "kind": "ask",
-                "prompt": msg.content,
-                "metadata": {
-                    "channel": msg.channel,
-                    "user_id": msg.user_id,
-                    "message_id": msg.message_id,
-                    "adapter": msg.channel,
-                },
-            }
-
-            url = f"http://127.0.0.1:{self.gateway_port}/ask"
-            data = json.dumps(ask_payload).encode("utf-8")
-            req = urllib.request.Request(
-                url,
-                data=data,
-                headers={"Content-Type": "application/json"},
-            )
-
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-
-            request_id = result.get("request_id", "")
+            request_id = self._submit_gateway_ask(msg)
             if not request_id:
-                logger.error(f"gateway /ask 未返回 request_id: {result}")
                 return False
-
-            # 轮询结果
             response_text = self._poll_gateway_result(request_id)
-
-            # 构造回复消息
-            outgoing = OutgoingMessage(
-                channel=msg.channel,
-                user_id=msg.user_id,
-                content=response_text,
-                format="text",
-                metadata={"gateway_request_id": request_id},
-            )
-
-            # 通过对应适配器发送回复
-            adapter = self._adapters.get(msg.channel)
-            if adapter:
-                ok = adapter.send_message(msg.user_id, outgoing)
-                if ok:
-                    self._update_active_channel(msg.user_id, msg.channel)
-                return ok
-            else:
-                logger.error(f"找不到 channel={msg.channel} 的适配器")
-                return False
-
+            return self._send_gateway_reply(msg, request_id, response_text)
         except urllib.error.URLError as exc:
             logger.error(f"gateway 请求失败: {exc}")
             return False
         except Exception as exc:
             logger.error(f"route_message 异常: {exc}")
             return False
+
+    def _submit_gateway_ask(self, msg: IncomingMessage) -> str:
+        import urllib.request
+
+        payload = _gateway_ask_payload(msg)
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.gateway_port}/ask",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        request_id = result.get("request_id", "")
+        if not request_id:
+            logger.error(f"gateway /ask 未返回 request_id: {result}")
+        return request_id
+
+    def _send_gateway_reply(self, msg: IncomingMessage, request_id: str, response_text: str) -> bool:
+        adapter = self._adapters.get(msg.channel)
+        if adapter is None:
+            logger.error(f"找不到 channel={msg.channel} 的适配器")
+            return False
+        outgoing = OutgoingMessage(
+            channel=msg.channel,
+            user_id=msg.user_id,
+            content=response_text,
+            format="text",
+            metadata={"gateway_request_id": request_id},
+        )
+        ok = adapter.send_message(msg.user_id, outgoing)
+        if ok:
+            self._update_active_channel(msg.user_id, msg.channel)
+        return ok
 
     def _poll_gateway_result(self, request_id: str, timeout: float = 60.0, interval: float = 1.0) -> str:
         """轮询 gateway /result/<id> 直到拿到结果或超时。"""

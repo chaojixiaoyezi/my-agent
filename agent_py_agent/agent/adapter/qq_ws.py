@@ -8,10 +8,65 @@ import json
 import ssl
 from socket import socket as _socket
 from typing import Any
+from urllib.parse import urlsplit
 
 from .qq_protocol import WebSocketFrame
 
 __all__ = ["QQWebSocketClient"]
+
+
+def _parse_ws_url(url: str):
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"ws", "wss"}:
+        raise ValueError(f"Unknown WebSocket URL scheme: {url}")
+    port = parsed.port or (443 if parsed.scheme == "wss" else 80)
+    path = parsed.path or "/"
+    request_target = f"{path}?{parsed.query}" if parsed.query else path
+    return parsed.scheme == "wss", parsed.hostname or "", port, request_target
+
+
+def _connect_socket(parsed):
+    is_ssl, host, port, _request_target = parsed
+    sock = _socket()
+    sock.settimeout(30)
+    if is_ssl:
+        ctx = ssl.create_default_context()
+        sock = ctx.wrap_socket(sock, server_hostname=host)
+    sock.connect((host, port))
+    return sock
+
+
+def _send_handshake(sock, parsed, access_token: str) -> str:
+    import secrets
+
+    _is_ssl, host, port, request_target = parsed
+    key = base64.b64encode(secrets.token_bytes(16)).decode()
+    handshake = (
+        f"GET {request_target} HTTP/1.1\r\n"
+        f"Host: {host}:{port}\r\n"
+        f"Upgrade: websocket\r\n"
+        f"Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        f"Sec-WebSocket-Version: 13\r\n"
+        f"Authorization: Bearer {access_token}\r\n"
+        f"\r\n"
+    )
+    sock.sendall(handshake.encode())
+    return key
+
+
+def _verify_handshake(sock, key: str) -> None:
+    response = b""
+    while b"\r\n\r\n" not in response:
+        response += sock.recv(4096)
+    if b"HTTP/1.1 101" not in response and b"HTTP/1.0 101" not in response:
+        sock.close()
+        raise ConnectionError(f"WebSocket handshake failed: {response[:200]}")
+    accept_expected = base64.b64encode(
+        hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()
+    ).decode()
+    if accept_expected.encode() not in response:
+        pass
 
 
 class QQWebSocketClient:
@@ -32,75 +87,10 @@ class QQWebSocketClient:
 
     def connect(self) -> None:
         """Establish TCP connection and complete WebSocket handshake."""
-        # Parse URL
-        if self.url.startswith("wss://"):
-            is_ssl = True
-            url_no_scheme = self.url[6:]
-        elif self.url.startswith("ws://"):
-            is_ssl = False
-            url_no_scheme = self.url[5:]
-        else:
-            raise ValueError(f"Unknown WebSocket URL scheme: {self.url}")
-
-        if "/" in url_no_scheme:
-            host_port_path = url_no_scheme.split("/", 1)
-            host_port = host_port_path[0]
-            path = "/" + host_port_path[1]
-        else:
-            host_port = url_no_scheme
-            path = "/"
-
-        if ":" in host_port:
-            host, port_str = host_port.rsplit(":", 1)
-            port = int(port_str)
-        else:
-            host = host_port
-            port = 443 if is_ssl else 80
-
-        # TCP connection
-        sock = _socket()
-        sock.settimeout(30)
-        if is_ssl:
-            ctx = ssl.create_default_context()
-            sock = ctx.wrap_socket(sock, server_hostname=host)
-        sock.connect((host, port))
-
-        # WebSocket handshake
-        import secrets
-
-        key = base64.b64encode(secrets.token_bytes(16)).decode()
-        query = self.url.split("?", 1)[1] if "?" in self.url else ""
-        request_target = f"{path}?{query}" if query else path
-        handshake = (
-            f"GET {request_target} HTTP/1.1\r\n"
-            f"Host: {host}:{port}\r\n"
-            f"Upgrade: websocket\r\n"
-            f"Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Key: {key}\r\n"
-            f"Sec-WebSocket-Version: 13\r\n"
-            f"Authorization: Bearer {self.access_token}\r\n"
-            f"\r\n"
-        )
-        sock.sendall(handshake.encode())
-
-        # Read handshake response
-        response = b""
-        while b"\r\n\r\n" not in response:
-            response += sock.recv(4096)
-
-        # Verify handshake response
-        if b"HTTP/1.1 101" not in response and b"HTTP/1.0 101" not in response:
-            sock.close()
-            raise ConnectionError(f"WebSocket handshake failed: {response[:200]}")
-
-        # Verify Sec-WebSocket-Accept
-        accept_expected = base64.b64encode(
-            hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()
-        ).decode()
-        if accept_expected.encode() not in response:
-            # Some implementations don't return this header, skip strict check
-            pass
-
+        parsed = _parse_ws_url(self.url)
+        sock = _connect_socket(parsed)
+        key = _send_handshake(sock, parsed, self.access_token)
+        _verify_handshake(sock, key)
         self._sock = sock
         self._connected = True
 

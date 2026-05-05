@@ -13,6 +13,65 @@ if TYPE_CHECKING:
     from .manager import SessionManager
 
 
+def _channel_activity_items(cross_channel, user_id: str) -> list[dict]:
+    items = []
+    for channel in ["chat", "feishu", "qq", "web"]:
+        session_ids = cross_channel.list_sessions_by_channel(user_id, channel)
+        for session_id in session_ids:
+            items.extend(_session_channel_activity(cross_channel, session_id))
+    return items
+
+
+def _session_channel_activity(cross_channel, session_id: str) -> list[dict]:
+    items = []
+    for ch_info in cross_channel.get_bound_sessions(session_id):
+        if ch_info.get("last_active_at", 0) <= 0:
+            continue
+        items.append(
+            {
+                "type": "channel_activity",
+                "session_id": session_id,
+                "channel": ch_info["channel"],
+                "active": ch_info["active"],
+                "timestamp": ch_info["last_active_at"],
+            }
+        )
+    return items
+
+
+def _session_update_items(session_manager, user_id: str) -> list[dict]:
+    return [
+        {
+            "type": "session_update",
+            "session_id": session.session_id,
+            "channel": session.last_active_channel,
+            "timestamp": session.updated_at,
+        }
+        for session in session_manager.list_sessions(user_id=user_id)
+    ]
+
+
+def _task_update_items(task_registry_store, user_id: str) -> list[dict]:
+    if not task_registry_store:
+        return []
+    try:
+        from ..task_registry import TaskRegistry
+        registry = TaskRegistry(task_registry_store)
+        tasks = registry.query_tasks(user_id=user_id, limit=50)
+    except Exception:
+        return []
+    return [
+        {
+            "type": "task_update",
+            "task_id": task["task_id"],
+            "status": task["status"],
+            "goal": task["goal"],
+            "timestamp": task.get("updated_at", 0),
+        }
+        for task in tasks
+    ]
+
+
 class AdminCrossChannelQuery:
     """管理员跨通道查询接口。
 
@@ -116,53 +175,12 @@ class AdminCrossChannelQuery:
         if not self._check_admin(user_id):
             return []
 
-        timeline = []
-
-        # 1. 收集各通道的活跃会话
-        for channel in ["chat", "feishu", "qq", "web"]:
-            session_ids = self._cross_channel.list_sessions_by_channel(self.ADMIN_USER, channel)
-            for session_id in session_ids:
-                bound_sessions = self._cross_channel.get_bound_sessions(session_id)
-                for ch_info in bound_sessions:
-                    if ch_info.get("last_active_at", 0) > 0:
-                        timeline.append({
-                            "type": "channel_activity",
-                            "session_id": session_id,
-                            "channel": ch_info["channel"],
-                            "active": ch_info["active"],
-                            "timestamp": ch_info["last_active_at"],
-                        })
-
-        # 2. 收集会话更新时间
-        sessions = self._session_manager.list_sessions(user_id=self.ADMIN_USER)
-        for session in sessions:
-            timeline.append({
-                "type": "session_update",
-                "session_id": session.session_id,
-                "channel": session.last_active_channel,
-                "timestamp": session.updated_at,
-            })
-
-        # 3. 收集任务更新
-        if self._task_registry_store:
-            try:
-                from ..task_registry import TaskRegistry
-                registry = TaskRegistry(self._task_registry_store)
-                tasks = registry.query_tasks(user_id=self.ADMIN_USER, limit=50)
-                for task in tasks:
-                    timeline.append({
-                        "type": "task_update",
-                        "task_id": task["task_id"],
-                        "status": task["status"],
-                        "goal": task["goal"],
-                        "timestamp": task.get("updated_at", 0),
-                    })
-            except Exception:
-                pass
-
-        # 按时间倒序排序
+        timeline = [
+            *_channel_activity_items(self._cross_channel, self.ADMIN_USER),
+            *_session_update_items(self._session_manager, self.ADMIN_USER),
+            *_task_update_items(self._task_registry_store, self.ADMIN_USER),
+        ]
         timeline.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
-
         return timeline[:limit]
 
     def get_channel_summary(self, user_id: str, channel: str) -> dict:
