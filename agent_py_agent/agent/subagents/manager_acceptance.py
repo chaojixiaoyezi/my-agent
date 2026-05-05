@@ -52,6 +52,7 @@ from .probe import (
 )
 from .rendering import render_acceptance_record_markdown, render_acceptance_review_markdown
 from .reports import AcceptanceReviewRecord, AcceptanceReviewReport
+from .acceptance_review_service import review_acceptance_task
 from .runner_rendering import _render_runner_item_line
 from .utils import (
     _apply_missing_paths,
@@ -186,72 +187,7 @@ class SubAgentAcceptanceMixin:
         note: str,
     ) -> AcceptanceReviewRecord:
         """对单个任务执行验收判断，并按需写回状态。"""
-
-        now = time.time()
-        before_status = task.status
-        before_verification = task.verification_status
-        output = _read_json_object(Path(task.output_json))
-        runner = _read_json_object(Path(task.runner_result_json))
-        # 调用公开方法 acceptance_findings（原 _acceptance_findings 已重命名）
-        findings = self.acceptance_findings(task, output, runner, now)
-        ok = all(item.ok or item.severity == "P2" for item in findings)
-        ready = task.status == "AWAITING_ACCEPTANCE" or task.verification_status == "NEEDS_ACCEPTANCE"
-        decision = "ACCEPT" if ok else "REJECT"
-        message = "验收通过。"
-        if not ok:
-            failed = [item.message for item in findings if not item.ok and item.severity != "P2"]
-            message = "验收未通过: " + "；".join(failed[:3])
-        applied = False
-
-        if apply and ready:
-            if ok:
-                task.status = "DONE"
-                task.verification_status = "VERIFIED"
-                task.failure_type = ""
-                task.result = task.result or message
-                task.ended_at = now
-                applied = True
-            else:
-                task.status = "BLOCKED"
-                task.verification_status = "FAILED"
-                task.failure_type = "acceptance_failed"
-                task.result = message
-                task.ended_at = now
-                applied = True
-            task.updated_at = now
-            task.heartbeat_at = now
-            self.save(task)
-            self._append_task_work_log(
-                task,
-                f"acceptance_review: decision={decision} reviewer={reviewer} message={message}",
-            )
-        elif apply and not ready:
-            message = f"任务当前状态不在等待验收范围内，未写回: status={task.status} verify={task.verification_status}"
-
-        record = AcceptanceReviewRecord(
-            id=_new_id("accept"),
-            run_id=task.id,
-            dry_run=not apply,
-            applied=applied,
-            ok=ok,
-            decision=decision,
-            message=message,
-            before_status=before_status,
-            after_status=task.status,
-            before_verification_status=before_verification,
-            after_verification_status=task.verification_status,
-            reviewer=reviewer,
-            note=note,
-            evidence_count=len(task.evidence),
-            test_count=len(_dict_list(output.get("tests", []))),
-            artifact_count=len(_dict_list(output.get("artifacts", []))),
-            findings=findings,
-            evidence_paths=[
-                item.evidence_path for item in findings if item.evidence_path
-            ],
-            created_at=now,
-        )
-        return record
+        return review_acceptance_task(self, task, apply=apply, reviewer=reviewer, note=note)
 
     def _write_acceptance_record_files(self, record: AcceptanceReviewRecord) -> None:
         """把单个验收记录写进对应任务目录。"""

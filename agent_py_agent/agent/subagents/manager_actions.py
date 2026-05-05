@@ -7,6 +7,7 @@ Human version:
 业务逻辑已移至 services/actions.py。
 """
 
+from .services.action_options import ActionApplyOptions
 from .services.actions import SubAgentActionService
 
 
@@ -32,19 +33,17 @@ class SubAgentActionMixin:
     def _append_task_work_log(self, *args, **kwargs):
         return self._action_service._append_task_work_log(*args, **kwargs)
 
-    def apply_actions(self, config=None, *, apply=False, action_filter="", run_id="", take_over_by="", locked_files=None, limit=0):
+    def apply_actions(self, config=None, options: ActionApplyOptions | None = None, **overrides):
         return self._action_service.apply_actions(
-            config, apply=apply, action_filter=action_filter, run_id=run_id,
-            take_over_by=take_over_by, locked_files=locked_files, limit=limit,
+            config,
+            ActionApplyOptions.from_values(options, **overrides),
         )
 
-    def write_action_apply_report(self, config=None, *, apply=False, action_filter="", run_id="", take_over_by="", locked_files=None, limit=0):
+    def write_action_apply_report(self, config=None, options: ActionApplyOptions | None = None, **overrides):
         import json
         from dataclasses import asdict
-        report = self.apply_actions(
-            config, apply=apply, action_filter=action_filter, run_id=run_id,
-            take_over_by=take_over_by, locked_files=locked_files, limit=limit,
-        )
+        opts = ActionApplyOptions.from_values(options, **overrides)
+        report = self.apply_actions(config, opts)
         (self.workspace / "subagent_action_apply_report.json").write_text(
             json.dumps(asdict(report), ensure_ascii=False, indent=2), encoding="utf-8",
         )

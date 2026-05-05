@@ -69,29 +69,36 @@ def validate_write_boundary(
             f" target={_display_path(target, workspace_root)} allowed={roots}"
         )
 
+    forbidden_error = _forbidden_boundary_error(target, allowed_roots, write_boundary, workspace_root)
+    if forbidden_error:
+        return forbidden_error
+    return _locked_boundary_error(target, write_boundary, workspace_root)
+
+
+def _forbidden_boundary_error(
+    target: Path,
+    allowed_roots: list[Path],
+    write_boundary: dict[str, object],
+    workspace_root: Path,
+) -> str:
     forbidden_roots = _boundary_paths(write_boundary.get("forbidden_write_roots"), workspace_root)
     for root in forbidden_roots:
-        if _is_relative_to(target, root):
-            # LLM: An allowed root that itself sits inside a forbidden root is an
-            # explicit grant from the parent agent (e.g. user said "write to
-            # ~/my_project" while ~ is forbidden).  Files inside such a root
-            # should be writable.  But a forbidden sub-root inside an allowed
-            # root (e.g. allowed=task_dir, forbidden=task_dir/private) still
-            # blocks.  We distinguish by checking whether the forbidden root is
-            # also inside some allowed root: if so, the forbidden rule wins.
-            forbidden_inside_allowed = any(
-                _is_relative_to(root, aroot) for aroot in allowed_roots
-            )
-            if not forbidden_inside_allowed:
-                # The forbidden root is NOT inside an allowed root — it's a
-                # general prohibition (e.g. ~).  Since the target passed the
-                # allowed check above, let it through.
-                continue
+        if _forbidden_root_blocks_target(target, root, allowed_roots):
             return (
                 "写入被阻止: 目标路径落在 forbidden_write_roots 内。"
                 f" target={_display_path(target, workspace_root)} forbidden={_display_path(root, workspace_root)}"
             )
+    return ""
 
+
+def _forbidden_root_blocks_target(target: Path, root: Path, allowed_roots: list[Path]) -> bool:
+    if not _is_relative_to(target, root):
+        return False
+    # LLM: general parent forbids (like ~) do not override a narrower explicit grant.
+    return any(_is_relative_to(root, aroot) for aroot in allowed_roots)
+
+
+def _locked_boundary_error(target: Path, write_boundary: dict[str, object], workspace_root: Path) -> str:
     locked_paths = _boundary_paths(write_boundary.get("locked_files"), workspace_root)
     for locked in locked_paths:
         if target == locked or _is_relative_to(target, locked):
@@ -99,7 +106,6 @@ def validate_write_boundary(
                 "写入被阻止: 目标路径已被 locked_files 锁定。"
                 f" target={_display_path(target, workspace_root)} locked={_display_path(locked, workspace_root)}"
             )
-
     return ""
 
 

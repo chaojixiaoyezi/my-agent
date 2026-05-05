@@ -59,6 +59,7 @@ from .result_processors import (
     _process_structured_output,
     _write_runner_result_files,
 )
+from .runner_result_state import apply_runner_result_fields
 from .runner_rendering import _render_runner_item_line, render_runner_result_markdown
 from .utils import (
     _apply_missing_paths,
@@ -138,7 +139,7 @@ class SubAgentRunnerResultMixin:
         tools_info = {"actual_tools": actual_tools, "ignored_tools": ignored_tools, "ignored_skills": ignored_skills}
         output_items = {"artifacts": artifacts, "tests": tests, "patches": patches, "lessons": lessons, "blockers": blockers, "next_actions": next_actions}
         status_context = {"status": status, "verification_status": verification_status, "failure_type": failure_type}
-        self._apply_runner_result_fields(task, result_meta, status_context, parsed, now)
+        apply_runner_result_fields(task, result_meta, status_context, parsed, now)
         output_payload = self._build_output_payload_wrapper(task, runner_meta, cap_data, tools_info, output_items)
         result = _build_runner_result(
             RunnerResultContext(
@@ -203,72 +204,6 @@ class SubAgentRunnerResultMixin:
         return (proc["ignored_tools"], proc["ignored_skills"], proc["structured_evidence_count"],
                 proc["structured_request_count"], proc["created_request_ids"], proc["artifacts"],
                 proc["tests"], proc["patches"], proc["lessons"], proc["next_actions"])
-
-    def _apply_runner_result_fields(self, task, result_meta, status_context, parsed, now):
-        ok = result_meta["ok"]
-        message = result_meta["message"]
-        response = result_meta["response"]
-        dry_run = result_meta["dry_run"]
-        status = status_context["status"]
-        verification_status = status_context["verification_status"]
-        failure_type = status_context["failure_type"]
-        parsed_ok = parsed.ok
-        if parsed.found and parsed_ok:
-            if not status:
-                task.status = _status_from_structured_output(parsed).upper()
-            elif status:
-                task.status = status.upper()
-            if not verification_status:
-                task.verification_status = _verification_from_runner_status(task.status).upper()
-            elif verification_status:
-                task.verification_status = verification_status.upper()
-            if failure_type:
-                task.failure_type = failure_type
-            elif not failure_type and parsed.failure_type:
-                task.failure_type = parsed.failure_type
-            if task.capability_requests and not failure_type:
-                task.failure_type = "capability_request"
-        elif parsed.found and not parsed_ok:
-            ok = False
-            task.status = status.upper() if status else "BLOCKED"
-            task.verification_status = verification_status.upper() if verification_status else "UNVERIFIED"
-            task.failure_type = failure_type or "structured_output_parse_error"
-            message = f"{message} / structured output parse failed: {parsed.parse_error}"
-            task.result = response or message
-        else:
-            if status:
-                task.status = status.upper()
-            if verification_status:
-                task.verification_status = verification_status.upper()
-            if failure_type:
-                task.failure_type = failure_type
-            elif not ok:
-                task.failure_type = task.failure_type or "runner_error"
-            if response:
-                task.result = response
-            elif message:
-                task.result = message
-        if response and not (parsed.found and not parsed_ok):
-            task.result = response
-        elif message:
-            task.result = message
-        if task.status in {"DONE", "FAILED", "BLOCKED", "CHANNEL_ERROR", "TIMEOUT"}:
-            task.ended_at = now
-        task.updated_at = now
-        task.heartbeat_at = now
-        if not dry_run:
-            task.runner_attempts = max(0, int(task.runner_attempts or 0)) + 1
-            task.runner_last_attempt_at = now
-            if not ok or task.status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
-                task.runner_last_error = message
-            else:
-                task.runner_last_error = ""
-            normalized_attempt_id = str(task.runner_active_attempt_id or "").strip()
-            if normalized_attempt_id:
-                task.runner_active_attempt_id = ""
-        # Write back modified ok and message so caller gets the corrected values
-        result_meta["ok"] = ok
-        result_meta["message"] = message
 
     def _compute_blockers(self, ok, status, parsed, message):
         if not ok or status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:

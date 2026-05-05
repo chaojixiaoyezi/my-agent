@@ -11,16 +11,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from ..models import SubAgentTask
-from ..policies import (
-    MakeDueIssueParams,
-    _action_for_issue,
-    _commands_for_action,
-    _is_active,
-    _issue_weight,
-    _make_due_issue,
-    _risk_weight,
-    _severity_weight,
-)
+from ..policies import _action_for_issue, _commands_for_action, _issue_weight, _risk_weight, _severity_weight
 from ..reports import (
     ActionPlanItem,
     ActionPlanReport,
@@ -30,6 +21,7 @@ from ..reports import (
     SubAgentBoardItem,
 )
 from ..utils import _merge_list
+from .board_due_checks import DueCheckSettings, inspect_single_task_due
 
 if TYPE_CHECKING:
     from ..capability_config import CapabilityConfig
@@ -95,244 +87,6 @@ def _to_board_item(
     )
 
 
-def _check_work_order_issues(task, validation, risk_flags, open_request_count, open_gap_count, age_seconds, stale_seconds):
-    """Check for missing work order files."""
-    issues = []
-    if not validation.ok:
-        issues.append(
-            _make_due_issue(
-                params=MakeDueIssueParams(
-                    task=task, severity="P0", kind="missing_work_order_files",
-                    message=f"工单目录缺少 {len(validation.missing)} 个关键路径，后续接管和验收不可靠。",
-                    suggested_action="repair_work_order", risk_flags=risk_flags,
-                    open_request_count=open_request_count, open_gap_count=open_gap_count,
-                    age_seconds=age_seconds, stale_seconds=stale_seconds,
-                )
-            )
-        )
-    return issues
-
-
-def _check_status_issues(task, risk_flags, open_request_count, open_gap_count, age_seconds, stale_seconds):
-    """Check for failed/timeout/channel error/blocked status issues."""
-    issues = []
-    if task.status in {"FAILED", "TIMEOUT", "CHANNEL_ERROR", "BLOCKED"}:
-        severity = {"FAILED": "P0", "TIMEOUT": "P0", "CHANNEL_ERROR": "P0", "BLOCKED": "P1"}[task.status]
-        action = {
-            "FAILED": "inspect_failure_and_reassign_or_takeover",
-            "TIMEOUT": "shrink_scope_or_takeover",
-            "CHANNEL_ERROR": "probe_channel_before_reassign",
-            "BLOCKED": "classify_blocker_and_route_capability",
-        }[task.status]
-        issues.append(
-            _make_due_issue(
-                params=MakeDueIssueParams(
-                    task=task, severity=severity, kind=f"status_{task.status.lower()}",
-                    message=f"任务状态为 {task.status}，需要父代理确认原因，不能当作完成。",
-                    suggested_action=action, risk_flags=risk_flags,
-                    open_request_count=open_request_count, open_gap_count=open_gap_count,
-                    age_seconds=age_seconds, stale_seconds=stale_seconds,
-                )
-            )
-        )
-    return issues
-
-
-def _check_channel_broken_issues(task, risk_flags, open_request_count, open_gap_count, age_seconds, stale_seconds):
-    """Check for channel broken issues."""
-    issues = []
-    if task.channel_status == "BROKEN":
-        issues.append(
-            _make_due_issue(
-                params=MakeDueIssueParams(
-                    task=task, severity="P0", kind="channel_broken",
-                    message="最近一次通道检查为 BROKEN，优先修复 runtime / workdir / JSON 现场。",
-                    suggested_action="run_channel_probe_and_fix_runtime", risk_flags=risk_flags,
-                    open_request_count=open_request_count, open_gap_count=open_gap_count,
-                    age_seconds=age_seconds, stale_seconds=stale_seconds,
-                )
-            )
-        )
-    return issues
-
-
-def _check_channel_degraded_issues(task, risk_flags, open_request_count, open_gap_count, age_seconds, stale_seconds):
-    """Check for channel degraded issues."""
-    issues = []
-    if task.channel_status == "DEGRADED":
-        issues.append(
-            _make_due_issue(
-                params=MakeDueIssueParams(
-                    task=task, severity="P1", kind="channel_degraded",
-                    message="最近一次通道检查为 DEGRADED，建议先修复弱项再继续派工。",
-                    suggested_action="inspect_channel_probe_evidence", risk_flags=risk_flags,
-                    open_request_count=open_request_count, open_gap_count=open_gap_count,
-                    age_seconds=age_seconds, stale_seconds=stale_seconds,
-                )
-            )
-        )
-    return issues
-
-
-def _check_probe_missing_issues(task, risk_flags, open_request_count, open_gap_count, age_seconds, stale_seconds):
-    """Check for missing channel probe evidence."""
-    issues = []
-    if task.status == "CHANNEL_ERROR" and not task.last_probe_at:
-        issues.append(
-            _make_due_issue(
-                params=MakeDueIssueParams(
-                    task=task, severity="P0", kind="channel_probe_missing",
-                    message="任务状态为 CHANNEL_ERROR，但还没有 probe 证据。",
-                    suggested_action="run_channel_probe", risk_flags=risk_flags,
-                    open_request_count=open_request_count, open_gap_count=open_gap_count,
-                    age_seconds=age_seconds, stale_seconds=stale_seconds,
-                )
-            )
-        )
-    return issues
-
-
-def _check_done_evidence_issues(task, min_evidence, risk_flags, open_request_count, open_gap_count, age_seconds, stale_seconds):
-    """Check for DONE task with insufficient evidence."""
-    issues = []
-    if task.status == "DONE" and min_evidence > 0 and len(task.evidence) < min_evidence:
-        issues.append(
-            _make_due_issue(
-                params=MakeDueIssueParams(
-                    task=task, severity="P0", kind="fake_done_risk",
-                    message=f"DONE 任务只有 {len(task.evidence)} 条证据，少于配置要求的 {min_evidence} 条。",
-                    suggested_action="require_evidence_or_reopen", risk_flags=risk_flags,
-                    open_request_count=open_request_count, open_gap_count=open_gap_count,
-                    age_seconds=age_seconds, stale_seconds=stale_seconds,
-                )
-            )
-        )
-    return issues
-
-
-def _check_done_verification_issues(task, risk_flags, open_request_count, open_gap_count, age_seconds, stale_seconds):
-    """Check for DONE task without verification."""
-    issues = []
-    if task.status == "DONE" and task.verification_status != "VERIFIED":
-        issues.append(
-            _make_due_issue(
-                params=MakeDueIssueParams(
-                    task=task, severity="P1", kind="unverified_done",
-                    message="任务已标记 DONE，但 verification_status 还不是 VERIFIED。",
-                    suggested_action="run_acceptance_or_assign_reviewer", risk_flags=risk_flags,
-                    open_request_count=open_request_count, open_gap_count=open_gap_count,
-                    age_seconds=age_seconds, stale_seconds=stale_seconds,
-                )
-            )
-        )
-    return issues
-
-
-def _check_capability_request_issues(task, open_request_count, risk_flags, open_gap_count, age_seconds, stale_seconds):
-    """Check for open capability request issues."""
-    issues = []
-    if open_request_count:
-        issues.append(
-            _make_due_issue(
-                params=MakeDueIssueParams(
-                    task=task, severity="P1", kind="open_capability_request",
-                    message=f"存在 {open_request_count} 条未处理能力请求。",
-                    suggested_action="route_capability_request", risk_flags=risk_flags,
-                    open_request_count=open_request_count, open_gap_count=open_gap_count,
-                    age_seconds=age_seconds, stale_seconds=stale_seconds,
-                )
-            )
-        )
-    return issues
-
-
-def _check_capability_gap_issues(task, open_gap_count, risk_flags, open_request_count, age_seconds, stale_seconds):
-    """Check for open capability gap issues."""
-    issues = []
-    if open_gap_count:
-        issues.append(
-            _make_due_issue(
-                params=MakeDueIssueParams(
-                    task=task, severity="P2", kind="open_capability_gap",
-                    message=f"存在 {open_gap_count} 条未关闭能力缺口。",
-                    suggested_action="triage_gap_for_learning_or_tooling", risk_flags=risk_flags,
-                    open_request_count=open_request_count, open_gap_count=open_gap_count,
-                    age_seconds=age_seconds, stale_seconds=stale_seconds,
-                )
-            )
-        )
-    return issues
-
-
-def _check_heartbeat_timeout_issues(task, heartbeat_timeout, stale_seconds, risk_flags, open_request_count, open_gap_count, age_seconds):
-    """Check for stale heartbeat on active tasks."""
-    issues = []
-    if _is_active(task.status) and heartbeat_timeout > 0 and stale_seconds > heartbeat_timeout:
-        severity = "P0" if stale_seconds > heartbeat_timeout * 3 else "P1"
-        issues.append(
-            _make_due_issue(
-                params=MakeDueIssueParams(
-                    task=task, severity=severity, kind="heartbeat_stale",
-                    message=f"心跳已停滞 {stale_seconds:.0f}s，超过配置阈值 {heartbeat_timeout}s。",
-                    suggested_action="check_runtime_or_takeover", risk_flags=risk_flags,
-                    open_request_count=open_request_count, open_gap_count=open_gap_count,
-                    age_seconds=age_seconds, stale_seconds=stale_seconds,
-                )
-            )
-        )
-    return issues
-
-
-def _check_run_timeout_issues(task, run_timeout, age_seconds, risk_flags, open_request_count, open_gap_count, stale_seconds):
-    """Check for run timeout on active tasks."""
-    issues = []
-    if _is_active(task.status) and run_timeout > 0 and age_seconds > run_timeout:
-        issues.append(
-            _make_due_issue(
-                params=MakeDueIssueParams(
-                    task=task, severity="P0", kind="run_timeout",
-                    message=f"任务已运行 {age_seconds:.0f}s，超过配置阈值 {run_timeout}s。",
-                    suggested_action="shrink_scope_reassign_or_takeover", risk_flags=risk_flags,
-                    open_request_count=open_request_count, open_gap_count=open_gap_count,
-                    age_seconds=age_seconds, stale_seconds=stale_seconds,
-                )
-            )
-        )
-    return issues
-
-
-def _inspect_single_task_due(
-    manager,
-    task,
-    now,
-    heartbeat_timeout,
-    run_timeout,
-    min_evidence,
-):
-    """Inspect a single task for due issues. Returns a list of issues."""
-    open_request_count = sum(1 for item in task.capability_requests if item.status == "OPEN")
-    open_gap_count = sum(1 for item in task.capability_gaps if item.status == "OPEN")
-    risk_flags = _build_risk_flags(task, open_request_count, open_gap_count)
-    age_seconds = max(0.0, now - (task.created_at or now))
-    stale_seconds = max(0.0, now - (task.heartbeat_at or task.updated_at or now))
-    issues = []
-
-    validation = manager.validate_work_order(task.id)
-    issues.extend(_check_work_order_issues(task, validation, risk_flags, open_request_count, open_gap_count, age_seconds, stale_seconds))
-    issues.extend(_check_status_issues(task, risk_flags, open_request_count, open_gap_count, age_seconds, stale_seconds))
-    issues.extend(_check_channel_broken_issues(task, risk_flags, open_request_count, open_gap_count, age_seconds, stale_seconds))
-    issues.extend(_check_channel_degraded_issues(task, risk_flags, open_request_count, open_gap_count, age_seconds, stale_seconds))
-    issues.extend(_check_probe_missing_issues(task, risk_flags, open_request_count, open_gap_count, age_seconds, stale_seconds))
-    issues.extend(_check_done_evidence_issues(task, min_evidence, risk_flags, open_request_count, open_gap_count, age_seconds, stale_seconds))
-    issues.extend(_check_done_verification_issues(task, risk_flags, open_request_count, open_gap_count, age_seconds, stale_seconds))
-    issues.extend(_check_capability_request_issues(task, open_request_count, risk_flags, open_gap_count, age_seconds, stale_seconds))
-    issues.extend(_check_capability_gap_issues(task, open_gap_count, risk_flags, open_request_count, age_seconds, stale_seconds))
-    issues.extend(_check_heartbeat_timeout_issues(task, heartbeat_timeout, stale_seconds, risk_flags, open_request_count, open_gap_count, age_seconds))
-    issues.extend(_check_run_timeout_issues(task, run_timeout, age_seconds, risk_flags, open_request_count, open_gap_count, stale_seconds))
-
-    return issues
-
-
 class SubAgentBoardService:
     """Board, due-check, and action planning service."""
 
@@ -367,12 +121,16 @@ class SubAgentBoardService:
         heartbeat_timeout = cfg.subagent_heartbeat_timeout if cfg else 0
         run_timeout = cfg.subagent_run_timeout if cfg else 0
         min_evidence = cfg.subagent_min_evidence_for_done if cfg else 0
+        settings = DueCheckSettings(now, heartbeat_timeout, run_timeout, min_evidence)
         issues: list[DueCheckIssue] = []
 
         for task in self.manager.list_runs():
             issues.extend(
-                _inspect_single_task_due(
-                    self.manager, task, now, heartbeat_timeout, run_timeout, min_evidence
+                inspect_single_task_due(
+                    self.manager,
+                    task,
+                    settings,
+                    risk_flags_builder=_build_risk_flags,
                 )
             )
 
