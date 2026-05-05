@@ -133,32 +133,7 @@ class KeywordToolSearchProvider(BaseToolSearchProvider):
         tokens = _tokenize(query)
         hits: list[ToolSearchHit] = []
         for spec in specs:
-            reasons: list[str] = []
-            score = 0.0
-            haystacks = {
-                "name": spec.name.lower(),
-                "description": spec.description.lower(),
-                "category": spec.category.lower(),
-                "keywords": " ".join(spec.keywords).lower(),
-                "use_cases": " ".join(spec.use_cases).lower(),
-            }
-            for token in tokens:
-                token_score = 0.0
-                token_reasons: list[str] = []
-                if token in haystacks["name"]:
-                    token_score += 6.0
-                    token_reasons.append(f"命中工具名“{token}”")
-                if token in haystacks["keywords"]:
-                    token_score += 4.0
-                    token_reasons.append(f"命中关键词“{token}”")
-                if token in haystacks["category"]:
-                    token_score += 2.5
-                    token_reasons.append(f"命中类别“{token}”")
-                if token in haystacks["description"] or token in haystacks["use_cases"]:
-                    token_score += 1.5
-                    token_reasons.append(f"命中用途描述“{token}”")
-                score += token_score
-                reasons.extend(token_reasons[:1])
+            score, reasons = _score_keyword_spec(spec, tokens)
             if score > 0:
                 hits.append(ToolSearchHit(name=spec.name, score=score, reasons=reasons[:3]))
         hits.sort(key=lambda item: (-item.score, item.name))
@@ -201,20 +176,7 @@ class HybridToolRetriever:
         merged: dict[str, ToolSearchHit] = {}
         for provider in self.providers:
             for hit in provider.search(query, specs, limit):
-                existing = merged.get(hit.name)
-                provider_reason = f"{provider.name} 召回"
-                if existing is None:
-                    merged[hit.name] = ToolSearchHit(
-                        name=hit.name,
-                        score=hit.score,
-                        reasons=[provider_reason, *hit.reasons][:4],
-                    )
-                    continue
-                existing.score += hit.score
-                for reason in [provider_reason, *hit.reasons]:
-                    if reason not in existing.reasons:
-                        existing.reasons.append(reason)
-                existing.reasons = existing.reasons[:4]
+                _merge_tool_hit(merged, provider.name, hit)
         ranked = sorted(merged.values(), key=lambda item: (-item.score, item.name))
         return ranked[:limit]
 
@@ -242,10 +204,7 @@ def _tokenize(text: str) -> list[str]:
     expanded: list[str] = []
     for token in tokens:
         expanded.append(token)
-        if re.fullmatch(r"[\u4e00-\u9fff]+", token):
-            for size in range(2, min(4, len(token)) + 1):
-                for idx in range(0, len(token) - size + 1):
-                    expanded.append(token[idx : idx + size])
+        expanded.extend(_chinese_subtokens(token))
     seen: set[str] = set()
     unique: list[str] = []
     for token in expanded:
@@ -253,3 +212,77 @@ def _tokenize(text: str) -> list[str]:
             seen.add(token)
             unique.append(token)
     return unique
+
+
+def _score_keyword_spec(spec: ToolSpec, tokens: list[str]) -> tuple[float, list[str]]:
+    haystacks = _keyword_haystacks(spec)
+    score = 0.0
+    reasons: list[str] = []
+    for token in tokens:
+        token_score, token_reasons = _score_keyword_token(token, haystacks)
+        score += token_score
+        reasons.extend(token_reasons[:1])
+    return score, reasons
+
+
+def _merge_tool_hit(
+    merged: dict[str, ToolSearchHit],
+    provider_name: str,
+    hit: ToolSearchHit,
+) -> None:
+    existing = merged.get(hit.name)
+    provider_reason = f"{provider_name} 召回"
+    if existing is None:
+        merged[hit.name] = ToolSearchHit(
+            name=hit.name,
+            score=hit.score,
+            reasons=[provider_reason, *hit.reasons][:4],
+        )
+        return
+    existing.score += hit.score
+    _append_unique_reasons(existing.reasons, [provider_reason, *hit.reasons])
+
+
+def _append_unique_reasons(target: list[str], reasons: list[str]) -> None:
+    for reason in reasons:
+        if reason not in target:
+            target.append(reason)
+    del target[4:]
+
+
+def _keyword_haystacks(spec: ToolSpec) -> dict[str, str]:
+    return {
+        "name": spec.name.lower(),
+        "description": spec.description.lower(),
+        "category": spec.category.lower(),
+        "keywords": " ".join(spec.keywords).lower(),
+        "use_cases": " ".join(spec.use_cases).lower(),
+    }
+
+
+def _score_keyword_token(token: str, haystacks: dict[str, str]) -> tuple[float, list[str]]:
+    score = 0.0
+    reasons: list[str] = []
+    checks = [
+        ("name", 6.0, f"命中工具名“{token}”"),
+        ("keywords", 4.0, f"命中关键词“{token}”"),
+        ("category", 2.5, f"命中类别“{token}”"),
+    ]
+    for key, weight, reason in checks:
+        if token in haystacks[key]:
+            score += weight
+            reasons.append(reason)
+    if token in haystacks["description"] or token in haystacks["use_cases"]:
+        score += 1.5
+        reasons.append(f"命中用途描述“{token}”")
+    return score, reasons
+
+
+def _chinese_subtokens(token: str) -> list[str]:
+    if not re.fullmatch(r"[\u4e00-\u9fff]+", token):
+        return []
+    return [
+        token[idx : idx + size]
+        for size in range(2, min(4, len(token)) + 1)
+        for idx in range(0, len(token) - size + 1)
+    ]

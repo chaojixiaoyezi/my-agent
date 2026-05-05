@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any
 
 from .models import (
     CapabilityRequest,
@@ -33,60 +32,9 @@ from .policies import (
     _verification_from_runner_status,
 )
 from .reports import AcceptanceReviewFinding
+from .result_contexts import OutputPayloadContext, RunnerResultContext
 from .runner_rendering import _render_runner_item_line
 from .utils import _merge_list, _new_id
-
-
-@dataclass(frozen=True)
-class OutputPayloadContext:
-    """Bundle of all _build_output_payload parameters into a single object."""
-    task: SubAgentTask
-    dry_run: bool
-    ok: bool
-    message: str
-    backend: str
-    tool_rounds: int
-    parsed: SubAgentParsedOutput
-    actual_tools: list[str] | None
-    structured_evidence_count: int
-    structured_request_count: int
-    created_request_ids: list[str]
-    ignored_tools: list[str]
-    ignored_skills: list[str]
-    artifacts: list[dict[str, Any]]
-    tests: list[dict[str, Any]]
-    patches: list[dict[str, Any]]
-    lessons: list[str]
-    blockers: list[str]
-    next_actions: list[str]
-    structured_repair_attempted: bool
-    structured_repair_ok: bool
-    structured_repair_error: str
-    now: float
-
-
-@dataclass(frozen=True)
-class RunnerResultContext:
-    """Bundle of all _build_runner_result parameters into a single object."""
-    task: SubAgentTask
-    dry_run: bool
-    ok: bool
-    message: str
-    backend: str
-    tool_rounds: int
-    prompt: str
-    response: str
-    parsed: SubAgentParsedOutput
-    structured_repair_attempted: bool
-    structured_repair_ok: bool
-    structured_repair_error: str
-    structured_evidence_count: int
-    structured_request_count: int
-    artifact_count: int
-    test_count: int
-    patch_count: int
-    lesson_count: int
-    now: float
 
 
 def _merge_actual_tools(task, actual_tools, used_tools, allowed_tools, parsed_used_tools, now):
