@@ -89,6 +89,42 @@ class LogParams:
     user_agent: str = ""
 
 
+def _normalize_log_params(params: LogParams | AuditAction | str | None, kwargs: dict[str, Any]) -> LogParams:
+    """把新旧两种 log 调用形式统一成 LogParams。"""
+
+    if isinstance(params, LogParams):
+        return params
+    if params is not None:
+        return LogParams(
+            action=params,
+            user_id=kwargs.pop("user_id", ""),
+            channel=kwargs.pop("channel", ""),
+            target_type=kwargs.pop("target_type", ""),
+            target_id=kwargs.pop("target_id", ""),
+            status=kwargs.pop("status", AuditStatus.SUCCESS),
+            details=kwargs.pop("details", None),
+            ip_address=kwargs.pop("ip_address", ""),
+            user_agent=kwargs.pop("user_agent", ""),
+        )
+    if kwargs:
+        return LogParams(
+            action=kwargs.pop("action", AuditAction.QUERY),
+            user_id=kwargs.pop("user_id", ""),
+            channel=kwargs.pop("channel", ""),
+            target_type=kwargs.pop("target_type", ""),
+            target_id=kwargs.pop("target_id", ""),
+            status=kwargs.pop("status", AuditStatus.SUCCESS),
+            details=kwargs.pop("details", None),
+            ip_address=kwargs.pop("ip_address", ""),
+            user_agent=kwargs.pop("user_agent", ""),
+        )
+    raise TypeError("log() requires either params: LogParams or keyword arguments")
+
+
+def _enum_value(value: Any) -> Any:
+    return value.value if isinstance(value, Enum) else value
+
+
 class AuditLogger:
     """审计日志记录器。
 
@@ -128,64 +164,27 @@ class AuditLogger:
         Returns:
             创建的 AuditEntry
         """
-        # Backward compatibility: if called with keyword arguments, construct LogParams
-        if isinstance(params, LogParams):
-            log_params = params
-        elif params is not None:
-            # Backward compatible mode: params is actually the action
-            log_params = LogParams(
-                action=params,
-                user_id=kwargs.pop("user_id", ""),
-                channel=kwargs.pop("channel", ""),
-                target_type=kwargs.pop("target_type", ""),
-                target_id=kwargs.pop("target_id", ""),
-                status=kwargs.pop("status", AuditStatus.SUCCESS),
-                details=kwargs.pop("details", None),
-                ip_address=kwargs.pop("ip_address", ""),
-                user_agent=kwargs.pop("user_agent", ""),
-            )
-        elif kwargs:
-            # All kwargs provided
-            log_params = LogParams(
-                action=kwargs.pop("action", AuditAction.QUERY),
-                user_id=kwargs.pop("user_id", ""),
-                channel=kwargs.pop("channel", ""),
-                target_type=kwargs.pop("target_type", ""),
-                target_id=kwargs.pop("target_id", ""),
-                status=kwargs.pop("status", AuditStatus.SUCCESS),
-                details=kwargs.pop("details", None),
-                ip_address=kwargs.pop("ip_address", ""),
-                user_agent=kwargs.pop("user_agent", ""),
-            )
-        else:
-            raise TypeError("log() requires either params: LogParams or keyword arguments")
+        log_params = _normalize_log_params(params, kwargs)
+        entry = self._entry_from_params(log_params)
+        self._write_to_file(entry)
+        if self._local_store is not None:
+            self._write_to_local_store(entry)
+        return entry
 
-        entry = AuditEntry(
+    def _entry_from_params(self, log_params: LogParams) -> AuditEntry:
+        return AuditEntry(
             entry_id=self._generate_entry_id(),
             timestamp=time.time(),
-            action=log_params.action.value
-            if isinstance(log_params.action, AuditAction)
-            else log_params.action,
+            action=_enum_value(log_params.action),
             user_id=log_params.user_id,
             channel=log_params.channel,
             target_type=log_params.target_type,
             target_id=log_params.target_id,
-            status=log_params.status.value
-            if isinstance(log_params.status, AuditStatus)
-            else log_params.status,
+            status=_enum_value(log_params.status),
             details=log_params.details or {},
             ip_address=log_params.ip_address,
             user_agent=log_params.user_agent,
         )
-
-        # 写入 JSONL 文件
-        self._write_to_file(entry)
-
-        # 写入 LocalStore events 表
-        if self._local_store is not None:
-            self._write_to_local_store(entry)
-
-        return entry
 
     def _write_to_file(self, entry: AuditEntry) -> None:
         """写入审计日志文件。

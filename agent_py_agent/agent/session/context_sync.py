@@ -21,75 +21,66 @@ def format_context_for_channel(context: dict, channel: str) -> str:
     Returns:
         格式化后的上下文文本
     """
-    lines = []
+    lines = _context_header_lines(context, channel)
+    _append_recent_messages(lines, context.get("recent_messages", []), channel)
+    _append_pending_reply(lines, context.get("pending_reply"))
+    _append_context_tasks(lines, context.get("tasks", []), channel)
+    lines.append("请继续对话。")
+    return "\n".join(lines)
 
-    # 标题
-    if channel == "feishu":
-        lines.append("**会话接续**")
-        lines.append("")
-    else:
-        lines.append("[会话接续]")
 
-    # 通道切换说明
+def _context_header_lines(context: dict, channel: str) -> list[str]:
+    lines = ["**会话接续**", ""] if channel == "feishu" else ["[会话接续]"]
     from_channel = context.get("from_channel", "")
     to_channel = context.get("to_channel", "")
     if from_channel and to_channel:
-        lines.append(f"从 {from_channel} 切换到 {to_channel}")
-        lines.append("")
-
-    # 原会话信息
+        lines.extend([f"从 {from_channel} 切换到 {to_channel}", ""])
     session_id = context.get("session_id", "")
     if session_id:
-        lines.append(f"原会话 ID: {session_id}")
-        lines.append("")
+        lines.extend([f"原会话 ID: {session_id}", ""])
+    return lines
 
-    # 最近上下文摘要
-    recent_messages = context.get("recent_messages", [])
-    if recent_messages:
-        lines.append("**最近上下文:**")
-        if channel == "feishu":
-            lines.append("")
-            lines.append("| 用户 | Agent |")
-            lines.append("| --- | --- |")
-            for msg in recent_messages[-5:]:
-                role = msg.get("role", "unknown")
-                content = msg.get("content", "")[:100]
-                lines.append(f"| {role} | {content}... |")
-        else:
-            lines.append("")
-            for msg in recent_messages[-5:]:
-                role = msg.get("role", "unknown")
-                content = msg.get("content", "")[:100]
-                lines.append(f"- {role}: {content}...")
 
-        lines.append("")
+def _append_recent_messages(lines: list[str], recent_messages: list[dict], channel: str) -> None:
+    if not recent_messages:
+        return
+    lines.extend(["**最近上下文:**", ""])
+    if channel == "feishu":
+        lines.extend(["| 用户 | Agent |", "| --- | --- |"])
+        lines.extend(_message_table_rows(recent_messages[-5:]))
+    else:
+        lines.extend(_message_bullets(recent_messages[-5:]))
+    lines.append("")
 
-    # 待回复内容
-    pending_reply = context.get("pending_reply")
+
+def _message_table_rows(messages: list[dict]) -> list[str]:
+    return [f"| {msg.get('role', 'unknown')} | {msg.get('content', '')[:100]}... |" for msg in messages]
+
+
+def _message_bullets(messages: list[dict]) -> list[str]:
+    return [f"- {msg.get('role', 'unknown')}: {msg.get('content', '')[:100]}..." for msg in messages]
+
+
+def _append_pending_reply(lines: list[str], pending_reply: object) -> None:
     if pending_reply:
-        lines.append("**待回复内容:**")
-        lines.append(pending_reply)
-        lines.append("")
+        lines.extend(["**待回复内容:**", str(pending_reply), ""])
 
-    # 关联任务状态
-    tasks = context.get("tasks", [])
-    if tasks:
-        lines.append("**当前活跃任务:**")
-        lines.append("")
-        for task in tasks:
-            task_id = task.get("task_id", "unknown")
-            status = task.get("status", "UNKNOWN")
-            goal = task.get("goal", "")[:60]
-            if channel == "feishu":
-                lines.append(f"- [{task_id}]({status}): {goal}...")
-            else:
-                lines.append(f"- {task_id}: {status} ({goal}...)")
-        lines.append("")
 
-    # 接续提示
-    lines.append("请继续对话。")
+def _append_context_tasks(lines: list[str], tasks: list[dict], channel: str) -> None:
+    if not tasks:
+        return
+    lines.extend(["**当前活跃任务:**", ""])
+    lines.extend(_format_context_task(task, channel) for task in tasks)
+    lines.append("")
 
-    return "\n".join(lines)
+
+def _format_context_task(task: dict, channel: str) -> str:
+    task_id = task.get("task_id", "unknown")
+    status = task.get("status", "UNKNOWN")
+    goal = task.get("goal", "")[:60]
+    if channel == "feishu":
+        return f"- [{task_id}]({status}): {goal}..."
+    return f"- {task_id}: {status} ({goal}...)"
 
 
 class SessionContextSync:

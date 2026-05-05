@@ -67,6 +67,7 @@ A class over the hard limit is a signal that it owns too many responsibilities. 
 
 ### Parameter Count
 
+- Instance/class method receivers (`self` / `cls`) do not count toward the parameter total.
 - 5-6 parameters: consider an options dataclass or a context object.
 - 7-8 parameters: must refactor before merge.
 - \> 8 parameters: hard block; no exemption.

@@ -11,6 +11,71 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+_BASE_SCHEMA_SQL = (
+    """
+    CREATE TABLE IF NOT EXISTS metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS records (
+        id TEXT PRIMARY KEY,
+        source_type TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        content_path TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        content_preview TEXT NOT NULL DEFAULT '',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        visibility TEXT NOT NULL DEFAULT 'private',
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_records_source
+    ON records(source_type, source_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_records_updated
+    ON records(updated_at)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT NOT NULL UNIQUE,
+        event_type TEXT NOT NULL,
+        record_id TEXT NOT NULL DEFAULT '',
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        created_at REAL NOT NULL
+    )
+    """,
+)
+
+_TASK_REGISTRY_SQL = (
+    """
+    CREATE TABLE IF NOT EXISTS task_registry (
+        task_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        goal TEXT NOT NULL,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_task_registry_session ON task_registry(session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_task_registry_user ON task_registry(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_task_registry_status ON task_registry(status)",
+    "CREATE INDEX IF NOT EXISTS idx_task_registry_updated ON task_registry(updated_at)",
+    """
+    INSERT INTO metadata(key, value)
+    VALUES('task_registry_enabled', 'true')
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value
+    """,
+)
+
 
 class LocalStoreSchemaMixin:
     """LLM: mixin providing schema initialization and safe SQLite connection helpers.
@@ -25,99 +90,27 @@ class LocalStoreSchemaMixin:
         self.files_dir.mkdir(parents=True, exist_ok=True)
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connection() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS metadata (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS records (
-                    id TEXT PRIMARY KEY,
-                    source_type TEXT NOT NULL,
-                    source_id TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    content_path TEXT NOT NULL,
-                    content_hash TEXT NOT NULL,
-                    content_preview TEXT NOT NULL DEFAULT '',
-                    metadata_json TEXT NOT NULL DEFAULT '{}',
-                    visibility TEXT NOT NULL DEFAULT 'private',
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_records_source
-                ON records(source_type, source_id)
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_records_updated
-                ON records(updated_at)
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS events (
-                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_id TEXT NOT NULL UNIQUE,
-                    event_type TEXT NOT NULL,
-                    record_id TEXT NOT NULL DEFAULT '',
-                    payload_json TEXT NOT NULL DEFAULT '{}',
-                    created_at REAL NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS task_registry (
-                    task_id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    goal TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_task_registry_session ON task_registry(session_id)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_task_registry_user ON task_registry(user_id)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_task_registry_status ON task_registry(status)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_task_registry_updated ON task_registry(updated_at)"
-            )
-            conn.execute(
-                """
-                INSERT INTO metadata(key, value)
-                VALUES('task_registry_enabled', 'true')
-                ON CONFLICT(key) DO UPDATE SET value=excluded.value
-                """,
-            )
+            self._execute_schema(conn, _BASE_SCHEMA_SQL)
+            self._execute_schema(conn, _TASK_REGISTRY_SQL)
             if self.enable_fts:
-                try:
-                    conn.execute(
-                        """
-                        CREATE VIRTUAL TABLE IF NOT EXISTS records_fts
-                        USING fts5(id UNINDEXED, title, content)
-                        """
-                    )
-                    self._fts_available = True
-                except sqlite3.OperationalError:
-                    self._fts_available = False
+                self._init_fts_schema(conn)
             conn.commit()
+
+    def _execute_schema(self, conn: sqlite3.Connection, statements: tuple[str, ...]) -> None:
+        for statement in statements:
+            conn.execute(statement)
+
+    def _init_fts_schema(self, conn: sqlite3.Connection) -> None:
+        try:
+            conn.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS records_fts
+                USING fts5(id UNINDEXED, title, content)
+                """
+            )
+            self._fts_available = True
+        except sqlite3.OperationalError:
+            self._fts_available = False
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=5.0)

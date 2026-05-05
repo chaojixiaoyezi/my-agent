@@ -35,6 +35,16 @@ class SubagentWorkflowConfigService:
         warnings: list[dict[str, object]] = []
         defaults = AgentConfig()
 
+        SubagentWorkflowConfigService._normalize_mode(config, defaults, warnings)
+        SubagentWorkflowConfigService._normalize_builtin(config, defaults, warnings)
+        SubagentWorkflowConfigService._normalize_dirs(config, defaults, warnings)
+        SubagentWorkflowConfigService._normalize_review_rounds(config, defaults, warnings)
+        config.subagent_workflow_config_warnings = warnings
+        return warnings
+
+    @staticmethod
+    def _normalize_mode(config: object, defaults: object, warnings: list[dict[str, object]]) -> None:
+        """Normalize subagent workflow mode."""
         raw_mode = config.subagent_workflow_mode
         if isinstance(raw_mode, str) and raw_mode.strip().lower() in {"auto", "manual", "off"}:
             config.subagent_workflow_mode = raw_mode.strip().lower()
@@ -48,6 +58,9 @@ class SubagentWorkflowConfigService:
                 "expected one of ['auto', 'manual', 'off']",
             )
 
+    @staticmethod
+    def _normalize_builtin(config: object, defaults: object, warnings: list[dict[str, object]]) -> None:
+        """Normalize builtin workflow enablement."""
         raw_builtin = config.subagent_builtin_workflows
         if isinstance(raw_builtin, bool):
             config.subagent_builtin_workflows = raw_builtin
@@ -61,6 +74,9 @@ class SubagentWorkflowConfigService:
                 "expected a boolean value",
             )
 
+    @staticmethod
+    def _normalize_dirs(config: object, defaults: object, warnings: list[dict[str, object]]) -> None:
+        """Normalize user workflow directories."""
         raw_dirs = config.subagent_user_workflow_dirs
         if (
             isinstance(raw_dirs, list)
@@ -77,6 +93,9 @@ class SubagentWorkflowConfigService:
                 "expected a list of non-empty strings",
             )
 
+    @staticmethod
+    def _normalize_review_rounds(config: object, defaults: object, warnings: list[dict[str, object]]) -> None:
+        """Normalize workflow review rounds."""
         raw_review_rounds = config.subagent_workflow_review_rounds
         if isinstance(raw_review_rounds, bool):
             review_rounds: int | None = None
@@ -98,6 +117,3 @@ class SubagentWorkflowConfigService:
                 defaults.subagent_workflow_review_rounds,
                 "expected an integer between 0 and 5",
             )
-
-        config.subagent_workflow_config_warnings = warnings
-        return warnings

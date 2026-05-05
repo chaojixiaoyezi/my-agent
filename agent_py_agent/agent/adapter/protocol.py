@@ -122,56 +122,59 @@ def qq_to_incoming(payload: dict[str, Any]) -> IncomingMessage | None:
        {"event": {...}} 或 {"d": {"author": {"id": "..."}, ...}}
     """
     try:
-        # event_type = payload.get("t", "")  # 新格式用 t 字段
-        d = payload.get("d", {})
-        if d:
-            # 优先用 user_openid（QQ 官方 WebSocket 格式）
-            author = d.get("author", {})
-            user_id = str(
-                author.get("user_openid", "")
-                or author.get("id", "")
-                or d.get("user_id", "")
-            )
-            content = d.get("content", "").strip()
-            msg_id = d.get("id", d.get("msg_id", ""))
-            raw_ts = d.get("timestamp", time.time())
-            # timestamp 可以是 ISO 字符串或数字
-            try:
-                if isinstance(raw_ts, str):
-                    ts = _parse_iso_timestamp(raw_ts)
-                else:
-                    ts = float(raw_ts)
-            except Exception:
-                ts = time.time()
-            metadata = {
-                "qq_guild_id": d.get("guild_id", ""),
-                "qq_channel_id": d.get("channel_id", ""),
-            }
-        else:
-            # 简化版格式
-            event = payload.get("event", {})
-            user_id = str(event.get("user_id", ""))
-            content = event.get("content", "").strip()
-            msg_id = event.get("msg_id", "")
-            ts = float(event.get("timestamp", time.time()))
-            metadata = {
-                "qq_guild_id": event.get("guild_id", ""),
-                "qq_channel_id": event.get("channel_id", ""),
-            }
-
-        if not content:
+        user_id, content, msg_id, ts, metadata = _qq_message_fields(payload)
+        if not content.strip():
             return None
 
         return IncomingMessage(
             channel="qq",
             user_id=user_id,
-            content=content,
+            content=content.strip(),
             message_id=str(msg_id),
             timestamp=ts,
             metadata=metadata,
         )
     except (ValueError, KeyError, TypeError):
         return None
+
+
+def _qq_message_fields(payload: dict[str, Any]) -> tuple[str, str, object, float, dict[str, Any]]:
+    d = payload.get("d", {})
+    if d:
+        return _qq_official_message_fields(d)
+    return _qq_legacy_message_fields(payload.get("event", {}))
+
+
+def _qq_official_message_fields(d: dict[str, Any]) -> tuple[str, str, object, float, dict[str, Any]]:
+    author = d.get("author", {})
+    user_id = str(author.get("user_openid", "") or author.get("id", "") or d.get("user_id", ""))
+    metadata = {
+        "qq_guild_id": d.get("guild_id", ""),
+        "qq_channel_id": d.get("channel_id", ""),
+    }
+    return user_id, d.get("content", ""), d.get("id", d.get("msg_id", "")), _qq_timestamp(d), metadata
+
+
+def _qq_legacy_message_fields(event: dict[str, Any]) -> tuple[str, str, object, float, dict[str, Any]]:
+    metadata = {
+        "qq_guild_id": event.get("guild_id", ""),
+        "qq_channel_id": event.get("channel_id", ""),
+    }
+    return (
+        str(event.get("user_id", "")),
+        event.get("content", ""),
+        event.get("msg_id", ""),
+        float(event.get("timestamp", time.time())),
+        metadata,
+    )
+
+
+def _qq_timestamp(d: dict[str, Any]) -> float:
+    raw_ts = d.get("timestamp", time.time())
+    try:
+        return _parse_iso_timestamp(raw_ts) if isinstance(raw_ts, str) else float(raw_ts)
+    except Exception:
+        return time.time()
 
 
 def _parse_iso_timestamp(ts_str: str) -> float:

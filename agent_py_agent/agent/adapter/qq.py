@@ -34,6 +34,92 @@ _QQ_API_BASE = "https://api.sgroup.qq.com"
 _QQ_TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
 
 
+def _qq_send_message(self, user_id: str, message: OutgoingMessage) -> bool:
+    """通过 QQ 机器人 HTTP API 发送消息到用户或频道。"""
+    try:
+        token = self._get_access_token()
+        if not token:
+            logger.error("QQ: 无法获取 access_token")
+            return False
+        url, http_payload = _qq_send_target(user_id, message)
+        if not url:
+            logger.error("QQ: 缺少 channel_id（需从事件 metadata 中获取）")
+            return False
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(http_payload).encode("utf-8"),
+            headers={"Authorization": f"QQBot {token}", "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            if result.get("code") == 0 or resp.status == 200:
+                return True
+            logger.error(f"QQ 发送消息失败: {result}")
+            return False
+    except Exception as exc:
+        logger.error(f"QQ send_message 异常: {exc}")
+        return False
+
+
+def _qq_send_target(user_id: str, message: OutgoingMessage) -> tuple[str, dict[str, object]]:
+    user_openid = message.metadata.get("qq_user_openid", user_id)
+    payload = {"content": message.content[:4000], "msg_type": 0}
+    if user_openid:
+        return f"{_QQ_API_BASE}/v2/users/{user_openid}/messages", payload
+    channel_id = message.metadata.get("qq_channel_id", "")
+    if not channel_id:
+        return "", payload
+    return f"{_QQ_API_BASE}/channels/{channel_id}/messages", payload
+
+
+def _qq_get_access_token(self) -> str | None:
+    """获取 QQ access_token，带缓存。"""
+    now = time.time()
+    if self._access_token and now < self._token_expires_at - 60:
+        return self._access_token
+    try:
+        result = _qq_request_token(self.app_id, self.app_secret)
+        logger.debug(f"QQ token response: {result}")
+        if "access_token" not in result:
+            logger.error(f"QQ token 响应缺少 access_token: {result}")
+            return None
+        self._access_token = result["access_token"]
+        self._token_expires_at = now + float(result.get("expires_in", 7200))
+        return self._access_token
+    except Exception as exc:
+        logger.error(f"获取 QQ access_token 失败: {exc}")
+        return None
+
+
+def _qq_request_token(app_id: str, app_secret: str) -> dict[str, Any]:
+    http_payload = json.dumps({
+        "appId": str(app_id),
+        "clientSecret": str(app_secret),
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        _QQ_TOKEN_URL,
+        data=http_payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _qq_fetch_gateway_url(self, token: str) -> str | None:
+    """获取 QQ WebSocket gateway 地址。"""
+    try:
+        req = urllib.request.Request(
+            f"{_QQ_API_BASE}/gateway",
+            headers={"Authorization": f"QQBot {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            return result.get("url")
+    except Exception as exc:
+        logger.error(f"获取 QQ gateway URL 失败: {exc}")
+        return None
+
+
 class QQAdapter(BaseChannelAdapter):
     """QQ 通道适配器（WebSocket 长连接版）— thin facade delegating to service classes."""
 
@@ -190,34 +276,35 @@ class QQAdapter(BaseChannelAdapter):
 
         op = payload.get("op", -1)
         d = payload.get("d", {})
-
         if op == 0:
-            # 事件消息
-            seq = payload.get("s", 0)
-            if seq:
-                self._last_seq = seq
-            t = payload.get("t", "")
-            if t == "MESSAGE_CREATE" or t == "C2C_MESSAGE_CREATE":
-                self._process_qq_message(d)
-            elif t == "READY":
-                self._session_id = d.get("session_id")
-                raw_hb = d.get("heartbeat_interval", 0)
-                if raw_hb and raw_hb > 0:
-                    self._heartbeat_interval = float(raw_hb)
-                    self._start_heartbeat()
-            elif t == "INVALID_SESSION":
-                logger.warning("QQ WebSocket INVALID_SESSION，重新连接")
-                self._session_id = None
-                self._stop_event.set()
+            self._handle_dispatch_event(payload, d)
         elif op == 1:
-            raw_hb = d.get("heartbeat_interval", 0)
-            if raw_hb and raw_hb > 0:
-                self._heartbeat_interval = float(raw_hb)
-                self._start_heartbeat()
+            self._maybe_start_heartbeat(d)
         elif op == 7:
             logger.warning("QQ WebSocket 要求重连")
             self._session_id = None
             self._stop_event.set()
+
+    def _handle_dispatch_event(self, payload: dict[str, Any], d: dict[str, Any]) -> None:
+        seq = payload.get("s", 0)
+        if seq:
+            self._last_seq = seq
+        t = payload.get("t", "")
+        if t in {"MESSAGE_CREATE", "C2C_MESSAGE_CREATE"}:
+            self._process_qq_message(d)
+        elif t == "READY":
+            self._session_id = d.get("session_id")
+            self._maybe_start_heartbeat(d)
+        elif t == "INVALID_SESSION":
+            logger.warning("QQ WebSocket INVALID_SESSION，重新连接")
+            self._session_id = None
+            self._stop_event.set()
+
+    def _maybe_start_heartbeat(self, d: dict[str, Any]) -> None:
+        raw_hb = d.get("heartbeat_interval", 0)
+        if raw_hb and raw_hb > 0:
+            self._heartbeat_interval = float(raw_hb)
+            self._start_heartbeat()
 
     # -------------------------------------------------------------------------
     # 心跳
@@ -268,98 +355,6 @@ class QQAdapter(BaseChannelAdapter):
     # 消息发送
     # -------------------------------------------------------------------------
 
-    def send_message(self, user_id: str, message: OutgoingMessage) -> bool:
-        """通过 QQ 机器人 HTTP API 发送消息到用户或频道。"""
-        try:
-            token = self._get_access_token()
-            if not token:
-                logger.error("QQ: 无法获取 access_token")
-                return False
-
-            # 私聊：用 user_openid 发到 /v2/users/{openid}/messages
-            user_openid = message.metadata.get("qq_user_openid", user_id)
-            if user_openid:
-                url = f"{_QQ_API_BASE}/v2/users/{user_openid}/messages"
-                http_payload = {
-                    "content": message.content[:4000],
-                    "msg_type": 0,
-                }
-            else:
-                channel_id = message.metadata.get("qq_channel_id", "")
-                if not channel_id:
-                    logger.error("QQ: 缺少 channel_id（需从事件 metadata 中获取）")
-                    return False
-                url = f"{_QQ_API_BASE}/channels/{channel_id}/messages"
-                http_payload = {
-                    "content": message.content[:4000],
-                    "msg_type": 0,
-                }
-
-            data = json.dumps(http_payload).encode("utf-8")
-            req = urllib.request.Request(
-                url,
-                data=data,
-                headers={
-                    "Authorization": f"QQBot {token}",
-                    "Content-Type": "application/json",
-                },
-            )
-
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-                if result.get("code") == 0 or resp.status == 200:
-                    return True
-                logger.error(f"QQ 发送消息失败: {result}")
-                return False
-
-        except Exception as exc:
-            logger.error(f"QQ send_message 异常: {exc}")
-            return False
-
-    # -------------------------------------------------------------------------
-    # API 请求
-    # -------------------------------------------------------------------------
-
-    def _get_access_token(self) -> str | None:
-        """获取 QQ access_token，带缓存。"""
-        now = time.time()
-        if self._access_token and now < self._token_expires_at - 60:
-            return self._access_token
-
-        try:
-            http_payload = json.dumps({
-                "appId": str(self.app_id),
-                "clientSecret": str(self.app_secret),
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                _QQ_TOKEN_URL,
-                data=http_payload,
-                headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-                logger.debug(f"QQ token response: {result}")
-                if "access_token" in result:
-                    self._access_token = result["access_token"]
-                    expires_in = result.get("expires_in", 7200)
-                    self._token_expires_at = now + float(expires_in)
-                    return self._access_token
-                logger.error(f"QQ token 响应缺少 access_token: {result}")
-        except Exception as exc:
-            logger.error(f"获取 QQ access_token 失败: {exc}")
-        return None
-
-    def _fetch_gateway_url(self, token: str) -> str | None:
-        """获取 QQ WebSocket gateway 地址。"""
-        try:
-            url = f"{_QQ_API_BASE}/gateway"
-            req = urllib.request.Request(
-                url,
-                headers={"Authorization": f"QQBot {token}"},
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
-                return result.get("url")
-        except Exception as exc:
-            logger.error(f"获取 QQ gateway URL 失败: {exc}")
-        return None
+    send_message = _qq_send_message
+    _get_access_token = _qq_get_access_token
+    _fetch_gateway_url = _qq_fetch_gateway_url

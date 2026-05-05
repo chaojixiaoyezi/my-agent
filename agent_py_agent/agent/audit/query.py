@@ -41,6 +41,68 @@ class AuditQueryParams:
     offset: int = 0
 
 
+def _normalize_query_params(params: AuditQueryParams | None, kwargs: dict[str, Any]) -> AuditQueryParams:
+    if params is None and not kwargs:
+        return AuditQueryParams()
+    if isinstance(params, AuditQueryParams):
+        return params
+    return AuditQueryParams(
+        user_id=kwargs.pop("user_id", None),
+        action=kwargs.pop("action", None),
+        target_id=kwargs.pop("target_id", None),
+        target_type=kwargs.pop("target_type", None),
+        status=kwargs.pop("status", None),
+        start_time=kwargs.pop("start_time", None),
+        end_time=kwargs.pop("end_time", None),
+        limit=kwargs.pop("limit", 100),
+        offset=kwargs.pop("offset", 0),
+    )
+
+
+def _iter_audit_dicts(path: Path):
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return
+    for line in lines:
+        data = _parse_audit_line(line)
+        if data is not None:
+            yield data
+
+
+def _parse_audit_line(line: str) -> dict[str, Any] | None:
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        data = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _audit_entry_matches(data: dict[str, Any], params: AuditQueryParams, action_str: str | None) -> bool:
+    if params.user_id and data.get("user_id") != params.user_id:
+        return False
+    if action_str and data.get("action") != action_str:
+        return False
+    if params.target_id and data.get("target_id") != params.target_id:
+        return False
+    if params.target_type and data.get("target_type") != params.target_type:
+        return False
+    if params.status and data.get("status") != params.status:
+        return False
+    return _timestamp_matches(data.get("timestamp", 0), params)
+
+
+def _timestamp_matches(timestamp: float, params: AuditQueryParams) -> bool:
+    if params.start_time and timestamp < params.start_time:
+        return False
+    if params.end_time and timestamp > params.end_time:
+        return False
+    return True
+
+
 class AuditQuery:
     """审计日志查询器。
 
@@ -70,86 +132,23 @@ class AuditQuery:
         Returns:
             AuditQueryResult 包含条目列表和总数
         """
-        if params is None and not kwargs:
-            params = AuditQueryParams()
-        elif isinstance(params, AuditQueryParams):
-            pass
-        else:
-            # Backward compatibility: convert kwargs to AuditQueryParams
-            params = AuditQueryParams(
-                user_id=kwargs.pop("user_id", None),
-                action=kwargs.pop("action", None),
-                target_id=kwargs.pop("target_id", None),
-                target_type=kwargs.pop("target_type", None),
-                status=kwargs.pop("status", None),
-                start_time=kwargs.pop("start_time", None),
-                end_time=kwargs.pop("end_time", None),
-                limit=kwargs.pop("limit", 100),
-                offset=kwargs.pop("offset", 0),
-            )
-
+        params = _normalize_query_params(params, kwargs)
         start_query = time.time()
-
         if not self._audit_file.exists():
-            return AuditQueryResult(
-                entries=[],
-                total_count=0,
-                query_time_ms=0,
-            )
-
-        entries: list[AuditEntry] = []
-        total_count = 0
+            return AuditQueryResult(entries=[], total_count=0, query_time_ms=0)
 
         action_str = (
             params.action.value if isinstance(params.action, AuditAction) else params.action
         )
-
-        try:
-            with open(self._audit_file, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-
-                    total_count += 1
-
-                    # 过滤条件
-                    if params.user_id and data.get("user_id") != params.user_id:
-                        continue
-                    if action_str and data.get("action") != action_str:
-                        continue
-                    if params.target_id and data.get("target_id") != params.target_id:
-                        continue
-                    if params.target_type and data.get("target_type") != params.target_type:
-                        continue
-                    if params.status and data.get("status") != params.status:
-                        continue
-
-                    timestamp = data.get("timestamp", 0)
-                    if params.start_time and timestamp < params.start_time:
-                        continue
-                    if params.end_time and timestamp > params.end_time:
-                        continue
-
-                    entries.append(AuditEntry.from_dict(data))
-
-        except (OSError, UnicodeDecodeError):
-            pass
-
-        # 按时间倒序
+        entries = [
+            AuditEntry.from_dict(data)
+            for data in _iter_audit_dicts(self._audit_file)
+            if _audit_entry_matches(data, params, action_str)
+        ]
         entries.sort(key=lambda e: e.timestamp, reverse=True)
-
-        # 应用分页
         total = len(entries)
         entries = entries[params.offset : params.offset + params.limit]
-
         query_time_ms = (time.time() - start_query) * 1000
-
         return AuditQueryResult(
             entries=entries,
             total_count=total,
@@ -178,33 +177,16 @@ class AuditQuery:
         status_counts: dict[str, int] = {}
         last_action_time = 0.0
 
-        try:
-            with open(self._audit_file, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-
-                    if user_id and data.get("user_id") != user_id:
-                        continue
-
-                    action = data.get("action", "UNKNOWN")
-                    status = data.get("status", "UNKNOWN")
-                    timestamp = data.get("timestamp", 0)
-
-                    action_counts[action] = action_counts.get(action, 0) + 1
-                    status_counts[status] = status_counts.get(status, 0) + 1
-
-                    if timestamp > last_action_time:
-                        last_action_time = timestamp
-
-        except (OSError, UnicodeDecodeError):
-            pass
+        for data in _iter_audit_dicts(self._audit_file):
+            if user_id and data.get("user_id") != user_id:
+                continue
+            action = data.get("action", "UNKNOWN")
+            status = data.get("status", "UNKNOWN")
+            timestamp = data.get("timestamp", 0)
+            action_counts[action] = action_counts.get(action, 0) + 1
+            status_counts[status] = status_counts.get(status, 0) + 1
+            if timestamp > last_action_time:
+                last_action_time = timestamp
 
         return {
             "user_id": user_id,
@@ -228,26 +210,11 @@ class AuditQuery:
 
         user_last_time: dict[str, float] = {}
 
-        try:
-            with open(self._audit_file, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-
-                    user = data.get("user_id", "unknown")
-                    timestamp = data.get("timestamp", 0)
-
-                    if user not in user_last_time or timestamp > user_last_time[user]:
-                        user_last_time[user] = timestamp
-
-        except (OSError, UnicodeDecodeError):
-            pass
+        for data in _iter_audit_dicts(self._audit_file):
+            user = data.get("user_id", "unknown")
+            timestamp = data.get("timestamp", 0)
+            if user not in user_last_time or timestamp > user_last_time[user]:
+                user_last_time[user] = timestamp
 
         # 按最后活动时间排序
         sorted_users = sorted(user_last_time.items(), key=lambda x: x[1], reverse=True)
@@ -272,33 +239,26 @@ class AuditQuery:
         """Clean up entries older than cutoff_time; return deleted count."""
         deleted_count = 0
         try:
-            with (
-                open(self._audit_file, encoding="utf-8") as f_in,
-                open(temp_file, "w", encoding="utf-8") as f_out,
-            ):
-                for line in f_in:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    deleted = self._process_cleanup_line(line, cutoff_time)
-                    if deleted:
-                        deleted_count += 1
-                    else:
-                        f_out.write(line + "\n")
+            lines = self._audit_file.read_text(encoding="utf-8").splitlines()
+            kept_lines, deleted_count = _cleanup_audit_lines(lines, cutoff_time)
+            temp_file.write_text("\n".join(kept_lines) + ("\n" if kept_lines else ""), encoding="utf-8")
         except OSError:
             if temp_file.exists():
                 temp_file.unlink()
             return 0
         return deleted_count
 
-    def _process_cleanup_line(self, line: str, cutoff_time: float) -> bool:
-        """Return True if line should be deleted, False to keep."""
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            return True
-        timestamp = data.get("timestamp", 0)
-        return timestamp < cutoff_time
+
+def _cleanup_audit_lines(lines: list[str], cutoff_time: float) -> tuple[list[str], int]:
+    kept_lines = []
+    deleted_count = 0
+    for line in lines:
+        data = _parse_audit_line(line)
+        if data is not None and data.get("timestamp", 0) >= cutoff_time:
+            kept_lines.append(line.strip())
+        else:
+            deleted_count += 1
+    return kept_lines, deleted_count
 
 
 __all__ = ["AuditQuery", "AuditQueryResult"]
