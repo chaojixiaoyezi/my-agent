@@ -9,8 +9,8 @@ from ..memory_archive import (
     snapshots,
 )
 from ..memory_archive.snapshots import CompressionSnapshotInput
-from ._runtime_params import CompressionContext
 from . import runtime_services
+from ._runtime_params import CompressionContext
 
 
 class CompressionService:
