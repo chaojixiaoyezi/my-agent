@@ -158,6 +158,22 @@ class _BuildContextParams:
     now: float
 
 
+@dataclass
+class _ExtractedOutput:
+    """Bundle for _extract_parsed_output result tuple."""
+    parsed: SubAgentParsedOutput
+    ignored_tools: list[str] = field(default_factory=list)
+    ignored_skills: list[str] = field(default_factory=list)
+    structured_evidence_count: int = 0
+    structured_request_count: int = 0
+    created_request_ids: list[str] = field(default_factory=list)
+    artifacts: list = field(default_factory=list)
+    tests: list = field(default_factory=list)
+    patches: list = field(default_factory=list)
+    lessons: list = field(default_factory=list)
+    next_actions: list = field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers — promoted from SubAgentRunnerResultMixin to module scope
 # ---------------------------------------------------------------------------
@@ -204,63 +220,46 @@ def _runner_make_runner_meta(dry_run, ok, message, backend, tool_rounds, now):
     return {"dry_run": dry_run, "ok": ok, "message": message, "backend": backend, "tool_rounds": tool_rounds, "now": now}
 
 
-def _runner_process_parsed_output(task, parsed, now, actual_tools):
-    """Process structured output and return all derived lists."""
-    if not (parsed.found and parsed.ok):
-        return [], [], 0, 0, [], [], [], [], [], []
-    proc = _process_structured_output(task, parsed, now, actual_tools)
-    return (proc["ignored_tools"], proc["ignored_skills"], proc["structured_evidence_count"],
-            proc["structured_request_count"], proc["created_request_ids"], proc["artifacts"],
-            proc["tests"], proc["patches"], proc["lessons"], proc["next_actions"])
+def _runner_build_output_payload(
+        ctx: OutputPayloadContext,
+    ) -> dict[str, object]:
+    """Build output payload from context."""
+    return _build_output_payload(ctx)
 
 
-def _runner_build_output_payload_wrapper(task, runner_meta, cap_data, tools_info, output_items):
-    """Build output payload from structured metadata."""
-    dry_run = runner_meta["dry_run"]
-    ok = runner_meta["ok"]
-    message = runner_meta["message"]
-    backend = runner_meta["backend"]
-    tool_rounds = runner_meta["tool_rounds"]
-    now = runner_meta["now"]
-    parsed = cap_data["parsed"]
-    structured_evidence_count = cap_data["structured_evidence_count"]
-    structured_request_count = cap_data["structured_request_count"]
-    created_request_ids = cap_data["created_request_ids"]
-    actual_tools = tools_info["actual_tools"]
-    ignored_tools = tools_info["ignored_tools"]
-    ignored_skills = tools_info["ignored_skills"]
-    artifacts = output_items["artifacts"]
-    tests = output_items["tests"]
-    patches = output_items["patches"]
-    lessons = output_items["lessons"]
-    blockers = output_items["blockers"]
-    next_actions = output_items["next_actions"]
-    ctx = OutputPayloadContext(
+def _make_build_output_context(
+    task: SubAgentTask,
+    runner_meta: dict,
+    cap_data: dict,
+    tools_info: dict,
+    output_items: dict,
+) -> OutputPayloadContext:
+    """Build OutputPayloadContext from structured metadata."""
+    return OutputPayloadContext(
         task=task,
-        dry_run=dry_run,
-        ok=ok,
-        message=message,
-        backend=backend,
-        tool_rounds=tool_rounds,
-        parsed=parsed,
-        actual_tools=actual_tools,
-        structured_evidence_count=structured_evidence_count,
-        structured_request_count=structured_request_count,
-        created_request_ids=created_request_ids,
-        ignored_tools=ignored_tools,
-        ignored_skills=ignored_skills,
-        artifacts=artifacts,
-        tests=tests,
-        patches=patches,
-        lessons=lessons,
-        blockers=blockers,
-        next_actions=next_actions,
+        dry_run=runner_meta["dry_run"],
+        ok=runner_meta["ok"],
+        message=runner_meta["message"],
+        backend=runner_meta["backend"],
+        tool_rounds=runner_meta["tool_rounds"],
+        parsed=cap_data["parsed"],
+        actual_tools=tools_info["actual_tools"],
+        structured_evidence_count=cap_data["structured_evidence_count"],
+        structured_request_count=cap_data["structured_request_count"],
+        created_request_ids=cap_data["created_request_ids"],
+        ignored_tools=tools_info["ignored_tools"],
+        ignored_skills=tools_info["ignored_skills"],
+        artifacts=output_items["artifacts"],
+        tests=output_items["tests"],
+        patches=output_items["patches"],
+        lessons=output_items["lessons"],
+        blockers=output_items["blockers"],
+        next_actions=output_items["next_actions"],
         structured_repair_attempted=cap_data.get("structured_repair_attempted", False),
         structured_repair_ok=cap_data.get("structured_repair_ok", False),
         structured_repair_error=cap_data.get("structured_repair_error", ""),
-        now=now,
+        now=runner_meta["now"],
     )
-    return _build_output_payload(ctx)
 
 
 def _runner_append_debrief(task, parsed):
@@ -330,37 +329,25 @@ class SubAgentRunnerResultMixin:
         structured_output: SubAgentParsedOutput | None,
         now: float,
         actual_tools: list[str] | None,
-    ) -> tuple[
-        SubAgentParsedOutput,
-        list[str],
-        list[str],
-        int,
-        int,
-        list[str],
-        list,
-        list,
-        list,
-        list,
-        list,
-    ]:
+    ) -> _ExtractedOutput:
         """Extract parsed output or return defaults."""
         parsed = structured_output or SubAgentParsedOutput()
         if parsed.found and parsed.ok:
             proc = _process_structured_output(task, parsed, now, actual_tools)
-            return (
-                parsed,
-                proc["ignored_tools"],
-                proc["ignored_skills"],
-                proc["structured_evidence_count"],
-                proc["structured_request_count"],
-                proc["created_request_ids"],
-                proc["artifacts"],
-                proc["tests"],
-                proc["patches"],
-                proc["lessons"],
-                proc["next_actions"],
+            return _ExtractedOutput(
+                parsed=parsed,
+                ignored_tools=proc["ignored_tools"],
+                ignored_skills=proc["ignored_skills"],
+                structured_evidence_count=proc["structured_evidence_count"],
+                structured_request_count=proc["structured_request_count"],
+                created_request_ids=proc["created_request_ids"],
+                artifacts=proc["artifacts"],
+                tests=proc["tests"],
+                patches=proc["patches"],
+                lessons=proc["lessons"],
+                next_actions=proc["next_actions"],
             )
-        return parsed, [], [], 0, 0, [], [], [], [], [], []
+        return _ExtractedOutput(parsed=parsed)
 
     def _apply_status_and_build_payload(
         self,
@@ -389,7 +376,11 @@ class SubAgentRunnerResultMixin:
         blockers = _runner_compute_blockers(final_ok, extracted.task.status, extracted.parsed, final_message)
         runner_meta = _runner_make_runner_meta(params.dry_run, final_ok, final_message, params.backend, params.tool_rounds, now)
         output_items = {"artifacts": extracted.artifacts, "tests": extracted.tests, "patches": extracted.patches, "lessons": extracted.lessons, "blockers": blockers, "next_actions": extracted.next_actions}
-        output_payload = _runner_build_output_payload_wrapper(extracted.task, runner_meta, cap_data, tools_info, output_items)
+        output_payload = _runner_build_output_payload(
+            _make_build_output_context(
+                extracted.task, runner_meta, cap_data, tools_info, output_items
+            )
+        )
         return output_payload, _make_build_context(
             _BuildContextParams(
                 task=extracted.task,
@@ -448,46 +439,34 @@ class SubAgentRunnerResultMixin:
         self.save(task)
         now = time.time()
 
-        (
-            parsed,
-            ignored_tools,
-            ignored_skills,
-            structured_evidence_count,
-            structured_request_count,
-            created_request_ids,
-            artifacts,
-            tests,
-            patches,
-            lessons,
-            next_actions,
-        ) = self._extract_parsed_output(task, params.structured_output, now, params.actual_tools)
+        extracted = self._extract_parsed_output(task, params.structured_output, now, params.actual_tools)
 
         output_payload, build_ctx = self._apply_status_and_build_payload(
             params,
             _ApplyStatusParams(
                 task=task,
-                parsed=parsed,
-                structured_evidence_count=structured_evidence_count,
-                structured_request_count=structured_request_count,
-                created_request_ids=created_request_ids,
+                parsed=extracted.parsed,
+                structured_evidence_count=extracted.structured_evidence_count,
+                structured_request_count=extracted.structured_request_count,
+                created_request_ids=extracted.created_request_ids,
                 structured_repair_attempted=params.structured_repair_attempted,
                 structured_repair_ok=params.structured_repair_ok,
                 structured_repair_error=params.structured_repair_error,
                 actual_tools=params.actual_tools,
-                ignored_tools=ignored_tools,
-                ignored_skills=ignored_skills,
-                artifacts=artifacts,
-                tests=tests,
-                patches=patches,
-                lessons=lessons,
-                next_actions=next_actions,
+                ignored_tools=extracted.ignored_tools,
+                ignored_skills=extracted.ignored_skills,
+                artifacts=extracted.artifacts,
+                tests=extracted.tests,
+                patches=extracted.patches,
+                lessons=extracted.lessons,
+                next_actions=extracted.next_actions,
             ),
             now,
         )
         # Override params in context with actual params object for full field access
         build_ctx.params = params
         result = self._build_and_persist_result(build_ctx)
-        self._post_result_side_effects(task, result, output_payload, params.dry_run, parsed, lessons)
+        self._post_result_side_effects(task, result, output_payload, params.dry_run, extracted.parsed, extracted.lessons)
         return result
 
     def _check_stale_runner_result(self, task, attempt_id, dry_run):
