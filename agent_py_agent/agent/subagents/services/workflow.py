@@ -81,13 +81,15 @@ def _try_workflow_plan(
 ) -> dict[str, object] | None:
     """Try to run workflow planning, return None on failure."""
     try:
-        from ...subagent_workflows.planner import plan_workflow_for_goal
+        from ...subagent_workflows.planner import WorkflowPlanConstraints, plan_workflow_for_goal
 
         result = plan_workflow_for_goal(
             goal,
-            quality_contract=quality_contract,
-            context_manifest=context_manifest,
-            allowed_write_roots=allowed_write_roots,
+            constraints=WorkflowPlanConstraints(
+                quality_contract=quality_contract,
+                context_manifest=context_manifest,
+                allowed_write_roots=allowed_write_roots,
+            ),
         )
         return result.to_dict()
     except Exception:

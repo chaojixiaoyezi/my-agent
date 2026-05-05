@@ -24,6 +24,7 @@ from agent_py_agent.agent.memory_archive.runtime.event_builders import (
     _tool_event,
     _tool_metadata,
     _tool_status,
+    _ToolFacts,
 )
 
 
@@ -327,7 +328,8 @@ class TestToolMetadata:
     def test_basic_fields(self):
         """验证基本字段"""
         tool_call = {"tool_name": "read", "tool_call_id": "c1"}
-        result = _tool_metadata(tool_call, tool_name="read", tool_call_id="c1", tool_success=True, status="ok", error_code="", backend="openai")
+        facts = _ToolFacts(tool_name="read", tool_call_id="c1", tool_success=True, status="ok", error_code="", backend="openai")
+        result = _tool_metadata(tool_call, facts=facts)
 
         assert result["tool_name"] == "read"
         assert result["tool_call_id"] == "c1"
@@ -337,13 +339,15 @@ class TestToolMetadata:
     def test_output_hash_added(self):
         """验证输出哈希被添加"""
         tool_call = {"tool_name": "read", "output": "some output content"}
-        result = _tool_metadata(tool_call, tool_name="read", tool_call_id="", tool_success=True, status="ok", error_code="", backend="openai")
+        facts = _ToolFacts(tool_name="read", tool_call_id="", tool_success=True, status="ok", error_code="", backend="openai")
+        result = _tool_metadata(tool_call, facts=facts)
 
         assert "output_hash" in result
 
     def test_parameters_added(self):
         """验证参数被添加"""
         tool_call = {"tool_name": "read", "parameters": {"path": "/data"}}
-        result = _tool_metadata(tool_call, tool_name="read", tool_call_id="", tool_success=True, status="ok", error_code="", backend="openai")
+        facts = _ToolFacts(tool_name="read", tool_call_id="", tool_success=True, status="ok", error_code="", backend="openai")
+        result = _tool_metadata(tool_call, facts=facts)
 
         assert "parameters" in result

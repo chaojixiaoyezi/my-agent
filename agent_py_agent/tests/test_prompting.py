@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_py_agent.agent.memory_store import MemoryRecord
-from agent_py_agent.agent.prompting import PromptBuilder
+from agent_py_agent.agent.prompting import PromptBuilder, ToolSections
 from agent_py_agent.agent.settings import AgentConfig
 
 
@@ -191,7 +191,8 @@ class TestBuildToolSections:
     def test_build_with_tool_catalog_section(self, tmp_path):
         config = AgentConfig()
         builder = PromptBuilder(config, tmp_path)
-        result = builder.build("hello", [], tool_catalog_section="# Tools\n- read_file\n- write_file")
+        tools = ToolSections(tool_catalog_section="# Tools\n- read_file\n- write_file")
+        result = builder.build("hello", [], tools=tools)
         assert "# Tools" in result
         assert "read_file" in result
         assert "write_file" in result
@@ -199,7 +200,8 @@ class TestBuildToolSections:
     def test_build_with_tool_recommendations_section(self, tmp_path):
         config = AgentConfig()
         builder = PromptBuilder(config, tmp_path)
-        result = builder.build("hello", [], tool_recommendations_section="# Recommended Tools\n- read_file")
+        tools = ToolSections(tool_recommendations_section="# Recommended Tools\n- read_file")
+        result = builder.build("hello", [], tools=tools)
         assert "# Recommended Tools" in result
         assert "read_file" in result
 
@@ -208,7 +210,8 @@ class TestBuildToolContext:
     def test_build_no_tool_context(self, tmp_path):
         config = AgentConfig()
         builder = PromptBuilder(config, tmp_path)
-        result = builder.build("hello", [], tool_context=None)
+        tools = ToolSections(tool_context=None)
+        result = builder.build("hello", [], tools=tools)
         assert "（无）" in result
         assert "# User Task" in result
         assert "hello" in result
@@ -216,13 +219,15 @@ class TestBuildToolContext:
     def test_build_empty_tool_context(self, tmp_path):
         config = AgentConfig()
         builder = PromptBuilder(config, tmp_path)
-        result = builder.build("hello", [], tool_context=[])
+        tools = ToolSections(tool_context=[])
+        result = builder.build("hello", [], tools=tools)
         assert "（无）" in result
 
     def test_build_single_tool_context(self, tmp_path):
         config = AgentConfig()
         builder = PromptBuilder(config, tmp_path)
-        result = builder.build("hello", [], tool_context=["[TOOL_CALL] read_file ... [/TOOL_CALL]"])
+        tools = ToolSections(tool_context=["[TOOL_CALL] read_file ... [/TOOL_CALL]"])
+        result = builder.build("hello", [], tools=tools)
         assert "# Tool Transcript" in result
         assert "Continue From Tool Transcript" in result
         assert "read_file" in result
@@ -234,14 +239,16 @@ class TestBuildToolContext:
             "[TOOL_CALL] tool1 ... [/TOOL_CALL]",
             "[TOOL_CALL] tool2 ... [/TOOL_CALL]",
         ]
-        result = builder.build("hello", [], tool_context=entries)
+        tools = ToolSections(tool_context=entries)
+        result = builder.build("hello", [], tools=tools)
         assert "tool1" in result
         assert "tool2" in result
 
     def test_build_tool_context_has_continuation_instruction(self, tmp_path):
         config = AgentConfig()
         builder = PromptBuilder(config, tmp_path)
-        result = builder.build("hello", [], tool_context=["[TOOL_CALL] tool ... [/TOOL_CALL]"])
+        tools = ToolSections(tool_context=["[TOOL_CALL] tool ... [/TOOL_CALL]"])
+        result = builder.build("hello", [], tools=tools)
         assert "Continue From Tool Transcript" in result
         assert "不要重新开始任务" in result
 
@@ -251,12 +258,15 @@ class TestBuildFullPrompt:
         config = AgentConfig(system_prompt="you are a helpful agent")
         builder = PromptBuilder(config, tmp_path)
         memories = [MemoryRecord(role="user", content="remember this")]
+        tools = ToolSections(
+            tool_catalog_section="# Tools\n- tool1",
+            tool_recommendations_section="# Recommended Tools\n- tool1",
+        )
         result = builder.build(
             "do the task",
             memories,
             inject=["runtime injection"],
-            tool_catalog_section="# Tools\n- tool1",
-            tool_recommendations_section="# Recommended Tools\n- tool1",
+            tools=tools,
         )
         assert "# System" in result
         assert "you are a helpful agent" in result
@@ -278,7 +288,8 @@ class TestBuildFullPrompt:
     def test_build_with_tool_context_uses_continuation_format(self, tmp_path):
         config = AgentConfig()
         builder = PromptBuilder(config, tmp_path)
-        result = builder.build("my task", [], tool_context=["[TOOL_CALL] call [/TOOL_CALL]"])
+        tools = ToolSections(tool_context=["[TOOL_CALL] call [/TOOL_CALL]"])
+        result = builder.build("my task", [], tools=tools)
         assert "# Tool Transcript" in result
         assert "# User Task" in result
         assert "Continue From Tool Transcript" in result
