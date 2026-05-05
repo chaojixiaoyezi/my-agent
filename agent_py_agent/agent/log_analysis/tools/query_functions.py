@@ -9,6 +9,7 @@ from __future__ import annotations
 本模块只包含函数，工具类（BaseTool 子类）在 tool_classes.py 里。
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,24 @@ from ..storage import (
 MAX_TRACE_CASE_QUERIES = 20
 
 
+@dataclass(frozen=True)
+class SecurityQueryParams:
+    """Parameter bundle for security_query."""
+    store: LocalLogStore | None = None
+    root: str | Path | None = None
+    attacker_ip: str | None = None
+    victim_ip: str | None = None
+    domain: str | None = None
+    uri: str | None = None
+    alert_type: str | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+    limit: int | None = DEFAULT_QUERY_LIMIT
+    max_limit: int | None = None
+
+
 def security_query(
+    params: SecurityQueryParams | None = None,
     *,
     store: LocalLogStore | None = None,
     root: str | Path | None = None,
@@ -44,6 +62,7 @@ def security_query(
     alert_type 和时间范围过滤事件。它返回的是摘要、预览行和 evidence ref，不是全量日志。
 
     参数说明:
+    params: SecurityQueryParams dataclass；同时支持直接传独立 kwargs。
     store: 已经创建好的 LocalLogStore；传它时函数直接用这个 store。
     root: 本地日志分析数据目录；store 没传时，用 root 创建 LocalLogStore。
     attacker_ip: 攻击者或源 IP 过滤条件。
@@ -60,20 +79,28 @@ def security_query(
     返回 dict，包含 tool、query_id、parameters、row_count、truncated、evidence_path、
     evidence_refs、summary 和 preview_rows。后续报告应引用 evidence_refs，而不是凭空下结论。
     """
-    local_store = _store(store, root)
+    if params is None:
+        params = SecurityQueryParams(
+            store=store, root=root,
+            attacker_ip=attacker_ip, victim_ip=victim_ip,
+            domain=domain, uri=uri, alert_type=alert_type,
+            start_time=start_time, end_time=end_time,
+            limit=limit, max_limit=max_limit,
+        )
+    local_store = _store(params.store, params.root)
     result = execute_security_query(
         local_store,
         QueryCriteria(
-            attacker_ip=attacker_ip,
-            victim_ip=victim_ip,
-            domain=domain,
-            uri=uri,
-            alert_type=alert_type,
-            start_time=start_time,
-            end_time=end_time,
-            limit=limit,
+            attacker_ip=params.attacker_ip,
+            victim_ip=params.victim_ip,
+            domain=params.domain,
+            uri=params.uri,
+            alert_type=params.alert_type,
+            start_time=params.start_time,
+            end_time=params.end_time,
+            limit=params.limit,
         ),
-        max_limit=max_limit,
+        max_limit=params.max_limit,
     )
     return _tool_response(result)
 
@@ -116,23 +143,27 @@ def hunt_ip(
         raise ValueError("role must be one of: any, attacker, victim")
     if role == "attacker":
         return security_query(
-            store=store,
-            root=root,
-            attacker_ip=ip,
-            start_time=start_time,
-            end_time=end_time,
-            limit=limit,
-            max_limit=max_limit,
+            SecurityQueryParams(
+                store=store,
+                root=root,
+                attacker_ip=ip,
+                start_time=start_time,
+                end_time=end_time,
+                limit=limit,
+                max_limit=max_limit,
+            )
         )
     if role == "victim":
         return security_query(
-            store=store,
-            root=root,
-            victim_ip=ip,
-            start_time=start_time,
-            end_time=end_time,
-            limit=limit,
-            max_limit=max_limit,
+            SecurityQueryParams(
+                store=store,
+                root=root,
+                victim_ip=ip,
+                start_time=start_time,
+                end_time=end_time,
+                limit=limit,
+                max_limit=max_limit,
+            )
         )
     local_store = _store(store, root)
     attacker = execute_security_query(
@@ -183,7 +214,7 @@ def security_hunt_domain(domain: str, **kwargs: Any) -> dict[str, Any]:
     返回说明:
     返回 security_query 的结果。
     """
-    return security_query(domain=domain, **kwargs)
+    return security_query(SecurityQueryParams(domain=domain, **kwargs))
 
 
 def trace_case(
@@ -237,7 +268,7 @@ def trace_case(
                 "limit": limit,
                 "max_limit": max_limit,
             }
-            queries.append(security_query(store=local_store, **kwargs))
+            queries.append(security_query(SecurityQueryParams(store=local_store, **kwargs)))
         if len(queries) >= max_queries:
             break
     return {

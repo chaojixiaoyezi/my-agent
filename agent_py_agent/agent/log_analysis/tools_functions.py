@@ -6,6 +6,7 @@ This module is derived from tools.py split. It contains the actual query
 functions for security log analysis.
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,24 @@ from .storage import (
 from .storage.query import execute_security_query
 
 
+@dataclass(frozen=True)
+class SecurityQueryParams:
+    """Parameter bundle for security_query."""
+    store: LocalLogStore | None = None
+    root: str | Path | None = None
+    attacker_ip: str | None = None
+    victim_ip: str | None = None
+    domain: str | None = None
+    uri: str | None = None
+    alert_type: str | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+    limit: int | None = DEFAULT_QUERY_LIMIT
+    max_limit: int | None = None
+
+
 def security_query(
+    params: SecurityQueryParams | None = None,
     *,
     store: LocalLogStore | None = None,
     root: str | Path | None = None,
@@ -32,20 +50,28 @@ def security_query(
     max_limit: int | None = None,
 ) -> dict[str, Any]:
     """Execute bounded security event query and return tool response format."""
-    local_store = _store(store, root)
+    if params is None:
+        params = SecurityQueryParams(
+            store=store, root=root,
+            attacker_ip=attacker_ip, victim_ip=victim_ip,
+            domain=domain, uri=uri, alert_type=alert_type,
+            start_time=start_time, end_time=end_time,
+            limit=limit, max_limit=max_limit,
+        )
+    local_store = _store(params.store, params.root)
     result = execute_security_query(
         local_store,
         QueryCriteria(
-            attacker_ip=attacker_ip,
-            victim_ip=victim_ip,
-            domain=domain,
-            uri=uri,
-            alert_type=alert_type,
-            start_time=start_time,
-            end_time=end_time,
-            limit=limit,
+            attacker_ip=params.attacker_ip,
+            victim_ip=params.victim_ip,
+            domain=params.domain,
+            uri=params.uri,
+            alert_type=params.alert_type,
+            start_time=params.start_time,
+            end_time=params.end_time,
+            limit=params.limit,
         ),
-        max_limit=max_limit,
+        max_limit=params.max_limit,
     )
     return _tool_response(result)
 
@@ -66,17 +92,21 @@ def hunt_ip(
         raise ValueError("role must be one of: any, attacker, victim")
     if role == "attacker":
         return security_query(
-            store=store, root=root,
-            attacker_ip=ip,
-            start_time=start_time, end_time=end_time,
-            limit=limit, max_limit=max_limit,
+            SecurityQueryParams(
+                store=store, root=root,
+                attacker_ip=ip,
+                start_time=start_time, end_time=end_time,
+                limit=limit, max_limit=max_limit,
+            )
         )
     if role == "victim":
         return security_query(
-            store=store, root=root,
-            victim_ip=ip,
-            start_time=start_time, end_time=end_time,
-            limit=limit, max_limit=max_limit,
+            SecurityQueryParams(
+                store=store, root=root,
+                victim_ip=ip,
+                start_time=start_time, end_time=end_time,
+                limit=limit, max_limit=max_limit,
+            )
         )
     local_store = _store(store, root)
     attacker = execute_security_query(
@@ -105,7 +135,7 @@ def security_hunt_ip(ip: str, **kwargs: Any) -> dict[str, Any]:
 
 def security_hunt_domain(domain: str, **kwargs: Any) -> dict[str, Any]:
     """Domain pivot via security_query."""
-    return security_query(domain=domain, **kwargs)
+    return security_query(SecurityQueryParams(domain=domain, **kwargs))
 
 
 def trace_case(
@@ -137,7 +167,7 @@ def trace_case(
                 "limit": limit,
                 "max_limit": max_limit,
             }
-            queries.append(security_query(store=local_store, **kwargs))
+            queries.append(security_query(SecurityQueryParams(store=local_store, **kwargs)))
         if len(queries) >= max_queries:
             break
     return {
