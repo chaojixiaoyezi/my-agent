@@ -31,18 +31,26 @@ def _derived_archive_fields(payload: dict[str, Any]) -> dict[str, Any]:
     fields: dict[str, Any] = {}
     turn_range = payload.get("turn_range")
     if isinstance(turn_range, dict):
-        for key in ("request_id", "run_id", "task_id", "source", "status", "error_code"):
-            if turn_range.get(key):
-                fields[key] = turn_range.get(key)
+        _copy_present_archive_fields(fields, turn_range)
     dispatch_events = payload.get("dispatch_events")
     if isinstance(dispatch_events, list):
         for event in dispatch_events:
             if not isinstance(event, dict):
                 continue
-            for key in ("request_id", "run_id", "task_id", "source", "status", "error_code"):
-                if event.get(key) and not fields.get(key):
-                    fields[key] = event.get(key)
+            _copy_present_archive_fields(fields, event, only_missing=True)
     return fields
+
+
+def _copy_present_archive_fields(
+    fields: dict[str, Any],
+    source: dict[str, Any],
+    *,
+    only_missing: bool = False,
+) -> None:
+    """Copy known archive routing fields from a nested payload."""
+    for key in ("request_id", "run_id", "task_id", "source", "status", "error_code"):
+        if source.get(key) and (not only_missing or not fields.get(key)):
+            fields[key] = source.get(key)
 
 
 def _archive_preview(payload: dict[str, Any]) -> str:

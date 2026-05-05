@@ -111,13 +111,16 @@ def _build_run_turn_events(
     turn: TurnData,
     ctx: RunContext,
 ) -> list[RawMemoryEvent]:
-    """LLM: convert one run turn into ordered RawMemoryEvent objects without writing them.
+    """Convert one run turn into ordered RawMemoryEvent objects without writing them."""
+    return [
+        *_message_events(session_id, turn, ctx),
+        *_tool_events(session_id, turn, ctx),
+    ]
 
-    新手说明:
-    这一步只拼事件，不碰磁盘。先放用户消息，再放助手回答，再按原顺序放工具元数据。
-    """
 
-    events = [
+def _message_events(session_id: str, turn: TurnData, ctx: RunContext) -> list[RawMemoryEvent]:
+    """Build user and assistant message events for one turn."""
+    return [
         _message_event(
             EventIdentity(
                 sequence=1,
@@ -158,6 +161,10 @@ def _build_run_turn_events(
         ),
     ]
 
+
+def _tool_events(session_id: str, turn: TurnData, ctx: RunContext) -> list[RawMemoryEvent]:
+    """Build tool events for one turn."""
+    events: list[RawMemoryEvent] = []
     for index, tool_call in enumerate(turn.tool_calls, start=1):
         events.append(
             _tool_event(
@@ -207,23 +214,7 @@ class ArchiveRunTurnParams:
 def archive_run_turn(
     params: ArchiveRunTurnParams,
 ) -> ArchiveRunTurnResult:
-    """LLM: append user, assistant, and optional tool RawMemoryEvent records for one run turn.
-
-    新手说明:
-    真实 `SimpleAgent.run()` 后面只要把本轮已经知道的信息丢进来，就能得到统一格式的冷归档。
-    这里不会保存 system prompt 或内置 prompt，也不会把长正文写成 blob；目前只保留短预览、hash 和空的正文路径占位。
-
-    参数说明:
-    `root` 是工作区根目录；`ctx` 包含 session_id、user_prompt、response_text 等归档所需字段。
-    `ctx.tool_calls` 是本轮工具调用元数据；`ctx.request_id`、`ctx.run_id`、`ctx.task_id` 用于把事件串回请求、运行和任务。
-    `ctx.source` 标识来源；`ctx.archive_level` 控制预览长度；`ctx.created_at` 可固定事件时间，便于测试。
-
-    返回说明:
-    返回 `ArchiveRunTurnResult`，包含写入路径、事件数、hash 和事件对象。
-
-    副作用说明:
-    会向 `memory/raw/YYYY-MM-DD.jsonl` 追加 raw event，并由 storage 层读回校验。
-    """
+    """Append user, assistant, and optional tool raw archive events for one run turn."""
     ctx = params.ctx
     root = params.root
 

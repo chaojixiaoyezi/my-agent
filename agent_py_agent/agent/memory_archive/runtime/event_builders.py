@@ -9,20 +9,24 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..models import RawMemoryEvent
-
-_PREVIEW_LIMITS = {
-    0: 2048,
-    1: 1024,
-    2: 512,
-    3: 160,
-}
+from ._event_utils import (
+    _canonical_json,
+    _content_hash,
+    _event_id,
+    _first_bool,
+    _first_text,
+    _normalize_archive_level,
+    _normalize_tool_call,
+    _preview,
+    _stable_display_json,
+    _summarize_text,
+    _tool_status,
+)
 
 
 @dataclass
@@ -56,6 +60,19 @@ class ToolCallContext:
     source: str
     archive_level: int
     created_at: str
+
+
+@dataclass(frozen=True)
+class _ToolEventFields:
+    """Normalized fields shared by tool event id, metadata, and RawMemoryEvent."""
+    tool_name: str
+    tool_call_id: str
+    tool_success: bool | None
+    status: str
+    error_code: str
+    metadata: dict[str, Any]
+    metadata_text: str
+    content_hash: str
 
 
 def _message_event(
@@ -118,6 +135,50 @@ def _tool_event(
     再把输出正文变成 hash 和短预览，避免 raw archive 暴涨。
     """
     tool_call = ctx.tool_call
+    fields = _tool_event_fields(tool_call, backend=ctx.backend)
+    event_id = _event_id(
+        {
+            "kind": "tool",
+            "sequence": identity.sequence,
+            "session_id": identity.session_id,
+            "request_id": identity.request_id,
+            "run_id": identity.run_id,
+            "task_id": identity.task_id,
+            "tool_name": fields.tool_name,
+            "tool_call_id": fields.tool_call_id,
+            "backend": ctx.backend,
+            "source": ctx.source,
+            "content_hash": fields.content_hash,
+        }
+    )
+    event = RawMemoryEvent(
+        event_id=event_id,
+        session_id=identity.session_id,
+        request_id=identity.request_id,
+        run_id=identity.run_id,
+        speaker="tool",
+        target="assistant",
+        action="tool_call",
+        created_at=ctx.created_at,
+        status=fields.status,
+        error_code=fields.error_code,
+        is_dispatch=bool(tool_call.get("is_dispatch", False)),
+        task_id=identity.task_id,
+        tool_name=fields.tool_name,
+        tool_call_id=fields.tool_call_id,
+        tool_success=fields.tool_success,
+        content_preview=_preview(fields.metadata_text, ctx.archive_level),
+        content_path="",
+        content_hash=fields.content_hash,
+        visibility="private",
+        source=ctx.source,
+        archive_level=_normalize_archive_level(ctx.archive_level),
+    )
+    return _apply_archive_level_to_tool_event(event, tool_call=tool_call, metadata=fields.metadata)
+
+
+def _tool_event_fields(tool_call: dict[str, Any], *, backend: str) -> _ToolEventFields:
+    """Normalize tool-call facts before creating the archive event."""
     tool_name = _first_text(tool_call, "tool_name", "tool", "name") or "unknown"
     tool_call_id = _first_text(tool_call, "tool_call_id", "call_id", "id")
     tool_success = _first_bool(tool_call, "tool_success", "success", "ok")
@@ -130,49 +191,18 @@ def _tool_event(
         tool_success=tool_success,
         status=status,
         error_code=error_code,
-        backend=ctx.backend,
+        backend=backend,
     )
-    metadata_text = _stable_display_json(metadata)
-    content_hash = _content_hash(_canonical_json(tool_call))
-    event_id = _event_id(
-        {
-            "kind": "tool",
-            "sequence": identity.sequence,
-            "session_id": identity.session_id,
-            "request_id": identity.request_id,
-            "run_id": identity.run_id,
-            "task_id": identity.task_id,
-            "tool_name": tool_name,
-            "tool_call_id": tool_call_id,
-            "backend": ctx.backend,
-            "source": ctx.source,
-            "content_hash": content_hash,
-        }
-    )
-    event = RawMemoryEvent(
-        event_id=event_id,
-        session_id=identity.session_id,
-        request_id=identity.request_id,
-        run_id=identity.run_id,
-        speaker="tool",
-        target="assistant",
-        action="tool_call",
-        created_at=ctx.created_at,
-        status=status,
-        error_code=error_code,
-        is_dispatch=bool(tool_call.get("is_dispatch", False)),
-        task_id=identity.task_id,
+    return _ToolEventFields(
         tool_name=tool_name,
         tool_call_id=tool_call_id,
         tool_success=tool_success,
-        content_preview=_preview(metadata_text, ctx.archive_level),
-        content_path="",
-        content_hash=content_hash,
-        visibility="private",
-        source=ctx.source,
-        archive_level=_normalize_archive_level(ctx.archive_level),
+        status=status,
+        error_code=error_code,
+        metadata=metadata,
+        metadata_text=_stable_display_json(metadata),
+        content_hash=_content_hash(_canonical_json(tool_call)),
     )
-    return _apply_archive_level_to_tool_event(event, tool_call=tool_call, metadata=metadata)
 
 
 def _tool_metadata(
@@ -264,161 +294,3 @@ def _apply_archive_level_to_tool_event(
         return event
     event.content_preview = _preview(_stable_display_json(metadata), event.archive_level)
     return event
-
-
-def _summarize_text(content: str, *, fallback: str) -> str:
-    """LLM: build a short event-style summary when full previews should not be stored.
-
-    新手说明:
-    这不是智能摘要，只是稳定的压缩版，保证归档最少还能看出这条消息大概是什么。
-    """
-
-    compact = " ".join(str(content).split())
-    if not compact:
-        return fallback
-    short = compact[:96]
-    if len(compact) > 96:
-        short += "..."
-    return short
-
-
-def _normalize_tool_call(call: Any) -> dict[str, Any]:
-    """LLM: coerce arbitrary tool-call objects into a plain dictionary.
-
-    新手说明:
-    测试和后端可能传 dict、dataclass 或普通对象。归档层只想处理字典，
-    所以这里把常见形状统一成 dict；未知形状至少保存字符串值。
-    """
-    if isinstance(call, Mapping):
-        return dict(call)
-    if is_dataclass(call) and not isinstance(call, type):
-        return asdict(call)
-    if hasattr(call, "__dict__"):
-        return {
-            key: value
-            for key, value in vars(call).items()
-            if not key.startswith("_")
-        }
-    return {"value": str(call)}
-
-
-def _normalize_archive_level(value: int) -> int:
-    """LLM: keep archive levels inside the supported 0..3 range.
-
-    新手说明:
-    归档级别越小，预览越长；越大，预览越短。坏值统一回到 3，减少隐私和体积风险。
-    """
-    if isinstance(value, bool):
-        return 3
-    try:
-        level = int(value)
-    except (TypeError, ValueError):
-        return 3
-    if level < 0 or level > 3:
-        return 3
-    return level
-
-
-def _preview(content: str, archive_level: int) -> str:
-    """LLM: trim archived text according to archive level.
-
-    新手说明:
-    raw event 只保存短预览，既能让人排查，又不会把长正文全部塞进索引行。
-    """
-    limit = _PREVIEW_LIMITS[_normalize_archive_level(archive_level)]
-    if len(content) <= limit:
-        return content
-    if limit <= 3:
-        return content[:limit]
-    return f"{content[: limit - 3]}..."
-
-
-def _event_id(payload: Mapping[str, Any]) -> str:
-    """LLM: derive a stable raw event id from canonical payload facts.
-
-    新手说明:
-    同一轮、同一内容、同一工具调用会得到同样 ID，方便测试和去重。
-    """
-    digest = hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
-    return f"raw:{digest[:32]}"
-
-
-def _content_hash(content: str) -> str:
-    """LLM: compute a SHA-256 content hash with an explicit prefix.
-
-    新手说明:
-    hash 让我们以后能确认正文是否变化，而不用把完整正文都放在索引里。
-    """
-    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    return f"sha256:{digest}"
-
-
-def _canonical_json(payload: Any) -> str:
-    """LLM: serialize payloads into deterministic JSON for identity hashes.
-
-    新手说明:
-    字典字段顺序不同不应该影响事件 ID。排序后的 JSON 能保证 hash 稳定。
-    """
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-
-
-def _stable_display_json(payload: Any) -> str:
-    """LLM: serialize metadata for human-facing previews while keeping input order.
-
-    新手说明:
-    展示预览更希望保留人工构造的字段顺序，所以这里不排序。
-    """
-    return json.dumps(payload, ensure_ascii=False, sort_keys=False, separators=(",", ":"), default=str)
-
-
-def _first_text(payload: Mapping[str, Any], *keys: str) -> str:
-    """LLM: find the first non-empty text value among candidate keys.
-
-    新手说明:
-    不同工具后端可能把同一个概念叫 `tool_name`、`tool` 或 `name`。
-    这个 helper 按优先级找第一个可用字段。
-    """
-    for key in keys:
-        value = payload.get(key)
-        if value is None:
-            continue
-        text = str(value)
-        if text:
-            return text
-    return ""
-
-
-def _first_bool(payload: Mapping[str, Any], *keys: str) -> bool | None:
-    """LLM: find the first boolean-ish status among candidate keys.
-
-    新手说明:
-    工具成功状态可能是真布尔，也可能是 `"yes"`、`"failed"` 这类字符串。
-    这里统一转成 `True`、`False` 或未知。
-    """
-    for key in keys:
-        value = payload.get(key)
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            text = value.strip().lower()
-            if text in {"true", "1", "yes", "ok", "success"}:
-                return True
-            if text in {"false", "0", "no", "error", "failed", "failure"}:
-                return False
-    return None
-
-
-def _tool_status(payload: Mapping[str, Any], tool_success: bool | None) -> str:
-    """LLM: choose a stable tool status string.
-
-    新手说明:
-    如果工具自己给了 status，就尊重它；否则根据 success 推出 ok/error；再不确定就是 unknown。
-    """
-    status = _first_text(payload, "status")
-    if status:
-        return status
-    if tool_success is True:
-        return "ok"
-    if tool_success is False:
-        return "error"
-    return "unknown"

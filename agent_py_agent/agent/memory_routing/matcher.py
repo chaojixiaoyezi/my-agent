@@ -76,19 +76,7 @@ def match_routes(
 
 
 def score_route(normalized_query: str, route: MemoryRoute) -> tuple[float, list[str], list[str]]:
-    """LLM contract: scores one route against an already-normalized query string.
-
-    新手说明:
-    别名比普通关键词更像"明确指路"，所以分数更高；topic 和 when_to_read
-    也会参与，但权重较低。最后返回分数、理由和命中的词，方便日志解释。
-
-    参数说明:
-    normalized_query: 已经通过 _normalize 处理过的查询文本。
-    route: 要打分的一条 MemoryRoute。
-
-    返回说明:
-    返回 `(score, reasons, matched_terms)`。score <= 0 表示没有命中。
-    """
+    """Score one route against an already-normalized query string."""
 
     score = 0.0
     reasons: list[str] = []
@@ -250,29 +238,23 @@ def _normalize(text: str) -> str:
 
 
 def _tokens(text: str) -> list[str]:
-    """LLM contract: extracts coarse English and Chinese tokens from text.
-
-    新手说明:
-    这个 tokenizer 很轻量，只服务普通规则匹配。中文长句会额外切 2-4 字片段，
-    让"任务恢复"这类短词也能从长句里被命中。
-
-    参数说明:
-    text: 原始或已归一化文本。
-
-    返回说明:
-    返回去重 token 列表，包括英文/数字片段和中文 2-4 字片段。
-    """
-
+    """Extract coarse English and Chinese tokens from text."""
     normalized = _normalize(text)
     raw_tokens = re.findall(r"[a-z0-9_./-]+|[\u4e00-\u9fff]+", normalized)
     expanded: list[str] = []
     for token in raw_tokens:
         expanded.append(token)
         if re.fullmatch(r"[\u4e00-\u9fff]+", token):
-            for size in (2, 3, 4):
-                for idx in range(0, max(len(token) - size + 1, 0)):
-                    expanded.append(token[idx : idx + size])
+            expanded.extend(_chinese_ngrams(token))
     return _dedupe(expanded)
+
+
+def _chinese_ngrams(token: str) -> list[str]:
+    """Return short Chinese n-grams used by the lightweight matcher."""
+    grams: list[str] = []
+    for size in (2, 3, 4):
+        grams.extend(token[idx : idx + size] for idx in range(0, max(len(token) - size + 1, 0)))
+    return grams
 
 
 def _unique_paths(paths: list[str]) -> list[str]:
