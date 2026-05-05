@@ -116,7 +116,10 @@ class TestAppendSessionTokenUsage:
 
     def test_new_session(self, tmp_path: Path):
         """测试新会话首次记录。"""
-        from agent_py_agent.agent.memory_archive.tokens import TurnTokenUsage, append_session_token_usage
+        from agent_py_agent.agent.memory_archive.tokens import (
+            TurnTokenUsage,
+            append_session_token_usage,
+        )
 
         result = append_session_token_usage(
             root=tmp_path,
@@ -136,7 +139,10 @@ class TestAppendSessionTokenUsage:
 
     def test_existing_session(self, tmp_path: Path):
         """测试追加到已有会话。"""
-        from agent_py_agent.agent.memory_archive.tokens import TurnTokenUsage, append_session_token_usage
+        from agent_py_agent.agent.memory_archive.tokens import (
+            TurnTokenUsage,
+            append_session_token_usage,
+        )
 
         # 第一次
         append_session_token_usage(
@@ -169,7 +175,10 @@ class TestAppendSessionTokenUsage:
 
     def test_zero_tokens(self, tmp_path: Path):
         """测试零 token 用量。"""
-        from agent_py_agent.agent.memory_archive.tokens import TurnTokenUsage, append_session_token_usage
+        from agent_py_agent.agent.memory_archive.tokens import (
+            TurnTokenUsage,
+            append_session_token_usage,
+        )
 
         result = append_session_token_usage(
             root=tmp_path,
@@ -188,7 +197,10 @@ class TestAppendSessionTokenUsage:
 
     def test_large_token_values(self, tmp_path: Path):
         """测试大数值 token 处理。"""
-        from agent_py_agent.agent.memory_archive.tokens import TurnTokenUsage, append_session_token_usage
+        from agent_py_agent.agent.memory_archive.tokens import (
+            TurnTokenUsage,
+            append_session_token_usage,
+        )
 
         result = append_session_token_usage(
             root=tmp_path,

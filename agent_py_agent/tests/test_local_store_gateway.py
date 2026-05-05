@@ -16,6 +16,7 @@ from pathlib import Path
 
 from agent_py_agent.__main__ import (
     AdapterPaths,
+    GatewayAskParams,
     _process_gateway_requests,
     build_local_doctor_report,
     gateway_paths,
@@ -24,7 +25,6 @@ from agent_py_agent.__main__ import (
     read_json_file,
     rebuild_local_store,
     recover_gateway_processing_requests,
-    GatewayAskParams,
     submit_gateway_ask,
     write_json_file,
 )

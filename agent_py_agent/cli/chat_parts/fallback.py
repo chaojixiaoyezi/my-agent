@@ -13,6 +13,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+
 @dataclass
 class WorkerStateRefs:
     """Bundle of shared worker state references for _show_status."""
@@ -63,13 +64,13 @@ from .input_loop import (
     is_exit_command,
     is_show_prompt_command,
 )
-from .slash_command_types import SlashCommandContext
 from .rendering import (
     BLUE,
     BOLD,
     RESET,
     terminal_rule,
 )
+from .slash_command_types import SlashCommandContext
 
 
 def _fallback_gateway_handle(
