@@ -11,14 +11,15 @@ from dataclasses import dataclass
 from queue import Queue
 from typing import Any
 
+from .fallback_state import ChatJob
 from .input_loop import is_show_prompt_command
 from .rendering import _cprint, _tui_print_banner
 from .tui import (
-    TuiHandleCommandParams,
     _tui_get_status_text,
     _tui_handle_expand_command,
     _tui_request_exit,
 )
+from .tui_params import MakeTuiAppParams, TuiHandleCommandParams
 
 
 @dataclass
@@ -168,28 +169,6 @@ def _make_input_area(history_file_path: str) -> Any:
         history=FileHistory(history_file_path),
         auto_suggest=AutoSuggestFromHistory(),
     )
-
-
-@dataclass(frozen=True)
-class MakeTuiAppParams:
-    """Parameter bundle for make_tui_app."""
-    agent: Any
-    state_lock: Any
-    is_running_ref: list[Any]
-    pending_jobs_ref: list[int]
-    running_started_at_ref: list[float]
-    last_token_estimate_ref: list[int]
-    jobs: Any
-    pending_jobs_ref_for_enqueue: list[int]
-    runtime_inject: list[Any]
-    prompt_files: list[Any]
-    args: Any
-    use_gateway: bool
-    paths: Any
-    assistant_outputs: list[str]
-    shutting_down_ref: list[bool]
-    running_prompt_ref: list[str]
-    stop_event: Any
 
 
 def make_tui_app(params: MakeTuiAppParams):
