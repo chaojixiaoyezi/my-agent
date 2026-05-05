@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
+from agent_py_agent.agent.subagents.services.lifecycle import RecordCapabilityGrantParams
 
 
 def test_subagent_lifecycle_service_records_capabilities_and_status(tmp_path) -> None:
@@ -22,9 +23,11 @@ def test_subagent_lifecycle_service_records_capabilities_and_status(tmp_path) ->
     )
     grant = manager.record_capability_grant(
         task.id,
-        request_id=request.id,
-        skills=["memory-route"],
-        tools=["search_text"],
+        RecordCapabilityGrantParams(
+            request_id=request.id,
+            skills=["memory-route"],
+            tools=["search_text"],
+        ),
     )
     evidence = manager.record_evidence(task.id, kind="test", summary="passed")
     updated = manager.set_status(task.id, "DONE", require_evidence=True)

@@ -246,7 +246,7 @@ class TestSecurityHuntDomain:
 
         with patch("agent_py_agent.agent.log_analysis.tools.query_functions.security_query") as mock_query:
             mock_query.return_value = {"tool": "security_query", "row_count": 1}
-            result = security_hunt_domain("evil.com", store=MagicMock())
+            result = security_hunt_domain("evil.com")
             mock_query.assert_called_once()
             call_args = mock_query.call_args[0]
             params = call_args[0]
