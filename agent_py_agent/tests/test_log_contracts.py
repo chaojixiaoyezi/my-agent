@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """测试日志分析契约模块 (contracts.py)
 
 测试重点：
@@ -5,6 +7,7 @@
 - AnalystInput/AnalystReport 验证
 - ReviewerDecision 评审逻辑
 """
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -28,51 +31,59 @@ from agent_py_agent.agent.log_analysis.agents.contracts import (
 # 辅助函数
 # ============================================================
 
-def make_analyst_input(
-    case_id: str = "case-001",
-    case_summary: str = "Test case summary",
-    evidence_refs: list[str] | None = None,
-    route_summary: dict[str, Any] | None = None,
-    entity_refs: list[str] | None = None,
-    finding_refs: list[str] | None = None,
-    available_tools: list[str] | None = None,
-    budget: dict[str, int] | None = None,
-) -> AnalystInput:
+@dataclass(frozen=True)
+class MakeAnalystInputParams:
+    """Parameter bundle for make_analyst_input."""
+    case_id: str = "case-001"
+    case_summary: str = "Test case summary"
+    evidence_refs: list[str] | None = None
+    route_summary: dict[str, Any] | None = None
+    entity_refs: list[str] | None = None
+    finding_refs: list[str] | None = None
+    available_tools: list[str] | None = None
+    budget: dict[str, int] | None = None
+
+
+def make_analyst_input(params: MakeAnalystInputParams) -> AnalystInput:
     """创建测试用 AnalystInput 对象"""
     return AnalystInput(
-        case_id=case_id,
-        case_summary=case_summary,
-        evidence_refs=evidence_refs or ["ev-001", "ev-002"],
-        route_summary=route_summary or {},
-        entity_refs=entity_refs or [],
-        finding_refs=finding_refs or [],
-        available_tools=available_tools or list(DEFAULT_ANALYST_TOOLS),
-        budget=budget or {},
+        case_id=params.case_id,
+        case_summary=params.case_summary,
+        evidence_refs=params.evidence_refs or ["ev-001", "ev-002"],
+        route_summary=params.route_summary or {},
+        entity_refs=params.entity_refs or [],
+        finding_refs=params.finding_refs or [],
+        available_tools=params.available_tools or list(DEFAULT_ANALYST_TOOLS),
+        budget=params.budget or {},
     )
 
 
-def make_analyst_report(
-    case_id: str = "case-001",
-    summary: str = "Test report summary",
-    evidence_refs: list[str] | None = None,
-    facts: list[str] | None = None,
-    inferences: list[str] | None = None,
-    gaps: list[str] | None = None,
-    next_actions: list[str] | None = None,
-    confidence: str = "medium",
-    status: str = "AWAITING_REVIEW",
-) -> AnalystReport:
+@dataclass(frozen=True)
+class MakeAnalystReportParams:
+    """Parameter bundle for make_analyst_report."""
+    case_id: str = "case-001"
+    summary: str = "Test report summary"
+    evidence_refs: list[str] | None = None
+    facts: list[str] | None = None
+    inferences: list[str] | None = None
+    gaps: list[str] | None = None
+    next_actions: list[str] | None = None
+    confidence: str = "medium"
+    status: str = "AWAITING_REVIEW"
+
+
+def make_analyst_report(params: MakeAnalystReportParams) -> AnalystReport:
     """创建测试用 AnalystReport 对象"""
     return AnalystReport(
-        case_id=case_id,
-        summary=summary,
-        evidence_refs=evidence_refs or ["ev-001"],
-        facts=facts or [],
-        inferences=inferences or [],
-        gaps=gaps or [],
-        next_actions=next_actions or [],
-        confidence=confidence,
-        status=status,
+        case_id=params.case_id,
+        summary=params.summary,
+        evidence_refs=params.evidence_refs or ["ev-001"],
+        facts=params.facts or [],
+        inferences=params.inferences or [],
+        gaps=params.gaps or [],
+        next_actions=params.next_actions or [],
+        confidence=params.confidence,
+        status=params.status,
     )
 
 
@@ -167,25 +178,25 @@ class TestAnalystInputValidation:
 
     def test_valid_analyst_input(self):
         """测试有效输入通过验证"""
-        input_obj = make_analyst_input()
+        input_obj = make_analyst_input(MakeAnalystInputParams())
         input_obj.validate()  # 不抛出异常
 
     def test_empty_case_id_raises(self):
         """测试空 case_id 抛出异常"""
-        input_obj = make_analyst_input(case_id="")
+        input_obj = make_analyst_input(MakeAnalystInputParams(case_id=""))
         with pytest.raises(ContractValidationError) as exc_info:
             input_obj.validate()
         assert "case_id" in str(exc_info.value)
 
     def test_empty_case_summary_raises(self):
         """测试空 case_summary 抛出异常"""
-        input_obj = make_analyst_input(case_summary="")
+        input_obj = make_analyst_input(MakeAnalystInputParams(case_summary=""))
         with pytest.raises(ContractValidationError):
             input_obj.validate()
 
     def test_to_dict_calls_validate(self):
         """测试 to_dict 调用 validate"""
-        input_obj = make_analyst_input()
+        input_obj = make_analyst_input(MakeAnalystInputParams())
         result = input_obj.to_dict()
         assert "case_id" in result
         assert result["case_id"] == "case-001"
@@ -223,23 +234,23 @@ class TestAnalystReportValidation:
 
     def test_valid_report_with_facts(self):
         """测试带事实的有效报告"""
-        report = make_analyst_report(facts=["fact 1", "fact 2"])
+        report = make_analyst_report(MakeAnalystReportParams(facts=["fact 1", "fact 2"]))
         report.validate()  # 不抛出异常
 
     def test_valid_report_with_inferences(self):
         """测试带推论的有效报告"""
-        report = make_analyst_report(inferences=["inference 1"])
+        report = make_analyst_report(MakeAnalystReportParams(inferences=["inference 1"]))
         report.validate()  # 不抛出异常
 
     def test_valid_report_with_gaps(self):
         """测试带 gaps 的有效报告"""
-        report = make_analyst_report(gaps=["gap 1"])
+        report = make_analyst_report(MakeAnalystReportParams(gaps=["gap 1"]))
         report.validate()  # 不抛出异常
 
     def test_empty_facts_inferences_gaps_raises(self):
         """测试 facts/inferences/gaps 全为空时抛出异常"""
         # 明确传入空列表
-        report = make_analyst_report(facts=[], inferences=[], gaps=[])
+        report = make_analyst_report(MakeAnalystReportParams(facts=[], inferences=[], gaps=[]))
         with pytest.raises(ContractValidationError) as exc_info:
             report.validate()
         assert "facts" in str(exc_info.value).lower() or "gaps" in str(exc_info.value).lower()
@@ -258,7 +269,7 @@ class TestAnalystReportValidation:
 
     def test_report_to_dict(self):
         """测试报告转换为字典"""
-        report = make_analyst_report(facts=["test fact"])
+        report = make_analyst_report(MakeAnalystReportParams(facts=["test fact"]))
         result = report.to_dict()
         assert "case_id" in result
         assert result["confidence"] == "medium"
@@ -273,7 +284,7 @@ class TestReviewerInputValidation:
 
     def test_valid_reviewer_input(self):
         """测试有效的 ReviewerInput"""
-        analyst_report = make_analyst_report(facts=["fact 1"])
+        analyst_report = make_analyst_report(MakeAnalystReportParams(facts=["fact 1"]))
         input_obj = ReviewerInput(
             case_id="case-001",
             analyst_report=analyst_report,
@@ -283,7 +294,7 @@ class TestReviewerInputValidation:
 
     def test_reviewer_input_empty_case_id_raises(self):
         """测试空 case_id 抛出异常"""
-        analyst_report = make_analyst_report()
+        analyst_report = make_analyst_report(MakeAnalystReportParams())
         input_obj = ReviewerInput(
             case_id="",
             analyst_report=analyst_report,
@@ -293,7 +304,7 @@ class TestReviewerInputValidation:
 
     def test_reviewer_input_to_dict(self):
         """测试 ReviewerInput 转换为字典"""
-        analyst_report = make_analyst_report(facts=["fact 1"])
+        analyst_report = make_analyst_report(MakeAnalystReportParams(facts=["fact 1"]))
         input_obj = ReviewerInput(
             case_id="case-001",
             analyst_report=analyst_report,
@@ -315,8 +326,10 @@ class TestReviewAnalystReport:
     def test_review_approves_valid_report_with_known_evidence(self):
         """测试有已知证据的有效报告被批准"""
         report = make_analyst_report(
-            facts=["fact 1"],
-            evidence_refs=["ev-001"],
+            MakeAnalystReportParams(
+                facts=["fact 1"],
+                evidence_refs=["ev-001"],
+            )
         )
         decision = review_analyst_report(report, known_evidence_refs=["ev-001"])
         assert decision.approved is True
@@ -325,8 +338,10 @@ class TestReviewAnalystReport:
     def test_review_rejects_unknown_evidence(self):
         """测试未知证据被拒绝"""
         report = make_analyst_report(
-            facts=["fact 1"],
-            evidence_refs=["ev-unknown"],
+            MakeAnalystReportParams(
+                facts=["fact 1"],
+                evidence_refs=["ev-unknown"],
+            )
         )
         decision = review_analyst_report(report, known_evidence_refs=["ev-known"])
         assert decision.approved is False
@@ -358,9 +373,11 @@ class TestReviewAnalystReport:
     def test_review_includes_gaps_in_decision(self):
         """测试决策包含 gaps 信息"""
         report = make_analyst_report(
-            facts=[],
-            evidence_refs=["ev-001"],
-            gaps=["gap1", "gap2"],
+            MakeAnalystReportParams(
+                facts=[],
+                evidence_refs=["ev-001"],
+                gaps=["gap1", "gap2"],
+            )
         )
         decision = review_analyst_report(report, known_evidence_refs=["ev-001"])
         assert decision.approved is False
@@ -369,8 +386,10 @@ class TestReviewAnalystReport:
     def test_review_multiple_evidence_refs(self):
         """测试多个证据引用"""
         report = make_analyst_report(
-            facts=["fact 1"],
-            evidence_refs=["ev-001", "ev-002", "ev-003"],
+            MakeAnalystReportParams(
+                facts=["fact 1"],
+                evidence_refs=["ev-001", "ev-002", "ev-003"],
+            )
         )
         decision = review_analyst_report(report, known_evidence_refs=["ev-001", "ev-002"])
         assert decision.approved is False
@@ -379,8 +398,10 @@ class TestReviewAnalystReport:
     def test_review_partial_known_evidence(self):
         """测试部分已知证据"""
         report = make_analyst_report(
-            facts=["fact 1"],
-            evidence_refs=["ev-001", "ev-002"],
+            MakeAnalystReportParams(
+                facts=["fact 1"],
+                evidence_refs=["ev-001", "ev-002"],
+            )
         )
         decision = review_analyst_report(report, known_evidence_refs=["ev-001"])
         assert decision.approved is False
@@ -396,7 +417,7 @@ class TestConvenienceFunctions:
 
     def test_validate_analyst_input_with_object(self):
         """测试验证 AnalystInput 对象"""
-        input_obj = make_analyst_input()
+        input_obj = make_analyst_input(MakeAnalystInputParams())
         result = validate_analyst_input(input_obj)
         assert isinstance(result, AnalystInput)
 
@@ -413,7 +434,7 @@ class TestConvenienceFunctions:
 
     def test_validate_analyst_report_with_object(self):
         """测试验证 AnalystReport 对象"""
-        report = make_analyst_report(facts=["fact 1"])
+        report = make_analyst_report(MakeAnalystReportParams(facts=["fact 1"]))
         result = validate_analyst_report(report)
         assert isinstance(result, AnalystReport)
 

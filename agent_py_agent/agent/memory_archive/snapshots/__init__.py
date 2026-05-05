@@ -111,22 +111,7 @@ def on_before_compression(
     root: str | Path,
     *,
     params: CompressionSnapshotInput | None = None,
-    # Backward-compat kwargs form
-    session_id: str = "",
-    turn_id: str = "",
-    role: str = "",
-    content: str = "",
-    archive_level: int = 3,
-    request_id: str = "",
-    run_id: str = "",
-    task_id: str = "",
-    source: str = "compression",
-    backend: str = "",
-    tool_calls: Iterable[Mapping[str, Any]] | None = None,
-    content_paths: Iterable[str] | None = None,
-    task_refs: Iterable[str] | None = None,
-    next_actions: Iterable[str] | None = None,
-    created_at: str | None = None,
+    **kwargs,
 ) -> CompressionHookResult:
     """LLM: the mandatory pre-compression hook entry point.
 
@@ -142,23 +127,7 @@ def on_before_compression(
     返回 CompressionHookResult；失败时直接抛出，不返回。
     """
     if params is None:
-        params = CompressionSnapshotInput(
-            session_id=session_id,
-            turn_id=turn_id,
-            role=role,
-            content=content,
-            archive_level=archive_level,
-            request_id=request_id,
-            run_id=run_id,
-            task_id=task_id,
-            source=source,
-            backend=backend,
-            tool_calls=tool_calls,
-            content_paths=content_paths,
-            task_refs=task_refs,
-            next_actions=next_actions,
-            created_at=created_at,
-        )
+        params = CompressionSnapshotInput(**kwargs)
     for hook in _compression_hooks:
         hook(session_id=params.session_id, turn_id=params.turn_id, archive_level=params.archive_level)
     return write_compression_snapshot(root, params=params)
@@ -203,23 +172,7 @@ def write_recovery_snapshot(
     root: str | Path,
     *,
     params: RecoverySnapshotInput | None = None,
-    # Backward-compat kwargs form
-    session_id: str = "",
-    user_prompt: str = "",
-    response_text: str = "",
-    backend: str = "",
-    source: str = "",
-    request_id: str = "",
-    run_id: str = "",
-    task_id: str = "",
-    status: str = "ok",
-    error_code: str = "",
-    tool_calls: Iterable[Mapping[str, Any]] | None = None,
-    task_refs: Iterable[str] | None = None,
-    content_paths: Iterable[str] | None = None,
-    next_actions: Iterable[str] | None = None,
-    archive_level: int = 3,
-    created_at: str | None = None,
+    **kwargs,
 ) -> RecoverySnapshotResult:
     """LLM: write one minimal hook snapshot and return a non-throwing result.
 
@@ -241,24 +194,7 @@ def write_recovery_snapshot(
     成功时会向 `memory/hooks/YYYY-MM-DD.jsonl` 追加一条 snapshot。
     """
     if params is None:
-        params = RecoverySnapshotInput(
-            session_id=session_id,
-            user_prompt=user_prompt,
-            response_text=response_text,
-            backend=backend,
-            source=source,
-            request_id=request_id,
-            run_id=run_id,
-            task_id=task_id,
-            status=status,
-            error_code=error_code,
-            tool_calls=tool_calls,
-            task_refs=task_refs,
-            content_paths=content_paths,
-            next_actions=next_actions,
-            archive_level=archive_level,
-            created_at=created_at,
-        )
+        params = RecoverySnapshotInput(**kwargs)
     return _write_recovery_snapshot_impl(root, params)
 
 
@@ -281,28 +217,39 @@ def _write_recovery_snapshot_impl(root: Path, params: RecoverySnapshotInput) -> 
         }
     )
     snapshot_id = _make_recovery_snapshot_id(
-        timestamp, params.session_id, params.request_id, params.run_id,
-        params.task_id, params.source, params.status, params.user_prompt, params.response_text,
+        params=MakeRecoverySnapshotIdParams(
+            timestamp=timestamp,
+            session_id=params.session_id,
+            request_id=params.request_id,
+            run_id=params.run_id,
+            task_id=params.task_id,
+            source=params.source,
+            status=params.status,
+            user_prompt=params.user_prompt,
+            response_text=params.response_text,
+        )
     )
     snapshot = _build_recovery_snapshot(
-        snapshot_id=snapshot_id,
-        session_id=params.session_id,
-        request_id=params.request_id,
-        run_id=params.run_id,
-        task_id=params.task_id,
-        source=params.source,
-        status=params.status,
-        error_code=params.error_code,
-        backend=params.backend,
-        normalized_tools=normalized_tools,
-        user_prompt=params.user_prompt,
-        response_text=params.response_text,
-        level=level,
-        token_estimate=token_estimate,
-        clean_task_refs=clean_task_refs,
-        clean_next_actions=clean_next_actions,
-        clean_content_paths=clean_content_paths,
-        timestamp=timestamp,
+        params=_RecoverySnapshotParams(
+            snapshot_id=snapshot_id,
+            session_id=params.session_id,
+            request_id=params.request_id,
+            run_id=params.run_id,
+            task_id=params.task_id,
+            source=params.source,
+            status=params.status,
+            error_code=params.error_code,
+            backend=params.backend,
+            normalized_tools=normalized_tools,
+            user_prompt=params.user_prompt,
+            response_text=params.response_text,
+            level=level,
+            token_estimate=token_estimate,
+            clean_task_refs=clean_task_refs,
+            clean_next_actions=clean_next_actions,
+            clean_content_paths=clean_content_paths,
+            timestamp=timestamp,
+        )
     )
     try:
         path = append_snapshot(root, snapshot)
@@ -325,22 +272,7 @@ def write_compression_snapshot(
     root: str | Path,
     *,
     params: CompressionSnapshotInput | None = None,
-    # Backward-compat kwargs form
-    session_id: str = "",
-    turn_id: str = "",
-    role: str = "",
-    content: str = "",
-    archive_level: int = 3,
-    request_id: str = "",
-    run_id: str = "",
-    task_id: str = "",
-    source: str = "compression",
-    backend: str = "",
-    tool_calls: Iterable[Mapping[str, Any]] | None = None,
-    content_paths: Iterable[str] | None = None,
-    task_refs: Iterable[str] | None = None,
-    next_actions: Iterable[str] | None = None,
-    created_at: str | None = None,
+    **kwargs,
 ) -> CompressionHookResult:
     """LLM: write the authoritative pre-compression snapshot and the searchable hook JSONL entry.
 
@@ -351,27 +283,8 @@ def write_compression_snapshot(
     2. `memory/hooks/*.jsonl` 可搜索 hook 记录
     任意一步失败都直接抛错，让上层阻断压缩。
     """
-    # Backward-compatible kwargs-style invocation
     if params is None:
-        params = CompressionSnapshotInput(
-            session_id=session_id,
-            turn_id=turn_id,
-            role=role,
-            content=content,
-            archive_level=archive_level,
-            request_id=request_id,
-            run_id=run_id,
-            task_id=task_id,
-            source=source,
-            backend=backend,
-            tool_calls=tool_calls,
-            content_paths=content_paths,
-            task_refs=task_refs,
-            next_actions=next_actions,
-            created_at=created_at,
-        )
-    elif isinstance(params, dict):
-        params = CompressionSnapshotInput(**params)
+        params = CompressionSnapshotInput(**kwargs)
     return _write_compression_snapshot_impl(root, params)
 
 
@@ -407,23 +320,25 @@ def _write_compression_snapshot_impl(
         }
     )
     snapshot = _build_compression_snapshot(
-        snapshot_id=snapshot_id,
-        session_id=params.session_id,
-        turn_id=params.turn_id,
-        source=params.source,
-        request_id=params.request_id,
-        run_id=params.run_id,
-        task_id=params.task_id,
-        backend=params.backend,
-        role=params.role,
-        normalized_tools=normalized_tools,
-        token_estimate=token_estimate,
-        level=level,
-        clean_task_refs=_dedupe_texts([params.run_id, params.task_id, *(params.task_refs or [])]),
-        clean_next_actions=_dedupe_texts(params.next_actions or []),
-        clean_content_paths=_dedupe_texts(params.content_paths or []),
-        content=params.content,
-        timestamp=timestamp,
+        params=_CompressionSnapshotParams(
+            snapshot_id=snapshot_id,
+            session_id=params.session_id,
+            turn_id=params.turn_id,
+            source=params.source,
+            request_id=params.request_id,
+            run_id=params.run_id,
+            task_id=params.task_id,
+            backend=params.backend,
+            role=params.role,
+            normalized_tools=normalized_tools,
+            token_estimate=token_estimate,
+            level=level,
+            clean_task_refs=_dedupe_texts([params.run_id, params.task_id, *(params.task_refs or [])]),
+            clean_next_actions=_dedupe_texts(params.next_actions or []),
+            clean_content_paths=_dedupe_texts(params.content_paths or []),
+            content=params.content,
+            timestamp=timestamp,
+        )
     )
     snapshot_file = write_compression_snapshot_file(root, snapshot)
     hook_path = append_snapshot(root, snapshot)
@@ -438,152 +353,162 @@ def _write_compression_snapshot_impl(
 
 # ---- internal helpers (build functions only, not public API) ----
 
-def _make_recovery_snapshot_id(
-    timestamp: str,
-    session_id: str,
-    request_id: str,
-    run_id: str,
-    task_id: str,
-    source: str,
-    status: str,
-    user_prompt: str,
-    response_text: str,
-) -> str:
+@dataclass(frozen=True)
+class MakeRecoverySnapshotIdParams:
+    """Params bundle for _make_recovery_snapshot_id."""
+    timestamp: str
+    session_id: str
+    request_id: str
+    run_id: str
+    task_id: str
+    source: str
+    status: str
+    user_prompt: str
+    response_text: str
+
+
+@dataclass(frozen=True)
+class _RecoverySnapshotParams:
+    """Internal params bundle for _build_recovery_snapshot."""
+    snapshot_id: str
+    session_id: str
+    request_id: str
+    run_id: str
+    task_id: str
+    source: str
+    status: str
+    error_code: str
+    backend: str
+    normalized_tools: list[dict[str, Any]]
+    user_prompt: str
+    response_text: str
+    level: int
+    token_estimate: int
+    clean_task_refs: list[str]
+    clean_next_actions: list[str]
+    clean_content_paths: list[str]
+    timestamp: str
+
+
+@dataclass(frozen=True)
+class _CompressionSnapshotParams:
+    """Internal params bundle for _build_compression_snapshot."""
+    snapshot_id: str
+    session_id: str
+    turn_id: str
+    source: str
+    request_id: str
+    run_id: str
+    task_id: str
+    backend: str
+    role: str
+    normalized_tools: list[dict[str, Any]]
+    token_estimate: int
+    level: int
+    clean_task_refs: list[str]
+    clean_next_actions: list[str]
+    clean_content_paths: list[str]
+    content: str
+    timestamp: str
+
+
+def _make_recovery_snapshot_id(*, params: MakeRecoverySnapshotIdParams) -> str:
     """Build snapshot ID for recovery snapshots."""
     return _snapshot_id(
         {
-            "created_at": timestamp,
-            "session_id": session_id,
-            "request_id": request_id,
-            "run_id": run_id,
-            "task_id": task_id,
-            "source": source,
-            "status": status,
-            "user_hash": _content_hash(user_prompt),
-            "response_hash": _content_hash(response_text),
+            "created_at": params.timestamp,
+            "session_id": params.session_id,
+            "request_id": params.request_id,
+            "run_id": params.run_id,
+            "task_id": params.task_id,
+            "source": params.source,
+            "status": params.status,
+            "user_hash": _content_hash(params.user_prompt),
+            "response_hash": _content_hash(params.response_text),
         }
     )
 
 
-def _build_recovery_snapshot(
-    *,
-    snapshot_id: str,
-    session_id: str,
-    request_id: str,
-    run_id: str,
-    task_id: str,
-    source: str,
-    status: str,
-    error_code: str,
-    backend: str,
-    normalized_tools: list[dict[str, Any]],
-    user_prompt: str,
-    response_text: str,
-    level: int,
-    token_estimate: int,
-    clean_task_refs: list[str],
-    clean_next_actions: list[str],
-    clean_content_paths: list[str],
-    timestamp: str,
-) -> CompressionSnapshot:
+def _build_recovery_snapshot(*, params: _RecoverySnapshotParams) -> CompressionSnapshot:
     """Build a CompressionSnapshot for recovery snapshot."""
     return CompressionSnapshot(
-        snapshot_id=snapshot_id,
-        session_id=str(session_id),
-        compression_id=f"recovery:{source}:{request_id or run_id or task_id or snapshot_id[-8:]}",
+        snapshot_id=params.snapshot_id,
+        session_id=str(params.session_id),
+        compression_id=f"recovery:{params.source}:{params.request_id or params.run_id or params.task_id or params.snapshot_id[-8:]}",
         turn_range={
             "kind": "recovery_snapshot",
-            "source": source,
-            "request_id": request_id,
-            "run_id": run_id,
-            "task_id": task_id,
+            "source": params.source,
+            "request_id": params.request_id,
+            "run_id": params.run_id,
+            "task_id": params.task_id,
         },
-        participants=_participants(normalized_tools),
-        user_intents=[_preview(user_prompt, level)] if user_prompt else [],
-        assistant_actions=[_preview(response_text, level)] if response_text else [],
-        tool_calls=normalized_tools,
+        participants=_participants(params.normalized_tools),
+        user_intents=[_preview(params.user_prompt, params.level)] if params.user_prompt else [],
+        assistant_actions=[_preview(params.response_text, params.level)] if params.response_text else [],
+        tool_calls=params.normalized_tools,
         dispatch_events=[
             {
-                "source": source,
-                "request_id": request_id,
-                "run_id": run_id,
-                "task_id": task_id,
-                "status": status,
-                "error_code": error_code,
-                "backend": backend,
+                "source": params.source,
+                "request_id": params.request_id,
+                "run_id": params.run_id,
+                "task_id": params.task_id,
+                "status": params.status,
+                "error_code": params.error_code,
+                "backend": params.backend,
             }
         ],
-        task_refs=clean_task_refs,
+        task_refs=params.clean_task_refs,
         decisions=[],
         open_questions=[],
-        next_actions=clean_next_actions,
+        next_actions=params.clean_next_actions,
         token_usage={
-            "estimate": token_estimate,
-            "archive_level": level,
-            "backend": backend,
+            "estimate": params.token_estimate,
+            "archive_level": params.level,
+            "backend": params.backend,
         },
-        archive_level=level,
-        content_paths=clean_content_paths,
-        created_at=timestamp,
+        archive_level=params.level,
+        content_paths=params.clean_content_paths,
+        created_at=params.timestamp,
     )
 
 
-def _build_compression_snapshot(
-    *,
-    snapshot_id: str,
-    session_id: str,
-    turn_id: str,
-    source: str,
-    request_id: str,
-    run_id: str,
-    task_id: str,
-    backend: str,
-    role: str,
-    normalized_tools: list[dict[str, Any]],
-    token_estimate: int,
-    level: int,
-    clean_task_refs: list[str],
-    clean_next_actions: list[str],
-    clean_content_paths: list[str],
-    content: str,
-    timestamp: str,
-) -> CompressionSnapshot:
+def _build_compression_snapshot(*, params: _CompressionSnapshotParams) -> CompressionSnapshot:
     """Build a CompressionSnapshot for compression snapshot."""
     return CompressionSnapshot(
-        snapshot_id=snapshot_id,
-        session_id=str(session_id),
-        compression_id=f"compression:{request_id or run_id or task_id or turn_id or snapshot_id[-8:]}",
+        snapshot_id=params.snapshot_id,
+        session_id=str(params.session_id),
+        compression_id=f"compression:{params.request_id or params.run_id or params.task_id or params.turn_id or params.snapshot_id[-8:]}",
         turn_range={
             "kind": "compression_snapshot",
-            "turn_id": turn_id,
-            "source": source,
-            "request_id": request_id,
-            "run_id": run_id,
-            "task_id": task_id,
+            "turn_id": params.turn_id,
+            "source": params.source,
+            "request_id": params.request_id,
+            "run_id": params.run_id,
+            "task_id": params.task_id,
         },
-        participants=[role] if role else ["system"],
-        user_intents=[_preview(content, level)] if role == "user" and content else [],
-        assistant_actions=[_preview(content, level)] if role == "assistant" and content else [],
-        tool_calls=normalized_tools,
+        participants=[params.role] if params.role else ["system"],
+        user_intents=[_preview(params.content, params.level)] if params.role == "user" and params.content else [],
+        assistant_actions=[_preview(params.content, params.level)] if params.role == "assistant" and params.content else [],
+        tool_calls=params.normalized_tools,
         dispatch_events=[
             {
-                "source": source,
-                "request_id": request_id,
-                "run_id": run_id,
-                "task_id": task_id,
-                "backend": backend,
+                "source": params.source,
+                "request_id": params.request_id,
+                "run_id": params.run_id,
+                "task_id": params.task_id,
+                "backend": params.backend,
                 "status": "snapshot_written",
             }
         ],
-        task_refs=clean_task_refs,
-        next_actions=clean_next_actions,
-        token_usage={"estimate": token_estimate, "archive_level": level, "backend": backend},
-        archive_level=level,
-        content_paths=clean_content_paths,
-        turn_id=str(turn_id),
-        role=str(role or "system"),
-        content=_preview(content, level),
-        token_estimate=token_estimate,
-        timestamp=timestamp,
-        created_at=timestamp,
+        task_refs=params.clean_task_refs,
+        next_actions=params.clean_next_actions,
+        token_usage={"estimate": params.token_estimate, "archive_level": params.level, "backend": params.backend},
+        archive_level=params.level,
+        content_paths=params.clean_content_paths,
+        turn_id=str(params.turn_id),
+        role=str(params.role or "system"),
+        content=_preview(params.content, params.level),
+        token_estimate=params.token_estimate,
+        timestamp=params.timestamp,
+        created_at=params.timestamp,
     )

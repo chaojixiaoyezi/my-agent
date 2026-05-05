@@ -197,22 +197,15 @@ class ArchiveTurnContext:
     created_at: str | None = None
 
 
+@dataclass(frozen=True)
+class ArchiveRunTurnParams:
+    """Parameter bundle for archive_run_turn."""
+    root: str | Path
+    ctx: ArchiveTurnContext
+
+
 def archive_run_turn(
-    root: str | Path,
-    ctx: ArchiveTurnContext | None = None,
-    *,
-    # Deprecated kwargs-style parameters for backwards compatibility
-    session_id: str = "",
-    user_prompt: str = "",
-    response_text: str = "",
-    backend: str = "",
-    tool_calls: Iterable[Any] | None = None,
-    request_id: str = "",
-    run_id: str = "",
-    task_id: str = "",
-    source: str = "run",
-    archive_level: int = 3,
-    created_at: str | None = None,
+    params: ArchiveRunTurnParams,
 ) -> ArchiveRunTurnResult:
     """LLM: append user, assistant, and optional tool RawMemoryEvent records for one run turn.
 
@@ -231,21 +224,8 @@ def archive_run_turn(
     副作用说明:
     会向 `memory/raw/YYYY-MM-DD.jsonl` 追加 raw event，并由 storage 层读回校验。
     """
-    # Backwards-compatible kwargs-style invocation
-    if ctx is None:
-        ctx = ArchiveTurnContext(
-            session_id=session_id,
-            user_prompt=user_prompt,
-            response_text=response_text,
-            backend=backend,
-            tool_calls=list(tool_calls) if tool_calls else [],
-            request_id=request_id,
-            run_id=run_id,
-            task_id=task_id,
-            source=source,
-            archive_level=archive_level,
-            created_at=created_at,
-        )
+    ctx = params.ctx
+    root = params.root
 
     normalized_level = _normalize_archive_level(ctx.archive_level)
     timestamp = ctx.created_at or utc_now_iso()

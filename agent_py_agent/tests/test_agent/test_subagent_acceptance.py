@@ -14,9 +14,15 @@ from pathlib import Path
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagent import (
+    RecordRunnerResultParams,
     VerificationEvidence,
     parse_subagent_runner_output,
 )
+
+
+def _rrr(run_id: str, **kwargs) -> RecordRunnerResultParams:
+    """Helper to create RecordRunnerResultParams with run_id as positional arg."""
+    return RecordRunnerResultParams(run_id=run_id, **kwargs)
 
 
 def test_subagent_acceptance_dry_run_and_apply():
@@ -229,13 +235,15 @@ def test_subagent_acceptance_uses_actual_tool_evidence_from_runner():
             "[/SUBAGENT_RESULT]"
         )
         agent.subagents.record_runner_result(
-            task.id,
-            dry_run=False,
-            ok=True,
-            message="done",
-            structured_output=parsed,
-            actual_tools=["read_file", "write_file"],
-            tool_rounds=2,
+            _rrr(
+                task.id,
+                dry_run=False,
+                ok=True,
+                message="done",
+                structured_output=parsed,
+                actual_tools=["read_file", "write_file"],
+                tool_rounds=2,
+            )
         )
 
         report = agent.subagents.write_acceptance_review_report(

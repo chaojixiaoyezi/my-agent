@@ -3,12 +3,13 @@ from __future__ import annotations
 """LLM: coordinates tool registration, prompt rendering, call parsing, authorization, and execution.
 
 给人看的解释：
-这个文件是工具系统的“前台服务台”。
+这个文件是工具系统的"前台服务台"。
 它不亲自实现读文件或发 HTTP，而是登记这些工具、给模型渲染工具菜单、解析模型发来的工具调用，
 再按授权和写入边界把请求分发给真正的工具。
 """
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -41,53 +42,58 @@ _MAX_PARSE_ERROR_RAW_CHARS = 1000
 _MAX_EXCEPTION_MESSAGE_CHARS = 500
 
 
+@dataclass(frozen=True)
+class ToolRegistryParams:
+    """Parameter bundle for ToolRegistry.__init__."""
+    workspace_root: Path
+    max_chars: int
+    max_entries: int
+    max_matches: int
+    web_max_chars: int
+    http_timeout: int
+    catalog_limit: int
+    retrieval_limit: int
+    vector_search_enabled: bool
+    shell_tool_timeout: int = 30
+    expose_security_tools: bool = False
+
+
 class ToolRegistry:
     """工具注册表。
 
     它负责四件事：
     - 统一登记有哪些工具
-    - 生成“常驻目录”和“候选详情”两层工具说明
+    - 生成"常驻目录"和"候选详情"两层工具说明
     - 解析模型发出的工具调用
     - 执行实际工具
     """
 
     def __init__(
         self,
-        workspace_root: Path,
-        *,
-        max_chars: int,
-        max_entries: int,
-        max_matches: int,
-        web_max_chars: int,
-        http_timeout: int,
-        catalog_limit: int,
-        retrieval_limit: int,
-        vector_search_enabled: bool,
-        shell_tool_timeout: int = 30,
-        expose_security_tools: bool = False,
+        params: ToolRegistryParams,
     ):
-        self.workspace_root = workspace_root.resolve()
+        self.workspace_root = params.workspace_root.resolve()
         self.tools: dict[str, BaseTool] = {}
-        self.expose_security_tools = expose_security_tools
+        self.expose_security_tools = params.expose_security_tools
         self.security_tool_names = set(SECURITY_TOOL_NAMES)
-        self.catalog_limit = catalog_limit
-        self.retrieval_limit = retrieval_limit
+        self.catalog_limit = params.catalog_limit
+        self.retrieval_limit = params.retrieval_limit
         self.retriever = HybridToolRetriever(
             [
                 KeywordToolSearchProvider(),
-                VectorToolSearchProvider(enabled=vector_search_enabled),
+                VectorToolSearchProvider(enabled=params.vector_search_enabled),
             ]
         )
 
-        self.register(ListFilesTool(self.workspace_root, max_entries))
-        self.register(ReadFileTool(self.workspace_root, max_chars))
-        self.register(SearchTextTool(self.workspace_root, max_matches))
+        self.register(ListFilesTool(self.workspace_root, params.max_entries))
+        self.register(ReadFileTool(self.workspace_root, params.max_chars))
+        self.register(SearchTextTool(self.workspace_root, params.max_matches))
         self.register(WriteFileTool(self.workspace_root))
         self.register(AppendFileTool(self.workspace_root))
         self.register(ReplaceInFileTool(self.workspace_root))
-        self.register(FetchUrlTool(max_chars=web_max_chars, timeout=http_timeout))
-        self.register(HttpRequestTool(max_chars=web_max_chars, timeout=http_timeout))
-        self.register(ShellTool(self.workspace_root, default_timeout=shell_tool_timeout))
+        self.register(FetchUrlTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
+        self.register(HttpRequestTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
+        self.register(ShellTool(self.workspace_root, default_timeout=params.shell_tool_timeout))
         from ..log_analysis.tools import (
             SecurityHuntIpTool,
             SecurityQueryTool,

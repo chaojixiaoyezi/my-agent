@@ -19,6 +19,7 @@ from ..memory_archive.snapshots import (
 )
 from ..subagent import (
     ParentPlannerRecord,
+    RecordRunnerResultParams,
     SubAgentRunnerResult,
     SubAgentTask,
     parse_parent_planner_output,
@@ -124,12 +125,14 @@ class _SubagentLifecycleMixin:
         prompt = _build_subagent_runner_prompt(context, instruction)
         if dry_run:
             return self.subagents.record_runner_result(
-                run_id,
-                attempt_id=active_attempt_id,
-                dry_run=True,
-                ok=True,
-                message="dry-run: 已生成执行上下文和 runner prompt，未调用模型。",
-                prompt=prompt,
+                RecordRunnerResultParams(
+                    run_id=run_id,
+                    attempt_id=active_attempt_id,
+                    dry_run=True,
+                    ok=True,
+                    message="dry-run: 已生成执行上下文和 runner prompt，未调用模型。",
+                    prompt=prompt,
+                )
             )
 
         if probe:
@@ -138,15 +141,17 @@ class _SubagentLifecycleMixin:
                 context = self.subagents.write_execution_context(run_id, max_cards=max_cards)
                 prompt = _build_subagent_runner_prompt(context, instruction)
                 return self.subagents.record_runner_result(
-                    run_id,
-                    attempt_id=active_attempt_id,
-                    dry_run=False,
-                    ok=False,
-                    message="通道健康检查为 BROKEN，未启动模型执行。",
-                    prompt=prompt,
-                    status="CHANNEL_ERROR",
-                    verification_status="UNVERIFIED",
-                    failure_type="channel",
+                    RecordRunnerResultParams(
+                        run_id=run_id,
+                        attempt_id=active_attempt_id,
+                        dry_run=False,
+                        ok=False,
+                        message="通道健康检查为 BROKEN，未启动模型执行。",
+                        prompt=prompt,
+                        status="CHANNEL_ERROR",
+                        verification_status="UNVERIFIED",
+                        failure_type="channel",
+                    )
                 )
             context = self.subagents.write_execution_context(run_id, max_cards=max_cards)
             prompt = _build_subagent_runner_prompt(context, instruction)
@@ -173,15 +178,17 @@ class _SubagentLifecycleMixin:
     def _handle_subagent_run_failure(self, run_id, active_attempt_id, exc, context, prompt):
         """Handle subagent run failure by recording error result."""
         failed_result = self.subagents.record_runner_result(
-            run_id,
-            attempt_id=active_attempt_id,
-            dry_run=False,
-            ok=False,
-            message=f"runner 执行失败: {exc}",
-            prompt=prompt,
-            status="BLOCKED",
-            verification_status="UNVERIFIED",
-            failure_type="runner_error",
+            RecordRunnerResultParams(
+                run_id=run_id,
+                attempt_id=active_attempt_id,
+                dry_run=False,
+                ok=False,
+                message=f"runner 执行失败: {exc}",
+                prompt=prompt,
+                status="BLOCKED",
+                verification_status="UNVERIFIED",
+                failure_type="runner_error",
+            )
         )
         self._write_subagent_recovery_snapshot(
             run_id,
@@ -230,26 +237,24 @@ class _SubagentLifecycleMixin:
             structured_repair_attempted = False
 
         runner_result = self.subagents.record_runner_result(
-            run_id,
-            attempt_id=active_attempt_id,
-            dry_run=False,
-            ok=structured.ok if structured.found else True,
-            message=message,
-            prompt=prompt_for_log,
-            response=response_for_log,
-            backend=backend_name,
-            tool_rounds=result.tool_rounds,
-            status="" if structured.found else "AWAITING_ACCEPTANCE",
-            verification_status="" if structured.found else "NEEDS_ACCEPTANCE",
-            structured_output=structured,
-            actual_tools=result.executed_tools or [],
-            structured_repair_attempted=structured_repair_attempted
-            if "structured_repair_attempted" in dir()
-            else False,
-            structured_repair_ok=structured_repair_ok if "structured_repair_ok" in dir() else False,
-            structured_repair_error=structured_repair_error
-            if "structured_repair_error" in dir()
-            else "",
+            RecordRunnerResultParams(
+                run_id=run_id,
+                attempt_id=active_attempt_id,
+                dry_run=False,
+                ok=structured.ok if structured.found else True,
+                message=message,
+                prompt=prompt_for_log,
+                response=response_for_log,
+                backend=backend_name,
+                tool_rounds=result.tool_rounds,
+                status="" if structured.found else "AWAITING_ACCEPTANCE",
+                verification_status="" if structured.found else "NEEDS_ACCEPTANCE",
+                structured_output=structured,
+                actual_tools=result.executed_tools or [],
+                structured_repair_attempted=structured_repair_attempted,
+                structured_repair_ok=structured_repair_ok,
+                structured_repair_error=structured_repair_error,
+            )
         )
         self._write_subagent_recovery_snapshot(
             run_id,

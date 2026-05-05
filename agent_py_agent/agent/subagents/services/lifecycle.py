@@ -8,6 +8,7 @@ SubAgentManager 继续暴露旧方法名，内部逐步改成服务委托。
 """
 
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from ...memory_routing import load_routes, match_routes, resolve_required_paths
@@ -19,6 +20,32 @@ from ..models import (
     VerificationEvidence,
 )
 from ..utils import _merge_list, _new_id
+
+
+@dataclass(frozen=True)
+class RecordCapabilityGrantParams:
+    """Params bundle for record_capability_grant."""
+
+    request_id: str
+    skills: list[str] | None = None
+    tools: list[str] | None = None
+    capability_cards: list[dict[str, str]] | None = None
+    reason: str = ""
+    constraints: dict[str, str] | None = None
+    expires_after_task: bool = True
+
+
+@dataclass(frozen=True)
+class RecordCapabilityGapParams:
+    """Params bundle for record_capability_gap."""
+
+    missing_capability: str
+    why_failed: str
+    attempted_skills: list[str] | None = None
+    attempted_tools: list[str] | None = None
+    needed_outputs: list[str] | None = None
+    suggested_skill: str = ""
+    suggested_tool: str = ""
 
 
 class SubAgentLifecycleService:
@@ -59,25 +86,19 @@ class SubAgentLifecycleService:
         self,
         run_id: str,
         *,
-        request_id: str,
-        skills: list[str] | None = None,
-        tools: list[str] | None = None,
-        capability_cards: list[dict[str, str]] | None = None,
-        reason: str = "",
-        constraints: dict[str, str] | None = None,
-        expires_after_task: bool = True,
+        params: RecordCapabilityGrantParams,
     ) -> CapabilityGrant:
         task = self.manager.load(run_id)
         grant = CapabilityGrant(
             id=_new_id("capgrant"),
-            request_id=request_id,
+            request_id=params.request_id,
             grant_to_run_id=run_id,
-            skills=skills or [],
-            tools=tools or [],
-            capability_cards=capability_cards or [],
-            reason=reason,
-            constraints=constraints or {},
-            expires_after_task=expires_after_task,
+            skills=params.skills or [],
+            tools=params.tools or [],
+            capability_cards=params.capability_cards or [],
+            reason=params.reason,
+            constraints=params.constraints or {},
+            expires_after_task=params.expires_after_task,
             created_at=time.time(),
         )
         task.capability_grants.append(grant)
@@ -91,27 +112,21 @@ class SubAgentLifecycleService:
         self,
         run_id: str,
         *,
-        missing_capability: str,
-        why_failed: str,
-        attempted_skills: list[str] | None = None,
-        attempted_tools: list[str] | None = None,
-        needed_outputs: list[str] | None = None,
-        suggested_skill: str = "",
-        suggested_tool: str = "",
+        params: RecordCapabilityGapParams,
     ) -> CapabilityGap:
         task = self.manager.load(run_id)
-        injected_rule_paths, memory_routes = self._match_memory_routes(missing_capability, why_failed, task)
+        injected_rule_paths, memory_routes = self._match_memory_routes(params.missing_capability, params.why_failed, task)
         gap = CapabilityGap(
             id=_new_id("capgap"),
             run_id=run_id,
-            missing_capability=missing_capability,
+            missing_capability=params.missing_capability,
             source_task=task.goal,
-            why_failed=why_failed,
-            attempted_skills=attempted_skills or [],
-            attempted_tools=attempted_tools or [],
-            needed_outputs=needed_outputs or [],
-            suggested_skill=suggested_skill,
-            suggested_tool=suggested_tool,
+            why_failed=params.why_failed,
+            attempted_skills=params.attempted_skills or [],
+            attempted_tools=params.attempted_tools or [],
+            needed_outputs=params.needed_outputs or [],
+            suggested_skill=params.suggested_skill,
+            suggested_tool=params.suggested_tool,
             memory_routes=memory_routes,
             injected_rule_paths=injected_rule_paths,
             created_at=time.time(),

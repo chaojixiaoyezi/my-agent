@@ -7,6 +7,12 @@ from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagent import parse_subagent_runner_output
+from agent_py_agent.agent.subagents.manager_runner_results import RecordRunnerResultParams
+
+
+def _rrr(run_id: str, **kwargs) -> RecordRunnerResultParams:
+    """Helper to create RecordRunnerResultParams with run_id as positional arg."""
+    return RecordRunnerResultParams(run_id=run_id, **kwargs)
 
 
 def _write_config(root: Path, *, enable_self_learning: bool) -> Path:
@@ -68,20 +74,20 @@ def test_record_runner_result_generates_and_dedupes_learning_candidates(tmp_path
         "[/SUBAGENT_RESULT]"
     )
 
-    agent.subagents.record_runner_result(
+    agent.subagents.record_runner_result(_rrr(
         first.id,
         dry_run=False,
         ok=True,
         message="done",
         structured_output=parsed,
-    )
-    agent.subagents.record_runner_result(
+    ))
+    agent.subagents.record_runner_result(_rrr(
         second.id,
         dry_run=False,
         ok=True,
         message="done",
         structured_output=parsed_similar,
-    )
+    ))
 
     candidates = agent.subagents.list_learning_candidates()
     assert len(candidates) == 1
@@ -124,13 +130,13 @@ def test_learn_cli_lists_accepts_rejects_and_reports_stats(tmp_path, capsys):
         "}\n"
         "[/SUBAGENT_RESULT]"
     )
-    agent.subagents.record_runner_result(
+    agent.subagents.record_runner_result(_rrr(
         task.id,
         dry_run=False,
         ok=True,
         message="done",
         structured_output=parsed,
-    )
+    ))
     candidate = agent.subagents.list_learning_candidates()[0]
     parser = build_parser()
 

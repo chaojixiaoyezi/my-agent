@@ -62,6 +62,7 @@ from .field_extractors import (
     _victim_ip,
 )
 from .rule_helpers import (
+    MakeFindingParams,
     _dedupe_findings,
     _evidence_ref,
     _make_finding,
@@ -139,26 +140,30 @@ def waf_attack_success_candidate(
             _make_finding(
                 "waf_attack_success_candidate",
                 evidence_events,
-                hypothesis="Possible web attack success: WAF/web alert was followed by server-side success indicators.",
-                confidence=confidence,
-                gaps=gaps,
-                next_queries=[
-                    _query("Trace web access/error logs around the WAF alert", alert),
-                    _query("Trace EDR process tree for the victim asset around the alert", alert),
-                    _query("Hunt outbound DNS/proxy/NetFlow from the victim asset after the alert", alert),
-                ],
-                features={
-                    "http_success_or_error_events": len(http_success),
-                    "process_anomaly_events": len(process_hits),
-                    "file_write_events": len(file_hits),
-                    "egress_events": len(egress_hits),
-                },
-                severity_hint="high" if confidence >= 0.7 else "medium",
-                extra_entities={
-                    "attacker_ip": [_source_ip(alert)],
-                    "victim_ip": [_victim_ip(alert)],
-                    "entry_uri": [_text(_field(alert, "uri", "api", "url", "http.url"))],
-                },
+                params=MakeFindingParams(
+                    detector_id="waf_attack_success_candidate",
+                    evidence_events=evidence_events,
+                    hypothesis="Possible web attack success: WAF/web alert was followed by server-side success indicators.",
+                    confidence=confidence,
+                    gaps=gaps,
+                    next_queries=[
+                        _query("Trace web access/error logs around the WAF alert", alert),
+                        _query("Trace EDR process tree for the victim asset around the alert", alert),
+                        _query("Hunt outbound DNS/proxy/NetFlow from the victim asset after the alert", alert),
+                    ],
+                    features={
+                        "http_success_or_error_events": len(http_success),
+                        "process_anomaly_events": len(process_hits),
+                        "file_write_events": len(file_hits),
+                        "egress_events": len(egress_hits),
+                    },
+                    severity_hint="high" if confidence >= 0.7 else "medium",
+                    extra_entities={
+                        "attacker_ip": [_source_ip(alert)],
+                        "victim_ip": [_victim_ip(alert)],
+                        "entry_uri": [_text(_field(alert, "uri", "api", "url", "http.url"))],
+                    },
+                ),
             )
         )
     return findings
@@ -188,25 +193,29 @@ def web_to_process_anomaly(
             _make_finding(
                 "web_to_process_anomaly",
                 [event],
-                hypothesis=f"Possible post-exploit command execution: web parent {parent or 'unknown'} launched {child or 'unknown'}.",
-                confidence=min(confidence, 0.9),
-                gaps=[
-                    "The initiating HTTP request is not confirmed unless web access/WAF evidence is linked.",
-                    "Process GUID or full process tree may be needed to prove execution lineage.",
-                ],
-                next_queries=[
-                    _query("Find web requests to this host in the 10 minutes before the process event", event),
-                    _query("Expand child process tree and file/network activity for this process", event),
-                    _query("Search for matching command line on peer web servers", event),
-                ],
-                features={"parent_process": parent, "child_process": child, "cmdline": cmdline[:300]},
-                severity_hint="high",
-                extra_entities={
-                    "victim_ip": [_asset_ip(event)],
-                    "process": [child],
-                    "parent_process": [parent],
-                    "host": [_host(event)],
-                },
+                params=MakeFindingParams(
+                    detector_id="web_to_process_anomaly",
+                    evidence_events=[event],
+                    hypothesis=f"Possible post-exploit command execution: web parent {parent or 'unknown'} launched {child or 'unknown'}.",
+                    confidence=min(confidence, 0.9),
+                    gaps=[
+                        "The initiating HTTP request is not confirmed unless web access/WAF evidence is linked.",
+                        "Process GUID or full process tree may be needed to prove execution lineage.",
+                    ],
+                    next_queries=[
+                        _query("Find web requests to this host in the 10 minutes before the process event", event),
+                        _query("Expand child process tree and file/network activity for this process", event),
+                        _query("Search for matching command line on peer web servers", event),
+                    ],
+                    features={"parent_process": parent, "child_process": child, "cmdline": cmdline[:300]},
+                    severity_hint="high",
+                    extra_entities={
+                        "victim_ip": [_asset_ip(event)],
+                        "process": [child],
+                        "parent_process": [parent],
+                        "host": [_host(event)],
+                    },
+                ),
             )
         )
     return findings
@@ -264,32 +273,36 @@ def vpn_new_geo_login(
             _make_finding(
                 "vpn_new_geo_login",
                 [event],
-                hypothesis="Possible VPN credential misuse: successful login used new or unusual source context.",
-                confidence=confidence,
-                gaps=gaps,
-                next_queries=[
-                    _query("Trace VPN session activity and assigned internal IP for this user", event),
-                    _query("Search host logons and admin actions by this user after VPN login", event),
-                    _query("Review MFA, device posture, and recent password reset events for this user", event),
-                ],
-                features={
-                    "new_geo": new_geo,
-                    "new_asn": new_asn,
-                    "new_device": new_device,
-                    "unusual_hour": unusual_hour,
-                    "country": country,
-                    "asn": asn,
-                    "device": device,
-                },
-                severity_hint="high" if confidence >= 0.7 else "medium",
-                extra_entities={
-                    "user": [user],
-                    "attacker_ip": [_source_ip(event)],
-                    "src_ip": [_source_ip(event)],
-                    "country": [country],
-                    "asn": [asn],
-                    "device": [device],
-                },
+                params=MakeFindingParams(
+                    detector_id="vpn_new_geo_login",
+                    evidence_events=[event],
+                    hypothesis="Possible VPN credential misuse: successful login used new or unusual source context.",
+                    confidence=confidence,
+                    gaps=gaps,
+                    next_queries=[
+                        _query("Trace VPN session activity and assigned internal IP for this user", event),
+                        _query("Search host logons and admin actions by this user after VPN login", event),
+                        _query("Review MFA, device posture, and recent password reset events for this user", event),
+                    ],
+                    features={
+                        "new_geo": new_geo,
+                        "new_asn": new_asn,
+                        "new_device": new_device,
+                        "unusual_hour": unusual_hour,
+                        "country": country,
+                        "asn": asn,
+                        "device": device,
+                    },
+                    severity_hint="high" if confidence >= 0.7 else "medium",
+                    extra_entities={
+                        "user": [user],
+                        "attacker_ip": [_source_ip(event)],
+                        "src_ip": [_source_ip(event)],
+                        "country": [country],
+                        "asn": [asn],
+                        "device": [device],
+                    },
+                ),
             )
         )
     return findings
@@ -329,31 +342,35 @@ def bruteforce_then_success(
             _make_finding(
                 "bruteforce_then_success",
                 [*related_failures[:5], success, *post_events[:5]],
-                hypothesis="Possible credential compromise: repeated failures were followed by a successful login.",
-                confidence=confidence,
-                gaps=[
-                    "MFA result and lockout policy outcome are not confirmed.",
-                    "Credential owner confirmation is needed before treating the login as compromised.",
-                ],
-                next_queries=[
-                    _query("Review all authentication events for this user and source around the success", success),
-                    _query("Trace resource access and host logons after the successful authentication", success),
-                    _query("Check MFA, password reset, lockout, and impossible travel signals", success),
-                ],
-                features={
-                    "failure_count": len(related_failures),
-                    "first_failure_time": _canonical_time(_event_time(related_failures[0])),
-                    "success_time": _canonical_time(_event_time(success)),
-                    "post_success_related_events": len(post_events),
-                },
-                severity_hint="high",
-                extra_entities={
-                    "user": [_user(success)],
-                    "attacker_ip": [_source_ip(success)],
-                    "src_ip": [_source_ip(success)],
-                    "victim_ip": [_victim_ip(success)],
-                    "host": [_host(success)],
-                },
+                params=MakeFindingParams(
+                    detector_id="bruteforce_then_success",
+                    evidence_events=[*related_failures[:5], success, *post_events[:5]],
+                    hypothesis="Possible credential compromise: repeated failures were followed by a successful login.",
+                    confidence=confidence,
+                    gaps=[
+                        "MFA result and lockout policy outcome are not confirmed.",
+                        "Credential owner confirmation is needed before treating the login as compromised.",
+                    ],
+                    next_queries=[
+                        _query("Review all authentication events for this user and source around the success", success),
+                        _query("Trace resource access and host logons after the successful authentication", success),
+                        _query("Check MFA, password reset, lockout, and impossible travel signals", success),
+                    ],
+                    features={
+                        "failure_count": len(related_failures),
+                        "first_failure_time": _canonical_time(_event_time(related_failures[0])),
+                        "success_time": _canonical_time(_event_time(success)),
+                        "post_success_related_events": len(post_events),
+                    },
+                    severity_hint="high",
+                    extra_entities={
+                        "user": [_user(success)],
+                        "attacker_ip": [_source_ip(success)],
+                        "src_ip": [_source_ip(success)],
+                        "victim_ip": [_victim_ip(success)],
+                        "host": [_host(success)],
+                    },
+                ),
             )
         )
     return findings
@@ -394,29 +411,33 @@ def rare_egress_after_alert(
             _make_finding(
                 "rare_egress_after_alert",
                 [alert, *candidates[:6]],
-                hypothesis="Possible post-alert command-and-control or exfiltration: alerted asset made rare outbound connections.",
-                confidence=confidence,
-                gaps=[
-                    "Outbound process owner is missing unless EDR network telemetry is linked.",
-                    "DNS/proxy and byte-count context are needed to distinguish callback from benign update traffic.",
-                ],
-                next_queries=[
-                    _query("Trace DNS, proxy, and NetFlow rows for the rare destination", candidates[0]),
-                    _query("Find the local process that opened the outbound connection", candidates[0]),
-                    _query("Search the rare destination across other assets for lateral spread", candidates[0]),
-                ],
-                features={
-                    "rare_egress_events": len(candidates),
-                    "destinations": _unique_texts(_destination(e) for e in candidates),
-                    "alert_severity": _severity(alert),
-                },
-                severity_hint="high",
-                extra_entities={
-                    "attacker_ip": [_source_ip(alert)],
-                    "victim_ip": [_victim_ip(alert), _source_ip(candidates[0])],
-                    "dst_ip": [_destination_ip(candidates[0])],
-                    "domain": [_domain(candidates[0])],
-                },
+                params=MakeFindingParams(
+                    detector_id="rare_egress_after_alert",
+                    evidence_events=[alert, *candidates[:6]],
+                    hypothesis="Possible post-alert command-and-control or exfiltration: alerted asset made rare outbound connections.",
+                    confidence=confidence,
+                    gaps=[
+                        "Outbound process owner is missing unless EDR network telemetry is linked.",
+                        "DNS/proxy and byte-count context are needed to distinguish callback from benign update traffic.",
+                    ],
+                    next_queries=[
+                        _query("Trace DNS, proxy, and NetFlow rows for the rare destination", candidates[0]),
+                        _query("Find the local process that opened the outbound connection", candidates[0]),
+                        _query("Search the rare destination across other assets for lateral spread", candidates[0]),
+                    ],
+                    features={
+                        "rare_egress_events": len(candidates),
+                        "destinations": _unique_texts(_destination(e) for e in candidates),
+                        "alert_severity": _severity(alert),
+                    },
+                    severity_hint="high",
+                    extra_entities={
+                        "attacker_ip": [_source_ip(alert)],
+                        "victim_ip": [_victim_ip(alert), _source_ip(candidates[0])],
+                        "dst_ip": [_destination_ip(candidates[0])],
+                        "domain": [_domain(candidates[0])],
+                    },
+                ),
             )
         )
     return findings
@@ -451,24 +472,28 @@ def multi_source_weak_signal(
             _make_finding(
                 "multi_source_weak_signal",
                 signal_events[:10],
-                hypothesis="Possible intrusion path: multiple weak signals overlap on the same entity and time window.",
-                confidence=confidence,
-                gaps=[
-                    "Signals are individually weak; analyst review must confirm whether they share one root cause.",
-                    "A route draft needs additional process, identity, and network context.",
-                ],
-                next_queries=[
-                    _query("Build a single timeline for the overlapping entity across WAF/VPN/EDR/DNS/proxy logs", signal_events[0]),
-                    _query("Expand related entities from the overlapping weak signals", signal_events[0]),
-                    _query("Check known maintenance, deployment, and vulnerability-scan windows", signal_events[0]),
-                ],
-                features={
-                    "signal_count": len(signals),
-                    "signal_types": sorted(signal_types),
-                    "source_products": sorted(sources),
-                },
-                severity_hint="high" if confidence >= 0.7 else "medium",
-                extra_entities=_entities_from_events(signal_events),
+                params=MakeFindingParams(
+                    detector_id="multi_source_weak_signal",
+                    evidence_events=signal_events[:10],
+                    hypothesis="Possible intrusion path: multiple weak signals overlap on the same entity and time window.",
+                    confidence=confidence,
+                    gaps=[
+                        "Signals are individually weak; analyst review must confirm whether they share one root cause.",
+                        "A route draft needs additional process, identity, and network context.",
+                    ],
+                    next_queries=[
+                        _query("Build a single timeline for the overlapping entity across WAF/VPN/EDR/DNS/proxy logs", signal_events[0]),
+                        _query("Expand related entities from the overlapping weak signals", signal_events[0]),
+                        _query("Check known maintenance, deployment, and vulnerability-scan windows", signal_events[0]),
+                    ],
+                    features={
+                        "signal_count": len(signals),
+                        "signal_types": sorted(signal_types),
+                        "source_products": sorted(sources),
+                    },
+                    severity_hint="high" if confidence >= 0.7 else "medium",
+                    extra_entities=_entities_from_events(signal_events),
+                ),
             )
         )
     return findings

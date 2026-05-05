@@ -12,6 +12,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent_py_agent.agent.subagents.manager_runner_results import (
+    RecordRunnerResultParams,
+    SubAgentRunnerResultMixin,
+)
 from agent_py_agent.agent.subagents.models import (
     SubAgentParsedOutput,
     SubAgentRunnerResult,
@@ -19,6 +23,10 @@ from agent_py_agent.agent.subagents.models import (
 )
 
 # ── 测试夹具 ──────────────────────────────────────────────────────────────
+
+def _rrr(run_id: str, **kwargs) -> RecordRunnerResultParams:
+    """Helper to create RecordRunnerResultParams with run_id as positional arg."""
+    return RecordRunnerResultParams(run_id=run_id, **kwargs)
 
 @pytest.fixture
 def mock_manager(tmp_path):
@@ -106,7 +114,7 @@ def test_record_runner_result_success(mock_manager, sample_task):
     """测试成功记录 runner 结果。"""
     mock_manager._tasks[sample_task.id] = sample_task
 
-    result = mock_manager.record_runner_result(
+    result = mock_manager.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
@@ -114,7 +122,7 @@ def test_record_runner_result_success(mock_manager, sample_task):
         backend="test-backend",
         tool_rounds=5,
         status="DONE",
-    )
+    ))
 
     assert result.ok is True
     assert result.status == "DONE"
@@ -146,13 +154,13 @@ def test_record_runner_result_with_parsed_output(mock_manager, sample_task):
         next_actions=[],
     )
 
-    result = mock_manager.record_runner_result(
+    result = mock_manager.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
         message="完成",
         structured_output=parsed,
-    )
+    ))
 
     assert result.ok is True
     assert result.structured_output_found is True
@@ -163,12 +171,12 @@ def test_record_runner_result_dry_run(mock_manager, sample_task):
     sample_task.runner_attempts = 0
     mock_manager._tasks[sample_task.id] = sample_task
 
-    result = mock_manager.record_runner_result(
+    result = mock_manager.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=True,
         ok=True,
         message="dry run",
-    )
+    ))
 
     assert result.dry_run is True
     assert result.runner_attempts == 0  # dry_run 不增加
@@ -178,13 +186,13 @@ def test_record_runner_result_failure(mock_manager, sample_task):
     """测试失败结果记录。"""
     mock_manager._tasks[sample_task.id] = sample_task
 
-    result = mock_manager.record_runner_result(
+    result = mock_manager.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=False,
         message="执行失败",
         status="FAILED",
-    )
+    ))
 
     assert result.ok is False
     assert result.status == "FAILED"
@@ -198,13 +206,13 @@ def test_record_runner_result_ignores_abandoned_attempt(mock_manager, sample_tas
     sample_task.runner_active_attempt_id = ""
     mock_manager._tasks[sample_task.id] = sample_task
 
-    result = mock_manager.record_runner_result(
+    result = mock_manager.record_runner_result(_rrr(
         run_id="run-123",
         attempt_id="attempt-old",
         dry_run=False,
         ok=True,
         message="stale result",
-    )
+    ))
 
     assert result.ok is False
     assert "abandoned" in result.message
@@ -215,13 +223,13 @@ def test_record_runner_result_ignores_non_active_attempt(mock_manager, sample_ta
     sample_task.runner_active_attempt_id = "active-123"
     mock_manager._tasks[sample_task.id] = sample_task
 
-    result = mock_manager.record_runner_result(
+    result = mock_manager.record_runner_result(_rrr(
         run_id="run-123",
         attempt_id="different-attempt",
         dry_run=False,
         ok=True,
         message="stale result",
-    )
+    ))
 
     assert result.ok is False
     assert "non-active" in result.message
@@ -233,13 +241,13 @@ def test_record_runner_result_updates_task_status(mock_manager, sample_task):
     """测试更新任务状态。"""
     mock_manager._tasks[sample_task.id] = sample_task
 
-    mock_manager.record_runner_result(
+    mock_manager.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
         message="done",
         status="DONE",
-    )
+    ))
 
     assert sample_task.status == "DONE"
     assert sample_task.updated_at > 0
@@ -250,13 +258,13 @@ def test_record_runner_result_sets_ended_at_for_terminal_statuses(mock_manager, 
     mock_manager._tasks[sample_task.id] = sample_task
 
     before = time.time()
-    mock_manager.record_runner_result(
+    mock_manager.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=False,
         message="failed",
         status="FAILED",
-    )
+    ))
 
     assert sample_task.ended_at >= before
 
@@ -266,12 +274,12 @@ def test_record_runner_result_increments_runner_attempts(mock_manager, sample_ta
     sample_task.runner_attempts = 2
     mock_manager._tasks[sample_task.id] = sample_task
 
-    mock_manager.record_runner_result(
+    mock_manager.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
         message="ok",
-    )
+    ))
 
     assert sample_task.runner_attempts == 3
 
@@ -280,13 +288,13 @@ def test_record_runner_result_records_last_error(mock_manager, sample_task):
     """测试记录最后错误。"""
     mock_manager._tasks[sample_task.id] = sample_task
 
-    mock_manager.record_runner_result(
+    mock_manager.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=False,
         message="Error: connection failed",
         status="FAILED",
-    )
+    ))
 
     assert "connection failed" in sample_task.runner_last_error
 
@@ -316,13 +324,13 @@ def test_record_runner_result_parses_structured_output(mock_manager, sample_task
         next_actions=["next"],
     )
 
-    result = mock_manager.record_runner_result(
+    result = mock_manager.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
         message="original message",
         structured_output=parsed,
-    )
+    ))
 
     assert result.structured_summary == "summary from model"
 
@@ -350,13 +358,13 @@ def test_record_runner_result_handles_parse_failure(mock_manager, sample_task):
         next_actions=[],
     )
 
-    result = mock_manager.record_runner_result(
+    result = mock_manager.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
         message="original",
         structured_output=parsed,
-    )
+    ))
 
     assert result.ok is False
     assert "parse failed" in result.message
@@ -369,12 +377,12 @@ def test_record_runner_result_writes_output_json(mock_manager, sample_task, tmp_
     sample_task.output_json = str(tmp_path / "output.json")
     mock_manager._tasks[sample_task.id] = sample_task
 
-    mock_manager.record_runner_result(
+    mock_manager.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
         message="ok",
-    )
+    ))
 
     assert (tmp_path / "output.json").exists()
     data = json.loads((tmp_path / "output.json").read_text())
@@ -387,14 +395,14 @@ def test_record_runner_result_writes_result_json(mock_manager, sample_task, tmp_
     sample_task.runner_result_file = str(tmp_path / "result.md")
     mock_manager._tasks[sample_task.id] = sample_task
 
-    mock_manager.record_runner_result(
+    mock_manager.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
         message="ok",
         prompt="the prompt",
         response="the response",
-    )
+    ))
 
     assert (tmp_path / "result.json").exists()
 
@@ -405,12 +413,12 @@ def test_record_runner_result_without_structured_output(mock_manager, sample_tas
     """测试无结构化输出时的处理。"""
     mock_manager._tasks[sample_task.id] = sample_task
 
-    result = mock_manager.record_runner_result(
+    result = mock_manager.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
         message="simple success",
-    )
+    ))
 
     assert result.structured_output_found is False
 
@@ -420,13 +428,13 @@ def test_record_runner_result_clears_active_attempt_on_success(mock_manager, sam
     sample_task.runner_active_attempt_id = "attempt-123"
     mock_manager._tasks[sample_task.id] = sample_task
 
-    mock_manager.record_runner_result(
+    mock_manager.record_runner_result(_rrr(
         run_id="run-123",
         attempt_id="attempt-123",
         dry_run=False,
         ok=True,
         message="ok",
-    )
+    ))
 
     assert sample_task.runner_active_attempt_id == ""
 
@@ -454,12 +462,12 @@ def test_record_runner_result_with_blocked_reason(mock_manager, sample_task):
         next_actions=[],
     )
 
-    result = mock_manager.record_runner_result(
+    result = mock_manager.record_runner_result(_rrr(
         run_id="run-123",
         dry_run=False,
         ok=True,
         message="",
         structured_output=parsed,
-    )
+    ))
 
     assert "waiting for resource" in result.blocked_reason

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..config import AgentConfig
-from ..subagent import SubAgentRunnerResult, SubAgentTask
+from ..subagent import RecordRunnerResultParams, SubAgentRunnerResult, SubAgentTask
 from .dynamic_timeout import calculate_dynamic_timeout
 
 if TYPE_CHECKING:
@@ -204,14 +204,16 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
     if thread.is_alive():
         timeout_message = f"runner timed out after {params.timeout_seconds:.2f}s"
         timeout_result = worker.subagents.record_runner_result(
-            params.run_id,
-            attempt_id=attempt_id,
-            dry_run=False,
-            ok=False,
-            message=timeout_message,
-            status="TIMEOUT",
-            verification_status="UNVERIFIED",
-            failure_type="runner_timeout",
+            RecordRunnerResultParams(
+                run_id=params.run_id,
+                attempt_id=attempt_id,
+                dry_run=False,
+                ok=False,
+                message=timeout_message,
+                status="TIMEOUT",
+                verification_status="UNVERIFIED",
+                failure_type="runner_timeout",
+            )
         )
         worker.subagents.abandon_runner_attempt(params.run_id, attempt_id, reason=timeout_message)
         return timeout_result

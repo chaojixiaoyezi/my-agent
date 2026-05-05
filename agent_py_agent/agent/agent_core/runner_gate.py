@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
-    from ..subagent import SubAgentRunnerResult, SubAgentTask
+    from ..subagent import RecordRunnerResultParams, SubAgentRunnerResult, SubAgentTask
 
 
 # ---------------------------------------------------------------------------
@@ -157,13 +157,15 @@ def run_concurrent_runners(
                 result = future.result()
             except Exception as exc:
                 result = agent.subagents.record_runner_result(
-                    run_id,
-                    dry_run=False,
-                    ok=False,
-                    message=f"runner worker failed: {exc}",
-                    status="BLOCKED",
-                    verification_status="UNVERIFIED",
-                    failure_type="runner_worker_error",
+                    RecordRunnerResultParams(
+                        run_id=run_id,
+                        dry_run=False,
+                        ok=False,
+                        message=f"runner worker failed: {exc}",
+                        status="BLOCKED",
+                        verification_status="UNVERIFIED",
+                        failure_type="runner_worker_error",
+                    )
                 )
             after = agent.subagents.load(run_id)
             completed[run_id] = (result, after)

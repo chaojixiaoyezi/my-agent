@@ -194,15 +194,18 @@ def make_tool_registry(workspace: Path) -> ToolRegistry:
     向量搜索默认关闭，其余参数取安全保守值。
     """
 
+    from agent_py_agent.agent.tools import ToolRegistryParams
     return ToolRegistry(
-        workspace,
-        max_chars=12000,
-        max_entries=100,
-        max_matches=50,
-        web_max_chars=12000,
-        http_timeout=30,
-        catalog_limit=20,
-        retrieval_limit=3,
-        vector_search_enabled=False,
-        shell_tool_timeout=30,
+        ToolRegistryParams(
+            workspace_root=workspace,
+            max_chars=12000,
+            max_entries=100,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            shell_tool_timeout=30,
+        )
     )

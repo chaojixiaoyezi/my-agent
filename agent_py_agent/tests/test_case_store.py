@@ -1,6 +1,7 @@
 """测试日志分析案例存储模块 (case_store.py)"""
 import json
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,34 +24,38 @@ from agent_py_agent.agent.log_analysis.storage.local_store import LocalLogStore
 # 辅助函数：创建测试 Finding
 # ============================================================
 
-def make_finding(
-    finding_id: str = "finding-001",
-    detector_id: str = "test_detector",
-    risk_score: float = 0.7,
-    attacker_ip: str = "1.2.3.4",
-    victim_ip: str = "5.6.7.8",
-    hypothesis: str = "",
-    gaps: list[str] | None = None,
-    next_queries: list[Any] | None = None,
-    window: list[str] | None = None,
-    entities: dict[str, list[str]] | None = None,
-    evidence_refs: list[EvidenceRef] | None = None,
-) -> Finding:
+@dataclass(frozen=True)
+class MakeFindingParams:
+    """Parameter bundle for make_finding."""
+    finding_id: str = "finding-001"
+    detector_id: str = "test_detector"
+    risk_score: float = 0.7
+    attacker_ip: str = "1.2.3.4"
+    victim_ip: str = "5.6.7.8"
+    hypothesis: str = ""
+    gaps: list[str] | None = None
+    next_queries: list[Any] | None = None
+    window: list[str] | None = None
+    entities: dict[str, list[str]] | None = None
+    evidence_refs: list[EvidenceRef] | None = None
+
+
+def make_finding(params: MakeFindingParams) -> Finding:
     """创建测试用 Finding 对象"""
     return Finding(
-        finding_id=finding_id,
-        detector_id=detector_id,
-        window=window or ["2026-05-01T00:00:00Z", "2026-05-01T23:59:59Z"],
+        finding_id=params.finding_id,
+        detector_id=params.detector_id,
+        window=params.window or ["2026-05-01T00:00:00Z", "2026-05-01T23:59:59Z"],
         severity_hint="medium",
-        risk_score=risk_score,
-        hypothesis=hypothesis,
-        gaps=gaps or [],
-        next_queries=next_queries or [],
-        entities=entities or {
-            "attacker_ip": [attacker_ip],
-            "victim_ip": [victim_ip],
+        risk_score=params.risk_score,
+        hypothesis=params.hypothesis,
+        gaps=params.gaps or [],
+        next_queries=params.next_queries or [],
+        entities=params.entities or {
+            "attacker_ip": [params.attacker_ip],
+            "victim_ip": [params.victim_ip],
         },
-        evidence_refs=evidence_refs or [],
+        evidence_refs=params.evidence_refs or [],
     )
 
 
@@ -125,7 +130,7 @@ class TestRecordFinding:
     def test_record_finding_above_threshold(self, tmp_path):
         """测试记录高于阈值的 finding，期望创建 case"""
         store = CaseStore(tmp_path, min_case_confidence=0.6)
-        finding = make_finding(risk_score=0.8)
+        finding = make_finding(MakeFindingParams(risk_score=0.8))
         case = store.record_finding(finding)
         assert case is not None
         assert case.risk_score == 0.8
@@ -134,14 +139,14 @@ class TestRecordFinding:
     def test_record_finding_below_threshold(self, tmp_path):
         """测试记录低于阈值的 finding，期望返回 None"""
         store = CaseStore(tmp_path, min_case_confidence=0.6)
-        finding = make_finding(risk_score=0.3)
+        finding = make_finding(MakeFindingParams(risk_score=0.3))
         case = store.record_finding(finding)
         assert case is None
 
     def test_record_finding_at_exact_threshold(self, tmp_path):
         """测试记录恰好在阈值的 finding"""
         store = CaseStore(tmp_path, min_case_confidence=0.6)
-        finding = make_finding(risk_score=0.6)
+        finding = make_finding(MakeFindingParams(risk_score=0.6))
         case = store.record_finding(finding)
         assert case is not None
 
@@ -162,16 +167,20 @@ class TestRecordFinding:
         """测试同一 dedup_key 的 finding 合并到已有 case"""
         store = CaseStore(tmp_path, min_case_confidence=0.5)
         finding1 = make_finding(
-            finding_id="finding-001",
-            attacker_ip="1.2.3.4",
-            victim_ip="5.6.7.8",
-            risk_score=0.6,
+            MakeFindingParams(
+                finding_id="finding-001",
+                attacker_ip="1.2.3.4",
+                victim_ip="5.6.7.8",
+                risk_score=0.6,
+            )
         )
         finding2 = make_finding(
-            finding_id="finding-002",
-            attacker_ip="1.2.3.4",
-            victim_ip="5.6.7.8",
-            risk_score=0.9,
+            MakeFindingParams(
+                finding_id="finding-002",
+                attacker_ip="1.2.3.4",
+                victim_ip="5.6.7.8",
+                risk_score=0.9,
+            )
         )
         case1 = store.record_finding(finding1)
         case2 = store.record_finding(finding2)
@@ -192,7 +201,7 @@ class TestCaseQuery:
     def test_get_case_exists(self, tmp_path):
         """测试获取存在的 case"""
         store = CaseStore(tmp_path)
-        finding = make_finding()
+        finding = make_finding(MakeFindingParams())
         case = store.record_finding(finding)
         assert case is not None
         retrieved = store.get_case(case.case_id)
@@ -212,10 +221,12 @@ class TestCaseQuery:
         # 0.9 -> P0, 0.75 -> P1, 0.6 -> P2
         for i, (score, expected_priority) in enumerate([(0.9, "P0"), (0.75, "P1"), (0.6, "P2")]):
             finding = make_finding(
-                finding_id=f"finding-{i}",
-                attacker_ip=f"1.2.3.{i}",
-                victim_ip="5.6.7.8",
-                risk_score=score,
+                MakeFindingParams(
+                    finding_id=f"finding-{i}",
+                    attacker_ip=f"1.2.3.{i}",
+                    victim_ip="5.6.7.8",
+                    risk_score=score,
+                )
             )
             store.record_finding(finding)
         cases = store.list_cases()
@@ -278,9 +289,11 @@ class TestDedupKey:
     def test_dedup_key_basic(self):
         """测试基本 dedup_key 生成"""
         finding = make_finding(
-            attacker_ip="1.2.3.4",
-            victim_ip="5.6.7.8",
-            window=["2026-05-01T00:00:00Z"],
+            MakeFindingParams(
+                attacker_ip="1.2.3.4",
+                victim_ip="5.6.7.8",
+                window=["2026-05-01T00:00:00Z"],
+            )
         )
         key = dedup_key_for_finding(finding, window_minutes=15)
         assert "attack=1.2.3.4" in key
@@ -290,10 +303,12 @@ class TestDedupKey:
     def test_dedup_key_with_account(self):
         """测试包含账户的 dedup_key (vpn_new_geo_login 场景)"""
         finding = make_finding(
-            detector_id="vpn_new_geo_login",
-            attacker_ip="1.2.3.4",
-            victim_ip="5.6.7.8",
-            entities={"attacker_ip": ["1.2.3.4"], "victim_ip": ["5.6.7.8"], "user": ["admin"]},
+            MakeFindingParams(
+                detector_id="vpn_new_geo_login",
+                attacker_ip="1.2.3.4",
+                victim_ip="5.6.7.8",
+                entities={"attacker_ip": ["1.2.3.4"], "victim_ip": ["5.6.7.8"], "user": ["admin"]},
+            )
         )
         key = dedup_key_for_finding(finding, window_minutes=15)
         assert "account=admin" in key
@@ -319,7 +334,7 @@ class TestCasePersistence:
         """测试 record_findings 返回不重复的 case"""
         store = CaseStore(tmp_path, min_case_confidence=0.3)
         findings = [
-            make_finding(finding_id=f"f-{i}", attacker_ip="1.2.3.4", victim_ip=f"5.6.7.{i}")
+            make_finding(MakeFindingParams(finding_id=f"f-{i}", attacker_ip="1.2.3.4", victim_ip=f"5.6.7.{i}"))
             for i in range(3)
         ]
         cases = store.record_findings(findings)
@@ -329,7 +344,7 @@ class TestCasePersistence:
     def test_case_title_from_finding(self, tmp_path):
         """测试 case 标题从 finding 生成"""
         store = CaseStore(tmp_path)
-        finding = make_finding(detector_id="test_detector", victim_ip="192.168.1.100")
+        finding = make_finding(MakeFindingParams(detector_id="test_detector", victim_ip="192.168.1.100"))
         case = store.record_finding(finding)
         assert case is not None
         assert "test_detector" in case.title
@@ -346,7 +361,7 @@ class TestBoundaryCases:
     def test_finding_with_no_victim(self, tmp_path):
         """测试没有 victim 的 finding"""
         store = CaseStore(tmp_path, min_case_confidence=0.3)
-        finding = make_finding(victim_ip="")
+        finding = make_finding(MakeFindingParams(victim_ip=""))
         # 没有 victim 可能无法创建有效 dedup_key，但仍应处理
         case = store.record_finding(finding)
         assert case is not None or case is None  # 取决于实现
@@ -354,14 +369,14 @@ class TestBoundaryCases:
     def test_finding_with_no_attacker(self, tmp_path):
         """测试没有 attacker 的 finding"""
         store = CaseStore(tmp_path, min_case_confidence=0.3)
-        finding = make_finding(attacker_ip="", victim_ip="5.6.7.8")
+        finding = make_finding(MakeFindingParams(attacker_ip="", victim_ip="5.6.7.8"))
         case = store.record_finding(finding)
         assert case is not None
 
     def test_finding_with_empty_entities(self, tmp_path):
         """测试 entities 为空的 finding"""
         store = CaseStore(tmp_path, min_case_confidence=0.3)
-        finding = make_finding(entities={})
+        finding = make_finding(MakeFindingParams(entities={}))
         case = store.record_finding(finding)
         # 应该创建 case 但优先级可能较低
         assert case is not None or case is None  # 根据实现
@@ -370,18 +385,22 @@ class TestBoundaryCases:
         """测试多个 finding 合并到同一 case"""
         store = CaseStore(tmp_path, min_case_confidence=0.3)
         finding1 = make_finding(
-            finding_id="f1",
-            attacker_ip="1.2.3.4",
-            victim_ip="5.6.7.8",
-            hypothesis="initial hypothesis",
-            gaps=["gap1"],
-            next_queries=[{"query": "test"}],
+            MakeFindingParams(
+                finding_id="f1",
+                attacker_ip="1.2.3.4",
+                victim_ip="5.6.7.8",
+                hypothesis="initial hypothesis",
+                gaps=["gap1"],
+                next_queries=[{"query": "test"}],
+            )
         )
         finding2 = make_finding(
-            finding_id="f2",
-            attacker_ip="1.2.3.4",
-            victim_ip="5.6.7.8",
-            gaps=["gap2"],
+            MakeFindingParams(
+                finding_id="f2",
+                attacker_ip="1.2.3.4",
+                victim_ip="5.6.7.8",
+                gaps=["gap2"],
+            )
         )
         store.record_finding(finding1)
         case = store.record_finding(finding2)

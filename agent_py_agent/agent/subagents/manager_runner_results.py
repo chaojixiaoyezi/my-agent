@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -73,29 +73,53 @@ from .utils import (
 if TYPE_CHECKING:
     from ..local_store import LocalStore
 
+
+@dataclass
+class RecordRunnerResultParams:
+    """Parameters for record_runner_result (18 fields replacing 18 positional params)."""
+    run_id: str
+    dry_run: bool
+    ok: bool
+    message: str
+    attempt_id: str = ""
+    prompt: str = ""
+    response: str = ""
+    backend: str = ""
+    tool_rounds: int = 0
+    status: str = ""
+    verification_status: str = ""
+    failure_type: str = ""
+    structured_output: SubAgentParsedOutput | None = None
+    actual_tools: list[str] | None = None
+    structured_repair_attempted: bool = False
+    structured_repair_ok: bool = False
+    structured_repair_error: str = ""
+
+
 class SubAgentRunnerResultMixin:
     def record_runner_result(
         self,
-        run_id: str,
-        *,
-        attempt_id: str = "",
-        dry_run: bool,
-        ok: bool,
-        message: str,
-        prompt: str = "",
-        response: str = "",
-        backend: str = "",
-        tool_rounds: int = 0,
-        status: str = "",
-        verification_status: str = "",
-        failure_type: str = "",
-        structured_output: SubAgentParsedOutput | None = None,
-        actual_tools: list[str] | None = None,
-        structured_repair_attempted: bool = False,
-        structured_repair_ok: bool = False,
-        structured_repair_error: str = "",
+        params: RecordRunnerResultParams,
     ) -> SubAgentRunnerResult:
         """LLM: record a runner invocation result back into the standard work order."""
+        run_id = params.run_id
+        dry_run = params.dry_run
+        ok = params.ok
+        message = params.message
+        attempt_id = params.attempt_id
+        prompt = params.prompt
+        response = params.response
+        backend = params.backend
+        tool_rounds = params.tool_rounds
+        status = params.status
+        verification_status = params.verification_status
+        failure_type = params.failure_type
+        structured_output = params.structured_output
+        actual_tools = params.actual_tools
+        structured_repair_attempted = params.structured_repair_attempted
+        structured_repair_ok = params.structured_repair_ok
+        structured_repair_error = params.structured_repair_error
+
         task = self.load(run_id)
         stale_result = self._check_stale_runner_result(task, attempt_id, dry_run)
         if stale_result:

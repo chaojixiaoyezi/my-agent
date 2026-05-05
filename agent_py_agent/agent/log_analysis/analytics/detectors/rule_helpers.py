@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
@@ -42,55 +43,70 @@ from .field_extractors import (
 )
 
 
+@dataclass(frozen=True)
+class MakeFindingParams:
+    """Params bundle for _make_finding."""
+
+    detector_id: str
+    evidence_events: Sequence[Any]
+    hypothesis: str = ""
+    confidence: float = 0.0
+    gaps: Sequence[str] = ()
+    next_queries: Sequence[Any] = ()
+    features: dict[str, Any] | None = None
+    severity_hint: str | None = None
+    extra_entities: dict[str, list[Any]] | None = None
+
+
 def _make_finding(
     detector_id: str,
     evidence_events: Sequence[Any],
     *,
-    hypothesis: str,
-    confidence: float,
-    gaps: Sequence[str],
-    next_queries: Sequence[Any],
-    features: dict[str, Any] | None = None,
-    severity_hint: str | None = None,
-    extra_entities: dict[str, list[Any]] | None = None,
+    params: MakeFindingParams,
 ) -> Any:
-    """LLM: Build a Finding object from detector output."""
-    rule = get_rule(detector_id)
-    entities = _entities_from_events(evidence_events)
-    for key, values in (extra_entities or {}).items():
+    """LLM: Build a Finding object from detector output.
+
+    Args:
+        detector_id: Detector identifier.
+        evidence_events: Sequence of evidence events.
+        params: Params bundle containing all finding construction args.
+    """
+    rule = get_rule(params.detector_id)
+    entities = _entities_from_events(params.evidence_events)
+    for key, values in (params.extra_entities or {}).items():
         entities.setdefault(key, [])
         entities[key].extend(_text(value) for value in values if _text(value))
     entities = _normalize_entities(entities)
-    evidence_refs = [_evidence_ref(event) for event in evidence_events]
-    window = list(_window_for_events(evidence_events))
+    evidence_refs = [_evidence_ref(event) for event in params.evidence_events]
+    window = list(_window_for_events(params.evidence_events))
     payload_for_id = {
-        "detector_id": detector_id,
+        "detector_id": params.detector_id,
         "window": window,
         "entities": entities,
         "evidence_refs": [ref.evidence_id for ref in evidence_refs],
-        "hypothesis": hypothesis,
+        "hypothesis": params.hypothesis,
     }
     from ...models import Finding
 
     finding = Finding(
         finding_id=_stable_id("finding", payload_for_id),
-        detector_id=detector_id,
+        detector_id=params.detector_id,
         detector_kind=rule.detector_kind,
         window=window,
-        severity_hint=severity_hint or rule.severity_hint,
-        risk_score=_clamp_float(confidence),
+        severity_hint=params.severity_hint or rule.severity_hint,
+        risk_score=_clamp_float(params.confidence),
         entities=entities,
-        features=dict(features or {}),
+        features=dict(params.features or {}),
         evidence_refs=evidence_refs,
         status="OPEN",
-        hypothesis=hypothesis,
-        confidence=_clamp_float(confidence),
-        gaps=_unique_texts(gaps),
-        next_queries=_unique_json_values(next_queries),
+        hypothesis=params.hypothesis,
+        confidence=_clamp_float(params.confidence),
+        gaps=_unique_texts(params.gaps),
+        next_queries=_unique_json_values(params.next_queries),
         rule_version=rule.version,
         created_at=utc_now_iso(),
         updated_at=utc_now_iso(),
-        attributes={"mode": rule.mode, "gap_details": _gap_details(gaps, window, entities, evidence_events)},
+        attributes={"mode": rule.mode, "gap_details": _gap_details(params.gaps, window, entities, params.evidence_events)},
     )
     finding.mode = rule.mode
     return finding
