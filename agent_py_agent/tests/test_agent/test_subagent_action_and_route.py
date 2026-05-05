@@ -17,6 +17,7 @@ from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.skills import SkillRegistry
+from agent_py_agent.agent.subagents.services.lifecycle import RecordCapabilityGrantParams
 
 
 def test_subagent_channel_probe_report():
@@ -351,21 +352,23 @@ def test_subagent_execution_context_uses_only_grants():
         )
         agent.subagents.record_capability_grant(
             task.id,
-            request_id=request.id,
-            skills=["api-check"],
-            tools=["http_request"],
-            capability_cards=[
-                {
-                    "id": "tool:http_request",
-                    "kind": "tool",
-                    "name": "http_request",
-                    "description": "发起 HTTP 请求并返回状态码和响应摘要",
-                    "risk_level": "low",
-                    "source": "builtin",
-                    "path": "",
-                }
-            ],
-            reason="父代理授权低风险接口健康检查。",
+            RecordCapabilityGrantParams(
+                request_id=request.id,
+                skills=["api-check"],
+                tools=["http_request"],
+                capability_cards=[
+                    {
+                        "id": "tool:http_request",
+                        "kind": "tool",
+                        "name": "http_request",
+                        "description": "发起 HTTP 请求并返回状态码和响应摘要",
+                        "risk_level": "low",
+                        "source": "builtin",
+                        "path": "",
+                    }
+                ],
+                reason="父代理授权低风险接口健康检查。",
+            ),
         )
         agent.subagents.record_evidence(
             task.id,

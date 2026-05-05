@@ -6,6 +6,7 @@ from pathlib import Path
 
 from agent_py_agent.agent.log_analysis.ingest.pipeline import ingest_file
 from agent_py_agent.agent.log_analysis.tools import security_query
+from agent_py_agent.agent.log_analysis.tools.query_functions import SecurityQueryParams
 
 
 def _project_root() -> Path:
@@ -77,10 +78,12 @@ def test_ingest_file_default_store_can_be_queried_end_to_end():
         result = ingest_file(fixture, root=root, source_id="query-fixture")
 
         response = security_query(
-            root=root,
-            start_time="2026-04-30T00:00:00Z",
-            end_time="2026-04-30T23:59:59Z",
-            limit=10,
+            SecurityQueryParams(
+                root=root,
+                start_time="2026-04-30T00:00:00Z",
+                end_time="2026-04-30T23:59:59Z",
+                limit=10,
+            )
         )
 
         assert result.events_path == str(root / "events.jsonl")

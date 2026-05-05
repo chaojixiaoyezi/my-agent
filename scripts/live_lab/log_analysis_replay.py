@@ -6,6 +6,7 @@ import argparse
 import json
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,20 @@ DEFAULT_OUTPUTS_DIR = REPO_ROOT / "validation" / "live_lab" / "log_analysis_repl
 DEFAULT_START_TIME = "2026-04-30T09:30:00Z"
 DEFAULT_END_TIME = "2026-04-30T10:30:00Z"
 SIMULATED_FAILURE_STAGES = frozenset({"evidence", "report"})
+
+
+@dataclass(frozen=True)
+class RunSecurityAlertV1ReplayParams:
+    """Parameter bundle for run_security_alert_v1_replay."""
+    output_root: str | Path
+    fixture_path: str | Path = DEFAULT_FIXTURE
+    fixture_format: str | None = None
+    source_id: str = "security-alert-v1-live-lab"
+    start_time: str = DEFAULT_START_TIME
+    end_time: str = DEFAULT_END_TIME
+    limit: int = 50
+    dry_run: bool = True
+    simulate_failure_stage: str | None = None
 
 
 def _base_summary(
@@ -82,35 +97,26 @@ def _run_stage(
 
 
 def run_security_alert_v1_replay(
-    *,
-    output_root: str | Path,
-    fixture_path: str | Path = DEFAULT_FIXTURE,
-    fixture_format: str | None = None,
-    source_id: str = "security-alert-v1-live-lab",
-    start_time: str = DEFAULT_START_TIME,
-    end_time: str = DEFAULT_END_TIME,
-    limit: int = 50,
-    dry_run: bool = True,
-    simulate_failure_stage: str | None = None,
+    params: RunSecurityAlertV1ReplayParams,
 ) -> dict[str, Any]:
-    output_root = Path(output_root)
-    fixture_path = Path(fixture_path)
+    output_root = Path(params.output_root)
+    fixture_path = Path(params.fixture_path)
     store_root = output_root / "store"
     artifacts_root = output_root / "artifacts"
     output_root.mkdir(parents=True, exist_ok=True)
     artifacts_root.mkdir(parents=True, exist_ok=True)
 
-    if simulate_failure_stage and simulate_failure_stage not in SIMULATED_FAILURE_STAGES:
+    if params.simulate_failure_stage and params.simulate_failure_stage not in SIMULATED_FAILURE_STAGES:
         allowed = ", ".join(sorted(SIMULATED_FAILURE_STAGES))
         raise ValueError(f"simulate_failure_stage must be one of: {allowed}")
 
-    summary = _base_summary(output_root, fixture_path, fixture_format, dry_run)
+    summary = _base_summary(output_root, fixture_path, params.fixture_format, params.dry_run)
     findings = case = route = traced = None
 
     ok, _ = _run_stage(
         summary,
         "ingest",
-        lambda: run_ingest_stage(fixture_path, store_root, source_id, fixture_format),
+        lambda: run_ingest_stage(fixture_path, store_root, params.source_id, params.fixture_format),
     )
     if not ok:
         return _write_and_return(summary)
@@ -139,7 +145,7 @@ def run_security_alert_v1_replay(
         summary,
         "evidence",
         lambda: run_evidence_stage(
-            case, store_root, start_time, end_time, limit, simulate_failure_stage
+            case, store_root, params.start_time, params.end_time, params.limit, params.simulate_failure_stage
         ),
     )
     if not ok:
@@ -149,7 +155,7 @@ def run_security_alert_v1_replay(
         summary,
         "report",
         lambda: run_report_stage(
-            case, route, findings, traced, artifacts_root, simulate_failure_stage
+            case, route, findings, traced, artifacts_root, params.simulate_failure_stage
         ),
     )
     if not ok:
@@ -206,13 +212,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     summary = run_security_alert_v1_replay(
-        output_root=args.output_root,
-        fixture_path=args.fixture,
-        fixture_format=args.fixture_format,
-        source_id=args.source_id,
-        start_time=args.start_time,
-        end_time=args.end_time,
-        limit=args.limit,
+        RunSecurityAlertV1ReplayParams(
+            output_root=args.output_root,
+            fixture_path=args.fixture,
+            fixture_format=args.fixture_format,
+            source_id=args.source_id,
+            start_time=args.start_time,
+            end_time=args.end_time,
+            limit=args.limit,
+        )
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if summary["ok"] else 2

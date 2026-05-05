@@ -35,29 +35,9 @@ class SecurityQueryParams:
 
 
 def security_query(
-    params: SecurityQueryParams | None = None,
-    *,
-    store: LocalLogStore | None = None,
-    root: str | Path | None = None,
-    attacker_ip: str | None = None,
-    victim_ip: str | None = None,
-    domain: str | None = None,
-    uri: str | None = None,
-    alert_type: str | None = None,
-    start_time: str | None = None,
-    end_time: str | None = None,
-    limit: int | None = DEFAULT_QUERY_LIMIT,
-    max_limit: int | None = None,
+    params: SecurityQueryParams,
 ) -> dict[str, Any]:
     """Execute bounded security event query and return tool response format."""
-    if params is None:
-        params = SecurityQueryParams(
-            store=store, root=root,
-            attacker_ip=attacker_ip, victim_ip=victim_ip,
-            domain=domain, uri=uri, alert_type=alert_type,
-            start_time=start_time, end_time=end_time,
-            limit=limit, max_limit=max_limit,
-        )
     local_store = _store(params.store, params.root)
     result = execute_security_query(
         local_store,
@@ -133,9 +113,9 @@ def security_hunt_ip(ip: str, **kwargs: Any) -> dict[str, Any]:
     return hunt_ip(ip, **kwargs)
 
 
-def security_hunt_domain(domain: str, **kwargs: Any) -> dict[str, Any]:
+def security_hunt_domain(domain: str) -> dict[str, Any]:
     """Domain pivot via security_query."""
-    return security_query(SecurityQueryParams(domain=domain, **kwargs))
+    return security_query(SecurityQueryParams(domain=domain))
 
 
 def trace_case(

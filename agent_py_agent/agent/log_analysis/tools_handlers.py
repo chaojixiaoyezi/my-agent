@@ -52,11 +52,13 @@ class SecurityQueryTool(BaseTool):
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         """Execute security_query with tool parameters."""
-        from .tools_functions import security_query
+        from .tools_functions import SecurityQueryParams, security_query
 
         payload = security_query(
-            root=params.get("root") or self.store_root,
-            **_query_params(params),
+            SecurityQueryParams(
+                root=params.get("root") or self.store_root,
+                **_query_params(params),
+            )
         )
         return ToolExecutionResult(self.spec.name, True, _prompt_json(payload))
 

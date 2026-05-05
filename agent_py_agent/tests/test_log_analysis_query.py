@@ -13,6 +13,7 @@ from agent_py_agent.agent.log_analysis.storage import (
     execute_security_query,
 )
 from agent_py_agent.agent.log_analysis.tools import hunt_ip, security_query, trace_case
+from agent_py_agent.agent.log_analysis.tools.query_functions import SecurityQueryParams
 
 
 def _matching_events(count: int, *, attacker_ip: str = "198.51.100.80"):
@@ -128,11 +129,13 @@ def test_large_query_writes_limited_evidence_and_returns_limited_preview(tmp_pat
     )
 
     response = security_query(
-        store=store,
-        attacker_ip="198.51.100.20",
-        start_time="2026-04-30T10:00:00Z",
-        end_time="2026-04-30T10:59:00Z",
-        limit=5,
+        SecurityQueryParams(
+            store=store,
+            attacker_ip="198.51.100.20",
+            start_time="2026-04-30T10:00:00Z",
+            end_time="2026-04-30T10:59:00Z",
+            limit=5,
+        )
     )
 
     assert response["row_count"] == 12
@@ -316,7 +319,7 @@ def test_tools_require_time_range_and_support_hunt_and_trace_case(tmp_path):
     )
 
     with pytest.raises(ValueError):
-        security_query(store=store, attacker_ip="198.51.100.30")
+        security_query(SecurityQueryParams(store=store, attacker_ip="198.51.100.30"))
 
     hunt = hunt_ip(
         "198.51.100.30",

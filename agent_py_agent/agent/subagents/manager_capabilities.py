@@ -53,6 +53,7 @@ from .probe import (
 from .rendering import render_capability_route_markdown
 from .reports import CapabilityRouteRecord, CapabilityRouteReport
 from .runner_rendering import _render_runner_item_line
+from .services.lifecycle import RecordCapabilityGapParams, RecordCapabilityGrantParams
 from .utils import (
     _apply_missing_paths,
     _apply_paths,
@@ -153,11 +154,13 @@ class SubAgentCapabilityMixin:
                 created_at=now,
             )
         gap = self.record_capability_gap(
-            run_id=task.id,
-            missing_capability=request.needed_capability,
-            why_failed="CapabilityRouter 没有找到匹配的 skill/tool card。",
-            attempted_tools=request.tried,
-            needed_outputs=[request.expected_output] if request.expected_output else [],
+            task.id,
+            RecordCapabilityGapParams(
+                missing_capability=request.needed_capability,
+                why_failed="CapabilityRouter 没有找到匹配的 skill/tool card。",
+                attempted_tools=request.tried,
+                needed_outputs=[request.expected_output] if request.expected_output else [],
+            ),
         )
         self._mark_capability_request_status(task.id, request.id, "GAP")
         return CapabilityRouteRecord(
@@ -304,12 +307,14 @@ class SubAgentCapabilityMixin:
 
         grant = self.record_capability_grant(
             task.id,
-            request_id=request.id,
-            skills=granted_skills,
-            tools=granted_tools,
-            capability_cards=selected_cards,
-            reason=f"CapabilityRouter 命中 {len(selected_hits)} 张能力卡。",
-            expires_after_task=True,
+            RecordCapabilityGrantParams(
+                request_id=request.id,
+                skills=granted_skills,
+                tools=granted_tools,
+                capability_cards=selected_cards,
+                reason=f"CapabilityRouter 命中 {len(selected_hits)} 张能力卡。",
+                expires_after_task=True,
+            ),
         )
         self._mark_capability_request_status(task.id, request.id, "GRANTED")
         routed_task = self.load(task.id)

@@ -14,6 +14,10 @@ from pathlib import Path
 from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.subagents.services.lifecycle import (
+    RecordCapabilityGapParams,
+    RecordCapabilityGrantParams,
+)
 
 
 def test_subagent_capability_records():
@@ -54,16 +58,20 @@ def test_subagent_capability_records():
         )
         grant = agent.subagents.record_capability_grant(
             child.id,
-            request_id=request.id,
-            tools=["fetch_url"],
-            reason="允许低风险 GET 检查。",
+            RecordCapabilityGrantParams(
+                request_id=request.id,
+                tools=["fetch_url"],
+                reason="允许低风险 GET 检查。",
+            ),
         )
         gap = agent.subagents.record_capability_gap(
             child.id,
-            missing_capability="authenticated_api_check",
-            why_failed="缺少登录态和安全授权。",
-            attempted_tools=["fetch_url"],
-            suggested_skill="api-auth-debugging",
+            RecordCapabilityGapParams(
+                missing_capability="authenticated_api_check",
+                why_failed="缺少登录态和安全授权。",
+                attempted_tools=["fetch_url"],
+                suggested_skill="api-auth-debugging",
+            ),
         )
 
         loaded_child = agent.subagents.load(child.id)
@@ -240,9 +248,11 @@ def test_subagent_due_check_report():
         )
         agent.subagents.record_capability_gap(
             active.id,
-            missing_capability="browser_smoke_test",
-            why_failed="没有浏览器自动化工具授权。",
-            suggested_tool="playwright_smoke",
+            RecordCapabilityGapParams(
+                missing_capability="browser_smoke_test",
+                why_failed="没有浏览器自动化工具授权。",
+                suggested_tool="playwright_smoke",
+            ),
         )
         loaded = agent.subagents.load(active.id)
         loaded.created_at = time.time() - 30

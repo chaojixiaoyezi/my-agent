@@ -23,6 +23,7 @@ from agent_py_agent.agent.memory_archive import (
     append_raw_event,
     write_compression_snapshot,
 )
+from agent_py_agent.agent.subagents.services.lifecycle import RecordCapabilityGapParams
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -223,8 +224,10 @@ priority: 40
 
     gap = agent.subagents.record_capability_gap(
         task.id,
-        missing_capability="authenticated_api_check",
-        why_failed="缺少登录态和安全授权。",
+        RecordCapabilityGapParams(
+            missing_capability="authenticated_api_check",
+            why_failed="缺少登录态和安全授权。",
+        ),
     )
     reloaded = agent.subagents.load(task.id)
 

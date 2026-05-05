@@ -41,19 +41,7 @@ class SecurityQueryParams:
 
 
 def security_query(
-    params: SecurityQueryParams | None = None,
-    *,
-    store: LocalLogStore | None = None,
-    root: str | Path | None = None,
-    attacker_ip: str | None = None,
-    victim_ip: str | None = None,
-    domain: str | None = None,
-    uri: str | None = None,
-    alert_type: str | None = None,
-    start_time: str | None = None,
-    end_time: str | None = None,
-    limit: int | None = DEFAULT_QUERY_LIMIT,
-    max_limit: int | None = None,
+    params: SecurityQueryParams,
 ) -> dict[str, Any]:
     """LLM: 执行一次有边界的安全事件查询，并把 QueryResult 转成工具返回格式。
 
@@ -62,31 +50,12 @@ def security_query(
     alert_type 和时间范围过滤事件。它返回的是摘要、预览行和 evidence ref，不是全量日志。
 
     参数说明:
-    params: SecurityQueryParams dataclass；同时支持直接传独立 kwargs。
-    store: 已经创建好的 LocalLogStore；传它时函数直接用这个 store。
-    root: 本地日志分析数据目录；store 没传时，用 root 创建 LocalLogStore。
-    attacker_ip: 攻击者或源 IP 过滤条件。
-    victim_ip: 受害者或目标 IP 过滤条件。
-    domain: 域名或主机名过滤条件。
-    uri: URI、路径或 API 过滤条件。
-    alert_type: 告警类型过滤条件，例如 waf_block 或 suspicious_login。
-    start_time: ISO 时间字符串，查询下界；安全分析里通常应该传。
-    end_time: ISO 时间字符串，查询上界；和 start_time 一起限制窗口。
-    limit: 本次最多持久化多少条证据行；None 时由下层默认处理。
-    max_limit: 配置层允许的最大上限，用来防止调用方把 limit 放得过大。
+    params: SecurityQueryParams dataclass，包含 store、root、各过滤条件、时间窗口、limit。
 
     返回说明:
     返回 dict，包含 tool、query_id、parameters、row_count、truncated、evidence_path、
     evidence_refs、summary 和 preview_rows。后续报告应引用 evidence_refs，而不是凭空下结论。
     """
-    if params is None:
-        params = SecurityQueryParams(
-            store=store, root=root,
-            attacker_ip=attacker_ip, victim_ip=victim_ip,
-            domain=domain, uri=uri, alert_type=alert_type,
-            start_time=start_time, end_time=end_time,
-            limit=limit, max_limit=max_limit,
-        )
     local_store = _store(params.store, params.root)
     result = execute_security_query(
         local_store,
@@ -201,7 +170,7 @@ def security_hunt_ip(ip: str, **kwargs: Any) -> dict[str, Any]:
     return hunt_ip(ip, **kwargs)
 
 
-def security_hunt_domain(domain: str, **kwargs: Any) -> dict[str, Any]:
+def security_hunt_domain(domain: str) -> dict[str, Any]:
     """LLM: 以 domain 为种子复用 security_query。
 
     新手说明:
@@ -209,12 +178,11 @@ def security_hunt_domain(domain: str, **kwargs: Any) -> dict[str, Any]:
 
     参数说明:
     domain: 必填，域名或主机名。
-    **kwargs: 透传给 security_query 的 store、root、时间窗口、limit、max_limit 等。
 
     返回说明:
     返回 security_query 的结果。
     """
-    return security_query(SecurityQueryParams(domain=domain, **kwargs))
+    return security_query(SecurityQueryParams(domain=domain))
 
 
 def trace_case(
