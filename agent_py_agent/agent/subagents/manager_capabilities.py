@@ -9,7 +9,7 @@ Human version:
 
 import json
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -66,6 +66,22 @@ from .utils import (
 if TYPE_CHECKING:
     from ..local_store import LocalStore
 
+
+@dataclass(frozen=True)
+class RouteCapabilityGrantParams:
+    """Params bundle for _route_capability_grant."""
+    task: SubAgentTask
+    request: CapabilityRequest
+    query: str
+    hits: list[CapabilitySearchHit]
+    selected_hits: list[CapabilitySearchHit]
+    granted_skills: list[str]
+    granted_tools: list[str]
+    selected_cards: list[dict[str, str]]
+    reasons: list[str]
+    grant: CapabilityGrant
+
+
 def _route_capability_gap(
     task,
     request,
@@ -89,19 +105,18 @@ def _route_capability_gap(
     )
 
 
-def _route_capability_grant(
-    task,
-    request,
-    query,
-    hits,
-    selected_hits,
-    granted_skills,
-    granted_tools,
-    selected_cards,
-    reasons,
-    grant,
-):
+def _route_capability_grant(*, params: RouteCapabilityGrantParams) -> CapabilityRouteRecord:
     """Build a GRANTED record when hits found and apply=True."""
+    task = params.task
+    request = params.request
+    query = params.query
+    hits = params.hits
+    selected_hits = params.selected_hits
+    granted_skills = params.granted_skills
+    granted_tools = params.granted_tools
+    selected_cards = params.selected_cards
+    reasons = params.reasons
+    grant = params.grant
     now = time.time()
     return CapabilityRouteRecord(
         id=_new_id("route"),
@@ -304,16 +319,18 @@ class SubAgentCapabilityMixin:
             f"skills={','.join(granted_skills) or 'none'} tools={','.join(granted_tools) or 'none'}。",
         )
         return _route_capability_grant(
-            task,
-            request,
-            query,
-            hits,
-            selected_hits,
-            granted_skills,
-            granted_tools,
-            selected_cards,
-            reasons,
-            grant,
+            params=RouteCapabilityGrantParams(
+                task=task,
+                request=request,
+                query=query,
+                hits=hits,
+                selected_hits=selected_hits,
+                granted_skills=granted_skills,
+                granted_tools=granted_tools,
+                selected_cards=selected_cards,
+                reasons=reasons,
+                grant=grant,
+            )
         )
 
     def _mark_capability_request_status(self, run_id: str, request_id: str, status: str) -> None:

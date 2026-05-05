@@ -26,7 +26,7 @@ from .models import (
     ToolSpec,
     VectorToolSearchProvider,
 )
-from .registry import ToolRegistry
+from .registry import ToolRegistry, ToolRegistryParams
 from .web import FetchUrlTool, HttpRequestTool
 from .write_boundary import WRITE_TOOL_NAMES, validate_write_boundary
 
@@ -45,6 +45,7 @@ __all__ = [
     "SearchTextTool",
     "ToolExecutionResult",
     "ToolRegistry",
+    "ToolRegistryParams",
     "ToolSearchHit",
     "ToolSpec",
     "VectorToolSearchProvider",

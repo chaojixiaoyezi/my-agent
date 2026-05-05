@@ -63,7 +63,7 @@ from .local_store import LocalStore
 from .memory import JsonlMemory
 from .prompting import PromptBuilder
 from .subagent import SubAgentManager
-from .tools import ToolRegistry
+from .tooling.registry import ToolRegistry, ToolRegistryParams
 from .user_space.paths import get_user_paths
 
 
@@ -131,15 +131,17 @@ class SimpleAgent(
 
         workspace_root = self.root.parent if (self.root / "__main__.py").exists() else self.root
         self.tools = ToolRegistry(
-            workspace_root,
-            max_chars=config.tool_read_max_chars,
-            max_entries=config.tool_list_max_entries,
-            max_matches=config.tool_search_max_matches,
-            web_max_chars=config.tool_web_max_chars,
-            http_timeout=config.tool_http_timeout,
-            catalog_limit=config.tool_catalog_limit,
-            retrieval_limit=config.tool_retrieval_limit,
-            vector_search_enabled=config.tool_vector_search_enabled,
+            ToolRegistryParams(
+                workspace_root=workspace_root,
+                max_chars=config.tool_read_max_chars,
+                max_entries=config.tool_list_max_entries,
+                max_matches=config.tool_search_max_matches,
+                web_max_chars=config.tool_web_max_chars,
+                http_timeout=config.tool_http_timeout,
+                catalog_limit=config.tool_catalog_limit,
+                retrieval_limit=config.tool_retrieval_limit,
+                vector_search_enabled=config.tool_vector_search_enabled,
+            )
         )
         self.tools.register(CreateSubagentsTool(self))
         self.tools.register(SubagentBoardTool(self))

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..models import SubAgentTask
 from ..policies import (
+    MakeDueIssueParams,
     _action_for_issue,
     _commands_for_action,
     _is_active,
@@ -100,11 +101,13 @@ def _check_work_order_issues(task, validation, risk_flags, open_request_count, o
     if not validation.ok:
         issues.append(
             _make_due_issue(
-                task, severity="P0", kind="missing_work_order_files",
-                message=f"工单目录缺少 {len(validation.missing)} 个关键路径，后续接管和验收不可靠。",
-                suggested_action="repair_work_order", risk_flags=risk_flags,
-                open_request_count=open_request_count, open_gap_count=open_gap_count,
-                age_seconds=age_seconds, stale_seconds=stale_seconds,
+                params=MakeDueIssueParams(
+                    task=task, severity="P0", kind="missing_work_order_files",
+                    message=f"工单目录缺少 {len(validation.missing)} 个关键路径，后续接管和验收不可靠。",
+                    suggested_action="repair_work_order", risk_flags=risk_flags,
+                    open_request_count=open_request_count, open_gap_count=open_gap_count,
+                    age_seconds=age_seconds, stale_seconds=stale_seconds,
+                )
             )
         )
     return issues
@@ -123,11 +126,13 @@ def _check_status_issues(task, risk_flags, open_request_count, open_gap_count, a
         }[task.status]
         issues.append(
             _make_due_issue(
-                task, severity=severity, kind=f"status_{task.status.lower()}",
-                message=f"任务状态为 {task.status}，需要父代理确认原因，不能当作完成。",
-                suggested_action=action, risk_flags=risk_flags,
-                open_request_count=open_request_count, open_gap_count=open_gap_count,
-                age_seconds=age_seconds, stale_seconds=stale_seconds,
+                params=MakeDueIssueParams(
+                    task=task, severity=severity, kind=f"status_{task.status.lower()}",
+                    message=f"任务状态为 {task.status}，需要父代理确认原因，不能当作完成。",
+                    suggested_action=action, risk_flags=risk_flags,
+                    open_request_count=open_request_count, open_gap_count=open_gap_count,
+                    age_seconds=age_seconds, stale_seconds=stale_seconds,
+                )
             )
         )
     return issues
@@ -139,11 +144,13 @@ def _check_channel_broken_issues(task, risk_flags, open_request_count, open_gap_
     if task.channel_status == "BROKEN":
         issues.append(
             _make_due_issue(
-                task, severity="P0", kind="channel_broken",
-                message="最近一次通道检查为 BROKEN，优先修复 runtime / workdir / JSON 现场。",
-                suggested_action="run_channel_probe_and_fix_runtime", risk_flags=risk_flags,
-                open_request_count=open_request_count, open_gap_count=open_gap_count,
-                age_seconds=age_seconds, stale_seconds=stale_seconds,
+                params=MakeDueIssueParams(
+                    task=task, severity="P0", kind="channel_broken",
+                    message="最近一次通道检查为 BROKEN，优先修复 runtime / workdir / JSON 现场。",
+                    suggested_action="run_channel_probe_and_fix_runtime", risk_flags=risk_flags,
+                    open_request_count=open_request_count, open_gap_count=open_gap_count,
+                    age_seconds=age_seconds, stale_seconds=stale_seconds,
+                )
             )
         )
     return issues
@@ -155,11 +162,13 @@ def _check_channel_degraded_issues(task, risk_flags, open_request_count, open_ga
     if task.channel_status == "DEGRADED":
         issues.append(
             _make_due_issue(
-                task, severity="P1", kind="channel_degraded",
-                message="最近一次通道检查为 DEGRADED，建议先修复弱项再继续派工。",
-                suggested_action="inspect_channel_probe_evidence", risk_flags=risk_flags,
-                open_request_count=open_request_count, open_gap_count=open_gap_count,
-                age_seconds=age_seconds, stale_seconds=stale_seconds,
+                params=MakeDueIssueParams(
+                    task=task, severity="P1", kind="channel_degraded",
+                    message="最近一次通道检查为 DEGRADED，建议先修复弱项再继续派工。",
+                    suggested_action="inspect_channel_probe_evidence", risk_flags=risk_flags,
+                    open_request_count=open_request_count, open_gap_count=open_gap_count,
+                    age_seconds=age_seconds, stale_seconds=stale_seconds,
+                )
             )
         )
     return issues
@@ -171,11 +180,13 @@ def _check_probe_missing_issues(task, risk_flags, open_request_count, open_gap_c
     if task.status == "CHANNEL_ERROR" and not task.last_probe_at:
         issues.append(
             _make_due_issue(
-                task, severity="P0", kind="channel_probe_missing",
-                message="任务状态为 CHANNEL_ERROR，但还没有 probe 证据。",
-                suggested_action="run_channel_probe", risk_flags=risk_flags,
-                open_request_count=open_request_count, open_gap_count=open_gap_count,
-                age_seconds=age_seconds, stale_seconds=stale_seconds,
+                params=MakeDueIssueParams(
+                    task=task, severity="P0", kind="channel_probe_missing",
+                    message="任务状态为 CHANNEL_ERROR，但还没有 probe 证据。",
+                    suggested_action="run_channel_probe", risk_flags=risk_flags,
+                    open_request_count=open_request_count, open_gap_count=open_gap_count,
+                    age_seconds=age_seconds, stale_seconds=stale_seconds,
+                )
             )
         )
     return issues
@@ -187,11 +198,13 @@ def _check_done_evidence_issues(task, min_evidence, risk_flags, open_request_cou
     if task.status == "DONE" and min_evidence > 0 and len(task.evidence) < min_evidence:
         issues.append(
             _make_due_issue(
-                task, severity="P0", kind="fake_done_risk",
-                message=f"DONE 任务只有 {len(task.evidence)} 条证据，少于配置要求的 {min_evidence} 条。",
-                suggested_action="require_evidence_or_reopen", risk_flags=risk_flags,
-                open_request_count=open_request_count, open_gap_count=open_gap_count,
-                age_seconds=age_seconds, stale_seconds=stale_seconds,
+                params=MakeDueIssueParams(
+                    task=task, severity="P0", kind="fake_done_risk",
+                    message=f"DONE 任务只有 {len(task.evidence)} 条证据，少于配置要求的 {min_evidence} 条。",
+                    suggested_action="require_evidence_or_reopen", risk_flags=risk_flags,
+                    open_request_count=open_request_count, open_gap_count=open_gap_count,
+                    age_seconds=age_seconds, stale_seconds=stale_seconds,
+                )
             )
         )
     return issues
@@ -203,11 +216,13 @@ def _check_done_verification_issues(task, risk_flags, open_request_count, open_g
     if task.status == "DONE" and task.verification_status != "VERIFIED":
         issues.append(
             _make_due_issue(
-                task, severity="P1", kind="unverified_done",
-                message="任务已标记 DONE，但 verification_status 还不是 VERIFIED。",
-                suggested_action="run_acceptance_or_assign_reviewer", risk_flags=risk_flags,
-                open_request_count=open_request_count, open_gap_count=open_gap_count,
-                age_seconds=age_seconds, stale_seconds=stale_seconds,
+                params=MakeDueIssueParams(
+                    task=task, severity="P1", kind="unverified_done",
+                    message="任务已标记 DONE，但 verification_status 还不是 VERIFIED。",
+                    suggested_action="run_acceptance_or_assign_reviewer", risk_flags=risk_flags,
+                    open_request_count=open_request_count, open_gap_count=open_gap_count,
+                    age_seconds=age_seconds, stale_seconds=stale_seconds,
+                )
             )
         )
     return issues
@@ -219,11 +234,13 @@ def _check_capability_request_issues(task, open_request_count, risk_flags, open_
     if open_request_count:
         issues.append(
             _make_due_issue(
-                task, severity="P1", kind="open_capability_request",
-                message=f"存在 {open_request_count} 条未处理能力请求。",
-                suggested_action="route_capability_request", risk_flags=risk_flags,
-                open_request_count=open_request_count, open_gap_count=open_gap_count,
-                age_seconds=age_seconds, stale_seconds=stale_seconds,
+                params=MakeDueIssueParams(
+                    task=task, severity="P1", kind="open_capability_request",
+                    message=f"存在 {open_request_count} 条未处理能力请求。",
+                    suggested_action="route_capability_request", risk_flags=risk_flags,
+                    open_request_count=open_request_count, open_gap_count=open_gap_count,
+                    age_seconds=age_seconds, stale_seconds=stale_seconds,
+                )
             )
         )
     return issues
@@ -235,11 +252,13 @@ def _check_capability_gap_issues(task, open_gap_count, risk_flags, open_request_
     if open_gap_count:
         issues.append(
             _make_due_issue(
-                task, severity="P2", kind="open_capability_gap",
-                message=f"存在 {open_gap_count} 条未关闭能力缺口。",
-                suggested_action="triage_gap_for_learning_or_tooling", risk_flags=risk_flags,
-                open_request_count=open_request_count, open_gap_count=open_gap_count,
-                age_seconds=age_seconds, stale_seconds=stale_seconds,
+                params=MakeDueIssueParams(
+                    task=task, severity="P2", kind="open_capability_gap",
+                    message=f"存在 {open_gap_count} 条未关闭能力缺口。",
+                    suggested_action="triage_gap_for_learning_or_tooling", risk_flags=risk_flags,
+                    open_request_count=open_request_count, open_gap_count=open_gap_count,
+                    age_seconds=age_seconds, stale_seconds=stale_seconds,
+                )
             )
         )
     return issues
@@ -252,11 +271,13 @@ def _check_heartbeat_timeout_issues(task, heartbeat_timeout, stale_seconds, risk
         severity = "P0" if stale_seconds > heartbeat_timeout * 3 else "P1"
         issues.append(
             _make_due_issue(
-                task, severity=severity, kind="heartbeat_stale",
-                message=f"心跳已停滞 {stale_seconds:.0f}s，超过配置阈值 {heartbeat_timeout}s。",
-                suggested_action="check_runtime_or_takeover", risk_flags=risk_flags,
-                open_request_count=open_request_count, open_gap_count=open_gap_count,
-                age_seconds=age_seconds, stale_seconds=stale_seconds,
+                params=MakeDueIssueParams(
+                    task=task, severity=severity, kind="heartbeat_stale",
+                    message=f"心跳已停滞 {stale_seconds:.0f}s，超过配置阈值 {heartbeat_timeout}s。",
+                    suggested_action="check_runtime_or_takeover", risk_flags=risk_flags,
+                    open_request_count=open_request_count, open_gap_count=open_gap_count,
+                    age_seconds=age_seconds, stale_seconds=stale_seconds,
+                )
             )
         )
     return issues
@@ -268,11 +289,13 @@ def _check_run_timeout_issues(task, run_timeout, age_seconds, risk_flags, open_r
     if _is_active(task.status) and run_timeout > 0 and age_seconds > run_timeout:
         issues.append(
             _make_due_issue(
-                task, severity="P0", kind="run_timeout",
-                message=f"任务已运行 {age_seconds:.0f}s，超过配置阈值 {run_timeout}s。",
-                suggested_action="shrink_scope_reassign_or_takeover", risk_flags=risk_flags,
-                open_request_count=open_request_count, open_gap_count=open_gap_count,
-                age_seconds=age_seconds, stale_seconds=stale_seconds,
+                params=MakeDueIssueParams(
+                    task=task, severity="P0", kind="run_timeout",
+                    message=f"任务已运行 {age_seconds:.0f}s，超过配置阈值 {run_timeout}s。",
+                    suggested_action="shrink_scope_reassign_or_takeover", risk_flags=risk_flags,
+                    open_request_count=open_request_count, open_gap_count=open_gap_count,
+                    age_seconds=age_seconds, stale_seconds=stale_seconds,
+                )
             )
         )
     return issues

@@ -6,7 +6,7 @@ from pathlib import Path
 from agent_py_agent.agent.capabilities import CapabilityRouter
 from agent_py_agent.agent.capability_config import CapabilityConfig, load_capability_config
 from agent_py_agent.agent.skills import SkillRegistry, parse_skill_file
-from agent_py_agent.agent.tools import ToolRegistry
+from agent_py_agent.agent.tools import ToolRegistry, ToolRegistryParams
 
 
 def test_skill_card_parsing():
@@ -77,16 +77,18 @@ risk_level: low
 
 def test_tool_specs_become_capability_cards():
     registry = ToolRegistry(
-        Path.cwd(),
-        max_chars=6000,
-        max_entries=200,
-        max_matches=50,
-        web_max_chars=12000,
-        http_timeout=30,
-        catalog_limit=20,
-        retrieval_limit=3,
-        vector_search_enabled=False,
-        shell_tool_timeout=30,
+        ToolRegistryParams(
+            workspace_root=Path.cwd(),
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            shell_tool_timeout=30,
+        )
     )
     router = CapabilityRouter(
         config=CapabilityConfig(capability_candidate_limit=2),
@@ -113,16 +115,18 @@ def test_zero_limit_means_unlimited():
         )
         config = load_capability_config(config_path)
     registry = ToolRegistry(
-        Path.cwd(),
-        max_chars=6000,
-        max_entries=200,
-        max_matches=50,
-        web_max_chars=12000,
-        http_timeout=30,
-        catalog_limit=20,
-        retrieval_limit=3,
-        vector_search_enabled=False,
-        shell_tool_timeout=30,
+        ToolRegistryParams(
+            workspace_root=Path.cwd(),
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            shell_tool_timeout=30,
+        )
     )
     router = CapabilityRouter(config=config, tool_specs=registry.specs())
 

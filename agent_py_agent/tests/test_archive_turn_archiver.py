@@ -9,7 +9,9 @@ from pathlib import Path
 import pytest
 
 from agent_py_agent.agent.memory_archive.runtime.turn_archiver import (
+    ArchiveRunTurnParams,
     ArchiveRunTurnResult,
+    ArchiveTurnContext,
     RunContext,
     TurnData,
     _build_run_turn_events,
@@ -202,18 +204,22 @@ class TestArchiveRunTurn:
     def test_writes_to_raw_directory(self, tmp_path):
         """验证写入 raw 目录"""
         result = archive_run_turn(
-            root=tmp_path,
-            session_id="s1",
-            user_prompt="hello",
-            response_text="hi",
-            backend="test",
-            tool_calls=[],
-            request_id="r1",
-            run_id="run1",
-            task_id="t1",
-            source="run",
-            archive_level=3,
-            created_at="2026-05-01T10:00:00Z",
+            ArchiveRunTurnParams(
+                root=tmp_path,
+                ctx=ArchiveTurnContext(
+                    session_id="s1",
+                    user_prompt="hello",
+                    response_text="hi",
+                    backend="test",
+                    tool_calls=[],
+                    request_id="r1",
+                    run_id="run1",
+                    task_id="t1",
+                    source="run",
+                    archive_level=3,
+                    created_at="2026-05-01T10:00:00Z",
+                ),
+            )
         )
 
         assert result.event_count >= 2
@@ -227,18 +233,22 @@ class TestArchiveRunTurn:
             {"tool_name": "write"},
         ]
         result = archive_run_turn(
-            root=tmp_path,
-            session_id="s1",
-            user_prompt="hello",
-            response_text="hi",
-            backend="test",
-            tool_calls=tool_calls,
-            request_id="r1",
-            run_id="run1",
-            task_id="t1",
-            source="run",
-            archive_level=3,
-            created_at="2026-05-01T10:00:00Z",
+            ArchiveRunTurnParams(
+                root=tmp_path,
+                ctx=ArchiveTurnContext(
+                    session_id="s1",
+                    user_prompt="hello",
+                    response_text="hi",
+                    backend="test",
+                    tool_calls=tool_calls,
+                    request_id="r1",
+                    run_id="run1",
+                    task_id="t1",
+                    source="run",
+                    archive_level=3,
+                    created_at="2026-05-01T10:00:00Z",
+                ),
+            )
         )
 
         # user message + assistant response + 2 tool calls = 4 events
@@ -247,18 +257,22 @@ class TestArchiveRunTurn:
     def test_returns_valid_event_ids(self, tmp_path):
         """验证返回有效事件 ID"""
         result = archive_run_turn(
-            root=tmp_path,
-            session_id="s1",
-            user_prompt="hello",
-            response_text="hi",
-            backend="test",
-            tool_calls=[],
-            request_id="r1",
-            run_id="run1",
-            task_id="t1",
-            source="run",
-            archive_level=3,
-            created_at="2026-05-01T10:00:00Z",
+            ArchiveRunTurnParams(
+                root=tmp_path,
+                ctx=ArchiveTurnContext(
+                    session_id="s1",
+                    user_prompt="hello",
+                    response_text="hi",
+                    backend="test",
+                    tool_calls=[],
+                    request_id="r1",
+                    run_id="run1",
+                    task_id="t1",
+                    source="run",
+                    archive_level=3,
+                    created_at="2026-05-01T10:00:00Z",
+                ),
+            )
         )
 
         assert len(result.event_ids) == result.event_count
@@ -267,18 +281,22 @@ class TestArchiveRunTurn:
     def test_content_hashes_consistent(self, tmp_path):
         """验证内容哈希一致性"""
         result = archive_run_turn(
-            root=tmp_path,
-            session_id="s1",
-            user_prompt="hello world",
-            response_text="hi there",
-            backend="test",
-            tool_calls=[],
-            request_id="r1",
-            run_id="run1",
-            task_id="t1",
-            source="run",
-            archive_level=3,
-            created_at="2026-05-01T10:00:00Z",
+            ArchiveRunTurnParams(
+                root=tmp_path,
+                ctx=ArchiveTurnContext(
+                    session_id="s1",
+                    user_prompt="hello world",
+                    response_text="hi there",
+                    backend="test",
+                    tool_calls=[],
+                    request_id="r1",
+                    run_id="run1",
+                    task_id="t1",
+                    source="run",
+                    archive_level=3,
+                    created_at="2026-05-01T10:00:00Z",
+                ),
+            )
         )
 
         assert len(result.content_hashes) == result.event_count
@@ -287,18 +305,22 @@ class TestArchiveRunTurn:
     def test_token_estimate_positive(self, tmp_path):
         """验证 token 估算为正数"""
         result = archive_run_turn(
-            root=tmp_path,
-            session_id="s1",
-            user_prompt="hello",
-            response_text="hi",
-            backend="test",
-            tool_calls=[],
-            request_id="r1",
-            run_id="run1",
-            task_id="t1",
-            source="run",
-            archive_level=3,
-            created_at="2026-05-01T10:00:00Z",
+            ArchiveRunTurnParams(
+                root=tmp_path,
+                ctx=ArchiveTurnContext(
+                    session_id="s1",
+                    user_prompt="hello",
+                    response_text="hi",
+                    backend="test",
+                    tool_calls=[],
+                    request_id="r1",
+                    run_id="run1",
+                    task_id="t1",
+                    source="run",
+                    archive_level=3,
+                    created_at="2026-05-01T10:00:00Z",
+                ),
+            )
         )
 
         assert result.token_estimate >= 0
@@ -306,17 +328,21 @@ class TestArchiveRunTurn:
     def test_default_created_at_used(self, tmp_path):
         """验证使用默认 created_at"""
         result = archive_run_turn(
-            root=tmp_path,
-            session_id="s1",
-            user_prompt="hello",
-            response_text="hi",
-            backend="test",
-            tool_calls=[],
-            request_id="r1",
-            run_id="run1",
-            task_id="t1",
-            source="run",
-            archive_level=3,
+            ArchiveRunTurnParams(
+                root=tmp_path,
+                ctx=ArchiveTurnContext(
+                    session_id="s1",
+                    user_prompt="hello",
+                    response_text="hi",
+                    backend="test",
+                    tool_calls=[],
+                    request_id="r1",
+                    run_id="run1",
+                    task_id="t1",
+                    source="run",
+                    archive_level=3,
+                ),
+            )
         )
 
         # 应该使用 UTC now，不抛出异常
@@ -325,18 +351,22 @@ class TestArchiveRunTurn:
     def test_empty_tool_calls(self, tmp_path):
         """验证空工具调用列表"""
         result = archive_run_turn(
-            root=tmp_path,
-            session_id="s1",
-            user_prompt="hello",
-            response_text="hi",
-            backend="test",
-            tool_calls=None,
-            request_id="r1",
-            run_id="run1",
-            task_id="t1",
-            source="run",
-            archive_level=3,
-            created_at="2026-05-01T10:00:00Z",
+            ArchiveRunTurnParams(
+                root=tmp_path,
+                ctx=ArchiveTurnContext(
+                    session_id="s1",
+                    user_prompt="hello",
+                    response_text="hi",
+                    backend="test",
+                    tool_calls=None,
+                    request_id="r1",
+                    run_id="run1",
+                    task_id="t1",
+                    source="run",
+                    archive_level=3,
+                    created_at="2026-05-01T10:00:00Z",
+                ),
+            )
         )
 
         assert result.event_count == 2  # 只有 user + assistant
@@ -344,18 +374,22 @@ class TestArchiveRunTurn:
     def test_none_tool_calls(self, tmp_path):
         """验证 None 工具调用"""
         result = archive_run_turn(
-            root=tmp_path,
-            session_id="s1",
-            user_prompt="hello",
-            response_text="hi",
-            backend="test",
-            tool_calls=None,
-            request_id="r1",
-            run_id="run1",
-            task_id="t1",
-            source="run",
-            archive_level=3,
-            created_at="2026-05-01T10:00:00Z",
+            ArchiveRunTurnParams(
+                root=tmp_path,
+                ctx=ArchiveTurnContext(
+                    session_id="s1",
+                    user_prompt="hello",
+                    response_text="hi",
+                    backend="test",
+                    tool_calls=None,
+                    request_id="r1",
+                    run_id="run1",
+                    task_id="t1",
+                    source="run",
+                    archive_level=3,
+                    created_at="2026-05-01T10:00:00Z",
+                ),
+            )
         )
 
         assert result.event_count == 2
@@ -363,18 +397,22 @@ class TestArchiveRunTurn:
     def test_archive_level_normalized(self, tmp_path):
         """验证归档等级被标准化"""
         result = archive_run_turn(
-            root=tmp_path,
-            session_id="s1",
-            user_prompt="hello",
-            response_text="hi",
-            backend="test",
-            tool_calls=[],
-            request_id="r1",
-            run_id="run1",
-            task_id="t1",
-            source="run",
-            archive_level=99,  # 超出范围，应该被标准化为 3
-            created_at="2026-05-01T10:00:00Z",
+            ArchiveRunTurnParams(
+                root=tmp_path,
+                ctx=ArchiveTurnContext(
+                    session_id="s1",
+                    user_prompt="hello",
+                    response_text="hi",
+                    backend="test",
+                    tool_calls=[],
+                    request_id="r1",
+                    run_id="run1",
+                    task_id="t1",
+                    source="run",
+                    archive_level=99,  # 超出范围，应该被标准化为 3
+                    created_at="2026-05-01T10:00:00Z",
+                ),
+            )
         )
 
         assert result.event_count >= 2
@@ -382,18 +420,22 @@ class TestArchiveRunTurn:
     def test_result_paths_are_path_objects(self, tmp_path):
         """验证返回路径是 Path 对象"""
         result = archive_run_turn(
-            root=tmp_path,
-            session_id="s1",
-            user_prompt="hello",
-            response_text="hi",
-            backend="test",
-            tool_calls=[],
-            request_id="r1",
-            run_id="run1",
-            task_id="t1",
-            source="run",
-            archive_level=3,
-            created_at="2026-05-01T10:00:00Z",
+            ArchiveRunTurnParams(
+                root=tmp_path,
+                ctx=ArchiveTurnContext(
+                    session_id="s1",
+                    user_prompt="hello",
+                    response_text="hi",
+                    backend="test",
+                    tool_calls=[],
+                    request_id="r1",
+                    run_id="run1",
+                    task_id="t1",
+                    source="run",
+                    archive_level=3,
+                    created_at="2026-05-01T10:00:00Z",
+                ),
+            )
         )
 
         assert all(isinstance(p, Path) for p in result.write_paths)

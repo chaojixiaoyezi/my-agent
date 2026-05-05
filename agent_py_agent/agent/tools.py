@@ -24,6 +24,7 @@ from .tooling import (
     SearchTextTool,
     ToolExecutionResult,
     ToolRegistry,
+    ToolRegistryParams,
     ToolSearchHit,
     ToolSpec,
     VectorToolSearchProvider,

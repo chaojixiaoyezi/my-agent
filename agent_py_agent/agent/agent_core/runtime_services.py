@@ -18,7 +18,7 @@ from ..memory_archive import (
     write_compression_snapshot,
     write_recovery_snapshot,
 )
-from ..memory_archive.runtime.turn_archiver import ArchiveTurnContext
+from ..memory_archive.runtime.turn_archiver import ArchiveRunTurnParams, ArchiveTurnContext
 from ..memory_archive.snapshots import (
     CompressionSnapshotInput,
     RecoverySnapshotInput,
@@ -428,19 +428,21 @@ class FinalizationService:
             "agent", params.final_response.text, tags=[params.final_response.backend]
         )
         return archive_run_turn(
-            self._agent.root,
-            ArchiveTurnContext(
-                session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
-                request_id=params.run_request_id,
-                run_id=params.run_id,
-                task_id=params.task_id,
-                user_prompt=params.user_prompt,
-                response_text=params.final_response.text,
-                backend=params.final_response.backend,
-                tool_calls=params.archive_tool_calls or [],
-                source=params.source,
-                archive_level=int(getattr(self._agent.config, "memory_archive_level", 3)),
-            ),
+            ArchiveRunTurnParams(
+                root=self._agent.root,
+                ctx=ArchiveTurnContext(
+                    session_id=getattr(self._agent, "session_id", self._agent.config.agent_name),
+                    request_id=params.run_request_id,
+                    run_id=params.run_id,
+                    task_id=params.task_id,
+                    user_prompt=params.user_prompt,
+                    response_text=params.final_response.text,
+                    backend=params.final_response.backend,
+                    tool_calls=params.archive_tool_calls or [],
+                    source=params.source,
+                    archive_level=int(getattr(self._agent.config, "memory_archive_level", 3)),
+                ),
+            )
         )
 
     def _write_recovery_snapshot_if_needed(self, params: WriteRecoverySnapshotParams):

@@ -202,8 +202,9 @@ class TestHuntIpRole:
             mock_query.return_value = {"tool": "security_query", "row_count": 5}
             result = hunt_ip("1.2.3.4", role="attacker", store=MagicMock())
             mock_query.assert_called_once()
-            call_kwargs = mock_query.call_args[1]
-            assert call_kwargs["attacker_ip"] == "1.2.3.4"
+            call_args = mock_query.call_args[0]
+            params = call_args[0]
+            assert params.attacker_ip == "1.2.3.4"
 
     def test_role_victim(self):
         """role=victim 只查 victim_ip。"""
@@ -212,8 +213,9 @@ class TestHuntIpRole:
         with patch("agent_py_agent.agent.log_analysis.tools.query_functions.security_query") as mock_query:
             mock_query.return_value = {"tool": "security_query", "row_count": 3}
             result = hunt_ip("5.6.7.8", role="victim", store=MagicMock())
-            call_kwargs = mock_query.call_args[1]
-            assert call_kwargs["victim_ip"] == "5.6.7.8"
+            call_args = mock_query.call_args[0]
+            params = call_args[0]
+            assert params.victim_ip == "5.6.7.8"
 
     def test_role_any_returns_combined(self):
         """role=any 返回组合结果。"""
@@ -246,8 +248,9 @@ class TestSecurityHuntDomain:
             mock_query.return_value = {"tool": "security_query", "row_count": 1}
             result = security_hunt_domain("evil.com", store=MagicMock())
             mock_query.assert_called_once()
-            call_kwargs = mock_query.call_args[1]
-            assert call_kwargs["domain"] == "evil.com"
+            call_args = mock_query.call_args[0]
+            params = call_args[0]
+            assert params.domain == "evil.com"
 
 
 class TestSecurityHuntIp:

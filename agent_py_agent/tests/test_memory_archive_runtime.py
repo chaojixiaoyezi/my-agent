@@ -5,6 +5,10 @@ import tempfile
 from pathlib import Path
 
 from agent_py_agent.agent.memory_archive import archive_run_turn
+from agent_py_agent.agent.memory_archive.runtime.turn_archiver import (
+    ArchiveRunTurnParams,
+    ArchiveTurnContext,
+)
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -16,15 +20,19 @@ def test_archive_run_turn_writes_user_and_assistant_events():
         root = Path(td)
 
         result = archive_run_turn(
-            root,
-            session_id="session-1",
-            request_id="req-1",
-            run_id="run-1",
-            task_id="task-1",
-            user_prompt="请记住这轮用户消息。",
-            response_text="我已经完成这一轮回复。",
-            backend="echo",
-            created_at="2026-04-30T10:00:00+08:00",
+            ArchiveRunTurnParams(
+                root=root,
+                ctx=ArchiveTurnContext(
+                    session_id="session-1",
+                    request_id="req-1",
+                    run_id="run-1",
+                    task_id="task-1",
+                    user_prompt="请记住这轮用户消息。",
+                    response_text="我已经完成这一轮回复。",
+                    backend="echo",
+                    created_at="2026-04-30T10:00:00+08:00",
+                ),
+            )
         )
 
         assert result.event_count == 2
@@ -50,22 +58,30 @@ def test_archive_run_turn_archive_level_changes_preview_length():
 
     with tempfile.TemporaryDirectory() as td0, tempfile.TemporaryDirectory() as td3:
         level0 = archive_run_turn(
-            Path(td0),
-            session_id="session-1",
-            user_prompt=long_prompt,
-            response_text="短回复",
-            backend="echo",
-            archive_level=0,
-            created_at="2026-04-30T10:00:00+08:00",
+            ArchiveRunTurnParams(
+                root=Path(td0),
+                ctx=ArchiveTurnContext(
+                    session_id="session-1",
+                    user_prompt=long_prompt,
+                    response_text="短回复",
+                    backend="echo",
+                    archive_level=0,
+                    created_at="2026-04-30T10:00:00+08:00",
+                ),
+            )
         )
         level3 = archive_run_turn(
-            Path(td3),
-            session_id="session-1",
-            user_prompt=long_prompt,
-            response_text="短回复",
-            backend="echo",
-            archive_level=3,
-            created_at="2026-04-30T10:00:00+08:00",
+            ArchiveRunTurnParams(
+                root=Path(td3),
+                ctx=ArchiveTurnContext(
+                    session_id="session-1",
+                    user_prompt=long_prompt,
+                    response_text="短回复",
+                    backend="echo",
+                    archive_level=3,
+                    created_at="2026-04-30T10:00:00+08:00",
+                ),
+            )
         )
 
         assert len(level0.events[0].content_preview) > len(level3.events[0].content_preview)
@@ -74,21 +90,24 @@ def test_archive_run_turn_archive_level_changes_preview_length():
 
 
 def test_archive_run_turn_event_ids_and_hashes_are_stable():
-    kwargs = {
-        "session_id": "session-1",
-        "request_id": "req-1",
-        "run_id": "run-1",
-        "task_id": "task-1",
-        "user_prompt": "同样的用户正文",
-        "response_text": "同样的助手正文",
-        "backend": "echo",
-        "tool_calls": [{"tool": "read_file", "id": "call-1", "ok": True, "output": "same output"}],
-        "created_at": "2026-04-30T10:00:00+08:00",
-    }
+    params = ArchiveRunTurnParams(
+        root=None,  # will be overridden per branch
+        ctx=ArchiveTurnContext(
+            session_id="session-1",
+            request_id="req-1",
+            run_id="run-1",
+            task_id="task-1",
+            user_prompt="同样的用户正文",
+            response_text="同样的助手正文",
+            backend="echo",
+            tool_calls=[{"tool": "read_file", "id": "call-1", "ok": True, "output": "same output"}],
+            created_at="2026-04-30T10:00:00+08:00",
+        ),
+    )
 
     with tempfile.TemporaryDirectory() as td1, tempfile.TemporaryDirectory() as td2:
-        first = archive_run_turn(Path(td1), **kwargs)
-        second = archive_run_turn(Path(td2), **kwargs)
+        first = archive_run_turn(ArchiveRunTurnParams(root=Path(td1), ctx=params.ctx))
+        second = archive_run_turn(ArchiveRunTurnParams(root=Path(td2), ctx=params.ctx))
 
         assert first.event_ids == second.event_ids
         assert first.content_hashes == second.content_hashes
@@ -101,22 +120,26 @@ def test_archive_run_turn_writes_tool_event_metadata():
         root = Path(td)
 
         result = archive_run_turn(
-            root,
-            session_id="session-1",
-            user_prompt="读取文件",
-            response_text="文件不存在。",
-            backend="echo",
-            tool_calls=[
-                {
-                    "tool": "read_file",
-                    "id": "call-7",
-                    "ok": False,
-                    "error_code": "ENOENT",
-                    "parameters": {"path": "missing.txt"},
-                    "output": "missing.txt not found",
-                }
-            ],
-            created_at="2026-04-30T10:00:00+08:00",
+            ArchiveRunTurnParams(
+                root=root,
+                ctx=ArchiveTurnContext(
+                    session_id="session-1",
+                    user_prompt="读取文件",
+                    response_text="文件不存在。",
+                    backend="echo",
+                    tool_calls=[
+                        {
+                            "tool": "read_file",
+                            "id": "call-7",
+                            "ok": False,
+                            "error_code": "ENOENT",
+                            "parameters": {"path": "missing.txt"},
+                            "output": "missing.txt not found",
+                        }
+                    ],
+                    created_at="2026-04-30T10:00:00+08:00",
+                ),
+            )
         )
 
         records = _read_jsonl(result.write_paths[0])

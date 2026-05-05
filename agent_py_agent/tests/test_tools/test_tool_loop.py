@@ -11,7 +11,7 @@ from pathlib import Path
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.log_analysis.storage import LocalLogStore
-from agent_py_agent.agent.tools import ToolRegistry
+from agent_py_agent.agent.tools import ToolRegistry, ToolRegistryParams
 
 from .backends import (
     DuplicateSubagentDelegationBackend,
@@ -135,15 +135,17 @@ def test_tool_catalog_and_recommended_sections():
     检查工具目录里有 http_request，推荐工具区能根据自然语言选到 http_request。
     """
     registry = ToolRegistry(
-        Path.cwd(),
-        max_chars=6000,
-        max_entries=200,
-        max_matches=50,
-        web_max_chars=12000,
-        http_timeout=30,
-        catalog_limit=20,
-        retrieval_limit=3,
-        vector_search_enabled=False,
+        ToolRegistryParams(
+            workspace_root=Path.cwd(),
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+        )
     )
 
     catalog = registry.render_catalog_section()
@@ -163,16 +165,18 @@ def test_tool_call_parser_accepts_subagent_call_alias():
     有些模型输出 [SUBAGENT_CALL]，解析器应该和 [TOOL_CALL] 一视同仁。
     """
     registry = ToolRegistry(
-        Path.cwd(),
-        max_chars=6000,
-        max_entries=200,
-        max_matches=50,
-        web_max_chars=12000,
-        http_timeout=30,
-        catalog_limit=20,
-        retrieval_limit=3,
-        vector_search_enabled=False,
-        shell_tool_timeout=30,
+        ToolRegistryParams(
+            workspace_root=Path.cwd(),
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            shell_tool_timeout=30,
+        )
     )
     calls = registry.parse_tool_calls(
         '[SUBAGENT_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
@@ -188,16 +192,18 @@ def test_tool_call_parser_accepts_qwen_xmlish_read_call():
     Qwen 模型可能输出 <function=read> 格式的工具调用，需要正确映射到 read_file。
     """
     registry = ToolRegistry(
-        Path.cwd(),
-        max_chars=6000,
-        max_entries=200,
-        max_matches=50,
-        web_max_chars=12000,
-        http_timeout=30,
-        catalog_limit=20,
-        retrieval_limit=3,
-        vector_search_enabled=False,
-        shell_tool_timeout=30,
+        ToolRegistryParams(
+            workspace_root=Path.cwd(),
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            shell_tool_timeout=30,
+        )
     )
     calls = registry.parse_tool_calls(
         "\n"
@@ -217,16 +223,18 @@ def test_tool_call_parser_accepts_qwen_xmlish_write_call():
     Qwen 写文件调用里 &amp; 应该被解码成 &。
     """
     registry = ToolRegistry(
-        Path.cwd(),
-        max_chars=6000,
-        max_entries=200,
-        max_matches=50,
-        web_max_chars=12000,
-        http_timeout=30,
-        catalog_limit=20,
-        retrieval_limit=3,
-        vector_search_enabled=False,
-        shell_tool_timeout=30,
+        ToolRegistryParams(
+            workspace_root=Path.cwd(),
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            shell_tool_timeout=30,
+        )
     )
     calls = registry.parse_tool_calls(
         '<function name="write">'
@@ -245,16 +253,18 @@ def test_tool_call_parser_reports_incomplete_qwen_xmlish_call():
     第二个调用缺少闭合标签，解析器应返回 __parse_error__ 而不是崩溃。
     """
     registry = ToolRegistry(
-        Path.cwd(),
-        max_chars=6000,
-        max_entries=200,
-        max_matches=50,
-        web_max_chars=12000,
-        http_timeout=30,
-        catalog_limit=20,
-        retrieval_limit=3,
-        vector_search_enabled=False,
-        shell_tool_timeout=30,
+        ToolRegistryParams(
+            workspace_root=Path.cwd(),
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            shell_tool_timeout=30,
+        )
     )
     calls = registry.parse_tool_calls(
         "<function=read><parameter=file_path>A.md</parameter>\n"
@@ -313,16 +323,19 @@ import json
 
 
 def _make_tool_registry(workspace: Path) -> ToolRegistry:
+    from agent_py_agent.agent.tools import ToolRegistryParams
     return ToolRegistry(
-        workspace,
-        max_chars=12000,
-        max_entries=100,
-        max_matches=50,
-        web_max_chars=12000,
-        http_timeout=30,
-        catalog_limit=20,
-        retrieval_limit=3,
-        vector_search_enabled=False,
+        ToolRegistryParams(
+            workspace_root=workspace,
+            max_chars=12000,
+            max_entries=100,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+        )
     )
 
 

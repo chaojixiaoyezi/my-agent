@@ -1,5 +1,6 @@
 """测试日志分析调度器模块 (scheduler.py)"""
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -19,30 +20,42 @@ from agent_py_agent.agent.log_analysis.models import CaseRecord, Finding
 # 辅助函数
 # ============================================================
 
-def make_finding(
-    finding_id: str = "finding-001",
-    detector_id: str = "test_detector",
-    risk_score: float = 0.7,
-    attacker_ip: str = "1.2.3.4",
-    victim_ip: str = "5.6.7.8",
-    window: list[str] | None = None,
-    hypothesis: str = "",
-    gaps: list[str] | None = None,
-    next_queries: list[Any] | None = None,
-) -> Finding:
-    """创建测试用 Finding 对象"""
+
+@dataclass(frozen=True)
+class MakeFindingParams:
+    """Params bundle for make_finding."""
+
+    finding_id: str = "finding-001"
+    detector_id: str = "test_detector"
+    risk_score: float = 0.7
+    attacker_ip: str = "1.2.3.4"
+    victim_ip: str = "5.6.7.8"
+    window: list[str] | None = None
+    hypothesis: str = ""
+    gaps: list[str] | None = None
+    next_queries: list[Any] | None = None
+
+
+def make_finding(params: MakeFindingParams | None = None, **kwargs: Any) -> Finding:
+    """Create a test Finding object.
+
+    Args:
+        params: Optional params bundle. If provided, kwargs are ignored.
+        **kwargs: Individual parameters (used when params is None).
+    """
+    p = params or MakeFindingParams(**kwargs)
     return Finding(
-        finding_id=finding_id,
-        detector_id=detector_id,
-        window=window or ["2026-05-01T00:00:00Z", "2026-05-01T23:59:59Z"],
+        finding_id=p.finding_id,
+        detector_id=p.detector_id,
+        window=p.window or ["2026-05-01T00:00:00Z", "2026-05-01T23:59:59Z"],
         severity_hint="medium",
-        risk_score=risk_score,
-        hypothesis=hypothesis,
-        gaps=gaps or [],
-        next_queries=next_queries or [],
+        risk_score=p.risk_score,
+        hypothesis=p.hypothesis,
+        gaps=p.gaps or [],
+        next_queries=p.next_queries or [],
         entities={
-            "attacker_ip": [attacker_ip],
-            "victim_ip": [victim_ip],
+            "attacker_ip": [p.attacker_ip],
+            "victim_ip": [p.victim_ip],
         },
         evidence_refs=[],
     )

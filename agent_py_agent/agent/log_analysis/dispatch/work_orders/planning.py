@@ -236,18 +236,31 @@ def _build_work_order_context(
     }
 
 
-def _create_work_orders(
-    case_id: str,
-    common_context: dict[str, Any],
-    refs: list[str],
-    checks: list[str],
-    issues: list[str],
-    risks: list[str],
-    mode: str,
-    dry_run: bool,
-    ready: bool,
-) -> tuple[SubagentWorkOrder, SubagentWorkOrder]:
+@dataclass(frozen=True)
+class CreateWorkOrdersParams:
+    """Params bundle for _create_work_orders."""
+    case_id: str
+    common_context: dict[str, Any]
+    refs: list[str]
+    checks: list[str]
+    issues: list[str]
+    risks: list[str]
+    mode: str
+    dry_run: bool
+    ready: bool
+
+
+def _create_work_orders(*, params: CreateWorkOrdersParams) -> tuple[SubagentWorkOrder, SubagentWorkOrder]:
     """Create analyst and reviewer work orders from common data."""
+    case_id = params.case_id
+    common_context = params.common_context
+    refs = params.refs
+    checks = params.checks
+    issues = params.issues
+    risks = params.risks
+    mode = params.mode
+    dry_run = params.dry_run
+    ready = params.ready
     analyst = SubagentWorkOrder(
         role="analyst",
         case_id=case_id,
@@ -333,15 +346,17 @@ def plan_case_subagent_work_orders(
 
     common_context = _build_work_order_context(summary, refs, route, quality_contract)
     analyst, reviewer = _create_work_orders(
-        case_id,
-        common_context,
-        refs,
-        checks,
-        issues,
-        risks,
-        mode,
-        dry_run,
-        ready,
+        params=CreateWorkOrdersParams(
+            case_id=case_id,
+            common_context=common_context,
+            refs=refs,
+            checks=checks,
+            issues=issues,
+            risks=risks,
+            mode=mode,
+            dry_run=dry_run,
+            ready=ready,
+        )
     )
 
     return LogAnalysisWorkOrderPlan(

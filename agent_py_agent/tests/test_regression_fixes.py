@@ -237,18 +237,20 @@ def test_regression_tool_registry_rejects_non_dict_payload():
     """验证工具注册层拒绝非对象 payload"""
     from pathlib import Path
 
-    from agent_py_agent.agent.tooling.registry import ToolRegistry
+    from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
 
     registry = ToolRegistry(
-        Path.cwd(),
-        max_chars=6000,
-        max_entries=200,
-        max_matches=50,
-        web_max_chars=12000,
-        http_timeout=30,
-        catalog_limit=20,
-        retrieval_limit=3,
-        vector_search_enabled=False,
+        ToolRegistryParams(
+            workspace_root=Path.cwd(),
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+        )
     )
 
     # 模拟检查 payload 类型
@@ -269,18 +271,20 @@ def test_regression_tool_registry_rejects_unknown_tool():
     """验证工具注册层拒绝未知工具名"""
     from pathlib import Path
 
-    from agent_py_agent.agent.tooling.registry import ToolRegistry
+    from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
 
     registry = ToolRegistry(
-        Path.cwd(),
-        max_chars=6000,
-        max_entries=200,
-        max_matches=50,
-        web_max_chars=12000,
-        http_timeout=30,
-        catalog_limit=20,
-        retrieval_limit=3,
-        vector_search_enabled=False,
+        ToolRegistryParams(
+            workspace_root=Path.cwd(),
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+        )
     )
     known_tools = {"read_file", "write_file", "search_text", "list_files"}
 

@@ -7,79 +7,87 @@ tui.py 的 run_tui 超过 100 行限制。拆出 UI 初始化相关代码（stat
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
+from queue import Queue
 from typing import Any
 
 from .input_loop import is_show_prompt_command
-from .rendering import (
-    _cprint,
+from .rendering import _cprint, _tui_print_banner
+from .tui import (
+    TuiHandleCommandParams,
     _tui_get_status_text,
     _tui_handle_expand_command,
-    _tui_print_banner,
     _tui_request_exit,
 )
 
 
-def _tui_create_keybindings(
-    input_area,
-    agent,
-    args,
-    runtime_inject,
-    prompt_files,
-    use_gateway,
-    paths,
-    state_lock,
-    is_running_ref,
-    pending_jobs_ref,
-    running_prompt_ref,
-    running_started_at_ref,
-    shutting_down_ref,
-    stop_event,
-    assistant_outputs,
-    jobs,
-    pending_jobs_ref_for_enqueue,
-):
+@dataclass
+class TuiCreateKeybindingsParams:
+    """Parameter bundle for _tui_create_keybindings."""
+
+    input_area: Any
+    agent: Any
+    args: Any
+    runtime_inject: list[Any]
+    prompt_files: list[Any]
+    use_gateway: bool
+    paths: Any
+    state_lock: threading.Lock
+    is_running_ref: list[Any]
+    pending_jobs_ref: list[int]
+    running_prompt_ref: list[str]
+    running_started_at_ref: list[float]
+    shutting_down_ref: list[bool]
+    stop_event: threading.Event
+    assistant_outputs: list[str]
+    jobs: Queue[Any]
+    pending_jobs_ref_for_enqueue: list[int]
+
+
+def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
     """Create prompt_toolkit KeyBindings with enter/c-c/c-d handlers."""
     from prompt_toolkit.key_binding import KeyBindings
 
     kb = KeyBindings()
 
     def _handle_enter(event):
-        text = input_area.text.strip()
+        text = params.input_area.text.strip()
         if not text:
             return
-        input_area.text = ""
+        params.input_area.text = ""
         if _tui_handle_command(
-            text,
-            agent,
-            args,
-            runtime_inject,
-            prompt_files,
-            use_gateway,
-            paths,
-            state_lock,
-            is_running_ref,
-            pending_jobs_ref,
-            running_prompt_ref,
-            running_started_at_ref,
-            shutting_down_ref,
-            stop_event,
-            assistant_outputs,
+            params=TuiHandleCommandParams(
+                user=text,
+                agent=params.agent,
+                args=params.args,
+                runtime_inject=params.runtime_inject,
+                prompt_files=params.prompt_files,
+                use_gateway=params.use_gateway,
+                paths=params.paths,
+                state_lock=params.state_lock,
+                is_running_ref=params.is_running_ref,
+                pending_jobs_ref=params.pending_jobs_ref,
+                running_prompt_ref=params.running_prompt_ref,
+                running_started_at_ref=params.running_started_at_ref,
+                shutting_down_ref=params.shutting_down_ref,
+                stop_event=params.stop_event,
+                assistant_outputs=params.assistant_outputs,
+            )
         ):
-            if stop_event.is_set():
+            if params.stop_event.is_set():
                 event.app.exit()
             return
         show_prompt, text = is_show_prompt_command(text)
-        from .fallback import ChatJob
 
         job = ChatJob(
             user=text,
             show_prompt=show_prompt,
-            inject=list(runtime_inject),
-            prompt_files=list(prompt_files),
+            inject=list(params.runtime_inject),
+            prompt_files=list(params.prompt_files),
         )
-        with state_lock:
-            pending_jobs_ref_for_enqueue[0] += 1
-        jobs.put(job)
+        with params.state_lock:
+            params.pending_jobs_ref_for_enqueue[0] += 1
+        params.jobs.put(job)
         from .rendering import terminal_rule
 
         lines = [line.rstrip() for line in text.splitlines()] or [text]
@@ -94,11 +102,11 @@ def _tui_create_keybindings(
 
     def _handle_ctrl_c(event):
         _tui_request_exit(
-            shutting_down_ref,
-            state_lock,
-            is_running_ref,
-            pending_jobs_ref,
-            stop_event,
+            params.shutting_down_ref,
+            params.state_lock,
+            params.is_running_ref,
+            params.pending_jobs_ref,
+            params.stop_event,
         )
         event.app.exit()
 
@@ -106,78 +114,17 @@ def _tui_create_keybindings(
 
     def _handle_ctrl_d(event):
         _tui_request_exit(
-            shutting_down_ref,
-            state_lock,
-            is_running_ref,
-            pending_jobs_ref,
-            stop_event,
+            params.shutting_down_ref,
+            params.state_lock,
+            params.is_running_ref,
+            params.pending_jobs_ref,
+            params.stop_event,
         )
         event.app.exit()
 
     kb.add("c-d")(_handle_ctrl_d)
 
     return kb
-
-
-def _tui_handle_command(
-    user,
-    agent,
-    args,
-    runtime_inject,
-    prompt_files,
-    use_gateway,
-    paths,
-    state_lock,
-    is_running_ref,
-    pending_jobs_ref,
-    running_prompt_ref,
-    running_started_at_ref,
-    shutting_down_ref,
-    stop_event,
-    assistant_outputs,
-) -> bool:
-    """Handle TUI slash command. Returns True if should exit."""
-    import time
-
-    from .input_loop import handle_common_slash_command, is_exit_command
-
-    if is_exit_command(user):
-        _tui_request_exit(
-            shutting_down_ref,
-            state_lock,
-            is_running_ref,
-            pending_jobs_ref,
-            stop_event,
-        )
-        return True
-    if user == "/expand" or user.startswith("/expand "):
-        return _tui_handle_expand_command(user, assistant_outputs)
-    if user == "/status":
-        with state_lock:
-            active = pending_jobs_ref[0] + (1 if is_running_ref[0] else 0)
-            prompt = running_prompt_ref[0]
-            elapsed = time.perf_counter() - running_started_at_ref[0] if is_running_ref[0] else 0
-        if not active:
-            _cprint("当前没有后台任务。")
-        elif is_running_ref[0]:
-            _cprint(f"正在响应中，已等待 {elapsed:.0f}s；队列中还有 {pending_jobs_ref[0]} 个任务。")
-            _cprint(f"当前任务: {prompt}")
-        else:
-            _cprint(f"当前没有运行中的任务；队列中还有 {pending_jobs_ref[0]} 个任务。")
-        if use_gateway:
-            from ...agent.gateway import render_gateway_status
-
-            for line in render_gateway_status(agent, paths):
-                _cprint(line)
-        return True
-    return handle_common_slash_command(
-        user,
-        agent=agent,
-        memory_limit=args.memory_limit,
-        runtime_inject=runtime_inject,
-        prompt_files=prompt_files,
-        print_line=_cprint,
-    )
 
 
 def _make_status_bar(
@@ -223,62 +170,68 @@ def _make_input_area(history_file_path: str) -> Any:
     )
 
 
-def make_tui_app(
-    agent,
-    state_lock,
-    is_running_ref,
-    pending_jobs_ref,
-    running_started_at_ref,
-    last_token_estimate_ref,
-    jobs,
-    pending_jobs_ref_for_enqueue,
-    runtime_inject,
-    prompt_files,
-    args,
-    use_gateway,
-    paths,
-    assistant_outputs,
-    shutting_down_ref,
-    running_prompt_ref,
-    stop_event,
-):
+@dataclass(frozen=True)
+class MakeTuiAppParams:
+    """Parameter bundle for make_tui_app."""
+    agent: Any
+    state_lock: Any
+    is_running_ref: list[Any]
+    pending_jobs_ref: list[int]
+    running_started_at_ref: list[float]
+    last_token_estimate_ref: list[int]
+    jobs: Any
+    pending_jobs_ref_for_enqueue: list[int]
+    runtime_inject: list[Any]
+    prompt_files: list[Any]
+    args: Any
+    use_gateway: bool
+    paths: Any
+    assistant_outputs: list[str]
+    shutting_down_ref: list[bool]
+    running_prompt_ref: list[str]
+    stop_event: Any
+
+
+def make_tui_app(params: MakeTuiAppParams):
     """Build and return a prompt_toolkit Application with status bar and input area."""
     from prompt_toolkit.application import Application
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import HSplit, Layout
     from prompt_toolkit.styles import Style
 
-    history_file = agent.root / ".chat_history"
+    history_file = params.agent.root / ".chat_history"
     history_file.parent.mkdir(parents=True, exist_ok=True)
 
     status_bar = _make_status_bar(
-        state_lock,
-        is_running_ref,
-        pending_jobs_ref,
-        running_started_at_ref,
-        last_token_estimate_ref,
-        agent.config.model_name,
+        params.state_lock,
+        params.is_running_ref,
+        params.pending_jobs_ref,
+        params.running_started_at_ref,
+        params.last_token_estimate_ref,
+        params.agent.config.model_name,
     )
     input_area = _make_input_area(str(history_file))
 
     kb = _tui_create_keybindings(
-        input_area,
-        agent,
-        args,
-        runtime_inject,
-        prompt_files,
-        use_gateway,
-        paths,
-        state_lock,
-        is_running_ref,
-        pending_jobs_ref,
-        running_prompt_ref,
-        running_started_at_ref,
-        shutting_down_ref,
-        stop_event,
-        assistant_outputs,
-        jobs,
-        pending_jobs_ref_for_enqueue,
+        TuiCreateKeybindingsParams(
+            input_area=input_area,
+            agent=params.agent,
+            args=params.args,
+            runtime_inject=params.runtime_inject,
+            prompt_files=params.prompt_files,
+            use_gateway=params.use_gateway,
+            paths=params.paths,
+            state_lock=params.state_lock,
+            is_running_ref=params.is_running_ref,
+            pending_jobs_ref=params.pending_jobs_ref,
+            running_prompt_ref=params.running_prompt_ref,
+            running_started_at_ref=params.running_started_at_ref,
+            shutting_down_ref=params.shutting_down_ref,
+            stop_event=params.stop_event,
+            assistant_outputs=params.assistant_outputs,
+            jobs=params.jobs,
+            pending_jobs_ref_for_enqueue=params.pending_jobs_ref_for_enqueue,
+        )
     )
 
     layout = Layout(HSplit([status_bar, Window(height=1), input_area]))

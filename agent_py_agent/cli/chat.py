@@ -50,7 +50,7 @@ from .chat_parts.rendering import (
 from .chat_parts.rendering import (
     CONTEXT_WINDOW as _CONTEXT_WINDOW,
 )
-from .chat_parts.tui import run_tui
+from .chat_parts.tui import TuiRunParams, run_tui
 from .common import make_agent, resume_context_override
 from .models import ChatJob
 from .thinking_spinner import ThinkingSpinner
@@ -123,25 +123,27 @@ def cmd_chat(args) -> int:
 
     if has_prompt_toolkit:
         return run_tui(
-            agent=agent,
-            args=args,
-            use_gateway=use_gateway,
-            paths=paths,
-            runtime_inject=runtime_inject,
-            prompt_files=prompt_files,
-            conversation_history=conversation_history,
-            history_lock=history_lock,
-            jobs=jobs,
-            state_lock=state_lock,
-            is_running_ref=[is_running],
-            pending_jobs_ref=[pending_jobs],
-            shutting_down_ref=[shutting_down],
-            running_prompt_ref=[running_prompt],
-            running_started_at_ref=[running_started_at],
-            last_token_estimate_ref=[last_token_estimate],
-            build_history_context=_build_history_context,
-            session_manager=session_manager,
-            current_session_id=current_session_id,
+            params=TuiRunParams(
+                agent=agent,
+                args=args,
+                use_gateway=use_gateway,
+                paths=paths,
+                runtime_inject=runtime_inject,
+                prompt_files=prompt_files,
+                conversation_history=conversation_history,
+                history_lock=history_lock,
+                jobs=jobs,
+                state_lock=state_lock,
+                is_running_ref=[is_running],
+                pending_jobs_ref=[pending_jobs],
+                shutting_down_ref=[shutting_down],
+                running_prompt_ref=[running_prompt],
+                running_started_at_ref=[running_started_at],
+                last_token_estimate_ref=[last_token_estimate],
+                build_history_context=_build_history_context,
+                session_manager=session_manager,
+                current_session_id=current_session_id,
+            )
         )
     else:
         return run_fallback(

@@ -8,6 +8,7 @@ Human version:
 """
 
 from .subagents.manager import SubAgentManager
+from .subagents.manager_runner_results import RecordRunnerResultParams
 from .subagents.models import (
     CapabilityGap,
     CapabilityGrant,

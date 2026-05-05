@@ -8,6 +8,7 @@ from __future__ import annotations
 """
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..capabilities import CapabilitySearchHit
@@ -40,43 +41,45 @@ def _risk_weight(flags: list[str]) -> int:
     return max((weights.get(item, 1) for item in flags), default=0)
 
 
-def _make_due_issue(
-    task: SubAgentTask,
-    *,
-    severity: str,
-    kind: str,
-    message: str,
-    suggested_action: str,
-    risk_flags: list[str],
-    open_request_count: int,
-    open_gap_count: int,
-    age_seconds: float,
-    stale_seconds: float,
-) -> DueCheckIssue:
+@dataclass(frozen=True)
+class MakeDueIssueParams:
+    """Params bundle for _make_due_issue."""
+    task: SubAgentTask
+    severity: str
+    kind: str
+    message: str
+    suggested_action: str
+    risk_flags: list[str]
+    open_request_count: int
+    open_gap_count: int
+    age_seconds: float
+    stale_seconds: float
+
+
+def _make_due_issue(*, params: MakeDueIssueParams) -> DueCheckIssue:
     """LLM: unified factory for due-check issues to keep fields consistent across branches.
 
     新手说明:
     统一创建 due-check 问题，避免不同分支字段不一致。
     """
-
     return DueCheckIssue(
-        run_id=task.id,
-        severity=severity,
-        kind=kind,
-        message=message,
-        suggested_action=suggested_action,
-        status=task.status,
-        owner=task.owner,
-        supervisor=task.supervisor,
-        final_owner=task.final_owner,
-        goal=task.goal,
-        task_dir=task.task_dir,
-        risk_flags=risk_flags,
-        evidence_count=len(task.evidence),
-        open_request_count=open_request_count,
-        open_gap_count=open_gap_count,
-        age_seconds=age_seconds,
-        stale_seconds=stale_seconds,
+        run_id=params.task.id,
+        severity=params.severity,
+        kind=params.kind,
+        message=params.message,
+        suggested_action=params.suggested_action,
+        status=params.task.status,
+        owner=params.task.owner,
+        supervisor=params.task.supervisor,
+        final_owner=params.task.final_owner,
+        goal=params.task.goal,
+        task_dir=params.task.task_dir,
+        risk_flags=params.risk_flags,
+        evidence_count=len(params.task.evidence),
+        open_request_count=params.open_request_count,
+        open_gap_count=params.open_gap_count,
+        age_seconds=params.age_seconds,
+        stale_seconds=params.stale_seconds,
         created_at=time.time(),
     )
 
