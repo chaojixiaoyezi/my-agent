@@ -1,7 +1,7 @@
 {
-  "cumulative_tokens": 7808540,
+  "cumulative_tokens": 7882486,
   "session_id": "SimplePythonAgent",
-  "turn_count": 749,
+  "turn_count": 756,
   "turns": [
     {
       "created_at": "1777725807.117192",
@@ -5994,6 +5994,62 @@
       "tool_tokens": 88,
       "turn_id": "run-1777962054173932000",
       "turn_total": 10460
+    },
+    {
+      "created_at": "1777962120.937349",
+      "input_tokens": 8900,
+      "output_tokens": 1333,
+      "tool_tokens": 96,
+      "turn_id": "run-1777962120933210000",
+      "turn_total": 10329
+    },
+    {
+      "created_at": "1777962179.303885",
+      "input_tokens": 8901,
+      "output_tokens": 1668,
+      "tool_tokens": 46,
+      "turn_id": "run-1777962179301242000",
+      "turn_total": 10615
+    },
+    {
+      "created_at": "1777962242.205764",
+      "input_tokens": 8900,
+      "output_tokens": 1600,
+      "tool_tokens": 2,
+      "turn_id": "run-1777962242202283000",
+      "turn_total": 10502
+    },
+    {
+      "created_at": "1777962317.647988",
+      "input_tokens": 8900,
+      "output_tokens": 1757,
+      "tool_tokens": 2,
+      "turn_id": "run-1777962317644185000",
+      "turn_total": 10659
+    },
+    {
+      "created_at": "1777962396.3913789",
+      "input_tokens": 8900,
+      "output_tokens": 2171,
+      "tool_tokens": 96,
+      "turn_id": "run-1777962396388567000",
+      "turn_total": 11167
+    },
+    {
+      "created_at": "1777962476.982178",
+      "input_tokens": 8901,
+      "output_tokens": 1315,
+      "tool_tokens": 143,
+      "turn_id": "run-1777962476979244000",
+      "turn_total": 10359
+    },
+    {
+      "created_at": "1777962513.743294",
+      "input_tokens": 8900,
+      "output_tokens": 1369,
+      "tool_tokens": 46,
+      "turn_id": "run-1777962513741846000",
+      "turn_total": 10315
     }
   ]
 }
