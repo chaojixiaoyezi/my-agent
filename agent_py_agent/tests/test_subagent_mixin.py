@@ -109,8 +109,8 @@ class TestSubagentMixinRun:
 
         assert result.run_id == "test-run"
         mock_mixin.subagents.record_runner_result.assert_called_once()
-        call_kwargs = mock_mixin.subagents.record_runner_result.call_args[1]
-        assert call_kwargs["dry_run"] is True
+        call_params = mock_mixin.subagents.record_runner_result.call_args[0][0]
+        assert call_params.dry_run is True
 
     def test_run_subagent_with_attempt_id(self, mock_mixin: SimpleAgentSubagentMixin) -> None:
         """测试带 attempt_id 的 run。"""
@@ -168,9 +168,9 @@ class TestSubagentMixinRun:
             )
 
         mock_mixin.subagents.record_runner_result.assert_called_once()
-        call_kwargs = mock_mixin.subagents.record_runner_result.call_args[1]
-        assert call_kwargs["status"] == "CHANNEL_ERROR"
-        assert call_kwargs["ok"] is False
+        call_params = mock_mixin.subagents.record_runner_result.call_args[0][0]
+        assert call_params.status == "CHANNEL_ERROR"
+        assert call_params.ok is False
 
 
 class TestSubagentMixinParentPlanner:
