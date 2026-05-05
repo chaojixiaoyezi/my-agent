@@ -74,17 +74,7 @@ def security_query(
     return _tool_response(result)
 
 
-def hunt_ip(
-    ip: str,
-    *,
-    store: LocalLogStore | None = None,
-    root: str | Path | None = None,
-    role: str = "any",
-    start_time: str | None = None,
-    end_time: str | None = None,
-    limit: int | None = DEFAULT_QUERY_LIMIT,
-    max_limit: int | None = None,
-) -> dict[str, Any]:
+def hunt_ip(ip: str, **kwargs: Any) -> dict[str, Any]:
     """LLM: 围绕单个 IP 做 attacker/victim/both 方向的受控 pivot 查询。
 
     新手说明:
@@ -108,46 +98,68 @@ def hunt_ip(
     异常说明:
     role 不属于 any/attacker/victim 时抛 ValueError，避免悄悄按错误方向查询。
     """
+    store = kwargs.get("store")
+    root = kwargs.get("root")
+    role = kwargs.get("role", "any")
+    start_time = kwargs.get("start_time")
+    end_time = kwargs.get("end_time")
+    limit = kwargs.get("limit", DEFAULT_QUERY_LIMIT)
+    max_limit = kwargs.get("max_limit")
     if role not in {"any", "attacker", "victim"}:
         raise ValueError("role must be one of: any, attacker, victim")
-    if role == "attacker":
-        return security_query(
-            SecurityQueryParams(
-                store=store,
-                root=root,
-                attacker_ip=ip,
-                start_time=start_time,
-                end_time=end_time,
-                limit=limit,
-                max_limit=max_limit,
-            )
-        )
-    if role == "victim":
-        return security_query(
-            SecurityQueryParams(
-                store=store,
-                root=root,
-                victim_ip=ip,
-                start_time=start_time,
-                end_time=end_time,
-                limit=limit,
-                max_limit=max_limit,
-            )
-        )
-    local_store = _store(store, root)
-    attacker = execute_security_query(
-        local_store,
-        QueryCriteria(attacker_ip=ip, start_time=start_time, end_time=end_time, limit=limit),
+    if role in {"attacker", "victim"}:
+        return _hunt_ip_single_role(ip, role=role, store=store, root=root, start_time=start_time, end_time=end_time, limit=limit, max_limit=max_limit)
+    return _hunt_ip_any(
+        ip,
+        store=store,
+        root=root,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
         max_limit=max_limit,
     )
-    victim = execute_security_query(
-        local_store,
-        QueryCriteria(victim_ip=ip, start_time=start_time, end_time=end_time, limit=limit),
-        max_limit=max_limit,
+
+
+def _hunt_ip_single_role(ip: str, **kwargs: Any) -> dict[str, Any]:
+    field = {"attacker": "attacker_ip", "victim": "victim_ip"}[str(kwargs["role"])]
+    return security_query(
+        SecurityQueryParams(
+            store=kwargs.get("store"),
+            root=kwargs.get("root"),
+            **{field: ip},
+            start_time=kwargs.get("start_time"),
+            end_time=kwargs.get("end_time"),
+            limit=kwargs.get("limit"),
+            max_limit=kwargs.get("max_limit"),
+        )
     )
+
+
+def _hunt_ip_any(ip: str, **kwargs: Any) -> dict[str, Any]:
+    local_store = _store(kwargs.get("store"), kwargs.get("root"))
+    attacker = _hunt_role_query(local_store, attacker_ip=ip, **kwargs)
+    victim = _hunt_role_query(local_store, victim_ip=ip, **kwargs)
+    return _hunt_any_response(ip, attacker, victim)
+
+
+def _hunt_role_query(local_store: LocalLogStore, **kwargs: Any) -> QueryResult:
+    return execute_security_query(
+        local_store,
+        QueryCriteria(
+            attacker_ip=kwargs.get("attacker_ip"),
+            victim_ip=kwargs.get("victim_ip"),
+            start_time=kwargs.get("start_time"),
+            end_time=kwargs.get("end_time"),
+            limit=kwargs.get("limit"),
+        ),
+        max_limit=kwargs.get("max_limit"),
+    )
+
+
+def _hunt_any_response(ip: str, attacker: QueryResult, victim: QueryResult) -> dict[str, Any]:
     return {
         "tool": "security_hunt_ip",
-        "seed": {"ip": ip, "role": role},
+        "seed": {"ip": ip, "role": "any"},
         "queries": [_tool_response(attacker), _tool_response(victim)],
         "row_count": attacker.row_count + victim.row_count,
         "evidence_refs": [attacker.query_id, victim.query_id],
@@ -185,17 +197,7 @@ def security_hunt_domain(domain: str) -> dict[str, Any]:
     return security_query(SecurityQueryParams(domain=domain))
 
 
-def trace_case(
-    case_id: str,
-    *,
-    store: LocalLogStore | None = None,
-    root: str | Path | None = None,
-    start_time: str | None = None,
-    end_time: str | None = None,
-    limit: int | None = DEFAULT_QUERY_LIMIT,
-    max_limit: int | None = None,
-    max_queries: int = MAX_TRACE_CASE_QUERIES,
-) -> dict[str, Any]:
+def trace_case(case_id: str, **kwargs: Any) -> dict[str, Any]:
     """LLM: 从已保存 case 中提取实体种子，按多个字段追踪相关日志证据。
 
     新手说明:
@@ -219,6 +221,13 @@ def trace_case(
     异常说明:
     找不到 case_id 时抛 KeyError，调用方应先确认 case 已落盘。
     """
+    store = kwargs.get("store")
+    root = kwargs.get("root")
+    start_time = kwargs.get("start_time")
+    end_time = kwargs.get("end_time")
+    limit = kwargs.get("limit", DEFAULT_QUERY_LIMIT)
+    max_limit = kwargs.get("max_limit")
+    max_queries = int(kwargs.get("max_queries", MAX_TRACE_CASE_QUERIES))
     local_store = _store(store, root)
     case = local_store.get_case(case_id)
     if case is None:

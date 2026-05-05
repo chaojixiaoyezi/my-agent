@@ -82,13 +82,13 @@ def build_first_response_report_content(
 def build_forensic_package(
     case: CaseRecord | Mapping[str, Any],
     route: RouteDraft | Mapping[str, Any] | None = None,
-    *,
-    findings: Sequence[Finding | Mapping[str, Any]] | None = None,
-    query_history: Sequence[Mapping[str, Any]] | None = None,
-    sample_rows: Sequence[Mapping[str, Any]] | None = None,
-    raw_refs: Sequence[str] | None = None,
-    frozen: bool = False,
+    **kwargs: Any,
 ) -> dict[str, Any]:
+    findings = kwargs.get("findings")
+    query_history = kwargs.get("query_history")
+    sample_rows = kwargs.get("sample_rows")
+    raw_refs = kwargs.get("raw_refs")
+    frozen = bool(kwargs.get("frozen", False))
     case_obj = case if isinstance(case, CaseRecord) else CaseRecord.from_dict(case)
     route_obj = _route_or_build(case_obj, route, findings)
     route_dict = route_obj.to_dict() if isinstance(route_obj, RouteDraft) else dict(route_obj)
@@ -130,22 +130,13 @@ def build_forensic_package(
 def forensic_package_content(
     case: CaseRecord | Mapping[str, Any],
     route: RouteDraft | Mapping[str, Any] | None = None,
-    *,
-    findings: Sequence[Finding | Mapping[str, Any]] | None = None,
-    query_history: Sequence[Mapping[str, Any]] | None = None,
-    sample_rows: Sequence[Mapping[str, Any]] | None = None,
-    raw_refs: Sequence[str] | None = None,
-    frozen: bool = False,
+    **kwargs: Any,
 ) -> str:
     return json.dumps(
         build_forensic_package(
             case,
             route,
-            findings=findings,
-            query_history=query_history,
-            sample_rows=sample_rows,
-            raw_refs=raw_refs,
-            frozen=frozen,
+            **kwargs,
         ),
         ensure_ascii=False,
         indent=2,
@@ -156,22 +147,9 @@ def forensic_package_content(
 def build_forensic_package_content(
     case: CaseRecord | Mapping[str, Any],
     route: RouteDraft | Mapping[str, Any] | None = None,
-    *,
-    findings: Sequence[Finding | Mapping[str, Any]] | None = None,
-    query_history: Sequence[Mapping[str, Any]] | None = None,
-    sample_rows: Sequence[Mapping[str, Any]] | None = None,
-    raw_refs: Sequence[str] | None = None,
-    frozen: bool = False,
+    **kwargs: Any,
 ) -> str:
-    return forensic_package_content(
-        case,
-        route,
-        findings=findings,
-        query_history=query_history,
-        sample_rows=sample_rows,
-        raw_refs=raw_refs,
-        frozen=frozen,
-    )
+    return forensic_package_content(case, route, **kwargs)
 
 
 def _route_or_build(

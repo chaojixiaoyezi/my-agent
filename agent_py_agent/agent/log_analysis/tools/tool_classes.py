@@ -13,8 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ...tooling.models import BaseTool, ToolExecutionResult, ToolSpec
-from ..tools_functions import SecurityQueryParams, security_query
-from .query_functions import security_hunt_ip, security_query, security_trace_case
+from .query_functions import SecurityQueryParams, security_hunt_ip, security_query, security_trace_case
 
 
 class SecurityQueryTool(BaseTool):

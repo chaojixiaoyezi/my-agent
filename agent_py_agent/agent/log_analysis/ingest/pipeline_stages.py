@@ -20,21 +20,15 @@ class RecordIterator:
     def __init__(
         self,
         source_path: Path,
-        *,
-        file_format: str,
-        parser: LogParser,
-        batch_id: str,
-        source_id: str,
-        source_product: str | None,
-        dead_letters: Any,
+        **kwargs: Any,
     ):
         self.source_path = source_path
-        self.file_format = file_format
-        self.parser = parser
-        self.batch_id = batch_id
-        self.source_id = source_id
-        self.source_product = source_product
-        self.dead_letters = dead_letters
+        self.file_format = kwargs["file_format"]
+        self.parser = kwargs["parser"]
+        self.batch_id = kwargs["batch_id"]
+        self.source_id = kwargs["source_id"]
+        self.source_product = kwargs.get("source_product")
+        self.dead_letters = kwargs["dead_letters"]
 
     def iter_records(self):
         """Dispatch to format-specific iterator."""
