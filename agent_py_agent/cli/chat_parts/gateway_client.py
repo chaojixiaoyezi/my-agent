@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from ...agent.gateway import (
+    GatewayAskParams,
     gateway_chunk_path,
     gateway_paths,
     gateway_running,
@@ -21,26 +23,34 @@ from ...agent.gateway import (
 )
 
 
+@dataclass
+class ChatRequestContent:
+    """Bundle of chat request content parameters for submit_chat_request."""
+    prompt: str
+    inject: list[str]
+    prompt_files: list[str]
+    save: bool
+    show_prompt: bool
+    resume_context: object
+
+
 def submit_chat_request(
     paths,
-    prompt: str,
-    inject: list[str],
-    prompt_files: list[str],
-    save: bool,
-    show_prompt: bool,
-    resume_context,
+    content: ChatRequestContent,
     agent,
 ) -> tuple[str, Path, Path]:
     """Submit a gateway chat request and return (request_id, chunk_path, response_path)."""
     request_id, _, response_path = submit_gateway_ask(
         paths,
-        prompt=prompt,
-        inject=inject,
-        prompt_files=prompt_files,
-        save=save,
-        include_prompt=show_prompt,
-        resume_context=resume_context,
-        agent=agent,
+        params=GatewayAskParams(
+            prompt=content.prompt,
+            inject=content.inject,
+            prompt_files=content.prompt_files,
+            save=content.save,
+            include_prompt=content.show_prompt,
+            resume_context=content.resume_context,
+            agent=agent,
+        ),
     )
     chunk_path = gateway_chunk_path(paths, request_id)
     return request_id, chunk_path, response_path
@@ -119,6 +129,7 @@ def format_gateway_timing(
 
 
 __all__ = [
+    "ChatRequestContent",
     "check_gateway_alive",
     "format_gateway_timing",
     "poll_gateway_chunks",

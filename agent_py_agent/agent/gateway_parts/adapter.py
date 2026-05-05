@@ -17,7 +17,7 @@ from .io import read_json_file, write_json_file
 from .logging import _report_gateway_side_effect_error
 from .paths import AdapterPaths, GatewayPaths
 from .recovery import _archive_gateway_request
-from .runtime import submit_gateway_ask, wait_for_gateway_response
+from .runtime import GatewayAskParams, submit_gateway_ask, wait_for_gateway_response
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -89,12 +89,14 @@ def _submit_adapter_gateway_request(
 ) -> tuple[str, Path, Path]:
     return submit_gateway_ask(
         gateway_paths_obj,
-        prompt=prompt,
-        inject=[str(item) for item in payload.get("inject", [])],
-        prompt_files=[str(item) for item in payload.get("prompt_files", [])],
-        save=not bool(payload.get("no_save", False)),
-        include_prompt=bool(payload.get("include_prompt", False)),
-        agent=agent,
+        params=GatewayAskParams(
+            prompt=prompt,
+            inject=[str(item) for item in payload.get("inject", [])],
+            prompt_files=[str(item) for item in payload.get("prompt_files", [])],
+            save=not bool(payload.get("no_save", False)),
+            include_prompt=bool(payload.get("include_prompt", False)),
+            agent=agent,
+        ),
     )
 
 

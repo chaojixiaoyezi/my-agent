@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from agent_py_agent.agent.subagents.patch.patch_apply_helpers import run_patch_apply_tests
@@ -14,18 +15,24 @@ from agent_py_agent.agent.subagents.patch.patch_file_ops import (
 from agent_py_agent.agent.subagents.utils import _read_json_object
 
 
+@dataclass
+class PatchApplyParams:
+    """Bundle for PatchApplyExecutor.execute parameters."""
+    patch_specs: list
+    review_status_updates: list
+    task: Any
+    manager: Any
+    applier: str
+    note: str
+    test_commands: list
+
+
 class PatchApplyExecutor:
     """Execute patch apply with rollback support."""
 
     @staticmethod
     def execute(
-        patch_specs,
-        review_status_updates,
-        task,
-        manager,
-        applier,
-        note,
-        test_commands,
+        params: PatchApplyParams,
     ):
         """Execute patch apply with rollback on failure."""
         touched_files = {}
@@ -35,28 +42,28 @@ class PatchApplyExecutor:
 
         try:
             applied_count, touched_files = do_apply_patches(
-                patch_specs, review_status_updates, task, manager, applier, note
+                params.patch_specs, params.review_status_updates, params.task, params.manager, params.applier, params.note
             )
-            if test_commands:
-                test_results = run_patch_apply_tests(test_commands, manager.workspace_root)
+            if params.test_commands:
+                test_results = run_patch_apply_tests(params.test_commands, params.manager.workspace_root)
                 failed = [item for item in test_results if not item.get("ok")]
                 if failed:
                     raise RuntimeError(f"{len(failed)} 个 apply 后测试失败。")
 
-            output = _read_json_object(Path(task.output_json))
-            output["patches"] = review_status_updates
-            Path(task.output_json).write_text(
+            output = _read_json_object(Path(params.task.output_json))
+            output["patches"] = params.review_status_updates
+            Path(params.task.output_json).write_text(
                 json.dumps(output, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            manager._append_task_work_log(
-                task,
-                f"patch_apply: applied={applied_count} tests={len(test_results)} applier={applier}",
+            params.manager._append_task_work_log(
+                params.task,
+                f"patch_apply: applied={applied_count} tests={len(test_results)} applier={params.applier}",
             )
         except Exception as exc:
             rollback_performed = bool(touched_files)
             rollback_patch_apply(touched_files)
-            for spec in patch_specs:
+            for spec in params.patch_specs:
                 spec["audit"]["apply_status"] = "ROLLED_BACK" if rollback_performed else "FAILED"
                 spec["audit"]["message"] = f"apply 失败: {exc}"
                 spec["patch_ref"]["apply_status"] = spec["audit"]["apply_status"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..memory_archive import snapshots
+from ..prompting_parts.builder import ToolSections
 from ..tools import ToolExecutionResult
 from ._runtime_params import ToolLoopExecuteParams
 from .parameters import _one_shot_tool_call_key
@@ -14,9 +15,11 @@ def _build_prompt(agent, params: ToolLoopExecuteParams) -> str:
         params.memories,
         inject=params.runtime_injections,
         prompt_files=params.prompt_files,
-        tool_catalog_section=params.tool_catalog_section,
-        tool_recommendations_section=params.tool_recommendations_section,
-        tool_context=params.tool_context,
+        tools=ToolSections(
+            tool_catalog_section=params.tool_catalog_section,
+            tool_recommendations_section=params.tool_recommendations_section,
+            tool_context=params.tool_context,
+        ),
     )
 
 

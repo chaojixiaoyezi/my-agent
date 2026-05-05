@@ -8,6 +8,20 @@ from __future__ import annotations
 
 from ..models import SubAgentTask
 from ..reports import AcceptanceReviewFinding
+from .evidence import _make_finding
+
+
+def _structured_output_message(
+    runner: dict[str, object],
+    found: bool,
+    ok: bool,
+) -> str:
+    """Build message string for structured output finding."""
+    if found and ok:
+        return "runner 结构化输出可解析。"
+    if not found:
+        return "runner 未记录结构化输出，按人工证据验收。"
+    return f"runner 结构化输出解析失败: {runner.get('structured_parse_error', '')}"
 
 
 def _build_readiness_findings(
@@ -25,7 +39,7 @@ def _build_readiness_findings(
 
     ready = task.status == "AWAITING_ACCEPTANCE" or task.verification_status == "NEEDS_ACCEPTANCE"
     findings.append(
-        AcceptanceReviewFinding(
+        _make_finding(
             name="ready_for_acceptance",
             ok=ready,
             severity="P1",
@@ -39,7 +53,7 @@ def _build_readiness_findings(
         )
     )
     findings.append(
-        AcceptanceReviewFinding(
+        _make_finding(
             name="channel_not_broken",
             ok=task.channel_status != "BROKEN",
             severity="P1",
@@ -56,17 +70,11 @@ def _build_readiness_findings(
     runner_structured_found = bool(runner.get("structured_output_found", False))
     runner_structured_ok = bool(runner.get("structured_output_ok", False))
     findings.append(
-        AcceptanceReviewFinding(
+        _make_finding(
             name="structured_output",
             ok=(not runner_structured_found) or runner_structured_ok,
             severity="P1",
-            message=(
-                "runner 结构化输出可解析。"
-                if runner_structured_found and runner_structured_ok
-                else "runner 未记录结构化输出，按人工证据验收。"
-                if not runner_structured_found
-                else f"runner 结构化输出解析失败: {runner.get('structured_parse_error', '')}"
-            ),
+            message=_structured_output_message(runner, runner_structured_found, runner_structured_ok),
             evidence_path=task.runner_result_json,
             created_at=created_at,
         )

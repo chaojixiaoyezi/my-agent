@@ -14,7 +14,7 @@ from ..memory_archive.snapshots import (
     CompressionSnapshotInput,
     RecoverySnapshotInput,
 )
-from ..memory_archive.tokens import append_session_token_usage
+from ..memory_archive.tokens import TurnTokenUsage, append_session_token_usage
 from ..tools import ToolExecutionResult
 from .models import AgentRunResult
 from .parameters import _one_shot_tool_call_key

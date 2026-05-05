@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_py_agent.agent.memory_store import MemoryRecord
-from agent_py_agent.agent.prompting_parts.builder import PromptBuilder
+from agent_py_agent.agent.prompting_parts.builder import PromptBuilder, ToolSections
 from agent_py_agent.agent.settings import AgentConfig
 
 
@@ -164,7 +164,9 @@ class TestBuildToolSections:
         result = builder.build(
             "hello",
             [],
-            tool_catalog_section="# Tools\n- read_file\n- write_file",
+            tools=ToolSections(
+                tool_catalog_section="# Tools\n- read_file\n- write_file",
+            ),
         )
         assert "read_file" in result
         assert "write_file" in result
@@ -175,7 +177,9 @@ class TestBuildToolSections:
         result = builder.build(
             "hello",
             [],
-            tool_recommendations_section="# Recommended\n- tool1",
+            tools=ToolSections(
+                tool_recommendations_section="# Recommended\n- tool1",
+            ),
         )
         assert "tool1" in result
 
@@ -184,14 +188,14 @@ class TestBuildToolContext:
     def test_build_no_tool_context(self, tmp_path):
         config = AgentConfig()
         builder = PromptBuilder(config, tmp_path)
-        result = builder.build("hello", [], tool_context=None)
+        result = builder.build("hello", [], tools=ToolSections(tool_context=None))
         assert "（无）" in result
         assert "# User Task" in result
 
     def test_build_empty_tool_context(self, tmp_path):
         config = AgentConfig()
         builder = PromptBuilder(config, tmp_path)
-        result = builder.build("hello", [], tool_context=[])
+        result = builder.build("hello", [], tools=ToolSections(tool_context=[]))
         assert "（无）" in result
 
     def test_build_single_tool_context(self, tmp_path):
@@ -200,7 +204,9 @@ class TestBuildToolContext:
         result = builder.build(
             "hello",
             [],
-            tool_context=["[TOOL_CALL] read_file...[/TOOL_CALL]"],
+            tools=ToolSections(
+                tool_context=["[TOOL_CALL] read_file...[/TOOL_CALL]"],
+            ),
         )
         assert "# Tool Transcript" in result
         assert "Continue From Tool Transcript" in result
@@ -211,7 +217,9 @@ class TestBuildToolContext:
         result = builder.build(
             "task",
             [],
-            tool_context=["[TOOL_CALL] tool1 [/TOOL_CALL]", "[TOOL_CALL] tool2 [/TOOL_CALL]"],
+            tools=ToolSections(
+                tool_context=["[TOOL_CALL] tool1 [/TOOL_CALL]", "[TOOL_CALL] tool2 [/TOOL_CALL]"],
+            ),
         )
         assert "tool1" in result
         assert "tool2" in result
@@ -222,7 +230,9 @@ class TestBuildToolContext:
         result = builder.build(
             "task",
             [],
-            tool_context=["[TOOL_CALL] tool...[/TOOL_CALL]"],
+            tools=ToolSections(
+                tool_context=["[TOOL_CALL] tool...[/TOOL_CALL]"],
+            ),
         )
         assert "不要重新开始任务" in result
         assert "不要重复调用同一个工具" in result
@@ -255,8 +265,10 @@ class TestBuildFullPrompt:
             "user task",
             memories,
             inject=["injection"],
-            tool_catalog_section="# Tools\n- tool",
-            tool_recommendations_section="# Recommended\n- tool",
+            tools=ToolSections(
+                tool_catalog_section="# Tools\n- tool",
+                tool_recommendations_section="# Recommended\n- tool",
+            ),
         )
         assert result.index("# System") < result.index("# Related Memory")
         assert result.index("# Related Memory") < result.index("# Dynamic Prompt Files")
@@ -275,7 +287,9 @@ class TestBuildFullPrompt:
         result = builder.build(
             "task",
             [],
-            tool_context=["[TOOL_CALL] tool...[/TOOL_CALL]"],
+            tools=ToolSections(
+                tool_context=["[TOOL_CALL] tool...[/TOOL_CALL]"],
+            ),
         )
         assert "# Tool Transcript" in result
         assert "# User Task" in result

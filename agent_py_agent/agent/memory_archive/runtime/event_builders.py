@@ -75,6 +75,18 @@ class _ToolEventFields:
     content_hash: str
 
 
+@dataclass(frozen=True)
+class _ToolFacts:
+    """Bundle for _tool_metadata keyword parameters."""
+
+    tool_name: str
+    tool_call_id: str
+    tool_success: bool | None
+    status: str
+    error_code: str
+    backend: str
+
+
 def _message_event(
     identity: EventIdentity,
     ctx: MessageContext,
@@ -186,12 +198,14 @@ def _tool_event_fields(tool_call: dict[str, Any], *, backend: str) -> _ToolEvent
     error_code = _first_text(tool_call, "error_code", "code")
     metadata = _tool_metadata(
         tool_call,
-        tool_name=tool_name,
-        tool_call_id=tool_call_id,
-        tool_success=tool_success,
-        status=status,
-        error_code=error_code,
-        backend=backend,
+        facts=_ToolFacts(
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            tool_success=tool_success,
+            status=status,
+            error_code=error_code,
+            backend=backend,
+        ),
     )
     return _ToolEventFields(
         tool_name=tool_name,
@@ -208,12 +222,7 @@ def _tool_event_fields(tool_call: dict[str, Any], *, backend: str) -> _ToolEvent
 def _tool_metadata(
     tool_call: dict[str, Any],
     *,
-    tool_name: str,
-    tool_call_id: str,
-    tool_success: bool | None,
-    status: str,
-    error_code: str,
-    backend: str,
+    facts: _ToolFacts,
 ) -> dict[str, Any]:
     """LLM: build the bounded metadata preview stored for a tool event.
 
@@ -222,12 +231,12 @@ def _tool_metadata(
     完整输出以后应走 content_path 或 evidence 文件，而不是塞进 raw event。
     """
     metadata: dict[str, Any] = {
-        "tool_name": tool_name,
-        "tool_call_id": tool_call_id,
-        "success": tool_success,
-        "status": status,
-        "error_code": error_code,
-        "backend": backend,
+        "tool_name": facts.tool_name,
+        "tool_call_id": facts.tool_call_id,
+        "success": facts.tool_success,
+        "status": facts.status,
+        "error_code": facts.error_code,
+        "backend": facts.backend,
     }
     for key in ("output", "result", "response", "content"):
         if key in tool_call:

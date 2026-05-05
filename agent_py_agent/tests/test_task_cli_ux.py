@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+from contextlib import contextmanager
 from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -222,6 +223,18 @@ class TestTaskShow:
 class TestTaskStateTransitions:
     """测试 task abandon/pause/resume 命令的状态转换。"""
 
+    @staticmethod
+    @contextmanager
+    def _patch_task_cli_deps(mock_store):
+        """Patch all task_commands dependencies into a single with-block."""
+        with patch("agent_py_agent.cli.task_commands.LocalStore") as mock_ls:
+            mock_ls.return_value = mock_store
+            with patch("agent_py_agent.cli.task_commands.load_config") as mock_cfg:
+                mock_cfg.return_value = MagicMock(workspace_root="")
+                with patch("agent_py_agent.cli.task_commands.resolve_workspace_root") as mock_resolve:
+                    mock_resolve.return_value = Path(tempfile.gettempdir())
+                    yield
+
     def _call_abandon(self, task_id, status):
         mock_store = _make_mock_store([
             {"task_id": task_id, "status": status, "goal": "", "session_id": "", "user_id": "", "created_at": 0, "updated_at": 0}
@@ -346,23 +359,17 @@ class TestTaskStateTransitions:
 
         mock_store.task_registry.update_task_status.side_effect = mock_update
 
-        with patch("agent_py_agent.cli.task_commands.LocalStore") as mock_ls:
-            mock_ls.return_value = mock_store
-            with patch("agent_py_agent.cli.task_commands.load_config") as mock_cfg:
-                mock_cfg.return_value = MagicMock(workspace_root="")
-                with patch("agent_py_agent.cli.task_commands.resolve_workspace_root") as mock_resolve:
-                    mock_resolve.return_value = Path(tempfile.gettempdir())
+        with self._patch_task_cli_deps(mock_store):
+            threads = []
+            for _ in range(5):
+                t = threading.Thread(
+                    target=lambda: cmd_task_pause(MockArgs(task_id="task-concurrent"))
+                )
+                threads.append(t)
+                t.start()
 
-                    threads = []
-                    for _ in range(5):
-                        t = threading.Thread(
-                            target=lambda: cmd_task_pause(MockArgs(task_id="task-concurrent"))
-                        )
-                        threads.append(t)
-                        t.start()
-
-                    for t in threads:
-                        t.join()
+            for t in threads:
+                t.join()
 
         assert len(update_calls) == 5
 

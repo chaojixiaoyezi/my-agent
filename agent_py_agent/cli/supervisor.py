@@ -54,16 +54,26 @@ def _wait_for_gateway_ready(paths, timeout: float = 30.0) -> tuple[int, bool] | 
     return None
 
 
+def _pid_file_matches(pid_path: Path, expected_pid: int) -> bool | None:
+    """Check if pid_path contains expected_pid.
+
+    Returns True if it matches, False if it exists but doesn't match,
+    None if the file cannot be read or doesn't exist.
+    """
+    if not pid_path.exists():
+        return None
+    try:
+        pid = int(pid_path.read_text(encoding="utf-8").strip())
+        return pid and pid == expected_pid
+    except (OSError, ValueError):
+        return None
+
+
 def _wait_for_supervisor_start(supervisor_pid_path: Path, process: subprocess.Popen, deadline: float) -> bool:
     """Wait for supervisor to write its PID file and confirm it matches our process."""
     while time.time() < deadline:
-        if supervisor_pid_path.exists():
-            try:
-                pid = int(supervisor_pid_path.read_text(encoding="utf-8").strip())
-                if pid and pid == process.pid:
-                    return True
-            except (OSError, ValueError):
-                pass
+        if _pid_file_matches(supervisor_pid_path, process.pid) is True:
+            return True
         time.sleep(0.2)
     return False
 

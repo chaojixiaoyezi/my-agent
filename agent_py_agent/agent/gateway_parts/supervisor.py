@@ -11,6 +11,7 @@ import json
 import os
 import signal
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -48,6 +49,18 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+@dataclass
+class SupervisorConfig:
+    """Bundle for GatewaySupervisor optional configuration parameters."""
+
+    workspace_root: str | None = None
+    heartbeat_timeout: float = 120.0
+    check_interval: float = 10.0
+    max_restart_attempts: int = 5
+    restart_cooldown: float = 30.0
+    log_path: Path | None = None
+
+
 class GatewaySupervisor:
     """Watchdog that monitors a gateway process and auto-restarts on crash."""
 
@@ -55,20 +68,16 @@ class GatewaySupervisor:
         self,
         config_path: str,
         *,
-        workspace_root: str | None = None,
-        heartbeat_timeout: float = 120.0,
-        check_interval: float = 10.0,
-        max_restart_attempts: int = 5,
-        restart_cooldown: float = 30.0,
-        log_path: Path | None = None,
+        options: SupervisorConfig | None = None,
     ):
         self.config_path = config_path
-        self.workspace_root = workspace_root
-        self.heartbeat_timeout = heartbeat_timeout
-        self.check_interval = check_interval
-        self.max_restart_attempts = max_restart_attempts
-        self.restart_cooldown = restart_cooldown
-        self.log_path = log_path
+        _opts = options or SupervisorConfig()
+        self.workspace_root = _opts.workspace_root
+        self.heartbeat_timeout = _opts.heartbeat_timeout
+        self.check_interval = _opts.check_interval
+        self.max_restart_attempts = _opts.max_restart_attempts
+        self.restart_cooldown = _opts.restart_cooldown
+        self.log_path = _opts.log_path
 
         self._supervisor_pid: int = os.getpid()
         self._gateway_pid: int | None = None
@@ -208,7 +217,8 @@ class GatewaySupervisor:
 
 def run_supervisor(config_path: str, **kwargs) -> int:
     """Run the gateway supervisor with the given config."""
-    supervisor = GatewaySupervisor(config_path, **kwargs)
+    options = SupervisorConfig(**kwargs) if kwargs else None
+    supervisor = GatewaySupervisor(config_path, options=options)
     return supervisor.run()
 
 

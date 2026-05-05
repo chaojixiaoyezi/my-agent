@@ -17,6 +17,7 @@ from agent_py_agent.__main__ import (
     read_json_file,
     rebuild_local_store,
     recover_gateway_processing_requests,
+    GatewayAskParams,
     submit_gateway_ask,
     write_json_file,
 )
@@ -205,9 +206,11 @@ def test_gateway_request_indexes_logs_to_local_store():
         paths = gateway_paths(agent)
         request_id, request_path, _ = submit_gateway_ask(
             paths,
-            prompt="gateway 日志测试：这条请求应该能被搜索到",
-            save=False,
-            agent=agent,
+            params=GatewayAskParams(
+                prompt="gateway 日志测试：这条请求应该能被搜索到",
+                save=False,
+                agent=agent,
+            ),
         )
 
         response = _handle_gateway_request(agent, request_path)
@@ -233,9 +236,11 @@ def test_gateway_request_writes_recovery_snapshot_when_saved():
         paths = gateway_paths(agent)
         request_id, request_path, _ = submit_gateway_ask(
             paths,
-            prompt="gateway recovery snapshot 测试",
-            save=True,
-            agent=agent,
+            params=GatewayAskParams(
+                prompt="gateway recovery snapshot 测试",
+                save=True,
+                agent=agent,
+            ),
         )
 
         response = _handle_gateway_request(agent, request_path)
@@ -268,11 +273,13 @@ def test_gateway_request_can_override_resume_context():
         paths = gateway_paths(agent)
         _, request_path, _ = submit_gateway_ask(
             paths,
-            prompt="继续 README",
-            save=False,
-            include_prompt=True,
-            resume_context=True,
-            agent=agent,
+            params=GatewayAskParams(
+                prompt="继续 README",
+                save=False,
+                include_prompt=True,
+                resume_context=True,
+                agent=agent,
+            ),
         )
 
         response = _handle_gateway_request(agent, request_path)
@@ -305,9 +312,11 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
         gpaths = gateway_paths(agent)
         submit_gateway_ask(
             gpaths,
-            prompt="local-rebuild gateway 请求索引测试",
-            save=False,
-            agent=agent,
+            params=GatewayAskParams(
+                prompt="local-rebuild gateway 请求索引测试",
+                save=False,
+                agent=agent,
+            ),
         )
         assert _process_gateway_requests(agent, gpaths) == 1
 
@@ -402,7 +411,7 @@ def test_gateway_worker_refreshes_processing_lease_heartbeat_during_long_run():
         paths = gateway_paths(agent)
         for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
             path.mkdir(parents=True, exist_ok=True)
-        request_id, request_path, _ = submit_gateway_ask(paths, prompt="长任务 lease heartbeat 测试", save=False)
+        request_id, request_path, _ = submit_gateway_ask(paths, params=GatewayAskParams(prompt="长任务 lease heartbeat 测试", save=False))
         observed: list[float] = []
         original_run = agent.run
 

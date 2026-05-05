@@ -8,7 +8,6 @@ from __future__ import annotations
 """
 
 import json
-import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -33,7 +32,7 @@ from .policies import (
 )
 from .reports import AcceptanceReviewFinding
 from .result_contexts import OutputPayloadContext, RunnerResultContext
-from .runner_rendering import _render_runner_item_line
+from .result_debrief import _append_runner_debrief_content
 from .utils import _merge_list, _new_id
 
 
@@ -378,45 +377,3 @@ def _write_runner_result_files(
         json.dumps(asdict(result), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-
-
-def _append_runner_debrief_content(
-    task: SubAgentTask,
-    parsed: SubAgentParsedOutput,
-) -> None:
-    """LLM: append structured runner output sections to the DEBRIEF file.
-
-    新手说明:
-    把结构化 runner 产出追加到 DEBRIEF，方便人接管。包括 artifacts、tests、patches、
-    lessons 和 next_actions 五个段落。
-    """
-
-    sections: list[str] = []
-    if parsed.artifacts:
-        sections.append("## Runner Artifacts")
-        sections.extend(_render_runner_item_line(item) for item in parsed.artifacts)
-    if parsed.tests:
-        sections.append("## Runner Tests")
-        sections.extend(_render_runner_item_line(item) for item in parsed.tests)
-    if parsed.patches:
-        sections.append("## Runner Patches")
-        sections.extend(_render_runner_item_line(item) for item in parsed.patches)
-    if parsed.lessons:
-        sections.append("## Runner Lessons")
-        sections.extend(f"- {item}" for item in parsed.lessons)
-    if parsed.next_actions:
-        sections.append("## Runner Next Actions")
-        sections.extend(f"- {item}" for item in parsed.next_actions)
-    if not sections:
-        return
-
-    path = Path(task.debrief_file)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        path.write_text("# DEBRIEF\n\n", encoding="utf-8")
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write("\n## Runner Structured Output\n\n")
-        handle.write(f"- created_at: {time.time()}\n")
-        handle.write(f"- run_id: {task.id}\n\n")
-        handle.write("\n\n".join(sections))
-        handle.write("\n")

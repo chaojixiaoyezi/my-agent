@@ -48,6 +48,30 @@ class RecordCapabilityGapParams:
     suggested_tool: str = ""
 
 
+@dataclass(frozen=True)
+class RecordCapabilityRequestParams:
+    """Params bundle for record_capability_request."""
+
+    problem: str
+    needed_capability: str
+    expected_output: str = ""
+    tried: list[str] | None = None
+    evidence: list[str] | None = None
+    constraints: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class RecordEvidenceParams:
+    """Params bundle for record_evidence."""
+
+    kind: str
+    summary: str
+    command: str = ""
+    path: str = ""
+    url: str = ""
+    ok: bool = True
+
+
 class SubAgentLifecycleService:
     """Mutate lifecycle fields on subagent tasks through the manager facade."""
 
@@ -57,24 +81,18 @@ class SubAgentLifecycleService:
     def record_capability_request(
         self,
         run_id: str,
-        *,
-        problem: str,
-        needed_capability: str,
-        expected_output: str = "",
-        tried: list[str] | None = None,
-        evidence: list[str] | None = None,
-        constraints: dict[str, str] | None = None,
+        params: RecordCapabilityRequestParams,
     ) -> CapabilityRequest:
         task = self.manager.load(run_id)
         request = CapabilityRequest(
             id=_new_id("capreq"),
             from_run_id=run_id,
-            problem=problem,
-            needed_capability=needed_capability,
-            expected_output=expected_output,
-            tried=tried or [],
-            evidence=evidence or [],
-            constraints=constraints or {},
+            problem=params.problem,
+            needed_capability=params.needed_capability,
+            expected_output=params.expected_output,
+            tried=params.tried or [],
+            evidence=params.evidence or [],
+            constraints=params.constraints or {},
             created_at=time.time(),
         )
         task.capability_requests.append(request)
@@ -144,22 +162,16 @@ class SubAgentLifecycleService:
     def record_evidence(
         self,
         run_id: str,
-        *,
-        kind: str,
-        summary: str,
-        command: str = "",
-        path: str = "",
-        url: str = "",
-        ok: bool = True,
+        params: RecordEvidenceParams,
     ) -> VerificationEvidence:
         task = self.manager.load(run_id)
         evidence = VerificationEvidence(
-            kind=kind,
-            summary=summary,
-            command=command,
-            path=path,
-            url=url,
-            ok=ok,
+            kind=params.kind,
+            summary=params.summary,
+            command=params.command,
+            path=params.path,
+            url=params.url,
+            ok=params.ok,
             created_at=time.time(),
         )
         task.evidence.append(evidence)

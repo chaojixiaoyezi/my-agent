@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from dataclasses import dataclass
 
 from ...agent.gateway import (
     _process_gateway_requests,
@@ -25,6 +26,15 @@ from ..scenario_utils import (
     print_scenario_step,
     write_scenario_summary,
 )
+
+
+@dataclass
+class ProcessingVerifyResults:
+    """Bundle of verification results for processing stop scenario."""
+    done_path: object
+    response_path: object
+    final_response: dict
+    response_json_valid: bool
 
 
 def _processing_stop_setup(args):
@@ -87,19 +97,19 @@ def _processing_stop_simulate_lease(gpaths, request_id, pending_path, payload):
     return processing_path, response_path
 
 
-def _processing_stop_verify_results(paths, request_id, requeued, processed, done_path, response_path, final_response, response_json_valid):
+def _processing_stop_verify_results(paths, request_id, requeued, processed, verify: ProcessingVerifyResults):
     """Verify processing stop scenario results."""
     final_ok = (
         requeued == 1
         and not after_requeue_processing.exists()
         and after_requeue_pending.exists()
         and processed == 1
-        and done_path.exists()
-        and final_response.get("ok") is True
-        and final_response.get("status") == "done"
+        and verify.done_path.exists()
+        and verify.final_response.get("ok") is True
+        and verify.final_response.get("status") == "done"
         and done_payload.get("lease_owner") == "scenario-recovery-worker-after-stop"
         and done_payload.get("attempts") == 2
-        and response_json_valid
+        and verify.response_json_valid
     )
     write_scenario_summary(
         paths,
@@ -110,9 +120,9 @@ def _processing_stop_verify_results(paths, request_id, requeued, processed, done
             "request_id": request_id,
             "requeued": requeued,
             "processed": processed,
-            "done_path": str(done_path),
-            "response_path": str(response_path),
-            "response": final_response,
+            "done_path": str(verify.done_path),
+            "response_path": str(verify.response_path),
+            "response": verify.final_response,
         },
     )
     print(f"\nsummary_json={paths.summary_json}")
@@ -163,5 +173,11 @@ def run_scenario_gateway_processing_stop_case(args) -> int:
         response_json_valid = False
 
     return _processing_stop_verify_results(
-        paths, request_id, requeued, processed, done_path, response_path, final_response, response_json_valid,
+        paths, request_id, requeued, processed,
+        ProcessingVerifyResults(
+            done_path=done_path,
+            response_path=response_path,
+            final_response=final_response,
+            response_json_valid=response_json_valid,
+        ),
     )

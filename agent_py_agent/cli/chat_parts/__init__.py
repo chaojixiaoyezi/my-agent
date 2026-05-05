@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from .fallback import ChatJob, run_fallback
 from .gateway_client import (
+    ChatRequestContent,
     check_gateway_alive,
     format_gateway_timing,
     poll_gateway_chunks,
@@ -25,6 +26,7 @@ from .input_loop import (
     is_show_prompt_command,
     parse_expand_target,
 )
+from .slash_command_types import SlashCommandContext
 from .renderer import (
     BLUE,
     BOLD,

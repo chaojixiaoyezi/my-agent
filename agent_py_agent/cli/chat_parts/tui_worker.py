@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .gateway_client import (
+    ChatRequestContent,
     check_gateway_alive,
     poll_gateway_chunks,
     submit_chat_request,
@@ -177,12 +178,14 @@ def _worker_gateway_path(
         raise RuntimeError("gateway 已停止。请先执行: my-agent gateway start")
     request_id, chunk_path, response_path = submit_chat_request(
         cfg.paths,
-        prompt=job.user,
-        inject=turn_inject,
-        prompt_files=job.prompt_files,
-        save=not cfg.args.no_save,
-        show_prompt=job.show_prompt,
-        resume_context=resume_context_override(cfg.args),
+        content=ChatRequestContent(
+            prompt=job.user,
+            inject=turn_inject,
+            prompt_files=job.prompt_files,
+            save=not cfg.args.no_save,
+            show_prompt=job.show_prompt,
+            resume_context=resume_context_override(cfg.args),
+        ),
         agent=cfg.agent,
     )
     timeout = cfg.args.gateway_timeout if cfg.args.gateway_timeout is not None else cfg.agent.config.gateway_request_timeout

@@ -105,6 +105,17 @@ def _write_summary(summary: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+def _capture_stage_result(stage_name, result, findings, case, route):
+    """Capture a stage result into the appropriate variable, returning updated tuple."""
+    if stage_name == "detector":
+        return result, case, route
+    if stage_name == "case":
+        return findings, result, route
+    if stage_name == "route":
+        return findings, case, result
+    return findings, case, route
+
+
 def _run_stages_sequentially(
     summary: dict[str, Any],
     stages: list[tuple[str, Any]],
@@ -114,20 +125,13 @@ def _run_stages_sequentially(
     Returns:
         Tuple of (updated summary, findings or None, case or route or None).
     """
-    findings = case = route = traced = None
+    findings = case = route = None
 
     for stage_name, handler in stages:
         ok, result = _run_stage(summary, stage_name, handler)
         if not ok:
             return summary, findings, case
-
-        # Capture results by stage name
-        if stage_name == "detector":
-            findings = result
-        elif stage_name == "case":
-            case = result
-        elif stage_name == "route":
-            route = result
+        findings, case, route = _capture_stage_result(stage_name, result, findings, case, route)
 
     return summary, findings, case
 

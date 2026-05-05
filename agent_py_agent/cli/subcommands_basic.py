@@ -12,9 +12,7 @@ import argparse
 from .chat import cmd_chat
 from .common import DEFAULT_CAPABILITY_CONFIG, add_resume_context_switches
 from .local_commands import (
-    cmd_local_doctor,
     cmd_local_index_memory,
-    cmd_local_rebuild,
     cmd_local_search,
     cmd_local_store_status,
     cmd_memory_list,
@@ -24,6 +22,7 @@ from .local_commands import (
     cmd_status,
     cmd_timeline,
 )
+from .local_repair_commands import cmd_local_doctor, cmd_local_rebuild
 from .memory_archive_commands import (
     cmd_memory_archive_list,
     cmd_memory_archive_search,

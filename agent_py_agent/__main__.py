@@ -9,6 +9,7 @@ CLI 真实实现已经拆到 `agent_py_agent.cli` 目录。
 
 from .agent.gateway import (
     AdapterPaths,
+    GatewayAskParams,
     GatewayPaths,
     _handle_gateway_request,
     _process_gateway_requests,

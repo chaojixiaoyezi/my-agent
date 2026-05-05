@@ -56,6 +56,24 @@ def _load_routes_for_matching(index_path: Path, agent, args) -> tuple[list[Memor
     return routes, matches, resolution.required_read_paths, resolution.candidate_paths
 
 
+def _try_validate_routes(index_path: Path, agent) -> tuple[bool, list[MemoryRoute], list[str], list[str]]:
+    """Try to validate routes, returning (ok, routes, route_warnings, messages)."""
+    try:
+        routes, route_warnings = _load_and_validate_routes(index_path, agent)
+        return True, routes, route_warnings, ["memory route validation completed."]
+    except Exception as exc:
+        return False, [], [], [f"memory route index could not be loaded: {type(exc).__name__}: {exc}"]
+
+
+def _try_match_routes(index_path: Path, agent, args) -> tuple[bool, list[MemoryRoute], list[MemoryRouteMatch], list[str], list[str], list[str]]:
+    """Try to match routes, returning (ok, routes, matches, required_paths, candidate_paths, messages)."""
+    try:
+        routes, matches, required_paths, candidate_paths = _load_routes_for_matching(index_path, agent, args)
+        return True, routes, matches, required_paths, candidate_paths, []
+    except Exception as exc:
+        return False, [], [], [], [], [f"memory route index could not be loaded: {type(exc).__name__}: {exc}"]
+
+
 def _execute_route_logic(args, agent, index_path: Path, mode: str, auto_read_limit: int):
     """Execute routing match logic, returning (ok, routes, matches, required_paths, candidate_paths, diagnostics)."""
     warnings = _config_warnings(agent.config)
@@ -69,22 +87,19 @@ def _execute_route_logic(args, agent, index_path: Path, mode: str, auto_read_lim
     if not index_path.exists():
         ok = False
         diagnostics["messages"].append(f"memory route index not found: {index_path}")
-    elif bool(getattr(args, "validate", False)):
-        try:
-            routes, diagnostics["route_warnings"] = _load_and_validate_routes(index_path, agent)
-            diagnostics["messages"].append("memory route validation completed.")
-        except Exception as exc:
-            ok = False
-            diagnostics["messages"].append(f"memory route index could not be loaded: {type(exc).__name__}: {exc}")
-    elif mode == "off":
-        diagnostics["messages"].append("memory routing mode is off; route matching skipped.")
-    else:
-        try:
-            routes, matches, required_read_paths, candidate_paths = _load_routes_for_matching(index_path, agent, args)
-        except Exception as exc:
-            ok = False
-            diagnostics["messages"].append(f"memory route index could not be loaded: {type(exc).__name__}: {exc}")
+        return ok, routes, matches, required_read_paths, candidate_paths, diagnostics
 
+    if bool(getattr(args, "validate", False)):
+        ok, routes, diagnostics["route_warnings"], msgs = _try_validate_routes(index_path, agent)
+        diagnostics["messages"].extend(msgs)
+        return ok, routes, matches, required_read_paths, candidate_paths, diagnostics
+
+    if mode == "off":
+        diagnostics["messages"].append("memory routing mode is off; route matching skipped.")
+        return ok, routes, matches, required_read_paths, candidate_paths, diagnostics
+
+    ok, routes, matches, required_read_paths, candidate_paths, msgs = _try_match_routes(index_path, agent, args)
+    diagnostics["messages"].extend(msgs)
     return ok, routes, matches, required_read_paths, candidate_paths, diagnostics
 
 

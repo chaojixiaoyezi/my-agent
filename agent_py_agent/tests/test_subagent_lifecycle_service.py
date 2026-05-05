@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.services.lifecycle import RecordCapabilityGrantParams
+from agent_py_agent.agent.subagents.services.lifecycle import RecordCapabilityGrantParams, RecordCapabilityRequestParams, RecordEvidenceParams
 
 
 def test_subagent_lifecycle_service_records_capabilities_and_status(tmp_path) -> None:
@@ -18,8 +18,10 @@ def test_subagent_lifecycle_service_records_capabilities_and_status(tmp_path) ->
 
     request = manager.record_capability_request(
         task.id,
-        problem="need search",
-        needed_capability="search",
+        RecordCapabilityRequestParams(
+            problem="need search",
+            needed_capability="search",
+        ),
     )
     grant = manager.record_capability_grant(
         task.id,
@@ -29,7 +31,7 @@ def test_subagent_lifecycle_service_records_capabilities_and_status(tmp_path) ->
             tools=["search_text"],
         ),
     )
-    evidence = manager.record_evidence(task.id, kind="test", summary="passed")
+    evidence = manager.record_evidence(task.id, RecordEvidenceParams(kind="test", summary="passed"))
     updated = manager.set_status(task.id, "DONE", require_evidence=True)
 
     loaded = manager.load(task.id)

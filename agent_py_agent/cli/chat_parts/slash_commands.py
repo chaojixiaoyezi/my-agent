@@ -7,8 +7,7 @@ TUI 和 fallback 两套聊天循环都支持同一批斜杠命令。这里统一
 避免两个循环各自复制一份业务逻辑。
 """
 
-from collections.abc import Callable
-from typing import Any
+from .slash_command_types import SlashCommandContext
 
 CHAT_HELP_TEXT = (
     "可用命令：\n"
@@ -30,59 +29,55 @@ CHAT_HELP_TEXT = (
 def handle_common_slash_command(
     user: str,
     *,
-    agent: Any,
-    memory_limit: int,
-    runtime_inject: list[str],
-    prompt_files: list[str],
-    print_line: Callable[[str], None],
+    ctx: SlashCommandContext,
     include_fallback_help: bool = False,
 ) -> bool:
     """Handle slash commands shared by prompt_toolkit and fallback chat loops."""
 
     if user == "/help":
         suffix = "Ctrl+C                        退出\n其他输入                       正常对话\n" if include_fallback_help else ""
-        print_line(CHAT_HELP_TEXT + suffix)
+        ctx.print_line(CHAT_HELP_TEXT + suffix)
         return True
     if user.startswith("/remember "):
-        rec = agent.remember(user[len("/remember "):], kind="note")
-        print_line(f"已记忆: {rec.content}")
+        rec = ctx.agent.remember(user[len("/remember "):], kind="note")
+        ctx.print_line(f"已记忆: {rec.content}")
         return True
     if user.startswith("/memory"):
         query = user[len("/memory"):].strip()
-        records = agent.recall(query, memory_limit) if query else agent.memory.all()[-memory_limit:]
+        records = ctx.agent.recall(query, ctx.memory_limit) if query else ctx.agent.memory.all()[-ctx.memory_limit:]
         if not records:
-            print_line("没有找到记忆。")
+            ctx.print_line("没有找到记忆。")
         else:
             for rec in records:
-                print_line(f"- [{rec.kind}] {rec.role}: {rec.content}")
+                ctx.print_line(f"- [{rec.kind}] {rec.role}: {rec.content}")
         return True
     if user == "/btw":
-        if not runtime_inject:
-            print_line("当前没有运行时 prompt 注入。")
+        if not ctx.runtime_inject:
+            ctx.print_line("当前没有运行时 prompt 注入。")
         else:
-            print_line("当前运行时 prompt 注入：")
-            for index, item in enumerate(runtime_inject, 1):
-                print_line(f"{index}. {item}")
+            ctx.print_line("当前运行时 prompt 注入：")
+            for index, item in enumerate(ctx.runtime_inject, 1):
+                ctx.print_line(f"{index}. {item}")
         return True
     if user.startswith("/btw "):
-        runtime_inject.append(user[len("/btw "):])
-        print_line(f"已加入注入 prompt，当前 {len(runtime_inject)} 条。")
+        ctx.runtime_inject.append(user[len("/btw "):])
+        ctx.print_line(f"已加入注入 prompt，当前 {len(ctx.runtime_inject)} 条。")
         return True
     if user == "/btw-clear":
-        runtime_inject.clear()
-        print_line("已清空运行时 prompt 注入。")
+        ctx.runtime_inject.clear()
+        ctx.print_line("已清空运行时 prompt 注入。")
         return True
     if user.startswith("/prompt-file "):
-        prompt_files.append(user[len("/prompt-file "):].strip())
-        print_line(f"已加入 prompt 文件，当前 {len(prompt_files)} 个。")
+        ctx.prompt_files.append(user[len("/prompt-file "):].strip())
+        ctx.print_line(f"已加入 prompt 文件，当前 {len(ctx.prompt_files)} 个。")
         return True
     if user.startswith("/subagents "):
         parts = user.split(maxsplit=2)
         if len(parts) < 3 or not parts[1].isdigit():
-            print_line("用法: /subagents <数量> <目标>")
+            ctx.print_line("用法: /subagents <数量> <目标>")
             return True
-        tasks = agent.spawn_subagents(parts[2], int(parts[1]))
+        tasks = ctx.agent.spawn_subagents(parts[2], int(parts[1]))
         for task in tasks:
-            print_line(f"- {task.id}: {task.goal}")
+            ctx.print_line(f"- {task.id}: {task.goal}")
         return True
     return False

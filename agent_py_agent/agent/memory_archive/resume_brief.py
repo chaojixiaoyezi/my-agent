@@ -8,7 +8,21 @@ from __future__ import annotations
 """
 
 import json
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass
+class RecoveryBriefContext:
+    """Bundle for _context_block keyword parameters."""
+
+    latest_user_intents: list[str]
+    latest_assistant_actions: list[str]
+    related_ids: dict[str, list[str]]
+    likely_task_statuses: list[dict[str, str]]
+    recommended_read_paths: list[str]
+    next_actions: list[str]
+    authority_note: str
 
 
 def build_resume_brief(
@@ -39,13 +53,15 @@ def build_resume_brief(
         ),
     ]
     context_block = _context_block(
-        latest_user_intents=latest_user_intents,
-        latest_assistant_actions=latest_assistant_actions,
-        related_ids=related_ids,
-        likely_task_statuses=likely_task_statuses,
-        recommended_read_paths=recommended_read_paths,
-        next_actions=next_actions,
-        authority_note=authority_note,
+        RecoveryBriefContext(
+            latest_user_intents=latest_user_intents,
+            latest_assistant_actions=latest_assistant_actions,
+            related_ids=related_ids,
+            likely_task_statuses=likely_task_statuses,
+            recommended_read_paths=recommended_read_paths,
+            next_actions=next_actions,
+            authority_note=authority_note,
+        )
     )
     return {
         "latest_user_intent": latest_user_intents[0] if latest_user_intents else "",
@@ -181,16 +197,7 @@ def _likely_task_statuses(task_payloads: list[dict[str, Any]]) -> list[dict[str,
     return statuses
 
 
-def _context_block(
-    *,
-    latest_user_intents: list[str],
-    latest_assistant_actions: list[str],
-    related_ids: dict[str, list[str]],
-    likely_task_statuses: list[dict[str, str]],
-    recommended_read_paths: list[str],
-    next_actions: list[str],
-    authority_note: str,
-) -> str:
+def _context_block(ctx: RecoveryBriefContext) -> str:
     """LLM: render a short text block suitable for future prompt injection or handoff.
 
     新手说明:
@@ -204,25 +211,25 @@ def _context_block(
     返回 Markdown 风格的恢复上下文块。
     """
 
-    lines = ["# Recovery Brief", "", f"- authority: {authority_note}"]
-    lines.append(f"- latest_user_intent: {latest_user_intents[0] if latest_user_intents else 'unknown'}")
+    lines = ["# Recovery Brief", "", f"- authority: {ctx.authority_note}"]
+    lines.append(f"- latest_user_intent: {ctx.latest_user_intents[0] if ctx.latest_user_intents else 'unknown'}")
     lines.append(
-        f"- latest_assistant_action: {latest_assistant_actions[0] if latest_assistant_actions else 'unknown'}"
+        f"- latest_assistant_action: {ctx.latest_assistant_actions[0] if ctx.latest_assistant_actions else 'unknown'}"
     )
-    lines.append("- related_ids: " + json.dumps(related_ids, ensure_ascii=False, sort_keys=True))
-    if likely_task_statuses:
+    lines.append("- related_ids: " + json.dumps(ctx.related_ids, ensure_ascii=False, sort_keys=True))
+    if ctx.likely_task_statuses:
         lines.append("- likely_task_statuses:")
-        for item in likely_task_statuses[:5]:
+        for item in ctx.likely_task_statuses[:5]:
             lines.append(
                 f"  - {item['run_id']} {item['status']}/{item['verification_status']} :: {item['goal']}"
             )
     else:
         lines.append("- likely_task_statuses: none")
     lines.append("- must_read:")
-    for path in recommended_read_paths[:10] or ["none"]:
+    for path in ctx.recommended_read_paths[:10] or ["none"]:
         lines.append(f"  - {path}")
     lines.append("- next_actions:")
-    for action in next_actions[:5]:
+    for action in ctx.next_actions[:5]:
         lines.append(f"  - {action}")
     return "\n".join(lines)
 

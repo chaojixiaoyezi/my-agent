@@ -33,6 +33,7 @@ from .storage import (
     write_compression_snapshot_file,
 )
 from .tokens import (
+    TurnTokenUsage,
     append_session_token_usage,
     check_token_budget,
     estimate_tokens,
@@ -42,6 +43,7 @@ from .tokens import (
 __all__ = [
     "CompressionSnapshot",
     "ArchiveRunTurnResult",
+    "TurnTokenUsage",
     "CompressionHookResult",
     "MemoryArchiveError",
     "RawMemoryEvent",

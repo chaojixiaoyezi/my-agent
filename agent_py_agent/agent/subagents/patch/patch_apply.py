@@ -14,7 +14,7 @@ from agent_py_agent.agent.subagents.reports import PatchApplyReport
 from agent_py_agent.agent.subagents.utils import _read_json_object
 
 from .patch_apply_reports import patch_apply_record_to_dict
-from .patch_apply_task import apply_patch_task, normalize_patch_apply_spec, resolve_patch_target
+from .patch_apply_task import ApplyPatchTaskParams, apply_patch_task, normalize_patch_apply_spec, resolve_patch_target
 
 
 class PatchApplyService:
@@ -120,7 +120,12 @@ class PatchApplyService:
 
     def _apply_patch_task(self, task, *, output, patches, apply, applier, note):
         """Backward-compatible wrapper for single-task patch application."""
-        return apply_patch_task(self.manager, task, output=output, patches=patches, apply=apply, applier=applier, note=note)
+        return apply_patch_task(
+            self.manager, task,
+            params=ApplyPatchTaskParams(
+                output=output, patches=patches, apply=apply, applier=applier, note=note,
+            ),
+        )
 
     def _normalize_patch_apply_spec(self, task, patch):
         """Backward-compatible wrapper for patch spec normalization."""

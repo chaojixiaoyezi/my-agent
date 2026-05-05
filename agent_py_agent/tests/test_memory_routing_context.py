@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from agent_py_agent.agent.memory_routing.context import (
+    RouteContextOptions,
     _resolve_relative_path,
     _resolve_root,
     build_routed_memory_context,
@@ -148,7 +149,9 @@ def test_build_routed_memory_context_disabled():
     context = build_routed_memory_context(
         root="/tmp",
         query="测试查询",
-        enabled=False,
+        options=RouteContextOptions(
+            enabled=False,
+        ),
     )
     assert context.enabled is False
     assert context.matches == []
@@ -173,8 +176,10 @@ def test_build_routed_memory_context_invalid_mode(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="测试",
-        index_path="memory/routing/INDEX.md",
-        mode="invalid_mode",
+        options=RouteContextOptions(
+            index_path="memory/routing/INDEX.md",
+            mode="invalid_mode",
+        ),
     )
     assert len(context.findings) > 0
     assert "mode must be one of" in context.findings[0]
@@ -185,7 +190,9 @@ def test_build_routed_memory_context_missing_index(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="测试",
-        index_path="memory/routing/NOTFOUND.md",
+        options=RouteContextOptions(
+            index_path="memory/routing/NOTFOUND.md",
+        ),
     )
     assert len(context.findings) > 0
     assert "does not exist" in context.findings[0]
@@ -203,8 +210,10 @@ def test_build_routed_memory_context_valid_index(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="需要数据分析工具",
-        index_path="memory/routing/INDEX.md",
-        mode="soft",
+        options=RouteContextOptions(
+            index_path="memory/routing/INDEX.md",
+            mode="soft",
+        ),
     )
 
     assert context.routes_count == 1
@@ -228,8 +237,10 @@ def test_build_routed_memory_context_auto_read_limit_zero(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="测试",
-        index_path="memory/routing/INDEX.md",
-        auto_read_limit=0,
+        options=RouteContextOptions(
+            index_path="memory/routing/INDEX.md",
+            auto_read_limit=0,
+        ),
     )
 
     assert context.required_read_paths == []
@@ -253,9 +264,11 @@ def test_build_routed_memory_context_strict_mode(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="测试关键词",
-        index_path="memory/routing/INDEX.md",
-        mode="strict",
-        auto_read_limit=3,
+        options=RouteContextOptions(
+            index_path="memory/routing/INDEX.md",
+            mode="strict",
+            auto_read_limit=3,
+        ),
     )
 
     assert len(context.required_read_paths) == 1
@@ -277,9 +290,11 @@ def test_build_routed_memory_context_read_content(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="测试关键词",
-        index_path="memory/routing/INDEX.md",
-        auto_read_limit=3,
-        max_chars_per_file=100,
+        options=RouteContextOptions(
+            index_path="memory/routing/INDEX.md",
+            auto_read_limit=3,
+            max_chars_per_file=100,
+        ),
     )
 
     assert len(context.injected_sections) == 1
@@ -302,9 +317,11 @@ def test_build_routed_memory_context_truncated_content(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="长文本关键词",
-        index_path="memory/routing/INDEX.md",
-        auto_read_limit=3,
-        max_chars_per_file=50,
+        options=RouteContextOptions(
+            index_path="memory/routing/INDEX.md",
+            auto_read_limit=3,
+            max_chars_per_file=50,
+        ),
     )
 
     assert len(context.injected_sections) == 1
@@ -323,8 +340,10 @@ def test_build_routed_memory_context_missing_authority_file(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="测试关键词",
-        index_path="memory/routing/INDEX.md",
-        auto_read_limit=3,
+        options=RouteContextOptions(
+            index_path="memory/routing/INDEX.md",
+            auto_read_limit=3,
+        ),
     )
 
     assert len(context.receipts) == 1
@@ -344,7 +363,9 @@ def test_build_routed_memory_context_route_validation(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="测试",
-        index_path="memory/routing/INDEX.md",
+        options=RouteContextOptions(
+            index_path="memory/routing/INDEX.md",
+        ),
     )
 
     # findings 应包含验证警告
@@ -369,7 +390,9 @@ def test_build_routed_memory_context_empty_query(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="",
-        index_path="memory/routing/INDEX.md",
+        options=RouteContextOptions(
+            index_path="memory/routing/INDEX.md",
+        ),
     )
 
     assert len(context.matches) == 1
@@ -383,7 +406,9 @@ def test_build_routed_memory_context_index_is_directory(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="测试",
-        index_path="memory/routing",
+        options=RouteContextOptions(
+            index_path="memory/routing",
+        ),
     )
 
     assert len(context.findings) > 0
@@ -399,7 +424,9 @@ def test_build_routed_memory_context_invalid_json_index(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="测试",
-        index_path="memory/routing/INDEX.json",
+        options=RouteContextOptions(
+            index_path="memory/routing/INDEX.json",
+        ),
     )
 
     assert len(context.findings) > 0
@@ -422,7 +449,9 @@ def test_build_routed_memory_context_json_index(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="JSON主题",
-        index_path="memory/routing/INDEX.json",
+        options=RouteContextOptions(
+            index_path="memory/routing/INDEX.json",
+        ),
     )
 
     assert context.routes_count == 1
@@ -447,7 +476,9 @@ def test_build_routed_memory_context_duplicate_authority_path(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="测试关键词",
-        index_path="memory/routing/INDEX.md",
+        options=RouteContextOptions(
+            index_path="memory/routing/INDEX.md",
+        ),
     )
 
     # 两条路由匹配（相同的触发词）
@@ -473,7 +504,9 @@ def test_build_routed_memory_context_pathlib_root(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,  # Path 对象
         query="测试",
-        index_path="memory/routing/INDEX.md",
+        options=RouteContextOptions(
+            index_path="memory/routing/INDEX.md",
+        ),
     )
 
     assert context.routes_count == 1
@@ -488,8 +521,10 @@ def test_build_routed_memory_context_whitespace_mode(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="测试",
-        index_path="memory/routing/INDEX.md",
-        mode="  soft  ",
+        options=RouteContextOptions(
+            index_path="memory/routing/INDEX.md",
+            mode="  soft  ",
+        ),
     )
 
     # 空白被去除后应该有效
@@ -514,8 +549,10 @@ def test_build_routed_memory_context_limit_results(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="测试",
-        index_path="memory/routing/INDEX.md",
-        limit=3,
+        options=RouteContextOptions(
+            index_path="memory/routing/INDEX.md",
+            limit=3,
+        ),
     )
 
     assert len(context.matches) == 3
@@ -537,7 +574,9 @@ def test_build_routed_memory_context_receipt_has_content_hash(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="测试关键词",
-        index_path="memory/routing/INDEX.md",
+        options=RouteContextOptions(
+            index_path="memory/routing/INDEX.md",
+        ),
     )
 
     assert context.receipts[0]["content_hash"] != ""
@@ -556,7 +595,9 @@ def test_build_routed_memory_context_authority_escape_finding(tmp_path):
     context = build_routed_memory_context(
         root=tmp_path,
         query="测试",
-        index_path="memory/routing/INDEX.md",
+        options=RouteContextOptions(
+            index_path="memory/routing/INDEX.md",
+        ),
     )
 
     assert any("escapes root" in f for f in context.findings)

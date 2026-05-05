@@ -17,6 +17,8 @@ from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagents.services.lifecycle import (
     RecordCapabilityGapParams,
     RecordCapabilityGrantParams,
+    RecordCapabilityRequestParams,
+    RecordEvidenceParams,
 )
 
 
@@ -39,8 +41,10 @@ def test_subagent_capability_records():
         )
 
         request = agent.subagents.record_capability_request(
-            child.id, problem="当前只有 read_file，无法确认接口是否可访问。",
-            needed_capability="http_check", expected_output="判断接口状态码和返回体", tried=["read_file"],
+            child.id, RecordCapabilityRequestParams(
+                problem="当前只有 read_file，无法确认接口是否可访问。",
+                needed_capability="http_check", expected_output="判断接口状态码和返回体", tried=["read_file"],
+            ),
         )
         grant = agent.subagents.record_capability_grant(child.id, RecordCapabilityGrantParams(
             request_id=request.id, tools=["fetch_url"], reason="允许低风险 GET 检查。",
@@ -83,9 +87,11 @@ def test_subagent_fake_done_requires_evidence():
 
         evidence = agent.subagents.record_evidence(
             task.id,
-            kind="command",
-            summary="运行 smoke test 通过",
-            command="python3 smoke_test.py",
+            RecordEvidenceParams(
+                kind="command",
+                summary="运行 smoke test 通过",
+                command="python3 smoke_test.py",
+            ),
         )
         done = agent.subagents.set_status(
             task.id,
@@ -187,8 +193,10 @@ def test_subagent_board_scales_and_flags():
             created.append(task)
         agent.subagents.record_capability_request(
             created[3].id,
-            problem="缺少网页检索能力。",
-            needed_capability="web_search",
+            RecordCapabilityRequestParams(
+                problem="缺少网页检索能力。",
+                needed_capability="web_search",
+            ),
         )
         agent.subagents.set_status(created[7].id, "DONE")
         agent.subagents.set_status(created[11].id, "BLOCKED", failure_type="tool_failure")
@@ -218,8 +226,10 @@ def test_subagent_due_check_report():
         )
         agent.subagents.record_capability_request(
             active.id,
-            problem="当前工具无法验证真实入口。",
-            needed_capability="browser_smoke_test",
+            RecordCapabilityRequestParams(
+                problem="当前工具无法验证真实入口。",
+                needed_capability="browser_smoke_test",
+            ),
         )
         agent.subagents.record_capability_gap(
             active.id,

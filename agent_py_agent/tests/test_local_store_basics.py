@@ -16,6 +16,7 @@ from pathlib import Path
 from agent_py_agent.__main__ import (
     _handle_gateway_request,
     gateway_paths,
+    GatewayAskParams,
     submit_gateway_ask,
 )
 from agent_py_agent.agent.config import AgentConfig
@@ -252,9 +253,11 @@ def test_gateway_request_indexes_logs_to_local_store():
         paths = gateway_paths(agent)
         request_id, request_path, _ = submit_gateway_ask(
             paths,
-            prompt="gateway 日志测试：这条请求应该能被搜索到",
-            save=False,
-            agent=agent,
+            params=GatewayAskParams(
+                prompt="gateway 日志测试：这条请求应该能被搜索到",
+                save=False,
+                agent=agent,
+            ),
         )
 
         response = _handle_gateway_request(agent, request_path)
@@ -287,9 +290,11 @@ def test_gateway_request_writes_recovery_snapshot_when_saved():
         paths = gateway_paths(agent)
         request_id, request_path, _ = submit_gateway_ask(
             paths,
-            prompt="gateway recovery snapshot 测试",
-            save=True,
-            agent=agent,
+            params=GatewayAskParams(
+                prompt="gateway recovery snapshot 测试",
+                save=True,
+                agent=agent,
+            ),
         )
 
         response = _handle_gateway_request(agent, request_path)
@@ -329,11 +334,13 @@ def test_gateway_request_can_override_resume_context():
         paths = gateway_paths(agent)
         _, request_path, _ = submit_gateway_ask(
             paths,
-            prompt="继续 README",
-            save=False,
-            include_prompt=True,
-            resume_context=True,
-            agent=agent,
+            params=GatewayAskParams(
+                prompt="继续 README",
+                save=False,
+                include_prompt=True,
+                resume_context=True,
+                agent=agent,
+            ),
         )
 
         response = _handle_gateway_request(agent, request_path)

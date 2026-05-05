@@ -59,29 +59,37 @@ class RoutedMemoryContext:
     findings: list[str] = field(default_factory=list)
 
 
+@dataclass
+class RouteContextOptions:
+    """Bundle for build_routed_memory_context keyword parameters."""
+
+    enabled: bool = True
+    index_path: str = "memory/routing/INDEX.md"
+    mode: str = "soft"
+    auto_read_limit: int = 3
+    limit: int = 5
+    max_chars_per_file: int = 4000
+
+
 def build_routed_memory_context(
     root: str | Path,
     query: str,
     *,
-    enabled: bool = True,
-    index_path: str = "memory/routing/INDEX.md",
-    mode: str = "soft",
-    auto_read_limit: int = 3,
-    limit: int = 5,
-    max_chars_per_file: int = 4000,
+    options: RouteContextOptions | None = None,
 ) -> RoutedMemoryContext:
     """Route a query to safe memory authority reads and prompt sections."""
 
-    context = RoutedMemoryContext(enabled=enabled, index_path=str(index_path))
-    if not enabled:
+    _opts = options or RouteContextOptions()
+    context = RoutedMemoryContext(enabled=_opts.enabled, index_path=str(_opts.index_path))
+    if not _opts.enabled:
         return context
 
     resolved_root = _prepare_root(context, root)
-    normalized_mode = _normalize_context_mode(context, mode)
+    normalized_mode = _normalize_context_mode(context, _opts.mode)
     if resolved_root is None or not normalized_mode:
         return context
 
-    index_file = _resolve_index_file(context, resolved_root, str(index_path))
+    index_file = _resolve_index_file(context, resolved_root, str(_opts.index_path))
     if index_file is None:
         return context
     routes = _load_routes(context, index_file)
@@ -92,22 +100,22 @@ def build_routed_memory_context(
     for finding in validate_routes(routes, resolved_root):
         _append_finding(context.findings, finding)
 
-    matches = match_routes(query, routes, limit=limit)
+    matches = match_routes(query, routes, limit=_opts.limit)
     context.matches = [_match_to_dict(match) for match in matches]
 
     targets = _read_targets_from_matches(matches, resolved_root, context.findings)
     context.candidate_paths = [target.path for target in targets]
     if normalized_mode == "strict":
-        read_targets = targets[: max(auto_read_limit, 0)]
+        read_targets = targets[: max(_opts.auto_read_limit, 0)]
         context.required_read_paths = [target.path for target in read_targets]
     else:
-        read_targets = targets[: max(auto_read_limit, 0)]
+        read_targets = targets[: max(_opts.auto_read_limit, 0)]
 
-    if auto_read_limit <= 0:
+    if _opts.auto_read_limit <= 0:
         return context
 
     for target in read_targets:
-        section, receipt = _read_authority_file(target, max_chars_per_file=max_chars_per_file)
+        section, receipt = _read_authority_file(target, max_chars_per_file=_opts.max_chars_per_file)
         context.receipts.append(receipt)
         if section:
             context.injected_sections.append(section)

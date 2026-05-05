@@ -46,12 +46,14 @@ def supervisor_instance(tmp_path, mock_agent_and_paths):
 
     supervisor = sv.GatewaySupervisor(
         config_path=str(config_file),
-        workspace_root=str(workspace),
-        heartbeat_timeout=30.0,
-        check_interval=1.0,
-        max_restart_attempts=3,
-        restart_cooldown=5.0,
-        log_path=log_path,
+        options=sv.SupervisorConfig(
+            workspace_root=str(workspace),
+            heartbeat_timeout=30.0,
+            check_interval=1.0,
+            max_restart_attempts=3,
+            restart_cooldown=5.0,
+            log_path=log_path,
+        ),
     )
     return supervisor
 
@@ -71,10 +73,12 @@ def test_supervisor_init_custom_params():
     """测试 GatewaySupervisor 自定义参数初始化。"""
     supervisor = sv.GatewaySupervisor(
         config_path="test.yaml",
-        heartbeat_timeout=60.0,
-        check_interval=5.0,
-        max_restart_attempts=10,
-        restart_cooldown=60.0,
+        options=sv.SupervisorConfig(
+            heartbeat_timeout=60.0,
+            check_interval=5.0,
+            max_restart_attempts=10,
+            restart_cooldown=60.0,
+        ),
     )
     assert supervisor.heartbeat_timeout == 60.0
     assert supervisor.check_interval == 5.0

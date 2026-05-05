@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any
 from .services.lifecycle import (
     RecordCapabilityGapParams,
     RecordCapabilityGrantParams,
+    RecordCapabilityRequestParams,
+    RecordEvidenceParams,
     SubAgentLifecycleService,
 )
 
@@ -38,25 +40,11 @@ class SubAgentLifecycleMixin:
     def record_capability_request(
         self,
         run_id: str,
-        *,
-        problem: str,
-        needed_capability: str,
-        expected_output: str = "",
-        tried=None,
-        evidence=None,
-        constraints=None,
+        params: RecordCapabilityRequestParams,
     ):
         """Record a capability request on a subagent task."""
 
-        return self._lifecycle_service().record_capability_request(
-            run_id,
-            problem=problem,
-            needed_capability=needed_capability,
-            expected_output=expected_output,
-            tried=tried,
-            evidence=evidence,
-            constraints=constraints,
-        )
+        return self._lifecycle_service().record_capability_request(run_id, params)
 
     def record_capability_grant(
         self,
@@ -77,25 +65,11 @@ class SubAgentLifecycleMixin:
     def record_evidence(
         self,
         run_id: str,
-        *,
-        kind: str,
-        summary: str,
-        command="",
-        path="",
-        url="",
-        ok=True,
+        params: RecordEvidenceParams,
     ):
         """Record verification evidence on a subagent task."""
 
-        return self._lifecycle_service().record_evidence(
-            run_id,
-            kind=kind,
-            summary=summary,
-            command=command,
-            path=path,
-            url=url,
-            ok=ok,
-        )
+        return self._lifecycle_service().record_evidence(run_id, params)
 
     def touch_heartbeat(self, run_id: str) -> None:
         """Refresh subagent heartbeat timestamp."""

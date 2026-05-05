@@ -26,6 +26,7 @@ from .queue_service import (
     wait_for_gateway_running,
 )
 from .request_worker import (
+    GatewayAskParams,
     _handle_gateway_request,
     _process_gateway_requests,
     submit_gateway_ask,
@@ -34,6 +35,7 @@ from .request_worker import (
 from .response_renderer import print_gateway_response
 
 __all__ = [
+    "GatewayAskParams",
     "_active_heartbeat_request_ids",
     "_gateway_processing_lease_interval",
     "_handle_gateway_request",

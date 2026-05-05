@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from .gateway_parts import (
     AdapterPaths,
+    GatewayAskParams,
     GatewayPaths,
     _handle_gateway_request,
     _process_gateway_requests,
@@ -49,6 +50,7 @@ from .gateway_parts import (
 
 __all__ = [
     "AdapterPaths",
+    "GatewayAskParams",
     "GatewayPaths",
     "adapter_paths",
     "append_gateway_history",

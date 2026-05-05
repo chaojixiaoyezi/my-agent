@@ -13,6 +13,7 @@ import sys
 import time
 
 from ..agent.gateway import (
+    GatewayAskParams,
     gateway_chunk_path,
     gateway_paths,
     gateway_response_path,
@@ -157,6 +158,52 @@ def _wait_for_gateway_response(
     return response
 
 
+def _poll_gateway_response(
+    agent,
+    paths,
+    request_id: str,
+    request_path: Path,
+    response_path: Path,
+    timeout: float,
+) -> dict[str, Any]:
+    """Poll for gateway response with spinner. Returns response dict or empty on timeout."""
+    chunk_path = gateway_chunk_path(paths, request_id)
+    spinner = ThinkingSpinner()
+    spinner.start()
+    deadline = time.time() + max(0.0, timeout)
+    response = _wait_for_gateway_response(chunk_path, response_path, deadline, spinner)
+    spinner.stop()
+    return response
+
+
+def _handle_gateway_timeout(
+    agent,
+    request_id: str,
+    request_path: Path,
+    response_path: Path,
+    timeout: float,
+) -> int:
+    """Handle gateway timeout. Returns exit code."""
+    log_gateway_payload(
+        agent,
+        {
+            "id": request_id,
+            "kind": "ask",
+            "status": "timeout",
+            "ok": False,
+            "error": f"timeout after {timeout}s",
+            "created_at": 0,
+            "ended_at": time.time(),
+        },
+        event_type="gateway_request_timeout",
+        request_path=request_path,
+        response_path=response_path,
+    )
+    print(f"gateway 请求等待超时: request_id={request_id} timeout={timeout}s", file=sys.stderr)
+    print(f"response: {response_path}")
+    return 2
+
+
 def cmd_gateway_ask(args) -> int:
     """向正在运行的 gateway 投递一条聊天请求。
 
@@ -173,13 +220,15 @@ def cmd_gateway_ask(args) -> int:
 
     request_id, request_path, response_path = submit_gateway_ask(
         paths,
-        prompt=args.prompt,
-        inject=args.inject or [],
-        prompt_files=args.prompt_file or [],
-        save=not args.no_save,
-        include_prompt=bool(args.show_prompt),
-        resume_context=resume_context_override(args),
-        agent=agent,
+        params=GatewayAskParams(
+            prompt=args.prompt,
+            inject=args.inject or [],
+            prompt_files=args.prompt_file or [],
+            save=not args.no_save,
+            include_prompt=bool(args.show_prompt),
+            resume_context=resume_context_override(args),
+            agent=agent,
+        ),
     )
     if args.no_wait:
         print(f"queued request_id={request_id}")
@@ -189,32 +238,10 @@ def cmd_gateway_ask(args) -> int:
 
     # Synchronous mode: poll for streaming chunks and response file.
     timeout = args.timeout if args.timeout is not None else agent.config.gateway_request_timeout
-    chunk_path = gateway_chunk_path(paths, request_id)
-    spinner = ThinkingSpinner()
-    spinner.start()
-    deadline = time.time() + max(0.0, timeout)
-    response = _wait_for_gateway_response(chunk_path, response_path, deadline, spinner)
-    spinner.stop()
+    response = _poll_gateway_response(agent, paths, request_id, request_path, response_path, timeout)
 
     if not response:
-        log_gateway_payload(
-            agent,
-            {
-                "id": request_id,
-                "kind": "ask",
-                "status": "timeout",
-                "ok": False,
-                "error": f"timeout after {timeout}s",
-                "created_at": 0,
-                "ended_at": time.time(),
-            },
-            event_type="gateway_request_timeout",
-            request_path=request_path,
-            response_path=response_path,
-        )
-        print(f"gateway 请求等待超时: request_id={request_id} timeout={timeout}s", file=sys.stderr)
-        print(f"response: {response_path}")
-        return 2
+        return _handle_gateway_timeout(agent, request_id, request_path, response_path, timeout)
     return print_gateway_response(response, json_mode=args.json, show_prompt=args.show_prompt)
 
 

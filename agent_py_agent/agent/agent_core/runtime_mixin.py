@@ -19,8 +19,8 @@ from ..memory_archive import (
     write_compression_snapshot,
     write_recovery_snapshot,
 )
-from ..memory_archive.tokens import append_session_token_usage
-from ..memory_routing import build_routed_memory_context
+from ..memory_archive.tokens import TurnTokenUsage, append_session_token_usage
+from ..memory_routing import RouteContextOptions, build_routed_memory_context
 from .runtime_capabilities import resolve_runtime_capabilities
 from .runtime_services import CompressionService, FinalizationService, ToolLoopService
 
@@ -259,10 +259,12 @@ def _prepare_runtime_context(agent, user_prompt, inject, resume_context):
     route_auto_read_limit = int(getattr(agent.config, "memory_rule_auto_read_limit", 3))
     routed_context = build_routed_memory_context(
         agent.root, user_prompt,
-        enabled=route_enabled,
-        mode=route_mode if route_mode != "off" else "soft",
-        auto_read_limit=route_auto_read_limit,
-        limit=max(route_auto_read_limit, 5),
+        options=RouteContextOptions(
+            enabled=route_enabled,
+            mode=route_mode if route_mode != "off" else "soft",
+            auto_read_limit=route_auto_read_limit,
+            limit=max(route_auto_read_limit, 5),
+        ),
     )
     resume_context_result = build_auto_resume_context(agent, user_prompt, enabled=resume_context)
     resume_context_section = (
