@@ -96,6 +96,14 @@ class _RuntimeServices:
     finalization: FinalizationService
 
 
+_RUN_PARAM_KEYS = [
+    "inject", "prompt_files", "save", "allowed_tools", "granted_capabilities",
+    "write_boundary", "request_id", "run_id", "task_id", "task_attributes",
+    "source", "recovery_snapshot", "resume_context", "recovery_task_refs",
+    "recovery_content_paths", "recovery_next_actions", "on_chunk",
+]
+
+
 class SimpleAgentRuntimeMixin:
     """LLM: mixin for the primary model/tool execution loop.
 
@@ -141,14 +149,7 @@ class SimpleAgentRuntimeMixin:
         elif not isinstance(params, RunParams):
             raise TypeError("run() requires params: RunParams keyword argument")
 
-        for key in [
-            "inject", "prompt_files", "save", "allowed_tools", "granted_capabilities",
-            "write_boundary", "request_id", "run_id", "task_id", "task_attributes",
-            "source", "recovery_snapshot", "resume_context", "recovery_task_refs",
-            "recovery_content_paths", "recovery_next_actions", "on_chunk",
-        ]:
-            if key in kwargs:
-                setattr(params, key, kwargs[key])
+        _apply_run_kwargs(params, kwargs)
 
         memories, runtime_injections, routed_context, resume_context_result = (
             _prepare_runtime_context(self, user_prompt, params.inject, params.resume_context)
@@ -226,6 +227,12 @@ class SimpleAgentRuntimeMixin:
     def recall(self, query: str, top_k: int | None = None):
         """召回相关记忆。"""
         return self.memory.search(query, top_k or self.config.memory_top_k)
+
+
+def _apply_run_kwargs(params: RunParams, kwargs: dict[str, object]) -> None:
+    for key in _RUN_PARAM_KEYS:
+        if key in kwargs:
+            setattr(params, key, kwargs[key])
 
 
 def _resolve_tool_sections(agent, allowed_tools, granted_capabilities):

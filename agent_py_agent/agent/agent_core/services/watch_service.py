@@ -71,6 +71,18 @@ class WatchSubagentsParams:
     stop_file: str | Path | None = None
 
 
+@dataclass(frozen=True)
+class WatchLoopParams:
+    params: WatchSubagentsParams
+    cfg: CapabilityConfig
+    router: CapabilityRouter
+    lock_path: Path
+    stop_path: Path | None
+    active_interval: float
+    idle_interval: float
+    max_consecutive: int
+
+
 def watch_subagents(
     agent: SimpleAgent,
     router: CapabilityRouter,
@@ -102,51 +114,74 @@ def watch_subagents(
     agent._reset_dispatch_rounds()
 
     with _DispatchWatchLock(lock_path, force=params.force_lock) as lock:
-        cycle = 0
-        last_dispatch_had_changes = False
-        while params.max_cycles == 0 or cycle < params.max_cycles:
-            if stop_path and stop_path.exists():
-                break
-            cycle += 1
-            cycle_params = RunSingleWatchCycleParams(
-                cycle=cycle,
+        cycle = _run_watch_cycles(
+            agent,
+            records,
+            WatchLoopParams(
+                params=params,
+                cfg=cfg,
+                router=router,
                 lock_path=lock_path,
                 stop_path=stop_path,
-                router=router,
-                cfg=cfg,
-                apply=params.apply,
-                execute_runners=params.execute_runners,
-                planner=params.planner,
-                workflow_mode=params.workflow_mode,
-                max_runners=params.max_runners,
-                limit=params.limit,
-                reviewer=params.reviewer,
-                note=params.note,
-                runner_instruction=params.runner_instruction,
-                max_cards=params.max_cards,
-                probe=params.probe,
-                take_over_by=params.take_over_by,
-                locked_files=params.locked_files,
                 active_interval=active_interval,
                 idle_interval=idle_interval,
                 max_consecutive=max_consecutive,
-                last_dispatch_had_changes=last_dispatch_had_changes,
-                max_cycles=params.max_cycles,
-            )
-            record = _run_single_watch_cycle(agent, cycle_params)
-            records.append(record)
-            last_dispatch_had_changes = getattr(record, "dispatch_record_count", 0) > 0
-
-        agent.subagents.write_dispatch_watch_heartbeat(
-            cycle=cycle,
-            status="stopped",
-            lock_path=str(lock_path),
-            pid=os.getpid(),
-            message=f"watch stopped; lock={lock.token}",
+            ),
         )
+        _write_watch_stopped(agent, cycle, lock_path, lock.token)
 
     report = agent.subagents.build_dispatch_watch_report(records, dry_run=not params.apply)
     return agent.subagents.write_dispatch_watch_report(report)
+
+
+def _run_watch_cycles(
+    agent,
+    records: list,
+    loop: WatchLoopParams,
+) -> int:
+    cycle = 0
+    last_dispatch_had_changes = False
+    while loop.params.max_cycles == 0 or cycle < loop.params.max_cycles:
+        if loop.stop_path and loop.stop_path.exists():
+            break
+        cycle += 1
+        cycle_params = _watch_cycle_params(
+            loop,
+            cycle,
+            last_dispatch_had_changes,
+        )
+        record = _run_single_watch_cycle(agent, cycle_params)
+        records.append(record)
+        last_dispatch_had_changes = getattr(record, "dispatch_record_count", 0) > 0
+    return cycle
+
+
+def _watch_cycle_params(
+    loop: WatchLoopParams,
+    cycle: int,
+    last_dispatch_had_changes: bool,
+) -> RunSingleWatchCycleParams:
+    params = loop.params
+    return RunSingleWatchCycleParams(
+        cycle=cycle, lock_path=loop.lock_path, stop_path=loop.stop_path, router=loop.router, cfg=loop.cfg,
+        apply=params.apply, execute_runners=params.execute_runners, planner=params.planner,
+        workflow_mode=params.workflow_mode, max_runners=params.max_runners, limit=params.limit,
+        reviewer=params.reviewer, note=params.note, runner_instruction=params.runner_instruction,
+        max_cards=params.max_cards, probe=params.probe, take_over_by=params.take_over_by,
+        locked_files=params.locked_files, active_interval=loop.active_interval, idle_interval=loop.idle_interval,
+        max_consecutive=loop.max_consecutive, last_dispatch_had_changes=last_dispatch_had_changes,
+        max_cycles=params.max_cycles,
+    )
+
+
+def _write_watch_stopped(agent, cycle: int, lock_path: Path, token: str) -> None:
+    agent.subagents.write_dispatch_watch_heartbeat(
+        cycle=cycle,
+        status="stopped",
+        lock_path=str(lock_path),
+        pid=os.getpid(),
+        message=f"watch stopped; lock={token}",
+    )
 
 
 def _execute_watch_dispatch(agent, params):
@@ -224,21 +259,10 @@ def _run_single_watch_cycle(
     agent._increment_dispatch_rounds()
 
     if agent._consecutive_dispatch_rounds >= params.max_consecutive:
-        message = f"{message} 已达到最大连续轮数限制 ({params.max_consecutive})，停止调度。"
-        agent.subagents.write_dispatch_watch_heartbeat(
-            cycle=params.cycle,
-            status="stopped_by_limit",
-            lock_path=str(params.lock_path),
-            pid=os.getpid(),
-            message=message,
-        )
+        _write_stopped_by_limit(agent, params, message)
         return record
 
-    more_cycles = params.max_cycles == 0 or params.cycle < params.max_cycles
-    stop_requested = bool(params.stop_path and params.stop_path.exists())
-    if stop_requested:
-        more_cycles = False
-        message = f"{message} stop requested."
+    more_cycles, message = _watch_sleep_state(params, message)
     agent.subagents.write_dispatch_watch_heartbeat(
         cycle=params.cycle,
         status="sleeping" if more_cycles else "stopping",
@@ -256,3 +280,21 @@ def _run_single_watch_cycle(
         return record
 
     return record
+
+
+def _write_stopped_by_limit(agent, params: RunSingleWatchCycleParams, message: str) -> None:
+    message = f"{message} 已达到最大连续轮数限制 ({params.max_consecutive})，停止调度。"
+    agent.subagents.write_dispatch_watch_heartbeat(
+        cycle=params.cycle,
+        status="stopped_by_limit",
+        lock_path=str(params.lock_path),
+        pid=os.getpid(),
+        message=message,
+    )
+
+
+def _watch_sleep_state(params: RunSingleWatchCycleParams, message: str) -> tuple[bool, str]:
+    more_cycles = params.max_cycles == 0 or params.cycle < params.max_cycles
+    if params.stop_path and params.stop_path.exists():
+        return False, f"{message} stop requested."
+    return more_cycles, message

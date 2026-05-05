@@ -45,6 +45,35 @@ def _tool_workflow_mode(explicit_mode: object, config_mode: object) -> str:
     return "off"
 
 
+def _subagent_allowed_tools(params: dict[str, object]) -> list[str]:
+    allowed_tools = _string_list(params.get("allowed_tools"))
+    if allowed_tools:
+        return allowed_tools
+    preset = str(params.get("tool_preset") or "read_only").strip().lower()
+    if preset == "coding":
+        return list(CODING_SUBAGENT_TOOLS)
+    if preset == "none":
+        return []
+    return list(READ_ONLY_SUBAGENT_TOOLS)
+
+
+def _create_run_params(agent, params: dict[str, object], goal: str, allowed_tools: list[str]):
+    workflow_mode = _tool_workflow_mode(params.get("workflow_mode"), agent.config.subagent_workflow_mode)
+    return CreateRunParams(
+        goal=goal,
+        thought=str(params.get("thought") or "根据父代理派工执行，并保留可验收证据。").strip(),
+        plan=_string_list(params.get("plan")) or ["理解目标", "执行任务", "产出证据", "等待父代理验收"],
+        agent_name=str(params.get("agent_name") or "general").strip(),
+        role=str(params.get("role") or "worker").strip(),
+        allowed_tools=allowed_tools,
+        owner=str(params.get("owner") or "").strip(),
+        supervisor=str(params.get("supervisor") or "parent").strip(),
+        final_owner=str(params.get("final_owner") or "").strip(),
+        acceptance_checks=_string_list(params.get("acceptance_checks")),
+        workflow_mode=workflow_mode,
+    )
+
+
 class CreateSubagentsTool(BaseTool):
     """主代理工具：把自然语言里的派工意图落成 subagent 工单。"""
 
@@ -104,53 +133,41 @@ class CreateSubagentsTool(BaseTool):
         if not goal:
             return ToolExecutionResult("create_subagents", False, "缺少必填参数 goal。")
 
+        count = self._requested_count(params)
+        if isinstance(count, ToolExecutionResult):
+            return count
+
+        allowed_tools = _subagent_allowed_tools(params)
+        run_params = _create_run_params(self.agent, params, goal, allowed_tools)
+        tasks = self._create_tasks(goal, count, run_params)
+        payload = self._create_payload(tasks, allowed_tools)
+        return ToolExecutionResult(
+            "create_subagents",
+            True,
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+
+    def _requested_count(self, params: dict[str, object]) -> int | ToolExecutionResult:
         count = _positive_int(params.get("count"), default=1)
         if count <= 0:
             return ToolExecutionResult("create_subagents", False, "count 必须大于 0。")
         if self.agent.config.max_subagents > 0:
             count = min(count, self.agent.config.max_subagents)
+        return count
 
-        allowed_tools = _string_list(params.get("allowed_tools"))
-        if not allowed_tools:
-            preset = str(params.get("tool_preset") or "read_only").strip().lower()
-            if preset == "coding":
-                allowed_tools = list(CODING_SUBAGENT_TOOLS)
-            elif preset == "none":
-                allowed_tools = []
-            else:
-                allowed_tools = list(READ_ONLY_SUBAGENT_TOOLS)
-
-        plan = _string_list(params.get("plan")) or ["理解目标", "执行任务", "产出证据", "等待父代理验收"]
-        acceptance_checks = _string_list(params.get("acceptance_checks"))
-        thought = str(params.get("thought") or "根据父代理派工执行，并保留可验收证据。").strip()
-        agent_name = str(params.get("agent_name") or "general").strip()
-        role = str(params.get("role") or "worker").strip()
-        owner = str(params.get("owner") or "").strip()
-        supervisor = str(params.get("supervisor") or "parent").strip()
-        final_owner = str(params.get("final_owner") or "").strip()
-        workflow_mode = _tool_workflow_mode(params.get("workflow_mode"), self.agent.config.subagent_workflow_mode)
-
+    def _create_tasks(self, goal: str, count: int, run_params: CreateRunParams):
         tasks = []
         for index in range(1, count + 1):
             task_goal = goal if count == 1 else f"{goal} / 子任务{index}"
+            task_params = CreateRunParams(**{**run_params.__dict__, "goal": task_goal})
             task = self.agent.subagents.create_run(
-                params=CreateRunParams(
-                    goal=task_goal,
-                    thought=thought,
-                    plan=plan,
-                    agent_name=agent_name,
-                    role=role,
-                    allowed_tools=allowed_tools,
-                    owner=owner,
-                    supervisor=supervisor,
-                    final_owner=final_owner,
-                    acceptance_checks=acceptance_checks,
-                    workflow_mode=workflow_mode,
-                ),
+                params=task_params,
             )
             tasks.append(task)
+        return tasks
 
-        payload = {
+    def _create_payload(self, tasks, allowed_tools: list[str]) -> dict[str, object]:
+        return {
             "created": len(tasks),
             "ids": [task.id for task in tasks],
             "allowed_tools": allowed_tools,
@@ -166,11 +183,6 @@ class CreateSubagentsTool(BaseTool):
                 for task in tasks
             ],
         }
-        return ToolExecutionResult(
-            "create_subagents",
-            True,
-            json.dumps(payload, ensure_ascii=False, indent=2),
-        )
 
 
 class SubagentBoardTool(BaseTool):
@@ -282,33 +294,35 @@ class DispatchSubagentsTool(BaseTool):
                 "execute_runners=true 必须配合 apply=true，避免误触发真实 API runner。",
             )
 
+        cfg, router = self._router()
+        report = self.agent.dispatch_subagents(router, cfg, **self._dispatch_kwargs(params, apply, execute_runners))
+        payload = self._report_payload(report)
+        return ToolExecutionResult("dispatch_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
+
+    def _router(self) -> tuple[CapabilityConfig, CapabilityRouter]:
         cfg = CapabilityConfig()
-        router = CapabilityRouter(
-            config=cfg,
-            tool_specs=[
-                spec
-                for spec in self.agent.tools.specs()
-                if spec.category != "orchestration"
-            ],
-        )
-        report = self.agent.dispatch_subagents(
-            router,
-            cfg,
-            apply=apply,
-            execute_runners=execute_runners,
-            planner=_bool_param(params.get("planner"), default=False),
-            workflow_mode=_tool_workflow_mode(params.get("workflow_mode"), self.agent.config.subagent_workflow_mode),
-            max_runners=_non_negative_int(params.get("max_runners"), default=1),
-            limit=_non_negative_int(params.get("limit"), default=20),
-            reviewer=str(params.get("reviewer") or "chat-tool").strip(),
-            note=str(params.get("note") or "triggered by dispatch_subagents tool").strip(),
-            runner_instruction=str(params.get("runner_instruction") or params.get("instruction") or "").strip(),
-            max_cards=_non_negative_int(params.get("max_cards"), default=0),
-            probe=not _bool_param(params.get("no_probe"), default=False),
-            take_over_by=str(params.get("take_over_by") or "").strip(),
-            locked_files=_string_list(params.get("locked_files")),
-        )
-        payload = {
+        tool_specs = [spec for spec in self.agent.tools.specs() if spec.category != "orchestration"]
+        return cfg, CapabilityRouter(config=cfg, tool_specs=tool_specs)
+
+    def _dispatch_kwargs(self, params: dict[str, object], apply: bool, execute_runners: bool) -> dict[str, object]:
+        return {
+            "apply": apply,
+            "execute_runners": execute_runners,
+            "planner": _bool_param(params.get("planner"), default=False),
+            "workflow_mode": _tool_workflow_mode(params.get("workflow_mode"), self.agent.config.subagent_workflow_mode),
+            "max_runners": _non_negative_int(params.get("max_runners"), default=1),
+            "limit": _non_negative_int(params.get("limit"), default=20),
+            "reviewer": str(params.get("reviewer") or "chat-tool").strip(),
+            "note": str(params.get("note") or "triggered by dispatch_subagents tool").strip(),
+            "runner_instruction": str(params.get("runner_instruction") or params.get("instruction") or "").strip(),
+            "max_cards": _non_negative_int(params.get("max_cards"), default=0),
+            "probe": not _bool_param(params.get("no_probe"), default=False),
+            "take_over_by": str(params.get("take_over_by") or "").strip(),
+            "locked_files": _string_list(params.get("locked_files")),
+        }
+
+    def _report_payload(self, report) -> dict[str, object]:
+        return {
             "dry_run": report.dry_run,
             "summary": report.summary,
             "records": [
@@ -328,4 +342,3 @@ class DispatchSubagentsTool(BaseTool):
             "dispatch_json": str(self.agent.subagents.workspace / "subagent_dispatch_report.json"),
             "dispatch_md": str(self.agent.subagents.workspace / "SUBAGENT_DISPATCH.md"),
         }
-        return ToolExecutionResult("dispatch_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))

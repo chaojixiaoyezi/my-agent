@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -77,54 +78,59 @@ def resolve_runner_config(config: Any, job_count: int) -> tuple[float, int, int]
 # ---------------------------------------------------------------------------
 
 
-def run_single_runner(
-    agent: SimpleAgent,
-    run_id: str,
-    task_timeout: float,
-    instruction: str,
-    execute_runners: bool,
-    max_cards: int,
-    probe: bool,
-    retry_reason: str,
-) -> SubAgentRunnerResult:
+@dataclass(frozen=True)
+class SingleRunnerParams:
+    agent: SimpleAgent
+    run_id: str
+    task_timeout: float
+    instruction: str
+    execute_runners: bool
+    max_cards: int
+    probe: bool
+    retry_reason: str
+
+
+@dataclass(frozen=True)
+class ConcurrentRunnerParams:
+    agent: SimpleAgent
+    pending_jobs: list[tuple[str, Any, str]]
+    runner_concurrency: int
+    runner_timeout_seconds: float
+    instruction: str
+    execute_runners: bool
+    max_cards: int
+    probe: bool
+
+
+def run_single_runner(params: SingleRunnerParams) -> SubAgentRunnerResult:
     """Execute a single runner with timeout."""
     from .runner_dispatch import RunSubagentWorkerParams, _run_subagent_worker
 
-    if execute_runners and task_timeout > 0:
-        params = RunSubagentWorkerParams(
-            config=agent.config,
-            root=agent.root,
-            run_id=run_id,
-            instruction=instruction,
+    if params.execute_runners and params.task_timeout > 0:
+        worker_params = RunSubagentWorkerParams(
+            config=params.agent.config,
+            root=params.agent.root,
+            run_id=params.run_id,
+            instruction=params.instruction,
             dry_run=False,
-            max_cards=max_cards,
-            probe=probe,
-            retry_reason=retry_reason,
-            timeout_seconds=task_timeout,
-            local_store=agent.local_store,
+            max_cards=params.max_cards,
+            probe=params.probe,
+            retry_reason=params.retry_reason,
+            timeout_seconds=params.task_timeout,
+            local_store=params.agent.local_store,
         )
-        return _run_subagent_worker(params)
-    else:
-        return agent.run_subagent(
-            run_id,
-            instruction=instruction,
-            dry_run=not execute_runners,
-            max_cards=max_cards,
-            probe=probe,
-            retry_reason=retry_reason,
-        )
+        return _run_subagent_worker(worker_params)
+    return params.agent.run_subagent(
+        params.run_id,
+        instruction=params.instruction,
+        dry_run=not params.execute_runners,
+        max_cards=params.max_cards,
+        probe=params.probe,
+        retry_reason=params.retry_reason,
+    )
 
 
-def run_concurrent_runners(
-    agent: SimpleAgent,
-    pending_jobs: list[tuple[str, Any, str]],
-    runner_concurrency: int,
-    runner_timeout_seconds: float,
-    instruction: str,
-    execute_runners: bool,
-    max_cards: int,
-    probe: bool,
-) -> dict[str, tuple[SubAgentRunnerResult, Any]]:
+def run_concurrent_runners(params: ConcurrentRunnerParams) -> dict[str, tuple[SubAgentRunnerResult, Any]]:
     """Execute multiple runners concurrently with timeout tracking.
 
     Returns a dict mapping run_id to (result, after_task).
@@ -132,22 +138,22 @@ def run_concurrent_runners(
     from .runner_dispatch import RunSubagentWorkerParams, _run_subagent_worker
 
     future_to_job = {}
-    with ThreadPoolExecutor(max_workers=runner_concurrency) as executor:
-        for run_id, before, retry_reason in pending_jobs:
-            task_timeout = get_task_timeout(before, runner_timeout_seconds, agent.config)
-            params = RunSubagentWorkerParams(
-                config=agent.config,
-                root=agent.root,
+    with ThreadPoolExecutor(max_workers=params.runner_concurrency) as executor:
+        for run_id, before, retry_reason in params.pending_jobs:
+            task_timeout = get_task_timeout(before, params.runner_timeout_seconds, params.agent.config)
+            worker_params = RunSubagentWorkerParams(
+                config=params.agent.config,
+                root=params.agent.root,
                 run_id=run_id,
-                instruction=instruction,
-                dry_run=not execute_runners,
-                max_cards=max_cards,
-                probe=probe,
+                instruction=params.instruction,
+                dry_run=not params.execute_runners,
+                max_cards=params.max_cards,
+                probe=params.probe,
                 retry_reason=retry_reason,
                 timeout_seconds=task_timeout,
-                local_store=agent.local_store,
+                local_store=params.agent.local_store,
             )
-            future = executor.submit(_run_subagent_worker, params)
+            future = executor.submit(_run_subagent_worker, worker_params)
             future_to_job[future] = (run_id, before, retry_reason)
 
         completed: dict[str, tuple[SubAgentRunnerResult, Any]] = {}
@@ -156,7 +162,7 @@ def run_concurrent_runners(
             try:
                 result = future.result()
             except Exception as exc:
-                result = agent.subagents.record_runner_result(
+                result = params.agent.subagents.record_runner_result(
                     RecordRunnerResultParams(
                         run_id=run_id,
                         dry_run=False,
@@ -167,7 +173,7 @@ def run_concurrent_runners(
                         failure_type="runner_worker_error",
                     )
                 )
-            after = agent.subagents.load(run_id)
+            after = params.agent.subagents.load(run_id)
             completed[run_id] = (result, after)
 
     return completed

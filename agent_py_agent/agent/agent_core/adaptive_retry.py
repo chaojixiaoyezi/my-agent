@@ -73,59 +73,54 @@ def split_task(task: SubAgentTask, suggestions: list[str]) -> list[SubAgentTask]
         拆分后的子任务列表
     """
 
-    subtasks = []
+    subtasks = [_build_split_subtask(task, suggestions, index, suggestion) for index, suggestion in enumerate(suggestions)]
+    _mark_task_split(task, subtasks)
 
-    # 生成子任务 ID
-    for i, suggestion in enumerate(suggestions):
-        subtask_id = f"{task.id}-part-{i+1:02d}"
+    return subtasks
 
-        # 构造子任务 goal
-        subtask_goal = f"{task.goal} - 第{i+1}部分：{suggestion}"
 
-        # 构造子任务 plan（从原 plan 拆分）
-        subtask_plan = []
-        if len(task.plan) > 0 and len(suggestions) > 0:
-            step_per_subtask = max(1, len(task.plan) // len(suggestions))
-            start_idx = i * step_per_subtask
-            end_idx = start_idx + step_per_subtask
-            subtask_plan = task.plan[start_idx:end_idx]
-        elif i == 0:
-            # 只有一个子任务，继承原 plan
-            subtask_plan = task.plan
+def _build_split_subtask(
+    task: SubAgentTask,
+    suggestions: list[str],
+    index: int,
+    suggestion: str,
+) -> SubAgentTask:
+    subtask = SubAgentTask(
+        id=f"{task.id}-part-{index+1:02d}",
+        goal=f"{task.goal} - 第{index+1}部分：{suggestion}",
+        thought=task.thought,
+        plan=_split_subtask_plan(task, suggestions, index),
+        agent_name=task.agent_name,
+        role=task.role,
+        owner=task.owner,
+        supervisor=task.supervisor,
+        parent_id=task.id,
+        root_id=task.root_id or task.id,
+        depth=task.depth + 1,
+        allowed_skills=list(task.allowed_skills),
+        allowed_tools=list(task.allowed_tools),
+        workflow_mode=task.workflow_mode,
+        created_at=time.time(),
+        updated_at=time.time(),
+    )
+    if task.context_manifest:
+        subtask.context_manifest = task.context_manifest
+    return subtask
 
-        # 创建子任务
-        subtask = SubAgentTask(
-            id=subtask_id,
-            goal=subtask_goal,
-            thought=task.thought,
-            plan=subtask_plan,
-            agent_name=task.agent_name,
-            role=task.role,
-            owner=task.owner,
-            supervisor=task.supervisor,
-            parent_id=task.id,
-            root_id=task.root_id or task.id,
-            depth=task.depth + 1,
-            allowed_skills=list(task.allowed_skills),
-            allowed_tools=list(task.allowed_tools),
-            workflow_mode=task.workflow_mode,
-            created_at=time.time(),
-            updated_at=time.time(),
-        )
 
-        # 继承执行上下文相关属性
-        if task.context_manifest:
-            subtask.context_manifest = task.context_manifest
+def _split_subtask_plan(task: SubAgentTask, suggestions: list[str], index: int) -> list[str]:
+    if task.plan and suggestions:
+        step_per_subtask = max(1, len(task.plan) // len(suggestions))
+        start_idx = index * step_per_subtask
+        return task.plan[start_idx : start_idx + step_per_subtask]
+    return task.plan if index == 0 else []
 
-        subtasks.append(subtask)
 
-    # 原任务标记为已拆分
+def _mark_task_split(task: SubAgentTask, subtasks: list[SubAgentTask]) -> None:
     task.status = "SPLIT"
     task.attributes["split_into"] = [st.id for st in subtasks]
     task.child_ids = [st.id for st in subtasks]
     task.updated_at = time.time()
-
-    return subtasks
 
 
 def should_auto_split(task: SubAgentTask, max_depth: int = 2) -> bool:
