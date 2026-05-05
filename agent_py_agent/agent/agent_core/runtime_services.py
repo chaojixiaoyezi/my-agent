@@ -8,6 +8,7 @@ Re-exports from split service modules for backward compatibility.
 
 from __future__ import annotations
 
+from ..memory_archive import write_compression_snapshot, write_recovery_snapshot
 from ._compression_service import CompressionService
 from ._finalization_service import FinalizationService
 from ._runtime_params import (
@@ -19,7 +20,6 @@ from ._runtime_params import (
     WriteRecoverySnapshotParams,
 )
 from ._tool_loop_service import ToolLoopService
-from ..memory_archive import write_compression_snapshot, write_recovery_snapshot
 from .models import AgentRunResult
 
 __all__ = [
