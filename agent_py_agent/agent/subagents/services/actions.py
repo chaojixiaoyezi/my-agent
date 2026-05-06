@@ -21,6 +21,7 @@ from .action_handlers import (
     apply_takeover_or_reassign,
 )
 from .action_options import ActionApplyOptions
+from .rescue_policy import action_rescue_record_fields
 
 if TYPE_CHECKING:
     from ..models import ActionApplyRecord, ActionPlanItem, SubAgentTask
@@ -153,6 +154,8 @@ class SubAgentActionService:
             after_status=task.status,
             before_channel_status=before_channel_status,
             after_channel_status=task.channel_status,
+            # LLM: apply logs preserve the rescue/escalation decision that led here.
+            **action_rescue_record_fields(action),
             evidence_paths=evidence_paths or [task.work_log_file],
             created_at=time.time(),
         )
@@ -227,6 +230,7 @@ def _missing_task_action_record(
         id=manager._new_id("apply"),
         action_id=action.id, run_id=action.run_id, action=action.action,
         dry_run=not opts.apply, applied=False, ok=False, message=str(exc),
+        **action_rescue_record_fields(action),
         created_at=now,
     )
 
@@ -249,5 +253,6 @@ def _dry_run_action_record(
         message=f"dry-run: would {action.action}",
         before_status=before_status, after_status=before_status,
         before_channel_status=before_channel_status, after_channel_status=before_channel_status,
+        **action_rescue_record_fields(action),
         evidence_paths=[task.task_dir], created_at=now,
     )

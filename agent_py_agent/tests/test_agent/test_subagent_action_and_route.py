@@ -89,9 +89,13 @@ def test_subagent_action_plan_dry_run():
         assert (stale.id, "takeover_or_reassign") in actions
         assert "heartbeat_stale" in actions[(stale.id, "takeover_or_reassign")].source_issue_kinds
         assert "run_timeout" in actions[(stale.id, "takeover_or_reassign")].source_issue_kinds
+        assert actions[(stale.id, "takeover_or_reassign")].rescue_strategy == "takeover_or_shrink_scope_before_retry"
+        assert actions[(stale.id, "takeover_or_reassign")].escalation_target == "parent"
+        assert "run_timeout" in actions[(stale.id, "takeover_or_reassign")].rescue_trigger
         assert (fake_done.id, "reopen_for_evidence") in actions
         assert (request_task.id, "route_capability_request") in actions
         assert (broken.id, "probe_or_repair_channel") in actions
+        assert actions[(request_task.id, "route_capability_request")].escalation_target == "capability_router"
         assert all(item.dry_run for item in report.actions)
         assert (root / "subs" / "subagent_action_plan.json").exists()
         assert (root / "subs" / "SUBAGENT_ACTION_PLAN.md").exists()
@@ -110,6 +114,7 @@ def test_subagent_action_apply_dry_run_and_apply():
         agent.subagents.set_status(fake_done.id, "DONE")
         dry_report = agent.subagents.write_action_apply_report(cap, action_filter="reopen_for_evidence", run_id=fake_done.id)
         assert dry_report.dry_run and dry_report.records[0].applied is False
+        assert dry_report.records[0].rescue_strategy == "reopen_and_request_missing_evidence"
         assert agent.subagents.load(fake_done.id).status == "DONE"
 
         # Test apply reopens

@@ -28,6 +28,7 @@ from ..reports import (
 )
 from ..utils import _merge_list
 from .board_due_checks import DueCheckSettings, inspect_single_task_due
+from .rescue_policy import merge_rescue_fields, rescue_fields_for_issue
 
 if TYPE_CHECKING:
     from ..capability_config import CapabilityConfig
@@ -176,6 +177,8 @@ class SubAgentBoardService:
             action, priority, would_change_status_to = _action_for_issue(issue)
             key = (issue.run_id, action)
             if key not in merged:
+                # LLM: rescue metadata keeps action plans auditable before apply mutates state.
+                rescue_fields = rescue_fields_for_issue(issue, action)
                 merged[key] = ActionPlanItem(
                     id=self.manager._new_id("action"),
                     run_id=issue.run_id,
@@ -186,6 +189,7 @@ class SubAgentBoardService:
                     source_issue_kinds=[issue.kind],
                     suggested_commands=_commands_for_action(action, issue.run_id),
                     would_change_status_to=would_change_status_to,
+                    **rescue_fields,
                     owner=issue.owner,
                     final_owner=issue.final_owner,
                     task_dir=issue.task_dir,
@@ -194,6 +198,7 @@ class SubAgentBoardService:
                 continue
             item = merged[key]
             item.source_issue_kinds = _merge_list(item.source_issue_kinds, [issue.kind])
+            merge_rescue_fields(item, issue, action)
             item.reason = f"{item.reason} / {issue.message}"
             if _severity_weight(issue.severity) > _severity_weight(item.severity):
                 item.severity = issue.severity
