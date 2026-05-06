@@ -57,7 +57,7 @@ def build_decision_ledger_payload(task: SubAgentTask, output_payload: dict[str, 
             *_string_list(summary_delta.get("open_questions")),
             *task.blockers,
             *_string_list(output_payload.get("blockers")),
-            *[gap.reason for gap in task.capability_gaps if gap.reason],
+            *[_capability_gap_summary(gap) for gap in task.capability_gaps],
         ]
     )
     return {
@@ -180,3 +180,11 @@ def _test_passed(item: dict[str, object]) -> bool:
         return bool(item.get("ok"))
     status = str(item.get("status") or item.get("result") or "").lower()
     return status in {"ok", "pass", "passed", "success", "succeeded"}
+
+
+def _capability_gap_summary(gap: object) -> str:
+    missing = str(getattr(gap, "missing_capability", "") or "")
+    why_failed = str(getattr(gap, "why_failed", "") or "")
+    if missing and why_failed:
+        return f"{missing}: {why_failed}"
+    return missing or why_failed
