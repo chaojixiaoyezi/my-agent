@@ -54,6 +54,8 @@ class StatusBarConfig:
 
 MAX_TRANSCRIPT_CHARS = 200_000
 TRANSCRIPT_SCROLL_LINES = 10
+APP_REDRAW_INTERVAL_SECONDS = 1 / 30
+APP_RENDER_POSTPONE_SECONDS = 1 / 60
 
 
 def _tui_enqueue_job(
@@ -355,6 +357,8 @@ def make_tui_app(params: MakeTuiAppParams):
         full_screen=use_app_scrollback,
         erase_when_done=False,
         mouse_support=use_app_scrollback,
+        min_redraw_interval=APP_REDRAW_INTERVAL_SECONDS if use_app_scrollback else None,
+        max_render_postpone_time=APP_RENDER_POSTPONE_SECONDS if use_app_scrollback else 0.01,
     )
     if output_area is not None and transcript_follow_ref is not None:
         app_ref[0] = app

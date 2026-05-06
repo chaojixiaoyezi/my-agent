@@ -121,7 +121,7 @@ def cmd_chat(args) -> int:
     runtime_inject: list[str] = args.inject or []
     prompt_files: list[str] = args.prompt_file or []
 
-    if _has_prompt_toolkit():
+    if _has_prompt_toolkit() and not bool(getattr(args, "plain", False)):
         return run_tui(params=TuiRunParams(
             agent=agent, args=args, use_gateway=use_gateway, paths=paths,
             runtime_inject=runtime_inject, prompt_files=prompt_files,

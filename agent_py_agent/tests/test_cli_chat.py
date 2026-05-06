@@ -402,6 +402,34 @@ class TestChatCommandArguments:
         assert cfg.agent is agent
         assert cfg.current_session_id == "sess-test"
 
+    def test_cmd_chat_plain_uses_fallback_even_with_prompt_toolkit(self):
+        """--plain 要绕开 TUI，避免 prompt_toolkit 重绘吞掉普通输出。"""
+        from agent_py_agent.cli.chat import cmd_chat
+
+        args = SimpleNamespace(
+            gateway=False,
+            inject=[],
+            prompt_file=[],
+            session_id="",
+            memory_limit=5,
+            plain=True,
+        )
+        agent = MagicMock()
+        agent.config.agent_name = "myagent"
+        session_manager = MagicMock()
+        session_manager.create_session.return_value = SimpleNamespace(session_id="sess-test")
+
+        with patch("agent_py_agent.cli.chat.make_agent", return_value=agent), \
+             patch("agent_py_agent.cli.chat.SessionManager", return_value=session_manager), \
+             patch("agent_py_agent.cli.chat._has_prompt_toolkit", return_value=True), \
+             patch("agent_py_agent.cli.chat.run_tui", return_value=0) as tui, \
+             patch("agent_py_agent.cli.chat.run_fallback", return_value=0) as fallback:
+            result = cmd_chat(args)
+
+        assert result == 0
+        tui.assert_not_called()
+        fallback.assert_called_once()
+
 
 class TestCollapseEdgeCases:
     """测试文本折叠边界场景。"""
