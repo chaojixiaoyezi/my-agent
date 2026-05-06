@@ -266,6 +266,32 @@ class TestWatchdog:
         # 不存在的 pid
         assert watchdog._is_pid_alive(999999999) is False
 
+    def test_watchdog_uses_posix_pid_check_on_mac_and_linux(self, monkeypatch, tmp_path: Path):
+        """macOS/Linux 保留 os.kill(pid, 0) 的进程探测路径。"""
+        from agent_py_agent.agent.agent_core import watchdog as watchdog_module
+        from agent_py_agent.agent.agent_core.watchdog import DispatchWatchdog
+
+        class MockConfig:
+            workspace_root = str(tmp_path)
+            gateway_workspace = "gateway"
+            watchdog_enabled = True
+            watchdog_interval = 60
+            watchdog_max_restarts = 3
+            watchdog_restart_delay = 10
+
+        calls = []
+
+        def fake_kill(pid, signal_number):
+            calls.append((pid, signal_number))
+
+        monkeypatch.setattr(watchdog_module.sys, "platform", "darwin")
+        monkeypatch.setattr(watchdog_module.os, "kill", fake_kill)
+
+        watchdog = DispatchWatchdog(MockConfig())
+
+        assert watchdog._is_pid_alive(12345) is True
+        assert calls == [(12345, 0)]
+
     def test_watchdog_start_stop(self, tmp_path: Path):
         """测试 watchdog 启动和停止。"""
         from agent_py_agent.agent.agent_core.watchdog import DispatchWatchdog

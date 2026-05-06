@@ -165,11 +165,12 @@ class TestCmdGatewayStatus:
              patch("agent_py_agent.cli._gateway_commands.gateway_paths", return_value=mock_paths), \
              patch("agent_py_agent.cli._gateway_commands.read_pid_record", return_value=None), \
              patch("agent_py_agent.cli._gateway_commands.read_json_file", return_value={}), \
-             patch("agent_py_agent.cli._gateway_commands.read_runtime_status", return_value={}), \
+             patch("agent_py_agent.cli._gateway_commands.read_runtime_status", return_value={}) as mock_runtime_status, \
              patch("agent_py_agent.cli.gateway_process.gateway_running", return_value=(None, False)), \
              patch("agent_py_agent.cli.gateway_process.gateway_request_counts", return_value={}):
             result = cmd_gateway_status(args)
             assert result == 0
+            mock_runtime_status.assert_called_once_with(mock_paths.state)
 
 
 class TestCmdGatewayRestart:
@@ -392,7 +393,7 @@ class TestCmdGatewayInstall:
         args = MagicMock()
         args.force = False
 
-        with patch("agent_py_agent.cli.gateway_process.install_service", return_value=True):
+        with patch("agent_py_agent.cli._gateway_commands.install_service", return_value=True):
             result = cmd_gateway_install(args)
             assert result == 0
 
@@ -406,6 +407,6 @@ class TestCmdGatewayUninstall:
 
         args = MagicMock()
 
-        with patch("agent_py_agent.cli.gateway_process.uninstall_service", return_value=True):
+        with patch("agent_py_agent.cli._gateway_commands.uninstall_service", return_value=True):
             result = cmd_gateway_uninstall(args)
             assert result == 0

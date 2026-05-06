@@ -119,7 +119,7 @@ def test_subagent_patch_apply_dry_run_shows_diff_for_write_file_patch():
             thought="先只看 diff。",
             plan=["dry-run apply"],
             extra_write_roots=[str(target)],
-            acceptance_checks=["command: python3 -c \"print('ok')\""],
+            acceptance_checks=["command: python -c \"print('ok')\""],
         )
         Path(task.output_json).write_text(
             json.dumps(
@@ -162,12 +162,15 @@ def test_subagent_patch_apply_writes_file_and_marks_patch_reviewed():
         agent = SimpleAgent(cfg, root)
         target = root / "workspace.txt"
         target.write_text("before\n", encoding="utf-8")
+        expected_content = repr("after\n")
         task = agent.subagents.create_run(
             goal="真正 apply patch",
             thought="把 planned patch 落地。",
             plan=["apply"],
             extra_write_roots=[str(target)],
-            acceptance_checks=["command: python3 -c \"from pathlib import Path; assert Path('workspace.txt').read_text() == 'after\\n'\""],
+            acceptance_checks=[
+                f"command: python -c \"from pathlib import Path; assert Path('workspace.txt').read_text() == {expected_content}\""
+            ],
         )
         Path(task.output_json).write_text(
             json.dumps(

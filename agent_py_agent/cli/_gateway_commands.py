@@ -184,7 +184,7 @@ def cmd_gateway_status(args) -> int:
     if state:
         print(f"  status_detail={json.dumps(state, ensure_ascii=False)}")
 
-    runtime = read_runtime_status(paths)
+    runtime = read_runtime_status(paths.state)
     if runtime:
         print(f"  last_heartbeat={runtime.get('updated_at', 'none')}")
         print(f"  last_status={runtime.get('status', 'none')}")
