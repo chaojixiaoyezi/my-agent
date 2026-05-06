@@ -2,7 +2,14 @@ from __future__ import annotations
 
 """Structured runner-output processing for subagent results."""
 
-from .models import CapabilityRequest, EvidencePacket, Finding, SubAgentParsedOutput, SubAgentTask, VerificationEvidence
+from .models import (
+    CapabilityRequest,
+    EvidencePacket,
+    Finding,
+    SubAgentParsedOutput,
+    SubAgentTask,
+    VerificationEvidence,
+)
 from .parsing import _normalize_runner_items, _split_allowed_items, _string_dict, _string_list
 from .utils import _merge_list, _new_id
 
