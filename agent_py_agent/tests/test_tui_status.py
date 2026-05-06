@@ -4,10 +4,14 @@ import threading
 from unittest.mock import patch
 
 from agent_py_agent.cli.chat_parts import tui
-from agent_py_agent.cli.chat_parts.tui import TuiStatusRefs, _tui_get_status_text
+from agent_py_agent.cli.chat_parts.tui import (
+    TuiStatusRefs,
+    _tui_get_activity_text,
+    _tui_get_status_text,
+)
 
 
-def test_tui_status_includes_thinking_line_and_elapsed_after_context_percent():
+def test_tui_status_keeps_model_line_structured_without_activity_text():
     refs = TuiStatusRefs(
         state_lock=threading.Lock(),
         is_running_ref=[True],
@@ -22,6 +26,23 @@ def test_tui_status_includes_thinking_line_and_elapsed_after_context_percent():
 
     assert "[" in status
     assert "1%" in status
+    assert "正在整理上下文" not in status
+
+
+def test_tui_activity_line_includes_rotating_star_and_elapsed():
+    refs = TuiStatusRefs(
+        state_lock=threading.Lock(),
+        is_running_ref=[True],
+        pending_jobs_ref=[0],
+        running_started_at_ref=[90.0],
+        last_token_estimate_ref=[2141],
+        thinking_line_ref=["正在整理上下文"],
+    )
+
+    with patch.object(tui.time, "perf_counter", return_value=93.2):
+        status = _tui_get_activity_text(refs)
+
+    assert status.startswith("✦ ")
     assert status.endswith("正在整理上下文 3.2s")
 
 
@@ -35,6 +56,6 @@ def test_tui_status_keeps_static_thinking_without_elapsed_when_idle():
         thinking_line_ref=["等待输入"],
     )
 
-    status = _tui_get_status_text(refs, "MiniMax-M2.7")
+    status = _tui_get_activity_text(refs)
 
-    assert status.endswith("等待输入")
+    assert status == "✦ 等待输入"

@@ -21,6 +21,7 @@ python -m pip install -e .
 ```powershell
 my-agent
 my-agent --app
+my-agent --plain
 my-agent --help
 ```
 
@@ -35,15 +36,17 @@ python -m agent_py_agent --help
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--config <path>` | `agent_py_agent/config/agent_config.yaml` | 指定主配置文件，控制模型后端、API base、API key 环境变量名、记忆路径、工具开关和 subagent workspace。 |
-| `--app` | `false` | 启动应用内聊天界面，固定状态栏和输入行，并使用应用内滚动历史。 |
+| `--app` | `false` | 兼容参数；默认入口已经使用应用内聊天界面。 |
+| `--plain` | `false` | 使用普通终端聊天模式，不进入应用内滚动历史界面。 |
 | `-h`, `--help` | - | 显示帮助。 |
 
 ## 运行形态
 
 | 形态 | 命令 | 是否常驻 | 是否调用真实 API |
 | --- | --- | --- | --- |
-| 默认入口 | `my-agent` | 前台 chat + 后台 gateway | 是，由后台 gateway 调用 |
-| 应用内聊天 | `my-agent --app` | 前台应用界面 + 后台 gateway | 是，由后台 gateway 调用 |
+| 默认入口 / 应用内聊天 | `my-agent` | 前台应用界面 + 后台 gateway | 是，由后台 gateway 调用 |
+| 兼容应用入口 | `my-agent --app` | 前台应用界面 + 后台 gateway | 是，由后台 gateway 调用 |
+| 普通终端聊天 | `my-agent --plain` | 前台 chat + 后台 gateway | 是，由后台 gateway 调用 |
 | 全局状态 | `my-agent status` | 否 | 否 |
 | 最近事件 | `my-agent timeline` | 否 | 否 |
 | 查看帮助 | `my-agent --help` | 否 | 否 |

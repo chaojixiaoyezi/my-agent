@@ -13,6 +13,7 @@ from .rendering import _cprint, _tui_print_banner, set_tui_output_sink
 from .tui import (
     TuiExitRefs,
     TuiStatusRefs,
+    _tui_get_activity_text,
     _tui_get_status_text,
     _tui_handle_command,
     _tui_handle_expand_command,
@@ -189,6 +190,25 @@ def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
     return kb
 
 
+def _make_activity_bar(
+    config: StatusBarConfig,
+):
+    from prompt_toolkit.layout import FormattedTextControl, Window
+
+    return Window(
+        content=FormattedTextControl(
+            lambda: [
+                (
+                    "class:activity-bar",
+                    f" {_tui_get_activity_text(config.refs)} ",
+                )
+            ],
+        ),
+        height=1,
+        style="class:activity-bar",
+    )
+
+
 def _make_status_bar(
     config: StatusBarConfig,
 ):
@@ -272,7 +292,9 @@ def _install_transcript_sink(output_area: Any, follow_ref: list[bool], app_ref: 
 
 
 def _app_scrollback_enabled(args: Any) -> bool:
-    return bool(getattr(args, "app_scrollback", False) or getattr(args, "app", False))
+    if getattr(args, "plain", False):
+        return False
+    return bool(getattr(args, "app_scrollback", True) or getattr(args, "app", False))
 
 
 def make_tui_app(params: MakeTuiAppParams):
@@ -284,19 +306,19 @@ def make_tui_app(params: MakeTuiAppParams):
     history_file = params.agent.root / ".chat_history"
     history_file.parent.mkdir(parents=True, exist_ok=True)
 
-    status_bar = _make_status_bar(
-        StatusBarConfig(
-            refs=TuiStatusRefs(
-                params.state_lock,
-                params.is_running_ref,
-                params.pending_jobs_ref,
-                params.running_started_at_ref,
-                params.last_token_estimate_ref,
-                params.thinking_line_ref,
-            ),
-            model_name=params.agent.config.model_name,
-        )
+    status_config = StatusBarConfig(
+        refs=TuiStatusRefs(
+            params.state_lock,
+            params.is_running_ref,
+            params.pending_jobs_ref,
+            params.running_started_at_ref,
+            params.last_token_estimate_ref,
+            params.thinking_line_ref,
+        ),
+        model_name=params.agent.config.model_name,
     )
+    activity_bar = _make_activity_bar(status_config)
+    status_bar = _make_status_bar(status_config)
     input_area = _make_input_area(str(history_file))
 
     use_app_scrollback = _app_scrollback_enabled(params.args)
@@ -304,8 +326,8 @@ def make_tui_app(params: MakeTuiAppParams):
     transcript_follow_ref = [True] if use_app_scrollback else None
     input_row = VSplit([_make_input_prompt_window(), input_area])
     body = (
-        [output_area, status_bar, Window(height=1), input_row]
-        if output_area is not None else [status_bar, Window(height=1), input_row]
+        [output_area, activity_bar, status_bar, Window(height=1), input_row]
+        if output_area is not None else [activity_bar, status_bar, Window(height=1), input_row]
     )
     layout = Layout(HSplit(body), focused_element=input_area)
 
@@ -317,6 +339,7 @@ def make_tui_app(params: MakeTuiAppParams):
 
     style = Style.from_dict(
         {
+            "activity-bar": "bg:#121827 #d6e4ff bold",
             "status-bar": "bg:#1a1a2e #8ec5ff bold",
             "transcript": "#f8fafc",
             "input-area": "#f8fafc",

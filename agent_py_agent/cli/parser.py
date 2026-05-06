@@ -44,7 +44,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--app",
         action="store_true",
-        help="启动应用内聊天界面，固定状态栏和输入行，并使用应用内滚动历史",
+        help="兼容参数：默认已启动应用内聊天界面",
+    )
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="使用普通终端聊天模式，不进入应用内滚动历史界面",
     )
     subparsers = parser.add_subparsers(dest="command")
     parser.set_defaults(func=cmd_default)
@@ -71,6 +76,5 @@ def main() -> int:
     configure_stdio()
     parser = build_parser()
     args = parser.parse_args()
-    if getattr(args, "app", False):
-        args.app_scrollback = True
+    args.app_scrollback = not bool(getattr(args, "plain", False))
     return args.func(args)

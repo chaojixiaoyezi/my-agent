@@ -13,6 +13,7 @@ from .renderer import GRAY, RESET, strip_ansi
 from .tui_worker_stream import (
     _flush_stream_buf,
     _maybe_record_response,
+    _set_thinking_line,
     _update_response_state,
     resume_context_override,
 )
@@ -119,14 +120,13 @@ def _compact_visible_text(text: str) -> str:
 
 
 def _print_gateway_timing(ctx, request_id: str, response: dict) -> None:
-    from .rendering import _cprint
-
     elapsed = time.perf_counter() - ctx.started_at
-    _cprint(
-        f"{GRAY}[耗时 {elapsed:.2f}s; "
+    _publish_timing(
+        ctx,
+        f"[耗时 {elapsed:.2f}s; "
         f"工具轮数 {response.get('tool_rounds', 0)}; "
         f"prompt_tokens~{response.get('prompt_token_estimate', 0)}; "
-        f"resume_context={1 if response.get('memory_resume_context_injected') else 0}]{RESET}"
+        f"resume_context={1 if response.get('memory_resume_context_injected') else 0}]",
     )
 
 
@@ -164,11 +164,31 @@ def _print_local_timing(ctx, result) -> None:
         _cprint(result.prompt)
         _cprint("===== RESPONSE =====")
     elapsed = time.perf_counter() - ctx.started_at
-    _cprint(
-        f"{GRAY}[耗时 {elapsed:.2f}s; 工具轮数 {result.tool_rounds}; "
+    _publish_timing(
+        ctx,
+        f"[耗时 {elapsed:.2f}s; 工具轮数 {result.tool_rounds}; "
         f"prompt_tokens~{result.prompt_token_estimate}; "
-        f"resume_context={1 if result.memory_resume_context_injected else 0}]{RESET}"
+        f"resume_context={1 if result.memory_resume_context_injected else 0}]",
     )
+
+
+def _publish_timing(ctx, text: str) -> None:
+    if _use_app_status_line(getattr(ctx.cfg, "args", None)):
+        _set_thinking_line(text, ctx.cfg.thinking_line_ref)
+        if ctx.cfg.app_ref[0] is not None:
+            ctx.cfg.app_ref[0].invalidate()
+        return
+    from .rendering import _cprint
+
+    _cprint(f"{GRAY}{text}{RESET}")
+
+
+def _use_app_status_line(args) -> bool:
+    if args is None:
+        return False
+    if getattr(args, "plain", False):
+        return False
+    return bool(getattr(args, "app_scrollback", True) or getattr(args, "app", False))
 
 
 __all__ = ["_worker_gateway_path", "_worker_local_path"]
