@@ -848,7 +848,7 @@ runner 不应该直接让任务变成 DONE。
 
 可沉淀经验。
 
-当前只写入 `output.json` 和 `DEBRIEF.md`，不会自动生成 skill。
+当前会写入 `output.json` 和 `DEBRIEF.md`；打开 `enable_self_learning=true` 后会生成 learning draft 候选，但不会自动生成正式 skill。
 
 `next_actions`
 
@@ -868,7 +868,7 @@ used_skills -> task.used_skills，未授权项忽略并审计
 artifacts -> output.json.artifacts
 tests -> output.json.tests
 patches -> output.json.patches
-lessons -> output.json.lessons + DEBRIEF.md
+lessons -> output.json.lessons + DEBRIEF.md；enable_self_learning=true 时另生成 learning draft 候选
 next_actions -> output.json.next_actions + DEBRIEF.md
 blocked_reason -> output.json.blockers + RUNNER_RESULT.md
 ```
@@ -1126,13 +1126,13 @@ failure_type = structured_output_parse_error
 ## 当前还缺什么
 
 优先级高：
-- 多子代理调度器：批量启动、限流、心跳、超时、接管。
-- 独立 daemon：在 `subagents-dispatch --watch` 基础上增加系统服务封装和外部停止控制。
-- 接受层：从 `output.json.tests` / `artifacts` 自动生成验收任务。
-- patch 集成器：读取真实 diff/patch，按权限、owner 和审核结果做受控集成。
-- lessons -> learning draft：在 `enable_self_learning=true` 时生成草稿。
+- worker / session pool 升级：当前已有保守 runner 并发线程池，但还缺真正的进程级 worker pool、session pool、启动速率控制和长期心跳治理。
+- subagent 独立服务化：当前 `daemon` 是前台常驻 dispatch；还缺 subagent 自身的系统服务封装、外部停止控制和更正式的 scheduler。
+- 验收层增强：从 `output.json.tests` / `artifacts` 自动生成验收任务，并把证据事实、worker 自述和父级结论分层展示。
+- patch 集成器深化：当前已有 patch review/apply service，后续还要按权限、owner、审核结果和集成测试做更完整的受控集成验收。
+- learning draft 提升链路：当前 `enable_self_learning=true` 会生成候选草稿；还缺从 accepted draft 到正式 skill / rule / profile 的人工确认提升流程。
 - 跨层能力上抛：父代理找不到时继续向爷代理或更高层抛。
-- ACP / adapter：接外部 agent session 或远端执行器。
+- ACP / 外部 agent session：接远端执行器或外部 agent session；现有 adapter/file 和 QQ/飞书通道不等于完整 ACP 执行器。
 
 ## 睡前检查清单
 

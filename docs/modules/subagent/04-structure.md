@@ -50,7 +50,7 @@ agent_py_agent/agent/
 5. acceptance planner 生成父级验收清单。
 6. runner 根据 execution context 调模型和工具，把 `RUNNER_RESULT.md`、`reports/runner_result.json`、`output.json` 写回任务目录。
 7. `memory-resume` 在跨天恢复时用 archive/LocalStore 作为线索，最终推荐读取任务目录里的事实源，再由父级决定是否验收。
-8. 目前 workflow dry-run CLI 可以展示计划；通用 workflow apply path 仍在推进中，LOG 专项 apply path 和 runner 恢复 scenario 已先行验证真实任务记录。
+8. workflow preview 仍可通过 CLI dry-run 展示；真实路径已接入 `create_run(... workflow_mode="plan|auto")` 和 `subagents-dispatch --apply --workflow-mode auto`，可把父任务上的 `workflow_plan` 物化为 worker 子工单。LOG 专项 apply path 和 runner 恢复 scenario 继续作为真实任务记录的先行验证样本。
 
 ## 给初学编程学生的学习路径
 
@@ -63,7 +63,7 @@ agent_py_agent/agent/
 
 ## 当前第一版索引 / 待补齐
 
-本页先解释主结构和学习路径。更细的类字段、状态机和通用 workflow apply 链路，需要等后续 apply path 落地后补齐。
+本页先解释主结构和学习路径。更细的类字段、状态机、workflow 子工单依赖和验收阻断细节，后续仍需要继续补齐。
 ## 2026-05-06 structure update
 - Workflow routing and subagent manager internals now separate decision fields, rendering sections, patch normalization, and service actions.
 - Compatibility modules still re-export the existing public model and rendering names for callers.

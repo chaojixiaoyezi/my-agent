@@ -180,8 +180,9 @@ my-agent timeline --limit 20
 - gateway 重启时会把遗留 `processing` 请求退回 `pending`。
 - `my-agent` 默认自动启动 gateway 并进入 gateway chat。
 - gateway request 和生命周期事件会写入 LocalStore。
+- gateway 运行时已有可选 HTTP 控制服务骨架；`gateway_port: 0` 可关闭。主请求事实源仍是本地文件队列。
 
-当前 gateway 形态：单机本地后台进程，不是 HTTP/WebSocket 服务。
+当前 gateway 形态：单机本地后台进程，本地文件队列仍是主协议；HTTP 是本机控制面补充，还不是完整 WebSocket / 多租户远端 gateway。
 
 ### Subagent / 多代理工作流
 
@@ -206,6 +207,9 @@ my-agent timeline --limit 20
 - dispatch 一轮调度。
 - dispatch watch 循环。
 - parent planner gate：有活跃/待处理/卡住事项时，不允许空心 `HEARTBEAT_OK`。
+- workflow plan/apply：父任务可保存 workflow plan，`auto` apply 可物化 worker 子工单。
+- runner 并发保守线程池：默认 1，显式 `runner_concurrency` 数字才并发。
+- learning draft：`enable_self_learning=true` 时，成功 runner 的 lessons 会生成候选草稿，并由 `my-agent learn` 管理。
 
 重要边界：
 - `subagent-run` 默认 dry-run。
@@ -273,17 +277,17 @@ scripts/workstream_status.sh
 ## 当前主要限制
 
 还没做完：
-- 真正并行 worker pool / session pool。
+- 真正进程级 worker pool / session pool，以及更完整的启动速率、长期心跳和资源治理。
 - 多层父子代理自动上抛和自动下发的完整闭环。
 - 子代理和孙代理的真实进程级并发调度。
-- patch 自动应用和集成验收。
-- lessons 自动生成自学习草稿。
+- patch 自动集成后的验证闭环和更强 owner / 权限策略。
+- accepted learning draft 到正式 skill / rule / profile 的人工确认提升流程。
 - 长期本地数据 compact / rebuild / backup 命令。
 - 远端同步、跨机器 gateway 协作、本体迁移、本体备份。
-- HTTP/WebSocket gateway 服务。
-- 外部聊天工具 adapter。
+- WebSocket / 多租户远端 gateway 服务。
+- 外部聊天工具 adapter 的更多真实平台打磨；文件 adapter、QQ/飞书通道和 adapter daemon 已有第一版。
 - TUI 观察面板。
-- ACP / adapter / 外部 session 接入。
+- ACP / 外部 agent session / 远端执行器接入。
 
 当前设计取向：
 - 先把单机本地第一事实源做稳。
@@ -311,9 +315,9 @@ scripts/workstream_status.sh
    - 明确 runner 并发、启动速率、超时和自适应策略。
    - 从当前 `daemon_*` 过渡到更正式 gateway scheduler。
 
-5. 外部聊天工具 adapter
-   - 复用 `gateway ask/result` 和 LocalStore timeline。
-   - 让完成结果自动回到聊天工具。
+5. 外部聊天工具 adapter 实战化
+   - 在现有 file/QQ/飞书 adapter 基础上补更多真实平台场景。
+   - 继续复用 `gateway ask/result` 和 LocalStore timeline，让完成结果稳定回到聊天工具。
 
 6. 长期后台日志分析底座
    - 规划见 `LOG_ANALYSIS_BACKLOG.md`。

@@ -500,16 +500,16 @@ Phase 10：失败沉淀
 - Router: supports `auto`, `manual`, and `off`; honors explicit template ids; falls back safely; recognizes English and common Chinese code/quality task wording.
 - Compiler: turns workflow phases into worker specs with dependencies, write boundaries, evidence requirements, non-rollback warnings, and `cannot_self_accept`.
 - Parent gate: merges template acceptance and `QualityContract` checks, adds anti-worker-PASS checks, and requires a critic gate for producer/critic/repair workflows.
-- Remaining after this slice: wire these plans into real chat/gateway/spawn dispatch, add more built-in workflow templates, and persist structured acceptance reports.
+- Later status: real task creation and dispatch apply can now consume these plans. Remaining work is broader chat/gateway/spawn explanation, more built-in templates, and stronger structured acceptance reporting.
 
 ## 2026-04-30 Implementation Note: Workflow Planner Facade
 
 - Status: dry-run planning facade landed.
 - Solves: parent code no longer has to call router, compiler, and parent-gate planner separately for every workflow experiment.
 - API: `plan_workflow_for_goal()` returns one `WorkflowPlanningResult` with the route decision, selected template, dispatch plan, parent acceptance plan, and accumulated issues.
-- Guardrail: it does not create or run subagents yet. This keeps the first integration safe while giving the gateway/chat/spawn layer a single place to call later.
+- Guardrail at landing time: it did not create or run subagents yet. Current code has since added a controlled apply path: task creation can persist a workflow plan, and dispatch apply in `auto` mode can materialize worker child runs.
 - User effect: moves us closer to "user only states the goal" because the system can infer workflow shape and acceptance gates before asking the user for dispatch details.
-- Remaining after this slice: connect this facade to real task creation, persist the selected plan, and expose a small explanation to users when auto/manual/off changes behavior.
+- Remaining after later integration: expose a clearer explanation to users when `auto/manual/off` changes behavior, and keep extending template/profile coverage.
 
 ## 2026-04-30 Implementation Note: Workflow Plan CLI
 
@@ -518,7 +518,7 @@ Phase 10：失败沉淀
 - Solves: users and the parent session can inspect the selected workflow, worker split, and parent acceptance checklist before creating any subagent task.
 - Guardrail: the command does not create files, create subagents, call runners, or mark anything accepted.
 - User effect: this is the first visible bridge from "user only states the goal" to "system explains the controlled dispatch plan".
-- Remaining after this slice: add an apply path that creates real work orders only after policy/confirmation, and persist the preview used for each real dispatch.
+- Later status: the apply path now exists through `create_run(... workflow_mode="plan|auto")`, `ensure_workflow_plan()`, and `realize_workflow_plan()`. Remaining work is richer policy/confirmation UX, stronger end-to-end tests, and clearer dispatch evidence for the exact plan used.
 
 ## 2026-04-30 Implementation Note: Preview Persistence
 
@@ -526,4 +526,4 @@ Phase 10：失败沉淀
 - Command: `my-agent subagents-workflow-plan "<goal>" --output-dir <dir>`.
 - Solves: parent acceptance can now reference the exact JSON/Markdown workflow preview used before dispatch, instead of relying on memory of the conversation.
 - Guardrail: persistence is opt-in and still does not create subagents or run workers.
-- Remaining after this slice: attach persisted preview paths to real dispatch records when an apply path lands.
+- Remaining after this slice: keep linking real dispatch records to the selected workflow plan and any persisted preview artifacts when they exist.

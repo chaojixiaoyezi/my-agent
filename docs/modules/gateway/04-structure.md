@@ -15,6 +15,9 @@ agent_py_agent/agent/
     |-- logging.py                     # gateway 日志和 LocalStore 事件镜像
     |-- recovery.py                    # processing 请求恢复、失败归档
     |-- runtime.py                     # 请求 worker、agent.run 调用、响应写回
+    |-- http_service.py                # 可选本机 HTTP 控制服务
+    |-- http_handlers.py               # HTTP 控制面 handler
+    |-- supervisor.py                  # gateway / adapter 健康检查和重启监督
     `-- adapter.py                     # inbox/outbox 文件 adapter
 
 agent_py_agent/cli/
