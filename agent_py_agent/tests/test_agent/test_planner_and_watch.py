@@ -7,6 +7,7 @@ watch 周期、锁防重入。
 """
 
 import json
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -182,7 +183,7 @@ def test_subagent_dispatch_watch_lock_prevents_second_parent():
         workspace = root / "subs"
         workspace.mkdir(parents=True, exist_ok=True)
         (workspace / "subagent_dispatch_watch.lock").write_text(
-            json.dumps({"token": "other", "pid": 123, "created_at": time.time()}),
+            json.dumps({"token": "other", "pid": os.getpid(), "created_at": time.time()}),
             encoding="utf-8",
         )
 
@@ -195,6 +196,6 @@ def test_subagent_dispatch_watch_lock_prevents_second_parent():
                 interval=0,
             )
         except RuntimeError as exc:
-            assert "dispatch watch lock 已存在" in str(exc)
+            assert "dispatch watch lock already exists" in str(exc)
         else:
             raise AssertionError("watch lock should block a second parent")
