@@ -13,6 +13,7 @@ from .tui import (
     TuiExitRefs,
     TuiStatusRefs,
     _tui_get_status_text,
+    _tui_handle_command,
     _tui_handle_expand_command,
     _tui_request_exit,
 )

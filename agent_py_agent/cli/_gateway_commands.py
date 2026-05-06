@@ -242,7 +242,7 @@ def cmd_gateway_restart(args) -> int:
     start_args = argparse.Namespace(
         config=args.config,
         force=True,
-        note=args.note,
+        note=getattr(args, "note", None),
         take_over_by=getattr(args, "take_over_by", ""),
         locked_file=getattr(args, "locked_file", []),
         force_lock=getattr(args, "force_lock", False),
