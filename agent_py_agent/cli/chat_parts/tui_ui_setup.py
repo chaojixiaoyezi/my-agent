@@ -8,8 +8,8 @@ from typing import Any
 
 from .fallback_state import ChatJob
 from .input_loop import is_show_prompt_command
-from .renderer import BLUE, BOLD, strip_ansi, style_text
-from .rendering import _cprint, _tui_print_banner, set_tui_output_sink
+from .renderer import BLUE, BOLD, style_text
+from .rendering import _cprint, _tui_print_banner, set_tui_output_sink, set_tui_stream_sink
 from .tui import (
     TuiExitRefs,
     TuiStatusRefs,
@@ -20,6 +20,10 @@ from .tui import (
     _tui_request_exit,
 )
 from .tui_params import MakeTuiAppParams, TuiHandleCommandParams
+from .tui_transcript_store import (
+    APP_REDRAW_INTERVAL_SECONDS,
+    TuiTranscriptStore,
+)
 
 
 @dataclass
@@ -52,9 +56,7 @@ class StatusBarConfig:
     model_name: str
 
 
-MAX_TRANSCRIPT_CHARS = 200_000
 TRANSCRIPT_SCROLL_LINES = 10
-APP_REDRAW_INTERVAL_SECONDS = 1 / 30
 APP_RENDER_POSTPONE_SECONDS = 1 / 60
 
 
@@ -275,22 +277,10 @@ def _make_transcript_area() -> Any:
 
 
 def _install_transcript_sink(output_area: Any, follow_ref: list[bool], app_ref: list[Any]) -> None:
-    transcript = [""]
-    lock = threading.Lock()
+    store = TuiTranscriptStore(output_area, follow_ref, app_ref)
 
-    def append_text(text: str) -> None:
-        cleaned = strip_ansi(text)
-        with lock:
-            transcript[0] += cleaned
-            if len(transcript[0]) > MAX_TRANSCRIPT_CHARS:
-                transcript[0] = transcript[0][-MAX_TRANSCRIPT_CHARS:]
-            output_area.text = transcript[0]
-            if follow_ref[0]:
-                output_area.buffer.cursor_position = len(output_area.text)
-        if app_ref[0] is not None:
-            app_ref[0].invalidate()
-
-    set_tui_output_sink(append_text)
+    set_tui_output_sink(store.append_history)
+    set_tui_stream_sink(store.append_stream, finish=store.finish_stream)
 
 
 def _app_scrollback_enabled(args: Any) -> bool:
@@ -365,5 +355,6 @@ def make_tui_app(params: MakeTuiAppParams):
         _install_transcript_sink(output_area, transcript_follow_ref, app_ref)
     else:
         set_tui_output_sink(None)
+        set_tui_stream_sink(None)
 
     return app

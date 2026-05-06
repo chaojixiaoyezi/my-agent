@@ -62,6 +62,9 @@ def _tui_cleanup_after_job(
     agent_response_text: str,
     response_recorded: bool,
 ) -> None:
+    from .rendering import finish_tui_stream
+
+    finish_tui_stream()
     if agent_response_text:
         if not response_recorded:
             cfg.assistant_outputs.append(agent_response_text)

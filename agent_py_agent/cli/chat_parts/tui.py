@@ -194,7 +194,7 @@ def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
 
 
 def _run_tui_loop(ctx: TuiLoopContext) -> None:
-    from .rendering import set_tui_output_sink
+    from .rendering import set_tui_output_sink, set_tui_stream_sink
 
     try:
         with patch_stdout():
@@ -203,6 +203,7 @@ def _run_tui_loop(ctx: TuiLoopContext) -> None:
         pass
     finally:
         set_tui_output_sink(None)
+        set_tui_stream_sink(None)
         ctx.refresh_stop.set()
     ctx.stop_event.set()
     _cprint("\nGoodbye.")

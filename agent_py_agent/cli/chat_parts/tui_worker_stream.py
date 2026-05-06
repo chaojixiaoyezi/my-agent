@@ -10,10 +10,10 @@ def _append_stream_text(
 ) -> bool:
     if not chunk:
         return False
-    from .rendering import _write_output_text
+    from .rendering import _write_stream_text
 
     visible = strip_ansi(style_text(chunk, GREEN))
-    _write_output_text(visible)
+    _write_stream_text(visible)
     if stream_visible_text_ref is not None and visible.strip():
         stream_visible_text_ref[0] += visible
     stream_buf_ref[0] = "" if chunk.endswith("\n") else "\n"
@@ -29,9 +29,9 @@ def _emit_stream_line(text: str) -> None:
 def _flush_stream_buf(stream_buf_ref: list) -> None:
     buf = stream_buf_ref[0]
     if buf:
-        from .rendering import _write_output_text
+        from .rendering import _write_stream_text
 
-        _write_output_text(buf)
+        _write_stream_text(buf)
         stream_buf_ref[0] = ""
 
 

@@ -105,7 +105,7 @@ def test_tui_default_mode_streams_visible_chunks() -> None:
     )
     spinner = SimpleNamespace(stopped=False, stop=lambda: setattr(spinner, "stopped", True))
 
-    with patch("agent_py_agent.cli.chat_parts.rendering._write_output_text") as mock_write:
+    with patch("agent_py_agent.cli.chat_parts.rendering._write_stream_text") as mock_write:
         _begin, on_chunk = _make_stream_callbacks(cfg, 1, spinner)
         visible = on_chunk("hello")
 
@@ -147,7 +147,38 @@ def test_tui_transcript_sink_appends_and_follows(monkeypatch) -> None:
         rendering._cprint("\033[38;2;34;197;94mhello\033[0m")
     finally:
         rendering.set_tui_output_sink(None)
+        rendering.set_tui_stream_sink(None)
 
     assert area.text == "hello\n"
     assert area.buffer.cursor_position == len(area.text)
     assert app.invalidated is True
+
+
+def test_tui_transcript_stream_stays_live_until_finished(monkeypatch) -> None:
+    pytest.importorskip("prompt_toolkit")
+    from agent_py_agent.cli.chat_parts.tui_ui_setup import (
+        TuiTranscriptStore,
+        _make_transcript_area,
+    )
+
+    area = _make_transcript_area()
+    follow = [True]
+    app = type("App", (), {"invalidate": lambda self: None})()
+    store = TuiTranscriptStore(area, follow, [app])
+
+    monkeypatch.setattr(
+        "agent_py_agent.cli.chat_parts.tui_transcript_store.time.monotonic",
+        lambda: 100.0,
+    )
+    store.append_history("myagent#1>\n")
+    store.append_stream("hello")
+
+    assert area.text == "myagent#1>\nhello"
+    assert store.history == "myagent#1>\n"
+    assert store.live_stream == "hello"
+
+    store.finish_stream()
+
+    assert area.text == "myagent#1>\nhello"
+    assert store.history == "myagent#1>\nhello"
+    assert store.live_stream == ""
