@@ -86,7 +86,7 @@ def test_ingest_file_default_store_can_be_queried_end_to_end():
             )
         )
 
-        assert result.events_path == str(root / "events.jsonl")
+        assert result.events_path.replace("\\", "/") == str(root / "events.jsonl").replace("\\", "/")
         assert response["row_count"] == result.stored_count == 3
         assert response["truncated"] is False
         assert len(response["preview_rows"]) == 3

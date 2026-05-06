@@ -80,12 +80,13 @@ class TestIsRelativeTo:
 class TestDisplayPath:
     def test_display_path_relative(self, tmp_path):
         result = _display_path(tmp_path / "subdir" / "file.txt", tmp_path)
-        assert result == f"subdir{Path('/')}file.txt"
+        # Paths are normalized to forward slashes for cross-platform consistency
+        assert result.replace("\\", "/") == "subdir/file.txt"
 
     def test_display_path_absolute(self, tmp_path):
         other = Path("/completely/different")
         result = _display_path(other, tmp_path)
-        assert result == str(other)
+        assert result.replace("\\", "/") == "/completely/different"
 
 
 class TestBoundaryPaths:

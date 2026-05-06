@@ -27,6 +27,8 @@ def _path_text(raw_path: object, *, label: str = "path") -> str:
         raise ValueError(f"{label} 过长，最多 {_MAX_BOUNDARY_PATH_CHARS} 个字符")
     if any(ord(char) < 32 for char in text):
         raise ValueError(f"{label} 包含不支持的控制字符")
+    # Normalize path separators to forward slashes for cross-platform consistency
+    text = text.replace("\\", "/")
     return text
 
 
@@ -148,6 +150,6 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 
 def _display_path(path: Path, workspace_root: Path) -> str:
     try:
-        return str(path.relative_to(workspace_root))
+        return str(path.relative_to(workspace_root)).replace("\\", "/")
     except ValueError:
-        return str(path)
+        return str(path).replace("\\", "/")
