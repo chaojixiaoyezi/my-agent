@@ -97,6 +97,23 @@ class SubagentWorkOrderCreationResult:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class WorkOrderCreationOptions:
+    apply: bool = False
+    parent_id: str = ""
+    root_id: str = ""
+    final_owner: str = "parent"
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> WorkOrderCreationOptions:
+        return cls(
+            apply=bool(kwargs.get("apply", False)),
+            parent_id=str(kwargs.get("parent_id", "")),
+            root_id=str(kwargs.get("root_id", "")),
+            final_owner=str(kwargs.get("final_owner", "parent")),
+        )
+
+
 def _work_order_quality_contract(order: SubagentWorkOrder) -> dict[str, Any]:
     """LLM: 它继承上游 quality_contract，并强制补上 evidence_required、cannot_self_accept 和 parent_final_gate。
 
@@ -190,32 +207,13 @@ def create_subagent_tasks_from_work_order_plan(
     subagents: SubAgentTaskCreator,
     plan: LogAnalysisWorkOrderPlan,
     *,
-    apply: bool = False,
-    parent_id: str = "",
-    root_id: str = "",
-    final_owner: str = "parent",
+    options: WorkOrderCreationOptions | None = None,
+    **kwargs: Any,
 ) -> SubagentWorkOrderCreationResult:
-    """LLM: 这是唯一会调用 subagents.create_run 的入口，但只有 apply=True 且 plan.ready 时才会创建任务。
+    """Create subagent tasks from a ready log-analysis work-order plan."""
 
-    新手说明:
-    输入是前一步生成的 plan 和一个会 create_run 的 subagents 对象；输出是创建结果。
-    apply=False 时只返回 dry-run 结果，不会创建任务；plan 缺证据或 not ready 时也会拒绝创建，并记录 issue。
-    即使创建成功，它也只是保存 SubAgentTask 记录，不启动 runner、模型或分析循环；最终验收仍由父级负责。
-
-    参数说明:
-    subagents: 负责创建 SubAgentTask 的对象，通常是真实 SubAgentManager，也可以是测试替身。
-    plan: plan_case_subagent_work_orders 生成的计划，里面包含 analyst/reviewer 工单和 ready 状态。
-    apply: 是否真的创建任务。默认 False，表示只返回 dry-run 结果；只有 True 才会调用 subagents.create_run。
-    parent_id: 父任务或父会话 id，会写入新任务的 parent_id 和 supervisor，方便追踪谁派的工。
-    root_id: 整条任务树的根 id；如果为空，SubAgentManager 会为每个任务使用自己的 id 或默认规则。
-    final_owner: 最终验收负责人，默认 "parent"，表示最后由父会话裁决。
-
-    返回说明:
-    返回 SubagentWorkOrderCreationResult。created 和 task_ids 只在 apply=True 且 plan.ready=True 时有内容。
-    如果 apply=False、plan.ready=False 或某张 order.ready=False，结果会保留 issues/risks 来解释为什么没创建。
-    """
-
-    mode = "apply" if apply else "dry_run"
+    creation_options = options or WorkOrderCreationOptions.from_kwargs(**kwargs)
+    mode = "apply" if creation_options.apply else "dry_run"
     issues = list(plan.issues)
     risks = list(plan.risks)
     if not plan.ready and PLAN_NOT_READY_ISSUE not in issues:
@@ -223,13 +221,13 @@ def create_subagent_tasks_from_work_order_plan(
     result = SubagentWorkOrderCreationResult(
         case_id=plan.case_id,
         ready=plan.ready,
-        apply=apply,
-        dry_run=not apply,
+        apply=creation_options.apply,
+        dry_run=not creation_options.apply,
         mode=mode,
         issues=issues,
         risks=risks,
     )
-    if not apply or not plan.ready:
+    if not creation_options.apply or not plan.ready:
         return result
 
     for order in plan.work_orders:
@@ -237,9 +235,7 @@ def create_subagent_tasks_from_work_order_plan(
             subagents,
             result,
             order,
-            parent_id=parent_id,
-            root_id=root_id,
-            final_owner=final_owner,
+            options=creation_options,
         )
     return result
 
@@ -248,12 +244,13 @@ def _create_ready_order(
     subagents: SubAgentTaskCreator,
     result: SubagentWorkOrderCreationResult,
     order: SubagentWorkOrder,
-    **kwargs: str,
+    *,
+    options: WorkOrderCreationOptions,
 ) -> None:
     if not order.ready:
         _note_skipped_order(result, order)
         return
-    task = subagents.create_run(**_create_run_payload(order, **kwargs))
+    task = subagents.create_run(**_create_run_payload(order, options=options))
     result.task_ids.append(str(task.id))
     result.created.append(_created_task_summary(task, order))
 
@@ -264,8 +261,8 @@ def _note_skipped_order(result: SubagentWorkOrderCreationResult, order: Subagent
         result.issues.append(issue)
 
 
-def _create_run_payload(order: SubagentWorkOrder, **kwargs: str) -> dict[str, Any]:
-    parent_id = kwargs.get("parent_id", "")
+def _create_run_payload(order: SubagentWorkOrder, *, options: WorkOrderCreationOptions) -> dict[str, Any]:
+    parent_id = options.parent_id
     return {
         "goal": order.goal,
         "thought": f"Manual LOG {order.role} work order for {order.case_id}; stay evidence-bound and leave final acceptance to the parent.",
@@ -273,11 +270,11 @@ def _create_run_payload(order: SubagentWorkOrder, **kwargs: str) -> dict[str, An
         "agent_name": f"log-{order.role}",
         "role": order.role,
         "parent_id": parent_id,
-        "root_id": kwargs.get("root_id", ""),
+        "root_id": options.root_id,
         "allowed_tools": list(order.allowed_tools),
         "owner": order.role,
         "supervisor": parent_id or "parent",
-        "final_owner": kwargs.get("final_owner", "parent"),
+        "final_owner": options.final_owner,
         "acceptance_checks": list(order.acceptance_checks),
         "quality_contract": _work_order_quality_contract(order),
         "context_manifest": _context_manifest(order),

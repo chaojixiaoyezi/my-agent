@@ -27,15 +27,6 @@ _TASK_STATUS_EMOJI = {
 
 
 def get_task_summary(store: LocalStore, task_id: str) -> str:
-    """获取任务摘要文本。
-
-    Args:
-        store: LocalStore 实例
-        task_id: 任务 ID
-
-    Returns:
-        格式化的任务摘要文本
-    """
 
     task_info = store.task_registry.lookup_task(task_id)
 
@@ -74,14 +65,6 @@ def get_task_summary(store: LocalStore, task_id: str) -> str:
 
 
 def format_task_list(tasks: list[dict]) -> str:
-    """格式化任务列表。
-
-    Args:
-        tasks: 任务信息列表
-
-    Returns:
-        格式化的任务列表文本
-    """
 
     if not tasks:
         return "没有找到任务。"

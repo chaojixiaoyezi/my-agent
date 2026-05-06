@@ -87,58 +87,12 @@ class SubAgentIndexingService:
 
     def index_task(self, task: SubAgentTask) -> None:
         """Index a task into the local store."""
-        content_lines = [
-            "# Subagent Run",
-            f"id: {task.id}",
-            f"goal: {task.goal}",
-            f"status: {task.status}",
-            f"verification_status: {task.verification_status}",
-            f"channel_status: {task.channel_status}",
-            f"owner: {task.owner}",
-            f"supervisor: {task.supervisor}",
-            f"final_owner: {task.final_owner}",
-            f"parent_id: {task.parent_id}",
-            f"root_id: {task.root_id}",
-            f"thought: {task.thought}",
-            "plan:",
-        ]
-        content_lines.extend(f"- {item}" for item in task.plan)
-        content_lines.append("acceptance_checks:")
-        content_lines.extend(f"- {item}" for item in task.acceptance_checks)
-        content_lines.append("evidence:")
-        content_lines.extend(f"- [{item.kind}] {item.summary}" for item in task.evidence)
-        content_lines.append("capability_requests:")
-        content_lines.extend(
-            f"- {item.id} {item.needed_capability} {item.problem} status={item.status}"
-            for item in task.capability_requests
-        )
-        content_lines.append("capability_gaps:")
-        content_lines.extend(
-            f"- {item.id} {item.missing_capability} {item.why_failed} status={item.status}"
-            for item in task.capability_gaps
-        )
-        content_lines.append(f"task_dir: {task.task_dir}")
-        content_lines.append(f"output_json: {task.output_json}")
         self.log_local_record(
             source_type="subagent_run",
             source_id=task.id,
             title=f"Subagent {task.id}: {task.goal}",
-            content="\n".join(content_lines),
-            metadata={
-                "run_id": task.id,
-                "goal": task.goal,
-                "status": task.status,
-                "verification_status": task.verification_status,
-                "channel_status": task.channel_status,
-                "root_id": task.root_id,
-                "parent_id": task.parent_id,
-                "depth": task.depth,
-                "evidence_count": len(task.evidence),
-                "capability_request_count": len(task.capability_requests),
-                "capability_gap_count": len(task.capability_gaps),
-                "task_dir": task.task_dir,
-                "updated_at": task.updated_at,
-            },
+            content=_task_index_content(task),
+            metadata=_task_index_metadata(task),
             event_type="subagent_run_saved",
         )
 
@@ -223,10 +177,79 @@ class SubAgentIndexingService:
             return []
         runs: list[SubAgentTask] = []
         for run_id in run_ids:
-            try:
-                task = self.manager.load(run_id)
-                if task.status not in DISPATCH_INELIGIBLE_STATUSES:
-                    runs.append(task)
-            except FileNotFoundError:
-                continue
+            task = _load_eligible_run(self.manager, run_id, DISPATCH_INELIGIBLE_STATUSES)
+            if task is not None:
+                runs.append(task)
         return runs
+
+
+def _task_index_content(task: SubAgentTask) -> str:
+    content_lines = _task_index_header_lines(task)
+    content_lines.extend(_task_index_list_section("plan", task.plan))
+    content_lines.extend(_task_index_list_section("acceptance_checks", task.acceptance_checks))
+    content_lines.extend(["evidence:"])
+    content_lines.extend(f"- [{item.kind}] {item.summary}" for item in task.evidence)
+    content_lines.extend(["capability_requests:"])
+    content_lines.extend(
+        f"- {item.id} {item.needed_capability} {item.problem} status={item.status}"
+        for item in task.capability_requests
+    )
+    content_lines.extend(["capability_gaps:"])
+    content_lines.extend(
+        f"- {item.id} {item.missing_capability} {item.why_failed} status={item.status}"
+        for item in task.capability_gaps
+    )
+    content_lines.append(f"task_dir: {task.task_dir}")
+    content_lines.append(f"output_json: {task.output_json}")
+    return "\n".join(content_lines)
+
+
+def _load_eligible_run(
+    manager: Any,
+    run_id: str,
+    ineligible_statuses: set[str],
+) -> SubAgentTask | None:
+    try:
+        task = manager.load(run_id)
+    except FileNotFoundError:
+        return None
+    return None if task.status in ineligible_statuses else task
+
+
+def _task_index_header_lines(task: SubAgentTask) -> list[str]:
+    return [
+        "# Subagent Run",
+        f"id: {task.id}",
+        f"goal: {task.goal}",
+        f"status: {task.status}",
+        f"verification_status: {task.verification_status}",
+        f"channel_status: {task.channel_status}",
+        f"owner: {task.owner}",
+        f"supervisor: {task.supervisor}",
+        f"final_owner: {task.final_owner}",
+        f"parent_id: {task.parent_id}",
+        f"root_id: {task.root_id}",
+        f"thought: {task.thought}",
+    ]
+
+
+def _task_index_list_section(name: str, values: list[str]) -> list[str]:
+    return [f"{name}:", *(f"- {item}" for item in values)]
+
+
+def _task_index_metadata(task: SubAgentTask) -> dict[str, object]:
+    return {
+        "run_id": task.id,
+        "goal": task.goal,
+        "status": task.status,
+        "verification_status": task.verification_status,
+        "channel_status": task.channel_status,
+        "root_id": task.root_id,
+        "parent_id": task.parent_id,
+        "depth": task.depth,
+        "evidence_count": len(task.evidence),
+        "capability_request_count": len(task.capability_requests),
+        "capability_gap_count": len(task.capability_gaps),
+        "task_dir": task.task_dir,
+        "updated_at": task.updated_at,
+    }

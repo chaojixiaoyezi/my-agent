@@ -187,25 +187,42 @@ def mock_local_store(make_fake_store_func):
     return make_fake_store_func()
 
 
+def _fake_store_options(kwargs):
+    options = {
+        "fts_available": kwargs.pop("fts_available", True),
+        "db_path": kwargs.pop("db_path", None),
+        "files_dir": kwargs.pop("files_dir", None),
+        "events_path": kwargs.pop("events_path", None),
+        "mock_conn": kwargs.pop("mock_conn", None),
+    }
+    if kwargs:
+        raise TypeError(f"Unexpected FakeStore options: {sorted(kwargs)}")
+    return options
+
+
+def _attach_mock_connection(store, mock_conn) -> None:
+    @contextmanager
+    def conn_ctx():
+        yield mock_conn
+
+    store._connection = conn_ctx
+
+
 @pytest.fixture
 def make_fake_store_func():
     """Factory 函数：创建自定义 FakeStore。"""
     from agent_py_agent.agent.local_storage.maintenance import LocalStoreMaintenanceMixin
 
-    def _make(
-        fts_available: bool = True,
-        db_path: Path | None = None,
-        files_dir: Path | None = None,
-        events_path: Path | None = None,
-        mock_conn: MagicMock | None = None,
-    ) -> MagicMock:
+    def _make(**kwargs) -> MagicMock:
         """创建 FakeStore 实例。"""
+        options = _fake_store_options(kwargs)
+
         class FakeStore(LocalStoreMaintenanceMixin):
             def __init__(self):
-                self._fts_available = fts_available
-                self.db_path = db_path or Path("/tmp/test.db")
-                self.files_dir = files_dir or Path("/tmp/files")
-                self.events_path = events_path or Path("/tmp/events.jsonl")
+                self._fts_available = options["fts_available"]
+                self.db_path = options["db_path"] or Path("/tmp/test.db")
+                self.files_dir = options["files_dir"] or Path("/tmp/files")
+                self.events_path = options["events_path"] or Path("/tmp/events.jsonl")
 
             @property
             def fts_available(self) -> bool:
@@ -229,11 +246,8 @@ def make_fake_store_func():
                 return "", ()
 
         store = FakeStore()
-        if mock_conn:
-            @contextmanager
-            def conn_ctx():
-                yield mock_conn
-            store._connection = conn_ctx
+        if options["mock_conn"]:
+            _attach_mock_connection(store, options["mock_conn"])
         return store
     return _make
 

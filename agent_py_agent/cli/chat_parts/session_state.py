@@ -1,9 +1,3 @@
-"""LLM: session lifecycle and context tracking for chat mode.
-
-给人看的解释：
-会话创建、恢复、保存和对话历史都在这里管理，
-让 chat.py 的主循环不再直接处理会话状态细节。
-"""
 
 from __future__ import annotations
 
@@ -18,10 +12,6 @@ def create_or_resume_session(
     session_id: str | None,
     channel: str = "chat",
 ) -> tuple[SessionManager, str]:
-    """Create a new session or resume an existing one.
-
-    Returns (session_manager, session_id).
-    """
     if session_id:
         session = session_manager.load_session(session_id)
         if session is None:
@@ -37,12 +27,10 @@ def create_or_resume_session(
 
 
 def touch_session_on_exit(session_manager: SessionManager, session_id: str, channel: str = "chat") -> None:
-    """Touch session to mark activity before exiting."""
     session_manager.touch_session(session_id, channel=channel)
 
 
 class ConversationHistory:
-    """Thread-safe conversation history manager."""
 
     def __init__(self, max_turns: int = 8) -> None:
         self._history: list[tuple[str, str]] = []
@@ -56,7 +44,6 @@ class ConversationHistory:
                 self._history[:] = self._history[-self._max_turns:]
 
     def get_context(self) -> str:
-        """Build history context string for injection."""
         with self._lock:
             if not self._history:
                 return ""

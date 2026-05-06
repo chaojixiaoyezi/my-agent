@@ -325,6 +325,15 @@ class TestArchiveRunTurn:
 
         assert result.token_estimate >= 0
 
+
+
+
+
+
+
+class TestArchiveRunTurnOptions:
+    """测试 archive_run_turn 回合归档"""
+
     def test_default_created_at_used(self, tmp_path):
         """验证使用默认 created_at"""
         result = archive_run_turn(

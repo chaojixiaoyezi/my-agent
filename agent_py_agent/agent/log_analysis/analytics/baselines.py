@@ -115,13 +115,18 @@ def _int_set_map(payload: Any) -> dict[str, set[int]]:
         clean_key = _norm(key)
         if not clean_key:
             continue
-        result[clean_key] = set()
-        raw_values = values if isinstance(values, Iterable) and not isinstance(values, str) else [values]
-        for item in raw_values:
-            try:
-                result[clean_key].add(int(item))
-            except (TypeError, ValueError):
-                continue
+        result[clean_key] = _as_int_set(values)
+    return result
+
+
+def _as_int_set(values: Any) -> set[int]:
+    result: set[int] = set()
+    raw_values = values if isinstance(values, Iterable) and not isinstance(values, str) else [values]
+    for item in raw_values:
+        try:
+            result.add(int(item))
+        except (TypeError, ValueError):
+            continue
     return result
 
 

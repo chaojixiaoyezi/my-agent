@@ -417,7 +417,7 @@ class TestWriteBoundaryCases:
         })
 
         assert result.ok is True
-        assert (workspace / "unicode.txt").read_text() == "你好世界 🎉 مرحبا"
+        assert (workspace / "unicode.txt").read_text(encoding="utf-8") == "你好世界 🎉 مرحبا"
 
     def test_write_control_characters_rejected(self, tmp_path: Path):
         """拒绝包含控制字符的路径。"""

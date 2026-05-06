@@ -39,12 +39,6 @@ def validate_write_boundary(
     workspace_root: Path,
     write_boundary: dict[str, object] | None,
 ) -> str:
-    """Enforce subagent write boundaries before filesystem write tools run.
-
-    In plain terms: prompts can tell a subagent "only write here", but prompts
-    are not a lock. This check is the real lock at the tool layer: a write must
-    stay inside allowed roots and avoid forbidden or locked paths.
-    """
 
     if tool_name not in WRITE_TOOL_NAMES or write_boundary is None:
         return ""

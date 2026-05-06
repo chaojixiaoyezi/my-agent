@@ -18,11 +18,6 @@ from .models import LocalStoreEvent, LocalTimelineItem
 
 
 class LocalStoreEventMixin:
-    """LLM: mixin for audit events and timeline projection.
-
-    给人看的解释：
-    这个 mixin 把'发生过什么事'保存下来，后面 status、timeline、doctor 都能复用这份证据。
-    """
 
     def timeline(
         self,
@@ -31,12 +26,6 @@ class LocalStoreEventMixin:
         source_type: str | None = None,
         event_type: str | None = None,
     ) -> list[LocalTimelineItem]:
-        """读取最近本地事件。
-
-        这是真正给 `my-agent timeline/status` 用的视图：
-        它不读 JSONL 文件，而是从 SQLite 事件表读取，并尽量 join 到 records，
-        这样能同时显示事件类型和对应记录标题。
-        """
 
         if limit <= 0:
             return []

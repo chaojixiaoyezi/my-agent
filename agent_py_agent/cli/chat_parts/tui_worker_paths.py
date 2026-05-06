@@ -1,0 +1,132 @@
+from __future__ import annotations
+
+import time
+
+from .gateway_client import (
+    ChatRequestContent,
+    check_gateway_alive,
+    poll_gateway_chunks,
+    submit_chat_request,
+)
+from .renderer import GRAY, RESET
+from .tui_worker_stream import (
+    _flush_stream_buf,
+    _maybe_record_response,
+    _update_response_state,
+    resume_context_override,
+)
+
+
+def _worker_gateway_path(ctx) -> tuple[str, bool]:
+    if not check_gateway_alive(ctx.cfg.paths):
+        raise RuntimeError("gateway 已停止。请先执行 my-agent gateway start")
+    request_id, chunk_path, response_path = _submit_gateway_job(ctx)
+    timeout = _gateway_timeout(ctx.cfg)
+    response = poll_gateway_chunks(
+        chunk_path,
+        response_path,
+        time.time() + max(0.0, timeout),
+        ctx.on_stream_chunk,
+        chunks_printed_ref=[0],
+    )
+    if response:
+        _flush_stream_buf(ctx.cfg.stream_buf_ref)
+    if not response:
+        raise TimeoutError(f"gateway 请求等待超时: request_id={request_id} response={response_path}")
+    return _finish_gateway_response(ctx, request_id, response)
+
+
+def _submit_gateway_job(ctx):
+    return submit_chat_request(
+        ctx.cfg.paths,
+        content=ChatRequestContent(
+            prompt=ctx.job.user,
+            inject=ctx.turn_inject,
+            prompt_files=ctx.job.prompt_files,
+            save=not ctx.cfg.args.no_save,
+            show_prompt=ctx.job.show_prompt,
+            resume_context=resume_context_override(ctx.cfg.args),
+        ),
+        agent=ctx.cfg.agent,
+    )
+
+
+def _gateway_timeout(cfg) -> float:
+    if cfg.args.gateway_timeout is not None:
+        return cfg.args.gateway_timeout
+    return cfg.agent.config.gateway_request_timeout
+
+
+def _finish_gateway_response(ctx, request_id: str, response: dict) -> tuple[str, bool]:
+    from .rendering import _cprint
+
+    if ctx.job.show_prompt and response.get("prompt"):
+        _cprint("===== FINAL PROMPT =====")
+        _cprint(response.get("prompt", ""))
+        _cprint("===== RESPONSE =====")
+    _print_gateway_timing(ctx, request_id, response)
+    if not response.get("ok"):
+        _cprint(f"错误: {response.get('error', 'gateway 请求失败')}")
+        return "", False
+    agent_response_text = _update_response_state(
+        response, ctx.cfg.state_lock, ctx.cfg.last_token_estimate_ref
+    )
+    response_recorded = _maybe_record_response(
+        agent_response_text, False, ctx.cfg.assistant_outputs, ctx.cfg.agent
+    )
+    return agent_response_text, response_recorded
+
+
+def _print_gateway_timing(ctx, request_id: str, response: dict) -> None:
+    from .rendering import _cprint
+
+    elapsed = time.perf_counter() - ctx.started_at
+    _cprint(
+        f"{GRAY}[耗时 {elapsed:.2f}s; gateway_request={request_id}; "
+        f"工具轮数 {response.get('tool_rounds', 0)}; "
+        f"prompt_tokens~{response.get('prompt_token_estimate', 0)}; "
+        f"resume_context={1 if response.get('memory_resume_context_injected') else 0}]{RESET}"
+    )
+
+
+def _worker_local_path(ctx) -> tuple[str, bool]:
+    from .rendering import _render_assistant_response
+
+    result = ctx.cfg.agent.run(
+        ctx.job.user,
+        inject=ctx.turn_inject,
+        prompt_files=ctx.job.prompt_files,
+        save=not ctx.cfg.args.no_save,
+        source="chat",
+        resume_context=resume_context_override(ctx.cfg.args),
+        recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
+        on_chunk=ctx.on_stream_chunk,
+    )
+    _flush_stream_buf(ctx.cfg.stream_buf_ref)
+    _print_local_timing(ctx, result)
+    with ctx.cfg.state_lock:
+        ctx.cfg.last_token_estimate_ref[0] = result.prompt_token_estimate
+    if result.response.strip():
+        _render_assistant_response(
+            result.response, ctx.cfg.assistant_outputs, ctx.cfg.agent.config.agent_name
+        )
+        return result.response, True
+    return result.response, False
+
+
+def _print_local_timing(ctx, result) -> None:
+    from .rendering import _cprint
+
+    if ctx.job.show_prompt:
+        _cprint("===== FINAL PROMPT =====")
+        _cprint(result.prompt)
+        _cprint("===== RESPONSE =====")
+    elapsed = time.perf_counter() - ctx.started_at
+    _cprint(
+        f"{GRAY}[耗时 {elapsed:.2f}s; 工具轮数 {result.tool_rounds}; "
+        f"prompt_tokens~{result.prompt_token_estimate}; "
+        f"resume_context={1 if result.memory_resume_context_injected else 0}]{RESET}"
+    )
+
+
+__all__ = ["_worker_gateway_path", "_worker_local_path"]

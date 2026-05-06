@@ -31,7 +31,6 @@ from ..scenario_utils import (
 
 
 def _delayed_response_setup(args):
-    """Setup for delayed response scenario: create workspace, agent, gateway paths, request and response."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=gateway-delayed-response")
@@ -79,7 +78,6 @@ def _delayed_response_setup(args):
 
 @dataclass
 class _DelayedResponseVerifyContext:
-    """Bundle for _delayed_response_verify to reduce parameter count."""
     paths: Any
     request_id: str
     processed: int
@@ -93,7 +91,6 @@ class _DelayedResponseVerifyContext:
 
 
 def _delayed_response_verify(ctx: _DelayedResponseVerifyContext) -> int:
-    """Verify delayed response handling results."""
     final_ok = (
         ctx.processed == 1
         and ctx.run_called["value"] is False
@@ -126,12 +123,6 @@ def _delayed_response_verify(ctx: _DelayedResponseVerifyContext) -> int:
 
 
 def run_scenario_gateway_delayed_response_case(args) -> int:
-    """LLM: simulate a response arriving before a duplicate pending request is claimed.
-
-    新手说明:
-    当 gateway 响应已经存在时，worker 不应该再次调用模型。
-    验证系统能检测已有响应、直接归档请求、不重复执行。
-    """
 
     paths, agent, gpaths, request_id, request_path, response_path = _delayed_response_setup(args)
 

@@ -211,46 +211,53 @@ def test_subagent_board_scales_and_flags():
         assert (root / "subs" / "SUBAGENT_BOARD.md").exists()
 
 
+def _make_due_check_stale_active_run(agent):
+    active = agent.subagents.create_run(
+        goal="实现长任务巡检",
+        thought="模拟长时间运行且等待能力路由的子代理。",
+        plan=["执行", "上抛能力", "等待父代理处理"],
+        owner="worker-a",
+        final_owner="final-owner",
+    )
+    agent.subagents.record_capability_request(
+        active.id,
+        RecordCapabilityRequestParams(
+            problem="当前工具无法验证真实入口。",
+            needed_capability="browser_smoke_test",
+        ),
+    )
+    agent.subagents.record_capability_gap(
+        active.id,
+        RecordCapabilityGapParams(
+            missing_capability="browser_smoke_test",
+            why_failed="没有浏览器自动化工具授权。",
+            suggested_tool="playwright_smoke",
+        ),
+    )
+    loaded = agent.subagents.load(active.id)
+    loaded.created_at = time.time() - 30
+    loaded.heartbeat_at = time.time() - 30
+    agent.subagents.save(loaded)
+    Path(loaded.acceptance_file).unlink()
+
+
+def _make_due_check_done_without_evidence(agent):
+    done = agent.subagents.create_run(
+        goal="假完成样本",
+        thought="没有证据就标记完成。",
+        plan=["标记完成"],
+    )
+    agent.subagents.set_status(done.id, "DONE")
+
+
 def test_subagent_due_check_report():
     """LLM: Verifies due-check detects stale heartbeats, timeouts, fake-done, and gaps."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
-        active = agent.subagents.create_run(
-            goal="实现长任务巡检",
-            thought="模拟长时间运行且等待能力路由的子代理。",
-            plan=["执行", "上抛能力", "等待父代理处理"],
-            owner="worker-a",
-            final_owner="final-owner",
-        )
-        agent.subagents.record_capability_request(
-            active.id,
-            RecordCapabilityRequestParams(
-                problem="当前工具无法验证真实入口。",
-                needed_capability="browser_smoke_test",
-            ),
-        )
-        agent.subagents.record_capability_gap(
-            active.id,
-            RecordCapabilityGapParams(
-                missing_capability="browser_smoke_test",
-                why_failed="没有浏览器自动化工具授权。",
-                suggested_tool="playwright_smoke",
-            ),
-        )
-        loaded = agent.subagents.load(active.id)
-        loaded.created_at = time.time() - 30
-        loaded.heartbeat_at = time.time() - 30
-        agent.subagents.save(loaded)
-        Path(loaded.acceptance_file).unlink()
-
-        done = agent.subagents.create_run(
-            goal="假完成样本",
-            thought="没有证据就标记完成。",
-            plan=["标记完成"],
-        )
-        agent.subagents.set_status(done.id, "DONE")
+        _make_due_check_stale_active_run(agent)
+        _make_due_check_done_without_evidence(agent)
 
         report = agent.subagents.write_due_check(
             CapabilityConfig(

@@ -30,7 +30,6 @@ from ..scenario_utils import (
 
 @dataclass
 class ProcessingVerifyResults:
-    """Bundle of verification results for processing stop scenario."""
     done_path: object
     response_path: object
     final_response: dict
@@ -38,7 +37,6 @@ class ProcessingVerifyResults:
 
 
 def _processing_stop_setup(args):
-    """Setup for processing stop scenario: create workspace, agent, gateway paths and pending request."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=gateway-processing-stop")
@@ -71,7 +69,6 @@ def _processing_stop_setup(args):
 
 
 def _processing_stop_simulate_lease(gpaths, request_id, pending_path, payload):
-    """Simulate worker claiming the request (move to processing with lease)."""
     processing_path = gpaths.processing / pending_path.name
     try:
         pending_path.rename(processing_path)
@@ -98,7 +95,6 @@ def _processing_stop_simulate_lease(gpaths, request_id, pending_path, payload):
 
 
 def _processing_stop_verify_results(paths, request_id, requeued, processed, verify: ProcessingVerifyResults):
-    """Verify processing stop scenario results."""
     final_ok = (
         requeued == 1
         and not after_requeue_processing.exists()
@@ -132,12 +128,6 @@ def _processing_stop_verify_results(paths, request_id, requeued, processed, veri
 
 
 def run_scenario_gateway_processing_stop_case(args) -> int:
-    """LLM: verify gateway handles stop/restart correctly when a worker is mid-request (has claimed and is calling the model).
-
-    新手说明:
-    模拟 gateway 正在处理请求时（worker 已领任务、正在调模型）收到主动 stop/restart。
-    验证：不卡死、不丢请求、不留半截 JSON、重启后能正确恢复。
-    """
 
     paths, agent, gpaths, request_id, pending_path, payload = _processing_stop_setup(args)
 

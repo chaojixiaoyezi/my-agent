@@ -34,19 +34,6 @@ VALID_CONTEXT_MODES = {"soft", "strict"}
 
 @dataclass
 class RoutedMemoryContext:
-    """LLM contract: returned runtime bundle for routed memory rule context.
-
-    新手说明:
-    这是主循环可以直接消费的一包结果：哪些 route 命中了、哪些文件候选、
-    哪些正文已经安全读入、每次读取有没有成功，以及有什么诊断信息。
-
-    字段说明:
-    `enabled` 表示路由是否启用；`index_path` 是实际使用的索引路径；
-    `routes_count` 是索引里的 route 总数；`matches` 是命中证据；
-    `required_read_paths` 是 strict 模式下父流程必须关注的路径；
-    `candidate_paths` 是 soft 模式下可选读取的路径；`injected_sections` 是可注入 prompt 的正文片段；
-    `receipts` 是每次读取的小票；`findings` 是安全检查或校验发现的问题。
-    """
 
     enabled: bool
     index_path: str
@@ -114,12 +101,21 @@ def build_routed_memory_context(
     if _opts.auto_read_limit <= 0:
         return context
 
+    _read_target_sections(context, read_targets, max_chars_per_file=_opts.max_chars_per_file)
+    return context
+
+
+def _read_target_sections(
+    context: RoutedMemoryContext,
+    read_targets: list[_ReadTarget],
+    *,
+    max_chars_per_file: int,
+) -> None:
     for target in read_targets:
-        section, receipt = _read_authority_file(target, max_chars_per_file=_opts.max_chars_per_file)
+        section, receipt = _read_authority_file(target, max_chars_per_file=max_chars_per_file)
         context.receipts.append(receipt)
         if section:
             context.injected_sections.append(section)
-    return context
 
 
 def _prepare_root(context: RoutedMemoryContext, root: str | Path) -> Path | None:
@@ -171,18 +167,6 @@ def _load_routes(context: RoutedMemoryContext, index_file: Path):
 
 
 def _match_to_dict(match: MemoryRouteMatch) -> dict[str, Any]:
-    """LLM contract: serializes one route match into plain JSON-friendly data.
-
-    新手说明:
-    运行时、日志和测试不需要 dataclass 对象；这里把关键证据摊平成 dict，
-    保留 route_id、路径、分数和命中理由。
-
-    参数说明:
-    `match` 是一条 `MemoryRouteMatch`。
-
-    返回说明:
-    返回 JSON 友好的命中证据字典。
-    """
 
     route = match.route
     return {

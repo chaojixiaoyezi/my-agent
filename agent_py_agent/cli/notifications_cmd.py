@@ -1,9 +1,3 @@
-"""通知 CLI 命令。
-
-提供 notifications 命令实现：
-- 列出用户的通知
-- 推送离线存储的通知
-"""
 from __future__ import annotations
 
 import json
@@ -14,7 +8,6 @@ from ..agent.notification import NotificationManager, NotificationRouter
 
 
 def _format_notification(n, include_delivery: bool = False) -> str:
-    """Format a single notification for text output."""
     status_icon = {
         "pending": "⏳",
         "delivered": "✓",
@@ -37,14 +30,6 @@ def _format_notification(n, include_delivery: bool = False) -> str:
 
 
 def cmd_notifications(args) -> int:
-    """查看未读通知。
-
-    Args:
-        args: 解析后的命令行参数
-
-    Returns:
-        退出码
-    """
     from .common import DEFAULT_CONFIG, load_config, resolve_workspace_root
 
     config_path = getattr(args, "config", str(DEFAULT_CONFIG))

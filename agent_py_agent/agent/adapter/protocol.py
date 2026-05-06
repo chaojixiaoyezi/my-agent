@@ -1,9 +1,3 @@
-"""LLM: 通道适配器消息协议 — 统一外部消息格式与各平台转换函数。
-
-给人看的解释：
-飞书、QQ 等外部平台的消息格式各不相同，这里定义统一的内部格式
-（IncomingMessage / OutgoingMessage），以及各平台到统一格式的转换函数。
-"""
 
 from __future__ import annotations
 
@@ -44,23 +38,6 @@ FEISHU_MESSAGE_TYPES = {"text", "post", "image", "audio", "video", "file", "stic
 
 
 def feishu_to_incoming(payload: dict[str, Any]) -> IncomingMessage | None:
-    """把飞书回调 payload 转换成 IncomingMessage。
-
-    飞书事件回调格式（简化版）：
-    {
-        "schema": "2.0",
-        "header": {"event_id": "...", "event_type": "im.message.receive_v1", ...},
-        "event": {
-            "sender": {"sender_id": {"open_id": "ou_xxx"}, "sender_type": "user"},
-            "message": {
-                "message_id": "om_xxx",
-                "create_time": "1234567890",
-                "chat_id": "oc_xxx",
-                "content": "{\"text\":\"hello\"}",
-            }
-        }
-    }
-    """
     try:
         event = payload.get("event", {})
         message = event.get("message", {})
@@ -112,15 +89,6 @@ def outgoing_to_feishu(msg: OutgoingMessage) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def qq_to_incoming(payload: dict[str, Any]) -> IncomingMessage | None:
-    """把 QQ 机器人回调 payload 转换成 IncomingMessage。
-
-    支持两种格式：
-    1. QQ 官方 WebSocket 事件（t= MESSAGE_CREATE）：
-       {"t": "MESSAGE_CREATE", "d": {"id": "...", "channel_id": "...",
-         "content": "...", "author": {"user_openid": "..."}, "timestamp": "..."}}
-    2. 旧版简化格式（字段在 event 或 d 里）：
-       {"event": {...}} 或 {"d": {"author": {"id": "..."}, ...}}
-    """
     try:
         user_id, content, msg_id, ts, metadata = _qq_message_fields(payload)
         if not content.strip():

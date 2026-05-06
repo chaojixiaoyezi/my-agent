@@ -181,6 +181,15 @@ def _assert_heartbeat_refreshed(observed: list[float], paths, request_path, requ
     assert response["lease_heartbeat_at"] >= observed[1]
 
 
+def _process_gateway_once_when_inbox_ready(agent, gpaths) -> None:
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if list(gpaths.inbox.glob("*.json")):
+            _process_gateway_requests(agent, gpaths)
+            return
+        time.sleep(0.05)
+
+
 def test_gateway_processing_recovery_requeues_then_fails_after_attempt_limit():
     """LLM: Verify recovery requeues timed-out requests and fails after max attempts."""
     root, agent, paths = _setup_agent_with_gateway(
@@ -348,15 +357,10 @@ def test_file_adapter_writes_gateway_response_to_outbox():
             {"id": "msg-1", "text": "文件 adapter 测试", "conversation_id": "conv-1"},
         )
 
-        def gateway_once():
-            deadline = time.time() + 5
-            while time.time() < deadline:
-                if list(gpaths.inbox.glob("*.json")):
-                    _process_gateway_requests(agent, gpaths)
-                    return
-                time.sleep(0.05)
-
-        thread = threading.Thread(target=gateway_once)
+        thread = threading.Thread(
+            target=_process_gateway_once_when_inbox_ready,
+            args=(agent, gpaths),
+        )
         thread.start()
         processed = process_file_adapter_once(
             agent,

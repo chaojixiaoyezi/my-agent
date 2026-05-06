@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import tempfile
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -17,6 +19,61 @@ from agent_py_agent.agent.log_analysis.doctor import (
     doctor_status,
     get_log_analysis_status,
 )
+
+
+def _doctor_config(**overrides):
+    config = MagicMock()
+    config.enabled = True
+    config.capability_level = "full"
+    config.config_warnings = []
+    config.worker_enabled = True
+    config.security_prompt_enabled = True
+    config.auto_dispatch_enabled = True
+    config.ml_enabled = True
+    config.cluster_enabled = True
+    config.response_execution_enabled = True
+    config.response_mode = "direct"
+    config.local_store_backend = "sqlite"
+    for name, value in overrides.items():
+        setattr(config, name, value)
+    return config
+
+
+@dataclass
+class DoctorPatchCase:
+    config: object | None = None
+    data_dir: Path = Path("/tmp/data")
+    gates: dict[str, bool] | None = None
+    config_path: object | None = None
+    load_error: Exception | None = None
+
+
+@contextmanager
+def _patched_doctor(case):
+    with ExitStack() as stack:
+        mock_load = stack.enter_context(
+            patch("agent_py_agent.agent.log_analysis.doctor.load_log_analysis_config")
+        )
+        if case.load_error is None:
+            mock_load.return_value = case.config or _doctor_config()
+        else:
+            mock_load.side_effect = case.load_error
+        mock_resolve = stack.enter_context(
+            patch("agent_py_agent.agent.log_analysis.doctor.resolve_log_analysis_data_dir")
+        )
+        mock_resolve.return_value = case.data_dir
+        mock_gates = stack.enter_context(
+            patch("agent_py_agent.agent.log_analysis.doctor.effective_feature_gates")
+        )
+        mock_gates.return_value = case.gates or {}
+        yield
+
+
+def _collect_with(case):
+    with _patched_doctor(case):
+        if case.config_path is None:
+            return collect_doctor_status()
+        return collect_doctor_status(config_path=case.config_path)
 
 # ── _path_status 测试 ───────────────────────────────────────────────────────
 
@@ -55,27 +112,12 @@ def test_path_status_not_exists():
 
 def test_collect_doctor_status_default_config():
     """测试使用默认配置。"""
-    with patch("agent_py_agent.agent.log_analysis.doctor.load_log_analysis_config") as mock_load:
-        mock_config = MagicMock()
-        mock_config.enabled = True
-        mock_config.capability_level = "full"
-        mock_config.config_warnings = []
-        mock_config.worker_enabled = True
-        mock_config.security_prompt_enabled = True
-        mock_config.auto_dispatch_enabled = False
-        mock_config.ml_enabled = False
-        mock_config.cluster_enabled = False
-        mock_config.response_execution_enabled = True
-        mock_config.response_mode = "direct"
-        mock_config.local_store_backend = "sqlite"
-        mock_load.return_value = mock_config
-
-        with patch("agent_py_agent.agent.log_analysis.doctor.resolve_log_analysis_data_dir") as mock_resolve:
-            mock_resolve.return_value = Path("/tmp/data")
-            with patch("agent_py_agent.agent.log_analysis.doctor.effective_feature_gates") as mock_gates:
-                mock_gates.return_value = {"gate1": True}
-
-                result = collect_doctor_status()
+    config = _doctor_config(
+        auto_dispatch_enabled=False,
+        ml_enabled=False,
+        cluster_enabled=False,
+    )
+    result = _collect_with(DoctorPatchCase(config=config, gates={"gate1": True}))
 
     assert result["module"] == "log_analysis"
     assert result["state"] == "enabled"
@@ -86,27 +128,16 @@ def test_collect_doctor_status_default_config():
 
 def test_collect_doctor_status_disabled_module():
     """测试禁用的模块。"""
-    with patch("agent_py_agent.agent.log_analysis.doctor.load_log_analysis_config") as mock_load:
-        mock_config = MagicMock()
-        mock_config.enabled = False
-        mock_config.capability_level = "minimal"
-        mock_config.config_warnings = []
-        mock_config.worker_enabled = False
-        mock_config.security_prompt_enabled = True
-        mock_config.auto_dispatch_enabled = False
-        mock_config.ml_enabled = False
-        mock_config.cluster_enabled = False
-        mock_config.response_execution_enabled = False
-        mock_config.response_mode = "direct"
-        mock_config.local_store_backend = "sqlite"
-        mock_load.return_value = mock_config
-
-        with patch("agent_py_agent.agent.log_analysis.doctor.resolve_log_analysis_data_dir") as mock_resolve:
-            mock_resolve.return_value = Path("/tmp/data")
-            with patch("agent_py_agent.agent.log_analysis.doctor.effective_feature_gates") as mock_gates:
-                mock_gates.return_value = {}
-
-                result = collect_doctor_status()
+    config = _doctor_config(
+        enabled=False,
+        capability_level="minimal",
+        worker_enabled=False,
+        auto_dispatch_enabled=False,
+        ml_enabled=False,
+        cluster_enabled=False,
+        response_execution_enabled=False,
+    )
+    result = _collect_with(DoctorPatchCase(config=config))
 
     assert result["state"] == "disabled"
     assert result["enabled"] is False
@@ -114,27 +145,14 @@ def test_collect_doctor_status_disabled_module():
 
 def test_collect_doctor_status_with_workspace_root():
     """测试指定 workspace_root。"""
-    with patch("agent_py_agent.agent.log_analysis.doctor.load_log_analysis_config") as mock_load:
-        mock_config = MagicMock()
-        mock_config.enabled = True
-        mock_config.capability_level = "full"
-        mock_config.config_warnings = []
-        mock_config.worker_enabled = True
-        mock_config.security_prompt_enabled = True
-        mock_config.auto_dispatch_enabled = True
-        mock_config.ml_enabled = True
-        mock_config.cluster_enabled = True
-        mock_config.response_execution_enabled = True
-        mock_config.response_mode = "async"
-        mock_config.local_store_backend = "duckdb"
-        mock_load.return_value = mock_config
-
-        with patch("agent_py_agent.agent.log_analysis.doctor.resolve_log_analysis_data_dir") as mock_resolve:
-            mock_resolve.return_value = Path("/custom/workspace/data")
-            with patch("agent_py_agent.agent.log_analysis.doctor.effective_feature_gates") as mock_gates:
-                mock_gates.return_value = {"gate_a": True, "gate_b": False}
-
-                result = collect_doctor_status(workspace_root="/custom/workspace")
+    config = _doctor_config(response_mode="async", local_store_backend="duckdb")
+    case = DoctorPatchCase(
+        config=config,
+        data_dir=Path("/custom/workspace/data"),
+        gates={"gate_a": True, "gate_b": False},
+    )
+    with _patched_doctor(case):
+        result = collect_doctor_status(workspace_root="/custom/workspace")
 
     assert result["enabled"] is True
 
@@ -143,27 +161,7 @@ def test_collect_doctor_status_with_workspace_root():
 
 def test_collect_doctor_status_includes_runtime_dirs():
     """测试包含所有运行时目录。"""
-    with patch("agent_py_agent.agent.log_analysis.doctor.load_log_analysis_config") as mock_load:
-        mock_config = MagicMock()
-        mock_config.enabled = True
-        mock_config.capability_level = "full"
-        mock_config.config_warnings = []
-        mock_config.worker_enabled = True
-        mock_config.security_prompt_enabled = True
-        mock_config.auto_dispatch_enabled = True
-        mock_config.ml_enabled = True
-        mock_config.cluster_enabled = True
-        mock_config.response_execution_enabled = True
-        mock_config.response_mode = "direct"
-        mock_config.local_store_backend = "sqlite"
-        mock_load.return_value = mock_config
-
-        with patch("agent_py_agent.agent.log_analysis.doctor.resolve_log_analysis_data_dir") as mock_resolve:
-            mock_resolve.return_value = Path("/tmp/data")
-            with patch("agent_py_agent.agent.log_analysis.doctor.effective_feature_gates") as mock_gates:
-                mock_gates.return_value = {}
-
-                result = collect_doctor_status()
+    result = _collect_with(DoctorPatchCase())
 
     assert "paths" in result
     for dir_name in RUNTIME_DIRS:
@@ -172,27 +170,7 @@ def test_collect_doctor_status_includes_runtime_dirs():
 
 def test_collect_doctor_status_path_structure():
     """测试路径结果结构。"""
-    with patch("agent_py_agent.agent.log_analysis.doctor.load_log_analysis_config") as mock_load:
-        mock_config = MagicMock()
-        mock_config.enabled = True
-        mock_config.capability_level = "full"
-        mock_config.config_warnings = []
-        mock_config.worker_enabled = True
-        mock_config.security_prompt_enabled = True
-        mock_config.auto_dispatch_enabled = True
-        mock_config.ml_enabled = True
-        mock_config.cluster_enabled = True
-        mock_config.response_execution_enabled = True
-        mock_config.response_mode = "direct"
-        mock_config.local_store_backend = "sqlite"
-        mock_load.return_value = mock_config
-
-        with patch("agent_py_agent.agent.log_analysis.doctor.resolve_log_analysis_data_dir") as mock_resolve:
-            mock_resolve.return_value = Path("/tmp/data")
-            with patch("agent_py_agent.agent.log_analysis.doctor.effective_feature_gates") as mock_gates:
-                mock_gates.return_value = {}
-
-                result = collect_doctor_status()
+    result = _collect_with(DoctorPatchCase())
 
     base_path = result["paths"]["base"]
     assert "path" in base_path
@@ -204,49 +182,23 @@ def test_collect_doctor_status_path_structure():
 
 def test_collect_doctor_status_with_config_warnings():
     """测试带配置警告的情况。"""
-    with patch("agent_py_agent.agent.log_analysis.doctor.load_log_analysis_config") as mock_load:
-        mock_warning = MagicMock()
-        mock_warning.to_dict.return_value = {
-            "field_name": "data_dir",
-            "raw_value": "/invalid",
-            "fallback_value": "/tmp",
-            "reason": "path not accessible",
-        }
-        mock_config = MagicMock()
-        mock_config.enabled = True
-        mock_config.capability_level = "full"
-        mock_config.config_warnings = [mock_warning]
-        mock_config.worker_enabled = True
-        mock_config.security_prompt_enabled = True
-        mock_config.auto_dispatch_enabled = True
-        mock_config.ml_enabled = True
-        mock_config.cluster_enabled = True
-        mock_config.response_execution_enabled = True
-        mock_config.response_mode = "direct"
-        mock_config.local_store_backend = "sqlite"
-        mock_load.return_value = mock_config
-
-        with patch("agent_py_agent.agent.log_analysis.doctor.resolve_log_analysis_data_dir") as mock_resolve:
-            mock_resolve.return_value = Path("/tmp")
-            with patch("agent_py_agent.agent.log_analysis.doctor.effective_feature_gates") as mock_gates:
-                mock_gates.return_value = {}
-
-                result = collect_doctor_status()
+    mock_warning = MagicMock()
+    mock_warning.to_dict.return_value = {
+        "field_name": "data_dir",
+        "raw_value": "/invalid",
+        "fallback_value": "/tmp",
+        "reason": "path not accessible",
+    }
+    config = _doctor_config(config_warnings=[mock_warning])
+    result = _collect_with(DoctorPatchCase(config=config, data_dir=Path("/tmp")))
 
     assert len(result["config"]["warnings"]) > 0
 
 
 def test_collect_doctor_status_with_load_error():
     """测试配置文件加载失败时的处理。"""
-    with patch("agent_py_agent.agent.log_analysis.doctor.load_log_analysis_config") as mock_load:
-        mock_load.side_effect = Exception("Config file corrupted")
-
-        with patch("agent_py_agent.agent.log_analysis.doctor.resolve_log_analysis_data_dir") as mock_resolve:
-            mock_resolve.return_value = Path("/tmp/data")
-            with patch("agent_py_agent.agent.log_analysis.doctor.effective_feature_gates") as mock_gates:
-                mock_gates.return_value = {}
-
-                result = collect_doctor_status()
+    case = DoctorPatchCase(load_error=Exception("Config file corrupted"))
+    result = _collect_with(case)
 
     # 应该使用安全默认值并在 warnings 中包含错误
     assert len(result["config"]["warnings"]) > 0
@@ -256,27 +208,8 @@ def test_collect_doctor_status_with_load_error():
 
 def test_collect_doctor_status_feature_gates():
     """测试功能门包含在结果中。"""
-    with patch("agent_py_agent.agent.log_analysis.doctor.load_log_analysis_config") as mock_load:
-        mock_config = MagicMock()
-        mock_config.enabled = True
-        mock_config.capability_level = "full"
-        mock_config.config_warnings = []
-        mock_config.worker_enabled = True
-        mock_config.security_prompt_enabled = True
-        mock_config.auto_dispatch_enabled = True
-        mock_config.ml_enabled = True
-        mock_config.cluster_enabled = True
-        mock_config.response_execution_enabled = True
-        mock_config.response_mode = "direct"
-        mock_config.local_store_backend = "sqlite"
-        mock_load.return_value = mock_config
-
-        with patch("agent_py_agent.agent.log_analysis.doctor.resolve_log_analysis_data_dir") as mock_resolve:
-            mock_resolve.return_value = Path("/tmp/data")
-            with patch("agent_py_agent.agent.log_analysis.doctor.effective_feature_gates") as mock_gates:
-                mock_gates.return_value = {"feature_a": True, "feature_b": False}
-
-                result = collect_doctor_status()
+    case = DoctorPatchCase(gates={"feature_a": True, "feature_b": False})
+    result = _collect_with(case)
 
     assert "feature_gates" in result
     assert result["feature_gates"]["feature_a"] is True
@@ -302,54 +235,14 @@ def test_collect_doctor_status_custom_config_path(tmp_path):
     config_file = tmp_path / "custom_config.yaml"
     config_file.write_text("enabled: true", encoding="utf-8")
 
-    with patch("agent_py_agent.agent.log_analysis.doctor.load_log_analysis_config") as mock_load:
-        mock_config = MagicMock()
-        mock_config.enabled = True
-        mock_config.capability_level = "full"
-        mock_config.config_warnings = []
-        mock_config.worker_enabled = True
-        mock_config.security_prompt_enabled = True
-        mock_config.auto_dispatch_enabled = True
-        mock_config.ml_enabled = True
-        mock_config.cluster_enabled = True
-        mock_config.response_execution_enabled = True
-        mock_config.response_mode = "direct"
-        mock_config.local_store_backend = "sqlite"
-        mock_load.return_value = mock_config
-
-        with patch("agent_py_agent.agent.log_analysis.doctor.resolve_log_analysis_data_dir") as mock_resolve:
-            mock_resolve.return_value = Path("/tmp/data")
-            with patch("agent_py_agent.agent.log_analysis.doctor.effective_feature_gates") as mock_gates:
-                mock_gates.return_value = {}
-
-                result = collect_doctor_status(config_path=config_file)
+    result = _collect_with(DoctorPatchCase(config_path=config_file))
 
     assert result["config"]["path"] == str(config_file)
 
 
 def test_collect_doctor_status_config_not_exists(tmp_path):
     """测试配置文件不存在。"""
-    with patch("agent_py_agent.agent.log_analysis.doctor.load_log_analysis_config") as mock_load:
-        mock_config = MagicMock()
-        mock_config.enabled = True
-        mock_config.capability_level = "full"
-        mock_config.config_warnings = []
-        mock_config.worker_enabled = True
-        mock_config.security_prompt_enabled = True
-        mock_config.auto_dispatch_enabled = True
-        mock_config.ml_enabled = True
-        mock_config.cluster_enabled = True
-        mock_config.response_execution_enabled = True
-        mock_config.response_mode = "direct"
-        mock_config.local_store_backend = "sqlite"
-        mock_load.return_value = mock_config
-
-        with patch("agent_py_agent.agent.log_analysis.doctor.resolve_log_analysis_data_dir") as mock_resolve:
-            mock_resolve.return_value = Path("/tmp/data")
-            with patch("agent_py_agent.agent.log_analysis.doctor.effective_feature_gates") as mock_gates:
-                mock_gates.return_value = {}
-
-                result = collect_doctor_status(config_path="/nonexistent/config.yaml")
+    result = _collect_with(DoctorPatchCase(config_path="/nonexistent/config.yaml"))
 
     assert result["config"]["exists"] is False
 
@@ -372,27 +265,8 @@ def test_path_status_symlink_to_existing_file(tmp_path):
 
 def test_collect_doctor_status_effective_config_fields():
     """测试有效配置字段包含在结果中。"""
-    with patch("agent_py_agent.agent.log_analysis.doctor.load_log_analysis_config") as mock_load:
-        mock_config = MagicMock()
-        mock_config.enabled = True
-        mock_config.capability_level = "full"
-        mock_config.config_warnings = []
-        mock_config.worker_enabled = True
-        mock_config.security_prompt_enabled = True
-        mock_config.auto_dispatch_enabled = True
-        mock_config.ml_enabled = False
-        mock_config.cluster_enabled = False
-        mock_config.response_execution_enabled = True
-        mock_config.response_mode = "direct"
-        mock_config.local_store_backend = "sqlite"
-        mock_load.return_value = mock_config
-
-        with patch("agent_py_agent.agent.log_analysis.doctor.resolve_log_analysis_data_dir") as mock_resolve:
-            mock_resolve.return_value = Path("/tmp/data")
-            with patch("agent_py_agent.agent.log_analysis.doctor.effective_feature_gates") as mock_gates:
-                mock_gates.return_value = {}
-
-                result = collect_doctor_status()
+    config = _doctor_config(ml_enabled=False, cluster_enabled=False)
+    result = _collect_with(DoctorPatchCase(config=config))
 
     effective = result["config"]["effective"]
     assert effective["worker_enabled"] is True

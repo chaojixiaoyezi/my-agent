@@ -11,7 +11,6 @@ from typing import Any
 
 @dataclass
 class TaskComplexityEstimate:
-    """任务复杂度预估结果。"""
 
     estimated_rounds: int
     estimated_input_tokens: int
@@ -25,16 +24,6 @@ def estimate_task_complexity(
     plan: list[str],
     allowed_tools: list[str],
 ) -> TaskComplexityEstimate:
-    """基于goal关键词、plan步骤数、工具数量估算任务复杂度。
-
-    Args:
-        goal: 用户任务描述
-        plan: 执行计划步骤列表
-        allowed_tools: 可用工具列表
-
-    Returns:
-        TaskComplexityEstimate: 包含预估轮数、token数和置信度
-    """
     # 基础分：plan 步骤数，最小为1
     base_rounds = max(1, len(plan))
 

@@ -1,29 +1,27 @@
 from __future__ import annotations
 
-"""LLM: shared slash-command handlers for chat mode.
-
-给人看的解释：
-TUI 和 fallback 两套聊天循环都支持同一批斜杠命令。这里统一处理公共命令，
-避免两个循环各自复制一份业务逻辑。
-"""
+from collections.abc import Callable
 
 from .slash_command_types import SlashCommandContext
 
 CHAT_HELP_TEXT = (
-    "可用命令：\n"
-    "/help                         显示帮助\n"
-    "/status                       查看后台任务状态\n"
-    "/expand [last|编号]           展开被自动折叠的助手回复\n"
-    "/exit                         退出\n"
-    "/memory [关键词]              搜索记忆\n"
-    "/remember <内容>              手动写入记忆\n"
-    "/btw                          显示运行时 prompt 注入\n"
-    "/btw <内容>                   增加运行时 prompt 注入\n"
-    "/btw-clear                    清空运行时 prompt 注入\n"
-    "/prompt-file <路径>           增加动态 prompt 文件\n"
-    "/subagents <数量> <目标>      生成 subagent 任务记录\n"
-    "/show-prompt <问题>           显示最终 prompt 并回答\n"
+    "Available commands:\n"
+    "/help                         Show help\n"
+    "/status                       Show background task status\n"
+    "/expand [last|number]          Expand a collapsed assistant response\n"
+    "/exit                         Exit chat\n"
+    "/memory [query]                Search memory\n"
+    "/remember <content>            Save a memory note\n"
+    "/btw                          Show runtime prompt injections\n"
+    "/btw <content>                 Add a runtime prompt injection\n"
+    "/btw-clear                    Clear runtime prompt injections\n"
+    "/prompt-file <path>            Add a prompt file\n"
+    "/subagents <count> <goal>      Spawn subagent task records\n"
+    "/show-prompt <question>        Show the final prompt and answer\n"
 )
+
+
+SlashHandler = Callable[[str, SlashCommandContext, bool], bool | None]
 
 
 def handle_common_slash_command(
@@ -32,52 +30,144 @@ def handle_common_slash_command(
     ctx: SlashCommandContext,
     include_fallback_help: bool = False,
 ) -> bool:
-    """Handle slash commands shared by prompt_toolkit and fallback chat loops."""
+    handlers: tuple[SlashHandler, ...] = (
+        _handle_help_command,
+        _handle_remember_command,
+        _handle_memory_command,
+        _handle_btw_command,
+        _handle_prompt_file_command,
+        _handle_subagents_command,
+    )
+    for handler in handlers:
+        result = handler(user, ctx, include_fallback_help)
+        if result is not None:
+            return result
+    return False
 
-    if user == "/help":
-        suffix = "Ctrl+C                        退出\n其他输入                       正常对话\n" if include_fallback_help else ""
-        ctx.print_line(CHAT_HELP_TEXT + suffix)
-        return True
-    if user.startswith("/remember "):
-        rec = ctx.agent.remember(user[len("/remember "):], kind="note")
-        ctx.print_line(f"已记忆: {rec.content}")
-        return True
-    if user.startswith("/memory"):
-        query = user[len("/memory"):].strip()
-        records = ctx.agent.recall(query, ctx.memory_limit) if query else ctx.agent.memory.all()[-ctx.memory_limit:]
-        if not records:
-            ctx.print_line("没有找到记忆。")
-        else:
-            for rec in records:
-                ctx.print_line(f"- [{rec.kind}] {rec.role}: {rec.content}")
-        return True
+
+def _handle_help_command(
+    user: str, ctx: SlashCommandContext, include_fallback_help: bool
+) -> bool | None:
+    if user != "/help":
+        return None
+    suffix = "Ctrl+C                        Exit\nOther input                   Send a normal message\n"
+    ctx.print_line(CHAT_HELP_TEXT + (suffix if include_fallback_help else ""))
+    return True
+
+
+def _handle_remember_command(
+    user: str, ctx: SlashCommandContext, include_fallback_help: bool
+) -> bool | None:
+    del include_fallback_help
+    if not user.startswith("/remember "):
+        return None
+    rec = ctx.agent.remember(user[len("/remember "):], kind="note")
+    ctx.print_line(f"Remembered: {rec.content}")
+    return True
+
+
+def _handle_memory_command(
+    user: str, ctx: SlashCommandContext, include_fallback_help: bool
+) -> bool | None:
+    del include_fallback_help
+    if not user.startswith("/memory"):
+        return None
+    query = user[len("/memory"):].strip()
+    records = ctx.agent.recall(query, ctx.memory_limit) if query else _recent_memory(ctx)
+    _print_memory_records(ctx, records)
+    return True
+
+
+def _recent_memory(ctx: SlashCommandContext):
+    return ctx.agent.memory.all()[-ctx.memory_limit:]
+
+
+def _print_memory_records(ctx: SlashCommandContext, records) -> None:
+    if not records:
+        ctx.print_line("No memory records found.")
+        return
+    for rec in records:
+        ctx.print_line(f"- [{rec.kind}] {rec.role}: {rec.content}")
+
+
+def _handle_btw_command(
+    user: str, ctx: SlashCommandContext, include_fallback_help: bool
+) -> bool | None:
+    del include_fallback_help
     if user == "/btw":
-        if not ctx.runtime_inject:
-            ctx.print_line("当前没有运行时 prompt 注入。")
-        else:
-            ctx.print_line("当前运行时 prompt 注入：")
-            for index, item in enumerate(ctx.runtime_inject, 1):
-                ctx.print_line(f"{index}. {item}")
+        _print_runtime_injections(ctx)
         return True
     if user.startswith("/btw "):
         ctx.runtime_inject.append(user[len("/btw "):])
-        ctx.print_line(f"已加入注入 prompt，当前 {len(ctx.runtime_inject)} 条。")
+        ctx.print_line(f"Added runtime prompt injection; count={len(ctx.runtime_inject)}.")
         return True
     if user == "/btw-clear":
         ctx.runtime_inject.clear()
-        ctx.print_line("已清空运行时 prompt 注入。")
+        ctx.print_line("Cleared runtime prompt injections.")
         return True
-    if user.startswith("/prompt-file "):
-        ctx.prompt_files.append(user[len("/prompt-file "):].strip())
-        ctx.print_line(f"已加入 prompt 文件，当前 {len(ctx.prompt_files)} 个。")
+    return None
+
+
+def _print_runtime_injections(ctx: SlashCommandContext) -> None:
+    if not ctx.runtime_inject:
+        ctx.print_line("No runtime prompt injections.")
+        return
+    ctx.print_line("Runtime prompt injections:")
+    for index, item in enumerate(ctx.runtime_inject, 1):
+        ctx.print_line(f"{index}. {item}")
+
+
+def _handle_prompt_file_command(
+    user: str, ctx: SlashCommandContext, include_fallback_help: bool
+) -> bool | None:
+    del include_fallback_help
+    if not user.startswith("/prompt-file "):
+        return None
+    ctx.prompt_files.append(user[len("/prompt-file "):].strip())
+    ctx.print_line(f"Added prompt file; count={len(ctx.prompt_files)}.")
+    return True
+
+
+def _handle_subagents_command(
+    user: str, ctx: SlashCommandContext, include_fallback_help: bool
+) -> bool | None:
+    del include_fallback_help
+    if not user.startswith("/subagents "):
+        return None
+    parts = user.split(maxsplit=2)
+    if len(parts) < 3 or not parts[1].isdigit():
+        ctx.print_line("Usage: /subagents <count> <goal>")
         return True
-    if user.startswith("/subagents "):
-        parts = user.split(maxsplit=2)
-        if len(parts) < 3 or not parts[1].isdigit():
-            ctx.print_line("用法: /subagents <数量> <目标>")
-            return True
-        tasks = ctx.agent.spawn_subagents(parts[2], int(parts[1]))
-        for task in tasks:
-            ctx.print_line(f"- {task.id}: {task.goal}")
-        return True
-    return False
+    for task in ctx.agent.spawn_subagents(parts[2], int(parts[1])):
+        ctx.print_line(f"- {task.id}: {task.goal}")
+    return True
+
+
+def is_exit_command(user: str) -> bool:
+    return user.lower() in {"/exit", "/logout", "/quit", "exit", "logout", "退出"}
+
+
+def parse_expand_target(raw: str) -> str | None:
+    if raw == "/expand":
+        return "last"
+    target = raw[len("/expand "):].strip()
+    if not target:
+        return "last"
+    if target.isdigit():
+        return target
+    return None
+
+
+def is_show_prompt_command(user: str) -> tuple[bool, str]:
+    if user.startswith("/show-prompt "):
+        return True, user[len("/show-prompt "):]
+    return False, user
+
+
+__all__ = [
+    "CHAT_HELP_TEXT",
+    "handle_common_slash_command",
+    "is_exit_command",
+    "is_show_prompt_command",
+    "parse_expand_target",
+]

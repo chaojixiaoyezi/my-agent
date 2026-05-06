@@ -1,8 +1,3 @@
-"""LLM: small chat-mode building blocks extracted from cli.chat.
-
-给人看的解释：
-`cli.chat` 仍是公共命令入口；这个包只承接可独立测试和复用的小职责。
-"""
 
 from __future__ import annotations
 
@@ -66,22 +61,18 @@ from ..common import CHAT_PROMPT, FALLBACK_CHAT_PROMPT, make_agent, resume_conte
 
 
 def _collapse_response_text(text: str):
-    """Backward compat wrapper."""
     return collapse_response_text(text)
 
 
 def _progress_bar(ratio: float, width: int = 10) -> str:
-    """Backward compat wrapper."""
     return progress_bar(ratio, width)
 
 
 def _startup_banner(agent_name: str, *, use_gateway: bool) -> str:
-    """Backward compat wrapper."""
     return startup_banner(agent_name, use_gateway=use_gateway)
 
 
 def _terminal_rule(char: str = "─", *, fallback: int = 119) -> str:
-    """Backward compat wrapper."""
     return terminal_rule(char, fallback=fallback)
 
 

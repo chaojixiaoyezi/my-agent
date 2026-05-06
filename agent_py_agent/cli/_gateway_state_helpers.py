@@ -1,4 +1,3 @@
-"""Gateway state management helpers."""
 
 from __future__ import annotations
 
@@ -26,7 +25,6 @@ from ._gateway_process_service import (
 
 
 def _build_run_state(context: dict, status: str = "running") -> dict:
-    """Build state dict for running/interrupted/failed statuses."""
     paths = context["paths"]
     agent = context["agent"]
     options = context["options"]
@@ -50,7 +48,6 @@ def _build_run_state(context: dict, status: str = "running") -> dict:
 
 
 def _build_run_payload(context: dict, extra: dict | None = None) -> dict:
-    """Build event payload dict for gateway_run events."""
     agent = context["agent"]
     options = context["options"]
     payload = {
@@ -75,7 +72,6 @@ def _build_run_payload(context: dict, extra: dict | None = None) -> dict:
 
 
 def _clear_gateway_stop_request(paths) -> None:
-    """Remove a stale stop request before a fresh gateway start."""
     try:
         paths.stop_request.unlink()
     except OSError:
@@ -83,7 +79,6 @@ def _clear_gateway_stop_request(paths) -> None:
 
 
 def _write_gateway_stop_request(paths, *, reason: str) -> None:
-    """Write a gateway stop request JSON file."""
     paths.stop_request.write_text(
         json.dumps({"requested_at": time.time(), "reason": reason}, ensure_ascii=False),
         encoding="utf-8",
@@ -91,7 +86,6 @@ def _write_gateway_stop_request(paths, *, reason: str) -> None:
 
 
 def _gateway_start_command(args) -> list[str]:
-    """Build the subprocess command used by `gateway start`."""
     command = [
         sys.executable,
         "-m",
@@ -107,7 +101,6 @@ def _gateway_start_command(args) -> list[str]:
 
 
 def _gateway_popen_options() -> tuple[int, bool]:
-    """Return platform-specific subprocess flags for detached gateway start."""
     if os.name == "nt":
         flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
         return flags, False
@@ -115,7 +108,6 @@ def _gateway_popen_options() -> tuple[int, bool]:
 
 
 def _spawn_gateway_process(paths, command: list[str], *, cwd: Path):
-    """Spawn the foreground gateway run command with stdout/stderr routed to log."""
     creationflags, start_new_session = _gateway_popen_options()
     with paths.log.open("ab") as log_file:
         return subprocess.Popen(
@@ -130,7 +122,6 @@ def _spawn_gateway_process(paths, command: list[str], *, cwd: Path):
 
 
 def _write_gateway_start_files(paths, *, pid: int, command: list[str]) -> None:
-    """Write pid and state files for a newly spawned gateway process."""
     paths.pid.parent.mkdir(parents=True, exist_ok=True)
     write_json_file(
         paths.pid,
@@ -145,7 +136,6 @@ def _write_gateway_start_files(paths, *, pid: int, command: list[str]) -> None:
 
 
 def _cmd_gateway_run_setup(args, agent, paths):
-    """Setup gateway run: recovery and initial logging. Returns requeued count."""
     for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         path.mkdir(parents=True, exist_ok=True)
     recovery = recover_gateway_processing_requests(
@@ -174,7 +164,6 @@ def _cmd_gateway_run_setup(args, agent, paths):
 
 
 def _cmd_gateway_run_threads(context: dict):
-    """Start heartbeat and request threads. Returns (heartbeat_thread, request_thread, http_server)."""
     args = context["args"]
     paths = context["paths"]
     agent = context["agent"]
@@ -203,7 +192,6 @@ def _cmd_gateway_run_threads(context: dict):
 
 
 def _cmd_gateway_run_cleanup(context: dict):
-    """Cleanup gateway run: stop threads, remove pid file, write heartbeat."""
     context["stop_event"].set()
     context["heartbeat_thread"].join(timeout=2)
     context["request_thread"].join(timeout=2)
@@ -230,7 +218,6 @@ def _cmd_gateway_run_cleanup(context: dict):
 
 
 def _run_gateway_watch(context: dict):
-    """Run the subagent watch loop for gateway foreground mode."""
     args = context["args"]
     options = context["options"]
     return context["agent"].watch_subagents(

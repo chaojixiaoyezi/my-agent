@@ -1,7 +1,3 @@
-"""Dispatch Watchdog 进程。
-
-监控 daemon 进程是否存活，并在必要时尝试重启。
-"""
 from __future__ import annotations
 
 import os
@@ -16,21 +12,8 @@ if TYPE_CHECKING:
 
 
 class DispatchWatchdog:
-    """Watchdog 进程，用于监控 daemon 是否存活。
-
-    工作逻辑：
-    - 每隔 watchdog_interval 秒检查一次 daemon 进程是否存活
-    - 检查方式：读 PID 文件 + 进程存活检测
-    - 如果进程挂了 → 记录日志 + 尝试重启（可选）
-    - 重启前等待 watchdog_restart_delay 秒，避免频繁重启
-    """
 
     def __init__(self, config: AgentConfig):
-        """初始化 Watchdog。
-
-        Args:
-            config: AgentConfig 实例
-        """
         self.config = config
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -46,7 +29,6 @@ class DispatchWatchdog:
         self.pid_file = Path(config.workspace_root) / config.gateway_workspace / "gateway.pid"
 
     def start(self) -> None:
-        """启动 watchdog 线程。"""
         if not self.enabled:
             return
 
@@ -58,14 +40,12 @@ class DispatchWatchdog:
         self._thread.start()
 
     def stop(self, timeout: float = 5.0) -> None:
-        """停止 watchdog 线程。"""
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
             self._thread = None
 
     def _run(self) -> None:
-        """Watchdog 主循环。"""
         while not self._stop_event.is_set():
             try:
                 self._check_daemon()
@@ -76,7 +56,6 @@ class DispatchWatchdog:
             self._stop_event.wait(self.interval)
 
     def _check_daemon(self) -> None:
-        """检查 daemon 进程是否存活。"""
         if not self.pid_file.exists():
             self._log("PID file not found, daemon may not be running")
             return
@@ -98,7 +77,6 @@ class DispatchWatchdog:
         self._handle_dead_daemon(pid)
 
     def _is_pid_alive(self, pid: int) -> bool:
-        """检查进程是否存活。"""
         if pid <= 0:
             return False
         if sys.platform == "win32":
@@ -111,7 +89,6 @@ class DispatchWatchdog:
             return False
 
     def _handle_dead_daemon(self, pid: int) -> None:
-        """处理 daemon 进程死亡的情况。"""
         if self._restart_count >= self.max_restarts:
             self._log(f"Max restarts ({self.max_restarts}) reached, not restarting")
             return
@@ -126,7 +103,6 @@ class DispatchWatchdog:
         self._restart_daemon()
 
     def _restart_daemon(self) -> None:
-        """尝试重启 daemon。"""
         try:
             import subprocess
 
@@ -150,18 +126,15 @@ class DispatchWatchdog:
             self._log(f"Failed to restart daemon: {e}")
 
     def _log(self, message: str) -> None:
-        """记录日志。"""
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         print(f"[Watchdog {timestamp}] {message}")
 
     @property
     def is_running(self) -> bool:
-        """检查 watchdog 是否正在运行。"""
         return self._thread is not None and self._thread.is_alive()
 
 
 def start_watchdog(config: AgentConfig) -> DispatchWatchdog | None:
-    """启动 Watchdog 并返回实例。"""
     watchdog = DispatchWatchdog(config)
     if watchdog.enabled:
         watchdog.start()
@@ -173,7 +146,6 @@ __all__ = ["DispatchWatchdog", "start_watchdog"]
 
 
 def _is_pid_alive_windows(pid: int) -> bool:
-    """Check whether a Windows process exists without sending a signal."""
     try:
         import ctypes
         from ctypes import wintypes

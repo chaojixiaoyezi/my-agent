@@ -196,7 +196,18 @@ def write_workflow_plan_preview(
 
 
 def _render_workflow_plan_preview_markdown(payload: dict[str, object]) -> str:
-    lines = [
+    lines = _workflow_plan_header_lines(payload)
+    lines.extend(_workflow_plan_worker_lines(payload.get("workers")))
+    lines.extend(["", "## Parent Acceptance Checklist"])
+    lines.extend(_workflow_plan_list_lines(payload.get("parent_acceptance_checklist")))
+    lines.extend(["", "## Issues"])
+    lines.extend(_workflow_plan_list_lines(payload.get("issues")))
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _workflow_plan_header_lines(payload: dict[str, object]) -> list[str]:
+    return [
         "# Subagent Workflow Plan Preview",
         "",
         f"- goal: {payload['goal']}",
@@ -210,42 +221,35 @@ def _render_workflow_plan_preview_markdown(payload: dict[str, object]) -> str:
         "",
         "## Workers",
     ]
-    workers = payload.get("workers")
-    if isinstance(workers, list) and workers:
-        for worker in workers:
-            if not isinstance(worker, dict):
-                continue
-            depends_on = ", ".join(str(item) for item in worker.get("depends_on", [])) or "none"
-            lines.extend(
-                [
-                    "",
-                    f"### {worker.get('phase_id', '')}",
-                    f"- role: {worker.get('role', '')}",
-                    f"- kind: {worker.get('kind', '')}",
-                    f"- depends_on: {depends_on}",
-                    f"- task: {worker.get('task', '')}",
-                    f"- acceptance_check_count: {worker.get('acceptance_check_count', 0)}",
-                ]
-            )
-    else:
-        lines.append("")
-        lines.append("No workers would be planned.")
 
-    lines.extend(["", "## Parent Acceptance Checklist"])
-    checklist = payload.get("parent_acceptance_checklist")
-    if isinstance(checklist, list) and checklist:
-        lines.extend(f"- {item}" for item in checklist)
-    else:
-        lines.append("- none")
 
-    lines.extend(["", "## Issues"])
-    issues = payload.get("issues")
-    if isinstance(issues, list) and issues:
-        lines.extend(f"- {item}" for item in issues)
-    else:
-        lines.append("- none")
-    lines.append("")
-    return "\n".join(lines)
+def _workflow_plan_worker_lines(workers: object) -> list[str]:
+    lines: list[str] = []
+    if not isinstance(workers, list) or not workers:
+        return ["", "No workers would be planned."]
+
+    for worker in workers:
+        if not isinstance(worker, dict):
+            continue
+        depends_on = ", ".join(str(item) for item in worker.get("depends_on", [])) or "none"
+        lines.extend(
+            [
+                "",
+                f"### {worker.get('phase_id', '')}",
+                f"- role: {worker.get('role', '')}",
+                f"- kind: {worker.get('kind', '')}",
+                f"- depends_on: {depends_on}",
+                f"- task: {worker.get('task', '')}",
+                f"- acceptance_check_count: {worker.get('acceptance_check_count', 0)}",
+            ]
+        )
+    return lines
+
+
+def _workflow_plan_list_lines(value: object) -> list[str]:
+    if isinstance(value, list) and value:
+        return [f"- {item}" for item in value]
+    return ["- none"]
 
 
 def _worker_task_summary(worker: Any, template_phase_tasks: dict[str, str]) -> str:

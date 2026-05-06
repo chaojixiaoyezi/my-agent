@@ -1,10 +1,3 @@
-"""LLM: gateway service installation/uninstallation for systemd (Linux) and launchd (macOS).
-
-Following Hermes's pattern:
-- systemd uses Restart=on-failure, RestartSec=30, RestartForceExitStatus=75
-- launchd uses KeepAlive with SuccessfulExit=false
-- User services live in ~/.config/systemd/user/ (non-root)
-"""
 
 from __future__ import annotations
 

@@ -40,6 +40,50 @@ class IngestResult:
     stored_event_ids: list[str]
 
 
+@dataclass(frozen=True)
+class _RecordIteratorRequest:
+    source_path: Path
+    parser: LogParser
+    batch_id: str
+    source_id: str
+    source_product: str | None
+    dead_letters: DeadLetterWriter
+
+
+@dataclass(frozen=True)
+class IngestPipelineOptions:
+    registry: ParserRegistry | None = None
+    store: Any | None = None
+    payload_max_chars: int = DEFAULT_PAYLOAD_MAX_CHARS
+    write_batch_size: int = 1000
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> IngestPipelineOptions:
+        return cls(
+            registry=kwargs.get("registry"),
+            store=kwargs.get("store"),
+            payload_max_chars=int(kwargs.get("payload_max_chars", DEFAULT_PAYLOAD_MAX_CHARS)),
+            write_batch_size=int(kwargs.get("write_batch_size", 1000)),
+        )
+
+
+@dataclass(frozen=True)
+class IngestFileOptions:
+    source_id: str | None = None
+    source_product: str | None = None
+    parser_id: str = "security_alert_v1"
+    file_format: str | None = None
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> IngestFileOptions:
+        return cls(
+            source_id=kwargs.get("source_id"),
+            source_product=kwargs.get("source_product"),
+            parser_id=str(kwargs.get("parser_id", "security_alert_v1")),
+            file_format=kwargs.get("file_format"),
+        )
+
+
 class JsonlEventSink:
     """Fallback event sink used until Worker C's LocalLogStore is available."""
 
@@ -62,17 +106,16 @@ class IngestPipeline:
         self,
         root: str | Path,
         *,
-        registry: ParserRegistry | None = None,
-        store: Any | None = None,
-        payload_max_chars: int = DEFAULT_PAYLOAD_MAX_CHARS,
-        write_batch_size: int = 1000,
+        options: IngestPipelineOptions | None = None,
+        **kwargs: Any,
     ):
+        ingest_options = options or IngestPipelineOptions.from_kwargs(**kwargs)
         self.root = Path(root)
-        self.payload_max_chars = payload_max_chars
-        self.write_batch_size = max(1, write_batch_size)
-        self.registry = registry or default_registry(payload_max_chars=payload_max_chars)
+        self.payload_max_chars = ingest_options.payload_max_chars
+        self.write_batch_size = max(1, ingest_options.write_batch_size)
+        self.registry = ingest_options.registry or default_registry(payload_max_chars=ingest_options.payload_max_chars)
         self.fallback_sink = JsonlEventSink(self.root)
-        self.store = store or self._default_store()
+        self.store = ingest_options.store or self._default_store()
         self.checkpoints = CheckpointStore(self.root)
         self.dedup = DedupStore(self.root / "dedup.sqlite3")
 
@@ -85,22 +128,14 @@ class IngestPipeline:
         self,
         path: str | Path,
         *,
-        source_id: str | None = None,
-        source_product: str | None = None,
-        parser_id: str = "security_alert_v1",
-        file_format: str | None = None,
+        options: IngestFileOptions | None = None,
+        **kwargs: Any,
     ) -> IngestResult:
         """Ingest a single file and return structured result."""
         from .pipeline_enrich import enrich_ingest_file
 
-        return enrich_ingest_file(
-            self,
-            path,
-            source_id=source_id,
-            source_product=source_product,
-            parser_id=parser_id,
-            file_format=file_format,
-        )
+        ingest_options = options or IngestFileOptions.from_kwargs(**kwargs)
+        return enrich_ingest_file(self, path, options=ingest_options)
 
     def _iter_parsed_records(
         self,
@@ -113,112 +148,40 @@ class IngestPipeline:
         source_id = kwargs["source_id"]
         source_product = kwargs.get("source_product")
         dead_letters = kwargs["dead_letters"]
+        request = _RecordIteratorRequest(source_path, parser, batch_id, source_id, source_product, dead_letters)
         if file_format in {"jsonl", "log"}:
-            yield from self._iter_jsonl_records(
-                source_path,
-                parser=parser,
-                batch_id=batch_id,
-                source_id=source_id,
-                source_product=source_product,
-                dead_letters=dead_letters,
-            )
+            yield from self._iter_jsonl_records(request)
             return
         if file_format == "csv":
-            yield from self._iter_csv_records(
-                source_path,
-                parser=parser,
-                batch_id=batch_id,
-                source_id=source_id,
-                source_product=source_product,
-                dead_letters=dead_letters,
-            )
+            yield from self._iter_csv_records(request)
             return
         raise ParserError(f"unsupported ingest file format: {file_format}")
 
-    def _iter_jsonl_records(
-        self,
-        source_path: Path,
-        *,
-        parser: LogParser,
-        batch_id: str,
-        source_id: str,
-        source_product: str | None,
-        dead_letters: DeadLetterWriter,
-    ):
-        with source_path.open("r", encoding="utf-8-sig", errors="replace") as handle:
-            for line_no, raw_line in enumerate(handle, start=1):
-                text = raw_line.rstrip("\n")
-                raw_ref = f"{batch_id}:line-{line_no}"
-                if not text.strip():
-                    yield None
-                    continue
-                try:
-                    yield parser.parse_json_line(
-                        text,
-                        raw_ref=raw_ref,
-                        source_id=source_id,
-                        source_product=source_product,
-                        line_no=line_no,
-                    )
-                except ParserError as exc:
-                    dead_letters.write(
-                        reason=str(exc),
-                        raw_ref=raw_ref,
-                        line_no=line_no,
-                        raw_line=text,
-                        parser_id=parser.parser_id,
-                    )
+    def _iter_jsonl_records(self, request: _RecordIteratorRequest):
+        from .pipeline_stages import RecordIterator
 
-    def _iter_csv_records(
-        self,
-        source_path: Path,
-        *,
-        parser: LogParser,
-        batch_id: str,
-        source_id: str,
-        source_product: str | None,
-        dead_letters: DeadLetterWriter,
-    ):
-        with source_path.open("r", encoding="utf-8-sig", newline="", errors="replace") as handle:
-            reader = csv.DictReader(handle)
-            if not reader.fieldnames:
-                dead_letters.write(
-                    reason="CSV file has no header",
-                    raw_ref=f"{batch_id}:line-1",
-                    line_no=1,
-                    raw_line="",
-                    parser_id=parser.parser_id,
-                )
-                return
-            for row in reader:
-                line_no = reader.line_num
-                raw_ref = f"{batch_id}:line-{line_no}"
-                try:
-                    yield parser.parse_csv_row(
-                        row,
-                        raw_ref=raw_ref,
-                        source_id=source_id,
-                        source_product=source_product,
-                        line_no=line_no,
-                    )
-                except ParserError as exc:
-                    dead_letters.write(
-                        reason=str(exc),
-                        raw_ref=raw_ref,
-                        line_no=line_no,
-                        raw_line=json.dumps(
-                            _jsonable_mapping(row), ensure_ascii=False, sort_keys=True
-                        ),
-                        raw_fields=_jsonable_mapping(row),
-                        parser_id=parser.parser_id,
-                    )
-                except csv.Error as exc:
-                    dead_letters.write(
-                        reason=f"invalid CSV: {exc}",
-                        raw_ref=raw_ref,
-                        line_no=line_no,
-                        parser_id=parser.parser_id,
-                    )
+        yield from RecordIterator(
+            request.source_path,
+            file_format="jsonl",
+            parser=request.parser,
+            batch_id=request.batch_id,
+            source_id=request.source_id,
+            source_product=request.source_product,
+            dead_letters=request.dead_letters,
+        ).iter_records()
+
+    def _iter_csv_records(self, request: _RecordIteratorRequest):
+        from .pipeline_stages import RecordIterator
+
+        yield from RecordIterator(
+            request.source_path,
+            file_format="csv",
+            parser=request.parser,
+            batch_id=request.batch_id,
+            source_id=request.source_id,
+            source_product=request.source_product,
+            dead_letters=request.dead_letters,
+        ).iter_records()
 
     def _write_events(self, events: list[dict[str, Any]]) -> dict[str, Any]:
         """Write events to store or fallback sink (delegated to pipeline_enrich)."""
@@ -241,15 +204,14 @@ def ingest_file(
 ) -> IngestResult:
     pipeline = IngestPipeline(
         kwargs.get("root") or default_log_analysis_root(),
-        store=kwargs.get("store"),
-        payload_max_chars=kwargs.get("payload_max_chars", DEFAULT_PAYLOAD_MAX_CHARS),
+        options=IngestPipelineOptions(
+            store=kwargs.get("store"),
+            payload_max_chars=kwargs.get("payload_max_chars", DEFAULT_PAYLOAD_MAX_CHARS),
+        ),
     )
     return pipeline.ingest_file(
         path,
-        source_id=kwargs.get("source_id"),
-        source_product=kwargs.get("source_product"),
-        parser_id=kwargs.get("parser_id", "security_alert_v1"),
-        file_format=kwargs.get("file_format"),
+        options=IngestFileOptions.from_kwargs(**kwargs),
     )
 
 

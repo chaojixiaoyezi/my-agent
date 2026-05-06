@@ -112,13 +112,14 @@ def _compact_text(value: Any, *, limit: int = 220) -> Any:
 def _compact_list(value: Any, *, limit: int = 8) -> list[Any]:
     output: list[Any] = []
     for item in _items(value)[:limit]:
-        if isinstance(item, Mapping):
-            output.append(_compact_mapping(item, limit=limit))
-        else:
-            compact = _compact_text(item)
-            if compact not in (None, ""):
-                output.append(compact)
+        _append_compact_item(output, item, limit=limit)
     return output
+
+
+def _append_compact_item(output: list[Any], item: Any, *, limit: int) -> None:
+    compact = _compact_mapping(item, limit=limit) if isinstance(item, Mapping) else _compact_text(item)
+    if compact not in (None, ""):
+        output.append(compact)
 
 
 def _compact_mapping(value: Mapping[str, Any], *, limit: int = 8) -> dict[str, Any]:
@@ -126,13 +127,16 @@ def _compact_mapping(value: Mapping[str, Any], *, limit: int = 8) -> dict[str, A
     for key, item in list(value.items())[:limit]:
         if item in (None, "", [], {}):
             continue
-        if isinstance(item, Mapping):
-            output[str(key)] = _compact_mapping(item, limit=limit)
-        elif isinstance(item, list):
-            output[str(key)] = _compact_list(item, limit=limit)
-        else:
-            output[str(key)] = _compact_text(item)
+        output[str(key)] = _compact_value(item, limit=limit)
     return output
+
+
+def _compact_value(value: Any, *, limit: int = 8) -> Any:
+    if isinstance(value, Mapping):
+        return _compact_mapping(value, limit=limit)
+    if isinstance(value, list):
+        return _compact_list(value, limit=limit)
+    return _compact_text(value)
 
 
 def _summarize_case_fields(case: Any) -> dict[str, Any]:
@@ -147,12 +151,7 @@ def _summarize_case_fields(case: Any) -> dict[str, Any]:
         value = _get(case, field_name)
         if value in (None, "", [], {}):
             continue
-        if isinstance(value, Mapping):
-            output[field_name] = _compact_mapping(value)
-        elif isinstance(value, list):
-            output[field_name] = _compact_list(value)
-        else:
-            output[field_name] = _compact_text(value)
+        output[field_name] = _compact_value(value)
 
     entity_refs = _get(case, "entity_refs") or _get(case, "entities")
     if entity_refs:
@@ -167,15 +166,23 @@ def _summarize_evidence(evidence: Any) -> list[dict[str, Any] | str]:
     output: list[dict[str, Any] | str] = []
     seen: set[str] = set()
     for item in _items(evidence)[:12]:
-        mapping = _to_mapping(item)
-        if mapping:
-            _append_compact_evidence(output, seen, mapping)
-        else:
-            refs = normalize_evidence_refs(item, limit=1)
-            if refs and refs[0] not in seen:
-                output.append(refs[0])
-                seen.add(refs[0])
+        _append_evidence_summary(output, seen, item)
     return output
+
+
+def _append_evidence_summary(output: list[dict[str, Any] | str], seen: set[str], item: Any) -> None:
+    mapping = _to_mapping(item)
+    if mapping:
+        _append_compact_evidence(output, seen, mapping)
+        return
+    _append_evidence_ref(output, seen, item)
+
+
+def _append_evidence_ref(output: list[dict[str, Any] | str], seen: set[str], item: Any) -> None:
+    refs = normalize_evidence_refs(item, limit=1)
+    if refs and refs[0] not in seen:
+        output.append(refs[0])
+        seen.add(refs[0])
 
 
 def _append_compact_evidence(output: list[dict[str, Any] | str], seen: set[str], mapping: Mapping[str, Any]) -> None:
@@ -215,12 +222,7 @@ def _summarize_route(route: Any) -> dict[str, Any]:
         value = _get(route, field_name)
         if value in (None, "", [], {}):
             continue
-        if isinstance(value, Mapping):
-            output[field_name] = _compact_mapping(value)
-        elif isinstance(value, list):
-            output[field_name] = _compact_list(value)
-        else:
-            output[field_name] = _compact_text(value)
+        output[field_name] = _compact_value(value)
     return output
 
 

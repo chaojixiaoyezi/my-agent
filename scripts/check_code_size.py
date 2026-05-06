@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from code_size_ast_checks import check_class_node, check_function_node
-from code_size_report import write_report
+from code_size_report import ReportRenderContext, write_report
 from code_size_rules import (
     EXCLUDE_NAMES,
     EXCLUDE_PARTS,
@@ -34,7 +34,13 @@ from code_size_rules import (
     TEST_SOFT_LIMIT,
     Finding,
 )
-from code_size_thresholds import is_near_soft, limit_finding, near_soft_finding
+from code_size_thresholds import (
+    FindingInput,
+    LimitFindingInput,
+    is_near_soft,
+    limit_finding,
+    near_soft_finding,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_PATH = ROOT / "CODE_SIZE_REPORT.md"
@@ -67,27 +73,33 @@ def _git_added_files() -> set[str]:
         return set()
     added: set[str] = set()
     for line in result.stdout.splitlines():
-        if line.startswith("?? "):
-            added.add(line[3:].rstrip("/"))
-        elif line[:2] in {"A ", "AM", "??"}:
-            added.add(line[3:])
+        item = _added_file_from_status_line(line)
+        if item:
+            added.add(item)
     return added
+
+
+def _added_file_from_status_line(line: str) -> str:
+    if line.startswith("?? "):
+        return line[3:].rstrip("/")
+    if line[:2] in {"A ", "AM", "??"}:
+        return line[3:]
+    return ""
 
 
 def _source_files() -> list[Path]:
     files: list[Path] = []
     for root_name in SOURCE_ROOTS:
-        root = ROOT / root_name
-        if root.is_file() and root.suffix == ".py":
-            if not _is_excluded(root):
-                files.append(root)
-        elif root.exists():
-            files.extend(
-                path
-                for path in root.rglob("*.py")
-                if not _is_excluded(path)
-            )
+        files.extend(_source_files_under(ROOT / root_name))
     return sorted(files)
+
+
+def _source_files_under(root: Path) -> list[Path]:
+    if root.is_file() and root.suffix == ".py":
+        return [] if _is_excluded(root) else [root]
+    if not root.exists():
+        return []
+    return [path for path in root.rglob("*.py") if not _is_excluded(path)]
 
 
 def _relative(path: Path) -> str:
@@ -115,16 +127,11 @@ def _check_file_size(path: Path) -> list[Finding]:
         if is_near_soft(line_count, soft):
             return [
                 near_soft_finding(
-                    "file",
-                    rel,
-                    path.name,
-                    line_count,
-                    soft,
-                    f"{rel} has {line_count} lines",
+                    FindingInput("file", rel, path.name, line_count, soft, f"{rel} has {line_count} lines")
                 )
             ]
         return []
-    return [limit_finding("file", rel, path.name, line_count, (soft, hard), f"{rel} has {line_count} lines")]
+    return [limit_finding(LimitFindingInput(FindingInput("file", rel, path.name, line_count, soft, f"{rel} has {line_count} lines"), hard))]
 
 
 def _check_ast(path: Path) -> list[Finding]:
@@ -239,43 +246,32 @@ def compute_strict_blockers(findings: list[Finding], baseline: dict[str, str] | 
     return blockers
 
 
-def main() -> int:
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Check code-size engineering guardrails.")
     parser.add_argument("--mode", choices=["warn", "strict"], default="warn")
     parser.add_argument("--baseline", type=str, default=None, help="Path to baseline JSON file")
     parser.add_argument("--write-baseline", type=str, default=None, help="Write current findings as baseline")
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    findings = collect_findings()
 
-    # Write baseline if requested
-    if args.write_baseline:
-        write_baseline(findings, Path(args.write_baseline))
-        print(f"baseline written to {args.write_baseline}")
+def _load_optional_baseline(path: str | None) -> tuple[dict[str, str] | None, bool]:
+    if not path:
+        return None, False
+    baseline_path = Path(path)
+    if baseline_path.exists():
+        return load_baseline(baseline_path), True
+    print(f"WARNING: baseline file not found: {path}", file=sys.stderr)
+    return None, False
 
-    # Load baseline if provided
-    baseline: dict[str, str] | None = None
-    baseline_loaded = False
-    if args.baseline:
-        bp = Path(args.baseline)
-        if bp.exists():
-            baseline = load_baseline(bp)
-            baseline_loaded = True
-        else:
-            print(f"WARNING: baseline file not found: {args.baseline}", file=sys.stderr)
 
-    blockers = compute_strict_blockers(findings, baseline)
-    blocked = args.mode == "strict" and bool(blockers)
+def _write_requested_baseline(findings: list[Finding], path: str | None) -> None:
+    if not path:
+        return
+    write_baseline(findings, Path(path))
+    print(f"baseline written to {path}")
 
-    write_report(
-        REPORT_PATH,
-        findings,
-        mode=args.mode,
-        blocked=blocked,
-        baseline_path=args.baseline,
-        baseline_loaded=baseline_loaded,
-    )
 
+def _print_summary(findings: list[Finding], blocked: bool) -> None:
     hard_count = len([f for f in findings if f.severity == "hard"])
     high_risk_count = len([f for f in findings if f.severity == "high-risk"])
     soft_count = len([f for f in findings if f.severity == "soft"])
@@ -285,6 +281,17 @@ def main() -> int:
         f"soft={soft_count} report={REPORT_PATH.relative_to(ROOT)} blocked={blocked}"
     )
 
+
+def main() -> int:
+    args = _parse_args()
+    findings = collect_findings()
+    _write_requested_baseline(findings, args.write_baseline)
+    baseline, baseline_loaded = _load_optional_baseline(args.baseline)
+    blockers = compute_strict_blockers(findings, baseline)
+    blocked = args.mode == "strict" and bool(blockers)
+    context = ReportRenderContext(args.mode, blocked, args.baseline, baseline_loaded)
+    write_report(REPORT_PATH, findings, context)
+    _print_summary(findings, blocked)
     if blocked:
         for item in blockers:
             print(f"BLOCKED: {item.severity}: {item.kind}: {item.path}:{item.name} {item.message}")

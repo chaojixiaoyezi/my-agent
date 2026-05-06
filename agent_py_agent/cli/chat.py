@@ -1,10 +1,3 @@
-"""LLM: implements interactive chat mode with optional gateway client execution and background job queue.
-
-给人看的解释：
-chat 模式要一边接收用户输入，一边让模型在后台跑。
-这个文件只处理交互体验、队列和内置斜杠命令，真正模型调用仍然走 SimpleAgent 或 gateway。
-现在委托给 chat_parts 包中的专门模块。
-"""
 
 from __future__ import annotations
 
@@ -67,7 +60,6 @@ _CHAT_RESPONSE_STYLE_INJECT = (
 
 
 def _setup_session(args, session_manager: SessionManager):
-    """解析 session_id 参数，创建或恢复会话并返回 session_id。"""
     if hasattr(args, "session_id") and args.session_id:
         session = session_manager.load_session(args.session_id)
         if session is None:
@@ -83,7 +75,6 @@ def _setup_session(args, session_manager: SessionManager):
 
 
 def _init_chat_state():
-    """初始化聊天循环的共享状态，返回 (state_dict, build_fn)。"""
     conversation_history: list[tuple[str, str]] = []
     history_lock = threading.Lock()
     state = dict(
@@ -106,7 +97,6 @@ def _init_chat_state():
 
 
 def _has_prompt_toolkit() -> bool:
-    """检测 prompt_toolkit 是否可用且终端支持。"""
     try:
         from prompt_toolkit import PromptSession
         return PromptSession is not None and sys.stdin.isatty() and sys.stdout.isatty()
@@ -115,7 +105,6 @@ def _has_prompt_toolkit() -> bool:
 
 
 def cmd_chat(args) -> int:
-    """启动交互循环。"""
     agent = make_agent(args)
     use_gateway = bool(args.gateway)
     paths = gateway_paths(agent)

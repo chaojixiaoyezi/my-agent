@@ -1,7 +1,3 @@
-"""Dispatch 循环闭环保证机制。
-
-循环调用 dispatch_subagents，直到没有可调度的任务或达到最大轮数上限。
-"""
 
 from __future__ import annotations
 
@@ -16,7 +12,6 @@ if TYPE_CHECKING:
 
 @dataclass
 class DispatchLoopParams:
-    """Bundle of all dispatch_loop parameters."""
 
     max_consecutive_rounds: int = 20
     apply: bool = False
@@ -36,7 +31,6 @@ class DispatchLoopParams:
 
 @dataclass
 class DispatchLoopReport:
-    """Dispatch 循环报告。"""
 
     rounds_count: int = 0
     total_records: int = 0
@@ -45,8 +39,26 @@ class DispatchLoopReport:
     rounds: list[dict] = field(default_factory=list)
 
 
+_DISPATCH_LOOP_PARAM_KEYS = [
+    "max_consecutive_rounds", "apply", "execute_runners", "planner",
+    "workflow_mode", "max_runners", "limit", "reviewer", "note",
+    "runner_instruction", "max_cards", "probe", "take_over_by", "locked_files",
+]
+
+
+def _coerce_dispatch_loop_params(params, kwargs) -> DispatchLoopParams:
+    if params is None:
+        params = DispatchLoopParams()
+    elif not isinstance(params, DispatchLoopParams):
+        raise TypeError("dispatch_loop() requires params: DispatchLoopParams keyword argument")
+
+    for key in _DISPATCH_LOOP_PARAM_KEYS:
+        if key in kwargs:
+            setattr(params, key, kwargs[key])
+    return params
+
+
 def _run_single_dispatch(agent, router, capability_config, params):
-    """执行单轮 dispatch 并返回报告。"""
     return agent.dispatch_subagents(
         router,
         capability_config,
@@ -74,20 +86,7 @@ def dispatch_loop(
     params: DispatchLoopParams = None,
     **kwargs,
 ) -> DispatchLoopReport:
-    """循环执行 dispatch 直到没有可调度任务或达到上限。"""
-    if params is None:
-        params = DispatchLoopParams()
-    elif not isinstance(params, DispatchLoopParams):
-        raise TypeError("dispatch_loop() requires params: DispatchLoopParams keyword argument")
-
-    for key in [
-        "max_consecutive_rounds", "apply", "execute_runners", "planner",
-        "workflow_mode", "max_runners", "limit", "reviewer", "note",
-        "runner_instruction", "max_cards", "probe", "take_over_by", "locked_files",
-    ]:
-        if key in kwargs:
-            setattr(params, key, kwargs[key])
-
+    params = _coerce_dispatch_loop_params(params, kwargs)
     report = DispatchLoopReport()
     max_rounds = params.max_consecutive_rounds
 
@@ -108,8 +107,11 @@ def dispatch_loop(
             report.stopped_by_limit = True
             break
 
-    # 获取最终待处理数
-    runner_max_attempts = 2  # 默认值
+    report.final_pending_count = _final_pending_runner_count(agent)
+    return report
+
+
+def _final_pending_runner_count(agent) -> int:
     try:
         from .runner_dispatch import _dispatch_runner_candidates, _runner_max_attempts
 
@@ -119,11 +121,9 @@ def dispatch_loop(
             max_runners=999,
             runner_max_attempts=runner_max_attempts,
         )
-        report.final_pending_count = len(candidates)
+        return len(candidates)
     except Exception:
-        report.final_pending_count = 0
-
-    return report
+        return 0
 
 
 __all__ = ["DispatchLoopReport", "DispatchLoopParams", "dispatch_loop"]

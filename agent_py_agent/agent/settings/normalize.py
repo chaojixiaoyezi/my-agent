@@ -1,10 +1,3 @@
-"""LLM: config validation and coercion helpers – normalize raw YAML data into safe values.
-
-给人看的解释：
-这个文件负责"校验和修正"用户手写的 YAML 配置。
-用户容易写错类型或超范围，这里的函数逐项检查，不合法的回退到安全默认值并给出警告。
-主配置数据类 AgentConfig 和加载函数仍在 config.py。
-"""
 
 from __future__ import annotations
 
@@ -57,12 +50,6 @@ def _coerce_int_config(
 
 
 def normalize_agent_config(data: dict[str, object]) -> tuple[dict[str, object], list[str]]:
-    """LLM: validate and coerce all non-memory AgentConfig fields with safe fallbacks.
-
-    Human version:
-    用户手写 YAML 容易出错，这里逐项检查并回退到安全默认值。
-    返回 (normalized_data, warnings)。
-    """
     return AgentConfigNormalizer.normalize(data)
 
 

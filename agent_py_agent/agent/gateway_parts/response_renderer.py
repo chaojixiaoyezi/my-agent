@@ -14,11 +14,6 @@ from .paths import GatewayPaths
 
 
 def print_gateway_response(payload: dict, *, json_mode: bool = False, show_prompt: bool = False) -> int:
-    """LLM contract: render a gateway response for CLI users.
-
-    Human version:
-    默认打印人看的回复；`--json` 打印完整结构，方便脚本或外部工具继续处理。
-    """
     if json_mode:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return 0 if payload.get("ok") else 2
@@ -47,5 +42,4 @@ def print_gateway_response(payload: dict, *, json_mode: bool = False, show_promp
 
 
 def read_gateway_response(paths: GatewayPaths, request_id: str) -> dict[str, Any]:
-    """Read a gateway response file."""
     return read_json_file(gateway_response_path(paths, request_id))

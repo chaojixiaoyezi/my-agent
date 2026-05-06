@@ -62,3 +62,6 @@ agent_py_agent/agent/log_analysis/
 ## 当前第一版索引 / 待补齐
 
 本页先描述主结构和学习路径。后续应补充每条 CLI 命令的输入输出样例、工具返回 JSON 样例，以及 Live Lab replay 的产物路径说明。
+## 2026-05-06 structure update
+- Ingestion, work-order dispatch, parser, and security modules now use small helper functions and parameter bundles for long internal call paths.
+- Public log-analysis package layout and external command behavior remain stable; the cleanup is an internal maintainability pass.

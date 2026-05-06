@@ -1,4 +1,3 @@
-"""Review commands: acceptance review, patch review/apply."""
 
 from __future__ import annotations
 
@@ -8,7 +7,6 @@ from .common import make_agent
 
 
 def cmd_subagents_acceptance(args) -> int:
-    """验收等待验收的 subagent，默认 dry-run。"""
 
     agent = make_agent(args)
     report = agent.subagents.write_acceptance_review_report(
@@ -40,7 +38,6 @@ def cmd_subagents_acceptance(args) -> int:
 
 
 def _print_patch_report(report, mode: str, workspace, include_audit: bool = False) -> None:
-    """Print patch apply/review report in consistent format."""
     print(f"SUBAGENT PATCH {mode.upper()}")
     print(f"mode={mode} total_records={report.summary.get('total', 0)}")
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
@@ -62,7 +59,6 @@ def _print_patch_report(report, mode: str, workspace, include_audit: bool = Fals
 
 
 def cmd_subagents_patches(args) -> int:
-    """审核或 apply runner 输出里的 patch 记录。"""
 
     agent = make_agent(args)
     workspace = agent.subagents.workspace
@@ -102,7 +98,6 @@ def cmd_subagents_patches(args) -> int:
 
 
 def _print_review_report(report, mode: str, workspace, include_audit: bool) -> None:
-    """Print patch review report in consistent format."""
     print("SUBAGENT PATCH REVIEW")
     print(f"mode={mode} total_records={report.summary.get('total', 0)}")
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))

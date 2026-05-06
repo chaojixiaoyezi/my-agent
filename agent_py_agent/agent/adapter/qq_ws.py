@@ -114,24 +114,29 @@ class QQWebSocketClient:
         self._sock.settimeout(timeout)
         try:
             data = self._sock.recv(8192)
-            if not data:
-                return None
-            result = WebSocketFrame.parse_frame(data)
-            if result is None:
-                return None
-            opcode, payload = result
-            if opcode == WebSocketFrame.OPCODE_CLOSE:
-                self._connected = False
-                return None
-            if opcode == WebSocketFrame.OPCODE_TEXT:
-                return payload.decode("utf-8")
-            if opcode == WebSocketFrame.OPCODE_PING:
-                if self._sock:
-                    self._sock.sendall(bytes([0x8A, 0x00]))
-                return None
-            return None
+            return self._handle_received_frame(data)
         except Exception:
             return None
+
+    def _handle_received_frame(self, data: bytes) -> str | None:
+        if not data:
+            return None
+        result = WebSocketFrame.parse_frame(data)
+        if result is None:
+            return None
+        opcode, payload = result
+        if opcode == WebSocketFrame.OPCODE_CLOSE:
+            self._connected = False
+            return None
+        if opcode == WebSocketFrame.OPCODE_TEXT:
+            return payload.decode("utf-8")
+        if opcode == WebSocketFrame.OPCODE_PING:
+            self._send_pong()
+        return None
+
+    def _send_pong(self) -> None:
+        if self._sock:
+            self._sock.sendall(bytes([0x8A, 0x00]))
 
     def close(self) -> None:
         """Gracefully close the connection."""

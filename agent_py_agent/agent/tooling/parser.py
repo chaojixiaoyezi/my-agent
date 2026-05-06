@@ -77,14 +77,6 @@ _MAX_XMLISH_RAW_CHARS = 1000
 
 
 def parse_xmlish_tool_calls(text: str) -> list[tuple[int, dict[str, Any]]]:
-    """Parse Qwen/OpenClaw-style XML-ish tool calls.
-
-    Some runtimes emit blocks like:
-    <tool_call><function=read><parameter=file_path>README.md</parameter>...
-
-    They are not real XML, so we parse this small dialect explicitly. Broken
-    blocks become __parse_error__ payloads instead of crashing the agent loop.
-    """
 
     calls: list[tuple[int, dict[str, Any]]] = []
     cursor = 0
@@ -134,59 +126,65 @@ def _handle_bare_function_opens_without_close(
     calls: list[tuple[int, dict[str, Any]]],
     closed_positions: set[int],
 ) -> None:
-    """Handle bare function opens that lack a closing tag.
-
-    新手说明:
-    有些模型输出不带闭合标签的格式。这个函数在两个 open 之间截取
-    body 并解析。最后一个没有闭合标签的块会标记为 parse error。
-    """
 
     opens = list(_XMLISH_BARE_FUNCTION_OPEN_RE.finditer(text))
     for i, match in enumerate(opens):
         if match.start() in closed_positions:
             continue
-        name = match.group("name1") or match.group("name2")
-        body_start = match.end()
-        next_open = opens[i + 1].start() if i + 1 < len(opens) else len(text)
-        body = text[body_start:next_open]
-        if not body.strip():
-            calls.append(
-                (
-                    match.start(),
-                    {
-                        "tool": "__parse_error__",
-                        "error": "XML-ish bare function call has empty body",
-                        "raw": _truncate_raw(text[match.start():next_open].strip()),
-                    },
-                )
-            )
-            continue
-        payload: dict[str, Any] = {"tool": _normalize_xmlish_tool_name(name)}
-        for param_match in _XMLISH_PARAMETER_EQ_RE.finditer(body):
-            pname = _normalize_xmlish_parameter_name(param_match.group("name"))
-            payload[pname] = _decode_xmlish_parameter_value(param_match.group("value"))
-        for param_match in _XMLISH_PARAMETER_NAME_RE.finditer(body):
-            pname = _normalize_xmlish_parameter_name(param_match.group("name"))
-            payload[pname] = _decode_xmlish_parameter_value(param_match.group("value"))
-        calls.append((match.start(), payload))
+        calls.append(_bare_function_payload(text, opens, i, match))
 
-    # The last bare function open without a closing tag is a parse error
-    if opens:
-        last = opens[-1]
-        if last.start() not in closed_positions:
-            after_last = text[last.end():]
-            if "</function" not in after_last.lower():
-                calls[:] = [(pos, pl) for pos, pl in calls if pos != last.start()]
-                calls.append(
-                    (
-                        last.start(),
-                        {
-                            "tool": "__parse_error__",
-                            "error": "XML-ish bare function call is missing a closing tag",
-                            "raw": _truncate_raw(text[last.start():].strip()),
-                        },
-                    )
-                )
+    _replace_unclosed_last_bare_function(text, calls, opens, closed_positions)
+
+
+def _bare_function_payload(text: str, opens: list[re.Match[str]], index: int, match: re.Match[str]) -> tuple[int, dict[str, Any]]:
+    name = match.group("name1") or match.group("name2")
+    next_open = opens[index + 1].start() if index + 1 < len(opens) else len(text)
+    body = text[match.end():next_open]
+    if not body.strip():
+        return (
+            match.start(),
+            {
+                "tool": "__parse_error__",
+                "error": "XML-ish bare function call has empty body",
+                "raw": _truncate_raw(text[match.start():next_open].strip()),
+            },
+        )
+    return match.start(), _xmlish_payload_from_body(name, body)
+
+
+def _xmlish_payload_from_body(name: str, body: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {"tool": _normalize_xmlish_tool_name(name)}
+    for param_match in _XMLISH_PARAMETER_EQ_RE.finditer(body):
+        pname = _normalize_xmlish_parameter_name(param_match.group("name"))
+        payload[pname] = _decode_xmlish_parameter_value(param_match.group("value"))
+    for param_match in _XMLISH_PARAMETER_NAME_RE.finditer(body):
+        pname = _normalize_xmlish_parameter_name(param_match.group("name"))
+        payload[pname] = _decode_xmlish_parameter_value(param_match.group("value"))
+    return payload
+
+
+def _replace_unclosed_last_bare_function(
+    text: str,
+    calls: list[tuple[int, dict[str, Any]]],
+    opens: list[re.Match[str]],
+    closed_positions: set[int],
+) -> None:
+    if not opens:
+        return
+    last = opens[-1]
+    if last.start() in closed_positions or "</function" in text[last.end():].lower():
+        return
+    calls[:] = [(pos, pl) for pos, pl in calls if pos != last.start()]
+    calls.append(
+        (
+            last.start(),
+            {
+                "tool": "__parse_error__",
+                "error": "XML-ish bare function call is missing a closing tag",
+                "raw": _truncate_raw(text[last.start():].strip()),
+            },
+        )
+    )
 
 
 def _parse_xmlish_tool_call_body(body: str, raw: str) -> dict[str, Any]:

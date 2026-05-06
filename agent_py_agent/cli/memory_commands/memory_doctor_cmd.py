@@ -1,9 +1,3 @@
-"""LLM: implements memory doctor CLI diagnostics.
-
-给人看的解释：
-doctor 命令检查有效的 memory 配置、路由索引健康状态和归档目录。
-只读文件，不调用模型，也不写业务数据。
-"""
 
 from __future__ import annotations
 
@@ -23,14 +17,6 @@ RECENT_ARCHIVE_FILE_LIMIT = 5
 
 
 def cmd_memory_doctor(args) -> int:
-    """Inspect effective memory config, route index health, and archive directories.
-
-    参数说明:
-    `args` 是 argparse 解析后的对象，包含 `index`、`json` 和通用 agent 参数。
-
-    返回说明:
-    返回进程退出码；报告已打印时返回 0。
-    """
     # Access make_agent through the module to allow test patching
     import sys
     memory_mod = sys.modules.get("agent_py_agent.cli.memory_commands")
@@ -56,7 +42,6 @@ def cmd_memory_doctor(args) -> int:
 
 
 def _resolve_index_path(root: Path, raw_index: str | None) -> Path:
-    """Resolve CLI index paths against the agent workspace root."""
     candidate = Path(raw_index).expanduser() if raw_index else DEFAULT_ROUTE_INDEX
     if candidate.is_absolute():
         return candidate.resolve()
@@ -64,7 +49,6 @@ def _resolve_index_path(root: Path, raw_index: str | None) -> Path:
 
 
 def _normalize_warning_item(item: Any) -> dict[str, Any]:
-    """Normalize a single config warning item to a dictionary."""
     if isinstance(item, dict):
         return dict(item)
     elif hasattr(item, "to_dict"):
@@ -76,13 +60,11 @@ def _normalize_warning_item(item: Any) -> dict[str, Any]:
 
 
 def _config_warnings(config: object) -> list[dict[str, Any]]:
-    """Return normalized memory config fallback warnings as dictionaries."""
     warnings = getattr(config, "memory_config_warnings", []) or []
     return [_normalize_warning_item(item) for item in warnings]
 
 
 def _memory_config_payload(config: object) -> dict[str, Any]:
-    """Serialize the effective normalized memory config fields."""
     fields = [
         "memory_archive_level",
         "memory_hook_enabled",
@@ -97,7 +79,6 @@ def _memory_config_payload(config: object) -> dict[str, Any]:
 
 
 def _build_routing_doctor(root: Path, index_path: Path) -> dict[str, Any]:
-    """Load and validate the route index for doctor output without raising to callers."""
     from ...agent.memory_routing import load_routes, validate_routes
 
     payload: dict[str, Any] = {
@@ -122,7 +103,6 @@ def _build_routing_doctor(root: Path, index_path: Path) -> dict[str, Any]:
 
 
 def _build_archive_doctor(root: Path, config: object) -> dict[str, Any]:
-    """Summarize memory hook and raw archive directories using public archive path helpers."""
     hook_today_path = snapshot_path_for(root)
     raw_today_path = raw_event_path_for(root)
     snapshot_dir = compression_snapshot_dir(root)
@@ -141,7 +121,6 @@ def _build_archive_doctor(root: Path, config: object) -> dict[str, Any]:
 
 
 def _archive_dir_payload(directory: Path, today_path: Path) -> dict[str, Any]:
-    """Produce stable file-count and recent-file metadata for one archive directory."""
     files = sorted(
         [path for path in directory.glob("*.jsonl") if path.is_file()] if directory.exists() else [],
         key=lambda path: (path.stat().st_mtime, path.name),
@@ -157,7 +136,6 @@ def _archive_dir_payload(directory: Path, today_path: Path) -> dict[str, Any]:
 
 
 def _archive_file_payload(path: Path) -> dict[str, Any]:
-    """Serialize one archive file's filesystem metadata for doctor JSON."""
     stat = path.stat()
     return {
         "name": path.name,
@@ -168,7 +146,6 @@ def _archive_file_payload(path: Path) -> dict[str, Any]:
 
 
 def _snapshot_dir_payload(directory: Path) -> dict[str, Any]:
-    """Inspect authoritative compression snapshot JSON files for doctor output."""
     files = sorted(
         [path for path in directory.glob("*.json") if path.is_file()] if directory.exists() else [],
         key=lambda path: (path.stat().st_mtime, path.name),
@@ -193,7 +170,6 @@ def _snapshot_dir_payload(directory: Path) -> dict[str, Any]:
 
 
 def _archive_consistency_warnings(hook_dir: Path, snapshot_dir: Path) -> list[str]:
-    """Report shallow consistency problems between hook and authoritative snapshot layers."""
     warnings: list[str] = []
     hook_exists = hook_dir.exists() and any(hook_dir.glob("*.jsonl"))
     snapshot_exists = snapshot_dir.exists() and any(snapshot_dir.glob("*.json"))
@@ -205,7 +181,6 @@ def _archive_consistency_warnings(hook_dir: Path, snapshot_dir: Path) -> list[st
 
 
 def _index_payload(index_path: Path) -> dict[str, Any]:
-    """Serialize route index location and existence state."""
     return {
         "path": str(index_path),
         "exists": index_path.exists(),
@@ -214,7 +189,6 @@ def _index_payload(index_path: Path) -> dict[str, Any]:
 
 
 def _route_payload(route) -> dict[str, Any]:
-    """Serialize a route without leaking dataclass implementation details."""
     from ...agent.memory_routing import MemoryRoute
     return {
         "route_id": route.route_id,
@@ -234,7 +208,6 @@ def _route_payload(route) -> dict[str, Any]:
 
 
 def _print_memory_doctor_report(payload: dict[str, Any], *, json_output: bool) -> None:
-    """Render the memory-doctor payload as either stable JSON or compact text."""
     if json_output:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return

@@ -26,6 +26,16 @@ class TraceCaseParams:
     max_queries: int = MAX_TRACE_CASE_QUERIES
 
 
+@dataclass(frozen=True)
+class _TraceFieldQueryInput:
+    local_store: LocalLogStore
+    queries: list[dict[str, Any]]
+    field: str
+    values: list[str]
+    params: TraceCaseParams
+    query_one: TraceQuery
+
+
 def trace_case_params(kwargs: dict[str, Any]) -> TraceCaseParams:
     return TraceCaseParams(
         store=kwargs.get("store"),
@@ -46,24 +56,24 @@ def trace_case_queries(
 ) -> list[dict[str, Any]]:
     queries: list[dict[str, Any]] = []
     for field in ("attacker_ip", "victim_ip", "domain", "uri", "alert_type"):
-        append_trace_field_queries(local_store, queries, field, seeds.get(field, []), params, query_one)
+        append_trace_field_queries(_TraceFieldQueryInput(local_store, queries, field, seeds.get(field, []), params, query_one))
         if len(queries) >= params.max_queries:
             break
     return queries
 
 
-def append_trace_field_queries(
-    local_store: LocalLogStore,
-    queries: list[dict[str, Any]],
-    field: str,
-    values: list[str],
-    params: TraceCaseParams,
-    query_one: TraceQuery,
-) -> None:
-    for value in values:
-        if len(queries) >= params.max_queries:
+def append_trace_field_queries(data: _TraceFieldQueryInput | LocalLogStore, *args: Any) -> None:
+    if not isinstance(data, _TraceFieldQueryInput):
+        data = _trace_field_query_input(data, args)
+    for value in data.values:
+        if len(data.queries) >= data.params.max_queries:
             break
-        queries.append(query_one(local_store, field, value, params))
+        data.queries.append(data.query_one(data.local_store, data.field, value, data.params))
+
+
+def _trace_field_query_input(local_store: LocalLogStore, args: tuple[Any, ...]) -> _TraceFieldQueryInput:
+    queries, field, values, params, query_one = args
+    return _TraceFieldQueryInput(local_store, queries, field, values, params, query_one)
 
 
 def trace_case_response(case_id: str, queries: list[dict[str, Any]], max_queries: int) -> dict[str, Any]:

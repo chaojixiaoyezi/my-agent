@@ -36,8 +36,15 @@ class ExecuteRegistryCallParams:
     write_boundary: dict[str, object] | None = None
 
 
+@dataclass(frozen=True)
+class _ToolAuthContext:
+    allowed: set[str] | None
+    granted_capabilities: list[str] | None
+    expose_security_tools: bool
+    security_tool_names: set[str]
+
+
 def parse_registry_tool_calls(text: str) -> list[dict[str, Any]]:
-    """从模型输出里提取工具调用块。"""
 
     calls: list[tuple[int, dict[str, Any]]] = []
     cursor = 0
@@ -60,12 +67,11 @@ def parse_registry_tool_calls(text: str) -> list[dict[str, Any]]:
 
 
 def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResult:
-    """执行单个工具调用。"""
 
-    normalized_payload, payload_error = _normalize_tool_payload(call.payload)
-    if payload_error:
-        return ToolExecutionResult("unknown", False, payload_error)
-    assert normalized_payload is not None
+    prepared = _prepare_tool_payload(call.payload)
+    if isinstance(prepared, ToolExecutionResult):
+        return prepared
+    normalized_payload = prepared
 
     if normalized_payload.get("tool") == "__parse_error__":
         return ToolExecutionResult(
@@ -79,14 +85,7 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
     except ValueError as exc:
         return ToolExecutionResult("unknown", False, str(exc))
 
-    allowed = allowed_tool_set(call.allowed_tools)
-    auth_error = _tool_auth_error(
-        tool_name,
-        allowed=allowed,
-        granted_capabilities=call.granted_capabilities,
-        expose_security_tools=call.expose_security_tools,
-        security_tool_names=call.security_tool_names,
-    )
+    auth_error = _registry_auth_error(tool_name, call)
     if auth_error:
         return ToolExecutionResult(tool_name, False, auth_error)
 
@@ -110,8 +109,27 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
         return ToolExecutionResult(tool_name, False, _format_tool_exception(exc))
 
 
+def _registry_auth_error(tool_name: str, call: ExecuteRegistryCallParams) -> str:
+    return _tool_auth_error(
+        tool_name,
+        _ToolAuthContext(
+            allowed=allowed_tool_set(call.allowed_tools),
+            granted_capabilities=call.granted_capabilities,
+            expose_security_tools=call.expose_security_tools,
+            security_tool_names=call.security_tool_names,
+        ),
+    )
+
+
+def _prepare_tool_payload(payload: object) -> dict[str, Any] | ToolExecutionResult:
+    normalized_payload, payload_error = _normalize_tool_payload(payload)
+    if payload_error:
+        return ToolExecutionResult("unknown", False, payload_error)
+    assert normalized_payload is not None
+    return normalized_payload
+
+
 def allowed_tool_set(allowed_tools: list[str] | None) -> set[str] | None:
-    """把工具 allowlist 规范成集合；None 表示不限制。"""
 
     if allowed_tools is None:
         return None
@@ -165,21 +183,17 @@ def _parse_tool_block_payload(raw: str) -> dict[str, Any]:
 
 def _tool_auth_error(
     tool_name: str,
-    *,
-    allowed: set[str] | None,
-    granted_capabilities: list[str] | None,
-    expose_security_tools: bool,
-    security_tool_names: set[str],
+    context: _ToolAuthContext,
 ) -> str:
-    if allowed is not None and tool_name not in allowed:
+    if context.allowed is not None and tool_name not in context.allowed:
         return f"工具未授权: {tool_name}"
-    if tool_name not in security_tool_names:
+    if tool_name not in context.security_tool_names:
         return ""
     if _security_tool_call_authorized(
         tool_name,
-        expose_security_tools,
-        allowed=allowed,
-        granted_capabilities=granted_capabilities,
+        context.expose_security_tools,
+        allowed=context.allowed,
+        granted_capabilities=context.granted_capabilities,
     ):
         return ""
     return f"tool not authorized: {tool_name}"

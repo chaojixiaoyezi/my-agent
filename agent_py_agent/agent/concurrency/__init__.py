@@ -1,7 +1,3 @@
-"""并发控制模块。
-
-提供乐观锁、任务级读写锁和并发异常处理。
-"""
 from __future__ import annotations
 
 from .exceptions import ConcurrencyConflictError

@@ -33,7 +33,6 @@ from .gateway_delayed_response_case import run_scenario_gateway_delayed_response
 
 
 def _restart_case_write_processing_payload(gpaths, request_id):
-    """Write a processing payload that simulates gateway crash leftover."""
     import os
     import time
 
@@ -54,7 +53,6 @@ def _restart_case_write_processing_payload(gpaths, request_id):
 
 
 def _restart_case_verify(paths, requeued, processing_path, pending_path):
-    """Verify restart recovery results."""
     final_ok = requeued == 1 and not processing_path.exists() and pending_path.exists()
     write_scenario_summary(
         paths,
@@ -74,12 +72,6 @@ def _restart_case_verify(paths, requeued, processing_path, pending_path):
 
 
 def run_scenario_gateway_restart_case(args) -> int:
-    """LLM: verify that gateway startup recovers leftover processing requests by requeuing them.
-
-    新手说明:
-    模拟 gateway 崩溃时请求卡在 processing 目录。
-    重启后系统应该把遗留请求挪回 pending 队列重新处理。
-    """
 
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -109,7 +101,6 @@ def run_scenario_gateway_restart_case(args) -> int:
 
 
 def _stale_lease_setup(args):
-    """Setup for stale lease scenario: create workspace, agent, gateway paths and stale processing request."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=gateway-stale-lease")
@@ -149,7 +140,6 @@ def _stale_lease_setup(args):
 
 @dataclass
 class _StaleLeaseVerifyContext:
-    """Bundle for _stale_lease_verify to reduce parameter count."""
     paths: Any
     request_id: str
     processing_path: Any
@@ -164,7 +154,6 @@ class _StaleLeaseVerifyContext:
 
 
 def _stale_lease_verify(ctx: _StaleLeaseVerifyContext) -> int:
-    """Verify stale lease recovery results."""
     final_ok = (
         ctx.stale_before
         and ctx.stale_before[0].get("request_id") == ctx.request_id
@@ -201,12 +190,6 @@ def _stale_lease_verify(ctx: _StaleLeaseVerifyContext) -> int:
 
 
 def run_scenario_gateway_stale_lease_case(args) -> int:
-    """LLM: simulate an interrupted worker lease, then recover and finish the gateway request.
-
-    新手说明:
-    模拟 worker 租约过期后请求卡在 processing 目录的情况。
-    验证系统能检测过期租约、恢复请求、重新处理并成功完成。
-    """
 
     paths, agent, gpaths, request_id, processing_path = _stale_lease_setup(args)
 

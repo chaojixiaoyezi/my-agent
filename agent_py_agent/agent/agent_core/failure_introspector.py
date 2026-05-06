@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class FailureIntrospection:
-    """LLM 自省结果。"""
 
     analysis_reason: str = ""  # 人可读的失败原因分析
     root_cause: str = ""  # 根因分类
@@ -34,17 +33,11 @@ class FailureIntrospection:
 
 
 class FailureIntrospector:
-    """LLM 失败自省器。
-
-    在规则分类器之后调用 LLM，分析失败原因并给出调参建议。
-    如果 LLM 调用失败，降级到规则分类结果，不影响原流程。
-    """
 
     def __init__(self, agent: SimpleAgent | None = None) -> None:
         self._agent = agent
 
     def set_agent(self, agent: SimpleAgent) -> None:
-        """设置 agent 实例，供 LLM 调用。"""
         self._agent = agent
 
     def introspect(
@@ -53,16 +46,6 @@ class FailureIntrospector:
         runner_result: SubAgentRunnerResult,
         failure_analysis: FailureAnalysis,
     ) -> FailureIntrospection:
-        """LLM 分析失败原因并返回调参建议。
-
-        Args:
-            task: 失败的任务
-            runner_result: runner 执行结果
-            failure_analysis: 规则分类器的分析结果
-
-        Returns:
-            FailureIntrospection：LLM 自省结果，包含调参建议
-        """
         if self._agent is None:
             logger.warning("FailureIntrospector: agent 未设置，降级到规则分类")
             return self._fallback_to_rules(failure_analysis)
@@ -79,7 +62,6 @@ class FailureIntrospector:
         runner_result: SubAgentRunnerResult,
         failure_analysis: FailureAnalysis,
     ) -> FailureIntrospection:
-        """调用 LLM 进行失败自省。"""
         current_timeout = self._get_current_timeout(task)
         tool_rounds = getattr(runner_result, "tool_rounds", 0)
         error_msg = runner_result.runner_last_error or runner_result.message or ""
@@ -131,7 +113,6 @@ class FailureIntrospector:
             return self._fallback_to_rules(failure_analysis)
 
     def _fallback_to_rules(self, failure_analysis: FailureAnalysis) -> FailureIntrospection:
-        """当 LLM 调用失败时，降级到规则分类结果。"""
         return FailureIntrospection(
             analysis_reason=f"规则分类：{failure_analysis.suggested_action}",
             root_cause=failure_analysis.root_cause,
@@ -142,7 +123,6 @@ class FailureIntrospector:
         )
 
     def _suggest_params_from_analysis(self, analysis: FailureAnalysis) -> dict:
-        """从规则分析结果生成建议参数。"""
         params = {}
         if analysis.should_adjust_timeout and analysis.new_timeout_seconds:
             params["new_timeout_seconds"] = analysis.new_timeout_seconds
@@ -151,7 +131,6 @@ class FailureIntrospector:
         return params
 
     def _get_current_timeout(self, task: SubAgentTask) -> float:
-        """获取任务当前的超时设置。"""
         if task.attributes and "dynamic_timeout_seconds" in task.attributes:
             return float(task.attributes["dynamic_timeout_seconds"])
         return 120.0  # 默认超时

@@ -1,13 +1,5 @@
 from __future__ import annotations
 
-"""Core DTOs for the optional log analysis module.
-
-These dataclasses are intentionally storage-agnostic and dependency-free.  They
-describe what flows between sources, parsers, stores, detectors, cases, and
-agents; later workers can plug in concrete ingestion and query backends without
-changing the contract.
-"""
-
 import json
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
@@ -21,8 +13,6 @@ T = TypeVar("T", bound="JsonRoundTripMixin")
 
 
 def utc_now_iso() -> str:
-    """Return a compact UTC timestamp suitable for case and evidence records."""
-
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
@@ -39,8 +29,6 @@ def _json_ready(value: Any) -> Any:
 
 
 class JsonRoundTripMixin:
-    """Small helper for JSON-ready dataclass contracts."""
-
     def to_dict(self) -> dict[str, Any]:
         return _json_ready(asdict(self))
 
@@ -224,16 +212,25 @@ class QueryPlan(JsonRoundTripMixin):
 
     def __post_init__(self) -> None:
         if not self.display:
-            parts = [self.purpose]
-            if self.source_products:
-                parts.append(f"sources={','.join(self.source_products)}")
-            if self.start_time or self.end_time:
-                parts.append(f"time={self.start_time or '*'}..{self.end_time or '*'}")
-            if self.filters:
-                filters = " ".join(f"{key}={value}" for key, value in sorted(self.filters.items()) if value not in (None, "", [], {}))
-                if filters:
-                    parts.append(filters)
-            self.display = " | ".join(part for part in parts if part)
+            self.display = _query_plan_display(self)
+
+
+def _query_plan_display(plan: QueryPlan) -> str:
+    parts = [plan.purpose]
+    if plan.source_products:
+        parts.append(f"sources={','.join(plan.source_products)}")
+    if plan.start_time or plan.end_time:
+        parts.append(f"time={plan.start_time or '*'}..{plan.end_time or '*'}")
+    filters = _query_plan_filter_display(plan.filters)
+    if filters:
+        parts.append(filters)
+    return " | ".join(part for part in parts if part)
+
+
+def _query_plan_filter_display(filters: Mapping[str, Any]) -> str:
+    if not filters:
+        return ""
+    return " ".join(f"{key}={value}" for key, value in sorted(filters.items()) if value not in (None, "", [], {}))
 
 
 @dataclass
@@ -298,67 +295,7 @@ class CaseRecord(JsonRoundTripMixin):
 Case = CaseRecord
 
 
-@dataclass
-class SecurityCase(JsonRoundTripMixin):
-    """安全检测器产出的 case 模型。
-
-    由检测器创建，包含基本的案件信息、触发实体、初始证据和来源。
-    用于桥接到 LogWorkOrder 并最终转换为 SubAgentTask。
-    """
-    case_id: str
-    severity: str = "medium"
-    event_class: str = "alert"
-    trigger_entities: dict[str, list[str]] = field(default_factory=dict)
-    initial_evidence: list[EvidenceRef] = field(default_factory=list)
-    detector_id: str = ""
-    created_at: str = field(default_factory=utc_now_iso)
-    attributes: dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def from_dict(cls, values: Mapping[str, Any]) -> SecurityCase:
-        allowed = {item.name for item in fields(cls)}
-        clean = {key: value for key, value in values.items() if key in allowed}
-        clean["initial_evidence"] = _coerce_evidence_refs(clean.get("initial_evidence", []))
-        return cls(**clean)
-
-
-@dataclass
-class LogWorkOrder(JsonRoundTripMixin):
-    """日志补查工单模型。
-
-    从 SecurityCase 创建，包含补查目标、时间窗口、查询限制和证据预算。
-    负责桥接到 SubAgentTask 执行系统。
-    """
-    work_order_id: str
-    case_id: str
-    investigation_goal: str
-    start_time: str
-    end_time: str
-    allowed_query_templates: list[str] = field(default_factory=list)
-    max_results: int = 100
-    evidence_budget: int = 1000
-    created_at: str = field(default_factory=utc_now_iso)
-    status: str = "OPEN"
-    assigned_run_id: str = ""
-    attributes: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class QueryResult(JsonRoundTripMixin):
-    """受控查询的结果。
-
-    包含查询内容、结果列表、数量统计和截断标志。
-    """
-    query_template: str
-    query_params: dict[str, Any] = field(default_factory=dict)
-    time_window: dict[str, str] = field(default_factory=dict)
-    results: list[dict[str, Any]] = field(default_factory=list)
-    result_count: int = 0
-    truncated: bool = False
-    max_limit: int = 100
-    created_at: str = field(default_factory=utc_now_iso)
-    metadata: dict[str, Any] = field(default_factory=dict)
-
+from .models_work_orders import LogWorkOrder, QueryResult, SecurityCase
 
 __all__ = [
     "Case",

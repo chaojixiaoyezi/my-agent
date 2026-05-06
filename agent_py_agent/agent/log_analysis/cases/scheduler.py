@@ -26,6 +26,25 @@ class ScheduleResult:
         }
 
 
+@dataclass(frozen=True)
+class ScheduleFindingsOptions:
+    root: str | Path | None = None
+    store: CaseStore | None = None
+    min_case_confidence: float = 0.6
+    merge_window_minutes: int = 15
+    search_store: Any | None = None
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> ScheduleFindingsOptions:
+        return cls(
+            root=kwargs.get("root"),
+            store=kwargs.get("store"),
+            min_case_confidence=float(kwargs.get("min_case_confidence", 0.6)),
+            merge_window_minutes=int(kwargs.get("merge_window_minutes", 15)),
+            search_store=kwargs.get("search_store"),
+        )
+
+
 class CaseScheduler:
     def __init__(self, store: CaseStore, *, min_case_confidence: float | None = None) -> None:
         self.store = store
@@ -39,34 +58,41 @@ class CaseScheduler:
             self.store.min_case_confidence = self.min_case_confidence
         try:
             for item in findings:
-                finding = item if isinstance(item, Finding) else Finding.from_dict(item)
-                result.recorded_findings.append(finding.finding_id)
-                case = self.store.record_finding(finding)
-                if case is None:
-                    result.low_confidence_findings.append(finding.finding_id)
-                    continue
-                if case.case_id not in seen_cases:
-                    seen_cases.add(case.case_id)
-                    result.cases.append(case)
+                _record_scheduled_finding(self.store, result, seen_cases, item)
         finally:
             self.store.min_case_confidence = original_threshold
         return result
 
 
+def _record_scheduled_finding(
+    store: CaseStore,
+    result: ScheduleResult,
+    seen_cases: set[str],
+    item: Finding | Mapping[str, Any],
+) -> None:
+    finding = item if isinstance(item, Finding) else Finding.from_dict(item)
+    result.recorded_findings.append(finding.finding_id)
+    case = store.record_finding(finding)
+    if case is None:
+        result.low_confidence_findings.append(finding.finding_id)
+        return
+    if case.case_id not in seen_cases:
+        seen_cases.add(case.case_id)
+        result.cases.append(case)
+
+
 def schedule_findings(
     findings: Sequence[Finding | Mapping[str, Any]],
     *,
-    root: str | Path | None = None,
-    store: CaseStore | None = None,
-    min_case_confidence: float = 0.6,
-    merge_window_minutes: int = 15,
-    search_store: Any | None = None,
+    options: ScheduleFindingsOptions | None = None,
+    **kwargs: Any,
 ) -> ScheduleResult:
-    case_store = store or CaseStore(
-        root or Path("data") / "log_analysis",
-        min_case_confidence=min_case_confidence,
-        merge_window_minutes=merge_window_minutes,
-        search_store=search_store,
+    schedule_options = options or ScheduleFindingsOptions.from_kwargs(**kwargs)
+    case_store = schedule_options.store or CaseStore(
+        schedule_options.root or Path("data") / "log_analysis",
+        min_case_confidence=schedule_options.min_case_confidence,
+        merge_window_minutes=schedule_options.merge_window_minutes,
+        search_store=schedule_options.search_store,
     )
     return CaseScheduler(case_store).schedule(findings)
 
@@ -74,20 +100,10 @@ def schedule_findings(
 def findings_to_cases(
     findings: Sequence[Finding | Mapping[str, Any]],
     *,
-    root: str | Path | None = None,
-    store: CaseStore | None = None,
-    min_case_confidence: float = 0.6,
-    merge_window_minutes: int = 15,
-    search_store: Any | None = None,
+    options: ScheduleFindingsOptions | None = None,
+    **kwargs: Any,
 ) -> list[CaseRecord]:
-    return schedule_findings(
-        findings,
-        root=root,
-        store=store,
-        min_case_confidence=min_case_confidence,
-        merge_window_minutes=merge_window_minutes,
-        search_store=search_store,
-    ).cases
+    return schedule_findings(findings, options=options, **kwargs).cases
 
 
-__all__ = ["CaseScheduler", "ScheduleResult", "findings_to_cases", "schedule_findings"]
+__all__ = ["CaseScheduler", "ScheduleFindingsOptions", "ScheduleResult", "findings_to_cases", "schedule_findings"]

@@ -1,7 +1,3 @@
-"""会话管理模块。
-
-提供会话持久化和恢复功能。
-"""
 from __future__ import annotations
 
 from .admin_query import AdminCrossChannelQuery

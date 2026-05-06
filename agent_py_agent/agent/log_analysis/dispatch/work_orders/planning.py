@@ -6,6 +6,7 @@ Dataclasses live in models.py so this module can stay focused on planning flow.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from ...agents.contracts import (
@@ -28,6 +29,25 @@ NO_EVIDENCE_ISSUE = "case has no evidence_refs; analyst/reviewer work orders are
 PLAN_NOT_READY_ISSUE = "work-order plan is not ready; refusing to create subagent tasks"
 
 
+@dataclass(frozen=True)
+class PlanWorkOrdersOptions:
+    evidence_refs: Any = None
+    route_summary: Mapping[str, Any] | None = None
+    quality_contract: Mapping[str, Any] | None = None
+    mode: str = "manual"
+    dry_run: bool = True
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> PlanWorkOrdersOptions:
+        return cls(
+            evidence_refs=kwargs.get("evidence_refs"),
+            route_summary=kwargs.get("route_summary"),
+            quality_contract=kwargs.get("quality_contract"),
+            mode=str(kwargs.get("mode", "manual")),
+            dry_run=bool(kwargs.get("dry_run", True)),
+        )
+
+
 def _get(source: Any, key: str, default: Any = None) -> Any:
     """Read a field from either a mapping or an object."""
     if isinstance(source, Mapping):
@@ -48,22 +68,30 @@ def _merge_unique(*values: Any) -> list[str]:
     output: list[str] = []
     seen: set[str] = set()
     for value in values:
-        for item in normalize_evidence_refs(value):
-            if item not in seen:
-                output.append(item)
-                seen.add(item)
+        _append_new_refs(output, seen, normalize_evidence_refs(value))
     return output
+
+
+def _append_new_refs(output: list[str], seen: set[str], refs: list[str]) -> None:
+    for item in refs:
+        if item not in seen:
+            output.append(item)
+            seen.add(item)
 
 
 def _acceptance_checks(quality_contract: Mapping[str, Any] | None) -> list[str]:
     """Combine default and per-case acceptance checks."""
     checks = list(DEFAULT_ACCEPTANCE_CHECKS)
     if quality_contract:
-        for item in quality_contract.get("acceptance_checks", []):
-            text = str(item or "").strip()
-            if text and text not in checks:
-                checks.append(text)
+        _append_acceptance_checks(checks, quality_contract.get("acceptance_checks", []))
     return checks
+
+
+def _append_acceptance_checks(checks: list[str], items: Any) -> None:
+    for item in items:
+        text = str(item or "").strip()
+        if text and text not in checks:
+            checks.append(text)
 
 
 def _build_work_order_context(
@@ -139,15 +167,23 @@ def _create_reviewer_work_order(params: CreateWorkOrdersParams) -> SubagentWorkO
 def plan_case_subagent_work_orders(
     case: Any,
     *,
-    evidence_refs: Any = None,
-    route_summary: Mapping[str, Any] | None = None,
-    quality_contract: Mapping[str, Any] | None = None,
-    mode: str = "manual",
-    dry_run: bool = True,
+    options: PlanWorkOrdersOptions | None = None,
+    **kwargs: Any,
 ) -> LogAnalysisWorkOrderPlan:
     """Generate bounded analyst/reviewer work orders for one log-analysis case."""
-    inputs = _plan_inputs(case, evidence_refs, route_summary, quality_contract)
-    common_context = _build_work_order_context(inputs.summary, inputs.refs, inputs.route, quality_contract)
+    plan_options = options or PlanWorkOrdersOptions.from_kwargs(**kwargs)
+    inputs = _plan_inputs(
+        case,
+        plan_options.evidence_refs,
+        plan_options.route_summary,
+        plan_options.quality_contract,
+    )
+    common_context = _build_work_order_context(
+        inputs.summary,
+        inputs.refs,
+        inputs.route,
+        plan_options.quality_contract,
+    )
     analyst, reviewer = _create_work_orders(
         params=CreateWorkOrdersParams(
             case_id=inputs.case_id,
@@ -156,12 +192,12 @@ def plan_case_subagent_work_orders(
             checks=inputs.checks,
             issues=inputs.issues,
             risks=inputs.risks,
-            mode=mode,
-            dry_run=dry_run,
+            mode=plan_options.mode,
+            dry_run=plan_options.dry_run,
             ready=inputs.ready,
         )
     )
-    return _plan_from_orders(inputs, [analyst, reviewer], mode=mode, dry_run=dry_run)
+    return _plan_from_orders(inputs, [analyst, reviewer], mode=plan_options.mode, dry_run=plan_options.dry_run)
 
 
 def _plan_from_orders(
@@ -217,6 +253,7 @@ __all__ = [
     "PARENT_FINAL_GATE",
     "PLAN_NOT_READY_ISSUE",
     "LogAnalysisWorkOrderPlan",
+    "PlanWorkOrdersOptions",
     "SubagentWorkOrder",
     "build_log_analysis_work_orders",
     "plan_case_subagent_work_orders",

@@ -154,10 +154,9 @@ def _write_gateway_processing_and_done_files(
     return processing_path, done_path, response_path
 
 
-def _log_gateway_archive_events(
-    agent: SimpleAgent, root: Path, request_id: str, request_path: Path, response_path: Path
-) -> None:
+def _log_gateway_archive_events(*args) -> None:
     """Append raw event and snapshot for gateway cross-day archive."""
+    agent, root, request_id, request_path, response_path = args
     append_raw_event(
         root,
         RawMemoryEvent(

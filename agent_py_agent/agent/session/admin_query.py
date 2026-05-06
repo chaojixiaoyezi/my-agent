@@ -1,7 +1,3 @@
-"""管理员跨通道查询接口。
-
-只对 admin 用户生效，提供全局会话和任务查询。
-"""
 from __future__ import annotations
 
 import time
@@ -73,10 +69,6 @@ def _task_update_items(task_registry_store, user_id: str) -> list[dict]:
 
 
 class AdminCrossChannelQuery:
-    """管理员跨通道查询接口。
-
-    只对 user_id=admin 生效，提供跨通道的会话、任务和活动时间线查询。
-    """
 
     ADMIN_USER = "admin"
 
@@ -86,13 +78,6 @@ class AdminCrossChannelQuery:
         session_manager: SessionManager,
         task_registry_store: LocalStore | None = None,
     ):
-        """初始化管理员查询接口。
-
-        Args:
-            cross_channel: 跨通道会话管理器
-            session_manager: 会话管理器
-            task_registry_store: LocalStore 实例（用于查询任务），可选
-        """
         self._cross_channel = cross_channel
         self._session_manager = session_manager
         self._task_registry_store = task_registry_store
@@ -102,14 +87,6 @@ class AdminCrossChannelQuery:
         return user_id == self.ADMIN_USER
 
     def get_all_sessions(self, user_id: str) -> list[dict]:
-        """获取管理员所有通道的会话。
-
-        Args:
-            user_id: 用户 ID（必须为 admin）
-
-        Returns:
-            所有会话列表
-        """
         if not self._check_admin(user_id):
             return []
 
@@ -139,15 +116,6 @@ class AdminCrossChannelQuery:
         return result
 
     def get_all_tasks(self, user_id: str, status: str | None = None) -> list[dict]:
-        """获取管理员所有任务（跨会话）。
-
-        Args:
-            user_id: 用户 ID（必须为 admin）
-            status: 可选的任务状态过滤
-
-        Returns:
-            任务列表
-        """
         if not self._check_admin(user_id):
             return []
 
@@ -163,15 +131,6 @@ class AdminCrossChannelQuery:
             return []
 
     def get_recent_activity(self, user_id: str, limit: int = 20) -> list[dict]:
-        """获取最近活动时间线（按时间倒序，混合各通道）。
-
-        Args:
-            user_id: 用户 ID（必须为 admin）
-            limit: 最多返回多少条
-
-        Returns:
-            活动时间线
-        """
         if not self._check_admin(user_id):
             return []
 
@@ -184,15 +143,6 @@ class AdminCrossChannelQuery:
         return timeline[:limit]
 
     def get_channel_summary(self, user_id: str, channel: str) -> dict:
-        """获取指定通道的摘要信息。
-
-        Args:
-            user_id: 用户 ID（必须为 admin）
-            channel: 通道名称
-
-        Returns:
-            通道摘要
-        """
         if not self._check_admin(user_id):
             return {"error": "权限不足"}
 

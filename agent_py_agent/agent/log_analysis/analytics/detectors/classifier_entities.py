@@ -138,18 +138,23 @@ def _unique_json_values(values: Sequence[Any]) -> list[Any]:
     result: list[Any] = []
     seen: set[str] = set()
     for value in values:
-        if isinstance(value, QueryPlan):
-            item: Any = value.to_dict()
-        elif isinstance(value, Mapping):
-            item = dict(value)
-        else:
-            item = _text(value)
+        item = _json_value(value)
         marker = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
         if marker in seen or item in ("", None, [], {}):
             continue
         seen.add(marker)
         result.append(item)
     return result
+
+
+def _json_value(value: Any) -> Any:
+    from ...models import QueryPlan
+
+    if isinstance(value, QueryPlan):
+        return value.to_dict()
+    if isinstance(value, Mapping):
+        return dict(value)
+    return _text(value)
 
 
 def _gap_details(

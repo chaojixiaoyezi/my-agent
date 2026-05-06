@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .base import ParsedRecord, ParserError
+from .base import ParseContext, ParsedRecord, ParserError
 from .common import DEFAULT_PAYLOAD_MAX_CHARS, normalize_security_alert_v1
 
 
@@ -23,11 +23,10 @@ class SecurityAlertV1Parser:
         self,
         record: Mapping[str, Any],
         *,
-        raw_ref: str,
-        source_id: str | None = None,
-        source_product: str | None = None,
-        line_no: int | None = None,
+        context: ParseContext | None = None,
+        **kwargs: Any,
     ) -> ParsedRecord:
+        parse_context = context or ParseContext.from_kwargs(**kwargs)
         if not isinstance(record, Mapping):
             raise ParserError("SecurityAlertV1 record must be an object")
         if not any(value not in (None, "") for value in record.values()):
@@ -35,29 +34,28 @@ class SecurityAlertV1Parser:
 
         event = normalize_security_alert_v1(
             record,
-            raw_ref=raw_ref,
-            source_id=source_id,
-            source_product=source_product,
-            line_no=line_no,
+            raw_ref=parse_context.raw_ref,
+            source_id=parse_context.source_id,
+            source_product=parse_context.source_product,
+            line_no=parse_context.line_no,
             payload_max_chars=self.payload_max_chars,
         )
         return ParsedRecord(
             event=event,
             parser_id=self.parser_id,
             parser_confidence=float(event["parser_confidence"]),
-            raw_ref=raw_ref,
-            line_no=line_no,
+            raw_ref=parse_context.raw_ref,
+            line_no=parse_context.line_no,
         )
 
     def parse_json_line(
         self,
         line: str,
         *,
-        raw_ref: str,
-        source_id: str | None = None,
-        source_product: str | None = None,
-        line_no: int | None = None,
+        context: ParseContext | None = None,
+        **kwargs: Any,
     ) -> ParsedRecord:
+        parse_context = context or ParseContext.from_kwargs(**kwargs)
         try:
             record = json.loads(line)
         except json.JSONDecodeError as exc:
@@ -66,28 +64,20 @@ class SecurityAlertV1Parser:
             raise ParserError("JSONL SecurityAlertV1 line must contain a JSON object")
         return self.parse_record(
             record,
-            raw_ref=raw_ref,
-            source_id=source_id,
-            source_product=source_product,
-            line_no=line_no,
+            context=parse_context,
         )
 
     def parse_csv_row(
         self,
         row: Mapping[str, Any],
         *,
-        raw_ref: str,
-        source_id: str | None = None,
-        source_product: str | None = None,
-        line_no: int | None = None,
+        context: ParseContext | None = None,
+        **kwargs: Any,
     ) -> ParsedRecord:
+        parse_context = context or ParseContext.from_kwargs(**kwargs)
         if None in row:
             raise ParserError("CSV row has more columns than the header")
         return self.parse_record(
             row,
-            raw_ref=raw_ref,
-            source_id=source_id,
-            source_product=source_product,
-            line_no=line_no,
+            context=parse_context,
         )
-

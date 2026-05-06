@@ -1,7 +1,7 @@
-"""Shell command execution tool with basic security controls."""
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -30,12 +30,10 @@ _DANGEROUS_PATTERNS = [re.compile(p, re.IGNORECASE) for p in _DANGEROUS_COMMANDS
 
 
 def _is_dangerous_command(command: str) -> bool:
-    """Return True when the command matches a blocked destructive pattern."""
     return any(pattern.search(command) for pattern in _DANGEROUS_PATTERNS)
 
 
 def _validate_command(command: str) -> str:
-    """Validate and trim a command string."""
     if not command:
         raise ValueError("command 不能为空")
     text = command.strip()
@@ -70,7 +68,6 @@ def _format_process_result(result: subprocess.CompletedProcess[str]) -> str:
 
 
 class ShellTool(BaseTool):
-    """Execute shell commands in the configured workspace."""
 
     def __init__(self, workspace_root: Path, default_timeout: int = 30):
         self.workspace_root = workspace_root.resolve()
@@ -108,7 +105,6 @@ class ShellTool(BaseTool):
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        """Execute a shell command and return a structured tool result."""
         command_result = self._parse_command(params)
         if isinstance(command_result, ToolExecutionResult):
             return command_result
@@ -138,6 +134,14 @@ class ShellTool(BaseTool):
         target: Path,
         timeout: int,
     ) -> subprocess.CompletedProcess[str]:
+        if os.name == "nt":
+            return subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command", command],
+                cwd=str(target),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
         return subprocess.run(
             command,
             shell=True,

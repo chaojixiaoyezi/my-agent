@@ -15,19 +15,6 @@ from typing import Any
 
 @dataclass
 class ToolSpec:
-    """单个工具的说明书。
-
-    这份结构同时服务两类场景：
-    - 生成给模型看的工具目录
-    - 做工具检索和排序
-
-    字段设计上尽量说人话，方便你后面继续扩展：
-    - `description` 是一句话总述
-    - `use_cases` 是'什么时候该用它'
-    - `avoid_when` 是'什么时候别用它'
-    - `keywords` 给检索器做召回
-    - `parameters` / `parameter_details` 负责把参数说明拆成简版和详版
-    """
 
     name: str
     category: str
@@ -40,11 +27,6 @@ class ToolSpec:
     examples: list[str] = field(default_factory=list)
 
     def render_catalog_entry(self) -> str:
-        """渲染工具目录里的中等详细条目。
-
-        这里故意不把所有细节都展开，只保留足够帮助模型做初步判断的信息。
-        简单说，就是先给它看'工具菜单'，别一上来就把整本说明书塞过去。
-        """
 
         params = "、".join(self.parameters.keys()) or "无"
         use_cases = "；".join(self.use_cases[:2]) or "无"
@@ -57,10 +39,6 @@ class ToolSpec:
         )
 
     def render_detail_entry(self) -> str:
-        """渲染当前任务候选工具的详细说明。
-
-        这里只给少数高相关工具展开，目的是减少误判，但不把所有工具都铺满 prompt。
-        """
 
         params = "\n".join(
             f"  - {name}: {self.parameter_details.get(name, desc)}"
@@ -82,18 +60,12 @@ class ToolSpec:
 
 @dataclass
 class ToolExecutionResult:
-    """工具执行结果。
-
-    不管底层工具是读文件、写文件，还是发 HTTP 请求，最终都统一成这个结构。
-    这样核心调度器只要认一种返回格式，后面加新工具也不用再改主循环。
-    """
 
     tool: str
     ok: bool
     output: str
 
     def render_for_prompt(self) -> str:
-        """把执行结果转成可直接塞回 prompt 的文本。"""
 
         status = "ok" if self.ok else "error"
         return f"[tool={self.tool}; status={status}]\n{self.output}"
@@ -101,7 +73,6 @@ class ToolExecutionResult:
 
 @dataclass
 class ToolSearchHit:
-    """一次工具检索的命中结果。"""
 
     name: str
     score: float
@@ -109,10 +80,6 @@ class ToolSearchHit:
 
 
 class BaseToolSearchProvider:
-    """工具检索提供者接口。
-
-    先把接口定下来，后面无论你接本地 embedding 还是远端向量服务，都按这个协议接入。
-    """
 
     name = "base"
 
@@ -121,11 +88,6 @@ class BaseToolSearchProvider:
 
 
 class KeywordToolSearchProvider(BaseToolSearchProvider):
-    """关键词检索器。
-
-    这是当前真正生效的第一层召回，优先保证稳定和可解释。
-    说白了，它不够聪明，但胜在不容易胡来。
-    """
 
     name = "keyword"
 
@@ -141,11 +103,6 @@ class KeywordToolSearchProvider(BaseToolSearchProvider):
 
 
 class VectorToolSearchProvider(BaseToolSearchProvider):
-    """向量检索接口的占位实现。
-
-    这版先不真的做 embedding 计算，只把扩展点留好。
-    这样后面你要接向量库时，不需要再动核心调度器和 prompt 结构。
-    """
 
     name = "vector"
 
@@ -159,15 +116,6 @@ class VectorToolSearchProvider(BaseToolSearchProvider):
 
 
 class HybridToolRetriever:
-    """混合检索器。
-
-    逻辑很简单：
-    - 先把多个召回器的结果合并
-    - 再按总分排
-    - 最后给出'为什么推荐这个工具'
-
-    现在真正起作用的是关键词层，向量层只是接口预留。
-    """
 
     def __init__(self, providers: list[BaseToolSearchProvider]):
         self.providers = providers
@@ -182,7 +130,6 @@ class HybridToolRetriever:
 
 
 class BaseTool:
-    """所有具体工具的基类。"""
 
     spec: ToolSpec
 
@@ -192,12 +139,6 @@ class BaseTool:
 
 
 def _tokenize(text: str) -> list[str]:
-    """把自然语言查询切成适合粗检索的小片段。
-
-    这里不追求花哨，只做够用的切分：
-    - 英文、数字、下划线按连续片段切
-    - 中文按连续中文片段保留，再拆出 2 到 4 字的小片段补召回
-    """
 
     lowered = (text or "").lower()
     tokens = re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]+", lowered)

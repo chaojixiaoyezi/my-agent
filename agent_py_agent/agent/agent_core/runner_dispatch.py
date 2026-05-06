@@ -33,11 +33,6 @@ RETRYABLE_RUNNER_FAILURE_TYPES = {
 
 
 def _runner_max_attempts(policy: str) -> int:
-    """把 runner_failure_policy 转成总尝试次数。
-
-    `auto` 第一版等价于"最多 2 次"：初次失败后再补一次机会。
-    这里返回的是总尝试次数，不是额外 retry 次数。
-    """
 
     value = str(policy or "auto").strip().lower()
     if value in {"", "auto"}:
@@ -51,13 +46,11 @@ def _runner_max_attempts(policy: str) -> int:
 
 
 def _runner_failure_type(task: SubAgentTask) -> str:
-    """标准化 runner failure_type，兼容模型输出大小写。"""
 
     return str(task.failure_type or "").strip().lower()
 
 
 def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:
-    """判断一个已失败任务是否还能自动重试。"""
 
     if runner_max_attempts <= 1:
         return ""
@@ -73,10 +66,6 @@ def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:
 
 
 def _resolve_runner_concurrency(value: object, job_count: int) -> int:
-    """把 runner_concurrency 配置转成实际 worker 数。
-
-    `auto` 先保持 1，避免默认并发消耗真实 API；明确写数字时才并行。
-    """
 
     if job_count <= 0:
         return 0
@@ -97,7 +86,6 @@ def _resolve_runner_concurrency(value: object, job_count: int) -> int:
 
 
 def _resolve_runner_start_rate(value: object, job_count: int) -> int:
-    """把 runner_start_rate 配置转成本轮最多启动多少个 runner。"""
 
     if job_count <= 0:
         return 0
@@ -118,7 +106,6 @@ def _resolve_runner_start_rate(value: object, job_count: int) -> int:
 
 
 def _resolve_runner_timeout_seconds(value: object) -> float:
-    """把 runner_timeout_seconds 配置转成超时秒数；0 表示不启用。"""
 
     if isinstance(value, str):
         normalized = value.strip().lower()
@@ -138,7 +125,6 @@ def _resolve_runner_timeout_seconds(value: object) -> float:
 
 @dataclass(frozen=True)
 class RunSubagentWorkerParams:
-    """Bundle of _run_subagent_worker parameters."""
 
     config: AgentConfig
     root: Path
@@ -164,13 +150,6 @@ class RunnerDispatchRecordParams:
 
 
 def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResult:
-    """LLM: run one subagent in an isolated worker SimpleAgent instance.
-
-    给人看的解释：
-    并发跑 runner 时，不能多个线程共用同一个 SimpleAgent、backend 或 LocalStore 连接。
-    所以这里临时创建一个新的 SimpleAgent，只负责当前 run_id。
-    如果传入 local_store，则复用同一个连接，避免 SQLite 并发问题。
-    """
 
     from ..core import SimpleAgent
 
@@ -242,7 +221,6 @@ def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams):
 
 
 def _runner_dispatch_record(params: RunnerDispatchRecordParams):
-    """把 runner 执行结果转成 dispatch record。"""
 
     return params.agent.subagents.make_dispatch_record(
         step="runner",
@@ -276,7 +254,6 @@ def _dispatch_runner_candidates(
     *,
     runner_max_attempts: int = 1,
 ) -> list[SubAgentTask]:
-    """挑选一轮 dispatch 可推进的 runner。"""
 
     if max_runners <= 0:
         return []
@@ -291,7 +268,6 @@ def _dispatch_runner_candidates(
 
 
 def _limit_items(items: list, limit: int) -> list:
-    """按调度 limit 截断列表；0 表示不限制。"""
 
     if limit <= 0:
         return list(items)
@@ -303,7 +279,6 @@ def _is_dispatch_runner_candidate(
     *,
     runner_max_attempts: int = 1,
 ) -> bool:
-    """判断任务是否可以由 dispatch 启动 runner。"""
 
     if task.status in {
         "AWAITING_ACCEPTANCE",
@@ -330,7 +305,6 @@ def _is_dispatch_runner_candidate(
 
 
 def _dispatch_patch_review_run_ids(tasks: list[SubAgentTask]) -> list[str]:
-    """挑选本轮调度需要审核 patch 的 run。"""
 
     run_ids: list[str] = []
     for task in tasks:
@@ -342,7 +316,6 @@ def _dispatch_patch_review_run_ids(tasks: list[SubAgentTask]) -> list[str]:
 
 
 def _task_has_runner_patches(task: SubAgentTask) -> bool:
-    """读取 output.json 判断是否有 patch 记录。"""
 
     try:
         payload = json.loads(Path(task.output_json).read_text(encoding="utf-8"))

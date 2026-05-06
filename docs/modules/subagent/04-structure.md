@@ -64,3 +64,6 @@ agent_py_agent/agent/
 ## 当前第一版索引 / 待补齐
 
 本页先解释主结构和学习路径。更细的类字段、状态机和通用 workflow apply 链路，需要等后续 apply path 落地后补齐。
+## 2026-05-06 structure update
+- Workflow routing and subagent manager internals now separate decision fields, rendering sections, patch normalization, and service actions.
+- Compatibility modules still re-export the existing public model and rendering names for callers.

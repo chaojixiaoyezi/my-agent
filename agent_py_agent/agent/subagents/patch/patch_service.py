@@ -17,20 +17,15 @@ from ..utils import _new_id
 if TYPE_CHECKING:
     from ..models import SubAgentTask
 
-
 _VALID_PATCH_STATUSES = {"applied", "planned", "blocked"}
 
-
 def _categorize_patches(patches: list[dict]) -> tuple[list, list, list]:
-    """Categorize patches into blocked, invalid, and applied groups."""
     blocked = [item for item in patches if str(item.get("status", "")).lower() in {"planned", "blocked"}]
     invalid = [item for item in patches if str(item.get("status", "")).lower() not in _VALID_PATCH_STATUSES]
     applied = [item for item in patches if str(item.get("status", "")).lower() == "applied"]
     return blocked, invalid, applied
 
-
 def _build_review_message(patches: list[dict], blocked: list, invalid: list, applied: list) -> tuple[str, str]:
-    """Build review decision and message."""
     if not patches:
         return "NO_PATCHES", "没有 patch 需要审核。"
     ok = not blocked and not invalid
@@ -43,9 +38,7 @@ def _build_review_message(patches: list[dict], blocked: list, invalid: list, app
         return "REJECT" if not ok else "APPROVE", "; ".join(parts) + "，不能审核通过。"
     return "APPROVE" if ok else "REJECT", f"{len(applied)} 个 patch 已声明 applied，可审核通过。"
 
-
 def _serialize_patch_review_record(record: PatchReviewRecord) -> dict:
-    """Serialize a patch review record to dictionary."""
     return {
         "id": record.id, "run_id": record.run_id, "dry_run": record.dry_run,
         "applied": record.applied, "ok": record.ok, "decision": record.decision,
@@ -56,18 +49,14 @@ def _serialize_patch_review_record(record: PatchReviewRecord) -> dict:
         "created_at": record.created_at,
     }
 
-
 def _serialize_patch_review_report(report: PatchReviewReport) -> dict:
-    """Serialize a patch review report to dictionary."""
     return {
         "generated_at": report.generated_at, "dry_run": report.dry_run,
         "summary": report.summary,
         "records": [_serialize_patch_review_record(r) for r in report.records],
     }
 
-
 class PatchReviewService:
-    """Handle patch review workflow decisions."""
 
     def __init__(self, manager):
         self.manager = manager
@@ -109,21 +98,10 @@ class PatchReviewService:
             if limit > 0 and len(records) >= limit:
                 break
 
-        summary = {"total": len(records)}
-        for record in records:
-            summary[record.decision] = summary.get(record.decision, 0) + 1
-            summary["ok" if record.ok else "failed"] = summary.get(
-                "ok" if record.ok else "failed",
-                0,
-            ) + 1
-            summary["dry_run" if record.dry_run else "applied"] = summary.get(
-                "dry_run" if record.dry_run else "applied",
-                0,
-            ) + 1
         return PatchReviewReport(
             generated_at=time.time(),
             dry_run=not apply,
-            summary=summary,
+            summary=_patch_review_summary(records),
             records=records,
         )
 
@@ -136,7 +114,6 @@ class PatchReviewService:
         note="",
         limit=0,
     ) -> PatchReviewReport:
-        """Write patch review report to disk."""
         from .patch_renderer import render_patch_review_markdown
 
         report = self.review_patches(run_ids, apply=apply, reviewer=reviewer, note=note, limit=limit)
@@ -153,7 +130,6 @@ class PatchReviewService:
         return report
 
     def _write_report_json(self, report: PatchReviewReport) -> None:
-        """Write report JSON to workspace."""
         (self.manager.workspace / "subagent_patch_review_report.json").write_text(
             json.dumps(_serialize_patch_review_report(report), ensure_ascii=False, indent=2), encoding="utf-8",
         )
@@ -168,7 +144,6 @@ class PatchReviewService:
         reviewer: str,
         note: str,
     ) -> PatchReviewRecord:
-        """Review patches for a single task."""
         now = time.time()
         blocked, invalid, applied_patches = _categorize_patches(patches)
         ok = bool(patches) and not blocked and not invalid
@@ -190,14 +165,12 @@ class PatchReviewService:
         )
 
     def _apply_review_status(self, patches: list[dict], ok: bool, reviewer: str, now: float, note: str) -> None:
-        """Apply review status to patches based on approval decision."""
         if ok:
             self._apply_approved_patches(patches, reviewer, now, note)
         else:
             self._apply_rejected_patches(patches, reviewer, now, note)
 
     def _write_patch_review_record_files(self, record: PatchReviewRecord) -> None:
-        """Write single patch review record to task directory."""
         from .patch_renderer import render_patch_review_record_markdown
 
         try:
@@ -212,7 +185,6 @@ class PatchReviewService:
         )
 
     def _apply_approved_patches(self, patches: list[dict], reviewer: str, now: float, note: str) -> None:
-        """Mark patches as approved."""
         for item in patches:
             item["review_status"] = "APPROVED"
             item["reviewed_by"] = reviewer
@@ -221,17 +193,10 @@ class PatchReviewService:
                 item["review_note"] = note
 
     def _apply_rejected_patches(self, patches: list[dict], reviewer: str, now: float, note: str) -> None:
-        """Mark patches as needing action."""
         for item in patches:
-            if str(item.get("status", "")).lower() != "applied":
-                item["review_status"] = "NEEDS_ACTION"
-                item["reviewed_by"] = reviewer
-                item["reviewed_at"] = now
-                if note:
-                    item["review_note"] = note
+            _apply_rejected_patch_status(item, reviewer=reviewer, now=now, note=note)
 
     def _append_patch_review_log(self, record: PatchReviewRecord) -> None:
-        """Append patch review record to global audit log."""
 
         from ...file_io import append_jsonl
 
@@ -267,3 +232,30 @@ class PatchReviewService:
                 f"applied={record.applied} message={record.message}\n"
             )
         self.manager._index_patch_review(record)
+
+
+def _patch_review_summary(records: list[PatchReviewRecord]) -> dict[str, int]:
+    summary = {"total": len(records)}
+    for record in records:
+        summary[record.decision] = summary.get(record.decision, 0) + 1
+        status_key = "ok" if record.ok else "failed"
+        mode_key = "dry_run" if record.dry_run else "applied"
+        summary[status_key] = summary.get(status_key, 0) + 1
+        summary[mode_key] = summary.get(mode_key, 0) + 1
+    return summary
+
+
+def _apply_rejected_patch_status(
+    item: dict,
+    *,
+    reviewer: str,
+    now: float,
+    note: str,
+) -> None:
+    if str(item.get("status", "")).lower() == "applied":
+        return
+    item["review_status"] = "NEEDS_ACTION"
+    item["reviewed_by"] = reviewer
+    item["reviewed_at"] = now
+    if note:
+        item["review_note"] = note

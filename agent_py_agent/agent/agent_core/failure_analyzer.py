@@ -12,7 +12,6 @@ from .failure_analysis_service import FailureAnalysis, FailureAnalysisService, _
 
 
 class SubAgentFailureAnalyzer:
-    """子代理失败分析器 — thin facade delegating to FailureAnalysisService."""
 
     def __init__(self, max_timeout: float = 600.0, max_retry_attempts: int = 3):
         self._service = FailureAnalysisService(max_timeout, max_retry_attempts)
@@ -22,7 +21,6 @@ class SubAgentFailureAnalyzer:
         task: SubAgentTask,
         runner_result: SubAgentRunnerResult,
     ) -> FailureAnalysis:
-        """分析失败原因并给出建议。"""
         failure_type = task.failure_type or ""
 
         if failure_type == "runner_timeout":
@@ -43,7 +41,6 @@ class SubAgentFailureAnalyzer:
         return self._wrap_result(self._service.analyze_generic_failure(task, runner_result))
 
     def _suggest_splits(self, task: SubAgentTask) -> list[str]:
-        """Expose _suggest_splits for backward compatibility with tests."""
         return _suggest_splits(task)
 
     def _wrap_result(self, result: FailureAnalysis) -> FailureAnalysis:

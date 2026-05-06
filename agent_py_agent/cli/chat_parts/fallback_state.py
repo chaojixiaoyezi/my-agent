@@ -14,7 +14,6 @@ from typing import Any
 
 @dataclass
 class FallbackWorkerConfig:
-    """Bundle of all _fallback_worker parameters."""
 
     jobs: Any  # queue.Queue
     state_lock: threading.Lock
@@ -34,7 +33,6 @@ class FallbackWorkerConfig:
 
 @dataclass
 class FallbackHandleCommandConfig:
-    """Bundle of all _fallback_handle_command parameters."""
 
     user: str
     agent: Any
@@ -54,7 +52,6 @@ class FallbackHandleCommandConfig:
 
 @dataclass
 class RunFallbackConfig:
-    """Bundle of all run_fallback parameters."""
 
     agent: Any
     args: Any
@@ -84,7 +81,6 @@ MAX_HISTORY_TURNS = 8
 
 
 def _startup_banner(agent_name: str, *, use_gateway: bool) -> str:
-    """Build startup banner."""
     from .rendering import startup_banner as _sb
 
     return _sb(agent_name, use_gateway=use_gateway)
@@ -98,7 +94,6 @@ def append_conversation_turn(
     *,
     max_turns: int = MAX_HISTORY_TURNS,
 ) -> None:
-    """Append one turn and keep the in-memory buffer bounded."""
     with history_lock:
         conversation_history.append((user_message, assistant_message))
         if len(conversation_history) > max_turns * 2:
@@ -106,21 +101,18 @@ def append_conversation_turn(
 
 
 def render_gateway_status(agent, paths):
-    """Render gateway status lines."""
     from ...agent.gateway import render_gateway_status as _rgs
 
     return _rgs(agent, paths)
 
 
 def resume_context_override(args) -> str | None:
-    """Get resume_context override from args."""
     if hasattr(args, "resume_context"):
         return args.resume_context
     return None
 
 
 class ChatJob:
-    """Job for the chat worker queue."""
 
     __slots__ = ("user", "show_prompt", "inject", "prompt_files")
 

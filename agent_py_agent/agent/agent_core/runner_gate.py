@@ -1,9 +1,3 @@
-"""LLM: runner execution and timeout handling.
-
-给人看的解释：
-负责 runner 的并发执行、超时管理、结果收集。
-不处理业务逻辑，只管"怎么跑、跑多久、结果是什么"。
-"""
 
 from __future__ import annotations
 
@@ -28,11 +22,6 @@ def get_task_timeout(
     runner_timeout_seconds: float,
     config: Any,
 ) -> float:
-    """Calculate effective timeout for a task.
-
-    Checks for pre-calculated dynamic timeout in task attributes first,
-    then falls back to configured static timeout, and finally dynamic calculation.
-    """
     from .dynamic_timeout import calculate_dynamic_timeout, estimate_task_tokens
 
     # Check for pre-calculated dynamic timeout
@@ -55,10 +44,6 @@ def get_task_timeout(
 
 
 def resolve_runner_config(config: Any, job_count: int) -> tuple[float, int, int]:
-    """Resolve runner concurrency, start_rate, and timeout from config.
-
-    Returns (runner_timeout_seconds, runner_concurrency, runner_start_rate).
-    """
     from .runner_dispatch import (
         _resolve_runner_concurrency,
         _resolve_runner_start_rate,
@@ -102,8 +87,16 @@ class ConcurrentRunnerParams:
     probe: bool
 
 
+@dataclass(frozen=True)
+class RunnerFailureParams:
+    agent: SimpleAgent
+    run_id: str
+    before: Any
+    result: Any
+    effective_instruction: str
+
+
 def run_single_runner(params: SingleRunnerParams) -> SubAgentRunnerResult:
-    """Execute a single runner with timeout."""
     from .runner_dispatch import RunSubagentWorkerParams, _run_subagent_worker
 
     if params.execute_runners and params.task_timeout > 0:
@@ -131,52 +124,60 @@ def run_single_runner(params: SingleRunnerParams) -> SubAgentRunnerResult:
 
 
 def run_concurrent_runners(params: ConcurrentRunnerParams) -> dict[str, tuple[SubAgentRunnerResult, Any]]:
-    """Execute multiple runners concurrently with timeout tracking.
-
-    Returns a dict mapping run_id to (result, after_task).
-    """
-    from .runner_dispatch import RunSubagentWorkerParams, _run_subagent_worker
+    from .runner_dispatch import _run_subagent_worker
 
     future_to_job = {}
     with ThreadPoolExecutor(max_workers=params.runner_concurrency) as executor:
         for run_id, before, retry_reason in params.pending_jobs:
-            task_timeout = get_task_timeout(before, params.runner_timeout_seconds, params.agent.config)
-            worker_params = RunSubagentWorkerParams(
-                config=params.agent.config,
-                root=params.agent.root,
-                run_id=run_id,
-                instruction=params.instruction,
-                dry_run=not params.execute_runners,
-                max_cards=params.max_cards,
-                probe=params.probe,
-                retry_reason=retry_reason,
-                timeout_seconds=task_timeout,
-                local_store=params.agent.local_store,
+            future = executor.submit(
+                _run_subagent_worker,
+                _runner_worker_params(params, run_id, before, retry_reason),
             )
-            future = executor.submit(_run_subagent_worker, worker_params)
             future_to_job[future] = (run_id, before, retry_reason)
 
         completed: dict[str, tuple[SubAgentRunnerResult, Any]] = {}
         for future in as_completed(future_to_job):
             run_id, before, retry_reason = future_to_job[future]
-            try:
-                result = future.result()
-            except Exception as exc:
-                result = params.agent.subagents.record_runner_result(
-                    RecordRunnerResultParams(
-                        run_id=run_id,
-                        dry_run=False,
-                        ok=False,
-                        message=f"runner worker failed: {exc}",
-                        status="BLOCKED",
-                        verification_status="UNVERIFIED",
-                        failure_type="runner_worker_error",
-                    )
-                )
+            result = _collect_runner_future_result(params, future, run_id)
             after = params.agent.subagents.load(run_id)
             completed[run_id] = (result, after)
 
     return completed
+
+
+def _runner_worker_params(params: ConcurrentRunnerParams, run_id: str, before, retry_reason: str):
+    from .runner_dispatch import RunSubagentWorkerParams
+
+    task_timeout = get_task_timeout(before, params.runner_timeout_seconds, params.agent.config)
+    return RunSubagentWorkerParams(
+        config=params.agent.config,
+        root=params.agent.root,
+        run_id=run_id,
+        instruction=params.instruction,
+        dry_run=not params.execute_runners,
+        max_cards=params.max_cards,
+        probe=params.probe,
+        retry_reason=retry_reason,
+        timeout_seconds=task_timeout,
+        local_store=params.agent.local_store,
+    )
+
+
+def _collect_runner_future_result(params: ConcurrentRunnerParams, future, run_id: str):
+    try:
+        return future.result()
+    except Exception as exc:
+        return params.agent.subagents.record_runner_result(
+            RecordRunnerResultParams(
+                run_id=run_id,
+                dry_run=False,
+                ok=False,
+                message=f"runner worker failed: {exc}",
+                status="BLOCKED",
+                verification_status="UNVERIFIED",
+                failure_type="runner_worker_error",
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -184,46 +185,45 @@ def run_concurrent_runners(params: ConcurrentRunnerParams) -> dict[str, tuple[Su
 # ---------------------------------------------------------------------------
 
 
-def handle_runner_failure(
-    agent: SimpleAgent,
-    run_id: str,
-    before: Any,
-    result: Any,
-    effective_instruction: str,
-) -> str:
-    """Handle runner failure - inject memory and trigger introspection.
-
-    Returns the potentially modified runner instruction.
-    """
-    failure_type = str(result.status or "").strip().upper()
+def handle_runner_failure(params: RunnerFailureParams) -> str:
+    failure_type = str(params.result.status or "").strip().upper()
     if failure_type not in {"BLOCKED", "TIMEOUT"}:
-        return effective_instruction
+        return params.effective_instruction
 
     # Set pending work flag
-    agent._has_pending_work = True
+    params.agent._has_pending_work = True
 
     # Inject relevant memories (push mode)
+    effective_instruction = _inject_failure_memories(params, failure_type)
+
+    # LLM introspection: analyze failure reason and suggest parameter adjustments
+    params.agent._handle_failure_introspection(params.run_id, params.before, params.result)
+
+    return effective_instruction
+
+
+def _inject_failure_memories(params: RunnerFailureParams, failure_type: str) -> str:
+    effective_instruction = params.effective_instruction
     try:
         from ..memory_push import format_memories_for_injection, push_relevant_memories
 
         task_context = {
-            "task_id": run_id,
-            "goal": getattr(before, "goal", ""),
+            "task_id": params.run_id,
+            "goal": getattr(params.before, "goal", ""),
             "failure_type": failure_type.lower(),
         }
         relevant_memories = push_relevant_memories(
-            agent, failure_type.lower(), task_context, limit=3
+            params.agent, failure_type.lower(), task_context, limit=3
         )
         if relevant_memories:
             memory_hint = format_memories_for_injection(relevant_memories)
-            if effective_instruction:
-                effective_instruction = f"{effective_instruction}\n\n{memory_hint}"
-            else:
-                effective_instruction = memory_hint
+            return _append_memory_hint(effective_instruction, memory_hint)
     except Exception:
         pass  # Memory injection failure doesn't affect main flow
-
-    # LLM introspection: analyze failure reason and suggest parameter adjustments
-    agent._handle_failure_introspection(run_id, before, result)
-
     return effective_instruction
+
+
+def _append_memory_hint(effective_instruction: str, memory_hint: str) -> str:
+    if effective_instruction:
+        return f"{effective_instruction}\n\n{memory_hint}"
+    return memory_hint

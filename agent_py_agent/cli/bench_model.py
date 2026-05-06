@@ -1,4 +1,3 @@
-"""CLI command for model speed benchmark profiles."""
 
 from __future__ import annotations
 
@@ -10,7 +9,6 @@ from .common import DEFAULT_CONFIG, make_agent
 
 
 def cmd_bench_model(args) -> int:
-    """Run or display the model speed benchmark profile."""
     config_path = args.config if args.config else DEFAULT_CONFIG
     config = load_config(config_path)
     speed_profile_path = _speed_profile_path(args, config)

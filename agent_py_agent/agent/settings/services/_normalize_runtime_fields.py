@@ -7,54 +7,60 @@ import os
 from ._coercion import CoercionService
 
 
+def _append_warning(warnings: list[str], warn: str | None) -> None:
+    if warn:
+        warnings.append(warn)
+
+
+def _apply_int_fields(
+    out: dict[str, object],
+    defaults: object,
+    specs: tuple[tuple[str, int | None, int | None], ...],
+) -> list[str]:
+    warnings: list[str] = []
+    for key, min_val, max_val in specs:
+        value, warn = CoercionService.coerce_int(
+            key,
+            out.get(key),
+            getattr(defaults, key),
+            min_val=min_val,
+            max_val=max_val,
+        )
+        out[key] = value
+        _append_warning(warnings, warn)
+    return warnings
+
+
+def _apply_bool_fields(
+    out: dict[str, object],
+    defaults: object,
+    keys: tuple[str, ...],
+) -> list[str]:
+    warnings: list[str] = []
+    for key in keys:
+        value, warn = CoercionService.coerce_bool(key, out.get(key), getattr(defaults, key))
+        out[key] = value
+        _append_warning(warnings, warn)
+    return warnings
+
+
 class ToolFieldsService:
     """Normalize tool-related config fields."""
 
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
-        """Normalize tool-related config fields."""
-        warnings: list[str] = []
         out = dict(data)
-
-        def apply(key: str, coerced: object, warn: str | None) -> None:
-            out[key] = coerced
-            if warn:
-                warnings.append(warn)
-
-        # max_tool_rounds
-        v, w = CoercionService.coerce_int(
-            "max_tool_rounds", out.get("max_tool_rounds"),
-            defaults.max_tool_rounds, min_val=1,
+        warnings = _apply_int_fields(
+            out,
+            defaults,
+            (
+                ("max_tool_rounds", 1, None),
+                ("tool_read_max_chars", 100, None),
+                ("tool_http_timeout", 1, None),
+                ("tool_shell_timeout", 1, None),
+            ),
         )
-        apply("max_tool_rounds", v, w)
-
-        # tool_read_max_chars
-        v, w = CoercionService.coerce_int(
-            "tool_read_max_chars", out.get("tool_read_max_chars"),
-            defaults.tool_read_max_chars, min_val=100,
-        )
-        apply("tool_read_max_chars", v, w)
-
-        # tool_http_timeout
-        v, w = CoercionService.coerce_int(
-            "tool_http_timeout", out.get("tool_http_timeout"),
-            defaults.tool_http_timeout, min_val=1,
-        )
-        apply("tool_http_timeout", v, w)
-
-        # tool_shell_timeout
-        v, w = CoercionService.coerce_int(
-            "tool_shell_timeout", out.get("tool_shell_timeout"),
-            defaults.tool_shell_timeout, min_val=1,
-        )
-        apply("tool_shell_timeout", v, w)
-
-        # stream_enabled
-        v, w = CoercionService.coerce_bool(
-            "stream_enabled", out.get("stream_enabled"), defaults.stream_enabled,
-        )
-        apply("stream_enabled", v, w)
-
+        warnings.extend(_apply_bool_fields(out, defaults, ("stream_enabled",)))
         return out, warnings
 
 
@@ -63,29 +69,12 @@ class SubagentBasicFieldsService:
 
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
-        """Normalize basic subagent config fields."""
-        warnings: list[str] = []
         out = dict(data)
-
-        def apply(key: str, coerced: object, warn: str | None) -> None:
-            out[key] = coerced
-            if warn:
-                warnings.append(warn)
-
-        # memory_top_k
-        v, w = CoercionService.coerce_int(
-            "memory_top_k", out.get("memory_top_k"),
-            defaults.memory_top_k, min_val=0,
+        warnings = _apply_int_fields(
+            out,
+            defaults,
+            (("memory_top_k", 0, None), ("max_subagents", 0, None)),
         )
-        apply("memory_top_k", v, w)
-
-        # max_subagents
-        v, w = CoercionService.coerce_int(
-            "max_subagents", out.get("max_subagents"),
-            defaults.max_subagents, min_val=0,
-        )
-        apply("max_subagents", v, w)
-
         return out, warnings
 
 
@@ -183,29 +172,15 @@ class TimeoutFieldsService:
 
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
-        """Normalize timeout-related config fields."""
-        warnings: list[str] = []
         out = dict(data)
-
-        def apply(key: str, coerced: object, warn: str | None) -> None:
-            out[key] = coerced
-            if warn:
-                warnings.append(warn)
-
-        # lease_heartbeat_interval_seconds
-        v, w = CoercionService.coerce_int(
-            "lease_heartbeat_interval_seconds", out.get("lease_heartbeat_interval_seconds"),
-            defaults.lease_heartbeat_interval_seconds, min_val=10,
+        warnings = _apply_int_fields(
+            out,
+            defaults,
+            (
+                ("lease_heartbeat_interval_seconds", 10, None),
+                ("lease_stale_without_heartbeat_seconds", 30, None),
+            ),
         )
-        apply("lease_heartbeat_interval_seconds", v, w)
-
-        # lease_stale_without_heartbeat_seconds
-        v, w = CoercionService.coerce_int(
-            "lease_stale_without_heartbeat_seconds", out.get("lease_stale_without_heartbeat_seconds"),
-            defaults.lease_stale_without_heartbeat_seconds, min_val=30,
-        )
-        apply("lease_stale_without_heartbeat_seconds", v, w)
-
         return out, warnings
 
 
@@ -214,55 +189,22 @@ class SubagentAdvancedFieldsService:
 
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
-        """Normalize advanced subagent config fields."""
-        warnings: list[str] = []
         out = dict(data)
-
-        def apply(key: str, coerced: object, warn: str | None) -> None:
-            out[key] = coerced
-            if warn:
-                warnings.append(warn)
-
-        # subagent_automation_level
-        v, w = CoercionService.coerce_int(
-            "subagent_automation_level", out.get("subagent_automation_level"),
-            defaults.subagent_automation_level, min_val=1, max_val=3,
+        warnings = _apply_int_fields(
+            out,
+            defaults,
+            (
+                ("subagent_automation_level", 1, 3),
+                ("dynamic_timeout_min", 10, None),
+                ("dynamic_timeout_max", 60, None),
+                ("max_auto_split_depth", 0, None),
+                ("max_auto_retry_attempts", 1, 10),
+            ),
         )
-        apply("subagent_automation_level", v, w)
-
-        # dynamic_timeout_safety_margin
-        v, w = CoercionService.coerce_float(
+        value, warn = CoercionService.coerce_float(
             "dynamic_timeout_safety_margin", out.get("dynamic_timeout_safety_margin"),
             defaults.dynamic_timeout_safety_margin, min_val=1.0, max_val=10.0,
         )
-        apply("dynamic_timeout_safety_margin", v, w)
-
-        # dynamic_timeout_min
-        v, w = CoercionService.coerce_int(
-            "dynamic_timeout_min", out.get("dynamic_timeout_min"),
-            defaults.dynamic_timeout_min, min_val=10,
-        )
-        apply("dynamic_timeout_min", v, w)
-
-        # dynamic_timeout_max
-        v, w = CoercionService.coerce_int(
-            "dynamic_timeout_max", out.get("dynamic_timeout_max"),
-            defaults.dynamic_timeout_max, min_val=60,
-        )
-        apply("dynamic_timeout_max", v, w)
-
-        # max_auto_split_depth
-        v, w = CoercionService.coerce_int(
-            "max_auto_split_depth", out.get("max_auto_split_depth"),
-            defaults.max_auto_split_depth, min_val=0,
-        )
-        apply("max_auto_split_depth", v, w)
-
-        # max_auto_retry_attempts
-        v, w = CoercionService.coerce_int(
-            "max_auto_retry_attempts", out.get("max_auto_retry_attempts"),
-            defaults.max_auto_retry_attempts, min_val=1, max_val=10,
-        )
-        apply("max_auto_retry_attempts", v, w)
-
+        out["dynamic_timeout_safety_margin"] = value
+        _append_warning(warnings, warn)
         return out, warnings

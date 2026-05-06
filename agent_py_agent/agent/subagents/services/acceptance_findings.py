@@ -40,15 +40,12 @@ def _artifact_exists(manager: Any, task: SubAgentTask, raw_path: str) -> bool:
             candidates.append(manager.workspace.parent.parent / path)
     return any(candidate.exists() for candidate in candidates)
 
-
 def _dict_list(value: object) -> list[dict[str, object]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
     return []
 
-
 class SubAgentAcceptanceFindingService:
-    """Acceptance finding rules and artifact checks."""
 
     def __init__(self, manager: Any):
         self.manager = manager
@@ -237,7 +234,6 @@ class SubAgentAcceptanceFindingService:
         runner: dict[str, object],
         created_at: float,
     ) -> list[AcceptanceReviewFinding]:
-        """Generate acceptance check findings."""
         from ..reports import AcceptanceReviewFinding
 
         findings: list[AcceptanceReviewFinding] = []
@@ -248,7 +244,6 @@ class SubAgentAcceptanceFindingService:
         findings.extend(self._findings_output_content(task, output, created_at))
         findings.extend(self._findings_artifacts_patches(task, output, created_at))
         return findings
-
 
 def _string_list(value: object) -> list[str]:
     if value is None:

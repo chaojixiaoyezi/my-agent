@@ -1,4 +1,3 @@
-"""Board commands: spawn, list/detail board, show detail."""
 
 from __future__ import annotations
 
@@ -9,7 +8,6 @@ from .common import make_agent
 
 
 def cmd_spawn(args) -> int:
-    """生成子任务记录。"""
 
     agent = make_agent(args)
     tasks = agent.spawn_subagents(args.goal, args.count)
@@ -19,7 +17,6 @@ def cmd_spawn(args) -> int:
 
 
 def cmd_subagents(args) -> int:
-    """显示子代理红绿灯看板。"""
 
     agent = make_agent(args)
     board = agent.subagents.write_board(recent_limit=args.limit)
@@ -50,7 +47,6 @@ def cmd_subagents(args) -> int:
 
 
 def cmd_subagent_detail(args) -> int:
-    """显示单个子代理运行详情。"""
 
     agent = make_agent(args)
     task = agent.subagents.load(args.run_id)

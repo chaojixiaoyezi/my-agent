@@ -1,18 +1,3 @@
-"""Claude Code 风格的思考指示器。
-
-在模型生成响应时显示动画 spinner，包含随机中文短语和已用时间。
-收到第一个文本 chunk 后自动停止。
-
-用法：
-    spinner = ThinkingSpinner()
-    spinner.start()
-    # ... 模型生成中 ...
-    spinner.stop()  # 收到第一个 chunk 时调用
-
-    # 或者用 context manager：
-    with ThinkingSpinner() as spinner:
-        result = agent.run(prompt, on_chunk=make_chunk_handler(spinner))
-"""
 
 from __future__ import annotations
 
@@ -28,13 +13,6 @@ _SPINNER_CHARS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 class ThinkingSpinner:
-    """Claude Code 风格的思考指示器。
-
-    人在看的解释：
-    模型思考时，终端会显示一行不断变化的文字和动画符号，
-    比如「╭ 蛐蛐人：努力工作中... ⠋ 3.2s」。
-    等模型开始输出内容后，这行会自动消失。
-    """
 
     def __init__(
         self,
@@ -55,7 +33,6 @@ class ThinkingSpinner:
         self._start_time = 0.0
 
     def start(self) -> None:
-        """启动后台线程，开始显示动画。"""
         if not self._enabled:
             return
         with self._lock:
@@ -68,7 +45,6 @@ class ThinkingSpinner:
             self._thread.start()
 
     def stop(self) -> None:
-        """停止动画并清除 spinner 行。线程安全，可重复调用。"""
         if not self._enabled:
             return
         with self._lock:
@@ -86,7 +62,6 @@ class ThinkingSpinner:
         sys.stdout.flush()
 
     def _animate(self) -> None:
-        """后台线程：每 0.12 秒刷新一帧，每 25 帧换一次短语。"""
         idx = 0
         while True:
             with self._lock:

@@ -12,7 +12,6 @@ from dataclasses import dataclass
 
 @dataclass
 class ChatJob:
-    """chat 模式里排队执行的一条模型请求。"""
 
     user: str
     show_prompt: bool
@@ -22,7 +21,6 @@ class ChatJob:
 
 @dataclass
 class DaemonOptions:
-    """daemon/gateway 共享的调度选项。"""
 
     apply: bool
     execute_runners: bool

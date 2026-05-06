@@ -74,3 +74,7 @@
 - 旧文档里已有大量 subagent 设计细节，第一版索引还没有逐段拆入四件套。
 - dry-run 到真实创建之间仍有产品风险：什么时候需要用户确认、怎么展示自动选择理由，还需要继续验证。
 - 并行 worker 可能同时补文档，后续需要以模块四件套为主入口，避免再次分散。
+## 2026-05-06 code-size cleanup
+- Split subagent workflow routing, manager helpers, patch review, runner rendering, and service utilities into smaller focused helpers.
+- Kept public report dataclasses, patch rendering compatibility, and re-export behavior intact.
+- Verified with subagent-focused pytest, ruff, and the global code-size report.

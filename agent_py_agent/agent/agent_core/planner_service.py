@@ -1,9 +1,3 @@
-"""LLM: task planning and decomposition - pure decision functions without side effects.
-
-给人看的解释：
-提取父代理 planner 的纯决策函数，不产生任何副作用。
-决策结果通过返回值传递，由调用方负责执行。
-"""
 
 from __future__ import annotations
 
@@ -22,7 +16,6 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class PlannerInputContext:
-    """Bundle of all state items needed for planner decision making."""
     tasks: list
     active_tasks: list
     due_report: Any
@@ -43,11 +36,6 @@ def build_parent_planner_state(
     reviewer: str,
     note: str,
 ) -> dict[str, Any]:
-    """Collect state snapshot for parent planner decision making.
-
-    This is a pure read-only operation - no state is modified.
-    Returns a dict with gate summary, board summary, and per-category items.
-    """
     from .runner_dispatch import (
         _dispatch_patch_review_run_ids,
         _dispatch_runner_candidates,
@@ -91,32 +79,54 @@ def build_parent_planner_state(
 
 
 def _collect_open_capability_items(tasks):
-    """Collect open capability requests and gaps from tasks."""
     open_requests = []
     open_gaps = []
     for task in tasks:
-        for request in task.capability_requests:
-            if request.status == "OPEN":
-                open_requests.append({
-                    "run_id": task.id,
-                    "request_id": request.id,
-                    "needed_capability": request.needed_capability,
-                    "problem": request.problem,
-                    "expected_output": request.expected_output,
-                })
-        for gap in task.capability_gaps:
-            if gap.status == "OPEN":
-                open_gaps.append({
-                    "run_id": task.id,
-                    "gap_id": gap.id,
-                    "needed_capability": gap.needed_capability,
-                    "problem": gap.problem,
-                })
+        open_requests.extend(_open_capability_request_items(task))
+        open_gaps.extend(_open_capability_gap_items(task))
     return open_requests, open_gaps
 
 
+def _open_capability_request_items(task) -> list[dict[str, object]]:
+    return [
+        item
+        for request in task.capability_requests
+        if (item := _open_capability_request_item(task, request)) is not None
+    ]
+
+
+def _open_capability_gap_items(task) -> list[dict[str, object]]:
+    return [
+        item
+        for gap in task.capability_gaps
+        if (item := _open_capability_gap_item(task, gap)) is not None
+    ]
+
+
+def _open_capability_request_item(task, request) -> dict[str, object] | None:
+    if request.status != "OPEN":
+        return None
+    return {
+        "run_id": task.id,
+        "request_id": request.id,
+        "needed_capability": request.needed_capability,
+        "problem": request.problem,
+        "expected_output": request.expected_output,
+    }
+
+
+def _open_capability_gap_item(task, gap) -> dict[str, object] | None:
+    if gap.status != "OPEN":
+        return None
+    return {
+        "run_id": task.id,
+        "gap_id": gap.id,
+        "needed_capability": gap.needed_capability,
+        "problem": gap.problem,
+    }
+
+
 def _build_gate_summary(ctx: PlannerInputContext) -> dict[str, Any]:
-    """Build the gate summary dict."""
     gate_summary = {
         "total_tasks": len(ctx.tasks),
         "active_tasks": len(ctx.active_tasks),
@@ -147,7 +157,6 @@ def _build_gate_summary(ctx: PlannerInputContext) -> dict[str, Any]:
 
 
 def _build_planner_state_dict(gate_summary: dict[str, Any], board: Any, ctx: PlannerInputContext, limit: int) -> dict[str, Any]:
-    """Build the full planner state dictionary."""
     from .runner_dispatch import _limit_items
 
     return {
@@ -197,7 +206,6 @@ def _build_planner_state_dict(gate_summary: dict[str, Any], board: Any, ctx: Pla
 
 
 def _task_state_for_planner(task) -> dict[str, Any]:
-    """Compress task state for planner prompt."""
     return {
         "run_id": task.id,
         "status": task.status,
@@ -222,10 +230,6 @@ def build_parent_planner_prompt(
     max_runners: int,
     runner_instruction: str,
 ) -> str:
-    """Build the parent planner LLM prompt from state snapshot.
-
-    Returns a complete prompt string ready for LLM invocation.
-    """
     import json
 
     payload = json.dumps(state, ensure_ascii=False, indent=2)
@@ -272,7 +276,6 @@ def build_parent_planner_prompt(
 
 
 def combine_runner_instruction(base: str, planner_instruction: str) -> str:
-    """Merge CLI instruction and planner instruction, CLI takes visual priority."""
     base = base.strip()
     planner_instruction = planner_instruction.strip()
     if base and planner_instruction:

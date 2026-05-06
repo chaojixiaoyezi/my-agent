@@ -12,7 +12,6 @@ from ..learning import cmd_learn_accept, cmd_learn_list, cmd_learn_reject, cmd_l
 
 
 def add_learning_subcommand(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Register the `learn` command tree."""
 
     learn = subparsers.add_parser("learn", help="管理自动生成的 learning draft 候选")
     learn_sub = learn.add_subparsers(dest="learn_command", required=True)

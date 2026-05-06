@@ -5,7 +5,26 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(frozen=True)
+class _ResultAccessContext:
+
+    request_id: str
+    user_id: str
+    permission: Any
+
+
+@dataclass(frozen=True)
+class _AskRequestContext:
+
+    body: dict
+    goal: str
+    request_id: str
+    user_id: str
+    channel: str
 
 
 def _request_identity(handler) -> tuple[str, Any]:
@@ -31,7 +50,6 @@ def _can_read_payload(payload: dict, user_id: str, permission: Any) -> bool:
 
 
 def handle_status(handler, server) -> None:
-    """GET /status - return gateway status."""
     if server is None:
         handler._send_json(500, {"error": "server not initialized"})
         return
@@ -69,43 +87,43 @@ def _request_counts(paths) -> dict[str, int]:
 
 
 def handle_result(handler, server) -> None:
-    """GET /result/<request_id> - return request result."""
     request_id = handler.path[len("/result/"):]
     if server is None:
         handler._send_json(500, {"error": "server not initialized"})
         return
     user_id, permission = _request_identity(handler)
+    access = _ResultAccessContext(request_id, user_id, permission)
     response_path = server.paths.responses / f"{request_id}.json"
     if response_path.exists():
-        _send_finished_result(handler, response_path, request_id, user_id, permission)
+        _send_finished_result(handler, response_path, access)
         return
-    if _send_pending_state(handler, server.paths.processing, "processing", request_id, user_id, permission):
+    if _send_pending_state(handler, server.paths.processing, "processing", access):
         return
-    if _send_pending_state(handler, server.paths.inbox, "queued", request_id, user_id, permission):
+    if _send_pending_state(handler, server.paths.inbox, "queued", access):
         return
     handler._send_json(404, {"error": "not found", "request_id": request_id})
 
 
-def _send_pending_state(handler, folder, status: str, request_id: str, user_id: str, permission: Any) -> bool:
-    request_path = folder / f"{request_id}.json"
+def _send_pending_state(handler, folder, status: str, access: _ResultAccessContext) -> bool:
+    request_path = folder / f"{access.request_id}.json"
     if not request_path.exists():
         return False
     payload = _read_payload(request_path)
-    if payload and not _can_read_payload(payload, user_id, permission):
-        handler._send_json(403, {"error": "forbidden", "request_id": request_id})
+    if payload and not _can_read_payload(payload, access.user_id, access.permission):
+        handler._send_json(403, {"error": "forbidden", "request_id": access.request_id})
         return True
-    handler._send_json(202, {"status": status, "request_id": request_id})
+    handler._send_json(202, {"status": status, "request_id": access.request_id})
     return True
 
 
-def _send_finished_result(handler, response_path, request_id: str, user_id: str, permission: Any) -> None:
+def _send_finished_result(handler, response_path, access: _ResultAccessContext) -> None:
     try:
         result = json.loads(response_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         handler._send_json(500, {"error": f"failed to read result: {exc}"})
         return
-    if not _can_read_payload(result, user_id, permission):
-        handler._send_json(403, {"error": "forbidden", "request_id": request_id})
+    if not _can_read_payload(result, access.user_id, access.permission):
+        handler._send_json(403, {"error": "forbidden", "request_id": access.request_id})
         return
     handler._send_json(200, result)
 
@@ -118,7 +136,6 @@ def _read_payload(path) -> dict:
 
 
 def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
-    """POST /ask - submit a new request."""
     try:
         body = handler._read_json()
     except json.JSONDecodeError as exc:
@@ -137,7 +154,7 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
         return
     request_id = request_id_factory()
     user_id, channel = _request_channel(handler)
-    request_data = _build_ask_request(body, goal, request_id, user_id, channel)
+    request_data = _build_ask_request(_AskRequestContext(body, goal, request_id, user_id, channel))
     pending_path = server.paths.inbox / f"{request_id}.json"
     try:
         pending_path.write_text(json.dumps(request_data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -147,23 +164,22 @@ def handle_ask(handler, server, request_id_factory: Callable[[], str]) -> None:
     handler._send_json(202, {"request_id": request_id, "status": "queued"})
 
 
-def _build_ask_request(body: dict, goal: str, request_id: str, user_id: str, channel: str) -> dict:
-    metadata = body.get("metadata", {})
-    metadata["user_id"] = user_id
-    metadata["channel"] = channel
+def _build_ask_request(context: _AskRequestContext) -> dict:
+    metadata = context.body.get("metadata", {})
+    metadata["user_id"] = context.user_id
+    metadata["channel"] = context.channel
     return {
-        "id": request_id,
-        "request_id": request_id,
+        "id": context.request_id,
+        "request_id": context.request_id,
         "kind": "ask",
-        "goal": goal,
+        "goal": context.goal,
         "metadata": metadata,
         "submitted_at": time.time(),
-        "user_id": user_id,
+        "user_id": context.user_id,
     }
 
 
 def handle_stop(handler, server) -> None:
-    """POST /stop - request graceful shutdown."""
     if server is None:
         handler._send_json(500, {"error": "server not initialized"})
         return
@@ -176,7 +192,6 @@ def handle_stop(handler, server) -> None:
 
 
 def handle_session_channels(handler, server) -> None:
-    """GET /sessions/{session_id}/channels - query session channel bindings."""
     from ..auth.middleware import require_admin_handler
 
     if require_admin_handler(handler):
@@ -195,7 +210,6 @@ def handle_session_channels(handler, server) -> None:
 
 
 def handle_session_bind(handler, server) -> None:
-    """POST /sessions/{session_id}/bind - bind session to new channel."""
     from ..auth.middleware import require_admin_handler
 
     if require_admin_handler(handler):
@@ -227,7 +241,6 @@ def _read_bind_body(handler) -> dict | None:
 
 
 def handle_admin_summary(handler, server) -> None:
-    """GET /admin/summary - admin global summary."""
     from ..auth.middleware import require_admin_handler
 
     if require_admin_handler(handler):

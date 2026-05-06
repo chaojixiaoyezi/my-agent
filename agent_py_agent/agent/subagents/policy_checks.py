@@ -230,14 +230,7 @@ def _verification_from_runner_status(status: str) -> str:
     return "UNVERIFIED"
 
 
-def _runner_next_action(
-    *,
-    dry_run: bool,
-    ok: bool,
-    status: str,
-    capability_request_count: int,
-    next_actions: list[str] | None = None,
-) -> str:
+def _runner_next_action(**kwargs) -> str:
     """LLM: compute machine-readable next-action suggestion from runner result.
 
     新手说明:
@@ -245,6 +238,11 @@ def _runner_next_action(
     有 next_actions 就取第一个，ok 且待验收就跑验收，否则检查失败。
     """
 
+    dry_run = bool(kwargs.get("dry_run", False))
+    ok = bool(kwargs.get("ok", False))
+    status = str(kwargs.get("status", ""))
+    capability_request_count = int(kwargs.get("capability_request_count", 0) or 0)
+    next_actions = kwargs.get("next_actions")
     if dry_run:
         return ""
     if capability_request_count:

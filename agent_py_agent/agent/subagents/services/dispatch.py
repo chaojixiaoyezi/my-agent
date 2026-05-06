@@ -26,9 +26,7 @@ if TYPE_CHECKING:
         ParentPlannerReport,
     )
 
-
 class SubAgentDispatchService:
-    """Dispatch record, reporting, and watch loop service."""
 
     def __init__(self, manager: Any):
         self.manager = manager
@@ -38,11 +36,9 @@ class SubAgentDispatchService:
         *,
         params: DispatchRecordParams,
     ) -> DispatchRecord:
-        """Create a dispatch audit record."""
         return self._make_dispatch_record(params)
 
     def _make_dispatch_record(self, params: DispatchRecordParams) -> DispatchRecord:
-        """Internal: create a dispatch audit record from params bundle."""
         from .dispatch_record_builder import DispatchRecordBuilder
 
         return DispatchRecordBuilder.make_record(self.manager, params)
@@ -53,7 +49,6 @@ class SubAgentDispatchService:
         *,
         dry_run: bool,
     ) -> DispatchReport:
-        """Summarize dispatch audit records."""
         from ..reports import DispatchReport
         from .dispatch_record_builder import DispatchRecordBuilder
 
@@ -71,7 +66,6 @@ class SubAgentDispatchService:
         *,
         append_log: bool = False,
     ) -> DispatchReport:
-        """Write dispatch report and optional audit log."""
         (self.manager.workspace / "subagent_dispatch_report.json").write_text(
             json.dumps(asdict(report), ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -99,7 +93,6 @@ class SubAgentDispatchService:
         *,
         params: DispatchWatchRecordParams,
     ) -> DispatchWatchRecord:
-        """Create a watch loop record."""
         from .dispatch_watch_builder import DispatchWatchBuilder
 
         return DispatchWatchBuilder.make_record(self.manager, params=params)
@@ -110,7 +103,6 @@ class SubAgentDispatchService:
         *,
         dry_run: bool,
     ) -> DispatchWatchReport:
-        """Summarize watch loop records."""
         from ..reports import DispatchWatchReport
         from .dispatch_watch_builder import DispatchWatchBuilder
 
@@ -123,7 +115,6 @@ class SubAgentDispatchService:
         )
 
     def write_dispatch_watch_report(self, report: DispatchWatchReport) -> DispatchWatchReport:
-        """Write watch mode report."""
         (self.manager.workspace / "subagent_dispatch_watch_report.json").write_text(
             json.dumps(asdict(report), ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -148,7 +139,6 @@ class SubAgentDispatchService:
         pid: int,
         message: str = "",
     ) -> Path:
-        """Write watch heartbeat for external process monitoring."""
         path = self.manager.workspace / "subagent_dispatch_watch_heartbeat.json"
         payload = {
             "cycle": cycle,
@@ -162,7 +152,6 @@ class SubAgentDispatchService:
         return path
 
     def write_parent_planner_exchange(self, prompt: str, response: str = "") -> tuple[str, str]:
-        """Write the most recent parent planner prompt/response."""
         prompt_path = self.manager.workspace / "parent_planner_prompt.md"
         response_path = self.manager.workspace / "parent_planner_response.md"
         prompt_path.write_text(prompt, encoding="utf-8")
@@ -175,7 +164,6 @@ class SubAgentDispatchService:
         *,
         params: ParentPlannerRecordParams,
     ) -> ParentPlannerRecord:
-        """Create a parent planner audit record."""
         from .parent_planner_builder import ParentPlannerBuilder
 
         return ParentPlannerBuilder.make_record(self.manager, params=params)
@@ -186,7 +174,6 @@ class SubAgentDispatchService:
         *,
         dry_run: bool,
     ) -> ParentPlannerReport:
-        """Summarize parent planner records."""
         from ..reports import ParentPlannerReport
         from .parent_planner_builder import ParentPlannerBuilder
 
@@ -204,7 +191,6 @@ class SubAgentDispatchService:
         *,
         append_log: bool = False,
     ) -> ParentPlannerReport:
-        """Write parent planner report and optional audit log."""
         (self.manager.workspace / "parent_planner_report.json").write_text(
             json.dumps(asdict(report), ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -228,13 +214,11 @@ class SubAgentDispatchService:
         return report
 
     def append_dispatch_watch_log(self, record: DispatchWatchRecord) -> None:
-        """Write global watch audit log."""
         from .dispatch_watch_log_appender import DispatchWatchLogAppender
 
         DispatchWatchLogAppender.append(record, self.manager.workspace, self.manager)
 
     def append_parent_planner_log(self, record: ParentPlannerRecord) -> None:
-        """Write global parent planner audit log."""
         from .parent_planner_builder import ParentPlannerLogAppender
 
         ParentPlannerLogAppender.append(record, self.manager.workspace, self.manager)

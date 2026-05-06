@@ -17,7 +17,6 @@ from .models import DaemonOptions
 
 
 def cmd_daemon(args) -> int:
-    """按配置启动前台常驻调度。"""
 
     agent = make_agent(args)
     try:
@@ -37,25 +36,7 @@ def cmd_daemon(args) -> int:
     )
     print("停止：Ctrl+C")
     try:
-        report = agent.watch_subagents(
-            router,
-            capability_config,
-            apply=options.apply,
-            execute_runners=options.execute_runners,
-            planner=options.planner,
-            max_runners=options.max_runners,
-            limit=options.limit,
-            reviewer=options.reviewer,
-            note=args.note or "",
-            runner_instruction=options.instruction or "",
-            max_cards=options.max_cards,
-            probe=options.probe,
-            take_over_by=args.take_over_by or "",
-            locked_files=args.locked_file or [],
-            interval=options.interval,
-            max_cycles=options.max_cycles,
-            force_lock=args.force_lock,
-        )
+        report = agent.watch_subagents(router, capability_config, apply=options.apply, execute_runners=options.execute_runners, planner=options.planner, max_runners=options.max_runners, limit=options.limit, reviewer=options.reviewer, note=args.note or "", runner_instruction=options.instruction or "", max_cards=options.max_cards, probe=options.probe, take_over_by=args.take_over_by or "", locked_files=args.locked_file or [], interval=options.interval, max_cycles=options.max_cycles, force_lock=args.force_lock)
     except KeyboardInterrupt:
         print("\ndaemon stopped by Ctrl+C")
         return 130
@@ -94,7 +75,6 @@ def _validate_daemon_numbers(
 
 
 def _resolve_daemon_max_runners(value: object) -> int:
-    """把 daemon_max_runners 的 auto / 数字配置转成当前前台调度器可执行的整数。"""
 
     if isinstance(value, str):
         normalized = value.strip().lower()
@@ -112,7 +92,6 @@ def _resolve_daemon_max_runners(value: object) -> int:
 
 
 def _resolve_daemon_options(agent: SimpleAgent, args) -> DaemonOptions:
-    """合并配置和 CLI override，得到 daemon/gateway 运行参数。"""
 
     cfg = agent.config
     apply = cfg.daemon_apply if getattr(args, "apply", None) is None else args.apply
@@ -141,26 +120,8 @@ def _resolve_daemon_options(agent: SimpleAgent, args) -> DaemonOptions:
     instruction = cfg.daemon_runner_instruction if instruction is None else instruction
     probe = False if getattr(args, "no_probe", False) else cfg.daemon_probe
 
-    invalid_number = _validate_daemon_numbers(
-        interval=interval,
-        max_runners=max_runners,
-        limit=limit,
-        max_cycles=max_cycles,
-        max_cards=max_cards,
-    )
+    invalid_number = _validate_daemon_numbers(interval=interval, max_runners=max_runners, limit=limit, max_cycles=max_cycles, max_cards=max_cards)
     if invalid_number:
         raise ValueError(invalid_number)
 
-    return DaemonOptions(
-        apply=apply,
-        execute_runners=execute_runners,
-        planner=planner,
-        interval=interval,
-        max_runners=max_runners,
-        limit=limit,
-        max_cycles=max_cycles,
-        max_cards=max_cards,
-        reviewer=reviewer,
-        instruction=instruction,
-        probe=probe,
-    )
+    return DaemonOptions(apply, execute_runners, planner, interval, max_runners, limit, max_cycles, max_cards, reviewer, instruction, probe)

@@ -27,7 +27,6 @@ PARENT_PLANNER_READ_TOOLS = ["list_files", "read_file", "search_text"]
 
 @dataclass(frozen=True)
 class BuildGateSummaryParams:
-    """Bundle of all _build_gate_summary parameters."""
 
     tasks: list
     active_tasks: list
@@ -43,32 +42,51 @@ class BuildGateSummaryParams:
 def _collect_open_requests_and_gaps(
     tasks: list[SubAgentTask],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Collect OPEN capability requests and gaps from tasks."""
     open_requests = []
     open_gaps = []
     for task in tasks:
-        for request in task.capability_requests:
-            if request.status == "OPEN":
-                open_requests.append(
-                    {
-                        "run_id": task.id,
-                        "request_id": request.id,
-                        "needed_capability": request.needed_capability,
-                        "problem": request.problem,
-                        "expected_output": request.expected_output,
-                    }
-                )
-        for gap in task.capability_gaps:
-            if gap.status == "OPEN":
-                open_gaps.append(
-                    {
-                        "run_id": task.id,
-                        "gap_id": gap.id,
-                        "needed_capability": gap.needed_capability,
-                        "problem": gap.problem,
-                    }
-                )
+        open_requests.extend(_open_request_items(task))
+        open_gaps.extend(_open_gap_items(task))
     return open_requests, open_gaps
+
+
+def _open_request_items(task: SubAgentTask) -> list[dict[str, object]]:
+    return [
+        item
+        for request in task.capability_requests
+        if (item := _open_request_item(task, request)) is not None
+    ]
+
+
+def _open_gap_items(task: SubAgentTask) -> list[dict[str, object]]:
+    return [
+        item
+        for gap in task.capability_gaps
+        if (item := _open_gap_item(task, gap)) is not None
+    ]
+
+
+def _open_request_item(task: SubAgentTask, request) -> dict[str, object] | None:
+    if request.status != "OPEN":
+        return None
+    return {
+        "run_id": task.id,
+        "request_id": request.id,
+        "needed_capability": request.needed_capability,
+        "problem": request.problem,
+        "expected_output": request.expected_output,
+    }
+
+
+def _open_gap_item(task: SubAgentTask, gap) -> dict[str, object] | None:
+    if gap.status != "OPEN":
+        return None
+    return {
+        "run_id": task.id,
+        "gap_id": gap.id,
+        "needed_capability": gap.needed_capability,
+        "problem": gap.problem,
+    }
 
 
 def _build_parent_planner_state(
@@ -80,7 +98,6 @@ def _build_parent_planner_state(
     reviewer: str,
     note: str,
 ) -> dict[str, object]:
-    """收集父代理 planner 的状态快照和 heartbeat gate。"""
 
     tasks = agent.subagents.list_runs()
     board_limit = limit if limit > 0 else len(tasks)
@@ -183,7 +200,6 @@ def _planner_acceptance_records(records, limit: int) -> list[dict[str, object]]:
 
 
 def _build_gate_summary(params: BuildGateSummaryParams) -> dict[str, int]:
-    """Build the gate_summary dict from collected reports."""
     gate_summary = {
         "total_tasks": len(params.tasks),
         "active_tasks": len(params.active_tasks),
@@ -221,7 +237,6 @@ def _build_parent_planner_prompt(
     max_runners: int,
     runner_instruction: str,
 ) -> str:
-    """构建父代理 planner 的完整 LLM turn prompt。"""
 
     payload = json.dumps(state, ensure_ascii=False, indent=2)
     mode = "apply" if apply else "dry-run"
@@ -267,7 +282,6 @@ def _build_parent_planner_prompt(
 
 
 def _task_state_for_planner(task: SubAgentTask) -> dict[str, object]:
-    """压缩任务状态，避免把完整工单塞进 planner prompt。"""
 
     return {
         "run_id": task.id,
@@ -286,7 +300,6 @@ def _task_state_for_planner(task: SubAgentTask) -> dict[str, object]:
 
 
 def _combine_runner_instruction(base: str, planner_instruction: str) -> str:
-    """合并 CLI 指令和 planner 指令，保持 CLI 指令优先可见。"""
 
     base = base.strip()
     planner_instruction = planner_instruction.strip()

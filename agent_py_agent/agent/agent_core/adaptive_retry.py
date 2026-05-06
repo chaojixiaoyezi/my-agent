@@ -21,16 +21,6 @@ def adaptive_retry(
     analysis: FailureAnalysis,
     max_split_depth: int = 2,
 ) -> SubAgentTask | list[SubAgentTask]:
-    """根据失败分析结果决定下一步。
-
-    Args:
-        task: 失败的任务
-        analysis: 失败分析结果
-        max_split_depth: 最大拆分深度
-
-    Returns:
-        单个任务（重试）或任务列表（拆分），空列表表示停止
-    """
 
     # 不应该重试的情况
     if not analysis.should_retry and not analysis.should_split:
@@ -63,15 +53,6 @@ def adaptive_retry(
 
 
 def split_task(task: SubAgentTask, suggestions: list[str]) -> list[SubAgentTask]:
-    """把大任务拆分成多个小任务。
-
-    Args:
-        task: 原始任务
-        suggestions: 拆分建议
-
-    Returns:
-        拆分后的子任务列表
-    """
 
     subtasks = [_build_split_subtask(task, suggestions, index, suggestion) for index, suggestion in enumerate(suggestions)]
     _mark_task_split(task, subtasks)
@@ -124,7 +105,6 @@ def _mark_task_split(task: SubAgentTask, subtasks: list[SubAgentTask]) -> None:
 
 
 def should_auto_split(task: SubAgentTask, max_depth: int = 2) -> bool:
-    """判断是否应该自动拆分任务。"""
 
     # 检查深度限制
     if task.depth >= max_depth:
@@ -142,7 +122,6 @@ def should_auto_split(task: SubAgentTask, max_depth: int = 2) -> bool:
 
 
 def estimate_split_count(task: SubAgentTask) -> int:
-    """估算应该拆分成几个子任务。"""
 
     plan_length = len(task.plan)
 

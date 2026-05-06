@@ -1,8 +1,3 @@
-"""跨通道会话管理。
-
-实现会话在不同通道（chat、feishu、qq 等）之间的绑定和切换。
-存储在会话目录下：data/sessions/{session_id}/channels.json
-"""
 from __future__ import annotations
 
 import json
@@ -30,17 +25,8 @@ class ChannelInfo:
 
 
 class CrossChannelSession:
-    """跨通道会话管理。
-
-    管理会话在不同通道间的绑定关系。
-    """
 
     def __init__(self, config: AgentConfig):
-        """初始化跨通道会话管理器。
-
-        Args:
-            config: 智能体配置对象
-        """
         self.config = config
         self._session_root = Path(config.session_workspace)
         self._session_root.mkdir(parents=True, exist_ok=True)
@@ -66,16 +52,6 @@ class CrossChannelSession:
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def bind_session(self, session_id: str, channel: str, user_id: str | None = None) -> bool:
-        """将会话绑定到新通道。
-
-        Args:
-            session_id: 会话 ID
-            channel: 通道名称（如 chat、feishu、qq）
-            user_id: 用户 ID（用于初始化或校验）
-
-        Returns:
-            是否成功绑定
-        """
         data = self._load_channels(session_id)
 
         if data is None:
@@ -106,15 +82,6 @@ class CrossChannelSession:
         return True
 
     def unbind_channel(self, session_id: str, channel: str) -> bool:
-        """从会话解绑通道。
-
-        Args:
-            session_id: 会话 ID
-            channel: 通道名称
-
-        Returns:
-            是否成功解绑
-        """
         data = self._load_channels(session_id)
         if data is None:
             return False
@@ -133,14 +100,6 @@ class CrossChannelSession:
         return True
 
     def get_bound_sessions(self, session_id: str) -> list[dict]:
-        """获取该会话绑定的所有通道。
-
-        Args:
-            session_id: 会话 ID
-
-        Returns:
-            通道信息列表
-        """
         data = self._load_channels(session_id)
         if data is None:
             return []
@@ -187,18 +146,6 @@ class CrossChannelSession:
         return None
 
     def transfer_session(self, session_id: str, from_channel: str, to_channel: str) -> bool:
-        """切换会话通道。
-
-        将会话从源通道切换到目标通道。
-
-        Args:
-            session_id: 会话 ID
-            from_channel: 源通道
-            to_channel: 目标通道
-
-        Returns:
-            是否成功切换
-        """
         data = self._load_channels(session_id)
         if data is None:
             return False

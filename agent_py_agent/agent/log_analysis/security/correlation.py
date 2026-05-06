@@ -30,6 +30,16 @@ class RouteDraft:
         return asdict(self)
 
 
+@dataclass
+class _RouteGapContext:
+    case_obj: CaseRecord
+    findings: Sequence[Finding]
+    impacted_entities: Mapping[str, Sequence[Any]]
+    entry_candidates: Sequence[Mapping[str, Any]]
+    gaps: list[str]
+    next_queries: list[Any]
+
+
 def build_route_draft(
     case: CaseRecord | Mapping[str, Any],
     *,
@@ -43,28 +53,7 @@ def build_route_draft(
     entry_candidates = _entry_candidates(finding_objs)
     gaps = _unique([*case_obj.gaps, *(gap for finding in finding_objs for gap in finding.gaps)])
     next_queries = _unique_values([*case_obj.next_queries, *(query for finding in finding_objs for query in finding.next_queries)])
-
-    if not entry_candidates:
-        gaps.append("Entry point is not identified; rank candidate source IP, VPN account, WAF URI, and first host touch.")
-        next_queries.append(
-            QueryPlan(
-                purpose="Build entry-candidate query across WAF, VPN, SSO, exposed services, and first host activity",
-                source_products=["waf", "vpn", "sso", "edr"],
-                start_time=case_obj.created_at,
-                end_time=case_obj.updated_at,
-                filters=_first_entity_filters(impacted_entities),
-                limit=100,
-                evidence_needed=["entry_candidate", "first_host_touch", "identity_session"],
-            ).to_dict()
-        )
-    if any(finding.detector_id == "waf_attack_success_candidate" for finding in finding_objs) and not any(
-        finding.detector_id == "web_to_process_anomaly" for finding in finding_objs
-    ):
-        gaps.append("WAF path lacks linked EDR process evidence for the victim asset.")
-    if any(finding.detector_id in {"vpn_new_geo_login", "bruteforce_then_success"} for finding in finding_objs) and not any(
-        "host" in finding.entities or "victim_ip" in finding.entities for finding in finding_objs
-    ):
-        gaps.append("Identity path lacks linked host logon or asset access evidence.")
+    _add_route_gaps(_RouteGapContext(case_obj, finding_objs, impacted_entities, entry_candidates, gaps, next_queries))
 
     chain = build_attack_chain(finding_objs)
     route = RouteDraft(
@@ -82,6 +71,33 @@ def build_route_draft(
     attributes = case_obj.attributes if isinstance(case_obj.attributes, Mapping) else {}
     case_obj.attributes = {**attributes, "route_draft": route.to_dict()}
     return route
+
+
+def _add_route_gaps(context: _RouteGapContext) -> None:
+    if not context.entry_candidates:
+        context.gaps.append("Entry point is not identified; rank candidate source IP, VPN account, WAF URI, and first host touch.")
+        context.next_queries.append(_entry_candidate_query(context.case_obj, context.impacted_entities))
+    detector_ids = {finding.detector_id for finding in context.findings}
+    if "waf_attack_success_candidate" in detector_ids and "web_to_process_anomaly" not in detector_ids:
+        context.gaps.append("WAF path lacks linked EDR process evidence for the victim asset.")
+    if detector_ids & {"vpn_new_geo_login", "bruteforce_then_success"} and not _has_identity_asset_link(context.findings):
+        context.gaps.append("Identity path lacks linked host logon or asset access evidence.")
+
+
+def _entry_candidate_query(case_obj: CaseRecord, impacted_entities: Mapping[str, Sequence[Any]]) -> dict[str, Any]:
+    return QueryPlan(
+        purpose="Build entry-candidate query across WAF, VPN, SSO, exposed services, and first host activity",
+        source_products=["waf", "vpn", "sso", "edr"],
+        start_time=case_obj.created_at,
+        end_time=case_obj.updated_at,
+        filters=_first_entity_filters(impacted_entities),
+        limit=100,
+        evidence_needed=["entry_candidate", "first_host_touch", "identity_session"],
+    ).to_dict()
+
+
+def _has_identity_asset_link(findings: Sequence[Finding]) -> bool:
+    return any("host" in finding.entities or "victim_ip" in finding.entities for finding in findings)
 
 
 def draft_route(case: CaseRecord | Mapping[str, Any], *, findings: Sequence[Finding | Mapping[str, Any]] | None = None) -> RouteDraft:
@@ -172,13 +188,16 @@ def _merge_entities(entity_sets: Sequence[Mapping[str, Sequence[Any]]]) -> dict[
 def _ref_ids(refs: Sequence[Any]) -> list[str]:
     result: list[str] = []
     for ref in refs:
-        if isinstance(ref, EvidenceRef):
-            result.append(ref.evidence_id)
-        elif isinstance(ref, Mapping):
-            result.append(str(ref.get("evidence_id") or ref.get("raw_ref") or ref))
-        else:
-            result.append(str(ref))
+        result.append(_ref_id(ref))
     return _unique(result)
+
+
+def _ref_id(ref: Any) -> str:
+    if isinstance(ref, EvidenceRef):
+        return ref.evidence_id
+    if isinstance(ref, Mapping):
+        return str(ref.get("evidence_id") or ref.get("raw_ref") or ref)
+    return str(ref)
 
 
 def _first_entity_filters(entities: Mapping[str, Sequence[Any]]) -> dict[str, Any]:

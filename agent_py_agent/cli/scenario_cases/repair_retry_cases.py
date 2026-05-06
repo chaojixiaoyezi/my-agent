@@ -22,11 +22,6 @@ from ..scenario_utils import (
 
 
 def print_dispatch_report(report) -> None:
-    """LLM: print a human-readable dispatch summary for scenario test output.
-
-    新手说明:
-    在场景测试里打印 dispatch 的摘要信息，方便看每一步执行结果。
-    """
 
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
     for record in report.records:
@@ -39,12 +34,6 @@ def print_dispatch_report(report) -> None:
 
 
 class ScenarioStructuredRepairBackend:
-    """LLM: stub backend that emits a broken SUBAGENT_RESULT on first call, then a valid one on repair.
-
-    新手说明:
-    场景测试用后端——第一次输出坏的结构化结果块（JSON 不完整），
-    第二次修复回合输出完整的可解析结构化结果。
-    """
 
     name = "scenario_structured_repair_backend"
 
@@ -95,7 +84,6 @@ class ScenarioStructuredRepairBackend:
 
 
 def _structured_repair_setup(args):
-    """Setup for structured repair: workspace, agent, backend, capability router, and task."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=structured-repair")
@@ -121,7 +109,6 @@ def _structured_repair_setup(args):
 
 
 def _verify_structured_repair(backend, loaded, runner, output, report):
-    """Verify structured repair: backend calls, status, repair flags, acceptance."""
     return (
         backend.calls == 2
         and loaded.status == "DONE"
@@ -136,12 +123,6 @@ def _verify_structured_repair(backend, loaded, runner, output, report):
 
 
 def run_scenario_structured_repair_case(args) -> int:
-    """LLM: verify that a broken structured output triggers a repair round and then passes acceptance.
-
-    新手说明:
-    让 runner 故意输出损坏的 JSON，验证系统会自动触发修复回合。
-    修复后父代理应该能验收通过。
-    """
 
     paths, agent, backend, capability_config, router, task = _structured_repair_setup(args)
 
@@ -182,12 +163,6 @@ def run_scenario_structured_repair_case(args) -> int:
 
 
 class ScenarioRetryBackend:
-    """LLM: stub backend that fails on first generate, then returns a valid structured result on second call.
-
-    新手说明:
-    场景测试用后端——第一次调用抛出 RuntimeError 模拟临时失败，
-    第二次调用返回可验收的结构化结果。
-    """
 
     name = "scenario_retry_backend"
 
@@ -227,7 +202,6 @@ class ScenarioRetryBackend:
 
 
 def _runner_retry_setup(args):
-    """Setup for runner retry: workspace, agent, backend, capability router, and task."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=runner-retry")
@@ -253,7 +227,6 @@ def _runner_retry_setup(args):
 
 
 def _run_dispatch_round(agent, router, capability_config, reviewer, note):
-    """Run one dispatch round and return report and loaded task state."""
     report = agent.dispatch_subagents(
         router, capability_config, apply=True, execute_runners=True,
         max_runners=1, probe=False, reviewer=reviewer, note=note,
@@ -263,7 +236,6 @@ def _run_dispatch_round(agent, router, capability_config, reviewer, note):
 
 
 def _verify_runner_retry(first, second, after_first, loaded, backend):
-    """Verify runner retry: first fails, second succeeds, correct attempt counts."""
     first_runner = [item for item in first.records if item.step == "runner"]
     second_runner = [item for item in second.records if item.step == "runner"]
     return (
@@ -284,12 +256,6 @@ def _verify_runner_retry(first, second, after_first, loaded, backend):
 
 
 def run_scenario_runner_retry_case(args) -> int:
-    """LLM: verify that a transient runner failure is automatically retried on the next dispatch round.
-
-    新手说明:
-    让 runner 第一次执行失败，验证下一轮 dispatch 会自动重试。
-    重试成功后父代理应该能验收通过。
-    """
 
     paths, agent, backend, capability_config, router, task = _runner_retry_setup(args)
 

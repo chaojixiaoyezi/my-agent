@@ -31,7 +31,6 @@ from .gateway_client import cmd_default
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """构建 CLI 参数解析器。"""
 
     parser = argparse.ArgumentParser(
         prog="my-agent",
@@ -63,7 +62,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    """程序入口。"""
 
     configure_stdio()
     parser = build_parser()

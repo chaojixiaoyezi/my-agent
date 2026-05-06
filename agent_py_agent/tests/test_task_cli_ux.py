@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -52,6 +52,32 @@ def _make_mock_store(tasks=None):
         mock_store.task_registry.query_tasks.return_value = []
         mock_store.task_registry.lookup_task.return_value = None
     return mock_store
+
+
+@contextmanager
+def _patched_task_cli_deps(mock_store):
+    with ExitStack() as stack:
+        mock_ls = stack.enter_context(patch("agent_py_agent.cli.task_commands.LocalStore"))
+        mock_ls.return_value = mock_store
+        mock_cfg = stack.enter_context(patch("agent_py_agent.cli.task_commands.load_config"))
+        mock_cfg.return_value = MagicMock(workspace_root="")
+        mock_resolve = stack.enter_context(
+            patch("agent_py_agent.cli.task_commands.resolve_workspace_root")
+        )
+        mock_resolve.return_value = Path(tempfile.gettempdir())
+        yield
+
+
+def _task_record(task_id, status):
+    return {
+        "task_id": task_id,
+        "status": status,
+        "goal": "",
+        "session_id": "",
+        "user_id": "",
+        "created_at": 0,
+        "updated_at": 0,
+    }
 
 
 class TestTaskList:
@@ -157,17 +183,11 @@ class TestTaskShow:
         mock_store = _make_mock_store([])
         mock_store.task_registry.lookup_task.return_value = None
 
-        with patch("agent_py_agent.cli.task_commands.LocalStore") as mock_ls:
-            mock_ls.return_value = mock_store
-            with patch("agent_py_agent.cli.task_commands.load_config") as mock_cfg:
-                mock_cfg.return_value = MagicMock(workspace_root="")
-                with patch("agent_py_agent.cli.task_commands.resolve_workspace_root") as mock_resolve:
-                    mock_resolve.return_value = Path(tempfile.gettempdir())
+        with _patched_task_cli_deps(mock_store):
+            args = MockArgs(task_id="task-999")
+            result = cmd_task_show(args)
 
-                    args = MockArgs(task_id="task-999")
-                    result = cmd_task_show(args)
-
-                    assert result == 0
+        assert result == 0
 
     def test_task_detail_completeness(self):
         """测试任务详情的完整性显示。
@@ -223,56 +243,20 @@ class TestTaskShow:
 class TestTaskStateTransitions:
     """测试 task abandon/pause/resume 命令的状态转换。"""
 
-    @staticmethod
-    @contextmanager
-    def _patch_task_cli_deps(mock_store):
-        """Patch all task_commands dependencies into a single with-block."""
-        with patch("agent_py_agent.cli.task_commands.LocalStore") as mock_ls:
-            mock_ls.return_value = mock_store
-            with patch("agent_py_agent.cli.task_commands.load_config") as mock_cfg:
-                mock_cfg.return_value = MagicMock(workspace_root="")
-                with patch("agent_py_agent.cli.task_commands.resolve_workspace_root") as mock_resolve:
-                    mock_resolve.return_value = Path(tempfile.gettempdir())
-                    yield
-
     def _call_abandon(self, task_id, status):
-        mock_store = _make_mock_store([
-            {"task_id": task_id, "status": status, "goal": "", "session_id": "", "user_id": "", "created_at": 0, "updated_at": 0}
-        ])
-        with patch("agent_py_agent.cli.task_commands.LocalStore") as mock_ls:
-            mock_ls.return_value = mock_store
-            with patch("agent_py_agent.cli.task_commands.load_config") as mock_cfg:
-                mock_cfg.return_value = MagicMock(workspace_root="")
-                with patch("agent_py_agent.cli.task_commands.resolve_workspace_root") as mock_resolve:
-                    mock_resolve.return_value = Path(tempfile.gettempdir())
-                    args = MockArgs(task_id=task_id)
-                    return cmd_task_abandon(args)
+        mock_store = _make_mock_store([_task_record(task_id, status)])
+        with _patched_task_cli_deps(mock_store):
+            return cmd_task_abandon(MockArgs(task_id=task_id))
 
     def _call_pause(self, task_id, status):
-        mock_store = _make_mock_store([
-            {"task_id": task_id, "status": status, "goal": "", "session_id": "", "user_id": "", "created_at": 0, "updated_at": 0}
-        ])
-        with patch("agent_py_agent.cli.task_commands.LocalStore") as mock_ls:
-            mock_ls.return_value = mock_store
-            with patch("agent_py_agent.cli.task_commands.load_config") as mock_cfg:
-                mock_cfg.return_value = MagicMock(workspace_root="")
-                with patch("agent_py_agent.cli.task_commands.resolve_workspace_root") as mock_resolve:
-                    mock_resolve.return_value = Path(tempfile.gettempdir())
-                    args = MockArgs(task_id=task_id)
-                    return cmd_task_pause(args)
+        mock_store = _make_mock_store([_task_record(task_id, status)])
+        with _patched_task_cli_deps(mock_store):
+            return cmd_task_pause(MockArgs(task_id=task_id))
 
     def _call_resume(self, task_id, status):
-        mock_store = _make_mock_store([
-            {"task_id": task_id, "status": status, "goal": "", "session_id": "", "user_id": "", "created_at": 0, "updated_at": 0}
-        ])
-        with patch("agent_py_agent.cli.task_commands.LocalStore") as mock_ls:
-            mock_ls.return_value = mock_store
-            with patch("agent_py_agent.cli.task_commands.load_config") as mock_cfg:
-                mock_cfg.return_value = MagicMock(workspace_root="")
-                with patch("agent_py_agent.cli.task_commands.resolve_workspace_root") as mock_resolve:
-                    mock_resolve.return_value = Path(tempfile.gettempdir())
-                    args = MockArgs(task_id=task_id)
-                    return cmd_task_resume(args)
+        mock_store = _make_mock_store([_task_record(task_id, status)])
+        with _patched_task_cli_deps(mock_store):
+            return cmd_task_resume(MockArgs(task_id=task_id))
 
     def test_abandon_completed_task(self):
         """测试 abandon 已 COMPLETED 的任务。
@@ -303,19 +287,11 @@ class TestTaskStateTransitions:
 
         验证对 PAUSED 任务执行 resume 会成功。
         """
-        mock_store = _make_mock_store([
-            {"task_id": "task-paused", "status": "PAUSED", "goal": "", "session_id": "", "user_id": "", "created_at": 0, "updated_at": 0}
-        ])
+        mock_store = _make_mock_store([_task_record("task-paused", "PAUSED")])
         mock_store.task_registry.update_task_status.return_value = True
 
-        with patch("agent_py_agent.cli.task_commands.LocalStore") as mock_ls:
-            mock_ls.return_value = mock_store
-            with patch("agent_py_agent.cli.task_commands.load_config") as mock_cfg:
-                mock_cfg.return_value = MagicMock(workspace_root="")
-                with patch("agent_py_agent.cli.task_commands.resolve_workspace_root") as mock_resolve:
-                    mock_resolve.return_value = Path(tempfile.gettempdir())
-                    args = MockArgs(task_id="task-paused")
-                    result = cmd_task_resume(args)
+        with _patched_task_cli_deps(mock_store):
+            result = cmd_task_resume(MockArgs(task_id="task-paused"))
 
         assert result == 0
         mock_store.task_registry.update_task_status.assert_called_once_with("task-paused", "RUNNING")
@@ -328,14 +304,8 @@ class TestTaskStateTransitions:
         mock_store = _make_mock_store([])
         mock_store.task_registry.lookup_task.return_value = None
 
-        with patch("agent_py_agent.cli.task_commands.LocalStore") as mock_ls:
-            mock_ls.return_value = mock_store
-            with patch("agent_py_agent.cli.task_commands.load_config") as mock_cfg:
-                mock_cfg.return_value = MagicMock(workspace_root="")
-                with patch("agent_py_agent.cli.task_commands.resolve_workspace_root") as mock_resolve:
-                    mock_resolve.return_value = Path(tempfile.gettempdir())
-                    args = MockArgs(task_id="task-nonexist")
-                    result = cmd_task_resume(args)
+        with _patched_task_cli_deps(mock_store):
+            result = cmd_task_resume(MockArgs(task_id="task-nonexist"))
 
         assert result == 1
 
@@ -346,9 +316,7 @@ class TestTaskStateTransitions:
         """
         import threading
 
-        mock_store = _make_mock_store([
-            {"task_id": "task-concurrent", "status": "RUNNING", "goal": "", "session_id": "", "user_id": "", "created_at": 0, "updated_at": 0}
-        ])
+        mock_store = _make_mock_store([_task_record("task-concurrent", "RUNNING")])
         mock_store.task_registry.update_task_status.return_value = True
 
         update_calls = []
@@ -359,7 +327,7 @@ class TestTaskStateTransitions:
 
         mock_store.task_registry.update_task_status.side_effect = mock_update
 
-        with self._patch_task_cli_deps(mock_store):
+        with _patched_task_cli_deps(mock_store):
             threads = []
             for _ in range(5):
                 t = threading.Thread(
@@ -382,14 +350,8 @@ class TestTaskSearch:
             tasks = []
         mock_store = _make_mock_store(tasks)
 
-        with patch("agent_py_agent.cli.task_commands.LocalStore") as mock_ls:
-            mock_ls.return_value = mock_store
-            with patch("agent_py_agent.cli.task_commands.load_config") as mock_cfg:
-                mock_cfg.return_value = MagicMock(workspace_root="")
-                with patch("agent_py_agent.cli.task_commands.resolve_workspace_root") as mock_resolve:
-                    mock_resolve.return_value = Path(tempfile.gettempdir())
-                    args = MockArgs(query=query)
-                    return cmd_task_search(args)
+        with _patched_task_cli_deps(mock_store):
+            return cmd_task_search(MockArgs(query=query))
 
     def test_empty_query(self):
         """测试空查询的处理。
@@ -481,14 +443,8 @@ class TestErrorMessages:
         mock_store = _make_mock_store([])
         mock_store.task_registry.lookup_task.return_value = None
 
-        with patch("agent_py_agent.cli.task_commands.LocalStore") as mock_ls:
-            mock_ls.return_value = mock_store
-            with patch("agent_py_agent.cli.task_commands.load_config") as mock_cfg:
-                mock_cfg.return_value = MagicMock(workspace_root="")
-                with patch("agent_py_agent.cli.task_commands.resolve_workspace_root") as mock_resolve:
-                    mock_resolve.return_value = Path(tempfile.gettempdir())
-                    args = MockArgs(task_id="task-does-not-exist")
-                    result = cmd_task_abandon(args)
+        with _patched_task_cli_deps(mock_store):
+            result = cmd_task_abandon(MockArgs(task_id="task-does-not-exist"))
 
         assert result == 1
 
@@ -497,19 +453,11 @@ class TestErrorMessages:
 
         验证 update_task_status 返回 False 时会返回错误码。
         """
-        mock_store = _make_mock_store([
-            {"task_id": "task-1", "status": "RUNNING", "goal": "", "session_id": "", "user_id": "", "created_at": 0, "updated_at": 0}
-        ])
+        mock_store = _make_mock_store([_task_record("task-1", "RUNNING")])
         mock_store.task_registry.update_task_status.return_value = False
 
-        with patch("agent_py_agent.cli.task_commands.LocalStore") as mock_ls:
-            mock_ls.return_value = mock_store
-            with patch("agent_py_agent.cli.task_commands.load_config") as mock_cfg:
-                mock_cfg.return_value = MagicMock(workspace_root="")
-                with patch("agent_py_agent.cli.task_commands.resolve_workspace_root") as mock_resolve:
-                    mock_resolve.return_value = Path(tempfile.gettempdir())
-                    args = MockArgs(task_id="task-1")
-                    result = cmd_task_abandon(args)
+        with _patched_task_cli_deps(mock_store):
+            result = cmd_task_abandon(MockArgs(task_id="task-1"))
 
         assert result == 1
 
@@ -521,14 +469,8 @@ class TestErrorMessages:
         mock_store = _make_mock_store([])
         mock_store.task_registry.lookup_task.return_value = None
 
-        with patch("agent_py_agent.cli.task_commands.LocalStore") as mock_ls:
-            mock_ls.return_value = mock_store
-            with patch("agent_py_agent.cli.task_commands.load_config") as mock_cfg:
-                mock_cfg.return_value = MagicMock(workspace_root="")
-                with patch("agent_py_agent.cli.task_commands.resolve_workspace_root") as mock_resolve:
-                    mock_resolve.return_value = Path(tempfile.gettempdir())
-                    args = MockArgs(task_id="")
-                    result = cmd_task_show(args)
+        with _patched_task_cli_deps(mock_store):
+            result = cmd_task_show(MockArgs(task_id=""))
 
         # 应该优雅处理
         assert result in (0, 1)
@@ -541,13 +483,7 @@ class TestErrorMessages:
         mock_store = _make_mock_store([])
         mock_store.task_registry.lookup_task.return_value = None
 
-        with patch("agent_py_agent.cli.task_commands.LocalStore") as mock_ls:
-            mock_ls.return_value = mock_store
-            with patch("agent_py_agent.cli.task_commands.load_config") as mock_cfg:
-                mock_cfg.return_value = MagicMock(workspace_root="")
-                with patch("agent_py_agent.cli.task_commands.resolve_workspace_root") as mock_resolve:
-                    mock_resolve.return_value = Path(tempfile.gettempdir())
-                    args = MockArgs(task_id="task-nonexist")
-                    result = cmd_task_pause(args)
+        with _patched_task_cli_deps(mock_store):
+            result = cmd_task_pause(MockArgs(task_id="task-nonexist"))
 
         assert result == 1

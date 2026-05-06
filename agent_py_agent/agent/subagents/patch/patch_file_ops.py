@@ -72,8 +72,12 @@ def rollback_patch_apply(touched_files: dict[Path, dict]) -> None:
     """Rollback patch apply by restoring original file contents."""
 
     for path, snapshot in touched_files.items():
-        if snapshot.get("before_exists"):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(str(snapshot.get("before_text") or ""), encoding="utf-8")
-        elif path.exists():
-            path.unlink()
+        _rollback_touched_file(path, snapshot)
+
+
+def _rollback_touched_file(path: Path, snapshot: dict) -> None:
+    if snapshot.get("before_exists"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(snapshot.get("before_text") or ""), encoding="utf-8")
+    elif path.exists():
+        path.unlink()

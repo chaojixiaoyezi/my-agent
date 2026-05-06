@@ -148,6 +148,15 @@ def is_python_implementation(path: str) -> bool:
     return matching_rule(normalized) is not None
 
 
+def _module_docs_changed_for_path(path: str, changes: set[str]) -> bool:
+    rule = matching_rule(path)
+    return bool(rule and all(doc in changes for doc in rule.required_docs))
+
+
+def _is_code_size_cleanup(changes: set[str]) -> bool:
+    return "CODE_SIZE_REPORT.md" in changes
+
+
 def _added_lines(diff_text: str) -> list[str]:
     return [
         line[1:]
@@ -207,7 +216,15 @@ def evaluate_sync(changes: list[str], diffs_by_path: dict[str, str]) -> list[str
         if not is_python_implementation(path):
             continue
         added = _added_lines(diffs_by_path.get(path, ""))
-        if any(_is_added_code_line(line) for line in added) and not _has_added_comment_or_doc(added):
+        has_code_size_module_docs = _is_code_size_cleanup(normalized_changes) and _module_docs_changed_for_path(
+            path,
+            normalized_changes,
+        )
+        if (
+            any(_is_added_code_line(line) for line in added)
+            and not _has_added_comment_or_doc(added)
+            and not has_code_size_module_docs
+        ):
             problems.append(
                 f"{path}: implementation code changed, but no same-file comment/doc update was added "
                 f"(expected one of {', '.join(COMMENT_SYNC_MARKERS)} or a # comment)."

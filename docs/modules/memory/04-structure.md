@@ -95,3 +95,6 @@ memory-resume 或 run(auto resume)
 ## 当前第一版索引 / 待补齐
 
 本页先讲主结构和阅读路径。后续需要补真实 route index 样例、raw archive 样例、doctor 输出样例、LocalStore 命中样例，以及更长时间的真实跨午夜恢复链路图。
+## 2026-05-06 structure update
+- Memory archive query logic now delegates filtering, task payload construction, gateway payload collection, and resume guidance rendering to focused helpers.
+- Memory routing matcher internals separate scoring specs, score accumulation, and receipt creation while keeping public model outputs stable.

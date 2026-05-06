@@ -10,6 +10,7 @@ gateway 在处理请求时需要"租约"机制——一个后台线程定期刷�
 
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,20 +24,18 @@ from .logging import _report_gateway_side_effect_error, log_gateway_payload
 _active_heartbeat_request_ids: set[str] = set()
 
 
+@dataclass(frozen=True)
+class _LeaseHeartbeatContext:
+
+    agent: SimpleAgent
+    request_path: Path
+    request_id: str
+    worker_id: str
+    stop_event: threading.Event
+    interval: float
+
+
 def _gateway_processing_lease_interval(agent: SimpleAgent) -> float:
-    """LLM: Return a heartbeat cadence short enough to keep processing leases fresh.
-
-    新手说明:
-    这个函数根据 gateway_heartbeat_interval 和 gateway_processing_timeout_seconds 两个配置，
-    算出一个合适的心跳间隔。核心逻辑是：心跳间隔不能超过 processing timeout 的 1/3，
-    这样即使偶尔丢一次心跳，也不会被误判为超时。最小间隔 0.2 秒，防止过于频繁。
-
-    参数说明:
-    agent: SimpleAgent 实例，从中读取 config.gateway_heartbeat_interval 和 config.gateway_processing_timeout_seconds。
-
-    返回说明:
-    返回心跳间隔秒数，至少 0.2 秒。
-    """
     try:
         gateway_interval = float(agent.config.gateway_heartbeat_interval or 5)
     except (TypeError, ValueError):
@@ -51,20 +50,6 @@ def _gateway_processing_lease_interval(agent: SimpleAgent) -> float:
 
 
 def _touch_gateway_processing_lease(request_path: Path, *, request_id: str, worker_id: str = "") -> bool:
-    """LLM: Refresh the lease heartbeat on a processing request file.
-
-    新手说明:
-    这个函数读取请求文件，确认 request_id 匹配后，更新 lease_heartbeat_at 和 updated_at 时间戳，
-    然后原子写回文件。如果读取失败、ID 不匹配或写入失败，返回 False。
-
-    参数说明:
-    request_path: 处理中的请求文件路径。
-    request_id: 请求 ID，用于校验文件内容是否匹配。
-    worker_id: 可选的 worker 标识，写入 lease_owner 字段。
-
-    返回说明:
-    成功刷新返回 True，否则返回 False。
-    """
     payload = read_json_file(request_path)
     if not payload:
         return False
@@ -90,18 +75,6 @@ def _touch_gateway_processing_lease(request_path: Path, *, request_id: str, work
 
 
 def is_heartbeat_alive_for_request(request_id: str) -> bool:
-    """LLM: Check whether a heartbeat thread is currently active for the given request.
-
-    新手说明:
-    通过检查全局集合 _active_heartbeat_request_ids 判断某个请求是否还有活跃的心跳线程。
-    外部代码用它来避免重复启动心跳，或者判断请求是否还在被处理。
-
-    参数说明:
-    request_id: 要检查的请求 ID。
-
-    返回说明:
-    有活跃心跳返回 True，否则返回 False。
-    """
     return request_id in _active_heartbeat_request_ids
 
 
@@ -112,28 +85,12 @@ def _start_gateway_processing_lease_heartbeat(
     request_id: str,
     worker_id: str = "",
 ) -> tuple[threading.Event, threading.Thread]:
-    """LLM: Start a daemon thread that keeps one processing lease alive during agent.run.
-
-    新手说明:
-    这个函数启动一个守护线程，按 _gateway_processing_lease_interval 算出的间隔定期调用
-    _touch_gateway_processing_lease 刷新心跳。如果连续 3 次刷新失败，线程会放弃并记录日志。
-    返回的 stop_event 可以被调用方 set() 来停止心跳，thread 对象用于 join()。
-
-    参数说明:
-    agent: SimpleAgent 实例，用于读取配置和记录日志。
-    request_path: 处理中的请求文件路径。
-    request_id: 请求 ID。
-    worker_id: 可选的 worker 标识。
-
-    返回说明:
-    返回 (stop_event, thread) 元组。调用方 set stop_event 来停止心跳，join thread 来等待线程结束。
-    """
     stop_event = threading.Event()
     interval = _gateway_processing_lease_interval(agent)
     _active_heartbeat_request_ids.add(request_id)
     thread = threading.Thread(
         target=_run_gateway_processing_lease_heartbeat,
-        args=(agent, request_path, request_id, worker_id, stop_event, interval),
+        args=(_LeaseHeartbeatContext(agent, request_path, request_id, worker_id, stop_event, interval),),
         name=f"gateway-lease-{request_id}",
         daemon=True,
     )
@@ -141,30 +98,41 @@ def _start_gateway_processing_lease_heartbeat(
     return stop_event, thread
 
 
-def _run_gateway_processing_lease_heartbeat(
+def _run_gateway_processing_lease_heartbeat(context: _LeaseHeartbeatContext) -> None:
+    try:
+        _run_lease_heartbeat_loop(context)
+    finally:
+        _active_heartbeat_request_ids.discard(context.request_id)
+
+
+def _run_lease_heartbeat_loop(context: _LeaseHeartbeatContext) -> None:
+    consecutive_failures = 0
+    while not context.stop_event.wait(context.interval):
+        ok, consecutive_failures = _refresh_lease_or_count_failure(
+            context.request_path, context.request_id, context.worker_id, consecutive_failures
+        )
+        if ok or not _should_stop_lease_heartbeat(
+            context.agent,
+            context.request_path,
+            context.request_id,
+            consecutive_failures,
+        ):
+            continue
+        return
+
+
+def _should_stop_lease_heartbeat(
     agent: SimpleAgent,
     request_path: Path,
     request_id: str,
-    worker_id: str,
-    stop_event: threading.Event,
-    interval: float,
-) -> None:
-    """Refresh one processing lease until stopped or repeated failures occur."""
-    consecutive_failures = 0
-    try:
-        while not stop_event.wait(interval):
-            ok, consecutive_failures = _refresh_lease_or_count_failure(
-                request_path, request_id, worker_id, consecutive_failures
-            )
-            if ok:
-                continue
-            if consecutive_failures <= 0:
-                return
-            if consecutive_failures >= 3:
-                _log_heartbeat_abandoned(agent, request_path, request_id, consecutive_failures)
-                return
-    finally:
-        _active_heartbeat_request_ids.discard(request_id)
+    consecutive_failures: int,
+) -> bool:
+    if consecutive_failures <= 0:
+        return True
+    if consecutive_failures < 3:
+        return False
+    _log_heartbeat_abandoned(agent, request_path, request_id, consecutive_failures)
+    return True
 
 
 def _refresh_lease_or_count_failure(
@@ -173,7 +141,6 @@ def _refresh_lease_or_count_failure(
     worker_id: str,
     consecutive_failures: int,
 ) -> tuple[bool, int]:
-    """Refresh a lease and convert unexpected exceptions into failure counts."""
     try:
         if not _touch_gateway_processing_lease(request_path, request_id=request_id, worker_id=worker_id):
             return False, 0
@@ -184,7 +151,6 @@ def _refresh_lease_or_count_failure(
 
 
 def _log_heartbeat_abandoned(agent: SimpleAgent, request_path: Path, request_id: str, failures: int) -> None:
-    """Record that a heartbeat loop gave up after repeated refresh failures."""
     log_gateway_payload(
         agent,
         {"id": request_id, "status": "heartbeat_abandoned", "failures": failures},

@@ -12,17 +12,6 @@ from typing import Any
 
 
 def format_archive_record(record: dict[str, Any]) -> str:
-    """LLM: format a single archive record as a readable CLI line.
-
-    新手说明:
-    把单条归档记录格式化成一行可读的 CLI 文本。
-
-    参数说明:
-    `record` 是标准化归档记录。
-
-    返回说明:
-    返回格式化的单行文本。
-    """
 
     timestamp = record.get("created_at", "")
     kind = record.get("kind", "")
@@ -47,17 +36,6 @@ def format_archive_record(record: dict[str, Any]) -> str:
 
 
 def format_archive_records_table(records: list[dict[str, Any]]) -> str:
-    """LLM: format a list of archive records as a CLI-friendly table.
-
-    新手说明:
-    把多条归档记录格式化成表格文本，适合命令行展示。
-
-    参数说明:
-    `records` 是标准化归档记录列表。
-
-    返回说明:
-    返回格式化的表格文本。
-    """
 
     if not records:
         return "No records found."
@@ -83,17 +61,6 @@ def format_archive_records_table(records: list[dict[str, Any]]) -> str:
 
 
 def format_query_response_json(response: Any) -> str:
-    """LLM: format query response as JSON string for API-like output.
-
-    新手说明:
-    把查询响应对象格式化成 JSON 字符串。
-
-    参数说明:
-    `response` 是查询响应对象。
-
-    返回说明:
-    返回 JSON 字符串。
-    """
 
     return json.dumps(
         {
@@ -110,17 +77,6 @@ def format_query_response_json(response: Any) -> str:
 
 
 def render_resume_guidance(guidance: dict[str, Any]) -> str:
-    """LLM: render resume guidance as a human-readable CLI summary.
-
-    新手说明:
-    把恢复指导字典格式化成人类可读的 CLI 摘要。
-
-    参数说明:
-    `guidance` 是恢复指导字典。
-
-    返回说明:
-    返回格式化的恢复指导文本。
-    """
 
     lines: list[str] = []
 

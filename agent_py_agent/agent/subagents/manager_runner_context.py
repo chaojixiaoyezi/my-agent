@@ -120,28 +120,25 @@ class SubAgentRunnerContextMixin:
         granted_skills, granted_tools, grants = self._extract_granted_caps(task)
         allowed_skills = _merge_list(task.allowed_skills, granted_skills)
         allowed_tools = _merge_list(task.allowed_tools, granted_tools)
+        return self._make_execution_context(
+            task,
+            allowed_skills=allowed_skills,
+            allowed_tools=allowed_tools,
+            grants=grants,
+            max_cards=max_cards,
+        )
+
+    def _make_execution_context(
+        self,
+        task: SubAgentTask,
+        *,
+        allowed_skills: list[str],
+        allowed_tools: list[str],
+        grants: list[dict[str, object]],
+        max_cards: int,
+    ) -> SubAgentExecutionContext:
         return SubAgentExecutionContext(
-            run_id=task.id,
-            generated_at=time.time(),
-            goal=task.goal,
-            thought=task.thought,
-            plan=task.plan,
-            agent_name=task.agent_name,
-            role=task.role,
-            status=task.status,
-            verification_status=task.verification_status,
-            channel_status=task.channel_status,
-            runner_attempts=task.runner_attempts,
-            runner_last_error=task.runner_last_error,
-            owner=task.owner,
-            supervisor=task.supervisor,
-            final_owner=task.final_owner,
-            parent_id=task.parent_id,
-            root_id=task.root_id,
-            depth=task.depth,
-            task_dir=task.task_dir,
-            execution_context_file=task.execution_context_file,
-            execution_context_json=task.execution_context_json,
+            **_execution_context_task_fields(task),
             allowed_skills=allowed_skills,
             allowed_tools=allowed_tools,
             granted_cards=_dedupe_granted_cards(task.capability_grants, max_cards=max_cards),
@@ -186,3 +183,29 @@ class SubAgentRunnerContextMixin:
         )
         self._index_execution_context(context)
         return context
+
+
+def _execution_context_task_fields(task: SubAgentTask) -> dict[str, object]:
+    return {
+        "run_id": task.id,
+        "generated_at": time.time(),
+        "goal": task.goal,
+        "thought": task.thought,
+        "plan": task.plan,
+        "agent_name": task.agent_name,
+        "role": task.role,
+        "status": task.status,
+        "verification_status": task.verification_status,
+        "channel_status": task.channel_status,
+        "runner_attempts": task.runner_attempts,
+        "runner_last_error": task.runner_last_error,
+        "owner": task.owner,
+        "supervisor": task.supervisor,
+        "final_owner": task.final_owner,
+        "parent_id": task.parent_id,
+        "root_id": task.root_id,
+        "depth": task.depth,
+        "task_dir": task.task_dir,
+        "execution_context_file": task.execution_context_file,
+        "execution_context_json": task.execution_context_json,
+    }

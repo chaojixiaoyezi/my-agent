@@ -1,7 +1,3 @@
-"""会话恢复模块。
-
-提供从会话 ID 恢复历史上下文的功能。
-"""
 from __future__ import annotations
 
 import json
@@ -82,14 +78,6 @@ def _load_subagent_context(agent: SimpleAgent, session_id: str) -> list[dict]:
 
 
 def format_resume_context(resume_data: dict) -> str:
-    """格式化恢复上下文为文本。
-
-    Args:
-        resume_data: resume_session 返回的数据
-
-    Returns:
-        格式化的文本
-    """
     if resume_data.get("error"):
         return f"恢复失败: {resume_data['error']}"
 

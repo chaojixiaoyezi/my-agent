@@ -25,68 +25,39 @@ ARCHIVE_SEARCH_FILE_LIMIT = 30
 
 
 def _archive_files(root: Path, *, layer: str, date_key: str | None) -> list[tuple[str, Path]]:
-    """LLM: return existing archive files for raw/hook layers in newest-first order.
-
-    新手说明:
-    如果指定日期，就只看那天的文件；没指定日期，就看最近若干个 JSONL 文件。
-    这样不会为了一个 list/search 命令把多年归档一次性翻完。
-
-    参数说明:
-    `root` 是工作区根目录；`layer` 是 `raw`、`hook` 或 `all`；`date_key` 是可选日期。
-
-    返回说明:
-    返回 `(layer, path)` 元组列表，按最近优先排列。
-    """
 
     layers = ["raw", "hook"] if layer == "all" else [layer]
     files: list[tuple[str, Path]] = []
     for current_layer in layers:
         directory = _archive_dir(root, current_layer)
         if date_key:
-            candidate = directory / f"{date_key}.jsonl"
-            if candidate.exists():
-                files.append((current_layer, candidate))
+            files.extend(_dated_layer_file(current_layer, directory, date_key))
             continue
         if directory.exists():
-            layer_files = sorted(
-                [path for path in directory.glob("*.jsonl") if path.is_file()],
-                key=lambda path: (path.stat().st_mtime, path.name),
-                reverse=True,
-            )[:ARCHIVE_SEARCH_FILE_LIMIT]
-            files.extend((current_layer, path) for path in layer_files)
+            files.extend(_recent_layer_files(current_layer, directory))
     return files
 
 
+def _dated_layer_file(layer: str, directory: Path, date_key: str) -> list[tuple[str, Path]]:
+    candidate = directory / f"{date_key}.jsonl"
+    return [(layer, candidate)] if candidate.exists() else []
+
+
+def _recent_layer_files(layer: str, directory: Path) -> list[tuple[str, Path]]:
+    layer_files = sorted(
+        [path for path in directory.glob("*.jsonl") if path.is_file()],
+        key=lambda path: (path.stat().st_mtime, path.name),
+        reverse=True,
+    )[:ARCHIVE_SEARCH_FILE_LIMIT]
+    return [(layer, path) for path in layer_files]
+
+
 def _archive_dir(root: Path, layer: str) -> Path:
-    """LLM: resolve the directory for one archive layer through public path helpers.
-
-    新手说明:
-    目录规则不要散落在 CLI 里。
-    hook 用 `snapshot_path_for`，raw 用 `raw_event_path_for`，以后路径变了这里也能跟着变。
-
-    参数说明:
-    `root` 是工作区根目录；`layer` 是 `hook` 或 `raw`。
-
-    返回说明:
-    返回对应归档目录路径。
-    """
 
     return snapshot_path_for(root).parent if layer == "hook" else raw_event_path_for(root).parent
 
 
 def _read_archive_file(layer: str, path: Path) -> list[dict[str, Any]]:
-    """LLM: parse one archive JSONL file and skip malformed lines without crashing.
-
-    新手说明:
-    归档是排障兜底层。
-    即使里面有一行坏 JSON，命令也应该继续读其他行，并把坏行标出来，而不是直接中断。
-
-    参数说明:
-    `layer` 是当前层名；`path` 是 JSONL 文件路径。
-
-    返回说明:
-    返回标准化记录列表；坏行会变成 `archive_error` 记录。
-    """
 
     records: list[dict[str, Any]] = []
     try:
@@ -109,18 +80,6 @@ def _read_archive_file(layer: str, path: Path) -> list[dict[str, Any]]:
 
 
 def _normalize_archive_record(layer: str, path: Path, line_no: int, payload: dict[str, Any]) -> dict[str, Any]:
-    """LLM: map raw event or hook snapshot payloads to a shared search/display shape.
-
-    新手说明:
-    raw 事件有 event_id、speaker、tool_name；hook 快照有 snapshot_id、user_intents、next_actions。
-    统一后，搜索命令就能按同一套字段工作。
-
-    参数说明:
-    `layer` 是 raw/hook；`path` 是来源文件；`line_no` 是行号；`payload` 是原始 JSON 对象。
-
-    返回说明:
-    返回标准化归档记录。
-    """
 
     derived = _derived_archive_fields(payload)
     created_at = str(payload.get("created_at", "") or "")
@@ -157,11 +116,6 @@ def _normalize_archive_record(layer: str, path: Path, line_no: int, payload: dic
 
 
 def _archive_level_value(value: Any) -> int:
-    """LLM: keep archive level stable even when the stored value is numeric zero.
-
-    新手说明:
-    `0` 是合法 archive level，不能被 Python 的 `or 3` 误判成空值。
-    """
 
     try:
         return int(3 if value is None else value)
@@ -170,17 +124,6 @@ def _archive_level_value(value: Any) -> int:
 
 
 def _gateway_terminal_request_path(request_path: str) -> str:
-    """LLM: prefer completed gateway request archive paths over transient processing paths.
-
-    新手说明:
-    真实 gateway 会先把请求放在 `requests/processing/`，处理完成后再移动到
-    `requests/done/` 或 `requests/failed/`。LocalStore 可能记录的是处理中的临时路径，
-    恢复时应该优先指向最终还存在的归档文件，避免第二天按提示去读一个已经被移动走的路径。
-    参数说明:
-    `request_path` 是 LocalStore metadata 里记录的请求 JSON 路径，可能为空、可能是 processing 路径。
-    返回说明:
-    返回最适合恢复读取的路径；如果找不到更好的终态文件，就保持原值。
-    """
 
     if not request_path:
         return ""

@@ -97,23 +97,30 @@ def _extract_findings(value: CaseRecord | Mapping[str, Any] | Sequence[Finding |
 def _entity_values(entities: Mapping[str, Sequence[Any]], *keys: str) -> list[str]:
     result: list[str] = []
     for key in keys:
-        for value in entities.get(key, []):
-            text = str(value or "").strip()
-            if text and text not in result:
-                result.append(text)
+        _append_entity_values(result, entities.get(key, []))
     return result
+
+
+def _append_entity_values(result: list[str], values: Sequence[Any]) -> None:
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in result:
+            result.append(text)
 
 
 def _ref_ids(refs: Sequence[Any]) -> list[str]:
     result: list[str] = []
     for ref in refs:
-        if isinstance(ref, EvidenceRef):
-            result.append(ref.evidence_id)
-        elif isinstance(ref, Mapping):
-            result.append(str(ref.get("evidence_id") or ref.get("raw_ref") or ref))
-        else:
-            result.append(str(ref))
+        result.append(_ref_id(ref))
     return result
+
+
+def _ref_id(ref: Any) -> str:
+    if isinstance(ref, EvidenceRef):
+        return ref.evidence_id
+    if isinstance(ref, Mapping):
+        return str(ref.get("evidence_id") or ref.get("raw_ref") or ref)
+    return str(ref)
 
 
 __all__ = ["AttackChainStep", "build_attack_chain", "lateral_movement_signs"]

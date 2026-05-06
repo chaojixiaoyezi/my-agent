@@ -85,12 +85,12 @@ def check_directory(root: Path) -> list[str]:
 
 def check_tarball(tar_path: Path) -> list[str]:
     """Check a tar.gz archive for dirty files."""
-    offenders: list[str] = []
     with tarfile.open(tar_path, "r:gz") as tf:
-        for member in tf.getmembers():
-            if _is_dirty(member.name):
-                offenders.append(member.name)
-    return offenders
+        return _dirty_tar_members(tf.getmembers())
+
+
+def _dirty_tar_members(members: list[tarfile.TarInfo]) -> list[str]:
+    return [member.name for member in members if _is_dirty(member.name)]
 
 
 def main() -> int:

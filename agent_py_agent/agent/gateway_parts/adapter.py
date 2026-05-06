@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,15 +24,34 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
+@dataclass(frozen=True)
+class _AdapterMessageContext:
+
+    agent: SimpleAgent
+    processing_path: Path
+    payload: dict
+    gateway_paths_obj: GatewayPaths
+    adapter_paths_obj: AdapterPaths
+    timeout: float
+
+
+@dataclass(frozen=True)
+class _AdapterTimeoutContext:
+
+    request_id: str
+    payload: dict
+    request_path: Path
+    started_at: float
+    timeout: float
+
+
 def _process_single_adapter_message(
-    agent: SimpleAgent,
-    processing_path: Path,
-    payload: dict,
-    gateway_paths_obj: GatewayPaths,
-    adapter_paths_obj: AdapterPaths,
-    timeout: float,
+    context: _AdapterMessageContext,
 ) -> bool:
-    """Process a single claimed adapter message. Returns True if processed."""
+    agent = context.agent
+    processing_path = context.processing_path
+    payload = context.payload
+    adapter_paths_obj = context.adapter_paths_obj
     message_id = _adapter_message_id(payload, processing_path)
     prompt = _adapter_message_prompt(payload)
     output_path = _adapter_output_path(adapter_paths_obj, message_id)
@@ -41,12 +61,14 @@ def _process_single_adapter_message(
         _archive_adapter_message(processing_path, adapter_paths_obj.failed)
         return True
     request_id, request_path, gateway_response = _submit_adapter_gateway_request(
-        agent, gateway_paths_obj, payload, prompt
+        agent, context.gateway_paths_obj, payload, prompt
     )
-    response = wait_for_gateway_response(gateway_paths_obj, request_id, timeout)
+    response = wait_for_gateway_response(context.gateway_paths_obj, request_id, context.timeout)
     if not response:
-        response = _timeout_adapter_gateway_response(request_id, payload, request_path, started_at, timeout)
-        _record_late_pending(adapter_paths_obj, request_id, timeout)
+        response = _timeout_adapter_gateway_response(
+            _AdapterTimeoutContext(request_id, payload, request_path, started_at, context.timeout)
+        )
+        _record_late_pending(adapter_paths_obj, request_id, context.timeout)
     adapter_response = _build_adapter_outbox_response(
         {
             "message_id": message_id,
@@ -100,25 +122,19 @@ def _submit_adapter_gateway_request(
     )
 
 
-def _timeout_adapter_gateway_response(
-    request_id: str,
-    payload: dict,
-    request_path: Path,
-    started_at: float,
-    timeout: float,
-) -> dict:
+def _timeout_adapter_gateway_response(context: _AdapterTimeoutContext) -> dict:
     return {
-        "id": request_id,
+        "id": context.request_id,
         "kind": "ask",
         "ok": False,
         "status": "timeout",
         "error_code": "GATEWAY_TIMEOUT",
-        "error": f"timeout after {timeout}s",
-        "created_at": payload.get("created_at", 0),
-        "started_at": started_at,
+        "error": f"timeout after {context.timeout}s",
+        "created_at": context.payload.get("created_at", 0),
+        "started_at": context.started_at,
         "ended_at": time.time(),
         "response": "",
-        "request_file": str(request_path),
+        "request_file": str(context.request_path),
     }
 
 
@@ -154,12 +170,6 @@ def process_file_adapter_once(
     timeout: float,
     limit: int = 20,
 ) -> int:
-    """LLM contract: process one bounded batch of adapter inbox messages.
-
-    Human version:
-    外部工具把 JSON 消息放进 adapter inbox。这里每次拿一批，转成 gateway ask，
-    等结果，再把回复写进 outbox。limit 防止一次循环无限处理。
-    """
 
     for path in (
         adapter_paths_obj.inbox,
@@ -181,23 +191,20 @@ def process_file_adapter_once(
             continue
         payload = read_json_file(processing_path)
         _process_single_adapter_message(
-            agent,
-            processing_path,
-            payload,
-            gateway_paths_obj,
-            adapter_paths_obj,
-            timeout,
+            _AdapterMessageContext(
+                agent,
+                processing_path,
+                payload,
+                gateway_paths_obj,
+                adapter_paths_obj,
+                timeout,
+            )
         )
         processed += 1
     return processed
 
 
 def _archive_adapter_message(path: Path, target_dir: Path) -> None:
-    """LLM contract: archive an adapter message and report archive failures.
-
-    Human version:
-    adapter 消息处理完要归档。归档失败不是业务结果失败，但不能静默吞掉，所以会打到 stderr。
-    """
 
     try:
         _archive_gateway_request(path, target_dir)
@@ -206,21 +213,11 @@ def _archive_adapter_message(path: Path, target_dir: Path) -> None:
 
 
 def _adapter_message_id(payload: dict, path: Path) -> str:
-    """LLM contract: pick a stable adapter message id from payload or filename.
-
-    Human version:
-    外部工具可能叫 `id`，也可能叫 `message_id`。都没有时用文件名，保证 outbox 一定有稳定名字。
-    """
 
     return str(payload.get("id") or payload.get("message_id") or path.stem).strip() or path.stem
 
 
 def _adapter_message_prompt(payload: dict) -> str:
-    """LLM contract: normalize adapter payload text into a prompt string.
-
-    Human version:
-    外部系统字段名不一定统一，所以按 `prompt/text/message/content` 这个顺序找第一段非空文本。
-    """
 
     for key in ("prompt", "text", "message", "content"):
         value = str(payload.get(key) or "").strip()
@@ -230,17 +227,11 @@ def _adapter_message_prompt(payload: dict) -> str:
 
 
 def _adapter_output_path(paths: AdapterPaths, message_id: str) -> Path:
-    """LLM contract: map adapter message id to outbox response path.
-
-    Human version:
-    每条 adapter 输入消息都会对应 `outbox/<message_id>.json`，外部程序按这个文件取回复。
-    """
 
     return paths.outbox / f"{message_id}.json"
 
 
 def _record_late_pending(paths: AdapterPaths, request_id: str, original_timeout: float) -> None:
-    """Record a timed-out request so late responses can be detected later."""
 
     late_path = paths.root / "late_pending.jsonl"
     entry = {
@@ -257,12 +248,6 @@ def _record_late_pending(paths: AdapterPaths, request_id: str, original_timeout:
 
 
 def check_late_responses(paths: AdapterPaths) -> list[dict]:
-    """Scan late_pending.jsonl and check if responses have arrived in gateway responses.
-
-    Human version:
-    调用方超时后，响应可能迟到。这里扫描 late_pending.jsonl，检查 gateway responses 目录是否有对应响应。
-    找到的响应会被标记为已检查，未找到的保留在索引中。
-    """
 
     late_path = paths.root / "late_pending.jsonl"
     if not late_path.exists():

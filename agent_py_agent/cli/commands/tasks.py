@@ -19,7 +19,6 @@ from ..task_commands import (
 
 
 def add_task_subcommands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Register task-* commands."""
 
     task_show = subparsers.add_parser("task-show", help="显示任务详情")
     task_show.add_argument("task_id", help="任务 ID")

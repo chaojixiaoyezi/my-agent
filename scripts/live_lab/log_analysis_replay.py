@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from .log_analysis_replay_stages import (
-    ReplayStageError,
+    EvidenceStageParams,
+    ReportStageParams,
     run_case_stage,
     run_detector_stage,
     run_evidence_stage,
@@ -31,6 +32,7 @@ SIMULATED_FAILURE_STAGES = frozenset({"evidence", "report"})
 @dataclass(frozen=True)
 class RunSecurityAlertV1ReplayParams:
     """Parameter bundle for run_security_alert_v1_replay."""
+
     output_root: str | Path
     fixture_path: str | Path = DEFAULT_FIXTURE
     fixture_format: str | None = None
@@ -40,6 +42,23 @@ class RunSecurityAlertV1ReplayParams:
     limit: int = 50
     dry_run: bool = True
     simulate_failure_stage: str | None = None
+
+
+@dataclass
+class ReplayState:
+    findings: Any = None
+    case: Any = None
+    route: Any = None
+    traced: Any = None
+
+
+@dataclass(frozen=True)
+class ReplayStageContext:
+    summary: dict[str, Any]
+    fixture_path: Path
+    store_root: Path
+    artifacts_root: Path
+    params: RunSecurityAlertV1ReplayParams
 
 
 def _base_summary(
@@ -105,84 +124,112 @@ def _write_summary(summary: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
-def _capture_stage_result(stage_name, result, findings, case, route):
+def _capture_stage_result(stage_name: str, result: Any, state: ReplayState) -> ReplayState:
     """Capture a stage result into the appropriate variable, returning updated tuple."""
     if stage_name == "detector":
-        return result, case, route
+        state.findings = result
     if stage_name == "case":
-        return findings, result, route
+        state.case = result
     if stage_name == "route":
-        return findings, case, result
-    return findings, case, route
+        state.route = result
+    return state
 
 
-def _run_stages_sequentially(
-    summary: dict[str, Any],
-    stages: list[tuple[str, Any]],
-) -> tuple[dict[str, Any], dict[str, Any] | None, Any]:
-    """Run multiple stages sequentially, aborting on first failure.
-
-    Returns:
-        Tuple of (updated summary, findings or None, case or route or None).
-    """
-    findings = case = route = None
-
-    for stage_name, handler in stages:
-        ok, result = _run_stage(summary, stage_name, handler)
-        if not ok:
-            return summary, findings, case
-        findings, case, route = _capture_stage_result(stage_name, result, findings, case, route)
-
-    return summary, findings, case
+def _run_replay_stages(context: ReplayStageContext) -> tuple[dict[str, Any], Any, Any, Any, Any]:
+    state = ReplayState()
+    if not _run_ingest_replay(context):
+        return _replay_result(context, state)
+    if not _run_detector_replay(context, state):
+        return _replay_result(context, state)
+    if not _run_case_replay(context, state):
+        return _replay_result(context, state)
+    if not _run_route_replay(context, state):
+        return _replay_result(context, state)
+    if not _run_evidence_replay(context, state):
+        return _replay_result(context, state)
+    _run_report_replay(context, state)
+    return _replay_result(context, state)
 
 
-def _run_replay_stages(
-    summary: dict[str, Any],
-    fixture_path: Path,
-    store_root: Path,
-    artifacts_root: Path,
-    params: RunSecurityAlertV1ReplayParams,
-) -> tuple[dict[str, Any], Any, Any, Any, Any]:
-    """Run all replay stages sequentially.
+def _replay_result(context: ReplayStageContext, state: ReplayState) -> tuple[dict[str, Any], Any, Any, Any, Any]:
+    return context.summary, state.findings, state.case, state.route, state.traced
 
-    Returns:
-        Tuple of (summary, findings, case, route, traced).
-    """
-    findings = case = route = traced = None
 
+def _run_ingest_replay(context: ReplayStageContext) -> bool:
     ok, _ = _run_stage(
-        summary, "ingest",
-        lambda: run_ingest_stage(fixture_path, store_root, params.source_id, params.fixture_format),
+        context.summary,
+        "ingest",
+        lambda: run_ingest_stage(
+            context.fixture_path,
+            context.store_root,
+            context.params.source_id,
+            context.params.fixture_format,
+        ),
     )
-    if not ok:
-        return summary, findings, case, route, traced
+    return ok
 
-    ok, findings = _run_stage(summary, "detector", lambda: run_detector_stage(store_root))
+
+def _run_detector_replay(context: ReplayStageContext, state: ReplayState) -> bool:
+    ok, state.findings = _run_stage(context.summary, "detector", lambda: run_detector_stage(context.store_root))
     if not ok:
         from agent_py_agent.agent.log_analysis.storage.local_store import LocalLogStore
-        summary["total_events"] = len(LocalLogStore(store_root).list_events())
-        return summary, findings, case, route, traced
 
-    ok, case = _run_stage(summary, "case", lambda: run_case_stage(findings, store_root, artifacts_root))
-    if not ok:
-        return summary, findings, case, route, traced
+        context.summary["total_events"] = len(LocalLogStore(context.store_root).list_events())
+    return ok
 
-    ok, route = _run_stage(summary, "route", lambda: run_route_stage(case, findings, artifacts_root))
-    if not ok:
-        return summary, findings, case, route, traced
 
-    ok, traced = _run_stage(
-        summary, "evidence",
-        lambda: run_evidence_stage(case, store_root, params.start_time, params.end_time, params.limit, params.simulate_failure_stage),
+def _run_case_replay(context: ReplayStageContext, state: ReplayState) -> bool:
+    ok, state.case = _run_stage(
+        context.summary,
+        "case",
+        lambda: run_case_stage(state.findings, context.store_root, context.artifacts_root),
     )
-    if not ok:
-        return summary, findings, case, route, traced
+    return ok
 
+
+def _run_route_replay(context: ReplayStageContext, state: ReplayState) -> bool:
+    ok, state.route = _run_stage(
+        context.summary,
+        "route",
+        lambda: run_route_stage(state.case, state.findings, context.artifacts_root),
+    )
+    return ok
+
+
+def _run_evidence_replay(context: ReplayStageContext, state: ReplayState) -> bool:
+    ok, state.traced = _run_stage(
+        context.summary,
+        "evidence",
+        lambda: run_evidence_stage(
+            EvidenceStageParams(
+                state.case,
+                context.store_root,
+                context.params.start_time,
+                context.params.end_time,
+                context.params.limit,
+                context.params.simulate_failure_stage,
+            )
+        ),
+    )
+    return ok
+
+
+def _run_report_replay(context: ReplayStageContext, state: ReplayState) -> bool:
     ok, _ = _run_stage(
-        summary, "report",
-        lambda: run_report_stage(case, route, findings, traced, artifacts_root, params.simulate_failure_stage),
+        context.summary,
+        "report",
+        lambda: run_report_stage(
+            ReportStageParams(
+                state.case,
+                state.route,
+                state.findings,
+                state.traced,
+                context.artifacts_root,
+                context.params.simulate_failure_stage,
+            )
+        ),
     )
-    return summary, findings, case, route, traced
+    return ok
 
 
 def run_security_alert_v1_replay(
@@ -201,7 +248,7 @@ def run_security_alert_v1_replay(
 
     summary = _base_summary(output_root, fixture_path, params.fixture_format, params.dry_run)
     summary, findings, case, route, traced = _run_replay_stages(
-        summary, fixture_path, store_root, artifacts_root, params
+        ReplayStageContext(summary, fixture_path, store_root, artifacts_root, params)
     )
 
     if summary["stages"].get("report") == "pass":
@@ -217,14 +264,6 @@ def _record_failure(summary: dict[str, Any], stage: str, exc: Exception) -> None
     summary["error_type"] = type(exc).__name__
     summary["error_message"] = str(exc)
     summary["error"] = f"{type(exc).__name__}: {exc}"
-
-
-def _write_and_return(summary: dict[str, Any]) -> dict[str, Any]:
-    Path(summary["summary_path"]).write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return summary
 
 
 def new_output_root() -> Path:

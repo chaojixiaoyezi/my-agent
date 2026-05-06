@@ -1,8 +1,3 @@
-"""LLM: TUI UI setup — extracted from tui.py to keep run_tui under 100 lines.
-
-给人看的解释：
-tui.py 的 run_tui 超过 100 行限制。拆出 UI 初始化相关代码（status_bar、input_area、key_bindings、layout、style、app 创建）。
-"""
 
 from __future__ import annotations
 
@@ -15,6 +10,8 @@ from .fallback_state import ChatJob
 from .input_loop import is_show_prompt_command
 from .rendering import _cprint, _tui_print_banner
 from .tui import (
+    TuiExitRefs,
+    TuiStatusRefs,
     _tui_get_status_text,
     _tui_handle_expand_command,
     _tui_request_exit,
@@ -24,7 +21,6 @@ from .tui_params import MakeTuiAppParams, TuiHandleCommandParams
 
 @dataclass
 class TuiCreateKeybindingsParams:
-    """Parameter bundle for _tui_create_keybindings."""
 
     input_area: Any
     agent: Any
@@ -45,11 +41,16 @@ class TuiCreateKeybindingsParams:
     pending_jobs_ref_for_enqueue: list[int]
 
 
+@dataclass
+class StatusBarConfig:
+    refs: TuiStatusRefs
+    model_name: str
+
+
 def _tui_enqueue_job(
     params: TuiCreateKeybindingsParams,
     text: str,
 ) -> None:
-    """Enqueue a chat job and render the user entry."""
     show_prompt, text = is_show_prompt_command(text)
     job = ChatJob(
         user=text,
@@ -72,7 +73,6 @@ def _tui_enqueue_job(
 
 
 def _handle_enter_keybinding(event, params):
-    """Handle Enter key: process command or enqueue job."""
     text = params.input_area.text.strip()
     if not text:
         return
@@ -103,31 +103,32 @@ def _handle_enter_keybinding(event, params):
 
 
 def _handle_ctrl_c_keybinding(event, params):
-    """Handle Ctrl+C: request exit."""
     _tui_request_exit(
-        params.shutting_down_ref,
-        params.state_lock,
-        params.is_running_ref,
-        params.pending_jobs_ref,
-        params.stop_event,
+        TuiExitRefs(
+            shutting_down_ref=params.shutting_down_ref,
+            state_lock=params.state_lock,
+            is_running_ref=params.is_running_ref,
+            pending_jobs_ref=params.pending_jobs_ref,
+            stop_event=params.stop_event,
+        )
     )
     event.app.exit()
 
 
 def _handle_ctrl_d_keybinding(event, params):
-    """Handle Ctrl+D: request exit."""
     _tui_request_exit(
-        params.shutting_down_ref,
-        params.state_lock,
-        params.is_running_ref,
-        params.pending_jobs_ref,
-        params.stop_event,
+        TuiExitRefs(
+            shutting_down_ref=params.shutting_down_ref,
+            state_lock=params.state_lock,
+            is_running_ref=params.is_running_ref,
+            pending_jobs_ref=params.pending_jobs_ref,
+            stop_event=params.stop_event,
+        )
     )
     event.app.exit()
 
 
 def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
-    """Create prompt_toolkit KeyBindings with enter/c-c/c-d handlers."""
     from prompt_toolkit.key_binding import KeyBindings
 
     kb = KeyBindings()
@@ -138,14 +139,8 @@ def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
 
 
 def _make_status_bar(
-    state_lock,
-    is_running_ref,
-    pending_jobs_ref,
-    running_started_at_ref,
-    last_token_estimate_ref,
-    model_name,
+    config: StatusBarConfig,
 ):
-    """Create the status bar Window component."""
     from prompt_toolkit.layout import FormattedTextControl, Window
 
     return Window(
@@ -153,7 +148,7 @@ def _make_status_bar(
             lambda: [
                 (
                     "class:status-bar",
-                    f" {_tui_get_status_text(state_lock, is_running_ref, pending_jobs_ref, running_started_at_ref, last_token_estimate_ref, model_name)} ",
+                    f" {_tui_get_status_text(config.refs, config.model_name)} ",
                 )
             ],
         ),
@@ -163,7 +158,6 @@ def _make_status_bar(
 
 
 def _make_input_area(history_file_path: str) -> Any:
-    """Create the TextArea input component with history."""
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.layout.dimension import Dimension
@@ -181,7 +175,6 @@ def _make_input_area(history_file_path: str) -> Any:
 
 
 def make_tui_app(params: MakeTuiAppParams):
-    """Build and return a prompt_toolkit Application with status bar and input area."""
     from prompt_toolkit.application import Application
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import HSplit, Layout
@@ -191,34 +184,16 @@ def make_tui_app(params: MakeTuiAppParams):
     history_file.parent.mkdir(parents=True, exist_ok=True)
 
     status_bar = _make_status_bar(
-        params.state_lock,
-        params.is_running_ref,
-        params.pending_jobs_ref,
-        params.running_started_at_ref,
-        params.last_token_estimate_ref,
-        params.agent.config.model_name,
+        StatusBarConfig(
+            refs=TuiStatusRefs(params.state_lock, params.is_running_ref, params.pending_jobs_ref, params.running_started_at_ref, params.last_token_estimate_ref),
+            model_name=params.agent.config.model_name,
+        )
     )
     input_area = _make_input_area(str(history_file))
 
     kb = _tui_create_keybindings(
         TuiCreateKeybindingsParams(
-            input_area=input_area,
-            agent=params.agent,
-            args=params.args,
-            runtime_inject=params.runtime_inject,
-            prompt_files=params.prompt_files,
-            use_gateway=params.use_gateway,
-            paths=params.paths,
-            state_lock=params.state_lock,
-            is_running_ref=params.is_running_ref,
-            pending_jobs_ref=params.pending_jobs_ref,
-            running_prompt_ref=params.running_prompt_ref,
-            running_started_at_ref=params.running_started_at_ref,
-            shutting_down_ref=params.shutting_down_ref,
-            stop_event=params.stop_event,
-            assistant_outputs=params.assistant_outputs,
-            jobs=params.jobs,
-            pending_jobs_ref_for_enqueue=params.pending_jobs_ref_for_enqueue,
+            input_area, params.agent, params.args, params.runtime_inject, params.prompt_files, params.use_gateway, params.paths, params.state_lock, params.is_running_ref, params.pending_jobs_ref, params.running_prompt_ref, params.running_started_at_ref, params.shutting_down_ref, params.stop_event, params.assistant_outputs, params.jobs, params.pending_jobs_ref_for_enqueue
         )
     )
 

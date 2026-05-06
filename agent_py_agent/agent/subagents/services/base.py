@@ -49,12 +49,18 @@ class CreateRunParams:
 def _extract_write_dirs(goal: str) -> list[str]:
     """Extract directory paths from user goal text for automatic subagent write permission."""
     dirs: list[str] = []
-    for pattern in [_DIR_PATTERN, _HOME_DIR_PATTERN]:
-        for match in pattern.finditer(goal):
-            path = match.group().strip()
-            if path and path not in dirs:
-                dirs.append(path)
+    for path in _iter_write_dir_matches(goal):
+        if path and path not in dirs:
+            dirs.append(path)
     return dirs
+
+
+def _iter_write_dir_matches(goal: str):
+    return (
+        match.group().strip()
+        for pattern in [_DIR_PATTERN, _HOME_DIR_PATTERN]
+        for match in pattern.finditer(goal)
+    )
 
 
 class SubAgentBaseService:

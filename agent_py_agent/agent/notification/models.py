@@ -1,10 +1,3 @@
-"""通知数据模型。
-
-定义通知的核心数据结构，包括：
-- Notification: 通知实体
-- NotificationDelivery: 投递记录
-- notification_id 生成逻辑
-"""
 from __future__ import annotations
 
 import secrets
@@ -15,10 +8,6 @@ from typing import Any
 
 @dataclass
 class Notification:
-    """通知实体。
-
-    每个通知代表一次任务完成状态的推送。
-    """
 
     notification_id: str
     task_id: str
@@ -58,10 +47,6 @@ class Notification:
 
 @dataclass
 class NotificationDelivery:
-    """投递记录。
-
-    记录每次投递尝试的结果。
-    """
 
     notification_id: str
     channel: str
@@ -85,11 +70,6 @@ class NotificationDelivery:
 
 
 def generate_notification_id() -> str:
-    """生成新的通知 ID。
-
-    格式：notif_{timestamp}_{hex4}
-    例如：notif_1714681234_a3b7
-    """
     timestamp = int(time.time())
     random_part = secrets.token_hex(2)  # 4 位十六进制
     return f"notif_{timestamp}_{random_part}"

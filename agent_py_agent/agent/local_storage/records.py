@@ -85,24 +85,8 @@ class _LocalStoreRecordHelpers:
 
 
 class LocalStoreRecordMixin(_LocalStoreRecordHelpers):
-    """LLM: mixin for record persistence and content-file mapping.
-
-    给人看的解释：
-    records 表像目录卡片，正文文件像内容仓库。
-    这个 mixin 把两者绑在一起，保证同一来源重复索引时会更新同一条记录。
-    """
 
     def upsert_record(self, **kwargs: Any) -> LocalSearchResult:
-        """新增或更新一条本地记录。
-
-        `source_type/source_id` 用来描述来源，例如：
-        - `memory` + 某条记忆的稳定 ID
-        - `gateway_request` + request_id
-        - `subagent_run` + run_id
-
-        没传 `record_id` 时会按来源生成稳定 ID，因此重复索引同一来源会覆盖旧记录，
-        不会越写越多。
-        """
 
         prepared = self._prepare_record(
             _RecordInput(
@@ -212,12 +196,6 @@ class LocalStoreRecordMixin(_LocalStoreRecordHelpers):
         )
 
     def log_record(self, **kwargs: Any) -> LocalSearchResult:
-        """写一条可搜索记录，并追加一条语义化审计事件。
-
-        `upsert_record()` 只表达'索引里有这条记录'。
-        `log_record()` 额外表达'发生了一件事'，适合 gateway/subagent/runner
-        这类流程日志使用。
-        """
 
         metadata = kwargs.get("metadata") or {}
         record = self.upsert_record(**{**kwargs, "metadata": metadata})

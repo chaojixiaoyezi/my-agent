@@ -17,13 +17,6 @@ if TYPE_CHECKING:
 
 @dataclass
 class GatewayPaths:
-    """LLM contract: all filesystem endpoints used by the gateway queue.
-
-    Human version:
-    这里集中保存 gateway 会读写的所有文件夹和文件。比如 inbox 是待处理请求，
-    processing 是正在处理的请求，responses 是结果。CLI 不需要自己拼路径，
-    只要拿到这组对象就知道 gateway 的现场在哪里。
-    """
 
     root: Path
     pid: Path
@@ -42,13 +35,6 @@ class GatewayPaths:
 
 @dataclass
 class AdapterPaths:
-    """LLM contract: file-adapter inbox/outbox directory set.
-
-    Human version:
-    文件适配器是给外部聊天工具/TUI 用的。外部程序把消息 JSON 放进 inbox，
-    my-agent 处理后把回复 JSON 放到 outbox。中间的 processing/done/failed
-    让人可以直接看目录判断消息走到哪一步。
-    """
 
     root: Path
     inbox: Path
@@ -59,12 +45,6 @@ class AdapterPaths:
 
 
 def gateway_paths(agent: SimpleAgent) -> GatewayPaths:
-    """LLM contract: resolve gateway control and queue paths from agent config.
-
-    Human version:
-    根据配置算出 gateway 的工作目录。测试环境可以把它指到临时目录，真实运行时
-    默认落到 agent_py_agent/data/gateway，这样不会把路径写死在命令逻辑里。
-    """
 
     root = agent.root / agent.config.gateway_workspace
     return GatewayPaths(
@@ -85,22 +65,10 @@ def gateway_paths(agent: SimpleAgent) -> GatewayPaths:
 
 
 def gateway_chunk_path(paths: GatewayPaths, request_id: str) -> Path:
-    """LLM: resolve the streaming chunk file for a processing request.
-
-    Human version:
-    流式输出时，daemon 把每个 chunk 追加到这个文件。CLI 轮询读取后显示给用户。
-    请求完成后由 daemon 删除。
-    """
     return paths.processing / f"{request_id}.chunks.jsonl"
 
 
 def adapter_paths(agent: SimpleAgent) -> AdapterPaths:
-    """LLM contract: resolve file-adapter paths from agent config.
-
-    Human version:
-    和 gateway_paths() 类似，只是这里服务外部消息适配器。以后如果 adapter
-    从文件协议换成别的协议，CLI 入口也不需要知道太多底层细节。
-    """
 
     root = agent.root / agent.config.adapter_workspace
     return AdapterPaths(

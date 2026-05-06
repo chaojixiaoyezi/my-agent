@@ -1,9 +1,3 @@
-"""LLM: top-level turn archiver — ArchiveRunTurnResult, archive_run_turn, and _build_run_turn_events.
-
-给人看的解释：
-这个文件放 ArchiveRunTurnResult 数据类、archive_run_turn 主函数和 _build_run_turn_events 事件拼装函数。
-archive_run_turn 是 SimpleAgent.run() 完成后用来把一轮对话写入冷归档的入口。
-"""
 
 from __future__ import annotations
 
@@ -31,17 +25,6 @@ from .event_builders import (
 
 @dataclass(frozen=True)
 class ArchiveRunTurnResult:
-    """LLM: return summary for raw archive writes performed for one run turn.
-
-    新手说明:
-    调用方拿到这个结果后，可以知道这轮写到了哪些文件、写了几条事件、粗略占多少 token。
-    里面也带回 event_id 和 content_hash，方便测试、排障或后续把归档记录和请求日志串起来。
-
-    字段说明:
-    `write_paths` 是实际写入过的 JSONL 文件；`event_count` 是事件数量；
-    `token_estimate` 是本轮粗略 token 估算；`event_ids` 和 `content_hashes` 方便追踪和去重；
-    `events` 是已经构造并写入的事件对象，测试和 doctor 可以直接检查。
-    """
 
     write_paths: tuple[Path, ...]
     event_count: int
@@ -52,20 +35,10 @@ class ArchiveRunTurnResult:
 
     @property
     def paths(self) -> tuple[Path, ...]:
-        """LLM: compatibility alias for callers that expect `paths`.
-
-        新手说明:
-        早期调用方可能只知道 `paths` 这个短名字；这里返回同一个 `write_paths`，避免破坏旧代码。
-        """
 
         return self.write_paths
 
     def to_dict(self) -> dict[str, Any]:
-        """LLM: serialize the archive result without losing event details.
-
-        新手说明:
-        如果 CLI 或 doctor 想把这次归档结果打印成 JSON，可以直接用这个方法。
-        """
 
         return {
             "write_paths": [str(path) for path in self.write_paths],
@@ -77,11 +50,6 @@ class ArchiveRunTurnResult:
         }
 
     def __getitem__(self, key: str) -> Any:
-        """LLM: provide dict-like access for compatibility with older tests or callers.
-
-        新手说明:
-        有些代码可能写 `result["event_count"]`，有些写 `result.event_count`。两种写法都能工作。
-        """
 
         return self.to_dict()[key]
 
@@ -239,20 +207,8 @@ def archive_run_turn(
         ),
     )
 
-    paths: list[Path] = []
-    for event in events:
-        path = append_raw_event(root, event)
-        if path not in paths:
-            paths.append(path)
-
-    token_estimate = estimate_tokens(
-        {
-            "user_prompt": ctx.user_prompt,
-            "response_text": ctx.response_text,
-            "backend": ctx.backend,
-            "tool_calls": normalized_tool_calls,
-        }
-    )
+    paths = _append_events(root, events)
+    token_estimate = _turn_token_estimate(ctx, normalized_tool_calls)
 
     return ArchiveRunTurnResult(
         write_paths=tuple(paths),
@@ -261,4 +217,24 @@ def archive_run_turn(
         event_ids=tuple(event.event_id for event in events),
         content_hashes=tuple(event.content_hash for event in events),
         events=tuple(events),
+    )
+
+
+def _append_events(root: str | Path, events: list[RawMemoryEvent]) -> list[Path]:
+    paths: list[Path] = []
+    for event in events:
+        path = append_raw_event(root, event)
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _turn_token_estimate(ctx: ArchiveTurnContext, tool_calls: list[dict[str, Any]]) -> int:
+    return estimate_tokens(
+        {
+            "user_prompt": ctx.user_prompt,
+            "response_text": ctx.response_text,
+            "backend": ctx.backend,
+            "tool_calls": tool_calls,
+        }
     )

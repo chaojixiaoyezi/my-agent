@@ -22,6 +22,25 @@ class DispatchHealthSummary:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class DispatchHealthInputs:
+    cases: list[Any] | None = None
+    case_backlog: Mapping[str, int] | None = None
+    queue: InvestigationQueue | None = None
+    budget: DispatchBudget | Mapping[str, Any] | None = None
+    prompt_config: SecurityPromptConfig | Mapping[str, Any] | None = None
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> DispatchHealthInputs:
+        return cls(
+            cases=kwargs.get("cases"),
+            case_backlog=kwargs.get("case_backlog"),
+            queue=kwargs.get("queue"),
+            budget=kwargs.get("budget"),
+            prompt_config=kwargs.get("prompt_config"),
+        )
+
+
 def _get(source: Any, key: str, default: Any = None) -> Any:
     if isinstance(source, Mapping):
         return source.get(key, default)
@@ -40,20 +59,24 @@ def _case_backlog_from_cases(cases: list[Any] | None) -> dict[str, int]:
 
 def build_health_summary(
     *,
-    cases: list[Any] | None = None,
-    case_backlog: Mapping[str, int] | None = None,
-    queue: InvestigationQueue | None = None,
-    budget: DispatchBudget | Mapping[str, Any] | None = None,
-    prompt_config: SecurityPromptConfig | Mapping[str, Any] | None = None,
+    inputs: DispatchHealthInputs | None = None,
+    **kwargs: Any,
 ) -> DispatchHealthSummary:
+    health_inputs = inputs or DispatchHealthInputs.from_kwargs(**kwargs)
+    budget = health_inputs.budget
+    prompt_config = health_inputs.prompt_config
     dispatch_budget = budget if isinstance(budget, DispatchBudget) else DispatchBudget.from_mapping(budget)
     security_prompt = (
         prompt_config
         if isinstance(prompt_config, SecurityPromptConfig)
         else SecurityPromptConfig.from_mapping(prompt_config)
     )
-    case_counts = dict(case_backlog) if case_backlog is not None else _case_backlog_from_cases(cases)
-    agent_backlog = queue.agent_backlog() if queue is not None else {}
+    case_counts = (
+        dict(health_inputs.case_backlog)
+        if health_inputs.case_backlog is not None
+        else _case_backlog_from_cases(health_inputs.cases)
+    )
+    agent_backlog = health_inputs.queue.agent_backlog() if health_inputs.queue is not None else {}
     return DispatchHealthSummary(
         case_backlog=case_counts,
         agent_backlog=agent_backlog,

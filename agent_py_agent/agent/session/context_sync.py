@@ -1,7 +1,3 @@
-"""会话上下文同步。
-
-在通道切换时同步会话上下文。
-"""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -12,15 +8,6 @@ if TYPE_CHECKING:
 
 
 def format_context_for_channel(context: dict, channel: str) -> str:
-    """按通道格式化上下文。
-
-    Args:
-        context: 上下文字典
-        channel: 目标通道（chat/feishu/qq）
-
-    Returns:
-        格式化后的上下文文本
-    """
     lines = _context_header_lines(context, channel)
     _append_recent_messages(lines, context.get("recent_messages", []), channel)
     _append_pending_reply(lines, context.get("pending_reply"))
@@ -87,25 +74,10 @@ class SessionContextSync:
     """会话上下文同步器。"""
 
     def __init__(self, cross_channel: CrossChannelSession, task_registry_store: LocalStore | None = None):
-        """初始化上下文同步器。
-
-        Args:
-            cross_channel: 跨通道会话管理器
-            task_registry_store: LocalStore 实例（用于查询任务），可选
-        """
         self._cross_channel = cross_channel
         self._task_registry_store = task_registry_store
 
     def sync_to_channel(self, session_id: str, channel: str) -> dict:
-        """将会话上下文同步到目标通道。
-
-        Args:
-            session_id: 会话 ID
-            channel: 目标通道
-
-        Returns:
-            同步后的上下文字典
-        """
         # 获取会话信息
         session = self._cross_channel._load_channels(session_id)
         if session is None:
@@ -142,16 +114,6 @@ class SessionContextSync:
         recent_messages: list[dict] | None = None,
         pending_reply: str | None = None,
     ) -> bool:
-        """更新会话的上下文信息。
-
-        Args:
-            session_id: 会话 ID
-            recent_messages: 最近消息列表
-            pending_reply: 待回复内容
-
-        Returns:
-            是否成功更新
-        """
         data = self._cross_channel._load_channels(session_id)
         if data is None:
             return False

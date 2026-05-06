@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .models import SpeedProfile, SpeedSample
 
@@ -18,13 +18,14 @@ if TYPE_CHECKING:
 
 def run_speed_benchmark(
     config: AgentConfig,
-    input_sizes: list[int] | None = None,
-    output_size: int = 500,
-    backend: str | None = None,
-    model: str | None = None,
+    **options: Any,
 ) -> SpeedProfile:
     """运行模型速度基准测试。"""
 
+    input_sizes = options.get("input_sizes")
+    output_size = int(options.get("output_size", 500))
+    backend = options.get("backend")
+    model = options.get("model")
     if input_sizes is None:
         input_sizes = [1000, 5000, 10000, 50000, 100000]
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,16 @@ from .base import (
     record_identity,
     utc_now,
 )
+
+
+@dataclass(frozen=True)
+class _AuditSampleInput:
+    audit: JsonlReadAudit
+    line_no: int
+    reason: str
+    line: str
+    detail: str = ""
+    max_samples: int = 5
 
 
 class LocalLogStore:
@@ -151,7 +162,7 @@ class LocalLogStore:
             except json.JSONDecodeError as exc:
                 audit.corrupt_lines += 1
                 audit.skipped_lines += 1
-                _add_audit_sample(audit, line_no, "invalid_json", line, str(exc))
+                _add_audit_sample(_AuditSampleInput(audit, line_no, "invalid_json", line, str(exc)))
                 continue
             if isinstance(payload, dict):
                 records.append(payload)
@@ -159,7 +170,7 @@ class LocalLogStore:
                 continue
             audit.non_object_lines += 1
             audit.skipped_lines += 1
-            _add_audit_sample(audit, line_no, "non_object_json", line)
+            _add_audit_sample(_AuditSampleInput(audit, line_no, "non_object_json", line))
         audit_payload = model_to_dict(audit)
         self._last_read_audits[str(path)] = audit_payload
         if path != self.corrupt_lines_path and (audit.corrupt_lines or audit.non_object_lines):
@@ -167,22 +178,14 @@ class LocalLogStore:
         return records
 
 
-def _add_audit_sample(
-    audit: JsonlReadAudit,
-    line_no: int,
-    reason: str,
-    line: str,
-    detail: str = "",
-    *,
-    max_samples: int = 5,
-) -> None:
-    if len(audit.samples) >= max_samples:
+def _add_audit_sample(data: _AuditSampleInput) -> None:
+    if len(data.audit.samples) >= data.max_samples:
         return
     sample: dict[str, Any] = {
-        "line_no": line_no,
-        "reason": reason,
-        "preview": line[:200],
+        "line_no": data.line_no,
+        "reason": data.reason,
+        "preview": data.line[:200],
     }
-    if detail:
-        sample["detail"] = detail
-    audit.samples.append(sample)
+    if data.detail:
+        sample["detail"] = data.detail
+    data.audit.samples.append(sample)

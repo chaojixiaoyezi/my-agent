@@ -31,7 +31,6 @@ from ..scenario_utils import (
 
 @dataclass
 class SubagentRunResults:
-    """Bundle of subagent runner results for _verify_subagent_resume."""
     runner: object
     loaded: object
     backend: object
@@ -39,18 +38,11 @@ class SubagentRunResults:
 
 @dataclass
 class ResumeCommandResults:
-    """Bundle of resume command results for _verify_subagent_resume."""
     payload: object
     returncode: int
 
 
 class ScenarioParentSubagentRecoveryBackend:
-    """LLM: stub backend that produces a tool call on first generate, then a structured SUBAGENT_RESULT on second.
-
-    新手说明:
-    场景测试用后端——第一次 generate 输出工具调用（读 README），
-    第二次 generate 输出可恢复的结构化结果（AWAITING_ACCEPTANCE）。
-    """
 
     name = "scenario_parent_subagent_recovery_backend"
 
@@ -97,12 +89,6 @@ class ScenarioParentSubagentRecoveryBackend:
 
 
 def _write_parent_subagent_recovery_fact_files(task) -> None:
-    """LLM: keep scenario task fact files aligned with the runner result state.
-
-    新手说明:
-    把子代理任务的 STATUS、HANDOFF、TEST_CHECKLIST 文件写好，
-    确保 memory-resume 恢复时能看到一致的任务状态。
-    """
 
     Path(task.status_file).write_text(
         "# STATUS\n\n"
@@ -137,11 +123,6 @@ def _write_parent_subagent_recovery_fact_files(task) -> None:
 
 
 def _append_parent_subagent_cross_day_resume_clues(root: Path, task) -> None:
-    """LLM: write deterministic cross-day archive clues for one real subagent runner result.
-
-    新手说明:
-    向归档系统写入模拟的跨天线索，让 memory-resume 命令能找到这个子代理任务的上下文。
-    """
 
     append_raw_event(
         root,
@@ -164,7 +145,6 @@ def _append_parent_subagent_cross_day_resume_clues(root: Path, task) -> None:
 
 
 def _append_subagent_snapshot(root: Path, task) -> None:
-    """Append a recovery snapshot for the subagent task."""
     append_snapshot(
         root,
         CompressionSnapshot(
@@ -202,7 +182,6 @@ def _append_subagent_snapshot(root: Path, task) -> None:
 
 
 def _parent_subagent_setup(args):
-    """Setup for parent subagent cross-day resume: create workspace, agent, task, and run subagent."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=parent-subagent-cross-day-resume")
@@ -244,7 +223,6 @@ def _parent_subagent_setup(args):
 
 
 def _run_subagent_resume(paths, task):
-    """Run memory-resume subprocess for subagent cross-day recovery. Returns parsed payload."""
     env = os.environ.copy()
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
@@ -263,7 +241,6 @@ def _run_subagent_resume(paths, task):
 
 
 def _verify_subagent_resume(run: SubagentRunResults, resume: ResumeCommandResults, task, expected_reads):
-    """Verify subagent cross-day resume found task fact sources."""
     task_sources = resume.payload.get("task_fact_sources", []) if isinstance(resume.payload, dict) else []
     recommended_reads = resume.payload.get("resume", {}).get("recommended_read_paths", []) if isinstance(resume.payload, dict) else []
     context_block = resume.payload.get("brief", {}).get("context_block", "") if isinstance(resume.payload, dict) else ""
@@ -289,12 +266,6 @@ def _verify_subagent_resume(run: SubagentRunResults, resume: ResumeCommandResult
 
 
 def run_scenario_parent_subagent_cross_day_resume_case(args) -> int:
-    """LLM: run a real subagent runner turn, then prove memory-resume returns task fact sources.
-
-    新手说明:
-    让子代理真正执行一轮（读 README），然后模拟跨天恢复。
-    验证 memory-resume 命令能找回子代理的任务事实源文件路径。
-    """
 
     paths, agent, backend, task, loaded, runner = _parent_subagent_setup(args)
 

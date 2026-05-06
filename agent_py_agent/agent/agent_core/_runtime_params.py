@@ -1,4 +1,3 @@
-"""Runtime service parameter dataclasses."""
 
 from __future__ import annotations
 
@@ -22,7 +21,6 @@ from .parameters import _one_shot_tool_call_key
 
 @dataclass(frozen=True)
 class FinalizeContext:
-    """Bundle of all finalize() parameters into a single object."""
 
     user_prompt: str
     final_prompt: str
@@ -50,7 +48,6 @@ class FinalizeContext:
 
 @dataclass(frozen=True)
 class ToolLoopExecuteParams:
-    """Bundle of all ToolLoopService.execute parameters."""
 
     user_prompt: str
     memories: list
@@ -72,7 +69,6 @@ class ToolLoopExecuteParams:
 
 @dataclass(frozen=True)
 class CompressionContext:
-    """Bundle of check_and_apply parameters."""
 
     user_prompt: str
     memories: list
@@ -87,7 +83,6 @@ class CompressionContext:
 
 @dataclass(frozen=True)
 class ArchiveRunParams:
-    """Bundle of _archive_run_if_needed parameters."""
 
     do_save: bool
     user_prompt: str
@@ -101,7 +96,6 @@ class ArchiveRunParams:
 
 @dataclass(frozen=True)
 class WriteRecoverySnapshotParams:
-    """Bundle of _write_recovery_snapshot_if_needed parameters."""
 
     do_save: bool
     recovery_snapshot: Any
@@ -120,7 +114,6 @@ class WriteRecoverySnapshotParams:
 
 @dataclass(frozen=True)
 class EstimateTokenParams:
-    """Bundle of _estimate_token_usage parameters."""
 
     user_prompt: str
     runtime_injections: list

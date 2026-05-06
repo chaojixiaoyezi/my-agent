@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 _INT_PATTERN = re.compile(r"-?[0-9]+")
 _FLOAT_PATTERN = re.compile(r"-?[0-9]+(\.[0-9]+)?")
+
+
+@dataclass(frozen=True)
+class _Bounds:
+    min_val: int | float | None
+    max_val: int | float | None
 
 
 class CoercionService:
@@ -30,50 +37,38 @@ class CoercionService:
 
     @staticmethod
     def coerce_int(
-        key: str, value: object, fallback: int, *, min_val: int | None = None, max_val: int | None = None
+        key: str, value: object, fallback: int, **bounds: int | None
     ) -> tuple[int, str | None]:
         """Coerce a raw config value to int with optional range checks."""
+        min_val = bounds.get("min_val")
+        max_val = bounds.get("max_val")
         if value is None:
             return fallback, None
-        if isinstance(value, bool):
-            return fallback, f"{key}: expected an integer, got boolean; using {fallback}"
-        if isinstance(value, int):
-            number = value
-        elif isinstance(value, str) and _INT_PATTERN.fullmatch(value.strip()):
-            number = int(value.strip())
-        elif isinstance(value, float) and value == int(value):
-            number = int(value)
-        else:
-            return fallback, f"{key}: expected an integer, got {value!r}; using {fallback}"
-        if min_val is not None and number < min_val:
-            return fallback, f"{key}: expected >= {min_val}, got {number}; using {fallback}"
-        if max_val is not None and number > max_val:
-            return fallback, f"{key}: expected <= {max_val}, got {number}; using {fallback}"
+        number = _coerce_int_number(value)
+        if number is None:
+            detail = "boolean" if isinstance(value, bool) else repr(value)
+            return fallback, f"{key}: expected an integer, got {detail}; using {fallback}"
+        warn = _range_warning(key, number, fallback, _Bounds(min_val, max_val))
+        if warn:
+            return fallback, warn
         return number, None
 
     @staticmethod
     def coerce_float(
-        key: str, value: object, fallback: float, *, min_val: float | None = None, max_val: float | None = None
+        key: str, value: object, fallback: float, **bounds: float | None
     ) -> tuple[float, str | None]:
         """Coerce a raw config value to float with optional range checks."""
+        min_val = bounds.get("min_val")
+        max_val = bounds.get("max_val")
         if value is None:
             return fallback, None
-        if isinstance(value, bool):
-            return fallback, f"{key}: expected a float, got boolean; using {fallback}"
-        if isinstance(value, (int, float)):
-            number = float(value)
-        elif isinstance(value, str):
-            stripped = value.strip()
-            if _FLOAT_PATTERN.fullmatch(stripped):
-                number = float(stripped)
-            else:
-                return fallback, f"{key}: expected a float, got {value!r}; using {fallback}"
-        else:
-            return fallback, f"{key}: expected a float, got {value!r}; using {fallback}"
-        if min_val is not None and number < min_val:
-            return fallback, f"{key}: expected >= {min_val}, got {number}; using {fallback}"
-        if max_val is not None and number > max_val:
-            return fallback, f"{key}: expected <= {max_val}, got {number}; using {fallback}"
+        number = _coerce_float_number(value)
+        if number is None:
+            detail = "boolean" if isinstance(value, bool) else repr(value)
+            return fallback, f"{key}: expected a float, got {detail}; using {fallback}"
+        warn = _range_warning(key, number, fallback, _Bounds(min_val, max_val))
+        if warn:
+            return fallback, warn
         return number, None
 
     @staticmethod
@@ -86,3 +81,41 @@ class CoercionService:
             if normalized in choices:
                 return normalized, None
         return fallback, f"{key}: expected one of {list(choices)}, got {value!r}; using {fallback}"
+
+
+def _coerce_int_number(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and _INT_PATTERN.fullmatch(value.strip()):
+        return int(value.strip())
+    if isinstance(value, float) and value == int(value):
+        return int(value)
+    return None
+
+
+def _coerce_float_number(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not _FLOAT_PATTERN.fullmatch(stripped):
+        return None
+    return float(stripped)
+
+
+def _range_warning(
+    key: str,
+    number: int | float,
+    fallback: int | float,
+    bounds: _Bounds,
+) -> str | None:
+    if bounds.min_val is not None and number < bounds.min_val:
+        return f"{key}: expected >= {bounds.min_val}, got {number}; using {fallback}"
+    if bounds.max_val is not None and number > bounds.max_val:
+        return f"{key}: expected <= {bounds.max_val}, got {number}; using {fallback}"
+    return None

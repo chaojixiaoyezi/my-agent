@@ -60,17 +60,6 @@ def paginate_records(
     page: int = 1,
     page_size: int = 100,
 ) -> ArchiveQueryResponse:
-    """LLM: apply pagination to a record list and return response object.
-
-    新手说明:
-    对记录列表进行分页，返回带有分页信息的响应对象。
-
-    参数说明:
-    `records` 是完整的记录列表；`page` 是页码（从1开始）；`page_size` 是每页记录数。
-
-    返回说明:
-    返回带有分页信息的 ArchiveQueryResponse 对象。
-    """
 
     total = len(records)
     start = (page - 1) * page_size

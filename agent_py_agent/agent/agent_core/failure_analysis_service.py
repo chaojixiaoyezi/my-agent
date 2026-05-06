@@ -9,7 +9,6 @@ from ..subagents.models import SubAgentRunnerResult, SubAgentTask
 
 @dataclass
 class FailureAnalysis:
-    """失败分析结果。"""
 
     failure_type: str = ""
     root_cause: str = ""
@@ -52,7 +51,6 @@ def _goal_based_split_suggestions(goal: str) -> list[str]:
 
 
 class FailureAnalysisService:
-    """Provides all failure-type analysis methods."""
 
     def __init__(self, max_timeout: float = _MAX_TIMEOUT, max_retry_attempts: int = _MAX_RETRY_ATTEMPTS):
         self.max_timeout = max_timeout

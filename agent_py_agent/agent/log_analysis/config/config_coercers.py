@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from .config_model import LogAnalysisConfigWarning
@@ -16,6 +17,56 @@ from .config_model import LogAnalysisConfigWarning
 _MISSING = object()
 _INT_PATTERN = re.compile(r"-?[0-9]+")
 _LEVELS = {"L0", "L1", "L2", "L3", "L4", "L5"}
+
+
+@dataclass(frozen=True)
+class _WarningInput:
+    field_name: str
+    raw_value: Any
+    fallback_value: Any
+    reason: str
+
+    @classmethod
+    def from_legacy(cls, args: tuple[Any, ...], kwargs: dict[str, Any]) -> _WarningInput:
+        if args:
+            field_name, raw_value, fallback_value, reason = args
+            return cls(str(field_name), raw_value, fallback_value, str(reason))
+        return cls(
+            str(kwargs["field_name"]),
+            kwargs.get("raw_value"),
+            kwargs.get("fallback_value"),
+            str(kwargs["reason"]),
+        )
+
+
+@dataclass(frozen=True)
+class _ChoiceOptions:
+    default: str
+    choices: set[str]
+    uppercase: bool = False
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> _ChoiceOptions:
+        return cls(
+            default=str(kwargs["default"]),
+            choices=set(kwargs["choices"]),
+            uppercase=bool(kwargs.get("uppercase", False)),
+        )
+
+
+@dataclass(frozen=True)
+class _IntOptions:
+    default: int
+    min_value: int
+    max_value: int | None
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> _IntOptions:
+        return cls(
+            default=int(kwargs["default"]),
+            min_value=int(kwargs["min_value"]),
+            max_value=kwargs.get("max_value"),
+        )
 
 
 def _lookup(source: Mapping[str, Any] | object, field_name: str) -> Any:
@@ -38,10 +89,9 @@ def _lookup(source: Mapping[str, Any] | object, field_name: str) -> Any:
 
 def _warn(
     warnings: list[LogAnalysisConfigWarning],
-    field_name: str,
-    raw_value: Any,
-    fallback_value: Any,
-    reason: str,
+    *args: Any,
+    warning: _WarningInput | None = None,
+    **kwargs: Any,
 ) -> None:
     """LLM: 追加一条配置 warning，记录原始值、回退值和原因。
 
@@ -58,12 +108,13 @@ def _warn(
     返回说明:
     没有返回值；结果追加到 warnings。
     """
+    item = warning or _WarningInput.from_legacy(args, kwargs)
     warnings.append(
         LogAnalysisConfigWarning(
-            field_name=field_name,
-            raw_value=raw_value,
-            fallback_value=fallback_value,
-            reason=reason,
+            field_name=item.field_name,
+            raw_value=item.raw_value,
+            fallback_value=item.fallback_value,
+            reason=item.reason,
         )
     )
 
@@ -109,11 +160,7 @@ def _coerce_bool(
 def _coerce_choice(
     field_name: str,
     raw_value: Any,
-    *,
-    default: str,
-    choices: set[str],
-    warnings: list[LogAnalysisConfigWarning],
-    uppercase: bool = False,
+    **kwargs: Any,
 ) -> str:
     """LLM: 把用户配置值安全转换成允许集合中的字符串选项。
 
@@ -132,25 +179,23 @@ def _coerce_choice(
     返回说明:
     返回 choices 中的字符串，或 default。
     """
+    warnings = kwargs["warnings"]
+    coercion = kwargs.get("options") or _ChoiceOptions.from_kwargs(**kwargs)
     if raw_value is _MISSING:
-        return default
+        return coercion.default
     if isinstance(raw_value, str):
         normalized = raw_value.strip()
-        normalized = normalized.upper() if uppercase else normalized.lower()
-        if normalized in choices:
+        normalized = normalized.upper() if coercion.uppercase else normalized.lower()
+        if normalized in coercion.choices:
             return normalized
-    _warn(warnings, field_name, raw_value, default, f"expected one of {sorted(choices)}")
-    return default
+    _warn(warnings, field_name, raw_value, coercion.default, f"expected one of {sorted(coercion.choices)}")
+    return coercion.default
 
 
 def _coerce_int(
     field_name: str,
     raw_value: Any,
-    *,
-    default: int,
-    min_value: int,
-    max_value: int | None,
-    warnings: list[LogAnalysisConfigWarning],
+    **kwargs: Any,
 ) -> int:
     """LLM: 把用户配置值安全转换成有范围限制的整数。
 
@@ -169,25 +214,27 @@ def _coerce_int(
     返回说明:
     返回范围内整数；解析失败或越界时返回 default。
     """
+    warnings = kwargs["warnings"]
+    coercion = kwargs.get("options") or _IntOptions.from_kwargs(**kwargs)
     if raw_value is _MISSING:
-        return default
+        return coercion.default
     if isinstance(raw_value, bool):
-        _warn(warnings, field_name, raw_value, default, "expected an integer, not a boolean")
-        return default
+        _warn(warnings, field_name, raw_value, coercion.default, "expected an integer, not a boolean")
+        return coercion.default
     if isinstance(raw_value, int):
         number = raw_value
     elif isinstance(raw_value, str) and _INT_PATTERN.fullmatch(raw_value.strip()):
         number = int(raw_value.strip())
     else:
-        _warn(warnings, field_name, raw_value, default, "expected an integer")
-        return default
+        _warn(warnings, field_name, raw_value, coercion.default, "expected an integer")
+        return coercion.default
 
-    if number < min_value:
-        _warn(warnings, field_name, raw_value, default, f"expected value >= {min_value}")
-        return default
-    if max_value is not None and number > max_value:
-        _warn(warnings, field_name, raw_value, default, f"expected value <= {max_value}")
-        return default
+    if number < coercion.min_value:
+        _warn(warnings, field_name, raw_value, coercion.default, f"expected value >= {coercion.min_value}")
+        return coercion.default
+    if coercion.max_value is not None and number > coercion.max_value:
+        _warn(warnings, field_name, raw_value, coercion.default, f"expected value <= {coercion.max_value}")
+        return coercion.default
     return number
 
 

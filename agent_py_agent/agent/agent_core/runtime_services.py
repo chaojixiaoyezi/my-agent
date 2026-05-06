@@ -1,10 +1,3 @@
-"""LLM: service classes for SimpleAgentRuntimeMixin.
-
-Re-exports from split service modules for backward compatibility.
-- ToolLoopService: tool-calling loop execution
-- CompressionService: compression check, snapshot, and compression logic
-- FinalizationService: result finalization, archiving, and token estimation
-"""
 
 from __future__ import annotations
 

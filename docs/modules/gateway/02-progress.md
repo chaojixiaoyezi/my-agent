@@ -84,3 +84,7 @@
 - gateway 连接 CLI、后台进程、文件协议、LocalStore、chat、adapter，变化面大，文档很容易再次散开。
 - 文件队列并发写入需要持续测试，否则 worker pool 扩大后容易出现重复处理或状态覆盖。
 - 普通用户入口和开发者命令层级需要继续打磨，避免体验被内部协议细节淹没。
+## 2026-05-06 code-size cleanup
+- Split gateway request execution out of the request worker and flattened gateway IO, lease, recovery, supervisor, and adapter helpers.
+- Strengthened request ID generation by keeping the full UUID suffix, eliminating stress-test collisions seen with the previous short suffix.
+- Preserved macOS/POSIX process handling while keeping Windows-native locking and file replacement safeguards.

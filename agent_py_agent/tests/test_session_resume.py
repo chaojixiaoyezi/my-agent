@@ -13,6 +13,20 @@ from agent_py_agent.agent.session.resume import (
 )
 
 
+def _remove_subagent_module():
+    import sys
+
+    return sys.modules.pop("agent_py_agent.agent.subagent", None)
+
+
+def _restore_subagent_module(original):
+    if original is None:
+        return
+    import sys
+
+    sys.modules["agent_py_agent.agent.subagent"] = original
+
+
 class TestResumeSession:
     """Test resume_session function."""
 
@@ -89,20 +103,13 @@ class TestResumeSession:
             mock_instance.load_session.return_value = mock_session
             MockSM.return_value = mock_instance
 
-            # Simulate import failure by removing from sys.modules
-            import sys
-            original = sys.modules.get("agent_py_agent.agent.subagent")
+            original = _remove_subagent_module()
             try:
-                # Temporarily remove to simulate import failure
-                if "agent_py_agent.agent.subagent" in sys.modules:
-                    del sys.modules["agent_py_agent.agent.subagent"]
                 result = resume_session(mock_agent, "test-session")
                 # Should complete without raising
                 assert "subagent_context" in result
             finally:
-                # Restore original
-                if original is not None:
-                    sys.modules["agent_py_agent.agent.subagent"] = original
+                _restore_subagent_module(original)
 
 
 class TestFormatResumeContext:

@@ -1,4 +1,3 @@
-"""_SubagentRepairMixin: structured output repair and recovery snapshot writing."""
 
 from __future__ import annotations
 
@@ -27,10 +26,8 @@ class SubagentRepairParams:
 
 
 class _SubagentRepairMixin:
-    """Internal: structured output repair and recovery snapshot writing."""
 
     def _handle_subagent_repair(self, params: SubagentRepairParams):
-        """Handle structured output repair when initial parse fails."""
         structured_repair_ok = False
         structured_repair_error = ""
 
@@ -89,12 +86,6 @@ class _SubagentRepairMixin:
         run_id: str,
         **kwargs,
     ) -> None:
-        """LLM: write a best-effort run_id recovery snapshot after subagent-run finishes.
-
-        给人看的解释：
-        子代理 runner 用 `save=False`，避免把大 prompt 写进普通对话记忆。
-        但任务恢复需要一个小锚点，所以 runner 结果写回后单独写 hook，并附上任务目录里的权威文件路径。
-        """
 
         if not bool(getattr(self.config, "memory_hook_enabled", True)):
             return

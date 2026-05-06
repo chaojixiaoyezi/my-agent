@@ -1,4 +1,3 @@
-"""Read-only filesystem tools."""
 
 from __future__ import annotations
 
@@ -20,18 +19,11 @@ _MAX_WRITE_TEXT_CHARS = 1_000_000
 
 
 class FileSystemTool(BaseTool):
-    """文件系统类工具的安全边界。
-
-    大白话解释：
-    不管模型多聪明，都不能让它随便跳出工作区去乱读乱写。
-    这里统一把路径钉死在工作区下面，减少误操作风险。
-    """
 
     def __init__(self, workspace_root: Path):
         self.workspace_root = workspace_root.resolve()
 
     def resolve_path(self, raw_path: str | Path) -> Path:
-        """解析路径，并强制限制在工作区内部。"""
 
         raw_text = _required_path(raw_path)
         candidate = Path(raw_text)
@@ -48,7 +40,6 @@ class FileSystemTool(BaseTool):
         return candidate
 
     def display_path(self, path: Path) -> str:
-        """把路径转成可审计但不泄露工作区绝对路径的格式。"""
 
         try:
             return str(path.relative_to(self.workspace_root)).replace("\\", "/")
@@ -57,7 +48,6 @@ class FileSystemTool(BaseTool):
 
 
 class ListFilesTool(FileSystemTool):
-    """列目录内容。"""
 
     def __init__(self, workspace_root: Path, max_entries: int):
         super().__init__(workspace_root)
@@ -112,7 +102,6 @@ class ListFilesTool(FileSystemTool):
 
 
 class ReadFileTool(FileSystemTool):
-    """读取文本文件。"""
 
     def __init__(self, workspace_root: Path, max_chars: int):
         super().__init__(workspace_root)
@@ -177,7 +166,6 @@ class ReadFileTool(FileSystemTool):
 
 
 class SearchTextTool(FileSystemTool):
-    """在工作区里做纯文本搜索。"""
 
     def __init__(self, workspace_root: Path, max_matches: int):
         super().__init__(workspace_root)
@@ -229,34 +217,49 @@ class SearchTextTool(FileSystemTool):
         return ToolExecutionResult("search_text", True, "\n".join(matches) or "没有找到匹配项")
 
     def _search_item_for_query(self, item: Path, query: str, matches: list[str]) -> str:
-        """Search one file item for query; return 'full' if max matches reached, '' otherwise."""
         try:
             safe_item = self.resolve_path(item)
         except ValueError:
             return ""
         try:
-            for idx, line in enumerate(safe_item.read_text(encoding="utf-8").splitlines(), start=1):
-                if query not in line:
-                    continue
-                snippet = self._make_snippet(line)
-                rel = self._item_relative_path(item, safe_item)
-                matches.append(f"{rel}:{idx}: {snippet}")
-                if len(matches) >= self.max_matches:
-                    matches.append(f"... 已截断，最多显示 {self.max_matches} 条")
-                    return "full"
+            return self._search_lines(item, safe_item, query, matches)
         except UnicodeDecodeError:
-            pass
+            return ""
         return ""
 
+    def _search_lines(
+        self,
+        item: Path,
+        safe_item: Path,
+        query: str,
+        matches: list[str],
+    ) -> str:
+        for idx, line in enumerate(safe_item.read_text(encoding="utf-8").splitlines(), start=1):
+            if query not in line:
+                continue
+            self._append_search_match(self._item_relative_path(item, safe_item), idx, line, matches)
+            if len(matches) >= self.max_matches:
+                matches.append(f"... 已截断，最多显示 {self.max_matches} 条")
+                return "full"
+        return ""
+
+    def _append_search_match(
+        self,
+        rel: Path,
+        line_number: int,
+        line: str,
+        matches: list[str],
+    ) -> None:
+        snippet = self._make_snippet(line)
+        matches.append(f"{rel}:{line_number}: {snippet}")
+
     def _make_snippet(self, line: str) -> str:
-        """Make a truncated snippet from a line."""
         snippet = line.strip()
         if len(snippet) > _MAX_SEARCH_LINE_CHARS:
             snippet = snippet[:_MAX_SEARCH_LINE_CHARS] + "... 已截断"
         return snippet
 
     def _item_relative_path(self, item: Path, safe_item: Path) -> Path:
-        """Get relative path, trying item first then safe_item."""
         try:
             return item.relative_to(self.workspace_root)
         except ValueError:

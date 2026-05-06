@@ -44,23 +44,9 @@ def _extract_patch_fields(patch):
     """
     raw_path = str(patch.get("path") or "").strip()
     status = str(patch.get("status") or "").strip().lower()
-    patch_type = str(
-        patch.get("tool")
-        or patch.get("type")
-        or (
-            "write_file"
-            if any(key in patch for key in ("content", "new_content", "file_content", "after"))
-            else ""
-        )
-    ).strip().lower()
+    patch_type = _extract_patch_type(patch)
 
-    content = patch.get("content")
-    if content is None:
-        for key in ("new_content", "file_content", "desired_content", "after"):
-            if patch.get(key) is not None:
-                content = patch.get(key)
-                break
-
+    content = _extract_patch_content(patch)
     diff_text = ""
     for key in ("diff", "patch", "patch_diff", "unified_diff"):
         value = patch.get(key)
@@ -69,6 +55,29 @@ def _extract_patch_fields(patch):
             break
 
     return raw_path, status, patch_type, content, diff_text
+
+
+def _extract_patch_content(patch):
+    content = patch.get("content")
+    if content is not None:
+        return content
+    return next(
+        (
+            patch.get(key)
+            for key in ("new_content", "file_content", "desired_content", "after")
+            if patch.get(key) is not None
+        ),
+        None,
+    )
+
+
+def _extract_patch_type(patch) -> str:
+    patch_type = patch.get("tool") or patch.get("type")
+    if patch_type:
+        return str(patch_type).strip().lower()
+    if any(key in patch for key in ("content", "new_content", "file_content", "after")):
+        return "write_file"
+    return ""
 
 
 def _build_initial_audit(raw_path, status, patch_type, patch, diff_text):

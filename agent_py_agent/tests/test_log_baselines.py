@@ -148,14 +148,15 @@ class TestIsNewValue:
 class TestBaselinesIsNewMethods:
     """SecurityBaselines 的 is_new_* 方法测试。"""
 
-    @pytest.mark.parametrize("method,attr,user,value,baseline,expected", [
+    @pytest.mark.parametrize("case", [
         ("is_new_country", "known_countries_by_user", "alice", "cn", {"alice": {"cn"}}, False),
         ("is_new_country", "known_countries_by_user", "alice", "us", {"alice": {"cn"}}, True),
         ("is_new_asn", "known_asns_by_user", "bob", "as12345", {"bob": {"as12345"}}, False),
         ("is_new_device", "known_devices_by_user", "charlie", "device1", {"charlie": {"device1"}}, False),
     ], ids=["country_known", "country_new", "asn_known", "device_known"])
-    def test_is_new_methods(self, method, attr, user, value, baseline, expected):
+    def test_is_new_methods(self, case):
         """验证 is_new_* 方法。"""
+        method, attr, user, value, baseline, expected = case
         bl = SecurityBaselines(**{attr: baseline})
         result = getattr(bl, method)(user, value)
         assert result is expected

@@ -27,7 +27,7 @@ class TestDispatchMixinBasics:
         mixin.config = MagicMock()
         mixin.subagents = MagicMock()
 
-        with patch('agent_py_agent.agent.agent_core.dispatch_mixin._dispatch_runner_candidates', return_value=[]):
+        with patch("agent_py_agent.agent.agent_core.runner_dispatch._dispatch_runner_candidates", return_value=[]):
             mixin._update_pending_work_state()
             assert mixin._has_pending_work is False
 

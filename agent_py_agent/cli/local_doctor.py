@@ -43,7 +43,6 @@ def _add_doctor_check(
 
 
 def _check_local_store_open(checks: list[dict], stats: dict) -> None:
-    """Add local_store_open check."""
     _add_doctor_check(
         checks,
         name="local_store_open",
@@ -55,7 +54,6 @@ def _check_local_store_open(checks: list[dict], stats: dict) -> None:
 
 
 def _check_memory_index(checks: list[dict], suggestions: list[str], memory_count: int, memory_indexed: int) -> None:
-    """Add memory_index check."""
     memory_ok = memory_count == memory_indexed
     _add_doctor_check(
         checks,
@@ -70,7 +68,6 @@ def _check_memory_index(checks: list[dict], suggestions: list[str], memory_count
 
 
 def _check_content_files(checks: list[dict], suggestions: list[str], missing_files: list, limit: int) -> None:
-    """Add content files check."""
     _add_doctor_check(
         checks,
         name="local_store_content_files",
@@ -84,7 +81,6 @@ def _check_content_files(checks: list[dict], suggestions: list[str], missing_fil
 
 
 def _check_gateway_queue(checks: list[dict], suggestions: list[str], paths, counts: dict, agent) -> None:
-    """Add gateway queue check."""
     stale_processing = gateway_stale_processing(paths, agent.config.gateway_processing_timeout_seconds)
     _add_doctor_check(
         checks,
@@ -99,7 +95,6 @@ def _check_gateway_queue(checks: list[dict], suggestions: list[str], paths, coun
 
 
 def _check_work_orders(checks: list[dict], suggestions: list[str], agent, limit: int) -> None:
-    """Add subagent work orders check."""
     invalid_work_orders = []
     for task in agent.subagents.list_runs():
         validation = agent.subagents.validate_work_order(task.id)
@@ -122,7 +117,6 @@ def _check_work_orders(checks: list[dict], suggestions: list[str], agent, limit:
 
 
 def build_local_doctor_report(agent: SimpleAgent, *, limit: int = 20) -> dict:
-    """生成本地事实源/gateway/subagent 的诊断报告。"""
 
     paths = gateway_paths(agent)
     checks: list[dict] = []
@@ -171,7 +165,6 @@ def build_local_doctor_report(agent: SimpleAgent, *, limit: int = 20) -> dict:
 
 
 def rebuild_subagent_index(agent: SimpleAgent) -> int:
-    """从 subagent 工单目录重建主要 LocalStore 记录。"""
 
     count = 0
     for task in agent.subagents.list_runs():
@@ -203,7 +196,6 @@ def rebuild_subagent_index(agent: SimpleAgent) -> int:
 
 
 def rebuild_local_store(agent: SimpleAgent, *, sources: set[str], reset: bool = False) -> dict:
-    """按来源重建 LocalStore。"""
 
     if reset:
         agent.local_store.reset()
@@ -229,7 +221,6 @@ def rebuild_local_store(agent: SimpleAgent, *, sources: set[str], reset: bool = 
 
 
 def build_status_suggestions(agent: SimpleAgent, payload: dict) -> list[str]:
-    """根据 status payload 给出下一步建议。"""
 
     suggestions: list[str] = []
     gateway = payload["gateway"]

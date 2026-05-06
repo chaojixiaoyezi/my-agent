@@ -1,9 +1,3 @@
-"""会话数据模型。
-
-定义会话的核心数据结构，包括：
-- Session: 会话实体
-- session_id 生成逻辑
-"""
 from __future__ import annotations
 
 import secrets
@@ -15,10 +9,6 @@ from typing import Any
 
 @dataclass
 class Session:
-    """会话实体。
-
-    每个会话代表一次完整的交互过程，可以跨终端、跨时间恢复。
-    """
 
     session_id: str
     user_id: str
@@ -49,11 +39,6 @@ class Session:
 
 
 def generate_session_id() -> str:
-    """生成新的会话 ID。
-
-    格式：sess_{timestamp}_{random8位}
-    例如：sess_1714681234_a3b7c9d1
-    """
     timestamp = int(time.time())
     random_part = secrets.token_hex(4)  # 8 位十六进制 (32 bits)
     return f"sess_{timestamp}_{random_part}"

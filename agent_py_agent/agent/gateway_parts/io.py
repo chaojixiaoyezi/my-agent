@@ -9,6 +9,7 @@ from __future__ import annotations
 """
 
 import json
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -16,61 +17,69 @@ from pathlib import Path
 from ..file_io import append_jsonl
 from .paths import GatewayPaths
 
+_JSON_FILE_LOCKS: dict[str, threading.Lock] = {}
+_JSON_FILE_LOCKS_GUARD = threading.Lock()
+
+
+def _path_lock(path: Path) -> threading.Lock:
+    key = str(path.resolve())
+    with _JSON_FILE_LOCKS_GUARD:
+        lock = _JSON_FILE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _JSON_FILE_LOCKS[key] = lock
+        return lock
+
 
 def write_json_file(path: Path, payload: dict) -> None:
-    """LLM contract: write one JSON object with deterministic formatting.
-
-    Human version:
-    统一写 JSON 文件的格式，父目录不存在就创建。这样队列里的请求、响应、状态文件
-    都长得一样，人打开看也更省心。
-    """
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def write_json_file_atomic(path: Path, payload: dict) -> None:
-    """LLM contract: atomically replace one JSON object file.
-
-    Human version:
-    processing lease heartbeat 会频繁刷新。如果直接覆盖原文件，其他进程可能读到半截 JSON。
-    这里先写同目录临时文件，再 rename 覆盖，让 recovery/local-doctor 看到的永远是完整对象。
-    """
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
-    try:
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(path)
-    finally:
+    with _path_lock(path):
         try:
-            tmp.unlink()
-        except OSError:
-            pass
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+            _replace_with_retry(tmp, path)
+        finally:
+            _unlink_tmp_file(tmp)
+
+
+def _unlink_tmp_file(tmp: Path) -> None:
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+
+
+def _replace_with_retry(tmp: Path, path: Path) -> None:
+    last_error: OSError | None = None
+    for attempt in range(8):
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(0.01 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
 
 
 def read_json_file(path: Path) -> dict:
-    """LLM contract: read an optional JSON object; invalid/missing means empty.
-
-    Human version:
-    gateway 目录里有些文件可能还没生成，或者进程崩溃时只写了一半。这里返回空 dict
-    代表'没有可用内容'，调用方再决定是跳过、重排还是失败归档。
-    """
 
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        with _path_lock(path):
+            payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
 
 
 def read_pid(path: Path) -> int:
-    """LLM contract: parse a pid file into a positive integer or 0.
-
-    Human version:
-    pid 文件可能不存在，也可能因为旧进程退出留下脏内容。这里统一把读不到的情况
-    变成 0，后面判断进程是否存活会更简单。
-    """
 
     try:
         return int(path.read_text(encoding="utf-8").strip())
@@ -79,11 +88,6 @@ def read_pid(path: Path) -> int:
 
 
 def tail_lines(path: Path, line_count: int) -> list[str]:
-    """LLM contract: return the last N text lines from a log file.
-
-    Human version:
-    `gateway logs` 只需要看末尾几行，不应该把整个日志刷屏。日志不存在时返回空列表。
-    """
 
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -95,32 +99,16 @@ def tail_lines(path: Path, line_count: int) -> list[str]:
 
 
 def new_gateway_request_id() -> str:
-    """LLM contract: create a unique, time-sortable gateway request id.
 
-    Human version:
-    ID 里有时间戳和随机片段。人看到文件名能大概猜出请求时间，同时同一秒多个请求也不容易撞名。
-    """
-
-    return f"gwreq-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    return f"gwreq-{int(time.time())}-{uuid.uuid4().hex}"
 
 
 def gateway_response_path(paths: GatewayPaths, request_id: str) -> Path:
-    """LLM contract: map request_id to its response JSON file path.
-
-    Human version:
-    所有 gateway 响应都放在 `responses/<request_id>.json`。这个小函数避免各处手写规则。
-    """
 
     return paths.responses / f"{request_id}.json"
 
 
 def gateway_request_counts(paths: GatewayPaths) -> dict[str, int]:
-    """LLM contract: count JSON files in each gateway queue state.
-
-    Human version:
-    status/doctor 会显示 pending、processing、done、failed、responses 的数量。
-    这些数字是快速判断 gateway 堵在哪一步的入口。
-    """
 
     def count_json(path: Path) -> int:
         try:
@@ -138,11 +126,6 @@ def gateway_request_counts(paths: GatewayPaths) -> dict[str, int]:
 
 
 def write_gateway_request(paths: GatewayPaths, payload: dict) -> Path:
-    """LLM contract: atomically enqueue one gateway request JSON file.
-
-    Human version:
-    先写 `.tmp`，再 rename 成正式文件。这样 worker 不会读到半截 JSON，这是一种很便宜但很有效的文件队列保护。
-    """
 
     request_id = str(payload["id"])
     paths.inbox.mkdir(parents=True, exist_ok=True)
@@ -154,10 +137,5 @@ def write_gateway_request(paths: GatewayPaths, payload: dict) -> Path:
 
 
 def append_gateway_history(paths: GatewayPaths, payload: dict) -> None:
-    """LLM contract: append one immutable gateway history event.
-
-    Human version:
-    `gateway_requests.jsonl` 是 gateway 的流水账。每个响应追加一行，排查问题时可以按时间追踪请求发生了什么。
-    """
 
     append_jsonl(paths.history, payload, sort_keys=True)

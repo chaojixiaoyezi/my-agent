@@ -1,12 +1,5 @@
 from __future__ import annotations
 
-"""LLM contract: pure subagent policies for filtering, risk, routing, and status mapping.
-
-Human version:
-这些函数是规则，不应该读写文件。比如哪些任务算红灯、某个 issue 应该映射成什么动作、
-runner 上报 DONE 时为什么只能进入待验收。
-"""
-
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,8 +17,6 @@ def filter_board_items(
     owner: str = "",
     root_id: str = "",
 ) -> list[SubAgentBoardItem]:
-    """按 CLI 参数过滤看板行。"""
-
     result = items
     if status:
         normalized = status.upper()
@@ -39,11 +30,7 @@ def filter_board_items(
     if root_id:
         result = [item for item in result if item.root_id == root_id]
     return result
-
-
 def _risk_weight(flags: list[str]) -> int:
-    """让严重风险在 Hot List 里排前面。"""
-
     weights = {
         "failed": 100,
         "timeout": 95,
@@ -59,11 +46,8 @@ def _risk_weight(flags: list[str]) -> int:
         "taken_over": 30,
     }
     return max((weights.get(item, 1) for item in flags), default=0)
-
-
 @dataclass(frozen=True)
 class MakeDueIssueParams:
-    """Params bundle for _make_due_issue."""
     task: SubAgentTask
     severity: str
     kind: str
@@ -74,10 +58,7 @@ class MakeDueIssueParams:
     open_gap_count: int
     age_seconds: float
     stale_seconds: float
-
-
 def _make_due_issue(*, params: MakeDueIssueParams) -> DueCheckIssue:
-    """统一创建 due-check 问题，避免不同分支字段不一致。"""
     return DueCheckIssue(
         run_id=params.task.id,
         severity=params.severity,
@@ -98,11 +79,7 @@ def _make_due_issue(*, params: MakeDueIssueParams) -> DueCheckIssue:
         stale_seconds=params.stale_seconds,
         created_at=time.time(),
     )
-
-
 def _issue_weight(issue: DueCheckIssue) -> int:
-    """due-check 排序权重。"""
-
     severity_weight = _severity_weight(issue.severity)
     kind_weight = {
         "missing_work_order_files": 90,
@@ -121,17 +98,9 @@ def _issue_weight(issue: DueCheckIssue) -> int:
         "open_capability_gap": 20,
     }.get(issue.kind, 1)
     return severity_weight + kind_weight
-
-
 def _severity_weight(severity: str) -> int:
-    """统一的 P0/P1/P2 权重。"""
-
     return {"P0": 1000, "P1": 500, "P2": 100}.get(severity, 0)
-
-
 def _action_for_issue(issue: DueCheckIssue) -> tuple[str, int, str]:
-    """把 due-check issue 映射为 dry-run 动作。"""
-
     kind = issue.kind
     if kind in {"channel_broken", "channel_probe_missing", "status_channel_error"}:
         return "probe_or_repair_channel", 980, "CHANNEL_ERROR"
@@ -154,52 +123,18 @@ def _action_for_issue(issue: DueCheckIssue) -> tuple[str, int, str]:
     if kind == "open_capability_gap":
         return "triage_capability_gap", 420, ""
     return issue.suggested_action or "inspect_manually", 100, ""
-
-
 def _commands_for_action(action: str, run_id: str) -> list[str]:
-    """给 dry-run 动作提供下一步可运行命令。"""
-
     # LLM: prefer the installed console script; it works on Windows and keeps mac/Linux docs tidy.
     cli = "my-agent"
-    commands = {
-        "probe_or_repair_channel": [
-            f"{cli} subagents-probe {run_id}",
-            f"{cli} subagent {run_id}",
-        ],
-        "inspect_channel_probe": [
-            f"{cli} subagents-probe {run_id}",
-            f"{cli} subagent {run_id}",
-        ],
-        "repair_work_order": [
-            f"{cli} subagents-probe {run_id}",
-            f"{cli} subagent {run_id}",
-        ],
-        "reopen_for_evidence": [
-            f"{cli} subagent {run_id}",
-        ],
-        "run_acceptance": [
-            f"{cli} subagent {run_id}",
-        ],
-        "takeover_or_reassign": [
-            f"{cli} subagents-probe {run_id}",
-            f"{cli} subagent {run_id}",
-        ],
-        "inspect_failure": [
-            f"{cli} subagent {run_id}",
-        ],
-        "classify_blocker": [
-            f"{cli} subagent {run_id}",
-        ],
-        "route_capability_request": [
-            f"{cli} subagent {run_id}",
-        ],
-        "triage_capability_gap": [
-            f"{cli} subagent {run_id}",
-        ],
+    probe_actions = {
+        "probe_or_repair_channel",
+        "inspect_channel_probe",
+        "repair_work_order",
+        "takeover_or_reassign",
     }
-    return commands.get(action, [f"{cli} subagent {run_id}"])
-
-
+    if action in probe_actions:
+        return [f"{cli} subagents-probe {run_id}", f"{cli} subagent {run_id}"]
+    return [f"{cli} subagent {run_id}"]
 def _filter_action_plan_items(
     actions: list[ActionPlanItem],
     *,
@@ -207,8 +142,6 @@ def _filter_action_plan_items(
     run_id: str = "",
     limit: int = 0,
 ) -> list[ActionPlanItem]:
-    """按 CLI 参数过滤动作计划。"""
-
     result = actions
     if action_filter:
         result = [item for item in result if item.action == action_filter]
@@ -217,11 +150,7 @@ def _filter_action_plan_items(
     if limit > 0:
         result = result[:limit]
     return result
-
-
 def _capability_request_query(task: SubAgentTask, request: CapabilityRequest) -> str:
-    """把子代理能力请求压成检索 query。"""
-
     parts = [
         task.goal,
         request.needed_capability,
@@ -232,43 +161,34 @@ def _capability_request_query(task: SubAgentTask, request: CapabilityRequest) ->
         " ".join(f"{key}:{value}" for key, value in request.constraints.items()),
     ]
     return "\n".join(part for part in parts if part)
-
-
 def _select_capability_hits(
     hits: list[CapabilitySearchHit],
     config: CapabilityConfig,
 ) -> list[CapabilitySearchHit]:
-    """按配置限制挑选要下发的 skill/tool card。"""
-
     selected: list[CapabilitySearchHit] = []
-    skill_count = 0
-    tool_count = 0
+    counts = {"skill": 0, "tool": 0}
     for hit in hits:
         if not _capability_hit_is_confident(hit):
             continue
-        if hit.card.kind == "skill":
-            if config.capability_grant_max_skills and skill_count >= config.capability_grant_max_skills:
-                continue
-            selected.append(hit)
-            skill_count += 1
+        if _capability_kind_limit_reached(hit, config, counts):
             continue
-        if hit.card.kind == "tool":
-            if config.capability_grant_max_tools and tool_count >= config.capability_grant_max_tools:
-                continue
-            selected.append(hit)
-            tool_count += 1
+        selected.append(hit)
+        if hit.card.kind in counts:
+            counts[hit.card.kind] += 1
     return selected
-
-
+def _capability_kind_limit_reached(
+    hit: CapabilitySearchHit,
+    config: CapabilityConfig,
+    counts: dict[str, int],
+) -> bool:
+    if hit.card.kind == "skill":
+        return bool(config.capability_grant_max_skills and counts["skill"] >= config.capability_grant_max_skills)
+    if hit.card.kind == "tool":
+        return bool(config.capability_grant_max_tools and counts["tool"] >= config.capability_grant_max_tools)
+    return False
 def _capability_hit_is_confident(hit: CapabilitySearchHit) -> bool:
-    """过滤掉只因泛词弱命中的能力卡。"""
-
     return hit.score >= 4.0
-
-
 def _route_card_payload(hit: CapabilitySearchHit) -> dict[str, str]:
-    """把能力命中结果压成 grant 里可审计的短卡。"""
-
     card = hit.card
     return {
         "id": card.id,
@@ -281,11 +201,7 @@ def _route_card_payload(hit: CapabilitySearchHit) -> dict[str, str]:
         "score": f"{hit.score:.2f}",
         "reasons": "；".join(hit.reasons[:4]),
     }
-
-
 def _status_from_structured_output(parsed: SubAgentParsedOutput) -> str:
-    """把模型上报状态压成 runner 允许的任务状态。"""
-
     status = parsed.status.upper().strip()
     if parsed.capability_requests or parsed.blocked_reason:
         return "BLOCKED"
@@ -294,26 +210,16 @@ def _status_from_structured_output(parsed: SubAgentParsedOutput) -> str:
     if status in {"DONE", "COMPLETED", "COMPLETE", "SUCCESS", "AWAITING_ACCEPTANCE"}:
         return "AWAITING_ACCEPTANCE"
     return "AWAITING_ACCEPTANCE"
-
-
 def _verification_from_runner_status(status: str) -> str:
-    """runner 不能直接 VERIFIED，只能进入待验收或未验收。"""
-
     if status.upper() == "AWAITING_ACCEPTANCE":
         return "NEEDS_ACCEPTANCE"
     return "UNVERIFIED"
-
-
-def _runner_next_action(
-    *,
-    dry_run: bool,
-    ok: bool,
-    status: str,
-    capability_request_count: int,
-    next_actions: list[str] | None = None,
-) -> str:
-    """根据 runner 结果给机器读的下一步建议。"""
-
+def _runner_next_action(**kwargs) -> str:
+    dry_run = bool(kwargs.get("dry_run", False))
+    ok = bool(kwargs.get("ok", False))
+    status = str(kwargs.get("status", ""))
+    capability_request_count = int(kwargs.get("capability_request_count", 0) or 0)
+    next_actions = kwargs.get("next_actions")
     if dry_run:
         return ""
     if capability_request_count:
@@ -325,34 +231,28 @@ def _runner_next_action(
     if not ok:
         return "inspect_runner_failure"
     return ""
-
-
 def _dedupe_granted_cards(
     grants: list[CapabilityGrant],
     *,
     max_cards: int = 0,
 ) -> list[dict[str, str]]:
-    """从 capability grants 中提取去重后的短卡。"""
-
     cards: list[dict[str, str]] = []
     seen: set[str] = set()
     for grant in grants:
-        for card in grant.capability_cards:
-            key = card.get("id") or f"{card.get('kind')}:{card.get('name')}"
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            cards.append(
-                {str(item_key): str(item_value) for item_key, item_value in card.items()}
-            )
-            if max_cards > 0 and len(cards) >= max_cards:
-                return cards
+        cards.extend(_new_grant_cards(grant, seen))
+        if max_cards > 0 and len(cards) >= max_cards:
+            return cards[:max_cards]
     return cards
-
-
+def _new_grant_cards(grant: CapabilityGrant, seen: set[str]) -> list[dict[str, str]]:
+    cards: list[dict[str, str]] = []
+    for card in grant.capability_cards:
+        key = card.get("id") or f"{card.get('kind')}:{card.get('name')}"
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        cards.append({str(item_key): str(item_value) for item_key, item_value in card.items()})
+    return cards
 def _execution_context_instructions() -> list[str]:
-    """生成子代理执行上下文里的硬规则。"""
-
     return [
         "只能使用本上下文列出的 allowed_skills、allowed_tools 和 granted_cards。",
         "不要读取或展开全局 skill/tool registry；缺能力时提交 capability_request。",
@@ -361,11 +261,7 @@ def _execution_context_instructions() -> list[str]:
         "写入只允许发生在 allowed_write_roots 内，禁止写 forbidden_write_roots 和 locked_files。",
         "如果通道损坏、工单文件缺失或任务边界不清，先标记 BLOCKED 并等待父代理处理。",
     ]
-
-
 def _is_active(status: str) -> bool:
-    """判断任务是否仍应有心跳和运行时限。"""
-
     return status.upper() not in {
         "DONE",
         "FAILED",
@@ -375,11 +271,7 @@ def _is_active(status: str) -> bool:
         "CHANNEL_ERROR",
         "TAKEN_OVER",
     }
-
-
 def _default_forbidden_write_roots() -> list[str]:
-    """默认禁止子代理写入的高风险目录。"""
-
     home = Path.home()
     return [
         str(home),

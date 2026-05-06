@@ -97,16 +97,25 @@ def _python_source_files() -> list[Path]:
     return files
 
 
+def _star_import_count(path: Path) -> int:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return sum(
+        1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if alias.name == "*"
+    )
+
+
 def test_no_new_star_imports() -> None:
     """Existing star imports are debt; new ones must not appear."""
 
     counts: dict[str, int] = {}
     for path in _python_source_files():
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
-                relative_path = path.relative_to(REPO_ROOT).as_posix()
-                counts[relative_path] = counts.get(relative_path, 0) + 1
+        star_count = _star_import_count(path)
+        if star_count:
+            counts[path.relative_to(REPO_ROOT).as_posix()] = star_count
 
     assert counts == STAR_IMPORT_BASELINE
 
@@ -179,11 +188,12 @@ def _check_forbidden_class(path: Path, forbidden: set[str]) -> list[str]:
     except SyntaxError:
         return offenders
     for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef) and node.name in forbidden:
-            rel = path.relative_to(REPO_ROOT).as_posix()
-            key = f"{rel}:{node.name}"
-            if key not in BASELINE:
-                offenders.append(key)
+        if not isinstance(node, ast.ClassDef) or node.name not in forbidden:
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        key = f"{rel}:{node.name}"
+        if key not in BASELINE:
+            offenders.append(key)
     return offenders
 
 

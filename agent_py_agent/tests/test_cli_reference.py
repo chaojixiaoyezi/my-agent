@@ -8,12 +8,12 @@ from agent_py_agent.__main__ import build_parser
 
 def _collect_subparser_missing(subparser, command, reference):
     """Collect missing commands and options from a subparser."""
-    missing = []
-    for sub_action in subparser._actions:
-        for sub_option in sub_action.option_strings:
-            if sub_option.startswith("--") and sub_option not in reference:
-                missing.append(f"{command} {sub_option}")
-    return missing
+    return [
+        f"{command} {sub_option}"
+        for sub_action in subparser._actions
+        for sub_option in sub_action.option_strings
+        if sub_option.startswith("--") and sub_option not in reference
+    ]
 
 
 def _check_action_options(action, reference, missing):
@@ -25,12 +25,12 @@ def _check_action_options(action, reference, missing):
 
 def _collect_subparser_options(action, reference):
     """Collect missing --options from a subparser action."""
-    missing = []
-    for sub_action in action._actions:
-        for sub_option in sub_action.option_strings:
-            if sub_option.startswith("--") and sub_option not in reference:
-                missing.append(f"{action.title} {sub_option}")
-    return missing
+    return [
+        f"{action.title} {sub_option}"
+        for sub_action in action._actions
+        for sub_option in sub_action.option_strings
+        if sub_option.startswith("--") and sub_option not in reference
+    ]
 
 
 def _collect_missing_subcommands(action, reference, missing):

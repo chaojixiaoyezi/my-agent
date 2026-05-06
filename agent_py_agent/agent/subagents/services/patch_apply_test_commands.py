@@ -24,24 +24,27 @@ class PatchApplyTestCommands:
             validate_patch_test_command,
         )
 
-        commands = []
-        blocked = []
+        commands: list[str] = []
+        blocked: list[str] = []
         for check in task.acceptance_checks:
             command = extract_patch_test_command(check)
-            if not command:
-                continue
-            problem = validate_patch_test_command(command)
-            if problem:
-                blocked.append(problem)
-            elif command not in commands:
-                commands.append(command)
+            _append_validated_command(command, commands, blocked, validate_patch_test_command)
         for test in _dict_list(output.get("tests", [])):
             command = str(test.get("command") or "").strip()
-            if not command:
-                continue
-            problem = validate_patch_test_command(command)
-            if problem:
-                blocked.append(problem)
-            elif command not in commands:
-                commands.append(command)
+            _append_validated_command(command, commands, blocked, validate_patch_test_command)
         return commands, blocked
+
+
+def _append_validated_command(
+    command: str,
+    commands: list[str],
+    blocked: list[str],
+    validate_patch_test_command,
+) -> None:
+    if not command:
+        return
+    problem = validate_patch_test_command(command)
+    if problem:
+        blocked.append(problem)
+    elif command not in commands:
+        commands.append(command)

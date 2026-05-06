@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 """LLM contract: channel probe execution and report persistence.
-
 Human version:
 这个 mixin 只放一类 SubAgentManager 能力。它不单独实例化，
 由 public SubAgentManager 组合使用，避免单个文件重新长成大杂烩。
 """
-
 import json
 import time
 from dataclasses import asdict
@@ -68,9 +66,19 @@ from .utils import (
 if TYPE_CHECKING:
     from ..local_store import LocalStore
 
+
+def _channel_probe_summary(results: list[ChannelProbeResult]) -> dict[str, int]:
+    summary: dict[str, int] = {"total": len(results)}
+    for result in results:
+        summary[result.channel_status] = summary.get(result.channel_status, 0) + 1
+        failed_check_names = [check.name for check in result.checks if not check.ok]
+        for name in failed_check_names:
+            summary[name] = summary.get(name, 0) + 1
+    return summary
+
+
 class SubAgentChannelProbeMixin:
     def _probe_work_order_check(self, run_id: str, task: SubAgentTask, now: float) -> list[ChannelProbeCheck]:
-        """Build checks for work order validation."""
         checks: list[ChannelProbeCheck] = []
         validation = self.validate_work_order(run_id)
         if validation.ok:
@@ -95,18 +103,14 @@ class SubAgentChannelProbeMixin:
                 )
             )
         return checks
-
     def _probe_json_files(self, task: SubAgentTask, now: float) -> list[ChannelProbeCheck]:
-        """Build checks for JSON file readability."""
         return [
             _probe_json_file("task_json_readable", Path(task.task_dir) / "task.json", "P0", now),
             _probe_json_file("run_json_readable", Path(task.task_dir) / "run.json", "P1", now),
             _probe_json_file("output_json_readable", Path(task.output_json), "P1", now),
             _probe_json_file("dependencies_json_readable", Path(task.dependencies_json), "P1", now),
         ]
-
     def _update_task_from_probe(self, task: SubAgentTask, checks: list[ChannelProbeCheck], now: float) -> None:
-        """Update task with probe results and save."""
         task.channel_checks = checks
         task.channel_status = _channel_status(checks)
         task.last_probe_at = now
@@ -114,24 +118,19 @@ class SubAgentChannelProbeMixin:
         if task.channel_status == "BROKEN":
             task.failure_type = "channel"
         self.save(task)
-
     def probe_channel(self, run_id: str) -> ChannelProbeResult:
         """检查单个子代理运行的通道健康状态。
-
         这里的'通道'先指最基础的运行现场：
         工单文件、机器 JSON、任务目录写入和 probe 证据落盘。
         后续真正接入执行器时，再把模型 session、ACP adapter 等检查接进来。
         """
-
         task = self.load(run_id)
         _apply_missing_paths(task, self._build_work_order_paths(task.id, task.task_dir or None))
         now = time.time()
         checks: list[ChannelProbeCheck] = []
-
         checks.extend(self._probe_work_order_check(run_id, task, now))
         checks.extend(self._probe_json_files(task, now))
         checks.append(_probe_writable_dir("scratch_writable", Path(task.scratch_dir), "P0", now))
-
         status = _channel_status(checks)
         result = ChannelProbeResult(
             run_id=task.id,
@@ -149,15 +148,12 @@ class SubAgentChannelProbeMixin:
         self._update_task_from_probe(task, result.checks, now)
         self._index_channel_probe(result)
         return result
-
     def probe_channels(
         self,
         run_ids: list[str] | None = None,
         *,
         limit: int = 0,
     ) -> ChannelProbeReport:
-        """批量检查子代理通道健康状态。"""
-
         selected = run_ids or [task.id for task in self.list_runs()]
         if limit > 0:
             selected = selected[:limit]
@@ -167,26 +163,17 @@ class SubAgentChannelProbeMixin:
                 results.append(self.probe_channel(run_id))
             except FileNotFoundError:
                 continue
-        summary: dict[str, int] = {"total": len(results)}
-        for result in results:
-            summary[result.channel_status] = summary.get(result.channel_status, 0) + 1
-            for check in result.checks:
-                if not check.ok:
-                    summary[check.name] = summary.get(check.name, 0) + 1
         return ChannelProbeReport(
             generated_at=time.time(),
-            summary=summary,
+            summary=_channel_probe_summary(results),
             results=results,
         )
-
     def write_channel_probe_report(
         self,
         run_ids: list[str] | None = None,
         *,
         limit: int = 0,
     ) -> ChannelProbeReport:
-        """写出批量通道健康检查报告。"""
-
         report = self.probe_channels(run_ids, limit=limit)
         (self.workspace / "subagent_channel_probe.json").write_text(
             json.dumps(asdict(report), ensure_ascii=False, indent=2),
@@ -204,14 +191,11 @@ class SubAgentChannelProbeMixin:
             event_type="subagent_channel_probe_report_written",
         )
         return report
-
     def _write_channel_probe_files(
         self,
         task: SubAgentTask,
         result: ChannelProbeResult,
     ) -> ChannelProbeCheck:
-        """把单个 run 的 probe 证据写入任务目录。"""
-
         now = time.time()
         try:
             probe_json = Path(task.logs_dir) / "last_channel_probe.json"
