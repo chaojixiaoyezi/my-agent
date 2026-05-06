@@ -209,7 +209,8 @@ try:
     assert gateway_chat.returncode == 0
     assert "当前模式: gateway 客户端" in gateway_chat.stdout
     assert "gateway status=" in gateway_chat.stdout
-    assert "gateway_request=" in gateway_chat.stdout
+    assert "工具轮数" in gateway_chat.stdout
+    assert "gateway_request=" not in gateway_chat.stdout
 finally:
     run(agent_cmd("gateway", "stop", "--timeout", "10", "--kill"))
 run(agent_cmd("subagent-context", "--help"))

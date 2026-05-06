@@ -5,7 +5,7 @@
 # - 追求的是跨平台、轻依赖、够维护，不是完整 YAML 语法
 
 # 智能体名称：主要用于 CLI 输出和日志标识
-agent_name: "小叶子-myagent"
+agent_name: "myagent"
 
 # 系统人格：每次请求都会放进最终 prompt 的 System 段
 system_prompt: "你是一个谨慎、可扩展、会记录记忆、会在必要时调用工具的 Python CLI 智能体。先理解任务，再给出结构化回答。"

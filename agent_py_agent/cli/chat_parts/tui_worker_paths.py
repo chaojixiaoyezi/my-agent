@@ -22,18 +22,19 @@ def _worker_gateway_path(ctx) -> tuple[str, bool]:
         raise RuntimeError("gateway 已停止。请先执行 my-agent gateway start")
     request_id, chunk_path, response_path = _submit_gateway_job(ctx)
     timeout = _gateway_timeout(ctx.cfg)
+    chunks_printed_ref = [0]
     response = poll_gateway_chunks(
         chunk_path,
         response_path,
         time.time() + max(0.0, timeout),
         ctx.on_stream_chunk,
-        chunks_printed_ref=[0],
+        chunks_printed_ref=chunks_printed_ref,
     )
     if response:
         _flush_stream_buf(ctx.cfg.stream_buf_ref)
     if not response:
         raise TimeoutError(f"gateway 请求等待超时: request_id={request_id} response={response_path}")
-    return _finish_gateway_response(ctx, request_id, response)
+    return _finish_gateway_response(ctx, request_id, response, chunks_printed_ref[0] > 0)
 
 
 def _submit_gateway_job(ctx):
@@ -57,7 +58,12 @@ def _gateway_timeout(cfg) -> float:
     return cfg.agent.config.gateway_request_timeout
 
 
-def _finish_gateway_response(ctx, request_id: str, response: dict) -> tuple[str, bool]:
+def _finish_gateway_response(
+    ctx,
+    request_id: str,
+    response: dict,
+    stream_has_visible_text: bool,
+) -> tuple[str, bool]:
     from .rendering import _cprint
 
     if ctx.job.show_prompt and response.get("prompt"):
@@ -72,8 +78,11 @@ def _finish_gateway_response(ctx, request_id: str, response: dict) -> tuple[str,
         response, ctx.cfg.state_lock, ctx.cfg.last_token_estimate_ref
     )
     response_recorded = _maybe_record_response(
-        agent_response_text, False, ctx.cfg.assistant_outputs, ctx.cfg.agent
+        agent_response_text, stream_has_visible_text, ctx.cfg.assistant_outputs, ctx.cfg.agent
     )
+    if stream_has_visible_text and agent_response_text.strip():
+        ctx.cfg.assistant_outputs.append(agent_response_text)
+        response_recorded = True
     return agent_response_text, response_recorded
 
 
@@ -82,7 +91,7 @@ def _print_gateway_timing(ctx, request_id: str, response: dict) -> None:
 
     elapsed = time.perf_counter() - ctx.started_at
     _cprint(
-        f"{GRAY}[耗时 {elapsed:.2f}s; gateway_request={request_id}; "
+        f"{GRAY}[耗时 {elapsed:.2f}s; "
         f"工具轮数 {response.get('tool_rounds', 0)}; "
         f"prompt_tokens~{response.get('prompt_token_estimate', 0)}; "
         f"resume_context={1 if response.get('memory_resume_context_injected') else 0}]{RESET}"
