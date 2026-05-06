@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+from collections.abc import Callable
 
 from .renderer import (
     BLUE,
@@ -36,12 +37,31 @@ except Exception:
     _pt_print = None
     _PT_ANSI = None
 
+_TUI_OUTPUT_SINK: Callable[[str], None] | None = None
+
+
+def set_tui_output_sink(sink: Callable[[str], None] | None) -> None:
+    global _TUI_OUTPUT_SINK
+    _TUI_OUTPUT_SINK = sink
+
 
 def _cprint(text: str) -> None:
+    if _TUI_OUTPUT_SINK is not None:
+        _TUI_OUTPUT_SINK(text + "\n")
+        return
     if sys.stdout.isatty() and _pt_print is not None and _PT_ANSI is not None:
-        _pt_print(_PT_ANSI(text))
+        rendered = _PT_ANSI(text) if supports_ansi() else strip_ansi(text)
+        _pt_print(rendered)
     else:
         print(text if supports_ansi() else strip_ansi(text))
+
+
+def _write_output_text(text: str) -> None:
+    if _TUI_OUTPUT_SINK is not None:
+        _TUI_OUTPUT_SINK(text)
+        return
+    sys.stdout.write(text if supports_ansi() else strip_ansi(text))
+    sys.stdout.flush()
 
 
 def startup_banner(agent_name: str, *, use_gateway: bool) -> str:

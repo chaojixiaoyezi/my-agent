@@ -1,16 +1,23 @@
 from __future__ import annotations
 
-import sys
-
-from .renderer import GREEN, style_text
+from .renderer import GREEN, strip_ansi, style_text
 
 
-def _append_stream_text(chunk: str, stream_buf_ref: list) -> None:
+def _append_stream_text(
+    chunk: str,
+    stream_buf_ref: list,
+    stream_visible_text_ref: list | None = None,
+) -> bool:
     if not chunk:
-        return
-    sys.stdout.write(style_text(chunk, GREEN))
-    sys.stdout.flush()
+        return False
+    from .rendering import _write_output_text
+
+    visible = strip_ansi(style_text(chunk, GREEN))
+    _write_output_text(visible)
+    if stream_visible_text_ref is not None and visible.strip():
+        stream_visible_text_ref[0] += visible
     stream_buf_ref[0] = "" if chunk.endswith("\n") else "\n"
+    return bool(visible.strip())
 
 
 def _emit_stream_line(text: str) -> None:
@@ -22,8 +29,9 @@ def _emit_stream_line(text: str) -> None:
 def _flush_stream_buf(stream_buf_ref: list) -> None:
     buf = stream_buf_ref[0]
     if buf:
-        sys.stdout.write(buf)
-        sys.stdout.flush()
+        from .rendering import _write_output_text
+
+        _write_output_text(buf)
         stream_buf_ref[0] = ""
 
 

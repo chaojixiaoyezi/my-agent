@@ -606,6 +606,7 @@ my-agent chat --gateway
 | `--no-save` | `false` | 交互对话不自动保存到记忆。 |
 | `--gateway` | `false` | 普通聊天消息投递给后台 gateway；如果 gateway 没启动，会提示先执行 `my-agent gateway start`。 |
 | `--gateway-timeout <seconds>` | `gateway_request_timeout` | gateway 模式等待单条响应的秒数。 |
+| `--app-scrollback` | `false` | 使用应用内可滚动聊天历史，并固定状态栏和输入行。 |
 | `--resume-context` | 配置值 | 本次 chat 会话临时启用恢复上下文注入。 |
 | `--no-resume-context` | 配置值 | 本次 chat 会话临时关闭恢复上下文注入。 |
 
