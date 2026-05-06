@@ -1,3 +1,8 @@
+﻿## 2026-05-06 code-size guard cleanup
+- Split `subagents/models.py` into focused capability, record, runtime, and task model modules while preserving the public compatibility import surface.
+- Split runner result structured-output processing and output payload assembly out of `result_processors.py`.
+- Split work-order path/file/validation helpers out of `manager_base.py` into `manager_work_orders.py`.
+- Explicit UTF-8 debrief writes keep Windows locale defaults from corrupting runner notes.
 # Subagent：开发推进记录
 
 ## 已完成

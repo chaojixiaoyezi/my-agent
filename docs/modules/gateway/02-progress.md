@@ -1,3 +1,7 @@
+﻿## 2026-05-06 adapter code-size cleanup
+- Split `cli/adapter.py` file-adapter loop, gateway availability checks, daemon startup, foreground registration, status, and stop flows into focused helpers.
+- Daemon flags remain cross-platform: Windows uses process-group/no-window flags, macOS/Linux keep the POSIX new-session path.
+- User-visible adapter CLI behavior and file protocol paths stay stable.
 # Gateway：开发推进记录
 
 ## 已完成

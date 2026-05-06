@@ -1,3 +1,7 @@
+﻿## 2026-05-06 structure update
+- `dispatch/work_orders/models.py` now owns work-order dataclasses; `planning.py` owns planning flow only.
+- `analytics/detectors/classifier_entities.py` now owns entity comparison, entity extraction, and gap detail helpers; `classifiers.py` owns event predicates and weak-signal classification.
+- `tools/query_trace.py` now owns trace-case parameter and query assembly helpers; `tools/query_functions.py` remains the public tool facade.
 # Log Analysis：结构树和详细说明
 
 ## 模块结构

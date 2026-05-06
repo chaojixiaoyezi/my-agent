@@ -128,12 +128,16 @@ class SimpleAgentRuntimeMixin:
     def _build_compression_snapshot_content(
         self, *, user_prompt, memories, runtime_injections, routed_context, resume_context_section
     ):
+        from ._compression_service import CompressionSnapshotContentParams
+
         return self._get_services().compression._build_compression_snapshot_content(
-            user_prompt=user_prompt,
-            memories=memories,
-            runtime_injections=runtime_injections,
-            routed_context=routed_context,
-            resume_context_section=resume_context_section,
+            CompressionSnapshotContentParams(
+                user_prompt=user_prompt,
+                memories=memories,
+                runtime_injections=runtime_injections,
+                routed_context=routed_context,
+                resume_context_section=resume_context_section,
+            )
         )
 
     def run(

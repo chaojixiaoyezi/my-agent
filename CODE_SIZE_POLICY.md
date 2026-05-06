@@ -24,6 +24,8 @@ Limits are expressed as **ideal / warn / hard** line counts. "Warn" triggers a C
 
 ### Exceeding Limits
 
+- **80% of Warn -> Warn**: surfaced as `high-risk` / near-soft in `CODE_SIZE_REPORT.md`.
+  These findings are visible in `--mode strict`, but they do not block unless they also exceed an existing hard-blocking rule.
 - **Ideal -> Warn**: allowed, but reviewer should ask "can this be split?"
 - **Warn -> Hard**: file must have an entry in `ARCHITECTURE_EXEMPTIONS.md` or be actively refactoring.
 - **Above Hard**: merge is blocked in `--mode strict`. In `--mode warn` it produces a CI warning that must be acknowledged.

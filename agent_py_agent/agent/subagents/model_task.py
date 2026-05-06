@@ -1,0 +1,122 @@
+from __future__ import annotations
+
+"""Subagent task and learning-candidate dataclasses."""
+
+from dataclasses import dataclass, field
+
+from .model_capabilities import (
+    CapabilityGap,
+    CapabilityGrant,
+    CapabilityRequest,
+    VerificationEvidence,
+)
+from .model_records import ChannelProbeCheck, TakeoverRecord
+from .quality_models import ContextManifest, QualityContract
+
+
+@dataclass
+class SubAgentTask:
+    """Persistent run record for one subagent task."""
+
+    id: str
+    goal: str
+    thought: str
+    plan: list[str]
+    agent_name: str = "general"
+    role: str = "general"
+    owner: str = ""
+    supervisor: str = ""
+    final_owner: str = ""
+    parent_id: str = ""
+    root_id: str = ""
+    depth: int = 0
+    allowed_skills: list[str] = field(default_factory=list)
+    allowed_tools: list[str] = field(default_factory=list)
+    used_skills: list[str] = field(default_factory=list)
+    used_tools: list[str] = field(default_factory=list)
+    capability_requests: list[CapabilityRequest] = field(default_factory=list)
+    capability_grants: list[CapabilityGrant] = field(default_factory=list)
+    capability_gaps: list[CapabilityGap] = field(default_factory=list)
+    acceptance_checks: list[str] = field(default_factory=list)
+    evidence: list[VerificationEvidence] = field(default_factory=list)
+    quality_contract: QualityContract = field(default_factory=QualityContract)
+    context_manifest: ContextManifest = field(default_factory=ContextManifest)
+    context_packs: list[dict[str, object]] = field(default_factory=list)
+    child_ids: list[str] = field(default_factory=list)
+    status: str = "PLANNING"
+    description: str = ""
+    paused_at: float = 0.0
+    abandoned_at: float = 0.0
+    verification_status: str = "UNVERIFIED"
+    failure_type: str = ""
+    result: str = ""
+    runner_attempts: int = 0
+    runner_last_attempt_at: float = 0.0
+    runner_last_error: str = ""
+    runner_active_attempt_id: str = ""
+    runner_abandoned_attempt_ids: list[str] = field(default_factory=list)
+    created_at: float = 0.0
+    updated_at: float = 0.0
+    heartbeat_at: float = 0.0
+    ended_at: float = 0.0
+    task_dir: str = ""
+    data_dir: str = ""
+    output_dir: str = ""
+    tests_dir: str = ""
+    reports_dir: str = ""
+    logs_dir: str = ""
+    scratch_dir: str = ""
+    status_file: str = ""
+    work_log_file: str = ""
+    action_receipts_file: str = ""
+    acceptance_file: str = ""
+    test_checklist_file: str = ""
+    bugs_file: str = ""
+    skill_usage_file: str = ""
+    handoff_file: str = ""
+    debrief_file: str = ""
+    output_json: str = ""
+    dependencies_json: str = ""
+    takeover_file: str = ""
+    execution_context_file: str = ""
+    execution_context_json: str = ""
+    runner_result_file: str = ""
+    runner_result_json: str = ""
+    runner_prompt_file: str = ""
+    runner_response_file: str = ""
+    allowed_write_roots: list[str] = field(default_factory=list)
+    forbidden_write_roots: list[str] = field(default_factory=list)
+    workflow_mode: str = "off"
+    workflow_template_id: str = ""
+    workflow_plan: dict[str, object] = field(default_factory=dict)
+    workflow_parent_run_id: str = ""
+    workflow_phase_id: str = ""
+    workflow_depends_on: list[str] = field(default_factory=list)
+    workflow_child_run_ids: list[str] = field(default_factory=list)
+    takeover_by: str = ""
+    takeover_reason: str = ""
+    locked_files: list[str] = field(default_factory=list)
+    takeover_records: list[TakeoverRecord] = field(default_factory=list)
+    channel_status: str = "UNKNOWN"
+    last_probe_at: float = 0.0
+    channel_checks: list[ChannelProbeCheck] = field(default_factory=list)
+    channel_probe_file: str = ""
+    attributes: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass
+class LearningCandidate:
+    """Candidate lesson that may later be accepted into learning memory."""
+
+    id: str
+    lesson: str
+    normalized_key: str
+    status: str = "draft"
+    confidence: float = 0.5
+    occurrence_count: int = 1
+    evidence_count: int = 1
+    source_runs: list[str] = field(default_factory=list)
+    evidence: list[dict[str, object]] = field(default_factory=list)
+    variants: list[str] = field(default_factory=list)
+    created_at: float = 0.0
+    updated_at: float = 0.0

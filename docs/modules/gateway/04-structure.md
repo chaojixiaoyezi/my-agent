@@ -1,3 +1,6 @@
+﻿## 2026-05-06 structure update
+- `cli/adapter.py` now keeps command entrypoints small and delegates file-loop, daemon, registration, status, and stop concerns to local helper functions.
+- `gateway_parts/adapter.py` still owns the inbox/outbox file protocol; CLI helpers only orchestrate startup and process lifecycle.
 # Gateway：结构树和详细说明
 
 ## 模块结构
