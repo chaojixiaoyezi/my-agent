@@ -34,6 +34,7 @@ class FallbackInputRefs:
     assistant_outputs: list[str]
 
 
+from .fallback_handlers import _fallback_gateway_handle, _fallback_local_handle
 from .fallback_state import (
     _CHAT_RESPONSE_STYLE_INJECT,
     FALLBACK_CHAT_PROMPT,
@@ -53,94 +54,6 @@ from .fallback_ui import (
     _read_user_input,
     _render_assistant_response,
 )
-from .gateway_client import (
-    ChatRequestContent,
-    check_gateway_alive,
-    poll_gateway_chunks,
-    submit_chat_request,
-)
-from .input_loop import (
-    handle_common_slash_command,
-    is_exit_command,
-    is_show_prompt_command,
-)
-from .rendering import (
-    BLUE,
-    BOLD,
-    RESET,
-    terminal_rule,
-)
-from .slash_command_types import SlashCommandContext
-
-
-def _fallback_gateway_handle(
-    job,
-    agent,
-    args,
-    paths,
-    assistant_outputs: list[str],
-    build_history_context: Callable[[], str],
-) -> tuple[str, bool]:
-    """Handle gateway-mode job. Returns (response_text, stream_started)."""
-    if not check_gateway_alive(paths):
-        raise RuntimeError("gateway 已停止。请先执行: my-agent gateway start")
-    history_ctx = build_history_context()
-    turn_inject = (
-        list(job.inject) + [_CHAT_RESPONSE_STYLE_INJECT] + ([history_ctx] if history_ctx else [])
-    )
-    next_message_id = len(assistant_outputs) + 1
-    on_chunk, stream_started_ref = _make_chunk_handler(agent.config.agent_name, next_message_id)
-    request_id, chunk_path, response_path = submit_chat_request(
-        paths,
-        content=ChatRequestContent(
-            prompt=job.user,
-            inject=turn_inject,
-            prompt_files=job.prompt_files,
-            save=not args.no_save,
-            show_prompt=job.show_prompt,
-            resume_context=resume_context_override(args),
-        ),
-        agent=agent,
-    )
-    timeout = getattr(args, "gateway_timeout", None) or agent.config.gateway_request_timeout
-    chunks_printed_ref = [0]
-    deadline = time.time() + max(0.0, timeout)
-    response = poll_gateway_chunks(
-        chunk_path, response_path, deadline, on_chunk, chunks_printed_ref=chunks_printed_ref
-    )
-    if not response:
-        raise TimeoutError(f"gateway 请求等待超时: request_id={request_id}")
-    return response.get("response", ""), stream_started_ref[0]
-
-
-def _fallback_local_handle(
-    job,
-    agent,
-    args,
-    assistant_outputs: list[str],
-    build_history_context: Callable[[], str],
-) -> tuple[str, bool]:
-    """Handle local-mode job. Returns (response_text, stream_started)."""
-    history_ctx = build_history_context()
-    turn_inject = (
-        list(job.inject) + [_CHAT_RESPONSE_STYLE_INJECT] + ([history_ctx] if history_ctx else [])
-    )
-    next_message_id = len(assistant_outputs) + 1
-    on_chunk, stream_started_ref = _make_chunk_handler(agent.config.agent_name, next_message_id)
-    result = agent.run(
-        job.user,
-        inject=turn_inject,
-        prompt_files=job.prompt_files,
-        save=not args.no_save,
-        source="chat",
-        resume_context=resume_context_override(args),
-        recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
-        on_chunk=on_chunk,
-    )
-    agent_response_text = result.response
-    if not stream_started_ref[0]:
-        _render_assistant_response(agent_response_text, assistant_outputs, agent.config.agent_name)
-    return agent_response_text, stream_started_ref[0]
 
 
 def _fallback_process_job(
