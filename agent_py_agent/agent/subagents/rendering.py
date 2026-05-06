@@ -178,6 +178,7 @@ def render_capability_route_markdown(report: CapabilityRouteReport) -> str:
 
 def render_acceptance_review_markdown(report: AcceptanceReviewReport) -> str:
     mode = "dry-run" if report.dry_run else "apply"
+    # LLM: acceptance reports separate worker claims from evidence and parent decisions.
     lines = [
         "# SUBAGENT ACCEPTANCE",
         "",
@@ -202,7 +203,12 @@ def render_acceptance_review_markdown(report: AcceptanceReviewReport) -> str:
             f" -> {record.after_status}/{record.after_verification_status}"
         )
         lines.append(f"  - {record.message}")
+        if record.worker_claims:
+            lines.append(f"  - worker: {record.worker_claims[0]}")
+        if record.evidence_facts:
+            lines.append(f"  - evidence: {'; '.join(record.evidence_facts[:3])}")
         failed = [item for item in record.findings if not item.ok and item.severity != "P2"]
+        failed.extend(item for item in record.verifier_checks if not item.ok and item.severity != "P2")
         for item in failed[:5]:
             lines.append(f"  - [{item.severity}] {item.name}: {item.message}")
     return "\n".join(lines) + "\n"
@@ -229,9 +235,32 @@ def render_acceptance_record_markdown(record: AcceptanceReviewRecord) -> str:
         f"- tests: {record.test_count}",
         f"- artifacts: {record.artifact_count}",
         "",
-        "## Findings",
+        "## Worker Claims",
+        "",
+        *_list_or_none(record.worker_claims),
+        "",
+        "## Evidence Facts",
+        "",
+        *_list_or_none(record.evidence_facts),
+        "",
+        "## Parent Conclusions",
+        "",
+        *_list_or_none(record.parent_conclusions),
+        "",
+        "## Verifier Checks",
         "",
     ]
+    if not record.verifier_checks:
+        lines.append("- none")
+    for item in record.verifier_checks:
+        status = "OK" if item.ok else "FAIL"
+        lines.append(f"- [{status}] {item.severity} {item.name}: {item.message}")
+        if item.evidence_path:
+            lines.append(f"  - evidence: {item.evidence_path}")
+    lines.extend([
+        "## Findings",
+        "",
+    ])
     if not record.findings:
         lines.append("- none")
     for item in record.findings:
@@ -240,6 +269,12 @@ def render_acceptance_record_markdown(record: AcceptanceReviewRecord) -> str:
         if item.evidence_path:
             lines.append(f"  - evidence: {item.evidence_path}")
     return "\n".join(lines) + "\n"
+
+
+def _list_or_none(items: list[str]) -> list[str]:
+    if not items:
+        return ["- none"]
+    return [f"- {item}" for item in items]
 
 
 def _render_board_line(item: SubAgentBoardItem) -> str:

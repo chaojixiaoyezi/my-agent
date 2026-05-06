@@ -20,6 +20,7 @@ class _AcceptSetupMixin:
         verification_status = kwargs.pop("verification_status", "NEEDS_ACCEPTANCE")
         channel_status = kwargs.pop("channel_status", "OK")
         evidence = kwargs.pop("evidence", None)
+        evidence_packets = kwargs.pop("evidence_packets", None)
         if kwargs:
             raise TypeError(f"Unexpected task options: {sorted(kwargs)}")
 
@@ -30,6 +31,16 @@ class _AcceptSetupMixin:
         task.output_json = str(tmp_path / "output.json")
         task.runner_result_json = str(tmp_path / "runner.json")
         task.evidence = evidence if evidence is not None else []
+        packet = MagicMock()
+        packet.id = "evpkt-test"
+        packet.claim = "test evidence"
+        packet.evidence_refs = [str(tmp_path / "acceptance.json")]
+        packet.artifact_refs = []
+        packet.unresolved_risks = []
+        task.evidence_packets = evidence_packets if evidence_packets is not None else ([packet] if task.evidence else [])
+        task.findings = []
+        task.latest_summary = ""
+        task.result = ""
         task.task_dir = str(tmp_path / "task_dir")
         task.channel_status = channel_status
         task.channel_probe_file = str(tmp_path / "probe.json")

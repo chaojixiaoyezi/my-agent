@@ -76,6 +76,10 @@ def test_subagent_acceptance_dry_run_and_apply():
         assert dry.records[0].ok
         assert dry.records[0].decision == "ACCEPT"
         assert dry.records[0].applied is False
+        assert dry.records[0].worker_claims
+        assert any("evidence_packets=1" in item for item in dry.records[0].evidence_facts)
+        assert dry.records[0].parent_conclusions[0] == "decision=ACCEPT"
+        assert any(item.name == "verifier_evidence_packets_traceable" and item.ok for item in dry.records[0].verifier_checks)
         assert loaded.status == "AWAITING_ACCEPTANCE"
 
         applied = agent.subagents.write_acceptance_review_report(run_ids=[task.id], apply=True, reviewer="tester")
@@ -207,3 +211,30 @@ def test_subagent_acceptance_uses_actual_tool_evidence_from_runner():
         assert loaded.verification_status == "VERIFIED"
         assert any(item.command == "read_file" for item in loaded.evidence)
         assert any(item.command == "write_file" for item in loaded.evidence)
+
+
+def test_subagent_acceptance_verifier_rejects_unresolved_evidence_risk():
+    """LLM: Verifies verifier findings block acceptance when evidence packets keep unresolved risks."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        task = agent.subagents.create_run(
+            goal="验收未解决风险",
+            thought="runner 留下 unresolved evidence risk。",
+            plan=["检查风险"],
+        )
+        _setup_acceptance_task(agent, task)
+        loaded = agent.subagents.load(task.id)
+        loaded.evidence_packets[0].unresolved_risks = ["没有覆盖错误路径"]
+        agent.subagents.save(loaded)
+
+        report = agent.subagents.write_acceptance_review_report(run_ids=[task.id], apply=True, reviewer="tester")
+        rejected = agent.subagents.load(task.id)
+
+        assert report.records[0].decision == "REJECT"
+        assert rejected.status == "BLOCKED"
+        assert any(
+            item.name == "verifier_no_unresolved_evidence_risks" and not item.ok
+            for item in report.records[0].verifier_checks
+        )

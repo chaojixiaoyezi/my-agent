@@ -69,6 +69,17 @@ class TestAcceptanceReviewRendering:
                     after_status="COMPLETED",
                     before_verification_status="UNVERIFIED",
                     after_verification_status="VERIFIED",
+                    worker_claims=["worker says done"],
+                    evidence_facts=["evidence_packets=1"],
+                    parent_conclusions=["decision=approved"],
+                    verifier_checks=[
+                        AcceptanceReviewFinding(
+                            name="verifier_evidence_packets_traceable",
+                            ok=True,
+                            severity="P1",
+                            message="refs ok",
+                        )
+                    ],
                     findings=[
                         AcceptanceReviewFinding(
                             name="code_quality",
@@ -86,6 +97,8 @@ class TestAcceptanceReviewRendering:
         assert "# SUBAGENT ACCEPTANCE" in result
         assert "approved" in result
         assert "COMPLETED" in result
+        assert "worker says done" in result
+        assert "evidence_packets=1" in result
 
     def test_render_acceptance_record_markdown_basic(self):
         """测试基本验收记录渲染。
@@ -107,6 +120,17 @@ class TestAcceptanceReviewRendering:
             evidence_count=2,
             test_count=5,
             artifact_count=1,
+            worker_claims=["worker says done"],
+            evidence_facts=["evidence_packets=1"],
+            parent_conclusions=["decision=approved"],
+            verifier_checks=[
+                AcceptanceReviewFinding(
+                    name="verifier_evidence_packets_traceable",
+                    ok=True,
+                    severity="P1",
+                    message="refs ok",
+                )
+            ],
             findings=[
                 AcceptanceReviewFinding(
                     name="tests_passed",
@@ -124,6 +148,9 @@ class TestAcceptanceReviewRendering:
         assert "approved" in result
         assert "evidence: 2" in result
         assert "tests: 5" in result
+        assert "## Worker Claims" in result
+        assert "## Verifier Checks" in result
+        assert "verifier_evidence_packets_traceable" in result
 
 class TestPatchReviewRendering:
     """测试 Patch 审核渲染功能。"""
