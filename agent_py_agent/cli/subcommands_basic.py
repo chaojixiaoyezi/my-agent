@@ -29,6 +29,7 @@ from .memory_archive_commands import (
     cmd_memory_resume,
 )
 from .memory_commands import cmd_memory_route
+from .memory_compact_commands import cmd_memory_compact
 from .memory_doctor import cmd_memory_doctor
 
 
@@ -130,6 +131,24 @@ def _add_archive_resume_args(parser) -> None:
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
 
 
+def _add_memory_compact_args(parser) -> None:
+    """参数说明: memory compact 第一版只注册只读 dry-run 和保守 apply 门禁。"""
+
+    parser.add_argument("--dry-run", action="store_true", default=True, help="只生成计划，不修改文件")
+    parser.add_argument("--apply", action="store_true", help="应用 compact；当前版本会拒绝执行")
+    parser.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="扫描哪一层归档")
+    parser.add_argument("--date", help="只扫描某一天，格式 YYYY-MM-DD")
+    parser.add_argument("--since", help="只看此时间之后的归档线索")
+    parser.add_argument("--until", help="只看此时间之前的归档线索")
+    parser.add_argument("--session-id", help="按 session_id 精确过滤")
+    parser.add_argument("--request-id", help="按 request_id 精确过滤")
+    parser.add_argument("--run-id", help="按 run_id 精确过滤")
+    parser.add_argument("--task-id", help="按 task_id 精确过滤")
+    parser.add_argument("--level", type=int, choices=[0, 1, 2, 3], help="只扫描指定 archive_level")
+    parser.add_argument("--limit", type=int, default=50, help="最多纳入多少条归档记录；0 表示不限")
+    parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+
+
 def add_memory_subcommands(sub: argparse._SubParsersAction) -> None:
     memory_route = sub.add_parser("memory-route", help="按长期规则索引预览 memory 路由命中")
     memory_route.add_argument("query", nargs="?", default="", help="要路由的查询或用户任务")
@@ -163,6 +182,10 @@ def add_memory_subcommands(sub: argparse._SubParsersAction) -> None:
     memory_resume.add_argument("query", nargs="?", default="", help="恢复关键词；也可只传 request/run/session 过滤")
     _add_archive_resume_args(memory_resume)
     memory_resume.set_defaults(func=cmd_memory_resume)
+
+    memory_compact = sub.add_parser("memory-compact", help="预演 memory compact 计划")
+    _add_memory_compact_args(memory_compact)
+    memory_compact.set_defaults(func=cmd_memory_compact)
 
 
 def add_local_store_subcommands(sub: argparse._SubParsersAction) -> None:

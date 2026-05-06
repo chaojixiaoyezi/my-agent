@@ -9,11 +9,12 @@ agent_py_agent/agent/
 |-- settings/memory.py                # memory 配置、默认值、warning、安全归一化和参数边界
 |-- memory_store/                     # 长期记忆 JSONL 事实流水，可选同步索引到 LocalStore
 |-- memory_routing/                   # route index、匹配、required/candidate path、read receipt
-`-- memory_archive/                   # hook snapshot、raw archive、留存、token 估算
+`-- memory_archive/                   # hook snapshot、raw archive、留存、token 估算、compact 预演
 
 agent_py_agent/cli/
 |-- memory_commands.py                # memory-route / memory-doctor 等可见诊断命令
-`-- memory_archive_commands.py        # memory-archive-list/search/resume 命令
+|-- memory_archive_commands.py        # memory-archive-list/search/resume 命令
+`-- memory_compact_commands.py        # memory-compact 只读预演命令
 ```
 
 ## 核心文件
@@ -32,8 +33,10 @@ agent_py_agent/cli/
 - `memory_archive/resume_brief.py`：把归档、LocalStore、任务事实源压成恢复简报。
 - `memory_archive/resume_context.py`：在“继续/恢复”类提示里按配置构造自动注入的恢复上下文。
 - `memory_archive/tokens.py`：为归档预算提供保守 token 估算，并维护 session 级 token 账本。
+- `memory_archive/compact.py`：构建只读 compact plan，汇总 raw/hook、权威 snapshot、token ledger、风险和建议动作。
 - `cli/memory_commands.py`：给用户和开发者看 route/doctor 结果。
 - `cli/memory_archive_commands.py`：给用户查看归档列表、搜索归档和生成恢复简报。
+- `cli/memory_compact_commands.py`：把 compact plan 暴露为 `memory-compact --dry-run`，当前不会应用真实压缩。
 
 ## 数据流
 
@@ -46,6 +49,7 @@ agent_py_agent/cli/
 7. raw event、hook snapshot 和权威快照写完后都会读回校验，确保恢复线索真实落盘。
 8. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore 和任务事实源生成恢复块；跨天时会同时扫描最近 raw/hook 文件。
 9. doctor 命令检查配置、route index、hook/raw/snapshot 目录和层级一致性 warning。
+10. `memory-compact --dry-run` 在真实压缩前只读扫描上述事实源，输出计划和风险，不修改文件。
 
 ## 跨天恢复链路
 

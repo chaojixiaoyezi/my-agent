@@ -67,6 +67,7 @@ MODULE_RULES = (
             "agent_py_agent/agent/memory_routing/",
             "agent_py_agent/cli/memory_commands.py",
             "agent_py_agent/cli/memory_archive_commands.py",
+            "agent_py_agent/cli/memory_compact_commands.py",
         ),
         required_docs=(
             "docs/modules/memory/02-progress.md",
