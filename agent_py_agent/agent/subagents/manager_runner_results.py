@@ -220,48 +220,6 @@ def _runner_make_runner_meta(dry_run, ok, message, backend, tool_rounds, now):
     return {"dry_run": dry_run, "ok": ok, "message": message, "backend": backend, "tool_rounds": tool_rounds, "now": now}
 
 
-def _runner_build_output_payload(
-        ctx: OutputPayloadContext,
-    ) -> dict[str, object]:
-    """Build output payload from context."""
-    return _build_output_payload(ctx)
-
-
-def _make_build_output_context(
-    task: SubAgentTask,
-    runner_meta: dict,
-    cap_data: dict,
-    tools_info: dict,
-    output_items: dict,
-) -> OutputPayloadContext:
-    """Build OutputPayloadContext from structured metadata."""
-    return OutputPayloadContext(
-        task=task,
-        dry_run=runner_meta["dry_run"],
-        ok=runner_meta["ok"],
-        message=runner_meta["message"],
-        backend=runner_meta["backend"],
-        tool_rounds=runner_meta["tool_rounds"],
-        parsed=cap_data["parsed"],
-        actual_tools=tools_info["actual_tools"],
-        structured_evidence_count=cap_data["structured_evidence_count"],
-        structured_request_count=cap_data["structured_request_count"],
-        created_request_ids=cap_data["created_request_ids"],
-        ignored_tools=tools_info["ignored_tools"],
-        ignored_skills=tools_info["ignored_skills"],
-        artifacts=output_items["artifacts"],
-        tests=output_items["tests"],
-        patches=output_items["patches"],
-        lessons=output_items["lessons"],
-        blockers=output_items["blockers"],
-        next_actions=output_items["next_actions"],
-        structured_repair_attempted=cap_data.get("structured_repair_attempted", False),
-        structured_repair_ok=cap_data.get("structured_repair_ok", False),
-        structured_repair_error=cap_data.get("structured_repair_error", ""),
-        now=runner_meta["now"],
-    )
-
-
 def _runner_append_debrief(task, parsed):
     """Append runner debrief content."""
     _append_runner_debrief_content(task, parsed)
@@ -376,11 +334,32 @@ class SubAgentRunnerResultMixin:
         blockers = _runner_compute_blockers(final_ok, extracted.task.status, extracted.parsed, final_message)
         runner_meta = _runner_make_runner_meta(params.dry_run, final_ok, final_message, params.backend, params.tool_rounds, now)
         output_items = {"artifacts": extracted.artifacts, "tests": extracted.tests, "patches": extracted.patches, "lessons": extracted.lessons, "blockers": blockers, "next_actions": extracted.next_actions}
-        output_payload = _runner_build_output_payload(
-            _make_build_output_context(
-                extracted.task, runner_meta, cap_data, tools_info, output_items
-            )
+        output_payload_ctx = OutputPayloadContext(
+            task=extracted.task,
+            dry_run=runner_meta["dry_run"],
+            ok=runner_meta["ok"],
+            message=runner_meta["message"],
+            backend=runner_meta["backend"],
+            tool_rounds=runner_meta["tool_rounds"],
+            parsed=extracted.parsed,
+            actual_tools=extracted.actual_tools,
+            structured_evidence_count=extracted.structured_evidence_count,
+            structured_request_count=extracted.structured_request_count,
+            created_request_ids=cap_data["created_request_ids"],
+            ignored_tools=extracted.ignored_tools,
+            ignored_skills=extracted.ignored_skills,
+            artifacts=output_items["artifacts"],
+            tests=output_items["tests"],
+            patches=output_items["patches"],
+            lessons=output_items["lessons"],
+            blockers=output_items["blockers"],
+            next_actions=output_items["next_actions"],
+            structured_repair_attempted=cap_data.get("structured_repair_attempted", False),
+            structured_repair_ok=cap_data.get("structured_repair_ok", False),
+            structured_repair_error=cap_data.get("structured_repair_error", ""),
+            now=runner_meta["now"],
         )
+        output_payload = _build_output_payload(output_payload_ctx)
         return output_payload, _make_build_context(
             _BuildContextParams(
                 task=extracted.task,
