@@ -81,6 +81,8 @@
 
 ### 3. Acceptance 强化 + Verifier
 
+状态：第一片已落地；acceptance report 已分层展示，确定性 verifier checks 已能阻断 unresolved evidence risk。还需要继续补自动验收项生成和独立 verifier / critic worker。
+
 第三步把验收从“检查完成材料”升级成“检查结论是否可靠”。
 
 要做：
@@ -224,10 +226,10 @@ compact 不应直接修改：
 - acceptance 阻断缺 evidence chain 的完成。
 - focused tests 覆盖旧 task 兼容、runner 写回、LocalStore 索引、acceptance 阻断。
 
-还剩的第一轮收尾：
+第一轮收尾已推进：
 
 - 把 status report 最近状态纳入更完整的父级查询/索引展示。
-- 让 acceptance report 明确列出 worker 自述、证据事实、父级结论三层。
+- acceptance report 已明确列出 worker 自述、证据事实、父级结论三层，并增加 verifier checks。
 - 基于 evidence packets 自动生成更细的验收项。
 
 这样做的好处是先把“看得见、能恢复、可验收”做稳，再去做更强并发和远端执行。

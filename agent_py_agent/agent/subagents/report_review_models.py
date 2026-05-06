@@ -38,6 +38,11 @@ class AcceptanceReviewRecord:
     test_count: int = 0
     artifact_count: int = 0
     findings: list[AcceptanceReviewFinding] = field(default_factory=list)
+    # LLM: layered acceptance separates worker claims, evidence facts, and parent conclusions.
+    worker_claims: list[str] = field(default_factory=list)
+    evidence_facts: list[str] = field(default_factory=list)
+    parent_conclusions: list[str] = field(default_factory=list)
+    verifier_checks: list[AcceptanceReviewFinding] = field(default_factory=list)
     evidence_paths: list[str] = field(default_factory=list)
     created_at: float = 0.0
 

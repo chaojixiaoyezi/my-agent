@@ -103,6 +103,17 @@ class TestAcceptanceReviewReports:
             after_status="RUNNING",
             before_verification_status="UNVERIFIED",
             after_verification_status="UNVERIFIED",
+            worker_claims=["worker says tests passed"],
+            evidence_facts=["tests=1"],
+            parent_conclusions=["decision=needs_review"],
+            verifier_checks=[
+                AcceptanceReviewFinding(
+                    name="verifier_evidence_packets_traceable",
+                    ok=True,
+                    severity="P1",
+                    message="refs ok",
+                )
+            ],
             findings=[
                 AcceptanceReviewFinding(
                     name="test_coverage",
@@ -115,6 +126,8 @@ class TestAcceptanceReviewReports:
 
         assert len(record.findings) == 1
         assert record.findings[0].ok is False
+        assert record.worker_claims == ["worker says tests passed"]
+        assert record.verifier_checks[0].name == "verifier_evidence_packets_traceable"
 
 class TestPatchReviewReports:
     """测试 Patch 审核报告数据类。"""
