@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock, patch
@@ -176,6 +177,29 @@ class TestCmdGatewayStatus:
 class TestCmdGatewayRestart:
     """测试 cmd_gateway_restart 命令。"""
 
+    def test_gateway_restart_supplies_run_defaults_when_parser_omits_them(self):
+        """Restart should pass the same safe defaults as gateway run."""
+        from agent_py_agent.cli._gateway_commands import cmd_gateway_restart
+        from agent_py_agent.cli.common import DEFAULT_CAPABILITY_CONFIG
+
+        args = argparse.Namespace(
+            config="agent_config.yaml",
+            timeout=None,
+            force=False,
+            force_lock=False,
+        )
+
+        with patch("agent_py_agent.cli._gateway_commands.cmd_gateway_stop", return_value=0), \
+             patch("agent_py_agent.cli._gateway_commands.cmd_gateway_run", return_value=0) as mock_run:
+            result = cmd_gateway_restart(args)
+
+        assert result == 0
+        run_args = mock_run.call_args.args[0]
+        assert run_args.capability_config == str(DEFAULT_CAPABILITY_CONFIG)
+        assert run_args.skill_dir == []
+        assert run_args.locked_file == []
+        assert run_args.note is None
+
     def test_gateway_restart_with_stopped_gateway(self, tmp_path: Path):
         """重启已停止的 gateway。"""
         from agent_py_agent.cli.gateway_process import cmd_gateway_restart
@@ -216,6 +240,25 @@ class TestCmdGatewayRestart:
             mock_run.assert_called_once()
             result = cmd_gateway_restart(args)
             assert result == 0
+
+
+class TestGatewayRunStateHelpers:
+    """Gateway run state helper regressions."""
+
+    def test_record_gateway_run_failed_persists_failed_state(self, tmp_path: Path):
+        from agent_py_agent.cli._gateway_state_helpers import _record_gateway_run_failed
+
+        paths = MagicMock()
+        paths.state = tmp_path / "gateway_state.json"
+        agent = MagicMock()
+
+        with patch("agent_py_agent.cli._gateway_state_helpers.log_gateway_event"):
+            _record_gateway_run_failed(paths, agent, 123, RuntimeError("boom"))
+
+        payload = json.loads(paths.state.read_text(encoding="utf-8"))
+        assert payload["status"] == "failed"
+        assert payload["pid"] == 123
+        assert payload["error"] == "boom"
 
 
 class TestCmdGatewayLogs:

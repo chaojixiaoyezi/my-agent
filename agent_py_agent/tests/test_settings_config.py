@@ -107,6 +107,16 @@ class TestLoadSimpleYaml:
             path.unlink()
 
 
+    def test_load_simple_yaml_accepts_utf8_bom(self, tmp_path: Path):
+        """PowerShell-created UTF-8 config files may include a BOM."""
+        path = tmp_path / "agent_config.yaml"
+        path.write_bytes(b"\xef\xbb\xbfworkspace_root: workspace\n")
+
+        data = load_simple_yaml(path)
+
+        assert data["workspace_root"] == "workspace"
+
+
 class TestNormalizeAgentConfig:
     """测试 normalize_agent_config 配置归一化。"""
 
