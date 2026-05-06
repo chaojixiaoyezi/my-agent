@@ -40,6 +40,7 @@ class GatewayAskContext:
     request_path: object
     response_path: object
     timeout: float
+    stream_output: bool = True
 
 
 def cmd_gateway(args) -> int:
@@ -151,12 +152,15 @@ def _wait_for_gateway_response(
     response_path: Path,
     deadline: float,
     spinner: ThinkingSpinner,
+    *,
+    stream_output: bool,
 ) -> dict[str, Any]:
     chunks_printed = 0
     response: dict[str, Any] = {}
 
     while time.time() <= deadline:
-        chunks_printed = _stream_chunk_lines(chunk_path, chunks_printed, spinner)
+        if stream_output:
+            chunks_printed = _stream_chunk_lines(chunk_path, chunks_printed, spinner)
         response = read_json_file(response_path)
         if response:
             break
@@ -168,10 +172,18 @@ def _wait_for_gateway_response(
 def _poll_gateway_response(ctx: GatewayAskContext) -> dict[str, Any]:
     chunk_path = gateway_chunk_path(ctx.paths, ctx.request_id)
     spinner = ThinkingSpinner()
-    spinner.start()
+    if ctx.stream_output:
+        spinner.start()
     deadline = time.time() + max(0.0, ctx.timeout)
-    response = _wait_for_gateway_response(chunk_path, ctx.response_path, deadline, spinner)
-    spinner.stop()
+    response = _wait_for_gateway_response(
+        chunk_path,
+        ctx.response_path,
+        deadline,
+        spinner,
+        stream_output=ctx.stream_output,
+    )
+    if ctx.stream_output:
+        spinner.stop()
     return response
 
 
@@ -231,7 +243,15 @@ def cmd_gateway_ask(args) -> int:
 
     # Synchronous mode: poll for streaming chunks and response file.
     timeout = args.timeout if args.timeout is not None else agent.config.gateway_request_timeout
-    ask_ctx = GatewayAskContext(agent, paths, request_id, request_path, response_path, timeout)
+    ask_ctx = GatewayAskContext(
+        agent,
+        paths,
+        request_id,
+        request_path,
+        response_path,
+        timeout,
+        stream_output=not args.json,
+    )
     response = _poll_gateway_response(ask_ctx)
 
     if not response:

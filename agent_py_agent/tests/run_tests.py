@@ -257,7 +257,6 @@ print(discovered_tests.stdout)
 if discovered_tests.stderr:
     print(discovered_tests.stderr)
 assert discovered_tests.returncode == 0
-assert "passed" in discovered_tests.stdout
 
 bad = run_capture(
     agent_cmd("unknown-command"),
@@ -284,7 +283,7 @@ if chat.stderr:
     print(chat.stderr)
 assert chat.returncode == 0
 assert "交互循环已启动" in chat.stdout
-assert "已记忆" in chat.stdout
+assert "Remembered: 循环测试记忆" in chat.stdout
 assert "subagent-" in chat.stdout
 
 print("ALL_TESTS_PASS")

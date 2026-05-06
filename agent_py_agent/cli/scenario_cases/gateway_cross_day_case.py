@@ -34,7 +34,7 @@ from ..scenario_utils import (
 
 
 def _cross_day_setup(paths, args):
-    prompt = "gateway cross-day resume drill: please return a short recoverable gateway response."
+    prompt = "gateway cross-day resume drill: reply with CROSS_DAY_RESUME_OK only."
     print_scenario_step(1, "Run a real background gateway ask")
     gateway_payload = run_scenario_gateway_ask(paths, prompt, timeout=args.timeout, save=True)
     if not gateway_payload.get("ok"):
@@ -46,14 +46,28 @@ def _cross_day_setup(paths, args):
     request_id = str(gateway_payload.get("id") or "")
     agent = load_scenario_agent(paths.config)
     gpaths = gateway_paths(agent)
-    request_path = gpaths.done / f"{request_id}.json"
-    if not request_path.exists():
-        request_path = gpaths.failed / f"{request_id}.json"
+    request_path = _gateway_request_fact_path(gpaths, request_id, gateway_payload)
     response_path = gateway_response_path(gpaths, request_id)
     print(f"request_id={request_id}")
     print(f"request_path={request_path} exists={request_path.exists()}")
     print(f"response_path={response_path} exists={response_path.exists()}")
     return agent, request_id, request_path, response_path, gateway_payload
+
+
+def _gateway_request_fact_path(gpaths, request_id: str, gateway_payload: dict) -> Path:
+    candidates = [
+        gpaths.done / f"{request_id}.json",
+        gpaths.failed / f"{request_id}.json",
+        gpaths.processing / f"{request_id}.json",
+        gpaths.inbox / f"{request_id}.json",
+    ]
+    payload_path = str(gateway_payload.get("request_file") or "")
+    if payload_path:
+        candidates.append(Path(payload_path))
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def _run_cross_day_resume(paths, request_id):

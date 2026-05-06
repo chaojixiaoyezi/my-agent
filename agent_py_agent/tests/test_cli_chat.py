@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -350,6 +351,35 @@ class TestChatCommandArguments:
 
         args = parser.parse_args(["chat"])
         assert args.memory_limit == 5
+
+    def test_cmd_chat_passes_fallback_config_object(self):
+        """非 TTY fallback 路径应传 RunFallbackConfig，而不是散装 kwargs。"""
+        from agent_py_agent.cli.chat import cmd_chat
+        from agent_py_agent.cli.chat_parts.fallback_state import RunFallbackConfig
+
+        args = SimpleNamespace(
+            gateway=False,
+            inject=[],
+            prompt_file=[],
+            session_id="",
+            memory_limit=5,
+        )
+        agent = MagicMock()
+        agent.config.agent_name = "myagent"
+        session_manager = MagicMock()
+        session_manager.create_session.return_value = SimpleNamespace(session_id="sess-test")
+
+        with patch("agent_py_agent.cli.chat.make_agent", return_value=agent), \
+             patch("agent_py_agent.cli.chat.SessionManager", return_value=session_manager), \
+             patch("agent_py_agent.cli.chat._has_prompt_toolkit", return_value=False), \
+             patch("agent_py_agent.cli.chat.run_fallback", return_value=0) as fallback:
+            result = cmd_chat(args)
+
+        assert result == 0
+        cfg = fallback.call_args.args[0]
+        assert isinstance(cfg, RunFallbackConfig)
+        assert cfg.agent is agent
+        assert cfg.current_session_id == "sess-test"
 
 
 class TestCollapseEdgeCases:

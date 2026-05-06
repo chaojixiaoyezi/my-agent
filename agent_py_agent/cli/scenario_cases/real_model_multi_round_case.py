@@ -14,6 +14,7 @@ from ...agent.backend import ModelResponse
 from ...agent.backends.base import get_backend
 from ..scenario_utils import (
     create_scenario_workspace,
+    install_scenario_backend,
     load_scenario_agent,
     print_scenario_step,
     write_scenario_summary,
@@ -100,7 +101,7 @@ def _multi_round_setup(args):
     agent = load_scenario_agent(paths.config)
     real_backend = get_backend(agent.config.model_backend, agent.config)
     backend = ScenarioRealModelMultiRoundBackend(real_backend)
-    agent.backend = backend
+    install_scenario_backend(agent, backend)
 
     print_scenario_step(1, "Create a parent-owned subagent task for multi-round test")
     task = agent.subagents.create_run(

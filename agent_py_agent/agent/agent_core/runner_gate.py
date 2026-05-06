@@ -111,6 +111,7 @@ def run_single_runner(params: SingleRunnerParams) -> SubAgentRunnerResult:
             retry_reason=params.retry_reason,
             timeout_seconds=params.task_timeout,
             local_store=params.agent.local_store,
+            backend_override=getattr(params.agent, "_subagent_worker_backend_override", None),
         )
         return _run_subagent_worker(worker_params)
     return params.agent.run_subagent(
@@ -160,6 +161,7 @@ def _runner_worker_params(params: ConcurrentRunnerParams, run_id: str, before, r
         retry_reason=retry_reason,
         timeout_seconds=task_timeout,
         local_store=params.agent.local_store,
+        backend_override=getattr(params.agent, "_subagent_worker_backend_override", None),
     )
 
 

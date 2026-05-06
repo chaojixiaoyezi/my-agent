@@ -44,3 +44,17 @@ def test_startup_banner_marks_gateway_mode() -> None:
     assert "AgentName" in banner
     assert "gateway client" in banner
 
+
+def test_cprint_uses_plain_print_when_stdout_is_not_tty(monkeypatch, capsys):
+    """非 TTY 管道下不要调用 prompt_toolkit，避免 Windows console 报错。"""
+    from agent_py_agent.cli.chat_parts import rendering
+
+    def fail_print(_text):
+        raise AssertionError("prompt_toolkit should not be used for non-tty stdout")
+
+    monkeypatch.setattr(rendering, "_pt_print", fail_print)
+    monkeypatch.setattr(rendering, "_PT_ANSI", lambda text: text)
+
+    rendering._cprint("hello")
+
+    assert "hello" in capsys.readouterr().out

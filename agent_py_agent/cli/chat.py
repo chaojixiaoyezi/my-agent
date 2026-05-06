@@ -30,6 +30,7 @@ from .chat_parts import (
     terminal_rule,
 )
 from .chat_parts.fallback import FALLBACK_CHAT_PROMPT, run_fallback
+from .chat_parts.fallback_state import RunFallbackConfig
 
 # Backward compatibility imports from chat_parts
 from .chat_parts.history import append_conversation_turn, build_history_context
@@ -137,7 +138,7 @@ def cmd_chat(args) -> int:
             session_manager=session_manager,
             current_session_id=current_session_id,
         ))
-    return run_fallback(
+    return run_fallback(RunFallbackConfig(
         agent=agent, args=args, use_gateway=use_gateway, paths=paths,
         runtime_inject=runtime_inject, prompt_files=prompt_files,
         conversation_history=state["conversation_history"],
@@ -146,7 +147,7 @@ def cmd_chat(args) -> int:
         build_history_context=build_history_context,
         session_manager=session_manager,
         current_session_id=current_session_id,
-    )
+    ))
 
 
 # Backward compatibility: re-export from chat_parts for tests

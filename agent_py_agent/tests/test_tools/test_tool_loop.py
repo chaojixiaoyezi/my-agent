@@ -79,6 +79,32 @@ def test_agent_can_delegate_to_subagents_from_tool_call():
         assert "必须配合 apply=true" in blocked_dispatch.output
 
 
+def test_create_subagents_rejects_external_write_target_before_task_creation():
+    """LLM: write-capable subagents should fail early for absolute paths outside workspace."""
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        external_dir = workspace.parent / "external-target"
+        cfg = AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            subagent_workspace="subs",
+            max_subagents=3,
+        )
+        agent = SimpleAgent(cfg, workspace)
+
+        result = agent.tools.execute_call(
+            {
+                "tool": "create_subagents",
+                "goal": f"在 {external_dir} 创建一个 txt 文件",
+                "allowed_tools": ["read_file", "write_file"],
+            }
+        )
+
+        assert not result.ok
+        assert "工作区外" in result.output
+        assert agent.subagents.list_runs() == []
+
+
 def test_repeated_orchestration_tool_call_is_not_executed_twice():
     """LLM: verify that identical consecutive orchestration tool calls are deduplicated.
 

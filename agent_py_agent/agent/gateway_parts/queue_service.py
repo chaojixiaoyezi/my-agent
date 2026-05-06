@@ -18,6 +18,7 @@ from .io import (
     gateway_request_counts,
     gateway_response_path,
     read_json_file,
+    write_json_file,
 )
 
 # Re-export heartbeat liveness check for backward compatibility
@@ -167,10 +168,32 @@ def claim_request(paths: GatewayPaths, request_path: Path) -> Path | None:
             return None
 
 
-def archive_request(processing_path: Path, target_folder: Path, request_id: str) -> None:
+def archive_request(processing_path: Path, target_folder: Path, request_id: str) -> bool:
     from .logging import _report_gateway_side_effect_error
 
     try:
         _archive_gateway_request(processing_path, target_folder)
+        return True
     except OSError as exc:
         _report_gateway_side_effect_error("archive_gateway_request", request_id, exc)
+        return False
+
+
+def materialize_missing_archive(target_folder: Path, request_id: str, response: dict) -> Path:
+    target_folder.mkdir(parents=True, exist_ok=True)
+    target = target_folder / f"{request_id}.json"
+    if target.exists():
+        return target
+    payload = {
+        "id": request_id,
+        "status": response.get("status", "done" if response.get("ok") else "failed"),
+        "ok": bool(response.get("ok")),
+        "attempts": response.get("attempts", 0),
+        "lease_owner": response.get("lease_owner", ""),
+        "lease_started_at": response.get("lease_started_at", 0),
+        "lease_heartbeat_at": response.get("lease_heartbeat_at", 0),
+        "completed_at": response.get("ended_at", time.time()),
+        "archive_note": "request file was already moved or removed before final archive",
+    }
+    write_json_file(target, payload)
+    return target

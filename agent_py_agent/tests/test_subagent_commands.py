@@ -11,6 +11,33 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+class TestCmdSpawn:
+    """测试 spawn-subagents 命令。"""
+
+    def test_cmd_spawn_serializes_dataclass_task(self, tmp_path: Path, capsys):
+        """spawn-subagents 应能输出包含嵌套 dataclass 的任务 JSON。"""
+        from agent_py_agent.agent.subagents.models import SubAgentTask
+        from agent_py_agent.cli.subagents import cmd_spawn
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.goal = "测试任务"
+        args.count = 1
+
+        mock_agent = MagicMock()
+        mock_agent.spawn_subagents.return_value = [
+            SubAgentTask(id="run_001", goal="测试任务", thought="思考", plan=["执行"])
+        ]
+
+        with patch("agent_py_agent.cli._board.make_agent", return_value=mock_agent):
+            result = cmd_spawn(args)
+
+        output = json.loads(capsys.readouterr().out)
+        assert result == 0
+        assert output["id"] == "run_001"
+        assert output["quality_contract"]["final_judge"] == "parent_final_gate"
+
+
 class TestCmdSubagents:
     """测试 cmd_subagents 命令（子代理看板）。"""
 

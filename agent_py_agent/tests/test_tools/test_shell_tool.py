@@ -199,6 +199,14 @@ def test_shell_tool_nonzero_return_code(shell_tool: ShellTool) -> None:
     assert "return_code=1" in result.output
 
 
+def test_shell_tool_preserves_unicode_output(shell_tool: ShellTool) -> None:
+    """Shell output should not crash or mangle non-ASCII text on Windows."""
+    result = shell_tool.execute({"command": "python -c \"print('你好')\""})
+    assert result.ok is True
+    assert "return_code=0" in result.output
+    assert "你好" in result.output
+
+
 def test_shell_tool_spec_has_run_command(shell_tool: ShellTool) -> None:
     """Test that ShellTool spec has correct name."""
     assert shell_tool.spec.name == "run_command"
