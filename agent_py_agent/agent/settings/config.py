@@ -10,6 +10,7 @@ from __future__ import annotations
 这里坚持只用标准库，目的是让项目在 Windows / Linux / macOS 上都能轻装运行。
 """
 
+import ast
 import os
 import re
 from dataclasses import dataclass, field
@@ -48,7 +49,7 @@ class AgentConfig:
 
     agent_name: str = "myagent"
     system_prompt: str = "你是一个谨慎、可扩展、会记录记忆、会在必要时调用工具的 Python CLI 智能体。先理解任务，再给出结构化回答。"
-    workspace_root: str = ""
+    workspace_root: str | list[str] = ""
     auto_detect_work_on_startup: bool = True
     model_backend: str = "echo"
     memory_path: str = "data/memory.jsonl"
@@ -178,12 +179,26 @@ class AgentConfig:
 def parse_scalar(value: str) -> Any:
 
     value = value.strip().strip('"').strip("'")
+    if value.startswith("[") and value.endswith("]"):
+        parsed = _parse_inline_list(value)
+        if parsed is not None:
+            return parsed
     if value.lower() in {"true", "false"}:
         return value.lower() == "true"
     try:
         return int(value)
     except ValueError:
         return value
+
+
+def _parse_inline_list(value: str) -> list[Any] | None:
+    try:
+        parsed = ast.literal_eval(value)
+    except (SyntaxError, ValueError):
+        return None
+    if not isinstance(parsed, list):
+        return None
+    return parsed
 
 
 def load_simple_yaml(path: Path) -> dict[str, Any]:

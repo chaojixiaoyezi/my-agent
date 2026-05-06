@@ -17,8 +17,8 @@ from .models import BaseTool, ToolExecutionResult, ToolSpec
 
 class WriteFileTool(FileSystemTool):
 
-    def __init__(self, workspace_root: Path):
-        super().__init__(workspace_root)
+    def __init__(self, workspace_root: Path, workspace_roots: list[Path] | None = None):
+        super().__init__(workspace_root, workspace_roots)
         self.spec = ToolSpec(
             name="write_file",
             category="filesystem",
@@ -68,8 +68,8 @@ class WriteFileTool(FileSystemTool):
 
 class AppendFileTool(FileSystemTool):
 
-    def __init__(self, workspace_root: Path):
-        super().__init__(workspace_root)
+    def __init__(self, workspace_root: Path, workspace_roots: list[Path] | None = None):
+        super().__init__(workspace_root, workspace_roots)
         self.spec = ToolSpec(
             name="append_file",
             category="filesystem",
@@ -120,8 +120,8 @@ class AppendFileTool(FileSystemTool):
 
 class ReplaceInFileTool(FileSystemTool):
 
-    def __init__(self, workspace_root: Path):
-        super().__init__(workspace_root)
+    def __init__(self, workspace_root: Path, workspace_roots: list[Path] | None = None):
+        super().__init__(workspace_root, workspace_roots)
         self.spec = ToolSpec(
             name="replace_in_file",
             category="filesystem",

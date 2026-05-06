@@ -48,6 +48,19 @@ class SubAgentManager(
     它本身不写业务逻辑，只组合那些已经按职责拆开的能力。
     """
 
-    def __init__(self, workspace, local_store=None, workspace_root=None, enable_self_learning=False):
-        super().__init__(workspace, local_store, workspace_root, enable_self_learning)
+    def __init__(
+        self,
+        workspace,
+        local_store=None,
+        workspace_root=None,
+        workspace_roots=None,
+        enable_self_learning=False,
+    ):
+        super().__init__(
+            workspace,
+            local_store=local_store,
+            workspace_root=workspace_root,
+            workspace_roots=workspace_roots,
+            enable_self_learning=enable_self_learning,
+        )
         self._init_patch_services()

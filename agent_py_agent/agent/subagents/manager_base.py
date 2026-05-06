@@ -31,6 +31,7 @@ class SubAgentBaseMixin:
         workspace: str | Path,
         local_store: LocalStore | None = None,
         workspace_root: str | Path | None = None,
+        workspace_roots: list[str | Path] | None = None,
         enable_self_learning: bool = False,
     ):
         self.workspace = Path(workspace)
@@ -38,6 +39,7 @@ class SubAgentBaseMixin:
         self.cards: dict[str, SubAgentCard] = {}
         self.local_store = local_store
         self.workspace_root = Path(workspace_root).resolve() if workspace_root else self.workspace.resolve().parent
+        self.workspace_roots = _normalized_workspace_roots(self.workspace_root, workspace_roots)
         self.enable_self_learning = bool(enable_self_learning)
 
         from .services.base import SubAgentBaseService
@@ -107,6 +109,15 @@ class SubAgentBaseMixin:
 
     def _new_id(self, prefix: str) -> str:
         return _new_id(prefix)
+
+
+def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -> list[Path]:
+    resolved: list[Path] = []
+    for raw in [primary, *(roots or [])]:
+        path = Path(raw).resolve()
+        if path not in resolved:
+            resolved.append(path)
+    return resolved
 
 
 from .services.base import _extract_write_dirs

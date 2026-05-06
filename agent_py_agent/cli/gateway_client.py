@@ -163,6 +163,8 @@ def _wait_for_gateway_response(
             chunks_printed = _stream_chunk_lines(chunk_path, chunks_printed, spinner)
         response = read_json_file(response_path)
         if response:
+            if stream_output:
+                chunks_printed = _stream_chunk_lines(chunk_path, chunks_printed, spinner)
             break
         time.sleep(0.1)
 

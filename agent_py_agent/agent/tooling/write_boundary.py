@@ -37,6 +37,7 @@ def validate_write_boundary(
     params: dict[str, Any],
     *,
     workspace_root: Path,
+    workspace_roots: list[Path] | None = None,
     write_boundary: dict[str, object] | None,
 ) -> str:
 
@@ -50,12 +51,13 @@ def validate_write_boundary(
     if raw_path is None:
         return ""
 
+    roots = _normalized_workspace_roots(workspace_root, workspace_roots)
     try:
-        target = _resolve_boundary_path(raw_path, workspace_root)
+        target = _resolve_boundary_path(raw_path, workspace_root, roots)
     except ValueError as exc:
         return f"写入被阻止: {exc}"
 
-    allowed_roots = _boundary_paths(write_boundary.get("allowed_write_roots"), workspace_root)
+    allowed_roots = _boundary_paths(write_boundary.get("allowed_write_roots"), workspace_root, roots)
     if not allowed_roots:
         return "写入被阻止: 当前 subagent 没有配置 allowed_write_roots，不能执行写文件工具。"
     if not any(_is_relative_to(target, root) for root in allowed_roots):
@@ -105,21 +107,30 @@ def _locked_boundary_error(target: Path, write_boundary: dict[str, object], work
     return ""
 
 
-def _boundary_paths(raw_paths: object, workspace_root: Path) -> list[Path]:
+def _boundary_paths(
+    raw_paths: object,
+    workspace_root: Path,
+    workspace_roots: list[Path] | None = None,
+) -> list[Path]:
     if not isinstance(raw_paths, list):
         return []
     paths: list[Path] = []
     for raw in raw_paths:
         try:
-            paths.append(_resolve_boundary_path(raw, workspace_root))
+            paths.append(_resolve_boundary_path(raw, workspace_root, workspace_roots))
         except ValueError:
             continue
     return paths
 
 
-def _resolve_boundary_path(raw_path: object, workspace_root: Path) -> Path:
+def _resolve_boundary_path(
+    raw_path: object,
+    workspace_root: Path,
+    workspace_roots: list[Path] | None = None,
+) -> Path:
     text = _path_text(raw_path)
     root = workspace_root.resolve(strict=False)
+    roots = _normalized_workspace_roots(root, workspace_roots)
     candidate = Path(text)
     if not candidate.is_absolute():
         candidate = root / candidate
@@ -127,6 +138,8 @@ def _resolve_boundary_path(raw_path: object, workspace_root: Path) -> Path:
         resolved = candidate.resolve(strict=False)
     except (OSError, RuntimeError) as exc:
         raise ValueError("路径解析失败，请检查路径是否有效。") from exc
+    if any(_is_relative_to(resolved, item) for item in roots):
+        return resolved
     try:
         resolved.relative_to(root)
     except ValueError as exc:
@@ -140,6 +153,15 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _normalized_workspace_roots(primary: Path, roots: list[Path] | None) -> list[Path]:
+    resolved: list[Path] = []
+    for raw in [primary, *(roots or [])]:
+        path = Path(raw).resolve(strict=False)
+        if path not in resolved:
+            resolved.append(path)
+    return resolved
 
 
 def _display_path(path: Path, workspace_root: Path) -> str:

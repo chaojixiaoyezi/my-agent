@@ -29,6 +29,7 @@ class ExecuteRegistryCallParams:
     payload: object
     tools: dict[str, BaseTool]
     workspace_root: Path
+    workspace_roots: list[Path] | None
     expose_security_tools: bool
     security_tool_names: set[str]
     allowed_tools: list[str] | None = None
@@ -98,6 +99,7 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
         tool_name,
         tool_params,
         workspace_root=call.workspace_root,
+        workspace_roots=call.workspace_roots,
         write_boundary=call.write_boundary,
     )
     if boundary_error:

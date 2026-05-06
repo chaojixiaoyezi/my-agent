@@ -26,7 +26,7 @@ class DispatchWatchdog:
         self.restart_delay = getattr(config, "watchdog_restart_delay", 10)
 
         # PID 文件路径
-        self.pid_file = Path(config.workspace_root) / config.gateway_workspace / "gateway.pid"
+        self.pid_file = _primary_workspace_root(config.workspace_root) / config.gateway_workspace / "gateway.pid"
 
     def start(self) -> None:
         if not self.enabled:
@@ -113,7 +113,7 @@ class DispatchWatchdog:
             # 启动新进程
             subprocess.Popen(
                 cmd,
-                cwd=self.config.workspace_root or ".",
+                cwd=str(_primary_workspace_root(self.config.workspace_root)),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -143,6 +143,12 @@ def start_watchdog(config: AgentConfig) -> DispatchWatchdog | None:
 
 
 __all__ = ["DispatchWatchdog", "start_watchdog"]
+
+
+def _primary_workspace_root(raw_root: object) -> Path:
+    if isinstance(raw_root, list):
+        raw_root = raw_root[0] if raw_root else "."
+    return Path(str(raw_root or ".")).resolve()
 
 
 def _is_pid_alive_windows(pid: int) -> bool:

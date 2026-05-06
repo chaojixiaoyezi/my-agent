@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 # LLM: patterns for extracting directory paths from user goal text.
 _DIR_PATTERN = re.compile(r"(?:/[\w.\-]+){2,}")
+_WINDOWS_DIR_PATTERN = re.compile(r"[A-Za-z]:[\\/][^\s\"'<>|]+")
 _HOME_DIR_PATTERN = re.compile(r"(?:~/[\w.\-]+(?:/[\w.\-]+)*)")
 
 
@@ -58,7 +59,7 @@ def _extract_write_dirs(goal: str) -> list[str]:
 def _iter_write_dir_matches(goal: str):
     return (
         match.group().strip()
-        for pattern in [_DIR_PATTERN, _HOME_DIR_PATTERN]
+        for pattern in [_WINDOWS_DIR_PATTERN, _DIR_PATTERN, _HOME_DIR_PATTERN]
         for match in pattern.finditer(goal)
     )
 

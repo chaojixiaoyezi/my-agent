@@ -104,11 +104,13 @@ class GatewaySupervisor:
         from ..core import SimpleAgent
 
         config = load_config(self.config_path)
-        root = Path(self.config_path).resolve().parent
+        roots = _workspace_roots(config.workspace_root, Path(self.config_path).resolve().parent)
+        root = roots[0]
         if self.workspace_root:
             root = Path(self.workspace_root).resolve()
+            roots = [root]
 
-        self._agent = SimpleAgent(config, root)
+        self._agent = SimpleAgent(config, root, workspace_roots=roots)
         self._paths = gateway_paths(self._agent)
 
     def _log(self, level: str, msg: str) -> None:
@@ -228,8 +230,8 @@ def is_supervisor_running(config_path: str) -> bool:
     from ..core import SimpleAgent
 
     config = load_config(config_path)
-    root = Path(config_path).resolve().parent
-    agent = SimpleAgent(config, root)
+    roots = _workspace_roots(config.workspace_root, Path(config_path).resolve().parent)
+    agent = SimpleAgent(config, roots[0], workspace_roots=roots)
     paths = gateway_paths(agent)
     supervisor_pid_path = paths.root / "supervisor.pid"
 
@@ -248,8 +250,8 @@ def stop_supervisor(config_path: str, timeout: float = 10.0) -> bool:
     from ..core import SimpleAgent
 
     config = load_config(config_path)
-    root = Path(config_path).resolve().parent
-    agent = SimpleAgent(config, root)
+    roots = _workspace_roots(config.workspace_root, Path(config_path).resolve().parent)
+    agent = SimpleAgent(config, roots[0], workspace_roots=roots)
     paths = gateway_paths(agent)
     supervisor_pid_path = paths.root / "supervisor.pid"
 
@@ -259,3 +261,20 @@ def stop_supervisor(config_path: str, timeout: float = 10.0) -> bool:
 
     terminate_pid(pid)
     return wait_for_pid_exit(pid, timeout)
+
+
+def _primary_workspace_root(raw_root: object, default: Path) -> Path:
+    return _workspace_roots(raw_root, default)[0]
+
+
+def _workspace_roots(raw_root: object, default: Path) -> list[Path]:
+    if isinstance(raw_root, list):
+        values = raw_root or [default]
+    else:
+        values = [raw_root or default]
+    roots: list[Path] = []
+    for item in values:
+        path = Path(str(item or default)).expanduser().resolve()
+        if path not in roots:
+            roots.append(path)
+    return roots or [default.resolve()]

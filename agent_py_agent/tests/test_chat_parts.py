@@ -47,6 +47,25 @@ def test_startup_banner_marks_gateway_mode() -> None:
     assert "gateway client" in banner
 
 
+def test_tui_stream_chunks_are_emitted_immediately(capsys) -> None:
+    from agent_py_agent.cli.chat_parts.tui_worker_stream import (
+        _append_stream_text,
+        _flush_stream_buf,
+    )
+
+    pending = [""]
+    _append_stream_text("hello", pending)
+    first = capsys.readouterr().out
+    _append_stream_text(" world", pending)
+    second = capsys.readouterr().out
+    _flush_stream_buf(pending)
+    tail = capsys.readouterr().out
+
+    assert "hello" in first
+    assert " world" in second
+    assert tail == "\n"
+
+
 def test_cprint_uses_plain_print_when_stdout_is_not_tty(monkeypatch, capsys):
     """非 TTY 管道下不要调用 prompt_toolkit，避免 Windows console 报错。"""
     from agent_py_agent.cli.chat_parts import rendering

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
-from ..subagents.services.base import CreateRunParams
+from ..subagents.services.base import CreateRunParams, _extract_write_dirs
 from ..tools import BaseTool, ToolExecutionResult, ToolSpec
 from .orchestration_write_guard import external_write_target_error
 from .parameters import _bool_param, _non_negative_int, _positive_int, _string_list
@@ -60,6 +60,7 @@ def _subagent_allowed_tools(params: dict[str, object]) -> list[str]:
 
 def _create_run_params(agent, params: dict[str, object], goal: str, allowed_tools: list[str]):
     workflow_mode = _tool_workflow_mode(params.get("workflow_mode"), agent.config.subagent_workflow_mode)
+    extra_write_roots = _merged_extra_write_roots(params, goal)
     return CreateRunParams(
         goal=goal,
         thought=str(params.get("thought") or "根据父代理派工执行，并保留可验收证据。").strip(),
@@ -71,8 +72,18 @@ def _create_run_params(agent, params: dict[str, object], goal: str, allowed_tool
         supervisor=str(params.get("supervisor") or "parent").strip(),
         final_owner=str(params.get("final_owner") or "").strip(),
         acceptance_checks=_string_list(params.get("acceptance_checks")),
+        extra_write_roots=extra_write_roots,
         workflow_mode=workflow_mode,
     )
+
+
+def _merged_extra_write_roots(params: dict[str, object], goal: str) -> list[str]:
+    roots: list[str] = []
+    for item in [*_string_list(params.get("extra_write_roots")), *_extract_write_dirs(goal)]:
+        text = str(item or "").strip()
+        if text and text not in roots:
+            roots.append(text)
+    return roots
 
 
 class CreateSubagentsTool(BaseTool):
@@ -109,6 +120,7 @@ class CreateSubagentsTool(BaseTool):
                 "acceptance_checks": "验收标准列表",
                 "plan": "每个子代理的初始步骤列表",
                 "workflow_mode": "off/plan/auto；决定是否在建工单时挂 workflow 计划",
+                "extra_write_roots": "额外写入目录列表；目录必须位于 workspace_root 列表允许范围内",
             },
             parameter_details={
                 "goal": "写清楚子代理要交付什么，不要只写一个空泛标题。",
@@ -118,6 +130,7 @@ class CreateSubagentsTool(BaseTool):
                 "acceptance_checks": "JSON 数组或多行文本，说明父代理后续怎样判断任务完成。",
                 "plan": "JSON 数组或多行文本，给子代理的初始执行步骤。",
                 "workflow_mode": "默认跟随配置：auto->auto，manual->plan，off->off。显式传值会覆盖配置。",
+                "extra_write_roots": "JSON 数组，例如 [\"C:/Users/you/Desktop/work\"]；只给本次子代理任务增加写入边界。",
             },
             examples=[
                 '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"tool_preset":"coding","workflow_mode":"auto","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',

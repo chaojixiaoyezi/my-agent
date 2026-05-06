@@ -101,6 +101,34 @@ class TestResolveWorkspaceRoot:
         expected = config_path.parent / "relative" / "path"
         assert result == expected.resolve()
 
+    def test_resolve_workspace_roots_list(self, tmp_path: Path):
+        """workspace_root can be a list; first item remains the primary root."""
+        from agent_py_agent.cli.common import resolve_workspace_root, resolve_workspace_roots
+
+        config = MagicMock()
+        config.workspace_root = ["primary", "extra"]
+
+        config_path = tmp_path / "config" / "config.yaml"
+        config_path.parent.mkdir(parents=True)
+
+        roots = resolve_workspace_roots(config, str(config_path))
+        assert roots == [
+            (config_path.parent / "primary").resolve(),
+            (config_path.parent / "extra").resolve(),
+        ]
+        assert resolve_workspace_root(config, str(config_path)) == roots[0]
+
+    def test_resolve_workspace_roots_list_empty_keeps_default_root(self, tmp_path: Path):
+        """An empty list item means keep the default project workspace."""
+        from agent_py_agent.cli.common import ROOT, resolve_workspace_roots
+
+        config = MagicMock()
+        config.workspace_root = ["", "extra"]
+        config_path = tmp_path / "config.yaml"
+
+        roots = resolve_workspace_roots(config, str(config_path))
+        assert roots == [ROOT, (tmp_path / "extra").resolve()]
+
     def test_resolve_workspace_root_expanduser(self, tmp_path: Path):
         """测试 ~ 展开。"""
         from agent_py_agent.cli.common import resolve_workspace_root

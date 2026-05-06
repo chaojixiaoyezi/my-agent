@@ -5,7 +5,7 @@ from pathlib import Path
 
 from ..agent.config import load_config
 from ..agent.model_speed import load_speed_profile, run_speed_benchmark, save_speed_profile
-from .common import DEFAULT_CONFIG, make_agent
+from .common import DEFAULT_CONFIG, make_agent, resolve_workspace_root
 
 
 def cmd_bench_model(args) -> int:
@@ -18,7 +18,7 @@ def cmd_bench_model(args) -> int:
 
 
 def _speed_profile_path(args, config) -> Path:
-    return args.profile if args.profile else config.workspace_root / "data" / "model_speed_profile.json"
+    return args.profile if args.profile else resolve_workspace_root(config, args.config or DEFAULT_CONFIG) / "data" / "model_speed_profile.json"
 
 
 def _show_speed_profile(speed_profile_path: Path) -> int:

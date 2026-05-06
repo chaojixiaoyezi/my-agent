@@ -154,6 +154,26 @@ def test_write_and_append_file_tools():
         assert (workspace / "src" / "demo.py").read_text(encoding="utf-8") == "print('a')\nprint('b')\n"
 
 
+def test_filesystem_tools_allow_configured_extra_workspace_root():
+    with tempfile.TemporaryDirectory() as primary_td, tempfile.TemporaryDirectory() as extra_td:
+        primary = Path(primary_td)
+        extra = Path(extra_td)
+        write_tool = WriteFileTool(primary, workspace_roots=[primary, extra])
+        read_tool = ReadFileTool(primary, max_chars=2000, workspace_roots=[primary, extra])
+        list_tool = ListFilesTool(primary, max_entries=20, workspace_roots=[primary, extra])
+
+        target = extra / "report.txt"
+        write_result = write_tool.execute({"path": str(target), "content": "ok"})
+        read_result = read_tool.execute({"path": str(target)})
+        list_result = list_tool.execute({"path": str(extra)})
+
+        assert write_result.ok
+        assert read_result.ok
+        assert "ok" in read_result.output
+        assert list_result.ok
+        assert "report.txt" in list_result.output
+
+
 def test_filesystem_tools_reject_bad_parameters_and_hide_absolute_outside_paths():
     """LLM: verify that filesystem tools reject bad params and never expose absolute paths outside workspace.
 

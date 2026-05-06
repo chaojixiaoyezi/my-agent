@@ -47,6 +47,10 @@ class TestParseScalar:
         assert parse_scalar('"hello"') == "hello"
         assert parse_scalar("'world'") == "world"
 
+    def test_parse_scalar_inline_list(self):
+        """Inline lists are convenient for workspace_root."""
+        assert parse_scalar('["", "C:/work"]') == ["", "C:/work"]
+
 
 class TestLoadSimpleYaml:
     """测试 load_simple_yaml 简化 YAML 加载。"""
@@ -75,6 +79,19 @@ class TestLoadSimpleYaml:
         try:
             data = load_simple_yaml(path)
             assert data["items"] == ["item1", "item2", "item3"]
+        finally:
+            path.unlink()
+
+    def test_load_simple_yaml_with_inline_list(self):
+        """Inline list syntax should work for compact config values."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write('workspace_root: ["", "C:/work"]\n')
+            f.flush()
+            path = Path(f.name)
+
+        try:
+            data = load_simple_yaml(path)
+            assert data["workspace_root"] == ["", "C:/work"]
         finally:
             path.unlink()
 
