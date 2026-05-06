@@ -27,7 +27,8 @@ from ..models import (
     TakeoverRecord,
     VerificationEvidence,
 )
-from ..utils import _apply_missing_paths
+from ..utils import _apply_missing_paths, _read_json_object
+from .checkpoint_artifacts import build_checkpoint_artifact_payloads
 
 
 def _field_names(model: type) -> set[str]:
@@ -240,7 +241,11 @@ class SubAgentPersistenceService:
         task_dir.mkdir(parents=True, exist_ok=True)
         self.manager._ensure_work_order_files(task)
         task.updated_at = task.updated_at or time.time()
+        if task.checkpoint_json:
+            task.checkpoint_ref = task.checkpoint_json
         task.latest_status_report = build_status_report(task)
+        output_payload = _read_json_object(Path(task.output_json)) if task.output_json else {}
+        checkpoint_artifacts = build_checkpoint_artifact_payloads(task, output_payload)
         payload = json.dumps(asdict(task), ensure_ascii=False, indent=2)
         (task_dir / "task.json").write_text(payload, encoding="utf-8")
         (task_dir / "run.json").write_text(payload, encoding="utf-8")
@@ -249,6 +254,17 @@ class SubAgentPersistenceService:
                 json.dumps(asdict(task.latest_status_report), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+        for field_name, artifact_payload in checkpoint_artifacts.items():
+            artifact_path = getattr(task, field_name, "")
+            if not artifact_path:
+                continue
+            if isinstance(artifact_payload, str):
+                Path(artifact_path).write_text(artifact_payload, encoding="utf-8")
+            else:
+                Path(artifact_path).write_text(
+                    json.dumps(artifact_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
         (task_dir / "thought.md").write_text(self._render_thought_markdown(task), encoding="utf-8")
         self.manager._index_task(task)
         if self.manager.local_store:
