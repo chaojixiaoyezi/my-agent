@@ -1,16 +1,8 @@
 from __future__ import annotations
 
-"""LLM contract: SubAgentCapabilityMixin methods grouped by one subagent responsibility.
+"""LLM contract: SubAgentCapabilityMixin methods grouped by one subagent responsibility."""
 
-Human version:
-这个 mixin 是 SubAgentManager 的一块业务能力，不单独实例化。
-拆成 mixin 是为了让每个文件只有一个变化原因，而不是把所有父代理逻辑塞进一个巨型文件。
-"""
-
-import json
 import time
-from dataclasses import asdict
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..capabilities import CapabilityRouter
@@ -18,60 +10,25 @@ from ..capability_config import CapabilityConfig
 from .capability_route_helpers import (
     RouteCapabilityApplyParams,
     RouteCapabilityGrantParams,
-    _append_capability_route_log,
     _mark_capability_request_status,
-    _route_capability_gap,
     _route_capability_grant,
 )
+from .capability_route_service import (
+    WouldGrantRecordParams,
+    build_capability_route_report,
+    build_would_gap_record,
+    build_would_grant_record,
+    extract_selected_hits_data,
+    record_capability_route_gap,
+    write_capability_route_report_files,
+)
 from .models import CapabilityRequest, SubAgentTask
-from .parsing import (
-    _dict_list,
-    _normalize_runner_items,
-    _split_allowed_items,
-    _string_dict,
-    _string_list,
-)
-from .policies import (
-    _action_for_issue,
-    _capability_request_query,
-    _commands_for_action,
-    _dedupe_granted_cards,
-    _default_forbidden_write_roots,
-    _execution_context_instructions,
-    _filter_action_plan_items,
-    _is_active,
-    _issue_weight,
-    _make_due_issue,
-    _risk_weight,
-    _route_card_payload,
-    _runner_next_action,
-    _select_capability_hits,
-    _severity_weight,
-    _status_from_structured_output,
-    _verification_from_runner_status,
-)
-from .probe import (
-    _channel_status,
-    _probe_fail,
-    _probe_json_file,
-    _probe_ok,
-    _probe_writable_dir,
-)
-from .rendering import render_capability_route_markdown
+from .policies import _capability_request_query, _select_capability_hits
 from .reports import CapabilityRouteRecord, CapabilityRouteReport
-from .services.lifecycle import RecordCapabilityGapParams, RecordCapabilityGrantParams
-from .utils import (
-    _apply_missing_paths,
-    _apply_paths,
-    _merge_list,
-    _new_id,
-    _read_json_object,
-    _write_if_missing,
-    _write_json_if_missing,
-)
+from .services.lifecycle import RecordCapabilityGrantParams
 
 if TYPE_CHECKING:
-    from ..local_store import LocalStore
+    from ..capabilities import CapabilitySearchHit
 
 
 class SubAgentCapabilityMixin:
@@ -79,37 +36,19 @@ class SubAgentCapabilityMixin:
         """Build a record when no hits found (dry-run WOULD_GAP or real GAP)."""
         now = time.time()
         if not apply:
-            return CapabilityRouteRecord(
-                id=_new_id("route"),
-                run_id=task.id,
-                request_id=request.id,
-                status="WOULD_GAP",
-                dry_run=True,
+            return build_would_gap_record(
+                task,
+                request,
                 query=query,
-                candidate_count=len(hits),
-                message="未找到足够可信的 skill/tool card；apply 时会记录 capability gap。",
+                hits=hits,
                 created_at=now,
             )
-        gap = self.record_capability_gap(
-            task.id,
-            RecordCapabilityGapParams(
-                missing_capability=request.needed_capability,
-                why_failed="CapabilityRouter 没有找到匹配的 skill/tool card。",
-                attempted_tools=request.tried,
-                needed_outputs=[request.expected_output] if request.expected_output else [],
-            ),
-        )
-        _mark_capability_request_status(self, task.id, request.id, "GAP")
-        return CapabilityRouteRecord(
-            id=_new_id("route"),
-            run_id=task.id,
-            request_id=request.id,
-            status="GAP",
-            dry_run=False,
+        return record_capability_route_gap(
+            self,
+            task,
+            request,
             query=query,
-            candidate_count=len(hits),
-            gap_id=gap.id,
-            message="未找到足够可信的 skill/tool card，已记录 capability gap。",
+            hits=hits,
             created_at=now,
         )
 
@@ -152,19 +91,7 @@ class SubAgentCapabilityMixin:
             if limit > 0 and len(records) >= limit:
                 break
 
-        summary: dict[str, int] = {"total": len(records)}
-        for record in records:
-            summary[record.status] = summary.get(record.status, 0) + 1
-            summary["dry_run" if record.dry_run else "applied"] = summary.get(
-                "dry_run" if record.dry_run else "applied",
-                0,
-            ) + 1
-        return CapabilityRouteReport(
-            generated_at=time.time(),
-            dry_run=not apply,
-            summary=summary,
-            records=records,
-        )
+        return build_capability_route_report(records, apply=apply)
 
     def write_capability_route_report(
         self,
@@ -184,24 +111,7 @@ class SubAgentCapabilityMixin:
             run_ids=run_ids,
             limit=limit,
         )
-        (self.workspace / "subagent_capability_route_report.json").write_text(
-            json.dumps(asdict(report), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        (self.workspace / "SUBAGENT_CAPABILITY_ROUTE.md").write_text(
-            render_capability_route_markdown(report),
-            encoding="utf-8",
-        )
-        self._index_report(
-            "subagent_capability_route_report",
-            "latest",
-            "Subagent capability route report",
-            report,
-            event_type="subagent_capability_route_report_written",
-        )
-        if apply:
-            for record in report.records:
-                _append_capability_route_log(self, record)
+        write_capability_route_report_files(self, report, apply=apply)
         return report
 
     def _extract_selected_hits_data(
@@ -209,11 +119,7 @@ class SubAgentCapabilityMixin:
         selected_hits: list[CapabilitySearchHit],
     ) -> tuple[list[dict[str, str]], list[str], list[str], list[str]]:
         """Extract cards, skills, tools, and reasons from selected hits."""
-        selected_cards = [_route_card_payload(hit) for hit in selected_hits]
-        granted_skills = [hit.card.name for hit in selected_hits if hit.card.kind == "skill"]
-        granted_tools = [hit.card.name for hit in selected_hits if hit.card.kind == "tool"]
-        reasons = _merge_list([], [reason for hit in selected_hits for reason in hit.reasons])
-        return selected_cards, granted_skills, granted_tools, reasons
+        return extract_selected_hits_data(selected_hits)
 
     def _route_capability_apply(
         self,
@@ -237,7 +143,8 @@ class SubAgentCapabilityMixin:
         self._append_task_work_log(
             routed_task,
             f"capability_route: request {params.request.id} 已生成 grant {grant.id}，"
-            f"skills={','.join(params.granted_skills) or 'none'} tools={','.join(params.granted_tools) or 'none'}。",
+            f"skills={','.join(params.granted_skills) or 'none'} "
+            f"tools={','.join(params.granted_tools) or 'none'}。",
         )
         return _route_capability_grant(
             params=RouteCapabilityGrantParams(
@@ -275,20 +182,19 @@ class SubAgentCapabilityMixin:
 
         if not apply:
             now = time.time()
-            return CapabilityRouteRecord(
-                id=_new_id("route"),
-                run_id=task.id,
-                request_id=request.id,
-                status="WOULD_GRANT",
-                dry_run=True,
-                query=query,
-                candidate_count=len(hits),
-                granted_skills=granted_skills,
-                granted_tools=granted_tools,
-                selected_cards=selected_cards,
-                reasons=reasons,
-                message="找到候选能力；apply 时会生成 capability grant。",
-                created_at=now,
+            # LLM: record construction lives in capability_route_service so this mixin stays a facade.
+            return build_would_grant_record(
+                WouldGrantRecordParams(
+                    task=task,
+                    request=request,
+                    query=query,
+                    hits=hits,
+                    granted_skills=granted_skills,
+                    granted_tools=granted_tools,
+                    selected_cards=selected_cards,
+                    reasons=reasons,
+                    created_at=now,
+                )
             )
 
         return self._route_capability_apply(

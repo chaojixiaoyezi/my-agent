@@ -14,94 +14,38 @@ import ast
 import json
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from code_size_report import write_report
+from code_size_rules import (
+    CLASS_HARD_LIMIT,
+    CLASS_SOFT_LIMIT,
+    EXCLUDE_NAMES,
+    EXCLUDE_PARTS,
+    EXCLUDE_PREFIXES,
+    EXCLUDE_SUFFIXES,
+    FILE_HARD_LIMIT,
+    FILE_SOFT_LIMIT,
+    FUNCTION_HARD_LIMIT,
+    FUNCTION_SOFT_LIMIT,
+    HIGH_RISK_FILES,
+    JUNK_NAME_BASELINE,
+    JUNK_NAMES,
+    MIXIN_HARD_LIMIT,
+    MIXIN_SOFT_LIMIT,
+    NESTING_HARD_LIMIT,
+    NESTING_SOFT_LIMIT,
+    PARAM_HARD_LIMIT,
+    PARAM_SOFT_LIMIT,
+    SOURCE_ROOTS,
+    TEST_HARD_LIMIT,
+    TEST_SOFT_LIMIT,
+    Finding,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_ROOTS = ["agent_py_agent", "scripts"]
 REPORT_PATH = ROOT / "CODE_SIZE_REPORT.md"
-
-FILE_SOFT_LIMIT = 400
-FILE_HARD_LIMIT = 600
-TEST_SOFT_LIMIT = 700
-TEST_HARD_LIMIT = 900
-FUNCTION_SOFT_LIMIT = 60
-FUNCTION_HARD_LIMIT = 100
-CLASS_SOFT_LIMIT = 250
-CLASS_HARD_LIMIT = 350
-MIXIN_SOFT_LIMIT = 200
-MIXIN_HARD_LIMIT = 250
-PARAM_SOFT_LIMIT = 6
-PARAM_HARD_LIMIT = 8
-NESTING_SOFT_LIMIT = 3
-NESTING_HARD_LIMIT = 4
-
-JUNK_NAMES = {
-    "common.py",
-    "final.py",
-    "final2.py",
-    "helper.py",
-    "helpers.py",
-    "manager2.py",
-    "manager_extra.py",
-    "misc.py",
-    "new.py",
-    "old.py",
-    "temp.py",
-    "tmp.py",
-    "utils.py",
-}
-JUNK_NAME_BASELINE = {
-    "agent_py_agent/agent/log_analysis/analytics/detectors/helpers.py",
-    "agent_py_agent/agent/log_analysis/parsers/common.py",
-    "agent_py_agent/agent/subagents/utils.py",
-    "agent_py_agent/cli/common.py",
-}
-
-# High-risk files frozen by architecture guardrails.
-HIGH_RISK_FILES: dict[str, int] = {
-    "agent_py_agent/cli/chat.py": 1017,
-    "agent_py_agent/agent/agent_core/dispatch_mixin.py": 895,
-    "agent_py_agent/agent/memory_archive/query.py": 839,
-    "agent_py_agent/agent/subagents/manager_patch.py": 794,
-    "agent_py_agent/agent/settings/config.py": 751,
-    "agent_py_agent/agent/subagents/manager_base.py": 751,
-    "agent_py_agent/agent/log_analysis/analytics/detectors/rules.py": 747,
-    "agent_py_agent/agent/log_analysis/tools.py": 672,
-    "agent_py_agent/agent/memory_archive/runtime.py": 657,
-    "agent_py_agent/agent/adapter/qq.py": 613,
-    "agent_py_agent/cli/memory_commands.py": 609,
-}
-
-EXCLUDE_PARTS = {
-    ".git",
-    "__pycache__",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".mypy_cache",
-    "htmlcov",
-    ".coverage",
-}
-EXCLUDE_PREFIXES = ("._",)
-EXCLUDE_SUFFIXES = {".pyc", ".pyo"}
-EXCLUDE_NAMES = {".DS_Store", ".AppleDouble", ".LSOverride"}
-
-
-@dataclass
-class Finding:
-    kind: str
-    path: str
-    name: str
-    value: int
-    limit: int
-    severity: str
-    message: str
-
-    def identity(self) -> str:
-        return f"{self.kind}:{self.path}:{self.name}"
 
 
 def _is_excluded(path: Path) -> bool:
