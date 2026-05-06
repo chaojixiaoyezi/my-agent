@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -39,6 +40,8 @@ def post_json(
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         raise _runtime_http_error(exc) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise _runtime_network_error(exc, request) from exc
 
 
 def post_stream(
@@ -76,6 +79,8 @@ def _post_stream_lines(request: _GatewayRequest) -> Iterator[str]:
             yield from _iter_sse_data_lines(resp)
     except urllib.error.HTTPError as exc:
         raise _runtime_http_error(exc) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise _runtime_network_error(exc, request) from exc
 
 
 def _urllib_request(request: _GatewayRequest) -> urllib.request.Request:
@@ -95,6 +100,18 @@ def _require_api_key(api_key: str) -> None:
 def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
     detail = exc.read().decode("utf-8", "replace")
     return RuntimeError(f"HTTP {exc.code}: {detail}")
+
+
+def _runtime_network_error(exc: BaseException, request: _GatewayRequest) -> RuntimeError:
+    parsed = urllib.parse.urlparse(request.url)
+    host = parsed.netloc or parsed.path.split("/", 1)[0] or request.api_base
+    reason = getattr(exc, "reason", None) or str(exc) or exc.__class__.__name__
+    return RuntimeError(
+        "网络请求失败: "
+        f"无法连接模型接口 {host}（{request.url}）。"
+        "请检查 DNS、网络/代理和 api_base 配置；"
+        f"底层错误: {reason}"
+    )
 
 
 def _iter_sse_data_lines(response) -> Iterator[str]:

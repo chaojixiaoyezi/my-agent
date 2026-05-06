@@ -9,6 +9,25 @@ from __future__ import annotations
 import shutil
 import sys
 
+from .renderer import (
+    BLUE,
+    BOLD,
+    COLLAPSE_PREVIEW_CHARS,
+    COLLAPSE_PREVIEW_LINES,
+    CONTEXT_WINDOW,
+    CYAN,
+    GRAY,
+    GREEN,
+    RESET,
+    YELLOW,
+    collapse_response_text,
+    color_text,
+    progress_bar,
+    strip_ansi,
+    style_text,
+    supports_ansi,
+)
+
 # prompt_toolkit is optional
 try:
     from prompt_toolkit import print_formatted_text as _pt_print
@@ -22,39 +41,7 @@ def _cprint(text: str) -> None:
     if sys.stdout.isatty() and _pt_print is not None and _PT_ANSI is not None:
         _pt_print(_PT_ANSI(text))
     else:
-        print(text)
-
-BLUE = "\033[38;2;59;130;246m"
-GRAY = "\033[90m"
-GREEN = "\033[38;2;34;197;94m"
-YELLOW = "\033[38;2;234;179;8m"
-CYAN = "\033[38;2;6;182;212m"
-RESET = "\033[0m"
-BOLD = "\033[1m"
-
-COLLAPSE_PREVIEW_LINES = 12
-COLLAPSE_PREVIEW_CHARS = 900
-CONTEXT_WINDOW = 200_000
-
-
-def progress_bar(ratio: float, width: int = 10) -> str:
-
-    filled = int(ratio * width)
-    return "█" * filled + "░" * (width - filled)
-
-
-def collapse_response_text(text: str) -> tuple[str, bool]:
-
-    lines = text.splitlines()
-    if len(lines) <= COLLAPSE_PREVIEW_LINES and len(text) <= COLLAPSE_PREVIEW_CHARS:
-        return text, False
-
-    preview = "\n".join(lines[:COLLAPSE_PREVIEW_LINES]).strip()
-    if len(preview) > COLLAPSE_PREVIEW_CHARS:
-        preview = preview[:COLLAPSE_PREVIEW_CHARS].rstrip()
-    if len(preview) < len(text):
-        preview += "\n..."
-    return preview, True
+        print(text if supports_ansi() else strip_ansi(text))
 
 
 def startup_banner(agent_name: str, *, use_gateway: bool) -> str:
@@ -74,7 +61,7 @@ def startup_banner(agent_name: str, *, use_gateway: bool) -> str:
 def _tui_print_banner(agent, use_gateway: bool) -> None:
     text = startup_banner(agent.config.agent_name, use_gateway=use_gateway)
     for line in text.splitlines():
-        print(line)
+        _cprint(line)
 
 
 def terminal_rule(char: str = "─", *, fallback: int = 119) -> str:

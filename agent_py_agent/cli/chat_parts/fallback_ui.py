@@ -11,7 +11,7 @@ import threading
 
 from .fallback_state import FALLBACK_CHAT_PROMPT
 from .input_loop import parse_expand_target
-from .rendering import GRAY, GREEN, RESET, _cprint, collapse_response_text
+from .rendering import GRAY, GREEN, _cprint, collapse_response_text, style_text
 
 
 def _make_chunk_handler(agent_name: str, next_message_id: int):
@@ -21,7 +21,7 @@ def _make_chunk_handler(agent_name: str, next_message_id: int):
 
     def on_chunk(chunk: str) -> None:
         if not stream_started_ref[0]:
-            sys.stdout.write(f"{GREEN}{agent_name}#{next_message_id}>{RESET} ")
+            sys.stdout.write(f"{style_text(f'{agent_name}#{next_message_id}>', GREEN)} ")
             sys.stdout.flush()
             stream_started_ref[0] = True
         remaining = max(0, 900 - stream_visible_chars_ref[0])
@@ -32,7 +32,7 @@ def _make_chunk_handler(agent_name: str, next_message_id: int):
             stream_visible_chars_ref[0] += len(visible)
         if remaining < len(chunk) and not stream_truncated_ref[0]:
             sys.stdout.write(
-                f"{GRAY}[回复较长，后续内容已折叠。完成后可用 /expand last 查看全文。]{RESET}"
+                style_text("[回复较长，后续内容已折叠。完成后可用 /expand last 查看全文。]", GRAY)
             )
             sys.stdout.flush()
             stream_truncated_ref[0] = True
@@ -45,12 +45,12 @@ def _render_assistant_response(text: str, assistant_outputs: list[str], agent_na
     assistant_outputs.append(text)
     message_id = len(assistant_outputs)
     if collapsed:
-        _cprint(f"{GREEN}{agent_name}#{message_id}>{RESET} {preview}")
+        _cprint(f"{style_text(f'{agent_name}#{message_id}>', GREEN)} {preview}")
         _cprint(
-            f"{GRAY}[回复较长，已自动折叠。输入 /expand {message_id} 或 /expand last 查看全文。]{RESET}"
+            style_text(f"[回复较长，已自动折叠。输入 /expand {message_id} 或 /expand last 查看全文。]", GRAY)
         )
         return
-    _cprint(f"{GREEN}{agent_name}#{message_id}>{RESET} {text}")
+    _cprint(f"{style_text(f'{agent_name}#{message_id}>', GREEN)} {text}")
 
 
 def _handle_expand_command(raw: str, assistant_outputs: list[str]) -> None:
@@ -82,5 +82,4 @@ def _read_user_input(state_lock: threading.Lock, fallback_waiting_for_input_ref:
         finally:
             fallback_waiting_for_input_ref[0] = False
     return input(FALLBACK_CHAT_PROMPT).strip()
-
 

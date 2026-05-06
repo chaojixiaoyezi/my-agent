@@ -66,6 +66,22 @@ class TestPostJson:
                 timeout=30,
             )
 
+    @patch("urllib.request.urlopen")
+    def test_url_error_is_wrapped_with_endpoint_hint(self, mock_urlopen):
+        """验证 DNS/网络错误被包装成可读提示。"""
+        mock_urlopen.side_effect = urllib.error.URLError("[Errno 11001] getaddrinfo failed")
+
+        from agent_py_agent.agent.backends.gateway_helpers import post_json
+        with pytest.raises(RuntimeError, match="网络请求失败.*api.example.com"):
+            post_json(
+                "https://api.example.com",
+                "test-key",
+                "/v1/chat",
+                {},
+                {},
+                timeout=30,
+            )
+
 
 class TestPostStream:
     """post_stream 流式请求收集测试。"""
@@ -197,6 +213,22 @@ class TestPostStreamIter:
 
         from agent_py_agent.agent.backends.gateway_helpers import post_stream_iter
         with pytest.raises(RuntimeError, match="HTTP 500"):
+            list(post_stream_iter(
+                "https://api.example.com",
+                "test-key",
+                "/v1/chat",
+                {},
+                {},
+                timeout=30,
+            ))
+
+    @patch("urllib.request.urlopen")
+    def test_iter_handles_url_error(self, mock_urlopen):
+        """验证流式 DNS/网络错误也被包装。"""
+        mock_urlopen.side_effect = urllib.error.URLError("[Errno 11001] getaddrinfo failed")
+
+        from agent_py_agent.agent.backends.gateway_helpers import post_stream_iter
+        with pytest.raises(RuntimeError, match="网络请求失败.*api.example.com"):
             list(post_stream_iter(
                 "https://api.example.com",
                 "test-key",

@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import sys
 
-from .renderer import GREEN, RESET
+from .renderer import GREEN, style_text
 
 
 def _append_stream_text(chunk: str, stream_buf_ref: list) -> None:
     if not chunk:
         return
-    sys.stdout.write(f"{GREEN}{chunk}{RESET}")
+    sys.stdout.write(style_text(chunk, GREEN))
     sys.stdout.flush()
     stream_buf_ref[0] = "" if chunk.endswith("\n") else "\n"
 
@@ -16,7 +16,7 @@ def _append_stream_text(chunk: str, stream_buf_ref: list) -> None:
 def _emit_stream_line(text: str) -> None:
     from .rendering import _cprint
 
-    _cprint(f"{GREEN}{text}{RESET}")
+    _cprint(style_text(text, GREEN))
 
 
 def _flush_stream_buf(stream_buf_ref: list) -> None:
