@@ -119,6 +119,8 @@
 
 ### 5. Compact / Checkpoint 协议
 
+状态：第一片已落地；持久化层会生成 compact 可读 recovery artifacts，并把 `checkpoint_ref` 指向 `reports/checkpoint.json`。还需要继续接入 `memory-resume` 优先读取、定期 checkpoint 触发、`parent_rollup_summary` 和 `children_rollup_summary`。
+
 这部分可以和前几步并行开发，但必须保持边界清楚。
 
 要做：
@@ -127,6 +129,7 @@
 - 每个长任务定期写结构化 handoff：`decision_ledger.json`、`progress.md`、`failing_tests.json`、`next_actions.json`。
 - checkpoint 只保存恢复必要字段，不保存完整聊天历史。
 - memory-resume 优先回到任务目录、status report、evidence packet 和 artifact refs。
+- 当前第一片已生成 `checkpoint.json`、`decision_ledger.json`、`progress.md`、`failing_tests.json` 和 `next_actions.json`，只保存恢复字段，不保存完整聊天历史。
 
 退出标准：
 
@@ -208,6 +211,7 @@ compact 可以并行，但建议只负责：
 - LocalStore compact / export。
 - `memory-resume` 恢复摘要体积控制。
 - checkpoint / handoff artifact 的读取和压缩。
+- subagent recovery artifacts 的读取和压缩。
 
 compact 不应直接修改：
 
