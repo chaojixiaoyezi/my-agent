@@ -177,7 +177,7 @@ def _make_input_area(history_file_path: str) -> Any:
 def make_tui_app(params: MakeTuiAppParams):
     from prompt_toolkit.application import Application
     from prompt_toolkit.key_binding import KeyBindings
-    from prompt_toolkit.layout import HSplit, Layout
+    from prompt_toolkit.layout import HSplit, Layout, Window
     from prompt_toolkit.styles import Style
 
     history_file = params.agent.root / ".chat_history"
