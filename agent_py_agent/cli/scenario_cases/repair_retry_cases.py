@@ -15,6 +15,7 @@ from ...agent.capability_config import load_capability_config
 from ..common import make_capability_router
 from ..scenario_utils import (
     create_scenario_workspace,
+    install_scenario_backend,
     load_scenario_agent,
     print_scenario_step,
     write_scenario_summary,
@@ -40,7 +41,7 @@ class ScenarioStructuredRepairBackend:
     def __init__(self) -> None:
         self.calls = 0
 
-    def generate(self, prompt: str) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
             return ModelResponse(
@@ -93,7 +94,7 @@ def _structured_repair_setup(args):
 
     agent = load_scenario_agent(paths.config)
     backend = ScenarioStructuredRepairBackend()
-    agent.backend = backend
+    install_scenario_backend(agent, backend)
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)
 
@@ -169,7 +170,22 @@ class ScenarioRetryBackend:
     def __init__(self) -> None:
         self.calls = 0
 
-    def generate(self, prompt: str) -> ModelResponse:
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        if "输出严格 JSON 格式" in prompt:
+            return ModelResponse(
+                text=json.dumps(
+                    {
+                        "analysis_reason": "场景测试模拟临时 runner 失败，允许重试。",
+                        "root_cause": "transient_runner_failure",
+                        "suggested_params": {},
+                        "should_retry": True,
+                        "should_split": False,
+                        "confidence": 0.9,
+                    },
+                    ensure_ascii=False,
+                ),
+                backend=self.name,
+            )
         self.calls += 1
         if self.calls == 1:
             raise RuntimeError("scenario transient runner failure")
@@ -211,7 +227,7 @@ def _runner_retry_setup(args):
 
     agent = load_scenario_agent(paths.config)
     backend = ScenarioRetryBackend()
-    agent.backend = backend
+    install_scenario_backend(agent, backend)
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)
 

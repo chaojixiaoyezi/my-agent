@@ -12,6 +12,7 @@ import os
 import time
 from dataclasses import dataclass
 
+from ...agent.backend import ModelResponse
 from ...agent.gateway import (
     _process_gateway_requests,
     gateway_paths,
@@ -25,11 +26,23 @@ from ...agent.gateway import (
 )
 from ..scenario_utils import (
     create_scenario_workspace,
+    install_scenario_backend,
     load_scenario_agent,
     print_scenario_step,
     write_scenario_summary,
 )
 from .gateway_delayed_response_case import run_scenario_gateway_delayed_response_case
+
+
+class ScenarioGatewayRecoveryBackend:
+
+    name = "scenario_gateway_recovery_backend"
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        return ModelResponse(
+            text='{"scenario": "gateway-stale-lease", "ok": true}',
+            backend=self.name,
+        )
 
 
 def _restart_case_write_processing_payload(gpaths, request_id):
@@ -109,6 +122,7 @@ def _stale_lease_setup(args):
     print(f"config={paths.config}")
 
     agent = load_scenario_agent(paths.config)
+    install_scenario_backend(agent, ScenarioGatewayRecoveryBackend())
     gpaths = gateway_paths(agent)
     for path in (gpaths.inbox, gpaths.processing, gpaths.done, gpaths.failed, gpaths.responses):
         path.mkdir(parents=True, exist_ok=True)

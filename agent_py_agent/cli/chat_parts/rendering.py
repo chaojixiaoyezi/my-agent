@@ -19,7 +19,7 @@ except Exception:
 
 
 def _cprint(text: str) -> None:
-    if _pt_print is not None and _PT_ANSI is not None:
+    if sys.stdout.isatty() and _pt_print is not None and _PT_ANSI is not None:
         _pt_print(_PT_ANSI(text))
     else:
         print(text)

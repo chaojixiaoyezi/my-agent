@@ -134,11 +134,19 @@ def load_scenario_agent(config_path: Path) -> SimpleAgent:
     return make_agent(Args())
 
 
+def install_scenario_backend(agent: SimpleAgent, backend: object) -> None:
+
+    agent.backend = backend
+    agent._subagent_worker_backend_override = backend
+
+
 def build_scenario_prompt(count: int) -> str:
 
     return (
         "这是 my-agent 隔离全流程场景测试。你必须通过工具创建子代理工单，"
         "不要自己直接完成任务。\n\n"
+        "本阶段只允许创建工单和查看看板；禁止调用 dispatch_subagents，禁止 execute_runners，"
+        "不要启动 runner，runner 会由下一阶段父代理调度。\n\n"
         "请只调用一次 create_subagents，参数必须满足：\n"
         f"- count: {count}\n"
         "- tool_preset: coding\n"
@@ -154,10 +162,13 @@ def build_scenario_runner_instruction() -> str:
 
     return (
         "这是隔离全流程测试的 runner 阶段。你只能在当前 fixture 工作区内操作。\n"
-        "必须严格按顺序完成，不允许跳步：\n"
-        "1. 第一轮先只调用 read_file，payload 精确使用 {\"tool\":\"read_file\",\"path\":\"README.md\"}。\n"
+        "必须严格按顺序完成，不允许跳步，也不允许用文字声称已经调用工具。\n"
+        "1. 第一轮回复只能是下面这个工具调用，不要输出 SUBAGENT_RESULT、解释或 Markdown：\n"
+        "[TOOL_CALL]\n"
+        "{\"tool\":\"read_file\",\"path\":\"README.md\"}\n"
+        "[/TOOL_CALL]\n"
         "2. 收到 read_file 成功结果后，从执行上下文 JSON 找到自己的 run_id、task_dir 和 allowed_write_roots。\n"
-        "3. 第二轮只调用 write_file，path 必须落在 allowed_write_roots 里面，推荐使用 "
+        "3. 第二轮回复只能调用 write_file，path 必须落在 allowed_write_roots 里面，推荐使用 "
         ".my_agent/subagents/<run_id>/scenario_outputs/<run_id>.md；content 写一份 3-6 行中文报告，"
         "说明已读取 README.md，并注明这是隔离测试和 task_dir 内产物。\n"
         "4. 只有在你已经看到 write_file 成功结果后，才允许输出最终 [SUBAGENT_RESULT]。\n"

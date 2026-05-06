@@ -67,6 +67,12 @@ def _format_process_result(result: subprocess.CompletedProcess[str]) -> str:
     return f"return_code={result.returncode}\nstdout={stdout}\nstderr={stderr}"
 
 
+def _subprocess_text_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    return env
+
+
 class ShellTool(BaseTool):
 
     def __init__(self, workspace_root: Path, default_timeout: int = 30):
@@ -140,6 +146,9 @@ class ShellTool(BaseTool):
                 cwd=str(target),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=_subprocess_text_env(),
                 timeout=timeout,
             )
         return subprocess.run(
@@ -148,5 +157,8 @@ class ShellTool(BaseTool):
             cwd=str(target),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=_subprocess_text_env(),
             timeout=timeout,
         )

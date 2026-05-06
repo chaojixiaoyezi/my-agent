@@ -15,7 +15,12 @@ from .io import (
     write_json_file,
 )
 from .paths import GatewayPaths
-from .queue_service import archive_request, claim_request, ensure_gateway_folders
+from .queue_service import (
+    archive_request,
+    claim_request,
+    ensure_gateway_folders,
+    materialize_missing_archive,
+)
 from .recovery import _gateway_request_attempts
 from .request_execution import _handle_gateway_request
 
@@ -182,7 +187,9 @@ def _finish_claimed_gateway_request(
     append_gateway_history(paths, response)
     target_folder = paths.done if response.get("ok") else paths.failed
     _write_final_request_archive_payload(processing_path, response)
-    archive_request(processing_path, target_folder, request_id)
+    archived = archive_request(processing_path, target_folder, request_id)
+    if not archived and not processing_path.exists():
+        materialize_missing_archive(target_folder, request_id, response)
 
 
 def _write_final_request_archive_payload(processing_path: Path, response: dict) -> None:

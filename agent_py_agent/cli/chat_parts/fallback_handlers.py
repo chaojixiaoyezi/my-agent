@@ -9,9 +9,11 @@ from .fallback_ui import _make_chunk_handler, _render_assistant_response
 from .gateway_client import (
     ChatRequestContent,
     check_gateway_alive,
+    format_gateway_timing,
     poll_gateway_chunks,
     submit_chat_request,
 )
+from .rendering import GRAY, RESET, _cprint
 
 
 @dataclass
@@ -27,6 +29,7 @@ class FallbackJobContext:
 def _fallback_gateway_handle(ctx: FallbackJobContext) -> tuple[str, bool]:
     if not check_gateway_alive(ctx.paths):
         raise RuntimeError("gateway 已停止。请先执行 my-agent gateway start")
+    started_at = time.perf_counter()
     on_chunk, stream_started_ref = _make_chunk_handler(
         ctx.agent.config.agent_name, _next_message_id(ctx)
     )
@@ -53,10 +56,12 @@ def _fallback_gateway_handle(ctx: FallbackJobContext) -> tuple[str, bool]:
     if not response and request_id:
         raise TimeoutError(f"gateway 请求等待超时: request_id={request_id}")
     _render_if_needed(ctx, response_text, stream_started_ref[0])
+    _print_gateway_timing(request_id, started_at, response, ctx)
     return response_text, stream_started_ref[0]
 
 
 def _fallback_local_handle(ctx: FallbackJobContext) -> tuple[str, bool]:
+    started_at = time.perf_counter()
     on_chunk, stream_started_ref = _make_chunk_handler(
         ctx.agent.config.agent_name, _next_message_id(ctx)
     )
@@ -72,6 +77,7 @@ def _fallback_local_handle(ctx: FallbackJobContext) -> tuple[str, bool]:
     )
     agent_response_text = result.response
     _render_if_needed(ctx, agent_response_text, stream_started_ref[0])
+    _print_local_timing(result, started_at)
     return agent_response_text, stream_started_ref[0]
 
 
@@ -99,6 +105,27 @@ def _render_if_needed(
 ) -> None:
     if not stream_started:
         _render_assistant_response(response_text, ctx.assistant_outputs, ctx.agent.config.agent_name)
+
+
+def _print_gateway_timing(
+    request_id: str,
+    started_at: float,
+    response: dict,
+    ctx: FallbackJobContext,
+) -> None:
+    elapsed = time.perf_counter() - started_at
+    _cprint(
+        f"{GRAY}{format_gateway_timing(request_id, elapsed, response, True, ctx.agent.config.agent_name)}{RESET}"
+    )
+
+
+def _print_local_timing(result, started_at: float) -> None:
+    elapsed = time.perf_counter() - started_at
+    _cprint(
+        f"{GRAY}[耗时 {elapsed:.2f}s; 工具轮数 {result.tool_rounds}; "
+        f"prompt_tokens~{result.prompt_token_estimate}; "
+        f"resume_context={1 if result.memory_resume_context_injected else 0}]{RESET}"
+    )
 
 
 __all__ = [

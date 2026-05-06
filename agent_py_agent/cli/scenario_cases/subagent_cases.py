@@ -21,6 +21,7 @@ from ...agent.memory_archive import (
 )
 from ..scenario_utils import (
     create_scenario_workspace,
+    install_scenario_backend,
     load_scenario_agent,
     print_scenario_step,
     run_scenario_subprocess,
@@ -191,7 +192,7 @@ def _parent_subagent_setup(args):
 
     agent = load_scenario_agent(paths.config)
     backend = ScenarioParentSubagentRecoveryBackend()
-    agent.backend = backend
+    install_scenario_backend(agent, backend)
 
     print_scenario_step(1, "Create a parent-owned subagent task")
     task = agent.subagents.create_run(

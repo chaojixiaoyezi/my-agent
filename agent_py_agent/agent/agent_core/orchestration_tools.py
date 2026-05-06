@@ -14,6 +14,7 @@ from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..subagents.services.base import CreateRunParams
 from ..tools import BaseTool, ToolExecutionResult, ToolSpec
+from .orchestration_write_guard import external_write_target_error
 from .parameters import _bool_param, _non_negative_int, _positive_int, _string_list
 
 if TYPE_CHECKING:
@@ -137,6 +138,10 @@ class CreateSubagentsTool(BaseTool):
             return count
 
         allowed_tools = _subagent_allowed_tools(params)
+        target_error = external_write_target_error(self.agent, goal, allowed_tools)
+        if target_error:
+            return ToolExecutionResult("create_subagents", False, target_error)
+
         run_params = _create_run_params(self.agent, params, goal, allowed_tools)
         tasks = self._create_tasks(goal, count, run_params)
         payload = self._create_payload(tasks, allowed_tools)

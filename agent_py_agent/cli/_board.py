@@ -2,9 +2,16 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict, is_dataclass
 
 from ..agent.subagent import filter_board_items
 from .common import make_agent
+
+
+def _task_jsonable(task):
+    if is_dataclass(task):
+        return asdict(task)
+    return getattr(task, "__dict__", {"value": str(task)})
 
 
 def cmd_spawn(args) -> int:
@@ -12,7 +19,7 @@ def cmd_spawn(args) -> int:
     agent = make_agent(args)
     tasks = agent.spawn_subagents(args.goal, args.count)
     for task in tasks:
-        print(json.dumps(task.__dict__, ensure_ascii=False))
+        print(json.dumps(_task_jsonable(task), ensure_ascii=False))
     return 0
 
 
@@ -52,7 +59,7 @@ def cmd_subagent_detail(args) -> int:
     task = agent.subagents.load(args.run_id)
     print(
         json.dumps(
-            task.__dict__, ensure_ascii=False, indent=2, default=lambda value: value.__dict__
+            _task_jsonable(task), ensure_ascii=False, indent=2,
         )
     )
     return 0

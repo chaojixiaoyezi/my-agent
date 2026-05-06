@@ -136,6 +136,7 @@ class RunSubagentWorkerParams:
     retry_reason: str
     timeout_seconds: float = 0.0
     local_store: object | None = None
+    backend_override: object | None = None
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,8 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
     from ..core import SimpleAgent
 
     worker = SimpleAgent(params.config, params.root)
+    if params.backend_override is not None:
+        worker.backend = params.backend_override
     _attach_worker_local_store(worker, params.local_store)
     if params.dry_run or params.timeout_seconds <= 0:
         return worker.run_subagent(
