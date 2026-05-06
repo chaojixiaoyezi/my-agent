@@ -31,6 +31,15 @@ from .indexing_dispatch import (
     _index_execution_context_via,
     _index_parent_planner_record_via,
 )
+from .indexing_records import (
+    index_acceptance_review_via,
+    index_action_apply_via,
+    index_capability_route_via,
+    index_channel_probe_via,
+    index_dataclass_record_via,
+    index_patch_review_via,
+    index_runner_result_via,
+)
 
 
 class SubAgentIndexingService:
@@ -171,54 +180,19 @@ class SubAgentIndexingService:
         event_type: str,
     ) -> None:
         """Index a dataclass record."""
-        try:
-            payload = asdict(record)
-        except TypeError:
-            payload = {"str": str(record), "repr": repr(record)}
-        metadata: dict[str, object] = {
-            key: value
-            for key, value in payload.items()
-            if key in {
-                "id", "run_id", "decision", "status", "ok",
-                "applied", "dry_run", "created_at", "cycle", "backend", "tool_rounds",
-            }
-        }
-        self.log_local_record(
-            source_type=source_type,
-            source_id=source_id,
-            title=title,
-            content=json.dumps(payload, ensure_ascii=False, indent=2),
-            metadata=metadata,
-            event_type=event_type,
-        )
+        index_dataclass_record_via(self, source_type, source_id, title, record, event_type)
 
     def index_action_apply(self, record: ActionApplyRecord) -> None:
-        self._index_dataclass_record(
-            "subagent_action_apply", record.id,
-            f"Action apply {record.action} {record.run_id or 'global'}",
-            record, "subagent_action_apply_logged",
-        )
+        index_action_apply_via(self, record)
 
     def index_capability_route(self, record: CapabilityRouteRecord) -> None:
-        self._index_dataclass_record(
-            "subagent_capability_route", record.id,
-            f"Capability route {record.request_id} {record.status}",
-            record, "subagent_capability_route_logged",
-        )
+        index_capability_route_via(self, record)
 
     def index_acceptance_review(self, record: AcceptanceReviewRecord) -> None:
-        self._index_dataclass_record(
-            "subagent_acceptance_review", record.id,
-            f"Acceptance {record.decision} {record.run_id}",
-            record, "subagent_acceptance_review_logged",
-        )
+        index_acceptance_review_via(self, record)
 
     def index_patch_review(self, record: PatchReviewRecord) -> None:
-        self._index_dataclass_record(
-            "subagent_patch_review", record.id,
-            f"Patch review {record.decision} {record.run_id}",
-            record, "subagent_patch_review_logged",
-        )
+        index_patch_review_via(self, record)
 
     def index_dispatch_record(self, record: DispatchRecord) -> None:
         _index_dispatch_record_via(self.manager, record)
@@ -233,38 +207,11 @@ class SubAgentIndexingService:
         _index_execution_context_via(self.manager, context)
 
     def index_runner_result(self, result: SubAgentRunnerResult, output_payload: dict[str, object]) -> None:
-        content = "\n".join([
-            json.dumps(asdict(result), ensure_ascii=False, indent=2),
-            "",
-            "## Output",
-            json.dumps(output_payload, ensure_ascii=False, indent=2),
-        ])
-        self.log_local_record(
-            source_type="subagent_runner_result",
-            source_id=f"{result.run_id}:{result.created_at:.6f}",
-            title=f"Runner {result.run_id} {result.status}",
-            content=content,
-            metadata={
-                "run_id": result.run_id,
-                "dry_run": result.dry_run,
-                "ok": result.ok,
-                "status": result.status,
-                "verification_status": result.verification_status,
-                "backend": result.backend,
-                "tool_rounds": result.tool_rounds,
-                "result_json": result.result_json,
-                "created_at": result.created_at,
-            },
-            event_type="subagent_runner_result_logged",
-        )
+        # LLM: record-specific serialization lives in indexing_records; this service routes calls.
+        index_runner_result_via(self, result, output_payload)
 
     def index_channel_probe(self, result: ChannelProbeResult) -> None:
-        self._index_dataclass_record(
-            "subagent_channel_probe",
-            f"{result.run_id}:{result.created_at:.6f}",
-            f"Channel probe {result.run_id} {result.channel_status}",
-            result, "subagent_channel_probe_logged",
-        )
+        index_channel_probe_via(self, result)
 
     def select_runs(self, run_ids: list[str] | None) -> list[SubAgentTask]:
         """Select runs by id, filtering out ineligible statuses."""
