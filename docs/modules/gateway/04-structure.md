@@ -34,7 +34,7 @@ agent_py_agent/cli/
 - `gateway_parts/recovery.py`：处理卡在 processing 的请求。
 - `gateway_parts/runtime.py`：真正执行 request worker，从 pending 取请求、调用 agent、写 response。
 - `cli/gateway_process.py`：用户管理后台进程的命令。
-- `cli/gateway_client.py`：用户或 chat 客户端投递消息和读取结果的命令。
+- `cli/gateway_client.py`：用户或 chat 客户端投递消息和读取结果的命令；默认入口也在这里把 `my-agent --app` 映射为 gateway chat + 应用内滚动历史 UI。
 
 ## 数据流
 

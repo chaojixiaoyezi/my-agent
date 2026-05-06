@@ -24,18 +24,21 @@ def _worker_gateway_path(ctx) -> tuple[str, bool]:
     request_id, chunk_path, response_path = _submit_gateway_job(ctx)
     timeout = _gateway_timeout(ctx.cfg)
     chunks_printed_ref = [0]
+    visible_chunks_ref = [0]
     response = poll_gateway_chunks(
         chunk_path,
         response_path,
         time.time() + max(0.0, timeout),
         ctx.on_stream_chunk,
         chunks_printed_ref=chunks_printed_ref,
+        visible_chunks_ref=visible_chunks_ref,
     )
     if response:
         _flush_stream_buf(ctx.cfg.stream_buf_ref)
     if not response:
         raise TimeoutError(f"gateway 请求等待超时: request_id={request_id} response={response_path}")
-    return _finish_gateway_response(ctx, request_id, response, chunks_printed_ref[0] > 0)
+    ctx.stop_spinner()
+    return _finish_gateway_response(ctx, request_id, response, visible_chunks_ref[0] > 0)
 
 
 def _submit_gateway_job(ctx):
@@ -140,6 +143,7 @@ def _worker_local_path(ctx) -> tuple[str, bool]:
         recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
         on_chunk=ctx.on_stream_chunk,
     )
+    ctx.stop_spinner()
     _flush_stream_buf(ctx.cfg.stream_buf_ref)
     _print_local_timing(ctx, result)
     with ctx.cfg.state_lock:

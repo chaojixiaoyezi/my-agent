@@ -41,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(DEFAULT_CONFIG),
         help="配置文件路径，默认使用 config/agent_config.yaml",
     )
+    parser.add_argument(
+        "--app",
+        action="store_true",
+        help="启动应用内聊天界面，固定状态栏和输入行，并使用应用内滚动历史",
+    )
     subparsers = parser.add_subparsers(dest="command")
     parser.set_defaults(func=cmd_default)
 
@@ -66,4 +71,6 @@ def main() -> int:
     configure_stdio()
     parser = build_parser()
     args = parser.parse_args()
+    if getattr(args, "app", False):
+        args.app_scrollback = True
     return args.func(args)
