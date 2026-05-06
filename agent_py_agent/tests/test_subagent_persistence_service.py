@@ -56,7 +56,12 @@ def test_subagent_persistence_writes_checkpoint_recovery_artifacts(tmp_path) -> 
         "status": "BLOCKED",
         "blockers": ["缺少验证证据"],
         "tests": [
-            {"name": "focused", "ok": False, "message": "assertion failed", "evidence_ref": "logs/focused.txt"},
+            {
+                "name": "focused",
+                "ok": False,
+                "message": "assertion failed",
+                "evidence_ref": "logs/focused.txt",
+            },
             {"name": "lint", "ok": True},
         ],
         "next_actions": ["补证据链"],

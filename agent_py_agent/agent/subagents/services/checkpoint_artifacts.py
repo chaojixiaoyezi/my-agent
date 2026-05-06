@@ -45,7 +45,11 @@ def build_decision_ledger_payload(task: SubAgentTask, output_payload: dict[str, 
     decisions = _unique_strings(
         [
             *_string_list(summary_delta.get("decisions_changed")),
-            *[item.claim for item in task.findings if item.status.upper() not in {"OPEN", "BLOCKED"}],
+            *[
+                item.claim
+                for item in task.findings
+                if item.status.upper() not in {"OPEN", "BLOCKED"}
+            ],
         ]
     )
     open_questions = _unique_strings(
