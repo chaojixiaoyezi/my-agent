@@ -166,7 +166,6 @@ def _make_input_area(history_file_path: str) -> Any:
 
     return TextArea(
         height=Dimension(min=1, max=8),
-        prompt=[("class:prompt", "❯ ")],
         style="class:input-area",
         multiline=False,
         wrap_lines=False,
@@ -175,10 +174,21 @@ def _make_input_area(history_file_path: str) -> Any:
     )
 
 
+def _make_input_prompt_window() -> Any:
+    from prompt_toolkit.layout import FormattedTextControl, Window
+
+    return Window(
+        content=FormattedTextControl([("class:prompt", "❯ ")]),
+        width=2,
+        dont_extend_width=True,
+        style="class:prompt",
+    )
+
+
 def make_tui_app(params: MakeTuiAppParams):
     from prompt_toolkit.application import Application
     from prompt_toolkit.key_binding import KeyBindings
-    from prompt_toolkit.layout import HSplit, Layout, Window
+    from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
     from prompt_toolkit.styles import Style
 
     history_file = params.agent.root / ".chat_history"
@@ -205,7 +215,8 @@ def make_tui_app(params: MakeTuiAppParams):
         )
     )
 
-    layout = Layout(HSplit([status_bar, Window(height=1), input_area]))
+    input_row = VSplit([_make_input_prompt_window(), input_area])
+    layout = Layout(HSplit([status_bar, Window(height=1), input_row]), focused_element=input_area)
 
     style = Style.from_dict(
         {

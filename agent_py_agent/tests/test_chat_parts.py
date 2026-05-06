@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import threading
 
+import pytest
+
 from agent_py_agent.cli.chat_parts.history import append_conversation_turn, build_history_context
 from agent_py_agent.cli.chat_parts.rendering import collapse_response_text, startup_banner
 
@@ -58,3 +60,18 @@ def test_cprint_uses_plain_print_when_stdout_is_not_tty(monkeypatch, capsys):
     rendering._cprint("hello")
 
     assert "hello" in capsys.readouterr().out
+
+
+def test_tui_input_prompt_is_stable_separate_window(tmp_path) -> None:
+    pytest.importorskip("prompt_toolkit")
+    from agent_py_agent.cli.chat_parts.tui_ui_setup import (
+        _make_input_area,
+        _make_input_prompt_window,
+    )
+
+    input_area = _make_input_area(str(tmp_path / ".chat_history"))
+    prompt_window = _make_input_prompt_window()
+
+    assert input_area.window.get_line_prefix is None
+    assert prompt_window.width == 2
+    assert prompt_window.content.text == [("class:prompt", "❯ ")]
