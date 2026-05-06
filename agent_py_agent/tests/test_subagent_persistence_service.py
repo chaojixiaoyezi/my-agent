@@ -40,7 +40,9 @@ def test_subagent_persistence_service_round_trips_task(tmp_path) -> None:
     assert (tmp_path / task.id / "reports" / "progress.md").exists()
     assert (tmp_path / task.id / "reports" / "failing_tests.json").exists()
     assert (tmp_path / task.id / "reports" / "next_actions.json").exists()
+    assert (tmp_path / task.id / "SKILL_SPARKS.md").exists()
     assert loaded.checkpoint_ref == loaded.checkpoint_json
+    assert loaded.skill_sparks_file.endswith("SKILL_SPARKS.md")
 
 
 def test_subagent_persistence_writes_checkpoint_recovery_artifacts(tmp_path) -> None:

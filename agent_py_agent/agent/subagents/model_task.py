@@ -133,6 +133,7 @@ class SubAgentTask:
     test_checklist_file: str = ""
     bugs_file: str = ""
     skill_usage_file: str = ""
+    skill_sparks_file: str = ""
     handoff_file: str = ""
     debrief_file: str = ""
     output_json: str = ""

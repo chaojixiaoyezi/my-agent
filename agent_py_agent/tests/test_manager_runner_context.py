@@ -96,6 +96,7 @@ def make_task(tmp_path, task_id="run-456"):
     task.test_checklist_file = str(tmp_path / "tests.json")
     task.bugs_file = str(tmp_path / "bugs.json")
     task.skill_usage_file = str(tmp_path / "skill_usage.json")
+    task.skill_sparks_file = str(tmp_path / "skill_sparks.md")
     task.handoff_file = str(tmp_path / "handoff.json")
     task.debrief_file = str(tmp_path / "debrief.md")
     task.output_json = str(tmp_path / "output.json")
@@ -210,6 +211,7 @@ def test_build_execution_context_write_boundary(mock_manager, tmp_path):
     assert "allowed_write_roots" in context.write_boundary
     assert "forbidden_write_roots" in context.write_boundary
     assert "locked_files" in context.write_boundary
+    assert context.write_boundary["skill_sparks_file"].endswith("skill_sparks.md")
 
 
 def test_build_execution_context_instructions(mock_manager, tmp_path):
