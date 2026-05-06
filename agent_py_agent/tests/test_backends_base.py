@@ -246,6 +246,38 @@ class TestOpenAICompatibleBackend:
         backend.generate("test")
         mock_urlopen.assert_called()
 
+    def test_generate_stream_calls_on_chunk_during_iteration(self):
+        backend = OpenAICompatibleBackend(
+            api_base="https://api.example.com",
+            api_key="test-key",
+            model_name="gpt-4",
+            stream_enabled=True,
+        )
+        events: list[str] = []
+
+        def request_stream_iter(path, payload, headers):
+            events.append("yield-first")
+            yield json.dumps({"choices": [{"delta": {"content": "hel"}}]})
+            events.append("after-first")
+            yield json.dumps({"choices": [{"delta": {"content": "lo"}}]})
+            events.append("after-second")
+            yield "[DONE]"
+
+        def on_chunk(content: str) -> None:
+            events.append(f"chunk-{content}")
+
+        backend.request_stream_iter = request_stream_iter
+        resp = backend.generate("test prompt", on_chunk=on_chunk)
+
+        assert resp.text == "hello"
+        assert events == [
+            "yield-first",
+            "chunk-hel",
+            "after-first",
+            "chunk-lo",
+            "after-second",
+        ]
+
 
 class TestAnthropicCompatibleBackend:
     def test_anthropic_backend_name(self):
@@ -314,6 +346,38 @@ class TestAnthropicCompatibleBackend:
         )
         with pytest.raises(RuntimeError, match="没有文本内容"):
             backend.generate("test")
+
+    def test_generate_stream_calls_on_chunk_during_iteration(self):
+        backend = AnthropicCompatibleBackend(
+            api_base="https://api.example.com",
+            api_key="test-key",
+            model_name="claude-3",
+            stream_enabled=True,
+        )
+        events: list[str] = []
+
+        def request_stream_iter(path, payload, headers):
+            events.append("yield-first")
+            yield json.dumps({"type": "content_block_delta", "delta": {"text": "hel"}})
+            events.append("after-first")
+            yield json.dumps({"type": "content_block_delta", "delta": {"text": "lo"}})
+            events.append("after-second")
+            yield json.dumps({"type": "message_stop"})
+
+        def on_chunk(content: str) -> None:
+            events.append(f"chunk-{content}")
+
+        backend.request_stream_iter = request_stream_iter
+        resp = backend.generate("test prompt", on_chunk=on_chunk)
+
+        assert resp.text == "hello"
+        assert events == [
+            "yield-first",
+            "chunk-hel",
+            "after-first",
+            "chunk-lo",
+            "after-second",
+        ]
 
 
 class TestGetBackend:

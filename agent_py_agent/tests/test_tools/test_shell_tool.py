@@ -6,7 +6,9 @@ from __future__ import annotations
 测试 run_command 工具：正常执行、超时处理、危险命令拒绝、参数校验。
 """
 
+import shlex
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -201,7 +203,8 @@ def test_shell_tool_nonzero_return_code(shell_tool: ShellTool) -> None:
 
 def test_shell_tool_preserves_unicode_output(shell_tool: ShellTool) -> None:
     """Shell output should not crash or mangle non-ASCII text on Windows."""
-    result = shell_tool.execute({"command": "python -c \"print('你好')\""})
+    python = shlex.quote(sys.executable)
+    result = shell_tool.execute({"command": f"{python} -c \"print('你好')\""})
     assert result.ok is True
     assert "return_code=0" in result.output
     assert "你好" in result.output

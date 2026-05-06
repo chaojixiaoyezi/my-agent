@@ -153,7 +153,6 @@ def _make_spinner(cfg: TuiWorkerConfig, next_message_id: int):
 
 def _make_stream_callbacks(cfg: TuiWorkerConfig, next_message_id: int, spinner):
     stream_started_ref = [False]
-    show_stream = bool(getattr(cfg.args, "app_scrollback", False) or getattr(cfg.args, "app", False))
 
     def begin_stream() -> None:
         if stream_started_ref[0]:
@@ -170,8 +169,6 @@ def _make_stream_callbacks(cfg: TuiWorkerConfig, next_message_id: int, spinner):
         from .renderer import strip_ansi
 
         if not strip_ansi(chunk).strip():
-            return False
-        if not show_stream:
             return False
         begin_stream()
         return _append_stream_text(chunk, cfg.stream_buf_ref, cfg.stream_visible_text_ref)
