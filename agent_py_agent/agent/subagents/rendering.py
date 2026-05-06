@@ -105,6 +105,15 @@ def render_action_plan_markdown(report: ActionPlanReport) -> str:
             f"action={action.action} sources={kinds}"
         )
         lines.append(f"  - reason: {action.reason}")
+        if action.rescue_strategy:
+            # LLM: render rescue metadata next to the action that would use it.
+            lines.append(
+                f"  - rescue: trigger={action.rescue_trigger or 'none'} "
+                f"strategy={action.rescue_strategy} escalate={action.escalation_target or 'parent'}"
+            )
+        if action.rescue_context_refs:
+            lines.append("  - rescue_context:")
+            lines.extend(f"    - `{ref}`" for ref in action.rescue_context_refs[:5])
         if action.would_change_status_to:
             lines.append(f"  - would_change_status_to: {action.would_change_status_to}")
         if action.suggested_commands:
@@ -138,6 +147,11 @@ def render_action_apply_markdown(report: ActionApplyReport) -> str:
             f"applied={record.applied} {record.before_status}->{record.after_status}"
         )
         lines.append(f"  - {record.message}")
+        if record.rescue_strategy:
+            lines.append(
+                f"  - rescue: trigger={record.rescue_trigger or 'none'} "
+                f"strategy={record.rescue_strategy} escalate={record.escalation_target or 'parent'}"
+            )
         if record.evidence_paths:
             lines.append("  - evidence:")
             lines.extend(f"    - `{path}`" for path in record.evidence_paths[:5])

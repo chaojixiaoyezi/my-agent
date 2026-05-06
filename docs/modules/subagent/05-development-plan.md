@@ -100,6 +100,8 @@
 
 ### 4. Rescue / Escalation
 
+状态：第一片已落地；action plan 已能带 rescue/escalation 元数据并写入 apply 记录。还需要继续补 rescue packet 文件、重复失败去重、重试上限和真正上抛记录。
+
 第四步处理卡住、失败和能力缺口。
 
 要做：

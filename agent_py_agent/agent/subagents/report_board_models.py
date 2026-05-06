@@ -98,6 +98,11 @@ class ActionPlanItem:
     source_issue_kinds: list[str]
     suggested_commands: list[str] = field(default_factory=list)
     would_change_status_to: str = ""
+    # LLM: rescue metadata keeps escalation visible before any mutating action runs.
+    rescue_trigger: str = ""
+    rescue_strategy: str = ""
+    escalation_target: str = ""
+    rescue_context_refs: list[str] = field(default_factory=list)
     requires_confirmation: bool = True
     dry_run: bool = True
     owner: str = ""
@@ -131,6 +136,10 @@ class ActionApplyRecord:
     after_status: str = ""
     before_channel_status: str = ""
     after_channel_status: str = ""
+    rescue_trigger: str = ""
+    rescue_strategy: str = ""
+    escalation_target: str = ""
+    rescue_context_refs: list[str] = field(default_factory=list)
     evidence_paths: list[str] = field(default_factory=list)
     created_at: float = 0.0
 
