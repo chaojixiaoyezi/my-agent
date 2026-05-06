@@ -51,7 +51,7 @@ class FileSystemTool(BaseTool):
         """把路径转成可审计但不泄露工作区绝对路径的格式。"""
 
         try:
-            return str(path.relative_to(self.workspace_root))
+            return str(path.relative_to(self.workspace_root)).replace("\\", "/")
         except ValueError:
             return "<outside-workspace>"
 

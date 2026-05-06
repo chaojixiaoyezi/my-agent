@@ -59,6 +59,8 @@ class TestFileSystemToolBase:
 
     def test_resolve_path_with_symlink_outside(self, tmp_path: Path):
         """符号链接指向工作区外时应被阻止。"""
+        import sys
+
         from agent_py_agent.agent.tooling.filesystem import FileSystemTool
 
         workspace = tmp_path / "workspace"
@@ -73,7 +75,12 @@ class TestFileSystemToolBase:
         secret_file.write_text("secret")
 
         symlink = workspace / "link_to_outside"
-        symlink.symlink_to(secret_file)
+        try:
+            symlink.symlink_to(secret_file)
+        except OSError as e:
+            if sys.platform == "win32" and e.winerror == 1314:
+                pytest.skip("Symbolic links require admin privileges on Windows")
+            raise
 
         # 解析符号链接时应该被拒绝，因为实际路径在工作区外
         with pytest.raises(ValueError, match="超出允许的工作区范围"):
@@ -91,7 +98,7 @@ class TestFileSystemToolBase:
         tool = FileSystemTool(workspace)
 
         result = tool.display_path(subdir / "file.txt")
-        assert result == "subdir/file.txt"
+        assert result.replace("\\", "/") == "subdir/file.txt"
 
     def test_display_path_outside_workspace(self, tmp_path: Path):
         """工作区外的路径应显示占位符。"""

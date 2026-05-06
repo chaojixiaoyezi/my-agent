@@ -293,20 +293,20 @@ def _storage_result(result: Any, *, count: int, store: Any | None = None) -> dic
         payload = dict(result)
         payload.setdefault("count", count)
         if payload.get("path") is None and store_path is not None:
-            payload["path"] = str(store_path)
+            payload["path"] = str(store_path).replace("\\", "/")
         return payload
     if isinstance(result, (str, Path)):
-        return {"count": count, "path": str(result)}
+        return {"count": count, "path": str(result).replace("\\", "/")}
     if isinstance(result, int):
-        return {"count": result, "path": str(store_path) if store_path is not None else None}
-    return {"count": count, "path": str(store_path) if store_path is not None else None}
+        return {"count": result, "path": str(store_path).replace("\\", "/") if store_path is not None else None}
+    return {"count": count, "path": str(store_path).replace("\\", "/") if store_path is not None else None}
 
 
 def _storage_summary(infos: list[dict[str, Any]], *, fallback_path: Path) -> dict[str, Any]:
     count = sum(int(info.get("count") or 0) for info in infos)
-    paths = sorted({str(info.get("path")) for info in infos if info.get("path")})
+    paths = sorted({str(info.get("path")).replace("\\", "/") for info in infos if info.get("path")})
     if not paths:
-        paths = [str(fallback_path)]
+        paths = [str(fallback_path).replace("\\", "/")]
     summary: dict[str, Any] = {"count": count, "path": paths[0]}
     if len(paths) > 1:
         summary["paths"] = paths

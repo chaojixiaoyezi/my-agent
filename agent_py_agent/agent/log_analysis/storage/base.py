@@ -301,7 +301,7 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple, set)):
         return [_jsonable(item) for item in value]
     if isinstance(value, Path):
-        return str(value)
+        return str(value).replace("\\", "/")
     if isinstance(value, datetime):
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     return value
