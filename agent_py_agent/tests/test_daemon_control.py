@@ -135,8 +135,8 @@ def test_get_running_pid_nonexistent(tmp_pid_path):
     assert pid is None
 
 
-@patch.object(os, "kill", side_effect=ProcessLookupError)
-def test_get_running_pid_invalid_pid_cleanup(mock_kill, tmp_pid_path):
+@patch.object(dc, "is_pid_alive", return_value=False)
+def test_get_running_pid_invalid_pid_cleanup(mock_alive, tmp_pid_path):
     """测试无效 PID 会清理文件。"""
     record = {"pid": 99999, "start_time": 12345}
     tmp_pid_path.parent.mkdir(parents=True, exist_ok=True)
@@ -175,7 +175,7 @@ def test_acquire_scoped_lock_already_held_by_different_process(mock_lock_dir, tm
     lock_path.write_text(json.dumps(other_record), encoding="utf-8")
 
     # 模拟进程存活检查
-    with patch.object(os, "kill", side_effect=ProcessLookupError):
+    with patch("agent_py_agent.agent.gateway_parts.scoped_locks.is_pid_alive", return_value=False):
         acquired, existing = dc.acquire_scoped_lock("test-scope", "test-identity")
         # 陈旧锁应该被清理，重新获取应该成功
         assert acquired is True

@@ -159,43 +159,45 @@ def _commands_for_action(action: str, run_id: str) -> list[str]:
     给 dry-run 动作提供下一步可运行命令。
     """
 
+    # LLM: prefer the installed console script; it avoids Windows python3 shim issues.
+    cli = "my-agent"
     commands = {
         "probe_or_repair_channel": [
-            f"python3 -m agent_py_agent subagents-probe {run_id}",
-            f"python3 -m agent_py_agent subagent {run_id}",
+            f"{cli} subagents-probe {run_id}",
+            f"{cli} subagent {run_id}",
         ],
         "inspect_channel_probe": [
-            f"python3 -m agent_py_agent subagents-probe {run_id}",
-            f"python3 -m agent_py_agent subagent {run_id}",
+            f"{cli} subagents-probe {run_id}",
+            f"{cli} subagent {run_id}",
         ],
         "repair_work_order": [
-            f"python3 -m agent_py_agent subagents-probe {run_id}",
-            f"python3 -m agent_py_agent subagent {run_id}",
+            f"{cli} subagents-probe {run_id}",
+            f"{cli} subagent {run_id}",
         ],
         "reopen_for_evidence": [
-            f"python3 -m agent_py_agent subagent {run_id}",
+            f"{cli} subagent {run_id}",
         ],
         "run_acceptance": [
-            f"python3 -m agent_py_agent subagent {run_id}",
+            f"{cli} subagent {run_id}",
         ],
         "takeover_or_reassign": [
-            f"python3 -m agent_py_agent subagents-probe {run_id}",
-            f"python3 -m agent_py_agent subagent {run_id}",
+            f"{cli} subagents-probe {run_id}",
+            f"{cli} subagent {run_id}",
         ],
         "inspect_failure": [
-            f"python3 -m agent_py_agent subagent {run_id}",
+            f"{cli} subagent {run_id}",
         ],
         "classify_blocker": [
-            f"python3 -m agent_py_agent subagent {run_id}",
+            f"{cli} subagent {run_id}",
         ],
         "route_capability_request": [
-            f"python3 -m agent_py_agent subagent {run_id}",
+            f"{cli} subagent {run_id}",
         ],
         "triage_capability_gap": [
-            f"python3 -m agent_py_agent subagent {run_id}",
+            f"{cli} subagent {run_id}",
         ],
     }
-    return commands.get(action, [f"python3 -m agent_py_agent subagent {run_id}"])
+    return commands.get(action, [f"{cli} subagent {run_id}"])
 
 
 def _status_from_structured_output(parsed: SubAgentParsedOutput) -> str:

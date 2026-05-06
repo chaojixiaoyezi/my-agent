@@ -128,10 +128,9 @@ def get_running_pid(pid_path: Path, *, cleanup_stale: bool = True) -> int | None
                 pass
         return None
 
-    # Check process existence
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
+    # LLM: use the shared process-control helper so Windows avoids os.kill(pid, 0)
+    # while macOS/Linux keep the POSIX liveness path.
+    if not is_pid_alive(pid):
         if cleanup_stale:
             try:
                 pid_path.unlink()

@@ -1,0 +1,62 @@
+name: Cross-platform guard
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  focused:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - windows-latest
+        python-version:
+          - "3.12"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package and test tools
+        run: |
+          python -m pip install -U pip
+          python -m pip install -e ".[dev]"
+
+      - name: Compile Python sources
+        run: python -m compileall -q agent_py_agent scripts
+
+      - name: Run cross-platform focused tests
+        run: >
+          python -m pytest
+          agent_py_agent/tests/test_process_control.py
+          agent_py_agent/tests/test_daemon_control.py
+          agent_py_agent/tests/test_supervisor.py
+          agent_py_agent/tests/test_watchdog.py
+          agent_py_agent/tests/test_dispatch_loop.py
+          agent_py_agent/tests/test_policy_checks.py
+          agent_py_agent/tests/test_subagent_policies.py
+          agent_py_agent/tests/test_manager_patch.py
+          agent_py_agent/tests/test_agent/test_subagent_patch_review.py
+          -q
+
+      - name: Check docs sync
+        run: python scripts/check_doc_sync.py
+
+      - name: Check code size budget
+        run: python scripts/check_code_size.py --mode warn
+
+      - name: Check formatting whitespace
+        run: git diff --check

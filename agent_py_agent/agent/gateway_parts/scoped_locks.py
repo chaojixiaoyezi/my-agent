@@ -15,6 +15,7 @@ from .daemon_metadata import (
     _utc_now_iso,
     _write_json_file,
 )
+from .process_control import is_pid_alive
 
 
 def _get_lock_dir() -> Path:
@@ -53,9 +54,8 @@ def _lock_process_stale(existing: dict) -> bool:
     pid = _lock_pid(existing)
     if pid is None:
         return True
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
+    # LLM: scoped locks share the gateway process liveness helper for Windows/mac parity.
+    if not is_pid_alive(pid):
         return True
     current_start = _get_process_start_time(pid)
     recorded_start = existing.get("start_time")
@@ -133,8 +133,11 @@ def _release_lock_if_stale(lock_file: Path) -> bool:
         return False
     try:
         pid = int(record["pid"])
-        os.kill(pid, 0)
     except (ProcessLookupError, PermissionError, ValueError):
+        lock_file.unlink()
+        return True
+    # LLM: stale lock cleanup must use the same cross-platform PID probe as gateway status.
+    if not is_pid_alive(pid):
         lock_file.unlink()
         return True
     if _get_process_start_time(pid) != record.get("start_time"):

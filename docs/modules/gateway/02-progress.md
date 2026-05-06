@@ -34,6 +34,7 @@
 - delayed-response 场景解决了”响应已经落盘但队列里还有迟到请求副本时，可能重复执行模型”的回归风险。
 - PID tracking 解决了”旧 PID 可能被系统复用导致误判进程存活”的问题。
 - scoped locks 解决了”多实例同时启动导致文件冲突”的问题。
+- Windows 进程存活探测已统一走 gateway process-control helper：Windows 使用 Win32 process handle，macOS/Linux 保留 `os.kill(pid, 0)` 的 POSIX 路径。
 - supervisor 解决了”gateway 崩溃后无人重启”的问题。
 - adapter daemon 解决了”适配器需要前台运行，无法后台常驻”的问题。
 - 系统服务解决了”需要手动启动/停止，无法随系统自动启动”的问题。

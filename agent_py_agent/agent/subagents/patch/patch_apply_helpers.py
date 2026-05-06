@@ -7,8 +7,10 @@ Human version:
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,6 +21,17 @@ if TYPE_CHECKING:
 _PATCH_TEST_ALLOWED_PREFIXES = {"python", "python3", "pytest"}
 _PATCH_TEST_TIMEOUT_SECONDS = 120
 _PATCH_TEST_BLOCKED_CHARS = {"&", "|", ">", "<", "`"}
+
+
+def _patch_test_argv(command: str) -> list[str]:
+    """Build the argv used for a patch-apply test command."""
+
+    argv = shlex.split(command)
+    # LLM: Windows often exposes python3.exe as a Store shim; use the running
+    # interpreter for patch tests while leaving macOS/Linux python3 commands intact.
+    if os.name == "nt" and argv and argv[0] == "python3":
+        argv[0] = sys.executable
+    return argv
 
 
 def extract_patch_test_command(check: str) -> str:
@@ -64,7 +77,7 @@ def run_patch_apply_tests(
 
     results = []
     for command in commands:
-        argv = shlex.split(command)
+        argv = _patch_test_argv(command)
         try:
             completed = subprocess.run(
                 argv,
