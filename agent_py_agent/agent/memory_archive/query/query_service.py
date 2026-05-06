@@ -15,6 +15,7 @@ from .archive_helpers import _append_run_id, _dedupe_strings
 from .archive_io import _archive_files, _gateway_terminal_request_path, _read_archive_file
 from .filter_policy import ArchiveFilterOptions, evaluate_filters
 from .query_models import ArchiveQueryRequest, ArchiveQueryResponse, paginate_records
+from .task_sources import task_recovery_read_paths
 
 
 @dataclass(frozen=True)
@@ -105,18 +106,14 @@ def collect_task_payloads(agent, task_ids: list[str], *, limit: int) -> list[dic
         except (FileNotFoundError, json.JSONDecodeError, TypeError):
             payloads.append({"run_id": run_id, "exists": False, "error": "task not found"})
             continue
+        # LLM: use one compact-first source list for CLI resume and runtime resume.
+        paths = task_recovery_read_paths(task)
         payloads.append({
             "run_id": task.id, "exists": True, "status": task.status,
             "verification_status": task.verification_status, "goal": task.goal,
             "updated_at": task.updated_at, "task_dir": task.task_dir,
-            "recommended_read_paths": [
-                task.status_file, task.work_log_file, task.handoff_file,
-                task.acceptance_file, task.test_checklist_file, task.output_json,
-            ],
-            "authority_validation": _validate_task_fact_sources([
-                task.status_file, task.work_log_file, task.handoff_file,
-                task.acceptance_file, task.test_checklist_file, task.output_json,
-            ]),
+            "recommended_read_paths": paths,
+            "authority_validation": _validate_task_fact_sources(paths),
         })
     return payloads
 

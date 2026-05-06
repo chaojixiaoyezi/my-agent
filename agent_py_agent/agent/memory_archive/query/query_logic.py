@@ -17,6 +17,7 @@ from .archive_io import (
     _gateway_terminal_request_path,
     _read_archive_file,
 )
+from .task_sources import task_recovery_read_paths
 
 
 @dataclass(frozen=True)
@@ -224,14 +225,8 @@ def _task_payload(agent, run_id: str) -> dict[str, Any]:
     }
 
 def _task_read_paths(task) -> list[str]:
-    return [
-        task.status_file,
-        task.work_log_file,
-        task.handoff_file,
-        task.acceptance_file,
-        task.test_checklist_file,
-        task.output_json,
-    ]
+    # LLM: keep legacy query_logic callers aligned with query_service task sources.
+    return task_recovery_read_paths(task)
 
 def _validate_task_fact_sources(paths: list[str]) -> dict[str, Any]:
     missing = [path for path in paths if path and not Path(path).exists()]

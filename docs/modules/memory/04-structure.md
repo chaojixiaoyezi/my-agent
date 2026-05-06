@@ -30,6 +30,7 @@ agent_py_agent/cli/
 - `memory_archive/runtime.py`：把 run turn 的用户、助手、工具元数据写成 raw archive 事件。
 - `memory_archive/snapshots.py`：在 run/gateway/subagent 完成点写轻量恢复 snapshot，并提供压缩前必须成功的 `write_compression_snapshot()` hook。
 - `memory_archive/query.py`：把 raw/hook JSONL 读成统一可搜索记录，并整理 resume 线索。
+- `memory_archive/query/task_sources.py`：集中维护 subagent 恢复事实源优先级；checkpoint artifacts 优先，传统 `STATUS.md` / `HANDOFF.md` 继续保留。
 - `memory_archive/resume_brief.py`：把归档、LocalStore、任务事实源压成恢复简报。
 - `memory_archive/resume_context.py`：在“继续/恢复”类提示里按配置构造自动注入的恢复上下文。
 - `memory_archive/tokens.py`：为归档预算提供保守 token 估算，并维护 session 级 token 账本。
@@ -47,7 +48,7 @@ agent_py_agent/cli/
 5. token 预算逼近阈值时，run 主链路先写 `memory_archive/snapshots/*.json` 权威快照，再做组合压缩。
 6. 长任务和普通保存路径都会继续写 raw event / hook snapshot，方便恢复和审计。
 7. raw event、hook snapshot 和权威快照写完后都会读回校验，确保恢复线索真实落盘。
-8. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore 和任务事实源生成恢复块；跨天时会同时扫描最近 raw/hook 文件。
+8. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore 和任务事实源生成恢复块；跨天时会同时扫描最近 raw/hook 文件。subagent 任务会先推荐 `reports/checkpoint.json`、`status_report.json`、`progress.md` 等 compact recovery artifacts，再推荐 `STATUS.md`、`HANDOFF.md` 和 `output.json`。
 9. doctor 命令检查配置、route index、hook/raw/snapshot 目录和层级一致性 warning。
 10. `memory-compact --dry-run` 在真实压缩前只读扫描上述事实源，输出计划和风险，不修改文件。
 
@@ -67,7 +68,8 @@ LocalStore gateway_request
   -> 保存可搜索的 gateway 请求索引，不作为最终事实，只帮助找到 request_id
 
 subagents/<run_id>/
-  -> STATUS.md / WORK_LOG.md / HANDOFF.md / ACCEPTANCE.md / TEST_CHECKLIST.md 是最终恢复事实源
+  -> reports/checkpoint.json / status_report.json / progress.md 是 compact-first 恢复入口
+  -> STATUS.md / WORK_LOG.md / HANDOFF.md / ACCEPTANCE.md / TEST_CHECKLIST.md 是最终核对事实源
 
 gateway/requests/done/<request_id>.json 或 gateway/requests/failed/<request_id>.json
   -> gateway 请求的终态请求事实源；如果 LocalStore 里还是 processing 路径，resume 会尽量纠偏到这里
