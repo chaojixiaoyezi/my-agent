@@ -8,6 +8,7 @@
 - compression hook 已接入 `SimpleAgent.run()`：token 超阈值时先写 `memory_archive/snapshots/*.json` 权威快照，再做保守组合压缩。
 - `memory_archive/tokens/` 已开始按 session 记录每轮 input/output/tool token 和累计 token。
 - `memory-route`、`memory-doctor`、`memory archive` 相关 CLI 和测试已存在。
+- `memory-compact --dry-run` 已能只读扫描 raw/hook、权威 snapshot 和 token ledger，输出 compact plan、风险提示和下一步建议。
 - `memory-route --validate` 已能检查重复关键词、跨 route 冲突、死链和非法 `inject_mode`。
 - `memory-archive-list --level <N>` 已能按 archive level 验证不同粒度落盘。
 - capability gap 已接通 memory route，把相关长期规则路径补进子代理 `context_manifest.required_read_paths`。
@@ -53,6 +54,7 @@
 - authoritative snapshot JSON 解决了“hook JSONL 适合搜索但不适合作为严格恢复锚点”的问题。
 - capability gap 与长期规则联动解决了“子代理已经发现自己缺什么，但相关规则没有自动回流到执行上下文”的问题。
 - archive level 过滤和 session token 账本解决了“不同粒度无法直接验收、token 只能估一轮”的问题。
+- compact dry-run 解决了“还没压缩前不知道会碰到哪些归档、snapshot、token ledger 和风险”的问题；真实 apply 前可以先审计计划。
 
 ## 下一步
 

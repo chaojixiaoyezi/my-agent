@@ -145,6 +145,7 @@ Ctrl+C
 | `memory-archive-list` | 列出 raw/hook 归档记录 | 否 | 否 |
 | `memory-archive-search` | 按字段搜索 raw/hook 归档 | 否 | 否 |
 | `memory-resume` | 从归档、LocalStore 和任务目录生成恢复线索 | 否 | 否 |
+| `memory-compact` | 只读预演 memory compact 计划 | 否 | 否 |
 | `local-store-status` | 查看本地事实源状态 | 否 | 否 |
 | `local-search` | 搜索 SQLite/FTS5 本地事实源 | 否 | 否 |
 | `local-index-memory` | 把旧 JSONL 记忆补建到本地事实源 | 是 | 否 |
@@ -417,6 +418,35 @@ JSON 输出里会额外包含 `brief`：
 | `--source <source>` | - | 按来源精确过滤。 |
 | `--limit <n>` | `20` | 最多显示多少条线索。 |
 | `--context-only` | `false` | 只输出可交接/注入的恢复上下文块。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `memory-compact`
+
+```powershell
+my-agent memory-compact
+my-agent memory-compact --session-id sess-xxx --json
+my-agent memory-compact --request-id gwreq-xxx --limit 0
+my-agent memory-compact --apply
+```
+
+预演上下文压缩计划。当前版本只做 dry-run：扫描 `memory/raw`、`memory/hooks`、`memory_archive/snapshots` 和 `memory_archive/tokens`，汇总可压缩线索、权威 snapshot、token ledger、风险提示和下一步建议，不删除、不覆盖、不重写任何归档文件。
+
+`--apply` 当前会明确拒绝执行并返回非 0，用来防止误以为已经启用真实压缩。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--dry-run` | `true` | 只生成计划，不修改文件；当前唯一支持模式。 |
+| `--apply` | `false` | 预留真实应用入口；当前版本会拒绝执行。 |
+| `--layer <layer>` | `all` | 扫描哪一层归档，可选 `all`、`raw`、`hook`。 |
+| `--date <YYYY-MM-DD>` | - | 只扫描某一天。 |
+| `--since <time>` | - | 只看此时间之后的归档线索。 |
+| `--until <time>` | - | 只看此时间之前的归档线索。 |
+| `--session-id <id>` | - | 按 session_id 精确过滤 archive、snapshot 和 token ledger。 |
+| `--request-id <id>` | - | 按 request_id 精确过滤 archive 和 snapshot。 |
+| `--run-id <id>` | - | 按 run_id 精确过滤 archive 和 snapshot。 |
+| `--task-id <id>` | - | 按 task_id 精确过滤 archive 和 snapshot。 |
+| `--level <0|1|2|3>` | - | 只扫描指定 `archive_level` 的 raw/hook 记录。 |
+| `--limit <n>` | `50` | 最多纳入多少条归档记录；`0` 表示不限。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 
 ## `local-store-status`
