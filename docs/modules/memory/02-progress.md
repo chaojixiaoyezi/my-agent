@@ -24,6 +24,7 @@
 - gateway 真实后台进程跨天恢复演练已接入 `scenario-test --case gateway-cross-day-resume`，不再只依赖手写 fixture 证明恢复逻辑。
 - `memory-resume` 会把已移动的 gateway processing 请求路径纠偏到现存的 done/failed 终态路径，避免恢复提示指向过期临时文件。
 - parent/subagent runner 跨天恢复演练已接入 `scenario-test --case parent-subagent-cross-day-resume`：真实 runner 工具回合写回后，`memory-resume` 能回到任务事实源路径。
+- subagent checkpoint recovery artifacts 已进入 `memory-resume` 推荐路径：恢复简报会优先提示 `reports/checkpoint.json`、`status_report.json`、`progress.md`、`decision_ledger.json`、`failing_tests.json`、`next_actions.json`，再回到 `STATUS.md` / `HANDOFF.md` 等传统事实源。
 - **记忆推模式** (`memory_push.py`)：在关键决策点自动查询并注入相关记忆，实现"推模式"记忆系统。
   - `MemoryType` 枚举：`LESSON_GENERAL`、`LESSON_TASK`、`LESSON_TEMP`、`CONTEXT`、`FACT`
   - `push_relevant_memories()` 函数：根据触发类型搜索相关记忆
@@ -50,6 +51,7 @@
 - 真实 gateway 演练解决了“恢复测试只覆盖伪造请求，没有覆盖后台进程、request worker、response 落盘”的问题。
 - processing 路径纠偏解决了“LocalStore 记录的是处理中文件，但第二天文件已经归档到 done/failed”的恢复断链问题。
 - parent/subagent runner 演练解决了“只有手写跨天 fixture，还没证明真实 runner 写回后能被恢复入口找回”的缺口。
+- checkpoint-first 推荐解决了“恢复时只能读长 Markdown 事实源，不能先读 compact 可恢复摘要”的缺口；现在 compact 后可以先读结构化恢复包，再核对原始任务文件。
 - compression hook 门禁解决了“压缩前没有可靠快照也会继续执行，导致恢复锚点缺失”的问题。
 - authoritative snapshot JSON 解决了“hook JSONL 适合搜索但不适合作为严格恢复锚点”的问题。
 - capability gap 与长期规则联动解决了“子代理已经发现自己缺什么，但相关规则没有自动回流到执行上下文”的问题。
@@ -60,6 +62,7 @@
 
 - 扩展 `scripts/check_doc_sync.py` 后续规则时，继续保持 memory 的 `02-progress.md` 和 `04-structure.md` 同步更新。
 - 继续补损坏 snapshot、task 权威文件缺失、默认注入过多等异常场景联合测试。
+- 继续补 subagent checkpoint artifact 缺失、损坏和旧任务未保存新字段时的恢复降级测试。
 - 记忆推模式接入更多决策点：planner 决策前自动注入 context 类型记忆（已实现：subagent_mixin.py run_parent_planner 前调用 push_planning_memories）
 - 验证推模式记忆注入后 agent 行为是否正确改善
 
@@ -97,6 +100,7 @@
 - 本轮记忆闭环 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_memory_first_loop.py agent_py_agent/tests/test_memory_archive.py agent_py_agent/tests/test_memory_archive_runtime.py agent_py_agent/tests/test_memory_cli.py agent_py_agent/tests/test_memory_archive_cli.py agent_py_agent/tests/test_memory_routing.py agent_py_agent/tests/test_memory_runtime_basics.py agent_py_agent/tests/test_memory_runtime_archive.py agent_py_agent/tests/test_memory_routing_context.py agent_py_agent/tests/test_agent/test_subagent_lifecycle.py` -> `59 passed`。
 - 本轮记忆闭环全量回归：`python3 -m pytest -q` -> `365 passed`。
 - 本轮推模式 focused 验收：`python3 -m pytest agent_py_agent/tests/test_memory_push.py agent_py_agent/tests/test_dispatch_loop.py -q` -> `39 passed`。
+- 本轮 subagent checkpoint resume focused 验收：`python3 -m pytest agent_py_agent/tests/test_memory_archive_cli_query.py::test_memory_resume_cross_day_handoff_uses_task_fact_sources agent_py_agent/tests/test_memory_archive_cli.py::test_memory_resume_cross_day_handoff_uses_task_fact_sources agent_py_agent/tests/test_memory_runtime.py::test_auto_resume_context_recovers_cross_day_handoff_task -q`。
 
 ## 未跑测试
 

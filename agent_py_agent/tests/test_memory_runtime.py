@@ -373,6 +373,7 @@ def test_auto_resume_context_recovers_cross_day_handoff_task(tmp_path):
     assert result.memory_resume_context_matches >= 2
     assert "### Auto Recovery Context" in result.prompt
     assert task.id in result.prompt
+    assert "checkpoint.json" in result.prompt
     assert "HANDOFF.md" in result.prompt
     assert "latest_user_intent: 跨天 handoff runtime：继续昨天 worker" in result.prompt
 

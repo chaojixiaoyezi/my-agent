@@ -470,10 +470,13 @@ def test_memory_resume_cross_day_handoff_uses_task_fact_sources(tmp_path, capsys
     }
     assert payload["task_fact_sources"][0]["exists"] is True
     assert payload["task_fact_sources"][0]["run_id"] == task.id
+    assert any(path.endswith("reports/checkpoint.json") for path in payload["resume"]["recommended_read_paths"])
+    assert any(path.endswith("reports/progress.md") for path in payload["resume"]["recommended_read_paths"])
     assert any(path.endswith("STATUS.md") for path in payload["resume"]["recommended_read_paths"])
     assert any(path.endswith("HANDOFF.md") for path in payload["resume"]["recommended_read_paths"])
     assert payload["brief"]["latest_user_intent"] == "跨天 handoff：继续 memory worker 验收"
     assert payload["brief"]["related_ids"]["request_ids"] == ["request-cross-day"]
     assert payload["brief"]["related_ids"]["run_ids"] == [task.id]
     assert task.id in payload["brief"]["context_block"]
+    assert "checkpoint.json" in payload["brief"]["context_block"]
     assert "HANDOFF.md" in payload["brief"]["context_block"]
