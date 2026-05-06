@@ -8,6 +8,7 @@ from typing import Any
 
 from .fallback_state import ChatJob
 from .input_loop import is_show_prompt_command
+from .renderer import BLUE, BOLD, style_text
 from .rendering import _cprint, _tui_print_banner
 from .tui import (
     TuiExitRefs,
@@ -18,7 +19,6 @@ from .tui import (
     _tui_request_exit,
 )
 from .tui_params import MakeTuiAppParams, TuiHandleCommandParams
-from .renderer import BLUE, BOLD, style_text
 
 
 @dataclass
