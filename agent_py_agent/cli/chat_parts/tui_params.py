@@ -47,6 +47,7 @@ class WorkerConfigParams:
     assistant_outputs: list[str]
     thinking_line_ref: list
     stream_buf_ref: list
+    stream_visible_text_ref: list
     app_ref: list
     last_token_estimate_ref: list
     stop_event: threading.Event
@@ -72,6 +73,7 @@ class StartWorkerParams:
     assistant_outputs: list[str]
     thinking_line_ref: list
     stream_buf_ref: list
+    stream_visible_text_ref: list
     last_token_estimate_ref: list
     stop_event: threading.Event
 
@@ -119,4 +121,3 @@ class TuiRunParams:
     build_history_context: object
     session_manager: object
     current_session_id: str
-

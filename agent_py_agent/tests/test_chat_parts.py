@@ -81,6 +81,17 @@ def test_cprint_uses_plain_print_when_stdout_is_not_tty(monkeypatch, capsys):
     assert "hello" in capsys.readouterr().out
 
 
+def test_tui_stream_chunks_strip_ansi_but_keep_text(capsys):
+    from agent_py_agent.cli.chat_parts.tui_worker_stream import _append_stream_text
+
+    pending = [""]
+    _append_stream_text("\033[38;2;34;197;94mhello\033[0m", pending)
+
+    out = capsys.readouterr().out
+    assert out == "hello"
+    assert "\033[" not in out
+
+
 def test_tui_input_prompt_is_stable_separate_window(tmp_path) -> None:
     pytest.importorskip("prompt_toolkit")
     from agent_py_agent.cli.chat_parts.tui_ui_setup import (
@@ -94,3 +105,26 @@ def test_tui_input_prompt_is_stable_separate_window(tmp_path) -> None:
     assert input_area.window.get_line_prefix is None
     assert prompt_window.width == 2
     assert prompt_window.content.text == [("class:prompt", "❯ ")]
+
+
+def test_tui_transcript_sink_appends_and_follows(monkeypatch) -> None:
+    pytest.importorskip("prompt_toolkit")
+    from agent_py_agent.cli.chat_parts import rendering
+    from agent_py_agent.cli.chat_parts.tui_ui_setup import (
+        _install_transcript_sink,
+        _make_transcript_area,
+    )
+
+    area = _make_transcript_area()
+    follow = [True]
+    app = type("App", (), {"invalidated": False, "invalidate": lambda self: setattr(self, "invalidated", True)})()
+
+    _install_transcript_sink(area, follow, [app])
+    try:
+        rendering._cprint("\033[38;2;34;197;94mhello\033[0m")
+    finally:
+        rendering.set_tui_output_sink(None)
+
+    assert area.text == "hello\n"
+    assert area.buffer.cursor_position == len(area.text)
+    assert app.invalidated is True

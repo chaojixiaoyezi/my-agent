@@ -87,8 +87,9 @@ def _emit_chunk_line(cline: str, on_chunk: callable) -> int:
     cobj = json.loads(cline)
     chunk_text = cobj.get("text", "")
     if chunk_text:
-        on_chunk(chunk_text)
-    return 1
+        visible = on_chunk(chunk_text)
+        return 0 if visible is False else 1
+    return 0
 
 
 def check_gateway_alive(paths) -> bool:

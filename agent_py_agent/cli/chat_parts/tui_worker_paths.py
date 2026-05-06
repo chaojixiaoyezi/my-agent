@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 
 from .gateway_client import (
@@ -8,7 +9,7 @@ from .gateway_client import (
     poll_gateway_chunks,
     submit_chat_request,
 )
-from .renderer import GRAY, RESET
+from .renderer import GRAY, RESET, strip_ansi
 from .tui_worker_stream import (
     _flush_stream_buf,
     _maybe_record_response,
@@ -70,20 +71,48 @@ def _finish_gateway_response(
         _cprint("===== FINAL PROMPT =====")
         _cprint(response.get("prompt", ""))
         _cprint("===== RESPONSE =====")
-    _print_gateway_timing(ctx, request_id, response)
     if not response.get("ok"):
         _cprint(f"错误: {response.get('error', 'gateway 请求失败')}")
+        _print_gateway_timing(ctx, request_id, response)
         return "", False
     agent_response_text = _update_response_state(
         response, ctx.cfg.state_lock, ctx.cfg.last_token_estimate_ref
     )
-    response_recorded = _maybe_record_response(
-        agent_response_text, stream_has_visible_text, ctx.cfg.assistant_outputs, ctx.cfg.agent
+    response_recorded = _record_gateway_response(
+        ctx, agent_response_text, stream_has_visible_text
     )
-    if stream_has_visible_text and agent_response_text.strip():
-        ctx.cfg.assistant_outputs.append(agent_response_text)
-        response_recorded = True
+    _print_gateway_timing(ctx, request_id, response)
     return agent_response_text, response_recorded
+
+
+def _record_gateway_response(ctx, agent_response_text: str, stream_has_visible_text: bool) -> bool:
+    if not agent_response_text or not agent_response_text.strip():
+        return False
+    if not stream_has_visible_text:
+        return _maybe_record_response(
+            agent_response_text, stream_has_visible_text, ctx.cfg.assistant_outputs, ctx.cfg.agent
+        )
+    if not _stream_output_contains_response(ctx.cfg, agent_response_text):
+        from .fallback_ui import _render_assistant_response
+
+        _render_assistant_response(
+            agent_response_text, ctx.cfg.assistant_outputs, ctx.cfg.agent.config.agent_name
+        )
+        return True
+    ctx.cfg.assistant_outputs.append(agent_response_text)
+    return True
+
+
+def _stream_output_contains_response(cfg, response_text: str) -> bool:
+    streamed_text_ref = getattr(cfg, "stream_visible_text_ref", [""])
+    streamed_text = streamed_text_ref[0] if streamed_text_ref else ""
+    streamed_norm = _compact_visible_text(streamed_text)
+    response_norm = _compact_visible_text(response_text)
+    return bool(response_norm and response_norm in streamed_norm)
+
+
+def _compact_visible_text(text: str) -> str:
+    return re.sub(r"\s+", "", strip_ansi(text or ""))
 
 
 def _print_gateway_timing(ctx, request_id: str, response: dict) -> None:

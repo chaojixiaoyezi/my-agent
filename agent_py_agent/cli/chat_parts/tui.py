@@ -28,6 +28,7 @@ class TuiInputRefs:
     assistant_outputs: list[str]
     thinking_line_ref: list[str]
     stream_buf_ref: list[str]
+    stream_visible_text_ref: list[str]
     stop_event: threading.Event
 
 
@@ -179,12 +180,15 @@ def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
 
 
 def _run_tui_loop(ctx: TuiLoopContext) -> None:
+    from .rendering import set_tui_output_sink
+
     try:
         with patch_stdout():
             ctx.app.run()
     except (EOFError, KeyboardInterrupt):
         pass
     finally:
+        set_tui_output_sink(None)
         ctx.refresh_stop.set()
     ctx.stop_event.set()
     _cprint("\nGoodbye.")
@@ -242,6 +246,7 @@ def _make_start_worker_params(
         assistant_outputs=refs.assistant_outputs,
         thinking_line_ref=refs.thinking_line_ref,
         stream_buf_ref=refs.stream_buf_ref,
+        stream_visible_text_ref=refs.stream_visible_text_ref,
         last_token_estimate_ref=params.last_token_estimate_ref,
         stop_event=refs.stop_event,
     )
@@ -252,6 +257,7 @@ def run_tui(*, params: TuiRunParams) -> int:
     thinking_line_ref = [""]
     stop_event = threading.Event()
     stream_buf_ref = [""]
+    stream_visible_text_ref = [""]
     app_ref: list = [None]
     refresh_stop = threading.Event()
 
@@ -263,6 +269,7 @@ def run_tui(*, params: TuiRunParams) -> int:
         assistant_outputs=assistant_outputs,
         thinking_line_ref=thinking_line_ref,
         stream_buf_ref=stream_buf_ref,
+        stream_visible_text_ref=stream_visible_text_ref,
         stop_event=stop_event,
     )
     _start_worker_threads(params=_make_start_worker_params(params, refs))

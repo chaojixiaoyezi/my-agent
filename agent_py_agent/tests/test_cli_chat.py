@@ -321,6 +321,17 @@ class TestChatCommandArguments:
         args = parser.parse_args(["chat", "--gateway-timeout", "120.0"])
         assert args.gateway_timeout == 120.0
 
+    def test_chat_has_app_scrollback_flag(self):
+        """测试 chat 命令有 --app-scrollback 参数。"""
+        from agent_py_agent.cli.subcommands_basic import add_basic_subcommands
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="command")
+        add_basic_subcommands(sub)
+
+        args = parser.parse_args(["chat", "--app-scrollback"])
+        assert args.app_scrollback is True
+
     def test_chat_has_resume_context_switches(self):
         """测试 chat 命令有 resume-context 切换开关。
 

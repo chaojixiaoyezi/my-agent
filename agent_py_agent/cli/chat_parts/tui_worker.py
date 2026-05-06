@@ -32,6 +32,7 @@ class TuiWorkerConfig:
     assistant_outputs: list[str]
     thinking_line_ref: list
     stream_buf_ref: list
+    stream_visible_text_ref: list
     app_ref: list
     last_token_estimate_ref: list
     stop_event: Any
@@ -80,9 +81,11 @@ def _reset_worker_refs(cfg: TuiWorkerConfig) -> None:
         cfg.running_started_at_ref[0] = 0.0
     cfg.thinking_line_ref[0] = ""
     cfg.stream_buf_ref[0] = ""
+    cfg.stream_visible_text_ref[0] = ""
 
 
 def _tui_process_job(cfg: TuiWorkerConfig, job) -> tuple[str, bool]:
+    cfg.stream_visible_text_ref[0] = ""
     history_ctx = cfg.build_history_context()
     turn_inject = _build_turn_inject(job.inject, history_ctx)
     next_message_id = len(cfg.assistant_outputs) + 1
@@ -158,11 +161,15 @@ def _make_stream_callbacks(cfg: TuiWorkerConfig, next_message_id: int, spinner):
         _cprint(f"\n{GREEN}{cfg.agent.config.agent_name}#{next_message_id}>{RESET}")
         stream_started_ref[0] = True
 
-    def on_stream_chunk(chunk: str) -> None:
+    def on_stream_chunk(chunk: str) -> bool:
         if not chunk:
-            return
+            return False
+        from .renderer import strip_ansi
+
+        if not strip_ansi(chunk).strip():
+            return False
         begin_stream()
-        _append_stream_text(chunk, cfg.stream_buf_ref)
+        return _append_stream_text(chunk, cfg.stream_buf_ref, cfg.stream_visible_text_ref)
 
     return begin_stream, on_stream_chunk
 

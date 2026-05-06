@@ -87,6 +87,7 @@ def add_basic_subcommands(sub: argparse._SubParsersAction) -> None:
     chat.add_argument("--no-save", action="store_true", help="交互对话不自动保存到记忆")
     chat.add_argument("--gateway", action="store_true", help="把普通聊天消息投递给后台 gateway，而不是在当前前台进程里调用模型")
     chat.add_argument("--gateway-timeout", type=float, help="gateway 模式等待单条响应的秒数，默认使用配置 gateway_request_timeout")
+    chat.add_argument("--app-scrollback", action="store_true", help="使用应用内可滚动聊天历史，并固定状态栏和输入行")
     chat.add_argument("--session-id", help="恢复指定会话，不传则创建新会话")
     add_resume_context_switches(chat)
     chat.set_defaults(func=cmd_chat)

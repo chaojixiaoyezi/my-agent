@@ -90,6 +90,28 @@ def test_chat_gateway_poll_drains_chunks_when_response_is_ready(tmp_path):
     assert seen == ["hello", " world"]
 
 
+def test_chat_gateway_poll_does_not_count_invisible_chunks(tmp_path):
+    chunk_path = tmp_path / "req.chunks.jsonl"
+    response_path = tmp_path / "response.json"
+    chunk_path.write_text(
+        json.dumps({"text": "   \n"}) + "\n",
+        encoding="utf-8",
+    )
+    response_path.write_text(json.dumps({"ok": True, "response": "fallback"}), encoding="utf-8")
+
+    chunks_printed_ref = [0]
+    response = poll_gateway_chunks(
+        chunk_path,
+        response_path,
+        deadline=9999999999,
+        on_chunk=lambda _chunk: False,
+        chunks_printed_ref=chunks_printed_ref,
+    )
+
+    assert response["response"] == "fallback"
+    assert chunks_printed_ref == [0]
+
+
 def test_gateway_worker_continues_when_processing_lease_write_fails(tmp_path, monkeypatch):
     """A lease file write failure must not strand a user request in processing."""
 

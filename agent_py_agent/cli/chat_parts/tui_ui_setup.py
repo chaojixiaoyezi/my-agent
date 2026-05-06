@@ -8,8 +8,8 @@ from typing import Any
 
 from .fallback_state import ChatJob
 from .input_loop import is_show_prompt_command
-from .renderer import BLUE, BOLD, style_text
-from .rendering import _cprint, _tui_print_banner
+from .renderer import BLUE, BOLD, strip_ansi, style_text
+from .rendering import _cprint, _tui_print_banner, set_tui_output_sink
 from .tui import (
     TuiExitRefs,
     TuiStatusRefs,
@@ -25,6 +25,8 @@ from .tui_params import MakeTuiAppParams, TuiHandleCommandParams
 class TuiCreateKeybindingsParams:
 
     input_area: Any
+    transcript_area: Any | None
+    transcript_follow_ref: list[bool] | None
     agent: Any
     args: Any
     runtime_inject: list[Any]
@@ -47,6 +49,10 @@ class TuiCreateKeybindingsParams:
 class StatusBarConfig:
     refs: TuiStatusRefs
     model_name: str
+
+
+MAX_TRANSCRIPT_CHARS = 200_000
+TRANSCRIPT_SCROLL_LINES = 10
 
 
 def _tui_enqueue_job(
@@ -104,6 +110,41 @@ def _handle_enter_keybinding(event, params):
     _tui_enqueue_job(params, text)
 
 
+def _set_transcript_follow(params: TuiCreateKeybindingsParams, value: bool) -> None:
+    if params.transcript_follow_ref is not None:
+        params.transcript_follow_ref[0] = value
+
+
+def _move_transcript_cursor(area: Any, delta: int) -> None:
+    if area is None:
+        return
+    if delta < 0:
+        area.buffer.cursor_up(count=abs(delta))
+    elif delta > 0:
+        area.buffer.cursor_down(count=delta)
+
+
+def _scroll_transcript(params: TuiCreateKeybindingsParams, delta: int) -> None:
+    if params.transcript_area is None:
+        return
+    _set_transcript_follow(params, False)
+    _move_transcript_cursor(params.transcript_area, delta)
+
+
+def _scroll_transcript_home(params: TuiCreateKeybindingsParams) -> None:
+    if params.transcript_area is None:
+        return
+    _set_transcript_follow(params, False)
+    params.transcript_area.buffer.cursor_position = 0
+
+
+def _scroll_transcript_end(params: TuiCreateKeybindingsParams) -> None:
+    if params.transcript_area is None:
+        return
+    _set_transcript_follow(params, True)
+    params.transcript_area.buffer.cursor_position = len(params.transcript_area.text)
+
+
 def _handle_ctrl_c_keybinding(event, params):
     _tui_request_exit(
         TuiExitRefs(
@@ -132,11 +173,19 @@ def _handle_ctrl_d_keybinding(event, params):
 
 def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
     from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.keys import Keys
 
     kb = KeyBindings()
     kb.add("enter")(lambda e: _handle_enter_keybinding(e, params))
     kb.add("c-c")(lambda e: _handle_ctrl_c_keybinding(e, params))
     kb.add("c-d")(lambda e: _handle_ctrl_d_keybinding(e, params))
+    if params.transcript_area is not None:
+        kb.add("pageup")(lambda e: _scroll_transcript(params, -TRANSCRIPT_SCROLL_LINES))
+        kb.add("pagedown")(lambda e: _scroll_transcript(params, TRANSCRIPT_SCROLL_LINES))
+        kb.add("home")(lambda e: _scroll_transcript_home(params))
+        kb.add("end")(lambda e: _scroll_transcript_end(params))
+        kb.add(Keys.ScrollUp)(lambda e: _scroll_transcript(params, -3))
+        kb.add(Keys.ScrollDown)(lambda e: _scroll_transcript(params, 3))
     return kb
 
 
@@ -186,6 +235,46 @@ def _make_input_prompt_window() -> Any:
     )
 
 
+def _make_transcript_area() -> Any:
+    from prompt_toolkit.layout.dimension import Dimension
+    from prompt_toolkit.widgets import TextArea
+
+    return TextArea(
+        text="",
+        multiline=True,
+        read_only=True,
+        focusable=True,
+        focus_on_click=False,
+        wrap_lines=True,
+        scrollbar=True,
+        height=Dimension(weight=1),
+        style="class:transcript",
+    )
+
+
+def _install_transcript_sink(output_area: Any, follow_ref: list[bool], app_ref: list[Any]) -> None:
+    transcript = [""]
+    lock = threading.Lock()
+
+    def append_text(text: str) -> None:
+        cleaned = strip_ansi(text)
+        with lock:
+            transcript[0] += cleaned
+            if len(transcript[0]) > MAX_TRANSCRIPT_CHARS:
+                transcript[0] = transcript[0][-MAX_TRANSCRIPT_CHARS:]
+            output_area.text = transcript[0]
+            if follow_ref[0]:
+                output_area.buffer.cursor_position = len(output_area.text)
+        if app_ref[0] is not None:
+            app_ref[0].invalidate()
+
+    set_tui_output_sink(append_text)
+
+
+def _app_scrollback_enabled(args: Any) -> bool:
+    return bool(getattr(args, "app_scrollback", False))
+
+
 def make_tui_app(params: MakeTuiAppParams):
     from prompt_toolkit.application import Application
     from prompt_toolkit.key_binding import KeyBindings
@@ -210,25 +299,44 @@ def make_tui_app(params: MakeTuiAppParams):
     )
     input_area = _make_input_area(str(history_file))
 
+    use_app_scrollback = _app_scrollback_enabled(params.args)
+    output_area = _make_transcript_area() if use_app_scrollback else None
+    transcript_follow_ref = [True] if use_app_scrollback else None
+    input_row = VSplit([_make_input_prompt_window(), input_area])
+    body = (
+        [output_area, status_bar, Window(height=1), input_row]
+        if output_area is not None else [status_bar, Window(height=1), input_row]
+    )
+    layout = Layout(HSplit(body), focused_element=input_area)
+
     kb = _tui_create_keybindings(
         TuiCreateKeybindingsParams(
-            input_area, params.agent, params.args, params.runtime_inject, params.prompt_files, params.use_gateway, params.paths, params.state_lock, params.is_running_ref, params.pending_jobs_ref, params.running_prompt_ref, params.running_started_at_ref, params.shutting_down_ref, params.stop_event, params.assistant_outputs, params.jobs, params.pending_jobs_ref_for_enqueue
+            input_area, output_area, transcript_follow_ref, params.agent, params.args, params.runtime_inject, params.prompt_files, params.use_gateway, params.paths, params.state_lock, params.is_running_ref, params.pending_jobs_ref, params.running_prompt_ref, params.running_started_at_ref, params.shutting_down_ref, params.stop_event, params.assistant_outputs, params.jobs, params.pending_jobs_ref_for_enqueue
         )
     )
-
-    input_row = VSplit([_make_input_prompt_window(), input_area])
-    layout = Layout(HSplit([status_bar, Window(height=1), input_row]), focused_element=input_area)
 
     style = Style.from_dict(
         {
             "status-bar": "bg:#1a1a2e #8ec5ff bold",
+            "transcript": "#f8fafc",
             "input-area": "#f8fafc",
             "prompt": "#f8fafc bold",
         }
     )
 
+    app_ref: list[Any] = [None]
     app = Application(
-        layout=layout, key_bindings=kb, style=style, full_screen=False, mouse_support=False
+        layout=layout,
+        key_bindings=kb,
+        style=style,
+        full_screen=use_app_scrollback,
+        erase_when_done=False,
+        mouse_support=use_app_scrollback,
     )
+    if output_area is not None and transcript_follow_ref is not None:
+        app_ref[0] = app
+        _install_transcript_sink(output_area, transcript_follow_ref, app_ref)
+    else:
+        set_tui_output_sink(None)
 
     return app
