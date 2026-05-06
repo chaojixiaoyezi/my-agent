@@ -7,13 +7,14 @@ from __future__ import annotations
 """
 
 import subprocess
+import sys
 from pathlib import Path
 
 
 def test_check_code_size_warn_generates_report() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     result = subprocess.run(
-        ["python3", "scripts/check_code_size.py", "--mode", "warn"],
+        [sys.executable, "scripts/check_code_size.py", "--mode", "warn"],
         cwd=repo_root,
         text=True,
         capture_output=True,

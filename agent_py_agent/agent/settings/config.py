@@ -79,6 +79,7 @@ class AgentConfig:
     prompt_files: list[str] = field(default_factory=list)
     enable_subagents: bool = True
     max_subagents: int = 5
+    subagent_board_limit: int = 5
     subagent_workspace: str = "data/subagents"
     subagent_workflow_mode: str = "auto"
     subagent_builtin_workflows: bool = True

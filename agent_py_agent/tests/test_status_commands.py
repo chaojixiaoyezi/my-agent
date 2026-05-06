@@ -4,6 +4,9 @@
 """
 from __future__ import annotations
 
+import json
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -40,6 +43,50 @@ class TestCmdStatus:
              patch("agent_py_agent.cli.local_commands.build_status_suggestions", return_value=[]):
             result = cmd_status(args)
             assert result == 0
+
+    def test_status_json_does_not_report_running_when_gateway_process_is_dead(self, tmp_path: Path):
+        """旧 state 写着 running，但进程已不在时，状态应以进程存活为准。"""
+        from agent_py_agent.cli.local_commands import cmd_status
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.limit = 5
+        args.recent = False
+        args.json = True
+
+        mock_agent = MagicMock()
+        mock_agent.config.agent_name = "test_agent"
+        mock_agent.root = tmp_path
+        mock_agent.config.gateway_stale_seconds = 300
+        mock_agent.config.auto_detect_work_on_startup = False
+        mock_agent.config.subagent_board_limit = 5
+        mock_agent.local_store.stats.return_value = {
+            "record_count": 100,
+            "event_count": 50,
+            "fts5_enabled": True,
+            "db_path": str(tmp_path / "store.db"),
+        }
+        mock_agent.subagents.build_board.return_value = MagicMock(
+            summary={"total": 0},
+            hot_list=[],
+            recent=[],
+        )
+        mock_agent.local_store.timeline.return_value = []
+
+        stdout = StringIO()
+        with patch("agent_py_agent.cli.local_commands.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli.local_commands.gateway_paths", return_value=MagicMock(root=tmp_path, state=tmp_path / "state.json", heartbeat=tmp_path / "heartbeat.json")), \
+             patch("agent_py_agent.cli.local_commands.gateway_running", return_value=(None, False)), \
+             patch("agent_py_agent.cli.local_commands.read_json_file", side_effect=[{"status": "running"}, {}]), \
+             patch("agent_py_agent.cli.local_commands.gateway_request_counts", return_value={}), \
+             patch("agent_py_agent.cli.local_commands.build_status_suggestions", return_value=[]), \
+             redirect_stdout(stdout):
+            result = cmd_status(args)
+
+        assert result == 0
+        payload = json.loads(stdout.getvalue())
+        assert payload["gateway"]["alive"] is False
+        assert payload["gateway"]["status"] == "stopped"
 
     def test_status_with_recent_flag(self, tmp_path: Path):
         """带 --recent 标志显示最近项。"""

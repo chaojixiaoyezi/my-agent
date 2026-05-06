@@ -186,7 +186,8 @@ def cmd_status(args) -> int:
     heartbeat = read_json_file(paths.heartbeat)
     heartbeat_at = float(heartbeat.get("updated_at", 0) or 0)
     heartbeat_age = time.time() - heartbeat_at if heartbeat_at else 0
-    gateway_status = "running" if alive else gateway_state.get("status", "stopped")
+    state_status = gateway_state.get("status", "stopped")
+    gateway_status = "running" if alive else ("stopped" if state_status == "running" else state_status)
     if alive and heartbeat_at and heartbeat_age > agent.config.gateway_stale_seconds:
         gateway_status = "stale"
 
