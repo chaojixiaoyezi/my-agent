@@ -51,6 +51,8 @@ Task workspace 是任务事实源。后续开发新增任务级能力时，应�
 - `shared/findings.jsonl`、`shared/messages.jsonl`、`shared/evidence_packets/`：子代理协作和证据链。
 - `artifacts/`：工具输出、日志样本、报告、临时中间件。
 
+当前 Phase 0 已先落地文件系统 skeleton：subagent 保存时会在 manager workspace 下创建 `tasks/<root_id>/`，写入 `task.yaml`、`state.json`、`timeline.jsonl`、`summaries/current_summary.md`、`shared/blackboard.md`、`shared/messages.jsonl`、`shared/findings.jsonl`、`artifacts/` 和 `agents/<run_id>/legacy_run_ref.json`。这一步只做 adapter，旧 run 目录仍保留原样。
+
 ## Agent Run Workspace 要求
 
 每个子代理 run 有自己的目录。目录名可以方便阅读，但父子关系不能靠名字判断，必须靠字段：
@@ -127,10 +129,11 @@ Task workspace 是任务事实源。后续开发新增任务级能力时，应�
 - 已有 `SubAgentTask` 的 parent/root/depth、status report、checkpoint artifacts、evidence packets 和 findings。
 - 已有 LocalStore 作为索引层雏形。
 - 已新增子代理 `SKILL_SPARKS.md` 候选文件。
+- 已新增 `memory_archive/task_workspace.py`，先创建文件系统版 task workspace 和 legacy run adapter，保持旧 subagent 路径兼容。
 
 后续主要差距：
 
-- 旧 subagent workspace 尚未迁移到 `tasks/<task_id>/agents/<run_id>/`。
-- 尚未有标准 `task.yaml`、`agent.yaml`、`state.json`、`timeline.jsonl`、`compactions/` 链。
+- 旧 subagent workspace 尚未迁移到 `tasks/<task_id>/agents/<run_id>/`；当前只有 `legacy_run_ref.json` adapter。
+- task workspace 已有第一版 `task.yaml`、`state.json`、`timeline.jsonl`，但 `agent.yaml`、run-level `state.json/timeline.jsonl` 和 `compactions/` 链尚未落地。
 - shared blackboard/messages/locks 仍未系统化。
 - memory item 写入门禁、retention 清理和 skill spark 提升链路还未落地。

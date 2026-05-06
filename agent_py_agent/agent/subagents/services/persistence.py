@@ -29,6 +29,7 @@ from ..models import (
 )
 from ..utils import _apply_missing_paths, _read_json_object
 from .checkpoint_artifacts import build_checkpoint_artifact_payloads
+from .task_workspace_adapter import sync_task_workspace_fields
 
 
 def _field_names(model: type) -> set[str]:
@@ -246,6 +247,8 @@ class SubAgentPersistenceService:
         task.latest_status_report = build_status_report(task)
         output_payload = _read_json_object(Path(task.output_json)) if task.output_json else {}
         checkpoint_artifacts = build_checkpoint_artifact_payloads(task, output_payload)
+        # LLM: task workspace is an additive runtime-memory adapter; legacy paths stay canonical for now.
+        sync_task_workspace_fields(self.workspace, task)
         payload = json.dumps(asdict(task), ensure_ascii=False, indent=2)
         (task_dir / "task.json").write_text(payload, encoding="utf-8")
         (task_dir / "run.json").write_text(payload, encoding="utf-8")

@@ -43,6 +43,59 @@ def test_subagent_persistence_service_round_trips_task(tmp_path) -> None:
     assert (tmp_path / task.id / "SKILL_SPARKS.md").exists()
     assert loaded.checkpoint_ref == loaded.checkpoint_json
     assert loaded.skill_sparks_file.endswith("SKILL_SPARKS.md")
+    task_workspace = tmp_path / "tasks" / task.root_id
+    assert loaded.task_workspace_dir == str(task_workspace)
+    assert loaded.task_workspace_task_yaml == str(task_workspace / "task.yaml")
+    assert loaded.task_workspace_state_json == str(task_workspace / "state.json")
+    assert loaded.task_workspace_timeline_jsonl == str(task_workspace / "timeline.jsonl")
+    assert loaded.task_workspace_summary_file == str(task_workspace / "summaries" / "current_summary.md")
+    assert loaded.task_workspace_shared_dir == str(task_workspace / "shared")
+    assert loaded.task_workspace_artifacts_dir == str(task_workspace / "artifacts")
+    assert loaded.task_workspace_agents_dir == str(task_workspace / "agents")
+    assert loaded.agent_run_workspace_dir == str(task_workspace / "agents" / task.id)
+    assert loaded.legacy_run_ref_json == str(task_workspace / "agents" / task.id / "legacy_run_ref.json")
+
+
+def test_subagent_persistence_creates_task_workspace_skeleton(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+
+    task = manager.create_run(
+        goal="建立任务级运行记忆空间",
+        thought="旧工单目录不能移动，新空间只做 adapter。",
+        plan=["建 task workspace", "写兼容指针"],
+    )
+    task.status = "RUNNING"
+    task.progress = 0.5
+    task.current_step = "同步状态"
+    task.latest_summary = "已创建 task workspace 骨架。"
+    manager.save(task)
+
+    task_workspace = tmp_path / "tasks" / task.root_id
+    state = json.loads((task_workspace / "state.json").read_text(encoding="utf-8"))
+    legacy_ref = json.loads(
+        (task_workspace / "agents" / task.id / "legacy_run_ref.json").read_text(encoding="utf-8"),
+    )
+    timeline_lines = (task_workspace / "timeline.jsonl").read_text(encoding="utf-8").splitlines()
+    summary_md = (task_workspace / "summaries" / "current_summary.md").read_text(encoding="utf-8")
+
+    assert (task_workspace / "task.yaml").exists()
+    assert (task_workspace / "shared" / "blackboard.md").exists()
+    assert (task_workspace / "shared" / "messages.jsonl").exists()
+    assert (task_workspace / "shared" / "findings.jsonl").exists()
+    assert (task_workspace / "artifacts" / "tool_outputs").is_dir()
+    assert (task_workspace / "artifacts" / "log_samples").is_dir()
+    assert (task_workspace / "artifacts" / "code_snapshots").is_dir()
+    assert (task_workspace / "artifacts" / "reports").is_dir()
+    assert state["task_id"] == task.root_id
+    assert state["primary_run_id"] == task.id
+    assert state["status"] == "RUNNING"
+    assert state["progress"] == 0.5
+    assert state["legacy"]["task_json"].endswith(f"{task.id}/task.json")
+    assert legacy_ref["mode"] == "legacy_subagent_work_order_adapter"
+    assert legacy_ref["legacy_task_dir"] == str(tmp_path / task.id)
+    assert legacy_ref["agent_run_workspace_status"] == "pending_phase_1"
+    assert any(json.loads(line)["event"] == "task_workspace_synced" for line in timeline_lines)
+    assert "已创建 task workspace 骨架。" in summary_md
 
 
 def test_subagent_persistence_writes_checkpoint_recovery_artifacts(tmp_path) -> None:
