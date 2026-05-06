@@ -17,32 +17,24 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from code_size_ast_checks import check_class_node, check_function_node
 from code_size_report import write_report
 from code_size_rules import (
-    CLASS_HARD_LIMIT,
-    CLASS_SOFT_LIMIT,
     EXCLUDE_NAMES,
     EXCLUDE_PARTS,
     EXCLUDE_PREFIXES,
     EXCLUDE_SUFFIXES,
     FILE_HARD_LIMIT,
     FILE_SOFT_LIMIT,
-    FUNCTION_HARD_LIMIT,
-    FUNCTION_SOFT_LIMIT,
     HIGH_RISK_FILES,
     JUNK_NAME_BASELINE,
     JUNK_NAMES,
-    MIXIN_HARD_LIMIT,
-    MIXIN_SOFT_LIMIT,
-    NESTING_HARD_LIMIT,
-    NESTING_SOFT_LIMIT,
-    PARAM_HARD_LIMIT,
-    PARAM_SOFT_LIMIT,
     SOURCE_ROOTS,
     TEST_HARD_LIMIT,
     TEST_SOFT_LIMIT,
     Finding,
 )
+from code_size_thresholds import is_near_soft, limit_finding, near_soft_finding
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_PATH = ROOT / "CODE_SIZE_REPORT.md"
@@ -102,36 +94,6 @@ def _relative(path: Path) -> str:
     return path.relative_to(ROOT).as_posix()
 
 
-def _node_span(node: ast.AST) -> int:
-    start = getattr(node, "lineno", 0)
-    end = getattr(node, "end_lineno", start)
-    return max(0, end - start + 1)
-
-
-def _arg_count(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
-    args = node.args
-    positional_args = list(args.posonlyargs) + list(args.args)
-    implicit_receiver = 1 if positional_args and positional_args[0].arg in {"self", "cls"} else 0
-    return (
-        len(positional_args)
-        + len(args.kwonlyargs)
-        + (1 if args.vararg else 0)
-        + (1 if args.kwarg else 0)
-        - implicit_receiver
-    )
-
-
-def _max_nesting(node: ast.AST) -> int:
-    branch_nodes = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith, ast.Try, ast.Match)
-
-    def walk(current: ast.AST, depth: int) -> int:
-        next_depth = depth + 1 if isinstance(current, branch_nodes) else depth
-        child_depths = [walk(child, next_depth) for child in ast.iter_child_nodes(current)]
-        return max([next_depth, *child_depths])
-
-    return walk(node, 0)
-
-
 def _read_text_safe(path: Path) -> str | None:
     """Read a file as UTF-8, returning None on decode error."""
     try:
@@ -150,20 +112,19 @@ def _check_file_size(path: Path) -> list[Finding]:
     soft = TEST_SOFT_LIMIT if is_test else FILE_SOFT_LIMIT
     hard = TEST_HARD_LIMIT if is_test else FILE_HARD_LIMIT
     if line_count <= soft:
+        if is_near_soft(line_count, soft):
+            return [
+                near_soft_finding(
+                    "file",
+                    rel,
+                    path.name,
+                    line_count,
+                    soft,
+                    f"{rel} has {line_count} lines",
+                )
+            ]
         return []
-    severity = "hard" if line_count > hard else "soft"
-    limit = hard if severity == "hard" else soft
-    return [
-        Finding(
-            "file",
-            rel,
-            path.name,
-            line_count,
-            limit,
-            severity,
-            f"{rel} has {line_count} lines",
-        )
-    ]
+    return [limit_finding("file", rel, path.name, line_count, (soft, hard), f"{rel} has {line_count} lines")]
 
 
 def _check_ast(path: Path) -> list[Finding]:
@@ -181,25 +142,9 @@ def _check_ast(path: Path) -> list[Finding]:
         if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
             findings.append(Finding("import_star", rel, "*", 1, 0, "hard", "star import is forbidden"))
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            span = _node_span(node)
-            if span > FUNCTION_SOFT_LIMIT:
-                severity = "hard" if span > FUNCTION_HARD_LIMIT else "soft"
-                findings.append(Finding("function", rel, node.name, span, FUNCTION_HARD_LIMIT, severity, "function too long"))
-            params = _arg_count(node)
-            if params > PARAM_SOFT_LIMIT:
-                severity = "hard" if params > PARAM_HARD_LIMIT else "soft"
-                findings.append(Finding("params", rel, node.name, params, PARAM_HARD_LIMIT, severity, "too many parameters"))
-            nesting = _max_nesting(node)
-            if nesting > NESTING_SOFT_LIMIT:
-                severity = "hard" if nesting > NESTING_HARD_LIMIT else "soft"
-                findings.append(Finding("nesting", rel, node.name, nesting, NESTING_HARD_LIMIT, severity, "nesting too deep"))
+            findings.extend(check_function_node(rel, node))
         if isinstance(node, ast.ClassDef):
-            span = _node_span(node)
-            soft = MIXIN_SOFT_LIMIT if node.name.endswith("Mixin") else CLASS_SOFT_LIMIT
-            hard = MIXIN_HARD_LIMIT if node.name.endswith("Mixin") else CLASS_HARD_LIMIT
-            if span > soft:
-                severity = "hard" if span > hard else "soft"
-                findings.append(Finding("class", rel, node.name, span, hard, severity, "class too long"))
+            findings.extend(check_class_node(rel, node))
     return findings
 
 
@@ -331,7 +276,14 @@ def main() -> int:
         baseline_loaded=baseline_loaded,
     )
 
-    print(f"code-size findings: total={len(findings)} hard={len([f for f in findings if f.severity == 'hard'])} report={REPORT_PATH.relative_to(ROOT)} blocked={blocked}")
+    hard_count = len([f for f in findings if f.severity == "hard"])
+    high_risk_count = len([f for f in findings if f.severity == "high-risk"])
+    soft_count = len([f for f in findings if f.severity == "soft"])
+    print(
+        "code-size findings: "
+        f"total={len(findings)} hard={hard_count} high-risk={high_risk_count} "
+        f"soft={soft_count} report={REPORT_PATH.relative_to(ROOT)} blocked={blocked}"
+    )
 
     if blocked:
         for item in blockers:

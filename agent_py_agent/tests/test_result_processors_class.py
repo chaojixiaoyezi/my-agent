@@ -596,7 +596,7 @@ def test_append_runner_debrief_content_basic(tmp_path):
 
     _append_runner_debrief_content(task, parsed)
 
-    content = Path(task.debrief_file).read_text()
+    content = Path(task.debrief_file).read_text(encoding="utf-8")
     assert "Runner Structured Output" in content
     assert "Runner Artifacts" in content
     assert "Runner Lessons" in content

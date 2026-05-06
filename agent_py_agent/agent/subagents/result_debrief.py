@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# LLM: use explicit UTF-8 so Windows locale defaults cannot corrupt debrief files.
+
 """LLM: append structured runner output sections to the DEBRIEF file.
 
 给人看的解释：

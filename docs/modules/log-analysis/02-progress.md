@@ -1,3 +1,8 @@
+﻿## 2026-05-06 code-size guard cleanup
+- Split work-order planning dataclasses from `dispatch/work_orders/planning.py` into `dispatch/work_orders/models.py`.
+- Split detector entity comparison and entity extraction helpers from `analytics/detectors/classifiers.py` into `analytics/detectors/classifier_entities.py`.
+- Split trace-case query assembly from `tools/query_functions.py` into `tools/query_trace.py` while keeping the public tool API stable.
+- Current strict code-size gate reports `hard=0`, `soft=0`; near-soft items are now visible as high-risk warnings.
 # Log Analysis：开发推进记录
 
 ## 已完成

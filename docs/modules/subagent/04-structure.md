@@ -1,3 +1,7 @@
+﻿## 2026-05-06 structure update
+- `subagents/models.py` is now a compatibility facade over `model_capabilities.py`, `model_records.py`, `model_runtime.py`, and `model_task.py`.
+- `subagents/result_processors.py` delegates structured output handling to `result_structured.py` and output payload assembly to `result_payloads.py`.
+- `subagents/manager_base.py` delegates work-order filesystem concerns to `manager_work_orders.py`.
 # Subagent：结构树和详细说明
 
 ## 模块结构
