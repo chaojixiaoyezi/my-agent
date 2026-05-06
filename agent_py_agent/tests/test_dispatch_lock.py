@@ -76,7 +76,7 @@ class TestDispatchWatchLock:
 
         lock = _DispatchWatchLock(lock_path)
 
-        with pytest.raises(RuntimeError, match="dispatch watch lock 已存在"):
+        with pytest.raises(RuntimeError, match="dispatch watch lock already exists"):
             lock.__enter__()
 
     def test_force_lock_removes_existing(self, tmp_path: Path):
@@ -127,6 +127,36 @@ class TestDispatchWatchLock:
         with lock:
             payload = json.loads(lock_path.read_text(encoding="utf-8"))
             assert payload["pid"] == os.getpid()
+
+
+    def test_stale_lock_with_dead_pid_is_replaced(self, tmp_path: Path):
+        from agent_py_agent.agent.agent_core.dispatch_lock import _DispatchWatchLock
+
+        lock_path = tmp_path / "dispatch.lock"
+        lock_path.write_text(
+            json.dumps({"token": "old", "pid": 987654, "created_at": time.time()}),
+            encoding="utf-8",
+        )
+
+        with patch("agent_py_agent.agent.agent_core.dispatch_lock.is_pid_alive", return_value=False):
+            with _DispatchWatchLock(lock_path) as lock:
+                payload = json.loads(lock_path.read_text(encoding="utf-8"))
+
+        assert payload["token"] == lock.token
+        assert not lock_path.exists()
+
+    def test_live_lock_is_still_rejected(self, tmp_path: Path):
+        from agent_py_agent.agent.agent_core.dispatch_lock import _DispatchWatchLock
+
+        lock_path = tmp_path / "dispatch.lock"
+        lock_path.write_text(
+            json.dumps({"token": "live", "pid": 987654, "created_at": time.time()}),
+            encoding="utf-8",
+        )
+
+        with patch("agent_py_agent.agent.agent_core.dispatch_lock.is_pid_alive", return_value=True), \
+             pytest.raises(RuntimeError, match="dispatch watch lock"):
+            _DispatchWatchLock(lock_path).__enter__()
 
 
 class TestLockEdgeCases:
