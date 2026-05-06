@@ -33,6 +33,8 @@ def build_work_order_paths(
         "test_checklist_file": str(task_dir / "TEST_CHECKLIST.md"),
         "bugs_file": str(task_dir / "BUGS.md"),
         "skill_usage_file": str(task_dir / "SKILL_USAGE.md"),
+        # LLM: skill sparks are task-local learning candidates, never promoted automatically.
+        "skill_sparks_file": str(task_dir / "SKILL_SPARKS.md"),
         "handoff_file": str(task_dir / "HANDOFF.md"),
         "debrief_file": str(task_dir / "DEBRIEF.md"),
         "output_json": str(task_dir / "output.json"),
@@ -79,6 +81,7 @@ def ensure_work_order_files(task: SubAgentTask) -> None:
     _write_if_missing(Path(task.test_checklist_file), _TEST_CHECKLIST_TMPL)
     _write_if_missing(Path(task.bugs_file), _BUGS_TMPL)
     _write_if_missing(Path(task.skill_usage_file), _SKILL_USAGE_TMPL)
+    _write_if_missing(Path(task.skill_sparks_file), _skill_sparks_content(task))
     _write_if_missing(Path(task.handoff_file), _handoff_content(task))
     _write_if_missing(Path(task.debrief_file), _DEBRIEF_TMPL)
     _write_json_if_missing(Path(task.output_json), _OUTPUT_JSON_TMPL.format(task_id=task.id, status=task.status))
@@ -128,6 +131,7 @@ def validate_work_order(manager: Any, run_id: str) -> WorkOrderValidation:
         task.test_checklist_file,
         task.bugs_file,
         task.skill_usage_file,
+        task.skill_sparks_file,
         task.handoff_file,
         task.debrief_file,
         task.output_json,
@@ -178,6 +182,28 @@ def _handoff_content(task: SubAgentTask) -> str:
         f"- status: {task.status_file}\n"
         f"- acceptance: {task.acceptance_file}\n"
         f"- tests: {task.test_checklist_file}\n"
+    )
+
+
+def _skill_sparks_content(task: SubAgentTask) -> str:
+    return (
+        "# SKILL_SPARKS\n\n"
+        "这些条目只是本子代理工作目录里的 skill 学习候选，不写入主代理长期记忆，"
+        "也不会自动升级为正式 skill。\n\n"
+        "## Boundary\n\n"
+        f"- run_id: {task.id}\n"
+        f"- root_id: {task.root_id or task.id}\n"
+        "- scope: task-local\n"
+        "- promotion: requires review, evidence, and explicit later workflow\n\n"
+        "## Sparks\n\n"
+        "- 暂无\n\n"
+        "## Template\n\n"
+        "- title:\n"
+        "  trigger:\n"
+        "  reusable_steps:\n"
+        "  evidence_refs:\n"
+        "  limits_or_counterexamples:\n"
+        "  suggested_skill_area:\n"
     )
 
 

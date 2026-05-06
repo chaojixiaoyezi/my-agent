@@ -44,6 +44,7 @@ def test_subagents():
         assert Path(tasks[0].test_checklist_file).exists()
         assert Path(tasks[0].bugs_file).exists()
         assert Path(tasks[0].skill_usage_file).exists()
+        assert Path(tasks[0].skill_sparks_file).exists()
         assert Path(tasks[0].handoff_file).exists()
         assert Path(tasks[0].debrief_file).exists()
         assert Path(tasks[0].output_json).exists()

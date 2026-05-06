@@ -101,6 +101,8 @@ class SubAgentRunnerContextMixin:
             "test_checklist_file": task.test_checklist_file,
             "bugs_file": task.bugs_file,
             "skill_usage_file": task.skill_usage_file,
+            # LLM: runners may write task-local skill candidates, not global memory.
+            "skill_sparks_file": task.skill_sparks_file,
             "handoff_file": task.handoff_file,
             "debrief_file": task.debrief_file,
             "output_json": task.output_json,

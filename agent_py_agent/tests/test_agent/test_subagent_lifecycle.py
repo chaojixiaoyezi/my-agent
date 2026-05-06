@@ -134,6 +134,9 @@ def test_subagent_work_order_validation():
             assert Path(directory).is_dir()
         assert task.allowed_write_roots == [task.task_dir]
         assert str(Path.home() / "Downloads") in task.forbidden_write_roots
+        sparks = Path(task.skill_sparks_file).read_text(encoding="utf-8")
+        assert "promotion: requires review" in sparks
+        assert "task-local" in sparks
 
         Path(task.acceptance_file).unlink()
         broken = agent.subagents.validate_work_order(task.id)
