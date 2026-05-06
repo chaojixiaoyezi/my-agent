@@ -80,7 +80,6 @@ def _reset_worker_refs(cfg: TuiWorkerConfig) -> None:
         cfg.is_running_ref[0] = False
         cfg.running_prompt_ref[0] = ""
         cfg.running_started_at_ref[0] = 0.0
-    cfg.thinking_line_ref[0] = ""
     cfg.stream_buf_ref[0] = ""
     cfg.stream_visible_text_ref[0] = ""
 

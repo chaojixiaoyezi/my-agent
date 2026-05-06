@@ -67,9 +67,6 @@ COLLAPSE_PREVIEW_CHARS = 900
 def _tui_get_status_text(refs: TuiStatusRefs, model: str) -> str:
     with refs.state_lock:
         tokens = refs.last_token_estimate_ref[0]
-        thinking = refs.thinking_line_ref[0] if refs.thinking_line_ref else ""
-        started_at = refs.running_started_at_ref[0]
-        running = bool(refs.is_running_ref[0])
     pct = tokens / CONTEXT_WINDOW if CONTEXT_WINDOW else 0
     bar = progress_bar(pct)
     pieces = [
@@ -77,9 +74,26 @@ def _tui_get_status_text(refs: TuiStatusRefs, model: str) -> str:
         f"ctx {tokens / 1000:.1f}K/{CONTEXT_WINDOW / 1000:.0f}K",
         f"[{bar}] {pct:.0%}",
     ]
-    if thinking:
-        pieces.append(_format_thinking_status(thinking, started_at, running))
     return " | ".join(pieces)
+
+
+def _tui_get_activity_text(refs: TuiStatusRefs) -> str:
+    with refs.state_lock:
+        thinking = refs.thinking_line_ref[0] if refs.thinking_line_ref else ""
+        started_at = refs.running_started_at_ref[0]
+        running = bool(refs.is_running_ref[0])
+    if not thinking:
+        return ""
+    star = _format_activity_star(started_at, running)
+    return f"{star} {_format_thinking_status(thinking, started_at, running)}"
+
+
+def _format_activity_star(started_at: float, running: bool) -> str:
+    if not running or not started_at:
+        return "✦"
+    frames = ("✦", "✧", "✶", "✷")
+    elapsed = max(0.0, time.perf_counter() - started_at)
+    return frames[int(elapsed * 4) % len(frames)]
 
 
 def _format_thinking_status(thinking: str, started_at: float, running: bool) -> str:
