@@ -1,7 +1,6 @@
 """进程控制测试 - process_control.py 进程存活检测、终止信号、等待退出。"""
 from __future__ import annotations
 
-import os
 import signal
 import time
 from unittest.mock import MagicMock, patch
@@ -22,19 +21,58 @@ class TestIsPidAlive:
         from agent_py_agent.agent.gateway_parts.process_control import is_pid_alive
         assert is_pid_alive(-1) is False
 
-    @patch("os.kill")
-    def test_unix_process_alive(self, mock_kill):
+    def test_posix_process_alive(self, monkeypatch):
         """验证 Unix 下进程存活返回 True。"""
-        mock_kill.return_value = None
+        from agent_py_agent.agent.gateway_parts import process_control
         from agent_py_agent.agent.gateway_parts.process_control import is_pid_alive
+
+        mock_kill = MagicMock(return_value=None)
+        monkeypatch.setattr(process_control.os, "name", "posix")
+        monkeypatch.setattr(process_control.os, "kill", mock_kill)
+
         assert is_pid_alive(12345) is True
         mock_kill.assert_called_once_with(12345, 0)
 
-    @patch("os.kill")
-    def test_unix_process_dead(self, mock_kill):
+    def test_posix_process_dead(self, monkeypatch):
         """验证 Unix 下进程不存在返回 False。"""
-        mock_kill.side_effect = OSError("No such process")
+        from agent_py_agent.agent.gateway_parts import process_control
         from agent_py_agent.agent.gateway_parts.process_control import is_pid_alive
+
+        mock_kill = MagicMock(side_effect=OSError("No such process"))
+        monkeypatch.setattr(process_control.os, "name", "posix")
+        monkeypatch.setattr(process_control.os, "kill", mock_kill)
+
+        assert is_pid_alive(99999) is False
+
+    def test_windows_process_alive(self, monkeypatch):
+        """验证 Windows 下通过 OpenProcess/GetExitCodeProcess 检查存活。"""
+        from agent_py_agent.agent.gateway_parts import process_control
+        from agent_py_agent.agent.gateway_parts.process_control import is_pid_alive
+
+        kernel32 = MagicMock()
+        kernel32.OpenProcess.return_value = 123
+        kernel32.GetExitCodeProcess.side_effect = lambda _handle, exit_code: setattr(exit_code._obj, "value", 259) or True
+        windll = MagicMock(kernel32=kernel32)
+
+        monkeypatch.setattr(process_control.os, "name", "nt")
+        monkeypatch.setattr(process_control.ctypes, "windll", windll, raising=False)
+
+        assert is_pid_alive(12345) is True
+        kernel32.OpenProcess.assert_called_once()
+        kernel32.CloseHandle.assert_called_once_with(123)
+
+    def test_windows_process_missing(self, monkeypatch):
+        """验证 Windows 下 OpenProcess 失败时返回 False。"""
+        from agent_py_agent.agent.gateway_parts import process_control
+        from agent_py_agent.agent.gateway_parts.process_control import is_pid_alive
+
+        kernel32 = MagicMock()
+        kernel32.OpenProcess.return_value = 0
+        windll = MagicMock(kernel32=kernel32)
+
+        monkeypatch.setattr(process_control.os, "name", "nt")
+        monkeypatch.setattr(process_control.ctypes, "windll", windll, raising=False)
+
         assert is_pid_alive(99999) is False
 
 

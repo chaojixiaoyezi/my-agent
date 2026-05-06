@@ -142,6 +142,55 @@ class TestValidatePatchTestCommand:
         result = SubAgentPatchMixin._validate_patch_test_command("python3 -m pytest")
         assert result == ""
 
+    def test_patch_apply_tests_normalize_python3_on_windows(self, tmp_path, monkeypatch):
+        """LLM: Windows patch tests should avoid the python3 Store shim."""
+        from agent_py_agent.agent.subagents.patch import patch_apply_helpers as helpers
+
+        captured = {}
+
+        class Completed:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            captured["kwargs"] = kwargs
+            return Completed()
+
+        monkeypatch.setattr(helpers.os, "name", "nt")
+        monkeypatch.setattr(helpers.sys, "executable", r"C:\Python312\python.exe")
+        monkeypatch.setattr(helpers.subprocess, "run", fake_run)
+
+        results = helpers.run_patch_apply_tests(["python3 -c \"print('ok')\""], tmp_path)
+
+        assert results[0]["ok"] is True
+        assert captured["argv"][0] == r"C:\Python312\python.exe"
+        assert captured["argv"][1:] == ["-c", "print('ok')"]
+
+    def test_patch_apply_tests_keep_python3_on_posix(self, tmp_path, monkeypatch):
+        """LLM: macOS/Linux patch tests should keep the caller's python3 command."""
+        from agent_py_agent.agent.subagents.patch import patch_apply_helpers as helpers
+
+        captured = {}
+
+        class Completed:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            return Completed()
+
+        monkeypatch.setattr(helpers.os, "name", "posix")
+        monkeypatch.setattr(helpers.subprocess, "run", fake_run)
+
+        results = helpers.run_patch_apply_tests(["python3 -m pytest"], tmp_path)
+
+        assert results[0]["ok"] is True
+        assert captured["argv"][:3] == ["python3", "-m", "pytest"]
+
 
 class TestRollbackPatchApply:
     """测试补丁回滚函数。"""

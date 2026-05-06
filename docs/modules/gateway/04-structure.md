@@ -133,7 +133,8 @@ memory-resume 或 run(auto resume)
 5. 再看 `gateway_parts/recovery.py`，理解程序崩溃后怎么恢复。
 6. 再看 `agent_py_agent/tests/test_memory_archive_cli.py::test_memory_resume_cross_day_gateway_request_uses_response_fact_source`，理解 gateway 请求如何进入跨天恢复。
 7. 再看 `agent_py_agent/tests/test_scenario_gateway_resume.py`，理解真实后台 gateway 进程、多 worker、迟到 response 和 stale lease 如何被场景测试启动、投递、恢复和验收。
-8. 最后看 `agent_py_agent/tests/test_gateway_client.py`，理解怎样证明协议边界和失败降级没坏。
+8. 再看 `agent_py_agent/agent/gateway_parts/process_control.py`，理解 Windows process handle 和 macOS/Linux POSIX signal 探测如何统一成 `is_pid_alive()`。
+9. 最后看 `agent_py_agent/tests/test_gateway_client.py`，理解怎样证明协议边界和失败降级没坏。
 
 ## 当前第一版索引 / 待补齐
 
