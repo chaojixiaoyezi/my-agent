@@ -26,61 +26,70 @@ def _apply_int_fields(
     return warnings
 
 
+def _apply_bool_fields(
+    out: dict[str, object],
+    defaults: object,
+    keys: tuple[str, ...],
+) -> list[str]:
+    warnings: list[str] = []
+    for key in keys:
+        coerced, warn = CoercionService.coerce_bool(key, out.get(key), getattr(defaults, key))
+        out[key] = coerced
+        if warn:
+            warnings.append(warn)
+    return warnings
+
+
+def _apply_choice_field(
+    out: dict[str, object],
+    defaults: object,
+    key: str,
+    choices: tuple[str, ...],
+) -> list[str]:
+    coerced, warn = CoercionService.coerce_choice(key, out.get(key), getattr(defaults, key), choices)
+    out[key] = coerced
+    return [warn] if warn else []
+
+
+def _normalize_temperature(out: dict[str, object], defaults: object) -> list[str]:
+    raw_temp = out.get("temperature", defaults.temperature)
+    temp_val = _temperature_value(raw_temp)
+    if temp_val is not None and 0.0 <= temp_val <= 2.0:
+        out["temperature"] = raw_temp.strip() if isinstance(raw_temp, str) else str(temp_val)
+        return []
+    out["temperature"] = defaults.temperature
+    if temp_val is None:
+        return [f"temperature: expected a float string, got {raw_temp!r}; using {defaults.temperature}"]
+    return [f"temperature: expected 0.0-2.0, got {temp_val}; using {defaults.temperature}"]
+
+
+def _temperature_value(raw_temp: object) -> float | None:
+    if isinstance(raw_temp, str):
+        try:
+            return float(raw_temp.strip())
+        except ValueError:
+            return None
+    if isinstance(raw_temp, (int, float)):
+        return float(raw_temp)
+    return None
+
+
 class ModelFieldsService:
     """Normalize model-related config fields."""
 
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
-        """Normalize model-related config fields."""
-        warnings: list[str] = []
         out = dict(data)
-
-        def apply(key: str, coerced: object, warn: str | None) -> None:
-            out[key] = coerced
-            if warn:
-                warnings.append(warn)
-
-        # model_backend
-        v, w = CoercionService.coerce_choice(
-            "model_backend", out.get("model_backend"), defaults.model_backend,
+        warnings = _apply_choice_field(
+            out,
+            defaults,
+            "model_backend",
             ("echo", "anthropic_compatible", "openai_compatible"),
         )
-        apply("model_backend", v, w)
-
-        # request_timeout
-        v, w = CoercionService.coerce_int(
-            "request_timeout", out.get("request_timeout"), defaults.request_timeout,
-            min_val=1, max_val=600,
+        warnings.extend(
+            _apply_int_fields(out, defaults, (("request_timeout", 1, 600), ("max_tokens", 1, None)))
         )
-        apply("request_timeout", v, w)
-
-        # max_tokens
-        v, w = CoercionService.coerce_int(
-            "max_tokens", out.get("max_tokens"), defaults.max_tokens, min_val=1,
-        )
-        apply("max_tokens", v, w)
-
-        # temperature (stored as str in AgentConfig, but validate as float)
-        raw_temp = out.get("temperature", defaults.temperature)
-        if isinstance(raw_temp, str):
-            try:
-                temp_val = float(raw_temp.strip())
-                if 0.0 <= temp_val <= 2.0:
-                    out["temperature"] = raw_temp.strip()
-                else:
-                    warnings.append(f"temperature: expected 0.0-2.0, got {temp_val}; using {defaults.temperature}")
-                    out["temperature"] = defaults.temperature
-            except ValueError:
-                warnings.append(f"temperature: expected a float string, got {raw_temp!r}; using {defaults.temperature}")
-                out["temperature"] = defaults.temperature
-        elif isinstance(raw_temp, (int, float)):
-            temp_val = float(raw_temp)
-            if 0.0 <= temp_val <= 2.0:
-                out["temperature"] = str(temp_val)
-            else:
-                warnings.append(f"temperature: expected 0.0-2.0, got {temp_val}; using {defaults.temperature}")
-                out["temperature"] = defaults.temperature
-
+        warnings.extend(_normalize_temperature(out, defaults))
         return out, warnings
 
 
@@ -112,53 +121,18 @@ class DaemonFieldsService:
 
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
-        """Normalize daemon-related config fields."""
-        warnings: list[str] = []
         out = dict(data)
-
-        def apply(key: str, coerced: object, warn: str | None) -> None:
-            out[key] = coerced
-            if warn:
-                warnings.append(warn)
-
-        # daemon_interval
-        v, w = CoercionService.coerce_int(
-            "daemon_interval", out.get("daemon_interval"),
-            defaults.daemon_interval, min_val=1,
+        warnings = _apply_int_fields(
+            out,
+            defaults,
+            (
+                ("daemon_interval", 1, None),
+                ("daemon_limit", 0, None),
+                ("daemon_max_cycles", 0, None),
+                ("daemon_max_cards", 0, None),
+            ),
         )
-        apply("daemon_interval", v, w)
-
-        # daemon_limit
-        v, w = CoercionService.coerce_int(
-            "daemon_limit", out.get("daemon_limit"),
-            defaults.daemon_limit, min_val=0,
+        warnings.extend(
+            _apply_bool_fields(out, defaults, ("daemon_apply", "daemon_execute_runners"))
         )
-        apply("daemon_limit", v, w)
-
-        # daemon_max_cycles
-        v, w = CoercionService.coerce_int(
-            "daemon_max_cycles", out.get("daemon_max_cycles"),
-            defaults.daemon_max_cycles, min_val=0,
-        )
-        apply("daemon_max_cycles", v, w)
-
-        # daemon_max_cards
-        v, w = CoercionService.coerce_int(
-            "daemon_max_cards", out.get("daemon_max_cards"),
-            defaults.daemon_max_cards, min_val=0,
-        )
-        apply("daemon_max_cards", v, w)
-
-        # daemon_apply
-        v, w = CoercionService.coerce_bool(
-            "daemon_apply", out.get("daemon_apply"), defaults.daemon_apply,
-        )
-        apply("daemon_apply", v, w)
-
-        # daemon_execute_runners
-        v, w = CoercionService.coerce_bool(
-            "daemon_execute_runners", out.get("daemon_execute_runners"), defaults.daemon_execute_runners,
-        )
-        apply("daemon_execute_runners", v, w)
-
         return out, warnings

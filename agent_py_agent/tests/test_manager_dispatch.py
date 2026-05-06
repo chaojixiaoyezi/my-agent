@@ -410,8 +410,8 @@ class TestWriteParentPlannerExchange:
 
             assert Path(prompt_path).exists()
             assert Path(response_path).exists()
-            assert Path(prompt_path).read_text() == prompt
-            assert Path(response_path).read_text() == response
+            assert Path(prompt_path).read_text(encoding="utf-8") == prompt
+            assert Path(response_path).read_text(encoding="utf-8") == response
 
     def test_write_parent_planner_exchange_without_response(self):
         """验证只有 prompt 没有 response 时也能工作。"""
@@ -425,5 +425,5 @@ class TestWriteParentPlannerExchange:
             prompt_path, response_path = agent.subagents.write_parent_planner_exchange(prompt)
 
             assert Path(prompt_path).exists()
-            assert Path(prompt_path).read_text() == prompt
+            assert Path(prompt_path).read_text(encoding="utf-8") == prompt
             # response 文件不存在因为没有提供

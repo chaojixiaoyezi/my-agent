@@ -75,7 +75,6 @@ def _create_run_params(agent, params: dict[str, object], goal: str, allowed_tool
 
 
 class CreateSubagentsTool(BaseTool):
-    """主代理工具：把自然语言里的派工意图落成 subagent 工单。"""
 
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
@@ -186,7 +185,6 @@ class CreateSubagentsTool(BaseTool):
 
 
 class SubagentBoardTool(BaseTool):
-    """主代理工具：把当前子代理任务树摘要返回给模型。"""
 
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
@@ -246,7 +244,6 @@ class SubagentBoardTool(BaseTool):
 
 
 class DispatchSubagentsTool(BaseTool):
-    """主代理工具：从聊天里触发一轮父代理调度。"""
 
     def __init__(self, agent: SimpleAgent):
         self.agent = agent

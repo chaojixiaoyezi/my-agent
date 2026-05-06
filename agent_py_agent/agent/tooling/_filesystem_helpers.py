@@ -1,4 +1,3 @@
-"""Helper functions for filesystem tools."""
 
 from __future__ import annotations
 
@@ -38,12 +37,12 @@ def _optional_path(value: Any, *, default: str = ".") -> str:
 
 def _text_param(
     value: Any,
-    *,
-    name: str,
-    max_chars: int,
-    allow_empty: bool = False,
-    strip: bool = False,
+    **options: Any,
 ) -> str:
+    name = str(options.get("name", "value"))
+    max_chars = int(options.get("max_chars", _MAX_WRITE_TEXT_CHARS))
+    allow_empty = bool(options.get("allow_empty", False))
+    strip = bool(options.get("strip", False))
     if value is None:
         raise ValueError(f"缺少必填参数 {name}")
     if not isinstance(value, (str, int, float, bool)):
@@ -88,7 +87,6 @@ def _bool_param(value: Any, *, default: bool = False) -> bool:
 
 
 def _read_text_safe(path: Path) -> str | None:
-    """Read text file as UTF-8, returning None on error."""
     try:
         return path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
@@ -96,7 +94,6 @@ def _read_text_safe(path: Path) -> str | None:
 
 
 def _parse_count_param(value: Any) -> int:
-    """Parse count parameter, returning 1 on error."""
     if value is None:
         return 1
     try:

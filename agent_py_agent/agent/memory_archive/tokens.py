@@ -28,14 +28,6 @@ class TurnTokenUsage:
 
 @dataclass(frozen=True)
 class TokenBudgetResult:
-    """LLM: result of a token budget check against configured limits.
-
-    新手说明:
-    检查 token 预算后返回的状态对象。
-    `status` 有三种：ok（正常）、warning（接近上限）、block（已超限）。
-    `ratio` 是当前 token 占最大值的比例，0.0-1.0+。
-    `message` 是给人看的提示。
-    """
 
     status: str  # "ok" | "warning" | "block"
     current_tokens: int
@@ -56,20 +48,6 @@ def check_token_budget(
     max_tokens: int,
     archive_level: int = 3,
 ) -> TokenBudgetResult:
-    """LLM: check whether current token usage is within budget for the given archive level.
-
-    新手说明:
-    不同 archive level 有不同的告警和阻断阈值。
-    level 0（全量归档）最紧，因为存的内容多、消耗快；level 3（最小恢复）最松。
-    返回值里有 status 和 ratio，调用方可以据此决定是否触发压缩或提示用户。
-
-    参数说明:
-    `current_tokens` 是当前累计 token 估算；`max_tokens` 是配置的最大 token 上限；
-    `archive_level` 是 0-3 的归档等级。
-
-    返回说明:
-    返回 TokenBudgetResult，包含状态、比例和提示信息。
-    """
 
     level = max(0, min(3, int(archive_level) if not isinstance(archive_level, bool) else 3))
     if max_tokens <= 0:
@@ -104,18 +82,6 @@ def check_token_budget(
 
 
 def estimate_tokens(payload: Any) -> int:
-    """LLM: estimate token count conservatively without provider-specific tokenizers.
-
-    新手说明:
-    真正 token 数要看模型 tokenizer。
-    这里用字符、UTF-8 字节、中文字符和英文片段一起估算，宁愿稍微多算一点，也不要把上下文快满这件事看轻。
-
-    参数说明:
-    `payload` 可以是字符串、字典、列表或任何可转成字符串的对象。
-
-    返回说明:
-    返回至少为 1 的整数 token 估算值。
-    """
 
     text = _payload_to_text(payload)
     if not text:
@@ -134,11 +100,6 @@ def estimate_tokens(payload: Any) -> int:
 
 
 def token_ledger_dir(root: str | Path) -> Path:
-    """LLM: return the session token ledger directory used by compression budgeting.
-
-    新手说明:
-    每轮 token 预算要能累计到 session 级别，所以单独放一个目录存账本。
-    """
 
     return Path(root) / "memory_archive" / "tokens"
 
@@ -148,11 +109,6 @@ def append_session_token_usage(
     *,
     usage: TurnTokenUsage,
 ) -> dict[str, Any]:
-    """LLM: append one turn token estimate to the session ledger and return cumulative totals.
-
-    新手说明:
-    这里不追求数据库复杂度，只需要一个稳定 JSON 文件，让压缩判断知道"到目前为止大概用了多少"。
-    """
 
     path = token_ledger_dir(root) / f"{usage.session_id}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,17 +152,6 @@ def append_session_token_usage(
 
 
 def _payload_to_text(payload: Any) -> str:
-    """LLM: convert any payload into text before token estimation.
-
-    新手说明:
-    估算 token 前先把结构化对象变成 JSON 字符串；如果 JSON 序列化失败，就退回 `str()`。
-
-    参数说明:
-    `payload` 是待估算对象。
-
-    返回说明:
-    返回可用于字符统计的字符串。
-    """
 
     if isinstance(payload, str):
         return payload
@@ -217,17 +162,6 @@ def _payload_to_text(payload: Any) -> str:
 
 
 def _structured_overhead(payload: Any) -> int:
-    """LLM: add a small overhead for structured containers.
-
-    新手说明:
-    JSON 结构里的字段名、括号和分隔符也会消耗 token。这里按字段/元素数量补一点预算。
-
-    参数说明:
-    `payload` 是原始对象。
-
-    返回说明:
-    返回额外 token 估算值。
-    """
 
     if isinstance(payload, dict):
         return max(1, len(payload) // 2)
@@ -237,17 +171,6 @@ def _structured_overhead(payload: Any) -> int:
 
 
 def _is_cjk(char: str) -> bool:
-    """LLM: detect whether one character is in common CJK ranges.
-
-    新手说明:
-    中文字符通常不能按英文"四字符一个 token"粗算，所以单独统计。
-
-    参数说明:
-    `char` 是单个字符。
-
-    返回说明:
-    中文/日文/韩文常见汉字范围内返回 True，否则 False。
-    """
 
     codepoint = ord(char)
     return (

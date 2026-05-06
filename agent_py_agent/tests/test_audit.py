@@ -10,6 +10,33 @@ from pathlib import Path
 from agent_py_agent.agent.audit import AuditAction, AuditLogger, AuditQuery
 from agent_py_agent.agent.audit.logger import AuditStatus
 
+_AUDIT_QUERY_ROWS = (
+    ("audit_1", 100, "CREATE_TASK", "alice", "chat", "task-1", "success"),
+    ("audit_2", 50, "DISPATCH", "alice", "chat", "task-1", "success"),
+    ("audit_3", 30, "UPDATE_TASK", "bob", "feishu", "task-2", "success"),
+    ("audit_4", 10, "QUERY", "bob", "chat", "task-1", "denied"),
+)
+
+
+def _write_audit_query_data(audit_path: Path, audit_file: Path) -> None:
+    """Write standard audit query JSONL fixture."""
+    audit_path.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    with open(audit_file, "w", encoding="utf-8") as f:
+        for entry_id, offset, action, user_id, channel, target_id, status in _AUDIT_QUERY_ROWS:
+            entry = {
+                "entry_id": entry_id,
+                "timestamp": now - offset,
+                "action": action,
+                "user_id": user_id,
+                "channel": channel,
+                "target_type": "task",
+                "target_id": target_id,
+                "status": status,
+                "details": {},
+            }
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
 
 class TestAuditAction(unittest.TestCase):
     """审计动作枚举测试。"""
@@ -164,7 +191,7 @@ class TestAuditQuery(unittest.TestCase):
         self.config = self._create_config()
 
         # 创建一些测试数据
-        self._create_test_data()
+        _write_audit_query_data(self.audit_path, self.audit_file)
 
     def tearDown(self):
         import shutil
@@ -176,63 +203,6 @@ class TestAuditQuery(unittest.TestCase):
             audit_log_path = str(self.audit_path)
             audit_enabled = True
         return MockConfig()
-
-    def _create_test_data(self):
-        """创建测试数据。"""
-        self.audit_path.mkdir(parents=True, exist_ok=True)
-
-        now = time.time()
-
-        entries = [
-            {
-                "entry_id": "audit_1",
-                "timestamp": now - 100,
-                "action": "CREATE_TASK",
-                "user_id": "alice",
-                "channel": "chat",
-                "target_type": "task",
-                "target_id": "task-1",
-                "status": "success",
-                "details": {},
-            },
-            {
-                "entry_id": "audit_2",
-                "timestamp": now - 50,
-                "action": "DISPATCH",
-                "user_id": "alice",
-                "channel": "chat",
-                "target_type": "task",
-                "target_id": "task-1",
-                "status": "success",
-                "details": {},
-            },
-            {
-                "entry_id": "audit_3",
-                "timestamp": now - 30,
-                "action": "UPDATE_TASK",
-                "user_id": "bob",
-                "channel": "feishu",
-                "target_type": "task",
-                "target_id": "task-2",
-                "status": "success",
-                "details": {},
-            },
-            {
-                "entry_id": "audit_4",
-                "timestamp": now - 10,
-                "action": "QUERY",
-                "user_id": "bob",
-                "channel": "chat",
-                "target_type": "task",
-                "target_id": "task-1",
-                "status": "denied",
-                "details": {},
-            },
-        ]
-
-        with open(self.audit_file, "w", encoding="utf-8") as f:
-            for entry in entries:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     def test_query_all(self):
         """测试查询所有。"""

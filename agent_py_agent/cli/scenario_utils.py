@@ -24,7 +24,6 @@ from .common import ROOT, make_agent
 
 @dataclass
 class ScenarioPaths:
-    """一次隔离场景测试使用的目录集合。"""
 
     run_root: Path
     fixture_root: Path
@@ -33,7 +32,6 @@ class ScenarioPaths:
     summary_md: Path
 
 def create_scenario_workspace(args) -> ScenarioPaths:
-    """创建一次不会污染开发仓库的场景测试目录。"""
 
     parent = (
         Path(args.workspace).expanduser().resolve()
@@ -64,7 +62,6 @@ def create_scenario_workspace(args) -> ScenarioPaths:
 
 
 def write_scenario_fixture(fixture_root: Path) -> None:
-    """写一个足够小、可被真实 runner 安全读写的项目。"""
 
     (fixture_root / "README.md").write_text(
         "\n".join(
@@ -104,7 +101,6 @@ def write_scenario_config(
     request_timeout: float,
     max_subagents: int,
 ) -> None:
-    """基于当前配置写一份隔离配置，保留模型和 API 设置。"""
 
     base = source_config.read_text(encoding="utf-8")
     fixture = str(fixture_root).replace("\\", "/")
@@ -131,7 +127,6 @@ max_tool_rounds: 8
 
 
 def load_scenario_agent(config_path: Path) -> SimpleAgent:
-    """加载隔离配置对应的 agent。"""
 
     class Args:
         config = str(config_path)
@@ -140,7 +135,6 @@ def load_scenario_agent(config_path: Path) -> SimpleAgent:
 
 
 def build_scenario_prompt(count: int) -> str:
-    """构建主代理派工 prompt，尽量让真实模型稳定调用派工工具。"""
 
     return (
         "这是 my-agent 隔离全流程场景测试。你必须通过工具创建子代理工单，"
@@ -157,7 +151,6 @@ def build_scenario_prompt(count: int) -> str:
 
 
 def build_scenario_runner_instruction() -> str:
-    """给每个真实 runner 的稳定执行说明。"""
 
     return (
         "这是隔离全流程测试的 runner 阶段。你只能在当前 fixture 工作区内操作。\n"
@@ -176,17 +169,6 @@ def build_scenario_runner_instruction() -> str:
 
 
 def scenario_command(paths: ScenarioPaths, *parts: str) -> list[str]:
-    """LLM: build an isolated scenario CLI command that uses the generated config.
-
-    新手说明:
-    场景测试不能直接使用开发仓库的默认配置，否则会把 gateway、memory、subagent
-    写到真实项目里。这个小函数统一把 `--config <scenario_agent_config.yaml>` 带上，
-    后面启动 gateway、投递 ask、执行 memory-resume 都走同一个隔离工作区。
-    参数说明:
-    `paths` 是本次 scenario 的目录集合；`parts` 是 `my-agent` 子命令和参数。
-    返回说明:
-    返回可以交给 `subprocess.run()` 的命令列表。
-    """
 
     return [sys.executable, "-m", "agent_py_agent", "--config", str(paths.config), *parts]
 
@@ -198,11 +180,6 @@ def run_scenario_gateway_ask(
     timeout: float,
     save: bool = False,
 ) -> dict[str, object]:
-    """用隔离配置启动 gateway、投递一次 ask，然后关闭 gateway。
-
-    `save=False` 保持普通 scenario happy path 不污染 archive；需要验证恢复链路时传
-    `save=True`，让真实 gateway 请求写入 raw archive 和 recovery snapshot。
-    """
 
     env = os.environ.copy()
     env.setdefault("PYTHONUTF8", "1")
@@ -235,7 +212,6 @@ def run_scenario_gateway_ask(
 
 
 def run_scenario_subprocess(cmd: list[str], *, env: dict[str, str], timeout: float) -> subprocess.CompletedProcess:
-    """运行隔离场景里的 CLI 子命令，并把输出原样展示给用户观察。"""
 
     print("$", " ".join(cmd))
     completed = subprocess.run(
@@ -260,7 +236,6 @@ def print_scenario_step(index: int, title: str) -> None:
 
 
 def print_scenario_board(agent: SimpleAgent, *, limit: int) -> None:
-    """打印一份短看板，方便观察当前阶段。"""
 
     board = agent.subagents.write_board(recent_limit=limit)
     print("board_summary=" + json.dumps(board.summary, ensure_ascii=False, sort_keys=True))
@@ -284,12 +259,6 @@ def scenario_tasks_verified(agent: SimpleAgent, expected_count: int) -> bool:
 
 
 def collect_scenario_report_files(agent: SimpleAgent, fixture_root: Path, expected_count: int) -> list[Path]:
-    """LLM: collect physical scenario report artifacts from the current write-boundary locations.
-
-    给人看的解释：
-    真实 runner 现在不能随便往 fixture 项目根目录写文件，只能写自己的 task_dir。
-    这个函数负责去'真实允许写入的位置'找报告，同时兼容旧的 fixture_root/scenario_outputs。
-    """
 
     report_files: list[Path] = []
     seen: set[Path] = set()
@@ -303,12 +272,6 @@ def collect_scenario_report_files(agent: SimpleAgent, fixture_root: Path, expect
 
 
 def _scenario_report_candidates(tasks: list[SubAgentTask], fixture_root: Path) -> list[Path]:
-    """LLM: derive scenario report candidate paths from task dirs and legacy fixture output dir.
-
-    给人看的解释：
-    新规则下报告应该在每个子代理自己的目录里。
-    旧规则下报告可能在 fixture_project/scenario_outputs，所以这里也顺手找一下旧位置。
-    """
 
     candidates = list((fixture_root / "scenario_outputs").glob("*.md"))
     for task in tasks:
@@ -324,7 +287,6 @@ def write_scenario_summary(
     reason: str,
     extra: dict[str, object] | None = None,
 ) -> None:
-    """写机器可读和人类可读的场景测试摘要。"""
 
     payload = {
         "ok": ok,

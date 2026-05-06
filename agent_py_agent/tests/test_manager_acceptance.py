@@ -14,8 +14,15 @@ import pytest
 class _AcceptSetupMixin:
     """Setup helpers for acceptance tests (tests 1-5 share identical task fixture)."""
 
-    def _make_standard_task(self, tmp_path: Path, status: str = "AWAITING_ACCEPTANCE", verification_status: str = "NEEDS_ACCEPTANCE", channel_status: str = "OK", evidence: list | None = None) -> MagicMock:
+    def _make_standard_task(self, tmp_path: Path, **kwargs) -> MagicMock:
         """Create a standard task mock with all required fields."""
+        status = kwargs.pop("status", "AWAITING_ACCEPTANCE")
+        verification_status = kwargs.pop("verification_status", "NEEDS_ACCEPTANCE")
+        channel_status = kwargs.pop("channel_status", "OK")
+        evidence = kwargs.pop("evidence", None)
+        if kwargs:
+            raise TypeError(f"Unexpected task options: {sorted(kwargs)}")
+
         task = MagicMock()
         task.id = "test_task"
         task.status = status
@@ -46,8 +53,13 @@ class _AcceptSetupMixin:
 class _AcceptRunMixin:
     """Logic helpers for acceptance tests."""
 
-    def _review_with_fixtures(self, manager: MagicMock, task: MagicMock, tmp_path: Path, findings: list | None = None, apply: bool = False) -> MagicMock:
+    def _review_with_fixtures(self, manager: MagicMock, task: MagicMock, *_, **kwargs) -> MagicMock:
         """Configure manager mocks and call review_acceptance."""
+        findings = kwargs.pop("findings", None)
+        apply = kwargs.pop("apply", False)
+        if kwargs:
+            raise TypeError(f"Unexpected review options: {sorted(kwargs)}")
+
         manager.load = MagicMock(return_value=task)
         manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
         manager.acceptance_findings = MagicMock(return_value=findings or [])
@@ -180,6 +192,12 @@ class TestSubAgentAcceptanceMixin(_AcceptSetupMixin, _AcceptRunMixin, _AcceptAss
 
         assert record.applied is False
         assert "未写回" in record.message
+
+
+
+
+class TestSubAgentAcceptanceReportMixin(_AcceptSetupMixin, _AcceptRunMixin, _AcceptAssertMixin):
+    """测试 SubAgentAcceptanceMixin 类。"""
 
     def test_review_acceptances批量验收(self, tmp_path: Path):
         """批量验收多个任务。"""

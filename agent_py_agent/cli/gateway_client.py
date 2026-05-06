@@ -11,6 +11,7 @@ import argparse
 import json
 import sys
 import time
+from dataclasses import dataclass
 
 from ..agent.gateway import (
     GatewayAskParams,
@@ -31,19 +32,23 @@ from .gateway_process import cmd_gateway_start
 from .thinking_spinner import ThinkingSpinner
 
 
+@dataclass
+class GatewayAskContext:
+    agent: object
+    paths: object
+    request_id: str
+    request_path: object
+    response_path: object
+    timeout: float
+
+
 def cmd_gateway(args) -> int:
-    """gateway 命令族入口。"""
 
     print("请指定 gateway 子命令：start / supervisor-start / status / stop / restart / logs / ask / result / start-all。", file=sys.stderr)
     return 2
 
 
 def ensure_gateway_started(args) -> int:
-    """确保 gateway 后台进程正在运行；未运行时自动启动。
-
-    这是 `my-agent` 无参数默认入口的核心：用户只敲命令名时，不应该先学习
-    `gateway start`，程序会自己把后台值班进程拉起来。
-    """
 
     agent = make_agent(args)
     paths = gateway_paths(agent)
@@ -69,15 +74,12 @@ def ensure_gateway_started(args) -> int:
 
 
 def cmd_default(args) -> int:
-    """无子命令默认入口：自动启动 gateway，然后进入 gateway chat。"""
     code = ensure_gateway_started(args)
     if code:
         return code
-    if agent := make_agent(args):
-        if agent.config.auto_detect_work_on_startup:
-            code = _handle_active_work_prompt(agent)
-            if code:
-                return code
+    code = _maybe_handle_active_work(args)
+    if code:
+        return code
     args.gateway = True
     args.gateway_timeout = None
     args.inject = None
@@ -87,8 +89,14 @@ def cmd_default(args) -> int:
     return cmd_chat(args)
 
 
+def _maybe_handle_active_work(args) -> int | None:
+    agent = make_agent(args)
+    if not agent or not agent.config.auto_detect_work_on_startup:
+        return None
+    return _handle_active_work_prompt(agent)
+
+
 def _handle_active_work_prompt(agent) -> int | None:
-    """Detect active work on startup and prompt user; return exit code or None to continue."""
     from ..agent.startup_recovery import (
         detect_active_work,
         format_active_work_summary,
@@ -116,23 +124,26 @@ def _handle_active_work_prompt(agent) -> int | None:
 
 
 def _stream_chunk_lines(chunk_path: Path, chunks_printed: int, spinner) -> int:
-    """Stream chunk lines from chunk file; return updated count."""
     if not chunk_path.exists():
         return chunks_printed
     try:
         lines = chunk_path.read_text(encoding="utf-8").splitlines()
         for line in lines[chunks_printed:]:
-            if not line.strip():
-                continue
-            obj = json.loads(line)
-            if chunks_printed == 0:
-                spinner.stop()
-            sys.stdout.write(obj.get("text", ""))
-            sys.stdout.flush()
-            chunks_printed += 1
+            chunks_printed += _write_stream_chunk_line(line, chunks_printed, spinner)
     except (OSError, json.JSONDecodeError):
         pass
     return chunks_printed
+
+
+def _write_stream_chunk_line(line: str, chunks_printed: int, spinner) -> int:
+    if not line.strip():
+        return 0
+    obj = json.loads(line)
+    if chunks_printed == 0:
+        spinner.stop()
+    sys.stdout.write(obj.get("text", ""))
+    sys.stdout.flush()
+    return 1
 
 
 def _wait_for_gateway_response(
@@ -141,10 +152,6 @@ def _wait_for_gateway_response(
     deadline: float,
     spinner: ThinkingSpinner,
 ) -> dict[str, Any]:
-    """Poll for gateway response, streaming chunks along the way.
-
-    Returns the response dict if available, or empty dict on timeout.
-    """
     chunks_printed = 0
     response: dict[str, Any] = {}
 
@@ -158,20 +165,12 @@ def _wait_for_gateway_response(
     return response
 
 
-def _poll_gateway_response(
-    agent,
-    paths,
-    request_id: str,
-    request_path: Path,
-    response_path: Path,
-    timeout: float,
-) -> dict[str, Any]:
-    """Poll for gateway response with spinner. Returns response dict or empty on timeout."""
-    chunk_path = gateway_chunk_path(paths, request_id)
+def _poll_gateway_response(ctx: GatewayAskContext) -> dict[str, Any]:
+    chunk_path = gateway_chunk_path(ctx.paths, ctx.request_id)
     spinner = ThinkingSpinner()
     spinner.start()
-    deadline = time.time() + max(0.0, timeout)
-    response = _wait_for_gateway_response(chunk_path, response_path, deadline, spinner)
+    deadline = time.time() + max(0.0, ctx.timeout)
+    response = _wait_for_gateway_response(chunk_path, ctx.response_path, deadline, spinner)
     spinner.stop()
     return response
 
@@ -183,7 +182,6 @@ def _handle_gateway_timeout(
     response_path: Path,
     timeout: float,
 ) -> int:
-    """Handle gateway timeout. Returns exit code."""
     log_gateway_payload(
         agent,
         {
@@ -205,11 +203,6 @@ def _handle_gateway_timeout(
 
 
 def cmd_gateway_ask(args) -> int:
-    """向正在运行的 gateway 投递一条聊天请求。
-
-    这是未来聊天工具/TUI 的最小原型：
-    CLI 只是客户端，把用户消息写进 pending；真正调用模型的是后台 gateway 进程。
-    """
 
     agent = make_agent(args)
     paths = gateway_paths(agent)
@@ -238,7 +231,8 @@ def cmd_gateway_ask(args) -> int:
 
     # Synchronous mode: poll for streaming chunks and response file.
     timeout = args.timeout if args.timeout is not None else agent.config.gateway_request_timeout
-    response = _poll_gateway_response(agent, paths, request_id, request_path, response_path, timeout)
+    ask_ctx = GatewayAskContext(agent, paths, request_id, request_path, response_path, timeout)
+    response = _poll_gateway_response(ask_ctx)
 
     if not response:
         return _handle_gateway_timeout(agent, request_id, request_path, response_path, timeout)
@@ -246,11 +240,6 @@ def cmd_gateway_ask(args) -> int:
 
 
 def cmd_gateway_result(args) -> int:
-    """读取某个 gateway 请求的结果。
-
-    主要服务于 `gateway ask --no-wait`。普通用户以后在聊天工具里不需要手动查，
-    聊天适配器会拿这个 response 再发回对应会话。
-    """
 
     agent = make_agent(args)
     paths = gateway_paths(agent)

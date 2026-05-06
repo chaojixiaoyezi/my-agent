@@ -1,9 +1,3 @@
-"""LLM: 通道管理器 — 统一管理所有外部通道适配器，负责注册、启停和消息路由。
-
-给人看的解释：
-ChannelManager 像一个"通道控制面板"，它知道有哪些适配器，
-收到消息后把请求转发给 gateway，处理完再把结果发回用户。
-"""
 
 from __future__ import annotations
 
@@ -77,20 +71,22 @@ class ChannelManager:
     def start_all(self) -> None:
         """启动所有已注册的适配器。"""
         for adapter in self._adapters.values():
-            if not adapter.running:
-                try:
-                    adapter.start()
-                except Exception as exc:
-                    logger.error(f"启动适配器 {adapter.adapter_name} 失败: {exc}")
+            if adapter.running:
+                continue
+            try:
+                adapter.start()
+            except Exception as exc:
+                logger.error(f"启动适配器 {adapter.adapter_name} 失败: {exc}")
 
     def stop_all(self) -> None:
         """停止所有已注册的适配器。"""
         for adapter in self._adapters.values():
-            if adapter.running:
-                try:
-                    adapter.stop()
-                except Exception as exc:
-                    logger.error(f"停止适配器 {adapter.adapter_name} 失败: {exc}")
+            if not adapter.running:
+                continue
+            try:
+                adapter.stop()
+            except Exception as exc:
+                logger.error(f"停止适配器 {adapter.adapter_name} 失败: {exc}")
 
     # -------------------------------------------------------------------------
     # 消息路由

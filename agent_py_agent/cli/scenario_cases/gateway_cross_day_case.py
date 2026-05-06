@@ -34,7 +34,6 @@ from ..scenario_utils import (
 
 
 def _cross_day_setup(paths, args):
-    """Run a real gateway ask and resolve request/response paths."""
     prompt = "gateway cross-day resume drill: please return a short recoverable gateway response."
     print_scenario_step(1, "Run a real background gateway ask")
     gateway_payload = run_scenario_gateway_ask(paths, prompt, timeout=args.timeout, save=True)
@@ -58,7 +57,6 @@ def _cross_day_setup(paths, args):
 
 
 def _run_cross_day_resume(paths, request_id):
-    """Run memory-resume subprocess and return parsed payload."""
     env = os.environ.copy()
     env.setdefault("PYTHONUTF8", "1")
     env.setdefault("PYTHONIOENCODING", "utf-8")
@@ -77,7 +75,6 @@ def _run_cross_day_resume(paths, request_id):
 
 
 def _verify_cross_day_resume(resume_payload, returncode, request_id, request_path, response_path):
-    """Verify cross-day resume found the gateway fact sources."""
     gateway_sources = resume_payload.get("gateway_fact_sources", []) if isinstance(resume_payload, dict) else []
     recommended_reads = resume_payload.get("resume", {}).get("recommended_read_paths", []) if isinstance(resume_payload, dict) else []
     context_block = resume_payload.get("brief", {}).get("context_block", "") if isinstance(resume_payload, dict) else ""
@@ -94,12 +91,6 @@ def _verify_cross_day_resume(resume_payload, returncode, request_id, request_pat
 
 
 def run_scenario_gateway_cross_day_resume_case(args) -> int:
-    """LLM: run a real gateway ask, then verify cross-day memory-resume can recover its JSON facts.
-
-    新手说明:
-    先真正发一个 gateway 请求，拿到响应后模拟跨天恢复场景。
-    验证 memory-resume 命令能找回这个请求的 JSON 事实源。
-    """
 
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -148,11 +139,6 @@ def _append_gateway_cross_day_resume_clues(
     request_path: Path,
     response_path: Path,
 ) -> None:
-    """LLM: write deterministic cross-day archive clues for one real gateway request.
-
-    新手说明:
-    向归档系统写入模拟的跨天线索，让 memory-resume 命令能找到这个 gateway 请求的上下文。
-    """
 
     append_raw_event(
         root,

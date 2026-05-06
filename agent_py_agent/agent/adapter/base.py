@@ -1,9 +1,3 @@
-"""LLM: 通道适配器基类 — 所有外部通道适配器（飞书、QQ 等）必须继承的抽象基类。
-
-给人看的解释：
-定义统一的适配器接口：start、stop、send_message、on_message。
-通道管理器通过这些接口透明地操作所有适配器。
-"""
 
 from __future__ import annotations
 
@@ -15,14 +9,6 @@ from .protocol import IncomingMessage, OutgoingMessage
 
 
 class BaseChannelAdapter(ABC):
-    """外部通讯通道适配器的抽象基类。
-
-    所有具体通道适配器（FeishuAdapter、QQAdapter）必须实现：
-    - adapter_name: 通道名称
-    - start() / stop(): 启停适配器
-    - send_message(): 向用户发消息
-    - on_message(): 注册消息回调
-    """
 
     adapter_name: str = "base"
 

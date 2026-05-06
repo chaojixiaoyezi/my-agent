@@ -20,7 +20,6 @@ def audit_request_processing(
     agent: SimpleAgent,
     context: dict,
 ) -> None:
-    """Log the start of gateway request processing."""
     request = context["request"]
     log_gateway_payload(
         agent,
@@ -45,7 +44,6 @@ def audit_request_completed(
     request_path: Path,
     response_path: Path,
 ) -> None:
-    """Log gateway request completion (success or failure)."""
     event_type = (
         "gateway_request_completed" if response.get("ok") else "gateway_request_failed"
     )
@@ -64,7 +62,6 @@ def audit_request_queued(
     request_path: Path,
     response_path: Path,
 ) -> None:
-    """Log when a gateway request is queued."""
     log_gateway_payload(
         agent,
         {**payload, "status": "queued", "ok": False},
@@ -80,7 +77,6 @@ def audit_heartbeat_abandoned(
     failures: int,
     request_path: Path,
 ) -> None:
-    """Log when a lease heartbeat thread is abandoned after max failures."""
     log_gateway_payload(
         agent,
         {"id": request_id, "status": "heartbeat_abandoned", "failures": failures},
@@ -94,5 +90,4 @@ def audit_side_effect_error(
     request_id: str,
     exc: Exception,
 ) -> None:
-    """Report a gateway side-effect error (non-fatal)."""
     _report_gateway_side_effect_error(operation, request_id, exc)

@@ -57,19 +57,10 @@ class SubAgentActionService:
             if opts.apply:
                 self._append_action_apply_log(record)
 
-        summary: dict[str, int] = {"total": len(records)}
-        for record in records:
-            summary[record.action] = summary.get(record.action, 0) + 1
-            summary["ok" if record.ok else "failed"] = summary.get(
-                "ok" if record.ok else "failed", 0,
-            ) + 1
-            summary["applied" if record.applied else "dry_run"] = summary.get(
-                "applied" if record.applied else "dry_run", 0,
-            ) + 1
         return ActionApplyReport(
             generated_at=time.time(),
             dry_run=not opts.apply,
-            summary=summary,
+            summary=_action_apply_summary(records),
             records=records,
         )
 
@@ -88,24 +79,18 @@ class SubAgentActionService:
         try:
             task = self.manager.load(action.run_id)
         except FileNotFoundError as exc:
-            return ActionApplyRecord(
-                id=self.manager._new_id("apply"),
-                action_id=action.id, run_id=action.run_id, action=action.action,
-                dry_run=not opts.apply, applied=False, ok=False, message=str(exc),
-                created_at=now,
-            )
+            return _missing_task_action_record(self.manager, action, opts, now, exc)
 
         before_status = task.status
         before_channel_status = task.channel_status
         if not opts.apply:
-            return ActionApplyRecord(
-                id=self.manager._new_id("apply"),
-                action_id=action.id, run_id=action.run_id, action=action.action,
-                dry_run=True, applied=False, ok=True,
-                message=f"dry-run: would {action.action}",
-                before_status=before_status, after_status=before_status,
-                before_channel_status=before_channel_status, after_channel_status=before_channel_status,
-                evidence_paths=[task.task_dir], created_at=now,
+            return _dry_run_action_record(
+                self.manager,
+                action,
+                task,
+                now,
+                before_status=before_status,
+                before_channel_status=before_channel_status,
             )
 
         handler = self._action_dispatch().get(action.action)
@@ -216,3 +201,53 @@ class SubAgentActionService:
             },
             event_type="subagent_work_log_appended",
         )
+
+
+def _action_apply_summary(records: list[ActionApplyRecord]) -> dict[str, int]:
+    summary: dict[str, int] = {"total": len(records)}
+    for record in records:
+        summary[record.action] = summary.get(record.action, 0) + 1
+        status_key = "ok" if record.ok else "failed"
+        mode_key = "applied" if record.applied else "dry_run"
+        summary[status_key] = summary.get(status_key, 0) + 1
+        summary[mode_key] = summary.get(mode_key, 0) + 1
+    return summary
+
+
+def _missing_task_action_record(
+    manager: Any,
+    action: ActionPlanItem,
+    opts: ActionApplyOptions,
+    now: float,
+    exc: FileNotFoundError,
+) -> ActionApplyRecord:
+    from ..reports import ActionApplyRecord
+
+    return ActionApplyRecord(
+        id=manager._new_id("apply"),
+        action_id=action.id, run_id=action.run_id, action=action.action,
+        dry_run=not opts.apply, applied=False, ok=False, message=str(exc),
+        created_at=now,
+    )
+
+
+def _dry_run_action_record(
+    manager: Any,
+    action: ActionPlanItem,
+    task: SubAgentTask,
+    now: float,
+    *,
+    before_status: str,
+    before_channel_status: str,
+) -> ActionApplyRecord:
+    from ..reports import ActionApplyRecord
+
+    return ActionApplyRecord(
+        id=manager._new_id("apply"),
+        action_id=action.id, run_id=action.run_id, action=action.action,
+        dry_run=True, applied=False, ok=True,
+        message=f"dry-run: would {action.action}",
+        before_status=before_status, after_status=before_status,
+        before_channel_status=before_channel_status, after_channel_status=before_channel_status,
+        evidence_paths=[task.task_dir], created_at=now,
+    )

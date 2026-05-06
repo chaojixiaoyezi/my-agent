@@ -1,4 +1,3 @@
-"""Internal dispatch mixin pieces: facade + failure introspection."""
 
 from __future__ import annotations
 
@@ -16,22 +15,18 @@ if TYPE_CHECKING:
 
 
 class _DispatchFacadeMixin:
-    """Internal: state properties and watch_subagents facade only."""
 
     _has_pending_work: bool = False
     _consecutive_dispatch_rounds: int = 0
 
     @property
     def has_pending_work(self) -> bool:
-        """公开的待处理工作状态属性。"""
         return self._has_pending_work
 
     def _increment_dispatch_rounds(self) -> None:
-        """递增连续 dispatch 轮数。"""
         self._consecutive_dispatch_rounds += 1
 
     def _reset_dispatch_rounds(self) -> None:
-        """重置连续 dispatch 轮数。"""
         self._consecutive_dispatch_rounds = 0
 
     def watch_subagents(
@@ -42,7 +37,6 @@ class _DispatchFacadeMixin:
         params: WatchParams = None,
         **kwargs,
     ) -> DispatchWatchReport:
-        """以 watch 模式持续执行父代理调度."""
         if params is None:
             params = WatchParams()
         elif not isinstance(params, WatchParams):
@@ -74,10 +68,8 @@ class _DispatchFacadeMixin:
 
 
 class _DispatchFailureMixin:
-    """Internal: failure introspection after runner errors."""
 
     def _handle_failure_introspection(self, run_id, task_before, runner_result):
-        """失败后调用 LLM 自省，分析原因并给出调参建议。"""
         try:
             from .failure_analyzer import SubAgentFailureAnalyzer
 
@@ -106,7 +98,6 @@ class _DispatchFailureMixin:
             logging.getLogger(__name__).warning(f"Failure introspection failed: {exc}")
 
     def _apply_introspection_params(self, task, params):
-        """根据 LLM 自省结果调整任务参数。"""
         applied = []
         if "new_timeout_seconds" in params:
             task.attributes["dynamic_timeout_seconds"] = float(params["new_timeout_seconds"])
@@ -125,5 +116,4 @@ class _DispatchFailureMixin:
         return task
 
     def _update_pending_work_state(self) -> None:
-        """更新待处理工作状态。"""
         self._has_pending_work = update_pending_work_state(self)

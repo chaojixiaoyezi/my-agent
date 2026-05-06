@@ -1,9 +1,3 @@
-"""LLM: output rendering primitives for chat mode.
-
-给人看的解释：
-颜色、进度条、长回复折叠、启动横幅、终端分隔线都放在这里，
-方便 TUI 和 fallback 两个循环共用。
-"""
 
 from __future__ import annotations
 
@@ -23,13 +17,11 @@ CONTEXT_WINDOW = 200_000
 
 
 def progress_bar(ratio: float, width: int = 10) -> str:
-    """Return a compact terminal progress bar."""
     filled = int(ratio * width)
     return "█" * filled + "░" * (width - filled)
 
 
 def collapse_response_text(text: str) -> tuple[str, bool]:
-    """Return a terminal-friendly preview plus whether the text was collapsed."""
     lines = text.splitlines()
     if len(lines) <= COLLAPSE_PREVIEW_LINES and len(text) <= COLLAPSE_PREVIEW_CHARS:
         return text, False
@@ -42,7 +34,6 @@ def collapse_response_text(text: str) -> tuple[str, bool]:
 
 
 def startup_banner(agent_name: str, *, use_gateway: bool) -> str:
-    """Build a compact startup banner."""
     mode = "gateway client" if use_gateway else "local runtime"
     return "\n".join(
         [
@@ -55,7 +46,6 @@ def startup_banner(agent_name: str, *, use_gateway: bool) -> str:
 
 
 def terminal_rule(char: str = "─", *, fallback: int = 119) -> str:
-    """Return a colored horizontal terminal rule."""
     width = max(20, shutil.get_terminal_size(fallback=(fallback, 24)).columns)
     return f"{GRAY}{char * width}{RESET}"
 

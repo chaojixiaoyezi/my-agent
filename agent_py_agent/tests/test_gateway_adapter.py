@@ -10,6 +10,47 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _gateway_paths(tmp_path: Path):
+    from agent_py_agent.agent.gateway_parts.paths import GatewayPaths
+
+    return GatewayPaths(
+        root=tmp_path / "gateway",
+        pid=tmp_path / "gateway/gateway.pid",
+        adapter_pid=tmp_path / "gateway/adapter.pid",
+        state=tmp_path / "gateway/state.json",
+        heartbeat=tmp_path / "gateway/heartbeat.json",
+        stop_request=tmp_path / "gateway/stop.request",
+        log=tmp_path / "gateway/gateway.log",
+        inbox=tmp_path / "gateway/requests/pending",
+        processing=tmp_path / "gateway/requests/processing",
+        done=tmp_path / "gateway/requests/done",
+        failed=tmp_path / "gateway/requests/failed",
+        responses=tmp_path / "gateway/responses",
+        history=tmp_path / "gateway/history.jsonl",
+    )
+
+
+def _adapter_paths(root: Path):
+    from agent_py_agent.agent.gateway_parts.paths import AdapterPaths
+
+    return AdapterPaths(
+        root=root,
+        inbox=root / "inbox",
+        processing=root / "processing",
+        done=root / "done",
+        failed=root / "failed",
+        outbox=root / "outbox",
+    )
+
+
+def _write_adapter_messages(adapter_paths, count: int) -> None:
+    adapter_paths.inbox.mkdir(parents=True, exist_ok=True)
+    for i in range(count):
+        (adapter_paths.inbox / f"msg_{i}.json").write_text(
+            '{"message": "test"}', encoding="utf-8"
+        )
+
+
 class TestAdapterMessageId:
     """测试 _adapter_message_id() 函数。"""
 
@@ -184,32 +225,8 @@ class TestProcessFileAdapterOnce:
     def test_empty_inbox_returns_zero(self, tmp_path: Path):
         """空 inbox 返回 0。"""
         from agent_py_agent.agent.gateway_parts.adapter import process_file_adapter_once
-        from agent_py_agent.agent.gateway_parts.paths import AdapterPaths, GatewayPaths
-
-        gateway_paths = GatewayPaths(
-            root=tmp_path / "gateway",
-            pid=tmp_path / "gateway/gateway.pid",
-            adapter_pid=tmp_path / "gateway/adapter.pid",
-            state=tmp_path / "gateway/state.json",
-            heartbeat=tmp_path / "gateway/heartbeat.json",
-            stop_request=tmp_path / "gateway/stop.request",
-            log=tmp_path / "gateway/gateway.log",
-            inbox=tmp_path / "gateway/requests/pending",
-            processing=tmp_path / "gateway/requests/processing",
-            done=tmp_path / "gateway/requests/done",
-            failed=tmp_path / "gateway/requests/failed",
-            responses=tmp_path / "gateway/responses",
-            history=tmp_path / "gateway/history.jsonl",
-        )
-
-        adapter_paths = AdapterPaths(
-            root=tmp_path / "adapter",
-            inbox=tmp_path / "adapter/inbox",
-            processing=tmp_path / "adapter/processing",
-            done=tmp_path / "adapter/done",
-            failed=tmp_path / "adapter/failed",
-            outbox=tmp_path / "adapter/outbox",
-        )
+        gateway_paths = _gateway_paths(tmp_path)
+        adapter_paths = _adapter_paths(tmp_path / "adapter")
 
         mock_agent = MagicMock()
 
@@ -226,39 +243,12 @@ class TestProcessFileAdapterOnce:
     def test_limit_parameter(self, tmp_path: Path):
         """验证 limit 参数限制处理数量。"""
         from agent_py_agent.agent.gateway_parts.adapter import process_file_adapter_once
-        from agent_py_agent.agent.gateway_parts.paths import AdapterPaths, GatewayPaths
 
-        gateway_paths = GatewayPaths(
-            root=tmp_path / "gateway",
-            pid=tmp_path / "gateway/gateway.pid",
-            adapter_pid=tmp_path / "gateway/adapter.pid",
-            state=tmp_path / "gateway/state.json",
-            heartbeat=tmp_path / "gateway/heartbeat.json",
-            stop_request=tmp_path / "gateway/stop.request",
-            log=tmp_path / "gateway/gateway.log",
-            inbox=tmp_path / "gateway/requests/pending",
-            processing=tmp_path / "gateway/requests/processing",
-            done=tmp_path / "gateway/requests/done",
-            failed=tmp_path / "gateway/requests/failed",
-            responses=tmp_path / "gateway/responses",
-            history=tmp_path / "gateway/history.jsonl",
-        )
-
-        adapter_paths = AdapterPaths(
-            root=tmp_path / "adapter",
-            inbox=tmp_path / "adapter/inbox",
-            processing=tmp_path / "adapter/processing",
-            done=tmp_path / "adapter/done",
-            failed=tmp_path / "adapter/failed",
-            outbox=tmp_path / "adapter/outbox",
-        )
+        gateway_paths = _gateway_paths(tmp_path)
+        adapter_paths = _adapter_paths(tmp_path / "adapter")
 
         # 创建 3 条消息
-        for i in range(3):
-            (tmp_path / "adapter/inbox").mkdir(parents=True, exist_ok=True)
-            (tmp_path / "adapter/inbox" / f"msg_{i}.json").write_text(
-                '{"message": "test"}', encoding="utf-8"
-            )
+        _write_adapter_messages(adapter_paths, 3)
 
         mock_agent = MagicMock()
 

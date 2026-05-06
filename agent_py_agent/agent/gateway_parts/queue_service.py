@@ -7,6 +7,7 @@ file state transitions, and lease management that were previously in that file.
 """
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -27,15 +28,15 @@ from .recovery import _archive_gateway_request, _gateway_request_attempts
 if TYPE_CHECKING:
     from ...core import SimpleAgent
 
+_CLAIM_LOCK = threading.Lock()
+
 
 def gateway_running(paths: GatewayPaths) -> tuple[int, bool]:
-    """LLM contract: return gateway pid and liveness flag."""
     pid = get_running_pid(paths.pid)
     return pid, bool(pid)
 
 
 def wait_for_gateway_running(paths: GatewayPaths, timeout: float = 10.0) -> tuple[int, bool]:
-    """LLM contract: wait for a recently started gateway pid to become alive."""
     deadline = time.time() + max(0.0, timeout)
     last_pid = 0
     while True:
@@ -50,7 +51,6 @@ def wait_for_gateway_running(paths: GatewayPaths, timeout: float = 10.0) -> tupl
 
 
 def render_gateway_status(agent: SimpleAgent, paths: GatewayPaths) -> list[str]:
-    """LLM contract: build human-readable gateway status lines."""
     pid, alive = gateway_running(paths)
     state = read_json_file(paths.state)
     heartbeat = read_json_file(paths.heartbeat)
@@ -71,32 +71,70 @@ def render_gateway_status(agent: SimpleAgent, paths: GatewayPaths) -> list[str]:
 
 
 def rebuild_gateway_index(agent: SimpleAgent) -> int:
-    """LLM contract: rebuild LocalStore gateway records from queue/history files."""
+    paths = gateway_paths(agent)
+    return (
+        _rebuild_gateway_history_index(agent, paths)
+        + _rebuild_gateway_request_file_index(agent, paths)
+        + _rebuild_gateway_response_index(agent, paths)
+    )
+
+
+def _rebuild_gateway_history_index(agent: SimpleAgent, paths: GatewayPaths) -> int:
     from .logging import _index_gateway_payload
 
-    paths = gateway_paths(agent)
     count = 0
-    if paths.history.exists():
-        for line in paths.history.read_text(encoding="utf-8", errors="replace").splitlines():
-            if not line.strip():
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if _index_gateway_payload(agent, payload, response_path=gateway_response_path(paths, str(payload.get("id") or ""))):
-                count += 1
+    if not paths.history.exists():
+        return count
+    for line in paths.history.read_text(encoding="utf-8", errors="replace").splitlines():
+        payload = _payload_from_history_line(line)
+        if not payload:
+            continue
+        response_path = gateway_response_path(paths, str(payload.get("id") or ""))
+        if _index_gateway_payload(agent, payload, response_path=response_path):
+            count += 1
+    return count
+
+
+def _payload_from_history_line(line: str) -> dict:
+    if not line.strip():
+        return {}
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _rebuild_gateway_request_file_index(agent: SimpleAgent, paths: GatewayPaths) -> int:
+    count = 0
+    for request_path in _iter_gateway_request_files(paths):
+        if _index_gateway_request_file(agent, paths, request_path):
+            count += 1
+    return count
+
+
+def _iter_gateway_request_files(paths: GatewayPaths):
     for folder in (paths.inbox, paths.processing, paths.done, paths.failed):
-        for request_path in sorted(folder.glob("*.json")):
-            payload = read_json_file(request_path)
-            if not payload:
-                continue
-            request_id = str(payload.get("id") or request_path.stem)
-            response_path = gateway_response_path(paths, request_id)
-            response_payload = read_json_file(response_path)
-            merged = {**payload, **response_payload} if response_payload else payload
-            if _index_gateway_payload(agent, merged, request_path=request_path, response_path=response_path):
-                count += 1
+        yield from sorted(folder.glob("*.json"))
+
+
+def _index_gateway_request_file(agent: SimpleAgent, paths: GatewayPaths, request_path: Path) -> bool:
+    from .logging import _index_gateway_payload
+
+    payload = read_json_file(request_path)
+    if not payload:
+        return False
+    request_id = str(payload.get("id") or request_path.stem)
+    response_path = gateway_response_path(paths, request_id)
+    response_payload = read_json_file(response_path)
+    merged = {**payload, **response_payload} if response_payload else payload
+    return _index_gateway_payload(agent, merged, request_path=request_path, response_path=response_path)
+
+
+def _rebuild_gateway_response_index(agent: SimpleAgent, paths: GatewayPaths) -> int:
+    from .logging import _index_gateway_payload
+
+    count = 0
     for response_path in sorted(paths.responses.glob("*.json")):
         payload = read_json_file(response_path)
         if not payload:
@@ -107,7 +145,6 @@ def rebuild_gateway_index(agent: SimpleAgent) -> int:
 
 
 def ensure_gateway_folders(paths: GatewayPaths) -> None:
-    """Ensure all gateway queue folders exist."""
     paths.inbox.mkdir(parents=True, exist_ok=True)
     paths.processing.mkdir(parents=True, exist_ok=True)
     paths.done.mkdir(parents=True, exist_ok=True)
@@ -116,20 +153,21 @@ def ensure_gateway_folders(paths: GatewayPaths) -> None:
 
 
 def claim_request(paths: GatewayPaths, request_path: Path) -> Path | None:
-    """Atomically claim a request file by moving it to processing folder."""
     from .logging import _report_gateway_side_effect_error
 
     processing_path = paths.processing / request_path.name
-    try:
-        request_path.replace(processing_path)
-        return processing_path
-    except OSError as exc:
-        _report_gateway_side_effect_error("claim_gateway_request", request_path.stem, exc)
-        return None
+    with _CLAIM_LOCK:
+        if not request_path.exists() or processing_path.exists():
+            return None
+        try:
+            request_path.replace(processing_path)
+            return processing_path
+        except OSError as exc:
+            _report_gateway_side_effect_error("claim_gateway_request", request_path.stem, exc)
+            return None
 
 
 def archive_request(processing_path: Path, target_folder: Path, request_id: str) -> None:
-    """Archive a processing request to done or failed folder."""
     from .logging import _report_gateway_side_effect_error
 
     try:

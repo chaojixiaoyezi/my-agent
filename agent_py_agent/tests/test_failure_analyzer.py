@@ -153,6 +153,44 @@ class TestSubAgentFailureAnalyzer:
         assert analysis.suggested_action == "retry_with_same_timeout"
         assert analysis.should_retry is True
 
+
+
+
+
+
+
+
+
+class TestSubAgentFailureAnalyzerPersistentCases:
+    """测试失败分析器。"""
+
+    @pytest.fixture
+    def analyzer(self) -> SubAgentFailureAnalyzer:
+        """创建分析器实例。"""
+        return SubAgentFailureAnalyzer(max_timeout=600.0, max_retry_attempts=3)
+
+    @pytest.fixture
+    def sample_task(self) -> SubAgentTask:
+        """创建示例任务。"""
+        return SubAgentTask(
+            id="test-task-1",
+            goal="测试任务",
+            thought="测试思考",
+            plan=["步骤1", "步骤2", "步骤3"],
+        )
+
+    @pytest.fixture
+    def sample_result(self) -> SubAgentRunnerResult:
+        """创建示例 runner 结果。"""
+        return SubAgentRunnerResult(
+            run_id="test-task-1",
+            dry_run=False,
+            ok=False,
+            status="BLOCKED",
+            verification_status="UNVERIFIED",
+            message="测试失败",
+        )
+
     def test_analyze_channel_broken(self, analyzer: SubAgentFailureAnalyzer, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult) -> None:
         """测试通道损坏。"""
         sample_task.channel_status = "BROKEN"

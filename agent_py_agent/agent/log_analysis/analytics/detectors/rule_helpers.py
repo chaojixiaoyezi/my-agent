@@ -72,24 +72,13 @@ def _make_finding(
         params: Params bundle containing all finding construction args.
     """
     rule = get_rule(params.detector_id)
-    entities = _entities_from_events(params.evidence_events)
-    for key, values in (params.extra_entities or {}).items():
-        entities.setdefault(key, [])
-        entities[key].extend(_text(value) for value in values if _text(value))
-    entities = _normalize_entities(entities)
+    entities = _finding_entities(params)
     evidence_refs = [_evidence_ref(event) for event in params.evidence_events]
     window = list(_window_for_events(params.evidence_events))
-    payload_for_id = {
-        "detector_id": params.detector_id,
-        "window": window,
-        "entities": entities,
-        "evidence_refs": [ref.evidence_id for ref in evidence_refs],
-        "hypothesis": params.hypothesis,
-    }
     from ...models import Finding
 
     finding = Finding(
-        finding_id=_stable_id("finding", payload_for_id),
+        finding_id=_stable_id("finding", _finding_id_payload(params, window, entities, evidence_refs)),
         detector_id=params.detector_id,
         detector_kind=rule.detector_kind,
         window=window,
@@ -110,6 +99,29 @@ def _make_finding(
     )
     finding.mode = rule.mode
     return finding
+
+
+def _finding_entities(params: MakeFindingParams) -> dict[str, list[str]]:
+    entities = _entities_from_events(params.evidence_events)
+    for key, values in (params.extra_entities or {}).items():
+        entities.setdefault(key, [])
+        entities[key].extend(_text(value) for value in values if _text(value))
+    return _normalize_entities(entities)
+
+
+def _finding_id_payload(
+    params: MakeFindingParams,
+    window: list[str],
+    entities: dict[str, list[str]],
+    evidence_refs: Sequence[EvidenceRef],
+) -> dict[str, Any]:
+    return {
+        "detector_id": params.detector_id,
+        "window": window,
+        "entities": entities,
+        "evidence_refs": [ref.evidence_id for ref in evidence_refs],
+        "hypothesis": params.hypothesis,
+    }
 
 
 def _evidence_id(event: dict[str, Any]) -> str:

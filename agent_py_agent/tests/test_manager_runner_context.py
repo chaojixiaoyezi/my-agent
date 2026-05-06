@@ -368,6 +368,6 @@ def test_write_execution_context_json_content(mock_manager, tmp_path):
 
     mock_manager.write_execution_context(sample_task.id)
 
-    data = json.loads((tmp_path / "context.json").read_text())
+    data = json.loads((tmp_path / "context.json").read_text(encoding="utf-8"))
     assert data["run_id"] == "run-456"
     assert data["goal"] == "执行数据分析任务"

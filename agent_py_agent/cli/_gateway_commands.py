@@ -1,4 +1,3 @@
-"""Gateway commands: run, status, stop, restart, logs, and their helpers."""
 
 from __future__ import annotations
 
@@ -55,12 +54,10 @@ from .models import DaemonOptions
 
 
 def _resolve_gateway_options(agent, args):
-    """Resolve gateway run options from agent config and CLI args."""
     return _resolve_daemon_options(agent, args)
 
 
 def _write_gateway_state(paths, data: dict) -> None:
-    """Write gateway state JSON file."""
     write_json_file(paths.state, data)
 
 
@@ -70,19 +67,16 @@ def _write_gateway_state(paths, data: dict) -> None:
 
 
 def cmd_gateway_install(args) -> int:
-    """Install the gateway as a system service (systemd or launchd)."""
     success = install_service(force=args.force)
     return 0 if success else 1
 
 
 def cmd_gateway_uninstall(args) -> int:
-    """Uninstall the gateway system service (systemd or launchd)."""
     success = uninstall_service()
     return 0 if success else 1
 
 
 def cmd_gateway_start(args) -> int:
-    """Start gateway in background."""
     agent = make_agent(args)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)
@@ -111,7 +105,6 @@ def cmd_gateway_start(args) -> int:
 
 
 def cmd_gateway_run(args) -> int:
-    """内部命令：前台运行 gateway 后台循环。"""
     agent = make_agent(args)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)
@@ -159,7 +152,6 @@ def cmd_gateway_run(args) -> int:
 
 
 def cmd_gateway_status(args) -> int:
-    """显示 gateway 状态。"""
     agent = make_agent(args)
     paths = gateway_paths(agent)
     pid_record = read_pid_record(paths.pid)
@@ -192,7 +184,6 @@ def cmd_gateway_status(args) -> int:
 
 
 def cmd_gateway_stop(args) -> int:
-    """请求 gateway 正常停止。"""
     agent = make_agent(args)
     paths = gateway_paths(agent)
     pid = get_running_pid(paths.pid)
@@ -239,7 +230,6 @@ def cmd_gateway_stop(args) -> int:
 
 
 def cmd_gateway_restart(args) -> int:
-    """重启 gateway。"""
     stop_args = argparse.Namespace(
         config=args.config,
         timeout=args.timeout,
@@ -275,7 +265,6 @@ def cmd_gateway_restart(args) -> int:
 
 
 def cmd_gateway_logs(args) -> int:
-    """显示 gateway 日志。"""
     agent = make_agent(args)
     paths = gateway_paths(agent)
     if not paths.log.exists():

@@ -76,7 +76,6 @@ class SubAgentAcceptanceMixin:
         reviewer: str = "parent",
         note: str = "",
     ) -> AcceptanceReviewRecord:
-        """验收单个等待验收的子代理运行。"""
 
         task = self.load(run_id)
         return self._review_acceptance_task(
@@ -120,21 +119,10 @@ class SubAgentAcceptanceMixin:
             )
             for task in selected
         ]
-        summary: dict[str, int] = {"total": len(records)}
-        for record in records:
-            summary[record.decision] = summary.get(record.decision, 0) + 1
-            summary["ok" if record.ok else "failed"] = summary.get(
-                "ok" if record.ok else "failed",
-                0,
-            ) + 1
-            summary["dry_run" if record.dry_run else "applied"] = summary.get(
-                "dry_run" if record.dry_run else "applied",
-                0,
-            ) + 1
         return AcceptanceReviewReport(
             generated_at=time.time(),
             dry_run=not apply,
-            summary=summary,
+            summary=_acceptance_report_summary(records),
             records=records,
         )
 
@@ -147,7 +135,6 @@ class SubAgentAcceptanceMixin:
         note: str = "",
         limit: int = 0,
     ) -> AcceptanceReviewReport:
-        """写出验收报告，并在 apply 时写回任务状态。"""
 
         report = self.review_acceptances(
             run_ids,
@@ -186,11 +173,9 @@ class SubAgentAcceptanceMixin:
         reviewer: str,
         note: str,
     ) -> AcceptanceReviewRecord:
-        """对单个任务执行验收判断，并按需写回状态。"""
         return review_acceptance_task(self, task, apply=apply, reviewer=reviewer, note=note)
 
     def _write_acceptance_record_files(self, record: AcceptanceReviewRecord) -> None:
-        """把单个验收记录写进对应任务目录。"""
 
         try:
             task = self.load(record.run_id)
@@ -212,7 +197,6 @@ class SubAgentAcceptanceMixin:
             handle.write(f"- message: {record.message}\n")
 
     def _append_acceptance_review_log(self, record: AcceptanceReviewRecord) -> None:
-        """写入全局验收审计日志。"""
 
         jsonl = self.workspace / "subagent_acceptance_log.jsonl"
         append_jsonl(jsonl, asdict(record))
@@ -227,3 +211,14 @@ class SubAgentAcceptanceMixin:
                 f"applied={record.applied} message={record.message}\n"
             )
         self._index_acceptance_review(record)
+
+
+def _acceptance_report_summary(records: list[AcceptanceReviewRecord]) -> dict[str, int]:
+    summary: dict[str, int] = {"total": len(records)}
+    for record in records:
+        summary[record.decision] = summary.get(record.decision, 0) + 1
+        status_key = "ok" if record.ok else "failed"
+        mode_key = "dry_run" if record.dry_run else "applied"
+        summary[status_key] = summary.get(status_key, 0) + 1
+        summary[mode_key] = summary.get(mode_key, 0) + 1
+    return summary

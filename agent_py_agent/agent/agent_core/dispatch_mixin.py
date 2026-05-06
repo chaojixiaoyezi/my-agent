@@ -2,11 +2,12 @@ from __future__ import annotations
 
 """LLM: thin facade for SimpleAgent parent-dispatch and watch-loop orchestration.
 
-给人看的解释：
-这个文件是调度 facade，所有实现都代理到 service 模块。
-保持 mixin 签名完全兼容，业务逻辑委托给 dispatch_service、planner_service、runner_gate、acceptance_gate。
+缁欎汉鐪嬬殑瑙ｉ噴锛?
+杩欎釜鏂囦欢鏄皟搴?facade锛屾墍鏈夊疄鐜伴兘浠ｇ悊鍒?service 妯″潡銆?
+淇濇寔 mixin 绛惧悕瀹屽叏鍏煎锛屼笟鍔￠€昏緫濮旀墭缁?dispatch_service銆乸lanner_service銆乺unner_gate銆乤cceptance_gate銆?
 """
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..capabilities import CapabilityRouter
@@ -14,6 +15,14 @@ from ..capability_config import CapabilityConfig
 from ..subagent import DispatchReport
 from .dispatch_facade import _DispatchFacadeMixin, _DispatchFailureMixin
 from .dispatch_params import DispatchContext, DispatchParams, RunnerBatchContext, WatchParams
+from .dispatch_record_params import (
+    AcceptanceRecordParams,
+    ActionApplyRecordParams,
+    CapabilityRouteRecordParams,
+    PatchReviewRecordParams,
+    WorkflowRecordParams,
+)
+from .dispatch_runner_batches import execute_runner_jobs
 
 if TYPE_CHECKING:
     pass
@@ -30,34 +39,36 @@ from .dispatch_service import (
 from .failure_introspector import FailureIntrospector
 from .planner_service import combine_runner_instruction
 from .runner_dispatch import (
-    RunnerDispatchRecordParams,
     _dispatch_patch_review_run_ids,
-    _dispatch_runner_candidates,
-    _runner_dispatch_record,
-    _runner_max_attempts,
-    _runner_retry_reason,
-)
-from .runner_gate import (
-    ConcurrentRunnerParams,
-    SingleRunnerParams,
-    get_task_timeout,
-    handle_runner_failure,
-    resolve_runner_config,
-    run_concurrent_runners,
-    run_single_runner,
 )
 from .services import notify_completed_tasks
 
 # ---------------------------------------------------------------------------
-# Internal mixin classes – each ≤ 250 lines
+# Internal mixin classes 鈥?each 鈮?250 lines
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class RunnerJobExecutionParams:
+    ctx: DispatchContext
+    execute_runners: bool
+    max_cards: int
+    probe: bool
+    existing_records: list
+
+
+@dataclass(frozen=True)
+class DispatchFinalizeParams:
+    apply: bool
+    reviewer: str
+    note: str
+    limit: int
+    existing_records: list
+
+
 class _DispatchCollectionBase:
-    """Internal: collect and finalize dispatch records."""
 
     def _collect_dispatch_records(self, ctx: DispatchContext):
-        """Collect records for non-runner dispatch steps."""
         records = []
 
         if ctx.planner:
@@ -79,188 +90,70 @@ class _DispatchCollectionBase:
 
         if ctx.normalized_workflow_mode in {"plan", "auto"}:
             workflow_records = build_workflow_records(
-                self, self.subagents.list_runs(), ctx.normalized_workflow_mode, ctx.limit, ctx.apply
+                WorkflowRecordParams(
+                    self,
+                    self.subagents.list_runs(),
+                    ctx.normalized_workflow_mode,
+                    ctx.limit,
+                    ctx.apply,
+                )
             )
             records.extend(workflow_records)
 
         records.append(make_due_check_record(self, ctx.cfg, ctx.apply))
         action_records = make_action_apply_records(
-            self, ctx.cfg, ctx.apply, ctx.take_over_by, ctx.locked_files, ctx.limit
+            ActionApplyRecordParams(
+                self,
+                ctx.cfg,
+                ctx.apply,
+                ctx.take_over_by,
+                ctx.locked_files,
+                ctx.limit,
+            )
         )
         records.extend(action_records)
         route_records = make_capability_route_records(
-            self, ctx.router, ctx.cfg, ctx.apply, ctx.limit
+            CapabilityRouteRecordParams(self, ctx.router, ctx.cfg, ctx.apply, ctx.limit)
         )
         records.extend(route_records)
         return records
 
-    def _collect_runner_candidates(
-        self, ctx: DispatchContext, runner_max_attempts: int, runner_candidates: list
-    ) -> tuple[list, list]:
-        """Collect runner candidates and pending jobs."""
-        pending_runner_jobs, dry_records = [], []
-        for task in runner_candidates:
-            before = self.subagents.load(task.id)
-            retry_reason = _runner_retry_reason(before, runner_max_attempts)
-            action_name = "retry_runner" if retry_reason else "execute_runner"
-            if not ctx.apply:
-                dry_records.append(
-                    self.subagents.make_dispatch_record(
-                        step="runner", action=action_name, run_id=task.id,
-                        dry_run=True, applied=False, ok=True,
-                        message=(
-                            f"dry-run: 将重试 runner（{retry_reason}）。"
-                            if retry_reason
-                            else "dry-run: apply 时会生成执行上下文；带 --execute-runners 时会调用模型。"
-                        ),
-                        before_status=before.status, after_status=before.status,
-                        before_verification_status=before.verification_status,
-                        after_verification_status=before.verification_status,
-                        evidence_paths=[before.task_dir],
-                    )
-                )
-                continue
-            pending_runner_jobs.append((task.id, before, retry_reason))
-        return dry_records, pending_runner_jobs
-
     def _execute_runner_jobs(
-        self, ctx: DispatchContext, execute_runners: bool,
-        max_cards: int, probe: bool, existing_records: list,
+        self, params: RunnerJobExecutionParams,
     ) -> list:
-        """Execute runner jobs and return updated records."""
-        records = list(existing_records)
-        effective_runner_instruction = ctx.runner_instruction
-        runner_max_attempts = _runner_max_attempts(self.config.runner_failure_policy)
-        runner_candidates = _dispatch_runner_candidates(
-            self.subagents.list_runs(), ctx.max_runners, runner_max_attempts=runner_max_attempts
+        batch_ctx = RunnerBatchContext(
+            pending_runner_jobs=[],
+            runner_concurrency=0,
+            runner_timeout_seconds=0,
+            effective_runner_instruction=params.ctx.runner_instruction,
+            execute_runners=params.execute_runners,
+            max_cards=params.max_cards,
+            probe=params.probe,
+            records=list(params.existing_records),
         )
-
-        dry_records, pending_runner_jobs = self._collect_runner_candidates(
-            ctx, runner_max_attempts, runner_candidates
-        )
-        records.extend(dry_records)
-
-        if pending_runner_jobs:
-            runner_timeout_seconds, runner_concurrency, runner_start_rate = resolve_runner_config(
-                self.config, len(pending_runner_jobs)
-            )
-            if runner_start_rate and runner_start_rate < len(pending_runner_jobs):
-                pending_runner_jobs = pending_runner_jobs[:runner_start_rate]
-
-            if pending_runner_jobs and runner_concurrency > 1 and execute_runners:
-                batch_ctx = RunnerBatchContext(
-                    pending_runner_jobs=pending_runner_jobs,
-                    runner_concurrency=runner_concurrency,
-                    runner_timeout_seconds=runner_timeout_seconds,
-                    effective_runner_instruction=effective_runner_instruction,
-                    execute_runners=execute_runners,
-                    max_cards=max_cards,
-                    probe=probe,
-                    records=records,
-                )
-                records, effective_runner_instruction = self._run_concurrent_batch(batch_ctx)
-            else:
-                batch_ctx = RunnerBatchContext(
-                    pending_runner_jobs=pending_runner_jobs,
-                    runner_concurrency=0,
-                    runner_timeout_seconds=runner_timeout_seconds,
-                    effective_runner_instruction=effective_runner_instruction,
-                    execute_runners=execute_runners,
-                    max_cards=max_cards,
-                    probe=probe,
-                    records=records,
-                )
-                records, effective_runner_instruction = self._run_sequential_batch(batch_ctx)
-            ctx.runner_instruction = effective_runner_instruction
+        records = execute_runner_jobs(self, params.ctx, batch_ctx)
+        params.ctx.runner_instruction = batch_ctx.effective_runner_instruction
         return records
 
-    def _run_concurrent_batch(self, ctx: RunnerBatchContext) -> tuple[list, str]:
-        """Run runner jobs concurrently. Returns (records, updated_instruction)."""
-        completed = run_concurrent_runners(
-            ConcurrentRunnerParams(
-                agent=self,
-                pending_jobs=ctx.pending_runner_jobs,
-                runner_concurrency=ctx.runner_concurrency,
-                runner_timeout_seconds=ctx.runner_timeout_seconds,
-                instruction=ctx.effective_runner_instruction,
-                execute_runners=ctx.execute_runners,
-                max_cards=ctx.max_cards,
-                probe=ctx.probe,
+    def _finalize_dispatch(self, params: DispatchFinalizeParams):
+        records = list(params.existing_records)
+        patch_run_ids = _dispatch_patch_review_run_ids(self.subagents.list_runs())
+        patch_records = make_patch_review_records(
+            PatchReviewRecordParams(
+                self, patch_run_ids, params.apply, params.reviewer, params.note, params.limit
             )
         )
-        for run_id, before, retry_reason in ctx.pending_runner_jobs:
-            result, after = completed[run_id]
-            ctx.records.append(
-                _runner_dispatch_record(
-                    RunnerDispatchRecordParams(
-                        agent=self,
-                        run_id=run_id,
-                        before=before,
-                        after=after,
-                        result=result,
-                        retry_reason=retry_reason,
-                        execute_runners=ctx.execute_runners,
-                    )
-                )
-            )
-            if not result.ok and ctx.execute_runners:
-                ctx.effective_runner_instruction = handle_runner_failure(
-                    self, run_id, before, result, ctx.effective_runner_instruction
-                )
-        return ctx.records, ctx.effective_runner_instruction
-
-    def _run_sequential_batch(self, ctx: RunnerBatchContext) -> tuple[list, str]:
-        """Run runner jobs sequentially. Returns (records, updated_instruction)."""
-        for run_id, before, retry_reason in ctx.pending_runner_jobs:
-            task_timeout = get_task_timeout(before, ctx.runner_timeout_seconds, self.config)
-            result = run_single_runner(
-                SingleRunnerParams(
-                    agent=self,
-                    run_id=run_id,
-                    task_timeout=task_timeout,
-                    instruction=ctx.effective_runner_instruction,
-                    execute_runners=ctx.execute_runners,
-                    max_cards=ctx.max_cards,
-                    probe=ctx.probe,
-                    retry_reason=retry_reason,
-                )
-            )
-            after = self.subagents.load(run_id)
-            ctx.records.append(
-                _runner_dispatch_record(
-                    RunnerDispatchRecordParams(
-                        agent=self,
-                        run_id=run_id,
-                        before=before,
-                        after=after,
-                        result=result,
-                        retry_reason=retry_reason,
-                        execute_runners=ctx.execute_runners,
-                    )
-                )
-            )
-            if not result.ok and ctx.execute_runners:
-                ctx.effective_runner_instruction = handle_runner_failure(
-                    self, run_id, before, result, ctx.effective_runner_instruction
-                )
-        return ctx.records, ctx.effective_runner_instruction
-
-    def _finalize_dispatch(self, cfg, apply, reviewer, note, limit, existing_records):
-        """Add patch review and acceptance records."""
-        records = list(existing_records)
-        patch_run_ids = _dispatch_patch_review_run_ids(self.subagents.list_runs())
-        patch_records = make_patch_review_records(self, patch_run_ids, apply, reviewer, note, limit)
         records.extend(patch_records)
-        acceptance_records = make_acceptance_records(self, apply, reviewer, note, limit)
+        acceptance_records = make_acceptance_records(
+            AcceptanceRecordParams(self, params.apply, params.reviewer, params.note, params.limit)
+        )
         records.extend(acceptance_records)
         return records
 
 
 class _DispatchReportMixin:
-    """Internal: build and write dispatch reports, notify completed tasks."""
 
     def _build_and_write_report(self, records, apply):
-        """Build and write dispatch report."""
         report = self.subagents.build_dispatch_report(records, dry_run=not apply)
         report = self.subagents.write_dispatch_report(report, append_log=apply)
         if apply:
@@ -269,7 +162,6 @@ class _DispatchReportMixin:
         return report
 
     def _notify_completed_tasks(self, records: list) -> None:
-        """Thin wrapper for backward compatibility — delegates to services.notify_completed_tasks."""
         notify_completed_tasks(self, records)
 
 
@@ -279,12 +171,6 @@ class SimpleAgentDispatchMixin(
     _DispatchReportMixin,
     _DispatchFailureMixin,
 ):
-    """LLM: mixin for audited parent dispatch and recurring watch mode.
-
-    给人看的解释：
-    用户说"推进一下子代理"或 daemon 定时巡检，都会走这里。
-    它负责串阶段，不把底层文件操作和规则判断都塞在自己身上。
-    """
 
     _DISPATCH_PARAM_KEYS = [
         "apply", "execute_runners", "planner", "workflow_mode",
@@ -300,12 +186,6 @@ class SimpleAgentDispatchMixin(
         params: DispatchParams | None = None,
         **kwargs,
     ) -> DispatchReport:
-        """执行一轮父代理调度。
-
-        dry-run 只汇总会做什么；apply 会依次执行低风险动作、能力路由、
-        runner、patch 审核和父代理验收。真实模型调用还需要额外打开
-        `execute_runners`，避免普通 apply 意外消耗 API。
-        """
         if params is None:
             params = DispatchParams()
         elif not isinstance(params, DispatchParams):
@@ -334,14 +214,26 @@ class SimpleAgentDispatchMixin(
             )
 
         records = self._execute_runner_jobs(
-            ctx, params.execute_runners, params.max_cards, params.probe, records
+            RunnerJobExecutionParams(
+                ctx=ctx,
+                execute_runners=params.execute_runners,
+                max_cards=params.max_cards,
+                probe=params.probe,
+                existing_records=records,
+            )
         )
         ctx.records = records
         ctx.runner_instruction = effective_runner_instruction
         ctx.max_runners = effective_max_runners
 
         records = self._finalize_dispatch(
-            cfg, params.apply, params.reviewer, params.note, params.limit, records
+            DispatchFinalizeParams(
+                apply=params.apply,
+                reviewer=params.reviewer,
+                note=params.note,
+                limit=params.limit,
+                existing_records=records,
+            )
         )
         return self._build_and_write_report(records, params.apply)
 

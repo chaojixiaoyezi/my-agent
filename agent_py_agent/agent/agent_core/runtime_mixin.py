@@ -27,7 +27,6 @@ from .runtime_services import CompressionService, FinalizationService, ToolLoopS
 
 @dataclass
 class RunParams:
-    """Bundle of all run() parameters."""
 
     inject: list[str] | None = None
     prompt_files: list[str] | None = None
@@ -50,7 +49,6 @@ class RunParams:
 
 @dataclass
 class _RuntimeLoopParams:
-    """Bundle of all _execute_runtime_loop parameters."""
 
     user_prompt: str
     memories: list
@@ -69,7 +67,6 @@ class _RuntimeLoopParams:
 
 @dataclass
 class _FinalizeParams:
-    """Bundle of all _build_finalize_context parameters."""
 
     user_prompt: str
     final_prompt: str
@@ -89,7 +86,6 @@ class _FinalizeParams:
 
 @dataclass
 class _RuntimeServices:
-    """Bundles the three lazy-initialized service instances."""
 
     tool_loop: ToolLoopService
     compression: CompressionService
@@ -105,11 +101,6 @@ _RUN_PARAM_KEYS = [
 
 
 class SimpleAgentRuntimeMixin:
-    """LLM: mixin for the primary model/tool execution loop.
-
-    给人看的解释：
-    `run()` 就在这里。普通聊天、gateway ask、runner 调用最后都会经过这条链路。
-    """
 
     _services: _RuntimeServices | None = None
 
@@ -147,7 +138,6 @@ class SimpleAgentRuntimeMixin:
         params: RunParams = None,
         **kwargs,
     ):
-        """执行一轮智能体请求。"""
         if params is None:
             params = RunParams()
         elif not isinstance(params, RunParams):
@@ -225,11 +215,9 @@ class SimpleAgentRuntimeMixin:
         )
 
     def remember(self, content: str, *, kind: str = "note"):
-        """手动写入一条记忆。"""
         return self.memory.add("user", content, kind=kind)
 
     def recall(self, query: str, top_k: int | None = None):
-        """召回相关记忆。"""
         return self.memory.search(query, top_k or self.config.memory_top_k)
 
 
@@ -240,7 +228,6 @@ def _apply_run_kwargs(params: RunParams, kwargs: dict[str, object]) -> None:
 
 
 def _resolve_tool_sections(agent, allowed_tools, granted_capabilities):
-    """Resolve tool catalog and recommendations sections."""
     runtime_capabilities = resolve_runtime_capabilities(
         None, inject=None, granted_capabilities=granted_capabilities,
     )
@@ -256,7 +243,6 @@ def _resolve_tool_sections(agent, allowed_tools, granted_capabilities):
 
 
 def _prepare_runtime_context(agent, user_prompt, inject, resume_context):
-    """Prepare memories, routing, and injections for a run."""
     memories = agent.memory.search(user_prompt, agent.config.memory_top_k)
     route_mode = str(getattr(agent.config, "memory_rule_routing_mode", "soft") or "soft")
     route_enabled = bool(getattr(agent.config, "memory_rule_routing_enabled", True)) and route_mode != "off"
@@ -284,7 +270,6 @@ def _prepare_runtime_context(agent, user_prompt, inject, resume_context):
 
 
 def _execute_runtime_loop(agent, params: _RuntimeLoopParams):
-    """Execute the core tool loop and compression for a run."""
     tool_catalog_section, tool_recommendations_section = _resolve_tool_sections(
         agent, params.allowed_tools, params.granted_capabilities,
     )

@@ -42,6 +42,27 @@ class DispatchRequest:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class PendingInvestigationInput:
+    case_id: str
+    priority: str = ""
+    reason: str = ""
+    evidence_refs: list[str] = field(default_factory=list)
+    case_summary: dict[str, Any] = field(default_factory=dict)
+    route_summary: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> PendingInvestigationInput:
+        return cls(
+            case_id=str(kwargs.get("case_id", "")),
+            priority=str(kwargs.get("priority", "")),
+            reason=str(kwargs.get("reason", "")),
+            evidence_refs=list(kwargs.get("evidence_refs") or []),
+            case_summary=dict(kwargs.get("case_summary") or {}),
+            route_summary=dict(kwargs.get("route_summary") or {}),
+        )
+
+
 class InvestigationQueue:
     """Small queue owned by the parent/session health layer."""
 
@@ -63,21 +84,18 @@ class InvestigationQueue:
     def add_pending(
         self,
         *,
-        case_id: str,
-        priority: str = "",
-        reason: str = "",
-        evidence_refs: list[str] | None = None,
-        case_summary: dict[str, Any] | None = None,
-        route_summary: dict[str, Any] | None = None,
+        pending: PendingInvestigationInput | None = None,
+        **kwargs: Any,
     ) -> DispatchRequest:
+        item = pending or PendingInvestigationInput.from_kwargs(**kwargs)
         return self.add(
             DispatchRequest(
-                case_id=case_id,
-                priority=priority,
-                reason=reason,
-                evidence_refs=list(evidence_refs or []),
-                case_summary=dict(case_summary or {}),
-                route_summary=dict(route_summary or {}),
+                case_id=item.case_id,
+                priority=item.priority,
+                reason=item.reason,
+                evidence_refs=list(item.evidence_refs),
+                case_summary=dict(item.case_summary),
+                route_summary=dict(item.route_summary),
             )
         )
 

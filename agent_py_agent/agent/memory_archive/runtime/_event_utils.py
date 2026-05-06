@@ -101,12 +101,18 @@ def _first_bool(payload: Mapping[str, Any], *keys: str) -> bool | None:
         value = payload.get(key)
         if isinstance(value, bool):
             return value
-        if isinstance(value, str):
-            text = value.strip().lower()
-            if text in {"true", "1", "yes", "ok", "success"}:
-                return True
-            if text in {"false", "0", "no", "error", "failed", "failure"}:
-                return False
+        parsed = _bool_from_text(value) if isinstance(value, str) else None
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _bool_from_text(value: str) -> bool | None:
+    text = value.strip().lower()
+    if text in {"true", "1", "yes", "ok", "success"}:
+        return True
+    if text in {"false", "0", "no", "error", "failed", "failure"}:
+        return False
     return None
 
 

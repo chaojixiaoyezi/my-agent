@@ -20,6 +20,64 @@ from agent_py_agent.agent.log_analysis.security.entity_graph import (
 )
 
 
+def _finding(params):
+    evidence = params["evidence"]
+    return Finding(
+        finding_id=params["finding_id"],
+        detector_id=params["detector_id"],
+        window=params["window"],
+        entities=params["entities"],
+        evidence_refs=[
+            EvidenceRef(evidence_id=evidence[0], source_id=evidence[1], kind="query"),
+        ],
+    )
+
+
+def _edges_between(graph, source, target):
+    return [
+        edge for edge in graph.edges
+        if edge.source == source and edge.target == target
+    ]
+
+
+def _assert_nodes_present(graph, node_ids):
+    for node_id in node_ids:
+        assert node_id in graph.nodes
+
+
+def _assert_edge_relationship(graph, source, target, relationship):
+    edges = _edges_between(graph, source, target)
+    assert len(edges) == 1
+    assert edges[0].relationship == relationship
+
+
+def _sample_entity_graph_findings():
+    return [
+        _finding(
+            {
+                "finding_id": "finding-1",
+                "detector_id": "waf_attack_success_candidate",
+                "window": ["2026-04-30T10:00:00Z", "2026-04-30T10:05:00Z"],
+                "entities": {
+                    "attacker_ip": ["198.51.100.1"],
+                    "victim_ip": ["10.0.0.5"],
+                    "user": ["admin"],
+                },
+                "evidence": ("ev-1", "waf-prod"),
+            },
+        ),
+        _finding(
+            {
+                "finding_id": "finding-2",
+                "detector_id": "web_to_process_anomaly",
+                "window": ["2026-04-30T10:05:00Z", "2026-04-30T10:10:00Z"],
+                "entities": {"victim_ip": ["10.0.0.5"], "process": ["/bin/bash"]},
+                "evidence": ("ev-2", "edr-prod"),
+            },
+        ),
+    ]
+
+
 def test_entity_node_generates_unique_node_id():
     """测试 EntityNode 生成唯一的 node_id。
 
@@ -148,63 +206,35 @@ def test_entity_graph_to_dict_serializes_correctly():
 
 def test_build_entity_graph_from_findings():
     """测试从 findings 列表构建完整实体图。"""
-    findings = [
-        Finding(
-            finding_id="finding-1",
-            detector_id="waf_attack_success_candidate",
-            window=["2026-04-30T10:00:00Z", "2026-04-30T10:05:00Z"],
-            entities={
-                "attacker_ip": ["198.51.100.1"],
-                "victim_ip": ["10.0.0.5"],
-                "user": ["admin"],
-            },
-            evidence_refs=[
-                EvidenceRef(evidence_id="ev-1", source_id="waf-prod", kind="query"),
-            ],
-        ),
-        Finding(
-            finding_id="finding-2",
-            detector_id="web_to_process_anomaly",
-            window=["2026-04-30T10:05:00Z", "2026-04-30T10:10:00Z"],
-            entities={
-                "victim_ip": ["10.0.0.5"],
-                "process": ["/bin/bash"],
-            },
-            evidence_refs=[
-                EvidenceRef(evidence_id="ev-2", source_id="edr-prod", kind="query"),
-            ],
-        ),
-    ]
+    graph = build_entity_graph(_sample_entity_graph_findings())
 
-    graph = build_entity_graph(findings)
-
-    # 验证节点
-    assert "attacker_ip:198.51.100.1" in graph.nodes
-    assert "victim_ip:10.0.0.5" in graph.nodes
-    assert "user:admin" in graph.nodes
-    assert "process:/bin/bash" in graph.nodes
-
-    # 验证边
-    attacker_to_victim = [
-        edge for edge in graph.edges
-        if edge.source == "attacker_ip:198.51.100.1" and edge.target == "victim_ip:10.0.0.5"
-    ]
-    assert len(attacker_to_victim) == 1
-    assert attacker_to_victim[0].relationship == "targets"
-
-    user_to_host = [
-        edge for edge in graph.edges
-        if edge.source == "user:admin" and edge.target == "victim_ip:10.0.0.5"
-    ]
-    assert len(user_to_host) == 1
-    assert user_to_host[0].relationship == "authenticates_to"
-
-    victim_to_process = [
-        edge for edge in graph.edges
-        if edge.source == "victim_ip:10.0.0.5" and edge.target == "process:/bin/bash"
-    ]
-    assert len(victim_to_process) == 1
-    assert victim_to_process[0].relationship == "executes"
+    _assert_nodes_present(
+        graph,
+        [
+            "attacker_ip:198.51.100.1",
+            "victim_ip:10.0.0.5",
+            "user:admin",
+            "process:/bin/bash",
+        ],
+    )
+    _assert_edge_relationship(
+        graph,
+        "attacker_ip:198.51.100.1",
+        "victim_ip:10.0.0.5",
+        "targets",
+    )
+    _assert_edge_relationship(
+        graph,
+        "user:admin",
+        "victim_ip:10.0.0.5",
+        "authenticates_to",
+    )
+    _assert_edge_relationship(
+        graph,
+        "victim_ip:10.0.0.5",
+        "process:/bin/bash",
+        "executes",
+    )
 
 
 def test_build_entity_graph_from_case_record():

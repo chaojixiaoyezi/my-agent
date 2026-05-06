@@ -16,6 +16,27 @@ class DeadLetterRef:
     count: int
 
 
+@dataclass(frozen=True)
+class DeadLetterRecord:
+    reason: str
+    raw_ref: str
+    line_no: int | None = None
+    raw_line: str | None = None
+    raw_fields: Mapping[str, Any] | None = None
+    parser_id: str | None = None
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> DeadLetterRecord:
+        return cls(
+            reason=str(kwargs["reason"]),
+            raw_ref=str(kwargs["raw_ref"]),
+            line_no=kwargs.get("line_no"),
+            raw_line=kwargs.get("raw_line"),
+            raw_fields=kwargs.get("raw_fields"),
+            parser_id=kwargs.get("parser_id"),
+        )
+
+
 class DeadLetterWriter:
     """Append-only dead-letter writer for malformed ingest records."""
 
@@ -31,25 +52,22 @@ class DeadLetterWriter:
     def write(
         self,
         *,
-        reason: str,
-        raw_ref: str,
-        line_no: int | None = None,
-        raw_line: str | None = None,
-        raw_fields: Mapping[str, Any] | None = None,
-        parser_id: str | None = None,
+        record: DeadLetterRecord | None = None,
+        **kwargs: Any,
     ) -> None:
+        item = record or DeadLetterRecord.from_kwargs(**kwargs)
         now = utc_now()
         record = {
-            "dead_letter_id": f"dlq-{sha256_text(f'{self.batch_id}:{raw_ref}:{reason}')[:24]}",
+            "dead_letter_id": f"dlq-{sha256_text(f'{self.batch_id}:{item.raw_ref}:{item.reason}')[:24]}",
             "batch_id": self.batch_id,
             "source_id": self.source_id,
-            "parser_id": parser_id,
-            "reason": reason,
-            "raw_ref": raw_ref,
-            "line_no": line_no,
-            "raw_line_preview": _preview(raw_line),
-            "raw_line_sha256": f"sha256:{sha256_text(raw_line or '')}",
-            "raw_fields": dict(raw_fields or {}),
+            "parser_id": item.parser_id,
+            "reason": item.reason,
+            "raw_ref": item.raw_ref,
+            "line_no": item.line_no,
+            "raw_line_preview": _preview(item.raw_line),
+            "raw_line_sha256": f"sha256:{sha256_text(item.raw_line or '')}",
+            "raw_fields": dict(item.raw_fields or {}),
             "created_at": now,
         }
         append_jsonl(self.path, record, sort_keys=True)
@@ -59,9 +77,9 @@ class DeadLetterWriter:
                 "event_type": "log_parse_failure",
                 "batch_id": self.batch_id,
                 "source_id": self.source_id,
-                "raw_ref": raw_ref,
-                "line_no": line_no,
-                "reason": reason,
+                "raw_ref": item.raw_ref,
+                "line_no": item.line_no,
+                "reason": item.reason,
                 "dead_letter_path": str(self.path),
                 "created_at": now,
             },
@@ -80,4 +98,3 @@ def _preview(value: str | None, *, max_chars: int = 2048) -> str | None:
         return None
     text = str(value)
     return text[:max_chars]
-

@@ -15,13 +15,6 @@ ONE_SHOT_TOOL_NAMES = {"create_subagents", "subagent_board", "dispatch_subagents
 
 
 def _one_shot_tool_call_key(payload: dict[str, object]) -> str:
-    """给一次性编排工具生成本轮去重 key。
-
-    真实模型偶尔会在看见工具结果后重复同一个编排工具调用。
-    `create_subagents` 多执行一次会多落一个真实工单；`subagent_board`
-    重复读虽然不改状态，但会拖慢收口。这里仅在同一轮 `run()` 里拦住
-    完全相同的重复调用，保留'以后再次派工/查看'的自由。
-    """
 
     tool_name = str(payload.get("tool") or "")
     if tool_name not in ONE_SHOT_TOOL_NAMES:
@@ -33,7 +26,6 @@ def _one_shot_tool_call_key(payload: dict[str, object]) -> str:
     return f"{tool_name}:{normalized}"
 
 def _string_list(value: object) -> list[str]:
-    """把工具参数里的数组/JSON 数组/多行文本整理成字符串列表。"""
 
     if value is None:
         return []
@@ -90,7 +82,6 @@ def _non_negative_int(value: object, *, default: int) -> int:
 
 
 def _sleep_with_stop(interval: float, stop_path: Path | None) -> bool:
-    """睡眠时定期检查 stop 文件；返回 True 表示收到停止请求。"""
 
     if interval <= 0:
         return bool(stop_path and stop_path.exists())

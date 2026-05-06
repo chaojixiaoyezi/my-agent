@@ -1,4 +1,3 @@
-"""Action commands: plan actions, apply actions, route capabilities."""
 
 from __future__ import annotations
 
@@ -9,7 +8,6 @@ from .common import make_agent, make_capability_router
 
 
 def cmd_subagents_plan_actions(args) -> int:
-    """根据 due-check 生成 dry-run 动作计划。"""
 
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
@@ -34,7 +32,6 @@ def cmd_subagents_plan_actions(args) -> int:
 
 
 def cmd_subagents_apply_actions(args) -> int:
-    """执行或 dry-run 执行 action plan。"""
 
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
@@ -69,7 +66,6 @@ def cmd_subagents_apply_actions(args) -> int:
 
 
 def cmd_subagents_route_capabilities(args) -> int:
-    """路由 OPEN capability request，默认 dry-run。"""
 
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)

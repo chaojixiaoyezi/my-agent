@@ -49,17 +49,20 @@ def _coerce_retention_days(value: Any) -> int | None:
     if isinstance(value, bool) or value is None:
         return None
     if isinstance(value, int):
-        days = value
-    elif isinstance(value, str):
-        text = value.strip()
-        if not text.isdecimal():
-            return None
-        days = int(text)
-    else:
+        return value if value >= 0 else None
+    if not isinstance(value, str):
         return None
-    if days < 0:
+    days = _days_from_text(value)
+    if days is None or days < 0:
         return None
     return days
+
+
+def _days_from_text(value: str) -> int | None:
+    text = value.strip()
+    if not text.isdecimal():
+        return None
+    return int(text)
 
 
 def _coerce_today(value: date | str | None) -> date | None:

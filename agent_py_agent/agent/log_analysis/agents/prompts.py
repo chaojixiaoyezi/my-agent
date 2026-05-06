@@ -42,13 +42,30 @@ class SecurityPromptConfig:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class SecurityPromptScope:
+    role: str = ""
+    case_summary: str = ""
+    is_security_command: bool = False
+    is_logs_command: bool = False
+    is_security_case: bool = False
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> SecurityPromptScope:
+        return cls(
+            role=str(kwargs.get("role", "")),
+            case_summary=str(kwargs.get("case_summary", "")),
+            is_security_command=bool(kwargs.get("is_security_command", False)),
+            is_logs_command=bool(kwargs.get("is_logs_command", False)),
+            is_security_case=bool(kwargs.get("is_security_case", False)),
+        )
+
+
 def should_inject_security_prompt(
     config: SecurityPromptConfig | Mapping[str, Any] | None,
     *,
-    role: str = "",
-    is_security_command: bool = False,
-    is_logs_command: bool = False,
-    is_security_case: bool = False,
+    scope: SecurityPromptScope | None = None,
+    **kwargs: Any,
 ) -> bool:
     prompt_config = (
         config
@@ -60,11 +77,12 @@ def should_inject_security_prompt(
     if prompt_config.security_prompt_mode == "off":
         return False
 
-    normalized_role = role.strip().lower()
+    prompt_scope = scope or SecurityPromptScope.from_kwargs(**kwargs)
+    normalized_role = prompt_scope.role.strip().lower()
     return bool(
-        is_security_command
-        or is_logs_command
-        or is_security_case
+        prompt_scope.is_security_command
+        or prompt_scope.is_logs_command
+        or prompt_scope.is_security_case
         or normalized_role in SECURITY_SUBAGENT_ROLES
     )
 
@@ -72,24 +90,16 @@ def should_inject_security_prompt(
 def security_prompt_fragment(
     config: SecurityPromptConfig | Mapping[str, Any] | None,
     *,
-    role: str = "",
-    case_summary: str = "",
-    is_security_command: bool = False,
-    is_logs_command: bool = False,
-    is_security_case: bool = False,
+    scope: SecurityPromptScope | None = None,
+    **kwargs: Any,
 ) -> str:
     prompt_config = _prompt_config(config)
-    if not should_inject_security_prompt(
-        prompt_config,
-        role=role,
-        is_security_command=is_security_command,
-        is_logs_command=is_logs_command,
-        is_security_case=is_security_case,
-    ):
+    prompt_scope = scope or SecurityPromptScope.from_kwargs(**kwargs)
+    if not should_inject_security_prompt(prompt_config, scope=prompt_scope):
         return ""
 
     lines = _security_prompt_lines(prompt_config.security_prompt_mode)
-    _append_case_summary(lines, case_summary)
+    _append_case_summary(lines, prompt_scope.case_summary)
 
     return "\n".join(lines).strip()
 
@@ -102,11 +112,7 @@ def build_security_prompt(base_prompt: str, config: SecurityPromptConfig | Mappi
 
     fragment = security_prompt_fragment(
         config,
-        role=str(scope.get("role", "")),
-        case_summary=str(scope.get("case_summary", "")),
-        is_security_command=bool(scope.get("is_security_command", False)),
-        is_logs_command=bool(scope.get("is_logs_command", False)),
-        is_security_case=bool(scope.get("is_security_case", False)),
+        scope=SecurityPromptScope.from_kwargs(**scope),
     )
     if not fragment:
         return base_prompt

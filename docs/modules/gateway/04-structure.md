@@ -142,3 +142,6 @@ memory-resume 或 run(auto resume)
 ## 当前第一版索引 / 待补齐
 
 本页先描述单机文件协议。后续应补充真实目录样例、请求 JSON schema、response JSON schema、失败恢复时序图和 gateway chat 的用户路径。
+## 2026-05-06 structure update
+- `gateway_parts/request_worker.py` now owns queue claiming and archive flow, while `gateway_parts/request_execution.py` owns one-request execution, chunk streaming, lease refresh, and response completion.
+- Gateway file IO keeps per-path process-local locks and retrying replace logic for Windows; POSIX behavior remains the normal atomic replace path.

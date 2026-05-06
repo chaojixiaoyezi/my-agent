@@ -24,12 +24,6 @@ FALLBACK_CHAT_PROMPT = "user> "
 
 
 def add_resume_context_switches(command) -> None:
-    """LLM: add tri-state CLI switches for optional recovery context injection.
-
-    给人看的解释：
-    不传参数就按配置走；`--resume-context` 临时打开；`--no-resume-context` 临时关闭。
-    这样测试恢复能力时不用反复改 YAML。
-    """
 
     group = command.add_mutually_exclusive_group()
     group.add_argument("--resume-context", dest="resume_context", action="store_true", help="本次请求临时启用恢复上下文注入")
@@ -38,11 +32,6 @@ def add_resume_context_switches(command) -> None:
 
 
 def configure_stdio() -> None:
-    """把标准输出尽量固定到 UTF-8。
-
-    这样做主要是为了避免 Windows 终端在打印模型返回内容时再次乱码。
-    说白了，就是先把'字能不能正常显示'这个基础问题兜住。
-    """
 
     for stream_name in ("stdout", "stderr"):
         stream = getattr(sys, stream_name, None)
@@ -58,19 +47,12 @@ def configure_stdio() -> None:
 
 
 def make_agent(args) -> SimpleAgent:
-    """根据配置创建一个可直接运行的智能体实例。"""
 
     config = load_config(args.config)
     return SimpleAgent(config, resolve_workspace_root(config, args.config))
 
 
 def resolve_workspace_root(config, config_path: str | Path) -> Path:
-    """解析本次运行实际使用的工作区根目录。
-
-    默认仍然使用包目录 `agent_py_agent`，保持之前行为不变。配置里写了
-    `workspace_root` 时，memory、gateway、subagent 账本和文件工具都会落在该目录下。
-    场景测试会利用这个开关把真实 API 任务关进临时 fixture，避免碰当前开发仓库。
-    """
 
     raw = str(getattr(config, "workspace_root", "") or "").strip()
     if not raw:
@@ -82,7 +64,6 @@ def resolve_workspace_root(config, config_path: str | Path) -> Path:
 
 
 def make_capability_router(agent: SimpleAgent, capability_config, skill_dirs: list[str] | None):
-    """创建 capability router，合并当前工具和可选 skill 目录。"""
 
     default_skill_dirs = [ROOT.parent / "skills", ROOT / "skills"]
     dirs = [Path(item).expanduser() for item in skill_dirs] if skill_dirs else default_skill_dirs
@@ -96,7 +77,6 @@ def make_capability_router(agent: SimpleAgent, capability_config, skill_dirs: li
 
 
 def format_local_time(timestamp: float) -> str:
-    """把 Unix 时间戳格式化成人能扫一眼的本地时间。"""
 
     if not timestamp:
         return "-"
@@ -104,12 +84,6 @@ def format_local_time(timestamp: float) -> str:
 
 
 def resume_context_override(args) -> bool | None:
-    """LLM: read the tri-state CLI override for automatic recovery context.
-
-    给人看的解释：
-    命令行有三种状态：没传参数就返回 None，表示按配置走；
-    传 `--resume-context` 返回 True，传 `--no-resume-context` 返回 False。
-    """
 
     return getattr(args, "resume_context", None)
 

@@ -19,7 +19,6 @@ except Exception:
 
 
 def _cprint(text: str) -> None:
-    """Print ANSI-colored text via prompt_toolkit or fall back to print."""
     if _pt_print is not None and _PT_ANSI is not None:
         _pt_print(_PT_ANSI(text))
     else:
@@ -39,14 +38,12 @@ CONTEXT_WINDOW = 200_000
 
 
 def progress_bar(ratio: float, width: int = 10) -> str:
-    """Return a compact terminal progress bar."""
 
     filled = int(ratio * width)
     return "█" * filled + "░" * (width - filled)
 
 
 def collapse_response_text(text: str) -> tuple[str, bool]:
-    """Return a terminal-friendly preview plus whether the text was collapsed."""
 
     lines = text.splitlines()
     if len(lines) <= COLLAPSE_PREVIEW_LINES and len(text) <= COLLAPSE_PREVIEW_CHARS:
@@ -61,7 +58,6 @@ def collapse_response_text(text: str) -> tuple[str, bool]:
 
 
 def startup_banner(agent_name: str, *, use_gateway: bool) -> str:
-    """Build a compact startup banner inspired by terminal agents like 长期助手."""
 
     mode = "gateway client" if use_gateway else "local runtime"
     return "\n".join(
@@ -82,7 +78,6 @@ def _tui_print_banner(agent, use_gateway: bool) -> None:
 
 
 def terminal_rule(char: str = "─", *, fallback: int = 119) -> str:
-    """Return a colored horizontal terminal rule."""
 
     width = max(20, shutil.get_terminal_size(fallback=(fallback, 24)).columns)
     return f"{GRAY}{char * width}{RESET}"

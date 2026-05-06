@@ -13,7 +13,6 @@ from ..notifications_cmd import cmd_notifications
 
 
 def add_operations_subcommands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Register notification and audit-log commands."""
 
     notifications = subparsers.add_parser("notifications", help="查看未读通知")
     notifications.add_argument("--all", action="store_true", help="列出所有通知（含已读）")

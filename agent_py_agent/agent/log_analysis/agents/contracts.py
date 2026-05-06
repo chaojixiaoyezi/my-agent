@@ -64,27 +64,33 @@ def _compact_string(value: Any, *, limit: int = 500) -> str:
 def _string_list(value: Any, *, limit: int = 50) -> list[str]:
     if value is None:
         return []
-    if isinstance(value, str):
-        items = [value]
-    elif isinstance(value, Mapping):
-        items = [str(value)]
-    else:
-        try:
-            items = list(value)
-        except TypeError:
-            items = [value]
-
     output: list[str] = []
-    for item in items[:limit]:
-        text = _compact_string(item)
-        if text:
-            output.append(text)
+    for item in _list_items(value)[:limit]:
+        _append_compact_string(output, item)
     return output
+
+
+def _list_items(value: Any) -> list[Any]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Mapping):
+        return [str(value)]
+    try:
+        return list(value)
+    except TypeError:
+        return [value]
+
+
+def _append_compact_string(output: list[str], item: Any) -> None:
+    text = _compact_string(item)
+    if text:
+        output.append(text)
 
 
 def _evidence_ref_from_mapping(value: Mapping[str, Any]) -> str:
     metadata = value.get("metadata")
-    for key in (
+    ref = _first_evidence_ref(
+        value,
         "evidence_ref",
         "evidence_id",
         "ref",
@@ -92,15 +98,19 @@ def _evidence_ref_from_mapping(value: Mapping[str, Any]) -> str:
         "query_id",
         "path",
         "uri",
-    ):
+    )
+    if ref:
+        return ref
+    if isinstance(metadata, Mapping):
+        return _first_evidence_ref(metadata, "evidence_id", "evidence_ref", "ref", "id", "query_id", "path", "evidence_path", "uri")
+    return ""
+
+
+def _first_evidence_ref(value: Mapping[str, Any], *keys: str) -> str:
+    for key in keys:
         text = _compact_string(value.get(key), limit=300)
         if text:
             return text
-    if isinstance(metadata, Mapping):
-        for key in ("evidence_id", "evidence_ref", "ref", "id", "query_id", "path", "evidence_path", "uri"):
-            text = _compact_string(metadata.get(key), limit=300)
-            if text:
-                return text
     return ""
 
 
@@ -280,59 +290,5 @@ def validate_analyst_report(payload: AnalystReport | Mapping[str, Any]) -> Analy
     return AnalystReport.from_mapping(payload)
 
 
-def review_analyst_report(
-    payload: AnalystReport | Mapping[str, Any],
-    *,
-    known_evidence_refs: list[str] | None = None,
-) -> ReviewerDecision:
-    """Local reviewer gate.
 
-    This is intentionally strict about evidence: a report without evidence refs
-    is rejected before any higher-level judgment.
-    """
-
-    try:
-        report = validate_analyst_report(payload)
-    except ContractValidationError as exc:
-        case_id = _compact_string(_get(payload, "case_id") or _get(payload, "id"), limit=120)
-        return ReviewerDecision(
-            case_id=case_id,
-            approved=False,
-            decision="REJECT",
-            reasons=[str(exc)],
-            next_actions=["request_evidence_backed_report"],
-        )
-
-    known_refs = set(normalize_evidence_refs(known_evidence_refs))
-    unknown_refs = [ref for ref in report.evidence_refs if known_refs and ref not in known_refs]
-    if unknown_refs:
-        return ReviewerDecision(
-            case_id=report.case_id,
-            approved=False,
-            decision="REJECT",
-            reasons=["report cites evidence_refs outside the reviewer evidence boundary"],
-            evidence_refs=list(report.evidence_refs),
-            gaps=[f"unknown evidence_ref: {ref}" for ref in unknown_refs],
-            next_actions=["rerun analyst with valid evidence refs"],
-        )
-
-    if not report.facts:
-        return ReviewerDecision(
-            case_id=report.case_id,
-            approved=False,
-            decision="NEEDS_MORE_EVIDENCE",
-            reasons=["report has evidence_refs but no evidence-backed facts"],
-            evidence_refs=list(report.evidence_refs),
-            gaps=list(report.gaps) or ["facts missing"],
-            next_actions=list(report.next_actions) or ["add facts tied to evidence_refs"],
-        )
-
-    return ReviewerDecision(
-        case_id=report.case_id,
-        approved=True,
-        decision="APPROVE",
-        reasons=["evidence_refs present and facts/inferences/gaps are separated"],
-        evidence_refs=list(report.evidence_refs),
-        gaps=list(report.gaps),
-        next_actions=list(report.next_actions),
-    )
+from .contracts_review import review_analyst_report

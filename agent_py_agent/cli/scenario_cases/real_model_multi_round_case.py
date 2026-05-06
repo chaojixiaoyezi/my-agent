@@ -23,12 +23,6 @@ from .subagent_cases import _write_parent_subagent_recovery_fact_files
 
 
 class ScenarioRealModelMultiRoundBackend:
-    """LLM: wraps a real model backend for multi-round tool call verification.
-
-    给人看的解释：
-    这个类包装真实后端，按顺序返回工具调用：第一轮 read_file，第二轮 search_text，
-    第三轮输出 AWAITING_ACCEPTANCE 结构化结果。用于验证真实 API 多轮工具调用恢复。
-    """
 
     name = "scenario_real_model_multi_round_backend"
 
@@ -96,7 +90,6 @@ class ScenarioRealModelMultiRoundBackend:
 
 
 def _multi_round_setup(args):
-    """Setup for multi-round recovery: create workspace, agent, backend, task, and run subagent."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=real-model-recovery-multi-round")
@@ -141,7 +134,6 @@ def _multi_round_setup(args):
 
 
 def _multi_round_build_expected_reads(loaded):
-    """Build list of expected read paths from loaded task."""
     return [
         loaded.status_file,
         loaded.work_log_file,
@@ -153,7 +145,6 @@ def _multi_round_build_expected_reads(loaded):
 
 @dataclass
 class _MultiRoundVerifyContext:
-    """Bundle for _multi_round_verify to reduce parameter count."""
     paths: Any
     task: Any
     loaded: Any
@@ -168,7 +159,6 @@ class _MultiRoundVerifyContext:
 
 
 def _multi_round_verify(ctx: _MultiRoundVerifyContext) -> int:
-    """Verify multi-round recovery results."""
     expected_reads = _multi_round_build_expected_reads(ctx.loaded)
     echo_signature = "这是 echo 后端的本地响应"
     output_json_valid = False
@@ -224,12 +214,6 @@ def _multi_round_verify(ctx: _MultiRoundVerifyContext) -> int:
 
 
 def run_scenario_real_model_recovery_multi_round_case(args) -> int:
-    """LLM: run a subagent with a real model API through 2+ tool call rounds, then prove memory-resume recovers multi-round evidence.
-
-    新手说明:
-    用真实模型 API 跑多轮子代理（至少 2 轮工具调用：read_file + search_text），
-    验证模型响应内容能在 memory-resume 恢复后找回，包括每轮工具调用的 evidence。
-    """
 
     paths, agent, backend, task, loaded, runner = _multi_round_setup(args)
 

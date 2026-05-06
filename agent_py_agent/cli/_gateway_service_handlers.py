@@ -1,4 +1,3 @@
-"""Service install/uninstall handlers for systemd and launchd."""
 
 from __future__ import annotations
 
@@ -30,7 +29,6 @@ def is_linux() -> bool:
 
 
 def supports_systemd_services() -> bool:
-    """Return True when systemd user services are available."""
     import shutil
 
     if not is_linux():
@@ -56,12 +54,6 @@ def supports_systemd_services() -> bool:
 
 
 def _ensure_user_systemd_env() -> None:
-    """Ensure DBUS_SESSION_BUS_ADDRESS and XDG_RUNTIME_DIR are set for systemctl --user.
-
-    On headless servers (SSH sessions), these env vars may be missing even when
-    the user's systemd instance is running (via linger). Without them,
-    ``systemctl --user`` fails with "Failed to connect to bus: No medium found".
-    """
     uid = os.getuid()
     if "XDG_RUNTIME_DIR" not in os.environ:
         runtime_dir = f"/run/user/{uid}"
@@ -76,7 +68,6 @@ def _ensure_user_systemd_env() -> None:
 
 
 def _systemctl_cmd(system: bool = False) -> list[str]:
-    """Return the systemctl command prefix for user or system service."""
     if not system:
         _ensure_user_systemd_env()
     return ["systemctl"] if system else ["systemctl", "--user"]
@@ -85,7 +76,6 @@ def _systemctl_cmd(system: bool = False) -> list[str]:
 def _run_systemctl(
     args: list[str], system: bool = False, check: bool = True, timeout: int = 30
 ) -> subprocess.CompletedProcess:
-    """Run systemctl with the given arguments."""
     cmd = _systemctl_cmd(system) + args
     return subprocess.run(cmd, check=check, capture_output=True, text=True, timeout=timeout)
 
@@ -95,17 +85,6 @@ def _service_scope_label(system: bool) -> str:
 
 
 def install_systemd(system: bool = False, force: bool = False) -> bool:
-    """Install the systemd service unit file and enable it.
-
-    Args:
-        system: If True, install as system service (requires root).
-                If False, install as user service.
-        force: If True, reinstall even if service already exists.
-
-    Returns:
-        True if installation was successful or already installed (not force).
-        False if installation failed.
-    """
     unit_path = get_systemd_unit_path(system=system)
 
     if unit_path.exists() and not force:
@@ -149,16 +128,6 @@ def install_systemd(system: bool = False, force: bool = False) -> bool:
 
 
 def uninstall_systemd(system: bool = False) -> bool:
-    """Stop, disable, and remove the systemd service unit file.
-
-    Args:
-        system: If True, uninstall system service (requires root).
-                If False, uninstall user service.
-
-    Returns:
-        True if uninstallation was successful.
-        False if uninstallation failed.
-    """
     scope = _service_scope_label(system)
 
     # Stop and disable the service (ignore errors if not running)
@@ -190,20 +159,10 @@ def uninstall_systemd(system: bool = False) -> bool:
 
 
 def _launchd_domain() -> str:
-    """Return the launchd domain for the current user."""
     return f"gui/{os.getuid()}"
 
 
 def install_launchd(force: bool = False) -> bool:
-    """Install the launchd plist and load it.
-
-    Args:
-        force: If True, reinstall even if service already exists.
-
-    Returns:
-        True if installation was successful.
-        False if installation failed.
-    """
     plist_path = get_launchd_plist_path()
     label = _get_launchd_label()
 
@@ -245,12 +204,6 @@ def install_launchd(force: bool = False) -> bool:
 
 
 def uninstall_launchd() -> bool:
-    """Unload and remove the launchd plist.
-
-    Returns:
-        True if uninstallation was successful.
-        False if uninstallation failed.
-    """
     plist_path = get_launchd_plist_path()
     label = _get_launchd_label()
 
@@ -281,12 +234,6 @@ def uninstall_launchd() -> bool:
 
 
 def install_service(force: bool = False) -> bool:
-    """Install the gateway service for the current platform.
-
-    On Linux with systemd: installs a systemd user service.
-    On macOS: installs a launchd service.
-    On other platforms: returns False (not supported).
-    """
     if is_macos():
         return install_launchd(force=force)
     elif is_linux() and supports_systemd_services():
@@ -297,12 +244,6 @@ def install_service(force: bool = False) -> bool:
 
 
 def uninstall_service() -> bool:
-    """Uninstall the gateway service for the current platform.
-
-    On Linux with systemd: uninstalls the systemd user service.
-    On macOS: uninstalls the launchd service.
-    On other platforms: returns False (not supported).
-    """
     if is_macos():
         return uninstall_launchd()
     elif is_linux() and supports_systemd_services():

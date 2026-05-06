@@ -38,6 +38,29 @@ class EntityEdge:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class EntityEdgeInput:
+    source: str
+    target: str
+    relationship: str
+    evidence_refs: Sequence[Any] = ()
+    first_seen: str = ""
+    last_seen: str = ""
+
+    @classmethod
+    def from_legacy(cls, args: tuple[Any, ...], kwargs: dict[str, Any]) -> EntityEdgeInput:
+        source, target, relationship, *rest = args
+        evidence_refs = rest[0] if rest else kwargs.get("evidence_refs", ())
+        return cls(
+            source=str(source),
+            target=str(target),
+            relationship=str(relationship),
+            evidence_refs=evidence_refs,
+            first_seen=str(kwargs.get("first_seen", "")),
+            last_seen=str(kwargs.get("last_seen", "")),
+        )
+
+
 @dataclass
 class EntityGraph:
     nodes: dict[str, EntityNode] = field(default_factory=dict)
@@ -58,31 +81,28 @@ class EntityGraph:
 
     def add_edge(
         self,
-        source: str,
-        target: str,
-        relationship: str,
-        evidence_refs: Sequence[Any] = (),
-        *,
-        first_seen: str = "",
-        last_seen: str = "",
+        *args: Any,
+        edge: EntityEdgeInput | None = None,
+        **kwargs: Any,
     ) -> None:
-        if not source or not target or source == target:
+        item = edge or EntityEdgeInput.from_legacy(args, kwargs)
+        if not item.source or not item.target or item.source == item.target:
             return
-        refs = _ref_ids(evidence_refs)
+        refs = _ref_ids(item.evidence_refs)
         for edge in self.edges:
-            if edge.source == source and edge.target == target and edge.relationship == relationship:
+            if edge.source == item.source and edge.target == item.target and edge.relationship == item.relationship:
                 edge.evidence_refs = _unique([*edge.evidence_refs, *refs])
-                edge.first_seen = edge.first_seen or first_seen
-                edge.last_seen = last_seen or edge.last_seen
+                edge.first_seen = edge.first_seen or item.first_seen
+                edge.last_seen = item.last_seen or edge.last_seen
                 return
         self.edges.append(
             EntityEdge(
-                source=source,
-                target=target,
-                relationship=relationship,
+                source=item.source,
+                target=item.target,
+                relationship=item.relationship,
                 evidence_refs=refs,
-                first_seen=first_seen,
-                last_seen=last_seen,
+                first_seen=item.first_seen,
+                last_seen=item.last_seen,
             )
         )
 
@@ -93,6 +113,31 @@ class EntityGraph:
         }
 
 
+@dataclass(frozen=True)
+class _EdgeBatch:
+    sources: Sequence[str]
+    targets: Sequence[str]
+    relationship: str
+    refs: Sequence[Any]
+    first_seen: str = ""
+    last_seen: str = ""
+
+
+@dataclass(frozen=True)
+class _NodeBatch:
+    kind: str
+    values: Sequence[Any]
+    refs: Sequence[Any]
+
+
+@dataclass(frozen=True)
+class _FindingEdgeContext:
+    nodes_by_kind: dict[str, list[str]]
+    refs: Sequence[Any]
+    first_seen: str
+    last_seen: str
+
+
 def build_entity_graph(case_or_findings: CaseRecord | Mapping[str, Any] | Sequence[Finding | Mapping[str, Any]]) -> EntityGraph:
     graph = EntityGraph()
     for finding in _extract_findings(case_or_findings):
@@ -100,40 +145,42 @@ def build_entity_graph(case_or_findings: CaseRecord | Mapping[str, Any] | Sequen
         when_start = finding.window[0] if finding.window else ""
         when_end = finding.window[1] if len(finding.window) > 1 else when_start
         nodes_by_kind = _add_finding_nodes(graph, finding, refs)
-        _add_finding_edges(graph, nodes_by_kind, refs, first_seen=when_start, last_seen=when_end)
+        _add_finding_edges(graph, _FindingEdgeContext(nodes_by_kind, refs, when_start, when_end))
     return graph
 
 
 def _add_finding_nodes(graph: EntityGraph, finding: Finding, refs: Sequence[Any]) -> dict[str, list[str]]:
     nodes_by_kind: dict[str, list[str]] = {}
     for kind, values in finding.entities.items():
-        for value in values:
-            node_id = graph.add_node(kind, value, refs)
-            if node_id:
-                nodes_by_kind.setdefault(kind, []).append(node_id)
+        _add_nodes_for_kind(graph, nodes_by_kind, _NodeBatch(kind, values, refs))
     return nodes_by_kind
 
 
-def _add_finding_edges(
+def _add_nodes_for_kind(
     graph: EntityGraph,
     nodes_by_kind: dict[str, list[str]],
-    refs: Sequence[Any],
-    *,
-    first_seen: str,
-    last_seen: str,
+    batch: _NodeBatch,
 ) -> None:
-    window = {"first_seen": first_seen, "last_seen": last_seen}
-    _add_edges(graph, nodes_by_kind.get("attacker_ip", []), _first_present(nodes_by_kind, "victim_ip", "dst_ip", "host"), "targets", refs, **window)
-    _add_edges(graph, nodes_by_kind.get("user", []), _first_present(nodes_by_kind, "host", "victim_ip"), "authenticates_to", refs, **window)
+    for value in batch.values:
+        node_id = graph.add_node(batch.kind, value, batch.refs)
+        if node_id:
+            nodes_by_kind.setdefault(batch.kind, []).append(node_id)
+
+
+def _add_finding_edges(graph: EntityGraph, context: _FindingEdgeContext) -> None:
+    nodes_by_kind = context.nodes_by_kind
+    window = {"first_seen": context.first_seen, "last_seen": context.last_seen}
+    _add_edges(graph, _EdgeBatch(nodes_by_kind.get("attacker_ip", []), _first_present(nodes_by_kind, "victim_ip", "dst_ip", "host"), "targets", context.refs, **window))
+    _add_edges(graph, _EdgeBatch(nodes_by_kind.get("user", []), _first_present(nodes_by_kind, "host", "victim_ip"), "authenticates_to", context.refs, **window))
     victims = _first_present(nodes_by_kind, "victim_ip", "host")
-    _add_edges(graph, victims, nodes_by_kind.get("process", []), "executes", refs, **window)
-    _add_edges(graph, victims, nodes_by_kind.get("dst_ip", []) + nodes_by_kind.get("domain", []), "connects_to", refs, **window)
+    _add_edges(graph, _EdgeBatch(victims, nodes_by_kind.get("process", []), "executes", context.refs, **window))
+    _add_edges(graph, _EdgeBatch(victims, nodes_by_kind.get("dst_ip", []) + nodes_by_kind.get("domain", []), "connects_to", context.refs, **window))
 
 
-def _add_edges(graph: EntityGraph, sources: Sequence[str], targets: Sequence[str], relationship: str, refs: Sequence[Any], **window: str) -> None:
-    for source in sources:
-        for target in targets:
-            graph.add_edge(source, target, relationship, refs, first_seen=window.get("first_seen", ""), last_seen=window.get("last_seen", ""))
+def _add_edges(graph: EntityGraph, batch: _EdgeBatch) -> None:
+    for source in batch.sources:
+        for target in batch.targets:
+            graph.add_edge(source, target, batch.relationship, batch.refs, first_seen=batch.first_seen, last_seen=batch.last_seen)
 
 
 def _first_present(values: dict[str, list[str]], *keys: str) -> list[str]:
@@ -160,13 +207,16 @@ def _extract_findings(value: CaseRecord | Mapping[str, Any] | Sequence[Finding |
 def _ref_ids(refs: Sequence[Any]) -> list[str]:
     result: list[str] = []
     for ref in refs:
-        if isinstance(ref, EvidenceRef):
-            result.append(ref.evidence_id)
-        elif isinstance(ref, Mapping):
-            result.append(str(ref.get("evidence_id") or ref.get("raw_ref") or ref))
-        else:
-            result.append(str(ref))
+        result.append(_ref_id(ref))
     return _unique(result)
+
+
+def _ref_id(ref: Any) -> str:
+    if isinstance(ref, EvidenceRef):
+        return ref.evidence_id
+    if isinstance(ref, Mapping):
+        return str(ref.get("evidence_id") or ref.get("raw_ref") or ref)
+    return str(ref)
 
 
 def _unique(values: Sequence[Any]) -> list[str]:

@@ -1,9 +1,3 @@
-"""LLM: implements memory route CLI diagnostics.
-
-给人看的解释：
-route 命令通过已配置的 memory 索引来路由查询，并打印稳定报告。
-索引缺失、配置关闭或索引写坏时，会输出诊断信息而不是让 CLI 崩溃。
-"""
 
 from __future__ import annotations
 
@@ -24,7 +18,6 @@ DEFAULT_ROUTE_INDEX = Path("memory") / "routing" / "INDEX.md"
 
 
 def _resolve_agent(args):
-    """创建 agent 实例，支持测试 patching。"""
     import sys
     memory_mod = sys.modules.get("agent_py_agent.cli.memory_commands")
     if memory_mod is not None:
@@ -34,7 +27,6 @@ def _resolve_agent(args):
 
 
 def _load_and_validate_routes(index_path: Path, agent) -> tuple[list[MemoryRoute], list[str]]:
-    """Load routes from index and validate them, returning (routes, warnings)."""
     from ...agent.memory_routing import load_routes, validate_routes
     routes = load_routes(index_path)
     warnings = validate_routes(routes, agent.root)
@@ -42,7 +34,6 @@ def _load_and_validate_routes(index_path: Path, agent) -> tuple[list[MemoryRoute
 
 
 def _load_routes_for_matching(index_path: Path, agent, args) -> tuple[list[MemoryRoute], list[MemoryRouteMatch], list[str], list[str]]:
-    """Load routes and perform matching, returning routes, matches, req_paths, cand_paths."""
     from ...agent.memory_routing import load_routes, match_routes, resolve_required_paths
 
     routes = load_routes(index_path)
@@ -57,7 +48,6 @@ def _load_routes_for_matching(index_path: Path, agent, args) -> tuple[list[Memor
 
 
 def _try_validate_routes(index_path: Path, agent) -> tuple[bool, list[MemoryRoute], list[str], list[str]]:
-    """Try to validate routes, returning (ok, routes, route_warnings, messages)."""
     try:
         routes, route_warnings = _load_and_validate_routes(index_path, agent)
         return True, routes, route_warnings, ["memory route validation completed."]
@@ -66,7 +56,6 @@ def _try_validate_routes(index_path: Path, agent) -> tuple[bool, list[MemoryRout
 
 
 def _try_match_routes(index_path: Path, agent, args) -> tuple[bool, list[MemoryRoute], list[MemoryRouteMatch], list[str], list[str], list[str]]:
-    """Try to match routes, returning (ok, routes, matches, required_paths, candidate_paths, messages)."""
     try:
         routes, matches, required_paths, candidate_paths = _load_routes_for_matching(index_path, agent, args)
         return True, routes, matches, required_paths, candidate_paths, []
@@ -75,7 +64,6 @@ def _try_match_routes(index_path: Path, agent, args) -> tuple[bool, list[MemoryR
 
 
 def _execute_route_logic(args, agent, index_path: Path, mode: str, auto_read_limit: int):
-    """Execute routing match logic, returning (ok, routes, matches, required_paths, candidate_paths, diagnostics)."""
     warnings = _config_warnings(agent.config)
     diagnostics: dict[str, Any] = {"config_warnings": warnings, "route_warnings": [], "messages": []}
     routes: list[MemoryRoute] = []
@@ -104,15 +92,6 @@ def _execute_route_logic(args, agent, index_path: Path, mode: str, auto_read_lim
 
 
 def cmd_memory_route(args) -> int:
-    """Route a query through the configured memory index and print a stable report.
-
-    参数说明:
-    `args` 是 argparse 解析后的对象，至少包含 `query`、`index`、`mode`、`limit`、
-    `auto_read_limit`、`json`，以及创建 agent 需要的通用 CLI 参数。
-
-    返回说明:
-    返回进程退出码；当前诊断类命令成功打印报告后返回 0。
-    """
     agent = _resolve_agent(args)
     mode = _resolve_route_mode(args.mode, agent.config)
     auto_read_limit = _resolve_auto_read_limit(args.auto_read_limit, agent.config)
@@ -137,7 +116,6 @@ def cmd_memory_route(args) -> int:
 
 
 def _resolve_index_path(root: Path, raw_index: str | None) -> Path:
-    """Resolve CLI index paths against the agent workspace root."""
     candidate = Path(raw_index).expanduser() if raw_index else DEFAULT_ROUTE_INDEX
     if candidate.is_absolute():
         return candidate.resolve()
@@ -145,19 +123,16 @@ def _resolve_index_path(root: Path, raw_index: str | None) -> Path:
 
 
 def _resolve_route_mode(raw_mode: str | None, config: object) -> str:
-    """Choose the CLI routing mode, falling back to normalized agent config."""
     return str(raw_mode or getattr(config, "memory_rule_routing_mode", "soft") or "soft").strip().lower()
 
 
 def _resolve_auto_read_limit(raw_limit: int | None, config: object) -> int:
-    """Choose the route auto-read limit, falling back to normalized agent config."""
     if raw_limit is not None:
         return raw_limit
     return int(getattr(config, "memory_rule_auto_read_limit", 3))
 
 
 def _normalize_warning_item(item: Any) -> dict[str, Any]:
-    """Normalize a single config warning item to a dictionary."""
     if isinstance(item, dict):
         return dict(item)
     elif hasattr(item, "to_dict"):
@@ -170,13 +145,11 @@ def _normalize_warning_item(item: Any) -> dict[str, Any]:
 
 
 def _config_warnings(config: object) -> list[dict[str, Any]]:
-    """Return normalized memory config fallback warnings as dictionaries."""
     warnings = getattr(config, "memory_config_warnings", []) or []
     return [_normalize_warning_item(item) for item in warnings]
 
 
 def _index_payload(index_path: Path) -> dict[str, Any]:
-    """Serialize route index location and existence state."""
     return {
         "path": str(index_path),
         "exists": index_path.exists(),
@@ -185,7 +158,6 @@ def _index_payload(index_path: Path) -> dict[str, Any]:
 
 
 def _match_payload(match: MemoryRouteMatch) -> dict[str, Any]:
-    """Serialize one route match with enough evidence for deterministic tests."""
     return {
         "route_id": match.route.route_id,
         "topic": match.route.topic,
@@ -199,7 +171,6 @@ def _match_payload(match: MemoryRouteMatch) -> dict[str, Any]:
 
 
 def _print_memory_route_report(payload: dict[str, Any], *, json_output: bool) -> None:
-    """Render the memory-route payload as either stable JSON or compact text."""
     if json_output:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return
@@ -233,7 +204,6 @@ def _print_memory_route_report(payload: dict[str, Any], *, json_output: bool) ->
 
 
 def _print_path_list(paths: list[str]) -> None:
-    """Print a small stable list of route paths for text reports."""
     if not paths:
         print("- none")
         return

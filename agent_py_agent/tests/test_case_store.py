@@ -59,20 +59,14 @@ def make_finding(params: MakeFindingParams) -> Finding:
     )
 
 
-def make_case_record(
-    case_id: str = "case-001",
-    title: str = "Test Case",
-    priority: str = "P2",
-    risk_score: float = 0.7,
-    dedup_key: str = "",
-) -> CaseRecord:
+def make_case_record(**kwargs) -> CaseRecord:
     """创建测试用 CaseRecord 对象"""
     return CaseRecord(
-        case_id=case_id,
-        title=title,
-        priority=priority,
-        risk_score=risk_score,
-        dedup_key=dedup_key,
+        case_id=kwargs.pop("case_id", "case-001"),
+        title=kwargs.pop("title", "Test Case"),
+        priority=kwargs.pop("priority", "P2"),
+        risk_score=kwargs.pop("risk_score", 0.7),
+        dedup_key=kwargs.pop("dedup_key", ""),
         finding_refs=[],
         evidence_refs=[],
         entities={},

@@ -33,11 +33,6 @@ from .memory_doctor import cmd_memory_doctor
 
 
 def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
-    """LLM: add the --capability-config argument with its default.
-
-    新手说明:
-    很多子命令都需要 --capability-config 参数，这里统一添加避免重复代码。
-    """
     p.add_argument(
         "--capability-config",
         default=str(DEFAULT_CAPABILITY_CONFIG),
@@ -46,12 +41,6 @@ def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
 
 
 def add_basic_subcommands(sub: argparse._SubParsersAction) -> None:
-    """LLM: register status, timeline, run, remember and other basic subcommands.
-
-    新手说明:
-    注册基础子命令：status、timeline、run、remember 等。
-    这些命令不依赖 gateway 或 subagent 系统。
-    """
     status = sub.add_parser("status", help="查看 my-agent 全局状态")
     status.add_argument("--limit", type=int, default=5, help="最多显示多少条 hot/recent/timeline 项")
     status.add_argument("--recent", action="store_true", help="显示最近子代理列表")
@@ -103,7 +92,6 @@ def add_basic_subcommands(sub: argparse._SubParsersAction) -> None:
 
 
 def _add_archive_search_args(parser) -> None:
-    """Add archive-search specific arguments to a parser."""
     parser.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="搜索哪一层归档")
     parser.add_argument("--date", help="只搜索某一天，格式 YYYY-MM-DD")
     parser.add_argument("--since", help="只看此时间之后的记录，支持 ISO 时间或日期")
@@ -123,7 +111,6 @@ def _add_archive_search_args(parser) -> None:
 
 
 def _add_archive_resume_args(parser) -> None:
-    """Add memory-resume specific arguments to a parser."""
     parser.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="从哪一层归档找线索")
     parser.add_argument("--date", help="只看某一天，格式 YYYY-MM-DD")
     parser.add_argument("--since", help="只看此时间之后的归档线索")
@@ -144,12 +131,6 @@ def _add_archive_resume_args(parser) -> None:
 
 
 def add_memory_subcommands(sub: argparse._SubParsersAction) -> None:
-    """LLM: register memory-route, memory-doctor and memory-archive subcommands.
-
-    新手说明:
-    注册记忆相关子命令：memory-route、memory-doctor、memory-archive-list、
-    memory-archive-search、memory-resume。
-    """
     memory_route = sub.add_parser("memory-route", help="按长期规则索引预览 memory 路由命中")
     memory_route.add_argument("query", nargs="?", default="", help="要路由的查询或用户任务")
     memory_route.add_argument("--index", help="路由索引文件；相对路径按 workspace root 解析")
@@ -185,12 +166,6 @@ def add_memory_subcommands(sub: argparse._SubParsersAction) -> None:
 
 
 def add_local_store_subcommands(sub: argparse._SubParsersAction) -> None:
-    """LLM: register local-store-status, local-search, local-index-memory, local-doctor, local-rebuild.
-
-    新手说明:
-    注册本地事实源相关子命令：local-store-status、local-search、
-    local-index-memory、local-doctor、local-rebuild。
-    """
     local_store_status = sub.add_parser("local-store-status", help="查看本地事实源状态")
     local_store_status.set_defaults(func=cmd_local_store_status)
 

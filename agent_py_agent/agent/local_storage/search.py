@@ -1,12 +1,5 @@
 from __future__ import annotations
 
-"""LLM: implements LocalStore FTS/LIKE search and record-filter SQL construction.
-
-给人看的解释：
-这个文件只管'怎么搜'。
-能用 FTS5 就走全文索引，不能用或语法出问题就退回 LIKE，保证本地检索尽量可用。
-"""
-
 import re
 import sqlite3
 from typing import Any
@@ -15,12 +8,6 @@ from .models import LocalSearchResult
 
 
 class LocalStoreSearchMixin:
-    """LLM: mixin for recent-list, FTS search, LIKE fallback, and FTS row maintenance.
-
-    给人看的解释：
-    这里是 LocalStore 的搜索层，不负责写业务记录，只负责把查询条件翻译成 SQLite 查询。
-    """
-
     def search(
         self,
         query: str,
@@ -29,34 +16,15 @@ class LocalStoreSearchMixin:
         source_type: str | None = None,
         visibility: str | None = None,
     ) -> list[LocalSearchResult]:
-        """搜索本地记录。
-
-        优先走 FTS5；如果 FTS5 不可用，或查询语法被 SQLite 拒绝，就退回 LIKE。
-        这里把'能搜到'放在第一位，不让检索语法的小毛刺影响主代理运行。
-        """
-
         clean_query = query.strip()
         if limit <= 0:
             return []
         if not clean_query:
             return self.list_recent(limit=limit, source_type=source_type, visibility=visibility)
         if self.fts_available:
-            try:
-                hits = self._search_fts(
-                    clean_query,
-                    limit=limit,
-                    source_type=source_type,
-                    visibility=visibility,
-                )
-                if hits:
-                    return hits
-            except sqlite3.OperationalError:
-                return self._search_like(
-                    clean_query,
-                    limit=limit,
-                    source_type=source_type,
-                    visibility=visibility,
-                )
+            hits = self._safe_search_fts(clean_query, limit=limit, source_type=source_type, visibility=visibility)
+            if hits:
+                return hits
         return self._search_like(
             clean_query,
             limit=limit,
@@ -71,8 +39,6 @@ class LocalStoreSearchMixin:
         source_type: str | None = None,
         visibility: str | None = None,
     ) -> list[LocalSearchResult]:
-        """列出最近更新的记录。"""
-
         if limit <= 0:
             return []
         where, params = self._record_filters(source_type=source_type, visibility=visibility)
@@ -118,14 +84,7 @@ class LocalStoreSearchMixin:
                 source_type=source_type,
                 visibility=visibility,
             )
-        clauses = ["records_fts MATCH ?"]
-        params: list[Any] = [fts_query]
-        if source_type:
-            clauses.append("records.source_type = ?")
-            params.append(source_type)
-        if visibility:
-            clauses.append("records.visibility = ?")
-            params.append(visibility)
+        clauses, params = _record_fts_filters(fts_query, source_type, visibility)
         sql = f"""
             SELECT records.*, bm25(records_fts) AS rank
             FROM records_fts
@@ -146,15 +105,7 @@ class LocalStoreSearchMixin:
         source_type: str | None,
         visibility: str | None,
     ) -> list[LocalSearchResult]:
-        clauses = ["(title LIKE ? OR content_preview LIKE ? OR source_id LIKE ?)"]
-        like = f"%{query}%"
-        params: list[Any] = [like, like, like]
-        if source_type:
-            clauses.append("source_type = ?")
-            params.append(source_type)
-        if visibility:
-            clauses.append("visibility = ?")
-            params.append(visibility)
+        clauses, params = _record_like_filters(query, source_type, visibility)
         with self._connection() as conn:
             rows = conn.execute(
                 f"""
@@ -186,3 +137,62 @@ class LocalStoreSearchMixin:
             "INSERT INTO records_fts(id, title, content) VALUES (?, ?, ?)",
             (record_id, title, content),
         )
+
+    def _safe_search_fts(
+        self,
+        query: str,
+        *,
+        limit: int,
+        source_type: str | None,
+        visibility: str | None,
+    ) -> list[LocalSearchResult]:
+        try:
+            return self._search_fts(
+                query,
+                limit=limit,
+                source_type=source_type,
+                visibility=visibility,
+            )
+        except sqlite3.OperationalError:
+            return self._search_like(
+                query,
+                limit=limit,
+                source_type=source_type,
+                visibility=visibility,
+            )
+
+
+def _record_fts_filters(
+    fts_query: str,
+    source_type: str | None,
+    visibility: str | None,
+) -> tuple[list[str], list[Any]]:
+    clauses = ["records_fts MATCH ?"]
+    params: list[Any] = [fts_query]
+    _append_optional_filter(clauses, params, "records.source_type", source_type)
+    _append_optional_filter(clauses, params, "records.visibility", visibility)
+    return clauses, params
+
+
+def _record_like_filters(
+    query: str,
+    source_type: str | None,
+    visibility: str | None,
+) -> tuple[list[str], list[Any]]:
+    like = f"%{query}%"
+    clauses = ["(title LIKE ? OR content_preview LIKE ? OR source_id LIKE ?)"]
+    params: list[Any] = [like, like, like]
+    _append_optional_filter(clauses, params, "source_type", source_type)
+    _append_optional_filter(clauses, params, "visibility", visibility)
+    return clauses, params
+
+
+def _append_optional_filter(
+    clauses: list[str],
+    params: list[Any],
+    field: str,
+    value: str | None,
+) -> None:
+    if value:
+        clauses.append(f"{field} = ?")
+        params.append(value)

@@ -1,12 +1,22 @@
-"""ToolLoopService: tool-calling loop execution."""
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 from ..memory_archive import snapshots
 from ..prompting_parts.builder import ToolSections
 from ..tools import ToolExecutionResult
 from ._runtime_params import ToolLoopExecuteParams
 from .parameters import _one_shot_tool_call_key
+
+
+@dataclass(frozen=True)
+class ToolCallRecordParams:
+    params: ToolLoopExecuteParams
+    tool_rounds: int
+    idx: int
+    payload: object
+    result: ToolExecutionResult
 
 
 def _build_prompt(agent, params: ToolLoopExecuteParams) -> str:
@@ -42,13 +52,11 @@ def _duplicate_one_shot_result(payload: dict[str, object]) -> ToolExecutionResul
 
 
 class ToolLoopService:
-    """Service for executing the main tool-calling loop."""
 
     def __init__(self, agent):
         self._agent = agent
 
     def execute(self, params: ToolLoopExecuteParams):
-        """Execute the main tool-calling loop."""
         final_prompt = ""
         final_response = None
         tool_rounds = params.tool_rounds
@@ -75,7 +83,9 @@ class ToolLoopService:
             params.tool_context.append(f"[assistant-tool-round-{tool_rounds}]\n{response.text}")
             for idx, payload in enumerate(calls, start=1):
                 result = self._execute_one_tool_call(params, payload)
-                self._record_tool_call(params, tool_rounds, idx, payload, result)
+                self._record_tool_call(
+                    ToolCallRecordParams(params, tool_rounds, idx, payload, result)
+                )
 
         return final_prompt, final_response, tool_rounds
 
@@ -104,18 +114,19 @@ class ToolLoopService:
             params.one_shot_tool_calls.add(one_shot_key)
         return result
 
-    def _record_tool_call(self, params, tool_rounds: int, idx: int, payload, result) -> None:
-        if result.ok and result.tool not in {"__parse_error__", "unknown"}:
-            params.executed_tools.append(result.tool)
-        params.archive_tool_calls.append(
+    def _record_tool_call(self, record: ToolCallRecordParams) -> None:
+        if record.result.ok and record.result.tool not in {"__parse_error__", "unknown"}:
+            record.params.executed_tools.append(record.result.tool)
+        record.params.archive_tool_calls.append(
             {
-                "tool": result.tool,
-                "id": f"{tool_rounds}-{idx}",
-                "ok": result.ok,
-                "parameters": payload,
+                "tool": record.result.tool,
+                "id": f"{record.tool_rounds}-{record.idx}",
+                "ok": record.result.ok,
+                "parameters": record.payload,
             }
         )
-        params.tool_context.append(
-            f"[tool-call-{tool_rounds}-{idx}]\n{payload}\n"
-            f"[tool-result-{tool_rounds}-{idx}]\n{result.render_for_prompt()}"
+        record.params.tool_context.append(
+            f"[tool-call-{record.tool_rounds}-{record.idx}]\n{record.payload}\n"
+            f"[tool-result-{record.tool_rounds}-{record.idx}]\n"
+            f"{record.result.render_for_prompt()}"
         )

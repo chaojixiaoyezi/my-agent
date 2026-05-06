@@ -1,9 +1,3 @@
-"""LLM: acceptance criteria evaluation.
-
-给人看的解释：
-负责验收（acceptance）阶段的逻辑。
-验收判断基于证据完整性和测试通过率，不涉及模型调用。
-"""
 
 from __future__ import annotations
 
@@ -19,10 +13,6 @@ if TYPE_CHECKING:
 
 
 def review_acceptance_summary(agent, limit: int = 20) -> dict[str, Any]:
-    """Get a summary of tasks needing acceptance review.
-
-    Returns a dict with count and sample records.
-    """
     tasks = agent.subagents.list_runs()
     needs_acceptance = [
         task
@@ -36,10 +26,6 @@ def review_acceptance_summary(agent, limit: int = 20) -> dict[str, Any]:
 
 
 def acceptance_decision_from_evidence(task) -> str:
-    """Make acceptance decision based on evidence and test results.
-
-    Returns "APPROVED", "REJECTED", or "NEEDS_WORK".
-    """
     # Count passing evidence
     passing_evidence = sum(1 for e in task.evidence if getattr(e, "ok", False))
 

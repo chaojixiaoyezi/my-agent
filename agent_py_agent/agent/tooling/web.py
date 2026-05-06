@@ -13,6 +13,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from typing import Any
 
 from .models import BaseTool, ToolExecutionResult, ToolSpec
@@ -26,6 +27,14 @@ _MAX_HEADER_VALUE_CHARS = 8192
 _MAX_METHOD_CHARS = 16
 _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _HTTP_METHOD_RE = re.compile(r"^[A-Z][A-Z0-9_-]*$")
+
+
+@dataclass(frozen=True)
+class _ResponseParts:
+    tool: str
+    status: int
+    headers: Any
+    body: str
 
 
 def _has_control_chars(text: str) -> bool:
@@ -66,15 +75,15 @@ def _normalize_method(value: Any) -> str:
     return method
 
 
-def _format_response(tool: str, status: int, headers: Any, body: str, max_chars: int) -> ToolExecutionResult:
+def _format_response(parts: _ResponseParts, max_chars: int) -> ToolExecutionResult:
     result = (
-        f"status={status}\n"
-        f"content_type={headers.get('Content-Type', '')}\n\n"
-        f"{body[:max_chars]}"
+        f"status={parts.status}\n"
+        f"content_type={parts.headers.get('Content-Type', '')}\n\n"
+        f"{parts.body[:max_chars]}"
     )
-    if len(body) > max_chars:
+    if len(parts.body) > max_chars:
         result += "\n... 已截断"
-    return ToolExecutionResult(tool, True, result)
+    return ToolExecutionResult(parts.tool, True, result)
 
 
 def _format_http_error(tool: str, exc: urllib.error.HTTPError, max_chars: int) -> ToolExecutionResult:
@@ -90,7 +99,6 @@ def _format_http_error(tool: str, exc: urllib.error.HTTPError, max_chars: int) -
 
 
 class FetchUrlTool(BaseTool):
-    """抓取网页或纯文本接口内容。"""
 
     def __init__(self, *, max_chars: int, timeout: int):
         self.max_chars = max_chars
@@ -132,7 +140,7 @@ class FetchUrlTool(BaseTool):
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 body = resp.read().decode("utf-8", "replace")
-                return _format_response("fetch_url", resp.status, resp.headers, body, self.max_chars)
+                return _format_response(_ResponseParts("fetch_url", resp.status, resp.headers, body), self.max_chars)
         except urllib.error.HTTPError as exc:
             return _format_http_error("fetch_url", exc, self.max_chars)
         except (urllib.error.URLError, TimeoutError) as exc:
@@ -140,7 +148,6 @@ class FetchUrlTool(BaseTool):
 
 
 class HttpRequestTool(BaseTool):
-    """通用 HTTP / API 调试工具。"""
 
     def __init__(self, *, max_chars: int, timeout: int):
         self.max_chars = max_chars
@@ -195,14 +202,16 @@ class HttpRequestTool(BaseTool):
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 response_body = resp.read().decode("utf-8", "replace")
-                return _format_response("http_request", resp.status, resp.headers, response_body, self.max_chars)
+                return _format_response(
+                    _ResponseParts("http_request", resp.status, resp.headers, response_body),
+                    self.max_chars,
+                )
         except urllib.error.HTTPError as exc:
             return _format_http_error("http_request", exc, self.max_chars)
         except (urllib.error.URLError, TimeoutError) as exc:
             return ToolExecutionResult("http_request", False, f"请求失败: {exc.__class__.__name__}")
 
     def _normalize_headers(self, headers: Any) -> dict[str, str]:
-        """把请求头统一整理成 `dict[str, str]`。"""
 
         if headers is None:
             return {"User-Agent": "SimplePythonAgent/1.0"}

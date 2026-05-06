@@ -1,4 +1,3 @@
-"""_ParentPlannerMixin and RunParentPlannerParams for parent planner LLM orchestration."""
 
 from __future__ import annotations
 
@@ -17,7 +16,6 @@ from .planner import (
 
 @dataclass(frozen=True)
 class RunParentPlannerParams:
-    """Bundle of run_parent_planner parameters."""
 
     router: CapabilityRouter
     capability_config: CapabilityConfig | None
@@ -30,16 +28,27 @@ class RunParentPlannerParams:
     runner_instruction: str
 
 
+@dataclass(frozen=True)
+class PlannerLLMParams:
+    state: dict
+    apply: bool
+    execute_runners: bool
+    max_runners: int
+    runner_instruction: str
+
+
+@dataclass(frozen=True)
+class PlannerRecordBuildParams:
+    result: object
+    state: dict
+    gate_summary: dict
+    apply: bool
+    runner_instruction: str
+
+
 class _ParentPlannerMixin:
-    """Internal: parent planner LLM turn orchestration (run, heartbeat, error, build)."""
 
     def run_parent_planner(self, params: RunParentPlannerParams) -> ParentPlannerRecord:
-        """运行一轮父代理 LLM planner，并写出审计报告.
-
-        planner 不是 heartbeat 的浅层 OK，而是一个完整模型 turn。只有状态门禁发现
-        有 active/pending/stalled/needs-intervention 事项时，才真正调用模型；如果模型
-        在有事时只回 HEARTBEAT_OK，会被标记为失败。
-        """
         cfg = params.capability_config or CapabilityConfig()
         state = _build_parent_planner_state(
             self,
@@ -57,22 +66,29 @@ class _ParentPlannerMixin:
             return self._make_heartbeat_ok_record(not params.apply, gate_summary)
 
         result = self._execute_planner_llm(
-            state,
-            params.apply,
-            params.execute_runners,
-            params.max_runners,
-            params.runner_instruction,
+            PlannerLLMParams(
+                state=state,
+                apply=params.apply,
+                execute_runners=params.execute_runners,
+                max_runners=params.max_runners,
+                runner_instruction=params.runner_instruction,
+            )
         )
         if result is None:
             return self._make_planner_error_record(
                 gate_summary, params.runner_instruction, params.apply
             )
         return self._build_planner_record(
-            result, state, gate_summary, params.apply, params.runner_instruction
+            PlannerRecordBuildParams(
+                result=result,
+                state=state,
+                gate_summary=gate_summary,
+                apply=params.apply,
+                runner_instruction=params.runner_instruction,
+            )
         )
 
     def _make_heartbeat_ok_record(self, dry_run, gate_summary):
-        """Make heartbeat OK record when no planner needed."""
         record = self.subagents.make_parent_planner_record(
             params=ParentPlannerRecordParams(
                 dry_run=dry_run,
@@ -88,14 +104,13 @@ class _ParentPlannerMixin:
         self.subagents.write_parent_planner_report(report, append_log=False)
         return record
 
-    def _execute_planner_llm(self, state, apply, execute_runners, max_runners, runner_instruction):
-        """Execute the parent planner LLM call."""
+    def _execute_planner_llm(self, params: PlannerLLMParams):
         prompt = _build_parent_planner_prompt(
-            state,
-            apply=apply,
-            execute_runners=execute_runners,
-            max_runners=max_runners,
-            runner_instruction=runner_instruction,
+            params.state,
+            apply=params.apply,
+            execute_runners=params.execute_runners,
+            max_runners=params.max_runners,
+            runner_instruction=params.runner_instruction,
         )
         self.subagents.write_parent_planner_exchange(prompt)
         try:
@@ -104,7 +119,6 @@ class _ParentPlannerMixin:
             return None
 
     def _make_planner_error_record(self, gate_summary, runner_instruction, apply):
-        """Make planner error record after LLM failure."""
         record = self.subagents.make_parent_planner_record(
             params=ParentPlannerRecordParams(
                 dry_run=not apply,
@@ -121,15 +135,14 @@ class _ParentPlannerMixin:
         self.subagents.write_parent_planner_report(report, append_log=apply)
         return record
 
-    def _build_planner_record(self, result, state, gate_summary, apply, runner_instruction):
-        """Build parent planner record from LLM result."""
+    def _build_planner_record(self, params: PlannerRecordBuildParams):
         from ..subagents.parsing import parse_parent_planner_output
 
         prompt_path, response_path = self.subagents.write_parent_planner_exchange(
-            result.prompt,
-            result.response,
+            params.result.prompt,
+            params.result.response,
         )
-        parsed = parse_parent_planner_output(result.response)
+        parsed = parse_parent_planner_output(params.result.response)
         ok = parsed.found and parsed.ok
         decision = parsed.decision or "PARSE_ERROR"
         message = parsed.summary or "父代理 planner 已完成完整 LLM turn。"
@@ -140,21 +153,21 @@ class _ParentPlannerMixin:
             decision = "PARSE_ERROR"
             parse_error = "缺少 [PARENT_PLANNER_RESULT] 结构化结果块。"
             message = "父代理 planner 有模型回复，但缺少结构化结果，不能当作 OK。"
-        if parsed.decision == "HEARTBEAT_OK" and state["gate"].get("needs_planner", 0):
+        if parsed.decision == "HEARTBEAT_OK" and params.state["gate"].get("needs_planner", 0):
             ok = False
             parse_error = parse_error or "planner gate blocked HEARTBEAT_OK"
             message = "状态门禁发现仍有待处理事项，禁止 planner 只返回 HEARTBEAT_OK。"
 
         record = self.subagents.make_parent_planner_record(
             params=ParentPlannerRecordParams(
-                dry_run=not apply,
+                dry_run=not params.apply,
                 triggered=True,
                 ok=ok,
                 decision=decision,
                 message=message,
-                gate_summary=gate_summary,
-                backend=result.backend,
-                tool_rounds=result.tool_rounds,
+                gate_summary=params.gate_summary,
+                backend=params.result.backend,
+                tool_rounds=params.result.tool_rounds,
                 parse_error=parse_error,
                 summary=parsed.summary,
                 actions=parsed.actions,
@@ -168,6 +181,6 @@ class _ParentPlannerMixin:
                 evidence_paths=[prompt_path, response_path],
             ),
         )
-        report = self.subagents.build_parent_planner_report([record], dry_run=not apply)
-        self.subagents.write_parent_planner_report(report, append_log=apply)
+        report = self.subagents.build_parent_planner_report([record], dry_run=not params.apply)
+        self.subagents.write_parent_planner_report(report, append_log=params.apply)
         return record

@@ -1,8 +1,3 @@
-"""LLM: watch mode orchestration for continuous dispatch.
-
-给人看的解释：
-封装 watch 循环的编排逻辑，包括单轮执行、状态持久化、停止条件判断。
-"""
 
 from __future__ import annotations
 
@@ -21,7 +16,6 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class RunSingleWatchCycleParams:
-    """Bundle of all _run_single_watch_cycle parameters."""
 
     cycle: int
     lock_path: Path
@@ -50,7 +44,6 @@ class RunSingleWatchCycleParams:
 
 @dataclass(frozen=True)
 class WatchSubagentsParams:
-    """Bundle of all watch_subagents parameters."""
 
     apply: bool = False
     execute_runners: bool = False
@@ -90,10 +83,6 @@ def watch_subagents(
     *,
     params: WatchSubagentsParams,
 ) -> DispatchWatchReport:
-    """以 watch 模式持续执行父代理调度。
-
-    内部管理循环、锁、状态持久化和报告生成。
-    """
     if params.max_cycles < 0:
         raise ValueError("max_cycles 不能小于 0。")
     if params.interval < 0:
@@ -185,7 +174,6 @@ def _write_watch_stopped(agent, cycle: int, lock_path: Path, token: str) -> None
 
 
 def _execute_watch_dispatch(agent, params):
-    """Execute dispatch for a single watch cycle and return dispatch result."""
     try:
         dispatch_report = agent.dispatch_subagents(
             router=params.router,
@@ -225,7 +213,6 @@ def _run_single_watch_cycle(
     agent: SimpleAgent,
     params: RunSingleWatchCycleParams,
 ) -> DispatchWatchRecord:
-    """Run a single watch cycle and return the dispatch watch record."""
     from ..dispatch_service import MakeDispatchWatchRecordParams, make_dispatch_watch_record
     from ..parameters import _sleep_with_stop
 

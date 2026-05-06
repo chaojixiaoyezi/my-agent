@@ -20,7 +20,6 @@ from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
 
 
 def start_gateway(supervisor) -> int | None:
-    """Start the gateway process. Returns the gateway PID or None on failure."""
     supervisor._resolve_agent_and_paths()
     cmd = [sys.executable, "-m", "agent_py_agent", "--config", supervisor.config_path, "gateway", "run"]
     creationflags, start_new_session = _gateway_process_flags()
@@ -70,7 +69,6 @@ def _wait_for_gateway_start(supervisor, process) -> int | None:
 
 
 def stop_gateway(supervisor, timeout: float = 20.0) -> bool:
-    """Request graceful shutdown of the gateway. Returns True if stopped."""
     supervisor._resolve_agent_and_paths()
     pid = get_running_pid(supervisor._paths.pid)
     if not pid:
@@ -99,7 +97,6 @@ def _write_supervisor_stop_request(supervisor) -> None:
 
 
 def restart_gateway(supervisor) -> bool:
-    """Restart the gateway. Returns True if restart was attempted."""
     if supervisor._restart_count >= supervisor.max_restart_attempts:
         supervisor._log_error(
             f"Max restart attempts ({supervisor.max_restart_attempts}) reached. "
@@ -126,7 +123,6 @@ def restart_gateway(supervisor) -> bool:
 
 
 def run_supervisor_loop(supervisor) -> int:
-    """Run the supervisor loop until stop is requested."""
     supervisor._log_info("Gateway supervisor starting")
     supervisor._resolve_agent_and_paths()
     supervisor_pid_path = supervisor._paths.root / "supervisor.pid"

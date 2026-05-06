@@ -16,7 +16,7 @@ if scripts_path not in sys.path:
     sys.path.insert(0, scripts_path)
 
 import check_code_size  # noqa: E402
-from code_size_report import write_report  # noqa: E402
+from code_size_report import ReportRenderContext, write_report  # noqa: E402
 from code_size_rules import Finding  # noqa: E402
 
 
@@ -113,14 +113,7 @@ def test_report_surfaces_high_risk_near_soft_findings(tmp_path) -> None:
         )
     ]
 
-    write_report(
-        report,
-        findings,
-        mode="strict",
-        blocked=False,
-        baseline_path=None,
-        baseline_loaded=False,
-    )
+    write_report(report, findings, ReportRenderContext("strict", False, None, False))
 
     text = report.read_text(encoding="utf-8")
     assert "- high_risk_findings: 1" in text

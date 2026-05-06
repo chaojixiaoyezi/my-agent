@@ -1,4 +1,3 @@
-"""FinalizationService: result finalization, archiving, and token estimation."""
 
 from __future__ import annotations
 
@@ -24,13 +23,11 @@ from .models import AgentRunResult
 
 
 class FinalizationService:
-    """Service for result finalization, archiving, and token estimation."""
 
     def __init__(self, agent):
         self._agent = agent
 
     def finalize(self, ctx: FinalizeContext):
-        """Finalize run result: archive, snapshots, token estimation, and return value."""
         assert ctx.final_response is not None
         run_request_id = ctx.request_id or f"run-{time_module.time_ns()}"
 
@@ -77,7 +74,6 @@ class FinalizationService:
         return self._build_agent_run_result(ctx, archive_result, snapshot_result, token_ledger)
 
     def _archive_run_if_needed(self, params: ArchiveRunParams):
-        """Archive run turn if do_save is enabled."""
         if not params.do_save:
             return None
         self._agent.memory.add("user", params.user_prompt)
@@ -103,7 +99,6 @@ class FinalizationService:
         )
 
     def _write_recovery_snapshot_if_needed(self, params: WriteRecoverySnapshotParams):
-        """Write recovery snapshot if enabled."""
         should_write = bool(getattr(self._agent.config, "memory_hook_enabled", True)) and (
             params.do_save if params.recovery_snapshot is None else bool(params.recovery_snapshot)
         )
@@ -134,7 +129,6 @@ class FinalizationService:
         )
 
     def _estimate_token_usage(self, params: EstimateTokenParams):
-        """Estimate and record token usage."""
         input_tokens = (
             estimate_tokens(params.user_prompt)
             + estimate_tokens(params.runtime_injections)
@@ -161,7 +155,6 @@ class FinalizationService:
     def _build_agent_run_result(
         self, ctx: FinalizeContext, archive_result, snapshot_result, token_ledger
     ):
-        """Build the final AgentRunResult object."""
         routed_context = ctx.routed_context
         return AgentRunResult(
             prompt=ctx.final_prompt,

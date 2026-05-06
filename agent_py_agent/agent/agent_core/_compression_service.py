@@ -1,4 +1,3 @@
-"""CompressionService: compression check, snapshot, and compression logic."""
 
 from __future__ import annotations
 
@@ -13,7 +12,6 @@ from ._runtime_params import CompressionContext
 
 @dataclass(frozen=True)
 class CompressionSnapshotContentParams:
-    """Fields needed to render a pre-compression snapshot body."""
 
     user_prompt: str
     memories: list[object]
@@ -23,13 +21,11 @@ class CompressionSnapshotContentParams:
 
 
 class CompressionService:
-    """Service for compression checking, snapshot writing, and memory compression."""
 
     def __init__(self, agent):
         self._agent = agent
 
     def check_and_apply(self, ctx: CompressionContext):
-        """Check prompt size and apply compression if needed."""
         if self._full_prompt_estimate(ctx) <= int(getattr(self._agent.config, "max_tokens", 1024)):
             return ctx.memories, "", "", False
 
@@ -110,7 +106,6 @@ class CompressionService:
         )
 
     def _compress_memories(self, memories: list[object], *, keep_recent: int) -> list[object]:
-        """Keep recent turns intact and replace older turns with one bounded summary record."""
         from ..memory_store.jsonl import MemoryRecord
 
         if len(memories) <= keep_recent:
@@ -131,7 +126,6 @@ class CompressionService:
         return [summary, *recent]
 
     def _build_compression_snapshot_content(self, params: CompressionSnapshotContentParams) -> str:
-        """Assemble the bounded snapshot body captured before context compression."""
         lines = [
             f"user_prompt={params.user_prompt}",
             f"memory_count={len(params.memories)}",

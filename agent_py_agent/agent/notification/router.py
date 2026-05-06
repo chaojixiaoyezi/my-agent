@@ -1,11 +1,3 @@
-"""通知路由。
-
-根据用户在线状态和通道可用性，决定通知投递策略：
-1. 先尝试发起通道
-2. 发起通道不在线 → 转活跃通道
-3. 活跃通道也不在线 → 转其他在线通道
-4. 都不在线 → 存储等待
-"""
 from __future__ import annotations
 
 import json
@@ -22,37 +14,14 @@ from .models import Notification
 
 
 class NotificationRouter:
-    """通知路由器。
-
-    决定通知投递策略和实际投递通道。
-    """
 
     def __init__(self, config: AgentConfig):
-        """初始化路由器。
-
-        Args:
-            config: 智能体配置对象
-        """
         self.config = config
         self._channel_checker = ChannelStatusChecker(config)
         self._manager = NotificationManager(config)
         self._session_workspace = Path(config.session_workspace)
 
     def route(self, notification: Notification) -> str | None:
-        """决定投递通道。
-
-        路由策略：
-        1. 先尝试发起通道（notification.channel）
-        2. 发起通道不在线 → 查 session 的 last_active_channel
-        3. 活跃通道也不在线 → 查用户所有会话，找最近的活跃通道
-        4. 都不在线 → 返回 None（需要存储）
-
-        Args:
-            notification: 通知对象
-
-        Returns:
-            实际投递通道，如果需要存储返回 None
-        """
         # 策略 1：尝试发起通道
         if self._channel_checker.check(notification.channel, notification.user_id):
             return notification.channel
@@ -117,28 +86,9 @@ class NotificationRouter:
         return None, 0.0
 
     def is_channel_online(self, channel: str, user_id: str | None = None) -> bool:
-        """检查通道是否在线。
-
-        Args:
-            channel: 通道名称
-            user_id: 用户 ID，可选
-
-        Returns:
-            通道是否在线
-        """
         return self._channel_checker.check(channel, user_id)
 
     def deliver(self, notification_id: str) -> tuple[bool, str]:
-        """尝试投递通知。
-
-        路由并投递单个通知。
-
-        Args:
-            notification_id: 通知 ID
-
-        Returns:
-            (是否成功, 投递通道或错误信息)
-        """
         notification = self._manager.load_notification(notification_id)
         if notification is None:
             return False, f"通知 {notification_id} 不存在"
@@ -165,18 +115,6 @@ class NotificationRouter:
             return False, "投递失败"
 
     def _do_deliver(self, notification: Notification, channel: str) -> bool:
-        """执行实际投递。
-
-        实际实现中，这里应该调用对应通道的适配器。
-        目前是模拟实现。
-
-        Args:
-            notification: 通知对象
-            channel: 投递通道
-
-        Returns:
-            是否投递成功
-        """
         # 模拟投递：实际实现中调用通道适配器
         # 对于 chat 通道，直接输出到 stderr（用于测试）
         # 对于其他通道，调用对应适配器
@@ -188,16 +126,6 @@ class NotificationRouter:
             return True
 
     def flush_stored(self, user_id: str) -> int:
-        """推送用户所有离线存储的通知。
-
-        用户上线时调用，将存储的通知推送给用户。
-
-        Args:
-            user_id: 用户 ID
-
-        Returns:
-            成功推送的通知数量
-        """
         pending = self._manager.get_pending(user_id)
         success_count = 0
 
@@ -210,14 +138,6 @@ class NotificationRouter:
         return success_count
 
     def get_pending_count(self, user_id: str) -> int:
-        """获取用户待处理通知数量。
-
-        Args:
-            user_id: 用户 ID
-
-        Returns:
-            待处理通知数量
-        """
         return self._manager.get_pending_count(user_id)
 
 

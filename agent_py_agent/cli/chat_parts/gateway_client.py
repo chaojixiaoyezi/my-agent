@@ -1,9 +1,3 @@
-"""LLM: gateway request/response streaming helpers for chat mode.
-
-给人看的解释：
-gateway 客户端的请求提交、chunk 读取、响应轮询都集中在这里，
-让 TUI 和 fallback 两个循环都复用同一套 gateway 交互逻辑。
-"""
 
 from __future__ import annotations
 
@@ -25,7 +19,6 @@ from ...agent.gateway import (
 
 @dataclass
 class ChatRequestContent:
-    """Bundle of chat request content parameters for submit_chat_request."""
     prompt: str
     inject: list[str]
     prompt_files: list[str]
@@ -39,7 +32,6 @@ def submit_chat_request(
     content: ChatRequestContent,
     agent,
 ) -> tuple[str, Path, Path]:
-    """Submit a gateway chat request and return (request_id, chunk_path, response_path)."""
     request_id, _, response_path = submit_gateway_ask(
         paths,
         params=GatewayAskParams(
@@ -64,10 +56,6 @@ def poll_gateway_chunks(
     *,
     chunks_printed_ref: list[int],
 ) -> dict:
-    """Poll gateway chunk and response files until deadline.
-
-    Returns the final response dict or empty dict on timeout.
-    """
     chunks_printed = chunks_printed_ref[0]
     response = {}
     while time.time() <= deadline:
@@ -81,26 +69,28 @@ def poll_gateway_chunks(
 
 
 def _poll_chunk_file(chunk_path: Path, on_chunk: callable, chunks_printed: int) -> int:
-    """Poll one chunk file, calling on_chunk for new lines. Returns updated count."""
     if not chunk_path.exists():
         return chunks_printed
     try:
         lines = chunk_path.read_text(encoding="utf-8").splitlines()
         for cline in lines[chunks_printed:]:
-            if not cline.strip():
-                continue
-            cobj = json.loads(cline)
-            chunk_text = cobj.get("text", "")
-            if chunk_text:
-                on_chunk(chunk_text)
-            chunks_printed += 1
+            chunks_printed += _emit_chunk_line(cline, on_chunk)
     except (OSError, json.JSONDecodeError):
         pass
     return chunks_printed
 
 
+def _emit_chunk_line(cline: str, on_chunk: callable) -> int:
+    if not cline.strip():
+        return 0
+    cobj = json.loads(cline)
+    chunk_text = cobj.get("text", "")
+    if chunk_text:
+        on_chunk(chunk_text)
+    return 1
+
+
 def check_gateway_alive(paths) -> bool:
-    """Check if gateway is running and alive."""
     _, alive = gateway_running(paths)
     return alive
 
@@ -112,7 +102,6 @@ def format_gateway_timing(
     use_gateway: bool,
     agent_name: str,
 ) -> str:
-    """Format gateway timing summary string."""
     if use_gateway:
         return (
             f"[耗时 {elapsed:.2f}s; gateway_request={request_id}; "

@@ -1,7 +1,3 @@
-"""Gateway process lifecycle, foreground run loop, status, stop/restart/logs commands.
-
-Re-exports commands from _gateway_commands for backward compatibility.
-"""
 
 from __future__ import annotations
 

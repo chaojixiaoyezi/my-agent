@@ -31,7 +31,6 @@ from ..scenario_utils import (
 
 @dataclass
 class WorkerRunResults:
-    """Bundle of worker run results for multi-worker scenario."""
     processed_by_worker: dict[str, int]
     run_prompts_by_worker: dict[str, list[str]]
     errors: list[str]
@@ -40,14 +39,12 @@ class WorkerRunResults:
 
 @dataclass
 class MultiWorkerScenarioSetup:
-    """Bundle of gateway setup data for multi-worker scenario."""
     gpaths: object
     request_ids: list[str]
     request_count: int
 
 
 def _multi_worker_setup(args):
-    """Setup for multi-worker scenario: create workspace, agent, gateway paths, and enqueue requests."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=gateway-multi-worker")
@@ -86,7 +83,6 @@ def _multi_worker_setup(args):
 
 
 def _multi_worker_verify(setup: MultiWorkerScenarioSetup, results: WorkerRunResults):
-    """Verify multi-worker results: check responses, done archives, and queue state."""
     responses = {request_id: read_json_file(gateway_response_path(setup.gpaths, request_id)) for request_id in setup.request_ids}
     done_payloads = {request_id: read_json_file(setup.gpaths.done / f"{request_id}.json") for request_id in setup.request_ids}
     response_backends = sorted(str(payload.get("backend") or "") for payload in responses.values())
@@ -121,7 +117,6 @@ def _multi_worker_verify(setup: MultiWorkerScenarioSetup, results: WorkerRunResu
 
 
 def _multi_worker_finish(paths, setup: MultiWorkerScenarioSetup, results: WorkerRunResults):
-    """Complete multi-worker run: print diagnostics and verify results."""
     print("processed_by_worker=" + json.dumps(results.processed_by_worker, ensure_ascii=False, sort_keys=True))
     print("run_prompts_by_worker=" + json.dumps(results.run_prompts_by_worker, ensure_ascii=False, sort_keys=True))
     if results.errors:
@@ -152,12 +147,6 @@ def _multi_worker_finish(paths, setup: MultiWorkerScenarioSetup, results: Worker
 
 
 def run_scenario_gateway_multi_worker_case(args) -> int:
-    """LLM: run two gateway workers against one pending queue and prove every request completes once.
-
-    新手说明:
-    启动两个 worker 同时处理同一队列中的请求。
-    验证每个请求只被处理一次，不会出现重复处理或遗漏。
-    """
 
     paths, gpaths, request_ids, request_count = _multi_worker_setup(args)
 

@@ -224,6 +224,15 @@ class TestSubAgentLearningMixin:
         assert drafts_dir.exists()
         assert drafts_dir.is_dir()
 
+
+
+
+
+
+
+class TestSubAgentLearningCandidateMixin:
+    """测试 SubAgentLearningMixin 类。"""
+
     def test_save_and_load_learning_candidate(self, tmp_path: Path):
         """测试保存和加载学习候选。"""
         from agent_py_agent.agent.subagents.manager_learning import SubAgentLearningMixin

@@ -25,19 +25,6 @@ def calculate_dynamic_timeout(
     min_timeout: float | None = None,
     max_timeout: float | None = None,
 ) -> float:
-    """根据输入大小和速度模型计算动态超时。
-
-    Args:
-        config: Agent 配置
-        estimated_input_tokens: 预估输入 token 数
-        estimated_output_tokens: 预估输出 token 数
-        safety_margin: 安全边际系数，默认使用配置值
-        min_timeout: 最小超时秒数，默认使用配置值
-        max_timeout: 最大超时秒数，默认使用配置值
-
-    Returns:
-        动态超时秒数
-    """
 
     effective_safety_margin = safety_margin if safety_margin is not None else config.dynamic_timeout_safety_margin
     effective_min_timeout = min_timeout if min_timeout is not None else float(config.dynamic_timeout_min)
@@ -66,11 +53,6 @@ def calculate_dynamic_timeout(
 
 
 def estimate_tokens_from_text(text: str) -> int:
-    """粗略估算文本的 token 数。
-
-    这是一个简化估算，不是精确的 tokenizer。
-    英文大约 4 字符 = 1 token，中文大约 1.5 字符 = 1 token。
-    """
 
     if not text:
         return 0
@@ -88,15 +70,6 @@ def estimate_tokens_from_text(text: str) -> int:
 
 
 def estimate_task_tokens(goal: str, plan: list[str] | None = None) -> tuple[int, int]:
-    """根据任务描述和计划估算输入和输出 token 数。
-
-    Args:
-        goal: 任务目标描述
-        plan: 计划步骤列表
-
-    Returns:
-        (estimated_input_tokens, estimated_output_tokens)
-    """
 
     # 估算输入 token：goal + plan
     plan_text = " ".join(plan) if plan else ""

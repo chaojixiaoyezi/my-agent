@@ -27,18 +27,6 @@ from .common import make_agent
 
 
 def cmd_memory_archive_list(args) -> int:
-    """LLM: list recent raw archive and hook snapshot records.
-
-    新手说明:
-    这条命令用来回答'最近到底落盘了哪些记忆归档'。
-    它会把 raw 事件和 hook 快照摊成统一字段，方便肉眼扫，也方便脚本继续处理。
-
-    参数说明:
-    `args` 是 argparse 对象，包含 `layer`、`date`、`limit`、`json` 和通用 agent 参数。
-
-    返回说明:
-    返回 CLI 退出码，打印成功时为 0。
-    """
 
     agent = make_agent(args)
     records = collect_archive_records(
@@ -62,18 +50,6 @@ def cmd_memory_archive_list(args) -> int:
 
 
 def cmd_memory_archive_search(args) -> int:
-    """LLM: search raw archive and hook snapshots with structured filters.
-
-    新手说明:
-    这条命令不是只搜一个关键词。
-    它可以同时按 session、request、run、工具名、状态、说话对象等字段过滤，适合排查'刚刚那轮到底发生了什么'。
-
-    参数说明:
-    `args` 是 argparse 对象，包含关键词、字段过滤、时间窗口、layer/date/limit/json 等。
-
-    返回说明:
-    返回 CLI 退出码，打印成功时为 0。
-    """
 
     agent = make_agent(args)
     records = collect_archive_records(agent.root, layer=args.layer, date_key=args.date, limit=0)
@@ -102,7 +78,6 @@ def cmd_memory_archive_search(args) -> int:
 
 
 def _collect_resume_data(agent, args):
-    """收集 resume 所需的归档匹配、本地命中、任务事实源和 gateway 事实源。"""
     archive_records = collect_archive_records(agent.root, layer=args.layer, date_key=args.date, limit=0)
     filters = archive_filters_from_args(args)
     archive_matches = filter_archive_records(
@@ -122,19 +97,6 @@ def _collect_resume_data(agent, args):
 
 
 def cmd_memory_resume(args) -> int:
-    """LLM: build a recovery brief from archive clues, LocalStore hits, and task fact sources.
-
-    新手说明:
-    用户说'继续'时，最怕模型只靠印象猜。
-    这条命令先把可检索线索找出来，再把任务目录这些权威事实源列出来，帮助下一步真正恢复现场。
-    如果线索来自 gateway 请求，它会额外列出 gateway request/response JSON，避免用户只看 LocalStore 摘要。
-
-    参数说明:
-    `args` 是 argparse 对象，包含 query、过滤字段、layer/date/limit/json/context_only 等。
-
-    返回说明:
-    返回 CLI 退出码；`--context-only` 时只打印恢复块。
-    """
     agent = make_agent(args)
     filters, archive_matches, local_payloads, task_payloads, gateway_payloads = _collect_resume_data(agent, args)
     resume = build_resume_guidance(archive_matches, local_payloads, task_payloads, gateway_payloads)
@@ -157,18 +119,6 @@ def cmd_memory_resume(args) -> int:
 
 
 def _print_archive_list(payload: dict[str, Any], *, json_output: bool) -> None:
-    """LLM: render memory-archive-list payload as JSON or compact text.
-
-    新手说明:
-    JSON 给测试和脚本，文本给人扫。
-    文本只打印最关键的字段，完整 payload 仍可用 `--json` 看。
-
-    参数说明:
-    `payload` 是 list 命令报告；`json_output` 控制输出格式。
-
-    返回说明:
-    不返回值；直接打印。
-    """
 
     if json_output:
         print(json.dumps(strip_sort_keys(payload), ensure_ascii=False, indent=2, sort_keys=True))
@@ -184,17 +134,6 @@ def _print_archive_list(payload: dict[str, Any], *, json_output: bool) -> None:
 
 
 def _print_archive_search(payload: dict[str, Any], *, json_output: bool) -> None:
-    """LLM: render memory-archive-search payload as JSON or compact text.
-
-    新手说明:
-    搜索结果会告诉你命中在哪个文件第几行，方便继续打开原始证据。
-
-    参数说明:
-    `payload` 是 search 命令报告；`json_output` 控制输出格式。
-
-    返回说明:
-    不返回值；直接打印。
-    """
 
     if json_output:
         print(json.dumps(strip_sort_keys(payload), ensure_ascii=False, indent=2, sort_keys=True))
@@ -208,7 +147,6 @@ def _print_archive_search(payload: dict[str, Any], *, json_output: bool) -> None
 
 
 def _print_resume_brief(brief: dict[str, Any]) -> None:
-    """打印 Recovery Brief 区段。"""
     print("Recovery Brief")
     print(f"- latest_user_intent: {brief['latest_user_intent'] or 'unknown'}")
     print(f"- latest_assistant_action: {brief['latest_assistant_action'] or 'unknown'}")
@@ -222,7 +160,6 @@ def _print_resume_brief(brief: dict[str, Any]) -> None:
 
 
 def _print_task_fact_sources(task_payloads: list[dict[str, Any]]) -> None:
-    """打印 Task Fact Sources 区段。"""
     print("Task Fact Sources")
     if not task_payloads:
         print("- none")
@@ -235,7 +172,6 @@ def _print_task_fact_sources(task_payloads: list[dict[str, Any]]) -> None:
 
 
 def _print_gateway_fact_sources(gateway_payloads: list[dict[str, Any]]) -> None:
-    """打印 Gateway Fact Sources 区段。"""
     print("Gateway Fact Sources")
     if not gateway_payloads:
         print("- none")
@@ -246,7 +182,6 @@ def _print_gateway_fact_sources(gateway_payloads: list[dict[str, Any]]) -> None:
 
 
 def _print_memory_resume_text(payload: dict[str, Any]) -> None:
-    """以文本格式打印 resume 报告。"""
     print("MY-AGENT MEMORY RESUME")
     print(f"workspace={payload['workspace_root']}")
     print(f"query={payload['query'] or '-'}")
@@ -270,17 +205,6 @@ def _print_memory_resume_text(payload: dict[str, Any]) -> None:
 
 
 def _print_memory_resume(payload: dict[str, Any], *, json_output: bool) -> None:
-    """LLM: render memory-resume payload as JSON or compact text.
-
-    新手说明:
-    文本输出按'线索 -> 事实源 -> 下一步'排，提醒人先读权威文件再继续干活。
-
-    参数说明:
-    `payload` 是 resume 命令报告；`json_output` 控制输出格式。
-
-    返回说明:
-    不返回值；直接打印。
-    """
     if json_output:
         print(json.dumps(strip_sort_keys(payload), ensure_ascii=False, indent=2, sort_keys=True))
         return
@@ -288,18 +212,6 @@ def _print_memory_resume(payload: dict[str, Any], *, json_output: bool) -> None:
 
 
 def _print_archive_record_lines(records: list[dict[str, Any]]) -> None:
-    """LLM: print normalized archive records as one-line recovery clues.
-
-    新手说明:
-    一行只放 ID、动作、状态、run_id 和原始文件位置。
-    这样人在终端里可以快速决定下一步打开哪个文件。
-
-    参数说明:
-    `records` 是标准化归档记录列表。
-
-    返回说明:
-    不返回值；直接打印。
-    """
 
     if not records:
         print("- none")

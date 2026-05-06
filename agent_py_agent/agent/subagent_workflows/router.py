@@ -28,6 +28,18 @@ class WorkflowRouteDecision:
     issues: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _RouteDecisionFields:
+    mode: str
+    selected_template_id: str
+    reason: str
+    task_type: str
+    risk_tags: list[str]
+    needs_confirmation: bool
+    available_template_ids: list[str]
+    issues: list[str]
+
+
 def route_workflow(
     goal: str,
     *,
@@ -37,23 +49,21 @@ def route_workflow(
 ) -> WorkflowRouteDecision:
     """Choose a workflow template for a parent goal."""
 
-    store = template_store or load_template_store()
-    available_template_ids = [template.id for template in store.all()]
-    issues = [_format_store_issue(issue) for issue in store.issues]
-
-    mode = _workflow_mode(config, issues)
+    store, available_template_ids, issues, mode = _workflow_route_inputs(config, template_store)
     task_type, preferred_template_id, risk_tags = _classify_goal(goal)
 
     if mode == "off":
-        return WorkflowRouteDecision(
-            mode=mode,
-            selected_template_id="",
-            reason="Subagent workflow routing is disabled by config.",
-            task_type=task_type,
-            risk_tags=risk_tags,
-            needs_confirmation=False,
-            available_template_ids=available_template_ids,
-            issues=issues,
+        return _make_route_decision(
+            _RouteDecisionFields(
+                mode=mode,
+                selected_template_id="",
+                reason="Subagent workflow routing is disabled by config.",
+                task_type=task_type,
+                risk_tags=risk_tags,
+                needs_confirmation=False,
+                available_template_ids=available_template_ids,
+                issues=issues,
+            )
         )
 
     selected_template_id, reason = _select_template(
@@ -67,15 +77,41 @@ def route_workflow(
     if selected_template_id and mode == "manual":
         reason = f"{reason} Manual mode requires parent confirmation before use."
 
+    return _make_route_decision(
+        _RouteDecisionFields(
+            mode=mode,
+            selected_template_id=selected_template_id,
+            reason=reason,
+            task_type=task_type,
+            risk_tags=risk_tags,
+            needs_confirmation=mode == "manual",
+            available_template_ids=available_template_ids,
+            issues=issues,
+        )
+    )
+
+
+def _workflow_route_inputs(
+    config: Any,
+    template_store: WorkflowTemplateStore | None,
+) -> tuple[WorkflowTemplateStore, list[str], list[str], str]:
+    store = template_store or load_template_store()
+    available_template_ids = [template.id for template in store.all()]
+    issues = [_format_store_issue(issue) for issue in store.issues]
+    mode = _workflow_mode(config, issues)
+    return store, available_template_ids, issues, mode
+
+
+def _make_route_decision(fields: _RouteDecisionFields) -> WorkflowRouteDecision:
     return WorkflowRouteDecision(
-        mode=mode,
-        selected_template_id=selected_template_id,
-        reason=reason,
-        task_type=task_type,
-        risk_tags=risk_tags,
-        needs_confirmation=mode == "manual",
-        available_template_ids=available_template_ids,
-        issues=issues,
+        mode=fields.mode,
+        selected_template_id=fields.selected_template_id,
+        reason=fields.reason,
+        task_type=fields.task_type,
+        risk_tags=fields.risk_tags,
+        needs_confirmation=fields.needs_confirmation,
+        available_template_ids=fields.available_template_ids,
+        issues=fields.issues,
     )
 
 

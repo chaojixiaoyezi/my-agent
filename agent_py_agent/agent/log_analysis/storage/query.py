@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections import Counter
+from dataclasses import dataclass
 from typing import Any
 
 from ..cases.evidence import LocalEvidenceStore
@@ -52,27 +53,64 @@ PREVIEW_FIELDS = (
 )
 
 
+@dataclass(frozen=True)
+class _QuerySummaryInput:
+    rows: list[dict[str, Any]]
+    parameters: dict[str, Any]
+    returned_row_count: int
+    truncated: bool
+    event_read_audit: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class SecurityQueryOptions:
+    require_time_range: bool = True
+    preview_limit: int = DEFAULT_PREVIEW_LIMIT
+    max_limit: int | None = None
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> SecurityQueryOptions:
+        return cls(
+            require_time_range=bool(kwargs.get("require_time_range", True)),
+            preview_limit=int(kwargs.get("preview_limit", DEFAULT_PREVIEW_LIMIT)),
+            max_limit=kwargs.get("max_limit"),
+        )
+
+
 def execute_security_query(
     store: LocalLogStore,
     criteria: QueryCriteria | dict[str, Any],
     *,
-    require_time_range: bool = True,
-    preview_limit: int = DEFAULT_PREVIEW_LIMIT,
-    max_limit: int | None = None,
+    options: SecurityQueryOptions | None = None,
+    **kwargs: Any,
 ) -> QueryResult:
+    query_options = options or SecurityQueryOptions.from_kwargs(**kwargs)
     query = _criteria(criteria)
-    if require_time_range and (not query.start_time or not query.end_time):
+    if query_options.require_time_range and (not query.start_time or not query.end_time):
         raise ValueError("start_time and end_time are required for controlled security queries")
 
+    result_payload = _execute_query_payload(store, query, query_options)
+    _save_query_record(store, **result_payload)
+    return _query_result(
+        preview_limit=query_options.preview_limit,
+        **result_payload,
+    )
+
+
+def _execute_query_payload(
+    store: LocalLogStore,
+    query: QueryCriteria,
+    query_options: SecurityQueryOptions,
+) -> dict[str, Any]:
     start = time.perf_counter()
-    limit = normalize_limit(query.limit, max_limit=max_limit)
+    limit = normalize_limit(query.limit, max_limit=query_options.max_limit)
     parameters = _criteria_to_parameters(query, limit)
     rows = _matching_rows(store, query)
     event_read_audit = store.last_read_audit(store.events_path)
     row_count = len(rows)
     truncated = row_count > limit
     limited_rows = rows[:limit]
-    summary = _query_summary(rows, parameters, len(limited_rows), truncated, event_read_audit)
+    summary = _query_summary(_QuerySummaryInput(rows, parameters, len(limited_rows), truncated, event_read_audit))
     query_id = _query_id(parameters)
     evidence = _write_query_evidence(
         store,
@@ -86,18 +124,7 @@ def execute_security_query(
     store.upsert_evidence_ref(evidence)
     duration_ms = int((time.perf_counter() - start) * 1000)
     evidence_path = evidence_path_from_ref(evidence)
-    record = QueryRecord(
-        query_id=query_id,
-        parameters=parameters,
-        row_count=row_count,
-        truncated=truncated,
-        evidence_path=evidence_path,
-        duration_ms=duration_ms,
-        created_at=utc_now(),
-        summary=summary,
-    )
-    store.save_query_record(record)
-    return _query_result(
+    result_payload = dict(
         query_id=query_id,
         parameters=parameters,
         row_count=row_count,
@@ -107,7 +134,25 @@ def execute_security_query(
         duration_ms=duration_ms,
         summary=summary,
         limited_rows=limited_rows,
-        preview_limit=preview_limit,
+    )
+    return result_payload
+
+
+def _save_query_record(
+    store: LocalLogStore,
+    **payload: Any,
+) -> None:
+    store.save_query_record(
+        QueryRecord(
+            query_id=payload["query_id"],
+            parameters=payload["parameters"],
+            row_count=payload["row_count"],
+            truncated=payload["truncated"],
+            evidence_path=payload["evidence_path"],
+            duration_ms=payload["duration_ms"],
+            created_at=utc_now(),
+            summary=payload["summary"],
+        )
     )
 
 
@@ -117,20 +162,14 @@ def _matching_rows(store: LocalLogStore, query: QueryCriteria) -> list[dict[str,
     return rows
 
 
-def _query_summary(
-    rows: list[dict[str, Any]],
-    parameters: dict[str, Any],
-    returned_row_count: int,
-    truncated: bool,
-    event_read_audit: dict[str, Any] | None,
-) -> dict[str, Any]:
-    summary = summarize_rows(rows, parameters)
-    summary["returned_row_count"] = returned_row_count
-    summary["truncated"] = truncated
-    if event_read_audit:
-        summary["storage_read_audit"] = event_read_audit
-        summary["skipped_storage_lines"] = event_read_audit.get("skipped_lines", 0)
-        summary["corrupt_storage_lines"] = event_read_audit.get("corrupt_lines", 0)
+def _query_summary(data: _QuerySummaryInput) -> dict[str, Any]:
+    summary = summarize_rows(data.rows, data.parameters)
+    summary["returned_row_count"] = data.returned_row_count
+    summary["truncated"] = data.truncated
+    if data.event_read_audit:
+        summary["storage_read_audit"] = data.event_read_audit
+        summary["skipped_storage_lines"] = data.event_read_audit.get("skipped_lines", 0)
+        summary["corrupt_storage_lines"] = data.event_read_audit.get("corrupt_lines", 0)
     return summary
 
 
@@ -237,12 +276,16 @@ def _top_counts(rows: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
     counter: Counter[str] = Counter()
     aliases = FIELD_ALIASES.get(field, (field,))
     for row in rows:
-        for alias in aliases:
-            value = nested_get(row, alias)
-            if value not in (None, ""):
-                counter[str(value)] += 1
-                break
+        _count_first_alias(counter, row, aliases)
     return [{"value": value, "count": count} for value, count in counter.most_common(5)]
+
+
+def _count_first_alias(counter: Counter[str], row: dict[str, Any], aliases: tuple[str, ...]) -> None:
+    for alias in aliases:
+        value = nested_get(row, alias)
+        if value not in (None, ""):
+            counter[str(value)] += 1
+            return
 
 
 def _query_id(parameters: dict[str, Any]) -> str:

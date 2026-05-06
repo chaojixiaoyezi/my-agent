@@ -44,27 +44,31 @@ class RecordIterator:
         """Parse a JSONL / .log file line by line."""
         with self.source_path.open("r", encoding="utf-8-sig", errors="replace") as handle:
             for line_no, raw_line in enumerate(handle, start=1):
-                text = raw_line.rstrip("\n")
-                raw_ref = f"{self.batch_id}:line-{line_no}"
-                if not text.strip():
-                    yield None
-                    continue
-                try:
-                    yield self.parser.parse_json_line(
-                        text,
-                        raw_ref=raw_ref,
-                        source_id=self.source_id,
-                        source_product=self.source_product,
-                        line_no=line_no,
-                    )
-                except ParserError as exc:
-                    self.dead_letters.write(
-                        reason=str(exc),
-                        raw_ref=raw_ref,
-                        line_no=line_no,
-                        raw_line=text,
-                        parser_id=self.parser.parser_id,
-                    )
+                yield from self._parse_jsonl_line(line_no, raw_line)
+
+    def _parse_jsonl_line(self, line_no: int, raw_line: str):
+        text = raw_line.rstrip("\n")
+        raw_ref = f"{self.batch_id}:line-{line_no}"
+        if not text.strip():
+            return (None,)
+        try:
+            parsed = self.parser.parse_json_line(
+                text,
+                raw_ref=raw_ref,
+                source_id=self.source_id,
+                source_product=self.source_product,
+                line_no=line_no,
+            )
+        except ParserError as exc:
+            self.dead_letters.write(
+                reason=str(exc),
+                raw_ref=raw_ref,
+                line_no=line_no,
+                raw_line=text,
+                parser_id=self.parser.parser_id,
+            )
+            return ()
+        return (parsed,)
 
     def _iter_csv(self):
         """Parse a CSV file row by row via the registered LogParser."""
@@ -82,34 +86,37 @@ class RecordIterator:
                 )
                 return
             for row in reader:
-                line_no = reader.line_num
-                raw_ref = f"{self.batch_id}:line-{line_no}"
-                try:
-                    yield self.parser.parse_csv_row(
-                        row,
-                        raw_ref=raw_ref,
-                        source_id=self.source_id,
-                        source_product=self.source_product,
-                        line_no=line_no,
-                    )
-                except ParserError as exc:
-                    self.dead_letters.write(
-                        reason=str(exc),
-                        raw_ref=raw_ref,
-                        line_no=line_no,
-                        raw_line=json.dumps(
-                            _jsonable_mapping(row), ensure_ascii=False, sort_keys=True
-                        ),
-                        raw_fields=_jsonable_mapping(row),
-                        parser_id=self.parser.parser_id,
-                    )
-                except csv.Error as exc:
-                    self.dead_letters.write(
-                        reason=f"invalid CSV: {exc}",
-                        raw_ref=raw_ref,
-                        line_no=line_no,
-                        parser_id=self.parser.parser_id,
-                    )
+                yield from self._parse_csv_row(row, reader.line_num)
+
+    def _parse_csv_row(self, row: Mapping[str, Any], line_no: int):
+        raw_ref = f"{self.batch_id}:line-{line_no}"
+        try:
+            parsed = self.parser.parse_csv_row(
+                row,
+                raw_ref=raw_ref,
+                source_id=self.source_id,
+                source_product=self.source_product,
+                line_no=line_no,
+            )
+        except ParserError as exc:
+            self.dead_letters.write(
+                reason=str(exc),
+                raw_ref=raw_ref,
+                line_no=line_no,
+                raw_line=json.dumps(_jsonable_mapping(row), ensure_ascii=False, sort_keys=True),
+                raw_fields=_jsonable_mapping(row),
+                parser_id=self.parser.parser_id,
+            )
+            return ()
+        except csv.Error as exc:
+            self.dead_letters.write(
+                reason=f"invalid CSV: {exc}",
+                raw_ref=raw_ref,
+                line_no=line_no,
+                parser_id=self.parser.parser_id,
+            )
+            return ()
+        return (parsed,)
 
 
 class EventWriter:
@@ -127,20 +134,34 @@ class EventWriter:
         if self.store is None:
             return self.fallback_sink.write_events(events)
 
+        batch_result = self._write_batch(events)
+        if batch_result is not None:
+            return batch_result
+        item_result = self._write_items(events)
+        if item_result is not None:
+            return item_result
+        return self.fallback_sink.write_events(events)
+
+    def _write_batch(self, events: list[dict[str, Any]]) -> dict[str, Any] | None:
         for method_name in ("write_events", "append_events", "upsert_events"):
             method = getattr(self.store, method_name, None)
             if callable(method):
                 result = method(events)
                 return _storage_result(result, count=len(events), store=self.store)
+        return None
 
+    def _write_items(self, events: list[dict[str, Any]]) -> dict[str, Any] | None:
         for method_name in ("write_event", "append_event", "upsert_event"):
             method = getattr(self.store, method_name, None)
             if callable(method):
-                for event in events:
-                    method(event)
-                return {"count": len(events), "path": None}
+                return _write_events_with_method(method, events)
+        return None
 
-        return self.fallback_sink.write_events(events)
+
+def _write_events_with_method(method: Any, events: list[dict[str, Any]]) -> dict[str, Any]:
+    for event in events:
+        method(event)
+    return {"count": len(events), "path": None}
 
 
 class ManifestWriter:
@@ -155,49 +176,60 @@ class ManifestWriter:
         params: WriteManifestParams,
     ) -> Path:
         """Write the manifest JSON file and return its path."""
-        from ..parsers.common import utc_now
         from .checkpoint import safe_source_id, write_json_atomic
 
         safe_source = safe_source_id(params.source_id)
         manifest_path = self.root / "manifests" / safe_source / f"{params.batch_id}.json"
-        cursor_after = {
-            "path": str(params.source_path),
-            "format": params.file_format,
-            "size_bytes": params.size_bytes,
-            "content_hash": params.content_hash,
-            "batch_id": params.batch_id,
-        }
-        manifest = {
-            "batch_id": params.batch_id,
-            "source_id": params.source_id,
-            "source_kind": "file",
-            "source_path": str(params.source_path),
-            "format": params.file_format,
-            "parser_id": params.parser.parser_id,
-            "parser_schema": params.parser.schema,
-            "received_at": params.started_at,
-            "completed_at": utc_now(),
-            "time_range": [params.first_event_time, params.last_event_time],
-            "raw_refs": [str(params.source_path)],
-            "size_bytes": params.size_bytes,
-            "content_hash": params.content_hash,
-            "cursor_before": dict(params.cursor_before),
-            "cursor_after": cursor_after,
-            "dedup_policy": "source_event_fingerprint",
-            "checkpoint_policy": "after_durable_write",
-            "status": "stored",
-            "counts": {
-                "parsed": params.parsed_count,
-                "stored": params.stored_count,
-                "duplicates": params.duplicate_count,
-                "skipped": params.skipped_count,
-                "dead_letter": params.dead_letter_count,
-            },
-            "storage": dict(params.storage_info),
-            "dead_letter_refs": params.dead_letter_refs,
-        }
-        write_json_atomic(manifest_path, manifest)
+        write_json_atomic(manifest_path, _manifest_payload(params))
         return manifest_path
+
+
+def _manifest_payload(params: WriteManifestParams) -> dict[str, Any]:
+    from ..parsers.common import utc_now
+
+    return {
+        "batch_id": params.batch_id,
+        "source_id": params.source_id,
+        "source_kind": "file",
+        "source_path": str(params.source_path),
+        "format": params.file_format,
+        "parser_id": params.parser.parser_id,
+        "parser_schema": params.parser.schema,
+        "received_at": params.started_at,
+        "completed_at": utc_now(),
+        "time_range": [params.first_event_time, params.last_event_time],
+        "raw_refs": [str(params.source_path)],
+        "size_bytes": params.size_bytes,
+        "content_hash": params.content_hash,
+        "cursor_before": dict(params.cursor_before),
+        "cursor_after": _manifest_cursor_after(params),
+        "dedup_policy": "source_event_fingerprint",
+        "checkpoint_policy": "after_durable_write",
+        "status": "stored",
+        "counts": _manifest_counts(params),
+        "storage": dict(params.storage_info),
+        "dead_letter_refs": params.dead_letter_refs,
+    }
+
+
+def _manifest_cursor_after(params: WriteManifestParams) -> dict[str, Any]:
+    return {
+        "path": str(params.source_path),
+        "format": params.file_format,
+        "size_bytes": params.size_bytes,
+        "content_hash": params.content_hash,
+        "batch_id": params.batch_id,
+    }
+
+
+def _manifest_counts(params: WriteManifestParams) -> dict[str, int]:
+    return {
+        "parsed": params.parsed_count,
+        "stored": params.stored_count,
+        "duplicates": params.duplicate_count,
+        "skipped": params.skipped_count,
+        "dead_letter": params.dead_letter_count,
+    }
 
 
 def _storage_result(result: Any, *, count: int, store: Any | None = None) -> dict[str, Any]:

@@ -27,18 +27,6 @@ RECENT_ARCHIVE_FILE_LIMIT = 5
 
 
 def cmd_memory_doctor(args) -> int:
-    """LLM: inspect effective memory config, route index health, and archive directories.
-
-    新手说明:
-    这是 memory 专用体检命令。它会告诉你配置最终生效成什么、配置有没有回退 warning、
-    默认或指定路由索引能不能读，以及 hook/raw 目录里现在有没有归档文件。
-
-    参数说明:
-    `args` 是 argparse 解析后的对象，包含 `index`、`json` 和通用 agent 参数。
-
-    返回说明:
-    返回进程退出码；报告已打印时返回 0。
-    """
 
     agent = make_agent(args)
     index_path = _resolve_index_path(agent.root, args.index)
@@ -58,18 +46,6 @@ def cmd_memory_doctor(args) -> int:
 
 
 def _resolve_index_path(root: Path, raw_index: str | None) -> Path:
-    """LLM: resolve CLI index paths against the agent workspace root.
-
-    新手说明:
-    不传参数时用 `memory/routing/INDEX.md`。传相对路径时按当前 agent 工作区找，
-    这样测试 fixture 和真实工作区都会落在同一套规则里。
-
-    参数说明:
-    `root` 是 agent 工作区根目录；`raw_index` 是用户传入的索引路径或空值。
-
-    返回说明:
-    返回解析后的绝对路径。这个 helper 只解析，不检查文件是否存在。
-    """
 
     candidate = Path(raw_index).expanduser() if raw_index else DEFAULT_ROUTE_INDEX
     if candidate.is_absolute():
@@ -78,18 +54,6 @@ def _resolve_index_path(root: Path, raw_index: str | None) -> Path:
 
 
 def _build_routing_doctor(root: Path, index_path: Path) -> dict[str, Any]:
-    """LLM: load and validate the route index for doctor output without raising to callers.
-
-    新手说明:
-    doctor 要像体检报告，不能因为索引文件缺失或写坏就直接中断。
-    所以这里把缺失、加载错误、校验 warning 都收进一个稳定 JSON 结构。
-
-    参数说明:
-    `root` 是工作区根目录；`index_path` 是要检查的索引文件路径。
-
-    返回说明:
-    返回 routing 体检字典，包含索引状态、route 列表、warning 和加载错误。
-    """
 
     payload: dict[str, Any] = {
         "index": _index_payload(index_path),
@@ -113,18 +77,6 @@ def _build_routing_doctor(root: Path, index_path: Path) -> dict[str, Any]:
 
 
 def _build_archive_doctor(root: Path, config: object) -> dict[str, Any]:
-    """LLM: summarize memory hook and raw archive directories using public archive path helpers.
-
-    新手说明:
-    archive 模块负责定义 hook/raw 文件落在哪里。doctor 只顺着公开 helper 找目录，
-    然后数一数文件、列出最近几个文件，方便用户判断归档骨架有没有在工作。
-
-    参数说明:
-    `root` 是工作区根目录；`config` 是 agent 的有效配置对象。
-
-    返回说明:
-    返回 archive 体检字典，包含留存配置、hook 目录状态和 raw 目录状态。
-    """
 
     hook_today_path = snapshot_path_for(root)
     raw_today_path = raw_event_path_for(root)
@@ -141,18 +93,6 @@ def _build_archive_doctor(root: Path, config: object) -> dict[str, Any]:
 
 
 def _archive_dir_payload(directory: Path, today_path: Path) -> dict[str, Any]:
-    """LLM: produce stable file-count and recent-file metadata for one archive directory.
-
-    新手说明:
-    这里不读 JSONL 内容，只看目录和文件状态；最近文件按修改时间倒序排列，
-    输出里保留名字、路径、大小和修改时间，足够排查目录有没有动静。
-
-    参数说明:
-    `directory` 是 hook 或 raw 目录；`today_path` 是今天理论上会写入的 JSONL 文件路径。
-
-    返回说明:
-    返回目录是否存在、文件数量、今天路径和最近文件列表。
-    """
 
     files = sorted(
         [path for path in directory.glob("*.jsonl") if path.is_file()] if directory.exists() else [],
@@ -169,17 +109,6 @@ def _archive_dir_payload(directory: Path, today_path: Path) -> dict[str, Any]:
 
 
 def _archive_file_payload(path: Path) -> dict[str, Any]:
-    """LLM: serialize one archive file's filesystem metadata for doctor JSON.
-
-    新手说明:
-    把最近文件变成稳定字段，测试和人都能看：文件名、完整路径、大小和 mtime。
-
-    参数说明:
-    `path` 是一个 JSONL 文件路径。
-
-    返回说明:
-    返回文件名、路径、字节数和修改时间。
-    """
 
     stat = path.stat()
     return {
@@ -191,18 +120,6 @@ def _archive_file_payload(path: Path) -> dict[str, Any]:
 
 
 def _memory_config_payload(config: object) -> dict[str, Any]:
-    """LLM: serialize the effective normalized memory config fields.
-
-    新手说明:
-    doctor 展示的是程序真正会使用的值，不是 YAML 里原始写法。
-    如果配置写坏后被回退，这里会显示回退后的安全值。
-
-    参数说明:
-    `config` 是 agent 的有效配置对象。
-
-    返回说明:
-    返回 memory 相关配置字段和值。
-    """
 
     fields = [
         "memory_archive_level",
@@ -218,7 +135,6 @@ def _memory_config_payload(config: object) -> dict[str, Any]:
 
 
 def _normalize_warning_item(item: Any) -> dict[str, Any]:
-    """Normalize a single config warning item to a dictionary."""
     if isinstance(item, dict):
         return dict(item)
     elif hasattr(item, "to_dict"):
@@ -230,34 +146,11 @@ def _normalize_warning_item(item: Any) -> dict[str, Any]:
 
 
 def _config_warnings(config: object) -> list[dict[str, Any]]:
-    """LLM: return normalized memory config fallback warnings as dictionaries.
-
-    新手说明:
-    配置加载器已经把 warning 存在 config 上。这里再做一层轻量兼容，
-    避免未来 warning 对象或 dict 混用时 CLI 输出变形。
-
-    参数说明:
-    `config` 是 agent 的有效配置对象。
-
-    返回说明:
-    返回 warning 字典列表；没有 warning 时返回空列表。
-    """
     warnings = getattr(config, "memory_config_warnings", []) or []
     return [_normalize_warning_item(item) for item in warnings]
 
 
 def _index_payload(index_path: Path) -> dict[str, Any]:
-    """LLM: serialize route index location and existence state.
-
-    新手说明:
-    所有命令都用同一种字段说明索引在哪里、存不存在、是不是文件。
-
-    参数说明:
-    `index_path` 是要展示的 route index 路径。
-
-    返回说明:
-    返回 `path`、`exists`、`is_file` 三个字段。
-    """
 
     return {
         "path": str(index_path),
@@ -267,17 +160,6 @@ def _index_payload(index_path: Path) -> dict[str, Any]:
 
 
 def _route_payload(route: MemoryRoute) -> dict[str, Any]:
-    """LLM: serialize a route without leaking dataclass implementation details.
-
-    新手说明:
-    doctor 的 routes 列表只放维护索引时最需要扫的字段，顺序稳定、内容克制。
-
-    参数说明:
-    `route` 是索引中的一条 `MemoryRoute`。
-
-    返回说明:
-    返回 JSON 友好的 route 字典。
-    """
 
     return {
         "route_id": route.route_id,
@@ -295,17 +177,6 @@ def _route_payload(route: MemoryRoute) -> dict[str, Any]:
 
 
 def _print_memory_doctor_report(payload: dict[str, Any], *, json_output: bool) -> None:
-    """LLM: render the memory-doctor payload as either stable JSON or compact text.
-
-    新手说明:
-    doctor 文本输出只保留最关键的配置、索引和目录状态；完整字段在 `--json` 里。
-
-    参数说明:
-    `payload` 是 `cmd_memory_doctor()` 构造好的完整报告；`json_output` 控制输出格式。
-
-    返回说明:
-    不返回值；直接打印到标准输出。
-    """
 
     if json_output:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))

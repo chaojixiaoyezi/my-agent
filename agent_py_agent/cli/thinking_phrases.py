@@ -1,8 +1,3 @@
-"""思考指示器的中文短语库。
-
-这些短语会在模型思考时随机显示，给用户一点趣味反馈。
-按风格分组，方便管理和扩充。
-"""
 
 import random as _random
 
@@ -188,6 +183,5 @@ PHRASES: dict[str, list[str]] = {
 
 
 def random_phrase() -> str:
-    """随机返回一个短语，用于思考指示器。"""
     category = _random.choice(list(PHRASES.keys()))
     return _random.choice(PHRASES[category])

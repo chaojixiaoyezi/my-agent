@@ -11,11 +11,6 @@ from typing import Any
 
 
 class LocalStoreMaintenanceMixin:
-    """LLM: mixin for operational LocalStore health and maintenance APIs.
-
-    给人看的解释：
-    这些方法通常给 doctor/status/rebuild 用，不是普通写入流程的主路径。
-    """
 
     def rebuild_fts(self) -> int:
         """用 `records` 表和文件系统内容重建 FTS5 索引。"""
@@ -35,11 +30,6 @@ class LocalStoreMaintenanceMixin:
         return count
 
     def reset(self, *, remove_content_files: bool = False, reset_events_file: bool = True) -> None:
-        """清空本地索引表，供 `local-rebuild --reset` 从文件事实源重建。
-
-        默认不删正文文件，只清 records/events/FTS。这样即使用户误操作，原始
-        JSONL、gateway 队列、subagent 工单和已写出的正文文件仍然在磁盘上。
-        """
 
         with self._connection() as conn:
             if self.fts_available:

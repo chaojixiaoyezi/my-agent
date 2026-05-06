@@ -14,16 +14,6 @@ if TYPE_CHECKING:
 
 
 class TaskRegistry:
-    """任务身份注册表。
-
-    职责：
-    - 注册任务到全局索引
-    - 查询任务信息
-    - 按条件过滤任务
-    - 删除任务
-
-    使用 LocalStore 的 task_registry 表存储。
-    """
 
     def __init__(self, store: LocalStore) -> None:
         self._store = store
@@ -36,15 +26,6 @@ class TaskRegistry:
         session_id: str | None = None,
         user_id: str | None = None,
     ) -> None:
-        """注册任务到全局索引。
-
-        Args:
-            task_id: 任务 ID
-            status: 任务状态
-            goal: 任务目标
-            session_id: 会话 ID
-            user_id: 用户 ID
-        """
 
         now = time.time()
 
@@ -65,14 +46,6 @@ class TaskRegistry:
             conn.commit()
 
     def lookup_task(self, task_id: str) -> dict | None:
-        """查询任务信息。
-
-        Args:
-            task_id: 任务 ID
-
-        Returns:
-            任务信息字典，或 None
-        """
 
         with self._store._connection() as conn:
             cursor = conn.execute(
@@ -99,16 +72,6 @@ class TaskRegistry:
         status: str | None = None,
         limit: int = 50,
     ) -> list[dict]:
-        """按条件查询任务。
-
-        Args:
-            user_id: 用户 ID 过滤
-            status: 状态过滤
-            limit: 最多返回多少条
-
-        Returns:
-            任务信息列表
-        """
 
         conditions = []
         params = []
@@ -148,26 +111,12 @@ class TaskRegistry:
             ]
 
     def remove_task(self, task_id: str) -> None:
-        """删除任务。
-
-        Args:
-            task_id: 任务 ID
-        """
 
         with self._store._connection() as conn:
             conn.execute("DELETE FROM task_registry WHERE task_id = ?", (task_id,))
             conn.commit()
 
     def update_task_status(self, task_id: str, status: str) -> bool:
-        """更新任务状态。
-
-        Args:
-            task_id: 任务 ID
-            status: 新状态
-
-        Returns:
-            是否更新成功
-        """
 
         now = time.time()
         with self._store._connection() as conn:
@@ -179,15 +128,6 @@ class TaskRegistry:
             return cursor.rowcount > 0
 
     def update_task_description(self, task_id: str, description: str) -> bool:
-        """更新任务描述。
-
-        Args:
-            task_id: 任务 ID
-            description: 新描述（最多 100 字）
-
-        Returns:
-            是否更新成功
-        """
 
         now = time.time()
         # description 存到 goal 字段的前 100 字符，或者新建专门的 description 字段

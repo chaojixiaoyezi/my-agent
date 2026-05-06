@@ -17,7 +17,6 @@ from .daemon_metadata import (
 
 @dataclass(frozen=True)
 class WriteRuntimeStatusParams:
-    """Bundle of write_runtime_status parameters."""
 
     status_path: Path
     gateway_state: Any = None
@@ -75,7 +74,6 @@ def _merge_platform_status(payload: dict, params: WriteRuntimeStatusParams) -> N
 
 
 def write_runtime_status(params: WriteRuntimeStatusParams) -> None:
-    """Persist gateway runtime health information for diagnostics/status."""
     payload = _base_runtime_payload(params.status_path)
     _merge_runtime_fields(payload, params)
     _merge_platform_status(payload, params)
@@ -83,5 +81,4 @@ def write_runtime_status(params: WriteRuntimeStatusParams) -> None:
 
 
 def read_runtime_status(status_path: Path) -> dict | None:
-    """Read the persisted gateway runtime health/status information."""
     return _read_json_file(status_path)

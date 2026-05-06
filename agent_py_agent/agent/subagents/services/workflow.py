@@ -62,14 +62,18 @@ def _merge_workflow_acceptance_checks(
     if not workflow_plan_dict or not workflow_plan_dict.get("ok"):
         return merged
     workers = workflow_plan_dict.get("workers") or []
-    if isinstance(workers, list):
-        for worker in workers:
-            if isinstance(worker, dict):
-                _add_worker_checks(merged, worker)
+    for worker in _iter_workflow_workers(workers):
+        _add_worker_checks(merged, worker)
     for check in workflow_plan_dict.get("parent_acceptance_checklist") or []:
         if isinstance(check, str) and check not in merged:
             merged.append(check)
     return merged
+
+
+def _iter_workflow_workers(workers: object):
+    if not isinstance(workers, list):
+        return ()
+    return (worker for worker in workers if isinstance(worker, dict))
 
 
 def _try_workflow_plan(

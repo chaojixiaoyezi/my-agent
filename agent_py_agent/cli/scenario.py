@@ -42,12 +42,6 @@ from .scenario_utils import (
 
 
 def print_dispatch_report(report) -> None:
-    """LLM: render a scenario dispatch report in a compact human-readable form.
-
-    给人看的解释：
-    场景测试每轮 dispatch 都会产生很多记录。
-    这里把每条记录压成一行，方便人快速看出哪一步失败。
-    """
 
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
     for record in report.records:
@@ -60,7 +54,6 @@ def print_dispatch_report(report) -> None:
 
 
 def _cmd_scenario_validate_args(args) -> bool:
-    """Validate scenario args. Returns True if valid, False otherwise."""
     if args.count <= 0:
         print("--count 必须大于 0。", file=sys.stderr)
         return False
@@ -74,7 +67,6 @@ def _cmd_scenario_validate_args(args) -> bool:
 
 
 def _cmd_scenario_happy_path(args, paths):
-    """Run the happy-path scenario. Returns exit code."""
     print("MY-AGENT SCENARIO TEST")
     print(f"run_root={paths.run_root}")
     print(f"fixture_root={paths.fixture_root}")
@@ -114,7 +106,6 @@ def _cmd_scenario_happy_path(args, paths):
 
 
 def _cmd_scenario_dispatch(agent, args, paths, created_via, gateway_payload):
-    """Run dispatch cycles. Returns final_ok."""
     print_scenario_step(3, "父代理调度 runner 和验收")
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)
@@ -160,7 +151,6 @@ def _cmd_scenario_dispatch(agent, args, paths, created_via, gateway_payload):
 
 
 def _cmd_scenario_verify_files(agent, args, paths, final_ok):
-    """Verify output files and write summary."""
     report_files = collect_scenario_report_files(agent, paths.fixture_root, args.count)
     if args.dry_run:
         files_ok = True
@@ -186,7 +176,6 @@ def _cmd_scenario_verify_files(agent, args, paths, final_ok):
 
 
 def cmd_scenario_test(args) -> int:
-    """跑一轮可观察、隔离的真实任务全流程。"""
 
     if args.case == "all":
         return run_scenario_suite(args)
@@ -223,7 +212,6 @@ def cmd_scenario_test(args) -> int:
 
 
 def run_scenario_suite(args) -> int:
-    """连续运行一组隔离场景。"""
 
     # Keep all cheap deterministic recovery cases before the happy path, which may call a real model.
     cases = [

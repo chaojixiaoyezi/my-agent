@@ -1,9 +1,3 @@
-"""LLM: dispatch orchestration, step sequencing, and workflow handling.
-
-给人看的解释：
-负责父代理调度的核心编排，按顺序执行各阶段：planner、workflow、due-check、
-action_apply、capability_route、runner、patch_review、acceptance。
-"""
 
 from __future__ import annotations
 
@@ -14,6 +8,14 @@ from typing import TYPE_CHECKING, Any
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..subagents.services.workflow import _try_workflow_plan, _workflow_extra_write_roots
+from .dispatch_record_params import (
+    AcceptanceRecordParams,
+    ActionApplyRecordParams,
+    CapabilityRouteRecordParams,
+    DryRunWorkflowRecordParams,
+    PatchReviewRecordParams,
+    WorkflowRecordParams,
+)
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -26,7 +28,6 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class MakeDispatchWatchRecordParams:
-    """Bundle of all make_dispatch_watch_record parameters."""
 
     cycle: int
     dry_run: bool
@@ -39,26 +40,24 @@ class MakeDispatchWatchRecordParams:
     evidence_paths: list[str] | None = None
 
 
-def build_workflow_records(agent, tasks, workflow_mode, limit, apply):
-    """Build dispatch records for workflow planning."""
+def build_workflow_records(params: WorkflowRecordParams):
     workflow_candidates = [
         task
-        for task in tasks
+        for task in params.tasks
         if not task.parent_id
         and not task.workflow_parent_run_id
         and task.status not in {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
     ]
-    if limit > 0:
-        workflow_candidates = workflow_candidates[:limit]
+    if params.limit > 0:
+        workflow_candidates = workflow_candidates[: params.limit]
     records = []
     for task in workflow_candidates:
-        task_records = _build_single_workflow_records(agent, task, workflow_mode, apply)
+        task_records = _build_single_workflow_records(params.agent, task, params.workflow_mode, params.apply)
         records.extend(task_records)
     return records
 
 
 def _build_single_workflow_records(agent, task, workflow_mode, apply):
-    """Build workflow records for a single task."""
     preview = (
         task.workflow_plan
         or _try_workflow_plan(
@@ -72,7 +71,9 @@ def _build_single_workflow_records(agent, task, workflow_mode, apply):
     worker_count = len(preview.get("workers") or []) if isinstance(preview, dict) else 0
 
     if not apply:
-        return _build_dry_run_workflow_records(agent, task, workflow_mode, preview, worker_count)
+        return _build_dry_run_workflow_records(
+            DryRunWorkflowRecordParams(agent, task, workflow_mode, preview, worker_count)
+        )
 
     planned = agent.subagents.ensure_workflow_plan(task.id, workflow_mode=workflow_mode)
     records = [_workflow_plan_record(agent, task, planned)]
@@ -81,7 +82,11 @@ def _build_single_workflow_records(agent, task, workflow_mode, apply):
     return records
 
 
-def _build_dry_run_workflow_records(agent, task, workflow_mode, preview, worker_count):
+def _build_dry_run_workflow_records(params: DryRunWorkflowRecordParams):
+    agent = params.agent
+    task = params.task
+    preview = params.preview
+    worker_count = params.worker_count
     records = [
         agent.subagents.make_dispatch_record(
             step="workflow",
@@ -101,7 +106,7 @@ def _build_dry_run_workflow_records(agent, task, workflow_mode, preview, worker_
             evidence_paths=[task.task_dir],
         )
     ]
-    if workflow_mode == "auto" and preview.get("ok"):
+    if params.workflow_mode == "auto" and preview.get("ok"):
         records.append(
             agent.subagents.make_dispatch_record(
                 step="workflow",
@@ -176,7 +181,6 @@ def _workflow_spawn_message(created_children) -> str:
 
 
 def make_due_check_record(agent, cfg, apply):
-    """Create due-check dispatch record."""
     due_report = agent.subagents.write_due_check(cfg) if apply else agent.subagents.due_check(cfg)
     return agent.subagents.make_dispatch_record(
         step="due_check",
@@ -189,24 +193,24 @@ def make_due_check_record(agent, cfg, apply):
     )
 
 
-def make_action_apply_records(agent, cfg, apply, take_over_by, locked_files, limit):
-    """Create action_apply dispatch records."""
+def make_action_apply_records(params: ActionApplyRecordParams):
+    agent = params.agent
     records = []
     action_report = (
         agent.subagents.write_action_apply_report(
-            cfg,
-            apply=apply,
-            take_over_by=take_over_by,
-            locked_files=locked_files or [],
-            limit=limit,
+            params.cfg,
+            apply=params.apply,
+            take_over_by=params.take_over_by,
+            locked_files=params.locked_files or [],
+            limit=params.limit,
         )
-        if apply
+        if params.apply
         else agent.subagents.apply_actions(
-            cfg,
+            params.cfg,
             apply=False,
-            take_over_by=take_over_by,
-            locked_files=locked_files or [],
-            limit=limit,
+            take_over_by=params.take_over_by,
+            locked_files=params.locked_files or [],
+            limit=params.limit,
         )
     )
     for item in action_report.records:
@@ -227,22 +231,22 @@ def make_action_apply_records(agent, cfg, apply, take_over_by, locked_files, lim
     return records
 
 
-def make_capability_route_records(agent, router, cfg, apply, limit):
-    """Create capability_route dispatch records."""
+def make_capability_route_records(params: CapabilityRouteRecordParams):
+    agent = params.agent
     records = []
     route_report = (
         agent.subagents.write_capability_route_report(
-            router,
-            cfg,
-            apply=apply,
-            limit=limit,
+            params.router,
+            params.cfg,
+            apply=params.apply,
+            limit=params.limit,
         )
-        if apply
+        if params.apply
         else agent.subagents.route_capability_requests(
-            router,
-            cfg,
+            params.router,
+            params.cfg,
             apply=False,
-            limit=limit,
+            limit=params.limit,
         )
     )
     for item in route_report.records:
@@ -263,26 +267,26 @@ def make_capability_route_records(agent, router, cfg, apply, limit):
     return records
 
 
-def make_patch_review_records(agent, patch_run_ids, apply, reviewer, note, limit):
-    """Create patch_review dispatch records."""
-    if not patch_run_ids:
+def make_patch_review_records(params: PatchReviewRecordParams):
+    agent = params.agent
+    if not params.patch_run_ids:
         return []
     records = []
     patch_report = (
         agent.subagents.write_patch_review_report(
-            patch_run_ids,
+            params.patch_run_ids,
             apply=True,
-            reviewer=reviewer,
-            note=note,
-            limit=limit,
+            reviewer=params.reviewer,
+            note=params.note,
+            limit=params.limit,
         )
-        if apply
+        if params.apply
         else agent.subagents.review_patches(
-            patch_run_ids,
+            params.patch_run_ids,
             apply=False,
-            reviewer=reviewer,
-            note=note,
-            limit=limit,
+            reviewer=params.reviewer,
+            note=params.note,
+            limit=params.limit,
         )
     )
     for item in patch_report.records:
@@ -301,22 +305,22 @@ def make_patch_review_records(agent, patch_run_ids, apply, reviewer, note, limit
     return records
 
 
-def make_acceptance_records(agent, apply, reviewer, note, limit):
-    """Create acceptance dispatch records."""
+def make_acceptance_records(params: AcceptanceRecordParams):
+    agent = params.agent
     records = []
     acceptance_report = (
         agent.subagents.write_acceptance_review_report(
             apply=True,
-            reviewer=reviewer,
-            note=note,
-            limit=limit,
+            reviewer=params.reviewer,
+            note=params.note,
+            limit=params.limit,
         )
-        if apply
+        if params.apply
         else agent.subagents.review_acceptances(
             apply=False,
-            reviewer=reviewer,
-            note=note,
-            limit=limit,
+            reviewer=params.reviewer,
+            note=params.note,
+            limit=params.limit,
         )
     )
     for item in acceptance_report.records:
@@ -345,7 +349,6 @@ def make_acceptance_records(agent, apply, reviewer, note, limit):
 
 
 def update_pending_work_state(agent) -> bool:
-    """Update _has_pending_work by checking for dispatchable runner candidates."""
     from .runner_dispatch import _dispatch_runner_candidates, _runner_max_attempts
 
     runner_max_attempts = _runner_max_attempts(agent.config.runner_failure_policy)
@@ -366,7 +369,6 @@ def make_dispatch_watch_record(
     agent,
     params: MakeDispatchWatchRecordParams,
 ) -> DispatchWatchRecord:
-    """Create a dispatch watch heartbeat record."""
     return agent.subagents.make_dispatch_watch_record(
         cycle=params.cycle,
         dry_run=params.dry_run,

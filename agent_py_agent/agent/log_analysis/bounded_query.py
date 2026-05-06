@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from .bounded_query_execution import execute_file_tail, validate_time_window
@@ -13,6 +14,15 @@ from .models import QueryResult
 
 # 全局默认配置
 default_config = BoundedQueryConfig()
+
+
+@dataclass(frozen=True)
+class _EmptyResultInput:
+    query_template: str
+    params: dict[str, Any]
+    time_window: dict[str, str]
+    max_results: int
+    error: dict[str, Any]
 
 
 def bounded_query(query_template: str, *args: Any, **params: Any) -> QueryResult:
@@ -28,14 +38,14 @@ def bounded_query(query_template: str, *args: Any, **params: Any) -> QueryResult
     if config.enforce_time_window:
         time_window_valid, time_error = validate_time_window(time_window)
         if not time_window_valid:
-            return _empty_result(query_template, params, time_window, max_results, error=time_error.to_dict() if time_error else {})
+            return _empty_result(_EmptyResultInput(query_template, params, time_window, max_results, time_error.to_dict() if time_error else {}))
 
     if query_template == "file_tail":
         if not file_path:
-            return _empty_result(query_template, params, time_window, max_results, error=_missing_file_error())
+            return _empty_result(_EmptyResultInput(query_template, params, time_window, max_results, _missing_file_error()))
         return execute_file_tail(str(file_path), time_window, max_results, config)
 
-    return _empty_result(query_template, params, time_window, max_results, error=_unsupported_template_error(query_template))
+    return _empty_result(_EmptyResultInput(query_template, params, time_window, max_results, _unsupported_template_error(query_template)))
 
 
 def _query_inputs(args: tuple[Any, ...], params: dict[str, Any]) -> tuple[str | None, str | None, str | None, int | None, BoundedQueryConfig]:
@@ -67,16 +77,16 @@ def _time_window(start_time: str | None, end_time: str | None) -> dict[str, str]
     return window
 
 
-def _empty_result(query_template: str, params: dict[str, Any], time_window: dict[str, str], max_results: int, *, error: dict[str, Any]) -> QueryResult:
+def _empty_result(data: _EmptyResultInput) -> QueryResult:
     return QueryResult(
-        query_template=query_template,
-        query_params=params,
-        time_window=time_window,
+        query_template=data.query_template,
+        query_params=data.params,
+        time_window=data.time_window,
         results=[],
         result_count=0,
         truncated=False,
-        max_limit=max_results,
-        metadata={"error": error},
+        max_limit=data.max_results,
+        metadata={"error": data.error},
     )
 
 

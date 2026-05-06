@@ -16,6 +16,7 @@ from .adapter import (
     cmd_adapter_status,
     cmd_adapter_stop,
 )
+from .commands.logs import add_logs_subcommands
 from .common import DEFAULT_CAPABILITY_CONFIG, add_resume_context_switches
 from .daemon import cmd_daemon
 from .gateway_client import cmd_gateway, cmd_gateway_ask, cmd_gateway_result
@@ -29,14 +30,6 @@ from .gateway_process import (
     cmd_gateway_stop,
     cmd_gateway_uninstall,
 )
-from .logs import (
-    cmd_logs,
-    cmd_logs_hunt_ip,
-    cmd_logs_ingest,
-    cmd_logs_query,
-    cmd_logs_status,
-    cmd_logs_trace_case,
-)
 from .scenario import cmd_scenario_test
 from .supervisor import (
     cmd_start_all,
@@ -48,11 +41,6 @@ from .supervisor import (
 
 
 def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
-    """LLM: add the --capability-config argument with its default.
-
-    新手说明:
-    很多子命令都需要 --capability-config 参数，这里统一添加避免重复代码。
-    """
     p.add_argument(
         "--capability-config",
         default=str(DEFAULT_CAPABILITY_CONFIG),
@@ -60,69 +48,7 @@ def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
     )
 
 
-def add_logs_subcommands(sub: argparse._SubParsersAction) -> None:
-    """LLM: register the logs subcommand tree with its nested sub-subparsers.
-
-    新手说明:
-    注册日志分析子命令组：logs status、logs ingest、logs query、
-    logs hunt-ip、logs trace-case。
-    """
-    logs = sub.add_parser("logs", help="Log analysis status, ingest and query commands")
-    logs_sub = logs.add_subparsers(dest="logs_command")
-    logs.set_defaults(func=cmd_logs)
-
-    logs_status = logs_sub.add_parser("status", help="Show log analysis module status without starting workers")
-    logs_status.add_argument("--json", action="store_true", help="Output machine-readable JSON")
-    logs_status.set_defaults(func=cmd_logs_status)
-
-    logs_ingest = logs_sub.add_parser("ingest", help="Ingest a local security log file")
-    logs_ingest.add_argument("file", help="File to ingest")
-    logs_ingest.add_argument("--root", help="Override log-analysis data directory")
-    logs_ingest.add_argument("--source-id", help="Source identifier for checkpoints and manifests")
-    logs_ingest.add_argument("--format", choices=["jsonl", "json", "csv", "log"], help="Input file format")
-    logs_ingest.add_argument("--json", action="store_true", help="Output machine-readable JSON")
-    logs_ingest.set_defaults(func=cmd_logs_ingest)
-
-    logs_query = logs_sub.add_parser("query", help="Query ingested security events")
-    logs_query.add_argument("--root", help="Override log-analysis data directory")
-    logs_query.add_argument("--start-time", help="Inclusive ISO-8601 start time")
-    logs_query.add_argument("--end-time", help="Inclusive ISO-8601 end time")
-    logs_query.add_argument("--attacker-ip", help="Filter by attacker/source IP")
-    logs_query.add_argument("--victim-ip", help="Filter by victim/destination IP")
-    logs_query.add_argument("--domain", help="Filter by domain/host/SNI/DNS query")
-    logs_query.add_argument("--uri", help="Filter by URI/URL/path/API")
-    logs_query.add_argument("--alert-type", help="Filter by alert type")
-    logs_query.add_argument("--limit", type=int, help="Maximum rows to return")
-    logs_query.add_argument("--json", action="store_true", help="Output machine-readable JSON")
-    logs_query.set_defaults(func=cmd_logs_query)
-
-    logs_hunt_ip = logs_sub.add_parser("hunt-ip", help="Run attacker/victim IP hunt queries")
-    logs_hunt_ip.add_argument("ip", help="IP address to hunt")
-    logs_hunt_ip.add_argument("--root", help="Override log-analysis data directory")
-    logs_hunt_ip.add_argument("--role", choices=["any", "attacker", "victim"], default="any", help="IP role to query")
-    logs_hunt_ip.add_argument("--start-time", help="Inclusive ISO-8601 start time")
-    logs_hunt_ip.add_argument("--end-time", help="Inclusive ISO-8601 end time")
-    logs_hunt_ip.add_argument("--limit", type=int, help="Maximum rows to return")
-    logs_hunt_ip.add_argument("--json", action="store_true", help="Output machine-readable JSON")
-    logs_hunt_ip.set_defaults(func=cmd_logs_hunt_ip)
-
-    logs_trace_case = logs_sub.add_parser("trace-case", help="Trace a case through stored query seeds")
-    logs_trace_case.add_argument("case_id", help="Case identifier")
-    logs_trace_case.add_argument("--root", help="Override log-analysis data directory")
-    logs_trace_case.add_argument("--start-time", help="Inclusive ISO-8601 start time")
-    logs_trace_case.add_argument("--end-time", help="Inclusive ISO-8601 end time")
-    logs_trace_case.add_argument("--limit", type=int, help="Maximum rows to return")
-    logs_trace_case.add_argument("--json", action="store_true", help="Output machine-readable JSON")
-    logs_trace_case.set_defaults(func=cmd_logs_trace_case)
-
-
 def add_daemon_subcommand(sub: argparse._SubParsersAction) -> None:
-    """LLM: register the daemon subcommand with all its daemon-override switches.
-
-    新手说明:
-    注册 daemon 子命令，包含所有覆盖配置的开关（如 --dry-run、--apply、
-    --execute-runners、--planner 等）。
-    """
     daemon = sub.add_parser("daemon", help="按配置启动前台常驻调度")
     _add_capability_config_arg(daemon)
     daemon.add_argument("--dry-run", action="store_false", dest="apply", default=None, help="覆盖配置：只生成报告，不写回")
@@ -149,11 +75,6 @@ def add_daemon_subcommand(sub: argparse._SubParsersAction) -> None:
 
 
 def add_scenario_subcommand(sub: argparse._SubParsersAction) -> None:
-    """LLM: register the scenario-test subcommand.
-
-    新手说明:
-    注册 scenario-test 子命令，包含场景选择、工作空间、子代理数量等参数。
-    """
     scenario = sub.add_parser("scenario-test", help="跑一轮隔离的真实全流程任务测试")
     _add_capability_config_arg(scenario)
     scenario.add_argument(
@@ -189,7 +110,6 @@ def add_scenario_subcommand(sub: argparse._SubParsersAction) -> None:
 
 
 def _add_gateway_start_stop_subcommands(gateway_sub):
-    """Register gateway start/stop/restart/logs subcommands."""
     gateway_start = gateway_sub.add_parser("start", help="启动后台 gateway")
     gateway_start.add_argument("--force", action="store_true", help="已有 gateway 运行时先尝试停止再启动")
     gateway_start.add_argument("--force-lock", action="store_true", help="传给内部 daemon，强制覆盖已有 dispatch watch lock")
@@ -213,7 +133,6 @@ def _add_gateway_start_stop_subcommands(gateway_sub):
 
 
 def _add_gateway_run_subcommand(gateway_sub):
-    """Register gateway run subcommand."""
     gateway_run = gateway_sub.add_parser("run", help="内部命令：前台运行 gateway 循环")
     _add_capability_config_arg(gateway_run)
     gateway_run.add_argument("--dry-run", action="store_false", dest="apply", default=None, help="覆盖配置：只生成报告，不写回")
@@ -242,7 +161,6 @@ def _add_gateway_run_subcommand(gateway_sub):
 
 
 def _add_gateway_ask_result_subcommands(gateway_sub):
-    """Register gateway ask/result subcommands."""
     gateway_ask = gateway_sub.add_parser(
         "ask",
         help="向后台 gateway 投递一条聊天请求；未来聊天工具/TUI 会复用这条通道",
@@ -266,7 +184,6 @@ def _add_gateway_ask_result_subcommands(gateway_sub):
 
 
 def _add_gateway_supervisor_subcommands(gateway_sub):
-    """Register supervisor subcommands."""
     supervisor_start = gateway_sub.add_parser("supervisor-start", help="启动 gateway 看门狗进程（自动重启崩溃的 gateway）")
     supervisor_start.set_defaults(func=cmd_supervisor_start)
 
@@ -287,7 +204,6 @@ def _add_gateway_supervisor_subcommands(gateway_sub):
 
 
 def _add_gateway_service_subcommands(gateway_sub):
-    """Register install/uninstall and start-all subcommands."""
     start_all = gateway_sub.add_parser("start-all", help="一键启动 gateway（带 supervisor）+ 所有适配器")
     start_all.add_argument(
         "--adapter",
@@ -306,12 +222,6 @@ def _add_gateway_service_subcommands(gateway_sub):
 
 
 def add_gateway_subcommands(sub: argparse._SubParsersAction) -> None:
-    """LLM: register the gateway subcommand tree with start/run/status/stop/restart/logs/ask/result.
-
-    新手说明:
-    注册 gateway 子命令组：gateway start、gateway run、gateway status、
-    gateway stop、gateway restart、gateway logs、gateway ask、gateway result。
-    """
     gateway = sub.add_parser("gateway", help="管理后台 gateway 进程")
     gateway_sub = gateway.add_subparsers(dest="gateway_command")
     gateway.set_defaults(func=cmd_gateway)
@@ -324,11 +234,6 @@ def add_gateway_subcommands(sub: argparse._SubParsersAction) -> None:
 
 
 def add_adapter_subcommand(sub: argparse._SubParsersAction) -> None:
-    """LLM: register the adapter subcommand tree.
-
-    新手说明:
-    注册 adapter 子命令组：adapter file/start/status/stop。
-    """
     adapter = sub.add_parser("adapter", help="外部聊天工具 / TUI 适配器")
     adapter_sub = adapter.add_subparsers(dest="adapter_command")
     adapter.set_defaults(func=cmd_adapter)

@@ -22,26 +22,10 @@ from .query_functions import (
 
 
 class SecurityQueryTool(BaseTool):
-    """LLM: Tool registry wrapper for bounded security_query execution.
-
-    新手说明:
-    这个类把普通 Python 函数 security_query 包装成 agent 工具系统认识的 BaseTool。
-    spec 描述工具名字、用途、参数和例子；execute 负责真正调用函数并返回 ToolExecutionResult。
-
-    字段说明:
-    store_root: 默认日志分析数据目录，execute 没有传 root 时使用。
-    spec: ToolSpec，告诉 agent 这个工具什么时候该用、参数是什么、什么时候不该用。
-    """
+    """Tool wrapper for bounded log-analysis queries."""
 
     def __init__(self, store_root: Path):
-        """LLM: 初始化 security_query 工具规格和默认 store root。
-
-        新手说明:
-        创建工具对象时先准备好说明书 spec，后面工具目录才能展示它。
-
-        参数说明:
-        store_root: 本地日志分析数据目录，作为 execute 的默认 root。
-        """
+        """Initialize the tool spec and default store root."""
         self.store_root = store_root
         self.spec = ToolSpec(
             name="security_query",
@@ -83,18 +67,7 @@ class SecurityQueryTool(BaseTool):
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        """LLM: 从工具参数中抽取查询条件，调用 security_query，并把结果序列化给 prompt。
-
-        新手说明:
-        工具系统传进来的是 params 字典。这个方法负责取出允许的参数，忽略其它杂项，
-        然后把查询结果变成 JSON 字符串。
-
-        参数说明:
-        params: 工具调用参数，可能包含 root、attacker_ip、victim_ip、domain、uri、alert_type、时间窗口和 limit。
-
-        返回说明:
-        返回 ToolExecutionResult，success=True 时 content 是格式化 JSON。
-        """
+        """Execute the tool and return prompt-safe JSON."""
         payload = security_query(SecurityQueryParams(
             root=params.get("root") or self.store_root,
             **_query_params(params),
@@ -103,25 +76,10 @@ class SecurityQueryTool(BaseTool):
 
 
 class SecurityHuntIpTool(BaseTool):
-    """LLM: Tool registry wrapper for IP pivot hunting.
-
-    新手说明:
-    这个类把 security_hunt_ip 暴露给 agent。它要求必须传 ip，并允许 role 控制查询方向。
-
-    字段说明:
-    store_root: 默认日志分析数据目录。
-    spec: ToolSpec，描述 IP hunting 的参数、例子和禁用场景。
-    """
+    """Tool wrapper for IP pivot hunting."""
 
     def __init__(self, store_root: Path):
-        """LLM: 初始化 security_hunt_ip 工具规格和默认 store root。
-
-        新手说明:
-        spec 里的参数说明会展示给 agent，帮助它知道 ip、role、时间窗口怎么传。
-
-        参数说明:
-        store_root: 本地日志分析数据目录，作为 execute 的默认 root。
-        """
+        """Initialize the tool spec and default store root."""
         self.store_root = store_root
         self.spec = ToolSpec(
             name="security_hunt_ip",
@@ -150,43 +108,17 @@ class SecurityHuntIpTool(BaseTool):
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        """LLM: 校验必填 ip，调用 security_hunt_ip，并返回 JSON 工具结果。
-
-        新手说明:
-        如果没有 ip，这个方法会抛 ValueError。这样错误会尽早暴露，而不是跑一个空查询。
-
-        参数说明:
-        params: 工具调用参数，必须包含 ip，可选 role、root、start_time、end_time、limit、max_limit。
-
-        返回说明:
-        返回 ToolExecutionResult，content 是 security_hunt_ip 的 JSON 结果。
-        """
+        """Execute the tool and return prompt-safe JSON."""
         ip = _required_text(params, "ip")
         payload = security_hunt_ip(ip, root=params.get("root") or self.store_root, **_hunt_params(params))
         return ToolExecutionResult(self.spec.name, True, _prompt_json(payload))
 
 
 class SecurityTraceCaseTool(BaseTool):
-    """LLM: Tool registry wrapper for case-based trace expansion.
-
-    新手说明:
-    这个类把本地 case 追踪能力暴露给 agent。它不是读取完整 case 给模型，
-    而是根据 case 里的种子跑受控查询，返回 evidence refs。
-
-    字段说明:
-    store_root: 默认日志分析数据目录。
-    spec: ToolSpec，描述 case trace 的参数、例子和禁用场景。
-    """
+    """Tool wrapper for case trace expansion."""
 
     def __init__(self, store_root: Path):
-        """LLM: 初始化 security_trace_case 工具规格和默认 store root。
-
-        新手说明:
-        spec 告诉 agent 需要 case_id，并提醒不要把它当作 full case dump 工具。
-
-        参数说明:
-        store_root: 本地日志分析数据目录，作为 execute 的默认 root。
-        """
+        """Initialize the tool spec and default store root."""
         self.store_root = store_root
         self.spec = ToolSpec(
             name="security_trace_case",
@@ -215,17 +147,7 @@ class SecurityTraceCaseTool(BaseTool):
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        """LLM: 校验必填 case_id，调用 security_trace_case，并返回 JSON 工具结果。
-
-        新手说明:
-        这个方法把工具调用参数翻译给 trace_case。case_id 缺失会立刻报错。
-
-        参数说明:
-        params: 工具调用参数，必须包含 case_id，可选 root、start_time、end_time、limit、max_limit、max_queries。
-
-        返回说明:
-        返回 ToolExecutionResult，content 是 security_trace_case 的 JSON 结果。
-        """
+        """Execute the tool and return prompt-safe JSON."""
         case_id = _required_text(params, "case_id")
         payload = security_trace_case(
             case_id,
@@ -236,17 +158,7 @@ class SecurityTraceCaseTool(BaseTool):
 
 
 def _query_params(params: dict[str, Any]) -> dict[str, Any]:
-    """LLM: 从工具 params 中挑出 security_query 允许的参数。
-
-    新手说明:
-    工具调用字典里可能混入其它字段。这个函数只保留查询函数认识的键，减少误传。
-
-    参数说明:
-    params: 原始工具参数字典。
-
-    返回说明:
-    返回过滤后的 dict，可安全传给 security_query。
-    """
+    """Tool wrapper for bounded log-analysis queries."""
     keys = (
         "attacker_ip",
         "victim_ip",
@@ -262,52 +174,18 @@ def _query_params(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _hunt_params(params: dict[str, Any]) -> dict[str, Any]:
-    """LLM: 从工具 params 中挑出 hunt_ip 允许的参数。
-
-    新手说明:
-    IP hunting 只需要 role、时间窗口和 limit 这些参数，其它字段不该传进去。
-
-    参数说明:
-    params: 原始工具参数字典。
-
-    返回说明:
-    返回过滤后的 dict，可安全传给 security_hunt_ip。
-    """
+    """Tool wrapper for bounded log-analysis queries."""
     payload = {key: params[key] for key in ("role", "start_time", "end_time", "limit", "max_limit") if key in params}
     return payload
 
 
 def _trace_params(params: dict[str, Any]) -> dict[str, Any]:
-    """LLM: 从工具 params 中挑出 trace_case 允许的参数。
-
-    新手说明:
-    case trace 除了时间和 limit，还允许 max_queries 控制最多扩展多少个 seed。
-
-    参数说明:
-    params: 原始工具参数字典。
-
-    返回说明:
-    返回过滤后的 dict，可安全传给 security_trace_case。
-    """
+    """Tool wrapper for bounded log-analysis queries."""
     return {key: params[key] for key in ("start_time", "end_time", "limit", "max_limit", "max_queries") if key in params}
 
 
 def _required_text(params: dict[str, Any], key: str) -> str:
-    """LLM: 校验工具参数中的必填文本字段。
-
-    新手说明:
-    有些参数比如 ip、case_id 不能缺。这个函数负责统一报错。
-
-    参数说明:
-    params: 原始工具参数字典。
-    key: 必填字段名。
-
-    返回说明:
-    返回字符串形式的参数值。
-
-    异常说明:
-    字段不存在或是空字符串时抛 ValueError。
-    """
+    """Tool wrapper for bounded log-analysis queries."""
     value = params.get(key)
     if value in (None, ""):
         raise ValueError(f"{key} is required")
@@ -315,15 +193,5 @@ def _required_text(params: dict[str, Any], key: str) -> str:
 
 
 def _prompt_json(payload: dict[str, Any]) -> str:
-    """LLM: 把工具 payload 转成稳定、可读、保留中文的 JSON 字符串。
-
-    新手说明:
-    agent prompt 里最好看到格式化 JSON，便于模型引用字段，也方便人类调试。
-
-    参数说明:
-    payload: 要输出给工具结果的字典。
-
-    返回说明:
-    返回带缩进、key 排序、中文不转义的 JSON 字符串。
-    """
+    """Tool wrapper for bounded log-analysis queries."""
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)

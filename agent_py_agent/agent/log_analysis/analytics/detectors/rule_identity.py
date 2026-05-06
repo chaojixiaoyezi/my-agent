@@ -3,6 +3,7 @@ from __future__ import annotations
 """Identity and multi-source soft detector rules."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from .classifiers import (
@@ -35,6 +36,15 @@ from .field_extractors import _host, _source_ip, _user, _victim_ip
 from .rule_helpers import MakeFindingParams, _make_finding, _query
 
 
+@dataclass(frozen=True)
+class _VpnContext:
+    event: JsonDict
+    user: str
+    country: str
+    asn: str
+    device: str
+
+
 def vpn_new_geo_login(events: Sequence[EventLike], *, baselines: Any = None, window_minutes: int = 60) -> list[Any]:
     """Detect successful VPN logins from new geo/ASN/device or unusual hours."""
     del window_minutes
@@ -43,11 +53,16 @@ def vpn_new_geo_login(events: Sequence[EventLike], *, baselines: Any = None, win
     baseline_obj = ensure_baselines(baselines)
     findings: list[Any] = []
     for event in [_event_dict(item) for item in events]:
-        if _is_vpn_event(event) and _is_success(event):
-            finding = _vpn_finding_if_unusual(event, baseline_obj)
-            if finding is not None:
-                findings.append(finding)
+        _append_vpn_finding(findings, event, baseline_obj)
     return findings
+
+
+def _append_vpn_finding(findings: list[Any], event: JsonDict, baseline_obj: Any) -> None:
+    if not (_is_vpn_event(event) and _is_success(event)):
+        return
+    finding = _vpn_finding_if_unusual(event, baseline_obj)
+    if finding is not None:
+        findings.append(finding)
 
 
 def bruteforce_then_success(
@@ -86,10 +101,11 @@ def _vpn_finding_if_unusual(event: JsonDict, baseline_obj: Any) -> Any | None:
     if not user:
         return None
     country, asn, device = _vpn_source_context(event)
-    flags = _vpn_unusual_flags(event, baseline_obj, user, country, asn, device)
+    context = _VpnContext(event=event, user=user, country=country, asn=asn, device=device)
+    flags = _vpn_unusual_flags(context, baseline_obj)
     if not any(flags.values()):
         return None
-    return _vpn_finding(event, user, country, asn, device, flags)
+    return _vpn_finding(context, flags)
 
 
 def _vpn_source_context(event: JsonDict) -> tuple[str, str, str]:
@@ -99,35 +115,35 @@ def _vpn_source_context(event: JsonDict) -> tuple[str, str, str]:
     return country, asn, device
 
 
-def _vpn_unusual_flags(event: JsonDict, baseline_obj: Any, user: str, country: str, asn: str, device: str) -> dict[str, bool]:
+def _vpn_unusual_flags(context: _VpnContext, baseline_obj: Any) -> dict[str, bool]:
     return {
-        "new_geo": _truthy(_field(event, "new_geo", "new_country", "is_new_geo")) or baseline_obj.is_new_country(user, country),
-        "new_asn": _truthy(_field(event, "new_asn", "is_new_asn")) or baseline_obj.is_new_asn(user, asn),
-        "new_device": _truthy(_field(event, "new_device", "is_new_device")) or baseline_obj.is_new_device(user, device),
-        "unusual_hour": _truthy(_field(event, "unusual_hour", "is_unusual_hour")) or baseline_obj.is_unusual_login_hour(user, _event_time(event)),
+        "new_geo": _truthy(_field(context.event, "new_geo", "new_country", "is_new_geo")) or baseline_obj.is_new_country(context.user, context.country),
+        "new_asn": _truthy(_field(context.event, "new_asn", "is_new_asn")) or baseline_obj.is_new_asn(context.user, context.asn),
+        "new_device": _truthy(_field(context.event, "new_device", "is_new_device")) or baseline_obj.is_new_device(context.user, context.device),
+        "unusual_hour": _truthy(_field(context.event, "unusual_hour", "is_unusual_hour")) or baseline_obj.is_unusual_login_hour(context.user, _event_time(context.event)),
     }
 
 
-def _vpn_finding(event: JsonDict, user: str, country: str, asn: str, device: str, flags: dict[str, bool]) -> Any:
+def _vpn_finding(context: _VpnContext, flags: dict[str, bool]) -> Any:
     confidence = min(0.58 + (0.12 if flags["new_geo"] else 0.0) + (0.08 if flags["new_asn"] else 0.0) + (0.08 if flags["new_device"] else 0.0) + (0.05 if flags["unusual_hour"] else 0.0), 0.86)
     gaps = ["MFA result, device posture, and identity-risk context are not confirmed.", "Post-login host access is not yet correlated."]
-    if not country:
+    if not context.country:
         gaps.append("Source country is missing; GeoIP enrichment is needed.")
-    if not asn:
+    if not context.asn:
         gaps.append("Source ASN is missing; ASN enrichment is needed.")
     return _make_finding(
         "vpn_new_geo_login",
-        [event],
+        [context.event],
         params=MakeFindingParams(
             detector_id="vpn_new_geo_login",
-            evidence_events=[event],
+            evidence_events=[context.event],
             hypothesis="Possible VPN credential misuse: successful login used new or unusual source context.",
             confidence=confidence,
             gaps=gaps,
-            next_queries=[_query("Trace VPN session activity and assigned internal IP for this user", event), _query("Search host logons and admin actions by this user after VPN login", event), _query("Review MFA, device posture, and recent password reset events for this user", event)],
-            features={**flags, "country": country, "asn": asn, "device": device},
+            next_queries=[_query("Trace VPN session activity and assigned internal IP for this user", context.event), _query("Search host logons and admin actions by this user after VPN login", context.event), _query("Review MFA, device posture, and recent password reset events for this user", context.event)],
+            features={**flags, "country": context.country, "asn": context.asn, "device": context.device},
             severity_hint="high" if confidence >= 0.7 else "medium",
-            extra_entities={"user": [user], "attacker_ip": [_source_ip(event)], "src_ip": [_source_ip(event)], "country": [country], "asn": [asn], "device": [device]},
+            extra_entities={"user": [context.user], "attacker_ip": [_source_ip(context.event)], "src_ip": [_source_ip(context.event)], "country": [context.country], "asn": [context.asn], "device": [context.device]},
         ),
     )
 

@@ -274,6 +274,14 @@ class TestIndexingAliases:
 
         manager._index_dataclass_record.assert_called_once()
 
+
+
+
+
+
+class TestIndexingRecordAliases:
+    """测试 manager_indexing.py 公开别名的委托行为。"""
+
     def test_index_parent_planner_record_delegates_to_private(self, tmp_path: Path):
         """验证 index_parent_planner_record() 正确委托给 _index_parent_planner_record。"""
         from agent_py_agent.agent.subagents.manager_indexing import SubAgentIndexingMixin
@@ -424,7 +432,7 @@ class TestPatchAliases:
         result = manager.resolve_patch_target(relative_path)
 
         assert result.is_absolute()
-        assert str(result).endswith("subdir/file.txt")
+        assert result == tmp_path / "subdir" / "file.txt"
 
     def test_resolve_patch_target_expanduser(self, tmp_path: Path):
         """验证 resolve_patch_target() 展开 ~ 用户目录。"""

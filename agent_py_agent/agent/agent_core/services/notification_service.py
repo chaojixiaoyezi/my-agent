@@ -1,8 +1,3 @@
-"""LLM: notification handling for completed tasks.
-
-给人看的解释：
-对达到终态的任务触发通知。
-"""
 
 from __future__ import annotations
 
@@ -14,11 +9,6 @@ if TYPE_CHECKING:
 
 
 def notify_completed_tasks(agent: SimpleAgent, records: list) -> None:
-    """对达到终态的任务触发通知。
-
-    根据 records 中的 step、applied、after_status 字段，
-    对已到达终态（DONE/FAILED/TIMEOUT）的任务发送通知。
-    """
     if not getattr(agent.config, "notification_enabled", False):
         return
 

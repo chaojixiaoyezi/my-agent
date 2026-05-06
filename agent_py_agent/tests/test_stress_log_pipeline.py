@@ -16,6 +16,16 @@ from agent_py_agent.agent.log_analysis.ingest.pipeline import IngestPipeline
 from agent_py_agent.agent.log_analysis.ingest.pipeline_enrich import flush_events
 
 
+def _future_errors(futures):
+    errors = []
+    for future in as_completed(futures):
+        try:
+            future.result()
+        except Exception as exc:
+            errors.append(exc)
+    return errors
+
+
 class TestLargeFileIngest:
     """大文件摄入压力测试"""
 
@@ -214,11 +224,7 @@ class TestConcurrentIngest:
 
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = [executor.submit(run_pipeline, i) for i in range(5)]
-            for f in as_completed(futures):
-                try:
-                    f.result()
-                except Exception as exc:
-                    errors.append(exc)
+            errors.extend(_future_errors(futures))
 
         assert errors == []
         assert len(results) == 5

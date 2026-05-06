@@ -20,7 +20,6 @@ from .local_doctor import build_local_doctor_report, rebuild_local_store
 
 
 def cmd_local_doctor(args) -> int:
-    """诊断 LocalStore、gateway 队列和 subagent 文件事实源的一致性。"""
 
     agent = make_agent(args)
     if args.repair:
@@ -58,7 +57,6 @@ def cmd_local_doctor(args) -> int:
 
 
 def cmd_local_rebuild(args) -> int:
-    """从文件事实源重建 LocalStore 索引。"""
 
     agent = make_agent(args)
     requested = set(args.source or ["memory", "gateway", "subagent", "fts"])

@@ -6,7 +6,40 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from .models import CaseRecord, EvidenceRef, Finding, utc_now_iso
+from .models import CaseRecord, Finding, utc_now_iso
+from .report_formatting import (
+    bullet_entities as _bullet_entities,
+)
+from .report_formatting import (
+    bullet_entries as _bullet_entries,
+)
+from .report_formatting import (
+    bullet_facts as _bullet_facts,
+)
+from .report_formatting import (
+    bullet_inferences as _bullet_inferences,
+)
+from .report_formatting import (
+    bullet_lateral as _bullet_lateral,
+)
+from .report_formatting import (
+    bullet_query_plans as _bullet_query_plans,
+)
+from .report_formatting import (
+    bullet_text as _bullet_text,
+)
+from .report_formatting import (
+    bullet_timeline as _bullet_timeline,
+)
+from .report_formatting import (
+    raw_like_refs as _raw_like_refs,
+)
+from .report_formatting import (
+    ref_ids as _ref_ids,
+)
+from .report_formatting import (
+    unique as _unique,
+)
 from .security.correlation import RouteDraft, build_route_draft
 
 
@@ -19,7 +52,10 @@ def first_response_report_content(
     case_obj = case if isinstance(case, CaseRecord) else CaseRecord.from_dict(case)
     route_obj = _route_or_build(case_obj, route, findings)
     route_dict = route_obj.to_dict() if isinstance(route_obj, RouteDraft) else dict(route_obj)
+    return "\n".join(_first_response_sections(case_obj, route_dict))
 
+
+def _first_response_sections(case_obj: CaseRecord, route_dict: Mapping[str, Any]) -> list[str]:
     lines = [
         "# First Response Report",
         "",
@@ -58,7 +94,7 @@ def first_response_report_content(
         *_bullet_text(route_dict.get("evidence_refs", [])),
         "",
     ]
-    return "\n".join(lines)
+    return lines
 
 
 def render_first_response_report(
@@ -174,140 +210,6 @@ def _filter_finding_dicts_for_case(case: CaseRecord, findings: Sequence[dict[str
     if not refs:
         return list(findings)
     return [finding for finding in findings if str(finding.get("finding_id") or "") in refs]
-
-
-def _bullet_facts(items: Sequence[Mapping[str, Any]]) -> list[str]:
-    if not items:
-        return ["- No confirmed facts beyond the case shell are available yet."]
-    return [
-        f"- {item.get('statement', 'Observed fact')} Evidence: {', '.join(item.get('evidence_refs', [])) or 'none'}"
-        for item in items
-    ]
-
-
-def _bullet_inferences(items: Sequence[Mapping[str, Any]]) -> list[str]:
-    if not items:
-        return ["- No inferences available yet."]
-    return [
-        f"- {item.get('hypothesis', 'Hypothesis pending')} Confidence: {float(item.get('confidence', 0.0)):.2f}"
-        for item in items
-    ]
-
-
-def _bullet_entries(items: Sequence[Mapping[str, Any]]) -> list[str]:
-    if not items:
-        return ["- No entry candidate is ranked yet."]
-    return [
-        f"- {item.get('kind', 'candidate')} via {item.get('detector_id', 'unknown')} "
-        f"confidence={float(item.get('confidence', 0.0)):.2f} evidence={', '.join(item.get('evidence_refs', [])) or 'none'}"
-        for item in items
-    ]
-
-
-def _bullet_timeline(items: Sequence[Mapping[str, Any]]) -> list[str]:
-    if not items:
-        return ["- No timeline steps are available yet."]
-    return [
-        f"- {item.get('time', 'unknown time')}: {item.get('stage', 'unknown')} - {item.get('action', '')}"
-        for item in items
-    ]
-
-
-def _bullet_entities(entities: Mapping[str, Sequence[Any]]) -> list[str]:
-    if not entities:
-        return ["- No impacted entities are available yet."]
-    return [f"- {key}: {', '.join(str(value) for value in values)}" for key, values in sorted(entities.items()) if values]
-
-
-def _bullet_lateral(items: Sequence[Mapping[str, Any]]) -> list[str]:
-    if not items:
-        return ["- No lateral movement sign is identified yet."]
-    return [f"- {item.get('kind', 'lateral_candidate')}: {item.get('summary', '')}" for item in items]
-
-
-def _bullet_text(items: Sequence[Any]) -> list[str]:
-    values = _unique(items)
-    return [f"- {item}" for item in values] if values else ["- None recorded."]
-
-
-def _bullet_query_plans(items: Sequence[Any]) -> list[str]:
-    values = _unique_items(items)
-    if not values:
-        return ["- None recorded."]
-    return [f"- {_format_query_plan(item)}" for item in values]
-
-
-def _format_query_plan(item: Any) -> str:
-    if not isinstance(item, Mapping):
-        return str(item)
-    display = str(item.get("display") or item.get("purpose") or "Query plan").strip()
-    details: list[str] = []
-    source_products = item.get("source_products") or []
-    if source_products:
-        details.append(f"sources={', '.join(str(value) for value in source_products)}")
-    start_time = str(item.get("start_time") or "").strip()
-    end_time = str(item.get("end_time") or "").strip()
-    if start_time or end_time:
-        details.append(f"time={start_time or '*'}..{end_time or '*'}")
-    filters = item.get("filters")
-    if isinstance(filters, Mapping) and filters:
-        rendered = ", ".join(f"{key}={value}" for key, value in sorted(filters.items()) if value not in (None, "", [], {}))
-        if rendered:
-            details.append(f"filters: {rendered}")
-    evidence_needed = item.get("evidence_needed") or []
-    if evidence_needed:
-        details.append(f"evidence={', '.join(str(value) for value in evidence_needed)}")
-    limit = item.get("limit")
-    if limit:
-        details.append(f"limit={limit}")
-    return f"{display} ({'; '.join(details)})" if details else display
-
-
-def _raw_like_refs(refs: Sequence[Any], ref_ids: Sequence[str]) -> list[str]:
-    raw: list[str] = []
-    for ref in refs:
-        if isinstance(ref, EvidenceRef) and ref.raw_ref:
-            raw.append(ref.raw_ref)
-        elif isinstance(ref, Mapping) and ref.get("raw_ref"):
-            raw.append(str(ref.get("raw_ref")))
-    raw.extend(ref for ref in ref_ids if ref.startswith("raw") or ":line-" in ref)
-    return _unique(raw)
-
-
-def _ref_ids(refs: Sequence[Any]) -> list[str]:
-    result: list[str] = []
-    for ref in refs:
-        if isinstance(ref, EvidenceRef):
-            result.append(ref.evidence_id)
-        elif isinstance(ref, Mapping):
-            result.append(str(ref.get("evidence_id") or ref.get("raw_ref") or ref))
-        else:
-            result.append(str(ref))
-    return _unique(result)
-
-
-def _unique(values: Sequence[Any]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        text = str(value or "").strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        result.append(text)
-    return result
-
-
-def _unique_items(values: Sequence[Any]) -> list[Any]:
-    result: list[Any] = []
-    seen: set[str] = set()
-    for value in values:
-        marker = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
-        if marker in seen or value in ("", None, [], {}):
-            continue
-        seen.add(marker)
-        result.append(value)
-    return result
 
 
 __all__ = [

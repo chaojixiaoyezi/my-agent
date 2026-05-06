@@ -35,10 +35,28 @@ def normalize_security_alert_v1(
 
     options = _normalize_options(kwargs)
     raw_fields = _clean_raw_fields(record)
+    mapped, mapping_source, attributes = _map_security_alert_fields(raw_fields)
+    event = _base_security_event(mapped, raw_fields, options)
+
+    _copy_security_ip_semantics(event)
+    _coerce_port_fields(event)
+    _apply_payload_policy(event, payload_max_chars=options.payload_max_chars)
+
+    event["raw_fields"] = raw_fields
+    event["attributes"] = attributes
+    event["mapping_source"] = mapping_source
+    event["parser_confidence"] = parser_confidence(raw_fields, mapping_source)
+
+    dedup_hash = event_fingerprint(event)
+    event["dedup_key"] = f"sha256:{dedup_hash}"
+    event["event_id"] = f"evt-{dedup_hash[:24]}"
+    return event
+
+
+def _map_security_alert_fields(raw_fields: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str], dict[str, Any]]:
     mapped: dict[str, Any] = {}
     mapping_source: dict[str, str] = {}
     attributes: dict[str, Any] = {}
-
     for raw_key, raw_value in raw_fields.items():
         stable_key = stable_field_key(raw_key)
         value = clean_value(raw_value)
@@ -49,7 +67,14 @@ def normalize_security_alert_v1(
             mapping_source[stable_key] = mapping_source_for(raw_key, stable_key)
         else:
             attributes[_to_snake(raw_key)] = value
+    return mapped, mapping_source, attributes
 
+
+def _base_security_event(
+    mapped: Mapping[str, Any],
+    raw_fields: Mapping[str, Any],
+    options: _NormalizeOptions,
+) -> dict[str, Any]:
     now = options.ingest_time or utc_now()
     event: dict[str, Any] = dict.fromkeys(SECURITY_ALERT_V1_KEYS)
     event.update(mapped)
@@ -70,19 +95,6 @@ def normalize_security_alert_v1(
     event["raw_ref"] = options.raw_ref
     event["raw_line_no"] = options.line_no
     event["parser_id"] = "security_alert_v1"
-
-    _copy_security_ip_semantics(event)
-    _coerce_port_fields(event)
-    _apply_payload_policy(event, payload_max_chars=options.payload_max_chars)
-
-    event["raw_fields"] = raw_fields
-    event["attributes"] = attributes
-    event["mapping_source"] = mapping_source
-    event["parser_confidence"] = parser_confidence(raw_fields, mapping_source)
-
-    dedup_hash = event_fingerprint(event)
-    event["dedup_key"] = f"sha256:{dedup_hash}"
-    event["event_id"] = f"evt-{dedup_hash[:24]}"
     return event
 
 

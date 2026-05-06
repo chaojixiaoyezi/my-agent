@@ -1,4 +1,3 @@
-"""Write filesystem tools."""
 
 from __future__ import annotations
 
@@ -17,7 +16,6 @@ from .models import BaseTool, ToolExecutionResult, ToolSpec
 
 
 class WriteFileTool(FileSystemTool):
-    """写文件或覆盖文件。"""
 
     def __init__(self, workspace_root: Path):
         super().__init__(workspace_root)
@@ -69,7 +67,6 @@ class WriteFileTool(FileSystemTool):
 
 
 class AppendFileTool(FileSystemTool):
-    """向文件末尾追加内容。"""
 
     def __init__(self, workspace_root: Path):
         super().__init__(workspace_root)
@@ -122,11 +119,6 @@ class AppendFileTool(FileSystemTool):
 
 
 class ReplaceInFileTool(FileSystemTool):
-    """精确替换文件中的一段文本。
-
-    这个工具是给"差异化编辑"准备的。
-    大白话说：如果只需要改一个函数、一行配置或一小段说明，就不要整文件覆盖。
-    """
 
     def __init__(self, workspace_root: Path):
         super().__init__(workspace_root)

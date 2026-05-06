@@ -25,22 +25,8 @@ class WebSocketFrame:
         if masked:
             mask_key = os.urandom(4)
             masked_payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
-            if length < 126:
-                second = 0x80 | length
-                return bytes([first, second]) + mask_key + masked_payload
-            elif length < 65536:
-                second = 0x80 | 126
-                return bytes([first, second]) + struct.pack(">H", length) + mask_key + masked_payload
-            else:
-                second = 0x80 | 127
-                return bytes([first, second]) + struct.pack(">Q", length) + mask_key + masked_payload
-        else:
-            if length < 126:
-                return bytes([first, length]) + payload
-            elif length < 65536:
-                return bytes([first, 126]) + struct.pack(">H", length) + payload
-            else:
-                return bytes([first, 127]) + struct.pack(">Q", length) + payload
+            return _frame_header(first, length, masked=True) + mask_key + masked_payload
+        return _frame_header(first, length, masked=False) + payload
 
     @staticmethod
     def build_close_frame() -> bytes:
@@ -64,23 +50,14 @@ class WebSocketFrame:
         has_mask = bool(second & 0x80)
         length = second & 0x7F
 
-        offset = 2
-        if length == 126:
-            if len(data) < 4:
-                return None
-            length = struct.unpack(">H", data[2:4])[0]
-            offset = 4
-        elif length == 127:
-            if len(data) < 10:
-                return None
-            length = struct.unpack(">Q", data[2:10])[0]
-            offset = 10
+        length_info = _parse_payload_length(data, length)
+        if length_info is None:
+            return None
+        length, offset = length_info
 
-        if has_mask:
-            if len(data) < offset + 4:
-                return None
-            mask_key = data[offset : offset + 4]
-            offset += 4
+        mask_key, offset = _parse_mask(data, offset, has_mask)
+        if mask_key is None and has_mask:
+            return None
 
         if len(data) < offset + length:
             return None
@@ -90,3 +67,32 @@ class WebSocketFrame:
             payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
 
         return opcode, payload
+
+
+def _frame_header(first: int, length: int, *, masked: bool) -> bytes:
+    mask_bit = 0x80 if masked else 0
+    if length < 126:
+        return bytes([first, mask_bit | length])
+    if length < 65536:
+        return bytes([first, mask_bit | 126]) + struct.pack(">H", length)
+    return bytes([first, mask_bit | 127]) + struct.pack(">Q", length)
+
+
+def _parse_payload_length(data: bytes, length: int) -> tuple[int, int] | None:
+    if length == 126:
+        if len(data) < 4:
+            return None
+        return struct.unpack(">H", data[2:4])[0], 4
+    if length == 127:
+        if len(data) < 10:
+            return None
+        return struct.unpack(">Q", data[2:10])[0], 10
+    return length, 2
+
+
+def _parse_mask(data: bytes, offset: int, has_mask: bool) -> tuple[bytes | None, int]:
+    if not has_mask:
+        return b"", offset
+    if len(data) < offset + 4:
+        return None, offset
+    return data[offset : offset + 4], offset + 4

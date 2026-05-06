@@ -31,11 +31,6 @@ class _RecoveryContext:
 
 
 def gateway_stale_processing(paths: GatewayPaths, timeout_seconds: int) -> list[dict]:
-    """LLM contract: list processing requests older than the configured lease timeout.
-
-    Human version:
-    这给 local-doctor 用。它会找出那些在 `processing` 里待太久的请求，帮助我们判断 gateway 是不是卡住了。
-    """
 
     items: list[dict] = []
     now = time.time()
@@ -72,15 +67,6 @@ def recover_gateway_processing_requests(
     agent: SimpleAgent | None = None,
     lease_stale_seconds: int | None = None,
 ) -> dict[str, int]:
-    """LLM contract: requeue or fail stale gateway processing requests.
-
-    Human version:
-    如果 gateway 崩在半路，请求会留在 `processing`。启动时我们把旧请求退回 pending；
-    运行中只处理超过超时时间的请求。重试次数太多的请求会归档到 failed，并写失败响应。
-
-    lease_stale_seconds：如果传入此参数，恢复逻辑会优先用它判断 lease 是否过期，
-    而不是只用 lease_heartbeat_at。这样可以兼容外部传入的动态配置。
-    """
 
     _ensure_recovery_dirs(paths)
     summary = {"requeued": 0, "failed": 0, "checked": 0, "archived": 0}
@@ -97,7 +83,6 @@ def recover_gateway_processing_requests(
 
 
 def _ensure_recovery_dirs(paths: GatewayPaths) -> None:
-    """Ensure request recovery directories exist before moving files."""
     for folder in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         folder.mkdir(parents=True, exist_ok=True)
 
@@ -107,7 +92,6 @@ def _recover_one_processing_request(
     request_path: Path,
     context: _RecoveryContext,
 ) -> str:
-    """Recover one processing request and return the summary bucket name."""
     payload = read_json_file(request_path) or {"id": request_path.stem, "kind": "unknown", "created_at": 0}
     request_id = str(payload.get("id") or request_path.stem)
     if gateway_response_path(paths, request_id).exists():
@@ -116,7 +100,16 @@ def _recover_one_processing_request(
         return ""
     attempts = _gateway_request_attempts(payload)
     if attempts >= context.max_attempts:
-        return _fail_stale_processing(paths, request_path, payload, context.timeout_seconds, attempts, context.agent)
+        return _fail_stale_processing(
+            {
+                "paths": paths,
+                "request_path": request_path,
+                "payload": payload,
+                "timeout_seconds": context.timeout_seconds,
+                "attempts": attempts,
+                "agent": context.agent,
+            }
+        )
     return _requeue_stale_processing(paths, request_path, payload, context)
 
 
@@ -146,24 +139,19 @@ def _processing_request_stale(
     )
 
 
-def _fail_stale_processing(
-    paths: GatewayPaths,
-    request_path: Path,
-    payload: dict,
-    timeout_seconds: int,
-    attempts: int,
-    agent: SimpleAgent | None,
-) -> str:
+def _fail_stale_processing(context: dict) -> str:
+    paths = context["paths"]
+    request_path = context["request_path"]
     _write_gateway_failure_response(
         paths,
         {
             "request_path": request_path,
-            "payload": payload,
+            "payload": context["payload"],
             "status": "failed",
             "error_code": "GATEWAY_PROCESSING_TIMEOUT",
-            "error": f"gateway processing timeout after {timeout_seconds}s; attempts={attempts}",
+            "error": f"gateway processing timeout after {context['timeout_seconds']}s; attempts={context['attempts']}",
             "event_type": "gateway_request_processing_failed",
-            "agent": agent,
+            "agent": context["agent"],
         },
     )
     try:
@@ -201,21 +189,11 @@ def _requeue_stale_processing(
 
 
 def requeue_gateway_processing_requests(paths: GatewayPaths) -> int:
-    """LLM contract: compatibility wrapper for startup processing recovery.
-
-    Human version:
-    老测试和场景里还会直接调用这个名字。它现在只是恢复逻辑的一个简短入口。
-    """
 
     return recover_gateway_processing_requests(paths, startup=True)["requeued"]
 
 
 def _gateway_request_attempts(payload: dict) -> int:
-    """LLM contract: parse request attempt count safely.
-
-    Human version:
-    文件里的 attempts 可能缺失或是奇怪类型。这里统一转成整数，转不了就按 0 次处理。
-    """
 
     try:
         return int(payload.get("attempts", 0) or 0)
@@ -224,11 +202,6 @@ def _gateway_request_attempts(payload: dict) -> int:
 
 
 def _gateway_processing_started_at(payload: dict, request_path: Path) -> float:
-    """LLM contract: derive processing start timestamp from payload or file mtime.
-
-    Human version:
-    有些旧请求没有 lease 字段，那就按 started/updated/created 或文件修改时间兜底。
-    """
 
     return _gateway_processing_timestamp(
         payload,
@@ -238,7 +211,6 @@ def _gateway_processing_started_at(payload: dict, request_path: Path) -> float:
 
 
 def _gateway_processing_lease_at(payload: dict, request_path: Path) -> float:
-    """Return the freshness timestamp used for stale processing recovery."""
 
     return _gateway_processing_timestamp(
         payload,
@@ -265,12 +237,6 @@ def _write_gateway_failure_response(
     paths: GatewayPaths,
     context: dict,
 ) -> dict:
-    """LLM contract: write a terminal failure response for a queued request.
-
-    Human version:
-    当请求重试太多或 processing 超时时，不能只把文件扔进 failed。还要写一个响应 JSON，
-    让客户端可以通过 request_id 查到明确失败原因。
-    """
 
     request_path = context["request_path"]
     payload = context["payload"]
@@ -313,11 +279,6 @@ def _write_gateway_failure_response(
 
 
 def _archive_gateway_request(path: Path, target_dir: Path) -> Path:
-    """LLM contract: move a request file into a terminal archive directory.
-
-    Human version:
-    done/failed 目录里可能已经有同名文件，所以必要时会给文件名加时间戳，避免覆盖旧证据。
-    """
 
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / path.name

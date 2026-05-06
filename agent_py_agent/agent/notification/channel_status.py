@@ -1,9 +1,3 @@
-"""通道在线状态检测。
-
-检测各通道是否在线：
-- chat: 检查 data/sessions/ 下是否有活跃会话
-- feishu/qq: 检查对应适配器状态文件
-"""
 from __future__ import annotations
 
 import json
@@ -16,19 +10,8 @@ if TYPE_CHECKING:
 
 
 class ChannelStatusChecker:
-    """通道状态检测器。
-
-    检测用户各通道的在线状态：
-    - chat：检查是否有活跃的 chat 会话（updated_at 在超时时间内）
-    - feishu/qq：检查适配器状态文件
-    """
 
     def __init__(self, config: AgentConfig):
-        """初始化检测器。
-
-        Args:
-            config: 智能体配置对象
-        """
         self.config = config
         self._session_workspace = Path(config.session_workspace)
         self._adapter_workspace = Path(config.adapter_workspace)
@@ -37,15 +20,6 @@ class ChannelStatusChecker:
         self._registered_status: dict[str, bool] = {}
 
     def check(self, channel: str, user_id: str | None = None) -> bool:
-        """检查通道是否在线。
-
-        Args:
-            channel: 通道名称（chat/feishu/qq）
-            user_id: 用户 ID，可选
-
-        Returns:
-            通道是否在线
-        """
         # 先检查注册状态
         if channel in self._registered_status:
             return self._registered_status[channel]
@@ -86,10 +60,6 @@ class ChannelStatusChecker:
         return False
 
     def _check_adapter_online(self, channel: str) -> bool:
-        """检查适配器通道是否在线。
-
-        检查 data/adapters/{channel}/status.json 是否存在且标记 running。
-        """
         status_file = self._adapter_workspace / channel / "status.json"
         if not status_file.exists():
             return False
@@ -101,34 +71,12 @@ class ChannelStatusChecker:
             return False
 
     def register_status(self, channel: str, status: bool) -> None:
-        """注册通道状态。
-
-        适配器启动/停止时调用。
-        内存状态优先级高于文件检测。
-
-        Args:
-            channel: 通道名称
-            status: True=在线，False=离线
-        """
         self._registered_status[channel] = status
 
     def unregister_status(self, channel: str) -> None:
-        """取消注册通道状态。
-
-        Args:
-            channel: 通道名称
-        """
         self._registered_status.pop(channel, None)
 
     def get_active_channels(self, user_id: str | None = None) -> list[str]:
-        """获取用户所有在线通道。
-
-        Args:
-            user_id: 用户 ID，可选
-
-        Returns:
-            在线通道列表
-        """
         active = []
 
         # 检查各通道
@@ -139,11 +87,6 @@ class ChannelStatusChecker:
         return active
 
     def set_channel_timeout(self, seconds: int) -> None:
-        """设置通道超时时间。
-
-        Args:
-            seconds: 超时秒数
-        """
         self._channel_timeout = seconds
 
 

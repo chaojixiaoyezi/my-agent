@@ -4,10 +4,32 @@ import sqlite3
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..parsers.common import utc_now
+
+
+@dataclass(frozen=True)
+class BatchFinish:
+    batch_id: str
+    status: str
+    event_count: int
+    duplicate_count: int
+    dead_letter_count: int
+    manifest_path: str
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> BatchFinish:
+        return cls(
+            batch_id=str(kwargs["batch_id"]),
+            status=str(kwargs["status"]),
+            event_count=int(kwargs["event_count"]),
+            duplicate_count=int(kwargs["duplicate_count"]),
+            dead_letter_count=int(kwargs["dead_letter_count"]),
+            manifest_path=str(kwargs["manifest_path"]),
+        )
 
 
 class DedupStore:
@@ -72,13 +94,10 @@ class DedupStore:
     def finish_batch(
         self,
         *,
-        batch_id: str,
-        status: str,
-        event_count: int,
-        duplicate_count: int,
-        dead_letter_count: int,
-        manifest_path: str,
+        finish: BatchFinish | None = None,
+        **kwargs: Any,
     ) -> None:
+        item = finish or BatchFinish.from_kwargs(**kwargs)
         with self._connect() as conn:
             conn.execute(
                 """
@@ -89,13 +108,13 @@ class DedupStore:
                 WHERE batch_id = ?
                 """,
                 (
-                    status,
+                    item.status,
                     utc_now(),
-                    event_count,
-                    duplicate_count,
-                    dead_letter_count,
-                    manifest_path,
-                    batch_id,
+                    item.event_count,
+                    item.duplicate_count,
+                    item.dead_letter_count,
+                    item.manifest_path,
+                    item.batch_id,
                 ),
             )
 

@@ -17,7 +17,13 @@ from code_size_rules import (
     PARAM_SOFT_LIMIT,
     Finding,
 )
-from code_size_thresholds import is_near_soft, limit_finding, near_soft_finding
+from code_size_thresholds import (
+    FindingInput,
+    LimitFindingInput,
+    is_near_soft,
+    limit_finding,
+    near_soft_finding,
+)
 
 
 def node_span(node: ast.AST) -> int:
@@ -35,28 +41,26 @@ def check_function_node(
     if span > FUNCTION_SOFT_LIMIT:
         findings.append(
             limit_finding(
-                "function",
-                rel,
-                node.name,
-                span,
-                (FUNCTION_SOFT_LIMIT, FUNCTION_HARD_LIMIT),
-                "function too long",
+                LimitFindingInput(
+                    FindingInput("function", rel, node.name, span, FUNCTION_SOFT_LIMIT, "function too long"),
+                    FUNCTION_HARD_LIMIT,
+                )
             )
         )
     elif is_near_soft(span, FUNCTION_SOFT_LIMIT):
-        findings.append(near_soft_finding("function", rel, node.name, span, FUNCTION_SOFT_LIMIT, "function approaching soft limit"))
+        findings.append(near_soft_finding(FindingInput("function", rel, node.name, span, FUNCTION_SOFT_LIMIT, "function approaching soft limit")))
 
     params = arg_count(node)
     if params > PARAM_SOFT_LIMIT:
-        findings.append(limit_finding("params", rel, node.name, params, (PARAM_SOFT_LIMIT, PARAM_HARD_LIMIT), "too many parameters"))
+        findings.append(limit_finding(LimitFindingInput(FindingInput("params", rel, node.name, params, PARAM_SOFT_LIMIT, "too many parameters"), PARAM_HARD_LIMIT)))
     elif is_near_soft(params, PARAM_SOFT_LIMIT):
-        findings.append(near_soft_finding("params", rel, node.name, params, PARAM_SOFT_LIMIT, "parameter count approaching soft limit"))
+        findings.append(near_soft_finding(FindingInput("params", rel, node.name, params, PARAM_SOFT_LIMIT, "parameter count approaching soft limit")))
 
     nesting = max_nesting(node)
     if nesting > NESTING_SOFT_LIMIT:
-        findings.append(limit_finding("nesting", rel, node.name, nesting, (NESTING_SOFT_LIMIT, NESTING_HARD_LIMIT), "nesting too deep"))
+        findings.append(limit_finding(LimitFindingInput(FindingInput("nesting", rel, node.name, nesting, NESTING_SOFT_LIMIT, "nesting too deep"), NESTING_HARD_LIMIT)))
     elif is_near_soft(nesting, NESTING_SOFT_LIMIT):
-        findings.append(near_soft_finding("nesting", rel, node.name, nesting, NESTING_SOFT_LIMIT, "nesting depth approaching soft limit"))
+        findings.append(near_soft_finding(FindingInput("nesting", rel, node.name, nesting, NESTING_SOFT_LIMIT, "nesting depth approaching soft limit")))
     return findings
 
 
@@ -68,10 +72,10 @@ def check_class_node(rel: str, node: ast.ClassDef) -> list[Finding]:
     hard = MIXIN_HARD_LIMIT if is_mixin else CLASS_HARD_LIMIT
     if span > soft:
         message = "mixin too long" if is_mixin else "class too long"
-        return [limit_finding(kind, rel, node.name, span, (soft, hard), message)]
+        return [limit_finding(LimitFindingInput(FindingInput(kind, rel, node.name, span, soft, message), hard))]
     if is_near_soft(span, soft):
         message = "mixin approaching soft limit" if is_mixin else "class approaching soft limit"
-        return [near_soft_finding(kind, rel, node.name, span, soft, message)]
+        return [near_soft_finding(FindingInput(kind, rel, node.name, span, soft, message))]
     return []
 
 

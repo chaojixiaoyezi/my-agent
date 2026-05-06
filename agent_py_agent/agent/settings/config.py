@@ -45,11 +45,6 @@ _FLOAT_PATTERN = re.compile(r"-?[0-9]+(\.[0-9]+)?")
 
 @dataclass
 class AgentConfig:
-    """运行时配置总表。
-
-    你可以把它理解成"智能体启动前的总开关面板"。
-    大到模型后端，小到工具返回长度限制，都从这里统一进来。
-    """
 
     agent_name: str = "SimplePythonAgent"
     system_prompt: str = "你是一个谨慎、可扩展、会记录记忆、会在必要时调用工具的 Python CLI 智能体。先理解任务，再给出结构化回答。"
@@ -181,16 +176,6 @@ class AgentConfig:
 
 
 def parse_scalar(value: str) -> Any:
-    """解析一个简单标量值。
-
-    这里支持的类型很克制：
-    - `true/false`
-    - 整数
-    - 其他内容按普通字符串处理
-
-    这样做的好处是规则简单，坏处是 YAML 能力有限。
-    对这个小项目来说，够用比花哨更重要。
-    """
 
     value = value.strip().strip('"').strip("'")
     if value.lower() in {"true", "false"}:
@@ -202,14 +187,6 @@ def parse_scalar(value: str) -> Any:
 
 
 def load_simple_yaml(path: Path) -> dict[str, Any]:
-    """读取一个极简 YAML 子集。
-
-    这不是完整 YAML 解析器，只支持当前项目要用到的结构：
-    - `key: value`
-    - `key:` 后面接列表项
-
-    大白话说，就是"够项目自己吃，不追求兼容所有 YAML 花样"。
-    """
 
     data: dict[str, Any] = {}
     current_key: str | None = None
@@ -234,10 +211,6 @@ def load_simple_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_config(config_path: str | Path) -> AgentConfig:
-    """从磁盘加载配置，并过滤未知字段。
-
-    这样用户即使先写了某些未来配置项，旧版本程序也不会立刻炸掉。
-    """
 
     path = Path(config_path)
     if not path.exists():

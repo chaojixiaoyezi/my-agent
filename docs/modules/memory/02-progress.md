@@ -106,3 +106,7 @@
 - memory 相关设计散在旧 ledger/backlog/test 文档中，第一版四件套还没有搬完全文。
 - route index、raw archive、LocalStore、daily memory 同时存在，新手可能混淆“事实源”和“索引/摘要”的区别。
 - 后续如果改恢复链路但不更新结构图，会很快重新变成散乱文档。
+## 2026-05-06 code-size cleanup
+- Refactored memory archive query, resume brief, storage-date, runtime event, and memory routing helpers to reduce near-soft code-size risk.
+- Preserved archive query outputs, memory routing receipts, and resume guidance semantics.
+- Verified with memory/archive/routing focused tests, ruff, and the global code-size report.

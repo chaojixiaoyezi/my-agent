@@ -8,12 +8,10 @@ Small helper functions keep daemon, foreground, and file-loop flows below soft l
 import json
 import os
 import signal
-import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
 
 from ..agent.adapter import ChannelManager, FeishuAdapter, QQAdapter
 from ..agent.gateway import (
@@ -25,23 +23,20 @@ from ..agent.gateway import (
 )
 from ..agent.gateway_parts.daemon_control import (
     get_running_pid,
-    is_pid_alive,
     remove_pid_file_if_owned,
     write_pid_record,
 )
-from ..agent.gateway_parts.process_control import terminate_pid, wait_for_pid_exit
+from .adapter_daemon import daemonize_adapter, print_daemon_adapter_status, stop_adapter_daemon
 from .common import make_agent
 from .gateway_client import ensure_gateway_started
 
 
 def cmd_adapter(args) -> int:
-    """Top-level adapter command placeholder."""
     print("please specify adapter subcommand: file", file=sys.stderr)
     return 2
 
 
 def cmd_adapter_file(args) -> int:
-    """Run the file protocol adapter: inbox JSON -> gateway -> outbox JSON."""
     agent = make_agent(args)
     gpaths = gateway_paths(agent)
     apaths = _resolve_adapter_paths(agent, args)
@@ -117,73 +112,13 @@ def _print_file_adapter_summary(total: int, apaths: AdapterPaths, gpaths) -> Non
 
 
 def cmd_adapter_start(args) -> int:
-    """Start channel adapters in foreground or daemon mode."""
     agent = make_agent(args)
     gpaths = gateway_paths(agent)
     gpaths.root.mkdir(parents=True, exist_ok=True)
     pid_file = Path(args.pid_file).expanduser() if args.pid_file else gpaths.adapter_pid
     if args.daemon:
-        return _daemonize_adapter(agent, gpaths, pid_file)
+        return daemonize_adapter(agent, gpaths, pid_file)
     return _run_adapter_foreground(agent, args, gpaths)
-
-
-def _daemonize_adapter(agent, gpaths, pid_file: Path) -> int:
-    existing_pid = get_running_pid(pid_file)
-    if existing_pid is not None:
-        print(f"adapter already running (PID {existing_pid}) or PID file exists", file=sys.stderr)
-        print(f"use stop first, or delete {pid_file} before retrying", file=sys.stderr)
-        return 1
-
-    process = _start_adapter_daemon_process(agent, gpaths)
-    return _wait_for_adapter_pid(process, pid_file)
-
-
-def _start_adapter_daemon_process(agent, gpaths) -> subprocess.Popen:
-    cmd = [
-        sys.executable,
-        "-m",
-        "agent_py_agent",
-        "--config",
-        str(agent.config.config_path),
-        "adapter",
-        "start",
-        "--channel",
-        getattr(agent.config, "adapter_channel", "all"),
-    ]
-    creationflags, start_new_session = _daemon_subprocess_flags()
-    with gpaths.log.open("ab") as log_file:
-        return subprocess.Popen(
-            cmd,
-            cwd=str(agent.root),
-            stdin=subprocess.DEVNULL,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            creationflags=creationflags,
-            start_new_session=start_new_session,
-        )
-
-
-def _daemon_subprocess_flags() -> tuple[int, bool]:
-    if os.name != "nt":
-        return 0, True
-    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    return flags, False
-
-
-def _wait_for_adapter_pid(process: subprocess.Popen, pid_file: Path) -> int:
-    deadline = time.time() + 30.0
-    while time.time() < deadline:
-        child_pid = get_running_pid(pid_file)
-        if child_pid is not None:
-            print(f"adapter started (PID {child_pid}), PID file: {pid_file}", file=sys.stderr)
-            return 0
-        if not is_pid_alive(process.pid):
-            print("adapter process failed to start", file=sys.stderr)
-            return 1
-        time.sleep(0.2)
-    print("adapter start timed out before PID file appeared", file=sys.stderr)
-    return 1
 
 
 def _register_channel_adapter(manager: ChannelManager, channel: str, agent) -> None:
@@ -283,35 +218,14 @@ def _write_adapter_state(gpaths, state: str, extra: dict | None = None) -> None:
 
 
 def cmd_adapter_status(args) -> int:
-    """Print adapter daemon or foreground-manager status."""
     agent = make_agent(args)
     gpaths = gateway_paths(agent)
     pid_file = Path(args.pid_file).expanduser() if args.pid_file else gpaths.adapter_pid
     pid = get_running_pid(pid_file)
     if pid is not None:
-        _print_daemon_adapter_status(pid, pid_file, gpaths)
+        print_daemon_adapter_status(pid, pid_file, gpaths)
         return 0
     return _print_foreground_adapter_status()
-
-
-def _print_daemon_adapter_status(pid: int, pid_file: Path, gpaths) -> None:
-    print(f"adapter running: pid={pid}", file=sys.stderr)
-    record = read_pid_record(pid_file)
-    if record:
-        print(f"  start_time: {record.get('start_time', 'unknown')}", file=sys.stderr)
-    state = _read_adapter_state(gpaths)
-    if state:
-        print(f"  state: {state.get('state', 'unknown')}", file=sys.stderr)
-
-
-def _read_adapter_state(gpaths) -> dict[str, Any] | None:
-    state_path = gpaths.root / "adapter_state.json"
-    if not state_path.exists():
-        return None
-    try:
-        return json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
 
 
 def _print_foreground_adapter_status() -> int:
@@ -326,48 +240,14 @@ def _print_foreground_adapter_status() -> int:
     return 0
 
 
-def read_pid_record(path: Path):
-    """Read PID record from file."""
-    from ..agent.gateway_parts.daemon_control import _read_json_file
-
-    return _read_json_file(path)
-
-
 def cmd_adapter_stop(args) -> int:
-    """Stop adapter daemon or foreground manager."""
     agent = make_agent(args)
     gpaths = gateway_paths(agent)
     pid_file = Path(args.pid_file).expanduser() if args.pid_file else gpaths.adapter_pid
     pid = get_running_pid(pid_file)
     if pid is not None:
-        return _stop_adapter_daemon(args, gpaths, pid_file, pid)
+        return stop_adapter_daemon(args, gpaths, pid_file, pid)
     return _stop_foreground_adapter_manager()
-
-
-def _stop_adapter_daemon(args, gpaths, pid_file: Path, pid: int) -> int:
-    print(f"stopping adapter (PID {pid})...", file=sys.stderr)
-    _write_stop_request(gpaths)
-    timeout = getattr(args, "timeout", 10.0)
-    if wait_for_pid_exit(pid, timeout=timeout):
-        remove_pid_file_if_owned(pid_file)
-        print("adapter stopped", file=sys.stderr)
-        return 0
-    terminate_pid(pid)
-    if wait_for_pid_exit(pid, timeout=5.0):
-        remove_pid_file_if_owned(pid_file)
-        print("adapter force-stopped", file=sys.stderr)
-        return 0
-    print("adapter stop failed", file=sys.stderr)
-    return 1
-
-
-def _write_stop_request(gpaths) -> None:
-    stop_request_path = gpaths.root / "adapter_stop.request"
-    stop_request_path.parent.mkdir(parents=True, exist_ok=True)
-    stop_request_path.write_text(
-        json.dumps({"requested_at": time.time(), "reason": "user request"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
 
 
 def _stop_foreground_adapter_manager() -> int:

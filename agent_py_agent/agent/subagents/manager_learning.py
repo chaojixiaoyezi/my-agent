@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 """LLM: manages self-learning draft candidates derived from runner lessons.
-
 给人看的解释：
 这个 mixin 只负责 learning draft 的保存、去重、确认和统计。
 它不会直接改正式 skill，只维护'候选草稿'这一层安全缓冲。
 """
-
 import json
 import re
 import time
@@ -17,15 +15,11 @@ from .models import LearningCandidate, SubAgentTask
 from .utils import _new_id
 
 _LEARNING_STATUSES = {"draft", "accepted", "rejected"}
-
-
 def _normalize_learning_text(text: str) -> str:
     normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
     normalized = re.sub(r"[^\w\u4e00-\u9fff ]+", " ", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized
-
-
 def _learning_tokens(text: str) -> set[str]:
     normalized = _normalize_learning_text(text)
     tokens = {item for item in normalized.split(" ") if item}
@@ -36,8 +30,6 @@ def _learning_tokens(text: str) -> set[str]:
         else:
             tokens.update(compact[index : index + 2] for index in range(len(compact) - 1))
     return tokens
-
-
 def _learning_similarity(left: str, right: str) -> float:
     if not left or not right:
         return 0.0
@@ -52,12 +44,8 @@ def _learning_similarity(left: str, right: str) -> float:
     overlap = left_tokens & right_tokens
     union = left_tokens | right_tokens
     return len(overlap) / max(1, len(union))
-
-
 def _candidate_confidence(occurrence_count: int) -> float:
     return round(min(0.95, 0.45 + max(0, occurrence_count - 1) * 0.12), 2)
-
-
 def _normalize_candidate(payload: dict[str, object]) -> LearningCandidate:
     status = str(payload.get("status", "draft") or "draft").strip().lower()
     if status not in _LEARNING_STATUSES:
@@ -101,20 +89,14 @@ def _normalize_candidate(payload: dict[str, object]) -> LearningCandidate:
         created_at=created_at,
         updated_at=updated_at,
     )
-
-
 class SubAgentLearningMixin:
-    """LLM: add self-learning draft storage and CLI-oriented operations."""
-
     def learning_drafts_dir(self) -> Path:
         root = getattr(self, "workspace_root", None) or self.workspace
         path = Path(root) / "data" / "learning_drafts"
         path.mkdir(parents=True, exist_ok=True)
         return path
-
     def learning_enabled(self) -> bool:
         return bool(getattr(self, "enable_self_learning", False))
-
     def list_learning_candidates(self) -> list[LearningCandidate]:
         candidates: list[LearningCandidate] = []
         for path in sorted(self.learning_drafts_dir().glob("*.json")):
@@ -133,7 +115,6 @@ class SubAgentLearningMixin:
                 -item.updated_at,
             ),
         )
-
     def load_learning_candidate(self, candidate_id: str) -> LearningCandidate:
         path = self.learning_drafts_dir() / f"{candidate_id}.json"
         if not path.exists():
@@ -142,7 +123,6 @@ class SubAgentLearningMixin:
         if not isinstance(payload, dict):
             raise FileNotFoundError(candidate_id)
         return _normalize_candidate(payload)
-
     def save_learning_candidate(self, candidate: LearningCandidate) -> LearningCandidate:
         path = self.learning_drafts_dir() / f"{candidate.id}.json"
         candidate.evidence_count = len(candidate.evidence)
@@ -153,9 +133,7 @@ class SubAgentLearningMixin:
             encoding="utf-8",
         )
         return candidate
-
     def _find_best_candidate(self, normalized: str, active_candidates: list[LearningCandidate]) -> tuple[LearningCandidate | None, float]:
-        """Find best matching candidate from active candidates."""
         best: LearningCandidate | None = None
         best_score = 0.0
         for candidate in active_candidates:
@@ -164,9 +142,7 @@ class SubAgentLearningMixin:
                 best = candidate
                 best_score = score
         return best, best_score
-
     def _update_candidate(self, candidate: LearningCandidate, text: str, normalized: str, task: SubAgentTask, now: float) -> LearningCandidate:
-        """Update an existing learning candidate with new evidence."""
         evidence_item = {
             "run_id": task.id,
             "output_json": task.output_json,
@@ -185,9 +161,7 @@ class SubAgentLearningMixin:
             candidate.lesson = text
             candidate.normalized_key = normalized
         return self.save_learning_candidate(candidate)
-
     def _create_candidate(self, text: str, normalized: str, task: SubAgentTask, now: float) -> tuple[LearningCandidate, dict]:
-        """Create a new learning candidate with initial values."""
         evidence_item = {
             "run_id": task.id,
             "output_json": task.output_json,
@@ -209,7 +183,6 @@ class SubAgentLearningMixin:
             updated_at=now,
         )
         return self.save_learning_candidate(candidate), evidence_item
-
     def record_learning_candidates(
         self,
         task: SubAgentTask,
@@ -217,12 +190,10 @@ class SubAgentLearningMixin:
     ) -> list[LearningCandidate]:
         if not self.learning_enabled():
             return []
-
         now = time.time()
         created_or_updated: list[LearningCandidate] = []
         candidates = self.list_learning_candidates()
         active_candidates = [item for item in candidates if item.status != "rejected"]
-
         for lesson in lessons:
             text = str(lesson or "").strip()
             if not text:
@@ -235,13 +206,10 @@ class SubAgentLearningMixin:
                 saved = self._update_candidate(best, text, normalized, task, now)
                 created_or_updated.append(saved)
                 continue
-
             saved, _ = self._create_candidate(text, normalized, task, now)
             active_candidates.append(saved)
             created_or_updated.append(saved)
-
         return created_or_updated
-
     def set_learning_candidate_status(self, candidate_id: str, status: str) -> LearningCandidate:
         normalized = str(status or "").strip().lower()
         if normalized not in _LEARNING_STATUSES:
@@ -250,7 +218,6 @@ class SubAgentLearningMixin:
         candidate.status = normalized
         candidate.updated_at = time.time()
         return self.save_learning_candidate(candidate)
-
     def learning_stats(self) -> dict[str, object]:
         candidates = self.list_learning_candidates()
         summary = {"draft": 0, "accepted": 0, "rejected": 0}

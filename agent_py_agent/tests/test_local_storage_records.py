@@ -38,7 +38,7 @@ class MinimalStore(
     def _index_dispatch_record(self, record):
         pass
 
-    def _index_report(self, source_type, source_id, title, report, event_type=None):
+    def _index_report(self, *args, **kwargs):
         pass
 
 

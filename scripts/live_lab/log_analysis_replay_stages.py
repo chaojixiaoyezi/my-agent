@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,26 @@ from agent_py_agent.agent.log_analysis.tools import trace_case
 
 class ReplayStageError(RuntimeError):
     """Raised when a replay stage finishes without the expected artifact."""
+
+
+@dataclass(frozen=True)
+class EvidenceStageParams:
+    case: Any
+    store_root: Path
+    start_time: str
+    end_time: str
+    limit: int
+    simulate_failure_stage: str | None
+
+
+@dataclass(frozen=True)
+class ReportStageParams:
+    case: Any
+    route: Any
+    findings: list
+    traced: Any
+    artifacts_root: Path
+    simulate_failure_stage: str | None
 
 
 def run_ingest_stage(
@@ -105,23 +126,16 @@ def run_route_stage(case: Any, findings: list, artifacts_root: Path) -> tuple[di
     }, route
 
 
-def run_evidence_stage(
-    case: Any,
-    store_root: Path,
-    start_time: str,
-    end_time: str,
-    limit: int,
-    simulate_failure_stage: str | None,
-) -> tuple[dict[str, Any], Any]:
+def run_evidence_stage(params: EvidenceStageParams) -> tuple[dict[str, Any], Any]:
     """Trace case and collect evidence paths."""
-    if simulate_failure_stage == "evidence":
+    if params.simulate_failure_stage == "evidence":
         raise ReplayStageError("simulated evidence stage failure")
     traced = trace_case(
-        case.case_id,
-        root=store_root,
-        start_time=start_time,
-        end_time=end_time,
-        limit=limit,
+        params.case.case_id,
+        root=params.store_root,
+        start_time=params.start_time,
+        end_time=params.end_time,
+        limit=params.limit,
     )
     evidence_paths = [
         str(query.get("evidence_path"))
@@ -142,34 +156,28 @@ def run_evidence_stage(
     }, traced
 
 
-def run_report_stage(
-    case: Any,
-    route: Any,
-    findings: list,
-    traced: Any,
-    artifacts_root: Path,
-    simulate_failure_stage: str | None,
-) -> tuple[dict[str, Any], Any]:
+def run_report_stage(params: ReportStageParams) -> tuple[dict[str, Any], Any]:
     """Write first-response report and forensic package."""
     from agent_py_agent.agent.log_analysis.reports import (
         first_response_report_content,
         forensic_package_content,
     )
 
-    if simulate_failure_stage == "report":
+    if params.simulate_failure_stage == "report":
         raise ReplayStageError("simulated report stage failure")
-    report_path = artifacts_root / "first_response_report.md"
+    report_path = params.artifacts_root / "first_response_report.md"
     report_path.write_text(
-        first_response_report_content(case, route, findings=findings), encoding="utf-8"
+        first_response_report_content(params.case, params.route, findings=params.findings),
+        encoding="utf-8",
     )
-    package_path = artifacts_root / "forensic_package.json"
+    package_path = params.artifacts_root / "forensic_package.json"
     package_path.write_text(
         forensic_package_content(
-            case,
-            route,
-            findings=findings,
-            query_history=traced.get("queries", []),
-            raw_refs=list(route.evidence_refs),
+            params.case,
+            params.route,
+            findings=params.findings,
+            query_history=params.traced.get("queries", []),
+            raw_refs=list(params.route.evidence_refs),
             frozen=True,
         )
         + "\n",

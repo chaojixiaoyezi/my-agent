@@ -19,11 +19,6 @@ from .gateway_helpers import post_json, post_stream, post_stream_iter
 
 @dataclass
 class ModelResponse:
-    """统一的模型返回结果。
-
-    不管底层用的是哪个模型厂商，最后都整理成这一个结构，
-    这样上层逻辑就不用关心返回格式差异。
-    """
 
     text: str
     backend: str
@@ -41,13 +36,6 @@ class BaseBackend:
 
 
 class EchoBackend(BaseBackend):
-    """本地回声后端。
-
-    这个后端不会真的请求外部模型，适合：
-    - 离线开发
-    - CLI 冒烟测试
-    - 验证 prompt 拼装和主循环有没有跑通
-    """
 
     name = "echo"
 
@@ -90,10 +78,6 @@ class HttpBackend(BaseBackend):
     def request_json(
         self, path: str, payload: dict[str, Any], headers: dict[str, str]
     ) -> dict[str, Any]:
-        """发送 POST 请求并把结果按 JSON 解析。
-
-        大白话就是：把请求发出去，再把模型返回的内容变成 Python 能继续处理的字典。
-        """
 
         if not self.api_key:
             raise ValueError("api_key 为空：请在配置文件中填写 API Key。")
@@ -110,11 +94,6 @@ class HttpBackend(BaseBackend):
     def request_stream(
         self, path: str, payload: dict[str, Any], headers: dict[str, str]
     ) -> list[str]:
-        """流式发送 POST 请求，逐行读取 SSE data 行。
-
-        超时是两个 chunk 之间的间隔（socket timeout），不是总时长。
-        返回所有 data 行的原始字符串列表，由调用方解析具体内容。
-        """
         return post_stream(
             self.api_base,
             self.api_key,
@@ -127,11 +106,6 @@ class HttpBackend(BaseBackend):
     def request_stream_iter(
         self, path: str, payload: dict[str, Any], headers: dict[str, str]
     ):
-        """流式发送 POST 请求，逐行 yield SSE data 行。
-
-        与 request_stream 相同的网络逻辑，但用生成器逐行返回，
-        调用方可以在收到每行时立即处理（比如逐字打印）。
-        """
         yield from post_stream_iter(
             self.api_base,
             self.api_key,
@@ -286,10 +260,6 @@ class AnthropicCompatibleBackend(HttpBackend):
 
 
 def get_backend(name: str, config: Any | None = None) -> BaseBackend:
-    """根据配置创建后端实例。
-
-    说白了，这里就是把配置里的字符串名字，变成真正可用的后端对象。
-    """
 
     if name == "echo":
         return EchoBackend()

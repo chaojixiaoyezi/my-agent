@@ -15,7 +15,7 @@ from ..parsers.base import LogParser
 from ..parsers.common import utc_now
 from .checkpoint import safe_source_id, write_json_atomic
 from .dead_letter import DeadLetterWriter
-from .pipeline import IngestResult, file_digest
+from .pipeline import IngestFileOptions, IngestResult, file_digest
 from .pipeline_helpers import (
     WriteManifestParams,
     _EnrichCounts,
@@ -27,6 +27,8 @@ from .pipeline_helpers import (
 from .pipeline_helpers import (
     write_manifest as _write_manifest,
 )
+from .pipeline_processing import _ProcessRecordsParams
+from .pipeline_processing import process_records as _process_records
 
 # Re-export for backward compatibility
 write_manifest = _write_manifest
@@ -66,15 +68,21 @@ class _PreparedIngest:
     cursor_before: dict
 
 
-@dataclass
-class _ProcessRecordsParams:
-    source_path: Path
-    file_format: str
-    parser: LogParser
-    batch_id: str
-    source_id: str
-    source_product: str | None
-    dead_letters: DeadLetterWriter
+@dataclass(frozen=True)
+class _PrepareIngestRequest:
+    path: str | Path
+    source_id: str | None
+    parser_id: str
+    file_format: str | None
+
+
+@dataclass(frozen=True)
+class _PreparedFinalize:
+    pipeline: Any
+    prepared: _PreparedIngest
+    counts: _EnrichCounts
+    event_ids: list[str]
+    storage_summary: dict[str, Any]
 
 
 def _finalize_ingest_result(params: _FinalizeIngestParams) -> IngestResult:
@@ -158,10 +166,8 @@ def enrich_ingest_file(
     pipeline,  # IngestPipeline — lazy to avoid circular import
     path: str | Path,
     *,
-    source_id: str | None = None,
-    source_product: str | None = None,
-    parser_id: str = "security_alert_v1",
-    file_format: str | None = None,
+    options: IngestFileOptions | None = None,
+    **kwargs: Any,
 ) -> IngestResult:
     """LLM: Main orchestration for ingesting a single file — dedup, storage, manifest, checkpoint.
 
@@ -170,12 +176,15 @@ def enrich_ingest_file(
     写 checkpoint。这是 pipeline.ingest_file 的实际实现，拆到这里避免
     pipeline.py 太长。
     """
+    ingest_options = options or IngestFileOptions.from_kwargs(**kwargs)
     prepared = _prepare_ingest(
         pipeline,
-        path=path,
-        source_id=source_id,
-        parser_id=parser_id,
-        file_format=file_format,
+        _PrepareIngestRequest(
+            path=path,
+            source_id=ingest_options.source_id,
+            parser_id=ingest_options.parser_id,
+            file_format=ingest_options.file_format,
+        ),
     )
 
     pipeline.dedup.begin_batch(
@@ -193,25 +202,20 @@ def enrich_ingest_file(
             parser=prepared.parser,
             batch_id=prepared.batch_id,
             source_id=prepared.batch_source_id,
-            source_product=source_product,
+            source_product=ingest_options.source_product,
             dead_letters=prepared.dead_letters,
         ),
     )
 
     storage_summary = _storage_summary(storage_infos, fallback_path=pipeline.fallback_sink.events_path)
-    return _finalize_prepared_ingest(pipeline, prepared, counts, event_ids, storage_summary)
+    return _finalize_prepared_ingest(_PreparedFinalize(pipeline, prepared, counts, event_ids, storage_summary))
 
 
-def _finalize_prepared_ingest(
-    pipeline,
-    prepared: _PreparedIngest,
-    counts: _EnrichCounts,
-    event_ids: list[str],
-    storage_summary: dict[str, Any],
-) -> IngestResult:
+def _finalize_prepared_ingest(finalize: _PreparedFinalize) -> IngestResult:
+    prepared = finalize.prepared
     return _finalize_ingest_result(
         _FinalizeIngestParams(
-            pipeline=pipeline,
+            pipeline=finalize.pipeline,
             batch_id=prepared.batch_id,
             batch_source_id=prepared.batch_source_id,
             source_path=prepared.source_path,
@@ -220,31 +224,24 @@ def _finalize_prepared_ingest(
             started_at=prepared.started_at,
             content_hash=prepared.content_hash,
             size_bytes=prepared.size_bytes,
-            counts=counts,
-            event_ids=event_ids,
+            counts=finalize.counts,
+            event_ids=finalize.event_ids,
             dead_letters=prepared.dead_letters,
-            storage_summary=storage_summary,
+            storage_summary=finalize.storage_summary,
             cursor_before=prepared.cursor_before,
         )
     )
 
 
-def _prepare_ingest(
-    pipeline,
-    *,
-    path: str | Path,
-    source_id: str | None,
-    parser_id: str,
-    file_format: str | None,
-) -> _PreparedIngest:
-    source_path = Path(path)
+def _prepare_ingest(pipeline, request: _PrepareIngestRequest) -> _PreparedIngest:
+    source_path = Path(request.path)
     if not source_path.exists():
         raise FileNotFoundError(source_path)
-    fmt = normalize_file_format(file_format or source_path.suffix.lstrip("."))
-    batch_source_id = source_id or source_path.stem
+    fmt = normalize_file_format(request.file_format or source_path.suffix.lstrip("."))
+    batch_source_id = request.source_id or source_path.stem
     size_bytes, content_hash = file_digest(source_path)
     batch_id = make_batch_id(source_id=batch_source_id, source_path=str(source_path.resolve()), content_hash=content_hash)
-    parser = pipeline.registry.choose(parser_id=parser_id, file_format=fmt)
+    parser = pipeline.registry.choose(parser_id=request.parser_id, file_format=fmt)
     return _PreparedIngest(
         source_path=source_path,
         fmt=fmt,
@@ -259,67 +256,6 @@ def _prepare_ingest(
     )
 
 
-def _process_records(pipeline, params: _ProcessRecordsParams) -> tuple[_EnrichCounts, list[str], list[dict[str, Any]]]:
-    """Parse, dedup, and buffer events from a source file in batches."""
-    parsed_count = 0
-    duplicate_count = 0
-    skipped_count = 0
-    last_event_time: str | None = None
-    first_event_time: str | None = None
-    stored_event_ids: list[str] = []
-    event_buffer: list[dict[str, Any]] = []
-    storage_infos: list[dict[str, Any]] = []
-    seen_in_batch: set[str] = set()
-
-    for item in pipeline._iter_parsed_records(
-        params.source_path,
-        file_format=params.file_format,
-        parser=params.parser,
-        batch_id=params.batch_id,
-        source_id=params.source_id,
-        source_product=params.source_product,
-        dead_letters=params.dead_letters,
-    ):
-        if item is None:
-            skipped_count += 1
-            continue
-        parsed_count += 1
-        event = item.event
-        event_time = event.get("event_time")
-        if isinstance(event_time, str):
-            if first_event_time is None or event_time < first_event_time:
-                first_event_time = event_time
-            if last_event_time is None or event_time > last_event_time:
-                last_event_time = event_time
-
-        dedup_key = str(event["dedup_key"])
-        if dedup_key in seen_in_batch or pipeline.dedup.is_duplicate(dedup_key):
-            duplicate_count += 1
-            pipeline.dedup.note_duplicate(dedup_key)
-            continue
-        seen_in_batch.add(dedup_key)
-        event_buffer.append(event)
-        if len(event_buffer) >= pipeline.write_batch_size:
-            storage_info, event_ids = flush_events(pipeline, event_buffer, batch_id=params.batch_id)
-            storage_infos.append(storage_info)
-            stored_event_ids.extend(event_ids)
-            event_buffer = []
-
-    if event_buffer:
-        storage_info, event_ids = flush_events(pipeline, event_buffer, batch_id=params.batch_id)
-        storage_infos.append(storage_info)
-        stored_event_ids.extend(event_ids)
-
-    counts = _EnrichCounts(
-        parsed_count=parsed_count,
-        duplicate_count=duplicate_count,
-        skipped_count=skipped_count,
-        first_event_time=first_event_time,
-        last_event_time=last_event_time,
-    )
-    return counts, stored_event_ids, storage_infos
-
-
 def write_events(pipeline, events: list[dict[str, Any]]) -> dict[str, Any]:
     """Write a list of events to the configured store or fallback JSONL sink."""
     if not events:
@@ -328,20 +264,34 @@ def write_events(pipeline, events: list[dict[str, Any]]) -> dict[str, Any]:
     if pipeline.store is None:
         return pipeline.fallback_sink.write_events(events)
 
+    batch_result = _write_batch_events(pipeline, events)
+    if batch_result is not None:
+        return batch_result
+    item_result = _write_item_events(pipeline, events)
+    return item_result if item_result is not None else pipeline.fallback_sink.write_events(events)
+
+
+def _write_batch_events(pipeline, events: list[dict[str, Any]]) -> dict[str, Any] | None:
     for method_name in ("write_events", "append_events", "upsert_events"):
         method = getattr(pipeline.store, method_name, None)
         if callable(method):
             result = method(events)
             return _storage_result(result, count=len(events), store=pipeline.store)
+    return None
 
+
+def _write_item_events(pipeline, events: list[dict[str, Any]]) -> dict[str, Any] | None:
     for method_name in ("write_event", "append_event", "upsert_event"):
         method = getattr(pipeline.store, method_name, None)
         if callable(method):
-            for event in events:
-                method(event)
-            return {"count": len(events), "path": None}
+            return _write_events_one_by_one(method, events)
+    return None
 
-    return pipeline.fallback_sink.write_events(events)
+
+def _write_events_one_by_one(method: Any, events: list[dict[str, Any]]) -> dict[str, Any]:
+    for event in events:
+        method(event)
+    return {"count": len(events), "path": None}
 
 
 def flush_events(

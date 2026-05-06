@@ -28,11 +28,11 @@ from .local_repair_commands import (
     cmd_local_rebuild,
     rebuild_local_store,
 )
+from .local_status_payload import StatusPayloadContext, build_status_payload, resolve_gateway_status
 from .thinking_spinner import ThinkingSpinner
 
 
 def _format_gateway_section(gateway_status: str, pid: int | None, alive: bool, heartbeat_age: float, paths) -> None:
-    """Format and print gateway section."""
     print("Gateway")
     print(f"- status={gateway_status} pid={pid if pid else '-'} alive={alive}")
     if heartbeat_age:
@@ -42,7 +42,6 @@ def _format_gateway_section(gateway_status: str, pid: int | None, alive: bool, h
 
 
 def _format_active_work(active_work_summary) -> None:
-    """Format and print active work section."""
     from ..agent.startup_recovery import format_active_work_summary
     print("进行中任务")
     print("-" + format_active_work_summary(active_work_summary).replace("\n", "\n  - "))
@@ -51,7 +50,6 @@ def _format_active_work(active_work_summary) -> None:
 
 
 def _format_subagents_section(board, limit: int) -> None:
-    """Format and print subagents section."""
     print("Subagents")
     print("- summary=" + json.dumps(board.summary, ensure_ascii=False, sort_keys=True))
     if board.hot_list:
@@ -68,7 +66,6 @@ def _format_subagents_section(board, limit: int) -> None:
 
 
 def _format_timeline(timeline) -> None:
-    """Format and print timeline section."""
     print("Timeline")
     if not timeline:
         print("- 暂无事件")
@@ -78,57 +75,7 @@ def _format_timeline(timeline) -> None:
 
 
 @dataclass
-class _StatusPayloadContext:
-    """Bundle for _build_status_payload to reduce parameter count."""
-    agent: Any
-    paths: Any
-    local_stats: dict
-    board: Any
-    timeline: list
-    pid: int | None
-    alive: bool
-    gateway_status: str
-    heartbeat_age: float
-    active_work_summary: Any
-
-
-def _build_status_payload(ctx: _StatusPayloadContext) -> dict:
-    """Build the status payload dict for JSON output."""
-    active_work = None
-    if ctx.active_work_summary:
-        active_work = {
-            "gateway_alive": ctx.active_work_summary.gateway_alive,
-            "active_task_count": ctx.active_work_summary.active_task_count,
-            "stale_request_count": ctx.active_work_summary.stale_request_count,
-            "recent_tasks": ctx.active_work_summary.recent_tasks,
-        }
-    return {
-        "agent_name": ctx.agent.config.agent_name,
-        "workspace_root": str(ctx.agent.root),
-        "gateway": {
-            "status": ctx.gateway_status,
-            "pid": ctx.pid,
-            "alive": ctx.alive,
-            "heartbeat_age_seconds": round(ctx.heartbeat_age, 1) if ctx.heartbeat_age else 0,
-            "request_counts": gateway_request_counts(ctx.paths),
-            "workspace": str(ctx.paths.root),
-        },
-        "local_store": ctx.local_stats,
-        "subagents": {
-            "summary": ctx.board.summary,
-            "hot_count": len(ctx.board.hot_list),
-            "recent_count": len(ctx.board.recent),
-            "hot": [item.__dict__ for item in ctx.board.hot_list[: ctx.agent.config.subagent_board_limit]],
-            "recent": [item.__dict__ for item in ctx.board.recent[: ctx.agent.config.subagent_board_limit]],
-        },
-        "active_work": active_work,
-        "timeline": [item.__dict__ for item in ctx.timeline],
-    }
-
-
-@dataclass
 class _StatusPrintContext:
-    """Bundle for _print_status_human to reduce parameter count."""
     agent: Any
     paths: Any
     local_stats: dict
@@ -143,7 +90,6 @@ class _StatusPrintContext:
 
 
 def _print_status_human(ctx: _StatusPrintContext):
-    """Print status in human-readable format."""
     agent = ctx.agent
     print("MY-AGENT STATUS")
     print(f"agent={agent.config.agent_name}")
@@ -174,7 +120,6 @@ def _print_status_human(ctx: _StatusPrintContext):
 
 
 def cmd_status(args) -> int:
-    """显示 my-agent 当前全局状态。"""
 
     agent = make_agent(args)
     paths = gateway_paths(agent)
@@ -184,12 +129,13 @@ def cmd_status(args) -> int:
     pid, alive = gateway_running(paths)
     gateway_state = read_json_file(paths.state)
     heartbeat = read_json_file(paths.heartbeat)
-    heartbeat_at = float(heartbeat.get("updated_at", 0) or 0)
-    heartbeat_age = time.time() - heartbeat_at if heartbeat_at else 0
-    state_status = gateway_state.get("status", "stopped")
-    gateway_status = "running" if alive else ("stopped" if state_status == "running" else state_status)
-    if alive and heartbeat_at and heartbeat_age > agent.config.gateway_stale_seconds:
-        gateway_status = "stale"
+    gateway_status, heartbeat_age = resolve_gateway_status(
+        alive=alive,
+        gateway_state=gateway_state,
+        heartbeat=heartbeat,
+        stale_seconds=agent.config.gateway_stale_seconds,
+        now=time.time(),
+    )
 
     # 检测进行中任务
     active_work_summary = None
@@ -197,43 +143,20 @@ def cmd_status(args) -> int:
         from ..agent.startup_recovery import detect_active_work
         active_work_summary = detect_active_work(agent)
 
-    payload_ctx = _StatusPayloadContext(
-        agent=agent,
-        paths=paths,
-        local_stats=local_stats,
-        board=board,
-        timeline=timeline,
-        pid=pid,
-        alive=alive,
-        gateway_status=gateway_status,
-        heartbeat_age=heartbeat_age,
-        active_work_summary=active_work_summary,
-    )
-    payload = _build_status_payload(payload_ctx)
+    request_counts = gateway_request_counts(paths)
+    payload_ctx = StatusPayloadContext(agent, paths, local_stats, board, timeline, pid, alive, gateway_status, heartbeat_age, active_work_summary, request_counts)
+    payload = build_status_payload(payload_ctx)
     payload["suggestions"] = build_status_suggestions(agent, payload)
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
-    print_ctx = _StatusPrintContext(
-        agent=agent,
-        paths=paths,
-        local_stats=local_stats,
-        board=board,
-        timeline=timeline,
-        gateway_status=gateway_status,
-        pid=pid,
-        alive=alive,
-        heartbeat_age=heartbeat_age,
-        active_work_summary=active_work_summary,
-        suggested_actions=payload["suggestions"],
-    )
+    print_ctx = _StatusPrintContext(agent, paths, local_stats, board, timeline, gateway_status, pid, alive, heartbeat_age, active_work_summary, payload["suggestions"])
     _print_status_human(print_ctx)
     return 0
 
 
 def cmd_timeline(args) -> int:
-    """显示 LocalStore 最近事件。"""
 
     agent = make_agent(args)
     items = agent.local_store.timeline(
@@ -263,7 +186,6 @@ def cmd_timeline(args) -> int:
 
 
 def cmd_run(args) -> int:
-    """执行一次单轮请求。"""
 
     agent = make_agent(args)
     spinner = ThinkingSpinner()
@@ -306,7 +228,6 @@ def cmd_run(args) -> int:
 
 
 def cmd_remember(args) -> int:
-    """手动写一条记忆。"""
 
     agent = make_agent(args)
     rec = agent.remember(args.content, kind=args.kind)
@@ -315,7 +236,6 @@ def cmd_remember(args) -> int:
 
 
 def cmd_memory_list(args) -> int:
-    """列出最近几条记忆。"""
 
     agent = make_agent(args)
     records = agent.memory.all()[-args.limit :]
@@ -325,7 +245,6 @@ def cmd_memory_list(args) -> int:
 
 
 def cmd_memory_search(args) -> int:
-    """按智能体自己的检索规则搜索记忆。"""
 
     agent = make_agent(args)
     for rec in agent.recall(args.query, args.limit):
@@ -334,7 +253,6 @@ def cmd_memory_search(args) -> int:
 
 
 def cmd_local_store_status(args) -> int:
-    """显示本地事实源状态。"""
 
     agent = make_agent(args)
     print(json.dumps(agent.local_store.stats(), ensure_ascii=False, indent=2, sort_keys=True))
@@ -342,7 +260,6 @@ def cmd_local_store_status(args) -> int:
 
 
 def cmd_local_search(args) -> int:
-    """搜索本地事实源。"""
 
     agent = make_agent(args)
     hits = agent.local_store.search(
@@ -360,7 +277,6 @@ def cmd_local_search(args) -> int:
 
 
 def cmd_local_index_memory(args) -> int:
-    """把现有 JSONL 记忆补建到本地事实源索引。"""
 
     agent = make_agent(args)
     count = agent.memory.index_all()

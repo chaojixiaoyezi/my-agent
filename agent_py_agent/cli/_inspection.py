@@ -1,4 +1,3 @@
-"""Inspection commands: due-check, probe, execution context."""
 
 from __future__ import annotations
 
@@ -9,7 +8,6 @@ from .common import make_agent
 
 
 def cmd_subagents_due_check(args) -> int:
-    """巡检 subagent 状态，输出父代理需要处理的问题。"""
 
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
@@ -34,7 +32,6 @@ def cmd_subagents_due_check(args) -> int:
 
 
 def cmd_subagents_probe(args) -> int:
-    """检查 subagent 通道健康状态。"""
 
     agent = make_agent(args)
     run_ids = args.run_id or None
@@ -58,7 +55,6 @@ def cmd_subagents_probe(args) -> int:
 
 
 def cmd_subagent_context(args) -> int:
-    """生成单个 subagent 的执行上下文包。"""
 
     agent = make_agent(args)
     context = agent.subagents.write_execution_context(args.run_id, max_cards=args.max_cards)

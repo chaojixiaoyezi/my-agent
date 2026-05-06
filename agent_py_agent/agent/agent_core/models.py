@@ -12,7 +12,6 @@ from dataclasses import dataclass
 
 @dataclass
 class AgentRunResult:
-    """一次 `run()` 调用的结果。"""
 
     prompt: str
     response: str

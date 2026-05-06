@@ -127,11 +127,7 @@ class SubAgentStateMachine:
         # Look up the transition
         key = (current, trigger_lower)
         if key not in _SUBAGENT_STATE_INDEX:
-            valid = [t["trigger"] for t in self.get_valid_transitions(current)]
-            raise ValueError(
-                f"Invalid transition: {current} --{trigger_lower}--> ? "
-                f"(valid triggers: {valid})"
-            )
+            self._raise_invalid_transition(current, trigger_lower)
 
         trans = _SUBAGENT_STATE_INDEX[key]
         new_state = trans[1]
@@ -141,32 +137,53 @@ class SubAgentStateMachine:
         if guard_func and not guard_func(task, **kwargs):
             raise ValueError(f"Transition guard failed for {current} --{trigger_lower}--> {new_state}")
 
-        # Update task state
+        old_state = self._apply_transition_state(task, new_state, trigger_lower, run_id)
+        self.manager.save(task)
+        self._append_transition_log(task, old_state, trigger_lower, new_state)
+
+        return task
+
+    def _raise_invalid_transition(self, current: str, trigger_lower: str) -> None:
+        valid = [t["trigger"] for t in self.get_valid_transitions(current)]
+        raise ValueError(
+            f"Invalid transition: {current} --{trigger_lower}--> ? "
+            f"(valid triggers: {valid})"
+        )
+
+    def _apply_transition_state(
+        self,
+        task: SubAgentTask,
+        new_state: str,
+        trigger_lower: str,
+        run_id: str,
+    ) -> str:
+        from .models import StateTransitionRecord
+
         old_state = task.status
         task.status = new_state
         task.updated_at = self.manager._clock()
-
-        # Record transition
-        from .models import StateTransitionRecord
-
-        record = StateTransitionRecord(
-            from_state=old_state,
-            to_state=new_state,
-            trigger=trigger_lower,
-            run_id=run_id,
-            created_at=task.updated_at,
+        task.state_transitions.append(
+            StateTransitionRecord(
+                from_state=old_state,
+                to_state=new_state,
+                trigger=trigger_lower,
+                run_id=run_id,
+                created_at=task.updated_at,
+            )
         )
-        task.state_transitions.append(record)
+        return old_state
 
-        self.manager.save(task)
-
-        # Append work log
+    def _append_transition_log(
+        self,
+        task: SubAgentTask,
+        old_state: str,
+        trigger_lower: str,
+        new_state: str,
+    ) -> None:
         self.manager._append_task_work_log(
             task,
             f"state_machine: {old_state} --{trigger_lower}--> {new_state}",
         )
-
-        return task
 
     def get_state_summary(self, run_id: str) -> dict:
         """Get a summary of task state and valid transitions."""

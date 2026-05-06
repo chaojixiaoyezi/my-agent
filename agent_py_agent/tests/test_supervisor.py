@@ -190,10 +190,7 @@ def test_is_gateway_healthy_no_pid(mock_get_pid, supervisor_instance):
     assert result is False
 
 
-@patch.object(sv, "get_running_pid", return_value=12345)
-@patch.object(sv, "is_pid_alive", return_value=True)
-@patch.object(sv.time, "time", return_value=time.time())
-def test_is_gateway_healthy_with_heartbeat(mock_time, mock_alive, mock_get_pid, supervisor_instance, tmp_path):
+def test_is_gateway_healthy_with_heartbeat(supervisor_instance, tmp_path):
     """测试有心跳且未过期时网关健康。"""
     heartbeat_file = tmp_path / "heartbeat.json"
     heartbeat_data = {"updated_at": time.time() - 10}  # 10秒前更新，未超过30秒超时
@@ -204,7 +201,10 @@ def test_is_gateway_healthy_with_heartbeat(mock_time, mock_alive, mock_get_pid, 
     mock_paths.heartbeat = heartbeat_file
     supervisor_instance._paths = mock_paths
 
-    result = supervisor_instance._is_gateway_healthy()
+    with patch.object(sv, "get_running_pid", return_value=12345), \
+         patch.object(sv, "is_pid_alive", return_value=True), \
+         patch.object(sv.time, "time", return_value=time.time()):
+        result = supervisor_instance._is_gateway_healthy()
     assert result is True
 
 
@@ -221,10 +221,7 @@ def test_is_gateway_healthy_pid_dead(mock_alive, mock_get_pid, supervisor_instan
     assert result is False
 
 
-@patch.object(sv, "get_running_pid", return_value=12345)
-@patch.object(sv, "is_pid_alive", return_value=True)
-@patch("agent_py_agent.agent.gateway_parts.supervisor.time.time", return_value=time.time())
-def test_is_gateway_healthy_stale_heartbeat(mock_time, mock_alive, mock_get_pid, supervisor_instance, tmp_path):
+def test_is_gateway_healthy_stale_heartbeat(supervisor_instance, tmp_path):
     """测试心跳过期时网关不健康。"""
     heartbeat_file = tmp_path / "stale_heartbeat.json"
     heartbeat_data = {"updated_at": time.time() - 100}  # 100秒前，超过30秒超时
@@ -237,7 +234,10 @@ def test_is_gateway_healthy_stale_heartbeat(mock_time, mock_alive, mock_get_pid,
     supervisor_instance._paths = mock_paths
     supervisor_instance._agent = MagicMock()  # 设置 agent 避免重新解析
 
-    result = supervisor_instance._is_gateway_healthy()
+    with patch.object(sv, "get_running_pid", return_value=12345), \
+         patch.object(sv, "is_pid_alive", return_value=True), \
+         patch("agent_py_agent.agent.gateway_parts.supervisor.time.time", return_value=time.time()):
+        result = supervisor_instance._is_gateway_healthy()
     assert result is False
 
 
@@ -342,11 +342,11 @@ def test_is_supervisor_running_no_pid_file():
 @patch.object(sv, "is_pid_alive", return_value=True)
 def test_is_supervisor_running_alive(mock_alive, mock_read):
     """测试 supervisor 进程存活时返回运行中。"""
-    with patch("agent_py_agent.agent.core.SimpleAgent"):
-        with patch("agent_py_agent.agent.config.load_config"):
-            with patch("agent_py_agent.agent.gateway_parts.gateway_paths") as mock_gp:
-                mock_gp.return_value = MagicMock(root=Path("/tmp"))
-                result = sv.is_supervisor_running("dummy.yaml")
+    with patch("agent_py_agent.agent.core.SimpleAgent"), \
+         patch("agent_py_agent.agent.config.load_config"), \
+         patch("agent_py_agent.agent.gateway_parts.gateway_paths") as mock_gp:
+        mock_gp.return_value = MagicMock(root=Path("/tmp"))
+        result = sv.is_supervisor_running("dummy.yaml")
     assert result is True
 
 
@@ -356,11 +356,11 @@ def test_is_supervisor_running_alive(mock_alive, mock_read):
 @patch.object(sv, "is_pid_alive", return_value=False)
 def test_stop_supervisor_not_running(mock_alive, mock_read):
     """测试 supervisor 未运行时返回成功。"""
-    with patch("agent_py_agent.agent.core.SimpleAgent"):
-        with patch("agent_py_agent.agent.config.load_config"):
-            with patch("agent_py_agent.agent.gateway_parts.gateway_paths") as mock_gp:
-                mock_gp.return_value = MagicMock(root=Path("/tmp"))
-                result = sv.stop_supervisor("dummy.yaml")
+    with patch("agent_py_agent.agent.core.SimpleAgent"), \
+         patch("agent_py_agent.agent.config.load_config"), \
+         patch("agent_py_agent.agent.gateway_parts.gateway_paths") as mock_gp:
+        mock_gp.return_value = MagicMock(root=Path("/tmp"))
+        result = sv.stop_supervisor("dummy.yaml")
     assert result is True
 
 

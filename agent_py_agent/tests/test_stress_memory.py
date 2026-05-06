@@ -26,6 +26,13 @@ from agent_py_agent.agent.memory_archive.snapshots import (
 )
 
 
+def _run_hook_snapshots(tmp_path, run_snapshot):
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(run_snapshot, i) for i in range(20)]
+        for future in as_completed(futures):
+            future.result()
+
+
 class TestSnapshotWriteStress:
     """快照写入压力测试"""
 
@@ -174,11 +181,7 @@ class TestSnapshotHookStress:
             )
 
         try:
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                futures = [executor.submit(run_snapshot, i) for i in range(20)]
-                for f in as_completed(futures):
-                    pass
-
+            _run_hook_snapshots(tmp_path, run_snapshot)
             assert execution_count[0] == 20
         finally:
             clear_compression_hooks()

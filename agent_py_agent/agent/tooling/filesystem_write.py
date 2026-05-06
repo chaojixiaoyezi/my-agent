@@ -22,12 +22,6 @@ from .models import ToolExecutionResult, ToolSpec
 
 
 class WriteFileTool(FileSystemTool):
-    """LLM: write or overwrite a text file within the workspace.
-
-    新手说明:
-    写入或覆盖一个文本文件，适合生成新代码、脚本和配置。
-    父目录不存在时会自动创建。
-    """
 
     def __init__(self, workspace_root: Path):
         super().__init__(workspace_root)
@@ -57,17 +51,6 @@ class WriteFileTool(FileSystemTool):
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        """LLM: execute the write_file tool.
-
-        新手说明:
-        校验路径和内容后写入文件，父目录不存在时自动创建。
-
-        参数说明:
-        `params` 是工具调用参数字典，需要 `path` 和 `content`。
-
-        返回说明:
-        返回 ToolExecutionResult，成功时内容为写入确认信息。
-        """
         try:
             raw_path = _required_path(params.get("path"))
             content = _text_param(
@@ -90,12 +73,6 @@ class WriteFileTool(FileSystemTool):
 
 
 class AppendFileTool(FileSystemTool):
-    """LLM: append content to the end of a text file within the workspace.
-
-    新手说明:
-    向文本文件末尾追加内容，适合补日志、补文档和补配置片段。
-    不会覆盖已有内容。
-    """
 
     def __init__(self, workspace_root: Path):
         super().__init__(workspace_root)
@@ -125,17 +102,6 @@ class AppendFileTool(FileSystemTool):
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        """LLM: execute the append_file tool.
-
-        新手说明:
-        校验路径和内容后追加到文件末尾，父目录不存在时自动创建。
-
-        参数说明:
-        `params` 是工具调用参数字典，需要 `path` 和 `content`。
-
-        返回说明:
-        返回 ToolExecutionResult，成功时内容为追加确认信息。
-        """
         try:
             raw_path = _required_path(params.get("path"))
             content = _text_param(
@@ -159,12 +125,6 @@ class AppendFileTool(FileSystemTool):
 
 
 class ReplaceInFileTool(FileSystemTool):
-    """LLM: precisely replace a segment of text in a file within the workspace.
-
-    新手说明:
-    这个工具是给"差异化编辑"准备的。如果只需要改一个函数、一行配置或一小段说明，
-    就不要整文件覆盖。先用 read_file 确认原文，再用这个工具精确替换。
-    """
 
     def __init__(self, workspace_root: Path):
         super().__init__(workspace_root)
@@ -211,18 +171,6 @@ class ReplaceInFileTool(FileSystemTool):
         )
 
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
-        """LLM: execute the replace_in_file tool.
-
-        新手说明:
-        读取文件，查找原文，按 count 参数替换，然后写回文件。
-        找不到原文时会报错，建议先 read_file 确认。
-
-        参数说明:
-        `params` 是工具调用参数字典，需要 `path`、`old`、`new`，可选 `count`。
-
-        返回说明:
-        返回 ToolExecutionResult，成功时内容为替换确认信息和替换数量。
-        """
         try:
             raw_path = _required_path(params.get("path"))
             old_text = _text_param(

@@ -1,4 +1,3 @@
-"""Shared dispatch parameter dataclasses for dispatch_mixin."""
 
 from __future__ import annotations
 
@@ -9,7 +8,6 @@ from typing import Any
 
 @dataclass
 class DispatchParams:
-    """Bundle of all dispatch_subagents parameters into a single object."""
 
     apply: bool = False
     execute_runners: bool = False
@@ -28,7 +26,6 @@ class DispatchParams:
 
 @dataclass
 class WatchParams:
-    """Bundle of all dispatch_subagents parameters into a single object."""
 
     apply: bool = False
     execute_runners: bool = False
@@ -51,7 +48,6 @@ class WatchParams:
 
 @dataclass
 class DispatchContext:
-    """Internal context bundle for dispatch helpers."""
 
     cfg: Any
     normalized_workflow_mode: str
@@ -70,7 +66,6 @@ class DispatchContext:
 
 @dataclass
 class RunnerBatchContext:
-    """Bundle of parameters for _run_*_batch helper methods."""
 
     pending_runner_jobs: list
     runner_concurrency: int

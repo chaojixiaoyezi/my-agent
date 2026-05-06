@@ -41,3 +41,6 @@
 - Live Lab 很容易被误解成普通单测；它更像“可见演练”，成本和依赖可能更高。
 - 当前 log-analysis replay 较成熟，其它模块 suite 还需要补。
 - 如果 suite 输出路径变化但文档没同步，新手会按旧路径找不到产物。
+## 2026-05-06 code-size cleanup
+- Split log-analysis replay setup and stage execution into smaller parameterized helpers.
+- Kept live-lab replay behavior stable while reducing script-level near-soft code-size risk.

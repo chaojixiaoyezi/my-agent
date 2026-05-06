@@ -78,12 +78,6 @@ _TASK_REGISTRY_SQL = (
 
 
 class LocalStoreSchemaMixin:
-    """LLM: mixin providing schema initialization and safe SQLite connection helpers.
-
-    给人看的解释：
-    LocalStore 启动时会先靠这个 mixin 把数据库准备好。
-    其他模块只需要用 `_connection()`，不用关心连接怎么创建和关闭。
-    """
 
     def _init_schema(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)

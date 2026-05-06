@@ -174,6 +174,14 @@ class TestSubagentsSubcommandRegistration:
         args = parser.parse_args(["subagents-probe", "run-1", "run-2", "run-3"])
         assert args.run_id == ["run-1", "run-2", "run-3"]
 
+
+
+
+
+
+class TestSubagentsReviewCommandRegistration:
+    """测试子代理子命令注册功能。"""
+
     def test_subagents_workflow_plan_has_goal_argument(self):
         """测试 subagents-workflow-plan 命令有 goal 参数。
 

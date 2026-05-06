@@ -59,3 +59,7 @@
 - 当前 apply path 只创建任务记录，不代表 analyst 已经工作，也不代表父级验收通过。
 - `evidence_read` 仍是待落地的受控读取能力，真实 analyst 执行前必须补齐。
 - JSONL 本地后端适合开发和小样本，不应被误解为生产 SIEM 存储。
+## 2026-05-06 code-size cleanup
+- Refactored log-analysis prompts, ingestion, dispatch, parser, and security helpers into smaller internal units.
+- Cleared current log-analysis 80% code-size high-risk findings while preserving public call surfaces and test behavior.
+- Verified with log-focused pytest, ruff, and the global code-size report.

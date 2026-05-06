@@ -1,4 +1,3 @@
-"""Dispatch and runner commands: dispatch, run, workflow plan."""
 
 from __future__ import annotations
 
@@ -18,7 +17,6 @@ from .common import make_agent, make_capability_router
 
 
 def _build_dispatch_kwargs(args) -> dict:
-    """提取 dispatch/watch 共用的参数字典。"""
     return dict(
         apply=args.apply,
         execute_runners=args.execute_runners,
@@ -37,7 +35,6 @@ def _build_dispatch_kwargs(args) -> dict:
 
 
 def _print_watch_report(agent, report, args) -> None:
-    """打印 watch 模式的调度报告。"""
     mode = "apply" if args.apply else "dry-run"
     print("SUBAGENT DISPATCH WATCH")
     print(
@@ -63,7 +60,6 @@ def _print_watch_report(agent, report, args) -> None:
 
 
 def _print_dispatch_report(agent, report, args) -> None:
-    """打印单次 dispatch 的调度报告。"""
     mode = "apply" if args.apply else "dry-run"
     print("SUBAGENT DISPATCH")
     print(
@@ -92,7 +88,6 @@ def _print_dispatch_report(agent, report, args) -> None:
 
 
 def cmd_subagents_dispatch(args) -> int:
-    """执行一轮父代理调度，默认 dry-run。"""
 
     if args.execute_runners and not args.apply:
         print("--execute-runners 必须和 --apply 一起使用。", file=sys.stderr)
@@ -120,7 +115,6 @@ def cmd_subagents_dispatch(args) -> int:
 
 
 def cmd_subagents_workflow_plan(args) -> int:
-    """Preview automatic subagent workflow routing without dispatching workers."""
 
     config = load_config(args.config)
     result = plan_workflow_for_goal(
@@ -168,7 +162,6 @@ def cmd_subagents_workflow_plan(args) -> int:
 
 
 def cmd_subagent_run(args) -> int:
-    """按 execution context 运行或 dry-run 一个 subagent。"""
 
     agent = make_agent(args)
     result = agent.run_subagent(

@@ -13,7 +13,6 @@ from ..bench_model import cmd_bench_model
 
 
 def add_bench_model_command(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Register the `bench-model` subcommand."""
 
     bench = subparsers.add_parser("bench-model", help="运行模型速度基准测试或查看已有速度模型")
     bench.add_argument("--show", action="store_true", help="查看已有速度模型，不运行测试")

@@ -1,9 +1,3 @@
-"""审计日志记录器。
-
-记录所有操作到审计日志：
-- 存储到 data/audit/audit.jsonl
-- 同时写入 LocalStore 的 events 表
-"""
 
 from __future__ import annotations
 
@@ -126,20 +120,8 @@ def _enum_value(value: Any) -> Any:
 
 
 class AuditLogger:
-    """审计日志记录器。
-
-    记录所有操作到审计日志：
-    - 存储到 data/audit/audit.jsonl
-    - 可选写入 LocalStore events 表
-    """
 
     def __init__(self, config: AgentConfig, local_store: LocalStore | None = None):
-        """初始化审计日志记录器。
-
-        Args:
-            config: 智能体配置对象
-            local_store: LocalStore 实例（可选）
-        """
         self.config = config
         self._local_store = local_store
         self._audit_root = Path(getattr(config, "audit_log_path", "data/audit"))
@@ -155,15 +137,6 @@ class AuditLogger:
         return f"audit_{timestamp}_{random_part}"
 
     def log(self, params: LogParams | AuditAction | str = None, **kwargs) -> AuditEntry:
-        """记录审计日志。
-
-        Args:
-            params: LogParams对象，或action（向后兼容）
-            **kwargs: 向后兼容的其他参数
-
-        Returns:
-            创建的 AuditEntry
-        """
         log_params = _normalize_log_params(params, kwargs)
         entry = self._entry_from_params(log_params)
         self._write_to_file(entry)
@@ -187,21 +160,11 @@ class AuditLogger:
         )
 
     def _write_to_file(self, entry: AuditEntry) -> None:
-        """写入审计日志文件。
-
-        Args:
-            entry: 审计条目
-        """
         line = json.dumps(entry.to_dict(), ensure_ascii=False)
         with open(self._audit_file, "a", encoding="utf-8") as f:
             f.write(line + "\n")
 
     def _write_to_local_store(self, entry: AuditEntry) -> None:
-        """写入 LocalStore events 表。
-
-        Args:
-            entry: 审计条目
-        """
         try:
             from ..local_storage import LocalStore
 

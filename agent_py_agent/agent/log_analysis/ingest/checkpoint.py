@@ -31,6 +31,25 @@ class Checkpoint:
         }
 
 
+@dataclass(frozen=True)
+class CheckpointCommit:
+    source_id: str
+    cursor_kind: str
+    cursor: Mapping[str, Any]
+    last_committed_batch_id: str
+    last_event_time: str | None
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> CheckpointCommit:
+        return cls(
+            source_id=str(kwargs["source_id"]),
+            cursor_kind=str(kwargs["cursor_kind"]),
+            cursor=kwargs["cursor"],
+            last_committed_batch_id=str(kwargs["last_committed_batch_id"]),
+            last_event_time=kwargs.get("last_event_time"),
+        )
+
+
 class CheckpointStore:
     """JSON checkpoint store scoped by source_id."""
 
@@ -52,21 +71,19 @@ class CheckpointStore:
     def commit(
         self,
         *,
-        source_id: str,
-        cursor_kind: str,
-        cursor: Mapping[str, Any],
-        last_committed_batch_id: str,
-        last_event_time: str | None,
+        commit: CheckpointCommit | None = None,
+        **kwargs: Any,
     ) -> Checkpoint:
+        item = commit or CheckpointCommit.from_kwargs(**kwargs)
         checkpoint = Checkpoint(
-            source_id=source_id,
-            cursor_kind=cursor_kind,
-            cursor=dict(cursor),
-            last_committed_batch_id=last_committed_batch_id,
-            last_event_time=last_event_time,
+            source_id=item.source_id,
+            cursor_kind=item.cursor_kind,
+            cursor=dict(item.cursor),
+            last_committed_batch_id=item.last_committed_batch_id,
+            last_event_time=item.last_event_time,
             updated_at=utc_now(),
         )
-        write_json_atomic(self.path_for(source_id), checkpoint.to_dict())
+        write_json_atomic(self.path_for(item.source_id), checkpoint.to_dict())
         return checkpoint
 
 
@@ -86,4 +103,3 @@ def write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
             tmp.unlink()
         except OSError:
             pass
-

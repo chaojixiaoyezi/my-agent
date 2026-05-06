@@ -7,39 +7,42 @@ from __future__ import annotations
 它依赖 archive_io 读写文件，依赖 filter_policy 做过滤判断。
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .archive_helpers import _append_run_id, _dedupe_strings
 from .archive_io import _archive_files, _gateway_terminal_request_path, _read_archive_file
-from .filter_policy import evaluate_filters
+from .filter_policy import ArchiveFilterOptions, evaluate_filters
 from .query_models import ArchiveQueryRequest, ArchiveQueryResponse, paginate_records
+
+
+@dataclass(frozen=True)
+class RawArchiveCollectOptions:
+    layer: str
+    date_key: str | None
+    limit: int
+    level: int | None = None
 
 
 def execute_archive_query(
     root: Path,
     request: ArchiveQueryRequest,
 ) -> ArchiveQueryResponse:
-    """LLM: execute a complete archive query and return paginated response.
 
-    新手说明:
-    收集归档记录，应用过滤条件，然后分页返回。
-
-    参数说明:
-    `root` 是工作区根目录；`request` 是查询请求参数对象。
-
-    返回说明:
-    返回分页的查询响应对象。
-    """
-
-    records = collect_raw_archive_records(root, request.layer, request.date_key, request.limit, request.level)
+    records = collect_raw_archive_records(
+        root,
+        RawArchiveCollectOptions(request.layer, request.date_key, request.limit, request.level),
+    )
     filtered = apply_filters(
         records,
-        query=request.query,
-        filters=request.filters,
-        since=request.since,
-        until=request.until,
-        level=request.level,
+        ArchiveFilterOptions(
+            query=request.query,
+            filters=request.filters,
+            since=request.since,
+            until=request.until,
+            level=request.level,
+        ),
     )
     return paginate_records(
         filtered,
@@ -50,81 +53,48 @@ def execute_archive_query(
 
 def collect_raw_archive_records(
     root: Path,
-    layer: str,
-    date_key: str | None,
-    limit: int,
-    level: int | None = None,
+    options: RawArchiveCollectOptions | str | None = None,
+    *args: Any,
+    **kwargs: Any,
 ) -> list[dict[str, Any]]:
-    """LLM: load and normalize archive JSONL records from selected layers.
-
-    新手说明:
-    从选定的层（raw/hook/all）加载归档记录，统一格式后按时间倒序排列。
-
-    参数说明:
-    `root` 是工作区根目录；`layer` 是 raw、hook 或 all；`date_key` 是可选日期；
-    `limit` 是返回上限，0 表示不截断；`level` 是可选的归档等级过滤。
-
-    返回说明:
-    返回按时间倒序排列的标准化归档记录列表。
-    """
+    if not isinstance(options, RawArchiveCollectOptions):
+        options = RawArchiveCollectOptions(
+            layer=str(options or kwargs["layer"]),
+            date_key=args[0] if len(args) > 0 else kwargs.get("date_key"),
+            limit=int(args[1] if len(args) > 1 else kwargs.get("limit", 0)),
+            level=args[2] if len(args) > 2 else kwargs.get("level"),
+        )
 
     records: list[dict[str, Any]] = []
-    for current_layer, path in _archive_files(root, layer=layer, date_key=date_key):
+    for current_layer, path in _archive_files(root, layer=options.layer, date_key=options.date_key):
         records.extend(_read_archive_file(current_layer, path))
-    if level is not None:
-        records = [r for r in records if int(r.get("archive_level", -1)) == int(level)]
+    if options.level is not None:
+        records = [r for r in records if int(r.get("archive_level", -1)) == int(options.level)]
     records.sort(key=lambda item: (item["created_at_sort"], item["file_path"], item["line_no"]), reverse=True)
-    return records[:limit] if limit > 0 else records
+    return records[:options.limit] if options.limit > 0 else records
 
 
 def apply_filters(
     records: list[dict[str, Any]],
-    *,
-    query: str,
-    filters: dict[str, str],
-    since: str | None,
-    until: str | None,
-    level: int | None = None,
+    options: ArchiveFilterOptions | None = None,
+    **kwargs: Any,
 ) -> list[dict[str, Any]]:
-    """LLM: apply all filter predicates to a record list.
-
-    新手说明:
-    对记录列表应用所有过滤器，返回匹配通过的记录。
-
-    参数说明:
-    与 filter_archive_records 参数相同。
-
-    返回说明:
-    返回过滤后的记录列表，顺序沿用输入顺序。
-    """
+    options = options or ArchiveFilterOptions(
+        query=str(kwargs.get("query", "")),
+        filters=dict(kwargs.get("filters", {}) or {}),
+        since=kwargs.get("since"),
+        until=kwargs.get("until"),
+        level=kwargs.get("level"),
+    )
 
     return [
         record
         for record in records
-        if evaluate_filters(
-            record,
-            query=query,
-            filters=filters,
-            since=since,
-            until=until,
-            level=level,
-        )
+        if evaluate_filters(record, options=options)
     ]
 
 
 def collect_task_payloads(agent, task_ids: list[str], *, limit: int) -> list[dict[str, Any]]:
-    """LLM: load task fact-source paths for candidate subagent IDs.
-
-    新手说明:
-    这里读的是任务目录事实源。archive 只能提示"可能相关"，
-    真正判断完成没完成，要回到 STATUS、WORK_LOG、HANDOFF、TESTS 这些文件。
-
-    参数说明:
-    `agent` 是当前 agent 对象；`task_ids` 是候选 subagent run id；`limit` 控制最多读取几个任务。
-
-    返回说明:
-    返回任务事实源摘要列表；任务不存在时返回带 `exists=False` 的记录。
-    """
 
     import json
 
@@ -159,19 +129,6 @@ def _validate_task_fact_sources(paths: list[str]) -> dict[str, Any]:
 
 
 def collect_gateway_payloads(local_hits: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
-    """LLM: derive gateway request fact-source paths from LocalStore hits.
-
-    新手说明:
-    gateway 的最终事实源不是 LocalStore 摘要，而是请求/响应 JSON 文件。
-    LocalStore 命中负责帮我们找到 request_id，这里再把 metadata 里的
-    request_path、response_path、content_path 收成一张清单。
-
-    参数说明:
-    `local_hits` 是命中字典列表；`limit` 控制最多返回多少条。
-
-    返回说明:
-    返回 gateway fact-source 摘要列表；没有 gateway 命中时返回空列表。
-    """
 
     payloads: list[dict[str, Any]] = []
     for hit in local_hits:

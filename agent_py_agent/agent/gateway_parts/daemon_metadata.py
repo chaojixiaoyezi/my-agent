@@ -15,7 +15,6 @@ def _utc_now_iso() -> str:
 
 
 def _get_process_start_time(pid: int) -> int | None:
-    """Return the kernel start time for a process when available (Linux only)."""
     if sys.platform == "win32":
         return None
     stat_path = Path(f"/proc/{pid}/stat")
@@ -31,7 +30,6 @@ def _scope_hash(identity: str) -> str:
 
 
 def _build_pid_record() -> dict:
-    """Build a PID record with metadata for start-time tracking."""
     return {
         "pid": os.getpid(),
         "kind": "my-agent-gateway",

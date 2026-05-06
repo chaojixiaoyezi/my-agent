@@ -1,11 +1,3 @@
-"""LLM: low-level event builders, normalizers, and hashing helpers for run-turn archiving.
-
-给人看的解释：
-这个文件放所有"构造单条归档事件"和"辅助工具函数"。
-包括用户/助手消息事件、工具调用事件、工具元数据构建，
-以及归一化、预览裁剪、hash、稳定 JSON 序列化等纯函数。
-主入口 turn_archiver.archive_run_turn 只调用 _build_run_turn_events，不直接碰磁盘。
-"""
 
 from __future__ import annotations
 
@@ -91,12 +83,6 @@ def _message_event(
     identity: EventIdentity,
     ctx: MessageContext,
 ) -> RawMemoryEvent:
-    """LLM: create one user or assistant message archive event.
-
-    新手说明:
-    用户消息和助手回复字段形状基本一样，只是 speaker、target 和 action 不同。
-    这里统一生成 event_id、短预览和内容 hash，避免两边格式漂移。
-    """
     content = ctx.content
     content_hash = _content_hash(content)
     event_id = _event_id(
@@ -140,12 +126,6 @@ def _tool_event(
     identity: EventIdentity,
     ctx: ToolCallContext,
 ) -> RawMemoryEvent:
-    """LLM: create one tool-call archive event from normalized tool metadata.
-
-    新手说明:
-    工具调用可能来自不同后端，字段名不完全一样。这个函数先提取常见字段，
-    再把输出正文变成 hash 和短预览，避免 raw archive 暴涨。
-    """
     tool_call = ctx.tool_call
     fields = _tool_event_fields(tool_call, backend=ctx.backend)
     event_id = _event_id(
@@ -224,12 +204,6 @@ def _tool_metadata(
     *,
     facts: _ToolFacts,
 ) -> dict[str, Any]:
-    """LLM: build the bounded metadata preview stored for a tool event.
-
-    新手说明:
-    工具结果可能很长，甚至包含敏感内容。这里只保留状态、参数和输出摘要；
-    完整输出以后应走 content_path 或 evidence 文件，而不是塞进 raw event。
-    """
     metadata: dict[str, Any] = {
         "tool_name": facts.tool_name,
         "tool_call_id": facts.tool_call_id,
@@ -252,11 +226,6 @@ def _tool_metadata(
 
 
 def _apply_archive_level_to_message_event(event: RawMemoryEvent, *, content: str) -> RawMemoryEvent:
-    """LLM: shape message archive granularity according to the configured archive level.
-
-    新手说明:
-    0 最完整，3 最精简。这里不改 JSONL 格式，只改字段保留多少细节。
-    """
 
     if event.archive_level == 0:
         return event
@@ -278,11 +247,6 @@ def _apply_archive_level_to_tool_event(
     tool_call: dict[str, Any],
     metadata: dict[str, Any],
 ) -> RawMemoryEvent:
-    """LLM: downsample tool archive detail according to archive level.
-
-    新手说明:
-    级别越高，越只保留恢复最小集，避免把大段工具输出预览反复写进 raw archive。
-    """
 
     if event.archive_level == 0:
         return event

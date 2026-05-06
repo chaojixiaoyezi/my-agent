@@ -197,13 +197,15 @@ class TestEntityGraphToDict:
 # ---------------------------------------------------------------------------
 
 
-def _make_finding(
-    finding_id: str = "f-1",
-    detector_id: str = "test_detector",
-    entities: dict | None = None,
-    window: list[str] | None = None,
-    evidence_refs: list | None = None,
-) -> Finding:
+def _make_finding(**kwargs) -> Finding:
+    finding_id = kwargs.pop("finding_id", "f-1")
+    detector_id = kwargs.pop("detector_id", "test_detector")
+    entities = kwargs.pop("entities", None)
+    window = kwargs.pop("window", None)
+    evidence_refs = kwargs.pop("evidence_refs", None)
+    if kwargs:
+        raise TypeError(f"Unexpected finding options: {sorted(kwargs)}")
+
     return Finding(
         finding_id=finding_id,
         detector_id=detector_id,

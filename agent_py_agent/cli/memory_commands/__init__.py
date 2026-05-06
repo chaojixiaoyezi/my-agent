@@ -1,8 +1,3 @@
-"""LLM: thin entry point that registers all memory CLI subcommands.
-
-给人看的解释：
-memory 命令是 CLI 的顶层入口，实际路由和 doctor 逻辑委托给专门的子模块。
-"""
 
 from __future__ import annotations
 

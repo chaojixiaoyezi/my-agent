@@ -186,12 +186,17 @@ def _case_seeds(case: dict[str, Any]) -> dict[str, list[str]]:
     }
     for container_name in ("entities", "attributes", "metadata"):
         container = case.get(container_name)
-        if isinstance(container, dict):
-            for field in seeds:
-                _extend_seed(seeds[field], container.get(field))
+        _extend_container_seeds(seeds, container)
     for field in seeds:
         _extend_seed(seeds[field], case.get(field))
     return {field: values for field, values in seeds.items() if values}
+
+
+def _extend_container_seeds(seeds: dict[str, list[str]], container: Any) -> None:
+    if not isinstance(container, dict):
+        return
+    for field in seeds:
+        _extend_seed(seeds[field], container.get(field))
 
 
 def _extend_seed(target: list[str], value: Any) -> None:

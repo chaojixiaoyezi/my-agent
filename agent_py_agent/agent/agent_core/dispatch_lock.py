@@ -15,7 +15,6 @@ from pathlib import Path
 
 
 class _DispatchWatchLock:
-    """简单跨平台文件锁，避免多个父代理同时 watch。"""
 
     def __init__(self, path: Path, *, force: bool = False):
         self.path = path

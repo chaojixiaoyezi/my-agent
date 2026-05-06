@@ -1,10 +1,3 @@
-"""LLM: implements workspace-scoped filesystem tools with path containment checks.
-
-给人看的解释：
-这个文件只负责"读写本地工作区文件"。
-模型想看目录、读文件、搜索文字、写文件、追加内容、局部替换内容，都会走这里。
-最重要的安全规则也在这里：路径必须待在 workspace 里面，不能偷偷跑到项目外。
-"""
 
 from __future__ import annotations
 

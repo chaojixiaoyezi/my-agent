@@ -107,8 +107,14 @@ def _mock_agent_for_doctor(tmp_path, cfg: DoctorMockConfig | None = None):
     return mock_agent
 
 
-def _build_doctor_report_with_mocks(mock_agent, tmp_path, request_counts=None, stale_processing=None, memory_count=5):
+def _build_doctor_report_with_mocks(mock_agent, tmp_path, **kwargs):
     """Call build_local_doctor_report with all required patches."""
+    request_counts = kwargs.pop("request_counts", None)
+    stale_processing = kwargs.pop("stale_processing", None)
+    memory_count = kwargs.pop("memory_count", 5)
+    if kwargs:
+        raise TypeError(f"Unexpected doctor report options: {sorted(kwargs)}")
+
     with contextlib.ExitStack() as stack:
         mock_paths = stack.enter_context(patch("agent_py_agent.cli.local_doctor.gateway_paths"))
         mock_paths.return_value = MagicMock(root=tmp_path)

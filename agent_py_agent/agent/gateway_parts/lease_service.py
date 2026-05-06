@@ -8,6 +8,7 @@ including heartbeat threads and lease state updates.
 
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,13 +24,22 @@ if TYPE_CHECKING:
 _active_heartbeat_request_ids: set[str] = set()
 
 
+@dataclass(frozen=True)
+class _HeartbeatLoopContext:
+
+    agent: SimpleAgent
+    request_path: Path
+    request_id: str
+    worker_id: str
+    stop_event: threading.Event
+    interval: float
+
+
 def get_active_heartbeat_request_ids() -> set[str]:
-    """Return the set of request IDs with active heartbeats."""
     return _active_heartbeat_request_ids.copy()
 
 
 def is_heartbeat_alive_for_request(request_id: str) -> bool:
-    """Check whether a heartbeat thread is currently active for the given request."""
     return request_id in _active_heartbeat_request_ids
 
 
@@ -39,7 +49,6 @@ def refresh_processing_lease(
     request_id: str,
     worker_id: str = "",
 ) -> bool:
-    """Refresh the lease heartbeat on a processing request file."""
     payload = read_json_file(request_path)
     if not payload:
         return False
@@ -65,7 +74,6 @@ def refresh_processing_lease(
 
 
 def _lease_interval(agent: SimpleAgent) -> float:
-    """Return a heartbeat cadence short enough to keep processing leases fresh."""
     try:
         gateway_interval = float(agent.config.gateway_heartbeat_interval or 5)
     except (TypeError, ValueError):
@@ -86,13 +94,12 @@ def start_lease_heartbeat(
     request_id: str,
     worker_id: str = "",
 ) -> tuple[threading.Event, threading.Thread]:
-    """Start a daemon thread that keeps one processing lease alive during agent.run."""
     stop_event = threading.Event()
     interval = _lease_interval(agent)
     _active_heartbeat_request_ids.add(request_id)
     thread = threading.Thread(
         target=_heartbeat_loop,
-        args=(agent, request_path, request_id, worker_id, stop_event, interval),
+        args=(_HeartbeatLoopContext(agent, request_path, request_id, worker_id, stop_event, interval),),
         name=f"gateway-lease-{request_id}",
         daemon=True,
     )
@@ -100,30 +107,41 @@ def start_lease_heartbeat(
     return stop_event, thread
 
 
-def _heartbeat_loop(
+def _heartbeat_loop(context: _HeartbeatLoopContext) -> None:
+    try:
+        _run_heartbeat_loop_body(context)
+    finally:
+        _active_heartbeat_request_ids.discard(context.request_id)
+
+
+def _run_heartbeat_loop_body(context: _HeartbeatLoopContext) -> None:
+    consecutive_failures = 0
+    while not context.stop_event.wait(context.interval):
+        ok, consecutive_failures = _refresh_or_count_failure(
+            context.request_path, context.request_id, context.worker_id, consecutive_failures
+        )
+        if ok or not _should_stop_heartbeat(
+            context.agent,
+            context.request_path,
+            context.request_id,
+            consecutive_failures,
+        ):
+            continue
+        return
+
+
+def _should_stop_heartbeat(
     agent: SimpleAgent,
     request_path: Path,
     request_id: str,
-    worker_id: str,
-    stop_event: threading.Event,
-    interval: float,
-) -> None:
-    """Refresh one gateway processing lease until stopped or abandoned."""
-    consecutive_failures = 0
-    try:
-        while not stop_event.wait(interval):
-            ok, consecutive_failures = _refresh_or_count_failure(
-                request_path, request_id, worker_id, consecutive_failures
-            )
-            if ok:
-                continue
-            if consecutive_failures <= 0:
-                return
-            if consecutive_failures >= 3:
-                audit_heartbeat_abandoned(agent, request_id, consecutive_failures, request_path)
-                return
-    finally:
-        _active_heartbeat_request_ids.discard(request_id)
+    consecutive_failures: int,
+) -> bool:
+    if consecutive_failures <= 0:
+        return True
+    if consecutive_failures < 3:
+        return False
+    audit_heartbeat_abandoned(agent, request_id, consecutive_failures, request_path)
+    return True
 
 
 def _refresh_or_count_failure(

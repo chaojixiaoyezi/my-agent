@@ -250,6 +250,13 @@ class TestSubAgentAcceptanceFindingMixin(_FindingSetupMixin, _FindingAssertMixin
 
         self._assert_finding(findings, "no_open_capability_requests", expected_ok=True)
 
+
+
+
+
+class TestSubAgentAcceptanceOutputFindingMixin(_FindingSetupMixin, _FindingAssertMixin, _FindingReportMixin):
+    """测试 _acceptance_findings 方法。"""
+
     def test_no_output_blockers(self, tmp_path: Path):
         """output.json 没有 blocker 检查。"""
         from agent_py_agent.agent.subagents.manager_acceptance_findings import (

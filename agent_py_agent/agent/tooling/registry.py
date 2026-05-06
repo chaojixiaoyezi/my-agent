@@ -44,7 +44,6 @@ _allowed_tool_set = allowed_tool_set
 
 @dataclass(frozen=True)
 class ToolRegistryParams:
-    """Parameter bundle for ToolRegistry.__init__."""
     workspace_root: Path
     max_chars: int
     max_entries: int
@@ -59,14 +58,6 @@ class ToolRegistryParams:
 
 
 class ToolRegistry:
-    """工具注册表。
-
-    它负责四件事：
-    - 统一登记有哪些工具
-    - 生成"常驻目录"和"候选详情"两层工具说明
-    - 解析模型发出的工具调用
-    - 执行实际工具
-    """
 
     def __init__(
         self,
@@ -105,7 +96,6 @@ class ToolRegistry:
         self.register(SecurityTraceCaseTool(self.workspace_root))
 
     def register(self, tool: BaseTool) -> None:
-        """注册一个工具。"""
 
         self.tools[tool.spec.name] = tool
 
@@ -116,7 +106,6 @@ class ToolRegistry:
         granted_capabilities: list[str] | None = None,
         include_orchestration: bool = False,
     ) -> list[ToolSpec]:
-        """按注册顺序返回所有工具说明。"""
 
         allowed = allowed_tool_set(allowed_tools)
         specs = [tool.spec for tool in self.tools.values()]
@@ -138,12 +127,6 @@ class ToolRegistry:
         allowed_tools: list[str] | None = None,
         granted_capabilities: list[str] | None = None,
     ) -> str:
-        """生成常驻 prompt 的工具目录。
-
-        这里给的是中等详细度版本：
-        模型能知道每个工具大概做什么、什么时候用、要传哪些关键参数，
-        但不会把每个参数的长篇说明全塞进去。
-        """
 
         specs = self.specs(
             allowed_tools=allowed_tools,
@@ -172,7 +155,6 @@ class ToolRegistry:
         allowed_tools: list[str] | None = None,
         granted_capabilities: list[str] | None = None,
     ) -> list[ToolSpec]:
-        """根据当前任务挑出最相关的少量工具。"""
 
         specs = self.specs(
             allowed_tools=allowed_tools,
@@ -192,7 +174,6 @@ class ToolRegistry:
         allowed_tools: list[str] | None = None,
         granted_capabilities: list[str] | None = None,
     ) -> str:
-        """生成当前任务的候选工具详情区块。"""
 
         specs = self.specs(
             allowed_tools=allowed_tools,
@@ -221,7 +202,6 @@ class ToolRegistry:
         return "# Recommended Tools\n" + "\n\n".join(blocks)
 
     def parse_tool_calls(self, text: str) -> list[dict[str, Any]]:
-        """从模型输出里提取工具调用块。"""
         return parse_registry_tool_calls(text)
 
     def execute_call(
@@ -232,7 +212,6 @@ class ToolRegistry:
         granted_capabilities: list[str] | None = None,
         write_boundary: dict[str, object] | None = None,
     ) -> ToolExecutionResult:
-        """执行单个工具调用。"""
         return execute_registry_call(
             ExecuteRegistryCallParams(
             payload=payload,

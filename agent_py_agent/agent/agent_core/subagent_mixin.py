@@ -1,13 +1,8 @@
-"""LLM: implements SimpleAgent subagent spawning, runner execution, and parent-planner turns.
-
-给人看的解释：
-这个文件只管"主代理怎么和子代理互动"。
-包括创建工单、跑一个子代理 runner、以及让父代理 planner 做一次完整模型判断。
-"""
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
@@ -31,6 +26,33 @@ from .runner_prompts import (
 from .task_complexity import TaskComplexityEstimate, estimate_task_complexity
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SubagentProbeParams:
+    run_id: str
+    active_attempt_id: str
+    max_cards: int
+    instruction: str
+    probe: bool
+
+
+@dataclass(frozen=True)
+class SubagentRunFailureParams:
+    run_id: str
+    active_attempt_id: str
+    exc: Exception
+    context: object
+    prompt: str
+
+
+@dataclass(frozen=True)
+class SubagentFinalizeParams:
+    run_id: str
+    active_attempt_id: str
+    result: object
+    context: object
+    prompt: str
 
 
 def _config_workflow_dispatch_mode(value: object) -> str:
@@ -70,10 +92,8 @@ def _tuple_repair_state(value: tuple) -> dict[str, object]:
 
 
 class _SubagentLifecycleBase:
-    """Internal: subagent spawning and runner execution (spawn, run, failure, finalize)."""
 
     def spawn_subagents(self, goal: str, count: int | None = None) -> list[SubAgentTask]:
-        """生成子任务记录。"""
 
         if not self.config.enable_subagents:
             raise RuntimeError("配置已禁用 subagent。")
@@ -113,7 +133,6 @@ class _SubagentLifecycleBase:
         run_id: str,
         **kwargs,
     ) -> SubAgentRunnerResult:
-        """按执行上下文运行一个子代理入口。"""
         instruction = str(kwargs.get("instruction", ""))
         dry_run = bool(kwargs.get("dry_run", True))
         max_cards = int(kwargs.get("max_cards", 0))
@@ -128,7 +147,9 @@ class _SubagentLifecycleBase:
         if dry_run:
             return self._record_subagent_dry_run(run_id, active_attempt_id, prompt)
 
-        probe_blocked = self._probe_subagent_channel(run_id, active_attempt_id, max_cards, instruction, probe)
+        probe_blocked = self._probe_subagent_channel(
+            SubagentProbeParams(run_id, active_attempt_id, max_cards, instruction, probe)
+        )
         if probe_blocked is not None:
             return probe_blocked
 
@@ -147,10 +168,12 @@ class _SubagentLifecycleBase:
             )
         except Exception as exc:
             return self._handle_subagent_run_failure(
-                run_id, active_attempt_id, exc, context, prompt
+                SubagentRunFailureParams(run_id, active_attempt_id, exc, context, prompt)
             )
 
-        return self._finalize_subagent_run(run_id, active_attempt_id, result, context, prompt)
+        return self._finalize_subagent_run(
+            SubagentFinalizeParams(run_id, active_attempt_id, result, context, prompt)
+        )
 
     def _prepare_subagent_attempt(self, run_id, *, dry_run, active_attempt_id, retry_reason):
         if dry_run or active_attempt_id:
@@ -175,17 +198,19 @@ class _SubagentLifecycleBase:
             )
         )
 
-    def _probe_subagent_channel(self, run_id, active_attempt_id, max_cards, instruction, probe):
-        if not probe:
+    def _probe_subagent_channel(self, params: SubagentProbeParams):
+        if not params.probe:
             return None
-        probe_result = self.subagents.probe_channel(run_id)
+        probe_result = self.subagents.probe_channel(params.run_id)
         if probe_result.channel_status != "BROKEN":
             return None
-        context, prompt = self._build_subagent_prompt(run_id, max_cards, instruction)
+        context, prompt = self._build_subagent_prompt(
+            params.run_id, params.max_cards, params.instruction
+        )
         return self.subagents.record_runner_result(
             RecordRunnerResultParams(
-                run_id=run_id,
-                attempt_id=active_attempt_id,
+                run_id=params.run_id,
+                attempt_id=params.active_attempt_id,
                 dry_run=False,
                 ok=False,
                 message="通道健康检查为 BROKEN，未启动模型执行。",
@@ -196,24 +221,23 @@ class _SubagentLifecycleBase:
             )
         )
 
-    def _handle_subagent_run_failure(self, run_id, active_attempt_id, exc, context, prompt):
-        """Handle subagent run failure by recording error result."""
+    def _handle_subagent_run_failure(self, params: SubagentRunFailureParams):
         failed_result = self.subagents.record_runner_result(
             RecordRunnerResultParams(
-                run_id=run_id,
-                attempt_id=active_attempt_id,
+                run_id=params.run_id,
+                attempt_id=params.active_attempt_id,
                 dry_run=False,
                 ok=False,
-                message=f"runner 执行失败: {exc}",
-                prompt=prompt,
+                message=f"runner 执行失败: {params.exc}",
+                prompt=params.prompt,
                 status="BLOCKED",
                 verification_status="UNVERIFIED",
                 failure_type="runner_error",
             )
         )
         self._write_subagent_recovery_snapshot(
-            run_id,
-            user_prompt=context.goal,
+            params.run_id,
+            user_prompt=params.context.goal,
             response_text=failed_result.message,
             backend="",
             status=failed_result.status,
@@ -222,15 +246,14 @@ class _SubagentLifecycleBase:
         )
         return failed_result
 
-    def _finalize_subagent_run(self, run_id, active_attempt_id, result, context, prompt):
-        """Finalize subagent run: parse output, repair if needed, record result."""
-        structured = parse_subagent_runner_output(result.response)
-        repair_state = _initial_repair_state(result)
+    def _finalize_subagent_run(self, params: SubagentFinalizeParams):
+        structured = parse_subagent_runner_output(params.result.response)
+        repair_state = _initial_repair_state(params.result)
         if not (structured.found and structured.ok):
             repair_state = self._handle_subagent_repair(
                 SubagentRepairParams(
-                    context=context,
-                    result=result,
+                    context=params.context,
+                    result=params.result,
                     structured=structured,
                     prompt_for_log=repair_state["prompt_for_log"],
                     response_for_log=repair_state["response_for_log"],
@@ -243,34 +266,34 @@ class _SubagentLifecycleBase:
 
         runner_result = self.subagents.record_runner_result(
             RecordRunnerResultParams(
-                run_id=run_id,
-                attempt_id=active_attempt_id,
+                run_id=params.run_id,
+                attempt_id=params.active_attempt_id,
                 dry_run=False,
                 ok=structured.ok if structured.found else True,
                 message=repair_state["message"],
                 prompt=repair_state["prompt_for_log"],
                 response=repair_state["response_for_log"],
                 backend=repair_state["backend_name"],
-                tool_rounds=result.tool_rounds,
+                tool_rounds=params.result.tool_rounds,
                 status="" if structured.found else "AWAITING_ACCEPTANCE",
                 verification_status="" if structured.found else "NEEDS_ACCEPTANCE",
                 structured_output=structured,
-                actual_tools=result.executed_tools or [],
+                actual_tools=params.result.executed_tools or [],
                 structured_repair_attempted=repair_state["attempted"],
                 structured_repair_ok=repair_state["ok"],
                 structured_repair_error=repair_state["error"],
             )
         )
         self._write_subagent_recovery_snapshot(
-            run_id,
-            user_prompt=context.goal,
+            params.run_id,
+            user_prompt=params.context.goal,
             response_text=repair_state["message"],
             backend=repair_state["backend_name"],
             status=runner_result.status,
             error_code=runner_result.runner_last_error,
             tool_calls=[
-                {"tool": tool_name, "id": f"{run_id}:{index}", "ok": True}
-                for index, tool_name in enumerate(result.executed_tools or [], start=1)
+                {"tool": tool_name, "id": f"{params.run_id}:{index}", "ok": True}
+                for index, tool_name in enumerate(params.result.executed_tools or [], start=1)
             ],
         )
         return runner_result
@@ -281,11 +304,7 @@ class SimpleAgentSubagentMixin(
     _SubagentRepairMixin,
     _ParentPlannerMixin,
 ):
-    """LLM: mixin for subagent lifecycle orchestration reachable from SimpleAgent.
-
-    给人看的解释：
-    这些方法不直接写文件细节，而是调用 SubAgentManager，让主代理保留"编排者"的角色。
-    """
+    pass
 
 
 # Re-export for backward compatibility

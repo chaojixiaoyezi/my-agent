@@ -38,27 +38,22 @@ _server_instance: GatewayHTTPServer | None = None
 
 
 def _generate_request_id() -> str:
-    """Generate a unique request ID."""
     return f"req_{int(time.time() * 1000)}_{os.getpid()}"
 
 
 class GatewayHTTPHandler(BaseHTTPRequestHandler):
-    """HTTP request handler for gateway。"""
 
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args: Any) -> None:
-        """Override to reduce noise。"""
         pass
 
     def _inject_auth_middleware(self) -> None:
-        """每个请求进来时，从 server 注入 auth_middleware 到 handler 实例。"""
         server = _server_instance
         if server is not None and server.auth_middleware is not None:
             self._auth_middleware = server.auth_middleware
 
     def _send_json(self, status: int, body: dict[str, Any]) -> None:
-        """Send JSON response."""
         body_str = json.dumps(body, ensure_ascii=False)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -68,7 +63,6 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
             self.wfile.write(body_str.encode("utf-8"))
 
     def _read_json(self) -> dict[str, Any]:
-        """Read JSON body from request."""
         content_length = int(self.headers.get("Content-Length", 0))
         if content_length == 0:
             return {}
@@ -76,7 +70,6 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         return json.loads(body.decode("utf-8"))
 
     def do_GET(self) -> None:
-        """Handle GET requests。"""
         self._inject_auth_middleware()
         if self.path == "/status":
             self._handle_status()
@@ -93,7 +86,6 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
-        """Handle POST requests。"""
         self._inject_auth_middleware()
         if self.path == "/ask":
             self._handle_ask()
@@ -107,36 +99,28 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not found"})
 
     def _handle_status(self) -> None:
-        """GET /status - return gateway status."""
         handle_status(self, _server_instance)
 
     def _handle_result(self) -> None:
-        """GET /result/<request_id> - return request result。"""
         handle_result(self, _server_instance)
 
     def _handle_ask(self) -> None:
-        """POST /ask - submit a new request。"""
         handle_ask(self, _server_instance, _generate_request_id)
 
     def _handle_stop(self) -> None:
-        """POST /stop - request graceful shutdown."""
         handle_stop(self, _server_instance)
 
     def _handle_session_channels(self) -> None:
-        """GET /sessions/{session_id}/channels - query session channel bindings。"""
         handle_session_channels(self, _server_instance)
 
     def _handle_session_bind(self) -> None:
-        """POST /sessions/{session_id}/bind - bind session to new channel。"""
         handle_session_bind(self, _server_instance)
 
     def _handle_admin_summary(self) -> None:
-        """GET /admin/summary - admin global summary。"""
         handle_admin_summary(self, _server_instance)
 
 
 class GatewayHTTPServer:
-    """HTTP server for gateway。"""
 
     def __init__(
         self,
@@ -156,7 +140,6 @@ class GatewayHTTPServer:
         self._stop_event = threading.Event()
 
     def start(self) -> None:
-        """Start HTTP server in background thread."""
         global _server_instance
         _server_instance = self
 
@@ -168,7 +151,6 @@ class GatewayHTTPServer:
         self._thread.start()
 
     def _serve(self) -> None:
-        """Serve HTTP requests until stopped."""
         if self.server is None:
             return
         try:
@@ -177,7 +159,6 @@ class GatewayHTTPServer:
             pass
 
     def stop(self, timeout: float = 5.0) -> None:
-        """Stop HTTP server."""
         global _server_instance
         if self.server:
             self.server.shutdown()
@@ -196,7 +177,6 @@ def start_http_server(
     admin_query: AdminCrossChannelQuery | None = None,
     auth_middleware: AuthMiddleware | None = None,
 ) -> GatewayHTTPServer:
-    """Start HTTP server and return handle."""
     server = GatewayHTTPServer(port, paths, cross_channel, admin_query, auth_middleware)
     server.start()
     return server

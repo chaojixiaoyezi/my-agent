@@ -3,10 +3,32 @@ from __future__ import annotations
 """Evidence file helpers for local log-analysis queries."""
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..storage.base import EvidenceRef, dict_to_model, stable_digest, utc_now
+
+
+@dataclass(frozen=True)
+class QueryEvidencePayload:
+    query_id: str
+    parameters: dict[str, Any]
+    rows: list[dict[str, Any]]
+    row_count: int
+    truncated: bool
+    summary: dict[str, Any]
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> QueryEvidencePayload:
+        return cls(
+            query_id=str(kwargs["query_id"]),
+            parameters=dict(kwargs["parameters"]),
+            rows=list(kwargs["rows"]),
+            row_count=int(kwargs["row_count"]),
+            truncated=bool(kwargs["truncated"]),
+            summary=dict(kwargs["summary"]),
+        )
 
 
 class LocalEvidenceStore:
@@ -20,25 +42,22 @@ class LocalEvidenceStore:
     def write_query_result(
         self,
         *,
-        query_id: str,
-        parameters: dict[str, Any],
-        rows: list[dict[str, Any]],
-        row_count: int,
-        truncated: bool,
-        summary: dict[str, Any],
+        payload: QueryEvidencePayload | None = None,
+        **kwargs: Any,
     ) -> EvidenceRef:
-        evidence_id = query_id
+        evidence = payload or QueryEvidencePayload.from_kwargs(**kwargs)
+        evidence_id = evidence.query_id
         path = self.evidence_dir / f"{evidence_id}.json"
         payload = {
             "evidence_id": evidence_id,
             "kind": "query_result",
-            "query_id": query_id,
+            "query_id": evidence.query_id,
             "created_at": utc_now(),
-            "parameters": parameters,
-            "row_count": row_count,
-            "truncated": truncated,
-            "summary": summary,
-            "rows": rows,
+            "parameters": evidence.parameters,
+            "row_count": evidence.row_count,
+            "truncated": evidence.truncated,
+            "summary": evidence.summary,
+            "rows": evidence.rows,
         }
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
         path.write_text(encoded + "\n", encoding="utf-8")
@@ -46,19 +65,19 @@ class LocalEvidenceStore:
         ref_payload = {
             "evidence_id": evidence_id,
             "kind": "query_result",
-            "query_id": query_id,
+            "query_id": evidence.query_id,
             "uri": str(path),
             "path": str(path),
             "content_hash": digest,
             "sha256": digest,
-            "row_count": row_count,
-            "truncated": truncated,
+            "row_count": evidence.row_count,
+            "truncated": evidence.truncated,
             "created_at": payload["created_at"],
-            "summary": f"query_result rows={row_count} truncated={truncated}",
+            "summary": f"query_result rows={evidence.row_count} truncated={evidence.truncated}",
             "metadata": {
                 "evidence_path": str(path),
-                "parameters": parameters,
-                "summary": summary,
+                "parameters": evidence.parameters,
+                "summary": evidence.summary,
             },
         }
         return dict_to_model(EvidenceRef, ref_payload)

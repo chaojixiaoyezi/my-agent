@@ -27,7 +27,6 @@ from .common import ROOT, make_agent
 
 
 def _spawn_daemon(cmd: list[str], log_path: Path) -> subprocess.Popen:
-    """在后台启动守护进程，stdout/stderr 重定向到日志文件。"""
     creationflags = 0
     start_new_session = False
     if os.name == "nt":
@@ -43,7 +42,6 @@ def _spawn_daemon(cmd: list[str], log_path: Path) -> subprocess.Popen:
 
 
 def _wait_for_gateway_ready(paths, timeout: float = 30.0) -> tuple[int, bool] | None:
-    """等待 gateway 就绪，返回 (pid, alive) 或超时返回 None。"""
     print("等待 gateway 就绪...")
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -55,11 +53,6 @@ def _wait_for_gateway_ready(paths, timeout: float = 30.0) -> tuple[int, bool] | 
 
 
 def _pid_file_matches(pid_path: Path, expected_pid: int) -> bool | None:
-    """Check if pid_path contains expected_pid.
-
-    Returns True if it matches, False if it exists but doesn't match,
-    None if the file cannot be read or doesn't exist.
-    """
     if not pid_path.exists():
         return None
     try:
@@ -70,7 +63,6 @@ def _pid_file_matches(pid_path: Path, expected_pid: int) -> bool | None:
 
 
 def _wait_for_supervisor_start(supervisor_pid_path: Path, process: subprocess.Popen, deadline: float) -> bool:
-    """Wait for supervisor to write its PID file and confirm it matches our process."""
     while time.time() < deadline:
         if _pid_file_matches(supervisor_pid_path, process.pid) is True:
             return True
@@ -79,7 +71,6 @@ def _wait_for_supervisor_start(supervisor_pid_path: Path, process: subprocess.Po
 
 
 def cmd_supervisor_start(args) -> int:
-    """启动 gateway 看门狗进程（supervisor）。"""
     agent = make_agent(args)
     paths = gateway_paths(agent)
 
@@ -101,7 +92,6 @@ def cmd_supervisor_start(args) -> int:
 
 
 def cmd_supervisor_run(args) -> int:
-    """内部命令：前台运行 supervisor。"""
     try:
         return run_supervisor(
             args.config,
@@ -117,7 +107,6 @@ def cmd_supervisor_run(args) -> int:
 
 
 def cmd_supervisor_status(args) -> int:
-    """显示 supervisor 状态。"""
     agent = make_agent(args)
     paths = gateway_paths(agent)
     supervisor_pid_path = paths.root / "supervisor.pid"
@@ -148,7 +137,6 @@ def cmd_supervisor_status(args) -> int:
 
 
 def cmd_supervisor_stop(args) -> int:
-    """停止 supervisor。"""
     agent = make_agent(args)
     paths = gateway_paths(agent)
 
@@ -161,7 +149,6 @@ def cmd_supervisor_stop(args) -> int:
 
 
 def cmd_start_all(args) -> int:
-    """一键启动 gateway + 所有通道适配器（supervisor 模式）。"""
     agent = make_agent(args)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)

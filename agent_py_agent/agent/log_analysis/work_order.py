@@ -44,37 +44,22 @@ def work_order_to_subagent_task(
     work_order: LogWorkOrder,
     config: WorkOrderToTaskConfig | None = None,
 ) -> SubAgentTask:
-    """把 LogWorkOrder 转换成 SubAgentTask。
-
-    Args:
-        work_order: 日志补查工单。
-        config: 可选的转换配置。
-
-    Returns:
-        转换后的 SubAgentTask，包含目标、工具限制和执行上下文。
-    """
+    """Convert a LogWorkOrder into a planned SubAgentTask."""
     if config is None:
         config = WorkOrderToTaskConfig()
 
-    # 生成 run_id，用 work_order_id 作为基础
     run_id = f"log-subagent-{work_order.work_order_id}"
 
-    # 生成 goal：把补查目标加上上下文
     goal = _build_goal(work_order)
 
-    # 生成 thought：简要说明补查策略
     thought = _build_thought(work_order)
 
-    # 生成 plan：把时间窗口和查询限制列成步骤
     plan = _build_plan(work_order)
 
-    # 生成 allowed_tools：基于允许的查询模板
     allowed_tools = _build_allowed_tools(work_order)
 
-    # 生成 allowed_skills：目前为空，后续可扩展
     allowed_skills = []
 
-    # 生成 execution_context 相关字段
     execution_context_json = _build_execution_context(
         work_order, config, allowed_tools, allowed_skills
     )

@@ -17,7 +17,6 @@ def _build_subagent_runner_prompt(
     context: SubAgentExecutionContext,
     instruction: str = "",
 ) -> str:
-    """把执行上下文压成子代理 runner 的用户任务。"""
 
     payload = json.dumps(asdict(context), ensure_ascii=False, indent=2)
     extra = instruction.strip() or "按执行上下文完成任务；如果能力不足，说明需要上抛的 capability_request。"
@@ -75,7 +74,6 @@ def _build_subagent_runner_repair_prompt(
     original_response: str,
     parse_error: str = "",
 ) -> str:
-    """要求模型把上一轮 runner 回复整理成机器可解析结果块。"""
 
     payload = json.dumps(asdict(context), ensure_ascii=False, indent=2)
     problem = parse_error.strip() or "上一轮回复缺少 [SUBAGENT_RESULT] 结果块。"
@@ -115,7 +113,6 @@ def _build_subagent_runner_repair_prompt(
 
 
 def _append_runner_repair_prompt(original_prompt: str, repair_prompt: str) -> str:
-    """把原始 runner prompt 和修复 prompt 合并进审计日志。"""
 
     return (
         f"{original_prompt}\n\n"
@@ -126,7 +123,6 @@ def _append_runner_repair_prompt(original_prompt: str, repair_prompt: str) -> st
 
 
 def _append_runner_repair_response(original_response: str, repair_response: str) -> str:
-    """把原始 runner 回复和修复回复合并进审计日志。"""
 
     return (
         f"{original_response}\n\n"
@@ -137,7 +133,6 @@ def _append_runner_repair_response(original_response: str, repair_response: str)
 
 
 def _append_runner_repair_failure(original_response: str, exc: Exception) -> str:
-    """记录结构化修复回合失败，保留原始 runner 回复。"""
 
     return (
         f"{original_response}\n\n"

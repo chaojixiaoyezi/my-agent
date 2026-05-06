@@ -1,7 +1,3 @@
-"""审计日志查询。
-
-提供审计日志的查询和统计功能。
-"""
 
 from __future__ import annotations
 
@@ -104,34 +100,13 @@ def _timestamp_matches(timestamp: float, params: AuditQueryParams) -> bool:
 
 
 class AuditQuery:
-    """审计日志查询器。
-
-    查询审计日志：
-    - 支持按用户、动作、目标、时间范围过滤
-    - 支持分页
-    - 支持统计摘要
-    """
 
     def __init__(self, config: AgentConfig):
-        """初始化审计查询器。
-
-        Args:
-            config: 智能体配置对象
-        """
         self.config = config
         self._audit_root = Path(getattr(config, "audit_log_path", "data/audit"))
         self._audit_file = self._audit_root / "audit.jsonl"
 
     def query(self, params: AuditQueryParams | None = None, **kwargs) -> AuditQueryResult:
-        """查询审计日志。
-
-        Args:
-            params: AuditQueryParams对象，或None（向后兼容）
-            **kwargs: 向后兼容的关键字参数
-
-        Returns:
-            AuditQueryResult 包含条目列表和总数
-        """
         params = _normalize_query_params(params, kwargs)
         start_query = time.time()
         if not self._audit_file.exists():
@@ -156,14 +131,6 @@ class AuditQuery:
         )
 
     def summary(self, user_id: str | None = None) -> dict[str, Any]:
-        """获取用户操作摘要。
-
-        Args:
-            user_id: 用户 ID，为空时查询所有用户
-
-        Returns:
-            摘要统计
-        """
         if not self._audit_file.exists():
             return {
                 "user_id": user_id,
@@ -197,14 +164,6 @@ class AuditQuery:
         }
 
     def recent_users(self, limit: int = 10) -> list[dict[str, Any]]:
-        """获取最近活跃的用户。
-
-        Args:
-            limit: 最多返回多少用户
-
-        Returns:
-            用户列表，每个用户包含 user_id 和最后活动时间
-        """
         if not self._audit_file.exists():
             return []
 

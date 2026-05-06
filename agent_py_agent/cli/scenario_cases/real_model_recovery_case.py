@@ -28,12 +28,6 @@ from .subagent_cases import (
 
 
 class ScenarioRealModelRecoveryBackend:
-    """LLM: wraps a real model backend to verify API connectivity while ensuring structured output succeeds.
-
-    给人看的解释：
-    这个类不是新后端，而是把真实后端包一层，顺便记录调用次数和响应内容。
-    第一次 generate 调真实模型验证连通性，第二次把真实响应包装成结构化结果。
-    """
 
     name = "scenario_real_model_recovery_backend"
 
@@ -87,7 +81,6 @@ class ScenarioRealModelRecoveryBackend:
 
 
 def _real_model_recovery_setup(args):
-    """Setup for real model recovery: create workspace, agent, backend, task, and run subagent."""
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
     print("case=real-model-recovery")
@@ -131,7 +124,6 @@ def _real_model_recovery_setup(args):
 
 
 def _real_model_recovery_resume(paths, agent, task, loaded):
-    """Run memory-resume for real model recovery. Returns resume_payload."""
     _append_parent_subagent_cross_day_resume_clues(agent.root, loaded)
     reloaded_agent = load_scenario_agent(paths.config)
     reloaded_task = reloaded_agent.subagents.load(task.id)
@@ -164,7 +156,6 @@ def _real_model_recovery_resume(paths, agent, task, loaded):
 
 
 def _real_model_recovery_build_expected_reads(loaded):
-    """Build list of expected read paths from loaded task."""
     return [
         loaded.status_file,
         loaded.work_log_file,
@@ -176,7 +167,6 @@ def _real_model_recovery_build_expected_reads(loaded):
 
 @dataclass
 class _RealModelRecoveryVerifyContext:
-    """Bundle for _real_model_recovery_verify to reduce parameter count."""
     paths: Any
     task: Any
     loaded: Any
@@ -191,7 +181,6 @@ class _RealModelRecoveryVerifyContext:
 
 
 def _real_model_recovery_verify(ctx: _RealModelRecoveryVerifyContext) -> int:
-    """Verify real model recovery results."""
     expected_reads = _real_model_recovery_build_expected_reads(ctx.loaded)
     echo_signature = "这是 echo 后端的本地响应"
     final_ok = (
@@ -235,12 +224,6 @@ def _real_model_recovery_verify(ctx: _RealModelRecoveryVerifyContext) -> int:
 
 
 def run_scenario_real_model_recovery_case(args) -> int:
-    """LLM: run a subagent with a real model API, then prove memory-resume recovers real response content.
-
-    新手说明:
-    用真实模型 API 跑一轮子代理，验证模型响应内容能在 memory-resume 恢复后找回。
-    这比 stub 后端测试更接近真实使用场景。
-    """
 
     paths, agent, backend, task, loaded, runner = _real_model_recovery_setup(args)
 

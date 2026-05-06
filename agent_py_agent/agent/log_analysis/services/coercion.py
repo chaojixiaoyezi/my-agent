@@ -7,12 +7,63 @@ emitting warnings when values fall back to defaults due to invalid input.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from ..config import LogAnalysisConfigWarning
 
 _MISSING = object()
 _INT_PATTERN = re.compile(r"-?[0-9]+")
+
+
+@dataclass(frozen=True)
+class ConfigWarningInput:
+    field_name: str
+    raw_value: Any
+    fallback_value: Any
+    reason: str
+
+    @classmethod
+    def from_legacy(cls, args: tuple[Any, ...], kwargs: dict[str, Any]) -> ConfigWarningInput:
+        if args:
+            field_name, raw_value, fallback_value, reason = args
+            return cls(str(field_name), raw_value, fallback_value, str(reason))
+        return cls(
+            str(kwargs["field_name"]),
+            kwargs.get("raw_value"),
+            kwargs.get("fallback_value"),
+            str(kwargs["reason"]),
+        )
+
+
+@dataclass(frozen=True)
+class ChoiceCoercionOptions:
+    default: str
+    choices: set[str]
+    uppercase: bool = False
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> ChoiceCoercionOptions:
+        return cls(
+            default=str(kwargs["default"]),
+            choices=set(kwargs["choices"]),
+            uppercase=bool(kwargs.get("uppercase", False)),
+        )
+
+
+@dataclass(frozen=True)
+class IntCoercionOptions:
+    default: int
+    min_value: int
+    max_value: int | None
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> IntCoercionOptions:
+        return cls(
+            default=int(kwargs["default"]),
+            min_value=int(kwargs["min_value"]),
+            max_value=kwargs.get("max_value"),
+        )
 
 
 def lookup(source: dict[str, Any] | object, field_name: str) -> Any:
@@ -24,18 +75,18 @@ def lookup(source: dict[str, Any] | object, field_name: str) -> Any:
 
 def append_warning(
     warnings: list[LogAnalysisConfigWarning],
-    field_name: str,
-    raw_value: Any,
-    fallback_value: Any,
-    reason: str,
+    *args: Any,
+    warning: ConfigWarningInput | None = None,
+    **kwargs: Any,
 ) -> None:
     """Append a configuration warning entry."""
+    item = warning or ConfigWarningInput.from_legacy(args, kwargs)
     warnings.append(
         LogAnalysisConfigWarning(
-            field_name=field_name,
-            raw_value=raw_value,
-            fallback_value=fallback_value,
-            reason=reason,
+            field_name=item.field_name,
+            raw_value=item.raw_value,
+            fallback_value=item.fallback_value,
+            reason=item.reason,
         )
     )
 
@@ -70,59 +121,55 @@ def coerce_bool(
 def coerce_choice(
     field_name: str,
     raw_value: Any,
-    *,
-    default: str,
-    choices: set[str],
-    warnings: list[LogAnalysisConfigWarning],
-    uppercase: bool = False,
+    **kwargs: Any,
 ) -> str:
     """Coerce a value to a string chosen from an allowed set.
 
     If uppercase=True, normalize input to upper-case before comparing.
     """
+    warnings = kwargs["warnings"]
+    coercion = kwargs.get("options") or ChoiceCoercionOptions.from_kwargs(**kwargs)
     if raw_value is _MISSING:
-        return default
+        return coercion.default
     if isinstance(raw_value, str):
         normalized = raw_value.strip()
-        normalized = normalized.upper() if uppercase else normalized.lower()
-        if normalized in choices:
+        normalized = normalized.upper() if coercion.uppercase else normalized.lower()
+        if normalized in coercion.choices:
             return normalized
-    append_warning(warnings, field_name, raw_value, default, f"expected one of {sorted(choices)}")
-    return default
+    append_warning(warnings, field_name, raw_value, coercion.default, f"expected one of {sorted(coercion.choices)}")
+    return coercion.default
 
 
 def coerce_int(
     field_name: str,
     raw_value: Any,
-    *,
-    default: int,
-    min_value: int,
-    max_value: int | None,
-    warnings: list[LogAnalysisConfigWarning],
+    **kwargs: Any,
 ) -> int:
     """Coerce a value to an integer within [min_value, max_value].
 
     Rejects booleans explicitly (since bool is int in Python) and non-integer strings.
     """
+    warnings = kwargs["warnings"]
+    coercion = kwargs.get("options") or IntCoercionOptions.from_kwargs(**kwargs)
     if raw_value is _MISSING:
-        return default
+        return coercion.default
     if isinstance(raw_value, bool):
-        append_warning(warnings, field_name, raw_value, default, "expected an integer, not a boolean")
-        return default
+        append_warning(warnings, field_name, raw_value, coercion.default, "expected an integer, not a boolean")
+        return coercion.default
     if isinstance(raw_value, int):
         number = raw_value
     elif isinstance(raw_value, str) and _INT_PATTERN.fullmatch(raw_value.strip()):
         number = int(raw_value.strip())
     else:
-        append_warning(warnings, field_name, raw_value, default, "expected an integer")
-        return default
+        append_warning(warnings, field_name, raw_value, coercion.default, "expected an integer")
+        return coercion.default
 
-    if number < min_value:
-        append_warning(warnings, field_name, raw_value, default, f"expected value >= {min_value}")
-        return default
-    if max_value is not None and number > max_value:
-        append_warning(warnings, field_name, raw_value, default, f"expected value <= {max_value}")
-        return default
+    if number < coercion.min_value:
+        append_warning(warnings, field_name, raw_value, coercion.default, f"expected value >= {coercion.min_value}")
+        return coercion.default
+    if coercion.max_value is not None and number > coercion.max_value:
+        append_warning(warnings, field_name, raw_value, coercion.default, f"expected value <= {coercion.max_value}")
+        return coercion.default
     return number
 
 

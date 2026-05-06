@@ -17,7 +17,6 @@ from .common import ROOT, resolve_workspace_root
 
 
 def cmd_task_list(args) -> int:
-    """列出任务列表。"""
 
     config = load_config(args.config)
     root = resolve_workspace_root(config, args.config)
@@ -36,7 +35,6 @@ def cmd_task_list(args) -> int:
 
 
 def cmd_task_show(args) -> int:
-    """显示任务详情。"""
 
     config = load_config(args.config)
     root = resolve_workspace_root(config, args.config)
@@ -49,7 +47,6 @@ def cmd_task_show(args) -> int:
 
 
 def cmd_task_abandon(args) -> int:
-    """标记任务为 ABANDONED。"""
 
     config = load_config(args.config)
     root = resolve_workspace_root(config, args.config)
@@ -76,7 +73,6 @@ def cmd_task_abandon(args) -> int:
 
 
 def cmd_task_pause(args) -> int:
-    """标记任务为 PAUSED。"""
 
     config = load_config(args.config)
     root = resolve_workspace_root(config, args.config)
@@ -103,7 +99,6 @@ def cmd_task_pause(args) -> int:
 
 
 def cmd_task_resume(args) -> int:
-    """将 PAUSED 任务恢复为 RUNNING。"""
 
     config = load_config(args.config)
     root = resolve_workspace_root(config, args.config)
@@ -130,7 +125,6 @@ def cmd_task_resume(args) -> int:
 
 
 def cmd_task_search(args) -> int:
-    """LLM 模糊搜索匹配的任务。"""
 
     config = load_config(args.config)
     root = resolve_workspace_root(config, args.config)

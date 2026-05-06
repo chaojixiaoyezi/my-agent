@@ -4,12 +4,23 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from .bounded_query_models import BoundedQueryConfig, BoundedQueryError
 from .models import QueryResult
+
+
+@dataclass(frozen=True)
+class _QueryErrorInput:
+    error_type: str
+    message: str
+    file_path: str
+    time_window: dict[str, str]
+    max_results: int
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 def validate_time_window(time_window: dict[str, str]) -> tuple[bool, BoundedQueryError | None]:
@@ -37,12 +48,12 @@ def execute_file_tail(file_path: str, time_window: dict[str, str], max_results: 
     """执行 file_tail 查询。"""
     allowed, error_msg = check_file_path_allowed(file_path, config)
     if not allowed:
-        return _query_error("access_denied", error_msg or "", file_path, time_window, max_results)
+        return _query_error(_QueryErrorInput("access_denied", error_msg or "", file_path, time_window, max_results))
 
     try:
         total_lines, parsed_lines = read_tail_lines(file_path, config.default_tail_lines)
     except OSError as exc:
-        return _query_error("file_read_error", f"无法读取文件: {exc}", file_path, time_window, max_results, error=str(exc))
+        return _query_error(_QueryErrorInput("file_read_error", f"无法读取文件: {exc}", file_path, time_window, max_results, {"error": str(exc)}))
 
     filtered_lines, filtered_count, skipped_count = filter_by_time_window(parsed_lines, time_window)
     truncated = len(filtered_lines) > max_results
@@ -152,16 +163,16 @@ def _within_base(path: Path, base: str) -> bool:
         return False
 
 
-def _query_error(error_type: str, message: str, file_path: str, time_window: dict[str, str], max_results: int, **details: Any) -> QueryResult:
+def _query_error(data: _QueryErrorInput) -> QueryResult:
     return QueryResult(
         query_template="file_tail",
-        query_params={"file_path": file_path},
-        time_window=time_window,
+        query_params={"file_path": data.file_path},
+        time_window=data.time_window,
         results=[],
         result_count=0,
         truncated=False,
-        max_limit=max_results,
-        metadata={"error": {"error_type": error_type, "message": message, "details": {"file_path": file_path, **details}}},
+        max_limit=data.max_results,
+        metadata={"error": {"error_type": data.error_type, "message": data.message, "details": {"file_path": data.file_path, **data.details}}},
     )
 
 

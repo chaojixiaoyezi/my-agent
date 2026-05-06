@@ -49,9 +49,18 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _read_adapter_state(state_path: Path) -> dict:
+    if not state_path.exists():
+        return {}
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
 @dataclass
 class SupervisorConfig:
-    """Bundle for GatewaySupervisor optional configuration parameters."""
 
     workspace_root: str | None = None
     heartbeat_timeout: float = 120.0
@@ -62,7 +71,6 @@ class SupervisorConfig:
 
 
 class GatewaySupervisor:
-    """Watchdog that monitors a gateway process and auto-restarts on crash."""
 
     def __init__(
         self,
@@ -88,7 +96,6 @@ class GatewaySupervisor:
         self._paths = None
 
     def _resolve_agent_and_paths(self):
-        """Lazily resolve agent and paths to avoid import overhead in supervisor."""
         if self._agent is not None or self._paths is not None:
             return
 
@@ -108,13 +115,17 @@ class GatewaySupervisor:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         line = f"[{ts}] [{level}] {msg}"
         print(line, flush=True)
-        if self.log_path:
-            try:
-                self.log_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(self.log_path, "a", encoding="utf-8") as f:
-                    f.write(line + "\n")
-            except OSError:
-                pass
+        self._append_log_file(line)
+
+    def _append_log_file(self, line: str) -> None:
+        if not self.log_path:
+            return
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
 
     def _log_info(self, msg: str) -> None:
         self._log("INFO", msg)
@@ -126,7 +137,6 @@ class GatewaySupervisor:
         self._log("ERROR", msg)
 
     def _read_gateway_heartbeat(self) -> dict | None:
-        """Read gateway heartbeat file, returning None if missing or stale."""
         self._resolve_agent_and_paths()
         heartbeat_path = self._paths.heartbeat
         if not heartbeat_path.exists():
@@ -137,21 +147,12 @@ class GatewaySupervisor:
             return None
 
     def _is_gateway_healthy(self) -> bool:
-        """Check if the gateway is healthy (running and heartbeat fresh)."""
         self._resolve_agent_and_paths()
 
         # Check heartbeat freshness first (most reliable)
         heartbeat = self._read_gateway_heartbeat()
-        if heartbeat:
-            updated_at = heartbeat.get("updated_at", 0)
-            if updated_at:
-                age = time.time() - float(updated_at)
-                if age <= self.heartbeat_timeout:
-                    return True  # Gateway is alive and responsive
-                else:
-                    self._log_warn(
-                        f"Gateway heartbeat stale: age={age:.1f}s > {self.heartbeat_timeout}s"
-                    )
+        if self._heartbeat_is_fresh(heartbeat):
+            return True
 
         # Fallback: check PID file directly
         pid = get_running_pid(self._paths.pid)
@@ -168,8 +169,19 @@ class GatewaySupervisor:
 
         return False
 
+    def _heartbeat_is_fresh(self, heartbeat: dict | None) -> bool:
+        if not heartbeat:
+            return False
+        updated_at = heartbeat.get("updated_at", 0)
+        if not updated_at:
+            return False
+        age = time.time() - float(updated_at)
+        if age <= self.heartbeat_timeout:
+            return True
+        self._log_warn(f"Gateway heartbeat stale: age={age:.1f}s > {self.heartbeat_timeout}s")
+        return False
+
     def _check_adapter_health(self) -> bool:
-        """Check if the adapter is healthy (running and state file valid)."""
         self._resolve_agent_and_paths()
 
         # Check adapter PID file
@@ -180,29 +192,20 @@ class GatewaySupervisor:
         if not is_pid_alive(pid):
             return False
 
-        # Check adapter state file
         state_path = self._paths.root / "adapter_state.json"
-        if state_path.exists():
-            try:
-                state = json.loads(state_path.read_text(encoding="utf-8"))
-                # Check if state is "running"
-                if state.get("state") == "running":
-                    return True
-            except (OSError, json.JSONDecodeError):
-                pass
+        state = _read_adapter_state(state_path)
+        if state.get("state") == "running":
+            return True
 
         return True  # PID alive, assume healthy if no state file
 
     def _start_gateway(self) -> int | None:
-        """Start the gateway process. Returns the gateway PID or None on failure."""
         return _start_gateway_impl(self)
 
     def _stop_gateway(self, timeout: float = 20.0) -> bool:
-        """Request graceful shutdown of the gateway. Returns True if stopped."""
         return _stop_gateway_impl(self, timeout=timeout)
 
     def _restart_gateway(self) -> bool:
-        """Restart the gateway. Returns True if restart was attempted."""
         return _restart_gateway_impl(self)
 
     def _handle_signal(self, signum, frame) -> None:
@@ -211,19 +214,16 @@ class GatewaySupervisor:
         self._stop_requested = True
 
     def run(self) -> int:
-        """Run the supervisor loop. Blocks until stop is requested."""
         return run_supervisor_loop(self)
 
 
 def run_supervisor(config_path: str, **kwargs) -> int:
-    """Run the gateway supervisor with the given config."""
     options = SupervisorConfig(**kwargs) if kwargs else None
     supervisor = GatewaySupervisor(config_path, options=options)
     return supervisor.run()
 
 
 def is_supervisor_running(config_path: str) -> bool:
-    """Check if a supervisor is running for the given config."""
     from ..config import load_config
     from ..core import SimpleAgent
 
@@ -244,7 +244,6 @@ def is_supervisor_running(config_path: str) -> bool:
 
 
 def stop_supervisor(config_path: str, timeout: float = 10.0) -> bool:
-    """Stop the supervisor for the given config."""
     from ..config import load_config
     from ..core import SimpleAgent
 

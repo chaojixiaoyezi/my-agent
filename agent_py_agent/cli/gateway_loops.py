@@ -25,13 +25,6 @@ from .models import DaemonOptions
 
 
 def _gateway_request_loop(args, paths: GatewayPaths, stop_event: threading.Event) -> None:
-    """LLM: Background thread that manages a pool of request workers for the gateway inbox.
-
-    新手说明:
-    启动若干 worker 线程来并发处理 gateway inbox 中的请求。
-    每个 worker 有自己的 SimpleAgent 实例，避免共享连接。
-    主循环等待 stop_event 触发后退出并 join 所有 worker。
-    """
 
     try:
         bootstrap_agent = make_agent(args)
@@ -55,12 +48,6 @@ def _gateway_request_loop(args, paths: GatewayPaths, stop_event: threading.Event
 
 
 def _gateway_request_worker_loop(args, paths: GatewayPaths, stop_event: threading.Event, worker_index: int) -> None:
-    """LLM: Single gateway request worker that polls and processes inbox requests.
-
-    新手说明:
-    单个 worker 线程的主循环。worker_index==0 的 worker 还负责
-    恢复卡在 processing 状态的旧请求。空闲时按 poll_interval 等待。
-    """
 
     try:
         agent = make_agent(args)
@@ -89,12 +76,6 @@ def _gateway_request_worker_loop(args, paths: GatewayPaths, stop_event: threadin
 
 
 def _gateway_heartbeat_loop(paths: GatewayPaths, agent: SimpleAgent, options: DaemonOptions, stop_event: threading.Event) -> None:
-    """LLM: Periodically writes a heartbeat JSON file so external monitors can detect liveness.
-
-    新手说明:
-    按配置的间隔定期写 heartbeat 文件，让外部监控知道 gateway 还活着。
-    stop_event 触发后退出循环。
-    """
 
     while not stop_event.is_set():
         _write_gateway_heartbeat(paths, agent, options, status="running", pid=os.getpid())
@@ -109,12 +90,6 @@ def _write_gateway_heartbeat(
     status: str,
     pid: int,
 ) -> None:
-    """LLM: Write a single heartbeat JSON record to the gateway heartbeat file.
-
-    新手说明:
-    把当前 gateway 的状态（pid、workspace、配置、请求计数）写入 heartbeat 文件。
-    外部工具可以通过读取这个文件来判断 gateway 是否存活。
-    """
     write_json_file(
         paths.heartbeat,
         {

@@ -1,4 +1,3 @@
-"""Gateway background workers: request loop, heartbeat loop, and related helpers."""
 
 from __future__ import annotations
 
@@ -19,11 +18,6 @@ from .models import DaemonOptions
 
 
 def _gateway_request_loop(args, paths, stop_event: threading.Event) -> None:
-    """后台处理 gateway inbox 请求。
-
-    这个线程会按配置启动一个很保守的 worker pool。每个 worker 都有自己的
-    `SimpleAgent` 实例，避免并发请求共享 backend / LocalStore 连接。
-    """
 
     try:
         bootstrap_agent = make_agent(args)
@@ -47,7 +41,6 @@ def _gateway_request_loop(args, paths, stop_event: threading.Event) -> None:
 
 
 def _gateway_request_worker_loop(args, paths, stop_event: threading.Event, worker_index: int) -> None:
-    """单个 gateway request worker。"""
 
     try:
         agent = make_agent(args)
@@ -76,7 +69,6 @@ def _gateway_request_worker_loop(args, paths, stop_event: threading.Event, worke
 
 
 def _gateway_heartbeat_loop(paths, agent, options: DaemonOptions, stop_event: threading.Event) -> None:
-    """定期写 gateway heartbeat。"""
 
     while not stop_event.is_set():
         _write_gateway_heartbeat(paths, agent, options, status="running", pid=os.getpid())

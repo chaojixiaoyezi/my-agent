@@ -44,3 +44,5 @@ scripts/
 ## 当前第一版索引 / 待补齐
 
 本页先描述当前脚本结构。后续应补充每个 suite 的命令示例、输出目录样例、summary schema 和常见失败处理。
+## 2026-05-06 structure update
+- Live-lab log-analysis replay now separates stage parameter objects from execution helpers, making future replay scenarios easier to extend.

@@ -19,7 +19,6 @@ from .process_control import is_pid_alive
 
 
 def _get_lock_dir() -> Path:
-    """Return the machine-local directory for scoped gateway locks."""
     state_home = Path(os.getenv("XDG_STATE_HOME", Path.home() / ".local" / "state"))
     return state_home / "my-agent" / "locks"
 
@@ -86,7 +85,6 @@ def _create_lock_file(lock_path: Path, record: dict) -> bool:
 def acquire_scoped_lock(
     scope: str, identity: str, metadata: dict[str, Any] | None = None
 ) -> tuple[bool, dict | None]:
-    """Acquire a machine-local lock keyed by scope + identity."""
     lock_path = _get_scope_lock_path(scope, identity)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     record = _build_scope_lock_record(scope, identity, metadata)
@@ -104,7 +102,6 @@ def acquire_scoped_lock(
 
 
 def release_scoped_lock(scope: str, identity: str) -> None:
-    """Release a previously-acquired scope lock when owned by this process."""
     lock_path = _get_scope_lock_path(scope, identity)
     existing = _read_json_file(lock_path)
     if not existing or existing.get("pid") != os.getpid():
@@ -115,7 +112,6 @@ def release_scoped_lock(scope: str, identity: str) -> None:
 
 
 def release_all_scoped_locks() -> int:
-    """Remove all stale scoped lock files in the lock directory."""
     lock_dir = _get_lock_dir()
     if not lock_dir.exists():
         return 0
@@ -127,7 +123,6 @@ def release_all_scoped_locks() -> int:
 
 
 def _release_lock_if_stale(lock_file: Path) -> bool:
-    """Remove a lock file if its owning process is dead or PID was reused."""
     record = _read_json_file(lock_file)
     if not record:
         return False

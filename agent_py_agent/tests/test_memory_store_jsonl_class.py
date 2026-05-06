@@ -135,7 +135,7 @@ class TestJsonlMemoryAdd:
         memory = JsonlMemory(memory_path)
         memory.add("user", "写入测试")
         assert memory_path.exists()
-        content = memory_path.read_text()
+        content = memory_path.read_text(encoding="utf-8")
         assert "写入测试" in content
 
     def test_add_multiple_records(self, memory_path: Path) -> None:

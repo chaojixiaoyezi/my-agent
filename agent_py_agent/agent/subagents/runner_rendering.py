@@ -1,22 +1,15 @@
 from __future__ import annotations
 
-"""LLM contract: markdown renderers for runner context, results, and channel probes.
-
-Human version:
-runner 相关输出更偏执行现场，所以单独放在这里。这样验收报告渲染和 runner
-执行上下文渲染不会互相搅在一个文件里。
-"""
-
 from .models import (
     ChannelProbeReport,
     ChannelProbeResult,
     SubAgentExecutionContext,
     SubAgentRunnerResult,
 )
+from .runner_rendering_sections import render_evidence_item_lines, render_granted_card_lines
 
 
 def _render_execution_context_header(context):
-    """Render the header section of execution context markdown."""
     return [
         "# SUBAGENT EXECUTION CONTEXT",
         "",
@@ -48,33 +41,18 @@ def _render_execution_context_header(context):
         "## Plan",
         "",
     ]
-
-
 def _render_capabilities_section(context):
-    """Render allowed capabilities section."""
     lines = ["## Allowed Capabilities", ""]
     lines.append(f"- skills: {', '.join(context.allowed_skills) or 'none'}")
     lines.append(f"- tools: {', '.join(context.allowed_tools) or 'none'}")
     lines.extend(["", "## Granted Cards", ""])
     if context.granted_cards:
         for card in context.granted_cards:
-            lines.append(
-                f"- [{card.get('kind', 'unknown')}] {card.get('name', 'unknown')} "
-                f"risk={card.get('risk_level', 'unknown')} source={card.get('source', 'unknown')}"
-            )
-            if card.get("description"):
-                lines.append(f"  - description: {card['description']}")
-            if card.get("path"):
-                lines.append(f"  - path: {card['path']}")
-            if card.get("reasons"):
-                lines.append(f"  - reasons: {card['reasons']}")
+            lines.extend(render_granted_card_lines(card))
     else:
         lines.append("- none")
     return lines
-
-
 def _render_write_boundary_section(context):
-    """Render write boundary section."""
     lines = ["", "## Write Boundary", ""]
     allowed_roots = context.write_boundary.get("allowed_write_roots") or []
     forbidden_roots = context.write_boundary.get("forbidden_write_roots") or []
@@ -86,10 +64,7 @@ def _render_write_boundary_section(context):
     )
     lines.append(f"- locked_files: {', '.join(locked_files) if locked_files else 'none'}")
     return lines
-
-
 def _render_quality_contract_section(contract):
-    """Render quality contract section."""
     lines = ["", "## Quality Contract", ""]
     lines.append(f"- user_visible_goal: {contract.user_visible_goal or 'none'}")
     lines.append(f"- benchmark_sample: {contract.benchmark_sample or 'none'}")
@@ -111,10 +86,7 @@ def _render_quality_contract_section(contract):
     lines.append("- allowed_degradation:")
     lines.extend(f"  - {item}" for item in contract.allowed_degradation or ["none"])
     return lines
-
-
 def _render_context_manifest_section(manifest):
-    """Render context manifest section."""
     lines = ["", "## Context Manifest", ""]
     lines.append(f"- core_pack_version: {manifest.core_pack_version}")
     lines.append(f"- role_pack: {manifest.role_pack or 'none'}")
@@ -127,19 +99,13 @@ def _render_context_manifest_section(manifest):
     lines.append("- omitted_context:")
     lines.extend(f"  - {item}" for item in manifest.omitted_context or ["none"])
     return lines
-
-
 def _render_context_pack_item_lines(item: dict[str, object]) -> list[str]:
-    """Render one context pack item's optional fields as lines."""
     lines = []
     for key in ["kind", "summary", "path", "ref", "role"]:
         if item.get(key):
             lines.append(f"  - {key}: {item[key]}")
     return lines
-
-
 def _render_context_packs_section(context):
-    """Render context packs section."""
     lines = ["", "## Context Packs", ""]
     if context.context_packs:
         for item in context.context_packs:
@@ -149,28 +115,17 @@ def _render_context_packs_section(context):
     else:
         lines.append("- none")
     return lines
-
-
 def _render_evidence_section(context):
-    """Render evidence section."""
     lines = ["", "## Evidence", ""]
     if context.evidence:
         for item in context.evidence:
-            status = "OK" if item.get("ok") else "FAIL"
-            lines.append(f"- [{status}] {item.get('kind', 'unknown')}: {item.get('summary', '')}")
-            if item.get("command"):
-                lines.append(f"  - command: `{item['command']}`")
-            if item.get("path"):
-                lines.append(f"  - path: {item['path']}")
-            if item.get("url"):
-                lines.append(f"  - url: {item['url']}")
+            lines.extend(render_evidence_item_lines(item))
     else:
         lines.append("- 暂无")
     return lines
 
 
 def _render_pending_requests_section(context):
-    """Render pending capability requests section."""
     lines = ["", "## Pending Capability Requests", ""]
     if context.pending_requests:
         for item in context.pending_requests:
@@ -181,10 +136,7 @@ def _render_pending_requests_section(context):
     else:
         lines.append("- none")
     return lines
-
-
 def _render_open_gaps_section(context):
-    """Render open capability gaps section."""
     lines = ["", "## Open Capability Gaps", ""]
     if context.open_gaps:
         for item in context.open_gaps:
@@ -195,26 +147,19 @@ def _render_open_gaps_section(context):
     else:
         lines.append("- none")
     return lines
-
-
 def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
-    """渲染给子代理执行器读取的人类版上下文。"""
-
     lines = _render_execution_context_header(context)
     lines.extend(f"- {item}" for item in context.plan or ["未设置"])
     lines.extend(_render_capabilities_section(context))
     lines.extend(_render_write_boundary_section(context))
-
     lines.extend(["", "## Acceptance Checks", ""])
     lines.extend(f"- [ ] {item}" for item in context.acceptance_checks or ["未设置"])
-
     lines.extend(_render_quality_contract_section(context.quality_contract))
     lines.extend(_render_context_manifest_section(context.context_manifest))
     lines.extend(_render_context_packs_section(context))
     lines.extend(_render_evidence_section(context))
     lines.extend(_render_pending_requests_section(context))
     lines.extend(_render_open_gaps_section(context))
-
     lines.extend(["", "## Execution Rules", ""])
     lines.append(
         "- Subagents cannot self-accept or declare final completion; only the parent "
@@ -222,14 +167,21 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
     )
     lines.extend(f"- {item}" for item in context.instructions)
     return "\n".join(lines) + "\n"
-
-
 def render_runner_result_markdown(result: SubAgentRunnerResult) -> str:
-    """渲染子代理 runner 调用结果。"""
-
     status = "OK" if result.ok else "FAIL"
     mode = "dry-run" if result.dry_run else "execute"
-    lines = [
+    lines = _runner_result_header_lines(result, mode, status)
+    lines.extend(_runner_structured_output_lines(result))
+    lines.extend(_runner_result_file_lines(result))
+    return "\n".join(lines) + "\n"
+
+
+def _runner_result_header_lines(
+    result: SubAgentRunnerResult,
+    mode: str,
+    status: str,
+) -> list[str]:
+    return [
         "# SUBAGENT RUNNER RESULT",
         "",
         f"- run_id: {result.run_id}",
@@ -257,8 +209,11 @@ def render_runner_result_markdown(result: SubAgentRunnerResult) -> str:
         "",
         result.message or "none",
     ]
+
+
+def _runner_structured_output_lines(result: SubAgentRunnerResult) -> list[str]:
     if result.structured_summary or result.blocked_reason or result.structured_parse_error:
-        lines.extend(["", "## Structured Output", ""])
+        lines = ["", "## Structured Output", ""]
         if result.structured_summary:
             lines.append(f"- summary: {result.structured_summary}")
         if result.blocked_reason:
@@ -267,25 +222,23 @@ def render_runner_result_markdown(result: SubAgentRunnerResult) -> str:
             lines.append(f"- parse_error: {result.structured_parse_error}")
         if result.structured_repair_error:
             lines.append(f"- repair_error: {result.structured_repair_error}")
-    lines.extend(
-        [
-            "",
-            "## Files",
-            "",
-            f"- execution_context_json: {result.execution_context_json}",
-            f"- execution_context_file: {result.execution_context_file}",
-            f"- prompt_file: {result.prompt_file or 'none'}",
-            f"- response_file: {result.response_file or 'none'}",
-            f"- result_json: {result.result_json}",
-            f"- output_json: {result.output_json}",
-        ]
-    )
-    return "\n".join(lines) + "\n"
+        return lines
+    return []
 
 
+def _runner_result_file_lines(result: SubAgentRunnerResult) -> list[str]:
+    return [
+        "",
+        "## Files",
+        "",
+        f"- execution_context_json: {result.execution_context_json}",
+        f"- execution_context_file: {result.execution_context_file}",
+        f"- prompt_file: {result.prompt_file or 'none'}",
+        f"- response_file: {result.response_file or 'none'}",
+        f"- result_json: {result.result_json}",
+        f"- output_json: {result.output_json}",
+    ]
 def render_channel_probe_markdown(report: ChannelProbeReport) -> str:
-    """渲染批量通道健康检查报告。"""
-
     lines = [
         "# SUBAGENT CHANNEL PROBE",
         "",
@@ -310,11 +263,7 @@ def render_channel_probe_markdown(report: ChannelProbeReport) -> str:
         for check in failed[:5]:
             lines.append(f"  - [{check.severity}] {check.name}: {check.summary} {check.error}".rstrip())
     return "\n".join(lines) + "\n"
-
-
 def render_single_channel_probe_markdown(result: ChannelProbeResult) -> str:
-    """渲染单个 run 的通道健康检查证据。"""
-
     lines = [
         "# CHANNEL PROBE",
         "",
@@ -336,11 +285,7 @@ def render_single_channel_probe_markdown(result: ChannelProbeResult) -> str:
         if check.error:
             lines.append(f"  - error: {check.error}")
     return "\n".join(lines) + "\n"
-
-
 def _render_runner_item_line(item: dict[str, object]) -> str:
-    """把 runner 结构化条目渲染成一行 debrief。"""
-
     title = (
         item.get("path")
         or item.get("name")

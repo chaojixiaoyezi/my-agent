@@ -15,7 +15,6 @@ from .rendering import GRAY, GREEN, RESET, collapse_response_text
 
 
 def _make_chunk_handler(agent_name: str, next_message_id: int):
-    """Factory for streaming chunk handlers."""
     stream_started_ref = [False]
     stream_visible_chars_ref = [0]
     stream_truncated_ref = [False]
@@ -75,7 +74,6 @@ def _handle_expand_command(raw: str, assistant_outputs: list[str]) -> None:
 
 
 def _read_user_input(state_lock: threading.Lock, fallback_waiting_for_input_ref: list) -> str:
-    """Read a line of input, handling both tty and non-tty cases."""
     if sys.stdin.isatty():
         print(FALLBACK_CHAT_PROMPT, end="", flush=True)
         fallback_waiting_for_input_ref[0] = True
