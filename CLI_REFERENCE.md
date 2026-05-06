@@ -1032,7 +1032,7 @@ my-agent gateway result gwreq-1777442684-0b7ac8cb
 
 ### 请求文件流转
 
-当前实现先用文件队列，不用 HTTP server。好处是跨平台、容易查问题，也方便后续替换成 SQLite 或 WebSocket。
+当前实现以文件队列为主事实源，方便跨平台排查和恢复。gateway 运行时另有可选本机 HTTP 控制服务骨架；它不替代 `requests/*` 和 `responses/*` 文件事实源，也还不是完整 WebSocket / 多租户远端 gateway。
 
 ```text
 ask 写入 pending -> gateway worker 加 lease 并移到 processing -> 模型处理 -> 写 responses -> 原请求移到 done/failed
@@ -1080,12 +1080,16 @@ agent_py_agent/data/gateway/gateway_requests.jsonl
 
 ## `adapter`
 
-第一版先提供文件协议：
+当前提供两类入口：文件协议 adapter，以及 QQ/飞书通道 adapter 的启动、状态和停止命令。文件协议仍是最容易接入外部工具或 TUI 的稳定最小协议。
 
 ```powershell
 my-agent adapter file
 my-agent adapter file --watch
 my-agent adapter file --root /tmp/my-agent-adapter
+my-agent adapter start --channel feishu --daemon
+my-agent adapter start --channel qq
+my-agent adapter status
+my-agent adapter stop
 ```
 
 外部聊天工具或 TUI 可以把消息 JSON 写进 adapter inbox，adapter 会投递到 gateway，再把响应写到 outbox。
@@ -1123,6 +1127,16 @@ agent_py_agent/data/adapters/file/outbox/<message_id>.json
 | `--limit <n>` | `20` | 每轮最多处理多少条消息，`0` 表示不限制。 |
 | `--timeout <seconds>` | `gateway_request_timeout` | 等待 gateway 响应的秒数。 |
 | `--no-start-gateway` | `false` | 不自动启动 gateway，未运行时直接失败。 |
+
+通道 adapter 子命令：
+
+| 子命令 | 说明 |
+| --- | --- |
+| `start --channel <name>` | 启动指定通道适配器，支持 `feishu` / `qq` / `all`。 |
+| `start --daemon` | 后台守护进程模式运行，写入 PID 文件。 |
+| `start --pid-file <path>` | 指定 PID 文件路径。 |
+| `status` | 查看通道适配器状态。 |
+| `stop` | 停止所有通道适配器。 |
 
 ## `subagent-context`
 

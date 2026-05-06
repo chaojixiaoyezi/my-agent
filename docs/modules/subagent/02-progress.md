@@ -14,6 +14,9 @@
 - `QualityContract`、`ContextManifest`、`context_packs` 已进入 subagent 任务结构。
 - workflow router、compiler、parent acceptance planner 已有 dry-run 规划链路。
 - `my-agent subagents-workflow-plan "<goal>"` 可预览 worker 拆分和父级验收清单。
+- 通用 workflow apply path 已接入真实任务创建：`create_run(... workflow_mode="plan|auto")` 会保存 `workflow_plan`，`subagents-dispatch --apply --workflow-mode auto` 会通过 `realize_workflow_plan()` 物化 worker 子工单，并写入父任务的 `workflow_child_run_ids`。
+- runner 并发已有保守线程池实现：默认/`auto` 仍是一轮 1 个 runner，显式数字 `runner_concurrency > 1` 时才并发执行同一轮候选 runner。
+- learning draft 已接入 runner lessons：`enable_self_learning=true` 且 runner 结构化输出成功时，会把 `lessons` 去重沉淀到 `data/learning_drafts/*.json`，再由 `my-agent learn list/accept/reject/stats` 管理。
 - LOG 模块已经验证了一条专项 apply path：把受控 work-order plan 落成真实 `SubAgentTask`，但不自动执行。
 - 第一版代码/文档/注释同步门已落地：`scripts/check_doc_sync.py` 会检查 covered module 的代码改动是否同步更新模块文档和同文件注释。
 - parent/subagent runner 跨天恢复场景已落地：`scenario-test --case parent-subagent-cross-day-resume` 会创建真实任务、执行 runner 工具回合、模拟跨天线索，并验证恢复回到任务事实源。
@@ -39,10 +42,11 @@
 
 ## 下一步
 
-- 把通用 workflow dry-run 规划接入真实 subagent 创建路径；LOG 专项 apply path 已先行验证，但还不是通用入口。
-- 将已保存的 workflow preview 附到真实 dispatch 记录。
-- 持久化结构化 acceptance report，区分 worker 自述和父级验收结论。
-- 补更多内置 workflow 模板和失败样本回归。
+- 把 workflow apply 的可解释性补齐：dispatch 记录要更清楚展示自动选择理由、模板 id、worker 子工单和父级验收门，尤其是 `auto/manual/off` 改变行为时。
+- 补 Quality Profile 和更多内置 workflow 模板；当前内置模板仍是小集合，不等于设计里的首批完整模板库。
+- 增强验收层：从 `output.json.tests` / `artifacts` 自动生成更细的验收任务，并在 report 中继续明确区分 worker 自述、证据事实和父级结论。
+- 补 patch 集成验收、跨层能力上抛、外部 agent session / ACP adapter 等后续闭环。
+- 补 workflow apply / worker 物化 / runner 并发 / learning draft 的回归样本，覆盖真实 dispatch 路径而不只覆盖 planner preview。
 - 给 memory、gateway、live-lab 等模块补四件套后，把它们加入 `scripts/check_doc_sync.py` 的 `MODULE_RULES`。
 
 ## 已跑测试
@@ -64,15 +68,15 @@
 
 ## 未跑测试
 
-- 当前尚未为通用 workflow apply path 增加测试，因为本轮只做 LOG 专项任务创建。
-- 后续如果接入真实 dispatch，需要补跑 subagent workflow 专项测试和全量 pytest。
+- 当前文档同步轮没有重新跑真实 API 冒烟。
+- workflow apply 已有实现，但仍需要继续补更贴近真实 dispatch 的端到端回归，尤其是 worker 子工单依赖、验收阻断和失败回放。
 - 同步门目前只覆盖 `log-analysis` 和 `subagent` 两个模块；其它模块还需要先补四件套和规则映射。
-- parent/subagent 跨天恢复 scenario 当前使用确定性 backend，不烧真实外部模型；后续真实 API 冒烟可作为交付级补验。
+- parent/subagent 跨天恢复已有确定性 backend 场景和真实 API 多轮恢复记录；后续交付级变更仍应按风险补跑真实 API 冒烟。
 
 ## 风险
 
 - 旧文档里已有大量 subagent 设计细节，第一版索引还没有逐段拆入四件套。
-- dry-run 到真实创建之间仍有产品风险：什么时候需要用户确认、怎么展示自动选择理由，还需要继续验证。
+- workflow 已经能从规划进入真实 worker 子工单创建，但产品风险还在：什么时候需要用户确认、怎么展示自动选择理由、如何避免高风险任务被过度自动化，还需要继续验证。
 - 并行 worker 可能同时补文档，后续需要以模块四件套为主入口，避免再次分散。
 ## 2026-05-06 code-size cleanup
 - Split subagent workflow routing, manager helpers, patch review, runner rendering, and service utilities into smaller focused helpers.

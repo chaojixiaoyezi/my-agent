@@ -483,14 +483,16 @@ agent_py_agent/config/capability_config.yaml
 6. 父代理可用 Capability Router 把 request 路由成 grant 或 gap。
 7. `subagent-run` 默认 dry-run，显式 `--execute` 才调用真实模型。
 8. runner 输出 `[SUBAGENT_RESULT]` JSON 后，系统会把 evidence、artifacts、tests、patches、lessons、next_actions 写回工单。
+9. workflow plan 已能进入真实任务创建：父任务保存 `workflow_plan`，`auto` apply 可物化 worker 子工单。
+10. `enable_self_learning=true` 时，成功 runner 的 lessons 会生成 learning draft 候选，由 `my-agent learn` 管理。
 
 还没做完的主链路：
 
-- 真正的并行 worker / process / session 调度。
+- 真正的进程级 worker pool / session pool 和长期心跳治理。
 - 多层父子代理自动上抛和下发。
-- patch 自动应用与集成验收。
-- lessons 自动生成自学习草稿。
-- 完整 ACP / adapter / 外部 session 接入。
+- patch 自动集成后的验证闭环和更强 owner / 权限策略。
+- accepted learning draft 到正式 skill / rule / profile 的人工确认提升流程。
+- 完整 ACP / 外部 agent session / 远端执行器接入。
 
 ## 安全边界
 
@@ -502,7 +504,7 @@ agent_py_agent/config/capability_config.yaml
 - 模型尝试调用未授权工具时，工具层会拒绝。
 - runner 不会直接把任务标成 DONE，只会进入 `AWAITING_ACCEPTANCE` / `NEEDS_ACCEPTANCE`，等待独立验收。
 - `patches` 当前只记录补丁意图和状态，不会自动 apply。
-- `lessons` 当前只写入 debrief，不会自动写正式 skill。
+- `lessons` 会写入 `output.json` / `DEBRIEF.md`；打开 `enable_self_learning=true` 后还会生成 learning draft 候选，但不会自动写正式 skill。
 
 ## 关键文档
 

@@ -38,7 +38,7 @@ gateway worker -> data/gateway/responses/<request_id>.json
 gateway audit -> data/gateway/gateway_requests.jsonl
 ```
 
-`gateway ask` 是最小客户端协议。它还不是完整 TUI attach，也不是 HTTP/WebSocket gateway，但已经把“用户消息进入常驻 gateway 并触发完整 LLM turn”这件事从前台 chat 里拆了出来。`chat --gateway` 已经开始复用这条请求队列：chat 只做前台客户端，普通消息交给后台 gateway 处理。后续 TUI 可以继续复用同一条请求队列，或者把底层从文件队列替换成 SQLite / HTTP，而不改变用户命令面。
+`gateway ask` 是最小客户端协议。它还不是完整 TUI attach，也不是完整 HTTP/WebSocket gateway；当前代码已有可选本机 HTTP 控制面，但请求事实源仍是文件队列。它已经把“用户消息进入常驻 gateway 并触发完整 LLM turn”这件事从前台 chat 里拆了出来。`chat --gateway` 已经开始复用这条请求队列：chat 只做前台客户端，普通消息交给后台 gateway 处理。后续 TUI 可以继续复用同一条请求队列，或者把底层从文件队列替换成 SQLite / HTTP，而不改变用户命令面。
 
 ### 大白话解释：gateway ask / result
 

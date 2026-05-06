@@ -11,6 +11,7 @@
 - request 队列已有 pending、processing、done、failed、responses 目录语义。
 - CLI 已有 gateway process/client 相关命令，包括 start/status/stop/restart/logs、ask/result、run。
 - processing 请求恢复、LocalStore 索引重建、adapter file 协议已有基础实现和测试记录。
+- gateway 运行时已有可选本机 HTTP 控制服务骨架；主协议和恢复事实源仍是本地文件队列。
 - gateway 请求跨天恢复已通过 memory resume 链路验证：request/response JSON 会作为事实源进入恢复推荐路径。
 - `scenario-test --case gateway-cross-day-resume` 已能启动真实后台 gateway、投递 ask、模拟跨天恢复线索，并验证 `memory-resume` 能把终态 request/response JSON 找回来。
 - gateway request worker 在 processing lease 写入失败时会降级继续处理请求，避免 Windows 深路径或临时文件失败把请求卡死在 processing。
@@ -46,7 +47,7 @@
 ## 下一步
 
 - 给 gateway 核心函数补齐和 LOG work-order 同级别的 `LLM:` / `新手说明:` / 参数说明。
-- 把更多 gateway 场景加入隔离测试：取消/优先级、processing 中 stop/restart。
+- 把更多 gateway 场景加入隔离测试：取消/优先级、HTTP 控制面、长时间 adapter watch。
 - 稳定默认入口体验，让普通 `my-agent` 更自然地确保 gateway 存活并进入 gateway chat。
 - 如果 gateway 协议路径或数据流变化，同步更新本文件和 `04-structure.md`。
 
