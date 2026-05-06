@@ -190,7 +190,7 @@ def load_simple_yaml(path: Path) -> dict[str, Any]:
 
     data: dict[str, Any] = {}
     current_key: str | None = None
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
         line = raw.split("#", 1)[0].rstrip()
         if not line.strip():
             continue

@@ -40,7 +40,7 @@ from ._gateway_state_helpers import (
     _write_gateway_start_files,
     _write_gateway_stop_request,
 )
-from .common import ROOT, make_agent, make_capability_router
+from .common import DEFAULT_CAPABILITY_CONFIG, ROOT, make_agent, make_capability_router
 from .daemon import _resolve_daemon_options
 from .gateway_service import (
     install_service,
@@ -230,6 +230,7 @@ def cmd_gateway_stop(args) -> int:
 
 
 def cmd_gateway_restart(args) -> int:
+    capability_config = getattr(args, "capability_config", None) or str(DEFAULT_CAPABILITY_CONFIG)
     stop_args = argparse.Namespace(
         config=args.config,
         timeout=args.timeout,
@@ -244,10 +245,10 @@ def cmd_gateway_restart(args) -> int:
         force=True,
         note=getattr(args, "note", None),
         take_over_by=getattr(args, "take_over_by", ""),
-        locked_file=getattr(args, "locked_file", []),
+        locked_file=getattr(args, "locked_file", None) or [],
         force_lock=getattr(args, "force_lock", False),
-        capability_config=getattr(args, "capability_config", None),
-        skill_dir=getattr(args, "skill_dir", None),
+        capability_config=capability_config,
+        skill_dir=getattr(args, "skill_dir", None) or [],
         interval=0,
         max_cycles=0,
         max_cards=100,

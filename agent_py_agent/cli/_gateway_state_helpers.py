@@ -265,13 +265,3 @@ def _record_gateway_run_failed(paths, agent, pid: int, exc: Exception) -> None:
     payload = {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()}
     write_json_file(paths.state, payload)
     log_gateway_event(agent, "gateway_run_failed", payload)
-    write_json_file(
-        paths.state,
-        {
-            "status": "starting",
-            "pid": pid,
-            "started_at": time.time(),
-            "command": command,
-            "log": str(paths.log),
-        },
-    )
