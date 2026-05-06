@@ -45,6 +45,7 @@ class WorkerPathContext:
     turn_inject: list[str]
     started_at: float
     on_stream_chunk: Any
+    stop_spinner: Any
 
 
 def _tui_update_running_state(cfg: TuiWorkerConfig, job) -> None:
@@ -98,6 +99,7 @@ def _tui_process_job(cfg: TuiWorkerConfig, job) -> tuple[str, bool]:
         turn_inject=turn_inject,
         started_at=cfg.running_started_at_ref[0],
         on_stream_chunk=on_stream_chunk,
+        stop_spinner=spinner.stop,
     )
     if cfg.use_gateway:
         return _worker_gateway_path(path_ctx)
@@ -151,6 +153,7 @@ def _make_spinner(cfg: TuiWorkerConfig, next_message_id: int):
 
 def _make_stream_callbacks(cfg: TuiWorkerConfig, next_message_id: int, spinner):
     stream_started_ref = [False]
+    show_stream = bool(getattr(cfg.args, "app_scrollback", False) or getattr(cfg.args, "app", False))
 
     def begin_stream() -> None:
         if stream_started_ref[0]:
@@ -167,6 +170,8 @@ def _make_stream_callbacks(cfg: TuiWorkerConfig, next_message_id: int, spinner):
         from .renderer import strip_ansi
 
         if not strip_ansi(chunk).strip():
+            return False
+        if not show_stream:
             return False
         begin_stream()
         return _append_stream_text(chunk, cfg.stream_buf_ref, cfg.stream_visible_text_ref)

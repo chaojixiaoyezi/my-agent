@@ -77,20 +77,23 @@ def test_chat_gateway_poll_drains_chunks_when_response_is_ready(tmp_path):
     )
     response_path.write_text(json.dumps({"ok": True, "response": "hello world"}), encoding="utf-8")
     seen: list[str] = []
+    visible_chunks_ref = [0]
 
     response = poll_gateway_chunks(
         chunk_path,
         response_path,
         deadline=9999999999,
-        on_chunk=seen.append,
+        on_chunk=lambda chunk: seen.append(chunk) or True,
         chunks_printed_ref=[0],
+        visible_chunks_ref=visible_chunks_ref,
     )
 
     assert response["response"] == "hello world"
     assert seen == ["hello", " world"]
+    assert visible_chunks_ref == [2]
 
 
-def test_chat_gateway_poll_does_not_count_invisible_chunks(tmp_path):
+def test_chat_gateway_poll_consumes_but_does_not_show_invisible_chunks(tmp_path):
     chunk_path = tmp_path / "req.chunks.jsonl"
     response_path = tmp_path / "response.json"
     chunk_path.write_text(
@@ -100,16 +103,19 @@ def test_chat_gateway_poll_does_not_count_invisible_chunks(tmp_path):
     response_path.write_text(json.dumps({"ok": True, "response": "fallback"}), encoding="utf-8")
 
     chunks_printed_ref = [0]
+    visible_chunks_ref = [0]
     response = poll_gateway_chunks(
         chunk_path,
         response_path,
         deadline=9999999999,
         on_chunk=lambda _chunk: False,
         chunks_printed_ref=chunks_printed_ref,
+        visible_chunks_ref=visible_chunks_ref,
     )
 
     assert response["response"] == "fallback"
-    assert chunks_printed_ref == [0]
+    assert chunks_printed_ref == [1]
+    assert visible_chunks_ref == [0]
 
 
 def test_gateway_worker_continues_when_processing_lease_write_fails(tmp_path, monkeypatch):

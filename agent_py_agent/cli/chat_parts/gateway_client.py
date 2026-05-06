@@ -55,41 +55,56 @@ def poll_gateway_chunks(
     on_chunk,  # callable(str) -> None
     *,
     chunks_printed_ref: list[int],
+    visible_chunks_ref: list[int] | None = None,
 ) -> dict:
     chunks_printed = chunks_printed_ref[0]
+    visible_chunks = visible_chunks_ref[0] if visible_chunks_ref else 0
     response = {}
     while time.time() <= deadline:
-        chunks_printed = _poll_chunk_file(chunk_path, on_chunk, chunks_printed)
+        chunks_printed, visible_chunks = _poll_chunk_file(
+            chunk_path, on_chunk, chunks_printed, visible_chunks
+        )
         response = read_json_file(response_path)
         if response:
-            chunks_printed = _poll_chunk_file(chunk_path, on_chunk, chunks_printed)
+            chunks_printed, visible_chunks = _poll_chunk_file(
+                chunk_path, on_chunk, chunks_printed, visible_chunks
+            )
             break
         time.sleep(0.1)
     chunks_printed_ref[0] = chunks_printed
+    if visible_chunks_ref is not None:
+        visible_chunks_ref[0] = visible_chunks
     return response
 
 
-def _poll_chunk_file(chunk_path: Path, on_chunk: callable, chunks_printed: int) -> int:
+def _poll_chunk_file(
+    chunk_path: Path,
+    on_chunk: callable,
+    chunks_printed: int,
+    visible_chunks: int,
+) -> tuple[int, int]:
     if not chunk_path.exists():
-        return chunks_printed
+        return chunks_printed, visible_chunks
     try:
         lines = chunk_path.read_text(encoding="utf-8").splitlines()
         for cline in lines[chunks_printed:]:
-            chunks_printed += _emit_chunk_line(cline, on_chunk)
+            consumed, visible = _emit_chunk_line(cline, on_chunk)
+            chunks_printed += consumed
+            visible_chunks += visible
     except (OSError, json.JSONDecodeError):
         pass
-    return chunks_printed
+    return chunks_printed, visible_chunks
 
 
-def _emit_chunk_line(cline: str, on_chunk: callable) -> int:
+def _emit_chunk_line(cline: str, on_chunk: callable) -> tuple[int, int]:
     if not cline.strip():
-        return 0
+        return 0, 0
     cobj = json.loads(cline)
     chunk_text = cobj.get("text", "")
     if chunk_text:
         visible = on_chunk(chunk_text)
-        return 0 if visible is False else 1
-    return 0
+        return 1, 1 if visible is True else 0
+    return 1, 0
 
 
 def check_gateway_alive(paths) -> bool:

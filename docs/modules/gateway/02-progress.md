@@ -29,6 +29,7 @@
 
 - 把后台进程、请求队列、响应文件、恢复逻辑从巨大 CLI 入口中拆出来，降低维护风险。
 - 前台 chat 可以作为 gateway 客户端，向后台投递普通消息。
+- 默认入口新增 `my-agent --app`，复用 gateway client 路径并进入应用内滚动历史 UI；普通 `my-agent`/`chat --gateway` 仍保留终端滚动历史体验。
 - gateway 崩溃遗留的 processing 请求不再只能人工猜状态，可以按 attempts 和超时退回或归档。
 - LocalStore 能看到 gateway request 和生命周期事件，方便 status/timeline/local-doctor 统一观察。
 - gateway request 的 LocalStore 命中现在不再只是“可搜索摘要”，还能把 request/response JSON 带回 `memory-resume` 和自动恢复上下文。

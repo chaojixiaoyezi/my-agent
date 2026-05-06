@@ -7,6 +7,8 @@ from __future__ import annotations
 """
 
 import threading
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -90,6 +92,27 @@ def test_tui_stream_chunks_strip_ansi_but_keep_text(capsys):
     out = capsys.readouterr().out
     assert out == "hello"
     assert "\033[" not in out
+
+
+def test_tui_default_mode_consumes_stream_without_terminal_write() -> None:
+    from agent_py_agent.cli.chat_parts.tui_worker import _make_stream_callbacks
+
+    cfg = SimpleNamespace(
+        args=SimpleNamespace(app_scrollback=False),
+        agent=SimpleNamespace(config=SimpleNamespace(agent_name="myagent")),
+        stream_buf_ref=[""],
+        stream_visible_text_ref=[""],
+    )
+    spinner = SimpleNamespace(stopped=False, stop=lambda: setattr(spinner, "stopped", True))
+
+    with patch("agent_py_agent.cli.chat_parts.rendering._write_output_text") as mock_write:
+        _begin, on_chunk = _make_stream_callbacks(cfg, 1, spinner)
+        visible = on_chunk("hello")
+
+    assert visible is False
+    assert spinner.stopped is False
+    assert cfg.stream_visible_text_ref == [""]
+    mock_write.assert_not_called()
 
 
 def test_tui_input_prompt_is_stable_separate_window(tmp_path) -> None:

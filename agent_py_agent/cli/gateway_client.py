@@ -87,6 +87,8 @@ def cmd_default(args) -> int:
     args.prompt_file = None
     args.memory_limit = 5
     args.no_save = False
+    # LLM: `my-agent --app` is just the default gateway chat with the app transcript UI.
+    args.app_scrollback = bool(getattr(args, "app", False))
     return cmd_chat(args)
 
 

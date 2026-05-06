@@ -272,7 +272,7 @@ def _install_transcript_sink(output_area: Any, follow_ref: list[bool], app_ref: 
 
 
 def _app_scrollback_enabled(args: Any) -> bool:
-    return bool(getattr(args, "app_scrollback", False))
+    return bool(getattr(args, "app_scrollback", False) or getattr(args, "app", False))
 
 
 def make_tui_app(params: MakeTuiAppParams):

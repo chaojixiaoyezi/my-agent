@@ -20,6 +20,7 @@ python -m pip install -e .
 
 ```powershell
 my-agent
+my-agent --app
 my-agent --help
 ```
 
@@ -34,6 +35,7 @@ python -m agent_py_agent --help
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--config <path>` | `agent_py_agent/config/agent_config.yaml` | 指定主配置文件，控制模型后端、API base、API key 环境变量名、记忆路径、工具开关和 subagent workspace。 |
+| `--app` | `false` | 启动应用内聊天界面，固定状态栏和输入行，并使用应用内滚动历史。 |
 | `-h`, `--help` | - | 显示帮助。 |
 
 ## 运行形态
@@ -41,6 +43,7 @@ python -m agent_py_agent --help
 | 形态 | 命令 | 是否常驻 | 是否调用真实 API |
 | --- | --- | --- | --- |
 | 默认入口 | `my-agent` | 前台 chat + 后台 gateway | 是，由后台 gateway 调用 |
+| 应用内聊天 | `my-agent --app` | 前台应用界面 + 后台 gateway | 是，由后台 gateway 调用 |
 | 全局状态 | `my-agent status` | 否 | 否 |
 | 最近事件 | `my-agent timeline` | 否 | 否 |
 | 查看帮助 | `my-agent --help` | 否 | 否 |
@@ -606,7 +609,6 @@ my-agent chat --gateway
 | `--no-save` | `false` | 交互对话不自动保存到记忆。 |
 | `--gateway` | `false` | 普通聊天消息投递给后台 gateway；如果 gateway 没启动，会提示先执行 `my-agent gateway start`。 |
 | `--gateway-timeout <seconds>` | `gateway_request_timeout` | gateway 模式等待单条响应的秒数。 |
-| `--app-scrollback` | `false` | 使用应用内可滚动聊天历史，并固定状态栏和输入行。 |
 | `--resume-context` | 配置值 | 本次 chat 会话临时启用恢复上下文注入。 |
 | `--no-resume-context` | 配置值 | 本次 chat 会话临时关闭恢复上下文注入。 |
 
