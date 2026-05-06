@@ -18,6 +18,7 @@ from .tui import (
     _tui_request_exit,
 )
 from .tui_params import MakeTuiAppParams, TuiHandleCommandParams
+from .renderer import BLUE, BOLD, style_text
 
 
 @dataclass
@@ -67,8 +68,8 @@ def _tui_enqueue_job(
     lines = [line.rstrip() for line in text.splitlines()] or [text]
     _cprint(f"\n{terminal_rule()}")
     for index, line in enumerate(lines):
-        ball = "\033[38;2;59;130;246m●\033[0m" if index == 0 else " "
-        _cprint(f"{ball}  \033[38;2;59;130;246m\033[1m{line}\033[0m")
+        ball = style_text("●", BLUE) if index == 0 else " "
+        _cprint(f"{ball}  {style_text(line, BLUE, BOLD)}")
     _cprint("")
     _cprint("")
 
