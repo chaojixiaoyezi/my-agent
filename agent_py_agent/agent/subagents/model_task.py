@@ -137,6 +137,12 @@ class SubAgentTask:
     debrief_file: str = ""
     output_json: str = ""
     status_report_json: str = ""
+    # LLM: compact/checkpoint recovery artifacts stay separate from full chat history.
+    checkpoint_json: str = ""
+    decision_ledger_json: str = ""
+    progress_md: str = ""
+    failing_tests_json: str = ""
+    next_actions_json: str = ""
     dependencies_json: str = ""
     takeover_file: str = ""
     execution_context_file: str = ""

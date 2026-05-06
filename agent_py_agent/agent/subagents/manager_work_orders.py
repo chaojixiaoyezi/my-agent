@@ -38,6 +38,12 @@ def build_work_order_paths(
         "output_json": str(task_dir / "output.json"),
         # LLM: status_report_json is the compact parent-visible progress snapshot.
         "status_report_json": str(task_dir / "reports" / "status_report.json"),
+        # LLM: checkpoint artifacts are compact-readable recovery facts, not transcripts.
+        "checkpoint_json": str(task_dir / "reports" / "checkpoint.json"),
+        "decision_ledger_json": str(task_dir / "reports" / "decision_ledger.json"),
+        "progress_md": str(task_dir / "reports" / "progress.md"),
+        "failing_tests_json": str(task_dir / "reports" / "failing_tests.json"),
+        "next_actions_json": str(task_dir / "reports" / "next_actions.json"),
         "dependencies_json": str(task_dir / "dependencies.json"),
         "takeover_file": str(task_dir / "TAKEOVER.md"),
         "channel_probe_file": str(task_dir / "CHANNEL_PROBE.md"),
@@ -77,6 +83,11 @@ def ensure_work_order_files(task: SubAgentTask) -> None:
     _write_if_missing(Path(task.debrief_file), _DEBRIEF_TMPL)
     _write_json_if_missing(Path(task.output_json), _OUTPUT_JSON_TMPL.format(task_id=task.id, status=task.status))
     _write_json_if_missing(Path(task.status_report_json), _STATUS_REPORT_JSON_TMPL.format(task_id=task.id, status=task.status))
+    _write_json_if_missing(Path(task.checkpoint_json), _CHECKPOINT_JSON_TMPL(task.id, task.status))
+    _write_json_if_missing(Path(task.decision_ledger_json), _DECISION_LEDGER_JSON_TMPL(task.id))
+    _write_if_missing(Path(task.progress_md), _PROGRESS_MD_TMPL.format(task_id=task.id, status=task.status))
+    _write_json_if_missing(Path(task.failing_tests_json), _FAILING_TESTS_JSON_TMPL(task.id))
+    _write_json_if_missing(Path(task.next_actions_json), _NEXT_ACTIONS_JSON_TMPL(task.id))
     _write_json_if_missing(Path(task.dependencies_json), _DEPS_JSON_TMPL.format(task_id=task.id))
 
 
@@ -121,6 +132,11 @@ def validate_work_order(manager: Any, run_id: str) -> WorkOrderValidation:
         task.debrief_file,
         task.output_json,
         task.status_report_json,
+        task.checkpoint_json,
+        task.decision_ledger_json,
+        task.progress_md,
+        task.failing_tests_json,
+        task.next_actions_json,
         task.dependencies_json,
     ]
     if task.takeover_by:
@@ -174,4 +190,42 @@ _SKILL_USAGE_TMPL = "# SKILL_USAGE\n\n记录本任务匹配、读取和实际使
 _DEBRIEF_TMPL = "# DEBRIEF\n\n## 方法\n\n- 待填写\n\n## 结果\n\n- 待填写\n\n## 可沉淀经验\n\n- 待填写\n"
 _OUTPUT_JSON_TMPL = '{{"run_id": "{task_id}", "status": "{status}", "artifacts": [], "tests": [], "acceptance": [], "blockers": [], "next_action": ""}}'
 _STATUS_REPORT_JSON_TMPL = '{{"run_id": "{task_id}", "version": 0, "state": "{status}", "progress": 0.0, "current_step": "{status}", "summary_delta": {{"facts_added": [], "facts_invalidated": [], "decisions_changed": [], "open_questions": []}}, "budget_used": {{}}, "artifact_refs": [], "evidence_refs": [], "blockers": [], "checkpoint_ref": "", "next_recommended_action": ""}}'
+_PROGRESS_MD_TMPL = "# PROGRESS\n\n- run_id: {task_id}\n- status: {status}\n- progress: 0.0\n- current_step: {status}\n\n## Latest Summary\n\n- 暂无\n"
 _DEPS_JSON_TMPL = '{{"run_id": "{task_id}", "dependencies": []}}'
+
+
+def _CHECKPOINT_JSON_TMPL(task_id: str, status: str) -> dict[str, object]:
+    return {
+        "run_id": task_id,
+        "status": status,
+        "verification_status": "UNVERIFIED",
+        "progress": 0.0,
+        "current_step": status,
+        "latest_summary": "",
+        "blockers": [],
+        "artifact_refs": [],
+        "evidence_refs": [],
+        "evidence_packet_ids": [],
+        "finding_ids": [],
+        "status_report_ref": "",
+        "handoff_ref": "",
+        "work_log_ref": "",
+        "acceptance_ref": "",
+        "output_ref": "",
+        "decision_ledger_ref": "",
+        "failing_tests_ref": "",
+        "next_actions_ref": "",
+        "updated_at": 0.0,
+    }
+
+
+def _DECISION_LEDGER_JSON_TMPL(task_id: str) -> dict[str, object]:
+    return {"run_id": task_id, "decisions": [], "open_questions": []}
+
+
+def _FAILING_TESTS_JSON_TMPL(task_id: str) -> dict[str, object]:
+    return {"run_id": task_id, "failing_tests": []}
+
+
+def _NEXT_ACTIONS_JSON_TMPL(task_id: str) -> dict[str, object]:
+    return {"run_id": task_id, "next_actions": []}
