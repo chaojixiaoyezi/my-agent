@@ -89,6 +89,8 @@ class SubAgentRunnerResultMixin:
                 structured_request_count=proc["structured_request_count"],
                 created_request_ids=proc["created_request_ids"],
                 artifacts=proc["artifacts"],
+                evidence_packets=proc["evidence_packets"],
+                findings=proc["findings"],
                 tests=proc["tests"],
                 patches=proc["patches"],
                 lessons=proc["lessons"],
@@ -116,6 +118,14 @@ class SubAgentRunnerResultMixin:
         lessons: list,
     ) -> int:
         """Handle save, debrief, learning side effects. Returns learning candidate count."""
+        if parsed.found and parsed.ok:
+            # LLM: status report fields are derived from structured runner output for parent visibility.
+            task.latest_summary = parsed.summary or task.latest_summary
+            task.current_step = parsed.status or task.status
+        for blocker in output_payload.get("blockers", []) or []:
+            text = str(blocker or "").strip()
+            if text and text not in task.blockers:
+                task.blockers.append(text)
         self.save(task)
         if parsed.found and parsed.ok:
             _runner_append_debrief(task, parsed)
@@ -161,6 +171,8 @@ class SubAgentRunnerResultMixin:
                 ignored_tools=extracted.ignored_tools,
                 ignored_skills=extracted.ignored_skills,
                 artifacts=extracted.artifacts,
+                evidence_packets=extracted.evidence_packets,
+                findings=extracted.findings,
                 tests=extracted.tests,
                 patches=extracted.patches,
                 lessons=extracted.lessons,

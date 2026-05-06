@@ -30,6 +30,9 @@ class OutputPayloadContext:
     ignored_tools: list[str]
     ignored_skills: list[str]
     artifacts: list[dict[str, Any]]
+    # LLM: parent acceptance consumes evidence_packets/findings as first-class facts.
+    evidence_packets: list[dict[str, Any]]
+    findings: list[dict[str, Any]]
     tests: list[dict[str, Any]]
     patches: list[dict[str, Any]]
     lessons: list[str]

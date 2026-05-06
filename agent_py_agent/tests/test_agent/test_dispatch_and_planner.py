@@ -14,7 +14,7 @@ from agent_py_agent.agent.capabilities import CapabilityRouter
 from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.subagent import VerificationEvidence
+from agent_py_agent.agent.subagent import EvidencePacket, VerificationEvidence
 
 from .backends import (
     AcceptedSubagentBackend,
@@ -34,6 +34,15 @@ def _setup_review_task(agent, task, *, patch_status="applied", patch_summary="�
     task.evidence.append(
         VerificationEvidence(kind="note", summary="有验收证据", ok=True, created_at=time.time())
     )
+    task.evidence_packets.append(EvidencePacket(
+        id="evpkt-dispatch",
+        claim="调度任务已有验收证据",
+        checked_scope="dispatch review fixture",
+        evidence_refs=[task.acceptance_file],
+        artifact_refs=[task.output_json],
+        confidence=0.9,
+        created_at=time.time(),
+    ))
     agent.subagents.save(task)
     Path(task.output_json).write_text(
         json.dumps({

@@ -245,10 +245,13 @@ def render_acceptance_record_markdown(record: AcceptanceReviewRecord) -> str:
 def _render_board_line(item: SubAgentBoardItem) -> str:
     flags = ",".join(item.risk_flags) if item.risk_flags else "ok"
     goal = item.goal.replace("\n", " ")[:100]
+    # LLM: compact board lines surface task-tree status for parent triage.
     return (
         f"- `{item.id}` status={item.status} verify={item.verification_status} "
         f"channel={item.channel_status} "
         f"depth={item.depth} owner={item.owner or 'none'} final={item.final_owner or 'none'} "
-        f"evidence={item.evidence_count} requests={item.open_request_count} "
-        f"gaps={item.open_gap_count} flags={flags} :: {goal}"
+        f"progress={item.progress:.0%} evidence={item.evidence_count} "
+        f"packets={item.evidence_packet_count} findings={item.finding_count} "
+        f"children={item.child_count} blockers={item.blocker_count} "
+        f"requests={item.open_request_count} gaps={item.open_gap_count} flags={flags} :: {goal}"
     )

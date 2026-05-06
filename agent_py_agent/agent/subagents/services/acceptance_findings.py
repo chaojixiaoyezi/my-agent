@@ -98,10 +98,20 @@ class SubAgentAcceptanceFindingService:
         findings: list[AcceptanceReviewFinding] = []
         ok_evidence = [item for item in task.evidence if item.ok]
         bad_evidence = [item for item in task.evidence if not item.ok]
+        # LLM: evidence packets are the traceable claim chain, stricter than prose evidence.
+        packets_with_refs = [
+            item for item in task.evidence_packets if item.evidence_refs or item.artifact_refs
+        ]
         findings.append(AcceptanceReviewFinding(
             name="evidence_present", ok=bool(ok_evidence), severity="P0",
             message=f"已有 {len(ok_evidence)} 条可用验收证据。" if ok_evidence else "缺少可用验收证据。",
             evidence_path=task.acceptance_file, created_at=created_at,
+        ))
+        findings.append(AcceptanceReviewFinding(
+            name="evidence_chain_present", ok=bool(packets_with_refs), severity="P0",
+            message=f"已有 {len(packets_with_refs)} 条 evidence packet 可追溯。"
+                    if packets_with_refs else "缺少带 evidence/artifact refs 的 evidence packet。",
+            evidence_path=task.output_json, created_at=created_at,
         ))
         findings.append(AcceptanceReviewFinding(
             name="evidence_not_failed", ok=not bad_evidence, severity="P1",

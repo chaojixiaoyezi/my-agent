@@ -67,6 +67,8 @@ def _to_board_item(
     open_request_count = sum(1 for item in task.capability_requests if item.status == "OPEN")
     open_gap_count = sum(1 for item in task.capability_gaps if item.status == "OPEN")
     flags = _build_risk_flags(task, open_request_count, open_gap_count)
+    # LLM: child status counts let parents inspect the task tree without reading every work log.
+    child_status_counts = _child_status_counts(manager, task)
     return SubAgentBoardItem(
         id=task.id,
         root_id=task.root_id,
@@ -82,15 +84,34 @@ def _to_board_item(
         updated_at=task.updated_at,
         heartbeat_at=task.heartbeat_at,
         evidence_count=len(task.evidence),
+        evidence_packet_count=len(task.evidence_packets),
+        finding_count=len(task.findings),
         open_request_count=open_request_count,
         open_gap_count=open_gap_count,
         child_count=len(task.child_ids),
+        child_status_counts=child_status_counts,
+        progress=max(0.0, min(1.0, float(task.progress or 0.0))),
+        current_step=task.current_step,
+        latest_summary=task.latest_summary,
+        blocker_count=len(task.blockers),
         takeover_by=task.takeover_by,
         locked_file_count=len(task.locked_files),
         risk_flags=flags,
         task_dir=task.task_dir,
         output_json=task.output_json,
     )
+
+
+def _child_status_counts(manager: Any, task: SubAgentTask) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for child_id in task.child_ids:
+        try:
+            child = manager.load(child_id)
+        except (FileNotFoundError, TypeError):
+            counts["missing"] = counts.get("missing", 0) + 1
+            continue
+        counts[child.status] = counts.get(child.status, 0) + 1
+    return counts
 
 
 class SubAgentBoardService:

@@ -130,6 +130,9 @@ def _parsed_output_from_payload(payload: dict[str, object]) -> SubAgentParsedOut
         used_skills=_string_list(payload.get("used_skills", [])),
         used_tools=_string_list(payload.get("used_tools", [])),
         evidence=_dict_list(payload.get("evidence", [])),
+        # LLM: parse traceable claim packets separately from legacy evidence notes.
+        evidence_packets=_dict_list(payload.get("evidence_packets", [])),
+        findings=_dict_list(payload.get("findings", [])),
         capability_requests=_dict_list(payload.get("capability_requests", [])),
         artifacts=_dict_list(payload.get("artifacts", [])),
         tests=_dict_list(payload.get("tests", [])),
@@ -279,5 +282,3 @@ def _normalize_runner_value(value: object) -> object:
     if isinstance(value, dict):
         return {str(k): str(v) for k, v in value.items()}
     return str(value)
-
-

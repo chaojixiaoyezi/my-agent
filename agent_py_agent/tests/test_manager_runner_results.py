@@ -81,6 +81,16 @@ def sample_task(tmp_path):
     task.used_tools = []
     task.used_skills = []
     task.evidence = []
+    task.evidence_packets = []
+    task.findings = []
+    task.evidence_refs = []
+    task.artifact_refs = []
+    task.blockers = []
+    task.progress = 0.0
+    task.current_step = ""
+    task.latest_summary = ""
+    task.budget_used = {}
+    task.checkpoint_ref = ""
     task.capability_requests = []
     task.capability_grants = []
     task.allowed_tools = ["tool_a", "tool_b"]
@@ -90,6 +100,7 @@ def sample_task(tmp_path):
     task.runner_result_file = str(tmp_path / "result.md")
     task.runner_result_json = str(tmp_path / "result.json")
     task.output_json = str(tmp_path / "output.json")
+    task.status_report_json = str(tmp_path / "status_report.json")
     task.debrief_file = str(tmp_path / "debrief.md")
     task.execution_context_file = str(tmp_path / "context.md")
     task.execution_context_json = str(tmp_path / "context.json")

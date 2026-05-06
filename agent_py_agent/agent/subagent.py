@@ -17,6 +17,9 @@ from .subagents.models import (
     ChannelProbeReport,
     ChannelProbeResult,
     ContextManifest,
+    # LLM: keep new task-tree dataclasses available through the old module path.
+    EvidencePacket,
+    Finding,
     LearningCandidate,
     QualityContract,
     SubAgentCard,
@@ -24,6 +27,7 @@ from .subagents.models import (
     SubAgentParsedOutput,
     SubAgentRunnerResult,
     SubAgentTask,
+    StatusReport,
     TakeoverRecord,
     VerificationEvidence,
     WorkOrderValidation,

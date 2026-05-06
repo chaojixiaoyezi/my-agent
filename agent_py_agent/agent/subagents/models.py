@@ -29,7 +29,8 @@ from .model_runtime import (
     SubAgentParsedOutput,
     SubAgentRunnerResult,
 )
-from .model_task import LearningCandidate, SubAgentTask
+# LLM: expose task-tree control-plane dataclasses through the stable facade.
+from .model_task import EvidencePacket, Finding, LearningCandidate, StatusReport, SubAgentTask
 from .quality_models import ContextManifest, QualityContract
 
 
@@ -79,6 +80,8 @@ __all__ = [
     "ChannelProbeResult",
     "ContextManifest",
     "DISPATCH_INELIGIBLE_STATUSES",
+    "EvidencePacket",
+    "Finding",
     "LearningCandidate",
     "QualityContract",
     "SubAgentCard",
@@ -86,6 +89,7 @@ __all__ = [
     "SubAgentParsedOutput",
     "SubAgentRunnerResult",
     "SubAgentTask",
+    "StatusReport",
     "TakeoverRecord",
     "TaskStatus",
     "VerificationEvidence",

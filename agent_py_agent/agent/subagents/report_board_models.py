@@ -31,6 +31,14 @@ class SubAgentBoardItem:
     risk_flags: list[str]
     task_dir: str
     output_json: str
+    # LLM: board rows expose task-tree evidence and child state without reading logs.
+    evidence_packet_count: int = 0
+    finding_count: int = 0
+    child_status_counts: dict[str, int] = field(default_factory=dict)
+    progress: float = 0.0
+    current_step: str = ""
+    latest_summary: str = ""
+    blocker_count: int = 0
 
 
 @dataclass

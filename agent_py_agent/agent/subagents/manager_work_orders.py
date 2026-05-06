@@ -36,6 +36,8 @@ def build_work_order_paths(
         "handoff_file": str(task_dir / "HANDOFF.md"),
         "debrief_file": str(task_dir / "DEBRIEF.md"),
         "output_json": str(task_dir / "output.json"),
+        # LLM: status_report_json is the compact parent-visible progress snapshot.
+        "status_report_json": str(task_dir / "reports" / "status_report.json"),
         "dependencies_json": str(task_dir / "dependencies.json"),
         "takeover_file": str(task_dir / "TAKEOVER.md"),
         "channel_probe_file": str(task_dir / "CHANNEL_PROBE.md"),
@@ -74,6 +76,7 @@ def ensure_work_order_files(task: SubAgentTask) -> None:
     _write_if_missing(Path(task.handoff_file), _handoff_content(task))
     _write_if_missing(Path(task.debrief_file), _DEBRIEF_TMPL)
     _write_json_if_missing(Path(task.output_json), _OUTPUT_JSON_TMPL.format(task_id=task.id, status=task.status))
+    _write_json_if_missing(Path(task.status_report_json), _STATUS_REPORT_JSON_TMPL.format(task_id=task.id, status=task.status))
     _write_json_if_missing(Path(task.dependencies_json), _DEPS_JSON_TMPL.format(task_id=task.id))
 
 
@@ -117,6 +120,7 @@ def validate_work_order(manager: Any, run_id: str) -> WorkOrderValidation:
         task.handoff_file,
         task.debrief_file,
         task.output_json,
+        task.status_report_json,
         task.dependencies_json,
     ]
     if task.takeover_by:
@@ -169,4 +173,5 @@ _BUGS_TMPL = "# BUGS\n\n## Open P0/P1\n\n- 暂无\n\n## Non-blocking\n\n- 暂无
 _SKILL_USAGE_TMPL = "# SKILL_USAGE\n\n记录本任务匹配、读取和实际使用过的 skill / references / 外部知识库。\n\n## Used\n\n- 暂无\n\n## Considered But Not Used\n\n- 暂无\n"
 _DEBRIEF_TMPL = "# DEBRIEF\n\n## 方法\n\n- 待填写\n\n## 结果\n\n- 待填写\n\n## 可沉淀经验\n\n- 待填写\n"
 _OUTPUT_JSON_TMPL = '{{"run_id": "{task_id}", "status": "{status}", "artifacts": [], "tests": [], "acceptance": [], "blockers": [], "next_action": ""}}'
+_STATUS_REPORT_JSON_TMPL = '{{"run_id": "{task_id}", "version": 0, "state": "{status}", "progress": 0.0, "current_step": "{status}", "summary_delta": {{"facts_added": [], "facts_invalidated": [], "decisions_changed": [], "open_questions": []}}, "budget_used": {{}}, "artifact_refs": [], "evidence_refs": [], "blockers": [], "checkpoint_ref": "", "next_recommended_action": ""}}'
 _DEPS_JSON_TMPL = '{{"run_id": "{task_id}", "dependencies": []}}'

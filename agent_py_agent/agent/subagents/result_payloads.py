@@ -48,6 +48,9 @@ def _build_output_payload(ctx: OutputPayloadContext) -> dict[str, object]:
         "used_tools": task.used_tools,
         "used_skills": task.used_skills,
         "artifacts": ctx.artifacts,
+        # LLM: output.json keeps traceable claim data beside legacy artifacts/tests.
+        "evidence_packets": ctx.evidence_packets,
+        "findings": ctx.findings,
         "tests": ctx.tests,
         "patches": ctx.patches,
         "acceptance": [item.summary for item in task.evidence],

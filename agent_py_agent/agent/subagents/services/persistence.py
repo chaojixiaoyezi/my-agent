@@ -19,7 +19,10 @@ from ..models import (
     CapabilityRequest,
     ChannelProbeCheck,
     ContextManifest,
+    EvidencePacket,
+    Finding,
     QualityContract,
+    StatusReport,
     SubAgentTask,
     TakeoverRecord,
     VerificationEvidence,
@@ -88,6 +91,89 @@ def _normalize_context_packs(value: object) -> list[dict[str, object]]:
     return [item for item in value if isinstance(item, dict)]
 
 
+def _float_value(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _dict_value(value: object) -> dict[str, object]:
+    return value if isinstance(value, dict) else {}
+
+
+def _normalize_evidence_packet(value: object) -> EvidencePacket:
+    if isinstance(value, EvidencePacket):
+        return value
+    if not isinstance(value, dict):
+        return EvidencePacket()
+    payload = {key: value[key] for key in _field_names(EvidencePacket) if key in value}
+    for key in ["evidence_refs", "artifact_refs", "counter_evidence_refs", "unresolved_risks"]:
+        payload[key] = _string_list_value(payload.get(key))
+    payload["confidence"] = _float_value(payload.get("confidence"))
+    payload["created_at"] = _float_value(payload.get("created_at"))
+    return EvidencePacket(**payload)
+
+
+def _normalize_finding(value: object) -> Finding:
+    if isinstance(value, Finding):
+        return value
+    if not isinstance(value, dict):
+        return Finding()
+    payload = {key: value[key] for key in _field_names(Finding) if key in value}
+    for key in ["evidence_packet_ids", "evidence_refs", "counter_evidence_refs"]:
+        payload[key] = _string_list_value(payload.get(key))
+    payload["confidence"] = _float_value(payload.get("confidence"))
+    payload["created_at"] = _float_value(payload.get("created_at"))
+    return Finding(**payload)
+
+
+def _normalize_status_report(value: object) -> StatusReport:
+    if isinstance(value, StatusReport):
+        return value
+    if not isinstance(value, dict):
+        return StatusReport()
+    payload = {key: value[key] for key in _field_names(StatusReport) if key in value}
+    payload["version"] = int(_float_value(payload.get("version"), 0.0))
+    payload["progress"] = _float_value(payload.get("progress"))
+    payload["summary_delta"] = _dict_value(payload.get("summary_delta"))
+    payload["budget_used"] = _dict_value(payload.get("budget_used"))
+    for key in ["artifact_refs", "evidence_refs", "blockers"]:
+        payload[key] = _string_list_value(payload.get(key))
+    payload["updated_at"] = _float_value(payload.get("updated_at"))
+    return StatusReport(**payload)
+
+
+def _summary_delta(task: SubAgentTask) -> dict[str, list[str]]:
+    return {
+        "facts_added": [task.latest_summary] if task.latest_summary else [],
+        "facts_invalidated": [],
+        "decisions_changed": [],
+        "open_questions": list(task.blockers),
+    }
+
+
+def build_status_report(task: SubAgentTask) -> StatusReport:
+    """LLM: Build the latest task-tree status snapshot from task facts."""
+    previous = task.latest_status_report if isinstance(task.latest_status_report, StatusReport) else StatusReport()
+    progress = max(0.0, min(1.0, _float_value(task.progress)))
+    return StatusReport(
+        run_id=task.id,
+        version=max(0, int(previous.version or 0)) + 1,
+        state=task.status,
+        progress=progress,
+        current_step=task.current_step or task.status,
+        summary_delta=_summary_delta(task),
+        budget_used=dict(task.budget_used or {}),
+        artifact_refs=list(dict.fromkeys(task.artifact_refs)),
+        evidence_refs=list(dict.fromkeys(task.evidence_refs)),
+        blockers=list(dict.fromkeys(task.blockers)),
+        checkpoint_ref=task.checkpoint_ref,
+        next_recommended_action=(task.blockers[0] if task.blockers else ""),
+        updated_at=task.updated_at or task.heartbeat_at or task.created_at,
+    )
+
+
 class SubAgentPersistenceService:
     """Read and write SubAgentTask records for the manager facade."""
 
@@ -116,6 +202,12 @@ class SubAgentPersistenceService:
             CapabilityGap(**item) for item in data.get("capability_gaps", []) if isinstance(item, dict)
         ]
         data["evidence"] = [VerificationEvidence(**item) for item in data.get("evidence", []) if isinstance(item, dict)]
+        data["evidence_packets"] = [
+            _normalize_evidence_packet(item) for item in data.get("evidence_packets", []) if isinstance(item, dict)
+        ]
+        data["findings"] = [
+            _normalize_finding(item) for item in data.get("findings", []) if isinstance(item, dict)
+        ]
         data["takeover_records"] = [
             TakeoverRecord(**item) for item in data.get("takeover_records", []) if isinstance(item, dict)
         ]
@@ -125,6 +217,7 @@ class SubAgentPersistenceService:
         data["quality_contract"] = _normalize_quality_contract(data.get("quality_contract"))
         data["context_manifest"] = _normalize_context_manifest(data.get("context_manifest"))
         data["context_packs"] = _normalize_context_packs(data.get("context_packs"))
+        data["latest_status_report"] = _normalize_status_report(data.get("latest_status_report"))
         return SubAgentTask(**data)
 
     def list_runs(self) -> list[SubAgentTask]:
@@ -147,9 +240,15 @@ class SubAgentPersistenceService:
         task_dir.mkdir(parents=True, exist_ok=True)
         self.manager._ensure_work_order_files(task)
         task.updated_at = task.updated_at or time.time()
+        task.latest_status_report = build_status_report(task)
         payload = json.dumps(asdict(task), ensure_ascii=False, indent=2)
         (task_dir / "task.json").write_text(payload, encoding="utf-8")
         (task_dir / "run.json").write_text(payload, encoding="utf-8")
+        if task.status_report_json:
+            Path(task.status_report_json).write_text(
+                json.dumps(asdict(task.latest_status_report), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         (task_dir / "thought.md").write_text(self._render_thought_markdown(task), encoding="utf-8")
         self.manager._index_task(task)
         if self.manager.local_store:

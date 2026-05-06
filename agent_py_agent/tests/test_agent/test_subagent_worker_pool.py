@@ -22,6 +22,7 @@ def _accepted_result(summary: str) -> ModelResponse:
             '  "used_tools": [],\n'
             '  "used_skills": [],\n'
             '  "evidence": [{"kind": "note", "summary": "worker pool 证据", "ok": true}],\n'
+            '  "evidence_packets": [{"id": "evpkt-worker-pool", "claim": "worker pool 任务已完成", "checked_scope": "worker pool runner", "evidence_refs": ["runner_result.json"], "artifact_refs": ["output.json"], "confidence": 0.9}],\n'
             '  "capability_requests": [],\n'
             '  "artifacts": [],\n'
             '  "tests": [{"name": "worker-pool", "command": "", "ok": true, "summary": "通过"}],\n'

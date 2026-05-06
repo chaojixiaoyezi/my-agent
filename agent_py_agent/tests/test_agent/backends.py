@@ -70,6 +70,9 @@ class AcceptedSubagentBackend(BaseBackend):
                 '  "evidence": [\n'
                 '    {"kind": "note", "summary": "调度器结构化执行证据", "ok": true}\n'
                 "  ],\n"
+                '  "evidence_packets": [\n'
+                '    {"id": "evpkt-dispatch-runner", "claim": "调度器 runner 已完成", "checked_scope": "dispatch runner", "evidence_refs": ["runner_result.json"], "artifact_refs": ["output.json"], "confidence": 0.9}\n'
+                "  ],\n"
                 '  "capability_requests": [],\n'
                 '  "artifacts": [],\n'
                 '  "tests": [\n'
@@ -120,6 +123,9 @@ class BoundaryWriteSubagentBackend(BaseBackend):
                 '  "evidence": [\n'
                 '    {"kind": "note", "summary": "工具结果显示 README.md 越界写入被阻止", "ok": true}\n'
                 "  ],\n"
+                '  "evidence_packets": [\n'
+                '    {"id": "evpkt-boundary", "claim": "越界写入已被阻止", "checked_scope": "write_file README.md", "evidence_refs": ["runner_result.json"], "artifact_refs": ["output.json"], "confidence": 0.9}\n'
+                "  ],\n"
                 '  "capability_requests": [],\n'
                 '  "artifacts": [],\n'
                 '  "tests": [],\n'
@@ -159,6 +165,9 @@ class FlakyThenAcceptedSubagentBackend(BaseBackend):
                 '  "used_skills": [],\n'
                 '  "evidence": [\n'
                 '    {"kind": "note", "summary": "第二次尝试成功生成证据", "ok": true}\n'
+                "  ],\n"
+                '  "evidence_packets": [\n'
+                '    {"id": "evpkt-retry", "claim": "重试后 runner 已完成", "checked_scope": "retry runner", "evidence_refs": ["runner_result.json"], "artifact_refs": ["output.json"], "confidence": 0.9}\n'
                 "  ],\n"
                 '  "capability_requests": [],\n'
                 '  "artifacts": [],\n'
@@ -203,6 +212,9 @@ class RepairingSubagentBackend(BaseBackend):
                 '  "used_skills": [],\n'
                 '  "evidence": [\n'
                 '    {"kind": "note", "summary": "修复回合根据上一轮回复生成可验收证据", "ok": true}\n'
+                "  ],\n"
+                '  "evidence_packets": [\n'
+                '    {"id": "evpkt-repair", "claim": "结构化结果已修复", "checked_scope": "runner repair", "evidence_refs": ["runner_result.json"], "artifact_refs": ["output.json"], "confidence": 0.9}\n'
                 "  ],\n"
                 '  "capability_requests": [],\n'
                 '  "artifacts": [],\n'
