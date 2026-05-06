@@ -32,6 +32,7 @@ from .storage import (
     snapshot_path_for,
     write_compression_snapshot_file,
 )
+from .task_workspace import TaskWorkspacePaths, ensure_subagent_task_workspace, task_workspace_path
 from .tokens import (
     TurnTokenUsage,
     append_session_token_usage,
@@ -49,6 +50,7 @@ __all__ = [
     "RawMemoryEvent",
     "RecoverySnapshotResult",
     "ResumeContextResult",
+    "TaskWorkspacePaths",
     "archive_run_turn",
     "append_raw_event",
     "append_snapshot",
@@ -66,6 +68,8 @@ __all__ = [
     "raw_event_path_for",
     "register_compression_hook",
     "snapshot_path_for",
+    "ensure_subagent_task_workspace",
+    "task_workspace_path",
     "token_ledger_dir",
     "write_compression_snapshot",
     "write_compression_snapshot_file",
