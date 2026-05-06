@@ -149,6 +149,10 @@ def _worker_local_path(ctx) -> tuple[str, bool]:
     with ctx.cfg.state_lock:
         ctx.cfg.last_token_estimate_ref[0] = result.prompt_token_estimate
     if result.response.strip():
+        stream_has_visible_text = bool(strip_ansi(ctx.cfg.stream_visible_text_ref[0]).strip())
+        if stream_has_visible_text and _stream_output_contains_response(ctx.cfg, result.response):
+            ctx.cfg.assistant_outputs.append(result.response)
+            return result.response, True
         _render_assistant_response(
             result.response, ctx.cfg.assistant_outputs, ctx.cfg.agent.config.agent_name
         )

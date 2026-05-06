@@ -38,11 +38,28 @@ except Exception:
     _PT_ANSI = None
 
 _TUI_OUTPUT_SINK: Callable[[str], None] | None = None
+_TUI_STREAM_SINK: Callable[[str], None] | None = None
+_TUI_STREAM_FINISH: Callable[[], None] | None = None
 
 
 def set_tui_output_sink(sink: Callable[[str], None] | None) -> None:
     global _TUI_OUTPUT_SINK
     _TUI_OUTPUT_SINK = sink
+
+
+def set_tui_stream_sink(
+    sink: Callable[[str], None] | None,
+    *,
+    finish: Callable[[], None] | None = None,
+) -> None:
+    global _TUI_STREAM_FINISH, _TUI_STREAM_SINK
+    _TUI_STREAM_SINK = sink
+    _TUI_STREAM_FINISH = finish
+
+
+def finish_tui_stream() -> None:
+    if _TUI_STREAM_FINISH is not None:
+        _TUI_STREAM_FINISH()
 
 
 def _cprint(text: str) -> None:
@@ -62,6 +79,13 @@ def _write_output_text(text: str) -> None:
         return
     sys.stdout.write(text if supports_ansi() else strip_ansi(text))
     sys.stdout.flush()
+
+
+def _write_stream_text(text: str) -> None:
+    if _TUI_STREAM_SINK is not None:
+        _TUI_STREAM_SINK(text)
+        return
+    _write_output_text(text)
 
 
 def startup_banner(agent_name: str, *, use_gateway: bool) -> str:
