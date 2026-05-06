@@ -99,6 +99,9 @@ class SubAgentParsedOutput:
     used_skills: list[str] = field(default_factory=list)
     used_tools: list[str] = field(default_factory=list)
     evidence: list[dict[str, object]] = field(default_factory=list)
+    # LLM: evidence_packets/findings keep claims traceable for parent acceptance.
+    evidence_packets: list[dict[str, object]] = field(default_factory=list)
+    findings: list[dict[str, object]] = field(default_factory=list)
     capability_requests: list[dict[str, object]] = field(default_factory=list)
     artifacts: list[dict[str, object]] = field(default_factory=list)
     tests: list[dict[str, object]] = field(default_factory=list)

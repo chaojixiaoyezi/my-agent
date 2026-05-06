@@ -76,11 +76,13 @@ class TestParseSubagentRunnerOutput:
 
     def test_parse_all_fields_extracted(self):
         """验证所有字段都被正确提取。"""
-        text = '[SUBAGENT_RESULT]\n{"status": "COMPLETED", "summary": "摘要", "blocked_reason": "", "failure_type": "", "used_skills": ["s1"], "used_tools": ["t1"], "evidence": [{"k": "v"}], "capability_requests": [], "artifacts": [], "tests": [], "patches": [], "lessons": ["l1"], "next_actions": ["a1"]}\n[/SUBAGENT_RESULT]'
+        text = '[SUBAGENT_RESULT]\n{"status": "COMPLETED", "summary": "摘要", "blocked_reason": "", "failure_type": "", "used_skills": ["s1"], "used_tools": ["t1"], "evidence": [{"k": "v"}], "evidence_packets": [{"claim": "c", "evidence_refs": ["e"]}], "findings": [{"claim": "f", "evidence_packet_ids": ["p"]}], "capability_requests": [], "artifacts": [], "tests": [], "patches": [], "lessons": ["l1"], "next_actions": ["a1"]}\n[/SUBAGENT_RESULT]'
         result = parse_subagent_runner_output(text)
         assert result.used_skills == ["s1"]
         assert result.used_tools == ["t1"]
         assert result.evidence == [{"k": "v"}]
+        assert result.evidence_packets == [{"claim": "c", "evidence_refs": ["e"]}]
+        assert result.findings == [{"claim": "f", "evidence_packet_ids": ["p"]}]
         assert result.lessons == ["l1"]
         assert result.next_actions == ["a1"]
 

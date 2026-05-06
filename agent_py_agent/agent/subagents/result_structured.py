@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Structured runner-output processing for subagent results."""
 
-from .models import CapabilityRequest, SubAgentParsedOutput, SubAgentTask, VerificationEvidence
+from .models import CapabilityRequest, EvidencePacket, Finding, SubAgentParsedOutput, SubAgentTask, VerificationEvidence
 from .parsing import _normalize_runner_items, _split_allowed_items, _string_dict, _string_list
 from .utils import _merge_list, _new_id
 
@@ -103,6 +103,90 @@ def _process_evidence_items(parsed, task, now):
     return count
 
 
+def _string_refs(value: object) -> list[str]:
+    return _string_list(value)
+
+
+def _float_confidence(value: object) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _process_evidence_packets(parsed, task, now):
+    """LLM: Turn runner evidence packets into task-tree evidence facts."""
+    packets: list[dict[str, object]] = []
+    for item in parsed.evidence_packets:
+        claim = str(item.get("claim", "") or "").strip()
+        evidence_refs = _string_refs(item.get("evidence_refs", []))
+        artifact_refs = _string_refs(item.get("artifact_refs", []))
+        if not claim or not (evidence_refs or artifact_refs):
+            continue
+        packet = EvidencePacket(
+            id=str(item.get("id", "") or _new_id("evpkt")),
+            claim=claim,
+            checked_scope=str(item.get("checked_scope", "") or ""),
+            evidence_refs=evidence_refs,
+            artifact_refs=artifact_refs,
+            counter_evidence_refs=_string_refs(item.get("counter_evidence_refs", [])),
+            confidence=_float_confidence(item.get("confidence", 0.0)),
+            unresolved_risks=_string_refs(item.get("unresolved_risks", [])),
+            created_at=now,
+        )
+        task.evidence_packets.append(packet)
+        task.evidence_refs = _merge_list(task.evidence_refs, packet.evidence_refs)
+        task.artifact_refs = _merge_list(task.artifact_refs, packet.artifact_refs)
+        packets.append({
+            "id": packet.id,
+            "claim": packet.claim,
+            "checked_scope": packet.checked_scope,
+            "evidence_refs": packet.evidence_refs,
+            "artifact_refs": packet.artifact_refs,
+            "counter_evidence_refs": packet.counter_evidence_refs,
+            "confidence": packet.confidence,
+            "unresolved_risks": packet.unresolved_risks,
+            "created_at": packet.created_at,
+        })
+    return packets
+
+
+def _process_findings(parsed, task, now):
+    """LLM: Store parent-readable findings that cite evidence packets."""
+    findings: list[dict[str, object]] = []
+    for item in parsed.findings:
+        claim = str(item.get("claim", "") or "").strip()
+        evidence_packet_ids = _string_refs(item.get("evidence_packet_ids", []))
+        evidence_refs = _string_refs(item.get("evidence_refs", []))
+        if not claim or not (evidence_packet_ids or evidence_refs):
+            continue
+        finding = Finding(
+            id=str(item.get("id", "") or _new_id("finding")),
+            claim=claim,
+            status=str(item.get("status", "OPEN") or "OPEN"),
+            severity=str(item.get("severity", "") or ""),
+            confidence=_float_confidence(item.get("confidence", 0.0)),
+            evidence_packet_ids=evidence_packet_ids,
+            evidence_refs=evidence_refs,
+            counter_evidence_refs=_string_refs(item.get("counter_evidence_refs", [])),
+            created_at=now,
+        )
+        task.findings.append(finding)
+        task.evidence_refs = _merge_list(task.evidence_refs, finding.evidence_refs)
+        findings.append({
+            "id": finding.id,
+            "claim": finding.claim,
+            "status": finding.status,
+            "severity": finding.severity,
+            "confidence": finding.confidence,
+            "evidence_packet_ids": finding.evidence_packet_ids,
+            "evidence_refs": finding.evidence_refs,
+            "counter_evidence_refs": finding.counter_evidence_refs,
+            "created_at": finding.created_at,
+        })
+    return findings
+
+
 def _normalize_parsed_fields(parsed):
     return {
         "artifacts": _normalize_runner_items(parsed.artifacts),
@@ -131,13 +215,26 @@ def _process_structured_output(
     task.used_skills = _merge_list(task.used_skills, used_skills)
 
     structured_evidence_count = _process_evidence_items(parsed, task, now)
+    evidence_packets = _process_evidence_packets(parsed, task, now)
+    findings = _process_findings(parsed, task, now)
     structured_request_count, created_request_ids = _create_capability_requests_from_parsed(task, parsed, now)
     normalized = _normalize_parsed_fields(parsed)
+    task.artifact_refs = _merge_list(
+        task.artifact_refs,
+        [
+            ref
+            for ref in (str(item.get("path") or item.get("uri") or item.get("artifact_id") or "") for item in normalized["artifacts"])
+            if ref
+        ],
+    )
+    task.blockers = _merge_list(task.blockers, [parsed.blocked_reason] if parsed.blocked_reason else [])
     return {
         "ignored_tools": ignored_tools,
         "ignored_skills": ignored_skills,
         "structured_evidence_count": structured_evidence_count,
         "structured_request_count": structured_request_count,
+        "evidence_packets": evidence_packets,
+        "findings": findings,
         "created_request_ids": created_request_ids,
         "artifacts": normalized["artifacts"],
         "tests": normalized["tests"],

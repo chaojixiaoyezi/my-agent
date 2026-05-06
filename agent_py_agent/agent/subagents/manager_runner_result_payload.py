@@ -46,6 +46,9 @@ class BuildAndPersistContext:
     structured_evidence_count: int
     structured_request_count: int
     artifacts: list
+    # LLM: carry traceable evidence packets through payload assembly.
+    evidence_packets: list
+    findings: list
     tests: list
     patches: list
     lessons: list
@@ -70,6 +73,8 @@ class _ApplyStatusParams:
     ignored_tools: list[str]
     ignored_skills: list[str]
     artifacts: list
+    evidence_packets: list
+    findings: list
     tests: list
     patches: list
     lessons: list
@@ -89,6 +94,8 @@ class _BuildContextParams:
     structured_evidence_count: int
     structured_request_count: int
     artifacts: list
+    evidence_packets: list
+    findings: list
     tests: list
     patches: list
     lessons: list
@@ -108,6 +115,8 @@ class _ExtractedOutput:
     structured_request_count: int = 0
     created_request_ids: list[str] = field(default_factory=list)
     artifacts: list = field(default_factory=list)
+    evidence_packets: list = field(default_factory=list)
+    findings: list = field(default_factory=list)
     tests: list = field(default_factory=list)
     patches: list = field(default_factory=list)
     lessons: list = field(default_factory=list)
@@ -176,6 +185,8 @@ def _make_build_context(p: _BuildContextParams) -> BuildAndPersistContext:
         structured_evidence_count=p.structured_evidence_count,
         structured_request_count=p.structured_request_count,
         artifacts=p.artifacts,
+        evidence_packets=p.evidence_packets,
+        findings=p.findings,
         tests=p.tests,
         patches=p.patches,
         lessons=p.lessons,
@@ -202,6 +213,8 @@ def _output_payload_context(extracted: _ApplyStatusParams, runner_meta: dict, ca
         ignored_tools=extracted.ignored_tools,
         ignored_skills=extracted.ignored_skills,
         artifacts=extracted.artifacts,
+        evidence_packets=extracted.evidence_packets,
+        findings=extracted.findings,
         tests=extracted.tests,
         patches=extracted.patches,
         lessons=extracted.lessons,
@@ -231,6 +244,8 @@ def _build_context_params(
         structured_evidence_count=extracted.structured_evidence_count,
         structured_request_count=extracted.structured_request_count,
         artifacts=extracted.artifacts,
+        evidence_packets=extracted.evidence_packets,
+        findings=extracted.findings,
         tests=extracted.tests,
         patches=extracted.patches,
         lessons=extracted.lessons,

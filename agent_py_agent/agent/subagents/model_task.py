@@ -15,6 +15,55 @@ from .quality_models import ContextManifest, QualityContract
 
 
 @dataclass
+class EvidencePacket:
+    """LLM: Evidence unit that backs a claim instead of trusting runner prose."""
+
+    id: str = ""
+    claim: str = ""
+    checked_scope: str = ""
+    evidence_refs: list[str] = field(default_factory=list)
+    artifact_refs: list[str] = field(default_factory=list)
+    counter_evidence_refs: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+    unresolved_risks: list[str] = field(default_factory=list)
+    created_at: float = 0.0
+
+
+@dataclass
+class Finding:
+    """LLM: Parent-readable conclusion that must cite evidence packets."""
+
+    id: str = ""
+    claim: str = ""
+    status: str = "OPEN"
+    severity: str = ""
+    confidence: float = 0.0
+    evidence_packet_ids: list[str] = field(default_factory=list)
+    evidence_refs: list[str] = field(default_factory=list)
+    counter_evidence_refs: list[str] = field(default_factory=list)
+    created_at: float = 0.0
+
+
+@dataclass
+class StatusReport:
+    """LLM: Latest observable progress snapshot for task-tree control plane."""
+
+    run_id: str = ""
+    version: int = 0
+    state: str = "PLANNING"
+    progress: float = 0.0
+    current_step: str = ""
+    summary_delta: dict[str, list[str]] = field(default_factory=dict)
+    budget_used: dict[str, object] = field(default_factory=dict)
+    artifact_refs: list[str] = field(default_factory=list)
+    evidence_refs: list[str] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+    checkpoint_ref: str = ""
+    next_recommended_action: str = ""
+    updated_at: float = 0.0
+
+
+@dataclass
 class SubAgentTask:
     """Persistent run record for one subagent task."""
 
@@ -39,6 +88,8 @@ class SubAgentTask:
     capability_gaps: list[CapabilityGap] = field(default_factory=list)
     acceptance_checks: list[str] = field(default_factory=list)
     evidence: list[VerificationEvidence] = field(default_factory=list)
+    evidence_packets: list[EvidencePacket] = field(default_factory=list)
+    findings: list[Finding] = field(default_factory=list)
     quality_contract: QualityContract = field(default_factory=QualityContract)
     context_manifest: ContextManifest = field(default_factory=ContextManifest)
     context_packs: list[dict[str, object]] = field(default_factory=list)
@@ -59,6 +110,15 @@ class SubAgentTask:
     updated_at: float = 0.0
     heartbeat_at: float = 0.0
     ended_at: float = 0.0
+    progress: float = 0.0
+    current_step: str = ""
+    latest_summary: str = ""
+    blockers: list[str] = field(default_factory=list)
+    budget_used: dict[str, object] = field(default_factory=dict)
+    artifact_refs: list[str] = field(default_factory=list)
+    evidence_refs: list[str] = field(default_factory=list)
+    checkpoint_ref: str = ""
+    latest_status_report: StatusReport = field(default_factory=StatusReport)
     task_dir: str = ""
     data_dir: str = ""
     output_dir: str = ""
@@ -76,6 +136,7 @@ class SubAgentTask:
     handoff_file: str = ""
     debrief_file: str = ""
     output_json: str = ""
+    status_report_json: str = ""
     dependencies_json: str = ""
     takeover_file: str = ""
     execution_context_file: str = ""

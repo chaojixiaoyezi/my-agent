@@ -42,6 +42,35 @@ def test_process_structured_output_handles_raw_json(mock_task):
     assert len(mock_task.evidence) == 1
 
 
+def test_process_structured_output_records_evidence_packets_and_findings(mock_task):
+    """LLM: evidence packets become task facts for parent acceptance."""
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        evidence_packets=[{
+            "claim": "关键结论",
+            "checked_scope": "scope-a",
+            "evidence_refs": ["artifact://evidence-1"],
+            "artifact_refs": ["artifact://raw-1"],
+            "confidence": 0.8,
+        }],
+        findings=[{
+            "claim": "父级可读结论",
+            "evidence_refs": ["artifact://evidence-1"],
+            "severity": "P1",
+        }],
+    )
+
+    result = _process_structured_output(mock_task, parsed, 123456.0, None)
+
+    assert len(result["evidence_packets"]) == 1
+    assert len(result["findings"]) == 1
+    assert mock_task.evidence_refs == ["artifact://evidence-1"]
+    assert mock_task.artifact_refs == ["artifact://raw-1"]
+
+
 def test_build_output_payload_with_lessons_and_next_actions(mock_task):
     """测试 lessons 和 next_actions 被正确传递。"""
     parsed = SubAgentParsedOutput(
@@ -79,6 +108,8 @@ def test_build_output_payload_with_lessons_and_next_actions(mock_task):
             ignored_tools=[],
             ignored_skills=[],
             artifacts=[],
+            evidence_packets=[],
+            findings=[],
             tests=[],
             patches=[],
             lessons=["经验1", "经验2"],

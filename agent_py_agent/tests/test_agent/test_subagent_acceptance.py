@@ -14,6 +14,7 @@ from pathlib import Path
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagent import (
+    EvidencePacket,
     RecordRunnerResultParams,
     VerificationEvidence,
     parse_subagent_runner_output,
@@ -34,6 +35,15 @@ def _setup_acceptance_task(agent, task):
     Path(task.reports_dir, "smoke.md").write_text("smoke ok\n", encoding="utf-8")
     task.evidence.append(VerificationEvidence(
         kind="command", summary="smoke test 通过", command="python smoke.py", ok=True, created_at=time.time(),
+    ))
+    task.evidence_packets.append(EvidencePacket(
+        id="evpkt-smoke",
+        claim="smoke test 通过",
+        checked_scope="reports/smoke.md",
+        evidence_refs=[str(Path(task.reports_dir, "smoke.md"))],
+        artifact_refs=["reports/smoke.md"],
+        confidence=0.9,
+        created_at=time.time(),
     ))
     agent.subagents.save(task)
     Path(task.output_json).write_text(json.dumps({
@@ -163,6 +173,9 @@ def test_subagent_acceptance_uses_actual_tool_evidence_from_runner():
             '  "evidence": [\n'
             '    {"kind": "command", "summary": "读取 README.md 成功", "path": "README.md", "ok": true},\n'
             '    {"kind": "command", "summary": "写入报告成功", "path": "scenario_outputs/demo.md", "ok": true}\n'
+            "  ],\n"
+            '  "evidence_packets": [\n'
+            '    {"id": "evpkt-tools", "claim": "README 已读取且报告已写入", "checked_scope": "README.md + scenario_outputs/demo.md", "evidence_refs": ["README.md", "scenario_outputs/demo.md"], "artifact_refs": ["scenario_outputs/demo.md"], "confidence": 0.9}\n'
             "  ],\n"
             '  "artifacts": [],\n'
             '  "tests": [],\n'

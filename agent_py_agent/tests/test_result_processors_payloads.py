@@ -68,6 +68,8 @@ def _output_payload_context(mock_task, parsed, **overrides):
         "ignored_tools": [],
         "ignored_skills": [],
         "artifacts": [],
+        "evidence_packets": [],
+        "findings": [],
         "tests": [],
         "patches": [],
         "lessons": [],

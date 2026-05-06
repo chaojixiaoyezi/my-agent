@@ -14,7 +14,7 @@ from pathlib import Path
 from agent_py_agent.__main__ import build_parser
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
-from agent_py_agent.agent.subagent import VerificationEvidence
+from agent_py_agent.agent.subagent import EvidencePacket, VerificationEvidence
 
 
 def _setup_patch_task(agent, task, *, patch_status="applied", patch_summary="测试 patch 已应用"):
@@ -24,6 +24,15 @@ def _setup_patch_task(agent, task, *, patch_status="applied", patch_summary="测
     task.channel_status = "OK"
     task.evidence.append(VerificationEvidence(
         kind="command", summary="patch smoke test 通过", command="python smoke.py", ok=True, created_at=time.time(),
+    ))
+    task.evidence_packets.append(EvidencePacket(
+        id="evpkt-patch",
+        claim="patch smoke test 通过",
+        checked_scope="patch output",
+        evidence_refs=[task.output_json],
+        artifact_refs=["agent_py_agent/agent/demo.py"],
+        confidence=0.9,
+        created_at=time.time(),
     ))
     agent.subagents.save(task)
     Path(task.output_json).write_text(json.dumps({
@@ -169,7 +178,7 @@ def test_subagent_patch_apply_writes_file_and_marks_patch_reviewed():
             plan=["apply"],
             extra_write_roots=[str(target)],
             acceptance_checks=[
-                f"command: python -c \"from pathlib import Path; assert Path('workspace.txt').read_text() == {expected_content}\""
+                f"command: python3 -c \"from pathlib import Path; assert Path('workspace.txt').read_text() == {expected_content}\""
             ],
         )
         Path(task.output_json).write_text(

@@ -30,3 +30,6 @@ def test_subagent_persistence_service_round_trips_task(tmp_path) -> None:
     assert any(item.id == task.id for item in runs)
     assert (tmp_path / task.id / "task.json").exists()
     assert (tmp_path / task.id / "thought.md").exists()
+    assert loaded.latest_status_report.run_id == task.id
+    assert loaded.latest_status_report.state == "DONE"
+    assert (tmp_path / task.id / "reports" / "status_report.json").exists()
