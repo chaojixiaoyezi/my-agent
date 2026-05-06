@@ -5,7 +5,6 @@
 """
 from __future__ import annotations
 
-import argparse
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock, patch
@@ -177,28 +176,27 @@ class TestCmdGatewayStatus:
 class TestCmdGatewayRestart:
     """测试 cmd_gateway_restart 命令。"""
 
-    def test_gateway_restart_supplies_run_defaults_when_parser_omits_them(self):
-        """Restart should pass the same safe defaults as gateway run."""
+    def test_gateway_restart_starts_background_gateway(self):
+        """Restart should stop first, then return after starting the background gateway."""
         from agent_py_agent.cli._gateway_commands import cmd_gateway_restart
-        from agent_py_agent.cli.common import DEFAULT_CAPABILITY_CONFIG
 
-        args = argparse.Namespace(
+        args = MagicMock(
             config="agent_config.yaml",
             timeout=None,
             force=False,
             force_lock=False,
         )
 
-        with patch("agent_py_agent.cli._gateway_commands.cmd_gateway_stop", return_value=0), \
-             patch("agent_py_agent.cli._gateway_commands.cmd_gateway_run", return_value=0) as mock_run:
+        with patch("agent_py_agent.cli._gateway_commands.cmd_gateway_stop", return_value=0) as mock_stop, \
+             patch("agent_py_agent.cli._gateway_commands.cmd_gateway_start", return_value=0) as mock_start:
             result = cmd_gateway_restart(args)
 
         assert result == 0
-        run_args = mock_run.call_args.args[0]
-        assert run_args.capability_config == str(DEFAULT_CAPABILITY_CONFIG)
-        assert run_args.skill_dir == []
-        assert run_args.locked_file == []
-        assert run_args.note is None
+        assert mock_stop.call_args.args[0].kill is True
+        start_args = mock_start.call_args.args[0]
+        assert start_args.config == "agent_config.yaml"
+        assert start_args.force is True
+        assert start_args.force_lock is False
 
     def test_gateway_restart_with_stopped_gateway(self, tmp_path: Path):
         """重启已停止的 gateway。"""
@@ -234,10 +232,10 @@ class TestCmdGatewayRestart:
              patch("agent_py_agent.cli.gateway_process.gateway_request_counts", return_value={}), \
              patch("agent_py_agent.cli._gateway_commands.get_running_pid", return_value=None), \
              patch("agent_py_agent.cli.gateway_process.wait_for_gateway_running", return_value=True), \
-             patch("agent_py_agent.cli._gateway_commands.cmd_gateway_run", return_value=0) as mock_run:
+             patch("agent_py_agent.cli._gateway_commands.cmd_gateway_start", return_value=0) as mock_start:
             result = cmd_gateway_restart(args)
             assert result == 0
-            mock_run.assert_called_once()
+            mock_start.assert_called_once()
             result = cmd_gateway_restart(args)
             assert result == 0
 

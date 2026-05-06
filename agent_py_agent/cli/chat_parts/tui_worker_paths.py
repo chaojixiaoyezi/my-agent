@@ -90,7 +90,7 @@ def _print_gateway_timing(ctx, request_id: str, response: dict) -> None:
 
 
 def _worker_local_path(ctx) -> tuple[str, bool]:
-    from .rendering import _render_assistant_response
+    from .fallback_ui import _render_assistant_response
 
     result = ctx.cfg.agent.run(
         ctx.job.user,

@@ -37,6 +37,7 @@ class TuiStatusRefs:
     pending_jobs_ref: list
     running_started_at_ref: list
     last_token_estimate_ref: list
+    thinking_line_ref: list
 
 
 @dataclass
@@ -64,6 +65,7 @@ COLLAPSE_PREVIEW_CHARS = 900
 def _tui_get_status_text(refs: TuiStatusRefs, model: str) -> str:
     with refs.state_lock:
         tokens = refs.last_token_estimate_ref[0]
+        thinking = refs.thinking_line_ref[0] if refs.thinking_line_ref else ""
     pct = tokens / CONTEXT_WINDOW if CONTEXT_WINDOW else 0
     bar = progress_bar(pct)
     pieces = [
@@ -71,6 +73,8 @@ def _tui_get_status_text(refs: TuiStatusRefs, model: str) -> str:
         f"ctx {tokens / 1000:.1f}K/{CONTEXT_WINDOW / 1000:.0f}K",
         f"[{bar}] {pct:.0%}",
     ]
+    if thinking:
+        pieces.append(thinking)
     return " | ".join(pieces)
 
 
@@ -180,6 +184,7 @@ def _run_tui_loop(ctx: TuiLoopContext) -> None:
 def _make_tui_app_params(
     params: TuiRunParams,
     assistant_outputs: list[str],
+    thinking_line_ref: list[str],
     stop_event: threading.Event,
 ) -> MakeTuiAppParams:
     return MakeTuiAppParams(
@@ -191,6 +196,7 @@ def _make_tui_app_params(
         last_token_estimate_ref=params.last_token_estimate_ref,
         jobs=params.jobs,
         pending_jobs_ref_for_enqueue=params.pending_jobs_ref,
+        thinking_line_ref=thinking_line_ref,
         runtime_inject=params.runtime_inject,
         prompt_files=params.prompt_files,
         args=params.args,
@@ -239,7 +245,7 @@ def run_tui(*, params: TuiRunParams) -> int:
     app_ref: list = [None]
     refresh_stop = threading.Event()
 
-    app = _make_tui_app(params=_make_tui_app_params(params, assistant_outputs, stop_event))
+    app = _make_tui_app(params=_make_tui_app_params(params, assistant_outputs, thinking_line_ref, stop_event))
     app_ref[0] = app
     refs = TuiInputRefs(
         app_ref=app_ref,

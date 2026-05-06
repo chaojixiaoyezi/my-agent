@@ -86,6 +86,7 @@ class MakeTuiAppParams:
     last_token_estimate_ref: list
     jobs: object
     pending_jobs_ref_for_enqueue: list
+    thinking_line_ref: list
     runtime_inject: list[str]
     prompt_files: list[str]
     args: object
@@ -118,5 +119,4 @@ class TuiRunParams:
     build_history_context: object
     session_manager: object
     current_session_id: str
-
 

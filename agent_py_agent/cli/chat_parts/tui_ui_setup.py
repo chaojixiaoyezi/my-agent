@@ -186,7 +186,14 @@ def make_tui_app(params: MakeTuiAppParams):
 
     status_bar = _make_status_bar(
         StatusBarConfig(
-            refs=TuiStatusRefs(params.state_lock, params.is_running_ref, params.pending_jobs_ref, params.running_started_at_ref, params.last_token_estimate_ref),
+            refs=TuiStatusRefs(
+                params.state_lock,
+                params.is_running_ref,
+                params.pending_jobs_ref,
+                params.running_started_at_ref,
+                params.last_token_estimate_ref,
+                params.thinking_line_ref,
+            ),
             model_name=params.agent.config.model_name,
         )
     )
