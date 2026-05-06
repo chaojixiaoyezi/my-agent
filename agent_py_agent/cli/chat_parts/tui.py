@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass
 
 from .rendering import _cprint, _tui_print_banner, progress_bar
@@ -66,6 +67,8 @@ def _tui_get_status_text(refs: TuiStatusRefs, model: str) -> str:
     with refs.state_lock:
         tokens = refs.last_token_estimate_ref[0]
         thinking = refs.thinking_line_ref[0] if refs.thinking_line_ref else ""
+        started_at = refs.running_started_at_ref[0]
+        running = bool(refs.is_running_ref[0])
     pct = tokens / CONTEXT_WINDOW if CONTEXT_WINDOW else 0
     bar = progress_bar(pct)
     pieces = [
@@ -74,8 +77,15 @@ def _tui_get_status_text(refs: TuiStatusRefs, model: str) -> str:
         f"[{bar}] {pct:.0%}",
     ]
     if thinking:
-        pieces.append(thinking)
+        pieces.append(_format_thinking_status(thinking, started_at, running))
     return " | ".join(pieces)
+
+
+def _format_thinking_status(thinking: str, started_at: float, running: bool) -> str:
+    if not running or not started_at:
+        return thinking
+    elapsed = max(0.0, time.perf_counter() - started_at)
+    return f"{thinking} {elapsed:.1f}s"
 
 
 def _tui_handle_expand_command(raw: str, assistant_outputs: list[str]) -> bool:

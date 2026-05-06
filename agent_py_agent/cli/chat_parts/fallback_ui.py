@@ -11,7 +11,7 @@ import threading
 
 from .fallback_state import FALLBACK_CHAT_PROMPT
 from .input_loop import parse_expand_target
-from .rendering import GRAY, GREEN, RESET, collapse_response_text
+from .rendering import GRAY, GREEN, RESET, _cprint, collapse_response_text
 
 
 def _make_chunk_handler(agent_name: str, next_message_id: int):
@@ -45,12 +45,12 @@ def _render_assistant_response(text: str, assistant_outputs: list[str], agent_na
     assistant_outputs.append(text)
     message_id = len(assistant_outputs)
     if collapsed:
-        print(f"{GREEN}{agent_name}#{message_id}>{RESET} {preview}")
-        print(
+        _cprint(f"{GREEN}{agent_name}#{message_id}>{RESET} {preview}")
+        _cprint(
             f"{GRAY}[回复较长，已自动折叠。输入 /expand {message_id} 或 /expand last 查看全文。]{RESET}"
         )
         return
-    print(f"{GREEN}{agent_name}#{message_id}>{RESET} {text}")
+    _cprint(f"{GREEN}{agent_name}#{message_id}>{RESET} {text}")
 
 
 def _handle_expand_command(raw: str, assistant_outputs: list[str]) -> None:

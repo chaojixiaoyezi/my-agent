@@ -104,7 +104,7 @@ def format_gateway_timing(
 ) -> str:
     if use_gateway:
         return (
-            f"[耗时 {elapsed:.2f}s; gateway_request={request_id}; "
+            f"[耗时 {elapsed:.2f}s; "
             f"工具轮数 {response.get('tool_rounds', 0)}; "
             f"prompt_tokens~{response.get('prompt_token_estimate', 0)}; "
             f"resume_context={1 if response.get('memory_resume_context_injected') else 0}]"

@@ -46,7 +46,7 @@ _FLOAT_PATTERN = re.compile(r"-?[0-9]+(\.[0-9]+)?")
 @dataclass
 class AgentConfig:
 
-    agent_name: str = "小叶子-myagent"
+    agent_name: str = "myagent"
     system_prompt: str = "你是一个谨慎、可扩展、会记录记忆、会在必要时调用工具的 Python CLI 智能体。先理解任务，再给出结构化回答。"
     workspace_root: str = ""
     auto_detect_work_on_startup: bool = True
