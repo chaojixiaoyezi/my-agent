@@ -20,8 +20,9 @@ _MAX_WRITE_TEXT_CHARS = 1_000_000
 
 class FileSystemTool(BaseTool):
 
-    def __init__(self, workspace_root: Path):
+    def __init__(self, workspace_root: Path, workspace_roots: list[Path] | None = None):
         self.workspace_root = workspace_root.resolve()
+        self.workspace_roots = _normalized_workspace_roots(self.workspace_root, workspace_roots)
 
     def resolve_path(self, raw_path: str | Path) -> Path:
 
@@ -33,6 +34,8 @@ class FileSystemTool(BaseTool):
             candidate = candidate.resolve(strict=False)
         except (OSError, RuntimeError) as exc:
             raise ValueError("路径解析失败，请检查路径是否有效。") from exc
+        if _is_under_any_root(candidate, self.workspace_roots):
+            return candidate
         try:
             candidate.relative_to(self.workspace_root)
         except ValueError as exc:
@@ -41,6 +44,14 @@ class FileSystemTool(BaseTool):
 
     def display_path(self, path: Path) -> str:
 
+        for root in self.workspace_roots:
+            if root == self.workspace_root:
+                continue
+            try:
+                path.relative_to(root)
+            except ValueError:
+                continue
+            return str(path).replace("\\", "/")
         try:
             return str(path.relative_to(self.workspace_root)).replace("\\", "/")
         except ValueError:
@@ -49,8 +60,8 @@ class FileSystemTool(BaseTool):
 
 class ListFilesTool(FileSystemTool):
 
-    def __init__(self, workspace_root: Path, max_entries: int):
-        super().__init__(workspace_root)
+    def __init__(self, workspace_root: Path, max_entries: int, workspace_roots: list[Path] | None = None):
+        super().__init__(workspace_root, workspace_roots)
         self.max_entries = max_entries
         self.spec = ToolSpec(
             name="list_files",
@@ -94,7 +105,7 @@ class ListFilesTool(FileSystemTool):
         entries: list[str] = []
         for item in iterator:
             suffix = "/" if item.is_dir() else ""
-            entries.append(str(item.relative_to(self.workspace_root)) + suffix)
+            entries.append(self.display_path(item) + suffix)
             if len(entries) >= self.max_entries:
                 entries.append(f"... 已截断，最多显示 {self.max_entries} 条")
                 break
@@ -103,8 +114,8 @@ class ListFilesTool(FileSystemTool):
 
 class ReadFileTool(FileSystemTool):
 
-    def __init__(self, workspace_root: Path, max_chars: int):
-        super().__init__(workspace_root)
+    def __init__(self, workspace_root: Path, max_chars: int, workspace_roots: list[Path] | None = None):
+        super().__init__(workspace_root, workspace_roots)
         self.max_chars = max_chars
         self.spec = ToolSpec(
             name="read_file",
@@ -167,8 +178,8 @@ class ReadFileTool(FileSystemTool):
 
 class SearchTextTool(FileSystemTool):
 
-    def __init__(self, workspace_root: Path, max_matches: int):
-        super().__init__(workspace_root)
+    def __init__(self, workspace_root: Path, max_matches: int, workspace_roots: list[Path] | None = None):
+        super().__init__(workspace_root, workspace_roots)
         self.max_matches = max_matches
         self.spec = ToolSpec(
             name="search_text",
@@ -245,7 +256,7 @@ class SearchTextTool(FileSystemTool):
 
     def _append_search_match(
         self,
-        rel: Path,
+        rel: str,
         line_number: int,
         line: str,
         matches: list[str],
@@ -259,8 +270,24 @@ class SearchTextTool(FileSystemTool):
             snippet = snippet[:_MAX_SEARCH_LINE_CHARS] + "... 已截断"
         return snippet
 
-    def _item_relative_path(self, item: Path, safe_item: Path) -> Path:
+    def _item_relative_path(self, item: Path, safe_item: Path) -> str:
+        return self.display_path(safe_item if safe_item.is_absolute() else item)
+
+
+def _normalized_workspace_roots(primary: Path, roots: list[Path] | None) -> list[Path]:
+    resolved: list[Path] = []
+    for raw in [primary, *(roots or [])]:
+        path = Path(raw).resolve()
+        if path not in resolved:
+            resolved.append(path)
+    return resolved
+
+
+def _is_under_any_root(path: Path, roots: list[Path]) -> bool:
+    for root in roots:
         try:
-            return item.relative_to(self.workspace_root)
+            path.relative_to(root)
+            return True
         except ValueError:
-            return safe_item.relative_to(self.workspace_root)
+            continue
+    return False

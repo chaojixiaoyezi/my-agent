@@ -53,6 +53,7 @@ class ToolRegistryParams:
     catalog_limit: int
     retrieval_limit: int
     vector_search_enabled: bool
+    workspace_roots: list[Path] | None = None
     shell_tool_timeout: int = 30
     expose_security_tools: bool = False
 
@@ -64,6 +65,7 @@ class ToolRegistry:
         params: ToolRegistryParams,
     ):
         self.workspace_root = params.workspace_root.resolve()
+        self.workspace_roots = params.workspace_roots or [self.workspace_root]
         self.tools: dict[str, BaseTool] = {}
         self.expose_security_tools = params.expose_security_tools
         self.security_tool_names = set(SECURITY_TOOL_NAMES)
@@ -76,12 +78,13 @@ class ToolRegistry:
             ]
         )
 
-        self.register(ListFilesTool(self.workspace_root, params.max_entries))
-        self.register(ReadFileTool(self.workspace_root, params.max_chars))
-        self.register(SearchTextTool(self.workspace_root, params.max_matches))
-        self.register(WriteFileTool(self.workspace_root))
-        self.register(AppendFileTool(self.workspace_root))
-        self.register(ReplaceInFileTool(self.workspace_root))
+        workspace_roots = self.workspace_roots
+        self.register(ListFilesTool(self.workspace_root, params.max_entries, workspace_roots))
+        self.register(ReadFileTool(self.workspace_root, params.max_chars, workspace_roots))
+        self.register(SearchTextTool(self.workspace_root, params.max_matches, workspace_roots))
+        self.register(WriteFileTool(self.workspace_root, workspace_roots))
+        self.register(AppendFileTool(self.workspace_root, workspace_roots))
+        self.register(ReplaceInFileTool(self.workspace_root, workspace_roots))
         self.register(FetchUrlTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
         self.register(HttpRequestTool(max_chars=params.web_max_chars, timeout=params.http_timeout))
         self.register(ShellTool(self.workspace_root, default_timeout=params.shell_tool_timeout))
@@ -217,6 +220,7 @@ class ToolRegistry:
             payload=payload,
             tools=self.tools,
             workspace_root=self.workspace_root,
+            workspace_roots=self.workspace_roots,
             expose_security_tools=self.expose_security_tools,
             security_tool_names=self.security_tool_names,
             allowed_tools=allowed_tools,

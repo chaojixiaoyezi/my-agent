@@ -62,6 +62,7 @@ def poll_gateway_chunks(
         chunks_printed = _poll_chunk_file(chunk_path, on_chunk, chunks_printed)
         response = read_json_file(response_path)
         if response:
+            chunks_printed = _poll_chunk_file(chunk_path, on_chunk, chunks_printed)
             break
         time.sleep(0.1)
     chunks_printed_ref[0] = chunks_printed

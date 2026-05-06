@@ -94,6 +94,15 @@ def _resolve_paths(config, root: Path):
     }
 
 
+def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -> list[Path]:
+    resolved: list[Path] = []
+    for raw in [primary, *(roots or [])]:
+        path = Path(raw).resolve()
+        if path not in resolved:
+            resolved.append(path)
+    return resolved
+
+
 class SimpleAgent(
     SimpleAgentRuntimeMixin,
     SimpleAgentSubagentMixin,
@@ -106,7 +115,7 @@ class SimpleAgent(
     它自己只做依赖组装；具体怎么聊天、怎么跑子代理、怎么 dispatch，已经分别交给 mixin 文件。
     """
 
-    def __init__(self, config: AgentConfig, root: str | Path):
+    def __init__(self, config: AgentConfig, root: str | Path, workspace_roots: list[str | Path] | None = None):
         """LLM: initialize all SimpleAgent collaborators and register orchestration tools.
 
         给人看的解释：
@@ -115,6 +124,7 @@ class SimpleAgent(
         """
         self.config = config
         self.root = Path(root)
+        self.workspace_roots = _normalized_workspace_roots(self.root, workspace_roots)
 
         paths = _resolve_paths(config, self.root)
         self.local_store = LocalStore(
@@ -130,13 +140,16 @@ class SimpleAgent(
             paths["subagent_workspace"],
             local_store=self.local_store,
             workspace_root=self.root,
+            workspace_roots=self.workspace_roots,
             enable_self_learning=config.enable_self_learning,
         )
 
         workspace_root = self.root.parent if (self.root / "__main__.py").exists() else self.root
+        workspace_roots = [workspace_root, *[root for root in self.workspace_roots if root != self.root]]
         self.tools = ToolRegistry(
             ToolRegistryParams(
                 workspace_root=workspace_root,
+                workspace_roots=workspace_roots,
                 max_chars=config.tool_read_max_chars,
                 max_entries=config.tool_list_max_entries,
                 max_matches=config.tool_search_max_matches,

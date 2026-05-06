@@ -25,7 +25,6 @@ def write_chunk(chunk_path: Path, text: str) -> None:
 
 
 def close_chunk_stream(chunk_path: Path) -> None:
-    try:
-        chunk_path.unlink(missing_ok=True)
-    except OSError:
-        pass
+    # Keep the chunk file after completion so clients that observe the final
+    # response first can still drain the last streamed tokens.
+    return

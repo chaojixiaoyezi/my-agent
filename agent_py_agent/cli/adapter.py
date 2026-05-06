@@ -141,7 +141,7 @@ def _register_channel_adapter(manager: ChannelManager, channel: str, agent) -> N
 
 
 def _adapter_workspace_root(agent) -> Path:
-    return Path(agent.config.workspace_root).resolve() if agent.config.workspace_root else Path.cwd()
+    return Path(getattr(agent, "root", Path.cwd())).resolve()
 
 
 def _feishu_adapter_config(agent) -> dict[str, str]:

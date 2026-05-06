@@ -15,6 +15,7 @@ from agent_py_agent.agent.gateway_parts import (
 )
 from agent_py_agent.agent.gateway_parts import runtime as gateway_runtime
 from agent_py_agent.cli import gateway_client
+from agent_py_agent.cli.chat_parts.gateway_client import poll_gateway_chunks
 
 
 def test_default_gateway_entry_can_reach_chat_handler():
@@ -65,6 +66,28 @@ def test_gateway_json_polling_suppresses_stream_chunks(tmp_path, capsys):
 
     assert payload["response"] == "DONE"
     assert capsys.readouterr().out == ""
+
+
+def test_chat_gateway_poll_drains_chunks_when_response_is_ready(tmp_path):
+    chunk_path = tmp_path / "req.chunks.jsonl"
+    response_path = tmp_path / "response.json"
+    chunk_path.write_text(
+        json.dumps({"text": "hello"}) + "\n" + json.dumps({"text": " world"}) + "\n",
+        encoding="utf-8",
+    )
+    response_path.write_text(json.dumps({"ok": True, "response": "hello world"}), encoding="utf-8")
+    seen: list[str] = []
+
+    response = poll_gateway_chunks(
+        chunk_path,
+        response_path,
+        deadline=9999999999,
+        on_chunk=seen.append,
+        chunks_printed_ref=[0],
+    )
+
+    assert response["response"] == "hello world"
+    assert seen == ["hello", " world"]
 
 
 def test_gateway_worker_continues_when_processing_lease_write_fails(tmp_path, monkeypatch):

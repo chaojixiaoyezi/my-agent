@@ -49,14 +49,42 @@ def configure_stdio() -> None:
 def make_agent(args) -> SimpleAgent:
 
     config = load_config(args.config)
-    return SimpleAgent(config, resolve_workspace_root(config, args.config))
+    roots = resolve_workspace_roots(config, args.config)
+    return SimpleAgent(config, roots[0], workspace_roots=roots)
 
 
 def resolve_workspace_root(config, config_path: str | Path) -> Path:
+    return resolve_workspace_roots(config, config_path)[0]
 
-    raw = str(getattr(config, "workspace_root", "") or "").strip()
+
+def resolve_workspace_roots(config, config_path: str | Path) -> list[Path]:
+
+    raw_value = getattr(config, "workspace_root", "")
+    raw_roots = _raw_workspace_roots(raw_value)
+    empty_means_default = isinstance(raw_value, list)
+    roots: list[Path] = []
+    for raw in raw_roots:
+        candidate = _resolve_one_workspace_root(raw, config_path, empty_means_default=empty_means_default)
+        if candidate is not None and candidate not in roots:
+            roots.append(candidate)
+    return roots or [ROOT]
+
+
+def _raw_workspace_roots(raw_value: object) -> list[object]:
+    if isinstance(raw_value, list):
+        return raw_value
+    return [raw_value]
+
+
+def _resolve_one_workspace_root(
+    raw_value: object,
+    config_path: str | Path,
+    *,
+    empty_means_default: bool,
+) -> Path | None:
+    raw = str(raw_value or "").strip()
     if not raw:
-        return ROOT
+        return ROOT if empty_means_default else None
     candidate = Path(raw).expanduser()
     if not candidate.is_absolute():
         candidate = Path(config_path).expanduser().resolve().parent / candidate

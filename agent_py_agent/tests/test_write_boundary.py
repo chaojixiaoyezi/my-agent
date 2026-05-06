@@ -305,6 +305,21 @@ class TestValidateWriteBoundaryEdgeCases:
         )
         assert result == ""
 
+    def test_allowed_root_in_extra_workspace_root(self, tmp_path):
+        primary = tmp_path / "primary"
+        extra = tmp_path / "extra"
+        primary.mkdir()
+        extra.mkdir()
+        target = extra / "file.txt"
+        result = validate_write_boundary(
+            "write_file",
+            {"path": str(target)},
+            workspace_root=primary,
+            workspace_roots=[primary, extra],
+            write_boundary={"allowed_write_roots": [str(extra)]},
+        )
+        assert result == ""
+
     def test_all_write_tools_validated(self, tmp_path):
         allowed = tmp_path / "allowed"
         allowed.mkdir()

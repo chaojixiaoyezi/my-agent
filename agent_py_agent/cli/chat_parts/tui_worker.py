@@ -159,7 +159,7 @@ def _make_stream_callbacks(cfg: TuiWorkerConfig, next_message_id: int, spinner):
         stream_started_ref[0] = True
 
     def on_stream_chunk(chunk: str) -> None:
-        if not chunk or not chunk.strip():
+        if not chunk:
             return
         begin_stream()
         _append_stream_text(chunk, cfg.stream_buf_ref)

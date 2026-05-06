@@ -20,7 +20,7 @@ auto_detect_work_on_startup: true
 # - 场景测试、外部聊天工具或未来多项目模式可以把它指向某个独立目录。
 # - memory_path、subagent_workspace、gateway_workspace、prompt_files 和文件工具都会以这个目录为基础。
 # - 这就是“测试不能影响当前开发仓库”的关键开关。
-workspace_root: ""
+workspace_root: ["", "C:/Users/41542/Desktop/2026年工作/5月"]
 
 # 默认模型后端：
 # - echo: 本地离线调试

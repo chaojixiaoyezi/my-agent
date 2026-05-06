@@ -4,6 +4,7 @@ import json
 import time
 from pathlib import Path
 
+from agent_py_agent.agent.gateway_parts.chunk_service import close_chunk_stream
 from agent_py_agent.agent.gateway_parts.paths import GatewayPaths, gateway_chunk_path
 
 
@@ -62,3 +63,13 @@ def test_chunk_file_cleanup(tmp_path):
     assert chunk_path.exists()
     chunk_path.unlink(missing_ok=True)
     assert not chunk_path.exists()
+
+
+def test_close_chunk_stream_keeps_file_for_late_pollers(tmp_path):
+    paths = _make_paths(tmp_path)
+    chunk_path = gateway_chunk_path(paths, "test-req")
+    chunk_path.write_text('{"t": 1, "text": "x"}\n', encoding="utf-8")
+
+    close_chunk_stream(chunk_path)
+
+    assert chunk_path.exists()
