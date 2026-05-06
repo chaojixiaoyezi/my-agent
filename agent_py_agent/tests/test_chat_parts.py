@@ -94,7 +94,7 @@ def test_tui_stream_chunks_strip_ansi_but_keep_text(capsys):
     assert "\033[" not in out
 
 
-def test_tui_default_mode_consumes_stream_without_terminal_write() -> None:
+def test_tui_default_mode_streams_visible_chunks() -> None:
     from agent_py_agent.cli.chat_parts.tui_worker import _make_stream_callbacks
 
     cfg = SimpleNamespace(
@@ -109,10 +109,10 @@ def test_tui_default_mode_consumes_stream_without_terminal_write() -> None:
         _begin, on_chunk = _make_stream_callbacks(cfg, 1, spinner)
         visible = on_chunk("hello")
 
-    assert visible is False
-    assert spinner.stopped is False
-    assert cfg.stream_visible_text_ref == [""]
-    mock_write.assert_not_called()
+    assert visible is True
+    assert spinner.stopped is True
+    assert cfg.stream_visible_text_ref == ["hello"]
+    mock_write.assert_called_once_with("hello")
 
 
 def test_tui_input_prompt_is_stable_separate_window(tmp_path) -> None:

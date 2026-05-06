@@ -10,7 +10,7 @@ from __future__ import annotations
 """
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -116,8 +116,7 @@ class HttpBackend(BaseBackend):
         )
 
 
-def _openai_stream_contents(lines) -> list[str]:
-    contents: list[str] = []
+def _openai_stream_contents(lines: Iterable[str]) -> Iterator[str]:
     for line in lines:
         if line == "[DONE]":
             break
@@ -127,12 +126,10 @@ def _openai_stream_contents(lines) -> list[str]:
         choices = obj.get("choices", [])
         content = choices[0].get("delta", {}).get("content") if choices else None
         if content:
-            contents.append(content)
-    return contents
+            yield content
 
 
-def _anthropic_stream_contents(lines) -> list[str]:
-    contents: list[str] = []
+def _anthropic_stream_contents(lines: Iterable[str]) -> Iterator[str]:
     for line in lines:
         obj = _json_object_or_none(line)
         if obj is None:
@@ -142,8 +139,7 @@ def _anthropic_stream_contents(lines) -> list[str]:
             break
         text = obj.get("delta", {}).get("text", "") if event_type == "content_block_delta" else ""
         if text:
-            contents.append(text)
-    return contents
+            yield text
 
 
 def _json_object_or_none(line: str) -> dict[str, Any] | None:
