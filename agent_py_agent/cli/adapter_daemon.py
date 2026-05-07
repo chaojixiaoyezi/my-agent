@@ -16,20 +16,21 @@ from ..agent.gateway_parts.daemon_control import (
     remove_pid_file_if_owned,
 )
 from ..agent.gateway_parts.process_control import terminate_pid, wait_for_pid_exit
+from .models import AdapterOptions
 
 
-def daemonize_adapter(agent, gpaths, pid_file: Path) -> int:
+def daemonize_adapter(agent, gpaths, pid_file: Path, options: AdapterOptions) -> int:
     existing_pid = get_running_pid(pid_file)
     if existing_pid is not None:
         print(f"adapter already running (PID {existing_pid}) or PID file exists", file=sys.stderr)
         print(f"use stop first, or delete {pid_file} before retrying", file=sys.stderr)
         return 1
 
-    process = _start_adapter_daemon_process(agent, gpaths)
+    process = _start_adapter_daemon_process(agent, gpaths, options)
     return _wait_for_adapter_pid(process, pid_file)
 
 
-def _start_adapter_daemon_process(agent, gpaths) -> subprocess.Popen:
+def _start_adapter_daemon_process(agent, gpaths, options: AdapterOptions) -> subprocess.Popen:
     cmd = [
         sys.executable,
         "-m",
@@ -39,7 +40,7 @@ def _start_adapter_daemon_process(agent, gpaths) -> subprocess.Popen:
         "adapter",
         "start",
         "--channel",
-        getattr(agent.config, "adapter_channel", "all"),
+        options.channel,
     ]
     creationflags, start_new_session = _daemon_subprocess_flags()
     with gpaths.log.open("ab") as log_file:
@@ -103,11 +104,10 @@ def read_pid_record(path: Path):
     return _read_json_file(path)
 
 
-def stop_adapter_daemon(args, gpaths, pid_file: Path, pid: int) -> int:
+def stop_adapter_daemon(options: AdapterOptions, gpaths, pid_file: Path, pid: int) -> int:
     print(f"stopping adapter (PID {pid})...", file=sys.stderr)
     _write_stop_request(gpaths)
-    timeout = getattr(args, "timeout", 10.0)
-    if wait_for_pid_exit(pid, timeout=timeout):
+    if wait_for_pid_exit(pid, timeout=options.stop_timeout):
         remove_pid_file_if_owned(pid_file)
         print("adapter stopped", file=sys.stderr)
         return 0

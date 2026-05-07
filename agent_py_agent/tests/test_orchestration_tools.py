@@ -259,6 +259,7 @@ class TestDispatchSubagentsToolExecute:
 
     def test_dispatch_without_apply(self):
         """apply=false 时执行 dry-run。"""
+        from agent_py_agent.agent.agent_core.dispatch_params import DispatchParams
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
         mock_report = MagicMock()
@@ -277,6 +278,9 @@ class TestDispatchSubagentsToolExecute:
 
         assert result.ok is True
         mock_agent.dispatch_subagents.assert_called_once()
+        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
+        assert isinstance(call_kwargs["params"], DispatchParams)
+        assert "apply" not in call_kwargs
 
     def test_dispatch_with_apply_and_execute_runners(self):
         """apply=true 且 execute_runners=true 时执行真实 runner。"""

@@ -35,6 +35,8 @@ agent_py_agent/cli/
 - `gateway_parts/runtime.py`：真正执行 request worker，从 pending 取请求、调用 agent、写 response。
 - `cli/gateway_process.py`：用户管理后台进程的命令。
 - `cli/gateway_client.py`：用户或 chat 客户端投递消息和读取结果的命令；默认入口也在这里把 `my-agent --app` 映射为 gateway chat + 应用内滚动历史 UI。
+- `cli/models.py`：承接 gateway/adapter CLI 的 bundle 数据结构，例如 `GatewayRunOptions`、`GatewayRunContext`、`GatewayThreadsRequest`、`GatewayRunCleanupRequest` 和 `AdapterOptions`；cmd 层解析 `argparse args` 后再传给 helper。
+- `cli/adapter.py`、`cli/_gateway_state_helpers.py`、`cli/gateway_loops.py`：运行期 helper 接收 options/context bundle，不再把 argparse namespace 深传到线程和内部 helper。
 
 ## 数据流
 
@@ -45,6 +47,7 @@ agent_py_agent/cli/
 5. 失败或超时后，根据 attempts 和 lease 退回 pending 或归档 failed。
 6. status/local-doctor/timeline 从 gateway state、heartbeat、history 和 LocalStore 读取可观察状态。
 7. `memory-resume` 或自动恢复命中 gateway_request 时，会把 request/response JSON 作为事实源推荐阅读。
+8. gateway/adapter CLI 在进入运行 helper 前会先构造 options/context bundle；线程启动、cleanup、watch 和 adapter loop 从 bundle 读取字段，避免新增 CLI 参数时污染内部协议。
 
 ### 多 worker 抢占
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -35,6 +36,82 @@ class DaemonOptions:
     reviewer: str
     instruction: str
     probe: bool
+
+
+@dataclass(frozen=True)
+class GatewayRunOptions:
+
+    apply: bool
+    execute_runners: bool
+    planner: bool
+    interval: float
+    max_runners: int
+    limit: int
+    max_cycles: int
+    max_cards: int
+    reviewer: str
+    instruction: str
+    probe: bool
+
+
+@dataclass(frozen=True)
+class GatewayStartOptions:
+
+    config: Path
+    force_lock: bool
+
+
+@dataclass(frozen=True)
+class GatewayRunContext:
+
+    agent: Any
+    paths: Any
+    options: GatewayRunOptions
+    config_path: Path
+    note: str
+    take_over_by: str
+    locked_files: list[str]
+    force_lock: bool
+    router: Any | None = None
+    capability_config: Any | None = None
+
+
+@dataclass(frozen=True)
+class GatewayThreadsRequest:
+
+    context: GatewayRunContext
+    requeued: int
+    failed: int
+    http_port: int
+
+
+@dataclass(frozen=True)
+class GatewayRunCleanupRequest:
+
+    context: GatewayRunContext
+    pid: int
+    stop_event: Any
+    heartbeat_thread: Any
+    request_thread: Any
+    http_server: Any | None
+
+
+@dataclass(frozen=True)
+class AdapterOptions:
+
+    root: Path | None
+    inbox: Path | None
+    outbox: Path | None
+    timeout: float | None
+    limit: int
+    once: bool
+    watch: bool
+    poll_interval: float
+    no_start_gateway: bool
+    channel: str
+    pid_file: Path | None
+    daemon: bool
+    stop_timeout: float
 
 
 @dataclass(frozen=True)

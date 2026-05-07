@@ -186,7 +186,7 @@ Shared workspace 是同一 task 下 sibling 子代理共享任务局部事实的
 - 已新增 `memory_archive/memory_gate.py`，先创建 run-local memory/skill candidate gate：`candidates.jsonl`、`review_queue.jsonl`、`skill_spark_gate.json` 只记录候选、证据、适用范围和 review 要求，默认 `not_promoted`。
 - 已新增 `subagents-memory-gate` 显式 review decision 写回：`decisions.jsonl` 记录 reviewer、decision、note 和 `auto_promote=false`；approve 只改变 gate 状态，不执行长期 memory/skill 导出。
 - 已新增 Phase 6 显式收口链：retention 只压缩 active review queue 并保留审计；`--export-memory` 只导出 `approve_memory` 候选；`--export-skill` 只生成 draft；`--verify` 写边界检查报告，确认没有自动提升。
-- 已开始按 bundle 接口规范收敛：memory gate review/retention/export 使用 Request/Result bundle，acceptance review service 已通过 `AcceptanceReviewRequest` 进入核心实现，manager 旧签名保留为兼容 wrapper。
+- 已开始按 bundle 接口规范收敛：memory gate review/retention/export 使用 Request/Result bundle，acceptance review service 已通过 `AcceptanceReviewRequest` 进入核心实现，patch fallback、dispatch/watch/daemon、gateway/adapter CLI 也已转为 bundle-first；旧签名保留为兼容 wrapper。
 
 后续主要差距：
 

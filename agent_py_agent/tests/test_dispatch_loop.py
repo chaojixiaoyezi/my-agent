@@ -63,6 +63,7 @@ class TestDispatchLoop:
     def test_dispatch_loop_single_round(self, tmp_path: Path):
         """单轮 dispatch 后无任务时只跑一轮。"""
         from agent_py_agent.agent.agent_core.dispatch_loop import DispatchLoopReport, dispatch_loop
+        from agent_py_agent.agent.agent_core.dispatch_params import DispatchParams
 
         # Mock agent
         agent = MagicMock()
@@ -82,6 +83,7 @@ class TestDispatchLoop:
         assert result.rounds_count == 1
         assert result.total_records == 0
         assert result.stopped_by_limit is False
+        assert isinstance(agent.dispatch_subagents.call_args.kwargs["params"], DispatchParams)
 
     def test_dispatch_loop_multiple_rounds(self, tmp_path: Path):
         """有任务时跑多轮。"""

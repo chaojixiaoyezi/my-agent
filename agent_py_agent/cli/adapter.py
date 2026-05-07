@@ -29,6 +29,7 @@ from ..agent.gateway_parts.daemon_control import (
 from .adapter_daemon import daemonize_adapter, print_daemon_adapter_status, stop_adapter_daemon
 from .common import make_agent
 from .gateway_client import ensure_gateway_started
+from .models import AdapterOptions
 
 
 def cmd_adapter(args) -> int:
@@ -38,22 +39,50 @@ def cmd_adapter(args) -> int:
 
 def cmd_adapter_file(args) -> int:
     agent = make_agent(args)
+    # LLM: argparse is consumed at the CLI edge; adapter helpers receive AdapterOptions.
+    options = _adapter_options_from_args(args)
     gpaths = gateway_paths(agent)
-    apaths = _resolve_adapter_paths(agent, args)
-    gateway_code = _ensure_gateway_available(args, gpaths)
+    apaths = _resolve_adapter_paths(agent, options)
+    gateway_code = ensure_gateway_started(args) if not options.no_start_gateway else _ensure_gateway_available(options, gpaths)
     if gateway_code:
         return gateway_code
 
-    timeout = args.timeout if args.timeout is not None else agent.config.gateway_request_timeout
-    total = _process_file_adapter_loop(agent, args, gpaths, apaths, timeout)
+    timeout = options.timeout if options.timeout is not None else agent.config.gateway_request_timeout
+    total = _process_file_adapter_loop(agent, options, gpaths, apaths, timeout)
     _print_file_adapter_summary(total, apaths, gpaths)
     return 0
 
 
-def _resolve_adapter_paths(agent, args) -> AdapterPaths:
+def _adapter_options_from_args(args) -> AdapterOptions:
+    def value(name: str, default=None):
+        return getattr(args, "__dict__", {}).get(name, default)
+
+    root = value("root")
+    inbox = value("inbox")
+    outbox = value("outbox")
+    pid_file = value("pid_file")
+    timeout = value("timeout")
+    return AdapterOptions(
+        root=Path(root).expanduser() if root else None,
+        inbox=Path(inbox).expanduser() if inbox else None,
+        outbox=Path(outbox).expanduser() if outbox else None,
+        timeout=timeout,
+        limit=value("limit", 20),
+        once=value("once", False),
+        watch=value("watch", False),
+        poll_interval=value("poll_interval", 1.0),
+        no_start_gateway=value("no_start_gateway", False),
+        channel=value("channel", "all"),
+        pid_file=Path(pid_file).expanduser() if pid_file else None,
+        daemon=value("daemon", False),
+        stop_timeout=10.0 if timeout is None else timeout,
+    )
+
+
+def _resolve_adapter_paths(agent, options: AdapterOptions) -> AdapterPaths:
     apaths = adapter_paths(agent)
-    if args.root:
-        root = Path(args.root).expanduser()
+    if options.root:
+        root = options.root
         apaths = AdapterPaths(
             root=root,
             inbox=root / "inbox",
@@ -62,16 +91,14 @@ def _resolve_adapter_paths(agent, args) -> AdapterPaths:
             failed=root / "failed",
             outbox=root / "outbox",
         )
-    if args.inbox:
-        apaths.inbox = Path(args.inbox).expanduser()
-    if args.outbox:
-        apaths.outbox = Path(args.outbox).expanduser()
+    if options.inbox:
+        apaths.inbox = options.inbox
+    if options.outbox:
+        apaths.outbox = options.outbox
     return apaths
 
 
-def _ensure_gateway_available(args, gpaths) -> int:
-    if not args.no_start_gateway:
-        return ensure_gateway_started(args)
+def _ensure_gateway_available(options: AdapterOptions, gpaths) -> int:
     _, alive = gateway_running(gpaths)
     if alive:
         return 0
@@ -79,7 +106,7 @@ def _ensure_gateway_available(args, gpaths) -> int:
     return 2
 
 
-def _process_file_adapter_loop(agent, args, gpaths, apaths: AdapterPaths, timeout) -> int:
+def _process_file_adapter_loop(agent, options: AdapterOptions, gpaths, apaths: AdapterPaths, timeout) -> int:
     total = 0
     while True:
         total += process_file_adapter_once(
@@ -87,11 +114,11 @@ def _process_file_adapter_loop(agent, args, gpaths, apaths: AdapterPaths, timeou
             gateway_paths_obj=gpaths,
             adapter_paths_obj=apaths,
             timeout=timeout,
-            limit=args.limit,
+            limit=options.limit,
         )
-        if args.once or not args.watch:
+        if options.once or not options.watch:
             return total
-        time.sleep(max(0.2, args.poll_interval))
+        time.sleep(max(0.2, options.poll_interval))
 
 
 def _print_file_adapter_summary(total: int, apaths: AdapterPaths, gpaths) -> None:
@@ -113,12 +140,13 @@ def _print_file_adapter_summary(total: int, apaths: AdapterPaths, gpaths) -> Non
 
 def cmd_adapter_start(args) -> int:
     agent = make_agent(args)
+    options = _adapter_options_from_args(args)
     gpaths = gateway_paths(agent)
     gpaths.root.mkdir(parents=True, exist_ok=True)
-    pid_file = Path(args.pid_file).expanduser() if args.pid_file else gpaths.adapter_pid
-    if args.daemon:
-        return daemonize_adapter(agent, gpaths, pid_file)
-    return _run_adapter_foreground(agent, args, gpaths)
+    pid_file = options.pid_file if options.pid_file else gpaths.adapter_pid
+    if options.daemon:
+        return daemonize_adapter(agent, gpaths, pid_file, options)
+    return _run_adapter_foreground(agent, options, gpaths)
 
 
 def _register_channel_adapter(manager: ChannelManager, channel: str, agent) -> None:
@@ -160,14 +188,14 @@ def _qq_adapter_config(agent) -> dict[str, str]:
     }
 
 
-def _run_adapter_foreground(agent, args, gpaths) -> int:
+def _run_adapter_foreground(agent, options: AdapterOptions, gpaths) -> int:
     manager = ChannelManager(gateway_port=agent.config.gateway_port)
-    _register_requested_adapters(manager, args.channel, agent)
+    _register_requested_adapters(manager, options.channel, agent)
     globals()["_adapter_manager"] = manager
 
     write_pid_record(gpaths.adapter_pid)
-    _write_adapter_state(gpaths, "running", {"channel": args.channel})
-    print(f"starting channel adapter: {args.channel}", file=sys.stderr)
+    _write_adapter_state(gpaths, "running", {"channel": options.channel})
+    print(f"starting channel adapter: {options.channel}", file=sys.stderr)
     manager.start_all()
     print(f"started adapters: {manager.list_adapters()}", file=sys.stderr)
 
@@ -219,8 +247,9 @@ def _write_adapter_state(gpaths, state: str, extra: dict | None = None) -> None:
 
 def cmd_adapter_status(args) -> int:
     agent = make_agent(args)
+    options = _adapter_options_from_args(args)
     gpaths = gateway_paths(agent)
-    pid_file = Path(args.pid_file).expanduser() if args.pid_file else gpaths.adapter_pid
+    pid_file = options.pid_file if options.pid_file else gpaths.adapter_pid
     pid = get_running_pid(pid_file)
     if pid is not None:
         print_daemon_adapter_status(pid, pid_file, gpaths)
@@ -242,11 +271,12 @@ def _print_foreground_adapter_status() -> int:
 
 def cmd_adapter_stop(args) -> int:
     agent = make_agent(args)
+    options = _adapter_options_from_args(args)
     gpaths = gateway_paths(agent)
-    pid_file = Path(args.pid_file).expanduser() if args.pid_file else gpaths.adapter_pid
+    pid_file = options.pid_file if options.pid_file else gpaths.adapter_pid
     pid = get_running_pid(pid_file)
     if pid is not None:
-        return stop_adapter_daemon(args, gpaths, pid_file, pid)
+        return stop_adapter_daemon(options, gpaths, pid_file, pid)
     return _stop_foreground_adapter_manager()
 
 

@@ -10,8 +10,15 @@ Human version:
 
 from typing import TYPE_CHECKING
 
-from .patch import PatchApplyOptions, PatchApplyService, PatchReviewOptions, PatchReviewService
+from .patch import (
+    PatchApplyOptions,
+    PatchApplyService,
+    PatchReviewOptions,
+    PatchReviewService,
+    PatchReviewTaskRequest,
+)
 from .patch.patch_apply_helpers import extract_patch_test_command, validate_patch_test_command
+from .patch.patch_apply_task import ApplyPatchTaskParams
 from .patch.patch_renderer import build_unified_diff
 from .services.patch_apply_helper import PatchApplyTaskHelper
 from .services.patch_review_helper import PatchReviewTaskHelper
@@ -149,24 +156,50 @@ class SubAgentPatchMixin:
         """Validate test command for security risks (delegated to patch_apply_helpers)."""
         return validate_patch_test_command(command)
 
-    def _review_patch_task(self, task, *, output, patches, apply, reviewer, note):
+    def _review_patch_task(
+        self,
+        task,
+        **legacy,
+    ):
         """Review a single task's patches (delegated to patch review service)."""
+        # LLM: bundle requests are accepted here; loose kwargs remain only for old tests/callers.
         if hasattr(self, "_patch_review_service") and self._patch_review_service is not None:
+            if isinstance(task, PatchReviewTaskRequest):
+                return self._patch_review_service._review_patch_task(task)
             return self._patch_review_service._review_patch_task(
-                task, output=output, patches=patches, apply=apply, reviewer=reviewer, note=note
+                task,
+                output=legacy.get("output"),
+                patches=legacy.get("patches"),
+                apply=bool(legacy.get("apply", False)),
+                reviewer=legacy.get("reviewer", "parent"),
+                note=legacy.get("note", ""),
             )
-        return PatchReviewTaskHelper.review_patch_task(
-            task, output=output, patches=patches, apply=apply, reviewer=reviewer, note=note
-        )
+        return PatchReviewTaskHelper.review_patch_task(task, **legacy)
 
-    def _apply_patch_task(self, task, *, output, patches, apply, applier, note):
+    def _apply_patch_task(
+        self,
+        task,
+        *,
+        params: ApplyPatchTaskParams | None = None,
+        **legacy,
+    ):
         """Apply patches for a single task (delegated to patch apply service)."""
+        # LLM: params is the preferred patch-apply bundle; expanded fields are compatibility glue.
         if hasattr(self, "_patch_apply_service") and self._patch_apply_service is not None:
+            if params is not None:
+                return self._patch_apply_service._apply_patch_task(task, params=params)
             return self._patch_apply_service._apply_patch_task(
-                task, output=output, patches=patches, apply=apply, applier=applier, note=note
+                task,
+                output=legacy.get("output"),
+                patches=legacy.get("patches"),
+                apply=bool(legacy.get("apply", False)),
+                applier=legacy.get("applier", "parent"),
+                note=legacy.get("note", ""),
             )
         return PatchApplyTaskHelper.apply_patch_task(
-            task, output=output, patches=patches, apply=apply, applier=applier, note=note
+            task,
+            params=params,
+            **legacy,
         )
 
     def _normalize_patch_apply_spec(self, task, patch):

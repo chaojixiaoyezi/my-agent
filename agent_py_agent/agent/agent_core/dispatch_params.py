@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +44,45 @@ class WatchParams:
     max_cycles: int = 0
     force_lock: bool = False
     stop_file: str | Path | None = None
+
+
+DISPATCH_PARAM_KEYS = tuple(field.name for field in fields(DispatchParams))
+WATCH_PARAM_KEYS = tuple(field.name for field in fields(WatchParams))
+
+
+def merge_dispatch_params(
+    params: DispatchParams | None = None,
+    kwargs: dict[str, Any] | None = None,
+) -> DispatchParams:
+    if params is None:
+        params = DispatchParams()
+    elif not isinstance(params, DispatchParams):
+        raise TypeError("dispatch_subagents() requires params: DispatchParams keyword argument")
+    return _replace_bundle(params, DISPATCH_PARAM_KEYS, kwargs or {})
+
+
+def merge_watch_params(
+    params: WatchParams | None = None,
+    kwargs: dict[str, Any] | None = None,
+) -> WatchParams:
+    if params is None:
+        params = WatchParams()
+    elif not isinstance(params, WatchParams):
+        raise TypeError("watch_subagents() requires params: WatchParams keyword argument")
+    return _replace_bundle(params, WATCH_PARAM_KEYS, kwargs or {})
+
+
+def dispatch_params_from_watch(params: WatchParams) -> DispatchParams:
+    return DispatchParams(
+        **{key: getattr(params, key) for key in DISPATCH_PARAM_KEYS}
+    )
+
+
+def _replace_bundle(params, allowed_keys: tuple[str, ...], kwargs: dict[str, Any]):
+    overrides = {key: kwargs[key] for key in allowed_keys if key in kwargs}
+    if not overrides:
+        return params
+    return replace(params, **overrides)
 
 
 @dataclass

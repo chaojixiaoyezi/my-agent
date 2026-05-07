@@ -14,6 +14,7 @@ from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..subagents.services.base import CreateRunParams, _extract_write_dirs
 from ..tools import BaseTool, ToolExecutionResult, ToolSpec
+from .dispatch_params import DispatchParams
 from .orchestration_write_guard import external_write_target_error
 from .parameters import _bool_param, _non_negative_int, _positive_int, _string_list
 
@@ -310,7 +311,11 @@ class DispatchSubagentsTool(BaseTool):
             )
 
         cfg, router = self._router()
-        report = self.agent.dispatch_subagents(router, cfg, **self._dispatch_kwargs(params, apply, execute_runners))
+        report = self.agent.dispatch_subagents(
+            router,
+            cfg,
+            params=self._dispatch_params(params, apply, execute_runners),
+        )
         payload = self._report_payload(report)
         return ToolExecutionResult("dispatch_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -319,22 +324,27 @@ class DispatchSubagentsTool(BaseTool):
         tool_specs = [spec for spec in self.agent.tools.specs() if spec.category != "orchestration"]
         return cfg, CapabilityRouter(config=cfg, tool_specs=tool_specs)
 
-    def _dispatch_kwargs(self, params: dict[str, object], apply: bool, execute_runners: bool) -> dict[str, object]:
-        return {
-            "apply": apply,
-            "execute_runners": execute_runners,
-            "planner": _bool_param(params.get("planner"), default=False),
-            "workflow_mode": _tool_workflow_mode(params.get("workflow_mode"), self.agent.config.subagent_workflow_mode),
-            "max_runners": _non_negative_int(params.get("max_runners"), default=1),
-            "limit": _non_negative_int(params.get("limit"), default=20),
-            "reviewer": str(params.get("reviewer") or "chat-tool").strip(),
-            "note": str(params.get("note") or "triggered by dispatch_subagents tool").strip(),
-            "runner_instruction": str(params.get("runner_instruction") or params.get("instruction") or "").strip(),
-            "max_cards": _non_negative_int(params.get("max_cards"), default=0),
-            "probe": not _bool_param(params.get("no_probe"), default=False),
-            "take_over_by": str(params.get("take_over_by") or "").strip(),
-            "locked_files": _string_list(params.get("locked_files")),
-        }
+    def _dispatch_params(
+        self,
+        params: dict[str, object],
+        apply: bool,
+        execute_runners: bool,
+    ) -> DispatchParams:
+        return DispatchParams(
+            apply=apply,
+            execute_runners=execute_runners,
+            planner=_bool_param(params.get("planner"), default=False),
+            workflow_mode=_tool_workflow_mode(params.get("workflow_mode"), self.agent.config.subagent_workflow_mode),
+            max_runners=_non_negative_int(params.get("max_runners"), default=1),
+            limit=_non_negative_int(params.get("limit"), default=20),
+            reviewer=str(params.get("reviewer") or "chat-tool").strip(),
+            note=str(params.get("note") or "triggered by dispatch_subagents tool").strip(),
+            runner_instruction=str(params.get("runner_instruction") or params.get("instruction") or "").strip(),
+            max_cards=_non_negative_int(params.get("max_cards"), default=0),
+            probe=not _bool_param(params.get("no_probe"), default=False),
+            take_over_by=str(params.get("take_over_by") or "").strip(),
+            locked_files=_string_list(params.get("locked_files")),
+        )
 
     def _report_payload(self, report) -> dict[str, object]:
         return {

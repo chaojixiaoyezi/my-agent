@@ -5,6 +5,7 @@ import argparse
 import json
 import sys
 import time
+from pathlib import Path
 
 from ..agent.capability_config import load_capability_config
 from ..agent.gateway import (
@@ -46,7 +47,13 @@ from .gateway_service import (
     install_service,
     uninstall_service,
 )
-from .models import DaemonOptions
+from .models import (
+    GatewayRunCleanupRequest,
+    GatewayRunContext,
+    GatewayRunOptions,
+    GatewayStartOptions,
+    GatewayThreadsRequest,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -54,7 +61,37 @@ from .models import DaemonOptions
 
 
 def _resolve_gateway_options(agent, args):
-    return _resolve_daemon_options(agent, args)
+    options = _resolve_daemon_options(agent, args)
+    return GatewayRunOptions(
+        apply=options.apply,
+        execute_runners=options.execute_runners,
+        planner=options.planner,
+        interval=options.interval,
+        max_runners=options.max_runners,
+        limit=options.limit,
+        max_cycles=options.max_cycles,
+        max_cards=options.max_cards,
+        reviewer=options.reviewer,
+        instruction=options.instruction,
+        probe=options.probe,
+    )
+
+
+def _gateway_start_options_from_args(args) -> GatewayStartOptions:
+    return GatewayStartOptions(config=Path(args.config), force_lock=bool(args.force_lock))
+
+
+def _gateway_run_context_from_args(agent, paths, options: GatewayRunOptions, args) -> GatewayRunContext:
+    return GatewayRunContext(
+        agent=agent,
+        paths=paths,
+        options=options,
+        config_path=Path(args.config),
+        note=args.note or "",
+        take_over_by=args.take_over_by or "",
+        locked_files=args.locked_file or [],
+        force_lock=args.force_lock,
+    )
 
 
 def _write_gateway_state(paths, data: dict) -> None:
@@ -94,7 +131,7 @@ def cmd_gateway_start(args) -> int:
             terminate_pid(pid)
             wait_for_pid_exit(pid, 5)
     _clear_gateway_stop_request(paths)
-    command = _gateway_start_command(args)
+    command = _gateway_start_command(_gateway_start_options_from_args(args))
     process = _spawn_gateway_process(paths, command, cwd=ROOT.parent)
     _write_gateway_start_files(paths, pid=process.pid, command=command)
     wait_for_gateway_running(paths, timeout=10.0)
@@ -108,7 +145,7 @@ def cmd_gateway_run(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)
-    requeued, pid = _cmd_gateway_run_setup(args, agent, paths)
+    requeued, pid = _cmd_gateway_run_setup(agent, paths)
     try:
         options = _resolve_gateway_options(agent, args)
     except ValueError as exc:
@@ -117,18 +154,28 @@ def cmd_gateway_run(args) -> int:
         return 2
 
     http_port = getattr(agent.config, "gateway_port", 0) or 0
-    run_context = {"args": args, "paths": paths, "agent": agent, "options": options}
+    run_context = _gateway_run_context_from_args(agent, paths, options, args)
     stop_event, heartbeat_thread, request_thread, http_server = _cmd_gateway_run_threads(
-        {**run_context, "requeued": requeued, "failed": 0, "http_port": http_port}
+        GatewayThreadsRequest(context=run_context, requeued=requeued, failed=0, http_port=http_port)
     )
 
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)
+    watch_context = GatewayRunContext(
+        agent=run_context.agent,
+        paths=run_context.paths,
+        options=run_context.options,
+        config_path=run_context.config_path,
+        note=run_context.note,
+        take_over_by=run_context.take_over_by,
+        locked_files=run_context.locked_files,
+        force_lock=run_context.force_lock,
+        router=router,
+        capability_config=capability_config,
+    )
     exit_code = 0
     try:
-        report = _run_gateway_watch(
-            {**run_context, "router": router, "capability_config": capability_config}
-        )
+        report = _run_gateway_watch(watch_context)
         _record_gateway_run_stopped(paths, agent, pid, report.summary)
     except KeyboardInterrupt:
         _record_gateway_run_interrupted(paths, agent, pid)
@@ -139,14 +186,14 @@ def cmd_gateway_run(args) -> int:
         exit_code = 2
     finally:
         _cmd_gateway_run_cleanup(
-            {
-                **run_context,
-                "pid": pid,
-                "stop_event": stop_event,
-                "heartbeat_thread": heartbeat_thread,
-                "request_thread": request_thread,
-                "http_server": http_server,
-            }
+            GatewayRunCleanupRequest(
+                context=run_context,
+                pid=pid,
+                stop_event=stop_event,
+                heartbeat_thread=heartbeat_thread,
+                request_thread=request_thread,
+                http_server=http_server,
+            )
         )
     return exit_code
 
