@@ -116,6 +116,8 @@ def _assert_runtime_workspace_paths(loaded, task_workspace, run_id: str) -> None
     assert "/daily/" in loaded.daily_ledger_file
     assert loaded.daily_ledger_file.endswith("/events.jsonl")
     assert loaded.daily_ledger_last_event_id.startswith(f"evt-{run_id}-{run_id}-")
+    assert loaded.task_artifact_manifest_jsonl == str(task_workspace / "artifacts" / "manifest.jsonl")
+    assert loaded.agent_run_artifact_manifest_jsonl == str(run_workspace / "artifacts" / "manifest.jsonl")
 
 
 def test_subagent_persistence_creates_agent_run_workspace_skeleton(tmp_path) -> None:
@@ -189,8 +191,45 @@ def test_subagent_persistence_appends_daily_event_ledger(tmp_path) -> None:
     assert latest["evidence_refs"] == ["logs/demo.log"]
     assert latest["refs"]["task_workspace"] == str(tmp_path / "tasks" / task.root_id)
     assert latest["refs"]["agent_run_workspace"] == str(tmp_path / "tasks" / task.root_id / "agents" / task.id)
+    assert latest["refs"]["task_artifact_manifest"] == str(tmp_path / "tasks" / task.root_id / "artifacts" / "manifest.jsonl")
+    assert latest["refs"]["agent_artifact_manifest"] == str(
+        tmp_path / "tasks" / task.root_id / "agents" / task.id / "artifacts" / "manifest.jsonl",
+    )
     assert latest["refs"]["legacy_task_dir"] == str(tmp_path / task.id)
     assert "goal" not in latest
+
+
+def test_subagent_persistence_writes_artifact_manifests(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+
+    task = manager.create_run(
+        goal="外置 artifact 引用",
+        thought="manifest 只记录摘要、hash 和路径，不复制输出正文。",
+        plan=["写 artifact", "保存 manifest"],
+    )
+    artifact_path = tmp_path / task.id / "reports" / "demo.txt"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text("artifact body\n", encoding="utf-8")
+    task.artifact_refs = ["reports/demo.txt", "missing.log"]
+    manager.save(task)
+
+    loaded = manager.load(task.id)
+    task_records = _read_jsonl(loaded.task_artifact_manifest_jsonl)
+    run_records = _read_jsonl(loaded.agent_run_artifact_manifest_jsonl)
+    existing = task_records[0]
+    missing = task_records[1]
+
+    assert run_records == task_records
+    assert existing["ref"] == "reports/demo.txt"
+    assert existing["path"] == str(artifact_path)
+    assert existing["exists"] is True
+    assert existing["size_bytes"] == len("artifact body\n")
+    assert existing["sha256"]
+    assert existing["content_externalized"] is True
+    assert "artifact body" not in json.dumps(existing, ensure_ascii=False)
+    assert missing["ref"] == "missing.log"
+    assert missing["exists"] is False
+    assert missing["sha256"] == ""
 
 
 def test_subagent_persistence_writes_checkpoint_recovery_artifacts(tmp_path) -> None:

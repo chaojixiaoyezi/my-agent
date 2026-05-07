@@ -38,3 +38,6 @@ def sync_task_workspace_fields(workspace: str | Path, task: SubAgentTask) -> Non
     # LLM: expose the latest daily ledger append for recovery/debug without storing full context.
     task.daily_ledger_file = str(task_workspace_paths.daily_ledger.events_jsonl)
     task.daily_ledger_last_event_id = task_workspace_paths.daily_ledger.event_id
+    # LLM: manifest paths let old task.json consumers find artifact metadata without reading bodies.
+    task.task_artifact_manifest_jsonl = str(task_workspace_paths.artifact_manifest.task_manifest_jsonl)
+    task.agent_run_artifact_manifest_jsonl = str(task_workspace_paths.artifact_manifest.agent_manifest_jsonl)

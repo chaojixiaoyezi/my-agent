@@ -17,6 +17,7 @@ from typing import Any
 
 # LLM: task workspace owns the run adapter path, but run files live in a focused helper.
 from .agent_run_workspace import AgentRunWorkspacePaths, ensure_agent_run_workspace
+from .artifact_registry import ArtifactManifestResult, sync_artifact_manifests
 from .daily_ledger import (
     DailyLedgerAppendResult,
     DailyLedgerWorkspaceRefs,
@@ -41,8 +42,15 @@ class TaskWorkspacePaths:
     agents_dir: Path
     agent_adapter_dir: Path
     agent_run: AgentRunWorkspacePaths
+    artifact_manifest: ArtifactManifestResult
     daily_ledger: DailyLedgerAppendResult
     legacy_run_ref_json: Path
+
+
+@dataclass(frozen=True)
+class _TaskWorkspaceRuntimeRefs:
+    artifact_manifest: ArtifactManifestResult | None = None
+    daily_ledger: DailyLedgerAppendResult | None = None
 
 
 def task_workspace_path(workspace: str | Path, task_id: str) -> Path:
@@ -67,29 +75,72 @@ def ensure_subagent_task_workspace(workspace: str | Path, task: Any) -> TaskWork
     _touch_jsonl(paths.shared_messages)
     _touch_jsonl(paths.shared_findings)
     ensure_agent_run_workspace(paths.agent_adapter_dir, task, task_id=task_id, now=now)
+    # LLM: artifact manifests are written before the daily event so ledger refs are resolvable.
+    artifact_manifest = sync_artifact_manifests(
+        task,
+        task_workspace_root=paths.root,
+        agent_run_workspace_root=paths.agent_adapter_dir,
+        now=now,
+    )
     _append_timeline(paths.timeline_jsonl, _timeline_event(task, now, previous_state))
     # LLM: daily ledger records compact refs only; task/run files keep the detailed facts.
     daily_ledger = append_subagent_task_event(
         workspace,
         task,
-        workspace_refs=DailyLedgerWorkspaceRefs(paths.root, paths.agent_adapter_dir),
+        workspace_refs=DailyLedgerWorkspaceRefs(
+            paths.root,
+            paths.agent_adapter_dir,
+            artifact_manifest.task_manifest_jsonl,
+            artifact_manifest.agent_manifest_jsonl,
+        ),
         now=now,
     )
-    return _paths_for(workspace, task_id, run_id, daily_ledger=daily_ledger)
+    return _paths_for(
+        workspace,
+        task_id,
+        run_id,
+        runtime_refs=_TaskWorkspaceRuntimeRefs(
+            artifact_manifest=artifact_manifest,
+            daily_ledger=daily_ledger,
+        ),
+    )
 
 
 def _paths_for(
     workspace: str | Path,
     task_id: str,
     run_id: str,
-    daily_ledger: DailyLedgerAppendResult | None = None,
+    runtime_refs: _TaskWorkspaceRuntimeRefs | None = None,
 ) -> TaskWorkspacePaths:
+    runtime_refs = runtime_refs or _TaskWorkspaceRuntimeRefs()
     root = task_workspace_path(workspace, task_id)
     shared_dir = root / "shared"
     artifacts_dir = root / "artifacts"
     agents_dir = root / "agents"
     agent_adapter_dir = agents_dir / _safe_segment(run_id)
-    agent_run = AgentRunWorkspacePaths(
+    return TaskWorkspacePaths(
+        root=root,
+        task_yaml=root / "task.yaml",
+        state_json=root / "state.json",
+        timeline_jsonl=root / "timeline.jsonl",
+        current_summary=root / "summaries" / "current_summary.md",
+        shared_dir=shared_dir,
+        shared_blackboard=shared_dir / "blackboard.md",
+        shared_messages=shared_dir / "messages.jsonl",
+        shared_findings=shared_dir / "findings.jsonl",
+        artifacts_dir=artifacts_dir,
+        agents_dir=agents_dir,
+        agent_adapter_dir=agent_adapter_dir,
+        agent_run=_agent_run_paths(agent_adapter_dir),
+        artifact_manifest=runtime_refs.artifact_manifest
+        or _default_artifact_manifest(artifacts_dir, agent_adapter_dir),
+        daily_ledger=runtime_refs.daily_ledger or _default_daily_ledger(workspace),
+        legacy_run_ref_json=agent_adapter_dir / "legacy_run_ref.json",
+    )
+
+
+def _agent_run_paths(agent_adapter_dir: Path) -> AgentRunWorkspacePaths:
+    return AgentRunWorkspacePaths(
         root=agent_adapter_dir,
         agent_yaml=agent_adapter_dir / "agent.yaml",
         state_json=agent_adapter_dir / "state.json",
@@ -105,23 +156,17 @@ def _paths_for(
         compactions_dir=agent_adapter_dir / "compactions",
         legacy_run_ref_json=agent_adapter_dir / "legacy_run_ref.json",
     )
-    return TaskWorkspacePaths(
-        root=root,
-        task_yaml=root / "task.yaml",
-        state_json=root / "state.json",
-        timeline_jsonl=root / "timeline.jsonl",
-        current_summary=root / "summaries" / "current_summary.md",
-        shared_dir=shared_dir,
-        shared_blackboard=shared_dir / "blackboard.md",
-        shared_messages=shared_dir / "messages.jsonl",
-        shared_findings=shared_dir / "findings.jsonl",
-        artifacts_dir=artifacts_dir,
-        agents_dir=agents_dir,
-        agent_adapter_dir=agent_adapter_dir,
-        agent_run=agent_run,
-        daily_ledger=daily_ledger or DailyLedgerAppendResult(Path(workspace) / "daily" / "pending" / "events.jsonl", ""),
-        legacy_run_ref_json=agent_adapter_dir / "legacy_run_ref.json",
+
+
+def _default_artifact_manifest(artifacts_dir: Path, agent_adapter_dir: Path) -> ArtifactManifestResult:
+    return ArtifactManifestResult(
+        task_manifest_jsonl=artifacts_dir / "manifest.jsonl",
+        agent_manifest_jsonl=agent_adapter_dir / "artifacts" / "manifest.jsonl",
     )
+
+
+def _default_daily_ledger(workspace: str | Path) -> DailyLedgerAppendResult:
+    return DailyLedgerAppendResult(Path(workspace) / "daily" / "pending" / "events.jsonl", "")
 
 
 def _ensure_directories(paths: TaskWorkspacePaths) -> None:

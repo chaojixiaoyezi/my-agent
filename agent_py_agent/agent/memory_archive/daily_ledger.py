@@ -30,6 +30,9 @@ class DailyLedgerWorkspaceRefs:
 
     task_workspace_root: Path
     agent_run_workspace_root: Path
+    task_artifact_manifest_jsonl: Path | None = None
+    # LLM: manifest refs point to summaries/hashes, never artifact bodies.
+    agent_artifact_manifest_jsonl: Path | None = None
 
 
 def daily_events_path_for(root: str | Path, created_at: str | int | float | None = None) -> Path:
@@ -87,6 +90,8 @@ def _refs(task: Any, workspace_refs: DailyLedgerWorkspaceRefs) -> dict[str, str]
         "agent_run_workspace": str(agent_run_workspace_root),
         "agent_run_state": str(agent_run_workspace_root / "state.json"),
         "agent_run_timeline": str(agent_run_workspace_root / "timeline.jsonl"),
+        "task_artifact_manifest": _path_text(workspace_refs.task_artifact_manifest_jsonl),
+        "agent_artifact_manifest": _path_text(workspace_refs.agent_artifact_manifest_jsonl),
         "legacy_task_dir": legacy_task_dir,
         "legacy_task_json": str(Path(legacy_task_dir) / "task.json") if legacy_task_dir else "",
         "legacy_checkpoint": str(getattr(task, "checkpoint_json", "")),
@@ -102,6 +107,10 @@ def _search_fields(task: Any) -> dict[str, object]:
         "current_step": str(getattr(task, "current_step", "")),
         "blockers": list(getattr(task, "blockers", []) or []),
     }
+
+
+def _path_text(path: Path | None) -> str:
+    return str(path) if path else ""
 
 
 def _summary(task: Any) -> str:
