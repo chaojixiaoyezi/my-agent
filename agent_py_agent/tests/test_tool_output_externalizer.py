@@ -1,0 +1,128 @@
+from __future__ import annotations
+
+"""LLM: regression tests for externalized runtime tool outputs.
+
+给人看的解释：
+这组测试确认大工具输出会进入 artifact 文件，归档记录只留下摘要、hash 和路径；
+运行中的工具结果仍可给模型完整读取，避免这个切片改变工具行为。
+"""
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
+from agent_py_agent.agent.agent_core._tool_loop_service import ToolCallRecordParams, ToolLoopService
+from agent_py_agent.agent.memory_archive.runtime.turn_archiver import (
+    ArchiveRunTurnParams,
+    ArchiveTurnContext,
+    archive_run_turn,
+)
+from agent_py_agent.agent.memory_archive.schema import RUNTIME_MEMORY_SCHEMA_VERSION
+from agent_py_agent.agent.tooling.models import ToolExecutionResult
+
+
+def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) -> None:
+    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
+    large_output = "line\n" + ("x" * 1400)
+
+    service._record_tool_call(
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=1,
+            idx=1,
+            payload={"tool": "read_file", "path": "large.log"},
+            result=ToolExecutionResult("read_file", True, large_output),
+        )
+    )
+    record = params.archive_tool_calls[0]
+    artifact_path = Path(record["output_path"])
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    index = [
+        json.loads(line)
+        for line in (artifact_path.parent / "index.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert record["output_externalized"] is True
+    _assert_schema_v2(record, "tool_output_archive_record")
+    _assert_schema_v2(artifact, "tool_output_artifact")
+    _assert_schema_v2(index[-1], "tool_output_index")
+    assert record["output_hash"] == artifact["sha256"]
+    assert record["output_size_bytes"] == len(large_output.encode("utf-8"))
+    assert "x" * 700 not in json.dumps(record, ensure_ascii=False)
+    assert artifact["content"] == large_output
+    assert artifact["request_id"] == "req-tool"
+    assert index[-1]["path"] == str(artifact_path)
+    assert index[-1]["sha256"] == artifact["sha256"]
+    assert large_output in params.tool_context[-1]
+
+
+def test_archive_tool_event_keeps_externalized_output_path(tmp_path: Path) -> None:
+    output_path = tmp_path / "memory_archive" / "artifacts" / "tool_outputs" / "demo.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("{}", encoding="utf-8")
+
+    result = archive_run_turn(
+        ArchiveRunTurnParams(
+            root=tmp_path,
+            ctx=ArchiveTurnContext(
+                session_id="session-tool",
+                user_prompt="run tool",
+                response_text="done",
+                backend="echo",
+                request_id="req-tool",
+                run_id="run-tool",
+                task_id="task-tool",
+                tool_calls=[{
+                    "tool": "read_file",
+                    "id": "1-1",
+                    "ok": True,
+                    "output_preview": "preview",
+                    "output_hash": "hash",
+                    "output_path": str(output_path),
+                    "output_externalized": True,
+                    "parameters": {"path": "large.log"},
+                }],
+            ),
+        )
+    )
+    tool_event = next(event for event in result.events if event.speaker == "tool")
+
+    assert tool_event.content_path == str(output_path)
+    assert tool_event.content_preview
+    assert tool_event.tool_name == "read_file"
+
+
+# LLM: _assert_schema_v2 protects the externalized tool output version and reserved fields contract.
+# 函数用途: 校验工具输出归档记录、artifact 正文和 index 行都使用统一 runtime memory schema v2。
+def _assert_schema_v2(record: dict[str, object], name: str) -> None:
+    assert record["version"] == RUNTIME_MEMORY_SCHEMA_VERSION
+    assert record["schema"]["name"] == name
+    assert record["reserved"]["schema_name"] == name
+    assert record["reserved"]["schema_version"] == RUNTIME_MEMORY_SCHEMA_VERSION
+    assert set(record["reserved"]) >= {"extensions", "compat", "future"}
+
+
+def _tool_loop_params(*, request_id: str, run_id: str, task_id: str) -> ToolLoopExecuteParams:
+    return ToolLoopExecuteParams(
+        user_prompt="",
+        memories=[],
+        runtime_injections=[],
+        prompt_files=[],
+        tool_catalog_section="",
+        tool_recommendations_section="",
+        tool_context=[],
+        effective_on_chunk=None,
+        allowed_tools=None,
+        granted_capabilities=None,
+        write_boundary=None,
+        task_attributes=None,
+        request_id=request_id,
+        run_id=run_id,
+        task_id=task_id,
+        one_shot_tool_calls=set(),
+        executed_tools=[],
+        archive_tool_calls=[],
+    )

@@ -156,10 +156,10 @@ def _add_archive_resume_args(parser) -> None:
 # LLM: _add_memory_compact_args 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
 # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_memory_compact_args(parser) -> None:
-    """参数说明: memory compact 第一版只注册只读 dry-run 和保守 apply 门禁。"""
+    """参数说明: memory compact 支持只读 dry-run 和非破坏性 apply 产物生成。"""
 
     parser.add_argument("--dry-run", action="store_true", default=True, help="只生成计划，不修改文件")
-    parser.add_argument("--apply", action="store_true", help="应用 compact；当前版本会拒绝执行")
+    parser.add_argument("--apply", action="store_true", help="生成非破坏性 compact context、自检和 apply ledger")
     parser.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="扫描哪一层归档")
     parser.add_argument("--date", help="只扫描某一天，格式 YYYY-MM-DD")
     parser.add_argument("--since", help="只看此时间之后的归档线索")

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..memory_archive import snapshots
+from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record, snapshots
 from ..prompting_parts.builder import ToolSections
 from ..tools import ToolExecutionResult
 from ._runtime_params import ToolLoopExecuteParams
@@ -142,16 +142,28 @@ class ToolLoopService:
     def _record_tool_call(self, record: ToolCallRecordParams) -> None:
         if record.result.ok and record.result.tool not in {"__parse_error__", "unknown"}:
             record.params.executed_tools.append(record.result.tool)
-        record.params.archive_tool_calls.append(
-            {
-                "tool": record.result.tool,
-                "id": f"{record.tool_rounds}-{record.idx}",
-                "ok": record.result.ok,
-                "parameters": record.payload,
-            }
-        )
+        record.params.archive_tool_calls.append(self._archive_tool_call_record(record))
         record.params.tool_context.append(
             f"[tool-call-{record.tool_rounds}-{record.idx}]\n{record.payload}\n"
             f"[tool-result-{record.tool_rounds}-{record.idx}]\n"
             f"{record.result.render_for_prompt()}"
         )
+
+    # LLM: _archive_tool_call_record 属于 SimpleAgent 核心运行的函数边界；工具输出归档格式变化会影响 raw archive 和 compact。
+    # 函数用途: 生成可归档的工具调用记录，大输出外置为 artifact，当前工具上下文仍保留完整结果。
+    def _archive_tool_call_record(self, record: ToolCallRecordParams) -> dict[str, object]:
+        call_id = f"{record.tool_rounds}-{record.idx}"
+        output_record = externalize_tool_output_record(
+            ExternalizeToolOutputRequest(
+                root=self._agent.root,
+                tool=record.result.tool,
+                call_id=call_id,
+                output=record.result.output,
+                ok=record.result.ok,
+                request_id=record.params.request_id,
+                run_id=record.params.run_id,
+                task_id=record.params.task_id,
+            )
+        )
+        output_record["parameters"] = record.payload
+        return output_record

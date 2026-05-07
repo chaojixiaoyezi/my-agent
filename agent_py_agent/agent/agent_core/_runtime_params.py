@@ -52,7 +52,7 @@ class FinalizeContext:
 
 
 # LLM: ToolLoopExecuteParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存工具循环execute参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
+# 类用途: 集中保存工具循环 execute 参数、运行标识和可变记录容器；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class ToolLoopExecuteParams:
 
@@ -68,6 +68,9 @@ class ToolLoopExecuteParams:
     granted_capabilities: Any
     write_boundary: Any
     task_attributes: dict | None
+    request_id: str
+    run_id: str
+    task_id: str
     one_shot_tool_calls: set
     executed_tools: list
     archive_tool_calls: list

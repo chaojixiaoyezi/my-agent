@@ -16,18 +16,20 @@
 - `memory_archive/tokens/<session>.json` 已记录每轮 token 和累计 token。
 - `memory-archive-list` / `memory-archive-search` 已能查看和搜索 raw/hook 线索。
 - `memory-resume` 已能从 archive、LocalStore、subagent task fact source 和 gateway request/response 生成恢复简报。
-- `memory-compact --dry-run` 第一版已接入，只读扫描 raw/hook、权威 snapshot 和 token ledger，不做真实 apply。
+- `memory-compact --dry-run` 第一版已接入，只读扫描 raw/hook、权威 snapshot 和 token ledger。
+- `memory-compact --apply` 第二片已接入为非破坏性 apply：生成 compact context、metadata、apply bundle、restore refs、ledger、self-check 和失败阻断报告，不删除、不重写、不裁剪原始事实源。
+- runtime 工具输出外置第一片已接入：大工具输出会写入 `memory_archive/artifacts/tool_outputs/`，compact 相关记录只读 preview/hash/path/size。
 - `local-rebuild` 已能从 memory/gateway/subagent 文件事实源重建 LocalStore。
 
 ## 核心差距
 
 当前已有“压缩前快照”“恢复线索”和第一版 dry-run，但还缺完整 compact 产品链路：
 
-- `memory-compact` 目前只有只读 dry-run，`--apply` 会明确拒绝执行。
+- `memory-compact` 目前支持只读 dry-run 和非破坏性 apply；destructive rewrite / backup / restore 仍未接入。
 - dry-run 预演报告已有基础统计，还没有生成可复现 `plan_id` 文件。
 - 没有统一 artifact 层处理大工具输出。
 - 没有专门面向 compact 的 `TASK_STATE` / structured handoff schema。
-- 没有 post-compact self check，无法判断压缩后是否真的没有丢目标、约束和测试状态。
+- post-compact self check 已有第一版；还需要继续扩展到更完整的目标、约束、测试状态和 artifact 完整性检查。
 - 没有聊天内 `/context`、`/compact`、`/artifacts` 这类交互命令。
 - `compact / rebuild / backup` 还没有形成长期维护闭环。
 

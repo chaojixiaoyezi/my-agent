@@ -3,16 +3,17 @@
 
 from __future__ import annotations
 
-"""CLI entrypoint for memory compact planning.
+"""CLI entrypoint for memory compact planning and non-destructive apply.
 
 新手说明:
-这个命令第一版只做 dry-run。真正的扫描逻辑在 memory_archive.compact，
-CLI 只负责把参数传进去并打印报告。
+这个命令先做 dry-run 计划；显式 --apply 时只生成 compact context、自检和 ledger，
+不会删除 raw archive、snapshot、token ledger 或 task/run 文件。
 """
 
 import json
 
 from ..agent.memory_archive.compact import MemoryCompactPlanOptions, build_memory_compact_plan
+from ..agent.memory_archive.compact_apply import MemoryCompactApplyOptions, apply_memory_compact
 from .common import make_agent
 
 
@@ -20,8 +21,7 @@ from .common import make_agent
 # 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_memory_compact(args) -> int:
     if getattr(args, "apply", False):
-        print("memory-compact --apply 尚未实现；请先使用 --dry-run 查看计划。")
-        return 2
+        return _cmd_memory_compact_apply(args)
     agent = make_agent(args)
     plan = build_memory_compact_plan(agent.root, _options_from_args(args))
     if args.json:
@@ -29,6 +29,21 @@ def cmd_memory_compact(args) -> int:
         return 0
     _print_memory_compact_plan(plan)
     return 0
+
+
+# LLM: _cmd_memory_compact_apply 属于memory CLI；必须保持非破坏性 apply 和明确退出码。
+# 函数用途: 执行 compact apply 命令，写 compact context/self-check/ledger 并按 JSON 或文本输出结果。
+def _cmd_memory_compact_apply(args) -> int:
+    agent = make_agent(args)
+    result = apply_memory_compact(
+        agent.root,
+        MemoryCompactApplyOptions(plan_options=_options_from_args(args)),
+    )
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if result["ok"] else 2
+    _print_memory_compact_apply(result)
+    return 0 if result["ok"] else 2
 
 
 # LLM: _options_from_args 属于memory CLI；改行为前先对齐调用方和快照/单测。
@@ -64,6 +79,18 @@ def _print_memory_compact_plan(plan: dict) -> None:
     print("Recommended Actions")
     for item in plan["recommended_actions"]:
         print(f"- {item}")
+
+
+# LLM: _print_memory_compact_apply 属于memory CLI；输出文案是用户确认 apply 语义的第一层说明。
+# 函数用途: 展示非破坏性 compact apply 的结果、产物路径和 self-check 状态。
+def _print_memory_compact_apply(result: dict) -> None:
+    print("MY-AGENT MEMORY COMPACT APPLY")
+    print(f"workspace={result['workspace_root']}")
+    print(f"event_id={result['event_id']}")
+    print(f"compact_status={result['compact_status']}")
+    print("content_preserved=true")
+    _print_json_line("refs", result["refs"])
+    _print_json_line("self_check", _self_check_report_payload(result["post_compact_self_check"]))
 
 
 # LLM: _print_json_line 属于memory CLI；改行为前先对齐调用方和快照/单测。
@@ -106,4 +133,14 @@ def _token_report_payload(tokens: dict) -> dict:
         "cumulative_tokens": tokens["cumulative_tokens"],
         "invalid": tokens["invalid_count"],
         "bytes": tokens["total_bytes"],
+    }
+
+
+# LLM: _self_check_report_payload 属于memory CLI；保持 compact apply 自检摘要短小稳定。
+# 函数用途: 生成 CLI 展示用的 self-check 摘要，避免直接打印整份检查报告。
+def _self_check_report_payload(self_check: dict) -> dict:
+    return {
+        "ok": self_check["ok"],
+        "check_count": len(self_check["checks"]),
+        "failed": [item["name"] for item in self_check["checks"] if not item["ok"]],
     }

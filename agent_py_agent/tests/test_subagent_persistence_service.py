@@ -362,6 +362,7 @@ def test_subagent_persistence_writes_artifact_manifests(tmp_path) -> None:
     assert missing["ref"] == "missing.log"
     assert missing["exists"] is False
     assert missing["sha256"] == ""
+    assert missing["resolution_status"] == "missing"
 
 
 def test_subagent_persistence_writes_compact_checkpoint_chain(tmp_path) -> None:

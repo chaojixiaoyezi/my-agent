@@ -17,6 +17,13 @@ from typing import Any
 
 from ..io import append_jsonl
 from ._storage_dates import _date_key
+from .schema import (
+    RuntimeMemorySchemaOptions,
+    runtime_memory_reserved_fields,
+    runtime_memory_schema_payload,
+)
+
+DAILY_LEDGER_EVENT_SCHEMA = RuntimeMemorySchemaOptions("daily_ledger_event")
 
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 DailyLedgerAppendResult 前先核对字段语义、序列化形态和调用方假设。
@@ -122,7 +129,8 @@ def _event_payload(task: Any, workspace_refs: DailyLedgerWorkspaceRefs, now: flo
     task_id = str(getattr(task, "root_id", "") or getattr(task, "id", "task"))
     run_id = str(getattr(task, "id", "") or task_id)
     return {
-        "version": 1,
+        "version": DAILY_LEDGER_EVENT_SCHEMA.version,
+        "schema": runtime_memory_schema_payload(DAILY_LEDGER_EVENT_SCHEMA),
         "event_id": _event_id(task_id, run_id, now),
         "event_type": "subagent_task_saved",
         "created_at": _utc_iso(now),
@@ -138,6 +146,7 @@ def _event_payload(task: Any, workspace_refs: DailyLedgerWorkspaceRefs, now: flo
         "artifact_refs": list(getattr(task, "artifact_refs", []) or []),
         "evidence_refs": list(getattr(task, "evidence_refs", []) or []),
         "search": _search_fields(task),
+        "reserved": runtime_memory_reserved_fields(DAILY_LEDGER_EVENT_SCHEMA),
     }
 
 

@@ -177,7 +177,7 @@ def _tool_event(
         tool_call_id=fields.tool_call_id,
         tool_success=fields.tool_success,
         content_preview=_preview(fields.metadata_text, ctx.archive_level),
-        content_path="",
+        content_path=str(fields.metadata.get("output_path") or fields.metadata.get("content_path") or ""),
         content_hash=fields.content_hash,
         visibility="private",
         source=ctx.source,
@@ -239,6 +239,9 @@ def _tool_metadata(
             metadata[f"{key}_hash"] = _content_hash(text)
             metadata[f"{key}_preview"] = _preview(text, 2)
             break
+    for key in ("output_hash", "output_preview", "output_path", "output_externalized", "output_size_bytes"):
+        if key in tool_call:
+            metadata[key] = tool_call[key]
     for key in ("parameters", "params", "arguments", "args"):
         if key in tool_call:
             metadata[key] = tool_call[key]
