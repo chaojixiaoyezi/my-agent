@@ -5,6 +5,7 @@ import json
 import sys
 
 from ..agent.agent_core.dispatch_params import DispatchParams, WatchParams
+from ..agent.agent_core.subagent_params import SubagentRunParams
 from ..agent.capability_config import load_capability_config
 from ..agent.config import load_config
 from ..agent.subagent_workflows import (
@@ -195,11 +196,13 @@ def cmd_subagent_run(args) -> int:
 
     agent = make_agent(args)
     result = agent.run_subagent(
-        args.run_id,
-        instruction=args.instruction or "",
-        dry_run=not args.execute,
-        max_cards=args.max_cards,
-        probe=not args.no_probe,
+        params=SubagentRunParams(
+            run_id=args.run_id,
+            instruction=args.instruction or "",
+            dry_run=not args.execute,
+            max_cards=args.max_cards,
+            probe=not args.no_probe,
+        )
     )
     mode = "execute" if args.execute else "dry-run"
     status = "OK" if result.ok else "FAIL"

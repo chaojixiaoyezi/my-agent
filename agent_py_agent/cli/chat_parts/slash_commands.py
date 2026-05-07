@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from ...agent.agent_core.subagent_params import SpawnSubagentsParams
 from .slash_command_types import SlashCommandContext
 
 CHAT_HELP_TEXT = (
@@ -138,7 +139,9 @@ def _handle_subagents_command(
     if len(parts) < 3 or not parts[1].isdigit():
         ctx.print_line("Usage: /subagents <count> <goal>")
         return True
-    for task in ctx.agent.spawn_subagents(parts[2], int(parts[1])):
+    for task in ctx.agent.spawn_subagents(
+        params=SpawnSubagentsParams(goal=parts[2], count=int(parts[1])),
+    ):
         ctx.print_line(f"- {task.id}: {task.goal}")
     return True
 

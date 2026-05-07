@@ -98,6 +98,7 @@ class RunnerFailureParams:
 
 def run_single_runner(params: SingleRunnerParams) -> SubAgentRunnerResult:
     from .runner_dispatch import RunSubagentWorkerParams, _run_subagent_worker
+    from .subagent_params import SubagentRunParams
 
     if params.execute_runners and params.task_timeout > 0:
         worker_params = RunSubagentWorkerParams(
@@ -115,12 +116,14 @@ def run_single_runner(params: SingleRunnerParams) -> SubAgentRunnerResult:
         )
         return _run_subagent_worker(worker_params)
     return params.agent.run_subagent(
-        params.run_id,
-        instruction=params.instruction,
-        dry_run=not params.execute_runners,
-        max_cards=params.max_cards,
-        probe=params.probe,
-        retry_reason=params.retry_reason,
+        params=SubagentRunParams(
+            run_id=params.run_id,
+            instruction=params.instruction,
+            dry_run=not params.execute_runners,
+            max_cards=params.max_cards,
+            probe=params.probe,
+            retry_reason=params.retry_reason,
+        )
     )
 
 

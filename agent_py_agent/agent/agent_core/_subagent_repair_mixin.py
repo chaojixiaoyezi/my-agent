@@ -25,6 +25,17 @@ class SubagentRepairParams:
     message: str
 
 
+@dataclass(frozen=True)
+class RecoverySnapshotParams:
+    run_id: str
+    user_prompt: str
+    response_text: str
+    backend: str
+    status: str
+    error_code: str
+    tool_calls: list[dict[str, object]]
+
+
 class _SubagentRepairMixin:
 
     def _handle_subagent_repair(self, params: SubagentRepairParams):
@@ -83,46 +94,78 @@ class _SubagentRepairMixin:
 
     def _write_subagent_recovery_snapshot(
         self,
-        run_id: str,
+        run_id: str | None = None,
+        *,
+        params: RecoverySnapshotParams | None = None,
         **kwargs,
     ) -> None:
 
         if not bool(getattr(self.config, "memory_hook_enabled", True)):
             return
+        snapshot = _recovery_snapshot_params(params, run_id=run_id, kwargs=kwargs)
         try:
-            task = self.subagents.load(run_id)
+            task = self.subagents.load(snapshot.run_id)
         except (FileNotFoundError, TypeError):
             task = None
-        content_paths = []
-        next_actions = [
-            "先读取子代理 STATUS/WORK_LOG/RUNNER_RESULT/output.json，再判断是否可以验收或重跑。"
-        ]
-        if task is not None:
-            content_paths = [
-                task.status_file,
-                task.work_log_file,
-                task.runner_result_file,
-                task.runner_result_json,
-                task.output_json,
-                task.handoff_file,
-            ]
         write_recovery_snapshot(
             self.root,
-            params=RecoverySnapshotInput(
-                session_id=getattr(self, "session_id", self.config.agent_name),
-                user_prompt=kwargs["user_prompt"],
-                response_text=kwargs["response_text"],
-                backend=kwargs["backend"],
-                source="subagent_run",
-                request_id=f"subagent-run:{run_id}",
-                run_id=run_id,
-                task_id=run_id,
-                status=str(kwargs["status"]).lower() or "unknown",
-                error_code=kwargs["error_code"],
-                tool_calls=kwargs["tool_calls"],
-                task_refs=[run_id],
-                content_paths=content_paths,
-                next_actions=next_actions,
-                archive_level=int(getattr(self.config, "memory_hook_archive_level", 3)),
-            ),
+            params=_recovery_snapshot_input(self, snapshot, _recovery_content_paths(task)),
         )
+
+
+def _recovery_snapshot_params(
+    params: RecoverySnapshotParams | None,
+    *,
+    run_id: str | None,
+    kwargs: dict[str, object],
+) -> RecoverySnapshotParams:
+    if params is not None:
+        if not isinstance(params, RecoverySnapshotParams):
+            raise TypeError("subagent recovery snapshot requires params: RecoverySnapshotParams")
+        return params
+    # LLM: legacy recovery kwargs normalize to one bundle before snapshot persistence.
+    return RecoverySnapshotParams(
+        run_id=str(run_id or kwargs["run_id"]),
+        user_prompt=str(kwargs["user_prompt"]),
+        response_text=str(kwargs["response_text"]),
+        backend=str(kwargs["backend"]),
+        status=str(kwargs["status"]),
+        error_code=str(kwargs["error_code"]),
+        tool_calls=list(kwargs["tool_calls"]),
+    )
+
+
+def _recovery_content_paths(task) -> list[str]:
+    if task is None:
+        return []
+    return [
+        task.status_file,
+        task.work_log_file,
+        task.runner_result_file,
+        task.runner_result_json,
+        task.output_json,
+        task.handoff_file,
+    ]
+
+
+def _recovery_snapshot_input(agent, snapshot: RecoverySnapshotParams, content_paths: list[str]):
+    next_actions = [
+        "先读取子代理 STATUS/WORK_LOG/RUNNER_RESULT/output.json，再判断是否可以验收或重跑。"
+    ]
+    return RecoverySnapshotInput(
+        session_id=getattr(agent, "session_id", agent.config.agent_name),
+        user_prompt=snapshot.user_prompt,
+        response_text=snapshot.response_text,
+        backend=snapshot.backend,
+        source="subagent_run",
+        request_id=f"subagent-run:{snapshot.run_id}",
+        run_id=snapshot.run_id,
+        task_id=snapshot.run_id,
+        status=str(snapshot.status).lower() or "unknown",
+        error_code=snapshot.error_code,
+        tool_calls=snapshot.tool_calls,
+        task_refs=[snapshot.run_id],
+        content_paths=content_paths,
+        next_actions=next_actions,
+        archive_level=int(getattr(agent.config, "memory_hook_archive_level", 3)),
+    )

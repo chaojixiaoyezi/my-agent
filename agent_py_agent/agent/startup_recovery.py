@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .subagents.models import SubAgentBoardOptions
+
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
@@ -56,7 +58,7 @@ def _detect_processing_requests(paths, summary):
 def _detect_active_tasks(agent, summary):
     """检测未完成的子代理任务和最近任务列表。"""
     try:
-        board = agent.subagents.build_board(recent_limit=3)
+        board = agent.subagents.build_board(options=SubAgentBoardOptions(recent_limit=3))
         final_statuses = {"DONE", "FAILED", "CANCELLED", "TIMEOUT"}
         active_tasks = [item for item in board.hot_list if item.status not in final_statuses]
         summary.active_task_count = len(active_tasks)

@@ -99,6 +99,14 @@ class SubAgentDueCheckOptions:
     write_report: bool = False
 
 
+# LLM: board selection uses the same manager-facing bundle pattern as route/probe/due-check.
+@dataclass(frozen=True)
+class SubAgentBoardOptions:
+    """Bundle for board rendering and recent-list selection."""
+
+    recent_limit: int = 20
+
+
 __all__ = [
     "CapabilityGap",
     "CapabilityGrant",
@@ -113,6 +121,7 @@ __all__ = [
     "LearningCandidate",
     "QualityContract",
     "SubAgentCard",
+    "SubAgentBoardOptions",
     "SubAgentCapabilityRouteOptions",
     "SubAgentChannelProbeOptions",
     "SubAgentDueCheckOptions",

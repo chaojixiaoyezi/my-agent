@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
+from ..subagents.models import SubAgentBoardOptions
 from ..subagents.services.base import CreateRunParams, _extract_write_dirs
 from ..tools import BaseTool, ToolExecutionResult, ToolSpec
 from .dispatch_params import DispatchParams
@@ -232,7 +233,9 @@ class SubagentBoardTool(BaseTool):
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         limit = _positive_int(params.get("limit"), default=10)
         status_filter = str(params.get("status") or "").strip().upper()
-        board = self.agent.subagents.write_board(recent_limit=max(1, limit))
+        board = self.agent.subagents.write_board(
+            options=SubAgentBoardOptions(recent_limit=max(1, limit)),
+        )
         items = board.items
         if status_filter:
             items = [item for item in items if item.status.upper() == status_filter]
