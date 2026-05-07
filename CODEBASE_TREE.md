@@ -184,7 +184,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- memory.py                          # 记忆兼容入口，真实实现已拆到 memory_store/
 |   |   |-- memory_settings.py                 # memory 配置安全解析兼容入口，真实实现已拆到 settings/memory.py
 |   |   |-- memory_store/                      # 长期记忆存储，当前是 JSONL + LocalStore 索引
-|   |   |-- memory_archive/                    # 压缩前 hook 快照和 raw 冷归档 JSONL 存储骨架
+|   |   |-- memory_archive/                    # raw/hook/snapshot、runtime workspace、schema v2、control-plane query、tool-output artifacts 和非破坏性 compact apply
 |   |   |-- memory_routing/                    # 长期规则索引化路由，负责 MEMORY -> index -> authority file 的确定性匹配
 |   |   |-- observability/                     # 未来 request_id、耗时、状态、错误码、metrics、trace 目录
 |   |   |   `-- user_space/                    # 用户数据隔离：路径解析、目录管理、迁移工具

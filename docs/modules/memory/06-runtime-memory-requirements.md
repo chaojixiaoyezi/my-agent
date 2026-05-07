@@ -85,11 +85,15 @@ Daily event ledger 是主代理按天查 task/run 线索的轻量入口，不是
 
 当前 Phase 2 已先落地 `daily/YYYY-MM-DD/events.jsonl`：subagent 保存时追加 `subagent_task_saved` 事件，包含 task/run id、状态、进度、duration、摘要、artifact/evidence refs、workspace 引用和检索字段。ledger 不保存完整用户目标、工具输出或子代理上下文；需要核实时必须回到 task/run workspace 或旧 work-order 文件。
 
+Control-plane query 第一片已落地：`query_memory_control_plane()` 会按 date/task/run/event scope 只读汇总 daily events、task/run refs、compact apply ledger 和 tool output index，返回 counts、summary、refs、preview/hash/path 等轻量信息。它不读取 artifact 正文，不写任何 workspace 文件，也不替代 task/run 目录里的权威事实。
+
 ## Artifact 外置要求
 
-工具大输出、日志样本、报告和中间产物必须留在 artifact 文件中。ledger、state、summary 和 memory item 只能保存摘要、hash、路径和状态。
+工具大输出、日志样本、报告和中间产物必须留在 artifact 文件中。ledger、state、summary、raw tool event 和 memory item 只能保存摘要、hash、路径和状态。
 
-当前 Phase 3 已先落地 `artifacts/manifest.jsonl`：subagent 保存时会在 task workspace 和 agent run workspace 各写一份 manifest，把 `artifact_refs` 规范化为 ref、resolved path、exists、size、sha256、summary、kind 和 source。manifest 不复制 artifact 正文；正文仍由原 artifact 文件承担。
+当前 runtime 工具输出外置第一片已落地：工具循环记录归档时，超过阈值的大输出会写入 `memory_archive/artifacts/tool_outputs/<tool>-<call>-<hash>.json`，并追加 `index.jsonl`；`archive_tool_calls` 和 raw tool event 只保存 `output_preview`、`output_hash`、`output_path`、`output_size_bytes` 和 `output_externalized`。当前模型轮的 `tool_context` 仍保留完整工具结果，所以这一步不改变工具执行行为，只改变归档和 compact 输入形态。
+
+当前 Phase 3 已先落地 `artifacts/manifest.jsonl`：subagent 保存时会在 task workspace 和 agent run workspace 各写一份 manifest，把 `artifact_refs` 规范化为 ref、resolved path、exists、size、sha256、summary、kind、source 和 `resolution_status`。manifest 只允许读取 legacy task dir、task workspace、agent run workspace 内的文件；越界绝对路径或 `..` 逃逸路径只登记 blocked 状态，不复制 artifact 正文，也不计算 hash。
 
 ## Skill Sparks 要求
 
@@ -118,11 +122,13 @@ Daily event ledger 是主代理按天查 task/run 线索的轻量入口，不是
 
 当前 Phase 4 已先落地 checkpoint-first compact chain：subagent 保存时会在 run `compactions/compaction_ledger.jsonl` 追加 `checkpoint_snapshot` 事件，并写每次 snapshot 的 markdown summary 和 metadata JSON；run `checkpoint.json` 会记录最新 ledger/summary/metadata/artifact manifest/timeline refs。当前状态明确标记为 `checkpoint_only`，不会删除 timeline、artifact 或旧 work-order 文件，也不等同于正式 compact apply。
 
+全局 `memory-compact --apply` 的第二片已落地为非破坏性 apply：它会基于 dry-run scope 写 `memory_archive/compact_applies/<event_id>.md`、metadata JSON、apply bundle、restore refs、post-compact self-check JSON 和 append-only ledger，成功状态为 `applied_non_destructive`。`restore_refs.json` 会列出原始 archive/snapshot/token ledger 引用，`apply_bundle.json` 会给恢复流程提供入口和核验步骤；如果 self-check 失败，会额外写 `self_check_failed.json` 并把 metadata/ledger 标记为 `blocked_self_check_failed`。这一步只建立恢复入口、自检、失败阻断和审计记录，不删除、不重写、不裁剪 raw/hook/snapshot/token/task/run 文件。后续如果要做 destructive rewrite，必须另加备份、restore、self-check failed rollback 和更高等级验收。
+
 ## Shared Workspace 要求
 
 Shared workspace 是同一 task 下 sibling 子代理共享任务局部事实的地方，不是主代理长期 memory。
 
-当前 Phase 5 已先落地 `shared/` 结构化同步：subagent 保存时会更新 `blackboard.md` 的状态 rollup，向 `messages.jsonl` 追加 status update，把 `findings` 写入 `findings.jsonl`，并把 `evidence_packets` 外置成 `shared/evidence_packets/<id>.json` 加 `index.jsonl`。这些文件只保存 claim、refs、confidence、status 等结构化事实；不保存完整聊天历史，也不自动提升为长期 memory item。
+当前 Phase 5 已先落地 `shared/` 结构化同步：subagent 保存时会更新 `blackboard.md` 的状态 rollup，向 `messages.jsonl` 追加 status update，把 `findings` 按 id 合并进 `findings.jsonl`，并把 `evidence_packets` 外置成 `shared/evidence_packets/<id>.json` 加按 id 合并的 `index.jsonl`。这些文件只保存 claim、refs、confidence、status 等结构化事实；不保存完整聊天历史，不让最后一个 sibling 覆盖其他 sibling 的发现，也不自动提升为长期 memory item。
 
 ## 接管要求
 
@@ -144,6 +150,31 @@ Shared workspace 是同一 task 下 sibling 子代理共享任务局部事实的
 4. 只有经过 gate 的 finding/memory candidate 才能进入长期 memory。
 
 `memory-resume` 应被理解为恢复入口生成器，而不是把子代理内容写入主 memory。
+
+## Schema v2 / Reserved 字段要求
+
+Runtime memory 的轻量索引记录必须能长期扩展，但不能把字段随手塞进各处。当前 v2 固定以下约定：
+
+- 顶层 `version` 必须写 `2`。
+- 顶层 `schema` 必须写 `name`、`version` 和 `reserved_keys`。
+- 顶层 `reserved` 必须写 `schema_name`、`schema_version`、`extensions`、`compat`、`future`。
+- `extensions` 只放实验性、可丢弃、可迁移字段。
+- `compat` 只放旧 reader/writer 兼容需要的桥接字段。
+- `future` 只放已经预留但还没有正式语义的字段。
+- 稳定业务字段必须显式命名，不允许长期藏在 `reserved` 里。
+- 读路径必须容忍旧 `version=1` 记录；写路径从 v2 开始统一输出 schema/reserved。
+
+当前已固化到 v2 的记录族：
+
+- `daily_ledger_event`
+- `control_plane_query`
+- `control_plane_task_run_ref`
+- `compact_apply`
+- `compact_apply_ledger`
+- `compact_apply_self_check`
+- `tool_output_archive_record`
+- `tool_output_artifact`
+- `tool_output_index`
 
 ## Bundle 接口规范
 
@@ -190,13 +221,17 @@ Shared workspace 是同一 task 下 sibling 子代理共享任务局部事实的
 - 已新增 `memory_archive/memory_gate.py`，先创建 run-local memory/skill candidate gate：`candidates.jsonl`、`review_queue.jsonl`、`skill_spark_gate.json` 只记录候选、证据、适用范围和 review 要求，默认 `not_promoted`。
 - 已新增 `subagents-memory-gate` 显式 review decision 写回：`decisions.jsonl` 记录 reviewer、decision、note 和 `auto_promote=false`；approve 只改变 gate 状态，不执行长期 memory/skill 导出。
 - 已新增 Phase 6 显式收口链：retention 只压缩 active review queue 并保留审计；`--export-memory` 只导出 `approve_memory` 候选；`--export-skill` 只生成 draft；`--verify` 写边界检查报告，确认没有自动提升。
+- 已新增 `memory_archive/control_plane.py`，先提供统一只读查询入口，把 daily ledger、task/run refs、compact apply ledger 和 tool output index 合成同一 scope 的引用视图，供 compact/resume/debug 继续使用。
+- 已新增 `memory_archive/schema.py`，先把 daily ledger、control-plane task/run refs、compact apply 和 tool output index 的写入记录统一到 schema v2 / reserved 三槽。
+- 已扩展 `memory_archive/compact_apply.py` 第二片：非破坏性 apply 会写 apply bundle、restore refs 和 self-check failed 报告，失败时只阻断状态并保留审计，不回滚、不删除、不改写原始事实源。
 - 已完成 bundle-first 收敛：runtime/subagent/gateway/log-analysis/memory-archive/audit/local-storage/backends 的服务入口已改为 Request/Options/Params 或显式 keyword -> bundle adapter；架构护栏会扫描业务代码中的函数级 var-positional / var-keyword，当前例外仅限透明转发、协议 override、兼容 adapter 和局部字段选择 helper。
 
 后续主要差距：
 
 - 旧 subagent workspace 尚未迁移到 `tasks/<task_id>/agents/<run_id>/`；当前 agent run workspace 是 skeleton + legacy adapter，不是完整替代。
-- task workspace 已有第一版 `task.yaml`、`state.json`、`timeline.jsonl`，run workspace 已有第一版 `agent.yaml`、run-level `state.json/timeline.jsonl` 和 checkpoint-first compact ledger/snapshot 链，但还没有接入真实 compact apply 和 post-compact self check。
-- daily ledger 已有 append-only 文件入口和 artifact manifest refs，但还没接入 resume 查询优先级；run-local gate retention 已有保守 active queue 清理。
-- artifact manifests 已能规范已有 `artifact_refs`，但还没自动搬运/截断大工具输出，也还没做 content-addressed artifact 存储。
+- task workspace 已有第一版 `task.yaml`、`state.json`、`timeline.jsonl`，run workspace 已有第一版 `agent.yaml`、run-level `state.json/timeline.jsonl` 和 checkpoint-first compact ledger/snapshot 链；全局 `memory-compact --apply` 已有非破坏性 apply、restore refs、apply bundle、post-compact self-check 和失败阻断，但 run-local destructive compact apply 仍未接入。
+- daily ledger 已有 append-only 文件入口和 artifact manifest refs，并已接入 control-plane 只读查询；resume 查询优先级还需要下一步显式改造，run-local gate retention 已有保守 active queue 清理。
+- artifact manifests 已能规范已有 `artifact_refs`，runtime 大工具输出已能外置到 `memory_archive/artifacts/tool_outputs/` 并追加 index，control-plane 已能统一查询全局 tool-output index；但 task/run artifact manifest 与全局 artifact index 的 content-addressed 去重存储还没做。
+- schema v2 已覆盖当前新写的轻量索引记录，但旧 raw/hook/archive 历史记录仍保持原 schema，后续要做迁移只能通过 reader 兼容或显式 migration，不允许原地重写历史事实源。
 - shared blackboard/messages/findings/evidence packets 已有最小同步面，但 locks/handoffs 和 sibling 消息协议仍未系统化。
 - memory item 写入门禁 / skill spark 提升链已能记录候选、review decision、retention、长期 memory 显式导出、skill draft 显式导出和 verifier 报告；正式 skill 安装仍未实现，后续也必须保持人工确认。

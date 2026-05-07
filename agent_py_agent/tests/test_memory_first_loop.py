@@ -9,9 +9,11 @@ archive level 过滤、压缩前 snapshot 门禁、路由校验命令，以及 c
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import agent_py_agent.agent.agent_core.runtime_loop_support as runtime_loop_support
 import agent_py_agent.agent.agent_core.runtime_mixin as runtime_mixin
 import agent_py_agent.agent.agent_core.runtime_services as runtime_services
 from agent_py_agent.__main__ import build_parser
@@ -145,6 +147,64 @@ def test_compression_hook_failure_blocks_run_and_audits_event(tmp_path, monkeypa
     events = _read_jsonl(tmp_path / "local_store" / "events.jsonl")
     assert events[-1]["event_type"] == "memory_compression_snapshot_failed"
     assert "disk full" in events[-1]["payload"]["error"]
+
+
+def test_runtime_compression_receives_routed_and_resume_context(monkeypatch):
+    routed_context = SimpleNamespace(
+        injected_sections=["### Routed Memory\nmemory/routing/rules/compact.md"],
+        required_read_paths=["memory/routing/rules/compact.md"],
+        candidate_paths=["memory/routing/rules/subagent.md"],
+        matches=[],
+    )
+    resume_context = SimpleNamespace(
+        context_block="恢复线索：继续 compact split 前先读 checkpoint。",
+        injected=True,
+    )
+    captured: dict[str, object] = {}
+    agent = _runtime_context_capture_agent(captured)
+
+    monkeypatch.setattr(runtime_loop_support, "build_routed_memory_context", lambda *args, **kwargs: routed_context)
+    monkeypatch.setattr(runtime_loop_support, "build_auto_resume_context", lambda *args, **kwargs: resume_context)
+
+    prepared = runtime_loop_support._prepare_runtime_context(agent, "继续 compact", [], True)
+    params = runtime_loop_support._runtime_loop_params(
+        "继续 compact",
+        prepared,
+        runtime_loop_support.RunParams(request_id="req-compact"),
+    )
+    runtime_loop_support._execute_runtime_compression(agent, params)
+    ctx = captured["ctx"]
+
+    assert ctx.routed_context is routed_context
+    assert ctx.resume_context_section.startswith("### Auto Recovery Context")
+    assert "恢复线索" in ctx.resume_context_section
+    assert "### Routed Memory" in ctx.runtime_injections[-1]
+
+
+def _runtime_context_capture_agent(captured: dict[str, object]):
+    class Memory:
+        def search(self, user_prompt: str, top_k: int):
+            return [SimpleNamespace(role="user", content=user_prompt)]
+
+    class Compression:
+        def check_and_apply(self, ctx):
+            captured["ctx"] = ctx
+            return ctx.memories, "snapshot-1", "snapshots/snapshot-1.json", True
+
+    class Agent:
+        root = Path(".")
+        memory = Memory()
+        config = SimpleNamespace(
+            memory_top_k=1,
+            memory_rule_routing_enabled=True,
+            memory_rule_routing_mode="soft",
+            memory_rule_auto_read_limit=2,
+        )
+
+        def _get_services(self):
+            return SimpleNamespace(compression=Compression())
+
+    return Agent()
 
 
 def test_memory_route_validate_reports_keyword_conflict_and_dead_link(tmp_path, capsys):

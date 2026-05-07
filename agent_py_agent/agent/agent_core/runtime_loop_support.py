@@ -37,13 +37,15 @@ class RunParams:
 
 
 # LLM: _RuntimeLoopParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存运行时循环参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
+# 类用途: 集中保存运行时循环和压缩快照需要的上下文字段；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class _RuntimeLoopParams:
 
     user_prompt: str
     memories: list
     runtime_injections: list
+    routed_context: Any
+    resume_context_section: str
     allowed_tools: list | None = None
     granted_capabilities: list | None = None
     prompt_files: list | None = None
@@ -78,7 +80,7 @@ class _FinalizeParams:
 
 
 # LLM: _PreparedRuntimeContext 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存prepared运行时上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
+# 类用途: 集中保存运行前准备出的 memory、路由和恢复上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class _PreparedRuntimeContext:
 
@@ -86,6 +88,7 @@ class _PreparedRuntimeContext:
     runtime_injections: list
     routed_context: Any
     resume_context_result: Any
+    resume_context_section: str
 
 
 # LLM: _RuntimeLoopResult 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -172,6 +175,8 @@ def _runtime_loop_params(
         user_prompt=user_prompt,
         memories=prepared.memories,
         runtime_injections=prepared.runtime_injections,
+        routed_context=prepared.routed_context,
+        resume_context_section=prepared.resume_context_section,
         allowed_tools=params.allowed_tools,
         granted_capabilities=params.granted_capabilities,
         prompt_files=params.prompt_files,
@@ -260,6 +265,7 @@ def _prepare_runtime_context(agent, user_prompt, inject, resume_context):
         runtime_injections=runtime_injections,
         routed_context=routed_context,
         resume_context_result=resume_context_result,
+        resume_context_section=resume_context_section,
     )
 
 
@@ -299,8 +305,8 @@ def _execute_runtime_compression(agent, params: _RuntimeLoopParams) -> _Compress
         user_prompt=params.user_prompt,
         memories=params.memories,
         runtime_injections=params.runtime_injections,
-        routed_context=None,
-        resume_context_section="",
+        routed_context=params.routed_context,
+        resume_context_section=params.resume_context_section,
         request_id=params.request_id,
         run_id=params.run_id,
         task_id=params.task_id,
@@ -332,6 +338,9 @@ def _tool_loop_execute_params(seed: _RuntimeToolLoopSeed) -> ToolLoopExecutePara
         granted_capabilities=params.granted_capabilities,
         write_boundary=params.write_boundary,
         task_attributes=params.task_attributes,
+        request_id=params.request_id,
+        run_id=params.run_id,
+        task_id=params.task_id,
         one_shot_tool_calls=one_shot_tool_calls,
         executed_tools=executed_tools,
         archive_tool_calls=archive_tool_calls,

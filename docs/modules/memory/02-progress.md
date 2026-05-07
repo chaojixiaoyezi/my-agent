@@ -9,6 +9,7 @@
 - `memory_archive/tokens/` 已开始按 session 记录每轮 input/output/tool token 和累计 token。
 - `memory-route`、`memory-doctor`、`memory archive` 相关 CLI 和测试已存在。
 - `memory-compact --dry-run` 已能只读扫描 raw/hook、权威 snapshot 和 token ledger，输出 compact plan、风险提示和下一步建议。
+- `memory-compact --apply` 已能生成非破坏性 compact context、apply metadata、apply ledger 和 post-compact self-check；当前不会删除、重写或裁剪 raw/hook/snapshot/token/task/run 文件。
 - `memory-route --validate` 已能检查重复关键词、跨 route 冲突、死链和非法 `inject_mode`。
 - `memory-archive-list --level <N>` 已能按 archive level 验证不同粒度落盘。
 - capability gap 已接通 memory route，把相关长期规则路径补进子代理 `context_manifest.required_read_paths`。
@@ -36,6 +37,12 @@
 - 2026-05-07 Phase 6 review decision 写回已落地：`subagents-memory-gate <run_id> --candidate-id <id> --decision ...` 会把 review 结果写入 `memory_gate/decisions.jsonl`，并更新候选和 checkpoint 的 gate refs；approve 只表示允许后续显式导出流程继续，不会自动写长期 memory 或正式 skill。
 - 2026-05-07 Phase 6 显式收口链已落地：`subagents-memory-gate` 现在支持 `--retention-dry-run/--retention-apply`、`--export-memory`、`--export-skill` 和 `--verify`；retention 只压缩 active queue 并保留审计，memory export 只处理 `approve_memory` 候选，skill export 只生成 draft，verifier 检查无自动提升边界。
 - 2026-05-07 bundle 接口规范已写入 runtime memory 开发要求：复杂业务入口统一 Request/Options/Params，复杂输出统一 Result/Record/Report；CLI args 必须在 CLI 层转换，manager 可保留旧签名作为兼容 wrapper。
+- 2026-05-07 P0 安全切片已落地：runtime compression snapshot 现在会带上 routed memory context 和 auto resume context；artifact manifest 只允许读取 legacy task dir、task workspace、agent run workspace 内的 artifact；shared workspace 的 findings/evidence 改为按 id 合并，避免 sibling 子代理互相覆盖。
+- 2026-05-07 Compact Apply 语义拆分第一片已落地：`memory-compact --apply` 不再等同于 destructive rewrite，而是写 `memory_archive/compact_applies/` 下的 compact context、metadata、ledger 和 self-check，状态标记为 `applied_non_destructive`。
+- 2026-05-07 Artifact Externalizer 第一片已落地：runtime 工具循环会把超过阈值的大工具输出写入 `memory_archive/artifacts/tool_outputs/*.json`，并追加 `index.jsonl`；`archive_tool_calls` 只保留 preview/hash/path/size，当前工具上下文仍保留完整结果，不改变本轮模型行为。
+- 2026-05-07 Control-plane Query API 第一片已落地：`query_memory_control_plane()` 会只读汇总 `daily/YYYY-MM-DD/events.jsonl`、task/run refs、`memory_archive/compact_applies/ledger.jsonl` 和 `memory_archive/artifacts/tool_outputs/index.jsonl`，按 date/task/run/event scope 返回轻量引用；它不读取大工具正文，不写入 workspace，也不替代 task/run 事实源。
+- 2026-05-07 Schema v2 / Reserved Fields 已固化第一片：`daily_ledger_event`、`control_plane_task_run_ref`、`compact_apply` / `compact_apply_ledger` / `compact_apply_self_check`、`tool_output_archive_record` / `tool_output_artifact` / `tool_output_index` 现在统一写 `version=2`、`schema` 和结构化 `reserved={schema_name,schema_version,extensions,compat,future}`；后续新增字段优先走明确业务字段，实验性扩展只能放入 reserved 三槽。
+- 2026-05-07 Compact Apply 第二片已落地：`memory-compact --apply` 现在除 context/metadata/self-check/ledger 外，还会写 `*.apply_bundle.json` 和 `*.restore_refs.json`，把原始 archive/snapshot/token refs 和恢复步骤串起来；如果 post-compact self-check 失败，会写 `*.self_check_failed.json` 并把 metadata/ledger 标记为 `blocked_self_check_failed`，仍然不删除、不重写、不裁剪历史事实源。
 - **记忆推模式** (`memory_push.py`)：在关键决策点自动查询并注入相关记忆，实现"推模式"记忆系统。
   - `MemoryType` 枚举：`LESSON_GENERAL`、`LESSON_TASK`、`LESSON_TEMP`、`CONTEXT`、`FACT`
   - `push_relevant_memories()` 函数：根据触发类型搜索相关记忆
@@ -79,6 +86,12 @@
 - capability gap 与长期规则联动解决了“子代理已经发现自己缺什么，但相关规则没有自动回流到执行上下文”的问题。
 - archive level 过滤和 session token 账本解决了“不同粒度无法直接验收、token 只能估一轮”的问题。
 - compact dry-run 解决了“还没压缩前不知道会碰到哪些归档、snapshot、token ledger 和风险”的问题；真实 apply 前可以先审计计划。
+- compact apply 语义拆分解决了“checkpoint_only 和真正 apply 混在一起”的问题；现在 apply 先形成可审计恢复入口和自检报告，明确保留原始内容，后续才能继续做更激进的上下文裁剪。
+- artifact externalizer 解决了“大工具输出只能混在工具上下文或归档摘要里”的问题；现在 compact/resume 能从 index 找到完整 artifact，而 raw archive、token ledger 和 apply metadata 不需要复制大正文。
+- control-plane query 解决了“daily ledger、compact apply、tool output index 和 task/run refs 只能各自散扫”的问题；现在 compact/resume/debug 可以先走统一只读入口，再按 refs 回到权威文件核实。
+- schema v2 / reserved 固化解决了“索引记录以后要加字段时没有统一落点”的问题；现在核心 runtime memory 轻量记录都带同一个版本和保留槽，架构评审能区分正式字段、兼容字段和未来实验扩展。
+- compact apply 第二片解决了“apply 只有摘要产物，但缺少显式恢复包和失败阻断”的问题；现在恢复时可以先读 apply bundle，再按 restore refs 回查原始事实源，自检失败也会留下机器可读失败报告。
+- P0 安全切片解决了三类恢复风险：compact 快照不会丢 routed/resume 恢复线索；artifact manifest 不会越界读本机任意绝对路径；shared workspace 不再由最后一次保存覆盖 sibling 已登记的 finding/evidence。
 
 ## 下一步
 
@@ -131,6 +144,9 @@
 - 本轮 Phase 4 Checkpoint/Compact Chain focused 验收：`python3 -m pytest agent_py_agent/tests/test_subagent_persistence_service.py -q` -> `7 passed`。
 - 本轮 Phase 5 Shared Workspace focused 验收：`python3 -m pytest agent_py_agent/tests/test_subagent_persistence_service.py -q` -> `8 passed`。
 - 本轮 Phase 6 Memory Gate focused 验收：`python3 -m pytest agent_py_agent/tests/test_subagent_persistence_service.py -q` -> `9 passed`。
+- 本轮 P0 安全 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_memory_first_loop.py::test_runtime_compression_receives_routed_and_resume_context agent_py_agent/tests/test_subagent_persistence_service.py::test_subagent_persistence_writes_artifact_manifests agent_py_agent/tests/test_memory_workspace_safety.py` -> passed。
+- 本轮 compact apply focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_memory_compact.py` -> `5 passed`。
+- 本轮 artifact externalizer focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_tool_output_externalizer.py` -> `2 passed`。
 
 ## 未跑测试
 
