@@ -35,3 +35,6 @@ def sync_task_workspace_fields(workspace: str | Path, task: SubAgentTask) -> Non
     task.agent_run_artifacts_dir = str(task_workspace_paths.agent_run.artifacts_dir)
     task.agent_run_compactions_dir = str(task_workspace_paths.agent_run.compactions_dir)
     task.legacy_run_ref_json = str(task_workspace_paths.legacy_run_ref_json)
+    # LLM: expose the latest daily ledger append for recovery/debug without storing full context.
+    task.daily_ledger_file = str(task_workspace_paths.daily_ledger.events_jsonl)
+    task.daily_ledger_last_event_id = task_workspace_paths.daily_ledger.event_id

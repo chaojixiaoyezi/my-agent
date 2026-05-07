@@ -158,6 +158,9 @@ class SubAgentTask:
     agent_run_artifacts_dir: str = ""
     agent_run_compactions_dir: str = ""
     legacy_run_ref_json: str = ""
+    # LLM: Phase 2 daily ledger stores compact task/run refs, not full subagent context.
+    daily_ledger_file: str = ""
+    daily_ledger_last_event_id: str = ""
     handoff_file: str = ""
     debrief_file: str = ""
     output_json: str = ""

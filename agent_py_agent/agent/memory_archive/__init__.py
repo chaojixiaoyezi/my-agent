@@ -5,6 +5,7 @@ from __future__ import annotations
 新手说明:
 这里是"压缩前快照"、"全量冷归档"和 runtime workspace adapter 的最小入口。
 以后真实压缩流程要接入时，优先从这里导入数据结构和写入函数，不要把 JSONL 路径规则散落到别的模块里。
+LLM: daily ledger helpers are exported here so runtime memory callers do not invent path rules.
 """
 
 # LLM: keep task/run workspace adapter exports centralized for callers.
@@ -12,6 +13,12 @@ from .agent_run_workspace import (
     AgentRunWorkspacePaths,
     agent_run_workspace_paths,
     ensure_agent_run_workspace,
+)
+from .daily_ledger import (
+    DailyLedgerAppendResult,
+    DailyLedgerWorkspaceRefs,
+    append_subagent_task_event,
+    daily_events_path_for,
 )
 from .models import CompressionSnapshot, RawMemoryEvent
 from .resume_context import ResumeContextResult, build_auto_resume_context
@@ -51,6 +58,8 @@ __all__ = [
     "CompressionSnapshot",
     "ArchiveRunTurnResult",
     "AgentRunWorkspacePaths",
+    "DailyLedgerAppendResult",
+    "DailyLedgerWorkspaceRefs",
     "TurnTokenUsage",
     "CompressionHookResult",
     "MemoryArchiveError",
@@ -62,11 +71,13 @@ __all__ = [
     "append_raw_event",
     "append_snapshot",
     "append_session_token_usage",
+    "append_subagent_task_event",
     "build_auto_resume_context",
     "check_token_budget",
     "clear_compression_hooks",
     "compression_snapshot_dir",
     "compression_snapshot_file_for",
+    "daily_events_path_for",
     "enforce_retention",
     "estimate_tokens",
     "agent_run_workspace_paths",
