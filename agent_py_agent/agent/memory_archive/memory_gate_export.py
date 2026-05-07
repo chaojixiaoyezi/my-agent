@@ -25,6 +25,8 @@ class MemoryGateExportRequest:
     candidate_id: str = ""
     reviewer: str = "parent"
     now: float | None = None
+    memory_path: Path | str | None = None
+    output_dir: Path | str | None = None
 
 
 @dataclass(frozen=True)
@@ -40,8 +42,6 @@ class MemoryGateExportResult:
 
 def export_approved_memory_candidates(
     agent_run_workspace_root: Path,
-    *,
-    memory_path: Path,
     request: MemoryGateExportRequest,
 ) -> MemoryGateExportResult:
     """Write approved memory candidates into the main JSONL memory store."""
@@ -49,6 +49,7 @@ def export_approved_memory_candidates(
     paths = memory_gate_paths(agent_run_workspace_root)
     candidates = read_memory_gate_jsonl(paths.candidates_jsonl)
     exported, skipped = _partition_exportable(candidates, request, "approved_for_memory_export")
+    memory_path = _required_path(request.memory_path, "memory_path")
     memory = JsonlMemory(memory_path)
     export_rows = [_memory_export_row(item, request, memory.path) for item in exported]
     for row in export_rows:
@@ -60,8 +61,6 @@ def export_approved_memory_candidates(
 
 def export_approved_skill_sparks(
     agent_run_workspace_root: Path,
-    *,
-    output_dir: Path | None,
     request: MemoryGateExportRequest,
 ) -> MemoryGateExportResult:
     """Write approved skill candidates as draft files, not installed skills."""
@@ -69,7 +68,7 @@ def export_approved_skill_sparks(
     paths = memory_gate_paths(agent_run_workspace_root)
     candidates = read_memory_gate_jsonl(paths.candidates_jsonl)
     exported, skipped = _partition_exportable(candidates, request, "approved_for_skill_export")
-    draft_root = output_dir or (paths.gate_dir / "skill_drafts")
+    draft_root = Path(request.output_dir) if request.output_dir else (paths.gate_dir / "skill_drafts")
     export_rows = [_skill_export_row(item, request, draft_root) for item in exported]
     for row in export_rows:
         _write_skill_draft(Path(str(row["draft_path"])), row)
@@ -253,6 +252,13 @@ def _append_jsonl_many(path: Path, records: list[dict[str, object]]) -> None:
 
 def _safe_segment(value: str) -> str:
     return str(value or "candidate").replace("/", "_").replace("\\", "_").strip() or "candidate"
+
+
+def _required_path(value: Path | str | None, field_name: str) -> Path:
+    # LLM: export destinations live in the request bundle so promotion cannot hide extra args.
+    if value is None or str(value).strip() == "":
+        raise ValueError(f"{field_name} is required for this memory gate export")
+    return Path(value)
 
 
 def _utc_iso(value: float | None) -> str:

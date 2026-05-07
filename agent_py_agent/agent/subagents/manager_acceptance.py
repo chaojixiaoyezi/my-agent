@@ -16,7 +16,12 @@ from typing import TYPE_CHECKING
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..file_io import append_jsonl
-from .acceptance_review_service import review_acceptance_task
+from .acceptance_review_service import (
+    AcceptanceReviewOptions,
+    AcceptanceReviewRequest,
+    acceptance_review_options,
+    review_acceptance_task,
+)
 from .models import SubAgentTask
 from .parsing import (
     _dict_list,
@@ -72,23 +77,31 @@ class SubAgentAcceptanceMixin:
         self,
         run_id: str,
         *,
+        options: AcceptanceReviewOptions | None = None,
         apply: bool = False,
         reviewer: str = "parent",
         note: str = "",
     ) -> AcceptanceReviewRecord:
 
         task = self.load(run_id)
-        return self._review_acceptance_task(
-            task,
+        opts = acceptance_review_options(
+            options,
             apply=apply,
             reviewer=reviewer,
             note=note,
+        )
+        return self._review_acceptance_task(
+            task,
+            apply=opts.apply,
+            reviewer=opts.reviewer,
+            note=opts.note,
         )
 
     def review_acceptances(
         self,
         run_ids: list[str] | None = None,
         *,
+        options: AcceptanceReviewOptions | None = None,
         apply: bool = False,
         reviewer: str = "parent",
         note: str = "",
@@ -99,6 +112,13 @@ class SubAgentAcceptanceMixin:
         不指定 run_id 时，只挑出正在等待验收的运行，避免误动历史任务。
         """
 
+        opts = acceptance_review_options(
+            options,
+            apply=apply,
+            reviewer=reviewer,
+            note=note,
+            limit=limit,
+        )
         selected = self._select_runs(run_ids)
         if run_ids is None:
             selected = [
@@ -107,21 +127,21 @@ class SubAgentAcceptanceMixin:
                 if task.status == "AWAITING_ACCEPTANCE"
                 or task.verification_status == "NEEDS_ACCEPTANCE"
             ]
-        if limit > 0:
-            selected = selected[:limit]
+        if opts.limit > 0:
+            selected = selected[: opts.limit]
 
         records = [
             self._review_acceptance_task(
                 task,
-                apply=apply,
-                reviewer=reviewer,
-                note=note,
+                apply=opts.apply,
+                reviewer=opts.reviewer,
+                note=opts.note,
             )
             for task in selected
         ]
         return AcceptanceReviewReport(
             generated_at=time.time(),
-            dry_run=not apply,
+            dry_run=not opts.apply,
             summary=_acceptance_report_summary(records),
             records=records,
         )
@@ -130,6 +150,7 @@ class SubAgentAcceptanceMixin:
         self,
         run_ids: list[str] | None = None,
         *,
+        options: AcceptanceReviewOptions | None = None,
         apply: bool = False,
         reviewer: str = "parent",
         note: str = "",
@@ -138,6 +159,7 @@ class SubAgentAcceptanceMixin:
 
         report = self.review_acceptances(
             run_ids,
+            options=options,
             apply=apply,
             reviewer=reviewer,
             note=note,
@@ -154,7 +176,7 @@ class SubAgentAcceptanceMixin:
         for record in report.records:
             self._write_acceptance_record_files(record)
             self._index_acceptance_review(record)
-            if apply:
+            if report.dry_run is False:
                 self._append_acceptance_review_log(record)
         self._index_report(
             "subagent_acceptance_report",
@@ -169,11 +191,28 @@ class SubAgentAcceptanceMixin:
         self,
         task: SubAgentTask,
         *,
-        apply: bool,
-        reviewer: str,
-        note: str,
+        options: AcceptanceReviewOptions | None = None,
+        apply: bool = False,
+        reviewer: str = "parent",
+        note: str = "",
     ) -> AcceptanceReviewRecord:
-        return review_acceptance_task(self, task, apply=apply, reviewer=reviewer, note=note)
+        # LLM: manager keeps the legacy method shape but service receives one request bundle.
+        opts = acceptance_review_options(
+            options,
+            apply=apply,
+            reviewer=reviewer,
+            note=note,
+        )
+        return review_acceptance_task(
+            self,
+            AcceptanceReviewRequest(
+                task=task,
+                apply=opts.apply,
+                reviewer=opts.reviewer,
+                note=opts.note,
+                now=opts.now,
+            ),
+        )
 
     def _write_acceptance_record_files(self, record: AcceptanceReviewRecord) -> None:
 

@@ -18,9 +18,11 @@ from .services.lifecycle import (
     RecordCapabilityGrantParams,
     RecordCapabilityRequestParams,
     RecordEvidenceParams,
+    SetStatusParams,
     SubAgentLifecycleService,
 )
 
+# LLM: lifecycle facade accepts bundle params while preserving legacy manager entrypoints.
 if TYPE_CHECKING:
     from ..local_store import LocalStore
 
@@ -78,8 +80,8 @@ class SubAgentLifecycleMixin:
 
     def set_status(
         self,
-        run_id: str,
-        status: str,
+        run_id: str | SetStatusParams,
+        status: str = "",
         *,
         result: str = "",
         failure_type: str = "",

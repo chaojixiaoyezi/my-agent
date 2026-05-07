@@ -35,6 +35,7 @@
 - 2026-05-07 Phase 6 Memory Gate / Skill Spark 提升链第一片已落地：subagent 保存时会在 `tasks/<root_id>/agents/<run_id>/memory_gate/` 写 `candidates.jsonl`、`review_queue.jsonl` 和 `skill_spark_gate.json`，把 runner lessons / findings 变成带 evidence、scope、review 要求的候选；当前只排队 review，`promotion_status=not_promoted`，不会写主代理长期 memory 或正式 skill。
 - 2026-05-07 Phase 6 review decision 写回已落地：`subagents-memory-gate <run_id> --candidate-id <id> --decision ...` 会把 review 结果写入 `memory_gate/decisions.jsonl`，并更新候选和 checkpoint 的 gate refs；approve 只表示允许后续显式导出流程继续，不会自动写长期 memory 或正式 skill。
 - 2026-05-07 Phase 6 显式收口链已落地：`subagents-memory-gate` 现在支持 `--retention-dry-run/--retention-apply`、`--export-memory`、`--export-skill` 和 `--verify`；retention 只压缩 active queue 并保留审计，memory export 只处理 `approve_memory` 候选，skill export 只生成 draft，verifier 检查无自动提升边界。
+- 2026-05-07 bundle 接口规范已写入 runtime memory 开发要求：复杂业务入口统一 Request/Options/Params，复杂输出统一 Result/Record/Report；CLI args 必须在 CLI 层转换，manager 可保留旧签名作为兼容 wrapper。
 - **记忆推模式** (`memory_push.py`)：在关键决策点自动查询并注入相关记忆，实现"推模式"记忆系统。
   - `MemoryType` 枚举：`LESSON_GENERAL`、`LESSON_TASK`、`LESSON_TEMP`、`CONTEXT`、`FACT`
   - `push_relevant_memories()` 函数：根据触发类型搜索相关记忆
@@ -72,6 +73,7 @@
 - Phase 6 memory gate 解决了“经验火花和 finding 没有提升门禁文件”的缺口；现在 lesson/finding 先进入 run-local review queue，必须补齐 evidence、适用范围、限制/反例和人工或 verifier 确认，后续流程才能考虑进入长期 memory 或正式 skill。
 - Phase 6 review decision 解决了“候选只有排队，没有可审计 reviewer 结论”的缺口；现在 approve/reject/needs_evidence 会保留在 gate 文件里，而且后续 task save 会保留已写回的 decision。
 - Phase 6 显式收口链解决了“approve 之后仍缺导出、清理和验收闭环”的缺口；现在 closed 候选能从 active review queue 清出但不删除审计，长期 memory 写入和 skill draft 生成都必须由 CLI 显式触发。
+- bundle 接口规范解决了“函数参数散、Params/Options/Request 混用且后续扩字段会拉长签名”的问题；第一批落点已覆盖 runtime memory workspace sync、memory gate export/review/retention、acceptance review、patch review/apply、action apply、lifecycle status 和 CLI 边界转换，后续新增接口继续按同一规则迁移。
 - compression hook 门禁解决了“压缩前没有可靠快照也会继续执行，导致恢复锚点缺失”的问题。
 - authoritative snapshot JSON 解决了“hook JSONL 适合搜索但不适合作为严格恢复锚点”的问题。
 - capability gap 与长期规则联动解决了“子代理已经发现自己缺什么，但相关规则没有自动回流到执行上下文”的问题。

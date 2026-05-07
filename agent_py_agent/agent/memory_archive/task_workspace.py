@@ -18,22 +18,34 @@ from typing import Any
 # LLM: task workspace owns the run adapter path, but run files live in a focused helper.
 from .agent_run_workspace import (
     AgentRunWorkspacePaths,
+    EnsureAgentRunWorkspaceRequest,
     agent_run_workspace_paths,
     ensure_agent_run_workspace,
 )
-from .artifact_registry import ArtifactManifestResult, sync_artifact_manifests
+from .artifact_registry import (
+    ArtifactManifestResult,
+    SyncArtifactManifestsRequest,
+    sync_artifact_manifests,
+)
 from .compact_chain import (
     CompactChainResult,
+    SyncAgentRunCompactChainRequest,
     default_compact_chain_result,
     sync_agent_run_compact_chain,
 )
 from .daily_ledger import (
+    AppendSubagentTaskEventRequest,
     DailyLedgerAppendResult,
     DailyLedgerWorkspaceRefs,
     append_subagent_task_event,
 )
 from .memory_gate import MemoryGateResult, memory_gate_paths, sync_agent_run_memory_gate
-from .shared_workspace import SharedWorkspaceResult, shared_workspace_paths, sync_shared_workspace
+from .shared_workspace import (
+    SharedWorkspaceResult,
+    SyncSharedWorkspaceRequest,
+    shared_workspace_paths,
+    sync_shared_workspace,
+)
 from .task_workspace_rendering import (
     write_summary,
     write_task_yaml_if_missing,
@@ -92,46 +104,88 @@ class _TaskWorkspacePathInputs:
     run_id: str
 
 
+@dataclass(frozen=True)
+class EnsureSubagentTaskWorkspaceRequest:
+    """Bundle inputs for syncing a task workspace and its runtime refs."""
+
+    # LLM: task workspace remains the outer adapter; downstream runtime syncs receive bundles.
+    workspace: str | Path
+    task: Any
+
+
 def task_workspace_path(workspace: str | Path, task_id: str) -> Path:
     """Return the task workspace path under a subagent manager workspace."""
 
     return Path(workspace) / "tasks" / _safe_segment(task_id)
 
 
-def ensure_subagent_task_workspace(workspace: str | Path, task: Any) -> TaskWorkspacePaths:
+def ensure_subagent_task_workspace(
+    request: EnsureSubagentTaskWorkspaceRequest | str | Path | None = None,
+    task: Any | None = None,
+    *,
+    workspace: str | Path | None = None,
+) -> TaskWorkspacePaths:
     """Create/update the Phase 0 task workspace for a persisted subagent task."""
 
-    task_id = str(getattr(task, "root_id", "") or getattr(task, "id", "task"))
-    run_id = str(getattr(task, "id", "") or task_id)
-    path_inputs = _TaskWorkspacePathInputs(workspace, task_id, run_id)
-    now = float(getattr(task, "updated_at", 0.0) or time.time())
+    inputs = _coerce_ensure_request(request, task, workspace=workspace)
+    task_id = str(getattr(inputs.task, "root_id", "") or getattr(inputs.task, "id", "task"))
+    run_id = str(getattr(inputs.task, "id", "") or task_id)
+    path_inputs = _TaskWorkspacePathInputs(inputs.workspace, task_id, run_id)
+    now = float(getattr(inputs.task, "updated_at", 0.0) or time.time())
     paths = _paths_for(path_inputs)
     _ensure_directories(paths)
-    write_task_yaml_if_missing(paths.task_yaml, task_id, task, now)
+    write_task_yaml_if_missing(paths.task_yaml, task_id, inputs.task, now)
     previous_state = _read_json_object(paths.state_json)
-    _write_json(paths.state_json, _state_payload(task_id, run_id, task, now))
-    write_summary(paths.current_summary, task_id, run_id, task)
+    _write_json(paths.state_json, _state_payload(task_id, run_id, inputs.task, now))
+    write_summary(paths.current_summary, task_id, run_id, inputs.task)
     # LLM: shared workspace is task-local collaboration state, not main long-term memory.
-    shared = sync_shared_workspace(paths.root, task, now=now)
-    ensure_agent_run_workspace(paths.agent_adapter_dir, task, task_id=task_id, now=now)
-    runtime_refs = _sync_runtime_refs(_RuntimeSyncInputs(workspace, task, paths, now))
-    _append_timeline(paths.timeline_jsonl, _timeline_event(task, now, previous_state))
+    shared = sync_shared_workspace(
+        SyncSharedWorkspaceRequest(task_workspace_root=paths.root, task=inputs.task, now=now)
+    )
+    ensure_agent_run_workspace(
+        EnsureAgentRunWorkspaceRequest(
+            root=paths.agent_adapter_dir,
+            task=inputs.task,
+            task_id=task_id,
+            now=now,
+        )
+    )
+    runtime_refs = _sync_runtime_refs(_RuntimeSyncInputs(inputs.workspace, inputs.task, paths, now))
+    _append_timeline(paths.timeline_jsonl, _timeline_event(inputs.task, now, previous_state))
     return _paths_for(path_inputs, runtime_refs=runtime_refs, shared=shared)
+
+
+def _coerce_ensure_request(
+    request: EnsureSubagentTaskWorkspaceRequest | str | Path | None,
+    task: Any | None,
+    *,
+    workspace: str | Path | None,
+) -> EnsureSubagentTaskWorkspaceRequest:
+    if isinstance(request, EnsureSubagentTaskWorkspaceRequest):
+        return request
+    resolved_workspace = workspace if workspace is not None else request
+    if resolved_workspace is None or task is None:
+        raise TypeError("ensure_subagent_task_workspace requires workspace and task")
+    return EnsureSubagentTaskWorkspaceRequest(workspace=resolved_workspace, task=task)
 
 
 def _sync_runtime_refs(inputs: _RuntimeSyncInputs) -> _TaskWorkspaceRuntimeRefs:
     # LLM: artifact manifests are written before the daily event so ledger refs are resolvable.
     artifact_manifest = sync_artifact_manifests(
-        inputs.task,
-        task_workspace_root=inputs.paths.root,
-        agent_run_workspace_root=inputs.paths.agent_adapter_dir,
-        now=inputs.now,
+        SyncArtifactManifestsRequest(
+            task=inputs.task,
+            task_workspace_root=inputs.paths.root,
+            agent_run_workspace_root=inputs.paths.agent_adapter_dir,
+            now=inputs.now,
+        )
     )
     compact_chain = sync_agent_run_compact_chain(
-        inputs.task,
-        agent_run_workspace_root=inputs.paths.agent_adapter_dir,
-        artifact_manifest_jsonl=artifact_manifest.agent_manifest_jsonl,
-        now=inputs.now,
+        SyncAgentRunCompactChainRequest(
+            task=inputs.task,
+            agent_run_workspace_root=inputs.paths.agent_adapter_dir,
+            artifact_manifest_jsonl=artifact_manifest.agent_manifest_jsonl,
+            now=inputs.now,
+        )
     )
     memory_gate = sync_agent_run_memory_gate(
         inputs.task,
@@ -155,18 +209,20 @@ def _append_daily_ledger(
 ) -> DailyLedgerAppendResult:
     # LLM: daily ledger records compact refs only; task/run files keep the detailed facts.
     return append_subagent_task_event(
-        inputs.workspace,
-        inputs.task,
-        workspace_refs=DailyLedgerWorkspaceRefs(
-            inputs.paths.root,
-            inputs.paths.agent_adapter_dir,
-            artifact_manifest.task_manifest_jsonl,
-            artifact_manifest.agent_manifest_jsonl,
-            compact_chain.ledger_jsonl,
-            memory_gate.candidates_jsonl,
-            memory_gate.skill_spark_gate_json,
+        AppendSubagentTaskEventRequest(
+            root=inputs.workspace,
+            task=inputs.task,
+            workspace_refs=DailyLedgerWorkspaceRefs(
+                inputs.paths.root,
+                inputs.paths.agent_adapter_dir,
+                artifact_manifest.task_manifest_jsonl,
+                artifact_manifest.agent_manifest_jsonl,
+                compact_chain.ledger_jsonl,
+                memory_gate.candidates_jsonl,
+                memory_gate.skill_spark_gate_json,
+            ),
+            now=inputs.now,
         ),
-        now=inputs.now,
     )
 
 
@@ -313,4 +369,9 @@ def _safe_segment(value: str) -> str:
     return cleaned or "task"
 
 
-__all__ = ["TaskWorkspacePaths", "ensure_subagent_task_workspace", "task_workspace_path"]
+__all__ = [
+    "EnsureSubagentTaskWorkspaceRequest",
+    "TaskWorkspacePaths",
+    "ensure_subagent_task_workspace",
+    "task_workspace_path",
+]

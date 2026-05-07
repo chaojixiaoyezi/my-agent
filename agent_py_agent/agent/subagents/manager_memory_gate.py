@@ -71,30 +71,27 @@ class SubAgentMemoryGateMixin:
         self,
         run_id: str,
         *,
-        memory_path: str | Path,
+        memory_path: str | Path | None = None,
         request: MemoryGateExportRequest,
     ) -> MemoryGateExportResult:
         """Export approved memory candidates only after explicit review approval."""
 
         task = self._ensure_memory_gate_workspace(run_id)
-        return export_approved_memory_candidates(
-            Path(task.agent_run_workspace_dir),
-            memory_path=Path(memory_path),
-            request=request,
-        )
+        bundled = _export_request_with_paths(request, memory_path=memory_path)
+        return export_approved_memory_candidates(Path(task.agent_run_workspace_dir), request=bundled)
 
     def export_memory_gate_candidates_to_skill_drafts(
         self,
         run_id: str,
         *,
-        output_dir: str | Path | None,
+        output_dir: str | Path | None = None,
         request: MemoryGateExportRequest,
     ) -> MemoryGateExportResult:
         """Export approved skill candidates as local drafts, never as installed skills."""
 
         task = self._ensure_memory_gate_workspace(run_id)
-        output_path = Path(output_dir) if output_dir else None
-        return export_approved_skill_sparks(Path(task.agent_run_workspace_dir), output_dir=output_path, request=request)
+        bundled = _export_request_with_paths(request, output_dir=output_dir)
+        return export_approved_skill_sparks(Path(task.agent_run_workspace_dir), request=bundled)
 
     def verify_memory_gate_boundary(self, run_id: str) -> MemoryGateVerifierResult:
         """Run deterministic checks for no-auto-promotion gate boundaries."""
@@ -108,3 +105,19 @@ class SubAgentMemoryGateMixin:
             return task
         self.save(task)
         return self.load(run_id)
+
+
+def _export_request_with_paths(
+    request: MemoryGateExportRequest,
+    *,
+    memory_path: str | Path | None = None,
+    output_dir: str | Path | None = None,
+) -> MemoryGateExportRequest:
+    # LLM: old manager kwargs stay compatible while the core export API receives one bundle.
+    return MemoryGateExportRequest(
+        candidate_id=request.candidate_id,
+        reviewer=request.reviewer,
+        now=request.now,
+        memory_path=memory_path if memory_path is not None else request.memory_path,
+        output_dir=output_dir if output_dir is not None else request.output_dir,
+    )

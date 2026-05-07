@@ -3,20 +3,26 @@ from __future__ import annotations
 
 import json
 
+from ..agent.subagents.acceptance_review_service import AcceptanceReviewOptions
+from ..agent.subagents.patch import PatchApplyOptions, PatchReviewOptions
 from .common import make_agent
+from .models import SubagentsAcceptanceOptions, SubagentsPatchOptions
 
 
 def cmd_subagents_acceptance(args) -> int:
 
     agent = make_agent(args)
+    options = _subagents_acceptance_options(args)
     report = agent.subagents.write_acceptance_review_report(
-        run_ids=args.run_id or None,
-        apply=args.apply,
-        reviewer=args.reviewer,
-        note=args.note or "",
-        limit=args.limit,
+        run_ids=options.run_ids,
+        options=AcceptanceReviewOptions(
+            apply=options.apply,
+            reviewer=options.reviewer or "parent",
+            note=options.note,
+            limit=options.limit,
+        ),
     )
-    mode = "apply" if args.apply else "dry-run"
+    mode = "apply" if options.apply else "dry-run"
     print("SUBAGENT ACCEPTANCE")
     print(f"mode={mode} total_records={report.summary.get('total', 0)}")
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
@@ -31,10 +37,21 @@ def cmd_subagents_acceptance(args) -> int:
         )
     print(f"\n已写入: {agent.subagents.workspace / 'subagent_acceptance_report.json'}")
     print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_ACCEPTANCE.md'}")
-    if args.apply:
+    if options.apply:
         print(f"审计日志: {agent.subagents.workspace / 'subagent_acceptance_log.jsonl'}")
         print(f"审计日志: {agent.subagents.workspace / 'ACCEPTANCE_REVIEW_LOG.md'}")
     return 0
+
+
+def _subagents_acceptance_options(args) -> SubagentsAcceptanceOptions:
+    # LLM: Keep argparse at the boundary; downstream helpers get a typed CLI bundle.
+    return SubagentsAcceptanceOptions(
+        run_ids=getattr(args, "run_id", None) or None,
+        apply=bool(getattr(args, "apply", False)),
+        reviewer=getattr(args, "reviewer", None),
+        note=getattr(args, "note", None) or "",
+        limit=int(getattr(args, "limit", 0) or 0),
+    )
 
 
 def _print_patch_report(report, mode: str, workspace, include_audit: bool = False) -> None:
@@ -62,39 +79,57 @@ def cmd_subagents_patches(args) -> int:
 
     agent = make_agent(args)
     workspace = agent.subagents.workspace
+    options = _subagents_patch_options(args)
 
-    if args.patch_action == "apply_dry_run":
+    if options.action == "apply_dry_run":
         report = agent.subagents.write_patch_apply_report(
-            run_ids=args.run_id or None,
-            apply=False,
-            applier=args.reviewer,
-            note=args.note or "",
-            limit=args.limit,
+            run_ids=options.run_ids,
+            options=PatchApplyOptions(
+                apply=False,
+                applier=options.reviewer or "parent",
+                note=options.note,
+                limit=options.limit,
+            ),
         )
         _print_patch_report(report, "apply-dry-run", workspace, include_audit=False)
         return 0
 
-    if args.patch_action == "apply":
+    if options.action == "apply":
         report = agent.subagents.write_patch_apply_report(
-            run_ids=args.run_id or None,
-            apply=True,
-            applier=args.reviewer,
-            note=args.note or "",
-            limit=args.limit,
+            run_ids=options.run_ids,
+            options=PatchApplyOptions(
+                apply=True,
+                applier=options.reviewer or "parent",
+                note=options.note,
+                limit=options.limit,
+            ),
         )
         _print_patch_report(report, "apply", workspace, include_audit=True)
         return 0
 
     report = agent.subagents.write_patch_review_report(
-        run_ids=args.run_id or None,
-        apply=args.patch_action == "review_apply",
-        reviewer=args.reviewer,
-        note=args.note or "",
-        limit=args.limit,
+        run_ids=options.run_ids,
+        options=PatchReviewOptions(
+            apply=options.action == "review_apply",
+            reviewer=options.reviewer or "parent",
+            note=options.note,
+            limit=options.limit,
+        ),
     )
-    mode = "review-apply" if args.patch_action == "review_apply" else "review-dry-run"
-    _print_review_report(report, mode, workspace, args.patch_action == "review_apply")
+    mode = "review-apply" if options.action == "review_apply" else "review-dry-run"
+    _print_review_report(report, mode, workspace, options.action == "review_apply")
     return 0
+
+
+def _subagents_patch_options(args) -> SubagentsPatchOptions:
+    # LLM: Normalize legacy parser constants before branching into review/apply modes.
+    return SubagentsPatchOptions(
+        action=getattr(args, "patch_action", None) or "review_dry_run",
+        run_ids=getattr(args, "run_id", None) or None,
+        reviewer=getattr(args, "reviewer", None),
+        note=getattr(args, "note", None) or "",
+        limit=int(getattr(args, "limit", 0) or 0),
+    )
 
 
 def _print_review_report(report, mode: str, workspace, include_audit: bool) -> None:

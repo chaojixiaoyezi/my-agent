@@ -40,6 +40,17 @@ class DailyLedgerWorkspaceRefs:
     agent_skill_spark_gate_json: Path | None = None
 
 
+@dataclass(frozen=True)
+class AppendSubagentTaskEventRequest:
+    """Bundle inputs for appending one compact daily subagent event."""
+
+    # LLM: daily ledger events accept one request bundle so refs stay grouped and auditable.
+    root: str | Path
+    task: Any
+    workspace_refs: DailyLedgerWorkspaceRefs
+    now: float
+
+
 def daily_events_path_for(root: str | Path, created_at: str | int | float | None = None) -> Path:
     """Return `daily/YYYY-MM-DD/events.jsonl` under the runtime memory root."""
 
@@ -47,18 +58,47 @@ def daily_events_path_for(root: str | Path, created_at: str | int | float | None
 
 
 def append_subagent_task_event(
-    root: str | Path,
-    task: Any,
+    request: AppendSubagentTaskEventRequest | str | Path | None = None,
+    task: Any | None = None,
     *,
-    workspace_refs: DailyLedgerWorkspaceRefs,
-    now: float,
+    root: str | Path | None = None,
+    workspace_refs: DailyLedgerWorkspaceRefs | None = None,
+    now: float | None = None,
 ) -> DailyLedgerAppendResult:
     """Append a compact subagent task/run event to the daily ledger."""
 
-    path = daily_events_path_for(root, now)
-    payload = _event_payload(task, workspace_refs, now)
+    inputs = _coerce_append_request(
+        request,
+        task,
+        root=root,
+        workspace_refs=workspace_refs,
+        now=now,
+    )
+    path = daily_events_path_for(inputs.root, inputs.now)
+    payload = _event_payload(inputs.task, inputs.workspace_refs, inputs.now)
     append_jsonl(path, payload, sort_keys=True)
     return DailyLedgerAppendResult(events_jsonl=path, event_id=str(payload["event_id"]))
+
+
+def _coerce_append_request(
+    request: AppendSubagentTaskEventRequest | str | Path | None,
+    task: Any | None,
+    *,
+    root: str | Path | None,
+    workspace_refs: DailyLedgerWorkspaceRefs | None,
+    now: float | None,
+) -> AppendSubagentTaskEventRequest:
+    if isinstance(request, AppendSubagentTaskEventRequest):
+        return request
+    resolved_root = root if root is not None else request
+    if resolved_root is None or task is None or workspace_refs is None or now is None:
+        raise TypeError("append_subagent_task_event requires root, task, workspace_refs, and now")
+    return AppendSubagentTaskEventRequest(
+        root=resolved_root,
+        task=task,
+        workspace_refs=workspace_refs,
+        now=now,
+    )
 
 
 def _event_payload(task: Any, workspace_refs: DailyLedgerWorkspaceRefs, now: float) -> dict[str, object]:
@@ -147,6 +187,7 @@ def _safe_segment(value: str) -> str:
 
 
 __all__ = [
+    "AppendSubagentTaskEventRequest",
     "DailyLedgerAppendResult",
     "DailyLedgerWorkspaceRefs",
     "append_subagent_task_event",

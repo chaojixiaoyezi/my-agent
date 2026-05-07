@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from ..agent.capability_config import load_capability_config
+from ..agent.subagents.services.action_options import ActionApplyOptions
 from .common import make_agent, make_capability_router
 
 
@@ -35,16 +36,12 @@ def cmd_subagents_apply_actions(args) -> int:
 
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
+    options = _subagents_action_apply_options(args)
     report = agent.subagents.write_action_apply_report(
         capability_config,
-        apply=args.apply,
-        action_filter=args.action or "",
-        run_id=args.run_id or "",
-        take_over_by=args.take_over_by or "",
-        locked_files=args.locked_file or [],
-        limit=args.limit,
+        options=options,
     )
-    mode = "apply" if args.apply else "dry-run"
+    mode = "apply" if options.apply else "dry-run"
     print("SUBAGENT ACTION APPLY")
     print(f"mode={mode} total_records={report.summary.get('total', 0)}")
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
@@ -59,10 +56,22 @@ def cmd_subagents_apply_actions(args) -> int:
         )
     print(f"\n已写入: {agent.subagents.workspace / 'subagent_action_apply_report.json'}")
     print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_ACTION_APPLY.md'}")
-    if args.apply:
+    if options.apply:
         print(f"审计日志: {agent.subagents.workspace / 'subagent_action_apply_log.jsonl'}")
         print(f"审计日志: {agent.subagents.workspace / 'ACTION_APPLY_LOG.md'}")
     return 0
+
+
+def _subagents_action_apply_options(args) -> ActionApplyOptions:
+    # LLM: CLI owns argparse; manager receives the existing business options bundle.
+    return ActionApplyOptions(
+        apply=bool(getattr(args, "apply", False)),
+        action_filter=getattr(args, "action", None) or "",
+        run_id=getattr(args, "run_id", None) or "",
+        take_over_by=getattr(args, "take_over_by", None) or "",
+        locked_files=getattr(args, "locked_file", None) or [],
+        limit=int(getattr(args, "limit", 0) or 0),
+    )
 
 
 def cmd_subagents_route_capabilities(args) -> int:

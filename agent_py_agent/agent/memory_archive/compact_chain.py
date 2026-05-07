@@ -25,6 +25,17 @@ class CompactChainResult:
 
 
 @dataclass(frozen=True)
+class SyncAgentRunCompactChainRequest:
+    """Bundle inputs for appending one agent-run compact checkpoint."""
+
+    # LLM: compact chain writes remain additive; request bundling avoids hidden positional drift.
+    task: Any
+    agent_run_workspace_root: Path
+    artifact_manifest_jsonl: Path
+    now: float
+
+
+@dataclass(frozen=True)
 class _CompactSnapshotContext:
     event_id: str
     sequence: int
@@ -37,40 +48,77 @@ class _CompactSnapshotContext:
 
 
 def sync_agent_run_compact_chain(
-    task: Any,
+    request: SyncAgentRunCompactChainRequest | Any = None,
     *,
-    agent_run_workspace_root: Path,
-    artifact_manifest_jsonl: Path,
-    now: float,
+    task: Any | None = None,
+    agent_run_workspace_root: Path | None = None,
+    artifact_manifest_jsonl: Path | None = None,
+    now: float | None = None,
 ) -> CompactChainResult:
     """Append a checkpoint snapshot event and update latest compact refs."""
 
-    paths = _compact_paths(agent_run_workspace_root)
+    inputs = _coerce_sync_request(
+        request,
+        task=task,
+        agent_run_workspace_root=agent_run_workspace_root,
+        artifact_manifest_jsonl=artifact_manifest_jsonl,
+        now=now,
+    )
+    paths = _compact_paths(inputs.agent_run_workspace_root)
     paths.ledger_jsonl.parent.mkdir(parents=True, exist_ok=True)
     sequence = _next_sequence(paths.ledger_jsonl)
     previous_event_id = _last_event_id(paths.ledger_jsonl)
-    event_id = _event_id(str(getattr(task, "id", "")), sequence)
+    event_id = _event_id(str(getattr(inputs.task, "id", "")), sequence)
     event_summary = paths.ledger_jsonl.parent / f"{event_id}.md"
     event_metadata = paths.ledger_jsonl.parent / f"{event_id}.json"
     context = _CompactSnapshotContext(
         event_id=event_id,
         sequence=sequence,
         previous_event_id=previous_event_id,
-        agent_run_workspace_root=agent_run_workspace_root,
-        artifact_manifest_jsonl=artifact_manifest_jsonl,
+        agent_run_workspace_root=inputs.agent_run_workspace_root,
+        artifact_manifest_jsonl=inputs.artifact_manifest_jsonl,
         summary_md=event_summary,
         metadata_json=event_metadata,
-        now=now,
+        now=inputs.now,
     )
-    metadata = _metadata_payload(task, context)
-    summary = _summary_markdown(task, metadata)
+    metadata = _metadata_payload(inputs.task, context)
+    summary = _summary_markdown(inputs.task, metadata)
     _write_markdown(event_summary, summary)
     _write_json(event_metadata, metadata)
     _write_markdown(paths.latest_summary_md, summary)
     _write_json(paths.latest_metadata_json, metadata)
     _append_ledger(paths.ledger_jsonl, metadata)
-    _merge_checkpoint(agent_run_workspace_root / "checkpoint.json", metadata)
+    _merge_checkpoint(inputs.agent_run_workspace_root / "checkpoint.json", metadata)
     return paths
+
+
+def _coerce_sync_request(
+    request: SyncAgentRunCompactChainRequest | Any,
+    *,
+    task: Any | None,
+    agent_run_workspace_root: Path | None,
+    artifact_manifest_jsonl: Path | None,
+    now: float | None,
+) -> SyncAgentRunCompactChainRequest:
+    if isinstance(request, SyncAgentRunCompactChainRequest):
+        return request
+    resolved_task = request if request is not None else task
+    if (
+        resolved_task is None
+        or agent_run_workspace_root is None
+        or artifact_manifest_jsonl is None
+        or now is None
+    ):
+        raise TypeError(
+            "sync_agent_run_compact_chain requires task, agent_run_workspace_root, "
+            "artifact_manifest_jsonl, and now"
+        )
+    return SyncAgentRunCompactChainRequest(
+        task=resolved_task,
+        agent_run_workspace_root=Path(agent_run_workspace_root),
+        artifact_manifest_jsonl=Path(artifact_manifest_jsonl),
+        now=now,
+    )
 
 
 def default_compact_chain_result(agent_run_workspace_root: Path) -> CompactChainResult:
@@ -231,4 +279,9 @@ def _utc_iso(value: float) -> str:
     return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
 
 
-__all__ = ["CompactChainResult", "default_compact_chain_result", "sync_agent_run_compact_chain"]
+__all__ = [
+    "CompactChainResult",
+    "SyncAgentRunCompactChainRequest",
+    "default_compact_chain_result",
+    "sync_agent_run_compact_chain",
+]

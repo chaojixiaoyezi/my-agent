@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass, replace
 
 from agent_py_agent.agent.subagents.reports import PatchApplyReport
 from agent_py_agent.agent.subagents.utils import _read_json_object
@@ -22,6 +23,42 @@ from .patch_apply_task import (
 )
 
 
+@dataclass(frozen=True)
+class PatchApplyOptions:
+    """Options bundle for patch apply report entrypoints."""
+
+    # LLM: apply policy knobs travel together so future gates do not widen public signatures.
+    apply: bool = False
+    applier: str = "parent"
+    note: str = ""
+    limit: int = 0
+
+    @classmethod
+    def from_values(cls, options: PatchApplyOptions | None = None, **overrides):
+        base = options or cls()
+        clean = {key: value for key, value in overrides.items() if value is not None}
+        return replace(base, **clean)
+
+
+def _patch_apply_options(
+    options: PatchApplyOptions | None,
+    *,
+    apply: bool,
+    applier: str,
+    note: str,
+    limit: int,
+) -> PatchApplyOptions:
+    if options is not None and (apply, applier, note, limit) == (False, "parent", "", 0):
+        return options
+    return PatchApplyOptions.from_values(
+        options,
+        apply=apply,
+        applier=applier,
+        note=note,
+        limit=limit,
+    )
+
+
 class PatchApplyService:
     """Execute patch apply with write boundary enforcement and rollback support."""
 
@@ -32,6 +69,7 @@ class PatchApplyService:
         self,
         run_ids=None,
         *,
+        options: PatchApplyOptions | None = None,
         apply=False,
         applier="parent",
         note="",
@@ -43,6 +81,13 @@ class PatchApplyService:
         from agent_py_agent.agent.subagents.parsing import _dict_list
         from agent_py_agent.agent.subagents.services.patch_apply_summary import PatchApplySummary
 
+        opts = _patch_apply_options(
+            options,
+            apply=apply,
+            applier=applier,
+            note=note,
+            limit=limit,
+        )
         records = []
         for task in self.manager._select_runs(run_ids):
             output = _read_json_object(Path(task.output_json))
@@ -50,14 +95,23 @@ class PatchApplyService:
             if run_ids is None and not patches:
                 continue
             records.append(
-                self._apply_patch_task(task, output=output, patches=patches, apply=apply, applier=applier, note=note)
+                self._apply_patch_task(
+                    task,
+                    params=ApplyPatchTaskParams(
+                        output=output,
+                        patches=patches,
+                        apply=opts.apply,
+                        applier=opts.applier,
+                        note=opts.note,
+                    ),
+                )
             )
-            if limit > 0 and len(records) >= limit:
+            if opts.limit > 0 and len(records) >= opts.limit:
                 break
 
         return PatchApplyReport(
             generated_at=time.time(),
-            dry_run=not apply,
+            dry_run=not opts.apply,
             summary=PatchApplySummary.build(records),
             records=records,
         )
@@ -66,6 +120,7 @@ class PatchApplyService:
         self,
         run_ids=None,
         *,
+        options: PatchApplyOptions | None = None,
         apply=False,
         applier="parent",
         note="",
@@ -77,7 +132,14 @@ class PatchApplyService:
             PatchApplyRecordFiles,
         )
 
-        report = self.apply_patches(run_ids, apply=apply, applier=applier, note=note, limit=limit)
+        opts = _patch_apply_options(
+            options,
+            apply=apply,
+            applier=applier,
+            note=note,
+            limit=limit,
+        )
+        report = self.apply_patches(run_ids, options=opts)
         (self.manager.workspace / "subagent_patch_apply_report.json").write_text(
             json.dumps(
                 {
@@ -95,7 +157,7 @@ class PatchApplyService:
             render_patch_apply_markdown(report),
             encoding="utf-8",
         )
-        self._write_apply_records(report, apply=apply)
+        self._write_apply_records(report, apply=opts.apply)
         self.manager._index_report(
             "subagent_patch_apply_report",
             "latest",
@@ -123,13 +185,25 @@ class PatchApplyService:
             if apply:
                 PatchApplyRecordFiles.append_log(record, self.manager)
 
-    def _apply_patch_task(self, task, *, output, patches, apply, applier, note):
+    def _apply_patch_task(
+        self,
+        task,
+        *,
+        params: ApplyPatchTaskParams | None = None,
+        **legacy,
+    ):
         """Backward-compatible wrapper for single-task patch application."""
+        # LLM: legacy kwargs are accepted only to build the task params bundle.
+        params = params or ApplyPatchTaskParams(
+            output=legacy.get("output") or {},
+            patches=legacy.get("patches") or [],
+            apply=bool(legacy.get("apply", False)),
+            applier=legacy.get("applier", "parent"),
+            note=legacy.get("note", ""),
+        )
         return apply_patch_task(
             self.manager, task,
-            params=ApplyPatchTaskParams(
-                output=output, patches=patches, apply=apply, applier=applier, note=note,
-            ),
+            params=params,
         )
 
     def _normalize_patch_apply_spec(self, task, patch):
