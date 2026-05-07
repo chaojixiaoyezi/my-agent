@@ -90,9 +90,10 @@ before changing code.
 - Test mocks, fixtures, and helpers may keep `**kwargs`, but tests must not use
   them as the reference style for product interfaces.
 - Every product-code exception must be registered in
-  `BUNDLE_KWARG_FUNCTION_EXEMPTIONS` in `test_architecture_guardrails.py` with a
-  reason. New function-level `*args` / `**kwargs` service interfaces fail the
-  guardrail unless the exception is reviewed and documented first.
+  `BUNDLE_VARARG_FUNCTION_EXEMPTIONS` or `BUNDLE_KWARG_FUNCTION_EXEMPTIONS` in
+  `test_architecture_guardrails.py` with a reason. New function-level `*args` /
+  `**kwargs` service interfaces fail the guardrail unless the exception is
+  reviewed and documented first.
 
 ---
 

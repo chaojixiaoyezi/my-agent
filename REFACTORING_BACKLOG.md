@@ -3,11 +3,13 @@
 LLM: Keep this backlog concrete and executable. Each entry must have a verification command.
 
 给人看的解释：
-这里列出最应该拆的文件，按严重程度排序。每项包含问题、目标结构、步骤、风险和验收命令。当前基线：414 findings (149 hard, 265 soft)。
+这里列出最应该拆的文件，按严重程度排序。每项包含问题、目标结构、步骤、风险和验收命令。当前 strict 快照：277 findings (0 hard, 277 high-risk, 0 soft)。
+
+注意：部分条目保留的是历史拆分计划；执行前必须重新运行 code-size 检查并核对当前文件大小，避免按旧行数做不必要的大拆。
 
 ---
 
-## Priority 1: Hard-limit violations (600+ lines, merge blockers)
+## Priority 1: Historical hard-limit split plans (revalidate before acting)
 
 ### 1. `cli/chat.py` -- 1017 lines
 
