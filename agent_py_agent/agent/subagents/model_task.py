@@ -164,6 +164,10 @@ class SubAgentTask:
     # LLM: Phase 3 artifact manifests normalize refs into summary/hash/path records.
     task_artifact_manifest_jsonl: str = ""
     agent_run_artifact_manifest_jsonl: str = ""
+    # LLM: Phase 4 compact chain fields point to checkpoint snapshots, not deleted context.
+    agent_run_compaction_ledger_jsonl: str = ""
+    agent_run_latest_compaction_summary_md: str = ""
+    agent_run_latest_compaction_metadata_json: str = ""
     handoff_file: str = ""
     debrief_file: str = ""
     output_json: str = ""

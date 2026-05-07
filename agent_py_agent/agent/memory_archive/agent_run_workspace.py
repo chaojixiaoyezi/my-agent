@@ -32,6 +32,10 @@ class AgentRunWorkspacePaths:
     outbox_dir: Path
     artifacts_dir: Path
     compactions_dir: Path
+    # LLM: compact chain files are additive recovery refs; original run files stay intact.
+    compaction_ledger_jsonl: Path
+    latest_compaction_summary_md: Path
+    latest_compaction_metadata_json: Path
     legacy_run_ref_json: Path
 
 
@@ -69,6 +73,9 @@ def agent_run_workspace_paths(root: Path) -> AgentRunWorkspacePaths:
         outbox_dir=root / "outbox",
         artifacts_dir=root / "artifacts",
         compactions_dir=root / "compactions",
+        compaction_ledger_jsonl=root / "compactions" / "compaction_ledger.jsonl",
+        latest_compaction_summary_md=root / "compactions" / "latest_summary.md",
+        latest_compaction_metadata_json=root / "compactions" / "latest_metadata.json",
         legacy_run_ref_json=root / "legacy_run_ref.json",
     )
 

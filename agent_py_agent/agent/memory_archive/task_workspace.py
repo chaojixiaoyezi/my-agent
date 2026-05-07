@@ -16,12 +16,26 @@ from pathlib import Path
 from typing import Any
 
 # LLM: task workspace owns the run adapter path, but run files live in a focused helper.
-from .agent_run_workspace import AgentRunWorkspacePaths, ensure_agent_run_workspace
+from .agent_run_workspace import (
+    AgentRunWorkspacePaths,
+    agent_run_workspace_paths,
+    ensure_agent_run_workspace,
+)
 from .artifact_registry import ArtifactManifestResult, sync_artifact_manifests
+from .compact_chain import (
+    CompactChainResult,
+    default_compact_chain_result,
+    sync_agent_run_compact_chain,
+)
 from .daily_ledger import (
     DailyLedgerAppendResult,
     DailyLedgerWorkspaceRefs,
     append_subagent_task_event,
+)
+from .task_workspace_rendering import (
+    blackboard_content,
+    write_summary,
+    write_task_yaml_if_missing,
 )
 
 
@@ -43,6 +57,8 @@ class TaskWorkspacePaths:
     agent_adapter_dir: Path
     agent_run: AgentRunWorkspacePaths
     artifact_manifest: ArtifactManifestResult
+    # LLM: compact chain is synced after checkpoint/artifacts so refs are resolvable.
+    compact_chain: CompactChainResult
     daily_ledger: DailyLedgerAppendResult
     legacy_run_ref_json: Path
 
@@ -50,7 +66,16 @@ class TaskWorkspacePaths:
 @dataclass(frozen=True)
 class _TaskWorkspaceRuntimeRefs:
     artifact_manifest: ArtifactManifestResult | None = None
+    compact_chain: CompactChainResult | None = None
     daily_ledger: DailyLedgerAppendResult | None = None
+
+
+@dataclass(frozen=True)
+class _RuntimeSyncInputs:
+    workspace: str | Path
+    task: Any
+    paths: TaskWorkspacePaths
+    now: float
 
 
 def task_workspace_path(workspace: str | Path, task_id: str) -> Path:
@@ -67,42 +92,58 @@ def ensure_subagent_task_workspace(workspace: str | Path, task: Any) -> TaskWork
     now = float(getattr(task, "updated_at", 0.0) or time.time())
     paths = _paths_for(workspace, task_id, run_id)
     _ensure_directories(paths)
-    _write_task_yaml_if_missing(paths.task_yaml, task_id, task, now)
+    write_task_yaml_if_missing(paths.task_yaml, task_id, task, now)
     previous_state = _read_json_object(paths.state_json)
     _write_json(paths.state_json, _state_payload(task_id, run_id, task, now))
-    _write_summary(paths.current_summary, task_id, run_id, task)
-    _write_if_missing(paths.shared_blackboard, _blackboard_content(task_id))
+    write_summary(paths.current_summary, task_id, run_id, task)
+    _write_if_missing(paths.shared_blackboard, blackboard_content(task_id))
     _touch_jsonl(paths.shared_messages)
     _touch_jsonl(paths.shared_findings)
     ensure_agent_run_workspace(paths.agent_adapter_dir, task, task_id=task_id, now=now)
+    runtime_refs = _sync_runtime_refs(_RuntimeSyncInputs(workspace, task, paths, now))
+    _append_timeline(paths.timeline_jsonl, _timeline_event(task, now, previous_state))
+    return _paths_for(workspace, task_id, run_id, runtime_refs=runtime_refs)
+
+
+def _sync_runtime_refs(inputs: _RuntimeSyncInputs) -> _TaskWorkspaceRuntimeRefs:
     # LLM: artifact manifests are written before the daily event so ledger refs are resolvable.
     artifact_manifest = sync_artifact_manifests(
-        task,
-        task_workspace_root=paths.root,
-        agent_run_workspace_root=paths.agent_adapter_dir,
-        now=now,
+        inputs.task,
+        task_workspace_root=inputs.paths.root,
+        agent_run_workspace_root=inputs.paths.agent_adapter_dir,
+        now=inputs.now,
     )
-    _append_timeline(paths.timeline_jsonl, _timeline_event(task, now, previous_state))
+    compact_chain = sync_agent_run_compact_chain(
+        inputs.task,
+        agent_run_workspace_root=inputs.paths.agent_adapter_dir,
+        artifact_manifest_jsonl=artifact_manifest.agent_manifest_jsonl,
+        now=inputs.now,
+    )
+    daily_ledger = _append_daily_ledger(inputs, artifact_manifest, compact_chain)
+    return _TaskWorkspaceRuntimeRefs(
+        artifact_manifest=artifact_manifest,
+        compact_chain=compact_chain,
+        daily_ledger=daily_ledger,
+    )
+
+
+def _append_daily_ledger(
+    inputs: _RuntimeSyncInputs,
+    artifact_manifest: ArtifactManifestResult,
+    compact_chain: CompactChainResult,
+) -> DailyLedgerAppendResult:
     # LLM: daily ledger records compact refs only; task/run files keep the detailed facts.
-    daily_ledger = append_subagent_task_event(
-        workspace,
-        task,
+    return append_subagent_task_event(
+        inputs.workspace,
+        inputs.task,
         workspace_refs=DailyLedgerWorkspaceRefs(
-            paths.root,
-            paths.agent_adapter_dir,
+            inputs.paths.root,
+            inputs.paths.agent_adapter_dir,
             artifact_manifest.task_manifest_jsonl,
             artifact_manifest.agent_manifest_jsonl,
+            compact_chain.ledger_jsonl,
         ),
-        now=now,
-    )
-    return _paths_for(
-        workspace,
-        task_id,
-        run_id,
-        runtime_refs=_TaskWorkspaceRuntimeRefs(
-            artifact_manifest=artifact_manifest,
-            daily_ledger=daily_ledger,
-        ),
+        now=inputs.now,
     )
 
 
@@ -131,29 +172,11 @@ def _paths_for(
         artifacts_dir=artifacts_dir,
         agents_dir=agents_dir,
         agent_adapter_dir=agent_adapter_dir,
-        agent_run=_agent_run_paths(agent_adapter_dir),
+        agent_run=agent_run_workspace_paths(agent_adapter_dir),
         artifact_manifest=runtime_refs.artifact_manifest
         or _default_artifact_manifest(artifacts_dir, agent_adapter_dir),
+        compact_chain=runtime_refs.compact_chain or default_compact_chain_result(agent_adapter_dir),
         daily_ledger=runtime_refs.daily_ledger or _default_daily_ledger(workspace),
-        legacy_run_ref_json=agent_adapter_dir / "legacy_run_ref.json",
-    )
-
-
-def _agent_run_paths(agent_adapter_dir: Path) -> AgentRunWorkspacePaths:
-    return AgentRunWorkspacePaths(
-        root=agent_adapter_dir,
-        agent_yaml=agent_adapter_dir / "agent.yaml",
-        state_json=agent_adapter_dir / "state.json",
-        task_md=agent_adapter_dir / "task.md",
-        timeline_jsonl=agent_adapter_dir / "timeline.jsonl",
-        checkpoint_json=agent_adapter_dir / "checkpoint.json",
-        summary_md=agent_adapter_dir / "summary.md",
-        final_report_md=agent_adapter_dir / "final_report.md",
-        findings_jsonl=agent_adapter_dir / "findings.jsonl",
-        inbox_dir=agent_adapter_dir / "inbox",
-        outbox_dir=agent_adapter_dir / "outbox",
-        artifacts_dir=agent_adapter_dir / "artifacts",
-        compactions_dir=agent_adapter_dir / "compactions",
         legacy_run_ref_json=agent_adapter_dir / "legacy_run_ref.json",
     )
 
@@ -229,51 +252,6 @@ def _timeline_event(task: Any, now: float, previous_state: dict[str, object]) ->
     }
 
 
-def _write_task_yaml_if_missing(path: Path, task_id: str, task: Any, now: float) -> None:
-    if path.exists():
-        return
-    goal = str(getattr(task, "goal", ""))
-    content = (
-        "version: 1\n"
-        f'task_id: "{_yaml_quote(task_id)}"\n'
-        f'primary_run_id: "{_yaml_quote(str(getattr(task, "id", "")))}"\n'
-        f'parent_run_id: "{_yaml_quote(str(getattr(task, "parent_id", "")))}"\n'
-        f"depth: {int(getattr(task, 'depth', 0) or 0)}\n"
-        f'created_at: {float(getattr(task, "created_at", 0.0) or now)}\n'
-        "source: subagent_persistence_adapter\n"
-        "objective: |-\n"
-        f"{_indent_block(goal or '待填写')}\n"
-        "legacy:\n"
-        f'  task_dir: "{_yaml_quote(str(getattr(task, "task_dir", "")))}"\n'
-    )
-    path.write_text(content, encoding="utf-8")
-
-
-def _write_summary(path: Path, task_id: str, run_id: str, task: Any) -> None:
-    latest = str(getattr(task, "latest_summary", "")) or "暂无"
-    content = (
-        "# Current Summary\n\n"
-        f"- task_id: {task_id}\n"
-        f"- primary_run_id: {run_id}\n"
-        f"- status: {getattr(task, 'status', '')}\n"
-        f"- current_step: {getattr(task, 'current_step', '') or getattr(task, 'status', '')}\n\n"
-        "## Latest\n\n"
-        f"{latest}\n"
-    )
-    path.write_text(content, encoding="utf-8")
-
-
-def _blackboard_content(task_id: str) -> str:
-    return (
-        "# Blackboard\n\n"
-        f"- task_id: {task_id}\n"
-        "- purpose: shared task-local facts, decisions, blockers, and handoff notes\n\n"
-        "## Facts\n\n- 暂无\n\n"
-        "## Decisions\n\n- 暂无\n\n"
-        "## Blockers\n\n- 暂无\n"
-    )
-
-
 def _read_json_object(path: Path) -> dict[str, object]:
     if not path.exists():
         return {}
@@ -306,14 +284,6 @@ def _write_if_missing(path: Path, content: str) -> None:
 def _safe_segment(value: str) -> str:
     cleaned = str(value or "task").replace("/", "_").replace("\\", "_").strip()
     return cleaned or "task"
-
-
-def _yaml_quote(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
-
-
-def _indent_block(value: str) -> str:
-    return "\n".join(f"  {line}" for line in value.splitlines() or [""])
 
 
 __all__ = ["TaskWorkspacePaths", "ensure_subagent_task_workspace", "task_workspace_path"]
