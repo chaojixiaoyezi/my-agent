@@ -3,10 +3,16 @@ from __future__ import annotations
 """LLM: public API for memory hook snapshots and raw archive storage.
 
 新手说明:
-这里是"压缩前快照"和"全量冷归档"的最小入口。
+这里是"压缩前快照"、"全量冷归档"和 runtime workspace adapter 的最小入口。
 以后真实压缩流程要接入时，优先从这里导入数据结构和写入函数，不要把 JSONL 路径规则散落到别的模块里。
 """
 
+# LLM: keep task/run workspace adapter exports centralized for callers.
+from .agent_run_workspace import (
+    AgentRunWorkspacePaths,
+    agent_run_workspace_paths,
+    ensure_agent_run_workspace,
+)
 from .models import CompressionSnapshot, RawMemoryEvent
 from .resume_context import ResumeContextResult, build_auto_resume_context
 from .runtime import ArchiveRunTurnResult, archive_run_turn
@@ -44,6 +50,7 @@ from .tokens import (
 __all__ = [
     "CompressionSnapshot",
     "ArchiveRunTurnResult",
+    "AgentRunWorkspacePaths",
     "TurnTokenUsage",
     "CompressionHookResult",
     "MemoryArchiveError",
@@ -62,6 +69,8 @@ __all__ = [
     "compression_snapshot_file_for",
     "enforce_retention",
     "estimate_tokens",
+    "agent_run_workspace_paths",
+    "ensure_agent_run_workspace",
     "filter_raw_event_for_level",
     "filter_snapshot_for_level",
     "on_before_compression",

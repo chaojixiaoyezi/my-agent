@@ -15,6 +15,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# LLM: task workspace owns the run adapter path, but run files live in a focused helper.
+from .agent_run_workspace import AgentRunWorkspacePaths, ensure_agent_run_workspace
+
 
 @dataclass(frozen=True)
 class TaskWorkspacePaths:
@@ -32,6 +35,7 @@ class TaskWorkspacePaths:
     artifacts_dir: Path
     agents_dir: Path
     agent_adapter_dir: Path
+    agent_run: AgentRunWorkspacePaths
     legacy_run_ref_json: Path
 
 
@@ -56,7 +60,7 @@ def ensure_subagent_task_workspace(workspace: str | Path, task: Any) -> TaskWork
     _write_if_missing(paths.shared_blackboard, _blackboard_content(task_id))
     _touch_jsonl(paths.shared_messages)
     _touch_jsonl(paths.shared_findings)
-    _write_json(paths.legacy_run_ref_json, _legacy_run_ref_payload(task_id, run_id, task, now))
+    ensure_agent_run_workspace(paths.agent_adapter_dir, task, task_id=task_id, now=now)
     _append_timeline(paths.timeline_jsonl, _timeline_event(task, now, previous_state))
     return paths
 
@@ -67,6 +71,22 @@ def _paths_for(workspace: str | Path, task_id: str, run_id: str) -> TaskWorkspac
     artifacts_dir = root / "artifacts"
     agents_dir = root / "agents"
     agent_adapter_dir = agents_dir / _safe_segment(run_id)
+    agent_run = AgentRunWorkspacePaths(
+        root=agent_adapter_dir,
+        agent_yaml=agent_adapter_dir / "agent.yaml",
+        state_json=agent_adapter_dir / "state.json",
+        task_md=agent_adapter_dir / "task.md",
+        timeline_jsonl=agent_adapter_dir / "timeline.jsonl",
+        checkpoint_json=agent_adapter_dir / "checkpoint.json",
+        summary_md=agent_adapter_dir / "summary.md",
+        final_report_md=agent_adapter_dir / "final_report.md",
+        findings_jsonl=agent_adapter_dir / "findings.jsonl",
+        inbox_dir=agent_adapter_dir / "inbox",
+        outbox_dir=agent_adapter_dir / "outbox",
+        artifacts_dir=agent_adapter_dir / "artifacts",
+        compactions_dir=agent_adapter_dir / "compactions",
+        legacy_run_ref_json=agent_adapter_dir / "legacy_run_ref.json",
+    )
     return TaskWorkspacePaths(
         root=root,
         task_yaml=root / "task.yaml",
@@ -80,6 +100,7 @@ def _paths_for(workspace: str | Path, task_id: str, run_id: str) -> TaskWorkspac
         artifacts_dir=artifacts_dir,
         agents_dir=agents_dir,
         agent_adapter_dir=agent_adapter_dir,
+        agent_run=agent_run,
         legacy_run_ref_json=agent_adapter_dir / "legacy_run_ref.json",
     )
 
@@ -124,24 +145,6 @@ def _state_payload(task_id: str, run_id: str, task: Any, now: float) -> dict[str
             if getattr(task, "task_dir", "")
             else "",
         },
-    }
-
-
-def _legacy_run_ref_payload(task_id: str, run_id: str, task: Any, now: float) -> dict[str, object]:
-    task_dir = str(getattr(task, "task_dir", ""))
-    return {
-        "version": 1,
-        "mode": "legacy_subagent_work_order_adapter",
-        "task_id": task_id,
-        "run_id": run_id,
-        "parent_run_id": str(getattr(task, "parent_id", "")),
-        "depth": int(getattr(task, "depth", 0) or 0),
-        "status": str(getattr(task, "status", "")),
-        "legacy_task_dir": task_dir,
-        "legacy_task_json": str(Path(task_dir) / "task.json") if task_dir else "",
-        "legacy_run_json": str(Path(task_dir) / "run.json") if task_dir else "",
-        "agent_run_workspace_status": "pending_phase_1",
-        "updated_at": now,
     }
 
 
