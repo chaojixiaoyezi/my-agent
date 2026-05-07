@@ -17,11 +17,18 @@ def _build_capability_and_blocker_findings(
     created_at: float,
 ) -> list[AcceptanceReviewFinding]:
     """Build findings for capability requests/gaps and output blockers."""
-    findings: list[AcceptanceReviewFinding] = []
-
     open_requests = [item for item in task.capability_requests if item.status == "OPEN"]
     open_gaps = [item for item in task.capability_gaps if item.status == "OPEN"]
-    findings.append(
+    blockers = [item for item in _string_list(output.get("blockers", [])) if item.strip()]
+    return [
+        _capability_request_finding(task, open_requests, created_at),
+        _capability_gap_finding(task, open_gaps, created_at),
+        _output_blocker_finding(task, blockers, created_at),
+    ]
+
+
+def _capability_request_finding(task, open_requests, created_at):
+    return (
         AcceptanceReviewFinding(
             name="no_open_capability_requests",
             ok=not open_requests,
@@ -35,7 +42,10 @@ def _build_capability_and_blocker_findings(
             created_at=created_at,
         )
     )
-    findings.append(
+
+
+def _capability_gap_finding(task, open_gaps, created_at):
+    return (
         AcceptanceReviewFinding(
             name="no_open_capability_gaps",
             ok=not open_gaps,
@@ -50,8 +60,9 @@ def _build_capability_and_blocker_findings(
         )
     )
 
-    blockers = [item for item in _string_list(output.get("blockers", [])) if item.strip()]
-    findings.append(
+
+def _output_blocker_finding(task, blockers, created_at):
+    return (
         AcceptanceReviewFinding(
             name="no_output_blockers",
             ok=not blockers,
@@ -61,4 +72,3 @@ def _build_capability_and_blocker_findings(
             created_at=created_at,
         )
     )
-    return findings

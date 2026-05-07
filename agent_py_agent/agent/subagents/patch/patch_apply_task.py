@@ -46,6 +46,17 @@ class ApplyPatchTaskParams:
     note: str
 
 
+@dataclass(frozen=True)
+class BaseAuditParams:
+    """LLM: bundle normalized patch audit metadata."""
+
+    patch: dict
+    raw_path: str
+    status: str
+    patch_type: str
+    diff_text: str
+
+
 def extract_patch_test_info(task, output):
     """Extract test commands and blocked test reasons from task output."""
     from agent_py_agent.agent.subagents.services.patch_apply_test_commands import (
@@ -163,7 +174,7 @@ def normalize_patch_apply_spec(manager, task, patch: dict) -> dict:
     patch_type = _patch_type(patch)
     content = _patch_content(patch)
     diff_text = _patch_diff_text(patch)
-    audit = _base_audit(patch, raw_path, status, patch_type, diff_text)
+    audit = _base_audit(BaseAuditParams(patch, raw_path, status, patch_type, diff_text))
 
     blocked = _preflight_patch_blocker(raw_path, status, patch_type, content)
     if blocked:
@@ -219,15 +230,15 @@ def _patch_diff_text(patch: dict) -> str:
     return ""
 
 
-def _base_audit(patch: dict, raw_path: str, status: str, patch_type: str, diff_text: str) -> dict:
+def _base_audit(params: BaseAuditParams) -> dict:
     return {
-        "path": raw_path,
-        "status": status or "unknown",
-        "review_status": str(patch.get("review_status") or "UNREVIEWED"),
-        "summary": str(patch.get("summary") or ""),
-        "patch_type": patch_type or "unknown",
+        "path": params.raw_path,
+        "status": params.status or "unknown",
+        "review_status": str(params.patch.get("review_status") or "UNREVIEWED"),
+        "summary": str(params.patch.get("summary") or ""),
+        "patch_type": params.patch_type or "unknown",
         "apply_status": "PENDING",
-        "diff_preview": diff_text,
+        "diff_preview": params.diff_text,
         "actual_diff": "",
         "message": "",
     }

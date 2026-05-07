@@ -12,6 +12,10 @@ import time
 from dataclasses import dataclass, replace
 
 from agent_py_agent.agent.subagents.reports import PatchApplyReport
+from agent_py_agent.agent.subagents.services.indexing_params import (
+    DataclassRecordIndexParams,
+    IndexReportParams,
+)
 from agent_py_agent.agent.subagents.utils import _read_json_object
 
 from .patch_apply_reports import patch_apply_record_to_dict
@@ -85,9 +89,6 @@ class PatchApplyService:
         limit=0,
     ) -> PatchApplyReport:
         """Execute the independent patch-apply audit chain for runner-declared file writes."""
-        from pathlib import Path
-
-        from agent_py_agent.agent.subagents.parsing import _dict_list
         from agent_py_agent.agent.subagents.services.patch_apply_summary import PatchApplySummary
 
         opts = _patch_apply_options(
@@ -97,27 +98,7 @@ class PatchApplyService:
             note=note,
             limit=limit,
         )
-        records = []
-        for task in self.manager._select_runs(run_ids):
-            output = _read_json_object(Path(task.output_json))
-            patches = _dict_list(output.get("patches", []))
-            if run_ids is None and not patches:
-                continue
-            records.append(
-                self._apply_patch_task(
-                    task,
-                    params=ApplyPatchTaskParams(
-                        output=output,
-                        patches=patches,
-                        apply=opts.apply,
-                        applier=opts.applier,
-                        note=opts.note,
-                    ),
-                )
-            )
-            if opts.limit > 0 and len(records) >= opts.limit:
-                break
-
+        records = _collect_patch_apply_records(self, run_ids, opts)
         return PatchApplyReport(
             generated_at=time.time(),
             dry_run=not opts.apply,
@@ -137,9 +118,6 @@ class PatchApplyService:
     ) -> PatchApplyReport:
         """Write patch apply report to disk."""
         from agent_py_agent.agent.subagents.patch.patch_renderer import render_patch_apply_markdown
-        from agent_py_agent.agent.subagents.services.patch_apply_record_files import (
-            PatchApplyRecordFiles,
-        )
 
         opts = _patch_apply_options(
             options,
@@ -149,30 +127,20 @@ class PatchApplyService:
             limit=limit,
         )
         report = self.apply_patches(run_ids, options=opts)
-        (self.manager.workspace / "subagent_patch_apply_report.json").write_text(
-            json.dumps(
-                {
-                    "generated_at": report.generated_at,
-                    "dry_run": report.dry_run,
-                    "summary": report.summary,
-                    "records": [patch_apply_record_to_dict(r) for r in report.records],
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        _write_patch_apply_report_json(self.manager, report)
         (self.manager.workspace / "SUBAGENT_PATCH_APPLY.md").write_text(
             render_patch_apply_markdown(report),
             encoding="utf-8",
         )
         self._write_apply_records(report, apply=opts.apply)
         self.manager._index_report(
-            "subagent_patch_apply_report",
-            "latest",
-            "Subagent patch apply report",
-            report,
-            event_type="subagent_patch_apply_report_written",
+            IndexReportParams(
+                "subagent_patch_apply_report",
+                "latest",
+                "Subagent patch apply report",
+                report,
+                "subagent_patch_apply_report_written",
+            ),
         )
         return report
 
@@ -185,11 +153,13 @@ class PatchApplyService:
         for record in report.records:
             PatchApplyRecordFiles.write_record(record, self.manager)
             self.manager._index_dataclass_record(
-                "subagent_patch_apply",
-                record.id,
-                f"Patch apply {record.run_id} {record.decision}",
-                record,
-                "subagent_patch_apply_logged",
+                DataclassRecordIndexParams(
+                    "subagent_patch_apply",
+                    record.id,
+                    f"Patch apply {record.run_id} {record.decision}",
+                    record,
+                    "subagent_patch_apply_logged",
+                ),
             )
             if apply:
                 PatchApplyRecordFiles.append_log(record, self.manager)
@@ -225,3 +195,59 @@ class PatchApplyService:
     def _resolve_patch_target(self, raw_path: str):
         """Backward-compatible wrapper for patch path resolution."""
         return resolve_patch_target(self.manager, raw_path)
+
+
+def _collect_patch_apply_records(service: PatchApplyService, run_ids, opts: PatchApplyOptions):
+    from pathlib import Path
+
+    from agent_py_agent.agent.subagents.parsing import _dict_list
+
+    records = []
+    for task in service.manager._select_runs(run_ids):
+        output = _read_json_object(Path(task.output_json))
+        patches = _dict_list(output.get("patches", []))
+        if run_ids is None and not patches:
+            continue
+        records.append(_apply_patch_record(_PatchApplyRecordParams(service, task, output, patches, opts)))
+        if opts.limit > 0 and len(records) >= opts.limit:
+            break
+    return records
+
+
+@dataclass(frozen=True)
+class _PatchApplyRecordParams:
+    """LLM: bundle one patch apply record request."""
+
+    service: PatchApplyService
+    task: object
+    output: dict
+    patches: list[dict]
+    opts: PatchApplyOptions
+
+
+def _apply_patch_record(params: _PatchApplyRecordParams):
+    opts = params.opts
+    service = params.service
+    return service._apply_patch_task(
+        params.task,
+        params=ApplyPatchTaskParams(
+            output=params.output,
+            patches=params.patches,
+            apply=opts.apply,
+            applier=opts.applier,
+            note=opts.note,
+        ),
+    )
+
+
+def _write_patch_apply_report_json(manager, report: PatchApplyReport) -> None:
+    payload = {
+        "generated_at": report.generated_at,
+        "dry_run": report.dry_run,
+        "summary": report.summary,
+        "records": [patch_apply_record_to_dict(r) for r in report.records],
+    }
+    (manager.workspace / "subagent_patch_apply_report.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )

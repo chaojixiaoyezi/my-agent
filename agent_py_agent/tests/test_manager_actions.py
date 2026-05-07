@@ -11,6 +11,69 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent_py_agent.agent.subagents.manager_actions import SubAgentActionMixin
+from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+from agent_py_agent.agent.subagents.models import SubAgentTask
+from agent_py_agent.agent.subagents.reports import ActionPlanItem
+
+
+class _ActionTestMixin(SubAgentBaseMixin, SubAgentActionMixin):
+    def __init__(self, workspace: Path):
+        SubAgentBaseMixin.__init__(self, workspace=workspace)
+
+    def load(self, run_id: str) -> SubAgentTask:
+        path = self.workspace / run_id / "task.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return SubAgentTask(**data)
+
+    def _index_task(self, task) -> None:
+        pass
+
+
+def _make_action_mixin(tmp_path: Path) -> _ActionTestMixin:
+    return _ActionTestMixin(workspace=tmp_path)
+
+
+def _make_action_task(
+    mixin: _ActionTestMixin,
+    run_id: str,
+    *,
+    status: str = "RUNNING",
+    channel_status: str = "OK",
+) -> SubAgentTask:
+    return SubAgentTask(
+        id=run_id,
+        goal="测试",
+        thought="思考",
+        plan=["步骤1"],
+        agent_name="test",
+        created_at=1234567890.0,
+        updated_at=1234567890.0,
+        status=status,
+        channel_status=channel_status,
+        **mixin._build_work_order_paths(run_id),
+    )
+
+
+def _make_action_item(
+    *,
+    action_id: str,
+    run_id: str,
+    action: str,
+    would_change_status_to: str = "BLOCKED",
+) -> ActionPlanItem:
+    return ActionPlanItem(
+        id=action_id,
+        run_id=run_id,
+        severity="P1",
+        priority=1,
+        action=action,
+        reason="测试",
+        source_issue_kinds=[],
+        would_change_status_to=would_change_status_to,
+        created_at=1234567890.0,
+    )
+
 
 class TestActionApplyReportInit:
     """测试 ActionApplyReport 数据类。"""
@@ -58,47 +121,13 @@ class TestApplyActionItemDryRun:
     """测试 _apply_action_item() dry-run 模式。"""
 
     def test_dry_run_returns_record_without_apply(self, tmp_path: Path):
-        from agent_py_agent.agent.subagents.manager_actions import SubAgentActionMixin
-        from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.models import SubAgentTask
-        from agent_py_agent.agent.subagents.reports import ActionPlanItem
-
-        class TestMixin(SubAgentBaseMixin, SubAgentActionMixin):
-            def __init__(self, workspace: Path):
-                SubAgentBaseMixin.__init__(self, workspace=workspace)
-
-            def load(self, run_id: str) -> SubAgentTask:
-                path = self.workspace / run_id / "task.json"
-                data = json.loads(path.read_text(encoding="utf-8"))
-                return SubAgentTask(**data)
-
-            def _index_task(self, task) -> None:
-                pass
-
-        mixin = TestMixin(workspace=tmp_path)
-
-        task = SubAgentTask(
-            id="run_dry",
-            goal="测试",
-            thought="思考",
-            plan=["步骤1"],
-            agent_name="test",
-            created_at=1234567890.0,
-            updated_at=1234567890.0,
-            **mixin._build_work_order_paths("run_dry"),
-        )
+        mixin = _make_action_mixin(tmp_path)
+        task = _make_action_task(mixin, "run_dry")
         mixin.save(task)
-
-        action = ActionPlanItem(
-            id="action_dry",
+        action = _make_action_item(
+            action_id="action_dry",
             run_id="run_dry",
-            severity="P1",
-            priority=1,
             action="reopen_for_evidence",
-            reason="测试原因",
-            source_issue_kinds=["test"],
-            would_change_status_to="BLOCKED",
-            created_at=1234567890.0,
         )
 
         record = mixin._apply_action_item(
@@ -117,26 +146,11 @@ class TestApplyActionItemNotFound:
 
     def test_returns_error_record(self, tmp_path: Path):
         """任务不存在时返回错误记录。"""
-        from agent_py_agent.agent.subagents.manager_actions import SubAgentActionMixin
-        from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.reports import ActionPlanItem
-
-        class TestMixin(SubAgentBaseMixin, SubAgentActionMixin):
-            def __init__(self, workspace: Path):
-                SubAgentBaseMixin.__init__(self, workspace=workspace)
-
-        mixin = TestMixin(workspace=tmp_path)
-
-        action = ActionPlanItem(
-            id="action_err",
+        mixin = _make_action_mixin(tmp_path)
+        action = _make_action_item(
+            action_id="action_err",
             run_id="nonexistent_run",
-            severity="P1",
-            priority=1,
             action="reopen_for_evidence",
-            reason="测试",
-            source_issue_kinds=[],
-            would_change_status_to="BLOCKED",
-            created_at=1234567890.0,
         )
 
         record = mixin._apply_action_item(
@@ -154,48 +168,27 @@ class TestRecordAfterTaskAction:
     """测试 _record_after_task_action() 方法。"""
 
     def test_creates_apply_record(self, tmp_path: Path):
-        from agent_py_agent.agent.subagents.manager_actions import SubAgentActionMixin
-        from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.models import SubAgentTask
-        from agent_py_agent.agent.subagents.reports import ActionPlanItem
-
-        class TestMixin(SubAgentBaseMixin, SubAgentActionMixin):
-            def __init__(self, workspace: Path):
-                SubAgentBaseMixin.__init__(self, workspace=workspace)
-
-        mixin = TestMixin(workspace=tmp_path)
-
-        task = SubAgentTask(
-            id="run_after",
-            goal="测试",
-            thought="思考",
-            plan=["步骤1"],
-            agent_name="test",
-            created_at=1234567890.0,
-            updated_at=1234567890.0,
-            status="RUNNING",
-            channel_status="OK",
-            **mixin._build_work_order_paths("run_after"),
+        from agent_py_agent.agent.subagents.services.action_params import (
+            RecordAfterTaskActionParams,
         )
 
-        action = ActionPlanItem(
-            id="action_after",
+        mixin = _make_action_mixin(tmp_path)
+        task = _make_action_task(mixin, "run_after")
+        action = _make_action_item(
+            action_id="action_after",
             run_id="run_after",
-            severity="P1",
-            priority=1,
             action="run_acceptance",
-            reason="测试",
-            source_issue_kinds=[],
             would_change_status_to="NEEDS_ACCEPTANCE",
-            created_at=1234567890.0,
         )
 
         record = mixin._record_after_task_action(
-            action,
-            task,
-            "RUNNING",
-            "OK",
-            "已标记需要验收",
+            RecordAfterTaskActionParams(
+                action,
+                task,
+                "RUNNING",
+                "OK",
+                "已标记需要验收",
+            )
         )
 
         assert record.ok is True

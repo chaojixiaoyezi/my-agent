@@ -8,6 +8,8 @@ from .fallback_state import _CHAT_RESPONSE_STYLE_INJECT, resume_context_override
 from .fallback_ui import _make_chunk_handler, _render_assistant_response
 from .gateway_client import (
     ChatRequestContent,
+    GatewayChunkPollRequest,
+    GatewayTimingContext,
     check_gateway_alive,
     format_gateway_timing,
     poll_gateway_chunks,
@@ -45,13 +47,7 @@ def _fallback_gateway_handle(ctx: FallbackJobContext) -> tuple[str, bool]:
         ),
         agent=ctx.agent,
     )
-    response = poll_gateway_chunks(
-        chunk_path,
-        response_path,
-        _gateway_deadline(ctx),
-        on_chunk,
-        chunks_printed_ref=[0],
-    )
+    response = poll_gateway_chunks(GatewayChunkPollRequest(chunk_path, response_path, _gateway_deadline(ctx), on_chunk, [0]))
     response_text = response.get("response", "")
     if not response and request_id:
         raise TimeoutError(f"gateway 请求等待超时: request_id={request_id}")
@@ -115,7 +111,7 @@ def _print_gateway_timing(
 ) -> None:
     elapsed = time.perf_counter() - started_at
     _cprint(
-        f"{GRAY}{format_gateway_timing(request_id, elapsed, response, True, ctx.agent.config.agent_name)}{RESET}"
+        f"{GRAY}{format_gateway_timing(GatewayTimingContext(request_id, elapsed, response, True))}{RESET}"
     )
 
 

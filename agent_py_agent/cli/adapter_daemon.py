@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -19,15 +20,31 @@ from ..agent.gateway_parts.process_control import terminate_pid, wait_for_pid_ex
 from .models import AdapterOptions
 
 
-def daemonize_adapter(agent, gpaths, pid_file: Path, options: AdapterOptions) -> int:
-    existing_pid = get_running_pid(pid_file)
+@dataclass(frozen=True)
+class AdapterDaemonRequest:
+    agent: object
+    gpaths: object
+    pid_file: Path
+    options: AdapterOptions
+
+
+@dataclass(frozen=True)
+class AdapterStopRequest:
+    options: AdapterOptions
+    gpaths: object
+    pid_file: Path
+    pid: int
+
+
+def daemonize_adapter(request: AdapterDaemonRequest) -> int:
+    existing_pid = get_running_pid(request.pid_file)
     if existing_pid is not None:
         print(f"adapter already running (PID {existing_pid}) or PID file exists", file=sys.stderr)
-        print(f"use stop first, or delete {pid_file} before retrying", file=sys.stderr)
+        print(f"use stop first, or delete {request.pid_file} before retrying", file=sys.stderr)
         return 1
 
-    process = _start_adapter_daemon_process(agent, gpaths, options)
-    return _wait_for_adapter_pid(process, pid_file)
+    process = _start_adapter_daemon_process(request.agent, request.gpaths, request.options)
+    return _wait_for_adapter_pid(process, request.pid_file)
 
 
 def _start_adapter_daemon_process(agent, gpaths, options: AdapterOptions) -> subprocess.Popen:
@@ -104,16 +121,16 @@ def read_pid_record(path: Path):
     return _read_json_file(path)
 
 
-def stop_adapter_daemon(options: AdapterOptions, gpaths, pid_file: Path, pid: int) -> int:
-    print(f"stopping adapter (PID {pid})...", file=sys.stderr)
-    _write_stop_request(gpaths)
-    if wait_for_pid_exit(pid, timeout=options.stop_timeout):
-        remove_pid_file_if_owned(pid_file)
+def stop_adapter_daemon(request: AdapterStopRequest) -> int:
+    print(f"stopping adapter (PID {request.pid})...", file=sys.stderr)
+    _write_stop_request(request.gpaths)
+    if wait_for_pid_exit(request.pid, timeout=request.options.stop_timeout):
+        remove_pid_file_if_owned(request.pid_file)
         print("adapter stopped", file=sys.stderr)
         return 0
-    terminate_pid(pid)
-    if wait_for_pid_exit(pid, timeout=5.0):
-        remove_pid_file_if_owned(pid_file)
+    terminate_pid(request.pid)
+    if wait_for_pid_exit(request.pid, timeout=5.0):
+        remove_pid_file_if_owned(request.pid_file)
         print("adapter force-stopped", file=sys.stderr)
         return 0
     print("adapter stop failed", file=sys.stderr)

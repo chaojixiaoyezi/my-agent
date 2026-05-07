@@ -46,14 +46,7 @@ def run_subagent_flow(agent, options: SubagentRunParams):
     agent._current_task_attributes = task_for_attrs.attributes
 
     try:
-        result = agent.run(
-            prompt,
-            save=False,
-            allowed_tools=context.allowed_tools,
-            write_boundary=context.write_boundary,
-            source="subagent_run_model_turn",
-            recovery_snapshot=False,
-        )
+        result = _run_subagent_model_turn(agent, prompt, context)
     except Exception as exc:
         return agent._handle_subagent_run_failure(
             SubagentRunFailureParams(options.run_id, active_attempt_id, exc, context, prompt)
@@ -61,4 +54,16 @@ def run_subagent_flow(agent, options: SubagentRunParams):
 
     return agent._finalize_subagent_run(
         SubagentFinalizeParams(options.run_id, active_attempt_id, result, context, prompt)
+    )
+
+
+def _run_subagent_model_turn(agent, prompt: str, context):
+    # LLM: one model turn stays separate from attempt/probe bookkeeping.
+    return agent.run(
+        prompt,
+        save=False,
+        allowed_tools=context.allowed_tools,
+        write_boundary=context.write_boundary,
+        source="subagent_run_model_turn",
+        recovery_snapshot=False,
     )

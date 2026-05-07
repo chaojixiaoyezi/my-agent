@@ -10,6 +10,7 @@ from typing import Any
 from ..storage.base import EvidenceRef, dict_to_model, stable_digest, utc_now
 
 
+# LLM: evidence references use payload bundles so query-result files remain the fact source.
 @dataclass(frozen=True)
 class QueryEvidencePayload:
     # LLM: Evidence writes use this bundle for compatibility and code-size guardrails.
@@ -19,6 +20,15 @@ class QueryEvidencePayload:
     row_count: int
     truncated: bool
     summary: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _EvidenceRefPayloadRequest:
+    # LLM: EvidenceRef metadata travels as one bundle to keep query evidence helpers small.
+    params: QueryEvidencePayload
+    path: Path
+    digest: str
+    created_at: str
 
 
 class LocalEvidenceStore:
@@ -66,25 +76,8 @@ class LocalEvidenceStore:
         encoded = json.dumps(evidence_dict, ensure_ascii=False, sort_keys=True, indent=2)
         path.write_text(encoded + "\n", encoding="utf-8")
         digest = stable_digest(evidence_dict)
-        ref_payload = {
-            "evidence_id": evidence_id,
-            "kind": "query_result",
-            "query_id": params.query_id,
-            "uri": str(path),
-            "path": str(path),
-            "content_hash": digest,
-            "sha256": digest,
-            "row_count": params.row_count,
-            "truncated": params.truncated,
-            "created_at": evidence_dict["created_at"],
-            "summary": f"query_result rows={params.row_count} truncated={params.truncated}",
-            "metadata": {
-                "evidence_path": str(path),
-                "parameters": params.parameters,
-                "summary": params.summary,
-            },
-        }
-        return dict_to_model(EvidenceRef, ref_payload)
+        ref_request = _EvidenceRefPayloadRequest(params, path, digest, evidence_dict["created_at"])
+        return dict_to_model(EvidenceRef, _query_evidence_ref_payload(ref_request))
 
     def read_json(self, evidence_path: str | Path, *, max_bytes: int = 200_000) -> dict[str, Any]:
         path = Path(evidence_path)
@@ -97,3 +90,25 @@ class LocalEvidenceStore:
                 "size_bytes": path.stat().st_size,
             }
         return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _query_evidence_ref_payload(request: _EvidenceRefPayloadRequest) -> dict[str, Any]:
+    params = request.params
+    return {
+        "evidence_id": params.query_id,
+        "kind": "query_result",
+        "query_id": params.query_id,
+        "uri": str(request.path),
+        "path": str(request.path),
+        "content_hash": request.digest,
+        "sha256": request.digest,
+        "row_count": params.row_count,
+        "truncated": params.truncated,
+        "created_at": request.created_at,
+        "summary": f"query_result rows={params.row_count} truncated={params.truncated}",
+        "metadata": {
+            "evidence_path": str(request.path),
+            "parameters": params.parameters,
+            "summary": params.summary,
+        },
+    }

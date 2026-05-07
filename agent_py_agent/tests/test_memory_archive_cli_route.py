@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from agent_py_agent.__main__ import build_parser
@@ -48,64 +49,85 @@ def _run_cli_json(capsys, config_path: Path, *argv: str) -> tuple[int, dict]:
     return code, json.loads(captured.out)
 
 
+@dataclass(frozen=True)
+class _ArchiveRawEventParams:
+    # LLM: archive fixture fields stay bundled so tests mirror product bundle rules.
+    event_id: str
+    run_id: str
+    speaker: str
+    content: str
+    created_at: str
+
+
+def _append_archive_raw_event(
+    root: Path,
+    *,
+    params: _ArchiveRawEventParams | None = None,
+    event_id: str = "",
+    run_id: str = "",
+    speaker: str = "",
+    content: str = "",
+    created_at: str = "",
+) -> None:
+    values = params or _ArchiveRawEventParams(event_id, run_id, speaker, content, created_at)
+    append_raw_event(
+        root,
+        RawMemoryEvent(
+            event_id=values.event_id,
+            session_id="session-demo",
+            request_id="request-demo",
+            run_id=values.run_id,
+            speaker=values.speaker,
+            target="assistant" if values.speaker == "user" else "user",
+            action="message" if values.speaker == "user" else "response",
+            status="ok",
+            task_id=values.run_id,
+            content_preview=values.content,
+            source="run",
+            created_at=values.created_at,
+        ),
+    )
+
+
+def _archive_snapshot(run_id: str) -> CompressionSnapshot:
+    return CompressionSnapshot(
+        snapshot_id="snapshot-demo-1",
+        session_id="session-demo",
+        compression_id="compression-demo",
+        turn_range={"start": 1, "end": 2},
+        user_intents=["继续 README 场景测试任务"],
+        assistant_actions=["已创建子代理，等待父代理继续验收。"],
+        dispatch_events=[{
+            "source": "subagent_run",
+            "request_id": "request-demo",
+            "run_id": run_id,
+            "task_id": run_id,
+            "status": "awaiting_acceptance",
+        }],
+        next_actions=["读取 STATUS.md 和 WORK_LOG.md"],
+        task_refs=[run_id],
+        created_at="2026-04-30T08:01:00+00:00",
+    )
+
+
 def _write_archive_fixture(root: Path, *, run_id: str = "subagent-archive-demo") -> None:
-    append_raw_event(
+    _append_archive_raw_event(
         root,
-        RawMemoryEvent(
-            event_id="raw-demo-1",
-            session_id="session-demo",
-            request_id="request-demo",
-            run_id=run_id,
-            speaker="user",
-            target="assistant",
-            action="message",
-            status="ok",
-            task_id=run_id,
-            content_preview="继续 README 场景测试任务",
-            source="run",
-            created_at="2026-04-30T08:00:00+00:00",
-        ),
+        event_id="raw-demo-1",
+        run_id=run_id,
+        speaker="user",
+        content="继续 README 场景测试任务",
+        created_at="2026-04-30T08:00:00+00:00",
     )
-    append_raw_event(
+    _append_archive_raw_event(
         root,
-        RawMemoryEvent(
-            event_id="raw-demo-2",
-            session_id="session-demo",
-            request_id="request-demo",
-            run_id=run_id,
-            speaker="assistant",
-            target="user",
-            action="response",
-            status="ok",
-            task_id=run_id,
-            content_preview="已创建子代理，等待父代理继续验收。",
-            source="run",
-            created_at="2026-04-30T08:00:30+00:00",
-        ),
+        event_id="raw-demo-2",
+        run_id=run_id,
+        speaker="assistant",
+        content="已创建子代理，等待父代理继续验收。",
+        created_at="2026-04-30T08:00:30+00:00",
     )
-    append_snapshot(
-        root,
-        CompressionSnapshot(
-            snapshot_id="snapshot-demo-1",
-            session_id="session-demo",
-            compression_id="compression-demo",
-            turn_range={"start": 1, "end": 2},
-            user_intents=["继续 README 场景测试任务"],
-            assistant_actions=["已创建子代理，等待父代理继续验收。"],
-            dispatch_events=[
-                {
-                    "source": "subagent_run",
-                    "request_id": "request-demo",
-                    "run_id": run_id,
-                    "task_id": run_id,
-                    "status": "awaiting_acceptance",
-                }
-            ],
-            next_actions=["读取 STATUS.md 和 WORK_LOG.md"],
-            task_refs=[run_id],
-            created_at="2026-04-30T08:01:00+00:00",
-        ),
-    )
+    append_snapshot(root, _archive_snapshot(run_id))
 
 
 def test_memory_archive_list_json_reads_raw_layer(tmp_path, capsys):

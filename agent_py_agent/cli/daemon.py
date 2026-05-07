@@ -9,12 +9,22 @@ daemon 是'前台常驻调度器'：按间隔循环跑父代理 dispatch。
 
 import json
 import sys
+from dataclasses import dataclass
 
 from ..agent.agent_core.dispatch_params import WatchParams
 from ..agent.capability_config import load_capability_config
 from ..agent.core import SimpleAgent
 from .common import make_agent, make_capability_router
 from .models import DaemonOptions
+
+
+@dataclass(frozen=True)
+class DaemonNumberOptions:
+    interval: float
+    max_runners: int
+    limit: int
+    max_cycles: int
+    max_cards: int
 
 
 def cmd_daemon(args) -> int:
@@ -79,23 +89,16 @@ def _daemon_watch_params(options: DaemonOptions) -> WatchParams:
     )
 
 
-def _validate_daemon_numbers(
-    *,
-    interval: float,
-    max_runners: int,
-    limit: int,
-    max_cycles: int,
-    max_cards: int,
-) -> str:
-    if interval < 0:
+def _validate_daemon_numbers(numbers: DaemonNumberOptions) -> str:
+    if numbers.interval < 0:
         return "daemon_interval / --interval 不能小于 0；0 表示每轮之间不等待，通常只用于测试。"
-    if max_runners < 0:
+    if numbers.max_runners < 0:
         return "daemon_max_runners / --max-runners 不能小于 0；0 表示本轮不执行 runner。"
-    if limit < 0:
+    if numbers.limit < 0:
         return "daemon_limit / --limit 不能小于 0；0 表示不限制记录条数。"
-    if max_cycles < 0:
+    if numbers.max_cycles < 0:
         return "daemon_max_cycles / --max-cycles 不能小于 0；0 表示持续运行。"
-    if max_cards < 0:
+    if numbers.max_cards < 0:
         return "daemon_max_cards / --max-cards 不能小于 0；0 表示不限制。"
     return ""
 
@@ -136,13 +139,7 @@ def _resolve_daemon_options(agent: SimpleAgent, args) -> DaemonOptions:
     instruction = cfg.daemon_runner_instruction if instruction is None else instruction
     probe = False if getattr(args, "no_probe", False) else cfg.daemon_probe
 
-    invalid_number = _validate_daemon_numbers(
-        interval=interval,
-        max_runners=max_runners,
-        limit=limit,
-        max_cycles=max_cycles,
-        max_cards=max_cards,
-    )
+    invalid_number = _validate_daemon_numbers(DaemonNumberOptions(interval, max_runners, limit, max_cycles, max_cards))
     if invalid_number:
         raise ValueError(invalid_number)
 

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
+# LLM: adapter internals stay bundled so file-protocol fields do not widen gateway call sites.
 @dataclass(frozen=True)
 class _AdapterMessageContext:
 
@@ -43,6 +44,14 @@ class _AdapterTimeoutContext:
     request_path: Path
     started_at: float
     timeout: float
+
+
+@dataclass(frozen=True)
+class ProcessFileAdapterOptions:
+    gateway_paths_obj: GatewayPaths
+    adapter_paths_obj: AdapterPaths
+    timeout: float
+    limit: int = 20
 
 
 def _process_single_adapter_message(
@@ -165,25 +174,26 @@ def _build_adapter_outbox_response(context: dict) -> dict:
 def process_file_adapter_once(
     agent: SimpleAgent,
     *,
+    params: ProcessFileAdapterOptions | None = None,
     gateway_paths_obj: GatewayPaths,
     adapter_paths_obj: AdapterPaths,
     timeout: float,
     limit: int = 20,
 ) -> int:
-
+    options = params or ProcessFileAdapterOptions(gateway_paths_obj, adapter_paths_obj, timeout, limit)
     for path in (
-        adapter_paths_obj.inbox,
-        adapter_paths_obj.processing,
-        adapter_paths_obj.done,
-        adapter_paths_obj.failed,
-        adapter_paths_obj.outbox,
+        options.adapter_paths_obj.inbox,
+        options.adapter_paths_obj.processing,
+        options.adapter_paths_obj.done,
+        options.adapter_paths_obj.failed,
+        options.adapter_paths_obj.outbox,
     ):
         path.mkdir(parents=True, exist_ok=True)
     processed = 0
-    for message_path in sorted(adapter_paths_obj.inbox.glob("*.json")):
-        if limit > 0 and processed >= limit:
+    for message_path in sorted(options.adapter_paths_obj.inbox.glob("*.json")):
+        if options.limit > 0 and processed >= options.limit:
             break
-        processing_path = adapter_paths_obj.processing / message_path.name
+        processing_path = options.adapter_paths_obj.processing / message_path.name
         try:
             message_path.replace(processing_path)
         except OSError as exc:
@@ -195,9 +205,9 @@ def process_file_adapter_once(
                 agent,
                 processing_path,
                 payload,
-                gateway_paths_obj,
-                adapter_paths_obj,
-                timeout,
+                options.gateway_paths_obj,
+                options.adapter_paths_obj,
+                options.timeout,
             )
         )
         processed += 1

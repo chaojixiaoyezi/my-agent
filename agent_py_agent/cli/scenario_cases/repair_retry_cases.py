@@ -8,9 +8,9 @@ from __future__ import annotations
 """
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
-from ...agent.backend import ModelResponse
 from ...agent.capability_config import load_capability_config
 from ..common import make_capability_router
 from ..scenario_utils import (
@@ -20,6 +20,34 @@ from ..scenario_utils import (
     print_scenario_step,
     write_scenario_summary,
 )
+from .repair_retry_backends import ScenarioRetryBackend, ScenarioStructuredRepairBackend
+
+
+@dataclass(frozen=True)
+class StructuredRepairVerifyRequest:
+    backend: object
+    loaded: object
+    runner: dict
+    output: dict
+    report: object
+
+
+@dataclass(frozen=True)
+class DispatchRoundRequest:
+    agent: object
+    router: object
+    capability_config: object
+    reviewer: str
+    note: str
+
+
+@dataclass(frozen=True)
+class RunnerRetryVerifyRequest:
+    first: object
+    second: object
+    after_first: object
+    loaded: object
+    backend: object
 
 
 def print_dispatch_report(report) -> None:
@@ -31,56 +59,6 @@ def print_dispatch_report(report) -> None:
         print(
             f"- [{status}] {record.step}/{record.action} run={run} "
             f"applied={record.applied} :: {record.message}"
-        )
-
-
-class ScenarioStructuredRepairBackend:
-
-    name = "scenario_structured_repair_backend"
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
-        self.calls += 1
-        if self.calls == 1:
-            return ModelResponse(
-                text=(
-                    "我已经完成任务，但这次故意输出一个损坏的结构化结果块。\n"
-                    "[SUBAGENT_RESULT]\n"
-                    "{\n"
-                    '  "status": "AWAITING_ACCEPTANCE",\n'
-                    '  "summary": "这个 JSON 少了结尾，用来模拟模型输出损坏",\n'
-                    '  "evidence": [\n'
-                    '    {"kind": "note", "summary": "原始回复声称已有证据", "ok": true}\n'
-                ),
-                backend=self.name,
-            )
-        return ModelResponse(
-            text=(
-                "[SUBAGENT_RESULT]\n"
-                "{\n"
-                '  "status": "AWAITING_ACCEPTANCE",\n'
-                '  "summary": "结构化输出损坏后已通过修复回合补齐。",\n'
-                '  "used_tools": [],\n'
-                '  "used_skills": [],\n'
-                '  "evidence": [\n'
-                '    {"kind": "note", "summary": "修复回合生成了可解析证据", "ok": true}\n'
-                "  ],\n"
-                '  "capability_requests": [],\n'
-                '  "artifacts": [],\n'
-                '  "tests": [\n'
-                '    {"name": "structured repair", "command": "", "ok": true, "summary": "坏 JSON 已修复"}\n'
-                "  ],\n"
-                '  "patches": [],\n'
-                '  "lessons": ["结构化输出损坏时先做格式修复，不新增事实"],\n'
-                '  "next_actions": [],\n'
-                '  "blocked_reason": "",\n'
-                '  "failure_type": ""\n'
-                "}\n"
-                "[/SUBAGENT_RESULT]"
-            ),
-            backend=self.name,
         )
 
 
@@ -109,17 +87,17 @@ def _structured_repair_setup(args):
     return paths, agent, backend, capability_config, router, task
 
 
-def _verify_structured_repair(backend, loaded, runner, output, report):
+def _verify_structured_repair(request: StructuredRepairVerifyRequest):
     return (
-        backend.calls == 2
-        and loaded.status == "DONE"
-        and loaded.verification_status == "VERIFIED"
-        and runner.get("structured_output_found") is True
-        and runner.get("structured_output_ok") is True
-        and runner.get("structured_repair_attempted") is True
-        and runner.get("structured_repair_ok") is True
-        and output.get("structured_output", {}).get("repair_attempted") is True
-        and any(item.step == "acceptance" and item.ok for item in report.records)
+        request.backend.calls == 2
+        and request.loaded.status == "DONE"
+        and request.loaded.verification_status == "VERIFIED"
+        and request.runner.get("structured_output_found") is True
+        and request.runner.get("structured_output_ok") is True
+        and request.runner.get("structured_repair_attempted") is True
+        and request.runner.get("structured_repair_ok") is True
+        and request.output.get("structured_output", {}).get("repair_attempted") is True
+        and any(item.step == "acceptance" and item.ok for item in request.report.records)
     )
 
 
@@ -143,7 +121,7 @@ def run_scenario_structured_repair_case(args) -> int:
         f"repair_ok={runner.get('structured_repair_ok')}"
     )
 
-    final_ok = _verify_structured_repair(backend, loaded, runner, output, report)
+    final_ok = _verify_structured_repair(StructuredRepairVerifyRequest(backend, loaded, runner, output, report))
     write_scenario_summary(
         paths,
         ok=final_ok,
@@ -161,60 +139,6 @@ def run_scenario_structured_repair_case(args) -> int:
     print(f"summary_md={paths.summary_md}")
     print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
     return 0 if final_ok else 2
-
-
-class ScenarioRetryBackend:
-
-    name = "scenario_retry_backend"
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
-        if "输出严格 JSON 格式" in prompt:
-            return ModelResponse(
-                text=json.dumps(
-                    {
-                        "analysis_reason": "场景测试模拟临时 runner 失败，允许重试。",
-                        "root_cause": "transient_runner_failure",
-                        "suggested_params": {},
-                        "should_retry": True,
-                        "should_split": False,
-                        "confidence": 0.9,
-                    },
-                    ensure_ascii=False,
-                ),
-                backend=self.name,
-            )
-        self.calls += 1
-        if self.calls == 1:
-            raise RuntimeError("scenario transient runner failure")
-        return ModelResponse(
-            text=(
-                "[SUBAGENT_RESULT]\n"
-                "{\n"
-                '  "status": "AWAITING_ACCEPTANCE",\n'
-                '  "summary": "runner 在第二次尝试中完成，已生成可验收证据。",\n'
-                '  "used_tools": [],\n'
-                '  "used_skills": [],\n'
-                '  "evidence": [\n'
-                '    {"kind": "note", "summary": "第二次 runner 尝试成功", "ok": true}\n'
-                "  ],\n"
-                '  "capability_requests": [],\n'
-                '  "artifacts": [],\n'
-                '  "tests": [\n'
-                '    {"name": "runner retry", "command": "", "ok": true, "summary": "第二次尝试通过"}\n'
-                "  ],\n"
-                '  "patches": [],\n'
-                '  "lessons": ["临时 runner 错误可以由父代理有限重试恢复"],\n'
-                '  "next_actions": [],\n'
-                '  "blocked_reason": "",\n'
-                '  "failure_type": ""\n'
-                "}\n"
-                "[/SUBAGENT_RESULT]"
-            ),
-            backend=self.name,
-        )
 
 
 def _runner_retry_setup(args):
@@ -242,32 +166,32 @@ def _runner_retry_setup(args):
     return paths, agent, backend, capability_config, router, task
 
 
-def _run_dispatch_round(agent, router, capability_config, reviewer, note):
-    report = agent.dispatch_subagents(
-        router, capability_config, apply=True, execute_runners=True,
-        max_runners=1, probe=False, reviewer=reviewer, note=note,
+def _run_dispatch_round(request: DispatchRoundRequest):
+    report = request.agent.dispatch_subagents(
+        request.router, request.capability_config, apply=True, execute_runners=True,
+        max_runners=1, probe=False, reviewer=request.reviewer, note=request.note,
     )
     print_dispatch_report(report)
     return report
 
 
-def _verify_runner_retry(first, second, after_first, loaded, backend):
-    first_runner = [item for item in first.records if item.step == "runner"]
-    second_runner = [item for item in second.records if item.step == "runner"]
+def _verify_runner_retry(request: RunnerRetryVerifyRequest):
+    first_runner = [item for item in request.first.records if item.step == "runner"]
+    second_runner = [item for item in request.second.records if item.step == "runner"]
     return (
         first_runner
         and first_runner[0].action == "execute_runner"
         and not first_runner[0].ok
-        and after_first.status == "BLOCKED"
-        and after_first.failure_type == "runner_error"
-        and after_first.runner_attempts == 1
+        and request.after_first.status == "BLOCKED"
+        and request.after_first.failure_type == "runner_error"
+        and request.after_first.runner_attempts == 1
         and second_runner
         and second_runner[0].action == "retry_runner"
         and second_runner[0].ok
-        and loaded.status == "DONE"
-        and loaded.verification_status == "VERIFIED"
-        and loaded.runner_attempts == 2
-        and backend.calls == 2
+        and request.loaded.status == "DONE"
+        and request.loaded.verification_status == "VERIFIED"
+        and request.loaded.runner_attempts == 2
+        and request.backend.calls == 2
     )
 
 
@@ -276,7 +200,9 @@ def run_scenario_runner_retry_case(args) -> int:
     paths, agent, backend, capability_config, router, task = _runner_retry_setup(args)
 
     print_scenario_step(2, "第一轮 dispatch：模拟 runner 临时失败")
-    first = _run_dispatch_round(agent, router, capability_config, "scenario-runner-retry", "first attempt should fail")
+    first = _run_dispatch_round(
+        DispatchRoundRequest(agent, router, capability_config, "scenario-runner-retry", "first attempt should fail")
+    )
     after_first = agent.subagents.load(task.id)
     print(
         f"after_first status={after_first.status} failure_type={after_first.failure_type} "
@@ -284,14 +210,16 @@ def run_scenario_runner_retry_case(args) -> int:
     )
 
     print_scenario_step(3, "第二轮 dispatch：自动重试并验收")
-    second = _run_dispatch_round(agent, router, capability_config, "scenario-runner-retry", "retry should succeed")
+    second = _run_dispatch_round(
+        DispatchRoundRequest(agent, router, capability_config, "scenario-runner-retry", "retry should succeed")
+    )
     loaded = agent.subagents.load(task.id)
     print(
         f"final status={loaded.status} verify={loaded.verification_status} "
         f"attempts={loaded.runner_attempts} backend_calls={backend.calls}"
     )
 
-    final_ok = _verify_runner_retry(first, second, after_first, loaded, backend)
+    final_ok = _verify_runner_retry(RunnerRetryVerifyRequest(first, second, after_first, loaded, backend))
     write_scenario_summary(
         paths,
         ok=final_ok,

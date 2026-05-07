@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,15 @@ from ...agent.memory_routing import (
 )
 
 DEFAULT_ROUTE_INDEX = Path("memory") / "routing" / "INDEX.md"
+
+
+@dataclass(frozen=True)
+class RouteLogicRequest:
+    args: Any
+    agent: Any
+    index_path: Path
+    mode: str
+    auto_read_limit: int
 
 
 def _resolve_agent(args):
@@ -63,7 +73,9 @@ def _try_match_routes(index_path: Path, agent, args) -> tuple[bool, list[MemoryR
         return False, [], [], [], [], [f"memory route index could not be loaded: {type(exc).__name__}: {exc}"]
 
 
-def _execute_route_logic(args, agent, index_path: Path, mode: str, auto_read_limit: int):
+def _execute_route_logic(request: RouteLogicRequest):
+    args = request.args
+    agent = request.agent
     warnings = _config_warnings(agent.config)
     diagnostics: dict[str, Any] = {"config_warnings": warnings, "route_warnings": [], "messages": []}
     routes: list[MemoryRoute] = []
@@ -72,21 +84,21 @@ def _execute_route_logic(args, agent, index_path: Path, mode: str, auto_read_lim
     candidate_paths: list[str] = []
     ok = True
 
-    if not index_path.exists():
+    if not request.index_path.exists():
         ok = False
-        diagnostics["messages"].append(f"memory route index not found: {index_path}")
+        diagnostics["messages"].append(f"memory route index not found: {request.index_path}")
         return ok, routes, matches, required_read_paths, candidate_paths, diagnostics
 
     if bool(getattr(args, "validate", False)):
-        ok, routes, diagnostics["route_warnings"], msgs = _try_validate_routes(index_path, agent)
+        ok, routes, diagnostics["route_warnings"], msgs = _try_validate_routes(request.index_path, agent)
         diagnostics["messages"].extend(msgs)
         return ok, routes, matches, required_read_paths, candidate_paths, diagnostics
 
-    if mode == "off":
+    if request.mode == "off":
         diagnostics["messages"].append("memory routing mode is off; route matching skipped.")
         return ok, routes, matches, required_read_paths, candidate_paths, diagnostics
 
-    ok, routes, matches, required_read_paths, candidate_paths, msgs = _try_match_routes(index_path, agent, args)
+    ok, routes, matches, required_read_paths, candidate_paths, msgs = _try_match_routes(request.index_path, agent, args)
     diagnostics["messages"].extend(msgs)
     return ok, routes, matches, required_read_paths, candidate_paths, diagnostics
 
@@ -97,7 +109,7 @@ def cmd_memory_route(args) -> int:
     auto_read_limit = _resolve_auto_read_limit(args.auto_read_limit, agent.config)
     index_path = _resolve_index_path(agent.root, args.index)
     ok, routes, matches, req_paths, cand_paths, diagnostics = _execute_route_logic(
-        args, agent, index_path, mode, auto_read_limit,
+        RouteLogicRequest(args, agent, index_path, mode, auto_read_limit),
     )
     payload = {
         "ok": ok, "workspace_root": str(agent.root), "query": args.query,
@@ -135,13 +147,12 @@ def _resolve_auto_read_limit(raw_limit: int | None, config: object) -> int:
 def _normalize_warning_item(item: Any) -> dict[str, Any]:
     if isinstance(item, dict):
         return dict(item)
-    elif hasattr(item, "to_dict"):
+    if hasattr(item, "to_dict"):
         return item.to_dict()
-    elif hasattr(item, "__dataclass_fields__"):
+    if hasattr(item, "__dataclass_fields__"):
         from dataclasses import asdict
         return asdict(item)
-    else:
-        return {"message": str(item)}
+    return {"message": str(item)}
 
 
 def _config_warnings(config: object) -> list[dict[str, Any]]:

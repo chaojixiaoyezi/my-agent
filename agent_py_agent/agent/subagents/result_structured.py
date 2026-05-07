@@ -2,6 +2,8 @@ from __future__ import annotations
 
 """Structured runner-output processing for subagent results."""
 
+from dataclasses import dataclass
+
 from .models import (
     CapabilityRequest,
     EvidencePacket,
@@ -14,11 +16,36 @@ from .parsing import _normalize_runner_items, _split_allowed_items, _string_dict
 from .utils import _merge_list, _new_id
 
 
-def _merge_actual_tools(task, actual_tools, used_tools, allowed_tools, parsed_used_tools, now):
-    actual_allowed_tools = [item for item in actual_tools if item in allowed_tools]
+@dataclass(frozen=True)
+class MergeActualToolsParams:
+    """LLM: bundle actual tool merge inputs from runner telemetry."""
+
+    task: SubAgentTask
+    actual_tools: list[str]
+    used_tools: list[str]
+    allowed_tools: set[str]
+    parsed_used_tools: list[str]
+    now: float
+
+
+@dataclass(frozen=True)
+class MergeTaskToolsParams:
+    """LLM: bundle parsed and actual tool state for task mutation."""
+
+    task: SubAgentTask
+    used_tools: list[str]
+    used_skills: list[str]
+    actual_tools: list[str] | None
+    parsed_used_tools: list[str]
+    now: float
+
+
+def _merge_actual_tools(params: MergeActualToolsParams):
+    task = params.task
+    actual_allowed_tools = [item for item in params.actual_tools if item in params.allowed_tools]
     task.used_tools = _merge_list(task.used_tools, actual_allowed_tools)
-    if not actual_tools:
-        return list(parsed_used_tools)
+    if not params.actual_tools:
+        return list(params.parsed_used_tools)
     ignored_tools = [item for item in task.used_tools if item not in actual_allowed_tools]
     for tool_name in actual_allowed_tools:
         if not any(
@@ -36,7 +63,7 @@ def _merge_actual_tools(task, actual_tools, used_tools, allowed_tools, parsed_us
                     summary=f"系统记录 runner 实际执行过 {tool_name}。",
                     command=tool_name,
                     ok=True,
-                    created_at=now,
+                    created_at=params.now,
                 )
             )
     return ignored_tools
@@ -82,10 +109,19 @@ def _split_tools_and_skills(parsed, allowed_tools, allowed_skills):
     return used_tools, ignored_tools, used_skills, ignored_skills
 
 
-def _merge_task_tools(task, used_tools, used_skills, actual_tools, parsed_used_tools, now):
-    if actual_tools is not None:
-        return _merge_actual_tools(task, actual_tools, used_tools, set(task.allowed_tools), parsed_used_tools, now)
-    task.used_tools = _merge_list(task.used_tools, used_tools)
+def _merge_task_tools(params: MergeTaskToolsParams):
+    if params.actual_tools is not None:
+        return _merge_actual_tools(
+            MergeActualToolsParams(
+                params.task,
+                params.actual_tools,
+                params.used_tools,
+                set(params.task.allowed_tools),
+                params.parsed_used_tools,
+                params.now,
+            )
+        )
+    params.task.used_tools = _merge_list(params.task.used_tools, params.used_tools)
     return []
 
 
@@ -216,7 +252,9 @@ def _process_structured_output(
         parsed, allowed_tools, allowed_skills
     )
     if actual_tools is not None:
-        ignored_tools = _merge_task_tools(task, used_tools, used_skills, actual_tools, parsed.used_tools, now)
+        ignored_tools = _merge_task_tools(
+            MergeTaskToolsParams(task, used_tools, used_skills, actual_tools, parsed.used_tools, now)
+        )
     else:
         task.used_tools = _merge_list(task.used_tools, used_tools)
     task.used_skills = _merge_list(task.used_skills, used_skills)

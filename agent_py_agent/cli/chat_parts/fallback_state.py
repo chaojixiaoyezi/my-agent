@@ -67,6 +67,13 @@ class RunFallbackConfig:
     session_manager: Any
     current_session_id: str
 
+
+@dataclass(frozen=True)
+class ConversationTurn:
+    user_message: str
+    assistant_message: str
+
+
 _CHAT_RESPONSE_STYLE_INJECT = (
     "这是 CLI 聊天界面。回答风格要求："
     "1. 不要用模板化欢迎词；"
@@ -89,13 +96,12 @@ def _startup_banner(agent_name: str, *, use_gateway: bool) -> str:
 def append_conversation_turn(
     conversation_history: list[tuple[str, str]],
     history_lock: threading.Lock,
-    user_message: str,
-    assistant_message: str,
+    turn: ConversationTurn,
     *,
     max_turns: int = MAX_HISTORY_TURNS,
 ) -> None:
     with history_lock:
-        conversation_history.append((user_message, assistant_message))
+        conversation_history.append((turn.user_message, turn.assistant_message))
         if len(conversation_history) > max_turns * 2:
             conversation_history[:] = conversation_history[-max_turns:]
 
@@ -123,5 +129,4 @@ class ChatJob:
         self.show_prompt = show_prompt
         self.inject = inject
         self.prompt_files = prompt_files
-
 

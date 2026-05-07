@@ -11,6 +11,7 @@ import signal
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..agent.adapter import ChannelManager, FeishuAdapter, QQAdapter
@@ -26,10 +27,25 @@ from ..agent.gateway_parts.daemon_control import (
     remove_pid_file_if_owned,
     write_pid_record,
 )
-from .adapter_daemon import daemonize_adapter, print_daemon_adapter_status, stop_adapter_daemon
+from .adapter_daemon import (
+    AdapterDaemonRequest,
+    AdapterStopRequest,
+    daemonize_adapter,
+    print_daemon_adapter_status,
+    stop_adapter_daemon,
+)
 from .common import make_agent
 from .gateway_client import ensure_gateway_started
 from .models import AdapterOptions
+
+
+@dataclass(frozen=True)
+class FileAdapterLoopContext:
+    agent: object
+    options: AdapterOptions
+    gpaths: object
+    apaths: AdapterPaths
+    timeout: float
 
 
 def cmd_adapter(args) -> int:
@@ -48,7 +64,7 @@ def cmd_adapter_file(args) -> int:
         return gateway_code
 
     timeout = options.timeout if options.timeout is not None else agent.config.gateway_request_timeout
-    total = _process_file_adapter_loop(agent, options, gpaths, apaths, timeout)
+    total = _process_file_adapter_loop(FileAdapterLoopContext(agent, options, gpaths, apaths, timeout))
     _print_file_adapter_summary(total, apaths, gpaths)
     return 0
 
@@ -106,19 +122,19 @@ def _ensure_gateway_available(options: AdapterOptions, gpaths) -> int:
     return 2
 
 
-def _process_file_adapter_loop(agent, options: AdapterOptions, gpaths, apaths: AdapterPaths, timeout) -> int:
+def _process_file_adapter_loop(context: FileAdapterLoopContext) -> int:
     total = 0
     while True:
         total += process_file_adapter_once(
-            agent,
-            gateway_paths_obj=gpaths,
-            adapter_paths_obj=apaths,
-            timeout=timeout,
-            limit=options.limit,
+            context.agent,
+            gateway_paths_obj=context.gpaths,
+            adapter_paths_obj=context.apaths,
+            timeout=context.timeout,
+            limit=context.options.limit,
         )
-        if options.once or not options.watch:
+        if context.options.once or not context.options.watch:
             return total
-        time.sleep(max(0.2, options.poll_interval))
+        time.sleep(max(0.2, context.options.poll_interval))
 
 
 def _print_file_adapter_summary(total: int, apaths: AdapterPaths, gpaths) -> None:
@@ -145,7 +161,7 @@ def cmd_adapter_start(args) -> int:
     gpaths.root.mkdir(parents=True, exist_ok=True)
     pid_file = options.pid_file if options.pid_file else gpaths.adapter_pid
     if options.daemon:
-        return daemonize_adapter(agent, gpaths, pid_file, options)
+        return daemonize_adapter(AdapterDaemonRequest(agent, gpaths, pid_file, options))
     return _run_adapter_foreground(agent, options, gpaths)
 
 
@@ -276,7 +292,7 @@ def cmd_adapter_stop(args) -> int:
     pid_file = options.pid_file if options.pid_file else gpaths.adapter_pid
     pid = get_running_pid(pid_file)
     if pid is not None:
-        return stop_adapter_daemon(options, gpaths, pid_file, pid)
+        return stop_adapter_daemon(AdapterStopRequest(options, gpaths, pid_file, pid))
     return _stop_foreground_adapter_manager()
 
 

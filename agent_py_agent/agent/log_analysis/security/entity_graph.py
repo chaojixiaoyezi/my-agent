@@ -69,24 +69,28 @@ class EntityGraph:
 
     def add_edge(
         self,
-        source: str = "",
+        source: str | EntityEdgeInput = "",
         target: str = "",
         relationship: str = "",
-        evidence_refs: Sequence[Any] = (),
         *,
         params: EntityEdgeInput | None = None,
         edge: EntityEdgeInput | None = None,
+        evidence_refs: Sequence[Any] = (),
         first_seen: str = "",
         last_seen: str = "",
     ) -> None:
-        item = params or edge or EntityEdgeInput(
-            source=str(source),
-            target=str(target),
-            relationship=str(relationship),
-            evidence_refs=evidence_refs,
-            first_seen=str(first_seen),
-            last_seen=str(last_seen),
-        )
+        item = params or edge
+        if item is None and isinstance(source, EntityEdgeInput):
+            item = source
+        if item is None:
+            item = EntityEdgeInput(
+                source=str(source),
+                target=str(target),
+                relationship=str(relationship),
+                evidence_refs=evidence_refs,
+                first_seen=str(first_seen),
+                last_seen=str(last_seen),
+            )
         if not item.source or not item.target or item.source == item.target:
             return
         refs = _ref_ids(item.evidence_refs)

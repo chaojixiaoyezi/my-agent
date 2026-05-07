@@ -143,20 +143,7 @@ class _ParentPlannerMixin:
             params.result.response,
         )
         parsed = parse_parent_planner_output(params.result.response)
-        ok = parsed.found and parsed.ok
-        decision = parsed.decision or "PARSE_ERROR"
-        message = parsed.summary or "父代理 planner 已完成完整 LLM turn。"
-        parse_error = parsed.parse_error
-
-        if not parsed.found:
-            ok = False
-            decision = "PARSE_ERROR"
-            parse_error = "缺少 [PARENT_PLANNER_RESULT] 结构化结果块。"
-            message = "父代理 planner 有模型回复，但缺少结构化结果，不能当作 OK。"
-        if parsed.decision == "HEARTBEAT_OK" and params.state["gate"].get("needs_planner", 0):
-            ok = False
-            parse_error = parse_error or "planner gate blocked HEARTBEAT_OK"
-            message = "状态门禁发现仍有待处理事项，禁止 planner 只返回 HEARTBEAT_OK。"
+        ok, decision, message, parse_error = _planner_record_status(parsed, params.state)
 
         record = self.subagents.make_parent_planner_record(
             params=ParentPlannerRecordParams(
@@ -184,3 +171,16 @@ class _ParentPlannerMixin:
         report = self.subagents.build_parent_planner_report([record], dry_run=not params.apply)
         self.subagents.write_parent_planner_report(report, append_log=params.apply)
         return record
+
+
+def _planner_record_status(parsed, state: dict) -> tuple[bool, str, str, str]:
+    # LLM: parser fallback rules stay separate from parent-planner record persistence.
+    ok = parsed.found and parsed.ok
+    decision = parsed.decision or "PARSE_ERROR"
+    message = parsed.summary or "父代理 planner 已完成完整 LLM turn。"
+    parse_error = parsed.parse_error
+    if not parsed.found:
+        return False, "PARSE_ERROR", "父代理 planner 有模型回复，但缺少结构化结果，不能当作 OK。", "缺少 [PARENT_PLANNER_RESULT] 结构化结果块。"
+    if parsed.decision == "HEARTBEAT_OK" and state["gate"].get("needs_planner", 0):
+        return False, decision, "状态门禁发现仍有待处理事项，禁止 planner 只返回 HEARTBEAT_OK。", parse_error or "planner gate blocked HEARTBEAT_OK"
+    return ok, decision, message, parse_error

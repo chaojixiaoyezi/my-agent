@@ -14,6 +14,7 @@ from .capability_route_helpers import (
 from .policies import _route_card_payload
 from .rendering import render_capability_route_markdown
 from .reports import CapabilityRouteRecord, CapabilityRouteReport
+from .services.indexing_params import IndexReportParams
 from .services.lifecycle import RecordCapabilityGapParams
 from .utils import _merge_list, _new_id
 
@@ -160,11 +161,13 @@ def write_capability_route_report_files(
         encoding="utf-8",
     )
     manager._index_report(
-        "subagent_capability_route_report",
-        "latest",
-        "Subagent capability route report",
-        report,
-        event_type="subagent_capability_route_report_written",
+        IndexReportParams(
+            "subagent_capability_route_report",
+            "latest",
+            "Subagent capability route report",
+            report,
+            "subagent_capability_route_report_written",
+        ),
     )
     if apply:
         for record in report.records:

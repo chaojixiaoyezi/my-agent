@@ -51,12 +51,11 @@ def _resolve_index_path(root: Path, raw_index: str | None) -> Path:
 def _normalize_warning_item(item: Any) -> dict[str, Any]:
     if isinstance(item, dict):
         return dict(item)
-    elif hasattr(item, "to_dict"):
+    if hasattr(item, "to_dict"):
         return item.to_dict()
-    elif hasattr(item, "__dataclass_fields__"):
+    if hasattr(item, "__dataclass_fields__"):
         return asdict(item)
-    else:
-        return {"message": str(item)}
+    return {"message": str(item)}
 
 
 def _config_warnings(config: object) -> list[dict[str, Any]]:

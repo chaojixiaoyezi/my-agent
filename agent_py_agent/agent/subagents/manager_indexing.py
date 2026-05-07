@@ -8,7 +8,11 @@ Human version:
 """
 
 from .services.indexing import SubAgentIndexingService
-from .services.indexing_params import LocalRecordParams
+from .services.indexing_params import (
+    DataclassRecordIndexParams,
+    IndexReportParams,
+    LocalRecordParams,
+)
 
 
 class SubAgentIndexingMixin:
@@ -44,8 +48,8 @@ class SubAgentIndexingMixin:
     def _index_task(self, task):
         return self._indexing_service.index_task(task)
 
-    def _index_report(self, source_type, source_id, title, report, *, event_type):
-        return self._indexing_service.index_report(source_type, source_id, title, report, event_type=event_type)
+    def _index_report(self, params: IndexReportParams):
+        return self._indexing_service.index_report(params)
 
     def _index_action_apply(self, record):
         return self._indexing_service.index_action_apply(record)
@@ -77,8 +81,8 @@ class SubAgentIndexingMixin:
     def _index_channel_probe(self, result):
         return self._indexing_service.index_channel_probe(result)
 
-    def _index_dataclass_record(self, source_type, source_id, title, record, event_type):
-        return self._indexing_service._index_dataclass_record(source_type, source_id, title, record, event_type)
+    def _index_dataclass_record(self, params: DataclassRecordIndexParams):
+        return self._indexing_service._index_dataclass_record(params)
 
     def _select_runs(self, run_ids):
         return self._indexing_service.select_runs(run_ids)
@@ -102,8 +106,8 @@ class SubAgentIndexingMixin:
     def index_execution_context(self, context):
         return self._indexing_service.index_execution_context(context)
 
-    def index_report(self, source_type, source_id, title, report, *, event_type):
-        return self._indexing_service.index_report(source_type, source_id, title, report, event_type=event_type)
+    def index_report(self, params: IndexReportParams):
+        return self._indexing_service.index_report(params)
 
     def log_local_record(
         self,

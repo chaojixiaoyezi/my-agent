@@ -468,9 +468,7 @@ def _assert_shared_workspace_facts(loaded, task) -> None:
     assert "等待 sibling 复核" in blackboard
 
 
-def test_subagent_persistence_writes_checkpoint_recovery_artifacts(tmp_path) -> None:
-    manager = SubAgentManager(tmp_path)
-
+def _create_checkpoint_recovery_task(manager: SubAgentManager, tmp_path: Path):
     task = manager.create_run(
         goal="恢复 compact 后的子代理事实",
         thought="只保存恢复需要的结构化事实。",
@@ -500,9 +498,10 @@ def test_subagent_persistence_writes_checkpoint_recovery_artifacts(tmp_path) -> 
     task.blockers = ["父级未验收"]
     task.artifact_refs = ["output.json"]
     task.evidence_refs = ["logs/focused.txt"]
+    return task
 
-    manager.save(task)
 
+def _assert_checkpoint_recovery_artifacts(tmp_path: Path, task) -> None:
     checkpoint = json.loads((tmp_path / task.id / "reports" / "checkpoint.json").read_text(encoding="utf-8"))
     failing_tests = json.loads((tmp_path / task.id / "reports" / "failing_tests.json").read_text(encoding="utf-8"))
     next_actions = json.loads((tmp_path / task.id / "reports" / "next_actions.json").read_text(encoding="utf-8"))
@@ -523,6 +522,14 @@ def test_subagent_persistence_writes_checkpoint_recovery_artifacts(tmp_path) -> 
     ]
     assert next_actions["next_actions"][:2] == ["补证据链", "请求父级验收"]
     assert "runner 已产出材料但证据不足。" in progress_md
+
+
+def test_subagent_persistence_writes_checkpoint_recovery_artifacts(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = _create_checkpoint_recovery_task(manager, tmp_path)
+    manager.save(task)
+
+    _assert_checkpoint_recovery_artifacts(tmp_path, task)
 
 
 def _read_jsonl(path: str) -> list[dict[str, object]]:

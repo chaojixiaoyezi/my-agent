@@ -2,47 +2,71 @@ from __future__ import annotations
 
 """Helpers for evidence-related acceptance review findings."""
 
+from dataclasses import dataclass
+
 from ..models import SubAgentTask
 from ..reports import AcceptanceReviewFinding
 
 
+@dataclass(frozen=True)
+class FindingParams:
+    """LLM: bundle acceptance finding fields to avoid widening helper signatures."""
+
+    name: str
+    ok: bool
+    severity: str
+    message: str
+    evidence_path: str
+    created_at: float
+
+
+@dataclass(frozen=True)
+class ToolEvidenceParams:
+    """LLM: bundle tool-evidence matching inputs."""
+
+    tool_name: str
+    kind_aliases: set[str]
+    extra_summary_keywords: list[str]
+    used_tools: list[str]
+    evidence: list
+
+
 def _make_finding(
-    name: str,
-    ok: bool,
-    severity: str,
-    message: str,
-    evidence_path: str,
-    created_at: float,
+    params: FindingParams | None = None,
+    *,
+    name: str = "",
+    ok: bool = False,
+    severity: str = "",
+    message: str = "",
+    evidence_path: str = "",
+    created_at: float = 0.0,
 ) -> AcceptanceReviewFinding:
     """Create a single AcceptanceReviewFinding."""
+    params = params or FindingParams(name, ok, severity, message, evidence_path, created_at)
     return AcceptanceReviewFinding(
-        name=name,
-        ok=ok,
-        severity=severity,
-        message=message,
-        evidence_path=evidence_path,
-        created_at=created_at,
+        name=params.name,
+        ok=params.ok,
+        severity=params.severity,
+        message=params.message,
+        evidence_path=params.evidence_path,
+        created_at=params.created_at,
     )
 
 
 def _has_tool_evidence(
-    tool_name: str,
-    kind_aliases: set[str],
-    extra_summary_keywords: list[str],
-    used_tools: list[str],
-    evidence: list,
+    params: ToolEvidenceParams,
 ) -> bool:
     """Check if tool has evidence in the task evidence list."""
-    if tool_name not in used_tools:
+    if params.tool_name not in params.used_tools:
         return False
     return any(
         item.ok and (
-            item.kind in kind_aliases
-            or tool_name in item.command.lower()
-            or tool_name in item.summary.lower()
-            or any(kw in item.summary for kw in extra_summary_keywords)
+            item.kind in params.kind_aliases
+            or params.tool_name in item.command.lower()
+            or params.tool_name in item.summary.lower()
+            or any(kw in item.summary for kw in params.extra_summary_keywords)
         )
-        for item in evidence
+        for item in params.evidence
     )
 
 
@@ -115,11 +139,13 @@ def _build_read_file_requirement_finding(
     created_at: float,
 ) -> AcceptanceReviewFinding:
     has_read = _has_tool_evidence(
-        "read_file",
-        {"read_file", "file_read", "file_content"},
-        [],
-        task.used_tools,
-        task.evidence,
+        ToolEvidenceParams(
+            "read_file",
+            {"read_file", "file_read", "file_content"},
+            [],
+            task.used_tools,
+            task.evidence,
+        )
     )
     return _make_finding(
         name="acceptance_requires_read_file",
@@ -140,11 +166,13 @@ def _build_write_file_requirement_finding(
     created_at: float,
 ) -> AcceptanceReviewFinding:
     has_write = _has_tool_evidence(
-        "write_file",
-        {"write_file", "file_write", "file_written"},
-        ["写入"],
-        task.used_tools,
-        task.evidence,
+        ToolEvidenceParams(
+            "write_file",
+            {"write_file", "file_write", "file_written"},
+            ["写入"],
+            task.used_tools,
+            task.evidence,
+        )
     )
     return _make_finding(
         name="acceptance_requires_write_file",

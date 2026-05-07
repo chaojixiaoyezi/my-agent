@@ -69,6 +69,8 @@ def test_gateway_json_polling_suppresses_stream_chunks(tmp_path, capsys):
 
 
 def test_chat_gateway_poll_drains_chunks_when_response_is_ready(tmp_path):
+    from agent_py_agent.cli.chat_parts.gateway_client import GatewayChunkPollRequest
+
     chunk_path = tmp_path / "req.chunks.jsonl"
     response_path = tmp_path / "response.json"
     chunk_path.write_text(
@@ -80,12 +82,14 @@ def test_chat_gateway_poll_drains_chunks_when_response_is_ready(tmp_path):
     visible_chunks_ref = [0]
 
     response = poll_gateway_chunks(
-        chunk_path,
-        response_path,
-        deadline=9999999999,
-        on_chunk=lambda chunk: seen.append(chunk) or True,
-        chunks_printed_ref=[0],
-        visible_chunks_ref=visible_chunks_ref,
+        GatewayChunkPollRequest(
+            chunk_path,
+            response_path,
+            9999999999,
+            lambda chunk: seen.append(chunk) or True,
+            [0],
+            visible_chunks_ref,
+        )
     )
 
     assert response["response"] == "hello world"
@@ -94,6 +98,8 @@ def test_chat_gateway_poll_drains_chunks_when_response_is_ready(tmp_path):
 
 
 def test_chat_gateway_poll_consumes_but_does_not_show_invisible_chunks(tmp_path):
+    from agent_py_agent.cli.chat_parts.gateway_client import GatewayChunkPollRequest
+
     chunk_path = tmp_path / "req.chunks.jsonl"
     response_path = tmp_path / "response.json"
     chunk_path.write_text(
@@ -105,12 +111,14 @@ def test_chat_gateway_poll_consumes_but_does_not_show_invisible_chunks(tmp_path)
     chunks_printed_ref = [0]
     visible_chunks_ref = [0]
     response = poll_gateway_chunks(
-        chunk_path,
-        response_path,
-        deadline=9999999999,
-        on_chunk=lambda _chunk: False,
-        chunks_printed_ref=chunks_printed_ref,
-        visible_chunks_ref=visible_chunks_ref,
+        GatewayChunkPollRequest(
+            chunk_path,
+            response_path,
+            9999999999,
+            lambda _chunk: False,
+            chunks_printed_ref,
+            visible_chunks_ref,
+        )
     )
 
     assert response["response"] == "fallback"

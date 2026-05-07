@@ -61,10 +61,7 @@ def _lookup(source: Mapping[str, Any] | object, field_name: str) -> Any:
 
 def _warn(
     warnings: list[LogAnalysisConfigWarning],
-    field_name: str,
-    raw_value: Any,
-    fallback_value: Any,
-    reason: str,
+    params: _WarningInput | None = None,
     *,
     warning: _WarningInput | None = None,
 ) -> None:
@@ -83,7 +80,9 @@ def _warn(
     返回说明:
     没有返回值；结果追加到 warnings。
     """
-    item = warning or _WarningInput(field_name, raw_value, fallback_value, reason)
+    item = params or warning
+    if item is None:
+        raise TypeError("_warn requires params")
     warnings.append(
         LogAnalysisConfigWarning(
             field_name=item.field_name,
@@ -128,7 +127,7 @@ def _coerce_bool(
             return True
         if normalized in {"false", "no", "off", "0"}:
             return False
-    _warn(warnings, field_name, raw_value, default, "expected a clear boolean value")
+    _warn(warnings, _WarningInput(field_name, raw_value, default, "expected a clear boolean value"))
     return default
 
 
@@ -167,8 +166,16 @@ def _coerce_choice(
         normalized = normalized.upper() if coercion.uppercase else normalized.lower()
         if normalized in coercion.choices:
             return normalized
-    _warn(warnings, field_name, raw_value, coercion.default, f"expected one of {sorted(coercion.choices)}")
+    _warn(warnings, _WarningInput(field_name, raw_value, coercion.default, f"expected one of {sorted(coercion.choices)}"))
     return coercion.default
+
+
+def _coerce_int_warning(
+    warnings: list[LogAnalysisConfigWarning],
+    params: _WarningInput,
+) -> int:
+    _warn(warnings, params)
+    return int(params.fallback_value)
 
 
 def _coerce_int(
@@ -181,43 +188,32 @@ def _coerce_int(
     max_value: int | None = None,
     options: _IntOptions | None = None,
 ) -> int:
-    """LLM: 把用户配置值安全转换成有范围限制的整数。
-
-    新手说明:
-    这个函数接受整数，也接受像 "100" 这样的数字字符串；但不接受 True/False，
-    因为布尔值在 Python 里也是 int，直接接受会很容易误判。
-
-    参数说明:
-    field_name: 字段名，用于 warning。
-    raw_value: 原始值。
-    default: 缺失或坏值时使用的默认整数。
-    min_value: 允许的最小值。
-    max_value: 允许的最大值；None 表示没有上限。
-    warnings: warning 列表。
-
-    返回说明:
-    返回范围内整数；解析失败或越界时返回 default。
-    """
+    """LLM: 安全转换整数配置，解析失败或越界时写 warning 并回退默认值."""
     coercion = options or _IntOptions(default=int(default), min_value=int(min_value), max_value=max_value)
     if raw_value is _MISSING:
         return coercion.default
     if isinstance(raw_value, bool):
-        _warn(warnings, field_name, raw_value, coercion.default, "expected an integer, not a boolean")
-        return coercion.default
+        return _coerce_int_warning(
+            warnings,
+            _WarningInput(field_name, raw_value, coercion.default, "expected an integer, not a boolean"),
+        )
     if isinstance(raw_value, int):
         number = raw_value
     elif isinstance(raw_value, str) and _INT_PATTERN.fullmatch(raw_value.strip()):
         number = int(raw_value.strip())
     else:
-        _warn(warnings, field_name, raw_value, coercion.default, "expected an integer")
-        return coercion.default
+        return _coerce_int_warning(warnings, _WarningInput(field_name, raw_value, coercion.default, "expected an integer"))
 
     if number < coercion.min_value:
-        _warn(warnings, field_name, raw_value, coercion.default, f"expected value >= {coercion.min_value}")
-        return coercion.default
+        return _coerce_int_warning(
+            warnings,
+            _WarningInput(field_name, raw_value, coercion.default, f"expected value >= {coercion.min_value}"),
+        )
     if coercion.max_value is not None and number > coercion.max_value:
-        _warn(warnings, field_name, raw_value, coercion.default, f"expected value <= {coercion.max_value}")
-        return coercion.default
+        return _coerce_int_warning(
+            warnings,
+            _WarningInput(field_name, raw_value, coercion.default, f"expected value <= {coercion.max_value}"),
+        )
     return number
 
 
@@ -249,5 +245,5 @@ def _coerce_path_string(
         normalized = raw_value.strip()
         if normalized and "\x00" not in normalized and "\n" not in normalized and "\r" not in normalized:
             return normalized
-    _warn(warnings, field_name, raw_value, default, "expected a non-empty path string")
+    _warn(warnings, _WarningInput(field_name, raw_value, default, "expected a non-empty path string"))
     return default

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..reports import PatchReviewRecord, PatchReviewReport
+from ..services.indexing_params import IndexReportParams
 from ..utils import _new_id
 from .patch_review_records import (
     PatchReviewStatusUpdate,
@@ -122,9 +123,6 @@ class PatchReviewService:
         Blocks `planned` / `blocked` patches to prevent unhandled changes from entering DONE.
         """
 
-        from ..parsing import _dict_list
-        from ..utils import _read_json_object
-
         opts = _patch_review_options(
             options,
             apply=apply,
@@ -132,26 +130,7 @@ class PatchReviewService:
             note=note,
             limit=limit,
         )
-        selected = self.manager._select_runs(run_ids)
-        records = []
-        for task in selected:
-            output = _read_json_object(Path(task.output_json))
-            patches = _dict_list(output.get("patches", []))
-            if run_ids is None and not patches:
-                continue
-            records.append(
-                self._review_patch_task(
-                    PatchReviewTaskRequest(
-                        task=task,
-                        output=output,
-                        patches=patches,
-                        options=opts,
-                    )
-                )
-            )
-            if opts.limit > 0 and len(records) >= opts.limit:
-                break
-
+        records = _collect_patch_review_records(self, run_ids, opts)
         return PatchReviewReport(
             generated_at=time.time(),
             dry_run=not opts.apply,
@@ -188,12 +167,20 @@ class PatchReviewService:
             self.manager._index_patch_review(record)
             if opts.apply:
                 append_patch_review_log(self.manager, record)
-        self.manager._index_report("subagent_patch_review_report", "latest", "Subagent patch review report", report, event_type="subagent_patch_review_report_written")
+        self.manager._index_report(
+            IndexReportParams(
+                "subagent_patch_review_report",
+                "latest",
+                "Subagent patch review report",
+                report,
+                "subagent_patch_review_report_written",
+            ),
+        )
         return report
 
     def _review_patch_task(
         self,
-        task: SubAgentTask | PatchReviewTaskRequest,
+        request: SubAgentTask | PatchReviewTaskRequest,
         *,
         output: dict | None = None,
         patches: list[dict] | None = None,
@@ -201,16 +188,14 @@ class PatchReviewService:
         reviewer: str = "parent",
         note: str = "",
     ) -> PatchReviewRecord:
-        if isinstance(task, PatchReviewTaskRequest):
-            request = task
-            task = request.task
-            output = request.output
-            patches = request.patches
-            opts = request.options
-        else:
-            opts = PatchReviewOptions(apply=apply, reviewer=reviewer, note=note)
-            output = output or {}
-            patches = patches or []
+        task, output, patches, opts = _coerce_patch_review_request(
+            request,
+            output=output,
+            patches=patches,
+            apply=apply,
+            reviewer=reviewer,
+            note=note,
+        )
 
         now = time.time()
         blocked, invalid, applied_patches = _categorize_patches(patches)
@@ -236,6 +221,41 @@ class PatchReviewService:
             blocked_count=len(blocked) + len(invalid), reviewer=opts.reviewer, note=opts.note,
             evidence_paths=[task.output_json, task.work_log_file], patches=reviewed_patches, created_at=now,
         )
+
+
+def _collect_patch_review_records(service: PatchReviewService, run_ids, opts: PatchReviewOptions):
+    from ..parsing import _dict_list
+    from ..utils import _read_json_object
+
+    records = []
+    for task in service.manager._select_runs(run_ids):
+        output = _read_json_object(Path(task.output_json))
+        patches = _dict_list(output.get("patches", []))
+        if run_ids is None and not patches:
+            continue
+        records.append(
+            service._review_patch_task(
+                PatchReviewTaskRequest(task=task, output=output, patches=patches, options=opts)
+            )
+        )
+        if opts.limit > 0 and len(records) >= opts.limit:
+            break
+    return records
+
+
+def _coerce_patch_review_request(
+    request,
+    *,
+    output: dict | None,
+    patches: list[dict] | None,
+    apply: bool,
+    reviewer: str,
+    note: str,
+):
+    if isinstance(request, PatchReviewTaskRequest):
+        return request.task, request.output, request.patches, request.options
+    opts = PatchReviewOptions(apply=apply, reviewer=reviewer, note=note)
+    return request, output or {}, patches or [], opts
 
 
 def _patch_review_summary(records: list[PatchReviewRecord]) -> dict[str, int]:

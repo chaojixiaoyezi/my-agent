@@ -40,41 +40,47 @@ def test_create_run_persists_quality_contract(tmp_path):
     assert payload["context_packs"][0]["name"] == "core"
 
 
+def _write_task_json(run_dir: Path, payload: dict) -> None:
+    run_dir.mkdir(parents=True)
+    (run_dir / "task.json").write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _write_legacy_task_json(workspace: Path) -> None:
+    _write_task_json(
+        workspace / "legacy-run",
+        {
+            "id": "legacy-run",
+            "goal": "Legacy goal",
+            "thought": "Legacy thought",
+            "plan": ["one"],
+            "capability_requests": {"old": "dict-shape"},
+            "quality_contract": {"quality_bar": "legacy bar", "must_check": "sample"},
+            "context_manifest": {"task_pack_refs": "legacy.md", "token_budget": "42"},
+            "context_packs": {"name": "legacy-pack"},
+            "future_field": "ignored",
+        },
+    )
+
+
+def _write_bare_legacy_task_json(workspace: Path) -> None:
+    _write_task_json(
+        workspace / "bare-legacy-run",
+        {
+            "id": "bare-legacy-run",
+            "goal": "Bare legacy goal",
+            "thought": "Bare legacy thought",
+            "plan": ["one"],
+        },
+    )
+
+
 def test_load_legacy_task_json_is_compatible(tmp_path):
     workspace = tmp_path / "subs"
-    run_dir = workspace / "legacy-run"
-    bare_run_dir = workspace / "bare-legacy-run"
-    run_dir.mkdir(parents=True)
-    bare_run_dir.mkdir(parents=True)
-    (run_dir / "task.json").write_text(
-        json.dumps(
-            {
-                "id": "legacy-run",
-                "goal": "Legacy goal",
-                "thought": "Legacy thought",
-                "plan": ["one"],
-                "capability_requests": {"old": "dict-shape"},
-                "quality_contract": {"quality_bar": "legacy bar", "must_check": "sample"},
-                "context_manifest": {"task_pack_refs": "legacy.md", "token_budget": "42"},
-                "context_packs": {"name": "legacy-pack"},
-                "future_field": "ignored",
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    (bare_run_dir / "task.json").write_text(
-        json.dumps(
-            {
-                "id": "bare-legacy-run",
-                "goal": "Bare legacy goal",
-                "thought": "Bare legacy thought",
-                "plan": ["one"],
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
+    _write_legacy_task_json(workspace)
+    _write_bare_legacy_task_json(workspace)
     manager = SubAgentManager(workspace)
 
     task = manager.load("legacy-run")

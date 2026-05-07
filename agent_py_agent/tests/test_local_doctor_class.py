@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_py_agent.cli.local_doctor import (
+    DoctorCheckRequest,
     _add_doctor_check,
     build_local_doctor_report,
     build_status_suggestions,
@@ -22,16 +23,22 @@ from agent_py_agent.cli.local_doctor import (
 
 # ── _add_doctor_check 测试 ─────────────────────────────────────────────────
 
+def _doctor_request(overrides: dict | None = None) -> DoctorCheckRequest:
+    data = {
+        "name": "test_check",
+        "ok": True,
+        "severity": "P1",
+        "message": "检查通过",
+        "details": None,
+    }
+    data.update(overrides or {})
+    return DoctorCheckRequest(**data)
+
+
 def test_add_doctor_check_ok():
     """测试添加正常的检查项。"""
     checks = []
-    _add_doctor_check(
-        checks,
-        name="test_check",
-        ok=True,
-        severity="P1",
-        message="检查通过",
-    )
+    _add_doctor_check(checks, _doctor_request())
     assert len(checks) == 1
     assert checks[0]["name"] == "test_check"
     assert checks[0]["ok"] is True
@@ -45,11 +52,13 @@ def test_add_doctor_check_with_details():
     details = {"path": "/tmp/test", "count": 5}
     _add_doctor_check(
         checks,
-        name="test_detail",
-        ok=False,
-        severity="P0",
-        message="检查失败",
-        details=details,
+        _doctor_request({
+            "name": "test_detail",
+            "ok": False,
+            "severity": "P0",
+            "message": "检查失败",
+            "details": details,
+        }),
     )
     assert checks[0]["details"] == details
 
@@ -59,10 +68,7 @@ def test_add_doctor_check_not_ok_sets_severity():
     checks = []
     _add_doctor_check(
         checks,
-        name="fail_check",
-        ok=False,
-        severity="P2",
-        message="有问题",
+        _doctor_request({"name": "fail_check", "ok": False, "severity": "P2", "message": "有问题"}),
     )
     assert checks[0]["severity"] == "P2"
 
@@ -348,13 +354,7 @@ def test_build_local_doctor_report_empty_local_store_with_sources(tmp_path):
 def test_add_doctor_check_empty_message():
     """测试空消息的检查项。"""
     checks = []
-    _add_doctor_check(
-        checks,
-        name="empty_msg",
-        ok=True,
-        severity="P1",
-        message="",
-    )
+    _add_doctor_check(checks, _doctor_request({"name": "empty_msg", "message": ""}))
     assert checks[0]["message"] == ""
 
 

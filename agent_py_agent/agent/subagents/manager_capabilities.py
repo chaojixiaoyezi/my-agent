@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..capabilities import CapabilityRouter
@@ -38,12 +39,30 @@ def _iter_open_capability_requests(tasks):
     )
 
 
+@dataclass(frozen=True)
+class CapabilityNoHitsParams:
+    """LLM: bundle no-hit route state for dry-run/apply decisions."""
+
+    task: SubAgentTask
+    request: CapabilityRequest
+    query: str
+    hits: list
+    apply: bool
+
+
 class SubAgentCapabilityMixin:
-    def _route_capability_no_hits(self, task, request, query, hits, apply):
+    def _route_capability_no_hits(self, params: CapabilityNoHitsParams):
         now = time.time()
-        if not apply:
-            return build_would_gap_record(task, request, query=query, hits=hits, created_at=now)
-        return record_capability_route_gap(self, task, request, query=query, hits=hits, created_at=now)
+        if not params.apply:
+            return build_would_gap_record(params.task, params.request, query=params.query, hits=params.hits, created_at=now)
+        return record_capability_route_gap(
+            self,
+            params.task,
+            params.request,
+            query=params.query,
+            hits=params.hits,
+            created_at=now,
+        )
 
     def route_capability_requests(
         self,
@@ -158,7 +177,9 @@ class SubAgentCapabilityMixin:
             selected_hits
         )
         if not selected_hits:
-            return self._route_capability_no_hits(task, request, query, hits, apply)
+            return self._route_capability_no_hits(
+                CapabilityNoHitsParams(task, request, query, hits, apply)
+            )
         if not apply:
             now = time.time()
             # LLM: record construction lives in capability_route_service so this mixin stays a facade.

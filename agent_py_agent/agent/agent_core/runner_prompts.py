@@ -12,6 +12,36 @@ from dataclasses import asdict
 
 from ..subagent import SubAgentExecutionContext
 
+_SUBAGENT_RESULT_TEMPLATE = (
+    "[SUBAGENT_RESULT]\n"
+    "{\n"
+    '  "status": "AWAITING_ACCEPTANCE",\n'
+    '  "summary": "本轮完成或卡住的摘要",\n'
+    '  "used_tools": [],\n'
+    '  "used_skills": [],\n'
+    '  "evidence": [\n'
+    '    {"kind": "command", "summary": "验证摘要", "command": "", "path": "", "url": "", "ok": true}\n'
+    "  ],\n"
+    '  "capability_requests": [\n'
+    '    {"problem": "缺少什么", "needed_capability": "能力名", "expected_output": "希望得到什么", "tried": [], "evidence": [], "constraints": {}}\n'
+    "  ],\n"
+    '  "artifacts": [\n'
+    '    {"path": "产物路径", "kind": "file|report|log", "summary": "产物说明"}\n'
+    "  ],\n"
+    '  "tests": [\n'
+    '    {"name": "测试名称", "command": "运行命令", "ok": true, "summary": "测试结果摘要"}\n'
+    "  ],\n"
+    '  "patches": [\n'
+    '    {"path": "改动文件", "status": "applied|planned|blocked", "summary": "改了什么或准备改什么"}\n'
+    "  ],\n"
+    '  "lessons": ["可沉淀经验，适合未来变成 skill 或规则"],\n'
+    '  "next_actions": ["建议父代理下一步动作"],\n'
+    '  "blocked_reason": "",\n'
+    '  "failure_type": ""\n'
+    "}\n"
+    "[/SUBAGENT_RESULT]\n"
+)
+
 
 def _build_subagent_runner_prompt(
     context: SubAgentExecutionContext,
@@ -37,33 +67,7 @@ def _build_subagent_runner_prompt(
         "- 最后必须输出一个机器可解析结果块，格式如下：\n\n"
         "注意：结果块里面只能放裸 JSON object，不要使用 ```json 或任何 Markdown 代码围栏。\n"
         "在最终结果块之前，不要把 [SUBAGENT_RESULT] 或 [/SUBAGENT_RESULT] 当作普通说明文字重复引用。\n\n"
-        "[SUBAGENT_RESULT]\n"
-        "{\n"
-        '  "status": "AWAITING_ACCEPTANCE",\n'
-        '  "summary": "本轮完成或卡住的摘要",\n'
-        '  "used_tools": [],\n'
-        '  "used_skills": [],\n'
-        '  "evidence": [\n'
-        '    {"kind": "command", "summary": "验证摘要", "command": "", "path": "", "url": "", "ok": true}\n'
-        "  ],\n"
-        '  "capability_requests": [\n'
-        '    {"problem": "缺少什么", "needed_capability": "能力名", "expected_output": "希望得到什么", "tried": [], "evidence": [], "constraints": {}}\n'
-        "  ],\n"
-        '  "artifacts": [\n'
-        '    {"path": "产物路径", "kind": "file|report|log", "summary": "产物说明"}\n'
-        "  ],\n"
-        '  "tests": [\n'
-        '    {"name": "测试名称", "command": "运行命令", "ok": true, "summary": "测试结果摘要"}\n'
-        "  ],\n"
-        '  "patches": [\n'
-        '    {"path": "改动文件", "status": "applied|planned|blocked", "summary": "改了什么或准备改什么"}\n'
-        "  ],\n"
-        '  "lessons": ["可沉淀经验，适合未来变成 skill 或规则"],\n'
-        '  "next_actions": ["建议父代理下一步动作"],\n'
-        '  "blocked_reason": "",\n'
-        '  "failure_type": ""\n'
-        "}\n"
-        "[/SUBAGENT_RESULT]\n"
+        f"{_SUBAGENT_RESULT_TEMPLATE}"
     )
 
 

@@ -43,6 +43,7 @@ from .field_extractors import (
 )
 
 
+# LLM: detector finding fields stay in MakeFindingParams so rule helpers remain extensible.
 @dataclass(frozen=True)
 class MakeFindingParams:
     """Params bundle for _make_finding."""
@@ -56,6 +57,14 @@ class MakeFindingParams:
     features: dict[str, Any] | None = None
     severity_hint: str | None = None
     extra_entities: dict[str, list[Any]] | None = None
+
+
+@dataclass(frozen=True)
+class _FindingIdPayloadParams:
+    finding: MakeFindingParams
+    window: list[str]
+    entities: dict[str, list[str]]
+    evidence_refs: Sequence[EvidenceRef]
 
 
 def _make_finding(
@@ -78,7 +87,10 @@ def _make_finding(
     from ...models import Finding
 
     finding = Finding(
-        finding_id=_stable_id("finding", _finding_id_payload(params, window, entities, evidence_refs)),
+        finding_id=_stable_id(
+            "finding",
+            _finding_id_payload(_FindingIdPayloadParams(params, window, entities, evidence_refs)),
+        ),
         detector_id=params.detector_id,
         detector_kind=rule.detector_kind,
         window=window,
@@ -110,17 +122,15 @@ def _finding_entities(params: MakeFindingParams) -> dict[str, list[str]]:
 
 
 def _finding_id_payload(
-    params: MakeFindingParams,
-    window: list[str],
-    entities: dict[str, list[str]],
-    evidence_refs: Sequence[EvidenceRef],
+    params: _FindingIdPayloadParams,
 ) -> dict[str, Any]:
+    finding = params.finding
     return {
-        "detector_id": params.detector_id,
-        "window": window,
-        "entities": entities,
-        "evidence_refs": [ref.evidence_id for ref in evidence_refs],
-        "hypothesis": params.hypothesis,
+        "detector_id": finding.detector_id,
+        "window": params.window,
+        "entities": params.entities,
+        "evidence_refs": [ref.evidence_id for ref in params.evidence_refs],
+        "hypothesis": finding.hypothesis,
     }
 
 

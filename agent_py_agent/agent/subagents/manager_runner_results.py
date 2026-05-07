@@ -37,7 +37,26 @@ def _runner_append_debrief(task, parsed):
     _append_runner_debrief_content(task, parsed)
 
 
-class SubAgentRunnerResultMixin:
+class _PostResultSideEffectParams:
+    """LLM: bundle post-result side effects so the facade signature stays narrow."""
+
+    def __init__(self, output_payload: dict, dry_run: bool, parsed: SubAgentParsedOutput, lessons: list):
+        self.output_payload = output_payload
+        self.dry_run = dry_run
+        self.parsed = parsed
+        self.lessons = lessons
+
+
+class _RunnerResultBuildParams:
+    """LLM: carry parsed output state from extraction into payload assembly."""
+
+    def __init__(self, params: RecordRunnerResultParams, extracted: _ExtractedOutput, now: float):
+        self.params = params
+        self.extracted = extracted
+        self.now = now
+
+
+class _SubAgentRunnerResultFacade:
     def _build_and_persist_result(
         self,
         ctx: BuildAndPersistContext,
@@ -112,12 +131,11 @@ class SubAgentRunnerResultMixin:
         self,
         task: SubAgentTask,
         result: SubAgentRunnerResult,
-        output_payload: dict,
-        dry_run: bool,
-        parsed: SubAgentParsedOutput,
-        lessons: list,
+        params: _PostResultSideEffectParams,
     ) -> int:
         """Handle save, debrief, learning side effects. Returns learning candidate count."""
+        output_payload = params.output_payload
+        parsed = params.parsed
         if parsed.found and parsed.ok:
             # LLM: status report fields are derived from structured runner output for parent visibility.
             task.latest_summary = parsed.summary or task.latest_summary
@@ -130,11 +148,11 @@ class SubAgentRunnerResultMixin:
         if parsed.found and parsed.ok:
             _runner_append_debrief(task, parsed)
         learning_candidates = []
-        if not dry_run and parsed.found and parsed.ok and lessons:
-            learning_candidates = self.record_learning_candidates(task, lessons)
+        if not params.dry_run and parsed.found and parsed.ok and params.lessons:
+            learning_candidates = self.record_learning_candidates(task, params.lessons)
         self._append_task_work_log(
             task,
-            f"subagent_runner: dry_run={dry_run} ok={result.ok} status={task.status} "
+            f"subagent_runner: dry_run={params.dry_run} ok={result.ok} status={task.status} "
             f"message={result.message} learning_candidates={len(learning_candidates)}",
         )
         self._index_runner_result(result, output_payload)
@@ -155,7 +173,25 @@ class SubAgentRunnerResultMixin:
         now = time.time()
 
         extracted = self._extract_parsed_output(task, params.structured_output, now, params.actual_tools)
+        output_payload, build_ctx = self._runner_result_build_context(
+            _RunnerResultBuildParams(params, extracted, now),
+            task,
+        )
+        result = self._build_and_persist_result(build_ctx)
+        self._post_result_side_effects(
+            task,
+            result,
+            _PostResultSideEffectParams(output_payload, params.dry_run, extracted.parsed, extracted.lessons),
+        )
+        return result
 
+    def _runner_result_build_context(
+        self,
+        build_params: _RunnerResultBuildParams,
+        task: SubAgentTask,
+    ):
+        params = build_params.params
+        extracted = build_params.extracted
         output_payload, build_ctx = self._apply_status_and_build_payload(
             params,
             _ApplyStatusParams(
@@ -178,13 +214,11 @@ class SubAgentRunnerResultMixin:
                 lessons=extracted.lessons,
                 next_actions=extracted.next_actions,
             ),
-            now,
+            build_params.now,
         )
         # Override params in context with actual params object for full field access
         build_ctx.params = params
-        result = self._build_and_persist_result(build_ctx)
-        self._post_result_side_effects(task, result, output_payload, params.dry_run, extracted.parsed, extracted.lessons)
-        return result
+        return output_payload, build_ctx
 
     def _check_stale_runner_result(self, task, attempt_id, dry_run):
         normalized_attempt_id = str(attempt_id or "").strip()
@@ -206,3 +240,7 @@ class SubAgentRunnerResultMixin:
             result_file=task.runner_result_file, result_json=task.runner_result_json,
             output_json=task.output_json, created_at=time.time(),
         )
+
+
+class SubAgentRunnerResultMixin(_SubAgentRunnerResultFacade):
+    """Public compatibility mixin; runner result behavior stays in the facade class."""

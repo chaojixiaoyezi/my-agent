@@ -81,17 +81,7 @@ class SpeedProfile:
 
         total_tokens = input_tokens + output_tokens
 
-        # 找到包围 total_tokens 的两个样本
-        lower = None
-        upper = None
-        for sample in self.samples:
-            sample_total = sample.total_tokens()
-            if sample_total <= total_tokens:
-                if lower is None or sample_total > lower.total_tokens():
-                    lower = sample
-            if sample_total >= total_tokens:
-                if upper is None or sample_total < upper.total_tokens():
-                    upper = sample
+        lower, upper = _bounding_samples(self.samples, total_tokens)
 
         # 如果只有一个方向，使用最近的样本
         if lower is None:
@@ -118,3 +108,37 @@ class SpeedProfile:
         upper_total = max(1, upper.total_tokens())
         weight = (total_tokens - lower_total) / (upper_total - lower_total)
         return lower.latency_seconds * (1 - weight) + upper.latency_seconds * weight
+
+
+def _bounding_samples(
+    samples: list[SpeedSample],
+    total_tokens: int,
+) -> tuple[SpeedSample | None, SpeedSample | None]:
+    lower = None
+    upper = None
+    for sample in samples:
+        lower = _choose_lower_sample(lower, sample, total_tokens)
+        upper = _choose_upper_sample(upper, sample, total_tokens)
+    return lower, upper
+
+
+def _choose_lower_sample(
+    current: SpeedSample | None,
+    sample: SpeedSample,
+    total_tokens: int,
+) -> SpeedSample | None:
+    sample_total = sample.total_tokens()
+    if sample_total <= total_tokens and (current is None or sample_total > current.total_tokens()):
+        return sample
+    return current
+
+
+def _choose_upper_sample(
+    current: SpeedSample | None,
+    sample: SpeedSample,
+    total_tokens: int,
+) -> SpeedSample | None:
+    sample_total = sample.total_tokens()
+    if sample_total >= total_tokens and (current is None or sample_total < current.total_tokens()):
+        return sample
+    return current

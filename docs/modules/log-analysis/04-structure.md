@@ -75,3 +75,9 @@ agent_py_agent/agent/log_analysis/
 - `agents/prompts.py` uses `SecurityPromptScope` as the security prompt scope bundle; tests now exercise the bundle call shape directly.
 - `cases/evidence.py`, `dispatch/queue.py`, `ingest/*`, `security/entity_graph.py`, `storage/query.py`, and `tools/query_trace.py` keep legacy explicit fields only as adapters around small dataclass bundles.
 - The strict code-size report now has no hard or soft findings for log-analysis; remaining items are high-risk near-soft warnings for follow-up refactors.
+- Detector rule helpers and query evidence writers use focused params objects at construction time, keeping storage facts and query summaries stable while near-soft cleanup splits implementation details.
+
+## 2026-05-07 high-risk zero update
+- `ingest/pipeline_finalize.py` now owns manifest, dedup completion, and checkpoint finalization; `ingest/pipeline_enrich.py` stays focused on one-file ingest orchestration and storage flushing.
+- `storage/query_projection.py` now owns row matching, summaries, and preview projection; `storage/query.py` stays focused on bounded query execution and evidence persistence.
+- Parser, evidence, checkpoint, health, entity graph, trace-case, and config warning helpers use explicit Params/Request bundles at internal boundaries; the strict report has no remaining log-analysis high-risk entries.

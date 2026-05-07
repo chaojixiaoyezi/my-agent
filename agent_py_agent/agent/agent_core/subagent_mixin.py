@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
@@ -21,11 +20,13 @@ from ._subagent_repair_mixin import (
 from .automation_guard import SubagentAutomationGuard
 from .planner import _build_parent_planner_state
 from .runner_prompts import (
-    _append_runner_repair_failure,
-    _append_runner_repair_prompt,
-    _append_runner_repair_response,
     _build_subagent_runner_prompt,
-    _build_subagent_runner_repair_prompt,
+)
+from .subagent_finalize_helpers import (
+    FinalizedRecoverySnapshotRequest,
+    FinalizedRunnerRecordRequest,
+    record_finalized_runner_result,
+    write_finalized_recovery_snapshot,
 )
 from .subagent_params import (
     SpawnSubagentsParams,
@@ -238,40 +239,10 @@ class _SubagentLifecycleBase:
             structured = repair_state[0]
             repair_state = _tuple_repair_state(repair_state)
 
-        runner_result = self.subagents.record_runner_result(
-            RecordRunnerResultParams(
-                run_id=params.run_id,
-                attempt_id=params.active_attempt_id,
-                dry_run=False,
-                ok=structured.ok if structured.found else True,
-                message=repair_state["message"],
-                prompt=repair_state["prompt_for_log"],
-                response=repair_state["response_for_log"],
-                backend=repair_state["backend_name"],
-                tool_rounds=params.result.tool_rounds,
-                status="" if structured.found else "AWAITING_ACCEPTANCE",
-                verification_status="" if structured.found else "NEEDS_ACCEPTANCE",
-                structured_output=structured,
-                actual_tools=params.result.executed_tools or [],
-                structured_repair_attempted=repair_state["attempted"],
-                structured_repair_ok=repair_state["ok"],
-                structured_repair_error=repair_state["error"],
-            )
+        runner_result = record_finalized_runner_result(
+            FinalizedRunnerRecordRequest(self, params, structured, repair_state)
         )
-        self._write_subagent_recovery_snapshot(
-            params=RecoverySnapshotParams(
-                run_id=params.run_id,
-                user_prompt=params.context.goal,
-                response_text=str(repair_state["message"]),
-                backend=str(repair_state["backend_name"]),
-                status=runner_result.status,
-                error_code=runner_result.runner_last_error,
-                tool_calls=[
-                    {"tool": tool_name, "id": f"{params.run_id}:{index}", "ok": True}
-                    for index, tool_name in enumerate(params.result.executed_tools or [], start=1)
-                ],
-            )
-        )
+        write_finalized_recovery_snapshot(FinalizedRecoverySnapshotRequest(self, params, runner_result, repair_state))
         return runner_result
 
 class SimpleAgentSubagentMixin(

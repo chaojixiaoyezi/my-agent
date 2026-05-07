@@ -97,3 +97,4 @@
 - Gateway logging, queue response merge, and supervisor control options were aligned with explicit option records/fields instead of product-level var-keyword service signatures.
 - Gateway helper calls remain stable for CLI/scenario callers while watch/daemon/gateway paths continue to enter core through `WatchParams` and context bundles.
 - Focused verification covered gateway helper and gateway logging tests.
+- 2026-05-07 high-risk cleanup continued across adapter, audit, HTTP startup, logging, recovery, and request execution helpers; new fields stay behind focused dataclass contexts rather than widening gateway request handling.

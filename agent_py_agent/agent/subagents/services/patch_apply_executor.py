@@ -47,22 +47,8 @@ class PatchApplyExecutor:
             applied_count, touched_files = do_apply_patches(
                 PatchFileApplyContext(params.patch_specs, params.task, params.applier, params.note)
             )
-            if params.test_commands:
-                test_results = run_patch_apply_tests(params.test_commands, params.manager.workspace_root)
-                failed = [item for item in test_results if not item.get("ok")]
-                if failed:
-                    raise RuntimeError(f"{len(failed)} 个 apply 后测试失败。")
-
-            output = _read_json_object(Path(params.task.output_json))
-            output["patches"] = params.review_status_updates
-            Path(params.task.output_json).write_text(
-                json.dumps(output, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            params.manager._append_task_work_log(
-                params.task,
-                f"patch_apply: applied={applied_count} tests={len(test_results)} applier={params.applier}",
-            )
+            test_results = _run_patch_apply_tests(params)
+            _write_patch_apply_success(params, applied_count, test_results)
         except Exception as exc:
             rollback_performed = bool(touched_files)
             rollback_patch_apply(touched_files)
@@ -73,3 +59,26 @@ class PatchApplyExecutor:
             raise RuntimeError(str(exc)) from exc
 
         return applied_count, touched_files, rollback_performed, test_results
+
+
+def _run_patch_apply_tests(params: PatchApplyParams) -> list:
+    if not params.test_commands:
+        return []
+    test_results = run_patch_apply_tests(params.test_commands, params.manager.workspace_root)
+    failed = [item for item in test_results if not item.get("ok")]
+    if failed:
+        raise RuntimeError(f"{len(failed)} 个 apply 后测试失败。")
+    return test_results
+
+
+def _write_patch_apply_success(params: PatchApplyParams, applied_count: int, test_results: list) -> None:
+    output = _read_json_object(Path(params.task.output_json))
+    output["patches"] = params.review_status_updates
+    Path(params.task.output_json).write_text(
+        json.dumps(output, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    params.manager._append_task_work_log(
+        params.task,
+        f"patch_apply: applied={applied_count} tests={len(test_results)} applier={params.applier}",
+    )

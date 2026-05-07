@@ -8,6 +8,7 @@ from __future__ import annotations
 """
 
 import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,18 +18,38 @@ if TYPE_CHECKING:
     from ..settings import AgentConfig
 
 
+@dataclass(frozen=True)
+class DynamicTimeoutParams:
+    # LLM: timeout inputs live in one bundle so future model-speed fields do not widen this API.
+    estimated_input_tokens: int = 0
+    estimated_output_tokens: int = 0
+    safety_margin: float | None = None
+    min_timeout: float | None = None
+    max_timeout: float | None = None
+
+
 def calculate_dynamic_timeout(
     config: AgentConfig,
     estimated_input_tokens: int = 0,
     estimated_output_tokens: int = 0,
+    *,
     safety_margin: float | None = None,
     min_timeout: float | None = None,
     max_timeout: float | None = None,
+    params: DynamicTimeoutParams | None = None,
 ) -> float:
 
+    values = params or DynamicTimeoutParams(
+        estimated_input_tokens=estimated_input_tokens,
+        estimated_output_tokens=estimated_output_tokens,
+        safety_margin=safety_margin,
+        min_timeout=min_timeout,
+        max_timeout=max_timeout,
+    )
     effective_safety_margin = safety_margin if safety_margin is not None else config.dynamic_timeout_safety_margin
-    effective_min_timeout = min_timeout if min_timeout is not None else float(config.dynamic_timeout_min)
-    effective_max_timeout = max_timeout if max_timeout is not None else float(config.dynamic_timeout_max)
+    effective_safety_margin = values.safety_margin if values.safety_margin is not None else config.dynamic_timeout_safety_margin
+    effective_min_timeout = values.min_timeout if values.min_timeout is not None else float(config.dynamic_timeout_min)
+    effective_max_timeout = values.max_timeout if values.max_timeout is not None else float(config.dynamic_timeout_max)
 
     # 尝试加载速度模型
     speed_profile_path = Path(config.model_speed_profile_path)
@@ -37,13 +58,13 @@ def calculate_dynamic_timeout(
     if speed_profile is None or not speed_profile.samples:
         # 没有速度模型时，使用经验公式
         # 基础时间：每 1000 token 给 10 秒，加上安全边际
-        total_tokens = estimated_input_tokens + estimated_output_tokens
+        total_tokens = values.estimated_input_tokens + values.estimated_output_tokens
         if total_tokens == 0:
             total_tokens = 2000  # 默认假设 2K token
         base_latency = (total_tokens / 1000) * 10.0
     else:
         # 使用速度模型插值
-        base_latency = speed_profile.interpolate(estimated_input_tokens, estimated_output_tokens)
+        base_latency = speed_profile.interpolate(values.estimated_input_tokens, values.estimated_output_tokens)
 
     # 应用安全边际
     timeout = base_latency * effective_safety_margin

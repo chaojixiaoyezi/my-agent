@@ -47,15 +47,14 @@ def lookup(source: dict[str, Any] | object, field_name: str) -> Any:
 
 def append_warning(
     warnings: list[LogAnalysisConfigWarning],
-    field_name: str,
-    raw_value: Any,
-    fallback_value: Any,
-    reason: str,
+    params: ConfigWarningInput | None = None,
     *,
     warning: ConfigWarningInput | None = None,
 ) -> None:
     """Append a configuration warning entry."""
-    item = warning or ConfigWarningInput(field_name, raw_value, fallback_value, reason)
+    item = params or warning
+    if item is None:
+        raise TypeError("append_warning requires params")
     warnings.append(
         LogAnalysisConfigWarning(
             field_name=item.field_name,
@@ -89,7 +88,7 @@ def coerce_bool(
             return True
         if normalized in {"false", "no", "off", "0"}:
             return False
-    append_warning(warnings, field_name, raw_value, default, "expected a clear boolean value")
+    append_warning(warnings, ConfigWarningInput(field_name, raw_value, default, "expected a clear boolean value"))
     return default
 
 
@@ -115,7 +114,7 @@ def coerce_choice(
         normalized = normalized.upper() if coercion.uppercase else normalized.lower()
         if normalized in coercion.choices:
             return normalized
-    append_warning(warnings, field_name, raw_value, coercion.default, f"expected one of {sorted(coercion.choices)}")
+    append_warning(warnings, ConfigWarningInput(field_name, raw_value, coercion.default, f"expected one of {sorted(coercion.choices)}"))
     return coercion.default
 
 
@@ -137,21 +136,30 @@ def coerce_int(
     if raw_value is _MISSING:
         return coercion.default
     if isinstance(raw_value, bool):
-        append_warning(warnings, field_name, raw_value, coercion.default, "expected an integer, not a boolean")
+        append_warning(
+            warnings,
+            ConfigWarningInput(field_name, raw_value, coercion.default, "expected an integer, not a boolean"),
+        )
         return coercion.default
     if isinstance(raw_value, int):
         number = raw_value
     elif isinstance(raw_value, str) and _INT_PATTERN.fullmatch(raw_value.strip()):
         number = int(raw_value.strip())
     else:
-        append_warning(warnings, field_name, raw_value, coercion.default, "expected an integer")
+        append_warning(warnings, ConfigWarningInput(field_name, raw_value, coercion.default, "expected an integer"))
         return coercion.default
 
     if number < coercion.min_value:
-        append_warning(warnings, field_name, raw_value, coercion.default, f"expected value >= {coercion.min_value}")
+        append_warning(
+            warnings,
+            ConfigWarningInput(field_name, raw_value, coercion.default, f"expected value >= {coercion.min_value}"),
+        )
         return coercion.default
     if coercion.max_value is not None and number > coercion.max_value:
-        append_warning(warnings, field_name, raw_value, coercion.default, f"expected value <= {coercion.max_value}")
+        append_warning(
+            warnings,
+            ConfigWarningInput(field_name, raw_value, coercion.default, f"expected value <= {coercion.max_value}"),
+        )
         return coercion.default
     return number
 
@@ -173,5 +181,5 @@ def coerce_path_string(
         normalized = raw_value.strip()
         if normalized and "\x00" not in normalized and "\n" not in normalized and "\r" not in normalized:
             return normalized
-    append_warning(warnings, field_name, raw_value, default, "expected a non-empty path string")
+    append_warning(warnings, ConfigWarningInput(field_name, raw_value, default, "expected a non-empty path string"))
     return default

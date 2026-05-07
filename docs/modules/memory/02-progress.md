@@ -150,3 +150,4 @@
 ## 2026-05-07 high-risk pre-clean
 - Split task workspace state/timeline payload and JSONL helpers into `memory_archive/task_workspace_payloads.py` so `task_workspace.py` stays focused on orchestration and path wiring.
 - Preserved task workspace file shapes, legacy run adapter behavior, and existing focused persistence tests.
+- Continued bundle cleanup in archive query, resume brief, memory gate review, and routing receipts; these changes keep archive/LocalStore records as clues while task/run/gateway files remain the authority.

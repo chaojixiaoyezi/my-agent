@@ -59,6 +59,7 @@ from .runner_rendering import (
     render_channel_probe_markdown,
     render_single_channel_probe_markdown,
 )
+from .services.indexing_params import IndexReportParams
 from .utils import (
     _apply_missing_paths,
     _apply_paths,
@@ -195,11 +196,13 @@ class SubAgentChannelProbeMixin:
             encoding="utf-8",
         )
         self._index_report(
-            "subagent_channel_probe_report",
-            "latest",
-            "Subagent channel probe report",
-            report,
-            event_type="subagent_channel_probe_report_written",
+            IndexReportParams(
+                "subagent_channel_probe_report",
+                "latest",
+                "Subagent channel probe report",
+                report,
+                "subagent_channel_probe_report_written",
+            ),
         )
         return report
     def _write_channel_probe_files(

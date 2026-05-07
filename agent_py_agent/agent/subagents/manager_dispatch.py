@@ -16,7 +16,7 @@ from .services.dispatch_params import (
 )
 
 
-class SubAgentDispatchMixin:
+class _SubAgentDispatchFacade:
     """Thin facade delegating dispatch record and reporting to SubAgentDispatchService."""
 
     @property
@@ -181,15 +181,25 @@ class SubAgentDispatchMixin:
     def append_parent_planner_log(self, record):
         self._dispatch_service.append_parent_planner_log(record)
 
-    # Rendering methods needed by dispatch service
-    def _render_dispatch_markdown(self, report):
-        from .rendering import render_dispatch_markdown
-        return render_dispatch_markdown(report)
+def _render_dispatch_markdown(report):
+    from .rendering import render_dispatch_markdown
+    return render_dispatch_markdown(report)
 
-    def _render_dispatch_watch_markdown(self, report):
-        from .rendering import render_dispatch_watch_markdown
-        return render_dispatch_watch_markdown(report)
 
-    def _render_parent_planner_markdown(self, report):
-        from .rendering import render_parent_planner_markdown
-        return render_parent_planner_markdown(report)
+def _render_dispatch_watch_markdown(report):
+    from .rendering import render_dispatch_watch_markdown
+    return render_dispatch_watch_markdown(report)
+
+
+def _render_parent_planner_markdown(report):
+    from .rendering import render_parent_planner_markdown
+    return render_parent_planner_markdown(report)
+
+
+_SubAgentDispatchFacade._render_dispatch_markdown = staticmethod(_render_dispatch_markdown)
+_SubAgentDispatchFacade._render_dispatch_watch_markdown = staticmethod(_render_dispatch_watch_markdown)
+_SubAgentDispatchFacade._render_parent_planner_markdown = staticmethod(_render_parent_planner_markdown)
+
+
+class SubAgentDispatchMixin(_SubAgentDispatchFacade):
+    """Public compatibility mixin; dispatch behavior stays in the facade class."""

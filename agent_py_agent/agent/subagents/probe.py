@@ -8,28 +8,41 @@ Human version:
 """
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from .models import ChannelProbeCheck
+
+
+@dataclass(frozen=True)
+class ProbeCheckParams:
+    """LLM: bundle probe check metadata for ok/fail constructors."""
+
+    severity: str
+    evidence_path: str = ""
+    created_at: float = 0.0
+    error: str = ""
 
 
 def _probe_ok(
     name: str,
     summary: str,
     *,
+    params: ProbeCheckParams | None = None,
     severity: str,
     evidence_path: str = "",
     created_at: float,
 ) -> ChannelProbeCheck:
     """创建成功的 probe check。"""
+    params = params or ProbeCheckParams(severity=severity, evidence_path=evidence_path, created_at=created_at)
 
     return ChannelProbeCheck(
         name=name,
         ok=True,
         summary=summary,
-        severity=severity,
-        evidence_path=evidence_path,
-        created_at=created_at,
+        severity=params.severity,
+        evidence_path=params.evidence_path,
+        created_at=params.created_at,
     )
 
 
@@ -37,21 +50,28 @@ def _probe_fail(
     name: str,
     summary: str,
     *,
+    params: ProbeCheckParams | None = None,
     severity: str,
     error: str,
     evidence_path: str = "",
     created_at: float,
 ) -> ChannelProbeCheck:
     """创建失败的 probe check。"""
+    params = params or ProbeCheckParams(
+        severity=severity,
+        evidence_path=evidence_path,
+        created_at=created_at,
+        error=error,
+    )
 
     return ChannelProbeCheck(
         name=name,
         ok=False,
         summary=summary,
-        severity=severity,
-        evidence_path=evidence_path,
-        error=error,
-        created_at=created_at,
+        severity=params.severity,
+        evidence_path=params.evidence_path,
+        error=params.error,
+        created_at=params.created_at,
     )
 
 
@@ -127,5 +147,4 @@ def _channel_status(checks: list[ChannelProbeCheck]) -> str:
     if any(not check.ok for check in checks):
         return "DEGRADED"
     return "OK"
-
 

@@ -39,10 +39,30 @@ class WorkflowDispatchPlan:
     context_manifest: Any = None
 
 
+@dataclass(frozen=True)
+class CompileWorkflowParams:
+    # LLM: workflow compile inputs are one bundle before worker specs are expanded.
+    goal: str
+    quality_contract: Any = None
+    context_manifest: Any = None
+    allowed_write_roots: list[str] | None = None
+    forbidden_write_roots: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class _WorkerSpecRequest:
+    template: WorkflowTemplate
+    phase: object
+    values: CompileWorkflowParams
+    allowed_roots: list[str]
+    forbidden_roots: list[str]
+
+
 def compile_workflow(
     template: WorkflowTemplate,
     *,
-    goal: str,
+    params: CompileWorkflowParams | None = None,
+    goal: str = "",
     quality_contract: Any = None,
     context_manifest: Any = None,
     allowed_write_roots: list[str] | None = None,
@@ -50,39 +70,50 @@ def compile_workflow(
 ) -> WorkflowDispatchPlan:
     """Compile a template into worker specs without creating SubAgentTask."""
 
-    allowed_roots = list(allowed_write_roots or [])
-    forbidden_roots = list(forbidden_write_roots or [])
+    values = params or CompileWorkflowParams(
+        goal, quality_contract, context_manifest, allowed_write_roots, forbidden_write_roots
+    )
+    allowed_roots = list(values.allowed_write_roots or [])
+    forbidden_roots = list(values.forbidden_write_roots or [])
     worker_specs = [
-        WorkflowWorkerSpec(
-            phase_id=phase.id,
-            role=phase.kind,
-            kind=phase.kind,
-            goal=goal,
-            instructions=_build_worker_instructions(
-                template=template,
-                phase_id=phase.id,
-                phase_kind=phase.kind,
-                phase_task=phase.task,
-            ),
-            acceptance_checks=list(phase.acceptance),
-            allowed_write_roots=list(allowed_roots),
-            forbidden_write_roots=list(forbidden_roots),
-            quality_contract=quality_contract,
-            context_manifest=context_manifest,
-            cannot_self_accept=True,
-            depends_on=list(phase.depends_on),
-        )
+        _worker_spec(_WorkerSpecRequest(template, phase, values, allowed_roots, forbidden_roots))
         for phase in template.phases
     ]
 
     return WorkflowDispatchPlan(
         template_id=template.id,
         template_name=template.name,
-        goal=goal,
+        goal=values.goal,
         worker_specs=worker_specs,
         parent_acceptance=list(template.parent_acceptance),
-        quality_contract=quality_contract,
-        context_manifest=context_manifest,
+        quality_contract=values.quality_contract,
+        context_manifest=values.context_manifest,
+    )
+
+
+def _worker_spec(request: _WorkerSpecRequest) -> WorkflowWorkerSpec:
+    # LLM: phase expansion stays isolated from the public compile facade.
+    template = request.template
+    phase = request.phase
+    values = request.values
+    return WorkflowWorkerSpec(
+        phase_id=phase.id,
+        role=phase.kind,
+        kind=phase.kind,
+        goal=values.goal,
+        instructions=_build_worker_instructions(
+            template=template,
+            phase_id=phase.id,
+            phase_kind=phase.kind,
+            phase_task=phase.task,
+        ),
+        acceptance_checks=list(phase.acceptance),
+        allowed_write_roots=list(request.allowed_roots),
+        forbidden_write_roots=list(request.forbidden_roots),
+        quality_contract=values.quality_contract,
+        context_manifest=values.context_manifest,
+        cannot_self_accept=True,
+        depends_on=list(phase.depends_on),
     )
 
 

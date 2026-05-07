@@ -10,7 +10,7 @@ from typing import Any
 from ..storage import DEFAULT_QUERY_LIMIT, LocalLogStore
 
 MAX_TRACE_CASE_QUERIES = 20
-TraceQuery = Callable[[LocalLogStore, str, str, "TraceCaseParams"], dict[str, Any]]
+TraceQuery = Callable[["TraceFieldQueryRequest"], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -35,13 +35,28 @@ class TraceCaseParamLimits:
 
 
 @dataclass(frozen=True)
-class _TraceFieldQueryInput:
+class TraceCaseQueryRequest:
+    # LLM: Case tracing passes query state as one bundle to avoid drifting helper signatures.
     local_store: LocalLogStore
+    seeds: dict[str, list[str]]
+    params: TraceCaseParams
+    query_one: TraceQuery
+
+
+@dataclass(frozen=True)
+class TraceFieldQueryRequest:
+    local_store: LocalLogStore
+    field: str
+    value: str
+    params: TraceCaseParams
+
+
+@dataclass(frozen=True)
+class _TraceFieldQueryInput:
     queries: list[dict[str, Any]]
     field: str
     values: list[str]
-    params: TraceCaseParams
-    query_one: TraceQuery
+    request: TraceCaseQueryRequest
 
 
 def trace_case_params(
@@ -71,32 +86,23 @@ def trace_case_params(
     )
 
 
-def trace_case_queries(
-    local_store: LocalLogStore,
-    seeds: dict[str, list[str]],
-    params: TraceCaseParams,
-    query_one: TraceQuery,
-) -> list[dict[str, Any]]:
+def trace_case_queries(request: TraceCaseQueryRequest) -> list[dict[str, Any]]:
     queries: list[dict[str, Any]] = []
     for field in ("attacker_ip", "victim_ip", "domain", "uri", "alert_type"):
-        append_trace_field_queries(_TraceFieldQueryInput(local_store, queries, field, seeds.get(field, []), params, query_one))
-        if len(queries) >= params.max_queries:
+        values = request.seeds.get(field, [])
+        append_trace_field_queries(_TraceFieldQueryInput(queries, field, values, request))
+        if len(queries) >= request.params.max_queries:
             break
     return queries
 
 
-def append_trace_field_queries(data: _TraceFieldQueryInput | LocalLogStore, *args: Any) -> None:
-    if not isinstance(data, _TraceFieldQueryInput):
-        data = _trace_field_query_input(data, args)
-    for value in data.values:
-        if len(data.queries) >= data.params.max_queries:
+def append_trace_field_queries(request: _TraceFieldQueryInput) -> None:
+    params = request.request.params
+    for value in request.values:
+        if len(request.queries) >= params.max_queries:
             break
-        data.queries.append(data.query_one(data.local_store, data.field, value, data.params))
-
-
-def _trace_field_query_input(local_store: LocalLogStore, args: tuple[Any, ...]) -> _TraceFieldQueryInput:
-    queries, field, values, params, query_one = args
-    return _TraceFieldQueryInput(local_store, queries, field, values, params, query_one)
+        field_request = TraceFieldQueryRequest(request.request.local_store, request.field, value, params)
+        request.queries.append(request.request.query_one(field_request))
 
 
 def trace_case_response(case_id: str, queries: list[dict[str, Any]], max_queries: int) -> dict[str, Any]:

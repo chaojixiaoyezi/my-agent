@@ -174,36 +174,38 @@ class FinalizationService:
             runtime_injection_token_estimate=estimate_tokens(ctx.runtime_injections)
             if ctx.runtime_injections
             else 0,
-            recovery_snapshot_id=snapshot_result.snapshot_id if snapshot_result else "",
-            recovery_snapshot_path=snapshot_result.path if snapshot_result else "",
-            recovery_snapshot_error=snapshot_result.error if snapshot_result else "",
-            recovery_snapshot_token_estimate=snapshot_result.token_estimate
-            if snapshot_result
-            else 0,
-            memory_resume_context_injected=ctx.resume_context_result.injected
-            if ctx.resume_context_result
-            else False,
-            memory_resume_context_query=ctx.resume_context_result.query
-            if ctx.resume_context_result
-            else "",
-            memory_resume_context_matches=(
-                ctx.resume_context_result.archive_match_count
-                + ctx.resume_context_result.local_match_count
-                + ctx.resume_context_result.task_fact_source_count
-            )
-            if ctx.resume_context_result
-            else 0,
-            memory_resume_context_token_estimate=estimate_tokens(
-                ctx.resume_context_result.context_block
-            )
-            if ctx.resume_context_result and ctx.resume_context_result.injected
-            else 0,
-            memory_resume_context_error=ctx.resume_context_result.error
-            if ctx.resume_context_result
-            else "",
+            **_snapshot_result_fields(snapshot_result),
+            **_resume_context_fields(ctx),
             compression_snapshot_id=ctx.compression_snapshot_id,
             compression_snapshot_path=ctx.compression_snapshot_path,
             compression_applied=ctx.compression_applied,
             turn_token_estimate=token_ledger["turn"],
             cumulative_token_estimate=token_ledger["cumulative"],
         )
+
+
+def _snapshot_result_fields(snapshot_result) -> dict:
+    # LLM: snapshot result projection is kept outside AgentRunResult assembly.
+    return {
+        "recovery_snapshot_id": snapshot_result.snapshot_id if snapshot_result else "",
+        "recovery_snapshot_path": snapshot_result.path if snapshot_result else "",
+        "recovery_snapshot_error": snapshot_result.error if snapshot_result else "",
+        "recovery_snapshot_token_estimate": snapshot_result.token_estimate if snapshot_result else 0,
+    }
+
+
+def _resume_context_fields(ctx: FinalizeContext) -> dict:
+    resume = ctx.resume_context_result
+    return {
+        "memory_resume_context_injected": resume.injected if resume else False,
+        "memory_resume_context_query": resume.query if resume else "",
+        "memory_resume_context_matches": (
+            resume.archive_match_count + resume.local_match_count + resume.task_fact_source_count
+        )
+        if resume
+        else 0,
+        "memory_resume_context_token_estimate": estimate_tokens(resume.context_block)
+        if resume and resume.injected
+        else 0,
+        "memory_resume_context_error": resume.error if resume else "",
+    }

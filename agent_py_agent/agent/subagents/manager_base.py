@@ -6,6 +6,7 @@ Work-order path/file helpers live in manager_work_orders.py to keep this mixin s
 """
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,24 +24,42 @@ if TYPE_CHECKING:
     from ..local_store import LocalStore
 
 
+@dataclass(frozen=True)
+class SubAgentManagerInitParams:
+    """LLM: bundle manager construction options while keeping workspace positional."""
+
+    local_store: LocalStore | None = None
+    workspace_root: str | Path | None = None
+    workspace_roots: list[str | Path] | None = None
+    enable_self_learning: bool = False
+
+
 class SubAgentBaseMixin:
     """Facade delegating core task lifecycle to services."""
 
     def __init__(
         self,
         workspace: str | Path,
+        *,
+        params: SubAgentManagerInitParams | None = None,
         local_store: LocalStore | None = None,
         workspace_root: str | Path | None = None,
         workspace_roots: list[str | Path] | None = None,
         enable_self_learning: bool = False,
     ):
+        params = params or SubAgentManagerInitParams(
+            local_store=local_store,
+            workspace_root=workspace_root,
+            workspace_roots=workspace_roots,
+            enable_self_learning=enable_self_learning,
+        )
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.cards: dict[str, SubAgentCard] = {}
-        self.local_store = local_store
-        self.workspace_root = Path(workspace_root).resolve() if workspace_root else self.workspace.resolve().parent
-        self.workspace_roots = _normalized_workspace_roots(self.workspace_root, workspace_roots)
-        self.enable_self_learning = bool(enable_self_learning)
+        self.local_store = params.local_store
+        self.workspace_root = Path(params.workspace_root).resolve() if params.workspace_root else self.workspace.resolve().parent
+        self.workspace_roots = _normalized_workspace_roots(self.workspace_root, params.workspace_roots)
+        self.enable_self_learning = bool(params.enable_self_learning)
 
         from .services.base import SubAgentBaseService
         from .services.lifecycle import SubAgentLifecycleService

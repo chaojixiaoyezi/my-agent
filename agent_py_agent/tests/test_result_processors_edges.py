@@ -71,6 +71,38 @@ def test_process_structured_output_records_evidence_packets_and_findings(mock_ta
     assert mock_task.artifact_refs == ["artifact://raw-1"]
 
 
+def _lessons_payload_context(mock_task, parsed: SubAgentParsedOutput) -> OutputPayloadContext:
+    lessons = ["经验1", "经验2"]
+    next_actions = ["行动1", "行动2", "行动3"]
+    return OutputPayloadContext(
+        task=mock_task,
+        dry_run=False,
+        ok=True,
+        message="",
+        backend="",
+        tool_rounds=0,
+        parsed=parsed,
+        actual_tools=None,
+        structured_evidence_count=0,
+        structured_request_count=0,
+        created_request_ids=[],
+        ignored_tools=[],
+        ignored_skills=[],
+        artifacts=[],
+        evidence_packets=[],
+        findings=[],
+        tests=[],
+        patches=[],
+        lessons=lessons,
+        blockers=[],
+        next_actions=next_actions,
+        structured_repair_attempted=False,
+        structured_repair_ok=False,
+        structured_repair_error="",
+        now=123456.0,
+    )
+
+
 def test_build_output_payload_with_lessons_and_next_actions(mock_task):
     parsed = SubAgentParsedOutput(
         found=True,
@@ -91,35 +123,7 @@ def test_build_output_payload_with_lessons_and_next_actions(mock_task):
         next_actions=["行动1", "行动2", "行动3"],
     )
 
-    payload = _build_output_payload(
-        OutputPayloadContext(
-            task=mock_task,
-            dry_run=False,
-            ok=True,
-            message="",
-            backend="",
-            tool_rounds=0,
-            parsed=parsed,
-            actual_tools=None,
-            structured_evidence_count=0,
-            structured_request_count=0,
-            created_request_ids=[],
-            ignored_tools=[],
-            ignored_skills=[],
-            artifacts=[],
-            evidence_packets=[],
-            findings=[],
-            tests=[],
-            patches=[],
-            lessons=["经验1", "经验2"],
-            blockers=[],
-            next_actions=["行动1", "行动2", "行动3"],
-            structured_repair_attempted=False,
-            structured_repair_ok=False,
-            structured_repair_error="",
-            now=123456.0,
-        )
-    )
+    payload = _build_output_payload(_lessons_payload_context(mock_task, parsed))
 
     assert payload["lessons"] == ["经验1", "经验2"]
     assert payload["next_actions"] == ["行动1", "行动2", "行动3"]

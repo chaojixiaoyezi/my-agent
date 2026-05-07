@@ -145,15 +145,9 @@ def build_forensic_package(
     )
     case_obj = case if isinstance(case, CaseRecord) else CaseRecord.from_dict(case)
     route_obj = _route_or_build(case_obj, route, package_options.findings)
-    route_dict = route_obj.to_dict() if isinstance(route_obj, RouteDraft) else dict(route_obj)
+    route_dict = _route_dict(route_obj)
     finding_dicts = _finding_dicts(case_obj, package_options.findings)
-    evidence_refs = _unique(
-        [
-            *_ref_ids(case_obj.evidence_refs),
-            *route_dict.get("evidence_refs", []),
-            *(ref for finding in finding_dicts for ref in _ref_ids(finding.get("evidence_refs", []))),
-        ]
-    )
+    evidence_refs = _forensic_evidence_refs(case_obj, route_dict, finding_dicts)
     return {
         "package_type": "log_analysis_forensic_package",
         "version": "v1",
@@ -170,15 +164,37 @@ def build_forensic_package(
         "raw_refs": list(package_options.raw_refs or _raw_like_refs(case_obj.evidence_refs, evidence_refs)),
         "query_history": [dict(item) for item in package_options.query_history],
         "sample_rows": [dict(item) for item in package_options.sample_rows],
-        "chain_of_custody": [
-            {
-                "action": "package_rendered",
-                "time": utc_now_iso(),
-                "actor": "log_analysis.reports",
-                "notes": "Content generated locally; caller owns file write and freeze policy.",
-            }
-        ],
+        "chain_of_custody": _chain_of_custody(),
     }
+
+
+def _chain_of_custody() -> list[dict[str, Any]]:
+    return [
+        {
+            "action": "package_rendered",
+            "time": utc_now_iso(),
+            "actor": "log_analysis.reports",
+            "notes": "Content generated locally; caller owns file write and freeze policy.",
+        }
+    ]
+
+
+def _route_dict(route: RouteDraft | Mapping[str, Any]) -> dict[str, Any]:
+    return route.to_dict() if isinstance(route, RouteDraft) else dict(route)
+
+
+def _forensic_evidence_refs(
+    case: CaseRecord,
+    route: Mapping[str, Any],
+    findings: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    return _unique(
+        [
+            *_ref_ids(case.evidence_refs),
+            *route.get("evidence_refs", []),
+            *(ref for finding in findings for ref in _ref_ids(finding.get("evidence_refs", []))),
+        ]
+    )
 
 
 def forensic_package_content(

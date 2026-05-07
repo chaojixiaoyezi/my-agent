@@ -49,6 +49,7 @@ def _case_backlog_from_cases(cases: list[Any] | None) -> dict[str, int]:
 
 def build_health_summary(
     *,
+    params: DispatchHealthInputs | None = None,
     inputs: DispatchHealthInputs | None = None,
     cases: list[Any] | None = None,
     case_backlog: Mapping[str, int] | None = None,
@@ -56,7 +57,7 @@ def build_health_summary(
     budget: DispatchBudget | Mapping[str, Any] | None = None,
     prompt_config: SecurityPromptConfig | Mapping[str, Any] | None = None,
 ) -> DispatchHealthSummary:
-    health_inputs = inputs or DispatchHealthInputs(
+    health_inputs = params or inputs or DispatchHealthInputs(
         cases=cases,
         case_backlog=case_backlog,
         queue=queue,

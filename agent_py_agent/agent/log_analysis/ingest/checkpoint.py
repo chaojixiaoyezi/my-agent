@@ -61,6 +61,7 @@ class CheckpointStore:
     def commit(
         self,
         *,
+        params: CheckpointCommit | None = None,
         commit: CheckpointCommit | None = None,
         source_id: str = "",
         cursor_kind: str = "",
@@ -68,7 +69,7 @@ class CheckpointStore:
         last_committed_batch_id: str = "",
         last_event_time: str | None = None,
     ) -> Checkpoint:
-        item = commit or CheckpointCommit(
+        item = params or commit or CheckpointCommit(
             source_id=str(source_id),
             cursor_kind=str(cursor_kind),
             cursor=cursor or {},

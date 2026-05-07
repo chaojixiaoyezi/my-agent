@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from ...agent.agent_core.models import AgentRunResult
 from ...agent.gateway import (
@@ -83,11 +84,23 @@ class _DelayedResponseVerifyContext:
     processed: int
     run_called: dict
     done_path: Any
+    response_path: Any
     response: dict
     pending_left: list
     processing_left: list
     failed_left: list
     done_payload: dict = None  # type: ignore[assignment]
+
+
+@dataclass(frozen=True)
+class _DelayedResponseRunRequest:
+    paths: Any
+    agent: Any
+    gpaths: Any
+    request_id: str
+    request_path: Any
+    response_path: Any
+    run_called: dict
 
 
 def _delayed_response_verify(ctx: _DelayedResponseVerifyContext) -> int:
@@ -112,7 +125,7 @@ def _delayed_response_verify(ctx: _DelayedResponseVerifyContext) -> int:
             "processed": ctx.processed,
             "run_called": ctx.run_called["value"],
             "done_path": str(ctx.done_path),
-            "response_path": str(ctx.response_path) if hasattr(ctx, 'response_path') else "",
+            "response_path": str(ctx.response_path),
             "response": ctx.response,
         },
     )
@@ -122,10 +135,26 @@ def _delayed_response_verify(ctx: _DelayedResponseVerifyContext) -> int:
     return 0 if final_ok else 2
 
 
+def _collect_delayed_response_result(request: _DelayedResponseRunRequest) -> _DelayedResponseVerifyContext:
+    processed = _process_gateway_requests(request.agent, request.gpaths, worker_id="scenario-delayed-response-worker")
+    done_path = request.gpaths.done / request.request_path.name
+    return _DelayedResponseVerifyContext(
+        paths=request.paths,
+        request_id=request.request_id,
+        processed=processed,
+        run_called=request.run_called,
+        done_path=done_path,
+        response_path=request.response_path,
+        response=read_json_file(request.response_path),
+        pending_left=sorted(path.name for path in request.gpaths.inbox.glob("*.json")),
+        processing_left=sorted(path.name for path in request.gpaths.processing.glob("*.json")),
+        failed_left=sorted(path.name for path in request.gpaths.failed.glob("*.json")),
+        done_payload=read_json_file(done_path),
+    )
+
+
 def run_scenario_gateway_delayed_response_case(args) -> int:
-
     paths, agent, gpaths, request_id, request_path, response_path = _delayed_response_setup(args)
-
     print_scenario_step(1, "Create a pending request with an already-arrived response")
     print(f"request_path={request_path} exists={request_path.exists()}")
     print(f"response_path={response_path} exists={response_path.exists()}")
@@ -139,35 +168,22 @@ def run_scenario_gateway_delayed_response_case(args) -> int:
     agent.run = fail_if_called  # type: ignore[method-assign]
 
     print_scenario_step(2, "Let worker claim the duplicate request")
-    processed = _process_gateway_requests(agent, gpaths, worker_id="scenario-delayed-response-worker")
-    done_path = gpaths.done / request_path.name
-    done_payload = read_json_file(done_path)
-    response = read_json_file(response_path)
-    pending_left = sorted(path.name for path in gpaths.inbox.glob("*.json"))
-    processing_left = sorted(path.name for path in gpaths.processing.glob("*.json"))
-    failed_left = sorted(path.name for path in gpaths.failed.glob("*.json"))
-    print(f"processed={processed} run_called={run_called['value']}")
-    print(f"done_path={done_path} exists={done_path.exists()}")
+    verify_ctx = _collect_delayed_response_result(
+        _DelayedResponseRunRequest(paths, agent, gpaths, request_id, request_path, response_path, run_called)
+    )
+    print(f"processed={verify_ctx.processed} run_called={run_called['value']}")
+    print(f"done_path={verify_ctx.done_path} exists={verify_ctx.done_path.exists()}")
     print(
         "queue_left="
         + json.dumps(
-            {"pending": pending_left, "processing": processing_left, "failed": failed_left},
+            {
+                "pending": verify_ctx.pending_left,
+                "processing": verify_ctx.processing_left,
+                "failed": verify_ctx.failed_left,
+            },
             ensure_ascii=False,
             sort_keys=True,
         )
     )
 
-    return _delayed_response_verify(
-        _DelayedResponseVerifyContext(
-            paths=paths,
-            request_id=request_id,
-            processed=processed,
-            run_called=run_called,
-            done_path=done_path,
-            response=response,
-            pending_left=pending_left,
-            processing_left=processing_left,
-            failed_left=failed_left,
-            done_payload=done_payload,
-        )
-    )
+    return _delayed_response_verify(verify_ctx)

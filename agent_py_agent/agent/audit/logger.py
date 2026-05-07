@@ -133,41 +133,6 @@ class AuditLogger:
             )
         )
 
-    def log_update_task(
-        self,
-        request: AuditTaskUpdateRequest | None = None,
-        *,
-        task_id: str = "",
-        user_id: str = "",
-        channel: str = "",
-        status_before: str = "",
-        status_after: str = "",
-        details: dict[str, Any] | None = None,
-    ) -> AuditEntry:
-        """记录更新任务。"""
-        request = request or AuditTaskUpdateRequest(
-            task_id=task_id,
-            user_id=user_id,
-            channel=channel,
-            status_before=status_before,
-            status_after=status_after,
-            details=details,
-        )
-        return self.log(
-            LogParams(
-                action=AuditAction.UPDATE_TASK,
-                user_id=request.user_id,
-                channel=request.channel,
-                target_type="task",
-                target_id=request.task_id,
-                details={
-                    "status_before": request.status_before,
-                    "status_after": request.status_after,
-                    **(request.details or {}),
-                },
-            )
-        )
-
     def log_dispatch(
         self,
         task_id: str,
@@ -186,60 +151,6 @@ class AuditLogger:
                 details=details,
             )
         )
-
-    def log_access_denied(
-        self,
-        request: AuditAccessDeniedRequest | None = None,
-        *,
-        action: AuditAction | str = "",
-        user_id: str = "",
-        channel: str = "",
-        target_type: str = "",
-        target_id: str = "",
-        reason: str = "",
-    ) -> AuditEntry:
-        """记录访问拒绝。"""
-        request = request or AuditAccessDeniedRequest(action, user_id, channel, target_type, target_id, reason)
-        return self.log(
-            LogParams(
-                action=request.action,
-                user_id=request.user_id,
-                channel=request.channel,
-                target_type=request.target_type,
-                target_id=request.target_id,
-                status=AuditStatus.DENIED,
-                details={"reason": request.reason},
-            )
-        )
-
-    def log_error(
-        self,
-        request: AuditErrorRequest | None = None,
-        *,
-        action: AuditAction | str = "",
-        user_id: str = "",
-        channel: str = "",
-        target_type: str = "",
-        target_id: str = "",
-        error: str = "",
-    ) -> AuditEntry:
-        """记录错误。"""
-        request = request or AuditErrorRequest(action, user_id, channel, target_type, target_id, error)
-        return self.log(
-            LogParams(
-                action=request.action,
-                user_id=request.user_id,
-                channel=request.channel,
-                target_type=request.target_type,
-                target_id=request.target_id,
-                status=AuditStatus.ERROR,
-                details={"error": request.error},
-            )
-        )
-
-
-__all__ = ["AuditLogger", "AuditEntry", "AuditAction", "AuditStatus", "LogParams"]
-
 
 @dataclass(frozen=True)
 class AuditTaskUpdateRequest:
@@ -275,3 +186,89 @@ class AuditErrorRequest:
     target_type: str
     target_id: str
     error: str
+
+
+def _log_update_task(
+    self,
+    request: AuditTaskUpdateRequest | None = None,
+    *,
+    task_id: str = "",
+    user_id: str = "",
+    channel: str = "",
+    status_before: str = "",
+    status_after: str = "",
+    details: dict[str, Any] | None = None,
+) -> AuditEntry:
+    # LLM: convenience audit methods live outside AuditLogger to keep the logger facade small.
+    request = request or AuditTaskUpdateRequest(task_id, user_id, channel, status_before, status_after, details)
+    return self.log(
+        LogParams(
+            action=AuditAction.UPDATE_TASK,
+            user_id=request.user_id,
+            channel=request.channel,
+            target_type="task",
+            target_id=request.task_id,
+            details={
+                "status_before": request.status_before,
+                "status_after": request.status_after,
+                **(request.details or {}),
+            },
+        )
+    )
+
+
+def _log_access_denied(
+    self,
+    request: AuditAccessDeniedRequest | None = None,
+    *,
+    action: AuditAction | str = "",
+    user_id: str = "",
+    channel: str = "",
+    target_type: str = "",
+    target_id: str = "",
+    reason: str = "",
+) -> AuditEntry:
+    request = request or AuditAccessDeniedRequest(action, user_id, channel, target_type, target_id, reason)
+    return self.log(
+        LogParams(
+            action=request.action,
+            user_id=request.user_id,
+            channel=request.channel,
+            target_type=request.target_type,
+            target_id=request.target_id,
+            status=AuditStatus.DENIED,
+            details={"reason": request.reason},
+        )
+    )
+
+
+def _log_error(
+    self,
+    request: AuditErrorRequest | None = None,
+    *,
+    action: AuditAction | str = "",
+    user_id: str = "",
+    channel: str = "",
+    target_type: str = "",
+    target_id: str = "",
+    error: str = "",
+) -> AuditEntry:
+    request = request or AuditErrorRequest(action, user_id, channel, target_type, target_id, error)
+    return self.log(
+        LogParams(
+            action=request.action,
+            user_id=request.user_id,
+            channel=request.channel,
+            target_type=request.target_type,
+            target_id=request.target_id,
+            status=AuditStatus.ERROR,
+            details={"error": request.error},
+        )
+    )
+
+
+AuditLogger.log_update_task = _log_update_task
+AuditLogger.log_access_denied = _log_access_denied
+AuditLogger.log_error = _log_error
+
+__all__ = ["AuditLogger", "AuditEntry", "AuditAction", "AuditStatus", "LogParams"]

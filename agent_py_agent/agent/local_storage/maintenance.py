@@ -30,7 +30,6 @@ class LocalStoreMaintenanceMixin:
         return count
 
     def reset(self, *, remove_content_files: bool = False, reset_events_file: bool = True) -> None:
-
         with self._connection() as conn:
             if self.fts_available:
                 conn.execute("DELETE FROM records_fts")
@@ -40,12 +39,18 @@ class LocalStoreMaintenanceMixin:
         if reset_events_file:
             self.events_path.parent.mkdir(parents=True, exist_ok=True)
             self.events_path.write_text("", encoding="utf-8")
-        if remove_content_files and self.files_dir.exists():
-            for path in self.files_dir.glob("*.txt"):
-                try:
-                    path.unlink()
-                except OSError:
-                    continue
+        if remove_content_files:
+            self._remove_content_files()
+
+    def _remove_content_files(self) -> None:
+        """Best-effort cleanup for content files after database reset."""
+        if not self.files_dir.exists():
+            return
+        for path in self.files_dir.glob("*.txt"):
+            try:
+                path.unlink()
+            except OSError:
+                continue
 
     def count_records(self, *, source_type: str | None = None) -> int:
         """统计记录数，可按 source_type 过滤。"""

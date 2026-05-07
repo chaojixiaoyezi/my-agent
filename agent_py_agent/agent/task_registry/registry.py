@@ -7,10 +7,21 @@ from __future__ import annotations
 """
 
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..local_store import LocalStore
+
+
+@dataclass(frozen=True)
+class RegisterTaskParams:
+    # LLM: task registry writes use one record bundle while keeping keyword callers compatible.
+    task_id: str
+    status: str
+    goal: str
+    session_id: str | None = None
+    user_id: str | None = None
 
 
 class TaskRegistry:
@@ -20,13 +31,16 @@ class TaskRegistry:
 
     def register_task(
         self,
-        task_id: str,
-        status: str,
-        goal: str,
+        task_id: str = "",
+        *,
+        status: str = "",
+        goal: str = "",
         session_id: str | None = None,
         user_id: str | None = None,
+        params: RegisterTaskParams | None = None,
     ) -> None:
 
+        values = params or RegisterTaskParams(task_id, status, goal, session_id, user_id)
         now = time.time()
 
         with self._store._connection() as conn:
@@ -41,7 +55,7 @@ class TaskRegistry:
                     goal=excluded.goal,
                     updated_at=excluded.updated_at
                 """,
-                (task_id, session_id or "", user_id or "", status, goal, now, now),
+                (values.task_id, values.session_id or "", values.user_id or "", values.status, values.goal, now, now),
             )
             conn.commit()
 

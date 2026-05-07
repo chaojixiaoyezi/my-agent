@@ -132,10 +132,7 @@ def get_migration_status(base_dir: Path | str) -> dict[str, Any]:
         "users": [],
     }
 
-    if user_data_root.exists():
-        for item in user_data_root.iterdir():
-            if item.is_dir() and not item.name.startswith("."):
-                status["users"].append(item.name)
+    status["users"] = _user_space_names(user_data_root)
 
     if marker_file.exists():
         try:
@@ -144,3 +141,10 @@ def get_migration_status(base_dir: Path | str) -> dict[str, Any]:
             pass
 
     return status
+
+
+def _user_space_names(user_data_root: Path) -> list[str]:
+    # LLM: migration status lists visible user roots without deepening status rendering.
+    if not user_data_root.exists():
+        return []
+    return [item.name for item in user_data_root.iterdir() if item.is_dir() and not item.name.startswith(".")]

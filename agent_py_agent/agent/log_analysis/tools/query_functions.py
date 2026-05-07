@@ -19,6 +19,8 @@ from ..storage import (
 from .query_trace import (
     MAX_TRACE_CASE_QUERIES,
     TraceCaseParams,
+    TraceCaseQueryRequest,
+    TraceFieldQueryRequest,
     trace_case_params,
     trace_case_queries,
     trace_case_response,
@@ -213,24 +215,21 @@ def trace_case(
     case = local_store.get_case(case_id)
     if case is None:
         raise KeyError(f"case not found: {case_id}")
-    queries = trace_case_queries(local_store, _case_seeds(case), trace_params, _trace_field_query)
+    query_request = TraceCaseQueryRequest(local_store, _case_seeds(case), trace_params, _trace_field_query)
+    queries = trace_case_queries(query_request)
     return trace_case_response(case_id, queries, trace_params.max_queries)
 
 
-def _trace_field_query(
-    local_store: LocalLogStore,
-    field: str,
-    value: str,
-    params: TraceCaseParams,
-) -> dict[str, Any]:
+def _trace_field_query(request: TraceFieldQueryRequest) -> dict[str, Any]:
+    params = request.params
     query_fields = {
-        field: value,
+        request.field: request.value,
         "start_time": params.start_time,
         "end_time": params.end_time,
         "limit": params.limit,
         "max_limit": params.max_limit,
     }
-    return security_query(SecurityQueryParams(store=local_store, **query_fields))
+    return security_query(SecurityQueryParams(store=request.local_store, **query_fields))
 
 
 def security_trace_case(

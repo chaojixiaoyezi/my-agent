@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,15 @@ _MAX_PATH_CHARS = 4096
 _MAX_SEARCH_QUERY_CHARS = 4000
 _MAX_SEARCH_LINE_CHARS = 500
 _MAX_WRITE_TEXT_CHARS = 1_000_000
+
+
+@dataclass(frozen=True)
+class TextParamOptions:
+    # LLM: text validation options are grouped for tool call compatibility.
+    name: str = "value"
+    max_chars: int = _MAX_WRITE_TEXT_CHARS
+    allow_empty: bool = False
+    strip: bool = False
 
 
 def _has_control_chars(text: str) -> bool:
@@ -38,15 +48,17 @@ def _optional_path(value: Any, *, default: str = ".") -> str:
 def _text_param(
     value: Any,
     *,
+    options: TextParamOptions | None = None,
     name: str = "value",
     max_chars: int = _MAX_WRITE_TEXT_CHARS,
     allow_empty: bool = False,
     strip: bool = False,
 ) -> str:
-    name = str(name)
-    max_chars = int(max_chars)
-    allow_empty = bool(allow_empty)
-    strip = bool(strip)
+    values = options or TextParamOptions(name, max_chars, allow_empty, strip)
+    name = str(values.name)
+    max_chars = int(values.max_chars)
+    allow_empty = bool(values.allow_empty)
+    strip = bool(values.strip)
     if value is None:
         raise ValueError(f"缺少必填参数 {name}")
     if not isinstance(value, (str, int, float, bool)):

@@ -212,10 +212,12 @@ def normalize_all(
     if config.query_default_limit > config.query_max_limit:
         coercion.append_warning(
             warnings,
-            "query_default_limit",
-            config.query_default_limit,
-            defaults.query_default_limit,
-            "expected value <= query_max_limit",
+            coercion.ConfigWarningInput(
+                "query_default_limit",
+                config.query_default_limit,
+                defaults.query_default_limit,
+                "expected value <= query_max_limit",
+            ),
         )
         config.query_default_limit = defaults.query_default_limit
 

@@ -73,6 +73,7 @@ def _write_runner_result_files(
     result: SubAgentRunnerResult,
     output_payload: dict[str, object],
     *,
+    params: object | None = None,
     prompt: str,
     response: str,
 ) -> None:

@@ -7,6 +7,7 @@ from __future__ import annotations
 """
 
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -16,9 +17,19 @@ if TYPE_CHECKING:
     from ..settings import AgentConfig
 
 
+@dataclass(frozen=True)
+class SpeedBenchmarkParams:
+    # LLM: benchmark options are grouped so model/backend overrides do not widen the runner.
+    input_sizes: list[int] | None = None
+    output_size: int = 500
+    backend: str | None = None
+    model: str | None = None
+
+
 def run_speed_benchmark(
     config: AgentConfig,
     *,
+    params: SpeedBenchmarkParams | None = None,
     input_sizes: list[int] | None = None,
     output_size: int = 500,
     backend: str | None = None,
@@ -26,12 +37,12 @@ def run_speed_benchmark(
 ) -> SpeedProfile:
     """运行模型速度基准测试。"""
 
-    output_size = int(output_size)
-    if input_sizes is None:
-        input_sizes = [1000, 5000, 10000, 50000, 100000]
+    values = params or SpeedBenchmarkParams(input_sizes, output_size, backend, model)
+    output_size = int(values.output_size)
+    input_sizes = values.input_sizes or [1000, 5000, 10000, 50000, 100000]
 
-    effective_backend = backend or config.model_backend
-    effective_model = model or config.model_name
+    effective_backend = values.backend or config.model_backend
+    effective_model = values.model or config.model_name
 
     from ..backends import create_backend
 

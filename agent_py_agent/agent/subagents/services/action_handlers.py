@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .action_params import RecordAfterTaskActionParams
+
 
 @dataclass(frozen=True)
 class ActionHandlerContext:
@@ -64,7 +66,9 @@ def apply_reopen_for_evidence(service, action, task, ctx: ActionHandlerContext):
     service.manager.save(task)
     service._append_task_work_log(task, "action_apply reopen_for_evidence: 已重开任务并等待验收证据。")
     return service._record_after_task_action(
-        action, task, ctx.before_status, ctx.before_channel_status, "已把缺证据的 DONE 任务改为 BLOCKED。"
+        RecordAfterTaskActionParams(
+            action, task, ctx.before_status, ctx.before_channel_status, "已把缺证据的 DONE 任务改为 BLOCKED。"
+        )
     )
 
 
@@ -74,7 +78,9 @@ def apply_run_acceptance(service, action, task, ctx: ActionHandlerContext):
     service.manager.save(task)
     service._append_task_work_log(task, "action_apply run_acceptance: 已标记为需要验收。")
     return service._record_after_task_action(
-        action, task, ctx.before_status, ctx.before_channel_status, "已标记为需要验收，未自动执行未知命令。"
+        RecordAfterTaskActionParams(
+            action, task, ctx.before_status, ctx.before_channel_status, "已标记为需要验收，未自动执行未知命令。"
+        )
     )
 
 
@@ -111,12 +117,14 @@ def apply_takeover_or_reassign(service, action, task, ctx: ActionHandlerContext)
     task = service.manager.load(action.run_id)
     service._append_task_work_log(task, f"action_apply takeover_or_reassign: 已由 {take_over_by} 接管。")
     return service._record_after_task_action(
-        action,
-        task,
-        ctx.before_status,
-        ctx.before_channel_status,
-        f"已由 {take_over_by} 接管任务。",
-        evidence_paths=[task.takeover_file, task.work_log_file],
+        RecordAfterTaskActionParams(
+            action,
+            task,
+            ctx.before_status,
+            ctx.before_channel_status,
+            f"已由 {take_over_by} 接管任务。",
+            evidence_paths=[task.takeover_file, task.work_log_file],
+        )
     )
 
 
@@ -125,9 +133,11 @@ def apply_record_only_action(service, action, task, ctx: ActionHandlerContext):
     service.manager.save(task)
     service._append_task_work_log(task, f"action_apply {action.action}: 已记录待人工处理，不自动修改能力授权。")
     return service._record_after_task_action(
-        action,
-        task,
-        ctx.before_status,
-        ctx.before_channel_status,
-        f"已记录 {action.action} 待人工处理。",
+        RecordAfterTaskActionParams(
+            action,
+            task,
+            ctx.before_status,
+            ctx.before_channel_status,
+            f"已记录 {action.action} 待人工处理。",
+        )
     )

@@ -12,6 +12,7 @@ import json
 import os
 import threading
 import time
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -33,8 +34,16 @@ if TYPE_CHECKING:
     from .paths import GatewayPaths
 
 
+# LLM: HTTP startup options stay in one params record before handler state is exposed.
 # Global server instance for signal handler access
 _server_instance: GatewayHTTPServer | None = None
+
+
+@dataclass(frozen=True)
+class GatewayHTTPServerParams:
+    cross_channel: CrossChannelSession | None = None
+    admin_query: AdminCrossChannelQuery | None = None
+    auth_middleware: AuthMiddleware | None = None
 
 
 def _generate_request_id() -> str:
@@ -126,15 +135,18 @@ class GatewayHTTPServer:
         self,
         port: int,
         paths: GatewayPaths,
+        *,
+        params: GatewayHTTPServerParams | None = None,
         cross_channel: CrossChannelSession | None = None,
         admin_query: AdminCrossChannelQuery | None = None,
         auth_middleware: AuthMiddleware | None = None,
     ):
+        server_params = params or GatewayHTTPServerParams(cross_channel, admin_query, auth_middleware)
         self.port = port
         self.paths = paths
-        self.cross_channel = cross_channel
-        self.admin_query = admin_query
-        self.auth_middleware = auth_middleware
+        self.cross_channel = server_params.cross_channel
+        self.admin_query = server_params.admin_query
+        self.auth_middleware = server_params.auth_middleware
         self.server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -173,10 +185,16 @@ class GatewayHTTPServer:
 def start_http_server(
     port: int,
     paths: GatewayPaths,
+    *,
+    params: GatewayHTTPServerParams | None = None,
     cross_channel: CrossChannelSession | None = None,
     admin_query: AdminCrossChannelQuery | None = None,
     auth_middleware: AuthMiddleware | None = None,
 ) -> GatewayHTTPServer:
-    server = GatewayHTTPServer(port, paths, cross_channel, admin_query, auth_middleware)
+    server = GatewayHTTPServer(
+        port,
+        paths,
+        params=params or GatewayHTTPServerParams(cross_channel, admin_query, auth_middleware),
+    )
     server.start()
     return server

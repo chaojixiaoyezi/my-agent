@@ -42,6 +42,11 @@ def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
 
 
 def add_basic_subcommands(sub: argparse._SubParsersAction) -> None:
+    _add_status_timeline_run_commands(sub)
+    _add_memory_chat_commands(sub)
+
+
+def _add_status_timeline_run_commands(sub: argparse._SubParsersAction) -> None:
     status = sub.add_parser("status", help="查看 my-agent 全局状态")
     status.add_argument("--limit", type=int, default=5, help="最多显示多少条 hot/recent/timeline 项")
     status.add_argument("--recent", action="store_true", help="显示最近子代理列表")
@@ -66,6 +71,8 @@ def add_basic_subcommands(sub: argparse._SubParsersAction) -> None:
     add_resume_context_switches(run)
     run.set_defaults(func=cmd_run)
 
+
+def _add_memory_chat_commands(sub: argparse._SubParsersAction) -> None:
     remember = sub.add_parser("remember", help="手动写入一条记忆")
     remember.add_argument("content", help="记忆内容")
     remember.add_argument("--kind", default="note", help="记忆类型，如 note/preference/fact")

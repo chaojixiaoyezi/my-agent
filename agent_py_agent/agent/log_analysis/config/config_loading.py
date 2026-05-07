@@ -22,6 +22,7 @@ from .config_coercers import (  # noqa: F401 — re-export for backward compatib
     _coerce_path_string,
     _lookup,
     _warn,
+    _WarningInput,
 )
 from .config_model import (
     LogAnalysisConfig,
@@ -142,10 +143,12 @@ def normalize_log_analysis_config(
     if config.query_default_limit > config.query_max_limit:
         _warn(
             warnings,
-            "query_default_limit",
-            config.query_default_limit,
-            defaults.query_default_limit,
-            "expected value <= query_max_limit",
+            _WarningInput(
+                "query_default_limit",
+                config.query_default_limit,
+                defaults.query_default_limit,
+                "expected value <= query_max_limit",
+            ),
         )
         config.query_default_limit = defaults.query_default_limit
 

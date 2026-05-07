@@ -16,8 +16,8 @@ from ..parsers.common import utc_now
 from .checkpoint import safe_source_id, write_json_atomic
 from .dead_letter import DeadLetterWriter
 from .pipeline import IngestFileOptions, IngestResult, file_digest
+from .pipeline_finalize import PreparedFinalize, finalize_prepared_ingest
 from .pipeline_helpers import (
-    WriteManifestParams,
     _EnrichCounts,
     _storage_result,
     _storage_summary,
@@ -32,26 +32,6 @@ from .pipeline_processing import process_records as _process_records
 
 # Re-export for backward compatibility
 write_manifest = _write_manifest
-
-
-@dataclass
-class _FinalizeIngestParams:
-    """Bundle of all _finalize_ingest_result parameters."""
-
-    pipeline: Any
-    batch_id: str
-    batch_source_id: str
-    source_path: Path
-    fmt: str
-    parser: LogParser
-    started_at: str
-    content_hash: str
-    size_bytes: int
-    counts: _EnrichCounts
-    event_ids: list[str]
-    dead_letters: DeadLetterWriter
-    storage_summary: dict[str, Any]
-    cursor_before: dict
 
 
 @dataclass
@@ -76,92 +56,6 @@ class _PrepareIngestRequest:
     file_format: str | None
 
 
-@dataclass(frozen=True)
-class _PreparedFinalize:
-    pipeline: Any
-    prepared: _PreparedIngest
-    counts: _EnrichCounts
-    event_ids: list[str]
-    storage_summary: dict[str, Any]
-
-
-def _finalize_ingest_result(params: _FinalizeIngestParams) -> IngestResult:
-    """Write manifest, finish dedup batch, commit checkpoint, return IngestResult."""
-    manifest_path = _write_manifest(_manifest_params(params))
-    _finish_dedup_batch(params, manifest_path)
-    checkpoint = _commit_checkpoint(params)
-
-    return IngestResult(
-        batch_id=params.batch_id,
-        source_id=params.batch_source_id,
-        source_path=str(params.source_path),
-        file_format=params.fmt,
-        status="stored",
-        parsed_count=params.counts.parsed_count,
-        stored_count=len(params.event_ids),
-        duplicate_count=params.counts.duplicate_count,
-        dead_letter_count=params.dead_letters.count,
-        skipped_count=params.counts.skipped_count,
-        content_hash=params.content_hash,
-        manifest_path=str(manifest_path),
-        checkpoint_path=str(params.pipeline.checkpoints.path_for(checkpoint.source_id)),
-        events_path=params.storage_summary.get("path"),
-        dead_letter_refs=params.dead_letters.refs(),
-        stored_event_ids=params.event_ids,
-    )
-
-
-def _manifest_params(params: _FinalizeIngestParams) -> WriteManifestParams:
-    return WriteManifestParams(
-        pipeline=params.pipeline,
-        batch_id=params.batch_id,
-        source_id=params.batch_source_id,
-        source_path=params.source_path,
-        file_format=params.fmt,
-        parser=params.parser,
-        started_at=params.started_at,
-        content_hash=params.content_hash,
-        size_bytes=params.size_bytes,
-        first_event_time=params.counts.first_event_time,
-        last_event_time=params.counts.last_event_time,
-        parsed_count=params.counts.parsed_count,
-        stored_count=len(params.event_ids),
-        duplicate_count=params.counts.duplicate_count,
-        skipped_count=params.counts.skipped_count,
-        dead_letter_count=params.dead_letters.count,
-        dead_letter_refs=params.dead_letters.refs(),
-        cursor_before=params.cursor_before,
-        storage_info=params.storage_summary,
-    )
-
-
-def _finish_dedup_batch(params: _FinalizeIngestParams, manifest_path: Path) -> None:
-    params.pipeline.dedup.finish_batch(
-        batch_id=params.batch_id,
-        status="stored",
-        event_count=len(params.event_ids),
-        duplicate_count=params.counts.duplicate_count,
-        dead_letter_count=params.dead_letters.count,
-        manifest_path=str(manifest_path),
-    )
-
-
-def _commit_checkpoint(params: _FinalizeIngestParams):
-    return params.pipeline.checkpoints.commit(
-        source_id=params.batch_source_id,
-        cursor_kind="file_content_hash",
-        cursor={
-            "path": str(params.source_path),
-            "format": params.fmt,
-            "size_bytes": params.size_bytes,
-            "content_hash": params.content_hash,
-            "batch_id": params.batch_id,
-        },
-        last_committed_batch_id=params.batch_id,
-        last_event_time=params.counts.last_event_time,
-    )
-
-
 def enrich_ingest_file(
     pipeline,  # IngestPipeline — lazy to avoid circular import
     path: str | Path,
@@ -172,13 +66,7 @@ def enrich_ingest_file(
     parser_id: str = "security_alert_v1",
     file_format: str | None = None,
 ) -> IngestResult:
-    """LLM: Main orchestration for ingesting a single file — dedup, storage, manifest, checkpoint.
-
-    新手说明:
-    一个文件的完整导入流程：选解析器、读文件、去重、写存储、写 manifest、
-    写 checkpoint。这是 pipeline.ingest_file 的实际实现，拆到这里避免
-    pipeline.py 太长。
-    """
+    """LLM: Main orchestration for one-file ingest: dedup, storage, manifest, checkpoint."""
     ingest_options = options or IngestFileOptions(
         source_id=source_id,
         source_product=source_product,
@@ -202,7 +90,13 @@ def enrich_ingest_file(
         source_path=str(prepared.source_path),
     )
 
-    counts, event_ids, storage_infos = _process_records(
+    counts, event_ids, storage_infos = _process_prepared_ingest(pipeline, prepared, ingest_options.source_product)
+    storage_summary = _storage_summary(storage_infos, fallback_path=pipeline.fallback_sink.events_path)
+    return finalize_prepared_ingest(PreparedFinalize(pipeline, prepared, counts, event_ids, storage_summary))
+
+
+def _process_prepared_ingest(pipeline, prepared: _PreparedIngest, source_product: str | None):
+    return _process_records(
         pipeline,
         _ProcessRecordsParams(
             source_path=prepared.source_path,
@@ -210,34 +104,9 @@ def enrich_ingest_file(
             parser=prepared.parser,
             batch_id=prepared.batch_id,
             source_id=prepared.batch_source_id,
-            source_product=ingest_options.source_product,
+            source_product=source_product,
             dead_letters=prepared.dead_letters,
         ),
-    )
-
-    storage_summary = _storage_summary(storage_infos, fallback_path=pipeline.fallback_sink.events_path)
-    return _finalize_prepared_ingest(_PreparedFinalize(pipeline, prepared, counts, event_ids, storage_summary))
-
-
-def _finalize_prepared_ingest(finalize: _PreparedFinalize) -> IngestResult:
-    prepared = finalize.prepared
-    return _finalize_ingest_result(
-        _FinalizeIngestParams(
-            pipeline=finalize.pipeline,
-            batch_id=prepared.batch_id,
-            batch_source_id=prepared.batch_source_id,
-            source_path=prepared.source_path,
-            fmt=prepared.fmt,
-            parser=prepared.parser,
-            started_at=prepared.started_at,
-            content_hash=prepared.content_hash,
-            size_bytes=prepared.size_bytes,
-            counts=finalize.counts,
-            event_ids=finalize.event_ids,
-            dead_letters=prepared.dead_letters,
-            storage_summary=finalize.storage_summary,
-            cursor_before=prepared.cursor_before,
-        )
     )
 
 

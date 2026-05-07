@@ -18,7 +18,16 @@ def build_work_order_paths(
     extra_write_roots: list[str] | None = None,
 ) -> dict[str, object]:
     task_dir = Path(task_dir) if task_dir else manager.workspace / run_id
-    paths = {
+    paths = _work_order_base_paths(task_dir)
+    paths.update(_work_order_report_paths(task_dir))
+    paths.update(_work_order_runner_paths(task_dir))
+    paths["allowed_write_roots"] = [str(task_dir)] + list(extra_write_roots or [])
+    paths["forbidden_write_roots"] = _default_forbidden_write_roots()
+    return paths
+
+
+def _work_order_base_paths(task_dir: Path) -> dict[str, str]:
+    return {
         "task_dir": str(task_dir),
         "data_dir": str(task_dir / "data"),
         "output_dir": str(task_dir / "output"),
@@ -38,17 +47,28 @@ def build_work_order_paths(
         "handoff_file": str(task_dir / "HANDOFF.md"),
         "debrief_file": str(task_dir / "DEBRIEF.md"),
         "output_json": str(task_dir / "output.json"),
-        # LLM: status_report_json is the compact parent-visible progress snapshot.
-        "status_report_json": str(task_dir / "reports" / "status_report.json"),
-        # LLM: checkpoint artifacts are compact-readable recovery facts, not transcripts.
-        "checkpoint_json": str(task_dir / "reports" / "checkpoint.json"),
-        "decision_ledger_json": str(task_dir / "reports" / "decision_ledger.json"),
-        "progress_md": str(task_dir / "reports" / "progress.md"),
-        "failing_tests_json": str(task_dir / "reports" / "failing_tests.json"),
-        "next_actions_json": str(task_dir / "reports" / "next_actions.json"),
         "dependencies_json": str(task_dir / "dependencies.json"),
         "takeover_file": str(task_dir / "TAKEOVER.md"),
         "channel_probe_file": str(task_dir / "CHANNEL_PROBE.md"),
+    }
+
+
+def _work_order_report_paths(task_dir: Path) -> dict[str, str]:
+    reports_dir = task_dir / "reports"
+    return {
+        # LLM: status_report_json is the compact parent-visible progress snapshot.
+        "status_report_json": str(reports_dir / "status_report.json"),
+        # LLM: checkpoint artifacts are compact-readable recovery facts, not transcripts.
+        "checkpoint_json": str(reports_dir / "checkpoint.json"),
+        "decision_ledger_json": str(reports_dir / "decision_ledger.json"),
+        "progress_md": str(reports_dir / "progress.md"),
+        "failing_tests_json": str(reports_dir / "failing_tests.json"),
+        "next_actions_json": str(reports_dir / "next_actions.json"),
+    }
+
+
+def _work_order_runner_paths(task_dir: Path) -> dict[str, str]:
+    return {
         "execution_context_file": str(task_dir / "EXECUTION_CONTEXT.md"),
         "execution_context_json": str(task_dir / "execution_context.json"),
         "runner_result_file": str(task_dir / "RUNNER_RESULT.md"),
@@ -56,9 +76,6 @@ def build_work_order_paths(
         "runner_prompt_file": str(task_dir / "logs" / "runner_prompt.md"),
         "runner_response_file": str(task_dir / "logs" / "runner_response.md"),
     }
-    paths["allowed_write_roots"] = [str(task_dir)] + list(extra_write_roots or [])
-    paths["forbidden_write_roots"] = _default_forbidden_write_roots()
-    return paths
 
 
 def ensure_work_order_files(task: SubAgentTask) -> None:

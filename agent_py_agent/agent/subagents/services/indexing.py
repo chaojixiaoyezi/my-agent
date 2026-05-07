@@ -31,7 +31,7 @@ from .indexing_dispatch import (
     _index_execution_context_via,
     _index_parent_planner_record_via,
 )
-from .indexing_params import LocalRecordParams
+from .indexing_params import DataclassRecordIndexParams, IndexReportParams, LocalRecordParams
 from .indexing_records import (
     index_acceptance_review_via,
     index_action_apply_via,
@@ -91,45 +91,36 @@ class SubAgentIndexingService:
 
     def index_report(
         self,
-        source_type: str,
-        source_id: str,
-        title: str,
-        report: object,
-        *,
-        event_type: str,
+        params: IndexReportParams,
     ) -> None:
         """Index a report into the local store."""
         try:
-            payload = asdict(report)
+            payload = asdict(params.report)
         except TypeError:
             # not a dataclass - convert via __dict__ or use str representation
-            payload = {"str": str(report), "repr": repr(report)}
+            payload = {"str": str(params.report), "repr": repr(params.report)}
         content = json.dumps(payload, ensure_ascii=False, indent=2)
         self.log_local_record(
             params=LocalRecordParams(
-                source_type=source_type,
-                source_id=source_id,
-                title=title,
+                source_type=params.source_type,
+                source_id=params.source_id,
+                title=params.title,
                 content=content,
                 metadata={
                     "dry_run": bool(payload.get("dry_run", False)) if isinstance(payload, dict) else False,
                     "generated_at": payload.get("generated_at", 0) if isinstance(payload, dict) else 0,
                     "summary": payload.get("summary", {}) if isinstance(payload, dict) else {},
                 },
-                event_type=event_type,
+                event_type=params.event_type,
             ),
         )
 
     def _index_dataclass_record(
         self,
-        source_type: str,
-        source_id: str,
-        title: str,
-        record: object,
-        event_type: str,
+        params: DataclassRecordIndexParams,
     ) -> None:
         """Index a dataclass record."""
-        index_dataclass_record_via(self, source_type, source_id, title, record, event_type)
+        index_dataclass_record_via(self, params)
 
     def index_action_apply(self, record: ActionApplyRecord) -> None:
         index_action_apply_via(self, record)

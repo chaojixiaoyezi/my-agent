@@ -21,35 +21,35 @@ def _build_test_and_artifact_findings(
     artifact_exists_fn: Callable[[str], bool],
 ) -> list[AcceptanceReviewFinding]:
     """Build findings for tests and artifacts."""
-    findings: list[AcceptanceReviewFinding] = []
-
     tests = _dict_list(output.get("tests", []))
     failed_tests = [item for item in tests if not bool(item.get("ok", False))]
-    findings.append(
-        AcceptanceReviewFinding(
-            name="tests_passed",
-            ok=not failed_tests,
-            severity="P1",
-            message=(
-                f"runner 记录的 {len(tests)} 条测试均通过。"
-                if tests and not failed_tests
-                else "runner 未记录测试，允许仅凭证据进入人工验收。"
-                if not tests
-                else f"存在 {len(failed_tests)} 条失败测试。"
-            ),
-            evidence_path=task.output_json,
-            created_at=created_at,
-        )
+    artifacts = _dict_list(output.get("artifacts", []))
+    return [
+        _tests_finding(task, tests, failed_tests, created_at),
+        _artifacts_finding(task, artifacts, artifact_exists_fn, created_at),
+    ]
+
+
+def _tests_finding(task, tests, failed_tests, created_at):
+    return AcceptanceReviewFinding(
+        name="tests_passed",
+        ok=not failed_tests,
+        severity="P1",
+        message=(
+            f"runner 记录的 {len(tests)} 条测试均通过。"
+            if tests and not failed_tests
+            else "runner 未记录测试，允许仅凭证据进入人工验收。"
+            if not tests
+            else f"存在 {len(failed_tests)} 条失败测试。"
+        ),
+        evidence_path=task.output_json,
+        created_at=created_at,
     )
 
-    artifacts = _dict_list(output.get("artifacts", []))
-    missing_artifacts = [
-        str(item.get("path", "") or "")
-        for item in artifacts
-        if str(item.get("path", "") or "").strip()
-        and not artifact_exists_fn(str(item.get("path", "") or ""))
-    ]
-    findings.append(
+
+def _artifacts_finding(task, artifacts, artifact_exists_fn, created_at):
+    missing_artifacts = _missing_artifacts(artifacts, artifact_exists_fn)
+    return (
         AcceptanceReviewFinding(
             name="artifact_paths_exist",
             ok=not missing_artifacts,
@@ -63,7 +63,15 @@ def _build_test_and_artifact_findings(
             created_at=created_at,
         )
     )
-    return findings
+
+
+def _missing_artifacts(artifacts, artifact_exists_fn):
+    return [
+        str(item.get("path", "") or "")
+        for item in artifacts
+        if str(item.get("path", "") or "").strip()
+        and not artifact_exists_fn(str(item.get("path", "") or ""))
+    ]
 
 
 def _check_artifact_exists(

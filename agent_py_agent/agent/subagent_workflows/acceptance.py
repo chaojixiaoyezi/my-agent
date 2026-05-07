@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Parent-side acceptance planning for subagent workflows."""
+"""LLM: parent-side acceptance planning keeps final verification outside worker self-report."""
 
 from dataclasses import dataclass, field, is_dataclass
 from typing import Any
@@ -33,6 +33,16 @@ class ParentAcceptancePlan:
         """Return human-readable check text for renderers that need strings."""
 
         return [item.text for item in self.items]
+
+
+@dataclass(frozen=True)
+class _AcceptanceItemSource:
+    """Bundle shared labels for parent acceptance item expansion."""
+
+    source: str
+    category: str
+    id_prefix: str
+    transform: Any | None = None
 
 
 _DEFAULT_ANTI_ACCEPTANCE_ITEMS = (
@@ -73,9 +83,7 @@ def plan_parent_acceptance(
     _extend_items(
         items,
         template.parent_acceptance,
-        source="template.parent_acceptance",
-        category="template",
-        id_prefix="template",
+        _AcceptanceItemSource("template.parent_acceptance", "template", "template"),
     )
     _extend_contract_items(items, contract)
     _add_default_anti_acceptance_items(items)
@@ -131,30 +139,23 @@ def _extend_contract_items(
         _extend_items(
             items,
             _as_list(contract.get(key)),
-            source=source,
-            category=category,
-            id_prefix=id_prefix,
-            transform=transform,
+            _AcceptanceItemSource(source, category, id_prefix, transform),
         )
 
 
 def _extend_items(
     items: list[ParentAcceptanceItem],
     values: list[str],
-    *,
-    source: str,
-    category: str,
-    id_prefix: str,
-    transform: Any | None = None,
+    item_source: _AcceptanceItemSource,
 ) -> None:
     for index, value in enumerate(values, start=1):
-        text = transform(value) if transform else value
+        text = item_source.transform(value) if item_source.transform else value
         items.append(
             ParentAcceptanceItem(
-                id=f"{id_prefix}_{index}",
+                id=f"{item_source.id_prefix}_{index}",
                 text=text,
-                source=source,
-                category=category,
+                source=item_source.source,
+                category=item_source.category,
             )
         )
 

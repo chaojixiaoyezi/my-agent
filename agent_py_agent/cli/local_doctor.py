@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..agent.core import SimpleAgent
@@ -21,22 +22,39 @@ from ..agent.gateway import (
 from .common import _memory_record_count
 
 
-def _add_doctor_check(
-    checks: list[dict],
-    *,
-    name: str,
-    ok: bool,
-    severity: str,
-    message: str,
-    details: dict | None = None,
-) -> None:
+@dataclass(frozen=True)
+class DoctorCheckRequest:
+    name: str
+    ok: bool
+    severity: str
+    message: str
+    details: dict | None = None
+
+
+@dataclass(frozen=True)
+class GatewayQueueCheckContext:
+    paths: object
+    counts: dict
+    agent: object
+
+
+@dataclass(frozen=True)
+class TaskFactSourceRequest:
+    agent: SimpleAgent
+    task: object
+    task_dir: Path
+    rel_path: str
+    source_type: str
+
+
+def _add_doctor_check(checks: list[dict], request: DoctorCheckRequest) -> None:
     checks.append(
         {
-            "name": name,
-            "ok": ok,
-            "severity": "ok" if ok else severity,
-            "message": message,
-            "details": details or {},
+            "name": request.name,
+            "ok": request.ok,
+            "severity": "ok" if request.ok else request.severity,
+            "message": request.message,
+            "details": request.details or {},
         }
     )
 
@@ -45,11 +63,13 @@ def _add_doctor_check(
 def _check_local_store_open(checks: list[dict], stats: dict) -> None:
     _add_doctor_check(
         checks,
-        name="local_store_open",
-        ok=True,
-        severity="P0",
-        message="LocalStore SQLite 可以打开。",
-        details=stats,
+        DoctorCheckRequest(
+            name="local_store_open",
+            ok=True,
+            severity="P0",
+            message="LocalStore SQLite 可以打开。",
+            details=stats,
+        ),
     )
 
 
@@ -57,11 +77,13 @@ def _check_memory_index(checks: list[dict], suggestions: list[str], memory_count
     memory_ok = memory_count == memory_indexed
     _add_doctor_check(
         checks,
-        name="memory_index",
-        ok=memory_ok,
-        severity="P1",
-        message=f"JSONL 记忆 {memory_count} 条，LocalStore memory 索引 {memory_indexed} 条。",
-        details={"memory_jsonl": memory_count, "memory_indexed": memory_indexed},
+        DoctorCheckRequest(
+            name="memory_index",
+            ok=memory_ok,
+            severity="P1",
+            message=f"JSONL 记忆 {memory_count} 条，LocalStore memory 索引 {memory_indexed} 条。",
+            details={"memory_jsonl": memory_count, "memory_indexed": memory_indexed},
+        ),
     )
     if not memory_ok:
         suggestions.append("运行 `my-agent local-rebuild --source memory` 补齐记忆索引。")
@@ -70,50 +92,60 @@ def _check_memory_index(checks: list[dict], suggestions: list[str], memory_count
 def _check_content_files(checks: list[dict], suggestions: list[str], missing_files: list, limit: int) -> None:
     _add_doctor_check(
         checks,
-        name="local_store_content_files",
-        ok=not missing_files,
-        severity="P1",
-        message=f"LocalStore 正文文件缺失 {len(missing_files)} 条。",
-        details={"missing": missing_files},
+        DoctorCheckRequest(
+            name="local_store_content_files",
+            ok=not missing_files,
+            severity="P1",
+            message=f"LocalStore 正文文件缺失 {len(missing_files)} 条。",
+            details={"missing": missing_files},
+        ),
     )
     if missing_files:
         suggestions.append("运行 `my-agent local-rebuild --reset` 从原始文件事实源重建索引。")
 
 
-def _check_gateway_queue(checks: list[dict], suggestions: list[str], paths, counts: dict, agent) -> None:
-    stale_processing = gateway_stale_processing(paths, agent.config.gateway_processing_timeout_seconds)
+def _check_gateway_queue(checks: list[dict], suggestions: list[str], ctx: GatewayQueueCheckContext) -> None:
+    stale_processing = gateway_stale_processing(ctx.paths, ctx.agent.config.gateway_processing_timeout_seconds)
     _add_doctor_check(
         checks,
-        name="gateway_queue",
-        ok=not stale_processing,
-        severity="P1",
-        message=f"gateway 队列 {json.dumps(counts, ensure_ascii=False, sort_keys=True)}；stale processing={len(stale_processing)}。",
-        details={"counts": counts, "stale_processing": stale_processing},
+        DoctorCheckRequest(
+            name="gateway_queue",
+            ok=not stale_processing,
+            severity="P1",
+            message=f"gateway 队列 {json.dumps(ctx.counts, ensure_ascii=False, sort_keys=True)}；stale processing={len(stale_processing)}。",
+            details={"counts": ctx.counts, "stale_processing": stale_processing},
+        ),
     )
     if stale_processing:
         suggestions.append("运行 `my-agent gateway restart --force` 或 `my-agent local-doctor --repair` 处理卡住的 processing 请求。")
 
 
 def _check_work_orders(checks: list[dict], suggestions: list[str], agent, limit: int) -> None:
-    invalid_work_orders = []
-    for task in agent.subagents.list_runs():
-        validation = agent.subagents.validate_work_order(task.id)
-        if not validation.ok:
-            invalid_work_orders.append(
-                {"run_id": task.id, "missing": validation.missing, "warnings": validation.warnings}
-            )
-            if len(invalid_work_orders) >= limit:
-                break
+    invalid_work_orders = _collect_invalid_work_orders(agent, limit)
     _add_doctor_check(
         checks,
-        name="subagent_work_orders",
-        ok=not invalid_work_orders,
-        severity="P1",
-        message=f"subagent 工单缺失关键文件 {len(invalid_work_orders)} 条。",
-        details={"invalid": invalid_work_orders},
+        DoctorCheckRequest(
+            name="subagent_work_orders",
+            ok=not invalid_work_orders,
+            severity="P1",
+            message=f"subagent 工单缺失关键文件 {len(invalid_work_orders)} 条。",
+            details={"invalid": invalid_work_orders},
+        ),
     )
     if invalid_work_orders:
         suggestions.append("运行 `my-agent subagents-apply-actions --apply --action repair_work_order` 修复缺失工单文件。")
+
+
+def _collect_invalid_work_orders(agent, limit: int) -> list[dict]:
+    invalid_work_orders = []
+    for task in agent.subagents.list_runs():
+        validation = agent.subagents.validate_work_order(task.id)
+        if validation.ok:
+            continue
+        invalid_work_orders.append({"run_id": task.id, "missing": validation.missing, "warnings": validation.warnings})
+        if len(invalid_work_orders) >= limit:
+            break
+    return invalid_work_orders
 
 
 def build_local_doctor_report(agent: SimpleAgent, *, limit: int = 20) -> dict:
@@ -137,17 +169,19 @@ def build_local_doctor_report(agent: SimpleAgent, *, limit: int = 20) -> dict:
         exists = path.exists()
         _add_doctor_check(
             checks,
-            name=f"path_{label}",
-            ok=exists or label in {"memory_path", "gateway_workspace", "subagent_workspace"},
-            severity="P1",
-            message=f"{label} {'存在' if exists else '尚未创建'}: {path}",
-            details={"path": str(path), "exists": exists},
+            DoctorCheckRequest(
+                name=f"path_{label}",
+                ok=exists or label in {"memory_path", "gateway_workspace", "subagent_workspace"},
+                severity="P1",
+                message=f"{label} {'存在' if exists else '尚未创建'}: {path}",
+                details={"path": str(path), "exists": exists},
+            ),
         )
     _check_memory_index(checks, suggestions, memory_count, memory_indexed)
     missing_files = agent.local_store.missing_content_files(limit=limit)
     _check_content_files(checks, suggestions, missing_files, limit)
     counts = gateway_request_counts(paths)
-    _check_gateway_queue(checks, suggestions, paths, counts, agent)
+    _check_gateway_queue(checks, suggestions, GatewayQueueCheckContext(paths, counts, agent))
     _check_work_orders(checks, suggestions, agent, limit)
     if stats["record_count"] == 0 and (memory_count or agent.subagents.list_runs() or any(counts.values())):
         suggestions.append("LocalStore 为空但磁盘上已有事实源，建议运行 `my-agent local-rebuild`。")
@@ -178,21 +212,25 @@ def rebuild_subagent_index(agent: SimpleAgent) -> int:
             "reports/acceptance_review.json": "subagent_acceptance_review",
             "reports/patch_review.json": "subagent_patch_review",
         }.items():
-            path = task_dir / rel_path
-            if not path.exists():
-                continue
-            content = path.read_text(encoding="utf-8", errors="replace")
-            source_id = task.id if rel_path == "execution_context.json" else f"{task.id}:{rel_path}"
-            agent.local_store.log_record(
-                source_type=source_type,
-                source_id=source_id,
-                title=f"{source_type} {task.id}",
-                content=content,
-                metadata={"run_id": task.id, "path": str(path), "rebuilt": True},
-                event_type=f"{source_type}_rebuilt",
-            )
-            count += 1
+            count += _log_task_fact_source(TaskFactSourceRequest(agent, task, task_dir, rel_path, source_type))
     return count
+
+
+def _log_task_fact_source(request: TaskFactSourceRequest) -> int:
+    path = request.task_dir / request.rel_path
+    if not path.exists():
+        return 0
+    content = path.read_text(encoding="utf-8", errors="replace")
+    source_id = request.task.id if request.rel_path == "execution_context.json" else f"{request.task.id}:{request.rel_path}"
+    request.agent.local_store.log_record(
+        source_type=request.source_type,
+        source_id=source_id,
+        title=f"{request.source_type} {request.task.id}",
+        content=content,
+        metadata={"run_id": request.task.id, "path": str(path), "rebuilt": True},
+        event_type=f"{request.source_type}_rebuilt",
+    )
+    return 1
 
 
 def rebuild_local_store(agent: SimpleAgent, *, sources: set[str], reset: bool = False) -> dict:

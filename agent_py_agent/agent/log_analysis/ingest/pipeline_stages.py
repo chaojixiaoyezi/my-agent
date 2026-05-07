@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..parsers.base import LogParser, ParserError
+from ..parsers.base import LogParser, ParseContext, ParserError
 from .dead_letter import DeadLetterRecord
 
 # Re-use WriteManifestParams from pipeline_helpers for ManifestWriter
@@ -83,10 +83,7 @@ class RecordIterator:
         try:
             parsed = self.parser.parse_json_line(
                 text,
-                raw_ref=raw_ref,
-                source_id=self.source_id,
-                source_product=self.source_product,
-                line_no=line_no,
+                request=ParseContext(raw_ref, self.source_id, self.source_product, line_no),
             )
         except ParserError as exc:
             self.dead_letters.write(
@@ -126,10 +123,7 @@ class RecordIterator:
         try:
             parsed = self.parser.parse_csv_row(
                 row,
-                raw_ref=raw_ref,
-                source_id=self.source_id,
-                source_product=self.source_product,
-                line_no=line_no,
+                request=ParseContext(raw_ref, self.source_id, self.source_product, line_no),
             )
         except ParserError as exc:
             self.dead_letters.write(

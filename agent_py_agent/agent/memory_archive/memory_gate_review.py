@@ -36,6 +36,14 @@ class MemoryGateReviewResult:
     skill_spark_gate_json: Path
 
 
+@dataclass(frozen=True)
+class _ReviewFieldsParams:
+    candidate: dict[str, object]
+    decision: str
+    request: MemoryGateReviewRequest
+    reviewed_at: str
+
+
 def record_memory_gate_review(
     agent_run_workspace_root: Path,
     request: MemoryGateReviewRequest,
@@ -65,7 +73,7 @@ def _apply_review_decision(
     for candidate in candidates:
         item = dict(candidate)
         if str(item.get("candidate_id") or "") == request.candidate_id:
-            _apply_review_fields(item, normalized, request, reviewed_at)
+            _apply_review_fields(_ReviewFieldsParams(item, normalized, request, reviewed_at))
             reviewed = item
         updated.append(item)
     if reviewed is None:
@@ -73,21 +81,18 @@ def _apply_review_decision(
     return updated, reviewed
 
 
-def _apply_review_fields(
-    candidate: dict[str, object],
-    decision: str,
-    request: MemoryGateReviewRequest,
-    reviewed_at: str,
-) -> None:
-    status, promotion_status, requires_more_review = _decision_status(decision)
-    candidate["review_decision"] = decision
+def _apply_review_fields(params: _ReviewFieldsParams) -> None:
+    # LLM: review field mutation is local to the run workspace and never exports automatically.
+    status, promotion_status, requires_more_review = _decision_status(params.decision)
+    candidate = params.candidate
+    candidate["review_decision"] = params.decision
     candidate["review_status"] = status
     candidate["promotion_status"] = promotion_status
     candidate["review_required"] = requires_more_review
     candidate["gate_status"] = "needs_review" if requires_more_review else "reviewed"
-    candidate["reviewer"] = request.reviewer or "parent"
-    candidate["review_note"] = request.note
-    candidate["reviewed_at"] = reviewed_at
+    candidate["reviewer"] = params.request.reviewer or "parent"
+    candidate["review_note"] = params.request.note
+    candidate["reviewed_at"] = params.reviewed_at
 
 
 def _decision_status(decision: str) -> tuple[str, str, bool]:

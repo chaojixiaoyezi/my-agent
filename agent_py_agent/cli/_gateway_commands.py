@@ -5,6 +5,7 @@ import argparse
 import json
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..agent.capability_config import load_capability_config
@@ -41,6 +42,7 @@ from ._gateway_state_helpers import (
     _write_gateway_start_files,
     _write_gateway_stop_request,
 )
+from ._gateway_stop_helpers import _force_kill_gateway
 from .common import ROOT, make_agent, make_capability_router
 from .daemon import _resolve_daemon_options
 from .gateway_service import (
@@ -58,6 +60,14 @@ from .models import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _GatewayRunBuildRequest:
+    agent: object
+    paths: GatewayPaths
+    options: GatewayRunOptions
+    args: argparse.Namespace
 
 
 def _resolve_gateway_options(agent, args):
@@ -81,11 +91,12 @@ def _gateway_start_options_from_args(args) -> GatewayStartOptions:
     return GatewayStartOptions(config=Path(args.config), force_lock=bool(args.force_lock))
 
 
-def _gateway_run_context_from_args(agent, paths, options: GatewayRunOptions, args) -> GatewayRunContext:
+def _gateway_run_context_from_args(request: _GatewayRunBuildRequest) -> GatewayRunContext:
+    args = request.args
     return GatewayRunContext(
-        agent=agent,
-        paths=paths,
-        options=options,
+        agent=request.agent,
+        paths=request.paths,
+        options=request.options,
         config_path=Path(args.config),
         note=args.note or "",
         take_over_by=args.take_over_by or "",
@@ -94,8 +105,21 @@ def _gateway_run_context_from_args(agent, paths, options: GatewayRunOptions, arg
     )
 
 
-def _write_gateway_state(paths, data: dict) -> None:
-    write_json_file(paths.state, data)
+def _gateway_context_with_router(run_context: GatewayRunContext, args) -> GatewayRunContext:
+    capability_config = load_capability_config(args.capability_config)
+    router = make_capability_router(run_context.agent, capability_config, args.skill_dir)
+    return GatewayRunContext(
+        agent=run_context.agent,
+        paths=run_context.paths,
+        options=run_context.options,
+        config_path=run_context.config_path,
+        note=run_context.note,
+        take_over_by=run_context.take_over_by,
+        locked_files=run_context.locked_files,
+        force_lock=run_context.force_lock,
+        router=router,
+        capability_config=capability_config,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -154,25 +178,12 @@ def cmd_gateway_run(args) -> int:
         return 2
 
     http_port = getattr(agent.config, "gateway_port", 0) or 0
-    run_context = _gateway_run_context_from_args(agent, paths, options, args)
+    run_context = _gateway_run_context_from_args(_GatewayRunBuildRequest(agent, paths, options, args))
     stop_event, heartbeat_thread, request_thread, http_server = _cmd_gateway_run_threads(
         GatewayThreadsRequest(context=run_context, requeued=requeued, failed=0, http_port=http_port)
     )
 
-    capability_config = load_capability_config(args.capability_config)
-    router = make_capability_router(agent, capability_config, args.skill_dir)
-    watch_context = GatewayRunContext(
-        agent=run_context.agent,
-        paths=run_context.paths,
-        options=run_context.options,
-        config_path=run_context.config_path,
-        note=run_context.note,
-        take_over_by=run_context.take_over_by,
-        locked_files=run_context.locked_files,
-        force_lock=run_context.force_lock,
-        router=router,
-        capability_config=capability_config,
-    )
+    watch_context = _gateway_context_with_router(run_context, args)
     exit_code = 0
     try:
         report = _run_gateway_watch(watch_context)
@@ -257,21 +268,8 @@ def cmd_gateway_stop(args) -> int:
         )
         print(f"gateway stopped pid={pid}")
         return 0
-    if args.kill:
-        terminate_pid(pid)
-        if wait_for_pid_exit(pid, 5):
-            write_json_file(paths.state, {"status": "killed", "pid": pid, "stopped_at": time.time()})
-            log_gateway_event(
-                agent,
-                "gateway_killed",
-                {"status": "killed", "pid": pid, "updated_at": time.time()},
-            )
-            try:
-                paths.pid.unlink()
-            except OSError:
-                pass
-            print(f"gateway killed pid={pid}")
-            return 0
+    if args.kill and _force_kill_gateway(agent, paths, pid):
+        return 0
     print(f"gateway stop requested but still running pid={pid}", file=sys.stderr)
     return 2
 

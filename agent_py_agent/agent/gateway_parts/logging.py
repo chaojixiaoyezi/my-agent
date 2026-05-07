@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
+# LLM: gateway log payload metadata is rendered through small contexts to keep indexing stable.
 @dataclass(frozen=True)
 class _GatewayPayloadRenderContext:
 
@@ -36,15 +37,23 @@ class GatewayIndexPayloadOptions:
     event_type: str = "gateway_request_rebuilt"
 
 
+@dataclass(frozen=True)
+class GatewayPayloadLogParams:
+    event_type: str
+    request_path: Path | None = None
+    response_path: Path | None = None
+
+
 def log_gateway_payload(
     agent: SimpleAgent,
     payload: dict,
     *,
+    params: GatewayPayloadLogParams | None = None,
     event_type: str,
     request_path: Path | None = None,
     response_path: Path | None = None,
 ) -> None:
-
+    log_params = params or GatewayPayloadLogParams(event_type, request_path, response_path)
     request_id = str(payload.get("id") or "")
     if not request_id:
         return
@@ -56,12 +65,16 @@ def log_gateway_payload(
             source_id=request_id,
             title=f"Gateway {kind} {status} {request_id}",
             content=_gateway_payload_content(
-                _GatewayPayloadRenderContext(payload, request_id, kind, status, request_path, response_path)
+                _GatewayPayloadRenderContext(
+                    payload, request_id, kind, status, log_params.request_path, log_params.response_path
+                )
             ),
             metadata=_gateway_payload_metadata(
-                _GatewayPayloadRenderContext(payload, request_id, kind, status, request_path, response_path)
+                _GatewayPayloadRenderContext(
+                    payload, request_id, kind, status, log_params.request_path, log_params.response_path
+                )
             ),
-            event_type=event_type,
+            event_type=log_params.event_type,
         )
     except Exception as exc:
         _report_gateway_side_effect_error("log_gateway_payload", request_id, exc)

@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from ...agent.gateway import (
     gateway_paths,
     gateway_response_path,
-    new_gateway_request_id,
 )
 from ...agent.memory_archive import (
     CompressionSnapshot,
@@ -88,19 +88,29 @@ def _run_cross_day_resume(paths, request_id):
         return {"ok": False, "error": f"memory-resume JSON parse failed: {exc}", "stdout": resume.stdout}, resume.returncode
 
 
-def _verify_cross_day_resume(resume_payload, returncode, request_id, request_path, response_path):
+@dataclass(frozen=True)
+class CrossDayResumeVerifyRequest:
+    resume_payload: dict
+    returncode: int
+    request_id: str
+    request_path: Path
+    response_path: Path
+
+
+def _verify_cross_day_resume(request: CrossDayResumeVerifyRequest):
+    resume_payload = request.resume_payload
     gateway_sources = resume_payload.get("gateway_fact_sources", []) if isinstance(resume_payload, dict) else []
     recommended_reads = resume_payload.get("resume", {}).get("recommended_read_paths", []) if isinstance(resume_payload, dict) else []
     context_block = resume_payload.get("brief", {}).get("context_block", "") if isinstance(resume_payload, dict) else ""
     return (
-        returncode == 0
-        and bool(request_id)
-        and request_path.exists()
-        and response_path.exists()
-        and any(item.get("request_id") == request_id for item in gateway_sources if isinstance(item, dict))
-        and str(request_path) in recommended_reads
-        and str(response_path) in recommended_reads
-        and str(response_path) in context_block
+        request.returncode == 0
+        and bool(request.request_id)
+        and request.request_path.exists()
+        and request.response_path.exists()
+        and any(item.get("request_id") == request.request_id for item in gateway_sources if isinstance(item, dict))
+        and str(request.request_path) in recommended_reads
+        and str(request.response_path) in recommended_reads
+        and str(request.response_path) in context_block
     )
 
 
@@ -126,7 +136,9 @@ def run_scenario_gateway_cross_day_resume_case(args) -> int:
     print_scenario_step(3, "Run memory-resume against the real gateway request id")
     resume_payload, returncode = _run_cross_day_resume(paths, request_id)
 
-    final_ok = _verify_cross_day_resume(resume_payload, returncode, request_id, request_path, response_path)
+    final_ok = _verify_cross_day_resume(
+        CrossDayResumeVerifyRequest(resume_payload, returncode, request_id, request_path, response_path)
+    )
     write_scenario_summary(
         paths,
         ok=final_ok,
@@ -153,44 +165,35 @@ def _append_gateway_cross_day_resume_clues(
     request_path: Path,
     response_path: Path,
 ) -> None:
+    append_raw_event(root, _gateway_cross_day_raw_event(request_id))
+    append_snapshot(root, _gateway_cross_day_snapshot(request_id, request_path, response_path))
 
-    append_raw_event(
-        root,
-        RawMemoryEvent(
-            event_id=f"raw-scenario-gateway-cross-day-{request_id}",
-            session_id="session-scenario-gateway-cross-day",
-            request_id=request_id,
-            speaker="user",
-            target="assistant",
-            action="message",
-            status="ok",
-            content_preview="gateway cross-day resume drill from the previous day",
-            source="gateway",
-            created_at="2026-04-29T23:58:00+00:00",
-        ),
+
+def _gateway_cross_day_raw_event(request_id: str) -> RawMemoryEvent:
+    return RawMemoryEvent(
+        event_id=f"raw-scenario-gateway-cross-day-{request_id}",
+        session_id="session-scenario-gateway-cross-day",
+        request_id=request_id,
+        speaker="user",
+        target="assistant",
+        action="message",
+        status="ok",
+        content_preview="gateway cross-day resume drill from the previous day",
+        source="gateway",
+        created_at="2026-04-29T23:58:00+00:00",
     )
-    append_snapshot(
-        root,
-        CompressionSnapshot(
-            snapshot_id=f"snapshot-scenario-gateway-cross-day-{request_id}",
-            session_id="session-scenario-gateway-cross-day",
-            compression_id=f"compression-scenario-gateway-cross-day-{request_id}",
-            turn_range={
-                "kind": "recovery_snapshot",
-                "source": "gateway",
-                "request_id": request_id,
-            },
-            user_intents=["continue the previous gateway request after a day boundary"],
-            assistant_actions=["gateway response is available; read request and response JSON before continuing"],
-            dispatch_events=[
-                {
-                    "source": "gateway",
-                    "request_id": request_id,
-                    "status": "done",
-                }
-            ],
-            content_paths=[str(request_path), str(response_path)],
-            next_actions=["Read the gateway request JSON and response JSON before taking action."],
-            created_at="2026-04-30T00:05:00+00:00",
-        ),
+
+
+def _gateway_cross_day_snapshot(request_id: str, request_path: Path, response_path: Path) -> CompressionSnapshot:
+    return CompressionSnapshot(
+        snapshot_id=f"snapshot-scenario-gateway-cross-day-{request_id}",
+        session_id="session-scenario-gateway-cross-day",
+        compression_id=f"compression-scenario-gateway-cross-day-{request_id}",
+        turn_range={"kind": "recovery_snapshot", "source": "gateway", "request_id": request_id},
+        user_intents=["continue the previous gateway request after a day boundary"],
+        assistant_actions=["gateway response is available; read request and response JSON before continuing"],
+        dispatch_events=[{"source": "gateway", "request_id": request_id, "status": "done"}],
+        content_paths=[str(request_path), str(response_path)],
+        next_actions=["Read the gateway request JSON and response JSON before taking action."],
+        created_at="2026-04-30T00:05:00+00:00",
     )

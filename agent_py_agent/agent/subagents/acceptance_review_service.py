@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .acceptance_review_verifier import build_verifier_checks
 from .models import SubAgentTask
 from .parsing import _dict_list
 from .reports import AcceptanceReviewFinding, AcceptanceReviewRecord
@@ -82,17 +83,33 @@ class AcceptanceReviewRequest:
     now: float | None = None
 
 
+@dataclass(frozen=True)
+class AcceptanceReviewInputs:
+    """LLM: loaded runner data for a single acceptance review."""
+
+    output: dict
+    runner: dict
+    findings: list[AcceptanceReviewFinding]
+    verifier_checks: list[AcceptanceReviewFinding]
+
+
+@dataclass(frozen=True)
+class AcceptanceDecisionRequest:
+    """LLM: bundle acceptance status writes so mutation arguments do not drift."""
+
+    ok: bool
+    message: str
+    now: float
+
+
 def review_acceptance_task(manager, request: AcceptanceReviewRequest) -> AcceptanceReviewRecord:
     """对单个任务执行验收判断，并按需写回状态。"""
     task = request.task
     now = request.now if request.now is not None else time.time()
     before_status = task.status
     before_verification = task.verification_status
-    output = _read_json_object(Path(task.output_json))
-    runner = _read_json_object(Path(task.runner_result_json))
-    findings = manager.acceptance_findings(task, output, runner, now)
-    verifier_checks = _build_verifier_checks(task, now)
-    review_checks = [*findings, *verifier_checks]
+    inputs = _acceptance_review_inputs(manager, task, now)
+    review_checks = [*inputs.findings, *inputs.verifier_checks]
     ok = all(item.ok or item.severity == "P2" for item in review_checks)
     ready = task.status == "AWAITING_ACCEPTANCE" or task.verification_status == "NEEDS_ACCEPTANCE"
     decision = "ACCEPT" if ok else "REJECT"
@@ -100,7 +117,7 @@ def review_acceptance_task(manager, request: AcceptanceReviewRequest) -> Accepta
     applied = False
 
     if request.apply and ready:
-        _apply_acceptance_decision(manager, task, ok=ok, message=message, now=now)
+        _apply_acceptance_decision(manager, task, request=AcceptanceDecisionRequest(ok, message, now))
         applied = True
         manager._append_task_work_log(
             task,
@@ -109,6 +126,45 @@ def review_acceptance_task(manager, request: AcceptanceReviewRequest) -> Accepta
     elif request.apply and not ready:
         message = f"任务当前状态不在等待验收范围内，未写回: status={task.status} verify={task.verification_status}"
 
+    return _acceptance_record(
+        request,
+        inputs,
+        review_checks=review_checks,
+        decision=decision,
+        message=message,
+        before_status=before_status,
+        before_verification=before_verification,
+        applied=applied,
+        ok=ok,
+        now=now,
+    )
+
+
+def _acceptance_review_inputs(manager, task: SubAgentTask, now: float) -> AcceptanceReviewInputs:
+    output = _read_json_object(Path(task.output_json))
+    runner = _read_json_object(Path(task.runner_result_json))
+    return AcceptanceReviewInputs(
+        output=output,
+        runner=runner,
+        findings=manager.acceptance_findings(task, output, runner, now),
+        verifier_checks=build_verifier_checks(task, now),
+    )
+
+
+def _acceptance_record(
+    request: AcceptanceReviewRequest,
+    inputs: AcceptanceReviewInputs,
+    *,
+    review_checks: list[AcceptanceReviewFinding],
+    decision: str,
+    message: str,
+    before_status: str,
+    before_verification: str,
+    applied: bool,
+    ok: bool,
+    now: float,
+) -> AcceptanceReviewRecord:
+    task = request.task
     return AcceptanceReviewRecord(
         id=_new_id("accept"),
         run_id=task.id,
@@ -124,13 +180,13 @@ def review_acceptance_task(manager, request: AcceptanceReviewRequest) -> Accepta
         reviewer=request.reviewer,
         note=request.note,
         evidence_count=len(task.evidence),
-        test_count=len(_dict_list(output.get("tests", []))),
-        artifact_count=len(_dict_list(output.get("artifacts", []))),
-        findings=findings,
-        worker_claims=_worker_claims(task, output, runner),
-        evidence_facts=_evidence_facts(task, output),
+        test_count=len(_dict_list(inputs.output.get("tests", []))),
+        artifact_count=len(_dict_list(inputs.output.get("artifacts", []))),
+        findings=inputs.findings,
+        worker_claims=_worker_claims(task, inputs.output, inputs.runner),
+        evidence_facts=_evidence_facts(task, inputs.output),
         parent_conclusions=_parent_conclusions(decision, message, review_checks),
-        verifier_checks=verifier_checks,
+        verifier_checks=inputs.verifier_checks,
         evidence_paths=[item.evidence_path for item in review_checks if item.evidence_path],
         created_at=now,
     )
@@ -143,7 +199,14 @@ def _acceptance_message(ok: bool, findings) -> str:
     return "验收未通过: " + "；".join(failed[:3])
 
 
-def _apply_acceptance_decision(manager, task: SubAgentTask, *, ok: bool, message: str, now: float) -> None:
+def _apply_acceptance_decision(
+    manager,
+    task: SubAgentTask,
+    *,
+    request: AcceptanceDecisionRequest,
+) -> None:
+    ok = request.ok
+    message = request.message
     if ok:
         task.status = "DONE"
         task.verification_status = "VERIFIED"
@@ -154,9 +217,9 @@ def _apply_acceptance_decision(manager, task: SubAgentTask, *, ok: bool, message
         task.verification_status = "FAILED"
         task.failure_type = "acceptance_failed"
         task.result = message
-    task.ended_at = now
-    task.updated_at = now
-    task.heartbeat_at = now
+    task.ended_at = request.now
+    task.updated_at = request.now
+    task.heartbeat_at = request.now
     manager.save(task)
 
 
@@ -203,53 +266,3 @@ def _parent_conclusions(
     conclusions = [f"decision={decision}", message]
     conclusions.extend(f"{item.severity}:{item.name}" for item in failed[:5])
     return conclusions
-
-
-def _build_verifier_checks(task: SubAgentTask, created_at: float) -> list[AcceptanceReviewFinding]:
-    """LLM: Deterministic verifier pass over evidence packets and parent findings."""
-    packet_ids = {item.id for item in task.evidence_packets if item.id}
-    packets_with_refs = [
-        item for item in task.evidence_packets if item.evidence_refs or item.artifact_refs
-    ]
-    unresolved_risks = [
-        risk
-        for packet in task.evidence_packets
-        for risk in packet.unresolved_risks
-        if str(risk).strip()
-    ]
-    findings_without_chain = [
-        item
-        for item in task.findings
-        if not item.evidence_refs
-        and not any(packet_id in packet_ids for packet_id in item.evidence_packet_ids)
-    ]
-    return [
-        AcceptanceReviewFinding(
-            name="verifier_evidence_packets_traceable",
-            ok=len(packets_with_refs) == len(task.evidence_packets) and bool(packets_with_refs),
-            severity="P1",
-            message="verifier 确认 evidence packets 均有 refs。"
-            if len(packets_with_refs) == len(task.evidence_packets) and packets_with_refs
-            else "verifier 发现存在缺少 refs 的 evidence packet。",
-            evidence_path=task.output_json,
-            created_at=created_at,
-        ),
-        AcceptanceReviewFinding(
-            name="verifier_findings_cite_evidence",
-            ok=not findings_without_chain,
-            severity="P1" if findings_without_chain else "P2",
-            message="verifier 确认 findings 引用了 evidence。"
-            if not findings_without_chain else f"verifier 发现 {len(findings_without_chain)} 条 finding 缺少 evidence 引用。",
-            evidence_path=task.output_json,
-            created_at=created_at,
-        ),
-        AcceptanceReviewFinding(
-            name="verifier_no_unresolved_evidence_risks",
-            ok=not unresolved_risks,
-            severity="P1",
-            message="verifier 未发现未解决 evidence risk。"
-            if not unresolved_risks else f"verifier 发现未解决风险: {unresolved_risks[0]}",
-            evidence_path=task.output_json,
-            created_at=created_at,
-        ),
-    ]

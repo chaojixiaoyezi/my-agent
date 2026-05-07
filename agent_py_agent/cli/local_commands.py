@@ -10,8 +10,6 @@ from __future__ import annotations
 import json
 import sys
 import time
-from dataclasses import dataclass
-from typing import Any
 
 from ..agent.gateway import (
     gateway_paths,
@@ -28,96 +26,15 @@ from .local_repair_commands import (
     cmd_local_rebuild,
     rebuild_local_store,
 )
-from .local_status_payload import StatusPayloadContext, build_status_payload, resolve_gateway_status
+from .local_status_payload import (
+    GatewayStatusRequest,
+    StatusPayloadContext,
+    build_status_payload,
+    resolve_gateway_status,
+)
+from .local_status_view import StatusPrintContext, print_status_human
 from .models import LocalSearchOptions, TimelineOptions
 from .thinking_spinner import ThinkingSpinner
-
-
-def _format_gateway_section(gateway_status: str, pid: int | None, alive: bool, heartbeat_age: float, paths) -> None:
-    print("Gateway")
-    print(f"- status={gateway_status} pid={pid if pid else '-'} alive={alive}")
-    if heartbeat_age:
-        print(f"- heartbeat_age_seconds={heartbeat_age:.1f}")
-    print("- requests=" + json.dumps(gateway_request_counts(paths), ensure_ascii=False, sort_keys=True))
-    print(f"- workspace={paths.root}")
-
-
-def _format_active_work(active_work_summary) -> None:
-    from ..agent.startup_recovery import format_active_work_summary
-    print("进行中任务")
-    print("-" + format_active_work_summary(active_work_summary).replace("\n", "\n  - "))
-    if active_work_summary.active_task_count > 0:
-        print("  运行 my-agent subagents-dispatch 可继续调度")
-
-
-def _format_subagents_section(board, limit: int) -> None:
-    print("Subagents")
-    print("- summary=" + json.dumps(board.summary, ensure_ascii=False, sort_keys=True))
-    if board.hot_list:
-        print(f"- hot={len(board.hot_list)}")
-        for item in board.hot_list[: limit]:
-            flags = ",".join(item.risk_flags) if item.risk_flags else "ok"
-            print(f"  - {item.id} {item.status}/{item.verification_status} flags={flags} :: {item.goal}")
-    else:
-        print("- hot=0")
-    if board.recent:
-        print("- recent:")
-        for item in board.recent[: limit]:
-            print(f"  - {item.id} {item.status}/{item.verification_status} :: {item.goal}")
-
-
-def _format_timeline(timeline) -> None:
-    print("Timeline")
-    if not timeline:
-        print("- 暂无事件")
-    for item in timeline:
-        source = f"{item.source_type}/{item.source_id}".strip("/")
-        print(f"- {format_local_time(item.created_at)} {item.event_type} {source} :: {item.title}")
-
-
-@dataclass
-class _StatusPrintContext:
-    agent: Any
-    paths: Any
-    local_stats: dict
-    board: Any
-    timeline: list
-    gateway_status: str
-    pid: int | None
-    alive: bool
-    heartbeat_age: float
-    active_work_summary: Any
-    suggested_actions: list
-
-
-def _print_status_human(ctx: _StatusPrintContext):
-    agent = ctx.agent
-    print("MY-AGENT STATUS")
-    print(f"agent={agent.config.agent_name}")
-    print(f"workspace={agent.root}")
-    print("")
-    _format_gateway_section(ctx.gateway_status, ctx.pid, ctx.alive, ctx.heartbeat_age, ctx.paths)
-    print("")
-    print("Local Store")
-    print(f"- records={ctx.local_stats['record_count']} events={ctx.local_stats['event_count']} fts5={ctx.local_stats['fts5_enabled']}")
-    print(f"- db={ctx.local_stats['db_path']}")
-    print("")
-    if ctx.active_work_summary:
-        _format_active_work(ctx.active_work_summary)
-    else:
-        print("进行中任务")
-        print("- 暂无")
-    print("")
-    _format_subagents_section(ctx.board, agent.config.subagent_board_limit)
-    print("")
-    _format_timeline(ctx.timeline)
-    print("")
-    print("Suggested Actions")
-    if ctx.suggested_actions:
-        for item in ctx.suggested_actions:
-            print(f"- {item}")
-    else:
-        print("- 暂无，当前没有明显需要立刻处理的事项。")
 
 
 def cmd_status(args) -> int:
@@ -131,11 +48,13 @@ def cmd_status(args) -> int:
     gateway_state = read_json_file(paths.state)
     heartbeat = read_json_file(paths.heartbeat)
     gateway_status, heartbeat_age = resolve_gateway_status(
-        alive=alive,
-        gateway_state=gateway_state,
-        heartbeat=heartbeat,
-        stale_seconds=agent.config.gateway_stale_seconds,
-        now=time.time(),
+        GatewayStatusRequest(
+            alive=alive,
+            gateway_state=gateway_state,
+            heartbeat=heartbeat,
+            stale_seconds=agent.config.gateway_stale_seconds,
+            now=time.time(),
+        )
     )
 
     # 检测进行中任务
@@ -152,8 +71,11 @@ def cmd_status(args) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
-    print_ctx = _StatusPrintContext(agent, paths, local_stats, board, timeline, gateway_status, pid, alive, heartbeat_age, active_work_summary, payload["suggestions"])
-    _print_status_human(print_ctx)
+    print_ctx = StatusPrintContext(
+        agent, paths, local_stats, board, timeline, gateway_status, pid, alive, heartbeat_age, active_work_summary,
+        request_counts, payload["suggestions"],
+    )
+    print_status_human(print_ctx)
     return 0
 
 

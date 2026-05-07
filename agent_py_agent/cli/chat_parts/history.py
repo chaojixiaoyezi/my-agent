@@ -2,8 +2,15 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
 
 MAX_HISTORY_TURNS = 8
+
+
+@dataclass(frozen=True)
+class ConversationTurn:
+    user_message: str
+    assistant_message: str
 
 
 def build_history_context(
@@ -26,12 +33,11 @@ def build_history_context(
 def append_conversation_turn(
     conversation_history: list[tuple[str, str]],
     history_lock: threading.Lock,
-    user_message: str,
-    assistant_message: str,
+    turn: ConversationTurn,
     *,
     max_turns: int = MAX_HISTORY_TURNS,
 ) -> None:
     with history_lock:
-        conversation_history.append((user_message, assistant_message))
+        conversation_history.append((turn.user_message, turn.assistant_message))
         if len(conversation_history) > max_turns * 2:
             conversation_history[:] = conversation_history[-max_turns:]

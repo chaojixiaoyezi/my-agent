@@ -62,42 +62,8 @@ class FailureIntrospector:
         runner_result: SubAgentRunnerResult,
         failure_analysis: FailureAnalysis,
     ) -> FailureIntrospection:
-        current_timeout = self._get_current_timeout(task)
-        tool_rounds = getattr(runner_result, "tool_rounds", 0)
-        error_msg = runner_result.runner_last_error or runner_result.message or ""
-
-        prompt = f"""分析以下任务失败原因，给出调参建议：
-
-任务目标: {(task.goal or "")[:200]}
-失败类型: {failure_analysis.failure_type}
-规则分类根因: {failure_analysis.root_cause}
-规则建议动作: {failure_analysis.suggested_action}
-当前参数:
-  - 超时: {current_timeout}秒
-  - runner_attempts: {task.runner_attempts}
-  - tool_rounds: {tool_rounds}
-
-错误信息: {error_msg[:300]}
-
-请分析：
-1. 为什么失败？（文件太大？模型太慢？超时太短？工具缺失？prompt 太复杂？）
-2. 建议怎么调参？（提高超时？简化 prompt？增加 tool_rounds？拆分任务？）
-3. 是否应该重试？是否应该拆分？
-
-输出严格 JSON 格式：
-{{
-  "analysis_reason": "任务太大，tool_rounds 耗尽仍没完成，需要拆分",
-  "root_cause": "task_too_complex",
-  "suggested_params": {{"new_timeout_seconds": 300, "max_tool_rounds": 15}},
-  "should_retry": true,
-  "should_split": false,
-  "confidence": 0.85
-}}
-
-只输出 JSON，不要其他文字。"""
-
         try:
-            response = self._agent.run(prompt, save=False)
+            response = self._agent.run(_failure_introspection_prompt(self, task, runner_result, failure_analysis), save=False)
             # 解析 JSON
             result_data = json.loads(response.response.strip())
             return FailureIntrospection(
@@ -134,3 +100,44 @@ class FailureIntrospector:
         if task.attributes and "dynamic_timeout_seconds" in task.attributes:
             return float(task.attributes["dynamic_timeout_seconds"])
         return 120.0  # 默认超时
+
+
+def _failure_introspection_prompt(
+    introspector: FailureIntrospector,
+    task: SubAgentTask,
+    runner_result: SubAgentRunnerResult,
+    failure_analysis: FailureAnalysis,
+) -> str:
+    # LLM: long diagnostic prompt is isolated from the model-call and JSON parsing path.
+    current_timeout = introspector._get_current_timeout(task)
+    tool_rounds = getattr(runner_result, "tool_rounds", 0)
+    error_msg = runner_result.runner_last_error or runner_result.message or ""
+    return f"""分析以下任务失败原因，给出调参建议：
+
+任务目标: {(task.goal or "")[:200]}
+失败类型: {failure_analysis.failure_type}
+规则分类根因: {failure_analysis.root_cause}
+规则建议动作: {failure_analysis.suggested_action}
+当前参数:
+  - 超时: {current_timeout}秒
+  - runner_attempts: {task.runner_attempts}
+  - tool_rounds: {tool_rounds}
+
+错误信息: {error_msg[:300]}
+
+请分析：
+1. 为什么失败？（文件太大？模型太慢？超时太短？工具缺失？prompt 太复杂？）
+2. 建议怎么调参？（提高超时？简化 prompt？增加 tool_rounds？拆分任务？）
+3. 是否应该重试？是否应该拆分？
+
+输出严格 JSON 格式：
+{{
+  "analysis_reason": "任务太大，tool_rounds 耗尽仍没完成，需要拆分",
+  "root_cause": "task_too_complex",
+  "suggested_params": {{"new_timeout_seconds": 300, "max_tool_rounds": 15}},
+  "should_retry": true,
+  "should_split": false,
+  "confidence": 0.85
+}}
+
+只输出 JSON，不要其他文字。"""

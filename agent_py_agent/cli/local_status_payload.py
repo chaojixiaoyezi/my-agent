@@ -6,19 +6,21 @@ from dataclasses import dataclass
 from typing import Any
 
 
-def resolve_gateway_status(
-    *,
-    alive: bool,
-    gateway_state: dict,
-    heartbeat: dict,
-    stale_seconds: float,
-    now: float,
-) -> tuple[str, float]:
-    heartbeat_at = float(heartbeat.get("updated_at", 0) or 0)
-    heartbeat_age = now - heartbeat_at if heartbeat_at else 0
-    state_status = gateway_state.get("status", "stopped")
-    gateway_status = "running" if alive else ("stopped" if state_status == "running" else state_status)
-    if alive and heartbeat_at and heartbeat_age > stale_seconds:
+@dataclass(frozen=True)
+class GatewayStatusRequest:
+    alive: bool
+    gateway_state: dict
+    heartbeat: dict
+    stale_seconds: float
+    now: float
+
+
+def resolve_gateway_status(request: GatewayStatusRequest) -> tuple[str, float]:
+    heartbeat_at = float(request.heartbeat.get("updated_at", 0) or 0)
+    heartbeat_age = request.now - heartbeat_at if heartbeat_at else 0
+    state_status = request.gateway_state.get("status", "stopped")
+    gateway_status = "running" if request.alive else ("stopped" if state_status == "running" else state_status)
+    if request.alive and heartbeat_at and heartbeat_age > request.stale_seconds:
         gateway_status = "stale"
     return gateway_status, heartbeat_age
 

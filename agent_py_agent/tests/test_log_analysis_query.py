@@ -90,6 +90,44 @@ def _upsert_sample_events(store: LocalLogStore) -> None:
     store.upsert_evidence_ref(EvidenceRef(evidence_id="evidence-1", query_id="query-1"))
 
 
+def _upsert_hunt_trace_events(store: LocalLogStore) -> None:
+    store.upsert_events(
+        [
+            {
+                "event_id": "evt-1",
+                "event_time": "2026-04-30T10:00:00Z",
+                "alert_type": "vpn_login",
+                "attacker_ip": "198.51.100.30",
+                "victim_ip": "10.0.0.7",
+            },
+            {
+                "event_id": "evt-2",
+                "event_time": "2026-04-30T10:03:00Z",
+                "alert_type": "edr_network",
+                "src_ip": "10.0.0.7",
+                "dst_ip": "198.51.100.30",
+            },
+        ]
+    )
+    store.upsert_case(
+        {
+            "case_id": "case-1",
+            "title": "suspicious vpn",
+            "attributes": {"attacker_ip": ["198.51.100.30"]},
+        }
+    )
+
+
+def _assert_hunt_response(hunt: dict) -> None:
+    assert hunt["row_count"] == 2
+    assert len(hunt["evidence_refs"]) == 2
+
+
+def _assert_trace_response(traced: dict) -> None:
+    assert traced["case_id"] == "case-1"
+    assert traced["row_count"] == 1
+
+
 def test_local_store_upserts_and_queries_security_fields(tmp_path):
     store = LocalLogStore(tmp_path)
     _upsert_sample_events(store)
@@ -301,31 +339,7 @@ def test_local_store_skips_bad_jsonl_lines_during_query(tmp_path):
 
 def test_tools_require_time_range_and_support_hunt_and_trace_case(tmp_path):
     store = LocalLogStore(tmp_path)
-    store.upsert_events(
-        [
-            {
-                "event_id": "evt-1",
-                "event_time": "2026-04-30T10:00:00Z",
-                "alert_type": "vpn_login",
-                "attacker_ip": "198.51.100.30",
-                "victim_ip": "10.0.0.7",
-            },
-            {
-                "event_id": "evt-2",
-                "event_time": "2026-04-30T10:03:00Z",
-                "alert_type": "edr_network",
-                "src_ip": "10.0.0.7",
-                "dst_ip": "198.51.100.30",
-            },
-        ]
-    )
-    store.upsert_case(
-        {
-            "case_id": "case-1",
-            "title": "suspicious vpn",
-            "attributes": {"attacker_ip": ["198.51.100.30"]},
-        }
-    )
+    _upsert_hunt_trace_events(store)
 
     with pytest.raises(ValueError):
         security_query(SecurityQueryParams(store=store, attacker_ip="198.51.100.30"))
@@ -337,8 +351,7 @@ def test_tools_require_time_range_and_support_hunt_and_trace_case(tmp_path):
         end_time="2026-04-30T10:10:00Z",
         limit=10,
     )
-    assert hunt["row_count"] == 2
-    assert len(hunt["evidence_refs"]) == 2
+    _assert_hunt_response(hunt)
 
     traced = trace_case(
         "case-1",
@@ -347,5 +360,4 @@ def test_tools_require_time_range_and_support_hunt_and_trace_case(tmp_path):
         end_time="2026-04-30T10:10:00Z",
         limit=10,
     )
-    assert traced["case_id"] == "case-1"
-    assert traced["row_count"] == 1
+    _assert_trace_response(traced)

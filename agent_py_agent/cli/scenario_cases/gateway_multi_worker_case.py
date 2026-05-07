@@ -44,6 +44,13 @@ class MultiWorkerScenarioSetup:
     request_count: int
 
 
+@dataclass
+class MultiWorkerRunOptions:
+    paths: object
+    gpaths: object
+    worker_count: int = 2
+
+
 def _multi_worker_setup(args):
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -146,13 +153,9 @@ def _multi_worker_finish(paths, setup: MultiWorkerScenarioSetup, results: Worker
     return 0 if final_ok else 2
 
 
-def run_scenario_gateway_multi_worker_case(args) -> int:
-
-    paths, gpaths, request_ids, request_count = _multi_worker_setup(args)
-
-    print_scenario_step(2, "Run two live workers concurrently")
+def _run_multi_worker_threads(options: MultiWorkerRunOptions) -> WorkerRunResults:
     lock = threading.Lock()
-    start_barrier = threading.Barrier(2)
+    start_barrier = threading.Barrier(options.worker_count)
     processed_by_worker: dict[str, int] = {}
     run_prompts_by_worker: dict[str, list[str]] = {}
     errors: list[str] = []
@@ -169,11 +172,11 @@ def run_scenario_gateway_multi_worker_case(args) -> int:
                 used_memories=0,
             )
 
-        worker_agent = load_scenario_agent(paths.config)
+        worker_agent = load_scenario_agent(options.paths.config)
         worker_agent.run = slow_run  # type: ignore[method-assign]
         try:
             start_barrier.wait(timeout=5)
-            processed = _process_gateway_requests(worker_agent, gpaths, worker_id=worker_id)
+            processed = _process_gateway_requests(worker_agent, options.gpaths, worker_id=worker_id)
         except Exception as exc:
             with lock:
                 errors.append(f"{worker_id}: {type(exc).__name__}: {exc}")
@@ -183,16 +186,24 @@ def run_scenario_gateway_multi_worker_case(args) -> int:
 
     threads = [
         threading.Thread(target=worker_run, args=(f"scenario-worker-{index}",), daemon=True)
-        for index in range(2)
+        for index in range(options.worker_count)
     ]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join(timeout=10)
     alive_threads = [thread.name for thread in threads if thread.is_alive()]
+    return WorkerRunResults(processed_by_worker, run_prompts_by_worker, errors, alive_threads)
+
+
+def run_scenario_gateway_multi_worker_case(args) -> int:
+    paths, gpaths, request_ids, request_count = _multi_worker_setup(args)
+
+    print_scenario_step(2, "Run two live workers concurrently")
+    results = _run_multi_worker_threads(MultiWorkerRunOptions(paths, gpaths))
 
     return _multi_worker_finish(
         paths,
         MultiWorkerScenarioSetup(gpaths=gpaths, request_ids=request_ids, request_count=request_count),
-        WorkerRunResults(processed_by_worker=processed_by_worker, run_prompts_by_worker=run_prompts_by_worker, errors=errors, alive_threads=alive_threads),
+        results,
     )

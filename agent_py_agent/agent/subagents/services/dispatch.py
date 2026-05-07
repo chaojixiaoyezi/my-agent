@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .dispatch_params import DispatchRecordParams, DispatchWatchHeartbeatParams
+from .indexing_params import IndexReportParams
 from .parent_planner_builder import ParentPlannerBuilder
 
 if TYPE_CHECKING:
@@ -82,9 +83,11 @@ class SubAgentDispatchService:
         for record in report.records:
             self.manager._index_dispatch_record(record)
         self.manager._index_report(
-            "subagent_dispatch_report", "latest",
-            "Subagent dispatch report", report,
-            event_type="subagent_dispatch_report_written",
+            IndexReportParams(
+                "subagent_dispatch_report", "latest",
+                "Subagent dispatch report", report,
+                "subagent_dispatch_report_written",
+            ),
         )
         return report
 
@@ -124,9 +127,11 @@ class SubAgentDispatchService:
             encoding="utf-8",
         )
         self.manager._index_report(
-            "subagent_dispatch_watch_report", "latest",
-            "Subagent dispatch watch report", report,
-            event_type="subagent_dispatch_watch_report_written",
+            IndexReportParams(
+                "subagent_dispatch_watch_report", "latest",
+                "Subagent dispatch watch report", report,
+                "subagent_dispatch_watch_report_written",
+            ),
         )
         return report
 
@@ -203,9 +208,11 @@ class SubAgentDispatchService:
         for record in report.records:
             self.manager._index_parent_planner_record(record)
         self.manager._index_report(
-            "parent_planner_report", "latest",
-            "Parent planner report", report,
-            event_type="parent_planner_report_written",
+            IndexReportParams(
+                "parent_planner_report", "latest",
+                "Parent planner report", report,
+                "parent_planner_report_written",
+            ),
         )
         return report
 

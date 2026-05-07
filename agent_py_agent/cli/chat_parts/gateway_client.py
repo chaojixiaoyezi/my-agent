@@ -27,6 +27,24 @@ class ChatRequestContent:
     resume_context: object
 
 
+@dataclass(frozen=True)
+class GatewayChunkPollRequest:
+    chunk_path: Path
+    response_path: Path
+    deadline: float
+    on_chunk: object
+    chunks_printed_ref: list[int]
+    visible_chunks_ref: list[int] | None = None
+
+
+@dataclass(frozen=True)
+class GatewayTimingContext:
+    request_id: str
+    elapsed: float
+    response: dict
+    use_gateway: bool
+
+
 def submit_chat_request(
     paths,
     content: ChatRequestContent,
@@ -48,32 +66,24 @@ def submit_chat_request(
     return request_id, chunk_path, response_path
 
 
-def poll_gateway_chunks(
-    chunk_path: Path,
-    response_path: Path,
-    deadline: float,
-    on_chunk,  # callable(str) -> None
-    *,
-    chunks_printed_ref: list[int],
-    visible_chunks_ref: list[int] | None = None,
-) -> dict:
-    chunks_printed = chunks_printed_ref[0]
-    visible_chunks = visible_chunks_ref[0] if visible_chunks_ref else 0
+def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
+    chunks_printed = request.chunks_printed_ref[0]
+    visible_chunks = request.visible_chunks_ref[0] if request.visible_chunks_ref else 0
     response = {}
-    while time.time() <= deadline:
+    while time.time() <= request.deadline:
         chunks_printed, visible_chunks = _poll_chunk_file(
-            chunk_path, on_chunk, chunks_printed, visible_chunks
+            request.chunk_path, request.on_chunk, chunks_printed, visible_chunks
         )
-        response = read_json_file(response_path)
+        response = read_json_file(request.response_path)
         if response:
             chunks_printed, visible_chunks = _poll_chunk_file(
-                chunk_path, on_chunk, chunks_printed, visible_chunks
+                request.chunk_path, request.on_chunk, chunks_printed, visible_chunks
             )
             break
         time.sleep(0.1)
-    chunks_printed_ref[0] = chunks_printed
-    if visible_chunks_ref is not None:
-        visible_chunks_ref[0] = visible_chunks
+    request.chunks_printed_ref[0] = chunks_printed
+    if request.visible_chunks_ref is not None:
+        request.visible_chunks_ref[0] = visible_chunks
     return response
 
 
@@ -112,30 +122,25 @@ def check_gateway_alive(paths) -> bool:
     return alive
 
 
-def format_gateway_timing(
-    request_id: str,
-    elapsed: float,
-    response: dict,
-    use_gateway: bool,
-    agent_name: str,
-) -> str:
-    if use_gateway:
+def format_gateway_timing(ctx: GatewayTimingContext) -> str:
+    if ctx.use_gateway:
         return (
-            f"[耗时 {elapsed:.2f}s; "
-            f"工具轮数 {response.get('tool_rounds', 0)}; "
-            f"prompt_tokens~{response.get('prompt_token_estimate', 0)}; "
-            f"resume_context={1 if response.get('memory_resume_context_injected') else 0}]"
+            f"[耗时 {ctx.elapsed:.2f}s; "
+            f"工具轮数 {ctx.response.get('tool_rounds', 0)}; "
+            f"prompt_tokens~{ctx.response.get('prompt_token_estimate', 0)}; "
+            f"resume_context={1 if ctx.response.get('memory_resume_context_injected') else 0}]"
         )
-    else:
-        return (
-            f"[耗时 {elapsed:.2f}s; 工具轮数 {response.get('tool_rounds', 0)}; "
-            f"prompt_tokens~{response.get('prompt_token_estimate', 0)}; "
-            f"resume_context={1 if response.get('memory_resume_context_injected') else 0}]"
-        )
+    return (
+        f"[耗时 {ctx.elapsed:.2f}s; 工具轮数 {ctx.response.get('tool_rounds', 0)}; "
+        f"prompt_tokens~{ctx.response.get('prompt_token_estimate', 0)}; "
+        f"resume_context={1 if ctx.response.get('memory_resume_context_injected') else 0}]"
+    )
 
 
 __all__ = [
     "ChatRequestContent",
+    "GatewayChunkPollRequest",
+    "GatewayTimingContext",
     "check_gateway_alive",
     "format_gateway_timing",
     "poll_gateway_chunks",

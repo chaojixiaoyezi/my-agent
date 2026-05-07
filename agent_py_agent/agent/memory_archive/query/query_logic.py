@@ -28,21 +28,42 @@ class _ArchiveFilterContext:
     until_ts: float | None
     level: int | None
 
+
+@dataclass(frozen=True)
+class CollectArchiveRecordsParams:
+    # LLM: archive query fields stay bundled so resume/compact callers share one shape.
+    layer: str
+    date_key: str | None = None
+    limit: int = 0
+    level: int | None = None
+
+
+@dataclass(frozen=True)
+class FilterArchiveRecordsParams:
+    query: str = ""
+    filters: dict[str, str] | None = None
+    since: str | None = None
+    until: str | None = None
+    level: int | None = None
+
+
 def collect_archive_records(
     root: Path,
     *,
-    layer: str,
+    layer: str = "all",
     date_key: str | None = None,
     limit: int = 0,
     level: int | None = None,
+    params: CollectArchiveRecordsParams | None = None,
 ) -> list[dict[str, Any]]:
-    layer = str(layer)
-    limit = int(limit)
+    values = params or CollectArchiveRecordsParams(layer, date_key, limit, level)
+    layer = str(values.layer)
+    limit = int(values.limit)
     records: list[dict[str, Any]] = []
-    for current_layer, path in _archive_files(root, layer=layer, date_key=date_key):
+    for current_layer, path in _archive_files(root, layer=layer, date_key=values.date_key):
         records.extend(_read_archive_file(current_layer, path))
-    if level is not None:
-        records = [record for record in records if int(record.get("archive_level", -1)) == int(level)]
+    if values.level is not None:
+        records = [record for record in records if int(record.get("archive_level", -1)) == int(values.level)]
     records.sort(key=lambda item: (item["created_at_sort"], item["file_path"], item["line_no"]), reverse=True)
     return records[:limit] if limit > 0 else records
 
@@ -68,21 +89,23 @@ def archive_filters_from_args(args) -> dict[str, str]:
 def filter_archive_records(
     records: list[dict[str, Any]],
     *,
+    params: FilterArchiveRecordsParams | None = None,
     query: str = "",
     filters: dict[str, str] | None = None,
     since: str | None = None,
     until: str | None = None,
     level: int | None = None,
 ) -> list[dict[str, Any]]:
-    query = str(query)
-    filters = dict(filters or {})
+    values = params or FilterArchiveRecordsParams(query, filters, since, until, level)
+    query = str(values.query)
+    filters = dict(values.filters or {})
     query_text = query.strip().lower()
     context = _ArchiveFilterContext(
         query_text=query_text,
         filters=filters,
-        since_ts=_created_at_sort(since or "", fallback=0.0) if since else None,
-        until_ts=_until_timestamp(until),
-        level=level,
+        since_ts=_created_at_sort(values.since or "", fallback=0.0) if values.since else None,
+        until_ts=_until_timestamp(values.until),
+        level=values.level,
     )
     return [
         record

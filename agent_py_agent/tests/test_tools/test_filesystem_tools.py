@@ -262,12 +262,14 @@ def test_replace_in_file_tool():
         assert target.read_text(encoding="utf-8") == "def hello():\n    return 'new'\n"
 
 
-def test_fetch_url_and_http_request_tools():
+def test_fetch_url_and_http_request_tools(monkeypatch):
     """LLM: verify that FetchUrlTool and HttpRequestTool work against a local test server.
 
     新手说明:
     启动本地 HTTP 服务，分别测试 GET 抓取和 POST 回显。
     """
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     server = start_test_server()
     try:
         base = f"http://127.0.0.1:{server.server_port}"

@@ -11,6 +11,7 @@ from agent_py_agent.agent.log_analysis.config.config_coercers import (
     _coerce_path_string,
     _lookup,
     _warn,
+    _WarningInput,
 )
 from agent_py_agent.agent.log_analysis.config.config_model import LogAnalysisConfigWarning
 
@@ -54,7 +55,7 @@ class TestWarn:
     def test_warn_appends_to_list(self):
         """验证追加 warning 到列表。"""
         warnings: list[LogAnalysisConfigWarning] = []
-        _warn(warnings, "field1", "bad_value", "default", "expected integer")
+        _warn(warnings, _WarningInput("field1", "bad_value", "default", "expected integer"))
         assert len(warnings) == 1
         assert warnings[0].field_name == "field1"
         assert warnings[0].raw_value == "bad_value"
@@ -64,8 +65,8 @@ class TestWarn:
     def test_warn_multiple(self):
         """验证追加多条 warning。"""
         warnings: list[LogAnalysisConfigWarning] = []
-        _warn(warnings, "a", 1, 0, "reason a")
-        _warn(warnings, "b", 2, 0, "reason b")
+        _warn(warnings, _WarningInput("a", 1, 0, "reason a"))
+        _warn(warnings, _WarningInput("b", 2, 0, "reason b"))
         assert len(warnings) == 2
 
 

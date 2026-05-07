@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from .models import SubAgentParsedOutput, SubAgentTask
 from .result_contexts import OutputPayloadContext
 from .result_processors import _build_output_payload
-from .runner_result_state import apply_runner_result_fields
+from .runner_result_state import RunnerResultFieldParams, apply_runner_result_fields
 
 
 @dataclass
@@ -161,15 +161,37 @@ def _runner_make_cap_data(params: _CapDataParams):
     }
 
 
-def _runner_make_runner_meta(dry_run, ok, message, backend, tool_rounds, now):
+@dataclass
+class _RunnerMetaParams:
+    """LLM: bundle runner metadata fields."""
+
+    dry_run: bool
+    ok: bool
+    message: str
+    backend: str
+    tool_rounds: int
+    now: float
+
+
+@dataclass
+class _ContextBuildRequest:
+    """LLM: bundle final context construction inputs."""
+
+    params: RecordRunnerResultParams
+    extracted: _ApplyStatusParams
+    output_payload: dict
+    state: dict
+
+
+def _runner_make_runner_meta(params: _RunnerMetaParams):
     """Build runner metadata dict."""
     return {
-        "dry_run": dry_run,
-        "ok": ok,
-        "message": message,
-        "backend": backend,
-        "tool_rounds": tool_rounds,
-        "now": now,
+        "dry_run": params.dry_run,
+        "ok": params.ok,
+        "message": params.message,
+        "backend": params.backend,
+        "tool_rounds": params.tool_rounds,
+        "now": params.now,
     }
 
 
@@ -227,20 +249,18 @@ def _output_payload_context(extracted: _ApplyStatusParams, runner_meta: dict, ca
     )
 
 
-def _build_context_params(
-    params: RecordRunnerResultParams,
-    extracted: _ApplyStatusParams,
-    output_payload: dict,
-    state: dict,
-) -> _BuildContextParams:
+def _build_context_params(request: _ContextBuildRequest) -> _BuildContextParams:
     """Bundle fields for final BuildAndPersistContext construction."""
+    params = request.params
+    extracted = request.extracted
+    state = request.state
     return _BuildContextParams(
         task=extracted.task,
         dry_run=params.dry_run,
         final_ok=state["final_ok"],
         final_message=state["final_message"],
         parsed=extracted.parsed,
-        output_payload=output_payload,
+        output_payload=request.output_payload,
         structured_evidence_count=extracted.structured_evidence_count,
         structured_request_count=extracted.structured_request_count,
         artifacts=extracted.artifacts,
@@ -278,13 +298,17 @@ def apply_status_and_build_payload(
         "verification_status": params.verification_status,
         "failure_type": params.failure_type,
     }
-    apply_runner_result_fields(extracted.task, result_meta, status_context, extracted.parsed, now)
+    apply_runner_result_fields(
+        RunnerResultFieldParams(extracted.task, result_meta, status_context, extracted.parsed, now)
+    )
     final_ok = result_meta["ok"]
     final_message = result_meta["message"]
     blockers = _runner_compute_blockers(final_ok, extracted.task.status, extracted.parsed, final_message)
-    runner_meta = _runner_make_runner_meta(params.dry_run, final_ok, final_message, params.backend, params.tool_rounds, now)
+    runner_meta = _runner_make_runner_meta(
+        _RunnerMetaParams(params.dry_run, final_ok, final_message, params.backend, params.tool_rounds, now)
+    )
     output_payload = _build_output_payload(_output_payload_context(extracted, runner_meta, cap_data, blockers))
     build_state = {"final_ok": final_ok, "final_message": final_message, "blockers": blockers, "now": now}
     return output_payload, _make_build_context(
-        _build_context_params(params, extracted, output_payload, build_state)
+        _build_context_params(_ContextBuildRequest(params, extracted, output_payload, build_state))
     )

@@ -61,7 +61,13 @@ class DeadLetterWriter:
                 parser_id=parser_id,
             )
         now = utc_now()
-        payload = {
+        payload = self._payload(params, now)
+        append_jsonl(self.path, payload, sort_keys=True)
+        append_jsonl(self.diagnostic_path, self._diagnostic(params, now), sort_keys=True)
+        self.count += 1
+
+    def _payload(self, params: DeadLetterRecord, now: str) -> dict[str, Any]:
+        return {
             "dead_letter_id": f"dlq-{sha256_text(f'{self.batch_id}:{params.raw_ref}:{params.reason}')[:24]}",
             "batch_id": self.batch_id,
             "source_id": self.source_id,
@@ -74,22 +80,18 @@ class DeadLetterWriter:
             "raw_fields": dict(params.raw_fields or {}),
             "created_at": now,
         }
-        append_jsonl(self.path, payload, sort_keys=True)
-        append_jsonl(
-            self.diagnostic_path,
-            {
-                "event_type": "log_parse_failure",
-                "batch_id": self.batch_id,
-                "source_id": self.source_id,
-                "raw_ref": params.raw_ref,
-                "line_no": params.line_no,
-                "reason": params.reason,
-                "dead_letter_path": str(self.path),
-                "created_at": now,
-            },
-            sort_keys=True,
-        )
-        self.count += 1
+
+    def _diagnostic(self, params: DeadLetterRecord, now: str) -> dict[str, Any]:
+        return {
+            "event_type": "log_parse_failure",
+            "batch_id": self.batch_id,
+            "source_id": self.source_id,
+            "raw_ref": params.raw_ref,
+            "line_no": params.line_no,
+            "reason": params.reason,
+            "dead_letter_path": str(self.path),
+            "created_at": now,
+        }
 
     def refs(self) -> list[dict[str, Any]]:
         if self.count == 0:
