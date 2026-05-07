@@ -174,6 +174,11 @@ class SubAgentTask:
     agent_run_compaction_ledger_jsonl: str = ""
     agent_run_latest_compaction_summary_md: str = ""
     agent_run_latest_compaction_metadata_json: str = ""
+    # LLM: Phase 6 gate files hold review candidates only; they never auto-promote memory.
+    agent_run_memory_gate_dir: str = ""
+    agent_run_memory_candidates_jsonl: str = ""
+    agent_run_memory_review_queue_jsonl: str = ""
+    agent_run_skill_spark_gate_json: str = ""
     handoff_file: str = ""
     debrief_file: str = ""
     output_json: str = ""

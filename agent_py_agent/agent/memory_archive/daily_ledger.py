@@ -35,6 +35,9 @@ class DailyLedgerWorkspaceRefs:
     agent_artifact_manifest_jsonl: Path | None = None
     # LLM: daily ledger only points at the compact ledger; run workspace owns the chain.
     agent_compaction_ledger_jsonl: Path | None = None
+    # LLM: gate refs expose review queues, not promoted memory bodies.
+    agent_memory_gate_candidates_jsonl: Path | None = None
+    agent_skill_spark_gate_json: Path | None = None
 
 
 def daily_events_path_for(root: str | Path, created_at: str | int | float | None = None) -> Path:
@@ -95,6 +98,8 @@ def _refs(task: Any, workspace_refs: DailyLedgerWorkspaceRefs) -> dict[str, str]
         "task_artifact_manifest": _path_text(workspace_refs.task_artifact_manifest_jsonl),
         "agent_artifact_manifest": _path_text(workspace_refs.agent_artifact_manifest_jsonl),
         "agent_compaction_ledger": _path_text(workspace_refs.agent_compaction_ledger_jsonl),
+        "agent_memory_gate_candidates": _path_text(workspace_refs.agent_memory_gate_candidates_jsonl),
+        "agent_skill_spark_gate": _path_text(workspace_refs.agent_skill_spark_gate_json),
         "legacy_task_dir": legacy_task_dir,
         "legacy_task_json": str(Path(legacy_task_dir) / "task.json") if legacy_task_dir else "",
         "legacy_checkpoint": str(getattr(task, "checkpoint_json", "")),

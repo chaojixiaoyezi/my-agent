@@ -32,6 +32,7 @@ from .daily_ledger import (
     DailyLedgerWorkspaceRefs,
     append_subagent_task_event,
 )
+from .memory_gate import MemoryGateResult, memory_gate_paths, sync_agent_run_memory_gate
 from .shared_workspace import SharedWorkspaceResult, shared_workspace_paths, sync_shared_workspace
 from .task_workspace_rendering import (
     write_summary,
@@ -62,6 +63,8 @@ class TaskWorkspacePaths:
     artifact_manifest: ArtifactManifestResult
     # LLM: compact chain is synced after checkpoint/artifacts so refs are resolvable.
     compact_chain: CompactChainResult
+    # LLM: memory gate queues candidates only; promotion remains an explicit later step.
+    memory_gate: MemoryGateResult
     daily_ledger: DailyLedgerAppendResult
     legacy_run_ref_json: Path
 
@@ -70,6 +73,7 @@ class TaskWorkspacePaths:
 class _TaskWorkspaceRuntimeRefs:
     artifact_manifest: ArtifactManifestResult | None = None
     compact_chain: CompactChainResult | None = None
+    memory_gate: MemoryGateResult | None = None
     daily_ledger: DailyLedgerAppendResult | None = None
 
 
@@ -129,10 +133,16 @@ def _sync_runtime_refs(inputs: _RuntimeSyncInputs) -> _TaskWorkspaceRuntimeRefs:
         artifact_manifest_jsonl=artifact_manifest.agent_manifest_jsonl,
         now=inputs.now,
     )
-    daily_ledger = _append_daily_ledger(inputs, artifact_manifest, compact_chain)
+    memory_gate = sync_agent_run_memory_gate(
+        inputs.task,
+        agent_run_workspace_root=inputs.paths.agent_adapter_dir,
+        now=inputs.now,
+    )
+    daily_ledger = _append_daily_ledger(inputs, artifact_manifest, compact_chain, memory_gate)
     return _TaskWorkspaceRuntimeRefs(
         artifact_manifest=artifact_manifest,
         compact_chain=compact_chain,
+        memory_gate=memory_gate,
         daily_ledger=daily_ledger,
     )
 
@@ -141,6 +151,7 @@ def _append_daily_ledger(
     inputs: _RuntimeSyncInputs,
     artifact_manifest: ArtifactManifestResult,
     compact_chain: CompactChainResult,
+    memory_gate: MemoryGateResult,
 ) -> DailyLedgerAppendResult:
     # LLM: daily ledger records compact refs only; task/run files keep the detailed facts.
     return append_subagent_task_event(
@@ -152,6 +163,8 @@ def _append_daily_ledger(
             artifact_manifest.task_manifest_jsonl,
             artifact_manifest.agent_manifest_jsonl,
             compact_chain.ledger_jsonl,
+            memory_gate.candidates_jsonl,
+            memory_gate.skill_spark_gate_json,
         ),
         now=inputs.now,
     )
@@ -189,6 +202,7 @@ def _paths_for(
         artifact_manifest=runtime_refs.artifact_manifest
         or _default_artifact_manifest(artifacts_dir, agent_adapter_dir),
         compact_chain=runtime_refs.compact_chain or default_compact_chain_result(agent_adapter_dir),
+        memory_gate=runtime_refs.memory_gate or memory_gate_paths(agent_adapter_dir),
         daily_ledger=runtime_refs.daily_ledger or _default_daily_ledger(path_inputs.workspace),
         legacy_run_ref_json=agent_adapter_dir / "legacy_run_ref.json",
     )
