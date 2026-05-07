@@ -27,13 +27,21 @@ from .artifact_registry import (
     SyncArtifactManifestsRequest,
     sync_artifact_manifests,
 )
+from .compact_action_guard import (
+    CompactActionGuardOptions,
+    CompactActionGuardRequest,
+    build_compact_action_guard,
+)
 from .compact_apply import MemoryCompactApplyOptions, apply_memory_compact
+from .compact_auto import MemoryCompactAutoCycleOptions, run_memory_compact_auto_cycle
 from .compact_chain import (
     CompactChainResult,
     SyncAgentRunCompactChainRequest,
     default_compact_chain_result,
     sync_agent_run_compact_chain,
 )
+from .compact_resume import MemoryCompactResumeOptions, build_memory_compact_resume
+from .compact_suggest import MemoryCompactSuggestOptions, build_memory_compact_suggestion
 from .control_plane import MemoryControlPlaneQueryOptions, query_memory_control_plane
 from .daily_ledger import (
     AppendSubagentTaskEventRequest,
@@ -109,8 +117,13 @@ __all__ = [
     "ExternalizeToolOutputRequest",
     "TurnTokenUsage",
     "CompressionHookResult",
+    "CompactActionGuardOptions",
+    "CompactActionGuardRequest",
     "MemoryArchiveError",
     "MemoryCompactApplyOptions",
+    "MemoryCompactAutoCycleOptions",
+    "MemoryCompactResumeOptions",
+    "MemoryCompactSuggestOptions",
     "MemoryControlPlaneQueryOptions",
     "RawMemoryEvent",
     "RecoverySnapshotResult",
@@ -130,6 +143,10 @@ __all__ = [
     "apply_memory_compact",
     "append_subagent_task_event",
     "build_auto_resume_context",
+    "build_memory_compact_resume",
+    "build_compact_action_guard",
+    "build_memory_compact_suggestion",
+    "run_memory_compact_auto_cycle",
     "check_token_budget",
     "clear_compression_hooks",
     "compression_snapshot_dir",

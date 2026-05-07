@@ -388,11 +388,20 @@ my-agent memory-resume "继续 README 那个任务"
 my-agent memory-resume --run-id subagent-xxx --json
 my-agent memory-resume --request-id gwreq-xxx --limit 10
 my-agent memory-resume "继续" --context-only
+my-agent memory-resume --from-compact apply-xxx --context-only
 ```
 
 从归档线索、LocalStore 检索结果和 subagent 任务目录中生成恢复简报。它会列出 archive clues、LocalStore clues、任务事实源路径和下一步建议，提醒你先读 `STATUS.md`、`WORK_LOG.md`、`HANDOFF.md`、`TEST_CHECKLIST.md` 等权威文件后再继续。
 
 `--context-only` 只打印稳定格式的 `Recovery Brief` 文本块，不打印外层说明。这个输出适合复制给真实环境测试、人工 handoff，后续也可以作为自动上下文注入的复用入口。
+
+`--from-compact <apply_id>` 会改走 compact apply 恢复路径，只读读取 `memory-compact --apply` 生成的 metadata、apply bundle、restore refs、work state snapshot、compact context 和 self-check，输出 `Compact Resume Context`、consistency report、action guard、推荐读取路径和下一步动作。它不会自动执行工具，也不会修改任务或子代理文件；`--compact-owner-type/--compact-owner-id` 只是给未来子代理会话压缩预留 owner 字段。
+
+compact 恢复输出还会包含 `compact_resume_handoff`：里面稳定展示目标、当前阶段、下一步、验收条件、约束、最近测试、推荐读取路径和 action guard 状态。`--context-only` 打印的 `Compact Resume Context` 也会分节包含这些内容，适合复制给新会话或其他 agent 接手。
+
+`--compact-resume-mode auto` 会启用更严格的 Action Guard：缺 acceptance、constraints、latest tests、refs 或 self-check 失败时会返回非 0，防止无人值守状态继续偏航。字段齐全、refs 存在且 self-check 通过时会返回 `allow_automated_continue` / `allowed_to_continue=true`，但仍标记 `automatic_tool_execution=none`，表示只允许后续策略接着判断，不会由 resume 命令直接跑工具。默认 `manual` 只生成恢复材料和人工确认提示。
+
+普通 `run` 在上下文风险达到阈值时会额外打印 `compact_suggestion` 和 `compact_auto`。`compact_suggestion` 给出 `memory-compact --dry-run`、`memory-compact --apply` 和 `memory-resume --from-compact` 的建议命令；`compact_auto` 显示自动协调器当前停在 `needs_user_confirmation`、`blocked_after_action_guard` 等哪一步。默认只是 plan-only 提醒，不会自动 apply、自动 resume 或继续执行工具。
 
 JSON 输出里会额外包含 `brief`：
 
@@ -424,6 +433,10 @@ JSON 输出里会额外包含 `brief`：
 | `--tool-name <name>` | - | 按工具名精确过滤。 |
 | `--source <source>` | - | 按来源精确过滤。 |
 | `--limit <n>` | `20` | 最多显示多少条线索。 |
+| `--from-compact <apply_id-or-path>` | - | 从某次非破坏性 compact apply 恢复上下文，可传 apply_id 或产物路径。 |
+| `--compact-resume-mode <manual|auto>` | `manual` | compact 恢复守门模式；`auto` 字段缺失会阻断，字段齐全时只返回允许继续的机器信号。 |
+| `--compact-owner-type <type>` | `main_agent` | compact owner 类型；`subagent_run` / `subagent_session` 会只读解析 task-local run workspace refs。 |
+| `--compact-owner-id <id>` | 空 | compact owner 标识；子代理 owner 通常传 run_id，不会写主 memory 或自动执行工具。 |
 | `--context-only` | `false` | 只输出可交接/注入的恢复上下文块。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 
@@ -436,14 +449,14 @@ my-agent memory-compact --request-id gwreq-xxx --limit 0
 my-agent memory-compact --apply
 ```
 
-预演上下文压缩计划。当前版本只做 dry-run：扫描 `memory/raw`、`memory/hooks`、`memory_archive/snapshots` 和 `memory_archive/tokens`，汇总可压缩线索、权威 snapshot、token ledger、风险提示和下一步建议，不删除、不覆盖、不重写任何归档文件。
+预演上下文压缩计划。默认 dry-run 会扫描 `memory/raw`、`memory/hooks`、`memory_archive/snapshots` 和 `memory_archive/tokens`，汇总可压缩线索、权威 snapshot、token ledger、风险提示和下一步建议，不删除、不覆盖、不重写任何归档文件。
 
-`--apply` 当前会明确拒绝执行并返回非 0，用来防止误以为已经启用真实压缩。
+`--apply` 当前是非破坏性 apply：会生成 compact context、metadata、apply bundle、restore refs、work state snapshot、self-check、失败报告和 append-only ledger。它只建立恢复入口，不删除、不重写、不裁剪 raw/hook/snapshot/token/task/run 文件。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--dry-run` | `true` | 只生成计划，不修改文件；当前唯一支持模式。 |
-| `--apply` | `false` | 预留真实应用入口；当前版本会拒绝执行。 |
+| `--apply` | `false` | 生成非破坏性 compact apply 产物；失败时返回非 0 并写 self-check failed 报告。 |
 | `--layer <layer>` | `all` | 扫描哪一层归档，可选 `all`、`raw`、`hook`。 |
 | `--date <YYYY-MM-DD>` | - | 只扫描某一天。 |
 | `--since <time>` | - | 只看此时间之后的归档线索。 |

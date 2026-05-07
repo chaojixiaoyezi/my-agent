@@ -43,3 +43,12 @@ class AgentRunResult:
     memory_resume_context_error: str = ""
     turn_token_estimate: int = 0
     cumulative_token_estimate: int = 0
+    memory_compact_suggested: bool = False
+    memory_compact_status: str = "ok"
+    memory_compact_ratio: float = 0.0
+    memory_compact_message: str = ""
+    memory_compact_commands: list[str] | None = None
+    memory_compact_auto_status: str = "skipped_below_threshold"
+    memory_compact_auto_next_action: str = "continue_without_compact"
+    memory_compact_auto_allowed_to_continue: bool = False
+    memory_compact_auto_tool_execution: str = "none"

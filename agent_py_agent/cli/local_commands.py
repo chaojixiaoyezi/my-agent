@@ -159,7 +159,23 @@ def cmd_run(args) -> int:
         f"resume_context={1 if result.memory_resume_context_injected else 0}; "
         f"resume_tokens≈{result.memory_resume_context_token_estimate}]"
     )
+    _print_compact_suggestion(result)
     return 0
+
+
+# LLM: _print_compact_suggestion keeps run CLI compact output out of cmd_run size-sensitive orchestration.
+# 函数用途: 打印 compact 建议、auto cycle 停车状态和推荐命令；只读 result，不触发 apply 或 resume。
+def _print_compact_suggestion(result) -> None:
+    if not result.memory_compact_suggested:
+        return
+    print(f"[compact_suggestion={result.memory_compact_status}; {result.memory_compact_message}]")
+    print(
+        "[compact_auto="
+        f"{result.memory_compact_auto_status}; next={result.memory_compact_auto_next_action}; "
+        f"tools={result.memory_compact_auto_tool_execution}]"
+    )
+    for command in result.memory_compact_commands or []:
+        print(f"- {command}")
 
 
 # LLM: cmd_remember 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
