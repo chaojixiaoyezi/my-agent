@@ -34,8 +34,14 @@ JUNK_NAME_BASELINE = {
 }
 
 BUNDLE_KWARG_FUNCTION_EXEMPTIONS = {
-    "agent_py_agent/agent/concurrency/retry.py:wrapper",
-    "agent_py_agent/agent/concurrency/retry.py:run",
+    "agent_py_agent/agent/concurrency/retry.py:wrapper": (
+        "Transparent retry decorator forwarding must preserve arbitrary callable signatures; "
+        "this is infrastructure, not a product service interface."
+    ),
+    "agent_py_agent/agent/concurrency/retry.py:run": (
+        "Transparent retry runner forwards arbitrary callable arguments; "
+        "callers must not use this as a product interface pattern."
+    ),
 }
 
 RUNTIME_ARTIFACT_NAMES = {
@@ -221,6 +227,8 @@ def test_no_new_forbidden_globals() -> None:
 
 def test_product_code_has_no_var_keyword_service_interfaces() -> None:
     """Service-facing product code must use typed bundles instead of **kwargs."""
+
+    assert all(reason.strip() for reason in BUNDLE_KWARG_FUNCTION_EXEMPTIONS.values())
 
     offenders: list[str] = []
     for path in _python_source_files():

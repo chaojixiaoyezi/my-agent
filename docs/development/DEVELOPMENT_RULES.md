@@ -66,8 +66,12 @@ before changing code.
 
 ## 4.1 Bundle Interface Standard / 统一 Bundle 接口规范
 
-- New service-facing APIs should accept one typed dataclass bundle, usually named
-  `Request`, `Options`, `Params`, or `Context` according to intent.
+- Product service / domain / repository / gateway / subagent / memory / tool /
+  skill / delegation interfaces must not use loose `*args` or `**kwargs` as
+  business parameter entry points.
+- Service-facing APIs should accept one typed dataclass bundle, usually named
+  `Params`, `Options`, `Context`, `Request`, `Command`, or `Query` according to
+  intent.
 - CLI functions may read `argparse.Namespace`, but must normalize it at the command
   boundary before calling agent/core/manager code.
 - Business services should prefer `def execute(*, request: SomeRequest)` or
@@ -79,9 +83,16 @@ before changing code.
   Extend the existing bundle and update focused tests instead.
 - Bundles should stay small and domain-specific. If a bundle starts mixing unrelated
   concerns, split it rather than passing a generic dict.
-- The only current product-code exception is transparent decorator forwarding in
-  `agent/concurrency/retry.py`; architecture guardrails fail any other function
-  that adds a var-keyword service interface.
+- A small number of low-level infrastructure utilities may keep `*args` /
+  `**kwargs` only when they must transparently forward arbitrary callable
+  signatures, such as retry/decorator/adapter/wrapper code. These utilities must
+  not become product service APIs.
+- Test mocks, fixtures, and helpers may keep `**kwargs`, but tests must not use
+  them as the reference style for product interfaces.
+- Every product-code exception must be registered in
+  `BUNDLE_KWARG_FUNCTION_EXEMPTIONS` in `test_architecture_guardrails.py` with a
+  reason. New function-level `*args` / `**kwargs` service interfaces fail the
+  guardrail unless the exception is reviewed and documented first.
 
 ---
 
