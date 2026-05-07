@@ -13,7 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .dispatch_params import DispatchRecordParams
+from .dispatch_params import DispatchRecordParams, DispatchWatchHeartbeatParams
 from .parent_planner_builder import ParentPlannerBuilder
 
 if TYPE_CHECKING:
@@ -133,19 +133,15 @@ class SubAgentDispatchService:
     def write_dispatch_watch_heartbeat(
         self,
         *,
-        cycle: int,
-        status: str,
-        lock_path: str,
-        pid: int,
-        message: str = "",
+        params: DispatchWatchHeartbeatParams,
     ) -> Path:
         path = self.manager.workspace / "subagent_dispatch_watch_heartbeat.json"
         payload = {
-            "cycle": cycle,
-            "status": status,
-            "lock_path": lock_path,
-            "pid": pid,
-            "message": message,
+            "cycle": params.cycle,
+            "status": params.status,
+            "lock_path": params.lock_path,
+            "pid": params.pid,
+            "message": params.message,
             "updated_at": time.time(),
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

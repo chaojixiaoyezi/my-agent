@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..subagents.services.dispatch_params import DispatchRecordParams
 from .dispatch_params import DispatchContext, RunnerBatchContext
 from .runner_dispatch import (
     RunnerDispatchRecordParams,
@@ -77,18 +78,20 @@ def collect_runner_candidates(agent, ctx: DispatchContext, runner_max_attempts: 
 
 def _dry_runner_record(params: RunnerDryRecordParams):
     return params.agent.subagents.make_dispatch_record(
-        step="runner",
-        action="retry_runner" if params.retry_reason else "execute_runner",
-        run_id=params.task.id,
-        dry_run=True,
-        applied=False,
-        ok=True,
-        message=_dry_runner_message(params.retry_reason),
-        before_status=params.before.status,
-        after_status=params.before.status,
-        before_verification_status=params.before.verification_status,
-        after_verification_status=params.before.verification_status,
-        evidence_paths=[params.before.task_dir],
+        params=DispatchRecordParams(
+            step="runner",
+            action="retry_runner" if params.retry_reason else "execute_runner",
+            run_id=params.task.id,
+            dry_run=True,
+            applied=False,
+            ok=True,
+            message=_dry_runner_message(params.retry_reason),
+            before_status=params.before.status,
+            after_status=params.before.status,
+            before_verification_status=params.before.verification_status,
+            after_verification_status=params.before.verification_status,
+            evidence_paths=[params.before.task_dir],
+        ),
     )
 
 

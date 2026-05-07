@@ -151,3 +151,7 @@ memory-resume 或 run(auto resume)
 ## 2026-05-06 structure update
 - `gateway_parts/request_worker.py` now owns queue claiming and archive flow, while `gateway_parts/request_execution.py` owns one-request execution, chunk streaming, lease refresh, and response completion.
 - Gateway file IO keeps per-path process-local locks and retrying replace logic for Windows; POSIX behavior remains the normal atomic replace path.
+
+## 2026-05-07 bundle structure update
+- Gateway execution continues to use file request/response facts, but option-heavy service helpers now expose typed bundles or explicit fields before they touch persistence.
+- `gateway_parts/logging.py`, `queue_service.py`, and `supervisor.py` are part of the bundle sweep; they no longer rely on open-ended keyword option bags for product behavior.

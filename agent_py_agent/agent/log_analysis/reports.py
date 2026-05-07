@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from .models import CaseRecord, Finding, utc_now_iso
@@ -41,6 +42,15 @@ from .report_formatting import (
     unique as _unique,
 )
 from .security.correlation import RouteDraft, build_route_draft
+
+
+@dataclass(frozen=True)
+class ForensicPackageOptions:
+    findings: Sequence[Finding | Mapping[str, Any]] | None = None
+    query_history: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
+    sample_rows: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
+    raw_refs: Sequence[Any] | None = None
+    frozen: bool = False
 
 
 def first_response_report_content(
@@ -118,17 +128,25 @@ def build_first_response_report_content(
 def build_forensic_package(
     case: CaseRecord | Mapping[str, Any],
     route: RouteDraft | Mapping[str, Any] | None = None,
-    **kwargs: Any,
+    *,
+    options: ForensicPackageOptions | None = None,
+    findings: Sequence[Finding | Mapping[str, Any]] | None = None,
+    query_history: Sequence[Mapping[str, Any]] = (),
+    sample_rows: Sequence[Mapping[str, Any]] = (),
+    raw_refs: Sequence[Any] | None = None,
+    frozen: bool = False,
 ) -> dict[str, Any]:
-    findings = kwargs.get("findings")
-    query_history = kwargs.get("query_history")
-    sample_rows = kwargs.get("sample_rows")
-    raw_refs = kwargs.get("raw_refs")
-    frozen = bool(kwargs.get("frozen", False))
+    package_options = options or ForensicPackageOptions(
+        findings=findings,
+        query_history=query_history,
+        sample_rows=sample_rows,
+        raw_refs=raw_refs,
+        frozen=frozen,
+    )
     case_obj = case if isinstance(case, CaseRecord) else CaseRecord.from_dict(case)
-    route_obj = _route_or_build(case_obj, route, findings)
+    route_obj = _route_or_build(case_obj, route, package_options.findings)
     route_dict = route_obj.to_dict() if isinstance(route_obj, RouteDraft) else dict(route_obj)
-    finding_dicts = _finding_dicts(case_obj, findings)
+    finding_dicts = _finding_dicts(case_obj, package_options.findings)
     evidence_refs = _unique(
         [
             *_ref_ids(case_obj.evidence_refs),
@@ -140,7 +158,7 @@ def build_forensic_package(
         "package_type": "log_analysis_forensic_package",
         "version": "v1",
         "generated_at": utc_now_iso(),
-        "frozen": frozen,
+        "frozen": package_options.frozen,
         "case": case_obj.to_dict(),
         "route": route_dict,
         "findings": finding_dicts,
@@ -149,9 +167,9 @@ def build_forensic_package(
         "gaps": route_dict.get("gaps", []),
         "next_queries": route_dict.get("next_queries", []),
         "evidence_refs": evidence_refs,
-        "raw_refs": list(raw_refs or _raw_like_refs(case_obj.evidence_refs, evidence_refs)),
-        "query_history": [dict(item) for item in query_history or []],
-        "sample_rows": [dict(item) for item in sample_rows or []],
+        "raw_refs": list(package_options.raw_refs or _raw_like_refs(case_obj.evidence_refs, evidence_refs)),
+        "query_history": [dict(item) for item in package_options.query_history],
+        "sample_rows": [dict(item) for item in package_options.sample_rows],
         "chain_of_custody": [
             {
                 "action": "package_rendered",
@@ -166,13 +184,24 @@ def build_forensic_package(
 def forensic_package_content(
     case: CaseRecord | Mapping[str, Any],
     route: RouteDraft | Mapping[str, Any] | None = None,
-    **kwargs: Any,
+    *,
+    options: ForensicPackageOptions | None = None,
+    findings: Sequence[Finding | Mapping[str, Any]] | None = None,
+    query_history: Sequence[Mapping[str, Any]] = (),
+    sample_rows: Sequence[Mapping[str, Any]] = (),
+    raw_refs: Sequence[Any] | None = None,
+    frozen: bool = False,
 ) -> str:
     return json.dumps(
         build_forensic_package(
             case,
             route,
-            **kwargs,
+            options=options,
+            findings=findings,
+            query_history=query_history,
+            sample_rows=sample_rows,
+            raw_refs=raw_refs,
+            frozen=frozen,
         ),
         ensure_ascii=False,
         indent=2,
@@ -183,9 +212,24 @@ def forensic_package_content(
 def build_forensic_package_content(
     case: CaseRecord | Mapping[str, Any],
     route: RouteDraft | Mapping[str, Any] | None = None,
-    **kwargs: Any,
+    *,
+    options: ForensicPackageOptions | None = None,
+    findings: Sequence[Finding | Mapping[str, Any]] | None = None,
+    query_history: Sequence[Mapping[str, Any]] = (),
+    sample_rows: Sequence[Mapping[str, Any]] = (),
+    raw_refs: Sequence[Any] | None = None,
+    frozen: bool = False,
 ) -> str:
-    return forensic_package_content(case, route, **kwargs)
+    return forensic_package_content(
+        case,
+        route,
+        options=options,
+        findings=findings,
+        query_history=query_history,
+        sample_rows=sample_rows,
+        raw_refs=raw_refs,
+        frozen=frozen,
+    )
 
 
 def _route_or_build(
@@ -217,6 +261,7 @@ __all__ = [
     "build_forensic_package",
     "build_forensic_package_content",
     "first_response_report_content",
+    "ForensicPackageOptions",
     "forensic_package_content",
     "render_first_response_report",
 ]

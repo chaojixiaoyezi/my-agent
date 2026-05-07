@@ -23,18 +23,6 @@ class ConfigWarningInput:
     fallback_value: Any
     reason: str
 
-    @classmethod
-    def from_legacy(cls, args: tuple[Any, ...], kwargs: dict[str, Any]) -> ConfigWarningInput:
-        if args:
-            field_name, raw_value, fallback_value, reason = args
-            return cls(str(field_name), raw_value, fallback_value, str(reason))
-        return cls(
-            str(kwargs["field_name"]),
-            kwargs.get("raw_value"),
-            kwargs.get("fallback_value"),
-            str(kwargs["reason"]),
-        )
-
 
 @dataclass(frozen=True)
 class ChoiceCoercionOptions:
@@ -42,28 +30,12 @@ class ChoiceCoercionOptions:
     choices: set[str]
     uppercase: bool = False
 
-    @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> ChoiceCoercionOptions:
-        return cls(
-            default=str(kwargs["default"]),
-            choices=set(kwargs["choices"]),
-            uppercase=bool(kwargs.get("uppercase", False)),
-        )
-
 
 @dataclass(frozen=True)
 class IntCoercionOptions:
     default: int
     min_value: int
     max_value: int | None
-
-    @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> IntCoercionOptions:
-        return cls(
-            default=int(kwargs["default"]),
-            min_value=int(kwargs["min_value"]),
-            max_value=kwargs.get("max_value"),
-        )
 
 
 def lookup(source: dict[str, Any] | object, field_name: str) -> Any:
@@ -75,12 +47,15 @@ def lookup(source: dict[str, Any] | object, field_name: str) -> Any:
 
 def append_warning(
     warnings: list[LogAnalysisConfigWarning],
-    *args: Any,
+    field_name: str,
+    raw_value: Any,
+    fallback_value: Any,
+    reason: str,
+    *,
     warning: ConfigWarningInput | None = None,
-    **kwargs: Any,
 ) -> None:
     """Append a configuration warning entry."""
-    item = warning or ConfigWarningInput.from_legacy(args, kwargs)
+    item = warning or ConfigWarningInput(field_name, raw_value, fallback_value, reason)
     warnings.append(
         LogAnalysisConfigWarning(
             field_name=item.field_name,
@@ -121,14 +96,18 @@ def coerce_bool(
 def coerce_choice(
     field_name: str,
     raw_value: Any,
-    **kwargs: Any,
+    *,
+    default: str,
+    choices: set[str],
+    warnings: list[LogAnalysisConfigWarning],
+    uppercase: bool = False,
+    options: ChoiceCoercionOptions | None = None,
 ) -> str:
     """Coerce a value to a string chosen from an allowed set.
 
     If uppercase=True, normalize input to upper-case before comparing.
     """
-    warnings = kwargs["warnings"]
-    coercion = kwargs.get("options") or ChoiceCoercionOptions.from_kwargs(**kwargs)
+    coercion = options or ChoiceCoercionOptions(default=str(default), choices=set(choices), uppercase=uppercase)
     if raw_value is _MISSING:
         return coercion.default
     if isinstance(raw_value, str):
@@ -143,14 +122,18 @@ def coerce_choice(
 def coerce_int(
     field_name: str,
     raw_value: Any,
-    **kwargs: Any,
+    *,
+    default: int,
+    min_value: int,
+    warnings: list[LogAnalysisConfigWarning],
+    max_value: int | None = None,
+    options: IntCoercionOptions | None = None,
 ) -> int:
     """Coerce a value to an integer within [min_value, max_value].
 
     Rejects booleans explicitly (since bool is int in Python) and non-integer strings.
     """
-    warnings = kwargs["warnings"]
-    coercion = kwargs.get("options") or IntCoercionOptions.from_kwargs(**kwargs)
+    coercion = options or IntCoercionOptions(default=int(default), min_value=int(min_value), max_value=max_value)
     if raw_value is _MISSING:
         return coercion.default
     if isinstance(raw_value, bool):

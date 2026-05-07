@@ -39,15 +39,6 @@ class ParseContext:
     source_product: str | None = None
     line_no: int | None = None
 
-    @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> ParseContext:
-        return cls(
-            raw_ref=str(kwargs["raw_ref"]),
-            source_id=kwargs.get("source_id"),
-            source_product=kwargs.get("source_product"),
-            line_no=kwargs.get("line_no"),
-        )
-
 
 class LogParser(Protocol):
     """Protocol implemented by log parsers used by the ingest pipeline."""
@@ -61,7 +52,10 @@ class LogParser(Protocol):
         record: Mapping[str, Any],
         *,
         context: ParseContext | None = None,
-        **kwargs: Any,
+        raw_ref: str = "",
+        source_id: str | None = None,
+        source_product: str | None = None,
+        line_no: int | None = None,
     ) -> ParsedRecord:
         """Parse one already decoded mapping."""
 
@@ -70,7 +64,10 @@ class LogParser(Protocol):
         line: str,
         *,
         context: ParseContext | None = None,
-        **kwargs: Any,
+        raw_ref: str = "",
+        source_id: str | None = None,
+        source_product: str | None = None,
+        line_no: int | None = None,
     ) -> ParsedRecord:
         """Parse one JSONL line."""
 
@@ -79,6 +76,9 @@ class LogParser(Protocol):
         row: Mapping[str, Any],
         *,
         context: ParseContext | None = None,
-        **kwargs: Any,
+        raw_ref: str = "",
+        source_id: str | None = None,
+        source_product: str | None = None,
+        line_no: int | None = None,
     ) -> ParsedRecord:
         """Parse one CSV row from csv.DictReader."""

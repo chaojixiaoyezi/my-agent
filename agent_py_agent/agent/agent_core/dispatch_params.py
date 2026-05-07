@@ -52,24 +52,24 @@ WATCH_PARAM_KEYS = tuple(field.name for field in fields(WatchParams))
 
 def merge_dispatch_params(
     params: DispatchParams | None = None,
-    kwargs: dict[str, Any] | None = None,
+    overrides: dict[str, Any] | None = None,
 ) -> DispatchParams:
     if params is None:
         params = DispatchParams()
     elif not isinstance(params, DispatchParams):
         raise TypeError("dispatch_subagents() requires params: DispatchParams keyword argument")
-    return _replace_bundle(params, DISPATCH_PARAM_KEYS, kwargs or {})
+    return _replace_bundle(params, DISPATCH_PARAM_KEYS, overrides or {})
 
 
 def merge_watch_params(
     params: WatchParams | None = None,
-    kwargs: dict[str, Any] | None = None,
+    overrides: dict[str, Any] | None = None,
 ) -> WatchParams:
     if params is None:
         params = WatchParams()
     elif not isinstance(params, WatchParams):
         raise TypeError("watch_subagents() requires params: WatchParams keyword argument")
-    return _replace_bundle(params, WATCH_PARAM_KEYS, kwargs or {})
+    return _replace_bundle(params, WATCH_PARAM_KEYS, overrides or {})
 
 
 def dispatch_params_from_watch(params: WatchParams) -> DispatchParams:
@@ -78,11 +78,11 @@ def dispatch_params_from_watch(params: WatchParams) -> DispatchParams:
     )
 
 
-def _replace_bundle(params, allowed_keys: tuple[str, ...], kwargs: dict[str, Any]):
-    overrides = {key: kwargs[key] for key in allowed_keys if key in kwargs}
-    if not overrides:
+def _replace_bundle(params, allowed_keys: tuple[str, ...], updates: dict[str, Any]):
+    selected = {key: updates[key] for key in allowed_keys if key in updates}
+    if not selected:
         return params
-    return replace(params, **overrides)
+    return replace(params, **selected)
 
 
 @dataclass

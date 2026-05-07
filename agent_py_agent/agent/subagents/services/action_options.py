@@ -21,9 +21,27 @@ class ActionApplyOptions:
     limit: int = 0
 
     @classmethod
-    def from_values(cls, options: ActionApplyOptions | None = None, **overrides):
-        """Build options while preserving old keyword-call compatibility."""
+    def from_values(
+        cls,
+        options: ActionApplyOptions | None = None,
+        *,
+        apply: bool | None = None,
+        action_filter: str | None = None,
+        run_id: str | None = None,
+        take_over_by: str | None = None,
+        locked_files: list[str] | None = None,
+        limit: int | None = None,
+    ):
+        """Build the options bundle from explicit legacy fields."""
 
         base = options or cls()
-        clean = {key: value for key, value in overrides.items() if value is not None}
+        updates = {
+            "apply": apply,
+            "action_filter": action_filter,
+            "run_id": run_id,
+            "take_over_by": take_over_by,
+            "locked_files": locked_files,
+            "limit": limit,
+        }
+        clean = {key: value for key, value in updates.items() if value is not None}
         return replace(base, **clean)

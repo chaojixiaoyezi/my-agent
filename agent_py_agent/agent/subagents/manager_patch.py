@@ -25,7 +25,7 @@ from .services.patch_review_helper import PatchReviewTaskHelper
 from .services.patch_spec_normalizer import PatchApplySpecNormalizer
 from .utils import _read_json_object  # noqa: F401 - re-exported for backward compat
 
-# LLM: patch manager forwards bundle options to services and keeps old kwargs as adapters.
+# LLM: patch manager forwards bundle options to services and keeps old explicit fields as adapters.
 if TYPE_CHECKING:
     from ..local_store import LocalStore
 
@@ -159,29 +159,44 @@ class SubAgentPatchMixin:
     def _review_patch_task(
         self,
         task,
-        **legacy,
+        *,
+        output: dict | None = None,
+        patches: list[dict] | None = None,
+        apply: bool = False,
+        reviewer: str = "parent",
+        note: str = "",
     ):
         """Review a single task's patches (delegated to patch review service)."""
-        # LLM: bundle requests are accepted here; loose kwargs remain only for old tests/callers.
         if hasattr(self, "_patch_review_service") and self._patch_review_service is not None:
             if isinstance(task, PatchReviewTaskRequest):
                 return self._patch_review_service._review_patch_task(task)
             return self._patch_review_service._review_patch_task(
                 task,
-                output=legacy.get("output"),
-                patches=legacy.get("patches"),
-                apply=bool(legacy.get("apply", False)),
-                reviewer=legacy.get("reviewer", "parent"),
-                note=legacy.get("note", ""),
+                output=output,
+                patches=patches,
+                apply=apply,
+                reviewer=reviewer,
+                note=note,
             )
-        return PatchReviewTaskHelper.review_patch_task(task, **legacy)
+        return PatchReviewTaskHelper.review_patch_task(
+            task,
+            output=output,
+            patches=patches,
+            apply=apply,
+            reviewer=reviewer,
+            note=note,
+        )
 
     def _apply_patch_task(
         self,
         task,
         *,
         params: ApplyPatchTaskParams | None = None,
-        **legacy,
+        output: dict | None = None,
+        patches: list[dict] | None = None,
+        apply: bool = False,
+        applier: str = "parent",
+        note: str = "",
     ):
         """Apply patches for a single task (delegated to patch apply service)."""
         # LLM: params is the preferred patch-apply bundle; expanded fields are compatibility glue.
@@ -190,16 +205,20 @@ class SubAgentPatchMixin:
                 return self._patch_apply_service._apply_patch_task(task, params=params)
             return self._patch_apply_service._apply_patch_task(
                 task,
-                output=legacy.get("output"),
-                patches=legacy.get("patches"),
-                apply=bool(legacy.get("apply", False)),
-                applier=legacy.get("applier", "parent"),
-                note=legacy.get("note", ""),
+                output=output,
+                patches=patches,
+                apply=apply,
+                applier=applier,
+                note=note,
             )
         return PatchApplyTaskHelper.apply_patch_task(
             task,
             params=params,
-            **legacy,
+            output=output,
+            patches=patches,
+            apply=apply,
+            applier=applier,
+            note=note,
         )
 
     def _normalize_patch_apply_spec(self, task, patch):

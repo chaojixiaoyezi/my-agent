@@ -23,6 +23,7 @@ from .io import (
 
 # Re-export heartbeat liveness check for backward compatibility
 from .lease_service import is_heartbeat_alive_for_request
+from .logging import GatewayIndexPayloadOptions, _index_gateway_payload
 from .paths import GatewayPaths, gateway_paths
 from .recovery import _archive_gateway_request, _gateway_request_attempts
 
@@ -81,8 +82,6 @@ def rebuild_gateway_index(agent: SimpleAgent) -> int:
 
 
 def _rebuild_gateway_history_index(agent: SimpleAgent, paths: GatewayPaths) -> int:
-    from .logging import _index_gateway_payload
-
     count = 0
     if not paths.history.exists():
         return count
@@ -91,7 +90,7 @@ def _rebuild_gateway_history_index(agent: SimpleAgent, paths: GatewayPaths) -> i
         if not payload:
             continue
         response_path = gateway_response_path(paths, str(payload.get("id") or ""))
-        if _index_gateway_payload(agent, payload, response_path=response_path):
+        if _index_gateway_payload(agent, payload, GatewayIndexPayloadOptions(response_path=response_path)):
             count += 1
     return count
 
@@ -120,8 +119,6 @@ def _iter_gateway_request_files(paths: GatewayPaths):
 
 
 def _index_gateway_request_file(agent: SimpleAgent, paths: GatewayPaths, request_path: Path) -> bool:
-    from .logging import _index_gateway_payload
-
     payload = read_json_file(request_path)
     if not payload:
         return False
@@ -129,18 +126,20 @@ def _index_gateway_request_file(agent: SimpleAgent, paths: GatewayPaths, request
     response_path = gateway_response_path(paths, request_id)
     response_payload = read_json_file(response_path)
     merged = {**payload, **response_payload} if response_payload else payload
-    return _index_gateway_payload(agent, merged, request_path=request_path, response_path=response_path)
+    return _index_gateway_payload(
+        agent,
+        merged,
+        GatewayIndexPayloadOptions(request_path=request_path, response_path=response_path),
+    )
 
 
 def _rebuild_gateway_response_index(agent: SimpleAgent, paths: GatewayPaths) -> int:
-    from .logging import _index_gateway_payload
-
     count = 0
     for response_path in sorted(paths.responses.glob("*.json")):
         payload = read_json_file(response_path)
         if not payload:
             continue
-        if _index_gateway_payload(agent, payload, response_path=response_path):
+        if _index_gateway_payload(agent, payload, GatewayIndexPayloadOptions(response_path=response_path)):
             count += 1
     return count
 

@@ -28,9 +28,25 @@ class AcceptanceReviewOptions:
     now: float | None = None
 
     @classmethod
-    def from_values(cls, options: AcceptanceReviewOptions | None = None, **overrides):
+    def from_values(
+        cls,
+        options: AcceptanceReviewOptions | None = None,
+        *,
+        apply: bool | None = None,
+        reviewer: str | None = None,
+        note: str | None = None,
+        limit: int | None = None,
+        now: float | None = None,
+    ):
         base = options or cls()
-        clean = {key: value for key, value in overrides.items() if value is not None}
+        updates = {
+            "apply": apply,
+            "reviewer": reviewer,
+            "note": note,
+            "limit": limit,
+            "now": now,
+        }
+        clean = {key: value for key, value in updates.items() if value is not None}
         return replace(base, **clean)
 
 
@@ -42,7 +58,7 @@ def acceptance_review_options(
     note: str = "",
     limit: int = 0,
 ) -> AcceptanceReviewOptions:
-    """Coerce legacy kwargs into the report-level acceptance options bundle."""
+    """Coerce legacy fields into the report-level acceptance options bundle."""
 
     if options is not None and (apply, reviewer, note, limit) == (False, "parent", "", 0):
         return options

@@ -14,11 +14,22 @@ class PatchReviewTaskHelper:
     @staticmethod
     def review_patch_task(
         task,
-        **legacy,
+        *,
+        output: dict | None = None,
+        patches: list[dict] | None = None,
+        apply: bool = False,
+        reviewer: str = "parent",
+        note: str = "",
     ):
         """Review a single task's patches (inline implementation)."""
         # LLM: fallback accepts the same request bundle as PatchReviewService for takeover safety.
-        task, patches, apply, reviewer, note = _coerce_review_inputs(task, legacy)
+        task, patches, apply, reviewer, note = _coerce_review_inputs(
+            task,
+            patches=patches,
+            apply=apply,
+            reviewer=reviewer,
+            note=note,
+        )
         now = time.time()
         blocked, invalid, applied_patches = _partition_patch_review_items(patches)
         ok = bool(patches) and not blocked and not invalid
@@ -48,7 +59,14 @@ class PatchReviewTaskHelper:
         )
 
 
-def _coerce_review_inputs(task, legacy):
+def _coerce_review_inputs(
+    task,
+    *,
+    patches: list[dict] | None,
+    apply: bool,
+    reviewer: str,
+    note: str,
+):
     from agent_py_agent.agent.subagents.patch.patch_service import PatchReviewTaskRequest
 
     if isinstance(task, PatchReviewTaskRequest):
@@ -62,10 +80,10 @@ def _coerce_review_inputs(task, legacy):
         )
     return (
         task,
-        legacy.get("patches") or [],
-        bool(legacy.get("apply", False)),
-        legacy.get("reviewer", "parent"),
-        legacy.get("note", ""),
+        patches or [],
+        bool(apply),
+        reviewer,
+        note,
     )
 
 

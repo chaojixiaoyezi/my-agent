@@ -36,15 +36,24 @@ class _TraceFieldQueryInput:
     query_one: TraceQuery
 
 
-def trace_case_params(kwargs: dict[str, Any]) -> TraceCaseParams:
+def trace_case_params(
+    *,
+    store: LocalLogStore | None = None,
+    root: str | Path | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    limit: int | None = DEFAULT_QUERY_LIMIT,
+    max_limit: int | None = None,
+    max_queries: int = MAX_TRACE_CASE_QUERIES,
+) -> TraceCaseParams:
     return TraceCaseParams(
-        store=kwargs.get("store"),
-        root=kwargs.get("root"),
-        start_time=kwargs.get("start_time"),
-        end_time=kwargs.get("end_time"),
-        limit=kwargs.get("limit", DEFAULT_QUERY_LIMIT),
-        max_limit=kwargs.get("max_limit"),
-        max_queries=int(kwargs.get("max_queries", MAX_TRACE_CASE_QUERIES)),
+        store=store,
+        root=root,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        max_limit=max_limit,
+        max_queries=int(max_queries),
     )
 
 

@@ -7,6 +7,7 @@ Human version:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -78,6 +79,13 @@ _TRANSITIONS_BY_TRIGGER = {
 }
 
 
+@dataclass(frozen=True)
+class StateTransitionParams:
+    """Params bundle for future guarded state transitions."""
+
+    guard_context: object | None = None
+
+
 class SubAgentStateMachine:
     """State machine for subagent task lifecycle.
 
@@ -112,7 +120,8 @@ class SubAgentStateMachine:
         self,
         run_id: str,
         trigger: str,
-        **kwargs,
+        *,
+        params: StateTransitionParams | None = None,
     ) -> SubAgentTask:
         """Execute a state transition on a task.
 
@@ -134,7 +143,8 @@ class SubAgentStateMachine:
 
         # Execute pre-transition guard if any
         guard_func = trans[3]
-        if guard_func and not guard_func(task, **kwargs):
+        transition_params = params or StateTransitionParams()
+        if guard_func and not guard_func(task, transition_params):
             raise ValueError(f"Transition guard failed for {current} --{trigger_lower}--> {new_state}")
 
         old_state = self._apply_transition_state(task, new_state, trigger_lower, run_id)

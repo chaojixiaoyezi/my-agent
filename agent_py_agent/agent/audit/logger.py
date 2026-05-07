@@ -83,36 +83,37 @@ class LogParams:
     user_agent: str = ""
 
 
-def _normalize_log_params(params: LogParams | AuditAction | str | None, kwargs: dict[str, Any]) -> LogParams:
+def _normalize_log_params(
+    params: LogParams | AuditAction | str | None,
+    *,
+    action: AuditAction | str | None = None,
+    user_id: str = "",
+    channel: str = "",
+    target_type: str = "",
+    target_id: str = "",
+    status: AuditStatus | str = AuditStatus.SUCCESS,
+    details: dict[str, Any] | None = None,
+    ip_address: str = "",
+    user_agent: str = "",
+) -> LogParams:
     """把新旧两种 log 调用形式统一成 LogParams。"""
 
     if isinstance(params, LogParams):
         return params
-    if params is not None:
+    action_value = params if params is not None else action
+    if action_value is not None:
         return LogParams(
-            action=params,
-            user_id=kwargs.pop("user_id", ""),
-            channel=kwargs.pop("channel", ""),
-            target_type=kwargs.pop("target_type", ""),
-            target_id=kwargs.pop("target_id", ""),
-            status=kwargs.pop("status", AuditStatus.SUCCESS),
-            details=kwargs.pop("details", None),
-            ip_address=kwargs.pop("ip_address", ""),
-            user_agent=kwargs.pop("user_agent", ""),
+            action=action_value,
+            user_id=user_id,
+            channel=channel,
+            target_type=target_type,
+            target_id=target_id,
+            status=status,
+            details=details,
+            ip_address=ip_address,
+            user_agent=user_agent,
         )
-    if kwargs:
-        return LogParams(
-            action=kwargs.pop("action", AuditAction.QUERY),
-            user_id=kwargs.pop("user_id", ""),
-            channel=kwargs.pop("channel", ""),
-            target_type=kwargs.pop("target_type", ""),
-            target_id=kwargs.pop("target_id", ""),
-            status=kwargs.pop("status", AuditStatus.SUCCESS),
-            details=kwargs.pop("details", None),
-            ip_address=kwargs.pop("ip_address", ""),
-            user_agent=kwargs.pop("user_agent", ""),
-        )
-    raise TypeError("log() requires either params: LogParams or keyword arguments")
+    raise TypeError("log() requires LogParams or action")
 
 
 def _enum_value(value: Any) -> Any:
@@ -136,8 +137,32 @@ class AuditLogger:
         random_part = secrets.token_hex(2)
         return f"audit_{timestamp}_{random_part}"
 
-    def log(self, params: LogParams | AuditAction | str = None, **kwargs) -> AuditEntry:
-        log_params = _normalize_log_params(params, kwargs)
+    def log(
+        self,
+        params: LogParams | AuditAction | str = None,
+        *,
+        action: AuditAction | str | None = None,
+        user_id: str = "",
+        channel: str = "",
+        target_type: str = "",
+        target_id: str = "",
+        status: AuditStatus | str = AuditStatus.SUCCESS,
+        details: dict[str, Any] | None = None,
+        ip_address: str = "",
+        user_agent: str = "",
+    ) -> AuditEntry:
+        log_params = _normalize_log_params(
+            params,
+            action=action,
+            user_id=user_id,
+            channel=channel,
+            target_type=target_type,
+            target_id=target_id,
+            status=status,
+            details=details,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
         entry = self._entry_from_params(log_params)
         self._write_to_file(entry)
         if self._local_store is not None:

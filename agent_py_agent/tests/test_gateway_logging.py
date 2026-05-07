@@ -116,13 +116,16 @@ class TestIndexGatewayPayload:
 
     def test_request_path_as_fallback_id(self, tmp_path: Path):
         """request_path.stem 作为后备 ID。"""
-        from agent_py_agent.agent.gateway_parts.logging import _index_gateway_payload
+        from agent_py_agent.agent.gateway_parts.logging import (
+            GatewayIndexPayloadOptions,
+            _index_gateway_payload,
+        )
 
         mock_agent = MagicMock()
         payload = {"status": "done"}  # 没有 id
 
         request_path = tmp_path / "req_789.json"
-        result = _index_gateway_payload(mock_agent, payload, request_path=request_path)
+        result = _index_gateway_payload(mock_agent, payload, GatewayIndexPayloadOptions(request_path=request_path))
 
         assert result is True
         call_kwargs = mock_agent.local_store.log_record.call_args[1]

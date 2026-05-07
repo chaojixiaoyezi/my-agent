@@ -20,14 +20,26 @@ from .models import PREVIEW_CHARS, LocalSearchResult
 
 
 @dataclass(frozen=True)
-class _RecordInput:
+class LocalRecordInput:
     source_type: str
     source_id: str
     title: str
     content: str
-    metadata: dict[str, Any]
-    visibility: str
-    record_id: object | None
+    metadata: dict[str, Any] | None = None
+    visibility: str = "private"
+    record_id: object | None = None
+
+
+@dataclass(frozen=True)
+class LocalRecordLogInput:
+    source_type: str
+    source_id: str
+    title: str
+    content: str
+    metadata: dict[str, Any] | None = None
+    visibility: str = "private"
+    record_id: object | None = None
+    event_type: str = "local_record_logged"
 
 
 @dataclass(frozen=True)
@@ -86,19 +98,29 @@ class _LocalStoreRecordHelpers:
 
 class LocalStoreRecordMixin(_LocalStoreRecordHelpers):
 
-    def upsert_record(self, **kwargs: Any) -> LocalSearchResult:
+    def upsert_record(
+        self,
+        params: LocalRecordInput | None = None,
+        *,
+        source_type: str | None = None,
+        source_id: str | None = None,
+        title: str | None = None,
+        content: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        visibility: str = "private",
+        record_id: object | None = None,
+    ) -> LocalSearchResult:
 
-        prepared = self._prepare_record(
-            _RecordInput(
-                source_type=str(kwargs["source_type"]),
-                source_id=str(kwargs["source_id"]),
-                title=str(kwargs["title"]),
-                content=str(kwargs["content"]),
-                metadata=kwargs.get("metadata") or {},
-                visibility=str(kwargs.get("visibility", "private")),
-                record_id=kwargs.get("record_id"),
-            )
+        params = params or LocalRecordInput(
+            source_type=str(source_type),
+            source_id=str(source_id),
+            title=str(title),
+            content=str(content),
+            metadata=metadata,
+            visibility=visibility,
+            record_id=record_id,
         )
+        prepared = self._prepare_record(params)
 
         with self._connection() as conn:
             created_at = self._existing_created_at(conn, prepared.record_id, prepared.now)
@@ -121,7 +143,7 @@ class LocalStoreRecordMixin(_LocalStoreRecordHelpers):
             content_path=prepared.stored_path,
         )
 
-    def _prepare_record(self, params: _RecordInput) -> _PreparedRecord:
+    def _prepare_record(self, params: LocalRecordInput) -> _PreparedRecord:
         clean_source_type = params.source_type.strip() or "unknown"
         clean_source_id = params.source_id.strip() or str(uuid.uuid4())
         clean_title = params.title.strip() or clean_source_id
@@ -129,15 +151,16 @@ class LocalStoreRecordMixin(_LocalStoreRecordHelpers):
         content_path = self._content_file(clean_record_id)
         content_path.parent.mkdir(parents=True, exist_ok=True)
         content_path.write_text(params.content, encoding="utf-8")
+        metadata = params.metadata or {}
         return _PreparedRecord(
             record_id=clean_record_id,
             source_type=clean_source_type,
             source_id=clean_source_id,
             title=clean_title,
             content=params.content,
-            metadata=params.metadata,
-            metadata_json=json.dumps(params.metadata, ensure_ascii=False, sort_keys=True),
-            visibility=params.visibility,
+            metadata=metadata,
+            metadata_json=json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+            visibility=str(params.visibility),
             content_hash=hashlib.sha256(params.content.encode("utf-8")).hexdigest(),
             stored_path=self._stored_path(content_path),
             now=time.time(),
@@ -195,17 +218,49 @@ class LocalStoreRecordMixin(_LocalStoreRecordHelpers):
             },
         )
 
-    def log_record(self, **kwargs: Any) -> LocalSearchResult:
+    def log_record(
+        self,
+        params: LocalRecordLogInput | None = None,
+        *,
+        source_type: str | None = None,
+        source_id: str | None = None,
+        title: str | None = None,
+        content: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        visibility: str = "private",
+        record_id: object | None = None,
+        event_type: str = "local_record_logged",
+    ) -> LocalSearchResult:
 
-        metadata = kwargs.get("metadata") or {}
-        record = self.upsert_record(**{**kwargs, "metadata": metadata})
+        params = params or LocalRecordLogInput(
+            source_type=str(source_type),
+            source_id=str(source_id),
+            title=str(title),
+            content=str(content),
+            metadata=metadata,
+            visibility=visibility,
+            record_id=record_id,
+            event_type=event_type,
+        )
+        metadata = params.metadata or {}
+        record = self.upsert_record(
+            LocalRecordInput(
+                source_type=params.source_type,
+                source_id=params.source_id,
+                title=params.title,
+                content=params.content,
+                metadata=metadata,
+                visibility=params.visibility,
+                record_id=params.record_id,
+            )
+        )
         self.record_event(
-            str(kwargs.get("event_type", "local_record_logged")),
+            str(params.event_type),
             record_id=record.id,
             payload={
-                "source_type": kwargs["source_type"],
-                "source_id": kwargs["source_id"],
-                "title": kwargs["title"],
+                "source_type": params.source_type,
+                "source_id": params.source_id,
+                "title": params.title,
                 **metadata,
             },
         )

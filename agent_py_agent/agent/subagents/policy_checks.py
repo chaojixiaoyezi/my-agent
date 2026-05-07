@@ -56,6 +56,17 @@ class MakeDueIssueParams:
     stale_seconds: float
 
 
+@dataclass(frozen=True)
+class RunnerNextActionParams:
+    """Params bundle for deciding the runner follow-up action."""
+
+    dry_run: bool = False
+    ok: bool = False
+    status: str = ""
+    capability_request_count: int = 0
+    next_actions: list[str] | None = None
+
+
 def _make_due_issue(*, params: MakeDueIssueParams) -> DueCheckIssue:
     """LLM: unified factory for due-check issues to keep fields consistent across branches.
 
@@ -230,7 +241,7 @@ def _verification_from_runner_status(status: str) -> str:
     return "UNVERIFIED"
 
 
-def _runner_next_action(**kwargs) -> str:
+def _runner_next_action(*, params: RunnerNextActionParams) -> str:
     """LLM: compute machine-readable next-action suggestion from runner result.
 
     新手说明:
@@ -238,20 +249,15 @@ def _runner_next_action(**kwargs) -> str:
     有 next_actions 就取第一个，ok 且待验收就跑验收，否则检查失败。
     """
 
-    dry_run = bool(kwargs.get("dry_run", False))
-    ok = bool(kwargs.get("ok", False))
-    status = str(kwargs.get("status", ""))
-    capability_request_count = int(kwargs.get("capability_request_count", 0) or 0)
-    next_actions = kwargs.get("next_actions")
-    if dry_run:
+    if params.dry_run:
         return ""
-    if capability_request_count:
+    if params.capability_request_count:
         return "route_capability_request"
-    if next_actions:
-        return next_actions[0]
-    if ok and status == "AWAITING_ACCEPTANCE":
+    if params.next_actions:
+        return params.next_actions[0]
+    if params.ok and params.status == "AWAITING_ACCEPTANCE":
         return "run_acceptance"
-    if not ok:
+    if not params.ok:
         return "inspect_runner_failure"
     return ""
 

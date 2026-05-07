@@ -20,17 +20,6 @@ class BatchFinish:
     dead_letter_count: int
     manifest_path: str
 
-    @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> BatchFinish:
-        return cls(
-            batch_id=str(kwargs["batch_id"]),
-            status=str(kwargs["status"]),
-            event_count=int(kwargs["event_count"]),
-            duplicate_count=int(kwargs["duplicate_count"]),
-            dead_letter_count=int(kwargs["dead_letter_count"]),
-            manifest_path=str(kwargs["manifest_path"]),
-        )
-
 
 class DedupStore:
     """SQLite-backed batch and event dedup ledger."""
@@ -95,9 +84,21 @@ class DedupStore:
         self,
         *,
         finish: BatchFinish | None = None,
-        **kwargs: Any,
+        batch_id: str = "",
+        status: str = "",
+        event_count: int = 0,
+        duplicate_count: int = 0,
+        dead_letter_count: int = 0,
+        manifest_path: str = "",
     ) -> None:
-        item = finish or BatchFinish.from_kwargs(**kwargs)
+        item = finish or BatchFinish(
+            batch_id=str(batch_id),
+            status=str(status),
+            event_count=int(event_count),
+            duplicate_count=int(duplicate_count),
+            dead_letter_count=int(dead_letter_count),
+            manifest_path=str(manifest_path),
+        )
         with self._connect() as conn:
             conn.execute(
                 """

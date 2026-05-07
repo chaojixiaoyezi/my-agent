@@ -58,6 +58,17 @@ class MakeDueIssueParams:
     open_gap_count: int
     age_seconds: float
     stale_seconds: float
+
+
+@dataclass(frozen=True)
+class RunnerNextActionParams:
+    dry_run: bool = False
+    ok: bool = False
+    status: str = ""
+    capability_request_count: int = 0
+    next_actions: list[str] | None = None
+
+
 def _make_due_issue(*, params: MakeDueIssueParams) -> DueCheckIssue:
     return DueCheckIssue(
         run_id=params.task.id,
@@ -214,21 +225,16 @@ def _verification_from_runner_status(status: str) -> str:
     if status.upper() == "AWAITING_ACCEPTANCE":
         return "NEEDS_ACCEPTANCE"
     return "UNVERIFIED"
-def _runner_next_action(**kwargs) -> str:
-    dry_run = bool(kwargs.get("dry_run", False))
-    ok = bool(kwargs.get("ok", False))
-    status = str(kwargs.get("status", ""))
-    capability_request_count = int(kwargs.get("capability_request_count", 0) or 0)
-    next_actions = kwargs.get("next_actions")
-    if dry_run:
+def _runner_next_action(*, params: RunnerNextActionParams) -> str:
+    if params.dry_run:
         return ""
-    if capability_request_count:
+    if params.capability_request_count:
         return "route_capability_request"
-    if next_actions:
-        return next_actions[0]
-    if ok and status == "AWAITING_ACCEPTANCE":
+    if params.next_actions:
+        return params.next_actions[0]
+    if params.ok and params.status == "AWAITING_ACCEPTANCE":
         return "run_acceptance"
-    if not ok:
+    if not params.ok:
         return "inspect_runner_failure"
     return ""
 def _dedupe_granted_cards(

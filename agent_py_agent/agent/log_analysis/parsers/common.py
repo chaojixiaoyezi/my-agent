@@ -29,18 +29,33 @@ class _NormalizeOptions:
     ingest_time: str | None
 
 def normalize_security_alert_v1(
-    record: Mapping[str, Any], **kwargs: Any,
+    record: Mapping[str, Any],
+    *,
+    options: _NormalizeOptions | None = None,
+    raw_ref: str = "",
+    source_id: str | None = None,
+    source_product: str | None = None,
+    line_no: int | None = None,
+    payload_max_chars: int = DEFAULT_PAYLOAD_MAX_CHARS,
+    ingest_time: str | None = None,
 ) -> dict[str, Any]:
     """Normalize one SecurityAlertV1 mapping while preserving raw fields."""
 
-    options = _normalize_options(kwargs)
+    normalize_options = options or _NormalizeOptions(
+        raw_ref=str(raw_ref),
+        source_id=source_id,
+        source_product=source_product,
+        line_no=line_no,
+        payload_max_chars=int(payload_max_chars),
+        ingest_time=ingest_time,
+    )
     raw_fields = _clean_raw_fields(record)
     mapped, mapping_source, attributes = _map_security_alert_fields(raw_fields)
-    event = _base_security_event(mapped, raw_fields, options)
+    event = _base_security_event(mapped, raw_fields, normalize_options)
 
     _copy_security_ip_semantics(event)
     _coerce_port_fields(event)
-    _apply_payload_policy(event, payload_max_chars=options.payload_max_chars)
+    _apply_payload_policy(event, payload_max_chars=normalize_options.payload_max_chars)
 
     event["raw_fields"] = raw_fields
     event["attributes"] = attributes
@@ -96,18 +111,6 @@ def _base_security_event(
     event["raw_line_no"] = options.line_no
     event["parser_id"] = "security_alert_v1"
     return event
-
-
-def _normalize_options(kwargs: dict[str, Any]) -> _NormalizeOptions:
-    return _NormalizeOptions(
-        raw_ref=str(kwargs.pop("raw_ref")),
-        source_id=kwargs.pop("source_id", None),
-        source_product=kwargs.pop("source_product", None),
-        line_no=kwargs.pop("line_no", None),
-        payload_max_chars=int(kwargs.pop("payload_max_chars", DEFAULT_PAYLOAD_MAX_CHARS)),
-        ingest_time=kwargs.pop("ingest_time", None),
-    )
-
 
 def stable_field_key(raw_key: str) -> str:
     key = _strip_key(raw_key)

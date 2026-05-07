@@ -25,16 +25,25 @@ _VALID_PATCH_STATUSES = {"applied", "planned", "blocked"}
 class PatchReviewOptions:
     """Options bundle for patch review report entrypoints."""
 
-    # LLM: review policy options stay grouped while legacy kwargs remain thin adapters.
+    # LLM: review policy options stay grouped while legacy fields remain thin adapters.
     apply: bool = False
     reviewer: str = "parent"
     note: str = ""
     limit: int = 0
 
     @classmethod
-    def from_values(cls, options: PatchReviewOptions | None = None, **overrides):
+    def from_values(
+        cls,
+        options: PatchReviewOptions | None = None,
+        *,
+        apply: bool | None = None,
+        reviewer: str | None = None,
+        note: str | None = None,
+        limit: int | None = None,
+    ):
         base = options or cls()
-        clean = {key: value for key, value in overrides.items() if value is not None}
+        updates = {"apply": apply, "reviewer": reviewer, "note": note, "limit": limit}
+        clean = {key: value for key, value in updates.items() if value is not None}
         return replace(base, **clean)
 
 

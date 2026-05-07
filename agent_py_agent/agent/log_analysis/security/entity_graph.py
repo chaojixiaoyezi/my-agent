@@ -47,19 +47,6 @@ class EntityEdgeInput:
     first_seen: str = ""
     last_seen: str = ""
 
-    @classmethod
-    def from_legacy(cls, args: tuple[Any, ...], kwargs: dict[str, Any]) -> EntityEdgeInput:
-        source, target, relationship, *rest = args
-        evidence_refs = rest[0] if rest else kwargs.get("evidence_refs", ())
-        return cls(
-            source=str(source),
-            target=str(target),
-            relationship=str(relationship),
-            evidence_refs=evidence_refs,
-            first_seen=str(kwargs.get("first_seen", "")),
-            last_seen=str(kwargs.get("last_seen", "")),
-        )
-
 
 @dataclass
 class EntityGraph:
@@ -81,11 +68,23 @@ class EntityGraph:
 
     def add_edge(
         self,
-        *args: Any,
+        source: str = "",
+        target: str = "",
+        relationship: str = "",
+        evidence_refs: Sequence[Any] = (),
+        *,
         edge: EntityEdgeInput | None = None,
-        **kwargs: Any,
+        first_seen: str = "",
+        last_seen: str = "",
     ) -> None:
-        item = edge or EntityEdgeInput.from_legacy(args, kwargs)
+        item = edge or EntityEdgeInput(
+            source=str(source),
+            target=str(target),
+            relationship=str(relationship),
+            evidence_refs=evidence_refs,
+            first_seen=str(first_seen),
+            last_seen=str(last_seen),
+        )
         if not item.source or not item.target or item.source == item.target:
             return
         refs = _ref_ids(item.evidence_refs)

@@ -37,12 +37,16 @@ def _optional_path(value: Any, *, default: str = ".") -> str:
 
 def _text_param(
     value: Any,
-    **options: Any,
+    *,
+    name: str = "value",
+    max_chars: int = _MAX_WRITE_TEXT_CHARS,
+    allow_empty: bool = False,
+    strip: bool = False,
 ) -> str:
-    name = str(options.get("name", "value"))
-    max_chars = int(options.get("max_chars", _MAX_WRITE_TEXT_CHARS))
-    allow_empty = bool(options.get("allow_empty", False))
-    strip = bool(options.get("strip", False))
+    name = str(name)
+    max_chars = int(max_chars)
+    allow_empty = bool(allow_empty)
+    strip = bool(strip)
     if value is None:
         raise ValueError(f"缺少必填参数 {name}")
     if not isinstance(value, (str, int, float, bool)):

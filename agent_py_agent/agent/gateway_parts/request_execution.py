@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..agent_core.runtime_mixin import RunParams
 from .audit_service import audit_request_completed, audit_request_processing
 from .chunk_service import close_chunk_stream, open_chunk_stream, write_chunk
 from .io import gateway_response_path, read_json_file
@@ -121,18 +122,20 @@ def _run_gateway_ask(context: _GatewayAskRunContext):
         raise ValueError(_EMPTY_PROMPT_MESSAGE)
     return context.agent.run(
         prompt,
-        inject=[str(item) for item in request.get("inject", [])],
-        prompt_files=[str(item) for item in request.get("prompt_files", [])],
-        save=bool(request.get("save", True)),
-        request_id=context.request_id,
-        source="gateway",
-        recovery_snapshot=bool(request.get("save", True)),
-        resume_context=request.get("resume_context") if "resume_context" in request else None,
-        recovery_next_actions=[
-            "If this gateway request must be recovered, inspect the gateway response and LocalStore gateway_request records first."
-        ],
-        recovery_content_paths=[str(context.request_path), str(context.response_path)],
-        on_chunk=context.on_chunk,
+        params=RunParams(
+            inject=[str(item) for item in request.get("inject", [])],
+            prompt_files=[str(item) for item in request.get("prompt_files", [])],
+            save=bool(request.get("save", True)),
+            request_id=context.request_id,
+            source="gateway",
+            recovery_snapshot=bool(request.get("save", True)),
+            resume_context=request.get("resume_context") if "resume_context" in request else None,
+            recovery_next_actions=[
+                "If this gateway request must be recovered, inspect the gateway response and LocalStore gateway_request records first."
+            ],
+            recovery_content_paths=[str(context.request_path), str(context.response_path)],
+            on_chunk=context.on_chunk,
+        ),
     )
 
 

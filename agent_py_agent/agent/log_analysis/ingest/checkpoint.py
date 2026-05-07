@@ -39,16 +39,6 @@ class CheckpointCommit:
     last_committed_batch_id: str
     last_event_time: str | None
 
-    @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> CheckpointCommit:
-        return cls(
-            source_id=str(kwargs["source_id"]),
-            cursor_kind=str(kwargs["cursor_kind"]),
-            cursor=kwargs["cursor"],
-            last_committed_batch_id=str(kwargs["last_committed_batch_id"]),
-            last_event_time=kwargs.get("last_event_time"),
-        )
-
 
 class CheckpointStore:
     """JSON checkpoint store scoped by source_id."""
@@ -72,9 +62,19 @@ class CheckpointStore:
         self,
         *,
         commit: CheckpointCommit | None = None,
-        **kwargs: Any,
+        source_id: str = "",
+        cursor_kind: str = "",
+        cursor: Mapping[str, Any] | None = None,
+        last_committed_batch_id: str = "",
+        last_event_time: str | None = None,
     ) -> Checkpoint:
-        item = commit or CheckpointCommit.from_kwargs(**kwargs)
+        item = commit or CheckpointCommit(
+            source_id=str(source_id),
+            cursor_kind=str(cursor_kind),
+            cursor=cursor or {},
+            last_committed_batch_id=str(last_committed_batch_id),
+            last_event_time=last_event_time,
+        )
         checkpoint = Checkpoint(
             source_id=item.source_id,
             cursor_kind=item.cursor_kind,

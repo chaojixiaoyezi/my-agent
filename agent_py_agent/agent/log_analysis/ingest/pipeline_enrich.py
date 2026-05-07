@@ -167,7 +167,10 @@ def enrich_ingest_file(
     path: str | Path,
     *,
     options: IngestFileOptions | None = None,
-    **kwargs: Any,
+    source_id: str | None = None,
+    source_product: str | None = None,
+    parser_id: str = "security_alert_v1",
+    file_format: str | None = None,
 ) -> IngestResult:
     """LLM: Main orchestration for ingesting a single file — dedup, storage, manifest, checkpoint.
 
@@ -176,7 +179,12 @@ def enrich_ingest_file(
     写 checkpoint。这是 pipeline.ingest_file 的实际实现，拆到这里避免
     pipeline.py 太长。
     """
-    ingest_options = options or IngestFileOptions.from_kwargs(**kwargs)
+    ingest_options = options or IngestFileOptions(
+        source_id=source_id,
+        source_product=source_product,
+        parser_id=str(parser_id),
+        file_format=file_format,
+    )
     prepared = _prepare_ingest(
         pipeline,
         _PrepareIngestRequest(

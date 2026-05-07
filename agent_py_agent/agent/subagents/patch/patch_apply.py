@@ -34,9 +34,18 @@ class PatchApplyOptions:
     limit: int = 0
 
     @classmethod
-    def from_values(cls, options: PatchApplyOptions | None = None, **overrides):
+    def from_values(
+        cls,
+        options: PatchApplyOptions | None = None,
+        *,
+        apply: bool | None = None,
+        applier: str | None = None,
+        note: str | None = None,
+        limit: int | None = None,
+    ):
         base = options or cls()
-        clean = {key: value for key, value in overrides.items() if value is not None}
+        updates = {"apply": apply, "applier": applier, "note": note, "limit": limit}
+        clean = {key: value for key, value in updates.items() if value is not None}
         return replace(base, **clean)
 
 
@@ -190,16 +199,19 @@ class PatchApplyService:
         task,
         *,
         params: ApplyPatchTaskParams | None = None,
-        **legacy,
+        output: dict | None = None,
+        patches: list[dict] | None = None,
+        apply: bool = False,
+        applier: str = "parent",
+        note: str = "",
     ):
         """Backward-compatible wrapper for single-task patch application."""
-        # LLM: legacy kwargs are accepted only to build the task params bundle.
         params = params or ApplyPatchTaskParams(
-            output=legacy.get("output") or {},
-            patches=legacy.get("patches") or [],
-            apply=bool(legacy.get("apply", False)),
-            applier=legacy.get("applier", "parent"),
-            note=legacy.get("note", ""),
+            output=output or {},
+            patches=patches or [],
+            apply=bool(apply),
+            applier=applier,
+            note=note,
         )
         return apply_patch_task(
             self.manager, task,

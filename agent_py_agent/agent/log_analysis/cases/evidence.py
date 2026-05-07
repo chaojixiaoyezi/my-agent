@@ -19,17 +19,6 @@ class QueryEvidencePayload:
     truncated: bool
     summary: dict[str, Any]
 
-    @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> QueryEvidencePayload:
-        return cls(
-            query_id=str(kwargs["query_id"]),
-            parameters=dict(kwargs["parameters"]),
-            rows=list(kwargs["rows"]),
-            row_count=int(kwargs["row_count"]),
-            truncated=bool(kwargs["truncated"]),
-            summary=dict(kwargs["summary"]),
-        )
-
 
 class LocalEvidenceStore:
     """Writes query evidence payloads under the local store root."""
@@ -43,9 +32,21 @@ class LocalEvidenceStore:
         self,
         *,
         payload: QueryEvidencePayload | None = None,
-        **kwargs: Any,
+        query_id: str = "",
+        parameters: dict[str, Any] | None = None,
+        rows: list[dict[str, Any]] | None = None,
+        row_count: int = 0,
+        truncated: bool = False,
+        summary: dict[str, Any] | None = None,
     ) -> EvidenceRef:
-        evidence = payload or QueryEvidencePayload.from_kwargs(**kwargs)
+        evidence = payload or QueryEvidencePayload(
+            query_id=str(query_id),
+            parameters=dict(parameters or {}),
+            rows=list(rows or []),
+            row_count=int(row_count),
+            truncated=bool(truncated),
+            summary=dict(summary or {}),
+        )
         evidence_id = evidence.query_id
         path = self.evidence_dir / f"{evidence_id}.json"
         payload = {

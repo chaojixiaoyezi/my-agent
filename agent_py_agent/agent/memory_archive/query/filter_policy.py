@@ -60,17 +60,8 @@ def filter_by_query_text(record: dict[str, Any], query_text: str) -> bool:
 
 def evaluate_filters(
     record: dict[str, Any],
-    options: ArchiveFilterOptions | None = None,
-    **kwargs: Any,
+    options: ArchiveFilterOptions,
 ) -> bool:
-    options = options or ArchiveFilterOptions(
-        query=str(kwargs.get("query", "")),
-        filters=dict(kwargs.get("filters", {}) or {}),
-        since=kwargs.get("since"),
-        until=kwargs.get("until"),
-        level=kwargs.get("level"),
-    )
-
     if not filter_by_fields(record, options.filters):
         return False
     if not filter_by_level(record, options.level):

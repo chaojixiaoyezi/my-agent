@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -41,23 +41,48 @@ class DispatchLoopReport:
     rounds: list[dict] = field(default_factory=list)
 
 
-_DISPATCH_LOOP_PARAM_KEYS = [
-    "max_consecutive_rounds", "apply", "execute_runners", "planner",
-    "workflow_mode", "max_runners", "limit", "reviewer", "note",
-    "runner_instruction", "max_cards", "probe", "take_over_by", "locked_files",
-]
+_DISPATCH_LOOP_PARAM_KEYS = tuple(field.name for field in fields(DispatchLoopParams))
 
 
-def _coerce_dispatch_loop_params(params, kwargs) -> DispatchLoopParams:
-    if params is None:
-        params = DispatchLoopParams()
-    elif not isinstance(params, DispatchLoopParams):
+def _coerce_dispatch_loop_params(
+    params: DispatchLoopParams | None,
+    *,
+    max_consecutive_rounds: int = 20,
+    apply: bool = False,
+    execute_runners: bool = False,
+    planner: bool = False,
+    workflow_mode: str = "off",
+    max_runners: int = 1,
+    limit: int = 20,
+    reviewer: str = "parent-dispatch",
+    note: str = "",
+    runner_instruction: str = "",
+    max_cards: int = 0,
+    probe: bool = True,
+    take_over_by: str = "",
+    locked_files: list[str] | None = None,
+) -> DispatchLoopParams:
+    if params is not None and not isinstance(params, DispatchLoopParams):
         raise TypeError("dispatch_loop() requires params: DispatchLoopParams keyword argument")
 
-    for key in _DISPATCH_LOOP_PARAM_KEYS:
-        if key in kwargs:
-            setattr(params, key, kwargs[key])
-    return params
+    if params is not None:
+        return params
+    return DispatchLoopParams(
+        max_consecutive_rounds=max_consecutive_rounds,
+        apply=apply,
+        execute_runners=execute_runners,
+        planner=planner,
+        workflow_mode=workflow_mode,
+        max_runners=max_runners,
+        limit=limit,
+        reviewer=reviewer,
+        note=note,
+        runner_instruction=runner_instruction,
+        max_cards=max_cards,
+        probe=probe,
+        take_over_by=take_over_by,
+        locked_files=locked_files,
+    )
 
 
 def _run_single_dispatch(agent, router, capability_config, params):
@@ -88,9 +113,38 @@ def dispatch_loop(
     capability_config: CapabilityConfig | None = None,
     *,
     params: DispatchLoopParams = None,
-    **kwargs,
+    max_consecutive_rounds: int = 20,
+    apply: bool = False,
+    execute_runners: bool = False,
+    planner: bool = False,
+    workflow_mode: str = "off",
+    max_runners: int = 1,
+    limit: int = 20,
+    reviewer: str = "parent-dispatch",
+    note: str = "",
+    runner_instruction: str = "",
+    max_cards: int = 0,
+    probe: bool = True,
+    take_over_by: str = "",
+    locked_files: list[str] | None = None,
 ) -> DispatchLoopReport:
-    params = _coerce_dispatch_loop_params(params, kwargs)
+    params = _coerce_dispatch_loop_params(
+        params,
+        max_consecutive_rounds=max_consecutive_rounds,
+        apply=apply,
+        execute_runners=execute_runners,
+        planner=planner,
+        workflow_mode=workflow_mode,
+        max_runners=max_runners,
+        limit=limit,
+        reviewer=reviewer,
+        note=note,
+        runner_instruction=runner_instruction,
+        max_cards=max_cards,
+        probe=probe,
+        take_over_by=take_over_by,
+        locked_files=locked_files,
+    )
     report = DispatchLoopReport()
     max_rounds = params.max_consecutive_rounds
 

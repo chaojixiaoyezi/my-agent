@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..subagents.models import SubAgentCapabilityRouteOptions, SubAgentDueCheckOptions
+from ..subagents.services.dispatch_params import DispatchRecordParams, DispatchWatchRecordParams
 from ..subagents.services.workflow import _try_workflow_plan, _workflow_extra_write_roots
 from .dispatch_record_params import (
     AcceptanceRecordParams,
@@ -90,6 +91,7 @@ def _build_dry_run_workflow_records(params: DryRunWorkflowRecordParams):
     worker_count = params.worker_count
     records = [
         agent.subagents.make_dispatch_record(
+            params=DispatchRecordParams(
             step="workflow",
             action="plan_workflow",
             run_id=task.id,
@@ -105,11 +107,13 @@ def _build_dry_run_workflow_records(params: DryRunWorkflowRecordParams):
             before_verification_status=task.verification_status,
             after_verification_status=task.verification_status,
             evidence_paths=[task.task_dir],
+            ),
         )
     ]
     if params.workflow_mode == "auto" and preview.get("ok"):
         records.append(
             agent.subagents.make_dispatch_record(
+                params=DispatchRecordParams(
                 step="workflow",
                 action="spawn_workflow_workers",
                 run_id=task.id,
@@ -122,6 +126,7 @@ def _build_dry_run_workflow_records(params: DryRunWorkflowRecordParams):
                 before_verification_status=task.verification_status,
                 after_verification_status=task.verification_status,
                 evidence_paths=[task.task_dir],
+                ),
             )
         )
     return records
@@ -129,6 +134,7 @@ def _build_dry_run_workflow_records(params: DryRunWorkflowRecordParams):
 
 def _workflow_plan_record(agent, task, planned):
     return agent.subagents.make_dispatch_record(
+        params=DispatchRecordParams(
         step="workflow",
         action="plan_workflow",
         run_id=task.id,
@@ -141,6 +147,7 @@ def _workflow_plan_record(agent, task, planned):
         before_verification_status=task.verification_status,
         after_verification_status=planned.verification_status,
         evidence_paths=[planned.task_dir],
+        ),
     )
 
 
@@ -155,6 +162,7 @@ def _workflow_spawn_record(agent, task, planned):
     before_child_count = len(planned.workflow_child_run_ids)
     planned, created_children = agent.subagents.realize_workflow_plan(task.id)
     return agent.subagents.make_dispatch_record(
+        params=DispatchRecordParams(
         step="workflow",
         action="spawn_workflow_workers",
         run_id=task.id,
@@ -167,6 +175,7 @@ def _workflow_spawn_record(agent, task, planned):
         before_verification_status=task.verification_status,
         after_verification_status=planned.verification_status,
         evidence_paths=[planned.task_dir, *[child.task_dir for child in created_children]],
+        ),
     )
 
 
@@ -189,6 +198,7 @@ def make_due_check_record(agent, cfg, apply):
         else agent.subagents.due_check(params=options)
     )
     return agent.subagents.make_dispatch_record(
+        params=DispatchRecordParams(
         step="due_check",
         action="scan",
         dry_run=not apply,
@@ -196,6 +206,7 @@ def make_due_check_record(agent, cfg, apply):
         ok=True,
         message=f"发现 {due_report.summary.get('total', 0)} 个 due-check issue。",
         evidence_paths=[str(agent.subagents.workspace / "subagent_due_check.json")],
+        ),
     )
 
 
@@ -222,6 +233,7 @@ def make_action_apply_records(params: ActionApplyRecordParams):
     for item in action_report.records:
         records.append(
             agent.subagents.make_dispatch_record(
+                params=DispatchRecordParams(
                 step="action_apply",
                 action=item.action,
                 run_id=item.run_id,
@@ -232,6 +244,7 @@ def make_action_apply_records(params: ActionApplyRecordParams):
                 before_status=item.before_status,
                 after_status=item.after_status,
                 evidence_paths=item.evidence_paths,
+                ),
             )
         )
     return records
@@ -260,6 +273,7 @@ def make_capability_route_records(params: CapabilityRouteRecordParams):
     for item in route_report.records:
         records.append(
             agent.subagents.make_dispatch_record(
+                params=DispatchRecordParams(
                 step="capability_route",
                 action=item.status.lower(),
                 run_id=item.run_id,
@@ -270,6 +284,7 @@ def make_capability_route_records(params: CapabilityRouteRecordParams):
                 evidence_paths=[
                     str(agent.subagents.workspace / "subagent_capability_route_report.json")
                 ],
+                ),
             )
         )
     return records
@@ -300,6 +315,7 @@ def make_patch_review_records(params: PatchReviewRecordParams):
     for item in patch_report.records:
         records.append(
             agent.subagents.make_dispatch_record(
+                params=DispatchRecordParams(
                 step="patch_review",
                 action=item.decision.lower(),
                 run_id=item.run_id,
@@ -308,6 +324,7 @@ def make_patch_review_records(params: PatchReviewRecordParams):
                 ok=item.ok,
                 message=item.message,
                 evidence_paths=item.evidence_paths,
+                ),
             )
         )
     return records
@@ -334,6 +351,7 @@ def make_acceptance_records(params: AcceptanceRecordParams):
     for item in acceptance_report.records:
         records.append(
             agent.subagents.make_dispatch_record(
+                params=DispatchRecordParams(
                 step="acceptance",
                 action=item.decision.lower(),
                 run_id=item.run_id,
@@ -346,6 +364,7 @@ def make_acceptance_records(params: AcceptanceRecordParams):
                 before_verification_status=item.before_verification_status,
                 after_verification_status=item.after_verification_status,
                 evidence_paths=item.evidence_paths,
+                ),
             )
         )
     return records
@@ -378,13 +397,15 @@ def make_dispatch_watch_record(
     params: MakeDispatchWatchRecordParams,
 ) -> DispatchWatchRecord:
     return agent.subagents.make_dispatch_watch_record(
-        cycle=params.cycle,
-        dry_run=params.dry_run,
-        ok=params.ok,
-        message=params.message,
-        dispatch_record_count=params.dispatch_record_count,
-        dispatch_summary=params.dispatch_summary,
-        started_at=params.started_at,
-        ended_at=params.ended_at,
-        evidence_paths=params.evidence_paths,
+        params=DispatchWatchRecordParams(
+            cycle=params.cycle,
+            dry_run=params.dry_run,
+            ok=params.ok,
+            message=params.message,
+            dispatch_record_count=params.dispatch_record_count,
+            dispatch_summary=params.dispatch_summary,
+            started_at=params.started_at,
+            ended_at=params.ended_at,
+            evidence_paths=params.evidence_paths,
+        ),
     )

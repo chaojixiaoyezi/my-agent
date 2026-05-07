@@ -57,15 +57,6 @@ class IngestPipelineOptions:
     payload_max_chars: int = DEFAULT_PAYLOAD_MAX_CHARS
     write_batch_size: int = 1000
 
-    @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> IngestPipelineOptions:
-        return cls(
-            registry=kwargs.get("registry"),
-            store=kwargs.get("store"),
-            payload_max_chars=int(kwargs.get("payload_max_chars", DEFAULT_PAYLOAD_MAX_CHARS)),
-            write_batch_size=int(kwargs.get("write_batch_size", 1000)),
-        )
-
 
 @dataclass(frozen=True)
 class IngestFileOptions:
@@ -73,15 +64,6 @@ class IngestFileOptions:
     source_product: str | None = None
     parser_id: str = "security_alert_v1"
     file_format: str | None = None
-
-    @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> IngestFileOptions:
-        return cls(
-            source_id=kwargs.get("source_id"),
-            source_product=kwargs.get("source_product"),
-            parser_id=str(kwargs.get("parser_id", "security_alert_v1")),
-            file_format=kwargs.get("file_format"),
-        )
 
 
 class JsonlEventSink:
@@ -107,9 +89,17 @@ class IngestPipeline:
         root: str | Path,
         *,
         options: IngestPipelineOptions | None = None,
-        **kwargs: Any,
+        registry: ParserRegistry | None = None,
+        store: Any | None = None,
+        payload_max_chars: int = DEFAULT_PAYLOAD_MAX_CHARS,
+        write_batch_size: int = 1000,
     ):
-        ingest_options = options or IngestPipelineOptions.from_kwargs(**kwargs)
+        ingest_options = options or IngestPipelineOptions(
+            registry=registry,
+            store=store,
+            payload_max_chars=int(payload_max_chars),
+            write_batch_size=int(write_batch_size),
+        )
         self.root = Path(root)
         self.payload_max_chars = ingest_options.payload_max_chars
         self.write_batch_size = max(1, ingest_options.write_batch_size)
@@ -129,25 +119,33 @@ class IngestPipeline:
         path: str | Path,
         *,
         options: IngestFileOptions | None = None,
-        **kwargs: Any,
+        source_id: str | None = None,
+        source_product: str | None = None,
+        parser_id: str = "security_alert_v1",
+        file_format: str | None = None,
     ) -> IngestResult:
         """Ingest a single file and return structured result."""
         from .pipeline_enrich import enrich_ingest_file
 
-        ingest_options = options or IngestFileOptions.from_kwargs(**kwargs)
+        ingest_options = options or IngestFileOptions(
+            source_id=source_id,
+            source_product=source_product,
+            parser_id=str(parser_id),
+            file_format=file_format,
+        )
         return enrich_ingest_file(self, path, options=ingest_options)
 
     def _iter_parsed_records(
         self,
         source_path: Path,
-        **kwargs: Any,
+        *,
+        file_format: str,
+        parser: LogParser,
+        batch_id: str,
+        source_id: str,
+        dead_letters: DeadLetterWriter,
+        source_product: str | None = None,
     ):
-        file_format = kwargs["file_format"]
-        parser = kwargs["parser"]
-        batch_id = kwargs["batch_id"]
-        source_id = kwargs["source_id"]
-        source_product = kwargs.get("source_product")
-        dead_letters = kwargs["dead_letters"]
         request = _RecordIteratorRequest(source_path, parser, batch_id, source_id, source_product, dead_letters)
         if file_format in {"jsonl", "log"}:
             yield from self._iter_jsonl_records(request)
@@ -200,18 +198,30 @@ class IngestPipeline:
 
 def ingest_file(
     path: str | Path,
-    **kwargs: Any,
+    *,
+    root: str | Path | None = None,
+    store: Any | None = None,
+    payload_max_chars: int = DEFAULT_PAYLOAD_MAX_CHARS,
+    source_id: str | None = None,
+    source_product: str | None = None,
+    parser_id: str = "security_alert_v1",
+    file_format: str | None = None,
 ) -> IngestResult:
     pipeline = IngestPipeline(
-        kwargs.get("root") or default_log_analysis_root(),
+        root or default_log_analysis_root(),
         options=IngestPipelineOptions(
-            store=kwargs.get("store"),
-            payload_max_chars=kwargs.get("payload_max_chars", DEFAULT_PAYLOAD_MAX_CHARS),
+            store=store,
+            payload_max_chars=payload_max_chars,
         ),
     )
     return pipeline.ingest_file(
         path,
-        options=IngestFileOptions.from_kwargs(**kwargs),
+        options=IngestFileOptions(
+            source_id=source_id,
+            source_product=source_product,
+            parser_id=str(parser_id),
+            file_format=file_format,
+        ),
     )
 
 

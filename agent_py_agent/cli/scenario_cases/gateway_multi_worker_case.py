@@ -158,7 +158,7 @@ def run_scenario_gateway_multi_worker_case(args) -> int:
     errors: list[str] = []
 
     def worker_run(worker_id: str):
-        def slow_run(user_prompt: str, **kwargs) -> AgentRunResult:
+        def slow_run(user_prompt: str, *, params=None) -> AgentRunResult:
             time.sleep(0.05)
             with lock:
                 run_prompts_by_worker.setdefault(worker_id, []).append(user_prompt)

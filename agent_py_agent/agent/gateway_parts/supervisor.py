@@ -219,8 +219,26 @@ class GatewaySupervisor:
         return run_supervisor_loop(self)
 
 
-def run_supervisor(config_path: str, **kwargs) -> int:
-    options = SupervisorConfig(**kwargs) if kwargs else None
+def run_supervisor(
+    config_path: str,
+    options: SupervisorConfig | None = None,
+    *,
+    workspace_root: str | None = None,
+    heartbeat_timeout: float = 120.0,
+    check_interval: float = 10.0,
+    max_restart_attempts: int = 5,
+    restart_cooldown: float = 30.0,
+    log_path: Path | None = None,
+) -> int:
+    if options is None:
+        options = SupervisorConfig(
+            workspace_root=workspace_root,
+            heartbeat_timeout=heartbeat_timeout,
+            check_interval=check_interval,
+            max_restart_attempts=max_restart_attempts,
+            restart_cooldown=restart_cooldown,
+            log_path=log_path,
+        )
     supervisor = GatewaySupervisor(config_path, options=options)
     return supervisor.run()
 

@@ -30,12 +30,14 @@ class _ArchiveFilterContext:
 
 def collect_archive_records(
     root: Path,
-    **options: Any,
+    *,
+    layer: str,
+    date_key: str | None = None,
+    limit: int = 0,
+    level: int | None = None,
 ) -> list[dict[str, Any]]:
-    layer = str(options["layer"])
-    date_key = options.get("date_key")
-    limit = int(options["limit"])
-    level = options.get("level")
+    layer = str(layer)
+    limit = int(limit)
     records: list[dict[str, Any]] = []
     for current_layer, path in _archive_files(root, layer=layer, date_key=date_key):
         records.extend(_read_archive_file(current_layer, path))
@@ -65,13 +67,15 @@ def archive_filters_from_args(args) -> dict[str, str]:
 
 def filter_archive_records(
     records: list[dict[str, Any]],
-    **options: Any,
+    *,
+    query: str = "",
+    filters: dict[str, str] | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    level: int | None = None,
 ) -> list[dict[str, Any]]:
-    query = str(options.get("query", ""))
-    filters = dict(options.get("filters", {}) or {})
-    since = options.get("since")
-    until = options.get("until")
-    level = options.get("level")
+    query = str(query)
+    filters = dict(filters or {})
     query_text = query.strip().lower()
     context = _ArchiveFilterContext(
         query_text=query_text,

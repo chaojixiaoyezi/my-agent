@@ -88,16 +88,20 @@ def resolve_required_paths(
 
 def build_read_receipt(
     match: MemoryRouteMatch,
-    **options,
+    *,
+    status: str = "planned",
+    content_hash: str = "",
+    elapsed_ms: float = 0.0,
+    error: str = "",
 ) -> MemoryReadReceipt:
     return MemoryReadReceipt(
         route_id=match.route.route_id,
         authority_path=match.route.authority_file(),
-        status=str(options.get("status", "planned")),
+        status=str(status),
         reasons=match.reasons,
-        content_hash=str(options.get("content_hash", "")),
-        elapsed_ms=float(options.get("elapsed_ms", 0.0)),
-        error=str(options.get("error", "")),
+        content_hash=str(content_hash),
+        elapsed_ms=float(elapsed_ms),
+        error=str(error),
     ).mark_now()
 
 

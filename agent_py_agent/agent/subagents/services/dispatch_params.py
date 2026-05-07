@@ -37,6 +37,16 @@ class DispatchWatchRecordParams:
 
 
 @dataclass(frozen=True)
+class DispatchWatchHeartbeatParams:
+    """Bundle of write_dispatch_watch_heartbeat parameters."""
+    cycle: int
+    status: str
+    lock_path: str
+    pid: int
+    message: str = ""
+
+
+@dataclass(frozen=True)
 class ParentPlannerRecordParams:
     """Bundle of make_parent_planner_record parameters."""
     dry_run: bool

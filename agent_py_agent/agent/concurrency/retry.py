@@ -30,6 +30,9 @@ class _ConflictRetryPolicy:
     def decorator(self, func: Callable[P, T]) -> Callable[P, T]:
         @wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+            # Decorator boundary: ParamSpec preserves the wrapped callable's own
+            # explicit signature, so this is the narrow transparent-forwarding
+            # exception rather than product code unpacking arbitrary options.
             return self.run(func, *args, **kwargs)
 
         return wrapper

@@ -29,6 +29,13 @@ class _GatewayPayloadRenderContext:
     response_path: Path | None
 
 
+@dataclass(frozen=True)
+class GatewayIndexPayloadOptions:
+    request_path: Path | None = None
+    response_path: Path | None = None
+    event_type: str = "gateway_request_rebuilt"
+
+
 def log_gateway_payload(
     agent: SimpleAgent,
     payload: dict,
@@ -127,12 +134,13 @@ def log_gateway_event(agent: SimpleAgent, event_type: str, payload: dict) -> Non
 def _index_gateway_payload(
     agent: SimpleAgent,
     payload: dict,
-    **kwargs,
+    options: GatewayIndexPayloadOptions | None = None,
 ) -> bool:
 
-    request_path = kwargs.get("request_path")
-    response_path = kwargs.get("response_path")
-    event_type = str(kwargs.get("event_type") or "gateway_request_rebuilt")
+    options = options or GatewayIndexPayloadOptions()
+    request_path = options.request_path
+    response_path = options.response_path
+    event_type = options.event_type
     request_id = str(payload.get("id") or (request_path.stem if request_path else "")).strip()
     if not request_id:
         return False

@@ -8,6 +8,7 @@ Human version:
 """
 
 from .services.indexing import SubAgentIndexingService
+from .services.indexing_params import LocalRecordParams
 
 
 class SubAgentIndexingMixin:
@@ -19,8 +20,26 @@ class SubAgentIndexingMixin:
             self.__dict__["_indexing_service"] = SubAgentIndexingService(self)
         return self.__dict__["_indexing_service"]
 
-    def _log_local_record(self, **kwargs):
-        return self._indexing_service.log_local_record(**kwargs)
+    def _log_local_record(
+        self,
+        *,
+        params: LocalRecordParams | None = None,
+        source_type: str = "",
+        source_id: str = "",
+        title: str = "",
+        content: str = "",
+        event_type: str = "",
+        metadata: dict[str, object] | None = None,
+    ):
+        params = params or LocalRecordParams(
+            source_type=source_type,
+            source_id=source_id,
+            title=title,
+            content=content,
+            event_type=event_type,
+            metadata=metadata,
+        )
+        return self._indexing_service.log_local_record(params=params)
 
     def _index_task(self, task):
         return self._indexing_service.index_task(task)
@@ -86,5 +105,23 @@ class SubAgentIndexingMixin:
     def index_report(self, source_type, source_id, title, report, *, event_type):
         return self._indexing_service.index_report(source_type, source_id, title, report, event_type=event_type)
 
-    def log_local_record(self, **kwargs):
-        return self._indexing_service.log_local_record(**kwargs)
+    def log_local_record(
+        self,
+        *,
+        params: LocalRecordParams | None = None,
+        source_type: str = "",
+        source_id: str = "",
+        title: str = "",
+        content: str = "",
+        event_type: str = "",
+        metadata: dict[str, object] | None = None,
+    ):
+        params = params or LocalRecordParams(
+            source_type=source_type,
+            source_id=source_id,
+            title=title,
+            content=content,
+            event_type=event_type,
+            metadata=metadata,
+        )
+        return self._indexing_service.log_local_record(params=params)

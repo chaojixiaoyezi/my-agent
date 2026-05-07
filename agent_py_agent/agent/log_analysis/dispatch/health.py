@@ -30,16 +30,6 @@ class DispatchHealthInputs:
     budget: DispatchBudget | Mapping[str, Any] | None = None
     prompt_config: SecurityPromptConfig | Mapping[str, Any] | None = None
 
-    @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> DispatchHealthInputs:
-        return cls(
-            cases=kwargs.get("cases"),
-            case_backlog=kwargs.get("case_backlog"),
-            queue=kwargs.get("queue"),
-            budget=kwargs.get("budget"),
-            prompt_config=kwargs.get("prompt_config"),
-        )
-
 
 def _get(source: Any, key: str, default: Any = None) -> Any:
     if isinstance(source, Mapping):
@@ -60,9 +50,19 @@ def _case_backlog_from_cases(cases: list[Any] | None) -> dict[str, int]:
 def build_health_summary(
     *,
     inputs: DispatchHealthInputs | None = None,
-    **kwargs: Any,
+    cases: list[Any] | None = None,
+    case_backlog: Mapping[str, int] | None = None,
+    queue: InvestigationQueue | None = None,
+    budget: DispatchBudget | Mapping[str, Any] | None = None,
+    prompt_config: SecurityPromptConfig | Mapping[str, Any] | None = None,
 ) -> DispatchHealthSummary:
-    health_inputs = inputs or DispatchHealthInputs.from_kwargs(**kwargs)
+    health_inputs = inputs or DispatchHealthInputs(
+        cases=cases,
+        case_backlog=case_backlog,
+        queue=queue,
+        budget=budget,
+        prompt_config=prompt_config,
+    )
     budget = health_inputs.budget
     prompt_config = health_inputs.prompt_config
     dispatch_budget = budget if isinstance(budget, DispatchBudget) else DispatchBudget.from_mapping(budget)

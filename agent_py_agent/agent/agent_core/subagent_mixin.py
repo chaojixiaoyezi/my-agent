@@ -123,8 +123,28 @@ class _SubagentLifecycleBase:
                 workflow_mode=_config_workflow_dispatch_mode(self.config.subagent_workflow_mode),
             )
 
-    def run_subagent(self, run_id: str | None = None, *, params: SubagentRunParams | None = None, **kwargs) -> SubAgentRunnerResult:
-        options = subagent_run_params(params, run_id=run_id, kwargs=kwargs)
+    def run_subagent(
+        self,
+        run_id: str | None = None,
+        *,
+        params: SubagentRunParams | None = None,
+        instruction: str = "",
+        dry_run: bool = True,
+        max_cards: int = 0,
+        probe: bool = True,
+        retry_reason: str = "",
+        attempt_id: str = "",
+    ) -> SubAgentRunnerResult:
+        options = subagent_run_params(
+            params,
+            run_id=run_id,
+            instruction=instruction,
+            dry_run=dry_run,
+            max_cards=max_cards,
+            probe=probe,
+            retry_reason=retry_reason,
+            attempt_id=attempt_id,
+        )
         return run_subagent_flow(self, options)
 
     def _prepare_subagent_attempt(self, run_id, *, dry_run, active_attempt_id, retry_reason):

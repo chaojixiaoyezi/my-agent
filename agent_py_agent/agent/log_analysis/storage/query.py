@@ -7,7 +7,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from ..cases.evidence import LocalEvidenceStore
+from ..cases.evidence import LocalEvidenceStore, QueryEvidencePayload
 from .base import (
     DEFAULT_PREVIEW_LIMIT,
     QueryCriteria,
@@ -63,18 +63,24 @@ class _QuerySummaryInput:
 
 
 @dataclass(frozen=True)
+class _QueryResultInput:
+    query_id: str
+    parameters: dict[str, Any]
+    row_count: int
+    truncated: bool
+    evidence_path: str
+    evidence: Any
+    duration_ms: int
+    summary: dict[str, Any]
+    limited_rows: list[dict[str, Any]]
+    preview_limit: int
+
+
+@dataclass(frozen=True)
 class SecurityQueryOptions:
     require_time_range: bool = True
     preview_limit: int = DEFAULT_PREVIEW_LIMIT
     max_limit: int | None = None
-
-    @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> SecurityQueryOptions:
-        return cls(
-            require_time_range=bool(kwargs.get("require_time_range", True)),
-            preview_limit=int(kwargs.get("preview_limit", DEFAULT_PREVIEW_LIMIT)),
-            max_limit=kwargs.get("max_limit"),
-        )
 
 
 def execute_security_query(
@@ -82,19 +88,22 @@ def execute_security_query(
     criteria: QueryCriteria | dict[str, Any],
     *,
     options: SecurityQueryOptions | None = None,
-    **kwargs: Any,
+    require_time_range: bool = True,
+    preview_limit: int = DEFAULT_PREVIEW_LIMIT,
+    max_limit: int | None = None,
 ) -> QueryResult:
-    query_options = options or SecurityQueryOptions.from_kwargs(**kwargs)
+    query_options = options or SecurityQueryOptions(
+        require_time_range=bool(require_time_range),
+        preview_limit=int(preview_limit),
+        max_limit=max_limit,
+    )
     query = _criteria(criteria)
     if query_options.require_time_range and (not query.start_time or not query.end_time):
         raise ValueError("start_time and end_time are required for controlled security queries")
 
     result_payload = _execute_query_payload(store, query, query_options)
-    _save_query_record(store, **result_payload)
-    return _query_result(
-        preview_limit=query_options.preview_limit,
-        **result_payload,
-    )
+    _save_query_record(store, result_payload)
+    return _query_result(_QueryResultInput(preview_limit=query_options.preview_limit, **result_payload))
 
 
 def _execute_query_payload(
@@ -140,7 +149,7 @@ def _execute_query_payload(
 
 def _save_query_record(
     store: LocalLogStore,
-    **payload: Any,
+    payload: dict[str, Any],
 ) -> None:
     store.save_query_record(
         QueryRecord(
@@ -173,24 +182,41 @@ def _query_summary(data: _QuerySummaryInput) -> dict[str, Any]:
     return summary
 
 
-def _write_query_evidence(store: LocalLogStore, **payload: Any):
-    return LocalEvidenceStore(store.root).write_query_result(**payload)
+def _write_query_evidence(
+    store: LocalLogStore,
+    *,
+    query_id: str,
+    parameters: dict[str, Any],
+    rows: list[dict[str, Any]],
+    row_count: int,
+    truncated: bool,
+    summary: dict[str, Any],
+):
+    return LocalEvidenceStore(store.root).write_query_result(
+        payload=QueryEvidencePayload(
+            query_id=query_id,
+            parameters=parameters,
+            rows=rows,
+            row_count=row_count,
+            truncated=truncated,
+            summary=summary,
+        )
+    )
 
 
-def _query_result(**payload: Any) -> QueryResult:
-    limited_rows = payload["limited_rows"]
-    preview_limit = payload["preview_limit"]
+def _query_result(payload: _QueryResultInput) -> QueryResult:
+    limited_rows = payload.limited_rows
     return QueryResult(
-        query_id=payload["query_id"],
-        parameters=payload["parameters"],
-        row_count=payload["row_count"],
-        truncated=payload["truncated"],
-        evidence_path=payload["evidence_path"],
-        evidence_ref=payload["evidence"],
-        duration_ms=payload["duration_ms"],
-        summary=payload["summary"],
+        query_id=payload.query_id,
+        parameters=payload.parameters,
+        row_count=payload.row_count,
+        truncated=payload.truncated,
+        evidence_path=payload.evidence_path,
+        evidence_ref=payload.evidence,
+        duration_ms=payload.duration_ms,
+        summary=payload.summary,
         rows=limited_rows,
-        preview_rows=[sanitize_event_for_preview(row) for row in limited_rows[:preview_limit]],
+        preview_rows=[sanitize_event_for_preview(row) for row in limited_rows[: payload.preview_limit]],
     )
 
 

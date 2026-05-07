@@ -71,12 +71,17 @@ before changing code.
 - CLI functions may read `argparse.Namespace`, but must normalize it at the command
   boundary before calling agent/core/manager code.
 - Business services should prefer `def execute(*, request: SomeRequest)` or
-  `def run(*, options: SomeOptions)`. Compatibility wrappers may keep old kwargs,
-  but they must immediately convert those kwargs into the same bundle.
+  `def run(*, options: SomeOptions)`. Compatibility wrappers may keep old
+  explicit keyword fields, but they must immediately convert those fields into
+  the same bundle; service-facing product code must not expose function-level
+  `**kwargs`.
 - Do not add new behavior flags as loose kwargs to an existing service method.
   Extend the existing bundle and update focused tests instead.
 - Bundles should stay small and domain-specific. If a bundle starts mixing unrelated
   concerns, split it rather than passing a generic dict.
+- The only current product-code exception is transparent decorator forwarding in
+  `agent/concurrency/retry.py`; architecture guardrails fail any other function
+  that adds a var-keyword service interface.
 
 ---
 

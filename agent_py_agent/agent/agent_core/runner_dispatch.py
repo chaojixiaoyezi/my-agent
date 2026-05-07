@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from ..config import AgentConfig
 from ..subagent import RecordRunnerResultParams, SubAgentRunnerResult, SubAgentTask
+from ..subagents.services.dispatch_params import DispatchRecordParams
 from .dynamic_timeout import calculate_dynamic_timeout
 from .subagent_params import SubagentRunParams
 
@@ -231,28 +232,30 @@ def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams):
 def _runner_dispatch_record(params: RunnerDispatchRecordParams):
 
     return params.agent.subagents.make_dispatch_record(
-        step="runner",
-        action=(
-            "retry_runner"
-            if params.retry_reason and params.execute_runners
-            else "execute_runner"
-            if params.execute_runners
-            else "runner_dry_run"
+        params=DispatchRecordParams(
+            step="runner",
+            action=(
+                "retry_runner"
+                if params.retry_reason and params.execute_runners
+                else "execute_runner"
+                if params.execute_runners
+                else "runner_dry_run"
+            ),
+            run_id=params.run_id,
+            dry_run=params.result.dry_run,
+            applied=not params.result.dry_run,
+            ok=params.result.ok,
+            message=params.result.message,
+            before_status=params.before.status,
+            after_status=params.after.status,
+            before_verification_status=params.before.verification_status,
+            after_verification_status=params.after.verification_status,
+            evidence_paths=[
+                params.result.execution_context_json,
+                params.result.result_json,
+                params.result.output_json,
+            ],
         ),
-        run_id=params.run_id,
-        dry_run=params.result.dry_run,
-        applied=not params.result.dry_run,
-        ok=params.result.ok,
-        message=params.result.message,
-        before_status=params.before.status,
-        after_status=params.after.status,
-        before_verification_status=params.before.verification_status,
-        after_verification_status=params.after.verification_status,
-        evidence_paths=[
-            params.result.execution_context_json,
-            params.result.result_json,
-            params.result.output_json,
-        ],
     )
 
 

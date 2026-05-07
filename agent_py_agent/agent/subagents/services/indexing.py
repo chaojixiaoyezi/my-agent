@@ -31,6 +31,7 @@ from .indexing_dispatch import (
     _index_execution_context_via,
     _index_parent_planner_record_via,
 )
+from .indexing_params import LocalRecordParams
 from .indexing_records import (
     index_acceptance_review_via,
     index_action_apply_via,
@@ -51,22 +52,12 @@ class SubAgentIndexingService:
     def log_local_record(
         self,
         *,
-        source_type: str,
-        source_id: str,
-        title: str,
-        content: str,
-        metadata: dict[str, object] | None = None,
-        event_type: str,
+        params: LocalRecordParams,
     ) -> None:
         """Write a subagent event to LocalStore; failures do not affect the file ledger."""
         if "_log_local_record" in self.manager.__dict__:
             self.manager._log_local_record(
-                source_type=source_type,
-                source_id=source_id,
-                title=title,
-                content=content,
-                metadata=metadata or {},
-                event_type=event_type,
+                params=params,
             )
             return
         if not hasattr(self.manager, "local_store"):
@@ -75,12 +66,12 @@ class SubAgentIndexingService:
             return
         try:
             self.manager.local_store.log_record(
-                source_type=source_type,
-                source_id=source_id,
-                title=title,
-                content=content,
-                metadata=metadata or {},
-                event_type=event_type,
+                source_type=params.source_type,
+                source_id=params.source_id,
+                title=params.title,
+                content=params.content,
+                metadata=params.metadata or {},
+                event_type=params.event_type,
             )
         except Exception:
             return
@@ -88,12 +79,14 @@ class SubAgentIndexingService:
     def index_task(self, task: SubAgentTask) -> None:
         """Index a task into the local store."""
         self.log_local_record(
-            source_type="subagent_run",
-            source_id=task.id,
-            title=f"Subagent {task.id}: {task.goal}",
-            content=_task_index_content(task),
-            metadata=_task_index_metadata(task),
-            event_type="subagent_run_saved",
+            params=LocalRecordParams(
+                source_type="subagent_run",
+                source_id=task.id,
+                title=f"Subagent {task.id}: {task.goal}",
+                content=_task_index_content(task),
+                metadata=_task_index_metadata(task),
+                event_type="subagent_run_saved",
+            ),
         )
 
     def index_report(
@@ -113,16 +106,18 @@ class SubAgentIndexingService:
             payload = {"str": str(report), "repr": repr(report)}
         content = json.dumps(payload, ensure_ascii=False, indent=2)
         self.log_local_record(
-            source_type=source_type,
-            source_id=source_id,
-            title=title,
-            content=content,
-            metadata={
-                "dry_run": bool(payload.get("dry_run", False)) if isinstance(payload, dict) else False,
-                "generated_at": payload.get("generated_at", 0) if isinstance(payload, dict) else 0,
-                "summary": payload.get("summary", {}) if isinstance(payload, dict) else {},
-            },
-            event_type=event_type,
+            params=LocalRecordParams(
+                source_type=source_type,
+                source_id=source_id,
+                title=title,
+                content=content,
+                metadata={
+                    "dry_run": bool(payload.get("dry_run", False)) if isinstance(payload, dict) else False,
+                    "generated_at": payload.get("generated_at", 0) if isinstance(payload, dict) else 0,
+                    "summary": payload.get("summary", {}) if isinstance(payload, dict) else {},
+                },
+                event_type=event_type,
+            ),
         )
 
     def _index_dataclass_record(

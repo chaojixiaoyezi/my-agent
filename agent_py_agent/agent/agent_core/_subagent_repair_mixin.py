@@ -97,12 +97,26 @@ class _SubagentRepairMixin:
         run_id: str | None = None,
         *,
         params: RecoverySnapshotParams | None = None,
-        **kwargs,
+        user_prompt: str = "",
+        response_text: str = "",
+        backend: str = "",
+        status: str = "",
+        error_code: str = "",
+        tool_calls: list[dict] | None = None,
     ) -> None:
 
         if not bool(getattr(self.config, "memory_hook_enabled", True)):
             return
-        snapshot = _recovery_snapshot_params(params, run_id=run_id, kwargs=kwargs)
+        snapshot = _recovery_snapshot_params(
+            params,
+            run_id=run_id,
+            user_prompt=user_prompt,
+            response_text=response_text,
+            backend=backend,
+            status=status,
+            error_code=error_code,
+            tool_calls=tool_calls,
+        )
         try:
             task = self.subagents.load(snapshot.run_id)
         except (FileNotFoundError, TypeError):
@@ -117,21 +131,26 @@ def _recovery_snapshot_params(
     params: RecoverySnapshotParams | None,
     *,
     run_id: str | None,
-    kwargs: dict[str, object],
+    user_prompt: str,
+    response_text: str,
+    backend: str,
+    status: str,
+    error_code: str,
+    tool_calls: list[dict] | None,
 ) -> RecoverySnapshotParams:
     if params is not None:
         if not isinstance(params, RecoverySnapshotParams):
             raise TypeError("subagent recovery snapshot requires params: RecoverySnapshotParams")
         return params
-    # LLM: legacy recovery kwargs normalize to one bundle before snapshot persistence.
+    # LLM: legacy recovery fields normalize to one bundle before snapshot persistence.
     return RecoverySnapshotParams(
-        run_id=str(run_id or kwargs["run_id"]),
-        user_prompt=str(kwargs["user_prompt"]),
-        response_text=str(kwargs["response_text"]),
-        backend=str(kwargs["backend"]),
-        status=str(kwargs["status"]),
-        error_code=str(kwargs["error_code"]),
-        tool_calls=list(kwargs["tool_calls"]),
+        run_id=str(run_id or ""),
+        user_prompt=str(user_prompt),
+        response_text=str(response_text),
+        backend=str(backend),
+        status=str(status),
+        error_code=str(error_code),
+        tool_calls=list(tool_calls or []),
     )
 
 

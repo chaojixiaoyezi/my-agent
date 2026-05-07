@@ -154,7 +154,7 @@ Shared workspace 是同一 task 下 sibling 子代理共享任务局部事实的
 - 业务入口的复杂输入使用 `XxxRequest`。如果只是配置开关、筛选条件或构建参数，可以用 `XxxOptions` / `XxxParams`，但同一领域内必须保持一致。
 - 复杂输出使用 `XxxResult` / 已存在的 `XxxRecord` / `XxxReport`，不要返回松散 tuple。
 - CLI 层可以接收 `argparse args`，但进入 manager/service 前必须转换成 Request/Options bundle，不能把 `args` 继续向业务层深传。
-- manager/public service 可以短期保留旧参数签名作为兼容 wrapper，但内部应立即构造 bundle，再调用核心实现。
+- manager/public service 可以短期保留旧的显式 keyword 字段作为兼容 wrapper，但内部应立即构造 bundle，再调用核心实现；业务代码不得再新增函数级 `**kwargs` 服务接口。
 - 新增字段优先加到 bundle dataclass 中，不继续拉长函数签名。
 
 适用范围：
@@ -166,6 +166,7 @@ Shared workspace 是同一 task 下 sibling 子代理共享任务局部事实的
 兼容要求：
 
 - bundle 改造不得破坏旧 CLI 和已有测试；旧入口保留时应作为薄 wrapper。
+- 旧入口如需兼容，只能列出显式字段并转换到 bundle；除透明装饰器转发外，不允许把 var-keyword 当成兼容层。
 - bundle dataclass 字段必须有明确默认值或显式必填语义。
 - 写入型 Request 必须能表达 `apply/dry_run`、reviewer、note、now/test clock、目标路径或 scope。
 - Result 必须带可审计 refs，例如写入文件路径、export log、report path、record id。
@@ -186,7 +187,7 @@ Shared workspace 是同一 task 下 sibling 子代理共享任务局部事实的
 - 已新增 `memory_archive/memory_gate.py`，先创建 run-local memory/skill candidate gate：`candidates.jsonl`、`review_queue.jsonl`、`skill_spark_gate.json` 只记录候选、证据、适用范围和 review 要求，默认 `not_promoted`。
 - 已新增 `subagents-memory-gate` 显式 review decision 写回：`decisions.jsonl` 记录 reviewer、decision、note 和 `auto_promote=false`；approve 只改变 gate 状态，不执行长期 memory/skill 导出。
 - 已新增 Phase 6 显式收口链：retention 只压缩 active review queue 并保留审计；`--export-memory` 只导出 `approve_memory` 候选；`--export-skill` 只生成 draft；`--verify` 写边界检查报告，确认没有自动提升。
-- 已开始按 bundle 接口规范收敛：memory gate review/retention/export 使用 Request/Result bundle，acceptance review service 已通过 `AcceptanceReviewRequest` 进入核心实现，patch fallback、dispatch/watch/daemon、gateway/adapter CLI 也已转为 bundle-first；旧签名保留为兼容 wrapper。
+- 已完成 bundle-first 收敛：runtime/subagent/gateway/log-analysis/memory-archive/audit/local-storage/backends 的服务入口已改为 Request/Options/Params 或显式 keyword -> bundle adapter；架构护栏会扫描业务代码中的函数级 var-keyword，当前只允许 `concurrency/retry.py` 的透明装饰器转发例外。
 
 后续主要差距：
 

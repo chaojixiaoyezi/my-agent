@@ -6,6 +6,8 @@ import json
 from dataclasses import asdict
 from typing import Any
 
+from .indexing_params import LocalRecordParams
+
 
 def index_dataclass_record_via(
     service: Any,
@@ -29,12 +31,14 @@ def index_dataclass_record_via(
         }
     }
     service.log_local_record(
-        source_type=source_type,
-        source_id=source_id,
-        title=title,
-        content=json.dumps(payload, ensure_ascii=False, indent=2),
-        metadata=metadata,
-        event_type=event_type,
+        params=LocalRecordParams(
+            source_type=source_type,
+            source_id=source_id,
+            title=title,
+            content=json.dumps(payload, ensure_ascii=False, indent=2),
+            metadata=metadata,
+            event_type=event_type,
+        ),
     )
 
 
@@ -92,20 +96,22 @@ def index_runner_result_via(service: Any, result: object, output_payload: dict[s
         json.dumps(output_payload, ensure_ascii=False, indent=2),
     ])
     service.log_local_record(
-        source_type="subagent_runner_result",
-        source_id=f"{result.run_id}:{result.created_at:.6f}",
-        title=f"Runner {result.run_id} {result.status}",
-        content=content,
-        metadata={
-            "run_id": result.run_id,
-            "dry_run": result.dry_run,
-            "ok": result.ok,
-            "status": result.status,
-            "verification_status": result.verification_status,
-            "backend": result.backend,
-            "tool_rounds": result.tool_rounds,
-            "result_json": result.result_json,
-            "created_at": result.created_at,
-        },
-        event_type="subagent_runner_result_logged",
+        params=LocalRecordParams(
+            source_type="subagent_runner_result",
+            source_id=f"{result.run_id}:{result.created_at:.6f}",
+            title=f"Runner {result.run_id} {result.status}",
+            content=content,
+            metadata={
+                "run_id": result.run_id,
+                "dry_run": result.dry_run,
+                "ok": result.ok,
+                "status": result.status,
+                "verification_status": result.verification_status,
+                "backend": result.backend,
+                "tool_rounds": result.tool_rounds,
+                "result_json": result.result_json,
+                "created_at": result.created_at,
+            },
+            event_type="subagent_runner_result_logged",
+        ),
     )

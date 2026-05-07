@@ -29,9 +29,9 @@ def post_json(
     path: str,
     payload: dict[str, Any],
     headers: dict[str, str],
-    **options: Any,
+    *,
+    timeout: int,
 ) -> dict[str, Any]:
-    timeout = int(options["timeout"])
     request = _GatewayRequest(api_base, api_key, path, payload, headers, timeout)
     _require_api_key(request.api_key)
     req = _urllib_request(request)
@@ -50,9 +50,9 @@ def post_stream(
     path: str,
     payload: dict[str, Any],
     headers: dict[str, str],
-    **options: Any,
+    *,
+    timeout: int,
 ) -> list[str]:
-    timeout = int(options["timeout"])
     request = _GatewayRequest(api_base, api_key, path, payload, headers, timeout)
     return list(_post_stream_lines(request))
 
@@ -63,9 +63,9 @@ def post_stream_iter(
     path: str,
     payload: dict[str, Any],
     headers: dict[str, str],
-    **options: Any,
+    *,
+    timeout: int,
 ):
-    timeout = int(options["timeout"])
     request = _GatewayRequest(api_base, api_key, path, payload, headers, timeout)
     yield from _post_stream_lines(request)
 

@@ -26,18 +26,6 @@ class _WarningInput:
     fallback_value: Any
     reason: str
 
-    @classmethod
-    def from_legacy(cls, args: tuple[Any, ...], kwargs: dict[str, Any]) -> _WarningInput:
-        if args:
-            field_name, raw_value, fallback_value, reason = args
-            return cls(str(field_name), raw_value, fallback_value, str(reason))
-        return cls(
-            str(kwargs["field_name"]),
-            kwargs.get("raw_value"),
-            kwargs.get("fallback_value"),
-            str(kwargs["reason"]),
-        )
-
 
 @dataclass(frozen=True)
 class _ChoiceOptions:
@@ -45,28 +33,12 @@ class _ChoiceOptions:
     choices: set[str]
     uppercase: bool = False
 
-    @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> _ChoiceOptions:
-        return cls(
-            default=str(kwargs["default"]),
-            choices=set(kwargs["choices"]),
-            uppercase=bool(kwargs.get("uppercase", False)),
-        )
-
 
 @dataclass(frozen=True)
 class _IntOptions:
     default: int
     min_value: int
     max_value: int | None
-
-    @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> _IntOptions:
-        return cls(
-            default=int(kwargs["default"]),
-            min_value=int(kwargs["min_value"]),
-            max_value=kwargs.get("max_value"),
-        )
 
 
 def _lookup(source: Mapping[str, Any] | object, field_name: str) -> Any:
@@ -89,9 +61,12 @@ def _lookup(source: Mapping[str, Any] | object, field_name: str) -> Any:
 
 def _warn(
     warnings: list[LogAnalysisConfigWarning],
-    *args: Any,
+    field_name: str,
+    raw_value: Any,
+    fallback_value: Any,
+    reason: str,
+    *,
     warning: _WarningInput | None = None,
-    **kwargs: Any,
 ) -> None:
     """LLM: 追加一条配置 warning，记录原始值、回退值和原因。
 
@@ -108,7 +83,7 @@ def _warn(
     返回说明:
     没有返回值；结果追加到 warnings。
     """
-    item = warning or _WarningInput.from_legacy(args, kwargs)
+    item = warning or _WarningInput(field_name, raw_value, fallback_value, reason)
     warnings.append(
         LogAnalysisConfigWarning(
             field_name=item.field_name,
@@ -160,7 +135,12 @@ def _coerce_bool(
 def _coerce_choice(
     field_name: str,
     raw_value: Any,
-    **kwargs: Any,
+    *,
+    default: str,
+    choices: set[str],
+    warnings: list[LogAnalysisConfigWarning],
+    uppercase: bool = False,
+    options: _ChoiceOptions | None = None,
 ) -> str:
     """LLM: 把用户配置值安全转换成允许集合中的字符串选项。
 
@@ -179,8 +159,7 @@ def _coerce_choice(
     返回说明:
     返回 choices 中的字符串，或 default。
     """
-    warnings = kwargs["warnings"]
-    coercion = kwargs.get("options") or _ChoiceOptions.from_kwargs(**kwargs)
+    coercion = options or _ChoiceOptions(default=str(default), choices=set(choices), uppercase=uppercase)
     if raw_value is _MISSING:
         return coercion.default
     if isinstance(raw_value, str):
@@ -195,7 +174,12 @@ def _coerce_choice(
 def _coerce_int(
     field_name: str,
     raw_value: Any,
-    **kwargs: Any,
+    *,
+    default: int,
+    min_value: int,
+    warnings: list[LogAnalysisConfigWarning],
+    max_value: int | None = None,
+    options: _IntOptions | None = None,
 ) -> int:
     """LLM: 把用户配置值安全转换成有范围限制的整数。
 
@@ -214,8 +198,7 @@ def _coerce_int(
     返回说明:
     返回范围内整数；解析失败或越界时返回 default。
     """
-    warnings = kwargs["warnings"]
-    coercion = kwargs.get("options") or _IntOptions.from_kwargs(**kwargs)
+    coercion = options or _IntOptions(default=int(default), min_value=int(min_value), max_value=max_value)
     if raw_value is _MISSING:
         return coercion.default
     if isinstance(raw_value, bool):

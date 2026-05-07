@@ -24,9 +24,12 @@ class SecurityAlertV1Parser:
         record: Mapping[str, Any],
         *,
         context: ParseContext | None = None,
-        **kwargs: Any,
+        raw_ref: str = "",
+        source_id: str | None = None,
+        source_product: str | None = None,
+        line_no: int | None = None,
     ) -> ParsedRecord:
-        parse_context = context or ParseContext.from_kwargs(**kwargs)
+        parse_context = context or ParseContext(str(raw_ref), source_id, source_product, line_no)
         if not isinstance(record, Mapping):
             raise ParserError("SecurityAlertV1 record must be an object")
         if not any(value not in (None, "") for value in record.values()):
@@ -53,9 +56,12 @@ class SecurityAlertV1Parser:
         line: str,
         *,
         context: ParseContext | None = None,
-        **kwargs: Any,
+        raw_ref: str = "",
+        source_id: str | None = None,
+        source_product: str | None = None,
+        line_no: int | None = None,
     ) -> ParsedRecord:
-        parse_context = context or ParseContext.from_kwargs(**kwargs)
+        parse_context = context or ParseContext(str(raw_ref), source_id, source_product, line_no)
         try:
             record = json.loads(line)
         except json.JSONDecodeError as exc:
@@ -72,9 +78,12 @@ class SecurityAlertV1Parser:
         row: Mapping[str, Any],
         *,
         context: ParseContext | None = None,
-        **kwargs: Any,
+        raw_ref: str = "",
+        source_id: str | None = None,
+        source_product: str | None = None,
+        line_no: int | None = None,
     ) -> ParsedRecord:
-        parse_context = context or ParseContext.from_kwargs(**kwargs)
+        parse_context = context or ParseContext(str(raw_ref), source_id, source_product, line_no)
         if None in row:
             raise ParserError("CSV row has more columns than the header")
         return self.parse_record(
