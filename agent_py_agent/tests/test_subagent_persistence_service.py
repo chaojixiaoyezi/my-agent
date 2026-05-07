@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
+from agent_py_agent.agent.subagents.models import EvidencePacket, Finding
 
 
 def test_subagent_persistence_service_round_trips_task(tmp_path) -> None:
@@ -97,6 +98,13 @@ def _assert_runtime_workspace_paths(loaded, task_workspace, run_id: str) -> None
     assert loaded.task_workspace_timeline_jsonl == str(task_workspace / "timeline.jsonl")
     assert loaded.task_workspace_summary_file == str(task_workspace / "summaries" / "current_summary.md")
     assert loaded.task_workspace_shared_dir == str(task_workspace / "shared")
+    assert loaded.task_workspace_shared_blackboard == str(task_workspace / "shared" / "blackboard.md")
+    assert loaded.task_workspace_shared_messages_jsonl == str(task_workspace / "shared" / "messages.jsonl")
+    assert loaded.task_workspace_shared_findings_jsonl == str(task_workspace / "shared" / "findings.jsonl")
+    assert loaded.task_workspace_shared_evidence_packets_dir == str(task_workspace / "shared" / "evidence_packets")
+    assert loaded.task_workspace_shared_evidence_index_jsonl == str(
+        task_workspace / "shared" / "evidence_packets" / "index.jsonl",
+    )
     assert loaded.task_workspace_artifacts_dir == str(task_workspace / "artifacts")
     assert loaded.task_workspace_agents_dir == str(task_workspace / "agents")
     assert loaded.agent_run_workspace_dir == str(run_workspace)
@@ -275,6 +283,71 @@ def test_subagent_persistence_writes_compact_checkpoint_chain(tmp_path) -> None:
     assert "已经写入 checkpoint snapshot。" in summary
     assert Path(loaded.agent_run_timeline_jsonl).exists()
     assert output_path.exists()
+
+
+def test_subagent_persistence_syncs_shared_workspace_facts(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = _create_task_with_shared_facts(manager)
+    manager.save(task)
+
+    loaded = manager.load(task.id)
+    _assert_shared_workspace_facts(loaded, task)
+
+
+def _create_task_with_shared_facts(manager: SubAgentManager):
+    task = manager.create_run(
+        goal="共享子代理任务局部事实",
+        thought="shared 目录只放结构化 facts，不写主 memory。",
+        plan=["写 evidence packet", "写 finding", "同步 shared"],
+    )
+    task.status = "RUNNING"
+    task.current_step = "同步 shared workspace"
+    task.latest_summary = "已产出可共享证据和发现。"
+    task.blockers = ["等待 sibling 复核"]
+    task.evidence_packets = [
+        EvidencePacket(
+            id="evpkt-shared-1",
+            claim="复核输入已经准备好",
+            checked_scope="shared workspace",
+            evidence_refs=["reports/status_report.json"],
+            artifact_refs=["output.json"],
+            confidence=0.82,
+        ),
+    ]
+    task.findings = [
+        Finding(
+            id="finding-shared-1",
+            claim="需要 sibling 复核证据链",
+            status="OPEN",
+            severity="P2",
+            evidence_packet_ids=["evpkt-shared-1"],
+            evidence_refs=["reports/status_report.json"],
+            confidence=0.74,
+        ),
+    ]
+    return task
+
+
+def _assert_shared_workspace_facts(loaded, task) -> None:
+    messages = _read_jsonl(loaded.task_workspace_shared_messages_jsonl)
+    findings = _read_jsonl(loaded.task_workspace_shared_findings_jsonl)
+    evidence_index = _read_jsonl(loaded.task_workspace_shared_evidence_index_jsonl)
+    packet = json.loads(
+        (Path(loaded.task_workspace_shared_evidence_packets_dir) / "evpkt-shared-1.json").read_text(encoding="utf-8"),
+    )
+    blackboard = Path(loaded.task_workspace_shared_blackboard).read_text(encoding="utf-8")
+
+    assert messages[-1]["message_type"] == "status_update"
+    assert messages[-1]["summary"] == "已产出可共享证据和发现。"
+    assert messages[-1]["evidence_packet_count"] == 1
+    assert messages[-1]["finding_count"] == 1
+    assert findings[0]["id"] == "finding-shared-1"
+    assert findings[0]["run_id"] == task.id
+    assert evidence_index[0]["id"] == "evpkt-shared-1"
+    assert evidence_index[0]["path"].endswith("shared/evidence_packets/evpkt-shared-1.json")
+    assert packet["claim"] == "复核输入已经准备好"
+    assert "需要 sibling 复核证据链" in blackboard
+    assert "等待 sibling 复核" in blackboard
 
 
 def test_subagent_persistence_writes_checkpoint_recovery_artifacts(tmp_path) -> None:

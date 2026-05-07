@@ -8,6 +8,7 @@ from __future__ import annotations
 LLM: daily ledger helpers are exported here so runtime memory callers do not invent path rules.
 LLM: artifact manifest helpers share the same public adapter surface.
 LLM: compact chain helpers are exported without enabling destructive compact apply.
+LLM: shared workspace helpers stay task-local and do not write main memory.
 """
 
 # LLM: keep task/run workspace adapter exports centralized for callers.
@@ -31,6 +32,7 @@ from .daily_ledger import (
 from .models import CompressionSnapshot, RawMemoryEvent
 from .resume_context import ResumeContextResult, build_auto_resume_context
 from .runtime import ArchiveRunTurnResult, archive_run_turn
+from .shared_workspace import SharedWorkspaceResult, shared_workspace_paths, sync_shared_workspace
 from .snapshots import (
     CompressionHookResult,
     RecoverySnapshotResult,
@@ -76,6 +78,7 @@ __all__ = [
     "RawMemoryEvent",
     "RecoverySnapshotResult",
     "ResumeContextResult",
+    "SharedWorkspaceResult",
     "TaskWorkspacePaths",
     "archive_run_turn",
     "append_raw_event",
@@ -98,10 +101,12 @@ __all__ = [
     "on_before_compression",
     "raw_event_path_for",
     "register_compression_hook",
+    "shared_workspace_paths",
     "snapshot_path_for",
     "ensure_subagent_task_workspace",
     "sync_artifact_manifests",
     "sync_agent_run_compact_chain",
+    "sync_shared_workspace",
     "task_workspace_path",
     "token_ledger_dir",
     "write_compression_snapshot",

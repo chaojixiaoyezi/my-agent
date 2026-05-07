@@ -141,6 +141,12 @@ class SubAgentTask:
     task_workspace_timeline_jsonl: str = ""
     task_workspace_summary_file: str = ""
     task_workspace_shared_dir: str = ""
+    # LLM: Phase 5 shared workspace fields expose task-local collaboration facts only.
+    task_workspace_shared_blackboard: str = ""
+    task_workspace_shared_messages_jsonl: str = ""
+    task_workspace_shared_findings_jsonl: str = ""
+    task_workspace_shared_evidence_packets_dir: str = ""
+    task_workspace_shared_evidence_index_jsonl: str = ""
     task_workspace_artifacts_dir: str = ""
     task_workspace_agents_dir: str = ""
     agent_run_workspace_dir: str = ""
