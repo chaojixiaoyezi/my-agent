@@ -47,6 +47,29 @@ def _setup_patch_task(agent, task, *, patch_status="applied", patch_summary="测
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _write_workspace_patch_output(task) -> None:
+    Path(task.output_json).write_text(
+        json.dumps(
+            {
+                "run_id": task.id,
+                "patches": [
+                    {
+                        "path": "workspace.txt",
+                        "tool": "write_file",
+                        "status": "planned",
+                        "summary": "把文件内容改成 after",
+                        "content": "after\n",
+                    }
+                ],
+                "tests": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_subagent_patch_review_approves_applied_patch_before_acceptance():
     """LLM: Verifies patch review approves an applied patch and then acceptance can pass."""
     with tempfile.TemporaryDirectory() as td:
@@ -180,26 +203,7 @@ def test_subagent_patch_apply_writes_file_and_marks_patch_reviewed():
                 f"command: python3 -c \"from pathlib import Path; assert Path('workspace.txt').read_text() == {expected_content}\""
             ],
         )
-        Path(task.output_json).write_text(
-            json.dumps(
-                {
-                    "run_id": task.id,
-                    "patches": [
-                        {
-                            "path": "workspace.txt",
-                            "tool": "write_file",
-                            "status": "planned",
-                            "summary": "把文件内容改成 after",
-                            "content": "after\n",
-                        }
-                    ],
-                    "tests": [],
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        _write_workspace_patch_output(task)
 
         report = agent.subagents.write_patch_apply_report(
             run_ids=[task.id],
@@ -326,25 +330,7 @@ def test_subagents_patches_cli_apply_dry_run_writes_patch_apply_report(tmp_path,
         plan=["apply-dry-run"],
         extra_write_roots=[str(target)],
     )
-    Path(task.output_json).write_text(
-        json.dumps(
-            {
-                "run_id": task.id,
-                "patches": [
-                    {
-                        "path": "workspace.txt",
-                        "tool": "write_file",
-                        "status": "planned",
-                        "summary": "把文件内容改成 after",
-                        "content": "after\n",
-                    }
-                ],
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    _write_workspace_patch_output(task)
 
     parser = build_parser()
     args = parser.parse_args(

@@ -179,36 +179,32 @@ def cmd_scenario_test(args) -> int:
 
     if args.case == "all":
         return run_scenario_suite(args)
-    if args.case == "verification":
-        return run_scenario_verification_case(args)
-    if args.case == "gateway-restart":
-        return run_scenario_gateway_restart_case(args)
-    if args.case == "gateway-cross-day-resume":
-        return run_scenario_gateway_cross_day_resume_case(args)
-    if args.case == "gateway-delayed-response":
-        return run_scenario_gateway_delayed_response_case(args)
-    if args.case == "gateway-multi-worker":
-        return run_scenario_gateway_multi_worker_case(args)
-    if args.case == "gateway-stale-lease":
-        return run_scenario_gateway_stale_lease_case(args)
-    if args.case == "gateway-processing-stop":
-        return run_scenario_gateway_processing_stop_case(args)
-    if args.case == "parent-subagent-cross-day-resume":
-        return run_scenario_parent_subagent_cross_day_resume_case(args)
-    if args.case == "real-model-recovery":
-        return run_scenario_real_model_recovery_case(args)
-    if args.case == "real-model-recovery-multi-round":
-        return run_scenario_real_model_recovery_multi_round_case(args)
-    if args.case == "structured-repair":
-        return run_scenario_structured_repair_case(args)
-    if args.case == "runner-retry":
-        return run_scenario_runner_retry_case(args)
+    case_runner = _scenario_case_runners().get(args.case)
+    if case_runner is not None:
+        return case_runner(args)
 
     if not _cmd_scenario_validate_args(args):
         return 2
 
     paths = create_scenario_workspace(args)
     return _cmd_scenario_happy_path(args, paths)
+
+
+def _scenario_case_runners():
+    return {
+        "verification": run_scenario_verification_case,
+        "gateway-restart": run_scenario_gateway_restart_case,
+        "gateway-cross-day-resume": run_scenario_gateway_cross_day_resume_case,
+        "gateway-delayed-response": run_scenario_gateway_delayed_response_case,
+        "gateway-multi-worker": run_scenario_gateway_multi_worker_case,
+        "gateway-stale-lease": run_scenario_gateway_stale_lease_case,
+        "gateway-processing-stop": run_scenario_gateway_processing_stop_case,
+        "parent-subagent-cross-day-resume": run_scenario_parent_subagent_cross_day_resume_case,
+        "real-model-recovery": run_scenario_real_model_recovery_case,
+        "real-model-recovery-multi-round": run_scenario_real_model_recovery_multi_round_case,
+        "structured-repair": run_scenario_structured_repair_case,
+        "runner-retry": run_scenario_runner_retry_case,
+    }
 
 
 def run_scenario_suite(args) -> int:

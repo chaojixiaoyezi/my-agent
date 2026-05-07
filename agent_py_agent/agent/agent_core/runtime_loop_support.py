@@ -6,6 +6,7 @@ from typing import Any
 from ..memory_archive import build_auto_resume_context
 from ..memory_routing import RouteContextOptions, build_routed_memory_context
 from .runtime_capabilities import resolve_runtime_capabilities
+from .runtime_services import CompressionContext, ToolLoopExecuteParams
 
 
 @dataclass
@@ -89,6 +90,22 @@ class _RuntimeLoopResult:
     archive_tool_calls: list[dict[str, object]]
 
 
+@dataclass
+class _CompressionLoopResult:
+    memories: list
+    snapshot_id: str
+    snapshot_path: str
+    applied: bool
+
+
+@dataclass
+class _RuntimeToolLoopSeed:
+    params: _RuntimeLoopParams
+    memories: list
+    tool_catalog_section: str
+    tool_recommendations_section: str
+
+
 _RUN_PARAM_FIELD_NAMES = tuple(field.name for field in fields(RunParams))
 
 
@@ -118,26 +135,8 @@ def run_params_from_values(
     elif not isinstance(params, RunParams):
         raise TypeError("run() requires params: RunParams keyword argument")
 
-    candidates = {
-        "inject": inject,
-        "prompt_files": prompt_files,
-        "save": save,
-        "allowed_tools": allowed_tools,
-        "granted_capabilities": granted_capabilities,
-        "write_boundary": write_boundary,
-        "request_id": request_id,
-        "run_id": run_id,
-        "task_id": task_id,
-        "task_attributes": task_attributes,
-        "source": source,
-        "recovery_snapshot": recovery_snapshot,
-        "resume_context": resume_context,
-        "recovery_task_refs": recovery_task_refs,
-        "recovery_content_paths": recovery_content_paths,
-        "recovery_next_actions": recovery_next_actions,
-        "on_chunk": on_chunk,
-    }
-    updates = {key: value for key, value in candidates.items() if key in _RUN_PARAM_FIELD_NAMES and value is not None}
+    values = {key: value for key, value in locals().items() if key != "params"}
+    updates = {key: values[key] for key in _RUN_PARAM_FIELD_NAMES if values.get(key) is not None}
     if not updates:
         return params
     return replace(params, **updates)
@@ -145,14 +144,13 @@ def run_params_from_values(
 
 def _runtime_loop_params(
     user_prompt: str,
-    memories: list,
-    runtime_injections: list,
+    prepared: _PreparedRuntimeContext,
     params: RunParams,
 ) -> _RuntimeLoopParams:
     return _RuntimeLoopParams(
         user_prompt=user_prompt,
-        memories=memories,
-        runtime_injections=runtime_injections,
+        memories=prepared.memories,
+        runtime_injections=prepared.runtime_injections,
         allowed_tools=params.allowed_tools,
         granted_capabilities=params.granted_capabilities,
         prompt_files=params.prompt_files,
@@ -242,9 +240,30 @@ def _execute_runtime_loop(agent, params: _RuntimeLoopParams):
     tool_catalog_section, tool_recommendations_section = _resolve_tool_sections(
         agent, params.allowed_tools, params.granted_capabilities,
     )
-    compression_svc = agent._get_services().compression
-    from .runtime_services import CompressionContext
+    compression = _execute_runtime_compression(agent, params)
+    loop_params = _tool_loop_execute_params(
+        _RuntimeToolLoopSeed(
+            params=params,
+            memories=compression.memories,
+            tool_catalog_section=tool_catalog_section,
+            tool_recommendations_section=tool_recommendations_section,
+        )
+    )
+    final_prompt, final_response, tool_rounds = agent._get_services().tool_loop.execute(loop_params)
+    return _RuntimeLoopResult(
+        final_prompt=final_prompt,
+        final_response=final_response,
+        tool_rounds=tool_rounds,
+        compression_snapshot_id=compression.snapshot_id,
+        compression_snapshot_path=compression.snapshot_path,
+        compression_applied=compression.applied,
+        executed_tools=loop_params.executed_tools,
+        archive_tool_calls=loop_params.archive_tool_calls,
+    )
 
+
+def _execute_runtime_compression(agent, params: _RuntimeLoopParams) -> _CompressionLoopResult:
+    compression_svc = agent._get_services().compression
     compression_ctx = CompressionContext(
         user_prompt=params.user_prompt,
         memories=params.memories,
@@ -256,26 +275,24 @@ def _execute_runtime_loop(agent, params: _RuntimeLoopParams):
         task_id=params.task_id,
         source=params.source,
     )
-    memories, compression_snapshot_id, compression_snapshot_path, compression_applied = (
-        compression_svc.check_and_apply(compression_ctx)
-    )
+    memories, snapshot_id, snapshot_path, applied = compression_svc.check_and_apply(compression_ctx)
+    return _CompressionLoopResult(memories=memories, snapshot_id=snapshot_id, snapshot_path=snapshot_path, applied=applied)
 
+
+def _tool_loop_execute_params(seed: _RuntimeToolLoopSeed) -> ToolLoopExecuteParams:
+    params = seed.params
     tool_context: list[str] = []
     tool_rounds = 0
-    final_prompt = ""
-    final_response = None
     one_shot_tool_calls: set[str] = set()
     executed_tools: list[str] = []
     archive_tool_calls: list[dict[str, object]] = []
-
-    from .runtime_services import ToolLoopExecuteParams
-    loop_params = ToolLoopExecuteParams(
+    return ToolLoopExecuteParams(
         user_prompt=params.user_prompt,
-        memories=memories,
+        memories=seed.memories,
         runtime_injections=params.runtime_injections,
         prompt_files=params.prompt_files,
-        tool_catalog_section=tool_catalog_section,
-        tool_recommendations_section=tool_recommendations_section,
+        tool_catalog_section=seed.tool_catalog_section,
+        tool_recommendations_section=seed.tool_recommendations_section,
         tool_context=tool_context,
         effective_on_chunk=params.on_chunk,
         allowed_tools=params.allowed_tools,
@@ -286,15 +303,4 @@ def _execute_runtime_loop(agent, params: _RuntimeLoopParams):
         executed_tools=executed_tools,
         archive_tool_calls=archive_tool_calls,
         tool_rounds=tool_rounds,
-    )
-    final_prompt, final_response, tool_rounds = agent._get_services().tool_loop.execute(loop_params)
-    return _RuntimeLoopResult(
-        final_prompt=final_prompt,
-        final_response=final_response,
-        tool_rounds=tool_rounds,
-        compression_snapshot_id=compression_snapshot_id,
-        compression_snapshot_path=compression_snapshot_path,
-        compression_applied=compression_applied,
-        executed_tools=executed_tools,
-        archive_tool_calls=archive_tool_calls,
     )

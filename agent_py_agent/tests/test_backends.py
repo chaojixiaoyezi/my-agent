@@ -1,16 +1,21 @@
 """后端适配器请求载荷约定检查。"""
 
 import json
+from dataclasses import replace
 
-from agent_py_agent.agent.backend import AnthropicCompatibleBackend, OpenAICompatibleBackend
+from agent_py_agent.agent.backend import (
+    AnthropicCompatibleBackend,
+    BackendOptions,
+    OpenAICompatibleBackend,
+)
+
+_OPENAI_OPTIONS = BackendOptions(api_base="http://fake/v1", api_key="k", model_name="m")
+_ANTHROPIC_OPTIONS = BackendOptions(api_base="http://fake/anthropic", api_key="k", model_name="m")
 
 
 class FakeOpenAI(OpenAICompatibleBackend):
     def __init__(self, *, stream_enabled=False):
-        super().__init__(
-            api_base="http://fake/v1", api_key="k", model_name="m",
-            stream_enabled=stream_enabled,
-        )
+        super().__init__(replace(_OPENAI_OPTIONS, stream_enabled=stream_enabled))
         self.seen = None
 
     def request_json(self, path, payload, headers):
@@ -28,10 +33,7 @@ class FakeOpenAI(OpenAICompatibleBackend):
 
 class FakeAnthropic(AnthropicCompatibleBackend):
     def __init__(self, *, stream_enabled=False):
-        super().__init__(
-            api_base="http://fake/anthropic", api_key="k", model_name="m",
-            stream_enabled=stream_enabled,
-        )
+        super().__init__(replace(_ANTHROPIC_OPTIONS, stream_enabled=stream_enabled))
         self.seen = None
 
     def request_json(self, path, payload, headers):
@@ -96,10 +98,7 @@ def test_streaming_skips_malformed_json():
 
     class PartialBroken(OpenAICompatibleBackend):
         def __init__(self):
-            super().__init__(
-                api_base="http://fake/v1", api_key="k", model_name="m",
-                stream_enabled=True,
-            )
+            super().__init__(replace(_OPENAI_OPTIONS, stream_enabled=True))
 
         def request_stream(self, path, payload, headers):
             return [
