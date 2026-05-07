@@ -12,9 +12,12 @@ agent_py_agent/agent/
 `-- memory_archive/                   # hook snapshot、raw archive、留存、token 估算、compact 预演
 	    |-- agent_run_workspace.py         # Phase 1 task-local agent run workspace 骨架
 	    |-- artifact_registry.py           # Phase 3 artifact manifest summary/hash/path 规范
-	    |-- compact_chain.py               # Phase 4 checkpoint-first compact chain ledger
-	    |-- daily_ledger.py                # Phase 2 daily/YYYY-MM-DD/events.jsonl 事件索引
-	    |-- shared_workspace.py            # Phase 5 task-local blackboard/messages/findings/evidence
+		    |-- compact_chain.py               # Phase 4 checkpoint-first compact chain ledger
+		    |-- daily_ledger.py                # Phase 2 daily/YYYY-MM-DD/events.jsonl 事件索引
+		    |-- memory_gate_export.py          # Phase 6 显式长期 memory / skill draft 导出
+		    |-- memory_gate_retention.py       # Phase 6 保守 retention 计划和 active queue 压缩
+		    |-- memory_gate_verifier.py        # Phase 6 no-auto-promotion 边界检查
+		    |-- shared_workspace.py            # Phase 5 task-local blackboard/messages/findings/evidence
 	    |-- task_workspace.py             # Phase 0 文件系统 task workspace 骨架和旧 subagent run adapter
 	    |-- task_workspace_rendering.py   # task workspace YAML/Markdown 小文件渲染 helper
 	    `-- query/task_sources.py          # task/run 恢复入口推荐，不把子代理内容写入主 memory
@@ -46,6 +49,9 @@ agent_py_agent/cli/
 - `memory_archive/artifact_registry.py`：把 `SubAgentTask.artifact_refs` 规范化为 task/run 两份 `artifacts/manifest.jsonl`，记录 ref、resolved path、exists、size、sha256、summary 和 kind，不复制 artifact 正文。
 - `memory_archive/compact_chain.py`：在 run `compactions/` 下追加 checkpoint snapshot ledger，写每次 summary/metadata，并把最新 compact refs 回写到 run checkpoint；当前只做恢复链，不删除原始 timeline/artifact。
 - `memory_archive/shared_workspace.py`：同步 task-local shared blackboard、status messages、findings 和 evidence packet 文件；这是 sibling 子代理协作面，不写入主代理长期 memory。
+- `memory_archive/memory_gate_export.py`：只在显式命令触发时，把 `approve_memory` 候选写入主 JSONL memory，或把 `approve_skill` 候选写成 run-local skill draft；不会自动安装正式 skill。
+- `memory_archive/memory_gate_retention.py`：生成 retention 计划，apply 时只从 active review queue 移除 closed 候选，候选、decision 和 export 审计日志继续保留。
+- `memory_archive/memory_gate_verifier.py`：写 `verifier_report.json`，检查 decision/export 是否仍保持 `auto_promote=false` 和显式提升边界。
 - `docs/modules/memory/06-runtime-memory-requirements.md`：定义 memory 作为运行时档案系统的开发要求，明确主代理长期记忆、每日账本、task workspace、agent run workspace、artifact、checkpoint、compact 和 retention 的边界。
 - `memory_archive/resume_brief.py`：把归档、LocalStore、任务事实源压成恢复简报。
 - `memory_archive/resume_context.py`：在“继续/恢复”类提示里按配置构造自动注入的恢复上下文。
@@ -70,9 +76,10 @@ agent_py_agent/cli/
 11. 同一保存流程会写 task/run artifact manifest，并让 daily ledger refs 指向 manifest；需要正文时再读 artifact 文件本身。
 12. 同一保存流程会追加 run `compactions/compaction_ledger.jsonl`，写 checkpoint snapshot summary/metadata，并让 run `checkpoint.json` 指向最新 compact refs；这不是删除上下文的 compact apply。
 13. 同一保存流程会同步 `shared/blackboard.md`、`messages.jsonl`、`findings.jsonl` 和 `evidence_packets/`，让 sibling 子代理共享任务局部 facts；这仍然不是主 memory 写入。
-14. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore、daily ledger 和任务事实源生成恢复块；跨天时会同时扫描最近 raw/hook 文件。subagent 任务会先推荐 `reports/checkpoint.json`、`status_report.json`、`progress.md` 等 compact recovery artifacts，再推荐 `STATUS.md`、`HANDOFF.md` 和 `output.json`。这只是恢复入口推荐，不代表把子代理内容写入主代理长期 memory。
-15. doctor 命令检查配置、route index、hook/raw/snapshot 目录和层级一致性 warning。
-16. `memory-compact --dry-run` 在真实压缩前只读扫描上述事实源，输出计划和风险，不修改文件。
+14. `subagents-memory-gate` 默认只列出候选或写 `decisions.jsonl`；只有显式 `--export-memory` 才写主 JSONL memory，只有显式 `--export-skill` 才写 skill draft，`--retention-apply` 也只压缩 active queue，不删除审计日志。
+15. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore、daily ledger 和任务事实源生成恢复块；跨天时会同时扫描最近 raw/hook 文件。subagent 任务会先推荐 `reports/checkpoint.json`、`status_report.json`、`progress.md` 等 compact recovery artifacts，再推荐 `STATUS.md`、`HANDOFF.md` 和 `output.json`。这只是恢复入口推荐，不代表把子代理内容写入主代理长期 memory。
+16. doctor 命令检查配置、route index、hook/raw/snapshot 目录和层级一致性 warning。
+17. `memory-compact --dry-run` 在真实压缩前只读扫描上述事实源，输出计划和风险，不修改文件。
 
 ## 跨天恢复链路
 
@@ -114,7 +121,7 @@ memory-resume 或 run(auto resume)
 共享 = blackboard + messages + evidence packets + artifact refs
 ```
 
-当前 Phase 0/1/2/3/4/5/6 已创建 task workspace 外壳、agent run workspace 外壳、daily event ledger、artifact manifest、checkpoint-first compact chain、shared 协作面和 run-local memory gate。`tasks/<root_id>/agents/<run_id>/legacy_run_ref.json` 会继续指向旧 run 目录；`memory_gate/` 保存 review 候选、decision log 和门禁摘要，不自动写主代理长期记忆。
+当前 Phase 0/1/2/3/4/5/6 已创建 task workspace 外壳、agent run workspace 外壳、daily event ledger、artifact manifest、checkpoint-first compact chain、shared 协作面和 run-local memory gate。`tasks/<root_id>/agents/<run_id>/legacy_run_ref.json` 会继续指向旧 run 目录；`memory_gate/` 保存 review 候选、decision log、export log、retention report 和 verifier report。只有显式 export 命令才会写主代理长期记忆或生成 skill draft。
 
 LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 目录里的权威文件。
 
@@ -131,8 +138,8 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 7. 再看 `memory_archive/models.py`、`storage.py`、`runtime.py` 和 `snapshots.py`，理解归档保存什么、怎么写入、怎么验收、压缩前 hook 为什么必须先成功。
 8. 再看 `memory_archive/query.py`、`resume_brief.py` 和 `resume_context.py`，理解“继续任务”时怎么找回线索。
 9. 再看 `memory_archive/tokens.py` 和 `agent_core/runtime_mixin.py`，理解 session token 账本和压缩触发点。
-10. 再看 `agent_py_agent/agent/memory_archive/memory_gate.py` 和 `agent_py_agent/agent/subagents/manager_memory_gate.py`，理解 lesson/finding 为什么先进入 review queue，以及 reviewer decision 为什么仍然不等于正式提升。
-11. 再看 `agent_py_agent/cli/_memory_gate.py`，理解 `subagents-memory-gate` 如何显式写回 decision。
+10. 再看 `agent_py_agent/agent/memory_archive/memory_gate.py`、`memory_gate_retention.py`、`memory_gate_export.py`、`memory_gate_verifier.py` 和 `agent_py_agent/agent/subagents/manager_memory_gate.py`，理解 lesson/finding 为什么先进入 review queue，以及 reviewer decision 为什么仍然不等于正式提升。
+11. 再看 `agent_py_agent/cli/_memory_gate.py`，理解 `subagents-memory-gate` 如何显式写回 decision、导出 approved 候选、生成 skill draft 和跑边界检查。
 12. 再看 `agent_py_agent/tests/test_memory_archive_cli.py::test_memory_resume_cross_day_handoff_uses_task_fact_sources` 和 `test_memory_runtime.py::test_auto_resume_context_recovers_cross_day_handoff_task`，理解 subagent 跨天恢复如何从线索回到事实源。
 13. 再看 `agent_py_agent/tests/test_scenario_gateway_resume.py`，理解真实 gateway 请求和 parent/subagent runner 结果如何通过跨天恢复回到文件事实源。
 14. 最后看 `agent_py_agent/tests/test_memory_*.py` 和 `test_memory_first_loop.py`，用测试反推每一层必须保证的行为。

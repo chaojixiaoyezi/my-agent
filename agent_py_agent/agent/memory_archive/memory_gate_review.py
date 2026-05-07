@@ -143,6 +143,8 @@ def _review_gate_summary(
             "candidates": str(paths.candidates_jsonl),
             "review_queue": str(paths.review_queue_jsonl),
             "decisions": str(paths.decisions_jsonl),
+            # LLM: expose the future export ledger without writing it during review.
+            "exports": str(paths.exports_jsonl),
         },
         "updated_at": str(reviewed.get("reviewed_at", "")),
     }
@@ -179,6 +181,7 @@ def _merge_checkpoint_from_review(
             "candidates_ref": str(paths.candidates_jsonl),
             "review_queue_ref": str(paths.review_queue_jsonl),
             "decisions_ref": str(paths.decisions_jsonl),
+            "exports_ref": str(paths.exports_jsonl),
             "skill_spark_gate_ref": str(paths.skill_spark_gate_json),
             "auto_promote": False,
         },

@@ -128,6 +128,7 @@ def _assert_runtime_workspace_paths(loaded, task_workspace, run_id: str) -> None
     assert loaded.agent_run_memory_candidates_jsonl == str(run_workspace / "memory_gate" / "candidates.jsonl")
     assert loaded.agent_run_memory_review_queue_jsonl == str(run_workspace / "memory_gate" / "review_queue.jsonl")
     assert loaded.agent_run_memory_decisions_jsonl == str(run_workspace / "memory_gate" / "decisions.jsonl")
+    assert loaded.agent_run_memory_exports_jsonl == str(run_workspace / "memory_gate" / "exports.jsonl")
     assert loaded.agent_run_skill_spark_gate_json == str(run_workspace / "memory_gate" / "skill_spark_gate.json")
     assert loaded.legacy_run_ref_json == str(run_workspace / "legacy_run_ref.json")
     assert "/daily/" in loaded.daily_ledger_file
@@ -211,6 +212,7 @@ def _assert_memory_gate_candidates(candidates, review_queue, refs) -> None:
     assert gate["promoted_count"] == 0
     assert checkpoint["memory_gate"]["auto_promote"] is False
     assert checkpoint["memory_gate"]["candidates_ref"] == loaded.agent_run_memory_candidates_jsonl
+    assert checkpoint["memory_gate"]["exports_ref"] == loaded.agent_run_memory_exports_jsonl
 
 
 def test_subagent_memory_gate_review_preserves_decision_across_save(tmp_path) -> None:

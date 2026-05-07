@@ -12,10 +12,25 @@ from pathlib import Path
 from ..memory_archive.memory_gate import (
     list_memory_gate_candidates,
 )
+from ..memory_archive.memory_gate_export import (
+    MemoryGateExportRequest,
+    MemoryGateExportResult,
+    export_approved_memory_candidates,
+    export_approved_skill_sparks,
+)
+from ..memory_archive.memory_gate_retention import (
+    MemoryGateRetentionRequest,
+    MemoryGateRetentionResult,
+    run_memory_gate_retention,
+)
 from ..memory_archive.memory_gate_review import (
     MemoryGateReviewRequest,
     MemoryGateReviewResult,
     record_memory_gate_review,
+)
+from ..memory_archive.memory_gate_verifier import (
+    MemoryGateVerifierResult,
+    verify_memory_gate_boundary,
 )
 from .models import SubAgentTask
 
@@ -40,6 +55,52 @@ class SubAgentMemoryGateMixin:
             Path(task.agent_run_workspace_dir),
             request,
         )
+
+    def run_memory_gate_retention(
+        self,
+        run_id: str,
+        request: MemoryGateRetentionRequest,
+    ) -> MemoryGateRetentionResult:
+        """Plan or apply queue retention without deleting audit facts."""
+
+        task = self._ensure_memory_gate_workspace(run_id)
+        # LLM: retention may compact the active queue, but candidate/decision audit files stay put.
+        return run_memory_gate_retention(Path(task.agent_run_workspace_dir), request)
+
+    def export_memory_gate_candidates_to_memory(
+        self,
+        run_id: str,
+        *,
+        memory_path: str | Path,
+        request: MemoryGateExportRequest,
+    ) -> MemoryGateExportResult:
+        """Export approved memory candidates only after explicit review approval."""
+
+        task = self._ensure_memory_gate_workspace(run_id)
+        return export_approved_memory_candidates(
+            Path(task.agent_run_workspace_dir),
+            memory_path=Path(memory_path),
+            request=request,
+        )
+
+    def export_memory_gate_candidates_to_skill_drafts(
+        self,
+        run_id: str,
+        *,
+        output_dir: str | Path | None,
+        request: MemoryGateExportRequest,
+    ) -> MemoryGateExportResult:
+        """Export approved skill candidates as local drafts, never as installed skills."""
+
+        task = self._ensure_memory_gate_workspace(run_id)
+        output_path = Path(output_dir) if output_dir else None
+        return export_approved_skill_sparks(Path(task.agent_run_workspace_dir), output_dir=output_path, request=request)
+
+    def verify_memory_gate_boundary(self, run_id: str) -> MemoryGateVerifierResult:
+        """Run deterministic checks for no-auto-promotion gate boundaries."""
+
+        task = self._ensure_memory_gate_workspace(run_id)
+        return verify_memory_gate_boundary(Path(task.agent_run_workspace_dir))
 
     def _ensure_memory_gate_workspace(self, run_id: str) -> SubAgentTask:
         task = self.load(run_id)

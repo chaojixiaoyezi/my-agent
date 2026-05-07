@@ -30,6 +30,8 @@ class MemoryGateResult:
     candidates_jsonl: Path
     review_queue_jsonl: Path
     decisions_jsonl: Path
+    # LLM: exports stay separate from review decisions so approve cannot masquerade as promotion.
+    exports_jsonl: Path
     skill_spark_gate_json: Path
 
 
@@ -61,6 +63,7 @@ def memory_gate_paths(agent_run_workspace_root: Path) -> MemoryGateResult:
         candidates_jsonl=gate_dir / "candidates.jsonl",
         review_queue_jsonl=gate_dir / "review_queue.jsonl",
         decisions_jsonl=gate_dir / "decisions.jsonl",
+        exports_jsonl=gate_dir / "exports.jsonl",
         skill_spark_gate_json=gate_dir / "skill_spark_gate.json",
     )
 
@@ -91,6 +94,7 @@ def _gate_summary(
             "candidates": str(paths.candidates_jsonl),
             "review_queue": str(paths.review_queue_jsonl),
             "decisions": str(paths.decisions_jsonl),
+            "exports": str(paths.exports_jsonl),
         },
         "updated_at": _utc_iso(now),
     }
@@ -104,6 +108,7 @@ def _merge_checkpoint(checkpoint_path: Path, paths: MemoryGateResult, candidates
         "candidates_ref": str(paths.candidates_jsonl),
         "review_queue_ref": str(paths.review_queue_jsonl),
         "decisions_ref": str(paths.decisions_jsonl),
+        "exports_ref": str(paths.exports_jsonl),
         "skill_spark_gate_ref": str(paths.skill_spark_gate_json),
         "auto_promote": False,
     }

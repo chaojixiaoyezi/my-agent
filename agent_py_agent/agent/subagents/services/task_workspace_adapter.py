@@ -70,4 +70,6 @@ def _sync_runtime_refs(task: SubAgentTask, task_workspace_paths) -> None:
     task.agent_run_memory_review_queue_jsonl = str(task_workspace_paths.memory_gate.review_queue_jsonl)
     # LLM: decisions are review audit logs; later promotion commands must read them explicitly.
     task.agent_run_memory_decisions_jsonl = str(task_workspace_paths.memory_gate.decisions_jsonl)
+    # LLM: exports are opt-in promotion records and remain separate from review decisions.
+    task.agent_run_memory_exports_jsonl = str(task_workspace_paths.memory_gate.exports_jsonl)
     task.agent_run_skill_spark_gate_json = str(task_workspace_paths.memory_gate.skill_spark_gate_json)
