@@ -20,6 +20,7 @@ from .subagents import (
     cmd_subagents_apply_actions,
     cmd_subagents_dispatch,
     cmd_subagents_due_check,
+    cmd_subagents_memory_gate,
     cmd_subagents_patches,
     cmd_subagents_plan_actions,
     cmd_subagents_probe,
@@ -117,6 +118,22 @@ def _add_agents_action_subcommands(sub):
     patches.add_argument("--note", help="写入 patch 审核记录的备注")
     patches.set_defaults(func=cmd_subagents_patches, patch_action="review_dry_run")
 
+def _add_agents_memory_gate_subcommands(sub):
+    # LLM: memory-gate review is explicit and never performs memory/skill export.
+    memory_gate = sub.add_parser("subagents-memory-gate", help="查看或写回 memory gate review decision")
+    memory_gate.add_argument("run_id", help="子代理运行 ID")
+    memory_gate.add_argument("--candidate-id", help="要写回 review decision 的候选 ID；不传则只列出候选")
+    memory_gate.add_argument(
+        "--decision",
+        choices=["approve_memory", "approve_skill", "reject", "needs_evidence"],
+        default="needs_evidence",
+        help="候选 review decision；只写 gate 状态，不执行提升",
+    )
+    memory_gate.add_argument("--reviewer", default="parent", help="reviewer 标识")
+    memory_gate.add_argument("--note", help="写入 decision log 的备注")
+    memory_gate.add_argument("--limit", type=int, default=20, help="列表模式最多显示多少条候选")
+    memory_gate.set_defaults(func=cmd_subagents_memory_gate)
+
 
 def _add_agents_dispatch_subcommands(sub):
     dispatch = sub.add_parser("subagents-dispatch", help="执行一轮父代理调度，默认 dry-run")
@@ -166,5 +183,6 @@ def _add_agents_context_subcommands(sub):
 def add_subagents_subcommands(sub: argparse._SubParsersAction) -> None:
     _add_agents_basic_subcommands(sub)
     _add_agents_action_subcommands(sub)
+    _add_agents_memory_gate_subcommands(sub)
     _add_agents_dispatch_subcommands(sub)
     _add_agents_context_subcommands(sub)

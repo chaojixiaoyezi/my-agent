@@ -23,4 +23,7 @@ from agent_py_agent.cli._inspection import (
     cmd_subagents_due_check,
     cmd_subagents_probe,
 )
+from agent_py_agent.cli._memory_gate import cmd_subagents_memory_gate
 from agent_py_agent.cli._review import cmd_subagents_acceptance, cmd_subagents_patches
+
+# LLM: memory gate CLI writes review state only, not memory or skill exports.
