@@ -136,33 +136,45 @@ class SimpleAgent(
         self.memory = JsonlMemory(paths["memory_path"], local_store=self.local_store)
         self.prompts = PromptBuilder(config, self.root)
         self.backend = get_backend(config.model_backend, config)
-        self.subagents = SubAgentManager(
-            paths["subagent_workspace"],
-            local_store=self.local_store,
-            workspace_root=self.root,
-            workspace_roots=self.workspace_roots,
-            enable_self_learning=config.enable_self_learning,
-        )
+        self.subagents = _build_subagent_manager(self, paths)
+        self.tools = _build_tool_registry(self, config)
+        _register_orchestration_tools(self)
 
-        workspace_root = self.root.parent if (self.root / "__main__.py").exists() else self.root
-        workspace_roots = [workspace_root, *[root for root in self.workspace_roots if root != self.root]]
-        self.tools = ToolRegistry(
-            ToolRegistryParams(
-                workspace_root=workspace_root,
-                workspace_roots=workspace_roots,
-                max_chars=config.tool_read_max_chars,
-                max_entries=config.tool_list_max_entries,
-                max_matches=config.tool_search_max_matches,
-                web_max_chars=config.tool_web_max_chars,
-                http_timeout=config.tool_http_timeout,
-                catalog_limit=config.tool_catalog_limit,
-                retrieval_limit=config.tool_retrieval_limit,
-                vector_search_enabled=config.tool_vector_search_enabled,
-            )
+
+def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
+    # LLM: dependency wiring is split so SimpleAgent.__init__ stays a composition facade.
+    return SubAgentManager(
+        paths["subagent_workspace"],
+        local_store=agent.local_store,
+        workspace_root=agent.root,
+        workspace_roots=agent.workspace_roots,
+        enable_self_learning=agent.config.enable_self_learning,
+    )
+
+
+def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
+    workspace_root = agent.root.parent if (agent.root / "__main__.py").exists() else agent.root
+    workspace_roots = [workspace_root, *[root for root in agent.workspace_roots if root != agent.root]]
+    return ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=workspace_root,
+            workspace_roots=workspace_roots,
+            max_chars=config.tool_read_max_chars,
+            max_entries=config.tool_list_max_entries,
+            max_matches=config.tool_search_max_matches,
+            web_max_chars=config.tool_web_max_chars,
+            http_timeout=config.tool_http_timeout,
+            catalog_limit=config.tool_catalog_limit,
+            retrieval_limit=config.tool_retrieval_limit,
+            vector_search_enabled=config.tool_vector_search_enabled,
         )
-        self.tools.register(CreateSubagentsTool(self))
-        self.tools.register(SubagentBoardTool(self))
-        self.tools.register(DispatchSubagentsTool(self))
+    )
+
+
+def _register_orchestration_tools(agent: SimpleAgent) -> None:
+    agent.tools.register(CreateSubagentsTool(agent))
+    agent.tools.register(SubagentBoardTool(agent))
+    agent.tools.register(DispatchSubagentsTool(agent))
 
 
 __all__ = [

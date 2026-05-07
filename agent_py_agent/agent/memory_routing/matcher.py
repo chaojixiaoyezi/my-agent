@@ -89,20 +89,31 @@ def resolve_required_paths(
 def build_read_receipt(
     match: MemoryRouteMatch,
     *,
+    params: ReadReceiptParams | None = None,
     status: str = "planned",
     content_hash: str = "",
     elapsed_ms: float = 0.0,
     error: str = "",
 ) -> MemoryReadReceipt:
+    values = params or ReadReceiptParams(status, content_hash, elapsed_ms, error)
     return MemoryReadReceipt(
         route_id=match.route.route_id,
         authority_path=match.route.authority_file(),
-        status=str(status),
+        status=str(values.status),
         reasons=match.reasons,
-        content_hash=str(content_hash),
-        elapsed_ms=float(elapsed_ms),
-        error=str(error),
+        content_hash=str(values.content_hash),
+        elapsed_ms=float(values.elapsed_ms),
+        error=str(values.error),
     ).mark_now()
+
+
+@dataclass(frozen=True)
+class ReadReceiptParams:
+    # LLM: read receipt status fields are grouped for future routing evidence fields.
+    status: str = "planned"
+    content_hash: str = ""
+    elapsed_ms: float = 0.0
+    error: str = ""
 
 
 @dataclass(frozen=True)

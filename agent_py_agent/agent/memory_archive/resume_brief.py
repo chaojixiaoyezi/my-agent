@@ -25,18 +25,27 @@ class RecoveryBriefContext:
     authority_note: str
 
 
+@dataclass(frozen=True)
+class ResumeBriefParams:
+    # LLM: resume brief callers pass optional recommendations as one bundle.
+    recommended_read_paths: list[str] | None = None
+    next_actions: list[str] | None = None
+
+
 def build_resume_brief(
     archive_matches: list[dict[str, Any]],
     local_hits: list[dict[str, Any]],
     task_payloads: list[dict[str, Any]],
     *,
+    params: ResumeBriefParams | None = None,
     recommended_read_paths: list[str] | None = None,
     next_actions: list[str] | None = None,
 ) -> dict[str, Any]:
     """Synthesize a compact recovery brief from existing resume evidence."""
 
-    recommended_read_paths = list(recommended_read_paths or [])
-    next_actions = list(next_actions or [])
+    values = params or ResumeBriefParams(recommended_read_paths, next_actions)
+    recommended_read_paths = list(values.recommended_read_paths or [])
+    next_actions = list(values.next_actions or [])
     latest_user_intents = _latest_user_intents(archive_matches)
     latest_assistant_actions = _latest_assistant_actions(archive_matches)
     related_ids = _related_ids(archive_matches, local_hits, task_payloads)

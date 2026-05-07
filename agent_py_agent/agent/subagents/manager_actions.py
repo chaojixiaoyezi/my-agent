@@ -10,7 +10,9 @@ Human version:
 from .models import SubAgentTask
 from .reports import ActionApplyRecord, ActionPlanItem
 from .services.action_options import ActionApplyOptions
+from .services.action_params import RecordAfterTaskActionParams
 from .services.actions import SubAgentActionService
+from .services.indexing_params import IndexReportParams
 
 
 class SubAgentActionMixin:
@@ -48,22 +50,9 @@ class SubAgentActionMixin:
 
     def _record_after_task_action(
         self,
-        action: ActionPlanItem,
-        task: SubAgentTask,
-        before_status: str,
-        before_channel_status: str,
-        message: str,
-        *,
-        evidence_paths: list[str] | None = None,
+        params: RecordAfterTaskActionParams,
     ):
-        return self._action_service._record_after_task_action(
-            action,
-            task,
-            before_status,
-            before_channel_status,
-            message,
-            evidence_paths=evidence_paths,
-        )
+        return self._action_service._record_after_task_action(params)
 
     def _append_action_apply_log(self, record: ActionApplyRecord):
         return self._action_service._append_action_apply_log(record)
@@ -128,8 +117,10 @@ class SubAgentActionMixin:
             render_action_apply_markdown(report), encoding="utf-8",
         )
         self._index_report(
-            "subagent_action_apply_report", "latest",
-            "Subagent action apply report", report,
-            event_type="subagent_action_apply_report_written",
+            IndexReportParams(
+                "subagent_action_apply_report", "latest",
+                "Subagent action apply report", report,
+                "subagent_action_apply_report_written",
+            ),
         )
         return report

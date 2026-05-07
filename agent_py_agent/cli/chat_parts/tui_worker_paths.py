@@ -5,6 +5,7 @@ import time
 
 from .gateway_client import (
     ChatRequestContent,
+    GatewayChunkPollRequest,
     check_gateway_alive,
     poll_gateway_chunks,
     submit_chat_request,
@@ -27,12 +28,14 @@ def _worker_gateway_path(ctx) -> tuple[str, bool]:
     chunks_printed_ref = [0]
     visible_chunks_ref = [0]
     response = poll_gateway_chunks(
-        chunk_path,
-        response_path,
-        time.time() + max(0.0, timeout),
-        ctx.on_stream_chunk,
-        chunks_printed_ref=chunks_printed_ref,
-        visible_chunks_ref=visible_chunks_ref,
+        GatewayChunkPollRequest(
+            chunk_path,
+            response_path,
+            time.time() + max(0.0, timeout),
+            ctx.on_stream_chunk,
+            chunks_printed_ref,
+            visible_chunks_ref,
+        )
     )
     if response:
         _flush_stream_buf(ctx.cfg.stream_buf_ref)

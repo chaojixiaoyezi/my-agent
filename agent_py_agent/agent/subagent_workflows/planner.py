@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Compose workflow routing, compilation, and parent acceptance planning."""
+"""LLM: workflow planning composes route, compile, and parent acceptance through bundles."""
 
 import json
 from dataclasses import dataclass, field
@@ -50,43 +50,80 @@ class WorkflowPlanningResult:
     def to_dict(self) -> dict[str, object]:
         """Return the audit-friendly dry-run preview payload."""
 
-        dispatch_plan = self.dispatch_plan
-        parent_acceptance_plan = self.parent_acceptance_plan
-        template_phase_tasks = {
-            phase.id: phase.task for phase in self.template.phases
-        } if self.template is not None else {}
-        workers = []
-        if dispatch_plan is not None:
-            workers = [
-                {
-                    "phase_id": worker.phase_id,
-                    "role": worker.role,
-                    "kind": worker.kind,
-                    "task": _worker_task_summary(worker, template_phase_tasks),
-                    "acceptance_check_count": len(worker.acceptance_checks),
-                    "acceptance_checks": list(worker.acceptance_checks),
-                    "depends_on": list(worker.depends_on),
-                }
-                for worker in dispatch_plan.worker_specs
-            ]
-        parent_checklist = parent_acceptance_plan.checklist if parent_acceptance_plan is not None else []
-        return {
-            "goal": self.goal,
-            "selected_template_id": self.selected_template_id,
-            "mode": self.decision.mode,
-            "needs_confirmation": self.decision.needs_confirmation,
-            "enabled": self.enabled,
-            "ok": self.ok,
-            "reason": self.decision.reason,
-            "task_type": self.decision.task_type,
-            "risk_tags": list(self.decision.risk_tags),
-            "worker_count": len(workers),
-            "workers": workers,
+        return _planning_payload(self)
+
+
+@dataclass(frozen=True)
+class _CompilePlansRequest:
+    template: WorkflowTemplate
+    goal: str
+    quality_contract: Any
+    context_manifest: Any
+    allowed_write_roots: list[str] | None
+    forbidden_write_roots: list[str] | None
+
+
+def _workflow_workers(
+    dispatch_plan: WorkflowDispatchPlan | None,
+    template_phase_tasks: dict[str, str],
+) -> list[dict[str, object]]:
+    """Build worker preview rows from a dispatch plan bundle."""
+    if dispatch_plan is None:
+        return []
+    return [
+        {
+            "phase_id": worker.phase_id,
+            "role": worker.role,
+            "kind": worker.kind,
+            "task": _worker_task_summary(worker, template_phase_tasks),
+            "acceptance_check_count": len(worker.acceptance_checks),
+            "acceptance_checks": list(worker.acceptance_checks),
+            "depends_on": list(worker.depends_on),
+        }
+        for worker in dispatch_plan.worker_specs
+    ]
+
+
+def _template_phase_tasks(template: WorkflowTemplate | None) -> dict[str, str]:
+    if template is None:
+        return {}
+    return {phase.id: phase.task for phase in template.phases}
+
+
+def _parent_checklist(parent_acceptance_plan: ParentAcceptancePlan | None) -> list[str]:
+    if parent_acceptance_plan is None:
+        return []
+    return parent_acceptance_plan.checklist
+
+
+def _planning_payload_base(result: WorkflowPlanningResult, workers: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "goal": result.goal,
+        "selected_template_id": result.selected_template_id,
+        "mode": result.decision.mode,
+        "needs_confirmation": result.decision.needs_confirmation,
+        "enabled": result.enabled,
+        "ok": result.ok,
+        "reason": result.decision.reason,
+        "task_type": result.decision.task_type,
+        "risk_tags": list(result.decision.risk_tags),
+        "worker_count": len(workers),
+        "workers": workers,
+    }
+
+
+def _planning_payload(result: WorkflowPlanningResult) -> dict[str, object]:
+    workers = _workflow_workers(result.dispatch_plan, _template_phase_tasks(result.template))
+    parent_checklist = _parent_checklist(result.parent_acceptance_plan)
+    payload = _planning_payload_base(result, workers)
+    payload.update(
+        {
             "parent_acceptance_check_count": len(parent_checklist),
             "parent_acceptance_checklist": list(parent_checklist),
-            "issues": list(self.issues),
+            "issues": list(result.issues),
         }
-
+    )
+    return payload
 
 def plan_workflow_for_goal(
     goal: str,
@@ -116,12 +153,14 @@ def plan_workflow_for_goal(
         return _make_disabled_result(goal, decision, issues)
 
     dispatch_plan, parent_acceptance_plan = _compile_plans(
-        template,
-        goal=goal,
-        quality_contract=_c.quality_contract,
-        context_manifest=_c.context_manifest,
-        allowed_write_roots=_c.allowed_write_roots,
-        forbidden_write_roots=_c.forbidden_write_roots,
+        _CompilePlansRequest(
+            template=template,
+            goal=goal,
+            quality_contract=_c.quality_contract,
+            context_manifest=_c.context_manifest,
+            allowed_write_roots=_c.allowed_write_roots,
+            forbidden_write_roots=_c.forbidden_write_roots,
+        )
     )
 
     return WorkflowPlanningResult(
@@ -149,28 +188,20 @@ def _make_disabled_result(
     )
 
 
-def _compile_plans(
-    template: WorkflowTemplate,
-    *,
-    goal: str,
-    quality_contract: Any,
-    context_manifest: Any,
-    allowed_write_roots: list[str] | None,
-    forbidden_write_roots: list[str] | None,
-) -> tuple[WorkflowDispatchPlan, ParentAcceptancePlan]:
+def _compile_plans(request: _CompilePlansRequest) -> tuple[WorkflowDispatchPlan, ParentAcceptancePlan]:
     """Compile both dispatch and parent-acceptance plans from a resolved template."""
     dispatch_plan = compile_workflow(
-        template,
-        goal=goal,
-        quality_contract=quality_contract,
-        context_manifest=context_manifest,
-        allowed_write_roots=allowed_write_roots,
-        forbidden_write_roots=forbidden_write_roots,
+        request.template,
+        goal=request.goal,
+        quality_contract=request.quality_contract,
+        context_manifest=request.context_manifest,
+        allowed_write_roots=request.allowed_write_roots,
+        forbidden_write_roots=request.forbidden_write_roots,
     )
     parent_acceptance_plan = plan_parent_acceptance(
-        template,
-        goal=goal,
-        quality_contract=quality_contract,
+        request.template,
+        goal=request.goal,
+        quality_contract=request.quality_contract,
     )
     return dispatch_plan, parent_acceptance_plan
 

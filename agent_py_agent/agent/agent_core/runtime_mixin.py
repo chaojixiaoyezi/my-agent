@@ -31,6 +31,38 @@ class _RuntimeServices:
     finalization: FinalizationService
 
 
+@dataclass(frozen=True)
+class _CompressionSnapshotRequest:
+    # LLM: snapshot render inputs stay bundled before crossing into CompressionService.
+    user_prompt: object
+    memories: object
+    runtime_injections: object
+    routed_context: object
+    resume_context_section: object
+
+
+@dataclass(frozen=True)
+class _RunCompatibilityFields:
+    # LLM: legacy run keyword fields are gathered before constructing RunParams.
+    inject: list[str] | None = None
+    prompt_files: list[str] | None = None
+    save: bool | None = None
+    allowed_tools: list[str] | None = None
+    granted_capabilities: list[str] | None = None
+    write_boundary: dict[str, object] | None = None
+    request_id: str | None = None
+    run_id: str | None = None
+    task_id: str | None = None
+    task_attributes: dict | None = None
+    source: str | None = None
+    recovery_snapshot: bool | None = None
+    resume_context: bool | None = None
+    recovery_task_refs: list[str] | None = None
+    recovery_content_paths: list[str] | None = None
+    recovery_next_actions: list[str] | None = None
+    on_chunk: object = None
+
+
 class SimpleAgentRuntimeMixin:
 
     _services: _RuntimeServices | None = None
@@ -48,17 +80,27 @@ class SimpleAgentRuntimeMixin:
         return self._get_services().compression._compress_memories(memories, keep_recent=keep_recent)
 
     def _build_compression_snapshot_content(
-        self, *, user_prompt, memories, runtime_injections, routed_context, resume_context_section
+        self,
+        *,
+        params: _CompressionSnapshotRequest | None = None,
+        user_prompt=None,
+        memories=None,
+        runtime_injections=None,
+        routed_context=None,
+        resume_context_section=None,
     ):
         from ._compression_service import CompressionSnapshotContentParams
 
+        values = params or _CompressionSnapshotRequest(
+            user_prompt, memories, runtime_injections, routed_context, resume_context_section
+        )
         return self._get_services().compression._build_compression_snapshot_content(
             CompressionSnapshotContentParams(
-                user_prompt=user_prompt,
-                memories=memories,
-                runtime_injections=runtime_injections,
-                routed_context=routed_context,
-                resume_context_section=resume_context_section,
+                user_prompt=values.user_prompt,
+                memories=values.memories,
+                runtime_injections=values.runtime_injections,
+                routed_context=values.routed_context,
+                resume_context_section=values.resume_context_section,
             )
         )
 
@@ -85,25 +127,13 @@ class SimpleAgentRuntimeMixin:
         recovery_next_actions: list[str] | None = None,
         on_chunk: object = None,
     ):
-        params = run_params_from_values(
+        params = _run_params_from_compat(
             params,
-            inject=inject,
-            prompt_files=prompt_files,
-            save=save,
-            allowed_tools=allowed_tools,
-            granted_capabilities=granted_capabilities,
-            write_boundary=write_boundary,
-            request_id=request_id,
-            run_id=run_id,
-            task_id=task_id,
-            task_attributes=task_attributes,
-            source=source,
-            recovery_snapshot=recovery_snapshot,
-            resume_context=resume_context,
-            recovery_task_refs=recovery_task_refs,
-            recovery_content_paths=recovery_content_paths,
-            recovery_next_actions=recovery_next_actions,
-            on_chunk=on_chunk,
+            _RunCompatibilityFields(
+                inject, prompt_files, save, allowed_tools, granted_capabilities, write_boundary, request_id, run_id,
+                task_id, task_attributes, source, recovery_snapshot, resume_context, recovery_task_refs,
+                recovery_content_paths, recovery_next_actions, on_chunk
+            ),
         )
         prepared = _prepare_runtime_context(self, user_prompt, params.inject, params.resume_context)
         loop_result = _execute_runtime_loop(
@@ -150,3 +180,26 @@ class SimpleAgentRuntimeMixin:
 
     def recall(self, query: str, top_k: int | None = None):
         return self.memory.search(query, top_k or self.config.memory_top_k)
+
+
+def _run_params_from_compat(params: RunParams, fields: _RunCompatibilityFields) -> RunParams:
+    return run_params_from_values(
+        params,
+        inject=fields.inject,
+        prompt_files=fields.prompt_files,
+        save=fields.save,
+        allowed_tools=fields.allowed_tools,
+        granted_capabilities=fields.granted_capabilities,
+        write_boundary=fields.write_boundary,
+        request_id=fields.request_id,
+        run_id=fields.run_id,
+        task_id=fields.task_id,
+        task_attributes=fields.task_attributes,
+        source=fields.source,
+        recovery_snapshot=fields.recovery_snapshot,
+        resume_context=fields.resume_context,
+        recovery_task_refs=fields.recovery_task_refs,
+        recovery_content_paths=fields.recovery_content_paths,
+        recovery_next_actions=fields.recovery_next_actions,
+        on_chunk=fields.on_chunk,
+    )

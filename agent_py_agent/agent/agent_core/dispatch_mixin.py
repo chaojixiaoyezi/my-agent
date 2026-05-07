@@ -13,8 +13,13 @@ from typing import TYPE_CHECKING
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..subagent import DispatchReport
-from ..subagents.services.dispatch_params import DispatchRecordParams
 from .dispatch_facade import _DispatchFacadeMixin, _DispatchFailureMixin
+from .dispatch_mixin_helpers import (
+    DispatchRunnerStageRequest,
+    RunnerJobExecutionParams,
+    parent_planner_dispatch_record,
+    run_dispatch_runner_stage,
+)
 from .dispatch_params import (
     DispatchContext,
     DispatchParams,
@@ -55,15 +60,6 @@ from .services import notify_completed_tasks
 
 
 @dataclass(frozen=True)
-class RunnerJobExecutionParams:
-    ctx: DispatchContext
-    execute_runners: bool
-    max_cards: int
-    probe: bool
-    existing_records: list
-
-
-@dataclass(frozen=True)
 class DispatchFinalizeParams:
     apply: bool
     reviewer: str
@@ -78,23 +74,7 @@ class _DispatchCollectionBase:
         records = []
 
         if ctx.planner:
-            from .subagent_mixin import RunParentPlannerParams
-
-            planner_params = RunParentPlannerParams(
-                router=ctx.router, capability_config=ctx.cfg, apply=ctx.apply,
-                execute_runners=False, max_runners=ctx.max_runners, limit=ctx.limit,
-                reviewer=ctx.reviewer, note=ctx.note, runner_instruction=ctx.runner_instruction,
-            )
-            planner_record = self.run_parent_planner(planner_params)
-            records.append(
-                self.subagents.make_dispatch_record(
-                    params=DispatchRecordParams(
-                        step="parent_planner", action=planner_record.decision.lower(),
-                        dry_run=not ctx.apply, applied=False, ok=planner_record.ok,
-                        message=planner_record.message, evidence_paths=planner_record.evidence_paths,
-                    ),
-                )
-            )
+            records.append(parent_planner_dispatch_record(self, ctx))
 
         if ctx.normalized_workflow_mode in {"plan", "auto"}:
             workflow_records = build_workflow_records(
@@ -222,15 +202,7 @@ class SimpleAgentDispatchMixin(
         if params.planner:
             ctx.runner_instruction, ctx.max_runners = _planner_dispatch_overrides(params, records)
 
-        records = self._execute_runner_jobs(
-            RunnerJobExecutionParams(
-                ctx=ctx,
-                execute_runners=params.execute_runners,
-                max_cards=params.max_cards,
-                probe=params.probe,
-                existing_records=records,
-            )
-        )
+        records = run_dispatch_runner_stage(request=DispatchRunnerStageRequest(self, ctx, params, records))
         ctx.records = records
         records = self._finalize_dispatch(_dispatch_finalize_params(params, records))
         return self._build_and_write_report(records, params.apply)

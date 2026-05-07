@@ -10,6 +10,62 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _daemon_args(tmp_path: Path) -> MagicMock:
+    args = MagicMock()
+    args.capability_config = str(tmp_path / "capability.yaml")
+    args.skill_dir = None
+    args.apply = True
+    args.execute_runners = True
+    args.planner = True
+    args.interval = 0
+    args.max_runners = 2
+    args.limit = 7
+    args.max_cycles = 1
+    args.reviewer = "reviewer"
+    args.note = "daemon note"
+    args.instruction = "runner note"
+    args.max_cards = 3
+    args.no_probe = True
+    args.take_over_by = "owner"
+    args.locked_file = ["a.py"]
+    args.force_lock = True
+    return args
+
+
+def _daemon_agent(tmp_path: Path) -> MagicMock:
+    mock_report = MagicMock()
+    mock_report.summary = {"total": 0}
+    mock_agent = MagicMock()
+    mock_agent.config.daemon_apply = False
+    mock_agent.config.daemon_execute_runners = False
+    mock_agent.config.daemon_planner = False
+    mock_agent.config.daemon_interval = 30
+    mock_agent.config.daemon_max_runners = 1
+    mock_agent.config.daemon_limit = 20
+    mock_agent.config.daemon_max_cycles = 0
+    mock_agent.config.daemon_reviewer = "parent-dispatch"
+    mock_agent.config.daemon_runner_instruction = ""
+    mock_agent.config.daemon_max_cards = 0
+    mock_agent.config.daemon_probe = True
+    mock_agent.watch_subagents.return_value = mock_report
+    mock_agent.subagents.workspace = tmp_path / "subs"
+    return mock_agent
+
+
+def _daemon_numbers(overrides: dict | None = None):
+    from agent_py_agent.cli.daemon import DaemonNumberOptions
+
+    data = {
+        "interval": 60,
+        "max_runners": 2,
+        "limit": 10,
+        "max_cycles": 5,
+        "max_cards": 3,
+    }
+    data.update(overrides or {})
+    return DaemonNumberOptions(**data)
+
+
 class TestCmdDaemon:
     """测试 cmd_daemon 命令。"""
 
@@ -59,41 +115,8 @@ class TestCmdDaemon:
         from agent_py_agent.agent.agent_core.dispatch_params import WatchParams
         from agent_py_agent.cli.daemon import cmd_daemon
 
-        args = MagicMock()
-        args.capability_config = str(tmp_path / "capability.yaml")
-        args.skill_dir = None
-        args.apply = True
-        args.execute_runners = True
-        args.planner = True
-        args.interval = 0
-        args.max_runners = 2
-        args.limit = 7
-        args.max_cycles = 1
-        args.reviewer = "reviewer"
-        args.note = "daemon note"
-        args.instruction = "runner note"
-        args.max_cards = 3
-        args.no_probe = True
-        args.take_over_by = "owner"
-        args.locked_file = ["a.py"]
-        args.force_lock = True
-
-        mock_report = MagicMock()
-        mock_report.summary = {"total": 0}
-        mock_agent = MagicMock()
-        mock_agent.config.daemon_apply = False
-        mock_agent.config.daemon_execute_runners = False
-        mock_agent.config.daemon_planner = False
-        mock_agent.config.daemon_interval = 30
-        mock_agent.config.daemon_max_runners = 1
-        mock_agent.config.daemon_limit = 20
-        mock_agent.config.daemon_max_cycles = 0
-        mock_agent.config.daemon_reviewer = "parent-dispatch"
-        mock_agent.config.daemon_runner_instruction = ""
-        mock_agent.config.daemon_max_cards = 0
-        mock_agent.config.daemon_probe = True
-        mock_agent.watch_subagents.return_value = mock_report
-        mock_agent.subagents.workspace = tmp_path / "subs"
+        args = _daemon_args(tmp_path)
+        mock_agent = _daemon_agent(tmp_path)
 
         with (
             patch("agent_py_agent.cli.daemon.make_agent", return_value=mock_agent),
@@ -148,78 +171,42 @@ class TestValidateDaemonNumbers:
         """测试有效参数。"""
         from agent_py_agent.cli.daemon import _validate_daemon_numbers
 
-        result = _validate_daemon_numbers(
-            interval=60,
-            max_runners=2,
-            limit=10,
-            max_cycles=5,
-            max_cards=3
-        )
+        result = _validate_daemon_numbers(_daemon_numbers())
         assert result == ""
 
     def test_validate_daemon_numbers_negative_interval(self):
         """测试负数 interval。"""
         from agent_py_agent.cli.daemon import _validate_daemon_numbers
 
-        result = _validate_daemon_numbers(
-            interval=-1,
-            max_runners=2,
-            limit=10,
-            max_cycles=5,
-            max_cards=3
-        )
+        result = _validate_daemon_numbers(_daemon_numbers({"interval": -1}))
         assert "不能小于 0" in result
 
     def test_validate_daemon_numbers_negative_max_runners(self):
         """测试负数 max_runners。"""
         from agent_py_agent.cli.daemon import _validate_daemon_numbers
 
-        result = _validate_daemon_numbers(
-            interval=60,
-            max_runners=-1,
-            limit=10,
-            max_cycles=5,
-            max_cards=3
-        )
+        result = _validate_daemon_numbers(_daemon_numbers({"max_runners": -1}))
         assert "不能小于 0" in result
 
     def test_validate_daemon_numbers_negative_limit(self):
         """测试负数 limit。"""
         from agent_py_agent.cli.daemon import _validate_daemon_numbers
 
-        result = _validate_daemon_numbers(
-            interval=60,
-            max_runners=2,
-            limit=-1,
-            max_cycles=5,
-            max_cards=3
-        )
+        result = _validate_daemon_numbers(_daemon_numbers({"limit": -1}))
         assert "不能小于 0" in result
 
     def test_validate_daemon_numbers_negative_max_cycles(self):
         """测试负数 max_cycles。"""
         from agent_py_agent.cli.daemon import _validate_daemon_numbers
 
-        result = _validate_daemon_numbers(
-            interval=60,
-            max_runners=2,
-            limit=10,
-            max_cycles=-1,
-            max_cards=3
-        )
+        result = _validate_daemon_numbers(_daemon_numbers({"max_cycles": -1}))
         assert "不能小于 0" in result
 
     def test_validate_daemon_numbers_negative_max_cards(self):
         """测试负数 max_cards。"""
         from agent_py_agent.cli.daemon import _validate_daemon_numbers
 
-        result = _validate_daemon_numbers(
-            interval=60,
-            max_runners=2,
-            limit=10,
-            max_cycles=5,
-            max_cards=-1
-        )
+        result = _validate_daemon_numbers(_daemon_numbers({"max_cards": -1}))
         assert "不能小于 0" in result
 
 

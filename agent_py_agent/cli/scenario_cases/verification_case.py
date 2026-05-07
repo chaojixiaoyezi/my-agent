@@ -79,29 +79,24 @@ def _verification_setup(args):
     return paths, agent, task
 
 
-def run_scenario_verification_case(args) -> int:
-
-    paths, agent, task = _verification_setup(args)
-
-    print_scenario_step(2, "执行父代理验收")
-    report = agent.subagents.write_acceptance_review_report(
-        run_ids=[task.id],
-        apply=True,
-        reviewer="scenario-verification",
-        note="forged artifact must be rejected",
-    )
-    loaded = agent.subagents.load(task.id)
+def _print_acceptance_records(report) -> None:
     for record in report.records:
         print(
             f"- decision={record.decision} ok={record.ok} applied={record.applied} "
             f"{record.before_status}/{record.before_verification_status}->"
             f"{record.after_status}/{record.after_verification_status}"
         )
-        for finding in record.findings:
-            if not finding.ok:
-                print(f"  [finding:{finding.severity}] {finding.name}: {finding.message}")
+        _print_failed_findings(record.findings)
 
-    final_ok = (
+
+def _print_failed_findings(findings) -> None:
+    for finding in findings:
+        if not finding.ok:
+            print(f"  [finding:{finding.severity}] {finding.name}: {finding.message}")
+
+
+def _verification_final_ok(report, loaded) -> bool:
+    return (
         report.records
         and report.records[0].decision == "REJECT"
         and not report.records[0].ok
@@ -112,6 +107,22 @@ def run_scenario_verification_case(args) -> int:
             for item in report.records[0].findings
         )
     )
+
+
+def run_scenario_verification_case(args) -> int:
+    paths, agent, task = _verification_setup(args)
+
+    print_scenario_step(2, "执行父代理验收")
+    report = agent.subagents.write_acceptance_review_report(
+        run_ids=[task.id],
+        apply=True,
+        reviewer="scenario-verification",
+        note="forged artifact must be rejected",
+    )
+    loaded = agent.subagents.load(task.id)
+    _print_acceptance_records(report)
+
+    final_ok = _verification_final_ok(report, loaded)
     write_scenario_summary(
         paths,
         ok=final_ok,

@@ -12,6 +12,59 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _make_board_mixin(tmp_path: Path):
+    from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+    from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
+
+    class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+        def __init__(self, workspace: Path):
+            SubAgentBaseMixin.__init__(self, workspace=workspace)
+
+        def validate_work_order(self, run_id):
+            from agent_py_agent.agent.subagents.models import WorkOrderValidation
+            return WorkOrderValidation(run_id=run_id, ok=True, missing=[], warnings=[])
+
+    return TestMixin(workspace=tmp_path)
+
+
+def _make_open_capability_request(run_id: str):
+    from agent_py_agent.agent.subagents.models import CapabilityRequest
+
+    return CapabilityRequest(
+        id="req_1",
+        from_run_id=run_id,
+        needed_capability="test_cap",
+        problem="问题",
+        expected_output="输出",
+        status="OPEN",
+        created_at=1234567890.0,
+    )
+
+
+def _make_board_task(mixin, run_id: str, *, capability_requests=None, channel_status="OK"):
+    from agent_py_agent.agent.subagents.models import SubAgentTask
+
+    return SubAgentTask(
+        id=run_id,
+        goal="测试",
+        thought="思考",
+        plan=["步骤1"],
+        agent_name="test",
+        status="RUNNING",
+        verification_status="PENDING",
+        channel_status=channel_status,
+        created_at=1234567890.0,
+        updated_at=1234567890.0,
+        capability_requests=capability_requests or [],
+        capability_gaps=[],
+        evidence=[],
+        child_ids=[],
+        locked_files=[],
+        takeover_by="",
+        **mixin._build_work_order_paths(run_id),
+    )
+
+
 class TestBuildBoard:
     """测试 build_board() 方法。"""
 
@@ -176,49 +229,9 @@ class TestRiskFlags:
         assert "blocked" in flags
 
     def test_open_capability_request_flag(self, tmp_path: Path):
-        from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
-        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
-        from agent_py_agent.agent.subagents.models import CapabilityRequest, SubAgentTask
-
-        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
-            def __init__(self, workspace: Path):
-                SubAgentBaseMixin.__init__(self, workspace=workspace)
-
-            def validate_work_order(self, run_id):
-                from agent_py_agent.agent.subagents.models import WorkOrderValidation
-                return WorkOrderValidation(run_id=run_id, ok=True, missing=[], warnings=[])
-
-        mixin = TestMixin(workspace=tmp_path)
-
-        request = CapabilityRequest(
-            id="req_1",
-            from_run_id="run_req",
-            needed_capability="test_cap",
-            problem="问题",
-            expected_output="输出",
-            status="OPEN",
-            created_at=1234567890.0,
-        )
-
-        task = SubAgentTask(
-            id="run_req",
-            goal="测试",
-            thought="思考",
-            plan=["步骤1"],
-            agent_name="test",
-            status="RUNNING",
-            verification_status="PENDING",
-            channel_status="OK",
-            created_at=1234567890.0,
-            updated_at=1234567890.0,
-            capability_requests=[request],
-            capability_gaps=[],
-            evidence=[],
-            child_ids=[],
-            locked_files=[],
-            takeover_by="",
-            **mixin._build_work_order_paths("run_req"),
-        )
+        mixin = _make_board_mixin(tmp_path)
+        request = _make_open_capability_request("run_req")
+        task = _make_board_task(mixin, "run_req", capability_requests=[request])
 
         flags = mixin._risk_flags(task, open_request_count=1, open_gap_count=0)
 

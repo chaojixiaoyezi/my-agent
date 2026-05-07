@@ -120,24 +120,37 @@ def push_relevant_memories(
     try:
         query = _build_memory_query(trigger_type, context)
         records = agent.memory.search(query, top_k=limit * 2)
-        for record in records:
-            if not record.content or len(record.content) < 10:
-                continue
-            entry = MemoryEntry(
-                type=MemoryType.from_string(record.kind),
-                trigger_type=trigger_type,
-                tags=record.tags or [],
-                content=record.content,
-                created_at=record.created_at,
-            )
-            text = _extract_memory_text(entry, trigger_type)
-            if text:
-                memories_text.append(text)
-            if len(memories_text) >= limit:
-                break
+        memories_text = _collect_memory_texts(records, trigger_type, limit)
     except Exception:
         pass
     return memories_text[:limit]
+
+
+def _collect_memory_texts(records, trigger_type: str, limit: int) -> list[str]:
+    # LLM: keep the public push path shallow while preserving record filtering order.
+    values: list[str] = []
+    for record in records:
+        text = _memory_text_from_record(record, trigger_type)
+        if not text:
+            continue
+        values.append(text)
+        if len(values) >= limit:
+            break
+    return values
+
+
+def _memory_text_from_record(record, trigger_type: str) -> str:
+    if not record.content or len(record.content) < 10:
+        return ""
+    entry = MemoryEntry(
+        type=MemoryType.from_string(record.kind),
+        trigger_type=trigger_type,
+        tags=record.tags or [],
+        content=record.content,
+        created_at=record.created_at,
+    )
+    # LLM: memory push only injects short lessons suited to the trigger.
+    return _extract_memory_text(entry, trigger_type)
 
 
 def _build_memory_query(trigger_type: str, context: dict) -> str:

@@ -131,6 +131,7 @@ agent_py_agent/agent/
 - `manager_base.py`, `manager_dispatch.py`, `manager_actions.py`, `manager_indexing.py`, and patch facades now list old compatibility fields explicitly and immediately construct `CreateRunParams`, dispatch params, `ActionApplyOptions`, `LocalRecordParams`, or patch request bundles.
 - `policy_checks.py` / `policies.py` use `RunnerNextActionParams`; `state_machine.py` uses `StateTransitionParams`; runner output payload construction passes those bundles instead of loose fields.
 - `agent_core` dispatch/watch/run-subagent/recovery paths now normalize into `DispatchParams`, `WatchParams`, `DispatchLoopParams`, `SubagentRunParams`, and `RecoverySnapshotParams` before entering service logic.
+- The remaining subagent params cleanup now routes action post-recording, report/dataclass indexing, learning candidate updates, due-check issue creation, patch review fallback, and patch spec validation through `RecordAfterTaskActionParams`, `IndexReportParams`, `DataclassRecordIndexParams`, `UpdateLearningCandidateParams`, `DueIssueSpec`, `PatchReviewTaskRequest`, and `PatchSpecFields`.
 
 ## 2026-05-07 hard/soft structure update
 - Patch manager parsing details stay outside the main mixin path, preserving `SubAgentPatchMixin` as a facade over patch review/apply services.
@@ -138,3 +139,4 @@ agent_py_agent/agent/
 - `subagents/rendering.py` keeps acceptance record section and failed-summary formatting behind small shared helpers so verifier checks and findings use one rendering path.
 - Patch/action/acceptance service internals now keep record construction and evidence item builders in focused helper modules; public manager methods continue to delegate through the existing service facade.
 - The subagent slice contributes no strict code-size hard or soft findings after this cleanup; near-soft warnings remain visible for future pre-feature refactors.
+- `subagent_workflows` keeps routing, dispatch-plan compilation, and parent acceptance planning as separate helper surfaces; compatibility callers can still ask for one planning result, but new fields enter through route/compile/acceptance bundles.

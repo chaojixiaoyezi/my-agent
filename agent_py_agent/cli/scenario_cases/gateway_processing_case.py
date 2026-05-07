@@ -36,6 +36,32 @@ class ProcessingVerifyResults:
     response_json_valid: bool
 
 
+@dataclass
+class ProcessingStopVerifyRequest:
+    paths: object
+    request_id: str
+    requeued: int
+    processed: int
+    after_requeue_processing: object
+    after_requeue_pending: object
+    done_payload: dict
+    verify: ProcessingVerifyResults
+
+
+@dataclass
+class ProcessingRequeueResult:
+    requeued: int
+    pending_path: object
+    processing_path: object
+
+
+@dataclass
+class ProcessingCompletionResult:
+    processed: int
+    done_payload: dict
+    verify: ProcessingVerifyResults
+
+
 def _processing_stop_setup(args):
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -94,49 +120,41 @@ def _processing_stop_simulate_lease(gpaths, request_id, pending_path, payload):
     return processing_path, response_path
 
 
-def _processing_stop_verify_results(paths, request_id, requeued, processed, verify: ProcessingVerifyResults):
+def _processing_stop_verify_results(request: ProcessingStopVerifyRequest):
+    verify = request.verify
     final_ok = (
-        requeued == 1
-        and not after_requeue_processing.exists()
-        and after_requeue_pending.exists()
-        and processed == 1
+        request.requeued == 1
+        and not request.after_requeue_processing.exists()
+        and request.after_requeue_pending.exists()
+        and request.processed == 1
         and verify.done_path.exists()
         and verify.final_response.get("ok") is True
         and verify.final_response.get("status") == "done"
-        and done_payload.get("lease_owner") == "scenario-recovery-worker-after-stop"
-        and done_payload.get("attempts") == 2
+        and request.done_payload.get("lease_owner") == "scenario-recovery-worker-after-stop"
+        and request.done_payload.get("attempts") == 2
         and verify.response_json_valid
     )
     write_scenario_summary(
-        paths,
+        request.paths,
         ok=final_ok,
         reason="gateway processing stop passed" if final_ok else "gateway processing stop failed",
         extra={
             "case": "gateway-processing-stop",
-            "request_id": request_id,
-            "requeued": requeued,
-            "processed": processed,
+            "request_id": request.request_id,
+            "requeued": request.requeued,
+            "processed": request.processed,
             "done_path": str(verify.done_path),
             "response_path": str(verify.response_path),
             "response": verify.final_response,
         },
     )
-    print(f"\nsummary_json={paths.summary_json}")
-    print(f"summary_md={paths.summary_md}")
+    print(f"\nsummary_json={request.paths.summary_json}")
+    print(f"summary_md={request.paths.summary_md}")
     print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
     return 0 if final_ok else 2
 
 
-def run_scenario_gateway_processing_stop_case(args) -> int:
-
-    paths, agent, gpaths, request_id, pending_path, payload = _processing_stop_setup(args)
-
-    print_scenario_step(1, "Submit request to gateway inbox")
-    print(f"pending_before={pending_path.exists()} request_id={request_id}")
-
-    print_scenario_step(2, "Simulate: worker claims request and starts agent.run (lease active)")
-    processing_path, response_path = _processing_stop_simulate_lease(gpaths, request_id, pending_path, payload)
-
+def _processing_stop_requeue(gpaths, processing_path) -> ProcessingRequeueResult:
     print_scenario_step(3, "Simulate gateway stop/restart mid-processing (requeue stale leases)")
     requeued = requeue_gateway_processing_requests(gpaths)
     after_requeue_pending = gpaths.inbox / processing_path.name
@@ -144,7 +162,10 @@ def run_scenario_gateway_processing_stop_case(args) -> int:
     print(f"requeued={requeued}")
     print(f"after_requeue_pending={after_requeue_pending.exists()}")
     print(f"after_requeue_processing={after_requeue_processing.exists()}")
+    return ProcessingRequeueResult(requeued, after_requeue_pending, after_requeue_processing)
 
+
+def _processing_stop_complete(agent, gpaths, processing_path, response_path) -> ProcessingCompletionResult:
     print_scenario_step(4, "Let a new worker pick up the requeued request and complete it")
     processed = _process_gateway_requests(agent, gpaths, worker_id="scenario-recovery-worker-after-stop")
     done_path = gpaths.done / processing_path.name
@@ -153,21 +174,44 @@ def run_scenario_gateway_processing_stop_case(args) -> int:
     print(f"processed={processed}")
     print(f"done_path={done_path} exists={done_path.exists()}")
     print(f"response_path={response_path} exists={response_path.exists()} ok={final_response.get('ok')}")
-
-    print_scenario_step(5, "Verify no half-written JSON, no lost requests")
-    response_json_valid = False
-    try:
-        json.loads(final_response.get("response", "{}") or "{}")
-        response_json_valid = True
-    except json.JSONDecodeError:
-        response_json_valid = False
-
-    return _processing_stop_verify_results(
-        paths, request_id, requeued, processed,
-        ProcessingVerifyResults(
+    return ProcessingCompletionResult(
+        processed=processed,
+        done_payload=done_payload,
+        verify=ProcessingVerifyResults(
             done_path=done_path,
             response_path=response_path,
             final_response=final_response,
-            response_json_valid=response_json_valid,
+            response_json_valid=_response_json_valid(final_response),
         ),
+    )
+
+
+def _response_json_valid(final_response: dict) -> bool:
+    print_scenario_step(5, "Verify no half-written JSON, no lost requests")
+    try:
+        json.loads(final_response.get("response", "{}") or "{}")
+        return True
+    except json.JSONDecodeError:
+        return False
+
+
+def run_scenario_gateway_processing_stop_case(args) -> int:
+    paths, agent, gpaths, request_id, pending_path, payload = _processing_stop_setup(args)
+    print_scenario_step(1, "Submit request to gateway inbox")
+    print(f"pending_before={pending_path.exists()} request_id={request_id}")
+    print_scenario_step(2, "Simulate: worker claims request and starts agent.run (lease active)")
+    processing_path, response_path = _processing_stop_simulate_lease(gpaths, request_id, pending_path, payload)
+    requeue = _processing_stop_requeue(gpaths, processing_path)
+    completion = _processing_stop_complete(agent, gpaths, processing_path, response_path)
+    return _processing_stop_verify_results(
+        ProcessingStopVerifyRequest(
+            paths=paths,
+            request_id=request_id,
+            requeued=requeue.requeued,
+            processed=completion.processed,
+            after_requeue_processing=requeue.processing_path,
+            after_requeue_pending=requeue.pending_path,
+            done_payload=completion.done_payload,
+            verify=completion.verify,
+        )
     )

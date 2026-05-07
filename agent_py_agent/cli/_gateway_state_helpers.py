@@ -180,7 +180,7 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
     stop_event = threading.Event()
     heartbeat_thread = threading.Thread(
         target=_gateway_heartbeat_loop,
-        args=(paths, agent, options, stop_event),
+        args=(context, stop_event),
         daemon=True,
     )
     heartbeat_thread.start()

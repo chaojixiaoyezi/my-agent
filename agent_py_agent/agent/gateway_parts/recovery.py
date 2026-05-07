@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
+# LLM: recovery options are bundled so stale-request handling stays independent of CLI flags.
 @dataclass(frozen=True)
 class _RecoveryContext:
     now: float
@@ -61,6 +62,7 @@ def gateway_stale_processing(paths: GatewayPaths, timeout_seconds: int) -> list[
 def recover_gateway_processing_requests(
     paths: GatewayPaths,
     *,
+    params: _RecoveryContext | None = None,
     max_attempts: int = 2,
     timeout_seconds: int = 900,
     startup: bool = False,
@@ -73,7 +75,7 @@ def recover_gateway_processing_requests(
     now = time.time()
     max_attempts = max(1, int(max_attempts or 1))
     timeout_seconds = max(1, int(timeout_seconds or 1))
-    context = _RecoveryContext(now, max_attempts, timeout_seconds, startup, agent, lease_stale_seconds)
+    context = params or _RecoveryContext(now, max_attempts, timeout_seconds, startup, agent, lease_stale_seconds)
     for request_path in sorted(paths.processing.glob("*.json")):
         summary["checked"] += 1
         action = _recover_one_processing_request(paths, request_path, context)

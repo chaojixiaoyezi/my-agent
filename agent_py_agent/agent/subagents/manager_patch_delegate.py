@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .patch import PatchReviewTaskRequest
+from .patch import PatchReviewOptions, PatchReviewTaskRequest
 from .patch.patch_apply_task import ApplyPatchTaskParams
 from .services.patch_apply_helper import PatchApplyTaskHelper
 from .services.patch_review_helper import PatchReviewTaskHelper
@@ -34,20 +34,20 @@ def review_patch_task_via_manager(
         if isinstance(task, PatchReviewTaskRequest):
             return service._review_patch_task(task)
         return service._review_patch_task(
-            task,
-            output=params.output,
-            patches=params.patches,
-            apply=params.apply,
-            reviewer=params.reviewer,
-            note=params.note,
+            PatchReviewTaskRequest(
+                task=task,
+                output=params.output or {},
+                patches=params.patches or [],
+                options=PatchReviewOptions(apply=params.apply, reviewer=params.reviewer, note=params.note),
+            )
         )
     return PatchReviewTaskHelper.review_patch_task(
-        task,
-        output=params.output,
-        patches=params.patches,
-        apply=params.apply,
-        reviewer=params.reviewer,
-        note=params.note,
+        task if isinstance(task, PatchReviewTaskRequest) else PatchReviewTaskRequest(
+            task=task,
+            output=params.output or {},
+            patches=params.patches or [],
+            options=PatchReviewOptions(apply=params.apply, reviewer=params.reviewer, note=params.note),
+        ),
     )
 
 

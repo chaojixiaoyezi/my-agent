@@ -11,6 +11,7 @@ from .fallback_handlers import (
 from .fallback_refs import FallbackInputRefs
 from .fallback_state import (
     MAX_HISTORY_TURNS,
+    ConversationTurn,
     FallbackWorkerConfig,
     RunFallbackConfig,
     append_conversation_turn,
@@ -47,8 +48,7 @@ def _fallback_finish_job(
         append_conversation_turn(
             cfg.conversation_history,
             cfg.history_lock,
-            job.user,
-            agent_response_text,
+            ConversationTurn(job.user, agent_response_text),
             max_turns=MAX_HISTORY_TURNS,
         )
     with cfg.state_lock:

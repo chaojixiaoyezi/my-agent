@@ -134,6 +134,7 @@ class SubAgentRunnerContextMixin:
         self,
         task: SubAgentTask,
         *,
+        params: object | None = None,
         allowed_skills: list[str],
         allowed_tools: list[str],
         grants: list[dict[str, object]],

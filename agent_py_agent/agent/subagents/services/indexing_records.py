@@ -6,22 +6,18 @@ import json
 from dataclasses import asdict
 from typing import Any
 
-from .indexing_params import LocalRecordParams
+from .indexing_params import DataclassRecordIndexParams, LocalRecordParams
 
 
 def index_dataclass_record_via(
     service: Any,
-    source_type: str,
-    source_id: str,
-    title: str,
-    record: object,
-    event_type: str,
+    params: DataclassRecordIndexParams,
 ) -> None:
     """Index one dataclass-like record through the owning indexing service."""
     try:
-        payload = asdict(record)
+        payload = asdict(params.record)
     except TypeError:
-        payload = {"str": str(record), "repr": repr(record)}
+        payload = {"str": str(params.record), "repr": repr(params.record)}
     metadata: dict[str, object] = {
         key: value
         for key, value in payload.items()
@@ -32,12 +28,12 @@ def index_dataclass_record_via(
     }
     service.log_local_record(
         params=LocalRecordParams(
-            source_type=source_type,
-            source_id=source_id,
-            title=title,
+            source_type=params.source_type,
+            source_id=params.source_id,
+            title=params.title,
             content=json.dumps(payload, ensure_ascii=False, indent=2),
             metadata=metadata,
-            event_type=event_type,
+            event_type=params.event_type,
         ),
     )
 
@@ -45,46 +41,56 @@ def index_dataclass_record_via(
 def index_action_apply_via(service: Any, record: object) -> None:
     index_dataclass_record_via(
         service,
-        "subagent_action_apply", record.id,
-        f"Action apply {record.action} {record.run_id or 'global'}",
-        record, "subagent_action_apply_logged",
+        DataclassRecordIndexParams(
+            "subagent_action_apply", record.id,
+            f"Action apply {record.action} {record.run_id or 'global'}",
+            record, "subagent_action_apply_logged",
+        ),
     )
 
 
 def index_capability_route_via(service: Any, record: object) -> None:
     index_dataclass_record_via(
         service,
-        "subagent_capability_route", record.id,
-        f"Capability route {record.request_id} {record.status}",
-        record, "subagent_capability_route_logged",
+        DataclassRecordIndexParams(
+            "subagent_capability_route", record.id,
+            f"Capability route {record.request_id} {record.status}",
+            record, "subagent_capability_route_logged",
+        ),
     )
 
 
 def index_acceptance_review_via(service: Any, record: object) -> None:
     index_dataclass_record_via(
         service,
-        "subagent_acceptance_review", record.id,
-        f"Acceptance {record.decision} {record.run_id}",
-        record, "subagent_acceptance_review_logged",
+        DataclassRecordIndexParams(
+            "subagent_acceptance_review", record.id,
+            f"Acceptance {record.decision} {record.run_id}",
+            record, "subagent_acceptance_review_logged",
+        ),
     )
 
 
 def index_patch_review_via(service: Any, record: object) -> None:
     index_dataclass_record_via(
         service,
-        "subagent_patch_review", record.id,
-        f"Patch review {record.decision} {record.run_id}",
-        record, "subagent_patch_review_logged",
+        DataclassRecordIndexParams(
+            "subagent_patch_review", record.id,
+            f"Patch review {record.decision} {record.run_id}",
+            record, "subagent_patch_review_logged",
+        ),
     )
 
 
 def index_channel_probe_via(service: Any, result: object) -> None:
     index_dataclass_record_via(
         service,
-        "subagent_channel_probe",
-        f"{result.run_id}:{result.created_at:.6f}",
-        f"Channel probe {result.run_id} {result.channel_status}",
-        result, "subagent_channel_probe_logged",
+        DataclassRecordIndexParams(
+            "subagent_channel_probe",
+            f"{result.run_id}:{result.created_at:.6f}",
+            f"Channel probe {result.run_id} {result.channel_status}",
+            result, "subagent_channel_probe_logged",
+        ),
     )
 
 

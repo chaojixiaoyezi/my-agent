@@ -40,12 +40,9 @@ def _build_patch_findings(
     created_at: float,
 ) -> list[AcceptanceReviewFinding]:
     """Build findings for patches."""
-    findings: list[AcceptanceReviewFinding] = []
-
     patches = _dict_list(output.get("patches", []))
     unresolved_patches, invalid_patches, unreviewed_applied_patches = _classify_patches(patches)
-
-    findings.append(
+    return [
         _make_finding(
             name="no_unresolved_patches",
             ok=not unresolved_patches,
@@ -57,9 +54,7 @@ def _build_patch_findings(
             ),
             evidence_path=task.output_json,
             created_at=created_at,
-        )
-    )
-    findings.append(
+        ),
         _make_finding(
             name="patch_status_valid",
             ok=not invalid_patches,
@@ -71,9 +66,7 @@ def _build_patch_findings(
             ),
             evidence_path=task.output_json,
             created_at=created_at,
-        )
-    )
-    findings.append(
+        ),
         _make_finding(
             name="patches_reviewed",
             ok=not unreviewed_applied_patches,
@@ -85,6 +78,5 @@ def _build_patch_findings(
             ),
             evidence_path=task.output_json,
             created_at=created_at,
-        )
-    )
-    return findings
+        ),
+    ]

@@ -96,6 +96,14 @@ class RunnerFailureParams:
     effective_instruction: str
 
 
+@dataclass(frozen=True)
+class _RunnerWorkerRequest:
+    params: ConcurrentRunnerParams
+    run_id: str
+    before: Any
+    retry_reason: str
+
+
 def run_single_runner(params: SingleRunnerParams) -> SubAgentRunnerResult:
     from .runner_dispatch import RunSubagentWorkerParams, _run_subagent_worker
     from .subagent_params import SubagentRunParams
@@ -135,7 +143,7 @@ def run_concurrent_runners(params: ConcurrentRunnerParams) -> dict[str, tuple[Su
         for run_id, before, retry_reason in params.pending_jobs:
             future = executor.submit(
                 _run_subagent_worker,
-                _runner_worker_params(params, run_id, before, retry_reason),
+                _runner_worker_params(request=_RunnerWorkerRequest(params, run_id, before, retry_reason)),
             )
             future_to_job[future] = (run_id, before, retry_reason)
 
@@ -149,19 +157,28 @@ def run_concurrent_runners(params: ConcurrentRunnerParams) -> dict[str, tuple[Su
     return completed
 
 
-def _runner_worker_params(params: ConcurrentRunnerParams, run_id: str, before, retry_reason: str):
+def _runner_worker_params(
+    context: ConcurrentRunnerParams | None = None,
+    *,
+    request: _RunnerWorkerRequest | None = None,
+    run_id: str = "",
+    before: Any = None,
+    retry_reason: str = "",
+):
     from .runner_dispatch import RunSubagentWorkerParams
 
-    task_timeout = get_task_timeout(before, params.runner_timeout_seconds, params.agent.config)
+    request = request or _RunnerWorkerRequest(context, run_id, before, retry_reason)
+    params = request.params
+    task_timeout = get_task_timeout(request.before, params.runner_timeout_seconds, params.agent.config)
     return RunSubagentWorkerParams(
         config=params.agent.config,
         root=params.agent.root,
-        run_id=run_id,
+        run_id=request.run_id,
         instruction=params.instruction,
         dry_run=not params.execute_runners,
         max_cards=params.max_cards,
         probe=params.probe,
-        retry_reason=retry_reason,
+        retry_reason=request.retry_reason,
         timeout_seconds=task_timeout,
         local_store=params.agent.local_store,
         backend_override=getattr(params.agent, "_subagent_worker_backend_override", None),

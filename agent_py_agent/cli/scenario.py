@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
+from typing import Any
 
 from ..agent.capability_config import load_capability_config
 from .common import make_capability_router
@@ -100,12 +102,25 @@ def _cmd_scenario_happy_path(args, paths):
         write_scenario_summary(paths, ok=False, reason=reason, extra={"created_via": created_via})
         return 2
 
-    final_ok = _cmd_scenario_dispatch(agent, args, paths, created_via, gateway_payload)
+    final_ok = _cmd_scenario_dispatch(
+        ScenarioDispatchRequest(agent, args, paths, created_via, gateway_payload)
+    )
     _cmd_scenario_verify_files(agent, args, paths, final_ok)
     return 0 if final_ok else 2
 
 
-def _cmd_scenario_dispatch(agent, args, paths, created_via, gateway_payload):
+@dataclass(frozen=True)
+class ScenarioDispatchRequest:
+    agent: Any
+    args: Any
+    paths: Any
+    created_via: str
+    gateway_payload: dict[str, object]
+
+
+def _cmd_scenario_dispatch(request: ScenarioDispatchRequest):
+    agent = request.agent
+    args = request.args
     print_scenario_step(3, "父代理调度 runner 和验收")
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)

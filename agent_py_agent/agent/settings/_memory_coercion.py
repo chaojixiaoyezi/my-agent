@@ -31,6 +31,15 @@ class _WarningDraft:
 
 
 @dataclass(frozen=True)
+class _ChoiceCoercion:
+    field_name: str
+    raw_value: Any
+    default: str
+    choices: set[str]
+    warnings: list[MemoryConfigWarning]
+
+
+@dataclass(frozen=True)
 class _IntCoercion:
     field_name: str
     raw_value: Any
@@ -78,7 +87,7 @@ def _coerce_field(
     if spec.kind == "bool":
         return _coerce_bool(spec.field_name, raw_value, default=default, warnings=warnings)
     if spec.kind == "choice":
-        return _coerce_choice(spec.field_name, raw_value, default=default, choices=spec.choices or set(), warnings=warnings)
+        return _coerce_choice(_ChoiceCoercion(spec.field_name, raw_value, default, spec.choices or set(), warnings))
     return _coerce_int(
         _IntCoercion(
             field_name=spec.field_name,
@@ -137,23 +146,19 @@ def _coerce_bool(
     return default
 
 
-def _coerce_choice(
-    field_name: str,
-    raw_value: Any,
-    *,
-    default: str,
-    choices: set[str],
-    warnings: list[MemoryConfigWarning],
-) -> str:
+def _coerce_choice(params: _ChoiceCoercion) -> str:
     """Parse an enum-like string config value against an allowlist."""
-    if raw_value is _MISSING:
-        return default
-    if isinstance(raw_value, str):
-        normalized = raw_value.strip().lower()
-        if normalized in choices:
+    if params.raw_value is _MISSING:
+        return params.default
+    if isinstance(params.raw_value, str):
+        normalized = params.raw_value.strip().lower()
+        if normalized in params.choices:
             return normalized
-    _warn(warnings, _WarningDraft(field_name, raw_value, default, f"expected one of {sorted(choices)}"))
-    return default
+    _warn(
+        params.warnings,
+        _WarningDraft(params.field_name, params.raw_value, params.default, f"expected one of {sorted(params.choices)}"),
+    )
+    return params.default
 
 
 def _coerce_int(

@@ -50,24 +50,29 @@ class RouteCapabilityApplyParams:
     reasons: list[str]
 
 
-def _route_capability_gap(
-    task,
-    request,
-    query,
-    hits,
-    gap,
-):
+@dataclass(frozen=True)
+class RouteCapabilityGapParams:
+    """Params bundle for _route_capability_gap."""
+
+    task: SubAgentTask
+    request: CapabilityRequest
+    query: str
+    hits: list
+    gap: object
+
+
+def _route_capability_gap(params: RouteCapabilityGapParams):
     """Build a GAP record when no hits found and apply=True."""
     now = time.time()
     return CapabilityRouteRecord(
         id=_new_id("route"),
-        run_id=task.id,
-        request_id=request.id,
+        run_id=params.task.id,
+        request_id=params.request.id,
         status="GAP",
         dry_run=False,
-        query=query,
-        candidate_count=len(hits),
-        gap_id=gap.id,
+        query=params.query,
+        candidate_count=len(params.hits),
+        gap_id=params.gap.id,
         message="未找到足够可信的 skill/tool card，已记录 capability gap。",
         created_at=now,
     )

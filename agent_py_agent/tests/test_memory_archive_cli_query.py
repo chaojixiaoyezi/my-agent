@@ -48,7 +48,7 @@ def _run_cli_json(capsys, config_path: Path, *argv: str) -> tuple[int, dict]:
     return code, json.loads(captured.out)
 
 
-def _write_cross_day_handoff_fixture(root: Path, *, run_id: str) -> None:
+def _append_cross_day_raw_event(root: Path, *, run_id: str) -> None:
     append_raw_event(
         root,
         RawMemoryEvent(
@@ -66,39 +66,87 @@ def _write_cross_day_handoff_fixture(root: Path, *, run_id: str) -> None:
             created_at="2026-04-29T23:58:00+00:00",
         ),
     )
-    append_snapshot(
-        root,
-        CompressionSnapshot(
-            snapshot_id="snapshot-cross-day-1",
-            session_id="session-cross-day",
-            compression_id="compression-cross-day",
-            turn_range={
-                "kind": "recovery_snapshot",
-                "source": "subagent_run",
-                "request_id": "request-cross-day",
-                "run_id": run_id,
-                "task_id": run_id,
-            },
-            user_intents=["跨天 handoff：继续 memory worker 验收"],
-            assistant_actions=["已经写好 HANDOFF，等待父会话继续读事实源。"],
-            dispatch_events=[
-                {
-                    "source": "subagent_run",
-                    "request_id": "request-cross-day",
-                    "run_id": run_id,
-                    "task_id": run_id,
-                    "status": "awaiting_acceptance",
-                }
-            ],
-            next_actions=["读取 STATUS.md、WORK_LOG.md、HANDOFF.md 后继续。"],
-            task_refs=[run_id],
-            content_paths=[
-                f"subagents/{run_id}/STATUS.md",
-                f"subagents/{run_id}/HANDOFF.md",
-            ],
-            created_at="2026-04-30T00:05:00+00:00",
-        ),
+
+
+def _cross_day_snapshot(run_id: str) -> CompressionSnapshot:
+    return CompressionSnapshot(
+        snapshot_id="snapshot-cross-day-1",
+        session_id="session-cross-day",
+        compression_id="compression-cross-day",
+        turn_range={
+            "kind": "recovery_snapshot",
+            "source": "subagent_run",
+            "request_id": "request-cross-day",
+            "run_id": run_id,
+            "task_id": run_id,
+        },
+        user_intents=["跨天 handoff：继续 memory worker 验收"],
+        assistant_actions=["已经写好 HANDOFF，等待父会话继续读事实源。"],
+        dispatch_events=[{
+            "source": "subagent_run",
+            "request_id": "request-cross-day",
+            "run_id": run_id,
+            "task_id": run_id,
+            "status": "awaiting_acceptance",
+        }],
+        next_actions=["读取 STATUS.md、WORK_LOG.md、HANDOFF.md 后继续。"],
+        task_refs=[run_id],
+        content_paths=[
+            f"subagents/{run_id}/STATUS.md",
+            f"subagents/{run_id}/HANDOFF.md",
+        ],
+        created_at="2026-04-30T00:05:00+00:00",
     )
+
+
+def _write_cross_day_handoff_fixture(root: Path, *, run_id: str) -> None:
+    _append_cross_day_raw_event(root, run_id=run_id)
+    append_snapshot(root, _cross_day_snapshot(run_id))
+
+
+def _make_echo_agent(root: Path) -> SimpleAgent:
+    return SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            subagent_workspace="subagents",
+            local_store_path="local_store/local.db",
+            local_store_files_dir="local_store/files",
+            local_store_events_path="local_store/events.jsonl",
+        ),
+        root,
+    )
+
+
+def _write_task_handoff_files(task) -> None:
+    Path(task.status_file).write_text(
+        "# STATUS\n\n- status: AWAITING_ACCEPTANCE\n- next: 读取 HANDOFF.md 后继续验收\n",
+        encoding="utf-8",
+    )
+    Path(task.handoff_file).write_text(
+        "# HANDOFF\n\n## Current State\n\n- 跨天 handoff 已准备好。\n\n"
+        "## Next Step\n\n- 父会话读取 STATUS/WORK_LOG/HANDOFF 后继续验收。\n",
+        encoding="utf-8",
+    )
+
+
+def _assert_cross_day_resume_payload(payload: dict, task_id: str) -> None:
+    assert {item["id"] for item in payload["archive_matches"]} == {
+        "raw-cross-day-1",
+        "snapshot-cross-day-1",
+    }
+    assert payload["task_fact_sources"][0]["exists"] is True
+    assert payload["task_fact_sources"][0]["run_id"] == task_id
+    read_paths = payload["resume"]["recommended_read_paths"]
+    assert any(path.endswith("reports/checkpoint.json") for path in read_paths)
+    assert any(path.endswith("reports/progress.md") for path in read_paths)
+    assert any(path.endswith("STATUS.md") for path in read_paths)
+    assert any(path.endswith("HANDOFF.md") for path in read_paths)
+    assert payload["brief"]["latest_user_intent"] == "跨天 handoff：继续 memory worker 验收"
+    assert payload["brief"]["related_ids"]["request_ids"] == ["request-cross-day"]
+    assert payload["brief"]["related_ids"]["run_ids"] == [task_id]
+    assert task_id in payload["brief"]["context_block"]
+    assert "checkpoint.json" in payload["brief"]["context_block"]
+    assert "HANDOFF.md" in payload["brief"]["context_block"]
 
 
 # ── Gateway fixture helpers ───────────────────────────────────────────────────
@@ -263,30 +311,13 @@ def _create_processing_done_fallback_agent(
 def test_memory_resume_cross_day_handoff_uses_task_fact_sources(tmp_path, capsys):
     config_path = _write_config(tmp_path)
     root = _workspace(config_path)
-    agent = SimpleAgent(
-        AgentConfig(
-            model_backend="echo",
-            subagent_workspace="subagents",
-            local_store_path="local_store/local.db",
-            local_store_files_dir="local_store/files",
-            local_store_events_path="local_store/events.jsonl",
-        ),
-        root,
-    )
+    agent = _make_echo_agent(root)
     task = agent.subagents.create_run(
         goal="跨天 handoff memory worker 验收",
         thought="验证跨天恢复能回到任务事实源。",
         plan=["读取昨天归档", "读取今天 handoff", "继续验收"],
     )
-    Path(task.status_file).write_text(
-        "# STATUS\n\n- status: AWAITING_ACCEPTANCE\n- next: 读取 HANDOFF.md 后继续验收\n",
-        encoding="utf-8",
-    )
-    Path(task.handoff_file).write_text(
-        "# HANDOFF\n\n## Current State\n\n- 跨天 handoff 已准备好。\n\n"
-        "## Next Step\n\n- 父会话读取 STATUS/WORK_LOG/HANDOFF 后继续验收。\n",
-        encoding="utf-8",
-    )
+    _write_task_handoff_files(task)
     _write_cross_day_handoff_fixture(root, run_id=task.id)
 
     code, payload = _run_cli_json(
@@ -301,22 +332,7 @@ def test_memory_resume_cross_day_handoff_uses_task_fact_sources(tmp_path, capsys
     )
 
     assert code == 0
-    assert {item["id"] for item in payload["archive_matches"]} == {
-        "raw-cross-day-1",
-        "snapshot-cross-day-1",
-    }
-    assert payload["task_fact_sources"][0]["exists"] is True
-    assert payload["task_fact_sources"][0]["run_id"] == task.id
-    assert any(path.endswith("reports/checkpoint.json") for path in payload["resume"]["recommended_read_paths"])
-    assert any(path.endswith("reports/progress.md") for path in payload["resume"]["recommended_read_paths"])
-    assert any(path.endswith("STATUS.md") for path in payload["resume"]["recommended_read_paths"])
-    assert any(path.endswith("HANDOFF.md") for path in payload["resume"]["recommended_read_paths"])
-    assert payload["brief"]["latest_user_intent"] == "跨天 handoff：继续 memory worker 验收"
-    assert payload["brief"]["related_ids"]["request_ids"] == ["request-cross-day"]
-    assert payload["brief"]["related_ids"]["run_ids"] == [task.id]
-    assert task.id in payload["brief"]["context_block"]
-    assert "checkpoint.json" in payload["brief"]["context_block"]
-    assert "HANDOFF.md" in payload["brief"]["context_block"]
+    _assert_cross_day_resume_payload(payload, task.id)
 
 
 def test_memory_resume_cross_day_gateway_request_uses_response_fact_source(tmp_path, capsys):

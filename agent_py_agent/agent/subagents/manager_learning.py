@@ -8,13 +8,27 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .models import LearningCandidate, SubAgentTask
 from .utils import _new_id
 
 _LEARNING_STATUSES = {"draft", "accepted", "rejected"}
+
+
+@dataclass(frozen=True)
+class UpdateLearningCandidateParams:
+    """Params bundle for merging one lesson into a candidate."""
+
+    # LLM: candidate update touches evidence, confidence, and variants as one mutation.
+    candidate: LearningCandidate
+    text: str
+    normalized: str
+    task: SubAgentTask
+    now: float
+
+
 def _normalize_learning_text(text: str) -> str:
     normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
     normalized = re.sub(r"[^\w\u4e00-\u9fff ]+", " ", normalized)
@@ -142,24 +156,25 @@ class SubAgentLearningMixin:
                 best = candidate
                 best_score = score
         return best, best_score
-    def _update_candidate(self, candidate: LearningCandidate, text: str, normalized: str, task: SubAgentTask, now: float) -> LearningCandidate:
+    def _update_candidate(self, params: UpdateLearningCandidateParams) -> LearningCandidate:
+        candidate = params.candidate
         evidence_item = {
-            "run_id": task.id,
-            "output_json": task.output_json,
-            "task_dir": task.task_dir,
-            "recorded_at": now,
+            "run_id": params.task.id,
+            "output_json": params.task.output_json,
+            "task_dir": params.task.task_dir,
+            "recorded_at": params.now,
         }
         candidate.occurrence_count += 1
         candidate.confidence = _candidate_confidence(candidate.occurrence_count)
-        candidate.updated_at = now
-        candidate.source_runs.append(task.id)
+        candidate.updated_at = params.now
+        candidate.source_runs.append(params.task.id)
         if evidence_item not in candidate.evidence:
             candidate.evidence.append(evidence_item)
-        if text not in candidate.variants:
-            candidate.variants.append(text)
-        if len(text) > len(candidate.lesson):
-            candidate.lesson = text
-            candidate.normalized_key = normalized
+        if params.text not in candidate.variants:
+            candidate.variants.append(params.text)
+        if len(params.text) > len(candidate.lesson):
+            candidate.lesson = params.text
+            candidate.normalized_key = params.normalized
         return self.save_learning_candidate(candidate)
     def _create_candidate(self, text: str, normalized: str, task: SubAgentTask, now: float) -> tuple[LearningCandidate, dict]:
         evidence_item = {
@@ -203,7 +218,7 @@ class SubAgentLearningMixin:
                 continue
             best, best_score = self._find_best_candidate(normalized, active_candidates)
             if best is not None and best_score >= 0.45:
-                saved = self._update_candidate(best, text, normalized, task, now)
+                saved = self._update_candidate(UpdateLearningCandidateParams(best, text, normalized, task, now))
                 created_or_updated.append(saved)
                 continue
             saved, _ = self._create_candidate(text, normalized, task, now)

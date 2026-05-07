@@ -64,58 +64,71 @@ def mock_manager(tmp_path):
 @pytest.fixture
 def sample_task(tmp_path):
     task = MagicMock(spec=SubAgentTask)
-    task.id = "run-123"
-    task.status = "RUNNING"
-    task.verification_status = "UNVERIFIED"
-    task.failure_type = ""
-    task.result = ""
-    task.ended_at = 0.0
-    task.updated_at = 0.0
-    task.heartbeat_at = 0.0
-    task.runner_attempts = 0
-    task.runner_last_attempt_at = 0.0
-    task.runner_last_error = ""
-    task.runner_active_attempt_id = ""
-    task.runner_abandoned_attempt_ids = []
-    task.used_tools = []
-    task.used_skills = []
-    task.evidence = []
-    task.evidence_packets = []
-    task.findings = []
-    task.evidence_refs = []
-    task.artifact_refs = []
-    task.blockers = []
-    task.progress = 0.0
-    task.current_step = ""
-    task.latest_summary = ""
-    task.budget_used = {}
-    task.checkpoint_ref = ""
-    task.capability_requests = []
-    task.capability_grants = []
-    task.allowed_tools = ["tool_a", "tool_b"]
-    task.allowed_skills = ["skill_x"]
-    task.runner_prompt_file = str(tmp_path / "prompt.txt")
-    task.runner_response_file = str(tmp_path / "response.txt")
-    task.runner_result_file = str(tmp_path / "result.md")
-    task.runner_result_json = str(tmp_path / "result.json")
-    task.output_json = str(tmp_path / "output.json")
-    task.status_report_json = str(tmp_path / "status_report.json")
-    task.debrief_file = str(tmp_path / "debrief.md")
-    task.execution_context_file = str(tmp_path / "context.md")
-    task.execution_context_json = str(tmp_path / "context.json")
-    task.task_dir = str(tmp_path)
-    task.goal = "测试任务"
-    task.thought = ""
-    task.plan = []
-    task.agent_name = "test-agent"
-    task.role = "general"
-    task.owner = "tester"
-    task.supervisor = ""
-    task.final_owner = ""
-    task.parent_id = ""
-    task.root_id = ""
-    task.depth = 0
+    for field_name, value in _sample_task_fields(tmp_path).items():
+        setattr(task, field_name, value)
     return task
+
+
+def _sample_task_fields(tmp_path) -> dict:
+    return {
+        "id": "run-123",
+        "status": "RUNNING",
+        "verification_status": "UNVERIFIED",
+        "failure_type": "",
+        "result": "",
+        "ended_at": 0.0,
+        "updated_at": 0.0,
+        "heartbeat_at": 0.0,
+        "runner_attempts": 0,
+        "runner_last_attempt_at": 0.0,
+        "runner_last_error": "",
+        "runner_active_attempt_id": "",
+        "runner_abandoned_attempt_ids": [],
+        "used_tools": [],
+        "used_skills": [],
+        "evidence": [],
+        "evidence_packets": [],
+        "findings": [],
+        "evidence_refs": [],
+        "artifact_refs": [],
+        "blockers": [],
+        "progress": 0.0,
+        "current_step": "",
+        "latest_summary": "",
+        "budget_used": {},
+        "checkpoint_ref": "",
+        "capability_requests": [],
+        "capability_grants": [],
+        "allowed_tools": ["tool_a", "tool_b"],
+        "allowed_skills": ["skill_x"],
+        **_sample_task_path_fields(tmp_path),
+    }
+
+
+def _sample_task_path_fields(tmp_path) -> dict:
+    return {
+        "runner_prompt_file": str(tmp_path / "prompt.txt"),
+        "runner_response_file": str(tmp_path / "response.txt"),
+        "runner_result_file": str(tmp_path / "result.md"),
+        "runner_result_json": str(tmp_path / "result.json"),
+        "output_json": str(tmp_path / "output.json"),
+        "status_report_json": str(tmp_path / "status_report.json"),
+        "debrief_file": str(tmp_path / "debrief.md"),
+        "execution_context_file": str(tmp_path / "context.md"),
+        "execution_context_json": str(tmp_path / "context.json"),
+        "task_dir": str(tmp_path),
+        "goal": "测试任务",
+        "thought": "",
+        "plan": [],
+        "agent_name": "test-agent",
+        "role": "general",
+        "owner": "tester",
+        "supervisor": "",
+        "final_owner": "",
+        "parent_id": "",
+        "root_id": "",
+        "depth": 0,
+    }
 
 
 # ── record_runner_result 基本测试 ──────────────────────────────────────────

@@ -1,7 +1,6 @@
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -16,47 +15,57 @@ def notify_completed_tasks(agent: SimpleAgent, records: list) -> None:
     notified_run_ids: set[str] = set()
 
     for record in records:
-        if record.step not in {"runner", "acceptance"}:
-            continue
-        if not record.applied:
-            continue
         run_id = record.run_id
-        if run_id in notified_run_ids:
+        if not _should_consider_notification(record, notified_run_ids, final_statuses):
             continue
-
-        after_status = getattr(record, "after_status", "")
-        if after_status not in final_statuses:
-            continue
-
-        try:
-            task = agent.subagents.load(run_id)
-        except FileNotFoundError:
-            continue
-
-        if task.status not in final_statuses:
+        task = _load_final_task(agent, run_id, final_statuses)
+        if task is None:
             continue
 
         notified_run_ids.add(run_id)
+        _deliver_task_notification(agent, task, run_id)
 
-        try:
-            from ..notification import NotificationManager, NotificationRouter
 
-            notif_manager = NotificationManager(agent.config)
-            channel = getattr(task, "last_active_channel", "") or "chat"
-            message = (
-                f"任务 {run_id} 已完成\n"
-                f"状态: {task.status}\n"
-                f"目标: {task.goal[:100]}\n"
-                f"尝试次数: {task.runner_attempts}"
-            )
-            notification = notif_manager.create_notification(
-                task_id=run_id,
-                user_id=getattr(agent.config, "user_id", "admin"),
-                session_id=task.root_id or "",
-                channel=channel,
-                message=message,
-            )
-            router = NotificationRouter(notif_manager, agent.config)
-            router.deliver(notification.notification_id)
-        except Exception:
-            pass
+def _should_consider_notification(record, notified_run_ids: set[str], final_statuses: set[str]) -> bool:
+    # LLM: notification eligibility is separate from delivery side effects.
+    return (
+        record.step in {"runner", "acceptance"}
+        and record.applied
+        and record.run_id not in notified_run_ids
+        and getattr(record, "after_status", "") in final_statuses
+    )
+
+
+def _load_final_task(agent: SimpleAgent, run_id: str, final_statuses: set[str]):
+    try:
+        task = agent.subagents.load(run_id)
+    except FileNotFoundError:
+        return None
+    return task if task.status in final_statuses else None
+
+
+def _deliver_task_notification(agent: SimpleAgent, task, run_id: str) -> None:
+    try:
+        from ..notification import NotificationManager, NotificationRouter
+
+        notif_manager = NotificationManager(agent.config)
+        channel = getattr(task, "last_active_channel", "") or "chat"
+        notification = notif_manager.create_notification(
+            task_id=run_id,
+            user_id=getattr(agent.config, "user_id", "admin"),
+            session_id=task.root_id or "",
+            channel=channel,
+            message=_task_completion_message(task, run_id),
+        )
+        NotificationRouter(notif_manager, agent.config).deliver(notification.notification_id)
+    except Exception:
+        pass
+
+
+def _task_completion_message(task, run_id: str) -> str:
+    return (
+        f"任务 {run_id} 已完成\n"
+        f"状态: {task.status}\n"
+        f"目标: {task.goal[:100]}\n"
+        f"尝试次数: {task.runner_attempts}"
+    )

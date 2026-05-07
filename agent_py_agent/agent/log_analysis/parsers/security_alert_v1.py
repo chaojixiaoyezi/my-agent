@@ -23,13 +23,14 @@ class SecurityAlertV1Parser:
         self,
         record: Mapping[str, Any],
         *,
+        request: ParseContext | None = None,
         context: ParseContext | None = None,
         raw_ref: str = "",
         source_id: str | None = None,
         source_product: str | None = None,
         line_no: int | None = None,
     ) -> ParsedRecord:
-        parse_context = context or ParseContext(str(raw_ref), source_id, source_product, line_no)
+        parse_context = request or context or ParseContext(str(raw_ref), source_id, source_product, line_no)
         if not isinstance(record, Mapping):
             raise ParserError("SecurityAlertV1 record must be an object")
         if not any(value not in (None, "") for value in record.values()):
@@ -55,13 +56,14 @@ class SecurityAlertV1Parser:
         self,
         line: str,
         *,
+        request: ParseContext | None = None,
         context: ParseContext | None = None,
         raw_ref: str = "",
         source_id: str | None = None,
         source_product: str | None = None,
         line_no: int | None = None,
     ) -> ParsedRecord:
-        parse_context = context or ParseContext(str(raw_ref), source_id, source_product, line_no)
+        parse_context = request or context or ParseContext(str(raw_ref), source_id, source_product, line_no)
         try:
             record = json.loads(line)
         except json.JSONDecodeError as exc:
@@ -70,23 +72,24 @@ class SecurityAlertV1Parser:
             raise ParserError("JSONL SecurityAlertV1 line must contain a JSON object")
         return self.parse_record(
             record,
-            context=parse_context,
+            request=parse_context,
         )
 
     def parse_csv_row(
         self,
         row: Mapping[str, Any],
         *,
+        request: ParseContext | None = None,
         context: ParseContext | None = None,
         raw_ref: str = "",
         source_id: str | None = None,
         source_product: str | None = None,
         line_no: int | None = None,
     ) -> ParsedRecord:
-        parse_context = context or ParseContext(str(raw_ref), source_id, source_product, line_no)
+        parse_context = request or context or ParseContext(str(raw_ref), source_id, source_product, line_no)
         if None in row:
             raise ParserError("CSV row has more columns than the header")
         return self.parse_record(
             row,
-            context=parse_context,
+            request=parse_context,
         )

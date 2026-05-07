@@ -92,13 +92,8 @@ class AdapterFieldsService:
             if warn:
                 warnings.append(warn)
 
-        # Feishu string fields pass through as-is
         for key in ("feishu_app_id", "feishu_app_secret", "feishu_verification_token", "feishu_encrypt_key"):
-            val = out.get(key, defaults.feishu_app_id if key == "feishu_app_id" else "")
-            if isinstance(val, str):
-                out[key] = val
-            else:
-                out[key] = ""
+            out[key] = _string_config_value(out.get(key, defaults.feishu_app_id if key == "feishu_app_id" else ""))
 
         # feishu_callback_port
         v, w = CoercionService.coerce_int(
@@ -114,13 +109,14 @@ class AdapterFieldsService:
             if env_val:
                 out[key] = env_val
             else:
-                val = out.get(key, defaults.qq_app_id if key == "qq_app_id" else "")
-                if isinstance(val, str):
-                    out[key] = val
-                else:
-                    out[key] = ""
+                out[key] = _string_config_value(out.get(key, defaults.qq_app_id if key == "qq_app_id" else ""))
 
         return out, warnings
+
+
+def _string_config_value(value: object) -> str:
+    # LLM: adapter string fields accept strings only; env override remains handled by caller.
+    return value if isinstance(value, str) else ""
 
 
 class UserFieldsService:

@@ -8,10 +8,10 @@ SubAgentManager 通过 facade 方法委托到这里。
 """
 
 import time
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .action_options import ActionApplyOptions
+from .action_params import RecordAfterTaskActionParams
 from .action_records import (
     ACTION_DISPATCH,
     ActionRecordContext,
@@ -26,21 +26,8 @@ from .action_records import (
 from .rescue_policy import action_rescue_record_fields
 
 if TYPE_CHECKING:
-    from ..models import ActionApplyRecord, ActionPlanItem, SubAgentTask
+    from ..models import ActionApplyRecord, ActionPlanItem
     from ..reports import ActionApplyRecord
-
-
-@dataclass(frozen=True)
-class RecordAfterTaskActionParams:
-    """Params bundle for creating a post-mutation action apply record."""
-
-    # LLM: action record creation and apply contexts stay bundled after the soft cleanup.
-    action: ActionPlanItem
-    task: SubAgentTask
-    before_status: str
-    before_channel_status: str
-    message: str
-    evidence_paths: list[str] | None = None
 
 
 class SubAgentActionService:
@@ -147,28 +134,10 @@ class SubAgentActionService:
 
     def _record_after_task_action(
         self,
-        action: ActionPlanItem | RecordAfterTaskActionParams,
-        task: SubAgentTask | None = None,
-        before_status: str = "",
-        before_channel_status: str = "",
-        message: str = "",
-        *,
-        evidence_paths: list[str] | None = None,
+        params: RecordAfterTaskActionParams,
     ) -> ActionApplyRecord:
         """Create an apply record after task modification."""
         from ..reports import ActionApplyRecord
-
-        if isinstance(action, RecordAfterTaskActionParams):
-            params = action
-        else:
-            params = RecordAfterTaskActionParams(
-                action=action,
-                task=task,
-                before_status=before_status,
-                before_channel_status=before_channel_status,
-                message=message,
-                evidence_paths=evidence_paths,
-            )
 
         return ActionApplyRecord(
             id=self.manager._new_id("apply"),

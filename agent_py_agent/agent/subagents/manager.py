@@ -10,7 +10,7 @@ SubAgentManager 仍然是外部代码使用的入口，但具体能力已经分�
 from .manager_acceptance import SubAgentAcceptanceMixin
 from .manager_acceptance_findings import SubAgentAcceptanceFindingMixin
 from .manager_actions import SubAgentActionMixin
-from .manager_base import SubAgentBaseMixin
+from .manager_base import SubAgentBaseMixin, SubAgentManagerInitParams
 from .manager_board import SubAgentBoardMixin
 from .manager_capabilities import SubAgentCapabilityMixin
 from .manager_channel_probe import SubAgentChannelProbeMixin
@@ -55,16 +55,21 @@ class SubAgentManager(
     def __init__(
         self,
         workspace,
+        *,
+        params: SubAgentManagerInitParams | None = None,
         local_store=None,
         workspace_root=None,
         workspace_roots=None,
         enable_self_learning=False,
     ):
-        super().__init__(
-            workspace,
+        params = params or SubAgentManagerInitParams(
             local_store=local_store,
             workspace_root=workspace_root,
             workspace_roots=workspace_roots,
             enable_self_learning=enable_self_learning,
+        )
+        super().__init__(
+            workspace,
+            params=params,
         )
         self._init_patch_services()

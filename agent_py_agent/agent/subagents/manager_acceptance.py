@@ -59,6 +59,7 @@ from .probe import (
 from .rendering import render_acceptance_record_markdown, render_acceptance_review_markdown
 from .reports import AcceptanceReviewRecord, AcceptanceReviewReport
 from .runner_rendering import _render_runner_item_line
+from .services.indexing_params import IndexReportParams
 from .utils import (
     _apply_missing_paths,
     _apply_paths,
@@ -72,7 +73,7 @@ from .utils import (
 if TYPE_CHECKING:
     from ..local_store import LocalStore
 
-class SubAgentAcceptanceMixin:
+class _SubAgentAcceptanceFacade:
     def review_acceptance(
         self,
         run_id: str,
@@ -119,17 +120,7 @@ class SubAgentAcceptanceMixin:
             note=note,
             limit=limit,
         )
-        selected = self._select_runs(run_ids)
-        if run_ids is None:
-            selected = [
-                task
-                for task in selected
-                if task.status == "AWAITING_ACCEPTANCE"
-                or task.verification_status == "NEEDS_ACCEPTANCE"
-            ]
-        if opts.limit > 0:
-            selected = selected[: opts.limit]
-
+        selected = _selected_acceptance_runs(self, run_ids, opts.limit)
         records = [
             self._review_acceptance_task(
                 task,
@@ -179,11 +170,13 @@ class SubAgentAcceptanceMixin:
             if report.dry_run is False:
                 self._append_acceptance_review_log(record)
         self._index_report(
-            "subagent_acceptance_report",
-            "latest",
-            "Subagent acceptance report",
-            report,
-            event_type="subagent_acceptance_report_written",
+            IndexReportParams(
+                "subagent_acceptance_report",
+                "latest",
+                "Subagent acceptance report",
+                report,
+                "subagent_acceptance_report_written",
+            ),
         )
         return report
 
@@ -250,6 +243,22 @@ class SubAgentAcceptanceMixin:
                 f"applied={record.applied} message={record.message}\n"
             )
         self._index_acceptance_review(record)
+
+
+class SubAgentAcceptanceMixin(_SubAgentAcceptanceFacade):
+    """Public compatibility mixin; implementation lives in the internal facade."""
+
+
+def _selected_acceptance_runs(manager, run_ids: list[str] | None, limit: int):
+    selected = manager._select_runs(run_ids)
+    if run_ids is None:
+        selected = [
+            task
+            for task in selected
+            if task.status == "AWAITING_ACCEPTANCE"
+            or task.verification_status == "NEEDS_ACCEPTANCE"
+        ]
+    return selected[:limit] if limit > 0 else selected
 
 
 def _acceptance_report_summary(records: list[AcceptanceReviewRecord]) -> dict[str, int]:

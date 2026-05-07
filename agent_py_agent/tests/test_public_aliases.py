@@ -329,6 +329,7 @@ class TestIndexingRecordAliases:
         """验证 index_report() 正确委托给 _index_report。"""
         from agent_py_agent.agent.subagents.manager_indexing import SubAgentIndexingMixin
         from agent_py_agent.agent.subagents.reports import DueCheckReport
+        from agent_py_agent.agent.subagents.services.indexing_params import IndexReportParams
 
         class MockManager(SubAgentIndexingMixin):
             def __init__(self):
@@ -345,13 +346,7 @@ class TestIndexingRecordAliases:
 
         manager._log_local_record = MagicMock()
 
-        manager.index_report(
-            source_type="test_type",
-            source_id="test-id",
-            title="Test Report",
-            report=report,
-            event_type="test_event",
-        )
+        manager.index_report(IndexReportParams("test_type", "test-id", "Test Report", report, "test_event"))
 
         manager._log_local_record.assert_called_once()
 

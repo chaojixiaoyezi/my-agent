@@ -200,33 +200,33 @@ class SubAgentLifecycleService:
 
     def set_status(
         self,
-        run_id: str | SetStatusParams,
+        params: str | SetStatusParams,
         status: str = "",
         *,
         result: str = "",
         failure_type: str = "",
         require_evidence: bool = False,
     ) -> SubAgentTask:
-        if isinstance(run_id, SetStatusParams):
-            params = run_id
+        if isinstance(params, SetStatusParams):
+            status_params = params
         else:
-            params = SetStatusParams(
-                run_id=run_id,
+            status_params = SetStatusParams(
+                run_id=params,
                 status=status,
                 result=result,
                 failure_type=failure_type,
                 require_evidence=require_evidence,
             )
 
-        task = self.manager.load(params.run_id)
-        normalized = params.status.upper()
-        if params.require_evidence and normalized == "DONE" and not task.evidence:
+        task = self.manager.load(status_params.run_id)
+        normalized = status_params.status.upper()
+        if status_params.require_evidence and normalized == "DONE" and not task.evidence:
             raise ValueError("缺少验收证据，不能标记为 DONE。")
         task.status = normalized
-        if params.result:
-            task.result = params.result
-        if params.failure_type:
-            task.failure_type = params.failure_type
+        if status_params.result:
+            task.result = status_params.result
+        if status_params.failure_type:
+            task.failure_type = status_params.failure_type
         if normalized in {"DONE", "FAILED", "BLOCKED", "CHANNEL_ERROR", "TIMEOUT"}:
             task.ended_at = time.time()
         task.updated_at = time.time()

@@ -12,7 +12,11 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_py_agent.cli.chat_parts.history import append_conversation_turn, build_history_context
+from agent_py_agent.cli.chat_parts.history import (
+    ConversationTurn,
+    append_conversation_turn,
+    build_history_context,
+)
 from agent_py_agent.cli.chat_parts.rendering import collapse_response_text, startup_banner
 
 
@@ -20,9 +24,9 @@ def test_history_context_keeps_recent_turns_in_reverse_order() -> None:
     history: list[tuple[str, str]] = []
     lock = threading.Lock()
 
-    append_conversation_turn(history, lock, "first", "answer-one", max_turns=2)
-    append_conversation_turn(history, lock, "second", "answer-two", max_turns=2)
-    append_conversation_turn(history, lock, "third", "answer-three", max_turns=2)
+    append_conversation_turn(history, lock, ConversationTurn("first", "answer-one"), max_turns=2)
+    append_conversation_turn(history, lock, ConversationTurn("second", "answer-two"), max_turns=2)
+    append_conversation_turn(history, lock, ConversationTurn("third", "answer-three"), max_turns=2)
 
     context = build_history_context(history, lock, max_turns=2)
 

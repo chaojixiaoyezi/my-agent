@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ...agent.backend import ModelResponse
 from ...agent.backends.base import get_backend
@@ -36,58 +37,51 @@ class ScenarioRealModelMultiRoundBackend:
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
-            real = self.real_backend.generate(prompt, on_chunk=on_chunk)
-            self.real_response_text = real.text
-            self.tool_sequence.append("read_file")
-            return ModelResponse(
-                text=(
-                    "[TOOL_CALL]\n"
-                    '{"tool": "read_file", "path": "README.md"}\n'
-                    "[/TOOL_CALL]"
-                ),
-                backend=self.name,
-            )
+            return self._tool_call_response(prompt, on_chunk, "read_file")
         if self.calls == 2:
-            real = self.real_backend.generate(prompt, on_chunk=on_chunk)
-            self.real_response_text += real.text
-            self.tool_sequence.append("search_text")
-            return ModelResponse(
-                text=(
-                    "[TOOL_CALL]\n"
-                    '{"tool": "search_text", "query": "gateway", "path": "."}\n'
-                    "[/TOOL_CALL]"
-                ),
-                backend=self.name,
-            )
+            return self._tool_call_response(prompt, on_chunk, "search_text")
+        return ModelResponse(text=self._final_structured_result(), backend=self.name)
+
+    def _tool_call_response(self, prompt: str, on_chunk, tool_name: str) -> ModelResponse:
+        real = self.real_backend.generate(prompt, on_chunk=on_chunk)
+        self.real_response_text += real.text
+        self.tool_sequence.append(tool_name)
+        payload = _tool_payload(tool_name)
+        return ModelResponse(text=f"[TOOL_CALL]\n{payload}\n[/TOOL_CALL]", backend=self.name)
+
+    def _final_structured_result(self) -> str:
         summary_preview = self.real_response_text[:200]
-        return ModelResponse(
-            text=(
-                "[SUBAGENT_RESULT]\n"
-                "{\n"
-                '  "status": "AWAITING_ACCEPTANCE",\n'
-                f'  "summary": "Real model multi-round smoke test: {summary_preview}",\n'
-                f'  "used_tools": {json.dumps(self.tool_sequence)},\n'
-                '  "used_skills": [],\n'
-                '  "evidence": [\n'
-                f'    {{"kind": "read_file", "summary": "README.md read via real model runner", "path": "README.md", "ok": true}},\n'
-                f'    {{"kind": "search_text", "summary": "search_text gateway via real model runner", "query": "gateway", "ok": true}}\n'
-                "  ],\n"
-                '  "capability_requests": [],\n'
-                '  "artifacts": [],\n'
-                '  "tests": [\n'
-                '    {"name": "real_model_multi_round_runner", "command": "", "ok": true, '
-                '"summary": "real model multi-round API call succeeded"}\n'
-                "  ],\n"
-                '  "patches": [],\n'
-                '  "lessons": ["real model multi-round API round-trip verified in recovery smoke test"],\n'
-                '  "next_actions": ["parent should validate recovery context includes multi-round evidence"],\n'
-                '  "blocked_reason": "",\n'
-                '  "failure_type": ""\n'
-                "}\n"
-                "[/SUBAGENT_RESULT]"
-            ),
-            backend=self.name,
+        return (
+            "[SUBAGENT_RESULT]\n"
+            "{\n"
+            '  "status": "AWAITING_ACCEPTANCE",\n'
+            f'  "summary": "Real model multi-round smoke test: {summary_preview}",\n'
+            f'  "used_tools": {json.dumps(self.tool_sequence)},\n'
+            '  "used_skills": [],\n'
+            '  "evidence": [\n'
+            '    {"kind": "read_file", "summary": "README.md read via real model runner", "path": "README.md", "ok": true},\n'
+            '    {"kind": "search_text", "summary": "search_text gateway via real model runner", "query": "gateway", "ok": true}\n'
+            "  ],\n"
+            '  "capability_requests": [],\n'
+            '  "artifacts": [],\n'
+            '  "tests": [\n'
+            '    {"name": "real_model_multi_round_runner", "command": "", "ok": true, '
+            '"summary": "real model multi-round API call succeeded"}\n'
+            "  ],\n"
+            '  "patches": [],\n'
+            '  "lessons": ["real model multi-round API round-trip verified in recovery smoke test"],\n'
+            '  "next_actions": ["parent should validate recovery context includes multi-round evidence"],\n'
+            '  "blocked_reason": "",\n'
+            '  "failure_type": ""\n'
+            "}\n"
+            "[/SUBAGENT_RESULT]"
         )
+
+
+def _tool_payload(tool_name: str) -> str:
+    if tool_name == "read_file":
+        return '{"tool": "read_file", "path": "README.md"}'
+    return '{"tool": "search_text", "query": "gateway", "path": "."}'
 
 
 def _multi_round_setup(args):
@@ -161,34 +155,7 @@ class _MultiRoundVerifyContext:
 
 def _multi_round_verify(ctx: _MultiRoundVerifyContext) -> int:
     expected_reads = _multi_round_build_expected_reads(ctx.loaded)
-    echo_signature = "这是 echo 后端的本地响应"
-    output_json_valid = False
-    try:
-        output_data = json.loads(Path(ctx.loaded.output_json).read_text(encoding="utf-8"))
-        output_json_valid = True
-    except (OSError, json.JSONDecodeError):
-        output_json_valid = False
-    final_ok = (
-        ctx.runner.ok
-        and ctx.loaded.status == "AWAITING_ACCEPTANCE"
-        and ctx.loaded.verification_status == "NEEDS_ACCEPTANCE"
-        and "read_file" in ctx.loaded.used_tools
-        and "search_text" in ctx.loaded.used_tools
-        and ctx.backend.calls >= 3
-        and len(ctx.backend.tool_sequence) >= 2
-        and "read_file" in ctx.backend.tool_sequence
-        and "search_text" in ctx.backend.tool_sequence
-        and bool(ctx.backend.real_response_text)
-        and echo_signature not in ctx.backend.real_response_text
-        and ctx.resume_payload.get("ok") is True
-        and ctx.archive_count >= 2
-        and ctx.matching_task.get("exists") is True
-        and ctx.matching_task.get("status") == "AWAITING_ACCEPTANCE"
-        and all(path in ctx.recommended_reads for path in expected_reads)
-        and ctx.task.id in ctx.context_block
-        and "AWAITING_ACCEPTANCE" in ctx.context_block
-        and output_json_valid
-    )
+    final_ok = _multi_round_final_ok(ctx, expected_reads, _output_json_valid(ctx.loaded))
     write_scenario_summary(
         ctx.paths,
         ok=final_ok,
@@ -212,6 +179,39 @@ def _multi_round_verify(ctx: _MultiRoundVerifyContext) -> int:
     print(f"summary_md={ctx.paths.summary_md}")
     print("SCENARIO_PASS" if final_ok else "SCENARIO_FAIL")
     return 0 if final_ok else 2
+
+
+def _output_json_valid(loaded) -> bool:
+    try:
+        json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
+        return True
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
+def _multi_round_final_ok(ctx: _MultiRoundVerifyContext, expected_reads: list, output_json_valid: bool) -> bool:
+    echo_signature = "这是 echo 后端的本地响应"
+    return (
+        ctx.runner.ok
+        and ctx.loaded.status == "AWAITING_ACCEPTANCE"
+        and ctx.loaded.verification_status == "NEEDS_ACCEPTANCE"
+        and "read_file" in ctx.loaded.used_tools
+        and "search_text" in ctx.loaded.used_tools
+        and ctx.backend.calls >= 3
+        and len(ctx.backend.tool_sequence) >= 2
+        and "read_file" in ctx.backend.tool_sequence
+        and "search_text" in ctx.backend.tool_sequence
+        and bool(ctx.backend.real_response_text)
+        and echo_signature not in ctx.backend.real_response_text
+        and ctx.resume_payload.get("ok") is True
+        and ctx.archive_count >= 2
+        and ctx.matching_task.get("exists") is True
+        and ctx.matching_task.get("status") == "AWAITING_ACCEPTANCE"
+        and all(path in ctx.recommended_reads for path in expected_reads)
+        and ctx.task.id in ctx.context_block
+        and "AWAITING_ACCEPTANCE" in ctx.context_block
+        and output_json_valid
+    )
 
 
 def run_scenario_real_model_recovery_multi_round_case(args) -> int:

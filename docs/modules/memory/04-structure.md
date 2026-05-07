@@ -163,3 +163,4 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 ## 2026-05-07 high-risk structure update
 - `memory_archive/task_workspace_payloads.py` now owns task workspace state/timeline payload construction and JSON/JSONL helper IO.
 - `memory_archive/task_workspace.py` remains the adapter/orchestration entry point and keeps the same public `EnsureSubagentTaskWorkspaceRequest` / `TaskWorkspacePaths` surface.
+- `memory_archive/query/query_logic.py`, `resume_brief.py`, `memory_gate_review.py`, and `memory_routing/matcher.py` now use request/params bundles for collection, filtering, reviewer write-back, and read receipts without changing the fact-source authority model.

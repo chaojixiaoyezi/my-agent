@@ -53,54 +53,67 @@ def mock_manager(tmp_path):
 
 def make_task(tmp_path, task_id="run-456"):
     task = MagicMock(spec=SubAgentTask)
-    task.id = task_id
-    task.goal = "执行数据分析任务"
-    task.thought = "需要分析数据"
-    task.plan = ["步骤1", "步骤2", "步骤3"]
-    task.agent_name = "data-agent"
-    task.role = "analyst"
-    task.status = "RUNNING"
-    task.verification_status = "UNVERIFIED"
-    task.channel_status = "OK"
-    task.runner_attempts = 2
-    task.runner_last_error = ""
-    task.owner = "owner-user"
-    task.supervisor = "supervisor-user"
-    task.final_owner = "final-owner"
-    task.parent_id = "parent-123"
-    task.root_id = "root-456"
-    task.depth = 1
-    task.task_dir = str(tmp_path / "task_dir")
-    task.execution_context_file = str(tmp_path / "context.md")
-    task.execution_context_json = str(tmp_path / "context.json")
-    task.allowed_skills = ["skill_a"]
-    task.allowed_tools = ["tool_x", "tool_y"]
-    task.used_skills = []
-    task.used_tools = []
-    task.capability_requests = []
-    task.capability_grants = []
-    task.capability_gaps = []
-    task.acceptance_checks = ["check1", "check2"]
-    task.evidence = []
-    task.quality_contract = QualityContract()
-    task.context_manifest = ContextManifest()
-    task.context_packs = []
-    task.allowed_write_roots = ["/tmp"]
-    task.forbidden_write_roots = ["/home"]
-    task.locked_files = []
-    task.status_file = str(tmp_path / "status.json")
-    task.work_log_file = str(tmp_path / "work_log.txt")
-    task.action_receipts_file = str(tmp_path / "receipts.json")
-    task.acceptance_file = str(tmp_path / "acceptance.json")
-    task.test_checklist_file = str(tmp_path / "tests.json")
-    task.bugs_file = str(tmp_path / "bugs.json")
-    task.skill_usage_file = str(tmp_path / "skill_usage.json")
-    task.skill_sparks_file = str(tmp_path / "skill_sparks.md")
-    task.handoff_file = str(tmp_path / "handoff.json")
-    task.debrief_file = str(tmp_path / "debrief.md")
-    task.output_json = str(tmp_path / "output.json")
-    task.dependencies_json = str(tmp_path / "deps.json")
+    for field_name, value in _task_defaults(tmp_path, task_id).items():
+        setattr(task, field_name, value)
     return task
+
+
+def _task_defaults(tmp_path, task_id: str) -> dict:
+    return {
+        "id": task_id,
+        "goal": "执行数据分析任务",
+        "thought": "需要分析数据",
+        "plan": ["步骤1", "步骤2", "步骤3"],
+        "agent_name": "data-agent",
+        "role": "analyst",
+        "status": "RUNNING",
+        "verification_status": "UNVERIFIED",
+        "channel_status": "OK",
+        "runner_attempts": 2,
+        "runner_last_error": "",
+        "owner": "owner-user",
+        "supervisor": "supervisor-user",
+        "final_owner": "final-owner",
+        "parent_id": "parent-123",
+        "root_id": "root-456",
+        "depth": 1,
+        "task_dir": str(tmp_path / "task_dir"),
+        "execution_context_file": str(tmp_path / "context.md"),
+        "execution_context_json": str(tmp_path / "context.json"),
+        **_task_list_defaults(tmp_path),
+    }
+
+
+def _task_list_defaults(tmp_path) -> dict:
+    return {
+        "allowed_skills": ["skill_a"],
+        "allowed_tools": ["tool_x", "tool_y"],
+        "used_skills": [],
+        "used_tools": [],
+        "capability_requests": [],
+        "capability_grants": [],
+        "capability_gaps": [],
+        "acceptance_checks": ["check1", "check2"],
+        "evidence": [],
+        "quality_contract": QualityContract(),
+        "context_manifest": ContextManifest(),
+        "context_packs": [],
+        "allowed_write_roots": ["/tmp"],
+        "forbidden_write_roots": ["/home"],
+        "locked_files": [],
+        "status_file": str(tmp_path / "status.json"),
+        "work_log_file": str(tmp_path / "work_log.txt"),
+        "action_receipts_file": str(tmp_path / "receipts.json"),
+        "acceptance_file": str(tmp_path / "acceptance.json"),
+        "test_checklist_file": str(tmp_path / "tests.json"),
+        "bugs_file": str(tmp_path / "bugs.json"),
+        "skill_usage_file": str(tmp_path / "skill_usage.json"),
+        "skill_sparks_file": str(tmp_path / "skill_sparks.md"),
+        "handoff_file": str(tmp_path / "handoff.json"),
+        "debrief_file": str(tmp_path / "debrief.md"),
+        "output_json": str(tmp_path / "output.json"),
+        "dependencies_json": str(tmp_path / "deps.json"),
+    }
 
 
 # ── build_execution_context 基本测试 ─────────────────────────────────────────

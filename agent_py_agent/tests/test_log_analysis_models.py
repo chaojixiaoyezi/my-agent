@@ -167,36 +167,31 @@ def test_log_analysis_defaults_are_disabled_and_heavy_features_off(tmp_path):
     assert is_feature_enabled(config, "response_execution") is False
 
 
-def test_log_analysis_invalid_config_values_fall_back_with_warnings():
-    config, warnings = normalize_log_analysis_config(
-        {
-            "enabled": "maybe",
-            "capability_level": "L9",
-            "data_dir": "",
-            "worker_enabled": "later",
-            "auto_dispatch_enabled": "false; rm -rf /",
-            "ml_enabled": "???",
-            "cluster_enabled": [],
-            "response_execution_enabled": "execute",
-            "response_mode": "execute-now",
-            "local_store_backend": "kafka",
-            "query_default_limit": -1,
-            "query_max_limit": "many",
-            "source_retention_days": 0,
-            "payload_preview_max_chars": True,
-            "max_parallel_analyst_agents": -2,
-            "dispatch_budget_per_hour": "nan",
-            "case_merge_window_minutes": 0,
-            "detector_window_minutes": 999999,
-        }
-    )
+def _invalid_log_analysis_config() -> dict:
+    return {
+        "enabled": "maybe",
+        "capability_level": "L9",
+        "data_dir": "",
+        "worker_enabled": "later",
+        "auto_dispatch_enabled": "false; rm -rf /",
+        "ml_enabled": "???",
+        "cluster_enabled": [],
+        "response_execution_enabled": "execute",
+        "response_mode": "execute-now",
+        "local_store_backend": "kafka",
+        "query_default_limit": -1,
+        "query_max_limit": "many",
+        "source_retention_days": 0,
+        "payload_preview_max_chars": True,
+        "max_parallel_analyst_agents": -2,
+        "dispatch_budget_per_hour": "nan",
+        "case_merge_window_minutes": 0,
+        "detector_window_minutes": 999999,
+    }
 
-    assert config.enabled is False
-    assert config.capability_level == "L0"
-    assert config.data_dir == "data/log_analysis"
-    assert config.response_mode == "recommend"
-    assert config.local_store_backend == "jsonl"
-    assert {warning.field_name for warning in warnings} == {
+
+def _invalid_config_warning_fields() -> set[str]:
+    return {
         "enabled",
         "capability_level",
         "data_dir",
@@ -216,6 +211,17 @@ def test_log_analysis_invalid_config_values_fall_back_with_warnings():
         "case_merge_window_minutes",
         "detector_window_minutes",
     }
+
+
+def test_log_analysis_invalid_config_values_fall_back_with_warnings():
+    config, warnings = normalize_log_analysis_config(_invalid_log_analysis_config())
+
+    assert config.enabled is False
+    assert config.capability_level == "L0"
+    assert config.data_dir == "data/log_analysis"
+    assert config.response_mode == "recommend"
+    assert config.local_store_backend == "jsonl"
+    assert {warning.field_name for warning in warnings} == _invalid_config_warning_fields()
     assert [item["field_name"] for item in config.config_warnings] == [warning.field_name for warning in warnings]
 
 

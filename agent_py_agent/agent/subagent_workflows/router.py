@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Route parent goals to reusable subagent workflow templates."""
+"""LLM: route parent goals to reusable workflow templates without mutating task state."""
 
 from dataclasses import dataclass, field
 from typing import Any
@@ -40,6 +40,70 @@ class _RouteDecisionFields:
     issues: list[str]
 
 
+@dataclass(frozen=True)
+class _TemplateSelectionRequest:
+    explicit_template_id: str
+    preferred_template_id: str
+    store: WorkflowTemplateStore
+    available_template_ids: list[str]
+    issues: list[str]
+
+
+@dataclass(frozen=True)
+class _RouteFieldsRequest:
+    # LLM: route decision projection keeps mode/template/task facts together.
+    mode: str
+    selected_template_id: str
+    task_type: str
+    risk_tags: list[str]
+    available_template_ids: list[str]
+    issues: list[str]
+    reason: str = "Subagent workflow routing is disabled by config."
+
+
+_QUALITY_CJK_KEYWORDS = ("高质量", "文档", "报告", "界面", "翻译", "论文", "交付", "排版", "验收")
+_CODE_CJK_KEYWORDS = ("代码", "修复", "报错", "功能", "开发", "实现", "测试", "重构", "日志", "安全", "模块", "命令")
+_QUALITY_KEYWORDS = (
+    "doc",
+    "docs",
+    "documentation",
+    "readme",
+    "pdf",
+    "ui",
+    "ux",
+    "interface",
+    "report",
+    "presentation",
+    "polish",
+    "quality",
+    "deliverable",
+    "高质量",
+    "文档",
+    "报告",
+    "界面",
+)
+_CODE_KEYWORDS = (
+    "bug",
+    "bugfix",
+    "fix",
+    "error",
+    "exception",
+    "traceback",
+    "code",
+    "feature",
+    "implement",
+    "refactor",
+    "test",
+    "api",
+    "cli",
+    "compile",
+    "代码",
+    "修复",
+    "报错",
+    "功能",
+)
+
+
 def route_workflow(
     goal: str,
     *,
@@ -53,41 +117,43 @@ def route_workflow(
     task_type, preferred_template_id, risk_tags = _classify_goal(goal)
 
     if mode == "off":
-        return _make_route_decision(
-            _RouteDecisionFields(
-                mode=mode,
-                selected_template_id="",
-                reason="Subagent workflow routing is disabled by config.",
-                task_type=task_type,
-                risk_tags=risk_tags,
-                needs_confirmation=False,
-                available_template_ids=available_template_ids,
-                issues=issues,
-            )
-        )
+        return _disabled_route_decision(_route_fields(_RouteFieldsRequest(mode, "", task_type, risk_tags, available_template_ids, issues)))
 
     selected_template_id, reason = _select_template(
-        explicit_template_id=explicit_template_id,
-        preferred_template_id=preferred_template_id,
-        store=store,
-        available_template_ids=available_template_ids,
-        issues=issues,
+        _TemplateSelectionRequest(
+            explicit_template_id=explicit_template_id,
+            preferred_template_id=preferred_template_id,
+            store=store,
+            available_template_ids=available_template_ids,
+            issues=issues,
+        )
     )
 
     if selected_template_id and mode == "manual":
         reason = f"{reason} Manual mode requires parent confirmation before use."
 
     return _make_route_decision(
-        _RouteDecisionFields(
-            mode=mode,
-            selected_template_id=selected_template_id,
-            reason=reason,
-            task_type=task_type,
-            risk_tags=risk_tags,
-            needs_confirmation=mode == "manual",
-            available_template_ids=available_template_ids,
-            issues=issues,
+        _route_fields(
+            _RouteFieldsRequest(mode, selected_template_id, task_type, risk_tags, available_template_ids, issues, reason)
         )
+    )
+
+
+def _disabled_route_decision(fields: _RouteDecisionFields) -> WorkflowRouteDecision:
+    """Build the off-mode route result without lengthening the public facade."""
+    return _make_route_decision(fields)
+
+
+def _route_fields(request: _RouteFieldsRequest) -> _RouteDecisionFields:
+    return _RouteDecisionFields(
+        mode=request.mode,
+        selected_template_id=request.selected_template_id,
+        reason=request.reason,
+        task_type=request.task_type,
+        risk_tags=request.risk_tags,
+        needs_confirmation=request.mode == "manual",
+        available_template_ids=request.available_template_ids,
+        issues=request.issues,
     )
 
 
@@ -126,87 +192,40 @@ def _workflow_mode(config: Any, issues: list[str]) -> str:
     return DEFAULT_MODE
 
 
-def _select_template(
-    *,
-    explicit_template_id: str,
-    preferred_template_id: str,
-    store: WorkflowTemplateStore,
-    available_template_ids: list[str],
-    issues: list[str],
-) -> tuple[str, str]:
-    explicit_template_id = explicit_template_id.strip()
+def _select_template(request: _TemplateSelectionRequest) -> tuple[str, str]:
+    explicit_template_id = request.explicit_template_id.strip()
     if explicit_template_id:
-        if store.get(explicit_template_id) is not None:
+        if request.store.get(explicit_template_id) is not None:
             return explicit_template_id, f"Explicit workflow template requested: {explicit_template_id}."
-        issues.append(f"explicit workflow template not found: {explicit_template_id}")
+        request.issues.append(f"explicit workflow template not found: {explicit_template_id}")
 
-    if store.get(preferred_template_id) is not None:
-        return preferred_template_id, f"Selected {preferred_template_id} for the classified task type."
+    if request.store.get(request.preferred_template_id) is not None:
+        return request.preferred_template_id, f"Selected {request.preferred_template_id} for the classified task type."
 
-    issues.append(f"preferred workflow template not available: {preferred_template_id}")
-    if available_template_ids:
-        fallback_template_id = available_template_ids[0]
+    request.issues.append(f"preferred workflow template not available: {request.preferred_template_id}")
+    if request.available_template_ids:
+        fallback_template_id = request.available_template_ids[0]
         return fallback_template_id, f"Fell back to available workflow template: {fallback_template_id}."
 
-    issues.append("no workflow templates are available")
+    request.issues.append("no workflow templates are available")
     return "", "No workflow template could be selected."
 
 
 def _classify_goal(goal: str) -> tuple[str, str, list[str]]:
     text = goal.casefold()
-
-    if _contains_any(goal, ("高质量", "文档", "报告", "界面", "翻译", "论文", "交付", "排版", "验收")):
+    if _matches_quality_goal(goal, text):
         return "quality_deliverable", PRODUCER_CRITIC_TEMPLATE_ID, ["quality_bar", "review_needed"]
-
-    if _contains_any(goal, ("代码", "修复", "报错", "功能", "开发", "实现", "测试", "重构", "日志", "安全", "模块", "命令")):
+    if _matches_code_goal(goal, text):
         return "code_or_bugfix", CODE_FEATURE_TEMPLATE_ID, ["code_change", "verification_needed"]
-
-    quality_keywords = (
-        "doc",
-        "docs",
-        "documentation",
-        "readme",
-        "pdf",
-        "ui",
-        "ux",
-        "interface",
-        "report",
-        "presentation",
-        "polish",
-        "quality",
-        "deliverable",
-        "高质量",
-        "文档",
-        "报告",
-        "界面",
-    )
-    if any(keyword in text for keyword in quality_keywords):
-        return "quality_deliverable", PRODUCER_CRITIC_TEMPLATE_ID, ["quality_bar", "review_needed"]
-
-    code_keywords = (
-        "bug",
-        "bugfix",
-        "fix",
-        "error",
-        "exception",
-        "traceback",
-        "code",
-        "feature",
-        "implement",
-        "refactor",
-        "test",
-        "api",
-        "cli",
-        "compile",
-        "代码",
-        "修复",
-        "报错",
-        "功能",
-    )
-    if any(keyword in text for keyword in code_keywords):
-        return "code_or_bugfix", CODE_FEATURE_TEMPLATE_ID, ["code_change", "verification_needed"]
-
     return "simple", SINGLE_WORKER_TEMPLATE_ID, ["low_scope"]
+
+
+def _matches_quality_goal(goal: str, text: str) -> bool:
+    return _contains_any(goal, _QUALITY_CJK_KEYWORDS) or any(keyword in text for keyword in _QUALITY_KEYWORDS)
+
+
+def _matches_code_goal(goal: str, text: str) -> bool:
+    return _contains_any(goal, _CODE_CJK_KEYWORDS) or any(keyword in text for keyword in _CODE_KEYWORDS)
 
 
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:

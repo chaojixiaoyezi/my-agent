@@ -87,21 +87,7 @@ class PromptBuilder:
         ) or "（无相关记忆）"
         dynamic = "\n".join(self.read_prompt_files(request.prompt_files))
         injected = "\n".join(request.inject or [])
-        tools_history = "\n\n".join(_tools.tool_context or [])
-        if tools_history:
-            task_and_transcript = (
-                f"# User Task\n{request.user_prompt}\n\n"
-                f"# Tool Transcript\n{tools_history}\n\n"
-                "# Continue From Tool Transcript\n"
-                "从最新的工具结果继续推进，不要重新开始任务。"
-                "如果某个工具调用已经成功，不要重复调用同一个工具和同一组参数；"
-                "直接使用已有结果进入下一步，或在证据足够时给出最终答案。"
-            )
-        else:
-            task_and_transcript = (
-                "# Tool Transcript\n（无）\n\n"
-                f"# User Task\n{request.user_prompt}"
-            )
+        task_and_transcript = _task_and_transcript_section(request.user_prompt, _tools.tool_context or [])
         default_tools = "# Tools\n（当前未启用工具）"
         default_recommendations = "# Recommended Tools\n（当前无候选工具详情）"
         return (
@@ -113,3 +99,18 @@ class PromptBuilder:
             f"{_tools.tool_recommendations_section or default_recommendations}\n\n"
             f"{task_and_transcript}\n"
         )
+
+
+def _task_and_transcript_section(user_prompt: str, tool_context: list[str]) -> str:
+    # LLM: tool transcript continuation rules stay in one helper shared by prompt builds.
+    tools_history = "\n\n".join(tool_context)
+    if not tools_history:
+        return "# Tool Transcript\n（无）\n\n" f"# User Task\n{user_prompt}"
+    return (
+        f"# User Task\n{user_prompt}\n\n"
+        f"# Tool Transcript\n{tools_history}\n\n"
+        "# Continue From Tool Transcript\n"
+        "从最新的工具结果继续推进，不要重新开始任务。"
+        "如果某个工具调用已经成功，不要重复调用同一个工具和同一组参数；"
+        "直接使用已有结果进入下一步，或在证据足够时给出最终答案。"
+    )

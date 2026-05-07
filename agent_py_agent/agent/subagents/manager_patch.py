@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from ..local_store import LocalStore
 
 
-class SubAgentPatchMixin:
+class _SubAgentPatchFacade:
     """Thin facade for patch review, apply, and diff rendering.
 
     All actual logic is delegated to PatchReviewService and PatchApplyService.
@@ -154,6 +154,7 @@ class SubAgentPatchMixin:
         self,
         task,
         *,
+        params: PatchReviewDelegateParams | None = None,
         output: dict | None = None,
         patches: list[dict] | None = None,
         apply: bool = False,
@@ -164,7 +165,7 @@ class SubAgentPatchMixin:
         return review_patch_task_via_manager(
             self,
             task,
-            params=PatchReviewDelegateParams(
+            params=params or PatchReviewDelegateParams(
                 output=output,
                 patches=patches,
                 apply=apply,
@@ -205,6 +206,10 @@ class SubAgentPatchMixin:
         from .patch.patch_file_ops import rollback_patch_apply
 
         rollback_patch_apply(touched_files)
+
+
+class SubAgentPatchMixin(_SubAgentPatchFacade):
+    """Public compatibility mixin; patch behavior stays in the facade class."""
 
 
 def _resolve_patch_target_path(raw_path, workspace_root):

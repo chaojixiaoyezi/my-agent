@@ -6,9 +6,22 @@ from __future__ import annotations
 检查任务是否处于等待验收状态、通道是否正常、runner 结构化输出是否可解析。
 """
 
+from dataclasses import dataclass
+
 from ..models import SubAgentTask
 from ..reports import AcceptanceReviewFinding
 from .evidence import _make_finding
+
+
+@dataclass(frozen=True)
+class StructuredFindingParams:
+    """LLM: bundle structured-output review state."""
+
+    task: SubAgentTask
+    runner: dict[str, object]
+    found: bool
+    ok: bool
+    created_at: float
 
 
 def _structured_output_message(
@@ -35,24 +48,33 @@ def _build_readiness_findings(
     检查任务是否处于等待验收状态、通道是否正常、runner 结构化输出是否可解析。
     """
 
-    findings: list[AcceptanceReviewFinding] = []
-
     ready = task.status == "AWAITING_ACCEPTANCE" or task.verification_status == "NEEDS_ACCEPTANCE"
-    findings.append(
-        _make_finding(
-            name="ready_for_acceptance",
-            ok=ready,
-            severity="P1",
-            message=(
-                "任务处于等待验收状态。"
-                if ready
-                else f"任务未处于等待验收状态: status={task.status} verify={task.verification_status}"
-            ),
-            evidence_path=task.runner_result_json,
-            created_at=created_at,
-        )
+    runner_structured_found = bool(runner.get("structured_output_found", False))
+    runner_structured_ok = bool(runner.get("structured_output_ok", False))
+    return [
+        _ready_finding(task, ready, created_at),
+        _channel_finding(task, created_at),
+        _structured_finding(StructuredFindingParams(task, runner, runner_structured_found, runner_structured_ok, created_at)),
+    ]
+
+
+def _ready_finding(task, ready, created_at):
+    return _make_finding(
+        name="ready_for_acceptance",
+        ok=ready,
+        severity="P1",
+        message=(
+            "任务处于等待验收状态。"
+            if ready
+            else f"任务未处于等待验收状态: status={task.status} verify={task.verification_status}"
+        ),
+        evidence_path=task.runner_result_json,
+        created_at=created_at,
     )
-    findings.append(
+
+
+def _channel_finding(task, created_at):
+    return (
         _make_finding(
             name="channel_not_broken",
             ok=task.channel_status != "BROKEN",
@@ -67,16 +89,15 @@ def _build_readiness_findings(
         )
     )
 
-    runner_structured_found = bool(runner.get("structured_output_found", False))
-    runner_structured_ok = bool(runner.get("structured_output_ok", False))
-    findings.append(
+
+def _structured_finding(params: StructuredFindingParams):
+    return (
         _make_finding(
             name="structured_output",
-            ok=(not runner_structured_found) or runner_structured_ok,
+            ok=(not params.found) or params.ok,
             severity="P1",
-            message=_structured_output_message(runner, runner_structured_found, runner_structured_ok),
-            evidence_path=task.runner_result_json,
-            created_at=created_at,
+            message=_structured_output_message(params.runner, params.found, params.ok),
+            evidence_path=params.task.runner_result_json,
+            created_at=params.created_at,
         )
     )
-    return findings

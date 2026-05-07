@@ -2,6 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class SubagentWorkflowWarningParams:
+    # LLM: warning fields are a bundle so config expansion does not change service signatures.
+    field_name: str
+    raw_value: object
+    fallback_value: object
+    reason: str
+
 
 class SubagentWorkflowWarningService:
     """Service for handling subagent workflow config warnings."""
@@ -9,18 +20,15 @@ class SubagentWorkflowWarningService:
     @staticmethod
     def add_warning(
         warnings: list[dict[str, object]],
-        field_name: str,
-        raw_value: object,
-        fallback_value: object,
-        reason: str,
+        params: SubagentWorkflowWarningParams,
     ) -> None:
         """Append a structured warning dict for a subagent workflow config field."""
         warnings.append(
             {
-                "field_name": field_name,
-                "raw_value": raw_value,
-                "fallback_value": fallback_value,
-                "reason": reason,
+                "field_name": params.field_name,
+                "raw_value": params.raw_value,
+                "fallback_value": params.fallback_value,
+                "reason": params.reason,
             }
         )
 
@@ -52,10 +60,12 @@ class SubagentWorkflowConfigService:
             config.subagent_workflow_mode = defaults.subagent_workflow_mode
             SubagentWorkflowWarningService.add_warning(
                 warnings,
-                "subagent_workflow_mode",
-                raw_mode,
-                defaults.subagent_workflow_mode,
-                "expected one of ['auto', 'manual', 'off']",
+                SubagentWorkflowWarningParams(
+                    "subagent_workflow_mode",
+                    raw_mode,
+                    defaults.subagent_workflow_mode,
+                    "expected one of ['auto', 'manual', 'off']",
+                ),
             )
 
     @staticmethod
@@ -68,10 +78,12 @@ class SubagentWorkflowConfigService:
             config.subagent_builtin_workflows = defaults.subagent_builtin_workflows
             SubagentWorkflowWarningService.add_warning(
                 warnings,
-                "subagent_builtin_workflows",
-                raw_builtin,
-                defaults.subagent_builtin_workflows,
-                "expected a boolean value",
+                SubagentWorkflowWarningParams(
+                    "subagent_builtin_workflows",
+                    raw_builtin,
+                    defaults.subagent_builtin_workflows,
+                    "expected a boolean value",
+                ),
             )
 
     @staticmethod
@@ -87,24 +99,19 @@ class SubagentWorkflowConfigService:
             config.subagent_user_workflow_dirs = list(defaults.subagent_user_workflow_dirs)
             SubagentWorkflowWarningService.add_warning(
                 warnings,
-                "subagent_user_workflow_dirs",
-                raw_dirs,
-                list(defaults.subagent_user_workflow_dirs),
-                "expected a list of non-empty strings",
+                SubagentWorkflowWarningParams(
+                    "subagent_user_workflow_dirs",
+                    raw_dirs,
+                    list(defaults.subagent_user_workflow_dirs),
+                    "expected a list of non-empty strings",
+                ),
             )
 
     @staticmethod
     def _normalize_review_rounds(config: object, defaults: object, warnings: list[dict[str, object]]) -> None:
         """Normalize workflow review rounds."""
         raw_review_rounds = config.subagent_workflow_review_rounds
-        if isinstance(raw_review_rounds, bool):
-            review_rounds: int | None = None
-        elif isinstance(raw_review_rounds, int):
-            review_rounds = raw_review_rounds
-        elif isinstance(raw_review_rounds, str) and raw_review_rounds.strip().isdigit():
-            review_rounds = int(raw_review_rounds.strip())
-        else:
-            review_rounds = None
+        review_rounds = _coerce_review_rounds_value(raw_review_rounds)
 
         if review_rounds is not None and 0 <= review_rounds <= 5:
             config.subagent_workflow_review_rounds = review_rounds
@@ -112,8 +119,21 @@ class SubagentWorkflowConfigService:
             config.subagent_workflow_review_rounds = defaults.subagent_workflow_review_rounds
             SubagentWorkflowWarningService.add_warning(
                 warnings,
-                "subagent_workflow_review_rounds",
-                raw_review_rounds,
-                defaults.subagent_workflow_review_rounds,
-                "expected an integer between 0 and 5",
+                SubagentWorkflowWarningParams(
+                    "subagent_workflow_review_rounds",
+                    raw_review_rounds,
+                    defaults.subagent_workflow_review_rounds,
+                    "expected an integer between 0 and 5",
+                ),
             )
+
+
+def _coerce_review_rounds_value(raw_review_rounds: object) -> int | None:
+    # LLM: review-round parsing stays outside normalization so warning writes stay shallow.
+    if isinstance(raw_review_rounds, bool):
+        return None
+    if isinstance(raw_review_rounds, int):
+        return raw_review_rounds
+    if isinstance(raw_review_rounds, str) and raw_review_rounds.strip().isdigit():
+        return int(raw_review_rounds.strip())
+    return None

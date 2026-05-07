@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -9,6 +10,17 @@ if TYPE_CHECKING:
     from ..settings.config import AgentConfig
 
 from .models import Notification, NotificationDelivery, generate_notification_id
+
+
+@dataclass(frozen=True)
+class CreateNotificationRequest:
+    """LLM: bundle for creating notification records."""
+
+    task_id: str
+    user_id: str
+    session_id: str
+    channel: str
+    message: str
 
 
 class NotificationManager:
@@ -24,21 +36,24 @@ class NotificationManager:
 
     def create_notification(
         self,
-        task_id: str,
-        user_id: str,
-        session_id: str,
-        channel: str,
-        message: str,
+        request: CreateNotificationRequest | None = None,
+        *,
+        task_id: str = "",
+        user_id: str = "",
+        session_id: str = "",
+        channel: str = "",
+        message: str = "",
     ) -> Notification:
+        request = request or CreateNotificationRequest(task_id, user_id, session_id, channel, message)
         notification_id = generate_notification_id()
 
         notification = Notification(
             notification_id=notification_id,
-            task_id=task_id,
-            user_id=user_id,
-            session_id=session_id,
-            channel=channel,
-            message=message,
+            task_id=request.task_id,
+            user_id=request.user_id,
+            session_id=request.session_id,
+            channel=request.channel,
+            message=request.message,
             status="pending",
             created_at=time.time(),
         )

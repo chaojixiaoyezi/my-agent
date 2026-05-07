@@ -143,7 +143,7 @@ def test_entity_graph_add_edge_creates_and_merges():
         "attacker_ip:198.51.100.1",
         "victim_ip:10.0.0.5",
         "targets",
-        ["ev-1"],
+        evidence_refs=["ev-1"],
         first_seen="2026-04-30T10:00:00Z",
         last_seen="2026-04-30T10:02:00Z",
     )
@@ -156,7 +156,7 @@ def test_entity_graph_add_edge_creates_and_merges():
         "attacker_ip:198.51.100.1",
         "victim_ip:10.0.0.5",
         "targets",
-        ["ev-2"],
+        evidence_refs=["ev-2"],
         first_seen="",
         last_seen="2026-04-30T10:05:00Z",
     )
@@ -174,7 +174,7 @@ def test_entity_graph_add_edge_handles_self_loop():
         "attacker_ip:198.51.100.1",
         "attacker_ip:198.51.100.1",
         "targets",
-        ["ev-1"],
+        evidence_refs=["ev-1"],
     )
     assert len(graph.edges) == 0
 
@@ -194,7 +194,7 @@ def test_entity_graph_to_dict_serializes_correctly():
 
     graph.add_node("attacker_ip", "198.51.100.1", ["ev-1"])
     graph.add_node("victim_ip", "10.0.0.5", ["ev-1"])
-    graph.add_edge("attacker_ip:198.51.100.1", "victim_ip:10.0.0.5", "targets", ["ev-1"])
+    graph.add_edge("attacker_ip:198.51.100.1", "victim_ip:10.0.0.5", "targets", evidence_refs=["ev-1"])
 
     result = graph.to_dict()
     assert "nodes" in result

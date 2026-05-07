@@ -96,8 +96,7 @@ class _LocalStoreRecordHelpers:
         return self.root / path
 
 
-class LocalStoreRecordMixin(_LocalStoreRecordHelpers):
-
+class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
     def upsert_record(
         self,
         params: LocalRecordInput | None = None,
@@ -218,6 +217,8 @@ class LocalStoreRecordMixin(_LocalStoreRecordHelpers):
             },
         )
 
+
+class _LocalStoreRecordLogger:
     def log_record(
         self,
         params: LocalRecordLogInput | None = None,
@@ -279,3 +280,7 @@ class LocalStoreRecordMixin(_LocalStoreRecordHelpers):
 
         digest = hashlib.sha256(f"{source_type}\0{source_id}".encode()).hexdigest()
         return f"rec-{digest[:24]}"
+
+
+class LocalStoreRecordMixin(_LocalStoreRecordWriter, _LocalStoreRecordLogger):
+    """Compatibility facade for LocalStore record write, lookup, and log APIs."""

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Execution helpers for a claimed gateway request."""
+"""LLM: execution helpers keep one claimed gateway request inside focused contexts."""
 
 import threading
 import time
@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..agent_core.runtime_mixin import RunParams
-from .audit_service import audit_request_completed, audit_request_processing
+from .audit_service import (
+    AuditRequestCompletedParams,
+    audit_request_completed,
+    audit_request_processing,
+)
 from .chunk_service import close_chunk_stream, open_chunk_stream, write_chunk
 from .io import gateway_response_path, read_json_file
 from .lease_service import refresh_processing_lease, start_lease_heartbeat
@@ -217,6 +221,18 @@ def _finalize_gateway_response(context: dict, response: dict) -> None:
     response["duration_seconds"] = round(ended_at - context["started_at"], 3)
 
 
+def _complete_gateway_request_audit(agent: SimpleAgent, context: dict, request_path: Path, response: dict) -> None:
+    audit_request_completed(
+        agent,
+        params=AuditRequestCompletedParams(
+            response=response,
+            request=context["request"],
+            request_path=request_path,
+            response_path=context["response_path"],
+        ),
+    )
+
+
 def _handle_gateway_request(
     agent: SimpleAgent,
     request_path: Path,
@@ -256,5 +272,5 @@ def _handle_gateway_request(
         _stop_gateway_request_lease(lease_stop, lease_thread)
         close_chunk_stream(chunk_path_abs)
     _finalize_gateway_response(context, response)
-    audit_request_completed(agent, response, context["request"], request_path, context["response_path"])
+    _complete_gateway_request_audit(agent, context, request_path, response)
     return response

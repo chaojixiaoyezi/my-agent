@@ -26,34 +26,24 @@ class PatchApplyTaskHelper:
     ):
         """Apply patches for a single task (inline minimal implementation)."""
         # LLM: fallback mirrors the bundle-first service path when the service is not initialized.
-        if params is not None:
-            patches = params.patches
-            apply = params.apply
-            applier = params.applier
-            note = params.note
-        else:
-            patches = patches or []
+        apply, applier, note, patches = _coerce_apply_patch_inputs(
+            params,
+            apply=apply,
+            applier=applier,
+            note=note,
+            patches=patches,
+        )
 
         now = time.time()
-        blocked = [
-            item for item in patches
-            if str(item.get("status", "")).lower() in {"planned", "blocked"}
-        ]
-        invalid = [
-            item for item in patches
-            if str(item.get("status", "")).lower() not in {"applied", "planned", "blocked"}
-        ]
+        blocked, invalid = _blocked_and_invalid_patch_items(patches)
         ok = not blocked and not invalid
-        decision = "APPLY" if ok else "BLOCK"
-        if not patches:
-            decision = "NO_PATCHES"
         return PatchApplyRecord(
             id=f"apply-{task.id if hasattr(task, 'id') else 'unknown'}-{int(now)}",
             run_id=task.id if hasattr(task, "id") else "",
             dry_run=not apply,
             applied=False,
             ok=ok,
-            decision=decision,
+            decision=_patch_apply_decision(patches, ok),
             message=f"{len(patches)} patches, {len(blocked)} blocked, {len(invalid)} invalid",
             patch_count=len(patches),
             applied_count=0,
@@ -69,3 +59,27 @@ class PatchApplyTaskHelper:
             patches=[],
             created_at=now,
         )
+
+
+def _coerce_apply_patch_inputs(params, *, apply, applier, note, patches):
+    if params is None:
+        return apply, applier, note, patches or []
+    return params.apply, params.applier, params.note, params.patches
+
+
+def _blocked_and_invalid_patch_items(patches):
+    blocked = [
+        item for item in patches
+        if str(item.get("status", "")).lower() in {"planned", "blocked"}
+    ]
+    invalid = [
+        item for item in patches
+        if str(item.get("status", "")).lower() not in {"applied", "planned", "blocked"}
+    ]
+    return blocked, invalid
+
+
+def _patch_apply_decision(patches, ok):
+    if not patches:
+        return "NO_PATCHES"
+    return "APPLY" if ok else "BLOCK"

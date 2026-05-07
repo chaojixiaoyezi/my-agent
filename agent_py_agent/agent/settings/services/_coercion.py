@@ -15,6 +15,13 @@ class _Bounds:
     max_val: int | float | None
 
 
+@dataclass(frozen=True)
+class CoerceNumberParams:
+    # LLM: config number coercion bounds travel together to keep facade signatures stable.
+    min_val: int | float | None = None
+    max_val: int | float | None = None
+
+
 class CoercionService:
     """Service for coercing raw config values to typed values with safe fallbacks."""
 
@@ -41,17 +48,19 @@ class CoercionService:
         value: object,
         fallback: int,
         *,
+        params: CoerceNumberParams | None = None,
         min_val: int | None = None,
         max_val: int | None = None,
     ) -> tuple[int, str | None]:
         """Coerce a raw config value to int with optional range checks."""
+        bounds = params or CoerceNumberParams(min_val, max_val)
         if value is None:
             return fallback, None
         number = _coerce_int_number(value)
         if number is None:
             detail = "boolean" if isinstance(value, bool) else repr(value)
             return fallback, f"{key}: expected an integer, got {detail}; using {fallback}"
-        warn = _range_warning(key, number, fallback, _Bounds(min_val, max_val))
+        warn = _range_warning(key, number, fallback, _Bounds(bounds.min_val, bounds.max_val))
         if warn:
             return fallback, warn
         return number, None
@@ -62,17 +71,19 @@ class CoercionService:
         value: object,
         fallback: float,
         *,
+        params: CoerceNumberParams | None = None,
         min_val: float | None = None,
         max_val: float | None = None,
     ) -> tuple[float, str | None]:
         """Coerce a raw config value to float with optional range checks."""
+        bounds = params or CoerceNumberParams(min_val, max_val)
         if value is None:
             return fallback, None
         number = _coerce_float_number(value)
         if number is None:
             detail = "boolean" if isinstance(value, bool) else repr(value)
             return fallback, f"{key}: expected a float, got {detail}; using {fallback}"
-        warn = _range_warning(key, number, fallback, _Bounds(min_val, max_val))
+        warn = _range_warning(key, number, fallback, _Bounds(bounds.min_val, bounds.max_val))
         if warn:
             return fallback, warn
         return number, None

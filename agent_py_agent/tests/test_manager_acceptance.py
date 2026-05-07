@@ -250,31 +250,9 @@ class TestSubAgentAcceptanceReportMixin(_AcceptSetupMixin, _AcceptRunMixin, _Acc
         Path(task.reports_dir).mkdir(parents=True, exist_ok=True)
         self._write_standard_files(tmp_path)
 
-        from dataclasses import asdict
-
         from agent_py_agent.agent.subagents.reports import AcceptanceReviewReport
 
-        record_data = {
-            "id": "accept_1",
-            "run_id": "test_task",
-            "dry_run": True,
-            "applied": False,
-            "ok": True,
-            "decision": "ACCEPT",
-            "message": "验收通过。",
-            "before_status": "AWAITING_ACCEPTANCE",
-            "after_status": "AWAITING_ACCEPTANCE",
-            "before_verification_status": "NEEDS_ACCEPTANCE",
-            "after_verification_status": "NEEDS_ACCEPTANCE",
-            "evidence_count": 0,
-            "test_count": 0,
-            "artifact_count": 0,
-            "findings": [],
-            "evidence_paths": [],
-            "created_at": time.time(),
-            "reviewer": "parent",
-            "note": "",
-        }
+        record_data = _acceptance_record_data()
 
         def mock_review_task(task, *, apply, reviewer, note):
             from agent_py_agent.agent.subagents.reports import AcceptanceReviewRecord
@@ -291,6 +269,31 @@ class TestSubAgentAcceptanceReportMixin(_AcceptSetupMixin, _AcceptRunMixin, _Acc
 
         assert (tmp_path / "subagent_acceptance_report.json").exists()
         assert (tmp_path / "SUBAGENT_ACCEPTANCE.md").exists()
+
+
+def _acceptance_record_data() -> dict:
+    # LLM: acceptance report fixture fields are kept out of the file-write test body.
+    return {
+        "id": "accept_1",
+        "run_id": "test_task",
+        "dry_run": True,
+        "applied": False,
+        "ok": True,
+        "decision": "ACCEPT",
+        "message": "验收通过。",
+        "before_status": "AWAITING_ACCEPTANCE",
+        "after_status": "AWAITING_ACCEPTANCE",
+        "before_verification_status": "NEEDS_ACCEPTANCE",
+        "after_verification_status": "NEEDS_ACCEPTANCE",
+        "evidence_count": 0,
+        "test_count": 0,
+        "artifact_count": 0,
+        "findings": [],
+        "evidence_paths": [],
+        "created_at": time.time(),
+        "reviewer": "parent",
+        "note": "",
+    }
 
 
 class TestAcceptanceReviewRecord:

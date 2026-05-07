@@ -12,6 +12,8 @@ import json
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 from ..agent.gateway import (
     GatewayAskParams,
@@ -41,6 +43,15 @@ class GatewayAskContext:
     response_path: object
     timeout: float
     stream_output: bool = True
+
+
+@dataclass(frozen=True)
+class GatewayPollRequest:
+    chunk_path: Path
+    response_path: Path
+    deadline: float
+    spinner: ThinkingSpinner
+    stream_output: bool
 
 
 def cmd_gateway(args) -> int:
@@ -149,24 +160,21 @@ def _write_stream_chunk_line(line: str, chunks_printed: int, spinner) -> int:
     return 1
 
 
-def _wait_for_gateway_response(
-    chunk_path: Path,
-    response_path: Path,
-    deadline: float,
-    spinner: ThinkingSpinner,
-    *,
-    stream_output: bool,
-) -> dict[str, Any]:
+def _flush_stream_chunks(request: GatewayPollRequest, chunks_printed: int) -> int:
+    if not request.stream_output:
+        return chunks_printed
+    return _stream_chunk_lines(request.chunk_path, chunks_printed, request.spinner)
+
+
+def _wait_for_gateway_response(request: GatewayPollRequest) -> dict[str, Any]:
     chunks_printed = 0
     response: dict[str, Any] = {}
 
-    while time.time() <= deadline:
-        if stream_output:
-            chunks_printed = _stream_chunk_lines(chunk_path, chunks_printed, spinner)
-        response = read_json_file(response_path)
+    while time.time() <= request.deadline:
+        chunks_printed = _flush_stream_chunks(request, chunks_printed)
+        response = read_json_file(request.response_path)
         if response:
-            if stream_output:
-                chunks_printed = _stream_chunk_lines(chunk_path, chunks_printed, spinner)
+            _flush_stream_chunks(request, chunks_printed)
             break
         time.sleep(0.1)
 
@@ -179,42 +187,30 @@ def _poll_gateway_response(ctx: GatewayAskContext) -> dict[str, Any]:
     if ctx.stream_output:
         spinner.start()
     deadline = time.time() + max(0.0, ctx.timeout)
-    response = _wait_for_gateway_response(
-        chunk_path,
-        ctx.response_path,
-        deadline,
-        spinner,
-        stream_output=ctx.stream_output,
-    )
+    response = _wait_for_gateway_response(GatewayPollRequest(chunk_path, ctx.response_path, deadline, spinner, ctx.stream_output))
     if ctx.stream_output:
         spinner.stop()
     return response
 
 
-def _handle_gateway_timeout(
-    agent,
-    request_id: str,
-    request_path: Path,
-    response_path: Path,
-    timeout: float,
-) -> int:
+def _handle_gateway_timeout(ctx: GatewayAskContext) -> int:
     log_gateway_payload(
-        agent,
+        ctx.agent,
         {
-            "id": request_id,
+            "id": ctx.request_id,
             "kind": "ask",
             "status": "timeout",
             "ok": False,
-            "error": f"timeout after {timeout}s",
+            "error": f"timeout after {ctx.timeout}s",
             "created_at": 0,
             "ended_at": time.time(),
         },
         event_type="gateway_request_timeout",
-        request_path=request_path,
-        response_path=response_path,
+        request_path=ctx.request_path,
+        response_path=ctx.response_path,
     )
-    print(f"gateway 请求等待超时: request_id={request_id} timeout={timeout}s", file=sys.stderr)
-    print(f"response: {response_path}")
+    print(f"gateway 请求等待超时: request_id={ctx.request_id} timeout={ctx.timeout}s", file=sys.stderr)
+    print(f"response: {ctx.response_path}")
     return 2
 
 
@@ -259,7 +255,7 @@ def cmd_gateway_ask(args) -> int:
     response = _poll_gateway_response(ask_ctx)
 
     if not response:
-        return _handle_gateway_timeout(agent, request_id, request_path, response_path, timeout)
+        return _handle_gateway_timeout(ask_ctx)
     return print_gateway_response(response, json_mode=args.json, show_prompt=args.show_prompt)
 
 

@@ -63,23 +63,27 @@ class ThinkingSpinner:
 
     def _animate(self) -> None:
         idx = 0
-        while True:
-            with self._lock:
-                if not self._running:
-                    break
+        while self._is_running():
             # LLM: rotate phrase every ~3 seconds (25 frames * 0.12s).
             if idx % 25 == 0:
                 self._phrase = random_phrase()
-            elapsed = time.perf_counter() - self._start_time
-            char = _SPINNER_CHARS[idx % len(_SPINNER_CHARS)]
-            frame = f"\r╭ 蛐蛐人：{self._phrase}... {char} {elapsed:.1f}s"
-            if self._on_update is not None:
-                self._on_update(frame.lstrip("\r"))
-            else:
-                sys.stdout.write(frame)
-                sys.stdout.flush()
+            self._emit_frame(idx)
             idx += 1
             time.sleep(0.12)
+
+    def _is_running(self) -> bool:
+        with self._lock:
+            return self._running
+
+    def _emit_frame(self, idx: int) -> None:
+        elapsed = time.perf_counter() - self._start_time
+        char = _SPINNER_CHARS[idx % len(_SPINNER_CHARS)]
+        frame = f"\r╭ 蛐蛐人：{self._phrase}... {char} {elapsed:.1f}s"
+        if self._on_update is not None:
+            self._on_update(frame.lstrip("\r"))
+            return
+        sys.stdout.write(frame)
+        sys.stdout.flush()
 
     def __enter__(self) -> ThinkingSpinner:
         self.start()

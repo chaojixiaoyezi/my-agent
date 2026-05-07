@@ -6,11 +6,39 @@ from __future__ import annotations
 runner 写回状态的分支比较多，单独放这里，manager mixin 只负责串起读写流程。
 """
 
+from dataclasses import dataclass
+
 from .policies import _status_from_structured_output, _verification_from_runner_status
 
 
-def apply_runner_result_fields(task, result_meta, status_context, parsed, now) -> None:
+@dataclass(frozen=True)
+class RunnerResultFieldParams:
+    """LLM: bundle runner result mutation inputs."""
+
+    task: object
+    result_meta: dict
+    status_context: dict
+    parsed: object
+    now: float
+
+
+@dataclass(frozen=True)
+class RunnerAttemptParams:
+    """LLM: bundle runner attempt counters and last-error state."""
+
+    task: object
+    dry_run: bool
+    ok: bool
+    message: str
+    now: float
+
+
+def apply_runner_result_fields(params: RunnerResultFieldParams) -> None:
     """Apply parsed runner status and raw fallback status to a task in place."""
+    task = params.task
+    result_meta = params.result_meta
+    status_context = params.status_context
+    parsed = params.parsed
     ok = result_meta["ok"]
     message = result_meta["message"]
     response = result_meta["response"]
@@ -30,8 +58,8 @@ def apply_runner_result_fields(task, result_meta, status_context, parsed, now) -
         task.result = response
     elif message:
         task.result = message
-    _apply_runner_timestamps(task, now)
-    _apply_runner_attempt_fields(task, dry_run, ok, message, now)
+    _apply_runner_timestamps(task, params.now)
+    _apply_runner_attempt_fields(RunnerAttemptParams(task, dry_run, ok, message, params.now))
     result_meta["ok"] = ok
     result_meta["message"] = message
 
@@ -74,13 +102,14 @@ def _apply_runner_timestamps(task, now: float) -> None:
     task.heartbeat_at = now
 
 
-def _apply_runner_attempt_fields(task, dry_run: bool, ok: bool, message: str, now: float) -> None:
-    if dry_run:
+def _apply_runner_attempt_fields(params: RunnerAttemptParams) -> None:
+    task = params.task
+    if params.dry_run:
         return
     task.runner_attempts = max(0, int(task.runner_attempts or 0)) + 1
-    task.runner_last_attempt_at = now
-    if not ok or task.status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
-        task.runner_last_error = message
+    task.runner_last_attempt_at = params.now
+    if not params.ok or task.status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
+        task.runner_last_error = params.message
     else:
         task.runner_last_error = ""
     if str(task.runner_active_attempt_id or "").strip():

@@ -294,7 +294,7 @@ class TestAdapterCliBundles:
         assert options.channel == "qq"
 
     def test_process_file_adapter_loop_uses_options_not_args(self, tmp_path: Path):
-        from agent_py_agent.cli.adapter import _process_file_adapter_loop
+        from agent_py_agent.cli.adapter import FileAdapterLoopContext, _process_file_adapter_loop
         from agent_py_agent.cli.models import AdapterOptions
 
         gpaths = _gateway_paths(tmp_path)
@@ -316,7 +316,7 @@ class TestAdapterCliBundles:
         )
 
         with patch("agent_py_agent.cli.adapter.process_file_adapter_once", return_value=2) as mock_once:
-            total = _process_file_adapter_loop(MagicMock(), options, gpaths, apaths, timeout=3.0)
+            total = _process_file_adapter_loop(FileAdapterLoopContext(MagicMock(), options, gpaths, apaths, 3.0))
 
         assert total == 2
         assert mock_once.call_args.kwargs["limit"] == 9

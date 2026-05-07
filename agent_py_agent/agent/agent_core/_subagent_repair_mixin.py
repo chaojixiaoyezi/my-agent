@@ -51,17 +51,7 @@ class _SubagentRepairMixin:
         try:
             repair_response = self.backend.generate(repair_prompt)
         except Exception as exc:
-            structured_repair_error = str(exc)
-            response_for_log = _append_runner_repair_failure(params.result.response, exc)
-            return (
-                params.structured,
-                structured_repair_ok,
-                structured_repair_error,
-                params.backend_name,
-                params.prompt_for_log,
-                response_for_log,
-                params.message,
-            )
+            return _repair_failure_tuple(params, exc)
 
         repaired = parse_subagent_runner_output(repair_response.text)
         prompt_for_log = _append_runner_repair_prompt(params.result.prompt, repair_prompt)
@@ -125,6 +115,19 @@ class _SubagentRepairMixin:
             self.root,
             params=_recovery_snapshot_input(self, snapshot, _recovery_content_paths(task)),
         )
+
+
+def _repair_failure_tuple(params: SubagentRepairParams, exc: Exception) -> tuple:
+    # LLM: repair failures preserve the original structured result and only append audit text.
+    return (
+        params.structured,
+        False,
+        str(exc),
+        params.backend_name,
+        params.prompt_for_log,
+        _append_runner_repair_failure(params.result.response, exc),
+        params.message,
+    )
 
 
 def _recovery_snapshot_params(

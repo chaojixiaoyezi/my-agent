@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-"""Audit logging for gateway operations.
+"""LLM: audit logging keeps request/response paths bundled around gateway events.
 
 This module is derived from runtime.py split. It contains all audit-related
 logging functions that were previously in that file.
 """
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,14 @@ from .logging import _report_gateway_side_effect_error, log_gateway_payload
 
 if TYPE_CHECKING:
     from ...core import SimpleAgent
+
+
+@dataclass(frozen=True)
+class AuditRequestCompletedParams:
+    response: dict
+    request: dict
+    request_path: Path
+    response_path: Path
 
 
 def audit_request_processing(
@@ -39,20 +48,19 @@ def audit_request_processing(
 
 def audit_request_completed(
     agent: SimpleAgent,
-    response: dict,
-    request: dict,
-    request_path: Path,
-    response_path: Path,
+    *,
+    params: AuditRequestCompletedParams,
 ) -> None:
+    response = params.response
     event_type = (
         "gateway_request_completed" if response.get("ok") else "gateway_request_failed"
     )
     log_gateway_payload(
         agent,
-        {**response, "prompt": request.get("prompt", "")},
+        {**response, "prompt": params.request.get("prompt", "")},
         event_type=event_type,
-        request_path=request_path,
-        response_path=response_path,
+        request_path=params.request_path,
+        response_path=params.response_path,
     )
 
 

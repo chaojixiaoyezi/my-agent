@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..capability_config import CapabilityConfig
 from ..subagents.models import SubAgentBoardOptions, SubAgentDueCheckOptions
+from .planner_templates import PARENT_PLANNER_RESULT_TEMPLATE
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -43,28 +44,6 @@ class PlannerPromptParams:
     execute_runners: bool
     max_runners: int
     runner_instruction: str
-
-
-_PARENT_PLANNER_RESULT_TEMPLATE = (
-    "## Required Output\n\n"
-    "最后必须输出一个机器可解析结果块，格式如下。结果块里只能放裸 JSON object，"
-    "不要使用 Markdown 代码围栏。\n\n"
-    "[PARENT_PLANNER_RESULT]\n"
-    "{\n"
-    '  "decision": "DISPATCH",\n'
-    '  "summary": "本轮父代理判断摘要",\n'
-    '  "should_dispatch": true,\n'
-    '  "runner_instruction": "给本轮 runner 的额外指令，可为空",\n'
-    '  "suggested_max_runners": 1,\n'
-    '  "actions": [\n'
-    '    {"action": "execute_runner|review_acceptance|route_capability|takeover|report_blocker", "run_id": "", "priority": 1, "reason": ""}\n'
-    "  ],\n"
-    '  "blockers": [],\n'
-    '  "risks": [],\n'
-    '  "notes": []\n'
-    "}\n"
-    "[/PARENT_PLANNER_RESULT]\n"
-)
 
 
 def build_parent_planner_state(
@@ -321,7 +300,7 @@ def _parent_planner_prompt(payload: str, mode: str, params: PlannerPromptParams)
         "- 如果 gate.needs_planner 为 1，必须给出 DISPATCH 或 BLOCKED_REPORT。\n"
         "- 你可以建议 runner_instruction，但不能提高 cli_max_runners，只能建议更小或相等的数量。\n"
         "- 你输出的 actions 只是建议；系统会再用规则调度器验证和执行。\n\n"
-        f"{_PARENT_PLANNER_RESULT_TEMPLATE}"
+        f"{PARENT_PLANNER_RESULT_TEMPLATE}"
     )
 
 

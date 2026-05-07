@@ -62,14 +62,7 @@ def _gateway_request_worker_loop(
     poll_interval = max(1, int(agent.config.gateway_request_poll_interval))
     while not stop_event.is_set():
         try:
-            if worker_index == 0:
-                recover_gateway_processing_requests(
-                    paths,
-                    startup=False,
-                    max_attempts=agent.config.gateway_request_max_attempts,
-                    timeout_seconds=agent.config.gateway_processing_timeout_seconds,
-                    agent=agent,
-                )
+            _recover_gateway_requests_if_primary(agent, paths, worker_index)
             processed = _process_gateway_requests(agent, paths, worker_id=f"gw-worker-{worker_index}")
         except Exception as exc:
             print(f"gateway request worker {worker_index} failed: {exc}", file=sys.stderr)
@@ -79,7 +72,22 @@ def _gateway_request_worker_loop(
         stop_event.wait(poll_interval)
 
 
-def _gateway_heartbeat_loop(paths, agent, options: GatewayRunOptions, stop_event: threading.Event) -> None:
+def _recover_gateway_requests_if_primary(agent, paths, worker_index: int) -> None:
+    if worker_index != 0:
+        return
+    recover_gateway_processing_requests(
+        paths,
+        startup=False,
+        max_attempts=agent.config.gateway_request_max_attempts,
+        timeout_seconds=agent.config.gateway_processing_timeout_seconds,
+        agent=agent,
+    )
+
+
+def _gateway_heartbeat_loop(context: GatewayRunContext, stop_event: threading.Event) -> None:
+    paths = context.paths
+    agent = context.agent
+    options = context.options
 
     while not stop_event.is_set():
         _write_gateway_heartbeat(paths, agent, options, status="running", pid=os.getpid())

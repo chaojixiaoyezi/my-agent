@@ -17,6 +17,36 @@ from agent_py_agent.agent.startup_recovery import (
 )
 
 
+@dataclass
+class _BoardTimestamps:
+    created_at: float
+    updated_at: float
+
+
+@dataclass
+class _BoardItem:
+    id: str
+    goal: str
+    status: str
+    verification_status: str
+    timestamps: _BoardTimestamps
+    risk_flags: list = field(default_factory=list)
+
+    @property
+    def created_at(self):
+        return self.timestamps.created_at
+
+    @property
+    def updated_at(self):
+        return self.timestamps.updated_at
+
+
+def _board_item(row: tuple) -> _BoardItem:
+    run_id, goal, status, verification_status, created_at, updated_at, risk_flags = row
+    timestamps = _BoardTimestamps(created_at, updated_at)
+    return _BoardItem(run_id, goal, status, verification_status, timestamps, risk_flags)
+
+
 @pytest.fixture
 def mock_agent():
     """创建一个模拟的 SimpleAgent。"""
@@ -54,40 +84,17 @@ def mock_paths(tmp_path):
 def sample_board():
     board = Mock()
 
-    # 模拟 hot_list 和 recent
-    @dataclass
-    class Timestamps:
-        created_at: float
-        updated_at: float
-
-    @dataclass
-    class BoardItem:
-        id: str
-        goal: str
-        status: str
-        verification_status: str
-        timestamps: Timestamps
-        risk_flags: list = field(default_factory=list)
-
-        @property
-        def created_at(self):
-            return self.timestamps.created_at
-
-        @property
-        def updated_at(self):
-            return self.timestamps.updated_at
-
     # 模拟活跃任务
     board.hot_list = [
-        BoardItem("sub-001", "测试任务1", "RUNNING", "UNVERIFIED", Timestamps(1234567890.0, 1234567891.0), ["timeout"]),
-        BoardItem("sub-002", "测试任务2", "BLOCKED", "FAILED", Timestamps(1234567892.0, 1234567893.0), []),
+        _board_item(("sub-001", "测试任务1", "RUNNING", "UNVERIFIED", 1234567890.0, 1234567891.0, ["timeout"])),
+        _board_item(("sub-002", "测试任务2", "BLOCKED", "FAILED", 1234567892.0, 1234567893.0, [])),
     ]
 
     # 模拟最近任务
     board.recent = [
-        BoardItem("sub-003", "测试任务3", "DONE", "VERIFIED", Timestamps(1234567880.0, 1234567895.0), []),
-        BoardItem("sub-004", "测试任务4", "FAILED", "FAILED", Timestamps(1234567885.0, 1234567898.0), []),
-        BoardItem("sub-005", "测试任务5", "PLANNING", "UNVERIFIED", Timestamps(1234567890.0, 1234567900.0), ["new"]),
+        _board_item(("sub-003", "测试任务3", "DONE", "VERIFIED", 1234567880.0, 1234567895.0, [])),
+        _board_item(("sub-004", "测试任务4", "FAILED", "FAILED", 1234567885.0, 1234567898.0, [])),
+        _board_item(("sub-005", "测试任务5", "PLANNING", "UNVERIFIED", 1234567890.0, 1234567900.0, ["new"])),
     ]
 
     board.summary = {

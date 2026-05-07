@@ -37,13 +37,17 @@ def configure_stdio() -> None:
         stream = getattr(sys, stream_name, None)
         reconfigure = getattr(stream, "reconfigure", None)
         if callable(reconfigure):
-            try:
-                reconfigure(encoding="utf-8", errors="replace")
-            except Exception as exc:
-                print(
-                    f"stdio reconfigure failed stream={stream_name} error_code={type(exc).__name__} error={exc}",
-                    file=sys.__stderr__,
-                )
+            _reconfigure_stdio_stream(stream_name, reconfigure)
+
+
+def _reconfigure_stdio_stream(stream_name: str, reconfigure) -> None:
+    try:
+        reconfigure(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        print(
+            f"stdio reconfigure failed stream={stream_name} error_code={type(exc).__name__} error={exc}",
+            file=sys.__stderr__,
+        )
 
 
 def make_agent(args) -> SimpleAgent:

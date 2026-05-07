@@ -13,6 +13,7 @@ import pytest
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagents.models import DISPATCH_INELIGIBLE_STATUSES
+from agent_py_agent.agent.subagents.services.indexing_params import IndexReportParams
 
 
 class TestDispatchIneligibleStatuses:
@@ -323,9 +324,11 @@ class TestIndexReport:
 
             # 不应该抛出异常
             agent.subagents._index_report(
-                source_type="test_report",
-                source_id="test-id",
-                title="Test Report",
-                report=report,
-                event_type="test_event",
+                IndexReportParams(
+                    source_type="test_report",
+                    source_id="test-id",
+                    title="Test Report",
+                    report=report,
+                    event_type="test_event",
+                )
             )

@@ -80,7 +80,7 @@ class SubAgentLifecycleMixin:
 
     def set_status(
         self,
-        run_id: str | SetStatusParams,
+        params: str | SetStatusParams,
         status: str = "",
         *,
         result: str = "",
@@ -90,7 +90,7 @@ class SubAgentLifecycleMixin:
         """Update task status with optional evidence requirement."""
 
         return self._lifecycle_service().set_status(
-            run_id,
+            params,
             status,
             result=result,
             failure_type=failure_type,

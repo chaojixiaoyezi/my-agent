@@ -189,10 +189,10 @@ def _record_like_filters(
 
 def _append_optional_filter(
     clauses: list[str],
-    params: list[Any],
+    values: list[Any],
     field: str,
     value: str | None,
 ) -> None:
     if value:
         clauses.append(f"{field} = ?")
-        params.append(value)
+        values.append(value)
