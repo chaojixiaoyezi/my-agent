@@ -151,7 +151,8 @@ Shared workspace 是同一 task 下 sibling 子代理共享任务局部事实的
 
 命名规则：
 
-- 业务入口的复杂输入使用 `XxxRequest`。如果只是配置开关、筛选条件或构建参数，可以用 `XxxOptions` / `XxxParams`，但同一领域内必须保持一致。
+- product service / domain / repository / gateway / subagent / memory / tool / skill / delegation 接口不得把散乱 `*args` / `**kwargs` 作为业务参数入口。
+- 业务入口的复杂输入使用 `XxxRequest`。如果只是配置开关、筛选条件或构建参数，可以用 `XxxOptions` / `XxxParams` / `XxxContext` / `XxxCommand` / `XxxQuery`，但同一领域内必须保持一致。
 - 复杂输出使用 `XxxResult` / 已存在的 `XxxRecord` / `XxxReport`，不要返回松散 tuple。
 - CLI 层可以接收 `argparse args`，但进入 manager/service 前必须转换成 Request/Options bundle，不能把 `args` 继续向业务层深传。
 - manager/public service 可以短期保留旧的显式 keyword 字段作为兼容 wrapper，但内部应立即构造 bundle，再调用核心实现；业务代码不得再新增函数级 `**kwargs` 服务接口。
@@ -166,7 +167,9 @@ Shared workspace 是同一 task 下 sibling 子代理共享任务局部事实的
 兼容要求：
 
 - bundle 改造不得破坏旧 CLI 和已有测试；旧入口保留时应作为薄 wrapper。
-- 旧入口如需兼容，只能列出显式字段并转换到 bundle；除透明装饰器转发外，不允许把 var-keyword 当成兼容层。
+- 旧入口如需兼容，只能列出显式字段并转换到 bundle；除 retry/decorator/adapter/wrapper 这类必须透明转发任意 callable 参数的底层通用工具外，不允许把 var-keyword 当成兼容层。
+- 测试代码中的 mock、fixture、helper 可以保留 `**kwargs`，但不得作为产品接口模式参考。
+- 所有 product-code 例外必须登记在架构守卫 allowlist 中，并写明文件、函数和保留原因；新增例外需要先复审再合入。
 - bundle dataclass 字段必须有明确默认值或显式必填语义。
 - 写入型 Request 必须能表达 `apply/dry_run`、reviewer、note、now/test clock、目标路径或 scope。
 - Result 必须带可审计 refs，例如写入文件路径、export log、report path、record id。
