@@ -152,4 +152,4 @@ python scripts/check_code_size.py --mode strict
 python scripts/check_code_size.py --mode warn 2>&1 | tail -5
 ```
 
-Current baseline (2026-05-03): **411 findings** (149 hard, 262 soft). Target: reduce hard findings to < 50 by 2026-07-31.
+Current strict snapshot (2026-05-07): **277 findings** (0 hard, 277 high-risk, 0 soft), with `CODE_SIZE_BASELINE.json` loaded. Target: keep hard and soft findings at 0 and reduce high-risk findings before they become soft violations.

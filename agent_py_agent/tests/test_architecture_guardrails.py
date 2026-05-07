@@ -33,6 +33,67 @@ JUNK_NAME_BASELINE = {
     "agent_py_agent/cli/common.py",
 }
 
+FORBIDDEN_CLASS_BASELINE: set[str] = set()
+
+BUNDLE_VARARG_FUNCTION_EXEMPTIONS = {
+    "agent_py_agent/agent/adapter/feishu.py:log_message": (
+        "HTTPRequestHandler-style logging override accepts formatter arguments; "
+        "not a product service parameter entry point."
+    ),
+    "agent_py_agent/agent/concurrency/retry.py:wrapper": (
+        "Transparent retry decorator forwarding must preserve arbitrary callable signatures; "
+        "this is infrastructure, not a product service interface."
+    ),
+    "agent_py_agent/agent/concurrency/retry.py:run": (
+        "Transparent retry runner forwards arbitrary callable arguments; "
+        "callers must not use this as a product interface pattern."
+    ),
+    "agent_py_agent/agent/gateway_parts/http_service.py:log_message": (
+        "HTTP server logging override accepts formatter arguments; "
+        "not a product service parameter entry point."
+    ),
+    "agent_py_agent/agent/log_analysis/agents/contracts.py:_first_evidence_ref": (
+        "Local field-selection helper accepts candidate keys; no service boundary."
+    ),
+    "agent_py_agent/agent/log_analysis/analytics/detectors/field_access.py:_field": (
+        "Local field-selection helper accepts candidate names; no service boundary."
+    ),
+    "agent_py_agent/agent/log_analysis/cases/case_helpers.py:_entity_values": (
+        "Local entity-field helper accepts candidate keys; no service boundary."
+    ),
+    "agent_py_agent/agent/log_analysis/dispatch/work_orders/planning.py:_merge_unique": (
+        "Local list-normalization helper accepts candidate values; no service boundary."
+    ),
+    "agent_py_agent/agent/log_analysis/security/attack_chain.py:_entity_values": (
+        "Local entity-field helper accepts candidate keys; no service boundary."
+    ),
+    "agent_py_agent/agent/log_analysis/security/entity_graph.py:_first_present": (
+        "Local field-selection helper accepts candidate keys; no service boundary."
+    ),
+    "agent_py_agent/agent/log_analysis/tools/query_trace.py:append_trace_field_queries": (
+        "Compatibility adapter accepts legacy positional arguments before normalizing; "
+        "not a model for new service interfaces."
+    ),
+    "agent_py_agent/agent/memory_archive/runtime/_event_utils.py:_first_bool": (
+        "Local event-field helper accepts candidate keys; no service boundary."
+    ),
+    "agent_py_agent/agent/memory_archive/runtime/_event_utils.py:_first_text": (
+        "Local event-field helper accepts candidate keys; no service boundary."
+    ),
+    "agent_py_agent/cli/chat_parts/renderer.py:style_text": (
+        "Small rendering helper accepts style codes; no product service boundary."
+    ),
+    "agent_py_agent/cli/scenario_utils.py:scenario_command": (
+        "CLI command-list builder accepts command fragments; no service boundary."
+    ),
+    "agent_py_agent/cli/thinking_spinner.py:__exit__": (
+        "Context-manager protocol method accepts arbitrary exception details."
+    ),
+    "scripts/live_lab/runner.py:agent_command": (
+        "Script command-list builder accepts command fragments; no service boundary."
+    ),
+}
+
 BUNDLE_KWARG_FUNCTION_EXEMPTIONS = {
     "agent_py_agent/agent/concurrency/retry.py:wrapper": (
         "Transparent retry decorator forwarding must preserve arbitrary callable signatures; "
@@ -203,7 +264,7 @@ def _check_forbidden_class(path: Path, forbidden: set[str]) -> list[str]:
             continue
         rel = path.relative_to(REPO_ROOT).as_posix()
         key = f"{rel}:{node.name}"
-        if key not in BASELINE:
+        if key not in FORBIDDEN_CLASS_BASELINE:
             offenders.append(key)
     return offenders
 
@@ -225,28 +286,60 @@ def test_no_new_forbidden_globals() -> None:
     assert offenders == []
 
 
-def test_product_code_has_no_var_keyword_service_interfaces() -> None:
-    """Service-facing product code must use typed bundles instead of **kwargs."""
-
-    assert all(reason.strip() for reason in BUNDLE_KWARG_FUNCTION_EXEMPTIONS.values())
-
+def _var_parameter_offenders(
+    *,
+    parameter_kind: str,
+    exemptions: dict[str, str],
+) -> list[str]:
     offenders: list[str] = []
     for path in _python_source_files():
         rel = path.relative_to(REPO_ROOT).as_posix()
         if "/tests/" in f"/{rel}":
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if node.args.kwarg is None:
-                continue
-            key = f"{rel}:{node.name}"
-            if key in BUNDLE_KWARG_FUNCTION_EXEMPTIONS:
-                continue
-            offenders.append(f"{rel}:{node.lineno} {node.name}(**{node.args.kwarg.arg})")
+        offenders.extend(_var_parameter_offenders_in_path(path, rel, parameter_kind, exemptions))
+    return offenders
 
-    assert offenders == []
+
+def _var_parameter_offenders_in_path(
+    path: Path,
+    rel: str,
+    parameter_kind: str,
+    exemptions: dict[str, str],
+) -> list[str]:
+    offenders: list[str] = []
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        parameter = node.args.vararg if parameter_kind == "args" else node.args.kwarg
+        if parameter is None:
+            continue
+        key = f"{rel}:{node.name}"
+        if key in exemptions:
+            continue
+        sigil = "*" if parameter_kind == "args" else "**"
+        offenders.append(f"{rel}:{node.lineno} {node.name}({sigil}{parameter.arg})")
+    return offenders
+
+
+def test_product_code_has_no_var_keyword_service_interfaces() -> None:
+    """Service-facing product code must use typed bundles instead of **kwargs."""
+
+    assert all(reason.strip() for reason in BUNDLE_KWARG_FUNCTION_EXEMPTIONS.values())
+    assert _var_parameter_offenders(
+        parameter_kind="kwargs",
+        exemptions=BUNDLE_KWARG_FUNCTION_EXEMPTIONS,
+    ) == []
+
+
+def test_product_code_has_no_var_positional_service_interfaces() -> None:
+    """Service-facing product code must use typed bundles instead of *args."""
+
+    assert all(reason.strip() for reason in BUNDLE_VARARG_FUNCTION_EXEMPTIONS.values())
+    assert _var_parameter_offenders(
+        parameter_kind="args",
+        exemptions=BUNDLE_VARARG_FUNCTION_EXEMPTIONS,
+    ) == []
 
 
 def test_no_macos_or_python_cache_artifacts() -> None:
