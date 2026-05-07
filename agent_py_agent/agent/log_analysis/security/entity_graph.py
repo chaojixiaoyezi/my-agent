@@ -40,6 +40,7 @@ class EntityEdge:
 
 @dataclass(frozen=True)
 class EntityEdgeInput:
+    # LLM: Edge timing and refs travel as one bundle instead of loose window kwargs.
     source: str
     target: str
     relationship: str
@@ -73,11 +74,12 @@ class EntityGraph:
         relationship: str = "",
         evidence_refs: Sequence[Any] = (),
         *,
+        params: EntityEdgeInput | None = None,
         edge: EntityEdgeInput | None = None,
         first_seen: str = "",
         last_seen: str = "",
     ) -> None:
-        item = edge or EntityEdgeInput(
+        item = params or edge or EntityEdgeInput(
             source=str(source),
             target=str(target),
             relationship=str(relationship),
@@ -179,7 +181,16 @@ def _add_finding_edges(graph: EntityGraph, context: _FindingEdgeContext) -> None
 def _add_edges(graph: EntityGraph, batch: _EdgeBatch) -> None:
     for source in batch.sources:
         for target in batch.targets:
-            graph.add_edge(source, target, batch.relationship, batch.refs, first_seen=batch.first_seen, last_seen=batch.last_seen)
+            graph.add_edge(
+                params=EntityEdgeInput(
+                    source=source,
+                    target=target,
+                    relationship=batch.relationship,
+                    evidence_refs=batch.refs,
+                    first_seen=batch.first_seen,
+                    last_seen=batch.last_seen,
+                )
+            )
 
 
 def _first_present(values: dict[str, list[str]], *keys: str) -> list[str]:

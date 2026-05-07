@@ -27,6 +27,14 @@ class TraceCaseParams:
 
 
 @dataclass(frozen=True)
+class TraceCaseParamLimits:
+    # LLM: Trace limits are bundled to keep tool calls explicit and bounded.
+    limit: int | None = DEFAULT_QUERY_LIMIT
+    max_limit: int | None = None
+    max_queries: int = MAX_TRACE_CASE_QUERIES
+
+
+@dataclass(frozen=True)
 class _TraceFieldQueryInput:
     local_store: LocalLogStore
     queries: list[dict[str, Any]]
@@ -42,18 +50,24 @@ def trace_case_params(
     root: str | Path | None = None,
     start_time: str | None = None,
     end_time: str | None = None,
+    params: TraceCaseParamLimits | None = None,
     limit: int | None = DEFAULT_QUERY_LIMIT,
     max_limit: int | None = None,
     max_queries: int = MAX_TRACE_CASE_QUERIES,
 ) -> TraceCaseParams:
+    query_limits = params or TraceCaseParamLimits(
+        limit=limit,
+        max_limit=max_limit,
+        max_queries=int(max_queries),
+    )
     return TraceCaseParams(
         store=store,
         root=root,
         start_time=start_time,
         end_time=end_time,
-        limit=limit,
-        max_limit=max_limit,
-        max_queries=int(max_queries),
+        limit=query_limits.limit,
+        max_limit=query_limits.max_limit,
+        max_queries=int(query_limits.max_queries),
     )
 
 

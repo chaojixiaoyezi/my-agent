@@ -171,37 +171,25 @@ def _run_single_watch_cycle(
     agent: SimpleAgent,
     params: RunSingleWatchCycleParams,
 ) -> DispatchWatchRecord:
-    from ..dispatch_service import MakeDispatchWatchRecordParams, make_dispatch_watch_record
     from ..parameters import _sleep_with_stop
 
     started_at = time_module.time()
-    agent.subagents.write_dispatch_watch_heartbeat(
-        params=DispatchWatchHeartbeatParams(
-            cycle=params.cycle,
-            status="running",
-            lock_path=str(params.lock_path),
-            pid=os.getpid(),
-            message="dispatch cycle started",
-        ),
-    )
+    _write_watch_heartbeat(agent, params, status="running", message="dispatch cycle started")
 
     ok, message, record_count, dispatch_summary, evidence_paths = _execute_watch_dispatch(
         agent, params
     )
 
-    ended_at = time_module.time()
-    watch_record_params = MakeDispatchWatchRecordParams(
-        cycle=params.cycle,
-        dry_run=not params.dispatch_params.apply,
+    record = _append_watch_record(
+        agent,
+        params,
+        started_at=started_at,
         ok=ok,
         message=message,
-        dispatch_record_count=record_count,
+        record_count=record_count,
         dispatch_summary=dispatch_summary,
-        started_at=started_at,
-        ended_at=ended_at,
         evidence_paths=evidence_paths,
     )
-    record = make_dispatch_watch_record(agent, watch_record_params)
     agent.subagents.append_dispatch_watch_log(record)
     agent._increment_dispatch_rounds()
 
@@ -210,14 +198,11 @@ def _run_single_watch_cycle(
         return record
 
     more_cycles, message = _watch_sleep_state(params, message)
-    agent.subagents.write_dispatch_watch_heartbeat(
-        params=DispatchWatchHeartbeatParams(
-            cycle=params.cycle,
-            status="sleeping" if more_cycles else "stopping",
-            lock_path=str(params.lock_path),
-            pid=os.getpid(),
-            message=message,
-        ),
+    _write_watch_heartbeat(
+        agent,
+        params,
+        status="sleeping" if more_cycles else "stopping",
+        message=message,
     )
     if not more_cycles:
         return record
@@ -229,6 +214,51 @@ def _run_single_watch_cycle(
         return record
 
     return record
+
+
+def _append_watch_record(
+    agent,
+    params: RunSingleWatchCycleParams,
+    *,
+    started_at: float,
+    ok: bool,
+    message: str,
+    record_count: int,
+    dispatch_summary: dict,
+    evidence_paths: list[str],
+) -> DispatchWatchRecord:
+    from ..dispatch_service import MakeDispatchWatchRecordParams, make_dispatch_watch_record
+
+    watch_record_params = MakeDispatchWatchRecordParams(
+        cycle=params.cycle,
+        dry_run=not params.dispatch_params.apply,
+        ok=ok,
+        message=message,
+        dispatch_record_count=record_count,
+        dispatch_summary=dispatch_summary,
+        started_at=started_at,
+        ended_at=time_module.time(),
+        evidence_paths=evidence_paths,
+    )
+    return make_dispatch_watch_record(agent, watch_record_params)
+
+
+def _write_watch_heartbeat(
+    agent,
+    params: RunSingleWatchCycleParams,
+    *,
+    status: str,
+    message: str,
+) -> None:
+    agent.subagents.write_dispatch_watch_heartbeat(
+        params=DispatchWatchHeartbeatParams(
+            cycle=params.cycle,
+            status=status,
+            lock_path=str(params.lock_path),
+            pid=os.getpid(),
+            message=message,
+        ),
+    )
 
 
 def _write_stopped_by_limit(agent, params: RunSingleWatchCycleParams, message: str) -> None:

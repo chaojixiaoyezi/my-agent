@@ -25,7 +25,7 @@ from .services.patch_review_helper import PatchReviewTaskHelper
 from .services.patch_spec_normalizer import PatchApplySpecNormalizer
 from .utils import _read_json_object  # noqa: F401 - re-exported for backward compat
 
-# LLM: patch manager forwards bundle options to services and keeps old explicit fields as adapters.
+# LLM: patch manager forwards bundle options to services; parsing helpers keep this mixin below soft size.
 if TYPE_CHECKING:
     from ..local_store import LocalStore
 
@@ -134,12 +134,7 @@ class SubAgentPatchMixin:
 
     def _resolve_patch_target(self, raw_path):
         """Private patch target path resolution (for backward compatibility)."""
-        from pathlib import Path
-
-        target = Path(raw_path).expanduser()
-        if not target.is_absolute():
-            target = self.workspace_root / target
-        return target.resolve(strict=False)
+        return _resolve_patch_target_path(raw_path, self.workspace_root)
 
     @staticmethod
     def _build_unified_diff(path: str, before_text: str, after_text: str) -> str:
@@ -235,3 +230,12 @@ class SubAgentPatchMixin:
         from .patch.patch_file_ops import rollback_patch_apply
 
         rollback_patch_apply(touched_files)
+
+
+def _resolve_patch_target_path(raw_path, workspace_root):
+    from pathlib import Path
+
+    target = Path(raw_path).expanduser()
+    if not target.is_absolute():
+        target = workspace_root / target
+    return target.resolve(strict=False)

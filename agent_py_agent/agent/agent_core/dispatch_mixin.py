@@ -200,7 +200,8 @@ class SimpleAgentDispatchMixin(
         take_over_by: str = "",
         locked_files: list[str] | None = None,
     ) -> DispatchReport:
-        params = params or DispatchParams(
+        params = _dispatch_params_from_call(
+            params=params,
             apply=apply,
             execute_runners=execute_runners,
             planner=planner,
@@ -215,28 +216,11 @@ class SimpleAgentDispatchMixin(
             take_over_by=take_over_by,
             locked_files=locked_files,
         )
-        params = merge_dispatch_params(params)
-
-        cfg = capability_config or CapabilityConfig()
-        normalized_workflow_mode = str(params.workflow_mode or "off").strip().lower()
-        effective_runner_instruction = params.runner_instruction
-        effective_max_runners = params.max_runners
-
-        ctx = DispatchContext(
-            cfg=cfg, normalized_workflow_mode=normalized_workflow_mode,
-            apply=params.apply, planner=params.planner,
-            runner_instruction=effective_runner_instruction,
-            max_runners=effective_max_runners, limit=params.limit,
-            reviewer=params.reviewer, note=params.note,
-            take_over_by=params.take_over_by, locked_files=params.locked_files,
-            router=router,
-        )
+        ctx = _dispatch_context_from_params(router, capability_config, params)
         records = self._collect_dispatch_records(ctx)
 
         if params.planner:
-            effective_runner_instruction, effective_max_runners = _planner_dispatch_overrides(
-                params, records
-            )
+            ctx.runner_instruction, ctx.max_runners = _planner_dispatch_overrides(params, records)
 
         records = self._execute_runner_jobs(
             RunnerJobExecutionParams(
@@ -248,19 +232,75 @@ class SimpleAgentDispatchMixin(
             )
         )
         ctx.records = records
-        ctx.runner_instruction = effective_runner_instruction
-        ctx.max_runners = effective_max_runners
-
-        records = self._finalize_dispatch(
-            DispatchFinalizeParams(
-                apply=params.apply,
-                reviewer=params.reviewer,
-                note=params.note,
-                limit=params.limit,
-                existing_records=records,
-            )
-        )
+        records = self._finalize_dispatch(_dispatch_finalize_params(params, records))
         return self._build_and_write_report(records, params.apply)
+
+
+def _dispatch_params_from_call(
+    *,
+    params: DispatchParams | None,
+    apply: bool,
+    execute_runners: bool,
+    planner: bool,
+    workflow_mode: str,
+    max_runners: int,
+    limit: int,
+    reviewer: str,
+    note: str,
+    runner_instruction: str,
+    max_cards: int,
+    probe: bool,
+    take_over_by: str,
+    locked_files: list[str] | None,
+) -> DispatchParams:
+    params = params or DispatchParams(
+        apply=apply,
+        execute_runners=execute_runners,
+        planner=planner,
+        workflow_mode=workflow_mode,
+        max_runners=max_runners,
+        limit=limit,
+        reviewer=reviewer,
+        note=note,
+        runner_instruction=runner_instruction,
+        max_cards=max_cards,
+        probe=probe,
+        take_over_by=take_over_by,
+        locked_files=locked_files,
+    )
+    return merge_dispatch_params(params)
+
+
+def _dispatch_context_from_params(
+    router: CapabilityRouter,
+    capability_config: CapabilityConfig | None,
+    params: DispatchParams,
+) -> DispatchContext:
+    return DispatchContext(
+        cfg=capability_config or CapabilityConfig(),
+        normalized_workflow_mode=str(params.workflow_mode or "off").strip().lower(),
+        apply=params.apply,
+        planner=params.planner,
+        runner_instruction=params.runner_instruction,
+        max_runners=params.max_runners,
+        limit=params.limit,
+        reviewer=params.reviewer,
+        note=params.note,
+        take_over_by=params.take_over_by,
+        locked_files=params.locked_files,
+        router=router,
+    )
+
+
+def _dispatch_finalize_params(params: DispatchParams, records: list) -> DispatchFinalizeParams:
+    return DispatchFinalizeParams(
+        apply=params.apply,
+        reviewer=params.reviewer,
+        note=params.note,
+        limit=params.limit,
+        existing_records=records,
+    )
+
 
 def _planner_dispatch_overrides(params: DispatchParams, records):
     planner_record = records[0] if records else None

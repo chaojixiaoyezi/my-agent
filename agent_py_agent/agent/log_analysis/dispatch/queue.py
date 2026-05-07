@@ -44,6 +44,7 @@ class DispatchRequest:
 
 @dataclass(frozen=True)
 class PendingInvestigationInput:
+    # LLM: Queue inserts keep optional legacy fields behind a single typed bundle.
     case_id: str
     priority: str = ""
     reason: str = ""
@@ -73,7 +74,7 @@ class InvestigationQueue:
     def add_pending(
         self,
         *,
-        pending: PendingInvestigationInput | None = None,
+        params: PendingInvestigationInput | None = None,
         case_id: str = "",
         priority: str = "",
         reason: str = "",
@@ -81,22 +82,23 @@ class InvestigationQueue:
         case_summary: dict[str, Any] | None = None,
         route_summary: dict[str, Any] | None = None,
     ) -> DispatchRequest:
-        item = pending or PendingInvestigationInput(
-            case_id=str(case_id),
-            priority=str(priority),
-            reason=str(reason),
-            evidence_refs=list(evidence_refs or []),
-            case_summary=dict(case_summary or {}),
-            route_summary=dict(route_summary or {}),
-        )
+        if params is None:
+            params = PendingInvestigationInput(
+                case_id=str(case_id),
+                priority=str(priority),
+                reason=str(reason),
+                evidence_refs=list(evidence_refs or []),
+                case_summary=dict(case_summary or {}),
+                route_summary=dict(route_summary or {}),
+            )
         return self.add(
             DispatchRequest(
-                case_id=item.case_id,
-                priority=item.priority,
-                reason=item.reason,
-                evidence_refs=list(item.evidence_refs),
-                case_summary=dict(item.case_summary),
-                route_summary=dict(item.route_summary),
+                case_id=params.case_id,
+                priority=params.priority,
+                reason=params.reason,
+                evidence_refs=list(params.evidence_refs),
+                case_summary=dict(params.case_summary),
+                route_summary=dict(params.route_summary),
             )
         )
 

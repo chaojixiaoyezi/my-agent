@@ -5,13 +5,26 @@ from __future__ import annotations
 import csv
 import json
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..parsers.base import LogParser, ParserError
+from .dead_letter import DeadLetterRecord
 
 # Re-use WriteManifestParams from pipeline_helpers for ManifestWriter
 from .pipeline_helpers import WriteManifestParams  # noqa: F401
+
+
+@dataclass(frozen=True)
+class RecordIteratorOptions:
+    # LLM: Iterator construction stays option-bundled to avoid parser-stage drift.
+    file_format: str
+    parser: LogParser
+    batch_id: str
+    source_id: str
+    dead_letters: Any
+    source_product: str | None = None
 
 
 class RecordIterator:
@@ -21,20 +34,30 @@ class RecordIterator:
         self,
         source_path: Path,
         *,
-        file_format: str,
-        parser: LogParser,
-        batch_id: str,
-        source_id: str,
+        options: RecordIteratorOptions | None = None,
+        file_format: str = "",
+        parser: LogParser | None = None,
+        batch_id: str = "",
+        source_id: str = "",
         source_product: str | None = None,
-        dead_letters: Any,
+        dead_letters: Any = None,
     ):
+        if options is None:
+            options = RecordIteratorOptions(
+                file_format=str(file_format),
+                parser=parser,
+                batch_id=str(batch_id),
+                source_id=str(source_id),
+                source_product=source_product,
+                dead_letters=dead_letters,
+            )
         self.source_path = source_path
-        self.file_format = file_format
-        self.parser = parser
-        self.batch_id = batch_id
-        self.source_id = source_id
-        self.source_product = source_product
-        self.dead_letters = dead_letters
+        self.file_format = options.file_format
+        self.parser = options.parser
+        self.batch_id = options.batch_id
+        self.source_id = options.source_id
+        self.source_product = options.source_product
+        self.dead_letters = options.dead_letters
 
     def iter_records(self):
         """Dispatch to format-specific iterator."""
@@ -67,11 +90,13 @@ class RecordIterator:
             )
         except ParserError as exc:
             self.dead_letters.write(
-                reason=str(exc),
-                raw_ref=raw_ref,
-                line_no=line_no,
-                raw_line=text,
-                parser_id=self.parser.parser_id,
+                record=DeadLetterRecord(
+                    reason=str(exc),
+                    raw_ref=raw_ref,
+                    line_no=line_no,
+                    raw_line=text,
+                    parser_id=self.parser.parser_id,
+                )
             )
             return ()
         return (parsed,)
@@ -84,11 +109,13 @@ class RecordIterator:
             reader = csv.DictReader(handle)
             if not reader.fieldnames:
                 self.dead_letters.write(
-                    reason="CSV file has no header",
-                    raw_ref=f"{self.batch_id}:line-1",
-                    line_no=1,
-                    raw_line="",
-                    parser_id=self.parser.parser_id,
+                    record=DeadLetterRecord(
+                        reason="CSV file has no header",
+                        raw_ref=f"{self.batch_id}:line-1",
+                        line_no=1,
+                        raw_line="",
+                        parser_id=self.parser.parser_id,
+                    )
                 )
                 return
             for row in reader:
@@ -106,20 +133,24 @@ class RecordIterator:
             )
         except ParserError as exc:
             self.dead_letters.write(
-                reason=str(exc),
-                raw_ref=raw_ref,
-                line_no=line_no,
-                raw_line=json.dumps(_jsonable_mapping(row), ensure_ascii=False, sort_keys=True),
-                raw_fields=_jsonable_mapping(row),
-                parser_id=self.parser.parser_id,
+                record=DeadLetterRecord(
+                    reason=str(exc),
+                    raw_ref=raw_ref,
+                    line_no=line_no,
+                    raw_line=json.dumps(_jsonable_mapping(row), ensure_ascii=False, sort_keys=True),
+                    raw_fields=_jsonable_mapping(row),
+                    parser_id=self.parser.parser_id,
+                )
             )
             return ()
         except csv.Error as exc:
             self.dead_letters.write(
-                reason=f"invalid CSV: {exc}",
-                raw_ref=raw_ref,
-                line_no=line_no,
-                parser_id=self.parser.parser_id,
+                record=DeadLetterRecord(
+                    reason=f"invalid CSV: {exc}",
+                    raw_ref=raw_ref,
+                    line_no=line_no,
+                    parser_id=self.parser.parser_id,
+                )
             )
             return ()
         return (parsed,)

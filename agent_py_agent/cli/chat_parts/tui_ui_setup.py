@@ -291,24 +291,12 @@ def _app_scrollback_enabled(args: Any) -> bool:
 
 def make_tui_app(params: MakeTuiAppParams):
     from prompt_toolkit.application import Application
-    from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
-    from prompt_toolkit.styles import Style
 
     history_file = params.agent.root / ".chat_history"
     history_file.parent.mkdir(parents=True, exist_ok=True)
 
-    status_config = StatusBarConfig(
-        refs=TuiStatusRefs(
-            params.state_lock,
-            params.is_running_ref,
-            params.pending_jobs_ref,
-            params.running_started_at_ref,
-            params.last_token_estimate_ref,
-            params.thinking_line_ref,
-        ),
-        model_name=params.agent.config.model_name,
-    )
+    status_config = _make_status_bar_config(params)
     activity_bar = _make_activity_bar(status_config)
     status_bar = _make_status_bar(status_config)
     input_area = _make_input_area(str(history_file))
@@ -323,21 +311,8 @@ def make_tui_app(params: MakeTuiAppParams):
     )
     layout = Layout(HSplit(body), focused_element=input_area)
 
-    kb = _tui_create_keybindings(
-        TuiCreateKeybindingsParams(
-            input_area, output_area, transcript_follow_ref, params.agent, params.args, params.runtime_inject, params.prompt_files, params.use_gateway, params.paths, params.state_lock, params.is_running_ref, params.pending_jobs_ref, params.running_prompt_ref, params.running_started_at_ref, params.shutting_down_ref, params.stop_event, params.assistant_outputs, params.jobs, params.pending_jobs_ref_for_enqueue
-        )
-    )
-
-    style = Style.from_dict(
-        {
-            "activity-bar": "bg:#121827 #d6e4ff bold",
-            "status-bar": "bg:#1a1a2e #8ec5ff bold",
-            "transcript": "#f8fafc",
-            "input-area": "#f8fafc",
-            "prompt": "#f8fafc bold",
-        }
-    )
+    kb = _make_tui_keybindings(params, input_area, output_area, transcript_follow_ref)
+    style = _make_tui_style()
 
     app_ref: list[Any] = [None]
     app = Application(
@@ -350,11 +325,74 @@ def make_tui_app(params: MakeTuiAppParams):
         min_redraw_interval=APP_REDRAW_INTERVAL_SECONDS if use_app_scrollback else None,
         max_render_postpone_time=APP_RENDER_POSTPONE_SECONDS if use_app_scrollback else 0.01,
     )
+    _configure_transcript_sink(output_area, transcript_follow_ref, app_ref, app)
+
+    return app
+
+
+def _make_status_bar_config(params: MakeTuiAppParams) -> StatusBarConfig:
+    return StatusBarConfig(
+        refs=TuiStatusRefs(
+            params.state_lock,
+            params.is_running_ref,
+            params.pending_jobs_ref,
+            params.running_started_at_ref,
+            params.last_token_estimate_ref,
+            params.thinking_line_ref,
+        ),
+        model_name=params.agent.config.model_name,
+    )
+
+
+def _make_tui_keybindings(
+    params: MakeTuiAppParams,
+    input_area: Any,
+    output_area: Any | None,
+    transcript_follow_ref: list[bool] | None,
+):
+    return _tui_create_keybindings(
+        TuiCreateKeybindingsParams(
+            input_area,
+            output_area,
+            transcript_follow_ref,
+            params.agent,
+            params.args,
+            params.runtime_inject,
+            params.prompt_files,
+            params.use_gateway,
+            params.paths,
+            params.state_lock,
+            params.is_running_ref,
+            params.pending_jobs_ref,
+            params.running_prompt_ref,
+            params.running_started_at_ref,
+            params.shutting_down_ref,
+            params.stop_event,
+            params.assistant_outputs,
+            params.jobs,
+            params.pending_jobs_ref_for_enqueue,
+        )
+    )
+
+
+def _make_tui_style():
+    from prompt_toolkit.styles import Style
+
+    return Style.from_dict(
+        {"activity-bar": "bg:#121827 #d6e4ff bold", "status-bar": "bg:#1a1a2e #8ec5ff bold",
+         "transcript": "#f8fafc", "input-area": "#f8fafc", "prompt": "#f8fafc bold"}
+    )
+
+
+def _configure_transcript_sink(
+    output_area: Any | None,
+    transcript_follow_ref: list[bool] | None,
+    app_ref: list[Any],
+    app: Any,
+) -> None:
     if output_area is not None and transcript_follow_ref is not None:
         app_ref[0] = app
         _install_transcript_sink(output_area, transcript_follow_ref, app_ref)
-    else:
-        set_tui_output_sink(None)
-        set_tui_stream_sink(None)
-
-    return app
+        return
+    set_tui_output_sink(None)
+    set_tui_stream_sink(None)

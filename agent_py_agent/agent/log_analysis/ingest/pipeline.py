@@ -43,6 +43,7 @@ class IngestResult:
 @dataclass(frozen=True)
 class _RecordIteratorRequest:
     source_path: Path
+    file_format: str
     parser: LogParser
     batch_id: str
     source_id: str
@@ -60,6 +61,7 @@ class IngestPipelineOptions:
 
 @dataclass(frozen=True)
 class IngestFileOptions:
+    # LLM: File ingest options are the public bundle for legacy keyword callers.
     source_id: str | None = None
     source_product: str | None = None
     parser_id: str = "security_alert_v1"
@@ -137,48 +139,62 @@ class IngestPipeline:
 
     def _iter_parsed_records(
         self,
-        source_path: Path,
+        source_path: Path | None = None,
         *,
-        file_format: str,
-        parser: LogParser,
-        batch_id: str,
-        source_id: str,
-        dead_letters: DeadLetterWriter,
+        request: _RecordIteratorRequest | None = None,
+        file_format: str = "",
+        parser: LogParser | None = None,
+        batch_id: str = "",
+        source_id: str = "",
         source_product: str | None = None,
+        dead_letters: DeadLetterWriter | None = None,
     ):
-        request = _RecordIteratorRequest(source_path, parser, batch_id, source_id, source_product, dead_letters)
-        if file_format in {"jsonl", "log"}:
+        if request is None:
+            request = _RecordIteratorRequest(
+                source_path=source_path or Path(""),
+                file_format=str(file_format),
+                parser=parser,
+                batch_id=str(batch_id),
+                source_id=str(source_id),
+                source_product=source_product,
+                dead_letters=dead_letters,
+            )
+        if request.file_format in {"jsonl", "log"}:
             yield from self._iter_jsonl_records(request)
             return
-        if file_format == "csv":
+        if request.file_format == "csv":
             yield from self._iter_csv_records(request)
             return
-        raise ParserError(f"unsupported ingest file format: {file_format}")
+        raise ParserError(f"unsupported ingest file format: {request.file_format}")
 
     def _iter_jsonl_records(self, request: _RecordIteratorRequest):
-        from .pipeline_stages import RecordIterator
+        from .pipeline_stages import RecordIterator, RecordIteratorOptions
 
         yield from RecordIterator(
             request.source_path,
-            file_format="jsonl",
-            parser=request.parser,
-            batch_id=request.batch_id,
-            source_id=request.source_id,
-            source_product=request.source_product,
-            dead_letters=request.dead_letters,
+            options=RecordIteratorOptions(
+                file_format="jsonl",
+                parser=request.parser,
+                batch_id=request.batch_id,
+                source_id=request.source_id,
+                source_product=request.source_product,
+                dead_letters=request.dead_letters,
+            ),
         ).iter_records()
 
     def _iter_csv_records(self, request: _RecordIteratorRequest):
-        from .pipeline_stages import RecordIterator
+        from .pipeline_stages import RecordIterator, RecordIteratorOptions
 
         yield from RecordIterator(
             request.source_path,
-            file_format="csv",
-            parser=request.parser,
-            batch_id=request.batch_id,
-            source_id=request.source_id,
-            source_product=request.source_product,
-            dead_letters=request.dead_letters,
+            options=RecordIteratorOptions(
+                file_format="csv",
+                parser=request.parser,
+                batch_id=request.batch_id,
+                source_id=request.source_id,
+                source_product=request.source_product,
+                dead_letters=request.dead_letters,
+            ),
         ).iter_records()
 
     def _write_events(self, events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -199,7 +215,10 @@ class IngestPipeline:
 def ingest_file(
     path: str | Path,
     *,
+    params: IngestFileOptions | None = None,
     root: str | Path | None = None,
+    pipeline_options: IngestPipelineOptions | None = None,
+    file_options: IngestFileOptions | None = None,
     store: Any | None = None,
     payload_max_chars: int = DEFAULT_PAYLOAD_MAX_CHARS,
     source_id: str | None = None,
@@ -207,22 +226,24 @@ def ingest_file(
     parser_id: str = "security_alert_v1",
     file_format: str | None = None,
 ) -> IngestResult:
-    pipeline = IngestPipeline(
-        root or default_log_analysis_root(),
-        options=IngestPipelineOptions(
+    if pipeline_options is None and (store is not None or payload_max_chars != DEFAULT_PAYLOAD_MAX_CHARS):
+        pipeline_options = IngestPipelineOptions(
             store=store,
-            payload_max_chars=payload_max_chars,
-        ),
-    )
-    return pipeline.ingest_file(
-        path,
-        options=IngestFileOptions(
+            payload_max_chars=int(payload_max_chars),
+        )
+    file_options = params or file_options
+    if file_options is None and any(value is not None for value in (source_id, source_product, file_format)):
+        file_options = IngestFileOptions(
             source_id=source_id,
             source_product=source_product,
             parser_id=str(parser_id),
             file_format=file_format,
-        ),
+        )
+    pipeline = IngestPipeline(
+        root or default_log_analysis_root(),
+        options=pipeline_options,
     )
+    return pipeline.ingest_file(path, options=file_options)
 
 
 def default_log_analysis_root() -> Path:

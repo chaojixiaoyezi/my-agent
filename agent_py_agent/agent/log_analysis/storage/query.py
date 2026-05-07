@@ -77,6 +77,17 @@ class _QueryResultInput:
 
 
 @dataclass(frozen=True)
+class _WriteQueryEvidenceInput:
+    # LLM: Query evidence writes share this small bundle with LocalEvidenceStore.
+    query_id: str
+    parameters: dict[str, Any]
+    rows: list[dict[str, Any]]
+    row_count: int
+    truncated: bool
+    summary: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class SecurityQueryOptions:
     require_time_range: bool = True
     preview_limit: int = DEFAULT_PREVIEW_LIMIT
@@ -123,12 +134,14 @@ def _execute_query_payload(
     query_id = _query_id(parameters)
     evidence = _write_query_evidence(
         store,
-        query_id=query_id,
-        parameters=parameters,
-        rows=limited_rows,
-        row_count=row_count,
-        truncated=truncated,
-        summary=summary,
+        _WriteQueryEvidenceInput(
+            query_id=query_id,
+            parameters=parameters,
+            rows=limited_rows,
+            row_count=row_count,
+            truncated=truncated,
+            summary=summary,
+        ),
     )
     store.upsert_evidence_ref(evidence)
     duration_ms = int((time.perf_counter() - start) * 1000)
@@ -184,22 +197,16 @@ def _query_summary(data: _QuerySummaryInput) -> dict[str, Any]:
 
 def _write_query_evidence(
     store: LocalLogStore,
-    *,
-    query_id: str,
-    parameters: dict[str, Any],
-    rows: list[dict[str, Any]],
-    row_count: int,
-    truncated: bool,
-    summary: dict[str, Any],
+    data: _WriteQueryEvidenceInput,
 ):
     return LocalEvidenceStore(store.root).write_query_result(
         payload=QueryEvidencePayload(
-            query_id=query_id,
-            parameters=parameters,
-            rows=rows,
-            row_count=row_count,
-            truncated=truncated,
-            summary=summary,
+            query_id=data.query_id,
+            parameters=data.parameters,
+            rows=data.rows,
+            row_count=data.row_count,
+            truncated=data.truncated,
+            summary=data.summary,
         )
     )
 

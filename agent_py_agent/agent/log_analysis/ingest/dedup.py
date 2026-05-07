@@ -13,6 +13,7 @@ from ..parsers.common import utc_now
 
 @dataclass(frozen=True)
 class BatchFinish:
+    # LLM: Batch finalization is bundled so ingest accounting can grow safely.
     batch_id: str
     status: str
     event_count: int
@@ -83,7 +84,7 @@ class DedupStore:
     def finish_batch(
         self,
         *,
-        finish: BatchFinish | None = None,
+        params: BatchFinish | None = None,
         batch_id: str = "",
         status: str = "",
         event_count: int = 0,
@@ -91,14 +92,15 @@ class DedupStore:
         dead_letter_count: int = 0,
         manifest_path: str = "",
     ) -> None:
-        item = finish or BatchFinish(
-            batch_id=str(batch_id),
-            status=str(status),
-            event_count=int(event_count),
-            duplicate_count=int(duplicate_count),
-            dead_letter_count=int(dead_letter_count),
-            manifest_path=str(manifest_path),
-        )
+        if params is None:
+            params = BatchFinish(
+                batch_id=str(batch_id),
+                status=str(status),
+                event_count=int(event_count),
+                duplicate_count=int(duplicate_count),
+                dead_letter_count=int(dead_letter_count),
+                manifest_path=str(manifest_path),
+            )
         with self._connect() as conn:
             conn.execute(
                 """
@@ -109,13 +111,13 @@ class DedupStore:
                 WHERE batch_id = ?
                 """,
                 (
-                    item.status,
+                    params.status,
                     utc_now(),
-                    item.event_count,
-                    item.duplicate_count,
-                    item.dead_letter_count,
-                    item.manifest_path,
-                    item.batch_id,
+                    params.event_count,
+                    params.duplicate_count,
+                    params.dead_letter_count,
+                    params.manifest_path,
+                    params.batch_id,
                 ),
             )
 

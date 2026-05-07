@@ -70,3 +70,8 @@ agent_py_agent/agent/log_analysis/
 - `bounded_query.py` exposes `BoundedQueryParams` for file-tail query options; old explicit keyword fields are normalized into that bundle at the boundary.
 - `dispatch/work_orders/creation.py` now calls subagent creation with `CreateRunParams`, so LOG dispatch no longer expands arbitrary task fields across the module boundary.
 - The parser, ingest, report, evidence, scheduler, storage query, and tool query helpers use domain-specific Params/Options records for multi-field inputs; no LOG product function keeps a var-keyword service signature.
+
+## 2026-05-07 hard/soft structure update
+- `agents/prompts.py` uses `SecurityPromptScope` as the security prompt scope bundle; tests now exercise the bundle call shape directly.
+- `cases/evidence.py`, `dispatch/queue.py`, `ingest/*`, `security/entity_graph.py`, `storage/query.py`, and `tools/query_trace.py` keep legacy explicit fields only as adapters around small dataclass bundles.
+- The strict code-size report now has no hard or soft findings for log-analysis; remaining items are high-risk near-soft warnings for follow-up refactors.
