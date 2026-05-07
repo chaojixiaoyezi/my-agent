@@ -10,6 +10,7 @@ agent_py_agent/agent/
 |-- memory_store/                     # 长期记忆 JSONL 事实流水，可选同步索引到 LocalStore
 |-- memory_routing/                   # route index、匹配、required/candidate path、read receipt
 `-- memory_archive/                   # hook snapshot、raw archive、留存、token 估算、compact 预演
+    |-- agent_run_workspace.py         # Phase 1 task-local agent run workspace 骨架
     |-- task_workspace.py             # Phase 0 文件系统 task workspace 骨架和旧 subagent run adapter
     `-- query/task_sources.py          # task/run 恢复入口推荐，不把子代理内容写入主 memory
 
@@ -34,6 +35,7 @@ agent_py_agent/cli/
 - `memory_archive/query.py`：把 raw/hook JSONL 读成统一可搜索记录，并整理 resume 线索。
 - `memory_archive/query/task_sources.py`：集中维护 subagent 恢复事实源优先级；checkpoint artifacts 优先，传统 `STATUS.md` / `HANDOFF.md` 继续保留。
 - `memory_archive/task_workspace.py`：创建文件系统版 task workspace 的最小骨架，并写 `agents/<run_id>/legacy_run_ref.json` 指向旧 subagent work-order 目录；这是 adapter，不迁移历史目录。
+- `memory_archive/agent_run_workspace.py`：创建 `tasks/<root_id>/agents/<run_id>/` 下的 run workspace 骨架，包含 agent 身份、run state、任务说明、checkpoint、summary、final report、findings 和 inbox/outbox/artifacts/compactions 目录。
 - `docs/modules/memory/06-runtime-memory-requirements.md`：定义 memory 作为运行时档案系统的开发要求，明确主代理长期记忆、每日账本、task workspace、agent run workspace、artifact、checkpoint、compact 和 retention 的边界。
 - `memory_archive/resume_brief.py`：把归档、LocalStore、任务事实源压成恢复简报。
 - `memory_archive/resume_context.py`：在“继续/恢复”类提示里按配置构造自动注入的恢复上下文。
@@ -52,10 +54,11 @@ agent_py_agent/cli/
 5. token 预算逼近阈值时，run 主链路先写 `memory_archive/snapshots/*.json` 权威快照，再做组合压缩。
 6. 长任务和普通保存路径都会继续写 raw event / hook snapshot，方便恢复和审计。
 7. raw event、hook snapshot 和权威快照写完后都会读回校验，确保恢复线索真实落盘。
-8. subagent 保存时会同步 `tasks/<root_id>/` 的 `state.json`、`timeline.jsonl`、`summaries/current_summary.md` 和 legacy run adapter；旧 `subagents/<run_id>/` 仍是当前 run 事实源。
-9. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore 和任务事实源生成恢复块；跨天时会同时扫描最近 raw/hook 文件。subagent 任务会先推荐 `reports/checkpoint.json`、`status_report.json`、`progress.md` 等 compact recovery artifacts，再推荐 `STATUS.md`、`HANDOFF.md` 和 `output.json`。这只是恢复入口推荐，不代表把子代理内容写入主代理长期 memory。
-10. doctor 命令检查配置、route index、hook/raw/snapshot 目录和层级一致性 warning。
-11. `memory-compact --dry-run` 在真实压缩前只读扫描上述事实源，输出计划和风险，不修改文件。
+8. subagent 保存时会同步 `tasks/<root_id>/` 的 `state.json`、`timeline.jsonl`、`summaries/current_summary.md` 和 legacy run adapter；旧 `subagents/<run_id>/` 仍是当前兼容事实源。
+9. 同一保存流程会同步 `tasks/<root_id>/agents/<run_id>/` 的 agent run workspace skeleton，先写恢复和接管需要的最小 run 文件，不搬迁旧工单目录。
+10. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore 和任务事实源生成恢复块；跨天时会同时扫描最近 raw/hook 文件。subagent 任务会先推荐 `reports/checkpoint.json`、`status_report.json`、`progress.md` 等 compact recovery artifacts，再推荐 `STATUS.md`、`HANDOFF.md` 和 `output.json`。这只是恢复入口推荐，不代表把子代理内容写入主代理长期 memory。
+11. doctor 命令检查配置、route index、hook/raw/snapshot 目录和层级一致性 warning。
+12. `memory-compact --dry-run` 在真实压缩前只读扫描上述事实源，输出计划和风险，不修改文件。
 
 ## 跨天恢复链路
 
@@ -97,7 +100,7 @@ memory-resume 或 run(auto resume)
 共享 = blackboard + messages + evidence packets + artifact refs
 ```
 
-当前 Phase 0 只创建 task workspace 外壳和 legacy run adapter。`tasks/<root_id>/agents/<run_id>/legacy_run_ref.json` 会指向旧 run 目录，后续 Phase 1 才把 agent run workspace 自身补齐。
+当前 Phase 0/1 已创建 task workspace 外壳和 agent run workspace 外壳。`tasks/<root_id>/agents/<run_id>/legacy_run_ref.json` 会继续指向旧 run 目录，后续 Phase 2+ 再把每日事件账本、artifact 外置、compact 链和 shared 协作面补齐。
 
 LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 目录里的权威文件。
 
