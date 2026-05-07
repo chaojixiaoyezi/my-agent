@@ -146,3 +146,7 @@
 - Refactored memory archive query, resume brief, storage-date, runtime event, and memory routing helpers to reduce near-soft code-size risk.
 - Preserved archive query outputs, memory routing receipts, and resume guidance semantics.
 - Verified with memory/archive/routing focused tests, ruff, and the global code-size report.
+
+## 2026-05-07 high-risk pre-clean
+- Split task workspace state/timeline payload and JSONL helpers into `memory_archive/task_workspace_payloads.py` so `task_workspace.py` stays focused on orchestration and path wiring.
+- Preserved task workspace file shapes, legacy run adapter behavior, and existing focused persistence tests.

@@ -9,12 +9,12 @@ from __future__ import annotations
 所以这里把不同后端都包装成统一接口，避免核心调度器里到处写 if/else。
 """
 
-import json
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from .gateway_helpers import post_json, post_stream, post_stream_iter
+from .stream_parsers import anthropic_stream_contents, openai_stream_contents
 
 
 @dataclass
@@ -152,40 +152,6 @@ class HttpBackend(BaseBackend):
         )
 
 
-def _openai_stream_contents(lines: Iterable[str]) -> Iterator[str]:
-    for line in lines:
-        if line == "[DONE]":
-            break
-        obj = _json_object_or_none(line)
-        if obj is None:
-            continue
-        choices = obj.get("choices", [])
-        content = choices[0].get("delta", {}).get("content") if choices else None
-        if content:
-            yield content
-
-
-def _anthropic_stream_contents(lines: Iterable[str]) -> Iterator[str]:
-    for line in lines:
-        obj = _json_object_or_none(line)
-        if obj is None:
-            continue
-        event_type = obj.get("type", "")
-        if event_type == "message_stop":
-            break
-        text = obj.get("delta", {}).get("text", "") if event_type == "content_block_delta" else ""
-        if text:
-            yield text
-
-
-def _json_object_or_none(line: str) -> dict[str, Any] | None:
-    try:
-        obj = json.loads(line)
-    except json.JSONDecodeError:
-        return None
-    return obj if isinstance(obj, dict) else None
-
-
 class OpenAICompatibleBackend(HttpBackend):
     """适配 OpenAI-compatible `/chat/completions` 接口。"""
 
@@ -222,7 +188,7 @@ class OpenAICompatibleBackend(HttpBackend):
         """流式解析 OpenAI SSE：逐行拼接 delta.content。"""
         parts: list[str] = []
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
-        for content in _openai_stream_contents(lines("/chat/completions", payload, headers)):
+        for content in openai_stream_contents(lines("/chat/completions", payload, headers)):
             parts.append(content)
             if on_chunk is not None:
                 on_chunk(content)
@@ -302,7 +268,7 @@ class AnthropicCompatibleBackend(HttpBackend):
         # request_stream 已过滤 event 行，需从 data 行的 type 字段恢复事件类型。
         parts: list[str] = []
         lines = self.request_stream_iter if on_chunk is not None else self.request_stream
-        for text in _anthropic_stream_contents(lines("/v1/messages", payload, headers)):
+        for text in anthropic_stream_contents(lines("/v1/messages", payload, headers)):
             parts.append(text)
             if on_chunk is not None:
                 on_chunk(text)

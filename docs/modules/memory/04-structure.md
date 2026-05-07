@@ -44,6 +44,7 @@ agent_py_agent/cli/
 - `memory_archive/query/task_sources.py`：集中维护 subagent 恢复事实源优先级；checkpoint artifacts 优先，传统 `STATUS.md` / `HANDOFF.md` 继续保留。
 - `memory_archive/task_workspace.py`：创建文件系统版 task workspace 的最小骨架，并写 `agents/<run_id>/legacy_run_ref.json` 指向旧 subagent work-order 目录；这是 adapter，不迁移历史目录。
 - `memory_archive/task_workspace.py`、`agent_run_workspace.py`、`daily_ledger.py`、`artifact_registry.py`、`compact_chain.py`、`shared_workspace.py`：这些 runtime memory 写入入口统一提供 `*Request` bundle；旧参数形态只作为兼容 adapter，新增字段应进入 bundle，避免跨阶段继续拉长函数签名。
+- `memory_archive/task_workspace_payloads.py`：承接 task workspace 的 `state.json`、`timeline.jsonl` payload 组装和小型 JSON/JSONL 读写 helper，让 workspace 主文件继续只负责编排。
 - `memory_archive/task_workspace_rendering.py`：承接 task workspace 的 `task.yaml`、summary 和 blackboard 初始内容渲染，避免同步编排文件继续膨胀。
 - `memory_archive/agent_run_workspace.py`：创建 `tasks/<root_id>/agents/<run_id>/` 下的 run workspace 骨架，包含 agent 身份、run state、任务说明、checkpoint、summary、final report、findings 和 inbox/outbox/artifacts/compactions 目录。
 - `memory_archive/daily_ledger.py`：维护 `daily/YYYY-MM-DD/events.jsonl`，只追加 task/run 状态、摘要、duration、refs、artifact/evidence refs 和检索字段，不存完整上下文或工具输出。
@@ -158,3 +159,7 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 - `memory_archive/query/query_logic.py` now exposes explicit archive collection/filter fields, and higher-level query service code converts compatibility inputs before filtering.
 - `resume_brief.py`, snapshot helpers, and memory route read receipts now use explicit Params/Options-style fields rather than var-keyword option bags.
 - Memory remains a fact-source locator: bundle cleanup does not change the authority model where task/run/gateway files stay authoritative and LocalStore/archive records are clues.
+
+## 2026-05-07 high-risk structure update
+- `memory_archive/task_workspace_payloads.py` now owns task workspace state/timeline payload construction and JSON/JSONL helper IO.
+- `memory_archive/task_workspace.py` remains the adapter/orchestration entry point and keeps the same public `EnsureSubagentTaskWorkspaceRequest` / `TaskWorkspacePaths` surface.
