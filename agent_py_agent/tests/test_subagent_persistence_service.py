@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from agent_py_agent.agent.memory_archive.memory_gate_review import MemoryGateReviewRequest
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import EvidencePacket, Finding
 
@@ -126,6 +127,7 @@ def _assert_runtime_workspace_paths(loaded, task_workspace, run_id: str) -> None
     assert loaded.agent_run_memory_gate_dir == str(run_workspace / "memory_gate")
     assert loaded.agent_run_memory_candidates_jsonl == str(run_workspace / "memory_gate" / "candidates.jsonl")
     assert loaded.agent_run_memory_review_queue_jsonl == str(run_workspace / "memory_gate" / "review_queue.jsonl")
+    assert loaded.agent_run_memory_decisions_jsonl == str(run_workspace / "memory_gate" / "decisions.jsonl")
     assert loaded.agent_run_skill_spark_gate_json == str(run_workspace / "memory_gate" / "skill_spark_gate.json")
     assert loaded.legacy_run_ref_json == str(run_workspace / "legacy_run_ref.json")
     assert "/daily/" in loaded.daily_ledger_file
@@ -209,6 +211,40 @@ def _assert_memory_gate_candidates(candidates, review_queue, refs) -> None:
     assert gate["promoted_count"] == 0
     assert checkpoint["memory_gate"]["auto_promote"] is False
     assert checkpoint["memory_gate"]["candidates_ref"] == loaded.agent_run_memory_candidates_jsonl
+
+
+def test_subagent_memory_gate_review_preserves_decision_across_save(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = _create_task_with_memory_gate_candidates(manager, tmp_path)
+    manager.save(task)
+    loaded = manager.load(task.id)
+    candidate_id = _read_jsonl(loaded.agent_run_memory_candidates_jsonl)[0]["candidate_id"]
+
+    result = manager.review_memory_gate_candidate(
+        task.id,
+        MemoryGateReviewRequest(
+            candidate_id=candidate_id,
+            decision="approve_memory",
+            reviewer="parent-test",
+            note="证据链已核验，允许后续显式导出 memory。",
+        ),
+    )
+    reviewed = result.candidate
+    manager.save(manager.load(task.id))
+    after_save = _candidate_by_id(_read_jsonl(loaded.agent_run_memory_candidates_jsonl), candidate_id)
+    decisions = _read_jsonl(loaded.agent_run_memory_decisions_jsonl)
+
+    assert reviewed["review_status"] == "approved"
+    assert reviewed["promotion_status"] == "approved_for_memory_export"
+    assert reviewed["review_required"] is False
+    assert after_save["reviewer"] == "parent-test"
+    assert after_save["promotion_status"] == "approved_for_memory_export"
+    assert decisions[-1]["candidate_id"] == candidate_id
+    assert decisions[-1]["auto_promote"] is False
+
+
+def _candidate_by_id(candidates, candidate_id: str) -> dict[str, object]:
+    return next(item for item in candidates if item["candidate_id"] == candidate_id)
 
 
 def test_subagent_persistence_creates_agent_run_workspace_skeleton(tmp_path) -> None:

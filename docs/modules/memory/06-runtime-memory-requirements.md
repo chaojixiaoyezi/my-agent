@@ -158,6 +158,7 @@ Shared workspace 是同一 task 下 sibling 子代理共享任务局部事实的
 - 已新增 `memory_archive/compact_chain.py`，先创建 run-local checkpoint snapshot ledger，用 append-only summary/metadata 串起 compact 恢复链，不删除原始上下文。
 - 已新增 `memory_archive/shared_workspace.py`，先创建 task-local shared blackboard/messages/findings/evidence packet 同步面，不写主代理长期记忆。
 - 已新增 `memory_archive/memory_gate.py`，先创建 run-local memory/skill candidate gate：`candidates.jsonl`、`review_queue.jsonl`、`skill_spark_gate.json` 只记录候选、证据、适用范围和 review 要求，默认 `not_promoted`。
+- 已新增 `subagents-memory-gate` 显式 review decision 写回：`decisions.jsonl` 记录 reviewer、decision、note 和 `auto_promote=false`；approve 只改变 gate 状态，不执行长期 memory/skill 导出。
 
 后续主要差距：
 
@@ -166,4 +167,4 @@ Shared workspace 是同一 task 下 sibling 子代理共享任务局部事实的
 - daily ledger 已有 append-only 文件入口和 artifact manifest refs，但还没接入 resume 查询优先级和 retention 清理。
 - artifact manifests 已能规范已有 `artifact_refs`，但还没自动搬运/截断大工具输出，也还没做 content-addressed artifact 存储。
 - shared blackboard/messages/findings/evidence packets 已有最小同步面，但 locks/handoffs 和 sibling 消息协议仍未系统化。
-- memory item 写入门禁 / skill spark 提升链第一片已落地，但还缺 review decision 写回、retention 清理、正式 skill 生成和长期 memory 写入命令；这些必须保持显式触发，不能默认自动提升。
+- memory item 写入门禁 / skill spark 提升链已能记录候选和 review decision，但还缺 retention 清理、正式 skill 生成和长期 memory 写入命令；这些必须保持显式触发，不能默认自动提升。

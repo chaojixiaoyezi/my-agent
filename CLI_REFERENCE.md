@@ -170,6 +170,7 @@ Ctrl+C
 | `subagents-route-capabilities` | 路由 capability request | `--apply` 时写 grant/gap | 否 |
 | `subagents-acceptance` | 验收等待验收的 subagent | `--apply` 时写回状态和审计日志 | 否 |
 | `subagents-patches` | 审核或 apply runner 输出的 patch 记录 | 默认 review dry-run；`--review-apply` 只写审核状态；`--apply` 真正落文件 | 否 |
+| `subagents-memory-gate` | 查看或写回子代理 memory/skill 候选 review decision | 传 `--candidate-id` 时写 `memory_gate/decisions.jsonl` 和 gate 状态 | 否 |
 | `subagents-dispatch` | 执行父代理调度 | dry-run 写报告；`--apply` 写回 | 只有 `--apply --execute-runners` 会调用 |
 | `daemon` | 按 `agent_config.yaml` 的 `daemon_*` 配置启动前台常驻调度 | 取决于配置 | 取决于配置 |
 | `scenario-test` | 跑一轮隔离的 gateway/chat/subagent/runner/验收全流程 | 写临时 fixture 和报告 | 默认调用真实 API，可用 `--dry-run` 跳过 runner |
@@ -773,6 +774,24 @@ my-agent subagents-patches --apply --run-id <run_id> --reviewer parent
 | `--limit <n>` | `20` | 最多处理多少条记录。 |
 | `--reviewer <name>` | `parent` | 审核者标识。 |
 | `--note <text>` | - | 写入 patch 审核记录的备注。 |
+
+## `subagents-memory-gate`
+
+```powershell
+my-agent subagents-memory-gate <run_id>
+my-agent subagents-memory-gate <run_id> --candidate-id <candidate_id> --decision approve_memory --reviewer parent
+```
+
+这个命令只处理 `tasks/<root_id>/agents/<run_id>/memory_gate/` 里的候选 review 状态，不会把候选写入主代理长期 memory，也不会生成正式 skill。`approve_memory` / `approve_skill` 只是允许后续显式导出流程继续。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `run_id` | - | 子代理运行 ID。 |
+| `--candidate-id <id>` | - | 要写回 review decision 的候选 ID；不传时只列出候选。 |
+| `--decision <value>` | `needs_evidence` | 可选 `approve_memory`、`approve_skill`、`reject`、`needs_evidence`。 |
+| `--reviewer <name>` | `parent` | review 者标识。 |
+| `--note <text>` | - | 写入 `decisions.jsonl` 的备注。 |
+| `--limit <n>` | `20` | 列表模式最多显示多少条候选。 |
 
 ## `subagents-dispatch`
 

@@ -143,6 +143,7 @@ from .cli.subagents import (
     cmd_subagents_apply_actions,
     cmd_subagents_dispatch,
     cmd_subagents_due_check,
+    cmd_subagents_memory_gate,
     cmd_subagents_patches,
     cmd_subagents_plan_actions,
     cmd_subagents_probe,
