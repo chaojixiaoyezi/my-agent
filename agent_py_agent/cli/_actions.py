@@ -4,8 +4,10 @@ from __future__ import annotations
 import json
 
 from ..agent.capability_config import load_capability_config
+from ..agent.subagents.models import SubAgentCapabilityRouteOptions
 from ..agent.subagents.services.action_options import ActionApplyOptions
 from .common import make_agent, make_capability_router
+from .models import SubagentsCapabilityRouteOptions
 
 
 def cmd_subagents_plan_actions(args) -> int:
@@ -79,14 +81,17 @@ def cmd_subagents_route_capabilities(args) -> int:
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)
+    options = _subagents_capability_route_options(args)
     report = agent.subagents.write_capability_route_report(
         router,
         capability_config,
-        apply=args.apply,
-        run_ids=args.run_id or None,
-        limit=args.limit,
+        params=SubAgentCapabilityRouteOptions(
+            apply=options.apply,
+            run_ids=options.run_ids,
+            limit=options.limit,
+        ),
     )
-    mode = "apply" if args.apply else "dry-run"
+    mode = "apply" if options.apply else "dry-run"
     print("SUBAGENT CAPABILITY ROUTE")
     print(f"mode={mode} total_records={report.summary.get('total', 0)}")
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
@@ -102,7 +107,16 @@ def cmd_subagents_route_capabilities(args) -> int:
         )
     print(f"\n已写入: {agent.subagents.workspace / 'subagent_capability_route_report.json'}")
     print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_CAPABILITY_ROUTE.md'}")
-    if args.apply:
+    if options.apply:
         print(f"审计日志: {agent.subagents.workspace / 'subagent_capability_route_log.jsonl'}")
         print(f"审计日志: {agent.subagents.workspace / 'CAPABILITY_ROUTE_LOG.md'}")
     return 0
+
+
+def _subagents_capability_route_options(args) -> SubagentsCapabilityRouteOptions:
+    # LLM: route-capability CLI converts args to a typed bundle before manager calls.
+    return SubagentsCapabilityRouteOptions(
+        apply=bool(args.apply),
+        run_ids=args.run_id or None,
+        limit=int(args.limit or 0),
+    )

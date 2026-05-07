@@ -4,15 +4,20 @@ from __future__ import annotations
 import json
 
 from ..agent.capability_config import load_capability_config
+from ..agent.subagents.models import SubAgentChannelProbeOptions, SubAgentDueCheckOptions
 from .common import make_agent
+from .models import SubagentContextOptions, SubagentsDueCheckOptions, SubagentsProbeOptions
 
 
 def cmd_subagents_due_check(args) -> int:
 
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
-    report = agent.subagents.write_due_check(capability_config)
-    issues = report.issues if args.all else report.issues[: args.limit]
+    options = _subagents_due_check_options(args)
+    report = agent.subagents.write_due_check(
+        params=SubAgentDueCheckOptions(config=capability_config, write_report=True),
+    )
+    issues = report.issues if options.all else report.issues[: options.limit]
     print("SUBAGENT DUE CHECK")
     print(f"total_issues={report.summary.get('total', 0)}")
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
@@ -34,8 +39,10 @@ def cmd_subagents_due_check(args) -> int:
 def cmd_subagents_probe(args) -> int:
 
     agent = make_agent(args)
-    run_ids = args.run_id or None
-    report = agent.subagents.write_channel_probe_report(run_ids, limit=args.limit)
+    options = _subagents_probe_options(args)
+    report = agent.subagents.write_channel_probe_report(
+        params=SubAgentChannelProbeOptions(run_ids=options.run_ids, limit=options.limit),
+    )
     print("SUBAGENT CHANNEL PROBE")
     print(f"total={report.summary.get('total', 0)}")
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
@@ -57,7 +64,8 @@ def cmd_subagents_probe(args) -> int:
 def cmd_subagent_context(args) -> int:
 
     agent = make_agent(args)
-    context = agent.subagents.write_execution_context(args.run_id, max_cards=args.max_cards)
+    options = _subagent_context_options(args)
+    context = agent.subagents.write_execution_context(options.run_id, max_cards=options.max_cards)
     print("SUBAGENT EXECUTION CONTEXT")
     print(
         f"run_id={context.run_id} skills={len(context.allowed_skills)} "
@@ -66,3 +74,16 @@ def cmd_subagent_context(args) -> int:
     print(f"已写入: {context.execution_context_json}")
     print(f"已写入: {context.execution_context_file}")
     return 0
+
+
+def _subagents_due_check_options(args) -> SubagentsDueCheckOptions:
+    # LLM: inspection commands keep argparse at the edge and pass small options bundles inward.
+    return SubagentsDueCheckOptions(all=bool(args.all), limit=int(args.limit or 0))
+
+
+def _subagents_probe_options(args) -> SubagentsProbeOptions:
+    return SubagentsProbeOptions(run_ids=args.run_id or None, limit=int(args.limit or 0))
+
+
+def _subagent_context_options(args) -> SubagentContextOptions:
+    return SubagentContextOptions(run_id=args.run_id, max_cards=int(args.max_cards or 0))

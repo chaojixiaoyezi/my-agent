@@ -10,6 +10,7 @@ LLM: keep external imports pointed here while moving concrete dataclasses out.
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 from .model_capabilities import (
     CapabilityGap,
@@ -72,6 +73,32 @@ class SubAgentCard:
     result_contract: list[str] = field(default_factory=list)
 
 
+# LLM: manager-facing option bundles live in the public facade so CLI/core callers share one shape.
+@dataclass(frozen=True)
+class SubAgentCapabilityRouteOptions:
+    """Bundle for capability-request routing options."""
+
+    apply: bool = False
+    run_ids: list[str] | None = None
+    limit: int = 0
+
+
+@dataclass(frozen=True)
+class SubAgentChannelProbeOptions:
+    """Bundle for channel probe selection options."""
+
+    run_ids: list[str] | None = None
+    limit: int = 0
+
+
+@dataclass(frozen=True)
+class SubAgentDueCheckOptions:
+    """Bundle for due-check report options."""
+
+    config: Any | None = None
+    write_report: bool = False
+
+
 __all__ = [
     "CapabilityGap",
     "CapabilityGrant",
@@ -86,6 +113,9 @@ __all__ = [
     "LearningCandidate",
     "QualityContract",
     "SubAgentCard",
+    "SubAgentCapabilityRouteOptions",
+    "SubAgentChannelProbeOptions",
+    "SubAgentDueCheckOptions",
     "SubAgentExecutionContext",
     "SubAgentParsedOutput",
     "SubAgentRunnerResult",

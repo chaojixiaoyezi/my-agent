@@ -7,6 +7,7 @@ Human version:
 业务逻辑已移至 services/board.py。
 """
 
+from .models import SubAgentDueCheckOptions
 from .services.board import SubAgentBoardService, _build_risk_flags, _to_board_item
 
 
@@ -41,11 +42,13 @@ class SubAgentBoardMixin:
         )
         return board
 
-    def due_check(self, config=None):
-        return self._board_service.due_check(config)
+    def due_check(self, config=None, *, params: SubAgentDueCheckOptions | None = None):
+        options = _due_check_options(config=config, params=params, write_report=False)
+        return self._board_service.due_check(options.config)
 
-    def write_due_check(self, config=None):
-        report = self.due_check(config)
+    def write_due_check(self, config=None, *, params: SubAgentDueCheckOptions | None = None):
+        options = _due_check_options(config=config, params=params, write_report=True)
+        report = self.due_check(params=options)
         import json
         from dataclasses import asdict
         (self.workspace / "subagent_due_check.json").write_text(
@@ -77,3 +80,17 @@ class SubAgentBoardMixin:
     def _filter_action_plan_items(self, actions, action_filter="", run_id="", limit=0):
         from .policies import _filter_action_plan_items as _filter_items
         return _filter_items(actions, action_filter=action_filter, run_id=run_id, limit=limit)
+
+
+def _due_check_options(
+    *,
+    config,
+    params: SubAgentDueCheckOptions | None,
+    write_report: bool,
+) -> SubAgentDueCheckOptions:
+    if params is not None:
+        if not isinstance(params, SubAgentDueCheckOptions):
+            raise TypeError("due check requires params: SubAgentDueCheckOptions")
+        return params
+    # LLM: due-check remains compatible with config positional calls while using an options bundle.
+    return SubAgentDueCheckOptions(config=config, write_report=write_report)
