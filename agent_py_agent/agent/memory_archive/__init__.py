@@ -7,6 +7,7 @@ from __future__ import annotations
 以后真实压缩流程要接入时，优先从这里导入数据结构和写入函数，不要把 JSONL 路径规则散落到别的模块里。
 LLM: daily ledger helpers are exported here so runtime memory callers do not invent path rules.
 LLM: artifact manifest helpers share the same public adapter surface.
+LLM: compact chain helpers are exported without enabling destructive compact apply.
 """
 
 # LLM: keep task/run workspace adapter exports centralized for callers.
@@ -16,6 +17,11 @@ from .agent_run_workspace import (
     ensure_agent_run_workspace,
 )
 from .artifact_registry import ArtifactManifestResult, sync_artifact_manifests
+from .compact_chain import (
+    CompactChainResult,
+    default_compact_chain_result,
+    sync_agent_run_compact_chain,
+)
 from .daily_ledger import (
     DailyLedgerAppendResult,
     DailyLedgerWorkspaceRefs,
@@ -61,6 +67,7 @@ __all__ = [
     "ArchiveRunTurnResult",
     "AgentRunWorkspacePaths",
     "ArtifactManifestResult",
+    "CompactChainResult",
     "DailyLedgerAppendResult",
     "DailyLedgerWorkspaceRefs",
     "TurnTokenUsage",
@@ -81,6 +88,7 @@ __all__ = [
     "compression_snapshot_dir",
     "compression_snapshot_file_for",
     "daily_events_path_for",
+    "default_compact_chain_result",
     "enforce_retention",
     "estimate_tokens",
     "agent_run_workspace_paths",
@@ -93,6 +101,7 @@ __all__ = [
     "snapshot_path_for",
     "ensure_subagent_task_workspace",
     "sync_artifact_manifests",
+    "sync_agent_run_compact_chain",
     "task_workspace_path",
     "token_ledger_dir",
     "write_compression_snapshot",

@@ -33,6 +33,8 @@ class DailyLedgerWorkspaceRefs:
     task_artifact_manifest_jsonl: Path | None = None
     # LLM: manifest refs point to summaries/hashes, never artifact bodies.
     agent_artifact_manifest_jsonl: Path | None = None
+    # LLM: daily ledger only points at the compact ledger; run workspace owns the chain.
+    agent_compaction_ledger_jsonl: Path | None = None
 
 
 def daily_events_path_for(root: str | Path, created_at: str | int | float | None = None) -> Path:
@@ -92,6 +94,7 @@ def _refs(task: Any, workspace_refs: DailyLedgerWorkspaceRefs) -> dict[str, str]
         "agent_run_timeline": str(agent_run_workspace_root / "timeline.jsonl"),
         "task_artifact_manifest": _path_text(workspace_refs.task_artifact_manifest_jsonl),
         "agent_artifact_manifest": _path_text(workspace_refs.agent_artifact_manifest_jsonl),
+        "agent_compaction_ledger": _path_text(workspace_refs.agent_compaction_ledger_jsonl),
         "legacy_task_dir": legacy_task_dir,
         "legacy_task_json": str(Path(legacy_task_dir) / "task.json") if legacy_task_dir else "",
         "legacy_checkpoint": str(getattr(task, "checkpoint_json", "")),

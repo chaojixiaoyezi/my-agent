@@ -116,6 +116,8 @@ Daily event ledger 是主代理按天查 task/run 线索的轻量入口，不是
 - compact 后更新 `summary.md` 和 `checkpoint.json`。
 - compact 失败不能删除旧上下文视图，不能假装成功。
 
+当前 Phase 4 已先落地 checkpoint-first compact chain：subagent 保存时会在 run `compactions/compaction_ledger.jsonl` 追加 `checkpoint_snapshot` 事件，并写每次 snapshot 的 markdown summary 和 metadata JSON；run `checkpoint.json` 会记录最新 ledger/summary/metadata/artifact manifest/timeline refs。当前状态明确标记为 `checkpoint_only`，不会删除 timeline、artifact 或旧 work-order 文件，也不等同于正式 compact apply。
+
 ## 接管要求
 
 新 agent 接管旧 run 时，不直接写旧目录。旧目录只读，新 run 新建目录，并记录：
@@ -147,11 +149,12 @@ Daily event ledger 是主代理按天查 task/run 线索的轻量入口，不是
 - 已新增 `memory_archive/agent_run_workspace.py`，先创建 task-local agent run workspace skeleton，保持旧 subagent work-order 路径兼容。
 - 已新增 `memory_archive/daily_ledger.py`，先创建每日事件 ledger，用摘要和 refs 索引 task/run，不吸收子代理完整上下文。
 - 已新增 `memory_archive/artifact_registry.py`，先创建 task/run artifact manifests，用 summary/hash/path 规范 artifact refs，不复制大输出正文。
+- 已新增 `memory_archive/compact_chain.py`，先创建 run-local checkpoint snapshot ledger，用 append-only summary/metadata 串起 compact 恢复链，不删除原始上下文。
 
 后续主要差距：
 
 - 旧 subagent workspace 尚未迁移到 `tasks/<task_id>/agents/<run_id>/`；当前 agent run workspace 是 skeleton + legacy adapter，不是完整替代。
-- task workspace 已有第一版 `task.yaml`、`state.json`、`timeline.jsonl`，run workspace 已有第一版 `agent.yaml`、run-level `state.json/timeline.jsonl` 和 `compactions/` 目录，但 compact ledger/snapshot 链尚未落地。
+- task workspace 已有第一版 `task.yaml`、`state.json`、`timeline.jsonl`，run workspace 已有第一版 `agent.yaml`、run-level `state.json/timeline.jsonl` 和 checkpoint-first compact ledger/snapshot 链，但还没有接入真实 compact apply 和 post-compact self check。
 - daily ledger 已有 append-only 文件入口和 artifact manifest refs，但还没接入 resume 查询优先级和 retention 清理。
 - artifact manifests 已能规范已有 `artifact_refs`，但还没自动搬运/截断大工具输出，也还没做 content-addressed artifact 存储。
 - shared blackboard/messages/locks 仍未系统化。

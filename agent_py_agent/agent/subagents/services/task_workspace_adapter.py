@@ -41,3 +41,7 @@ def sync_task_workspace_fields(workspace: str | Path, task: SubAgentTask) -> Non
     # LLM: manifest paths let old task.json consumers find artifact metadata without reading bodies.
     task.task_artifact_manifest_jsonl = str(task_workspace_paths.artifact_manifest.task_manifest_jsonl)
     task.agent_run_artifact_manifest_jsonl = str(task_workspace_paths.artifact_manifest.agent_manifest_jsonl)
+    # LLM: compact-chain paths are recovery pointers; original timeline/artifacts remain authoritative.
+    task.agent_run_compaction_ledger_jsonl = str(task_workspace_paths.compact_chain.ledger_jsonl)
+    task.agent_run_latest_compaction_summary_md = str(task_workspace_paths.compact_chain.latest_summary_md)
+    task.agent_run_latest_compaction_metadata_json = str(task_workspace_paths.compact_chain.latest_metadata_json)
