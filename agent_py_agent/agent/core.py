@@ -1,6 +1,9 @@
+# LLM: 这是主代理兼容门面，保持初始化依赖顺序和公开导出稳定。
+# 模块用途: SimpleAgent 组装入口，连接配置、记忆、后端、工具和子代理管理器。
+
 from __future__ import annotations
 
-"""LLM: composition root for SimpleAgent after splitting runtime, subagents, dispatch, and tools.
+"""composition root for SimpleAgent after splitting runtime, subagents, dispatch, and tools.
 
 给人看的解释：
 以前这个文件把主循环、子代理 runner、父代理 dispatch、工具定义、prompt 模板都堆在一起。
@@ -67,6 +70,8 @@ from .tooling.registry import ToolRegistry, ToolRegistryParams
 from .user_space.paths import get_user_paths
 
 
+# LLM: _resolve_paths 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 根据配置和用户空间选择 LocalStore、memory、subagent 与 gateway 的落盘路径。
 def _resolve_paths(config, root: Path):
     """解析所有存储路径（支持用户空间隔离）。"""
     user_id = getattr(config, "user_id", "admin") or "admin"
@@ -94,6 +99,8 @@ def _resolve_paths(config, root: Path):
     }
 
 
+# LLM: _normalized_workspace_roots 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 解析并去重工作区根目录，保留第一个主工作区。
 def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -> list[Path]:
     resolved: list[Path] = []
     for raw in [primary, *(roots or [])]:
@@ -103,20 +110,24 @@ def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -
     return resolved
 
 
+# LLM: SimpleAgent 属于 兼容入口 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: 主代理门面，持有配置、记忆、后端、工具注册表和子代理管理器。
 class SimpleAgent(
     SimpleAgentRuntimeMixin,
     SimpleAgentSubagentMixin,
     SimpleAgentDispatchMixin,
 ):
-    """LLM: wires config, memory, prompts, backend, tools, and subagent manager into one agent facade.
+    """wires config, memory, prompts, backend, tools, and subagent manager into one agent facade.
 
     给人看的解释：
     这是用户和 CLI 看到的主代理对象。
     它自己只做依赖组装；具体怎么聊天、怎么跑子代理、怎么 dispatch，已经分别交给 mixin 文件。
     """
 
+    # LLM: SimpleAgent.__init__ 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 初始化 SimpleAgent 的依赖、配置和运行期字段。
     def __init__(self, config: AgentConfig, root: str | Path, workspace_roots: list[str | Path] | None = None):
-        """LLM: initialize all SimpleAgent collaborators and register orchestration tools.
+        """initialize all SimpleAgent collaborators and register orchestration tools.
 
         给人看的解释：
         创建主代理时会准备本地账本、记忆、prompt 构造器、模型后端、子代理管理器和工具注册表。
@@ -141,8 +152,9 @@ class SimpleAgent(
         _register_orchestration_tools(self)
 
 
+# LLM: _build_subagent_manager 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 用代理依赖和路径配置创建 SubAgentManager。
 def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
-    # LLM: dependency wiring is split so SimpleAgent.__init__ stays a composition facade.
     return SubAgentManager(
         paths["subagent_workspace"],
         local_store=agent.local_store,
@@ -152,6 +164,8 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
     )
 
 
+# LLM: _build_tool_registry 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 按工具配置创建 ToolRegistry 并注入工作区边界。
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
     workspace_root = agent.root.parent if (agent.root / "__main__.py").exists() else agent.root
     workspace_roots = [workspace_root, *[root for root in agent.workspace_roots if root != agent.root]]
@@ -171,6 +185,8 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
     )
 
 
+# LLM: _register_orchestration_tools 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把创建子代理、看板和 dispatch 编排工具注册到主代理工具表。
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CreateSubagentsTool(agent))
     agent.tools.register(SubagentBoardTool(agent))

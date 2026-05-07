@@ -1,6 +1,9 @@
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
 from __future__ import annotations
 
-"""LLM: thin entry point for soft detector rules.
+"""thin entry point for soft detector rules.
 
 新手说明:
 这个文件是检测器规则的主入口点，只做组合和导出。

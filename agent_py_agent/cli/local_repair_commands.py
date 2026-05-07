@@ -1,6 +1,9 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
-"""LLM: local doctor and local rebuild CLI commands.
+"""local doctor and local rebuild CLI commands.
 
 给人看的解释：
 这两个命令从 local_commands.py 拆出来，让那个文件不超 400 行。
@@ -20,6 +23,8 @@ from .local_doctor import build_local_doctor_report, rebuild_local_store
 from .models import LocalDoctorOptions, LocalRebuildOptions
 
 
+# LLM: cmd_local_doctor 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_local_doctor(args) -> int:
 
     agent = make_agent(args)
@@ -58,6 +63,8 @@ def cmd_local_doctor(args) -> int:
     return 0 if report["ok"] else 1
 
 
+# LLM: cmd_local_rebuild 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_local_rebuild(args) -> int:
 
     agent = make_agent(args)
@@ -75,8 +82,9 @@ def cmd_local_rebuild(args) -> int:
     return 0
 
 
+# LLM: _local_doctor_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _local_doctor_options(args) -> LocalDoctorOptions:
-    # LLM: local repair commands consume argparse once, then use small options bundles.
     return LocalDoctorOptions(
         repair=bool(args.repair),
         limit=int(args.limit or 0),
@@ -84,6 +92,8 @@ def _local_doctor_options(args) -> LocalDoctorOptions:
     )
 
 
+# LLM: _local_rebuild_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _local_rebuild_options(args) -> LocalRebuildOptions:
     return LocalRebuildOptions(
         sources=set(args.source or ["memory", "gateway", "subagent", "fts"]),

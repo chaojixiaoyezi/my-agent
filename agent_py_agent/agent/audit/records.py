@@ -1,3 +1,6 @@
+# LLM: Audit module; keep JSONL entry shape and query filters stable.
+# 模块用途: 记录和查询关键操作审计事件，支持后续排查和治理。
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
@@ -5,6 +8,8 @@ from enum import Enum
 from typing import Any
 
 
+# LLM: AuditAction is a 审计系统 boundary object; coordinate field or method changes with callers, docs, and focused tests.
+# 类用途: 审计动作枚举。
 class AuditAction(str, Enum):
     """审计动作枚举。"""
 
@@ -26,6 +31,8 @@ class AuditAction(str, Enum):
     GATEWAY_RESPONSE = "GATEWAY_RESPONSE"
 
 
+# LLM: AuditStatus is a 审计系统 boundary object; coordinate field or method changes with callers, docs, and focused tests.
+# 类用途: 审计状态枚举。
 class AuditStatus(str, Enum):
     """审计状态枚举。"""
 
@@ -34,6 +41,8 @@ class AuditStatus(str, Enum):
     ERROR = "error"
 
 
+# LLM: AuditEntry is a 审计系统 boundary object; coordinate field or method changes with callers, docs, and focused tests.
+# 类用途: 审计日志条目。
 @dataclass
 class AuditEntry:
     """审计日志条目。"""
@@ -50,16 +59,22 @@ class AuditEntry:
     ip_address: str = ""
     user_agent: str = ""
 
+    # LLM: AuditEntry.to_dict belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
+    # 函数用途: 转换为字典。。
     def to_dict(self) -> dict[str, Any]:
         """转换为字典。"""
         return asdict(self)
 
+    # LLM: AuditEntry.from_dict belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
+    # 函数用途: 从字典创建。。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AuditEntry:
         """从字典创建。"""
         return cls(**data)
 
 
+# LLM: LogParams is a 审计系统 boundary object; coordinate field or method changes with callers, docs, and focused tests.
+# 类用途: Bundle of AuditLogger.log parameters.
 @dataclass(frozen=True)
 class LogParams:
     """Bundle of AuditLogger.log parameters."""
@@ -75,6 +90,8 @@ class LogParams:
     user_agent: str = ""
 
 
+# LLM: normalize_log_params belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
+# 函数用途: 把新旧两种 log 调用形式统一成 LogParams。。
 def normalize_log_params(
     params: LogParams | AuditAction | str | None,
     *,
@@ -108,6 +125,8 @@ def normalize_log_params(
     raise TypeError("log() requires LogParams or action")
 
 
+# LLM: enum_value belongs to 审计系统; keep caller-visible returns, errors, and side effects aligned with focused tests.
+# 函数用途: 完成 审计系统 里的 enum_value 步骤，保持现有返回值、异常和副作用语义。
 def enum_value(value: Any) -> Any:
     return value.value if isinstance(value, Enum) else value
 

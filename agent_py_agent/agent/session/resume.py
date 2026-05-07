@@ -1,3 +1,6 @@
+# LLM: Session runtime module; keep conversation state and persistence contracts stable.
+# 模块用途: 维护会话运行时状态、上下文和持久化边界。
+
 from __future__ import annotations
 
 import json
@@ -10,6 +13,8 @@ if TYPE_CHECKING:
 from .manager import SessionManager
 
 
+# LLM: resume_session 属于跨通道会话管理的函数边界；调整时先确认会话归属、上下文同步和用户隔离仍按原契约工作。
+# 函数用途: 处理恢复会话相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持会话归属、上下文同步和用户隔离上的返回值和副作用边界稳定。
 def resume_session(agent: SimpleAgent, session_id: str) -> dict:
     """恢复会话上下文."""
     manager = SessionManager(agent.config)
@@ -21,6 +26,8 @@ def resume_session(agent: SimpleAgent, session_id: str) -> dict:
     return {"session": session, "recent_memories": recent_memories, "subagent_context": subagent_context}
 
 
+# LLM: _load_recent_memories 属于跨通道会话管理的函数边界；调整时先确认会话归属、上下文同步和用户隔离仍按原契约工作。
+# 函数用途: 读取或查询recentmemories需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _load_recent_memories(config, session_id: str) -> list[dict]:
     """Load recent memories for a session from memory.jsonl."""
     try:
@@ -32,6 +39,8 @@ def _load_recent_memories(config, session_id: str) -> list[dict]:
     return _recent_memory_records(memory_path, session_id)
 
 
+# LLM: _recent_memory_records 属于跨通道会话管理的函数边界；调整时先确认会话归属、上下文同步和用户隔离仍按原契约工作。
+# 函数用途: 处理recent记忆记录相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动会话归属、上下文同步和用户隔离，调用方依赖写入顺序和文件格式。
 def _recent_memory_records(memory_path: Path, session_id: str) -> list[dict]:
     try:
         lines = memory_path.read_text(encoding="utf-8").strip().split("\n")
@@ -44,6 +53,8 @@ def _recent_memory_records(memory_path: Path, session_id: str) -> list[dict]:
     ]
 
 
+# LLM: _parse_memory_line 属于跨通道会话管理的函数边界；调整时先确认会话归属、上下文同步和用户隔离仍按原契约工作。
+# 函数用途: 解析并归一化记忆line的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _parse_memory_line(line: str, session_id: str) -> dict | None:
     """Parse one memory line and return it if session_id matches."""
     if not line:
@@ -57,6 +68,8 @@ def _parse_memory_line(line: str, session_id: str) -> dict | None:
     return None
 
 
+# LLM: _load_subagent_context 属于跨通道会话管理的函数边界；调整时先确认会话归属、上下文同步和用户隔离仍按原契约工作。
+# 函数用途: 读取或查询子代理上下文需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _load_subagent_context(agent: SimpleAgent, session_id: str) -> list[dict]:
     """Load subagent context for a session."""
     subagent_context: list[dict] = []
@@ -72,6 +85,8 @@ def _load_subagent_context(agent: SimpleAgent, session_id: str) -> list[dict]:
     return subagent_context
 
 
+# LLM: _append_subagent_context_item 属于跨通道会话管理的函数边界；调整时先确认会话归属、上下文同步和用户隔离仍按原契约工作。
+# 函数用途: 写入子代理上下文条目的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动会话归属、上下文同步和用户隔离，调用方依赖写入顺序和文件格式。
 def _append_subagent_context_item(subagent_context: list[dict], item, session_id: str) -> None:
     if not (hasattr(item, "metadata") and item.metadata.get("session_id") == session_id):
         return
@@ -83,6 +98,8 @@ def _append_subagent_context_item(subagent_context: list[dict], item, session_id
     })
 
 
+# LLM: format_resume_context 属于跨通道会话管理的函数边界；调整时先确认会话归属、上下文同步和用户隔离仍按原契约工作。
+# 函数用途: 渲染或汇总恢复上下文的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def format_resume_context(resume_data: dict) -> str:
     if resume_data.get("error"):
         return f"恢复失败: {resume_data['error']}"

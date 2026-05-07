@@ -1,4 +1,7 @@
-"""LLM: helper functions for building acceptance review findings.
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
+"""helper functions for building acceptance review findings.
 
 This module is a backward-compatibility stub. Actual implementations have been
 moved to the acceptance_helpers/ subdirectory.

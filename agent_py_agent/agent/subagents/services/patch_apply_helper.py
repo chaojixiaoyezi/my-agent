@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 """Patch apply task helper for backward-compatible inline implementation."""
 
 from __future__ import annotations
@@ -7,12 +10,16 @@ import time
 from agent_py_agent.agent.subagents.reports import PatchApplyRecord
 
 
+# LLM: PatchApplyTaskHelper 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 封装补丁应用任务辅助相关状态和行为，维持当前模块的职责边界；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 class PatchApplyTaskHelper:
     """Handles inline patch apply task logic for backward compatibility.
 
     This helper is used when _patch_apply_service is not initialized.
     """
 
+    # LLM: apply_patch_task 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 更新补丁任务对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、报告记录和持久化副作用，需避免破坏既有状态机约定。
     @staticmethod
     def apply_patch_task(
         task,
@@ -25,7 +32,7 @@ class PatchApplyTaskHelper:
         note: str = "",
     ):
         """Apply patches for a single task (inline minimal implementation)."""
-        # LLM: fallback mirrors the bundle-first service path when the service is not initialized.
+        # LLM: 服务未初始化时，兜底路径仍镜像“参数包优先”的服务流程。
         apply, applier, note, patches = _coerce_apply_patch_inputs(
             params,
             apply=apply,
@@ -61,12 +68,16 @@ class PatchApplyTaskHelper:
         )
 
 
+# LLM: _coerce_apply_patch_inputs 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 解析并归一化补丁inputs的输入形态，让下游只处理稳定结构；关键副作用: 会更新任务状态、报告记录和持久化副作用，需避免破坏既有状态机约定。
 def _coerce_apply_patch_inputs(params, *, apply, applier, note, patches):
     if params is None:
         return apply, applier, note, patches or []
     return params.apply, params.applier, params.note, params.patches
 
 
+# LLM: _blocked_and_invalid_patch_items 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理blockedinvalid补丁条目相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _blocked_and_invalid_patch_items(patches):
     blocked = [
         item for item in patches
@@ -79,6 +90,8 @@ def _blocked_and_invalid_patch_items(patches):
     return blocked, invalid
 
 
+# LLM: _patch_apply_decision 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理补丁应用decision相关的数据流，连接当前职责的前后步骤；关键副作用: 会更新任务状态、报告记录和持久化副作用，需避免破坏既有状态机约定。
 def _patch_apply_decision(patches, ok):
     if not patches:
         return "NO_PATCHES"

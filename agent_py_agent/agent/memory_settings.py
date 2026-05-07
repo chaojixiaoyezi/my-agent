@@ -1,6 +1,9 @@
+# LLM: Agent package module; keep public imports and cross-module compatibility stable.
+# 模块用途: 提供 agent 核心功能的一部分，对外暴露稳定入口或兼容转发。
+
 from __future__ import annotations
 
-"""LLM: compatibility facade for memory settings moved to `agent.settings.memory`.
+"""compatibility facade for memory settings moved to `agent.settings.memory`.
 
 给人看的解释：
 memory 配置安全解析的真实实现已经放到 `agent_py_agent.agent.settings.memory`。

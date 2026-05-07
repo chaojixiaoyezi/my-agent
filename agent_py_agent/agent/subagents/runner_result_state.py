@@ -1,6 +1,9 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-"""LLM: task state mutation rules for runner result recording.
+"""task state mutation rules for runner result recording.
 
 给人看的解释：
 runner 写回状态的分支比较多，单独放这里，manager mixin 只负责串起读写流程。
@@ -11,9 +14,10 @@ from dataclasses import dataclass
 from .policies import _status_from_structured_output, _verification_from_runner_status
 
 
+# LLM: RunnerResultFieldParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存执行器结果字段参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class RunnerResultFieldParams:
-    """LLM: bundle runner result mutation inputs."""
 
     task: object
     result_meta: dict
@@ -22,9 +26,10 @@ class RunnerResultFieldParams:
     now: float
 
 
+# LLM: RunnerAttemptParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存执行器attempt参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class RunnerAttemptParams:
-    """LLM: bundle runner attempt counters and last-error state."""
 
     task: object
     dry_run: bool
@@ -33,6 +38,8 @@ class RunnerAttemptParams:
     now: float
 
 
+# LLM: apply_runner_result_fields 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 更新执行器结果字段对应的任务或运行状态，并保留既有字段语义；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def apply_runner_result_fields(params: RunnerResultFieldParams) -> None:
     """Apply parsed runner status and raw fallback status to a task in place."""
     task = params.task
@@ -64,6 +71,8 @@ def apply_runner_result_fields(params: RunnerResultFieldParams) -> None:
     result_meta["message"] = message
 
 
+# LLM: _apply_status_fields 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 更新状态字段对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def _apply_status_fields(task, status_context, parsed) -> None:
     status = status_context["status"]
     verification_status = status_context["verification_status"]
@@ -88,6 +97,8 @@ def _apply_status_fields(task, status_context, parsed) -> None:
         task.failure_type = failure_type
 
 
+# LLM: _apply_unstructured_failure 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 更新unstructured失败对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def _apply_unstructured_failure(task, ok, failure_type: str) -> None:
     if failure_type:
         task.failure_type = failure_type
@@ -95,6 +106,8 @@ def _apply_unstructured_failure(task, ok, failure_type: str) -> None:
         task.failure_type = task.failure_type or "runner_error"
 
 
+# LLM: _apply_runner_timestamps 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 更新执行器timestamps对应的任务或运行状态，并保留既有字段语义；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _apply_runner_timestamps(task, now: float) -> None:
     if task.status in {"DONE", "FAILED", "BLOCKED", "CHANNEL_ERROR", "TIMEOUT"}:
         task.ended_at = now
@@ -102,6 +115,8 @@ def _apply_runner_timestamps(task, now: float) -> None:
     task.heartbeat_at = now
 
 
+# LLM: _apply_runner_attempt_fields 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 更新执行器attempt字段对应的任务或运行状态，并保留既有字段语义；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _apply_runner_attempt_fields(params: RunnerAttemptParams) -> None:
     task = params.task
     if params.dry_run:

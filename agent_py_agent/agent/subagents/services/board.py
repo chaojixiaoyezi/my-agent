@@ -1,6 +1,9 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-"""LLM: board and action planning service for subagent tasks.
+"""board and action planning service for subagent tasks.
 
 给人看的解释：
 这里承接看板构建、due-check 巡检、动作计划生成等逻辑。
@@ -34,6 +37,8 @@ if TYPE_CHECKING:
     from ..capability_config import CapabilityConfig
 
 
+# LLM: _build_risk_flags 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 构建riskflags所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _build_risk_flags(
     task: SubAgentTask,
     open_request_count: int,
@@ -60,6 +65,8 @@ def _build_risk_flags(
     return flags
 
 
+# LLM: _to_board_item 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 转换看板条目的数据表示，保持跨模块传递时的字段含义一致；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _to_board_item(
     manager: Any,
     task: SubAgentTask,
@@ -103,6 +110,8 @@ def _to_board_item(
     )
 
 
+# LLM: _child_status_counts 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理子级状态counts相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _child_status_counts(manager: Any, task: SubAgentTask) -> dict[str, int]:
     counts: dict[str, int] = {}
     for child_id in task.child_ids:
@@ -115,12 +124,18 @@ def _child_status_counts(manager: Any, task: SubAgentTask) -> dict[str, int]:
     return counts
 
 
+# LLM: SubAgentBoardService 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 封装subagent看板服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 class SubAgentBoardService:
     """Board, due-check, and action planning service."""
 
+    # LLM: __init__ 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def __init__(self, manager: Any):
         self.manager = manager
 
+    # LLM: build_board 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 构建看板所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def build_board(
         self,
         *,
@@ -146,6 +161,8 @@ class SubAgentBoardService:
             items=items,
         )
 
+    # LLM: due_check 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理到期检查相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
     def due_check(self, config: CapabilityConfig | None = None) -> DueCheckReport:
         """Inspect all subagent runs to find issues needing parent intervention."""
         if config is None and hasattr(self.manager, "_make_default_capability_config"):
@@ -175,6 +192,8 @@ class SubAgentBoardService:
             summary[issue.kind] = summary.get(issue.kind, 0) + 1
         return DueCheckReport(generated_at=now, summary=summary, issues=issues)
 
+    # LLM: plan_actions 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理计划动作相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def plan_actions(self, config: CapabilityConfig | None = None) -> ActionPlanReport:
         """Convert due-check issues into a dry-run action plan."""
         due_report = self.due_check(config)
@@ -219,6 +238,8 @@ class SubAgentBoardService:
         return ActionPlanReport(generated_at=time.time(), summary=summary, actions=actions)
 
 
+# LLM: _board_options 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理看板选项相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _board_options(
     options: SubAgentBoardOptions | None,
     *,
@@ -228,5 +249,5 @@ def _board_options(
         if not isinstance(options, SubAgentBoardOptions):
             raise TypeError("build_board requires options: SubAgentBoardOptions")
         return options
-    # LLM: board services normalize the legacy recent_limit into an options bundle.
+    # LLM: 看板服务把旧 recent_limit 入口归一到选项参数包。
     return SubAgentBoardOptions(recent_limit=recent_limit)

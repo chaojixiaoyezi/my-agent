@@ -1,6 +1,9 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 from __future__ import annotations
 
-"""LLM: public facade for recovery and compression snapshot writes.
+"""public facade for recovery and compression snapshot writes.
 
 新手说明:
 这个包的公开导入路径保持不变；具体构造和写入实现拆到内部模块，
@@ -41,16 +44,22 @@ from ._types import (
 from ._writers import _write_compression_snapshot_impl, _write_recovery_snapshot_impl
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 register_compression_hook 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 register compression hook 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def register_compression_hook(hook: CompressionHook) -> None:
     """Register a callback that runs before every compression."""
     _compression_hooks.append(hook)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 clear_compression_hooks 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 clear compression hooks 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def clear_compression_hooks() -> None:
     """Remove all registered compression hooks."""
     _compression_hooks.clear()
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 on_before_compression 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 on before compression 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def on_before_compression(
     root: str | Path,
     *,
@@ -94,6 +103,8 @@ def on_before_compression(
     return write_compression_snapshot(root, params=params)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 write_recovery_snapshot 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write recovery snapshot 相关记录，集中处理目标路径、格式化和状态更新。
 def write_recovery_snapshot(
     root: str | Path,
     *,
@@ -137,6 +148,8 @@ def write_recovery_snapshot(
     return _write_recovery_snapshot_impl(root, params)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 write_compression_snapshot 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write compression snapshot 相关记录，集中处理目标路径、格式化和状态更新。
 def write_compression_snapshot(
     root: str | Path,
     *,

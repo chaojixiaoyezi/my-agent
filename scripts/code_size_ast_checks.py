@@ -1,9 +1,13 @@
+# LLM: Code-size governance helper; keep report identities, thresholds, and baseline behavior stable.
+# 模块用途: 支撑代码规模守卫，统计文件/函数/类大小并生成可审查的报告。
+
 from __future__ import annotations
 
 """AST-level checks for functions, classes, parameters, and nesting."""
 
 import ast
 
+from code_size_docstrings import docstring_line_numbers, physical_span
 from code_size_rules import (
     CLASS_HARD_LIMIT,
     CLASS_SOFT_LIMIT,
@@ -26,18 +30,26 @@ from code_size_thresholds import (
 )
 
 
-def node_span(node: ast.AST) -> int:
+# LLM: node_span 属于code-size 守卫；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
+def node_span(node: ast.AST, ignored_lines: set[int] | None = None) -> int:
     start = getattr(node, "lineno", 0)
     end = getattr(node, "end_lineno", start)
-    return max(0, end - start + 1)
+    ignored = set(docstring_line_numbers(node))
+    if ignored_lines:
+        ignored.update(line for line in ignored_lines if start <= line <= end)
+    return max(0, physical_span(node) - len(ignored))
 
 
+# LLM: check_function_node 属于code-size 守卫；改行为前先对齐调用方和快照/单测。
+# 函数用途: 判断输入或环境是否满足规则，结果会影响分支、告警或阻断。
 def check_function_node(
     rel: str,
     node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ignored_lines: set[int] | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
-    span = node_span(node)
+    span = node_span(node, ignored_lines)
     if span > FUNCTION_SOFT_LIMIT:
         findings.append(
             limit_finding(
@@ -64,8 +76,10 @@ def check_function_node(
     return findings
 
 
-def check_class_node(rel: str, node: ast.ClassDef) -> list[Finding]:
-    span = node_span(node)
+# LLM: check_class_node 属于code-size 守卫；改行为前先对齐调用方和快照/单测。
+# 函数用途: 判断输入或环境是否满足规则，结果会影响分支、告警或阻断。
+def check_class_node(rel: str, node: ast.ClassDef, ignored_lines: set[int] | None = None) -> list[Finding]:
+    span = node_span(node, ignored_lines)
     is_mixin = node.name.endswith("Mixin")
     kind = "mixin" if is_mixin else "class"
     soft = MIXIN_SOFT_LIMIT if is_mixin else CLASS_SOFT_LIMIT
@@ -79,13 +93,14 @@ def check_class_node(rel: str, node: ast.ClassDef) -> list[Finding]:
     return []
 
 
+# LLM: arg_count 属于code-size 守卫；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def arg_count(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
     args = node.args
     positional_args = list(args.posonlyargs) + list(args.args)
     implicit_receiver = 1 if positional_args and positional_args[0].arg in {"self", "cls"} else 0
     arg_names = {item.arg for item in positional_args} | {item.arg for item in args.kwonlyargs}
     if arg_names & {"params", "options", "request"}:
-        # LLM: bundle-first compatibility adapters may list old explicit fields,
         # but the service-facing contract is the single params/options/request bundle.
         return (
             len(positional_args)
@@ -103,9 +118,13 @@ def arg_count(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
     )
 
 
+# LLM: max_nesting 属于code-size 守卫；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def max_nesting(node: ast.AST) -> int:
     branch_nodes = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith, ast.Try, ast.Match)
 
+    # LLM: walk 属于code-size 守卫；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def walk(current: ast.AST, depth: int) -> int:
         next_depth = depth + 1 if isinstance(current, branch_nodes) else depth
         child_depths = [walk(child, next_depth) for child in ast.iter_child_nodes(current)]

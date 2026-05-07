@@ -1,6 +1,9 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
-"""LLM: subagents subcommand registration helpers.
+"""subagents subcommand registration helpers.
 
 给人看的解释：
 这个文件包含子代理相关子命令的注册函数。
@@ -29,6 +32,8 @@ from .subagents import (
 )
 
 
+# LLM: _add_capability_config_arg 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--capability-config",
@@ -37,6 +42,8 @@ def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
     )
 
 
+# LLM: _add_agents_basic_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_agents_basic_subcommands(sub):
     spawn = sub.add_parser("spawn-subagents", help="拆分并创建 subagent 任务记录")
     spawn.add_argument("goal", help="要拆分的目标")
@@ -76,6 +83,8 @@ def _add_agents_basic_subcommands(sub):
     action_plan.set_defaults(func=cmd_subagents_plan_actions)
 
 
+# LLM: _add_agents_action_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_agents_action_subcommands(sub):
     apply_actions = sub.add_parser("subagents-apply-actions", help="执行或 dry-run 执行 action plan")
     _add_capability_config_arg(apply_actions)
@@ -118,8 +127,9 @@ def _add_agents_action_subcommands(sub):
     patches.add_argument("--note", help="写入 patch 审核记录的备注")
     patches.set_defaults(func=cmd_subagents_patches, patch_action="review_dry_run")
 
+# LLM: _add_agents_memory_gate_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_agents_memory_gate_subcommands(sub):
-    # LLM: memory-gate review is explicit and never performs memory/skill export.
     memory_gate = sub.add_parser("subagents-memory-gate", help="查看或写回 memory gate review decision")
     memory_gate.add_argument("run_id", help="子代理运行 ID")
     memory_gate_mode = memory_gate.add_mutually_exclusive_group()
@@ -143,6 +153,8 @@ def _add_agents_memory_gate_subcommands(sub):
     memory_gate.set_defaults(func=cmd_subagents_memory_gate)
 
 
+# LLM: _add_agents_dispatch_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_agents_dispatch_subcommands(sub):
     dispatch = sub.add_parser("subagents-dispatch", help="执行一轮父代理调度，默认 dry-run")
     _add_capability_config_arg(dispatch)
@@ -168,6 +180,8 @@ def _add_agents_dispatch_subcommands(sub):
     dispatch.set_defaults(func=cmd_subagents_dispatch, apply=False)
 
 
+# LLM: _add_agents_context_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_agents_context_subcommands(sub):
     subagent_context = sub.add_parser("subagent-context", help="生成单个 subagent 执行上下文包")
     subagent_context.add_argument("run_id", help="子代理运行 ID")
@@ -188,6 +202,8 @@ def _add_agents_context_subcommands(sub):
     subagent.set_defaults(func=cmd_subagent_detail)
 
 
+# LLM: add_subagents_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 注册 argparse 参数和子命令，决定用户可见的命令形状。
 def add_subagents_subcommands(sub: argparse._SubParsersAction) -> None:
     _add_agents_basic_subcommands(sub)
     _add_agents_action_subcommands(sub)

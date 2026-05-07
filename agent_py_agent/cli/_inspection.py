@@ -1,3 +1,6 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 
 from __future__ import annotations
 
@@ -9,6 +12,8 @@ from .common import make_agent
 from .models import SubagentContextOptions, SubagentsDueCheckOptions, SubagentsProbeOptions
 
 
+# LLM: cmd_subagents_due_check 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents_due_check(args) -> int:
 
     agent = make_agent(args)
@@ -36,6 +41,8 @@ def cmd_subagents_due_check(args) -> int:
     return 0
 
 
+# LLM: cmd_subagents_probe 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents_probe(args) -> int:
 
     agent = make_agent(args)
@@ -61,6 +68,8 @@ def cmd_subagents_probe(args) -> int:
     return 0
 
 
+# LLM: cmd_subagent_context 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagent_context(args) -> int:
 
     agent = make_agent(args)
@@ -76,14 +85,19 @@ def cmd_subagent_context(args) -> int:
     return 0
 
 
+# LLM: _subagents_due_check_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _subagents_due_check_options(args) -> SubagentsDueCheckOptions:
-    # LLM: inspection commands keep argparse at the edge and pass small options bundles inward.
     return SubagentsDueCheckOptions(all=bool(args.all), limit=int(args.limit or 0))
 
 
+# LLM: _subagents_probe_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _subagents_probe_options(args) -> SubagentsProbeOptions:
     return SubagentsProbeOptions(run_ids=args.run_id or None, limit=int(args.limit or 0))
 
 
+# LLM: _subagent_context_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _subagent_context_options(args) -> SubagentContextOptions:
     return SubagentContextOptions(run_id=args.run_id, max_cards=int(args.max_cards or 0))

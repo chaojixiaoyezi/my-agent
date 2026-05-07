@@ -1,3 +1,6 @@
+# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
+# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
+
 
 from __future__ import annotations
 
@@ -21,11 +24,15 @@ CONTEXT_WINDOW = 200_000
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
+# LLM: progress_bar 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def progress_bar(ratio: float, width: int = 10) -> str:
     filled = int(ratio * width)
     return "█" * filled + "░" * (width - filled)
 
 
+# LLM: collapse_response_text 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def collapse_response_text(text: str) -> tuple[str, bool]:
     lines = text.splitlines()
     if len(lines) <= COLLAPSE_PREVIEW_LINES and len(text) <= COLLAPSE_PREVIEW_CHARS:
@@ -38,6 +45,8 @@ def collapse_response_text(text: str) -> tuple[str, bool]:
     return preview, True
 
 
+# LLM: startup_banner 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def startup_banner(agent_name: str, *, use_gateway: bool) -> str:
     mode = "gateway client" if use_gateway else "local runtime"
     return "\n".join(
@@ -50,25 +59,35 @@ def startup_banner(agent_name: str, *, use_gateway: bool) -> str:
     )
 
 
+# LLM: terminal_rule 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def terminal_rule(char: str = "─", *, fallback: int = 119) -> str:
     width = max(20, shutil.get_terminal_size(fallback=(fallback, 24)).columns)
     return f"{GRAY}{char * width}{RESET}"
 
 
+# LLM: strip_ansi 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
+# LLM: style_text 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def style_text(text: str, *codes: str) -> str:
     if not codes or not supports_ansi():
         return text
     return "".join(codes) + text + RESET
 
 
+# LLM: color_text 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def color_text(text: str, color: str) -> str:
     return style_text(text, color)
 
 
+# LLM: supports_ansi 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def supports_ansi() -> bool:
     if os.environ.get("NO_COLOR") or os.environ.get("MY_AGENT_NO_COLOR"):
         return False
@@ -82,6 +101,8 @@ def supports_ansi() -> bool:
     )
 
 
+# LLM: _windows_vt_enabled 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 @lru_cache(maxsize=1)
 def _windows_vt_enabled() -> bool:
     if os.name != "nt":

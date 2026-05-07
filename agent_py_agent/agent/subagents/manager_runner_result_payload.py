@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """Helpers for applying runner status and assembling runner result payloads."""
@@ -10,6 +13,8 @@ from .result_processors import _build_output_payload
 from .runner_result_state import RunnerResultFieldParams, apply_runner_result_fields
 
 
+# LLM: RecordRunnerResultParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存记录执行器结果参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class RecordRunnerResultParams:
     """Parameters for record_runner_result (18 fields replacing 18 positional params)."""
@@ -33,6 +38,8 @@ class RecordRunnerResultParams:
     structured_repair_error: str = ""
 
 
+# LLM: BuildAndPersistContext 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存buildpersist上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class BuildAndPersistContext:
     """Bundle for _build_and_persist_result to reduce parameter count."""
@@ -46,7 +53,7 @@ class BuildAndPersistContext:
     structured_evidence_count: int
     structured_request_count: int
     artifacts: list
-    # LLM: carry traceable evidence packets through payload assembly.
+    # LLM: 输出载荷组装时保留可追溯证据包，供父级验收继续读取。
     evidence_packets: list
     findings: list
     tests: list
@@ -57,6 +64,8 @@ class BuildAndPersistContext:
     now: float
 
 
+# LLM: _ApplyStatusParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存应用状态参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class _ApplyStatusParams:
     """Bundle for _apply_status_and_build_payload to reduce parameter count."""
@@ -81,6 +90,8 @@ class _ApplyStatusParams:
     next_actions: list
 
 
+# LLM: _BuildContextParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存build上下文参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class _BuildContextParams:
     """Bundle for _make_build_context to reduce parameter count."""
@@ -104,6 +115,8 @@ class _BuildContextParams:
     now: float
 
 
+# LLM: _ExtractedOutput 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存extractedoutput字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class _ExtractedOutput:
     """Bundle for _extract_parsed_output result tuple."""
@@ -123,6 +136,8 @@ class _ExtractedOutput:
     next_actions: list = field(default_factory=list)
 
 
+# LLM: _CapDataParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存capdata参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class _CapDataParams:
     """Bundle for _runner_make_cap_data to reduce parameter count."""
@@ -136,6 +151,8 @@ class _CapDataParams:
     structured_repair_error: str
 
 
+# LLM: _runner_compute_blockers 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 推进执行器computeblockers的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _runner_compute_blockers(ok, status, parsed, message):
     """Compute blockers list based on task state."""
     if not ok or status in {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}:
@@ -143,11 +160,15 @@ def _runner_compute_blockers(ok, status, parsed, message):
     return []
 
 
+# LLM: _runner_make_result_meta 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 推进执行器make结果meta的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _runner_make_result_meta(ok, message, response, dry_run):
     """Build result metadata dict."""
     return {"ok": ok, "message": message, "response": response, "dry_run": dry_run}
 
 
+# LLM: _runner_make_cap_data 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 推进执行器makecapdata的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _runner_make_cap_data(params: _CapDataParams):
     """Build capability data dict."""
     return {
@@ -161,9 +182,10 @@ def _runner_make_cap_data(params: _CapDataParams):
     }
 
 
+# LLM: _RunnerMetaParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存执行器meta参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class _RunnerMetaParams:
-    """LLM: bundle runner metadata fields."""
 
     dry_run: bool
     ok: bool
@@ -173,9 +195,10 @@ class _RunnerMetaParams:
     now: float
 
 
+# LLM: _ContextBuildRequest 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存上下文build请求字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class _ContextBuildRequest:
-    """LLM: bundle final context construction inputs."""
 
     params: RecordRunnerResultParams
     extracted: _ApplyStatusParams
@@ -183,6 +206,8 @@ class _ContextBuildRequest:
     state: dict
 
 
+# LLM: _runner_make_runner_meta 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 推进执行器make执行器meta的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _runner_make_runner_meta(params: _RunnerMetaParams):
     """Build runner metadata dict."""
     return {
@@ -195,6 +220,8 @@ def _runner_make_runner_meta(params: _RunnerMetaParams):
     }
 
 
+# LLM: _make_build_context 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 构建上下文所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _make_build_context(p: _BuildContextParams) -> BuildAndPersistContext:
     """Build BuildAndPersistContext from computed values."""
     return BuildAndPersistContext(
@@ -218,6 +245,8 @@ def _make_build_context(p: _BuildContextParams) -> BuildAndPersistContext:
     )
 
 
+# LLM: _output_payload_context 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理output载荷上下文相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _output_payload_context(extracted: _ApplyStatusParams, runner_meta: dict, cap_data: dict, blockers: list) -> OutputPayloadContext:
     """Build the payload context after task status has been applied."""
     return OutputPayloadContext(
@@ -249,6 +278,8 @@ def _output_payload_context(extracted: _ApplyStatusParams, runner_meta: dict, ca
     )
 
 
+# LLM: _build_context_params 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 构建上下文参数所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _build_context_params(request: _ContextBuildRequest) -> _BuildContextParams:
     """Bundle fields for final BuildAndPersistContext construction."""
     params = request.params
@@ -275,6 +306,8 @@ def _build_context_params(request: _ContextBuildRequest) -> _BuildContextParams:
     )
 
 
+# LLM: apply_status_and_build_payload 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 更新状态build载荷对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def apply_status_and_build_payload(
     params: RecordRunnerResultParams,
     extracted: _ApplyStatusParams,

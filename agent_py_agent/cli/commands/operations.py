@@ -1,6 +1,9 @@
+# LLM: CLI command registration module; keep parser wiring and command handler imports stable.
+# 模块用途: 组织某组命令行子命令，让用户能从 CLI 触发对应功能。
+
 from __future__ import annotations
 
-"""LLM: registers operational inspection commands.
+"""registers operational inspection commands.
 
 给人看的解释：
 这些命令用于通知和审计查询，属于运维/观察入口，不放在业务状态机里。
@@ -12,6 +15,8 @@ from ..audit_log_cmd import cmd_audit_log
 from ..notifications_cmd import cmd_notifications
 
 
+# LLM: add_operations_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 注册 argparse 参数和子命令，决定用户可见的命令形状。
 def add_operations_subcommands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
 
     notifications = subparsers.add_parser("notifications", help="查看未读通知")

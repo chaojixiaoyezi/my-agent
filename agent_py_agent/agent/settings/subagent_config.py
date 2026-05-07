@@ -1,4 +1,7 @@
-"""LLM: subagent limits and policies."""
+"""subagent limits and policies."""
+
+# LLM: 默认值会改变任务拆分和自动执行强度，调参需同步子代理测试。
+# 模块用途: 子代理数量、并发、自动化和验收策略配置模型。
 
 from __future__ import annotations
 
@@ -7,6 +10,8 @@ from dataclasses import dataclass, field
 __all__ = ["SubagentConfig"]
 
 
+# LLM: SubagentConfig 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: SubagentConfig 配置模型，保存 配置系统 的默认值和可调参数。
 @dataclass
 class SubagentConfig:
     """Subagent limits and automation policies."""

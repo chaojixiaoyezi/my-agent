@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 """Patch review task helper for backward-compatible inline implementation."""
 
 from __future__ import annotations
@@ -8,6 +11,8 @@ from dataclasses import dataclass
 from agent_py_agent.agent.subagents.patch.patch_service import PatchReviewTaskRequest
 
 
+# LLM: PatchReviewGroups 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 集中保存补丁审查groups字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class PatchReviewGroups:
     """Partitioned patch groups used to make a review decision."""
@@ -17,18 +22,22 @@ class PatchReviewGroups:
     applied: list[dict]
 
 
+# LLM: PatchReviewTaskHelper 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 封装补丁审查任务辅助相关状态和行为，维持当前模块的职责边界；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 class PatchReviewTaskHelper:
     """Handles inline patch review task logic for backward compatibility.
 
     This helper is used when _patch_review_service is not initialized.
     """
 
+    # LLM: review_patch_task 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理审查补丁任务相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     @staticmethod
     def review_patch_task(
         request: PatchReviewTaskRequest,
     ):
         """Review a single task's patches (inline implementation)."""
-        # LLM: fallback accepts the same request bundle as PatchReviewService for takeover safety.
+        # LLM: 兜底路径沿用补丁审查服务的请求包，避免接管流程遗漏审查输入。
         task = request.task
         patches = request.patches
         opts = request.options
@@ -61,6 +70,8 @@ class PatchReviewTaskHelper:
         )
 
 
+# LLM: _partition_patch_review_items 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 拆分补丁审查条目输入集合，给调度、验收或补丁处理提供分组结果；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _partition_patch_review_items(patches) -> PatchReviewGroups:
     blocked = [
         item
@@ -76,6 +87,8 @@ def _partition_patch_review_items(patches) -> PatchReviewGroups:
     return PatchReviewGroups(blocked, invalid, applied)
 
 
+# LLM: _patch_review_decision 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理补丁审查decision相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _patch_review_decision(patches, groups: PatchReviewGroups, ok):
     if not patches:
         return "NO_PATCHES", "没有 patch 需要审核。"

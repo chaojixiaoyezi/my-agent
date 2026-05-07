@@ -1,6 +1,9 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 from __future__ import annotations
 
-"""LLM: explicit exports from reviewed run-local candidates.
+"""explicit exports from reviewed run-local candidates.
 
 Human version:
 Review approval is not promotion. This module is the opt-in promotion step: it
@@ -18,6 +21,8 @@ from .memory_gate import memory_gate_paths
 from .memory_gate_candidates import memory_gate_review_queue_records, read_memory_gate_jsonl
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 MemoryGateExportRequest 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 MemoryGateExportRequest 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class MemoryGateExportRequest:
     """Export selector for one or more approved gate candidates."""
@@ -29,6 +34,8 @@ class MemoryGateExportRequest:
     output_dir: Path | str | None = None
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 MemoryGateExportResult 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 MemoryGateExportResult 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class MemoryGateExportResult:
     """Export result for memory or skill draft promotion."""
@@ -40,6 +47,8 @@ class MemoryGateExportResult:
     skipped: list[dict[str, object]]
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 export_approved_memory_candidates 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 export approved memory candidates 相关记录，集中处理目标路径、格式化和状态更新。
 def export_approved_memory_candidates(
     agent_run_workspace_root: Path,
     request: MemoryGateExportRequest,
@@ -59,6 +68,8 @@ def export_approved_memory_candidates(
     return MemoryGateExportResult(len(export_rows), len(skipped), paths.exports_jsonl, export_rows, skipped)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 export_approved_skill_sparks 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 export approved skill sparks 相关记录，集中处理目标路径、格式化和状态更新。
 def export_approved_skill_sparks(
     agent_run_workspace_root: Path,
     request: MemoryGateExportRequest,
@@ -77,6 +88,8 @@ def export_approved_skill_sparks(
     return MemoryGateExportResult(len(export_rows), len(skipped), paths.exports_jsonl, export_rows, skipped)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _partition_exportable 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 判断 partition exportable 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def _partition_exportable(
     candidates: list[dict[str, object]],
     request: MemoryGateExportRequest,
@@ -88,10 +101,14 @@ def _partition_exportable(
     return exported, skipped
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _matches_candidate 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 判断 matches candidate 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def _matches_candidate(candidate: dict[str, object], candidate_id: str) -> bool:
     return not candidate_id or str(candidate.get("candidate_id") or "") == candidate_id
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _memory_export_row 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 memory export row 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _memory_export_row(
     candidate: dict[str, object],
     request: MemoryGateExportRequest,
@@ -124,6 +141,8 @@ def _memory_export_row(
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _skill_export_row 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 skill export row 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _skill_export_row(
     candidate: dict[str, object],
     request: MemoryGateExportRequest,
@@ -149,6 +168,8 @@ def _skill_export_row(
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_skill_draft 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write skill draft 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_skill_draft(path: Path, row: dict[str, object]) -> None:
     # LLM: this is intentionally a draft markdown file, not a formal SKILL.md install target.
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -178,6 +199,8 @@ def _write_skill_draft(path: Path, row: dict[str, object]) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _mark_exported 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 mark exported 相关记录，集中处理目标路径、格式化和状态更新。
 def _mark_exported(
     candidates: list[dict[str, object]],
     export_rows: list[dict[str, object]],
@@ -197,6 +220,8 @@ def _mark_exported(
     return updated
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_gate_after_export 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write gate after export 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_gate_after_export(
     agent_run_workspace_root: Path,
     candidates: list[dict[str, object]],
@@ -210,6 +235,8 @@ def _write_gate_after_export(
     _merge_checkpoint(agent_run_workspace_root / "checkpoint.json", paths.exports_jsonl, rows)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _merge_checkpoint 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 merge checkpoint 涉及的字段，让后续匹配和存储使用同一形态。
 def _merge_checkpoint(checkpoint_path: Path, exports_jsonl: Path, rows: list[dict[str, object]]) -> None:
     checkpoint = _read_json_object(checkpoint_path)
     memory_gate = dict(checkpoint.get("memory_gate", {}) if isinstance(checkpoint.get("memory_gate"), dict) else {})
@@ -220,6 +247,8 @@ def _merge_checkpoint(checkpoint_path: Path, exports_jsonl: Path, rows: list[dic
     _write_json(checkpoint_path, checkpoint)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _read_json_object 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 读取 read json object 需要的文件、记录或配置，并整理成调用方可直接使用的结果。
 def _read_json_object(path: Path) -> dict[str, object]:
     if not path.exists():
         return {}
@@ -230,17 +259,23 @@ def _read_json_object(path: Path) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_json 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write json 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_jsonl 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write jsonl 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     content = "\n".join(json.dumps(record, ensure_ascii=False, sort_keys=True) for record in records)
     path.write_text((content + "\n") if content else "", encoding="utf-8")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _append_jsonl_many 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 append jsonl many 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_jsonl_many(path: Path, records: list[dict[str, object]]) -> None:
     if not records:
         return
@@ -250,10 +285,14 @@ def _append_jsonl_many(path: Path, records: list[dict[str, object]]) -> None:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _safe_segment 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 safe segment 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _safe_segment(value: str) -> str:
     return str(value or "candidate").replace("/", "_").replace("\\", "_").strip() or "candidate"
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _required_path 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 required path 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _required_path(value: Path | str | None, field_name: str) -> Path:
     # LLM: export destinations live in the request bundle so promotion cannot hide extra args.
     if value is None or str(value).strip() == "":
@@ -261,6 +300,8 @@ def _required_path(value: Path | str | None, field_name: str) -> Path:
     return Path(value)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _utc_iso 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 utc iso 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _utc_iso(value: float | None) -> str:
     timestamp = value if value is not None else datetime.now(timezone.utc).timestamp()
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()

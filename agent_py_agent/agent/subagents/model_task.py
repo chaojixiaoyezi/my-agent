@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """Subagent task and learning-candidate dataclasses."""
@@ -14,9 +17,10 @@ from .model_records import ChannelProbeCheck, TakeoverRecord
 from .quality_models import ContextManifest, QualityContract
 
 
+# LLM: EvidencePacket 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存证据packet字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class EvidencePacket:
-    """LLM: Evidence unit that backs a claim instead of trusting runner prose."""
 
     id: str = ""
     claim: str = ""
@@ -29,9 +33,10 @@ class EvidencePacket:
     created_at: float = 0.0
 
 
+# LLM: Finding 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存finding字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class Finding:
-    """LLM: Parent-readable conclusion that must cite evidence packets."""
 
     id: str = ""
     claim: str = ""
@@ -44,9 +49,10 @@ class Finding:
     created_at: float = 0.0
 
 
+# LLM: StatusReport 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存状态报告字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class StatusReport:
-    """LLM: Latest observable progress snapshot for task-tree control plane."""
 
     run_id: str = ""
     version: int = 0
@@ -63,6 +69,8 @@ class StatusReport:
     updated_at: float = 0.0
 
 
+# LLM: SubAgentTask 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存subagent任务字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class SubAgentTask:
     """Persistent run record for one subagent task."""
@@ -134,14 +142,14 @@ class SubAgentTask:
     bugs_file: str = ""
     skill_usage_file: str = ""
     skill_sparks_file: str = ""
-    # LLM: Phase 0 runtime memory task workspace paths mirror this legacy work order.
+    # LLM: 第 0 阶段运行记忆的任务工作区路径镜像旧工作单位置。
     task_workspace_dir: str = ""
     task_workspace_task_yaml: str = ""
     task_workspace_state_json: str = ""
     task_workspace_timeline_jsonl: str = ""
     task_workspace_summary_file: str = ""
     task_workspace_shared_dir: str = ""
-    # LLM: Phase 5 shared workspace fields expose task-local collaboration facts only.
+    # LLM: 第 5 阶段共享工作区字段只暴露任务本地协作事实。
     task_workspace_shared_blackboard: str = ""
     task_workspace_shared_messages_jsonl: str = ""
     task_workspace_shared_findings_jsonl: str = ""
@@ -150,7 +158,7 @@ class SubAgentTask:
     task_workspace_artifacts_dir: str = ""
     task_workspace_agents_dir: str = ""
     agent_run_workspace_dir: str = ""
-    # LLM: Phase 1 agent-run workspace files are task-local mirrors of the legacy run.
+    # LLM: 第 1 阶段代理运行工作区文件是旧运行目录的任务本地镜像。
     agent_run_agent_yaml: str = ""
     agent_run_state_json: str = ""
     agent_run_task_md: str = ""
@@ -170,7 +178,7 @@ class SubAgentTask:
     # LLM: Phase 3 artifact manifests normalize refs into summary/hash/path records.
     task_artifact_manifest_jsonl: str = ""
     agent_run_artifact_manifest_jsonl: str = ""
-    # LLM: Phase 4 compact chain fields point to checkpoint snapshots, not deleted context.
+    # LLM: 第 4 阶段压缩链字段指向检查点快照，不表示上下文已删除。
     agent_run_compaction_ledger_jsonl: str = ""
     agent_run_latest_compaction_summary_md: str = ""
     agent_run_latest_compaction_metadata_json: str = ""
@@ -221,6 +229,8 @@ class SubAgentTask:
     attributes: dict[str, object] = field(default_factory=dict)
 
 
+# LLM: LearningCandidate 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存learningcandidate字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class LearningCandidate:
     """Candidate lesson that may later be accepted into learning memory."""

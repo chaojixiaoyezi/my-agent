@@ -1,6 +1,9 @@
+# LLM: CLI command registration module; keep parser wiring and command handler imports stable.
+# 模块用途: 组织某组命令行子命令，让用户能从 CLI 触发对应功能。
+
 from __future__ import annotations
 
-"""LLM: registers task inspection and lifecycle commands.
+"""registers task inspection and lifecycle commands.
 
 给人看的解释：
 task-* 命令是任务事实源的外部入口；注册逻辑集中在这里，执行逻辑仍在 task_commands.py。
@@ -18,6 +21,8 @@ from ..task_commands import (
 )
 
 
+# LLM: add_task_subcommands 注册 task 命令树；参数名是用户可见接口。
+# 函数用途: 挂载 task list/show/search 等子命令和各自 handler。
 def add_task_subcommands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
 
     task_show = subparsers.add_parser("task-show", help="显示任务详情")

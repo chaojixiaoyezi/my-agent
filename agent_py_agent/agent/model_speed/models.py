@@ -1,6 +1,9 @@
+# LLM: Model-speed module; keep benchmark samples and interpolation data shapes stable.
+# 模块用途: 记录和估算模型速度，辅助超时、调度或容量判断。
+
 from __future__ import annotations
 
-"""LLM: model speed profiling data structures.
+"""model speed profiling data structures.
 
 给人看的解释：
 这里定义速度基准测试的数据结构。
@@ -15,6 +18,8 @@ if TYPE_CHECKING:
     pass
 
 
+# LLM: SpeedSample is a 模型速度评估 boundary object; coordinate field or method changes with callers, docs, and focused tests.
+# 类用途: 单个速度测点。
 @dataclass
 class SpeedSample:
     """单个速度测点。"""
@@ -23,9 +28,13 @@ class SpeedSample:
     output_tokens: int = 0
     latency_seconds: float = 0.0
 
+    # LLM: SpeedSample.total_tokens belongs to 模型速度评估; keep caller-visible returns, errors, and side effects aligned with focused tests.
+    # 函数用途: 完成 模型速度评估 里的 total_tokens 步骤，保持现有返回值、异常和副作用语义；会读取实例字段。
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
 
+    # LLM: SpeedSample.tokens_per_second belongs to 模型速度评估; keep caller-visible returns, errors, and side effects aligned with focused tests.
+    # 函数用途: 完成 模型速度评估 里的 tokens_per_second 步骤，保持现有返回值、异常和副作用语义；会读取实例字段。
     def tokens_per_second(self) -> float:
         total = self.total_tokens()
         if total == 0:
@@ -33,6 +42,8 @@ class SpeedSample:
         return total / max(0.001, self.latency_seconds)
 
 
+# LLM: SpeedProfile is a 模型速度评估 boundary object; coordinate field or method changes with callers, docs, and focused tests.
+# 类用途: 模型速度配置文件。
 @dataclass
 class SpeedProfile:
     """模型速度配置文件。"""
@@ -43,6 +54,8 @@ class SpeedProfile:
     samples: list[SpeedSample] = field(default_factory=list)
     interpolation_method: str = "log_linear"
 
+    # LLM: SpeedProfile.to_dict belongs to 模型速度评估; keep caller-visible returns, errors, and side effects aligned with focused tests.
+    # 函数用途: 转换成字典，用于 JSON 序列化。。
     def to_dict(self) -> dict:
         """转换成字典，用于 JSON 序列化。"""
         return {
@@ -60,6 +73,8 @@ class SpeedProfile:
             "interpolation_method": self.interpolation_method,
         }
 
+    # LLM: SpeedProfile.from_dict belongs to 模型速度评估; keep caller-visible returns, errors, and side effects aligned with focused tests.
+    # 函数用途: 从字典创建实例。。
     @classmethod
     def from_dict(cls, data: dict) -> SpeedProfile:
         """从字典创建实例。"""
@@ -73,6 +88,8 @@ class SpeedProfile:
             interpolation_method=data.get("interpolation_method", "log_linear"),
         )
 
+    # LLM: SpeedProfile.interpolate belongs to 模型速度评估; keep caller-visible returns, errors, and side effects aligned with focused tests.
+    # 函数用途: 根据输入大小插值预估耗时（秒）。。
     def interpolate(self, input_tokens: int, output_tokens: int) -> float:
         """根据输入大小插值预估耗时（秒）。"""
 
@@ -110,6 +127,8 @@ class SpeedProfile:
         return lower.latency_seconds * (1 - weight) + upper.latency_seconds * weight
 
 
+# LLM: _bounding_samples belongs to 模型速度评估; keep caller-visible returns, errors, and side effects aligned with focused tests.
+# 函数用途: 完成 模型速度评估 里的 _bounding_samples 步骤，保持现有返回值、异常和副作用语义。
 def _bounding_samples(
     samples: list[SpeedSample],
     total_tokens: int,
@@ -122,6 +141,8 @@ def _bounding_samples(
     return lower, upper
 
 
+# LLM: _choose_lower_sample belongs to 模型速度评估; keep caller-visible returns, errors, and side effects aligned with focused tests.
+# 函数用途: 完成 模型速度评估 里的 _choose_lower_sample 步骤，保持现有返回值、异常和副作用语义。
 def _choose_lower_sample(
     current: SpeedSample | None,
     sample: SpeedSample,
@@ -133,6 +154,8 @@ def _choose_lower_sample(
     return current
 
 
+# LLM: _choose_upper_sample belongs to 模型速度评估; keep caller-visible returns, errors, and side effects aligned with focused tests.
+# 函数用途: 完成 模型速度评估 里的 _choose_upper_sample 步骤，保持现有返回值、异常和副作用语义。
 def _choose_upper_sample(
     current: SpeedSample | None,
     sample: SpeedSample,

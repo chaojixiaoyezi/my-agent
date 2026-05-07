@@ -1,3 +1,6 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 
 from __future__ import annotations
 
@@ -10,6 +13,8 @@ from .common import make_agent, make_capability_router
 from .models import SubagentsCapabilityRouteOptions
 
 
+# LLM: cmd_subagents_plan_actions 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents_plan_actions(args) -> int:
 
     agent = make_agent(args)
@@ -34,6 +39,8 @@ def cmd_subagents_plan_actions(args) -> int:
     return 0
 
 
+# LLM: cmd_subagents_apply_actions 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents_apply_actions(args) -> int:
 
     agent = make_agent(args)
@@ -64,8 +71,9 @@ def cmd_subagents_apply_actions(args) -> int:
     return 0
 
 
+# LLM: _subagents_action_apply_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _subagents_action_apply_options(args) -> ActionApplyOptions:
-    # LLM: CLI owns argparse; manager receives the existing business options bundle.
     return ActionApplyOptions(
         apply=bool(getattr(args, "apply", False)),
         action_filter=getattr(args, "action", None) or "",
@@ -76,6 +84,8 @@ def _subagents_action_apply_options(args) -> ActionApplyOptions:
     )
 
 
+# LLM: cmd_subagents_route_capabilities 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents_route_capabilities(args) -> int:
 
     agent = make_agent(args)
@@ -113,8 +123,9 @@ def cmd_subagents_route_capabilities(args) -> int:
     return 0
 
 
+# LLM: _subagents_capability_route_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _subagents_capability_route_options(args) -> SubagentsCapabilityRouteOptions:
-    # LLM: route-capability CLI converts args to a typed bundle before manager calls.
     return SubagentsCapabilityRouteOptions(
         apply=bool(args.apply),
         run_ids=args.run_id or None,

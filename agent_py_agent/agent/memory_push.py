@@ -1,3 +1,6 @@
+# LLM: Agent package module; keep public imports and cross-module compatibility stable.
+# 模块用途: 提供 agent 核心功能的一部分，对外暴露稳定入口或兼容转发。
+
 """记忆推送模块。
 
 在关键决策点自动查询并注入相关记忆，实现"推模式"记忆系统。
@@ -16,6 +19,8 @@ if TYPE_CHECKING:
     from .memory_store import JsonlMemory
 
 
+# LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 MemoryType 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 定义 MemoryType 的合法枚举值，供序列化、分支判断和兼容旧数据使用。
 class MemoryType(str, Enum):
     """记忆类型枚举。
 
@@ -23,8 +28,7 @@ class MemoryType(str, Enum):
     - LESSON_TASK: 任务教训，有场景限制
     - LESSON_TEMP: 临时经验，单次有效
     - CONTEXT: 上下文记忆
-    - FACT: 事实
-    """
+    - FACT: 事实"""
 
     LESSON_GENERAL = "lesson_general"
     LESSON_TASK = "lesson_task"
@@ -32,6 +36,8 @@ class MemoryType(str, Enum):
     CONTEXT = "context"
     FACT = "fact"
 
+    # LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 from_string 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 从外部数据还原 from string 需要的领域对象，统一缺省值和兼容字段。
     @classmethod
     def from_string(cls, value: str) -> MemoryType:
         """从字符串创建 MemoryType，兼容旧记忆（无 type 标签的当作 LESSON_GENERAL）。"""
@@ -44,6 +50,8 @@ class MemoryType(str, Enum):
         return cls.LESSON_GENERAL
 
 
+# LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 TriggerType 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 定义 TriggerType 的合法枚举值，供序列化、分支判断和兼容旧数据使用。
 class TriggerType(str, Enum):
     """触发类型枚举。"""
 
@@ -53,6 +61,8 @@ class TriggerType(str, Enum):
     GENERAL = "general"
 
 
+# LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 MemoryEntry 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 MemoryEntry 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class MemoryEntry:
     """记忆条目结构。"""
@@ -67,6 +77,8 @@ class MemoryEntry:
     trigger_conditions: dict | None = None
     created_at: float = 0.0
 
+    # LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 to_dict 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 把 to dict 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_dict(self) -> dict:
         return {
             "type": self.type.value if isinstance(self.type, MemoryType) else self.type,
@@ -80,6 +92,8 @@ class MemoryEntry:
             "created_at": self.created_at,
         }
 
+    # LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 from_dict 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 从外部数据还原 from dict 需要的领域对象，统一缺省值和兼容字段。
     @classmethod
     def from_dict(cls, data: dict) -> MemoryEntry:
         type_val = data.get("type", "lesson_general")
@@ -100,6 +114,8 @@ class MemoryEntry:
             created_at=data.get("created_at", 0.0),
         )
 
+    # LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 to_memory_record_content 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 把 to memory record content 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_memory_record_content(self) -> str:
         """转换为简短的记忆文本，供注入到上下文使用。"""
         if self.lesson:
@@ -107,6 +123,8 @@ class MemoryEntry:
         return f"[{self.type.value}] {self.content[:100]}"
 
 
+# LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 push_relevant_memories 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 push relevant memories 在当前模块中的核心转换或协调步骤，衔接 记忆推送会查询 memory store 并生成注入文本或写入条目。
 def push_relevant_memories(
     agent,
     trigger_type: str,
@@ -126,6 +144,8 @@ def push_relevant_memories(
     return memories_text[:limit]
 
 
+# LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 _collect_memory_texts 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 收集或查询 collect memory texts 的候选结果，并按参数完成筛选、排序或数量限制。
 def _collect_memory_texts(records, trigger_type: str, limit: int) -> list[str]:
     # LLM: keep the public push path shallow while preserving record filtering order.
     values: list[str] = []
@@ -139,6 +159,8 @@ def _collect_memory_texts(records, trigger_type: str, limit: int) -> list[str]:
     return values
 
 
+# LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 _memory_text_from_record 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 memory text from record 在当前模块中的核心转换或协调步骤，衔接 记忆推送会查询 memory store 并生成注入文本或写入条目。
 def _memory_text_from_record(record, trigger_type: str) -> str:
     if not record.content or len(record.content) < 10:
         return ""
@@ -153,6 +175,8 @@ def _memory_text_from_record(record, trigger_type: str) -> str:
     return _extract_memory_text(entry, trigger_type)
 
 
+# LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 _build_memory_query 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 build memory query 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _build_memory_query(trigger_type: str, context: dict) -> str:
     """Build search query from trigger type and context."""
     query_parts = [trigger_type]
@@ -166,6 +190,8 @@ def _build_memory_query(trigger_type: str, context: dict) -> str:
     return " ".join(query_parts)
 
 
+# LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 _extract_memory_text 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 extract memory text 涉及的字段，让后续匹配和存储使用同一形态。
 def _extract_memory_text(entry: MemoryEntry, trigger_type: str) -> str:
     """Extract and filter memory text based on trigger type."""
     desired: set[MemoryType] = {
@@ -181,6 +207,8 @@ def _extract_memory_text(entry: MemoryEntry, trigger_type: str) -> str:
     return ""
 
 
+# LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 push_timeout_memories 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 push timeout memories 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def push_timeout_memories(agent, task_id: str, goal: str, timeout_count: int = 0) -> list[str]:
     """推送超时相关记忆。"""
     context = {
@@ -191,6 +219,8 @@ def push_timeout_memories(agent, task_id: str, goal: str, timeout_count: int = 0
     return push_relevant_memories(agent, TriggerType.TIMEOUT.value, context, limit=3)
 
 
+# LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 push_failure_memories 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 push failure memories 在当前模块中的核心转换或协调步骤，衔接 记忆推送会查询 memory store 并生成注入文本或写入条目。
 def push_failure_memories(agent, task_id: str, goal: str, failure_type: str) -> list[str]:
     """推送失败相关记忆。"""
     context = {
@@ -201,6 +231,8 @@ def push_failure_memories(agent, task_id: str, goal: str, failure_type: str) -> 
     return push_relevant_memories(agent, TriggerType.FAILURE.value, context, limit=3)
 
 
+# LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 push_planning_memories 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 push planning memories 在当前模块中的核心转换或协调步骤，衔接 记忆推送会查询 memory store 并生成注入文本或写入条目。
 def push_planning_memories(agent, task_id: str, goal: str) -> list[str]:
     """推送计划相关记忆。"""
     context = {
@@ -210,6 +242,8 @@ def push_planning_memories(agent, task_id: str, goal: str) -> list[str]:
     return push_relevant_memories(agent, TriggerType.PLANNING.value, context, limit=3)
 
 
+# LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 MemoryWriteContext 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 MemoryWriteContext 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class MemoryWriteContext:
     """Context for writing a typed memory entry."""
@@ -225,6 +259,8 @@ class MemoryWriteContext:
     role: str = "system"
 
 
+# LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 write_memory_with_type 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write memory with type 相关记录，集中处理目标路径、格式化和状态更新。
 def write_memory_with_type(
     memory: JsonlMemory,
     ctx: MemoryWriteContext,
@@ -233,8 +269,7 @@ def write_memory_with_type(
 
     Args:
         memory: JsonlMemory 实例
-        ctx: MemoryWriteContext 包含 content、mem_type 等字段
-    """
+        ctx: MemoryWriteContext 包含 content、mem_type 等字段"""
     # 构建扩展记忆内容（包含结构化字段）
     extended_content = ctx.content
     if ctx.lesson or ctx.action:
@@ -265,6 +300,8 @@ def write_memory_with_type(
     return record
 
 
+# LLM: 记忆推送会查询 memory store 并生成注入文本或写入条目；修改 format_memories_for_injection 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 format memories for injection 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def format_memories_for_injection(memories: list[str]) -> str:
     """格式化记忆列表，准备注入到上下文。
 
@@ -272,8 +309,7 @@ def format_memories_for_injection(memories: list[str]) -> str:
         memories: 记忆文本列表
 
     Returns:
-        格式化的字符串，每条记忆用换行分隔
-    """
+        格式化的字符串，每条记忆用换行分隔"""
     if not memories:
         return ""
 

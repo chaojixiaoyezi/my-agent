@@ -44,3 +44,8 @@
 ## 2026-05-06 code-size cleanup
 - Split log-analysis replay setup and stage execution into smaller parameterized helpers.
 - Kept live-lab replay behavior stable while reducing script-level near-soft code-size risk.
+
+## 2026-05-07 LLM annotation coverage update
+- `scripts/live_lab/` and related governance scripts now follow the same definition-level double-layer comments rule as product code: every module/class/function/method has `LLM:` plus `函数用途:` / `类用途:`.
+- This is a documentation/maintainability pass only; Live Lab suite behavior and artifact paths are intended to stay unchanged.
+- Added a code-size script regression test that scans non-test, non-runtime Python files so future changes cannot silently miss annotation coverage.

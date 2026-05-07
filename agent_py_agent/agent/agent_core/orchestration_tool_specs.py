@@ -1,3 +1,6 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 from __future__ import annotations
 
 from ..tools import ToolSpec
@@ -55,6 +58,8 @@ _DISPATCH_PARAMETER_DETAILS = {
 }
 
 
+# LLM: build_create_subagents_spec 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 构建子代理spec所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def build_create_subagents_spec() -> ToolSpec:
     return ToolSpec(
         name="create_subagents",
@@ -69,6 +74,8 @@ def build_create_subagents_spec() -> ToolSpec:
     )
 
 
+# LLM: build_subagent_board_spec 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 构建子代理看板spec所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def build_subagent_board_spec() -> ToolSpec:
     return ToolSpec(
         name="subagent_board",
@@ -82,6 +89,8 @@ def build_subagent_board_spec() -> ToolSpec:
     )
 
 
+# LLM: build_dispatch_subagents_spec 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 构建子代理spec所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def build_dispatch_subagents_spec() -> ToolSpec:
     return ToolSpec(
         name="dispatch_subagents",

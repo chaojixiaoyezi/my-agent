@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """LLM contract: SubAgentBoardMixin - thin facade delegating board service.
@@ -11,21 +14,31 @@ from .models import SubAgentBoardOptions, SubAgentDueCheckOptions
 from .services.board import SubAgentBoardService, _build_risk_flags, _to_board_item
 
 
+# LLM: SubAgentBoardMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 拆分subagent看板混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 class SubAgentBoardMixin:
     """Thin facade delegating board, due-check, and action planning to SubAgentBoardService."""
 
+    # LLM: _board_service 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理看板服务相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     @property
     def _board_service(self):
         if not hasattr(self, "__board_service"):
             self.__board_service = SubAgentBoardService(self)
         return self.__board_service
 
+    # LLM: _to_board_item 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 转换看板条目的数据表示，保持跨模块传递时的字段含义一致；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def _to_board_item(self, task):
         return _to_board_item(self, task)
 
+    # LLM: _risk_flags 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理riskflags相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def _risk_flags(self, task, open_request_count=0, open_gap_count=0):
         return _build_risk_flags(task, open_request_count, open_gap_count)
 
+    # LLM: build_board 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 构建看板所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def build_board(
         self,
         *,
@@ -35,6 +48,8 @@ class SubAgentBoardMixin:
         board_options = _board_options(options, recent_limit=recent_limit)
         return self._board_service.build_board(options=board_options)
 
+    # LLM: write_board 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 写入看板的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def write_board(
         self,
         *,
@@ -54,10 +69,14 @@ class SubAgentBoardMixin:
         )
         return board
 
+    # LLM: due_check 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理到期检查相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
     def due_check(self, config=None, *, params: SubAgentDueCheckOptions | None = None):
         options = _due_check_options(config=config, params=params, write_report=False)
         return self._board_service.due_check(options.config)
 
+    # LLM: write_due_check 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 写入到期检查的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def write_due_check(self, config=None, *, params: SubAgentDueCheckOptions | None = None):
         options = _due_check_options(config=config, params=params, write_report=True)
         report = self.due_check(params=options)
@@ -72,9 +91,13 @@ class SubAgentBoardMixin:
         )
         return report
 
+    # LLM: plan_actions 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理计划动作相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def plan_actions(self, config=None):
         return self._board_service.plan_actions(config)
 
+    # LLM: write_action_plan 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 写入动作计划的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def write_action_plan(self, config=None):
         report = self.plan_actions(config)
         import json
@@ -88,12 +111,15 @@ class SubAgentBoardMixin:
         )
         return report
 
-    # Internal helpers used by board service
+    # LLM: _filter_action_plan_items 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理filter动作计划条目相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def _filter_action_plan_items(self, actions, action_filter="", run_id="", limit=0):
         from .policies import _filter_action_plan_items as _filter_items
         return _filter_items(actions, action_filter=action_filter, run_id=run_id, limit=limit)
 
 
+# LLM: _due_check_options 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理到期检查选项相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _due_check_options(
     *,
     config,
@@ -104,10 +130,12 @@ def _due_check_options(
         if not isinstance(params, SubAgentDueCheckOptions):
             raise TypeError("due check requires params: SubAgentDueCheckOptions")
         return params
-    # LLM: due-check remains compatible with config positional calls while using an options bundle.
+    # LLM: 到期检查保留配置位置参数兼容性，内部使用选项参数包。
     return SubAgentDueCheckOptions(config=config, write_report=write_report)
 
 
+# LLM: _board_options 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理看板选项相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _board_options(
     options: SubAgentBoardOptions | None,
     *,
@@ -117,5 +145,5 @@ def _board_options(
         if not isinstance(options, SubAgentBoardOptions):
             raise TypeError("board requires options: SubAgentBoardOptions")
         return options
-    # LLM: board manager keeps recent_limit compatibility while using options internally.
+    # LLM: 看板管理器保留 recent_limit 兼容入口，内部改用选项对象。
     return SubAgentBoardOptions(recent_limit=recent_limit)

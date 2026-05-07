@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """Evidence-related acceptance finding builders."""
@@ -10,6 +13,8 @@ if TYPE_CHECKING:
     from ..models import SubAgentTask
 
 
+# LLM: build_evidence_findings 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 构建证据findings所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def build_evidence_findings(task: SubAgentTask, created_at: float) -> list[AcceptanceReviewFinding]:
     findings = _base_evidence_findings(task, created_at)
     acceptance_text = ";".join(task.acceptance_checks).lower()
@@ -20,6 +25,8 @@ def build_evidence_findings(task: SubAgentTask, created_at: float) -> list[Accep
     return findings
 
 
+# LLM: _base_evidence_findings 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理基础证据findings相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _base_evidence_findings(task: SubAgentTask, created_at: float) -> list[AcceptanceReviewFinding]:
     ok_evidence = [item for item in task.evidence if item.ok]
     bad_evidence = [item for item in task.evidence if not item.ok]
@@ -58,6 +65,8 @@ def _base_evidence_findings(task: SubAgentTask, created_at: float) -> list[Accep
     ]
 
 
+# LLM: _required_read_file_finding 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 校验requiredread文件finding需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _required_read_file_finding(task: SubAgentTask, created_at: float) -> AcceptanceReviewFinding:
     has_read = "read_file" in task.used_tools and any(
         item.ok
@@ -82,6 +91,8 @@ def _required_read_file_finding(task: SubAgentTask, created_at: float) -> Accept
     )
 
 
+# LLM: _required_write_file_finding 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 校验requiredwrite文件finding需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
 def _required_write_file_finding(task: SubAgentTask, created_at: float) -> AcceptanceReviewFinding:
     has_write = "write_file" in task.used_tools and any(
         item.ok

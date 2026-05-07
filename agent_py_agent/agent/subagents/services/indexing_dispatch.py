@@ -1,6 +1,9 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-"""LLM: dispatch record indexing helpers for SubAgentIndexingService."""
+"""dispatch record indexing helpers for SubAgentIndexingService."""
 
 from typing import TYPE_CHECKING, Any
 
@@ -11,6 +14,8 @@ if TYPE_CHECKING:
     from ..models import SubAgentExecutionContext
 
 
+# LLM: _index_dispatch_record_via 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理index调度记录via相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
 def _index_dispatch_record_via(
     manager_or_service: Any,
     record: DispatchRecord,
@@ -24,6 +29,8 @@ def _index_dispatch_record_via(
     )
 
 
+# LLM: _index_dispatch_watch_record_via 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理index调度监控记录via相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
 def _index_dispatch_watch_record_via(
     manager_or_service: Any,
     record: DispatchWatchRecord,
@@ -37,6 +44,8 @@ def _index_dispatch_watch_record_via(
     )
 
 
+# LLM: _index_parent_planner_record_via 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理index父级规划器记录via相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
 def _index_parent_planner_record_via(
     manager_or_service: Any,
     record: ParentPlannerRecord,
@@ -50,6 +59,8 @@ def _index_parent_planner_record_via(
     )
 
 
+# LLM: _index_execution_context_via 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理indexexecution上下文via相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _index_execution_context_via(
     manager_or_service: Any,
     context: SubAgentExecutionContext,

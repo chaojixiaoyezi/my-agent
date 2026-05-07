@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 """LLM contract: SubAgentLifecycleMixin - thin facade delegating to lifecycle service.
 
 Human version:
@@ -22,14 +25,18 @@ from .services.lifecycle import (
     SubAgentLifecycleService,
 )
 
-# LLM: lifecycle facade accepts bundle params while preserving legacy manager entrypoints.
+# LLM: 生命周期门面接收参数包，同时保留旧管理器入口兼容性。
 if TYPE_CHECKING:
     from ..local_store import LocalStore
 
 
+# LLM: SubAgentLifecycleMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 拆分subagent生命周期混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 class SubAgentLifecycleMixin:
     """Thin facade for lifecycle operations delegating to SubAgentLifecycleService."""
 
+    # LLM: _lifecycle_service 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理生命周期服务相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def _lifecycle_service(self):
         """Lazily get or create the lifecycle service."""
 
@@ -39,6 +46,8 @@ class SubAgentLifecycleMixin:
             self.lifecycle = lifecycle
         return lifecycle
 
+    # LLM: record_capability_request 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 写入能力请求的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def record_capability_request(
         self,
         run_id: str,
@@ -48,6 +57,8 @@ class SubAgentLifecycleMixin:
 
         return self._lifecycle_service().record_capability_request(run_id, params)
 
+    # LLM: record_capability_grant 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 写入能力grant的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def record_capability_grant(
         self,
         run_id: str,
@@ -56,6 +67,8 @@ class SubAgentLifecycleMixin:
         """Record a capability grant on a subagent task."""
         return self._lifecycle_service().record_capability_grant(run_id, params=params)
 
+    # LLM: record_capability_gap 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 写入能力缺口的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def record_capability_gap(
         self,
         run_id: str,
@@ -64,6 +77,8 @@ class SubAgentLifecycleMixin:
         """Record a capability gap on a subagent task."""
         return self._lifecycle_service().record_capability_gap(run_id, params=params)
 
+    # LLM: record_evidence 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 写入证据的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def record_evidence(
         self,
         run_id: str,
@@ -73,11 +88,15 @@ class SubAgentLifecycleMixin:
 
         return self._lifecycle_service().record_evidence(run_id, params)
 
+    # LLM: touch_heartbeat 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理touchheartbeat相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def touch_heartbeat(self, run_id: str) -> None:
         """Refresh subagent heartbeat timestamp."""
 
         self._lifecycle_service().touch_heartbeat(run_id)
 
+    # LLM: set_status 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 更新状态对应的任务或运行状态，并保留既有字段语义；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def set_status(
         self,
         params: str | SetStatusParams,
@@ -97,6 +116,8 @@ class SubAgentLifecycleMixin:
             require_evidence=require_evidence,
         )
 
+    # LLM: prepare_runner_attempt 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理prepare执行器attempt相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
     def prepare_runner_attempt(self, run_id: str, *, retry_reason: str = ""):
         """Prepare task for runner execution (set RUNNING, reset verification)."""
 
@@ -122,6 +143,8 @@ class SubAgentLifecycleMixin:
         )
         return task
 
+    # LLM: abandon_runner_attempt 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理abandon执行器attempt相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
     def abandon_runner_attempt(self, run_id: str, attempt_id: str, *, reason: str = ""):
         """Mark a runner attempt as abandoned."""
 

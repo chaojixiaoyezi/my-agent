@@ -1,6 +1,9 @@
+# LLM: Live Lab validation script; keep CLI flags, artifact paths, and replay outputs stable for scenario tests.
+# 模块用途: 支撑可见验收和回放场景，负责启动案例、整理输出或生成报告。
+
 from __future__ import annotations
 
-"""LLM: shared constants for the Live Lab CLI, runner, and cases.
+"""shared constants for the Live Lab CLI, runner, and cases.
 
 给人看的解释：
 这些是测试台所有模块都会用到的固定路径和 suite 定义。

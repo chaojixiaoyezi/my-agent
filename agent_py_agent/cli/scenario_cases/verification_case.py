@@ -1,6 +1,9 @@
+# LLM: CLI scenario case definition; keep fixture flow and expected gateway/subagent behavior stable.
+# 模块用途: 定义一类命令行情景测试，用来复现和验证端到端流程。
+
 from __future__ import annotations
 
-"""LLM: implements the verification scenario that proves the parent agent rejects forged artifacts and self-declared completion.
+"""implements the verification scenario that proves the parent agent rejects forged artifacts and self-declared completion.
 
 给人看的解释：
 这个文件验证父代理不会接受伪造 artifact / 自称完成。
@@ -20,6 +23,8 @@ from ..scenario_utils import (
 )
 
 
+# LLM: _forge_task_evidence 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _forge_task_evidence(agent):
     print_scenario_step(1, "构造伪造完成的子代理记录")
     task = agent.subagents.create_run(
@@ -46,6 +51,8 @@ def _forge_task_evidence(agent):
     return task
 
 
+# LLM: _write_forged_output_files 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 把报告、摘要或状态写入磁盘，保持输出路径和 JSON 字段稳定。
 def _write_forged_output_files(task):
     Path(task.output_json).write_text(
         json.dumps({
@@ -66,6 +73,8 @@ def _write_forged_output_files(task):
     )
 
 
+# LLM: _verification_setup 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _verification_setup(args):
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -79,6 +88,8 @@ def _verification_setup(args):
     return paths, agent, task
 
 
+# LLM: _print_acceptance_records 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_acceptance_records(report) -> None:
     for record in report.records:
         print(
@@ -89,12 +100,16 @@ def _print_acceptance_records(report) -> None:
         _print_failed_findings(record.findings)
 
 
+# LLM: _print_failed_findings 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_failed_findings(findings) -> None:
     for finding in findings:
         if not finding.ok:
             print(f"  [finding:{finding.severity}] {finding.name}: {finding.message}")
 
 
+# LLM: _verification_final_ok 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _verification_final_ok(report, loaded) -> bool:
     return (
         report.records
@@ -109,6 +124,8 @@ def _verification_final_ok(report, loaded) -> bool:
     )
 
 
+# LLM: run_scenario_verification_case 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_scenario_verification_case(args) -> int:
     paths, agent, task = _verification_setup(args)
 

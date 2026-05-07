@@ -1,6 +1,9 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-"""LLM: bridge legacy subagent work orders into runtime memory task workspaces."""
+"""bridge legacy subagent work orders into runtime memory task workspaces."""
 
 from pathlib import Path
 
@@ -8,6 +11,8 @@ from ...memory_archive.task_workspace import ensure_subagent_task_workspace
 from ..models import SubAgentTask
 
 
+# LLM: sync_task_workspace_fields 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理同步任务workspace字段相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def sync_task_workspace_fields(workspace: str | Path, task: SubAgentTask) -> None:
     """Create/update the task workspace adapter and copy its paths onto the task."""
 
@@ -17,6 +22,8 @@ def sync_task_workspace_fields(workspace: str | Path, task: SubAgentTask) -> Non
     _sync_runtime_refs(task, task_workspace_paths)
 
 
+# LLM: _sync_task_workspace_paths 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理同步任务workspace路径相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _sync_task_workspace_paths(task: SubAgentTask, task_workspace_paths) -> None:
     # LLM: task workspace paths are root-task scoped and safe for sibling discovery.
     task.task_workspace_dir = str(task_workspace_paths.root)
@@ -36,8 +43,10 @@ def _sync_task_workspace_paths(task: SubAgentTask, task_workspace_paths) -> None
     task.agent_run_workspace_dir = str(task_workspace_paths.agent_adapter_dir)
 
 
+# LLM: _sync_agent_run_paths 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理同步agentrun路径相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
 def _sync_agent_run_paths(task: SubAgentTask, task_workspace_paths) -> None:
-    # LLM: keep new run workspace paths discoverable through the legacy SubAgentTask JSON.
+    # LLM: 新运行工作区路径继续写进旧 SubAgentTask JSON，保证旧读取方可发现。
     task.agent_run_agent_yaml = str(task_workspace_paths.agent_run.agent_yaml)
     task.agent_run_state_json = str(task_workspace_paths.agent_run.state_json)
     task.agent_run_task_md = str(task_workspace_paths.agent_run.task_md)
@@ -53,6 +62,8 @@ def _sync_agent_run_paths(task: SubAgentTask, task_workspace_paths) -> None:
     task.legacy_run_ref_json = str(task_workspace_paths.legacy_run_ref_json)
 
 
+# LLM: _sync_runtime_refs 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理同步运行时refs相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
 def _sync_runtime_refs(task: SubAgentTask, task_workspace_paths) -> None:
     # LLM: expose the latest daily ledger append for recovery/debug without storing full context.
     task.daily_ledger_file = str(task_workspace_paths.daily_ledger.events_jsonl)

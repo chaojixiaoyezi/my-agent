@@ -1,6 +1,9 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 from __future__ import annotations
 
-"""LLM: preflight checks for write-capable orchestration tasks.
+"""preflight checks for write-capable orchestration tasks.
 
 Subagent tool execution still owns the real write boundary. This module only catches
 obvious outside-workspace write requests before a work order is created.
@@ -27,6 +30,8 @@ _WRITE_INTENT_WORDS = (
 )
 
 
+# LLM: external_write_target_error 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理externalwritetargeterror相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def external_write_target_error(agent, goal: str, allowed_tools: list[str]) -> str:
     if not WRITE_SUBAGENT_TOOLS.intersection(allowed_tools):
         return ""
@@ -44,11 +49,15 @@ def external_write_target_error(agent, goal: str, allowed_tools: list[str]) -> s
     )
 
 
+# LLM: _goal_has_write_intent 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理目标haswriteintent相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _goal_has_write_intent(goal: str) -> bool:
     lowered = goal.lower()
     return any(word in lowered for word in _WRITE_INTENT_WORDS)
 
 
+# LLM: _external_absolute_paths 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理externalabsolute路径相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _external_absolute_paths(goal: str, workspace_roots: Path | list[Path]) -> list[str]:
     roots = _workspace_roots(workspace_roots)
     external: list[str] = []
@@ -59,10 +68,14 @@ def _external_absolute_paths(goal: str, workspace_roots: Path | list[Path]) -> l
     return external
 
 
+# LLM: _trim_path_candidate 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理trim路径candidate相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _trim_path_candidate(raw: str) -> str:
     return raw.strip().rstrip(".,;:，。；：、)]}）】")
 
 
+# LLM: _is_external_absolute_path 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 判断externalabsolute路径条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _is_external_absolute_path(raw: str, workspace_roots: Path | list[Path]) -> bool:
     text = raw.replace("\\", "/")
     if _WINDOWS_ABSOLUTE_RE.match(raw) and not Path(text).is_absolute():
@@ -77,11 +90,15 @@ def _is_external_absolute_path(raw: str, workspace_roots: Path | list[Path]) -> 
     return not any(_is_relative_to(resolved, root) for root in _workspace_roots(workspace_roots))
 
 
+# LLM: _workspace_roots 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理workspaceroots相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _workspace_roots(workspace_roots: Path | list[Path]) -> list[Path]:
     raw_roots = workspace_roots if isinstance(workspace_roots, list) else [workspace_roots]
     return [Path(root).resolve(strict=False) for root in raw_roots]
 
 
+# LLM: _is_relative_to 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 判断relativeto条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)

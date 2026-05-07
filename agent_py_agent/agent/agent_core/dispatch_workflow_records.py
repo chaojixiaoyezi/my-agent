@@ -1,3 +1,6 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 from __future__ import annotations
 
 from ..subagents.services.dispatch_params import DispatchRecordParams
@@ -5,6 +8,8 @@ from ..subagents.services.workflow import _try_workflow_plan, _workflow_extra_wr
 from .dispatch_record_params import DryRunWorkflowRecordParams, WorkflowRecordParams
 
 
+# LLM: build_workflow_records 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 构建工作流记录所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def build_workflow_records(params: WorkflowRecordParams):
     workflow_candidates = [
         task
@@ -22,6 +27,8 @@ def build_workflow_records(params: WorkflowRecordParams):
     return records
 
 
+# LLM: _build_single_workflow_records 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 构建单个工作流记录所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _build_single_workflow_records(agent, task, workflow_mode, apply):
     preview = (
         task.workflow_plan
@@ -47,6 +54,8 @@ def _build_single_workflow_records(agent, task, workflow_mode, apply):
     return records
 
 
+# LLM: _build_dry_run_workflow_records 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 构建dryrun工作流记录所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _build_dry_run_workflow_records(params: DryRunWorkflowRecordParams):
     agent = params.agent
     task = params.task
@@ -95,6 +104,8 @@ def _build_dry_run_workflow_records(params: DryRunWorkflowRecordParams):
     return records
 
 
+# LLM: _workflow_plan_record 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理工作流计划记录相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _workflow_plan_record(agent, task, planned):
     return agent.subagents.make_dispatch_record(
         params=DispatchRecordParams(
@@ -114,6 +125,8 @@ def _workflow_plan_record(agent, task, planned):
     )
 
 
+# LLM: _workflow_plan_message 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理工作流计划消息相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _workflow_plan_message(planned) -> str:
     if not planned.workflow_plan:
         return "未能生成 workflow 计划。"
@@ -121,6 +134,8 @@ def _workflow_plan_message(planned) -> str:
     return f"已写入 workflow 计划，template={planned.workflow_template_id or 'none'} workers={worker_count}。"
 
 
+# LLM: _workflow_spawn_record 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理工作流spawn记录相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _workflow_spawn_record(agent, task, planned):
     before_child_count = len(planned.workflow_child_run_ids)
     planned, created_children = agent.subagents.realize_workflow_plan(task.id)
@@ -142,6 +157,8 @@ def _workflow_spawn_record(agent, task, planned):
     )
 
 
+# LLM: _workflow_spawn_message 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理工作流spawn消息相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _workflow_spawn_message(created_children) -> str:
     if created_children:
         return f"已创建 {len(created_children)} 个 workflow worker 子工单。"

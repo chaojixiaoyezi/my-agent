@@ -1,8 +1,10 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 from __future__ import annotations
 
-"""LLM: builds subagent runner execution prompts and structured-output repair audit text.
+"""builds subagent runner execution prompts and structured-output repair audit text.
 
-给人看的解释：
 runner 真正调用模型前，需要把执行上下文压成明确任务；模型输出不合格式时，还要生成一次'只修格式'的补救 prompt。
 这些 prompt 模板都放这里，避免主流程函数越来越长。
 """
@@ -43,6 +45,8 @@ _SUBAGENT_RESULT_TEMPLATE = (
 )
 
 
+# LLM: _build_subagent_runner_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 构建子代理执行器提示词所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _build_subagent_runner_prompt(
     context: SubAgentExecutionContext,
     instruction: str = "",
@@ -71,6 +75,8 @@ def _build_subagent_runner_prompt(
     )
 
 
+# LLM: _build_subagent_runner_repair_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 构建子代理执行器repair提示词所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _build_subagent_runner_repair_prompt(
     context: SubAgentExecutionContext,
     *,
@@ -116,6 +122,8 @@ def _build_subagent_runner_repair_prompt(
     )
 
 
+# LLM: _append_runner_repair_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 写入执行器repair提示词的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _append_runner_repair_prompt(original_prompt: str, repair_prompt: str) -> str:
 
     return (
@@ -126,6 +134,8 @@ def _append_runner_repair_prompt(original_prompt: str, repair_prompt: str) -> st
     )
 
 
+# LLM: _append_runner_repair_response 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 写入执行器repair响应的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _append_runner_repair_response(original_response: str, repair_response: str) -> str:
 
     return (
@@ -136,6 +146,8 @@ def _append_runner_repair_response(original_response: str, repair_response: str)
     )
 
 
+# LLM: _append_runner_repair_failure 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 写入执行器repair失败的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _append_runner_repair_failure(original_response: str, exc: Exception) -> str:
 
     return (

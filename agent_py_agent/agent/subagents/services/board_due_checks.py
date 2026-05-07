@@ -1,6 +1,9 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-"""LLM: due-check issue builders for subagent board service.
+"""due-check issue builders for subagent board service.
 
 给人看的解释：
 这里把单任务巡检拆出 board.py，用一个上下文对象承载重复参数，避免每个检查函数都有长参数列表。
@@ -12,6 +15,8 @@ from typing import Any
 from ..policies import MakeDueIssueParams, _is_active, _make_due_issue
 
 
+# LLM: DueCheckSettings 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 集中保存到期检查settings字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class DueCheckSettings:
     """Runtime thresholds for one due-check pass."""
@@ -22,6 +27,8 @@ class DueCheckSettings:
     min_evidence: int
 
 
+# LLM: DueInspectionContext 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 集中保存到期inspection上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class DueInspectionContext:
     """Shared values used by all due-check predicates for one task."""
@@ -34,6 +41,8 @@ class DueInspectionContext:
     stale_seconds: float
 
 
+# LLM: DueIssueSpec 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 集中保存到期issuespec字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class DueIssueSpec:
     """One due-check issue template."""
@@ -44,6 +53,8 @@ class DueIssueSpec:
     action: str
 
 
+# LLM: _issue_params 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理issue参数相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _issue_params(ctx: DueInspectionContext, spec: DueIssueSpec):
     return MakeDueIssueParams(
         task=ctx.task,
@@ -59,10 +70,14 @@ def _issue_params(ctx: DueInspectionContext, spec: DueIssueSpec):
     )
 
 
+# LLM: _single_issue 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理单个issue相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _single_issue(ctx: DueInspectionContext, spec: DueIssueSpec):
     return _make_due_issue(params=_issue_params(ctx, spec))
 
 
+# LLM: _check_work_order_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 校验workorderissues需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _check_work_order_issues(ctx: DueInspectionContext, validation):
     """Check for missing work order files."""
     if validation.ok:
@@ -80,6 +95,8 @@ def _check_work_order_issues(ctx: DueInspectionContext, validation):
     ]
 
 
+# LLM: _check_status_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 校验状态issues需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _check_status_issues(ctx: DueInspectionContext):
     """Check for failed/timeout/channel error/blocked status issues."""
     task = ctx.task
@@ -105,6 +122,8 @@ def _check_status_issues(ctx: DueInspectionContext):
     ]
 
 
+# LLM: _check_channel_broken_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 校验通道brokenissues需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _check_channel_broken_issues(ctx: DueInspectionContext):
     """Check for channel broken issues."""
     if ctx.task.channel_status != "BROKEN":
@@ -122,6 +141,8 @@ def _check_channel_broken_issues(ctx: DueInspectionContext):
     ]
 
 
+# LLM: _check_channel_degraded_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 校验通道degradedissues需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _check_channel_degraded_issues(ctx: DueInspectionContext):
     """Check for channel degraded issues."""
     if ctx.task.channel_status != "DEGRADED":
@@ -139,6 +160,8 @@ def _check_channel_degraded_issues(ctx: DueInspectionContext):
     ]
 
 
+# LLM: _check_probe_missing_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 校验probemissingissues需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _check_probe_missing_issues(ctx: DueInspectionContext):
     """Check for missing channel probe evidence."""
     if ctx.task.status != "CHANNEL_ERROR" or ctx.task.last_probe_at:
@@ -156,6 +179,8 @@ def _check_probe_missing_issues(ctx: DueInspectionContext):
     ]
 
 
+# LLM: _check_done_evidence_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 校验done证据issues需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _check_done_evidence_issues(ctx: DueInspectionContext, min_evidence):
     """Check for DONE task with insufficient evidence."""
     task = ctx.task
@@ -174,6 +199,8 @@ def _check_done_evidence_issues(ctx: DueInspectionContext, min_evidence):
     ]
 
 
+# LLM: _check_done_verification_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 校验doneverificationissues需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _check_done_verification_issues(ctx: DueInspectionContext):
     """Check for DONE task without verification."""
     if ctx.task.status != "DONE" or ctx.task.verification_status == "VERIFIED":
@@ -191,6 +218,8 @@ def _check_done_verification_issues(ctx: DueInspectionContext):
     ]
 
 
+# LLM: _check_capability_request_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 校验能力请求issues需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _check_capability_request_issues(ctx: DueInspectionContext):
     """Check for open capability request issues."""
     if not ctx.open_request_count:
@@ -208,6 +237,8 @@ def _check_capability_request_issues(ctx: DueInspectionContext):
     ]
 
 
+# LLM: _check_capability_gap_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 校验能力缺口issues需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _check_capability_gap_issues(ctx: DueInspectionContext):
     """Check for open capability gap issues."""
     if not ctx.open_gap_count:
@@ -225,6 +256,8 @@ def _check_capability_gap_issues(ctx: DueInspectionContext):
     ]
 
 
+# LLM: _check_heartbeat_timeout_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 校验heartbeat超时issues需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _check_heartbeat_timeout_issues(ctx: DueInspectionContext, heartbeat_timeout):
     """Check for stale heartbeat on active tasks."""
     if not (_is_active(ctx.task.status) and heartbeat_timeout > 0 and ctx.stale_seconds > heartbeat_timeout):
@@ -243,6 +276,8 @@ def _check_heartbeat_timeout_issues(ctx: DueInspectionContext, heartbeat_timeout
     ]
 
 
+# LLM: _check_run_timeout_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 校验超时issues需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
 def _check_run_timeout_issues(ctx: DueInspectionContext, run_timeout):
     """Check for run timeout on active tasks."""
     if not (_is_active(ctx.task.status) and run_timeout > 0 and ctx.age_seconds > run_timeout):
@@ -260,6 +295,8 @@ def _check_run_timeout_issues(ctx: DueInspectionContext, run_timeout):
     ]
 
 
+# LLM: inspect_single_task_due 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理inspect单个任务到期相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def inspect_single_task_due(
     manager,
     task,

@@ -1,6 +1,9 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
-"""LLM: logs / gateway / adapter / daemon / scenario subcommand registration helpers.
+"""logs / gateway / adapter / daemon / scenario subcommand registration helpers.
 
 给人看的解释：
 这个文件包含日志、gateway、适配器、守护进程和场景测试子命令的注册函数。
@@ -40,6 +43,8 @@ from .supervisor import (
 )
 
 
+# LLM: _add_capability_config_arg 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--capability-config",
@@ -48,6 +53,8 @@ def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
     )
 
 
+# LLM: add_daemon_subcommand 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 注册 argparse 参数和子命令，决定用户可见的命令形状。
 def add_daemon_subcommand(sub: argparse._SubParsersAction) -> None:
     daemon = sub.add_parser("daemon", help="按配置启动前台常驻调度")
     _add_capability_config_arg(daemon)
@@ -74,6 +81,8 @@ def add_daemon_subcommand(sub: argparse._SubParsersAction) -> None:
 
 
 
+# LLM: add_scenario_subcommand 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 注册 argparse 参数和子命令，决定用户可见的命令形状。
 def add_scenario_subcommand(sub: argparse._SubParsersAction) -> None:
     scenario = sub.add_parser("scenario-test", help="跑一轮隔离的真实全流程任务测试")
     _add_capability_config_arg(scenario)
@@ -109,6 +118,8 @@ def add_scenario_subcommand(sub: argparse._SubParsersAction) -> None:
 
 
 
+# LLM: _add_gateway_start_stop_subcommands 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _add_gateway_start_stop_subcommands(gateway_sub):
     gateway_start = gateway_sub.add_parser("start", help="启动后台 gateway")
     gateway_start.add_argument("--force", action="store_true", help="已有 gateway 运行时先尝试停止再启动")
@@ -132,6 +143,8 @@ def _add_gateway_start_stop_subcommands(gateway_sub):
     gateway_logs.set_defaults(func=cmd_gateway_logs)
 
 
+# LLM: _add_gateway_run_subcommand 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _add_gateway_run_subcommand(gateway_sub):
     gateway_run = gateway_sub.add_parser("run", help="内部命令：前台运行 gateway 循环")
     _add_capability_config_arg(gateway_run)
@@ -160,6 +173,8 @@ def _add_gateway_run_subcommand(gateway_sub):
     gateway_status.set_defaults(func=cmd_gateway_status)
 
 
+# LLM: _add_gateway_ask_result_subcommands 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _add_gateway_ask_result_subcommands(gateway_sub):
     gateway_ask = gateway_sub.add_parser(
         "ask",
@@ -183,6 +198,8 @@ def _add_gateway_ask_result_subcommands(gateway_sub):
     gateway_result.set_defaults(func=cmd_gateway_result)
 
 
+# LLM: _add_gateway_supervisor_subcommands 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _add_gateway_supervisor_subcommands(gateway_sub):
     supervisor_start = gateway_sub.add_parser("supervisor-start", help="启动 gateway 看门狗进程（自动重启崩溃的 gateway）")
     supervisor_start.set_defaults(func=cmd_supervisor_start)
@@ -203,6 +220,8 @@ def _add_gateway_supervisor_subcommands(gateway_sub):
     supervisor_run.set_defaults(func=cmd_supervisor_run)
 
 
+# LLM: _add_gateway_service_subcommands 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _add_gateway_service_subcommands(gateway_sub):
     start_all = gateway_sub.add_parser("start-all", help="一键启动 gateway（带 supervisor）+ 所有适配器")
     start_all.add_argument(
@@ -221,6 +240,8 @@ def _add_gateway_service_subcommands(gateway_sub):
     gateway_uninstall.set_defaults(func=cmd_gateway_uninstall)
 
 
+# LLM: add_gateway_subcommands 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 注册 argparse 参数和子命令，决定用户可见的命令形状。
 def add_gateway_subcommands(sub: argparse._SubParsersAction) -> None:
     gateway = sub.add_parser("gateway", help="管理后台 gateway 进程")
     gateway_sub = gateway.add_subparsers(dest="gateway_command")
@@ -233,6 +254,8 @@ def add_gateway_subcommands(sub: argparse._SubParsersAction) -> None:
     _add_gateway_service_subcommands(gateway_sub)
 
 
+# LLM: add_adapter_subcommand 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 注册 argparse 参数和子命令，决定用户可见的命令形状。
 def add_adapter_subcommand(sub: argparse._SubParsersAction) -> None:
     adapter = sub.add_parser("adapter", help="外部聊天工具 / TUI 适配器")
     adapter_sub = adapter.add_subparsers(dest="adapter_command")

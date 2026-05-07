@@ -1,3 +1,6 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 
 from __future__ import annotations
 
@@ -21,6 +24,8 @@ from ._event_utils import (
 )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 EventIdentity 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 EventIdentity 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class EventIdentity:
     """Shared identity fields for message and tool events."""
@@ -31,6 +36,8 @@ class EventIdentity:
     task_id: str
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 MessageContext 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 MessageContext 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class MessageContext:
     """Context fields specific to a message event."""
@@ -44,6 +51,8 @@ class MessageContext:
     content: str
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 ToolCallContext 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 ToolCallContext 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class ToolCallContext:
     """Context fields specific to a tool-call event."""
@@ -54,6 +63,8 @@ class ToolCallContext:
     created_at: str
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _ToolEventFields 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 _ToolEventFields 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _ToolEventFields:
     """Normalized fields shared by tool event id, metadata, and RawMemoryEvent."""
@@ -67,6 +78,8 @@ class _ToolEventFields:
     content_hash: str
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _ToolFacts 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 _ToolFacts 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _ToolFacts:
     """Bundle for _tool_metadata keyword parameters."""
@@ -79,6 +92,8 @@ class _ToolFacts:
     backend: str
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _message_event 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 message event 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _message_event(
     identity: EventIdentity,
     ctx: MessageContext,
@@ -122,6 +137,8 @@ def _message_event(
     return _apply_archive_level_to_message_event(event, content=content)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _tool_event 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 tool event 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _tool_event(
     identity: EventIdentity,
     ctx: ToolCallContext,
@@ -169,6 +186,8 @@ def _tool_event(
     return _apply_archive_level_to_tool_event(event, tool_call=tool_call, metadata=fields.metadata)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _tool_event_fields 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 tool event fields 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _tool_event_fields(tool_call: dict[str, Any], *, backend: str) -> _ToolEventFields:
     """Normalize tool-call facts before creating the archive event."""
     tool_name = _first_text(tool_call, "tool_name", "tool", "name") or "unknown"
@@ -199,6 +218,8 @@ def _tool_event_fields(tool_call: dict[str, Any], *, backend: str) -> _ToolEvent
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _tool_metadata 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 tool metadata 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _tool_metadata(
     tool_call: dict[str, Any],
     *,
@@ -225,6 +246,8 @@ def _tool_metadata(
     return metadata
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _apply_archive_level_to_message_event 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 apply archive level to message event 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _apply_archive_level_to_message_event(event: RawMemoryEvent, *, content: str) -> RawMemoryEvent:
 
     if event.archive_level == 0:
@@ -241,6 +264,8 @@ def _apply_archive_level_to_message_event(event: RawMemoryEvent, *, content: str
     return event
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _apply_archive_level_to_tool_event 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 apply archive level to tool event 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _apply_archive_level_to_tool_event(
     event: RawMemoryEvent,
     *,

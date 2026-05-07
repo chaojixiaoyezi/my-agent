@@ -1,3 +1,6 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 
 from __future__ import annotations
 
@@ -10,12 +13,16 @@ from ..agent.subagents.models import SubAgentBoardOptions
 from .common import make_agent
 
 
+# LLM: _task_jsonable 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _task_jsonable(task):
     if is_dataclass(task):
         return asdict(task)
     return getattr(task, "__dict__", {"value": str(task)})
 
 
+# LLM: cmd_spawn 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_spawn(args) -> int:
 
     agent = make_agent(args)
@@ -25,6 +32,8 @@ def cmd_spawn(args) -> int:
     return 0
 
 
+# LLM: cmd_subagents 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents(args) -> int:
 
     agent = make_agent(args)
@@ -57,6 +66,8 @@ def cmd_subagents(args) -> int:
     return 0
 
 
+# LLM: cmd_subagent_detail 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagent_detail(args) -> int:
 
     agent = make_agent(args)

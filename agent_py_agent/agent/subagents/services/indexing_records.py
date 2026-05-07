@@ -1,6 +1,9 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-"""LLM: record-specific LocalStore indexing helpers for SubAgentIndexingService."""
+"""record-specific LocalStore indexing helpers for SubAgentIndexingService."""
 
 import json
 from dataclasses import asdict
@@ -9,6 +12,8 @@ from typing import Any
 from .indexing_params import DataclassRecordIndexParams, LocalRecordParams
 
 
+# LLM: index_dataclass_record_via 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理indexdataclass记录via相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
 def index_dataclass_record_via(
     service: Any,
     params: DataclassRecordIndexParams,
@@ -38,6 +43,8 @@ def index_dataclass_record_via(
     )
 
 
+# LLM: index_action_apply_via 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理index动作应用via相关的数据流，连接当前职责的前后步骤；关键副作用: 会更新任务状态、报告记录和持久化副作用，需避免破坏既有状态机约定。
 def index_action_apply_via(service: Any, record: object) -> None:
     index_dataclass_record_via(
         service,
@@ -49,6 +56,8 @@ def index_action_apply_via(service: Any, record: object) -> None:
     )
 
 
+# LLM: index_capability_route_via 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理index能力routevia相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def index_capability_route_via(service: Any, record: object) -> None:
     index_dataclass_record_via(
         service,
@@ -60,6 +69,8 @@ def index_capability_route_via(service: Any, record: object) -> None:
     )
 
 
+# LLM: index_acceptance_review_via 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理index验收审查via相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def index_acceptance_review_via(service: Any, record: object) -> None:
     index_dataclass_record_via(
         service,
@@ -71,6 +82,8 @@ def index_acceptance_review_via(service: Any, record: object) -> None:
     )
 
 
+# LLM: index_patch_review_via 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理index补丁审查via相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def index_patch_review_via(service: Any, record: object) -> None:
     index_dataclass_record_via(
         service,
@@ -82,6 +95,8 @@ def index_patch_review_via(service: Any, record: object) -> None:
     )
 
 
+# LLM: index_channel_probe_via 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理index通道probevia相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def index_channel_probe_via(service: Any, result: object) -> None:
     index_dataclass_record_via(
         service,
@@ -94,6 +109,8 @@ def index_channel_probe_via(service: Any, result: object) -> None:
     )
 
 
+# LLM: index_runner_result_via 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理index执行器结果via相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
 def index_runner_result_via(service: Any, result: object, output_payload: dict[str, object]) -> None:
     content = "\n".join([
         json.dumps(asdict(result), ensure_ascii=False, indent=2),

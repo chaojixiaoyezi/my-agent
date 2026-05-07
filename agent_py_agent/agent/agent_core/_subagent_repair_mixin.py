@@ -1,3 +1,6 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 
 from __future__ import annotations
 
@@ -14,6 +17,8 @@ from .runner_prompts import (
 )
 
 
+# LLM: SubagentRepairParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存子代理repair参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class SubagentRepairParams:
     context: object
@@ -25,6 +30,8 @@ class SubagentRepairParams:
     message: str
 
 
+# LLM: RecoverySnapshotParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存恢复snapshot参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class RecoverySnapshotParams:
     run_id: str
@@ -36,8 +43,12 @@ class RecoverySnapshotParams:
     tool_calls: list[dict[str, object]]
 
 
+# LLM: _SubagentRepairMixin 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 拆分子代理repair混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class _SubagentRepairMixin:
 
+    # LLM: _handle_subagent_repair 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 推进子代理repair的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _handle_subagent_repair(self, params: SubagentRepairParams):
         structured_repair_ok = False
         structured_repair_error = ""
@@ -82,6 +93,8 @@ class _SubagentRepairMixin:
             message,
         )
 
+    # LLM: _write_subagent_recovery_snapshot 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 写入子代理恢复snapshot的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
     def _write_subagent_recovery_snapshot(
         self,
         run_id: str | None = None,
@@ -117,6 +130,8 @@ class _SubagentRepairMixin:
         )
 
 
+# LLM: _repair_failure_tuple 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理repair失败tuple相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _repair_failure_tuple(params: SubagentRepairParams, exc: Exception) -> tuple:
     # LLM: repair failures preserve the original structured result and only append audit text.
     return (
@@ -130,6 +145,8 @@ def _repair_failure_tuple(params: SubagentRepairParams, exc: Exception) -> tuple
     )
 
 
+# LLM: _recovery_snapshot_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理恢复snapshot参数相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _recovery_snapshot_params(
     params: RecoverySnapshotParams | None,
     *,
@@ -145,7 +162,7 @@ def _recovery_snapshot_params(
         if not isinstance(params, RecoverySnapshotParams):
             raise TypeError("subagent recovery snapshot requires params: RecoverySnapshotParams")
         return params
-    # LLM: legacy recovery fields normalize to one bundle before snapshot persistence.
+    # LLM: 旧恢复字段先归一到一个参数包，再进入快照持久化。
     return RecoverySnapshotParams(
         run_id=str(run_id or ""),
         user_prompt=str(user_prompt),
@@ -157,6 +174,8 @@ def _recovery_snapshot_params(
     )
 
 
+# LLM: _recovery_content_paths 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理恢复内容路径相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _recovery_content_paths(task) -> list[str]:
     if task is None:
         return []
@@ -170,6 +189,8 @@ def _recovery_content_paths(task) -> list[str]:
     ]
 
 
+# LLM: _recovery_snapshot_input 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理恢复snapshotinput相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _recovery_snapshot_input(agent, snapshot: RecoverySnapshotParams, content_paths: list[str]):
     next_actions = [
         "先读取子代理 STATUS/WORK_LOG/RUNNER_RESULT/output.json，再判断是否可以验收或重跑。"

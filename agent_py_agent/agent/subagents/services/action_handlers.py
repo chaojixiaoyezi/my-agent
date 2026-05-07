@@ -1,6 +1,9 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-"""LLM: concrete action handlers used by SubAgentActionService.
+"""concrete action handlers used by SubAgentActionService.
 
 给人看的解释：
 每个 handler 只处理一种动作写回，公共审计字段放在 ActionHandlerContext 里。
@@ -12,6 +15,8 @@ from pathlib import Path
 from .action_params import RecordAfterTaskActionParams
 
 
+# LLM: ActionHandlerContext 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 集中保存动作handler上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class ActionHandlerContext:
     """Common audit fields for one action application."""
@@ -23,6 +28,8 @@ class ActionHandlerContext:
     locked_files: list[str] | None = None
 
 
+# LLM: apply_probe_or_repair_channel 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 更新proberepair通道对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、报告记录和持久化副作用，需避免破坏既有状态机约定。
 def apply_probe_or_repair_channel(service, action, task, ctx: ActionHandlerContext):
     from ..reports import ActionApplyRecord
 
@@ -39,6 +46,8 @@ def apply_probe_or_repair_channel(service, action, task, ctx: ActionHandlerConte
     )
 
 
+# LLM: apply_repair_work_order 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 更新repairworkorder对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、报告记录和持久化副作用，需避免破坏既有状态机约定。
 def apply_repair_work_order(service, action, task, ctx: ActionHandlerContext):
     from ..reports import ActionApplyRecord
 
@@ -57,6 +66,8 @@ def apply_repair_work_order(service, action, task, ctx: ActionHandlerContext):
     )
 
 
+# LLM: apply_reopen_for_evidence 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 更新reopen证据对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、报告记录和持久化副作用，需避免破坏既有状态机约定。
 def apply_reopen_for_evidence(service, action, task, ctx: ActionHandlerContext):
     task.status = "BLOCKED"
     task.failure_type = "missing_evidence"
@@ -72,6 +83,8 @@ def apply_reopen_for_evidence(service, action, task, ctx: ActionHandlerContext):
     )
 
 
+# LLM: apply_run_acceptance 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 更新验收对应的任务或运行状态，并保留既有字段语义；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
 def apply_run_acceptance(service, action, task, ctx: ActionHandlerContext):
     task.verification_status = "NEEDS_ACCEPTANCE"
     task.updated_at = ctx.now
@@ -84,6 +97,8 @@ def apply_run_acceptance(service, action, task, ctx: ActionHandlerContext):
     )
 
 
+# LLM: apply_takeover_or_reassign 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 更新takeoverreassign对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、报告记录和持久化副作用，需避免破坏既有状态机约定。
 def apply_takeover_or_reassign(service, action, task, ctx: ActionHandlerContext):
     from ..reports import ActionApplyRecord
 
@@ -128,6 +143,8 @@ def apply_takeover_or_reassign(service, action, task, ctx: ActionHandlerContext)
     )
 
 
+# LLM: apply_record_only_action 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 更新only动作对应的任务或运行状态，并保留既有字段语义；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
 def apply_record_only_action(service, action, task, ctx: ActionHandlerContext):
     task.updated_at = ctx.now
     service.manager.save(task)

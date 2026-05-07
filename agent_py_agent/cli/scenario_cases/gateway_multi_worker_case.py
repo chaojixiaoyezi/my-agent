@@ -1,6 +1,9 @@
+# LLM: CLI scenario case definition; keep fixture flow and expected gateway/subagent behavior stable.
+# 模块用途: 定义一类命令行情景测试，用来复现和验证端到端流程。
+
 from __future__ import annotations
 
-"""LLM: implements the gateway multi-worker scenario that proves concurrent workers process every request once.
+"""implements the gateway multi-worker scenario that proves concurrent workers process every request once.
 
 给人看的解释：
 这个文件验证两个 worker 同时处理一个队列时，每个请求只会被处理一次。
@@ -29,6 +32,8 @@ from ..scenario_utils import (
 )
 
 
+# LLM: WorkerRunResults 是gateway CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 @dataclass
 class WorkerRunResults:
     processed_by_worker: dict[str, int]
@@ -37,6 +42,8 @@ class WorkerRunResults:
     alive_threads: list[str]
 
 
+# LLM: MultiWorkerScenarioSetup 是gateway CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 @dataclass
 class MultiWorkerScenarioSetup:
     gpaths: object
@@ -44,6 +51,8 @@ class MultiWorkerScenarioSetup:
     request_count: int
 
 
+# LLM: MultiWorkerRunOptions 是gateway CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass
 class MultiWorkerRunOptions:
     paths: object
@@ -51,6 +60,8 @@ class MultiWorkerRunOptions:
     worker_count: int = 2
 
 
+# LLM: _multi_worker_setup 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _multi_worker_setup(args):
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -89,6 +100,8 @@ def _multi_worker_setup(args):
     return paths, gpaths, request_ids, request_count
 
 
+# LLM: _multi_worker_verify 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _multi_worker_verify(setup: MultiWorkerScenarioSetup, results: WorkerRunResults):
     responses = {request_id: read_json_file(gateway_response_path(setup.gpaths, request_id)) for request_id in setup.request_ids}
     done_payloads = {request_id: read_json_file(setup.gpaths.done / f"{request_id}.json") for request_id in setup.request_ids}
@@ -123,6 +136,8 @@ def _multi_worker_verify(setup: MultiWorkerScenarioSetup, results: WorkerRunResu
     ), responses, done_payloads
 
 
+# LLM: _multi_worker_finish 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _multi_worker_finish(paths, setup: MultiWorkerScenarioSetup, results: WorkerRunResults):
     print("processed_by_worker=" + json.dumps(results.processed_by_worker, ensure_ascii=False, sort_keys=True))
     print("run_prompts_by_worker=" + json.dumps(results.run_prompts_by_worker, ensure_ascii=False, sort_keys=True))
@@ -153,6 +168,8 @@ def _multi_worker_finish(paths, setup: MultiWorkerScenarioSetup, results: Worker
     return 0 if final_ok else 2
 
 
+# LLM: _run_multi_worker_threads 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def _run_multi_worker_threads(options: MultiWorkerRunOptions) -> WorkerRunResults:
     lock = threading.Lock()
     start_barrier = threading.Barrier(options.worker_count)
@@ -160,7 +177,11 @@ def _run_multi_worker_threads(options: MultiWorkerRunOptions) -> WorkerRunResult
     run_prompts_by_worker: dict[str, list[str]] = {}
     errors: list[str] = []
 
+    # LLM: worker_run 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def worker_run(worker_id: str):
+        # LLM: slow_run 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+        # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
         def slow_run(user_prompt: str, *, params=None) -> AgentRunResult:
             time.sleep(0.05)
             with lock:
@@ -196,6 +217,8 @@ def _run_multi_worker_threads(options: MultiWorkerRunOptions) -> WorkerRunResult
     return WorkerRunResults(processed_by_worker, run_prompts_by_worker, errors, alive_threads)
 
 
+# LLM: run_scenario_gateway_multi_worker_case 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_scenario_gateway_multi_worker_case(args) -> int:
     paths, gpaths, request_ids, request_count = _multi_worker_setup(args)
 

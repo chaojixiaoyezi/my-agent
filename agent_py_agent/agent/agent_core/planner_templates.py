@@ -1,6 +1,9 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 from __future__ import annotations
 
-"""LLM: parent planner structured-output templates kept outside planner orchestration."""
+"""parent planner structured-output templates kept outside planner orchestration."""
 
 PARENT_PLANNER_RESULT_TEMPLATE = (
     "## Required Output\n\n"

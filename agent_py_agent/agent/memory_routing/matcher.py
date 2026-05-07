@@ -1,3 +1,6 @@
+# LLM: Memory routing module; keep context selection and read-receipt records stable.
+# 模块用途: 根据任务上下文选择可注入记忆，并记录读取路径。
+
 from __future__ import annotations
 
 import re
@@ -9,6 +12,8 @@ from .models import MemoryPathResolution, MemoryReadReceipt, MemoryRoute, Memory
 VALID_MODES = {"soft", "strict"}
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 match_routes 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 判断 match routes 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def match_routes(
     query: str,
     routes: list[MemoryRoute],
@@ -26,6 +31,8 @@ def match_routes(
     return _limit_matches(hits, limit)
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 score_route 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 基于规则或事件字段计算 score route 的判定结果，避免把推测当作事实写入。
 def score_route(normalized_query: str, route: MemoryRoute) -> tuple[float, list[str], list[str]]:
     reasons: list[str] = []
     matched_terms: list[str] = []
@@ -58,6 +65,8 @@ def score_route(normalized_query: str, route: MemoryRoute) -> tuple[float, list[
     return score, _dedupe(reasons), _dedupe(matched_terms)
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 resolve_required_paths 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 resolve required paths 在当前模块中的核心转换或协调步骤，衔接 memory routing 读取项目规则、路径和上下文片段来决定注入范围。
 def resolve_required_paths(
     matches: list[MemoryRouteMatch],
     *,
@@ -86,6 +95,8 @@ def resolve_required_paths(
     )
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 build_read_receipt 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 build read receipt 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def build_read_receipt(
     match: MemoryRouteMatch,
     *,
@@ -107,6 +118,8 @@ def build_read_receipt(
     ).mark_now()
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 ReadReceiptParams 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 ReadReceiptParams 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class ReadReceiptParams:
     # LLM: read receipt status fields are grouped for future routing evidence fields.
@@ -116,6 +129,8 @@ class ReadReceiptParams:
     error: str = ""
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _TermScoreSpec 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 _TermScoreSpec 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _TermScoreSpec:
     exact_reason: str
@@ -126,12 +141,16 @@ class _TermScoreSpec:
     fuzzy_bonus: float
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _ScoreAccumulator 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 _ScoreAccumulator 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _ScoreAccumulator:
     reasons: list[str]
     matched_terms: list[str]
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _match_one_route 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 判断 match one route 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def _match_one_route(normalized_query: str, route: MemoryRoute) -> MemoryRouteMatch | None:
     if route.inject_mode == "never":
         return None
@@ -146,6 +165,8 @@ def _match_one_route(normalized_query: str, route: MemoryRoute) -> MemoryRouteMa
     return MemoryRouteMatch(route=route, score=score, reasons=reasons[:6], matched_terms=terms)
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _always_route_match 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 判断 always route match 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def _always_route_match(route: MemoryRoute) -> MemoryRouteMatch | None:
     if route.inject_mode != "always":
         return None
@@ -153,10 +174,14 @@ def _always_route_match(route: MemoryRoute) -> MemoryRouteMatch | None:
     return MemoryRouteMatch(route=route, score=score, reasons=reasons, matched_terms=terms)
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _always_route_score 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 基于规则或事件字段计算 always route score 的判定结果，避免把推测当作事实写入。
 def _always_route_score(route: MemoryRoute) -> tuple[float, list[str], list[str]]:
     return 1.0 + min(max(route.priority, 0), 100) / 100, ["默认注入规则"], []
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _score_terms 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 基于规则或事件字段计算 score terms 的判定结果，避免把推测当作事实写入。
 def _score_terms(
     normalized_query: str,
     terms: Sequence[str],
@@ -185,6 +210,8 @@ def _score_terms(
     return score, exact_hit, fuzzy_hit
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _score_topic 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 基于规则或事件字段计算 score topic 的判定结果，避免把推测当作事实写入。
 def _score_topic(
     normalized_query: str,
     route: MemoryRoute,
@@ -198,6 +225,8 @@ def _score_topic(
     return 3.0, True
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _score_when_overlap 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 基于规则或事件字段计算 score when overlap 的判定结果，避免把推测当作事实写入。
 def _score_when_overlap(
     normalized_query: str,
     route: MemoryRoute,
@@ -216,12 +245,16 @@ def _score_when_overlap(
     return float(min(len(overlap), 3))
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _apply_priority_score 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 基于规则或事件字段计算 apply priority score 的判定结果，避免把推测当作事实写入。
 def _apply_priority_score(score: float, priority: int) -> float:
     if score <= 0 or not priority:
         return score
     return score + min(max(priority, 0), 100) / 100
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _limit_matches 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 判断 limit matches 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def _limit_matches(hits: list[MemoryRouteMatch], limit: int | None) -> list[MemoryRouteMatch]:
     if limit is None or limit == 0:
         return hits
@@ -230,10 +263,14 @@ def _limit_matches(hits: list[MemoryRouteMatch], limit: int | None) -> list[Memo
     return hits[:limit]
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _normalize 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 normalize 涉及的字段，让后续匹配和存储使用同一形态。
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text.lower()).strip()
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _tokens 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 tokens 在当前模块中的核心转换或协调步骤，衔接 memory routing 读取项目规则、路径和上下文片段来决定注入范围。
 def _tokens(text: str) -> list[str]:
     normalized = _normalize(text)
     raw_tokens = re.findall(r"[a-z0-9_./-]+|[\u4e00-\u9fff]+", normalized)
@@ -245,6 +282,8 @@ def _tokens(text: str) -> list[str]:
     return _dedupe(expanded)
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _chinese_ngrams 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 chinese ngrams 在当前模块中的核心转换或协调步骤，衔接 memory routing 读取项目规则、路径和上下文片段来决定注入范围。
 def _chinese_ngrams(token: str) -> list[str]:
     grams: list[str] = []
     for size in (2, 3, 4):
@@ -252,10 +291,14 @@ def _chinese_ngrams(token: str) -> list[str]:
     return grams
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _unique_paths 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 unique paths 涉及的字段，让后续匹配和存储使用同一形态。
 def _unique_paths(paths: list[str]) -> list[str]:
     return _dedupe([path.strip() for path in paths if path.strip()])
 
 
+# LLM: memory routing 读取项目规则、路径和上下文片段来决定注入范围；修改 _dedupe 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 dedupe 涉及的字段，让后续匹配和存储使用同一形态。
 def _dedupe(items: list[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []

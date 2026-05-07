@@ -1,3 +1,6 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
@@ -9,6 +12,8 @@ from .runtime_capabilities import resolve_runtime_capabilities
 from .runtime_services import CompressionContext, ToolLoopExecuteParams
 
 
+# LLM: RunParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存run参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class RunParams:
 
@@ -31,6 +36,8 @@ class RunParams:
     on_chunk: object = None
 
 
+# LLM: _RuntimeLoopParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存运行时循环参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class _RuntimeLoopParams:
 
@@ -49,6 +56,8 @@ class _RuntimeLoopParams:
     source: str = "run"
 
 
+# LLM: _FinalizeParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存finalize参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class _FinalizeParams:
 
@@ -68,6 +77,8 @@ class _FinalizeParams:
     tool_rounds: int
 
 
+# LLM: _PreparedRuntimeContext 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存prepared运行时上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class _PreparedRuntimeContext:
 
@@ -77,6 +88,8 @@ class _PreparedRuntimeContext:
     resume_context_result: Any
 
 
+# LLM: _RuntimeLoopResult 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存运行时循环结果字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class _RuntimeLoopResult:
 
@@ -90,6 +103,8 @@ class _RuntimeLoopResult:
     archive_tool_calls: list[dict[str, object]]
 
 
+# LLM: _CompressionLoopResult 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存压缩循环结果字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class _CompressionLoopResult:
     memories: list
@@ -98,6 +113,8 @@ class _CompressionLoopResult:
     applied: bool
 
 
+# LLM: _RuntimeToolLoopSeed 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存运行时工具循环seed字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 @dataclass
 class _RuntimeToolLoopSeed:
     params: _RuntimeLoopParams
@@ -109,6 +126,8 @@ class _RuntimeToolLoopSeed:
 _RUN_PARAM_FIELD_NAMES = tuple(field.name for field in fields(RunParams))
 
 
+# LLM: run_params_from_values 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进来自参数values的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def run_params_from_values(
     params: RunParams | None = None,
     *,
@@ -142,6 +161,8 @@ def run_params_from_values(
     return replace(params, **updates)
 
 
+# LLM: _runtime_loop_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进运行时循环参数的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _runtime_loop_params(
     user_prompt: str,
     prepared: _PreparedRuntimeContext,
@@ -164,6 +185,8 @@ def _runtime_loop_params(
     )
 
 
+# LLM: _finalize_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理finalize参数相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _finalize_params(
     user_prompt: str,
     prepared: _PreparedRuntimeContext,
@@ -188,6 +211,8 @@ def _finalize_params(
     )
 
 
+# LLM: _resolve_tool_sections 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 读取或查询工具sections需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _resolve_tool_sections(agent, allowed_tools, granted_capabilities):
     runtime_capabilities = resolve_runtime_capabilities(
         None, inject=None, granted_capabilities=granted_capabilities,
@@ -203,6 +228,8 @@ def _resolve_tool_sections(agent, allowed_tools, granted_capabilities):
     return tool_catalog, tool_recommendations
 
 
+# LLM: _prepare_runtime_context 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理prepare运行时上下文相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _prepare_runtime_context(agent, user_prompt, inject, resume_context):
     memories = agent.memory.search(user_prompt, agent.config.memory_top_k)
     route_mode = str(getattr(agent.config, "memory_rule_routing_mode", "soft") or "soft")
@@ -236,6 +263,8 @@ def _prepare_runtime_context(agent, user_prompt, inject, resume_context):
     )
 
 
+# LLM: _execute_runtime_loop 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进运行时循环的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _execute_runtime_loop(agent, params: _RuntimeLoopParams):
     tool_catalog_section, tool_recommendations_section = _resolve_tool_sections(
         agent, params.allowed_tools, params.granted_capabilities,
@@ -262,6 +291,8 @@ def _execute_runtime_loop(agent, params: _RuntimeLoopParams):
     )
 
 
+# LLM: _execute_runtime_compression 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进运行时压缩的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _execute_runtime_compression(agent, params: _RuntimeLoopParams) -> _CompressionLoopResult:
     compression_svc = agent._get_services().compression
     compression_ctx = CompressionContext(
@@ -279,6 +310,8 @@ def _execute_runtime_compression(agent, params: _RuntimeLoopParams) -> _Compress
     return _CompressionLoopResult(memories=memories, snapshot_id=snapshot_id, snapshot_path=snapshot_path, applied=applied)
 
 
+# LLM: _tool_loop_execute_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理工具循环execute参数相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _tool_loop_execute_params(seed: _RuntimeToolLoopSeed) -> ToolLoopExecuteParams:
     params = seed.params
     tool_context: list[str] = []

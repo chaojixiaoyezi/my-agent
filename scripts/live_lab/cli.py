@@ -1,6 +1,9 @@
+# LLM: Live Lab validation script; keep CLI flags, artifact paths, and replay outputs stable for scenario tests.
+# 模块用途: 支撑可见验收和回放场景，负责启动案例、整理输出或生成报告。
+
 from __future__ import annotations
 
-"""LLM: command-line contract and process entrypoint for Live Lab.
+"""command-line contract and process entrypoint for Live Lab.
 
 给人看的解释：
 这个文件只管“用户能传哪些参数”和“程序怎么退出”。
@@ -15,13 +18,14 @@ from .constants import DEFAULT_CONFIG, DEFAULT_RUNS_DIR, SUITES
 from .runner import LiveLab
 
 
+# LLM: build_parser 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+# 函数用途: 注册 argparse 参数和子命令，决定用户可见的命令形状。
 def build_parser() -> argparse.ArgumentParser:
-    """LLM: defines the live lab command line contract.
+    """defines the live lab command line contract.
 
     给人看的解释：
     这里列出测试台支持哪些参数。
-    常用的是 `--suite smoke` 和 `--suite real --real-llm`。
-    """
+    常用的是 `--suite smoke` 和 `--suite real --real-llm`。"""
 
     parser = argparse.ArgumentParser(
         prog="live_agent_lab.py",
@@ -49,13 +53,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# LLM: validate_args 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+# 函数用途: 判断输入或环境是否满足规则，结果会影响分支、告警或阻断。
 def validate_args(args: argparse.Namespace) -> int:
-    """LLM: validates numeric guardrails before workspace creation.
+    """validates numeric guardrails before workspace creation.
 
     给人看的解释：
     这些数字如果是 0 或负数，后面测试含义就不清楚。
-    所以在真正开跑前先拦住，并给出明确错误。
-    """
+    所以在真正开跑前先拦住，并给出明确错误。"""
 
     if args.count <= 0:
         print("--count 必须大于 0。", file=sys.stderr)
@@ -69,12 +74,13 @@ def validate_args(args: argparse.Namespace) -> int:
     return 0
 
 
+# LLM: main 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+# 函数用途: 脚本入口，解析参数、运行主流程，并用退出码表达成功或失败。
 def main(argv: list[str] | None = None) -> int:
-    """LLM: process entrypoint.
+    """process entrypoint.
 
     给人看的解释：
-    解析参数，启动 Live Lab，最后用退出码告诉外部“通过还是失败”。
-    """
+    解析参数，启动 Live Lab，最后用退出码告诉外部“通过还是失败”。"""
 
     args = build_parser().parse_args(argv)
     code = validate_args(args)

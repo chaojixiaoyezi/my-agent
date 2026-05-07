@@ -1,4 +1,7 @@
-"""LLM: 本包把 LOG 配置拆成 config_model（数据模型和路径工具）与 config_loading（加载和归一化）两个子模块。
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
+"""本包把 LOG 配置拆成 config_model（数据模型和路径工具）与 config_loading（加载和归一化）两个子模块。
 
 新手说明:
 从外部 import 时路径不变，仍然可以用 from ...config import LogAnalysisConfig。

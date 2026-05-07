@@ -1,3 +1,6 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 
 from __future__ import annotations
 
@@ -18,8 +21,9 @@ from .common import make_agent, make_capability_router
 from .models import SubagentsDispatchOptions
 
 
+# LLM: _subagents_dispatch_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _subagents_dispatch_options(args) -> SubagentsDispatchOptions:
-    # LLM: subagent dispatch CLI args collapse into one bundle before agent calls.
     return SubagentsDispatchOptions(
         apply=bool(args.apply),
         execute_runners=bool(args.execute_runners),
@@ -41,6 +45,8 @@ def _subagents_dispatch_options(args) -> SubagentsDispatchOptions:
     )
 
 
+# LLM: _dispatch_params 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _dispatch_params(options: SubagentsDispatchOptions) -> DispatchParams:
     return DispatchParams(
         apply=options.apply,
@@ -59,6 +65,8 @@ def _dispatch_params(options: SubagentsDispatchOptions) -> DispatchParams:
     )
 
 
+# LLM: _watch_params 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _watch_params(options: SubagentsDispatchOptions) -> WatchParams:
     return WatchParams(
         **_dispatch_params(options).__dict__,
@@ -68,6 +76,8 @@ def _watch_params(options: SubagentsDispatchOptions) -> WatchParams:
     )
 
 
+# LLM: _print_watch_report 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_watch_report(agent, report, options: SubagentsDispatchOptions) -> None:
     mode = "apply" if options.apply else "dry-run"
     print("SUBAGENT DISPATCH WATCH")
@@ -93,6 +103,8 @@ def _print_watch_report(agent, report, options: SubagentsDispatchOptions) -> Non
         print(f"planner: {ws / 'PARENT_PLANNER.md'}")
 
 
+# LLM: _print_dispatch_report 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_dispatch_report(agent, report, options: SubagentsDispatchOptions) -> None:
     mode = "apply" if options.apply else "dry-run"
     print("SUBAGENT DISPATCH")
@@ -121,6 +133,8 @@ def _print_dispatch_report(agent, report, options: SubagentsDispatchOptions) -> 
         print(f"planner: {ws / 'PARENT_PLANNER.md'}")
 
 
+# LLM: cmd_subagents_dispatch 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents_dispatch(args) -> int:
 
     options = _subagents_dispatch_options(args)
@@ -145,6 +159,8 @@ def cmd_subagents_dispatch(args) -> int:
     return 0
 
 
+# LLM: cmd_subagents_workflow_plan 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents_workflow_plan(args) -> int:
 
     config = load_config(args.config)
@@ -192,6 +208,8 @@ def cmd_subagents_workflow_plan(args) -> int:
     return 0
 
 
+# LLM: cmd_subagent_run 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagent_run(args) -> int:
 
     agent = make_agent(args)

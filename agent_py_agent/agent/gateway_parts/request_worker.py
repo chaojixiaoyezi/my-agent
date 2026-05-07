@@ -1,3 +1,6 @@
+# LLM: Gateway service module; keep file-queue, daemon, HTTP, and audit contracts stable.
+# 模块用途: 拆分 gateway 请求队列、守护进程、HTTP 处理和响应渲染逻辑。
+
 from __future__ import annotations
 
 """Request execution and handling for gateway."""
@@ -28,6 +31,8 @@ if TYPE_CHECKING:
     from ...core import SimpleAgent
 
 
+# LLM: GatewayAskParams 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 类用途: 集中保存网关ask参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class GatewayAskParams:
     prompt: str
@@ -39,6 +44,8 @@ class GatewayAskParams:
     agent: SimpleAgent | None = field(default=None, repr=False)
 
 
+# LLM: _ClaimedGatewayRequestContext 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 类用途: 集中保存claimed网关请求上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class _ClaimedGatewayRequestContext:
 
@@ -49,6 +56,8 @@ class _ClaimedGatewayRequestContext:
     worker_id: str
 
 
+# LLM: submit_gateway_ask 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 发送网关ask请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def submit_gateway_ask(
     paths: GatewayPaths,
     *,
@@ -86,6 +95,8 @@ def submit_gateway_ask(
     return request_id, request_path, response_path
 
 
+# LLM: wait_for_gateway_response 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 推进网关响应的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def wait_for_gateway_response(paths: GatewayPaths, request_id: str, timeout: float) -> dict:
     path = gateway_response_path(paths, request_id)
     deadline = time.time() + max(0.0, timeout)
@@ -97,6 +108,8 @@ def wait_for_gateway_response(paths: GatewayPaths, request_id: str, timeout: flo
     return {}
 
 
+# LLM: _process_gateway_requests 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 推进网关requests的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths, *, worker_id: str = "gw-worker") -> int:
     ensure_gateway_folders(paths)
     processed = 0
@@ -106,6 +119,8 @@ def _process_gateway_requests(agent: SimpleAgent, paths: GatewayPaths, *, worker
     return processed
 
 
+# LLM: _process_gateway_request_path 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 推进网关请求路径的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _process_gateway_request_path(
     agent: SimpleAgent,
     paths: GatewayPaths,
@@ -128,6 +143,8 @@ def _process_gateway_request_path(
     return True
 
 
+# LLM: _process_claimed_gateway_request 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 推进claimed网关请求的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _process_claimed_gateway_request(context: _ClaimedGatewayRequestContext) -> dict:
     from .io import write_json_file_atomic
     from .logging import _report_gateway_side_effect_error
@@ -152,6 +169,8 @@ def _process_claimed_gateway_request(context: _ClaimedGatewayRequestContext) -> 
     )
 
 
+# LLM: _mark_request_processing 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 更新processing对应的任务或运行状态，并保留既有字段语义；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _mark_request_processing(request_payload: dict, worker_id: str) -> None:
     lease_now = time.time()
     request_payload.update(
@@ -166,6 +185,8 @@ def _mark_request_processing(request_payload: dict, worker_id: str) -> None:
     )
 
 
+# LLM: _write_processing_payload_fallback 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 写入processing载荷fallback的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def _write_processing_payload_fallback(processing_path: Path, request_payload: dict, request_id: str) -> None:
     from .logging import _report_gateway_side_effect_error
 
@@ -175,6 +196,8 @@ def _write_processing_payload_fallback(processing_path: Path, request_payload: d
         _report_gateway_side_effect_error("prepare_gateway_request_lease_fallback", request_id, fallback_exc)
 
 
+# LLM: _finish_claimed_gateway_request 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理finishclaimed网关请求相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _finish_claimed_gateway_request(
     paths: GatewayPaths,
     processing_path: Path,
@@ -192,6 +215,8 @@ def _finish_claimed_gateway_request(
         materialize_missing_archive(target_folder, request_id, response)
 
 
+# LLM: _write_final_request_archive_payload 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 写入final请求archive载荷的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def _write_final_request_archive_payload(processing_path: Path, response: dict) -> None:
     request_payload = read_json_file(processing_path)
     if not request_payload:

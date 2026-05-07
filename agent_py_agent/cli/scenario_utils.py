@@ -1,6 +1,9 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
-"""LLM: provides scenario-test workspace setup, fixture writing, subprocess helpers, and summary output.
+"""provides scenario-test workspace setup, fixture writing, subprocess helpers, and summary output.
 
 给人看的解释：
 场景测试需要临时项目、隔离配置、固定 prompt、gateway 子进程和最终报告。
@@ -23,6 +26,8 @@ from .common import ROOT, make_agent
 from .scenario_workspace import ScenarioConfigRequest, write_scenario_config, write_scenario_fixture
 
 
+# LLM: ScenarioPaths 是scenario CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 @dataclass
 class ScenarioPaths:
 
@@ -32,6 +37,8 @@ class ScenarioPaths:
     summary_json: Path
     summary_md: Path
 
+# LLM: create_scenario_workspace 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def create_scenario_workspace(args) -> ScenarioPaths:
 
     parent = (
@@ -62,20 +69,28 @@ def create_scenario_workspace(args) -> ScenarioPaths:
     )
 
 
+# LLM: load_scenario_agent 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 读取文件、索引或配置，并转换成后续逻辑可直接使用的数据。
 def load_scenario_agent(config_path: Path) -> SimpleAgent:
 
+    # LLM: Args 是scenario CLI的数据契约；字段名会被调用方和测试读取。
+    # 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
     class Args:
         config = str(config_path)
 
     return make_agent(Args())
 
 
+# LLM: install_scenario_backend 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def install_scenario_backend(agent: SimpleAgent, backend: object) -> None:
 
     agent.backend = backend
     agent._subagent_worker_backend_override = backend
 
 
+# LLM: build_scenario_prompt 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def build_scenario_prompt(count: int) -> str:
 
     return (
@@ -94,6 +109,8 @@ def build_scenario_prompt(count: int) -> str:
     )
 
 
+# LLM: build_scenario_runner_instruction 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def build_scenario_runner_instruction() -> str:
 
     return (
@@ -115,11 +132,15 @@ def build_scenario_runner_instruction() -> str:
     )
 
 
+# LLM: scenario_command 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def scenario_command(paths: ScenarioPaths, *parts: str) -> list[str]:
 
     return [sys.executable, "-m", "agent_py_agent", "--config", str(paths.config), *parts]
 
 
+# LLM: run_scenario_gateway_ask 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_scenario_gateway_ask(
     paths: ScenarioPaths,
     prompt: str,
@@ -158,6 +179,8 @@ def run_scenario_gateway_ask(
         )
 
 
+# LLM: run_scenario_subprocess 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_scenario_subprocess(cmd: list[str], *, env: dict[str, str], timeout: float) -> subprocess.CompletedProcess:
 
     print("$", " ".join(cmd))
@@ -178,10 +201,14 @@ def run_scenario_subprocess(cmd: list[str], *, env: dict[str, str], timeout: flo
     return completed
 
 
+# LLM: print_scenario_step 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def print_scenario_step(index: int, title: str) -> None:
     print(f"\n== {index}. {title} ==")
 
 
+# LLM: print_scenario_board 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def print_scenario_board(agent: SimpleAgent, *, limit: int) -> None:
 
     board = agent.subagents.write_board(options=SubAgentBoardOptions(recent_limit=limit))
@@ -195,6 +222,8 @@ def print_scenario_board(agent: SimpleAgent, *, limit: int) -> None:
     print(f"board_md={agent.subagents.workspace / 'SUBAGENT_BOARD.md'}")
 
 
+# LLM: scenario_tasks_verified 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def scenario_tasks_verified(agent: SimpleAgent, expected_count: int) -> bool:
     tasks = agent.subagents.list_runs()
     if len(tasks) < expected_count:
@@ -205,6 +234,8 @@ def scenario_tasks_verified(agent: SimpleAgent, expected_count: int) -> bool:
     )
 
 
+# LLM: collect_scenario_report_files 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 汇总多个检查来源，并按统一结构返回调用方。
 def collect_scenario_report_files(agent: SimpleAgent, fixture_root: Path, expected_count: int) -> list[Path]:
 
     report_files: list[Path] = []
@@ -218,6 +249,8 @@ def collect_scenario_report_files(agent: SimpleAgent, fixture_root: Path, expect
     return sorted(report_files)
 
 
+# LLM: _scenario_report_candidates 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _scenario_report_candidates(tasks: list[SubAgentTask], fixture_root: Path) -> list[Path]:
 
     candidates = list((fixture_root / "scenario_outputs").glob("*.md"))
@@ -227,6 +260,8 @@ def _scenario_report_candidates(tasks: list[SubAgentTask], fixture_root: Path) -
     return candidates
 
 
+# LLM: write_scenario_summary 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 把报告、摘要或状态写入磁盘，保持输出路径和 JSON 字段稳定。
 def write_scenario_summary(
     paths: ScenarioPaths,
     *,

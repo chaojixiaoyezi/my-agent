@@ -1,6 +1,9 @@
+# LLM: 这些方法会批量触碰数据库和正文文件，改动时优先保护可恢复性。
+# 模块用途: LocalStore 维护操作，包括重建索引、清库、统计和缺失文件检查。
+
 from __future__ import annotations
 
-"""LLM: implements LocalStore maintenance, statistics, reset, FTS rebuild, and integrity checks.
+"""implements LocalStore maintenance, statistics, reset, FTS rebuild, and integrity checks.
 
 给人看的解释：
 这个文件只管维护类动作。
@@ -10,8 +13,12 @@ from __future__ import annotations
 from typing import Any
 
 
+# LLM: LocalStoreMaintenanceMixin 属于 LocalStore 本地事实索引 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: LocalStoreMaintenanceMixin 封装 LocalStore 本地事实索引 的一组相关操作，供上层组合调用。
 class LocalStoreMaintenanceMixin:
 
+    # LLM: LocalStoreMaintenanceMixin.rebuild_fts 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 重建 rebuild_fts，让派生索引重新对齐主记录。
     def rebuild_fts(self) -> int:
         """用 `records` 表和文件系统内容重建 FTS5 索引。"""
 
@@ -29,6 +36,8 @@ class LocalStoreMaintenanceMixin:
             conn.commit()
         return count
 
+    # LLM: LocalStoreMaintenanceMixin.reset 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 清理 reset 相关状态，并让调用方知道是否完成。
     def reset(self, *, remove_content_files: bool = False, reset_events_file: bool = True) -> None:
         with self._connection() as conn:
             if self.fts_available:
@@ -42,6 +51,8 @@ class LocalStoreMaintenanceMixin:
         if remove_content_files:
             self._remove_content_files()
 
+    # LLM: LocalStoreMaintenanceMixin._remove_content_files 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 清理 remove_content_files 相关状态，并让调用方知道是否完成。
     def _remove_content_files(self) -> None:
         """Best-effort cleanup for content files after database reset."""
         if not self.files_dir.exists():
@@ -52,6 +63,8 @@ class LocalStoreMaintenanceMixin:
             except OSError:
                 continue
 
+    # LLM: LocalStoreMaintenanceMixin.count_records 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 汇总 count_records 的统计信息供状态页或诊断使用。
     def count_records(self, *, source_type: str | None = None) -> int:
         """统计记录数，可按 source_type 过滤。"""
 
@@ -59,6 +72,8 @@ class LocalStoreMaintenanceMixin:
         with self._connection() as conn:
             return int(conn.execute(f"SELECT COUNT(*) FROM records {where}", params).fetchone()[0])
 
+    # LLM: LocalStoreMaintenanceMixin.source_counts 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 汇总 source_counts 的统计信息供状态页或诊断使用。
     def source_counts(self) -> dict[str, int]:
         """按 source_type 汇总记录数。"""
 
@@ -68,6 +83,8 @@ class LocalStoreMaintenanceMixin:
             ).fetchall()
         return {str(row["source_type"]): int(row["count"]) for row in rows}
 
+    # LLM: LocalStoreMaintenanceMixin.missing_content_files 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 完成 LocalStore 本地事实索引 中的 missing_content_files 步骤，并保持调用方依赖的数据形状。
     def missing_content_files(self, *, limit: int = 20) -> list[dict[str, Any]]:
         """检查 records 指向的正文文件是否还存在。"""
 
@@ -97,6 +114,8 @@ class LocalStoreMaintenanceMixin:
                 break
         return missing
 
+    # LLM: LocalStoreMaintenanceMixin.stats 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 汇总 stats 的统计信息供状态页或诊断使用。
     def stats(self) -> dict[str, Any]:
         """返回本地事实源的当前状态。"""
 

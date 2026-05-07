@@ -1,3 +1,6 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 
 from __future__ import annotations
 
@@ -10,6 +13,8 @@ from ._runtime_params import ToolLoopExecuteParams
 from .parameters import _one_shot_tool_call_key
 
 
+# LLM: ToolCallRecordParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存工具call记录参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class ToolCallRecordParams:
     params: ToolLoopExecuteParams
@@ -19,6 +24,8 @@ class ToolCallRecordParams:
     result: ToolExecutionResult
 
 
+# LLM: _build_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 构建提示词所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _build_prompt(agent, params: ToolLoopExecuteParams) -> str:
     return agent.prompts.build(
         params.user_prompt,
@@ -33,6 +40,8 @@ def _build_prompt(agent, params: ToolLoopExecuteParams) -> str:
     )
 
 
+# LLM: _effective_max_tool_rounds 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理effectivemax工具轮数相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
     effective = agent.config.max_tool_rounds
     attrs_to_check = params.task_attributes or getattr(agent, "_current_task_attributes", None)
@@ -41,6 +50,8 @@ def _effective_max_tool_rounds(agent, params: ToolLoopExecuteParams) -> int:
     return effective
 
 
+# LLM: _duplicate_one_shot_result 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理duplicateoneshot结果相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _duplicate_one_shot_result(payload: dict[str, object]) -> ToolExecutionResult:
     tool_name = str(payload.get("tool") or "unknown")
     return ToolExecutionResult(
@@ -51,11 +62,17 @@ def _duplicate_one_shot_result(payload: dict[str, object]) -> ToolExecutionResul
     )
 
 
+# LLM: ToolLoopService 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 封装工具循环服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class ToolLoopService:
 
+    # LLM: __init__ 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def __init__(self, agent):
         self._agent = agent
 
+    # LLM: execute 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 推进execute的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def execute(self, params: ToolLoopExecuteParams):
         final_prompt = ""
         final_response = None
@@ -89,9 +106,13 @@ class ToolLoopService:
 
         return final_prompt, final_response, tool_rounds
 
+    # LLM: _tool_round_limit_reached 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理工具round限制reached相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _tool_round_limit_reached(self, params: ToolLoopExecuteParams, tool_rounds: int) -> bool:
         return tool_rounds >= _effective_max_tool_rounds(self._agent, params)
 
+    # LLM: _final_response_after_tool_limit 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理final响应after工具限制相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _final_response_after_tool_limit(self, params: ToolLoopExecuteParams):
         params.tool_context.append("[tool-system]\n已达到最大工具轮数限制，停止继续调用工具。")
         final_prompt = _build_prompt(self._agent, params)
@@ -100,6 +121,8 @@ class ToolLoopService:
         )
         return final_prompt, final_response
 
+    # LLM: _execute_one_tool_call 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 推进one工具call的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _execute_one_tool_call(self, params: ToolLoopExecuteParams, payload):
         one_shot_key = _one_shot_tool_call_key(payload)
         if one_shot_key and one_shot_key in params.one_shot_tool_calls:
@@ -114,6 +137,8 @@ class ToolLoopService:
             params.one_shot_tool_calls.add(one_shot_key)
         return result
 
+    # LLM: _record_tool_call 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 写入工具call的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
     def _record_tool_call(self, record: ToolCallRecordParams) -> None:
         if record.result.ok and record.result.tool not in {"__parse_error__", "unknown"}:
             record.params.executed_tools.append(record.result.tool)

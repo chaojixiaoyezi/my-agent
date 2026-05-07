@@ -1,6 +1,9 @@
+# LLM: 解析容错直接影响工具调用召回，放宽规则时要防误解析。
+# 模块用途: 从模型输出中解析 XMLish 工具调用和参数。
+
 from __future__ import annotations
 
-"""LLM: parses non-JSON XML-ish tool-call dialects into canonical tool payloads.
+"""parses non-JSON XML-ish tool-call dialects into canonical tool payloads.
 
 给人看的解释：
 有些模型不会严格输出 `[TOOL_CALL]{json}[/TOOL_CALL]`，而是吐出像 XML 的格式。
@@ -76,6 +79,8 @@ _XMLISH_PARAMETER_ALIASES = {
 _MAX_XMLISH_RAW_CHARS = 1000
 
 
+# LLM: parse_xmlish_tool_calls 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 解析 parse_xmlish_tool_calls 数据结构。
 def parse_xmlish_tool_calls(text: str) -> list[tuple[int, dict[str, Any]]]:
 
     calls: list[tuple[int, dict[str, Any]]] = []
@@ -121,6 +126,8 @@ def parse_xmlish_tool_calls(text: str) -> list[tuple[int, dict[str, Any]]]:
 
 
 
+# LLM: _handle_bare_function_opens_without_close 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 handle_bare_function_opens_without_close 步骤，并保持调用方依赖的数据形状。
 def _handle_bare_function_opens_without_close(
     text: str,
     calls: list[tuple[int, dict[str, Any]]],
@@ -136,6 +143,8 @@ def _handle_bare_function_opens_without_close(
     _replace_unclosed_last_bare_function(text, calls, opens, closed_positions)
 
 
+# LLM: _bare_function_payload 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 bare_function_payload 步骤，并保持调用方依赖的数据形状。
 def _bare_function_payload(text: str, opens: list[re.Match[str]], index: int, match: re.Match[str]) -> tuple[int, dict[str, Any]]:
     name = match.group("name1") or match.group("name2")
     next_open = opens[index + 1].start() if index + 1 < len(opens) else len(text)
@@ -152,6 +161,8 @@ def _bare_function_payload(text: str, opens: list[re.Match[str]], index: int, ma
     return match.start(), _xmlish_payload_from_body(name, body)
 
 
+# LLM: _xmlish_payload_from_body 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 xmlish_payload_from_body 步骤，并保持调用方依赖的数据形状。
 def _xmlish_payload_from_body(name: str, body: str) -> dict[str, Any]:
     payload: dict[str, Any] = {"tool": _normalize_xmlish_tool_name(name)}
     for param_match in _XMLISH_PARAMETER_EQ_RE.finditer(body):
@@ -163,6 +174,8 @@ def _xmlish_payload_from_body(name: str, body: str) -> dict[str, Any]:
     return payload
 
 
+# LLM: _replace_unclosed_last_bare_function 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 replace_unclosed_last_bare_function 步骤，并保持调用方依赖的数据形状。
 def _replace_unclosed_last_bare_function(
     text: str,
     calls: list[tuple[int, dict[str, Any]]],
@@ -187,6 +200,8 @@ def _replace_unclosed_last_bare_function(
     )
 
 
+# LLM: _parse_xmlish_tool_call_body 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 解析 parse_xmlish_tool_call_body 数据结构。
 def _parse_xmlish_tool_call_body(body: str, raw: str) -> dict[str, Any]:
     function_match = _XMLISH_FUNCTION_EQ_RE.search(body)
     if function_match is None:
@@ -210,16 +225,22 @@ def _parse_xmlish_tool_call_body(body: str, raw: str) -> dict[str, Any]:
     return payload
 
 
+# LLM: _normalize_xmlish_tool_name 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把输入值归一成 工具系统 内部使用的稳定格式。
 def _normalize_xmlish_tool_name(name: str) -> str:
     cleaned = name.strip().lower().replace("-", "_")
     return _XMLISH_TOOL_ALIASES.get(cleaned, cleaned)
 
 
+# LLM: _normalize_xmlish_parameter_name 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把输入值归一成 工具系统 内部使用的稳定格式。
 def _normalize_xmlish_parameter_name(name: str) -> str:
     cleaned = name.strip().lower().replace("-", "_")
     return _XMLISH_PARAMETER_ALIASES.get(cleaned, cleaned)
 
 
+# LLM: _decode_xmlish_parameter_value 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 decode_xmlish_parameter_value 步骤，并保持调用方依赖的数据形状。
 def _decode_xmlish_parameter_value(value: str) -> Any:
     text = html.unescape(value.strip())
     if not text:
@@ -238,6 +259,8 @@ def _decode_xmlish_parameter_value(value: str) -> Any:
     return text
 
 
+# LLM: _truncate_raw 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 truncate_raw 步骤，并保持调用方依赖的数据形状。
 def _truncate_raw(text: str) -> str:
     if len(text) <= _MAX_XMLISH_RAW_CHARS:
         return text

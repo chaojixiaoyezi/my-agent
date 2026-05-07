@@ -1,3 +1,6 @@
+# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
+# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
+
 
 from __future__ import annotations
 
@@ -7,6 +10,8 @@ from typing import Optional
 from ...agent.session import SessionManager, generate_session_id
 
 
+# LLM: create_or_resume_session 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def create_or_resume_session(
     session_manager: SessionManager,
     session_id: str | None,
@@ -26,23 +31,33 @@ def create_or_resume_session(
     return session_manager, session.session_id
 
 
+# LLM: touch_session_on_exit 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def touch_session_on_exit(session_manager: SessionManager, session_id: str, channel: str = "chat") -> None:
     session_manager.touch_session(session_id, channel=channel)
 
 
+# LLM: ConversationHistory 是chat CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 class ConversationHistory:
 
+    # LLM: __init__ 属于chat CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def __init__(self, max_turns: int = 8) -> None:
         self._history: list[tuple[str, str]] = []
         self._lock = threading.Lock()
         self._max_turns = max_turns
 
+    # LLM: append 属于chat CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def append(self, user: str, assistant: str) -> None:
         with self._lock:
             self._history.append((user, assistant))
             if len(self._history) > self._max_turns * 2:
                 self._history[:] = self._history[-self._max_turns:]
 
+    # LLM: get_context 属于chat CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def get_context(self) -> str:
         with self._lock:
             if not self._history:
@@ -55,6 +70,8 @@ class ConversationHistory:
             lines.append(f"助手: {assistant_msg[:500]}")
         return "\n".join(lines)
 
+    # LLM: __len__ 属于chat CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def __len__(self) -> int:
         with self._lock:
             return len(self._history)

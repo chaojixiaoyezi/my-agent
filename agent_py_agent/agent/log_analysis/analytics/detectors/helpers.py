@@ -1,4 +1,7 @@
-"""LLM: Field extraction, event classification, and utility helpers for soft detectors.
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
+"""Field extraction, event classification, and utility helpers for soft detectors.
 
 给人看的解释：
 这个模块包含日志事件分析中用到的各种"小工具函数"——把原始事件字典转成统一格式、

@@ -130,18 +130,20 @@ my-agent/                          ← 项目根目录
 ### 注释格式（两层注释）
 
 ```python
+# LLM: technical summary of the contract, side effects and invariants.
+# 函数用途: 人能看懂的用途、调用时机和修改注意事项。
 def example(...):
-    """LLM: technical summary of the contract, side effects and invariants.
-
-    人话说明：
-    这个函数用来做什么，什么时候会被调用。
-    """
+    ...
 ```
 
-- 第一行给 LLM 读，写清 contract / invariant / side effects。
-- 第二行给人读，用大白话。
+- 每个功能代码里的 module / class / function / method 都要有这类双层注释。
+- module 使用 `模块用途:`，class 使用 `类用途:`，function 和 method 使用 `函数用途:`。
+- class / def 有装饰器时，注释放在第一行装饰器上方。
+- `LLM:` 给后续模型读，写清 contract / invariant / side effects / caller expectations。
+- `模块用途:`、`函数用途:` 或 `类用途:` 给人读，用大白话说明用途、调用入口、修改时要检查什么。
 - 有副作用的函数必须写清：会不会写文件、调用 API、启动进程、改状态。
 - 测试函数不强求长注释。
+- 批量补注释后必须跑 `compileall`、`ruff` 和 `scripts/check_code_size.py`；注释不计入实现行数，但语法位置和装饰器位置必须正确。
 
 ### 测试要求
 

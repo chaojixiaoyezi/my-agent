@@ -1,3 +1,6 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 
 from __future__ import annotations
 
@@ -22,11 +25,17 @@ from ._runtime_params import (
 from .models import AgentRunResult
 
 
+# LLM: FinalizationService 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 封装收尾服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class FinalizationService:
 
+    # LLM: __init__ 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def __init__(self, agent):
         self._agent = agent
 
+    # LLM: finalize 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理finalize相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def finalize(self, ctx: FinalizeContext):
         assert ctx.final_response is not None
         run_request_id = ctx.request_id or f"run-{time_module.time_ns()}"
@@ -73,6 +82,8 @@ class FinalizationService:
 
         return self._build_agent_run_result(ctx, archive_result, snapshot_result, token_ledger)
 
+    # LLM: _archive_run_if_needed 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 写入ifneeded的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
     def _archive_run_if_needed(self, params: ArchiveRunParams):
         if not params.do_save:
             return None
@@ -98,6 +109,8 @@ class FinalizationService:
             )
         )
 
+    # LLM: _write_recovery_snapshot_if_needed 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 写入恢复snapshotifneeded的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
     def _write_recovery_snapshot_if_needed(self, params: WriteRecoverySnapshotParams):
         should_write = bool(getattr(self._agent.config, "memory_hook_enabled", True)) and (
             params.do_save if params.recovery_snapshot is None else bool(params.recovery_snapshot)
@@ -128,6 +141,8 @@ class FinalizationService:
             ),
         )
 
+    # LLM: _estimate_token_usage 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 计算令牌usage的预算、数量或限制，影响后续调度节奏；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def _estimate_token_usage(self, params: EstimateTokenParams):
         input_tokens = (
             estimate_tokens(params.user_prompt)
@@ -152,6 +167,8 @@ class FinalizationService:
             "cumulative": int(ledger["cumulative_tokens"]),
         }
 
+    # LLM: _build_agent_run_result 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 构建agentrun结果所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _build_agent_run_result(
         self, ctx: FinalizeContext, archive_result, snapshot_result, token_ledger
     ):
@@ -184,6 +201,8 @@ class FinalizationService:
         )
 
 
+# LLM: _snapshot_result_fields 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理snapshot结果字段相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _snapshot_result_fields(snapshot_result) -> dict:
     # LLM: snapshot result projection is kept outside AgentRunResult assembly.
     return {
@@ -194,6 +213,8 @@ def _snapshot_result_fields(snapshot_result) -> dict:
     }
 
 
+# LLM: _resume_context_fields 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理恢复上下文字段相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _resume_context_fields(ctx: FinalizeContext) -> dict:
     resume = ctx.resume_context_result
     return {

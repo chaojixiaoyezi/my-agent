@@ -1,3 +1,6 @@
+# LLM: Live Lab validation script; keep CLI flags, artifact paths, and replay outputs stable for scenario tests.
+# 模块用途: 支撑可见验收和回放场景，负责启动案例、整理输出或生成报告。
+
 """Stage helpers for run_security_alert_v1_replay — each returns (summary_updates, stage_result) or raises."""
 
 from __future__ import annotations
@@ -15,10 +18,14 @@ from agent_py_agent.agent.log_analysis.storage.local_store import LocalLogStore
 from agent_py_agent.agent.log_analysis.tools import trace_case
 
 
+# LLM: ReplayStageError 是Live Lab 验收的数据契约；字段名会被调用方和测试读取。
+# 类用途: 标记本流程的专用异常，方便入口层给出明确失败信息。
 class ReplayStageError(RuntimeError):
     """Raised when a replay stage finishes without the expected artifact."""
 
 
+# LLM: EvidenceStageParams 是Live Lab 验收的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class EvidenceStageParams:
     case: Any
@@ -29,6 +36,8 @@ class EvidenceStageParams:
     simulate_failure_stage: str | None
 
 
+# LLM: ReportStageParams 是Live Lab 验收的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class ReportStageParams:
     case: Any
@@ -39,6 +48,8 @@ class ReportStageParams:
     simulate_failure_stage: str | None
 
 
+# LLM: run_ingest_stage 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_ingest_stage(
     fixture_path: Path,
     store_root: Path,
@@ -66,6 +77,8 @@ def run_ingest_stage(
     }, result
 
 
+# LLM: run_detector_stage 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_detector_stage(store_root: Path) -> tuple[dict[str, Any], Any]:
     """Run soft detectors on stored events."""
     from agent_py_agent.agent.log_analysis.analytics.detectors import run_soft_detectors
@@ -86,6 +99,8 @@ def run_detector_stage(store_root: Path) -> tuple[dict[str, Any], Any]:
     }, findings
 
 
+# LLM: run_case_stage 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_case_stage(
     findings: list, store_root: Path, artifacts_root: Path
 ) -> tuple[dict[str, Any], Any]:
@@ -111,6 +126,8 @@ def run_case_stage(
     }, case
 
 
+# LLM: run_route_stage 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_route_stage(case: Any, findings: list, artifacts_root: Path) -> tuple[dict[str, Any], Any]:
     """Build route draft and write to artifacts."""
     route = build_route_draft(case, findings=findings)
@@ -126,6 +143,8 @@ def run_route_stage(case: Any, findings: list, artifacts_root: Path) -> tuple[di
     }, route
 
 
+# LLM: run_evidence_stage 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_evidence_stage(params: EvidenceStageParams) -> tuple[dict[str, Any], Any]:
     """Trace case and collect evidence paths."""
     if params.simulate_failure_stage == "evidence":
@@ -156,6 +175,8 @@ def run_evidence_stage(params: EvidenceStageParams) -> tuple[dict[str, Any], Any
     }, traced
 
 
+# LLM: run_report_stage 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_report_stage(params: ReportStageParams) -> tuple[dict[str, Any], Any]:
     """Write first-response report and forensic package."""
     from agent_py_agent.agent.log_analysis.reports import (

@@ -1,6 +1,9 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
-"""LLM: writes scenario fixture projects and isolated scenario config overrides.
+"""writes scenario fixture projects and isolated scenario config overrides.
 
 给人看的解释：
 scenario_utils 负责流程编排；这里单独承接磁盘 fixture/config 写入，避免场景入口文件继续变胖。
@@ -10,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+# LLM: ScenarioConfigRequest 是scenario CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class ScenarioConfigRequest:
     source_config: Path
@@ -19,6 +24,8 @@ class ScenarioConfigRequest:
     max_subagents: int
 
 
+# LLM: write_scenario_fixture 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 把报告、摘要或状态写入磁盘，保持输出路径和 JSON 字段稳定。
 def write_scenario_fixture(fixture_root: Path) -> None:
     (fixture_root / "README.md").write_text(
         "\n".join(
@@ -50,6 +57,8 @@ def write_scenario_fixture(fixture_root: Path) -> None:
     (fixture_root / "scenario_outputs").mkdir(parents=True, exist_ok=True)
 
 
+# LLM: write_scenario_config 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 把报告、摘要或状态写入磁盘，保持输出路径和 JSON 字段稳定。
 def write_scenario_config(request: ScenarioConfigRequest) -> None:
     base = request.source_config.read_text(encoding="utf-8")
     fixture = str(request.fixture_root).replace("\\", "/")

@@ -1,6 +1,9 @@
+# LLM: Gateway service module; keep file-queue, daemon, HTTP, and audit contracts stable.
+# 模块用途: 拆分 gateway 请求队列、守护进程、HTTP 处理和响应渲染逻辑。
+
 from __future__ import annotations
 
-"""LLM: 本模块包含 gateway 请求处理租约（lease）和心跳（heartbeat）相关的函数与常量。
+"""本模块包含 gateway 请求处理租约（lease）和心跳（heartbeat）相关的函数与常量。
 
 新手说明:
 gateway 在处理请求时需要"租约"机制——一个后台线程定期刷新请求文件的心跳时间戳，
@@ -24,6 +27,8 @@ from .logging import _report_gateway_side_effect_error, log_gateway_payload
 _active_heartbeat_request_ids: set[str] = set()
 
 
+# LLM: _LeaseHeartbeatContext 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 类用途: 集中保存租约heartbeat上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class _LeaseHeartbeatContext:
 
@@ -35,6 +40,8 @@ class _LeaseHeartbeatContext:
     interval: float
 
 
+# LLM: _gateway_processing_lease_interval 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理网关processing租约interval相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _gateway_processing_lease_interval(agent: SimpleAgent) -> float:
     try:
         gateway_interval = float(agent.config.gateway_heartbeat_interval or 5)
@@ -49,6 +56,8 @@ def _gateway_processing_lease_interval(agent: SimpleAgent) -> float:
     return max(0.2, gateway_interval)
 
 
+# LLM: _touch_gateway_processing_lease 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理touch网关processing租约相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _touch_gateway_processing_lease(request_path: Path, *, request_id: str, worker_id: str = "") -> bool:
     payload = read_json_file(request_path)
     if not payload:
@@ -74,10 +83,14 @@ def _touch_gateway_processing_lease(request_path: Path, *, request_id: str, work
     return True
 
 
+# LLM: is_heartbeat_alive_for_request 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 判断heartbeatalive请求条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def is_heartbeat_alive_for_request(request_id: str) -> bool:
     return request_id in _active_heartbeat_request_ids
 
 
+# LLM: _start_gateway_processing_lease_heartbeat 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 推进网关processing租约heartbeat的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _start_gateway_processing_lease_heartbeat(
     agent: SimpleAgent,
     request_path: Path,
@@ -98,6 +111,8 @@ def _start_gateway_processing_lease_heartbeat(
     return stop_event, thread
 
 
+# LLM: _run_gateway_processing_lease_heartbeat 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 推进网关processing租约heartbeat的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _run_gateway_processing_lease_heartbeat(context: _LeaseHeartbeatContext) -> None:
     try:
         _run_lease_heartbeat_loop(context)
@@ -105,6 +120,8 @@ def _run_gateway_processing_lease_heartbeat(context: _LeaseHeartbeatContext) -> 
         _active_heartbeat_request_ids.discard(context.request_id)
 
 
+# LLM: _run_lease_heartbeat_loop 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 推进租约heartbeat循环的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _run_lease_heartbeat_loop(context: _LeaseHeartbeatContext) -> None:
     consecutive_failures = 0
     while not context.stop_event.wait(context.interval):
@@ -121,6 +138,8 @@ def _run_lease_heartbeat_loop(context: _LeaseHeartbeatContext) -> None:
         return
 
 
+# LLM: _should_stop_lease_heartbeat 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 判断租约heartbeat条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _should_stop_lease_heartbeat(
     agent: SimpleAgent,
     request_path: Path,
@@ -135,6 +154,8 @@ def _should_stop_lease_heartbeat(
     return True
 
 
+# LLM: _refresh_lease_or_count_failure 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理refresh租约数量失败相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def _refresh_lease_or_count_failure(
     request_path: Path,
     request_id: str,
@@ -150,6 +171,8 @@ def _refresh_lease_or_count_failure(
         return False, consecutive_failures + 1
 
 
+# LLM: _log_heartbeat_abandoned 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 写入heartbeatabandoned的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def _log_heartbeat_abandoned(agent: SimpleAgent, request_path: Path, request_id: str, failures: int) -> None:
     log_gateway_payload(
         agent,

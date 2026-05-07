@@ -1,6 +1,9 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 from __future__ import annotations
 
-"""LLM: filesystem task workspace skeletons for runtime memory.
+"""filesystem task workspace skeletons for runtime memory.
 
 Human version:
 This module creates the task-level memory workspace described by the runtime
@@ -60,6 +63,8 @@ from .task_workspace_rendering import (
 )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 TaskWorkspacePaths 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 TaskWorkspacePaths 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class TaskWorkspacePaths:
     """Concrete paths for one task workspace plus one legacy run adapter."""
@@ -89,6 +94,8 @@ class TaskWorkspacePaths:
     legacy_run_ref_json: Path
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _TaskWorkspaceRuntimeRefs 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 _TaskWorkspaceRuntimeRefs 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _TaskWorkspaceRuntimeRefs:
     artifact_manifest: ArtifactManifestResult | None = None
@@ -97,6 +104,8 @@ class _TaskWorkspaceRuntimeRefs:
     daily_ledger: DailyLedgerAppendResult | None = None
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _RuntimeSyncInputs 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 _RuntimeSyncInputs 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _RuntimeSyncInputs:
     workspace: str | Path
@@ -105,6 +114,8 @@ class _RuntimeSyncInputs:
     now: float
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _TaskWorkspacePathInputs 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 _TaskWorkspacePathInputs 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _TaskWorkspacePathInputs:
     workspace: str | Path
@@ -112,6 +123,8 @@ class _TaskWorkspacePathInputs:
     run_id: str
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 EnsureSubagentTaskWorkspaceRequest 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 EnsureSubagentTaskWorkspaceRequest 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class EnsureSubagentTaskWorkspaceRequest:
     """Bundle inputs for syncing a task workspace and its runtime refs."""
@@ -121,12 +134,16 @@ class EnsureSubagentTaskWorkspaceRequest:
     task: Any
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 task_workspace_path 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 task workspace path 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def task_workspace_path(workspace: str | Path, task_id: str) -> Path:
     """Return the task workspace path under a subagent manager workspace."""
 
     return Path(workspace) / "tasks" / _safe_segment(task_id)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 ensure_subagent_task_workspace 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 校验 ensure subagent task workspace 的输入、状态或路径，提前暴露无效数据和越界条件。
 def ensure_subagent_task_workspace(
     request: EnsureSubagentTaskWorkspaceRequest | str | Path | None = None,
     task: Any | None = None,
@@ -163,6 +180,8 @@ def ensure_subagent_task_workspace(
     return _paths_for(path_inputs, runtime_refs=runtime_refs, shared=shared)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _coerce_ensure_request 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 coerce ensure request 涉及的字段，让后续匹配和存储使用同一形态。
 def _coerce_ensure_request(
     request: EnsureSubagentTaskWorkspaceRequest | str | Path | None,
     task: Any | None,
@@ -177,6 +196,8 @@ def _coerce_ensure_request(
     return EnsureSubagentTaskWorkspaceRequest(workspace=resolved_workspace, task=task)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _sync_runtime_refs 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 sync runtime refs 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _sync_runtime_refs(inputs: _RuntimeSyncInputs) -> _TaskWorkspaceRuntimeRefs:
     # LLM: artifact manifests are written before the daily event so ledger refs are resolvable.
     artifact_manifest = sync_artifact_manifests(
@@ -209,6 +230,8 @@ def _sync_runtime_refs(inputs: _RuntimeSyncInputs) -> _TaskWorkspaceRuntimeRefs:
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _append_daily_ledger 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 append daily ledger 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_daily_ledger(
     inputs: _RuntimeSyncInputs,
     artifact_manifest: ArtifactManifestResult,
@@ -234,6 +257,8 @@ def _append_daily_ledger(
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _paths_for 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 paths for 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _paths_for(
     path_inputs: _TaskWorkspacePathInputs,
     runtime_refs: _TaskWorkspaceRuntimeRefs | None = None,
@@ -272,6 +297,8 @@ def _paths_for(
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _default_artifact_manifest 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 default artifact manifest 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _default_artifact_manifest(artifacts_dir: Path, agent_adapter_dir: Path) -> ArtifactManifestResult:
     return ArtifactManifestResult(
         task_manifest_jsonl=artifacts_dir / "manifest.jsonl",
@@ -279,10 +306,14 @@ def _default_artifact_manifest(artifacts_dir: Path, agent_adapter_dir: Path) -> 
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _default_daily_ledger 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 default daily ledger 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _default_daily_ledger(workspace: str | Path) -> DailyLedgerAppendResult:
     return DailyLedgerAppendResult(Path(workspace) / "daily" / "pending" / "events.jsonl", "")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _ensure_directories 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 校验 ensure directories 的输入、状态或路径，提前暴露无效数据和越界条件。
 def _ensure_directories(paths: TaskWorkspacePaths) -> None:
     for directory in [
         paths.root,
@@ -302,6 +333,8 @@ def _ensure_directories(paths: TaskWorkspacePaths) -> None:
         directory.mkdir(parents=True, exist_ok=True)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _safe_segment 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 safe segment 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _safe_segment(value: str) -> str:
     cleaned = str(value or "task").replace("/", "_").replace("\\", "_").strip()
     return cleaned or "task"

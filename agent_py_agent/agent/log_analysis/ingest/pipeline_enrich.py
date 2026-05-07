@@ -1,6 +1,9 @@
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
 from __future__ import annotations
 
-"""LLM: later-stage ingest pipeline functions — normalization, enrichment, dedup, and output writing.
+"""later-stage ingest pipeline functions — normalization, enrichment, dedup, and output writing.
 
 给人看的解释：
 这个文件放 pipeline 的后半段：格式规范化、去重、事件写入存储、manifest 生成。
@@ -34,6 +37,8 @@ from .pipeline_processing import process_records as _process_records
 write_manifest = _write_manifest
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _PreparedIngest 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 _PreparedIngest 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class _PreparedIngest:
     source_path: Path
@@ -48,6 +53,8 @@ class _PreparedIngest:
     cursor_before: dict
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _PrepareIngestRequest 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 _PrepareIngestRequest 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _PrepareIngestRequest:
     path: str | Path
@@ -56,6 +63,8 @@ class _PrepareIngestRequest:
     file_format: str | None
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 enrich_ingest_file 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 enrich ingest file 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
 def enrich_ingest_file(
     pipeline,  # IngestPipeline — lazy to avoid circular import
     path: str | Path,
@@ -66,7 +75,7 @@ def enrich_ingest_file(
     parser_id: str = "security_alert_v1",
     file_format: str | None = None,
 ) -> IngestResult:
-    """LLM: Main orchestration for one-file ingest: dedup, storage, manifest, checkpoint."""
+    """Main orchestration for one-file ingest: dedup, storage, manifest, checkpoint."""
     ingest_options = options or IngestFileOptions(
         source_id=source_id,
         source_product=source_product,
@@ -95,6 +104,8 @@ def enrich_ingest_file(
     return finalize_prepared_ingest(PreparedFinalize(pipeline, prepared, counts, event_ids, storage_summary))
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _process_prepared_ingest 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 推进 process prepared ingest 对应的调度、执行或处理步骤，并返回可追踪的状态结果。
 def _process_prepared_ingest(pipeline, prepared: _PreparedIngest, source_product: str | None):
     return _process_records(
         pipeline,
@@ -110,6 +121,8 @@ def _process_prepared_ingest(pipeline, prepared: _PreparedIngest, source_product
     )
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _prepare_ingest 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 prepare ingest 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
 def _prepare_ingest(pipeline, request: _PrepareIngestRequest) -> _PreparedIngest:
     source_path = Path(request.path)
     if not source_path.exists():
@@ -133,6 +146,8 @@ def _prepare_ingest(pipeline, request: _PrepareIngestRequest) -> _PreparedIngest
     )
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 write_events 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write events 相关记录，集中处理目标路径、格式化和状态更新。
 def write_events(pipeline, events: list[dict[str, Any]]) -> dict[str, Any]:
     """Write a list of events to the configured store or fallback JSONL sink."""
     if not events:
@@ -148,6 +163,8 @@ def write_events(pipeline, events: list[dict[str, Any]]) -> dict[str, Any]:
     return item_result if item_result is not None else pipeline.fallback_sink.write_events(events)
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _write_batch_events 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write batch events 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_batch_events(pipeline, events: list[dict[str, Any]]) -> dict[str, Any] | None:
     for method_name in ("write_events", "append_events", "upsert_events"):
         method = getattr(pipeline.store, method_name, None)
@@ -157,6 +174,8 @@ def _write_batch_events(pipeline, events: list[dict[str, Any]]) -> dict[str, Any
     return None
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _write_item_events 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write item events 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_item_events(pipeline, events: list[dict[str, Any]]) -> dict[str, Any] | None:
     for method_name in ("write_event", "append_event", "upsert_event"):
         method = getattr(pipeline.store, method_name, None)
@@ -165,12 +184,16 @@ def _write_item_events(pipeline, events: list[dict[str, Any]]) -> dict[str, Any]
     return None
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _write_events_one_by_one 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write events one by one 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_events_one_by_one(method: Any, events: list[dict[str, Any]]) -> dict[str, Any]:
     for event in events:
         method(event)
     return {"count": len(events), "path": None}
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 flush_events 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 flush events 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
 def flush_events(
     pipeline,
     events: list[dict[str, Any]],

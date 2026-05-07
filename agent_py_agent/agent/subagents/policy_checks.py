@@ -1,6 +1,9 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-"""LLM: individual policy check functions for risk weighting, status mapping, and due-check dispatch.
+"""individual policy check functions for risk weighting, status mapping, and due-check dispatch.
 
 给人看的解释：
 这些函数各自是一条规则——某个 issue 应该排多前面、某个 runner 状态应该映射成什么任务状态、
@@ -17,12 +20,9 @@ from .models import CapabilityGrant, CapabilityRequest, SubAgentParsedOutput, Su
 from .reports import ActionPlanItem, DueCheckIssue, SubAgentBoardItem
 
 
+# LLM: _risk_weight 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理riskweight相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _risk_weight(flags: list[str]) -> int:
-    """LLM: compute risk weight so severe risks appear first in Hot List.
-
-    新手说明:
-    让严重风险在 Hot List 里排前面。返回值越大越靠前。
-    """
 
     weights = {
         "failed": 100,
@@ -41,6 +41,8 @@ def _risk_weight(flags: list[str]) -> int:
     return max((weights.get(item, 1) for item in flags), default=0)
 
 
+# LLM: MakeDueIssueParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存make到期issue参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class MakeDueIssueParams:
     """Params bundle for _make_due_issue."""
@@ -56,6 +58,8 @@ class MakeDueIssueParams:
     stale_seconds: float
 
 
+# LLM: RunnerNextActionParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存执行器next动作参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class RunnerNextActionParams:
     """Params bundle for deciding the runner follow-up action."""
@@ -67,12 +71,9 @@ class RunnerNextActionParams:
     next_actions: list[str] | None = None
 
 
+# LLM: _make_due_issue 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 构建到期issue所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _make_due_issue(*, params: MakeDueIssueParams) -> DueCheckIssue:
-    """LLM: unified factory for due-check issues to keep fields consistent across branches.
-
-    新手说明:
-    统一创建 due-check 问题，避免不同分支字段不一致。
-    """
     return DueCheckIssue(
         run_id=params.task.id,
         severity=params.severity,
@@ -95,22 +96,16 @@ def _make_due_issue(*, params: MakeDueIssueParams) -> DueCheckIssue:
     )
 
 
+# LLM: _severity_weight 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理severityweight相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _severity_weight(severity: str) -> int:
-    """LLM: map P0/P1/P2 severity to a numeric weight for sorting.
-
-    新手说明:
-    统一的 P0/P1/P2 权重。P0 最严重排最前。
-    """
 
     return {"P0": 1000, "P1": 500, "P2": 100}.get(severity, 0)
 
 
+# LLM: _issue_weight 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理issueweight相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _issue_weight(issue: DueCheckIssue) -> int:
-    """LLM: compute due-check sorting weight combining severity and kind.
-
-    新手说明:
-    due-check 排序权重。严重程度和问题类型各贡献一部分分数。
-    """
 
     severity_weight = _severity_weight(issue.severity)
     kind_weight = {
@@ -132,12 +127,9 @@ def _issue_weight(issue: DueCheckIssue) -> int:
     return severity_weight + kind_weight
 
 
+# LLM: _action_for_issue 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理动作issue相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _action_for_issue(issue: DueCheckIssue) -> tuple[str, int, str]:
-    """LLM: map a due-check issue to a dry-run action tuple.
-
-    新手说明:
-    把 due-check issue 映射为 dry-run 动作。返回 (动作名, 优先级, 状态变更)。
-    """
 
     kind = issue.kind
     if kind in {"channel_broken", "channel_probe_missing", "status_channel_error"}:
@@ -163,14 +155,11 @@ def _action_for_issue(issue: DueCheckIssue) -> tuple[str, int, str]:
     return issue.suggested_action or "inspect_manually", 100, ""
 
 
+# LLM: _commands_for_action 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理commands动作相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _commands_for_action(action: str, run_id: str) -> list[str]:
-    """LLM: provide runnable CLI commands for a dry-run action.
 
-    新手说明:
-    给 dry-run 动作提供下一步可运行命令。
-    """
-
-    # LLM: prefer the installed console script; it avoids Windows python3 shim issues.
+    # LLM: 优先使用已安装命令行入口，绕开 Windows 的 python3 占位程序问题。
     cli = "my-agent"
     commands = {
         "probe_or_repair_channel": [
@@ -211,13 +200,9 @@ def _commands_for_action(action: str, run_id: str) -> list[str]:
     return commands.get(action, [f"{cli} subagent {run_id}"])
 
 
+# LLM: _status_from_structured_output 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理来自状态structuredoutput相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _status_from_structured_output(parsed: SubAgentParsedOutput) -> str:
-    """LLM: normalize model-reported status into runner-allowed task status.
-
-    新手说明:
-    把模型上报状态压成 runner 允许的任务状态。有 capability_requests 或 blocked_reason 就变 BLOCKED，
-    完成类状态统一变成 AWAITING_ACCEPTANCE。
-    """
 
     status = parsed.status.upper().strip()
     if parsed.capability_requests or parsed.blocked_reason:
@@ -229,25 +214,18 @@ def _status_from_structured_output(parsed: SubAgentParsedOutput) -> str:
     return "AWAITING_ACCEPTANCE"
 
 
+# LLM: _verification_from_runner_status 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理来自verification执行器状态相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _verification_from_runner_status(status: str) -> str:
-    """LLM: derive verification status from runner status; runner cannot directly set VERIFIED.
-
-    新手说明:
-    runner 不能直接 VERIFIED，只能进入待验收或未验收。
-    """
 
     if status.upper() == "AWAITING_ACCEPTANCE":
         return "NEEDS_ACCEPTANCE"
     return "UNVERIFIED"
 
 
+# LLM: _runner_next_action 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 推进执行器next动作的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _runner_next_action(*, params: RunnerNextActionParams) -> str:
-    """LLM: compute machine-readable next-action suggestion from runner result.
-
-    新手说明:
-    根据 runner 结果给机器读的下一步建议。dry_run 不建议动作，有 capability_request 就路由，
-    有 next_actions 就取第一个，ok 且待验收就跑验收，否则检查失败。
-    """
 
     if params.dry_run:
         return ""
@@ -262,12 +240,9 @@ def _runner_next_action(*, params: RunnerNextActionParams) -> str:
     return ""
 
 
+# LLM: _is_active 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 判断active条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _is_active(status: str) -> bool:
-    """LLM: check whether a task should still have heartbeat and runtime limits.
-
-    新手说明:
-    判断任务是否仍应有心跳和运行时限。终态任务不算 active。
-    """
 
     return status.upper() not in {
         "DONE",
@@ -280,12 +255,9 @@ def _is_active(status: str) -> bool:
     }
 
 
+# LLM: _default_forbidden_write_roots 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理defaultforbiddenwriteroots相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
 def _default_forbidden_write_roots() -> list[str]:
-    """LLM: return default high-risk directories that subagents must not write to.
-
-    新手说明:
-    默认禁止子代理写入的高风险目录，比如用户主目录和桌面。
-    """
 
     home = Path.home()
     return [

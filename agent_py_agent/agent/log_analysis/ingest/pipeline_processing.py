@@ -1,3 +1,6 @@
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
 from __future__ import annotations
 
 """Record processing loop for enrich_ingest_file."""
@@ -11,6 +14,8 @@ from .dead_letter import DeadLetterWriter
 from .pipeline_helpers import _EnrichCounts
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _ProcessRecordsParams 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 _ProcessRecordsParams 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class _ProcessRecordsParams:
     source_path: Path
@@ -21,6 +26,8 @@ class _ProcessRecordsParams:
     source_product: str | None
     dead_letters: DeadLetterWriter
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 process_records 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 推进 process records 对应的调度、执行或处理步骤，并返回可追踪的状态结果。
 def process_records(pipeline, params: _ProcessRecordsParams) -> tuple[_EnrichCounts, list[str], list[dict[str, Any]]]:
     parsed_count = 0
     duplicate_count = 0
@@ -70,11 +77,15 @@ def process_records(pipeline, params: _ProcessRecordsParams) -> tuple[_EnrichCou
     return counts, flush_state.stored_event_ids, flush_state.storage_infos
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _ProcessTimeWindow 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 _ProcessTimeWindow 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class _ProcessTimeWindow:
     first_event_time: str | None = None
     last_event_time: str | None = None
 
+    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 note 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 完成 note 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
     def note(self, event_time: Any) -> None:
         if not isinstance(event_time, str):
             return
@@ -84,16 +95,22 @@ class _ProcessTimeWindow:
             self.last_event_time = event_time
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _FlushState 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 _FlushState 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class _FlushState:
     storage_infos: list[dict[str, Any]] = None
     stored_event_ids: list[str] = None
 
+    # LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 __post_init__ 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 完成 post init 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
     def __post_init__(self) -> None:
         self.storage_infos = [] if self.storage_infos is None else self.storage_infos
         self.stored_event_ids = [] if self.stored_event_ids is None else self.stored_event_ids
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _flush_buffer 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 flush buffer 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
 def _flush_buffer(
     pipeline,
     batch_id: str,

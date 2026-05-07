@@ -1,8 +1,10 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 from __future__ import annotations
 
-"""LLM: selects runner candidates, handles retry policy, creates dispatch records, and runs worker agents.
+"""selects runner candidates, handles retry policy, creates dispatch records, and runs worker agents.
 
-给人看的解释：
 dispatch 阶段不应该把"谁能跑、能不能重试、并发 worker 怎么启动"都塞在一个大函数里。
 这个文件专门处理 runner 相关的规则和小工具。
 """
@@ -30,6 +32,8 @@ RETRYABLE_RUNNER_FAILURE_TYPES = {
 }
 
 
+# LLM: _runner_max_attempts 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进执行器maxattempts的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _runner_max_attempts(policy: str) -> int:
 
     value = str(policy or "auto").strip().lower()
@@ -43,11 +47,15 @@ def _runner_max_attempts(policy: str) -> int:
         return 2
 
 
+# LLM: _runner_failure_type 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进执行器失败type的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _runner_failure_type(task: SubAgentTask) -> str:
 
     return str(task.failure_type or "").strip().lower()
 
 
+# LLM: _runner_retry_reason 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进执行器retryreason的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:
 
     if runner_max_attempts <= 1:
@@ -63,6 +71,8 @@ def _runner_retry_reason(task: SubAgentTask, runner_max_attempts: int) -> str:
     return f"failure_type={failure_type}; attempt={attempts + 1}/{runner_max_attempts}"
 
 
+# LLM: _resolve_runner_concurrency 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 读取或查询执行器concurrency需要的状态，返回调用方可继续处理的快照；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _resolve_runner_concurrency(value: object, job_count: int) -> int:
 
     if job_count <= 0:
@@ -83,6 +93,8 @@ def _resolve_runner_concurrency(value: object, job_count: int) -> int:
     return max(1, min(parsed, job_count))
 
 
+# LLM: _resolve_runner_start_rate 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 读取或查询执行器startrate需要的状态，返回调用方可继续处理的快照；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _resolve_runner_start_rate(value: object, job_count: int) -> int:
 
     if job_count <= 0:
@@ -103,6 +115,8 @@ def _resolve_runner_start_rate(value: object, job_count: int) -> int:
     return max(0, min(parsed, job_count))
 
 
+# LLM: _resolve_runner_timeout_seconds 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 读取或查询执行器超时seconds需要的状态，返回调用方可继续处理的快照；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _resolve_runner_timeout_seconds(value: object) -> float:
 
     if isinstance(value, str):
@@ -121,6 +135,8 @@ def _resolve_runner_timeout_seconds(value: object) -> float:
     return max(0.0, parsed)
 
 
+# LLM: RunnerDispatchRecordParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存执行器调度记录参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class RunnerDispatchRecordParams:
     agent: SimpleAgent
@@ -132,6 +148,8 @@ class RunnerDispatchRecordParams:
     execute_runners: bool
 
 
+# LLM: _runner_dispatch_record 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进执行器调度记录的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _runner_dispatch_record(params: RunnerDispatchRecordParams):
 
     return params.agent.subagents.make_dispatch_record(
@@ -162,6 +180,8 @@ def _runner_dispatch_record(params: RunnerDispatchRecordParams):
     )
 
 
+# LLM: _dispatch_runner_candidates 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进执行器candidates的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _dispatch_runner_candidates(
     tasks: list[SubAgentTask],
     max_runners: int,
@@ -181,6 +201,8 @@ def _dispatch_runner_candidates(
     return candidates
 
 
+# LLM: _limit_items 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 计算限制条目的预算、数量或限制，影响后续调度节奏；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _limit_items(items: list, limit: int) -> list:
 
     if limit <= 0:
@@ -188,6 +210,8 @@ def _limit_items(items: list, limit: int) -> list:
     return list(items)[:limit]
 
 
+# LLM: _is_dispatch_runner_candidate 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 判断执行器candidate条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _is_dispatch_runner_candidate(
     task: SubAgentTask,
     *,

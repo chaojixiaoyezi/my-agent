@@ -1,3 +1,6 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 
 from __future__ import annotations
 
@@ -9,6 +12,8 @@ from .common import make_agent
 from .models import SubagentsAcceptanceOptions, SubagentsPatchOptions
 
 
+# LLM: cmd_subagents_acceptance 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents_acceptance(args) -> int:
 
     agent = make_agent(args)
@@ -43,8 +48,9 @@ def cmd_subagents_acceptance(args) -> int:
     return 0
 
 
+# LLM: _subagents_acceptance_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _subagents_acceptance_options(args) -> SubagentsAcceptanceOptions:
-    # LLM: Keep argparse at the boundary; downstream helpers get a typed CLI bundle.
     return SubagentsAcceptanceOptions(
         run_ids=getattr(args, "run_id", None) or None,
         apply=bool(getattr(args, "apply", False)),
@@ -54,6 +60,8 @@ def _subagents_acceptance_options(args) -> SubagentsAcceptanceOptions:
     )
 
 
+# LLM: _print_patch_report 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_patch_report(report, mode: str, workspace, include_audit: bool = False) -> None:
     print(f"SUBAGENT PATCH {mode.upper()}")
     print(f"mode={mode} total_records={report.summary.get('total', 0)}")
@@ -75,6 +83,8 @@ def _print_patch_report(report, mode: str, workspace, include_audit: bool = Fals
         print(f"审计日志: {workspace / f'PATCH_{mode.upper()}_LOG.md'}")
 
 
+# LLM: cmd_subagents_patches 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents_patches(args) -> int:
 
     agent = make_agent(args)
@@ -121,8 +131,9 @@ def cmd_subagents_patches(args) -> int:
     return 0
 
 
+# LLM: _subagents_patch_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _subagents_patch_options(args) -> SubagentsPatchOptions:
-    # LLM: Normalize legacy parser constants before branching into review/apply modes.
     return SubagentsPatchOptions(
         action=getattr(args, "patch_action", None) or "review_dry_run",
         run_ids=getattr(args, "run_id", None) or None,
@@ -132,6 +143,8 @@ def _subagents_patch_options(args) -> SubagentsPatchOptions:
     )
 
 
+# LLM: _print_review_report 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_review_report(report, mode: str, workspace, include_audit: bool) -> None:
     print("SUBAGENT PATCH REVIEW")
     print(f"mode={mode} total_records={report.summary.get('total', 0)}")

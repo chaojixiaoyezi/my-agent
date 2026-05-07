@@ -1,3 +1,6 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 from __future__ import annotations
 
 import json
@@ -20,6 +23,8 @@ from .archive_io import (
 from .task_sources import task_recovery_read_paths
 
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _ArchiveFilterContext 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 _ArchiveFilterContext 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _ArchiveFilterContext:
     query_text: str
@@ -29,6 +34,8 @@ class _ArchiveFilterContext:
     level: int | None
 
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 CollectArchiveRecordsParams 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 CollectArchiveRecordsParams 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class CollectArchiveRecordsParams:
     # LLM: archive query fields stay bundled so resume/compact callers share one shape.
@@ -38,6 +45,8 @@ class CollectArchiveRecordsParams:
     level: int | None = None
 
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 FilterArchiveRecordsParams 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 FilterArchiveRecordsParams 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class FilterArchiveRecordsParams:
     query: str = ""
@@ -47,6 +56,8 @@ class FilterArchiveRecordsParams:
     level: int | None = None
 
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 collect_archive_records 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 收集或查询 collect archive records 的候选结果，并按参数完成筛选、排序或数量限制。
 def collect_archive_records(
     root: Path,
     *,
@@ -67,6 +78,8 @@ def collect_archive_records(
     records.sort(key=lambda item: (item["created_at_sort"], item["file_path"], item["line_no"]), reverse=True)
     return records[:limit] if limit > 0 else records
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 archive_filters_from_args 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 archive filters from args 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def archive_filters_from_args(args) -> dict[str, str]:
     fields = [
         "session_id",
@@ -86,6 +99,8 @@ def archive_filters_from_args(args) -> dict[str, str]:
         if str(getattr(args, field, "") or "").strip()
     }
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 filter_archive_records 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 判断 filter archive records 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def filter_archive_records(
     records: list[dict[str, Any]],
     *,
@@ -113,6 +128,8 @@ def filter_archive_records(
         if _archive_record_matches(record, context)
     ]
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 resume_local_query 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 收集或查询 resume local query 的候选结果，并按参数完成筛选、排序或数量限制。
 def resume_local_query(args, archive_matches: list[dict[str, Any]]) -> str:
     for value in (args.query, args.run_id, args.request_id, args.session_id, args.task_id):
         text = str(value or "").strip()
@@ -123,6 +140,8 @@ def resume_local_query(args, archive_matches: list[dict[str, Any]]) -> str:
             return text
     return ""
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 local_hit_payload 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 local hit payload 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def local_hit_payload(hit) -> dict[str, Any]:
     return {
         "id": hit.id,
@@ -136,6 +155,8 @@ def local_hit_payload(hit) -> dict[str, Any]:
         "content_path": hit.content_path,
     }
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 collect_resume_task_ids 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 收集或查询 collect resume task ids 的候选结果，并按参数完成筛选、排序或数量限制。
 def collect_resume_task_ids(args, archive_matches: list[dict[str, Any]], local_hits: list[dict[str, Any]]) -> list[str]:
     ids: list[str] = []
     for value in (args.run_id, args.task_id):
@@ -146,12 +167,16 @@ def collect_resume_task_ids(args, archive_matches: list[dict[str, Any]], local_h
         _append_local_hit_task_ids(ids, hit)
     return ids
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 collect_task_payloads 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 收集或查询 collect task payloads 的候选结果，并按参数完成筛选、排序或数量限制。
 def collect_task_payloads(agent, task_ids: list[str], *, limit: int) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
     for run_id in task_ids[:limit]:
         payloads.append(_task_payload(agent, run_id))
     return payloads
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 collect_gateway_payloads 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 收集或查询 collect gateway payloads 的候选结果，并按参数完成筛选、排序或数量限制。
 def collect_gateway_payloads(local_hits: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
     for hit in local_hits:
@@ -163,6 +188,8 @@ def collect_gateway_payloads(local_hits: list[dict[str, Any]], *, limit: int) ->
             break
     return payloads
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 build_resume_guidance 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 build resume guidance 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def build_resume_guidance(
     archive_matches: list[dict[str, Any]],
     local_hits: list[dict[str, Any]],
@@ -179,6 +206,8 @@ def build_resume_guidance(
         "next_actions": _resume_next_actions(task_payloads, gateway_items),
     }
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 strip_sort_keys 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 strip sort keys 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def strip_sort_keys(payload: Any) -> Any:
     if isinstance(payload, list):
         return [strip_sort_keys(item) for item in payload]
@@ -186,6 +215,8 @@ def strip_sort_keys(payload: Any) -> Any:
         return {key: strip_sort_keys(value) for key, value in payload.items() if key != "created_at_sort"}
     return payload
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _until_timestamp 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 until timestamp 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _until_timestamp(until: str | None) -> float | None:
     if not until:
         return None
@@ -194,6 +225,8 @@ def _until_timestamp(until: str | None) -> float | None:
         timestamp += 86399.999999
     return timestamp
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _archive_record_matches 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 判断 archive record matches 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def _archive_record_matches(
     record: dict[str, Any],
     context: _ArchiveFilterContext,
@@ -207,12 +240,18 @@ def _archive_record_matches(
         and (not context.query_text or context.query_text in _archive_search_text(record))
     )
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _matches_filters 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 判断 matches filters 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def _matches_filters(record: dict[str, Any], filters: dict[str, str]) -> bool:
     return all(str(record.get(field, "")) == value for field, value in filters.items())
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _matches_level 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 判断 matches level 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def _matches_level(record: dict[str, Any], level: int | None) -> bool:
     return level is None or int(record.get("archive_level", -1)) == int(level)
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _first_record_id 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 first record id 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _first_record_id(record: dict[str, Any]) -> str:
     for field in ("run_id", "task_id", "request_id", "session_id"):
         text = str(record.get(field, "") or "").strip()
@@ -220,12 +259,16 @@ def _first_record_id(record: dict[str, Any]) -> str:
             return text
     return ""
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _append_archive_task_ids 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 append archive task ids 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_archive_task_ids(ids: list[str], record: dict[str, Any]) -> None:
     _append_run_id(ids, record.get("run_id"))
     _append_run_id(ids, record.get("task_id"))
     for ref in record.get("task_refs", []) or []:
         _append_run_id(ids, ref)
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _append_local_hit_task_ids 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 append local hit task ids 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_local_hit_task_ids(ids: list[str], hit: dict[str, Any]) -> None:
     if str(hit.get("source_type", "")).startswith("subagent"):
         _append_run_id(ids, hit.get("source_id"))
@@ -233,6 +276,8 @@ def _append_local_hit_task_ids(ids: list[str], hit: dict[str, Any]) -> None:
     _append_run_id(ids, metadata.get("run_id"))
     _append_run_id(ids, metadata.get("task_id"))
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _task_payload 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 task payload 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _task_payload(agent, run_id: str) -> dict[str, Any]:
     try:
         task = agent.subagents.load(run_id)
@@ -251,14 +296,20 @@ def _task_payload(agent, run_id: str) -> dict[str, Any]:
         "authority_validation": _validate_task_fact_sources(paths),
     }
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _task_read_paths 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 task read paths 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def _task_read_paths(task) -> list[str]:
     # LLM: keep legacy query_logic callers aligned with query_service task sources.
     return task_recovery_read_paths(task)
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _validate_task_fact_sources 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 校验 validate task fact sources 的输入、状态或路径，提前暴露无效数据和越界条件。
 def _validate_task_fact_sources(paths: list[str]) -> dict[str, Any]:
     missing = [path for path in paths if path and not Path(path).exists()]
     return {"ok": not missing, "missing_paths": missing}
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _gateway_payload 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 gateway payload 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _gateway_payload(hit: dict[str, Any]) -> dict[str, Any] | None:
     source_type = str(hit.get("source_type", "") or "")
     source_id = str(hit.get("source_id", "") or "")
@@ -280,6 +331,8 @@ def _gateway_payload(hit: dict[str, Any]) -> dict[str, Any] | None:
         "recommended_read_paths": _dedupe_strings([request_path, response_path, content_path]),
     }
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _recommended_resume_reads 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 recommended resume reads 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def _recommended_resume_reads(
     task_payloads: list[dict[str, Any]],
     gateway_payloads: list[dict[str, Any]],
@@ -291,11 +344,15 @@ def _recommended_resume_reads(
     _append_paths(recommended_reads, (str(hit.get("content_path", "") or "") for hit in local_hits))
     return recommended_reads
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _append_paths 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 append paths 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_paths(target: list[str], paths) -> None:
     for path in paths:
         if path and path not in target:
             target.append(path)
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _resume_next_actions 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 收集或查询 resume next actions 的候选结果，并按参数完成筛选、排序或数量限制。
 def _resume_next_actions(
     task_payloads: list[dict[str, Any]],
     gateway_payloads: list[dict[str, Any]],
@@ -311,6 +368,8 @@ def _resume_next_actions(
         next_actions.append("Use memory-archive-search to narrow request_id/run_id/session_id first.")
     return next_actions
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _invalid_authority_ids 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 invalid authority ids 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _invalid_authority_ids(task_payloads: list[dict[str, Any]]) -> list[str]:
     return [
         task.get("run_id", "")

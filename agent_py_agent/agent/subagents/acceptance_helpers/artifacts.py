@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """Build findings for tests and artifacts, and check artifact paths.
@@ -14,6 +17,8 @@ from ..parsing import _dict_list
 from ..reports import AcceptanceReviewFinding
 
 
+# LLM: _build_test_and_artifact_findings 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 构建test产物findings所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _build_test_and_artifact_findings(
     task: SubAgentTask,
     output: dict[str, object],
@@ -30,6 +35,8 @@ def _build_test_and_artifact_findings(
     ]
 
 
+# LLM: _tests_finding 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 处理testsfinding相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _tests_finding(task, tests, failed_tests, created_at):
     return AcceptanceReviewFinding(
         name="tests_passed",
@@ -47,6 +54,8 @@ def _tests_finding(task, tests, failed_tests, created_at):
     )
 
 
+# LLM: _artifacts_finding 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 处理产物finding相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _artifacts_finding(task, artifacts, artifact_exists_fn, created_at):
     missing_artifacts = _missing_artifacts(artifacts, artifact_exists_fn)
     return (
@@ -65,6 +74,8 @@ def _artifacts_finding(task, artifacts, artifact_exists_fn, created_at):
     )
 
 
+# LLM: _missing_artifacts 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 处理missing产物相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持验收证据、补丁摘要和就绪判断上的返回值和副作用边界稳定。
 def _missing_artifacts(artifacts, artifact_exists_fn):
     return [
         str(item.get("path", "") or "")
@@ -74,17 +85,13 @@ def _missing_artifacts(artifacts, artifact_exists_fn):
     ]
 
 
+# LLM: _check_artifact_exists 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 校验产物exists需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _check_artifact_exists(
     workspace: Path,
     task_dir: str,
     raw_path: str,
 ) -> bool:
-    """LLM: check whether an artifact path declared by runner actually exists on disk.
-
-    新手说明:
-    runner 可能声称写了一个文件，但实际没写。这个函数去多个可能的位置找一下，
-    包括任务目录、工作区根目录、以及 .my_agent 上级目录。
-    """
 
     text = raw_path.strip()
     if not text or "://" in text:

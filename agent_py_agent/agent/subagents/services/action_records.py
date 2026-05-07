@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """Action apply record and log helpers."""
@@ -39,6 +42,8 @@ ACTION_DISPATCH = {
 }
 
 
+# LLM: ActionRecordContext 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 集中保存动作记录上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class ActionRecordContext:
     manager: Any
@@ -51,6 +56,8 @@ class ActionRecordContext:
     exc: FileNotFoundError | None = None
 
 
+# LLM: action_apply_summary 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理动作应用summary相关的数据流，连接当前职责的前后步骤；关键副作用: 会更新任务状态、报告记录和持久化副作用，需避免破坏既有状态机约定。
 def action_apply_summary(records: list[ActionApplyRecord]) -> dict[str, int]:
     summary: dict[str, int] = {"total": len(records)}
     for record in records:
@@ -62,6 +69,8 @@ def action_apply_summary(records: list[ActionApplyRecord]) -> dict[str, int]:
     return summary
 
 
+# LLM: action_handler_context 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理动作handler上下文相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
 def action_handler_context(
     opts: ActionApplyOptions,
     now: float,
@@ -77,6 +86,8 @@ def action_handler_context(
     )
 
 
+# LLM: missing_task_action_record 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理missing任务动作记录相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
 def missing_task_action_record(ctx: ActionRecordContext) -> ActionApplyRecord:
     from ..reports import ActionApplyRecord
 
@@ -94,6 +105,8 @@ def missing_task_action_record(ctx: ActionRecordContext) -> ActionApplyRecord:
     )
 
 
+# LLM: dry_run_action_record 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理dryrun动作记录相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
 def dry_run_action_record(ctx: ActionRecordContext) -> ActionApplyRecord:
     from ..reports import ActionApplyRecord
 
@@ -116,6 +129,8 @@ def dry_run_action_record(ctx: ActionRecordContext) -> ActionApplyRecord:
     )
 
 
+# LLM: unsupported_action_record 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理unsupported动作记录相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
 def unsupported_action_record(ctx: ActionRecordContext) -> ActionApplyRecord:
     from ..reports import ActionApplyRecord
 
@@ -137,6 +152,8 @@ def unsupported_action_record(ctx: ActionRecordContext) -> ActionApplyRecord:
     )
 
 
+# LLM: append_action_apply_log 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 写入动作应用log的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
 def append_action_apply_log(manager: Any, record: ActionApplyRecord) -> None:
     from ...file_io import append_jsonl
 
@@ -155,6 +172,8 @@ def append_action_apply_log(manager: Any, record: ActionApplyRecord) -> None:
     manager._index_action_apply(record)
 
 
+# LLM: append_task_work_log 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 写入任务worklog的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
 def append_task_work_log(manager: Any, task: SubAgentTask, message: str) -> None:
     path = Path(task.work_log_file)
     path.parent.mkdir(parents=True, exist_ok=True)

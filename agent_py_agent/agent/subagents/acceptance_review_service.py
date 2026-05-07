@@ -1,6 +1,9 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-"""LLM: single-task acceptance review helper for SubAgentAcceptanceMixin.
+"""single-task acceptance review helper for SubAgentAcceptanceMixin.
 
 给人看的解释：
 验收一条任务时既要读 runner 输出又可能写回状态，拆出后 mixin 保持薄门面。
@@ -17,6 +20,8 @@ from .reports import AcceptanceReviewFinding, AcceptanceReviewRecord
 from .utils import _new_id, _read_json_object
 
 
+# LLM: AcceptanceReviewOptions 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存验收审查选项字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class AcceptanceReviewOptions:
     """Options bundle for acceptance review report entrypoints."""
@@ -28,6 +33,8 @@ class AcceptanceReviewOptions:
     limit: int = 0
     now: float | None = None
 
+    # LLM: from_values 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 转换values的数据表示，保持跨模块传递时的字段含义一致；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     @classmethod
     def from_values(
         cls,
@@ -51,6 +58,8 @@ class AcceptanceReviewOptions:
         return replace(base, **clean)
 
 
+# LLM: acceptance_review_options 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理验收审查选项相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def acceptance_review_options(
     options: AcceptanceReviewOptions | None = None,
     *,
@@ -72,9 +81,10 @@ def acceptance_review_options(
     )
 
 
+# LLM: AcceptanceReviewRequest 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存验收审查请求字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class AcceptanceReviewRequest:
-    """LLM: Bundle one acceptance review request so future gate fields do not widen signatures."""
 
     task: SubAgentTask
     apply: bool = False
@@ -83,9 +93,10 @@ class AcceptanceReviewRequest:
     now: float | None = None
 
 
+# LLM: AcceptanceReviewInputs 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存验收审查inputs字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class AcceptanceReviewInputs:
-    """LLM: loaded runner data for a single acceptance review."""
 
     output: dict
     runner: dict
@@ -93,15 +104,18 @@ class AcceptanceReviewInputs:
     verifier_checks: list[AcceptanceReviewFinding]
 
 
+# LLM: AcceptanceDecisionRequest 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存验收decision请求字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class AcceptanceDecisionRequest:
-    """LLM: bundle acceptance status writes so mutation arguments do not drift."""
 
     ok: bool
     message: str
     now: float
 
 
+# LLM: review_acceptance_task 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理审查验收任务相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def review_acceptance_task(manager, request: AcceptanceReviewRequest) -> AcceptanceReviewRecord:
     """对单个任务执行验收判断，并按需写回状态。"""
     task = request.task
@@ -140,6 +154,8 @@ def review_acceptance_task(manager, request: AcceptanceReviewRequest) -> Accepta
     )
 
 
+# LLM: _acceptance_review_inputs 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理验收审查inputs相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _acceptance_review_inputs(manager, task: SubAgentTask, now: float) -> AcceptanceReviewInputs:
     output = _read_json_object(Path(task.output_json))
     runner = _read_json_object(Path(task.runner_result_json))
@@ -151,6 +167,8 @@ def _acceptance_review_inputs(manager, task: SubAgentTask, now: float) -> Accept
     )
 
 
+# LLM: _acceptance_record 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理验收记录相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
 def _acceptance_record(
     request: AcceptanceReviewRequest,
     inputs: AcceptanceReviewInputs,
@@ -192,6 +210,8 @@ def _acceptance_record(
     )
 
 
+# LLM: _acceptance_message 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理验收消息相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _acceptance_message(ok: bool, findings) -> str:
     if ok:
         return "验收通过。"
@@ -199,6 +219,8 @@ def _acceptance_message(ok: bool, findings) -> str:
     return "验收未通过: " + "；".join(failed[:3])
 
 
+# LLM: _apply_acceptance_decision 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 更新验收decision对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def _apply_acceptance_decision(
     manager,
     task: SubAgentTask,
@@ -223,8 +245,9 @@ def _apply_acceptance_decision(
     manager.save(task)
 
 
+# LLM: _worker_claims 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理工作器claims相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _worker_claims(task: SubAgentTask, output: dict, runner: dict) -> list[str]:
-    """LLM: Preserve worker self-report separately from parent conclusions."""
     claims: list[str] = []
     for value in [
         output.get("summary"),
@@ -241,6 +264,8 @@ def _worker_claims(task: SubAgentTask, output: dict, runner: dict) -> list[str]:
     return claims[:8]
 
 
+# LLM: _evidence_facts 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理证据facts相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _evidence_facts(task: SubAgentTask, output: dict) -> list[str]:
     tests = _dict_list(output.get("tests", []))
     artifacts = _dict_list(output.get("artifacts", []))
@@ -257,6 +282,8 @@ def _evidence_facts(task: SubAgentTask, output: dict) -> list[str]:
     return facts
 
 
+# LLM: _parent_conclusions 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理父级conclusions相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _parent_conclusions(
     decision: str,
     message: str,

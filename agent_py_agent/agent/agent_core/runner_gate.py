@@ -1,3 +1,6 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 
 from __future__ import annotations
 
@@ -17,6 +20,8 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+# LLM: get_task_timeout 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 读取或查询任务超时需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def get_task_timeout(
     task: SubAgentTask,
     runner_timeout_seconds: float,
@@ -43,6 +48,8 @@ def get_task_timeout(
     )
 
 
+# LLM: resolve_runner_config 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 读取或查询执行器config需要的状态，返回调用方可继续处理的快照；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def resolve_runner_config(config: Any, job_count: int) -> tuple[float, int, int]:
     from .runner_dispatch import (
         _resolve_runner_concurrency,
@@ -63,6 +70,8 @@ def resolve_runner_config(config: Any, job_count: int) -> tuple[float, int, int]
 # ---------------------------------------------------------------------------
 
 
+# LLM: SingleRunnerParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存单个执行器参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class SingleRunnerParams:
     agent: SimpleAgent
@@ -75,6 +84,8 @@ class SingleRunnerParams:
     retry_reason: str
 
 
+# LLM: ConcurrentRunnerParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存concurrent执行器参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class ConcurrentRunnerParams:
     agent: SimpleAgent
@@ -87,6 +98,8 @@ class ConcurrentRunnerParams:
     probe: bool
 
 
+# LLM: RunnerFailureParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存执行器失败参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class RunnerFailureParams:
     agent: SimpleAgent
@@ -96,6 +109,8 @@ class RunnerFailureParams:
     effective_instruction: str
 
 
+# LLM: _RunnerWorkerRequest 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存执行器工作器请求字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class _RunnerWorkerRequest:
     params: ConcurrentRunnerParams
@@ -104,6 +119,8 @@ class _RunnerWorkerRequest:
     retry_reason: str
 
 
+# LLM: run_single_runner 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进单个执行器的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def run_single_runner(params: SingleRunnerParams) -> SubAgentRunnerResult:
     from .runner_dispatch import RunSubagentWorkerParams, _run_subagent_worker
     from .subagent_params import SubagentRunParams
@@ -135,6 +152,8 @@ def run_single_runner(params: SingleRunnerParams) -> SubAgentRunnerResult:
     )
 
 
+# LLM: run_concurrent_runners 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进concurrentrunners的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def run_concurrent_runners(params: ConcurrentRunnerParams) -> dict[str, tuple[SubAgentRunnerResult, Any]]:
     from .runner_dispatch import _run_subagent_worker
 
@@ -157,6 +176,8 @@ def run_concurrent_runners(params: ConcurrentRunnerParams) -> dict[str, tuple[Su
     return completed
 
 
+# LLM: _runner_worker_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进执行器工作器参数的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _runner_worker_params(
     context: ConcurrentRunnerParams | None = None,
     *,
@@ -185,6 +206,8 @@ def _runner_worker_params(
     )
 
 
+# LLM: _collect_runner_future_result 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 读取或查询执行器future结果需要的状态，返回调用方可继续处理的快照；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _collect_runner_future_result(params: ConcurrentRunnerParams, future, run_id: str):
     try:
         return future.result()
@@ -207,6 +230,8 @@ def _collect_runner_future_result(params: ConcurrentRunnerParams, future, run_id
 # ---------------------------------------------------------------------------
 
 
+# LLM: handle_runner_failure 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进执行器失败的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def handle_runner_failure(params: RunnerFailureParams) -> str:
     failure_type = str(params.result.status or "").strip().upper()
     if failure_type not in {"BLOCKED", "TIMEOUT"}:
@@ -224,6 +249,8 @@ def handle_runner_failure(params: RunnerFailureParams) -> str:
     return effective_instruction
 
 
+# LLM: _inject_failure_memories 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理inject失败memories相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _inject_failure_memories(params: RunnerFailureParams, failure_type: str) -> str:
     effective_instruction = params.effective_instruction
     try:
@@ -245,6 +272,8 @@ def _inject_failure_memories(params: RunnerFailureParams, failure_type: str) -> 
     return effective_instruction
 
 
+# LLM: _append_memory_hint 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 写入记忆hint的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _append_memory_hint(effective_instruction: str, memory_hint: str) -> str:
     if effective_instruction:
         return f"{effective_instruction}\n\n{memory_hint}"

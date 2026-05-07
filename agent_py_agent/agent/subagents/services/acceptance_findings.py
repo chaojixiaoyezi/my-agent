@@ -1,6 +1,9 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-"""LLM: acceptance finding rules and artifact existence checks.
+"""acceptance finding rules and artifact existence checks.
 
 给人看的解释：
 这里承接验收检查项生成逻辑。
@@ -17,6 +20,8 @@ from ..reports import AcceptanceReviewFinding
 from .acceptance_evidence_findings import build_evidence_findings
 
 
+# LLM: _artifact_exists 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理产物exists相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _artifact_exists(manager: Any, task: SubAgentTask, raw_path: str) -> bool:
     """Check if a runner-reported local artifact actually exists.
 
@@ -41,16 +46,24 @@ def _artifact_exists(manager: Any, task: SubAgentTask, raw_path: str) -> bool:
             candidates.append(manager.workspace.parent.parent / path)
     return any(candidate.exists() for candidate in candidates)
 
+# LLM: _dict_list 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理dictlist相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _dict_list(value: object) -> list[dict[str, object]]:
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
     return []
 
+# LLM: SubAgentAcceptanceFindingService 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 封装subagent验收finding服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 class SubAgentAcceptanceFindingService:
 
+    # LLM: __init__ 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def __init__(self, manager: Any):
         self.manager = manager
 
+    # LLM: _artifact_exists 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理产物exists相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def _artifact_exists(self, task: SubAgentTask, raw_path: str) -> bool:
         """Check if a runner-reported local artifact actually exists.
 
@@ -61,6 +74,8 @@ class SubAgentAcceptanceFindingService:
             return self.manager._artifact_exists(task, raw_path)
         return _artifact_exists(self.manager, task, raw_path)
 
+    # LLM: _findings_basic_state 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 读取或查询findingsbasic状态需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def _findings_basic_state(self, task: SubAgentTask, created_at: float) -> list[AcceptanceReviewFinding]:
         findings: list[AcceptanceReviewFinding] = []
         validation = self.manager.validate_work_order(task.id)
@@ -82,6 +97,8 @@ class SubAgentAcceptanceFindingService:
         ))
         return findings
 
+    # LLM: _findings_runner_output 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 读取或查询findings执行器output需要的状态，返回调用方可继续处理的快照；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
     def _findings_runner_output(self, task: SubAgentTask, runner: dict, created_at: float) -> list[AcceptanceReviewFinding]:
         findings: list[AcceptanceReviewFinding] = []
         runner_structured_found = bool(runner.get("structured_output_found", False))
@@ -95,9 +112,13 @@ class SubAgentAcceptanceFindingService:
         ))
         return findings
 
+    # LLM: _findings_evidence 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 读取或查询findings证据需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def _findings_evidence(self, task: SubAgentTask, created_at: float) -> list[AcceptanceReviewFinding]:
         return build_evidence_findings(task, created_at)
 
+    # LLM: _findings_capability 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 读取或查询findings能力需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def _findings_capability(self, task: SubAgentTask, created_at: float) -> list[AcceptanceReviewFinding]:
         findings: list[AcceptanceReviewFinding] = []
         open_requests = [item for item in task.capability_requests if item.status == "OPEN"]
@@ -116,6 +137,8 @@ class SubAgentAcceptanceFindingService:
         ))
         return findings
 
+    # LLM: _findings_output_content 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 读取或查询findingsoutput内容需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def _findings_output_content(self, task: SubAgentTask, output: dict, created_at: float) -> list[AcceptanceReviewFinding]:
         findings: list[AcceptanceReviewFinding] = []
         blockers = [item for item in _string_list(output.get("blockers", [])) if item.strip()]
@@ -135,6 +158,8 @@ class SubAgentAcceptanceFindingService:
         ))
         return findings
 
+    # LLM: _findings_artifacts_patches 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 读取或查询findings产物patches需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def _findings_artifacts_patches(self, task: SubAgentTask, output: dict, created_at: float) -> list[AcceptanceReviewFinding]:
         findings: list[AcceptanceReviewFinding] = []
         artifacts = _dict_list(output.get("artifacts", []))
@@ -183,6 +208,8 @@ class SubAgentAcceptanceFindingService:
         ))
         return findings
 
+    # LLM: acceptance_findings 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理验收findings相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def acceptance_findings(
         self,
         task: SubAgentTask,
@@ -201,6 +228,8 @@ class SubAgentAcceptanceFindingService:
         findings.extend(self._findings_artifacts_patches(task, output, created_at))
         return findings
 
+# LLM: _string_list 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理stringlist相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _string_list(value: object) -> list[str]:
     if value is None:
         return []

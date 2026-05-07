@@ -1,6 +1,9 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-"""LLM: markdown renderers for dispatch, watch, and parent planner reports.
+"""markdown renderers for dispatch, watch, and parent planner reports.
 
 给人看的解释：
 这些报告都属于父代理调度视角，单独拆出后 rendering.py 保持兼容入口。
@@ -9,6 +12,8 @@ from __future__ import annotations
 from .reports import DispatchReport, DispatchWatchReport, ParentPlannerReport
 
 
+# LLM: render_dispatch_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def render_dispatch_markdown(report: DispatchReport) -> str:
     """渲染父代理调度器报告。"""
 
@@ -39,6 +44,8 @@ def render_dispatch_markdown(report: DispatchReport) -> str:
     return "\n".join(lines) + "\n"
 
 
+# LLM: render_dispatch_watch_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def render_dispatch_watch_markdown(report: DispatchWatchReport) -> str:
     """渲染父代理 watch 模式报告。"""
 
@@ -68,6 +75,8 @@ def render_dispatch_watch_markdown(report: DispatchWatchReport) -> str:
     return "\n".join(lines) + "\n"
 
 
+# LLM: render_parent_planner_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总父级规划器markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def render_parent_planner_markdown(report: ParentPlannerReport) -> str:
     """渲染父代理 planner 报告。"""
 

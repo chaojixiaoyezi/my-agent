@@ -1,4 +1,7 @@
-"""LLM: patch file write execution with rollback support.
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
+"""patch file write execution with rollback support.
 
 Human version:
 这个模块处理 patch 文件的实际写入和回滚操作。
@@ -14,6 +17,8 @@ if TYPE_CHECKING:
     from ..models import SubAgentTask
 
 
+# LLM: PatchFileApplyContext 属于子代理补丁应用的类边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
+# 类用途: 集中保存补丁文件应用上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class PatchFileApplyContext:
     patch_specs: list[dict]
@@ -22,6 +27,8 @@ class PatchFileApplyContext:
     note: str
 
 
+# LLM: do_apply_patches 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
+# 函数用途: 处理do应用patches相关的数据流，连接当前职责的前后步骤；关键副作用: 会更新补丁文件、预演结果和应用报告，需避免破坏既有状态机约定。
 def do_apply_patches(ctx: PatchFileApplyContext) -> tuple[int, dict]:
     """Perform actual patch file writes and diff building.
 
@@ -41,6 +48,8 @@ def do_apply_patches(ctx: PatchFileApplyContext) -> tuple[int, dict]:
     return applied_count, touched_files
 
 
+# LLM: _apply_patch_spec 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
+# 函数用途: 更新补丁spec对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新补丁文件、预演结果和应用报告，需避免破坏既有状态机约定。
 def _apply_patch_spec(spec: dict, *, ctx: PatchFileApplyContext, now: float, touched_files: dict) -> None:
     from .patch_renderer import build_unified_diff
 
@@ -57,6 +66,8 @@ def _apply_patch_spec(spec: dict, *, ctx: PatchFileApplyContext, now: float, tou
     spec["audit"]["message"] = "patch 已写入文件。"
 
 
+# LLM: _mark_patch_applied 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
+# 函数用途: 更新补丁applied对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新补丁文件、预演结果和应用报告，需避免破坏既有状态机约定。
 def _mark_patch_applied(spec: dict, *, applier: str, now: float, note: str) -> None:
     spec["patch_ref"]["status"] = "applied"
     spec["patch_ref"]["apply_status"] = "APPLIED"
@@ -70,6 +81,8 @@ def _mark_patch_applied(spec: dict, *, applier: str, now: float, note: str) -> N
         spec["patch_ref"]["review_note"] = note
 
 
+# LLM: rollback_patch_apply 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
+# 函数用途: 处理rollback补丁应用相关的数据流，连接当前职责的前后步骤；关键副作用: 会更新补丁文件、预演结果和应用报告，需避免破坏既有状态机约定。
 def rollback_patch_apply(touched_files: dict[Path, dict]) -> None:
     """Rollback patch apply by restoring original file contents."""
 
@@ -77,6 +90,8 @@ def rollback_patch_apply(touched_files: dict[Path, dict]) -> None:
         _rollback_touched_file(path, snapshot)
 
 
+# LLM: _rollback_touched_file 属于子代理补丁应用的函数边界；调整时先确认补丁文件、预演结果和应用报告仍按原契约工作。
+# 函数用途: 处理rollbacktouched文件相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持补丁文件、预演结果和应用报告上的返回值和副作用边界稳定。
 def _rollback_touched_file(path: Path, snapshot: dict) -> None:
     if snapshot.get("before_exists"):
         path.parent.mkdir(parents=True, exist_ok=True)

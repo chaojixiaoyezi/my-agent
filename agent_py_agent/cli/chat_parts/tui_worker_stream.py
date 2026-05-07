@@ -1,8 +1,13 @@
+# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
+# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
+
 from __future__ import annotations
 
 from .renderer import GREEN, strip_ansi, style_text
 
 
+# LLM: _append_stream_text 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _append_stream_text(
     chunk: str,
     stream_buf_ref: list,
@@ -20,12 +25,16 @@ def _append_stream_text(
     return bool(visible.strip())
 
 
+# LLM: _emit_stream_line 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _emit_stream_line(text: str) -> None:
     from .rendering import _cprint
 
     _cprint(style_text(text, GREEN))
 
 
+# LLM: _flush_stream_buf 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _flush_stream_buf(stream_buf_ref: list) -> None:
     buf = stream_buf_ref[0]
     if buf:
@@ -35,6 +44,8 @@ def _flush_stream_buf(stream_buf_ref: list) -> None:
         stream_buf_ref[0] = ""
 
 
+# LLM: _set_thinking_line 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _set_thinking_line(text: str, thinking_line_ref: list) -> None:
     import re
 
@@ -46,6 +57,8 @@ def _set_thinking_line(text: str, thinking_line_ref: list) -> None:
     thinking_line_ref[0] = cleaned
 
 
+# LLM: _update_response_state 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _update_response_state(
     response: dict,
     state_lock,
@@ -57,6 +70,8 @@ def _update_response_state(
     return agent_response_text
 
 
+# LLM: _maybe_record_response 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _maybe_record_response(
     text: str,
     stream_has_visible_text: bool,
@@ -71,6 +86,8 @@ def _maybe_record_response(
     return False
 
 
+# LLM: resume_context_override 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def resume_context_override(args) -> str | None:
     if hasattr(args, "resume_context"):
         return args.resume_context

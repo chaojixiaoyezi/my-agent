@@ -46,3 +46,8 @@ scripts/
 本页先描述当前脚本结构。后续应补充每个 suite 的命令示例、输出目录样例、summary schema 和常见失败处理。
 ## 2026-05-06 structure update
 - Live-lab log-analysis replay now separates stage parameter objects from execution helpers, making future replay scenarios easier to extend.
+
+## 2026-05-07 annotation structure update
+- Live Lab scripts now treat definition-level comments as part of the developer-facing architecture map: `LLM:` records suite contracts, side effects, and caller expectations; `函数用途:` / `类用途:` gives a beginner-readable explanation.
+- `scripts/live_lab/runner.py`, `reporter.py`, `session.py`, `cases.py`, `cli.py`, and replay modules should keep comments synchronized when case flow, artifact paths, or process execution changes.
+- Code-size accounting excludes comment/docstring lines, so required guidance text does not count as implementation size.

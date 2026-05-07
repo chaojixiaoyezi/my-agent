@@ -1,6 +1,9 @@
+# LLM: Model-speed module; keep benchmark samples and interpolation data shapes stable.
+# 模块用途: 记录和估算模型速度，辅助超时、调度或容量判断。
+
 from __future__ import annotations
 
-"""LLM: model speed benchmarking.
+"""model speed benchmarking.
 
 给人看的解释：
 负责运行模型速度基准测试，生成 SpeedProfile。
@@ -17,15 +20,18 @@ if TYPE_CHECKING:
     from ..settings import AgentConfig
 
 
+# LLM: SpeedBenchmarkParams is a 模型速度评估 boundary object; coordinate field or method changes with callers, docs, and focused tests.
+# 类用途: 保存 SpeedBenchmarkParams 的输入字段，调用方先构造这个对象再进入 模型速度评估，避免继续散传参数。
 @dataclass(frozen=True)
 class SpeedBenchmarkParams:
-    # LLM: benchmark options are grouped so model/backend overrides do not widen the runner.
     input_sizes: list[int] | None = None
     output_size: int = 500
     backend: str | None = None
     model: str | None = None
 
 
+# LLM: run_speed_benchmark belongs to 模型速度评估; keep caller-visible returns, errors, and side effects aligned with focused tests.
+# 函数用途: 运行模型速度基准测试。。
 def run_speed_benchmark(
     config: AgentConfig,
     *,
@@ -62,6 +68,8 @@ def run_speed_benchmark(
     )
 
 
+# LLM: _benchmark_single belongs to 模型速度评估; keep caller-visible returns, errors, and side effects aligned with focused tests.
+# 函数用途: 运行单次基准测试，失败返回 None。。
 def _benchmark_single(
     backend_instance, input_tokens: int, output_size: int
 ) -> SpeedSample | None:

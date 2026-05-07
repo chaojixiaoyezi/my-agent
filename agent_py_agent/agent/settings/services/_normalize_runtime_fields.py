@@ -1,5 +1,8 @@
 """Tool, adapter, user, timeout, and advanced subagent config normalizers."""
 
+# LLM: 这里维护运行期安全上限，新增字段要同步 warning 路径。
+# 模块用途: 工具、适配器、用户空间、超时和高级子代理字段的归一化规则。
+
 from __future__ import annotations
 
 import os
@@ -7,11 +10,15 @@ import os
 from ._coercion import CoercionService
 
 
+# LLM: _append_warning 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 向结果或告警集合加入 append_warning，同时保留调用方依赖的顺序。
 def _append_warning(warnings: list[str], warn: str | None) -> None:
     if warn:
         warnings.append(warn)
 
 
+# LLM: _apply_int_fields 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把 配置系统 的归一化结果写回配置对象。
 def _apply_int_fields(
     out: dict[str, object],
     defaults: object,
@@ -31,6 +38,8 @@ def _apply_int_fields(
     return warnings
 
 
+# LLM: _apply_bool_fields 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把 配置系统 的归一化结果写回配置对象。
 def _apply_bool_fields(
     out: dict[str, object],
     defaults: object,
@@ -44,9 +53,13 @@ def _apply_bool_fields(
     return warnings
 
 
+# LLM: ToolFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: ToolFieldsService 封装 配置系统 的一组相关操作，供上层组合调用。
 class ToolFieldsService:
     """Normalize tool-related config fields."""
 
+    # LLM: ToolFieldsService.normalize 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 归一化 ToolFieldsService 负责的配置字段并追加告警。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         out = dict(data)
@@ -64,9 +77,13 @@ class ToolFieldsService:
         return out, warnings
 
 
+# LLM: SubagentBasicFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: SubagentBasicFieldsService 封装 配置系统 的一组相关操作，供上层组合调用。
 class SubagentBasicFieldsService:
     """Normalize basic subagent config fields (max_subagents, memory_top_k)."""
 
+    # LLM: SubagentBasicFieldsService.normalize 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 归一化 SubagentBasicFieldsService 负责的配置字段并追加告警。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         out = dict(data)
@@ -78,15 +95,21 @@ class SubagentBasicFieldsService:
         return out, warnings
 
 
+# LLM: AdapterFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: AdapterFieldsService 封装 配置系统 的一组相关操作，供上层组合调用。
 class AdapterFieldsService:
     """Normalize adapter-related config fields (feishu, qq, etc.)."""
 
+    # LLM: AdapterFieldsService.normalize 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 归一化 AdapterFieldsService 负责的配置字段并追加告警。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         """Normalize adapter-related config fields."""
         warnings: list[str] = []
         out = dict(data)
 
+        # LLM: AdapterFieldsService.apply 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+        # 函数用途: 把 AdapterFieldsService 的归一化结果写回配置对象。
         def apply(key: str, coerced: object, warn: str | None) -> None:
             out[key] = coerced
             if warn:
@@ -114,20 +137,27 @@ class AdapterFieldsService:
         return out, warnings
 
 
+# LLM: _string_config_value 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 配置系统 中的 string_config_value 步骤，并保持调用方依赖的数据形状。
 def _string_config_value(value: object) -> str:
-    # LLM: adapter string fields accept strings only; env override remains handled by caller.
     return value if isinstance(value, str) else ""
 
 
+# LLM: UserFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: UserFieldsService 封装 配置系统 的一组相关操作，供上层组合调用。
 class UserFieldsService:
     """Normalize user-related config fields."""
 
+    # LLM: UserFieldsService.normalize 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 归一化 UserFieldsService 负责的配置字段并追加告警。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         """Normalize user-related config fields."""
         warnings: list[str] = []
         out = dict(data)
 
+        # LLM: UserFieldsService.apply 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+        # 函数用途: 把 UserFieldsService 的归一化结果写回配置对象。
         def apply(key: str, coerced: object, warn: str | None) -> None:
             out[key] = coerced
             if warn:
@@ -163,9 +193,13 @@ class UserFieldsService:
         return out, warnings
 
 
+# LLM: TimeoutFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: TimeoutFieldsService 封装 配置系统 的一组相关操作，供上层组合调用。
 class TimeoutFieldsService:
     """Normalize timeout-related config fields."""
 
+    # LLM: TimeoutFieldsService.normalize 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 归一化 TimeoutFieldsService 负责的配置字段并追加告警。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         out = dict(data)
@@ -180,9 +214,13 @@ class TimeoutFieldsService:
         return out, warnings
 
 
+# LLM: SubagentAdvancedFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: SubagentAdvancedFieldsService 封装 配置系统 的一组相关操作，供上层组合调用。
 class SubagentAdvancedFieldsService:
     """Normalize advanced subagent config fields."""
 
+    # LLM: SubagentAdvancedFieldsService.normalize 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 归一化 SubagentAdvancedFieldsService 负责的配置字段并追加告警。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
         out = dict(data)

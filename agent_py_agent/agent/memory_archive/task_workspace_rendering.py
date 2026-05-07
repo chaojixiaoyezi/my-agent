@@ -1,6 +1,9 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 from __future__ import annotations
 
-"""LLM: rendering helpers for filesystem task workspace files.
+"""rendering helpers for filesystem task workspace files.
 
 Human version:
 These helpers keep task workspace orchestration focused on sync order while this
@@ -11,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 write_task_yaml_if_missing 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write task yaml if missing 相关记录，集中处理目标路径、格式化和状态更新。
 def write_task_yaml_if_missing(path: Path, task_id: str, task: Any, now: float) -> None:
     """Write the task workspace identity file once, preserving manual edits."""
 
@@ -33,6 +38,8 @@ def write_task_yaml_if_missing(path: Path, task_id: str, task: Any, now: float) 
     path.write_text(content, encoding="utf-8")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 write_summary 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write summary 相关记录，集中处理目标路径、格式化和状态更新。
 def write_summary(path: Path, task_id: str, run_id: str, task: Any) -> None:
     """Write the current task summary view."""
 
@@ -49,6 +56,8 @@ def write_summary(path: Path, task_id: str, run_id: str, task: Any) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 blackboard_content 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 blackboard content 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def blackboard_content(task_id: str) -> str:
     """Return the default task-local shared blackboard body."""
 
@@ -62,10 +71,14 @@ def blackboard_content(task_id: str) -> str:
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _yaml_quote 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 yaml quote 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _yaml_quote(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _indent_block 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 indent block 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _indent_block(value: str) -> str:
     return "\n".join(f"  {line}" for line in value.splitlines() or [""])
 

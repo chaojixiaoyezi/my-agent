@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 import time
@@ -10,6 +13,8 @@ from .models import CapabilityGrant, CapabilityRequest, SubAgentParsedOutput, Su
 from .reports import ActionPlanItem, DueCheckIssue, SubAgentBoardItem
 
 
+# LLM: filter_board_items 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理filter看板条目相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def filter_board_items(
     items: list[SubAgentBoardItem],
     *,
@@ -30,6 +35,8 @@ def filter_board_items(
     if root_id:
         result = [item for item in result if item.root_id == root_id]
     return result
+# LLM: _risk_weight 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理riskweight相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _risk_weight(flags: list[str]) -> int:
     weights = {
         "failed": 100,
@@ -46,6 +53,8 @@ def _risk_weight(flags: list[str]) -> int:
         "taken_over": 30,
     }
     return max((weights.get(item, 1) for item in flags), default=0)
+# LLM: MakeDueIssueParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存make到期issue参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class MakeDueIssueParams:
     task: SubAgentTask
@@ -60,6 +69,8 @@ class MakeDueIssueParams:
     stale_seconds: float
 
 
+# LLM: RunnerNextActionParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存执行器next动作参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class RunnerNextActionParams:
     dry_run: bool = False
@@ -69,6 +80,8 @@ class RunnerNextActionParams:
     next_actions: list[str] | None = None
 
 
+# LLM: _make_due_issue 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 构建到期issue所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _make_due_issue(*, params: MakeDueIssueParams) -> DueCheckIssue:
     return DueCheckIssue(
         run_id=params.task.id,
@@ -90,6 +103,8 @@ def _make_due_issue(*, params: MakeDueIssueParams) -> DueCheckIssue:
         stale_seconds=params.stale_seconds,
         created_at=time.time(),
     )
+# LLM: _issue_weight 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理issueweight相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _issue_weight(issue: DueCheckIssue) -> int:
     severity_weight = _severity_weight(issue.severity)
     kind_weight = {
@@ -109,8 +124,12 @@ def _issue_weight(issue: DueCheckIssue) -> int:
         "open_capability_gap": 20,
     }.get(issue.kind, 1)
     return severity_weight + kind_weight
+# LLM: _severity_weight 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理severityweight相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _severity_weight(severity: str) -> int:
     return {"P0": 1000, "P1": 500, "P2": 100}.get(severity, 0)
+# LLM: _action_for_issue 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理动作issue相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _action_for_issue(issue: DueCheckIssue) -> tuple[str, int, str]:
     kind = issue.kind
     if kind in {"channel_broken", "channel_probe_missing", "status_channel_error"}:
@@ -134,8 +153,10 @@ def _action_for_issue(issue: DueCheckIssue) -> tuple[str, int, str]:
     if kind == "open_capability_gap":
         return "triage_capability_gap", 420, ""
     return issue.suggested_action or "inspect_manually", 100, ""
+# LLM: _commands_for_action 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理commands动作相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _commands_for_action(action: str, run_id: str) -> list[str]:
-    # LLM: prefer the installed console script; it works on Windows and keeps mac/Linux docs tidy.
+    # LLM: 优先使用已安装命令行入口，兼顾 Windows 可用性和 macOS/Linux 文档清晰度。
     cli = "my-agent"
     probe_actions = {
         "probe_or_repair_channel",
@@ -146,6 +167,8 @@ def _commands_for_action(action: str, run_id: str) -> list[str]:
     if action in probe_actions:
         return [f"{cli} subagents-probe {run_id}", f"{cli} subagent {run_id}"]
     return [f"{cli} subagent {run_id}"]
+# LLM: _filter_action_plan_items 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理filter动作计划条目相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _filter_action_plan_items(
     actions: list[ActionPlanItem],
     *,
@@ -161,6 +184,8 @@ def _filter_action_plan_items(
     if limit > 0:
         result = result[:limit]
     return result
+# LLM: _capability_request_query 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理能力请求查询相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _capability_request_query(task: SubAgentTask, request: CapabilityRequest) -> str:
     parts = [
         task.goal,
@@ -172,6 +197,8 @@ def _capability_request_query(task: SubAgentTask, request: CapabilityRequest) ->
         " ".join(f"{key}:{value}" for key, value in request.constraints.items()),
     ]
     return "\n".join(part for part in parts if part)
+# LLM: _select_capability_hits 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 读取或查询能力hits需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _select_capability_hits(
     hits: list[CapabilitySearchHit],
     config: CapabilityConfig,
@@ -187,6 +214,8 @@ def _select_capability_hits(
         if hit.card.kind in counts:
             counts[hit.card.kind] += 1
     return selected
+# LLM: _capability_kind_limit_reached 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理能力kind限制reached相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _capability_kind_limit_reached(
     hit: CapabilitySearchHit,
     config: CapabilityConfig,
@@ -197,8 +226,12 @@ def _capability_kind_limit_reached(
     if hit.card.kind == "tool":
         return bool(config.capability_grant_max_tools and counts["tool"] >= config.capability_grant_max_tools)
     return False
+# LLM: _capability_hit_is_confident 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理能力hitisconfident相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _capability_hit_is_confident(hit: CapabilitySearchHit) -> bool:
     return hit.score >= 4.0
+# LLM: _route_card_payload 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理routecard载荷相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _route_card_payload(hit: CapabilitySearchHit) -> dict[str, str]:
     card = hit.card
     return {
@@ -212,6 +245,8 @@ def _route_card_payload(hit: CapabilitySearchHit) -> dict[str, str]:
         "score": f"{hit.score:.2f}",
         "reasons": "；".join(hit.reasons[:4]),
     }
+# LLM: _status_from_structured_output 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理来自状态structuredoutput相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _status_from_structured_output(parsed: SubAgentParsedOutput) -> str:
     status = parsed.status.upper().strip()
     if parsed.capability_requests or parsed.blocked_reason:
@@ -221,10 +256,14 @@ def _status_from_structured_output(parsed: SubAgentParsedOutput) -> str:
     if status in {"DONE", "COMPLETED", "COMPLETE", "SUCCESS", "AWAITING_ACCEPTANCE"}:
         return "AWAITING_ACCEPTANCE"
     return "AWAITING_ACCEPTANCE"
+# LLM: _verification_from_runner_status 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理来自verification执行器状态相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _verification_from_runner_status(status: str) -> str:
     if status.upper() == "AWAITING_ACCEPTANCE":
         return "NEEDS_ACCEPTANCE"
     return "UNVERIFIED"
+# LLM: _runner_next_action 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 推进执行器next动作的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _runner_next_action(*, params: RunnerNextActionParams) -> str:
     if params.dry_run:
         return ""
@@ -237,6 +276,8 @@ def _runner_next_action(*, params: RunnerNextActionParams) -> str:
     if not params.ok:
         return "inspect_runner_failure"
     return ""
+# LLM: _dedupe_granted_cards 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理dedupegrantedcards相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _dedupe_granted_cards(
     grants: list[CapabilityGrant],
     *,
@@ -249,6 +290,8 @@ def _dedupe_granted_cards(
         if max_cards > 0 and len(cards) >= max_cards:
             return cards[:max_cards]
     return cards
+# LLM: _new_grant_cards 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 构建grantcards所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _new_grant_cards(grant: CapabilityGrant, seen: set[str]) -> list[dict[str, str]]:
     cards: list[dict[str, str]] = []
     for card in grant.capability_cards:
@@ -258,6 +301,8 @@ def _new_grant_cards(grant: CapabilityGrant, seen: set[str]) -> list[dict[str, s
         seen.add(key)
         cards.append({str(item_key): str(item_value) for item_key, item_value in card.items()})
     return cards
+# LLM: _execution_context_instructions 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理execution上下文instructions相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _execution_context_instructions() -> list[str]:
     return [
         "只能使用本上下文列出的 allowed_skills、allowed_tools 和 granted_cards。",
@@ -267,6 +312,8 @@ def _execution_context_instructions() -> list[str]:
         "写入只允许发生在 allowed_write_roots 内，禁止写 forbidden_write_roots 和 locked_files。",
         "如果通道损坏、工单文件缺失或任务边界不清，先标记 BLOCKED 并等待父代理处理。",
     ]
+# LLM: _is_active 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 判断active条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _is_active(status: str) -> bool:
     return status.upper() not in {
         "DONE",
@@ -277,6 +324,8 @@ def _is_active(status: str) -> bool:
         "CHANNEL_ERROR",
         "TAKEN_OVER",
     }
+# LLM: _default_forbidden_write_roots 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理defaultforbiddenwriteroots相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
 def _default_forbidden_write_roots() -> list[str]:
     home = Path.home()
     return [

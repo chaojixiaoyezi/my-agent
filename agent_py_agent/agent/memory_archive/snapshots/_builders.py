@@ -1,3 +1,6 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 """CompressionSnapshot object builders for recovery and compression snapshots."""
 
 from __future__ import annotations
@@ -9,6 +12,8 @@ from ..models import CompressionSnapshot
 from ._helpers import _content_hash, _participants, _preview, _snapshot_id
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 MakeRecoverySnapshotIdParams 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 MakeRecoverySnapshotIdParams 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class MakeRecoverySnapshotIdParams:
     """Params bundle for _make_recovery_snapshot_id."""
@@ -23,6 +28,8 @@ class MakeRecoverySnapshotIdParams:
     response_text: str
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 RecoverySnapshotBuildParams 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 RecoverySnapshotBuildParams 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class RecoverySnapshotBuildParams:
     """Internal params bundle for _build_recovery_snapshot."""
@@ -46,6 +53,8 @@ class RecoverySnapshotBuildParams:
     timestamp: str
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 CompressionSnapshotBuildParams 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 CompressionSnapshotBuildParams 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class CompressionSnapshotBuildParams:
     """Internal params bundle for _build_compression_snapshot."""
@@ -68,6 +77,8 @@ class CompressionSnapshotBuildParams:
     timestamp: str
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _make_recovery_snapshot_id 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 make recovery snapshot id 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _make_recovery_snapshot_id(*, params: MakeRecoverySnapshotIdParams) -> str:
     """Build snapshot ID for recovery snapshots."""
     return _snapshot_id(
@@ -85,6 +96,8 @@ def _make_recovery_snapshot_id(*, params: MakeRecoverySnapshotIdParams) -> str:
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _build_recovery_snapshot 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 build recovery snapshot 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _build_recovery_snapshot(*, params: RecoverySnapshotBuildParams) -> CompressionSnapshot:
     """Build a CompressionSnapshot for recovery snapshot."""
     return CompressionSnapshot(
@@ -124,6 +137,8 @@ def _build_recovery_snapshot(*, params: RecoverySnapshotBuildParams) -> Compress
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _build_compression_snapshot 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 build compression snapshot 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _build_compression_snapshot(*, params: CompressionSnapshotBuildParams) -> CompressionSnapshot:
     """Build a CompressionSnapshot for compression snapshot."""
     return CompressionSnapshot(

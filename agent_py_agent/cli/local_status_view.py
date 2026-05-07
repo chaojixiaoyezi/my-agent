@@ -1,6 +1,9 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
-"""LLM: human-readable status rendering helpers for local CLI commands."""
+"""human-readable status rendering helpers for local CLI commands."""
 
 import json
 from dataclasses import dataclass
@@ -9,6 +12,8 @@ from typing import Any
 from .common import format_local_time
 
 
+# LLM: StatusPrintContext 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 集中携带运行期上下文和共享引用，供相邻阶段稳定读取。
 @dataclass
 class StatusPrintContext:
     agent: Any
@@ -25,6 +30,8 @@ class StatusPrintContext:
     suggested_actions: list
 
 
+# LLM: _GatewaySectionRequest 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass
 class _GatewaySectionRequest:
     status: str
@@ -34,6 +41,8 @@ class _GatewaySectionRequest:
     paths: Any
 
 
+# LLM: print_status_human 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def print_status_human(ctx: StatusPrintContext):
     agent = ctx.agent
     print("MY-AGENT STATUS")
@@ -58,6 +67,8 @@ def print_status_human(ctx: StatusPrintContext):
     _format_suggested_actions(ctx.suggested_actions)
 
 
+# LLM: _format_gateway_section 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _format_gateway_section(request: _GatewaySectionRequest, request_counts: dict) -> None:
     print("Gateway")
     print(f"- status={request.status} pid={request.pid if request.pid else '-'} alive={request.alive}")
@@ -67,6 +78,8 @@ def _format_gateway_section(request: _GatewaySectionRequest, request_counts: dic
     print(f"- workspace={request.paths.root}")
 
 
+# LLM: _format_active_work_block 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _format_active_work_block(active_work_summary) -> None:
     if active_work_summary:
         _format_active_work(active_work_summary)
@@ -75,6 +88,8 @@ def _format_active_work_block(active_work_summary) -> None:
     print("- 暂无")
 
 
+# LLM: _format_active_work 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _format_active_work(active_work_summary) -> None:
     from ..agent.startup_recovery import format_active_work_summary
 
@@ -84,6 +99,8 @@ def _format_active_work(active_work_summary) -> None:
         print("  运行 my-agent subagents-dispatch 可继续调度")
 
 
+# LLM: _format_subagents_section 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _format_subagents_section(board, limit: int) -> None:
     print("Subagents")
     print("- summary=" + json.dumps(board.summary, ensure_ascii=False, sort_keys=True))
@@ -100,6 +117,8 @@ def _format_subagents_section(board, limit: int) -> None:
             print(f"  - {item.id} {item.status}/{item.verification_status} :: {item.goal}")
 
 
+# LLM: _format_timeline 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _format_timeline(timeline) -> None:
     print("Timeline")
     if not timeline:
@@ -109,6 +128,8 @@ def _format_timeline(timeline) -> None:
         print(f"- {format_local_time(item.created_at)} {item.event_type} {source} :: {item.title}")
 
 
+# LLM: _format_suggested_actions 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _format_suggested_actions(suggested_actions: list) -> None:
     print("Suggested Actions")
     if suggested_actions:

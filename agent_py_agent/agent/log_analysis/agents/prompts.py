@@ -1,3 +1,6 @@
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
 from __future__ import annotations
 
 """Security prompt switch for log-analysis workflows."""
@@ -19,6 +22,8 @@ SECURITY_SUBAGENT_ROLES = {
 }
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 SecurityPromptConfig 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 SecurityPromptConfig 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class SecurityPromptConfig:
     """Security prompt config, defaulting to ordinary agent behavior."""
@@ -26,6 +31,8 @@ class SecurityPromptConfig:
     security_prompt_enabled: bool = False
     security_prompt_mode: str = "off"
 
+    # LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 from_mapping 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 从外部数据还原 from mapping 需要的领域对象，统一缺省值和兼容字段。
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any] | None) -> SecurityPromptConfig:
         if not payload:
@@ -38,10 +45,14 @@ class SecurityPromptConfig:
             mode = "off"
         return cls(security_prompt_enabled=enabled, security_prompt_mode=mode)
 
+    # LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 to_dict 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 把 to dict 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 SecurityPromptScope 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 SecurityPromptScope 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class SecurityPromptScope:
     # LLM: Scope stays bundled so security prompt APIs do not grow loose kwargs again.
@@ -52,6 +63,8 @@ class SecurityPromptScope:
     is_security_case: bool = False
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 should_inject_security_prompt 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 should inject security prompt 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def should_inject_security_prompt(
     config: SecurityPromptConfig | Mapping[str, Any] | None,
     *,
@@ -77,6 +90,8 @@ def should_inject_security_prompt(
     )
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 security_prompt_fragment 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 security prompt fragment 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def security_prompt_fragment(
     config: SecurityPromptConfig | Mapping[str, Any] | None,
     *,
@@ -93,6 +108,8 @@ def security_prompt_fragment(
     return "\n".join(lines).strip()
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 build_security_prompt 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 build security prompt 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def build_security_prompt(
     base_prompt: str,
     config: SecurityPromptConfig | Mapping[str, Any] | None = None,
@@ -101,8 +118,7 @@ def build_security_prompt(
 ) -> str:
     """Append security instructions only when explicitly enabled and scoped.
 
-    With the default config, the return value is byte-for-byte the input prompt.
-    """
+    With the default config, the return value is byte-for-byte the input prompt."""
 
     fragment = security_prompt_fragment(
         config,
@@ -118,10 +134,14 @@ def build_security_prompt(
 append_security_prompt = build_security_prompt
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _prompt_config 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 prompt config 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def _prompt_config(config: SecurityPromptConfig | Mapping[str, Any] | None) -> SecurityPromptConfig:
     return config if isinstance(config, SecurityPromptConfig) else SecurityPromptConfig.from_mapping(config)
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _security_prompt_lines 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 security prompt lines 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def _security_prompt_lines(mode: str) -> list[str]:
     lines = [
         "# Security Log Analysis Context",
@@ -138,6 +158,8 @@ def _security_prompt_lines(mode: str) -> list[str]:
     return lines
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _minimal_security_lines 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 minimal security lines 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def _minimal_security_lines() -> list[str]:
     return [
         "- Every conclusion must cite evidence_refs.",
@@ -147,6 +169,8 @@ def _minimal_security_lines() -> list[str]:
     ]
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _analyst_security_lines 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 analyst security lines 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def _analyst_security_lines() -> list[str]:
     return [
         "- Analyst output must follow the AnalystReport contract: case_id, summary, evidence_refs, facts, inferences, gaps, next_actions, confidence.",
@@ -155,6 +179,8 @@ def _analyst_security_lines() -> list[str]:
     ]
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _incident_security_lines 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 incident security lines 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _incident_security_lines() -> list[str]:
     return [
         "- Prioritize P0/P1 routing, affected entities, containment options, and time-bounded gaps.",
@@ -162,6 +188,8 @@ def _incident_security_lines() -> list[str]:
     ]
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _append_case_summary 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 append case summary 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_case_summary(lines: list[str], case_summary: str) -> None:
     if case_summary:
         lines.extend(["", "## Case Summary", case_summary.strip()])

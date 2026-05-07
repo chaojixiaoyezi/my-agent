@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """Structured runner-output processing for subagent results."""
@@ -16,9 +19,10 @@ from .parsing import _normalize_runner_items, _split_allowed_items, _string_dict
 from .utils import _merge_list, _new_id
 
 
+# LLM: MergeActualToolsParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存mergeactual工具参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class MergeActualToolsParams:
-    """LLM: bundle actual tool merge inputs from runner telemetry."""
 
     task: SubAgentTask
     actual_tools: list[str]
@@ -28,9 +32,10 @@ class MergeActualToolsParams:
     now: float
 
 
+# LLM: MergeTaskToolsParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存merge任务工具参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class MergeTaskToolsParams:
-    """LLM: bundle parsed and actual tool state for task mutation."""
 
     task: SubAgentTask
     used_tools: list[str]
@@ -40,6 +45,8 @@ class MergeTaskToolsParams:
     now: float
 
 
+# LLM: _merge_actual_tools 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 更新actual工具对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def _merge_actual_tools(params: MergeActualToolsParams):
     task = params.task
     actual_allowed_tools = [item for item in params.actual_tools if item in params.allowed_tools]
@@ -69,6 +76,8 @@ def _merge_actual_tools(params: MergeActualToolsParams):
     return ignored_tools
 
 
+# LLM: _create_evidence_from_parsed 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 构建来自证据parsed所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _create_evidence_from_parsed(parsed, now):
     count = 0
     for item in parsed.evidence:
@@ -78,6 +87,8 @@ def _create_evidence_from_parsed(parsed, now):
     return count
 
 
+# LLM: _create_capability_requests_from_parsed 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 构建来自能力requestsparsed所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _create_capability_requests_from_parsed(task, parsed, now):
     count = 0
     created_ids = []
@@ -103,12 +114,16 @@ def _create_capability_requests_from_parsed(task, parsed, now):
     return count, created_ids
 
 
+# LLM: _split_tools_and_skills 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 拆分工具skills输入集合，给调度、验收或补丁处理提供分组结果；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _split_tools_and_skills(parsed, allowed_tools, allowed_skills):
     used_tools, ignored_tools = _split_allowed_items(parsed.used_tools, allowed_tools)
     used_skills, ignored_skills = _split_allowed_items(parsed.used_skills, allowed_skills)
     return used_tools, ignored_tools, used_skills, ignored_skills
 
 
+# LLM: _merge_task_tools 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 更新任务工具对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def _merge_task_tools(params: MergeTaskToolsParams):
     if params.actual_tools is not None:
         return _merge_actual_tools(
@@ -125,6 +140,8 @@ def _merge_task_tools(params: MergeTaskToolsParams):
     return []
 
 
+# LLM: _process_evidence_items 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 推进证据条目的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _process_evidence_items(parsed, task, now):
     count = 0
     for item in parsed.evidence:
@@ -146,10 +163,14 @@ def _process_evidence_items(parsed, task, now):
     return count
 
 
+# LLM: _string_refs 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理stringrefs相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _string_refs(value: object) -> list[str]:
     return _string_list(value)
 
 
+# LLM: _float_confidence 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理floatconfidence相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _float_confidence(value: object) -> float:
     try:
         return float(value)
@@ -157,8 +178,9 @@ def _float_confidence(value: object) -> float:
         return 0.0
 
 
+# LLM: _process_evidence_packets 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 推进证据packets的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _process_evidence_packets(parsed, task, now):
-    """LLM: Turn runner evidence packets into task-tree evidence facts."""
     packets: list[dict[str, object]] = []
     for item in parsed.evidence_packets:
         claim = str(item.get("claim", "") or "").strip()
@@ -194,8 +216,9 @@ def _process_evidence_packets(parsed, task, now):
     return packets
 
 
+# LLM: _process_findings 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 推进findings的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _process_findings(parsed, task, now):
-    """LLM: Store parent-readable findings that cite evidence packets."""
     findings: list[dict[str, object]] = []
     for item in parsed.findings:
         claim = str(item.get("claim", "") or "").strip()
@@ -230,6 +253,8 @@ def _process_findings(parsed, task, now):
     return findings
 
 
+# LLM: _normalize_parsed_fields 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 解析并归一化parsed字段的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _normalize_parsed_fields(parsed):
     return {
         "artifacts": _normalize_runner_items(parsed.artifacts),
@@ -240,6 +265,8 @@ def _normalize_parsed_fields(parsed):
     }
 
 
+# LLM: _process_structured_output 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 推进structuredoutput的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _process_structured_output(
     task: SubAgentTask,
     parsed: SubAgentParsedOutput,

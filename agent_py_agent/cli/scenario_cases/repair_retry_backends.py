@@ -1,19 +1,28 @@
+# LLM: CLI scenario case definition; keep fixture flow and expected gateway/subagent behavior stable.
+# 模块用途: 定义一类命令行情景测试，用来复现和验证端到端流程。
+
 from __future__ import annotations
 
-"""LLM: backend stubs used by structured-repair and runner-retry scenario cases."""
+"""backend stubs used by structured-repair and runner-retry scenario cases."""
 
 import json
 
 from ...agent.backend import ModelResponse
 
 
+# LLM: ScenarioStructuredRepairBackend 是scenario CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 class ScenarioStructuredRepairBackend:
 
     name = "scenario_structured_repair_backend"
 
+    # LLM: __init__ 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def __init__(self) -> None:
         self.calls = 0
 
+    # LLM: generate 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
@@ -57,13 +66,19 @@ class ScenarioStructuredRepairBackend:
         )
 
 
+# LLM: ScenarioRetryBackend 是scenario CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 class ScenarioRetryBackend:
 
     name = "scenario_retry_backend"
 
+    # LLM: __init__ 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def __init__(self) -> None:
         self.calls = 0
 
+    # LLM: generate 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         if "输出严格 JSON 格式" in prompt:
             return ModelResponse(

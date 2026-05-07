@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """Patch review/apply markdown renderers."""
@@ -5,10 +8,14 @@ from __future__ import annotations
 from .reports import PatchApplyRecord, PatchApplyReport, PatchReviewRecord, PatchReviewReport
 
 
+# LLM: _summary_lines 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总lines的展示文本，保持命令行、日志和审计输出一致；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _summary_lines(summary: dict[str, int]) -> list[str]:
     return [f"- {key}: {summary[key]}" for key in sorted(summary)]
 
 
+# LLM: render_patch_review_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总补丁审查markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def render_patch_review_markdown(report: PatchReviewReport) -> str:
     mode = "dry-run" if report.dry_run else "apply"
     lines = [
@@ -37,6 +44,8 @@ def render_patch_review_markdown(report: PatchReviewReport) -> str:
     return "\n".join(lines) + "\n"
 
 
+# LLM: render_patch_review_record_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总补丁审查记录markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
 def render_patch_review_record_markdown(record: PatchReviewRecord) -> str:
     lines = [
         "# PATCH REVIEW",
@@ -61,6 +70,8 @@ def render_patch_review_record_markdown(record: PatchReviewRecord) -> str:
     return "\n".join(lines) + "\n"
 
 
+# LLM: _patch_review_lines 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理补丁审查lines相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _patch_review_lines(patches: list[dict[str, object]]) -> list[str]:
     if not patches:
         return ["- none"]
@@ -71,6 +82,8 @@ def _patch_review_lines(patches: list[dict[str, object]]) -> list[str]:
     ]
 
 
+# LLM: render_patch_apply_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总补丁应用markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def render_patch_apply_markdown(report: PatchApplyReport) -> str:
     mode = "dry-run" if report.dry_run else "apply"
     lines = [
@@ -100,6 +113,8 @@ def render_patch_apply_markdown(report: PatchApplyReport) -> str:
     return "\n".join(lines) + "\n"
 
 
+# LLM: render_patch_apply_record_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总补丁应用记录markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
 def render_patch_apply_record_markdown(record: PatchApplyRecord) -> str:
     lines = [
         "# PATCH APPLY",
@@ -125,6 +140,8 @@ def render_patch_apply_record_markdown(record: PatchApplyRecord) -> str:
     return "\n".join(lines) + "\n"
 
 
+# LLM: _patch_apply_lines 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理补丁应用lines相关的数据流，连接当前职责的前后步骤；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def _patch_apply_lines(patches: list[dict[str, object]]) -> list[str]:
     if not patches:
         return ["- none"]

@@ -1,4 +1,7 @@
 
+# LLM: 这里守住控制字符、长度和默认值边界，改动会影响所有文件工具。
+# 模块用途: 文件工具的参数解析、路径文本校验和安全读取 helper。
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11,19 +14,24 @@ _MAX_SEARCH_LINE_CHARS = 500
 _MAX_WRITE_TEXT_CHARS = 1_000_000
 
 
+# LLM: TextParamOptions 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: 文本参数约束模型，集中保存必填、长度和空值规则。
 @dataclass(frozen=True)
 class TextParamOptions:
-    # LLM: text validation options are grouped for tool call compatibility.
     name: str = "value"
     max_chars: int = _MAX_WRITE_TEXT_CHARS
     allow_empty: bool = False
     strip: bool = False
 
 
+# LLM: _has_control_chars 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 判断 has_control_chars 是否满足安全或状态条件。
 def _has_control_chars(text: str) -> bool:
     return any(ord(char) < 32 for char in text)
 
 
+# LLM: _required_path 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 required_path 步骤，并保持调用方依赖的数据形状。
 def _required_path(value: Any, *, name: str = "path") -> str:
     if value is None:
         raise ValueError(f"缺少必填参数 {name}")
@@ -39,12 +47,16 @@ def _required_path(value: Any, *, name: str = "path") -> str:
     return text
 
 
+# LLM: _optional_path 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 optional_path 步骤，并保持调用方依赖的数据形状。
 def _optional_path(value: Any, *, default: str = ".") -> str:
     if value is None:
         return default
     return _required_path(value)
 
 
+# LLM: _text_param 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 text_param 步骤，并保持调用方依赖的数据形状。
 def _text_param(
     value: Any,
     *,
@@ -73,6 +85,8 @@ def _text_param(
     return text
 
 
+# LLM: _int_param 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 int_param 步骤，并保持调用方依赖的数据形状。
 def _int_param(value: Any, *, name: str, default: int, min_value: int | None = None) -> int:
     if value is None:
         parsed = default
@@ -86,6 +100,8 @@ def _int_param(value: Any, *, name: str, default: int, min_value: int | None = N
     return parsed
 
 
+# LLM: _bool_param 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 bool_param 步骤，并保持调用方依赖的数据形状。
 def _bool_param(value: Any, *, default: bool = False) -> bool:
     if value is None:
         return default
@@ -102,6 +118,8 @@ def _bool_param(value: Any, *, default: bool = False) -> bool:
     return default
 
 
+# LLM: _read_text_safe 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 读取 read_text_safe 数据并转换成内部对象。
 def _read_text_safe(path: Path) -> str | None:
     try:
         return path.read_text(encoding="utf-8")
@@ -109,6 +127,8 @@ def _read_text_safe(path: Path) -> str | None:
         return None
 
 
+# LLM: _parse_count_param 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 解析 parse_count_param 数据结构。
 def _parse_count_param(value: Any) -> int:
     if value is None:
         return 1

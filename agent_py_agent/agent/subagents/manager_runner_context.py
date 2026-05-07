@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """LLM contract: runner execution-context construction and persistence.
@@ -64,7 +67,11 @@ from .utils import (
 if TYPE_CHECKING:
     from ..local_store import LocalStore
 
+# LLM: SubAgentRunnerContextMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 拆分subagent执行器上下文混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 class SubAgentRunnerContextMixin:
+    # LLM: _extract_granted_caps 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理extractgrantedcaps相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def _extract_granted_caps(self, task: SubAgentTask) -> tuple[list[str], list[str], list[dict[str, object]]]:
         """Extract skills, tools, and grants from capability grants."""
         granted_skills: list[str] = []
@@ -87,6 +94,8 @@ class SubAgentRunnerContextMixin:
             )
         return granted_skills, granted_tools, grants
 
+    # LLM: _build_write_boundary 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 构建boundary所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def _build_write_boundary(self, task: SubAgentTask) -> dict[str, str]:
         """Build write boundary configuration dict."""
         return {
@@ -109,6 +118,8 @@ class SubAgentRunnerContextMixin:
             "dependencies_json": task.dependencies_json,
         }
 
+    # LLM: build_execution_context 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 构建execution上下文所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def build_execution_context(
         self,
         run_id: str,
@@ -130,6 +141,8 @@ class SubAgentRunnerContextMixin:
             max_cards=max_cards,
         )
 
+    # LLM: _make_execution_context 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 构建execution上下文所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def _make_execution_context(
         self,
         task: SubAgentTask,
@@ -159,6 +172,8 @@ class SubAgentRunnerContextMixin:
             instructions=_execution_context_instructions(),
         )
 
+    # LLM: write_execution_context 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 写入execution上下文的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def write_execution_context(
         self,
         run_id: str,
@@ -188,6 +203,8 @@ class SubAgentRunnerContextMixin:
         return context
 
 
+# LLM: _execution_context_task_fields 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理execution上下文任务字段相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _execution_context_task_fields(task: SubAgentTask) -> dict[str, object]:
     return {
         "run_id": task.id,

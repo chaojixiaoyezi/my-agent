@@ -144,3 +144,7 @@
 - Continued high-risk cleanup by moving patch review record helpers, action record/log helpers, acceptance evidence helpers, and orchestration specs behind smaller focused modules while keeping manager/service facades compatible.
 - Focused verification covered manager patch, manager actions, strict code-size, ruff, and architecture guardrails.
 - 2026-05-07 workflow high-risk cleanup continued in router, planner, and parent acceptance helpers; route fields, compile inputs, and final-gate checklist expansion stay separated so worker self-report cannot become the acceptance source.
+## 2026-05-07 LLM annotation coverage update
+- Product-code modules, classes, functions, and methods in the active module now carry the required `LLM:` plus `函数用途:` / `类用途:` definition-level double-layer comments format.
+- This is a documentation-only maintainability pass: behavior, file formats, workflow semantics, and public interfaces are intended to stay unchanged.
+- Future module changes must keep these comments current when changing module/class/def behavior, side effects, bundles, or caller expectations.

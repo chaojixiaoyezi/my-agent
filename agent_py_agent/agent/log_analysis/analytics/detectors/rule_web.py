@@ -1,3 +1,6 @@
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
 from __future__ import annotations
 
 """Web and network-oriented soft detector rules."""
@@ -35,6 +38,8 @@ from .field_extractors import (
 from .rule_helpers import MakeFindingParams, _make_finding, _query
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 waf_attack_success_candidate 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 waf attack success candidate 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def waf_attack_success_candidate(
     events: Sequence[EventLike], *, baselines: Any = None, window_minutes: int = 15
 ) -> list[Any]:
@@ -53,6 +58,8 @@ def waf_attack_success_candidate(
     return findings
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 web_to_process_anomaly 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 web to process anomaly 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def web_to_process_anomaly(
     events: Sequence[EventLike], *, baselines: Any = None, window_minutes: int = 10
 ) -> list[Any]:
@@ -65,6 +72,8 @@ def web_to_process_anomaly(
     return findings
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 rare_egress_after_alert 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 rare egress after alert 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def rare_egress_after_alert(
     events: Sequence[EventLike], *, baselines: Any = None, window_minutes: int = 30
 ) -> list[Any]:
@@ -82,6 +91,8 @@ def rare_egress_after_alert(
     return findings
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _waf_signal_groups 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 waf signal groups 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _waf_signal_groups(alert: JsonDict, events: list[JsonDict], window_minutes: int) -> dict[str, list[JsonDict]]:
     related = [event for event in events if event is not alert and _within_after(alert, event, window_minutes) and _same_asset(alert, event)]
     return {
@@ -92,10 +103,14 @@ def _waf_signal_groups(alert: JsonDict, events: list[JsonDict], window_minutes: 
     }
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _waf_evidence_events 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 waf evidence events 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _waf_evidence_events(alert: JsonDict, groups: dict[str, list[JsonDict]]) -> list[JsonDict]:
     return [alert, *groups["http"][:3], *groups["process"][:3], *groups["file"][:3], *groups["egress"][:3]]
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _waf_confidence 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 waf confidence 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _waf_confidence(groups: dict[str, list[JsonDict]]) -> float:
     return min(
         0.54
@@ -107,6 +122,8 @@ def _waf_confidence(groups: dict[str, list[JsonDict]]) -> float:
     )
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _waf_gaps 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 waf gaps 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _waf_gaps(groups: dict[str, list[JsonDict]]) -> list[str]:
     gaps: list[str] = []
     if not groups["process"]:
@@ -118,6 +135,8 @@ def _waf_gaps(groups: dict[str, list[JsonDict]]) -> list[str]:
     return gaps
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _waf_finding 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 waf finding 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _waf_finding(alert: JsonDict, evidence_events: list[JsonDict], groups: dict[str, list[JsonDict]]) -> Any:
     confidence = _waf_confidence(groups)
     return _make_finding(
@@ -146,6 +165,8 @@ def _waf_finding(alert: JsonDict, evidence_events: list[JsonDict], groups: dict[
     )
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _web_process_finding 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 web process finding 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _web_process_finding(event: JsonDict) -> Any:
     parent = _parent_process_name(event)
     child = _process_name(event)
@@ -172,6 +193,8 @@ def _web_process_finding(event: JsonDict) -> Any:
     )
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _rare_egress_candidates 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 rare egress candidates 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _rare_egress_candidates(alert: JsonDict, egress_events: list[JsonDict], baseline_obj: Any, window_minutes: int) -> list[JsonDict]:
     candidates: list[JsonDict] = []
     for event in egress_events:
@@ -185,6 +208,8 @@ def _rare_egress_candidates(alert: JsonDict, egress_events: list[JsonDict], base
     return candidates
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _rare_egress_finding 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 rare egress finding 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _rare_egress_finding(alert: JsonDict, candidates: list[JsonDict]) -> Any:
     confidence = min(0.62 + (0.08 if _severity(alert) in {"high", "critical"} else 0.0) + min(len(candidates), 4) * 0.035, 0.86)
     return _make_finding(

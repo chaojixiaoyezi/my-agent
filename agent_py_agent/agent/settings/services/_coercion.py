@@ -1,5 +1,8 @@
 """Coercion service: type coercion helpers for config values."""
 
+# LLM: 这里产出的 warning 文案会被 CLI 和测试读取，修改需保持结构稳定。
+# 模块用途: 通用配置值类型转换服务，负责 bool、数字和枚举校验。
+
 from __future__ import annotations
 
 import re
@@ -9,22 +12,29 @@ _INT_PATTERN = re.compile(r"-?[0-9]+")
 _FLOAT_PATTERN = re.compile(r"-?[0-9]+(\.[0-9]+)?")
 
 
+# LLM: _Bounds 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: 数字配置边界，保存最小值和最大值。
 @dataclass(frozen=True)
 class _Bounds:
     min_val: int | float | None
     max_val: int | float | None
 
 
+# LLM: CoerceNumberParams 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: 数字转换参数包，保存字段名、默认值和范围限制。
 @dataclass(frozen=True)
 class CoerceNumberParams:
-    # LLM: config number coercion bounds travel together to keep facade signatures stable.
     min_val: int | float | None = None
     max_val: int | float | None = None
 
 
+# LLM: CoercionService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: CoercionService 封装 配置系统 的一组相关操作，供上层组合调用。
 class CoercionService:
     """Service for coercing raw config values to typed values with safe fallbacks."""
 
+    # LLM: CoercionService.coerce_bool 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 把原始配置值转换成目标类型，失败时回退默认值并记录告警。
     @staticmethod
     def coerce_bool(key: str, value: object, fallback: bool) -> tuple[bool, str | None]:
         """Coerce a raw config value to bool with a safe fallback."""
@@ -42,6 +52,8 @@ class CoercionService:
                 return False, None
         return fallback, f"{key}: expected a clear boolean, got {value!r}; using {fallback}"
 
+    # LLM: CoercionService.coerce_int 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 把原始配置值转换成目标类型，失败时回退默认值并记录告警。
     @staticmethod
     def coerce_int(
         key: str,
@@ -65,6 +77,8 @@ class CoercionService:
             return fallback, warn
         return number, None
 
+    # LLM: CoercionService.coerce_float 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 把原始配置值转换成目标类型，失败时回退默认值并记录告警。
     @staticmethod
     def coerce_float(
         key: str,
@@ -88,6 +102,8 @@ class CoercionService:
             return fallback, warn
         return number, None
 
+    # LLM: CoercionService.coerce_choice 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 把原始配置值转换成目标类型，失败时回退默认值并记录告警。
     @staticmethod
     def coerce_choice(key: str, value: object, fallback: str, choices: tuple[str, ...]) -> tuple[str, str | None]:
         """Coerce a raw config value to one of the allowed string choices."""
@@ -100,6 +116,8 @@ class CoercionService:
         return fallback, f"{key}: expected one of {list(choices)}, got {value!r}; using {fallback}"
 
 
+# LLM: _coerce_int_number 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把原始配置值转换成目标类型，失败时回退默认值并记录告警。
 def _coerce_int_number(value: object) -> int | None:
     if isinstance(value, bool):
         return None
@@ -112,6 +130,8 @@ def _coerce_int_number(value: object) -> int | None:
     return None
 
 
+# LLM: _coerce_float_number 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把原始配置值转换成目标类型，失败时回退默认值并记录告警。
 def _coerce_float_number(value: object) -> float | None:
     if isinstance(value, bool):
         return None
@@ -125,6 +145,8 @@ def _coerce_float_number(value: object) -> float | None:
     return float(stripped)
 
 
+# LLM: _range_warning 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 配置系统 中的 range_warning 步骤，并保持调用方依赖的数据形状。
 def _range_warning(
     key: str,
     number: int | float,

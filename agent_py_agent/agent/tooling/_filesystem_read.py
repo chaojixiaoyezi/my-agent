@@ -1,4 +1,7 @@
 
+# LLM: 路径解析必须持续限制在工作区根内，避免读越界。
+# 模块用途: 工作区内文件列举、读取和文本搜索工具实现。
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -18,12 +21,18 @@ from .models import BaseTool, ToolExecutionResult, ToolSpec
 _MAX_WRITE_TEXT_CHARS = 1_000_000
 
 
+# LLM: FileSystemTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: FileSystemTool 数据模型，集中保存 工具系统 的结构化状态。
 class FileSystemTool(BaseTool):
 
+    # LLM: FileSystemTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 初始化 FileSystemTool 的依赖、配置和运行期字段。
     def __init__(self, workspace_root: Path, workspace_roots: list[Path] | None = None):
         self.workspace_root = workspace_root.resolve()
         self.workspace_roots = _normalized_workspace_roots(self.workspace_root, workspace_roots)
 
+    # LLM: FileSystemTool.resolve_path 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 解析 resolve_path 并确认结果仍在允许边界内。
     def resolve_path(self, raw_path: str | Path) -> Path:
 
         raw_text = _required_path(raw_path)
@@ -42,6 +51,8 @@ class FileSystemTool(BaseTool):
             raise ValueError("路径超出允许的工作区范围，请使用工作区内路径。") from exc
         return candidate
 
+    # LLM: FileSystemTool.display_path 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 把内部路径转换成调用方可读的展示路径。
     def display_path(self, path: Path) -> str:
 
         for root in self.workspace_roots:
@@ -58,8 +69,12 @@ class FileSystemTool(BaseTool):
             return "<outside-workspace>"
 
 
+# LLM: ListFilesTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: ListFilesTool 数据模型，集中保存 工具系统 的结构化状态。
 class ListFilesTool(FileSystemTool):
 
+    # LLM: ListFilesTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 初始化 ListFilesTool 的依赖、配置和运行期字段。
     def __init__(self, workspace_root: Path, max_entries: int, workspace_roots: list[Path] | None = None):
         super().__init__(workspace_root, workspace_roots)
         self.max_entries = max_entries
@@ -89,6 +104,8 @@ class ListFilesTool(FileSystemTool):
             ],
         )
 
+    # LLM: ListFilesTool.execute 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 执行 ListFilesTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
             raw_path = _optional_path(params.get("path"), default=".")
@@ -112,8 +129,12 @@ class ListFilesTool(FileSystemTool):
         return ToolExecutionResult("list_files", True, "\n".join(entries) or "目录为空")
 
 
+# LLM: ReadFileTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: ReadFileTool 数据模型，集中保存 工具系统 的结构化状态。
 class ReadFileTool(FileSystemTool):
 
+    # LLM: ReadFileTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 初始化 ReadFileTool 的依赖、配置和运行期字段。
     def __init__(self, workspace_root: Path, max_chars: int, workspace_roots: list[Path] | None = None):
         super().__init__(workspace_root, workspace_roots)
         self.max_chars = max_chars
@@ -145,6 +166,8 @@ class ReadFileTool(FileSystemTool):
             ],
         )
 
+    # LLM: ReadFileTool.execute 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 执行 ReadFileTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
             raw_path = _required_path(params.get("path"))
@@ -176,8 +199,12 @@ class ReadFileTool(FileSystemTool):
         return ToolExecutionResult("read_file", True, result or "(空文件)")
 
 
+# LLM: SearchTextTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: SearchTextTool 数据模型，集中保存 工具系统 的结构化状态。
 class SearchTextTool(FileSystemTool):
 
+    # LLM: SearchTextTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 初始化 SearchTextTool 的依赖、配置和运行期字段。
     def __init__(self, workspace_root: Path, max_matches: int, workspace_roots: list[Path] | None = None):
         super().__init__(workspace_root, workspace_roots)
         self.max_matches = max_matches
@@ -207,6 +234,8 @@ class SearchTextTool(FileSystemTool):
             ],
         )
 
+    # LLM: SearchTextTool.execute 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 执行 SearchTextTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
             query = _text_param(params.get("query"), name="query", max_chars=_MAX_SEARCH_QUERY_CHARS, strip=True)
@@ -227,6 +256,8 @@ class SearchTextTool(FileSystemTool):
                 return ToolExecutionResult("search_text", True, "\n".join(matches))
         return ToolExecutionResult("search_text", True, "\n".join(matches) or "没有找到匹配项")
 
+    # LLM: SearchTextTool._search_item_for_query 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 完成 工具系统 中的 search_item_for_query 步骤，并保持调用方依赖的数据形状。
     def _search_item_for_query(self, item: Path, query: str, matches: list[str]) -> str:
         try:
             safe_item = self.resolve_path(item)
@@ -238,6 +269,8 @@ class SearchTextTool(FileSystemTool):
             return ""
         return ""
 
+    # LLM: SearchTextTool._search_lines 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 完成 工具系统 中的 search_lines 步骤，并保持调用方依赖的数据形状。
     def _search_lines(
         self,
         item: Path,
@@ -254,6 +287,8 @@ class SearchTextTool(FileSystemTool):
                 return "full"
         return ""
 
+    # LLM: SearchTextTool._append_search_match 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 向结果或告警集合加入 append_search_match，同时保留调用方依赖的顺序。
     def _append_search_match(
         self,
         rel: str,
@@ -264,16 +299,22 @@ class SearchTextTool(FileSystemTool):
         snippet = self._make_snippet(line)
         matches.append(f"{rel}:{line_number}: {snippet}")
 
+    # LLM: SearchTextTool._make_snippet 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 完成 工具系统 中的 make_snippet 步骤，并保持调用方依赖的数据形状。
     def _make_snippet(self, line: str) -> str:
         snippet = line.strip()
         if len(snippet) > _MAX_SEARCH_LINE_CHARS:
             snippet = snippet[:_MAX_SEARCH_LINE_CHARS] + "... 已截断"
         return snippet
 
+    # LLM: SearchTextTool._item_relative_path 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 完成 工具系统 中的 item_relative_path 步骤，并保持调用方依赖的数据形状。
     def _item_relative_path(self, item: Path, safe_item: Path) -> str:
         return self.display_path(safe_item if safe_item.is_absolute() else item)
 
 
+# LLM: _normalized_workspace_roots 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 解析并去重工作区根目录，保留第一个主工作区。
 def _normalized_workspace_roots(primary: Path, roots: list[Path] | None) -> list[Path]:
     resolved: list[Path] = []
     for raw in [primary, *(roots or [])]:
@@ -283,6 +324,8 @@ def _normalized_workspace_roots(primary: Path, roots: list[Path] | None) -> list
     return resolved
 
 
+# LLM: _is_under_any_root 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 判断 is_under_any_root 是否满足安全或状态条件。
 def _is_under_any_root(path: Path, roots: list[Path]) -> bool:
     for root in roots:
         try:

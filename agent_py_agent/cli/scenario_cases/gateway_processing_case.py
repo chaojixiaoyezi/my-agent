@@ -1,6 +1,9 @@
+# LLM: CLI scenario case definition; keep fixture flow and expected gateway/subagent behavior stable.
+# 模块用途: 定义一类命令行情景测试，用来复现和验证端到端流程。
+
 from __future__ import annotations
 
-"""LLM: gateway processing-stop scenario case.
+"""gateway processing-stop scenario case.
 
 给人看的解释：
 这个模块专门模拟 gateway 正在处理请求时被 stop/restart 打断，验证请求能恢复并完成。
@@ -28,6 +31,8 @@ from ..scenario_utils import (
 )
 
 
+# LLM: ProcessingVerifyResults 是gateway CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 @dataclass
 class ProcessingVerifyResults:
     done_path: object
@@ -36,6 +41,8 @@ class ProcessingVerifyResults:
     response_json_valid: bool
 
 
+# LLM: ProcessingStopVerifyRequest 是gateway CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass
 class ProcessingStopVerifyRequest:
     paths: object
@@ -48,6 +55,8 @@ class ProcessingStopVerifyRequest:
     verify: ProcessingVerifyResults
 
 
+# LLM: ProcessingRequeueResult 是gateway CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 @dataclass
 class ProcessingRequeueResult:
     requeued: int
@@ -55,6 +64,8 @@ class ProcessingRequeueResult:
     processing_path: object
 
 
+# LLM: ProcessingCompletionResult 是gateway CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 @dataclass
 class ProcessingCompletionResult:
     processed: int
@@ -62,6 +73,8 @@ class ProcessingCompletionResult:
     verify: ProcessingVerifyResults
 
 
+# LLM: _processing_stop_setup 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _processing_stop_setup(args):
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -94,6 +107,8 @@ def _processing_stop_setup(args):
     return paths, agent, gpaths, request_id, pending_path, payload
 
 
+# LLM: _processing_stop_simulate_lease 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _processing_stop_simulate_lease(gpaths, request_id, pending_path, payload):
     processing_path = gpaths.processing / pending_path.name
     try:
@@ -120,6 +135,8 @@ def _processing_stop_simulate_lease(gpaths, request_id, pending_path, payload):
     return processing_path, response_path
 
 
+# LLM: _processing_stop_verify_results 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _processing_stop_verify_results(request: ProcessingStopVerifyRequest):
     verify = request.verify
     final_ok = (
@@ -154,6 +171,8 @@ def _processing_stop_verify_results(request: ProcessingStopVerifyRequest):
     return 0 if final_ok else 2
 
 
+# LLM: _processing_stop_requeue 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _processing_stop_requeue(gpaths, processing_path) -> ProcessingRequeueResult:
     print_scenario_step(3, "Simulate gateway stop/restart mid-processing (requeue stale leases)")
     requeued = requeue_gateway_processing_requests(gpaths)
@@ -165,6 +184,8 @@ def _processing_stop_requeue(gpaths, processing_path) -> ProcessingRequeueResult
     return ProcessingRequeueResult(requeued, after_requeue_pending, after_requeue_processing)
 
 
+# LLM: _processing_stop_complete 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _processing_stop_complete(agent, gpaths, processing_path, response_path) -> ProcessingCompletionResult:
     print_scenario_step(4, "Let a new worker pick up the requeued request and complete it")
     processed = _process_gateway_requests(agent, gpaths, worker_id="scenario-recovery-worker-after-stop")
@@ -186,6 +207,8 @@ def _processing_stop_complete(agent, gpaths, processing_path, response_path) -> 
     )
 
 
+# LLM: _response_json_valid 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _response_json_valid(final_response: dict) -> bool:
     print_scenario_step(5, "Verify no half-written JSON, no lost requests")
     try:
@@ -195,6 +218,8 @@ def _response_json_valid(final_response: dict) -> bool:
         return False
 
 
+# LLM: run_scenario_gateway_processing_stop_case 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_scenario_gateway_processing_stop_case(args) -> int:
     paths, agent, gpaths, request_id, pending_path, payload = _processing_stop_setup(args)
     print_scenario_step(1, "Submit request to gateway inbox")

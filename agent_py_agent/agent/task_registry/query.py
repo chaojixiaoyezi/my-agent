@@ -1,6 +1,9 @@
+# LLM: Task registry module; keep task lookup and metadata contracts stable.
+# 模块用途: 注册、查询和更新任务元数据，给 CLI 和调度逻辑使用。
+
 from __future__ import annotations
 
-"""LLM: task query interface.
+"""task query interface.
 
 给人看的解释：
 提供跨会话查询接口，包括任务摘要。
@@ -26,6 +29,8 @@ _TASK_STATUS_EMOJI = {
 }
 
 
+# LLM: get_task_summary belongs to 任务注册表; keep caller-visible returns, errors, and side effects aligned with focused tests.
+# 函数用途: 查询已有记录、索引或配置并返回给上层调用方，返回结构需要保持稳定。
 def get_task_summary(store: LocalStore, task_id: str) -> str:
 
     task_info = store.task_registry.lookup_task(task_id)
@@ -64,6 +69,8 @@ def get_task_summary(store: LocalStore, task_id: str) -> str:
     return "\n".join(lines)
 
 
+# LLM: format_task_list belongs to 任务注册表; keep caller-visible returns, errors, and side effects aligned with focused tests.
+# 函数用途: 把内部状态转换成人或 LLM 可读文本，改文案时要同步 CLI/报告测试。
 def format_task_list(tasks: list[dict]) -> str:
 
     if not tasks:

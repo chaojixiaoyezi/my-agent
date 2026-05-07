@@ -1,6 +1,9 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-"""LLM: action apply service for subagent tasks.
+"""action apply service for subagent tasks.
 
 给人看的解释：
 这里承接动作执行逻辑（apply_actions, _apply_action_item 等）。
@@ -30,12 +33,18 @@ if TYPE_CHECKING:
     from ..reports import ActionApplyRecord
 
 
+# LLM: SubAgentActionService 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 封装subagent动作服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 class SubAgentActionService:
     """Action apply execution service."""
 
+    # LLM: __init__ 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def __init__(self, manager: Any):
         self.manager = manager
 
+    # LLM: apply_actions 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 更新动作对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、报告记录和持久化副作用，需避免破坏既有状态机约定。
     def apply_actions(
         self,
         config: Any = None,
@@ -81,6 +90,8 @@ class SubAgentActionService:
             records=records,
         )
 
+    # LLM: _apply_action_item 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 更新动作条目对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、报告记录和持久化副作用，需避免破坏既有状态机约定。
     def _apply_action_item(
         self,
         action: ActionPlanItem,
@@ -129,9 +140,13 @@ class SubAgentActionService:
             ActionRecordContext(self.manager, action, now, before_status, before_channel_status, task)
         )
 
+    # LLM: _action_dispatch 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理动作调度相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
     def _action_dispatch(self) -> dict[str, callable]:
         return ACTION_DISPATCH
 
+    # LLM: _record_after_task_action 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 写入after任务动作的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def _record_after_task_action(
         self,
         params: RecordAfterTaskActionParams,
@@ -158,10 +173,14 @@ class SubAgentActionService:
             created_at=time.time(),
         )
 
+    # LLM: _append_action_apply_log 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 写入动作应用log的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def _append_action_apply_log(self, record: ActionApplyRecord) -> None:
         """Write global action apply audit log."""
         append_action_apply_log(self.manager, record)
 
+    # LLM: _append_task_work_log 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 写入任务worklog的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def _append_task_work_log(self, task: SubAgentTask, message: str) -> None:
         """Write apply progress to task's own WORK_LOG."""
         append_task_work_log(self.manager, task, message)

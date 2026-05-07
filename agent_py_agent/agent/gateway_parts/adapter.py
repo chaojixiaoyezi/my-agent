@@ -1,8 +1,10 @@
+# LLM: Gateway service module; keep file-queue, daemon, HTTP, and audit contracts stable.
+# 模块用途: 拆分 gateway 请求队列、守护进程、HTTP 处理和响应渲染逻辑。
+
 from __future__ import annotations
 
-"""LLM: translates file-adapter inbox messages into gateway ask requests and outbox replies.
+"""translates file-adapter inbox messages into gateway ask requests and outbox replies.
 
-给人看的解释：
 外部聊天工具或 TUI 可以往 adapter inbox 丢 JSON。
 这个文件负责取走这些消息，转成 gateway ask，请求完成后再把回复写到 outbox。
 它是外部文件协议和内部 gateway 协议之间的转换层。
@@ -24,7 +26,8 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
-# LLM: adapter internals stay bundled so file-protocol fields do not widen gateway call sites.
+# LLM: _AdapterMessageContext 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 类用途: 集中保存adapter消息上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class _AdapterMessageContext:
 
@@ -36,6 +39,8 @@ class _AdapterMessageContext:
     timeout: float
 
 
+# LLM: _AdapterTimeoutContext 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 类用途: 集中保存adapter超时上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class _AdapterTimeoutContext:
 
@@ -46,6 +51,8 @@ class _AdapterTimeoutContext:
     timeout: float
 
 
+# LLM: ProcessFileAdapterOptions 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 类用途: 集中保存process文件adapter选项字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class ProcessFileAdapterOptions:
     gateway_paths_obj: GatewayPaths
@@ -54,6 +61,8 @@ class ProcessFileAdapterOptions:
     limit: int = 20
 
 
+# LLM: _process_single_adapter_message 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 推进单个adapter消息的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _process_single_adapter_message(
     context: _AdapterMessageContext,
 ) -> bool:
@@ -98,6 +107,8 @@ def _process_single_adapter_message(
     return True
 
 
+# LLM: _empty_prompt_adapter_response 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理empty提示词adapter响应相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def _empty_prompt_adapter_response(message_id: str, payload: dict, processing_path: Path, started_at: float) -> dict:
     return {
         "id": message_id,
@@ -112,6 +123,8 @@ def _empty_prompt_adapter_response(message_id: str, payload: dict, processing_pa
     }
 
 
+# LLM: _submit_adapter_gateway_request 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 发送adapter网关请求请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _submit_adapter_gateway_request(
     agent: SimpleAgent,
     gateway_paths_obj: GatewayPaths,
@@ -131,6 +144,8 @@ def _submit_adapter_gateway_request(
     )
 
 
+# LLM: _timeout_adapter_gateway_response 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理超时adapter网关响应相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def _timeout_adapter_gateway_response(context: _AdapterTimeoutContext) -> dict:
     return {
         "id": context.request_id,
@@ -147,6 +162,8 @@ def _timeout_adapter_gateway_response(context: _AdapterTimeoutContext) -> dict:
     }
 
 
+# LLM: _build_adapter_outbox_response 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 构建adapteroutbox响应所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _build_adapter_outbox_response(context: dict) -> dict:
     message_id = context["message_id"]
     payload = context["payload"]
@@ -171,6 +188,8 @@ def _build_adapter_outbox_response(context: dict) -> dict:
     }
 
 
+# LLM: process_file_adapter_once 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 推进文件adapteronce的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def process_file_adapter_once(
     agent: SimpleAgent,
     *,
@@ -214,6 +233,8 @@ def process_file_adapter_once(
     return processed
 
 
+# LLM: _archive_adapter_message 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 写入adapter消息的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def _archive_adapter_message(path: Path, target_dir: Path) -> None:
 
     try:
@@ -222,11 +243,15 @@ def _archive_adapter_message(path: Path, target_dir: Path) -> None:
         _report_gateway_side_effect_error("archive_adapter_message", path.stem, exc)
 
 
+# LLM: _adapter_message_id 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理adapter消息id相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def _adapter_message_id(payload: dict, path: Path) -> str:
 
     return str(payload.get("id") or payload.get("message_id") or path.stem).strip() or path.stem
 
 
+# LLM: _adapter_message_prompt 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理adapter消息提示词相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def _adapter_message_prompt(payload: dict) -> str:
 
     for key in ("prompt", "text", "message", "content"):
@@ -236,11 +261,15 @@ def _adapter_message_prompt(payload: dict) -> str:
     return ""
 
 
+# LLM: _adapter_output_path 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理adapteroutput路径相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def _adapter_output_path(paths: AdapterPaths, message_id: str) -> Path:
 
     return paths.outbox / f"{message_id}.json"
 
 
+# LLM: _record_late_pending 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 写入latepending的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def _record_late_pending(paths: AdapterPaths, request_id: str, original_timeout: float) -> None:
 
     late_path = paths.root / "late_pending.jsonl"
@@ -257,6 +286,8 @@ def _record_late_pending(paths: AdapterPaths, request_id: str, original_timeout:
         _report_gateway_side_effect_error("record_late_pending", request_id, exc)
 
 
+# LLM: check_late_responses 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 校验lateresponses需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def check_late_responses(paths: AdapterPaths) -> list[dict]:
 
     late_path = paths.root / "late_pending.jsonl"
@@ -273,6 +304,8 @@ def check_late_responses(paths: AdapterPaths) -> list[dict]:
     return results
 
 
+# LLM: _iter_late_pending_entries 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理迭代latependingentries相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持请求队列、租约文件、进程状态和响应渲染上的返回值和副作用边界稳定。
 def _iter_late_pending_entries(late_path: Path) -> list[dict]:
     entries: list[dict] = []
     for line in late_path.read_text(encoding="utf-8").splitlines():
@@ -287,6 +320,8 @@ def _iter_late_pending_entries(late_path: Path) -> list[dict]:
     return entries
 
 
+# LLM: _mark_late_response_if_arrived 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 更新late响应ifarrived对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新请求队列、租约文件、进程状态和响应渲染，需避免破坏既有状态机约定。
 def _mark_late_response_if_arrived(paths: AdapterPaths, entry: dict) -> dict:
     request_id = entry.get("request_id", "")
     gateway_responses_dir = paths.root.parent / "gateway" / "responses"
@@ -297,6 +332,8 @@ def _mark_late_response_if_arrived(paths: AdapterPaths, entry: dict) -> dict:
     return entry
 
 
+# LLM: _rewrite_unchecked_late_entries 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理rewriteuncheckedlateentries相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def _rewrite_unchecked_late_entries(late_path: Path, entries: list[dict]) -> None:
     lines = [json.dumps(entry, ensure_ascii=False) for entry in entries if not entry.get("checked")]
     content = "\n".join(lines) + ("\n" if lines else "")

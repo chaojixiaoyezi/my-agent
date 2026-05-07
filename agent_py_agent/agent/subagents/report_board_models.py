@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """Board, due-check, action, and capability route report models."""
@@ -5,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+# LLM: SubAgentBoardItem 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存subagent看板条目字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class SubAgentBoardItem:
     """瀛愪唬鐞嗙湅鏉块噷鐨勪竴琛屾満鍣ㄤ簨瀹炪€?"""
@@ -41,6 +46,8 @@ class SubAgentBoardItem:
     blocker_count: int = 0
 
 
+# LLM: SubAgentBoard 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存subagent看板字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class SubAgentBoard:
     """瀛愪唬鐞嗙湅鏉匡紝鍏奸【鏈哄櫒璇诲彇鍜屼汉绫绘壂瑙嗐€?"""
@@ -52,6 +59,8 @@ class SubAgentBoard:
     items: list[SubAgentBoardItem]
 
 
+# LLM: DueCheckIssue 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存到期检查issue字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class DueCheckIssue:
     """鐖朵唬鐞嗗贰妫€鍙戠幇鐨勪竴鏉″緟澶勭悊闂銆?"""
@@ -76,6 +85,8 @@ class DueCheckIssue:
     created_at: float = 0.0
 
 
+# LLM: DueCheckReport 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存到期检查报告字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class DueCheckReport:
     """鐖朵唬鐞?due-check 鎶ュ憡銆?"""
@@ -85,6 +96,8 @@ class DueCheckReport:
     issues: list[DueCheckIssue]
 
 
+# LLM: ActionPlanItem 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存动作计划条目字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class ActionPlanItem:
     """鐢?due-check 杞嚭鏉ョ殑涓€鏉?dry-run 鍔ㄤ綔銆?"""
@@ -111,6 +124,8 @@ class ActionPlanItem:
     created_at: float = 0.0
 
 
+# LLM: ActionPlanReport 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存动作计划报告字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class ActionPlanReport:
     """鐖朵唬鐞嗗姩浣滆鍒掓姤鍛娿€?"""
@@ -120,6 +135,8 @@ class ActionPlanReport:
     actions: list[ActionPlanItem]
 
 
+# LLM: ActionApplyRecord 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存动作应用记录字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class ActionApplyRecord:
     """涓€娆?action apply 鐨勫璁¤褰曘€?"""
@@ -144,6 +161,8 @@ class ActionApplyRecord:
     created_at: float = 0.0
 
 
+# LLM: ActionApplyReport 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存动作应用报告字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class ActionApplyReport:
     """action apply 鎶ュ憡銆?"""
@@ -154,6 +173,8 @@ class ActionApplyReport:
     records: list[ActionApplyRecord]
 
 
+# LLM: CapabilityRouteRecord 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存能力route记录字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class CapabilityRouteRecord:
     """涓€娆?capability request 璺敱璁板綍銆?"""
@@ -175,6 +196,8 @@ class CapabilityRouteRecord:
     created_at: float = 0.0
 
 
+# LLM: CapabilityRouteReport 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存能力route报告字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class CapabilityRouteReport:
     """鑳藉姏璇锋眰璺敱鎶ュ憡銆?"""

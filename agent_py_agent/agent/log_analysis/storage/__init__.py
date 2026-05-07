@@ -1,3 +1,6 @@
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
 from __future__ import annotations
 
 from .base import (
@@ -19,6 +22,8 @@ from .local_store import LocalLogStore
 
 # Lazy import to break circular dependency:
 # query.py → cases.evidence → storage.base
+# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 __getattr__ 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 getattr 在当前模块中的核心转换或协调步骤，衔接 日志分析存储层读写本地事件、finding、case 和 evidence 投影。
 def __getattr__(name: str):
     if name in ("execute_security_query", "sanitize_event_for_preview", "summarize_rows"):
         from .query import (

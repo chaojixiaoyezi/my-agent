@@ -1,3 +1,6 @@
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
 from __future__ import annotations
 
 """Contracts for log-analysis analyst and reviewer subagents.
@@ -29,14 +32,20 @@ DEFAULT_ACCEPTANCE_CHECKS = [
 ]
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 ContractValidationError 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 封装 ContractValidationError 的状态和协作方法，作为当前模块对外复用的领域对象。
 class ContractValidationError(ValueError):
     """Raised when a subagent payload violates the local contract."""
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _as_mapping 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 把 as mapping 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
 def _as_mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _to_mapping 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 把 to mapping 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
 def _to_mapping(value: Any) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
         return value
@@ -48,12 +57,16 @@ def _to_mapping(value: Any) -> Mapping[str, Any]:
     return {}
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _get 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 get 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def _get(value: Any, key: str, default: Any = None) -> Any:
     if isinstance(value, Mapping):
         return value.get(key, default)
     return getattr(value, key, default)
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _compact_string 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 compact string 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def _compact_string(value: Any, *, limit: int = 500) -> str:
     text = str(value or "").strip()
     if len(text) <= limit:
@@ -61,6 +74,8 @@ def _compact_string(value: Any, *, limit: int = 500) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _string_list 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 string list 在当前模块中的核心转换或协调步骤，衔接 agent 协作层定义日志分析 prompt、契约和总结结构。
 def _string_list(value: Any, *, limit: int = 50) -> list[str]:
     if value is None:
         return []
@@ -70,6 +85,8 @@ def _string_list(value: Any, *, limit: int = 50) -> list[str]:
     return output
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _list_items 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 收集或查询 list items 的候选结果，并按参数完成筛选、排序或数量限制。
 def _list_items(value: Any) -> list[Any]:
     if isinstance(value, str):
         return [value]
@@ -81,12 +98,16 @@ def _list_items(value: Any) -> list[Any]:
         return [value]
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _append_compact_string 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 append compact string 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_compact_string(output: list[str], item: Any) -> None:
     text = _compact_string(item)
     if text:
         output.append(text)
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _evidence_ref_from_mapping 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 evidence ref from mapping 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _evidence_ref_from_mapping(value: Mapping[str, Any]) -> str:
     metadata = value.get("metadata")
     ref = _first_evidence_ref(
@@ -106,6 +127,8 @@ def _evidence_ref_from_mapping(value: Mapping[str, Any]) -> str:
     return ""
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 _first_evidence_ref 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 first evidence ref 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _first_evidence_ref(value: Mapping[str, Any], *keys: str) -> str:
     for key in keys:
         text = _compact_string(value.get(key), limit=300)
@@ -114,6 +137,8 @@ def _first_evidence_ref(value: Mapping[str, Any], *keys: str) -> str:
     return ""
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 normalize_evidence_refs 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 normalize evidence refs 涉及的字段，让后续匹配和存储使用同一形态。
 def normalize_evidence_refs(value: Any, *, limit: int = 50) -> list[str]:
     """Return compact evidence ref strings from strings or evidence dicts."""
 
@@ -141,6 +166,8 @@ def normalize_evidence_refs(value: Any, *, limit: int = 50) -> list[str]:
     return refs
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 require_evidence_refs 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 require evidence refs 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def require_evidence_refs(evidence_refs: Any, *, field_name: str = "evidence_refs") -> list[str]:
     refs = normalize_evidence_refs(evidence_refs)
     if not refs:
@@ -148,6 +175,8 @@ def require_evidence_refs(evidence_refs: Any, *, field_name: str = "evidence_ref
     return refs
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 AnalystInput 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 AnalystInput 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class AnalystInput:
     """Small input object for an analyst subagent."""
@@ -162,6 +191,8 @@ class AnalystInput:
     budget: dict[str, int] = field(default_factory=dict)
     acceptance_checks: list[str] = field(default_factory=lambda: list(DEFAULT_ACCEPTANCE_CHECKS))
 
+    # LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 validate 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 计算 validate 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
     def validate(self) -> None:
         if not self.case_id:
             raise ContractValidationError("case_id is required")
@@ -169,10 +200,14 @@ class AnalystInput:
             raise ContractValidationError("case_summary is required")
         self.evidence_refs = require_evidence_refs(self.evidence_refs)
 
+    # LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 to_dict 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 把 to dict 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_dict(self) -> dict[str, Any]:
         self.validate()
         return asdict(self)
 
+    # LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 from_mapping 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 从外部数据还原 from mapping 需要的领域对象，统一缺省值和兼容字段。
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> AnalystInput:
         route_summary = _as_mapping(payload.get("route_summary") or payload.get("route"))
@@ -191,6 +226,8 @@ class AnalystInput:
         return item
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 AnalystReport 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 AnalystReport 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class AnalystReport:
     """Analyst output contract consumed by the reviewer."""
@@ -205,6 +242,8 @@ class AnalystReport:
     confidence: str = "medium"
     status: str = "AWAITING_REVIEW"
 
+    # LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 validate 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 计算 validate 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
     def validate(self) -> None:
         if not self.case_id:
             raise ContractValidationError("case_id is required")
@@ -214,10 +253,14 @@ class AnalystReport:
         if not (self.facts or self.inferences or self.gaps):
             raise ContractValidationError("report must separate facts, inferences, or gaps")
 
+    # LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 to_dict 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 把 to dict 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_dict(self) -> dict[str, Any]:
         self.validate()
         return asdict(self)
 
+    # LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 from_mapping 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 从外部数据还原 from mapping 需要的领域对象，统一缺省值和兼容字段。
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> AnalystReport:
         item = cls(
@@ -235,6 +278,8 @@ class AnalystReport:
         return item
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 ReviewerInput 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 ReviewerInput 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class ReviewerInput:
     """Reviewer input: a report plus the known evidence boundary."""
@@ -244,12 +289,16 @@ class ReviewerInput:
     evidence_refs: list[str] = field(default_factory=list)
     acceptance_checks: list[str] = field(default_factory=lambda: list(DEFAULT_ACCEPTANCE_CHECKS))
 
+    # LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 validate 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 计算 validate 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
     def validate(self) -> None:
         if not self.case_id:
             raise ContractValidationError("case_id is required")
         self.analyst_report.validate()
         self.evidence_refs = normalize_evidence_refs(self.evidence_refs) or list(self.analyst_report.evidence_refs)
 
+    # LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 to_dict 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 把 to dict 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_dict(self) -> dict[str, Any]:
         self.validate()
         return {
@@ -260,6 +309,8 @@ class ReviewerInput:
         }
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 ReviewerDecision 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 ReviewerDecision 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class ReviewerDecision:
     """Reviewer output contract."""
@@ -272,10 +323,14 @@ class ReviewerDecision:
     gaps: list[str] = field(default_factory=list)
     next_actions: list[str] = field(default_factory=list)
 
+    # LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 to_dict 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 把 to dict 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 validate_analyst_input 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 校验 validate analyst input 的输入、状态或路径，提前暴露无效数据和越界条件。
 def validate_analyst_input(payload: AnalystInput | Mapping[str, Any]) -> AnalystInput:
     if isinstance(payload, AnalystInput):
         payload.validate()
@@ -283,6 +338,8 @@ def validate_analyst_input(payload: AnalystInput | Mapping[str, Any]) -> Analyst
     return AnalystInput.from_mapping(payload)
 
 
+# LLM: agent 协作层定义日志分析 prompt、契约和总结结构；修改 validate_analyst_report 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 校验 validate analyst report 的输入、状态或路径，提前暴露无效数据和越界条件。
 def validate_analyst_report(payload: AnalystReport | Mapping[str, Any]) -> AnalystReport:
     if isinstance(payload, AnalystReport):
         payload.validate()

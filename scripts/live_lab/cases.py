@@ -1,6 +1,9 @@
+# LLM: Live Lab validation script; keep CLI flags, artifact paths, and replay outputs stable for scenario tests.
+# 模块用途: 支撑可见验收和回放场景，负责启动案例、整理输出或生成报告。
+
 from __future__ import annotations
 
-"""LLM: concrete Live Lab case implementations.
+"""concrete Live Lab case implementations.
 
 给人看的解释：
 这里放每种测试场景具体做什么。
@@ -14,13 +17,14 @@ import textwrap
 from .constants import REPO_ROOT
 
 
+# LLM: run_case 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_case(lab, case_name: str) -> None:
-    """LLM: dispatches a suite case name to its implementation.
+    """dispatches a suite case name to its implementation.
 
     给人看的解释：
     suite 里保存的是字符串，比如 `health`。
-    这里把字符串转成真正要执行的函数。
-    """
+    这里把字符串转成真正要执行的函数。"""
 
     handlers = {
         "health": case_health,
@@ -32,13 +36,14 @@ def run_case(lab, case_name: str) -> None:
     handlers[case_name](lab)
 
 
+# LLM: case_health 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def case_health(lab) -> None:
-    """LLM: validates CLI wiring and local observability without calling a model.
+    """validates CLI wiring and local observability without calling a model.
 
     给人看的解释：
     这是最便宜的健康检查：看 CLI 能不能启动、LocalStore/gateway 状态能不能读。
-    它不调用真实 LLM，适合每次开发完先跑一下。
-    """
+    它不调用真实 LLM，适合每次开发完先跑一下。"""
 
     lab.section("CASE health")
     lab.run_command(lab.agent_command("--help"), timeout=60)
@@ -47,13 +52,14 @@ def case_health(lab) -> None:
     lab.run_command(lab.agent_command("gateway", "status"), timeout=60)
 
 
+# LLM: case_bad_weather 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def case_bad_weather(lab) -> None:
-    """LLM: runs focused recovery/guard scenarios that do not require real LLM calls.
+    """runs focused recovery/guard scenarios that do not require real LLM calls.
 
     给人看的解释：
     这组是“坏天气测试”：伪造完成、gateway 崩溃残留、坏 JSON、runner 临时失败。
-    它们用固定/模拟后端复现坑位，适合快速回归系统边界。
-    """
+    它们用固定/模拟后端复现坑位，适合快速回归系统边界。"""
 
     lab.section("CASE bad_weather")
     workspace = lab.run_root / "bad_weather"
@@ -79,6 +85,8 @@ def case_bad_weather(lab) -> None:
         )
 
 
+# LLM: case_log_analysis_replay 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def case_log_analysis_replay(lab) -> None:
     """Run the offline SecurityAlertV1 replay without a model call."""
 
@@ -97,14 +105,15 @@ def case_log_analysis_replay(lab) -> None:
         raise RuntimeError(f"log analysis replay failed at {summary.get('failed_stage')}: {summary.get('error')}")
 
 
+# LLM: case_gateway_ask 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def case_gateway_ask(lab) -> None:
-    """LLM: starts gateway and sends one real LLM ask through the runtime path.
+    """starts gateway and sends one real LLM ask through the runtime path.
 
     给人看的解释：
     这是最小真实模型路径：
     先启动后台 gateway，再把一条 prompt 投进去，等真实模型回包，最后关闭 gateway。
-    你能在终端看到我们发了什么、命令怎么跑、返回 JSON 是什么。
-    """
+    你能在终端看到我们发了什么、命令怎么跑、返回 JSON 是什么。"""
 
     lab.section("CASE gateway_ask")
     prompt = textwrap.dedent(
@@ -141,13 +150,14 @@ def case_gateway_ask(lab) -> None:
         )
 
 
+# LLM: case_long_subagent 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def case_long_subagent(lab) -> None:
-    """LLM: runs the existing happy-path scenario with real gateway, runners, and acceptance.
+    """runs the existing happy-path scenario with real gateway, runners, and acceptance.
 
     给人看的解释：
     这是比较接近真实工作的长链路测试：
-    gateway 收到任务、主代理派工、runner 读写文件、父代理验收，全部关在隔离 fixture 里。
-    """
+    gateway 收到任务、主代理派工、runner 读写文件、父代理验收，全部关在隔离 fixture 里。"""
 
     lab.section("CASE long_subagent")
     sys.path.insert(0, str(REPO_ROOT))

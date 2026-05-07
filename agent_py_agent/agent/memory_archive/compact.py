@@ -1,6 +1,9 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 from __future__ import annotations
 
-"""LLM: dry-run planning for memory compact without mutating archive files.
+"""dry-run planning for memory compact without mutating archive files.
 
 新手说明:
 这里先只做"压缩预演"。它扫描 raw/hook、compression snapshots 和 token ledger，
@@ -17,6 +20,8 @@ from .storage import compression_snapshot_dir
 from .tokens import token_ledger_dir
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 MemoryCompactPlanOptions 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 MemoryCompactPlanOptions 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class MemoryCompactPlanOptions:
     """参数说明: memory compact dry-run 的过滤条件。"""
@@ -33,6 +38,8 @@ class MemoryCompactPlanOptions:
     limit: int = 50
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 build_memory_compact_plan 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 build memory compact plan 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def build_memory_compact_plan(root: str | Path, options: MemoryCompactPlanOptions) -> dict[str, Any]:
     """返回说明: 构建只读 compact plan，供 CLI/测试消费。"""
 
@@ -58,6 +65,8 @@ def build_memory_compact_plan(root: str | Path, options: MemoryCompactPlanOption
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _matching_archive_records 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 判断 matching archive records 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def _matching_archive_records(root: Path, options: MemoryCompactPlanOptions) -> list[dict[str, Any]]:
     filters = {
         key: value
@@ -87,11 +96,15 @@ def _matching_archive_records(root: Path, options: MemoryCompactPlanOptions) -> 
     return matches[: options.limit] if options.limit > 0 else matches
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _archive_files_from_records 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 archive files from records 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _archive_files_from_records(records: list[dict[str, Any]]) -> list[Path]:
     paths = {str(record.get("file_path") or "") for record in records}
     return sorted(Path(path) for path in paths if path)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _archive_summary 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 archive summary 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _archive_summary(records: list[dict[str, Any]], files: list[Path]) -> dict[str, Any]:
     return {
         "record_count": len(records),
@@ -104,6 +117,8 @@ def _archive_summary(records: list[dict[str, Any]], files: list[Path]) -> dict[s
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _snapshot_summary 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 snapshot summary 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _snapshot_summary(root: Path, options: MemoryCompactPlanOptions) -> dict[str, Any]:
     directory = compression_snapshot_dir(root)
     files = sorted(directory.glob("*.json")) if directory.exists() else []
@@ -117,6 +132,8 @@ def _snapshot_summary(root: Path, options: MemoryCompactPlanOptions) -> dict[str
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _token_summary 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 token summary 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _token_summary(root: Path, session_id: str) -> dict[str, Any]:
     directory = token_ledger_dir(root)
     files = sorted(directory.glob("*.json")) if directory.exists() else []
@@ -134,6 +151,8 @@ def _token_summary(root: Path, session_id: str) -> dict[str, Any]:
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _read_json_files 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 读取 read json files 需要的文件、记录或配置，并整理成调用方可直接使用的结果。
 def _read_json_files(
     files: list[Path],
     *,
@@ -164,6 +183,8 @@ def _read_json_files(
     return payloads, invalid
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _manifest_payload 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 manifest payload 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _manifest_payload(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "file_path": str(path),
@@ -176,6 +197,8 @@ def _manifest_payload(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _payload_matches_scope 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 判断 payload matches scope 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def _payload_matches_scope(payload: dict[str, Any], options: MemoryCompactPlanOptions) -> bool:
     """返回说明: 让 snapshot 也能按 request/run/task 过滤，避免 dry-run 范围过宽。"""
 
@@ -187,6 +210,8 @@ def _payload_matches_scope(payload: dict[str, Any], options: MemoryCompactPlanOp
     return all(not expected or _payload_has_value(payload, field, expected) for field, expected in checks.items())
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _payload_has_value 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 payload has value 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _payload_has_value(payload: dict[str, Any], field: str, expected: str) -> bool:
     if str(payload.get(field) or "") == expected:
         return True
@@ -203,6 +228,8 @@ def _payload_has_value(payload: dict[str, Any], field: str, expected: str) -> bo
     return False
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _payload_created_at 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 payload created at 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _payload_created_at(payload: dict[str, Any]) -> str:
     created_at = str(payload.get("created_at") or payload.get("timestamp") or "")
     if created_at:
@@ -214,6 +241,8 @@ def _payload_created_at(payload: dict[str, Any]) -> str:
     return ""
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _scope_payload 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 scope payload 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _scope_payload(options: MemoryCompactPlanOptions) -> dict[str, Any]:
     return {
         "layer": options.layer,
@@ -229,6 +258,8 @@ def _scope_payload(options: MemoryCompactPlanOptions) -> dict[str, Any]:
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _risk_notes 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 risk notes 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _risk_notes(archive: dict[str, Any], snapshots: dict[str, Any], tokens: dict[str, Any]) -> list[str]:
     risks: list[str] = []
     if archive["error_count"]:
@@ -242,6 +273,8 @@ def _risk_notes(archive: dict[str, Any], snapshots: dict[str, Any], tokens: dict
     return risks
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _recommended_actions 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 recommended actions 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _recommended_actions(
     archive: dict[str, Any],
     snapshots: dict[str, Any],
@@ -260,6 +293,8 @@ def _recommended_actions(
     return actions
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _count_by 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 count by 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _count_by(records: list[dict[str, Any]], key: str) -> dict[str, int]:
     counts: dict[str, int] = {}
     for record in records:
@@ -268,14 +303,20 @@ def _count_by(records: list[dict[str, Any]], key: str) -> dict[str, int]:
     return counts
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _file_payload 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 file payload 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _file_payload(path: Path) -> dict[str, Any]:
     return {"path": str(path), "size_bytes": _safe_size(path)}
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _total_size 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 total size 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _total_size(paths: list[Path]) -> int:
     return sum(_safe_size(path) for path in paths)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _safe_size 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 safe size 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _safe_size(path: Path) -> int:
     try:
         return path.stat().st_size
@@ -283,6 +324,8 @@ def _safe_size(path: Path) -> int:
         return 0
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _safe_int 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 safe int 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _safe_int(value: Any) -> int:
     try:
         return int(value or 0)

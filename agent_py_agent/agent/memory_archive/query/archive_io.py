@@ -1,6 +1,9 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 from __future__ import annotations
 
-"""LLM: archive file reading and record normalization for memory archive queries.
+"""archive file reading and record normalization for memory archive queries.
 
 新手说明:
 这个文件负责"从磁盘读归档文件"和"把原始 JSON 记录变统一格式"。
@@ -24,6 +27,8 @@ from .archive_helpers import (
 ARCHIVE_SEARCH_FILE_LIMIT = 30
 
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _archive_files 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 archive files 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def _archive_files(root: Path, *, layer: str, date_key: str | None) -> list[tuple[str, Path]]:
 
     layers = ["raw", "hook"] if layer == "all" else [layer]
@@ -38,11 +43,15 @@ def _archive_files(root: Path, *, layer: str, date_key: str | None) -> list[tupl
     return files
 
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _dated_layer_file 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 dated layer file 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _dated_layer_file(layer: str, directory: Path, date_key: str) -> list[tuple[str, Path]]:
     candidate = directory / f"{date_key}.jsonl"
     return [(layer, candidate)] if candidate.exists() else []
 
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _recent_layer_files 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 recent layer files 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def _recent_layer_files(layer: str, directory: Path) -> list[tuple[str, Path]]:
     layer_files = sorted(
         [path for path in directory.glob("*.jsonl") if path.is_file()],
@@ -52,11 +61,15 @@ def _recent_layer_files(layer: str, directory: Path) -> list[tuple[str, Path]]:
     return [(layer, path) for path in layer_files]
 
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _archive_dir 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 archive dir 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def _archive_dir(root: Path, layer: str) -> Path:
 
     return snapshot_path_for(root).parent if layer == "hook" else raw_event_path_for(root).parent
 
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _read_archive_file 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 读取 read archive file 需要的文件、记录或配置，并整理成调用方可直接使用的结果。
 def _read_archive_file(layer: str, path: Path) -> list[dict[str, Any]]:
 
     records: list[dict[str, Any]] = []
@@ -79,6 +92,8 @@ def _read_archive_file(layer: str, path: Path) -> list[dict[str, Any]]:
     return records
 
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _normalize_archive_record 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 normalize archive record 涉及的字段，让后续匹配和存储使用同一形态。
 def _normalize_archive_record(layer: str, path: Path, line_no: int, payload: dict[str, Any]) -> dict[str, Any]:
 
     derived = _derived_archive_fields(payload)
@@ -115,6 +130,8 @@ def _normalize_archive_record(layer: str, path: Path, line_no: int, payload: dic
     }
 
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _archive_level_value 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 archive level value 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def _archive_level_value(value: Any) -> int:
 
     try:
@@ -123,6 +140,8 @@ def _archive_level_value(value: Any) -> int:
         return 3
 
 
+# LLM: 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实；修改 _gateway_terminal_request_path 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 gateway terminal request path 在当前模块中的核心转换或协调步骤，衔接 归档查询从 archive JSON/JSONL 与 workspace 文件读取可恢复事实。
 def _gateway_terminal_request_path(request_path: str) -> str:
 
     if not request_path:
