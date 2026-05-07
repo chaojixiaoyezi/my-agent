@@ -222,11 +222,19 @@ def render_acceptance_review_markdown(report: AcceptanceReviewReport) -> str:
             lines.append(f"  - worker: {record.worker_claims[0]}")
         if record.evidence_facts:
             lines.append(f"  - evidence: {'; '.join(record.evidence_facts[:3])}")
-        failed = [item for item in record.findings if not item.ok and item.severity != "P2"]
-        failed.extend(item for item in record.verifier_checks if not item.ok and item.severity != "P2")
-        for item in failed[:5]:
-            lines.append(f"  - [{item.severity}] {item.name}: {item.message}")
+        _extend_failed_acceptance_items(lines, record)
     return "\n".join(lines) + "\n"
+
+
+def _extend_failed_acceptance_items(
+    lines: list[str],
+    record: AcceptanceReviewRecord,
+) -> None:
+    # LLM: review summary shows only blocking failures; full detail stays in record sections.
+    failed = [item for item in record.findings if not item.ok and item.severity != "P2"]
+    failed.extend(item for item in record.verifier_checks if not item.ok and item.severity != "P2")
+    for item in failed[:5]:
+        lines.append(f"  - [{item.severity}] {item.name}: {item.message}")
 
 
 def render_acceptance_record_markdown(record: AcceptanceReviewRecord) -> str:
