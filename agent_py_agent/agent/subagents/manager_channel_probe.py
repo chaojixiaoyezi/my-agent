@@ -14,7 +14,13 @@ from typing import TYPE_CHECKING
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..file_io import append_jsonl
-from .models import ChannelProbeCheck, ChannelProbeReport, ChannelProbeResult, SubAgentTask
+from .models import (
+    ChannelProbeCheck,
+    ChannelProbeReport,
+    ChannelProbeResult,
+    SubAgentChannelProbeOptions,
+    SubAgentTask,
+)
 from .parsing import (
     _dict_list,
     _normalize_runner_items,
@@ -152,11 +158,13 @@ class SubAgentChannelProbeMixin:
         self,
         run_ids: list[str] | None = None,
         *,
+        params: SubAgentChannelProbeOptions | None = None,
         limit: int = 0,
     ) -> ChannelProbeReport:
-        selected = run_ids or [task.id for task in self.list_runs()]
-        if limit > 0:
-            selected = selected[:limit]
+        options = _channel_probe_options(params, run_ids=run_ids, limit=limit)
+        selected = options.run_ids or [task.id for task in self.list_runs()]
+        if options.limit > 0:
+            selected = selected[: options.limit]
         results: list[ChannelProbeResult] = []
         for run_id in selected:
             try:
@@ -172,9 +180,12 @@ class SubAgentChannelProbeMixin:
         self,
         run_ids: list[str] | None = None,
         *,
+        params: SubAgentChannelProbeOptions | None = None,
         limit: int = 0,
     ) -> ChannelProbeReport:
-        report = self.probe_channels(run_ids, limit=limit)
+        report = self.probe_channels(
+            params=_channel_probe_options(params, run_ids=run_ids, limit=limit),
+        )
         (self.workspace / "subagent_channel_probe.json").write_text(
             json.dumps(asdict(report), ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -224,3 +235,17 @@ class SubAgentChannelProbeMixin:
                 evidence_path=task.channel_probe_file,
                 created_at=now,
             )
+
+
+def _channel_probe_options(
+    params: SubAgentChannelProbeOptions | None,
+    *,
+    run_ids: list[str] | None,
+    limit: int,
+) -> SubAgentChannelProbeOptions:
+    if params is not None:
+        if not isinstance(params, SubAgentChannelProbeOptions):
+            raise TypeError("channel probe requires params: SubAgentChannelProbeOptions")
+        return params
+    # LLM: probe APIs keep positional compatibility but normalize to an options bundle.
+    return SubAgentChannelProbeOptions(run_ids=run_ids, limit=limit)

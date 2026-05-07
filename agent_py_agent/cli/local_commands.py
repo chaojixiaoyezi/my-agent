@@ -29,6 +29,7 @@ from .local_repair_commands import (
     rebuild_local_store,
 )
 from .local_status_payload import StatusPayloadContext, build_status_payload, resolve_gateway_status
+from .models import LocalSearchOptions, TimelineOptions
 from .thinking_spinner import ThinkingSpinner
 
 
@@ -159,20 +160,21 @@ def cmd_status(args) -> int:
 def cmd_timeline(args) -> int:
 
     agent = make_agent(args)
+    options = _timeline_options(args)
     items = agent.local_store.timeline(
-        limit=args.limit,
-        source_type=args.source_type,
-        event_type=args.event_type,
+        limit=options.limit,
+        source_type=options.source_type,
+        event_type=options.event_type,
     )
-    if args.json:
+    if options.json:
         print(json.dumps([item.__dict__ for item in items], ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
     print("MY-AGENT TIMELINE")
-    if args.source_type:
-        print(f"source_type={args.source_type}")
-    if args.event_type:
-        print(f"event_type={args.event_type}")
+    if options.source_type:
+        print(f"source_type={options.source_type}")
+    if options.event_type:
+        print(f"event_type={options.event_type}")
     if not items:
         print("暂无事件。")
         return 0
@@ -180,7 +182,7 @@ def cmd_timeline(args) -> int:
         source = f"{item.source_type}/{item.source_id}".strip("/")
         title = item.title or "-"
         print(f"- {format_local_time(item.created_at)} {item.event_type} {source} :: {title}")
-        if args.details:
+        if options.details:
             print("  payload=" + json.dumps(item.payload, ensure_ascii=False, sort_keys=True))
     return 0
 
@@ -262,16 +264,17 @@ def cmd_local_store_status(args) -> int:
 def cmd_local_search(args) -> int:
 
     agent = make_agent(args)
+    options = _local_search_options(args)
     hits = agent.local_store.search(
-        args.query,
-        limit=args.limit,
-        source_type=args.source_type,
-        visibility=args.visibility,
+        options.query,
+        limit=options.limit,
+        source_type=options.source_type,
+        visibility=options.visibility,
     )
     for hit in hits:
         payload = hit.__dict__.copy()
-        if args.preview_chars >= 0:
-            payload["content"] = payload["content"][: args.preview_chars]
+        if options.preview_chars >= 0:
+            payload["content"] = payload["content"][: options.preview_chars]
         print(json.dumps(payload, ensure_ascii=False))
     return 0
 
@@ -292,3 +295,24 @@ def cmd_local_index_memory(args) -> int:
         )
     )
     return 0
+
+
+def _timeline_options(args) -> TimelineOptions:
+    # LLM: local timeline keeps argparse conversion at the CLI edge.
+    return TimelineOptions(
+        limit=int(args.limit or 0),
+        source_type=args.source_type,
+        event_type=args.event_type,
+        json=bool(args.json),
+        details=bool(args.details),
+    )
+
+
+def _local_search_options(args) -> LocalSearchOptions:
+    return LocalSearchOptions(
+        query=args.query,
+        limit=int(args.limit or 0),
+        source_type=args.source_type,
+        visibility=args.visibility,
+        preview_chars=int(args.preview_chars),
+    )

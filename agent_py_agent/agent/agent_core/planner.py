@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..capability_config import CapabilityConfig
 from ..subagent import SubAgentTask
+from ..subagents.models import SubAgentDueCheckOptions
 from .runner_dispatch import (
     _dispatch_patch_review_run_ids,
     _dispatch_runner_candidates,
@@ -102,7 +103,7 @@ def _build_parent_planner_state(
     tasks = agent.subagents.list_runs()
     board_limit = limit if limit > 0 else len(tasks)
     board = agent.subagents.build_board(recent_limit=board_limit)
-    due_report = agent.subagents.due_check(cfg)
+    due_report = agent.subagents.due_check(params=SubAgentDueCheckOptions(config=cfg))
     action_plan = agent.subagents.plan_actions(cfg)
     runner_candidates = _dispatch_runner_candidates(tasks, max_runners)
     patch_run_ids = _limit_items(_dispatch_patch_review_run_ids(tasks), limit)

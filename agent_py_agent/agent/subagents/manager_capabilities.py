@@ -20,7 +20,7 @@ from .capability_route_service import (
     record_capability_route_gap,
     write_capability_route_report_files,
 )
-from .models import CapabilityRequest, SubAgentTask
+from .models import CapabilityRequest, SubAgentCapabilityRouteOptions, SubAgentTask
 from .policies import _capability_request_query, _select_capability_hits
 from .reports import CapabilityRouteRecord, CapabilityRouteReport
 from .services.lifecycle import RecordCapabilityGrantParams
@@ -44,11 +44,13 @@ class SubAgentCapabilityMixin:
         if not apply:
             return build_would_gap_record(task, request, query=query, hits=hits, created_at=now)
         return record_capability_route_gap(self, task, request, query=query, hits=hits, created_at=now)
+
     def route_capability_requests(
         self,
         router: CapabilityRouter,
         config: CapabilityConfig | None = None,
         *,
+        params: SubAgentCapabilityRouteOptions | None = None,
         apply: bool = False,
         run_ids: list[str] | None = None,
         limit: int = 0,
@@ -57,9 +59,10 @@ class SubAgentCapabilityMixin:
         默认 dry-run，只展示会下发哪些能力。
         `apply=True` 时才会真正生成 capability grant 或 capability gap。
         """
+        options = _capability_route_options(params, apply=apply, run_ids=run_ids, limit=limit)
         cfg = config or CapabilityConfig()
         records: list[CapabilityRouteRecord] = []
-        selected_runs = self._select_runs(run_ids)
+        selected_runs = self._select_runs(options.run_ids)
         for task, request in _iter_open_capability_requests(selected_runs):
             query = _capability_request_query(task, request)
             hits = router.search(query, limit=cfg.capability_candidate_limit)
@@ -71,31 +74,32 @@ class SubAgentCapabilityMixin:
                     query=query,
                     hits=hits,
                     selected_hits=selected_hits,
-                    apply=apply,
+                    apply=options.apply,
                 )
             )
-            if limit > 0 and len(records) >= limit:
+            if options.limit > 0 and len(records) >= options.limit:
                 break
-        return build_capability_route_report(records, apply=apply)
+        return build_capability_route_report(records, apply=options.apply)
 
     def write_capability_route_report(
         self,
         router: CapabilityRouter,
         config: CapabilityConfig | None = None,
         *,
+        params: SubAgentCapabilityRouteOptions | None = None,
         apply: bool = False,
         run_ids: list[str] | None = None,
         limit: int = 0,
     ) -> CapabilityRouteReport:
+        options = _capability_route_options(params, apply=apply, run_ids=run_ids, limit=limit)
         report = self.route_capability_requests(
             router,
             config,
-            apply=apply,
-            run_ids=run_ids,
-            limit=limit,
+            params=options,
         )
-        write_capability_route_report_files(self, report, apply=apply)
+        write_capability_route_report_files(self, report, apply=options.apply)
         return report
+
     def _extract_selected_hits_data(
         self,
         selected_hits: list[CapabilitySearchHit],
@@ -139,6 +143,7 @@ class SubAgentCapabilityMixin:
                 grant=grant,
             )
         )
+
     def _route_capability_request(
         self,
         task: SubAgentTask,
@@ -183,3 +188,22 @@ class SubAgentCapabilityMixin:
                 reasons=reasons,
             )
         )
+
+
+def _capability_route_options(
+    params: SubAgentCapabilityRouteOptions | None,
+    *,
+    apply: bool,
+    run_ids: list[str] | None,
+    limit: int,
+) -> SubAgentCapabilityRouteOptions:
+    if params is not None:
+        if not isinstance(params, SubAgentCapabilityRouteOptions):
+            raise TypeError("capability routing requires params: SubAgentCapabilityRouteOptions")
+        return params
+    # LLM: manager APIs keep legacy kwargs but normalize immediately to a single options bundle.
+    return SubAgentCapabilityRouteOptions(
+        apply=apply,
+        run_ids=run_ids,
+        limit=limit,
+    )

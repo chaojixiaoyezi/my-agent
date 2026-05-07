@@ -64,6 +64,20 @@ before changing code.
 - If a function approaches 80 lines, start decomposing it into named helpers.
 - Params over 8 must use dataclass bundling: `def f(*, params: SomeParams)`.
 
+## 4.1 Bundle Interface Standard / 统一 Bundle 接口规范
+
+- New service-facing APIs should accept one typed dataclass bundle, usually named
+  `Request`, `Options`, `Params`, or `Context` according to intent.
+- CLI functions may read `argparse.Namespace`, but must normalize it at the command
+  boundary before calling agent/core/manager code.
+- Business services should prefer `def execute(*, request: SomeRequest)` or
+  `def run(*, options: SomeOptions)`. Compatibility wrappers may keep old kwargs,
+  but they must immediately convert those kwargs into the same bundle.
+- Do not add new behavior flags as loose kwargs to an existing service method.
+  Extend the existing bundle and update focused tests instead.
+- Bundles should stay small and domain-specific. If a bundle starts mixing unrelated
+  concerns, split it rather than passing a generic dict.
+
 ---
 
 ## 5. Entry Points Stay Thin / 入口保持精简

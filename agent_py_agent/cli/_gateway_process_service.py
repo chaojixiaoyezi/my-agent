@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 from ..agent.gateway import (
     _process_gateway_requests,
@@ -14,13 +15,18 @@ from ..agent.gateway import (
     write_json_file,
 )
 from .common import make_agent
-from .models import DaemonOptions
+from .models import GatewayRunContext, GatewayRunOptions
 
 
-def _gateway_request_loop(args, paths, stop_event: threading.Event) -> None:
+def _gateway_agent_from_context(context: GatewayRunContext):
+    # LLM: legacy gateway process service now rebuilds workers from a context bundle.
+    return make_agent(SimpleNamespace(config=str(context.config_path)))
+
+
+def _gateway_request_loop(context: GatewayRunContext, paths, stop_event: threading.Event) -> None:
 
     try:
-        bootstrap_agent = make_agent(args)
+        bootstrap_agent = _gateway_agent_from_context(context)
         worker_count = max(1, int(bootstrap_agent.config.gateway_request_workers or 1))
     except Exception as exc:
         print(f"gateway request worker failed to initialize: {exc}", file=sys.stderr)
@@ -29,7 +35,7 @@ def _gateway_request_loop(args, paths, stop_event: threading.Event) -> None:
     for index in range(worker_count):
         thread = threading.Thread(
             target=_gateway_request_worker_loop,
-            args=(args, paths, stop_event, index),
+            args=(context, paths, stop_event, index),
             daemon=True,
         )
         thread.start()
@@ -40,10 +46,15 @@ def _gateway_request_loop(args, paths, stop_event: threading.Event) -> None:
         thread.join(timeout=2)
 
 
-def _gateway_request_worker_loop(args, paths, stop_event: threading.Event, worker_index: int) -> None:
+def _gateway_request_worker_loop(
+    context: GatewayRunContext,
+    paths,
+    stop_event: threading.Event,
+    worker_index: int,
+) -> None:
 
     try:
-        agent = make_agent(args)
+        agent = _gateway_agent_from_context(context)
     except Exception as exc:
         print(f"gateway request worker {worker_index} failed to initialize: {exc}", file=sys.stderr)
         return
@@ -68,7 +79,7 @@ def _gateway_request_worker_loop(args, paths, stop_event: threading.Event, worke
         stop_event.wait(poll_interval)
 
 
-def _gateway_heartbeat_loop(paths, agent, options: DaemonOptions, stop_event: threading.Event) -> None:
+def _gateway_heartbeat_loop(paths, agent, options: GatewayRunOptions, stop_event: threading.Event) -> None:
 
     while not stop_event.is_set():
         _write_gateway_heartbeat(paths, agent, options, status="running", pid=os.getpid())
@@ -78,7 +89,7 @@ def _gateway_heartbeat_loop(paths, agent, options: DaemonOptions, stop_event: th
 def _write_gateway_heartbeat(
     paths,
     agent,
-    options: DaemonOptions,
+    options: GatewayRunOptions,
     *,
     status: str,
     pid: int,

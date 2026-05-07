@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sys
 
-from ..agent.agent_core.dispatch_mixin import DispatchParams
+from ..agent.agent_core.dispatch_params import DispatchParams, WatchParams
 from ..agent.capability_config import load_capability_config
 from ..agent.config import load_config
 from ..agent.subagent_workflows import (
@@ -14,31 +14,64 @@ from ..agent.subagent_workflows import (
     write_workflow_plan_preview,
 )
 from .common import make_agent, make_capability_router
+from .models import SubagentsDispatchOptions
 
 
-def _build_dispatch_kwargs(args) -> dict:
-    return dict(
-        apply=args.apply,
-        execute_runners=args.execute_runners,
-        planner=args.planner,
-        workflow_mode=args.workflow_mode,
-        max_runners=args.max_runners,
-        limit=args.limit,
-        reviewer=args.reviewer,
+def _subagents_dispatch_options(args) -> SubagentsDispatchOptions:
+    # LLM: subagent dispatch CLI args collapse into one bundle before agent calls.
+    return SubagentsDispatchOptions(
+        apply=bool(args.apply),
+        execute_runners=bool(args.execute_runners),
+        planner=bool(args.planner),
+        workflow_mode=args.workflow_mode or "off",
+        max_runners=int(args.max_runners or 0),
+        limit=int(args.limit or 0),
+        reviewer=args.reviewer or "parent-dispatch",
         note=args.note or "",
-        runner_instruction=args.instruction or "",
-        max_cards=args.max_cards,
-        probe=not args.no_probe,
+        instruction=args.instruction or "",
+        max_cards=int(args.max_cards or 0),
+        probe=not bool(args.no_probe),
         take_over_by=args.take_over_by or "",
         locked_files=args.locked_file or [],
+        interval=float(args.interval or 0),
+        max_cycles=int(args.max_cycles or 0),
+        force_lock=bool(args.force_lock),
+        watch=bool(args.watch),
     )
 
 
-def _print_watch_report(agent, report, args) -> None:
-    mode = "apply" if args.apply else "dry-run"
+def _dispatch_params(options: SubagentsDispatchOptions) -> DispatchParams:
+    return DispatchParams(
+        apply=options.apply,
+        execute_runners=options.execute_runners,
+        planner=options.planner,
+        workflow_mode=options.workflow_mode,
+        max_runners=options.max_runners,
+        limit=options.limit,
+        reviewer=options.reviewer,
+        note=options.note,
+        runner_instruction=options.instruction,
+        max_cards=options.max_cards,
+        probe=options.probe,
+        take_over_by=options.take_over_by,
+        locked_files=options.locked_files,
+    )
+
+
+def _watch_params(options: SubagentsDispatchOptions) -> WatchParams:
+    return WatchParams(
+        **_dispatch_params(options).__dict__,
+        interval=options.interval,
+        max_cycles=options.max_cycles,
+        force_lock=options.force_lock,
+    )
+
+
+def _print_watch_report(agent, report, options: SubagentsDispatchOptions) -> None:
+    mode = "apply" if options.apply else "dry-run"
     print("SUBAGENT DISPATCH WATCH")
     print(
-        f"mode={mode} planner={args.planner} execute_runners={args.execute_runners} "
+        f"mode={mode} planner={options.planner} execute_runners={options.execute_runners} "
         f"cycles={report.summary.get('total', 0)}"
     )
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
@@ -54,16 +87,16 @@ def _print_watch_report(agent, report, args) -> None:
     print(f"heartbeat: {ws / 'subagent_dispatch_watch_heartbeat.json'}")
     print(f"watch log: {ws / 'subagent_dispatch_watch_log.jsonl'}")
     print(f"watch log: {ws / 'DISPATCH_WATCH_LOG.md'}")
-    if args.planner:
+    if options.planner:
         print(f"planner: {ws / 'parent_planner_report.json'}")
         print(f"planner: {ws / 'PARENT_PLANNER.md'}")
 
 
-def _print_dispatch_report(agent, report, args) -> None:
-    mode = "apply" if args.apply else "dry-run"
+def _print_dispatch_report(agent, report, options: SubagentsDispatchOptions) -> None:
+    mode = "apply" if options.apply else "dry-run"
     print("SUBAGENT DISPATCH")
     print(
-        f"mode={mode} planner={args.planner} execute_runners={args.execute_runners} "
+        f"mode={mode} planner={options.planner} execute_runners={options.execute_runners} "
         f"total_records={report.summary.get('total', 0)}"
     )
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
@@ -79,38 +112,35 @@ def _print_dispatch_report(agent, report, args) -> None:
     ws = agent.subagents.workspace
     print(f"\n已写入: {ws / 'subagent_dispatch_report.json'}")
     print(f"已写入: {ws / 'SUBAGENT_DISPATCH.md'}")
-    if args.apply:
+    if options.apply:
         print(f"审计日志: {ws / 'subagent_dispatch_log.jsonl'}")
         print(f"审计日志: {ws / 'DISPATCH_LOG.md'}")
-    if args.planner:
+    if options.planner:
         print(f"planner: {ws / 'parent_planner_report.json'}")
         print(f"planner: {ws / 'PARENT_PLANNER.md'}")
 
 
 def cmd_subagents_dispatch(args) -> int:
 
-    if args.execute_runners and not args.apply:
+    options = _subagents_dispatch_options(args)
+    if options.execute_runners and not options.apply:
         print("--execute-runners 必须和 --apply 一起使用。", file=sys.stderr)
         return 2
 
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(agent, capability_config, args.skill_dir)
-    kwargs = _build_dispatch_kwargs(args)
-    if args.watch:
+    if options.watch:
         try:
-            report = agent.watch_subagents(
-                router, capability_config, interval=args.interval,
-                max_cycles=args.max_cycles, force_lock=args.force_lock, **kwargs,
-            )
+            report = agent.watch_subagents(router, capability_config, params=_watch_params(options))
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
             return 2
-        _print_watch_report(agent, report, args)
+        _print_watch_report(agent, report, options)
         return 0
 
-    report = agent.dispatch_subagents(router, capability_config, **kwargs)
-    _print_dispatch_report(agent, report, args)
+    report = agent.dispatch_subagents(router, capability_config, params=_dispatch_params(options))
+    _print_dispatch_report(agent, report, options)
     return 0
 
 

@@ -115,6 +115,115 @@ class AdapterOptions:
 
 
 @dataclass(frozen=True)
+class SubagentsDispatchOptions:
+
+    apply: bool
+    execute_runners: bool
+    planner: bool
+    workflow_mode: str
+    max_runners: int
+    limit: int
+    reviewer: str
+    note: str
+    instruction: str
+    max_cards: int
+    probe: bool
+    take_over_by: str
+    locked_files: list[str]
+    interval: float
+    max_cycles: int
+    force_lock: bool
+    watch: bool
+
+
+@dataclass(frozen=True)
+class SubagentsDueCheckOptions:
+
+    all: bool
+    limit: int
+
+
+@dataclass(frozen=True)
+class SubagentsProbeOptions:
+
+    run_ids: list[str] | None
+    limit: int
+
+
+@dataclass(frozen=True)
+class SubagentContextOptions:
+
+    run_id: str
+    max_cards: int
+
+
+@dataclass(frozen=True)
+class SubagentsCapabilityRouteOptions:
+
+    apply: bool
+    run_ids: list[str] | None
+    limit: int
+
+
+@dataclass(frozen=True)
+class TimelineOptions:
+
+    limit: int
+    source_type: str | None
+    event_type: str | None
+    json: bool
+    details: bool
+
+
+@dataclass(frozen=True)
+class LocalSearchOptions:
+
+    query: str
+    limit: int
+    source_type: str | None
+    visibility: str | None
+    preview_chars: int
+
+
+@dataclass(frozen=True)
+class LocalDoctorOptions:
+
+    repair: bool
+    limit: int
+    json: bool
+
+
+@dataclass(frozen=True)
+class LocalRebuildOptions:
+
+    sources: set[str]
+    reset: bool
+
+
+@dataclass(frozen=True)
+class TaskListOptions:
+
+    config: str
+    user_id: str | None
+    status: str | None
+    limit: int
+
+
+@dataclass(frozen=True)
+class TaskIdOptions:
+
+    config: str
+    task_id: str
+
+
+@dataclass(frozen=True)
+class TaskSearchOptions:
+
+    config: str
+    query: str
+
+
+@dataclass(frozen=True)
 class SubagentsAcceptanceOptions:
 
     run_ids: list[str] | None

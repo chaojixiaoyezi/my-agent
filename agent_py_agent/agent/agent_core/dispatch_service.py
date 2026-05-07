@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
+from ..subagents.models import SubAgentCapabilityRouteOptions, SubAgentDueCheckOptions
 from ..subagents.services.workflow import _try_workflow_plan, _workflow_extra_write_roots
 from .dispatch_record_params import (
     AcceptanceRecordParams,
@@ -181,7 +182,12 @@ def _workflow_spawn_message(created_children) -> str:
 
 
 def make_due_check_record(agent, cfg, apply):
-    due_report = agent.subagents.write_due_check(cfg) if apply else agent.subagents.due_check(cfg)
+    options = SubAgentDueCheckOptions(config=cfg, write_report=apply)
+    due_report = (
+        agent.subagents.write_due_check(params=options)
+        if apply
+        else agent.subagents.due_check(params=options)
+    )
     return agent.subagents.make_dispatch_record(
         step="due_check",
         action="scan",
@@ -234,19 +240,21 @@ def make_action_apply_records(params: ActionApplyRecordParams):
 def make_capability_route_records(params: CapabilityRouteRecordParams):
     agent = params.agent
     records = []
+    options = SubAgentCapabilityRouteOptions(
+        apply=params.apply,
+        limit=params.limit,
+    )
     route_report = (
         agent.subagents.write_capability_route_report(
             params.router,
             params.cfg,
-            apply=params.apply,
-            limit=params.limit,
+            params=options,
         )
         if params.apply
         else agent.subagents.route_capability_requests(
             params.router,
             params.cfg,
-            apply=False,
-            limit=params.limit,
+            params=options,
         )
     )
     for item in route_report.records:
