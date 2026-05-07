@@ -14,8 +14,13 @@ from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..subagents.models import SubAgentBoardOptions
 from ..subagents.services.base import CreateRunParams, _extract_write_dirs
-from ..tools import BaseTool, ToolExecutionResult, ToolSpec
+from ..tools import BaseTool, ToolExecutionResult
 from .dispatch_params import DispatchParams
+from .orchestration_tool_specs import (
+    build_create_subagents_spec,
+    build_dispatch_subagents_spec,
+    build_subagent_board_spec,
+)
 from .orchestration_write_guard import external_write_target_error
 from .parameters import _bool_param, _non_negative_int, _positive_int, _string_list
 
@@ -60,20 +65,20 @@ def _subagent_allowed_tools(params: dict[str, object]) -> list[str]:
     return list(READ_ONLY_SUBAGENT_TOOLS)
 
 
-def _create_run_params(agent, params: dict[str, object], goal: str, allowed_tools: list[str]):
-    workflow_mode = _tool_workflow_mode(params.get("workflow_mode"), agent.config.subagent_workflow_mode)
-    extra_write_roots = _merged_extra_write_roots(params, goal)
+def _create_run_params(agent, raw_params: dict[str, object], goal: str, allowed_tools: list[str]):
+    workflow_mode = _tool_workflow_mode(raw_params.get("workflow_mode"), agent.config.subagent_workflow_mode)
+    extra_write_roots = _merged_extra_write_roots(raw_params, goal)
     return CreateRunParams(
         goal=goal,
-        thought=str(params.get("thought") or "根据父代理派工执行，并保留可验收证据。").strip(),
-        plan=_string_list(params.get("plan")) or ["理解目标", "执行任务", "产出证据", "等待父代理验收"],
-        agent_name=str(params.get("agent_name") or "general").strip(),
-        role=str(params.get("role") or "worker").strip(),
+        thought=str(raw_params.get("thought") or "根据父代理派工执行，并保留可验收证据。").strip(),
+        plan=_string_list(raw_params.get("plan")) or ["理解目标", "执行任务", "产出证据", "等待父代理验收"],
+        agent_name=str(raw_params.get("agent_name") or "general").strip(),
+        role=str(raw_params.get("role") or "worker").strip(),
         allowed_tools=allowed_tools,
-        owner=str(params.get("owner") or "").strip(),
-        supervisor=str(params.get("supervisor") or "parent").strip(),
-        final_owner=str(params.get("final_owner") or "").strip(),
-        acceptance_checks=_string_list(params.get("acceptance_checks")),
+        owner=str(raw_params.get("owner") or "").strip(),
+        supervisor=str(raw_params.get("supervisor") or "parent").strip(),
+        final_owner=str(raw_params.get("final_owner") or "").strip(),
+        acceptance_checks=_string_list(raw_params.get("acceptance_checks")),
         extra_write_roots=extra_write_roots,
         workflow_mode=workflow_mode,
     )
@@ -92,53 +97,7 @@ class CreateSubagentsTool(BaseTool):
 
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = ToolSpec(
-            name="create_subagents",
-            category="orchestration",
-            description="创建一个或多个子代理任务记录，适合把复杂任务正式拆给子代理。",
-            use_cases=[
-                "用户要求拆分任务、派多个子代理、开工单或让子代理分别处理事项",
-                "需要把聊天里的计划落盘，后续由 dispatch_subagents 推进和验收",
-            ],
-            avoid_when=[
-                "只是解释思路、不需要真正创建任务时，不要调用；先直接回答即可",
-            ],
-            keywords=[
-                "子代理",
-                "派工",
-                "拆分",
-                "工单",
-                "任务",
-                "subagent",
-                "delegate",
-                "spawn",
-                "assign",
-            ],
-            parameters={
-                "goal": "总目标或任务描述，必填",
-                "count": "创建多少个子代理，默认 1，受 max_subagents 限制",
-                "tool_preset": "默认 read_only；coding 会授予文件读写工具；none 不授予工具",
-                "allowed_tools": "显式工具列表；传了它就覆盖 tool_preset",
-                "acceptance_checks": "验收标准列表",
-                "plan": "每个子代理的初始步骤列表",
-                "workflow_mode": "off/plan/auto；决定是否在建工单时挂 workflow 计划",
-                "extra_write_roots": "额外写入目录列表；目录必须位于 workspace_root 列表允许范围内",
-            },
-            parameter_details={
-                "goal": "写清楚子代理要交付什么，不要只写一个空泛标题。",
-                "count": "例如 3 表示创建 3 个并列子任务；如果任务需要人工精细拆分，可以多次调用本工具。",
-                "tool_preset": "`read_only` 只允许 list/read/search；`coding` 允许读写和替换文件；`none` 不授予工具。",
-                "allowed_tools": "JSON 数组，例如 [\"read_file\", \"write_file\"]。如果需要写代码，通常至少给 read_file/search_text/write_file/replace_in_file。",
-                "acceptance_checks": "JSON 数组或多行文本，说明父代理后续怎样判断任务完成。",
-                "plan": "JSON 数组或多行文本，给子代理的初始执行步骤。",
-                "workflow_mode": "默认跟随配置：auto->auto，manual->plan，off->off。显式传值会覆盖配置。",
-                "extra_write_roots": "JSON 数组，例如 [\"C:/Users/you/Desktop/work\"]；只给本次子代理任务增加写入边界。",
-            },
-            examples=[
-                '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"tool_preset":"coding","workflow_mode":"auto","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',
-                '{"tool":"create_subagents","goal":"调研 gateway 失败场景","count":2,"tool_preset":"read_only"}',
-            ],
-        )
+        self.spec = build_create_subagents_spec()
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         if not self.agent.config.enable_subagents:
@@ -208,27 +167,7 @@ class SubagentBoardTool(BaseTool):
 
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = ToolSpec(
-            name="subagent_board",
-            category="orchestration",
-            description="查看当前子代理看板和状态摘要，用来判断任务是否待执行、待验收或卡住。",
-            use_cases=[
-                "用户问当前任务进度、有哪些子代理、哪些任务卡住或完成",
-                "调度前先查看任务树状态，避免重复派工",
-            ],
-            avoid_when=[
-                "已经知道具体 run_id 且只需要执行 dispatch 时，可以直接调用 dispatch_subagents",
-            ],
-            keywords=["任务状态", "看板", "进度", "子代理", "board", "status", "subagent"],
-            parameters={
-                "limit": "最多返回多少条明细，默认 10",
-                "status": "按状态过滤，可选，如 PLANNING/DONE/BLOCKED",
-            },
-            examples=[
-                '{"tool":"subagent_board","limit":10}',
-                '{"tool":"subagent_board","status":"BLOCKED","limit":20}',
-            ],
-        )
+        self.spec = build_subagent_board_spec()
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         limit = _positive_int(params.get("limit"), default=10)
@@ -269,39 +208,7 @@ class DispatchSubagentsTool(BaseTool):
 
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
-        self.spec = ToolSpec(
-            name="dispatch_subagents",
-            category="orchestration",
-            description="执行一轮子代理调度，可 dry-run，也可 apply 并调用真实 runner。",
-            use_cases=[
-                "已经创建子代理后，用户要求推进、开跑、验收、处理卡住项",
-                "需要让父代理检查 due-check、路由能力、执行 runner、审核 patch 或验收结果",
-            ],
-            avoid_when=[
-                "只是创建任务时先用 create_subagents；没有明确推进意图时默认 dry-run 更稳",
-            ],
-            keywords=["调度", "推进", "运行", "验收", "派工", "dispatch", "runner", "acceptance"],
-            parameters={
-                "apply": "是否写回低风险动作，默认 false",
-                "execute_runners": "是否真实调用模型执行 runner，必须配合 apply=true",
-                "planner": "是否启用父代理 planner，默认 false",
-                "workflow_mode": "off/plan/auto；是否在 dispatch 前补做 workflow 规划或自动派工",
-                "max_runners": "本轮最多推进多少个 runner，默认 1；0 表示不执行 runner",
-                "limit": "每阶段最多处理多少条记录，默认 20；0 表示不限制",
-                "runner_instruction": "给 runner 的额外指令",
-            },
-            parameter_details={
-                "apply": "false 只生成计划和报告；true 会写审计日志并可能改变任务状态。",
-                "execute_runners": "true 会消耗真实 API；只有用户明确要求开跑/真实执行/完整测试时才打开。",
-                "planner": "true 会额外调用父代理 LLM planner；适合长任务统筹，但会多消耗一次模型调用。",
-                "workflow_mode": "plan 只把 workflow 计划写回父任务；auto 会在计划 OK 时落成 worker 子工单。",
-                "max_runners": "用来限制本轮推进数量，避免一次把太多子代理同时跑起来。",
-            },
-            examples=[
-                '{"tool":"dispatch_subagents","apply":false,"workflow_mode":"plan","max_runners":1}',
-                '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"workflow_mode":"auto","max_runners":2,"runner_instruction":"只在隔离 fixture 目录内写文件，并输出可验收证据"}',
-            ],
-        )
+        self.spec = build_dispatch_subagents_spec()
 
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         apply = _bool_param(params.get("apply"), default=False)

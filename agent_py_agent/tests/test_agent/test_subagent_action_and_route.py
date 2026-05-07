@@ -209,7 +209,6 @@ def test_subagent_capability_route_grants_tool():
 
 
 def test_subagent_capability_route_grants_skill():
-    """LLM: Verifies capability router grants a skill from SkillRegistry."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         skill_dir = root / "skills" / "api-check"

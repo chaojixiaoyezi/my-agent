@@ -136,4 +136,5 @@ agent_py_agent/agent/
 - Patch manager parsing details stay outside the main mixin path, preserving `SubAgentPatchMixin` as a facade over patch review/apply services.
 - Action application split unsupported-action record creation and handler context construction into helpers while keeping `ActionApplyOptions` as the service bundle.
 - `subagents/rendering.py` keeps acceptance record section and failed-summary formatting behind small shared helpers so verifier checks and findings use one rendering path.
+- Patch/action/acceptance service internals now keep record construction and evidence item builders in focused helper modules; public manager methods continue to delegate through the existing service facade.
 - The subagent slice contributes no strict code-size hard or soft findings after this cleanup; near-soft warnings remain visible for future pre-feature refactors.

@@ -10,19 +10,21 @@ Human version:
 
 from typing import TYPE_CHECKING
 
+from .manager_patch_delegate import (
+    PatchReviewDelegateParams,
+    apply_patch_task_via_manager,
+    normalize_patch_apply_spec_via_manager,
+    review_patch_task_via_manager,
+)
 from .patch import (
     PatchApplyOptions,
     PatchApplyService,
     PatchReviewOptions,
     PatchReviewService,
-    PatchReviewTaskRequest,
 )
 from .patch.patch_apply_helpers import extract_patch_test_command, validate_patch_test_command
 from .patch.patch_apply_task import ApplyPatchTaskParams
 from .patch.patch_renderer import build_unified_diff
-from .services.patch_apply_helper import PatchApplyTaskHelper
-from .services.patch_review_helper import PatchReviewTaskHelper
-from .services.patch_spec_normalizer import PatchApplySpecNormalizer
 from .utils import _read_json_object  # noqa: F401 - re-exported for backward compat
 
 # LLM: patch manager forwards bundle options to services; parsing helpers keep this mixin below soft size.
@@ -138,17 +140,14 @@ class SubAgentPatchMixin:
 
     @staticmethod
     def _build_unified_diff(path: str, before_text: str, after_text: str) -> str:
-        """Build unified diff string (delegated to patch_renderer)."""
         return build_unified_diff(path, before_text, after_text)
 
     @staticmethod
     def _extract_patch_test_command(check: str) -> str:
-        """Extract test command from check string (delegated to patch_apply_helpers)."""
         return extract_patch_test_command(check)
 
     @staticmethod
     def _validate_patch_test_command(command: str) -> str:
-        """Validate test command for security risks (delegated to patch_apply_helpers)."""
         return validate_patch_test_command(command)
 
     def _review_patch_task(
@@ -162,24 +161,16 @@ class SubAgentPatchMixin:
         note: str = "",
     ):
         """Review a single task's patches (delegated to patch review service)."""
-        if hasattr(self, "_patch_review_service") and self._patch_review_service is not None:
-            if isinstance(task, PatchReviewTaskRequest):
-                return self._patch_review_service._review_patch_task(task)
-            return self._patch_review_service._review_patch_task(
-                task,
+        return review_patch_task_via_manager(
+            self,
+            task,
+            params=PatchReviewDelegateParams(
                 output=output,
                 patches=patches,
                 apply=apply,
                 reviewer=reviewer,
                 note=note,
-            )
-        return PatchReviewTaskHelper.review_patch_task(
-            task,
-            output=output,
-            patches=patches,
-            apply=apply,
-            reviewer=reviewer,
-            note=note,
+            ),
         )
 
     def _apply_patch_task(
@@ -194,19 +185,8 @@ class SubAgentPatchMixin:
         note: str = "",
     ):
         """Apply patches for a single task (delegated to patch apply service)."""
-        # LLM: params is the preferred patch-apply bundle; expanded fields are compatibility glue.
-        if hasattr(self, "_patch_apply_service") and self._patch_apply_service is not None:
-            if params is not None:
-                return self._patch_apply_service._apply_patch_task(task, params=params)
-            return self._patch_apply_service._apply_patch_task(
-                task,
-                output=output,
-                patches=patches,
-                apply=apply,
-                applier=applier,
-                note=note,
-            )
-        return PatchApplyTaskHelper.apply_patch_task(
+        return apply_patch_task_via_manager(
+            self,
             task,
             params=params,
             output=output,
@@ -218,15 +198,10 @@ class SubAgentPatchMixin:
 
     def _normalize_patch_apply_spec(self, task, patch):
         """Normalize patch apply spec (delegated to patch apply service)."""
-        if hasattr(self, "_patch_apply_service") and self._patch_apply_service is not None:
-            return self._patch_apply_service._normalize_patch_apply_spec(task, patch)
-        return PatchApplySpecNormalizer.normalize(
-            task, patch, self.workspace_root, self._build_unified_diff
-        )
+        return normalize_patch_apply_spec_via_manager(self, task, patch)
 
     @staticmethod
     def _rollback_patch_apply(touched_files):
-        """Rollback patch apply (delegated to patch_file_ops)."""
         from .patch.patch_file_ops import rollback_patch_apply
 
         rollback_patch_apply(touched_files)

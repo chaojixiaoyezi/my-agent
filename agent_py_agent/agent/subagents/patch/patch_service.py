@@ -6,7 +6,6 @@ Human version:
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -14,6 +13,13 @@ from typing import TYPE_CHECKING
 
 from ..reports import PatchReviewRecord, PatchReviewReport
 from ..utils import _new_id
+from .patch_review_records import (
+    PatchReviewStatusUpdate,
+    append_patch_review_log,
+    apply_review_status,
+    write_patch_review_record_files,
+    write_patch_review_report_json,
+)
 
 if TYPE_CHECKING:
     from ..models import SubAgentTask
@@ -96,24 +102,6 @@ def _build_review_message(patches: list[dict], blocked: list, invalid: list, app
         return "REJECT" if not ok else "APPROVE", "; ".join(parts) + "，不能审核通过。"
     return "APPROVE" if ok else "REJECT", f"{len(applied)} 个 patch 已声明 applied，可审核通过。"
 
-def _serialize_patch_review_record(record: PatchReviewRecord) -> dict:
-    return {
-        "id": record.id, "run_id": record.run_id, "dry_run": record.dry_run,
-        "applied": record.applied, "ok": record.ok, "decision": record.decision,
-        "message": record.message, "patch_count": record.patch_count,
-        "approved_count": record.approved_count, "blocked_count": record.blocked_count,
-        "reviewer": record.reviewer, "note": record.note,
-        "evidence_paths": record.evidence_paths, "patches": record.patches,
-        "created_at": record.created_at,
-    }
-
-def _serialize_patch_review_report(report: PatchReviewReport) -> dict:
-    return {
-        "generated_at": report.generated_at, "dry_run": report.dry_run,
-        "summary": report.summary,
-        "records": [_serialize_patch_review_record(r) for r in report.records],
-    }
-
 class PatchReviewService:
 
     def __init__(self, manager):
@@ -191,22 +179,17 @@ class PatchReviewService:
             limit=limit,
         )
         report = self.review_patches(run_ids, options=opts)
-        self._write_report_json(report)
+        write_patch_review_report_json(self.manager, report)
         (self.manager.workspace / "SUBAGENT_PATCH_REVIEW.md").write_text(
             render_patch_review_markdown(report), encoding="utf-8",
         )
         for record in report.records:
-            self._write_patch_review_record_files(record)
+            write_patch_review_record_files(self.manager, record)
             self.manager._index_patch_review(record)
             if opts.apply:
-                self._append_patch_review_log(record)
+                append_patch_review_log(self.manager, record)
         self.manager._index_report("subagent_patch_review_report", "latest", "Subagent patch review report", report, event_type="subagent_patch_review_report_written")
         return report
-
-    def _write_report_json(self, report: PatchReviewReport) -> None:
-        (self.manager.workspace / "subagent_patch_review_report.json").write_text(
-            json.dumps(_serialize_patch_review_report(report), ensure_ascii=False, indent=2), encoding="utf-8",
-        )
 
     def _review_patch_task(
         self,
@@ -236,9 +219,14 @@ class PatchReviewService:
         reviewed_patches = [dict(item) for item in patches]
 
         if opts.apply and patches:
-            self._apply_review_status(reviewed_patches, ok, opts.reviewer, now, opts.note)
+            apply_review_status(PatchReviewStatusUpdate(reviewed_patches, ok, opts.reviewer, now, opts.note))
             output["patches"] = reviewed_patches
-            Path(task.output_json).write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+            import json
+
+            Path(task.output_json).write_text(
+                json.dumps(output, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
             self.manager._append_task_work_log(task, f"patch_review: {'approved' if ok else 'blocked'}={len(reviewed_patches)} reviewer={opts.reviewer}")
 
         return PatchReviewRecord(
@@ -248,75 +236,6 @@ class PatchReviewService:
             blocked_count=len(blocked) + len(invalid), reviewer=opts.reviewer, note=opts.note,
             evidence_paths=[task.output_json, task.work_log_file], patches=reviewed_patches, created_at=now,
         )
-
-    def _apply_review_status(self, patches: list[dict], ok: bool, reviewer: str, now: float, note: str) -> None:
-        if ok:
-            self._apply_approved_patches(patches, reviewer, now, note)
-        else:
-            self._apply_rejected_patches(patches, reviewer, now, note)
-
-    def _write_patch_review_record_files(self, record: PatchReviewRecord) -> None:
-        from .patch_renderer import render_patch_review_record_markdown
-
-        try:
-            task = self.manager.load(record.run_id)
-        except FileNotFoundError:
-            return
-        (Path(task.reports_dir) / "patch_review.json").write_text(
-            json.dumps(_serialize_patch_review_record(record), ensure_ascii=False, indent=2), encoding="utf-8",
-        )
-        (Path(task.task_dir) / "PATCH_REVIEW.md").write_text(
-            render_patch_review_record_markdown(record), encoding="utf-8",
-        )
-
-    def _apply_approved_patches(self, patches: list[dict], reviewer: str, now: float, note: str) -> None:
-        for item in patches:
-            item["review_status"] = "APPROVED"
-            item["reviewed_by"] = reviewer
-            item["reviewed_at"] = now
-            if note:
-                item["review_note"] = note
-
-    def _apply_rejected_patches(self, patches: list[dict], reviewer: str, now: float, note: str) -> None:
-        for item in patches:
-            _apply_rejected_patch_status(item, reviewer=reviewer, now=now, note=note)
-
-    def _append_patch_review_log(self, record: PatchReviewRecord) -> None:
-
-        from ...file_io import append_jsonl
-
-        jsonl = self.manager.workspace / "subagent_patch_review_log.jsonl"
-        append_jsonl(
-            jsonl,
-            {
-                "id": record.id,
-                "run_id": record.run_id,
-                "dry_run": record.dry_run,
-                "applied": record.applied,
-                "ok": record.ok,
-                "decision": record.decision,
-                "message": record.message,
-                "patch_count": record.patch_count,
-                "approved_count": record.approved_count,
-                "blocked_count": record.blocked_count,
-                "reviewer": record.reviewer,
-                "note": record.note,
-                "evidence_paths": record.evidence_paths,
-                "patches": record.patches,
-                "created_at": record.created_at,
-            },
-        )
-
-        markdown = self.manager.workspace / "PATCH_REVIEW_LOG.md"
-        if not markdown.exists():
-            markdown.write_text("# PATCH REVIEW LOG\n\n", encoding="utf-8")
-        with markdown.open("a", encoding="utf-8") as handle:
-            status = "OK" if record.ok else "FAIL"
-            handle.write(
-                f"- [{status}] {record.id} run={record.run_id} decision={record.decision} "
-                f"applied={record.applied} message={record.message}\n"
-            )
-        self.manager._index_patch_review(record)
 
 
 def _patch_review_summary(records: list[PatchReviewRecord]) -> dict[str, int]:
@@ -328,19 +247,3 @@ def _patch_review_summary(records: list[PatchReviewRecord]) -> dict[str, int]:
         summary[status_key] = summary.get(status_key, 0) + 1
         summary[mode_key] = summary.get(mode_key, 0) + 1
     return summary
-
-
-def _apply_rejected_patch_status(
-    item: dict,
-    *,
-    reviewer: str,
-    now: float,
-    note: str,
-) -> None:
-    if str(item.get("status", "")).lower() == "applied":
-        return
-    item["review_status"] = "NEEDS_ACTION"
-    item["reviewed_by"] = reviewer
-    item["reviewed_at"] = now
-    if note:
-        item["review_note"] = note

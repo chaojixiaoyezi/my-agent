@@ -68,6 +68,9 @@ EXCLUDE_PARTS = {
     "htmlcov",
     ".coverage",
 }
+EXCLUDE_PATH_PREFIXES = {
+    "agent_py_agent/data/",
+}
 EXCLUDE_PREFIXES = ("._",)
 EXCLUDE_SUFFIXES = {".pyc", ".pyo"}
 EXCLUDE_NAMES = {".DS_Store", ".AppleDouble", ".LSOverride"}

@@ -112,10 +112,6 @@ class TestBoardRendering:
         assert "暂无任务" in result
 
     def test_render_board_markdown_many_items(self):
-        """测试大量任务时看板渲染。
-
-        验证任务超过50个时只会显示前50个。
-        """
         items = [
             SubAgentBoardItem(
                 id=f"task-{i}",

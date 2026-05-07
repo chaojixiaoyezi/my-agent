@@ -34,13 +34,6 @@ from agent_py_agent.agent.core import SimpleAgent
 
 
 def test_local_rebuild_indexes_memory_gateway_and_subagents():
-    """LLM: Verify rebuild_local_store re-indexes memory, gateway, and subagent sources.
-
-    新手说明:
-    测试 rebuild_local_store 在 reset 后能从 memory、gateway_request、
-    subagent_run 三个来源重建索引，并且 build_local_doctor_report
-    返回正确的计数和检查项。
-    """
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
@@ -218,13 +211,6 @@ def test_gateway_worker_refreshes_processing_lease_heartbeat_during_long_run():
 
 
 def test_gateway_recovery_uses_lease_heartbeat_before_started_at():
-    """LLM: Verify recovery checks lease_heartbeat_at before lease_started_at for staleness.
-
-    新手说明:
-    测试 gateway 恢复机制优先看 lease_heartbeat_at 而不是
-    lease_started_at：当 heartbeat 时间戳仍然新鲜时，即使
-    started_at 已超时，也不应该判定为 stale。
-    """
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
@@ -270,13 +256,6 @@ def test_gateway_recovery_uses_lease_heartbeat_before_started_at():
 
 
 def test_gateway_recovery_archives_processing_duplicate_when_response_exists():
-    """LLM: Verify recovery archives processing request when matching response already exists.
-
-    新手说明:
-    测试当 processing 目录下有一个请求，但 responses 目录下
-    已经有对应的响应文件时，recovery 应该直接把 processing
-    中的请求归档到 done，而不是重排或标记失败。
-    """
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(
@@ -324,13 +303,6 @@ def test_gateway_recovery_archives_processing_duplicate_when_response_exists():
 
 
 def test_file_adapter_writes_gateway_response_to_outbox():
-    """LLM: Verify file adapter forwards inbox message to gateway and writes response to outbox.
-
-    新手说明:
-    测试文件适配器的端到端流程：把 inbox 中的消息转发给 gateway
-    处理，然后把 gateway 的响应写入 outbox，实现与外部系统的
-    文件级集成。
-    """
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(

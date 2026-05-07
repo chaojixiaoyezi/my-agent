@@ -23,7 +23,6 @@ from .backends import (
 
 
 def test_subagent_runner_dry_run_and_execute():
-    """LLM: Verifies runner dry-run preserves PLANNING status and real execute transitions to AWAITING_ACCEPTANCE."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")

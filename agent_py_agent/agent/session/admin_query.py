@@ -197,10 +197,7 @@ class AdminCrossChannelQuery:
                 f"会话数: {summary['session_count']}",
                 f"活跃任务: {summary['active_task_count']}",
             ])
-            if summary.get("sessions"):
-                lines.append("最近会话:")
-                for sess in summary["sessions"][:3]:
-                    lines.append(f"  - {sess['session_id']}: {sess['primary']}")
+            _append_summary_sessions(lines, summary)
             lines.append("")
 
     def _append_active_tasks(self, user_id: str, lines: list[str]) -> None:
@@ -228,13 +225,36 @@ class AdminCrossChannelQuery:
     def _append_activity_line(self, lines: list[str], item: dict, ts: str) -> None:
         """Format and append a single activity timeline entry."""
         item_type = item["type"]
-        if item_type == "session_update":
-            lines.append(f"- [{ts}] 会话 {item['session_id'][:16]}... 在 {item['channel']}")
-        elif item_type == "task_update":
-            lines.append(f"- [{ts}] 任务 {item['task_id']} -> {item['status']}")
-        elif item_type == "channel_activity":
-            active_str = "活跃" if item.get("active") else "非活跃"
-            lines.append(f"- [{ts}] 通道 {item['channel']} ({active_str})")
+        formatters = {
+            "session_update": _format_session_activity,
+            "task_update": _format_task_activity,
+            "channel_activity": _format_channel_activity,
+        }
+        if item_type in formatters:
+            lines.append(formatters[item_type](item, ts))
 
 
 __all__ = ["AdminCrossChannelQuery"]
+
+
+def _append_summary_sessions(lines: list[str], summary: dict) -> None:
+    sessions = summary.get("sessions")
+    if not sessions:
+        return
+    # LLM: channel summaries cap session details to keep admin output compact.
+    lines.append("最近会话:")
+    for sess in sessions[:3]:
+        lines.append(f"  - {sess['session_id']}: {sess['primary']}")
+
+
+def _format_session_activity(item: dict, ts: str) -> str:
+    return f"- [{ts}] 会话 {item['session_id'][:16]}... 在 {item['channel']}"
+
+
+def _format_task_activity(item: dict, ts: str) -> str:
+    return f"- [{ts}] 任务 {item['task_id']} -> {item['status']}"
+
+
+def _format_channel_activity(item: dict, ts: str) -> str:
+    active_str = "活跃" if item.get("active") else "非活跃"
+    return f"- [{ts}] 通道 {item['channel']} ({active_str})"

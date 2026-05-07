@@ -140,4 +140,5 @@
 - Cleared current subagent patch/action soft findings without changing public manager facades.
 - `SubAgentPatchMixin` remains a thin adapter over patch services; action application now keeps helper context bundled so follow-up fields do not lengthen service signatures.
 - Split acceptance Markdown item rendering into shared helpers, keeping verifier checks, findings, and record summary output identical while reducing function-level near-soft risk.
+- Continued high-risk cleanup by moving patch review record helpers, action record/log helpers, acceptance evidence helpers, and orchestration specs behind smaller focused modules while keeping manager/service facades compatible.
 - Focused verification covered manager patch, manager actions, strict code-size, ruff, and architecture guardrails.

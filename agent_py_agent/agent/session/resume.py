@@ -66,15 +66,21 @@ def _load_subagent_context(agent: SimpleAgent, session_id: str) -> list[dict]:
         registry = SubagentRegistry(agent)
         board = registry.build_board(recent_limit=5)
         for item in board.recent:
-            if hasattr(item, "metadata") and item.metadata.get("session_id") == session_id:
-                subagent_context.append({
-                    "id": item.id,
-                    "goal": item.goal,
-                    "status": item.status,
-                })
+            _append_subagent_context_item(subagent_context, item, session_id)
     except Exception:
         pass
     return subagent_context
+
+
+def _append_subagent_context_item(subagent_context: list[dict], item, session_id: str) -> None:
+    if not (hasattr(item, "metadata") and item.metadata.get("session_id") == session_id):
+        return
+    # LLM: resume context stores only compact subagent facts.
+    subagent_context.append({
+        "id": item.id,
+        "goal": item.goal,
+        "status": item.status,
+    })
 
 
 def format_resume_context(resume_data: dict) -> str:

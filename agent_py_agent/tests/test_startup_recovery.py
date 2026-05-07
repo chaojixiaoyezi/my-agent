@@ -52,7 +52,6 @@ def mock_paths(tmp_path):
 
 @pytest.fixture
 def sample_board():
-    """创建模拟的 subagent board。"""
     board = Mock()
 
     # 模拟 hot_list 和 recent

@@ -72,7 +72,6 @@ def test_process_structured_output_records_evidence_packets_and_findings(mock_ta
 
 
 def test_build_output_payload_with_lessons_and_next_actions(mock_task):
-    """测试 lessons 和 next_actions 被正确传递。"""
     parsed = SubAgentParsedOutput(
         found=True,
         ok=True,

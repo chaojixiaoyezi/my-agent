@@ -41,6 +41,14 @@ class DispatchLoopReport:
     rounds: list[dict] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class SingleDispatchRequest:
+    agent: object
+    router: object
+    capability_config: object
+    params: DispatchLoopParams
+
+
 _DISPATCH_LOOP_PARAM_KEYS = tuple(field.name for field in fields(DispatchLoopParams))
 
 
@@ -85,25 +93,53 @@ def _coerce_dispatch_loop_params(
     )
 
 
-def _run_single_dispatch(agent, router, capability_config, params):
-    return agent.dispatch_subagents(
-        router,
-        capability_config,
-        params=DispatchParams(
-            apply=params.apply,
-            execute_runners=params.execute_runners,
-            planner=params.planner,
-            workflow_mode=params.workflow_mode,
-            max_runners=params.max_runners,
-            limit=params.limit,
-            reviewer=params.reviewer,
-            note=params.note,
-            runner_instruction=params.runner_instruction,
-            max_cards=params.max_cards,
-            probe=params.probe,
-            take_over_by=params.take_over_by,
-            locked_files=params.locked_files,
-        ),
+def _run_single_dispatch(request: SingleDispatchRequest):
+    params = request.params
+    return request.agent.dispatch_subagents(
+        request.router,
+        request.capability_config,
+        params=_dispatch_params_from_loop(params),
+    )
+
+
+def _dispatch_params_from_loop(params: DispatchLoopParams) -> DispatchParams:
+    return DispatchParams(
+        apply=params.apply,
+        execute_runners=params.execute_runners,
+        planner=params.planner,
+        workflow_mode=params.workflow_mode,
+        max_runners=params.max_runners,
+        limit=params.limit,
+        reviewer=params.reviewer,
+        note=params.note,
+        runner_instruction=params.runner_instruction,
+        max_cards=params.max_cards,
+        probe=params.probe,
+        take_over_by=params.take_over_by,
+        locked_files=params.locked_files,
+    )
+
+
+def _append_dispatch_round(report: DispatchLoopReport, dispatch_report, round_num: int) -> None:
+    report.rounds_count = round_num
+    report.total_records += len(dispatch_report.records)
+    report.rounds.append(
+        {
+            "round": round_num,
+            "record_count": len(dispatch_report.records),
+            "ok": all(item.ok for item in dispatch_report.records),
+        }
+    )
+
+
+def _dispatch_loop_params_from_locals(values: dict) -> DispatchLoopParams:
+    return _coerce_dispatch_loop_params(
+        values["params"],
+        **{
+            key: values[key]
+            for key in _DISPATCH_LOOP_PARAM_KEYS
+            if key != "locked_files" or values[key] is not None
+        },
     )
 
 
@@ -128,37 +164,15 @@ def dispatch_loop(
     take_over_by: str = "",
     locked_files: list[str] | None = None,
 ) -> DispatchLoopReport:
-    params = _coerce_dispatch_loop_params(
-        params,
-        max_consecutive_rounds=max_consecutive_rounds,
-        apply=apply,
-        execute_runners=execute_runners,
-        planner=planner,
-        workflow_mode=workflow_mode,
-        max_runners=max_runners,
-        limit=limit,
-        reviewer=reviewer,
-        note=note,
-        runner_instruction=runner_instruction,
-        max_cards=max_cards,
-        probe=probe,
-        take_over_by=take_over_by,
-        locked_files=locked_files,
-    )
+    params = _dispatch_loop_params_from_locals(locals())
     report = DispatchLoopReport()
     max_rounds = params.max_consecutive_rounds
 
     for round_num in range(1, max_rounds + 1):
         dispatch_report = _run_single_dispatch(
-            agent, router, capability_config, params
+            SingleDispatchRequest(agent, router, capability_config, params)
         )
-        report.rounds_count = round_num
-        report.total_records += len(dispatch_report.records)
-        report.rounds.append({
-            "round": round_num,
-            "record_count": len(dispatch_report.records),
-            "ok": all(item.ok for item in dispatch_report.records),
-        })
+        _append_dispatch_round(report, dispatch_report, round_num)
         if not agent.has_pending_work:
             break
         if round_num >= max_rounds:

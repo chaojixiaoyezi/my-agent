@@ -183,20 +183,29 @@ class CrossChannelSession:
         for session_dir in self._session_root.iterdir():
             if not session_dir.is_dir():
                 continue
-            channels_file = session_dir / "channels.json"
-            if not channels_file.exists():
-                continue
-
-            try:
-                data = json.loads(channels_file.read_text(encoding="utf-8"))
-                if data.get("user_id") != user_id:
-                    continue
-                if channel in data.get("channels", {}):
-                    sessions.append(data.get("session_id"))
-            except (json.JSONDecodeError, OSError):
-                continue
+            session_id = self._session_id_for_channel(session_dir, user_id, channel)
+            if session_id:
+                sessions.append(session_id)
 
         return sessions
+
+    def _session_id_for_channel(
+        self,
+        session_dir: Path,
+        user_id: str,
+        channel: str,
+    ) -> str | None:
+        channels_file = session_dir / "channels.json"
+        if not channels_file.exists():
+            return None
+        try:
+            data = json.loads(channels_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        if data.get("user_id") == user_id and channel in data.get("channels", {}):
+            session_id = data.get("session_id")
+            return session_id if isinstance(session_id, str) else None
+        return None
 
 
 __all__ = ["CrossChannelSession", "ChannelInfo"]

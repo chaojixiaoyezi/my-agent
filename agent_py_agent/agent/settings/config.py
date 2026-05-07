@@ -209,20 +209,31 @@ def load_simple_yaml(path: Path) -> dict[str, Any]:
         line = raw.split("#", 1)[0].rstrip()
         if not line.strip():
             continue
-        if line.startswith("  - ") and current_key:
-            data.setdefault(current_key, []).append(parse_scalar(line[4:]))
+        if _append_yaml_list_item(data, current_key, line):
             continue
-        if ":" in line and not line.startswith(" "):
-            key, value = line.split(":", 1)
-            key = key.strip()
-            value = value.strip()
-            if value == "":
-                data[key] = []
-                current_key = key
-            else:
-                data[key] = parse_scalar(value)
-                current_key = None
+        current_key = _handle_yaml_mapping_line(data, current_key, line)
     return data
+
+
+def _append_yaml_list_item(data: dict[str, Any], current_key: str | None, line: str) -> bool:
+    if not (line.startswith("  - ") and current_key):
+        return False
+    # LLM: simple YAML loader only supports top-level scalar lists.
+    data.setdefault(current_key, []).append(parse_scalar(line[4:]))
+    return True
+
+
+def _handle_yaml_mapping_line(data: dict[str, Any], current_key: str | None, line: str) -> str | None:
+    if ":" not in line or line.startswith(" "):
+        return current_key
+    key, value = line.split(":", 1)
+    key = key.strip()
+    value = value.strip()
+    if value == "":
+        data[key] = []
+        return key
+    data[key] = parse_scalar(value)
+    return None
 
 
 def load_config(config_path: str | Path) -> AgentConfig:

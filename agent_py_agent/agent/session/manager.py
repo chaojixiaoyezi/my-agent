@@ -96,19 +96,9 @@ class SessionManager:
             return sessions
 
         for session_dir in sorted(self._session_root.iterdir()):
-            if not session_dir.is_dir():
-                continue
-            session_file = session_dir / "session.json"
-            if not session_file.exists():
-                continue
-
-            try:
-                data = json.loads(session_file.read_text(encoding="utf-8"))
-                # 过滤用户
-                if data.get("user_id") == user_id:
-                    sessions.append(Session.from_dict(data))
-            except (json.JSONDecodeError, KeyError, TypeError):
-                continue
+            session = self._load_session_for_user(session_dir, user_id)
+            if session is not None:
+                sessions.append(session)
 
         # 按更新时间倒序
         sessions.sort(key=lambda s: s.updated_at, reverse=True)
@@ -126,6 +116,19 @@ class SessionManager:
     def session_exists(self, session_id: str) -> bool:
         session_file = self._get_session_path(session_id)
         return session_file.exists()
+
+    def _load_session_for_user(self, session_dir: Path, user_id: str) -> Session | None:
+        if not session_dir.is_dir():
+            return None
+        session_file = session_dir / "session.json"
+        if not session_file.exists():
+            return None
+        try:
+            data = json.loads(session_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return None
+        # LLM: list only hydrates sessions after user filtering.
+        return Session.from_dict(data) if data.get("user_id") == user_id else None
 
 
 __all__ = ["SessionManager"]

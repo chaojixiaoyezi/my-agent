@@ -75,13 +75,6 @@ def test_write_compression_snapshot_creates_authoritative_json_file(tmp_path):
 
 
 def test_memory_archive_list_can_filter_by_archive_level(tmp_path, capsys):
-    """LLM: verify memory-archive-list --level only returns the requested archive level.
-
-    给人看的解释：
-    用户需要肉眼确认不同 archive level 是否真的写出了不同粒度。
-    这个测试直接走 CLI，防止参数只加到 parser 没加到查询逻辑。
-    """
-
     config_path = _write_config(tmp_path)
     root = tmp_path / "workspace"
     append_raw_event(

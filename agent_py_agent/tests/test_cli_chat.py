@@ -373,6 +373,10 @@ class TestChatCommandArguments:
         args = parser.parse_args(["chat"])
         assert args.memory_limit == 5
 
+
+class TestChatCommandRuntime:
+    """测试 chat 命令运行时分发。"""
+
     def test_cmd_chat_passes_fallback_config_object(self):
         """非 TTY fallback 路径应传 RunFallbackConfig，而不是散装 kwargs。"""
         from agent_py_agent.cli.chat import cmd_chat

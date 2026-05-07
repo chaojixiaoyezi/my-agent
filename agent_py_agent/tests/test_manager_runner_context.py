@@ -52,7 +52,6 @@ def mock_manager(tmp_path):
 
 
 def make_task(tmp_path, task_id="run-456"):
-    """创建示例 SubAgentTask。"""
     task = MagicMock(spec=SubAgentTask)
     task.id = task_id
     task.goal = "执行数据分析任务"

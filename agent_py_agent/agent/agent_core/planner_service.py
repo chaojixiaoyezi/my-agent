@@ -28,15 +28,68 @@ class PlannerInputContext:
     open_gaps: list
 
 
+@dataclass(frozen=True)
+class PlannerStateParams:
+    cfg: CapabilityConfig
+    max_runners: int
+    limit: int
+    reviewer: str
+    note: str
+
+
+@dataclass(frozen=True)
+class PlannerPromptParams:
+    apply: bool
+    execute_runners: bool
+    max_runners: int
+    runner_instruction: str
+
+
+_PARENT_PLANNER_RESULT_TEMPLATE = (
+    "## Required Output\n\n"
+    "最后必须输出一个机器可解析结果块，格式如下。结果块里只能放裸 JSON object，"
+    "不要使用 Markdown 代码围栏。\n\n"
+    "[PARENT_PLANNER_RESULT]\n"
+    "{\n"
+    '  "decision": "DISPATCH",\n'
+    '  "summary": "本轮父代理判断摘要",\n'
+    '  "should_dispatch": true,\n'
+    '  "runner_instruction": "给本轮 runner 的额外指令，可为空",\n'
+    '  "suggested_max_runners": 1,\n'
+    '  "actions": [\n'
+    '    {"action": "execute_runner|review_acceptance|route_capability|takeover|report_blocker", "run_id": "", "priority": 1, "reason": ""}\n'
+    "  ],\n"
+    '  "blockers": [],\n'
+    '  "risks": [],\n'
+    '  "notes": []\n'
+    "}\n"
+    "[/PARENT_PLANNER_RESULT]\n"
+)
+
+
 def build_parent_planner_state(
     agent: SimpleAgent,
-    cfg: CapabilityConfig,
+    cfg: CapabilityConfig | None = None,
     *,
-    max_runners: int,
-    limit: int,
-    reviewer: str,
-    note: str,
+    params: PlannerStateParams | None = None,
+    max_runners: int = 1,
+    limit: int = 20,
+    reviewer: str = "",
+    note: str = "",
 ) -> dict[str, Any]:
+    params = params or PlannerStateParams(
+        cfg=cfg or CapabilityConfig(),
+        max_runners=max_runners,
+        limit=limit,
+        reviewer=reviewer,
+        note=note,
+    )
+    board, ctx = _collect_parent_planner_context(agent, params)
+    gate_summary = _build_gate_summary(ctx)
+    return _build_planner_state_dict(gate_summary, board, ctx, params.limit)
+
+
+def _collect_parent_planner_context(agent: SimpleAgent, params: PlannerStateParams) -> tuple[Any, PlannerInputContext]:
     from .runner_dispatch import (
         _dispatch_patch_review_run_ids,
         _dispatch_runner_candidates,
@@ -44,39 +97,43 @@ def build_parent_planner_state(
     )
 
     tasks = agent.subagents.list_runs()
-    board_limit = limit if limit > 0 else len(tasks)
+    board_limit = params.limit if params.limit > 0 else len(tasks)
     board = agent.subagents.build_board(options=SubAgentBoardOptions(recent_limit=board_limit))
-    due_report = agent.subagents.due_check(params=SubAgentDueCheckOptions(config=cfg))
-    action_plan = agent.subagents.plan_actions(cfg)
-    runner_candidates = _dispatch_runner_candidates(tasks, max_runners)
-    patch_run_ids = _limit_items(_dispatch_patch_review_run_ids(tasks), limit)
+    due_report = agent.subagents.due_check(params=SubAgentDueCheckOptions(config=params.cfg))
+    action_plan = agent.subagents.plan_actions(params.cfg)
+    runner_candidates = _dispatch_runner_candidates(tasks, params.max_runners)
+    patch_run_ids = _limit_items(_dispatch_patch_review_run_ids(tasks), params.limit)
     acceptance_report = agent.subagents.review_acceptances(
         apply=False,
-        reviewer=reviewer,
-        note=note,
-        limit=limit,
+        reviewer=params.reviewer,
+        note=params.note,
+        limit=params.limit,
     )
-    active_tasks = [
+    active_tasks = _active_planner_tasks(tasks)
+    open_requests, open_gaps = _collect_open_capability_items(tasks)
+    return (
+        board,
+        PlannerInputContext(
+            tasks=tasks,
+            active_tasks=active_tasks,
+            due_report=due_report,
+            action_plan=action_plan,
+            runner_candidates=runner_candidates,
+            patch_run_ids=patch_run_ids,
+            acceptance_report=acceptance_report,
+            open_requests=open_requests,
+            open_gaps=open_gaps,
+        ),
+    )
+
+
+def _active_planner_tasks(tasks: list) -> list:
+    terminal_statuses = {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
+    return [
         task
         for task in tasks
-        if task.status not in {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
-        or task.verification_status == "NEEDS_ACCEPTANCE"
+        if task.status not in terminal_statuses or task.verification_status == "NEEDS_ACCEPTANCE"
     ]
-    open_requests, open_gaps = _collect_open_capability_items(tasks)
-    ctx = PlannerInputContext(
-        tasks=tasks,
-        active_tasks=active_tasks,
-        due_report=due_report,
-        action_plan=action_plan,
-        runner_candidates=runner_candidates,
-        patch_run_ids=patch_run_ids,
-        acceptance_report=acceptance_report,
-        open_requests=open_requests,
-        open_gaps=open_gaps,
-    )
-    gate_summary = _build_gate_summary(ctx)
-    state = _build_planner_state_dict(gate_summary, board, ctx, limit)
-    return state
 
 
 def _collect_open_capability_items(tasks):
@@ -206,7 +263,7 @@ def _build_planner_state_dict(gate_summary: dict[str, Any], board: Any, ctx: Pla
     }
 
 
-def _task_state_for_planner(task) -> dict[str, Any]:
+def task_state_for_planner(task) -> dict[str, Any]:
     return {
         "run_id": task.id,
         "status": task.status,
@@ -223,18 +280,27 @@ def _task_state_for_planner(task) -> dict[str, Any]:
     }
 
 
+_task_state_for_planner = task_state_for_planner
+
+
 def build_parent_planner_prompt(
     state: dict[str, Any],
     *,
-    apply: bool,
-    execute_runners: bool,
-    max_runners: int,
-    runner_instruction: str,
+    params: PlannerPromptParams | None = None,
+    apply: bool = False,
+    execute_runners: bool = False,
+    max_runners: int = 1,
+    runner_instruction: str = "",
 ) -> str:
     import json
 
+    params = params or PlannerPromptParams(apply, execute_runners, max_runners, runner_instruction)
     payload = json.dumps(state, ensure_ascii=False, indent=2)
-    mode = "apply" if apply else "dry-run"
+    mode = "apply" if params.apply else "dry-run"
+    return _parent_planner_prompt(payload, mode, params)
+
+
+def _parent_planner_prompt(payload: str, mode: str, params: PlannerPromptParams) -> str:
     return (
         "# Parent Planner Tick\n\n"
         "你是父代理 planner。这个 tick 来自定时 watch，不是浅层 heartbeat。\n"
@@ -243,9 +309,9 @@ def build_parent_planner_prompt(
         "你可以使用只读工具核对状态，但不要直接写文件。真正写回由调度器按审计流程执行。\n\n"
         "## Runtime\n\n"
         f"- mode: {mode}\n"
-        f"- execute_runners: {execute_runners}\n"
-        f"- cli_max_runners: {max_runners}\n"
-        f"- existing_runner_instruction: {runner_instruction or 'none'}\n\n"
+        f"- execute_runners: {params.execute_runners}\n"
+        f"- cli_max_runners: {params.max_runners}\n"
+        f"- existing_runner_instruction: {params.runner_instruction or 'none'}\n\n"
         "## State Snapshot\n\n"
         "```json\n"
         f"{payload}\n"
@@ -255,24 +321,7 @@ def build_parent_planner_prompt(
         "- 如果 gate.needs_planner 为 1，必须给出 DISPATCH 或 BLOCKED_REPORT。\n"
         "- 你可以建议 runner_instruction，但不能提高 cli_max_runners，只能建议更小或相等的数量。\n"
         "- 你输出的 actions 只是建议；系统会再用规则调度器验证和执行。\n\n"
-        "## Required Output\n\n"
-        "最后必须输出一个机器可解析结果块，格式如下。结果块里只能放裸 JSON object，"
-        "不要使用 Markdown 代码围栏。\n\n"
-        "[PARENT_PLANNER_RESULT]\n"
-        "{\n"
-        '  "decision": "DISPATCH",\n'
-        '  "summary": "本轮父代理判断摘要",\n'
-        '  "should_dispatch": true,\n'
-        '  "runner_instruction": "给本轮 runner 的额外指令，可为空",\n'
-        '  "suggested_max_runners": 1,\n'
-        '  "actions": [\n'
-        '    {"action": "execute_runner|review_acceptance|route_capability|takeover|report_blocker", "run_id": "", "priority": 1, "reason": ""}\n'
-        "  ],\n"
-        '  "blockers": [],\n'
-        '  "risks": [],\n'
-        '  "notes": []\n'
-        "}\n"
-        "[/PARENT_PLANNER_RESULT]\n"
+        f"{_PARENT_PLANNER_RESULT_TEMPLATE}"
     )
 
 
