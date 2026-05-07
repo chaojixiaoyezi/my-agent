@@ -35,10 +35,9 @@ class NotificationRouter:
             return active_channel
 
         # 策略 3：查用户所有会话，找任意在线通道
-        for channel in ("chat", "feishu", "qq"):
-            if channel != notification.channel:
-                if self._channel_checker.check(channel, notification.user_id):
-                    return channel
+        for channel in self._candidate_fallback_channels(notification.channel):
+            if self._channel_checker.check(channel, notification.user_id):
+                return channel
 
         # 策略 4：都不在线，需要存储
         return None
@@ -57,12 +56,13 @@ class NotificationRouter:
         try:
             for session_dir in self._session_workspace.iterdir():
                 channel, updated_at = self._eval_session_for_router(session_dir, user_id, exclude_channel, timeout)
-                if updated_at > best_time:
-                    best_time = updated_at
-                    best_channel = channel
+                best_channel, best_time = _newer_channel(channel, updated_at, best_channel, best_time)
         except OSError:
             return None
         return best_channel
+
+    def _candidate_fallback_channels(self, excluded_channel: str) -> tuple[str, ...]:
+        return tuple(channel for channel in ("chat", "feishu", "qq") if channel != excluded_channel)
 
     def _eval_session_for_router(self, session_dir: Path, user_id: str, exclude_channel: str | None, timeout: float) -> tuple[str | None, float]:
         """Evaluate session dir for active channel; return (channel, updated_at)."""
@@ -130,10 +130,11 @@ class NotificationRouter:
         success_count = 0
 
         for notification in pending:
-            if notification.status == "stored":
-                success, info = self.deliver(notification.notification_id)
-                if success:
-                    success_count += 1
+            if notification.status != "stored":
+                continue
+            success, _info = self.deliver(notification.notification_id)
+            if success:
+                success_count += 1
 
         return success_count
 
@@ -142,3 +143,15 @@ class NotificationRouter:
 
 
 __all__ = ["NotificationRouter"]
+
+
+def _newer_channel(
+    channel: str | None,
+    updated_at: float,
+    best_channel: str | None,
+    best_time: float,
+) -> tuple[str | None, float]:
+    # LLM: keep router scan flat while preserving newest-active-channel selection.
+    if updated_at > best_time:
+        return channel, updated_at
+    return best_channel, best_time

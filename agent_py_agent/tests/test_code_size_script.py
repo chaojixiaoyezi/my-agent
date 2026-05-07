@@ -51,6 +51,17 @@ def test_near_soft_file_finding_is_high_risk(tmp_path, monkeypatch) -> None:
     assert "near soft limit" in finding.message
 
 
+def test_runtime_data_python_files_are_not_scanned(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(check_code_size, "ROOT", tmp_path)
+    runtime_file = tmp_path / "agent_py_agent" / "data" / "subagents" / "run-1" / "artifact.py"
+    runtime_file.parent.mkdir(parents=True)
+    runtime_file.write_text("def generated(a, b, c, d, e):\n    pass\n", encoding="utf-8")
+
+    findings = check_code_size.collect_findings()
+
+    assert findings == []
+
+
 def test_near_soft_ast_findings_cover_requested_kinds(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(check_code_size, "ROOT", tmp_path)
     source = tmp_path / "agent_py_agent" / "near_soft_ast.py"

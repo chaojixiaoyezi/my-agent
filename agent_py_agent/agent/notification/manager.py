@@ -94,16 +94,9 @@ class NotificationManager:
         if not self._notification_root.exists():
             return pending
 
-        for path in self._notification_root.iterdir():
-            if not path.is_file() or not path.name.endswith(".json"):
-                continue
-
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if data.get("user_id") == user_id and data.get("status") in ("pending", "stored"):
-                    pending.append(Notification.from_dict(data))
-            except (json.JSONDecodeError, KeyError, TypeError):
-                continue
+        for data in self._iter_notification_dicts():
+            if data.get("user_id") == user_id and data.get("status") in ("pending", "stored"):
+                pending.append(Notification.from_dict(data))
 
         # 按创建时间排序
         pending.sort(key=lambda n: n.created_at)
@@ -123,26 +116,26 @@ class NotificationManager:
         if not self._notification_root.exists():
             return notifications
 
-        for path in self._notification_root.iterdir():
-            if not path.is_file() or not path.name.endswith(".json"):
+        for data in self._iter_notification_dicts():
+            if data.get("user_id") != user_id:
                 continue
 
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if data.get("user_id") != user_id:
-                    continue
-
-                status = data.get("status")
-                if status == "delivered" and not include_delivered:
-                    continue
-
-                notifications.append(Notification.from_dict(data))
-            except (json.JSONDecodeError, KeyError, TypeError):
+            status = data.get("status")
+            if status == "delivered" and not include_delivered:
                 continue
+
+            notifications.append(Notification.from_dict(data))
 
         # 按创建时间倒序
         notifications.sort(key=lambda n: n.created_at, reverse=True)
         return notifications[:limit]
+
+    def _iter_notification_dicts(self) -> list[dict[str, object]]:
+        items: list[dict[str, object]] = []
+        for path in self._notification_root.iterdir():
+            if path.is_file() and path.name.endswith(".json"):
+                _append_notification_dict(items, path)
+        return items
 
     def delete_notification(self, notification_id: str) -> bool:
         path = self._get_notification_path(notification_id)
@@ -157,3 +150,13 @@ class NotificationManager:
 
 
 __all__ = ["NotificationManager"]
+
+
+def _append_notification_dict(items: list[dict[str, object]], path: Path) -> None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return
+    if isinstance(data, dict):
+        # LLM: malformed notification files are skipped before model hydration.
+        items.append(data)

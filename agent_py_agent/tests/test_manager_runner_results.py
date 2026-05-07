@@ -63,7 +63,6 @@ def mock_manager(tmp_path):
 
 @pytest.fixture
 def sample_task(tmp_path):
-    """创建示例 SubAgentTask。"""
     task = MagicMock(spec=SubAgentTask)
     task.id = "run-123"
     task.status = "RUNNING"

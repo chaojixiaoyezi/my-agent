@@ -156,7 +156,6 @@ def test_subagent_acceptance_enforces_required_write_file_evidence():
 
 
 def test_subagent_acceptance_uses_actual_tool_evidence_from_runner():
-    """LLM: Verifies acceptance uses actual_tools from runner result to match evidence requirements."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")

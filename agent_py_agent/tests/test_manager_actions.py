@@ -58,7 +58,6 @@ class TestApplyActionItemDryRun:
     """测试 _apply_action_item() dry-run 模式。"""
 
     def test_dry_run_returns_record_without_apply(self, tmp_path: Path):
-        """dry-run 模式返回记录但不实际执行。"""
         from agent_py_agent.agent.subagents.manager_actions import SubAgentActionMixin
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask
@@ -155,7 +154,6 @@ class TestRecordAfterTaskAction:
     """测试 _record_after_task_action() 方法。"""
 
     def test_creates_apply_record(self, tmp_path: Path):
-        """验证创建 apply 记录。"""
         from agent_py_agent.agent.subagents.manager_actions import SubAgentActionMixin
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
         from agent_py_agent.agent.subagents.models import SubAgentTask

@@ -56,7 +56,6 @@ class TestCmdDaemon:
         assert options.interval == 60
 
     def test_cmd_daemon_passes_watch_params_bundle(self, tmp_path: Path):
-        """daemon CLI 将解析后的选项打包成 WatchParams 传给 watch_subagents。"""
         from agent_py_agent.agent.agent_core.dispatch_params import WatchParams
         from agent_py_agent.cli.daemon import cmd_daemon
 

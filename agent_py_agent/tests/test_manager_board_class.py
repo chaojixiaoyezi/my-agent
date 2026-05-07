@@ -176,7 +176,6 @@ class TestRiskFlags:
         assert "blocked" in flags
 
     def test_open_capability_request_flag(self, tmp_path: Path):
-        """有未处理能力请求时添加标记。"""
         from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
         from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
         from agent_py_agent.agent.subagents.models import CapabilityRequest, SubAgentTask

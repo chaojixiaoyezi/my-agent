@@ -268,7 +268,6 @@ class TestCapabilityRoutingDryRun:
         assert result.dry_run is True
 
     def test_route_capability_request_with_hits_returns_would_grant(self, tmp_path: Path):
-        """测试有命中时返回 WOULD_GRANT。"""
         from agent_py_agent.agent.subagents.manager_capabilities import SubAgentCapabilityMixin
         from agent_py_agent.agent.subagents.models import CapabilityRequest, SubAgentTask
 

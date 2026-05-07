@@ -22,6 +22,7 @@ from code_size_report import ReportRenderContext, write_report
 from code_size_rules import (
     EXCLUDE_NAMES,
     EXCLUDE_PARTS,
+    EXCLUDE_PATH_PREFIXES,
     EXCLUDE_PREFIXES,
     EXCLUDE_SUFFIXES,
     FILE_HARD_LIMIT,
@@ -48,6 +49,12 @@ REPORT_PATH = ROOT / "CODE_SIZE_REPORT.md"
 
 def _is_excluded(path: Path) -> bool:
     """Check if a path should be excluded from scanning."""
+    try:
+        rel = path.relative_to(ROOT).as_posix()
+    except ValueError:
+        rel = path.as_posix()
+    if any(rel.startswith(prefix) for prefix in EXCLUDE_PATH_PREFIXES):
+        return True
     for part in path.parts:
         if part in EXCLUDE_PARTS:
             return True

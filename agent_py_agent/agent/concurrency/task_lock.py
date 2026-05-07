@@ -31,13 +31,9 @@ class TaskLockManager:
 
     def release_read(self, task_id: str) -> None:
         with self._write_lock:
-            if task_id in self._read_locks:
-                lock = self._read_locks[task_id]
-                try:
-                    lock.release()
-                except RuntimeError:
-                    # 锁未持有
-                    pass
+            lock = self._read_locks.get(task_id)
+            if lock is not None:
+                _release_lock_once(lock)
 
     def acquire_write(self, task_id: str) -> None:
         with self._write_lock:
@@ -48,13 +44,9 @@ class TaskLockManager:
 
     def release_write(self, task_id: str) -> None:
         with self._write_lock:
-            if task_id in self._read_locks:
-                lock = self._read_locks[task_id]
-                try:
-                    lock.release()
-                    lock.release()
-                except RuntimeError:
-                    pass
+            lock = self._read_locks.get(task_id)
+            if lock is not None:
+                _release_lock_twice(lock)
 
     def release(self, task_id: str) -> None:
         self.release_read(task_id)
@@ -102,6 +94,22 @@ class TaskLockManager:
 
 # 全局锁管理器实例
 _global_lock_manager: TaskLockManager | None = None
+
+
+def _release_lock_once(lock: threading.RLock) -> None:
+    try:
+        lock.release()
+    except RuntimeError:
+        # LLM: releasing an unheld task lock is a no-op for compatibility.
+        pass
+
+
+def _release_lock_twice(lock: threading.RLock) -> None:
+    try:
+        lock.release()
+        lock.release()
+    except RuntimeError:
+        pass
 
 
 def get_task_lock_manager() -> TaskLockManager:

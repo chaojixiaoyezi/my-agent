@@ -164,7 +164,6 @@ def test_subagent_patch_apply_dry_run_shows_diff_for_write_file_patch():
 
 
 def test_subagent_patch_apply_writes_file_and_marks_patch_reviewed():
-    """LLM: Verifies patch apply writes the file, records audit, and approves the patch."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
@@ -311,7 +310,6 @@ def test_subagent_patch_apply_rolls_back_when_post_apply_test_fails():
 
 
 def test_subagents_patches_cli_apply_dry_run_writes_patch_apply_report(tmp_path, capsys):
-    """LLM: Verifies CLI apply-dry-run goes through the patch-apply preview path."""
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(
         'workspace_root: "."\n'

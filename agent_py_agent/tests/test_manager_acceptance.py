@@ -237,7 +237,6 @@ class TestSubAgentAcceptanceReportMixin(_AcceptSetupMixin, _AcceptRunMixin, _Acc
         assert report.summary["total"] == 1
 
     def test_write_acceptance_review_report_creates_files(self, tmp_path: Path):
-        """写出验收报告时创建文件。"""
         from agent_py_agent.agent.subagents.manager_acceptance import SubAgentAcceptanceMixin
 
         class MockManager(SubAgentAcceptanceMixin):

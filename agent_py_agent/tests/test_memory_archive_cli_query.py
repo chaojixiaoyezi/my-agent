@@ -261,7 +261,6 @@ def _create_processing_done_fallback_agent(
 
 
 def test_memory_resume_cross_day_handoff_uses_task_fact_sources(tmp_path, capsys):
-    """LLM: Tests that memory-resume correctly links cross-day handoff archives to task fact sources."""
     config_path = _write_config(tmp_path)
     root = _workspace(config_path)
     agent = SimpleAgent(

@@ -1,4 +1,4 @@
-"""Patch apply task executor with rollback support."""
+"""LLM: patch apply task executor with rollback support."""
 
 from __future__ import annotations
 
@@ -6,9 +6,11 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from agent_py_agent.agent.subagents.patch.patch_apply_helpers import run_patch_apply_tests
 from agent_py_agent.agent.subagents.patch.patch_file_ops import (
+    PatchFileApplyContext,
     do_apply_patches,
     rollback_patch_apply,
 )
@@ -18,6 +20,7 @@ from agent_py_agent.agent.subagents.utils import _read_json_object
 @dataclass
 class PatchApplyParams:
     """Bundle for PatchApplyExecutor.execute parameters."""
+
     patch_specs: list
     review_status_updates: list
     task: Any
@@ -42,7 +45,7 @@ class PatchApplyExecutor:
 
         try:
             applied_count, touched_files = do_apply_patches(
-                params.patch_specs, params.review_status_updates, params.task, params.manager, params.applier, params.note
+                PatchFileApplyContext(params.patch_specs, params.task, params.applier, params.note)
             )
             if params.test_commands:
                 test_results = run_patch_apply_tests(params.test_commands, params.manager.workspace_root)

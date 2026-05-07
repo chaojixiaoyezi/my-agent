@@ -153,7 +153,6 @@ def test_subagent_dispatch_apply_executes_runner_and_accepts(monkeypatch):
 
 
 def test_subagent_dispatch_retries_transient_runner_failure(monkeypatch):
-    """LLM: Verifies dispatch retries a transient runner failure on the second call."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         backend = FlakyThenAcceptedSubagentBackend()
