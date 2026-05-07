@@ -14,6 +14,7 @@ from .rendering_patch import (
     render_patch_review_record_markdown,
 )
 from .reports import (
+    AcceptanceReviewFinding,
     AcceptanceReviewRecord,
     AcceptanceReviewReport,
     ActionApplyReport,
@@ -264,25 +265,25 @@ def render_acceptance_record_markdown(record: AcceptanceReviewRecord) -> str:
         "## Verifier Checks",
         "",
     ]
-    if not record.verifier_checks:
-        lines.append("- none")
-    for item in record.verifier_checks:
-        status = "OK" if item.ok else "FAIL"
-        lines.append(f"- [{status}] {item.severity} {item.name}: {item.message}")
-        if item.evidence_path:
-            lines.append(f"  - evidence: {item.evidence_path}")
-    lines.extend([
-        "## Findings",
-        "",
-    ])
-    if not record.findings:
-        lines.append("- none")
-    for item in record.findings:
-        status = "OK" if item.ok else "FAIL"
-        lines.append(f"- [{status}] {item.severity} {item.name}: {item.message}")
-        if item.evidence_path:
-            lines.append(f"  - evidence: {item.evidence_path}")
+    _extend_acceptance_review_items(lines, record.verifier_checks)
+    lines.extend(["## Findings", ""])
+    _extend_acceptance_review_items(lines, record.findings)
     return "\n".join(lines) + "\n"
+
+
+def _extend_acceptance_review_items(
+    lines: list[str],
+    items: list[AcceptanceReviewFinding],
+) -> None:
+    # LLM: keep acceptance record section rendering shared without hiding decision logic.
+    if not items:
+        lines.append("- none")
+        return
+    for item in items:
+        status = "OK" if item.ok else "FAIL"
+        lines.append(f"- [{status}] {item.severity} {item.name}: {item.message}")
+        if item.evidence_path:
+            lines.append(f"  - evidence: {item.evidence_path}")
 
 
 def _list_or_none(items: list[str]) -> list[str]:
