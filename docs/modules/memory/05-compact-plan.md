@@ -105,11 +105,35 @@ compact 后的模型上下文应该由这些层组成：
 - 把 hypothesis 写成 confirmed fact。
 - 自动写正式 skill。
 
+## 无人值守工作状态锁
+
+自动 compact/resume 最大风险不是“摘要写得短不短”，而是压缩后模型继续工作时已经偏离原任务。无人值守模式必须先证明工作状态仍一致，不能只靠模型口头说“我记得”。
+
+自动 compact 后继续执行前，必须通过 Work State Consistency Check：
+
+- `goal`：当前目标必须和 compact 前一致。
+- `phase`：当前阶段、当前步骤、下一步动作必须能从 task/run state 或 apply bundle 还原。
+- `acceptance`：验收条件、必须通过的测试、用户明确要求不能丢。
+- `constraints`：禁止事项、架构边界、不能覆盖的文件必须保留。
+- `refs`：关键文件、artifact、restore refs、latest checkpoint 必须仍可定位。
+- `git_state`：当前 diff 必须仍属于同一任务范围，不能突然扩大到无关模块。
+- `test_state`：最近 focused tests / failing tests / CI 状态不能被摘要吞掉。
+
+恢复后的第一步必须是 Action Guard：
+
+1. 读取 compact context、apply bundle、restore refs 和 task/run state。
+2. 对照 compact 前的 work state snapshot。
+3. 输出机器可读的 consistency report。
+4. 只有 `ok=true` 时才允许继续执行工具或改代码。
+5. 如果缺字段、refs 不存在、任务目标冲突或 diff 范围异常，进入 `blocked_needs_human_review`，不得无人值守继续。
+
+这条规则适用于半自动和自动模式：自动 compact 不是“压完就继续”，而是“压完、恢复、对照、确认一致，再继续”。
+
 用户最少动手的理想路径：
 
 ```text
 50%: 系统自动 checkpoint，不打扰用户，只在状态行提示。
-70%: 系统自动 compact，如果 self check 通过，继续执行。
+70%: 系统建议 compact；半自动阶段需用户确认，自动阶段也必须先通过 work state consistency check。
 85%: 系统自动 artifact 化大输出，并提示上下文高风险。
 95%: 系统停止继续膨胀，要求 compact/retry/人工恢复三选一。
 ```
@@ -133,8 +157,9 @@ compact 后的模型上下文应该由这些层组成：
       -> 更新 memory 候选和 task state
       -> 写 compact audit event
   -> post-compact self check
+  -> work state consistency check
   -> 重新加载 rules/routes/required paths
-  -> 继续执行任务
+  -> 一致性通过后继续执行任务；否则 blocked_needs_human_review
 ```
 
 ## Artifact 层要求
@@ -529,14 +554,153 @@ my-agent local-rebuild --source memory --reset
 - parent/subagent 批次收束前触发 flush。
 - `memory-resume` 从 subagent fact source 恢复后补充 compact state。
 
-## 推荐优先级
+## 与 memory 同步开发的边界
 
-1. `memory-compact --dry-run`
-2. artifact schema 和大工具输出外置
-3. compact summary / task state schema
-4. post-compact self check
-5. `memory-compact --apply --backup`
-6. `memory-backup`
-7. chat slash commands：`/context`、`/compact`、`/artifacts`
+compact、resume 和 memory runtime 应该同步推进，但要分清职责，避免几个 agent 同时改同一个入口。
 
-这条顺序先让风险可见，再让数据可恢复，最后才做真正改写和自动化。
+可以并行开发的方向：
+
+- Compact agent：负责 `memory-compact --apply`、apply bundle、restore refs、self-check、work state snapshot、failure blocking。
+- Resume agent：负责 `memory-resume --from-compact`、恢复块生成、context-only 输出、consistency report。
+- Memory query agent：负责 control-plane query 接入 resume 优先级、daily ledger/task/run/tool-output/compact apply 的统一检索。
+- Work-state agent：负责 Work State Consistency Check、Action Guard、Drift Detector 的字段、报告和测试。
+- Docs/tests agent：负责文档、CLI help、focused tests、cross-platform tests 和 code-size guard。
+
+必须串行或先约定接口再并行的点：
+
+- `apply_bundle.json` / `restore_refs.json` / `work_state_snapshot.json` 的 schema。
+- `memory-resume --from-compact` 的 CLI 参数和返回格式。
+- consistency report 的状态枚举，例如 `ok`、`blocked_missing_refs`、`blocked_goal_mismatch`、`blocked_diff_scope`、`blocked_needs_human_review`。
+- control-plane query 的公开 bundle 字段。
+- 自动 compact/resume 触发策略和无人值守继续条件。
+
+多子代理协作规则：
+
+- 每个子代理只拥有自己模块的写入范围，跨模块字段先写到文档再改代码。
+- 不允许多个子代理同时改同一个 schema 文件；schema 变动必须先合并设计。
+- 不允许为了赶进度跳过 self-check、doc sync、strict code-size 和 focused tests。
+- 自动化相关改动默认只做 suggest / blocked，不直接开启 silent auto continue。
+- 所有新写入文件必须保留 v2 schema/reserved 或明确说明为什么还不能升级。
+
+## 下一步开发顺序
+
+现在 dry-run、工具输出外置、非破坏性 compact apply、apply bundle、restore refs、schema v2 和第一版 self-check 已经落地。后续按“先手动，再半自动，最后自动”的顺序推进。
+
+### Step 1：手动 compact apply 完整化
+
+状态：第一片已落地。用户手动执行 `memory-compact --apply` 时，现在会得到更完整、稳定、可审计的压缩恢复包。
+
+范围：
+
+- 固定 apply bundle / restore refs 的字段。
+- 给 apply 生成稳定 `apply_id` / `plan_id`。
+- 扩展 self-check：检查 goal、constraints、acceptance、latest tests、artifact refs、restore refs。
+- 写 work state snapshot，作为后续 resume 对照基线。
+- 保持非破坏性，不删除、不重写、不裁剪原始事实源。
+
+验收：
+
+- `memory-compact --apply` 后能列出本次 apply 的全部恢复入口。
+- self-check 失败时必须 blocked，不能写成成功。
+- hard/high-risk/soft 保持 0。
+
+当前实现说明：
+
+- `apply_id` 使用 `plan_id + 时间` 生成；同一秒重复 apply 会自动追加后缀，避免覆盖旧产物。
+- `plan_id`、`apply_id` 会同时写入 metadata、apply bundle、restore refs、work state snapshot、self-check、失败报告和 ledger。
+- 新增 `*.work_state_snapshot.json`，记录 goal、phase、next step、acceptance、constraints、changed/read files、artifact refs、restore refs、latest tests、git state、missing fields 和 source quality。
+- work state 字段来源第一片已接入：只读 workspace 内 task/run 事实源，例如 `ACCEPTANCE.md`、`CONSTRAINTS.md`、`TEST_CHECKLIST.md`、`task.json`、旧 `subagents/<run_id>/` 和新 `tasks/*/agents/<run_id>/`；找不到字段时仍写 `missing_fields`，不会猜测或伪造。
+- self-check 已检查 context、restore refs、apply bundle、work state snapshot 是否写入，restore refs 是否存在，以及 goal / next actions / acceptance / constraints / test state / risks 是否被带出。
+- 当前仍保持非破坏性：不删除、不重写、不裁剪 raw/hook/snapshot/token/task/run 文件。
+
+### Step 2：手动 resume from compact
+
+状态：第一片已落地。用户可以手动指定一次 compact apply，让系统生成可继续工作的恢复上下文。
+
+建议命令形态：
+
+```bash
+my-agent memory-resume --from-compact <apply_id>
+my-agent memory-resume --from-compact <apply_id> --context-only
+```
+
+范围：
+
+- 读取 apply bundle、compact context、restore refs、task/run state。
+- 生成恢复块，明确当前 goal、phase、next action、constraints、refs、test state。
+- 输出 work state consistency report。
+- 不自动执行工具、不自动改代码，只生成恢复上下文和状态确认。
+
+验收：
+
+- 新会话能从 compact apply 恢复到同一任务状态。
+- refs 缺失、目标冲突、diff 范围异常时进入 blocked。
+- 恢复结果能追溯到原始 fact sources。
+
+当前实现说明：
+
+- `memory-resume --from-compact <apply_id>` 会只读读取 metadata、apply bundle、restore refs、work state snapshot、compact context 和 self-check。
+- 输出 `compact_resume` payload、`compact_resume_consistency_report`、`compact_resume_handoff`、推荐读取路径、下一步建议和 `context_block`。
+- `compact_resume_handoff` 会稳定包含 goal、current_phase、next_step、acceptance、constraints、latest_tests、changed_files、read_files、recommended_read_paths 和 action_guard 摘要，方便新会话或其他 agent 接手。
+- `--context-only` 只打印 `Compact Resume Context`，方便复制到新会话或后续自动注入。
+- self-check 失败、restore refs 缺失、apply IDs 串号或 compact context 缺失时会进入 `blocked_needs_human_review`，不会自动继续执行工具。
+- `MemoryCompactResumeOptions.owner_type/owner_id` 已接入子代理 owner 只读引用解析；`subagent_run` / `subagent_session` 会返回 task-local run workspace 和 legacy adapter refs，但不触碰 subagent runner，不写主 memory。
+
+### Step 3：半自动 compact 提示
+
+状态：第一片已落地。系统发现上下文风险时提示用户 compact，但执行前需要确认。
+
+范围：
+
+- token ledger / context ratio 达阈值时提示。
+- 展示风险、预计收益、将写入哪些文件。
+- 用户确认后执行手动 apply 流程。
+- apply 后仍需要用户确认是否使用 resume context 继续。
+
+验收：
+
+- 默认不静默切换上下文。
+- 用户能看到 compact 原因、范围和失败处理。
+- self-check 或 consistency check 失败时不继续。
+
+当前实现说明：
+
+- 新增 `compact_suggest.py`，根据累计 token、上下文窗口和 dry-run plan 生成 `compact_suggestion`。
+- `run` 结果新增 `memory_compact_suggested/status/ratio/message/commands` 字段；CLI 只在达到建议阈值时打印提示。
+- 提示会给出 `memory-compact --dry-run`、`memory-compact --apply` 和 `memory-resume --from-compact <apply_id> --context-only` 命令，但 `automatic_action=none`。
+- 当前默认上下文窗口来自 `memory_compact_context_window_tokens`；未设置时用 `max_tokens * 16` 且不低于 8192 的保守估计，后续接真实模型 context window 时只替换这一层。
+- `owner_type/owner_id` 会继续透传给 compact resume；子代理 owner 当前只解析 refs，不触碰 subagent runner，也不自动做子代理会话压缩。
+
+### Step 4：自动 compact/resume
+
+状态：安全第二片已落地。无人值守长任务中，系统未来可以自动 compact 并继续；当前已实现状态锁、动作守门报告和一个默认不自动 apply 的安全协调器。
+
+范围：
+
+- 自动 checkpoint、artifact 外置、apply、self-check。
+- 自动 resume 前强制 Work State Consistency Check。
+- Action Guard 通过后才允许继续工具调用或代码修改。
+- Drift Detector 持续检查任务目标、diff 范围、next action 和测试状态。
+- 不确定时进入 `blocked_needs_human_review`，不得静默继续。
+
+验收：
+
+- 自动 compact 后继续执行的第一条动作必须引用 consistency report。
+- 状态不一致时不会继续无人值守。
+- 不会自动删除历史，不会自动写正式 skill，不会把假设写成事实。
+
+当前实现说明：
+
+- 新增 `compact_action_guard.py`，每次 `memory-resume --from-compact` 都会带 `action_guard`。
+- 默认 `manual` 模式输出 `requires_user_confirmation`，表示恢复材料可读，但不能无人值守继续。
+- `--compact-resume-mode auto` 会启用严格守门：consistency/self-check/refs/goal/next_step 必须通过，且 `missing_fields` 必须为空。
+- 如果 work state 缺 acceptance、constraints、latest_tests 等字段，自动模式会返回 `blocked_missing_work_state_fields`，CLI 退出码为 2。
+- 如果 work state 字段齐全、refs 存在、self-check 通过且 `resume_mode=auto`，action guard 会返回 `allow_automated_continue`、`allowed_to_continue=true` 和 `allowed_next_action=continue_after_guard`。
+- action guard 和 auto cycle 都显式写 `automatic_tool_execution=none`：这一步只给出 go/no-go 机器判断，不自动运行工具或修改代码。
+- 新增 `compact_auto.py`，提供 `run_memory_compact_auto_cycle()`：默认 `allow_apply=false` 时只返回 compact 建议和 `needs_user_confirmation`，不会写 apply 产物。
+- 显式 `allow_apply=true` 时，auto cycle 只执行非破坏性 apply 和 `resume_mode=auto` 的 action guard 检查；如果字段不完整会停在 `blocked_after_action_guard`，仍不会执行工具或继续改代码。
+- `SimpleAgent.run()` 收尾已经接入 auto cycle 的默认 plan-only 分支；达到 compact 阈值时，CLI 会显示 `compact_suggestion` 和 `compact_auto`，其中 `compact_auto` 只说明当前状态、下一步和工具执行状态，不会自动 apply。
+- `compact_subagent_owner.py` 已接入 `memory-resume --from-compact`：指定 `subagent_run` / `subagent_session` owner 后，会返回 `linked_run_workspace`、`legacy_only` 或 `owner_refs_not_found` 状态，以及 task-local refs；当前仍不自动执行工具、不改 runner、不污染主 memory。
+- 当前仍不会自动继续工具调用或代码修改；这一步只是把“提示、可选 apply、恢复、自检、停住”的无人值守安全骨架做出来。
+
+这条顺序先让风险可见，再让数据可恢复，再让用户确认流程顺滑，最后才做真正自动化。

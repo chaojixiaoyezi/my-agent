@@ -13,6 +13,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ..agent.memory_archive.compact_resume import (
+    MemoryCompactResumeOptions,
+    build_memory_compact_resume,
+)
 from ..agent.memory_archive.query import (
     archive_filters_from_args,
     build_resume_guidance,
@@ -109,6 +113,8 @@ def _collect_resume_data(agent, args):
 # 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_memory_resume(args) -> int:
     agent = make_agent(args)
+    if _from_compact_arg(args):
+        return _cmd_memory_resume_from_compact(agent, args)
     filters, archive_matches, local_payloads, task_payloads, gateway_payloads = _collect_resume_data(agent, args)
     resume = build_resume_guidance(archive_matches, local_payloads, task_payloads, gateway_payloads)
     brief = build_resume_brief(
@@ -127,6 +133,41 @@ def cmd_memory_resume(args) -> int:
         return 0
     _print_memory_resume(payload, json_output=args.json)
     return 0
+
+
+# LLM: _from_compact_arg ignores MagicMock/default argparse sentinels and accepts only real user input.
+# 函数用途: 判断 CLI 是否真正传入 --from-compact，避免旧测试或兼容调用误入 compact resume 分支。
+def _from_compact_arg(args) -> str:
+    value = getattr(args, "from_compact", "")
+    return value.strip() if isinstance(value, str) else ""
+
+
+# LLM: _cmd_memory_resume_from_compact keeps compact resume read-only and separate from archive search resume.
+# 函数用途: 处理 memory-resume --from-compact，读取 apply 产物并输出恢复上下文或 JSON。
+def _cmd_memory_resume_from_compact(agent, args) -> int:
+    payload = build_memory_compact_resume(
+        agent.root,
+        MemoryCompactResumeOptions(
+            apply_ref=_from_compact_arg(args),
+            owner_type=getattr(args, "compact_owner_type", "main_agent") or "main_agent",
+            owner_id=getattr(args, "compact_owner_id", "") or "",
+            resume_mode=getattr(args, "compact_resume_mode", "manual") or "manual",
+        ),
+    )
+    if getattr(args, "context_only", False):
+        print(payload["context_block"])
+        return 0 if _compact_resume_exit_ok(payload) else 2
+    _print_memory_resume_from_compact(payload, json_output=args.json)
+    return 0 if _compact_resume_exit_ok(payload) else 2
+
+
+# LLM: _compact_resume_exit_ok treats auto guard blocking as a non-zero CLI result.
+# 函数用途: 判断 compact resume 命令退出码；manual 成功可返回 0，auto guard 阻断必须返回 2。
+def _compact_resume_exit_ok(payload: dict[str, Any]) -> bool:
+    if not payload.get("ok"):
+        return False
+    guard = payload.get("action_guard", {}) if isinstance(payload.get("action_guard"), dict) else {}
+    return guard.get("mode") != "auto" or bool(guard.get("allowed_to_continue"))
 
 
 # LLM: _print_archive_list 属于memory CLI；改行为前先对齐调用方和快照/单测。
@@ -234,6 +275,50 @@ def _print_memory_resume(payload: dict[str, Any], *, json_output: bool) -> None:
         print(json.dumps(strip_sort_keys(payload), ensure_ascii=False, indent=2, sort_keys=True))
         return
     _print_memory_resume_text(payload)
+
+
+# LLM: _print_memory_resume_from_compact renders compact-specific resume output without hiding consistency status.
+# 函数用途: 输出 compact resume 的 apply id、状态、推荐读取路径和下一步动作。
+def _print_memory_resume_from_compact(payload: dict[str, Any], *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(strip_sort_keys(payload), ensure_ascii=False, indent=2, sort_keys=True))
+        return
+    print("MY-AGENT MEMORY RESUME FROM COMPACT")
+    print(f"workspace={payload['workspace_root']}")
+    print(f"apply_id={payload['apply_id']}")
+    print(f"plan_id={payload['plan_id'] or '-'}")
+    print(f"consistency_status={payload['consistency_report']['status']}")
+    print(f"action_guard={payload['action_guard']['status']}")
+    _print_compact_handoff(payload.get("handoff", {}))
+    print("Recommended Reads")
+    for path in payload["recommended_read_paths"] or ["none"]:
+        print(f"- {path}")
+    print("Next Actions")
+    for action in payload["next_actions"]:
+        print(f"- {action}")
+
+
+# LLM: _print_compact_handoff shows the resume package fields that matter before continuing work.
+# 函数用途: 输出 compact resume 的目标、阶段、验收、约束、测试和 action guard 摘要。
+def _print_compact_handoff(handoff: dict[str, Any]) -> None:
+    if not handoff:
+        return
+    print("Handoff")
+    print(f"- goal: {handoff.get('goal') or 'unknown'}")
+    print(f"- current_phase: {handoff.get('current_phase') or 'unknown'}")
+    print(f"- next_step: {handoff.get('next_step') or 'unknown'}")
+    print(f"- missing_fields: {json.dumps(handoff.get('missing_fields', []), ensure_ascii=False)}")
+    _print_named_items("Acceptance", handoff.get("acceptance", {}).get("items", []))
+    _print_named_items("Constraints", handoff.get("constraints", {}).get("items", []))
+    _print_named_items("Latest Tests", handoff.get("latest_tests", {}).get("items", []))
+
+
+# LLM: _print_named_items keeps compact handoff subsections compact and stable for CLI users.
+# 函数用途: 输出一个命名列表，空列表明确显示 none。
+def _print_named_items(title: str, items: list[str]) -> None:
+    print(title)
+    for item in items or ["none"]:
+        print(f"- {item}")
 
 
 # LLM: _print_archive_record_lines 属于memory CLI；改行为前先对齐调用方和快照/单测。

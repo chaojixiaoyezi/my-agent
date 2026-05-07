@@ -43,6 +43,16 @@
 - 2026-05-07 Control-plane Query API 第一片已落地：`query_memory_control_plane()` 会只读汇总 `daily/YYYY-MM-DD/events.jsonl`、task/run refs、`memory_archive/compact_applies/ledger.jsonl` 和 `memory_archive/artifacts/tool_outputs/index.jsonl`，按 date/task/run/event scope 返回轻量引用；它不读取大工具正文，不写入 workspace，也不替代 task/run 事实源。
 - 2026-05-07 Schema v2 / Reserved Fields 已固化第一片：`daily_ledger_event`、`control_plane_task_run_ref`、`compact_apply` / `compact_apply_ledger` / `compact_apply_self_check`、`tool_output_archive_record` / `tool_output_artifact` / `tool_output_index` 现在统一写 `version=2`、`schema` 和结构化 `reserved={schema_name,schema_version,extensions,compat,future}`；后续新增字段优先走明确业务字段，实验性扩展只能放入 reserved 三槽。
 - 2026-05-07 Compact Apply 第二片已落地：`memory-compact --apply` 现在除 context/metadata/self-check/ledger 外，还会写 `*.apply_bundle.json` 和 `*.restore_refs.json`，把原始 archive/snapshot/token refs 和恢复步骤串起来；如果 post-compact self-check 失败，会写 `*.self_check_failed.json` 并把 metadata/ledger 标记为 `blocked_self_check_failed`，仍然不删除、不重写、不裁剪历史事实源。
+- 2026-05-08 手动 Compact Apply 完整化第一片已落地：`memory-compact --apply` 现在会生成稳定 `apply_id/plan_id`，并把同一组 ID 写进 metadata、apply bundle、restore refs、work state snapshot、self-check、失败报告和 ledger；新增 `*.work_state_snapshot.json` 作为后续手动 resume 和无人值守状态锁的对照基线。
+- 2026-05-08 手动 Resume From Compact 第一片已落地：`memory-resume --from-compact <apply_id>` 会只读恢复 compact apply 产物，输出 `Compact Resume Context`、consistency report、推荐读取路径和下一步动作；`owner_type/owner_id` 已预留给未来子代理自动会话压缩，当前不触碰 subagent runner。
+- 2026-05-08 半自动 Compact 提示第一片已落地：`run` 收尾会基于 token ledger 和上下文窗口返回 compact suggestion 字段，CLI 在达到阈值时提示 dry-run/apply/resume 命令；当前 `automatic_action=none`，仍需用户确认。
+- 2026-05-08 自动 Compact/Resume 安全第一片已落地：`memory-resume --from-compact` 现在会输出 `compact_action_guard`；`manual` 要人工确认，`auto` 模式在缺 acceptance/constraints/latest_tests 等 work state 字段时会阻断并返回非零退出码。
+- 2026-05-08 自动 Compact/Resume 协调第一片已落地：`run_memory_compact_auto_cycle()` 默认只生成 `compact_auto_cycle` 和人工确认建议；显式 `allow_apply=true` 时也只做非破坏性 apply、auto resume 和 action guard 检查，随后停住，不执行工具、不继续改代码。
+- 2026-05-08 自动 Compact/Resume 触发器第一片已落地：`SimpleAgent.run()` 收尾已经接入 auto cycle 的默认 plan-only 分支，结果和 CLI 会暴露 `compact_auto` 的 status / next_action / tools 字段；当前仍不会自动写 apply 产物。
+- 2026-05-08 Work State 字段来源第一片已落地：compact apply 会从 workspace 内 task/run 事实源读取 `ACCEPTANCE.md`、`CONSTRAINTS.md`、`TEST_CHECKLIST.md`、`task.json` 等文件，把 acceptance、constraints、latest_tests 和 read_files 写入 `work_state_snapshot`；找不到时仍显式保留 missing，不猜测。
+- 2026-05-08 Resume 交接包增强第一片已落地：`memory-resume --from-compact` 现在返回 `compact_resume_handoff`，并在 context block / CLI 中稳定展示目标、阶段、下一步、验收条件、约束、最近测试、推荐读取路径和 action guard 状态。
+- 2026-05-08 自动 Guard 放行第一片已落地：当 work state 字段齐全、refs 存在、self-check 通过且 `resume_mode=auto` 时，`compact_action_guard` 会返回 `allow_automated_continue` / `allowed_to_continue=true`；报告仍明确 `automatic_tool_execution=none`，不会自动跑工具。
+- 2026-05-08 子代理 Compact Owner 预留口第一片已落地：`memory-resume --from-compact --compact-owner-type subagent_run|subagent_session --compact-owner-id <run_id>` 会只读解析 `tasks/*/agents/<run_id>/` 和旧 `subagents/<run_id>/` 引用，返回 run workspace、checkpoint、summary、legacy adapter refs；仍不写主 memory、不改 runner、不自动执行工具。
 - **记忆推模式** (`memory_push.py`)：在关键决策点自动查询并注入相关记忆，实现"推模式"记忆系统。
   - `MemoryType` 枚举：`LESSON_GENERAL`、`LESSON_TASK`、`LESSON_TEMP`、`CONTEXT`、`FACT`
   - `push_relevant_memories()` 函数：根据触发类型搜索相关记忆
@@ -91,6 +101,11 @@
 - control-plane query 解决了“daily ledger、compact apply、tool output index 和 task/run refs 只能各自散扫”的问题；现在 compact/resume/debug 可以先走统一只读入口，再按 refs 回到权威文件核实。
 - schema v2 / reserved 固化解决了“索引记录以后要加字段时没有统一落点”的问题；现在核心 runtime memory 轻量记录都带同一个版本和保留槽，架构评审能区分正式字段、兼容字段和未来实验扩展。
 - compact apply 第二片解决了“apply 只有摘要产物，但缺少显式恢复包和失败阻断”的问题；现在恢复时可以先读 apply bundle，再按 restore refs 回查原始事实源，自检失败也会留下机器可读失败报告。
+- 自动 compact/resume 协调第一片解决了“直接接自动化容易一压完就继续乱跑”的问题；现在自动链路先有默认 plan-only、显式 allow_apply 和 action guard 停车点，后续再接真实触发器时不会越过安全边界。
+- 自动 compact/resume 触发器第一片解决了“协调器写好了但 run 主链路还不知道”的问题；现在普通 run 达到阈值时会露出 auto cycle 停车状态，后续可以在同一接口上逐步接配置和无人值守策略。
+- Work State 字段来源第一片解决了“action guard 永远只能看到 unknown”的问题；现在只要任务目录里有验收、约束和测试事实源，compact apply 就能把它们带进恢复基线，缺失时仍按 missing 处理。
+- Resume 交接包增强第一片解决了“恢复结果只给路径和简单状态，不够接手”的问题；现在 handoff/context block 直接把接手者最需要看的目标、约束、验收、测试和 guard 状态摆出来。
+- 自动 Guard 放行第一片解决了“guard 只能阻断，不能表达安全可继续”的问题；现在字段完整时能给自动流程一个明确 go 信号，但工具执行仍必须由后续更高层策略显式触发。
 - P0 安全切片解决了三类恢复风险：compact 快照不会丢 routed/resume 恢复线索；artifact manifest 不会越界读本机任意绝对路径；shared workspace 不再由最后一次保存覆盖 sibling 已登记的 finding/evidence。
 
 ## 下一步

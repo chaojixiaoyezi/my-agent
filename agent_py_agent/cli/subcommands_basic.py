@@ -134,6 +134,10 @@ def _add_archive_search_args(parser) -> None:
 # LLM: _add_archive_resume_args 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
 # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_archive_resume_args(parser) -> None:
+    parser.add_argument("--from-compact", dest="from_compact", help="从 memory-compact --apply 的 apply_id 或产物路径恢复")
+    parser.add_argument("--compact-resume-mode", choices=["manual", "auto"], default="manual", help="compact 恢复模式；auto 会启用严格 action guard")
+    parser.add_argument("--compact-owner-type", default="main_agent", help="compact owner 类型；预留 subagent_run/subagent_session")
+    parser.add_argument("--compact-owner-id", default="", help="compact owner 标识；预留给子代理会话压缩")
     parser.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="从哪一层归档找线索")
     parser.add_argument("--date", help="只看某一天，格式 YYYY-MM-DD")
     parser.add_argument("--since", help="只看此时间之后的归档线索")

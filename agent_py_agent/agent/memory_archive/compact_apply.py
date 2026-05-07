@@ -19,6 +19,32 @@ from pathlib import Path
 from typing import Any
 
 from .compact import MemoryCompactPlanOptions, build_memory_compact_plan
+from .compact_apply_ids import (
+    compact_apply_id,
+    compact_apply_plan_id,
+    compact_candidate_counts,
+    compact_risk_level,
+    compact_scope_hash,
+)
+from .compact_apply_io import append_jsonl as _append_jsonl
+from .compact_apply_io import write_json as _write_json
+from .compact_apply_io import write_text as _write_text
+from .compact_apply_self_check import (
+    COMPACT_SELF_CHECK_FAILURE_SCHEMA,
+    COMPACT_SELF_CHECK_SCHEMA,
+)
+from .compact_apply_self_check import (
+    build_self_check_failure_payload as _self_check_failure_payload,
+)
+from .compact_apply_self_check import (
+    build_self_check_payload as _self_check_payload,
+)
+from .compact_apply_work_state import (
+    WorkStateSnapshotRequest,
+    build_work_state_snapshot,
+    restore_refs_summary,
+    work_state_summary,
+)
 from .schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_reserved_fields,
@@ -29,8 +55,6 @@ COMPACT_APPLY_SCHEMA = RuntimeMemorySchemaOptions("compact_apply")
 COMPACT_APPLY_BUNDLE_SCHEMA = RuntimeMemorySchemaOptions("compact_apply_bundle")
 COMPACT_APPLY_LEDGER_SCHEMA = RuntimeMemorySchemaOptions("compact_apply_ledger")
 COMPACT_RESTORE_REFS_SCHEMA = RuntimeMemorySchemaOptions("compact_apply_restore_refs")
-COMPACT_SELF_CHECK_SCHEMA = RuntimeMemorySchemaOptions("compact_apply_self_check")
-COMPACT_SELF_CHECK_FAILURE_SCHEMA = RuntimeMemorySchemaOptions("compact_apply_self_check_failure")
 
 
 # LLM: memory archive compact apply 的入口 bundle；新增 apply 策略字段时放这里，不拉长函数签名。
@@ -61,23 +85,29 @@ def apply_memory_compact(root: str | Path, options: MemoryCompactApplyOptions) -
     workspace = Path(root)
     plan = build_memory_compact_plan(workspace, options.plan_options)
     now = _utc_now()
-    event_id = _event_id(now)
-    paths = _apply_paths(workspace, event_id)
-    payload = _metadata_payload(_ApplyMetadataBuildRequest(plan, options, event_id, now, paths))
+    plan_id = compact_apply_plan_id(plan)
+    apply_id = _unique_apply_id(workspace, plan_id, now)
+    paths = _apply_paths(workspace, apply_id)
+    payload = _metadata_payload(_ApplyMetadataBuildRequest(plan, options, apply_id, now, paths))
     context = _context_markdown(payload, plan)
     _write_text(paths["context_md"], context)
-    restore_refs = _restore_refs_payload(plan, paths, now)
+    restore_refs = _restore_refs_payload(payload, plan, paths, now)
     _write_json(paths["restore_refs_json"], restore_refs)
-    apply_bundle = _apply_bundle_payload(payload, restore_refs, paths)
+    work_state = build_work_state_snapshot(
+        WorkStateSnapshotRequest(plan, restore_refs, paths, now, payload["apply_id"], payload["plan_id"])
+    )
+    _write_json(paths["work_state_snapshot_json"], work_state)
+    apply_bundle = _apply_bundle_payload(payload, restore_refs, work_state, paths)
     _write_json(paths["apply_bundle_json"], apply_bundle)
-    self_check = _self_check_payload(plan, paths, now)
+    self_check = _self_check_payload(plan, paths, now, work_state)
     payload["post_compact_self_check"] = self_check
     payload["restore_refs"] = restore_refs
+    payload["work_state_snapshot"] = work_state
     payload["apply_bundle"] = apply_bundle
     if not self_check["ok"]:
         payload["ok"] = False
         payload["compact_status"] = "blocked_self_check_failed"
-        payload["self_check_failure"] = _self_check_failure_payload(payload, self_check, paths, now)
+        payload["self_check_failure"] = _self_check_failure_payload(payload, self_check, _refs(paths), now)
         _write_json(paths["failed_self_check_json"], payload["self_check_failure"])
     _write_json(paths["self_check_json"], self_check)
     _write_json(paths["metadata_json"], payload)
@@ -95,6 +125,7 @@ def _apply_paths(workspace: Path, event_id: str) -> dict[str, Path]:
         "metadata_json": directory / f"{event_id}.json",
         "apply_bundle_json": directory / f"{event_id}.apply_bundle.json",
         "restore_refs_json": directory / f"{event_id}.restore_refs.json",
+        "work_state_snapshot_json": directory / f"{event_id}.work_state_snapshot.json",
         "self_check_json": directory / f"{event_id}.self_check.json",
         "failed_self_check_json": directory / f"{event_id}.self_check_failed.json",
         "ledger_jsonl": directory / "ledger.jsonl",
@@ -112,6 +143,8 @@ def _metadata_payload(request: _ApplyMetadataBuildRequest) -> dict[str, Any]:
         "mode": "apply",
         "dry_run": False,
         "event_id": request.event_id,
+        "apply_id": request.event_id,
+        "plan_id": compact_apply_plan_id(plan),
         "event_type": "memory_compact_apply",
         "compact_status": "applied_non_destructive",
         "workspace_root": plan["workspace_root"],
@@ -137,6 +170,10 @@ def _source_plan(plan: dict[str, Any]) -> dict[str, Any]:
         "estimated_compactable_bytes": plan["estimated_compactable_bytes"],
         "risks": list(plan["risks"]),
         "recommended_actions": list(plan["recommended_actions"]),
+        "plan_id": compact_apply_plan_id(plan),
+        "scope_hash": compact_scope_hash(plan),
+        "candidate_counts": compact_candidate_counts(plan),
+        "risk_level": compact_risk_level(plan),
     }
 
 
@@ -148,6 +185,7 @@ def _refs(paths: dict[str, Path]) -> dict[str, str]:
         "metadata": str(paths["metadata_json"]),
         "apply_bundle": str(paths["apply_bundle_json"]),
         "restore_refs": str(paths["restore_refs_json"]),
+        "work_state_snapshot": str(paths["work_state_snapshot_json"]),
         "post_compact_self_check": str(paths["self_check_json"]),
         "self_check_failure": str(paths["failed_self_check_json"]),
         "apply_ledger": str(paths["ledger_jsonl"]),
@@ -156,11 +194,15 @@ def _refs(paths: dict[str, Path]) -> dict[str, str]:
 
 # LLM: _restore_refs_payload records every original source path needed to verify or rebuild a compact context.
 # 函数用途: 生成 compact apply 的恢复引用包，只保存路径和摘要，不复制或修改原始事实源。
-def _restore_refs_payload(plan: dict[str, Any], paths: dict[str, Path], now: str) -> dict[str, Any]:
+def _restore_refs_payload(
+    payload: dict[str, Any], plan: dict[str, Any], paths: dict[str, Path], now: str
+) -> dict[str, Any]:
     return {
         "version": COMPACT_RESTORE_REFS_SCHEMA.version,
         "schema": runtime_memory_schema_payload(COMPACT_RESTORE_REFS_SCHEMA),
         "event_type": "compact_apply_restore_refs",
+        "apply_id": payload["apply_id"],
+        "plan_id": payload["plan_id"],
         "workspace_root": plan["workspace_root"],
         "scope": plan["scope"],
         "created_at": now,
@@ -174,18 +216,21 @@ def _restore_refs_payload(plan: dict[str, Any], paths: dict[str, Path], now: str
 # LLM: _apply_bundle_payload is the resume entrypoint for non-destructive compact apply.
 # 函数用途: 生成 apply bundle，串起 context、metadata、自检、restore refs 和人工恢复步骤。
 def _apply_bundle_payload(
-    payload: dict[str, Any], restore_refs: dict[str, Any], paths: dict[str, Path]
+    payload: dict[str, Any], restore_refs: dict[str, Any], work_state: dict[str, Any], paths: dict[str, Path]
 ) -> dict[str, Any]:
     return {
         "version": COMPACT_APPLY_BUNDLE_SCHEMA.version,
         "schema": runtime_memory_schema_payload(COMPACT_APPLY_BUNDLE_SCHEMA),
         "event_id": payload["event_id"],
+        "apply_id": payload["apply_id"],
+        "plan_id": payload["plan_id"],
         "event_type": "compact_apply_bundle",
         "compact_status": payload["compact_status"],
         "workspace_root": payload["workspace_root"],
         "scope": payload["scope"],
         "refs": _refs(paths),
-        "restore_refs_summary": _restore_refs_summary(restore_refs),
+        "restore_refs_summary": restore_refs_summary(restore_refs),
+        "work_state_summary": work_state_summary(work_state),
         "restore_steps": _restore_steps(),
         "content_preserved": True,
         "reserved": runtime_memory_reserved_fields(COMPACT_APPLY_BUNDLE_SCHEMA),
@@ -216,22 +261,12 @@ def _file_refs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return refs
 
 
-# LLM: _restore_refs_summary gives callers counts without opening restore_refs.json.
-# 函数用途: 统计恢复引用包里三类原始事实源的数量，供 apply bundle 快速展示。
-def _restore_refs_summary(restore_refs: dict[str, Any]) -> dict[str, int]:
-    refs = restore_refs["source_refs"]
-    return {
-        "archive_files": len(refs["archive_files"]),
-        "snapshot_files": len(refs["snapshot_files"]),
-        "token_ledgers": len(refs["token_ledgers"]),
-    }
-
-
 # LLM: _restore_steps is a stable human/model checklist for safe non-destructive recovery.
 # 函数用途: 返回使用 apply bundle 恢复上下文时必须遵守的核验顺序。
 def _restore_steps() -> list[str]:
     return [
         "read post_compact_self_check and stop if ok is false",
+        "read work_state_snapshot and compare goal, next action, refs, and tests before continuing",
         "read compact_context as the compact entrypoint",
         "use restore_refs to verify raw/hook archives, snapshots, token ledgers, and task/run workspaces",
         "trust restored answers only after source refs still exist and match the requested scope",
@@ -262,47 +297,6 @@ def _context_markdown(payload: dict[str, Any], plan: dict[str, Any]) -> str:
     )
 
 
-# LLM: _self_check_payload 做 apply 后最小自检；后续更严格检查可扩展到 checks 列表和 reserved 字段。
-# 函数用途: 确认 apply 产物写入路径、源内容保留策略和风险转录状态，返回机器可读报告。
-def _self_check_payload(plan: dict[str, Any], paths: dict[str, Path], now: str) -> dict[str, Any]:
-    checks = [
-        {"name": "source_content_preserved", "ok": True, "severity": "hard"},
-        {"name": "compact_context_written", "ok": paths["context_md"].exists(), "severity": "hard"},
-        {"name": "restore_refs_written", "ok": paths["restore_refs_json"].exists(), "severity": "hard"},
-        {"name": "apply_bundle_written", "ok": paths["apply_bundle_json"].exists(), "severity": "hard"},
-        {"name": "risks_carried_forward", "ok": isinstance(plan["risks"], list), "severity": "soft"},
-    ]
-    return {
-        "version": COMPACT_SELF_CHECK_SCHEMA.version,
-        "schema": runtime_memory_schema_payload(COMPACT_SELF_CHECK_SCHEMA),
-        "ok": all(item["ok"] for item in checks if item["severity"] == "hard"),
-        "event_type": "post_compact_self_check",
-        "checks": checks,
-        "created_at": now,
-        "reserved": runtime_memory_reserved_fields(COMPACT_SELF_CHECK_SCHEMA),
-    }
-
-
-# LLM: _self_check_failure_payload is written only when apply artifacts fail validation.
-# 函数用途: 记录失败检查、恢复引用和阻断状态；仍保持非破坏性，不回滚或改写原始事实源。
-def _self_check_failure_payload(
-    payload: dict[str, Any], self_check: dict[str, Any], paths: dict[str, Path], now: str
-) -> dict[str, Any]:
-    return {
-        "version": COMPACT_SELF_CHECK_FAILURE_SCHEMA.version,
-        "schema": runtime_memory_schema_payload(COMPACT_SELF_CHECK_FAILURE_SCHEMA),
-        "ok": False,
-        "event_id": payload["event_id"],
-        "event_type": "compact_apply_self_check_failure",
-        "compact_status": "blocked_self_check_failed",
-        "created_at": now,
-        "failed_checks": [item for item in self_check["checks"] if not item["ok"]],
-        "refs": _refs(paths),
-        "content_preserved": True,
-        "reserved": runtime_memory_reserved_fields(COMPACT_SELF_CHECK_FAILURE_SCHEMA),
-    }
-
-
 # LLM: _ledger_record 控制 ledger 行宽，避免把整份 apply metadata 重复塞进 JSONL。
 # 函数用途: 提取 apply metadata 的关键字段，作为 append-only ledger 的单行记录。
 def _ledger_record(payload: dict[str, Any]) -> dict[str, Any]:
@@ -310,6 +304,8 @@ def _ledger_record(payload: dict[str, Any]) -> dict[str, Any]:
         "version": COMPACT_APPLY_LEDGER_SCHEMA.version,
         "schema": runtime_memory_schema_payload(COMPACT_APPLY_LEDGER_SCHEMA),
         "event_id": payload["event_id"],
+        "apply_id": payload["apply_id"],
+        "plan_id": payload["plan_id"],
         "event_type": payload["event_type"],
         "compact_status": payload["compact_status"],
         "workspace_root": payload["workspace_root"],
@@ -328,32 +324,16 @@ def _bullet_lines(items: list[str]) -> str:
     return "\n".join(f"- {item}" for item in items) if items else "- none"
 
 
-# LLM: _append_jsonl 是 compact apply ledger 写入点；只追加，不改写旧 ledger 行。
-# 函数用途: 把一条 JSON 记录追加到 JSONL，并确保父目录存在。
-def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
-
-
-# LLM: _write_json 负责 compact apply JSON 产物；统一格式减少后续 parser 分歧。
-# 函数用途: 写入缩进 JSON 文件，并确保父目录存在。
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-# LLM: _write_text 负责 compact apply Markdown 产物；不附加额外解释或隐式路径。
-# 函数用途: 写入文本文件，并确保父目录存在。
-def _write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-
-
-# LLM: _event_id 当前用 UTC 秒级时间生成；后续如需并发唯一性可在 reserved 兼容扩展。
-# 函数用途: 根据 ISO 时间生成文件名安全的 compact apply event id。
-def _event_id(now: str) -> str:
-    return "memory-compact-" + now.replace(":", "").replace("-", "").replace("+", "Z")
+# LLM: _unique_apply_id prevents same-second manual apply attempts from overwriting artifacts.
+# 函数用途: 如果同一 plan 同一秒重复 apply，追加数字后缀并保持所有产物使用同一个 apply_id。
+def _unique_apply_id(workspace: Path, plan_id: str, now: str) -> str:
+    base = compact_apply_id(plan_id, now)
+    candidate = base
+    suffix = 2
+    while _apply_paths(workspace, candidate)["metadata_json"].exists():
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+    return candidate
 
 
 # LLM: _utc_now 集中时间来源，测试需要稳定事件时可 monkeypatch 这一层。

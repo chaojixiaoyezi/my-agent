@@ -90,6 +90,24 @@ def test_run_writes_raw_archive_when_saved(tmp_path):
     assert snapshots[0]["dispatch_events"][0]["source"] == "run"
 
 
+def test_run_surfaces_compact_suggestion_without_auto_apply(tmp_path):
+    """LLM: Tests that agent.run() can suggest compact without running apply automatically."""
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent.config.memory_compact_context_window_tokens = 20
+
+    result = agent.run("请生成足够长的 compact 提示触发内容", save=False)
+
+    assert result.memory_compact_suggested is True
+    assert result.memory_compact_status in {"suggest_compact", "artifact_guard", "stop_required"}
+    assert result.memory_compact_commands
+    assert "memory-compact" in result.memory_compact_commands[0]
+    assert result.memory_compact_auto_status == "needs_user_confirmation"
+    assert result.memory_compact_auto_next_action == "ask_user_before_apply"
+    assert result.memory_compact_auto_tool_execution == "none"
+    assert result.memory_compact_auto_allowed_to_continue is False
+    assert not (tmp_path / "memory_archive" / "compact_applies").exists()
+
+
 def test_run_no_save_does_not_write_raw_archive(tmp_path):
     """LLM: Tests that agent.run() with save=False does not write any raw archive files."""
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)

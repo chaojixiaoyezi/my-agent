@@ -170,8 +170,18 @@ Runtime memory 的轻量索引记录必须能长期扩展，但不能把字段�
 - `control_plane_query`
 - `control_plane_task_run_ref`
 - `compact_apply`
+- `compact_apply_bundle`
 - `compact_apply_ledger`
+- `compact_apply_restore_refs`
 - `compact_apply_self_check`
+- `compact_apply_self_check_failure`
+- `compact_work_state_snapshot`
+- `compact_resume`
+- `compact_resume_consistency_report`
+- `compact_resume_handoff`
+- `compact_action_guard`
+- `compact_suggestion`
+- `compact_auto_cycle`
 - `tool_output_archive_record`
 - `tool_output_artifact`
 - `tool_output_index`
@@ -223,13 +233,21 @@ Runtime memory 的轻量索引记录必须能长期扩展，但不能把字段�
 - 已新增 Phase 6 显式收口链：retention 只压缩 active review queue 并保留审计；`--export-memory` 只导出 `approve_memory` 候选；`--export-skill` 只生成 draft；`--verify` 写边界检查报告，确认没有自动提升。
 - 已新增 `memory_archive/control_plane.py`，先提供统一只读查询入口，把 daily ledger、task/run refs、compact apply ledger 和 tool output index 合成同一 scope 的引用视图，供 compact/resume/debug 继续使用。
 - 已新增 `memory_archive/schema.py`，先把 daily ledger、control-plane task/run refs、compact apply 和 tool output index 的写入记录统一到 schema v2 / reserved 三槽。
-- 已扩展 `memory_archive/compact_apply.py` 第二片：非破坏性 apply 会写 apply bundle、restore refs 和 self-check failed 报告，失败时只阻断状态并保留审计，不回滚、不删除、不改写原始事实源。
+- 已扩展 `memory_archive/compact_apply.py` 手动 apply 完整化第一片：非破坏性 apply 会写稳定 `apply_id/plan_id`、apply bundle、restore refs、work state snapshot、self-check 和 self-check failed 报告；失败时只阻断状态并保留审计，不回滚、不删除、不改写原始事实源。
+- 已新增 `memory_archive/compact_resume.py` 手动 resume 第一片：`memory-resume --from-compact` 只读恢复 compact apply 产物，输出 context block、recommended reads、next actions 和 consistency report；预留 `owner_type/owner_id` 给未来子代理会话压缩，但当前不自动执行工具、不改写 subagent 文件。
+- 已新增 `memory_archive/compact_resume_handoff.py` Resume 交接包第一片：compact resume 会额外输出 `compact_resume_handoff`，把目标、阶段、下一步、验收条件、约束、最近测试、推荐读取路径和 action guard 状态整理成稳定结构，并同步渲染进 context block。
+- 已新增 `memory_archive/compact_action_guard.py` 自动 compact/resume 安全第一片：compact resume 会输出 action guard；manual 模式要求人工确认，auto 模式缺字段或 refs/self-check 异常时阻断，字段齐全时返回 `allow_automated_continue` / `allowed_to_continue=true`，但仍显式 `automatic_tool_execution=none`，不直接执行工具。
+- 已新增 `memory_archive/compact_subagent_owner.py` 子代理 owner refs 第一片：`subagent_run` / `subagent_session` compact resume 会只读解析 task-local run workspace 和 legacy adapter refs，输出 `memory_scope=task_local`、`writes_main_memory=false` 和 `automatic_tool_execution=none`；当前不改 runner，不污染主代理长期 memory。
+- 已新增 `memory_archive/compact_suggest.py` 半自动提示第一片：`run` 收尾会根据 token ledger 和上下文窗口返回 compact suggestion 字段，CLI 只打印建议命令，不自动 apply、不自动 resume。
+- 已新增 `memory_archive/compact_auto.py` 自动 compact/resume 协调第一片，并已接入 `SimpleAgent.run()` 收尾的默认 plan-only 分支：结果和 CLI 会显示 `compact_auto` 的状态、下一步和工具执行状态；显式允许 apply 时也只做非破坏性 apply、auto resume 和 action guard 检查，随后停住，不执行工具、不继续改代码。
+- 已新增 `memory_archive/compact_work_state_sources.py` Work State 字段来源第一片：compact apply 会只读 workspace 内 task/run 事实源，把 acceptance、constraints、latest_tests 和 read_files 写入 `work_state_snapshot`；当前支持旧 `subagents/<run_id>/`、新 `tasks/*/agents/<run_id>/`、`ACCEPTANCE.md`、`CONSTRAINTS.md`、`TEST_CHECKLIST.md` 和 `task.json`。
 - 已完成 bundle-first 收敛：runtime/subagent/gateway/log-analysis/memory-archive/audit/local-storage/backends 的服务入口已改为 Request/Options/Params 或显式 keyword -> bundle adapter；架构护栏会扫描业务代码中的函数级 var-positional / var-keyword，当前例外仅限透明转发、协议 override、兼容 adapter 和局部字段选择 helper。
 
 后续主要差距：
 
 - 旧 subagent workspace 尚未迁移到 `tasks/<task_id>/agents/<run_id>/`；当前 agent run workspace 是 skeleton + legacy adapter，不是完整替代。
-- task workspace 已有第一版 `task.yaml`、`state.json`、`timeline.jsonl`，run workspace 已有第一版 `agent.yaml`、run-level `state.json/timeline.jsonl` 和 checkpoint-first compact ledger/snapshot 链；全局 `memory-compact --apply` 已有非破坏性 apply、restore refs、apply bundle、post-compact self-check 和失败阻断，但 run-local destructive compact apply 仍未接入。
+- task workspace 已有第一版 `task.yaml`、`state.json`、`timeline.jsonl`，run workspace 已有第一版 `agent.yaml`、run-level `state.json/timeline.jsonl` 和 checkpoint-first compact ledger/snapshot 链；全局 `memory-compact --apply` 已有非破坏性 apply、restore refs、apply bundle、work state snapshot、post-compact self-check 和失败阻断，`memory-resume --from-compact` 已能只读生成手动恢复上下文；run-local destructive compact apply 仍未接入。
+- 半自动 compact 提示已接入主代理 `run` 返回值；自动 compact/resume 当前只落地 action guard，不会自动切换上下文，也不会自动执行工具。子代理自动会话压缩只预留 owner 字段和接口口子，尚未接入 runner。
 - daily ledger 已有 append-only 文件入口和 artifact manifest refs，并已接入 control-plane 只读查询；resume 查询优先级还需要下一步显式改造，run-local gate retention 已有保守 active queue 清理。
 - artifact manifests 已能规范已有 `artifact_refs`，runtime 大工具输出已能外置到 `memory_archive/artifacts/tool_outputs/` 并追加 index，control-plane 已能统一查询全局 tool-output index；但 task/run artifact manifest 与全局 artifact index 的 content-addressed 去重存储还没做。
 - schema v2 已覆盖当前新写的轻量索引记录，但旧 raw/hook/archive 历史记录仍保持原 schema，后续要做迁移只能通过 reader 兼容或显式 migration，不允许原地重写历史事实源。

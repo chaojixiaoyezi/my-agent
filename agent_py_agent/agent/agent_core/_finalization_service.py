@@ -9,8 +9,11 @@ import time as time_module
 from ..memory_archive import (
     archive_run_turn,
     estimate_tokens,
+    run_memory_compact_auto_cycle,
     write_recovery_snapshot,
 )
+from ..memory_archive.compact import MemoryCompactPlanOptions
+from ..memory_archive.compact_auto import MemoryCompactAutoCycleOptions
 from ..memory_archive.runtime.turn_archiver import ArchiveRunTurnParams, ArchiveTurnContext
 from ..memory_archive.snapshots import (
     RecoverySnapshotInput,
@@ -198,6 +201,7 @@ class FinalizationService:
             compression_applied=ctx.compression_applied,
             turn_token_estimate=token_ledger["turn"],
             cumulative_token_estimate=token_ledger["cumulative"],
+            **_compact_auto_cycle_fields(self._agent, ctx, token_ledger),
         )
 
 
@@ -230,3 +234,43 @@ def _resume_context_fields(ctx: FinalizeContext) -> dict:
         else 0,
         "memory_resume_context_error": resume.error if resume else "",
     }
+
+
+# LLM: _compact_auto_cycle_fields wires run finalization to the safe plan-only compact auto cycle.
+# 函数用途: 在 run 收尾时触发自动 compact/resume 协调器的默认计划分支；不会 apply、resume 或执行工具。
+def _compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[str, int]) -> dict:
+    cycle = run_memory_compact_auto_cycle(
+        agent.root,
+        MemoryCompactAutoCycleOptions(
+            current_tokens=int(token_ledger["cumulative"]),
+            max_context_tokens=_compact_context_window_tokens(agent),
+            plan_options=MemoryCompactPlanOptions(
+                session_id=getattr(agent, "session_id", agent.config.agent_name),
+                request_id=ctx.request_id or "",
+                run_id=ctx.run_id or "",
+                task_id=ctx.task_id or "",
+            ),
+        ),
+    )
+    suggestion = cycle["suggestion"]
+    return {
+        "memory_compact_suggested": bool(suggestion["should_prompt"]),
+        "memory_compact_status": str(suggestion["status"]),
+        "memory_compact_ratio": float(suggestion["token_budget"]["ratio"]),
+        "memory_compact_message": str(suggestion["message"]),
+        "memory_compact_commands": list(suggestion["recommended_commands"]),
+        "memory_compact_auto_status": str(cycle["status"]),
+        "memory_compact_auto_next_action": str(cycle["next_action"]),
+        "memory_compact_auto_allowed_to_continue": bool(cycle["allowed_to_continue"]),
+        "memory_compact_auto_tool_execution": str(cycle["automatic_tool_execution"]),
+    }
+
+
+# LLM: _compact_context_window_tokens keeps compact suggestions conservative until real context windows exist.
+# 函数用途: 读取可选配置 memory_compact_context_window_tokens；未设置时用 max_tokens 的保守倍数估算窗口。
+def _compact_context_window_tokens(agent) -> int:
+    configured = int(getattr(agent.config, "memory_compact_context_window_tokens", 0) or 0)
+    if configured > 0:
+        return configured
+    max_tokens = int(getattr(agent.config, "max_tokens", 1024) or 1024)
+    return max(8192, max_tokens * 16)
