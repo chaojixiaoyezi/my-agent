@@ -10,7 +10,7 @@ SubAgentManager 通过 facade 方法委托到这里。
 import time
 from typing import TYPE_CHECKING, Any
 
-from ..models import SubAgentTask
+from ..models import SubAgentBoardOptions, SubAgentTask
 from ..policies import (
     _action_for_issue,
     _commands_for_action,
@@ -121,8 +121,14 @@ class SubAgentBoardService:
     def __init__(self, manager: Any):
         self.manager = manager
 
-    def build_board(self, *, recent_limit: int = 20) -> SubAgentBoard:
+    def build_board(
+        self,
+        *,
+        options: SubAgentBoardOptions | None = None,
+        recent_limit: int = 20,
+    ) -> SubAgentBoard:
         """Build the subagent traffic light board."""
+        board_options = _board_options(options, recent_limit=recent_limit)
         items = [_to_board_item(self.manager, task) for task in self.manager.list_runs()]
         summary: dict[str, int] = {"total": len(items)}
         for item in items:
@@ -131,7 +137,7 @@ class SubAgentBoardService:
             summary[f"channel_{item.channel_status}"] = summary.get(f"channel_{item.channel_status}", 0) + 1
         hot_list = [item for item in items if item.risk_flags]
         hot_list.sort(key=lambda item: (-_risk_weight(item.risk_flags), -(item.updated_at or 0)))
-        recent = items[:recent_limit]
+        recent = items[: board_options.recent_limit]
         return SubAgentBoard(
             generated_at=time.time(),
             summary=summary,
@@ -211,3 +217,16 @@ class SubAgentBoardService:
             summary[action.severity] = summary.get(action.severity, 0) + 1
             summary[action.action] = summary.get(action.action, 0) + 1
         return ActionPlanReport(generated_at=time.time(), summary=summary, actions=actions)
+
+
+def _board_options(
+    options: SubAgentBoardOptions | None,
+    *,
+    recent_limit: int,
+) -> SubAgentBoardOptions:
+    if options is not None:
+        if not isinstance(options, SubAgentBoardOptions):
+            raise TypeError("build_board requires options: SubAgentBoardOptions")
+        return options
+    # LLM: board services normalize the legacy recent_limit into an options bundle.
+    return SubAgentBoardOptions(recent_limit=recent_limit)

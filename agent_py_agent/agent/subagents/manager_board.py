@@ -7,7 +7,7 @@ Human version:
 业务逻辑已移至 services/board.py。
 """
 
-from .models import SubAgentDueCheckOptions
+from .models import SubAgentBoardOptions, SubAgentDueCheckOptions
 from .services.board import SubAgentBoardService, _build_risk_flags, _to_board_item
 
 
@@ -26,11 +26,23 @@ class SubAgentBoardMixin:
     def _risk_flags(self, task, open_request_count=0, open_gap_count=0):
         return _build_risk_flags(task, open_request_count, open_gap_count)
 
-    def build_board(self, *, recent_limit: int = 20):
-        return self._board_service.build_board(recent_limit=recent_limit)
+    def build_board(
+        self,
+        *,
+        options: SubAgentBoardOptions | None = None,
+        recent_limit: int = 20,
+    ):
+        board_options = _board_options(options, recent_limit=recent_limit)
+        return self._board_service.build_board(options=board_options)
 
-    def write_board(self, *, recent_limit: int = 20):
-        board = self.build_board(recent_limit=recent_limit)
+    def write_board(
+        self,
+        *,
+        options: SubAgentBoardOptions | None = None,
+        recent_limit: int = 20,
+    ):
+        board_options = _board_options(options, recent_limit=recent_limit)
+        board = self.build_board(options=board_options)
         import json
         from dataclasses import asdict
         (self.workspace / "subagent_board.json").write_text(
@@ -94,3 +106,16 @@ def _due_check_options(
         return params
     # LLM: due-check remains compatible with config positional calls while using an options bundle.
     return SubAgentDueCheckOptions(config=config, write_report=write_report)
+
+
+def _board_options(
+    options: SubAgentBoardOptions | None,
+    *,
+    recent_limit: int,
+) -> SubAgentBoardOptions:
+    if options is not None:
+        if not isinstance(options, SubAgentBoardOptions):
+            raise TypeError("board requires options: SubAgentBoardOptions")
+        return options
+    # LLM: board manager keeps recent_limit compatibility while using options internally.
+    return SubAgentBoardOptions(recent_limit=recent_limit)

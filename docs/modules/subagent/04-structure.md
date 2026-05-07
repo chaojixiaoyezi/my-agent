@@ -71,6 +71,8 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/models.py`：继续作为兼容导出入口，并新增 `SubAgentCapabilityRouteOptions`、`SubAgentChannelProbeOptions`、`SubAgentDueCheckOptions`，让 manager/core/CLI 共用同一批业务 options bundle。
 - `agent_py_agent/cli/models.py`：承接 CLI 专属 options bundle；命令函数只在边界读取 argparse，再把参数转成小 dataclass 传给业务层或 manager bundle。
 - `agent_py_agent/agent/agent_core/dispatch_params.py`：承接 dispatch/watch 的 `DispatchParams` / `WatchParams`，让父代理 dispatch 主链路不再依赖裸 kwargs 扩展。
+- `agent_py_agent/agent/agent_core/subagent_params.py`：承接 runner/spawn 相关轻量 bundle，包括 `SubagentRunParams`、`SpawnSubagentsParams` 和 runner flow 内部的 probe/failure/finalize 参数。
+- `agent_py_agent/agent/agent_core/subagent_run_flow.py`：承接单个 subagent runner 从 prompt、probe、模型调用到结果写回的流程，避免 `subagent_mixin.py` 因 bundle 兼容继续变胖。
 - `agent_py_agent/cli/_gateway_process_service.py`：legacy gateway process service 通过 `GatewayRunContext` / `GatewayRunOptions` 重建 worker 和 heartbeat，不再把 argparse 对象传入后台线程。
 - `agent_py_agent/cli/_memory_gate.py`：实现 `subagents-memory-gate` CLI，显式列出候选、写回 approve/reject/needs_evidence、导出 approved 候选、生成 skill draft 和跑 verify。
 - `SKILL_SPARKS.md`：子代理目录里的经验火花候选，只记录可复用步骤、触发条件、证据引用、限制和反例；后续提升为 skill 必须经过单独 gate。
@@ -106,6 +108,7 @@ agent_py_agent/agent/
 19. `memory-resume` 在跨天恢复时用 archive/LocalStore 作为线索，最终推荐读取任务目录里的事实源和 checkpoint artifacts，再由父级决定是否验收；这只是恢复入口推荐，不代表子代理写入主代理长期 memory。
 20. workflow preview 仍可通过 CLI dry-run 展示；真实路径已接入 `create_run(... workflow_mode="plan|auto")` 和 `subagents-dispatch --apply --workflow-mode auto`，可把父任务上的 `workflow_plan` 物化为 worker 子工单。LOG 专项 apply path 和 runner 恢复 scenario 继续作为真实任务记录的先行验证样本。
 21. CLI / core / manager 的新接口规则是先构造 Request/Options bundle，再进入业务服务；旧散参入口只做兼容 adapter，不作为新增字段的扩展位置。
+22. subagent runner、spawn、recovery snapshot 和 board 的新字段优先加到 `subagent_params.py` 或 `SubAgentBoardOptions`，mixin 只做兼容 facade 和少量编排。
 
 ## 给初学编程学生的学习路径
 

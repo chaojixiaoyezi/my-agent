@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, is_dataclass
 
+from ..agent.agent_core.subagent_params import SpawnSubagentsParams
 from ..agent.subagent import filter_board_items
+from ..agent.subagents.models import SubAgentBoardOptions
 from .common import make_agent
 
 
@@ -17,7 +19,7 @@ def _task_jsonable(task):
 def cmd_spawn(args) -> int:
 
     agent = make_agent(args)
-    tasks = agent.spawn_subagents(args.goal, args.count)
+    tasks = agent.spawn_subagents(params=SpawnSubagentsParams(goal=args.goal, count=args.count))
     for task in tasks:
         print(json.dumps(_task_jsonable(task), ensure_ascii=False))
     return 0
@@ -26,7 +28,9 @@ def cmd_spawn(args) -> int:
 def cmd_subagents(args) -> int:
 
     agent = make_agent(args)
-    board = agent.subagents.write_board(recent_limit=args.limit)
+    board = agent.subagents.write_board(
+        options=SubAgentBoardOptions(recent_limit=int(args.limit or 0)),
+    )
     items = filter_board_items(
         board.items if args.all else board.hot_list or board.recent,
         status=args.status or "",

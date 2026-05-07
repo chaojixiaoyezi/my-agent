@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from ..config import AgentConfig
 from ..subagent import RecordRunnerResultParams, SubAgentRunnerResult, SubAgentTask
 from .dynamic_timeout import calculate_dynamic_timeout
+from .subagent_params import SubagentRunParams
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -160,12 +161,14 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
     _attach_worker_local_store(worker, params.local_store)
     if params.dry_run or params.timeout_seconds <= 0:
         return worker.run_subagent(
-            params.run_id,
-            instruction=params.instruction,
-            dry_run=params.dry_run,
-            max_cards=params.max_cards,
-            probe=params.probe,
-            retry_reason=params.retry_reason,
+            params=SubagentRunParams(
+                run_id=params.run_id,
+                instruction=params.instruction,
+                dry_run=params.dry_run,
+                max_cards=params.max_cards,
+                probe=params.probe,
+                retry_reason=params.retry_reason,
+            )
         )
     return _run_subagent_worker_with_timeout(worker, params)
 
@@ -188,13 +191,15 @@ def _run_subagent_worker_with_timeout(worker, params: RunSubagentWorkerParams):
     def _target() -> None:
         try:
             payload["result"] = worker.run_subagent(
-                params.run_id,
-                instruction=params.instruction,
-                dry_run=False,
-                max_cards=params.max_cards,
-                probe=params.probe,
-                retry_reason=params.retry_reason,
-                attempt_id=attempt_id,
+                params=SubagentRunParams(
+                    run_id=params.run_id,
+                    instruction=params.instruction,
+                    dry_run=False,
+                    max_cards=params.max_cards,
+                    probe=params.probe,
+                    retry_reason=params.retry_reason,
+                    attempt_id=attempt_id,
+                )
             )
         except Exception as exc:  # pragma: no cover - defensive wrapper
             payload["error"] = exc

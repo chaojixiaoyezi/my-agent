@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ..capability_config import CapabilityConfig
-from ..subagents.models import SubAgentDueCheckOptions
+from ..subagents.models import SubAgentBoardOptions, SubAgentDueCheckOptions
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -45,7 +45,7 @@ def build_parent_planner_state(
 
     tasks = agent.subagents.list_runs()
     board_limit = limit if limit > 0 else len(tasks)
-    board = agent.subagents.build_board(recent_limit=board_limit)
+    board = agent.subagents.build_board(options=SubAgentBoardOptions(recent_limit=board_limit))
     due_report = agent.subagents.due_check(params=SubAgentDueCheckOptions(config=cfg))
     action_plan = agent.subagents.plan_actions(cfg)
     runner_candidates = _dispatch_runner_candidates(tasks, max_runners)

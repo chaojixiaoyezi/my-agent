@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..agent.core import SimpleAgent
-from ..agent.subagents.models import SubAgentTask
+from ..agent.subagents.models import SubAgentBoardOptions, SubAgentTask
 from .common import ROOT, make_agent
 
 
@@ -248,7 +248,7 @@ def print_scenario_step(index: int, title: str) -> None:
 
 def print_scenario_board(agent: SimpleAgent, *, limit: int) -> None:
 
-    board = agent.subagents.write_board(recent_limit=limit)
+    board = agent.subagents.write_board(options=SubAgentBoardOptions(recent_limit=limit))
     print("board_summary=" + json.dumps(board.summary, ensure_ascii=False, sort_keys=True))
     for item in board.items[:limit]:
         print(
