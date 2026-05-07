@@ -9,7 +9,6 @@ subagent runs keep their legacy directories; the task workspace records an
 adapter pointer so later phases can add richer agent-run workspaces safely.
 """
 
-import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +44,15 @@ from .shared_workspace import (
     SyncSharedWorkspaceRequest,
     shared_workspace_paths,
     sync_shared_workspace,
+)
+
+# LLM: payload/JSON helpers stay focused so workspace orchestration does not keep growing.
+from .task_workspace_payloads import (
+    append_timeline,
+    read_json_object,
+    state_payload,
+    timeline_event,
+    write_json,
 )
 from .task_workspace_rendering import (
     write_summary,
@@ -135,8 +143,8 @@ def ensure_subagent_task_workspace(
     paths = _paths_for(path_inputs)
     _ensure_directories(paths)
     write_task_yaml_if_missing(paths.task_yaml, task_id, inputs.task, now)
-    previous_state = _read_json_object(paths.state_json)
-    _write_json(paths.state_json, _state_payload(task_id, run_id, inputs.task, now))
+    previous_state = read_json_object(paths.state_json)
+    write_json(paths.state_json, state_payload(task_id, run_id, inputs.task, now))
     write_summary(paths.current_summary, task_id, run_id, inputs.task)
     # LLM: shared workspace is task-local collaboration state, not main long-term memory.
     shared = sync_shared_workspace(
@@ -151,7 +159,7 @@ def ensure_subagent_task_workspace(
         )
     )
     runtime_refs = _sync_runtime_refs(_RuntimeSyncInputs(inputs.workspace, inputs.task, paths, now))
-    _append_timeline(paths.timeline_jsonl, _timeline_event(inputs.task, now, previous_state))
+    append_timeline(paths.timeline_jsonl, timeline_event(inputs.task, now, previous_state))
     return _paths_for(path_inputs, runtime_refs=runtime_refs, shared=shared)
 
 
@@ -292,76 +300,6 @@ def _ensure_directories(paths: TaskWorkspacePaths) -> None:
         paths.agent_adapter_dir,
     ]:
         directory.mkdir(parents=True, exist_ok=True)
-
-
-def _state_payload(task_id: str, run_id: str, task: Any, now: float) -> dict[str, object]:
-    return {
-        "version": 1,
-        "task_id": task_id,
-        "primary_run_id": run_id,
-        "status": str(getattr(task, "status", "")),
-        "verification_status": str(getattr(task, "verification_status", "")),
-        "progress": float(getattr(task, "progress", 0.0) or 0.0),
-        "current_step": str(getattr(task, "current_step", "")),
-        "latest_summary": str(getattr(task, "latest_summary", "")),
-        "blockers": list(getattr(task, "blockers", []) or []),
-        "artifact_refs": list(getattr(task, "artifact_refs", []) or []),
-        "evidence_refs": list(getattr(task, "evidence_refs", []) or []),
-        "child_run_ids": list(getattr(task, "child_ids", []) or []),
-        "updated_at": now,
-        "legacy": {
-            "task_dir": str(getattr(task, "task_dir", "")),
-            "task_json": str(Path(str(getattr(task, "task_dir", ""))) / "task.json")
-            if getattr(task, "task_dir", "")
-            else "",
-        },
-    }
-
-
-def _timeline_event(task: Any, now: float, previous_state: dict[str, object]) -> dict[str, object]:
-    task_id = str(getattr(task, "root_id", "") or getattr(task, "id", "task"))
-    run_id = str(getattr(task, "id", "") or task_id)
-    return {
-        "ts": now,
-        "event": "task_workspace_synced",
-        "task_id": task_id,
-        "run_id": run_id,
-        "status": str(getattr(task, "status", "")),
-        "previous_status": str(previous_state.get("status") or ""),
-        "summary": str(getattr(task, "latest_summary", "")),
-        "refs": {
-            "legacy_task_dir": str(getattr(task, "task_dir", "")),
-        },
-    }
-
-
-def _read_json_object(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _write_json(path: Path, payload: dict[str, object]) -> None:
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def _append_timeline(path: Path, payload: dict[str, object]) -> None:
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
-
-
-def _touch_jsonl(path: Path) -> None:
-    if not path.exists():
-        path.write_text("", encoding="utf-8")
-
-
-def _write_if_missing(path: Path, content: str) -> None:
-    if not path.exists():
-        path.write_text(content, encoding="utf-8")
 
 
 def _safe_segment(value: str) -> str:
