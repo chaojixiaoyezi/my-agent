@@ -26,16 +26,62 @@ class SharedWorkspaceResult:
     evidence_index_jsonl: Path
 
 
-def sync_shared_workspace(task_workspace_root: Path, task: Any, *, now: float) -> SharedWorkspaceResult:
+@dataclass(frozen=True)
+class SyncSharedWorkspaceRequest:
+    """Bundle inputs for syncing a task-local shared workspace."""
+
+    # LLM: shared workspace inputs stay task-local in one bundle and never imply main memory writes.
+    task_workspace_root: Path
+    task: Any
+    now: float
+
+
+def sync_shared_workspace(
+    request: SyncSharedWorkspaceRequest | Path | None = None,
+    task: Any | None = None,
+    *,
+    task_workspace_root: Path | None = None,
+    now: float | None = None,
+) -> SharedWorkspaceResult:
     """Write compact task-local shared facts for one subagent save."""
 
-    paths = shared_workspace_paths(task_workspace_root)
+    inputs = _coerce_sync_request(
+        request,
+        task=task,
+        task_workspace_root=task_workspace_root,
+        now=now,
+    )
+    paths = shared_workspace_paths(inputs.task_workspace_root)
     paths.evidence_packets_dir.mkdir(parents=True, exist_ok=True)
-    _write_blackboard(paths.blackboard_md, task, now)
-    _append_message(paths.messages_jsonl, _message_payload(task, now))
-    _write_jsonl(paths.findings_jsonl, _finding_records(task, now))
-    _write_evidence_packets(paths.evidence_packets_dir, paths.evidence_index_jsonl, task, now)
+    _write_blackboard(paths.blackboard_md, inputs.task, inputs.now)
+    _append_message(paths.messages_jsonl, _message_payload(inputs.task, inputs.now))
+    _write_jsonl(paths.findings_jsonl, _finding_records(inputs.task, inputs.now))
+    _write_evidence_packets(
+        paths.evidence_packets_dir,
+        paths.evidence_index_jsonl,
+        inputs.task,
+        inputs.now,
+    )
     return paths
+
+
+def _coerce_sync_request(
+    request: SyncSharedWorkspaceRequest | Path | None,
+    task: Any | None,
+    *,
+    task_workspace_root: Path | None,
+    now: float | None,
+) -> SyncSharedWorkspaceRequest:
+    if isinstance(request, SyncSharedWorkspaceRequest):
+        return request
+    resolved_root = task_workspace_root if task_workspace_root is not None else request
+    if resolved_root is None or task is None or now is None:
+        raise TypeError("sync_shared_workspace requires task_workspace_root, task, and now")
+    return SyncSharedWorkspaceRequest(
+        task_workspace_root=Path(resolved_root),
+        task=task,
+        now=now,
+    )
 
 
 def shared_workspace_paths(task_workspace_root: Path) -> SharedWorkspaceResult:
@@ -184,4 +230,9 @@ def _utc_iso(value: float) -> str:
     return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
 
 
-__all__ = ["SharedWorkspaceResult", "shared_workspace_paths", "sync_shared_workspace"]
+__all__ = [
+    "SharedWorkspaceResult",
+    "SyncSharedWorkspaceRequest",
+    "shared_workspace_paths",
+    "sync_shared_workspace",
+]

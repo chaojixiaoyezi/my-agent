@@ -7,6 +7,7 @@ from __future__ import annotations
 """
 
 import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .models import SubAgentTask
@@ -15,9 +16,60 @@ from .reports import AcceptanceReviewFinding, AcceptanceReviewRecord
 from .utils import _new_id, _read_json_object
 
 
-def review_acceptance_task(manager, task: SubAgentTask, *, apply: bool, reviewer: str, note: str) -> AcceptanceReviewRecord:
+@dataclass(frozen=True)
+class AcceptanceReviewOptions:
+    """Options bundle for acceptance review report entrypoints."""
+
+    # LLM: report-level acceptance options stay bundled while per-task review uses a request.
+    apply: bool = False
+    reviewer: str = "parent"
+    note: str = ""
+    limit: int = 0
+    now: float | None = None
+
+    @classmethod
+    def from_values(cls, options: AcceptanceReviewOptions | None = None, **overrides):
+        base = options or cls()
+        clean = {key: value for key, value in overrides.items() if value is not None}
+        return replace(base, **clean)
+
+
+def acceptance_review_options(
+    options: AcceptanceReviewOptions | None = None,
+    *,
+    apply: bool = False,
+    reviewer: str = "parent",
+    note: str = "",
+    limit: int = 0,
+) -> AcceptanceReviewOptions:
+    """Coerce legacy kwargs into the report-level acceptance options bundle."""
+
+    if options is not None and (apply, reviewer, note, limit) == (False, "parent", "", 0):
+        return options
+    return AcceptanceReviewOptions.from_values(
+        options,
+        apply=apply,
+        reviewer=reviewer,
+        note=note,
+        limit=limit,
+    )
+
+
+@dataclass(frozen=True)
+class AcceptanceReviewRequest:
+    """LLM: Bundle one acceptance review request so future gate fields do not widen signatures."""
+
+    task: SubAgentTask
+    apply: bool = False
+    reviewer: str = "parent"
+    note: str = ""
+    now: float | None = None
+
+
+def review_acceptance_task(manager, request: AcceptanceReviewRequest) -> AcceptanceReviewRecord:
     """对单个任务执行验收判断，并按需写回状态。"""
-    now = time.time()
+    task = request.task
+    now = request.now if request.now is not None else time.time()
     before_status = task.status
     before_verification = task.verification_status
     output = _read_json_object(Path(task.output_json))
@@ -31,20 +83,20 @@ def review_acceptance_task(manager, task: SubAgentTask, *, apply: bool, reviewer
     message = _acceptance_message(ok, review_checks)
     applied = False
 
-    if apply and ready:
+    if request.apply and ready:
         _apply_acceptance_decision(manager, task, ok=ok, message=message, now=now)
         applied = True
         manager._append_task_work_log(
             task,
-            f"acceptance_review: decision={decision} reviewer={reviewer} message={message}",
+            f"acceptance_review: decision={decision} reviewer={request.reviewer} message={message}",
         )
-    elif apply and not ready:
+    elif request.apply and not ready:
         message = f"任务当前状态不在等待验收范围内，未写回: status={task.status} verify={task.verification_status}"
 
     return AcceptanceReviewRecord(
         id=_new_id("accept"),
         run_id=task.id,
-        dry_run=not apply,
+        dry_run=not request.apply,
         applied=applied,
         ok=ok,
         decision=decision,
@@ -53,8 +105,8 @@ def review_acceptance_task(manager, task: SubAgentTask, *, apply: bool, reviewer
         after_status=task.status,
         before_verification_status=before_verification,
         after_verification_status=task.verification_status,
-        reviewer=reviewer,
-        note=note,
+        reviewer=request.reviewer,
+        note=request.note,
         evidence_count=len(task.evidence),
         test_count=len(_dict_list(output.get("tests", []))),
         artifact_count=len(_dict_list(output.get("artifacts", []))),

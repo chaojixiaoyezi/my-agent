@@ -39,21 +39,64 @@ class AgentRunWorkspacePaths:
     legacy_run_ref_json: Path
 
 
-def ensure_agent_run_workspace(root: Path, task: Any, *, task_id: str, now: float) -> AgentRunWorkspacePaths:
+@dataclass(frozen=True)
+class EnsureAgentRunWorkspaceRequest:
+    """Bundle inputs for syncing one agent-run workspace."""
+
+    # LLM: new run workspace knobs should join this bundle instead of widening sync signatures.
+    root: Path
+    task: Any
+    task_id: str
+    now: float
+
+
+def ensure_agent_run_workspace(
+    request: EnsureAgentRunWorkspaceRequest | Path | None = None,
+    task: Any | None = None,
+    *,
+    root: Path | None = None,
+    task_id: str | None = None,
+    now: float | None = None,
+) -> AgentRunWorkspacePaths:
     """Create/update the Phase 1 agent-run workspace skeleton for a subagent task."""
 
-    paths = agent_run_workspace_paths(root)
+    inputs = _coerce_ensure_request(request, task, root=root, task_id=task_id, now=now)
+    paths = agent_run_workspace_paths(inputs.root)
     _ensure_directories(paths)
-    _write_agent_yaml_if_missing(paths.agent_yaml, task, task_id, now)
-    _write_json(paths.state_json, _state_payload(task, task_id, now))
-    _write_markdown(paths.task_md, _task_markdown(task, task_id))
-    _write_json(paths.checkpoint_json, _checkpoint_payload(task, task_id, now))
-    _write_markdown(paths.summary_md, _summary_markdown(task, task_id))
-    _write_final_report(paths.final_report_md, task, task_id)
-    _write_findings(paths.findings_jsonl, task)
-    _write_json(paths.legacy_run_ref_json, _legacy_run_ref_payload(task, task_id, now))
-    _append_timeline(paths.timeline_jsonl, _timeline_event(task, task_id, now))
+    _write_agent_yaml_if_missing(paths.agent_yaml, inputs.task, inputs.task_id, inputs.now)
+    _write_json(paths.state_json, _state_payload(inputs.task, inputs.task_id, inputs.now))
+    _write_markdown(paths.task_md, _task_markdown(inputs.task, inputs.task_id))
+    _write_json(paths.checkpoint_json, _checkpoint_payload(inputs.task, inputs.task_id, inputs.now))
+    _write_markdown(paths.summary_md, _summary_markdown(inputs.task, inputs.task_id))
+    _write_final_report(paths.final_report_md, inputs.task, inputs.task_id)
+    _write_findings(paths.findings_jsonl, inputs.task)
+    _write_json(
+        paths.legacy_run_ref_json,
+        _legacy_run_ref_payload(inputs.task, inputs.task_id, inputs.now),
+    )
+    _append_timeline(paths.timeline_jsonl, _timeline_event(inputs.task, inputs.task_id, inputs.now))
     return paths
+
+
+def _coerce_ensure_request(
+    request: EnsureAgentRunWorkspaceRequest | Path | None,
+    task: Any | None,
+    *,
+    root: Path | None,
+    task_id: str | None,
+    now: float | None,
+) -> EnsureAgentRunWorkspaceRequest:
+    if isinstance(request, EnsureAgentRunWorkspaceRequest):
+        return request
+    resolved_root = root if root is not None else request
+    if resolved_root is None or task is None or task_id is None or now is None:
+        raise TypeError("ensure_agent_run_workspace requires root, task, task_id, and now")
+    return EnsureAgentRunWorkspaceRequest(
+        root=Path(resolved_root),
+        task=task,
+        task_id=task_id,
+        now=now,
+    )
 
 
 def agent_run_workspace_paths(root: Path) -> AgentRunWorkspacePaths:
@@ -256,4 +299,9 @@ def _yaml_quote(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-__all__ = ["AgentRunWorkspacePaths", "agent_run_workspace_paths", "ensure_agent_run_workspace"]
+__all__ = [
+    "AgentRunWorkspacePaths",
+    "EnsureAgentRunWorkspaceRequest",
+    "agent_run_workspace_paths",
+    "ensure_agent_run_workspace",
+]

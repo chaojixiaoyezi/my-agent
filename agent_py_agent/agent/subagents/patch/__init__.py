@@ -9,7 +9,7 @@ Human version:
 
 from __future__ import annotations
 
-from .patch_apply import PatchApplyService
+from .patch_apply import PatchApplyOptions, PatchApplyService
 from .patch_renderer import (
     build_unified_diff,
     render_patch_apply_markdown,
@@ -17,11 +17,15 @@ from .patch_renderer import (
     render_patch_review_markdown,
     render_patch_review_record_markdown,
 )
-from .patch_service import PatchReviewService
+from .patch_service import PatchReviewOptions, PatchReviewService, PatchReviewTaskRequest
 
+# LLM: patch bundle types are exported here so managers and CLIs share one import surface.
 __all__ = [
+    "PatchApplyOptions",
     "PatchApplyService",
+    "PatchReviewOptions",
     "PatchReviewService",
+    "PatchReviewTaskRequest",
     "build_unified_diff",
     "render_patch_apply_markdown",
     "render_patch_apply_record_markdown",

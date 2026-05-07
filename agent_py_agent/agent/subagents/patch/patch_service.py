@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,6 +19,54 @@ if TYPE_CHECKING:
     from ..models import SubAgentTask
 
 _VALID_PATCH_STATUSES = {"applied", "planned", "blocked"}
+
+
+@dataclass(frozen=True)
+class PatchReviewOptions:
+    """Options bundle for patch review report entrypoints."""
+
+    # LLM: review policy options stay grouped while legacy kwargs remain thin adapters.
+    apply: bool = False
+    reviewer: str = "parent"
+    note: str = ""
+    limit: int = 0
+
+    @classmethod
+    def from_values(cls, options: PatchReviewOptions | None = None, **overrides):
+        base = options or cls()
+        clean = {key: value for key, value in overrides.items() if value is not None}
+        return replace(base, **clean)
+
+
+@dataclass(frozen=True)
+class PatchReviewTaskRequest:
+    """Request bundle for reviewing one task's patches."""
+
+    # LLM: per-task review state is passed as one request to avoid partial call-site drift.
+    task: SubAgentTask
+    output: dict
+    patches: list[dict]
+    options: PatchReviewOptions
+
+
+def _patch_review_options(
+    options: PatchReviewOptions | None,
+    *,
+    apply: bool,
+    reviewer: str,
+    note: str,
+    limit: int,
+) -> PatchReviewOptions:
+    if options is not None and (apply, reviewer, note, limit) == (False, "parent", "", 0):
+        return options
+    return PatchReviewOptions.from_values(
+        options,
+        apply=apply,
+        reviewer=reviewer,
+        note=note,
+        limit=limit,
+    )
+
 
 def _categorize_patches(patches: list[dict]) -> tuple[list, list, list]:
     blocked = [item for item in patches if str(item.get("status", "")).lower() in {"planned", "blocked"}]
@@ -65,6 +114,7 @@ class PatchReviewService:
         self,
         run_ids=None,
         *,
+        options: PatchReviewOptions | None = None,
         apply=False,
         reviewer="parent",
         note="",
@@ -78,6 +128,13 @@ class PatchReviewService:
         from ..parsing import _dict_list
         from ..utils import _read_json_object
 
+        opts = _patch_review_options(
+            options,
+            apply=apply,
+            reviewer=reviewer,
+            note=note,
+            limit=limit,
+        )
         selected = self.manager._select_runs(run_ids)
         records = []
         for task in selected:
@@ -87,20 +144,20 @@ class PatchReviewService:
                 continue
             records.append(
                 self._review_patch_task(
-                    task,
-                    output=output,
-                    patches=patches,
-                    apply=apply,
-                    reviewer=reviewer,
-                    note=note,
+                    PatchReviewTaskRequest(
+                        task=task,
+                        output=output,
+                        patches=patches,
+                        options=opts,
+                    )
                 )
             )
-            if limit > 0 and len(records) >= limit:
+            if opts.limit > 0 and len(records) >= opts.limit:
                 break
 
         return PatchReviewReport(
             generated_at=time.time(),
-            dry_run=not apply,
+            dry_run=not opts.apply,
             summary=_patch_review_summary(records),
             records=records,
         )
@@ -109,6 +166,7 @@ class PatchReviewService:
         self,
         run_ids=None,
         *,
+        options: PatchReviewOptions | None = None,
         apply=False,
         reviewer="parent",
         note="",
@@ -116,7 +174,14 @@ class PatchReviewService:
     ) -> PatchReviewReport:
         from .patch_renderer import render_patch_review_markdown
 
-        report = self.review_patches(run_ids, apply=apply, reviewer=reviewer, note=note, limit=limit)
+        opts = _patch_review_options(
+            options,
+            apply=apply,
+            reviewer=reviewer,
+            note=note,
+            limit=limit,
+        )
+        report = self.review_patches(run_ids, options=opts)
         self._write_report_json(report)
         (self.manager.workspace / "SUBAGENT_PATCH_REVIEW.md").write_text(
             render_patch_review_markdown(report), encoding="utf-8",
@@ -124,7 +189,7 @@ class PatchReviewService:
         for record in report.records:
             self._write_patch_review_record_files(record)
             self.manager._index_patch_review(record)
-            if apply:
+            if opts.apply:
                 self._append_patch_review_log(record)
         self.manager._index_report("subagent_patch_review_report", "latest", "Subagent patch review report", report, event_type="subagent_patch_review_report_written")
         return report
@@ -136,31 +201,42 @@ class PatchReviewService:
 
     def _review_patch_task(
         self,
-        task: SubAgentTask,
+        task: SubAgentTask | PatchReviewTaskRequest,
         *,
-        output: dict,
-        patches: list[dict],
-        apply: bool,
-        reviewer: str,
-        note: str,
+        output: dict | None = None,
+        patches: list[dict] | None = None,
+        apply: bool = False,
+        reviewer: str = "parent",
+        note: str = "",
     ) -> PatchReviewRecord:
+        if isinstance(task, PatchReviewTaskRequest):
+            request = task
+            task = request.task
+            output = request.output
+            patches = request.patches
+            opts = request.options
+        else:
+            opts = PatchReviewOptions(apply=apply, reviewer=reviewer, note=note)
+            output = output or {}
+            patches = patches or []
+
         now = time.time()
         blocked, invalid, applied_patches = _categorize_patches(patches)
         ok = bool(patches) and not blocked and not invalid
         decision, message = _build_review_message(patches, blocked, invalid, applied_patches)
         reviewed_patches = [dict(item) for item in patches]
 
-        if apply and patches:
-            self._apply_review_status(reviewed_patches, ok, reviewer, now, note)
+        if opts.apply and patches:
+            self._apply_review_status(reviewed_patches, ok, opts.reviewer, now, opts.note)
             output["patches"] = reviewed_patches
             Path(task.output_json).write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
-            self.manager._append_task_work_log(task, f"patch_review: {'approved' if ok else 'blocked'}={len(reviewed_patches)} reviewer={reviewer}")
+            self.manager._append_task_work_log(task, f"patch_review: {'approved' if ok else 'blocked'}={len(reviewed_patches)} reviewer={opts.reviewer}")
 
         return PatchReviewRecord(
-            id=_new_id("patchreview"), run_id=task.id, dry_run=not apply,
-            applied=apply and bool(patches), ok=ok, decision=decision, message=message,
+            id=_new_id("patchreview"), run_id=task.id, dry_run=not opts.apply,
+            applied=opts.apply and bool(patches), ok=ok, decision=decision, message=message,
             patch_count=len(patches), approved_count=len(reviewed_patches) if ok else 0,
-            blocked_count=len(blocked) + len(invalid), reviewer=reviewer, note=note,
+            blocked_count=len(blocked) + len(invalid), reviewer=opts.reviewer, note=opts.note,
             evidence_paths=[task.output_json, task.work_log_file], patches=reviewed_patches, created_at=now,
         )
 

@@ -209,6 +209,9 @@ class TestCmdSubagentsApplyActions:
              patch("agent_py_agent.cli._actions.load_capability_config", return_value=MagicMock()):
             result = cmd_subagents_apply_actions(args)
             assert result == 0
+        call_kwargs = mock_agent.subagents.write_action_apply_report.call_args.kwargs
+        assert call_kwargs["options"].apply is False
+        assert call_kwargs["options"].locked_files == []
 
 
 class TestCmdSubagentsRouteCapabilities:
@@ -264,6 +267,12 @@ class TestCmdSubagentsAcceptance:
         with patch("agent_py_agent.cli._review.make_agent", return_value=mock_agent):
             result = cmd_subagents_acceptance(args)
             assert result == 0
+        call_kwargs = mock_agent.subagents.write_acceptance_review_report.call_args.kwargs
+        assert call_kwargs["run_ids"] is None
+        assert call_kwargs["options"].apply is False
+        assert call_kwargs["options"].reviewer == "parent"
+        assert call_kwargs["options"].note == ""
+        assert call_kwargs["options"].limit == 10
 
 
 class TestCmdSubagentsPatches:
@@ -290,6 +299,12 @@ class TestCmdSubagentsPatches:
         with patch("agent_py_agent.cli._review.make_agent", return_value=mock_agent):
             result = cmd_subagents_patches(args)
             assert result == 0
+        call_kwargs = mock_agent.subagents.write_patch_review_report.call_args.kwargs
+        assert call_kwargs["run_ids"] is None
+        assert call_kwargs["options"].apply is False
+        assert call_kwargs["options"].reviewer == "parent"
+        assert call_kwargs["options"].note == ""
+        assert call_kwargs["options"].limit == 10
 
 
 class TestCmdSubagentsDispatch:

@@ -8,6 +8,7 @@ SubAgentManager 通过 facade 方法委托到这里。
 """
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -26,6 +27,19 @@ from .rescue_policy import action_rescue_record_fields
 if TYPE_CHECKING:
     from ..models import ActionApplyRecord, ActionPlanItem, SubAgentTask
     from ..reports import ActionApplyRecord
+
+
+@dataclass(frozen=True)
+class RecordAfterTaskActionParams:
+    """Params bundle for creating a post-mutation action apply record."""
+
+    # LLM: action record creation receives one mutation context bundle after task changes.
+    action: ActionPlanItem
+    task: SubAgentTask
+    before_status: str
+    before_channel_status: str
+    message: str
+    evidence_paths: list[str] | None = None
 
 
 class SubAgentActionService:
@@ -131,32 +145,45 @@ class SubAgentActionService:
 
     def _record_after_task_action(
         self,
-        action: ActionPlanItem,
-        task: SubAgentTask,
-        before_status: str,
-        before_channel_status: str,
-        message: str,
+        action: ActionPlanItem | RecordAfterTaskActionParams,
+        task: SubAgentTask | None = None,
+        before_status: str = "",
+        before_channel_status: str = "",
+        message: str = "",
         *,
         evidence_paths: list[str] | None = None,
     ) -> ActionApplyRecord:
         """Create an apply record after task modification."""
         from ..reports import ActionApplyRecord
+
+        if isinstance(action, RecordAfterTaskActionParams):
+            params = action
+        else:
+            params = RecordAfterTaskActionParams(
+                action=action,
+                task=task,
+                before_status=before_status,
+                before_channel_status=before_channel_status,
+                message=message,
+                evidence_paths=evidence_paths,
+            )
+
         return ActionApplyRecord(
             id=self.manager._new_id("apply"),
-            action_id=action.id,
-            run_id=action.run_id,
-            action=action.action,
+            action_id=params.action.id,
+            run_id=params.action.run_id,
+            action=params.action.action,
             dry_run=False,
             applied=True,
             ok=True,
-            message=message,
-            before_status=before_status,
-            after_status=task.status,
-            before_channel_status=before_channel_status,
-            after_channel_status=task.channel_status,
+            message=params.message,
+            before_status=params.before_status,
+            after_status=params.task.status,
+            before_channel_status=params.before_channel_status,
+            after_channel_status=params.task.channel_status,
             # LLM: apply logs preserve the rescue/escalation decision that led here.
-            **action_rescue_record_fields(action),
-            evidence_paths=evidence_paths or [task.work_log_file],
+            **action_rescue_record_fields(params.action),
+            evidence_paths=params.evidence_paths or [params.task.work_log_file],
             created_at=time.time(),
         )
 

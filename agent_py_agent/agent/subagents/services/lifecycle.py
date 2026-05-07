@@ -72,6 +72,18 @@ class RecordEvidenceParams:
     ok: bool = True
 
 
+@dataclass(frozen=True)
+class SetStatusParams:
+    """Params bundle for set_status."""
+
+    # LLM: status mutations use an explicit bundle so evidence gates can grow independently.
+    run_id: str
+    status: str
+    result: str = ""
+    failure_type: str = ""
+    require_evidence: bool = False
+
+
 class SubAgentLifecycleService:
     """Mutate lifecycle fields on subagent tasks through the manager facade."""
 
@@ -188,22 +200,33 @@ class SubAgentLifecycleService:
 
     def set_status(
         self,
-        run_id: str,
-        status: str,
+        run_id: str | SetStatusParams,
+        status: str = "",
         *,
         result: str = "",
         failure_type: str = "",
         require_evidence: bool = False,
     ) -> SubAgentTask:
-        task = self.manager.load(run_id)
-        normalized = status.upper()
-        if require_evidence and normalized == "DONE" and not task.evidence:
+        if isinstance(run_id, SetStatusParams):
+            params = run_id
+        else:
+            params = SetStatusParams(
+                run_id=run_id,
+                status=status,
+                result=result,
+                failure_type=failure_type,
+                require_evidence=require_evidence,
+            )
+
+        task = self.manager.load(params.run_id)
+        normalized = params.status.upper()
+        if params.require_evidence and normalized == "DONE" and not task.evidence:
             raise ValueError("缺少验收证据，不能标记为 DONE。")
         task.status = normalized
-        if result:
-            task.result = result
-        if failure_type:
-            task.failure_type = failure_type
+        if params.result:
+            task.result = params.result
+        if params.failure_type:
+            task.failure_type = params.failure_type
         if normalized in {"DONE", "FAILED", "BLOCKED", "CHANNEL_ERROR", "TIMEOUT"}:
             task.ended_at = time.time()
         task.updated_at = time.time()

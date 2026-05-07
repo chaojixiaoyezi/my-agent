@@ -145,6 +145,32 @@ Shared workspace 是同一 task 下 sibling 子代理共享任务局部事实的
 
 `memory-resume` 应被理解为恢复入口生成器，而不是把子代理内容写入主 memory。
 
+## Bundle 接口规范
+
+后续 runtime memory、subagent、compact、gateway 和 CLI 业务接口统一按 bundle 风格演进。目标不是把每个小 helper 都包装起来，而是让可扩展的业务边界稳定、可审计、好兼容。
+
+命名规则：
+
+- 业务入口的复杂输入使用 `XxxRequest`。如果只是配置开关、筛选条件或构建参数，可以用 `XxxOptions` / `XxxParams`，但同一领域内必须保持一致。
+- 复杂输出使用 `XxxResult` / 已存在的 `XxxRecord` / `XxxReport`，不要返回松散 tuple。
+- CLI 层可以接收 `argparse args`，但进入 manager/service 前必须转换成 Request/Options bundle，不能把 `args` 继续向业务层深传。
+- manager/public service 可以短期保留旧参数签名作为兼容 wrapper，但内部应立即构造 bundle，再调用核心实现。
+- 新增字段优先加到 bundle dataclass 中，不继续拉长函数签名。
+
+适用范围：
+
+- 必须 bundle：跨模块调用、会写文件/状态、会调用模型/工具、未来可能扩展 policy/gate/retention/verifier 的接口。
+- 可以不 bundle：纯内部小 helper、单一值转换、局部渲染函数、只有一两个稳定参数且无状态副作用的函数。
+- 复杂 helper 如果参数超过 3 个业务含义字段，优先抽成 dataclass bundle。
+
+兼容要求：
+
+- bundle 改造不得破坏旧 CLI 和已有测试；旧入口保留时应作为薄 wrapper。
+- bundle dataclass 字段必须有明确默认值或显式必填语义。
+- 写入型 Request 必须能表达 `apply/dry_run`、reviewer、note、now/test clock、目标路径或 scope。
+- Result 必须带可审计 refs，例如写入文件路径、export log、report path、record id。
+- 不允许为了 bundle 化引入新依赖，不允许把 `dict[str, object]` 当作长期替代 Request。
+
 ## 当前实现对齐状态
 
 - 已有 `memory_archive` raw/hook/snapshot、token ledger 和 resume brief 雏形。
@@ -160,6 +186,7 @@ Shared workspace 是同一 task 下 sibling 子代理共享任务局部事实的
 - 已新增 `memory_archive/memory_gate.py`，先创建 run-local memory/skill candidate gate：`candidates.jsonl`、`review_queue.jsonl`、`skill_spark_gate.json` 只记录候选、证据、适用范围和 review 要求，默认 `not_promoted`。
 - 已新增 `subagents-memory-gate` 显式 review decision 写回：`decisions.jsonl` 记录 reviewer、decision、note 和 `auto_promote=false`；approve 只改变 gate 状态，不执行长期 memory/skill 导出。
 - 已新增 Phase 6 显式收口链：retention 只压缩 active review queue 并保留审计；`--export-memory` 只导出 `approve_memory` 候选；`--export-skill` 只生成 draft；`--verify` 写边界检查报告，确认没有自动提升。
+- 已开始按 bundle 接口规范收敛：memory gate review/retention/export 使用 Request/Result bundle，acceptance review service 已通过 `AcceptanceReviewRequest` 进入核心实现，manager 旧签名保留为兼容 wrapper。
 
 后续主要差距：
 

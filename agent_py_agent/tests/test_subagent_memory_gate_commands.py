@@ -76,6 +76,11 @@ def test_cmd_subagents_memory_gate_records_review(tmp_path: Path, capsys):
     assert result == 0
     assert "SUBAGENT MEMORY GATE REVIEW" in output
     assert "approved_for_memory_export" in output
+    call_args = mock_agent.subagents.review_memory_gate_candidate.call_args.args
+    assert call_args[0] == "run_001"
+    assert call_args[1].candidate_id == "memgate-run_001-abc"
+    assert call_args[1].decision == "approve_memory"
+    assert call_args[1].note == "证据已核验"
 
 
 def test_cmd_subagents_memory_gate_exports_memory(tmp_path: Path, capsys):
@@ -100,6 +105,11 @@ def test_cmd_subagents_memory_gate_exports_memory(tmp_path: Path, capsys):
     assert result == 0
     assert "SUBAGENT MEMORY GATE EXPORT MEMORY" in output
     assert "exported=1" in output
+    call_args = mock_agent.subagents.export_memory_gate_candidates_to_memory.call_args.args
+    call_kwargs = mock_agent.subagents.export_memory_gate_candidates_to_memory.call_args.kwargs
+    assert call_args == ("run_001",)
+    assert call_kwargs["request"].candidate_id == "memgate-run_001-abc"
+    assert call_kwargs["request"].memory_path == tmp_path / "memory.jsonl"
 
 
 def test_cmd_subagents_memory_gate_retention_and_verify(tmp_path: Path, capsys):

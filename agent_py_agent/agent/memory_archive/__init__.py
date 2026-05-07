@@ -11,19 +11,27 @@ LLM: compact chain helpers are exported without enabling destructive compact app
 LLM: shared workspace helpers stay task-local and do not write main memory.
 """
 
+# LLM: bundle request exports keep archive call sites stable as runtime memory grows.
 # LLM: keep task/run workspace adapter exports centralized for callers.
 from .agent_run_workspace import (
     AgentRunWorkspacePaths,
+    EnsureAgentRunWorkspaceRequest,
     agent_run_workspace_paths,
     ensure_agent_run_workspace,
 )
-from .artifact_registry import ArtifactManifestResult, sync_artifact_manifests
+from .artifact_registry import (
+    ArtifactManifestResult,
+    SyncArtifactManifestsRequest,
+    sync_artifact_manifests,
+)
 from .compact_chain import (
     CompactChainResult,
+    SyncAgentRunCompactChainRequest,
     default_compact_chain_result,
     sync_agent_run_compact_chain,
 )
 from .daily_ledger import (
+    AppendSubagentTaskEventRequest,
     DailyLedgerAppendResult,
     DailyLedgerWorkspaceRefs,
     append_subagent_task_event,
@@ -32,7 +40,12 @@ from .daily_ledger import (
 from .models import CompressionSnapshot, RawMemoryEvent
 from .resume_context import ResumeContextResult, build_auto_resume_context
 from .runtime import ArchiveRunTurnResult, archive_run_turn
-from .shared_workspace import SharedWorkspaceResult, shared_workspace_paths, sync_shared_workspace
+from .shared_workspace import (
+    SharedWorkspaceResult,
+    SyncSharedWorkspaceRequest,
+    shared_workspace_paths,
+    sync_shared_workspace,
+)
 from .snapshots import (
     CompressionHookResult,
     RecoverySnapshotResult,
@@ -55,7 +68,12 @@ from .storage import (
     snapshot_path_for,
     write_compression_snapshot_file,
 )
-from .task_workspace import TaskWorkspacePaths, ensure_subagent_task_workspace, task_workspace_path
+from .task_workspace import (
+    EnsureSubagentTaskWorkspaceRequest,
+    TaskWorkspacePaths,
+    ensure_subagent_task_workspace,
+    task_workspace_path,
+)
 from .tokens import (
     TurnTokenUsage,
     append_session_token_usage,
@@ -68,10 +86,13 @@ __all__ = [
     "CompressionSnapshot",
     "ArchiveRunTurnResult",
     "AgentRunWorkspacePaths",
+    "AppendSubagentTaskEventRequest",
     "ArtifactManifestResult",
     "CompactChainResult",
     "DailyLedgerAppendResult",
     "DailyLedgerWorkspaceRefs",
+    "EnsureAgentRunWorkspaceRequest",
+    "EnsureSubagentTaskWorkspaceRequest",
     "TurnTokenUsage",
     "CompressionHookResult",
     "MemoryArchiveError",
@@ -79,6 +100,9 @@ __all__ = [
     "RecoverySnapshotResult",
     "ResumeContextResult",
     "SharedWorkspaceResult",
+    "SyncAgentRunCompactChainRequest",
+    "SyncArtifactManifestsRequest",
+    "SyncSharedWorkspaceRequest",
     "TaskWorkspacePaths",
     "archive_run_turn",
     "append_raw_event",

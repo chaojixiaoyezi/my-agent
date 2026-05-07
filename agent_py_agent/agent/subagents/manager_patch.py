@@ -10,7 +10,7 @@ Human version:
 
 from typing import TYPE_CHECKING
 
-from .patch import PatchApplyService, PatchReviewService
+from .patch import PatchApplyOptions, PatchApplyService, PatchReviewOptions, PatchReviewService
 from .patch.patch_apply_helpers import extract_patch_test_command, validate_patch_test_command
 from .patch.patch_renderer import build_unified_diff
 from .services.patch_apply_helper import PatchApplyTaskHelper
@@ -18,6 +18,7 @@ from .services.patch_review_helper import PatchReviewTaskHelper
 from .services.patch_spec_normalizer import PatchApplySpecNormalizer
 from .utils import _read_json_object  # noqa: F401 - re-exported for backward compat
 
+# LLM: patch manager forwards bundle options to services and keeps old kwargs as adapters.
 if TYPE_CHECKING:
     from ..local_store import LocalStore
 
@@ -37,6 +38,7 @@ class SubAgentPatchMixin:
         self,
         run_ids=None,
         *,
+        options: PatchReviewOptions | None = None,
         apply=False,
         reviewer="parent",
         note="",
@@ -46,6 +48,7 @@ class SubAgentPatchMixin:
 
         return self._patch_review_service.review_patches(
             run_ids,
+            options=options,
             apply=apply,
             reviewer=reviewer,
             note=note,
@@ -56,6 +59,7 @@ class SubAgentPatchMixin:
         self,
         run_ids=None,
         *,
+        options: PatchReviewOptions | None = None,
         apply=False,
         reviewer="parent",
         note="",
@@ -65,6 +69,7 @@ class SubAgentPatchMixin:
 
         return self._patch_review_service.write_review_report(
             run_ids,
+            options=options,
             apply=apply,
             reviewer=reviewer,
             note=note,
@@ -75,6 +80,7 @@ class SubAgentPatchMixin:
         self,
         run_ids=None,
         *,
+        options: PatchApplyOptions | None = None,
         apply=False,
         applier="parent",
         note="",
@@ -84,6 +90,7 @@ class SubAgentPatchMixin:
 
         return self._patch_apply_service.apply_patches(
             run_ids,
+            options=options,
             apply=apply,
             applier=applier,
             note=note,
@@ -94,6 +101,7 @@ class SubAgentPatchMixin:
         self,
         run_ids=None,
         *,
+        options: PatchApplyOptions | None = None,
         apply=False,
         applier="parent",
         note="",
@@ -103,6 +111,7 @@ class SubAgentPatchMixin:
 
         return self._patch_apply_service.write_apply_report(
             run_ids,
+            options=options,
             apply=apply,
             applier=applier,
             note=note,

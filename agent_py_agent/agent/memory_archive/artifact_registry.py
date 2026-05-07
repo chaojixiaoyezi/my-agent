@@ -25,6 +25,17 @@ class ArtifactManifestResult:
 
 
 @dataclass(frozen=True)
+class SyncArtifactManifestsRequest:
+    """Bundle inputs for syncing task/run artifact manifests."""
+
+    # LLM: artifact sync stays reference-only, so future fields belong on this explicit request.
+    task: Any
+    task_workspace_root: Path
+    agent_run_workspace_root: Path
+    now: float
+
+
+@dataclass(frozen=True)
 class _ArtifactRecordContext:
     task_id: str
     run_id: str
@@ -32,20 +43,57 @@ class _ArtifactRecordContext:
 
 
 def sync_artifact_manifests(
-    task: Any,
+    request: SyncArtifactManifestsRequest | Any = None,
     *,
-    task_workspace_root: Path,
-    agent_run_workspace_root: Path,
-    now: float,
+    task: Any | None = None,
+    task_workspace_root: Path | None = None,
+    agent_run_workspace_root: Path | None = None,
+    now: float | None = None,
 ) -> ArtifactManifestResult:
     """Write task-level and run-level artifact manifests from task artifact refs."""
 
-    records = _artifact_records(task, now)
-    task_manifest = task_workspace_root / "artifacts" / "manifest.jsonl"
-    agent_manifest = agent_run_workspace_root / "artifacts" / "manifest.jsonl"
+    inputs = _coerce_sync_request(
+        request,
+        task=task,
+        task_workspace_root=task_workspace_root,
+        agent_run_workspace_root=agent_run_workspace_root,
+        now=now,
+    )
+    records = _artifact_records(inputs.task, inputs.now)
+    task_manifest = inputs.task_workspace_root / "artifacts" / "manifest.jsonl"
+    agent_manifest = inputs.agent_run_workspace_root / "artifacts" / "manifest.jsonl"
     _write_manifest(task_manifest, records)
     _write_manifest(agent_manifest, records)
     return ArtifactManifestResult(task_manifest_jsonl=task_manifest, agent_manifest_jsonl=agent_manifest)
+
+
+def _coerce_sync_request(
+    request: SyncArtifactManifestsRequest | Any,
+    *,
+    task: Any | None,
+    task_workspace_root: Path | None,
+    agent_run_workspace_root: Path | None,
+    now: float | None,
+) -> SyncArtifactManifestsRequest:
+    if isinstance(request, SyncArtifactManifestsRequest):
+        return request
+    resolved_task = request if request is not None else task
+    if (
+        resolved_task is None
+        or task_workspace_root is None
+        or agent_run_workspace_root is None
+        or now is None
+    ):
+        raise TypeError(
+            "sync_artifact_manifests requires task, task_workspace_root, "
+            "agent_run_workspace_root, and now"
+        )
+    return SyncArtifactManifestsRequest(
+        task=resolved_task,
+        task_workspace_root=Path(task_workspace_root),
+        agent_run_workspace_root=Path(agent_run_workspace_root),
+        now=now,
+    )
 
 
 def _artifact_records(task: Any, now: float) -> list[dict[str, object]]:
@@ -145,4 +193,8 @@ def _safe_segment(value: str) -> str:
     return str(value or "item").replace("/", "_").replace("\\", "_").strip() or "item"
 
 
-__all__ = ["ArtifactManifestResult", "sync_artifact_manifests"]
+__all__ = [
+    "ArtifactManifestResult",
+    "SyncArtifactManifestsRequest",
+    "sync_artifact_manifests",
+]
