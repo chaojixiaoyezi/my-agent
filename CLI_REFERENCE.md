@@ -780,17 +780,29 @@ my-agent subagents-patches --apply --run-id <run_id> --reviewer parent
 ```powershell
 my-agent subagents-memory-gate <run_id>
 my-agent subagents-memory-gate <run_id> --candidate-id <candidate_id> --decision approve_memory --reviewer parent
+my-agent subagents-memory-gate <run_id> --export-memory --candidate-id <candidate_id>
+my-agent subagents-memory-gate <run_id> --export-skill --candidate-id <candidate_id>
+my-agent subagents-memory-gate <run_id> --retention-dry-run
+my-agent subagents-memory-gate <run_id> --retention-apply
+my-agent subagents-memory-gate <run_id> --verify
 ```
 
-这个命令只处理 `tasks/<root_id>/agents/<run_id>/memory_gate/` 里的候选 review 状态，不会把候选写入主代理长期 memory，也不会生成正式 skill。`approve_memory` / `approve_skill` 只是允许后续显式导出流程继续。
+这个命令默认只处理 `tasks/<root_id>/agents/<run_id>/memory_gate/` 里的候选 review 状态。显式传 `--export-memory` 才会把 `approve_memory` 候选写入主代理长期 memory JSONL；显式传 `--export-skill` 才会把 `approve_skill` 候选写成本地 skill draft。`--retention-apply` 只压缩 active review queue，不删除候选、decision 或 export 审计日志。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `run_id` | - | 子代理运行 ID。 |
+| `--retention-dry-run` | `false` | 只生成 retention 清理计划和 `retention_report.json`。 |
+| `--retention-apply` | `false` | 应用 retention：从 active review queue 移除 closed 候选，但保留审计日志。 |
+| `--export-memory` | `false` | 把已 `approve_memory` 的候选显式导出到主 memory JSONL。 |
+| `--export-skill` | `false` | 把已 `approve_skill` 的候选显式导出为 skill draft，不安装正式 skill。 |
+| `--verify` | `false` | 写 `verifier_report.json`，检查 gate/export 没有自动提升或边界破坏。 |
 | `--candidate-id <id>` | - | 要写回 review decision 的候选 ID；不传时只列出候选。 |
 | `--decision <value>` | `needs_evidence` | 可选 `approve_memory`、`approve_skill`、`reject`、`needs_evidence`。 |
 | `--reviewer <name>` | `parent` | review 者标识。 |
 | `--note <text>` | - | 写入 `decisions.jsonl` 的备注。 |
+| `--memory-path <path>` | 当前 agent memory | `--export-memory` 的目标 JSONL。 |
+| `--skill-output-dir <path>` | run-local `memory_gate/skill_drafts` | `--export-skill` 的草稿输出目录。 |
 | `--limit <n>` | `20` | 列表模式最多显示多少条候选。 |
 
 ## `subagents-dispatch`

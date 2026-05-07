@@ -122,6 +122,12 @@ def _add_agents_memory_gate_subcommands(sub):
     # LLM: memory-gate review is explicit and never performs memory/skill export.
     memory_gate = sub.add_parser("subagents-memory-gate", help="查看或写回 memory gate review decision")
     memory_gate.add_argument("run_id", help="子代理运行 ID")
+    memory_gate_mode = memory_gate.add_mutually_exclusive_group()
+    memory_gate_mode.add_argument("--retention-dry-run", action="store_true", help="只生成 retention 清理计划")
+    memory_gate_mode.add_argument("--retention-apply", action="store_true", help="应用 retention：压缩 active review queue，但保留审计日志")
+    memory_gate_mode.add_argument("--export-memory", action="store_true", help="把 approve_memory 候选显式导出到主 memory JSONL")
+    memory_gate_mode.add_argument("--export-skill", action="store_true", help="把 approve_skill 候选显式导出为 skill draft")
+    memory_gate_mode.add_argument("--verify", action="store_true", help="检查 memory gate 没有自动提升或边界破坏")
     memory_gate.add_argument("--candidate-id", help="要写回 review decision 的候选 ID；不传则只列出候选")
     memory_gate.add_argument(
         "--decision",
@@ -131,6 +137,8 @@ def _add_agents_memory_gate_subcommands(sub):
     )
     memory_gate.add_argument("--reviewer", default="parent", help="reviewer 标识")
     memory_gate.add_argument("--note", help="写入 decision log 的备注")
+    memory_gate.add_argument("--memory-path", help="export-memory 的目标 JSONL；默认使用当前 agent memory_path")
+    memory_gate.add_argument("--skill-output-dir", help="export-skill 的草稿输出目录；默认写入 run memory_gate/skill_drafts")
     memory_gate.add_argument("--limit", type=int, default=20, help="列表模式最多显示多少条候选")
     memory_gate.set_defaults(func=cmd_subagents_memory_gate)
 

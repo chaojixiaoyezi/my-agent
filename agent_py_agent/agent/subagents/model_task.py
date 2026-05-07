@@ -180,6 +180,8 @@ class SubAgentTask:
     agent_run_memory_review_queue_jsonl: str = ""
     # LLM: decision logs are audit refs; they are not long-term memory exports.
     agent_run_memory_decisions_jsonl: str = ""
+    # LLM: export logs are explicit promotion audit refs, never automatic writes.
+    agent_run_memory_exports_jsonl: str = ""
     agent_run_skill_spark_gate_json: str = ""
     handoff_file: str = ""
     debrief_file: str = ""
