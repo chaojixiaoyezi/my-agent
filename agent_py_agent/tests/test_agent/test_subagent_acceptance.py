@@ -58,6 +58,28 @@ def _setup_acceptance_task(agent, task):
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _actual_tool_evidence_output() -> str:
+    return (
+        "[SUBAGENT_RESULT]\n"
+        "{\n"
+        '  "status": "AWAITING_ACCEPTANCE",\n'
+        '  "summary": "已读取 README 并写入报告",\n'
+        '  "used_tools": ["read_file", "write_file"],\n'
+        '  "evidence": [\n'
+        '    {"kind": "command", "summary": "读取 README.md 成功", "path": "README.md", "ok": true},\n'
+        '    {"kind": "command", "summary": "写入报告成功", "path": "scenario_outputs/demo.md", "ok": true}\n'
+        "  ],\n"
+        '  "evidence_packets": [\n'
+        '    {"id": "evpkt-tools", "claim": "README 已读取且报告已写入", "checked_scope": "README.md + scenario_outputs/demo.md", "evidence_refs": ["README.md", "scenario_outputs/demo.md"], "artifact_refs": ["scenario_outputs/demo.md"], "confidence": 0.9}\n'
+        "  ],\n"
+        '  "artifacts": [],\n'
+        '  "tests": [],\n'
+        '  "patches": []\n'
+        "}\n"
+        "[/SUBAGENT_RESULT]"
+    )
+
+
 def test_subagent_acceptance_dry_run_and_apply():
     """LLM: Verifies dry-run acceptance reports ACCEPT but does not change status; apply transitions to DONE."""
     with tempfile.TemporaryDirectory() as td:
@@ -167,25 +189,7 @@ def test_subagent_acceptance_uses_actual_tool_evidence_from_runner():
             allowed_tools=["read_file", "write_file"],
             acceptance_checks=["必须有 read_file 证据；必须有 write_file 证据"],
         )
-        parsed = parse_subagent_runner_output(
-            "[SUBAGENT_RESULT]\n"
-            "{\n"
-            '  "status": "AWAITING_ACCEPTANCE",\n'
-            '  "summary": "已读取 README 并写入报告",\n'
-            '  "used_tools": ["read_file", "write_file"],\n'
-            '  "evidence": [\n'
-            '    {"kind": "command", "summary": "读取 README.md 成功", "path": "README.md", "ok": true},\n'
-            '    {"kind": "command", "summary": "写入报告成功", "path": "scenario_outputs/demo.md", "ok": true}\n'
-            "  ],\n"
-            '  "evidence_packets": [\n'
-            '    {"id": "evpkt-tools", "claim": "README 已读取且报告已写入", "checked_scope": "README.md + scenario_outputs/demo.md", "evidence_refs": ["README.md", "scenario_outputs/demo.md"], "artifact_refs": ["scenario_outputs/demo.md"], "confidence": 0.9}\n'
-            "  ],\n"
-            '  "artifacts": [],\n'
-            '  "tests": [],\n'
-            '  "patches": []\n'
-            "}\n"
-            "[/SUBAGENT_RESULT]"
-        )
+        parsed = parse_subagent_runner_output(_actual_tool_evidence_output())
         agent.subagents.record_runner_result(
             _rrr(
                 task.id,

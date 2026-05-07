@@ -49,6 +49,42 @@ def _populate_query_store(root: Path, *, count: int = 6, attacker_ip: str = "198
     return store
 
 
+def _run_limited_hunt(capsys, root: Path) -> tuple[int, dict]:
+    return _run_cli_json(
+        capsys,
+        "logs",
+        "hunt-ip",
+        "198.51.100.77",
+        "--root",
+        str(root),
+        "--role",
+        "attacker",
+        "--start-time",
+        "2026-04-30T00:00:00Z",
+        "--end-time",
+        "2026-04-30T23:59:59Z",
+        "--limit",
+        "10",
+    )
+
+
+def _run_limited_trace(capsys, root: Path) -> tuple[int, dict]:
+    return _run_cli_json(
+        capsys,
+        "logs",
+        "trace-case",
+        "case-1",
+        "--root",
+        str(root),
+        "--start-time",
+        "2026-04-30T00:00:00Z",
+        "--end-time",
+        "2026-04-30T23:59:59Z",
+        "--limit",
+        "10",
+    )
+
+
 def test_logs_status_json_reports_default_disabled_without_worker(capsys):
     code, payload = _run_cli_json(capsys, "logs", "status")
 
@@ -192,36 +228,8 @@ def test_logs_hunt_and_trace_use_configured_max_limit(tmp_path, capsys, monkeypa
         }
     )
 
-    hunt_code, hunt_payload = _run_cli_json(
-        capsys,
-        "logs",
-        "hunt-ip",
-        "198.51.100.77",
-        "--root",
-        str(root),
-        "--role",
-        "attacker",
-        "--start-time",
-        "2026-04-30T00:00:00Z",
-        "--end-time",
-        "2026-04-30T23:59:59Z",
-        "--limit",
-        "10",
-    )
-    trace_code, trace_payload = _run_cli_json(
-        capsys,
-        "logs",
-        "trace-case",
-        "case-1",
-        "--root",
-        str(root),
-        "--start-time",
-        "2026-04-30T00:00:00Z",
-        "--end-time",
-        "2026-04-30T23:59:59Z",
-        "--limit",
-        "10",
-    )
+    hunt_code, hunt_payload = _run_limited_hunt(capsys, root)
+    trace_code, trace_payload = _run_limited_trace(capsys, root)
 
     assert hunt_code == 0
     assert hunt_payload["limit"] == 3

@@ -29,6 +29,17 @@ class ToolSections:
     tool_context: list[str] | None = None
 
 
+@dataclass
+class PromptBuildRequest:
+    """LLM: bundle for PromptBuilder.build inputs."""
+
+    user_prompt: str
+    memories: list[MemoryRecord]
+    inject: list[str] | None = None
+    prompt_files: list[str] | None = None
+    tools: ToolSections | None = None
+
+
 class PromptBuilder:
     """负责构造每一轮发给模型的完整 prompt。"""
 
@@ -54,9 +65,10 @@ class PromptBuilder:
 
     def build(
         self,
-        user_prompt: str,
-        memories: list[MemoryRecord],
+        user_prompt: str = "",
+        memories: list[MemoryRecord] | None = None,
         *,
+        request: PromptBuildRequest | None = None,
         inject: list[str] | None = None,
         prompt_files: list[str] | None = None,
         tools: ToolSections | None = None,
@@ -68,16 +80,17 @@ class PromptBuilder:
         - `tool_recommendations_section`：按当前任务筛出来的少量候选详情，告诉模型'这次大概率该用谁'
         """
 
-        _tools = tools or ToolSections()
+        request = request or PromptBuildRequest(user_prompt, memories or [], inject, prompt_files, tools)
+        _tools = request.tools or ToolSections()
         memory_text = "\n".join(
-            f"- [{m.kind}] {m.role}: {m.content}" for m in memories
+            f"- [{m.kind}] {m.role}: {m.content}" for m in request.memories
         ) or "（无相关记忆）"
-        dynamic = "\n".join(self.read_prompt_files(prompt_files))
-        injected = "\n".join(inject or [])
+        dynamic = "\n".join(self.read_prompt_files(request.prompt_files))
+        injected = "\n".join(request.inject or [])
         tools_history = "\n\n".join(_tools.tool_context or [])
         if tools_history:
             task_and_transcript = (
-                f"# User Task\n{user_prompt}\n\n"
+                f"# User Task\n{request.user_prompt}\n\n"
                 f"# Tool Transcript\n{tools_history}\n\n"
                 "# Continue From Tool Transcript\n"
                 "从最新的工具结果继续推进，不要重新开始任务。"
@@ -87,7 +100,7 @@ class PromptBuilder:
         else:
             task_and_transcript = (
                 "# Tool Transcript\n（无）\n\n"
-                f"# User Task\n{user_prompt}"
+                f"# User Task\n{request.user_prompt}"
             )
         default_tools = "# Tools\n（当前未启用工具）"
         default_recommendations = "# Recommended Tools\n（当前无候选工具详情）"

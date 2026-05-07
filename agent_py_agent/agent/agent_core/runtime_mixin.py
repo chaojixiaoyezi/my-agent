@@ -110,8 +110,7 @@ class SimpleAgentRuntimeMixin:
             self,
             _runtime_loop_params(
                 user_prompt,
-                prepared.memories,
-                prepared.runtime_injections,
+                prepared,
                 params,
             ),
         )

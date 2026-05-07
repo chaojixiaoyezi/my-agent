@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from .gateway_helpers import post_json, post_stream, post_stream_iter
+from .gateway_helpers import GatewayRequest, post_json, post_stream, post_stream_iter
 from .stream_parsers import anthropic_stream_contents, openai_stream_contents
 
 
@@ -81,28 +81,8 @@ class HttpBackend(BaseBackend):
 
     def __init__(
         self,
-        options: BackendOptions | None = None,
-        *,
-        api_base: str | None = None,
-        api_key: str | None = None,
-        model_name: str | None = None,
-        request_timeout: int | str = 60,
-        max_tokens: int | str = 1024,
-        temperature: float | str = 0.2,
-        stream_enabled: bool = True,
+        options: BackendOptions,
     ):
-        if options is None:
-            if api_base is None or api_key is None or model_name is None:
-                raise TypeError("HttpBackend requires BackendOptions or api_base/api_key/model_name")
-            options = BackendOptions(
-                api_base=str(api_base),
-                api_key=str(api_key),
-                model_name=str(model_name),
-                request_timeout=int(request_timeout),
-                max_tokens=int(max_tokens),
-                temperature=float(temperature),
-                stream_enabled=bool(stream_enabled),
-            )
         self.api_base = str(options.api_base).rstrip("/")
         self.api_key = str(options.api_key)
         self.model_name = str(options.model_name)
@@ -118,36 +98,25 @@ class HttpBackend(BaseBackend):
         if not self.api_key:
             raise ValueError("api_key 为空：请在配置文件中填写 API Key。")
 
-        return post_json(
-            self.api_base,
-            self.api_key,
-            path,
-            payload,
-            headers,
-            timeout=self.request_timeout,
-        )
+        return post_json(self._gateway_request(path, payload, headers))
 
     def request_stream(
         self, path: str, payload: dict[str, Any], headers: dict[str, str]
     ) -> list[str]:
-        return post_stream(
-            self.api_base,
-            self.api_key,
-            path,
-            payload,
-            headers,
-            timeout=self.request_timeout,
-        )
+        return post_stream(self._gateway_request(path, payload, headers))
 
     def request_stream_iter(
         self, path: str, payload: dict[str, Any], headers: dict[str, str]
     ):
-        yield from post_stream_iter(
-            self.api_base,
-            self.api_key,
-            path,
-            payload,
-            headers,
+        yield from post_stream_iter(self._gateway_request(path, payload, headers))
+
+    def _gateway_request(self, path: str, payload: dict[str, Any], headers: dict[str, str]) -> GatewayRequest:
+        return GatewayRequest(
+            api_base=self.api_base,
+            api_key=self.api_key,
+            path=path,
+            payload=payload,
+            headers=headers,
             timeout=self.request_timeout,
         )
 
@@ -202,27 +171,10 @@ class AnthropicCompatibleBackend(HttpBackend):
 
     def __init__(
         self,
-        options: BackendOptions | None = None,
-        *,
+        options: BackendOptions,
         anthropic_version: str = "2023-06-01",
-        api_base: str | None = None,
-        api_key: str | None = None,
-        model_name: str | None = None,
-        request_timeout: int | str = 60,
-        max_tokens: int | str = 1024,
-        temperature: float | str = 0.2,
-        stream_enabled: bool = True,
     ):
-        super().__init__(
-            options,
-            api_base=api_base,
-            api_key=api_key,
-            model_name=model_name,
-            request_timeout=request_timeout,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            stream_enabled=stream_enabled,
-        )
+        super().__init__(options)
         self.anthropic_version = anthropic_version
 
     def generate(

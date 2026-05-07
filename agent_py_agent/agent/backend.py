@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from .backends import (  # noqa: F401
     AnthropicCompatibleBackend,
+    BackendOptions,
     BaseBackend,
     EchoBackend,
     HttpBackend,
@@ -20,6 +21,7 @@ from .backends import (  # noqa: F401
 __all__ = [
     "AnthropicCompatibleBackend",
     "BaseBackend",
+    "BackendOptions",
     "EchoBackend",
     "HttpBackend",
     "ModelResponse",

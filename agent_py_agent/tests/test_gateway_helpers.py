@@ -8,11 +8,24 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent_py_agent.agent.backends.gateway_helpers import GatewayRequest
+
 
 class IterableBytesIO(BytesIO):
     """BytesIO that iterates over lines."""
     def __iter__(self):
         return iter(self.readline, b"")
+
+
+def _request(api_key: str = "test-key", payload: dict | None = None) -> GatewayRequest:
+    return GatewayRequest(
+        api_base="https://api.example.com",
+        api_key=api_key,
+        path="/v1/chat",
+        payload=payload or {},
+        headers={"Content-Type": "application/json"},
+        timeout=30,
+    )
 
 
 class TestPostJson:
@@ -22,7 +35,7 @@ class TestPostJson:
         """验证空 api_key 抛出 ValueError。"""
         from agent_py_agent.agent.backends.gateway_helpers import post_json
         with pytest.raises(ValueError, match="api_key 为空"):
-            post_json("https://api.example.com", "", "/v1/chat", {}, {}, timeout=30)
+            post_json(_request(api_key=""))
 
     @patch("urllib.request.urlopen")
     def test_success_response(self, mock_urlopen):
@@ -35,14 +48,7 @@ class TestPostJson:
         mock_urlopen.return_value = mock_response
 
         from agent_py_agent.agent.backends.gateway_helpers import post_json
-        result = post_json(
-            "https://api.example.com",
-            "test-key",
-            "/v1/chat",
-            {"model": "gpt-4"},
-            {"Content-Type": "application/json"},
-            timeout=30,
-        )
+        result = post_json(_request(payload={"model": "gpt-4"}))
         assert result == {"content": "test response"}
 
     @patch("urllib.request.urlopen")
@@ -57,14 +63,7 @@ class TestPostJson:
 
         from agent_py_agent.agent.backends.gateway_helpers import post_json
         with pytest.raises(RuntimeError, match="HTTP 401"):
-            post_json(
-                "https://api.example.com",
-                "bad-key",
-                "/v1/chat",
-                {},
-                {},
-                timeout=30,
-            )
+            post_json(_request(api_key="bad-key"))
 
     @patch("urllib.request.urlopen")
     def test_url_error_is_wrapped_with_endpoint_hint(self, mock_urlopen):
@@ -73,14 +72,7 @@ class TestPostJson:
 
         from agent_py_agent.agent.backends.gateway_helpers import post_json
         with pytest.raises(RuntimeError, match="网络请求失败.*api.example.com"):
-            post_json(
-                "https://api.example.com",
-                "test-key",
-                "/v1/chat",
-                {},
-                {},
-                timeout=30,
-            )
+            post_json(_request())
 
 
 class TestPostStream:
@@ -90,7 +82,7 @@ class TestPostStream:
         """验证空 api_key 抛出 ValueError。"""
         from agent_py_agent.agent.backends.gateway_helpers import post_stream
         with pytest.raises(ValueError, match="api_key 为空"):
-            post_stream("https://api.example.com", "", "/v1/chat", {"stream": True}, {}, timeout=30)
+            post_stream(_request(api_key="", payload={"stream": True}))
 
     @patch("urllib.request.urlopen")
     def test_stream_collects_data_lines(self, mock_urlopen):
@@ -108,14 +100,7 @@ class TestPostStream:
         mock_urlopen.return_value = mock_response
 
         from agent_py_agent.agent.backends.gateway_helpers import post_stream
-        result = post_stream(
-            "https://api.example.com",
-            "test-key",
-            "/v1/chat",
-            {},
-            {},
-            timeout=30,
-        )
+        result = post_stream(_request())
         assert '{"content": "line1"}' in result
         assert '{"content": "line2"}' in result
 
@@ -134,14 +119,7 @@ class TestPostStream:
         mock_urlopen.return_value = mock_response
 
         from agent_py_agent.agent.backends.gateway_helpers import post_stream
-        result = post_stream(
-            "https://api.example.com",
-            "test-key",
-            "/v1/chat",
-            {},
-            {},
-            timeout=30,
-        )
+        result = post_stream(_request())
         assert len(result) == 1
         assert "actual" in result[0]
 
@@ -156,14 +134,7 @@ class TestPostStream:
         mock_urlopen.return_value = mock_response
 
         from agent_py_agent.agent.backends.gateway_helpers import post_stream
-        result = post_stream(
-            "https://api.example.com",
-            "test-key",
-            "/v1/chat",
-            {},
-            {},
-            timeout=30,
-        )
+        result = post_stream(_request())
         assert len(result) == 1
 
 
@@ -174,7 +145,7 @@ class TestPostStreamIter:
         """验证空 api_key 抛出 ValueError。"""
         from agent_py_agent.agent.backends.gateway_helpers import post_stream_iter
         with pytest.raises(ValueError, match="api_key 为空"):
-            list(post_stream_iter("https://api.example.com", "", "/v1/chat", {"stream": True}, {}, timeout=30))
+            list(post_stream_iter(_request(api_key="", payload={"stream": True})))
 
     @patch("urllib.request.urlopen")
     def test_iter_yields_data_lines(self, mock_urlopen):
@@ -190,14 +161,7 @@ class TestPostStreamIter:
         mock_urlopen.return_value = mock_response
 
         from agent_py_agent.agent.backends.gateway_helpers import post_stream_iter
-        result = list(post_stream_iter(
-            "https://api.example.com",
-            "test-key",
-            "/v1/chat",
-            {},
-            {},
-            timeout=30,
-        ))
+        result = list(post_stream_iter(_request()))
         assert len(result) == 2
         assert '{"token": "hello"}' in result[0]
 
@@ -213,14 +177,7 @@ class TestPostStreamIter:
 
         from agent_py_agent.agent.backends.gateway_helpers import post_stream_iter
         with pytest.raises(RuntimeError, match="HTTP 500"):
-            list(post_stream_iter(
-                "https://api.example.com",
-                "test-key",
-                "/v1/chat",
-                {},
-                {},
-                timeout=30,
-            ))
+            list(post_stream_iter(_request()))
 
     @patch("urllib.request.urlopen")
     def test_iter_handles_url_error(self, mock_urlopen):
@@ -229,14 +186,7 @@ class TestPostStreamIter:
 
         from agent_py_agent.agent.backends.gateway_helpers import post_stream_iter
         with pytest.raises(RuntimeError, match="网络请求失败.*api.example.com"):
-            list(post_stream_iter(
-                "https://api.example.com",
-                "test-key",
-                "/v1/chat",
-                {},
-                {},
-                timeout=30,
-            ))
+            list(post_stream_iter(_request()))
 
     @patch("urllib.request.urlopen")
     def test_iter_stops_on_empty_stream(self, mock_urlopen):
@@ -248,12 +198,5 @@ class TestPostStreamIter:
         mock_urlopen.return_value = mock_response
 
         from agent_py_agent.agent.backends.gateway_helpers import post_stream_iter
-        result = list(post_stream_iter(
-            "https://api.example.com",
-            "test-key",
-            "/v1/chat",
-            {},
-            {},
-            timeout=30,
-        ))
+        result = list(post_stream_iter(_request()))
         assert result == []

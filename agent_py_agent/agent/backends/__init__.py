@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from .base import (
     AnthropicCompatibleBackend,
+    BackendOptions,
     BaseBackend,
     EchoBackend,
     HttpBackend,
@@ -20,6 +21,7 @@ from .base import (
 __all__ = [
     "AnthropicCompatibleBackend",
     "BaseBackend",
+    "BackendOptions",
     "EchoBackend",
     "HttpBackend",
     "ModelResponse",

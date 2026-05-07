@@ -55,6 +55,18 @@ def _setup_review_task(agent, task, *, patch_status="applied", patch_summary="å·
     return task
 
 
+def _dispatch_runner_once(agent, router):
+    return agent.dispatch_subagents(
+        router,
+        CapabilityConfig(),
+        apply=True,
+        execute_runners=True,
+        max_runners=1,
+        probe=False,
+        reviewer="dispatch-test",
+    )
+
+
 def test_subagent_dispatch_dry_run_plans_runner_patch_and_acceptance():
     """LLM: Verifies dry-run dispatch plans runner, patch_review, and acceptance steps without mutating state."""
     with tempfile.TemporaryDirectory() as td:
@@ -166,15 +178,7 @@ def test_subagent_dispatch_retries_transient_runner_failure(monkeypatch):
         )
         router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
 
-        first = agent.dispatch_subagents(
-            router,
-            CapabilityConfig(),
-            apply=True,
-            execute_runners=True,
-            max_runners=1,
-            probe=False,
-            reviewer="dispatch-test",
-        )
+        first = _dispatch_runner_once(agent, router)
         after_first = agent.subagents.load(task.id)
 
         assert any(item.step == "runner" and item.action == "execute_runner" and not item.ok for item in first.records)
@@ -183,15 +187,7 @@ def test_subagent_dispatch_retries_transient_runner_failure(monkeypatch):
         assert after_first.runner_attempts == 1
         assert "temporary runner backend outage" in after_first.runner_last_error
 
-        second = agent.dispatch_subagents(
-            router,
-            CapabilityConfig(),
-            apply=True,
-            execute_runners=True,
-            max_runners=1,
-            probe=False,
-            reviewer="dispatch-test",
-        )
+        second = _dispatch_runner_once(agent, router)
         loaded = agent.subagents.load(task.id)
 
         assert any(item.step == "runner" and item.action == "retry_runner" and item.ok for item in second.records)

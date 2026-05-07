@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from io import BytesIO
 from unittest.mock import MagicMock, patch
 
@@ -8,6 +9,7 @@ import pytest
 
 from agent_py_agent.agent.backends.base import (
     AnthropicCompatibleBackend,
+    BackendOptions,
     BaseBackend,
     EchoBackend,
     HttpBackend,
@@ -15,6 +17,20 @@ from agent_py_agent.agent.backends.base import (
     OpenAICompatibleBackend,
     get_backend,
 )
+
+_DEFAULT_OPTIONS = BackendOptions(
+    api_base="https://api.example.com",
+    api_key="key",
+    model_name="test",
+    request_timeout=60,
+    max_tokens=1024,
+    temperature=0.2,
+    stream_enabled=True,
+)
+
+
+def _options(**overrides) -> BackendOptions:
+    return replace(_DEFAULT_OPTIONS, **overrides)
 
 
 class TestModelResponse:
@@ -74,48 +90,25 @@ class TestEchoBackend:
 
 class TestHttpBackendInit:
     def test_http_backend_strips_api_base_trailing_slash(self):
-        backend = HttpBackend(
-            api_base="https://api.example.com/",
-            api_key="key",
-            model_name="test",
-        )
+        backend = HttpBackend(_options(api_base="https://api.example.com/"))
         assert backend.api_base == "https://api.example.com"
 
     def test_http_backend_converts_timeout_to_int(self):
-        backend = HttpBackend(
-            api_base="https://api.example.com",
-            api_key="key",
-            model_name="test",
-            request_timeout="30",
-        )
+        backend = HttpBackend(_options(request_timeout="30"))
         assert backend.request_timeout == 30
 
     def test_http_backend_converts_max_tokens_to_int(self):
-        backend = HttpBackend(
-            api_base="https://api.example.com",
-            api_key="key",
-            model_name="test",
-            max_tokens="512",
-        )
+        backend = HttpBackend(_options(max_tokens="512"))
         assert backend.max_tokens == 512
 
     def test_http_backend_converts_temperature_to_float(self):
-        backend = HttpBackend(
-            api_base="https://api.example.com",
-            api_key="key",
-            model_name="test",
-            temperature="0.7",
-        )
+        backend = HttpBackend(_options(temperature="0.7"))
         assert backend.temperature == 0.7
 
 
 class TestHttpBackendRequestJson:
     def test_request_json_missing_api_key(self):
-        backend = HttpBackend(
-            api_base="https://api.example.com",
-            api_key="",
-            model_name="test",
-        )
+        backend = HttpBackend(_options(api_key=""))
         with pytest.raises(ValueError, match="api_key 为空"):
             backend.request_json("/path", {}, {})
 
@@ -127,11 +120,7 @@ class TestHttpBackendRequestJson:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
-        backend = HttpBackend(
-            api_base="https://api.example.com",
-            api_key="test-key",
-            model_name="test",
-        )
+        backend = HttpBackend(_options(api_key="test-key"))
         result = backend.request_json("/path", {"key": "value"}, {"Header": "val"})
         assert result == {"result": "ok"}
 
@@ -151,33 +140,21 @@ class TestHttpBackendRequestJson:
         )
         mock_urlopen.side_effect = exc
 
-        backend = HttpBackend(
-            api_base="https://api.example.com",
-            api_key="test-key",
-            model_name="test",
-        )
+        backend = HttpBackend(_options(api_key="test-key"))
         with pytest.raises(RuntimeError, match="HTTP 400"):
             backend.request_json("/path", {}, {})
 
 
 class TestHttpBackendRequestStream:
     def test_request_stream_missing_api_key(self):
-        backend = HttpBackend(
-            api_base="https://api.example.com",
-            api_key="",
-            model_name="test",
-        )
+        backend = HttpBackend(_options(api_key=""))
         with pytest.raises(ValueError, match="api_key 为空"):
             backend.request_stream("/path", {}, {})
 
 
 class TestOpenAICompatibleBackend:
     def test_openai_backend_name(self):
-        assert OpenAICompatibleBackend(
-            api_base="https://api.example.com",
-            api_key="key",
-            model_name="test",
-        ).name == "openai_compatible"
+        assert OpenAICompatibleBackend(_options()).name == "openai_compatible"
 
     @patch.object(OpenAICompatibleBackend, "request_stream")
     def test_generate_stream_collects_content(self, mock_request_stream):
@@ -187,24 +164,14 @@ class TestOpenAICompatibleBackend:
             '[DONE]',
         ]
 
-        backend = OpenAICompatibleBackend(
-            api_base="https://api.example.com",
-            api_key="test-key",
-            model_name="gpt-4",
-            stream_enabled=True,
-        )
+        backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="gpt-4"))
         resp = backend.generate("test prompt", on_chunk=None)
         assert resp.text == "hello"
         assert resp.backend == "openai_compatible"
 
     def test_generate_with_streaming_disabled(self):
         """When stream_enabled=False, uses request_json directly."""
-        backend = OpenAICompatibleBackend(
-            api_base="https://api.example.com",
-            api_key="test-key",
-            model_name="gpt-4",
-            stream_enabled=False,
-        )
+        backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="gpt-4", stream_enabled=False))
         with patch.object(backend, "request_json") as mock_request_json:
             mock_request_json.return_value = {
                 "choices": [{"message": {"content": "direct response"}}]
@@ -220,12 +187,7 @@ class TestOpenAICompatibleBackend:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
-        backend = OpenAICompatibleBackend(
-            api_base="https://api.example.com",
-            api_key="test-key",
-            model_name="gpt-4",
-            stream_enabled=False,
-        )
+        backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="gpt-4", stream_enabled=False))
         with pytest.raises(RuntimeError, match="无法解析"):
             backend.generate("test")
 
@@ -237,22 +199,12 @@ class TestOpenAICompatibleBackend:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
-        backend = OpenAICompatibleBackend(
-            api_base="https://api.example.com",
-            api_key="test-key",
-            model_name="gpt-4",
-            stream_enabled=True,
-        )
+        backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="gpt-4"))
         backend.generate("test")
         mock_urlopen.assert_called()
 
     def test_generate_stream_calls_on_chunk_during_iteration(self):
-        backend = OpenAICompatibleBackend(
-            api_base="https://api.example.com",
-            api_key="test-key",
-            model_name="gpt-4",
-            stream_enabled=True,
-        )
+        backend = OpenAICompatibleBackend(_options(api_key="test-key", model_name="gpt-4"))
         events: list[str] = []
 
         def request_stream_iter(path, payload, headers):
@@ -281,19 +233,10 @@ class TestOpenAICompatibleBackend:
 
 class TestAnthropicCompatibleBackend:
     def test_anthropic_backend_name(self):
-        assert AnthropicCompatibleBackend(
-            api_base="https://api.example.com",
-            api_key="key",
-            model_name="test",
-        ).name == "anthropic_compatible"
+        assert AnthropicCompatibleBackend(_options()).name == "anthropic_compatible"
 
     def test_anthropic_custom_version(self):
-        backend = AnthropicCompatibleBackend(
-            api_base="https://api.example.com",
-            api_key="key",
-            model_name="test",
-            anthropic_version="2024-01-01",
-        )
+        backend = AnthropicCompatibleBackend(_options(), anthropic_version="2024-01-01")
         assert backend.anthropic_version == "2024-01-01"
 
     @patch("urllib.request.urlopen")
@@ -304,12 +247,7 @@ class TestAnthropicCompatibleBackend:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
-        backend = AnthropicCompatibleBackend(
-            api_base="https://api.example.com",
-            api_key="test-key",
-            model_name="claude-3",
-            stream_enabled=False,
-        )
+        backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3", stream_enabled=False))
         resp = backend.generate("test prompt", on_chunk=None)
         assert resp.text == "hello"
 
@@ -321,12 +259,7 @@ class TestAnthropicCompatibleBackend:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
-        backend = AnthropicCompatibleBackend(
-            api_base="https://api.example.com",
-            api_key="test-key",
-            model_name="claude-3",
-            stream_enabled=False,
-        )
+        backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3", stream_enabled=False))
         resp = backend.generate("test")
         assert resp.text == "fallback text"
 
@@ -338,22 +271,12 @@ class TestAnthropicCompatibleBackend:
         mock_response.__exit__ = MagicMock(return_value=False)
         mock_urlopen.return_value = mock_response
 
-        backend = AnthropicCompatibleBackend(
-            api_base="https://api.example.com",
-            api_key="test-key",
-            model_name="claude-3",
-            stream_enabled=False,
-        )
+        backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3", stream_enabled=False))
         with pytest.raises(RuntimeError, match="没有文本内容"):
             backend.generate("test")
 
     def test_generate_stream_calls_on_chunk_during_iteration(self):
-        backend = AnthropicCompatibleBackend(
-            api_base="https://api.example.com",
-            api_key="test-key",
-            model_name="claude-3",
-            stream_enabled=True,
-        )
+        backend = AnthropicCompatibleBackend(_options(api_key="test-key", model_name="claude-3"))
         events: list[str] = []
 
         def request_stream_iter(path, payload, headers):

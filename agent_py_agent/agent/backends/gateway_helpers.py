@@ -6,11 +6,12 @@ import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any
 
 
 @dataclass(frozen=True)
-class _GatewayRequest:
+class GatewayRequest:
+    """LLM: bundle for HTTP gateway model requests."""
+
     api_base: str
     api_key: str
     path: str
@@ -24,15 +25,8 @@ class _GatewayRequest:
 
 
 def post_json(
-    api_base: str,
-    api_key: str,
-    path: str,
-    payload: dict[str, Any],
-    headers: dict[str, str],
-    *,
-    timeout: int,
+    request: GatewayRequest,
 ) -> dict[str, Any]:
-    request = _GatewayRequest(api_base, api_key, path, payload, headers, timeout)
     _require_api_key(request.api_key)
     req = _urllib_request(request)
     try:
@@ -45,32 +39,18 @@ def post_json(
 
 
 def post_stream(
-    api_base: str,
-    api_key: str,
-    path: str,
-    payload: dict[str, Any],
-    headers: dict[str, str],
-    *,
-    timeout: int,
+    request: GatewayRequest,
 ) -> list[str]:
-    request = _GatewayRequest(api_base, api_key, path, payload, headers, timeout)
     return list(_post_stream_lines(request))
 
 
 def post_stream_iter(
-    api_base: str,
-    api_key: str,
-    path: str,
-    payload: dict[str, Any],
-    headers: dict[str, str],
-    *,
-    timeout: int,
+    request: GatewayRequest,
 ):
-    request = _GatewayRequest(api_base, api_key, path, payload, headers, timeout)
     yield from _post_stream_lines(request)
 
 
-def _post_stream_lines(request: _GatewayRequest) -> Iterator[str]:
+def _post_stream_lines(request: GatewayRequest) -> Iterator[str]:
     request.payload["stream"] = True
     _require_api_key(request.api_key)
     req = _urllib_request(request)
@@ -83,7 +63,7 @@ def _post_stream_lines(request: _GatewayRequest) -> Iterator[str]:
         raise _runtime_network_error(exc, request) from exc
 
 
-def _urllib_request(request: _GatewayRequest) -> urllib.request.Request:
+def _urllib_request(request: GatewayRequest) -> urllib.request.Request:
     return urllib.request.Request(
         request.url,
         data=json.dumps(request.payload).encode("utf-8"),
@@ -102,7 +82,7 @@ def _runtime_http_error(exc: urllib.error.HTTPError) -> RuntimeError:
     return RuntimeError(f"HTTP {exc.code}: {detail}")
 
 
-def _runtime_network_error(exc: BaseException, request: _GatewayRequest) -> RuntimeError:
+def _runtime_network_error(exc: BaseException, request: GatewayRequest) -> RuntimeError:
     parsed = urllib.parse.urlparse(request.url)
     host = parsed.netloc or parsed.path.split("/", 1)[0] or request.api_base
     reason = getattr(exc, "reason", None) or str(exc) or exc.__class__.__name__

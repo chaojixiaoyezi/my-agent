@@ -20,6 +20,28 @@ def _read_jsonl(path: str | Path) -> list[dict]:
     return [json.loads(line) for line in target.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def _assert_manifest_and_checkpoint(result) -> None:
+    manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
+    assert manifest["counts"]["stored"] == 3
+    assert manifest["dedup_policy"] == "source_event_fingerprint"
+    assert manifest["checkpoint_policy"] == "after_durable_write"
+
+    checkpoint = json.loads(Path(result.checkpoint_path).read_text(encoding="utf-8"))
+    assert checkpoint["last_committed_batch_id"] == result.batch_id
+    assert checkpoint["cursor"]["content_hash"] == result.content_hash
+
+
+def _assert_waf_event(events: list[dict]) -> None:
+    waf_event = next(event for event in events if event["source_product"] == "waf")
+    assert waf_event["alert_type"] == "Web攻击"
+    assert waf_event["threat_name"] == "疑似命令执行"
+    assert waf_event["raw_fields"]["告警类型"] == "Web攻击"
+    assert waf_event["payload_truncated"] is True
+    assert waf_event["payload_sha256"].startswith("sha256:")
+    assert len(waf_event["payload"]) == 24
+    assert waf_event["dedup_key"].startswith("sha256:")
+
+
 def test_security_alert_v1_jsonl_ingest_manifest_checkpoint_and_dedup():
     fixture = _project_root() / "validation" / "security_fixtures" / "security_alert_v1.jsonl"
 
@@ -39,25 +61,11 @@ def test_security_alert_v1_jsonl_ingest_manifest_checkpoint_and_dedup():
         assert Path(result.manifest_path).exists()
         assert Path(result.checkpoint_path).exists()
 
-        manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
-        assert manifest["counts"]["stored"] == 3
-        assert manifest["dedup_policy"] == "source_event_fingerprint"
-        assert manifest["checkpoint_policy"] == "after_durable_write"
-
-        checkpoint = json.loads(Path(result.checkpoint_path).read_text(encoding="utf-8"))
-        assert checkpoint["last_committed_batch_id"] == result.batch_id
-        assert checkpoint["cursor"]["content_hash"] == result.content_hash
+        _assert_manifest_and_checkpoint(result)
 
         events = _read_jsonl(result.events_path)
         assert len(events) == 3
-        waf_event = next(event for event in events if event["source_product"] == "waf")
-        assert waf_event["alert_type"] == "Web攻击"
-        assert waf_event["threat_name"] == "疑似命令执行"
-        assert waf_event["raw_fields"]["告警类型"] == "Web攻击"
-        assert waf_event["payload_truncated"] is True
-        assert waf_event["payload_sha256"].startswith("sha256:")
-        assert len(waf_event["payload"]) == 24
-        assert waf_event["dedup_key"].startswith("sha256:")
+        _assert_waf_event(events)
 
         duplicate = ingest_file(
             fixture,

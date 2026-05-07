@@ -73,34 +73,47 @@ def _track_heartbeat_during_run(agent, paths, request_path) -> list[float]:
     return observed
 
 
+def _make_recovery_agent(root: Path) -> SimpleAgent:
+    cfg = AgentConfig(
+        model_backend="echo",
+        gateway_workspace="gateway",
+        local_store_path="local_store/local.db",
+        local_store_files_dir="local_store/files",
+        local_store_events_path="local_store/events.jsonl",
+        gateway_processing_timeout_seconds=1,
+        gateway_request_max_attempts=2,
+    )
+    return SimpleAgent(cfg, root)
+
+
+def _ensure_gateway_dirs(paths) -> None:
+    for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def _write_processing_request(paths, request_id: str, attempts: int, prompt: str) -> Path:
+    request_path = paths.processing / f"{request_id}.json"
+    write_json_file(
+        request_path,
+        {
+            "id": request_id,
+            "kind": "ask",
+            "prompt": prompt,
+            "attempts": attempts,
+            "lease_started_at": time.time() - 10,
+        },
+    )
+    return request_path
+
+
 def test_gateway_processing_recovery_requeues_then_fails_after_attempt_limit():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        cfg = AgentConfig(
-            model_backend="echo",
-            gateway_workspace="gateway",
-            local_store_path="local_store/local.db",
-            local_store_files_dir="local_store/files",
-            local_store_events_path="local_store/events.jsonl",
-            gateway_processing_timeout_seconds=1,
-            gateway_request_max_attempts=2,
-        )
-        agent = SimpleAgent(cfg, root)
+        agent = _make_recovery_agent(root)
         paths = gateway_paths(agent)
-        for path in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
-            path.mkdir(parents=True, exist_ok=True)
+        _ensure_gateway_dirs(paths)
 
-        request_path = paths.processing / "gwreq-timeout.json"
-        write_json_file(
-            request_path,
-            {
-                "id": "gwreq-timeout",
-                "kind": "ask",
-                "prompt": "会被重排的请求",
-                "attempts": 1,
-                "lease_started_at": time.time() - 10,
-            },
-        )
+        request_path = _write_processing_request(paths, "gwreq-timeout", 1, "会被重排的请求")
         recovered = recover_gateway_processing_requests(
             paths,
             startup=False,
@@ -111,17 +124,7 @@ def test_gateway_processing_recovery_requeues_then_fails_after_attempt_limit():
         assert recovered["requeued"] == 1
         assert (paths.inbox / request_path.name).exists()
 
-        second_path = paths.processing / "gwreq-fail.json"
-        write_json_file(
-            second_path,
-            {
-                "id": "gwreq-fail",
-                "kind": "ask",
-                "prompt": "会失败归档的请求",
-                "attempts": 2,
-                "lease_started_at": time.time() - 10,
-            },
-        )
+        second_path = _write_processing_request(paths, "gwreq-fail", 2, "会失败归档的请求")
         failed = recover_gateway_processing_requests(
             paths,
             startup=False,
