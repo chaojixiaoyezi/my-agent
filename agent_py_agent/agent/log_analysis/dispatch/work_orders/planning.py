@@ -1,4 +1,7 @@
-"""LLM: Planning logic for log-analysis subagent work orders.
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
+"""Planning logic for log-analysis subagent work orders.
 
 Dataclasses live in models.py so this module can stay focused on planning flow.
 """
@@ -29,6 +32,8 @@ NO_EVIDENCE_ISSUE = "case has no evidence_refs; analyst/reviewer work orders are
 PLAN_NOT_READY_ISSUE = "work-order plan is not ready; refusing to create subagent tasks"
 
 
+# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 PlanWorkOrdersOptions 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 PlanWorkOrdersOptions 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class PlanWorkOrdersOptions:
     evidence_refs: Any = None
@@ -38,6 +43,8 @@ class PlanWorkOrdersOptions:
     dry_run: bool = True
 
 
+# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 _get 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 get 在当前模块中的核心转换或协调步骤，衔接 dispatch 流程按预算、队列和工单状态分派日志分析任务。
 def _get(source: Any, key: str, default: Any = None) -> Any:
     """Read a field from either a mapping or an object."""
     if isinstance(source, Mapping):
@@ -45,6 +52,8 @@ def _get(source: Any, key: str, default: Any = None) -> Any:
     return getattr(source, key, default)
 
 
+# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 _case_id 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 case id 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _case_id(case: Any, summary: Mapping[str, Any]) -> str:
     """Return a stable case id from case fields or summary fallback."""
     summary_case = summary.get("case", {})
@@ -53,6 +62,8 @@ def _case_id(case: Any, summary: Mapping[str, Any]) -> str:
     return str(_get(case, "case_id") or _get(case, "id") or summary_case.get("case_id") or "unknown-case")
 
 
+# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 _merge_unique 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 merge unique 涉及的字段，让后续匹配和存储使用同一形态。
 def _merge_unique(*values: Any) -> list[str]:
     """Normalize, merge, and de-duplicate evidence refs in first-seen order."""
     output: list[str] = []
@@ -62,6 +73,8 @@ def _merge_unique(*values: Any) -> list[str]:
     return output
 
 
+# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 _append_new_refs 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 append new refs 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_new_refs(output: list[str], seen: set[str], refs: list[str]) -> None:
     for item in refs:
         if item not in seen:
@@ -69,6 +82,8 @@ def _append_new_refs(output: list[str], seen: set[str], refs: list[str]) -> None
             seen.add(item)
 
 
+# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 _acceptance_checks 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 acceptance checks 在当前模块中的核心转换或协调步骤，衔接 dispatch 流程按预算、队列和工单状态分派日志分析任务。
 def _acceptance_checks(quality_contract: Mapping[str, Any] | None) -> list[str]:
     """Combine default and per-case acceptance checks."""
     checks = list(DEFAULT_ACCEPTANCE_CHECKS)
@@ -77,6 +92,8 @@ def _acceptance_checks(quality_contract: Mapping[str, Any] | None) -> list[str]:
     return checks
 
 
+# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 _append_acceptance_checks 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 append acceptance checks 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_acceptance_checks(checks: list[str], items: Any) -> None:
     for item in items:
         text = str(item or "").strip()
@@ -84,6 +101,8 @@ def _append_acceptance_checks(checks: list[str], items: Any) -> None:
             checks.append(text)
 
 
+# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 _build_work_order_context 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 build work order context 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _build_work_order_context(
     summary: dict[str, Any],
     refs: list[str],
@@ -104,6 +123,8 @@ def _build_work_order_context(
     }
 
 
+# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 _create_work_orders 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 create work orders 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _create_work_orders(*, params: CreateWorkOrdersParams) -> tuple[SubagentWorkOrder, SubagentWorkOrder]:
     """Create analyst and reviewer work orders from common data."""
     analyst = _create_analyst_work_order(params)
@@ -111,6 +132,8 @@ def _create_work_orders(*, params: CreateWorkOrdersParams) -> tuple[SubagentWork
     return analyst, reviewer
 
 
+# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 _create_analyst_work_order 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 create analyst work order 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _create_analyst_work_order(params: CreateWorkOrdersParams) -> SubagentWorkOrder:
     return SubagentWorkOrder(
         role="analyst",
@@ -132,6 +155,8 @@ def _create_analyst_work_order(params: CreateWorkOrdersParams) -> SubagentWorkOr
     )
 
 
+# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 _create_reviewer_work_order 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 create reviewer work order 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _create_reviewer_work_order(params: CreateWorkOrdersParams) -> SubagentWorkOrder:
     return SubagentWorkOrder(
         role="reviewer",
@@ -154,6 +179,8 @@ def _create_reviewer_work_order(params: CreateWorkOrdersParams) -> SubagentWorkO
     )
 
 
+# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 plan_case_subagent_work_orders 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 推进 plan case subagent work orders 对应的调度、执行或处理步骤，并返回可追踪的状态结果。
 def plan_case_subagent_work_orders(
     case: Any,
     *,
@@ -200,6 +227,8 @@ def plan_case_subagent_work_orders(
     return _plan_from_orders(inputs, [analyst, reviewer], mode=plan_options.mode, dry_run=plan_options.dry_run)
 
 
+# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 _plan_from_orders 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 推进 plan from orders 对应的调度、执行或处理步骤，并返回可追踪的状态结果。
 def _plan_from_orders(
     inputs: PlanInputs,
     work_orders: list[SubagentWorkOrder],
@@ -218,6 +247,8 @@ def _plan_from_orders(
     )
 
 
+# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 _plan_inputs 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 推进 plan inputs 对应的调度、执行或处理步骤，并返回可追踪的状态结果。
 def _plan_inputs(
     case: Any,
     evidence_refs: Any,
@@ -239,6 +270,8 @@ def _plan_inputs(
     )
 
 
+# LLM: dispatch 流程按预算、队列和工单状态分派日志分析任务；修改 _readiness_notes 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 readiness notes 在当前模块中的核心转换或协调步骤，衔接 dispatch 流程按预算、队列和工单状态分派日志分析任务。
 def _readiness_notes(refs: list[str]) -> tuple[list[str], list[str]]:
     if refs:
         return [], []

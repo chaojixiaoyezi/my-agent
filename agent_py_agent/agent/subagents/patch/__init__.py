@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 """LLM contract: Patch review, apply, and rendering subpackage.
 
 Human version:
@@ -19,7 +22,7 @@ from .patch_renderer import (
 )
 from .patch_service import PatchReviewOptions, PatchReviewService, PatchReviewTaskRequest
 
-# LLM: patch bundle types are exported here so managers and CLIs share one import surface.
+# LLM: 补丁参数包类型集中从这里导出，让管理器和命令行共享同一导入面。
 __all__ = [
     "PatchApplyOptions",
     "PatchApplyService",

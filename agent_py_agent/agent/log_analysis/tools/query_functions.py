@@ -1,4 +1,7 @@
-"""LLM: Security log query functions used by log-analysis tools.
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
+"""Security log query functions used by log-analysis tools.
 
 Trace-case query assembly lives in query_trace.py; this file is the public facade.
 """
@@ -27,6 +30,8 @@ from .query_trace import (
 )
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 SecurityQueryParams 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 SecurityQueryParams 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class SecurityQueryParams:
     """Parameter bundle for security_query."""
@@ -44,6 +49,8 @@ class SecurityQueryParams:
     max_limit: int | None = None
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 HuntIpParams 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 HuntIpParams 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class HuntIpParams:
     """Parameter bundle for hunt_ip."""
@@ -57,6 +64,8 @@ class HuntIpParams:
     max_limit: int | None = None
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 security_query 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 security query 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def security_query(params: SecurityQueryParams) -> dict[str, Any]:
     """Execute a bounded security-event query and return the tool payload."""
     local_store = _store(params.store, params.root)
@@ -77,6 +86,8 @@ def security_query(params: SecurityQueryParams) -> dict[str, Any]:
     return _tool_response(result)
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 hunt_ip 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 hunt ip 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def hunt_ip(
     ip: str,
     *,
@@ -106,6 +117,8 @@ def hunt_ip(
     return _hunt_ip_any(ip, hunt_params)
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 _hunt_ip_single_role 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 hunt ip single role 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def _hunt_ip_single_role(ip: str, *, params: HuntIpParams) -> dict[str, Any]:
     field = {"attacker": "attacker_ip", "victim": "victim_ip"}[params.role]
     return security_query(
@@ -121,6 +134,8 @@ def _hunt_ip_single_role(ip: str, *, params: HuntIpParams) -> dict[str, Any]:
     )
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 _hunt_ip_any 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 hunt ip any 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def _hunt_ip_any(ip: str, params: HuntIpParams) -> dict[str, Any]:
     local_store = _store(params.store, params.root)
     attacker = _hunt_role_query(local_store, params=params, attacker_ip=ip)
@@ -128,6 +143,8 @@ def _hunt_ip_any(ip: str, params: HuntIpParams) -> dict[str, Any]:
     return _hunt_any_response(ip, attacker, victim)
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 _hunt_role_query 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 hunt role query 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def _hunt_role_query(
     local_store: LocalLogStore,
     *,
@@ -148,6 +165,8 @@ def _hunt_role_query(
     )
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 _hunt_any_response 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 hunt any response 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def _hunt_any_response(ip: str, attacker: QueryResult, victim: QueryResult) -> dict[str, Any]:
     return {
         "tool": "security_hunt_ip",
@@ -158,6 +177,8 @@ def _hunt_any_response(ip: str, attacker: QueryResult, victim: QueryResult) -> d
     }
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 security_hunt_ip 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 security hunt ip 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def security_hunt_ip(
     ip: str,
     *,
@@ -184,11 +205,15 @@ def security_hunt_ip(
     )
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 security_hunt_domain 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 security hunt domain 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def security_hunt_domain(domain: str) -> dict[str, Any]:
     """Run a domain pivot through security_query."""
     return security_query(SecurityQueryParams(domain=domain))
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 trace_case 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 trace case 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def trace_case(
     case_id: str,
     *,
@@ -220,6 +245,8 @@ def trace_case(
     return trace_case_response(case_id, queries, trace_params.max_queries)
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 _trace_field_query 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 trace field query 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def _trace_field_query(request: TraceFieldQueryRequest) -> dict[str, Any]:
     params = request.params
     query_fields = {
@@ -232,6 +259,8 @@ def _trace_field_query(request: TraceFieldQueryRequest) -> dict[str, Any]:
     return security_query(SecurityQueryParams(store=request.local_store, **query_fields))
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 security_trace_case 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 security trace case 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def security_trace_case(
     case_id: str,
     *,
@@ -258,6 +287,8 @@ def security_trace_case(
     )
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 _tool_response 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 tool response 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def _tool_response(result: QueryResult) -> dict[str, Any]:
     """Convert QueryResult to the compact agent tool response."""
     return {
@@ -273,6 +304,8 @@ def _tool_response(result: QueryResult) -> dict[str, Any]:
     }
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 _case_seeds 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 case seeds 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def _case_seeds(case: dict[str, Any]) -> dict[str, list[str]]:
     """Extract query seeds from top-level and nested case fields."""
     seeds: dict[str, list[str]] = {
@@ -290,6 +323,8 @@ def _case_seeds(case: dict[str, Any]) -> dict[str, list[str]]:
     return {field: values for field, values in seeds.items() if values}
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 _extend_container_seeds 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 extend container seeds 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def _extend_container_seeds(seeds: dict[str, list[str]], container: Any) -> None:
     if not isinstance(container, dict):
         return
@@ -297,6 +332,8 @@ def _extend_container_seeds(seeds: dict[str, list[str]], container: Any) -> None
         _extend_seed(seeds[field], container.get(field))
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 _extend_seed 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 extend seed 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def _extend_seed(target: list[str], value: Any) -> None:
     """Append a scalar or nested seed value to target in de-duplicated form."""
     if value in (None, ""):
@@ -310,6 +347,8 @@ def _extend_seed(target: list[str], value: Any) -> None:
         target.append(text)
 
 
+# LLM: 工具层把查询、追踪和 handler 结果暴露给 agent 调用；修改 _store 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 store 在当前模块中的核心转换或协调步骤，衔接 工具层把查询、追踪和 handler 结果暴露给 agent 调用。
 def _store(store: LocalLogStore | None, root: str | Path | None) -> LocalLogStore:
     """Resolve a caller-provided store or create one from root."""
     if store is not None:

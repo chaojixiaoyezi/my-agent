@@ -1,6 +1,9 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 from __future__ import annotations
 
-"""LLM: conservative token estimation helpers for memory budgeting.
+"""conservative token estimation helpers for memory budgeting.
 
 新手说明:
 这里不是精确 tokenizer，也不假装精确。
@@ -14,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 TurnTokenUsage 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 TurnTokenUsage 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class TurnTokenUsage:
     """Bundle for append_session_token_usage keyword parameters."""
@@ -26,6 +31,8 @@ class TurnTokenUsage:
     created_at: str
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 TokenBudgetResult 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 TokenBudgetResult 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class TokenBudgetResult:
 
@@ -43,6 +50,8 @@ _LEVEL_WARNING_RATIO = {0: 0.6, 1: 0.7, 2: 0.75, 3: 0.8}
 _LEVEL_BLOCK_RATIO = {0: 0.85, 1: 0.9, 2: 0.95, 3: 1.0}
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 check_token_budget 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 校验 check token budget 的输入、状态或路径，提前暴露无效数据和越界条件。
 def check_token_budget(
     current_tokens: int,
     max_tokens: int,
@@ -81,6 +90,8 @@ def check_token_budget(
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 estimate_tokens 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 estimate tokens 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def estimate_tokens(payload: Any) -> int:
 
     text = _payload_to_text(payload)
@@ -99,11 +110,15 @@ def estimate_tokens(payload: Any) -> int:
     return max(1, cjk_estimate, byte_estimate, dense_text_estimate) + structured_overhead
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 token_ledger_dir 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 token ledger dir 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def token_ledger_dir(root: str | Path) -> Path:
 
     return Path(root) / "memory_archive" / "tokens"
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 append_session_token_usage 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 append session token usage 相关记录，集中处理目标路径、格式化和状态更新。
 def append_session_token_usage(
     root: str | Path,
     *,
@@ -151,6 +166,8 @@ def append_session_token_usage(
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _payload_to_text 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 payload to text 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _payload_to_text(payload: Any) -> str:
 
     if isinstance(payload, str):
@@ -161,6 +178,8 @@ def _payload_to_text(payload: Any) -> str:
         return str(payload)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _structured_overhead 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 structured overhead 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _structured_overhead(payload: Any) -> int:
 
     if isinstance(payload, dict):
@@ -170,6 +189,8 @@ def _structured_overhead(payload: Any) -> int:
     return 0
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _is_cjk 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 is cjk 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _is_cjk(char: str) -> bool:
 
     codepoint = ord(char)

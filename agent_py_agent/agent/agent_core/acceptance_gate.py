@@ -1,3 +1,6 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 
 from __future__ import annotations
 
@@ -12,6 +15,8 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+# LLM: review_acceptance_summary 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理审查验收summary相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def review_acceptance_summary(agent, limit: int = 20) -> dict[str, Any]:
     tasks = agent.subagents.list_runs()
     needs_acceptance = [
@@ -25,6 +30,8 @@ def review_acceptance_summary(agent, limit: int = 20) -> dict[str, Any]:
     }
 
 
+# LLM: acceptance_decision_from_evidence 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理来自验收decision证据相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def acceptance_decision_from_evidence(task) -> str:
     # Count passing evidence
     passing_evidence = sum(1 for e in task.evidence if getattr(e, "ok", False))

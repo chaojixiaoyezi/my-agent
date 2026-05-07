@@ -1,3 +1,6 @@
+# LLM: Prompt-building module; keep assembled prompt sections and file-loading behavior stable.
+# 模块用途: 构造系统提示、工具说明、任务上下文和会话片段。
+
 from __future__ import annotations
 
 """主智能体使用的 prompt 拼装器。
@@ -20,6 +23,8 @@ from ..config import AgentConfig
 from ..memory import MemoryRecord
 
 
+# LLM: ToolSections is a Prompt 构造 boundary object; coordinate field or method changes with callers, docs, and focused tests.
+# 类用途: Bundle for PromptBuilder.build tool-related parameters.
 @dataclass
 class ToolSections:
     """Bundle for PromptBuilder.build tool-related parameters."""
@@ -29,9 +34,11 @@ class ToolSections:
     tool_context: list[str] | None = None
 
 
+# LLM: PromptBuildRequest is a Prompt 构造 boundary object; coordinate field or method changes with callers, docs, and focused tests.
+# 类用途: 保存 PromptBuildRequest 的输入字段，调用方先构造这个对象再进入 Prompt 构造，避免继续散传参数。
 @dataclass
 class PromptBuildRequest:
-    """LLM: bundle for PromptBuilder.build inputs."""
+    """bundle for PromptBuilder.build inputs."""
 
     user_prompt: str
     memories: list[MemoryRecord]
@@ -40,19 +47,24 @@ class PromptBuildRequest:
     tools: ToolSections | None = None
 
 
+# LLM: PromptBuilder is a Prompt 构造 boundary object; coordinate field or method changes with callers, docs, and focused tests.
+# 类用途: 负责构造每一轮发给模型的完整 prompt。
 class PromptBuilder:
     """负责构造每一轮发给模型的完整 prompt。"""
 
+    # LLM: PromptBuilder.__init__ belongs to Prompt 构造; keep caller-visible returns, errors, and side effects aligned with focused tests.
+    # 函数用途: 初始化实例依赖和字段，不应在构造阶段做难以回滚的重副作用；它是 PromptBuilder 的方法，通常依赖实例字段。
     def __init__(self, config: AgentConfig, root: Path):
         self.config = config
         self.root = root
 
+    # LLM: PromptBuilder.read_prompt_files belongs to Prompt 构造; keep caller-visible returns, errors, and side effects aligned with focused tests.
+    # 函数用途: 读取动态 prompt 文件并拼接内容。 大白话解释： 这些文件相当于'额外行为规则'，只要被读进来，这一轮模型就真的能看到。。
     def read_prompt_files(self, extra_files: list[str] | None = None) -> list[str]:
         """读取动态 prompt 文件并拼接内容。
 
         大白话解释：
-        这些文件相当于'额外行为规则'，只要被读进来，这一轮模型就真的能看到。
-        """
+        这些文件相当于'额外行为规则'，只要被读进来，这一轮模型就真的能看到。"""
 
         chunks: list[str] = []
         for name in [*self.config.prompt_files, *(extra_files or [])]:
@@ -63,6 +75,8 @@ class PromptBuilder:
                 chunks.append(f"# Prompt File: {path}\n" + path.read_text(encoding="utf-8"))
         return chunks
 
+    # LLM: PromptBuilder.build belongs to Prompt 构造; keep caller-visible returns, errors, and side effects aligned with focused tests.
+    # 函数用途: 拼出完整 prompt。 这版和旧版最大的区别是把工具信息拆成了两层： - `tool_catalog_section`：常驻的工具目录，告诉模型'你手里有什么工具' - `tool_recommendations_section`：按当前任务筛出来的少量候选详情，告诉模型'这次。
     def build(
         self,
         user_prompt: str = "",
@@ -77,8 +91,7 @@ class PromptBuilder:
 
         这版和旧版最大的区别是把工具信息拆成了两层：
         - `tool_catalog_section`：常驻的工具目录，告诉模型'你手里有什么工具'
-        - `tool_recommendations_section`：按当前任务筛出来的少量候选详情，告诉模型'这次大概率该用谁'
-        """
+        - `tool_recommendations_section`：按当前任务筛出来的少量候选详情，告诉模型'这次大概率该用谁'"""
 
         request = request or PromptBuildRequest(user_prompt, memories or [], inject, prompt_files, tools)
         _tools = request.tools or ToolSections()
@@ -101,8 +114,9 @@ class PromptBuilder:
         )
 
 
+# LLM: _task_and_transcript_section belongs to Prompt 构造; keep caller-visible returns, errors, and side effects aligned with focused tests.
+# 函数用途: 完成 Prompt 构造 里的 _task_and_transcript_section 步骤，保持现有返回值、异常和副作用语义。
 def _task_and_transcript_section(user_prompt: str, tool_context: list[str]) -> str:
-    # LLM: tool transcript continuation rules stay in one helper shared by prompt builds.
     tools_history = "\n\n".join(tool_context)
     if not tools_history:
         return "# Tool Transcript\n（无）\n\n" f"# User Task\n{user_prompt}"

@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 import time
@@ -30,6 +33,8 @@ if TYPE_CHECKING:
     from ..capabilities import CapabilitySearchHit
 
 
+# LLM: _iter_open_capability_requests 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理迭代开放能力requests相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _iter_open_capability_requests(tasks):
     return (
         (task, request)
@@ -39,9 +44,10 @@ def _iter_open_capability_requests(tasks):
     )
 
 
+# LLM: CapabilityNoHitsParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存能力nohits参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class CapabilityNoHitsParams:
-    """LLM: bundle no-hit route state for dry-run/apply decisions."""
 
     task: SubAgentTask
     request: CapabilityRequest
@@ -50,7 +56,11 @@ class CapabilityNoHitsParams:
     apply: bool
 
 
+# LLM: SubAgentCapabilityMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 拆分subagent能力混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 class SubAgentCapabilityMixin:
+    # LLM: _route_capability_no_hits 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理route能力nohits相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def _route_capability_no_hits(self, params: CapabilityNoHitsParams):
         now = time.time()
         if not params.apply:
@@ -64,6 +74,8 @@ class SubAgentCapabilityMixin:
             created_at=now,
         )
 
+    # LLM: route_capability_requests 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理route能力requests相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
     def route_capability_requests(
         self,
         router: CapabilityRouter,
@@ -100,6 +112,8 @@ class SubAgentCapabilityMixin:
                 break
         return build_capability_route_report(records, apply=options.apply)
 
+    # LLM: write_capability_route_report 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 写入能力route报告的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def write_capability_route_report(
         self,
         router: CapabilityRouter,
@@ -119,11 +133,15 @@ class SubAgentCapabilityMixin:
         write_capability_route_report_files(self, report, apply=options.apply)
         return report
 
+    # LLM: _extract_selected_hits_data 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理extractselectedhitsdata相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def _extract_selected_hits_data(
         self,
         selected_hits: list[CapabilitySearchHit],
     ) -> tuple[list[dict[str, str]], list[str], list[str], list[str]]:
         return extract_selected_hits_data(selected_hits)
+    # LLM: _route_capability_apply 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理route能力应用相关的数据流，连接当前职责的前后步骤；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
     def _route_capability_apply(
         self,
         *,
@@ -163,6 +181,8 @@ class SubAgentCapabilityMixin:
             )
         )
 
+    # LLM: _route_capability_request 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理route能力请求相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
     def _route_capability_request(
         self,
         task: SubAgentTask,
@@ -182,7 +202,7 @@ class SubAgentCapabilityMixin:
             )
         if not apply:
             now = time.time()
-            # LLM: record construction lives in capability_route_service so this mixin stays a facade.
+            # LLM: 记录构造留在能力路由服务里，本混入只维持门面职责。
             return build_would_grant_record(
                 WouldGrantRecordParams(
                     task=task,
@@ -211,6 +231,8 @@ class SubAgentCapabilityMixin:
         )
 
 
+# LLM: _capability_route_options 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理能力route选项相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _capability_route_options(
     params: SubAgentCapabilityRouteOptions | None,
     *,
@@ -222,7 +244,7 @@ def _capability_route_options(
         if not isinstance(params, SubAgentCapabilityRouteOptions):
             raise TypeError("capability routing requires params: SubAgentCapabilityRouteOptions")
         return params
-    # LLM: manager APIs keep legacy explicit fields but normalize immediately to one options bundle.
+    # LLM: 管理器接口保留旧显式字段，内部立即归一成一个选项参数包。
     return SubAgentCapabilityRouteOptions(
         apply=apply,
         run_ids=run_ids,

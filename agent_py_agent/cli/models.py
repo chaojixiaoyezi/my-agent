@@ -1,6 +1,9 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
-"""LLM: defines small CLI DTOs for chat jobs, daemon options, and CLI request bundles.
+"""defines small CLI DTOs for chat jobs, daemon options, and CLI request bundles.
 
 给人看的解释：
 这个文件只放命令行运行时用的小数据结构。
@@ -13,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 
+# LLM: ChatJob 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 @dataclass
 class ChatJob:
 
@@ -22,6 +27,8 @@ class ChatJob:
     prompt_files: list[str]
 
 
+# LLM: DaemonOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass
 class DaemonOptions:
 
@@ -42,6 +49,8 @@ class DaemonOptions:
     force_lock: bool
 
 
+# LLM: GatewayRunOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class GatewayRunOptions:
 
@@ -58,6 +67,8 @@ class GatewayRunOptions:
     probe: bool
 
 
+# LLM: GatewayStartOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class GatewayStartOptions:
 
@@ -65,6 +76,8 @@ class GatewayStartOptions:
     force_lock: bool
 
 
+# LLM: GatewayRunContext 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 集中携带运行期上下文和共享引用，供相邻阶段稳定读取。
 @dataclass(frozen=True)
 class GatewayRunContext:
 
@@ -80,6 +93,8 @@ class GatewayRunContext:
     capability_config: Any | None = None
 
 
+# LLM: GatewayThreadsRequest 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class GatewayThreadsRequest:
 
@@ -89,6 +104,8 @@ class GatewayThreadsRequest:
     http_port: int
 
 
+# LLM: GatewayRunCleanupRequest 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class GatewayRunCleanupRequest:
 
@@ -100,6 +117,8 @@ class GatewayRunCleanupRequest:
     http_server: Any | None
 
 
+# LLM: AdapterOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class AdapterOptions:
 
@@ -118,6 +137,8 @@ class AdapterOptions:
     stop_timeout: float
 
 
+# LLM: SubagentsDispatchOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class SubagentsDispatchOptions:
 
@@ -140,6 +161,8 @@ class SubagentsDispatchOptions:
     watch: bool
 
 
+# LLM: SubagentsDueCheckOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class SubagentsDueCheckOptions:
 
@@ -147,6 +170,8 @@ class SubagentsDueCheckOptions:
     limit: int
 
 
+# LLM: SubagentsProbeOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class SubagentsProbeOptions:
 
@@ -154,6 +179,8 @@ class SubagentsProbeOptions:
     limit: int
 
 
+# LLM: SubagentContextOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class SubagentContextOptions:
 
@@ -161,6 +188,8 @@ class SubagentContextOptions:
     max_cards: int
 
 
+# LLM: SubagentsCapabilityRouteOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class SubagentsCapabilityRouteOptions:
 
@@ -169,6 +198,8 @@ class SubagentsCapabilityRouteOptions:
     limit: int
 
 
+# LLM: TimelineOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class TimelineOptions:
 
@@ -179,6 +210,8 @@ class TimelineOptions:
     details: bool
 
 
+# LLM: LocalSearchOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class LocalSearchOptions:
 
@@ -189,6 +222,8 @@ class LocalSearchOptions:
     preview_chars: int
 
 
+# LLM: LocalDoctorOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class LocalDoctorOptions:
 
@@ -197,6 +232,8 @@ class LocalDoctorOptions:
     json: bool
 
 
+# LLM: LocalRebuildOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class LocalRebuildOptions:
 
@@ -204,6 +241,8 @@ class LocalRebuildOptions:
     reset: bool
 
 
+# LLM: TaskListOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class TaskListOptions:
 
@@ -213,6 +252,8 @@ class TaskListOptions:
     limit: int
 
 
+# LLM: TaskIdOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class TaskIdOptions:
 
@@ -220,6 +261,8 @@ class TaskIdOptions:
     task_id: str
 
 
+# LLM: TaskSearchOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class TaskSearchOptions:
 
@@ -227,6 +270,8 @@ class TaskSearchOptions:
     query: str
 
 
+# LLM: SubagentsAcceptanceOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class SubagentsAcceptanceOptions:
 
@@ -237,6 +282,8 @@ class SubagentsAcceptanceOptions:
     limit: int
 
 
+# LLM: SubagentsPatchOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class SubagentsPatchOptions:
 
@@ -247,6 +294,8 @@ class SubagentsPatchOptions:
     limit: int
 
 
+# LLM: SubagentsMemoryGateOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class SubagentsMemoryGateOptions:
 

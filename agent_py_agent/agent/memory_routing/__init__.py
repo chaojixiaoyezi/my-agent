@@ -1,3 +1,6 @@
+# LLM: Memory routing module; keep context selection and read-receipt records stable.
+# 模块用途: 根据任务上下文选择可注入记忆，并记录读取路径。
+
 
 from .context import RouteContextOptions, RoutedMemoryContext, build_routed_memory_context
 from .loader import load_memory_routes, load_routes, parse_json_routes, parse_markdown_routes

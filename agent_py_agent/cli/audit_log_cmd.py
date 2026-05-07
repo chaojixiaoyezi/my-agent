@@ -1,3 +1,6 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
 import json
@@ -7,6 +10,8 @@ import time
 from ..agent.audit import AuditAction, AuditQuery
 
 
+# LLM: _show_recent_users 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _show_recent_users(query: AuditQuery, args) -> int:
     limit = getattr(args, "limit", 10)
     users = query.recent_users(limit=limit)
@@ -27,6 +32,8 @@ def _show_recent_users(query: AuditQuery, args) -> int:
     return 0
 
 
+# LLM: _show_summary 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _show_summary(query: AuditQuery, args) -> int:
     user_id = getattr(args, "user", None)
     stats = query.summary(user_id=user_id)
@@ -51,6 +58,8 @@ def _show_summary(query: AuditQuery, args) -> int:
     return 0
 
 
+# LLM: _show_entries 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _show_entries(query: AuditQuery, args) -> int:
     result = query.query(
         user_id=getattr(args, "user", None),
@@ -74,6 +83,8 @@ def _show_entries(query: AuditQuery, args) -> int:
     return 0
 
 
+# LLM: _audit_action_from_args 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _audit_action_from_args(args) -> AuditAction | None:
     action_str = getattr(args, "action", None)
     if not action_str:
@@ -84,6 +95,8 @@ def _audit_action_from_args(args) -> AuditAction | None:
         return None
 
 
+# LLM: _print_audit_entry 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_audit_entry(entry) -> None:
     time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(entry.timestamp))
     print(f"[{entry.status.upper()}] {entry.action} - {entry.user_id}", file=sys.stdout)
@@ -96,6 +109,8 @@ def _print_audit_entry(entry) -> None:
         print(f"  详情: {json.dumps(entry.details, ensure_ascii=False)}", file=sys.stdout)
     print()
 
+# LLM: cmd_audit_log 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_audit_log(args) -> int:
     from .common import DEFAULT_CONFIG, load_config, resolve_workspace_root
 

@@ -1,6 +1,9 @@
+# LLM: CLI scenario case definition; keep fixture flow and expected gateway/subagent behavior stable.
+# 模块用途: 定义一类命令行情景测试，用来复现和验证端到端流程。
+
 from __future__ import annotations
 
-"""LLM: real-model multi-round recovery scenario.
+"""real-model multi-round recovery scenario.
 
 给人看的解释：
 这个模块验证真实模型 API 经过多轮工具调用后，跨天恢复仍能找回 evidence 和任务事实源。
@@ -24,16 +27,22 @@ from .real_model_recovery_case import _real_model_recovery_resume
 from .subagent_cases import _write_parent_subagent_recovery_fact_files
 
 
+# LLM: ScenarioRealModelMultiRoundBackend 是scenario CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 class ScenarioRealModelMultiRoundBackend:
 
     name = "scenario_real_model_multi_round_backend"
 
+    # LLM: __init__ 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def __init__(self, real_backend) -> None:
         self.real_backend = real_backend
         self.calls = 0
         self.real_response_text = ""
         self.tool_sequence: list[str] = []
 
+    # LLM: generate 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
@@ -42,6 +51,8 @@ class ScenarioRealModelMultiRoundBackend:
             return self._tool_call_response(prompt, on_chunk, "search_text")
         return ModelResponse(text=self._final_structured_result(), backend=self.name)
 
+    # LLM: _tool_call_response 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def _tool_call_response(self, prompt: str, on_chunk, tool_name: str) -> ModelResponse:
         real = self.real_backend.generate(prompt, on_chunk=on_chunk)
         self.real_response_text += real.text
@@ -49,6 +60,8 @@ class ScenarioRealModelMultiRoundBackend:
         payload = _tool_payload(tool_name)
         return ModelResponse(text=f"[TOOL_CALL]\n{payload}\n[/TOOL_CALL]", backend=self.name)
 
+    # LLM: _final_structured_result 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def _final_structured_result(self) -> str:
         summary_preview = self.real_response_text[:200]
         return (
@@ -78,12 +91,16 @@ class ScenarioRealModelMultiRoundBackend:
         )
 
 
+# LLM: _tool_payload 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _tool_payload(tool_name: str) -> str:
     if tool_name == "read_file":
         return '{"tool": "read_file", "path": "README.md"}'
     return '{"tool": "search_text", "query": "gateway", "path": "."}'
 
 
+# LLM: _multi_round_setup 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _multi_round_setup(args):
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -128,6 +145,8 @@ def _multi_round_setup(args):
     return paths, agent, backend, task, loaded, runner
 
 
+# LLM: _multi_round_build_expected_reads 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _multi_round_build_expected_reads(loaded):
     return [
         loaded.status_file,
@@ -138,6 +157,8 @@ def _multi_round_build_expected_reads(loaded):
     ]
 
 
+# LLM: _MultiRoundVerifyContext 是scenario CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 集中携带运行期上下文和共享引用，供相邻阶段稳定读取。
 @dataclass
 class _MultiRoundVerifyContext:
     paths: Any
@@ -153,6 +174,8 @@ class _MultiRoundVerifyContext:
     matching_task: dict
 
 
+# LLM: _multi_round_verify 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _multi_round_verify(ctx: _MultiRoundVerifyContext) -> int:
     expected_reads = _multi_round_build_expected_reads(ctx.loaded)
     final_ok = _multi_round_final_ok(ctx, expected_reads, _output_json_valid(ctx.loaded))
@@ -181,6 +204,8 @@ def _multi_round_verify(ctx: _MultiRoundVerifyContext) -> int:
     return 0 if final_ok else 2
 
 
+# LLM: _output_json_valid 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _output_json_valid(loaded) -> bool:
     try:
         json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
@@ -189,6 +214,8 @@ def _output_json_valid(loaded) -> bool:
         return False
 
 
+# LLM: _multi_round_final_ok 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _multi_round_final_ok(ctx: _MultiRoundVerifyContext, expected_reads: list, output_json_valid: bool) -> bool:
     echo_signature = "这是 echo 后端的本地响应"
     return (
@@ -214,6 +241,8 @@ def _multi_round_final_ok(ctx: _MultiRoundVerifyContext, expected_reads: list, o
     )
 
 
+# LLM: run_scenario_real_model_recovery_multi_round_case 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_scenario_real_model_recovery_multi_round_case(args) -> int:
 
     paths, agent, backend, task, loaded, runner = _multi_round_setup(args)

@@ -1,3 +1,6 @@
+# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
+# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
+
 from __future__ import annotations
 
 import queue
@@ -14,6 +17,8 @@ from .tui_worker_stream import (
 )
 
 
+# LLM: TuiWorkerConfig 是chat CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 @dataclass
 class TuiWorkerConfig:
     jobs: Any
@@ -38,6 +43,8 @@ class TuiWorkerConfig:
     stop_event: Any
 
 
+# LLM: WorkerPathContext 是chat CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 集中携带运行期上下文和共享引用，供相邻阶段稳定读取。
 @dataclass
 class WorkerPathContext:
     cfg: TuiWorkerConfig
@@ -48,6 +55,8 @@ class WorkerPathContext:
     stop_spinner: Any
 
 
+# LLM: _tui_update_running_state 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
 def _tui_update_running_state(cfg: TuiWorkerConfig, job) -> None:
     with cfg.state_lock:
         cfg.pending_jobs_ref[0] -= 1
@@ -56,6 +65,8 @@ def _tui_update_running_state(cfg: TuiWorkerConfig, job) -> None:
         cfg.running_started_at_ref[0] = time.perf_counter()
 
 
+# LLM: _tui_cleanup_after_job 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
 def _tui_cleanup_after_job(
     cfg: TuiWorkerConfig,
     job,
@@ -78,6 +89,8 @@ def _tui_cleanup_after_job(
     cfg.jobs.task_done()
 
 
+# LLM: _reset_worker_refs 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _reset_worker_refs(cfg: TuiWorkerConfig) -> None:
     with cfg.state_lock:
         cfg.is_running_ref[0] = False
@@ -87,6 +100,8 @@ def _reset_worker_refs(cfg: TuiWorkerConfig) -> None:
     cfg.stream_visible_text_ref[0] = ""
 
 
+# LLM: _tui_process_job 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
 def _tui_process_job(cfg: TuiWorkerConfig, job) -> tuple[str, bool]:
     cfg.stream_visible_text_ref[0] = ""
     history_ctx = cfg.build_history_context()
@@ -108,6 +123,8 @@ def _tui_process_job(cfg: TuiWorkerConfig, job) -> tuple[str, bool]:
     return _worker_local_path(path_ctx)
 
 
+# LLM: _build_turn_inject 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _build_turn_inject(job_inject: list[str], history_ctx: str) -> list[str]:
     turn_inject = list(job_inject) + [CHAT_RESPONSE_STYLE_INJECT]
     if history_ctx:
@@ -115,6 +132,8 @@ def _build_turn_inject(job_inject: list[str], history_ctx: str) -> list[str]:
     return turn_inject
 
 
+# LLM: _tui_worker_body 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 维护 TUI 聊天界面的输入、状态栏、退出或渲染行为。
 def _tui_worker_body(cfg: TuiWorkerConfig) -> None:
     while not cfg.stop_event.is_set():
         try:
@@ -135,7 +154,11 @@ def _tui_worker_body(cfg: TuiWorkerConfig) -> None:
             _tui_cleanup_after_job(cfg, job, agent_response_text, response_recorded)
 
 
+# LLM: _make_spinner 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_spinner(cfg: TuiWorkerConfig, next_message_id: int):
+    # LLM: on_spinner_update 属于chat CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def on_spinner_update(text: str) -> None:
         _set_thinking_line(text, cfg.thinking_line_ref)
         if cfg.app_ref[0] is not None:
@@ -153,9 +176,13 @@ def _make_spinner(cfg: TuiWorkerConfig, next_message_id: int):
     return spinner, on_spinner_update
 
 
+# LLM: _make_stream_callbacks 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_stream_callbacks(cfg: TuiWorkerConfig, next_message_id: int, spinner):
     stream_started_ref = [False]
 
+    # LLM: begin_stream 属于chat CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def begin_stream() -> None:
         if stream_started_ref[0]:
             return
@@ -165,6 +192,8 @@ def _make_stream_callbacks(cfg: TuiWorkerConfig, next_message_id: int, spinner):
         _cprint(f"\n{GREEN}{cfg.agent.config.agent_name}#{next_message_id}>{RESET}")
         stream_started_ref[0] = True
 
+    # LLM: on_stream_chunk 属于chat CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def on_stream_chunk(chunk: str) -> bool:
         if not chunk:
             return False
@@ -181,6 +210,8 @@ def _make_stream_callbacks(cfg: TuiWorkerConfig, next_message_id: int, spinner):
 MAX_HISTORY_TURNS = 8
 
 
+# LLM: _append_conversation_turn 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _append_conversation_turn(
     conversation_history: list[tuple[str, str]],
     history_lock,

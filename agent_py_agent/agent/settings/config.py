@@ -1,3 +1,6 @@
+# LLM: 这是运行配置入口，解析规则和默认值变更会扩散到启动、工具和子代理。
+# 模块用途: 主 AgentConfig 模型和轻量 YAML 配置加载。
+
 from __future__ import annotations
 
 """智能体配置加载工具。
@@ -44,6 +47,8 @@ _INT_PATTERN = re.compile(r"-?[0-9]+")
 _FLOAT_PATTERN = re.compile(r"-?[0-9]+(\.[0-9]+)?")
 
 
+# LLM: AgentConfig 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: 主运行配置对象，汇总模型、工具、gateway、子代理、通知和用户空间字段。
 @dataclass
 class AgentConfig:
 
@@ -176,6 +181,8 @@ class AgentConfig:
     config_warnings: list[str] = field(default_factory=list)
 
 
+# LLM: parse_scalar 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 解析 parse_scalar 数据结构。
 def parse_scalar(value: str) -> Any:
 
     value = value.strip().strip('"').strip("'")
@@ -191,6 +198,8 @@ def parse_scalar(value: str) -> Any:
         return value
 
 
+# LLM: _parse_inline_list 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 解析 parse_inline_list 数据结构。
 def _parse_inline_list(value: str) -> list[Any] | None:
     try:
         parsed = ast.literal_eval(value)
@@ -201,6 +210,8 @@ def _parse_inline_list(value: str) -> list[Any] | None:
     return parsed
 
 
+# LLM: load_simple_yaml 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 读取 load_simple_yaml 数据并转换成内部对象。
 def load_simple_yaml(path: Path) -> dict[str, Any]:
 
     data: dict[str, Any] = {}
@@ -215,14 +226,17 @@ def load_simple_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
+# LLM: _append_yaml_list_item 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 向结果或告警集合加入 append_yaml_list_item，同时保留调用方依赖的顺序。
 def _append_yaml_list_item(data: dict[str, Any], current_key: str | None, line: str) -> bool:
     if not (line.startswith("  - ") and current_key):
         return False
-    # LLM: simple YAML loader only supports top-level scalar lists.
     data.setdefault(current_key, []).append(parse_scalar(line[4:]))
     return True
 
 
+# LLM: _handle_yaml_mapping_line 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 配置系统 中的 handle_yaml_mapping_line 步骤，并保持调用方依赖的数据形状。
 def _handle_yaml_mapping_line(data: dict[str, Any], current_key: str | None, line: str) -> str | None:
     if ":" not in line or line.startswith(" "):
         return current_key
@@ -236,6 +250,8 @@ def _handle_yaml_mapping_line(data: dict[str, Any], current_key: str | None, lin
     return None
 
 
+# LLM: load_config 属于 配置系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 读取 load_config 数据并转换成内部对象。
 def load_config(config_path: str | Path) -> AgentConfig:
 
     path = Path(config_path)

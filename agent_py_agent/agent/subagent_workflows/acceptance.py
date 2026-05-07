@@ -1,6 +1,9 @@
+# LLM: Subagent workflow planner module; keep route, compile, and acceptance bundle shapes stable.
+# 模块用途: 拆分子代理工作流的规划、编译、验收或存储逻辑。
+
 from __future__ import annotations
 
-"""LLM: parent-side acceptance planning keeps final verification outside worker self-report."""
+"""parent-side acceptance planning keeps final verification outside worker self-report."""
 
 from dataclasses import dataclass, field, is_dataclass
 from typing import Any
@@ -8,6 +11,8 @@ from typing import Any
 from .models import WorkflowTemplate
 
 
+# LLM: ParentAcceptanceItem 属于子代理工作流编排的类边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 类用途: 集中保存父级验收条目字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发模板选择、步骤编译和验收策略相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class ParentAcceptanceItem:
     """One check the parent session must perform before accepting delivery."""
@@ -19,6 +24,8 @@ class ParentAcceptanceItem:
     required: bool = True
 
 
+# LLM: ParentAcceptancePlan 属于子代理工作流编排的类边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 类用途: 集中保存父级验收计划字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发模板选择、步骤编译和验收策略相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class ParentAcceptancePlan:
     """Structured final-gate checklist assembled for a workflow template."""
@@ -28,6 +35,8 @@ class ParentAcceptancePlan:
     items: list[ParentAcceptanceItem] = field(default_factory=list)
     final_gate: str = "parent_final_gate"
 
+    # LLM: checklist 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+    # 函数用途: 校验checklist需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     @property
     def checklist(self) -> list[str]:
         """Return human-readable check text for renderers that need strings."""
@@ -35,6 +44,8 @@ class ParentAcceptancePlan:
         return [item.text for item in self.items]
 
 
+# LLM: _AcceptanceItemSource 属于子代理工作流编排的类边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 类用途: 集中保存验收条目source字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发模板选择、步骤编译和验收策略相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class _AcceptanceItemSource:
     """Bundle shared labels for parent acceptance item expansion."""
@@ -69,6 +80,8 @@ _DEFAULT_ANTI_ACCEPTANCE_ITEMS = (
 )
 
 
+# LLM: plan_parent_acceptance 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理计划父级验收相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def plan_parent_acceptance(
     template: WorkflowTemplate,
     *,
@@ -101,6 +114,8 @@ def plan_parent_acceptance(
     return ParentAcceptancePlan(template_id=template.id, goal=goal, items=_dedupe_items(items))
 
 
+# LLM: _add_default_anti_acceptance_items 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理adddefaultanti验收条目相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _add_default_anti_acceptance_items(items: list[ParentAcceptanceItem]) -> None:
     """Append the default anti-acceptance items that prevent self-acceptance."""
     for item_id, text in _DEFAULT_ANTI_ACCEPTANCE_ITEMS:
@@ -114,6 +129,8 @@ def _add_default_anti_acceptance_items(items: list[ParentAcceptanceItem]) -> Non
         )
 
 
+# LLM: _extend_contract_items 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理extendcontract条目相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _extend_contract_items(
     items: list[ParentAcceptanceItem],
     contract: dict[str, object],
@@ -143,6 +160,8 @@ def _extend_contract_items(
         )
 
 
+# LLM: _extend_items 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理extend条目相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _extend_items(
     items: list[ParentAcceptanceItem],
     values: list[str],
@@ -160,6 +179,8 @@ def _extend_items(
         )
 
 
+# LLM: _contract_mapping 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理contractmapping相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _contract_mapping(value: object | None) -> dict[str, object]:
     if value is None:
         return {}
@@ -190,6 +211,8 @@ def _contract_mapping(value: object | None) -> dict[str, object]:
     }
 
 
+# LLM: _as_list 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 转换aslist的数据表示，保持跨模块传递时的字段含义一致；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _as_list(value: object) -> list[str]:
     if value is None:
         return []
@@ -200,6 +223,8 @@ def _as_list(value: object) -> list[str]:
     return [str(value)] if str(value) else []
 
 
+# LLM: _requires_reviewer_result 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 校验requiresreviewer结果需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _requires_reviewer_result(template: WorkflowTemplate, contract: dict[str, object]) -> bool:
     if template.id == "producer_critic_repair":
         return True
@@ -209,6 +234,8 @@ def _requires_reviewer_result(template: WorkflowTemplate, contract: dict[str, ob
     return "high quality" in quality_bar or "critic" in quality_bar or "reviewer" in quality_bar
 
 
+# LLM: _dedupe_items 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理dedupe条目相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _dedupe_items(items: list[ParentAcceptanceItem]) -> list[ParentAcceptanceItem]:
     seen: set[tuple[str, str]] = set()
     deduped: list[ParentAcceptanceItem] = []

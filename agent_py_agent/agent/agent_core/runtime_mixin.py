@@ -1,8 +1,10 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 from __future__ import annotations
 
-"""LLM: implements the SimpleAgent prompt/model/tool loop plus memory facade methods.
+"""implements the SimpleAgent prompt/model/tool loop plus memory facade methods.
 
-给人看的解释：
 这个文件是主代理最基础的一轮对话链路：召回记忆、构建 prompt、调用模型、解析工具调用、把工具结果再喂回模型。
 它不处理子代理调度细节，那些已经拆到别的 mixin。
 
@@ -23,6 +25,8 @@ from .runtime_loop_support import (
 from .runtime_services import CompressionService, FinalizationService, ToolLoopService
 
 
+# LLM: _RuntimeServices 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存运行时services字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 @dataclass
 class _RuntimeServices:
 
@@ -31,6 +35,8 @@ class _RuntimeServices:
     finalization: FinalizationService
 
 
+# LLM: _CompressionSnapshotRequest 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存压缩snapshot请求字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class _CompressionSnapshotRequest:
     # LLM: snapshot render inputs stay bundled before crossing into CompressionService.
@@ -41,9 +47,11 @@ class _CompressionSnapshotRequest:
     resume_context_section: object
 
 
+# LLM: _RunCompatibilityFields 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存runcompatibility字段字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class _RunCompatibilityFields:
-    # LLM: legacy run keyword fields are gathered before constructing RunParams.
+    # LLM: 旧运行关键字字段先集中收集，再构造统一运行参数。
     inject: list[str] | None = None
     prompt_files: list[str] | None = None
     save: bool | None = None
@@ -63,10 +71,14 @@ class _RunCompatibilityFields:
     on_chunk: object = None
 
 
+# LLM: SimpleAgentRuntimeMixin 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 拆分simpleagent运行时混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class SimpleAgentRuntimeMixin:
 
     _services: _RuntimeServices | None = None
 
+    # LLM: _get_services 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 读取或查询services需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def _get_services(self) -> _RuntimeServices:
         if self._services is None:
             self._services = _RuntimeServices(
@@ -76,9 +88,13 @@ class SimpleAgentRuntimeMixin:
             )
         return self._services
 
+    # LLM: _compress_memories 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理compressmemories相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _compress_memories(self, memories: list[object], *, keep_recent: int) -> list[object]:
         return self._get_services().compression._compress_memories(memories, keep_recent=keep_recent)
 
+    # LLM: _build_compression_snapshot_content 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 构建压缩snapshot内容所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def _build_compression_snapshot_content(
         self,
         *,
@@ -104,6 +120,8 @@ class SimpleAgentRuntimeMixin:
             )
         )
 
+    # LLM: run 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 推进run的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def run(
         self,
         user_prompt: str,
@@ -147,6 +165,8 @@ class SimpleAgentRuntimeMixin:
         ctx = self._build_finalize_context(_finalize_params(user_prompt, prepared, loop_result, params))
         return self._get_services().finalization.finalize(ctx)
 
+    # LLM: _build_finalize_context 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 构建finalize上下文所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def _build_finalize_context(self, params: _FinalizeParams):
         from .runtime_services import FinalizeContext
         rp = params.run_params
@@ -175,13 +195,19 @@ class SimpleAgentRuntimeMixin:
             tool_rounds=params.tool_rounds,
         )
 
+    # LLM: remember 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理remember相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def remember(self, content: str, *, kind: str = "note"):
         return self.memory.add("user", content, kind=kind)
 
+    # LLM: recall 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理recall相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def recall(self, query: str, top_k: int | None = None):
         return self.memory.search(query, top_k or self.config.memory_top_k)
 
 
+# LLM: _run_params_from_compat 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进来自参数compat的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _run_params_from_compat(params: RunParams, fields: _RunCompatibilityFields) -> RunParams:
     return run_params_from_values(
         params,

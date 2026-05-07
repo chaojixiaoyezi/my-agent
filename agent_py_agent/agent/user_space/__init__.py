@@ -1,3 +1,6 @@
+# LLM: User-space module; keep per-user path and migration behavior stable.
+# 模块用途: 管理用户隔离目录、路径推导和旧数据迁移。
+
 from __future__ import annotations
 
 """用户数据隔离模块。

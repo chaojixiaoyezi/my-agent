@@ -1,3 +1,6 @@
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
 from __future__ import annotations
 
 import json
@@ -9,6 +12,8 @@ from .base import ParseContext, ParsedRecord, ParserError
 from .common import DEFAULT_PAYLOAD_MAX_CHARS, normalize_security_alert_v1
 
 
+# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 SecurityAlertV1Parser 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 SecurityAlertV1Parser 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(slots=True)
 class SecurityAlertV1Parser:
     """Parser for the first SecurityAlertV1 CSV/JSONL alert schema."""
@@ -19,6 +24,8 @@ class SecurityAlertV1Parser:
     schema: str = "SecurityAlertV1"
     supported_formats: tuple[str, ...] = ("jsonl", "csv", "log")
 
+    # LLM: parser 层把外部日志格式规范化成统一事件字段；修改 parse_record 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 从外部数据还原 parse record 需要的领域对象，统一缺省值和兼容字段。
     def parse_record(
         self,
         record: Mapping[str, Any],
@@ -52,6 +59,8 @@ class SecurityAlertV1Parser:
             line_no=parse_context.line_no,
         )
 
+    # LLM: parser 层把外部日志格式规范化成统一事件字段；修改 parse_json_line 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 从外部数据还原 parse json line 需要的领域对象，统一缺省值和兼容字段。
     def parse_json_line(
         self,
         line: str,
@@ -75,6 +84,8 @@ class SecurityAlertV1Parser:
             request=parse_context,
         )
 
+    # LLM: parser 层把外部日志格式规范化成统一事件字段；修改 parse_csv_row 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 从外部数据还原 parse csv row 需要的领域对象，统一缺省值和兼容字段。
     def parse_csv_row(
         self,
         row: Mapping[str, Any],

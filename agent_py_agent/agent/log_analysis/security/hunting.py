@@ -1,3 +1,6 @@
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
 from __future__ import annotations
 
 """Query-plan drafts for analyst and hunt agents."""
@@ -11,6 +14,8 @@ from ..models import CaseRecord
 from .correlation import RouteDraft
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 HuntQuery 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 HuntQuery 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class HuntQuery:
     query_id: str
@@ -22,10 +27,14 @@ class HuntQuery:
     filters: dict[str, Any] = field(default_factory=dict)
     limit: int = 500
 
+    # LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 to_dict 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 把 to dict 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 build_seed_hunt_queries 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 build seed hunt queries 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def build_seed_hunt_queries(
     seed_type: str,
     seed_value: str,
@@ -68,6 +77,8 @@ def build_seed_hunt_queries(
     ]
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 build_case_hunt_plan 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 build case hunt plan 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def build_case_hunt_plan(case: CaseRecord | Mapping[str, Any], route: RouteDraft | Mapping[str, Any] | None = None) -> list[HuntQuery]:
     case_obj = case if isinstance(case, CaseRecord) else CaseRecord.from_dict(case)
     route_dict = route.to_dict() if isinstance(route, RouteDraft) else dict(route or {})
@@ -82,6 +93,8 @@ def build_case_hunt_plan(case: CaseRecord | Mapping[str, Any], route: RouteDraft
     return _dedupe_queries(queries)
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 next_query_plan 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 next query plan 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def next_query_plan(case: CaseRecord | Mapping[str, Any], route: RouteDraft | Mapping[str, Any] | None = None) -> dict[str, Any]:
     case_obj = case if isinstance(case, CaseRecord) else CaseRecord.from_dict(case)
     route_dict = route.to_dict() if isinstance(route, RouteDraft) else dict(route or {})
@@ -92,6 +105,8 @@ def next_query_plan(case: CaseRecord | Mapping[str, Any], route: RouteDraft | Ma
     }
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 retrohunt_query_plan 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 retrohunt query plan 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def retrohunt_query_plan(seed_type: str, seed_value: str, *, days: int = 30) -> dict[str, Any]:
     return {
         "kind": "retrohunt",
@@ -102,6 +117,8 @@ def retrohunt_query_plan(seed_type: str, seed_value: str, *, days: int = 30) -> 
     }
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _case_window 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 case window 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _case_window(case: CaseRecord, route: Mapping[str, Any]) -> tuple[str, str]:
     timeline = route.get("timeline") or []
     times = [str(item.get("time", "")) for item in timeline if isinstance(item, Mapping) and item.get("time")]
@@ -110,6 +127,8 @@ def _case_window(case: CaseRecord, route: Mapping[str, Any]) -> tuple[str, str]:
     return (case.created_at, case.updated_at)
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _dedupe_queries 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 dedupe queries 涉及的字段，让后续匹配和存储使用同一形态。
 def _dedupe_queries(queries: Sequence[HuntQuery]) -> list[HuntQuery]:
     result: list[HuntQuery] = []
     seen: set[tuple[str, str, tuple[str, ...]]] = set()
@@ -122,6 +141,8 @@ def _dedupe_queries(queries: Sequence[HuntQuery]) -> list[HuntQuery]:
     return result
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _unique 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 unique 涉及的字段，让后续匹配和存储使用同一形态。
 def _unique(values: Sequence[Any]) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()

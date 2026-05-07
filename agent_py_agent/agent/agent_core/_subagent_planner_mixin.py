@@ -1,3 +1,6 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 
 from __future__ import annotations
 
@@ -14,6 +17,8 @@ from .planner import (
 )
 
 
+# LLM: RunParentPlannerParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存run父级规划器参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class RunParentPlannerParams:
 
@@ -28,6 +33,8 @@ class RunParentPlannerParams:
     runner_instruction: str
 
 
+# LLM: PlannerLLMParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存规划器llmparams字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class PlannerLLMParams:
     state: dict
@@ -37,6 +44,8 @@ class PlannerLLMParams:
     runner_instruction: str
 
 
+# LLM: PlannerRecordBuildParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存规划器记录build参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class PlannerRecordBuildParams:
     result: object
@@ -46,8 +55,12 @@ class PlannerRecordBuildParams:
     runner_instruction: str
 
 
+# LLM: _ParentPlannerMixin 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 拆分父级规划器混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class _ParentPlannerMixin:
 
+    # LLM: run_parent_planner 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 推进父级规划器的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def run_parent_planner(self, params: RunParentPlannerParams) -> ParentPlannerRecord:
         cfg = params.capability_config or CapabilityConfig()
         state = _build_parent_planner_state(
@@ -88,6 +101,8 @@ class _ParentPlannerMixin:
             )
         )
 
+    # LLM: _make_heartbeat_ok_record 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 构建heartbeatok记录所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
     def _make_heartbeat_ok_record(self, dry_run, gate_summary):
         record = self.subagents.make_parent_planner_record(
             params=ParentPlannerRecordParams(
@@ -104,6 +119,8 @@ class _ParentPlannerMixin:
         self.subagents.write_parent_planner_report(report, append_log=False)
         return record
 
+    # LLM: _execute_planner_llm 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 推进规划器llm的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _execute_planner_llm(self, params: PlannerLLMParams):
         prompt = _build_parent_planner_prompt(
             params.state,
@@ -118,6 +135,8 @@ class _ParentPlannerMixin:
         except Exception:
             return None
 
+    # LLM: _make_planner_error_record 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 构建规划器error记录所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
     def _make_planner_error_record(self, gate_summary, runner_instruction, apply):
         record = self.subagents.make_parent_planner_record(
             params=ParentPlannerRecordParams(
@@ -135,6 +154,8 @@ class _ParentPlannerMixin:
         self.subagents.write_parent_planner_report(report, append_log=apply)
         return record
 
+    # LLM: _build_planner_record 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 构建规划器记录所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
     def _build_planner_record(self, params: PlannerRecordBuildParams):
         from ..subagents.parsing import parse_parent_planner_output
 
@@ -173,8 +194,10 @@ class _ParentPlannerMixin:
         return record
 
 
+# LLM: _planner_record_status 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理规划器记录状态相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _planner_record_status(parsed, state: dict) -> tuple[bool, str, str, str]:
-    # LLM: parser fallback rules stay separate from parent-planner record persistence.
+    # LLM: 解析兜底规则与父级规划记录持久化分离，避免失败处理写错位置。
     ok = parsed.found and parsed.ok
     decision = parsed.decision or "PARSE_ERROR"
     message = parsed.summary or "父代理 planner 已完成完整 LLM turn。"

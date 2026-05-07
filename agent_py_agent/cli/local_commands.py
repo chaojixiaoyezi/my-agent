@@ -1,6 +1,9 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
-"""LLM: implements status, timeline, run, memory, local-search, local-doctor, and local-rebuild CLI commands.
+"""implements status, timeline, run, memory, local-search, local-doctor, and local-rebuild CLI commands.
 
 给人看的解释：
 这个文件只放和'本地状态/记忆/LocalStore'相关的命令。
@@ -37,6 +40,8 @@ from .models import LocalSearchOptions, TimelineOptions
 from .thinking_spinner import ThinkingSpinner
 
 
+# LLM: cmd_status 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_status(args) -> int:
 
     agent = make_agent(args)
@@ -79,6 +84,8 @@ def cmd_status(args) -> int:
     return 0
 
 
+# LLM: cmd_timeline 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_timeline(args) -> int:
 
     agent = make_agent(args)
@@ -109,12 +116,16 @@ def cmd_timeline(args) -> int:
     return 0
 
 
+# LLM: cmd_run 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_run(args) -> int:
 
     agent = make_agent(args)
     spinner = ThinkingSpinner()
     spinner.start()
 
+    # LLM: _on_run_chunk 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def _on_run_chunk(chunk: str) -> None:
         spinner.stop()
         sys.stdout.write(chunk)
@@ -151,6 +162,8 @@ def cmd_run(args) -> int:
     return 0
 
 
+# LLM: cmd_remember 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_remember(args) -> int:
 
     agent = make_agent(args)
@@ -159,6 +172,8 @@ def cmd_remember(args) -> int:
     return 0
 
 
+# LLM: cmd_memory_list 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_memory_list(args) -> int:
 
     agent = make_agent(args)
@@ -168,6 +183,8 @@ def cmd_memory_list(args) -> int:
     return 0
 
 
+# LLM: cmd_memory_search 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_memory_search(args) -> int:
 
     agent = make_agent(args)
@@ -176,6 +193,8 @@ def cmd_memory_search(args) -> int:
     return 0
 
 
+# LLM: cmd_local_store_status 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_local_store_status(args) -> int:
 
     agent = make_agent(args)
@@ -183,6 +202,8 @@ def cmd_local_store_status(args) -> int:
     return 0
 
 
+# LLM: cmd_local_search 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_local_search(args) -> int:
 
     agent = make_agent(args)
@@ -201,6 +222,8 @@ def cmd_local_search(args) -> int:
     return 0
 
 
+# LLM: cmd_local_index_memory 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_local_index_memory(args) -> int:
 
     agent = make_agent(args)
@@ -219,8 +242,9 @@ def cmd_local_index_memory(args) -> int:
     return 0
 
 
+# LLM: _timeline_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _timeline_options(args) -> TimelineOptions:
-    # LLM: local timeline keeps argparse conversion at the CLI edge.
     return TimelineOptions(
         limit=int(args.limit or 0),
         source_type=args.source_type,
@@ -230,6 +254,8 @@ def _timeline_options(args) -> TimelineOptions:
     )
 
 
+# LLM: _local_search_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _local_search_options(args) -> LocalSearchOptions:
     return LocalSearchOptions(
         query=args.query,

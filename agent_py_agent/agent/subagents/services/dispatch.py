@@ -1,6 +1,9 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-"""LLM: dispatch record and reporting service.
+"""dispatch record and reporting service.
 
 给人看的解释：
 这里承接调度记录生成、汇总和写出逻辑。
@@ -27,11 +30,17 @@ if TYPE_CHECKING:
         ParentPlannerReport,
     )
 
+# LLM: SubAgentDispatchService 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 封装subagent调度服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 class SubAgentDispatchService:
 
+    # LLM: __init__ 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def __init__(self, manager: Any):
         self.manager = manager
 
+    # LLM: make_dispatch_record 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 构建make调度记录所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def make_dispatch_record(
         self,
         *,
@@ -39,11 +48,15 @@ class SubAgentDispatchService:
     ) -> DispatchRecord:
         return self._make_dispatch_record(params)
 
+    # LLM: _make_dispatch_record 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 构建make调度记录所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def _make_dispatch_record(self, params: DispatchRecordParams) -> DispatchRecord:
         from .dispatch_record_builder import DispatchRecordBuilder
 
         return DispatchRecordBuilder.make_record(self.manager, params)
 
+    # LLM: build_dispatch_report 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 构建报告所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
     def build_dispatch_report(
         self,
         records: list[DispatchRecord],
@@ -61,6 +74,8 @@ class SubAgentDispatchService:
             records=records,
         )
 
+    # LLM: write_dispatch_report 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 写入报告的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def write_dispatch_report(
         self,
         report: DispatchReport,
@@ -91,6 +106,8 @@ class SubAgentDispatchService:
         )
         return report
 
+    # LLM: make_dispatch_watch_record 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 构建make调度监控记录所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def make_dispatch_watch_record(
         self,
         *,
@@ -100,6 +117,8 @@ class SubAgentDispatchService:
 
         return DispatchWatchBuilder.make_record(self.manager, params=params)
 
+    # LLM: build_dispatch_watch_report 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 构建报告所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
     def build_dispatch_watch_report(
         self,
         records: list[DispatchWatchRecord],
@@ -117,6 +136,8 @@ class SubAgentDispatchService:
             records=records,
         )
 
+    # LLM: write_dispatch_watch_report 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 写入报告的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def write_dispatch_watch_report(self, report: DispatchWatchReport) -> DispatchWatchReport:
         (self.manager.workspace / "subagent_dispatch_watch_report.json").write_text(
             json.dumps(asdict(report), ensure_ascii=False, indent=2),
@@ -135,6 +156,8 @@ class SubAgentDispatchService:
         )
         return report
 
+    # LLM: write_dispatch_watch_heartbeat 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 写入heartbeat的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def write_dispatch_watch_heartbeat(
         self,
         *,
@@ -152,6 +175,8 @@ class SubAgentDispatchService:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
 
+    # LLM: write_parent_planner_exchange 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 写入父级规划器exchange的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def write_parent_planner_exchange(self, prompt: str, response: str = "") -> tuple[str, str]:
         prompt_path = self.manager.workspace / "parent_planner_prompt.md"
         response_path = self.manager.workspace / "parent_planner_response.md"
@@ -160,6 +185,8 @@ class SubAgentDispatchService:
             response_path.write_text(response, encoding="utf-8")
         return str(prompt_path), str(response_path)
 
+    # LLM: make_parent_planner_record 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 构建父级规划器记录所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def make_parent_planner_record(
         self,
         *,
@@ -169,6 +196,8 @@ class SubAgentDispatchService:
 
         return ParentPlannerBuilder.make_record(self.manager, params=params)
 
+    # LLM: build_parent_planner_report 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 构建父级规划器报告所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def build_parent_planner_report(
         self,
         records: list[ParentPlannerRecord],
@@ -186,6 +215,8 @@ class SubAgentDispatchService:
             records=records,
         )
 
+    # LLM: write_parent_planner_report 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 写入父级规划器报告的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def write_parent_planner_report(
         self,
         report: ParentPlannerReport,
@@ -216,11 +247,15 @@ class SubAgentDispatchService:
         )
         return report
 
+    # LLM: append_dispatch_watch_log 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 写入append调度监控log的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def append_dispatch_watch_log(self, record: DispatchWatchRecord) -> None:
         from .dispatch_watch_log_appender import DispatchWatchLogAppender
 
         DispatchWatchLogAppender.append(record, self.manager.workspace, self.manager)
 
+    # LLM: append_parent_planner_log 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 写入父级规划器log的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def append_parent_planner_log(self, record: ParentPlannerRecord) -> None:
         from .parent_planner_builder import ParentPlannerLogAppender
 

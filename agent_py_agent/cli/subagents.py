@@ -1,6 +1,9 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
-"""LLM: implements CLI commands for subagent boards, due-checks, actions, routing, reviews, dispatch, and runner entrypoints.
+"""implements CLI commands for subagent boards, due-checks, actions, routing, reviews, dispatch, and runner entrypoints.
 
 给人看的解释：
 这个文件只管用户在命令行里怎么操作子代理。
@@ -25,5 +28,3 @@ from agent_py_agent.cli._inspection import (
 )
 from agent_py_agent.cli._memory_gate import cmd_subagents_memory_gate
 from agent_py_agent.cli._review import cmd_subagents_acceptance, cmd_subagents_patches
-
-# LLM: memory gate CLI writes review state only, not memory or skill exports.

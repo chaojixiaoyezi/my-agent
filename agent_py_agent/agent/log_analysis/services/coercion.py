@@ -1,3 +1,6 @@
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
 """Type coercion and field normalization utilities for log analysis config.
 
 These functions safely convert raw YAML values into validated typed values,
@@ -16,6 +19,8 @@ _MISSING = object()
 _INT_PATTERN = re.compile(r"-?[0-9]+")
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 ConfigWarningInput 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 ConfigWarningInput 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class ConfigWarningInput:
     field_name: str
@@ -24,6 +29,8 @@ class ConfigWarningInput:
     reason: str
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 ChoiceCoercionOptions 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 ChoiceCoercionOptions 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class ChoiceCoercionOptions:
     default: str
@@ -31,6 +38,8 @@ class ChoiceCoercionOptions:
     uppercase: bool = False
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 IntCoercionOptions 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 IntCoercionOptions 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class IntCoercionOptions:
     default: int
@@ -38,6 +47,8 @@ class IntCoercionOptions:
     max_value: int | None
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 lookup 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 lookup 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def lookup(source: dict[str, Any] | object, field_name: str) -> Any:
     """Read a config field from a Mapping or plain object, returning _MISSING sentinel if absent."""
     if isinstance(source, dict):
@@ -45,6 +56,8 @@ def lookup(source: dict[str, Any] | object, field_name: str) -> Any:
     return getattr(source, field_name, _MISSING)
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 append_warning 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 append warning 相关记录，集中处理目标路径、格式化和状态更新。
 def append_warning(
     warnings: list[LogAnalysisConfigWarning],
     params: ConfigWarningInput | None = None,
@@ -65,6 +78,8 @@ def append_warning(
     )
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 coerce_bool 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 coerce bool 涉及的字段，让后续匹配和存储使用同一形态。
 def coerce_bool(
     field_name: str,
     raw_value: Any,
@@ -74,8 +89,7 @@ def coerce_bool(
 ) -> bool:
     """Coerce a value to bool, falling back to default on bad input.
 
-    Accepts bool, 0/1 int, and strings "true"/"false", "yes"/"no", "on"/"off".
-    """
+    Accepts bool, 0/1 int, and strings "true"/"false", "yes"/"no", "on"/"off"."""
     if raw_value is _MISSING:
         return default
     if isinstance(raw_value, bool):
@@ -92,6 +106,8 @@ def coerce_bool(
     return default
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 coerce_choice 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 coerce choice 涉及的字段，让后续匹配和存储使用同一形态。
 def coerce_choice(
     field_name: str,
     raw_value: Any,
@@ -104,8 +120,7 @@ def coerce_choice(
 ) -> str:
     """Coerce a value to a string chosen from an allowed set.
 
-    If uppercase=True, normalize input to upper-case before comparing.
-    """
+    If uppercase=True, normalize input to upper-case before comparing."""
     coercion = options or ChoiceCoercionOptions(default=str(default), choices=set(choices), uppercase=uppercase)
     if raw_value is _MISSING:
         return coercion.default
@@ -118,6 +133,8 @@ def coerce_choice(
     return coercion.default
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 coerce_int 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 coerce int 涉及的字段，让后续匹配和存储使用同一形态。
 def coerce_int(
     field_name: str,
     raw_value: Any,
@@ -130,8 +147,7 @@ def coerce_int(
 ) -> int:
     """Coerce a value to an integer within [min_value, max_value].
 
-    Rejects booleans explicitly (since bool is int in Python) and non-integer strings.
-    """
+    Rejects booleans explicitly (since bool is int in Python) and non-integer strings."""
     coercion = options or IntCoercionOptions(default=int(default), min_value=int(min_value), max_value=max_value)
     if raw_value is _MISSING:
         return coercion.default
@@ -164,6 +180,8 @@ def coerce_int(
     return number
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 coerce_path_string 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 coerce path string 涉及的字段，让后续匹配和存储使用同一形态。
 def coerce_path_string(
     field_name: str,
     raw_value: Any,
@@ -173,8 +191,7 @@ def coerce_path_string(
 ) -> str:
     """Coerce a value to a non-empty, safe path string.
 
-    Rejects null bytes and control characters; preserves empty strings as invalid.
-    """
+    Rejects null bytes and control characters; preserves empty strings as invalid."""
     if raw_value is _MISSING:
         return default
     if isinstance(raw_value, str):

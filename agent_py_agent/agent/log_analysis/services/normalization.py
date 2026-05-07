@@ -1,3 +1,6 @@
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
 """Field-group normalization for log analysis config.
 
 Each function normalizes a logical group of related fields and accumulates
@@ -14,6 +17,8 @@ from . import coercion
 _LEVELS = {"L0", "L1", "L2", "L3", "L4", "L5"}
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 normalize_core_bool_fields 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 normalize core bool fields 涉及的字段，让后续匹配和存储使用同一形态。
 def normalize_core_bool_fields(
     source: dict[str, Any],
     defaults: LogAnalysisConfig,
@@ -52,6 +57,8 @@ def normalize_core_bool_fields(
     }
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 normalize_choice_fields 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 normalize choice fields 涉及的字段，让后续匹配和存储使用同一形态。
 def normalize_choice_fields(
     source: dict[str, Any],
     defaults: LogAnalysisConfig,
@@ -79,6 +86,8 @@ def normalize_choice_fields(
     }
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 normalize_path_and_version_fields 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 normalize path and version fields 涉及的字段，让后续匹配和存储使用同一形态。
 def normalize_path_and_version_fields(
     source: dict[str, Any],
     defaults: LogAnalysisConfig,
@@ -99,6 +108,8 @@ def normalize_path_and_version_fields(
     }
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 normalize_query_limit_fields 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 normalize query limit fields 涉及的字段，让后续匹配和存储使用同一形态。
 def normalize_query_limit_fields(
     source: dict[str, Any],
     defaults: LogAnalysisConfig,
@@ -121,6 +132,8 @@ def normalize_query_limit_fields(
     }
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 normalize_retention_and_preview_fields 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 normalize retention and preview fields 涉及的字段，让后续匹配和存储使用同一形态。
 def normalize_retention_and_preview_fields(
     source: dict[str, Any],
     defaults: LogAnalysisConfig,
@@ -143,6 +156,8 @@ def normalize_retention_and_preview_fields(
     }
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 normalize_dispatch_and_window_fields 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 normalize dispatch and window fields 涉及的字段，让后续匹配和存储使用同一形态。
 def normalize_dispatch_and_window_fields(
     source: dict[str, Any],
     defaults: LogAnalysisConfig,
@@ -177,6 +192,8 @@ def normalize_dispatch_and_window_fields(
     }
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 normalize_all 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 normalize all 涉及的字段，让后续匹配和存储使用同一形态。
 def normalize_all(
     values: dict[str, Any] | object | None,
 ) -> tuple[LogAnalysisConfig, list[LogAnalysisConfigWarning]]:
@@ -185,8 +202,7 @@ def normalize_all(
     Returns (config, warnings) where warnings contain entries for any field
     that fell back to its default due to invalid input.
     If query_default_limit exceeds query_max_limit, query_default_limit is
-    also corrected to the default.
-    """
+    also corrected to the default."""
     source = values if values is not None else {}
     warnings: list[LogAnalysisConfigWarning] = []
     defaults = LogAnalysisConfig()

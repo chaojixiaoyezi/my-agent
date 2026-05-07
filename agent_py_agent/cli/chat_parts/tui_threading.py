@@ -1,3 +1,6 @@
+# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
+# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
+
 from __future__ import annotations
 
 import threading
@@ -5,6 +8,8 @@ import threading
 from .tui_params import StartWorkerParams, WorkerConfigParams
 
 
+# LLM: _make_worker_config 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _make_worker_config(*, params: WorkerConfigParams):
     from .tui_worker import TuiWorkerConfig
 
@@ -32,6 +37,8 @@ def _make_worker_config(*, params: WorkerConfigParams):
     )
 
 
+# LLM: _start_worker_threads 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _start_worker_threads(*, params: StartWorkerParams) -> None:
     from .tui_worker import _tui_worker_body
 
@@ -66,6 +73,8 @@ def _start_worker_threads(*, params: StartWorkerParams) -> None:
     ).start()
 
 
+# LLM: _refresh_loop 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _refresh_loop(refresh_stop: threading.Event, app_ref: list) -> None:
     while not refresh_stop.wait(1.0):
         if app_ref[0] is not None:

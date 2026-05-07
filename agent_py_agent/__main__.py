@@ -1,6 +1,9 @@
+# LLM: Top-level package module; keep package entry points and import compatibility stable.
+# 模块用途: 组织 Python 包入口，让 CLI 和模块导入能找到 agent 代码。
+
 from __future__ import annotations
 
-"""LLM: compatibility entrypoint re-exporting the split CLI package.
+"""compatibility entrypoint re-exporting the split CLI package.
 
 给人看的解释：
 CLI 真实实现已经拆到 `agent_py_agent.cli` 目录。

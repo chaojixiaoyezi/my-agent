@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """LLM contract: public dataclass exports for subagent state.
@@ -31,11 +34,13 @@ from .model_runtime import (
     SubAgentRunnerResult,
 )
 
-# LLM: expose task-tree control-plane dataclasses through the stable facade.
+# LLM: 通过稳定门面导出任务树控制面数据类，避免调用方绑定内部文件。
 from .model_task import EvidencePacket, Finding, LearningCandidate, StatusReport, SubAgentTask
 from .quality_models import ContextManifest, QualityContract
 
 
+# LLM: TaskStatus 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 封装任务状态相关状态和行为，维持当前模块的职责边界；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 class TaskStatus(str, Enum):
     """Subagent lifecycle status values."""
 
@@ -56,6 +61,8 @@ DISPATCH_INELIGIBLE_STATUSES = frozenset({
 })
 
 
+# LLM: SubAgentCard 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存subagentcard字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class SubAgentCard:
     """Role/capability card describing what a subagent is allowed to do."""
@@ -73,7 +80,8 @@ class SubAgentCard:
     result_contract: list[str] = field(default_factory=list)
 
 
-# LLM: manager-facing option bundles live in the public facade so CLI/core callers share one shape.
+# LLM: SubAgentCapabilityRouteOptions 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存subagent能力route选项字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class SubAgentCapabilityRouteOptions:
     """Bundle for capability-request routing options."""
@@ -83,6 +91,8 @@ class SubAgentCapabilityRouteOptions:
     limit: int = 0
 
 
+# LLM: SubAgentChannelProbeOptions 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存subagent通道probe选项字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class SubAgentChannelProbeOptions:
     """Bundle for channel probe selection options."""
@@ -91,6 +101,8 @@ class SubAgentChannelProbeOptions:
     limit: int = 0
 
 
+# LLM: SubAgentDueCheckOptions 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存subagent到期检查选项字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class SubAgentDueCheckOptions:
     """Bundle for due-check report options."""
@@ -99,7 +111,8 @@ class SubAgentDueCheckOptions:
     write_report: bool = False
 
 
-# LLM: board selection uses the same manager-facing bundle pattern as route/probe/due-check.
+# LLM: SubAgentBoardOptions 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存subagent看板选项字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class SubAgentBoardOptions:
     """Bundle for board rendering and recent-list selection."""

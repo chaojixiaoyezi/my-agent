@@ -1,3 +1,6 @@
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
 """Shared helpers extracted from pipeline_enrich.py to keep other modules lean."""
 
 from __future__ import annotations
@@ -9,6 +12,8 @@ from typing import Any
 from ..parsers.base import LogParser, ParserError
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 normalize_file_format 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 normalize file format 涉及的字段，让后续匹配和存储使用同一形态。
 def normalize_file_format(value: str) -> str:
     """Normalize a file format string to a canonical ingest format name."""
     fmt = value.lower().lstrip(".") or "jsonl"
@@ -19,6 +24,8 @@ def normalize_file_format(value: str) -> str:
     raise ParserError(f"unsupported file format: {value}")
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 make_batch_id 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 make batch id 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def make_batch_id(*, source_id: str, source_path: str, content_hash: str) -> str:
     """Generate a deterministic batch ID from source identity and content hash."""
     from ..parsers.common import sha256_json
@@ -36,6 +43,8 @@ def make_batch_id(*, source_id: str, source_path: str, content_hash: str) -> str
 from dataclasses import dataclass
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 WriteManifestParams 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 WriteManifestParams 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class WriteManifestParams:
     """Bundle of write_manifest parameters."""
@@ -61,6 +70,8 @@ class WriteManifestParams:
     storage_info: Mapping[str, Any]
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 write_manifest 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write manifest 相关记录，集中处理目标路径、格式化和状态更新。
 def write_manifest(params: WriteManifestParams) -> Path:
     """Write a manifest JSON file summarizing the ingest batch results."""
     from ..parsers.common import utc_now
@@ -108,6 +119,8 @@ def write_manifest(params: WriteManifestParams) -> Path:
     return manifest_path
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _storage_result 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 storage result 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
 def _storage_result(result: Any, *, count: int, store: Any | None = None) -> dict[str, Any]:
     """Normalize a store write return value into a standard dict with count and path."""
     store_path = getattr(store, "events_path", None)
@@ -124,6 +137,8 @@ def _storage_result(result: Any, *, count: int, store: Any | None = None) -> dic
     return {"count": count, "path": str(store_path).replace("\\", "/") if store_path is not None else None}
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _storage_summary 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 storage summary 在当前模块中的核心转换或协调步骤，衔接 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态。
 def _storage_summary(infos: list[dict[str, Any]], *, fallback_path: Path) -> dict[str, Any]:
     """Aggregate multiple storage result dicts into a single summary."""
     count = sum(int(info.get("count") or 0) for info in infos)
@@ -139,6 +154,8 @@ def _storage_summary(infos: list[dict[str, Any]], *, fallback_path: Path) -> dic
 from dataclasses import dataclass
 
 
+# LLM: 日志摄取流程解析原始事件并维护 checkpoint、去重和 dead-letter 状态；修改 _EnrichCounts 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 _EnrichCounts 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _EnrichCounts:
     """Internal counter bundle returned by _process_records."""

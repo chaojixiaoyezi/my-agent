@@ -1,6 +1,9 @@
+# LLM: 保持 mixin、模型和常量导出稳定，避免破坏 LocalStore 门面。
+# 模块用途: LocalStore 拆分实现的公开导出点。
+
 from __future__ import annotations
 
-"""LLM: public LocalStore support package split by schema, records, search, events, and maintenance.
+"""public LocalStore support package split by schema, records, search, events, and maintenance.
 
 给人看的解释：
 LocalStore 已经拆成几个职责清楚的小文件。

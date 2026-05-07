@@ -1,4 +1,7 @@
-"""LLM: patch apply task executor with rollback support."""
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
+"""patch apply task executor with rollback support."""
 
 from __future__ import annotations
 
@@ -17,6 +20,8 @@ from agent_py_agent.agent.subagents.patch.patch_file_ops import (
 from agent_py_agent.agent.subagents.utils import _read_json_object
 
 
+# LLM: PatchApplyParams 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 集中保存补丁应用参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class PatchApplyParams:
     """Bundle for PatchApplyExecutor.execute parameters."""
@@ -30,9 +35,13 @@ class PatchApplyParams:
     test_commands: list
 
 
+# LLM: PatchApplyExecutor 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 封装补丁应用executor相关状态和行为，维持当前模块的职责边界；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 class PatchApplyExecutor:
     """Execute patch apply with rollback support."""
 
+    # LLM: execute 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 推进execute的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
     @staticmethod
     def execute(
         params: PatchApplyParams,
@@ -61,6 +70,8 @@ class PatchApplyExecutor:
         return applied_count, touched_files, rollback_performed, test_results
 
 
+# LLM: _run_patch_apply_tests 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 推进补丁应用tests的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
 def _run_patch_apply_tests(params: PatchApplyParams) -> list:
     if not params.test_commands:
         return []
@@ -71,6 +82,8 @@ def _run_patch_apply_tests(params: PatchApplyParams) -> list:
     return test_results
 
 
+# LLM: _write_patch_apply_success 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 写入补丁应用success的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
 def _write_patch_apply_success(params: PatchApplyParams, applied_count: int, test_results: list) -> None:
     output = _read_json_object(Path(params.task.output_json))
     output["patches"] = params.review_status_updates

@@ -1,11 +1,16 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-"""LLM: deterministic verifier checks for acceptance review records."""
+"""deterministic verifier checks for acceptance review records."""
 
 from .models import SubAgentTask
 from .reports import AcceptanceReviewFinding
 
 
+# LLM: build_verifier_checks 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 构建verifier检查所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def build_verifier_checks(task: SubAgentTask, created_at: float) -> list[AcceptanceReviewFinding]:
     """Verify evidence packets and parent findings before acceptance."""
     packet_ids = {item.id for item in task.evidence_packets if item.id}
@@ -31,6 +36,8 @@ def build_verifier_checks(task: SubAgentTask, created_at: float) -> list[Accepta
     ]
 
 
+# LLM: _verifier_packets_finding 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理verifierpacketsfinding相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _verifier_packets_finding(task, packets_with_refs, created_at):
     ok = len(packets_with_refs) == len(task.evidence_packets) and bool(packets_with_refs)
     return AcceptanceReviewFinding(
@@ -44,6 +51,8 @@ def _verifier_packets_finding(task, packets_with_refs, created_at):
     )
 
 
+# LLM: _verifier_findings_finding 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理verifierfindingsfinding相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _verifier_findings_finding(task, findings_without_chain, created_at):
     return AcceptanceReviewFinding(
         name="verifier_findings_cite_evidence",
@@ -57,6 +66,8 @@ def _verifier_findings_finding(task, findings_without_chain, created_at):
     )
 
 
+# LLM: _verifier_risks_finding 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理verifierrisksfinding相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _verifier_risks_finding(task, unresolved_risks, created_at):
     return AcceptanceReviewFinding(
         name="verifier_no_unresolved_evidence_risks",

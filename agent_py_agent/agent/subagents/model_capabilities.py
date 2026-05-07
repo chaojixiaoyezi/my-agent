@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """Capability and evidence dataclasses used by subagent runs."""
@@ -5,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+# LLM: CapabilityRequest 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存能力请求字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class CapabilityRequest:
     """Request from a subagent for a missing capability."""
@@ -21,6 +26,8 @@ class CapabilityRequest:
     created_at: float = 0.0
 
 
+# LLM: CapabilityGrant 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存能力grant字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class CapabilityGrant:
     """Capability granted by a parent/supervisor to a subagent."""
@@ -37,6 +44,8 @@ class CapabilityGrant:
     created_at: float = 0.0
 
 
+# LLM: CapabilityGap 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存能力缺口字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class CapabilityGap:
     """A capability gap left after routing/search could not find a match."""
@@ -57,6 +66,8 @@ class CapabilityGap:
     created_at: float = 0.0
 
 
+# LLM: VerificationEvidence 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存verification证据字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class VerificationEvidence:
     """Evidence produced by a subagent for verification/acceptance."""

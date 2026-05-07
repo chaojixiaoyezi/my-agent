@@ -1,6 +1,9 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
-"""LLM: subcommand registration helpers – re-export module.
+"""subcommand registration helpers – re-export module.
 
 给人看的解释：
 这个文件原来是所有子命令注册函数的单一大文件，现已按领域拆分为：

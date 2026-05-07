@@ -1,3 +1,6 @@
+# LLM: Capability module; keep skill/tool routing contracts stable for planner and dispatch callers.
+# 模块用途: 描述和路由 agent 能力、技能、工具和执行条件。
+
 from __future__ import annotations
 
 """能力路由配置加载工具。
@@ -12,13 +15,14 @@ from pathlib import Path
 from ..settings.config import load_simple_yaml
 
 
+# LLM: CapabilityConfig is a 能力路由 boundary object; coordinate field or method changes with callers, docs, and focused tests.
+# 类用途: 能力路由配置总表。 数字限制项统一约定：0 表示不限制。 这样用户可以先只打开关键限制，其余细节等系统成熟后再慢慢调。
 @dataclass
 class CapabilityConfig:
     """能力路由配置总表。
 
     数字限制项统一约定：0 表示不限制。
-    这样用户可以先只打开关键限制，其余细节等系统成熟后再慢慢调。
-    """
+    这样用户可以先只打开关键限制，其余细节等系统成熟后再慢慢调。"""
 
     enable_capability_routing: bool = False
     capability_request_max_tokens: int = 600
@@ -41,6 +45,8 @@ class CapabilityConfig:
     skill_body_max_tokens: int = 0
 
 
+# LLM: load_capability_config belongs to 能力路由; keep caller-visible returns, errors, and side effects aligned with focused tests.
+# 函数用途: 加载能力路由配置，并忽略旧版本暂不认识的字段。。
 def load_capability_config(config_path: str | Path) -> CapabilityConfig:
     """加载能力路由配置，并忽略旧版本暂不认识的字段。"""
 

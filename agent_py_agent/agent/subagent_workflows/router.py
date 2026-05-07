@@ -1,6 +1,9 @@
+# LLM: Subagent workflow planner module; keep route, compile, and acceptance bundle shapes stable.
+# 模块用途: 拆分子代理工作流的规划、编译、验收或存储逻辑。
+
 from __future__ import annotations
 
-"""LLM: route parent goals to reusable workflow templates without mutating task state."""
+"""route parent goals to reusable workflow templates without mutating task state."""
 
 from dataclasses import dataclass, field
 from typing import Any
@@ -14,6 +17,8 @@ DEFAULT_MODE = "auto"
 VALID_MODES = {"off", "manual", "auto"}
 
 
+# LLM: WorkflowRouteDecision 属于子代理工作流编排的类边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 类用途: 集中保存工作流routedecision字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class WorkflowRouteDecision:
     """Structured decision returned by the workflow router."""
@@ -28,6 +33,8 @@ class WorkflowRouteDecision:
     issues: list[str] = field(default_factory=list)
 
 
+# LLM: _RouteDecisionFields 属于子代理工作流编排的类边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 类用途: 集中保存routedecision字段字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发模板选择、步骤编译和验收策略相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class _RouteDecisionFields:
     mode: str
@@ -40,6 +47,8 @@ class _RouteDecisionFields:
     issues: list[str]
 
 
+# LLM: _TemplateSelectionRequest 属于子代理工作流编排的类边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 类用途: 集中保存模板selection请求字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发模板选择、步骤编译和验收策略相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class _TemplateSelectionRequest:
     explicit_template_id: str
@@ -49,6 +58,8 @@ class _TemplateSelectionRequest:
     issues: list[str]
 
 
+# LLM: _RouteFieldsRequest 属于子代理工作流编排的类边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 类用途: 集中保存route字段请求字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发模板选择、步骤编译和验收策略相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class _RouteFieldsRequest:
     # LLM: route decision projection keeps mode/template/task facts together.
@@ -104,6 +115,8 @@ _CODE_KEYWORDS = (
 )
 
 
+# LLM: route_workflow 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理route工作流相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def route_workflow(
     goal: str,
     *,
@@ -139,11 +152,15 @@ def route_workflow(
     )
 
 
+# LLM: _disabled_route_decision 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理disabledroutedecision相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _disabled_route_decision(fields: _RouteDecisionFields) -> WorkflowRouteDecision:
     """Build the off-mode route result without lengthening the public facade."""
     return _make_route_decision(fields)
 
 
+# LLM: _route_fields 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理route字段相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _route_fields(request: _RouteFieldsRequest) -> _RouteDecisionFields:
     return _RouteDecisionFields(
         mode=request.mode,
@@ -157,6 +174,8 @@ def _route_fields(request: _RouteFieldsRequest) -> _RouteDecisionFields:
     )
 
 
+# LLM: _workflow_route_inputs 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理工作流routeinputs相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _workflow_route_inputs(
     config: Any,
     template_store: WorkflowTemplateStore | None,
@@ -168,6 +187,8 @@ def _workflow_route_inputs(
     return store, available_template_ids, issues, mode
 
 
+# LLM: _make_route_decision 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 构建routedecision所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _make_route_decision(fields: _RouteDecisionFields) -> WorkflowRouteDecision:
     return WorkflowRouteDecision(
         mode=fields.mode,
@@ -181,6 +202,8 @@ def _make_route_decision(fields: _RouteDecisionFields) -> WorkflowRouteDecision:
     )
 
 
+# LLM: _workflow_mode 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理工作流mode相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _workflow_mode(config: Any, issues: list[str]) -> str:
     raw_mode = getattr(config, "subagent_workflow_mode", DEFAULT_MODE)
     if isinstance(raw_mode, str):
@@ -192,6 +215,8 @@ def _workflow_mode(config: Any, issues: list[str]) -> str:
     return DEFAULT_MODE
 
 
+# LLM: _select_template 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 读取或查询模板需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _select_template(request: _TemplateSelectionRequest) -> tuple[str, str]:
     explicit_template_id = request.explicit_template_id.strip()
     if explicit_template_id:
@@ -211,6 +236,8 @@ def _select_template(request: _TemplateSelectionRequest) -> tuple[str, str]:
     return "", "No workflow template could be selected."
 
 
+# LLM: _classify_goal 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理classify目标相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _classify_goal(goal: str) -> tuple[str, str, list[str]]:
     text = goal.casefold()
     if _matches_quality_goal(goal, text):
@@ -220,18 +247,26 @@ def _classify_goal(goal: str) -> tuple[str, str, list[str]]:
     return "simple", SINGLE_WORKER_TEMPLATE_ID, ["low_scope"]
 
 
+# LLM: _matches_quality_goal 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理matchesquality目标相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _matches_quality_goal(goal: str, text: str) -> bool:
     return _contains_any(goal, _QUALITY_CJK_KEYWORDS) or any(keyword in text for keyword in _QUALITY_KEYWORDS)
 
 
+# LLM: _matches_code_goal 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理matchescode目标相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _matches_code_goal(goal: str, text: str) -> bool:
     return _contains_any(goal, _CODE_CJK_KEYWORDS) or any(keyword in text for keyword in _CODE_KEYWORDS)
 
 
+# LLM: _contains_any 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 判断any条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
+# LLM: _format_store_issue 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 渲染或汇总存储issue的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _format_store_issue(issue: Any) -> str:
     parts = [str(getattr(issue, "message", issue))]
     template_id = getattr(issue, "template_id", "")

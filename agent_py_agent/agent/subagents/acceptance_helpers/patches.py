@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """Build findings for patches.
@@ -12,6 +15,8 @@ from ..reports import AcceptanceReviewFinding
 from .evidence import _make_finding
 
 
+# LLM: _classify_patches 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 处理classifypatches相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持验收证据、补丁摘要和就绪判断上的返回值和副作用边界稳定。
 def _classify_patches(
     patches: list[dict],
 ) -> tuple[list[dict], list[dict], list[dict]]:
@@ -34,6 +39,8 @@ def _classify_patches(
     return unresolved_patches, invalid_patches, unreviewed_applied_patches
 
 
+# LLM: _build_patch_findings 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 构建补丁findings所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _build_patch_findings(
     task: SubAgentTask,
     output: dict[str, object],

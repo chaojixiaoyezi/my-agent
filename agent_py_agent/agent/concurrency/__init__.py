@@ -1,3 +1,6 @@
+# LLM: Concurrency module; keep lock/conflict semantics stable around task mutations.
+# 模块用途: 提供任务锁、乐观锁和冲突重试，保护并发写入。
+
 from __future__ import annotations
 
 from .exceptions import ConcurrencyConflictError

@@ -1,4 +1,7 @@
-"""LLM: Field normalization helpers for subagent manager data models.
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
+"""Field normalization helpers for subagent manager data models.
 
 新手说明:
 这个模块从 manager_base.py 中提取出来，负责把外部传入的
@@ -13,23 +16,15 @@ import re
 from dataclasses import fields
 
 
+# LLM: _field_names 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理字段names相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _field_names(model: type) -> set[str]:
-    """LLM: Return the set of field names for a dataclass type.
-
-    新手说明:
-    获取一个 dataclass 类的所有字段名集合，用于从字典中
-    筛选有效字段，避免传入多余 key 导致构造报错。
-    """
     return {item.name for item in fields(model)}
 
 
+# LLM: _list_value 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 读取或查询value需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _list_value(value: object) -> list[object]:
-    """LLM: Coerce a value into a list — None becomes [], tuples become lists.
-
-    新手说明:
-    把各种形式的值统一转成 list：None 变空列表，tuple 转 list，
-    已经是 list 的直接返回，其它类型包装成单元素列表。
-    """
     if value is None:
         return []
     if isinstance(value, list):
@@ -39,26 +34,15 @@ def _list_value(value: object) -> list[object]:
     return [value]
 
 
+# LLM: _string_list_value 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理stringlistvalue相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _string_list_value(value: object) -> list[str]:
-    """LLM: Coerce a value into a list of non-empty strings.
-
-    新手说明:
-    把值转成字符串列表，并过滤掉 None 和空字符串。
-    常用于规范化 QualityContract 和 ContextManifest 中的
-    字符串列表字段。
-    """
     return [str(item) for item in _list_value(value) if item not in (None, "")]
 
 
+# LLM: _normalize_quality_contract 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 解析并归一化qualitycontract的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _normalize_quality_contract(value: object) -> QualityContract:
-    """LLM: Normalize a value into a QualityContract instance.
-
-    新手说明:
-    把外部传入的 QualityContract 数据规范化成强类型实例。
-    如果已经是 QualityContract 直接返回；如果是字典则筛选
-    有效字段并确保列表字段和布尔字段类型正确；其它情况
-    返回默认空实例。
-    """
     from .models import QualityContract
 
     if isinstance(value, QualityContract):
@@ -80,15 +64,9 @@ def _normalize_quality_contract(value: object) -> QualityContract:
     return QualityContract(**payload)
 
 
+# LLM: _normalize_context_manifest 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 解析并归一化上下文manifest的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _normalize_context_manifest(value: object) -> ContextManifest:
-    """LLM: Normalize a value into a ContextManifest instance.
-
-    新手说明:
-    把外部传入的 ContextManifest 数据规范化成强类型实例。
-    如果已经是 ContextManifest 直接返回；如果是字典则筛选
-    有效字段、确保列表字段类型正确、token_budget 转整数；
-    其它情况返回默认空实例。
-    """
     from .models import ContextManifest
 
     if isinstance(value, ContextManifest):
@@ -105,14 +83,9 @@ def _normalize_context_manifest(value: object) -> ContextManifest:
     return ContextManifest(**payload)
 
 
+# LLM: _normalize_context_packs 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 解析并归一化上下文packs的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _normalize_context_packs(value: object) -> list[dict[str, object]]:
-    """LLM: Normalize a value into a list of context pack dictionaries.
-
-    新手说明:
-    把 context_packs 参数规范化成字典列表：单个字典包装成
-    单元素列表，非列表类型返回空列表，列表中非字典元素
-    被过滤掉。
-    """
     if isinstance(value, dict):
         return [value]
     if not isinstance(value, list):
@@ -126,14 +99,9 @@ _HOME_DIR_PATTERN = re.compile(r"(?:~/[\w.\-]+(?:/[\w.\-]+)*)")
 _ABSOLUTE_DIR_PATTERN = re.compile(r"(?:/[\w.\-]+(?:/[\w.\-]+)*)(?=/|$)")
 
 
+# LLM: _extract_write_dirs 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理extractwritedirs相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
 def _extract_write_dirs(goal: str) -> list[str]:
-    """LLM: Extract directory paths from user goal text for auto write-permission.
-
-    新手说明:
-    从用户目标文本中用正则提取目录路径，用于自动授权子代理写入。
-    匹配 /path/to/dir 形式的绝对路径和 ~/path 形式的 home 目录路径，
-    去重后返回路径列表。
-    """
     dirs: list[str] = []
     for path in _iter_write_dir_matches(goal):
         if path and path not in dirs:
@@ -141,6 +109,8 @@ def _extract_write_dirs(goal: str) -> list[str]:
     return dirs
 
 
+# LLM: _iter_write_dir_matches 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理迭代writedirmatches相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
 def _iter_write_dir_matches(goal: str):
     return (
         match.group().strip()

@@ -1,8 +1,10 @@
+# LLM: Gateway service module; keep file-queue, daemon, HTTP, and audit contracts stable.
+# 模块用途: 拆分 gateway 请求队列、守护进程、HTTP 处理和响应渲染逻辑。
+
 from __future__ import annotations
 
-"""LLM: detects, requeues, fails, and archives stale gateway processing requests.
+"""detects, requeues, fails, and archives stale gateway processing requests.
 
-给人看的解释：
 gateway 如果崩在半路，请求会留在 processing 目录。
 这个文件专门处理这种'卡住的请求'：能重试就退回 pending，重试太多就写失败响应并归档。
 """
@@ -20,7 +22,8 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
-# LLM: recovery options are bundled so stale-request handling stays independent of CLI flags.
+# LLM: _RecoveryContext 属于网关守护进程的类边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 类用途: 集中保存恢复上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class _RecoveryContext:
     now: float
@@ -31,6 +34,8 @@ class _RecoveryContext:
     lease_stale_seconds: int | None
 
 
+# LLM: gateway_stale_processing 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理网关staleprocessing相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def gateway_stale_processing(paths: GatewayPaths, timeout_seconds: int) -> list[dict]:
 
     items: list[dict] = []
@@ -59,6 +64,8 @@ def gateway_stale_processing(paths: GatewayPaths, timeout_seconds: int) -> list[
     return items
 
 
+# LLM: recover_gateway_processing_requests 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理recover网关processingrequests相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def recover_gateway_processing_requests(
     paths: GatewayPaths,
     *,
@@ -84,11 +91,15 @@ def recover_gateway_processing_requests(
     return summary
 
 
+# LLM: _ensure_recovery_dirs 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 校验恢复dirs需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _ensure_recovery_dirs(paths: GatewayPaths) -> None:
     for folder in (paths.inbox, paths.processing, paths.done, paths.failed, paths.responses):
         folder.mkdir(parents=True, exist_ok=True)
 
 
+# LLM: _recover_one_processing_request 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理recoveroneprocessing请求相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _recover_one_processing_request(
     paths: GatewayPaths,
     request_path: Path,
@@ -115,6 +126,8 @@ def _recover_one_processing_request(
     return _requeue_stale_processing(paths, request_path, payload, context)
 
 
+# LLM: _archive_completed_processing 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 写入completedprocessing的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def _archive_completed_processing(paths: GatewayPaths, request_path: Path, request_id: str) -> str:
     try:
         _archive_gateway_request(request_path, paths.done)
@@ -124,6 +137,8 @@ def _archive_completed_processing(paths: GatewayPaths, request_path: Path, reque
     return "archived"
 
 
+# LLM: _processing_request_stale 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 推进processing请求stale的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _processing_request_stale(
     payload: dict,
     request_path: Path,
@@ -141,6 +156,8 @@ def _processing_request_stale(
     )
 
 
+# LLM: _fail_stale_processing 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理failstaleprocessing相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _fail_stale_processing(context: dict) -> str:
     paths = context["paths"]
     request_path = context["request_path"]
@@ -164,6 +181,8 @@ def _fail_stale_processing(context: dict) -> str:
     return "failed"
 
 
+# LLM: _requeue_stale_processing 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理requeuestaleprocessing相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _requeue_stale_processing(
     paths: GatewayPaths,
     request_path: Path,
@@ -190,11 +209,15 @@ def _requeue_stale_processing(
     return "requeued"
 
 
+# LLM: requeue_gateway_processing_requests 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理requeue网关processingrequests相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def requeue_gateway_processing_requests(paths: GatewayPaths) -> int:
 
     return recover_gateway_processing_requests(paths, startup=True)["requeued"]
 
 
+# LLM: _gateway_request_attempts 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理网关请求attempts相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _gateway_request_attempts(payload: dict) -> int:
 
     try:
@@ -203,6 +226,8 @@ def _gateway_request_attempts(payload: dict) -> int:
         return 0
 
 
+# LLM: _gateway_processing_started_at 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理网关processingstartedat相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _gateway_processing_started_at(payload: dict, request_path: Path) -> float:
 
     return _gateway_processing_timestamp(
@@ -212,6 +237,8 @@ def _gateway_processing_started_at(payload: dict, request_path: Path) -> float:
     )
 
 
+# LLM: _gateway_processing_lease_at 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理网关processing租约at相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _gateway_processing_lease_at(payload: dict, request_path: Path) -> float:
 
     return _gateway_processing_timestamp(
@@ -221,6 +248,8 @@ def _gateway_processing_lease_at(payload: dict, request_path: Path) -> float:
     )
 
 
+# LLM: _gateway_processing_timestamp 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 处理网关processingtimestamp相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响请求队列、租约文件、进程状态和响应渲染，需保持重试、超时和状态迁移语义。
 def _gateway_processing_timestamp(payload: dict, request_path: Path, keys: tuple[str, ...]) -> float:
     for key in keys:
         try:
@@ -235,6 +264,8 @@ def _gateway_processing_timestamp(payload: dict, request_path: Path, keys: tuple
         return 0
 
 
+# LLM: _write_gateway_failure_response 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 写入网关失败响应的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def _write_gateway_failure_response(
     paths: GatewayPaths,
     context: dict,
@@ -280,6 +311,8 @@ def _write_gateway_failure_response(
     return response
 
 
+# LLM: _archive_gateway_request 属于网关守护进程的函数边界；调整时先确认请求队列、租约文件、进程状态和响应渲染仍按原契约工作。
+# 函数用途: 写入网关请求的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动请求队列、租约文件、进程状态和响应渲染，调用方依赖写入顺序和文件格式。
 def _archive_gateway_request(path: Path, target_dir: Path) -> Path:
 
     target_dir.mkdir(parents=True, exist_ok=True)

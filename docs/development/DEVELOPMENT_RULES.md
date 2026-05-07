@@ -127,7 +127,7 @@ before changing code.
 
 ---
 
-## 8. Comments Explain WHY, Not WHAT / 注释解释"为什么"
+## 8. Comments and Docstrings / 注释和 docstring
 
 ```python
 # BAD — restates the code
@@ -137,8 +137,28 @@ x = x + 1  # increment x
 x = x + 1  # skip the sentinel row that the legacy exporter always emits
 ```
 
-- Docstrings go on public classes and non-trivial functions.
+- Every product-code module, class, function, and method must have a two-layer
+  comment block above the definition. For decorated definitions, place it above
+  the first decorator:
+  ```python
+  # LLM: contract, callers, side effects, and invariants for future models.
+  # 函数用途: plain-language purpose, call timing, and edit notes for humans.
+  def example(...):
+      ...
+  ```
+- Modules use `模块用途:`. Classes use `类用途:`. Functions and methods use `函数用途:`.
+- `LLM:` is for future coding agents: mention module ownership, stable contract,
+  side effects, caller expectations, and tests/docs to check after edits.
+- `模块用途:` / `函数用途:` / `类用途:` is for humans: explain what it does, when it
+  is called, and what a beginner should inspect before changing it.
+- Do not use mechanical filler such as “handles this small logic block”; comments
+  must describe the actual responsibility visible in the code.
+- Existing `新手说明:` / `参数说明:` / `返回说明:` blocks may remain as additional
+  detail, but they do not replace the required `LLM:` + human-purpose line.
 - Inline comments are for non-obvious decisions, workarounds, and domain constraints.
+- Code-size spans count implementation lines, not comment/docstring lines. Do not weaken
+  required comments to satisfy size checks; split real implementation when the
+  implementation itself approaches the limit.
 
 ---
 

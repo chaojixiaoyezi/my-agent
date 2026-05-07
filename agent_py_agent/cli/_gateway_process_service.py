@@ -1,3 +1,6 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 
 from __future__ import annotations
 
@@ -18,11 +21,14 @@ from .common import make_agent
 from .models import GatewayRunContext, GatewayRunOptions
 
 
+# LLM: _gateway_agent_from_context 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _gateway_agent_from_context(context: GatewayRunContext):
-    # LLM: legacy gateway process service now rebuilds workers from a context bundle.
     return make_agent(SimpleNamespace(config=str(context.config_path)))
 
 
+# LLM: _gateway_request_loop 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _gateway_request_loop(context: GatewayRunContext, paths, stop_event: threading.Event) -> None:
 
     try:
@@ -46,6 +52,8 @@ def _gateway_request_loop(context: GatewayRunContext, paths, stop_event: threadi
         thread.join(timeout=2)
 
 
+# LLM: _gateway_request_worker_loop 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _gateway_request_worker_loop(
     context: GatewayRunContext,
     paths,
@@ -72,6 +80,8 @@ def _gateway_request_worker_loop(
         stop_event.wait(poll_interval)
 
 
+# LLM: _recover_gateway_requests_if_primary 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _recover_gateway_requests_if_primary(agent, paths, worker_index: int) -> None:
     if worker_index != 0:
         return
@@ -84,6 +94,8 @@ def _recover_gateway_requests_if_primary(agent, paths, worker_index: int) -> Non
     )
 
 
+# LLM: _gateway_heartbeat_loop 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _gateway_heartbeat_loop(context: GatewayRunContext, stop_event: threading.Event) -> None:
     paths = context.paths
     agent = context.agent
@@ -94,6 +106,8 @@ def _gateway_heartbeat_loop(context: GatewayRunContext, stop_event: threading.Ev
         stop_event.wait(max(1, agent.config.gateway_heartbeat_interval))
 
 
+# LLM: _write_gateway_heartbeat 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 把报告、摘要或状态写入磁盘，保持输出路径和 JSON 字段稳定。
 def _write_gateway_heartbeat(
     paths,
     agent,

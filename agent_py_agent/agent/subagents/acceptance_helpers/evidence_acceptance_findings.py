@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """Helpers for evidence-related acceptance review findings."""
@@ -8,9 +11,10 @@ from ..models import SubAgentTask
 from ..reports import AcceptanceReviewFinding
 
 
+# LLM: FindingParams 属于子代理验收证据的类边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 类用途: 集中保存finding参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class FindingParams:
-    """LLM: bundle acceptance finding fields to avoid widening helper signatures."""
 
     name: str
     ok: bool
@@ -20,9 +24,10 @@ class FindingParams:
     created_at: float
 
 
+# LLM: ToolEvidenceParams 属于子代理验收证据的类边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 类用途: 集中保存工具证据参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class ToolEvidenceParams:
-    """LLM: bundle tool-evidence matching inputs."""
 
     tool_name: str
     kind_aliases: set[str]
@@ -31,6 +36,8 @@ class ToolEvidenceParams:
     evidence: list
 
 
+# LLM: _make_finding 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 构建finding所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _make_finding(
     params: FindingParams | None = None,
     *,
@@ -53,6 +60,8 @@ def _make_finding(
     )
 
 
+# LLM: _has_tool_evidence 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 判断工具证据条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _has_tool_evidence(
     params: ToolEvidenceParams,
 ) -> bool:
@@ -70,6 +79,8 @@ def _has_tool_evidence(
     )
 
 
+# LLM: build_evidence_findings 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 构建证据findings所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def build_evidence_findings(
     task: SubAgentTask,
     created_at: float,
@@ -80,6 +91,8 @@ def build_evidence_findings(
     return findings
 
 
+# LLM: _build_presence_findings 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 构建presencefindings所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _build_presence_findings(
     task: SubAgentTask,
     created_at: float,
@@ -115,6 +128,8 @@ def _build_presence_findings(
     ]
 
 
+# LLM: _build_tool_requirement_findings 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 构建工具requirementfindings所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _build_tool_requirement_findings(
     task: SubAgentTask,
     created_at: float,
@@ -134,6 +149,8 @@ def _build_tool_requirement_findings(
     return findings
 
 
+# LLM: _build_read_file_requirement_finding 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 构建文件requirementfinding所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _build_read_file_requirement_finding(
     task: SubAgentTask,
     created_at: float,
@@ -161,6 +178,8 @@ def _build_read_file_requirement_finding(
     )
 
 
+# LLM: _build_write_file_requirement_finding 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 构建文件requirementfinding所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动验收证据、补丁摘要和就绪判断，调用方依赖写入顺序和文件格式。
 def _build_write_file_requirement_finding(
     task: SubAgentTask,
     created_at: float,

@@ -1,3 +1,6 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 
 from __future__ import annotations
 
@@ -16,6 +19,8 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
+# LLM: RunSingleWatchCycleParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存run单个监控cycle参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class RunSingleWatchCycleParams:
 
@@ -35,6 +40,8 @@ class RunSingleWatchCycleParams:
 WatchSubagentsParams = WatchParams
 
 
+# LLM: WatchLoopParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存监控循环参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class WatchLoopParams:
     params: WatchParams
@@ -47,6 +54,8 @@ class WatchLoopParams:
     max_consecutive: int
 
 
+# LLM: watch_subagents 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进子代理的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def watch_subagents(
     agent: SimpleAgent,
     router: CapabilityRouter,
@@ -94,6 +103,8 @@ def watch_subagents(
     return agent.subagents.write_dispatch_watch_report(report)
 
 
+# LLM: _run_watch_cycles 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进cycles的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _run_watch_cycles(
     agent,
     records: list,
@@ -116,6 +127,8 @@ def _run_watch_cycles(
     return cycle
 
 
+# LLM: _watch_cycle_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进cycle参数的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _watch_cycle_params(
     loop: WatchLoopParams,
     cycle: int,
@@ -131,6 +144,8 @@ def _watch_cycle_params(
     )
 
 
+# LLM: _write_watch_stopped 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 写入stopped的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _write_watch_stopped(agent, cycle: int, lock_path: Path, token: str) -> None:
     agent.subagents.write_dispatch_watch_heartbeat(
         params=DispatchWatchHeartbeatParams(
@@ -143,6 +158,8 @@ def _write_watch_stopped(agent, cycle: int, lock_path: Path, token: str) -> None
     )
 
 
+# LLM: _execute_watch_dispatch 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进execute监控调度的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _execute_watch_dispatch(agent, params):
     try:
         dispatch_report = agent.dispatch_subagents(
@@ -167,6 +184,8 @@ def _execute_watch_dispatch(agent, params):
     return ok, message, record_count, dispatch_summary, evidence_paths
 
 
+# LLM: _run_single_watch_cycle 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进单个监控cycle的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _run_single_watch_cycle(
     agent: SimpleAgent,
     params: RunSingleWatchCycleParams,
@@ -216,6 +235,8 @@ def _run_single_watch_cycle(
     return record
 
 
+# LLM: _append_watch_record 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 写入append监控记录的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _append_watch_record(
     agent,
     params: RunSingleWatchCycleParams,
@@ -243,6 +264,8 @@ def _append_watch_record(
     return make_dispatch_watch_record(agent, watch_record_params)
 
 
+# LLM: _write_watch_heartbeat 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 写入heartbeat的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _write_watch_heartbeat(
     agent,
     params: RunSingleWatchCycleParams,
@@ -261,6 +284,8 @@ def _write_watch_heartbeat(
     )
 
 
+# LLM: _write_stopped_by_limit 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 写入stopped限制的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _write_stopped_by_limit(agent, params: RunSingleWatchCycleParams, message: str) -> None:
     message = f"{message} 已达到最大连续轮数限制 ({params.max_consecutive})，停止调度。"
     agent.subagents.write_dispatch_watch_heartbeat(
@@ -274,6 +299,8 @@ def _write_stopped_by_limit(agent, params: RunSingleWatchCycleParams, message: s
     )
 
 
+# LLM: _watch_sleep_state 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进sleep状态的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _watch_sleep_state(params: RunSingleWatchCycleParams, message: str) -> tuple[bool, str]:
     more_cycles = params.max_cycles == 0 or params.cycle < params.max_cycles
     if params.stop_path and params.stop_path.exists():

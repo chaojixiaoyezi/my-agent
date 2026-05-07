@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """Build findings for capability requests/gaps and output blockers.
@@ -11,6 +14,8 @@ from ..parsing import _string_list
 from ..reports import AcceptanceReviewFinding
 
 
+# LLM: _build_capability_and_blocker_findings 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 构建能力blockerfindings所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _build_capability_and_blocker_findings(
     task: SubAgentTask,
     output: dict[str, object],
@@ -27,6 +32,8 @@ def _build_capability_and_blocker_findings(
     ]
 
 
+# LLM: _capability_request_finding 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 处理能力请求finding相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _capability_request_finding(task, open_requests, created_at):
     return (
         AcceptanceReviewFinding(
@@ -44,6 +51,8 @@ def _capability_request_finding(task, open_requests, created_at):
     )
 
 
+# LLM: _capability_gap_finding 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 处理能力缺口finding相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _capability_gap_finding(task, open_gaps, created_at):
     return (
         AcceptanceReviewFinding(
@@ -61,6 +70,8 @@ def _capability_gap_finding(task, open_gaps, created_at):
     )
 
 
+# LLM: _output_blocker_finding 属于子代理验收证据的函数边界；调整时先确认验收证据、补丁摘要和就绪判断仍按原契约工作。
+# 函数用途: 处理outputblockerfinding相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _output_blocker_finding(task, blockers, created_at):
     return (
         AcceptanceReviewFinding(

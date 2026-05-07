@@ -1,3 +1,6 @@
+# LLM: CLI memory command helper; keep archive/query/doctor option shapes stable.
+# 模块用途: 提供 memory 查询、诊断或归档相关命令入口。
+
 
 from __future__ import annotations
 
@@ -16,6 +19,8 @@ DEFAULT_ROUTE_INDEX = Path("memory") / "routing" / "INDEX.md"
 RECENT_ARCHIVE_FILE_LIMIT = 5
 
 
+# LLM: cmd_memory_doctor 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_memory_doctor(args) -> int:
     # Access make_agent through the module to allow test patching
     import sys
@@ -41,6 +46,8 @@ def cmd_memory_doctor(args) -> int:
     return 0
 
 
+# LLM: _resolve_index_path 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
 def _resolve_index_path(root: Path, raw_index: str | None) -> Path:
     candidate = Path(raw_index).expanduser() if raw_index else DEFAULT_ROUTE_INDEX
     if candidate.is_absolute():
@@ -48,6 +55,8 @@ def _resolve_index_path(root: Path, raw_index: str | None) -> Path:
     return (root / candidate).resolve()
 
 
+# LLM: _normalize_warning_item 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
 def _normalize_warning_item(item: Any) -> dict[str, Any]:
     if isinstance(item, dict):
         return dict(item)
@@ -58,11 +67,15 @@ def _normalize_warning_item(item: Any) -> dict[str, Any]:
     return {"message": str(item)}
 
 
+# LLM: _config_warnings 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _config_warnings(config: object) -> list[dict[str, Any]]:
     warnings = getattr(config, "memory_config_warnings", []) or []
     return [_normalize_warning_item(item) for item in warnings]
 
 
+# LLM: _memory_config_payload 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _memory_config_payload(config: object) -> dict[str, Any]:
     fields = [
         "memory_archive_level",
@@ -77,6 +90,8 @@ def _memory_config_payload(config: object) -> dict[str, Any]:
     return {field: getattr(config, field) for field in fields}
 
 
+# LLM: _build_routing_doctor 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _build_routing_doctor(root: Path, index_path: Path) -> dict[str, Any]:
     from ...agent.memory_routing import load_routes, validate_routes
 
@@ -101,6 +116,8 @@ def _build_routing_doctor(root: Path, index_path: Path) -> dict[str, Any]:
     return payload
 
 
+# LLM: _build_archive_doctor 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _build_archive_doctor(root: Path, config: object) -> dict[str, Any]:
     hook_today_path = snapshot_path_for(root)
     raw_today_path = raw_event_path_for(root)
@@ -119,6 +136,8 @@ def _build_archive_doctor(root: Path, config: object) -> dict[str, Any]:
     }
 
 
+# LLM: _archive_dir_payload 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _archive_dir_payload(directory: Path, today_path: Path) -> dict[str, Any]:
     files = sorted(
         [path for path in directory.glob("*.jsonl") if path.is_file()] if directory.exists() else [],
@@ -134,6 +153,8 @@ def _archive_dir_payload(directory: Path, today_path: Path) -> dict[str, Any]:
     }
 
 
+# LLM: _archive_file_payload 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _archive_file_payload(path: Path) -> dict[str, Any]:
     stat = path.stat()
     return {
@@ -144,6 +165,8 @@ def _archive_file_payload(path: Path) -> dict[str, Any]:
     }
 
 
+# LLM: _snapshot_dir_payload 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _snapshot_dir_payload(directory: Path) -> dict[str, Any]:
     files = sorted(
         [path for path in directory.glob("*.json") if path.is_file()] if directory.exists() else [],
@@ -168,6 +191,8 @@ def _snapshot_dir_payload(directory: Path) -> dict[str, Any]:
     }
 
 
+# LLM: _archive_consistency_warnings 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _archive_consistency_warnings(hook_dir: Path, snapshot_dir: Path) -> list[str]:
     warnings: list[str] = []
     hook_exists = hook_dir.exists() and any(hook_dir.glob("*.jsonl"))
@@ -179,6 +204,8 @@ def _archive_consistency_warnings(hook_dir: Path, snapshot_dir: Path) -> list[st
     return warnings
 
 
+# LLM: _index_payload 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _index_payload(index_path: Path) -> dict[str, Any]:
     return {
         "path": str(index_path),
@@ -187,6 +214,8 @@ def _index_payload(index_path: Path) -> dict[str, Any]:
     }
 
 
+# LLM: _route_payload 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _route_payload(route) -> dict[str, Any]:
     from ...agent.memory_routing import MemoryRoute
     return {
@@ -206,6 +235,8 @@ def _route_payload(route) -> dict[str, Any]:
     }
 
 
+# LLM: _print_memory_doctor_report 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_memory_doctor_report(payload: dict[str, Any], *, json_output: bool) -> None:
     if json_output:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))

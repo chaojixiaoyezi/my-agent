@@ -1,3 +1,6 @@
+# LLM: Agent package module; keep public imports and cross-module compatibility stable.
+# 模块用途: 提供 agent 核心功能的一部分，对外暴露稳定入口或兼容转发。
+
 """启动时恢复检测功能。
 
 检测当前环境中的进行中任务，包括：
@@ -5,6 +8,9 @@
 - 未完成的子代理任务
 - 遗留的 processing 请求
 """
+# LLM: 这里只汇总恢复提示，不应制造新的副作用或改变任务状态。
+# 模块用途: 启动时检测 gateway、processing 请求、子代理任务、通知和 dispatch 遗留状态。
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -17,6 +23,8 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
+# LLM: ActiveWorkSummary 属于 兼容入口 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: 启动恢复检测结果，汇总仍在进行或需要提示用户的工作。
 @dataclass
 class ActiveWorkSummary:
     """进行中任务摘要。"""
@@ -31,6 +39,8 @@ class ActiveWorkSummary:
     dispatch_pending: bool = False
     dispatch_rounds: int = 0
 
+    # LLM: ActiveWorkSummary.__post_init__ 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 补齐 dataclass 的派生默认值，避免调用方处理 None。
     def __post_init__(self) -> None:
         if self.recent_tasks is None:
             self.recent_tasks = []
@@ -38,6 +48,8 @@ class ActiveWorkSummary:
             self.processing_requests = []
 
 
+# LLM: _detect_gateway_state 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 读取 gateway 进程状态并写入启动恢复摘要。
 def _detect_gateway_state(paths, summary):
     """检测 gateway 状态。"""
     from .gateway import gateway_running
@@ -46,6 +58,8 @@ def _detect_gateway_state(paths, summary):
     summary.gateway_pid = pid
 
 
+# LLM: _detect_processing_requests 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 统计遗留 processing 请求并记录请求 id。
 def _detect_processing_requests(paths, summary):
     """获取 processing 请求列表。"""
     from .gateway import gateway_request_counts
@@ -55,6 +69,8 @@ def _detect_processing_requests(paths, summary):
         summary.processing_requests = [f.stem for f in paths.processing.glob("*.json")]
 
 
+# LLM: _detect_active_tasks 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 读取子代理看板，汇总未完成任务数和最近任务。
 def _detect_active_tasks(agent, summary):
     """检测未完成的子代理任务和最近任务列表。"""
     try:
@@ -78,6 +94,8 @@ def _detect_active_tasks(agent, summary):
         summary.recent_tasks = []
 
 
+# LLM: _detect_pending_notifications 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 统计当前用户仍未处理的通知数量。
 def _detect_pending_notifications(agent, summary):
     """检测未读通知。"""
     try:
@@ -89,6 +107,8 @@ def _detect_pending_notifications(agent, summary):
         summary.pending_notifications = 0
 
 
+# LLM: _detect_dispatch_status 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 读取代理内存中的 dispatch 循环状态。
 def _detect_dispatch_status(agent, summary):
     """检测未完成的 dispatch 循环状态。"""
     try:
@@ -101,6 +121,8 @@ def _detect_dispatch_status(agent, summary):
         summary.dispatch_rounds = 0
 
 
+# LLM: detect_active_work 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 集中执行启动恢复探测并返回 ActiveWorkSummary。
 def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
     """检测当前环境中的进行中任务。
 
@@ -124,6 +146,8 @@ def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
     return summary
 
 
+# LLM: format_active_work_summary 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把恢复摘要渲染成 CLI 可展示的中文提示文本。
 def format_active_work_summary(summary: ActiveWorkSummary) -> str:
     """格式化进行中任务摘要为可读文本。
 
@@ -167,6 +191,8 @@ def format_active_work_summary(summary: ActiveWorkSummary) -> str:
     return "\n".join(lines) if lines else "当前没有进行中任务。"
 
 
+# LLM: has_active_work 属于 兼容入口 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 判断恢复摘要中是否存在需要用户注意的未完成工作。
 def has_active_work(summary: ActiveWorkSummary) -> bool:
     """判断是否有进行中任务。
 

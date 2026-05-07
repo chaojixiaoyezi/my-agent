@@ -1,6 +1,9 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 from __future__ import annotations
 
-"""LLM: candidate extraction helpers for run-local memory gates."""
+"""candidate extraction helpers for run-local memory gates."""
 
 import hashlib
 import json
@@ -10,18 +13,22 @@ from pathlib import Path
 from typing import Any
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _GateCandidateContext 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 _GateCandidateContext 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _GateCandidateContext:
-    """LLM: Bundles stable run identity so candidate builders stay small."""
+    """Bundles stable run identity so candidate builders stay small."""
 
     task_id: str
     run_id: str
     now: float
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _GateRequirementContext 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 _GateRequirementContext 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _GateRequirementContext:
-    """LLM: Groups gate evidence so requirement checks stay below guardrail limits."""
+    """Groups gate evidence so requirement checks stay below guardrail limits."""
 
     content: str
     evidence_refs: list[str]
@@ -30,6 +37,8 @@ class _GateRequirementContext:
     scope: str
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 build_memory_gate_candidates 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 build memory gate candidates 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def build_memory_gate_candidates(
     task: Any,
     *,
@@ -52,6 +61,8 @@ def build_memory_gate_candidates(
     return sorted(records, key=lambda item: str(item["candidate_id"]))
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 memory_gate_review_queue_records 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 memory gate review queue records 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def memory_gate_review_queue_records(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
     """Return the compact review queue projection for candidate records."""
 
@@ -71,6 +82,8 @@ def memory_gate_review_queue_records(candidates: list[dict[str, object]]) -> lis
     ]
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 read_memory_gate_jsonl 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 读取 read memory gate jsonl 需要的文件、记录或配置，并整理成调用方可直接使用的结果。
 def read_memory_gate_jsonl(path: Path) -> list[dict[str, object]]:
     """Read a JSONL file, ignoring corrupt rows."""
 
@@ -89,6 +102,8 @@ def read_memory_gate_jsonl(path: Path) -> list[dict[str, object]]:
     return records
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _candidate_payload 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 candidate payload 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _candidate_payload(
     task: Any,
     context: _GateCandidateContext,
@@ -128,6 +143,8 @@ def _candidate_payload(
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _lesson_texts 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 lesson texts 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _lesson_texts(task: Any) -> list[str]:
     output = _read_json_object(Path(str(getattr(task, "output_json", ""))))
     lessons = output.get("lessons", [])
@@ -139,6 +156,8 @@ def _lesson_texts(task: Any) -> list[str]:
     return _dedupe(str(item).strip() for item in lessons if str(item).strip())
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _finding_texts 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 finding texts 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _finding_texts(task: Any) -> list[str]:
     texts: list[str] = []
     for item in list(getattr(task, "findings", []) or []):
@@ -149,6 +168,8 @@ def _finding_texts(task: Any) -> list[str]:
     return _dedupe(texts)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _missing_requirements 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 missing requirements 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _missing_requirements(context: _GateRequirementContext) -> list[str]:
     missing: list[str] = []
     if not context.content.strip():
@@ -163,6 +184,8 @@ def _missing_requirements(context: _GateRequirementContext) -> list[str]:
     return missing
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _task_evidence_refs 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 task evidence refs 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _task_evidence_refs(task: Any) -> list[str]:
     refs = list(getattr(task, "evidence_refs", []) or [])
     for item in list(getattr(task, "evidence_packets", []) or []):
@@ -175,6 +198,8 @@ def _task_evidence_refs(task: Any) -> list[str]:
     return [str(item) for item in refs if str(item).strip()]
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _task_artifact_refs 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 task artifact refs 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _task_artifact_refs(task: Any) -> list[str]:
     refs = list(getattr(task, "artifact_refs", []) or [])
     for item in list(getattr(task, "evidence_packets", []) or []):
@@ -182,6 +207,8 @@ def _task_artifact_refs(task: Any) -> list[str]:
     return [str(item) for item in refs if str(item).strip()]
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _finding_ids 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 finding ids 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _finding_ids(task: Any) -> list[str]:
     ids: list[str] = []
     for item in list(getattr(task, "findings", []) or []):
@@ -191,6 +218,8 @@ def _finding_ids(task: Any) -> list[str]:
     return ids
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _source_refs 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 source refs 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _source_refs(task: Any) -> dict[str, str]:
     return {
         "legacy_task_dir": str(getattr(task, "task_dir", "")),
@@ -201,10 +230,14 @@ def _source_refs(task: Any) -> dict[str, str]:
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _existing_candidates 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 existing candidates 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _existing_candidates(path: Path) -> dict[str, dict[str, object]]:
     return {str(item.get("candidate_id") or ""): item for item in read_memory_gate_jsonl(path) if item.get("candidate_id")}
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _merge_existing_review_state 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 merge existing review state 涉及的字段，让后续匹配和存储使用同一形态。
 def _merge_existing_review_state(
     candidate: dict[str, object],
     existing_by_id: dict[str, dict[str, object]],
@@ -222,12 +255,16 @@ def _merge_existing_review_state(
     return candidate
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _record_payload 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 record payload 相关记录，集中处理目标路径、格式化和状态更新。
 def _record_payload(item: object) -> dict[str, object]:
     if is_dataclass(item):
         return asdict(item)
     return dict(item) if isinstance(item, dict) else {}
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _record_list 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 record list 相关记录，集中处理目标路径、格式化和状态更新。
 def _record_list(item: object, key: str) -> list[str]:
     value = _record_payload(item).get(key, [])
     if not isinstance(value, list):
@@ -235,15 +272,21 @@ def _record_list(item: object, key: str) -> list[str]:
     return [str(entry) for entry in value if str(entry).strip()]
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _scope 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 scope 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _scope(task: Any) -> str:
     return str(getattr(task, "goal", "") or getattr(task, "current_step", "") or "").strip()[:500]
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _candidate_id 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 candidate id 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _candidate_id(run_id: str, candidate_type: str, content: str) -> str:
     digest = hashlib.sha256(f"{candidate_type}:{content}".encode()).hexdigest()[:12]
     return f"memgate-{_safe_segment(run_id)}-{digest}"
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _read_json_object 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 读取 read json object 需要的文件、记录或配置，并整理成调用方可直接使用的结果。
 def _read_json_object(path: Path) -> dict[str, object]:
     if not path.exists():
         return {}
@@ -254,14 +297,20 @@ def _read_json_object(path: Path) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _dedupe 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 dedupe 涉及的字段，让后续匹配和存储使用同一形态。
 def _dedupe(values) -> list[str]:
     return list(dict.fromkeys(str(item).strip() for item in values if str(item).strip()))
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _safe_segment 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 safe segment 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _safe_segment(value: str) -> str:
     return str(value or "run").replace("/", "_").replace("\\", "_").strip() or "run"
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _utc_iso 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 utc iso 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _utc_iso(value: float) -> str:
     return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
 

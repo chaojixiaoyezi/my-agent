@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """LLM contract: parse and normalize model-produced subagent JSON blocks.
@@ -13,6 +16,8 @@ from .models import SubAgentParsedOutput
 from .reports import ParentPlannerParsedOutput
 
 
+# LLM: parse_subagent_runner_output 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 解析并归一化子代理执行器output的输入形态，让下游只处理稳定结构；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def parse_subagent_runner_output(text: str) -> SubAgentParsedOutput:
     """解析 runner 模型回复中的结构化结果块。"""
 
@@ -45,6 +50,8 @@ def parse_subagent_runner_output(text: str) -> SubAgentParsedOutput:
     return SubAgentParsedOutput(found=True, ok=False, parse_error="未找到可解析的结构化结果。")
 
 
+# LLM: parse_parent_planner_output 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 解析并归一化父级规划器output的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def parse_parent_planner_output(text: str) -> ParentPlannerParsedOutput:
     """解析父代理 planner 模型回复中的结构化结果块。"""
 
@@ -77,6 +84,8 @@ def parse_parent_planner_output(text: str) -> ParentPlannerParsedOutput:
     return ParentPlannerParsedOutput(found=True, ok=False, parse_error="未找到可解析的结构化结果。")
 
 
+# LLM: _extract_subagent_result_blocks 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理extract子代理结果blocks相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _extract_subagent_result_blocks(text: str, marker_start: str, marker_end: str) -> list[str]:
     """提取所有成对的 runner 结果块，允许正文里先提到协议标记。"""
 
@@ -94,6 +103,8 @@ def _extract_subagent_result_blocks(text: str, marker_start: str, marker_end: st
     return blocks
 
 
+# LLM: _parsed_parent_planner_from_payload 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 解析并归一化来自parsed父级规划器载荷的输入形态，让下游只处理稳定结构；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _parsed_parent_planner_from_payload(payload: dict[str, object]) -> ParentPlannerParsedOutput:
     """把已解析 JSON payload 转成父代理 planner 结果。"""
 
@@ -117,6 +128,8 @@ def _parsed_parent_planner_from_payload(payload: dict[str, object]) -> ParentPla
     )
 
 
+# LLM: _parsed_output_from_payload 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 解析并归一化来自parsedoutput载荷的输入形态，让下游只处理稳定结构；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _parsed_output_from_payload(payload: dict[str, object]) -> SubAgentParsedOutput:
     """把已解析 JSON payload 转成标准结果对象。"""
 
@@ -130,7 +143,7 @@ def _parsed_output_from_payload(payload: dict[str, object]) -> SubAgentParsedOut
         used_skills=_string_list(payload.get("used_skills", [])),
         used_tools=_string_list(payload.get("used_tools", [])),
         evidence=_dict_list(payload.get("evidence", [])),
-        # LLM: parse traceable claim packets separately from legacy evidence notes.
+        # LLM: 可追溯声明包与旧证据备注分开解析，避免语义互相污染。
         evidence_packets=_dict_list(payload.get("evidence_packets", [])),
         findings=_dict_list(payload.get("findings", [])),
         capability_requests=_dict_list(payload.get("capability_requests", [])),
@@ -143,6 +156,8 @@ def _parsed_output_from_payload(payload: dict[str, object]) -> SubAgentParsedOut
     )
 
 
+# LLM: _strip_json_fence 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理stripJSONfence相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _strip_json_fence(raw: str) -> str:
     """去掉可选的 Markdown JSON fence。"""
 
@@ -157,6 +172,8 @@ def _strip_json_fence(raw: str) -> str:
     return "\n".join(lines).strip()
 
 
+# LLM: _parse_runner_json_payload 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 解析并归一化执行器JSON载荷的输入形态，让下游只处理稳定结构；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _parse_runner_json_payload(raw: str) -> tuple[dict[str, object], str]:
     """从 runner 结果块里解析 JSON object。"""
 
@@ -180,6 +197,8 @@ def _parse_runner_json_payload(raw: str) -> tuple[dict[str, object], str]:
     return {}, errors[0] if errors else "未找到可解析的 JSON object。"
 
 
+# LLM: _extract_first_json_object_text 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理extractfirstJSONobject文本相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _extract_first_json_object_text(text: str) -> str:
     """容忍模型在结果块里给 JSON 加了 `json` 或说明前缀。"""
 
@@ -196,6 +215,8 @@ def _extract_first_json_object_text(text: str) -> str:
     return ""
 
 
+# LLM: _dict_list 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理dictlist相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _dict_list(value: object) -> list[dict[str, object]]:
     """把任意值规范成 dict list。"""
 
@@ -208,6 +229,8 @@ def _dict_list(value: object) -> list[dict[str, object]]:
     return result
 
 
+# LLM: _string_list 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理stringlist相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _string_list(value: object) -> list[str]:
     """把任意值规范成字符串列表。"""
 
@@ -218,6 +241,8 @@ def _string_list(value: object) -> list[str]:
     return []
 
 
+# LLM: _int_value 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理intvalue相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _int_value(value: object) -> int:
     """把任意值尽量转成整数，失败时返回 0。"""
 
@@ -235,6 +260,8 @@ def _int_value(value: object) -> int:
     return 0
 
 
+# LLM: _string_dict 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理stringdict相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _string_dict(value: object) -> dict[str, str]:
     """把任意值规范成字符串字典。"""
 
@@ -243,6 +270,8 @@ def _string_dict(value: object) -> dict[str, str]:
     return {str(key): str(val) for key, val in value.items()}
 
 
+# LLM: _split_allowed_items 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 拆分allowed条目输入集合，给调度、验收或补丁处理提供分组结果；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _split_allowed_items(items: list[str], allowed: set[str]) -> tuple[list[str], list[str]]:
     """拆分授权项和未授权项。"""
 
@@ -256,6 +285,8 @@ def _split_allowed_items(items: list[str], allowed: set[str]) -> tuple[list[str]
     return accepted, ignored
 
 
+# LLM: _normalize_runner_items 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 解析并归一化执行器条目的输入形态，让下游只处理稳定结构；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _normalize_runner_items(items: list[dict[str, object]]) -> list[dict[str, object]]:
     """把 runner item 转成稳定可 JSON 化的浅层对象。"""
 
@@ -265,6 +296,8 @@ def _normalize_runner_items(items: list[dict[str, object]]) -> list[dict[str, ob
     return normalized
 
 
+# LLM: _normalize_single_runner_item 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 解析并归一化单个执行器条目的输入形态，让下游只处理稳定结构；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _normalize_single_runner_item(item: dict[str, object]) -> dict[str, object]:
     """Normalize one runner item dict to JSON-serializable form."""
     payload: dict[str, object] = {}
@@ -273,6 +306,8 @@ def _normalize_single_runner_item(item: dict[str, object]) -> dict[str, object]:
     return payload
 
 
+# LLM: _normalize_runner_value 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 解析并归一化执行器value的输入形态，让下游只处理稳定结构；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _normalize_runner_value(value: object) -> object:
     """Normalize a single runner field value to JSON-serializable form."""
     if isinstance(value, (str, int, float, bool)) or value is None:

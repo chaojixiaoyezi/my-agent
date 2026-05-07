@@ -1,3 +1,6 @@
+# LLM: Subagent workflow planner module; keep route, compile, and acceptance bundle shapes stable.
+# 模块用途: 拆分子代理工作流的规划、编译、验收或存储逻辑。
+
 from __future__ import annotations
 
 """Load built-in and user-defined subagent workflow templates."""
@@ -15,6 +18,8 @@ REQUIRED_TEMPLATE_FIELDS = ("id", "name", "solves", "fit_for", "phases", "parent
 REQUIRED_PHASE_FIELDS = ("id", "kind", "task")
 
 
+# LLM: WorkflowTemplateStore 属于子代理工作流编排的类边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 类用途: 集中保存工作流模板存储字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发模板选择、步骤编译和验收策略相关副作用，需保持公开契约稳定。
 @dataclass
 class WorkflowTemplateStore:
     """In-memory workflow template catalog with accumulated load issues."""
@@ -22,13 +27,19 @@ class WorkflowTemplateStore:
     templates: dict[str, WorkflowTemplate] = field(default_factory=dict)
     issues: list[WorkflowLoadIssue] = field(default_factory=list)
 
+    # LLM: all 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+    # 函数用途: 处理all相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
     def all(self) -> list[WorkflowTemplate]:
         return [self.templates[key] for key in sorted(self.templates)]
 
+    # LLM: get 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+    # 函数用途: 读取或查询get需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def get(self, template_id: str) -> WorkflowTemplate | None:
         return self.templates.get(template_id)
 
 
+# LLM: load_template_store 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 读取或查询模板存储需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def load_template_store(user_template_dir: str | Path | None = None) -> WorkflowTemplateStore:
     """Load built-in templates, then overlay valid user templates with matching ids."""
 
@@ -39,6 +50,8 @@ def load_template_store(user_template_dir: str | Path | None = None) -> Workflow
     return store
 
 
+# LLM: load_workflow_templates 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 读取或查询工作流模板需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def load_workflow_templates(
     user_template_dir: str | Path | None = None,
 ) -> tuple[list[WorkflowTemplate], list[WorkflowLoadIssue]]:
@@ -48,6 +61,8 @@ def load_workflow_templates(
     return store.all(), store.issues
 
 
+# LLM: validate_template_data 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 校验模板data需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def validate_template_data(
     data: Any,
     *,
@@ -62,6 +77,8 @@ def validate_template_data(
     return issues
 
 
+# LLM: _check_required_fields 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 校验required字段需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _check_required_fields(data: dict, template_id: str, source_path: str) -> list[WorkflowLoadIssue]:
     """Check that all required top-level fields are present."""
     issues: list[WorkflowLoadIssue] = []
@@ -76,6 +93,8 @@ def _check_required_fields(data: dict, template_id: str, source_path: str) -> li
     return issues
 
 
+# LLM: _validate_phases 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 校验phases需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _validate_phases(phases: Any, template_id: str, source_path: str) -> list[WorkflowLoadIssue]:
     """Validate phases field and its contents."""
     issues: list[WorkflowLoadIssue] = []
@@ -94,6 +113,8 @@ def _validate_phases(phases: Any, template_id: str, source_path: str) -> list[Wo
     return issues
 
 
+# LLM: _validate_single_phase 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 校验单个phase需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _validate_single_phase(phase: Any, idx: int, template_id: str, source_path: str) -> list[WorkflowLoadIssue]:
     """Validate one phase entry."""
     issues: list[WorkflowLoadIssue] = []
@@ -117,6 +138,8 @@ def _validate_single_phase(phase: Any, idx: int, template_id: str, source_path: 
     return issues
 
 
+# LLM: _load_builtin_templates 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 读取或查询builtin模板需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _load_builtin_templates() -> WorkflowTemplateStore:
     store = WorkflowTemplateStore()
     try:
@@ -133,6 +156,8 @@ def _load_builtin_templates() -> WorkflowTemplateStore:
     return store
 
 
+# LLM: _load_user_templates 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 读取或查询user模板需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _load_user_templates(user_template_dir: Path) -> WorkflowTemplateStore:
     store = WorkflowTemplateStore()
     if not user_template_dir.exists():
@@ -164,6 +189,8 @@ def _load_user_templates(user_template_dir: Path) -> WorkflowTemplateStore:
     return store
 
 
+# LLM: _load_json_text_into_store 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 读取或查询JSON文本into存储需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _load_json_text_into_store(
     store: WorkflowTemplateStore,
     text: str,
@@ -188,6 +215,8 @@ def _load_json_text_into_store(
         store.templates[template.id] = template
 
 
+# LLM: _template_items 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理模板条目相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _template_items(
     data: Any,
     *,
@@ -216,6 +245,8 @@ def _template_items(
     return items
 
 
+# LLM: _template_from_mapping 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理来自模板mapping相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _template_from_mapping(
     data: dict[str, Any],
     *,
@@ -234,6 +265,8 @@ def _template_from_mapping(
     )
 
 
+# LLM: _phase_from_mapping 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理来自phasemapping相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _phase_from_mapping(data: dict[str, Any]) -> WorkflowPhase:
     return WorkflowPhase(
         id=_clean_str(data.get("id")),
@@ -244,19 +277,27 @@ def _phase_from_mapping(data: dict[str, Any]) -> WorkflowPhase:
     )
 
 
+# LLM: _merge_templates 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 更新模板对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新模板选择、步骤编译和验收策略，需避免破坏既有状态机约定。
 def _merge_templates(target: WorkflowTemplateStore, source: WorkflowTemplateStore) -> None:
     target.templates.update(source.templates)
     target.issues.extend(source.issues)
 
 
+# LLM: _clean_str 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理cleanstr相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _clean_str(value: Any) -> str:
     return str(value or "").strip()
 
 
+# LLM: _is_missing 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 判断missing条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _is_missing(value: Any) -> bool:
     return value is None or value == "" or value == []
 
 
+# LLM: _as_list 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 转换aslist的数据表示，保持跨模块传递时的字段含义一致；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _as_list(value: Any) -> list[str]:
     if value is None:
         return []

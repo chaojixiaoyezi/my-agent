@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """LLM contract: runner result recording and debrief persistence.
@@ -32,14 +35,19 @@ from .utils import _apply_missing_paths
 # Internal helpers — promoted from SubAgentRunnerResultMixin to module scope
 # ---------------------------------------------------------------------------
 
+# LLM: _runner_append_debrief 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 推进执行器append复盘的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
 def _runner_append_debrief(task, parsed):
     """Append runner debrief content."""
     _append_runner_debrief_content(task, parsed)
 
 
+# LLM: _PostResultSideEffectParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存post结果sideeffect参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 class _PostResultSideEffectParams:
-    """LLM: bundle post-result side effects so the facade signature stays narrow."""
 
+    # LLM: __init__ 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def __init__(self, output_payload: dict, dry_run: bool, parsed: SubAgentParsedOutput, lessons: list):
         self.output_payload = output_payload
         self.dry_run = dry_run
@@ -47,16 +55,23 @@ class _PostResultSideEffectParams:
         self.lessons = lessons
 
 
+# LLM: _RunnerResultBuildParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存执行器结果build参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 class _RunnerResultBuildParams:
-    """LLM: carry parsed output state from extraction into payload assembly."""
 
+    # LLM: __init__ 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def __init__(self, params: RecordRunnerResultParams, extracted: _ExtractedOutput, now: float):
         self.params = params
         self.extracted = extracted
         self.now = now
 
 
+# LLM: _SubAgentRunnerResultFacade 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 拆分subagent执行器结果门面流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 class _SubAgentRunnerResultFacade:
+    # LLM: _build_and_persist_result 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 构建persist结果所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def _build_and_persist_result(
         self,
         ctx: BuildAndPersistContext,
@@ -89,6 +104,8 @@ class _SubAgentRunnerResultFacade:
         Path(ctx.task.runner_result_file).write_text(render_runner_result_markdown(result), encoding="utf-8")
         return result
 
+    # LLM: _extract_parsed_output 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理extractparsedoutput相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def _extract_parsed_output(
         self,
         task: SubAgentTask,
@@ -117,6 +134,8 @@ class _SubAgentRunnerResultFacade:
             )
         return _ExtractedOutput(parsed=parsed)
 
+    # LLM: _apply_status_and_build_payload 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 更新状态build载荷对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
     def _apply_status_and_build_payload(
         self,
         params: RecordRunnerResultParams,
@@ -124,9 +143,11 @@ class _SubAgentRunnerResultFacade:
         now: float,
     ) -> tuple[dict, BuildAndPersistContext]:
         """Apply status to task and build output payload."""
-        # LLM: payload assembly moved out so this manager remains a compatibility facade.
+        # LLM: 载荷组装外移，让该管理器保持兼容门面职责。
         return apply_status_and_build_payload(params, extracted, now)
 
+    # LLM: _post_result_side_effects 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 发送结果sideeffects请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
     def _post_result_side_effects(
         self,
         task: SubAgentTask,
@@ -137,7 +158,7 @@ class _SubAgentRunnerResultFacade:
         output_payload = params.output_payload
         parsed = params.parsed
         if parsed.found and parsed.ok:
-            # LLM: status report fields are derived from structured runner output for parent visibility.
+            # LLM: 状态报告字段来自结构化执行器输出，便于父级可见。
             task.latest_summary = parsed.summary or task.latest_summary
             task.current_step = parsed.status or task.status
         for blocker in output_payload.get("blockers", []) or []:
@@ -158,11 +179,12 @@ class _SubAgentRunnerResultFacade:
         self._index_runner_result(result, output_payload)
         return len(learning_candidates)
 
+    # LLM: record_runner_result 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 写入执行器结果的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def record_runner_result(
         self,
         params: RecordRunnerResultParams,
     ) -> SubAgentRunnerResult:
-        """LLM: record a runner invocation result back into the standard work order."""
         task = self.load(params.run_id)
         stale_result = self._check_stale_runner_result(task, params.attempt_id, params.dry_run)
         if stale_result:
@@ -185,6 +207,8 @@ class _SubAgentRunnerResultFacade:
         )
         return result
 
+    # LLM: _runner_result_build_context 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 推进执行器结果build上下文的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
     def _runner_result_build_context(
         self,
         build_params: _RunnerResultBuildParams,
@@ -220,6 +244,8 @@ class _SubAgentRunnerResultFacade:
         build_ctx.params = params
         return output_payload, build_ctx
 
+    # LLM: _check_stale_runner_result 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 校验stale执行器结果需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
     def _check_stale_runner_result(self, task, attempt_id, dry_run):
         normalized_attempt_id = str(attempt_id or "").strip()
         if normalized_attempt_id:
@@ -230,6 +256,8 @@ class _SubAgentRunnerResultFacade:
                 return self._make_quick_result(task, dry_run, False, f"ignored stale runner result for non-active attempt {normalized_attempt_id}")
         return None
 
+    # LLM: _make_quick_result 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 构建quick结果所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def _make_quick_result(self, task, dry_run, ok, message):
         return SubAgentRunnerResult(
             run_id=task.id, dry_run=dry_run, ok=ok, status=task.status,
@@ -242,5 +270,7 @@ class _SubAgentRunnerResultFacade:
         )
 
 
+# LLM: SubAgentRunnerResultMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 拆分subagent执行器结果混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 class SubAgentRunnerResultMixin(_SubAgentRunnerResultFacade):
     """Public compatibility mixin; runner result behavior stays in the facade class."""

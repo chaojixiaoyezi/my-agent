@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """LLM contract: compose focused subagent manager mixins into the public manager class.
@@ -27,6 +30,8 @@ from .manager_workflow import SubAgentWorkflowMixin
 # LLM: memory gate review is separate from learning drafts and never promotes by itself.
 
 
+# LLM: SubAgentManager 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 协调subagent管理器的下游服务和持久化入口，对外维持稳定管理接口；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 class SubAgentManager(
     SubAgentBaseMixin,
     SubAgentLifecycleMixin,
@@ -52,6 +57,8 @@ class SubAgentManager(
     它本身不写业务逻辑，只组合那些已经按职责拆开的能力。
     """
 
+    # LLM: __init__ 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def __init__(
         self,
         workspace,

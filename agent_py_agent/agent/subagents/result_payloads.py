@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """Payload assembly for subagent runner result files."""
@@ -6,6 +9,8 @@ from .policies import RunnerNextActionParams, _runner_next_action
 from .result_contexts import OutputPayloadContext
 
 
+# LLM: _build_structured_output_payload 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 构建structuredoutput载荷所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _build_structured_output_payload(ctx: OutputPayloadContext) -> dict[str, object]:
     return {
         "found": ctx.parsed.found,
@@ -30,6 +35,8 @@ def _build_structured_output_payload(ctx: OutputPayloadContext) -> dict[str, obj
     }
 
 
+# LLM: _build_output_payload 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 构建output载荷所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _build_output_payload(ctx: OutputPayloadContext) -> dict[str, object]:
     task = ctx.task
     return {
@@ -48,7 +55,7 @@ def _build_output_payload(ctx: OutputPayloadContext) -> dict[str, object]:
         "used_tools": task.used_tools,
         "used_skills": task.used_skills,
         "artifacts": ctx.artifacts,
-        # LLM: output.json keeps traceable claim data beside legacy artifacts/tests.
+        # LLM: output.json 将可追溯声明与旧产物、测试字段并列保存。
         "evidence_packets": ctx.evidence_packets,
         "findings": ctx.findings,
         "tests": ctx.tests,

@@ -1,3 +1,6 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 """Snapshot write implementations kept behind the public snapshots facade."""
 
 from __future__ import annotations
@@ -30,6 +33,8 @@ from ._types import (
 )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_recovery_snapshot_impl 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write recovery snapshot impl 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_recovery_snapshot_impl(root: str | Path, params: RecoverySnapshotInput) -> RecoverySnapshotResult:
     """Write a best-effort recovery snapshot and report any storage failure."""
     timestamp = params.created_at or utc_now_iso()
@@ -71,6 +76,8 @@ def _write_recovery_snapshot_impl(root: str | Path, params: RecoverySnapshotInpu
     return RecoverySnapshotResult(ok=True, snapshot_id=snapshot_id, path=str(path), token_estimate=token_estimate)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_compression_snapshot_impl 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write compression snapshot impl 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_compression_snapshot_impl(root: str | Path, params: CompressionSnapshotInput) -> CompressionHookResult:
     """Write the authoritative compression snapshot and searchable hook entry."""
     timestamp = params.created_at or utc_now_iso()
@@ -110,6 +117,8 @@ def _write_compression_snapshot_impl(root: str | Path, params: CompressionSnapsh
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _estimate_recovery_tokens 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 estimate recovery tokens 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _estimate_recovery_tokens(params: RecoverySnapshotInput, normalized_tools: list[dict[str, object]]) -> int:
     return estimate_tokens(
         {
@@ -123,6 +132,8 @@ def _estimate_recovery_tokens(params: RecoverySnapshotInput, normalized_tools: l
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _estimate_compression_tokens 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 estimate compression tokens 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _estimate_compression_tokens(params: CompressionSnapshotInput, normalized_tools: list[dict[str, object]]) -> int:
     return estimate_tokens(
         {
@@ -137,6 +148,8 @@ def _estimate_compression_tokens(params: CompressionSnapshotInput, normalized_to
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _recovery_snapshot_id 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 recovery snapshot id 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _recovery_snapshot_id(params: RecoverySnapshotInput, timestamp: str) -> str:
     return _make_recovery_snapshot_id(
         params=MakeRecoverySnapshotIdParams(
@@ -153,6 +166,8 @@ def _recovery_snapshot_id(params: RecoverySnapshotInput, timestamp: str) -> str:
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _compression_snapshot_id 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 compression snapshot id 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _compression_snapshot_id(params: CompressionSnapshotInput, timestamp: str) -> str:
     return _snapshot_id(
         {

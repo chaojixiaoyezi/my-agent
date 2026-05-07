@@ -1,3 +1,6 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 from __future__ import annotations
 
 """Runner candidate collection and batch execution for dispatch mixins."""
@@ -25,6 +28,8 @@ from .runner_gate import (
 )
 
 
+# LLM: RunnerRecordInput 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存执行器记录input字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class RunnerRecordInput:
     run_id: str
@@ -34,6 +39,8 @@ class RunnerRecordInput:
     retry_reason: str
 
 
+# LLM: RunnerDryRecordParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存执行器dry记录参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class RunnerDryRecordParams:
     agent: object
@@ -43,6 +50,8 @@ class RunnerDryRecordParams:
     retry_reason: str
 
 
+# LLM: execute_runner_jobs 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进执行器jobs的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) -> list:
     records = list(batch.records)
     runner_max_attempts = _runner_max_attempts(agent.config.runner_failure_policy)
@@ -62,6 +71,8 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
     return run_runner_batch(agent, batch)
 
 
+# LLM: collect_runner_candidates 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 读取或查询执行器candidates需要的状态，返回调用方可继续处理的快照；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def collect_runner_candidates(agent, ctx: DispatchContext, runner_max_attempts: int, runner_candidates: list):
     pending_runner_jobs, dry_records = [], []
     for task in runner_candidates:
@@ -76,6 +87,8 @@ def collect_runner_candidates(agent, ctx: DispatchContext, runner_max_attempts: 
     return dry_records, pending_runner_jobs
 
 
+# LLM: _dry_runner_record 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理dry执行器记录相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _dry_runner_record(params: RunnerDryRecordParams):
     return params.agent.subagents.make_dispatch_record(
         params=DispatchRecordParams(
@@ -95,12 +108,16 @@ def _dry_runner_record(params: RunnerDryRecordParams):
     )
 
 
+# LLM: _dry_runner_message 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理dry执行器消息相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _dry_runner_message(retry_reason: str) -> str:
     if retry_reason:
         return f"dry-run: 将重试 runner（{retry_reason}）。"
     return "dry-run: apply 时会生成执行上下文；带 --execute-runners 时会调用模型。"
 
 
+# LLM: _limited_runner_jobs 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 计算limited执行器jobs的预算、数量或限制，影响后续调度节奏；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _limited_runner_jobs(agent, pending_runner_jobs: list) -> list:
     _, _, runner_start_rate = resolve_runner_config(agent.config, len(pending_runner_jobs))
     if runner_start_rate and runner_start_rate < len(pending_runner_jobs):
@@ -108,6 +125,8 @@ def _limited_runner_jobs(agent, pending_runner_jobs: list) -> list:
     return pending_runner_jobs
 
 
+# LLM: run_runner_batch 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进执行器batch的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def run_runner_batch(agent, ctx: RunnerBatchContext) -> list:
     runner_timeout_seconds, runner_concurrency, _ = resolve_runner_config(
         agent.config, len(ctx.pending_runner_jobs)
@@ -119,6 +138,8 @@ def run_runner_batch(agent, ctx: RunnerBatchContext) -> list:
     return _run_sequential_batch(agent, ctx)
 
 
+# LLM: _run_concurrent_batch 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进concurrentbatch的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _run_concurrent_batch(agent, ctx: RunnerBatchContext) -> list:
     completed = run_concurrent_runners(
         ConcurrentRunnerParams(
@@ -138,6 +159,8 @@ def _run_concurrent_batch(agent, ctx: RunnerBatchContext) -> list:
     return ctx.records
 
 
+# LLM: _run_sequential_batch 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进sequentialbatch的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _run_sequential_batch(agent, ctx: RunnerBatchContext) -> list:
     for run_id, before, retry_reason in ctx.pending_runner_jobs:
         result = run_single_runner(
@@ -160,6 +183,8 @@ def _run_sequential_batch(agent, ctx: RunnerBatchContext) -> list:
     return ctx.records
 
 
+# LLM: _append_runner_record 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 写入执行器记录的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _append_runner_record(agent, ctx: RunnerBatchContext, item: RunnerRecordInput) -> None:
     ctx.records.append(
         _runner_dispatch_record(

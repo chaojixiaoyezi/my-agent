@@ -1,6 +1,9 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 from __future__ import annotations
 
-"""LLM: deterministic verifier for the memory gate promotion boundary."""
+"""deterministic verifier for the memory gate promotion boundary."""
 
 import json
 from dataclasses import dataclass
@@ -11,6 +14,8 @@ from .memory_gate import memory_gate_paths
 from .memory_gate_candidates import read_memory_gate_jsonl
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 MemoryGateVerifierResult 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 MemoryGateVerifierResult 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class MemoryGateVerifierResult:
     """Boundary verification result for one run-local gate."""
@@ -20,6 +25,8 @@ class MemoryGateVerifierResult:
     report_json: Path
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 verify_memory_gate_boundary 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 校验 verify memory gate boundary 的输入、状态或路径，提前暴露无效数据和越界条件。
 def verify_memory_gate_boundary(agent_run_workspace_root: Path) -> MemoryGateVerifierResult:
     """Check that gate files preserve explicit-promotion boundaries."""
 
@@ -46,6 +53,8 @@ def verify_memory_gate_boundary(agent_run_workspace_root: Path) -> MemoryGateVer
     return MemoryGateVerifierResult(ok=not problems, report=report, report_json=report_json)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _verify_candidates 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 校验 verify candidates 的输入、状态或路径，提前暴露无效数据和越界条件。
 def _verify_candidates(candidates: list[dict[str, object]]) -> list[str]:
     problems: list[str] = []
     for item in candidates:
@@ -59,6 +68,8 @@ def _verify_candidates(candidates: list[dict[str, object]]) -> list[str]:
     return problems
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _verify_decisions 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 校验 verify decisions 的输入、状态或路径，提前暴露无效数据和越界条件。
 def _verify_decisions(decisions: list[dict[str, object]]) -> list[str]:
     problems: list[str] = []
     for item in decisions:
@@ -67,6 +78,8 @@ def _verify_decisions(decisions: list[dict[str, object]]) -> list[str]:
     return problems
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _verify_exports 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 校验 verify exports 的输入、状态或路径，提前暴露无效数据和越界条件。
 def _verify_exports(exports: list[dict[str, object]], candidates: list[dict[str, object]]) -> list[str]:
     by_id = {str(item.get("candidate_id") or ""): item for item in candidates}
     problems: list[str] = []
@@ -77,6 +90,8 @@ def _verify_exports(exports: list[dict[str, object]], candidates: list[dict[str,
     return problems
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _export_problem 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 export problem 相关记录，集中处理目标路径、格式化和状态更新。
 def _export_problem(row: dict[str, object], candidate: dict[str, object] | None) -> str:
     candidate_id = str(row.get("candidate_id") or "")
     if not candidate:
@@ -87,12 +102,16 @@ def _export_problem(row: dict[str, object], candidate: dict[str, object] | None)
     return ""
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _verify_files 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 校验 verify files 的输入、状态或路径，提前暴露无效数据和越界条件。
 def _verify_files(paths) -> list[str]:
     # LLM: files may be empty, but the gate directory and core ledgers should exist after sync.
     required = [paths.gate_dir, paths.candidates_jsonl, paths.review_queue_jsonl, paths.skill_spark_gate_json]
     return [f"missing required gate path: {path}" for path in required if not Path(path).exists()]
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_json 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write json 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

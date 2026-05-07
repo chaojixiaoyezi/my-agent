@@ -1,6 +1,9 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
-"""LLM: CLI entrypoints for memory archive list/search/resume reports.
+"""CLI entrypoints for memory archive list/search/resume reports.
 
 新手说明:
 这个文件只管命令入口和打印。
@@ -26,6 +29,8 @@ from ..agent.memory_archive.resume_brief import build_resume_brief
 from .common import make_agent
 
 
+# LLM: cmd_memory_archive_list 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_memory_archive_list(args) -> int:
 
     agent = make_agent(args)
@@ -49,6 +54,8 @@ def cmd_memory_archive_list(args) -> int:
     return 0
 
 
+# LLM: cmd_memory_archive_search 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_memory_archive_search(args) -> int:
 
     agent = make_agent(args)
@@ -77,6 +84,8 @@ def cmd_memory_archive_search(args) -> int:
     return 0
 
 
+# LLM: _collect_resume_data 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 汇总多个检查来源，并按统一结构返回调用方。
 def _collect_resume_data(agent, args):
     archive_records = collect_archive_records(agent.root, layer=args.layer, date_key=args.date, limit=0)
     filters = archive_filters_from_args(args)
@@ -96,6 +105,8 @@ def _collect_resume_data(agent, args):
     return filters, archive_matches, local_payloads, task_payloads, gateway_payloads
 
 
+# LLM: cmd_memory_resume 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_memory_resume(args) -> int:
     agent = make_agent(args)
     filters, archive_matches, local_payloads, task_payloads, gateway_payloads = _collect_resume_data(agent, args)
@@ -118,6 +129,8 @@ def cmd_memory_resume(args) -> int:
     return 0
 
 
+# LLM: _print_archive_list 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_archive_list(payload: dict[str, Any], *, json_output: bool) -> None:
 
     if json_output:
@@ -133,6 +146,8 @@ def _print_archive_list(payload: dict[str, Any], *, json_output: bool) -> None:
     _print_archive_record_lines(payload["records"])
 
 
+# LLM: _print_archive_search 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_archive_search(payload: dict[str, Any], *, json_output: bool) -> None:
 
     if json_output:
@@ -146,6 +161,8 @@ def _print_archive_search(payload: dict[str, Any], *, json_output: bool) -> None
     _print_archive_record_lines(payload["matches"])
 
 
+# LLM: _print_resume_brief 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_resume_brief(brief: dict[str, Any]) -> None:
     print("Recovery Brief")
     print(f"- latest_user_intent: {brief['latest_user_intent'] or 'unknown'}")
@@ -159,6 +176,8 @@ def _print_resume_brief(brief: dict[str, Any]) -> None:
     print(f"- authority: {brief['authority_note']}")
 
 
+# LLM: _print_task_fact_sources 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_task_fact_sources(task_payloads: list[dict[str, Any]]) -> None:
     print("Task Fact Sources")
     if not task_payloads:
@@ -171,6 +190,8 @@ def _print_task_fact_sources(task_payloads: list[dict[str, Any]]) -> None:
         print(f"  task_dir={task['task_dir']}")
 
 
+# LLM: _print_gateway_fact_sources 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_gateway_fact_sources(gateway_payloads: list[dict[str, Any]]) -> None:
     print("Gateway Fact Sources")
     if not gateway_payloads:
@@ -181,6 +202,8 @@ def _print_gateway_fact_sources(gateway_payloads: list[dict[str, Any]]) -> None:
             print(f"  - {path}")
 
 
+# LLM: _print_memory_resume_text 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_memory_resume_text(payload: dict[str, Any]) -> None:
     print("MY-AGENT MEMORY RESUME")
     print(f"workspace={payload['workspace_root']}")
@@ -204,6 +227,8 @@ def _print_memory_resume_text(payload: dict[str, Any]) -> None:
         print(f"- {action}")
 
 
+# LLM: _print_memory_resume 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_memory_resume(payload: dict[str, Any], *, json_output: bool) -> None:
     if json_output:
         print(json.dumps(strip_sort_keys(payload), ensure_ascii=False, indent=2, sort_keys=True))
@@ -211,6 +236,8 @@ def _print_memory_resume(payload: dict[str, Any], *, json_output: bool) -> None:
     _print_memory_resume_text(payload)
 
 
+# LLM: _print_archive_record_lines 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_archive_record_lines(records: list[dict[str, Any]]) -> None:
 
     if not records:

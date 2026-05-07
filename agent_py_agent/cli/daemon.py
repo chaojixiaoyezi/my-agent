@@ -1,6 +1,9 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
-"""LLM: resolves daemon options and runs foreground recurring parent dispatch.
+"""resolves daemon options and runs foreground recurring parent dispatch.
 
 给人看的解释：
 daemon 是'前台常驻调度器'：按间隔循环跑父代理 dispatch。
@@ -18,6 +21,8 @@ from .common import make_agent, make_capability_router
 from .models import DaemonOptions
 
 
+# LLM: DaemonNumberOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class DaemonNumberOptions:
     interval: float
@@ -27,6 +32,8 @@ class DaemonNumberOptions:
     max_cards: int
 
 
+# LLM: cmd_daemon 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_daemon(args) -> int:
 
     agent = make_agent(args)
@@ -68,8 +75,9 @@ def cmd_daemon(args) -> int:
     return 0
 
 
+# LLM: _daemon_watch_params 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _daemon_watch_params(options: DaemonOptions) -> WatchParams:
-    # LLM: daemon watch execution consumes one resolved options bundle, not argparse.
     return WatchParams(
         apply=options.apply,
         execute_runners=options.execute_runners,
@@ -89,6 +97,8 @@ def _daemon_watch_params(options: DaemonOptions) -> WatchParams:
     )
 
 
+# LLM: _validate_daemon_numbers 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _validate_daemon_numbers(numbers: DaemonNumberOptions) -> str:
     if numbers.interval < 0:
         return "daemon_interval / --interval 不能小于 0；0 表示每轮之间不等待，通常只用于测试。"
@@ -103,6 +113,8 @@ def _validate_daemon_numbers(numbers: DaemonNumberOptions) -> str:
     return ""
 
 
+# LLM: _resolve_daemon_max_runners 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
 def _resolve_daemon_max_runners(value: object) -> int:
 
     if isinstance(value, str):
@@ -120,6 +132,8 @@ def _resolve_daemon_max_runners(value: object) -> int:
         raise ValueError("daemon_max_runners / --max-runners 必须是整数或 auto。") from exc
 
 
+# LLM: _resolve_daemon_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
 def _resolve_daemon_options(agent: SimpleAgent, args) -> DaemonOptions:
 
     cfg = agent.config
@@ -163,6 +177,8 @@ def _resolve_daemon_options(agent: SimpleAgent, args) -> DaemonOptions:
     )
 
 
+# LLM: _daemon_numeric_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _daemon_numeric_options(args, cfg) -> tuple[float, int, int, int, int]:
     interval = getattr(args, "interval", None)
     interval = cfg.daemon_interval if interval is None else interval
@@ -178,8 +194,9 @@ def _daemon_numeric_options(args, cfg) -> tuple[float, int, int, int, int]:
     return interval, max_runners, limit, max_cycles, max_cards
 
 
+# LLM: _daemon_boundary_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _daemon_boundary_options(args) -> tuple[str, str, list[str], bool]:
-    # LLM: resolved daemon options include boundary fields so watch params do not read argparse.
     return (
         getattr(args, "note", None) or "",
         getattr(args, "take_over_by", None) or "",

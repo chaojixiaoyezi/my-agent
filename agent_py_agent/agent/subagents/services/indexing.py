@@ -1,9 +1,12 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-"""LLM: indexing and event logging service.
+"""indexing and event logging service.
 
 给人看的解释：
-这里承接 LocalStore 写入、报告索引、任务索引等逻辑。
+这里集中处理 LocalStore 写入、报告索引、任务索引等逻辑。
 SubAgentManager 通过 facade 方法委托到这里。
 """
 
@@ -43,12 +46,18 @@ from .indexing_records import (
 )
 
 
+# LLM: SubAgentIndexingService 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 封装subagent索引服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 class SubAgentIndexingService:
     """Indexing and local event logging service."""
 
+    # LLM: __init__ 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def __init__(self, manager: Any):
         self.manager = manager
 
+    # LLM: log_local_record 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 写入local记录的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def log_local_record(
         self,
         *,
@@ -76,6 +85,8 @@ class SubAgentIndexingService:
         except Exception:
             return
 
+    # LLM: index_task 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理index任务相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def index_task(self, task: SubAgentTask) -> None:
         """Index a task into the local store."""
         self.log_local_record(
@@ -89,6 +100,8 @@ class SubAgentIndexingService:
             ),
         )
 
+    # LLM: index_report 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理index报告相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def index_report(
         self,
         params: IndexReportParams,
@@ -115,6 +128,8 @@ class SubAgentIndexingService:
             ),
         )
 
+    # LLM: _index_dataclass_record 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理indexdataclass记录相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def _index_dataclass_record(
         self,
         params: DataclassRecordIndexParams,
@@ -122,37 +137,59 @@ class SubAgentIndexingService:
         """Index a dataclass record."""
         index_dataclass_record_via(self, params)
 
+    # LLM: index_action_apply 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理index动作应用相关的数据流，连接当前职责的前后步骤；关键副作用: 会更新任务状态、报告记录和持久化副作用，需避免破坏既有状态机约定。
     def index_action_apply(self, record: ActionApplyRecord) -> None:
         index_action_apply_via(self, record)
 
+    # LLM: index_capability_route 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理index能力route相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def index_capability_route(self, record: CapabilityRouteRecord) -> None:
         index_capability_route_via(self, record)
 
+    # LLM: index_acceptance_review 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理index验收审查相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def index_acceptance_review(self, record: AcceptanceReviewRecord) -> None:
         index_acceptance_review_via(self, record)
 
+    # LLM: index_patch_review 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理index补丁审查相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def index_patch_review(self, record: PatchReviewRecord) -> None:
         index_patch_review_via(self, record)
 
+    # LLM: index_dispatch_record 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理index调度记录相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def index_dispatch_record(self, record: DispatchRecord) -> None:
         _index_dispatch_record_via(self.manager, record)
 
+    # LLM: index_dispatch_watch_record 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理index调度监控记录相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def index_dispatch_watch_record(self, record: DispatchWatchRecord) -> None:
         _index_dispatch_watch_record_via(self.manager, record)
 
+    # LLM: index_parent_planner_record 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理index父级规划器记录相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def index_parent_planner_record(self, record: ParentPlannerRecord) -> None:
         _index_parent_planner_record_via(self.manager, record)
 
+    # LLM: index_execution_context 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理indexexecution上下文相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def index_execution_context(self, context: SubAgentExecutionContext) -> None:
         _index_execution_context_via(self.manager, context)
 
+    # LLM: index_runner_result 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理index执行器结果相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
     def index_runner_result(self, result: SubAgentRunnerResult, output_payload: dict[str, object]) -> None:
-        # LLM: record-specific serialization lives in indexing_records; this service routes calls.
+        # LLM: 记录专属序列化放在索引记录模块，本服务只负责路由调用。
         index_runner_result_via(self, result, output_payload)
 
+    # LLM: index_channel_probe 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理index通道probe相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def index_channel_probe(self, result: ChannelProbeResult) -> None:
         index_channel_probe_via(self, result)
 
+    # LLM: select_runs 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 读取或查询runs需要的状态，返回调用方可继续处理的快照；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
     def select_runs(self, run_ids: list[str] | None) -> list[SubAgentTask]:
         """Select runs by id, filtering out ineligible statuses."""
         from ..models import DISPATCH_INELIGIBLE_STATUSES
@@ -169,6 +206,8 @@ class SubAgentIndexingService:
         return runs
 
 
+# LLM: _task_index_content 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理任务index内容相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _task_index_content(task: SubAgentTask) -> str:
     content_lines = _task_index_header_lines(task)
     content_lines.extend(_task_index_list_section("plan", task.plan))
@@ -190,6 +229,8 @@ def _task_index_content(task: SubAgentTask) -> str:
     return "\n".join(content_lines)
 
 
+# LLM: _load_eligible_run 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 读取或查询eligiblerun需要的状态，返回调用方可继续处理的快照；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
 def _load_eligible_run(
     manager: Any,
     run_id: str,
@@ -202,6 +243,8 @@ def _load_eligible_run(
     return None if task.status in ineligible_statuses else task
 
 
+# LLM: _task_index_header_lines 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理任务indexheaderlines相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _task_index_header_lines(task: SubAgentTask) -> list[str]:
     return [
         "# Subagent Run",
@@ -219,10 +262,14 @@ def _task_index_header_lines(task: SubAgentTask) -> list[str]:
     ]
 
 
+# LLM: _task_index_list_section 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理任务indexlistsection相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _task_index_list_section(name: str, values: list[str]) -> list[str]:
     return [f"{name}:", *(f"- {item}" for item in values)]
 
 
+# LLM: _task_index_metadata 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理任务indexmetadata相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _task_index_metadata(task: SubAgentTask) -> dict[str, object]:
     return {
         "run_id": task.id,

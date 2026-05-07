@@ -1,4 +1,7 @@
-"""LLM: service objects behind the public SubAgentManager facade.
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
+"""service objects behind the public SubAgentManager facade.
 
 给人看的解释：
 这个包承接从 manager mixin 中抽出的稳定职责。外部仍使用 SubAgentManager，

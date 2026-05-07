@@ -1,3 +1,6 @@
+# LLM: Gateway service module; keep file-queue, daemon, HTTP, and audit contracts stable.
+# 模块用途: 拆分 gateway 请求队列、守护进程、HTTP 处理和响应渲染逻辑。
+
 from __future__ import annotations
 
 """Gateway runtime entry point — thin re-export facade.

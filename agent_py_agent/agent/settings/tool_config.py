@@ -1,4 +1,7 @@
-"""LLM: tool registry and execution settings."""
+"""tool registry and execution settings."""
+
+# LLM: 这些上限保护 prompt 预算和外部调用，放宽前确认调用面。
+# 模块用途: 工具读取、检索、HTTP 和目录展示上限的配置模型。
 
 from __future__ import annotations
 
@@ -7,6 +10,8 @@ from dataclasses import dataclass
 __all__ = ["ToolConfig"]
 
 
+# LLM: ToolConfig 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: ToolConfig 配置模型，保存 配置系统 的默认值和可调参数。
 @dataclass
 class ToolConfig:
     """Tool registry and execution limits."""

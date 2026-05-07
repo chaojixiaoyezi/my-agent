@@ -1,6 +1,9 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-"""LLM: base task creation and lifecycle service.
+"""base task creation and lifecycle service.
 
 给人看的解释：
 这里承接子代理任务创建、分割、注册卡等基础能力。
@@ -22,6 +25,8 @@ _WINDOWS_DIR_PATTERN = re.compile(r"[A-Za-z]:[\\/][^\s\"'<>|]+")
 _HOME_DIR_PATTERN = re.compile(r"(?:~/[\w.\-]+(?:/[\w.\-]+)*)")
 
 
+# LLM: CreateRunParams 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 集中保存createrun参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class CreateRunParams:
     """Bundle of create_run parameters."""
@@ -47,6 +52,8 @@ class CreateRunParams:
     workflow_mode: str = "off"
 
 
+# LLM: _extract_write_dirs 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理extractwritedirs相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
 def _extract_write_dirs(goal: str) -> list[str]:
     """Extract directory paths from user goal text for automatic subagent write permission."""
     dirs: list[str] = []
@@ -56,6 +63,8 @@ def _extract_write_dirs(goal: str) -> list[str]:
     return dirs
 
 
+# LLM: _iter_write_dir_matches 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理迭代writedirmatches相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
 def _iter_write_dir_matches(goal: str):
     return (
         match.group().strip()
@@ -64,12 +73,18 @@ def _iter_write_dir_matches(goal: str):
     )
 
 
+# LLM: SubAgentBaseService 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 封装subagent基础服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 class SubAgentBaseService:
     """Base task creation and lifecycle service."""
 
+    # LLM: __init__ 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def __init__(self, manager: Any):
         self.manager = manager
 
+    # LLM: split 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 拆分split输入集合，给调度、验收或补丁处理提供分组结果；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def split(self, goal: str, count: int, *, workflow_mode: str = "off") -> list[SubAgentTask]:
         """Split a goal into multiple subagent task records.
 
@@ -91,10 +106,14 @@ class SubAgentBaseService:
             tasks.append(task)
         return tasks
 
+    # LLM: register_card 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理registercard相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def register_card(self, card: SubAgentCard) -> None:
         """Register a subagent role card."""
         self.manager.cards[card.name] = card
 
+    # LLM: create_run 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 构建createrun所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
     def create_run(
         self,
         *,
@@ -112,6 +131,8 @@ class SubAgentBaseService:
         self._finalize_task(task, params.parent_id)
         return task
 
+    # LLM: _prepare_run 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理preparerun相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
     def _prepare_run(self, params: CreateRunParams) -> dict[str, object]:
         """Prepare run context: paths, workflow planning, merged acceptance checks."""
         from ..services.workflow import (
@@ -144,6 +165,8 @@ class SubAgentBaseService:
             "now": time.time(),
         }
 
+    # LLM: _build_task 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 构建任务所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def _build_task(self, params: CreateRunParams, prepared: dict[str, object]) -> SubAgentTask:
         """Build SubAgentTask from params and prepared context."""
         from ..models import SubAgentTask
@@ -185,6 +208,8 @@ class SubAgentBaseService:
             **prepared["paths"],
         )
 
+    # LLM: _finalize_task 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理finalize任务相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def _finalize_task(self, task: SubAgentTask, parent_id: str) -> None:
         """Save task, register in local store, and link to parent if needed."""
         self.manager.save(task)
@@ -199,6 +224,8 @@ class SubAgentBaseService:
         if parent_id:
             self.manager.add_child(parent_id, task.id)
 
+    # LLM: record_takeover 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 写入takeover的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def record_takeover(
         self,
         run_id: str,

@@ -151,3 +151,7 @@
 - Split task workspace state/timeline payload and JSONL helpers into `memory_archive/task_workspace_payloads.py` so `task_workspace.py` stays focused on orchestration and path wiring.
 - Preserved task workspace file shapes, legacy run adapter behavior, and existing focused persistence tests.
 - Continued bundle cleanup in archive query, resume brief, memory gate review, and routing receipts; these changes keep archive/LocalStore records as clues while task/run/gateway files remain the authority.
+## 2026-05-07 LLM annotation coverage update
+- Product-code modules, classes, functions, and methods in the active module now carry the required `LLM:` plus `函数用途:` / `类用途:` definition-level double-layer comments format.
+- This is a documentation-only maintainability pass: behavior, file formats, workflow semantics, and public interfaces are intended to stay unchanged.
+- Future module changes must keep these comments current when changing module/class/def behavior, side effects, bundles, or caller expectations.

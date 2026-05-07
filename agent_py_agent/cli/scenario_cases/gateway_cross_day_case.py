@@ -1,6 +1,9 @@
+# LLM: CLI scenario case definition; keep fixture flow and expected gateway/subagent behavior stable.
+# 模块用途: 定义一类命令行情景测试，用来复现和验证端到端流程。
+
 from __future__ import annotations
 
-"""LLM: implements the gateway cross-day resume scenario that verifies memory-resume recovers gateway JSON facts.
+"""implements the gateway cross-day resume scenario that verifies memory-resume recovers gateway JSON facts.
 
 给人看的解释：
 这个文件验证 gateway 请求跨天后能被 memory-resume 命令找回。
@@ -33,6 +36,8 @@ from ..scenario_utils import (
 )
 
 
+# LLM: _cross_day_setup 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _cross_day_setup(paths, args):
     prompt = "gateway cross-day resume drill: reply with CROSS_DAY_RESUME_OK only."
     print_scenario_step(1, "Run a real background gateway ask")
@@ -54,6 +59,8 @@ def _cross_day_setup(paths, args):
     return agent, request_id, request_path, response_path, gateway_payload
 
 
+# LLM: _gateway_request_fact_path 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _gateway_request_fact_path(gpaths, request_id: str, gateway_payload: dict) -> Path:
     candidates = [
         gpaths.done / f"{request_id}.json",
@@ -70,6 +77,8 @@ def _gateway_request_fact_path(gpaths, request_id: str, gateway_payload: dict) -
     return candidates[0]
 
 
+# LLM: _run_cross_day_resume 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def _run_cross_day_resume(paths, request_id):
     env = os.environ.copy()
     env.setdefault("PYTHONUTF8", "1")
@@ -88,6 +97,8 @@ def _run_cross_day_resume(paths, request_id):
         return {"ok": False, "error": f"memory-resume JSON parse failed: {exc}", "stdout": resume.stdout}, resume.returncode
 
 
+# LLM: CrossDayResumeVerifyRequest 是gateway CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class CrossDayResumeVerifyRequest:
     resume_payload: dict
@@ -97,6 +108,8 @@ class CrossDayResumeVerifyRequest:
     response_path: Path
 
 
+# LLM: _verify_cross_day_resume 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _verify_cross_day_resume(request: CrossDayResumeVerifyRequest):
     resume_payload = request.resume_payload
     gateway_sources = resume_payload.get("gateway_fact_sources", []) if isinstance(resume_payload, dict) else []
@@ -114,6 +127,8 @@ def _verify_cross_day_resume(request: CrossDayResumeVerifyRequest):
     )
 
 
+# LLM: run_scenario_gateway_cross_day_resume_case 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_scenario_gateway_cross_day_resume_case(args) -> int:
 
     paths = create_scenario_workspace(args)
@@ -158,6 +173,8 @@ def run_scenario_gateway_cross_day_resume_case(args) -> int:
     return 0 if final_ok else 2
 
 
+# LLM: _append_gateway_cross_day_resume_clues 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _append_gateway_cross_day_resume_clues(
     root: Path,
     *,
@@ -169,6 +186,8 @@ def _append_gateway_cross_day_resume_clues(
     append_snapshot(root, _gateway_cross_day_snapshot(request_id, request_path, response_path))
 
 
+# LLM: _gateway_cross_day_raw_event 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _gateway_cross_day_raw_event(request_id: str) -> RawMemoryEvent:
     return RawMemoryEvent(
         event_id=f"raw-scenario-gateway-cross-day-{request_id}",
@@ -184,6 +203,8 @@ def _gateway_cross_day_raw_event(request_id: str) -> RawMemoryEvent:
     )
 
 
+# LLM: _gateway_cross_day_snapshot 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _gateway_cross_day_snapshot(request_id: str, request_path: Path, response_path: Path) -> CompressionSnapshot:
     return CompressionSnapshot(
         snapshot_id=f"snapshot-scenario-gateway-cross-day-{request_id}",

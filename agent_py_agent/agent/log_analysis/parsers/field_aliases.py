@@ -1,3 +1,6 @@
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
 from __future__ import annotations
 
 """SecurityAlertV1 field alias tables for parser normalization."""
@@ -51,6 +54,8 @@ ENGLISH_ALIASES: dict[str, str] = {
 }
 
 
+# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 build_field_aliases 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 build field aliases 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def build_field_aliases() -> dict[str, str]:
     aliases: dict[str, str] = {}
     for stable_key in SECURITY_ALERT_V1_KEYS:
@@ -63,11 +68,15 @@ def build_field_aliases() -> dict[str, str]:
     return aliases
 
 
+# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 header_token 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 header token 在当前模块中的核心转换或协调步骤，衔接 parser 层把外部日志格式规范化成统一事件字段。
 def header_token(key: str) -> str:
     stripped = strip_key(key).lower()
     return re.sub(r"[\s_\-./]+", "", stripped)
 
 
+# LLM: parser 层把外部日志格式规范化成统一事件字段；修改 strip_key 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 strip key 在当前模块中的核心转换或协调步骤，衔接 parser 层把外部日志格式规范化成统一事件字段。
 def strip_key(key: str) -> str:
     return key.strip().lstrip("\ufeff")
 

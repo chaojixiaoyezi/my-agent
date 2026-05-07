@@ -1,6 +1,9 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
-"""LLM: small helpers for gateway stop/kill command behavior."""
+"""small helpers for gateway stop/kill command behavior."""
 
 import time
 
@@ -13,6 +16,8 @@ from ..agent.gateway import (
 )
 
 
+# LLM: _force_kill_gateway 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _force_kill_gateway(agent, paths: GatewayPaths, pid: int) -> bool:
     terminate_pid(pid)
     if not wait_for_pid_exit(pid, 5):

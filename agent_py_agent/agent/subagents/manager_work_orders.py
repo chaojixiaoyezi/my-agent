@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """Work-order path, file, and validation helpers for SubAgentBaseMixin."""
@@ -11,6 +14,8 @@ from .policies import _default_forbidden_write_roots
 from .utils import _apply_missing_paths, _write_if_missing, _write_json_if_missing
 
 
+# LLM: build_work_order_paths 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 构建workorder路径所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def build_work_order_paths(
     manager: Any,
     run_id: str,
@@ -26,6 +31,8 @@ def build_work_order_paths(
     return paths
 
 
+# LLM: _work_order_base_paths 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理workorder基础路径相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _work_order_base_paths(task_dir: Path) -> dict[str, str]:
     return {
         "task_dir": str(task_dir),
@@ -53,6 +60,8 @@ def _work_order_base_paths(task_dir: Path) -> dict[str, str]:
     }
 
 
+# LLM: _work_order_report_paths 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理workorder报告路径相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _work_order_report_paths(task_dir: Path) -> dict[str, str]:
     reports_dir = task_dir / "reports"
     return {
@@ -67,6 +76,8 @@ def _work_order_report_paths(task_dir: Path) -> dict[str, str]:
     }
 
 
+# LLM: _work_order_runner_paths 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理workorder执行器路径相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _work_order_runner_paths(task_dir: Path) -> dict[str, str]:
     return {
         "execution_context_file": str(task_dir / "EXECUTION_CONTEXT.md"),
@@ -78,6 +89,8 @@ def _work_order_runner_paths(task_dir: Path) -> dict[str, str]:
     }
 
 
+# LLM: ensure_work_order_files 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 校验workorder文件需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def ensure_work_order_files(task: SubAgentTask) -> None:
     for directory in [
         task.data_dir,
@@ -111,6 +124,8 @@ def ensure_work_order_files(task: SubAgentTask) -> None:
     _write_json_if_missing(Path(task.dependencies_json), _DEPS_JSON_TMPL.format(task_id=task.id))
 
 
+# LLM: write_takeover_file 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 写入takeover文件的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
 def write_takeover_file(task: SubAgentTask, record: TakeoverRecord) -> None:
     content = (
         "# TAKEOVER\n\n"
@@ -130,6 +145,8 @@ def write_takeover_file(task: SubAgentTask, record: TakeoverRecord) -> None:
     Path(task.takeover_file).write_text(content, encoding="utf-8")
 
 
+# LLM: validate_work_order 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 校验workorder需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def validate_work_order(manager: Any, run_id: str) -> WorkOrderValidation:
     task = manager.load(run_id)
     _apply_missing_paths(task, manager._build_work_order_paths(task.id, task.task_dir or None))
@@ -171,6 +188,8 @@ def validate_work_order(manager: Any, run_id: str) -> WorkOrderValidation:
     return WorkOrderValidation(run_id=run_id, ok=not missing, missing=missing, warnings=warnings)
 
 
+# LLM: _status_content 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理状态内容相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _status_content(task: SubAgentTask) -> str:
     return (
         "# STATUS\n\n"
@@ -183,11 +202,15 @@ def _status_content(task: SubAgentTask) -> str:
     )
 
 
+# LLM: _acceptance_content 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理验收内容相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _acceptance_content(task: SubAgentTask) -> str:
     checks = "\n".join(f"- [ ] {item}" for item in task.acceptance_checks or ["未设置"])
     return _ACCEPTANCE_TMPL.format(checks=checks)
 
 
+# LLM: _handoff_content 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理handoff内容相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _handoff_content(task: SubAgentTask) -> str:
     return (
         "# HANDOFF\n\n"
@@ -202,6 +225,8 @@ def _handoff_content(task: SubAgentTask) -> str:
     )
 
 
+# LLM: _skill_sparks_content 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理skillsparks内容相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _skill_sparks_content(task: SubAgentTask) -> str:
     return (
         "# SKILL_SPARKS\n\n"
@@ -237,6 +262,8 @@ _PROGRESS_MD_TMPL = "# PROGRESS\n\n- run_id: {task_id}\n- status: {status}\n- pr
 _DEPS_JSON_TMPL = '{{"run_id": "{task_id}", "dependencies": []}}'
 
 
+# LLM: _CHECKPOINT_JSON_TMPL 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 校验checkpointJSONtmpl需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _CHECKPOINT_JSON_TMPL(task_id: str, status: str) -> dict[str, object]:
     return {
         "run_id": task_id,
@@ -262,13 +289,19 @@ def _CHECKPOINT_JSON_TMPL(task_id: str, status: str) -> dict[str, object]:
     }
 
 
+# LLM: _DECISION_LEDGER_JSON_TMPL 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理decisionledgerJSONtmpl相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _DECISION_LEDGER_JSON_TMPL(task_id: str) -> dict[str, object]:
     return {"run_id": task_id, "decisions": [], "open_questions": []}
 
 
+# LLM: _FAILING_TESTS_JSON_TMPL 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理failingtestsJSONtmpl相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _FAILING_TESTS_JSON_TMPL(task_id: str) -> dict[str, object]:
     return {"run_id": task_id, "failing_tests": []}
 
 
+# LLM: _NEXT_ACTIONS_JSON_TMPL 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理next动作JSONtmpl相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _NEXT_ACTIONS_JSON_TMPL(task_id: str) -> dict[str, object]:
     return {"run_id": task_id, "next_actions": []}

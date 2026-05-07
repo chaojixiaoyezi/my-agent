@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """LLM contract: SubAgentAcceptanceMixin methods grouped by one subagent responsibility.
@@ -73,7 +76,11 @@ from .utils import (
 if TYPE_CHECKING:
     from ..local_store import LocalStore
 
+# LLM: _SubAgentAcceptanceFacade 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 拆分subagent验收门面流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 class _SubAgentAcceptanceFacade:
+    # LLM: review_acceptance 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理审查验收相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def review_acceptance(
         self,
         run_id: str,
@@ -98,6 +105,8 @@ class _SubAgentAcceptanceFacade:
             note=opts.note,
         )
 
+    # LLM: review_acceptances 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理审查acceptances相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def review_acceptances(
         self,
         run_ids: list[str] | None = None,
@@ -137,6 +146,8 @@ class _SubAgentAcceptanceFacade:
             records=records,
         )
 
+    # LLM: write_acceptance_review_report 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 写入验收审查报告的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def write_acceptance_review_report(
         self,
         run_ids: list[str] | None = None,
@@ -180,6 +191,8 @@ class _SubAgentAcceptanceFacade:
         )
         return report
 
+    # LLM: _review_acceptance_task 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理审查验收任务相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def _review_acceptance_task(
         self,
         task: SubAgentTask,
@@ -189,7 +202,7 @@ class _SubAgentAcceptanceFacade:
         reviewer: str = "parent",
         note: str = "",
     ) -> AcceptanceReviewRecord:
-        # LLM: manager keeps the legacy method shape but service receives one request bundle.
+        # LLM: 管理器保留旧方法形态，服务层只接收归一后的请求包。
         opts = acceptance_review_options(
             options,
             apply=apply,
@@ -207,6 +220,8 @@ class _SubAgentAcceptanceFacade:
             ),
         )
 
+    # LLM: _write_acceptance_record_files 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 写入验收记录文件的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def _write_acceptance_record_files(self, record: AcceptanceReviewRecord) -> None:
 
         try:
@@ -228,6 +243,8 @@ class _SubAgentAcceptanceFacade:
             handle.write(f"- applied: {record.applied}\n")
             handle.write(f"- message: {record.message}\n")
 
+    # LLM: _append_acceptance_review_log 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 写入验收审查log的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def _append_acceptance_review_log(self, record: AcceptanceReviewRecord) -> None:
 
         jsonl = self.workspace / "subagent_acceptance_log.jsonl"
@@ -245,10 +262,14 @@ class _SubAgentAcceptanceFacade:
         self._index_acceptance_review(record)
 
 
+# LLM: SubAgentAcceptanceMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 拆分subagent验收混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 class SubAgentAcceptanceMixin(_SubAgentAcceptanceFacade):
     """Public compatibility mixin; implementation lives in the internal facade."""
 
 
+# LLM: _selected_acceptance_runs 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 读取或查询selected验收runs需要的状态，返回调用方可继续处理的快照；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _selected_acceptance_runs(manager, run_ids: list[str] | None, limit: int):
     selected = manager._select_runs(run_ids)
     if run_ids is None:
@@ -261,6 +282,8 @@ def _selected_acceptance_runs(manager, run_ids: list[str] | None, limit: int):
     return selected[:limit] if limit > 0 else selected
 
 
+# LLM: _acceptance_report_summary 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理验收报告summary相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _acceptance_report_summary(records: list[AcceptanceReviewRecord]) -> dict[str, int]:
     summary: dict[str, int] = {"total": len(records)}
     for record in records:

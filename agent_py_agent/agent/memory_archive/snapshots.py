@@ -1,6 +1,9 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 from __future__ import annotations
 
-"""LLM: lightweight recovery snapshot builder for run/gateway/subagent completion points.
+"""lightweight recovery snapshot builder for run/gateway/subagent completion points.
 
 新手说明:
 这个文件专门负责写"恢复锚点"。

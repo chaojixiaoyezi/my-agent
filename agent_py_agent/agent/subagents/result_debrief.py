@@ -1,8 +1,11 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-# LLM: use explicit UTF-8 so Windows locale defaults cannot corrupt debrief files.
+# LLM: 明确使用 UTF-8，避免 Windows 默认区域设置破坏复盘文件内容。
 
-"""LLM: append structured runner output sections to the DEBRIEF file.
+"""append structured runner output sections to the DEBRIEF file.
 
 给人看的解释：
 把结构化 runner 产出追加到 DEBRIEF，方便人接管。
@@ -16,16 +19,12 @@ from .models import SubAgentParsedOutput, SubAgentTask
 from .runner_rendering import _render_runner_item_line
 
 
+# LLM: _append_runner_debrief_content 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 写入执行器复盘内容的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
 def _append_runner_debrief_content(
     task: SubAgentTask,
     parsed: SubAgentParsedOutput,
 ) -> None:
-    """LLM: append structured runner output sections to the DEBRIEF file.
-
-    新手说明:
-    把结构化 runner 产出追加到 DEBRIEF，方便人接管。包括 artifacts、tests、patches、
-    lessons 和 next_actions 五个段落。
-    """
 
     sections: list[str] = []
     if parsed.artifacts:

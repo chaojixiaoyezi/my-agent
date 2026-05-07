@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """Runtime dataclasses for subagent execution and runner output."""
@@ -7,6 +10,8 @@ from dataclasses import dataclass, field
 from .quality_models import ContextManifest, QualityContract
 
 
+# LLM: SubAgentExecutionContext 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存subagentexecution上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class SubAgentExecutionContext:
     """Minimum authorized context passed to a subagent runner."""
@@ -47,6 +52,8 @@ class SubAgentExecutionContext:
     instructions: list[str] = field(default_factory=list)
 
 
+# LLM: SubAgentRunnerResult 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存subagent执行器结果字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class SubAgentRunnerResult:
     """Result of one subagent runner invocation."""
@@ -85,6 +92,8 @@ class SubAgentRunnerResult:
     created_at: float = 0.0
 
 
+# LLM: SubAgentParsedOutput 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存subagentparsedoutput字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
 class SubAgentParsedOutput:
     """Machine-readable output parsed from a runner model response."""

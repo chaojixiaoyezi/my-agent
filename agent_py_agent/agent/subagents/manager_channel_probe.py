@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """LLM contract: channel probe execution and report persistence.
@@ -74,6 +77,8 @@ if TYPE_CHECKING:
     from ..local_store import LocalStore
 
 
+# LLM: _channel_probe_summary 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理通道probesummary相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _channel_probe_summary(results: list[ChannelProbeResult]) -> dict[str, int]:
     summary: dict[str, int] = {"total": len(results)}
     for result in results:
@@ -84,7 +89,11 @@ def _channel_probe_summary(results: list[ChannelProbeResult]) -> dict[str, int]:
     return summary
 
 
+# LLM: SubAgentChannelProbeMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 拆分subagent通道probe混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 class SubAgentChannelProbeMixin:
+    # LLM: _probe_work_order_check 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理probeworkorder检查相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
     def _probe_work_order_check(self, run_id: str, task: SubAgentTask, now: float) -> list[ChannelProbeCheck]:
         checks: list[ChannelProbeCheck] = []
         validation = self.validate_work_order(run_id)
@@ -110,6 +119,8 @@ class SubAgentChannelProbeMixin:
                 )
             )
         return checks
+    # LLM: _probe_json_files 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理probeJSON文件相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def _probe_json_files(self, task: SubAgentTask, now: float) -> list[ChannelProbeCheck]:
         return [
             _probe_json_file("task_json_readable", Path(task.task_dir) / "task.json", "P0", now),
@@ -117,6 +128,8 @@ class SubAgentChannelProbeMixin:
             _probe_json_file("output_json_readable", Path(task.output_json), "P1", now),
             _probe_json_file("dependencies_json_readable", Path(task.dependencies_json), "P1", now),
         ]
+    # LLM: _update_task_from_probe 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 更新来自任务probe对应的任务或运行状态，并保留既有字段语义；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
     def _update_task_from_probe(self, task: SubAgentTask, checks: list[ChannelProbeCheck], now: float) -> None:
         task.channel_checks = checks
         task.channel_status = _channel_status(checks)
@@ -125,6 +138,8 @@ class SubAgentChannelProbeMixin:
         if task.channel_status == "BROKEN":
             task.failure_type = "channel"
         self.save(task)
+    # LLM: probe_channel 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理probe通道相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def probe_channel(self, run_id: str) -> ChannelProbeResult:
         """检查单个子代理运行的通道健康状态。
         这里的'通道'先指最基础的运行现场：
@@ -155,6 +170,8 @@ class SubAgentChannelProbeMixin:
         self._update_task_from_probe(task, result.checks, now)
         self._index_channel_probe(result)
         return result
+    # LLM: probe_channels 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 处理probechannels相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def probe_channels(
         self,
         run_ids: list[str] | None = None,
@@ -177,6 +194,8 @@ class SubAgentChannelProbeMixin:
             summary=_channel_probe_summary(results),
             results=results,
         )
+    # LLM: write_channel_probe_report 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 写入通道probe报告的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def write_channel_probe_report(
         self,
         run_ids: list[str] | None = None,
@@ -205,6 +224,8 @@ class SubAgentChannelProbeMixin:
             ),
         )
         return report
+    # LLM: _write_channel_probe_files 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+    # 函数用途: 写入通道probe文件的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def _write_channel_probe_files(
         self,
         task: SubAgentTask,
@@ -240,6 +261,8 @@ class SubAgentChannelProbeMixin:
             )
 
 
+# LLM: _channel_probe_options 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理通道probe选项相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
 def _channel_probe_options(
     params: SubAgentChannelProbeOptions | None,
     *,
@@ -250,5 +273,5 @@ def _channel_probe_options(
         if not isinstance(params, SubAgentChannelProbeOptions):
             raise TypeError("channel probe requires params: SubAgentChannelProbeOptions")
         return params
-    # LLM: probe APIs keep positional compatibility but normalize to an options bundle.
+    # LLM: 探测接口保留位置参数兼容性，内部立即归一到选项参数包。
     return SubAgentChannelProbeOptions(run_ids=run_ids, limit=limit)

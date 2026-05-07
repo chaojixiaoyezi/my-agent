@@ -1,3 +1,6 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 from __future__ import annotations
 
 """Runtime capability inference for ordinary SimpleAgent turns.
@@ -115,6 +118,8 @@ _SECURITY_TOKENS = (
 )
 
 
+# LLM: resolve_runtime_capabilities 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 读取或查询运行时能力需要的状态，返回调用方可继续处理的快照；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def resolve_runtime_capabilities(
     user_prompt: str,
     *,
@@ -131,6 +136,8 @@ def resolve_runtime_capabilities(
     return capabilities
 
 
+# LLM: _normalize_capabilities 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 解析并归一化能力的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _normalize_capabilities(capabilities: Iterable[str] | None) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -143,6 +150,8 @@ def _normalize_capabilities(capabilities: Iterable[str] | None) -> list[str]:
     return normalized
 
 
+# LLM: _looks_like_security_log_task 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 判断likesecuritylog任务条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _looks_like_security_log_task(text: str) -> bool:
     if not text.strip():
         return False
@@ -161,6 +170,8 @@ def _looks_like_security_log_task(text: str) -> bool:
     return has_log_signal and has_security_signal
 
 
+# LLM: _contains_keyword 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 判断keyword条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _contains_keyword(text: str, keywords: Iterable[str]) -> bool:
     for keyword in keywords:
         if _contains_single_keyword(text, keyword):
@@ -168,6 +179,8 @@ def _contains_keyword(text: str, keywords: Iterable[str]) -> bool:
     return False
 
 
+# LLM: _contains_single_keyword 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 判断单个keyword条件是否成立，作为后续调度或分支决策的门禁；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _contains_single_keyword(text: str, keyword: str) -> bool:
     if re.fullmatch(r"[a-z0-9_ ]+", keyword):
         return bool(re.search(rf"(?<![a-z0-9_]){re.escape(keyword)}(?![a-z0-9_])", text))

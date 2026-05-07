@@ -1,3 +1,6 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 
 from __future__ import annotations
 
@@ -43,6 +46,8 @@ from .task_complexity import TaskComplexityEstimate, estimate_task_complexity
 logger = logging.getLogger(__name__)
 
 
+# LLM: _config_workflow_dispatch_mode 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理config工作流调度mode相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _config_workflow_dispatch_mode(value: object) -> str:
     if isinstance(value, str):
         normalized = value.strip().lower()
@@ -53,6 +58,8 @@ def _config_workflow_dispatch_mode(value: object) -> str:
     return "off"
 
 
+# LLM: _initial_repair_state 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理initialrepair状态相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _initial_repair_state(result) -> dict[str, object]:
     return {
         "prompt_for_log": result.prompt,
@@ -65,6 +72,8 @@ def _initial_repair_state(result) -> dict[str, object]:
     }
 
 
+# LLM: _tuple_repair_state 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理tuplerepair状态相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _tuple_repair_state(value: tuple) -> dict[str, object]:
     structured, ok, error, backend_name, prompt_for_log, response_for_log, message = value
     return {
@@ -79,8 +88,12 @@ def _tuple_repair_state(value: tuple) -> dict[str, object]:
     }
 
 
+# LLM: _SubagentLifecycleBase 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 封装子代理生命周期基础相关状态和行为，维持当前模块的职责边界；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class _SubagentLifecycleBase:
 
+    # LLM: spawn_subagents 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理spawn子代理相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def spawn_subagents(
         self,
         goal: str | None = None,
@@ -124,6 +137,8 @@ class _SubagentLifecycleBase:
                 workflow_mode=_config_workflow_dispatch_mode(self.config.subagent_workflow_mode),
             )
 
+    # LLM: run_subagent 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 推进子代理的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def run_subagent(
         self,
         run_id: str | None = None,
@@ -148,17 +163,23 @@ class _SubagentLifecycleBase:
         )
         return run_subagent_flow(self, options)
 
+    # LLM: _prepare_subagent_attempt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理prepare子代理attempt相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _prepare_subagent_attempt(self, run_id, *, dry_run, active_attempt_id, retry_reason):
         if dry_run or active_attempt_id:
             return active_attempt_id
         prepared = self.subagents.prepare_runner_attempt(run_id, retry_reason=retry_reason)
         return prepared.runner_active_attempt_id
 
+    # LLM: _build_subagent_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 构建子代理提示词所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
     def _build_subagent_prompt(self, run_id, max_cards, instruction):
         context = self.subagents.write_execution_context(run_id, max_cards=max_cards)
         prompt = _build_subagent_runner_prompt(context, instruction)
         return context, prompt
 
+    # LLM: _record_subagent_dry_run 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 写入子代理dryrun的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
     def _record_subagent_dry_run(self, run_id, active_attempt_id, prompt):
         return self.subagents.record_runner_result(
             RecordRunnerResultParams(
@@ -171,6 +192,8 @@ class _SubagentLifecycleBase:
             )
         )
 
+    # LLM: _probe_subagent_channel 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理probe子代理通道相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _probe_subagent_channel(self, params: SubagentProbeParams):
         if not params.probe:
             return None
@@ -194,6 +217,8 @@ class _SubagentLifecycleBase:
             )
         )
 
+    # LLM: _handle_subagent_run_failure 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 推进子代理run失败的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _handle_subagent_run_failure(self, params: SubagentRunFailureParams):
         failed_result = self.subagents.record_runner_result(
             RecordRunnerResultParams(
@@ -221,6 +246,8 @@ class _SubagentLifecycleBase:
         )
         return failed_result
 
+    # LLM: _finalize_subagent_run 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理finalize子代理run相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _finalize_subagent_run(self, params: SubagentFinalizeParams):
         structured = parse_subagent_runner_output(params.result.response)
         repair_state = _initial_repair_state(params.result)
@@ -245,6 +272,8 @@ class _SubagentLifecycleBase:
         write_finalized_recovery_snapshot(FinalizedRecoverySnapshotRequest(self, params, runner_result, repair_state))
         return runner_result
 
+# LLM: SimpleAgentSubagentMixin 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 拆分simpleagent子代理混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class SimpleAgentSubagentMixin(
     _SubagentLifecycleBase,
     _SubagentRepairMixin,

@@ -1,6 +1,9 @@
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
 from __future__ import annotations
 
-"""LLM: 本模块把本地 LOG 查询能力包装成安全工具，返回摘要、预览行和 evidence refs，而不是整包原始日志。
+"""本模块把本地 LOG 查询能力包装成安全工具，返回摘要、预览行和 evidence refs，而不是整包原始日志。
 
 新手说明:
 这里的函数和类是 agent 能调用的"安全日志工具"。它们不会把所有日志直接塞进 prompt，

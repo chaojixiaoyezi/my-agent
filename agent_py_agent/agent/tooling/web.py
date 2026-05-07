@@ -1,6 +1,9 @@
+# LLM: 网络访问边界和错误格式要稳定，避免外部请求拖垮主流程。
+# 模块用途: HTTP 和网页抓取工具，统一 URL/header 校验、超时和响应截断。
+
 from __future__ import annotations
 
-"""LLM: implements outbound HTTP tools behind explicit timeout and output-size limits.
+"""implements outbound HTTP tools behind explicit timeout and output-size limits.
 
 给人看的解释：
 这个文件只负责访问网络。
@@ -29,6 +32,8 @@ _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _HTTP_METHOD_RE = re.compile(r"^[A-Z][A-Z0-9_-]*$")
 
 
+# LLM: _ResponseParts 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: HTTP 响应片段模型，统一传递工具名、状态、头和正文。
 @dataclass(frozen=True)
 class _ResponseParts:
     tool: str
@@ -37,10 +42,14 @@ class _ResponseParts:
     body: str
 
 
+# LLM: _has_control_chars 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 判断 has_control_chars 是否满足安全或状态条件。
 def _has_control_chars(text: str) -> bool:
     return any(ord(char) < 32 for char in text)
 
 
+# LLM: _scalar_text 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 scalar_text 步骤，并保持调用方依赖的数据形状。
 def _scalar_text(value: Any, *, name: str, max_chars: int, allow_empty: bool = False) -> str:
     if value is None:
         raise ValueError(f"缺少必填参数 {name}")
@@ -54,6 +63,8 @@ def _scalar_text(value: Any, *, name: str, max_chars: int, allow_empty: bool = F
     return text
 
 
+# LLM: _normalize_url 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把输入值归一成 工具系统 内部使用的稳定格式。
 def _normalize_url(value: Any) -> str:
     url = _scalar_text(value, name="url", max_chars=_MAX_URL_CHARS)
     if _has_control_chars(url):
@@ -68,6 +79,8 @@ def _normalize_url(value: Any) -> str:
     return url
 
 
+# LLM: _normalize_method 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把输入值归一成 工具系统 内部使用的稳定格式。
 def _normalize_method(value: Any) -> str:
     method = _scalar_text(value, name="method", max_chars=_MAX_METHOD_CHARS).upper()
     if not _HTTP_METHOD_RE.fullmatch(method):
@@ -75,6 +88,8 @@ def _normalize_method(value: Any) -> str:
     return method
 
 
+# LLM: _format_response 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把 format_response 转成人或模型可读的展示文本。
 def _format_response(parts: _ResponseParts, max_chars: int) -> ToolExecutionResult:
     result = (
         f"status={parts.status}\n"
@@ -86,6 +101,8 @@ def _format_response(parts: _ResponseParts, max_chars: int) -> ToolExecutionResu
     return ToolExecutionResult(parts.tool, True, result)
 
 
+# LLM: _format_http_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把 format_http_error 转成人或模型可读的展示文本。
 def _format_http_error(tool: str, exc: urllib.error.HTTPError, max_chars: int) -> ToolExecutionResult:
     detail = exc.read(max_chars + 1).decode("utf-8", "replace")
     result = (
@@ -98,8 +115,12 @@ def _format_http_error(tool: str, exc: urllib.error.HTTPError, max_chars: int) -
     return ToolExecutionResult(tool, False, result)
 
 
+# LLM: FetchUrlTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: FetchUrlTool 数据模型，集中保存 工具系统 的结构化状态。
 class FetchUrlTool(BaseTool):
 
+    # LLM: FetchUrlTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 初始化 FetchUrlTool 的依赖、配置和运行期字段。
     def __init__(self, *, max_chars: int, timeout: int):
         self.max_chars = max_chars
         self.timeout = timeout
@@ -126,6 +147,8 @@ class FetchUrlTool(BaseTool):
             ],
         )
 
+    # LLM: FetchUrlTool.execute 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 执行 FetchUrlTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
             url = _normalize_url(params.get("url"))
@@ -147,8 +170,12 @@ class FetchUrlTool(BaseTool):
             return ToolExecutionResult("fetch_url", False, f"请求失败: {exc.__class__.__name__}")
 
 
+# LLM: HttpRequestTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: HttpRequestTool 数据模型，集中保存 工具系统 的结构化状态。
 class HttpRequestTool(BaseTool):
 
+    # LLM: HttpRequestTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 初始化 HttpRequestTool 的依赖、配置和运行期字段。
     def __init__(self, *, max_chars: int, timeout: int):
         self.max_chars = max_chars
         self.timeout = timeout
@@ -182,6 +209,8 @@ class HttpRequestTool(BaseTool):
             ],
         )
 
+    # LLM: HttpRequestTool.execute 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 执行 HttpRequestTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
             url = _normalize_url(params.get("url"))
@@ -211,6 +240,8 @@ class HttpRequestTool(BaseTool):
         except (urllib.error.URLError, TimeoutError) as exc:
             return ToolExecutionResult("http_request", False, f"请求失败: {exc.__class__.__name__}")
 
+    # LLM: HttpRequestTool._normalize_headers 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 把输入值归一成 工具系统 内部使用的稳定格式。
     def _normalize_headers(self, headers: Any) -> dict[str, str]:
 
         if headers is None:
@@ -234,6 +265,8 @@ class HttpRequestTool(BaseTool):
         raise ValueError("headers 必须为空、对象或 JSON 字符串")
 
 
+# LLM: _normalize_header_dict 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把输入值归一成 工具系统 内部使用的稳定格式。
 def _normalize_header_dict(headers: dict[Any, Any]) -> dict[str, str]:
     if len(headers) > _MAX_HEADER_COUNT:
         raise ValueError(f"headers 字段过多，最多 {_MAX_HEADER_COUNT} 个")

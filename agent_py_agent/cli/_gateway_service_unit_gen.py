@@ -1,3 +1,6 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 
 from __future__ import annotations
 
@@ -22,14 +25,20 @@ _SERVICE_DESCRIPTION = "MyAgent Gateway - Multi-Agent Messaging Platform"
 # =============================================================================
 
 
+# LLM: get_service_name 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def get_service_name() -> str:
     return _SERVICE_BASE
 
 
+# LLM: _get_launchd_label 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _get_launchd_label() -> str:
     return "ai.my-agent.gateway"
 
 
+# LLM: get_systemd_unit_path 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def get_systemd_unit_path(system: bool = False) -> Path:
     name = get_service_name()
     if system:
@@ -37,6 +46,8 @@ def get_systemd_unit_path(system: bool = False) -> Path:
     return Path.home() / ".config" / "systemd" / "user" / f"{name}.service"
 
 
+# LLM: get_launchd_plist_path 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def get_launchd_plist_path() -> Path:
     label = _get_launchd_label()
     return Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
@@ -47,6 +58,8 @@ def get_launchd_plist_path() -> Path:
 # =============================================================================
 
 
+# LLM: _detect_venv_dir 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _detect_venv_dir() -> Path | None:
     if sys.prefix != sys.base_prefix:
         venv = Path(sys.prefix)
@@ -64,6 +77,8 @@ def _detect_venv_dir() -> Path | None:
     return None
 
 
+# LLM: get_python_path 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def get_python_path() -> str:
     venv = _detect_venv_dir()
     if venv is not None:
@@ -76,6 +91,8 @@ def get_python_path() -> str:
     return sys.executable
 
 
+# LLM: _build_path_entries 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _build_path_entries() -> list[str]:
     path_entries = []
     venv = _detect_venv_dir()
@@ -101,6 +118,8 @@ def _build_path_entries() -> list[str]:
     return path_entries
 
 
+# LLM: _resolve_node_path 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
 def _resolve_node_path() -> str | None:
     resolved_node = shutil.which("node")
     if resolved_node:
@@ -108,6 +127,8 @@ def _resolve_node_path() -> str | None:
     return None
 
 
+# LLM: _build_systemd_path_entries 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
 def _build_systemd_path_entries(venv_bin: str) -> str:
     path_entries = [venv_bin]
     # Add node bin if present
@@ -131,10 +152,14 @@ def _build_systemd_path_entries(venv_bin: str) -> str:
     return ":".join(path_entries)
 
 
+# LLM: _get_config_path 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _get_config_path() -> str:
     return os.environ.get("MY_AGENT_CONFIG", str(PROJECT_ROOT / "config" / "agent_config.yaml"))
 
 
+# LLM: _format_systemd_unit_section 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _format_systemd_unit_section(exec_start: str, working_dir: str, sane_path: str) -> str:
     return f"""[Service]
 Type=simple
@@ -150,6 +175,8 @@ TimeoutStopSec=60
 """
 
 
+# LLM: generate_systemd_unit_text 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def generate_systemd_unit_text(system: bool = False) -> str:
     python_path = get_python_path()
     working_dir = str(PROJECT_ROOT)
@@ -177,6 +204,8 @@ StartLimitBurst=5
 # =============================================================================
 
 
+# LLM: generate_launchd_plist_text 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def generate_launchd_plist_text() -> str:
     python_path = get_python_path()
     config_path = os.environ.get("MY_AGENT_CONFIG", str(PROJECT_ROOT / "config" / "agent_config.yaml"))
@@ -226,5 +255,7 @@ def generate_launchd_plist_text() -> str:
 # =============================================================================
 
 
+# LLM: is_windows 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 判断输入或环境是否满足规则，结果会影响分支、告警或阻断。
 def is_windows() -> bool:
-    return sys.platform == "win32"
+    return sys.platform == "win32"# LLM: is_windows is a module-level entry in CLI 命令行入口; preserve inputs, outputs, and side effects.

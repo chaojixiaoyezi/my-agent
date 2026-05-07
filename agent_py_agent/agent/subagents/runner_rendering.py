@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 from .models import (
@@ -9,6 +12,8 @@ from .models import (
 from .runner_rendering_sections import render_evidence_item_lines, render_granted_card_lines
 
 
+# LLM: _render_execution_context_header 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总execution上下文header的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _render_execution_context_header(context):
     return [
         "# SUBAGENT EXECUTION CONTEXT",
@@ -41,6 +46,8 @@ def _render_execution_context_header(context):
         "## Plan",
         "",
     ]
+# LLM: _render_capabilities_section 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总能力section的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _render_capabilities_section(context):
     lines = ["## Allowed Capabilities", ""]
     lines.append(f"- skills: {', '.join(context.allowed_skills) or 'none'}")
@@ -52,6 +59,8 @@ def _render_capabilities_section(context):
     else:
         lines.append("- none")
     return lines
+# LLM: _render_write_boundary_section 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总boundarysection的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
 def _render_write_boundary_section(context):
     lines = ["", "## Write Boundary", ""]
     allowed_roots = context.write_boundary.get("allowed_write_roots") or []
@@ -64,6 +73,8 @@ def _render_write_boundary_section(context):
     )
     lines.append(f"- locked_files: {', '.join(locked_files) if locked_files else 'none'}")
     return lines
+# LLM: _render_quality_contract_section 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总qualitycontractsection的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _render_quality_contract_section(contract):
     lines = ["", "## Quality Contract", ""]
     lines.append(f"- user_visible_goal: {contract.user_visible_goal or 'none'}")
@@ -86,6 +97,8 @@ def _render_quality_contract_section(contract):
     lines.append("- allowed_degradation:")
     lines.extend(f"  - {item}" for item in contract.allowed_degradation or ["none"])
     return lines
+# LLM: _render_context_manifest_section 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总上下文manifestsection的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _render_context_manifest_section(manifest):
     lines = ["", "## Context Manifest", ""]
     lines.append(f"- core_pack_version: {manifest.core_pack_version}")
@@ -99,12 +112,16 @@ def _render_context_manifest_section(manifest):
     lines.append("- omitted_context:")
     lines.extend(f"  - {item}" for item in manifest.omitted_context or ["none"])
     return lines
+# LLM: _render_context_pack_item_lines 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总上下文pack条目lines的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _render_context_pack_item_lines(item: dict[str, object]) -> list[str]:
     lines = []
     for key in ["kind", "summary", "path", "ref", "role"]:
         if item.get(key):
             lines.append(f"  - {key}: {item[key]}")
     return lines
+# LLM: _render_context_packs_section 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总上下文packssection的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _render_context_packs_section(context):
     lines = ["", "## Context Packs", ""]
     if context.context_packs:
@@ -115,6 +132,8 @@ def _render_context_packs_section(context):
     else:
         lines.append("- none")
     return lines
+# LLM: _render_evidence_section 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总证据section的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _render_evidence_section(context):
     lines = ["", "## Evidence", ""]
     if context.evidence:
@@ -125,6 +144,8 @@ def _render_evidence_section(context):
     return lines
 
 
+# LLM: _render_pending_requests_section 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总pendingrequestssection的展示文本，保持命令行、日志和审计输出一致；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _render_pending_requests_section(context):
     lines = ["", "## Pending Capability Requests", ""]
     if context.pending_requests:
@@ -136,6 +157,8 @@ def _render_pending_requests_section(context):
     else:
         lines.append("- none")
     return lines
+# LLM: _render_open_gaps_section 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总开放gapssection的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _render_open_gaps_section(context):
     lines = ["", "## Open Capability Gaps", ""]
     if context.open_gaps:
@@ -147,6 +170,8 @@ def _render_open_gaps_section(context):
     else:
         lines.append("- none")
     return lines
+# LLM: render_execution_context_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总execution上下文markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
     lines = _render_execution_context_header(context)
     lines.extend(f"- {item}" for item in context.plan or ["未设置"])
@@ -167,6 +192,8 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
     )
     lines.extend(f"- {item}" for item in context.instructions)
     return "\n".join(lines) + "\n"
+# LLM: render_runner_result_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总执行器结果markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def render_runner_result_markdown(result: SubAgentRunnerResult) -> str:
     status = "OK" if result.ok else "FAIL"
     mode = "dry-run" if result.dry_run else "execute"
@@ -176,6 +203,8 @@ def render_runner_result_markdown(result: SubAgentRunnerResult) -> str:
     return "\n".join(lines) + "\n"
 
 
+# LLM: _runner_result_header_lines 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 推进执行器结果headerlines的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _runner_result_header_lines(
     result: SubAgentRunnerResult,
     mode: str,
@@ -211,6 +240,8 @@ def _runner_result_header_lines(
     ]
 
 
+# LLM: _runner_structured_output_lines 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 推进执行器structuredoutputlines的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _runner_structured_output_lines(result: SubAgentRunnerResult) -> list[str]:
     if result.structured_summary or result.blocked_reason or result.structured_parse_error:
         lines = ["", "## Structured Output", ""]
@@ -226,6 +257,8 @@ def _runner_structured_output_lines(result: SubAgentRunnerResult) -> list[str]:
     return []
 
 
+# LLM: _runner_result_file_lines 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 推进执行器结果文件lines的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _runner_result_file_lines(result: SubAgentRunnerResult) -> list[str]:
     return [
         "",
@@ -238,6 +271,8 @@ def _runner_result_file_lines(result: SubAgentRunnerResult) -> list[str]:
         f"- result_json: {result.result_json}",
         f"- output_json: {result.output_json}",
     ]
+# LLM: render_channel_probe_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总通道probemarkdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def render_channel_probe_markdown(report: ChannelProbeReport) -> str:
     lines = [
         "# SUBAGENT CHANNEL PROBE",
@@ -263,6 +298,8 @@ def render_channel_probe_markdown(report: ChannelProbeReport) -> str:
         for check in failed[:5]:
             lines.append(f"  - [{check.severity}] {check.name}: {check.summary} {check.error}".rstrip())
     return "\n".join(lines) + "\n"
+# LLM: render_single_channel_probe_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总单个通道probemarkdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会更新任务状态、执行器结果、验收和报告展示，需避免破坏既有状态机约定。
 def render_single_channel_probe_markdown(result: ChannelProbeResult) -> str:
     lines = [
         "# CHANNEL PROBE",
@@ -285,6 +322,8 @@ def render_single_channel_probe_markdown(result: ChannelProbeResult) -> str:
         if check.error:
             lines.append(f"  - error: {check.error}")
     return "\n".join(lines) + "\n"
+# LLM: _render_runner_item_line 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 渲染或汇总执行器条目line的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def _render_runner_item_line(item: dict[str, object]) -> str:
     title = (
         item.get("path")

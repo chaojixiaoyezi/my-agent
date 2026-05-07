@@ -1,6 +1,9 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 from __future__ import annotations
 
-"""LLM: minimal agent-run workspaces inside a runtime-memory task workspace.
+"""minimal agent-run workspaces inside a runtime-memory task workspace.
 
 Human version:
 Each subagent run now gets a small filesystem workspace under
@@ -15,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 AgentRunWorkspacePaths 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 AgentRunWorkspacePaths 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class AgentRunWorkspacePaths:
     """Concrete files for one task-local agent run workspace."""
@@ -39,6 +44,8 @@ class AgentRunWorkspacePaths:
     legacy_run_ref_json: Path
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 EnsureAgentRunWorkspaceRequest 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 EnsureAgentRunWorkspaceRequest 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class EnsureAgentRunWorkspaceRequest:
     """Bundle inputs for syncing one agent-run workspace."""
@@ -50,6 +57,8 @@ class EnsureAgentRunWorkspaceRequest:
     now: float
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 ensure_agent_run_workspace 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 校验 ensure agent run workspace 的输入、状态或路径，提前暴露无效数据和越界条件。
 def ensure_agent_run_workspace(
     request: EnsureAgentRunWorkspaceRequest | Path | None = None,
     task: Any | None = None,
@@ -78,6 +87,8 @@ def ensure_agent_run_workspace(
     return paths
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _coerce_ensure_request 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 coerce ensure request 涉及的字段，让后续匹配和存储使用同一形态。
 def _coerce_ensure_request(
     request: EnsureAgentRunWorkspaceRequest | Path | None,
     task: Any | None,
@@ -99,6 +110,8 @@ def _coerce_ensure_request(
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 agent_run_workspace_paths 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 agent run workspace paths 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def agent_run_workspace_paths(root: Path) -> AgentRunWorkspacePaths:
     """Return all Phase 1 files for an agent-run workspace root."""
 
@@ -123,6 +136,8 @@ def agent_run_workspace_paths(root: Path) -> AgentRunWorkspacePaths:
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _ensure_directories 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 校验 ensure directories 的输入、状态或路径，提前暴露无效数据和越界条件。
 def _ensure_directories(paths: AgentRunWorkspacePaths) -> None:
     for directory in [
         paths.root,
@@ -136,6 +151,8 @@ def _ensure_directories(paths: AgentRunWorkspacePaths) -> None:
         directory.mkdir(parents=True, exist_ok=True)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _state_payload 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 state payload 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _state_payload(task: Any, task_id: str, now: float) -> dict[str, object]:
     return {
         "version": 1,
@@ -156,6 +173,8 @@ def _state_payload(task: Any, task_id: str, now: float) -> dict[str, object]:
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _checkpoint_payload 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 checkpoint payload 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _checkpoint_payload(task: Any, task_id: str, now: float) -> dict[str, object]:
     return {
         "version": 1,
@@ -174,6 +193,8 @@ def _checkpoint_payload(task: Any, task_id: str, now: float) -> dict[str, object
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _legacy_run_ref_payload 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 legacy run ref payload 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _legacy_run_ref_payload(task: Any, task_id: str, now: float) -> dict[str, object]:
     task_dir = str(getattr(task, "task_dir", ""))
     return {
@@ -192,6 +213,8 @@ def _legacy_run_ref_payload(task: Any, task_id: str, now: float) -> dict[str, ob
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _timeline_event 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 timeline event 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _timeline_event(task: Any, task_id: str, now: float) -> dict[str, object]:
     return {
         "ts": now,
@@ -203,6 +226,8 @@ def _timeline_event(task: Any, task_id: str, now: float) -> dict[str, object]:
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_agent_yaml_if_missing 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write agent yaml if missing 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_agent_yaml_if_missing(path: Path, task: Any, task_id: str, now: float) -> None:
     if path.exists():
         return
@@ -222,6 +247,8 @@ def _write_agent_yaml_if_missing(path: Path, task: Any, task_id: str, now: float
     path.write_text(content, encoding="utf-8")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _task_markdown 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 task markdown 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _task_markdown(task: Any, task_id: str) -> str:
     plan_lines = "\n".join(f"- {item}" for item in list(getattr(task, "plan", []) or [])) or "- 暂无"
     acceptance_checks = list(getattr(task, "acceptance_checks", []) or [])
@@ -240,6 +267,8 @@ def _task_markdown(task: Any, task_id: str) -> str:
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _summary_markdown 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 summary markdown 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _summary_markdown(task: Any, task_id: str) -> str:
     latest = str(getattr(task, "latest_summary", "")) or "暂无"
     return (
@@ -253,6 +282,8 @@ def _summary_markdown(task: Any, task_id: str) -> str:
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_final_report 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write final report 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_final_report(path: Path, task: Any, task_id: str) -> None:
     result = str(getattr(task, "result", ""))
     status = str(getattr(task, "status", ""))
@@ -270,31 +301,43 @@ def _write_final_report(path: Path, task: Any, task_id: str) -> None:
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_findings 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write findings 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_findings(path: Path, task: Any) -> None:
     payloads = [_finding_payload(item) for item in list(getattr(task, "findings", []) or [])]
     lines = [json.dumps(payload, ensure_ascii=False, sort_keys=True) for payload in payloads if payload is not None]
     path.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _finding_payload 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 finding payload 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _finding_payload(item: object) -> dict[str, object] | None:
     if is_dataclass(item):
         return asdict(item)
     return item if isinstance(item, dict) else None
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_json 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write json 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_markdown 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write markdown 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_markdown(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _append_timeline 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 append timeline 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_timeline(path: Path, payload: dict[str, object]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _yaml_quote 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 yaml quote 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _yaml_quote(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 

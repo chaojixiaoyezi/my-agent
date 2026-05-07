@@ -1,6 +1,9 @@
+# LLM: Live Lab validation script; keep CLI flags, artifact paths, and replay outputs stable for scenario tests.
+# 模块用途: 支撑可见验收和回放场景，负责启动案例、整理输出或生成报告。
+
 from __future__ import annotations
 
-"""LLM: Live Lab session workspace and isolated config writer.
+"""Live Lab session workspace and isolated config writer.
 
 给人看的解释：
 这个模块只负责创建隔离测试目录、fixture 小项目和临时配置，避免 Live Lab 污染开发仓库。
@@ -12,14 +15,17 @@ import uuid
 from pathlib import Path
 
 
+# LLM: LabSessionManager 是Live Lab 验收的数据契约；字段名会被调用方和测试读取。
+# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 class LabSessionManager:
-    """LLM: owns workspace setup and config writing.
+    """owns workspace setup and config writing.
 
     给人看的解释：
     测试前先建目录、写 fixture 小项目、写一份临时配置。
-    这份配置会把 memory、gateway、subagent、LocalStore 都关进测试目录。
-    """
+    这份配置会把 memory、gateway、subagent、LocalStore 都关进测试目录。"""
 
+    # LLM: __init__ 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.source_config = Path(args.config).expanduser().resolve()
@@ -35,8 +41,10 @@ class LabSessionManager:
         self.stop_file = self.run_root / "STOP"
         self.created = False
 
+    # LLM: setup 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def setup(self) -> None:
-        """LLM: creates the isolated live-lab workspace and config."""
+        """creates the isolated live-lab workspace and config."""
         if not self.source_config.exists():
             raise FileNotFoundError(f"配置文件不存在: {self.source_config}")
         self.fixture_root.mkdir(parents=True, exist_ok=True)
@@ -47,8 +55,10 @@ class LabSessionManager:
         self.prepare_runtime_dirs()
         self.created = True
 
+    # LLM: write_fixture 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 把报告、摘要或状态写入磁盘，保持输出路径和 JSON 字段稳定。
     def write_fixture(self) -> None:
-        """LLM: writes a tiny project that real agents can safely read and modify."""
+        """writes a tiny project that real agents can safely read and modify."""
         (self.fixture_root / "README.md").write_text(
             "\n".join(
                 [
@@ -78,8 +88,10 @@ class LabSessionManager:
         )
         (self.fixture_root / "lab_outputs").mkdir(parents=True, exist_ok=True)
 
+    # LLM: write_config 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 把报告、摘要或状态写入磁盘，保持输出路径和 JSON 字段稳定。
     def write_config(self) -> None:
-        """LLM: appends isolation overrides while preserving model/API settings."""
+        """appends isolation overrides while preserving model/API settings."""
         base = self.source_config.read_text(encoding="utf-8")
         fixture = str(self.fixture_root).replace("\\", "/")
         backend_override = "" if self.args.real_llm else '\nmodel_backend: "echo"\n'
@@ -112,8 +124,10 @@ request_timeout: {max(30, int(self.args.timeout))}
 {backend_override}"""
         self.config_path.write_text(base + overrides, encoding="utf-8")
 
+    # LLM: prepare_runtime_dirs 属于Live Lab 验收；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def prepare_runtime_dirs(self) -> None:
-        """LLM: pre-creates runtime files that doctor expects in a fresh workspace."""
+        """pre-creates runtime files that doctor expects in a fresh workspace."""
         event_path = self.fixture_root / ".my_agent" / "local_store" / "events.jsonl"
         event_path.parent.mkdir(parents=True, exist_ok=True)
         event_path.touch(exist_ok=True)

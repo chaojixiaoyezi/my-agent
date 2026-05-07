@@ -1,8 +1,10 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 from __future__ import annotations
 
-"""LLM: LLM-based failure introspection for dispatch闭环.
+"""LLM-based failure introspection for dispatch闭环.
 
-给人看的解释：
 在规则分类器（SubAgentFailureAnalyzer）之后，增加 LLM 自省层。
 分析失败"为什么"发生，给出调参建议，并注入下一轮 task。
 """
@@ -21,6 +23,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# LLM: FailureIntrospection 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存失败introspection字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 @dataclass
 class FailureIntrospection:
 
@@ -32,14 +36,22 @@ class FailureIntrospection:
     confidence: float = 0.5  # 分析置信度 0-1
 
 
+# LLM: FailureIntrospector 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 封装失败诊断器相关状态和行为，维持当前模块的职责边界；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class FailureIntrospector:
 
+    # LLM: __init__ 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def __init__(self, agent: SimpleAgent | None = None) -> None:
         self._agent = agent
 
+    # LLM: set_agent 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 更新agent对应的任务或运行状态，并保留既有字段语义；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def set_agent(self, agent: SimpleAgent) -> None:
         self._agent = agent
 
+    # LLM: introspect 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理introspect相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def introspect(
         self,
         task: SubAgentTask,
@@ -56,6 +68,8 @@ class FailureIntrospector:
             logger.warning(f"FailureIntrospector: LLM 调用失败，降级到规则分类: {exc}")
             return self._fallback_to_rules(failure_analysis)
 
+    # LLM: _call_llm_introspect 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理callllmintrospect相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _call_llm_introspect(
         self,
         task: SubAgentTask,
@@ -78,6 +92,8 @@ class FailureIntrospector:
             logger.warning(f"FailureIntrospector: JSON 解析失败: {exc}，降级到规则分类")
             return self._fallback_to_rules(failure_analysis)
 
+    # LLM: _fallback_to_rules 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理fallbacktorules相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _fallback_to_rules(self, failure_analysis: FailureAnalysis) -> FailureIntrospection:
         return FailureIntrospection(
             analysis_reason=f"规则分类：{failure_analysis.suggested_action}",
@@ -88,6 +104,8 @@ class FailureIntrospector:
             confidence=0.3,  # 低置信度表示是降级结果
         )
 
+    # LLM: _suggest_params_from_analysis 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理来自suggest参数分析相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _suggest_params_from_analysis(self, analysis: FailureAnalysis) -> dict:
         params = {}
         if analysis.should_adjust_timeout and analysis.new_timeout_seconds:
@@ -96,19 +114,23 @@ class FailureIntrospector:
             params["split_suggestions"] = analysis.split_suggestions
         return params
 
+    # LLM: _get_current_timeout 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 读取或查询current超时需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def _get_current_timeout(self, task: SubAgentTask) -> float:
         if task.attributes and "dynamic_timeout_seconds" in task.attributes:
             return float(task.attributes["dynamic_timeout_seconds"])
         return 120.0  # 默认超时
 
 
+# LLM: _failure_introspection_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理失败introspection提示词相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _failure_introspection_prompt(
     introspector: FailureIntrospector,
     task: SubAgentTask,
     runner_result: SubAgentRunnerResult,
     failure_analysis: FailureAnalysis,
 ) -> str:
-    # LLM: long diagnostic prompt is isolated from the model-call and JSON parsing path.
+    # LLM: 长诊断提示词与模型调用、JSON 解析路径分离，便于单独调整。
     current_timeout = introspector._get_current_timeout(task)
     tool_rounds = getattr(runner_result, "tool_rounds", 0)
     error_msg = runner_result.runner_last_error or runner_result.message or ""

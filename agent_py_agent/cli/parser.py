@@ -1,6 +1,9 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
-"""LLM: builds the argparse root and delegates subcommand registration.
+"""builds the argparse root and delegates subcommand registration.
 
 给人看的解释：
 这个文件现在只做一件事：创建顶层 parser，然后把各命令族交给
@@ -30,6 +33,8 @@ from .common import DEFAULT_CONFIG, configure_stdio
 from .gateway_client import cmd_default
 
 
+# LLM: build_parser 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 注册 argparse 参数和子命令，决定用户可见的命令形状。
 def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
@@ -71,6 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# LLM: main 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 脚本入口，解析参数、运行主流程，并用退出码表达成功或失败。
 def main() -> int:
 
     configure_stdio()

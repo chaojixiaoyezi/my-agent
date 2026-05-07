@@ -1,6 +1,9 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
-"""LLM: persistence service for SubAgentManager task records.
+"""persistence service for SubAgentManager task records.
 
 给人看的解释：
 子代理工单的读取、扫描和保存集中在这里。SubAgentManager 继续提供原方法名，
@@ -32,10 +35,14 @@ from .checkpoint_artifacts import build_checkpoint_artifact_payloads
 from .task_workspace_adapter import sync_task_workspace_fields
 
 
+# LLM: _field_names 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理字段names相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _field_names(model: type) -> set[str]:
     return {item.name for item in fields(model)}
 
 
+# LLM: _list_value 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 读取或查询value需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _list_value(value: object) -> list[object]:
     if value is None:
         return []
@@ -46,10 +53,14 @@ def _list_value(value: object) -> list[object]:
     return [value]
 
 
+# LLM: _string_list_value 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理stringlistvalue相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _string_list_value(value: object) -> list[str]:
     return [str(item) for item in _list_value(value) if item not in (None, "")]
 
 
+# LLM: _normalize_quality_contract 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 解析并归一化qualitycontract的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _normalize_quality_contract(value: object) -> QualityContract:
     if isinstance(value, QualityContract):
         return value
@@ -70,6 +81,8 @@ def _normalize_quality_contract(value: object) -> QualityContract:
     return QualityContract(**payload)
 
 
+# LLM: _normalize_context_manifest 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 解析并归一化上下文manifest的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _normalize_context_manifest(value: object) -> ContextManifest:
     if isinstance(value, ContextManifest):
         return value
@@ -85,6 +98,8 @@ def _normalize_context_manifest(value: object) -> ContextManifest:
     return ContextManifest(**payload)
 
 
+# LLM: _normalize_context_packs 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 解析并归一化上下文packs的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _normalize_context_packs(value: object) -> list[dict[str, object]]:
     if isinstance(value, dict):
         return [value]
@@ -93,6 +108,8 @@ def _normalize_context_packs(value: object) -> list[dict[str, object]]:
     return [item for item in value if isinstance(item, dict)]
 
 
+# LLM: _float_value 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理floatvalue相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _float_value(value: object, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -100,10 +117,14 @@ def _float_value(value: object, default: float = 0.0) -> float:
         return default
 
 
+# LLM: _dict_value 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 处理dictvalue相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _dict_value(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
+# LLM: _normalize_evidence_packet 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 解析并归一化证据packet的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _normalize_evidence_packet(value: object) -> EvidencePacket:
     if isinstance(value, EvidencePacket):
         return value
@@ -117,6 +138,8 @@ def _normalize_evidence_packet(value: object) -> EvidencePacket:
     return EvidencePacket(**payload)
 
 
+# LLM: _normalize_finding 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 解析并归一化finding的输入形态，让下游只处理稳定结构；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _normalize_finding(value: object) -> Finding:
     if isinstance(value, Finding):
         return value
@@ -130,6 +153,8 @@ def _normalize_finding(value: object) -> Finding:
     return Finding(**payload)
 
 
+# LLM: _normalize_status_report 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 解析并归一化状态报告的输入形态，让下游只处理稳定结构；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _normalize_status_report(value: object) -> StatusReport:
     if isinstance(value, StatusReport):
         return value
@@ -146,6 +171,8 @@ def _normalize_status_report(value: object) -> StatusReport:
     return StatusReport(**payload)
 
 
+# LLM: _summary_delta 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 渲染或汇总delta的展示文本，保持命令行、日志和审计输出一致；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _summary_delta(task: SubAgentTask) -> dict[str, list[str]]:
     return {
         "facts_added": [task.latest_summary] if task.latest_summary else [],
@@ -155,8 +182,9 @@ def _summary_delta(task: SubAgentTask) -> dict[str, list[str]]:
     }
 
 
+# LLM: build_status_report 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 函数用途: 构建状态报告所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def build_status_report(task: SubAgentTask) -> StatusReport:
-    """LLM: Build the latest task-tree status snapshot from task facts."""
     previous = task.latest_status_report if isinstance(task.latest_status_report, StatusReport) else StatusReport()
     progress = max(0.0, min(1.0, _float_value(task.progress)))
     return StatusReport(
@@ -176,16 +204,24 @@ def build_status_report(task: SubAgentTask) -> StatusReport:
     )
 
 
+# LLM: SubAgentPersistenceService 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+# 类用途: 封装subagent持久化服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 class SubAgentPersistenceService:
     """Read and write SubAgentTask records for the manager facade."""
 
+    # LLM: __init__ 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def __init__(self, manager: Any):
         self.manager = manager
 
+    # LLM: workspace 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 处理workspace相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     @property
     def workspace(self) -> Path:
         return self.manager.workspace
 
+    # LLM: load 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 读取或查询load需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def load(self, run_id: str) -> SubAgentTask:
         """Load one subagent task from disk."""
 
@@ -222,6 +258,8 @@ class SubAgentPersistenceService:
         data["latest_status_report"] = _normalize_status_report(data.get("latest_status_report"))
         return SubAgentTask(**data)
 
+    # LLM: list_runs 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 读取或查询runs需要的状态，返回调用方可继续处理的快照；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
     def list_runs(self) -> list[SubAgentTask]:
         """Scan the workspace for subagent task records."""
 
@@ -234,6 +272,8 @@ class SubAgentPersistenceService:
         runs.sort(key=lambda item: item.updated_at or item.created_at, reverse=True)
         return runs
 
+    # LLM: save 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 写入save的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     def save(self, task: SubAgentTask) -> None:
         """Persist a task as JSON plus human-readable Markdown."""
 
@@ -247,7 +287,7 @@ class SubAgentPersistenceService:
         task.latest_status_report = build_status_report(task)
         output_payload = _read_json_object(Path(task.output_json)) if task.output_json else {}
         checkpoint_artifacts = build_checkpoint_artifact_payloads(task, output_payload)
-        # LLM: task workspace is an additive runtime-memory adapter; legacy paths stay canonical for now.
+        # LLM: 任务工作区是增量运行记忆适配层，旧路径暂时仍是权威来源。
         sync_task_workspace_fields(self.workspace, task)
         payload = json.dumps(asdict(task), ensure_ascii=False, indent=2)
         (task_dir / "task.json").write_text(payload, encoding="utf-8")
@@ -279,6 +319,8 @@ class SubAgentPersistenceService:
                 goal=task.goal,
             )
 
+    # LLM: _render_thought_markdown 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
+    # 函数用途: 渲染或汇总thoughtmarkdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会更新任务状态、报告记录和持久化副作用，需避免破坏既有状态机约定。
     @staticmethod
     def _render_thought_markdown(task: SubAgentTask) -> str:
         return (

@@ -1,6 +1,9 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 from __future__ import annotations
 
-"""LLM: thin facade for SimpleAgent parent-dispatch and watch-loop orchestration.
+"""thin facade for SimpleAgent parent-dispatch and watch-loop orchestration.
 
 缁欎汉鐪嬬殑瑙ｉ噴锛?
 杩欎釜鏂囦欢鏄皟搴?facade锛屾墍鏈夊疄鐜伴兘浠ｇ悊鍒?service 妯″潡銆?
@@ -59,6 +62,8 @@ from .services import notify_completed_tasks
 # ---------------------------------------------------------------------------
 
 
+# LLM: DispatchFinalizeParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存调度finalize参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class DispatchFinalizeParams:
     apply: bool
@@ -68,8 +73,12 @@ class DispatchFinalizeParams:
     existing_records: list
 
 
+# LLM: _DispatchCollectionBase 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 封装调度collection基础相关状态和行为，维持当前模块的职责边界；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class _DispatchCollectionBase:
 
+    # LLM: _collect_dispatch_records 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 读取或查询记录需要的状态，返回调用方可继续处理的快照；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
     def _collect_dispatch_records(self, ctx: DispatchContext):
         records = []
 
@@ -106,6 +115,8 @@ class _DispatchCollectionBase:
         records.extend(route_records)
         return records
 
+    # LLM: _execute_runner_jobs 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 推进执行器jobs的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _execute_runner_jobs(
         self, params: RunnerJobExecutionParams,
     ) -> list:
@@ -123,6 +134,8 @@ class _DispatchCollectionBase:
         params.ctx.runner_instruction = batch_ctx.effective_runner_instruction
         return records
 
+    # LLM: _finalize_dispatch 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理finalize调度相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _finalize_dispatch(self, params: DispatchFinalizeParams):
         records = list(params.existing_records)
         patch_run_ids = _dispatch_patch_review_run_ids(self.subagents.list_runs())
@@ -139,8 +152,12 @@ class _DispatchCollectionBase:
         return records
 
 
+# LLM: _DispatchReportMixin 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 拆分调度报告混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class _DispatchReportMixin:
 
+    # LLM: _build_and_write_report 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 构建write报告所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
     def _build_and_write_report(self, records, apply):
         report = self.subagents.build_dispatch_report(records, dry_run=not apply)
         report = self.subagents.write_dispatch_report(report, append_log=apply)
@@ -149,10 +166,14 @@ class _DispatchReportMixin:
         self._has_pending_work = update_pending_work_state(self)
         return report
 
+    # LLM: _notify_completed_tasks 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理notifycompletedtasks相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _notify_completed_tasks(self, records: list) -> None:
         notify_completed_tasks(self, records)
 
 
+# LLM: SimpleAgentDispatchMixin 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 拆分simpleagent调度混入流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class SimpleAgentDispatchMixin(
     _DispatchFacadeMixin,
     _DispatchCollectionBase,
@@ -160,6 +181,8 @@ class SimpleAgentDispatchMixin(
     _DispatchFailureMixin,
 ):
 
+    # LLM: dispatch_subagents 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 推进子代理的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def dispatch_subagents(
         self,
         router: CapabilityRouter,
@@ -208,6 +231,8 @@ class SimpleAgentDispatchMixin(
         return self._build_and_write_report(records, params.apply)
 
 
+# LLM: _dispatch_params_from_call 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进来自参数call的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _dispatch_params_from_call(
     *,
     params: DispatchParams | None,
@@ -243,6 +268,8 @@ def _dispatch_params_from_call(
     return merge_dispatch_params(params)
 
 
+# LLM: _dispatch_context_from_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进来自上下文参数的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _dispatch_context_from_params(
     router: CapabilityRouter,
     capability_config: CapabilityConfig | None,
@@ -264,6 +291,8 @@ def _dispatch_context_from_params(
     )
 
 
+# LLM: _dispatch_finalize_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进finalize参数的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _dispatch_finalize_params(params: DispatchParams, records: list) -> DispatchFinalizeParams:
     return DispatchFinalizeParams(
         apply=params.apply,
@@ -274,6 +303,8 @@ def _dispatch_finalize_params(params: DispatchParams, records: list) -> Dispatch
     )
 
 
+# LLM: _planner_dispatch_overrides 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理规划器调度overrides相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _planner_dispatch_overrides(params: DispatchParams, records):
     planner_record = records[0] if records else None
     if not planner_record or planner_record.step != "parent_planner":

@@ -1,6 +1,9 @@
+# LLM: Memory store module; keep JSONL storage and indexing formats stable.
+# 模块用途: 提供底层记忆 JSONL 存储、索引和读取能力。
+
 from __future__ import annotations
 
-"""LLM: public API for durable memory stores used by the agent runtime.
+"""public API for durable memory stores used by the agent runtime.
 
 给人看的解释：
 这里放'长期记忆怎么存'的实现。当前是 JSONL + LocalStore 索引，后面可以扩展

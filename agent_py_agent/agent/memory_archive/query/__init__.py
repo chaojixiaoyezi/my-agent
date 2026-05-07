@@ -1,6 +1,9 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 from __future__ import annotations
 
-"""LLM: query helpers for memory raw archive, hook snapshots, and resume evidence.
+"""query helpers for memory raw archive, hook snapshots, and resume evidence.
 
 新手说明:
 这个包只做"找线索"和"整理恢复依据"。

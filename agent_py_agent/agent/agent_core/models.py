@@ -1,8 +1,10 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 from __future__ import annotations
 
-"""LLM: defines agent runtime DTOs shared across the core mixins.
+"""defines agent runtime DTOs shared across the core mixins.
 
-给人看的解释：
 这个文件只放主代理运行结果这类小结构。
 它不碰模型、不碰工具、不碰子代理，只给其他模块一个稳定的数据返回格式。
 """
@@ -10,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+# LLM: AgentRunResult 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存agentrun结果字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class AgentRunResult:
 

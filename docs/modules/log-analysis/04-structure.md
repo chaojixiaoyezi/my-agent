@@ -81,3 +81,8 @@ agent_py_agent/agent/log_analysis/
 - `ingest/pipeline_finalize.py` now owns manifest, dedup completion, and checkpoint finalization; `ingest/pipeline_enrich.py` stays focused on one-file ingest orchestration and storage flushing.
 - `storage/query_projection.py` now owns row matching, summaries, and preview projection; `storage/query.py` stays focused on bounded query execution and evidence persistence.
 - Parser, evidence, checkpoint, health, entity graph, trace-case, and config warning helpers use explicit Params/Request bundles at internal boundaries; the strict report has no remaining log-analysis high-risk entries.
+
+## 2026-05-07 annotation structure update
+- Module structure docs now treat the definition-level double-layer comments as part of the code architecture: `LLM:` records model-facing contract/caller/side-effect notes, and `函数用途:` / `类用途:` records beginner-readable purpose and edit guidance.
+- New files, services, bundles, or facade methods must update both this structure page and the in-code comments at the same time.
+- The global file tree in `CODEBASE_TREE.md` now includes a current architecture map for CLI, agent core, gateway, memory, log-analysis, subagent, tooling, and settings boundaries.

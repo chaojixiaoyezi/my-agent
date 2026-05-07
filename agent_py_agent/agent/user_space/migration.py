@@ -1,3 +1,6 @@
+# LLM: User-space module; keep per-user path and migration behavior stable.
+# 模块用途: 管理用户隔离目录、路径推导和旧数据迁移。
+
 from __future__ import annotations
 
 """用户空间迁移工具。
@@ -11,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 
+# LLM: migrate_to_user_space belongs to 用户空间隔离; keep caller-visible returns, errors, and side effects aligned with focused tests.
+# 函数用途: 迁移现有数据到用户空间。 把 base_dir 下的现有数据移到 data/users/{user_id}/ 下： - memory.jsonl - subagents/ - gateway/ - data/local_store/（移动到用户目录下）。
 def migrate_to_user_space(base_dir: Path | str, user_id: str = "admin") -> dict[str, Any]:
     """迁移现有数据到用户空间。
 
@@ -25,8 +30,7 @@ def migrate_to_user_space(base_dir: Path | str, user_id: str = "admin") -> dict[
         user_id: 目标用户 ID
 
     Returns:
-        dict: 迁移结果，包含 moved_files, skipped_files, errors
-    """
+        dict: 迁移结果，包含 moved_files, skipped_files, errors"""
     if isinstance(base_dir, str):
         base_dir = Path(base_dir)
     base_dir = base_dir.resolve()
@@ -53,6 +57,8 @@ def migrate_to_user_space(base_dir: Path | str, user_id: str = "admin") -> dict[
     return result
 
 
+# LLM: _migrate_single belongs to 用户空间隔离; keep caller-visible returns, errors, and side effects aligned with focused tests.
+# 函数用途: 迁移单个文件或目录。；会写入或调整文件，改动时要确认路径、安全边界和失败恢复。
 def _migrate_single(source_path: Path, dest_path: Path, result: dict[str, Any]) -> None:
     """迁移单个文件或目录。"""
 
@@ -68,13 +74,14 @@ def _migrate_single(source_path: Path, dest_path: Path, result: dict[str, Any]) 
         result["errors"].append(f"{source_path}: {e}")
 
 
+# LLM: create_migration_marker belongs to 用户空间隔离; keep caller-visible returns, errors, and side effects aligned with focused tests.
+# 函数用途: 在原位置创建迁移提示文件。；会写入或调整文件，改动时要确认路径、安全边界和失败恢复。
 def create_migration_marker(base_dir: Path, user_id: str) -> None:
     """在原位置创建迁移提示文件。
 
     Args:
         base_dir: 项目根目录
-        user_id: 用户 ID
-    """
+        user_id: 用户 ID"""
     marker_dir = base_dir / "data"
     marker_file = marker_dir / "MIGRATED_TO_USER_SPACE.txt"
 
@@ -91,6 +98,8 @@ def create_migration_marker(base_dir: Path, user_id: str) -> None:
         pass
 
 
+# LLM: check_needs_migration belongs to 用户空间隔离; keep caller-visible returns, errors, and side effects aligned with focused tests.
+# 函数用途: 检查是否需要迁移。 如果 data/users/ 目录不存在，说明还没做过用户空间迁移。。
 def check_needs_migration(base_dir: Path | str) -> bool:
     """检查是否需要迁移。
 
@@ -100,8 +109,7 @@ def check_needs_migration(base_dir: Path | str) -> bool:
         base_dir: 项目根目录
 
     Returns:
-        bool: 是否需要迁移
-    """
+        bool: 是否需要迁移"""
     if isinstance(base_dir, str):
         base_dir = Path(base_dir)
     base_dir = base_dir.resolve()
@@ -110,6 +118,8 @@ def check_needs_migration(base_dir: Path | str) -> bool:
     return not user_data_root.exists()
 
 
+# LLM: get_migration_status belongs to 用户空间隔离; keep caller-visible returns, errors, and side effects aligned with focused tests.
+# 函数用途: 获取迁移状态。。
 def get_migration_status(base_dir: Path | str) -> dict[str, Any]:
     """获取迁移状态。
 
@@ -117,8 +127,7 @@ def get_migration_status(base_dir: Path | str) -> dict[str, Any]:
         base_dir: 项目根目录
 
     Returns:
-        dict: 迁移状态信息
-    """
+        dict: 迁移状态信息"""
     if isinstance(base_dir, str):
         base_dir = Path(base_dir)
     base_dir = base_dir.resolve()
@@ -143,8 +152,9 @@ def get_migration_status(base_dir: Path | str) -> dict[str, Any]:
     return status
 
 
+# LLM: _user_space_names belongs to 用户空间隔离; keep caller-visible returns, errors, and side effects aligned with focused tests.
+# 函数用途: 完成 用户空间隔离 里的 _user_space_names 步骤，保持现有返回值、异常和副作用语义。
 def _user_space_names(user_data_root: Path) -> list[str]:
-    # LLM: migration status lists visible user roots without deepening status rendering.
     if not user_data_root.exists():
         return []
     return [item.name for item in user_data_root.iterdir() if item.is_dir() and not item.name.startswith(".")]

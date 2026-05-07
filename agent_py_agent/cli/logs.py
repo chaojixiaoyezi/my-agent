@@ -1,3 +1,6 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
 """CLI commands for the optional log-analysis module."""
@@ -18,11 +21,15 @@ from ..agent.log_analysis.tools_functions import (
 )
 
 
+# LLM: cmd_logs 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_logs(args) -> int:
     print("Usage: my-agent logs {status,ingest,query,hunt-ip,trace-case}")
     return 2
 
 
+# LLM: cmd_logs_status 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_logs_status(args) -> int:
     status = collect_doctor_status()
     config = load_log_analysis_config()
@@ -37,6 +44,8 @@ def cmd_logs_status(args) -> int:
     return 0
 
 
+# LLM: cmd_logs_ingest 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_logs_ingest(args) -> int:
     config = load_log_analysis_config()
     root = _resolve_root(args.root, config.data_dir)
@@ -57,6 +66,8 @@ def cmd_logs_ingest(args) -> int:
     return 0
 
 
+# LLM: cmd_logs_query 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_logs_query(args) -> int:
     config = load_log_analysis_config()
     root = _resolve_root(args.root, config.data_dir)
@@ -87,6 +98,8 @@ def cmd_logs_query(args) -> int:
     return 0
 
 
+# LLM: cmd_logs_hunt_ip 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_logs_hunt_ip(args) -> int:
     config = load_log_analysis_config()
     root = _resolve_root(args.root, config.data_dir)
@@ -112,6 +125,8 @@ def cmd_logs_hunt_ip(args) -> int:
     return 0
 
 
+# LLM: cmd_logs_trace_case 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_logs_trace_case(args) -> int:
     config = load_log_analysis_config()
     root = _resolve_root(args.root, config.data_dir)
@@ -136,12 +151,16 @@ def cmd_logs_trace_case(args) -> int:
     return 0
 
 
+# LLM: _resolve_root 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
 def _resolve_root(raw_root: str | None, configured_data_dir: str) -> Path:
     if raw_root:
         return Path(raw_root).expanduser()
     return resolve_log_analysis_data_dir(configured_data_dir)
 
 
+# LLM: _resolve_query_limit 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
 def _resolve_query_limit(raw_limit: int | None, default_limit: int, max_limit: int) -> tuple[int, list[dict[str, Any]]]:
     warnings: list[dict[str, Any]] = []
     requested = default_limit if raw_limit is None else raw_limit
@@ -168,6 +187,8 @@ def _resolve_query_limit(raw_limit: int | None, default_limit: int, max_limit: i
     return requested, warnings
 
 
+# LLM: _print_status 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_status(payload: dict[str, Any], *, json_output: bool) -> None:
     if json_output:
         _print_json(payload)
@@ -185,6 +206,8 @@ def _print_status(payload: dict[str, Any], *, json_output: bool) -> None:
         print(f"- {warning.get('field_name', 'warning')}: {warning.get('reason', '')}")
 
 
+# LLM: _print_ingest 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_ingest(payload: dict[str, Any], *, json_output: bool) -> None:
     if json_output:
         _print_json(payload)
@@ -202,6 +225,8 @@ def _print_ingest(payload: dict[str, Any], *, json_output: bool) -> None:
     print(f"checkpoint={result['checkpoint_path']}")
 
 
+# LLM: _print_query 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_query(payload: dict[str, Any], *, json_output: bool) -> None:
     if json_output:
         _print_json(payload)
@@ -220,10 +245,14 @@ def _print_query(payload: dict[str, Any], *, json_output: bool) -> None:
         print("- " + json.dumps(row, ensure_ascii=False, sort_keys=True))
 
 
+# LLM: _print_json 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def _print_json(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
 
 
+# LLM: _jsonable 属于logs CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _jsonable(value: Any) -> Any:
     if is_dataclass(value):
         return _jsonable(asdict(value))

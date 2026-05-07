@@ -1,3 +1,6 @@
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
 """LogWorkOrder 到 SubAgentTask 的转换器。
 
 负责把日志补查工单桥接到子代理执行系统，转换目标、时间窗口、查询限制和允许的工具。
@@ -10,6 +13,8 @@ from agent_py_agent.agent.subagents.models import SubAgentTask
 from .models import LogWorkOrder, utc_now_iso
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 WorkOrderToTaskConfig 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 WorkOrderToTaskConfig 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class WorkOrderToTaskConfig:
     """work_order 到 subagent 转换的配置。"""
@@ -19,6 +24,8 @@ class WorkOrderToTaskConfig:
     quality_contract: dict[str, Any] = field(default_factory=dict)
     context_manifest: dict[str, Any] = field(default_factory=dict)
 
+    # LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 __post_init__ 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 完成 post init 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
     def __post_init__(self) -> None:
         if not self.quality_contract:
             self.quality_contract = {
@@ -40,6 +47,8 @@ class WorkOrderToTaskConfig:
             }
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 work_order_to_subagent_task 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 work order to subagent task 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def work_order_to_subagent_task(
     work_order: LogWorkOrder,
     config: WorkOrderToTaskConfig | None = None,
@@ -87,6 +96,8 @@ def work_order_to_subagent_task(
     return task
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _build_goal 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 build goal 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _build_goal(work_order: LogWorkOrder) -> str:
     """构建任务目标。"""
     parts = [f"补查安全 case {work_order.case_id}"]
@@ -102,6 +113,8 @@ def _build_goal(work_order: LogWorkOrder) -> str:
     return "".join(parts)
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _build_thought 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 build thought 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _build_thought(work_order: LogWorkOrder) -> str:
     """构建任务思路。"""
     parts = [
@@ -112,6 +125,8 @@ def _build_thought(work_order: LogWorkOrder) -> str:
     return "".join(parts)
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _build_plan 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 build plan 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _build_plan(work_order: LogWorkOrder) -> list[str]:
     """构建执行计划。"""
     plan = [
@@ -124,6 +139,8 @@ def _build_plan(work_order: LogWorkOrder) -> list[str]:
     return plan
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _build_allowed_tools 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 build allowed tools 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _build_allowed_tools(work_order: LogWorkOrder) -> list[str]:
     """构建允许的工具列表。"""
     # 第一版只支持 file_tail 模板
@@ -138,6 +155,8 @@ def _build_allowed_tools(work_order: LogWorkOrder) -> list[str]:
     return tools
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _template_to_tool_name 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 template to tool name 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def _template_to_tool_name(template: str) -> str | None:
     """把查询模板名映射到工具名。"""
     template_map = {
@@ -149,6 +168,8 @@ def _template_to_tool_name(template: str) -> str | None:
     return template_map.get(template)
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _build_execution_context 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 build execution context 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _build_execution_context(
     work_order: LogWorkOrder,
     config: WorkOrderToTaskConfig,
@@ -186,6 +207,8 @@ def _build_execution_context(
     return json.dumps(context, ensure_ascii=False, indent=2)
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _quality_contract_from_dict 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 quality contract from dict 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def _quality_contract_from_dict(d: dict[str, Any]) -> Any:
     """从字典构造质量契约。"""
     from agent_py_agent.agent.subagents.models import QualityContract
@@ -205,6 +228,8 @@ def _quality_contract_from_dict(d: dict[str, Any]) -> Any:
     )
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _context_manifest_from_dict 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 context manifest from dict 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def _context_manifest_from_dict(d: dict[str, Any]) -> Any:
     """从字典构造上下文清单。"""
     from agent_py_agent.agent.subagents.models import ContextManifest

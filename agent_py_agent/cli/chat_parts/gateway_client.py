@@ -1,3 +1,6 @@
+# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
+# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
+
 
 from __future__ import annotations
 
@@ -17,6 +20,8 @@ from ...agent.gateway import (
 )
 
 
+# LLM: ChatRequestContent 是gateway CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 @dataclass
 class ChatRequestContent:
     prompt: str
@@ -27,6 +32,8 @@ class ChatRequestContent:
     resume_context: object
 
 
+# LLM: GatewayChunkPollRequest 是gateway CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
 @dataclass(frozen=True)
 class GatewayChunkPollRequest:
     chunk_path: Path
@@ -37,6 +44,8 @@ class GatewayChunkPollRequest:
     visible_chunks_ref: list[int] | None = None
 
 
+# LLM: GatewayTimingContext 是gateway CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 集中携带运行期上下文和共享引用，供相邻阶段稳定读取。
 @dataclass(frozen=True)
 class GatewayTimingContext:
     request_id: str
@@ -45,6 +54,8 @@ class GatewayTimingContext:
     use_gateway: bool
 
 
+# LLM: submit_chat_request 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def submit_chat_request(
     paths,
     content: ChatRequestContent,
@@ -66,6 +77,8 @@ def submit_chat_request(
     return request_id, chunk_path, response_path
 
 
+# LLM: poll_gateway_chunks 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
     chunks_printed = request.chunks_printed_ref[0]
     visible_chunks = request.visible_chunks_ref[0] if request.visible_chunks_ref else 0
@@ -87,6 +100,8 @@ def poll_gateway_chunks(request: GatewayChunkPollRequest) -> dict:
     return response
 
 
+# LLM: _poll_chunk_file 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _poll_chunk_file(
     chunk_path: Path,
     on_chunk: callable,
@@ -106,6 +121,8 @@ def _poll_chunk_file(
     return chunks_printed, visible_chunks
 
 
+# LLM: _emit_chunk_line 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _emit_chunk_line(cline: str, on_chunk: callable) -> tuple[int, int]:
     if not cline.strip():
         return 0, 0
@@ -117,11 +134,15 @@ def _emit_chunk_line(cline: str, on_chunk: callable) -> tuple[int, int]:
     return 1, 0
 
 
+# LLM: check_gateway_alive 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 判断输入或环境是否满足规则，结果会影响分支、告警或阻断。
 def check_gateway_alive(paths) -> bool:
     _, alive = gateway_running(paths)
     return alive
 
 
+# LLM: format_gateway_timing 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 整理 CLI 或报告展示文本，输出文案变化会影响快照断言。
 def format_gateway_timing(ctx: GatewayTimingContext) -> str:
     if ctx.use_gateway:
         return (

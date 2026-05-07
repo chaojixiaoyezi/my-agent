@@ -1,3 +1,6 @@
+# LLM: Subagent orchestration module; keep task workspace, manager facade, and report contracts stable.
+# 模块用途: 支撑主代理派发、跟踪、验收、汇总子代理任务。
+
 from __future__ import annotations
 
 """Helpers for capability request routing records and report persistence."""
@@ -23,9 +26,10 @@ if TYPE_CHECKING:
     from .models import CapabilityRequest, SubAgentTask
 
 
+# LLM: WouldGrantRecordParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 类用途: 集中保存wouldgrant记录参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class WouldGrantRecordParams:
-    """LLM: bundle dry-run grant fields so the helper keeps a small signature."""
 
     task: SubAgentTask
     request: CapabilityRequest
@@ -38,6 +42,8 @@ class WouldGrantRecordParams:
     created_at: float | None = None
 
 
+# LLM: extract_selected_hits_data 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 处理extractselectedhitsdata相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def extract_selected_hits_data(
     selected_hits: list[CapabilitySearchHit],
 ) -> tuple[list[dict[str, str]], list[str], list[str], list[str]]:
@@ -49,6 +55,8 @@ def extract_selected_hits_data(
     return selected_cards, granted_skills, granted_tools, reasons
 
 
+# LLM: build_would_gap_record 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 构建would缺口记录所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
 def build_would_gap_record(
     task: SubAgentTask,
     request: CapabilityRequest,
@@ -71,6 +79,8 @@ def build_would_gap_record(
     )
 
 
+# LLM: record_capability_route_gap 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 写入能力route缺口的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
 def record_capability_route_gap(
     manager,
     task: SubAgentTask,
@@ -105,6 +115,8 @@ def record_capability_route_gap(
     )
 
 
+# LLM: build_would_grant_record 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 构建wouldgrant记录所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
 def build_would_grant_record(params: WouldGrantRecordParams) -> CapabilityRouteRecord:
     """Build a dry-run WOULD_GRANT route record."""
     return CapabilityRouteRecord(
@@ -124,6 +136,8 @@ def build_would_grant_record(params: WouldGrantRecordParams) -> CapabilityRouteR
     )
 
 
+# LLM: build_capability_route_report 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 构建能力route报告所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def build_capability_route_report(
     records: list[CapabilityRouteRecord],
     *,
@@ -145,6 +159,8 @@ def build_capability_route_report(
     )
 
 
+# LLM: write_capability_route_report_files 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
+# 函数用途: 写入能力route报告文件的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
 def write_capability_route_report_files(
     manager,
     report: CapabilityRouteReport,

@@ -1,6 +1,9 @@
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
 from __future__ import annotations
 
-"""LLM: query row matching, summaries, and preview projection for local log storage."""
+"""query row matching, summaries, and preview projection for local log storage."""
 
 from collections import Counter
 from typing import Any
@@ -35,6 +38,8 @@ PREVIEW_FIELDS = (
 )
 
 
+# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 summarize_rows 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 summarize rows 在当前模块中的核心转换或协调步骤，衔接 日志分析存储层读写本地事件、finding、case 和 evidence 投影。
 def summarize_rows(rows: list[dict[str, Any]], parameters: dict[str, Any]) -> dict[str, Any]:
     times = [str(event_time_value(row)) for row in rows if event_time_value(row) not in (None, "")]
     return {
@@ -49,6 +54,8 @@ def summarize_rows(rows: list[dict[str, Any]], parameters: dict[str, Any]) -> di
     }
 
 
+# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 sanitize_event_for_preview 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 sanitize event for preview 在当前模块中的核心转换或协调步骤，衔接 日志分析存储层读写本地事件、finding、case 和 evidence 投影。
 def sanitize_event_for_preview(row: dict[str, Any]) -> dict[str, Any]:
     preview: dict[str, Any] = {}
     for field in PREVIEW_FIELDS:
@@ -63,6 +70,8 @@ def sanitize_event_for_preview(row: dict[str, Any]) -> dict[str, Any]:
     return preview
 
 
+# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 query_matches 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 收集或查询 query matches 的候选结果，并按参数完成筛选、排序或数量限制。
 def query_matches(row: dict[str, Any], criteria: QueryCriteria) -> bool:
     if not _matches_time(row, criteria.start_time, criteria.end_time):
         return False
@@ -75,6 +84,8 @@ def query_matches(row: dict[str, Any], criteria: QueryCriteria) -> bool:
     return True
 
 
+# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 _matches_time 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 判断 matches time 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def _matches_time(row: dict[str, Any], start_time: str | None, end_time: str | None) -> bool:
     if not start_time and not end_time:
         return True
@@ -90,6 +101,8 @@ def _matches_time(row: dict[str, Any], start_time: str | None, end_time: str | N
     return True
 
 
+# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 _matches_any_alias 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 判断 matches any alias 是否满足规则、查询或上下文条件，返回确定性的筛选结果。
 def _matches_any_alias(row: dict[str, Any], aliases: tuple[str, ...], expected: str) -> bool:
     expected_normalized = expected.lower()
     for alias in aliases:
@@ -101,6 +114,8 @@ def _matches_any_alias(row: dict[str, Any], aliases: tuple[str, ...], expected: 
     return False
 
 
+# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 _top_counts 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 top counts 在当前模块中的核心转换或协调步骤，衔接 日志分析存储层读写本地事件、finding、case 和 evidence 投影。
 def _top_counts(rows: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
     counter: Counter[str] = Counter()
     aliases = FIELD_ALIASES.get(field, (field,))
@@ -109,6 +124,8 @@ def _top_counts(rows: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
     return [{"value": value, "count": count} for value, count in counter.most_common(5)]
 
 
+# LLM: 日志分析存储层读写本地事件、finding、case 和 evidence 投影；修改 _count_first_alias 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 count first alias 在当前模块中的核心转换或协调步骤，衔接 日志分析存储层读写本地事件、finding、case 和 evidence 投影。
 def _count_first_alias(counter: Counter[str], row: dict[str, Any], aliases: tuple[str, ...]) -> None:
     for alias in aliases:
         value = nested_get(row, alias)

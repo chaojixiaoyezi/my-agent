@@ -1,6 +1,9 @@
+# LLM: CLI scenario case definition; keep fixture flow and expected gateway/subagent behavior stable.
+# 模块用途: 定义一类命令行情景测试，用来复现和验证端到端流程。
+
 from __future__ import annotations
 
-"""LLM: implements the real-model recovery scenario that verifies a real API round-trip survives cross-day resume.
+"""implements the real-model recovery scenario that verifies a real API round-trip survives cross-day resume.
 
 给人看的解释：
 这个文件验证用真实模型 API 跑一轮子代理后，memory-resume 能找回真实响应内容。
@@ -28,15 +31,21 @@ from .subagent_cases import (
 )
 
 
+# LLM: ScenarioRealModelRecoveryBackend 是scenario CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 定义本模块对外传递的数据字段，字段名需要和调用方保持一致。
 class ScenarioRealModelRecoveryBackend:
 
     name = "scenario_real_model_recovery_backend"
 
+    # LLM: __init__ 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def __init__(self, real_backend) -> None:
         self.real_backend = real_backend
         self.calls = 0
         self.real_response_text = ""
 
+    # LLM: generate 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
     def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
         self.calls += 1
         if self.calls == 1:
@@ -81,6 +90,8 @@ class ScenarioRealModelRecoveryBackend:
         )
 
 
+# LLM: _real_model_recovery_setup 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _real_model_recovery_setup(args):
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -124,6 +135,8 @@ def _real_model_recovery_setup(args):
     return paths, agent, backend, task, loaded, runner
 
 
+# LLM: _real_model_recovery_resume 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _real_model_recovery_resume(paths, agent, task, loaded):
     _append_parent_subagent_cross_day_resume_clues(agent.root, loaded)
     reloaded_agent = load_scenario_agent(paths.config)
@@ -156,6 +169,8 @@ def _real_model_recovery_resume(paths, agent, task, loaded):
     return resume_payload
 
 
+# LLM: _real_model_recovery_build_expected_reads 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _real_model_recovery_build_expected_reads(loaded):
     return [
         loaded.status_file,
@@ -166,6 +181,8 @@ def _real_model_recovery_build_expected_reads(loaded):
     ]
 
 
+# LLM: _RealModelRecoveryVerifyContext 是scenario CLI的数据契约；字段名会被调用方和测试读取。
+# 类用途: 集中携带运行期上下文和共享引用，供相邻阶段稳定读取。
 @dataclass
 class _RealModelRecoveryVerifyContext:
     paths: Any
@@ -181,6 +198,8 @@ class _RealModelRecoveryVerifyContext:
     matching_task: dict
 
 
+# LLM: _real_model_recovery_verify 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _real_model_recovery_verify(ctx: _RealModelRecoveryVerifyContext) -> int:
     expected_reads = _real_model_recovery_build_expected_reads(ctx.loaded)
     echo_signature = "这是 echo 后端的本地响应"
@@ -224,6 +243,8 @@ def _real_model_recovery_verify(ctx: _RealModelRecoveryVerifyContext) -> int:
     return 0 if final_ok else 2
 
 
+# LLM: run_scenario_real_model_recovery_case 属于scenario CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 执行对应流程阶段，并把成功、失败和产物写入汇总状态。
 def run_scenario_real_model_recovery_case(args) -> int:
 
     paths, agent, backend, task, loaded, runner = _real_model_recovery_setup(args)

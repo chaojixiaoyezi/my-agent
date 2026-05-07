@@ -1,4 +1,7 @@
 
+# LLM: 写入前必须经过工作区和子代理边界校验，错误文案也服务上层决策。
+# 模块用途: 内部文件写入、追加和替换工具实现。
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -15,8 +18,12 @@ from ._filesystem_read import FileSystemTool
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 
 
+# LLM: WriteFileTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: WriteFileTool 数据模型，集中保存 工具系统 的结构化状态。
 class WriteFileTool(FileSystemTool):
 
+    # LLM: WriteFileTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 初始化 WriteFileTool 的依赖、配置和运行期字段。
     def __init__(self, workspace_root: Path, workspace_roots: list[Path] | None = None):
         super().__init__(workspace_root, workspace_roots)
         self.spec = ToolSpec(
@@ -44,6 +51,8 @@ class WriteFileTool(FileSystemTool):
             ],
         )
 
+    # LLM: WriteFileTool.execute 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 执行 WriteFileTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
             raw_path = _required_path(params.get("path"))
@@ -66,8 +75,12 @@ class WriteFileTool(FileSystemTool):
         )
 
 
+# LLM: AppendFileTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: AppendFileTool 数据模型，集中保存 工具系统 的结构化状态。
 class AppendFileTool(FileSystemTool):
 
+    # LLM: AppendFileTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 初始化 AppendFileTool 的依赖、配置和运行期字段。
     def __init__(self, workspace_root: Path, workspace_roots: list[Path] | None = None):
         super().__init__(workspace_root, workspace_roots)
         self.spec = ToolSpec(
@@ -95,6 +108,8 @@ class AppendFileTool(FileSystemTool):
             ],
         )
 
+    # LLM: AppendFileTool.execute 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 执行 AppendFileTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
             raw_path = _required_path(params.get("path"))
@@ -118,8 +133,12 @@ class AppendFileTool(FileSystemTool):
         )
 
 
+# LLM: ReplaceInFileTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: ReplaceInFileTool 数据模型，集中保存 工具系统 的结构化状态。
 class ReplaceInFileTool(FileSystemTool):
 
+    # LLM: ReplaceInFileTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 初始化 ReplaceInFileTool 的依赖、配置和运行期字段。
     def __init__(self, workspace_root: Path, workspace_roots: list[Path] | None = None):
         super().__init__(workspace_root, workspace_roots)
         self.spec = ToolSpec(
@@ -164,6 +183,8 @@ class ReplaceInFileTool(FileSystemTool):
             ],
         )
 
+    # LLM: ReplaceInFileTool.execute 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 执行 ReplaceInFileTool 的主流程并返回 ToolExecutionResult。
     def execute(self, params: dict[str, Any]) -> ToolExecutionResult:
         try:
             raw_path = _required_path(params.get("path"))

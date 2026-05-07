@@ -1,3 +1,6 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 from __future__ import annotations
 
 from .subagent_params import (
@@ -8,6 +11,8 @@ from .subagent_params import (
 )
 
 
+# LLM: run_subagent_flow 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进子代理flow的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def run_subagent_flow(agent, options: SubagentRunParams):
     """Run one subagent task from prompt construction through result persistence."""
     active_attempt_id = str(options.attempt_id or "").strip()
@@ -57,8 +62,10 @@ def run_subagent_flow(agent, options: SubagentRunParams):
     )
 
 
+# LLM: _run_subagent_model_turn 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进子代理模型turn的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _run_subagent_model_turn(agent, prompt: str, context):
-    # LLM: one model turn stays separate from attempt/probe bookkeeping.
+    # LLM: 单次模型调用与尝试次数、通道探测记账分离，便于独立重试。
     return agent.run(
         prompt,
         save=False,

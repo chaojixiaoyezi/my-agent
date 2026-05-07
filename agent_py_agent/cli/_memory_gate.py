@@ -1,6 +1,9 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
-"""LLM: CLI for reviewing run-local memory gate candidates.
+"""CLI for reviewing run-local memory gate candidates.
 
 给人看的解释：
 这个命令默认只写回 review decision；后续导出必须通过显式 mode 参数触发。
@@ -15,6 +18,8 @@ from .common import make_agent
 from .models import SubagentsMemoryGateOptions
 
 
+# LLM: cmd_subagents_memory_gate 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_subagents_memory_gate(args) -> int:
     agent = make_agent(args)
     options = _subagents_memory_gate_options(args)
@@ -63,6 +68,8 @@ def cmd_subagents_memory_gate(args) -> int:
     return 0
 
 
+# LLM: _subagents_memory_gate_options 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _subagents_memory_gate_options(args) -> SubagentsMemoryGateOptions:
     requested_path = getattr(args, "memory_path", None)
     memory_path = Path(requested_path) if isinstance(requested_path, str) and requested_path else None
@@ -83,6 +90,8 @@ def _subagents_memory_gate_options(args) -> SubagentsMemoryGateOptions:
     )
 
 
+# LLM: _cmd_memory_gate_retention 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _cmd_memory_gate_retention(agent, options: SubagentsMemoryGateOptions) -> int:
     result = agent.subagents.run_memory_gate_retention(
         options.run_id,
@@ -100,6 +109,8 @@ def _cmd_memory_gate_retention(agent, options: SubagentsMemoryGateOptions) -> in
     return 0
 
 
+# LLM: _cmd_memory_gate_export_memory 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _cmd_memory_gate_export_memory(agent, options: SubagentsMemoryGateOptions) -> int:
     memory_path = options.memory_path or Path(agent.memory.path)
     result = agent.subagents.export_memory_gate_candidates_to_memory(
@@ -113,6 +124,8 @@ def _cmd_memory_gate_export_memory(agent, options: SubagentsMemoryGateOptions) -
     return 0
 
 
+# LLM: _cmd_memory_gate_export_skill 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _cmd_memory_gate_export_skill(agent, options: SubagentsMemoryGateOptions) -> int:
     result = agent.subagents.export_memory_gate_candidates_to_skill_drafts(
         options.run_id,
@@ -126,6 +139,8 @@ def _cmd_memory_gate_export_skill(agent, options: SubagentsMemoryGateOptions) ->
     return 0
 
 
+# LLM: _cmd_memory_gate_verify 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _cmd_memory_gate_verify(agent, options: SubagentsMemoryGateOptions) -> int:
     result = agent.subagents.verify_memory_gate_boundary(options.run_id)
     print("SUBAGENT MEMORY GATE VERIFY")
@@ -134,6 +149,8 @@ def _cmd_memory_gate_verify(agent, options: SubagentsMemoryGateOptions) -> int:
     return 0 if result.ok else 1
 
 
+# LLM: _export_request 属于memory CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _export_request(
     options: SubagentsMemoryGateOptions,
     *,

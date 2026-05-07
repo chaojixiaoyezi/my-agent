@@ -8,6 +8,78 @@
 
 > 2026-04-29 更新：大文件已经按职责拆分。旧入口文件仍保留兼容导入，新实现优先看 `cli/`、`agent_core/`、`tooling/`、`gateway_parts/`、`local_storage/`、`subagents/`。
 > 第二轮更新：`agent/` 根目录散落实现已继续归位。目录含义详见 `agent_py_agent/agent/DIRECTORY_GUIDE.md`。
+> 2026-05-07 更新：功能代码已统一补齐定义上方双层注释。每个 product module / class / function / method 都必须包含 `LLM:` 和 `模块用途:` / `函数用途:` / `类用途:`；新增入口时同步更新这里的文件树和开发规范。
+
+### 当前功能代码地图
+
+这张小树是后续架构评审和 LLM 开发优先看的版本；下面的大树保留更细文件入口和历史说明。
+
+```text
+agent_py_agent/
+|-- cli/                                      # 命令行入口层，只做参数解析、展示和调用服务
+|   |-- chat_parts/                           # 交互 chat 的 UI、历史、gateway client 和 fallback worker
+|   |-- commands/                             # 命令行分组入口和小型 command helpers
+|   |-- memory_commands/                      # memory route/query/doctor/compact/archive 子命令
+|   |-- scenario_cases/                       # gateway、subagent、runner、repair 等确定性 scenario
+|   |-- daemon.py                             # 前台常驻 subagent/watch 调度入口
+|   |-- local_doctor.py                       # 本地状态体检、修复建议和重建入口
+|   |-- local_status_payload.py               # status payload 组装
+|   |-- local_status_view.py                  # status 用户可读展示
+|   `-- parser.py                             # argparse 命令树和 main()
+|-- agent/
+|   |-- adapter/                              # 外部聊天/消息通道适配，例如 QQ、飞书和协议管理
+|   |-- agent_core/                           # SimpleAgent 主循环、tool loop、dispatch、planner、runner、watch
+|   |   `-- services/                         # 主循环可复用服务，例如 notification/watch
+|   |-- audit/                                # 审计日志、任务访问记录和查询
+|   |-- auth/                                 # 认证、权限中间件和用户身份模型
+|   |-- backends/                             # 模型后端适配和流式解析
+|   |-- capability/                           # skill/tool/capability 配置、路由和 card 解析
+|   |-- concurrency/                          # 乐观锁、任务锁和透明重试
+|   |-- extensions/                           # 插件/扩展声明和加载边界
+|   |-- gateway_parts/                        # 文件协议 gateway：路径、队列、HTTP、worker、恢复、supervisor
+|   |-- io/                                   # 底层 JSONL/文件 IO 原语
+|   |-- local_storage/                        # LocalStore schema、records、events、search、maintenance
+|   |-- log_analysis/                         # 日志分析接入、解析、查询、检测、case、派工和报告
+|   |   |-- agents/                            # 日志分析子代理合同和 prompt
+|   |   |-- analytics/                         # 检测器、规则、基线和特征提取
+|   |   |-- cases/                             # case store、证据和调度
+|   |   |-- config/                            # 日志分析配置加载和 coercion
+|   |   |-- dispatch/                          # work order、queue、budget 和健康检查
+|   |   |-- ingest/                            # parser pipeline、checkpoint、dedup、dead letter
+|   |   |-- parsers/                           # 外部日志格式解析器
+|   |   |-- security/                          # 安全实体图和检测辅助
+|   |   |-- services/                          # 日志分析服务层通用 coercion/normalization
+|   |   |-- storage/                           # 日志存储和查询 projection
+|   |   `-- tools/                             # agent 可调用的日志查询/trace/hunt 工具
+|   |-- memory_archive/                       # raw archive、task workspace、agent run workspace、memory gate
+|   |   |-- query/                             # archive 查询/filter/payload 构造
+|   |   |-- runtime/                           # run-time archive hook 和事件同步
+|   |   `-- snapshots/                         # 快照模型和 snapshot IO
+|   |-- memory_routing/                       # 长期规则索引、匹配、上下文注入和 receipt
+|   |-- memory_store/                         # 长期 memory JSONL 存储和 LocalStore 索引
+|   |-- model_speed/                          # 模型速度 benchmark 和模型描述
+|   |-- notification/                         # 通知收件箱、过滤和用户可见摘要
+|   |-- prompting_parts/                      # prompt 构造、工具 transcript 和上下文片段
+|   |-- session/                              # 跨通道会话和 admin 查询
+|   |-- settings/                             # 配置 schema、normalize、服务化 coercion
+|   |   `-- services/                         # 配置字段归一化和 runtime/subagent 子配置
+|   |-- subagent_workflows/                   # 子代理 workflow route/compile/plan 和内置模板
+|   |-- subagents/                            # 子代理 manager facade、服务、验收、patch、runner、persistence
+|   |   |-- acceptance_helpers/                # 父级验收 evidence/artifact/readiness helpers
+|   |   |-- patch/                             # patch review/apply/render 服务
+|   |   `-- services/                          # lifecycle/dispatch/indexing/actions/persistence 等服务
+|   |-- task_registry/                        # 任务注册表和查找入口
+|   |-- tooling/                              # 工具模型、文件/HTTP/shell 工具、注册表、写边界
+|   |-- user_space/                           # 用户数据隔离路径和迁移
+|   |-- clients/ repositories/ security/ validators/
+|   |                                          # 预留边界目录；新增实现前先补设计说明
+|   |-- core.py                               # SimpleAgent 兼容组合入口
+|   |-- tools.py / subagent.py / gateway.py    # 兼容 re-export 入口，新逻辑在对应子目录
+|   `-- startup_recovery.py                   # 启动时恢复检测和用户可读摘要
+|-- config/                                   # 默认配置样例
+|-- prompts/                                  # 默认 prompt 规则
+`-- tests/                                    # 回归测试；不强制每个测试函数双层注释
+```
 
 ```text
 simple-python-agent-v0.3/                      # 项目根目录，放代码、说明文档和验证记录
@@ -756,7 +828,7 @@ docs/
 
 ## 2026-04-30 文档同步门补充
 
-- `scripts/check_doc_sync.py`: 检查 covered module 的代码改动是否同步更新 `docs/modules/<module>/02-progress.md` 和 `04-structure.md`，并要求实现代码改动同文件补注释或 docstring。
+- `scripts/check_doc_sync.py`: 检查 covered module 的代码改动是否同步更新 `docs/modules/<module>/02-progress.md` 和 `04-structure.md`，并要求实现代码改动同文件维护双层注释。
 - 当前 covered module：`log-analysis`、`subagent`、`memory`、`gateway`、`live-lab`。
 - `agent_py_agent/tests/test_doc_sync.py`: 覆盖同步门规则、必需文档存在性和缺注释/缺文档的失败路径。
 

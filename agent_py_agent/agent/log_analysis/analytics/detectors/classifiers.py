@@ -1,4 +1,7 @@
-"""LLM: Event classification predicates and weak-signal aggregation.
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
+"""Event classification predicates and weak-signal aggregation.
 
 This module provides:
   - Event classification predicates (is_waf_event, is_auth_event, etc.)
@@ -57,6 +60,8 @@ from .field_extractors import (
 # Event classification predicates
 # ---------------------------------------------------------------------------
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _is_alert_event 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 is alert event 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _is_alert_event(event: Mapping[str, Any]) -> bool:
     """Return True if event is an alert or high-severity event."""
     if _event_class(event) == "alert":
@@ -66,6 +71,8 @@ def _is_alert_event(event: Mapping[str, Any]) -> bool:
     return _severity(event) in {"high", "critical"}
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _is_waf_event 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 is waf event 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _is_waf_event(event: Mapping[str, Any]) -> bool:
     """Return True if event is a WAF / web-injection alert."""
     product = _source_product(event)
@@ -77,6 +84,8 @@ def _is_waf_event(event: Mapping[str, Any]) -> bool:
     return "waf" in product or ("web" in alert_text and has_web_fields) or ("injection" in alert_text and has_web_fields)
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _is_http_success_or_error 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 is http success or error 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _is_http_success_or_error(event: Mapping[str, Any]) -> bool:
     """Return True if event has an HTTP 2xx or 5xx status code."""
     status = _to_int(_field(event, "status_code", "http_status", "http.status_code", "response_status"))
@@ -85,6 +94,8 @@ def _is_http_success_or_error(event: Mapping[str, Any]) -> bool:
     return 200 <= status < 300 or status >= 500
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _is_suspicious_web_process_event 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 is suspicious web process event 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _is_suspicious_web_process_event(event: Mapping[str, Any]) -> bool:
     """Return True if event shows a web parent spawning a suspicious child."""
     parent = _parent_process_name(event)
@@ -98,6 +109,8 @@ def _is_suspicious_web_process_event(event: Mapping[str, Any]) -> bool:
     return parent in WEB_PARENT_PROCESSES and child in SUSPICIOUS_CHILD_PROCESSES
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _is_suspicious_file_write 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 is suspicious file write 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _is_suspicious_file_write(event: Mapping[str, Any]) -> bool:
     """Return True if event is a file write to a web-accessible path."""
     event_class = _event_class(event)
@@ -114,6 +127,8 @@ def _is_suspicious_file_write(event: Mapping[str, Any]) -> bool:
     return path.endswith(web_ext) or any(item in path for item in web_dirs)
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _is_egress_event 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 is egress event 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _is_egress_event(event: Mapping[str, Any]) -> bool:
     """Return True if event is an outbound network/egress event."""
     event_class = _event_class(event)
@@ -132,6 +147,8 @@ def _is_egress_event(event: Mapping[str, Any]) -> bool:
     return bool(src and domain)
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _is_internal_ip 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 is internal ip 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _is_internal_ip(value: str) -> bool:
     """Return True if value is a private/link-local IP address."""
     try:
@@ -151,12 +168,16 @@ def _is_internal_ip(value: str) -> bool:
     return any(ip in network for network in private_networks)
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _is_vpn_event 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 is vpn event 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _is_vpn_event(event: Mapping[str, Any]) -> bool:
     """Return True if event is a VPN login/session event."""
     product = _source_product(event)
     return "vpn" in product or ("vpn" in _event_action(event) and _is_auth_event(event))
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _is_auth_event 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 is auth event 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _is_auth_event(event: Mapping[str, Any]) -> bool:
     """Return True if event is an authentication/identity event."""
     event_class = _event_class(event)
@@ -165,11 +186,15 @@ def _is_auth_event(event: Mapping[str, Any]) -> bool:
     return event_class in {"auth", "authentication", "identity"} or "login" in action or "auth" in action or "vpn" in product
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _is_success 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 is success 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _is_success(event: Mapping[str, Any]) -> bool:
     """Return True if event outcome indicates success."""
     return _outcome(event) in {"success", "succeeded", "successful", "allowed", "ok", "accepted", "pass"}
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _is_failure 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 is failure 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _is_failure(event: Mapping[str, Any]) -> bool:
     """Return True if event outcome indicates failure."""
     return _outcome(event) in {"failure", "failed", "fail", "denied", "blocked", "rejected", "invalid"}
@@ -179,6 +204,8 @@ def _is_failure(event: Mapping[str, Any]) -> bool:
 # Helper functions for text/int conversion
 # ---------------------------------------------------------------------------
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _to_int 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 把 to int 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
 def _to_int(value) -> int | None:
     """Convert value to int or return None."""
     if value is None:
@@ -193,6 +220,8 @@ def _to_int(value) -> int | None:
 # Weak-signal & entity helpers
 # ---------------------------------------------------------------------------
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _weak_signal 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 weak signal 在当前模块中的核心转换或协调步骤，衔接 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源。
 def _weak_signal(event: JsonDict) -> JsonDict | None:
     """Classify event as a weak signal and return its metadata, or None."""
     signal_type = _classify_weak_signal(event)
@@ -201,6 +230,8 @@ def _weak_signal(event: JsonDict) -> JsonDict | None:
     return {"signal_type": signal_type, "source_product": _source_product(event), "event": event}
 
 
+# LLM: 日志分析检测逻辑以规范化事件、规则和实体字段为事实来源；修改 _classify_weak_signal 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 基于规则或事件字段计算 classify weak signal 的判定结果，避免把推测当作事实写入。
 def _classify_weak_signal(event: JsonDict) -> str:
     """Return signal type string for a weak signal event, or empty string."""
     if _is_waf_event(event):

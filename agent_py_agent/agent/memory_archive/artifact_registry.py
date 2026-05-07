@@ -1,6 +1,9 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 from __future__ import annotations
 
-"""LLM: normalized artifact manifests for runtime memory.
+"""normalized artifact manifests for runtime memory.
 
 Human version:
 Artifact manifests turn arbitrary `artifact_refs` into small records with
@@ -16,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 ArtifactManifestResult 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 ArtifactManifestResult 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class ArtifactManifestResult:
     """Task/run manifest paths produced while syncing artifacts."""
@@ -24,6 +29,8 @@ class ArtifactManifestResult:
     agent_manifest_jsonl: Path
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 SyncArtifactManifestsRequest 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 SyncArtifactManifestsRequest 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class SyncArtifactManifestsRequest:
     """Bundle inputs for syncing task/run artifact manifests."""
@@ -35,6 +42,8 @@ class SyncArtifactManifestsRequest:
     now: float
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _ArtifactRecordContext 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 _ArtifactRecordContext 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class _ArtifactRecordContext:
     task_id: str
@@ -42,6 +51,8 @@ class _ArtifactRecordContext:
     now: float
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 sync_artifact_manifests 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 sync artifact manifests 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def sync_artifact_manifests(
     request: SyncArtifactManifestsRequest | Any = None,
     *,
@@ -67,6 +78,8 @@ def sync_artifact_manifests(
     return ArtifactManifestResult(task_manifest_jsonl=task_manifest, agent_manifest_jsonl=agent_manifest)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _coerce_sync_request 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 coerce sync request 涉及的字段，让后续匹配和存储使用同一形态。
 def _coerce_sync_request(
     request: SyncArtifactManifestsRequest | Any,
     *,
@@ -96,6 +109,8 @@ def _coerce_sync_request(
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _artifact_records 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 artifact records 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _artifact_records(task: Any, now: float) -> list[dict[str, object]]:
     task_id = str(getattr(task, "root_id", "") or getattr(task, "id", "task"))
     run_id = str(getattr(task, "id", "") or task_id)
@@ -108,6 +123,8 @@ def _artifact_records(task: Any, now: float) -> list[dict[str, object]]:
     return records
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _artifact_record 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 artifact record 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _artifact_record(
     context: _ArtifactRecordContext,
     index: int,
@@ -135,6 +152,8 @@ def _artifact_record(
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _artifact_refs 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 artifact refs 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _artifact_refs(task: Any) -> list[str]:
     refs: list[str] = []
     for item in list(getattr(task, "artifact_refs", []) or []):
@@ -144,6 +163,8 @@ def _artifact_refs(task: Any) -> list[str]:
     return refs
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _resolve_ref 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 resolve ref 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _resolve_ref(ref: str, task_dir: Path | None) -> Path | None:
     path = Path(ref).expanduser()
     if path.is_absolute():
@@ -151,12 +172,16 @@ def _resolve_ref(ref: str, task_dir: Path | None) -> Path | None:
     return (task_dir / path) if task_dir else path
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_manifest 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write manifest 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_manifest(path: Path, records: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     content = "\n".join(json.dumps(record, ensure_ascii=False, sort_keys=True) for record in records)
     path.write_text((content + "\n") if content else "", encoding="utf-8")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _sha256_file 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 sha256 file 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -165,11 +190,15 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _artifact_id 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 artifact id 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _artifact_id(run_id: str, index: int, ref: str) -> str:
     digest = hashlib.sha1(ref.encode("utf-8")).hexdigest()[:12]
     return f"artifact-{_safe_segment(run_id)}-{index}-{digest}"
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _artifact_kind 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 artifact kind 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _artifact_kind(ref: str) -> str:
     suffix = Path(ref).suffix.lower()
     if suffix in {".json", ".md", ".txt", ".log"}:
@@ -179,16 +208,22 @@ def _artifact_kind(ref: str) -> str:
     return "artifact"
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _summary 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 summary 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _summary(ref: str, exists: bool, size_bytes: int) -> str:
     if exists:
         return f"{Path(ref).name or ref} ({size_bytes} bytes)"
     return f"unresolved artifact ref: {ref}"
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _utc_iso 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 utc iso 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _utc_iso(value: float) -> str:
     return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _safe_segment 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 safe segment 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _safe_segment(value: str) -> str:
     return str(value or "item").replace("/", "_").replace("\\", "_").strip() or "item"
 

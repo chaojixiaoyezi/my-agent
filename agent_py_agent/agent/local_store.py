@@ -1,6 +1,9 @@
+# LLM: 这里保留旧主类导入路径，真实行为应留在 local_storage 拆分模块。
+# 模块用途: LocalStore 兼容门面，组合 schema、records、search、events 和 maintenance mixin。
+
 from __future__ import annotations
 
-"""LLM: compatibility facade and composition root for the split LocalStore implementation.
+"""compatibility facade and composition root for the split LocalStore implementation.
 
 给人看的解释：
 LocalStore 的真实能力已经按 schema、records、search、events、maintenance 拆到 `local_storage/`。
@@ -23,6 +26,8 @@ from .local_storage import (
 from .task_registry import TaskRegistry
 
 
+# LLM: LocalStore 属于 LocalStore 本地事实索引 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: LocalStore 主门面，组合数据库 schema、记录读写、搜索、事件和维护能力。
 class LocalStore(
     LocalStoreSchemaMixin,
     LocalStoreRecordMixin,
@@ -30,7 +35,7 @@ class LocalStore(
     LocalStoreEventMixin,
     LocalStoreMaintenanceMixin,
 ):
-    """LLM: composes LocalStore persistence, search, events, and maintenance APIs.
+    """composes LocalStore persistence, search, events, and maintenance APIs.
 
     给人看的解释：
     你可以把它理解成本地账本的门面：
@@ -40,6 +45,8 @@ class LocalStore(
     - events 表和 JSONL 保存'发生过什么事'
     """
 
+    # LLM: LocalStore.__init__ 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 初始化 LocalStore 的依赖、配置和运行期字段。
     def __init__(
         self,
         db_path: str | Path,
@@ -48,7 +55,7 @@ class LocalStore(
         events_path: str | Path | None = None,
         enable_fts: bool = True,
     ):
-        """LLM: initialize LocalStore paths, feature switches, and database schema.
+        """initialize LocalStore paths, feature switches, and database schema.
 
         给人看的解释：
         创建 LocalStore 时只需要告诉它数据库在哪。
@@ -64,9 +71,11 @@ class LocalStore(
         self._init_schema()
         self.task_registry = TaskRegistry(self)
 
+    # LLM: LocalStore.fts_available 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 报告当前 LocalStore 是否同时启用并成功初始化 FTS。
     @property
     def fts_available(self) -> bool:
-        """LLM: report whether FTS5 search is both enabled and available.
+        """report whether FTS5 search is both enabled and available.
 
         给人看的解释：
         配置允许 FTS5 还不够，SQLite 本身也得支持。

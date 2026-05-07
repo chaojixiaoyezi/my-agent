@@ -1,6 +1,9 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 from __future__ import annotations
 
-"""LLM: retention planning for run-local memory gate queues.
+"""retention planning for run-local memory gate queues.
 
 Human version:
 Retention here is deliberately conservative. It can compact the active review
@@ -17,6 +20,8 @@ from .memory_gate import memory_gate_paths
 from .memory_gate_candidates import memory_gate_review_queue_records, read_memory_gate_jsonl
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 MemoryGateRetentionRequest 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 MemoryGateRetentionRequest 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class MemoryGateRetentionRequest:
     """Controls whether retention only previews or updates active queue files."""
@@ -25,6 +30,8 @@ class MemoryGateRetentionRequest:
     now: float | None = None
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 MemoryGateRetentionResult 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 MemoryGateRetentionResult 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class MemoryGateRetentionResult:
     """Retention report paths and counters for one agent run."""
@@ -34,6 +41,8 @@ class MemoryGateRetentionResult:
     actions_jsonl: Path
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 run_memory_gate_retention 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 推进 run memory gate retention 对应的调度、执行或处理步骤，并返回可追踪的状态结果。
 def run_memory_gate_retention(
     agent_run_workspace_root: Path,
     request: MemoryGateRetentionRequest,
@@ -57,12 +66,16 @@ def run_memory_gate_retention(
     return MemoryGateRetentionResult(report=report, report_json=report_json, actions_jsonl=actions_jsonl)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _is_closed_candidate 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 计算 is closed candidate 的稳定值、时间窗口或标识符，供去重、排序和检索使用。
 def _is_closed_candidate(candidate: dict[str, object]) -> bool:
     status = str(candidate.get("review_status") or "")
     promotion = str(candidate.get("promotion_status") or "")
     return status == "rejected" or promotion in {"promoted_to_memory", "skill_draft_created"}
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _retention_action 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 retention action 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _retention_action(
     candidate: dict[str, object],
     request: MemoryGateRetentionRequest,
@@ -80,6 +93,8 @@ def _retention_action(
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _report_payload 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 组装 report payload 的对象、payload 或展示文本，供报告、CLI 或下游流程消费。
 def _report_payload(
     candidates: list[dict[str, object]],
     actions: list[dict[str, object]],
@@ -97,6 +112,8 @@ def _report_payload(
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _merge_checkpoint 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 merge checkpoint 涉及的字段，让后续匹配和存储使用同一形态。
 def _merge_checkpoint(
     checkpoint_path: Path,
     report: dict[str, object],
@@ -116,6 +133,8 @@ def _merge_checkpoint(
     _write_json(checkpoint_path, checkpoint)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _read_json_object 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 读取 read json object 需要的文件、记录或配置，并整理成调用方可直接使用的结果。
 def _read_json_object(path: Path) -> dict[str, object]:
     if not path.exists():
         return {}
@@ -126,17 +145,23 @@ def _read_json_object(path: Path) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_json 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write json 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_jsonl 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write jsonl 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     content = "\n".join(json.dumps(record, ensure_ascii=False, sort_keys=True) for record in records)
     path.write_text((content + "\n") if content else "", encoding="utf-8")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _append_jsonl_many 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 append jsonl many 相关记录，集中处理目标路径、格式化和状态更新。
 def _append_jsonl_many(path: Path, records: list[dict[str, object]]) -> None:
     if not records:
         return
@@ -146,6 +171,8 @@ def _append_jsonl_many(path: Path, records: list[dict[str, object]]) -> None:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _utc_iso 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 utc iso 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _utc_iso(value: float | None) -> str:
     timestamp = value if value is not None else datetime.now(timezone.utc).timestamp()
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()

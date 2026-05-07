@@ -1,3 +1,6 @@
+# LLM: External adapter module; keep platform payload and runtime boundary contracts stable.
+# 模块用途: 对接 QQ、飞书等外部渠道，把平台事件转换成内部请求。
+
 
 from .base import BaseChannelAdapter
 from .feishu import FeishuAdapter

@@ -1,6 +1,9 @@
+# LLM: Agent package module; keep public imports and cross-module compatibility stable.
+# 模块用途: 提供 agent 核心功能的一部分，对外暴露稳定入口或兼容转发。
+
 from __future__ import annotations
 
-"""LLM: compatibility facade for the split `agent.tooling` package.
+"""compatibility facade for the split `agent.tooling` package.
 
 给人看的解释：
 真实工具代码现在已经拆到 `agent_py_agent.agent.tooling` 目录里。

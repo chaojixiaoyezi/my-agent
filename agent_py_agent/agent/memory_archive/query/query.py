@@ -1,6 +1,9 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 from __future__ import annotations
 
-"""LLM: thin entry point for memory archive query operations.
+"""thin entry point for memory archive query operations.
 
 新手说明:
 这个文件是查询包的入口点，只做组合和导出，不含业务逻辑。

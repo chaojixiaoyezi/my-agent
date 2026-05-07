@@ -1,3 +1,6 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 
 from __future__ import annotations
 
@@ -62,6 +65,8 @@ from .models import (
 # ---------------------------------------------------------------------------
 
 
+# LLM: _GatewayRunBuildRequest 是 gateway run 组装阶段的输入契约。
+# 类用途: 保存 agent、paths、options 和 argparse args，供 run context 构建使用。
 @dataclass(frozen=True)
 class _GatewayRunBuildRequest:
     agent: object
@@ -70,6 +75,8 @@ class _GatewayRunBuildRequest:
     args: argparse.Namespace
 
 
+# LLM: _resolve_gateway_options 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 解析路径、模式或配置默认值，返回后续流程使用的稳定值。
 def _resolve_gateway_options(agent, args):
     options = _resolve_daemon_options(agent, args)
     return GatewayRunOptions(
@@ -87,10 +94,14 @@ def _resolve_gateway_options(agent, args):
     )
 
 
+# LLM: _gateway_start_options_from_args 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _gateway_start_options_from_args(args) -> GatewayStartOptions:
     return GatewayStartOptions(config=Path(args.config), force_lock=bool(args.force_lock))
 
 
+# LLM: _gateway_run_context_from_args 生成 gateway 主循环上下文。
+# 函数用途: 从 agent、paths、options 和 CLI 参数构造 GatewayRunContext。
 def _gateway_run_context_from_args(request: _GatewayRunBuildRequest) -> GatewayRunContext:
     args = request.args
     return GatewayRunContext(
@@ -105,6 +116,8 @@ def _gateway_run_context_from_args(request: _GatewayRunBuildRequest) -> GatewayR
     )
 
 
+# LLM: _gateway_context_with_router 给 run context 注入 capability router。
+# 函数用途: 读取 capability 配置，创建 router，并返回替换后的 context。
 def _gateway_context_with_router(run_context: GatewayRunContext, args) -> GatewayRunContext:
     capability_config = load_capability_config(args.capability_config)
     router = make_capability_router(run_context.agent, capability_config, args.skill_dir)
@@ -127,16 +140,22 @@ def _gateway_context_with_router(run_context: GatewayRunContext, args) -> Gatewa
 # ---------------------------------------------------------------------------
 
 
+# LLM: cmd_gateway_install 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_gateway_install(args) -> int:
     success = install_service(force=args.force)
     return 0 if success else 1
 
 
+# LLM: cmd_gateway_uninstall 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_gateway_uninstall(args) -> int:
     success = uninstall_service()
     return 0 if success else 1
 
 
+# LLM: cmd_gateway_start 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_gateway_start(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
@@ -165,6 +184,8 @@ def cmd_gateway_start(args) -> int:
     return 0
 
 
+# LLM: cmd_gateway_run 以前台模式运行 gateway；它编排锁、router 和 worker。
+# 函数用途: 构造 run context，进入 gateway 服务循环，并返回服务退出码。
 def cmd_gateway_run(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
@@ -209,6 +230,8 @@ def cmd_gateway_run(args) -> int:
     return exit_code
 
 
+# LLM: cmd_gateway_status 输出 gateway 运行状态；字段和文案会被 CLI 测试读取。
+# 函数用途: 汇总锁、心跳、进程和队列状态，并打印状态报告。
 def cmd_gateway_status(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
@@ -241,6 +264,8 @@ def cmd_gateway_status(args) -> int:
     return 0
 
 
+# LLM: cmd_gateway_stop 负责停止 gateway；退出码区分请求成功和未运行。
+# 函数用途: 写入 stop request，等待进程退出，并输出停止结果。
 def cmd_gateway_stop(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
@@ -274,6 +299,8 @@ def cmd_gateway_stop(args) -> int:
     return 2
 
 
+# LLM: cmd_gateway_restart 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_gateway_restart(args) -> int:
     stop_args = argparse.Namespace(
         config=args.config,
@@ -292,6 +319,8 @@ def cmd_gateway_restart(args) -> int:
     return cmd_gateway_start(start_args)
 
 
+# LLM: cmd_gateway_logs 属于gateway CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_gateway_logs(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)

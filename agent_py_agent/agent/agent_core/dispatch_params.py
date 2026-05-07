@@ -1,3 +1,6 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 
 from __future__ import annotations
 
@@ -6,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 
+# LLM: DispatchParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存调度参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class DispatchParams:
 
@@ -24,6 +29,8 @@ class DispatchParams:
     locked_files: list[str] | None = None
 
 
+# LLM: WatchParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存监控参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class WatchParams:
 
@@ -50,6 +57,8 @@ DISPATCH_PARAM_KEYS = tuple(field.name for field in fields(DispatchParams))
 WATCH_PARAM_KEYS = tuple(field.name for field in fields(WatchParams))
 
 
+# LLM: merge_dispatch_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 更新参数对应的任务或运行状态，并保留既有字段语义；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def merge_dispatch_params(
     params: DispatchParams | None = None,
     overrides: dict[str, Any] | None = None,
@@ -61,6 +70,8 @@ def merge_dispatch_params(
     return _replace_bundle(params, DISPATCH_PARAM_KEYS, overrides or {})
 
 
+# LLM: merge_watch_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 更新参数对应的任务或运行状态，并保留既有字段语义；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def merge_watch_params(
     params: WatchParams | None = None,
     overrides: dict[str, Any] | None = None,
@@ -72,12 +83,16 @@ def merge_watch_params(
     return _replace_bundle(params, WATCH_PARAM_KEYS, overrides or {})
 
 
+# LLM: dispatch_params_from_watch 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进来自参数监控的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def dispatch_params_from_watch(params: WatchParams) -> DispatchParams:
     return DispatchParams(
         **{key: getattr(params, key) for key in DISPATCH_PARAM_KEYS}
     )
 
 
+# LLM: _replace_bundle 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理replacebundle相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _replace_bundle(params, allowed_keys: tuple[str, ...], updates: dict[str, Any]):
     selected = {key: updates[key] for key in allowed_keys if key in updates}
     if not selected:
@@ -85,6 +100,8 @@ def _replace_bundle(params, allowed_keys: tuple[str, ...], updates: dict[str, An
     return replace(params, **selected)
 
 
+# LLM: DispatchContext 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存调度上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class DispatchContext:
 
@@ -103,6 +120,8 @@ class DispatchContext:
     records: list = field(default_factory=list)
 
 
+# LLM: RunnerBatchContext 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存执行器batch上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class RunnerBatchContext:
 

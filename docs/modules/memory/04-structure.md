@@ -164,3 +164,8 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 - `memory_archive/task_workspace_payloads.py` now owns task workspace state/timeline payload construction and JSON/JSONL helper IO.
 - `memory_archive/task_workspace.py` remains the adapter/orchestration entry point and keeps the same public `EnsureSubagentTaskWorkspaceRequest` / `TaskWorkspacePaths` surface.
 - `memory_archive/query/query_logic.py`, `resume_brief.py`, `memory_gate_review.py`, and `memory_routing/matcher.py` now use request/params bundles for collection, filtering, reviewer write-back, and read receipts without changing the fact-source authority model.
+
+## 2026-05-07 annotation structure update
+- Module structure docs now treat the definition-level double-layer comments as part of the code architecture: `LLM:` records model-facing contract/caller/side-effect notes, and `函数用途:` / `类用途:` records beginner-readable purpose and edit guidance.
+- New files, services, bundles, or facade methods must update both this structure page and the in-code comments at the same time.
+- The global file tree in `CODEBASE_TREE.md` now includes a current architecture map for CLI, agent core, gateway, memory, log-analysis, subagent, tooling, and settings boundaries.

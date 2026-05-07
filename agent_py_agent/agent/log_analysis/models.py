@@ -1,3 +1,6 @@
+# LLM: Log-analysis module; keep ingest, query, and detector data contracts stable.
+# 模块用途: 支撑日志导入、查询、检测、案例和分析报告生成。
+
 from __future__ import annotations
 
 import json
@@ -12,10 +15,14 @@ JsonValue = dict[str, Any] | list[Any] | str | int | float | bool | None
 T = TypeVar("T", bound="JsonRoundTripMixin")
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 utc_now_iso 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 utc now iso 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _json_ready 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 json ready 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
 def _json_ready(value: Any) -> Any:
     if is_dataclass(value):
         return _json_ready(asdict(value))
@@ -28,24 +35,36 @@ def _json_ready(value: Any) -> Any:
     return value
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 JsonRoundTripMixin 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 封装 JsonRoundTripMixin 的状态和协作方法，作为当前模块对外复用的领域对象。
 class JsonRoundTripMixin:
+    # LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 to_dict 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 把 to dict 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_dict(self) -> dict[str, Any]:
         return _json_ready(asdict(self))
 
+    # LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 to_json 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 把 to json 对应对象转换成字典、JSON 或文本形态，供持久化和输出层复用。
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True)
 
+    # LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 from_dict 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 从外部数据还原 from dict 需要的领域对象，统一缺省值和兼容字段。
     @classmethod
     def from_dict(cls: type[T], values: Mapping[str, Any]) -> T:
         allowed = {item.name for item in fields(cls)}
         clean = {key: value for key, value in values.items() if key in allowed}
         return cls(**clean)
 
+    # LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 from_json 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 从外部数据还原 from json 需要的领域对象，统一缺省值和兼容字段。
     @classmethod
     def from_json(cls: type[T], payload: str | bytes) -> T:
         return cls.from_dict(json.loads(payload))
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 SourceSpec 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 SourceSpec 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class SourceSpec(JsonRoundTripMixin):
     source_id: str
@@ -60,6 +79,8 @@ class SourceSpec(JsonRoundTripMixin):
     options: dict[str, Any] = field(default_factory=dict)
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 Checkpoint 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 Checkpoint 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class Checkpoint(JsonRoundTripMixin):
     source_id: str
@@ -70,6 +91,8 @@ class Checkpoint(JsonRoundTripMixin):
     updated_at: str = ""
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 RawBatch 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 RawBatch 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class RawBatch(JsonRoundTripMixin):
     batch_id: str
@@ -86,6 +109,8 @@ class RawBatch(JsonRoundTripMixin):
     attributes: dict[str, Any] = field(default_factory=dict)
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 NormalizedEvent 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 NormalizedEvent 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class NormalizedEvent(JsonRoundTripMixin):
     event_id: str
@@ -108,6 +133,8 @@ class NormalizedEvent(JsonRoundTripMixin):
     attributes: dict[str, Any] = field(default_factory=dict)
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 SecurityAlertV1 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 SecurityAlertV1 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class SecurityAlertV1(JsonRoundTripMixin):
     alert_id: str
@@ -144,6 +171,8 @@ class SecurityAlertV1(JsonRoundTripMixin):
     attributes: dict[str, Any] = field(default_factory=dict)
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 EvidenceRef 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 EvidenceRef 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class EvidenceRef(JsonRoundTripMixin):
     evidence_id: str
@@ -163,6 +192,8 @@ class EvidenceRef(JsonRoundTripMixin):
     summary: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    # LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 __post_init__ 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 完成 post init 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
     def __post_init__(self) -> None:
         if not self.path:
             self.path = str(self.metadata.get("evidence_path") or self.metadata.get("path") or "")
@@ -176,6 +207,8 @@ class EvidenceRef(JsonRoundTripMixin):
             self.metadata["sha256"] = self.sha256
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _coerce_evidence_refs 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 coerce evidence refs 涉及的字段，让后续匹配和存储使用同一形态。
 def _coerce_evidence_refs(value: Any) -> list[EvidenceRef]:
     if value is None:
         return []
@@ -189,6 +222,8 @@ def _coerce_evidence_refs(value: Any) -> list[EvidenceRef]:
     return [_coerce_evidence_ref(item) for item in value if _coerce_evidence_ref(item) is not None]
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _coerce_evidence_ref 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 coerce evidence ref 涉及的字段，让后续匹配和存储使用同一形态。
 def _coerce_evidence_ref(value: Any) -> EvidenceRef | None:
     if isinstance(value, EvidenceRef):
         return value
@@ -199,6 +234,8 @@ def _coerce_evidence_ref(value: Any) -> EvidenceRef | None:
     return None
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 QueryPlan 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 QueryPlan 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class QueryPlan(JsonRoundTripMixin):
     purpose: str
@@ -210,11 +247,15 @@ class QueryPlan(JsonRoundTripMixin):
     evidence_needed: list[str] = field(default_factory=list)
     display: str = ""
 
+    # LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 __post_init__ 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 完成 post init 在当前模块中的核心转换或协调步骤，衔接 日志分析模块围绕事件、查询、案例和报告传递结构化事实。
     def __post_init__(self) -> None:
         if not self.display:
             self.display = _query_plan_display(self)
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _query_plan_display 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 收集或查询 query plan display 的候选结果，并按参数完成筛选、排序或数量限制。
 def _query_plan_display(plan: QueryPlan) -> str:
     parts = [plan.purpose]
     if plan.source_products:
@@ -227,12 +268,16 @@ def _query_plan_display(plan: QueryPlan) -> str:
     return " | ".join(part for part in parts if part)
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 _query_plan_filter_display 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 收集或查询 query plan filter display 的候选结果，并按参数完成筛选、排序或数量限制。
 def _query_plan_filter_display(filters: Mapping[str, Any]) -> str:
     if not filters:
         return ""
     return " ".join(f"{key}={value}" for key, value in sorted(filters.items()) if value not in (None, "", [], {}))
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 Finding 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 Finding 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class Finding(JsonRoundTripMixin):
     finding_id: str
@@ -254,6 +299,8 @@ class Finding(JsonRoundTripMixin):
     updated_at: str = field(default_factory=utc_now_iso)
     attributes: dict[str, Any] = field(default_factory=dict)
 
+    # LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 from_dict 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 从外部数据还原 from dict 需要的领域对象，统一缺省值和兼容字段。
     @classmethod
     def from_dict(cls, values: Mapping[str, Any]) -> Finding:
         allowed = {item.name for item in fields(cls)}
@@ -262,6 +309,8 @@ class Finding(JsonRoundTripMixin):
         return cls(**clean)
 
 
+# LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 CaseRecord 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 CaseRecord 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass
 class CaseRecord(JsonRoundTripMixin):
     case_id: str
@@ -284,6 +333,8 @@ class CaseRecord(JsonRoundTripMixin):
     route_refs: list[str] = field(default_factory=list)
     attributes: dict[str, Any] = field(default_factory=dict)
 
+    # LLM: 日志分析模块围绕事件、查询、案例和报告传递结构化事实；修改 from_dict 时同步检查返回值、异常处理和读写副作用。
+    # 函数用途: 从外部数据还原 from dict 需要的领域对象，统一缺省值和兼容字段。
     @classmethod
     def from_dict(cls, values: Mapping[str, Any]) -> CaseRecord:
         allowed = {item.name for item in fields(cls)}

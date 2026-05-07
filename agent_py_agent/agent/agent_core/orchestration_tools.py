@@ -1,8 +1,10 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 from __future__ import annotations
 
-"""LLM: exposes model-callable orchestration tools backed by SimpleAgent subagent workflows.
+"""exposes model-callable orchestration tools backed by SimpleAgent subagent workflows.
 
-给人看的解释：
 这些不是普通文件工具，而是'主代理让模型触发子代理流程'的工具。
 创建子代理、查看看板、执行 dispatch 都在这里，真实业务再转给 SimpleAgent 和 SubAgentManager。
 """
@@ -39,6 +41,8 @@ CODING_SUBAGENT_TOOLS = [
 ]
 
 
+# LLM: _tool_workflow_mode 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理工具工作流mode相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _tool_workflow_mode(explicit_mode: object, config_mode: object) -> str:
     if isinstance(explicit_mode, str):
         normalized = explicit_mode.strip().lower()
@@ -53,6 +57,8 @@ def _tool_workflow_mode(explicit_mode: object, config_mode: object) -> str:
     return "off"
 
 
+# LLM: _subagent_allowed_tools 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理子代理allowed工具相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _subagent_allowed_tools(params: dict[str, object]) -> list[str]:
     allowed_tools = _string_list(params.get("allowed_tools"))
     if allowed_tools:
@@ -65,6 +71,8 @@ def _subagent_allowed_tools(params: dict[str, object]) -> list[str]:
     return list(READ_ONLY_SUBAGENT_TOOLS)
 
 
+# LLM: _create_run_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 构建参数所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _create_run_params(agent, raw_params: dict[str, object], goal: str, allowed_tools: list[str]):
     workflow_mode = _tool_workflow_mode(raw_params.get("workflow_mode"), agent.config.subagent_workflow_mode)
     extra_write_roots = _merged_extra_write_roots(raw_params, goal)
@@ -84,6 +92,8 @@ def _create_run_params(agent, raw_params: dict[str, object], goal: str, allowed_
     )
 
 
+# LLM: _merged_extra_write_roots 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 更新mergedextrawriteroots对应的任务或运行状态，并保留既有字段语义；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _merged_extra_write_roots(params: dict[str, object], goal: str) -> list[str]:
     roots: list[str] = []
     for item in [*_string_list(params.get("extra_write_roots")), *_extract_write_dirs(goal)]:
@@ -93,12 +103,18 @@ def _merged_extra_write_roots(params: dict[str, object], goal: str) -> list[str]
     return roots
 
 
+# LLM: CreateSubagentsTool 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 提供create子代理工具模型工具入口，把结构化参数转为子代理操作；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class CreateSubagentsTool(BaseTool):
 
+    # LLM: __init__ 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         self.spec = build_create_subagents_spec()
 
+    # LLM: execute 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 推进execute的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         if not self.agent.config.enable_subagents:
             return ToolExecutionResult("create_subagents", False, "配置已禁用 subagent。")
@@ -125,6 +141,8 @@ class CreateSubagentsTool(BaseTool):
             json.dumps(payload, ensure_ascii=False, indent=2),
         )
 
+    # LLM: _requested_count 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 发送requested数量请求或消息，并把外部响应转换成内部可处理结果；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
     def _requested_count(self, params: dict[str, object]) -> int | ToolExecutionResult:
         count = _positive_int(params.get("count"), default=1)
         if count <= 0:
@@ -133,6 +151,8 @@ class CreateSubagentsTool(BaseTool):
             count = min(count, self.agent.config.max_subagents)
         return count
 
+    # LLM: _create_tasks 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 构建tasks所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _create_tasks(self, goal: str, count: int, run_params: CreateRunParams):
         tasks = []
         for index in range(1, count + 1):
@@ -144,6 +164,8 @@ class CreateSubagentsTool(BaseTool):
             tasks.append(task)
         return tasks
 
+    # LLM: _create_payload 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 构建载荷所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def _create_payload(self, tasks, allowed_tools: list[str]) -> dict[str, object]:
         return {
             "created": len(tasks),
@@ -163,12 +185,18 @@ class CreateSubagentsTool(BaseTool):
         }
 
 
+# LLM: SubagentBoardTool 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 提供子代理看板工具模型工具入口，把结构化参数转为子代理操作；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class SubagentBoardTool(BaseTool):
 
+    # LLM: __init__ 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         self.spec = build_subagent_board_spec()
 
+    # LLM: execute 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 推进execute的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         limit = _positive_int(params.get("limit"), default=10)
         status_filter = str(params.get("status") or "").strip().upper()
@@ -204,12 +232,18 @@ class SubagentBoardTool(BaseTool):
         return ToolExecutionResult("subagent_board", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+# LLM: DispatchSubagentsTool 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 提供调度子代理工具模型工具入口，把结构化参数转为子代理操作；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class DispatchSubagentsTool(BaseTool):
 
+    # LLM: __init__ 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         self.spec = build_dispatch_subagents_spec()
 
+    # LLM: execute 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 推进execute的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         apply = _bool_param(params.get("apply"), default=False)
         execute_runners = _bool_param(params.get("execute_runners"), default=False)
@@ -229,11 +263,15 @@ class DispatchSubagentsTool(BaseTool):
         payload = self._report_payload(report)
         return ToolExecutionResult("dispatch_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
 
+    # LLM: _router 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理router相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
     def _router(self) -> tuple[CapabilityConfig, CapabilityRouter]:
         cfg = CapabilityConfig()
         tool_specs = [spec for spec in self.agent.tools.specs() if spec.category != "orchestration"]
         return cfg, CapabilityRouter(config=cfg, tool_specs=tool_specs)
 
+    # LLM: _dispatch_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 推进参数的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _dispatch_params(
         self,
         params: dict[str, object],
@@ -256,6 +294,8 @@ class DispatchSubagentsTool(BaseTool):
             locked_files=_string_list(params.get("locked_files")),
         )
 
+    # LLM: _report_payload 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+    # 函数用途: 处理报告载荷相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def _report_payload(self, report) -> dict[str, object]:
         return {
             "dry_run": report.dry_run,

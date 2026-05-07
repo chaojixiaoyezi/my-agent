@@ -1,3 +1,6 @@
+# LLM: Agent core orchestration module; keep planning, dispatch, tool-loop, and finalization contracts stable.
+# 模块用途: 支撑主代理运行循环、计划、工具调用、子代理调度和收尾。
+
 
 from __future__ import annotations
 
@@ -12,6 +15,8 @@ if TYPE_CHECKING:
 from .dispatch_params import DispatchParams
 
 
+# LLM: DispatchLoopParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存调度循环参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class DispatchLoopParams:
 
@@ -31,6 +36,8 @@ class DispatchLoopParams:
     locked_files: list[str] | None = None
 
 
+# LLM: DispatchLoopReport 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存调度循环报告字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class DispatchLoopReport:
 
@@ -41,6 +48,8 @@ class DispatchLoopReport:
     rounds: list[dict] = field(default_factory=list)
 
 
+# LLM: SingleDispatchRequest 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 类用途: 集中保存单个调度请求字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class SingleDispatchRequest:
     agent: object
@@ -52,6 +61,8 @@ class SingleDispatchRequest:
 _DISPATCH_LOOP_PARAM_KEYS = tuple(field.name for field in fields(DispatchLoopParams))
 
 
+# LLM: _coerce_dispatch_loop_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 解析并归一化循环参数的输入形态，让下游只处理稳定结构；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _coerce_dispatch_loop_params(
     params: DispatchLoopParams | None,
     *,
@@ -93,6 +104,8 @@ def _coerce_dispatch_loop_params(
     )
 
 
+# LLM: _run_single_dispatch 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进单个调度的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _run_single_dispatch(request: SingleDispatchRequest):
     params = request.params
     return request.agent.dispatch_subagents(
@@ -102,6 +115,8 @@ def _run_single_dispatch(request: SingleDispatchRequest):
     )
 
 
+# LLM: _dispatch_params_from_loop 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进来自参数循环的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _dispatch_params_from_loop(params: DispatchLoopParams) -> DispatchParams:
     return DispatchParams(
         apply=params.apply,
@@ -120,6 +135,8 @@ def _dispatch_params_from_loop(params: DispatchLoopParams) -> DispatchParams:
     )
 
 
+# LLM: _append_dispatch_round 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 写入round的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
 def _append_dispatch_round(report: DispatchLoopReport, dispatch_report, round_num: int) -> None:
     report.rounds_count = round_num
     report.total_records += len(dispatch_report.records)
@@ -132,6 +149,8 @@ def _append_dispatch_round(report: DispatchLoopReport, dispatch_report, round_nu
     )
 
 
+# LLM: _dispatch_loop_params_from_locals 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进来自循环参数locals的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _dispatch_loop_params_from_locals(values: dict) -> DispatchLoopParams:
     return _coerce_dispatch_loop_params(
         values["params"],
@@ -143,6 +162,8 @@ def _dispatch_loop_params_from_locals(values: dict) -> DispatchLoopParams:
     )
 
 
+# LLM: dispatch_loop 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 推进循环的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def dispatch_loop(
     agent,
     router: CapabilityRouter,
@@ -183,6 +204,8 @@ def dispatch_loop(
     return report
 
 
+# LLM: _final_pending_runner_count 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
+# 函数用途: 处理finalpending执行器数量相关的数据流，连接当前职责的前后步骤；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _final_pending_runner_count(agent) -> int:
     try:
         from .runner_dispatch import _dispatch_runner_candidates, _runner_max_attempts

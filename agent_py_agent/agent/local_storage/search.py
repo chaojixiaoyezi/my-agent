@@ -1,3 +1,6 @@
+# LLM: 搜索结果排序和过滤影响记忆检索质量，变更时同步检索测试。
+# 模块用途: LocalStore 的 FTS 与 LIKE 搜索、最近列表和筛选条件拼装。
+
 from __future__ import annotations
 
 import re
@@ -7,7 +10,11 @@ from typing import Any
 from .models import LocalSearchResult
 
 
+# LLM: LocalStoreSearchMixin 属于 LocalStore 本地事实索引 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: LocalStoreSearchMixin 封装 LocalStore 本地事实索引 的一组相关操作，供上层组合调用。
 class LocalStoreSearchMixin:
+    # LLM: LocalStoreSearchMixin.search 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 按查询词检索候选工具或本地记录并返回排序结果。
     def search(
         self,
         query: str,
@@ -32,6 +39,8 @@ class LocalStoreSearchMixin:
             visibility=visibility,
         )
 
+    # LLM: LocalStoreSearchMixin.list_recent 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 列出符合条件的 list_recent 结果并遵守数量上限。
     def list_recent(
         self,
         *,
@@ -49,6 +58,8 @@ class LocalStoreSearchMixin:
             ).fetchall()
         return [self._row_to_result(row) for row in rows]
 
+    # LLM: LocalStoreSearchMixin._record_filters 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 把 record_filters 写入本地存储并保留后续查询需要的字段。
     def _record_filters(
         self,
         *,
@@ -68,6 +79,8 @@ class LocalStoreSearchMixin:
             return "", params
         return "WHERE " + " AND ".join(clauses), params
 
+    # LLM: LocalStoreSearchMixin._search_fts 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 完成 LocalStore 本地事实索引 中的 search_fts 步骤，并保持调用方依赖的数据形状。
     def _search_fts(
         self,
         query: str,
@@ -97,6 +110,8 @@ class LocalStoreSearchMixin:
             rows = conn.execute(sql, [*params, limit]).fetchall()
         return [self._row_to_result(row, score=float(row["rank"])) for row in rows]
 
+    # LLM: LocalStoreSearchMixin._search_like 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 完成 LocalStore 本地事实索引 中的 search_like 步骤，并保持调用方依赖的数据形状。
     def _search_like(
         self,
         query: str,
@@ -119,12 +134,16 @@ class LocalStoreSearchMixin:
             ).fetchall()
         return [self._row_to_result(row, score=0.0) for row in rows]
 
+    # LLM: LocalStoreSearchMixin._fts_query 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 完成 LocalStore 本地事实索引 中的 fts_query 步骤，并保持调用方依赖的数据形状。
     def _fts_query(self, query: str) -> str:
         tokens = re.findall(r"[\w]+|[\u4e00-\u9fff]+", query, flags=re.UNICODE)
         cleaned = [token.replace('"', "").strip() for token in tokens]
         parts = [f'"{token}"' for token in cleaned if token]
         return " OR ".join(parts)
 
+    # LLM: LocalStoreSearchMixin._replace_fts_row 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 完成 LocalStore 本地事实索引 中的 replace_fts_row 步骤，并保持调用方依赖的数据形状。
     def _replace_fts_row(
         self,
         conn: sqlite3.Connection,
@@ -138,6 +157,8 @@ class LocalStoreSearchMixin:
             (record_id, title, content),
         )
 
+    # LLM: LocalStoreSearchMixin._safe_search_fts 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+    # 函数用途: 完成 LocalStore 本地事实索引 中的 safe_search_fts 步骤，并保持调用方依赖的数据形状。
     def _safe_search_fts(
         self,
         query: str,
@@ -162,6 +183,8 @@ class LocalStoreSearchMixin:
             )
 
 
+# LLM: _record_fts_filters 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把 record_fts_filters 写入本地存储并保留后续查询需要的字段。
 def _record_fts_filters(
     fts_query: str,
     source_type: str | None,
@@ -174,6 +197,8 @@ def _record_fts_filters(
     return clauses, params
 
 
+# LLM: _record_like_filters 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把 record_like_filters 写入本地存储并保留后续查询需要的字段。
 def _record_like_filters(
     query: str,
     source_type: str | None,
@@ -187,6 +212,8 @@ def _record_like_filters(
     return clauses, params
 
 
+# LLM: _append_optional_filter 属于 LocalStore 本地事实索引 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 向结果或告警集合加入 append_optional_filter，同时保留调用方依赖的顺序。
 def _append_optional_filter(
     clauses: list[str],
     values: list[Any],

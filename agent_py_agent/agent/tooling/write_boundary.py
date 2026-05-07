@@ -1,6 +1,9 @@
+# LLM: 这是写工具的安全闸口，路径归一和错误解释必须保持保守。
+# 模块用途: 子代理写入边界校验，阻止文件工具越过授权路径。
+
 from __future__ import annotations
 
-"""LLM: enforces subagent write scopes before mutating filesystem tools run.
+"""enforces subagent write scopes before mutating filesystem tools run.
 
 给人看的解释：
 这个文件是一道真正的写入门禁。
@@ -15,6 +18,8 @@ WRITE_TOOL_NAMES = {"write_file", "append_file", "replace_in_file"}
 _MAX_BOUNDARY_PATH_CHARS = 4096
 
 
+# LLM: _path_text 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 path_text 步骤，并保持调用方依赖的数据形状。
 def _path_text(raw_path: object, *, label: str = "path") -> str:
     if raw_path is None:
         raise ValueError(f"{label} 参数缺失")
@@ -32,6 +37,8 @@ def _path_text(raw_path: object, *, label: str = "path") -> str:
     return text
 
 
+# LLM: validate_write_boundary 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 validate_write_boundary 步骤，并保持调用方依赖的数据形状。
 def validate_write_boundary(
     tool_name: str,
     params: dict[str, Any],
@@ -73,6 +80,8 @@ def validate_write_boundary(
     return _locked_boundary_error(target, write_boundary, workspace_root)
 
 
+# LLM: _forbidden_boundary_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 forbidden_boundary_error 步骤，并保持调用方依赖的数据形状。
 def _forbidden_boundary_error(
     target: Path,
     allowed_roots: list[Path],
@@ -89,13 +98,16 @@ def _forbidden_boundary_error(
     return ""
 
 
+# LLM: _forbidden_root_blocks_target 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 forbidden_root_blocks_target 步骤，并保持调用方依赖的数据形状。
 def _forbidden_root_blocks_target(target: Path, root: Path, allowed_roots: list[Path]) -> bool:
     if not _is_relative_to(target, root):
         return False
-    # LLM: general parent forbids (like ~) do not override a narrower explicit grant.
     return any(_is_relative_to(root, aroot) for aroot in allowed_roots)
 
 
+# LLM: _locked_boundary_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 locked_boundary_error 步骤，并保持调用方依赖的数据形状。
 def _locked_boundary_error(target: Path, write_boundary: dict[str, object], workspace_root: Path) -> str:
     locked_paths = _boundary_paths(write_boundary.get("locked_files"), workspace_root)
     for locked in locked_paths:
@@ -107,6 +119,8 @@ def _locked_boundary_error(target: Path, write_boundary: dict[str, object], work
     return ""
 
 
+# LLM: _boundary_paths 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 boundary_paths 步骤，并保持调用方依赖的数据形状。
 def _boundary_paths(
     raw_paths: object,
     workspace_root: Path,
@@ -123,6 +137,8 @@ def _boundary_paths(
     return paths
 
 
+# LLM: _resolve_boundary_path 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 解析 resolve_boundary_path 并确认结果仍在允许边界内。
 def _resolve_boundary_path(
     raw_path: object,
     workspace_root: Path,
@@ -147,6 +163,8 @@ def _resolve_boundary_path(
     return resolved
 
 
+# LLM: _is_relative_to 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 判断 is_relative_to 是否满足安全或状态条件。
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -155,6 +173,8 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
+# LLM: _normalized_workspace_roots 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 解析并去重工作区根目录，保留第一个主工作区。
 def _normalized_workspace_roots(primary: Path, roots: list[Path] | None) -> list[Path]:
     resolved: list[Path] = []
     for raw in [primary, *(roots or [])]:
@@ -164,6 +184,8 @@ def _normalized_workspace_roots(primary: Path, roots: list[Path] | None) -> list
     return resolved
 
 
+# LLM: _display_path 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把内部路径转换成调用方可读的展示路径。
 def _display_path(path: Path, workspace_root: Path) -> str:
     try:
         return str(path.relative_to(workspace_root)).replace("\\", "/")

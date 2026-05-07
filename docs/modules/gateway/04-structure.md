@@ -159,3 +159,8 @@ memory-resume 或 run(auto resume)
 
 ## 2026-05-07 request execution size update
 - `gateway_parts/request_execution.py` keeps request execution state in small context records and delegates completion audit into a helper, leaving no high-risk code-size entry in the gateway request-execution slice.
+
+## 2026-05-07 annotation structure update
+- Module structure docs now treat the definition-level double-layer comments as part of the code architecture: `LLM:` records model-facing contract/caller/side-effect notes, and `函数用途:` / `类用途:` records beginner-readable purpose and edit guidance.
+- New files, services, bundles, or facade methods must update both this structure page and the in-code comments at the same time.
+- The global file tree in `CODEBASE_TREE.md` now includes a current architecture map for CLI, agent core, gateway, memory, log-analysis, subagent, tooling, and settings boundaries.

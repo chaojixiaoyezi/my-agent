@@ -1,3 +1,6 @@
+# LLM: CLI chat UI helper; keep transcript, fallback, and TUI contracts stable for interactive sessions.
+# 模块用途: 支撑命令行聊天界面的渲染、输入、历史记录或后台工作线程。
+
 
 from __future__ import annotations
 
@@ -60,18 +63,26 @@ from ...cli.models import ChatJob
 from ..common import CHAT_PROMPT, FALLBACK_CHAT_PROMPT, make_agent, resume_context_override
 
 
+# LLM: _collapse_response_text 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _collapse_response_text(text: str):
     return collapse_response_text(text)
 
 
+# LLM: _progress_bar 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _progress_bar(ratio: float, width: int = 10) -> str:
     return progress_bar(ratio, width)
 
 
+# LLM: _startup_banner 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _startup_banner(agent_name: str, *, use_gateway: bool) -> str:
     return startup_banner(agent_name, use_gateway=use_gateway)
 
 
+# LLM: _terminal_rule 属于chat CLI；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _terminal_rule(char: str = "─", *, fallback: int = 119) -> str:
     return terminal_rule(char, fallback=fallback)
 

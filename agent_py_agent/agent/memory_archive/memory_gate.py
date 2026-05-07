@@ -1,6 +1,9 @@
+# LLM: Memory archive module; keep task/run workspace files and long-term memory records stable.
+# 模块用途: 维护任务工作区、运行记录、compact 链和长期记忆归档。
+
 from __future__ import annotations
 
-"""LLM: review gate files for task-local memory and skill-spark candidates.
+"""review gate files for task-local memory and skill-spark candidates.
 
 Human version:
 Subagents can produce useful lessons and findings, but those facts must not
@@ -22,6 +25,8 @@ from .memory_gate_candidates import (
 )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 MemoryGateResult 前先核对字段语义、序列化形态和调用方假设。
+# 类用途: 承载 MemoryGateResult 的字段集合，在模块边界间传递结构化状态和结果。
 @dataclass(frozen=True)
 class MemoryGateResult:
     """Concrete files for one run-local memory promotion gate."""
@@ -35,6 +40,8 @@ class MemoryGateResult:
     skill_spark_gate_json: Path
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 sync_agent_run_memory_gate 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 sync agent run memory gate 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def sync_agent_run_memory_gate(
     task: Any,
     *,
@@ -54,6 +61,8 @@ def sync_agent_run_memory_gate(
     return paths
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 memory_gate_paths 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 memory gate paths 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def memory_gate_paths(agent_run_workspace_root: Path) -> MemoryGateResult:
     """Return memory gate paths without writing files."""
 
@@ -68,12 +77,16 @@ def memory_gate_paths(agent_run_workspace_root: Path) -> MemoryGateResult:
     )
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 list_memory_gate_candidates 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 收集或查询 list memory gate candidates 的候选结果，并按参数完成筛选、排序或数量限制。
 def list_memory_gate_candidates(agent_run_workspace_root: Path) -> list[dict[str, object]]:
     """Read current memory-gate candidates for one agent run workspace."""
 
     return read_memory_gate_jsonl(memory_gate_paths(agent_run_workspace_root).candidates_jsonl)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _gate_summary 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 gate summary 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _gate_summary(
     task: Any,
     paths: MemoryGateResult,
@@ -100,6 +113,8 @@ def _gate_summary(
     }
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _merge_checkpoint 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 提取、合并或规范化 merge checkpoint 涉及的字段，让后续匹配和存储使用同一形态。
 def _merge_checkpoint(checkpoint_path: Path, paths: MemoryGateResult, candidates: list[dict[str, object]]) -> None:
     checkpoint = _read_json_object(checkpoint_path)
     checkpoint["memory_gate"] = {
@@ -115,6 +130,8 @@ def _merge_checkpoint(checkpoint_path: Path, paths: MemoryGateResult, candidates
     _write_json(checkpoint_path, checkpoint)
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _read_json_object 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 读取 read json object 需要的文件、记录或配置，并整理成调用方可直接使用的结果。
 def _read_json_object(path: Path) -> dict[str, object]:
     if not path.exists():
         return {}
@@ -125,17 +142,23 @@ def _read_json_object(path: Path) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_json 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write json 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _write_jsonl 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 写入或登记 write jsonl 相关记录，集中处理目标路径、格式化和状态更新。
 def _write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     content = "\n".join(json.dumps(record, ensure_ascii=False, sort_keys=True) for record in records)
     path.write_text((content + "\n") if content else "", encoding="utf-8")
 
 
+# LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _utc_iso 时同步检查返回值、异常处理和读写副作用。
+# 函数用途: 完成 utc iso 在当前模块中的核心转换或协调步骤，衔接 memory archive 维护任务工作区、归档文件、gate 结果和快照。
 def _utc_iso(value: float) -> str:
     return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
 

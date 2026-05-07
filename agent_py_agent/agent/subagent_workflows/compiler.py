@@ -1,3 +1,6 @@
+# LLM: Subagent workflow planner module; keep route, compile, and acceptance bundle shapes stable.
+# 模块用途: 拆分子代理工作流的规划、编译、验收或存储逻辑。
+
 from __future__ import annotations
 
 """Compile workflow templates into reviewable worker dispatch plans."""
@@ -8,6 +11,8 @@ from typing import Any
 from .models import WorkflowTemplate
 
 
+# LLM: WorkflowWorkerSpec 属于子代理工作流编排的类边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 类用途: 集中保存工作流工作器spec字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发模板选择、步骤编译和验收策略相关副作用，需保持公开契约稳定。
 @dataclass
 class WorkflowWorkerSpec:
     """Reviewable instructions for one workflow phase worker."""
@@ -26,6 +31,8 @@ class WorkflowWorkerSpec:
     depends_on: list[str] = field(default_factory=list)
 
 
+# LLM: WorkflowDispatchPlan 属于子代理工作流编排的类边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 类用途: 集中保存工作流调度计划字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发模板选择、步骤编译和验收策略相关副作用，需保持公开契约稳定。
 @dataclass
 class WorkflowDispatchPlan:
     """A compiled workflow that can be inspected before dispatch."""
@@ -39,9 +46,11 @@ class WorkflowDispatchPlan:
     context_manifest: Any = None
 
 
+# LLM: CompileWorkflowParams 属于子代理工作流编排的类边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 类用途: 集中保存compile工作流参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class CompileWorkflowParams:
-    # LLM: workflow compile inputs are one bundle before worker specs are expanded.
+    # LLM: 工作流编译输入先收束成参数包，再展开为各工作器规格。
     goal: str
     quality_contract: Any = None
     context_manifest: Any = None
@@ -49,6 +58,8 @@ class CompileWorkflowParams:
     forbidden_write_roots: list[str] | None = None
 
 
+# LLM: _WorkerSpecRequest 属于子代理工作流编排的类边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 类用途: 集中保存工作器spec请求字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发模板选择、步骤编译和验收策略相关副作用，需保持公开契约稳定。
 @dataclass(frozen=True)
 class _WorkerSpecRequest:
     template: WorkflowTemplate
@@ -58,6 +69,8 @@ class _WorkerSpecRequest:
     forbidden_roots: list[str]
 
 
+# LLM: compile_workflow 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理compile工作流相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def compile_workflow(
     template: WorkflowTemplate,
     *,
@@ -91,8 +104,10 @@ def compile_workflow(
     )
 
 
+# LLM: _worker_spec 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 处理工作器spec相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持模板选择、步骤编译和验收策略上的返回值和副作用边界稳定。
 def _worker_spec(request: _WorkerSpecRequest) -> WorkflowWorkerSpec:
-    # LLM: phase expansion stays isolated from the public compile facade.
+    # LLM: 阶段展开逻辑留在内部，公共编译入口只负责串接模板到计划。
     template = request.template
     phase = request.phase
     values = request.values
@@ -117,6 +132,8 @@ def _worker_spec(request: _WorkerSpecRequest) -> WorkflowWorkerSpec:
     )
 
 
+# LLM: _build_worker_instructions 属于子代理工作流编排的函数边界；调整时先确认模板选择、步骤编译和验收策略仍按原契约工作。
+# 函数用途: 构建工作器instructions所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _build_worker_instructions(
     *,
     template: WorkflowTemplate,

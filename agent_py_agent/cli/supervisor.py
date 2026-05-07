@@ -1,6 +1,9 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 from __future__ import annotations
 
-"""LLM: implements gateway supervisor and start-all CLI commands.
+"""implements gateway supervisor and start-all CLI commands.
 
 给人看的解释：
 这个文件实现两个功能：
@@ -26,6 +29,8 @@ from ..agent.gateway_parts.supervisor import (
 from .common import ROOT, make_agent
 
 
+# LLM: _spawn_daemon 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _spawn_daemon(cmd: list[str], log_path: Path) -> subprocess.Popen:
     creationflags = 0
     start_new_session = False
@@ -41,6 +46,8 @@ def _spawn_daemon(cmd: list[str], log_path: Path) -> subprocess.Popen:
         )
 
 
+# LLM: _wait_for_gateway_ready 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 协调 gateway 请求、进程状态、worker 或本地文件之间的流转。
 def _wait_for_gateway_ready(paths, timeout: float = 30.0) -> tuple[int, bool] | None:
     print("等待 gateway 就绪...")
     deadline = time.time() + timeout
@@ -52,6 +59,8 @@ def _wait_for_gateway_ready(paths, timeout: float = 30.0) -> tuple[int, bool] | 
     return None
 
 
+# LLM: _pid_file_matches 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _pid_file_matches(pid_path: Path, expected_pid: int) -> bool | None:
     if not pid_path.exists():
         return None
@@ -62,6 +71,8 @@ def _pid_file_matches(pid_path: Path, expected_pid: int) -> bool | None:
         return None
 
 
+# LLM: _wait_for_supervisor_start 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _wait_for_supervisor_start(supervisor_pid_path: Path, process: subprocess.Popen, deadline: float) -> bool:
     while time.time() < deadline:
         if _pid_file_matches(supervisor_pid_path, process.pid) is True:
@@ -70,6 +81,8 @@ def _wait_for_supervisor_start(supervisor_pid_path: Path, process: subprocess.Po
     return False
 
 
+# LLM: cmd_supervisor_start 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_supervisor_start(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
@@ -91,6 +104,8 @@ def cmd_supervisor_start(args) -> int:
     return 0
 
 
+# LLM: cmd_supervisor_run 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_supervisor_run(args) -> int:
     try:
         return run_supervisor(
@@ -106,6 +121,8 @@ def cmd_supervisor_run(args) -> int:
         return 2
 
 
+# LLM: cmd_supervisor_status 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_supervisor_status(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
@@ -136,6 +153,8 @@ def cmd_supervisor_status(args) -> int:
     return 0
 
 
+# LLM: cmd_supervisor_stop 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_supervisor_stop(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
@@ -148,6 +167,8 @@ def cmd_supervisor_stop(args) -> int:
         return 2
 
 
+# LLM: cmd_start_all 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
 def cmd_start_all(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)

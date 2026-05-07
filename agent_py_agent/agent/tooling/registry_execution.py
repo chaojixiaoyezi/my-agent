@@ -1,6 +1,9 @@
+# LLM: 安全工具可见性和执行授权在这里落地，改动前核对认证边界。
+# 模块用途: 工具调用解析、授权校验、参数准备和异常格式化。
+
 from __future__ import annotations
 
-"""LLM: parsing and execution helpers for ToolRegistry.
+"""parsing and execution helpers for ToolRegistry.
 
 给人看的解释：
 ToolRegistry 本身保持'服务台'职责；这里集中放工具调用解析、授权检查和异常格式化，
@@ -24,6 +27,8 @@ _MAX_PARSE_ERROR_RAW_CHARS = 1000
 _MAX_EXCEPTION_MESSAGE_CHARS = 500
 
 
+# LLM: ExecuteRegistryCallParams 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: 工具执行参数包，集中保存调用上下文、授权和安全策略。
 @dataclass(frozen=True)
 class ExecuteRegistryCallParams:
     payload: object
@@ -37,6 +42,8 @@ class ExecuteRegistryCallParams:
     write_boundary: dict[str, object] | None = None
 
 
+# LLM: _ToolAuthContext 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
+# 类用途: 工具授权上下文，保存安全工具可见性和允许调用集合。
 @dataclass(frozen=True)
 class _ToolAuthContext:
     allowed: set[str] | None
@@ -45,6 +52,8 @@ class _ToolAuthContext:
     security_tool_names: set[str]
 
 
+# LLM: parse_registry_tool_calls 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 解析 parse_registry_tool_calls 数据结构。
 def parse_registry_tool_calls(text: str) -> list[dict[str, Any]]:
 
     calls: list[tuple[int, dict[str, Any]]] = []
@@ -67,6 +76,8 @@ def parse_registry_tool_calls(text: str) -> list[dict[str, Any]]:
     return [payload for _, payload in calls]
 
 
+# LLM: execute_registry_call 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 execute_registry_call 步骤，并保持调用方依赖的数据形状。
 def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResult:
 
     prepared = _prepare_tool_payload(call.payload)
@@ -111,6 +122,8 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
         return ToolExecutionResult(tool_name, False, _format_tool_exception(exc))
 
 
+# LLM: _registry_auth_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 registry_auth_error 步骤，并保持调用方依赖的数据形状。
 def _registry_auth_error(tool_name: str, call: ExecuteRegistryCallParams) -> str:
     return _tool_auth_error(
         tool_name,
@@ -123,6 +136,8 @@ def _registry_auth_error(tool_name: str, call: ExecuteRegistryCallParams) -> str
     )
 
 
+# LLM: _prepare_tool_payload 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 整理工具调用的 prepare_tool_payload 信息，供注册表鉴权或执行使用。
 def _prepare_tool_payload(payload: object) -> dict[str, Any] | ToolExecutionResult:
     normalized_payload, payload_error = _normalize_tool_payload(payload)
     if payload_error:
@@ -131,6 +146,8 @@ def _prepare_tool_payload(payload: object) -> dict[str, Any] | ToolExecutionResu
     return normalized_payload
 
 
+# LLM: allowed_tool_set 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 整理工具调用的 allowed_tool_set 信息，供注册表鉴权或执行使用。
 def allowed_tool_set(allowed_tools: list[str] | None) -> set[str] | None:
 
     if allowed_tools is None:
@@ -138,6 +155,8 @@ def allowed_tool_set(allowed_tools: list[str] | None) -> set[str] | None:
     return {str(item) for item in allowed_tools if str(item).strip()}
 
 
+# LLM: security_tools_visible 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 整理工具调用的 security_tools_visible 信息，供注册表鉴权或执行使用。
 def security_tools_visible(
     expose_security_tools: bool,
     *,
@@ -151,6 +170,8 @@ def security_tools_visible(
     )
 
 
+# LLM: _next_tool_block_start 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 整理工具调用的 next_tool_block_start 信息，供注册表鉴权或执行使用。
 def _next_tool_block_start(text: str, cursor: int) -> tuple[int, str] | None:
     start_markers = ["[TOOL_CALL]", "[SUBAGENT_CALL]"]
     starts = [
@@ -162,6 +183,8 @@ def _next_tool_block_start(text: str, cursor: int) -> tuple[int, str] | None:
     return min(starts, key=lambda item: item[0]) if starts else None
 
 
+# LLM: _next_tool_block_end 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 整理工具调用的 next_tool_block_end 信息，供注册表鉴权或执行使用。
 def _next_tool_block_end(text: str, start_at: int) -> tuple[int, str] | None:
     end_markers = ["[/TOOL_CALL]", "[/SUBAGENT_CALL]"]
     ends = [
@@ -173,6 +196,8 @@ def _next_tool_block_end(text: str, start_at: int) -> tuple[int, str] | None:
     return min(ends, key=lambda item: item[0]) if ends else None
 
 
+# LLM: _parse_tool_block_payload 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 解析 parse_tool_block_payload 数据结构。
 def _parse_tool_block_payload(raw: str) -> dict[str, Any]:
     try:
         payload = json.loads(raw)
@@ -183,6 +208,8 @@ def _parse_tool_block_payload(raw: str) -> dict[str, Any]:
     return payload
 
 
+# LLM: _tool_auth_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 整理工具调用的 tool_auth_error 信息，供注册表鉴权或执行使用。
 def _tool_auth_error(
     tool_name: str,
     context: _ToolAuthContext,
@@ -201,6 +228,8 @@ def _tool_auth_error(
     return f"tool not authorized: {tool_name}"
 
 
+# LLM: _security_tool_call_authorized 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 整理工具调用的 security_tool_call_authorized 信息，供注册表鉴权或执行使用。
 def _security_tool_call_authorized(
     tool_name: str,
     expose_security_tools: bool,
@@ -215,6 +244,8 @@ def _security_tool_call_authorized(
     )
 
 
+# LLM: _parse_error_payload 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 解析 parse_error_payload 数据结构。
 def _parse_error_payload(error: str, raw: str) -> dict[str, str]:
     return {
         "tool": "__parse_error__",
@@ -223,6 +254,8 @@ def _parse_error_payload(error: str, raw: str) -> dict[str, str]:
     }
 
 
+# LLM: _normalize_tool_payload 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把输入值归一成 工具系统 内部使用的稳定格式。
 def _normalize_tool_payload(payload: object) -> tuple[dict[str, Any] | None, str]:
     if not isinstance(payload, dict):
         return None, "工具调用必须是 JSON 对象"
@@ -242,6 +275,8 @@ def _normalize_tool_payload(payload: object) -> tuple[dict[str, Any] | None, str
     return normalized, ""
 
 
+# LLM: _tool_name 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 整理工具调用的 tool_name 信息，供注册表鉴权或执行使用。
 def _tool_name(value: object) -> str:
     if value is None:
         raise ValueError("工具调用缺少 tool 字段")
@@ -257,6 +292,8 @@ def _tool_name(value: object) -> str:
     return name
 
 
+# LLM: _format_tool_exception 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 把 format_tool_exception 转成人或模型可读的展示文本。
 def _format_tool_exception(exc: Exception) -> str:
     if isinstance(exc, ValueError):
         message = _truncate(str(exc), _MAX_EXCEPTION_MESSAGE_CHARS)
@@ -266,6 +303,8 @@ def _format_tool_exception(exc: Exception) -> str:
     return f"工具执行失败: {exc.__class__.__name__}；请检查参数后重试。"
 
 
+# LLM: _truncate 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
+# 函数用途: 完成 工具系统 中的 truncate 步骤，并保持调用方依赖的数据形状。
 def _truncate(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text

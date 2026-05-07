@@ -1,3 +1,6 @@
+# LLM: CLI surface module; keep argparse/Typer wiring, stdout text, and service-call boundaries stable.
+# 模块用途: 提供命令行入口或辅助函数，把用户命令转换成 agent 服务调用。
+
 
 from __future__ import annotations
 
@@ -60,6 +63,8 @@ _CHAT_RESPONSE_STYLE_INJECT = (
 )
 
 
+# LLM: _setup_session 处理 chat session 选择；恢复和新建路径都在这里分流。
+# 函数用途: 根据 session_id 加载历史会话，否则创建新 session 并返回 id。
 def _setup_session(args, session_manager: SessionManager):
     if hasattr(args, "session_id") and args.session_id:
         session = session_manager.load_session(args.session_id)
@@ -75,6 +80,8 @@ def _setup_session(args, session_manager: SessionManager):
     return session.session_id
 
 
+# LLM: _init_chat_state 初始化 chat 共享状态；TUI 和 fallback 共用这些字段。
+# 函数用途: 创建对话历史、锁、停止事件、队列和 history context builder。
 def _init_chat_state():
     conversation_history: list[tuple[str, str]] = []
     history_lock = threading.Lock()
@@ -91,12 +98,16 @@ def _init_chat_state():
         last_token_estimate=0,
     )
 
+    # LLM: _build_history_context 属于chat CLI；改行为前先对齐调用方和快照/单测。
+    # 函数用途: 构造下游调用需要的参数包、状态对象或命令对象。
     def _build_history_context() -> str:
         return build_history_context(conversation_history, history_lock, max_turns=MAX_HISTORY_TURNS)
 
     return state, _build_history_context
 
 
+# LLM: _has_prompt_toolkit 决定是否走 TUI；导入失败时回落到 fallback。
+# 函数用途: 探测 prompt_toolkit 是否可用，避免缺依赖时中断 chat 命令。
 def _has_prompt_toolkit() -> bool:
     try:
         from prompt_toolkit import PromptSession
@@ -105,6 +116,8 @@ def _has_prompt_toolkit() -> bool:
         return False
 
 
+# LLM: cmd_chat 是交互聊天入口；会在 gateway、本地、TUI 和 fallback 间选择路径。
+# 函数用途: 创建 agent/session，注入响应风格，并启动对应的聊天界面。
 def cmd_chat(args) -> int:
     agent = make_agent(args)
     use_gateway = bool(args.gateway)
