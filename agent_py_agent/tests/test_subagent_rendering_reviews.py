@@ -44,6 +44,34 @@ from agent_py_agent.agent.subagents.reports import (
 )
 
 
+def _acceptance_finding(name: str, message: str) -> AcceptanceReviewFinding:
+    return AcceptanceReviewFinding(name=name, ok=True, severity="P1", message=message)
+
+
+def _acceptance_record(**overrides) -> AcceptanceReviewRecord:
+    # LLM: compact fixture keeps acceptance rendering tests focused on output assertions.
+    values = {
+        "id": "acc-1",
+        "run_id": "run-1",
+        "dry_run": True,
+        "applied": False,
+        "ok": True,
+        "decision": "approved",
+        "message": "验收通过",
+        "before_status": "RUNNING",
+        "after_status": "COMPLETED",
+        "before_verification_status": "UNVERIFIED",
+        "after_verification_status": "VERIFIED",
+        "worker_claims": ["worker says done"],
+        "evidence_facts": ["evidence_packets=1"],
+        "parent_conclusions": ["decision=approved"],
+        "verifier_checks": [_acceptance_finding("verifier_evidence_packets_traceable", "refs ok")],
+        "findings": [_acceptance_finding("code_quality", "代码质量达标")],
+    }
+    values.update(overrides)
+    return AcceptanceReviewRecord(**values)
+
+
 class TestAcceptanceReviewRendering:
     """测试验收审核渲染功能。"""
 
@@ -56,40 +84,7 @@ class TestAcceptanceReviewRendering:
             generated_at=time.time(),
             dry_run=True,
             summary={"total": 1, "passed": 1},
-            records=[
-                AcceptanceReviewRecord(
-                    id="acc-1",
-                    run_id="run-1",
-                    dry_run=True,
-                    applied=False,
-                    ok=True,
-                    decision="approved",
-                    message="验收通过",
-                    before_status="RUNNING",
-                    after_status="COMPLETED",
-                    before_verification_status="UNVERIFIED",
-                    after_verification_status="VERIFIED",
-                    worker_claims=["worker says done"],
-                    evidence_facts=["evidence_packets=1"],
-                    parent_conclusions=["decision=approved"],
-                    verifier_checks=[
-                        AcceptanceReviewFinding(
-                            name="verifier_evidence_packets_traceable",
-                            ok=True,
-                            severity="P1",
-                            message="refs ok",
-                        )
-                    ],
-                    findings=[
-                        AcceptanceReviewFinding(
-                            name="code_quality",
-                            ok=True,
-                            severity="P1",
-                            message="代码质量达标",
-                        )
-                    ],
-                )
-            ],
+            records=[_acceptance_record()],
         )
 
         result = render_acceptance_review_markdown(report)
@@ -105,40 +100,11 @@ class TestAcceptanceReviewRendering:
 
         验证单个验收记录可以正确渲染。
         """
-        record = AcceptanceReviewRecord(
-            id="acc-1",
-            run_id="run-1",
-            dry_run=True,
-            applied=False,
-            ok=True,
-            decision="approved",
-            message="验收通过",
-            before_status="RUNNING",
-            after_status="COMPLETED",
-            before_verification_status="UNVERIFIED",
-            after_verification_status="VERIFIED",
+        record = _acceptance_record(
             evidence_count=2,
             test_count=5,
             artifact_count=1,
-            worker_claims=["worker says done"],
-            evidence_facts=["evidence_packets=1"],
-            parent_conclusions=["decision=approved"],
-            verifier_checks=[
-                AcceptanceReviewFinding(
-                    name="verifier_evidence_packets_traceable",
-                    ok=True,
-                    severity="P1",
-                    message="refs ok",
-                )
-            ],
-            findings=[
-                AcceptanceReviewFinding(
-                    name="tests_passed",
-                    ok=True,
-                    severity="P1",
-                    message="所有测试通过",
-                )
-            ],
+            findings=[_acceptance_finding("tests_passed", "所有测试通过")],
         )
 
         result = render_acceptance_record_markdown(record)
