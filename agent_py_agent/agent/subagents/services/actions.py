@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 class RecordAfterTaskActionParams:
     """Params bundle for creating a post-mutation action apply record."""
 
-    # LLM: action record creation receives one mutation context bundle after task changes.
+    # LLM: action record creation and apply contexts stay bundled after the soft cleanup.
     action: ActionPlanItem
     task: SubAgentTask
     before_status: str
@@ -138,23 +138,20 @@ class SubAgentActionService:
 
         handler = self._action_dispatch().get(action.action)
         if handler:
-            ctx = ActionHandlerContext(
-                before_status=before_status,
-                before_channel_status=before_channel_status,
-                now=now,
-                take_over_by=opts.take_over_by,
-                locked_files=opts.locked_files or [],
+            return handler(
+                self,
+                action,
+                task,
+                _action_handler_context(opts, now, before_status, before_channel_status),
             )
-            return handler(self, action, task, ctx)
 
-        return ActionApplyRecord(
-            id=self.manager._new_id("apply"),
-            action_id=action.id, run_id=action.run_id, action=action.action,
-            dry_run=False, applied=False, ok=False,
-            message=f"暂不支持 apply 动作: {action.action}",
-            before_status=before_status, after_status=before_status,
-            before_channel_status=before_channel_status, after_channel_status=before_channel_status,
-            evidence_paths=[task.task_dir], created_at=now,
+        return _unsupported_action_record(
+            self.manager,
+            action,
+            task,
+            now,
+            before_status=before_status,
+            before_channel_status=before_channel_status,
         )
 
     def _action_dispatch(self) -> dict[str, callable]:
@@ -292,6 +289,21 @@ def _missing_task_action_record(
     )
 
 
+def _action_handler_context(
+    opts: ActionApplyOptions,
+    now: float,
+    before_status: str,
+    before_channel_status: str,
+) -> ActionHandlerContext:
+    return ActionHandlerContext(
+        before_status=before_status,
+        before_channel_status=before_channel_status,
+        now=now,
+        take_over_by=opts.take_over_by,
+        locked_files=opts.locked_files or [],
+    )
+
+
 def _dry_run_action_record(
     manager: Any,
     action: ActionPlanItem,
@@ -311,5 +323,27 @@ def _dry_run_action_record(
         before_status=before_status, after_status=before_status,
         before_channel_status=before_channel_status, after_channel_status=before_channel_status,
         **action_rescue_record_fields(action),
+        evidence_paths=[task.task_dir], created_at=now,
+    )
+
+
+def _unsupported_action_record(
+    manager: Any,
+    action: ActionPlanItem,
+    task: SubAgentTask,
+    now: float,
+    *,
+    before_status: str,
+    before_channel_status: str,
+) -> ActionApplyRecord:
+    from ..reports import ActionApplyRecord
+
+    return ActionApplyRecord(
+        id=manager._new_id("apply"),
+        action_id=action.id, run_id=action.run_id, action=action.action,
+        dry_run=False, applied=False, ok=False,
+        message=f"暂不支持 apply 动作: {action.action}",
+        before_status=before_status, after_status=before_status,
+        before_channel_status=before_channel_status, after_channel_status=before_channel_status,
         evidence_paths=[task.task_dir], created_at=now,
     )

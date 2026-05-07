@@ -68,3 +68,8 @@
 - Converted log-analysis coercion, parser, query, ingest, evidence, scheduler, reports, work-order planning/creation, entity graph, and bounded query paths to explicit Params/Options bundles or explicit keyword adapters.
 - Removed product-level function var-keyword interfaces from `agent/log_analysis`; the work-order task creation boundary now passes `CreateRunParams` instead of expanding task payload fields.
 - Focused verification covered log-analysis query, ingest, dispatch queue/health, scheduler, first-loop bounded query, and work-order creation paths.
+
+## 2026-05-07 hard/soft code-size cleanup
+- Cleared the remaining log-analysis strict code-size soft findings while keeping `hard=0`.
+- Security prompt, query evidence, dispatch queue, ingest pipeline, dedup, dead-letter, entity graph, and trace-case helpers now expose explicit bundle params instead of function-level var-keyword compatibility bags.
+- Focused verification covered dispatch, queue, entity graph, dead-letter, ingest, evidence, architecture guardrails, and strict code-size checks.

@@ -131,3 +131,8 @@ agent_py_agent/agent/
 - `manager_base.py`, `manager_dispatch.py`, `manager_actions.py`, `manager_indexing.py`, and patch facades now list old compatibility fields explicitly and immediately construct `CreateRunParams`, dispatch params, `ActionApplyOptions`, `LocalRecordParams`, or patch request bundles.
 - `policy_checks.py` / `policies.py` use `RunnerNextActionParams`; `state_machine.py` uses `StateTransitionParams`; runner output payload construction passes those bundles instead of loose fields.
 - `agent_core` dispatch/watch/run-subagent/recovery paths now normalize into `DispatchParams`, `WatchParams`, `DispatchLoopParams`, `SubagentRunParams`, and `RecoverySnapshotParams` before entering service logic.
+
+## 2026-05-07 hard/soft structure update
+- Patch manager parsing details stay outside the main mixin path, preserving `SubAgentPatchMixin` as a facade over patch review/apply services.
+- Action application split unsupported-action record creation and handler context construction into helpers while keeping `ActionApplyOptions` as the service bundle.
+- The subagent slice contributes no strict code-size hard or soft findings after this cleanup; near-soft warnings remain visible for future pre-feature refactors.

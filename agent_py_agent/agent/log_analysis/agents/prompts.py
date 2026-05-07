@@ -44,6 +44,7 @@ class SecurityPromptConfig:
 
 @dataclass(frozen=True)
 class SecurityPromptScope:
+    # LLM: Scope stays bundled so security prompt APIs do not grow loose kwargs again.
     role: str = ""
     case_summary: str = ""
     is_security_command: bool = False
@@ -55,11 +56,6 @@ def should_inject_security_prompt(
     config: SecurityPromptConfig | Mapping[str, Any] | None,
     *,
     scope: SecurityPromptScope | None = None,
-    role: str = "",
-    case_summary: str = "",
-    is_security_command: bool = False,
-    is_logs_command: bool = False,
-    is_security_case: bool = False,
 ) -> bool:
     prompt_config = (
         config
@@ -71,13 +67,7 @@ def should_inject_security_prompt(
     if prompt_config.security_prompt_mode == "off":
         return False
 
-    prompt_scope = scope or SecurityPromptScope(
-        role=str(role),
-        case_summary=str(case_summary),
-        is_security_command=bool(is_security_command),
-        is_logs_command=bool(is_logs_command),
-        is_security_case=bool(is_security_case),
-    )
+    prompt_scope = scope or SecurityPromptScope()
     normalized_role = prompt_scope.role.strip().lower()
     return bool(
         prompt_scope.is_security_command
@@ -91,20 +81,9 @@ def security_prompt_fragment(
     config: SecurityPromptConfig | Mapping[str, Any] | None,
     *,
     scope: SecurityPromptScope | None = None,
-    role: str = "",
-    case_summary: str = "",
-    is_security_command: bool = False,
-    is_logs_command: bool = False,
-    is_security_case: bool = False,
 ) -> str:
     prompt_config = _prompt_config(config)
-    prompt_scope = scope or SecurityPromptScope(
-        role=str(role),
-        case_summary=str(case_summary),
-        is_security_command=bool(is_security_command),
-        is_logs_command=bool(is_logs_command),
-        is_security_case=bool(is_security_case),
-    )
+    prompt_scope = scope or SecurityPromptScope()
     if not should_inject_security_prompt(prompt_config, scope=prompt_scope):
         return ""
 
@@ -119,11 +98,6 @@ def build_security_prompt(
     config: SecurityPromptConfig | Mapping[str, Any] | None = None,
     *,
     scope: SecurityPromptScope | None = None,
-    role: str = "",
-    case_summary: str = "",
-    is_security_command: bool = False,
-    is_logs_command: bool = False,
-    is_security_case: bool = False,
 ) -> str:
     """Append security instructions only when explicitly enabled and scoped.
 
@@ -133,11 +107,6 @@ def build_security_prompt(
     fragment = security_prompt_fragment(
         config,
         scope=scope,
-        role=role,
-        case_summary=case_summary,
-        is_security_command=is_security_command,
-        is_logs_command=is_logs_command,
-        is_security_case=is_security_case,
     )
     if not fragment:
         return base_prompt

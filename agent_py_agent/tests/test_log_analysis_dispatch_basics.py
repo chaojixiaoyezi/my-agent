@@ -12,6 +12,7 @@ from agent_py_agent.agent.log_analysis.agents.contracts import (
 )
 from agent_py_agent.agent.log_analysis.agents.prompts import (
     SecurityPromptConfig,
+    SecurityPromptScope,
     build_security_prompt,
 )
 from agent_py_agent.agent.log_analysis.agents.summaries import (
@@ -58,8 +59,7 @@ def test_security_prompt_disabled_leaves_base_prompt_unchanged():
     rendered = build_security_prompt(
         base_prompt,
         SecurityPromptConfig(security_prompt_enabled=False, security_prompt_mode="analyst"),
-        role="analyst-agent",
-        is_security_case=True,
+        scope=SecurityPromptScope(role="analyst-agent", is_security_case=True),
     )
 
     assert rendered == base_prompt
@@ -70,8 +70,10 @@ def test_security_prompt_analyst_mode_is_scoped_and_evidence_driven():
     rendered = build_security_prompt(
         "base",
         SecurityPromptConfig(security_prompt_enabled=True, security_prompt_mode="analyst"),
-        role="analyst-agent",
-        case_summary='{"case":{"case_id":"case-001"},"evidence":["ev-1"],"route":{}}',
+        scope=SecurityPromptScope(
+            role="analyst-agent",
+            case_summary='{"case":{"case_id":"case-001"},"evidence":["ev-1"],"route":{}}',
+        ),
     )
 
     assert "# Security Log Analysis Context" in rendered
