@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from agent_py_agent.agent.subagents.patch.patch_renderer import build_unified_diff
 from agent_py_agent.agent.subagents.reports import PatchApplyRecord
@@ -37,6 +38,7 @@ class _ExecuteApplyContext:
 @dataclass
 class ApplyPatchTaskParams:
     """Bundle for apply_patch_task keyword-only parameters."""
+    # LLM: single-task patch apply state travels as one bundle through service and fallback paths.
     output: dict
     patches: list
     apply: bool

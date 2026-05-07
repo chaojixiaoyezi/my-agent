@@ -9,6 +9,8 @@ if TYPE_CHECKING:
     from ..capability_config import CapabilityConfig
     from ..subagent import SubAgent
 
+from .dispatch_params import DispatchParams
+
 
 @dataclass
 class DispatchLoopParams:
@@ -62,19 +64,21 @@ def _run_single_dispatch(agent, router, capability_config, params):
     return agent.dispatch_subagents(
         router,
         capability_config,
-        apply=params.apply,
-        execute_runners=params.execute_runners,
-        planner=params.planner,
-        workflow_mode=params.workflow_mode,
-        max_runners=params.max_runners,
-        limit=params.limit,
-        reviewer=params.reviewer,
-        note=params.note,
-        runner_instruction=params.runner_instruction,
-        max_cards=params.max_cards,
-        probe=params.probe,
-        take_over_by=params.take_over_by,
-        locked_files=params.locked_files,
+        params=DispatchParams(
+            apply=params.apply,
+            execute_runners=params.execute_runners,
+            planner=params.planner,
+            workflow_mode=params.workflow_mode,
+            max_runners=params.max_runners,
+            limit=params.limit,
+            reviewer=params.reviewer,
+            note=params.note,
+            runner_instruction=params.runner_instruction,
+            max_cards=params.max_cards,
+            probe=params.probe,
+            take_over_by=params.take_over_by,
+            locked_files=params.locked_files,
+        ),
     )
 
 

@@ -11,6 +11,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from agent_py_agent.agent.capabilities import CapabilityRouter
 from agent_py_agent.agent.capability_config import CapabilityConfig
@@ -199,3 +200,40 @@ def test_subagent_dispatch_watch_lock_prevents_second_parent():
             assert "dispatch watch lock already exists" in str(exc)
         else:
             raise AssertionError("watch lock should block a second parent")
+
+
+def test_watch_dispatch_cycle_passes_dispatch_params_bundle():
+    """watch service 内部调用 dispatch_subagents 时使用 DispatchParams。"""
+    from agent_py_agent.agent.agent_core.dispatch_params import DispatchParams
+    from agent_py_agent.agent.agent_core.services.watch_service import (
+        RunSingleWatchCycleParams,
+        _execute_watch_dispatch,
+    )
+
+    agent = MagicMock()
+    agent.subagents.workspace = Path("/tmp/subs")
+    report = MagicMock()
+    report.records = []
+    report.summary = {}
+    agent.dispatch_subagents.return_value = report
+    params = RunSingleWatchCycleParams(
+        cycle=1,
+        lock_path=Path("/tmp/lock"),
+        stop_path=None,
+        router=MagicMock(),
+        cfg=CapabilityConfig(),
+        dispatch_params=DispatchParams(apply=True, max_runners=2),
+        active_interval=0,
+        idle_interval=0,
+        max_consecutive=20,
+        last_dispatch_had_changes=False,
+        max_cycles=1,
+    )
+
+    ok, _, record_count, _, _ = _execute_watch_dispatch(agent, params)
+
+    assert ok is True
+    assert record_count == 0
+    call_kwargs = agent.dispatch_subagents.call_args.kwargs
+    assert call_kwargs["params"] is params.dispatch_params
+    assert "apply" not in call_kwargs

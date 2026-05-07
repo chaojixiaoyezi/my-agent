@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from ...capabilities import CapabilityRouter
 from ...capability_config import CapabilityConfig
+from ..dispatch_params import DispatchParams, WatchParams, dispatch_params_from_watch
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -22,19 +23,7 @@ class RunSingleWatchCycleParams:
     stop_path: Path | None
     router: CapabilityRouter
     cfg: CapabilityConfig
-    apply: bool
-    execute_runners: bool
-    planner: bool
-    workflow_mode: str
-    max_runners: int
-    limit: int
-    reviewer: str
-    note: str
-    runner_instruction: str
-    max_cards: int
-    probe: bool
-    take_over_by: str
-    locked_files: list[str] | None
+    dispatch_params: DispatchParams
     active_interval: float
     idle_interval: float
     max_consecutive: int
@@ -42,31 +31,12 @@ class RunSingleWatchCycleParams:
     max_cycles: int = 0
 
 
-@dataclass(frozen=True)
-class WatchSubagentsParams:
-
-    apply: bool = False
-    execute_runners: bool = False
-    planner: bool = False
-    workflow_mode: str = "off"
-    max_runners: int = 1
-    limit: int = 20
-    reviewer: str = "parent-dispatch"
-    note: str = ""
-    runner_instruction: str = ""
-    max_cards: int = 0
-    probe: bool = True
-    take_over_by: str = ""
-    locked_files: list[str] | None = None
-    interval: float = 30.0
-    max_cycles: int = 0
-    force_lock: bool = False
-    stop_file: str | Path | None = None
+WatchSubagentsParams = WatchParams
 
 
 @dataclass(frozen=True)
 class WatchLoopParams:
-    params: WatchSubagentsParams
+    params: WatchParams
     cfg: CapabilityConfig
     router: CapabilityRouter
     lock_path: Path
@@ -81,7 +51,7 @@ def watch_subagents(
     router: CapabilityRouter,
     capability_config: CapabilityConfig | None,
     *,
-    params: WatchSubagentsParams,
+    params: WatchParams,
 ) -> DispatchWatchReport:
     if params.max_cycles < 0:
         raise ValueError("max_cycles 不能小于 0。")
@@ -153,11 +123,8 @@ def _watch_cycle_params(
     params = loop.params
     return RunSingleWatchCycleParams(
         cycle=cycle, lock_path=loop.lock_path, stop_path=loop.stop_path, router=loop.router, cfg=loop.cfg,
-        apply=params.apply, execute_runners=params.execute_runners, planner=params.planner,
-        workflow_mode=params.workflow_mode, max_runners=params.max_runners, limit=params.limit,
-        reviewer=params.reviewer, note=params.note, runner_instruction=params.runner_instruction,
-        max_cards=params.max_cards, probe=params.probe, take_over_by=params.take_over_by,
-        locked_files=params.locked_files, active_interval=loop.active_interval, idle_interval=loop.idle_interval,
+        dispatch_params=dispatch_params_from_watch(params),
+        active_interval=loop.active_interval, idle_interval=loop.idle_interval,
         max_consecutive=loop.max_consecutive, last_dispatch_had_changes=last_dispatch_had_changes,
         max_cycles=params.max_cycles,
     )
@@ -178,19 +145,7 @@ def _execute_watch_dispatch(agent, params):
         dispatch_report = agent.dispatch_subagents(
             router=params.router,
             capability_config=params.cfg,
-            apply=params.apply,
-            execute_runners=params.execute_runners,
-            planner=params.planner,
-            workflow_mode=params.workflow_mode,
-            max_runners=params.max_runners,
-            limit=params.limit,
-            reviewer=params.reviewer,
-            note=params.note,
-            runner_instruction=params.runner_instruction,
-            max_cards=params.max_cards,
-            probe=params.probe,
-            take_over_by=params.take_over_by,
-            locked_files=params.locked_files,
+            params=params.dispatch_params,
         )
         ok = all(item.ok for item in dispatch_report.records)
         message = f"完成一轮 dispatch，records={len(dispatch_report.records)}。"
@@ -232,7 +187,7 @@ def _run_single_watch_cycle(
     ended_at = time_module.time()
     watch_record_params = MakeDispatchWatchRecordParams(
         cycle=params.cycle,
-        dry_run=not params.apply,
+        dry_run=not params.dispatch_params.apply,
         ok=ok,
         message=message,
         dispatch_record_count=record_count,

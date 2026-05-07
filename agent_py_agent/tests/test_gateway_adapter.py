@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -261,3 +262,62 @@ class TestProcessFileAdapterOnce:
         )
 
         assert result == 1
+
+
+class TestAdapterCliBundles:
+    """Adapter CLI helper bundle regressions."""
+
+    def test_adapter_options_from_args_normalizes_paths(self, tmp_path: Path):
+        from agent_py_agent.cli.adapter import _adapter_options_from_args
+
+        args = argparse.Namespace(
+            root=str(tmp_path / "adapter"),
+            inbox=str(tmp_path / "custom_inbox"),
+            outbox=str(tmp_path / "custom_outbox"),
+            timeout=None,
+            limit=7,
+            once=True,
+            watch=False,
+            poll_interval=0.5,
+            no_start_gateway=True,
+            channel="qq",
+            pid_file=str(tmp_path / "adapter.pid"),
+            daemon=False,
+        )
+
+        options = _adapter_options_from_args(args)
+
+        assert options.root == tmp_path / "adapter"
+        assert options.inbox == tmp_path / "custom_inbox"
+        assert options.outbox == tmp_path / "custom_outbox"
+        assert options.stop_timeout == 10.0
+        assert options.channel == "qq"
+
+    def test_process_file_adapter_loop_uses_options_not_args(self, tmp_path: Path):
+        from agent_py_agent.cli.adapter import _process_file_adapter_loop
+        from agent_py_agent.cli.models import AdapterOptions
+
+        gpaths = _gateway_paths(tmp_path)
+        apaths = _adapter_paths(tmp_path / "adapter")
+        options = AdapterOptions(
+            root=None,
+            inbox=None,
+            outbox=None,
+            timeout=3.0,
+            limit=9,
+            once=True,
+            watch=True,
+            poll_interval=0.2,
+            no_start_gateway=True,
+            channel="all",
+            pid_file=None,
+            daemon=False,
+            stop_timeout=10.0,
+        )
+
+        with patch("agent_py_agent.cli.adapter.process_file_adapter_once", return_value=2) as mock_once:
+            total = _process_file_adapter_loop(MagicMock(), options, gpaths, apaths, timeout=3.0)
+
+        assert total == 2
+        assert mock_once.call_args.kwargs["limit"] == 9
+        assert mock_once.call_args.kwargs["timeout"] == 3.0

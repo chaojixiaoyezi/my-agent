@@ -14,8 +14,25 @@ class PatchApplyTaskHelper:
     """
 
     @staticmethod
-    def apply_patch_task(task, *, output, patches, apply, applier, note):
+    def apply_patch_task(
+        task,
+        *,
+        params=None,
+        **legacy,
+    ):
         """Apply patches for a single task (inline minimal implementation)."""
+        # LLM: fallback mirrors the bundle-first service path when the service is not initialized.
+        if params is not None:
+            patches = params.patches
+            apply = params.apply
+            applier = params.applier
+            note = params.note
+        else:
+            patches = legacy.get("patches") or []
+            apply = bool(legacy.get("apply", False))
+            applier = legacy.get("applier", "parent")
+            note = legacy.get("note", "")
+
         now = time.time()
         blocked = [
             item for item in patches
@@ -40,6 +57,12 @@ class PatchApplyTaskHelper:
             patch_count=len(patches),
             applied_count=0,
             blocked_count=len(blocked),
+            applier=applier,
+            note=note,
+            evidence_paths=[
+                task.output_json if hasattr(task, "output_json") else "",
+                task.work_log_file if hasattr(task, "work_log_file") else "",
+            ],
             test_commands=[],
             test_results=[],
             patches=[],

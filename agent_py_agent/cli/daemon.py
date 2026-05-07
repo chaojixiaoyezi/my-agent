@@ -10,6 +10,7 @@ daemon 是'前台常驻调度器'：按间隔循环跑父代理 dispatch。
 import json
 import sys
 
+from ..agent.agent_core.dispatch_params import WatchParams
 from ..agent.capability_config import load_capability_config
 from ..agent.core import SimpleAgent
 from .common import make_agent, make_capability_router
@@ -36,7 +37,11 @@ def cmd_daemon(args) -> int:
     )
     print("停止：Ctrl+C")
     try:
-        report = agent.watch_subagents(router, capability_config, apply=options.apply, execute_runners=options.execute_runners, planner=options.planner, max_runners=options.max_runners, limit=options.limit, reviewer=options.reviewer, note=args.note or "", runner_instruction=options.instruction or "", max_cards=options.max_cards, probe=options.probe, take_over_by=args.take_over_by or "", locked_files=args.locked_file or [], interval=options.interval, max_cycles=options.max_cycles, force_lock=args.force_lock)
+        report = agent.watch_subagents(
+            router,
+            capability_config,
+            params=_daemon_watch_params(options, args),
+        )
     except KeyboardInterrupt:
         print("\ndaemon stopped by Ctrl+C")
         return 130
@@ -51,6 +56,26 @@ def cmd_daemon(args) -> int:
     if options.planner:
         print(f"planner: {agent.subagents.workspace / 'PARENT_PLANNER.md'}")
     return 0
+
+
+def _daemon_watch_params(options: DaemonOptions, args) -> WatchParams:
+    return WatchParams(
+        apply=options.apply,
+        execute_runners=options.execute_runners,
+        planner=options.planner,
+        max_runners=options.max_runners,
+        limit=options.limit,
+        reviewer=options.reviewer,
+        note=args.note or "",
+        runner_instruction=options.instruction or "",
+        max_cards=options.max_cards,
+        probe=options.probe,
+        take_over_by=args.take_over_by or "",
+        locked_files=args.locked_file or [],
+        interval=options.interval,
+        max_cycles=options.max_cycles,
+        force_lock=args.force_lock,
+    )
 
 
 def _validate_daemon_numbers(

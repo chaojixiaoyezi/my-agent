@@ -258,6 +258,59 @@ class TestGatewayRunStateHelpers:
         assert payload["pid"] == 123
         assert payload["error"] == "boom"
 
+    def test_gateway_start_command_uses_options_bundle(self, tmp_path: Path):
+        from agent_py_agent.cli._gateway_state_helpers import _gateway_start_command
+        from agent_py_agent.cli.models import GatewayStartOptions
+
+        config = tmp_path / "config.yaml"
+        command = _gateway_start_command(GatewayStartOptions(config=config, force_lock=True))
+
+        assert command[-2:] == ["run", "--force-lock"]
+        assert command[command.index("--config") + 1] == str(config.resolve())
+
+    def test_run_gateway_watch_uses_context_bundle(self):
+        from agent_py_agent.cli._gateway_state_helpers import _run_gateway_watch
+        from agent_py_agent.cli.models import GatewayRunContext, GatewayRunOptions
+
+        paths = MagicMock()
+        paths.stop_request = Path("gateway.stop")
+        agent = MagicMock()
+        options = GatewayRunOptions(
+            apply=True,
+            execute_runners=False,
+            planner=True,
+            interval=2.0,
+            max_runners=3,
+            limit=4,
+            max_cycles=5,
+            max_cards=6,
+            reviewer="reviewer",
+            instruction="runner instruction",
+            probe=True,
+        )
+        context = GatewayRunContext(
+            agent=agent,
+            paths=paths,
+            options=options,
+            config_path=Path("config.yaml"),
+            note="note",
+            take_over_by="owner",
+            locked_files=["a.py"],
+            force_lock=True,
+            router=object(),
+            capability_config={"capabilities": []},
+        )
+
+        _run_gateway_watch(context)
+
+        kwargs = agent.watch_subagents.call_args.kwargs
+        params = kwargs["params"]
+        assert params.note == "note"
+        assert params.take_over_by == "owner"
+        assert params.locked_files == ["a.py"]
+        assert params.force_lock is True
+        assert params.stop_file == paths.stop_request
+
 
 class TestCmdGatewayLogs:
     """测试 cmd_gateway_logs 命令。"""

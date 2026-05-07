@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..subagent import DispatchWatchReport
-from .dispatch_params import WatchParams
+from .dispatch_params import WatchParams, merge_watch_params
 from .dispatch_service import update_pending_work_state
 from .services import watch_subagents as _watch_subagents
 
@@ -37,34 +37,8 @@ class _DispatchFacadeMixin:
         params: WatchParams = None,
         **kwargs,
     ) -> DispatchWatchReport:
-        if params is None:
-            params = WatchParams()
-        elif not isinstance(params, WatchParams):
-            raise TypeError("watch_subagents() requires params: WatchParams keyword argument")
-
-        for key in [
-            "apply", "execute_runners", "planner", "workflow_mode",
-            "max_runners", "limit", "reviewer", "note", "runner_instruction",
-            "max_cards", "probe", "take_over_by", "locked_files",
-            "interval", "max_cycles", "force_lock", "stop_file",
-        ]:
-            if key in kwargs:
-                setattr(params, key, kwargs[key])
-
-        from .services.watch_service import WatchSubagentsParams as _WSP
-
-        wsp = _WSP(
-            apply=params.apply, execute_runners=params.execute_runners,
-            planner=params.planner, workflow_mode=params.workflow_mode,
-            max_runners=params.max_runners, limit=params.limit,
-            reviewer=params.reviewer, note=params.note,
-            runner_instruction=params.runner_instruction, max_cards=params.max_cards,
-            probe=params.probe, take_over_by=params.take_over_by,
-            locked_files=params.locked_files, interval=params.interval,
-            max_cycles=params.max_cycles, force_lock=params.force_lock,
-            stop_file=params.stop_file,
-        )
-        return _watch_subagents(self, router=router, capability_config=capability_config, params=wsp)
+        params = merge_watch_params(params, kwargs)
+        return _watch_subagents(self, router=router, capability_config=capability_config, params=params)
 
 
 class _DispatchFailureMixin:

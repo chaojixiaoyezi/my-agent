@@ -34,6 +34,37 @@ def test_patch_review_task_request_bundle_dry_run(tmp_path: Path):
     assert record.note == "bundle"
 
 
+def test_patch_review_manager_fallback_accepts_request_bundle(tmp_path: Path):
+    from agent_py_agent.agent.subagents.manager_patch import SubAgentPatchMixin
+    from agent_py_agent.agent.subagents.patch import (
+        PatchReviewOptions,
+        PatchReviewTaskRequest,
+    )
+
+    class Manager(SubAgentPatchMixin):
+        pass
+
+    task = SimpleNamespace(
+        id="run-fallback-review",
+        output_json=str(tmp_path / "output.json"),
+        work_log_file=str(tmp_path / "WORK_LOG.md"),
+    )
+    manager = Manager()
+
+    record = manager._review_patch_task(
+        PatchReviewTaskRequest(
+            task=task,
+            output={"patches": []},
+            patches=[{"path": "a.py", "status": "applied"}],
+            options=PatchReviewOptions(reviewer="fallback-reviewer", note="fallback bundle"),
+        )
+    )
+
+    assert record.ok is True
+    assert record.reviewer == "fallback-reviewer"
+    assert record.note == "fallback bundle"
+
+
 def test_patch_apply_task_accepts_params_bundle(tmp_path: Path):
     from agent_py_agent.agent.subagents.patch.patch_apply import PatchApplyService
     from agent_py_agent.agent.subagents.patch.patch_apply_task import ApplyPatchTaskParams
@@ -63,6 +94,39 @@ def test_patch_apply_task_accepts_params_bundle(tmp_path: Path):
     assert record.decision == "NO_PATCHES"
     assert record.applier == "applier-b"
     assert record.note == "bundle"
+
+
+def test_patch_apply_manager_fallback_accepts_params_bundle(tmp_path: Path):
+    from agent_py_agent.agent.subagents.manager_patch import SubAgentPatchMixin
+    from agent_py_agent.agent.subagents.patch.patch_apply_task import ApplyPatchTaskParams
+
+    class Manager(SubAgentPatchMixin):
+        pass
+
+    output_path = tmp_path / "output.json"
+    output_path.write_text('{"patches": []}', encoding="utf-8")
+    task = SimpleNamespace(
+        id="run-fallback-apply",
+        output_json=str(output_path),
+        work_log_file=str(tmp_path / "WORK_LOG.md"),
+        acceptance_checks=[],
+    )
+    manager = Manager()
+
+    record = manager._apply_patch_task(
+        task,
+        params=ApplyPatchTaskParams(
+            output={"patches": []},
+            patches=[],
+            apply=False,
+            applier="fallback-applier",
+            note="fallback bundle",
+        ),
+    )
+
+    assert record.decision == "NO_PATCHES"
+    assert record.applier == "fallback-applier"
+    assert record.note == "fallback bundle"
 
 
 def test_action_record_after_task_accepts_params_bundle():

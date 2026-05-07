@@ -23,7 +23,8 @@
   - Watchdog Supervisor 自动监控并重启崩溃 gateway
   - Adapter 守护进程模式（`--daemon` + PID 文件）
   - `gateway start-all --adapter` 一键启动 gateway + 适配器
-  - 系统服务安装（`gateway install` systemd/launchd）
+- 系统服务安装（`gateway install` systemd/launchd）
+- 2026-05-07 Gateway / Adapter CLI bundle 边界已落地：gateway run/start helper、gateway worker thread 请求、adapter file/start/status/stop helper 先把 `argparse args` 收敛成 `GatewayRunOptions` / `GatewayRunContext` / `AdapterOptions` 等 bundle；`args` 不再深传到这些 helper。
 
 ## 解决的问题
 
@@ -44,6 +45,7 @@
 - supervisor 解决了”gateway 崩溃后无人重启”的问题。
 - adapter daemon 解决了”适配器需要前台运行，无法后台常驻”的问题。
 - 系统服务解决了”需要手动启动/停止，无法随系统自动启动”的问题。
+- Gateway / Adapter bundle 边界解决了“命令行 args 被 helper/thread 深传，后续新增字段容易散落”的问题；现在 cmd 层负责解析，运行 helper 接明确的 context/options。
 
 ## 下一步
 

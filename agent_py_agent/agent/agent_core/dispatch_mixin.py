@@ -14,7 +14,12 @@ from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..subagent import DispatchReport
 from .dispatch_facade import _DispatchFacadeMixin, _DispatchFailureMixin
-from .dispatch_params import DispatchContext, DispatchParams, RunnerBatchContext, WatchParams
+from .dispatch_params import (
+    DispatchContext,
+    DispatchParams,
+    RunnerBatchContext,
+    merge_dispatch_params,
+)
 from .dispatch_record_params import (
     AcceptanceRecordParams,
     ActionApplyRecordParams,
@@ -172,12 +177,6 @@ class SimpleAgentDispatchMixin(
     _DispatchFailureMixin,
 ):
 
-    _DISPATCH_PARAM_KEYS = [
-        "apply", "execute_runners", "planner", "workflow_mode",
-        "max_runners", "limit", "reviewer", "note", "runner_instruction",
-        "max_cards", "probe", "take_over_by", "locked_files",
-    ]
-
     def dispatch_subagents(
         self,
         router: CapabilityRouter,
@@ -186,11 +185,7 @@ class SimpleAgentDispatchMixin(
         params: DispatchParams | None = None,
         **kwargs,
     ) -> DispatchReport:
-        if params is None:
-            params = DispatchParams()
-        elif not isinstance(params, DispatchParams):
-            raise TypeError("dispatch_subagents() requires params: DispatchParams keyword argument")
-        self._apply_dispatch_kwargs(params, kwargs)
+        params = merge_dispatch_params(params, kwargs)
 
         cfg = capability_config or CapabilityConfig()
         normalized_workflow_mode = str(params.workflow_mode or "off").strip().lower()
@@ -236,12 +231,6 @@ class SimpleAgentDispatchMixin(
             )
         )
         return self._build_and_write_report(records, params.apply)
-
-    def _apply_dispatch_kwargs(self, params: DispatchParams, kwargs: dict[str, object]) -> None:
-        for key in self._DISPATCH_PARAM_KEYS:
-            if key in kwargs:
-                setattr(params, key, kwargs[key])
-
 
 def _planner_dispatch_overrides(params: DispatchParams, records):
     planner_record = records[0] if records else None

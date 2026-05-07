@@ -55,6 +55,60 @@ class TestCmdDaemon:
         assert options.apply is False
         assert options.interval == 60
 
+    def test_cmd_daemon_passes_watch_params_bundle(self, tmp_path: Path):
+        """daemon CLI 将解析后的选项打包成 WatchParams 传给 watch_subagents。"""
+        from agent_py_agent.agent.agent_core.dispatch_params import WatchParams
+        from agent_py_agent.cli.daemon import cmd_daemon
+
+        args = MagicMock()
+        args.capability_config = str(tmp_path / "capability.yaml")
+        args.skill_dir = None
+        args.apply = True
+        args.execute_runners = True
+        args.planner = True
+        args.interval = 0
+        args.max_runners = 2
+        args.limit = 7
+        args.max_cycles = 1
+        args.reviewer = "reviewer"
+        args.note = "daemon note"
+        args.instruction = "runner note"
+        args.max_cards = 3
+        args.no_probe = True
+        args.take_over_by = "owner"
+        args.locked_file = ["a.py"]
+        args.force_lock = True
+
+        mock_report = MagicMock()
+        mock_report.summary = {"total": 0}
+        mock_agent = MagicMock()
+        mock_agent.config.daemon_apply = False
+        mock_agent.config.daemon_execute_runners = False
+        mock_agent.config.daemon_planner = False
+        mock_agent.config.daemon_interval = 30
+        mock_agent.config.daemon_max_runners = 1
+        mock_agent.config.daemon_limit = 20
+        mock_agent.config.daemon_max_cycles = 0
+        mock_agent.config.daemon_reviewer = "parent-dispatch"
+        mock_agent.config.daemon_runner_instruction = ""
+        mock_agent.config.daemon_max_cards = 0
+        mock_agent.config.daemon_probe = True
+        mock_agent.watch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = tmp_path / "subs"
+
+        with (
+            patch("agent_py_agent.cli.daemon.make_agent", return_value=mock_agent),
+            patch("agent_py_agent.cli.daemon.load_capability_config", return_value=MagicMock()),
+            patch("agent_py_agent.cli.daemon.make_capability_router", return_value=MagicMock()),
+        ):
+            assert cmd_daemon(args) == 0
+
+        call_kwargs = mock_agent.watch_subagents.call_args.kwargs
+        assert isinstance(call_kwargs["params"], WatchParams)
+        assert call_kwargs["params"].execute_runners is True
+        assert call_kwargs["params"].max_runners == 2
+        assert "apply" not in call_kwargs
+
 
 class TestResolveDaemonMaxRunners:
     """测试 _resolve_daemon_max_runners 辅助函数。"""
