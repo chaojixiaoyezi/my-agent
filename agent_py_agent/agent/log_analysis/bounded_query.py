@@ -25,41 +25,83 @@ class _EmptyResultInput:
     error: dict[str, Any]
 
 
-def bounded_query(query_template: str, *args: Any, **params: Any) -> QueryResult:
+@dataclass(frozen=True)
+class BoundedQueryParams:
+    """Params bundle for bounded log queries."""
+
+    file_path: str | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+    max_results: int | None = None
+    config: BoundedQueryConfig | None = None
+
+
+def bounded_query(
+    query_template: str,
+    *,
+    params: BoundedQueryParams | None = None,
+    file_path: str | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    max_results: int | None = None,
+    config: BoundedQueryConfig | None = None,
+) -> QueryResult:
     """执行受控查询。
 
-    兼容旧调用方式：支持 file_path/start_time/end_time/max_results/config 关键字，
-    也保留 query_template 后少量位置参数，方便旧测试和调用方继续工作。
+    支持显式关键字兼容；内部统一转换为 BoundedQueryParams。
     """
-    file_path, start_time, end_time, max_results, config = _query_inputs(args, params)
-    max_results = _effective_max_results(max_results, config)
-    time_window = _time_window(start_time, end_time)
+    query_params = _query_inputs(
+        params=params,
+        file_path=file_path,
+        start_time=start_time,
+        end_time=end_time,
+        max_results=max_results,
+        config=config,
+    )
+    effective_config = query_params.config or default_config
+    max_results = _effective_max_results(query_params.max_results, effective_config)
+    time_window = _time_window(query_params.start_time, query_params.end_time)
 
-    if config.enforce_time_window:
+    if effective_config.enforce_time_window:
         time_window_valid, time_error = validate_time_window(time_window)
         if not time_window_valid:
-            return _empty_result(_EmptyResultInput(query_template, params, time_window, max_results, time_error.to_dict() if time_error else {}))
+            return _empty_result(_EmptyResultInput(query_template, _result_params(query_params), time_window, max_results, time_error.to_dict() if time_error else {}))
 
     if query_template == "file_tail":
-        if not file_path:
-            return _empty_result(_EmptyResultInput(query_template, params, time_window, max_results, _missing_file_error()))
-        return execute_file_tail(str(file_path), time_window, max_results, config)
+        if not query_params.file_path:
+            return _empty_result(_EmptyResultInput(query_template, _result_params(query_params), time_window, max_results, _missing_file_error()))
+        return execute_file_tail(str(query_params.file_path), time_window, max_results, effective_config)
 
-    return _empty_result(_EmptyResultInput(query_template, params, time_window, max_results, _unsupported_template_error(query_template)))
+    return _empty_result(_EmptyResultInput(query_template, _result_params(query_params), time_window, max_results, _unsupported_template_error(query_template)))
 
 
-def _query_inputs(args: tuple[Any, ...], params: dict[str, Any]) -> tuple[str | None, str | None, str | None, int | None, BoundedQueryConfig]:
-    names = ("file_path", "start_time", "end_time", "max_results", "config")
-    for name, value in zip(names, args, strict=False):
-        params.setdefault(name, value)
-    config = params.pop("config", None) or default_config
-    return (
-        params.pop("file_path", None),
-        params.pop("start_time", None),
-        params.pop("end_time", None),
-        params.pop("max_results", None),
-        config,
+def _query_inputs(
+    *,
+    params: BoundedQueryParams | None,
+    file_path: str | None,
+    start_time: str | None,
+    end_time: str | None,
+    max_results: int | None,
+    config: BoundedQueryConfig | None,
+) -> BoundedQueryParams:
+    if params is not None:
+        return params
+    return BoundedQueryParams(
+        file_path=file_path,
+        start_time=start_time,
+        end_time=end_time,
+        max_results=max_results,
+        config=config,
     )
+
+
+def _result_params(params: BoundedQueryParams) -> dict[str, Any]:
+    return {
+        "file_path": params.file_path,
+        "start_time": params.start_time,
+        "end_time": params.end_time,
+        "max_results": params.max_results,
+    }
 
 
 def _effective_max_results(max_results: int | None, config: BoundedQueryConfig) -> int:

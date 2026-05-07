@@ -34,16 +34,6 @@ class ScheduleFindingsOptions:
     merge_window_minutes: int = 15
     search_store: Any | None = None
 
-    @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> ScheduleFindingsOptions:
-        return cls(
-            root=kwargs.get("root"),
-            store=kwargs.get("store"),
-            min_case_confidence=float(kwargs.get("min_case_confidence", 0.6)),
-            merge_window_minutes=int(kwargs.get("merge_window_minutes", 15)),
-            search_store=kwargs.get("search_store"),
-        )
-
 
 class CaseScheduler:
     def __init__(self, store: CaseStore, *, min_case_confidence: float | None = None) -> None:
@@ -85,9 +75,19 @@ def schedule_findings(
     findings: Sequence[Finding | Mapping[str, Any]],
     *,
     options: ScheduleFindingsOptions | None = None,
-    **kwargs: Any,
+    root: str | Path | None = None,
+    store: CaseStore | None = None,
+    min_case_confidence: float = 0.6,
+    merge_window_minutes: int = 15,
+    search_store: Any | None = None,
 ) -> ScheduleResult:
-    schedule_options = options or ScheduleFindingsOptions.from_kwargs(**kwargs)
+    schedule_options = options or ScheduleFindingsOptions(
+        root=root,
+        store=store,
+        min_case_confidence=float(min_case_confidence),
+        merge_window_minutes=int(merge_window_minutes),
+        search_store=search_store,
+    )
     case_store = schedule_options.store or CaseStore(
         schedule_options.root or Path("data") / "log_analysis",
         min_case_confidence=schedule_options.min_case_confidence,
@@ -101,9 +101,21 @@ def findings_to_cases(
     findings: Sequence[Finding | Mapping[str, Any]],
     *,
     options: ScheduleFindingsOptions | None = None,
-    **kwargs: Any,
+    root: str | Path | None = None,
+    store: CaseStore | None = None,
+    min_case_confidence: float = 0.6,
+    merge_window_minutes: int = 15,
+    search_store: Any | None = None,
 ) -> list[CaseRecord]:
-    return schedule_findings(findings, options=options, **kwargs).cases
+    return schedule_findings(
+        findings,
+        options=options,
+        root=root,
+        store=store,
+        min_case_confidence=min_case_confidence,
+        merge_window_minutes=merge_window_minutes,
+        search_store=search_store,
+    ).cases
 
 
 __all__ = ["CaseScheduler", "ScheduleFindingsOptions", "ScheduleResult", "findings_to_cases", "schedule_findings"]

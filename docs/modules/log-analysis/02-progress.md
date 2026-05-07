@@ -63,3 +63,8 @@
 - Refactored log-analysis prompts, ingestion, dispatch, parser, and security helpers into smaller internal units.
 - Cleared current log-analysis 80% code-size high-risk findings while preserving public call surfaces and test behavior.
 - Verified with log-focused pytest, ruff, and the global code-size report.
+
+## 2026-05-07 bundle interface completion
+- Converted log-analysis coercion, parser, query, ingest, evidence, scheduler, reports, work-order planning/creation, entity graph, and bounded query paths to explicit Params/Options bundles or explicit keyword adapters.
+- Removed product-level function var-keyword interfaces from `agent/log_analysis`; the work-order task creation boundary now passes `CreateRunParams` instead of expanding task payload fields.
+- Focused verification covered log-analysis query, ingest, dispatch queue/health, scheduler, first-loop bounded query, and work-order creation paths.

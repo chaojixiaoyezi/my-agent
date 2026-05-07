@@ -73,7 +73,7 @@
 - Phase 6 memory gate 解决了“经验火花和 finding 没有提升门禁文件”的缺口；现在 lesson/finding 先进入 run-local review queue，必须补齐 evidence、适用范围、限制/反例和人工或 verifier 确认，后续流程才能考虑进入长期 memory 或正式 skill。
 - Phase 6 review decision 解决了“候选只有排队，没有可审计 reviewer 结论”的缺口；现在 approve/reject/needs_evidence 会保留在 gate 文件里，而且后续 task save 会保留已写回的 decision。
 - Phase 6 显式收口链解决了“approve 之后仍缺导出、清理和验收闭环”的缺口；现在 closed 候选能从 active review queue 清出但不删除审计，长期 memory 写入和 skill draft 生成都必须由 CLI 显式触发。
-- bundle 接口规范解决了“函数参数散、Params/Options/Request 混用且后续扩字段会拉长签名”的问题；第一批落点已覆盖 runtime memory workspace sync、memory gate export/review/retention、acceptance review、patch review/apply、action apply、lifecycle status 和 CLI 边界转换，后续新增接口继续按同一规则迁移。
+- bundle 接口规范解决了“函数参数散、Params/Options/Request 混用且后续扩字段会拉长签名”的问题；当前落点已覆盖 runtime memory workspace sync、memory gate export/review/retention、acceptance review、patch review/apply、action apply、lifecycle status、gateway/log-analysis/memory-archive/audit/local-storage/backend 和 CLI 边界转换，并新增架构护栏阻止业务代码继续引入函数级 var-keyword 服务接口。
 - compression hook 门禁解决了“压缩前没有可靠快照也会继续执行，导致恢复锚点缺失”的问题。
 - authoritative snapshot JSON 解决了“hook JSONL 适合搜索但不适合作为严格恢复锚点”的问题。
 - capability gap 与长期规则联动解决了“子代理已经发现自己缺什么，但相关规则没有自动回流到执行上下文”的问题。

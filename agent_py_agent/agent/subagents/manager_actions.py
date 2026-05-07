@@ -7,6 +7,8 @@ Human version:
 业务逻辑已移至 services/actions.py。
 """
 
+from .models import SubAgentTask
+from .reports import ActionApplyRecord, ActionPlanItem
 from .services.action_options import ActionApplyOptions
 from .services.actions import SubAgentActionService
 
@@ -21,28 +23,102 @@ class SubAgentActionMixin:
         return self.__action_service
 
     # Internal methods for backward compatibility with tests
-    def _apply_action_item(self, *args, **kwargs):
-        return self._action_service._apply_action_item(*args, **kwargs)
-
-    def _record_after_task_action(self, *args, **kwargs):
-        return self._action_service._record_after_task_action(*args, **kwargs)
-
-    def _append_action_apply_log(self, *args, **kwargs):
-        return self._action_service._append_action_apply_log(*args, **kwargs)
-
-    def _append_task_work_log(self, *args, **kwargs):
-        return self._action_service._append_task_work_log(*args, **kwargs)
-
-    def apply_actions(self, config=None, options: ActionApplyOptions | None = None, **overrides):
-        return self._action_service.apply_actions(
-            config,
-            ActionApplyOptions.from_values(options, **overrides),
+    def _apply_action_item(
+        self,
+        action: ActionPlanItem,
+        *,
+        options: ActionApplyOptions | None = None,
+        apply: bool | None = None,
+        action_filter: str | None = None,
+        run_id: str | None = None,
+        take_over_by: str | None = None,
+        locked_files: list[str] | None = None,
+        limit: int | None = None,
+    ):
+        return self._action_service._apply_action_item(
+            action,
+            options=options,
+            apply=apply,
+            action_filter=action_filter,
+            run_id=run_id,
+            take_over_by=take_over_by,
+            locked_files=locked_files,
+            limit=limit,
         )
 
-    def write_action_apply_report(self, config=None, options: ActionApplyOptions | None = None, **overrides):
+    def _record_after_task_action(
+        self,
+        action: ActionPlanItem,
+        task: SubAgentTask,
+        before_status: str,
+        before_channel_status: str,
+        message: str,
+        *,
+        evidence_paths: list[str] | None = None,
+    ):
+        return self._action_service._record_after_task_action(
+            action,
+            task,
+            before_status,
+            before_channel_status,
+            message,
+            evidence_paths=evidence_paths,
+        )
+
+    def _append_action_apply_log(self, record: ActionApplyRecord):
+        return self._action_service._append_action_apply_log(record)
+
+    def _append_task_work_log(self, task: SubAgentTask, message: str):
+        return self._action_service._append_task_work_log(task, message)
+
+    def apply_actions(
+        self,
+        config=None,
+        options: ActionApplyOptions | None = None,
+        *,
+        apply: bool | None = None,
+        action_filter: str | None = None,
+        run_id: str | None = None,
+        take_over_by: str | None = None,
+        locked_files: list[str] | None = None,
+        limit: int | None = None,
+    ):
+        return self._action_service.apply_actions(
+            config,
+            ActionApplyOptions.from_values(
+                options,
+                apply=apply,
+                action_filter=action_filter,
+                run_id=run_id,
+                take_over_by=take_over_by,
+                locked_files=locked_files,
+                limit=limit,
+            ),
+        )
+
+    def write_action_apply_report(
+        self,
+        config=None,
+        options: ActionApplyOptions | None = None,
+        *,
+        apply: bool | None = None,
+        action_filter: str | None = None,
+        run_id: str | None = None,
+        take_over_by: str | None = None,
+        locked_files: list[str] | None = None,
+        limit: int | None = None,
+    ):
         import json
         from dataclasses import asdict
-        opts = ActionApplyOptions.from_values(options, **overrides)
+        opts = ActionApplyOptions.from_values(
+            options,
+            apply=apply,
+            action_filter=action_filter,
+            run_id=run_id,
+            take_over_by=take_over_by,
+            locked_files=locked_files,
+            limit=limit,
+        )
         report = self.apply_actions(config, opts)
         (self.workspace / "subagent_action_apply_report.json").write_text(
             json.dumps(asdict(report), ensure_ascii=False, indent=2), encoding="utf-8",

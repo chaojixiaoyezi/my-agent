@@ -113,7 +113,7 @@ def _export_request_with_paths(
     memory_path: str | Path | None = None,
     output_dir: str | Path | None = None,
 ) -> MemoryGateExportRequest:
-    # LLM: old manager kwargs stay compatible while the core export API receives one bundle.
+    # LLM: old manager fields stay compatible while the core export API receives one bundle.
     return MemoryGateExportRequest(
         candidate_id=request.candidate_id,
         reviewer=request.reviewer,

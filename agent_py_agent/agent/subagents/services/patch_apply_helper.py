@@ -18,7 +18,11 @@ class PatchApplyTaskHelper:
         task,
         *,
         params=None,
-        **legacy,
+        output: dict | None = None,
+        patches: list[dict] | None = None,
+        apply: bool = False,
+        applier: str = "parent",
+        note: str = "",
     ):
         """Apply patches for a single task (inline minimal implementation)."""
         # LLM: fallback mirrors the bundle-first service path when the service is not initialized.
@@ -28,10 +32,7 @@ class PatchApplyTaskHelper:
             applier = params.applier
             note = params.note
         else:
-            patches = legacy.get("patches") or []
-            apply = bool(legacy.get("apply", False))
-            applier = legacy.get("applier", "parent")
-            note = legacy.get("note", "")
+            patches = patches or []
 
         now = time.time()
         blocked = [

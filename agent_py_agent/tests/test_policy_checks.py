@@ -9,6 +9,7 @@ import pytest
 
 from agent_py_agent.agent.subagents.models import CapabilityRequest, SubAgentParsedOutput
 from agent_py_agent.agent.subagents.policy_checks import (
+    RunnerNextActionParams,
     _action_for_issue,
     _commands_for_action,
     _default_forbidden_write_roots,
@@ -96,10 +97,12 @@ def test_verification_other_statuses():
 def test_runner_next_action_dry_run():
     """测试 dry_run 不建议动作。"""
     result = _runner_next_action(
-        dry_run=True,
-        ok=True,
-        status="RUNNING",
-        capability_request_count=0,
+        params=RunnerNextActionParams(
+            dry_run=True,
+            ok=True,
+            status="RUNNING",
+            capability_request_count=0,
+        ),
     )
     assert result == ""
 
@@ -107,10 +110,12 @@ def test_runner_next_action_dry_run():
 def test_runner_next_action_capability_request():
     """有能力请求时路由。"""
     result = _runner_next_action(
-        dry_run=False,
-        ok=True,
-        status="RUNNING",
-        capability_request_count=1,
+        params=RunnerNextActionParams(
+            dry_run=False,
+            ok=True,
+            status="RUNNING",
+            capability_request_count=1,
+        ),
     )
     assert result == "route_capability_request"
 
@@ -118,11 +123,13 @@ def test_runner_next_action_capability_request():
 def test_runner_next_action_next_actions():
     """有 next_actions 时取第一个。"""
     result = _runner_next_action(
-        dry_run=False,
-        ok=True,
-        status="RUNNING",
-        capability_request_count=0,
-        next_actions=["custom_action", "another"],
+        params=RunnerNextActionParams(
+            dry_run=False,
+            ok=True,
+            status="RUNNING",
+            capability_request_count=0,
+            next_actions=["custom_action", "another"],
+        ),
     )
     assert result == "custom_action"
 
@@ -130,10 +137,12 @@ def test_runner_next_action_next_actions():
 def test_runner_next_action_awaiting_acceptance():
     """AWAITING_ACCEPTANCE 时跑验收。"""
     result = _runner_next_action(
-        dry_run=False,
-        ok=True,
-        status="AWAITING_ACCEPTANCE",
-        capability_request_count=0,
+        params=RunnerNextActionParams(
+            dry_run=False,
+            ok=True,
+            status="AWAITING_ACCEPTANCE",
+            capability_request_count=0,
+        ),
     )
     assert result == "run_acceptance"
 
@@ -141,10 +150,12 @@ def test_runner_next_action_awaiting_acceptance():
 def test_runner_next_action_not_ok():
     """失败时检查失败原因。"""
     result = _runner_next_action(
-        dry_run=False,
-        ok=False,
-        status="FAILED",
-        capability_request_count=0,
+        params=RunnerNextActionParams(
+            dry_run=False,
+            ok=False,
+            status="FAILED",
+            capability_request_count=0,
+        ),
     )
     assert result == "inspect_runner_failure"
 
@@ -152,11 +163,13 @@ def test_runner_next_action_not_ok():
 def test_runner_next_action_no_suggestion():
     """没有任何线索时返回空。"""
     result = _runner_next_action(
-        dry_run=False,
-        ok=True,
-        status="RUNNING",
-        capability_request_count=0,
-        next_actions=None,
+        params=RunnerNextActionParams(
+            dry_run=False,
+            ok=True,
+            status="RUNNING",
+            capability_request_count=0,
+            next_actions=None,
+        ),
     )
     assert result == ""
 
@@ -164,11 +177,13 @@ def test_runner_next_action_no_suggestion():
 def test_runner_next_action_empty_next_actions():
     """空 next_actions 列表不触发自定义动作。"""
     result = _runner_next_action(
-        dry_run=False,
-        ok=True,
-        status="RUNNING",
-        capability_request_count=0,
-        next_actions=[],
+        params=RunnerNextActionParams(
+            dry_run=False,
+            ok=True,
+            status="RUNNING",
+            capability_request_count=0,
+            next_actions=[],
+        ),
     )
     assert result == ""
 
@@ -424,9 +439,11 @@ def test_status_from_structured_output_capability_priority():
 def test_runner_next_action_dry_run_with_capability():
     """dry_run 时即使有能力请求也返回空。"""
     result = _runner_next_action(
-        dry_run=True,
-        ok=True,
-        status="RUNNING",
-        capability_request_count=5,
+        params=RunnerNextActionParams(
+            dry_run=True,
+            ok=True,
+            status="RUNNING",
+            capability_request_count=5,
+        ),
     )
     assert result == ""

@@ -52,21 +52,26 @@ def subagent_run_params(
     params: SubagentRunParams | None,
     *,
     run_id: str | None,
-    kwargs: dict[str, object],
+    instruction: str = "",
+    dry_run: bool = True,
+    max_cards: int = 0,
+    probe: bool = True,
+    retry_reason: str = "",
+    attempt_id: str = "",
 ) -> SubagentRunParams:
     if params is not None:
         if not isinstance(params, SubagentRunParams):
             raise TypeError("run_subagent() requires params: SubagentRunParams")
         return params
-    # LLM: run_subagent keeps legacy kwargs but core code consumes a single run bundle.
+    # LLM: run_subagent keeps explicit legacy fields but core code consumes one run bundle.
     return SubagentRunParams(
-        run_id=str(run_id or kwargs["run_id"]),
-        instruction=str(kwargs.get("instruction", "")),
-        dry_run=bool(kwargs.get("dry_run", True)),
-        max_cards=int(kwargs.get("max_cards", 0)),
-        probe=bool(kwargs.get("probe", True)),
-        retry_reason=str(kwargs.get("retry_reason", "")),
-        attempt_id=str(kwargs.get("attempt_id", "")),
+        run_id=str(run_id or ""),
+        instruction=str(instruction),
+        dry_run=bool(dry_run),
+        max_cards=int(max_cards),
+        probe=bool(probe),
+        retry_reason=str(retry_reason),
+        attempt_id=str(attempt_id),
     )
 
 

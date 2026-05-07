@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Payload assembly for subagent runner result files."""
 
-from .policies import _runner_next_action
+from .policies import RunnerNextActionParams, _runner_next_action
 from .result_contexts import OutputPayloadContext
 
 
@@ -57,11 +57,13 @@ def _build_output_payload(ctx: OutputPayloadContext) -> dict[str, object]:
         "lessons": ctx.lessons,
         "blockers": ctx.blockers,
         "next_action": _runner_next_action(
-            dry_run=ctx.dry_run,
-            ok=ctx.ok,
-            status=task.status,
-            capability_request_count=ctx.structured_request_count,
-            next_actions=ctx.next_actions,
+            params=RunnerNextActionParams(
+                dry_run=ctx.dry_run,
+                ok=ctx.ok,
+                status=task.status,
+                capability_request_count=ctx.structured_request_count,
+                next_actions=ctx.next_actions,
+            ),
         ),
         "next_actions": ctx.next_actions,
         "created_at": ctx.now,

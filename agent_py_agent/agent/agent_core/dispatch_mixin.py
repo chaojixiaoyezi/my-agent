@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..subagent import DispatchReport
+from ..subagents.services.dispatch_params import DispatchRecordParams
 from .dispatch_facade import _DispatchFacadeMixin, _DispatchFailureMixin
 from .dispatch_params import (
     DispatchContext,
@@ -87,9 +88,11 @@ class _DispatchCollectionBase:
             planner_record = self.run_parent_planner(planner_params)
             records.append(
                 self.subagents.make_dispatch_record(
-                    step="parent_planner", action=planner_record.decision.lower(),
-                    dry_run=not ctx.apply, applied=False, ok=planner_record.ok,
-                    message=planner_record.message, evidence_paths=planner_record.evidence_paths,
+                    params=DispatchRecordParams(
+                        step="parent_planner", action=planner_record.decision.lower(),
+                        dry_run=not ctx.apply, applied=False, ok=planner_record.ok,
+                        message=planner_record.message, evidence_paths=planner_record.evidence_paths,
+                    ),
                 )
             )
 
@@ -183,9 +186,36 @@ class SimpleAgentDispatchMixin(
         capability_config: CapabilityConfig | None = None,
         *,
         params: DispatchParams | None = None,
-        **kwargs,
+        apply: bool = False,
+        execute_runners: bool = False,
+        planner: bool = False,
+        workflow_mode: str = "off",
+        max_runners: int = 1,
+        limit: int = 20,
+        reviewer: str = "parent-dispatch",
+        note: str = "",
+        runner_instruction: str = "",
+        max_cards: int = 0,
+        probe: bool = True,
+        take_over_by: str = "",
+        locked_files: list[str] | None = None,
     ) -> DispatchReport:
-        params = merge_dispatch_params(params, kwargs)
+        params = params or DispatchParams(
+            apply=apply,
+            execute_runners=execute_runners,
+            planner=planner,
+            workflow_mode=workflow_mode,
+            max_runners=max_runners,
+            limit=limit,
+            reviewer=reviewer,
+            note=note,
+            runner_instruction=runner_instruction,
+            max_cards=max_cards,
+            probe=probe,
+            take_over_by=take_over_by,
+            locked_files=locked_files,
+        )
+        params = merge_dispatch_params(params)
 
         cfg = capability_config or CapabilityConfig()
         normalized_workflow_mode = str(params.workflow_mode or "off").strip().lower()

@@ -65,3 +65,8 @@ agent_py_agent/agent/log_analysis/
 ## 2026-05-06 structure update
 - Ingestion, work-order dispatch, parser, and security modules now use small helper functions and parameter bundles for long internal call paths.
 - Public log-analysis package layout and external command behavior remain stable; the cleanup is an internal maintainability pass.
+
+## 2026-05-07 bundle structure update
+- `bounded_query.py` exposes `BoundedQueryParams` for file-tail query options; old explicit keyword fields are normalized into that bundle at the boundary.
+- `dispatch/work_orders/creation.py` now calls subagent creation with `CreateRunParams`, so LOG dispatch no longer expands arbitrary task fields across the module boundary.
+- The parser, ingest, report, evidence, scheduler, storage query, and tool query helpers use domain-specific Params/Options records for multi-field inputs; no LOG product function keeps a var-keyword service signature.

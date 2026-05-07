@@ -37,16 +37,6 @@ class PlanWorkOrdersOptions:
     mode: str = "manual"
     dry_run: bool = True
 
-    @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> PlanWorkOrdersOptions:
-        return cls(
-            evidence_refs=kwargs.get("evidence_refs"),
-            route_summary=kwargs.get("route_summary"),
-            quality_contract=kwargs.get("quality_contract"),
-            mode=str(kwargs.get("mode", "manual")),
-            dry_run=bool(kwargs.get("dry_run", True)),
-        )
-
 
 def _get(source: Any, key: str, default: Any = None) -> Any:
     """Read a field from either a mapping or an object."""
@@ -168,10 +158,20 @@ def plan_case_subagent_work_orders(
     case: Any,
     *,
     options: PlanWorkOrdersOptions | None = None,
-    **kwargs: Any,
+    evidence_refs: Any = None,
+    route_summary: Mapping[str, Any] | None = None,
+    quality_contract: Mapping[str, Any] | None = None,
+    mode: str = "manual",
+    dry_run: bool = True,
 ) -> LogAnalysisWorkOrderPlan:
     """Generate bounded analyst/reviewer work orders for one log-analysis case."""
-    plan_options = options or PlanWorkOrdersOptions.from_kwargs(**kwargs)
+    plan_options = options or PlanWorkOrdersOptions(
+        evidence_refs=evidence_refs,
+        route_summary=route_summary,
+        quality_contract=quality_contract,
+        mode=str(mode),
+        dry_run=bool(dry_run),
+    )
     inputs = _plan_inputs(
         case,
         plan_options.evidence_refs,

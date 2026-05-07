@@ -24,6 +24,19 @@ class ModelResponse:
     backend: str
 
 
+@dataclass(frozen=True)
+class BackendOptions:
+    """Connection and generation options shared by HTTP model backends."""
+
+    api_base: str
+    api_key: str
+    model_name: str
+    request_timeout: int = 60
+    max_tokens: int = 1024
+    temperature: float = 0.2
+    stream_enabled: bool = True
+
+
 class BaseBackend:
     """所有后端适配器都要实现的基类接口。"""
 
@@ -66,14 +79,37 @@ class EchoBackend(BaseBackend):
 class HttpBackend(BaseBackend):
     """真实模型后端共用的 HTTP 请求基础逻辑。"""
 
-    def __init__(self, **kwargs: Any):
-        self.api_base = str(kwargs["api_base"]).rstrip("/")
-        self.api_key = str(kwargs["api_key"])
-        self.model_name = str(kwargs["model_name"])
-        self.request_timeout = int(kwargs.get("request_timeout", 60))
-        self.max_tokens = int(kwargs.get("max_tokens", 1024))
-        self.temperature = float(kwargs.get("temperature", 0.2))
-        self.stream_enabled = bool(kwargs.get("stream_enabled", True))
+    def __init__(
+        self,
+        options: BackendOptions | None = None,
+        *,
+        api_base: str | None = None,
+        api_key: str | None = None,
+        model_name: str | None = None,
+        request_timeout: int | str = 60,
+        max_tokens: int | str = 1024,
+        temperature: float | str = 0.2,
+        stream_enabled: bool = True,
+    ):
+        if options is None:
+            if api_base is None or api_key is None or model_name is None:
+                raise TypeError("HttpBackend requires BackendOptions or api_base/api_key/model_name")
+            options = BackendOptions(
+                api_base=str(api_base),
+                api_key=str(api_key),
+                model_name=str(model_name),
+                request_timeout=int(request_timeout),
+                max_tokens=int(max_tokens),
+                temperature=float(temperature),
+                stream_enabled=bool(stream_enabled),
+            )
+        self.api_base = str(options.api_base).rstrip("/")
+        self.api_key = str(options.api_key)
+        self.model_name = str(options.model_name)
+        self.request_timeout = int(options.request_timeout)
+        self.max_tokens = int(options.max_tokens)
+        self.temperature = float(options.temperature)
+        self.stream_enabled = bool(options.stream_enabled)
 
     def request_json(
         self, path: str, payload: dict[str, Any], headers: dict[str, str]
@@ -198,8 +234,29 @@ class AnthropicCompatibleBackend(HttpBackend):
 
     name = "anthropic_compatible"
 
-    def __init__(self, *, anthropic_version: str = "2023-06-01", **kwargs: Any):
-        super().__init__(**kwargs)
+    def __init__(
+        self,
+        options: BackendOptions | None = None,
+        *,
+        anthropic_version: str = "2023-06-01",
+        api_base: str | None = None,
+        api_key: str | None = None,
+        model_name: str | None = None,
+        request_timeout: int | str = 60,
+        max_tokens: int | str = 1024,
+        temperature: float | str = 0.2,
+        stream_enabled: bool = True,
+    ):
+        super().__init__(
+            options,
+            api_base=api_base,
+            api_key=api_key,
+            model_name=model_name,
+            request_timeout=request_timeout,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stream_enabled=stream_enabled,
+        )
         self.anthropic_version = anthropic_version
 
     def generate(
@@ -262,7 +319,7 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
     if config is None:
         raise ValueError("真实模型后端需要传入 config。")
 
-    common = dict(
+    common = BackendOptions(
         api_base=config.api_base,
         api_key=config.api_key,
         model_name=config.model_name,
@@ -273,10 +330,10 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
     )
 
     if name == "openai_compatible":
-        return OpenAICompatibleBackend(**common)
+        return OpenAICompatibleBackend(common)
     if name == "anthropic_compatible":
         return AnthropicCompatibleBackend(
-            **common,
+            common,
             anthropic_version=config.anthropic_version,
         )
 

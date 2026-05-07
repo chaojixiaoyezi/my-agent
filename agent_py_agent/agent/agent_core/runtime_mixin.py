@@ -9,7 +9,7 @@ from __future__ import annotations
 Facade pattern: delegates to service classes in runtime_services.py.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from typing import Any
 
 from ..memory_archive import (
@@ -92,12 +92,7 @@ class _RuntimeServices:
     finalization: FinalizationService
 
 
-_RUN_PARAM_KEYS = [
-    "inject", "prompt_files", "save", "allowed_tools", "granted_capabilities",
-    "write_boundary", "request_id", "run_id", "task_id", "task_attributes",
-    "source", "recovery_snapshot", "resume_context", "recovery_task_refs",
-    "recovery_content_paths", "recovery_next_actions", "on_chunk",
-]
+_RUN_PARAM_FIELD_NAMES = tuple(field.name for field in fields(RunParams))
 
 
 class SimpleAgentRuntimeMixin:
@@ -136,14 +131,44 @@ class SimpleAgentRuntimeMixin:
         user_prompt: str,
         *,
         params: RunParams = None,
-        **kwargs,
+        inject: list[str] | None = None,
+        prompt_files: list[str] | None = None,
+        save: bool | None = None,
+        allowed_tools: list[str] | None = None,
+        granted_capabilities: list[str] | None = None,
+        write_boundary: dict[str, object] | None = None,
+        request_id: str | None = None,
+        run_id: str | None = None,
+        task_id: str | None = None,
+        task_attributes: dict | None = None,
+        source: str | None = None,
+        recovery_snapshot: bool | None = None,
+        resume_context: bool | None = None,
+        recovery_task_refs: list[str] | None = None,
+        recovery_content_paths: list[str] | None = None,
+        recovery_next_actions: list[str] | None = None,
+        on_chunk: object = None,
     ):
-        if params is None:
-            params = RunParams()
-        elif not isinstance(params, RunParams):
-            raise TypeError("run() requires params: RunParams keyword argument")
-
-        _apply_run_kwargs(params, kwargs)
+        params = run_params_from_values(
+            params,
+            inject=inject,
+            prompt_files=prompt_files,
+            save=save,
+            allowed_tools=allowed_tools,
+            granted_capabilities=granted_capabilities,
+            write_boundary=write_boundary,
+            request_id=request_id,
+            run_id=run_id,
+            task_id=task_id,
+            task_attributes=task_attributes,
+            source=source,
+            recovery_snapshot=recovery_snapshot,
+            resume_context=resume_context,
+            recovery_task_refs=recovery_task_refs,
+            recovery_content_paths=recovery_content_paths,
+            recovery_next_actions=recovery_next_actions,
+            on_chunk=on_chunk,
+        )
 
         memories, runtime_injections, routed_context, resume_context_result = (
             _prepare_runtime_context(self, user_prompt, params.inject, params.resume_context)
@@ -221,10 +246,55 @@ class SimpleAgentRuntimeMixin:
         return self.memory.search(query, top_k or self.config.memory_top_k)
 
 
-def _apply_run_kwargs(params: RunParams, kwargs: dict[str, object]) -> None:
-    for key in _RUN_PARAM_KEYS:
-        if key in kwargs:
-            setattr(params, key, kwargs[key])
+def run_params_from_values(
+    params: RunParams | None = None,
+    *,
+    inject: list[str] | None = None,
+    prompt_files: list[str] | None = None,
+    save: bool | None = None,
+    allowed_tools: list[str] | None = None,
+    granted_capabilities: list[str] | None = None,
+    write_boundary: dict[str, object] | None = None,
+    request_id: str | None = None,
+    run_id: str | None = None,
+    task_id: str | None = None,
+    task_attributes: dict | None = None,
+    source: str | None = None,
+    recovery_snapshot: bool | None = None,
+    resume_context: bool | None = None,
+    recovery_task_refs: list[str] | None = None,
+    recovery_content_paths: list[str] | None = None,
+    recovery_next_actions: list[str] | None = None,
+    on_chunk: object = None,
+) -> RunParams:
+    if params is None:
+        params = RunParams()
+    elif not isinstance(params, RunParams):
+        raise TypeError("run() requires params: RunParams keyword argument")
+
+    candidates = {
+        "inject": inject,
+        "prompt_files": prompt_files,
+        "save": save,
+        "allowed_tools": allowed_tools,
+        "granted_capabilities": granted_capabilities,
+        "write_boundary": write_boundary,
+        "request_id": request_id,
+        "run_id": run_id,
+        "task_id": task_id,
+        "task_attributes": task_attributes,
+        "source": source,
+        "recovery_snapshot": recovery_snapshot,
+        "resume_context": resume_context,
+        "recovery_task_refs": recovery_task_refs,
+        "recovery_content_paths": recovery_content_paths,
+        "recovery_next_actions": recovery_next_actions,
+        "on_chunk": on_chunk,
+    }
+    updates = {key: value for key, value in candidates.items() if key in _RUN_PARAM_FIELD_NAMES and value is not None}
+    if not updates:
+        return params
+    return replace(params, **updates)
 
 
 def _resolve_tool_sections(agent, allowed_tools, granted_capabilities):

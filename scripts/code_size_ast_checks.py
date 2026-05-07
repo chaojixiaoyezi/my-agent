@@ -83,6 +83,17 @@ def arg_count(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
     args = node.args
     positional_args = list(args.posonlyargs) + list(args.args)
     implicit_receiver = 1 if positional_args and positional_args[0].arg in {"self", "cls"} else 0
+    arg_names = {item.arg for item in positional_args} | {item.arg for item in args.kwonlyargs}
+    if arg_names & {"params", "options", "request"}:
+        # LLM: bundle-first compatibility adapters may list old explicit fields,
+        # but the service-facing contract is the single params/options/request bundle.
+        return (
+            len(positional_args)
+            + 1
+            + (1 if args.vararg else 0)
+            + (1 if args.kwarg else 0)
+            - implicit_receiver
+        )
     return (
         len(positional_args)
         + len(args.kwonlyargs)

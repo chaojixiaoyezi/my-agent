@@ -35,9 +35,44 @@ class _DispatchFacadeMixin:
         capability_config: CapabilityConfig | None = None,
         *,
         params: WatchParams = None,
-        **kwargs,
+        apply: bool = False,
+        execute_runners: bool = False,
+        planner: bool = False,
+        workflow_mode: str = "off",
+        max_runners: int = 1,
+        limit: int = 20,
+        reviewer: str = "parent-dispatch",
+        note: str = "",
+        runner_instruction: str = "",
+        max_cards: int = 0,
+        probe: bool = True,
+        take_over_by: str = "",
+        locked_files: list[str] | None = None,
+        interval: float = 30.0,
+        max_cycles: int = 0,
+        force_lock: bool = False,
+        stop_file=None,
     ) -> DispatchWatchReport:
-        params = merge_watch_params(params, kwargs)
+        params = params or WatchParams(
+            apply=apply,
+            execute_runners=execute_runners,
+            planner=planner,
+            workflow_mode=workflow_mode,
+            max_runners=max_runners,
+            limit=limit,
+            reviewer=reviewer,
+            note=note,
+            runner_instruction=runner_instruction,
+            max_cards=max_cards,
+            probe=probe,
+            take_over_by=take_over_by,
+            locked_files=locked_files,
+            interval=interval,
+            max_cycles=max_cycles,
+            force_lock=force_lock,
+            stop_file=stop_file,
+        )
+        params = merge_watch_params(params)
         return _watch_subagents(self, router=router, capability_config=capability_config, params=params)
 
 

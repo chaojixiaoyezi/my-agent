@@ -54,18 +54,8 @@ def execute_archive_query(
 
 def collect_raw_archive_records(
     root: Path,
-    options: RawArchiveCollectOptions | str | None = None,
-    *args: Any,
-    **kwargs: Any,
+    options: RawArchiveCollectOptions,
 ) -> list[dict[str, Any]]:
-    if not isinstance(options, RawArchiveCollectOptions):
-        options = RawArchiveCollectOptions(
-            layer=str(options or kwargs["layer"]),
-            date_key=args[0] if len(args) > 0 else kwargs.get("date_key"),
-            limit=int(args[1] if len(args) > 1 else kwargs.get("limit", 0)),
-            level=args[2] if len(args) > 2 else kwargs.get("level"),
-        )
-
     records: list[dict[str, Any]] = []
     for current_layer, path in _archive_files(root, layer=options.layer, date_key=options.date_key):
         records.extend(_read_archive_file(current_layer, path))
@@ -77,17 +67,8 @@ def collect_raw_archive_records(
 
 def apply_filters(
     records: list[dict[str, Any]],
-    options: ArchiveFilterOptions | None = None,
-    **kwargs: Any,
+    options: ArchiveFilterOptions,
 ) -> list[dict[str, Any]]:
-    options = options or ArchiveFilterOptions(
-        query=str(kwargs.get("query", "")),
-        filters=dict(kwargs.get("filters", {}) or {}),
-        since=kwargs.get("since"),
-        until=kwargs.get("until"),
-        level=kwargs.get("level"),
-    )
-
     return [
         record
         for record in records

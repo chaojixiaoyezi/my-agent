@@ -132,7 +132,7 @@ def run_scenario_gateway_delayed_response_case(args) -> int:
 
     run_called = {"value": False}
 
-    def fail_if_called(user_prompt: str, **kwargs) -> AgentRunResult:
+    def fail_if_called(user_prompt: str, *, params=None) -> AgentRunResult:
         run_called["value"] = True
         raise AssertionError("agent.run should not be called when response already exists")
 

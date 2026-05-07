@@ -153,3 +153,8 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 ## 2026-05-06 structure update
 - Memory archive query logic now delegates filtering, task payload construction, gateway payload collection, and resume guidance rendering to focused helpers.
 - Memory routing matcher internals separate scoring specs, score accumulation, and receipt creation while keeping public model outputs stable.
+
+## 2026-05-07 bundle structure update
+- `memory_archive/query/query_logic.py` now exposes explicit archive collection/filter fields, and higher-level query service code converts compatibility inputs before filtering.
+- `resume_brief.py`, snapshot helpers, and memory route read receipts now use explicit Params/Options-style fields rather than var-keyword option bags.
+- Memory remains a fact-source locator: bundle cleanup does not change the authority model where task/run/gateway files stay authoritative and LocalStore/archive records are clues.

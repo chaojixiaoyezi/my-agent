@@ -51,17 +51,6 @@ class PendingInvestigationInput:
     case_summary: dict[str, Any] = field(default_factory=dict)
     route_summary: dict[str, Any] = field(default_factory=dict)
 
-    @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> PendingInvestigationInput:
-        return cls(
-            case_id=str(kwargs.get("case_id", "")),
-            priority=str(kwargs.get("priority", "")),
-            reason=str(kwargs.get("reason", "")),
-            evidence_refs=list(kwargs.get("evidence_refs") or []),
-            case_summary=dict(kwargs.get("case_summary") or {}),
-            route_summary=dict(kwargs.get("route_summary") or {}),
-        )
-
 
 class InvestigationQueue:
     """Small queue owned by the parent/session health layer."""
@@ -85,9 +74,21 @@ class InvestigationQueue:
         self,
         *,
         pending: PendingInvestigationInput | None = None,
-        **kwargs: Any,
+        case_id: str = "",
+        priority: str = "",
+        reason: str = "",
+        evidence_refs: list[str] | None = None,
+        case_summary: dict[str, Any] | None = None,
+        route_summary: dict[str, Any] | None = None,
     ) -> DispatchRequest:
-        item = pending or PendingInvestigationInput.from_kwargs(**kwargs)
+        item = pending or PendingInvestigationInput(
+            case_id=str(case_id),
+            priority=str(priority),
+            reason=str(reason),
+            evidence_refs=list(evidence_refs or []),
+            case_summary=dict(case_summary or {}),
+            route_summary=dict(route_summary or {}),
+        )
         return self.add(
             DispatchRequest(
                 case_id=item.case_id,

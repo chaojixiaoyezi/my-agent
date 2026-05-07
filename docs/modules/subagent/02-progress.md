@@ -130,3 +130,8 @@
 - Split subagent workflow routing, manager helpers, patch review, runner rendering, and service utilities into smaller focused helpers.
 - Kept public report dataclasses, patch rendering compatibility, and re-export behavior intact.
 - Verified with subagent-focused pytest, ruff, and the global code-size report.
+
+## 2026-05-07 bundle interface completion
+- Converted subagent manager/core action, dispatch, indexing, create-run, patch review/apply, runner next-action, state transition, run-subagent, recovery snapshot, and dispatch-loop compatibility paths to bundle-first or explicit keyword -> bundle adapters.
+- Added an architecture guardrail that blocks new product-code function var-keyword service interfaces; only transparent retry decorator forwarding remains exempt.
+- Focused verification covered policy checks, manager actions/dispatch/indexing, bundle interfaces, dispatch loop/watchdog, subagent runner, acceptance, patch review, and mixin recovery snapshot paths.

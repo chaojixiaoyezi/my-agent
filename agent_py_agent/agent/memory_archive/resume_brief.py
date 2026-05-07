@@ -29,12 +29,14 @@ def build_resume_brief(
     archive_matches: list[dict[str, Any]],
     local_hits: list[dict[str, Any]],
     task_payloads: list[dict[str, Any]],
-    **options: Any,
+    *,
+    recommended_read_paths: list[str] | None = None,
+    next_actions: list[str] | None = None,
 ) -> dict[str, Any]:
     """Synthesize a compact recovery brief from existing resume evidence."""
 
-    recommended_read_paths = list(options.get("recommended_read_paths", []) or [])
-    next_actions = list(options.get("next_actions", []) or [])
+    recommended_read_paths = list(recommended_read_paths or [])
+    next_actions = list(next_actions or [])
     latest_user_intents = _latest_user_intents(archive_matches)
     latest_assistant_actions = _latest_assistant_actions(archive_matches)
     related_ids = _related_ids(archive_matches, local_hits, task_payloads)

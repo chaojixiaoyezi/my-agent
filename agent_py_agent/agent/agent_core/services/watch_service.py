@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from ...capabilities import CapabilityRouter
 from ...capability_config import CapabilityConfig
+from ...subagents.services.dispatch_params import DispatchWatchHeartbeatParams
 from ..dispatch_params import DispatchParams, WatchParams, dispatch_params_from_watch
 
 if TYPE_CHECKING:
@@ -132,11 +133,13 @@ def _watch_cycle_params(
 
 def _write_watch_stopped(agent, cycle: int, lock_path: Path, token: str) -> None:
     agent.subagents.write_dispatch_watch_heartbeat(
-        cycle=cycle,
-        status="stopped",
-        lock_path=str(lock_path),
-        pid=os.getpid(),
-        message=f"watch stopped; lock={token}",
+        params=DispatchWatchHeartbeatParams(
+            cycle=cycle,
+            status="stopped",
+            lock_path=str(lock_path),
+            pid=os.getpid(),
+            message=f"watch stopped; lock={token}",
+        ),
     )
 
 
@@ -173,11 +176,13 @@ def _run_single_watch_cycle(
 
     started_at = time_module.time()
     agent.subagents.write_dispatch_watch_heartbeat(
-        cycle=params.cycle,
-        status="running",
-        lock_path=str(params.lock_path),
-        pid=os.getpid(),
-        message="dispatch cycle started",
+        params=DispatchWatchHeartbeatParams(
+            cycle=params.cycle,
+            status="running",
+            lock_path=str(params.lock_path),
+            pid=os.getpid(),
+            message="dispatch cycle started",
+        ),
     )
 
     ok, message, record_count, dispatch_summary, evidence_paths = _execute_watch_dispatch(
@@ -206,11 +211,13 @@ def _run_single_watch_cycle(
 
     more_cycles, message = _watch_sleep_state(params, message)
     agent.subagents.write_dispatch_watch_heartbeat(
-        cycle=params.cycle,
-        status="sleeping" if more_cycles else "stopping",
-        lock_path=str(params.lock_path),
-        pid=os.getpid(),
-        message=message,
+        params=DispatchWatchHeartbeatParams(
+            cycle=params.cycle,
+            status="sleeping" if more_cycles else "stopping",
+            lock_path=str(params.lock_path),
+            pid=os.getpid(),
+            message=message,
+        ),
     )
     if not more_cycles:
         return record
@@ -227,11 +234,13 @@ def _run_single_watch_cycle(
 def _write_stopped_by_limit(agent, params: RunSingleWatchCycleParams, message: str) -> None:
     message = f"{message} 已达到最大连续轮数限制 ({params.max_consecutive})，停止调度。"
     agent.subagents.write_dispatch_watch_heartbeat(
-        cycle=params.cycle,
-        status="stopped_by_limit",
-        lock_path=str(params.lock_path),
-        pid=os.getpid(),
-        message=message,
+        params=DispatchWatchHeartbeatParams(
+            cycle=params.cycle,
+            status="stopped_by_limit",
+            lock_path=str(params.lock_path),
+            pid=os.getpid(),
+            message=message,
+        ),
     )
 
 

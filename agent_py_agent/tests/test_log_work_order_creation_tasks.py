@@ -158,8 +158,9 @@ class TestCreateSubagentTasksFromWorkOrderPlan:
             root_id="root-001",
         )
         call_kwargs = mock_subagents.create_run.call_args[1]
-        assert call_kwargs["parent_id"] == "parent-001"
-        assert call_kwargs["root_id"] == "root-001"
+        params = call_kwargs["params"]
+        assert params.parent_id == "parent-001"
+        assert params.root_id == "root-001"
 
     def test_sets_final_owner(self):
         """测试设置 final_owner"""
@@ -185,7 +186,7 @@ class TestCreateSubagentTasksFromWorkOrderPlan:
             final_owner="security_team",
         )
         call_kwargs = mock_subagents.create_run.call_args[1]
-        assert call_kwargs["final_owner"] == "security_team"
+        assert call_kwargs["params"].final_owner == "security_team"
 
     def test_work_orders_get_correct_role(self):
         """测试工单获得正确 role"""
@@ -206,8 +207,9 @@ class TestCreateSubagentTasksFromWorkOrderPlan:
         )
         create_subagent_tasks_from_work_order_plan(mock_subagents, plan, apply=True)
         call_kwargs = mock_subagents.create_run.call_args[1]
-        assert call_kwargs["role"] == "analyst"
-        assert call_kwargs["agent_name"] == "log-analyst"
+        params = call_kwargs["params"]
+        assert params.role == "analyst"
+        assert params.agent_name == "log-analyst"
 
     def test_reviewer_work_order_sets_correct_agent_name(self):
         """测试 reviewer 工单设置正确的 agent_name"""
@@ -228,5 +230,6 @@ class TestCreateSubagentTasksFromWorkOrderPlan:
         )
         create_subagent_tasks_from_work_order_plan(mock_subagents, plan, apply=True)
         call_kwargs = mock_subagents.create_run.call_args[1]
-        assert call_kwargs["role"] == "reviewer"
-        assert call_kwargs["agent_name"] == "log-reviewer"
+        params = call_kwargs["params"]
+        assert params.role == "reviewer"
+        assert params.agent_name == "log-reviewer"

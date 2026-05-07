@@ -33,6 +33,11 @@ JUNK_NAME_BASELINE = {
     "agent_py_agent/cli/common.py",
 }
 
+BUNDLE_KWARG_FUNCTION_EXEMPTIONS = {
+    "agent_py_agent/agent/concurrency/retry.py:wrapper",
+    "agent_py_agent/agent/concurrency/retry.py:run",
+}
+
 RUNTIME_ARTIFACT_NAMES = {
     ".DS_Store",
     ".coverage",
@@ -210,6 +215,28 @@ def test_no_new_forbidden_globals() -> None:
     offenders = []
     for path in _python_source_files():
         offenders.extend(_check_forbidden_class(path, FORBIDDEN_CLASS_NAMES))
+
+    assert offenders == []
+
+
+def test_product_code_has_no_var_keyword_service_interfaces() -> None:
+    """Service-facing product code must use typed bundles instead of **kwargs."""
+
+    offenders: list[str] = []
+    for path in _python_source_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if "/tests/" in f"/{rel}":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.args.kwarg is None:
+                continue
+            key = f"{rel}:{node.name}"
+            if key in BUNDLE_KWARG_FUNCTION_EXEMPTIONS:
+                continue
+            offenders.append(f"{rel}:{node.lineno} {node.name}(**{node.args.kwarg.arg})")
 
     assert offenders == []
 

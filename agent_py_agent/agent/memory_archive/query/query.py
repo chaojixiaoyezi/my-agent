@@ -23,6 +23,7 @@ from .archive_io import (
     _read_archive_file,
 )
 from .filter_policy import (
+    ArchiveFilterOptions,
     evaluate_filters,
     filter_by_fields,
     filter_by_level,
@@ -48,6 +49,7 @@ from .query_models import (
     paginate_records,
 )
 from .query_service import (
+    RawArchiveCollectOptions,
     apply_filters,
     collect_gateway_payloads,
     collect_raw_archive_records,
@@ -65,6 +67,8 @@ __all__ = [
     # query_models
     "ArchiveQueryRequest",
     "ArchiveQueryResponse",
+    "ArchiveFilterOptions",
+    "RawArchiveCollectOptions",
     "ResumeContext",
     "paginate_records",
     # query_service

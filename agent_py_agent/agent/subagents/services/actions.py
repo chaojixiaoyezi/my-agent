@@ -22,6 +22,7 @@ from .action_handlers import (
     apply_takeover_or_reassign,
 )
 from .action_options import ActionApplyOptions
+from .indexing_params import LocalRecordParams
 from .rescue_policy import action_rescue_record_fields
 
 if TYPE_CHECKING:
@@ -52,12 +53,26 @@ class SubAgentActionService:
         self,
         config: Any = None,
         options: ActionApplyOptions | None = None,
-        **overrides,
+        *,
+        apply: bool | None = None,
+        action_filter: str | None = None,
+        run_id: str | None = None,
+        take_over_by: str | None = None,
+        locked_files: list[str] | None = None,
+        limit: int | None = None,
     ) -> ActionApplyReport:
         """Execute or dry-run an action plan."""
         from ..reports import ActionApplyReport
 
-        opts = ActionApplyOptions.from_values(options, **overrides)
+        opts = ActionApplyOptions.from_values(
+            options,
+            apply=apply,
+            action_filter=action_filter,
+            run_id=run_id,
+            take_over_by=take_over_by,
+            locked_files=locked_files,
+            limit=limit,
+        )
         plan = self.manager.plan_actions(config)
         actions = self.manager._filter_action_plan_items(
             plan.actions,
@@ -84,12 +99,25 @@ class SubAgentActionService:
         action: ActionPlanItem,
         *,
         options: ActionApplyOptions | None = None,
-        **overrides,
+        apply: bool | None = None,
+        action_filter: str | None = None,
+        run_id: str | None = None,
+        take_over_by: str | None = None,
+        locked_files: list[str] | None = None,
+        limit: int | None = None,
     ) -> ActionApplyRecord:
         """Execute a single action plan item."""
         from ..reports import ActionApplyRecord
 
-        opts = ActionApplyOptions.from_values(options, **overrides)
+        opts = ActionApplyOptions.from_values(
+            options,
+            apply=apply,
+            action_filter=action_filter,
+            run_id=run_id,
+            take_over_by=take_over_by,
+            locked_files=locked_files,
+            limit=limit,
+        )
         now = time.time()
         try:
             task = self.manager.load(action.run_id)
@@ -218,18 +246,20 @@ class SubAgentActionService:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(f"- {time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
         self.manager._log_local_record(
-            source_type="subagent_work_log",
-            source_id=f"{task.id}:{time.time():.6f}",
-            title=f"Subagent work log {task.id}",
-            content=f"{task.id}\n{task.goal}\n{message}",
-            metadata={
-                "run_id": task.id,
-                "goal": task.goal,
-                "status": task.status,
-                "verification_status": task.verification_status,
-                "work_log_file": task.work_log_file,
-            },
-            event_type="subagent_work_log_appended",
+            params=LocalRecordParams(
+                source_type="subagent_work_log",
+                source_id=f"{task.id}:{time.time():.6f}",
+                title=f"Subagent work log {task.id}",
+                content=f"{task.id}\n{task.goal}\n{message}",
+                metadata={
+                    "run_id": task.id,
+                    "goal": task.goal,
+                    "status": task.status,
+                    "verification_status": task.verification_status,
+                    "work_log_file": task.work_log_file,
+                },
+                event_type="subagent_work_log_appended",
+            ),
         )
 
 

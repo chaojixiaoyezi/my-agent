@@ -37,11 +37,14 @@ class CoercionService:
 
     @staticmethod
     def coerce_int(
-        key: str, value: object, fallback: int, **bounds: int | None
+        key: str,
+        value: object,
+        fallback: int,
+        *,
+        min_val: int | None = None,
+        max_val: int | None = None,
     ) -> tuple[int, str | None]:
         """Coerce a raw config value to int with optional range checks."""
-        min_val = bounds.get("min_val")
-        max_val = bounds.get("max_val")
         if value is None:
             return fallback, None
         number = _coerce_int_number(value)
@@ -55,11 +58,14 @@ class CoercionService:
 
     @staticmethod
     def coerce_float(
-        key: str, value: object, fallback: float, **bounds: float | None
+        key: str,
+        value: object,
+        fallback: float,
+        *,
+        min_val: float | None = None,
+        max_val: float | None = None,
     ) -> tuple[float, str | None]:
         """Coerce a raw config value to float with optional range checks."""
-        min_val = bounds.get("min_val")
-        max_val = bounds.get("max_val")
         if value is None:
             return fallback, None
         number = _coerce_float_number(value)

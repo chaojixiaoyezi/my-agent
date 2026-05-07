@@ -13,6 +13,8 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
+from agent_py_agent.agent.subagents.services.base import CreateRunParams
+
 from .planning import (
     PLAN_NOT_READY_ISSUE,
     LogAnalysisWorkOrderPlan,
@@ -30,21 +32,21 @@ class SubAgentTaskCreator(Protocol):
 
     参数说明:
     这个类本身没有构造参数。它只描述"传进来的对象应该长什么样"。
-    如果一个对象实现了 create_run(**kwargs)，它就满足这个接口。
+    如果一个对象实现了 create_run 并接收命名字段，它就满足这个接口。
     """
 
-    def create_run(self, **kwargs: Any) -> Any:
+    def create_run(self, *, params: CreateRunParams) -> Any:
         """LLM: create_subagent_tasks_from_work_order_plan 通过它把已审核的工单落成 SubAgentTask。
 
         新手说明:
-        输入是一组关键字参数，例如 goal、role、allowed_tools 和 context_packs。
+        输入是 CreateRunParams bundle，例如 goal、role、allowed_tools 和 context_packs。
         输出通常是任务对象，至少要能读到 id；本模块不会启动任务，只保存创建结果。
 
         参数说明:
-        **kwargs 是一包命名参数，具体字段由真实的 SubAgentManager.create_run 接收。
+        params 是任务创建参数包，具体字段由真实的 SubAgentManager.create_run 接收。
         常见字段包括 goal、thought、plan、agent_name、role、allowed_tools、acceptance_checks、
         quality_contract、context_manifest、context_packs 等。
-        这里使用 **kwargs 是为了让本模块只依赖"能创建任务"这件事，而不绑定某个具体 manager 类。
+        这里把 bundle adapter 限定在协议边界，避免内部继续传散参。
 
         返回说明:
         返回值通常是 SubAgentTask。调用方至少会读取 task.id、task.status 和 task.verification_status。
@@ -103,15 +105,6 @@ class WorkOrderCreationOptions:
     parent_id: str = ""
     root_id: str = ""
     final_owner: str = "parent"
-
-    @classmethod
-    def from_kwargs(cls, **kwargs: Any) -> WorkOrderCreationOptions:
-        return cls(
-            apply=bool(kwargs.get("apply", False)),
-            parent_id=str(kwargs.get("parent_id", "")),
-            root_id=str(kwargs.get("root_id", "")),
-            final_owner=str(kwargs.get("final_owner", "parent")),
-        )
 
 
 def _work_order_quality_contract(order: SubagentWorkOrder) -> dict[str, Any]:
@@ -208,11 +201,19 @@ def create_subagent_tasks_from_work_order_plan(
     plan: LogAnalysisWorkOrderPlan,
     *,
     options: WorkOrderCreationOptions | None = None,
-    **kwargs: Any,
+    apply: bool = False,
+    parent_id: str = "",
+    root_id: str = "",
+    final_owner: str = "parent",
 ) -> SubagentWorkOrderCreationResult:
     """Create subagent tasks from a ready log-analysis work-order plan."""
 
-    creation_options = options or WorkOrderCreationOptions.from_kwargs(**kwargs)
+    creation_options = options or WorkOrderCreationOptions(
+        apply=bool(apply),
+        parent_id=str(parent_id),
+        root_id=str(root_id),
+        final_owner=str(final_owner),
+    )
     mode = "apply" if creation_options.apply else "dry_run"
     issues = list(plan.issues)
     risks = list(plan.risks)
@@ -250,7 +251,7 @@ def _create_ready_order(
     if not order.ready:
         _note_skipped_order(result, order)
         return
-    task = subagents.create_run(**_create_run_payload(order, options=options))
+    task = subagents.create_run(params=CreateRunParams(**_create_run_payload(order, options=options)))
     result.task_ids.append(str(task.id))
     result.created.append(_created_task_summary(task, order))
 

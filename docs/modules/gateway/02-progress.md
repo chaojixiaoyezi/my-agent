@@ -92,3 +92,8 @@
 - Split gateway request execution out of the request worker and flattened gateway IO, lease, recovery, supervisor, and adapter helpers.
 - Strengthened request ID generation by keeping the full UUID suffix, eliminating stress-test collisions seen with the previous short suffix.
 - Preserved macOS/POSIX process handling while keeping Windows-native locking and file replacement safeguards.
+
+## 2026-05-07 bundle interface completion
+- Gateway logging, queue response merge, and supervisor control options were aligned with explicit option records/fields instead of product-level var-keyword service signatures.
+- Gateway helper calls remain stable for CLI/scenario callers while watch/daemon/gateway paths continue to enter core through `WatchParams` and context bundles.
+- Focused verification covered gateway helper and gateway logging tests.

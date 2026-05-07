@@ -42,6 +42,19 @@ class SecurityQueryParams:
     max_limit: int | None = None
 
 
+@dataclass(frozen=True)
+class HuntIpParams:
+    """Parameter bundle for hunt_ip."""
+
+    role: str = "any"
+    store: LocalLogStore | None = None
+    root: str | Path | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+    limit: int | None = DEFAULT_QUERY_LIMIT
+    max_limit: int | None = None
+
+
 def security_query(params: SecurityQueryParams) -> dict[str, Any]:
     """Execute a bounded security-event query and return the tool payload."""
     local_store = _store(params.store, params.root)
@@ -62,49 +75,74 @@ def security_query(params: SecurityQueryParams) -> dict[str, Any]:
     return _tool_response(result)
 
 
-def hunt_ip(ip: str, **kwargs: Any) -> dict[str, Any]:
+def hunt_ip(
+    ip: str,
+    *,
+    params: HuntIpParams | None = None,
+    role: str = "any",
+    store: LocalLogStore | None = None,
+    root: str | Path | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    limit: int | None = DEFAULT_QUERY_LIMIT,
+    max_limit: int | None = None,
+) -> dict[str, Any]:
     """Pivot around one IP as attacker, victim, or both."""
-    role = kwargs.get("role", "any")
-    if role not in {"any", "attacker", "victim"}:
+    hunt_params = params or HuntIpParams(
+        role=role,
+        store=store,
+        root=root,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        max_limit=max_limit,
+    )
+    if hunt_params.role not in {"any", "attacker", "victim"}:
         raise ValueError("role must be one of: any, attacker, victim")
-    if role in {"attacker", "victim"}:
-        return _hunt_ip_single_role(ip, role=role, kwargs=kwargs)
-    return _hunt_ip_any(ip, **kwargs)
+    if hunt_params.role in {"attacker", "victim"}:
+        return _hunt_ip_single_role(ip, params=hunt_params)
+    return _hunt_ip_any(ip, hunt_params)
 
 
-def _hunt_ip_single_role(ip: str, *, role: str, kwargs: dict[str, Any]) -> dict[str, Any]:
-    field = {"attacker": "attacker_ip", "victim": "victim_ip"}[role]
+def _hunt_ip_single_role(ip: str, *, params: HuntIpParams) -> dict[str, Any]:
+    field = {"attacker": "attacker_ip", "victim": "victim_ip"}[params.role]
     return security_query(
         SecurityQueryParams(
-            store=kwargs.get("store"),
-            root=kwargs.get("root"),
+            store=params.store,
+            root=params.root,
             **{field: ip},
-            start_time=kwargs.get("start_time"),
-            end_time=kwargs.get("end_time"),
-            limit=kwargs.get("limit"),
-            max_limit=kwargs.get("max_limit"),
+            start_time=params.start_time,
+            end_time=params.end_time,
+            limit=params.limit,
+            max_limit=params.max_limit,
         )
     )
 
 
-def _hunt_ip_any(ip: str, **kwargs: Any) -> dict[str, Any]:
-    local_store = _store(kwargs.get("store"), kwargs.get("root"))
-    attacker = _hunt_role_query(local_store, attacker_ip=ip, **kwargs)
-    victim = _hunt_role_query(local_store, victim_ip=ip, **kwargs)
+def _hunt_ip_any(ip: str, params: HuntIpParams) -> dict[str, Any]:
+    local_store = _store(params.store, params.root)
+    attacker = _hunt_role_query(local_store, params=params, attacker_ip=ip)
+    victim = _hunt_role_query(local_store, params=params, victim_ip=ip)
     return _hunt_any_response(ip, attacker, victim)
 
 
-def _hunt_role_query(local_store: LocalLogStore, **kwargs: Any) -> QueryResult:
+def _hunt_role_query(
+    local_store: LocalLogStore,
+    *,
+    params: HuntIpParams,
+    attacker_ip: str | None = None,
+    victim_ip: str | None = None,
+) -> QueryResult:
     return execute_security_query(
         local_store,
         QueryCriteria(
-            attacker_ip=kwargs.get("attacker_ip"),
-            victim_ip=kwargs.get("victim_ip"),
-            start_time=kwargs.get("start_time"),
-            end_time=kwargs.get("end_time"),
-            limit=kwargs.get("limit"),
+            attacker_ip=attacker_ip,
+            victim_ip=victim_ip,
+            start_time=params.start_time,
+            end_time=params.end_time,
+            limit=params.limit,
         ),
-        max_limit=kwargs.get("max_limit"),
+        max_limit=params.max_limit,
     )
 
 
@@ -118,9 +156,30 @@ def _hunt_any_response(ip: str, attacker: QueryResult, victim: QueryResult) -> d
     }
 
 
-def security_hunt_ip(ip: str, **kwargs: Any) -> dict[str, Any]:
+def security_hunt_ip(
+    ip: str,
+    *,
+    params: HuntIpParams | None = None,
+    role: str = "any",
+    store: LocalLogStore | None = None,
+    root: str | Path | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    limit: int | None = DEFAULT_QUERY_LIMIT,
+    max_limit: int | None = None,
+) -> dict[str, Any]:
     """Compatibility wrapper for the security_hunt_ip tool name."""
-    return hunt_ip(ip, **kwargs)
+    return hunt_ip(
+        ip,
+        params=params,
+        role=role,
+        store=store,
+        root=root,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        max_limit=max_limit,
+    )
 
 
 def security_hunt_domain(domain: str) -> dict[str, Any]:
@@ -128,15 +187,34 @@ def security_hunt_domain(domain: str) -> dict[str, Any]:
     return security_query(SecurityQueryParams(domain=domain))
 
 
-def trace_case(case_id: str, **kwargs: Any) -> dict[str, Any]:
+def trace_case(
+    case_id: str,
+    *,
+    params: TraceCaseParams | None = None,
+    store: LocalLogStore | None = None,
+    root: str | Path | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    limit: int | None = DEFAULT_QUERY_LIMIT,
+    max_limit: int | None = None,
+    max_queries: int = MAX_TRACE_CASE_QUERIES,
+) -> dict[str, Any]:
     """Trace related evidence by extracting query seeds from a saved case."""
-    params = trace_case_params(kwargs)
-    local_store = _store(params.store, params.root)
+    trace_params = params or trace_case_params(
+        store=store,
+        root=root,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        max_limit=max_limit,
+        max_queries=max_queries,
+    )
+    local_store = _store(trace_params.store, trace_params.root)
     case = local_store.get_case(case_id)
     if case is None:
         raise KeyError(f"case not found: {case_id}")
-    queries = trace_case_queries(local_store, _case_seeds(case), params, _trace_field_query)
-    return trace_case_response(case_id, queries, params.max_queries)
+    queries = trace_case_queries(local_store, _case_seeds(case), trace_params, _trace_field_query)
+    return trace_case_response(case_id, queries, trace_params.max_queries)
 
 
 def _trace_field_query(
@@ -145,19 +223,40 @@ def _trace_field_query(
     value: str,
     params: TraceCaseParams,
 ) -> dict[str, Any]:
-    query_kwargs = {
+    query_fields = {
         field: value,
         "start_time": params.start_time,
         "end_time": params.end_time,
         "limit": params.limit,
         "max_limit": params.max_limit,
     }
-    return security_query(SecurityQueryParams(store=local_store, **query_kwargs))
+    return security_query(SecurityQueryParams(store=local_store, **query_fields))
 
 
-def security_trace_case(case_id: str, **kwargs: Any) -> dict[str, Any]:
+def security_trace_case(
+    case_id: str,
+    *,
+    params: TraceCaseParams | None = None,
+    store: LocalLogStore | None = None,
+    root: str | Path | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    limit: int | None = DEFAULT_QUERY_LIMIT,
+    max_limit: int | None = None,
+    max_queries: int = MAX_TRACE_CASE_QUERIES,
+) -> dict[str, Any]:
     """Compatibility wrapper for the security_trace_case tool name."""
-    return trace_case(case_id, **kwargs)
+    return trace_case(
+        case_id,
+        params=params,
+        store=store,
+        root=root,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        max_limit=max_limit,
+        max_queries=max_queries,
+    )
 
 
 def _tool_response(result: QueryResult) -> dict[str, Any]:

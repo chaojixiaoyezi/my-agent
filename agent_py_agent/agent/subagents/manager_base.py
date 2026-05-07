@@ -7,7 +7,7 @@ Work-order path/file helpers live in manager_work_orders.py to keep this mixin s
 
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .manager_work_orders import (
     build_work_order_paths,
@@ -56,10 +56,52 @@ class SubAgentBaseMixin:
     def register_card(self, card: SubAgentCard) -> None:
         self.cards[card.name] = card
 
-    def create_run(self, **kwargs) -> SubAgentTask:
-        if "params" in kwargs:
-            return self.base_service.create_run(params=kwargs["params"])
-        return self.base_service.create_run(params=CreateRunParams(**kwargs))
+    def create_run(
+        self,
+        *,
+        params: CreateRunParams | None = None,
+        goal: str = "",
+        thought: str = "",
+        plan: list[str] | None = None,
+        agent_name: str = "general",
+        role: str = "general",
+        parent_id: str = "",
+        root_id: str = "",
+        depth: int = 0,
+        allowed_skills: list[str] | None = None,
+        allowed_tools: list[str] | None = None,
+        owner: str = "",
+        supervisor: str = "",
+        final_owner: str = "",
+        acceptance_checks: list[str] | None = None,
+        quality_contract: Any = None,
+        context_manifest: Any = None,
+        context_packs: Any = None,
+        extra_write_roots: list[str] | None = None,
+        workflow_mode: str = "off",
+    ) -> SubAgentTask:
+        params = params or CreateRunParams(
+            goal=goal,
+            thought=thought,
+            plan=plan or [],
+            agent_name=agent_name,
+            role=role,
+            parent_id=parent_id,
+            root_id=root_id,
+            depth=depth,
+            allowed_skills=allowed_skills,
+            allowed_tools=allowed_tools,
+            owner=owner,
+            supervisor=supervisor,
+            final_owner=final_owner,
+            acceptance_checks=acceptance_checks,
+            quality_contract=quality_contract,
+            context_manifest=context_manifest,
+            context_packs=context_packs,
+            extra_write_roots=extra_write_roots,
+            workflow_mode=workflow_mode,
+        )
+        return self.base_service.create_run(params=params)
 
     def record_takeover(
         self,

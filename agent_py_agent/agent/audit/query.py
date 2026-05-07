@@ -37,21 +37,31 @@ class AuditQueryParams:
     offset: int = 0
 
 
-def _normalize_query_params(params: AuditQueryParams | None, kwargs: dict[str, Any]) -> AuditQueryParams:
-    if params is None and not kwargs:
-        return AuditQueryParams()
+def _normalize_query_params(
+    params: AuditQueryParams | None,
+    *,
+    user_id: str | None = None,
+    action: AuditAction | str | None = None,
+    target_id: str | None = None,
+    target_type: str | None = None,
+    status: str | None = None,
+    start_time: float | None = None,
+    end_time: float | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> AuditQueryParams:
     if isinstance(params, AuditQueryParams):
         return params
     return AuditQueryParams(
-        user_id=kwargs.pop("user_id", None),
-        action=kwargs.pop("action", None),
-        target_id=kwargs.pop("target_id", None),
-        target_type=kwargs.pop("target_type", None),
-        status=kwargs.pop("status", None),
-        start_time=kwargs.pop("start_time", None),
-        end_time=kwargs.pop("end_time", None),
-        limit=kwargs.pop("limit", 100),
-        offset=kwargs.pop("offset", 0),
+        user_id=user_id,
+        action=action,
+        target_id=target_id,
+        target_type=target_type,
+        status=status,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -106,8 +116,32 @@ class AuditQuery:
         self._audit_root = Path(getattr(config, "audit_log_path", "data/audit"))
         self._audit_file = self._audit_root / "audit.jsonl"
 
-    def query(self, params: AuditQueryParams | None = None, **kwargs) -> AuditQueryResult:
-        params = _normalize_query_params(params, kwargs)
+    def query(
+        self,
+        params: AuditQueryParams | None = None,
+        *,
+        user_id: str | None = None,
+        action: AuditAction | str | None = None,
+        target_id: str | None = None,
+        target_type: str | None = None,
+        status: str | None = None,
+        start_time: float | None = None,
+        end_time: float | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> AuditQueryResult:
+        params = _normalize_query_params(
+            params,
+            user_id=user_id,
+            action=action,
+            target_id=target_id,
+            target_type=target_type,
+            status=status,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            offset=offset,
+        )
         start_query = time.time()
         if not self._audit_file.exists():
             return AuditQueryResult(entries=[], total_count=0, query_time_ms=0)

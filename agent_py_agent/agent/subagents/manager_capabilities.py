@@ -201,7 +201,7 @@ def _capability_route_options(
         if not isinstance(params, SubAgentCapabilityRouteOptions):
             raise TypeError("capability routing requires params: SubAgentCapabilityRouteOptions")
         return params
-    # LLM: manager APIs keep legacy kwargs but normalize immediately to a single options bundle.
+    # LLM: manager APIs keep legacy explicit fields but normalize immediately to one options bundle.
     return SubAgentCapabilityRouteOptions(
         apply=apply,
         run_ids=run_ids,

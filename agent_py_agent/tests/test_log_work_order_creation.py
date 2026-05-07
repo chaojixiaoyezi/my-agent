@@ -371,9 +371,10 @@ class TestBoundaryCases:
         )
         create_subagent_tasks_from_work_order_plan(mock_subagents, plan, apply=True)
         call_kwargs = mock_subagents.create_run.call_args[1]
+        params = call_kwargs["params"]
         # context_packs 应该被传递
-        assert "context_packs" in call_kwargs
-        assert len(call_kwargs["context_packs"]) == 1
+        assert params.context_packs
+        assert len(params.context_packs) == 1
 
     def test_quality_contract_in_context_manifest(self):
         """测试 context_manifest 包含质量契约引用"""
@@ -394,5 +395,5 @@ class TestBoundaryCases:
         )
         create_subagent_tasks_from_work_order_plan(mock_subagents, plan, apply=True)
         call_kwargs = mock_subagents.create_run.call_args[1]
-        manifest = call_kwargs["context_manifest"]
+        manifest = call_kwargs["params"].context_manifest
         assert "quality_contract_ref" in manifest
