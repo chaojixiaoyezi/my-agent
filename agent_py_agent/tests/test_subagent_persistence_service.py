@@ -7,6 +7,7 @@ from __future__ import annotations
 """
 
 import json
+from pathlib import Path
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 
@@ -112,6 +113,9 @@ def _assert_runtime_workspace_paths(loaded, task_workspace, run_id: str) -> None
     assert loaded.agent_run_artifacts_dir == str(run_workspace / "artifacts")
     assert loaded.agent_run_compactions_dir == str(run_workspace / "compactions")
     assert loaded.legacy_run_ref_json == str(run_workspace / "legacy_run_ref.json")
+    assert "/daily/" in loaded.daily_ledger_file
+    assert loaded.daily_ledger_file.endswith("/events.jsonl")
+    assert loaded.daily_ledger_last_event_id.startswith(f"evt-{run_id}-{run_id}-")
 
 
 def test_subagent_persistence_creates_agent_run_workspace_skeleton(tmp_path) -> None:
@@ -154,6 +158,39 @@ def test_subagent_persistence_creates_agent_run_workspace_skeleton(tmp_path) -> 
     assert legacy_ref["legacy_task_dir"] == str(tmp_path / task.id)
     assert legacy_ref["agent_run_workspace_status"] == "phase_1_skeleton"
     assert any(json.loads(line)["event"] == "agent_run_workspace_synced" for line in run_timeline)
+
+
+def test_subagent_persistence_appends_daily_event_ledger(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+
+    task = manager.create_run(
+        goal="写每日事件账本",
+        thought="事件只放摘要、状态和引用，不放完整上下文。",
+        plan=["保存任务", "检查 daily ledger"],
+    )
+    task.status = "RUNNING"
+    task.current_step = "记录事件"
+    task.latest_summary = "daily ledger 已追加 task/run 引用。"
+    task.artifact_refs = ["reports/demo.txt"]
+    task.evidence_refs = ["logs/demo.log"]
+    manager.save(task)
+
+    loaded = manager.load(task.id)
+    events = _read_jsonl(loaded.daily_ledger_file)
+    latest = events[-1]
+
+    assert loaded.daily_ledger_last_event_id == latest["event_id"]
+    assert latest["event_type"] == "subagent_task_saved"
+    assert latest["task_id"] == task.root_id
+    assert latest["run_id"] == task.id
+    assert latest["status"] == "RUNNING"
+    assert latest["summary"] == "daily ledger 已追加 task/run 引用。"
+    assert latest["artifact_refs"] == ["reports/demo.txt"]
+    assert latest["evidence_refs"] == ["logs/demo.log"]
+    assert latest["refs"]["task_workspace"] == str(tmp_path / "tasks" / task.root_id)
+    assert latest["refs"]["agent_run_workspace"] == str(tmp_path / "tasks" / task.root_id / "agents" / task.id)
+    assert latest["refs"]["legacy_task_dir"] == str(tmp_path / task.id)
+    assert "goal" not in latest
 
 
 def test_subagent_persistence_writes_checkpoint_recovery_artifacts(tmp_path) -> None:
@@ -211,3 +248,7 @@ def test_subagent_persistence_writes_checkpoint_recovery_artifacts(tmp_path) -> 
     ]
     assert next_actions["next_actions"][:2] == ["补证据链", "请求父级验收"]
     assert "runner 已产出材料但证据不足。" in progress_md
+
+
+def _read_jsonl(path: str) -> list[dict[str, object]]:
+    return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]

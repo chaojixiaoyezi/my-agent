@@ -28,6 +28,7 @@
 - 2026-05-07 runtime memory 新目标边界已记录到 `06-runtime-memory-requirements.md`：memory 定位为运行时档案系统，主代理 memory 只索引任务/run/事件/artifact 引用，subagent 仍留在 task/run workspace，不能默认写主长期记忆。
 - 2026-05-07 Phase 0 Task Workspace 骨架已落地：subagent 保存时会在 manager workspace 下同步 `tasks/<root_id>/task.yaml`、`state.json`、`timeline.jsonl`、`summaries/current_summary.md`、`shared/`、`artifacts/`、`agents/<run_id>/legacy_run_ref.json`；旧 `subagents/<run_id>/task.json` 和工单 Markdown 仍保持兼容事实源。
 - 2026-05-07 Phase 1 Agent Run Workspace 适配已落地：`tasks/<root_id>/agents/<run_id>/` 现在会生成 `agent.yaml`、run `state.json`、`task.md`、run `timeline.jsonl`、`checkpoint.json`、`summary.md`、`final_report.md`、`findings.jsonl`、`inbox/`、`outbox/`、`artifacts/`、`compactions/`，并继续用 `legacy_run_ref.json` 指向旧工单目录。
+- 2026-05-07 Phase 2 Daily Event Ledger 已落地：subagent 保存时会追加 `daily/YYYY-MM-DD/events.jsonl`，只记录 task/run 状态、摘要、duration、artifact/evidence refs、workspace 路径和检索字段，不写入完整 goal、工具输出或子代理上下文。
 - **记忆推模式** (`memory_push.py`)：在关键决策点自动查询并注入相关记忆，实现"推模式"记忆系统。
   - `MemoryType` 枚举：`LESSON_GENERAL`、`LESSON_TASK`、`LESSON_TEMP`、`CONTEXT`、`FACT`
   - `push_relevant_memories()` 函数：根据触发类型搜索相关记忆
@@ -58,6 +59,7 @@
 - runtime memory 开发要求解决了“memory、task workspace、subagent workspace 概念混在一起”的风险；后续要按主代理档案馆、task 项目空间、agent run 工作位分层推进。
 - Phase 0 task workspace adapter 解决了“只有旧 run 目录、没有任务级事实容器”的第一层缺口；现在能先按 root task 聚合状态、summary、timeline、shared/artifact/agents 目录，同时不迁移或污染旧路径。
 - Phase 1 agent run workspace adapter 解决了“task 下有 agents 目录但 run 工作位仍只是 legacy 指针”的缺口；现在每个 run 有自己的恢复、接管、summary、finding 和 compact 预留面，但旧工单仍可读写。
+- Phase 2 daily ledger 解决了“有 task/run 事实源，但主代理还没有按天索引 task/run/event/artifact 引用”的缺口；恢复入口可以先用 daily ledger 找线索，再回到 task/run 文件核实。
 - compression hook 门禁解决了“压缩前没有可靠快照也会继续执行，导致恢复锚点缺失”的问题。
 - authoritative snapshot JSON 解决了“hook JSONL 适合搜索但不适合作为严格恢复锚点”的问题。
 - capability gap 与长期规则联动解决了“子代理已经发现自己缺什么，但相关规则没有自动回流到执行上下文”的问题。
@@ -69,7 +71,7 @@
 - 扩展 `scripts/check_doc_sync.py` 后续规则时，继续保持 memory 的 `02-progress.md` 和 `04-structure.md` 同步更新。
 - 继续补损坏 snapshot、task 权威文件缺失、默认注入过多等异常场景联合测试。
 - 继续补 subagent checkpoint artifact 缺失、损坏和旧任务未保存新字段时的恢复降级测试。
-- 按 `06-runtime-memory-requirements.md` 继续做文件系统版 Phase 2-6：事件账本、artifact 外置、compact/checkpoint 链、shared 协作面和 memory gate / skill spark 提升链。
+- 按 `06-runtime-memory-requirements.md` 继续做文件系统版 Phase 3-6：artifact 外置、compact/checkpoint 链、shared 协作面和 memory gate / skill spark 提升链。
 - 记忆推模式接入更多决策点：planner 决策前自动注入 context 类型记忆（已实现：subagent_mixin.py run_parent_planner 前调用 push_planning_memories）
 - 验证推模式记忆注入后 agent 行为是否正确改善
 
@@ -110,6 +112,7 @@
 - 本轮 subagent checkpoint resume focused 验收：`python3 -m pytest agent_py_agent/tests/test_memory_archive_cli_query.py::test_memory_resume_cross_day_handoff_uses_task_fact_sources agent_py_agent/tests/test_memory_archive_cli.py::test_memory_resume_cross_day_handoff_uses_task_fact_sources agent_py_agent/tests/test_memory_runtime.py::test_auto_resume_context_recovers_cross_day_handoff_task -q`。
 - 本轮 Phase 0 Task Workspace focused 验收：`python3 -m pytest agent_py_agent/tests/test_subagent_persistence_service.py -q` -> `3 passed`。
 - 本轮 Phase 1 Agent Run Workspace focused 验收：`python3 -m pytest agent_py_agent/tests/test_subagent_persistence_service.py -q` -> `4 passed`。
+- 本轮 Phase 2 Daily Event Ledger focused 验收：`python3 -m pytest agent_py_agent/tests/test_subagent_persistence_service.py -q` -> `5 passed`。
 
 ## 未跑测试
 

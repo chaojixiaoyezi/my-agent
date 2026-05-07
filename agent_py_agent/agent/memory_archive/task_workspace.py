@@ -17,6 +17,11 @@ from typing import Any
 
 # LLM: task workspace owns the run adapter path, but run files live in a focused helper.
 from .agent_run_workspace import AgentRunWorkspacePaths, ensure_agent_run_workspace
+from .daily_ledger import (
+    DailyLedgerAppendResult,
+    DailyLedgerWorkspaceRefs,
+    append_subagent_task_event,
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +41,7 @@ class TaskWorkspacePaths:
     agents_dir: Path
     agent_adapter_dir: Path
     agent_run: AgentRunWorkspacePaths
+    daily_ledger: DailyLedgerAppendResult
     legacy_run_ref_json: Path
 
 
@@ -62,10 +68,22 @@ def ensure_subagent_task_workspace(workspace: str | Path, task: Any) -> TaskWork
     _touch_jsonl(paths.shared_findings)
     ensure_agent_run_workspace(paths.agent_adapter_dir, task, task_id=task_id, now=now)
     _append_timeline(paths.timeline_jsonl, _timeline_event(task, now, previous_state))
-    return paths
+    # LLM: daily ledger records compact refs only; task/run files keep the detailed facts.
+    daily_ledger = append_subagent_task_event(
+        workspace,
+        task,
+        workspace_refs=DailyLedgerWorkspaceRefs(paths.root, paths.agent_adapter_dir),
+        now=now,
+    )
+    return _paths_for(workspace, task_id, run_id, daily_ledger=daily_ledger)
 
 
-def _paths_for(workspace: str | Path, task_id: str, run_id: str) -> TaskWorkspacePaths:
+def _paths_for(
+    workspace: str | Path,
+    task_id: str,
+    run_id: str,
+    daily_ledger: DailyLedgerAppendResult | None = None,
+) -> TaskWorkspacePaths:
     root = task_workspace_path(workspace, task_id)
     shared_dir = root / "shared"
     artifacts_dir = root / "artifacts"
@@ -101,6 +119,7 @@ def _paths_for(workspace: str | Path, task_id: str, run_id: str) -> TaskWorkspac
         agents_dir=agents_dir,
         agent_adapter_dir=agent_adapter_dir,
         agent_run=agent_run,
+        daily_ledger=daily_ledger or DailyLedgerAppendResult(Path(workspace) / "daily" / "pending" / "events.jsonl", ""),
         legacy_run_ref_json=agent_adapter_dir / "legacy_run_ref.json",
     )
 

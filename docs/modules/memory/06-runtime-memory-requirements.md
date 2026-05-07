@@ -79,6 +79,12 @@ Task workspace 是任务事实源。后续开发新增任务级能力时，应�
 
 当前 Phase 1 已先落地 agent run workspace skeleton：subagent 保存时会在 `tasks/<root_id>/agents/<run_id>/` 写 `agent.yaml`、run `state.json`、`task.md`、run `timeline.jsonl`、`checkpoint.json`、`summary.md`、`final_report.md`、`findings.jsonl`，并创建 `inbox/`、`outbox/`、`artifacts/`、`compactions/`。旧 work-order 目录仍继续读写，run workspace 先作为恢复、接管和后续 compact 的兼容面。
 
+## Daily Event Ledger 要求
+
+Daily event ledger 是主代理按天查 task/run 线索的轻量入口，不是任务事实源。
+
+当前 Phase 2 已先落地 `daily/YYYY-MM-DD/events.jsonl`：subagent 保存时追加 `subagent_task_saved` 事件，包含 task/run id、状态、进度、duration、摘要、artifact/evidence refs、workspace 引用和检索字段。ledger 不保存完整用户目标、工具输出或子代理上下文；需要核实时必须回到 task/run workspace 或旧 work-order 文件。
+
 ## Skill Sparks 要求
 
 `SKILL_SPARKS.md` 是子代理目录内的任务局部经验火花，用于后续 skill 学习流程的输入。
@@ -133,10 +139,12 @@ Task workspace 是任务事实源。后续开发新增任务级能力时，应�
 - 已新增子代理 `SKILL_SPARKS.md` 候选文件。
 - 已新增 `memory_archive/task_workspace.py`，先创建文件系统版 task workspace 和 legacy run adapter，保持旧 subagent 路径兼容。
 - 已新增 `memory_archive/agent_run_workspace.py`，先创建 task-local agent run workspace skeleton，保持旧 subagent work-order 路径兼容。
+- 已新增 `memory_archive/daily_ledger.py`，先创建每日事件 ledger，用摘要和 refs 索引 task/run，不吸收子代理完整上下文。
 
 后续主要差距：
 
 - 旧 subagent workspace 尚未迁移到 `tasks/<task_id>/agents/<run_id>/`；当前 agent run workspace 是 skeleton + legacy adapter，不是完整替代。
 - task workspace 已有第一版 `task.yaml`、`state.json`、`timeline.jsonl`，run workspace 已有第一版 `agent.yaml`、run-level `state.json/timeline.jsonl` 和 `compactions/` 目录，但 compact ledger/snapshot 链尚未落地。
+- daily ledger 已有 append-only 文件入口，但还没接入 resume 查询优先级、retention 清理和 artifact 外置摘要规范。
 - shared blackboard/messages/locks 仍未系统化。
 - memory item 写入门禁、retention 清理和 skill spark 提升链路还未落地。
