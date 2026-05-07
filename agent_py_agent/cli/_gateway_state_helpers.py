@@ -227,28 +227,33 @@ def _cmd_gateway_run_cleanup(request: GatewayRunCleanupRequest):
 
 
 def _run_gateway_watch(context: GatewayRunContext):
-    options = context.options
     return context.agent.watch_subagents(
         context.router,
         context.capability_config,
-        params=WatchParams(
-            apply=options.apply,
-            execute_runners=options.execute_runners,
-            planner=options.planner,
-            max_runners=options.max_runners,
-            limit=options.limit,
-            reviewer=options.reviewer,
-            note=context.note,
-            runner_instruction=options.instruction or "",
-            max_cards=options.max_cards,
-            probe=options.probe,
-            take_over_by=context.take_over_by,
-            locked_files=context.locked_files,
-            interval=options.interval,
-            max_cycles=options.max_cycles,
-            force_lock=context.force_lock,
-            stop_file=context.paths.stop_request,
-        ),
+        params=_gateway_watch_params(context),
+    )
+
+
+def _gateway_watch_params(context: GatewayRunContext) -> WatchParams:
+    # LLM: gateway run context is the bundle; watch params are derived in one place.
+    options = context.options
+    return WatchParams(
+        apply=options.apply,
+        execute_runners=options.execute_runners,
+        planner=options.planner,
+        max_runners=options.max_runners,
+        limit=options.limit,
+        reviewer=options.reviewer,
+        note=context.note,
+        runner_instruction=options.instruction or "",
+        max_cards=options.max_cards,
+        probe=options.probe,
+        take_over_by=context.take_over_by,
+        locked_files=context.locked_files,
+        interval=options.interval,
+        max_cycles=options.max_cycles,
+        force_lock=context.force_lock,
+        stop_file=context.paths.stop_request,
     )
 
 

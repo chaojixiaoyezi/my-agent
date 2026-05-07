@@ -36,6 +36,10 @@ class DaemonOptions:
     reviewer: str
     instruction: str
     probe: bool
+    note: str
+    take_over_by: str
+    locked_files: list[str]
+    force_lock: bool
 
 
 @dataclass(frozen=True)

@@ -40,7 +40,7 @@ def cmd_daemon(args) -> int:
         report = agent.watch_subagents(
             router,
             capability_config,
-            params=_daemon_watch_params(options, args),
+            params=_daemon_watch_params(options),
         )
     except KeyboardInterrupt:
         print("\ndaemon stopped by Ctrl+C")
@@ -58,7 +58,8 @@ def cmd_daemon(args) -> int:
     return 0
 
 
-def _daemon_watch_params(options: DaemonOptions, args) -> WatchParams:
+def _daemon_watch_params(options: DaemonOptions) -> WatchParams:
+    # LLM: daemon watch execution consumes one resolved options bundle, not argparse.
     return WatchParams(
         apply=options.apply,
         execute_runners=options.execute_runners,
@@ -66,15 +67,15 @@ def _daemon_watch_params(options: DaemonOptions, args) -> WatchParams:
         max_runners=options.max_runners,
         limit=options.limit,
         reviewer=options.reviewer,
-        note=args.note or "",
+        note=options.note,
         runner_instruction=options.instruction or "",
         max_cards=options.max_cards,
         probe=options.probe,
-        take_over_by=args.take_over_by or "",
-        locked_files=args.locked_file or [],
+        take_over_by=options.take_over_by,
+        locked_files=options.locked_files,
         interval=options.interval,
         max_cycles=options.max_cycles,
-        force_lock=args.force_lock,
+        force_lock=options.force_lock,
     )
 
 
@@ -129,6 +130,43 @@ def _resolve_daemon_options(agent: SimpleAgent, args) -> DaemonOptions:
     if execute_runners and not apply:
         raise ValueError("daemon_execute_runners / --execute-runners 必须和 daemon_apply / --apply 一起使用。")
 
+    interval, max_runners, limit, max_cycles, max_cards = _daemon_numeric_options(args, cfg)
+    reviewer = getattr(args, "reviewer", None) or cfg.daemon_reviewer
+    instruction = getattr(args, "instruction", None)
+    instruction = cfg.daemon_runner_instruction if instruction is None else instruction
+    probe = False if getattr(args, "no_probe", False) else cfg.daemon_probe
+
+    invalid_number = _validate_daemon_numbers(
+        interval=interval,
+        max_runners=max_runners,
+        limit=limit,
+        max_cycles=max_cycles,
+        max_cards=max_cards,
+    )
+    if invalid_number:
+        raise ValueError(invalid_number)
+
+    note, take_over_by, locked_files, force_lock = _daemon_boundary_options(args)
+    return DaemonOptions(
+        apply=apply,
+        execute_runners=execute_runners,
+        planner=planner,
+        interval=interval,
+        max_runners=max_runners,
+        limit=limit,
+        max_cycles=max_cycles,
+        max_cards=max_cards,
+        reviewer=reviewer,
+        instruction=instruction,
+        probe=probe,
+        note=note,
+        take_over_by=take_over_by,
+        locked_files=locked_files,
+        force_lock=force_lock,
+    )
+
+
+def _daemon_numeric_options(args, cfg) -> tuple[float, int, int, int, int]:
     interval = getattr(args, "interval", None)
     interval = cfg.daemon_interval if interval is None else interval
     raw_max_runners = getattr(args, "max_runners", None)
@@ -140,13 +178,14 @@ def _resolve_daemon_options(agent: SimpleAgent, args) -> DaemonOptions:
     max_cycles = cfg.daemon_max_cycles if max_cycles is None else max_cycles
     max_cards = getattr(args, "max_cards", None)
     max_cards = cfg.daemon_max_cards if max_cards is None else max_cards
-    reviewer = getattr(args, "reviewer", None) or cfg.daemon_reviewer
-    instruction = getattr(args, "instruction", None)
-    instruction = cfg.daemon_runner_instruction if instruction is None else instruction
-    probe = False if getattr(args, "no_probe", False) else cfg.daemon_probe
+    return interval, max_runners, limit, max_cycles, max_cards
 
-    invalid_number = _validate_daemon_numbers(interval=interval, max_runners=max_runners, limit=limit, max_cycles=max_cycles, max_cards=max_cards)
-    if invalid_number:
-        raise ValueError(invalid_number)
 
-    return DaemonOptions(apply, execute_runners, planner, interval, max_runners, limit, max_cycles, max_cards, reviewer, instruction, probe)
+def _daemon_boundary_options(args) -> tuple[str, str, list[str], bool]:
+    # LLM: resolved daemon options include boundary fields so watch params do not read argparse.
+    return (
+        getattr(args, "note", None) or "",
+        getattr(args, "take_over_by", None) or "",
+        getattr(args, "locked_file", None) or [],
+        bool(getattr(args, "force_lock", False)),
+    )
