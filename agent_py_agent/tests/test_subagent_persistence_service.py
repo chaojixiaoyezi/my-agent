@@ -123,12 +123,92 @@ def _assert_runtime_workspace_paths(loaded, task_workspace, run_id: str) -> None
     assert loaded.agent_run_compaction_ledger_jsonl == str(run_workspace / "compactions" / "compaction_ledger.jsonl")
     assert loaded.agent_run_latest_compaction_summary_md == str(run_workspace / "compactions" / "latest_summary.md")
     assert loaded.agent_run_latest_compaction_metadata_json == str(run_workspace / "compactions" / "latest_metadata.json")
+    assert loaded.agent_run_memory_gate_dir == str(run_workspace / "memory_gate")
+    assert loaded.agent_run_memory_candidates_jsonl == str(run_workspace / "memory_gate" / "candidates.jsonl")
+    assert loaded.agent_run_memory_review_queue_jsonl == str(run_workspace / "memory_gate" / "review_queue.jsonl")
+    assert loaded.agent_run_skill_spark_gate_json == str(run_workspace / "memory_gate" / "skill_spark_gate.json")
     assert loaded.legacy_run_ref_json == str(run_workspace / "legacy_run_ref.json")
     assert "/daily/" in loaded.daily_ledger_file
     assert loaded.daily_ledger_file.endswith("/events.jsonl")
     assert loaded.daily_ledger_last_event_id.startswith(f"evt-{run_id}-{run_id}-")
     assert loaded.task_artifact_manifest_jsonl == str(task_workspace / "artifacts" / "manifest.jsonl")
     assert loaded.agent_run_artifact_manifest_jsonl == str(run_workspace / "artifacts" / "manifest.jsonl")
+
+
+def test_subagent_persistence_writes_memory_gate_candidates(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = _create_task_with_memory_gate_candidates(manager, tmp_path)
+    manager.save(task)
+
+    loaded = manager.load(task.id)
+    candidates = _read_jsonl(loaded.agent_run_memory_candidates_jsonl)
+    review_queue = _read_jsonl(loaded.agent_run_memory_review_queue_jsonl)
+    gate = json.loads(Path(loaded.agent_run_skill_spark_gate_json).read_text(encoding="utf-8"))
+    checkpoint = json.loads(Path(loaded.agent_run_checkpoint_json).read_text(encoding="utf-8"))
+
+    _assert_memory_gate_candidates(
+        candidates,
+        review_queue,
+        {"gate": gate, "checkpoint": checkpoint, "loaded": loaded},
+    )
+
+
+def _create_task_with_memory_gate_candidates(manager: SubAgentManager, tmp_path: Path):
+    task = manager.create_run(
+        goal="沉淀可复用经验但先经过门禁",
+        thought="经验候选必须留在 task/run 空间等待 review。",
+        plan=["写 lesson", "同步 gate"],
+    )
+    output_payload = {
+        "run_id": task.id,
+        "status": "AWAITING_ACCEPTANCE",
+        "lessons": ["先核验证据链，再把经验作为候选提交 review"],
+    }
+    (tmp_path / task.id / "output.json").write_text(json.dumps(output_payload), encoding="utf-8")
+    task.status = "AWAITING_ACCEPTANCE"
+    task.current_step = "等待 review"
+    task.latest_summary = "已产出经验候选。"
+    task.evidence_refs = ["reports/status_report.json"]
+    task.evidence_packets = [
+        EvidencePacket(
+            id="evpkt-gate-1",
+            claim="经验候选有可核验证据",
+            checked_scope="runner result",
+            evidence_refs=["reports/status_report.json"],
+            artifact_refs=["output.json"],
+            confidence=0.8,
+        ),
+    ]
+    task.findings = [
+        Finding(
+            id="finding-gate-1",
+            claim="经验只能作为候选，不可自动提升",
+            evidence_packet_ids=["evpkt-gate-1"],
+            evidence_refs=["reports/status_report.json"],
+            confidence=0.7,
+        ),
+    ]
+    return task
+
+
+def _assert_memory_gate_candidates(candidates, review_queue, refs) -> None:
+    gate = refs["gate"]
+    checkpoint = refs["checkpoint"]
+    loaded = refs["loaded"]
+    skill_candidate = next(item for item in candidates if item["candidate_type"] == "skill_spark")
+    memory_candidate = next(item for item in candidates if item["candidate_type"] == "memory_candidate")
+    assert skill_candidate["content"] == "先核验证据链，再把经验作为候选提交 review"
+    assert skill_candidate["promotion_status"] == "not_promoted"
+    assert skill_candidate["review_required"] is True
+    assert skill_candidate["evidence_refs"] == ["reports/status_report.json", "evpkt-gate-1"]
+    assert skill_candidate["artifact_refs"] == ["output.json"]
+    assert "limits_or_counterexamples" in skill_candidate["missing_requirements"]
+    assert memory_candidate["content"] == "经验只能作为候选，不可自动提升"
+    assert review_queue[0]["promotion_status"] == "not_promoted"
+    assert gate["promotion_policy"] == "never_auto_promote"
+    assert gate["promoted_count"] == 0
+    assert checkpoint["memory_gate"]["auto_promote"] is False
+    assert checkpoint["memory_gate"]["candidates_ref"] == loaded.agent_run_memory_candidates_jsonl
 
 
 def test_subagent_persistence_creates_agent_run_workspace_skeleton(tmp_path) -> None:

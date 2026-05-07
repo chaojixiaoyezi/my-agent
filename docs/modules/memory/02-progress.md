@@ -32,6 +32,7 @@
 - 2026-05-07 Phase 3 Artifact 外置规范已落地：subagent 保存时会写 `tasks/<root_id>/artifacts/manifest.jsonl` 和 `tasks/<root_id>/agents/<run_id>/artifacts/manifest.jsonl`，把 `artifact_refs` 规范化为 summary/hash/path/size/exists 记录，不复制 artifact 正文。
 - 2026-05-07 Phase 4 Checkpoint/Compact Chain 已落地：subagent 保存时会在 `tasks/<root_id>/agents/<run_id>/compactions/` 追加 `compaction_ledger.jsonl`，写每次 checkpoint snapshot 的 summary/metadata，并把最新 compact refs 回写到 run `checkpoint.json`；当前是 checkpoint-first 恢复链，不做 destructive compact apply。
 - 2026-05-07 Phase 5 Shared Workspace 已落地：subagent 保存时会同步 `tasks/<root_id>/shared/blackboard.md`、`messages.jsonl`、`findings.jsonl` 和 `evidence_packets/`，只写任务局部结构化 facts 和引用，不进入主代理长期 memory。
+- 2026-05-07 Phase 6 Memory Gate / Skill Spark 提升链第一片已落地：subagent 保存时会在 `tasks/<root_id>/agents/<run_id>/memory_gate/` 写 `candidates.jsonl`、`review_queue.jsonl` 和 `skill_spark_gate.json`，把 runner lessons / findings 变成带 evidence、scope、review 要求的候选；当前只排队 review，`promotion_status=not_promoted`，不会写主代理长期 memory 或正式 skill。
 - **记忆推模式** (`memory_push.py`)：在关键决策点自动查询并注入相关记忆，实现"推模式"记忆系统。
   - `MemoryType` 枚举：`LESSON_GENERAL`、`LESSON_TASK`、`LESSON_TEMP`、`CONTEXT`、`FACT`
   - `push_relevant_memories()` 函数：根据触发类型搜索相关记忆
@@ -66,6 +67,7 @@
 - Phase 3 artifact manifest 解决了“artifact_refs 只是散乱字符串，daily ledger 也只能看到原始 ref”的缺口；现在大输出保留在文件里，ledger 和 task/run workspace 只引用 manifest、summary、hash 和路径。
 - Phase 4 compact chain 解决了“run workspace 只有 compactions 空目录，没有 append-only checkpoint snapshot 链”的缺口；现在每次保存都会留下可追踪的 checkpoint summary/metadata，且 checkpoint 明确标记原 timeline/artifact 被保留。
 - Phase 5 shared workspace 解决了“shared/ 只有空文件，sibling 子代理没有结构化任务局部事实面”的缺口；现在 evidence packets、findings、status message 和 blackboard rollup 都能在 task workspace 内共享，但不会污染主 memory。
+- Phase 6 memory gate 解决了“经验火花和 finding 没有提升门禁文件”的缺口；现在 lesson/finding 先进入 run-local review queue，必须补齐 evidence、适用范围、限制/反例和人工或 verifier 确认，后续流程才能考虑进入长期 memory 或正式 skill。
 - compression hook 门禁解决了“压缩前没有可靠快照也会继续执行，导致恢复锚点缺失”的问题。
 - authoritative snapshot JSON 解决了“hook JSONL 适合搜索但不适合作为严格恢复锚点”的问题。
 - capability gap 与长期规则联动解决了“子代理已经发现自己缺什么，但相关规则没有自动回流到执行上下文”的问题。
@@ -77,7 +79,7 @@
 - 扩展 `scripts/check_doc_sync.py` 后续规则时，继续保持 memory 的 `02-progress.md` 和 `04-structure.md` 同步更新。
 - 继续补损坏 snapshot、task 权威文件缺失、默认注入过多等异常场景联合测试。
 - 继续补 subagent checkpoint artifact 缺失、损坏和旧任务未保存新字段时的恢复降级测试。
-- 按 `06-runtime-memory-requirements.md` 继续做文件系统版 Phase 6：memory gate / skill spark 提升链。
+- 继续补 Phase 6 后半段：把 review decision、retention 清理和正式 skill 生成流程做成独立显式命令或 verifier path，保持默认不自动提升。
 - 记忆推模式接入更多决策点：planner 决策前自动注入 context 类型记忆（已实现：subagent_mixin.py run_parent_planner 前调用 push_planning_memories）
 - 验证推模式记忆注入后 agent 行为是否正确改善
 
@@ -122,6 +124,7 @@
 - 本轮 Phase 3 Artifact Manifest focused 验收：`python3 -m pytest agent_py_agent/tests/test_subagent_persistence_service.py -q` -> `6 passed`。
 - 本轮 Phase 4 Checkpoint/Compact Chain focused 验收：`python3 -m pytest agent_py_agent/tests/test_subagent_persistence_service.py -q` -> `7 passed`。
 - 本轮 Phase 5 Shared Workspace focused 验收：`python3 -m pytest agent_py_agent/tests/test_subagent_persistence_service.py -q` -> `8 passed`。
+- 本轮 Phase 6 Memory Gate focused 验收：`python3 -m pytest agent_py_agent/tests/test_subagent_persistence_service.py -q` -> `9 passed`。
 
 ## 未跑测试
 

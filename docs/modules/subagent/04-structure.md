@@ -14,6 +14,7 @@
 - Each persisted task now writes Phase 3 task/run artifact manifests under `artifacts/manifest.jsonl`, with summary/hash/path metadata instead of artifact bodies.
 - Each persisted task now writes a Phase 4 run-local compact checkpoint chain under `compactions/`, with append-only ledger rows plus latest summary/metadata refs.
 - Each persisted task now writes a Phase 5 task-local shared workspace under `shared/`, with blackboard rollup, status messages, findings, and evidence packet files for sibling collaboration.
+- Each persisted task now writes a Phase 6 run-local memory gate under `memory_gate/`, with candidate and review queue files that never auto-promote into main memory or formal skills.
 # Subagent：结构树和详细说明
 
 ## 模块结构
@@ -58,6 +59,7 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/memory_archive/artifact_registry.py`：把 `artifact_refs` 写成 task/run `artifacts/manifest.jsonl`，记录摘要、hash、路径、size 和 exists 状态，不复制正文。
 - `agent_py_agent/agent/memory_archive/compact_chain.py`：把 run `compactions/` 升级成 checkpoint-first compact chain，追加 ledger、写 summary/metadata，并把最新 refs 回写到 run checkpoint。
 - `agent_py_agent/agent/memory_archive/shared_workspace.py`：同步 task-local `shared/` 协作面，把 evidence packets、findings、status messages 和 blackboard rollup 写成 sibling 可读事实，不写主 memory。
+- `agent_py_agent/agent/memory_archive/memory_gate.py`：同步 run-local `memory_gate/`，把 lessons / findings 写成带证据、适用范围、缺口和 review 要求的候选；它只排队，不负责正式提升。
 - `SKILL_SPARKS.md`：子代理目录里的经验火花候选，只记录可复用步骤、触发条件、证据引用、限制和反例；后续提升为 skill 必须经过单独 gate。
 - `agent_py_agent/agent/subagents/services/board.py`：把任务树节点转成 report board item，并汇总 child status、progress、summary、evidence/finding/blocker 计数。
 - `agent_py_agent/agent/subagents/services/rescue_policy.py`：根据 due-check issue 给 action plan 添加 rescue/escalation 元数据，保持建议可审计但不自动越权执行。
@@ -85,8 +87,9 @@ agent_py_agent/agent/
 13. persistence 写 `artifacts/manifest.jsonl`，让父级先看摘要、hash、path 和 exists，再按需读取 artifact 文件正文。
 14. persistence 追加 `compactions/compaction_ledger.jsonl`，写 checkpoint snapshot summary/metadata，并把 run `checkpoint.json` 指向最新 compact refs；当前不会删除 timeline、artifact 或旧 work-order 文件。
 15. persistence 同步 `shared/blackboard.md`、`messages.jsonl`、`findings.jsonl` 和 `evidence_packets/`，让 sibling 子代理共享结构化任务事实，但不写入主 memory。
-16. `memory-resume` 在跨天恢复时用 archive/LocalStore 作为线索，最终推荐读取任务目录里的事实源和 checkpoint artifacts，再由父级决定是否验收；这只是恢复入口推荐，不代表子代理写入主代理长期 memory。
-17. workflow preview 仍可通过 CLI dry-run 展示；真实路径已接入 `create_run(... workflow_mode="plan|auto")` 和 `subagents-dispatch --apply --workflow-mode auto`，可把父任务上的 `workflow_plan` 物化为 worker 子工单。LOG 专项 apply path 和 runner 恢复 scenario 继续作为真实任务记录的先行验证样本。
+16. persistence 同步 `memory_gate/candidates.jsonl`、`review_queue.jsonl` 和 `skill_spark_gate.json`，把 lesson/finding 作为候选排队；只有后续显式 review/gate 通过后，才允许进入长期 memory 或正式 skill 流程。
+17. `memory-resume` 在跨天恢复时用 archive/LocalStore 作为线索，最终推荐读取任务目录里的事实源和 checkpoint artifacts，再由父级决定是否验收；这只是恢复入口推荐，不代表子代理写入主代理长期 memory。
+18. workflow preview 仍可通过 CLI dry-run 展示；真实路径已接入 `create_run(... workflow_mode="plan|auto")` 和 `subagents-dispatch --apply --workflow-mode auto`，可把父任务上的 `workflow_plan` 物化为 worker 子工单。LOG 专项 apply path 和 runner 恢复 scenario 继续作为真实任务记录的先行验证样本。
 
 ## 给初学编程学生的学习路径
 

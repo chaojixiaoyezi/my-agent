@@ -114,7 +114,7 @@ memory-resume 或 run(auto resume)
 共享 = blackboard + messages + evidence packets + artifact refs
 ```
 
-当前 Phase 0/1/2/3/4/5 已创建 task workspace 外壳、agent run workspace 外壳、daily event ledger、artifact manifest、checkpoint-first compact chain 和 shared 协作面。`tasks/<root_id>/agents/<run_id>/legacy_run_ref.json` 会继续指向旧 run 目录，后续 Phase 6 再把 memory gate 和 skill spark 提升链补齐。
+当前 Phase 0/1/2/3/4/5/6 已创建 task workspace 外壳、agent run workspace 外壳、daily event ledger、artifact manifest、checkpoint-first compact chain、shared 协作面和 run-local memory gate。`tasks/<root_id>/agents/<run_id>/legacy_run_ref.json` 会继续指向旧 run 目录；`memory_gate/` 只保存 review 候选和门禁摘要，不自动写主代理长期记忆。
 
 LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 目录里的权威文件。
 
@@ -131,9 +131,10 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 7. 再看 `memory_archive/models.py`、`storage.py`、`runtime.py` 和 `snapshots.py`，理解归档保存什么、怎么写入、怎么验收、压缩前 hook 为什么必须先成功。
 8. 再看 `memory_archive/query.py`、`resume_brief.py` 和 `resume_context.py`，理解“继续任务”时怎么找回线索。
 9. 再看 `memory_archive/tokens.py` 和 `agent_core/runtime_mixin.py`，理解 session token 账本和压缩触发点。
-10. 再看 `agent_py_agent/tests/test_memory_archive_cli.py::test_memory_resume_cross_day_handoff_uses_task_fact_sources` 和 `test_memory_runtime.py::test_auto_resume_context_recovers_cross_day_handoff_task`，理解 subagent 跨天恢复如何从线索回到事实源。
-11. 再看 `agent_py_agent/tests/test_scenario_gateway_resume.py`，理解真实 gateway 请求和 parent/subagent runner 结果如何通过跨天恢复回到文件事实源。
-12. 最后看 `agent_py_agent/tests/test_memory_*.py` 和 `test_memory_first_loop.py`，用测试反推每一层必须保证的行为。
+10. 再看 `agent_py_agent/agent/memory_archive/memory_gate.py`，理解 lesson/finding 为什么先进入 review queue，而不是直接提升为长期记忆或 skill。
+11. 再看 `agent_py_agent/tests/test_memory_archive_cli.py::test_memory_resume_cross_day_handoff_uses_task_fact_sources` 和 `test_memory_runtime.py::test_auto_resume_context_recovers_cross_day_handoff_task`，理解 subagent 跨天恢复如何从线索回到事实源。
+12. 再看 `agent_py_agent/tests/test_scenario_gateway_resume.py`，理解真实 gateway 请求和 parent/subagent runner 结果如何通过跨天恢复回到文件事实源。
+13. 最后看 `agent_py_agent/tests/test_memory_*.py` 和 `test_memory_first_loop.py`，用测试反推每一层必须保证的行为。
 
 ## 当前第一版索引 / 待补齐
 
