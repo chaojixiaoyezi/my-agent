@@ -18,6 +18,12 @@ def sync_task_workspace_fields(workspace: str | Path, task: SubAgentTask) -> Non
     task.task_workspace_timeline_jsonl = str(task_workspace_paths.timeline_jsonl)
     task.task_workspace_summary_file = str(task_workspace_paths.current_summary)
     task.task_workspace_shared_dir = str(task_workspace_paths.shared_dir)
+    # LLM: shared workspace paths let sibling runs inspect task-local facts without main memory writes.
+    task.task_workspace_shared_blackboard = str(task_workspace_paths.shared.blackboard_md)
+    task.task_workspace_shared_messages_jsonl = str(task_workspace_paths.shared.messages_jsonl)
+    task.task_workspace_shared_findings_jsonl = str(task_workspace_paths.shared.findings_jsonl)
+    task.task_workspace_shared_evidence_packets_dir = str(task_workspace_paths.shared.evidence_packets_dir)
+    task.task_workspace_shared_evidence_index_jsonl = str(task_workspace_paths.shared.evidence_index_jsonl)
     task.task_workspace_artifacts_dir = str(task_workspace_paths.artifacts_dir)
     task.task_workspace_agents_dir = str(task_workspace_paths.agents_dir)
     task.agent_run_workspace_dir = str(task_workspace_paths.agent_adapter_dir)

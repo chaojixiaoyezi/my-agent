@@ -118,6 +118,12 @@ Daily event ledger 是主代理按天查 task/run 线索的轻量入口，不是
 
 当前 Phase 4 已先落地 checkpoint-first compact chain：subagent 保存时会在 run `compactions/compaction_ledger.jsonl` 追加 `checkpoint_snapshot` 事件，并写每次 snapshot 的 markdown summary 和 metadata JSON；run `checkpoint.json` 会记录最新 ledger/summary/metadata/artifact manifest/timeline refs。当前状态明确标记为 `checkpoint_only`，不会删除 timeline、artifact 或旧 work-order 文件，也不等同于正式 compact apply。
 
+## Shared Workspace 要求
+
+Shared workspace 是同一 task 下 sibling 子代理共享任务局部事实的地方，不是主代理长期 memory。
+
+当前 Phase 5 已先落地 `shared/` 结构化同步：subagent 保存时会更新 `blackboard.md` 的状态 rollup，向 `messages.jsonl` 追加 status update，把 `findings` 写入 `findings.jsonl`，并把 `evidence_packets` 外置成 `shared/evidence_packets/<id>.json` 加 `index.jsonl`。这些文件只保存 claim、refs、confidence、status 等结构化事实；不保存完整聊天历史，也不自动提升为长期 memory item。
+
 ## 接管要求
 
 新 agent 接管旧 run 时，不直接写旧目录。旧目录只读，新 run 新建目录，并记录：
@@ -150,6 +156,7 @@ Daily event ledger 是主代理按天查 task/run 线索的轻量入口，不是
 - 已新增 `memory_archive/daily_ledger.py`，先创建每日事件 ledger，用摘要和 refs 索引 task/run，不吸收子代理完整上下文。
 - 已新增 `memory_archive/artifact_registry.py`，先创建 task/run artifact manifests，用 summary/hash/path 规范 artifact refs，不复制大输出正文。
 - 已新增 `memory_archive/compact_chain.py`，先创建 run-local checkpoint snapshot ledger，用 append-only summary/metadata 串起 compact 恢复链，不删除原始上下文。
+- 已新增 `memory_archive/shared_workspace.py`，先创建 task-local shared blackboard/messages/findings/evidence packet 同步面，不写主代理长期记忆。
 
 后续主要差距：
 
@@ -157,5 +164,5 @@ Daily event ledger 是主代理按天查 task/run 线索的轻量入口，不是
 - task workspace 已有第一版 `task.yaml`、`state.json`、`timeline.jsonl`，run workspace 已有第一版 `agent.yaml`、run-level `state.json/timeline.jsonl` 和 checkpoint-first compact ledger/snapshot 链，但还没有接入真实 compact apply 和 post-compact self check。
 - daily ledger 已有 append-only 文件入口和 artifact manifest refs，但还没接入 resume 查询优先级和 retention 清理。
 - artifact manifests 已能规范已有 `artifact_refs`，但还没自动搬运/截断大工具输出，也还没做 content-addressed artifact 存储。
-- shared blackboard/messages/locks 仍未系统化。
+- shared blackboard/messages/findings/evidence packets 已有最小同步面，但 locks/handoffs 和 sibling 消息协议仍未系统化。
 - memory item 写入门禁、retention 清理和 skill spark 提升链路还未落地。

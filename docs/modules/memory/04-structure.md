@@ -14,6 +14,7 @@ agent_py_agent/agent/
 	    |-- artifact_registry.py           # Phase 3 artifact manifest summary/hash/path 规范
 	    |-- compact_chain.py               # Phase 4 checkpoint-first compact chain ledger
 	    |-- daily_ledger.py                # Phase 2 daily/YYYY-MM-DD/events.jsonl 事件索引
+	    |-- shared_workspace.py            # Phase 5 task-local blackboard/messages/findings/evidence
 	    |-- task_workspace.py             # Phase 0 文件系统 task workspace 骨架和旧 subagent run adapter
 	    |-- task_workspace_rendering.py   # task workspace YAML/Markdown 小文件渲染 helper
 	    `-- query/task_sources.py          # task/run 恢复入口推荐，不把子代理内容写入主 memory
@@ -44,6 +45,7 @@ agent_py_agent/cli/
 - `memory_archive/daily_ledger.py`：维护 `daily/YYYY-MM-DD/events.jsonl`，只追加 task/run 状态、摘要、duration、refs、artifact/evidence refs 和检索字段，不存完整上下文或工具输出。
 - `memory_archive/artifact_registry.py`：把 `SubAgentTask.artifact_refs` 规范化为 task/run 两份 `artifacts/manifest.jsonl`，记录 ref、resolved path、exists、size、sha256、summary 和 kind，不复制 artifact 正文。
 - `memory_archive/compact_chain.py`：在 run `compactions/` 下追加 checkpoint snapshot ledger，写每次 summary/metadata，并把最新 compact refs 回写到 run checkpoint；当前只做恢复链，不删除原始 timeline/artifact。
+- `memory_archive/shared_workspace.py`：同步 task-local shared blackboard、status messages、findings 和 evidence packet 文件；这是 sibling 子代理协作面，不写入主代理长期 memory。
 - `docs/modules/memory/06-runtime-memory-requirements.md`：定义 memory 作为运行时档案系统的开发要求，明确主代理长期记忆、每日账本、task workspace、agent run workspace、artifact、checkpoint、compact 和 retention 的边界。
 - `memory_archive/resume_brief.py`：把归档、LocalStore、任务事实源压成恢复简报。
 - `memory_archive/resume_context.py`：在“继续/恢复”类提示里按配置构造自动注入的恢复上下文。
@@ -67,9 +69,10 @@ agent_py_agent/cli/
 10. 同一保存流程会追加 `daily/YYYY-MM-DD/events.jsonl`，作为主代理按天查 task/run/event/artifact refs 的轻量索引。
 11. 同一保存流程会写 task/run artifact manifest，并让 daily ledger refs 指向 manifest；需要正文时再读 artifact 文件本身。
 12. 同一保存流程会追加 run `compactions/compaction_ledger.jsonl`，写 checkpoint snapshot summary/metadata，并让 run `checkpoint.json` 指向最新 compact refs；这不是删除上下文的 compact apply。
-13. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore、daily ledger 和任务事实源生成恢复块；跨天时会同时扫描最近 raw/hook 文件。subagent 任务会先推荐 `reports/checkpoint.json`、`status_report.json`、`progress.md` 等 compact recovery artifacts，再推荐 `STATUS.md`、`HANDOFF.md` 和 `output.json`。这只是恢复入口推荐，不代表把子代理内容写入主代理长期 memory。
-14. doctor 命令检查配置、route index、hook/raw/snapshot 目录和层级一致性 warning。
-15. `memory-compact --dry-run` 在真实压缩前只读扫描上述事实源，输出计划和风险，不修改文件。
+13. 同一保存流程会同步 `shared/blackboard.md`、`messages.jsonl`、`findings.jsonl` 和 `evidence_packets/`，让 sibling 子代理共享任务局部 facts；这仍然不是主 memory 写入。
+14. 用户说“继续/恢复”时，resume context 可以按配置从 archive、LocalStore、daily ledger 和任务事实源生成恢复块；跨天时会同时扫描最近 raw/hook 文件。subagent 任务会先推荐 `reports/checkpoint.json`、`status_report.json`、`progress.md` 等 compact recovery artifacts，再推荐 `STATUS.md`、`HANDOFF.md` 和 `output.json`。这只是恢复入口推荐，不代表把子代理内容写入主代理长期 memory。
+15. doctor 命令检查配置、route index、hook/raw/snapshot 目录和层级一致性 warning。
+16. `memory-compact --dry-run` 在真实压缩前只读扫描上述事实源，输出计划和风险，不修改文件。
 
 ## 跨天恢复链路
 
@@ -111,7 +114,7 @@ memory-resume 或 run(auto resume)
 共享 = blackboard + messages + evidence packets + artifact refs
 ```
 
-当前 Phase 0/1/2/3/4 已创建 task workspace 外壳、agent run workspace 外壳、daily event ledger、artifact manifest 和 checkpoint-first compact chain。`tasks/<root_id>/agents/<run_id>/legacy_run_ref.json` 会继续指向旧 run 目录，后续 Phase 5+ 再把 shared 协作面和 memory gate 补齐。
+当前 Phase 0/1/2/3/4/5 已创建 task workspace 外壳、agent run workspace 外壳、daily event ledger、artifact manifest、checkpoint-first compact chain 和 shared 协作面。`tasks/<root_id>/agents/<run_id>/legacy_run_ref.json` 会继续指向旧 run 目录，后续 Phase 6 再把 memory gate 和 skill spark 提升链补齐。
 
 LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 目录里的权威文件。
 
