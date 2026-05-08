@@ -90,6 +90,8 @@ class AgentConfig:
     task_max_subagents: int = 0
     task_max_grandchildren: int = 0
     subagent_automation_level: int = 2
+    acceptance_execute_tests: bool = False
+    acceptance_test_timeout_seconds: int = 120
     dynamic_timeout_safety_margin: float = 2.0
     dynamic_timeout_min: int = 30
     dynamic_timeout_max: int = 600

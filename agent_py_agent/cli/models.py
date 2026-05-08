@@ -280,6 +280,8 @@ class SubagentsAcceptanceOptions:
     reviewer: str | None
     note: str
     limit: int
+    execute_tests: bool | None = None
+    test_timeout: float | None = None
 
 
 # LLM: SubagentsPatchOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
@@ -292,6 +294,16 @@ class SubagentsPatchOptions:
     reviewer: str | None
     note: str
     limit: int
+
+
+# LLM: SubagentsTestsOptions keeps the test-report CLI request explicit and small.
+# 类用途: 保存 subagents-tests 的查看/重跑参数，避免命令层散传 argparse 字段。
+@dataclass(frozen=True)
+class SubagentsTestsOptions:
+
+    run_id: str
+    re_run: bool
+    timeout: float
 
 
 # LLM: SubagentsMemoryGateOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。

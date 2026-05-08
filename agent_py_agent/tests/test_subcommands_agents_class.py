@@ -37,6 +37,7 @@ class TestSubagentsSubcommandRegistration:
             "subagents-apply-actions",
             "subagents-route-capabilities",
             "subagents-acceptance",
+            "subagents-tests",
             "subagents-patches",
             "subagents-dispatch",
             "subagent-context",
@@ -229,6 +230,46 @@ class TestSubagentsReviewCommandRegistration:
         ])
         assert args.reviewer == "test-reviewer"
         assert args.note == "测试备注"
+
+    def test_subagents_acceptance_has_real_test_override_args(self):
+        """测试 subagents-acceptance 命令可以显式覆盖真实测试执行配置。"""
+        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="subcommand")
+        add_subagents_subcommands(sub)
+
+        args = parser.parse_args([
+            "subagents-acceptance",
+            "--execute-tests",
+            "--test-timeout", "9",
+        ])
+        assert args.execute_tests is True
+        assert args.test_timeout == 9
+
+        args = parser.parse_args([
+            "subagents-acceptance",
+            "--no-execute-tests",
+        ])
+        assert args.execute_tests is False
+
+    def test_subagents_tests_has_view_and_rerun_args(self):
+        """测试 subagents-tests 命令有查看和显式重跑参数。"""
+        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="subcommand")
+        add_subagents_subcommands(sub)
+
+        args = parser.parse_args([
+            "subagents-tests",
+            "run-123",
+            "--re-run",
+            "--timeout", "9",
+        ])
+        assert args.run_id == "run-123"
+        assert args.re_run is True
+        assert args.timeout == 9
 
     def test_subagents_patches_has_patch_action_group(self):
         """测试 subagents-patches 命令有 patch 操作组。
