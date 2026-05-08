@@ -1872,3 +1872,12 @@ def example(...):
 - Auto Policy 现在输出 `preflight_status`、`ready_for_manual_execution`、`ready_for_automatic_execution`、`preflight_checks` 和 `preflight_blockers`。
 - 对 allowlisted `run_tests`，preflight 可以是 `manual_ready`，但 `ready_for_automatic_execution=false` 且 blocker 保留 `automatic_execution_disabled`。
 - 对需要人工确认、状态修改或不在 allowlist 的动作，preflight 会给出明确 blocker；这只是审计和未来调度输入，不执行命令。
+
+## 2026-05-09 Parent Acceptance Auto Policy dispatch preflight 摘要
+
+状态：已落地
+
+摘要：
+- `subagents-dispatch` 的 acceptance record 现在透传 `preflight_status`、`ready_for_automatic_execution` 和 `preflight_blockers`。
+- `SUBAGENT_DISPATCH.md` 展示同一组 preflight 摘要，让 watch/调度层直接看到“manual_ready 仍不等于自动放行”。
+- 这仍是报告层字段，不触发 tests/apply/rescue，也不会根据 preflight 自动修改 task/run 状态。

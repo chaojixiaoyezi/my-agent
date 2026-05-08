@@ -67,6 +67,42 @@ def _dispatch_runner_once(agent, router):
     )
 
 
+# LLM: _acceptance_dispatch_record keeps dispatch test bodies below strict size limits.
+# 函数用途: 从调度报告中取出指定 run 的 acceptance 记录，减少测试主体重复断言。
+def _acceptance_dispatch_record(report, run_id: str):
+    return next(item for item in report.records if item.step == "acceptance" and item.run_id == run_id)
+
+
+# LLM: _assert_parent_acceptance_policy_dispatch verifies policy summaries stay refs-only and non-executing.
+# 函数用途: 检查 dispatch record 的父级验收 auto-policy 摘要，确保 manual/preflight 字段没有变成执行许可。
+def _assert_parent_acceptance_policy_dispatch(record, task) -> Path:
+    assert record.parent_acceptance_policy_action == "run_tests"
+    assert record.parent_acceptance_policy_would_execute is True
+    assert record.parent_acceptance_policy_executed is False
+    assert record.parent_acceptance_policy_execution_mode == "manual_only"
+    assert record.parent_acceptance_policy_automatic_execution_allowed is False
+    assert record.parent_acceptance_policy_recommended_command == f"subagents-tests {task.id} --re-run"
+    assert record.parent_acceptance_policy_preflight_status == "manual_ready"
+    assert record.parent_acceptance_policy_ready_for_automatic_execution is False
+    assert record.parent_acceptance_policy_preflight_blockers == ["automatic_execution_disabled"]
+    policy_ref = Path(task.reports_dir) / "parent_acceptance_auto_policy.json"
+    assert record.parent_acceptance_policy_ref == str(policy_ref)
+    return policy_ref
+
+
+# LLM: _assert_dispatch_policy_markdown verifies human dispatch output mirrors the safe machine summary.
+# 函数用途: 检查 dispatch Markdown 展示 policy ref、manual-only 和 preflight 摘要，但不暗示自动执行。
+def _assert_dispatch_policy_markdown(markdown: str, task, policy_ref: Path) -> None:
+    assert "parent_acceptance_auto_policy" in markdown
+    assert "execution_mode=manual_only" in markdown
+    assert "automatic_execution_allowed=False" in markdown
+    assert f"recommended_command=subagents-tests {task.id} --re-run" in markdown
+    assert "preflight_status=manual_ready" in markdown
+    assert "ready_for_automatic_execution=False" in markdown
+    assert "preflight_blockers=automatic_execution_disabled" in markdown
+    assert str(policy_ref) in markdown
+
+
 def test_subagent_dispatch_dry_run_plans_runner_patch_and_acceptance():
     """LLM: Verifies dry-run dispatch plans runner, patch_review, and acceptance steps without mutating state."""
     with tempfile.TemporaryDirectory() as td:
@@ -90,17 +126,10 @@ def test_subagent_dispatch_dry_run_plans_runner_patch_and_acceptance():
         assert report.dry_run
         assert any(item.step == "runner" and item.run_id == runner_task.id for item in report.records)
         assert any(item.step == "patch_review" and item.run_id == review_task.id for item in report.records)
-        acceptance_record = next(item for item in report.records if item.step == "acceptance" and item.run_id == review_task.id)
-        assert acceptance_record.parent_acceptance_policy_action == "run_tests"
-        assert acceptance_record.parent_acceptance_policy_would_execute is True
-        assert acceptance_record.parent_acceptance_policy_executed is False
-        assert acceptance_record.parent_acceptance_policy_execution_mode == "manual_only"
-        assert acceptance_record.parent_acceptance_policy_automatic_execution_allowed is False
-        assert acceptance_record.parent_acceptance_policy_recommended_command == (
-            f"subagents-tests {review_task.id} --re-run"
+        policy_ref = _assert_parent_acceptance_policy_dispatch(
+            _acceptance_dispatch_record(report, review_task.id),
+            review_task,
         )
-        policy_ref = Path(review_task.reports_dir) / "parent_acceptance_auto_policy.json"
-        assert acceptance_record.parent_acceptance_policy_ref == str(policy_ref)
         policy_payload = json.loads(policy_ref.read_text(encoding="utf-8"))
         assert policy_payload["policy"]["executed"] is False
         assert policy_payload["policy"]["mutates_task_state"] is False
@@ -108,11 +137,7 @@ def test_subagent_dispatch_dry_run_plans_runner_patch_and_acceptance():
         assert agent.subagents.load(runner_task.id).status == "PLANNING"
         assert agent.subagents.load(review_task.id).status == "AWAITING_ACCEPTANCE"
         dispatch_markdown = (root / "subs" / "SUBAGENT_DISPATCH.md").read_text(encoding="utf-8")
-        assert "parent_acceptance_auto_policy" in dispatch_markdown
-        assert "execution_mode=manual_only" in dispatch_markdown
-        assert "automatic_execution_allowed=False" in dispatch_markdown
-        assert f"recommended_command=subagents-tests {review_task.id} --re-run" in dispatch_markdown
-        assert str(policy_ref) in dispatch_markdown
+        _assert_dispatch_policy_markdown(dispatch_markdown, review_task, policy_ref)
         assert (root / "subs" / "subagent_dispatch_report.json").exists()
         assert not (root / "subs" / "subagent_dispatch_log.jsonl").exists()
 
