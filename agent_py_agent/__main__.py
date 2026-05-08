@@ -103,6 +103,7 @@ from .cli.local_doctor import (
     rebuild_local_store,
     rebuild_subagent_index,
 )
+from .cli.memory_artifact_commands import cmd_memory_artifact_read
 from .cli.memory_archive_commands import (
     cmd_memory_archive_list,
     cmd_memory_archive_search,

@@ -151,6 +151,7 @@ Ctrl+C
 | `memory-archive-list` | 列出 raw/hook 归档记录 | 否 | 否 |
 | `memory-archive-search` | 按字段搜索 raw/hook 归档 | 否 | 否 |
 | `memory-resume` | 从归档、LocalStore 和任务目录生成恢复线索 | 否 | 否 |
+| `memory-artifact-read` | 显式读取已登记 tool-output artifact 正文 | 否 | 否 |
 | `memory-compact` | 只读预演 memory compact 计划 | 否 | 否 |
 | `local-store-status` | 查看本地事实源状态 | 否 | 否 |
 | `local-search` | 搜索 SQLite/FTS5 本地事实源 | 否 | 否 |
@@ -438,6 +439,25 @@ JSON 输出里会额外包含 `brief`：
 | `--compact-owner-type <type>` | `main_agent` | compact owner 类型；`subagent_run` / `subagent_session` 会只读解析 task-local run workspace refs。 |
 | `--compact-owner-id <id>` | 空 | compact owner 标识；子代理 owner 通常传 run_id，不会写主 memory 或自动执行工具。 |
 | `--context-only` | `false` | 只输出可交接/注入的恢复上下文块。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `memory-artifact-read`
+
+```powershell
+my-agent memory-artifact-read C:\repo\memory_archive\artifacts\tool_outputs\read_file-call-abc.json
+my-agent memory-artifact-read <sha256> --offset 4000 --max-chars 2000 --json
+my-agent memory-artifact-read <call_id> --max-chars 0
+```
+
+显式读取已经外置的 tool-output artifact 正文。这个命令只信任 `memory_archive/artifacts/tool_outputs/index.jsonl` 里的登记记录；`artifact_ref` 可以是登记过的 path、sha256 或 call_id。普通文件路径即使存在，也不会被当成 artifact 读取。
+
+默认只读前 4000 个字符；`--offset` 可以从正文中间继续读，`--max-chars 0` 表示读取完整正文。JSON 输出会包含 `content_hash_verified=true`、`reads_artifact_body=true`、`truncated`、`content_offset` 和 `content_max_chars`，方便接管者确认这次确实是显式读取。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `artifact_ref` | 必填 | 来自恢复包、manifest 或 tool output index 的 artifact path/hash/call_id。 |
+| `--offset` | `0` | 从正文第几个字符开始读取。 |
+| `--max-chars` | `4000` | 最多读取多少字符；`0` 表示读取全部。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 
 ## `memory-compact`

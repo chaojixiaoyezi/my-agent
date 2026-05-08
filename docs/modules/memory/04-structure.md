@@ -219,3 +219,8 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 - `memory_archive/compact_resume.py` now calls that extractor before building recommended read paths, so the main resume orchestration file does not keep growing with JSONL scanning details.
 - `memory_archive/compact_resume_handoff.py` now carries the same checkpoint refs into `compact_resume_handoff` and renders a `Fail Safe Checkpoints` section in the context block.
 - The structure remains refs-only: `memory-resume` may inspect hook checkpoint metadata, but it does not read or inline externalized tool artifact bodies. Artifact bodies stay behind explicit artifact path reads.
+
+## 2026-05-08 artifact explicit read structure update
+- `memory_archive/artifact_reader.py` owns indexed tool-output artifact body reads. It treats `index.jsonl` as the authority, validates the registered path boundary, verifies sha256, and returns explicit slices.
+- `cli/memory_artifact_commands.py` exposes `memory-artifact-read`, keeping failed reads metadata-only and successful reads clearly marked with `reads_artifact_body=true`.
+- `tooling/artifact.py` exposes `read_artifact` to the model as the controlled runtime tool; ordinary workspace files still go through `read_file`.
