@@ -1845,3 +1845,12 @@ def example(...):
 - `SUBAGENT_DISPATCH.md` 展示同一组摘要，方便父代理或人类先看报告再沿 ref 进入具体 run 审计。
 - `subagents-dispatch --watch` 不在 watch 层重新运行 policy；watch record 只引用本轮 dispatch JSON/Markdown，避免 watch 循环把 `would_execute=true` 误解成自动执行。
 - 当前边界不变：不执行 tests、不 apply acceptance、不 rescue、不修改 task 状态；`executed=false` 仍是硬约束。
+
+## 2026-05-09 Parent Acceptance Auto Policy 半自动计划字段
+
+状态：已落地
+
+摘要：
+- `parent_acceptance_auto_policy.json` 的 policy 现在包含 `execution_mode=manual_only`、`automatic_execution_allowed=false` 和 `recommended_command`。
+- 这一步只把“如果要继续，应该手动跑哪条命令”写成机器可读字段；不会启动进程、不会跑 tests、不会 apply、不会 rescue，也不会改 task/run 状态。
+- `reserved.semi_auto_plan` 记录 stage、manual confirmation 和 `dry_run_only/no_process_execution/no_task_state_mutation` 等硬边界，为后续受控调度器读取做准备。

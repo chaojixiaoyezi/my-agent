@@ -137,7 +137,14 @@ def _print_acceptance_auto_policy(policy) -> None:
         f"would_execute={bool(getattr(policy, 'would_execute', False))} "
         f"executed={bool(getattr(policy, 'executed', False))}"
     )
+    print(
+        f"execution_mode={getattr(policy, 'execution_mode', 'manual_only')} "
+        f"automatic_execution_allowed={bool(getattr(policy, 'automatic_execution_allowed', False))}"
+    )
     print(f"reason={getattr(policy, 'reason', '')}")
+    recommended_command = str(getattr(policy, "recommended_command", "") or "")
+    if recommended_command:
+        print(f"recommended_command={recommended_command}")
     command = str(getattr(policy, "command", "") or "")
     if command:
         print(f"command={command}")

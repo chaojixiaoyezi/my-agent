@@ -83,6 +83,9 @@ class _FakeSubagents:
             dry_run=True,
             would_execute=True,
             executed=False,
+            execution_mode="manual_only",
+            automatic_execution_allowed=False,
+            recommended_command=f"subagents-tests {run_id} --re-run",
             mutates_task_state=False,
             next_action_ref=str(Path(self._task.reports_dir) / "parent_acceptance_next_action.json"),
             to_dict=lambda: {
@@ -92,6 +95,9 @@ class _FakeSubagents:
                 "dry_run": True,
                 "would_execute": True,
                 "executed": False,
+                "execution_mode": "manual_only",
+                "automatic_execution_allowed": False,
+                "recommended_command": f"subagents-tests {run_id} --re-run",
             },
         )
 
@@ -337,3 +343,5 @@ def test_subagents_acceptance_plan_auto_policy_prints_policy_decision(tmp_path, 
     assert "SUBAGENT ACCEPTANCE AUTO POLICY" in out
     assert "run_id=run-1 action=run_tests decision=allow dry_run=True" in out
     assert "would_execute=True executed=False" in out
+    assert "execution_mode=manual_only automatic_execution_allowed=False" in out
+    assert "recommended_command=subagents-tests run-1 --re-run" in out
