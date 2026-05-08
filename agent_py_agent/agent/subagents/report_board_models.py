@@ -116,6 +116,8 @@ class ActionPlanItem:
     rescue_strategy: str = ""
     escalation_target: str = ""
     rescue_context_refs: list[str] = field(default_factory=list)
+    # LLM: rescue packet records refs-only retry/escalation policy; it does not authorize auto execution.
+    rescue_packet: dict[str, object] = field(default_factory=dict)
     requires_confirmation: bool = True
     dry_run: bool = True
     owner: str = ""
@@ -157,6 +159,8 @@ class ActionApplyRecord:
     rescue_strategy: str = ""
     escalation_target: str = ""
     rescue_context_refs: list[str] = field(default_factory=list)
+    # LLM: apply records preserve the rescue packet that justified the action.
+    rescue_packet: dict[str, object] = field(default_factory=dict)
     evidence_paths: list[str] = field(default_factory=list)
     created_at: float = 0.0
 

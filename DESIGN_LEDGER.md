@@ -1774,7 +1774,7 @@ def example(...):
 - 继续把 `SharedProgressPanel` 接入 CLI/status 展示和 shared workspace facts；面板只暴露 refs 和投影摘要，不读取 artifact 正文，也不替代 task/run workspace 事实源。
 - tool output externalizer 前已加入 fail-safe recovery snapshot，ToolContextReducer 也已接入 live prompt 注入前：大工具输出写 artifact 前先记录工具名、hash、大小、run/task/request id 和下一步建议；下一轮 prompt 只放 artifact 摘要、路径和 checkpoint refs，不再直接塞回完整大正文。
 - takeover/rescue 第一段已接入 `takeover_readiness_ref`：action plan 的 `rescue_context_refs` 和 takeover apply 的 `evidence_paths` 会先暴露 `reports/takeover_readiness.json`，再按包里的 recommended read order 显式列出 failure handoff、checkpoint、status report、artifact manifest 或 artifact refs；第一版仍保持 refs-only，不自动读取大 artifact 正文，也不自动接管或重试。
-- takeover/rescue 下一步应在上述 refs 基础上生成 rescue packet / rescue action plan，补重复失败去重、重试上限、父级/能力层上抛和人工确认建议。
+- rescue packet / rescue action plan 第一段已落地：`ActionPlanItem` 和 `ActionApplyRecord` 带 `rescue_packet`，记录 `dedupe_key`、`issue_kinds`、`repeat_count`、`retry_policy.max_attempts`、上抛目标、人工确认建议和 `recovery_entrypoints`；`auto_retry=false`、`auto_execute=false`、`reads_artifact_bodies=false` 是当前边界。它只做计划和审计，不自动 rescue。
 - 后续做 Security Gate 时优先基于 `SecuritySignal` 扩展：先补外部案例调研、风险分类、detector fixture 和 audit report，再决定是否接入权限收窄、工具隔离或人工确认流程。
 - 后续接外部 IM / 企业用户时，先实现 `RuntimeIdentity` / `ConversationScope` 这类轻量身份包，把 service owner、effective principal、conversation、root run 和 memory namespace 写进 artifact/snapshot/control-plane metadata；员工长期记忆是否启用保持 policy 决策，不和第一版 artifact 隔离绑死。
 - 后续做员工记忆时，先实现 task/run working memory 的清理与保留包，再实现 conversation memory 的显式 promotion 队列；主代理可以读取员工授权范围内的 conversation summary / preference card / open tasks，但不能默认读取员工私有 run artifacts 或管理员个人记忆。

@@ -92,6 +92,15 @@ def test_subagent_action_plan_dry_run():
         assert actions[(stale.id, "takeover_or_reassign")].rescue_strategy == "takeover_or_shrink_scope_before_retry"
         assert actions[(stale.id, "takeover_or_reassign")].escalation_target == "parent"
         assert "run_timeout" in actions[(stale.id, "takeover_or_reassign")].rescue_trigger
+        takeover_packet = actions[(stale.id, "takeover_or_reassign")].rescue_packet
+        assert takeover_packet["schema_name"] == "subagent_rescue_packet"
+        assert takeover_packet["dedupe_key"] == f"{stale.id}:takeover_or_reassign"
+        assert takeover_packet["repeat_count"] == 2
+        assert set(takeover_packet["issue_kinds"]) == {"heartbeat_stale", "run_timeout"}
+        assert takeover_packet["retry_policy"]["max_attempts"] == 1
+        assert takeover_packet["escalation"]["target"] == "parent"
+        assert takeover_packet["manual_confirmation"]["required"] is True
+        assert takeover_packet["reserved"]["auto_execute"] is False
         assert (fake_done.id, "reopen_for_evidence") in actions
         assert (request_task.id, "route_capability_request") in actions
         assert (broken.id, "probe_or_repair_channel") in actions
