@@ -117,3 +117,46 @@ def test_rescue_context_refs_use_takeover_readiness_read_order_without_artifact_
     assert loaded.agent_run_artifact_manifest_jsonl in refs
     assert refs[1 : 1 + len(expected_order)] == expected_order
     assert "DO_NOT_PULL_ARTIFACT_BODY_INTO_RESCUE_CONTEXT" not in encoded
+
+
+def test_rescue_packet_records_refs_only_policy_and_escalation_without_artifact_body(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="build rescue packet",
+        thought="rescue packet should stay metadata-only",
+        plan=["write artifact", "block"],
+    )
+    artifact_path = Path(task.task_dir) / "reports" / "blackbox.txt"
+    artifact_path.write_text("DO_NOT_PULL_ARTIFACT_BODY_INTO_RESCUE_PACKET\n", encoding="utf-8")
+    task.status = "FAILED"
+    task.failure_type = "tool_output_context_overflow"
+    task.artifact_refs = [str(artifact_path)]
+    manager.save(task)
+
+    loaded = manager.load(task.id)
+    issue = DueCheckIssue(
+        run_id=task.id,
+        severity="P1",
+        kind="status_failed",
+        message="failed",
+        suggested_action="inspect_failure",
+        status="FAILED",
+        task_dir=loaded.task_dir,
+    )
+
+    fields = rescue_fields_for_issue(issue, "inspect_failure")
+    packet = fields["rescue_packet"]
+    encoded = json.dumps(packet, ensure_ascii=False)
+
+    assert packet["schema_name"] == "subagent_rescue_packet"
+    assert packet["run_id"] == task.id
+    assert packet["dedupe_key"] == f"{task.id}:inspect_failure"
+    assert packet["issue_kinds"] == ["status_failed"]
+    assert packet["repeat_count"] == 1
+    assert packet["retry_policy"]["max_attempts"] == 1
+    assert packet["retry_policy"]["auto_retry"] is False
+    assert packet["escalation"]["target"] == "parent"
+    assert packet["manual_confirmation"]["required"] is True
+    assert packet["recovery_entrypoints"][0] == loaded.takeover_readiness_json
+    assert packet["reserved"]["reads_artifact_bodies"] is False
+    assert "DO_NOT_PULL_ARTIFACT_BODY_INTO_RESCUE_PACKET" not in encoded

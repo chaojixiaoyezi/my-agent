@@ -256,6 +256,12 @@ class TestActionPlanRendering:
                     reason="任务应该继续执行",
                     source_issue_kinds=["timeout"],
                     suggested_commands=["agent resume --run-id=run-1"],
+                    rescue_packet={
+                        "schema_name": "subagent_rescue_packet",
+                        "retry_policy": {"max_attempts": 1, "auto_retry": False},
+                        "manual_confirmation": {"required": True},
+                        "recovery_entrypoints": ["reports/takeover_readiness.json"],
+                    },
                 )
             ],
         )
@@ -266,6 +272,10 @@ class TestActionPlanRendering:
         assert "dry-run" in result
         assert "run-1" in result
         assert "resume" in result
+        assert "rescue_packet" in result
+        assert "retry_limit=1" in result
+        assert "manual_confirmation=True" in result
+        assert "reports/takeover_readiness.json" in result
 
     def test_render_action_plan_markdown_empty(self):
         """测试空动作计划渲染。
