@@ -123,6 +123,8 @@ class _SubAgentAcceptanceFacade:
     def plan_parent_acceptance_auto_policy(self, run_id: str) -> ParentAcceptanceAutoPolicy:
         return manager_plan_parent_acceptance_auto_policy(self, run_id)
 
+    # LLM: review_acceptance runs one parent acceptance review with explicit opt-in execution options.
+    # 函数用途: 对单个子代理 run 执行父级验收；只有 options 或 apply 参数允许时才写回任务状态。
     def review_acceptance(
         self,
         run_id: str,
