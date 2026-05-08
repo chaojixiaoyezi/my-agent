@@ -190,7 +190,9 @@ my-agent status --recent --limit 10
 my-agent status --json
 ```
 
-显示当前本地工作台总览：gateway 存活状态、gateway 队列数量、LocalStore 记录/事件数量、subagent summary、红灯任务、最近事件和建议下一步动作。它只读现有账本，不调用模型。
+显示当前本地工作台总览：gateway 存活状态、gateway 队列数量、LocalStore 记录/事件数量、subagent summary、红灯任务、Shared Progress、Takeover View、最近事件和建议下一步动作。它只读现有账本，不调用模型。
+
+`Takeover View` 会列出可接管 run、failure handoff ref、takeover readiness ref 和 recommended read order；它只读取恢复索引，不展开 artifact 正文。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -687,6 +689,8 @@ my-agent subagents --limit 20
 | `--owner <owner>` | - | 按 `owner`、`supervisor` 或 `final_owner` 过滤。 |
 | `--root-id <id>` | - | 按根任务 ID 过滤。 |
 | `--limit <n>` | `20` | 最多显示多少条。 |
+
+输出会包含 `Shared Progress` 和 `Takeover View`：前者显示 root task 聚合计数，后者显示接管入口 refs 和推荐读取顺序。完整 artifact 正文不会自动进入看板。
 
 ## `subagents-due-check`
 

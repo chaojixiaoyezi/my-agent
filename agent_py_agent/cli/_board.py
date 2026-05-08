@@ -11,7 +11,19 @@ from ..agent.agent_core.subagent_params import SpawnSubagentsParams
 from ..agent.subagent import filter_board_items
 from ..agent.subagents.models import SubAgentBoardOptions
 from .common import make_agent
-from .shared_progress import format_shared_progress_lines, shared_progress_for_board
+from .shared_progress import (
+    format_shared_progress_lines,
+    format_takeover_view_lines,
+    shared_progress_for_board,
+)
+
+
+# LLM: _print_takeover_view keeps board takeover guidance visible and refs-only.
+# 函数用途: 在 subagents 看板里展示可接管 run 的 packet/read_order，不读取 artifact 正文。
+def _print_takeover_view(panels: list[dict]) -> None:
+    print("Takeover View")
+    for line in format_takeover_view_lines(panels):
+        print(line)
 
 
 # LLM: _task_jsonable 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
@@ -52,6 +64,7 @@ def cmd_subagents(args) -> int:
     print("summary=" + json.dumps(board.summary, ensure_ascii=False, sort_keys=True))
     panels = shared_progress_for_board(agent, board, purpose="subagents_board")
     _print_shared_progress(panels)
+    _print_takeover_view(panels)
     if not items:
         print("没有匹配的子代理记录。")
         return 0

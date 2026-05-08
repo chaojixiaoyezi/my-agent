@@ -20,6 +20,9 @@ def test_status_payload_surfaces_shared_progress_and_failure_handoff(tmp_path) -
     task.failure_type = "tool_output_context_overflow"
     task.latest_summary = "工具输出太大，已经停止展开。"
     task.current_step = "等待接管"
+    artifact_path = tmp_path / "subagents" / task.id / "reports" / "large-output.txt"
+    artifact_path.write_text("STATUS_TAKEOVER_VIEW_MUST_NOT_INLINE_ARTIFACT_BODY\n", encoding="utf-8")
+    task.artifact_refs = [str(artifact_path)]
     manager.save(task)
     board = manager.build_board(recent_limit=5)
 
@@ -30,6 +33,10 @@ def test_status_payload_surfaces_shared_progress_and_failure_handoff(tmp_path) -
     assert panels[0]["run_count"] == 1
     assert panels[0]["failure_handoff_refs"] == [task.failure_handoff_json]
     assert panels[0]["takeover_readiness_refs"] == [task.takeover_readiness_json]
+    assert panels[0]["takeover_entries"][0]["run_id"] == task.id
+    assert panels[0]["takeover_entries"][0]["takeover_readiness_ref"] == task.takeover_readiness_json
+    assert task.failure_handoff_json in panels[0]["takeover_entries"][0]["recommended_read_order"]
+    assert "STATUS_TAKEOVER_VIEW_MUST_NOT_INLINE_ARTIFACT_BODY" not in json.dumps(payload, ensure_ascii=False)
 
 
 def test_status_human_prints_shared_progress_failure_handoff(tmp_path, capsys) -> None:
@@ -39,6 +46,22 @@ def test_status_human_prints_shared_progress_failure_handoff(tmp_path, capsys) -
         "blocked_count": 1,
         "failure_handoff_refs": ["reports/failure_handoff.json"],
         "takeover_readiness_refs": ["reports/takeover_readiness.json"],
+        "takeover_entries": [
+            {
+                "run_id": "run-1",
+                "status": "FAILED",
+                "current_step": "等待接管",
+                "latest_summary": "工具输出过大",
+                "failure_handoff_ref": "reports/failure_handoff.json",
+                "takeover_readiness_ref": "reports/takeover_readiness.json",
+                "recommended_read_order": [
+                    "reports/takeover_readiness.json",
+                    "reports/failure_handoff.json",
+                    "reports/checkpoint.json",
+                    "reports/artifacts/manifest.jsonl",
+                ],
+            }
+        ],
     }
     ctx = StatusPrintContext(
         agent=SimpleNamespace(config=SimpleNamespace(agent_name="demo", subagent_board_limit=5), root=tmp_path),
@@ -60,6 +83,9 @@ def test_status_human_prints_shared_progress_failure_handoff(tmp_path, capsys) -
     output = capsys.readouterr().out
     assert "Shared Progress" in output
     assert "root-1 runs=2 blocked=1 failure_handoffs=1 takeover_packets=1" in output
+    assert "Takeover View" in output
+    assert "run-1 status=FAILED step=等待接管" in output
+    assert "read_order[1]=reports/failure_handoff.json" in output
 
 
 def test_subagents_board_prints_shared_progress_panel(tmp_path) -> None:
@@ -70,6 +96,17 @@ def test_subagents_board_prints_shared_progress_panel(tmp_path) -> None:
         "blocked_count": 1,
         "failure_handoff_refs": ["reports/failure_handoff.json"],
         "takeover_readiness_refs": ["reports/takeover_readiness.json"],
+        "takeover_entries": [
+            {
+                "run_id": "run-1",
+                "status": "BLOCKED",
+                "current_step": "等待接管",
+                "latest_summary": "需要父级处理",
+                "failure_handoff_ref": "reports/failure_handoff.json",
+                "takeover_readiness_ref": "reports/takeover_readiness.json",
+                "recommended_read_order": ["reports/takeover_readiness.json", "reports/failure_handoff.json"],
+            }
+        ],
     }
     board = SimpleNamespace(summary={"total": 0}, hot_list=[], recent=[], items=[], shared_progress=[panel])
     agent = SimpleNamespace(subagents=SimpleNamespace(write_board=lambda options: board, workspace=tmp_path))
@@ -82,6 +119,8 @@ def test_subagents_board_prints_shared_progress_panel(tmp_path) -> None:
     assert result == 0
     assert "Shared Progress" in stdout.getvalue()
     assert "root-1 runs=2 blocked=1 failure_handoffs=1 takeover_packets=1" in stdout.getvalue()
+    assert "Takeover View" in stdout.getvalue()
+    assert "run-1 status=BLOCKED step=等待接管" in stdout.getvalue()
 
 
 def _status_payload_context(tmp_path, store, manager, board) -> StatusPayloadContext:
