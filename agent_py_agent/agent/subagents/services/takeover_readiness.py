@@ -102,6 +102,22 @@ def write_takeover_readiness_files(task: SubAgentTask) -> dict[str, object]:
     return packet
 
 
+# LLM: takeover_readiness_ref_order reads the recovery index only; artifact bodies stay behind explicit refs.
+# 函数用途: 从接管必读包里提取推荐读取顺序，并把包本身放在最前面；不会读取 artifact 正文。
+def takeover_readiness_ref_order(path_text: str) -> list[str]:
+    if not path_text:
+        return []
+    path = Path(path_text)
+    refs = [str(path)]
+    try:
+        packet = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return refs
+    if isinstance(packet, dict):
+        refs.extend(_string_list(packet.get("recommended_read_order")))
+    return _unique_strings(refs)
+
+
 # LLM: _run_identity captures ownership refs for the takeover packet without resolving parents.
 # 函数用途: 记录当前 run/root/workspace 身份，让接管者知道恢复包属于谁。
 def _run_identity(task: SubAgentTask) -> dict[str, object]:

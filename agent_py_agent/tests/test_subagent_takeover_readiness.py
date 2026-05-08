@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
+from agent_py_agent.agent.subagents.reports import DueCheckIssue
+from agent_py_agent.agent.subagents.services.rescue_policy import rescue_fields_for_issue
 from agent_py_agent.agent.subagents.services.takeover_readiness import (
     build_takeover_readiness_packet,
     render_takeover_readiness_markdown,
@@ -73,3 +75,45 @@ def test_subagent_save_writes_takeover_readiness_packet_files(tmp_path) -> None:
     assert payload["reserved"]["reads_artifact_bodies"] is False
     assert "## 建议读取顺序" in markdown
     assert loaded.takeover_readiness_json in payload["recommended_read_order"]
+
+
+def test_rescue_context_refs_use_takeover_readiness_read_order_without_artifact_body(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal="rescue action reads readiness refs",
+        thought="rescue should inspect refs, not large artifact bodies",
+        plan=["write artifact", "block", "handoff"],
+    )
+    artifact_path = Path(task.task_dir) / "reports" / "blackbox.txt"
+    artifact_path.write_text("DO_NOT_PULL_ARTIFACT_BODY_INTO_RESCUE_CONTEXT\n", encoding="utf-8")
+    task.status = "BLOCKED"
+    task.failure_type = "tool_output_context_overflow"
+    task.current_step = "handoff"
+    task.blockers = ["large tool output"]
+    task.artifact_refs = [str(artifact_path)]
+    manager.save(task)
+
+    loaded = manager.load(task.id)
+    packet = json.loads(Path(loaded.takeover_readiness_json).read_text(encoding="utf-8"))
+    issue = DueCheckIssue(
+        run_id=task.id,
+        severity="P1",
+        kind="status_blocked",
+        message="blocked",
+        suggested_action="takeover_or_reassign",
+        status="BLOCKED",
+        task_dir=loaded.task_dir,
+    )
+
+    fields = rescue_fields_for_issue(issue, "takeover_or_reassign")
+    refs = fields["rescue_context_refs"]
+    encoded = json.dumps(refs, ensure_ascii=False)
+    expected_order = list(dict.fromkeys([loaded.takeover_readiness_json, *packet["recommended_read_order"]]))
+
+    assert refs[0] == loaded.task_dir
+    assert refs[1] == loaded.takeover_readiness_json
+    assert loaded.failure_handoff_json in refs
+    assert loaded.agent_run_checkpoint_json in refs
+    assert loaded.agent_run_artifact_manifest_jsonl in refs
+    assert refs[1 : 1 + len(expected_order)] == expected_order
+    assert "DO_NOT_PULL_ARTIFACT_BODY_INTO_RESCUE_CONTEXT" not in encoded

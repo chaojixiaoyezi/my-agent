@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.manager_actions import SubAgentActionMixin
 from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
 from agent_py_agent.agent.subagents.models import SubAgentTask
@@ -162,6 +163,55 @@ class TestApplyActionItemNotFound:
 
         assert record.ok is False
         assert record.applied is False
+
+
+class TestTakeoverReadinessActionApply:
+    def test_takeover_apply_evidence_paths_follow_readiness_read_order_without_artifact_body(self, tmp_path: Path):
+        manager = SubAgentManager(tmp_path)
+        task = manager.create_run(
+            goal="apply takeover with readiness refs",
+            thought="takeover evidence should point at recovery refs",
+            plan=["write artifact", "block", "takeover"],
+        )
+        artifact_path = Path(task.task_dir) / "reports" / "blackbox.txt"
+        artifact_path.write_text("DO_NOT_PULL_ARTIFACT_BODY_INTO_APPLY_RECORD\n", encoding="utf-8")
+        task.status = "BLOCKED"
+        task.failure_type = "tool_output_context_overflow"
+        task.channel_status = "OK"
+        task.artifact_refs = [str(artifact_path)]
+        manager.save(task)
+        loaded = manager.load(task.id)
+        packet = json.loads(Path(loaded.takeover_readiness_json).read_text(encoding="utf-8"))
+        action = ActionPlanItem(
+            id="action_takeover",
+            run_id=task.id,
+            severity="P1",
+            priority=1,
+            action="takeover_or_reassign",
+            reason="blocked",
+            source_issue_kinds=["status_blocked"],
+            would_change_status_to="TAKEN_OVER",
+            rescue_context_refs=list(packet["recommended_read_order"]),
+            created_at=1234567890.0,
+        )
+
+        record = manager._apply_action_item(
+            action,
+            apply=True,
+            take_over_by="parent-agent",
+            locked_files=[],
+        )
+        encoded = json.dumps(record.evidence_paths, ensure_ascii=False)
+        expected_order = list(dict.fromkeys([loaded.takeover_readiness_json, *packet["recommended_read_order"]]))
+
+        assert record.ok is True
+        assert record.applied is True
+        assert record.evidence_paths[0] == loaded.takeover_readiness_json
+        assert loaded.failure_handoff_json in record.evidence_paths
+        assert loaded.agent_run_checkpoint_json in record.evidence_paths
+        assert loaded.agent_run_artifact_manifest_jsonl in record.evidence_paths
+        assert record.evidence_paths[0 : len(expected_order)] == expected_order
+        assert "DO_NOT_PULL_ARTIFACT_BODY_INTO_APPLY_RECORD" not in encoded
 
 
 class TestRecordAfterTaskAction:

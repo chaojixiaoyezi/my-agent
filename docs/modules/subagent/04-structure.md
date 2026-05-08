@@ -26,6 +26,7 @@
 - CLI status surfaces now expose shared progress and failure handoff refs in `status --json`, human `status`, and the `subagents` board. These views show counts and refs only; they do not load failure handoff or artifact bodies.
 - Large runtime tool outputs now write a fail-safe recovery snapshot before externalization. The snapshot stores metadata such as tool, hash, size, run/task/request ids, and next action, while the full output body still belongs only to the externalized artifact.
 - ToolContextReducer now protects the next live prompt: externalized large outputs are injected as refs and metadata only, while full bodies remain in artifacts.
+- Takeover/rescue command paths now consume takeover readiness refs first: action plans and takeover apply records surface `takeover_readiness.json` before its recommended read order, without loading artifact bodies.
 # Subagent：结构树和详细说明
 
 ## 模块结构
@@ -69,7 +70,7 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/services/failure_handoff.py`：根据失败/阻塞状态和 `failure_type` 生成失败交接记录，给后续接管代理留下警告、避坑建议和推荐下一步。
 - `agent_py_agent/agent/subagents/services/persistence_failure_handoff.py`：归一化并写入 `reports/failure_handoff.json`，让 persistence 主流程只负责编排。
 - `agent_py_agent/agent/subagents/services/persistence_recovery_outputs.py`：集中写 checkpoint artifacts 和 takeover readiness 文件，避免 persistence 主保存流程重新靠近 code-size 风险。
-- `agent_py_agent/agent/subagents/services/takeover_readiness.py`：生成 `reports/takeover_readiness.json` 和 `TAKEOVER_READINESS.md` 接管前必读包；只整理 refs、manifest 元数据和读取顺序，不读取 artifact 正文。
+- `agent_py_agent/agent/subagents/services/takeover_readiness.py`：生成 `reports/takeover_readiness.json` 和 `TAKEOVER_READINESS.md` 接管前必读包；只整理 refs、manifest 元数据和读取顺序，不读取 artifact 正文；并提供 refs-only 的推荐读取顺序解析给 rescue/action apply 使用。
 - `agent_py_agent/agent/subagents/services/persistence_security.py`：归一化 `SecuritySignal` 预留字段，让安全信号解析不挤进 persistence 主流程；当前不执行安全策略。
 - `agent_py_agent/agent/subagents/services/checkpoint_artifacts.py`：从 task facts 和 `output.json` 构建 compact 可读恢复包，包含 checkpoint、decision ledger、progress、failing tests 和 next actions。
 - `agent_py_agent/agent/subagents/services/task_workspace_adapter.py`：把 runtime memory task workspace 路径同步回 `SubAgentTask`，避免 persistence 保存函数继续膨胀。
@@ -102,7 +103,7 @@ agent_py_agent/agent/
 - `agent_py_agent/cli/_memory_gate.py`：实现 `subagents-memory-gate` CLI，显式列出候选、写回 approve/reject/needs_evidence、导出 approved 候选、生成 skill draft 和跑 verify。
 - `SKILL_SPARKS.md`：子代理目录里的经验火花候选，只记录可复用步骤、触发条件、证据引用、限制和反例；后续提升为 skill 必须经过单独 gate。
 - `agent_py_agent/agent/subagents/services/board.py`：把任务树节点转成 report board item，并汇总 child status、progress、summary、evidence/finding/blocker 计数。
-- `agent_py_agent/agent/subagents/services/rescue_policy.py`：根据 due-check issue 给 action plan 添加 rescue/escalation 元数据，保持建议可审计但不自动越权执行。
+- `agent_py_agent/agent/subagents/services/rescue_policy.py`：根据 due-check issue 给 action plan 添加 rescue/escalation 元数据，保持建议可审计但不自动越权执行；当 task 目录存在 `reports/takeover_readiness.json` 时，会优先把该包和推荐读取 refs 放入 `rescue_context_refs`。
 - `agent_py_agent/agent/subagents/result_structured.py`：解析 runner structured output 中的 evidence packets、findings、artifacts、tests、blockers，并写回任务事实。
 - `agent_py_agent/agent/subagents/capability_route_service.py`：承接 capability route record 构建、gap 包装、summary 和报告落盘。
 - `agent_py_agent/agent/subagents/services/indexing_records.py`：承接 LocalStore dataclass record 索引 helper，让 indexing service 只保留编排入口。
@@ -138,8 +139,9 @@ agent_py_agent/agent/
 23. `status --json`、人类 `status` 和 `subagents` 看板通过 `cli/shared_progress.py` 展示共享进度摘要；展示层按 root task 查询控制面，不扫描旧工单目录正文。
 24. runtime tool loop 对大工具输出先调用 `tool_output_failsafe.py` 写 recovery snapshot，再调用 `tool_output_externalizer.py` 写 artifact；snapshot 里只有摘要 metadata，完整输出不会进入 snapshot。
 25. `tool_context_reducer.py` 根据 archive record 决定下一轮 prompt 内容：小输出保留原工具结果，大输出只保留 preview、artifact path、hash、size 和 fail-safe checkpoint path。
-26. 只有显式 review/gate 通过且再触发 `--export-memory` 或 `--export-skill` 后，候选才允许进入长期 memory 或 skill draft 流程；approve 不会自动导出。
-27. retention 只从 active review queue 移除 rejected / already exported 候选，候选、decision、export 和 verifier 文件仍留在 run workspace 里供接管和审计。
+26. action plan 的 `rescue_context_refs` 和 takeover apply 的 `evidence_paths` 会把 `takeover_readiness.json` 放在首位，再按 packet 的 recommended read order 展开 failure handoff、checkpoint、artifact manifest 等 refs；这些路径是恢复索引，不代表自动读取正文或自动接管。
+27. 只有显式 review/gate 通过且再触发 `--export-memory` 或 `--export-skill` 后，候选才允许进入长期 memory 或 skill draft 流程；approve 不会自动导出。
+28. retention 只从 active review queue 移除 rejected / already exported 候选，候选、decision、export 和 verifier 文件仍留在 run workspace 里供接管和审计。
 28. `memory-resume` 在跨天恢复时用 archive/LocalStore 作为线索，最终推荐读取任务目录里的事实源和 checkpoint artifacts，再由父级决定是否验收；这只是恢复入口推荐，不代表子代理写入主代理长期 memory。
 29. workflow preview 仍可通过 CLI dry-run 展示；真实路径已接入 `create_run(... workflow_mode="plan|auto")` 和 `subagents-dispatch --apply --workflow-mode auto`，可把父任务上的 `workflow_plan` 物化为 worker 子工单。LOG 专项 apply path 和 runner 恢复 scenario 继续作为真实任务记录的先行验证样本。
 30. CLI / core / manager 的新接口规则是先构造 Request/Options bundle，再进入业务服务；旧散参入口只做兼容 adapter，不作为新增字段的扩展位置。
