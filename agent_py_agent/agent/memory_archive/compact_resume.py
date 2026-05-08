@@ -14,6 +14,7 @@ from .compact_action_guard import (
     CompactActionGuardRequest,
     build_compact_action_guard,
 )
+from .compact_resume_failsafe import collect_fail_safe_checkpoints
 from .compact_resume_handoff import (
     CompactResumeHandoffRequest,
     build_compact_resume_handoff,
@@ -143,7 +144,8 @@ def _resume_payload(request: _ResumePayloadBuildRequest) -> dict[str, Any]:
     artifacts = request.artifacts
     consistency = request.consistency
     action_guard = request.action_guard
-    recommended = _recommended_read_paths(metadata, artifacts)
+    fail_safe_checkpoints = collect_fail_safe_checkpoints(artifacts["restore_refs"])
+    recommended = _recommended_read_paths(metadata, artifacts, fail_safe_checkpoints)
     next_actions = _next_actions(consistency)
     handoff = build_compact_resume_handoff(
         CompactResumeHandoffRequest(
@@ -153,6 +155,7 @@ def _resume_payload(request: _ResumePayloadBuildRequest) -> dict[str, Any]:
             action_guard=action_guard,
             recommended_read_paths=recommended,
             next_actions=next_actions,
+            fail_safe_checkpoints=fail_safe_checkpoints,
         )
     )
     context_block = render_compact_resume_context_block(handoff)
@@ -170,6 +173,7 @@ def _resume_payload(request: _ResumePayloadBuildRequest) -> dict[str, Any]:
         "consistency_report": consistency,
         "action_guard": action_guard,
         "handoff": handoff,
+        "fail_safe_checkpoints": fail_safe_checkpoints,
         "recommended_read_paths": recommended,
         "next_actions": next_actions,
         "context_block": context_block,
@@ -219,6 +223,7 @@ def _blocked_result(request: _BlockedResumeRequest) -> dict[str, Any]:
         "consistency_report": consistency,
         "action_guard": action_guard,
         "handoff": {},
+        "fail_safe_checkpoints": [],
         "recommended_read_paths": [str(request.metadata_path)],
         "next_actions": ["Find a valid compact apply id or rerun memory-compact --apply."],
         "context_block": "",
@@ -229,9 +234,12 @@ def _blocked_result(request: _BlockedResumeRequest) -> dict[str, Any]:
 
 # LLM: _recommended_read_paths points humans/models back to facts before continuing work.
 # 函数用途: 返回手动恢复时必须优先读取的 compact 产物和原始事实源路径。
-def _recommended_read_paths(metadata: dict[str, Any], artifacts: dict[str, Any]) -> list[str]:
+def _recommended_read_paths(
+    metadata: dict[str, Any], artifacts: dict[str, Any], fail_safe_checkpoints: list[dict[str, Any]]
+) -> list[str]:
     refs = metadata.get("refs", {}) if isinstance(metadata.get("refs"), dict) else {}
     paths = [str(value) for value in refs.values() if value]
+    paths.extend(str(item.get("path", "") or "") for item in fail_safe_checkpoints)
     paths.extend(_source_paths(artifacts["restore_refs"]))
     return _dedupe(paths)
 
