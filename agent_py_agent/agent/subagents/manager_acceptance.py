@@ -25,6 +25,15 @@ from .acceptance_review_service import (
     acceptance_review_options,
     review_acceptance_task,
 )
+from .manager_parent_acceptance import (
+    ParentAcceptanceApplyResult,
+    ParentAcceptanceDecision,
+    ParentAcceptanceNextAction,
+    manager_apply_parent_acceptance_decision,
+    manager_plan_parent_acceptance,
+    manager_plan_parent_acceptance_next_action,
+    manager_write_parent_acceptance_decision,
+)
 from .models import SubAgentTask
 from .parsing import (
     _dict_list,
@@ -81,6 +90,32 @@ if TYPE_CHECKING:
 class _SubAgentAcceptanceFacade:
     # LLM: review_acceptance 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
     # 函数用途: 处理审查验收相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
+    # LLM: plan_parent_acceptance is a dry-run upper-agent controller entrypoint; it must not execute tests or mutate tasks.
+    # 函数用途: 让父代理先查看验收下一步建议；只读取任务事实源并返回决策，不写状态、不跑命令。
+    def plan_parent_acceptance(self, run_id: str) -> ParentAcceptanceDecision:
+        return manager_plan_parent_acceptance(self, run_id)
+
+    # LLM: write_parent_acceptance_decision persists the dry-run plan but does not apply it.
+    # 函数用途: 写入父级验收 dry-run 决策审计文件；不执行 tests、不修改 task 状态。
+    def write_parent_acceptance_decision(self, run_id: str) -> ParentAcceptanceDecision:
+        return manager_write_parent_acceptance_decision(self, run_id)
+
+    # LLM: apply_parent_acceptance_decision only bridges inspect_only into the existing acceptance apply path.
+    # 函数用途: 显式应用父级验收决策；execute_tests/request_human/rescue 只写入拦截审计，不自动跑命令或改状态。
+    def apply_parent_acceptance_decision(
+        self,
+        run_id: str,
+        *,
+        reviewer: str = "parent",
+        note: str = "",
+    ) -> ParentAcceptanceApplyResult:
+        return manager_apply_parent_acceptance_decision(self, run_id, reviewer=reviewer, note=note)
+
+    # LLM: plan_parent_acceptance_next_action returns a scheduler-facing recommendation, not an execution.
+    # 函数用途: 为父/上级代理生成下一步显式动作建议；不运行 tests、不 rescue、不改状态。
+    def plan_parent_acceptance_next_action(self, run_id: str) -> ParentAcceptanceNextAction:
+        return manager_plan_parent_acceptance_next_action(self, run_id)
+
     def review_acceptance(
         self,
         run_id: str,

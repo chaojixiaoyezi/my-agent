@@ -1808,3 +1808,15 @@ def example(...):
 - `status --json` 的 `subagents.shared_progress` 现在包含 `takeover_entries`，按 run 展示 `failure_handoff_ref`、`takeover_readiness_ref` 和 `recommended_read_order`。
 - 人类 `status` 和 `subagents` 看板新增 `Takeover View` 小节，接管者可以先看到具体 run、当前 step、handoff/readiness refs 和前几条推荐读序。
 - 展示层只读取 `takeover_readiness.json` 这个恢复索引里的 recommended read order，不读取或内联 artifact 正文；artifact body 仍必须后续通过显式 artifact 读取入口访问。
+## 2026-05-08 Parent Acceptance Controller v1 dry-run
+
+状态：部分落地
+摘要：
+- 2026-05-08 新增父级验收控制器第一片：父代理可通过 `plan_parent_acceptance(run_id)` 读取子代理 `output.json`、`test_execution.json` 和 handoff refs，生成 refs-only 的 dry-run 决策。
+- 决策当前覆盖 `execute_tests`、`inspect_only`、`request_human` 和 `rescue`：缺真实测试报告但 tests 安全时建议执行；命令预检高风险时要求人工确认；真实测试已通过时只需继续普通验收；失败/阻塞任务走 rescue。
+- 2026-05-08 新增 `subagents-acceptance-plan <run_id>` CLI，可用人类视图或 `--json` 展示父级 dry-run 决策，仍只展示 refs/summary，不读取 artifact 正文。
+- 2026-05-08 `status --json`、人类 `status` 和 `subagents` 看板新增 `Acceptance Plan` 摘要：对待验收、失败或阻塞 run 展示父级 dry-run 决策，继续保持 refs-only。
+- 2026-05-08 新增 `subagents-acceptance-plan <run_id> --write` 和 `write_parent_acceptance_decision(run_id)`，可把 dry-run 决策写入 `reports/parent_acceptance_decision.json` 审计文件；文件声明 `dry_run=true`、`refs_only=true`，不保存 artifact 正文。
+- 2026-05-08 新增显式 `--apply` 第一片：只有 `inspect_only` 会桥接到既有 acceptance apply；`execute_tests`、`request_human`、`rescue` 只写入 `reports/parent_acceptance_apply.json` 拦截审计，不自动跑 tests、不自动 rescue、不绕过人工确认。
+- 2026-05-08 新增 `--next-action` 第一片：父/上级代理可读取当前 plan 和 apply 审计 refs，得到 `run_tests`、`request_human_confirmation`、`plan_rescue` 或 `apply_acceptance` 建议；它只返回建议命令和 refs，不执行建议、不写状态。
+- 当前仍没有自动策略配置；父/上级代理后续可以读取 `parent_acceptance_decision.json`、`parent_acceptance_apply.json` 和 next-action 结果，再按策略显式执行测试、请求人工或进入救援。

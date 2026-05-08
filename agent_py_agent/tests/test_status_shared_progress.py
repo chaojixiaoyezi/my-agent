@@ -39,6 +39,38 @@ def test_status_payload_surfaces_shared_progress_and_failure_handoff(tmp_path) -
     assert "STATUS_TAKEOVER_VIEW_MUST_NOT_INLINE_ARTIFACT_BODY" not in json.dumps(payload, ensure_ascii=False)
 
 
+def test_status_payload_surfaces_acceptance_plan_summary(tmp_path) -> None:
+    store = LocalStore(tmp_path / "local.db")
+    manager = SubAgentManager(tmp_path / "subagents", local_store=store)
+    task = manager.create_run(
+        goal="await parent acceptance",
+        thought="worker says tests are ready",
+        plan=["write output", "wait acceptance"],
+    )
+    task.status = "AWAITING_ACCEPTANCE"
+    task.verification_status = "NEEDS_ACCEPTANCE"
+    artifact_path = tmp_path / "subagents" / task.id / "reports" / "large-output.txt"
+    artifact_path.write_text("STATUS_ACCEPTANCE_PLAN_MUST_NOT_INLINE_ARTIFACT_BODY\n", encoding="utf-8")
+    task.artifact_refs = [str(artifact_path)]
+    _write_acceptance_output(task, [{
+        "name": "unit",
+        "validation_method": "command",
+        "command": "python -m pytest -q",
+    }])
+    manager.save(task)
+    board = manager.build_board(recent_limit=5)
+
+    payload = build_status_payload(_status_payload_context(tmp_path, store, manager, board))
+
+    entry = payload["subagents"]["shared_progress"][0]["acceptance_plan_entries"][0]
+    assert entry["run_id"] == task.id
+    assert entry["decision"] == "execute_tests"
+    assert entry["risk_level"] == "low"
+    assert entry["requires_human_confirmation"] is False
+    assert "test_execution.json" in entry["reason"]
+    assert "STATUS_ACCEPTANCE_PLAN_MUST_NOT_INLINE_ARTIFACT_BODY" not in json.dumps(payload, ensure_ascii=False)
+
+
 def test_status_human_prints_shared_progress_failure_handoff(tmp_path, capsys) -> None:
     panel = _takeover_panel_with_scope("FAILED")
     ctx = StatusPrintContext(
@@ -66,6 +98,8 @@ def test_status_human_prints_shared_progress_failure_handoff(tmp_path, capsys) -
     assert "principal=employee-1 conversation=feishu-dm-1" in output
     assert "memory=conversation:feishu-dm-1 config=conversation_overlay global_write=False" in output
     assert "read_order[1]=reports/failure_handoff.json" in output
+    assert "Acceptance Plan" in output
+    assert "run-1 decision=execute_tests risk=low human=False" in output
 
 
 def test_subagents_board_prints_shared_progress_panel(tmp_path) -> None:
@@ -89,6 +123,8 @@ def test_subagents_board_prints_shared_progress_panel(tmp_path) -> None:
     assert "root-1 runs=2 blocked=1 failure_handoffs=1 takeover_packets=1" in stdout.getvalue()
     assert "Takeover View" in stdout.getvalue()
     assert "run-1 status=BLOCKED step=waiting takeover" in stdout.getvalue()
+    assert "Acceptance Plan" in stdout.getvalue()
+    assert "run-1 decision=execute_tests risk=low human=False" in stdout.getvalue()
 
 
 def _status_payload_context(tmp_path, store, manager, board) -> StatusPayloadContext:
@@ -121,6 +157,7 @@ def _takeover_panel_with_scope(status: str) -> dict:
         "failure_handoff_refs": ["reports/failure_handoff.json"],
         "takeover_readiness_refs": ["reports/takeover_readiness.json"],
         "takeover_entries": [_takeover_entry_with_scope(status)],
+        "acceptance_plan_entries": [_acceptance_plan_entry()],
     }
 
 
@@ -148,3 +185,33 @@ def _patch_board_agent(agent):
     from unittest.mock import patch
 
     return patch("agent_py_agent.cli._board.make_agent", return_value=agent)
+
+
+def _acceptance_plan_entry() -> dict:
+    return {
+        "run_id": "run-1",
+        "decision": "execute_tests",
+        "risk_level": "low",
+        "requires_human_confirmation": False,
+        "reason": "reports/test_execution.json is missing",
+        "test_execution_ref": "",
+        "failure_handoff_ref": "reports/failure_handoff.json",
+        "takeover_readiness_ref": "reports/takeover_readiness.json",
+    }
+
+
+def _write_acceptance_output(task, tests: list[dict]) -> None:
+    from pathlib import Path
+
+    Path(task.output_json).write_text(
+        json.dumps({
+            "run_id": task.id,
+            "status": task.status,
+            "summary": "worker says tests are ready",
+            "tests": tests,
+            "artifacts": task.artifact_refs,
+            "patches": [],
+            "blockers": [],
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
