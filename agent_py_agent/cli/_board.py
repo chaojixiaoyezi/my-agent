@@ -11,6 +11,19 @@ from ..agent.agent_core.subagent_params import SpawnSubagentsParams
 from ..agent.subagent import filter_board_items
 from ..agent.subagents.models import SubAgentBoardOptions
 from .common import make_agent
+from .shared_progress import (
+    format_shared_progress_lines,
+    format_takeover_view_lines,
+    shared_progress_for_board,
+)
+
+
+# LLM: _print_takeover_view keeps board takeover guidance visible and refs-only.
+# 函数用途: 在 subagents 看板里展示可接管 run 的 packet/read_order，不读取 artifact 正文。
+def _print_takeover_view(panels: list[dict]) -> None:
+    print("Takeover View")
+    for line in format_takeover_view_lines(panels):
+        print(line)
 
 
 # LLM: _task_jsonable 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
@@ -49,6 +62,9 @@ def cmd_subagents(args) -> int:
     print("SUBAGENT BOARD")
     print(f"total={board.summary.get('total', 0)} hot={len(board.hot_list)}")
     print("summary=" + json.dumps(board.summary, ensure_ascii=False, sort_keys=True))
+    panels = shared_progress_for_board(agent, board, purpose="subagents_board")
+    _print_shared_progress(panels)
+    _print_takeover_view(panels)
     if not items:
         print("没有匹配的子代理记录。")
         return 0
@@ -64,6 +80,14 @@ def cmd_subagents(args) -> int:
     print(f"\n已写入: {agent.subagents.workspace / 'subagent_board.json'}")
     print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_BOARD.md'}")
     return 0
+
+
+# LLM: _print_shared_progress keeps board output refs-only and compact.
+# 函数用途: 在子代理看板里展示共享进度面板摘要和 failure handoff 计数。
+def _print_shared_progress(panels: list[dict]) -> None:
+    print("Shared Progress")
+    for line in format_shared_progress_lines(panels):
+        print(line)
 
 
 # LLM: cmd_subagent_detail 属于CLI 命令层；改行为前先对齐调用方和快照/单测。

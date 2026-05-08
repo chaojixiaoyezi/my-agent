@@ -1,0 +1,181 @@
+# LLM: Explicit artifact reads must go through the artifact index, not arbitrary file paths.
+# 模块用途: 读取已登记 tool-output artifact 的正文切片，并校验 index、路径边界和 sha256。
+from __future__ import annotations
+
+"""explicit refs-only-to-body reader for externalized tool output artifacts."""
+
+import hashlib
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+DEFAULT_ARTIFACT_READ_CHARS = 4000
+
+
+# LLM: ReadToolOutputArtifactRequest keeps future read policy fields on one stable bundle.
+# 类用途: 保存 artifact 显式读取的工作区、引用、偏移和读取长度；max_chars=0 表示读取全部。
+@dataclass(frozen=True)
+class ReadToolOutputArtifactRequest:
+    root: str | Path
+    artifact_ref: str
+    offset: int = 0
+    max_chars: int = DEFAULT_ARTIFACT_READ_CHARS
+
+
+# LLM: _RegisteredArtifactRead keeps internal artifact read arguments bundled for code-size guardrails.
+# 类用途: 保存已通过 index 和路径边界检查的 artifact 文件、登记记录和原始读取请求。
+@dataclass(frozen=True)
+class _RegisteredArtifactRead:
+    path: Path
+    record: dict[str, Any]
+    request: ReadToolOutputArtifactRequest
+
+
+# LLM: read_tool_output_artifact is the only public body-read entrypoint for tool-output artifacts.
+# 函数用途: 先从 tool_outputs/index.jsonl 找登记记录，再读取正文并校验 hash；不会把任意文件路径当 artifact。
+def read_tool_output_artifact(request: ReadToolOutputArtifactRequest) -> dict[str, Any]:
+    root = Path(request.root).expanduser().resolve(strict=False)
+    artifact_ref = str(request.artifact_ref or "").strip()
+    if not artifact_ref:
+        return _error_payload("missing_artifact_ref", artifact_ref, "artifact_ref is required")
+    record = _find_index_record(root, artifact_ref)
+    if record is None:
+        return _error_payload("artifact_not_registered", artifact_ref, "artifact ref was not found in tool output index")
+    path = Path(str(record.get("path", "") or "")).expanduser().resolve(strict=False)
+    allowed_root = _tool_output_root(root)
+    if not _is_under_allowed_root(path, allowed_root):
+        return _error_payload("artifact_path_outside_tool_outputs", artifact_ref, "registered path is outside tool_outputs")
+    if not path.is_file():
+        return _error_payload("artifact_missing", artifact_ref, "registered artifact file does not exist")
+    return _read_registered_artifact(_RegisteredArtifactRead(path=path, record=record, request=request))
+
+
+# LLM: _read_registered_artifact validates artifact JSON and returns only the requested content slice.
+# 函数用途: 读取 artifact JSON 正文，校验 kind/content/hash，再按 offset/max_chars 返回显式读取片段。
+def _read_registered_artifact(read: _RegisteredArtifactRead) -> dict[str, Any]:
+    path = read.path
+    record = read.record
+    request = read.request
+    artifact_ref = request.artifact_ref
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return _error_payload("artifact_unreadable", artifact_ref, f"{type(exc).__name__}: {exc}")
+    content = payload.get("content")
+    if payload.get("kind") != "tool_output" or not isinstance(content, str):
+        return _error_payload("invalid_tool_output_artifact", artifact_ref, "artifact is not a tool_output content file")
+    digest = _sha256_text(content)
+    expected = str(payload.get("sha256") or record.get("sha256") or "")
+    if expected and digest != expected:
+        return _error_payload("artifact_hash_mismatch", artifact_ref, "artifact content hash does not match metadata")
+    offset = max(0, int(request.offset or 0))
+    max_chars = max(0, int(request.max_chars if request.max_chars is not None else DEFAULT_ARTIFACT_READ_CHARS))
+    content_slice, truncated = _content_slice(content, offset=offset, max_chars=max_chars)
+    return {
+        "ok": True,
+        "artifact_ref": artifact_ref,
+        "artifact_path": str(path),
+        "kind": "tool_output",
+        "tool": str(payload.get("tool") or record.get("tool") or ""),
+        "call_id": str(payload.get("call_id") or record.get("call_id") or ""),
+        "request_id": str(payload.get("request_id") or record.get("request_id") or ""),
+        "run_id": str(payload.get("run_id") or record.get("run_id") or ""),
+        "task_id": str(payload.get("task_id") or record.get("task_id") or ""),
+        "sha256": digest,
+        "size_bytes": len(content.encode("utf-8")),
+        "content_offset": offset,
+        "content_max_chars": max_chars,
+        "content_chars": len(content_slice),
+        "truncated": truncated,
+        "content_hash_verified": True,
+        "reads_artifact_body": True,
+        "content": content_slice,
+    }
+
+
+# LLM: _find_index_record accepts registered path/hash/call id refs while keeping index as authority.
+# 函数用途: 从 tool output index 中查找用户传入的 artifact ref；找不到就拒绝读取。
+def _find_index_record(root: Path, artifact_ref: str) -> dict[str, Any] | None:
+    index_path = _tool_output_root(root) / "index.jsonl"
+    records = _index_records(index_path)
+    ref_path = Path(artifact_ref).expanduser()
+    resolved_ref = ref_path.resolve(strict=False) if ref_path.is_absolute() or _looks_like_path(artifact_ref) else None
+    for record in records:
+        record_path = Path(str(record.get("path", "") or "")).expanduser().resolve(strict=False)
+        if artifact_ref in {str(record.get("path", "") or ""), str(record.get("sha256", "") or ""), str(record.get("call_id", "") or "")}:
+            return record
+        if resolved_ref is not None and record_path == resolved_ref:
+            return record
+    return None
+
+
+# LLM: _index_records is tolerant of corrupt lines but never treats index absence as permission to read files.
+# 函数用途: 读取 tool_outputs/index.jsonl 的有效 JSON 对象行；坏行跳过，缺失则返回空列表。
+def _index_records(index_path: Path) -> list[dict[str, Any]]:
+    try:
+        lines = index_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    records: list[dict[str, Any]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+# LLM: _content_slice applies explicit slicing so artifact reads can avoid re-flooding prompts.
+# 函数用途: max_chars=0 读取全部，否则返回 offset 后最多 max_chars 个字符，并标记是否截断。
+def _content_slice(content: str, *, offset: int, max_chars: int) -> tuple[str, bool]:
+    if offset >= len(content):
+        return "", False
+    if max_chars == 0:
+        return content[offset:], False
+    end = min(len(content), offset + max_chars)
+    return content[offset:end], end < len(content)
+
+
+# LLM: _error_payload keeps failed reads metadata-only and omits content.
+# 函数用途: 失败时只返回错误码、引用和说明，不泄漏任何文件正文。
+def _error_payload(error_code: str, artifact_ref: str, message: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "artifact_ref": artifact_ref,
+        "error_code": error_code,
+        "message": message,
+        "reads_artifact_body": False,
+    }
+
+
+# LLM: _tool_output_root returns the only directory where tool-output artifact bodies may live.
+# 函数用途: 生成 workspace 内固定 tool_outputs 目录，供 index、路径边界和读取逻辑共用。
+def _tool_output_root(root: Path) -> Path:
+    return root / "memory_archive" / "artifacts" / "tool_outputs"
+
+
+# LLM: _is_under_allowed_root prevents registered artifact paths from escaping the trusted artifact directory.
+# 函数用途: 判断 artifact 文件是否仍在允许目录下，阻止绝对路径或 .. 越界读取。
+def _is_under_allowed_root(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+# LLM: _looks_like_path decides whether a ref should also be compared as a filesystem path.
+# 函数用途: 区分 sha/call_id 这类纯标识和 path-like ref，避免把普通字符串都当路径解析。
+def _looks_like_path(value: str) -> bool:
+    return any(mark in value for mark in ("/", "\\")) or value.endswith(".json")
+
+
+# LLM: _sha256_text provides stable content verification for explicit artifact body reads.
+# 函数用途: 计算 artifact 正文 UTF-8 sha256，用来核对 index/payload 元数据。
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()

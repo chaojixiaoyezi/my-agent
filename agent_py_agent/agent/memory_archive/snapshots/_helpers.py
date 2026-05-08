@@ -83,7 +83,7 @@ def _stable_json(payload: Any) -> str:
 def _tool_snapshot(tool_call: Mapping[str, Any], archive_level: int) -> dict[str, Any]:
     """Convert a tool call record into small recovery-safe metadata."""
     parameters = tool_call.get("parameters", {})
-    return {
+    snapshot = {
         "tool": str(tool_call.get("tool") or tool_call.get("tool_name") or "unknown"),
         "tool_call_id": str(tool_call.get("id") or tool_call.get("tool_call_id") or ""),
         "ok": tool_call.get("ok"),
@@ -91,6 +91,11 @@ def _tool_snapshot(tool_call: Mapping[str, Any], archive_level: int) -> dict[str
         "error_code": str(tool_call.get("error_code") or ""),
         "parameters_preview": _preview(_stable_json(parameters), archive_level),
     }
+    # LLM: output metadata is safe to keep in snapshots; full output bodies still stay in artifacts.
+    for key in ["output_hash", "output_size_bytes", "output_externalized"]:
+        if key in tool_call:
+            snapshot[key] = tool_call[key]
+    return snapshot
 
 
 # LLM: memory archive 维护任务工作区、归档文件、gate 结果和快照；修改 _participants 时同步检查返回值、异常处理和读写副作用。

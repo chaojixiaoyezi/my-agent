@@ -31,6 +31,7 @@ from .memory_archive_commands import (
     cmd_memory_archive_search,
     cmd_memory_resume,
 )
+from .memory_artifact_commands import cmd_memory_artifact_read
 from .memory_commands import cmd_memory_route
 from .memory_compact_commands import cmd_memory_compact
 from .memory_doctor import cmd_memory_doctor
@@ -212,6 +213,13 @@ def add_memory_subcommands(sub: argparse._SubParsersAction) -> None:
     memory_resume.add_argument("query", nargs="?", default="", help="恢复关键词；也可只传 request/run/session 过滤")
     _add_archive_resume_args(memory_resume)
     memory_resume.set_defaults(func=cmd_memory_resume)
+
+    memory_artifact_read = sub.add_parser("memory-artifact-read", help="显式读取已登记 tool-output artifact 正文")
+    memory_artifact_read.add_argument("artifact_ref", help="来自恢复包、manifest 或 tool output index 的 artifact path/hash/call_id")
+    memory_artifact_read.add_argument("--offset", type=int, default=0, help="从正文第几个字符开始读取")
+    memory_artifact_read.add_argument("--max-chars", type=int, default=4000, help="最多读取多少字符；0 表示读取全部")
+    memory_artifact_read.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    memory_artifact_read.set_defaults(func=cmd_memory_artifact_read)
 
     memory_compact = sub.add_parser("memory-compact", help="预演 memory compact 计划")
     _add_memory_compact_args(memory_compact)

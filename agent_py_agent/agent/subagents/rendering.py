@@ -16,6 +16,7 @@ from .rendering_patch import (
     render_patch_review_markdown,
     render_patch_review_record_markdown,
 )
+from .rendering_rescue import render_action_rescue_packet_lines
 from .reports import (
     AcceptanceReviewFinding,
     AcceptanceReviewRecord,
@@ -128,6 +129,8 @@ def render_action_plan_markdown(report: ActionPlanReport) -> str:
         if action.rescue_context_refs:
             lines.append("  - rescue_context:")
             lines.extend(f"    - `{ref}`" for ref in action.rescue_context_refs[:5])
+        if action.rescue_packet:
+            lines.extend(render_action_rescue_packet_lines(action.rescue_packet))
         if action.would_change_status_to:
             lines.append(f"  - would_change_status_to: {action.would_change_status_to}")
         if action.suggested_commands:

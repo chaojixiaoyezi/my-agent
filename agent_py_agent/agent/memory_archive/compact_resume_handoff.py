@@ -28,6 +28,7 @@ class CompactResumeHandoffRequest:
     action_guard: dict[str, Any]
     recommended_read_paths: list[str]
     next_actions: list[str]
+    fail_safe_checkpoints: list[dict[str, Any]]
 
 
 # LLM: build_compact_resume_handoff is read-only and makes resume output easy for humans and agents.
@@ -50,6 +51,7 @@ def build_compact_resume_handoff(request: CompactResumeHandoffRequest) -> dict[s
         "changed_files": _string_list(work_state.get("changed_files")),
         "read_files": _string_list(work_state.get("read_files")),
         "recommended_read_paths": list(request.recommended_read_paths),
+        "fail_safe_checkpoints": _fail_safe_checkpoint_payloads(request.fail_safe_checkpoints),
         "missing_fields": _string_list(work_state.get("missing_fields")),
         "consistency_status": str(request.consistency.get("status", "")),
         "action_guard": _action_guard_payload(request.action_guard),
@@ -79,6 +81,7 @@ def render_compact_resume_context_block(handoff: dict[str, Any]) -> str:
     _extend_section(lines, "Constraints", handoff["constraints"]["items"])
     _extend_section(lines, "Latest Tests", handoff["latest_tests"]["items"])
     _extend_section(lines, "Changed Files", handoff["changed_files"])
+    _extend_section(lines, "Fail Safe Checkpoints", _fail_safe_checkpoint_lines(handoff["fail_safe_checkpoints"]))
     _extend_section(lines, "Must Read", handoff["recommended_read_paths"][:12])
     _extend_section(lines, "Next Actions", handoff["next_actions"])
     return "\n".join(lines)
@@ -117,6 +120,61 @@ def _action_guard_payload(action_guard: dict[str, Any]) -> dict[str, Any]:
         "automatic_tool_execution": str(action_guard.get("automatic_tool_execution", "none")),
         "missing_fields": _string_list(action_guard.get("missing_fields")),
     }
+
+
+# LLM: _fail_safe_checkpoint_payloads keeps recovery checkpoint refs metadata-only.
+# 函数用途: 规范 memory-resume 交接包里的 fail-safe checkpoint 摘要，不展开 artifact 正文。
+def _fail_safe_checkpoint_payloads(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "path": str(item.get("path", "") or ""),
+            "line_no": int(item.get("line_no", 0) or 0),
+            "snapshot_id": str(item.get("snapshot_id", "") or ""),
+            "source": str(item.get("source", "") or ""),
+            "status": str(item.get("status", "") or ""),
+            "tool_calls": _tool_call_refs(item.get("tool_calls")),
+            "next_actions": _string_list(item.get("next_actions")),
+            "reads_artifact_bodies": False,
+        }
+        for item in items
+    ]
+
+
+# LLM: _fail_safe_checkpoint_lines renders only refs, hashes, and sizes for the manual context block.
+# 函数用途: 把 fail-safe checkpoint 摘要渲染成短行，避免把大工具输出带回恢复 prompt。
+def _fail_safe_checkpoint_lines(items: list[dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for item in items:
+        tools = item.get("tool_calls", []) if isinstance(item.get("tool_calls"), list) else []
+        first_tool = tools[0] if tools and isinstance(tools[0], dict) else {}
+        lines.append(
+            f"{item.get('path', '')}:{item.get('line_no', 0)} "
+            f"snapshot={item.get('snapshot_id', '')} "
+            f"tool={first_tool.get('tool', '')} "
+            f"hash={first_tool.get('output_hash', '')} "
+            f"size={first_tool.get('output_size_bytes', 0)}"
+        )
+    return lines
+
+
+# LLM: _tool_call_refs strips tool calls down to recovery identity fields.
+# 函数用途: 保留工具名、调用 id、hash 和尺寸，不复制工具输出内容。
+def _tool_call_refs(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list | tuple):
+        return []
+    refs: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        refs.append({
+            "tool": str(item.get("tool") or item.get("name") or ""),
+            "id": str(item.get("id") or item.get("tool_call_id") or ""),
+            "ok": item.get("ok"),
+            "output_hash": str(item.get("output_hash", "") or ""),
+            "output_size_bytes": int(item.get("output_size_bytes", 0) or 0),
+            "output_externalized": str(item.get("output_externalized", "") or ""),
+        })
+    return refs
 
 
 # LLM: _extend_section renders compact Markdown lists with stable none output.

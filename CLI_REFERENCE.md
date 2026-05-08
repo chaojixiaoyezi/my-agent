@@ -151,6 +151,7 @@ Ctrl+C
 | `memory-archive-list` | 列出 raw/hook 归档记录 | 否 | 否 |
 | `memory-archive-search` | 按字段搜索 raw/hook 归档 | 否 | 否 |
 | `memory-resume` | 从归档、LocalStore 和任务目录生成恢复线索 | 否 | 否 |
+| `memory-artifact-read` | 显式读取已登记 tool-output artifact 正文 | 否 | 否 |
 | `memory-compact` | 只读预演 memory compact 计划 | 否 | 否 |
 | `local-store-status` | 查看本地事实源状态 | 否 | 否 |
 | `local-search` | 搜索 SQLite/FTS5 本地事实源 | 否 | 否 |
@@ -189,7 +190,9 @@ my-agent status --recent --limit 10
 my-agent status --json
 ```
 
-显示当前本地工作台总览：gateway 存活状态、gateway 队列数量、LocalStore 记录/事件数量、subagent summary、红灯任务、最近事件和建议下一步动作。它只读现有账本，不调用模型。
+显示当前本地工作台总览：gateway 存活状态、gateway 队列数量、LocalStore 记录/事件数量、subagent summary、红灯任务、Shared Progress、Takeover View、最近事件和建议下一步动作。它只读现有账本，不调用模型。
+
+`Takeover View` 会列出可接管 run、failure handoff ref、takeover readiness ref 和 recommended read order；它只读取恢复索引，不展开 artifact 正文。若 run 携带隔离元数据，还会显示 principal、conversation、memory namespace 和 config scope 摘要；这些字段只是审计线索，不代表员工长期记忆已启用，也不代表允许写全局配置。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -440,6 +443,25 @@ JSON 输出里会额外包含 `brief`：
 | `--context-only` | `false` | 只输出可交接/注入的恢复上下文块。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 
+## `memory-artifact-read`
+
+```powershell
+my-agent memory-artifact-read C:\repo\memory_archive\artifacts\tool_outputs\read_file-call-abc.json
+my-agent memory-artifact-read <sha256> --offset 4000 --max-chars 2000 --json
+my-agent memory-artifact-read <call_id> --max-chars 0
+```
+
+显式读取已经外置的 tool-output artifact 正文。这个命令只信任 `memory_archive/artifacts/tool_outputs/index.jsonl` 里的登记记录；`artifact_ref` 可以是登记过的 path、sha256 或 call_id。普通文件路径即使存在，也不会被当成 artifact 读取。
+
+默认只读前 4000 个字符；`--offset` 可以从正文中间继续读，`--max-chars 0` 表示读取完整正文。JSON 输出会包含 `content_hash_verified=true`、`reads_artifact_body=true`、`truncated`、`content_offset` 和 `content_max_chars`，方便接管者确认这次确实是显式读取。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `artifact_ref` | 必填 | 来自恢复包、manifest 或 tool output index 的 artifact path/hash/call_id。 |
+| `--offset` | `0` | 从正文第几个字符开始读取。 |
+| `--max-chars` | `4000` | 最多读取多少字符；`0` 表示读取全部。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
 ## `memory-compact`
 
 ```powershell
@@ -667,6 +689,8 @@ my-agent subagents --limit 20
 | `--owner <owner>` | - | 按 `owner`、`supervisor` 或 `final_owner` 过滤。 |
 | `--root-id <id>` | - | 按根任务 ID 过滤。 |
 | `--limit <n>` | `20` | 最多显示多少条。 |
+
+输出会包含 `Shared Progress` 和 `Takeover View`：前者显示 root task 聚合计数，后者显示接管入口 refs 和推荐读取顺序。完整 artifact 正文不会自动进入看板。
 
 ## `subagents-due-check`
 
