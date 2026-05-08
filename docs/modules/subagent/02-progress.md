@@ -39,6 +39,13 @@
 - 2026-05-08 ToolContextReducer live prompt 保护已落地：大工具输出外置后，下一轮 prompt 只注入 preview、artifact path、hash、size 和 fail-safe checkpoint；完整正文只留在 artifact 文件里。
 - 2026-05-08 Takeover / Rescue readiness refs 已接入：rescue action plan 的 `rescue_context_refs` 和 takeover apply 的 `evidence_paths` 会优先暴露 `takeover_readiness.json`，再按 packet 的 `recommended_read_order` 展开 failure handoff、checkpoint、status report、artifact manifest、evidence/artifact refs；仍保持 refs-only，不自动读取大 artifact 正文。
 - 2026-05-08 Rescue Packet / Rescue Action Plan 第一片已落地：`ActionPlanItem` / `ActionApplyRecord` 新增 `rescue_packet`，记录 dedupe key、合并后的 issue kinds / repeat count、保守重试上限、上抛目标、人工确认建议和恢复入口 refs；它是可审计计划，不自动 retry/takeover，也不读取 artifact 正文。
+- 2026-05-08 Acceptance Real Execution 第一片已落地：新增 `TestExecutionRecord`，先定义真实测试执行证据的数据结构、序列化、stdout/stderr 截断和 `passed` 派生结果；当前不执行命令、不写 `test_execution.json`，只给后续 `TestExecutor` 和父级验收接入打底。
+- 2026-05-08 Acceptance Real Execution 第二片已落地：新增最小 `TestExecutor`，支持 command / file_check / content_check，记录真实退出码、输出摘要、文件元数据和内容匹配结果；当前仍不接入 acceptance 自动写回，也不生成 `test_execution.json`。
+- 2026-05-08 Acceptance Real Execution 第三片已落地：新增 `write_test_execution_report()` / `load_test_execution_report()`，可把执行记录写入 `test_execution.json` 和 `test_execution.md`；JSON 是机器事实源，Markdown 只做展示，当前仍需调用方显式触发。
+- 2026-05-08 Acceptance Real Execution 第四片已落地：`AcceptanceReviewOptions(execute_tests=True)` 可显式把 `TestExecutor` 和 `test_execution` report 接入 acceptance dry-run/apply 评审，生成 `test_execution_recorded` 和 P0 `test_execution_passed` findings；默认仍不自动执行 tests。
+- 2026-05-08 Acceptance Real Execution 第五片已落地：新增 `subagents-tests <run_id>` CLI；默认只展示已有 `test_execution.json` 摘要，`--re-run` 才显式读取 `output.json.tests`、执行 allowlist 验证并写回 `test_execution.json/md`。
+- 2026-05-08 Acceptance Real Execution 第六片已落地：新增 `acceptance_execute_tests` 和 `acceptance_test_timeout_seconds` 配置；默认仍关闭真实执行，`subagents-acceptance --execute-tests/--no-execute-tests/--test-timeout` 可覆盖单次验收。
+- 2026-05-08 Acceptance Real Execution CI 收尾：整理 ruff import/UP037，并让默认验收路径继续按旧 `apply/reviewer/note` 调用兼容旧测试替身；只有真实测试执行、超时覆盖或显式时间等新字段启用时才传完整 options 包。
 
 - 2026-05-05 CI 稳定性修复：修正 `manager_runner_results.py` 在结构化解析失败时仍把 `SubAgentRunnerResult.ok` 写成旧值的问题；同时补齐 `test_local_store_gateway.py` 的临时目录隔离和 heartbeat 读取路径，避免 gateway 测试互相污染。
 - workflow 配置和开关已落地：`auto`、`manual`、`off`。
@@ -96,6 +103,7 @@
 - 下一步继续补 Compact / Resume 链路：把 fail-safe checkpoint 接入 `memory-resume` 的优先事实源，让恢复流程先读 checkpoint/snapshot metadata，再显式读取 artifact。
 - 继续补 Security Gate 研究入口：先核验 OpenClaw/Hermes 等公开安全问题的来源、复现场景和风险模式，再把确认后的模式变成 detector fixture、security report 和权限收窄策略；当前 `SecuritySignal` 只做预留审计口。
 - 继续把 Runtime Memory Phase 6 的 `verifier_report.json` 接入父级 acceptance / dispatch 摘要；正式 skill 安装仍要另走人工确认流程，不能由子代理自动完成。
+- 继续补 Acceptance Real Execution：下一步做聚合统计、报告保留策略或更细的 allowlist 配置；当前默认验收路径仍保守关闭真实执行。
 - 把 workflow apply 的可解释性补齐：dispatch 记录要更清楚展示自动选择理由、模板 id、worker 子工单和父级验收门，尤其是 `auto/manual/off` 改变行为时。
 - 补 Quality Profile 和更多内置 workflow 模板；当前内置模板仍是小集合，不等于设计里的首批完整模板库。
 - 增强验收层：从 `output.json.tests` / `artifacts` 自动生成更细的验收任务，并在 report 中继续明确区分 worker 自述、证据事实和父级结论。
@@ -146,6 +154,12 @@
 - 本轮 Takeover / Rescue readiness refs TDD 验收：`python -m pytest -q agent_py_agent\tests\test_subagent_takeover_readiness.py agent_py_agent\tests\test_manager_actions.py` 先因 action plan/apply record 未接入 `takeover_readiness.json` 失败，补实现后 -> `13 passed`。
 - 本轮 Rescue Packet / Rescue Action Plan TDD 验收：`python -m pytest -q tests\test_subagent_takeover_readiness.py tests\test_agent\test_subagent_action_and_route.py::test_subagent_action_plan_dry_run tests\test_subagent_rendering.py::TestActionPlanRendering::test_render_action_plan_markdown_basic -p no:cacheprovider` 先因 `rescue_packet` 缺失失败，补实现后 -> `6 passed`；组合回归 `python -m pytest -q tests\test_subagent_takeover_readiness.py tests\test_manager_actions.py tests\test_agent\test_subagent_action_and_route.py tests\test_subagent_rendering.py -p no:cacheprovider` -> `34 passed`。
 - 本轮 Principal / Conversation 隔离预留 TDD 验收：`python -m pytest -q agent_py_agent\tests\test_subagent_security_reserve.py agent_py_agent\tests\test_status_shared_progress.py -p no:cacheprovider` 先因 `RuntimeIdentity` 不存在失败，补实现后 -> `5 passed`。当前只保存并展示 `runtime_identity`、`memory_scope`、`config_scope` 元数据，不启用员工长期记忆，也不允许会话覆盖写入全局配置。
+- 本轮 Acceptance Real Execution 记录模型 TDD 验收：`python -m pytest -q agent_py_agent\tests\test_subagent_test_execution_record.py -p no:cacheprovider` 先因 `TestExecutionRecord` 不存在失败，补实现后 -> `3 passed`。
+- 本轮 Acceptance Real Execution 执行器 TDD 验收：`python -m pytest -q agent_py_agent\tests\test_subagent_test_executor.py -p no:cacheprovider` 先因 `TestExecutor` 不存在失败，补实现后 -> `4 passed`。
+- 本轮 Acceptance Real Execution 报告存储 TDD 验收：`python -m pytest -q agent_py_agent\tests\test_subagent_test_execution_report.py -p no:cacheprovider` 先因 `execution_report` 模块不存在失败，补实现后 -> `2 passed`。
+- 本轮 Acceptance Real Execution 验收接入 TDD 验收：`python -m pytest -q agent_py_agent\tests\test_agent\test_subagent_acceptance.py::test_subagent_acceptance_can_execute_real_tests_on_explicit_dry_run -p no:cacheprovider` 先因 `AcceptanceReviewOptions` 未导出失败，补实现后 -> `1 passed`；整组 acceptance 回归 `python -m pytest -q agent_py_agent\tests\test_agent\test_subagent_acceptance.py -p no:cacheprovider` -> `6 passed`。
+- 本轮 Acceptance Real Execution CLI TDD 验收：`python -m pytest -q agent_py_agent\tests\test_subcommands_agents_class.py::TestSubagentsSubcommandRegistration::test_add_subagents_subcommands_creates_expected_commands agent_py_agent\tests\test_subcommands_agents_class.py::TestSubagentsReviewCommandRegistration::test_subagents_tests_has_view_and_rerun_args agent_py_agent\tests\test_subagents_tests_command.py -p no:cacheprovider` 先因 `cmd_subagents_tests` 不存在失败，补实现后 -> `4 passed`。
+- 本轮 Acceptance Real Execution 配置接入 TDD 验收：`python -m pytest -q agent_py_agent\tests\test_config_validation.py::test_acceptance_real_execution_config_defaults_are_conservative agent_py_agent\tests\test_config_validation.py::test_acceptance_real_execution_config_coercion_and_range agent_py_agent\tests\test_subcommands_agents_class.py::TestSubagentsReviewCommandRegistration::test_subagents_acceptance_has_real_test_override_args agent_py_agent\tests\test_subagents_tests_command.py::test_subagents_acceptance_uses_configured_real_test_defaults agent_py_agent\tests\test_subagents_tests_command.py::test_subagents_acceptance_cli_override_wins_over_config -p no:cacheprovider` 先因配置字段和 CLI 参数缺失失败，补实现后 -> `5 passed`。
 
 ## 未跑测试
 

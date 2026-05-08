@@ -12,8 +12,14 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import ClassVar
 
+# LLM: imports stay ruff-clean because this service is shared by CLI, manager facades, and CI acceptance tests.
 from .acceptance_review_verifier import build_verifier_checks
+from .acceptance_test_execution import (
+    AcceptanceTestExecutionRequest,
+    build_acceptance_test_execution_findings,
+)
 from .models import SubAgentTask
 from .parsing import _dict_list
 from .reports import AcceptanceReviewFinding, AcceptanceReviewRecord
@@ -26,12 +32,17 @@ from .utils import _new_id, _read_json_object
 class AcceptanceReviewOptions:
     """Options bundle for acceptance review report entrypoints."""
 
+    __test__: ClassVar[bool] = False
+
     # LLM: report-level acceptance options stay bundled while per-task review uses a request.
     apply: bool = False
     reviewer: str = "parent"
     note: str = ""
     limit: int = 0
     now: float | None = None
+    # LLM: execute_tests is explicit opt-in; default acceptance must not start running user commands.
+    execute_tests: bool = False
+    test_timeout_seconds: float = 120.0
 
     # LLM: from_values 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
     # 函数用途: 转换values的数据表示，保持跨模块传递时的字段含义一致；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
@@ -45,6 +56,8 @@ class AcceptanceReviewOptions:
         note: str | None = None,
         limit: int | None = None,
         now: float | None = None,
+        execute_tests: bool | None = None,
+        test_timeout_seconds: float | None = None,
     ):
         base = options or cls()
         updates = {
@@ -53,6 +66,8 @@ class AcceptanceReviewOptions:
             "note": note,
             "limit": limit,
             "now": now,
+            "execute_tests": execute_tests,
+            "test_timeout_seconds": test_timeout_seconds,
         }
         clean = {key: value for key, value in updates.items() if value is not None}
         return replace(base, **clean)
@@ -91,6 +106,9 @@ class AcceptanceReviewRequest:
     reviewer: str = "parent"
     note: str = ""
     now: float | None = None
+    # LLM: request carries real-test execution options through to findings without changing legacy defaults.
+    execute_tests: bool = False
+    test_timeout_seconds: float = 120.0
 
 
 # LLM: AcceptanceReviewInputs 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
@@ -122,7 +140,7 @@ def review_acceptance_task(manager, request: AcceptanceReviewRequest) -> Accepta
     now = request.now if request.now is not None else time.time()
     before_status = task.status
     before_verification = task.verification_status
-    inputs = _acceptance_review_inputs(manager, task, now)
+    inputs = _acceptance_review_inputs(manager, request, now)
     review_checks = [*inputs.findings, *inputs.verifier_checks]
     ok = all(item.ok or item.severity == "P2" for item in review_checks)
     ready = task.status == "AWAITING_ACCEPTANCE" or task.verification_status == "NEEDS_ACCEPTANCE"
@@ -156,13 +174,19 @@ def review_acceptance_task(manager, request: AcceptanceReviewRequest) -> Accepta
 
 # LLM: _acceptance_review_inputs 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 处理验收审查inputs相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
-def _acceptance_review_inputs(manager, task: SubAgentTask, now: float) -> AcceptanceReviewInputs:
+def _acceptance_review_inputs(manager, request: AcceptanceReviewRequest, now: float) -> AcceptanceReviewInputs:
+    task = request.task
     output = _read_json_object(Path(task.output_json))
     runner = _read_json_object(Path(task.runner_result_json))
+    findings = manager.acceptance_findings(task, output, runner, now)
+    if request.execute_tests:
+        findings.extend(build_acceptance_test_execution_findings(
+            AcceptanceTestExecutionRequest(manager, task, output, request, now)
+        ))
     return AcceptanceReviewInputs(
         output=output,
         runner=runner,
-        findings=manager.acceptance_findings(task, output, runner, now),
+        findings=findings,
         verifier_checks=build_verifier_checks(task, now),
     )
 

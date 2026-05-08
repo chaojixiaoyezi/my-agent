@@ -2,7 +2,7 @@
 
 ## 一句话结论
 
-验收不能只看子代理"填表"，必须有系统级真实执行验证。新增 `TestExecutionRecord` 记录测试命令的真实退出码/stdout/stderr，并在验收时自动执行 allowlist 内的测试命令。
+验收不能只看子代理"填表"，必须有系统级真实执行验证。当前实现新增 `TestExecutionRecord` 记录测试命令的真实退出码/stdout/stderr，并通过 `subagents-tests --re-run`、`subagents-acceptance --execute-tests`、配置 `acceptance_execute_tests: true` 或 `AcceptanceReviewOptions(execute_tests=True)` 显式执行 allowlist 内的测试命令；默认验收路径暂不自动执行。
 
 ## 需求背景
 
@@ -346,20 +346,20 @@ task_dir/
 ```yaml
 # agent_config.yaml
 
-# 验收时是否自动执行测试命令
-# - true: 验收时自动执行 tests 里 command 字段的命令
+# 验收时是否默认执行测试命令
+# - true: subagents-acceptance 默认执行 tests 里的 allowlist 验证
 # - false: 只检查 tests 字段，不真实执行（兼容旧模式）
-acceptance_execute_tests: true
+acceptance_execute_tests: false
 
 # 测试执行超时（秒）
 # - 单个测试命令的最大执行时间
-# - 0 表示使用默认值 120 秒
-acceptance_test_timeout: 120
+# - 当前允许 1 到 300 秒，超出范围会回退默认值
+acceptance_test_timeout_seconds: 120
 
 # 测试命令 allowlist
 # - 只有这些前缀的命令允许执行
-# - 为空时使用默认 allowlist
-acceptance_test_allowed_prefixes: []
+# - 当前先使用 TestExecutor 内置 allowlist，配置项后续接入
+# acceptance_test_allowed_prefixes: []
 
 # 测试执行结果保留天数
 # - 超过这个天数的 test_execution.json 会自动清理
@@ -373,11 +373,14 @@ acceptance_test_retention_days: 30
 # 查看某个任务的测试执行记录
 my-agent subagents-tests <run_id>
 
-# 重新执行某个任务的测试
-my-agent subagents-tests <run_id> --re-run
+# 显式重新执行某个任务的测试
+my-agent subagents-tests <run_id> --re-run --timeout 120
 
-# 查看测试执行统计
-my-agent subagents-tests --stats
+# 本次验收显式执行真实 tests
+my-agent subagents-acceptance --execute-tests --test-timeout 120
+
+# 查看测试执行统计（待做）
+# my-agent subagents-tests --stats
 ```
 
 ## 与现有系统的关系
@@ -387,8 +390,8 @@ my-agent subagents-tests --stats
 | `acceptance_helpers.py` | 集成 TestExecutor，使用真实执行结果 |
 | `manager_patch.py` | 复用 `_run_patch_apply_tests` 的逻辑到 TestExecutor |
 | `models.py` | 新增 `test_execution_json` 字段 |
-| `agent_config.yaml` | 新增验收测试配置项 |
-| `cli/subagents.py` | 新增 `subagents-tests` 命令 |
+| `agent_config.yaml` | 新增 `acceptance_execute_tests` 和 `acceptance_test_timeout_seconds` |
+| `cli/subagents.py` | 新增 `subagents-tests` 命令；`subagents-acceptance` 支持 `--execute-tests` / `--no-execute-tests` / `--test-timeout` |
 
 ## 安全边界
 
@@ -407,22 +410,22 @@ my-agent subagents-tests --stats
 
 ### 第一阶段：核心执行器
 
-1. 新增 `TestExecutionRecord` 数据模型
-2. 实现 `TestExecutor` 类
-3. 实现命令安全性验证
-4. 实现三种验证方式（command/file_check/content_check）
+1. 新增 `TestExecutionRecord` 数据模型（已落地第一片：`agent_py_agent/agent/subagents/execution_records.py`，当前只做记录模型、序列化、stdout/stderr 截断和 `passed` 派生结果）
+2. 实现 `TestExecutor` 类（已落地第一片：`agent_py_agent/agent/subagents/execution_executor.py`，当前不会自动影响 acceptance 状态）
+3. 实现命令安全性验证（已落地第一片：shell=False、基础 allowlist、高风险 shell 字符拦截、超时记录）
+4. 实现三种验证方式（command/file_check/content_check）（已落地第一片：command 真实执行、file_check 元数据检查、content_check 字面量包含检查）
 
 ### 第二阶段：集成验收
 
-1. 修改 `_build_output_and_capability_findings()` 集成 TestExecutor
-2. 新增 `test_execution.json` 存储逻辑
-3. 新增配置项
+1. 修改验收流程集成 TestExecutor（已落地第一片：`AcceptanceReviewOptions(execute_tests=True)` 显式开启；dry-run 生成执行报告和 P0 阻断 finding，默认不自动执行）
+2. 新增 `test_execution.json` 存储逻辑（已落地第一片：`write_test_execution_report()` 写 JSON 事实源和 Markdown 展示报告，当前由调用方显式触发）
+3. 新增配置项（已落地：`acceptance_execute_tests` 默认关闭，`acceptance_test_timeout_seconds` 默认 120；`subagents-acceptance` 的 CLI 参数可覆盖配置）
 
 ### 第三阶段：CLI 和报告
 
-1. 新增 `subagents-tests` CLI 命令
-2. 生成人类可读的 `test_execution.md` 报告
-3. 新增测试执行统计
+1. 新增 `subagents-tests` CLI 命令（已落地：默认查看 `test_execution.json`，显式 `--re-run` 才读取 `output.json.tests` 并重跑）
+2. 生成人类可读的 `test_execution.md` 报告（已落地）
+3. 新增测试执行统计（待做）
 
 ### 第四阶段：测试和文档
 

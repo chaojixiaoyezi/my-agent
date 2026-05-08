@@ -5,11 +5,18 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from ..agent.subagents.acceptance_review_service import AcceptanceReviewOptions
+from ..agent.subagents.execution_executor import TestExecutor
+from ..agent.subagents.execution_report import (
+    TestExecutionReportOptions,
+    load_test_execution_report,
+    write_test_execution_report,
+)
 from ..agent.subagents.patch import PatchApplyOptions, PatchReviewOptions
 from .common import make_agent
-from .models import SubagentsAcceptanceOptions, SubagentsPatchOptions
+from .models import SubagentsAcceptanceOptions, SubagentsPatchOptions, SubagentsTestsOptions
 
 
 # LLM: cmd_subagents_acceptance 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
@@ -25,6 +32,8 @@ def cmd_subagents_acceptance(args) -> int:
             reviewer=options.reviewer or "parent",
             note=options.note,
             limit=options.limit,
+            execute_tests=_acceptance_execute_tests(agent, options),
+            test_timeout_seconds=_acceptance_test_timeout(agent, options),
         ),
     )
     mode = "apply" if options.apply else "dry-run"
@@ -57,7 +66,132 @@ def _subagents_acceptance_options(args) -> SubagentsAcceptanceOptions:
         reviewer=getattr(args, "reviewer", None),
         note=getattr(args, "note", None) or "",
         limit=int(getattr(args, "limit", 0) or 0),
+        execute_tests=getattr(args, "execute_tests", None),
+        test_timeout=getattr(args, "test_timeout", None),
     )
+
+
+# LLM: _acceptance_execute_tests applies explicit CLI choice before config defaults.
+# 函数用途: 解析真实测试执行开关，保持默认验收路径保守且可由命令行覆盖。
+def _acceptance_execute_tests(agent, options: SubagentsAcceptanceOptions) -> bool:
+    if options.execute_tests is not None:
+        return bool(options.execute_tests)
+    return bool(getattr(agent.config, "acceptance_execute_tests", False))
+
+
+# LLM: _acceptance_test_timeout applies CLI override before the configured timeout.
+# 函数用途: 解析真实测试执行超时，供 acceptance 和 test report 使用同一数值。
+def _acceptance_test_timeout(agent, options: SubagentsAcceptanceOptions) -> float:
+    if options.test_timeout is not None:
+        return float(options.test_timeout)
+    return float(getattr(agent.config, "acceptance_test_timeout_seconds", 120) or 120)
+
+
+# LLM: cmd_subagents_tests is refs-first; it prints stored reports unless users explicitly re-run.
+# 函数用途: 查看或显式重跑单个 subagent 的真实测试执行记录，不自动展开大 artifact 正文。
+def cmd_subagents_tests(args) -> int:
+
+    agent = make_agent(args)
+    options = _subagents_tests_options(args)
+    task = agent.subagents.load(options.run_id)
+    report_path = Path(task.reports_dir) / "test_execution.json"
+
+    if options.re_run:
+        _request_acceptance_test_execution(agent, options)
+        if not report_path.exists():
+            _write_subagents_tests_report(agent, task, options)
+
+    if not report_path.exists():
+        print("SUBAGENT TESTS")
+        print(f"run_id={options.run_id} re_run={options.re_run}")
+        print("暂时没有 test_execution.json；如需真实执行请加 --re-run。")
+        return 1
+
+    report = load_test_execution_report(report_path)
+    _print_subagents_tests_report(options, report)
+    return 0
+
+
+# LLM: _subagents_tests_options normalizes argparse names used by tests and CLI wiring.
+# 函数用途: 收拢 subagents-tests 参数，给查看和重跑流程使用同一份结构。
+def _subagents_tests_options(args) -> SubagentsTestsOptions:
+    return SubagentsTestsOptions(
+        run_id=str(getattr(args, "run_id", "") or ""),
+        re_run=bool(getattr(args, "re_run", False)),
+        timeout=float(getattr(args, "timeout", 120.0) or 120.0),
+    )
+
+
+# LLM: _request_acceptance_test_execution keeps this command aligned with acceptance opt-in semantics.
+# 函数用途: 调用验收服务的显式真实测试开关；真实服务会写报告，测试替身则可只记录调用。
+def _request_acceptance_test_execution(agent, options: SubagentsTestsOptions) -> None:
+    agent.subagents.write_acceptance_review_report(
+        run_ids=[options.run_id],
+        options=AcceptanceReviewOptions(
+            execute_tests=True,
+            test_timeout_seconds=options.timeout,
+        ),
+    )
+
+
+# LLM: _write_subagents_tests_report is a fallback for direct CLI re-run when acceptance did not write a report.
+# 函数用途: 从 output.json 读取 tests 并执行，写入 test_execution.json/md。
+def _write_subagents_tests_report(agent, task, options: SubagentsTestsOptions):
+    workspace_root = _subagents_tests_workspace(agent, task)
+    output = _read_task_output(task)
+    tests = [item for item in output.get("tests", []) if isinstance(item, dict)]
+    executor = TestExecutor(workspace_root, timeout_seconds=options.timeout)
+    records = [executor.execute(test) for test in tests]
+    return write_test_execution_report(
+        task.reports_dir,
+        records,
+        options=TestExecutionReportOptions(
+            workspace_root=workspace_root,
+            timeout_seconds=options.timeout,
+        ),
+    )
+
+
+# LLM: _subagents_tests_workspace prefers the manager project root and falls back to output.json's folder.
+# 函数用途: 推断测试执行目录，保证真实命令和文件检查被限制在可解释的 workspace 内。
+def _subagents_tests_workspace(agent, task) -> Path:
+    workspace_root = getattr(agent.subagents, "workspace_root", None)
+    if workspace_root:
+        return Path(workspace_root)
+    output_json = Path(getattr(task, "output_json", "") or ".").resolve()
+    return output_json.parent
+
+
+# LLM: _read_task_output only reads the structured runner output, not any referenced large artifact body.
+# 函数用途: 读取 output.json 里的 tests 数组；失败时返回空结构，由报告保留空执行事实。
+def _read_task_output(task) -> dict[str, object]:
+    raw_path = getattr(task, "output_json", "") or ""
+    if not raw_path:
+        return {}
+    output_json = Path(raw_path)
+    if not output_json.is_file():
+        return {}
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, dict) else {}
+
+
+# LLM: _print_subagents_tests_report is intentionally compact so terminal output stays inspectable.
+# 函数用途: 打印测试执行摘要和每条记录的结果，不打印 stdout/stderr 全文。
+def _print_subagents_tests_report(options: SubagentsTestsOptions, report) -> None:
+    print("SUBAGENT TESTS")
+    print(f"run_id={options.run_id} re_run={options.re_run}")
+    print(
+        f"total={report.total_tests} executed={report.executed} "
+        f"passed={report.passed} failed={report.failed}"
+    )
+    for record in report.records:
+        status = "PASS" if record.passed else "FAIL"
+        print(
+            f"- [{status}] {record.test_name} method={record.validation_method} "
+            f"exit_code={record.exit_code}"
+        )
+    print(f"\nJSON: {report.json_path}")
+    print(f"Markdown: {report.markdown_path}")
 
 
 # LLM: _print_patch_report 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
