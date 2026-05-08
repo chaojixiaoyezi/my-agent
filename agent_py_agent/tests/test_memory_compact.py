@@ -233,7 +233,11 @@ def test_memory_compact_apply_reads_hook_recovery_state_without_snapshot_file(tm
     assert work_state["missing_fields"] == ["acceptance", "constraints", "latest_tests"]
     assert resume["action_guard"]["status"] == "requires_user_confirmation"
     assert resume["handoff"]["goal"] == "需要自动 compact dry-run 计划"
+    assert resume["continue_packet"]["ready_to_continue"] is False
+    assert resume["continue_packet"]["continue_mode"] == "manual_handoff"
+    assert resume["continue_packet"]["automatic_tool_execution"] == "none"
     assert resume["completion_prompt"]["status"] == "needs_user_input"
+    assert resume["completion_prompt"]["suggested_commands"]
     assert "验收条件" in resume["completion_prompt"]["prompt_template"]
     assert "Completion Prompt" in resume["context_block"]
     assert auto_resume["action_guard"]["status"] == "blocked_missing_work_state_fields"

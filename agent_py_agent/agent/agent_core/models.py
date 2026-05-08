@@ -52,3 +52,5 @@ class AgentRunResult:
     memory_compact_auto_next_action: str = "continue_without_compact"
     memory_compact_auto_allowed_to_continue: bool = False
     memory_compact_auto_tool_execution: str = "none"
+    memory_compact_auto_apply_id: str = ""
+    memory_compact_auto_continue_ready: bool = False

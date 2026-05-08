@@ -279,6 +279,7 @@ def _compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[s
                 run_id=ctx.run_id or "",
                 task_id=ctx.task_id or "",
             ),
+            allow_apply=bool(getattr(agent.config, "memory_compact_auto_allow_apply", False)),
         ),
     )
     suggestion = cycle["suggestion"]
@@ -292,6 +293,8 @@ def _compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[s
         "memory_compact_auto_next_action": str(cycle["next_action"]),
         "memory_compact_auto_allowed_to_continue": bool(cycle["allowed_to_continue"]),
         "memory_compact_auto_tool_execution": str(cycle["automatic_tool_execution"]),
+        "memory_compact_auto_apply_id": str(cycle["apply_id"]),
+        "memory_compact_auto_continue_ready": bool(cycle["continue_packet"].get("ready_to_continue")),
     }
 
 

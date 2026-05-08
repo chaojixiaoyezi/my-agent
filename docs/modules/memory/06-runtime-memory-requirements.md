@@ -124,6 +124,10 @@ Control-plane query 第一片已落地：`query_memory_control_plane()` 会按 d
 
 全局 `memory-compact --apply` 的第二片已落地为非破坏性 apply：它会基于 dry-run scope 写 `memory_archive/compact_applies/<event_id>.md`、metadata JSON、apply bundle、restore refs、post-compact self-check JSON 和 append-only ledger，成功状态为 `applied_non_destructive`。`restore_refs.json` 会列出原始 archive/snapshot/token ledger 引用，`apply_bundle.json` 会给恢复流程提供入口和核验步骤；如果 self-check 失败，会额外写 `self_check_failed.json` 并把 metadata/ledger 标记为 `blocked_self_check_failed`。这一步只建立恢复入口、自检、失败阻断和审计记录，不删除、不重写、不裁剪 raw/hook/snapshot/token/task/run 文件。后续如果要做 destructive rewrite，必须另加备份、restore、self-check failed rollback 和更高等级验收。
 
+`memory-resume --from-compact` 会生成 `compact_continue_packet`。它不是执行器，而是恢复后继续工作的统一契约：包含目标、阶段、下一步、验收、约束、最近测试、推荐读取路径、action guard、subagent owner refs 和 `automatic_tool_execution=none`。自动链路即使拿到 `ready_to_continue=true`，也只代表 compact 恢复状态一致，不代表子代理业务验收通过；测试执行、acceptance apply 和 rescue 仍必须走 parent acceptance 链路。
+
+`memory_compact_auto_allow_apply` 是自动 compact apply 的显式配置口子，默认关闭。开启后 `SimpleAgent.run()` 也只允许非破坏性 apply、auto resume、continue packet 和 guard 停车，不自动运行工具、不自动改代码、不自动 apply acceptance。
+
 ## Shared Workspace 要求
 
 Shared workspace 是同一 task 下 sibling 子代理共享任务局部事实的地方，不是主代理长期 memory。
@@ -179,9 +183,11 @@ Runtime memory 的轻量索引记录必须能长期扩展，但不能把字段�
 - `compact_resume`
 - `compact_resume_consistency_report`
 - `compact_resume_handoff`
+- `compact_continue_packet`
 - `compact_action_guard`
 - `compact_suggestion`
 - `compact_auto_cycle`
+- `compact_subagent_owner_refs`
 - `tool_output_archive_record`
 - `tool_output_artifact`
 - `tool_output_index`

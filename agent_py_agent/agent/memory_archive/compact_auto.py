@@ -104,10 +104,27 @@ def _cycle_payload(request: _AutoCyclePayloadOptions) -> dict[str, Any]:
         "suggestion": request.suggestion,
         "apply_result": request.apply_result or {},
         "resume_result": resume or {},
+        "continue_packet": _continue_packet(resume),
+        "apply_id": _apply_id(request.apply_result),
         "allowed_to_continue": bool(resume and resume["action_guard"]["allowed_to_continue"]),
         "next_action": _next_action(request.status),
         "reserved": runtime_memory_reserved_fields(COMPACT_AUTO_CYCLE_SCHEMA),
     }
+
+
+# LLM: _continue_packet exposes the resume continuation contract without expanding auto-cycle callers.
+# 函数用途: 从 resume_result 中取出继续工作包；没有 apply/resume 时返回空对象。
+def _continue_packet(resume: dict[str, Any] | None) -> dict[str, Any]:
+    if not resume:
+        return {}
+    packet = resume.get("continue_packet", {})
+    return packet if isinstance(packet, dict) else {}
+
+
+# LLM: _apply_id gives run finalization a small stable ref without copying the whole apply result.
+# 函数用途: 从可选 apply_result 中取 apply_id，未执行 apply 时返回空字符串。
+def _apply_id(apply_result: dict[str, Any] | None) -> str:
+    return str(apply_result.get("apply_id", "") or "") if apply_result else ""
 
 
 # LLM: _next_action gives automation callers one machine-readable stop/continue recommendation.

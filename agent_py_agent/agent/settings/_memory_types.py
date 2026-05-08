@@ -25,6 +25,7 @@ class MemorySettings:
     memory_resume_auto_context_enabled: bool = False
     memory_resume_auto_context_mode: str = "trigger"
     memory_resume_auto_context_limit: int = 5
+    memory_compact_auto_allow_apply: bool = False
 
 
 # LLM: MemoryConfigWarning 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。

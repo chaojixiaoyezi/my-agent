@@ -59,6 +59,11 @@
 - 2026-05-08 Resume 交接包增强第一片已落地：`memory-resume --from-compact` 现在返回 `compact_resume_handoff`，并在 context block / CLI 中稳定展示目标、阶段、下一步、验收条件、约束、最近测试、推荐读取路径和 action guard 状态。
 - 2026-05-08 自动 Guard 放行第一片已落地：当 work state 字段齐全、refs 存在、self-check 通过且 `resume_mode=auto` 时，`compact_action_guard` 会返回 `allow_automated_continue` / `allowed_to_continue=true`；报告仍明确 `automatic_tool_execution=none`，不会自动跑工具。
 - 2026-05-08 子代理 Compact Owner 预留口第一片已落地：`memory-resume --from-compact --compact-owner-type subagent_run|subagent_session --compact-owner-id <run_id>` 会只读解析 `tasks/*/agents/<run_id>/` 和旧 `subagents/<run_id>/` 引用，返回 run workspace、checkpoint、summary、legacy adapter refs；仍不写主 memory、不改 runner、不自动执行工具。
+- 2026-05-08 Continue Packet 第一片已落地：`memory-resume --from-compact` 现在返回 `compact_continue_packet`，把目标、阶段、下一步、验收、约束、最近测试、推荐读取路径、action guard 和 subagent owner refs 固定成统一继续契约；它只表达恢复上下文是否可继续，不代表业务验收通过。
+- 2026-05-08 半自动 Resume 第二片已落地：`completion_prompt` 新增 `suggested_commands`，给出 `memory-fact-write --from-compact`、同 scope 重新 `memory-compact --apply` 和 `memory-resume --compact-resume-mode auto` 的闭环提示；仍只写用户显式确认事实，不解析助手回复。
+- 2026-05-08 子代理 Compact Hook 预留第二片已落地：subagent owner refs 会带 `reserved_hooks`，预留 run-local `session_compact_ledger.jsonl` 和 `latest_continue_packet.json` 路径；当前 `enabled=false`，不写主 memory、不自动执行工具、不改 runner。
+- 2026-05-08 Auto Compact/Resume 第一版增强已落地：新增 `memory_compact_auto_allow_apply` 配置，默认 false；开启后 `SimpleAgent.run()` 也只做非破坏性 apply、auto resume、continue packet 和 guard 停车，并把 `apply_id` / `continue_ready` 暴露给结果和 CLI。
+- 2026-05-08 compact + parent acceptance 联调第一片已落地：新增 focused 测试串起 subagent task、compact apply/resume、continue packet、parent acceptance apply 阻断和 auto-policy dry-run；断言 auto-policy 仍 `executed=false`、`mutates_task_state=false`，且 task 状态不被 compact 自动链路改动。
 - **记忆推模式** (`memory_push.py`)：在关键决策点自动查询并注入相关记忆，实现"推模式"记忆系统。
   - `MemoryType` 枚举：`LESSON_GENERAL`、`LESSON_TASK`、`LESSON_TEMP`、`CONTEXT`、`FACT`
   - `push_relevant_memories()` 函数：根据触发类型搜索相关记忆
@@ -114,6 +119,8 @@
 - Work State 字段来源第一片解决了“action guard 永远只能看到 unknown”的问题；现在只要任务目录里有验收、约束和测试事实源，compact apply 就能把它们带进恢复基线，缺失时仍按 missing 处理。
 - Resume 交接包增强第一片解决了“恢复结果只给路径和简单状态，不够接手”的问题；现在 handoff/context block 直接把接手者最需要看的目标、约束、验收、测试和 guard 状态摆出来。
 - 自动 Guard 放行第一片解决了“guard 只能阻断，不能表达安全可继续”的问题；现在字段完整时能给自动流程一个明确 go 信号，但工具执行仍必须由后续更高层策略显式触发。
+- Continue Packet 解决了“resume 输出能看但缺统一继续契约”的问题；现在手动、半自动和自动 compact 都能读同一份 packet 判断目标、约束、验收、测试、refs 和 guard 状态。
+- compact + parent acceptance 联调解决了“恢复上下文可继续”和“子代理业务验收通过”容易混淆的问题；现在测试明确这两条链路相邻但不互相越权。
 - P0 安全切片解决了三类恢复风险：compact 快照不会丢 routed/resume 恢复线索；artifact manifest 不会越界读本机任意绝对路径；shared workspace 不再由最后一次保存覆盖 sibling 已登记的 finding/evidence。
 
 ## 下一步

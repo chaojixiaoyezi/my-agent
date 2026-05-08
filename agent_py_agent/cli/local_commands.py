@@ -172,7 +172,9 @@ def _print_compact_suggestion(result) -> None:
     print(
         "[compact_auto="
         f"{result.memory_compact_auto_status}; next={result.memory_compact_auto_next_action}; "
-        f"tools={result.memory_compact_auto_tool_execution}]"
+        f"tools={result.memory_compact_auto_tool_execution}; "
+        f"continue_ready={result.memory_compact_auto_continue_ready}; "
+        f"apply_id={result.memory_compact_auto_apply_id or '-'}]"
     )
     for command in result.memory_compact_commands or []:
         print(f"- {command}")

@@ -71,6 +71,7 @@ class AgentConfig:
     memory_resume_auto_context_enabled: bool = False
     memory_resume_auto_context_mode: str = "trigger"
     memory_resume_auto_context_limit: int = 5
+    memory_compact_auto_allow_apply: bool = False
     memory_config_warnings: list[dict[str, Any]] = field(default_factory=list)
     local_store_path: str = "data/local_store/local.db"
     local_store_files_dir: str = "data/local_store/files"

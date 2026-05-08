@@ -46,6 +46,7 @@ def build_compact_completion_prompt(request: CompactCompletionPromptRequest) -> 
         "missing_fields": missing,
         "fields": fields,
         "prompt_template": _prompt_template(fields),
+        "suggested_commands": _suggested_commands(request, missing),
         "runtime_fact_source_hint": "Use a future run prompt with these explicit labels, or write an approved task.json fact source.",
         "automatic_write": False,
     }
@@ -80,6 +81,31 @@ def _prompt_template(fields: list[dict[str, str]]) -> str:
     for field in fields:
         lines.extend([f"{field['label']}:", f"- <{field['hint']}>", ""])
     return "\n".join(lines).rstrip()
+
+
+# LLM: _suggested_commands keeps semi-auto recovery explicit and copyable without writing facts itself.
+# 函数用途: 根据 compact scope 生成 memory-fact-write 和重新 resume 的建议命令；缺字段时才返回。
+def _suggested_commands(request: CompactCompletionPromptRequest, missing: list[str]) -> list[str]:
+    if not missing:
+        return []
+    fact_id = _fact_id_from_scope(request.work_state)
+    fact_flag = f" --fact-id {fact_id}" if fact_id else ""
+    return [
+        f"my-agent memory-fact-write{fact_flag} --from-compact {request.apply_id} "
+        '--acceptance "..." --constraint "..." --latest-test "..."',
+        "my-agent memory-compact --apply  # rerun with the same request/session/task/run scope",
+        "my-agent memory-resume --from-compact <new_apply_id> --compact-resume-mode auto",
+    ]
+
+
+# LLM: _fact_id_from_scope chooses a stable runtime_facts directory from the compact work-state scope.
+# 函数用途: 优先 request/session/task/run id，保证补全事实能被下一次同 scope compact apply 读到。
+def _fact_id_from_scope(work_state: dict[str, Any]) -> str:
+    scope = work_state.get("scope", {}) if isinstance(work_state.get("scope"), dict) else {}
+    for key in ("request_id", "session_id", "task_id", "run_id"):
+        if value := str(scope.get(key) or "").strip():
+            return value
+    return ""
 
 
 __all__ = ["CompactCompletionPromptRequest", "build_compact_completion_prompt"]
