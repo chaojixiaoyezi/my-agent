@@ -15,6 +15,7 @@ from ..agent.subagents.execution_report import (
     write_test_execution_report,
 )
 from ..agent.subagents.patch import PatchApplyOptions, PatchReviewOptions
+from ._acceptance_plan import cmd_subagents_acceptance_plan
 from .common import make_agent
 from .models import SubagentsAcceptanceOptions, SubagentsPatchOptions, SubagentsTestsOptions
 

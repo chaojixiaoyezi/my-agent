@@ -12,6 +12,8 @@ from typing import Any
 
 from ..agent.local_storage import AgentRuntimeQueryContext
 
+_ACCEPTANCE_PLAN_STATUSES = {"AWAITING_ACCEPTANCE", "FAILED", "BLOCKED", "ERROR", "TIMEOUT"}
+
 
 # LLM: shared_progress_for_board collects root task panels for visible board items only.
 # 函数用途: 从看板可见项查询共享进度面板，并返回短 JSON 摘要。
@@ -76,6 +78,40 @@ def format_takeover_view_lines(panels: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+# LLM: format_acceptance_plan_lines renders parent dry-run decisions without executing tests.
+# 函数用途: 给 status/subagents 展示父级验收下一步摘要；只显示 refs 和摘要字段，不展开事实文件正文。
+def format_acceptance_plan_lines(panels: list[dict[str, Any]]) -> list[str]:
+    entries = _acceptance_plan_entries_from_panels(panels)
+    if not entries:
+        return ["- 暂无"]
+    lines: list[str] = []
+    for entry in entries:
+        lines.extend(_acceptance_plan_entry_lines(entry))
+    return lines
+
+
+# LLM: _acceptance_plan_entry_lines keeps one decision's human output compact and refs-only.
+# 函数用途: 渲染单条父级验收计划摘要，避免主格式函数继续加深嵌套。
+def _acceptance_plan_entry_lines(entry: dict[str, Any]) -> list[str]:
+    lines = [
+        f"- {entry.get('run_id', '')} decision={entry.get('decision', '')} "
+        f"risk={entry.get('risk_level', '')} "
+        f"human={bool(entry.get('requires_human_confirmation', False))}"
+    ]
+    reason = entry.get("reason")
+    if reason:
+        lines.append(f"  - reason={reason}")
+    lines.extend(_acceptance_plan_ref_lines(entry))
+    return lines
+
+
+# LLM: _acceptance_plan_ref_lines emits only paths already present in the dry-run decision.
+# 函数用途: 输出验收计划引用路径，不打开引用文件。
+def _acceptance_plan_ref_lines(entry: dict[str, Any]) -> list[str]:
+    names = ("test_execution_ref", "failure_handoff_ref", "takeover_readiness_ref")
+    return [f"  - {name}={entry[name]}" for name in names if entry.get(name)]
+
+
 # LLM: _query_panels keeps CLI status as a read-only projection over LocalStore panels.
 # 函数用途: 按 root task 查询共享进度面板并转成 CLI 可序列化摘要。
 def _query_panels(agent: Any, root_ids: list[str], purpose: str) -> list[dict[str, Any]]:
@@ -87,7 +123,7 @@ def _query_panels(agent: Any, root_ids: list[str], purpose: str) -> list[dict[st
         panel = local_store.query_shared_progress_panel(
             AgentRuntimeQueryContext(root_task_id=root_id, scope="root_tree", purpose=purpose, requester_role="cli")
         )
-        panels.append(_panel_payload(panel))
+        panels.append(_panel_payload(panel, _acceptance_planner(agent)))
     return panels
 
 
@@ -104,7 +140,7 @@ def _root_ids_from_board(board: Any) -> list[str]:
 
 # LLM: _panel_payload serializes a SharedProgressPanel without reading linked files.
 # 函数用途: 把共享进度面板转成 status/subagents 输出需要的短 JSON。
-def _panel_payload(panel: Any) -> dict[str, Any]:
+def _panel_payload(panel: Any, acceptance_planner: Any = None) -> dict[str, Any]:
     runs = _list_attr(panel, "runs")
     blocked_runs = _list_attr(panel, "blocked_runs")
     rollup = getattr(panel, "rollup", None)
@@ -120,6 +156,7 @@ def _panel_payload(panel: Any) -> dict[str, Any]:
         "failure_handoff_refs": failure_refs,
         "takeover_readiness_refs": takeover_refs,
         "takeover_entries": _takeover_entries(runs),
+        "acceptance_plan_entries": _acceptance_plan_entries(runs, acceptance_planner),
         "warnings": list(getattr(panel, "warnings", []) or []),
     }
 
@@ -180,6 +217,63 @@ def _takeover_entries_from_panels(panels: list[dict[str, Any]]) -> list[dict[str
         if isinstance(raw_entries, list):
             entries.extend(item for item in raw_entries if isinstance(item, dict))
     return entries
+
+
+# LLM: _acceptance_plan_entries_from_panels flattens prepared dry-run decisions for CLI rendering.
+# 函数用途: 复用 shared-progress payload 中的验收计划摘要，避免 status 和看板各自拼字段。
+def _acceptance_plan_entries_from_panels(panels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for panel in panels:
+        raw_entries = panel.get("acceptance_plan_entries", [])
+        if isinstance(raw_entries, list):
+            entries.extend(item for item in raw_entries if isinstance(item, dict))
+    return entries
+
+
+# LLM: _acceptance_plan_entries calls the read-only parent controller for visible risky/awaiting runs.
+# 函数用途: 从控制面可见 run 生成父级验收 dry-run 摘要；异常时跳过该 run，不执行 tests 或写回状态。
+def _acceptance_plan_entries(runs: list[Any], acceptance_planner: Any = None) -> list[dict[str, Any]]:
+    if not callable(acceptance_planner):
+        return []
+    entries: list[dict[str, Any]] = []
+    for run in runs:
+        if str(getattr(run, "status", "") or "").upper() not in _ACCEPTANCE_PLAN_STATUSES:
+            continue
+        try:
+            decision = acceptance_planner(str(getattr(run, "run_id", "") or ""))
+        except Exception:
+            continue
+        entries.append(_decision_payload(decision))
+    return entries
+
+
+# LLM: _decision_payload narrows parent decisions to refs-only fields safe for status JSON.
+# 函数用途: 把真实或测试替身决策转为 CLI payload；保留路径/摘要，不读取路径内容。
+def _decision_payload(decision: Any) -> dict[str, Any]:
+    to_dict = getattr(decision, "to_dict", None)
+    payload = to_dict() if callable(to_dict) else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "run_id": payload.get("run_id", getattr(decision, "run_id", "")),
+        "decision": payload.get("decision", getattr(decision, "decision", "")),
+        "reason": payload.get("reason", getattr(decision, "reason", "")),
+        "risk_level": payload.get("risk_level", getattr(decision, "risk_level", "")),
+        "requires_human_confirmation": bool(
+            payload.get("requires_human_confirmation", getattr(decision, "requires_human_confirmation", False))
+        ),
+        "evidence_refs": list(payload.get("evidence_refs", []) or []),
+        "test_execution_ref": payload.get("test_execution_ref", getattr(decision, "test_execution_ref", "")),
+        "failure_handoff_ref": payload.get("failure_handoff_ref", getattr(decision, "failure_handoff_ref", "")),
+        "takeover_readiness_ref": payload.get("takeover_readiness_ref", getattr(decision, "takeover_readiness_ref", "")),
+        "next_actions": list(payload.get("next_actions", []) or []),
+    }
+
+
+# LLM: _acceptance_planner locates the manager dry-run hook without making it mandatory for test doubles.
+# 函数用途: 安全取得 `plan_parent_acceptance`；没有该能力时 status/board 仍能展示其它面板内容。
+def _acceptance_planner(agent: Any) -> Any:
+    return getattr(getattr(agent, "subagents", None), "plan_parent_acceptance", None)
 
 
 # LLM: _dict_metadata lets status expose scope summaries while rejecting loose non-dict metadata.
