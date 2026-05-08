@@ -1779,3 +1779,12 @@ def example(...):
 - 后续接外部 IM / 企业用户时，先实现 `RuntimeIdentity` / `ConversationScope` 这类轻量身份包，把 service owner、effective principal、conversation、root run 和 memory namespace 写进 artifact/snapshot/control-plane metadata；员工长期记忆是否启用保持 policy 决策，不和第一版 artifact 隔离绑死。
 - 后续做员工记忆时，先实现 task/run working memory 的清理与保留包，再实现 conversation memory 的显式 promotion 队列；主代理可以读取员工授权范围内的 conversation summary / preference card / open tasks，但不能默认读取员工私有 run artifacts 或管理员个人记忆。
 - 后续做配置系统时，先实现 scoped config overlay 和 effective config viewer：员工会话里的配置测试默认落到 `conversation_overlay` / `run_override`，只有通过明确的 admin approval / policy gate 才能 promote 到 project、tenant 或 global 层；所有 promote 都要写 audit event、diff、rollback ref 和发起人的 effective principal。
+
+## 2026-05-08 / Memory-resume fail-safe checkpoint refs
+状态：已落地
+
+摘要：
+- `memory-resume --from-compact` 现在会把工具输出外置前写入的 metadata-only fail-safe checkpoint 纳入恢复入口。
+- checkpoint 来自 compact restore refs 指向的 hook JSONL；恢复包只展示 path、line_no、snapshot_id、工具名、hash、size、next_actions 等摘要，不读取 artifact 正文。
+- `compact_resume_handoff` 和 Compact Resume Context 新增 `Fail Safe Checkpoints` 小节，接管者先读 checkpoint 摘要，再决定是否显式读取 artifact。
+- 这条边界继续遵守：checkpoint 不是 compact，summary 不是 verified fact，artifact ref 不是任意文件路径，完整 artifact body 不是默认 prompt 内容。

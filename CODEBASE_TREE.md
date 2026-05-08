@@ -915,6 +915,7 @@ docs/
 - `agent_py_agent/agent/subagents/services/persistence_recovery_outputs.py`: 集中写入 checkpoint artifacts 和 takeover readiness 文件，让 persistence 主流程保持薄编排。
 - `agent_py_agent/agent/subagents/services/takeover_readiness.py`: 生成接管前必读包 `reports/takeover_readiness.json` 和 `TAKEOVER_READINESS.md`，只保存 refs、artifact manifest 元数据和读取顺序，不读取大正文。
 - `agent_py_agent/agent/subagents/rendering_rescue.py`: 渲染 rescue packet 的 refs-only 摘要，避免主 `rendering.py` 因接管/救援展示继续膨胀。
+- `agent_py_agent/agent/memory_archive/compact_resume_failsafe.py`: 从 compact restore refs 指向的 hook JSONL 中提取工具输出外置前 fail-safe checkpoint，保持 memory-resume refs-only。
 - `agent_py_agent/agent/subagents/services/persistence_security.py`: 负责 `SecuritySignal` 预留字段的读取归一化，避免 persistence 主流程继续膨胀；当前不执行安全策略。
 - `agent_py_agent/agent/subagents/model_task.py`: 新增 `SecuritySignal` 和 `security_review_required` 安全预留字段，用于记录安全劫持、安全欺骗、prompt injection、工具权限异常等可疑信号；当前只审计不拦截。
 - `agent_py_agent/tests/test_local_store_control_plane.py`: 覆盖 LocalStore 控制面表、rollup 计算、上级/中间子代理 runtime query，以及 `SubAgentPersistenceService.save()` 的投影写入路径。
@@ -925,3 +926,4 @@ docs/
 - `agent_py_agent/tests/test_subagent_security_reserve.py`: 覆盖安全信号预留字段随 task 持久化，并投影到 LocalStore metadata。
 - `agent_py_agent/tests/test_status_shared_progress.py`: 覆盖 `status` / `subagents` CLI 展示共享进度、failure handoff refs 和 takeover packet refs。
 - `agent_py_agent/tests/test_tool_output_externalizer.py`: 覆盖大工具输出外置 artifact 和外置前 fail-safe recovery snapshot。
+- `agent_py_agent/tests/test_memory_compact_failsafe.py`: 覆盖 `memory-resume --from-compact` 如何展示 fail-safe checkpoint refs 且不读取 artifact 正文。

@@ -192,3 +192,13 @@
 - Product-code modules, classes, functions, and methods in the active module now carry the required `LLM:` plus `函数用途:` / `类用途:` definition-level double-layer comments format.
 - This is a documentation-only maintainability pass: behavior, file formats, workflow semantics, and public interfaces are intended to stay unchanged.
 - Future module changes must keep these comments current when changing module/class/def behavior, side effects, bundles, or caller expectations.
+
+## 2026-05-08 compact resume fail-safe checkpoint refs
+- `memory-resume --from-compact` 现在会从 compact restore refs 指向的 hook JSONL 中提取 `tool_output_externalizer` 的 fail-safe checkpoint。
+- 新增输出字段 `fail_safe_checkpoints`，只包含 checkpoint path、line_no、snapshot_id、source/status、request/run/task id、工具名、调用 id、output hash、size、externalized 状态和 next_actions。
+- `compact_resume_handoff` 和 `Compact Resume Context` 新增 `Fail Safe Checkpoints` 小节；`recommended_read_paths` 会把这些 checkpoint path 提前放入必读入口。
+- 该流程只读 metadata-only hook checkpoint，不自动读取 `memory_archive/artifacts/tool_outputs/*` 的完整正文；完整大输出仍必须后续显式按 artifact 路径读取。
+
+## 2026-05-08 compact resume fail-safe code-size split
+- 为避免 `compact_resume.py` 和 `test_memory_compact.py` 继续接近 code-size 软上限，checkpoint JSONL 扫描逻辑拆到 `compact_resume_failsafe.py`，新增回归测试拆到 `test_memory_compact_failsafe.py`。
+- 行为边界不变：memory-resume 只展示 fail-safe checkpoint refs / hash / size / next_actions，不自动读取 tool-output artifact 正文。

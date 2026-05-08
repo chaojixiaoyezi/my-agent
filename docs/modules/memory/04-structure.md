@@ -213,3 +213,9 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 - Module structure docs now treat the definition-level double-layer comments as part of the code architecture: `LLM:` records model-facing contract/caller/side-effect notes, and `函数用途:` / `类用途:` records beginner-readable purpose and edit guidance.
 - New files, services, bundles, or facade methods must update both this structure page and the in-code comments at the same time.
 - The global file tree in `CODEBASE_TREE.md` now includes a current architecture map for CLI, agent core, gateway, memory, log-analysis, subagent, tooling, and settings boundaries.
+
+## 2026-05-08 compact resume fail-safe structure update
+- `memory_archive/compact_resume_failsafe.py` owns metadata-only tool-output fail-safe checkpoint extraction from restore refs that point to hook JSONL files. The extractor records path, line number, snapshot id, source/status, request/run/task ids, output hash, output size, and next actions.
+- `memory_archive/compact_resume.py` now calls that extractor before building recommended read paths, so the main resume orchestration file does not keep growing with JSONL scanning details.
+- `memory_archive/compact_resume_handoff.py` now carries the same checkpoint refs into `compact_resume_handoff` and renders a `Fail Safe Checkpoints` section in the context block.
+- The structure remains refs-only: `memory-resume` may inspect hook checkpoint metadata, but it does not read or inline externalized tool artifact bodies. Artifact bodies stay behind explicit artifact path reads.
