@@ -34,6 +34,11 @@ class ParentAcceptanceAutoPolicy:
     execution_mode: str = "manual_only"
     automatic_execution_allowed: bool = False
     recommended_command: str = ""
+    preflight_status: str = "blocked"
+    ready_for_manual_execution: bool = False
+    ready_for_automatic_execution: bool = False
+    preflight_checks: dict[str, bool] = field(default_factory=dict)
+    preflight_blockers: list[str] = field(default_factory=list)
     mutates_task_state: bool = False
     requires_human_confirmation: bool = False
     next_action_ref: str = ""
@@ -99,6 +104,12 @@ def _policy_for_action(
     decision = "allow" if is_allowed else "blocked"
     reason = "action is in auto-policy allowlist" if is_allowed else _blocked_reason(action)
     recommended_command = action.command if is_allowed and action.command else ""
+    preflight = _preflight_result(
+        action=action,
+        allowed_actions=allowed_actions,
+        is_allowed=is_allowed,
+        recommended_command=recommended_command,
+    )
     return ParentAcceptanceAutoPolicy(
         run_id=task.id,
         action=action.action,
@@ -110,6 +121,11 @@ def _policy_for_action(
         execution_mode="manual_only",
         automatic_execution_allowed=False,
         recommended_command=recommended_command,
+        preflight_status=str(preflight["status"]),
+        ready_for_manual_execution=bool(preflight["ready_for_manual_execution"]),
+        ready_for_automatic_execution=bool(preflight["ready_for_automatic_execution"]),
+        preflight_checks=dict(preflight["checks"]),
+        preflight_blockers=list(preflight["blockers"]),
         mutates_task_state=False,
         requires_human_confirmation=action.requires_human_confirmation,
         next_action_ref="inline",
@@ -118,10 +134,54 @@ def _policy_for_action(
         reserved={
             "allowed_actions": sorted(allowed_actions),
             "semi_auto_plan": _semi_auto_plan(is_allowed=is_allowed, recommended_command=recommended_command),
+            "preflight": preflight,
             "source_mutates_task_state": action.mutates_task_state,
             "source_action_reason": action.reason,
         },
     )
+
+
+# LLM: _preflight_result records future executor gates without opening the executor path.
+# 函数用途: 汇总自动策略执行前检查项和阻断原因；当前只产出审计事实，不运行命令。
+def _preflight_result(
+    *,
+    action: ParentAcceptanceNextAction,
+    allowed_actions: set[str],
+    is_allowed: bool,
+    recommended_command: str,
+) -> dict[str, Any]:
+    checks = {
+        "action_in_allowlist": action.action in allowed_actions,
+        "has_recommended_command": bool(recommended_command),
+        "requires_human_confirmation": bool(action.requires_human_confirmation),
+        "mutates_task_state": bool(action.mutates_task_state),
+        "automatic_execution_allowed": False,
+    }
+    blockers = _preflight_blockers(checks)
+    ready_for_manual = is_allowed and checks["has_recommended_command"] and not action.mutates_task_state
+    return {
+        "status": "manual_ready" if ready_for_manual else "blocked",
+        "ready_for_manual_execution": ready_for_manual,
+        "ready_for_automatic_execution": False,
+        "checks": checks,
+        "blockers": blockers,
+    }
+
+
+# LLM: _preflight_blockers gives schedulers explicit reasons to stop before execution.
+# 函数用途: 根据 preflight 检查项生成阻断原因列表，让后续调度器不用猜为什么不能自动跑。
+def _preflight_blockers(checks: dict[str, bool]) -> list[str]:
+    blockers: list[str] = []
+    if not checks["action_in_allowlist"]:
+        blockers.append("action_not_in_allowlist")
+    if checks["requires_human_confirmation"]:
+        blockers.append("requires_human_confirmation")
+    if checks["mutates_task_state"]:
+        blockers.append("mutates_task_state")
+    if checks["action_in_allowlist"] and not checks["has_recommended_command"]:
+        blockers.append("missing_recommended_command")
+    blockers.append("automatic_execution_disabled")
+    return blockers
 
 
 # LLM: _semi_auto_plan makes the future executor contract explicit while still denying execution.

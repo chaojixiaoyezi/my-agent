@@ -1863,3 +1863,12 @@ def example(...):
 - `subagents-dispatch` 的 acceptance record 现在透传 policy 的 `execution_mode`、`automatic_execution_allowed` 和 `recommended_command`。
 - JSON report 和 `SUBAGENT_DISPATCH.md` 都能直接看到 manual-only 边界，避免 watch/调度层只看 `would_execute=true` 就误判为可以自动执行。
 - 行为边界不变：dispatch/watch 仍只写审计和引用，不启动 recommended command，不 apply，不 rescue，不改 task 状态。
+
+## 2026-05-09 Parent Acceptance Auto Policy preflight 审计
+
+状态：已落地
+
+摘要：
+- Auto Policy 现在输出 `preflight_status`、`ready_for_manual_execution`、`ready_for_automatic_execution`、`preflight_checks` 和 `preflight_blockers`。
+- 对 allowlisted `run_tests`，preflight 可以是 `manual_ready`，但 `ready_for_automatic_execution=false` 且 blocker 保留 `automatic_execution_disabled`。
+- 对需要人工确认、状态修改或不在 allowlist 的动作，preflight 会给出明确 blocker；这只是审计和未来调度输入，不执行命令。

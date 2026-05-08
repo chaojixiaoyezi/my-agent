@@ -261,6 +261,12 @@ def test_parent_acceptance_auto_policy_dry_run_allows_run_tests_without_executio
         assert policy.execution_mode == "manual_only"
         assert policy.automatic_execution_allowed is False
         assert policy.recommended_command == f"subagents-tests {task.id} --re-run"
+        assert policy.preflight_status == "manual_ready"
+        assert policy.ready_for_manual_execution is True
+        assert policy.ready_for_automatic_execution is False
+        assert policy.preflight_checks["action_in_allowlist"] is True
+        assert policy.preflight_checks["automatic_execution_allowed"] is False
+        assert policy.preflight_blockers == ["automatic_execution_disabled"]
         assert policy.command == f"subagents-tests {task.id} --re-run"
         assert policy.mutates_task_state is False
         assert reloaded.status == "AWAITING_ACCEPTANCE"
@@ -271,6 +277,8 @@ def test_parent_acceptance_auto_policy_dry_run_allows_run_tests_without_executio
         assert payload["policy"]["execution_mode"] == "manual_only"
         assert payload["policy"]["automatic_execution_allowed"] is False
         assert payload["policy"]["recommended_command"] == f"subagents-tests {task.id} --re-run"
+        assert payload["policy"]["preflight_status"] == "manual_ready"
+        assert payload["policy"]["ready_for_automatic_execution"] is False
         assert payload["reserved"]["refs_only"] is True
 
 
@@ -293,6 +301,10 @@ def test_parent_acceptance_auto_policy_blocks_human_confirmation():
         assert policy.requires_human_confirmation is True
         assert policy.would_execute is False
         assert policy.executed is False
+        assert policy.preflight_status == "blocked"
+        assert policy.ready_for_manual_execution is False
+        assert policy.ready_for_automatic_execution is False
+        assert "requires_human_confirmation" in policy.preflight_blockers
 
 
 def test_parent_acceptance_plan_requires_human_for_unsafe_test_command():

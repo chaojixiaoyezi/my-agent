@@ -844,7 +844,7 @@ my-agent subagents-acceptance-plan <run_id> --auto-policy
 
 显式传 `--next-action` 时只生成父/上级代理可读的下一步建议，例如 `run_tests`、`request_human_confirmation`、`plan_rescue` 或 `apply_acceptance`。它会展示建议命令和 `parent_acceptance_decision.json` / `parent_acceptance_apply.json` refs，但不会执行建议命令、不会写 task 状态。
 
-显式传 `--auto-policy` 时会读取 next-action，写入 `reports/parent_acceptance_auto_policy.json`，并展示策略判断。第一版固定 dry-run：`run_tests` 可被标记为 `allow` / `would_execute=true`，但 `executed=false`；`request_human_confirmation`、`plan_rescue`、`apply_acceptance` 等不会自动执行。半自动计划会额外展示 `execution_mode=manual_only`、`automatic_execution_allowed=false` 和 `recommended_command`，意思是“这条命令可以给人或后续受控调度器参考，但当前代码不会自己运行”。
+显式传 `--auto-policy` 时会读取 next-action，写入 `reports/parent_acceptance_auto_policy.json`，并展示策略判断。第一版固定 dry-run：`run_tests` 可被标记为 `allow` / `would_execute=true`，但 `executed=false`；`request_human_confirmation`、`plan_rescue`、`apply_acceptance` 等不会自动执行。半自动计划会额外展示 `execution_mode=manual_only`、`automatic_execution_allowed=false`、`recommended_command` 和 `preflight_status`，意思是“这条命令可以给人或后续受控调度器参考，但当前代码不会自己运行”。`ready_for_automatic_execution` 第一版固定 false。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
