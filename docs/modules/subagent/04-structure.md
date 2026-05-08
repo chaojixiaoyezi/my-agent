@@ -64,8 +64,8 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/parent_acceptance_apply.py`：保存父级验收显式 apply 的结果模型、拦截/应用结果构造和 `parent_acceptance_apply.json` 落盘逻辑。
 - `agent_py_agent/agent/subagents/parent_acceptance_next_action.py`：把父级验收 plan/apply 审计映射成下一步动作建议，例如 `run_tests`、`request_human_confirmation`、`plan_rescue` 或 `apply_acceptance`；它只返回建议和 refs，不执行动作。
 - `agent_py_agent/agent/subagents/parent_acceptance_auto_policy.py`：把 next-action 映射成自动策略 dry-run 判断并写入 `parent_acceptance_auto_policy.json`；当前生成 allow/blocked、would_execute、manual-only 半自动计划和 executed=false。
-- `agent_py_agent/agent/agent_core/dispatch_service.py`：在 acceptance 调度记录上附加 parent acceptance auto-policy 的 refs-only 摘要；该接入只调用 dry-run policy 审计，不执行 tests、不 apply acceptance、不触发 rescue。
-- `agent_py_agent/agent/subagents/report_dispatch_models.py` / `services/dispatch_params.py`：`DispatchRecord` 和 `DispatchRecordParams` 持有 `parent_acceptance_policy_ref`、decision、action、would_execute、executed 等机器摘要字段，供 JSON report、Markdown 和 watch 读取。
+- `agent_py_agent/agent/agent_core/dispatch_service.py`：在 acceptance 调度记录上附加 parent acceptance auto-policy 的 refs-only 摘要；包括 manual-only 半自动字段，但该接入只调用 dry-run policy 审计，不执行 tests、不 apply acceptance、不触发 rescue。
+- `agent_py_agent/agent/subagents/report_dispatch_models.py` / `services/dispatch_params.py`：`DispatchRecord` 和 `DispatchRecordParams` 持有 `parent_acceptance_policy_ref`、decision、action、would_execute、executed、execution_mode、automatic_execution_allowed、recommended_command 等机器摘要字段，供 JSON report、Markdown 和 watch 读取。
 - `agent_py_agent/agent/subagents/rendering_dispatch.py`：`SUBAGENT_DISPATCH.md` 展示 policy 摘要和 ref，仍不展开 audit 文件正文。
 - `agent_py_agent/agent/subagents/manager_parent_acceptance.py`：承接 manager 的父级验收 plan/write/apply/next-action/auto-policy 桥接流程，让 `manager_acceptance.py` 类体只保留薄转发方法。
 - `agent_py_agent/agent/subagents/acceptance_test_execution.py`：把显式开启的真实测试执行接入 acceptance findings，生成 `test_execution_recorded` 和 `test_execution_passed`，默认不运行。
@@ -294,8 +294,8 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 
 ### Dispatch / Watch 接入
 
-- `subagents-dispatch` 的 acceptance record 会带 `parent_acceptance_policy_ref`、`parent_acceptance_policy_decision`、`parent_acceptance_policy_action`、`parent_acceptance_policy_would_execute` 和 `parent_acceptance_policy_executed`。
-- `SUBAGENT_DISPATCH.md` 展示同一组摘要，方便人类快速判断下一步；完整事实源仍是 run-local `reports/parent_acceptance_auto_policy.json`。
+- `subagents-dispatch` 的 acceptance record 会带 `parent_acceptance_policy_ref`、`parent_acceptance_policy_decision`、`parent_acceptance_policy_action`、`parent_acceptance_policy_would_execute`、`parent_acceptance_policy_executed`、`parent_acceptance_policy_execution_mode`、`parent_acceptance_policy_automatic_execution_allowed` 和 `parent_acceptance_policy_recommended_command`。
+- `SUBAGENT_DISPATCH.md` 展示同一组摘要，方便人类快速判断下一步；完整事实源仍是 run-local `reports/parent_acceptance_auto_policy.json`。Markdown 展示 recommended command 不代表 dispatch 会执行。
 - `subagents-dispatch --watch` 不单独执行 auto-policy。watch record 的 evidence 只指向 `subagent_dispatch_report.json` 和 `SUBAGENT_DISPATCH.md`，由调用方沿 ref 读取具体 run 的 policy audit。
 - 第一片接入仍是 refs-only dry-run：`would_execute=true` 只说明未来可考虑执行，`executed=false` 仍是硬边界。
 
