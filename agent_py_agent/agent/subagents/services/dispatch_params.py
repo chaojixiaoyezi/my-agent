@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 
 # LLM: DispatchRecordParams 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 类用途: 集中保存调度记录参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
+# 类用途: 集中保存调度记录参数字段，包括验收 auto-policy refs-only 摘要；关键副作用: 本身不执行输入输出，字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
 class DispatchRecordParams:
     """Bundle of make_dispatch_record parameters."""
@@ -25,6 +25,11 @@ class DispatchRecordParams:
     before_verification_status: str = ""
     after_verification_status: str = ""
     evidence_paths: list[str] | None = None
+    parent_acceptance_policy_ref: str = ""
+    parent_acceptance_policy_decision: str = ""
+    parent_acceptance_policy_action: str = ""
+    parent_acceptance_policy_would_execute: bool = False
+    parent_acceptance_policy_executed: bool = False
 
 
 # LLM: DispatchWatchRecordParams 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。

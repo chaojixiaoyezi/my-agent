@@ -128,6 +128,9 @@ def _explicit_sections(text: str) -> _ExplicitSections:
             active = label
             buckets[label].extend(_inline_items(inline))
             continue
+        if _looks_like_unmatched_heading(line):
+            active = ""
+            continue
         if active:
             buckets[active].extend(_line_items(line))
     return _ExplicitSections(
@@ -145,6 +148,17 @@ def _section_heading(line: str) -> tuple[str, str]:
     if not match:
         return "", ""
     return _label_key(match.group(1)), match.group(2).strip()
+
+
+# LLM: _looks_like_unmatched_heading prevents unrelated labeled sections from leaking into active fact buckets.
+# 函数用途: 识别未知标题或标签行，一旦出现就停止继续收集上一段验收/约束/测试事实。
+def _looks_like_unmatched_heading(line: str) -> bool:
+    text = line.strip().lstrip("-*# ").strip()
+    if not text:
+        return False
+    if re.match(r"^[^:：]{1,40}\s*[:：]\s*$", text):
+        return True
+    return bool(re.match(r"^[^:：]{1,40}\s*[:：]\s+.+$", text))
 
 
 # LLM: _label_key maps human labels to the three compact work-state fields.

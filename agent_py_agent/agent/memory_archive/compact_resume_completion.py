@@ -90,10 +90,11 @@ def _suggested_commands(request: CompactCompletionPromptRequest, missing: list[s
         return []
     fact_id = _fact_id_from_scope(request.work_state)
     fact_flag = f" --fact-id {fact_id}" if fact_id else ""
+    scope_flags = _scope_flags(request.work_state)
     return [
         f"my-agent memory-fact-write{fact_flag} --from-compact {request.apply_id} "
         '--acceptance "..." --constraint "..." --latest-test "..."',
-        "my-agent memory-compact --apply  # rerun with the same request/session/task/run scope",
+        f"my-agent memory-compact --apply{scope_flags}",
         "my-agent memory-resume --from-compact <new_apply_id> --compact-resume-mode auto",
     ]
 
@@ -106,6 +107,31 @@ def _fact_id_from_scope(work_state: dict[str, Any]) -> str:
         if value := str(scope.get(key) or "").strip():
             return value
     return ""
+
+
+# LLM: _scope_flags renders compact rerun flags so suggested commands keep the original apply scope.
+# 函数用途: 把 work_state.scope 转成可复制命令参数，避免用户复制到无范围 compact apply。
+def _scope_flags(work_state: dict[str, Any]) -> str:
+    scope = work_state.get("scope", {}) if isinstance(work_state.get("scope"), dict) else {}
+    flags = []
+    for key, flag in (
+        ("session_id", "--session-id"),
+        ("request_id", "--request-id"),
+        ("task_id", "--task-id"),
+        ("run_id", "--run-id"),
+    ):
+        value = str(scope.get(key) or "").strip()
+        if value:
+            flags.append(f"{flag} {_quote_shell(value)}")
+    return f" {' '.join(flags)}" if flags else ""
+
+
+# LLM: _quote_shell is a tiny POSIX-safe renderer for copyable recovery commands.
+# 函数用途: 在建议命令里安全保留带空格或引号的 scope 值。
+def _quote_shell(value: str) -> str:
+    if value and all(char.isalnum() or char in "._:/=-" for char in value):
+        return value
+    return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
 __all__ = ["CompactCompletionPromptRequest", "build_compact_completion_prompt"]

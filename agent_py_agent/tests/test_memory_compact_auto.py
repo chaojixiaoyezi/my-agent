@@ -16,6 +16,10 @@ from agent_py_agent.agent.memory_archive.compact_resume import (
     MemoryCompactResumeOptions,
     build_memory_compact_resume,
 )
+from agent_py_agent.agent.memory_archive.compact_work_state_sources import (
+    WorkStateFieldSourceRequest,
+    build_work_state_field_sources,
+)
 from agent_py_agent.tests.test_memory_compact import (
     _assert_apply_preserved_sources,
     _assert_schema_v2,
@@ -84,6 +88,23 @@ def test_memory_compact_work_state_reads_task_fact_sources(tmp_path: Path) -> No
     assert resume["handoff"]["action_guard"]["status"] == "requires_user_confirmation"
     assert "## Acceptance" in resume["context_block"]
     assert "focused compact resume tests pass" in resume["context_block"]
+
+
+def test_memory_compact_work_state_treats_scope_ids_as_literal_paths(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    leak_dir = root / "tasks" / "unrelated-task" / "agents" / "run-leak"
+    leak_dir.mkdir(parents=True)
+    (leak_dir / "ACCEPTANCE.md").write_text("- leaked acceptance should not be imported\n", encoding="utf-8")
+
+    sources = build_work_state_field_sources(
+        WorkStateFieldSourceRequest(
+            plan={"workspace_root": str(root), "scope": {"request_id": "*"}},
+            source_state={"task_refs": [], "content_paths": []},
+        )
+    )
+
+    assert sources.acceptance["items"] == []
+    assert sources.read_files == []
 
 
 def test_memory_compact_auto_guard_allows_complete_work_state_without_running_tools(tmp_path: Path) -> None:

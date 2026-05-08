@@ -13,11 +13,12 @@ SubAgentManager 通过 facade 方法委托到这里。
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:
-    from ..models import SubAgentTask
-
+from ..execution_report import TestExecutionReport, load_test_execution_report
 from ..reports import AcceptanceReviewFinding
 from .acceptance_evidence_findings import build_evidence_findings
+
+if TYPE_CHECKING:
+    from ..models import SubAgentTask
 
 
 # LLM: _artifact_exists 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -148,6 +149,16 @@ class SubAgentAcceptanceFindingService:
             evidence_path=task.output_json, created_at=created_at,
         ))
         tests = _dict_list(output.get("tests", []))
+        report = _existing_test_execution_report(task)
+        if tests and report is not None:
+            ok = report.total_tests > 0 and report.failed == 0
+            findings.append(AcceptanceReviewFinding(
+                name="tests_passed", ok=ok, severity="P1",
+                message=f"真实测试报告记录的 {report.total_tests} 条测试均通过。" if ok else
+                        f"真实测试报告存在失败: total={report.total_tests} failed={report.failed}。",
+                evidence_path=str(report.json_path), created_at=created_at,
+            ))
+            return findings
         failed_tests = [item for item in tests if not bool(item.get("ok", False))]
         findings.append(AcceptanceReviewFinding(
             name="tests_passed", ok=not failed_tests, severity="P1",
@@ -236,3 +247,15 @@ def _string_list(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value if item not in (None, "")]
     return [str(value)]
+
+
+# LLM: _existing_test_execution_report lets normal acceptance trust machine facts over worker test claims.
+# 函数用途: 读取已存在的 test_execution.json；读取失败时返回 None，保持旧 output.json 验收路径可用。
+def _existing_test_execution_report(task) -> TestExecutionReport | None:
+    path = Path(task.reports_dir) / "test_execution.json"
+    if not path.exists():
+        return None
+    try:
+        return load_test_execution_report(path)
+    except (OSError, ValueError, TypeError):
+        return None

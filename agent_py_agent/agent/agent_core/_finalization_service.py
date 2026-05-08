@@ -265,9 +265,10 @@ def _resume_context_fields(ctx: FinalizeContext) -> dict:
     }
 
 
-# LLM: _compact_auto_cycle_fields wires run finalization to the safe plan-only compact auto cycle.
-# 函数用途: 在 run 收尾时触发自动 compact/resume 协调器的默认计划分支；不会 apply、resume 或执行工具。
+# LLM: _compact_auto_cycle_fields honors do_save before any opt-in compact apply write.
+# 函数用途: 在 run 收尾时触发自动 compact/resume 协调器；`save=False` 时即使配置允许也只做计划，不写 apply 产物。
 def _compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[str, int]) -> dict:
+    allow_apply = ctx.do_save and bool(getattr(agent.config, "memory_compact_auto_allow_apply", False))
     cycle = run_memory_compact_auto_cycle(
         agent.root,
         MemoryCompactAutoCycleOptions(
@@ -279,7 +280,7 @@ def _compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[s
                 run_id=ctx.run_id or "",
                 task_id=ctx.task_id or "",
             ),
-            allow_apply=bool(getattr(agent.config, "memory_compact_auto_allow_apply", False)),
+            allow_apply=allow_apply,
         ),
     )
     suggestion = cycle["suggestion"]

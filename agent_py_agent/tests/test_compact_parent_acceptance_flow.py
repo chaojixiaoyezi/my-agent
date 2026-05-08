@@ -21,6 +21,11 @@ from agent_py_agent.agent.memory_archive.compact_resume import (
     MemoryCompactResumeOptions,
     build_memory_compact_resume,
 )
+from agent_py_agent.agent.subagent import (
+    AcceptanceReviewOptions,
+    EvidencePacket,
+    VerificationEvidence,
+)
 
 
 # LLM: test_compact_resume_and_parent_acceptance_auto_policy_stay_refs_only protects the combined flow boundary.
@@ -69,6 +74,43 @@ def test_compact_resume_and_parent_acceptance_auto_policy_stay_refs_only(tmp_pat
     assert reloaded.verification_status == "NEEDS_ACCEPTANCE"
 
 
+# LLM: test_compact_resume_parent_acceptance_executes_real_tests_then_applies covers the business acceptance handoff.
+# 函数用途: 串联 compact auto resume、父级 dry-run、显式真实测试执行、inspect-only apply，确保流程不自动越权。
+def test_compact_resume_parent_acceptance_executes_real_tests_then_applies(tmp_path: Path) -> None:
+    agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subagents"), tmp_path)
+    task = _awaiting_acceptance_task(agent)
+    _write_compact_state_files(task)
+    _write_compact_archives(tmp_path, task.id)
+    _write_parent_acceptance_evidence(agent, task)
+    (tmp_path / "business-output.txt").write_text("ready\n", encoding="utf-8")
+
+    resume = _auto_resume_compact_acceptance(tmp_path, task.id)
+    _write_parent_acceptance_output(
+        task,
+        tests=[{
+            "name": "business artifact exists",
+            "validation_method": "file_check",
+            "file_path": "business-output.txt",
+        }],
+    )
+
+    result = _run_parent_acceptance_real_test_cycle(agent, task.id)
+
+    reloaded = agent.subagents.load(task.id)
+    assert resume["continue_packet"]["ready_to_continue"] is True
+    assert result["first_decision"].decision == "execute_tests"
+    assert result["blocked_apply"].applied is False
+    assert result["report"].records[0].decision == "ACCEPT"
+    assert any(item.name == "test_execution_passed" and item.ok for item in result["report"].records[0].findings)
+    assert result["second_decision"].decision == "inspect_only"
+    assert result["applied"].applied is True
+    assert result["applied"].acceptance_decision == "ACCEPT"
+    assert reloaded.status == "DONE"
+    assert reloaded.verification_status == "VERIFIED"
+    exports_path = Path(reloaded.agent_run_memory_exports_jsonl)
+    assert not exports_path.exists() or exports_path.read_text(encoding="utf-8") == ""
+
+
 # LLM: _awaiting_acceptance_task creates a real saved task so workspace adapters and parent acceptance share refs.
 # 函数用途: 建立等待父级验收的子代理任务，并触发 task/run workspace 兼容写入。
 def _awaiting_acceptance_task(agent: SimpleAgent):
@@ -83,6 +125,73 @@ def _awaiting_acceptance_task(agent: SimpleAgent):
     task.channel_status = "OK"
     agent.subagents.save(task)
     return task
+
+
+# LLM: _auto_resume_compact_acceptance keeps the integration test below code-size guard while preserving scope.
+# 函数用途: 对同一 run scope 执行非破坏性 compact apply/resume，并返回 auto continue packet。
+def _auto_resume_compact_acceptance(root: Path, run_id: str) -> dict[str, object]:
+    apply_result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(
+                session_id="session-compact-acceptance",
+                request_id="request-compact-acceptance",
+                run_id=run_id,
+                task_id=run_id,
+            ),
+        ),
+    )
+    return build_memory_compact_resume(
+        root,
+        MemoryCompactResumeOptions(apply_ref=apply_result["apply_id"], resume_mode="auto"),
+    )
+
+
+# LLM: _run_parent_acceptance_real_test_cycle models explicit parent actions after compact resume.
+# 函数用途: 依次执行父级 dry-run、拦截 apply、显式真实测试、inspect-only apply，并返回各阶段结果。
+def _run_parent_acceptance_real_test_cycle(agent: SimpleAgent, run_id: str) -> dict[str, object]:
+    first_decision = agent.subagents.plan_parent_acceptance(run_id)
+    blocked_apply = agent.subagents.apply_parent_acceptance_decision(run_id, reviewer="parent")
+    report = agent.subagents.write_acceptance_review_report(
+        run_ids=[run_id],
+        options=AcceptanceReviewOptions(execute_tests=True, test_timeout_seconds=10),
+        reviewer="parent-tests",
+    )
+    second_decision = agent.subagents.plan_parent_acceptance(run_id)
+    applied = agent.subagents.apply_parent_acceptance_decision(run_id, reviewer="parent")
+    return {
+        "first_decision": first_decision,
+        "blocked_apply": blocked_apply,
+        "report": report,
+        "second_decision": second_decision,
+        "applied": applied,
+    }
+
+
+# LLM: _write_parent_acceptance_evidence gives normal acceptance enough verifier evidence after real tests pass.
+# 函数用途: 写入一条可追踪 evidence packet，避免父级验收只依赖 worker output 自述。
+def _write_parent_acceptance_evidence(agent: SimpleAgent, task) -> None:
+    evidence_path = Path(task.reports_dir) / "business-evidence.md"
+    evidence_path.write_text("business output is present\n", encoding="utf-8")
+    task.evidence.append(
+        VerificationEvidence(
+            kind="file_check",
+            summary="business output exists",
+            path="business-output.txt",
+            ok=True,
+        )
+    )
+    task.evidence_packets.append(
+        EvidencePacket(
+            id="packet-business-output",
+            claim="business output exists",
+            checked_scope="business-output.txt",
+            evidence_refs=[str(evidence_path)],
+            artifact_refs=["business-output.txt"],
+            confidence=0.9,
+        )
+    )
+    agent.subagents.save(task)
 
 
 # LLM: _write_compact_state_files supplies explicit work-state facts for action guard auto mode.
@@ -133,12 +242,12 @@ def _write_compact_archives(root: Path, run_id: str) -> None:
 
 # LLM: _write_parent_acceptance_output makes parent policy recommend run_tests without executing them.
 # 函数用途: 写入 worker output 和 runner parse record，供父级验收 controller 产生 run_tests 建议。
-def _write_parent_acceptance_output(task) -> None:
+def _write_parent_acceptance_output(task, *, tests: list[dict[str, object]] | None = None) -> None:
     output = {
         "run_id": task.id,
         "status": "AWAITING_ACCEPTANCE",
         "summary": "worker says tests are ready",
-        "tests": [{"name": "unit", "validation_method": "command", "command": "python -m pytest -q"}],
+        "tests": tests or [{"name": "unit", "validation_method": "command", "command": "python -m pytest -q"}],
         "artifacts": [],
         "patches": [],
         "blockers": [],

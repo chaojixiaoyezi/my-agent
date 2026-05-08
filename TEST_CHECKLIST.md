@@ -147,8 +147,10 @@
 - [ ] `--apply --execute-runners` 才会推进真实 runner，并可能消耗 API
 - [ ] dispatch 顺序保持为 due-check / action apply / capability route / runner / patch review / acceptance
 - [ ] dispatch apply 后能把可验收 run 收口到 `DONE/VERIFIED`
+- [ ] acceptance dispatch record 可展示 parent acceptance auto-policy 的 ref、decision、action、would_execute、executed，且 executed 仍为 false
 - [ ] `subagents-dispatch --watch --max-cycles 1 --interval 0` 能安全退出
 - [ ] watch 模式会写 heartbeat、watch 报告和 watch 日志
+- [ ] watch 只引用本轮 dispatch report/Markdown，不在 watch 层重新执行 auto-policy、tests、apply 或 rescue
 - [ ] watch lock 会阻止第二个父代理同时运行
 - [ ] `--planner` 在有 active/pending/stalled/needs-intervention 时会调用父代理 LLM
 - [ ] planner gate 不允许有待处理事项时只返回 `HEARTBEAT_OK`
