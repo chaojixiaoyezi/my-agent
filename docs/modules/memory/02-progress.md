@@ -207,3 +207,7 @@
 - 新增 `memory-artifact-read <artifact_ref>`，只读取 tool output index 已登记 artifact；未登记普通文件会返回 `artifact_not_registered`，不打印正文。
 - 新增 `read_artifact` 工具，模型只能通过 artifact path/hash/call_id 显式读取正文切片；默认 `max_chars=4000`，`max_chars=0` 表示读取完整正文。
 - artifact reader 会校验路径仍在 `memory_archive/artifacts/tool_outputs/` 下，并校验 artifact content sha256，避免把 artifact ref 变成任意文件读取后门。
+
+## 2026-05-08 artifact explicit read CI follow-up
+- 补齐 `artifact_reader.py` 私有 helper 的双层用途注释，符合 code-size 脚本对产品代码可维护性的检查要求。
+- 该修复只补充 reader helper 的边界说明和入口导入排序，不改变 `memory-artifact-read` / `read_artifact` 的 refs-only 读取边界。

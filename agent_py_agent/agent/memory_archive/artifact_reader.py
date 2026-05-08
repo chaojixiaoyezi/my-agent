@@ -153,10 +153,14 @@ def _error_payload(error_code: str, artifact_ref: str, message: str) -> dict[str
     }
 
 
+# LLM: _tool_output_root returns the only directory where tool-output artifact bodies may live.
+# 函数用途: 生成 workspace 内固定 tool_outputs 目录，供 index、路径边界和读取逻辑共用。
 def _tool_output_root(root: Path) -> Path:
     return root / "memory_archive" / "artifacts" / "tool_outputs"
 
 
+# LLM: _is_under_allowed_root prevents registered artifact paths from escaping the trusted artifact directory.
+# 函数用途: 判断 artifact 文件是否仍在允许目录下，阻止绝对路径或 .. 越界读取。
 def _is_under_allowed_root(path: Path, root: Path) -> bool:
     try:
         path.resolve(strict=False).relative_to(root.resolve(strict=False))
@@ -165,9 +169,13 @@ def _is_under_allowed_root(path: Path, root: Path) -> bool:
         return False
 
 
+# LLM: _looks_like_path decides whether a ref should also be compared as a filesystem path.
+# 函数用途: 区分 sha/call_id 这类纯标识和 path-like ref，避免把普通字符串都当路径解析。
 def _looks_like_path(value: str) -> bool:
     return any(mark in value for mark in ("/", "\\")) or value.endswith(".json")
 
 
+# LLM: _sha256_text provides stable content verification for explicit artifact body reads.
+# 函数用途: 计算 artifact 正文 UTF-8 sha256，用来核对 index/payload 元数据。
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
