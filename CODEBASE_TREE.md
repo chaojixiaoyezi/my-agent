@@ -51,7 +51,7 @@ agent_py_agent/
 |   |   |-- services/                          # 日志分析服务层通用 coercion/normalization
 |   |   |-- storage/                           # 日志存储和查询 projection
 |   |   `-- tools/                             # agent 可调用的日志查询/trace/hunt 工具
-|   |-- memory_archive/                       # raw archive、task/run workspace、compact apply/resume/handoff/action-guard/auto/suggest/subagent-owner refs、memory gate
+|   |-- memory_archive/                       # raw archive、task/run workspace、runtime facts、compact apply/resume/handoff/action-guard/auto/suggest/subagent-owner refs、memory gate
 |   |   |-- query/                             # archive 查询/filter/payload 构造
 |   |   |-- runtime/                           # run-time archive hook 和事件同步
 |   |   `-- snapshots/                         # 快照模型和 snapshot IO
@@ -184,7 +184,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- memory.py                          # 记忆兼容入口，真实实现已拆到 memory_store/
 |   |   |-- memory_settings.py                 # memory 配置安全解析兼容入口，真实实现已拆到 settings/memory.py
 |   |   |-- memory_store/                      # 长期记忆存储，当前是 JSONL + LocalStore 索引
-|   |   |-- memory_archive/                    # raw/hook/snapshot、runtime workspace、schema v2、control-plane query、tool-output artifacts 和非破坏性 compact apply/resume/subagent-owner refs
+|   |   |-- memory_archive/                    # raw/hook/snapshot、runtime workspace/facts、schema v2、control-plane query、tool-output artifacts 和非破坏性 compact apply/resume/subagent-owner refs
 |   |   |-- memory_routing/                    # 长期规则索引化路由，负责 MEMORY -> index -> authority file 的确定性匹配
 |   |   |-- observability/                     # 未来 request_id、耗时、状态、错误码、metrics、trace 目录
 |   |   |   `-- user_space/                    # 用户数据隔离：路径解析、目录管理、迁移工具
@@ -233,6 +233,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |       |-- test_log_analysis_query.py         # 本地日志查询、evidence 和 hunting tool 测试
 |       |-- test_memory_archive.py             # 压缩前快照、raw 冷归档、留存策略和 token 估算测试
 |       |-- test_memory_archive_runtime.py     # run turn 冷归档 helper、稳定 event_id/hash 和工具元数据测试
+|       |-- test_memory_compact.py              # compact apply/resume、handoff、completion prompt 和手动 fact-write 闭环测试
 |       |-- test_memory_compact_auto.py        # 自动 compact/resume 协调器的 plan-only 和 action guard 停车测试
 |       |-- test_memory_cli.py                 # memory-route / memory-doctor CLI 可见诊断测试
 |       |-- test_memory_config.py              # memory 配置安全默认、非法值回退和 warning receipt 测试

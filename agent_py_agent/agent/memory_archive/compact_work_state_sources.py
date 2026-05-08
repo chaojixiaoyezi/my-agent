@@ -51,7 +51,13 @@ def build_work_state_field_sources(request: WorkStateFieldSourceRequest) -> Work
 def _candidate_fact_roots(request: WorkStateFieldSourceRequest) -> list[Path]:
     workspace = Path(str(request.plan["workspace_root"]))
     scope = request.plan.get("scope", {}) if isinstance(request.plan.get("scope"), dict) else {}
-    ids = _dedupe([str(scope.get("task_id") or ""), str(scope.get("run_id") or ""), *request.source_state["task_refs"]])
+    ids = _dedupe([
+        str(scope.get("request_id") or ""),
+        str(scope.get("session_id") or ""),
+        str(scope.get("task_id") or ""),
+        str(scope.get("run_id") or ""),
+        *request.source_state["task_refs"],
+    ])
     roots = [workspace, *(_path_root(workspace, item) for item in request.source_state["content_paths"])]
     for item_id in ids:
         roots.extend(_id_roots(workspace, item_id))
@@ -66,6 +72,7 @@ def _id_roots(workspace: Path, item_id: str) -> list[Path]:
     return [
         workspace / "subagents" / item_id,
         workspace / "tasks" / item_id,
+        workspace / "memory_archive" / "runtime_facts" / item_id,
         *sorted((workspace / "tasks").glob(f"*/agents/{item_id}")),
     ]
 

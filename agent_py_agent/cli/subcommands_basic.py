@@ -35,6 +35,7 @@ from .memory_artifact_commands import cmd_memory_artifact_read
 from .memory_commands import cmd_memory_route
 from .memory_compact_commands import cmd_memory_compact
 from .memory_doctor import cmd_memory_doctor
+from .memory_fact_commands import cmd_memory_fact_write
 
 
 # LLM: _add_capability_config_arg 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
@@ -158,6 +159,21 @@ def _add_archive_resume_args(parser) -> None:
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
 
 
+# LLM: _add_memory_fact_write_args registers the explicit completion-fact write surface.
+# 函数用途: 配置 memory-fact-write 参数，让用户手动补齐 compact resume 缺失字段。
+def _add_memory_fact_write_args(parser) -> None:
+    parser.add_argument("--fact-id", default="", help="事实源目录名；通常使用 request_id/session_id/task_id/run_id")
+    parser.add_argument("--from-compact", dest="from_compact", default="", help="可选：从 compact apply 读取目标和下一步")
+    parser.add_argument("--compact-owner-type", default="main_agent", help="compact owner 类型；与 memory-resume 保持一致")
+    parser.add_argument("--compact-owner-id", default="", help="compact owner 标识；与 memory-resume 保持一致")
+    parser.add_argument("--goal", default="", help="可选：当前任务目标；未传时尝试从 --from-compact handoff 读取")
+    parser.add_argument("--next-action", action="append", default=[], help="可重复：恢复后的下一步动作")
+    parser.add_argument("--acceptance", action="append", default=[], help="可重复：用户确认的验收条件")
+    parser.add_argument("--constraint", action="append", default=[], help="可重复：用户确认的约束/禁止事项")
+    parser.add_argument("--latest-test", action="append", default=[], help="可重复：最近已跑或必须跑的测试状态")
+    parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+
+
 # LLM: _add_memory_compact_args 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
 # 函数用途: 完成本模块中的转换、分发或状态整理，供相邻流程继续使用。
 def _add_memory_compact_args(parser) -> None:
@@ -196,6 +212,12 @@ def add_memory_subcommands(sub: argparse._SubParsersAction) -> None:
     memory_doctor.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     memory_doctor.set_defaults(func=cmd_memory_doctor)
 
+    _add_memory_archive_subcommands(sub)
+
+
+# LLM: _add_memory_archive_subcommands keeps archive/compact CLI registration grouped and size-safe.
+# 函数用途: 注册 archive search/resume/artifact/fact/compact 命令，避免主 memory 注册函数继续膨胀。
+def _add_memory_archive_subcommands(sub: argparse._SubParsersAction) -> None:
     memory_archive_list = sub.add_parser("memory-archive-list", help="列出 memory raw/hook 归档记录")
     memory_archive_list.add_argument("--layer", choices=["all", "raw", "hook"], default="all", help="查看哪一层归档")
     memory_archive_list.add_argument("--date", help="只查看某一天，格式 YYYY-MM-DD")
@@ -220,6 +242,10 @@ def add_memory_subcommands(sub: argparse._SubParsersAction) -> None:
     memory_artifact_read.add_argument("--max-chars", type=int, default=4000, help="最多读取多少字符；0 表示读取全部")
     memory_artifact_read.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     memory_artifact_read.set_defaults(func=cmd_memory_artifact_read)
+
+    memory_fact_write = sub.add_parser("memory-fact-write", help="写入用户确认的 compact resume 补全事实")
+    _add_memory_fact_write_args(memory_fact_write)
+    memory_fact_write.set_defaults(func=cmd_memory_fact_write)
 
     memory_compact = sub.add_parser("memory-compact", help="预演 memory compact 计划")
     _add_memory_compact_args(memory_compact)

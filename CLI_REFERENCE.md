@@ -152,7 +152,8 @@ Ctrl+C
 | `memory-archive-search` | 按字段搜索 raw/hook 归档 | 否 | 否 |
 | `memory-resume` | 从归档、LocalStore 和任务目录生成恢复线索 | 否 | 否 |
 | `memory-artifact-read` | 显式读取已登记 tool-output artifact 正文 | 否 | 否 |
-| `memory-compact` | 只读预演 memory compact 计划 | 否 | 否 |
+| `memory-fact-write` | 写入用户确认的 compact resume 补全事实源 | 是 | 否 |
+| `memory-compact` | 预演 memory compact 计划；`--apply` 生成非破坏性恢复产物 | `--apply` 时写 | 否 |
 | `local-store-status` | 查看本地事实源状态 | 否 | 否 |
 | `local-search` | 搜索 SQLite/FTS5 本地事实源 | 否 | 否 |
 | `local-index-memory` | 把旧 JSONL 记忆补建到本地事实源 | 是 | 否 |
@@ -410,6 +411,8 @@ compact 恢复输出还会包含 `compact_resume_handoff`：里面稳定展示�
 
 `--compact-resume-mode auto` 会启用更严格的 Action Guard：缺 acceptance、constraints、latest tests、refs 或 self-check 失败时会返回非 0，防止无人值守状态继续偏航。字段齐全、refs 存在且 self-check 通过时会返回 `allow_automated_continue` / `allowed_to_continue=true`，但仍标记 `automatic_tool_execution=none`，表示只允许后续策略接着判断，不会由 resume 命令直接跑工具。默认 `manual` 只生成恢复材料和人工确认提示。
 
+缺 work state 字段时，compact 恢复输出会包含 `completion_prompt`。这会给出可复制的“验收条件/约束/测试”模板；模板本身不会自动写文件。用户确认这些事实后，可以用 `memory-fact-write` 写入 scope 内的 `runtime_facts/<fact_id>/task.json`，再重新按同一个 request/session/task/run scope 执行 `memory-compact --apply`。
+
 普通 `run` 在上下文风险达到阈值时会额外打印 `compact_suggestion` 和 `compact_auto`。`compact_suggestion` 给出 `memory-compact --dry-run`、`memory-compact --apply` 和 `memory-resume --from-compact` 的建议命令；`compact_auto` 显示自动协调器当前停在 `needs_user_confirmation`、`blocked_after_action_guard` 等哪一步。默认只是 plan-only 提醒，不会自动 apply、自动 resume 或继续执行工具。
 
 JSON 输出里会额外包含 `brief`：
@@ -466,6 +469,28 @@ my-agent memory-artifact-read <call_id> --max-chars 0
 | `artifact_ref` | 必填 | 来自恢复包、manifest 或 tool output index 的 artifact path/hash/call_id。 |
 | `--offset` | `0` | 从正文第几个字符开始读取。 |
 | `--max-chars` | `4000` | 最多读取多少字符；`0` 表示读取全部。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `memory-fact-write`
+
+```powershell
+my-agent memory-fact-write --fact-id request-xxx --acceptance "pytest passes" --constraint "do not touch user config" --latest-test "python3 -m pytest -q"
+my-agent memory-fact-write --from-compact apply-xxx --acceptance "..." --constraint "..." --latest-test "..." --json
+```
+
+把用户已经确认的 compact resume 补全事实写入 `memory_archive/runtime_facts/<fact_id>/task.json`。它用于半自动 compact 闭环：`memory-resume --from-compact --compact-resume-mode auto` 如果因为缺 `acceptance`、`constraints`、`latest_tests` 阻断，先让用户补齐事实，再写入这个事实源，然后重新执行同一 scope 的 `memory-compact --apply`。
+
+这个命令只保存显式传入的事实，不解析模型回复，不猜验收条件。`--from-compact` 只用于读取目标、下一步和 scope；如果没有传 `--fact-id`，命令会优先从 compact scope 中选择 `request_id`、`session_id`、`task_id`、`run_id` 作为事实源目录名。为了让后续 apply 能读到它，重新 compact 时要使用同一个 scope，例如同一个 `--request-id`。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--fact-id <id>` | - | 事实源目录名；通常使用 request_id/session_id/task_id/run_id。 |
+| `--from-compact <apply_id>` | - | 可选：从 compact apply 的 handoff 读取目标、下一步和 scope。 |
+| `--goal <text>` | - | 可选：当前任务目标；未传时尝试从 compact handoff 读取。 |
+| `--next-action <text>` | 可重复 | 恢复后的下一步动作。 |
+| `--acceptance <text>` | 可重复 | 用户确认的验收条件。 |
+| `--constraint <text>` | 可重复 | 用户确认的约束或禁止事项。 |
+| `--latest-test <text>` | 可重复 | 最近已跑或必须跑的测试状态。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 
 ## `memory-compact`

@@ -290,6 +290,7 @@ def _print_memory_resume_from_compact(payload: dict[str, Any], *, json_output: b
     print(f"consistency_status={payload['consistency_report']['status']}")
     print(f"action_guard={payload['action_guard']['status']}")
     _print_compact_handoff(payload.get("handoff", {}))
+    _print_compact_completion_prompt(payload.get("completion_prompt", {}))
     print("Recommended Reads")
     for path in payload["recommended_read_paths"] or ["none"]:
         print(f"- {path}")
@@ -311,6 +312,18 @@ def _print_compact_handoff(handoff: dict[str, Any]) -> None:
     _print_named_items("Acceptance", handoff.get("acceptance", {}).get("items", []))
     _print_named_items("Constraints", handoff.get("constraints", {}).get("items", []))
     _print_named_items("Latest Tests", handoff.get("latest_tests", {}).get("items", []))
+
+
+# LLM: _print_compact_completion_prompt makes blocked resume actionable without writing facts automatically.
+# 函数用途: 当 compact resume 缺工作状态字段时，输出可复制补全模板和缺失字段列表。
+def _print_compact_completion_prompt(completion: dict[str, Any]) -> None:
+    if completion.get("status") != "needs_user_input":
+        return
+    print("Completion Prompt")
+    print("- missing_fields=" + json.dumps(completion.get("missing_fields", []), ensure_ascii=False))
+    template = str(completion.get("prompt_template") or "")
+    if template:
+        print(template)
 
 
 # LLM: _print_named_items keeps compact handoff subsections compact and stable for CLI users.
