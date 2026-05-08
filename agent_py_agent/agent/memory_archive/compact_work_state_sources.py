@@ -6,6 +6,7 @@ from __future__ import annotations
 """bounded fact-source scanner for compact work-state snapshots."""
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -69,12 +70,23 @@ def _candidate_fact_roots(request: WorkStateFieldSourceRequest) -> list[Path]:
 def _id_roots(workspace: Path, item_id: str) -> list[Path]:
     if not item_id:
         return []
+    task_agent_roots = [
+        path
+        for path in sorted((workspace / "tasks").glob("*/agents/*"))
+        if path.is_dir() and path.name == item_id
+    ]
     return [
         workspace / "subagents" / item_id,
         workspace / "tasks" / item_id,
-        workspace / "memory_archive" / "runtime_facts" / item_id,
-        *sorted((workspace / "tasks").glob(f"*/agents/{item_id}")),
+        workspace / "memory_archive" / "runtime_facts" / _safe_runtime_fact_id(item_id),
+        *task_agent_roots,
     ]
+
+
+# LLM: _safe_runtime_fact_id mirrors runtime_fact_source directory sanitization for scoped request IDs.
+# 函数用途: 将 request/session/task/run id 按字面目录名解析，避免 glob 元字符扩大扫描范围。
+def _safe_runtime_fact_id(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-") or "run"
 
 
 # LLM: _field_items gathers field values from exact files and task JSON without broad filesystem crawling.

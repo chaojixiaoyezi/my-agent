@@ -134,6 +134,28 @@ def test_run_auto_compact_apply_stops_after_continue_packet(tmp_path):
     assert (tmp_path / "memory_archive" / "compact_applies").exists()
 
 
+def test_run_no_save_blocks_opt_in_auto_compact_apply(tmp_path):
+    """LLM: Tests that save=False remains a hard persistence boundary for auto compact apply."""
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent.config.memory_compact_context_window_tokens = 20
+    agent.config.memory_compact_auto_allow_apply = True
+
+    result = agent.run(
+        "验收: auto compact packet exists\n约束: no persistence during no-save\n测试: focused compact runtime test",
+        save=False,
+        request_id="req-no-save-auto-compact",
+        run_id="run-no-save-auto-compact",
+        task_id="run-no-save-auto-compact",
+    )
+
+    assert result.memory_compact_suggested is True
+    assert result.memory_compact_auto_status == "needs_user_confirmation"
+    assert result.memory_compact_auto_next_action == "ask_user_before_apply"
+    assert result.memory_compact_auto_allowed_to_continue is False
+    assert result.memory_compact_auto_apply_id == ""
+    assert not (tmp_path / "memory_archive" / "compact_applies").exists()
+
+
 def test_run_no_save_does_not_write_raw_archive(tmp_path):
     """LLM: Tests that agent.run() with save=False does not write any raw archive files."""
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
