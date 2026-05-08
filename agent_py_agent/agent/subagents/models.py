@@ -35,12 +35,14 @@ from .model_runtime import (
 )
 
 # LLM: 通过稳定门面导出任务树控制面数据类，避免调用方绑定内部文件。
+# LLM: RuntimeIdentity is re-exported here so callers keep using the stable subagent model facade.
 from .model_task import (
     EvidencePacket,
     FailureHandoff,
     Finding,
     InheritanceManifest,
     LearningCandidate,
+    RuntimeIdentity,
     SecuritySignal,
     StatusReport,
     SubAgentTask,
@@ -144,6 +146,7 @@ __all__ = [
     "InheritanceManifest",
     "LearningCandidate",
     "QualityContract",
+    "RuntimeIdentity",
     "SecuritySignal",
     "SubAgentCard",
     "SubAgentBoardOptions",

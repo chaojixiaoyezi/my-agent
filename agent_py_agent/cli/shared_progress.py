@@ -58,6 +58,19 @@ def format_takeover_view_lines(panels: list[dict[str, Any]]) -> list[str]:
             lines.append(f"  - failure_handoff={entry['failure_handoff_ref']}")
         if entry.get("takeover_readiness_ref"):
             lines.append(f"  - takeover_readiness={entry['takeover_readiness_ref']}")
+        identity = entry.get("runtime_identity") if isinstance(entry.get("runtime_identity"), dict) else {}
+        memory = entry.get("memory_scope") if isinstance(entry.get("memory_scope"), dict) else {}
+        config = entry.get("config_scope") if isinstance(entry.get("config_scope"), dict) else {}
+        if identity or memory or config:
+            lines.append(
+                f"  - principal={identity.get('effective_principal_id') or '-'} "
+                f"conversation={identity.get('conversation_id') or '-'}"
+            )
+            lines.append(
+                f"  - memory={memory.get('namespace') or '-'} "
+                f"config={config.get('scope') or '-'} "
+                f"global_write={config.get('writes_global_config', False)}"
+            )
         for index, ref in enumerate(list(entry.get("recommended_read_order", []) or [])[:5]):
             lines.append(f"  - read_order[{index}]={ref}")
     return lines
@@ -128,6 +141,9 @@ def _run_payload(run: Any) -> dict[str, Any]:
         "latest_summary": run.latest_summary,
         "failure_handoff_ref": str(run.metadata.get("failure_handoff_ref") or ""),
         "takeover_readiness_ref": str(run.metadata.get("takeover_readiness_ref") or ""),
+        "runtime_identity": _dict_metadata(run, "runtime_identity"),
+        "memory_scope": _dict_metadata(run, "memory_scope"),
+        "config_scope": _dict_metadata(run, "config_scope"),
     }
 
 
@@ -147,6 +163,9 @@ def _takeover_entries(runs: list[Any]) -> list[dict[str, Any]]:
             "latest_summary": run.latest_summary,
             "failure_handoff_ref": failure_ref,
             "takeover_readiness_ref": readiness_ref,
+            "runtime_identity": _dict_metadata(run, "runtime_identity"),
+            "memory_scope": _dict_metadata(run, "memory_scope"),
+            "config_scope": _dict_metadata(run, "config_scope"),
             "recommended_read_order": _read_takeover_read_order(readiness_ref, failure_ref),
         })
     return entries
@@ -161,6 +180,13 @@ def _takeover_entries_from_panels(panels: list[dict[str, Any]]) -> list[dict[str
         if isinstance(raw_entries, list):
             entries.extend(item for item in raw_entries if isinstance(item, dict))
     return entries
+
+
+# LLM: _dict_metadata lets status expose scope summaries while rejecting loose non-dict metadata.
+# 函数用途: 只把控制面里已结构化的身份/记忆/配置 scope 透出到 CLI，不读取外部文件。
+def _dict_metadata(run: Any, key: str) -> dict[str, Any]:
+    value = run.metadata.get(key)
+    return dict(value) if isinstance(value, dict) else {}
 
 
 # LLM: _read_takeover_read_order reads only the recovery packet JSON index, never artifact body refs.

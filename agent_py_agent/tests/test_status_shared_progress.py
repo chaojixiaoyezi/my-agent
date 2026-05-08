@@ -15,11 +15,11 @@ from agent_py_agent.cli.subagents import cmd_subagents
 def test_status_payload_surfaces_shared_progress_and_failure_handoff(tmp_path) -> None:
     store = LocalStore(tmp_path / "local.db")
     manager = SubAgentManager(tmp_path / "subagents", local_store=store)
-    task = manager.create_run(goal="处理失败任务", thought="留下进度面板线索。", plan=["保存"])
+    task = manager.create_run(goal="handle failed task", thought="keep refs only", plan=["save"])
     task.status = "FAILED"
     task.failure_type = "tool_output_context_overflow"
-    task.latest_summary = "工具输出太大，已经停止展开。"
-    task.current_step = "等待接管"
+    task.latest_summary = "tool output too large"
+    task.current_step = "waiting takeover"
     artifact_path = tmp_path / "subagents" / task.id / "reports" / "large-output.txt"
     artifact_path.write_text("STATUS_TAKEOVER_VIEW_MUST_NOT_INLINE_ARTIFACT_BODY\n", encoding="utf-8")
     task.artifact_refs = [str(artifact_path)]
@@ -40,29 +40,7 @@ def test_status_payload_surfaces_shared_progress_and_failure_handoff(tmp_path) -
 
 
 def test_status_human_prints_shared_progress_failure_handoff(tmp_path, capsys) -> None:
-    panel = {
-        "root_task_id": "root-1",
-        "run_count": 2,
-        "blocked_count": 1,
-        "failure_handoff_refs": ["reports/failure_handoff.json"],
-        "takeover_readiness_refs": ["reports/takeover_readiness.json"],
-        "takeover_entries": [
-            {
-                "run_id": "run-1",
-                "status": "FAILED",
-                "current_step": "等待接管",
-                "latest_summary": "工具输出过大",
-                "failure_handoff_ref": "reports/failure_handoff.json",
-                "takeover_readiness_ref": "reports/takeover_readiness.json",
-                "recommended_read_order": [
-                    "reports/takeover_readiness.json",
-                    "reports/failure_handoff.json",
-                    "reports/checkpoint.json",
-                    "reports/artifacts/manifest.jsonl",
-                ],
-            }
-        ],
-    }
+    panel = _takeover_panel_with_scope("FAILED")
     ctx = StatusPrintContext(
         agent=SimpleNamespace(config=SimpleNamespace(agent_name="demo", subagent_board_limit=5), root=tmp_path),
         paths=SimpleNamespace(root=tmp_path),
@@ -84,31 +62,21 @@ def test_status_human_prints_shared_progress_failure_handoff(tmp_path, capsys) -
     assert "Shared Progress" in output
     assert "root-1 runs=2 blocked=1 failure_handoffs=1 takeover_packets=1" in output
     assert "Takeover View" in output
-    assert "run-1 status=FAILED step=等待接管" in output
+    assert "run-1 status=FAILED step=waiting takeover" in output
+    assert "principal=employee-1 conversation=feishu-dm-1" in output
+    assert "memory=conversation:feishu-dm-1 config=conversation_overlay global_write=False" in output
     assert "read_order[1]=reports/failure_handoff.json" in output
 
 
 def test_subagents_board_prints_shared_progress_panel(tmp_path) -> None:
     args = SimpleNamespace(limit=10, all=False, status=None, owner=None, root_id=None)
-    panel = {
-        "root_task_id": "root-1",
-        "run_count": 2,
-        "blocked_count": 1,
-        "failure_handoff_refs": ["reports/failure_handoff.json"],
-        "takeover_readiness_refs": ["reports/takeover_readiness.json"],
-        "takeover_entries": [
-            {
-                "run_id": "run-1",
-                "status": "BLOCKED",
-                "current_step": "等待接管",
-                "latest_summary": "需要父级处理",
-                "failure_handoff_ref": "reports/failure_handoff.json",
-                "takeover_readiness_ref": "reports/takeover_readiness.json",
-                "recommended_read_order": ["reports/takeover_readiness.json", "reports/failure_handoff.json"],
-            }
-        ],
-    }
-    board = SimpleNamespace(summary={"total": 0}, hot_list=[], recent=[], items=[], shared_progress=[panel])
+    board = SimpleNamespace(
+        summary={"total": 0},
+        hot_list=[],
+        recent=[],
+        items=[],
+        shared_progress=[_takeover_panel_with_scope("BLOCKED")],
+    )
     agent = SimpleNamespace(subagents=SimpleNamespace(write_board=lambda options: board, workspace=tmp_path))
 
     stdout = StringIO()
@@ -120,7 +88,7 @@ def test_subagents_board_prints_shared_progress_panel(tmp_path) -> None:
     assert "Shared Progress" in stdout.getvalue()
     assert "root-1 runs=2 blocked=1 failure_handoffs=1 takeover_packets=1" in stdout.getvalue()
     assert "Takeover View" in stdout.getvalue()
-    assert "run-1 status=BLOCKED step=等待接管" in stdout.getvalue()
+    assert "run-1 status=BLOCKED step=waiting takeover" in stdout.getvalue()
 
 
 def _status_payload_context(tmp_path, store, manager, board) -> StatusPayloadContext:
@@ -143,6 +111,37 @@ def _status_payload_context(tmp_path, store, manager, board) -> StatusPayloadCon
         active_work_summary=None,
         request_counts={},
     )
+
+
+def _takeover_panel_with_scope(status: str) -> dict:
+    return {
+        "root_task_id": "root-1",
+        "run_count": 2,
+        "blocked_count": 1,
+        "failure_handoff_refs": ["reports/failure_handoff.json"],
+        "takeover_readiness_refs": ["reports/takeover_readiness.json"],
+        "takeover_entries": [_takeover_entry_with_scope(status)],
+    }
+
+
+def _takeover_entry_with_scope(status: str) -> dict:
+    return {
+        "run_id": "run-1",
+        "status": status,
+        "current_step": "waiting takeover",
+        "latest_summary": "tool output too large",
+        "failure_handoff_ref": "reports/failure_handoff.json",
+        "takeover_readiness_ref": "reports/takeover_readiness.json",
+        "runtime_identity": {"effective_principal_id": "employee-1", "conversation_id": "feishu-dm-1"},
+        "memory_scope": {"namespace": "conversation:feishu-dm-1"},
+        "config_scope": {"scope": "conversation_overlay", "writes_global_config": False},
+        "recommended_read_order": [
+            "reports/takeover_readiness.json",
+            "reports/failure_handoff.json",
+            "reports/checkpoint.json",
+            "reports/artifacts/manifest.jsonl",
+        ],
+    }
 
 
 def _patch_board_agent(agent):

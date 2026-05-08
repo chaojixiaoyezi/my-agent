@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from agent_py_agent.agent.local_store import LocalStore
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.models import SecuritySignal
+from agent_py_agent.agent.subagents.models import RuntimeIdentity, SecuritySignal
 
 
 def test_subagent_save_preserves_security_signal_reserve_fields(tmp_path) -> None:
@@ -37,3 +37,44 @@ def test_subagent_save_preserves_security_signal_reserve_fields(tmp_path) -> Non
     assert projected.metadata["security_review_required"] is True
     assert projected.metadata["security_signal_count"] == 1
     assert projected.metadata["security_signal_types"] == ["prompt_injection_suspected"]
+
+
+def test_subagent_save_preserves_runtime_identity_memory_and_config_scope_reserve_fields(tmp_path) -> None:
+    store = LocalStore(tmp_path / "local.db")
+    manager = SubAgentManager(tmp_path / "subagents", local_store=store)
+    task = manager.create_run(
+        goal="处理员工会话里的大输出恢复",
+        thought="只记录隔离边界，不启用员工长期记忆或全局配置写入。",
+        plan=["保存 scope", "投影到控制面"],
+    )
+    task.runtime_identity = RuntimeIdentity(
+        service_owner_id="owner-admin",
+        requester_id="employee-1",
+        effective_principal_id="employee-1",
+        conversation_id="feishu-dm-1",
+        root_run_id="root-chat-1",
+        memory_namespace="conversation:feishu-dm-1",
+        conversation_memory_policy="not_enabled",
+        promotion_policy="explicit_review",
+        config_scope="conversation_overlay",
+        config_overlay_ref="overlays/feishu-dm-1.json",
+        config_promotion_policy="admin_approval_required",
+    )
+
+    manager.save(task)
+
+    loaded = manager.load(task.id)
+    projected = store.get_agent_run(task.id)
+
+    assert loaded.runtime_identity.requester_id == "employee-1"
+    assert loaded.runtime_identity.memory_namespace == "conversation:feishu-dm-1"
+    assert projected is not None
+    assert projected.metadata["runtime_identity"]["service_owner_id"] == "owner-admin"
+    assert projected.metadata["runtime_identity"]["effective_principal_id"] == "employee-1"
+    assert projected.metadata["memory_scope"]["namespace"] == "conversation:feishu-dm-1"
+    assert projected.metadata["memory_scope"]["conversation_memory_policy"] == "not_enabled"
+    assert projected.metadata["memory_scope"]["promotion_policy"] == "explicit_review"
+    assert projected.metadata["config_scope"]["scope"] == "conversation_overlay"
+    assert projected.metadata["config_scope"]["overlay_ref"] == "overlays/feishu-dm-1.json"
+    assert projected.metadata["config_scope"]["promotion_policy"] == "admin_approval_required"
+    assert projected.metadata["config_scope"]["writes_global_config"] is False

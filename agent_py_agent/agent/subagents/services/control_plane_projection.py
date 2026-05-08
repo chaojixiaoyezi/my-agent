@@ -76,6 +76,9 @@ def _agent_run_metadata(task: SubAgentTask) -> dict[str, object]:
         metadata["security_review_required"] = bool(task.security_review_required)
         metadata["security_signal_count"] = len(task.security_signals)
         metadata["security_signal_types"] = list(dict.fromkeys(security_signal_types))
+    scope_metadata = _runtime_scope_metadata(task)
+    if scope_metadata:
+        metadata.update(scope_metadata)
     if task.inheritance_manifest.source_run_id:
         metadata["inheritance_manifest_ref"] = task.inheritance_manifest_json
     if task.failure_handoff.run_id:
@@ -85,8 +88,38 @@ def _agent_run_metadata(task: SubAgentTask) -> dict[str, object]:
     return metadata
 
 
+# LLM: _runtime_scope_metadata projects scope fields without turning them into permissions.
+# 函数用途: 把员工/会话/记忆/配置隔离元数据暴露给控制面，默认不写全局配置。
+def _runtime_scope_metadata(task: SubAgentTask) -> dict[str, object]:
+    identity = getattr(task, "runtime_identity", None)
+    if not identity:
+        return {}
+    runtime_identity = {
+        "service_owner_id": identity.service_owner_id,
+        "requester_id": identity.requester_id,
+        "effective_principal_id": identity.effective_principal_id,
+        "conversation_id": identity.conversation_id,
+        "root_run_id": identity.root_run_id or task.root_id or task.id,
+    }
+    memory_scope = {
+        "namespace": identity.memory_namespace,
+        "conversation_memory_policy": identity.conversation_memory_policy or "not_enabled",
+        "promotion_policy": identity.promotion_policy or "explicit_review",
+        "task_memory_is_temporary": True,
+    }
+    config_scope = {
+        "scope": identity.config_scope or "run_override",
+        "overlay_ref": identity.config_overlay_ref,
+        "promotion_policy": identity.config_promotion_policy or "admin_approval_required",
+        "writes_global_config": False,
+    }
+    if not any(runtime_identity.values()) and not memory_scope["namespace"] and not config_scope["overlay_ref"]:
+        return {}
+    return {"runtime_identity": runtime_identity, "memory_scope": memory_scope, "config_scope": config_scope}
+
+
 # LLM: _agent_event_from_task appends an audit event for every save projection.
-# 函数用途: 从 SubAgentTask 构造 agent_events 的保存事件。
+# 函数用途: 写入运行保存事件；scope 信息保留在 run metadata，事件不复制权限边界。
 def _agent_event_from_task(task: SubAgentTask) -> AgentEventInput:
     root_task_id = task.root_id or task.id
     return AgentEventInput(

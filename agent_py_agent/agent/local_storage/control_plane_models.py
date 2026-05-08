@@ -98,6 +98,12 @@ class AgentTreeReport:
 @dataclass(frozen=True)
 class AgentRuntimeQueryContext:
     requester_run_id: str = ""
+    service_owner_id: str = ""
+    requester_id: str = ""
+    effective_principal_id: str = ""
+    conversation_id: str = ""
+    memory_namespace: str = ""
+    config_scope: str = ""
     root_task_id: str = ""
     target_run_id: str = ""
     scope: str = "root_tree"
