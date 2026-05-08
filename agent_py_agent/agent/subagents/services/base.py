@@ -73,6 +73,17 @@ def _iter_write_dir_matches(goal: str):
     )
 
 
+# LLM: _load_parent_task keeps inheritance manifest creation best-effort and non-blocking.
+# 函数用途: 读取父级任务快照，失败时返回 None，避免创建 child 因旧工单缺失而中断。
+def _load_parent_task(manager: Any, parent_id: str):
+    if not parent_id:
+        return None
+    try:
+        return manager.load(parent_id)
+    except FileNotFoundError:
+        return None
+
+
 # LLM: SubAgentBaseService 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 类用途: 封装subagent基础服务操作，把状态读写和错误处理收束在服务层；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
 class SubAgentBaseService:
@@ -170,6 +181,7 @@ class SubAgentBaseService:
     def _build_task(self, params: CreateRunParams, prepared: dict[str, object]) -> SubAgentTask:
         """Build SubAgentTask from params and prepared context."""
         from ..models import SubAgentTask
+        from ..services.inheritance_manifest import build_inheritance_manifest
         from ..services.persistence import (
             _normalize_context_manifest,
             _normalize_context_packs,
@@ -180,7 +192,7 @@ class SubAgentBaseService:
         now = prepared["now"]
         workflow_plan_dict = prepared["workflow_plan_dict"]
 
-        return SubAgentTask(
+        task = SubAgentTask(
             id=run_id,
             goal=params.goal,
             thought=params.thought,
@@ -207,6 +219,8 @@ class SubAgentBaseService:
             workflow_plan=workflow_plan_dict or {},
             **prepared["paths"],
         )
+        task.inheritance_manifest = build_inheritance_manifest(_load_parent_task(self.manager, params.parent_id), task)
+        return task
 
     # LLM: _finalize_task 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
     # 函数用途: 处理finalize任务相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。

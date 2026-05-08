@@ -67,6 +67,13 @@ def _work_order_report_paths(task_dir: Path) -> dict[str, str]:
     return {
         # LLM: status_report_json is the compact parent-visible progress snapshot.
         "status_report_json": str(reports_dir / "status_report.json"),
+        # LLM: inheritance manifest records parent/child context decisions without expanding context.
+        "inheritance_manifest_json": str(reports_dir / "inheritance_manifest.json"),
+        # LLM: failure handoff records warnings and recovery advice for takeover/rescue flows.
+        "failure_handoff_json": str(reports_dir / "failure_handoff.json"),
+        # LLM: takeover readiness is the fixed entrypoint for rescue/takeover refs.
+        "takeover_readiness_json": str(reports_dir / "takeover_readiness.json"),
+        "takeover_readiness_md": str(task_dir / "TAKEOVER_READINESS.md"),
         # LLM: checkpoint artifacts are compact-readable recovery facts, not transcripts.
         "checkpoint_json": str(reports_dir / "checkpoint.json"),
         "decision_ledger_json": str(reports_dir / "decision_ledger.json"),

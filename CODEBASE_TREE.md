@@ -38,7 +38,7 @@ agent_py_agent/
 |   |-- extensions/                           # 插件/扩展声明和加载边界
 |   |-- gateway_parts/                        # 文件协议 gateway：路径、队列、HTTP、worker、恢复、supervisor
 |   |-- io/                                   # 底层 JSONL/文件 IO 原语
-|   |-- local_storage/                        # LocalStore schema、records、events、search、maintenance
+|   |-- local_storage/                        # LocalStore schema、records、events、search、maintenance、agent runtime control-plane
 |   |-- log_analysis/                         # 日志分析接入、解析、查询、检测、case、派工和报告
 |   |   |-- agents/                            # 日志分析子代理合同和 prompt
 |   |   |-- analytics/                         # 检测器、规则、基线和特征提取
@@ -165,7 +165,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |   |-- daemon_control.py            # 守护进程控制：fork、 PID 文件、优雅关闭
 |   |   |   |-- http_service.py              # HTTP 服务：POST /ask、GET /result/<id>、GET /status、POST /stop
 |   |   |-- local_store.py                     # LocalStore 兼容组合入口，真实实现已拆到 local_storage/
-|   |   |-- local_storage/                     # LocalStore models/schema/records/search/events/maintenance
+|   |   |-- local_storage/                     # LocalStore models/schema/records/search/events/maintenance/control-plane
 |   |   |-- log_analysis/                      # 可选日志分析底座，负责安全日志接入、解析、查询、检测、case、报告和 analyst 派工
 |   |   |   |-- startup_recovery.py               # 启动时恢复检测，检测未完成的子代理任务和遗留 gateway 请求
 |   |   |   |-- models.py                      # 核心数据模型：Case/LogWorkOrder/SecurityCase/QueryResult/SecurityAlertV1 等
@@ -897,3 +897,30 @@ docs/
 
 - `agent_py_agent/tests/test_adaptive_retry.py`: 自适应重派测试（18 tests）
   - 测试自适应重派策略、任务拆分、自动拆分判断、拆分数量估算
+
+## 2026-05-08 Tree Update: Agent Runtime Control Plane
+
+- `agent_py_agent/agent/local_storage/control_plane_models.py`: 定义 agent run、agent event、task rollup、runtime query context 和任务树查询结果的数据结构，保留 `metadata` / `reserved` 给后续继承策略、共享面板和失败交接扩展。
+- `agent_py_agent/agent/local_storage/control_plane.py`: 给 LocalStore 增加控制面 API，支持 upsert run、记录事件、重建 rollup、查询 root task 树、查询子树、blocked runs 和带 requester/scope 的 runtime query。
+- `agent_py_agent/agent/local_storage/control_plane_panel.py`: 给 LocalStore 增加共享进度面板查询，把 runtime query、rollup、blocked runs 和 inheritance refs 组合成上级/接管代理可读状态包。
+- `agent_py_agent/agent/local_storage/control_plane_codec.py`: 集中维护控制面 SQLite SQL、参数组装和行转换，避免公开 mixin 因 SQL 细节膨胀。
+- `agent_py_agent/cli/shared_progress.py`: 给 `status` 和 `subagents` CLI 生成共享进度摘要，展示 blocked、failure handoff refs 和 takeover packet refs 数量，不读取正文。
+- `agent_py_agent/agent/agent_core/tool_output_failsafe.py`: 大工具输出写 artifact 前写 fail-safe recovery snapshot，只记录工具名、hash、大小和恢复建议。
+- `agent_py_agent/agent/agent_core/tool_context_reducer.py`: 大工具输出进入下一轮 live prompt 前只注入 artifact 摘要和 checkpoint refs，小输出仍保留原工具结果。
+- `agent_py_agent/agent/subagents/services/control_plane_projection.py`: 在 subagent 保存时把 task 当前状态投影到 LocalStore 控制面；它只做查询索引，不替代旧工单目录或 runtime workspace 事实源。
+- `agent_py_agent/agent/subagents/services/inheritance_manifest.py`: 创建 child task 时生成继承清单，记录 inherited / overridden / dropped 项；它是 audit-only，不自动扩大子代理上下文。
+- `agent_py_agent/agent/subagents/services/persistence_inheritance.py`: 负责继承清单的读取归一化和 `reports/inheritance_manifest.json` 写入，避免 persistence 主流程继续膨胀。
+- `agent_py_agent/agent/subagents/services/failure_handoff.py`: 生成失败交接记录，保存 warning、risk level、checkpoint refs、artifact/evidence refs、避坑建议和推荐下一步。
+- `agent_py_agent/agent/subagents/services/persistence_failure_handoff.py`: 负责失败交接记录的读取归一化和 `reports/failure_handoff.json` 写入，避免 persistence 主流程继续膨胀。
+- `agent_py_agent/agent/subagents/services/persistence_recovery_outputs.py`: 集中写入 checkpoint artifacts 和 takeover readiness 文件，让 persistence 主流程保持薄编排。
+- `agent_py_agent/agent/subagents/services/takeover_readiness.py`: 生成接管前必读包 `reports/takeover_readiness.json` 和 `TAKEOVER_READINESS.md`，只保存 refs、artifact manifest 元数据和读取顺序，不读取大正文。
+- `agent_py_agent/agent/subagents/services/persistence_security.py`: 负责 `SecuritySignal` 预留字段的读取归一化，避免 persistence 主流程继续膨胀；当前不执行安全策略。
+- `agent_py_agent/agent/subagents/model_task.py`: 新增 `SecuritySignal` 和 `security_review_required` 安全预留字段，用于记录安全劫持、安全欺骗、prompt injection、工具权限异常等可疑信号；当前只审计不拦截。
+- `agent_py_agent/tests/test_local_store_control_plane.py`: 覆盖 LocalStore 控制面表、rollup 计算、上级/中间子代理 runtime query，以及 `SubAgentPersistenceService.save()` 的投影写入路径。
+- `agent_py_agent/tests/test_local_store_shared_progress_panel.py`: 覆盖共享进度面板如何组合 runtime query、task rollup、blocked runs、inheritance manifest refs 和 takeover readiness refs。
+- `agent_py_agent/tests/test_subagent_inheritance_manifest.py`: 覆盖 parent/child 创建时的继承、覆盖、裁剪记录和 manifest JSON 落盘。
+- `agent_py_agent/tests/test_subagent_failure_handoff.py`: 覆盖失败/阻塞 run 保存时的 failure handoff JSON 落盘和 LocalStore metadata refs。
+- `agent_py_agent/tests/test_subagent_takeover_readiness.py`: 覆盖接管前必读包生成、落盘和不读取 artifact 正文的边界。
+- `agent_py_agent/tests/test_subagent_security_reserve.py`: 覆盖安全信号预留字段随 task 持久化，并投影到 LocalStore metadata。
+- `agent_py_agent/tests/test_status_shared_progress.py`: 覆盖 `status` / `subagents` CLI 展示共享进度、failure handoff refs 和 takeover packet refs。
+- `agent_py_agent/tests/test_tool_output_externalizer.py`: 覆盖大工具输出外置 artifact 和外置前 fail-safe recovery snapshot。

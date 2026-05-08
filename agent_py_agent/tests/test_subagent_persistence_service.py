@@ -14,6 +14,10 @@ from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import EvidencePacket, Finding
 
 
+def _path_text(path: str) -> str:
+    return path.replace("\\", "/")
+
+
 def test_subagent_persistence_service_round_trips_task(tmp_path) -> None:
     manager = SubAgentManager(tmp_path)
 
@@ -83,7 +87,7 @@ def test_subagent_persistence_creates_task_workspace_skeleton(tmp_path) -> None:
     assert state["primary_run_id"] == task.id
     assert state["status"] == "RUNNING"
     assert state["progress"] == 0.5
-    assert state["legacy"]["task_json"].endswith(f"{task.id}/task.json")
+    assert _path_text(state["legacy"]["task_json"]).endswith(f"{task.id}/task.json")
     assert legacy_ref["mode"] == "legacy_subagent_work_order_adapter"
     assert legacy_ref["legacy_task_dir"] == str(tmp_path / task.id)
     assert legacy_ref["agent_run_workspace_status"] == "phase_1_skeleton"
@@ -131,8 +135,8 @@ def _assert_runtime_workspace_paths(loaded, task_workspace, run_id: str) -> None
     assert loaded.agent_run_memory_exports_jsonl == str(run_workspace / "memory_gate" / "exports.jsonl")
     assert loaded.agent_run_skill_spark_gate_json == str(run_workspace / "memory_gate" / "skill_spark_gate.json")
     assert loaded.legacy_run_ref_json == str(run_workspace / "legacy_run_ref.json")
-    assert "/daily/" in loaded.daily_ledger_file
-    assert loaded.daily_ledger_file.endswith("/events.jsonl")
+    assert "/daily/" in _path_text(loaded.daily_ledger_file)
+    assert _path_text(loaded.daily_ledger_file).endswith("/events.jsonl")
     assert loaded.daily_ledger_last_event_id.startswith(f"evt-{run_id}-{run_id}-")
     assert loaded.task_artifact_manifest_jsonl == str(task_workspace / "artifacts" / "manifest.jsonl")
     assert loaded.agent_run_artifact_manifest_jsonl == str(run_workspace / "artifacts" / "manifest.jsonl")
@@ -285,7 +289,7 @@ def test_subagent_persistence_creates_agent_run_workspace_skeleton(tmp_path) -> 
     assert run_state["run_id"] == task.id
     assert run_state["status"] == "BLOCKED"
     assert run_state["blockers"] == ["缺少日志样本"]
-    assert checkpoint["legacy_checkpoint_ref"].endswith(f"{task.id}/reports/checkpoint.json")
+    assert _path_text(checkpoint["legacy_checkpoint_ref"]).endswith(f"{task.id}/reports/checkpoint.json")
     assert legacy_ref["legacy_task_dir"] == str(tmp_path / task.id)
     assert legacy_ref["agent_run_workspace_status"] == "phase_1_skeleton"
     assert any(json.loads(line)["event"] == "agent_run_workspace_synced" for line in run_timeline)
@@ -355,7 +359,7 @@ def test_subagent_persistence_writes_artifact_manifests(tmp_path) -> None:
     assert existing["ref"] == "reports/demo.txt"
     assert existing["path"] == str(artifact_path)
     assert existing["exists"] is True
-    assert existing["size_bytes"] == len("artifact body\n")
+    assert existing["size_bytes"] == artifact_path.stat().st_size
     assert existing["sha256"]
     assert existing["content_externalized"] is True
     assert "artifact body" not in json.dumps(existing, ensure_ascii=False)
@@ -463,7 +467,7 @@ def _assert_shared_workspace_facts(loaded, task) -> None:
     assert findings[0]["id"] == "finding-shared-1"
     assert findings[0]["run_id"] == task.id
     assert evidence_index[0]["id"] == "evpkt-shared-1"
-    assert evidence_index[0]["path"].endswith("shared/evidence_packets/evpkt-shared-1.json")
+    assert _path_text(evidence_index[0]["path"]).endswith("shared/evidence_packets/evpkt-shared-1.json")
     assert packet["claim"] == "复核输入已经准备好"
     assert "需要 sibling 复核证据链" in blackboard
     assert "等待 sibling 复核" in blackboard
@@ -510,8 +514,8 @@ def _assert_checkpoint_recovery_artifacts(tmp_path: Path, task) -> None:
 
     assert checkpoint["run_id"] == task.id
     assert checkpoint["status"] == "BLOCKED"
-    assert checkpoint["checkpoint_ref"].endswith("reports/checkpoint.json")
-    assert checkpoint["status_report_ref"].endswith("reports/status_report.json")
+    assert _path_text(checkpoint["checkpoint_ref"]).endswith("reports/checkpoint.json")
+    assert _path_text(checkpoint["status_report_ref"]).endswith("reports/status_report.json")
     assert checkpoint["blockers"] == ["父级未验收", "缺少验证证据"]
     assert failing_tests["failing_tests"] == [
         {

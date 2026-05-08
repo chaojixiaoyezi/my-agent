@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .common import format_local_time
+from .shared_progress import format_shared_progress_lines
 
 
 # LLM: StatusPrintContext 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
@@ -61,6 +62,8 @@ def print_status_human(ctx: StatusPrintContext):
     _format_active_work_block(ctx.active_work_summary)
     print("")
     _format_subagents_section(ctx.board, agent.config.subagent_board_limit)
+    print("")
+    _format_shared_progress_section(getattr(ctx.board, "shared_progress", []))
     print("")
     _format_timeline(ctx.timeline)
     print("")
@@ -115,6 +118,14 @@ def _format_subagents_section(board, limit: int) -> None:
         print("- recent:")
         for item in board.recent[: limit]:
             print(f"  - {item.id} {item.status}/{item.verification_status} :: {item.goal}")
+
+
+# LLM: _format_shared_progress_section surfaces refs-only control-plane panels in status output.
+# 函数用途: 展示共享进度和 failure handoff 引用数量，不读取 artifact 正文。
+def _format_shared_progress_section(panels: list[dict]) -> None:
+    print("Shared Progress")
+    for line in format_shared_progress_lines(panels):
+        print(line)
 
 
 # LLM: _format_timeline 属于CLI 命令层；改行为前先对齐调用方和快照/单测。

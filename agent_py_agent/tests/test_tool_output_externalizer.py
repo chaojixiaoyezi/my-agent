@@ -4,7 +4,7 @@ from __future__ import annotations
 
 给人看的解释：
 这组测试确认大工具输出会进入 artifact 文件，归档记录只留下摘要、hash 和路径；
-运行中的工具结果仍可给模型完整读取，避免这个切片改变工具行为。
+下一轮 live prompt 只读取摘要和恢复锚点，避免把黑盒大输出直接塞回上下文。
 """
 
 import json
@@ -56,7 +56,41 @@ def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) ->
     assert artifact["request_id"] == "req-tool"
     assert index[-1]["path"] == str(artifact_path)
     assert index[-1]["sha256"] == artifact["sha256"]
-    assert large_output in params.tool_context[-1]
+    assert large_output not in params.tool_context[-1]
+    assert str(artifact_path) in params.tool_context[-1]
+    assert "完整工具输出已外置" in params.tool_context[-1]
+    assert record["fail_safe_checkpoint_path"] in params.tool_context[-1]
+
+
+def test_tool_loop_writes_fail_safe_checkpoint_before_externalizing_large_output(tmp_path: Path) -> None:
+    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
+    large_output = "danger\n" + ("x" * 1400)
+
+    service._record_tool_call(
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=1,
+            idx=1,
+            payload={"tool": "blackbox_tool"},
+            result=ToolExecutionResult("blackbox_tool", True, large_output),
+        )
+    )
+
+    record = params.archive_tool_calls[0]
+    checkpoint_path = Path(record["fail_safe_checkpoint_path"])
+    snapshots = [
+        json.loads(line)
+        for line in checkpoint_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert record["fail_safe_checkpoint_written"] is True
+    assert checkpoint_path.exists()
+    assert snapshots[-1]["turn_range"]["source"] == "tool_output_externalizer"
+    assert snapshots[-1]["tool_calls"][0]["tool"] == "blackbox_tool"
+    assert snapshots[-1]["tool_calls"][0]["output_hash"] == record["output_hash"]
+    assert snapshots[-1]["next_actions"] == ["先读取工具输出 artifact 摘要和 fail-safe checkpoint，再决定是否把内容切片读回 prompt。"]
 
 
 def test_archive_tool_event_keeps_externalized_output_path(tmp_path: Path) -> None:
