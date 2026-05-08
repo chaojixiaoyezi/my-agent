@@ -60,6 +60,7 @@
 - 2026-05-09 Parent Acceptance Auto Policy dispatch/watch dry-run 接入已落地：`subagents-dispatch` 在 acceptance 记录上写入 `parent_acceptance_policy_*` 摘要字段，并生成 `reports/parent_acceptance_auto_policy.json`；`SUBAGENT_DISPATCH.md` 会展示 policy ref、decision、action、would_execute 和 executed。watch 仍只引用 `subagent_dispatch_report.json` / `SUBAGENT_DISPATCH.md`，不重复执行 policy、不跑 tests、不 apply、不改 task 状态。
 - 2026-05-09 Parent Acceptance Auto Policy 半自动计划字段已落地：policy JSON 和 CLI 现在展示 `execution_mode=manual_only`、`automatic_execution_allowed=false` 和 `recommended_command`，明确这是人工/后续受控调度参考，不会自动启动进程、不跑 tests、不 apply、不 rescue、不改 task 状态。
 - 2026-05-09 Parent Acceptance Auto Policy dispatch 半自动摘要已落地：acceptance dispatch record 和 `SUBAGENT_DISPATCH.md` 透传 `execution_mode`、`automatic_execution_allowed` 和 `recommended_command`，让 watch/调度层明确看到 manual-only 边界；仍不执行建议命令、不 apply、不 rescue、不改 task 状态。
+- 2026-05-09 Parent Acceptance Auto Policy preflight 审计已落地：policy JSON 和 CLI 现在展示 `preflight_status`、`ready_for_manual_execution`、`ready_for_automatic_execution`、checks 和 blockers；`run_tests` 可以是 manual_ready，但自动执行第一版固定 false，人工确认/状态修改/非 allowlist 会明确阻断。
 - 2026-05-09 业务/子代理验收链路联调修正：`runner-retry` 和 `structured-repair` 离线 scenario stub 输出已补齐带 refs 的 `evidence_packets` 和安全 `file_check` tests，真实 CLI `scenario-test --case runner-retry` / `--case structured-repair` 均能走到 `DONE/VERIFIED` 与 `SCENARIO_PASS`。
 
 - 2026-05-05 CI 稳定性修复：修正 `manager_runner_results.py` 在结构化解析失败时仍把 `SubAgentRunnerResult.ok` 写成旧值的问题；同时补齐 `test_local_store_gateway.py` 的临时目录隔离和 heartbeat 读取路径，避免 gateway 测试互相污染。

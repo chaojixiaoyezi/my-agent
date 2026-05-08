@@ -141,6 +141,14 @@ def _print_acceptance_auto_policy(policy) -> None:
         f"execution_mode={getattr(policy, 'execution_mode', 'manual_only')} "
         f"automatic_execution_allowed={bool(getattr(policy, 'automatic_execution_allowed', False))}"
     )
+    print(
+        f"preflight_status={getattr(policy, 'preflight_status', 'blocked')} "
+        f"manual={bool(getattr(policy, 'ready_for_manual_execution', False))} "
+        f"automatic={bool(getattr(policy, 'ready_for_automatic_execution', False))}"
+    )
+    blockers = list(getattr(policy, "preflight_blockers", []) or [])
+    if blockers:
+        print(f"preflight_blockers={','.join(str(item) for item in blockers)}")
     print(f"reason={getattr(policy, 'reason', '')}")
     recommended_command = str(getattr(policy, "recommended_command", "") or "")
     if recommended_command:
