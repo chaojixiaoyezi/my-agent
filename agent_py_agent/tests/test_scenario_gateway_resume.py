@@ -52,6 +52,33 @@ def _write_real_model_config(tmp_path: Path) -> Path | None:
     return config_path
 
 
+# LLM: Runs an offline scenario case through the real CLI parser without hitting external APIs.
+# 函数用途: 执行不依赖真实模型的 scenario-test 用例，并返回输出，供端到端回归断言。
+def _run_offline_scenario_case(tmp_path: Path, capsys, case: str) -> str:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--config",
+            str(_write_echo_config(tmp_path)),
+            "scenario-test",
+            "--case",
+            case,
+            "--workspace",
+            str(tmp_path / "scenario-runs"),
+            "--max-runners",
+            "1",
+        ]
+    )
+
+    code = args.func(args)
+    output = capsys.readouterr().out
+
+    assert code == 0, output
+    assert f"case={case}" in output
+    assert "SCENARIO_PASS" in output
+    return output
+
+
 def test_scenario_gateway_cross_day_resume_uses_real_gateway_process(tmp_path, capsys):
     """The scenario case should prove real gateway ask facts can be resumed across days."""
 
@@ -76,6 +103,24 @@ def test_scenario_gateway_cross_day_resume_uses_real_gateway_process(tmp_path, c
     assert code == 0, output
     assert "case=gateway-cross-day-resume" in output
     assert "SCENARIO_PASS" in output
+
+
+def test_scenario_runner_retry_reaches_parent_acceptance(tmp_path, capsys):
+    """The runner retry scenario should satisfy the current evidence-packet acceptance contract."""
+
+    output = _run_offline_scenario_case(tmp_path, capsys, "runner-retry")
+
+    assert "retry_runner" in output
+    assert "final status=DONE verify=VERIFIED" in output
+
+
+def test_scenario_structured_repair_reaches_parent_acceptance(tmp_path, capsys):
+    """The structured repair scenario should satisfy the current evidence-packet acceptance contract."""
+
+    output = _run_offline_scenario_case(tmp_path, capsys, "structured-repair")
+
+    assert "repair_attempted=True" in output
+    assert "final status=DONE verify=VERIFIED" in output
 
 
 def test_scenario_gateway_stale_lease_requeues_and_completes(tmp_path, capsys):
