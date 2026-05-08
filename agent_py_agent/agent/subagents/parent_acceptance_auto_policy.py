@@ -31,6 +31,9 @@ class ParentAcceptanceAutoPolicy:
     dry_run: bool = True
     would_execute: bool = False
     executed: bool = False
+    execution_mode: str = "manual_only"
+    automatic_execution_allowed: bool = False
+    recommended_command: str = ""
     mutates_task_state: bool = False
     requires_human_confirmation: bool = False
     next_action_ref: str = ""
@@ -95,6 +98,7 @@ def _policy_for_action(
     is_allowed = action.action in allowed_actions and not action.requires_human_confirmation
     decision = "allow" if is_allowed else "blocked"
     reason = "action is in auto-policy allowlist" if is_allowed else _blocked_reason(action)
+    recommended_command = action.command if is_allowed and action.command else ""
     return ParentAcceptanceAutoPolicy(
         run_id=task.id,
         action=action.action,
@@ -103,6 +107,9 @@ def _policy_for_action(
         command=action.command,
         would_execute=is_allowed and bool(action.command),
         executed=False,
+        execution_mode="manual_only",
+        automatic_execution_allowed=False,
+        recommended_command=recommended_command,
         mutates_task_state=False,
         requires_human_confirmation=action.requires_human_confirmation,
         next_action_ref="inline",
@@ -110,10 +117,28 @@ def _policy_for_action(
         apply_ref=action.apply_ref,
         reserved={
             "allowed_actions": sorted(allowed_actions),
+            "semi_auto_plan": _semi_auto_plan(is_allowed=is_allowed, recommended_command=recommended_command),
             "source_mutates_task_state": action.mutates_task_state,
             "source_action_reason": action.reason,
         },
     )
+
+
+# LLM: _semi_auto_plan makes the future executor contract explicit while still denying execution.
+# 函数用途: 生成半自动计划预留字段；只记录人工可执行命令和硬边界，不触发任何执行。
+def _semi_auto_plan(*, is_allowed: bool, recommended_command: str) -> dict[str, Any]:
+    return {
+        "stage": "ready_for_manual_confirmation" if is_allowed and recommended_command else "blocked",
+        "execution_mode": "manual_only",
+        "automatic_execution_allowed": False,
+        "recommended_command": recommended_command,
+        "requires_manual_confirmation": True,
+        "safety_boundaries": [
+            "dry_run_only",
+            "no_process_execution",
+            "no_task_state_mutation",
+        ],
+    }
 
 
 # LLM: _blocked_reason explains why policy stops without consulting external state.

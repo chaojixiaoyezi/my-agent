@@ -258,6 +258,9 @@ def test_parent_acceptance_auto_policy_dry_run_allows_run_tests_without_executio
         assert policy.dry_run is True
         assert policy.would_execute is True
         assert policy.executed is False
+        assert policy.execution_mode == "manual_only"
+        assert policy.automatic_execution_allowed is False
+        assert policy.recommended_command == f"subagents-tests {task.id} --re-run"
         assert policy.command == f"subagents-tests {task.id} --re-run"
         assert policy.mutates_task_state is False
         assert reloaded.status == "AWAITING_ACCEPTANCE"
@@ -265,6 +268,9 @@ def test_parent_acceptance_auto_policy_dry_run_allows_run_tests_without_executio
         assert payload["schema"] == "parent_acceptance_auto_policy.v1"
         assert payload["dry_run"] is True
         assert payload["policy"]["decision"] == "allow"
+        assert payload["policy"]["execution_mode"] == "manual_only"
+        assert payload["policy"]["automatic_execution_allowed"] is False
+        assert payload["policy"]["recommended_command"] == f"subagents-tests {task.id} --re-run"
         assert payload["reserved"]["refs_only"] is True
 
 

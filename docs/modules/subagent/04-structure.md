@@ -63,7 +63,7 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/parent_acceptance_controller.py`：生成父代理验收 dry-run 决策，返回 `execute_tests` / `inspect_only` / `request_human` / `rescue` 等下一步；它只读 refs 和机器事实源，不执行命令、不写 task；显式写入时生成 `parent_acceptance_decision.json`。
 - `agent_py_agent/agent/subagents/parent_acceptance_apply.py`：保存父级验收显式 apply 的结果模型、拦截/应用结果构造和 `parent_acceptance_apply.json` 落盘逻辑。
 - `agent_py_agent/agent/subagents/parent_acceptance_next_action.py`：把父级验收 plan/apply 审计映射成下一步动作建议，例如 `run_tests`、`request_human_confirmation`、`plan_rescue` 或 `apply_acceptance`；它只返回建议和 refs，不执行动作。
-- `agent_py_agent/agent/subagents/parent_acceptance_auto_policy.py`：把 next-action 映射成自动策略 dry-run 判断并写入 `parent_acceptance_auto_policy.json`；当前只生成 allow/blocked、would_execute 和 executed=false。
+- `agent_py_agent/agent/subagents/parent_acceptance_auto_policy.py`：把 next-action 映射成自动策略 dry-run 判断并写入 `parent_acceptance_auto_policy.json`；当前生成 allow/blocked、would_execute、manual-only 半自动计划和 executed=false。
 - `agent_py_agent/agent/agent_core/dispatch_service.py`：在 acceptance 调度记录上附加 parent acceptance auto-policy 的 refs-only 摘要；该接入只调用 dry-run policy 审计，不执行 tests、不 apply acceptance、不触发 rescue。
 - `agent_py_agent/agent/subagents/report_dispatch_models.py` / `services/dispatch_params.py`：`DispatchRecord` 和 `DispatchRecordParams` 持有 `parent_acceptance_policy_ref`、decision、action、would_execute、executed 等机器摘要字段，供 JSON report、Markdown 和 watch 读取。
 - `agent_py_agent/agent/subagents/rendering_dispatch.py`：`SUBAGENT_DISPATCH.md` 展示 policy 摘要和 ref，仍不展开 audit 文件正文。
@@ -147,7 +147,7 @@ agent_py_agent/agent/
 9. Acceptance Real Execution 当前提供 `TestExecutionRecord`、最小 `TestExecutor`、report 存储、显式 acceptance 接入、`subagents-tests` CLI、`subagents-acceptance-plan` CLI 和配置默认值；只有 `AcceptanceReviewOptions(execute_tests=True)`、`subagents-tests --re-run`、`subagents-acceptance --execute-tests` 或配置 `acceptance_execute_tests: true` 时才运行 tests 并生成报告/阻断 findings，默认旧验收路径和 acceptance-plan 都不执行命令；已有 `test_execution.json` 会作为后续 acceptance/apply 的测试事实源。
 9. Parent Acceptance Controller 的 `--apply` 当前只是第一片安全桥接：`inspect_only` 才能进入普通 acceptance apply；`execute_tests`、`request_human`、`rescue` 会被写入 `parent_acceptance_apply.json` 并保持任务状态不变，留给上级/自动调度器下一步显式处理。
 9. Parent Acceptance Controller 的 `--next-action` 是自动调度前的建议层：它读取当前 plan 和已有 apply 审计 refs，返回下一步建议命令或人工/救援意图，但不会执行建议，也不会把建议当 verified fact。
-9. Parent Acceptance Auto Policy v1 dry-run 当前消费 next-action、决策/apply refs 和保守 allowlist。第一片只判断“策略是否允许、如果允许会执行什么、为什么仍不执行”，写 `parent_acceptance_auto_policy.json`；不运行 tests、不 apply、不 rescue，也不改 task/run 状态。
+9. Parent Acceptance Auto Policy v1 dry-run 当前消费 next-action、决策/apply refs 和保守 allowlist。第一片只判断“策略是否允许、如果允许会执行什么、为什么仍不执行”，写 `parent_acceptance_auto_policy.json`；半自动计划只暴露 `execution_mode=manual_only`、`automatic_execution_allowed=false` 和 `recommended_command`，不运行 tests、不 apply、不 rescue，也不改 task/run 状态。
 9. `subagents-dispatch` 现在会在 acceptance 记录上附带 parent auto-policy 的 machine summary 和 ref；watch 只读取本轮 dispatch report / Markdown，不在 watch 层重新跑 policy，也不会因为 `would_execute=true` 自动执行任何动作。
 10. Compact resume 的 continue packet 可以携带 subagent owner refs 和 acceptance/test 线索，但它只证明“恢复上下文可继续”，不证明“子代理业务验收通过”。父级验收和 auto-policy 仍是 tests/apply/rescue 的唯一判断层，compact auto 不得绕过。
 10. compact/resume 与父级验收的联调链路是：continue packet ready -> parent acceptance 发现缺 `test_execution.json` 并阻断为 `execute_tests` -> 显式测试执行写报告 -> parent acceptance 变为 `inspect_only` -> 显式 apply 才能写 `DONE/VERIFIED`。任一步都不允许 compact auto 直接跑 tests、apply 或导出子代理 memory。
@@ -267,6 +267,9 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
   "dry_run": true,
   "auto_execute": false,
   "would_execute": false,
+  "execution_mode": "manual_only",
+  "automatic_execution_allowed": false,
+  "recommended_command": "subagents-tests <run_id> --re-run",
   "executed": false,
   "blocked_reason": "dry_run_only",
   "requires_human": false,
@@ -287,7 +290,7 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 }
 ```
 
-审计记录里的 `executed` 第一版必须恒为 false；`would_execute` 只表达策略判断，不代表动作已经发生。Markdown 或 CLI 视图只能展示摘要，机器判断必须读取 JSON。
+审计记录里的 `executed` 第一版必须恒为 false；`would_execute` 只表达策略判断，不代表动作已经发生。Markdown 或 CLI 视图只能展示摘要，机器判断必须读取 JSON。半自动字段只表达“下一条人工/受控调度参考命令”：`execution_mode` 第一版恒为 `manual_only`，`automatic_execution_allowed` 第一版恒为 false，`recommended_command` 不得被当前 policy 构建函数直接执行。
 
 ### Dispatch / Watch 接入
 
