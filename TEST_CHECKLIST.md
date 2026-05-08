@@ -150,6 +150,7 @@
 - [ ] acceptance dispatch record 可展示 parent acceptance auto-policy 的 ref、decision、action、would_execute、executed，且 executed 仍为 false
 - [ ] parent acceptance auto-policy 半自动计划必须保持 `execution_mode=manual_only`、`automatic_execution_allowed=false`，`recommended_command` 只能作为人工或后续受控调度参考；dispatch JSON/Markdown 只能透传这些字段，不能执行命令
 - [ ] parent acceptance auto-policy preflight 可以显示 manual_ready，但 `ready_for_automatic_execution` 必须为 false，且自动执行禁用原因必须进入 blockers
+- [ ] dispatch JSON/Markdown 透传 preflight 摘要时，不得把 `manual_ready` 当成自动执行许可
 - [ ] `subagents-dispatch --watch --max-cycles 1 --interval 0` 能安全退出
 - [ ] watch 模式会写 heartbeat、watch 报告和 watch 日志
 - [ ] watch 只引用本轮 dispatch report/Markdown，不在 watch 层重新执行 auto-policy、tests、apply 或 rescue

@@ -244,6 +244,11 @@ def test_subagent_dispatch_watch_surfaces_parent_acceptance_auto_policy_refs():
         assert acceptance_record["parent_acceptance_policy_recommended_command"] == (
             f"subagents-tests {task.id} --re-run"
         )
+        assert acceptance_record["parent_acceptance_policy_preflight_status"] == "manual_ready"
+        assert acceptance_record["parent_acceptance_policy_ready_for_automatic_execution"] is False
+        assert acceptance_record["parent_acceptance_policy_preflight_blockers"] == [
+            "automatic_execution_disabled"
+        ]
         assert payload["policy"]["would_execute"] is True
         assert payload["policy"]["executed"] is False
         assert payload["reserved"]["mutates_task_state"] is False

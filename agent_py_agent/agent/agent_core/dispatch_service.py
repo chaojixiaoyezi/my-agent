@@ -262,6 +262,11 @@ def _parent_acceptance_policy_summary(agent, run_id: str) -> dict[str, object]:
             policy.automatic_execution_allowed
         ),
         "parent_acceptance_policy_recommended_command": policy.recommended_command,
+        "parent_acceptance_policy_preflight_status": policy.preflight_status,
+        "parent_acceptance_policy_ready_for_automatic_execution": bool(
+            policy.ready_for_automatic_execution
+        ),
+        "parent_acceptance_policy_preflight_blockers": list(policy.preflight_blockers),
     }
 
 
