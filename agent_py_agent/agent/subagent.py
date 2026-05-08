@@ -37,6 +37,12 @@ from .subagents.models import (
     VerificationEvidence,
     WorkOrderValidation,
 )
+
+# LLM: expose parent acceptance plan/apply/next-action/auto-policy records through the legacy facade for upper-agent callers.
+from .subagents.parent_acceptance_apply import ParentAcceptanceApplyResult
+from .subagents.parent_acceptance_auto_policy import ParentAcceptanceAutoPolicy
+from .subagents.parent_acceptance_controller import ParentAcceptanceDecision, ParentAcceptanceRef
+from .subagents.parent_acceptance_next_action import ParentAcceptanceNextAction
 from .subagents.parsing import parse_parent_planner_output, parse_subagent_runner_output
 from .subagents.policies import filter_board_items
 from .subagents.rendering import (

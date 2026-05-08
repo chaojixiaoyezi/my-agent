@@ -37,6 +37,7 @@ class TestSubagentsSubcommandRegistration:
             "subagents-apply-actions",
             "subagents-route-capabilities",
             "subagents-acceptance",
+            "subagents-acceptance-plan",
             "subagents-tests",
             "subagents-patches",
             "subagents-dispatch",
@@ -270,6 +271,61 @@ class TestSubagentsReviewCommandRegistration:
         assert args.run_id == "run-123"
         assert args.re_run is True
         assert args.timeout == 9
+
+    def test_subagents_acceptance_plan_has_run_id_argument(self):
+        """测试 subagents-acceptance-plan 命令必须指定 run_id。"""
+        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="subcommand")
+        add_subagents_subcommands(sub)
+
+        args = parser.parse_args(["subagents-acceptance-plan", "run-123"])
+        assert args.run_id == "run-123"
+
+    def test_subagents_acceptance_plan_has_write_argument(self):
+        """测试 subagents-acceptance-plan 可显式写入 dry-run 决策文件。"""
+        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="subcommand")
+        add_subagents_subcommands(sub)
+
+        args = parser.parse_args(["subagents-acceptance-plan", "run-123", "--write"])
+        assert args.write is True
+
+    def test_subagents_acceptance_plan_has_apply_argument(self):
+        """测试 subagents-acceptance-plan 可显式 apply 低风险决策。"""
+        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="subcommand")
+        add_subagents_subcommands(sub)
+
+        args = parser.parse_args(["subagents-acceptance-plan", "run-123", "--apply"])
+        assert args.apply is True
+
+    def test_subagents_acceptance_plan_has_next_action_argument(self):
+        """测试 subagents-acceptance-plan 可查看父级下一动作建议。"""
+        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="subcommand")
+        add_subagents_subcommands(sub)
+
+        args = parser.parse_args(["subagents-acceptance-plan", "run-123", "--next-action"])
+        assert args.next_action is True
+
+    def test_subagents_acceptance_plan_has_auto_policy_argument(self):
+        """测试 subagents-acceptance-plan 可查看自动策略 dry-run。"""
+        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="subcommand")
+        add_subagents_subcommands(sub)
+
+        args = parser.parse_args(["subagents-acceptance-plan", "run-123", "--auto-policy"])
+        assert args.auto_policy is True
 
     def test_subagents_patches_has_patch_action_group(self):
         """测试 subagents-patches 命令有 patch 操作组。

@@ -170,6 +170,7 @@ Ctrl+C
 | `subagents-workflow-plan` | 预览目标会命中哪个内置 subagent workflow | 否 | 否 |
 | `subagents-route-capabilities` | 路由 capability request | `--apply` 时写 grant/gap | 否 |
 | `subagents-acceptance` | 验收等待验收的 subagent | `--apply` 时写回状态和审计日志 | 否 |
+| `subagents-acceptance-plan` | 查看、审计或显式应用单个 subagent 的父级验收决策 | `--write` 写 dry-run 决策；`--apply` 只允许 `inspect_only` 进入普通验收 apply；`--next-action` 给上级动作建议；`--auto-policy` 写策略 dry-run 审计 | 否 |
 | `subagents-tests` | 查看或显式重跑单个 subagent 的真实测试执行记录 | `--re-run` 时写 `test_execution.json/md` | 否 |
 | `subagents-patches` | 审核或 apply runner 输出的 patch 记录 | 默认 review dry-run；`--review-apply` 只写审核状态；`--apply` 真正落文件 | 否 |
 | `subagents-memory-gate` | 查看或写回子代理 memory/skill 候选 review decision | 传 `--candidate-id` 时写 `memory_gate/decisions.jsonl` 和 gate 状态 | 否 |
@@ -191,9 +192,13 @@ my-agent status --recent --limit 10
 my-agent status --json
 ```
 
-显示当前本地工作台总览：gateway 存活状态、gateway 队列数量、LocalStore 记录/事件数量、subagent summary、红灯任务、Shared Progress、Takeover View、最近事件和建议下一步动作。它只读现有账本，不调用模型。
+显示当前本地工作台总览：gateway 存活状态、gateway 队列数量、LocalStore 记录/事件数量、subagent summary、红灯任务、Shared Progress、Takeover View、Acceptance Plan、Acceptance Next Action、最近事件和建议下一步动作。它只读现有账本，不调用模型。
 
 `Takeover View` 会列出可接管 run、failure handoff ref、takeover readiness ref 和 recommended read order；它只读取恢复索引，不展开 artifact 正文。若 run 携带隔离元数据，还会显示 principal、conversation、memory namespace 和 config scope 摘要；这些字段只是审计线索，不代表员工长期记忆已启用，也不代表允许写全局配置。
+
+`Acceptance Plan` 会展示待验收、失败或阻塞 run 的父级验收 dry-run 决策，例如 `execute_tests`、`inspect_only`、`request_human` 或 `rescue`。它只显示摘要和 refs，不执行 tests、不写任务状态、不读取 artifact 正文。
+
+`Acceptance Next Action` 会展示同一批可见 run 的父级下一动作建议，例如 `run_tests`、`request_human_confirmation`、`plan_rescue` 或 `apply_acceptance`，并列出建议命令、原因、refs 和 `mutates_task_state`。它只显示建议，不执行命令、不写任务状态、不读取 artifact 正文。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -691,7 +696,7 @@ my-agent subagents --limit 20
 | `--root-id <id>` | - | 按根任务 ID 过滤。 |
 | `--limit <n>` | `20` | 最多显示多少条。 |
 
-输出会包含 `Shared Progress` 和 `Takeover View`：前者显示 root task 聚合计数，后者显示接管入口 refs 和推荐读取顺序。完整 artifact 正文不会自动进入看板。
+输出会包含 `Shared Progress`、`Takeover View`、`Acceptance Plan` 和 `Acceptance Next Action`：前者显示 root task 聚合计数，接管视图显示恢复入口 refs 和推荐读取顺序，验收计划显示父级 dry-run 决策，下一动作区块显示建议命令、原因、refs 和 `mutates_task_state`。完整 artifact 正文不会自动进入看板，也不会因为展示验收计划或下一动作建议而执行 tests、apply 或 rescue。
 
 ## `subagents-due-check`
 
@@ -796,6 +801,36 @@ my-agent subagents-acceptance --execute-tests --test-timeout 120
 | `--execute-tests` | 配置值 | 本次验收显式执行 `output.json.tests`，覆盖 `acceptance_execute_tests`。 |
 | `--no-execute-tests` | 配置值 | 本次验收显式不执行 tests，覆盖配置默认值。 |
 | `--test-timeout <seconds>` | `acceptance_test_timeout_seconds` | 本次真实执行 tests 的单条测试超时秒数。 |
+
+## `subagents-acceptance-plan`
+
+```powershell
+my-agent subagents-acceptance-plan <run_id>
+my-agent subagents-acceptance-plan <run_id> --json
+my-agent subagents-acceptance-plan <run_id> --write
+my-agent subagents-acceptance-plan <run_id> --apply
+my-agent subagents-acceptance-plan <run_id> --next-action
+my-agent subagents-acceptance-plan <run_id> --auto-policy
+```
+
+只读取该 run 的 `output.json`、`reports/test_execution.json` 和 handoff/readiness refs，展示父级下一步 dry-run 决策。输出可能是 `execute_tests`、`inspect_only`、`request_human` 或 `rescue`；默认不会执行 tests、不会读取 artifact 正文、不会写回 task 状态。显式传 `--write` 时会写入 `reports/parent_acceptance_decision.json` 审计文件，但这仍然不是 apply。
+
+显式传 `--apply` 时会先写入 `parent_acceptance_decision.json`，再写入 `parent_acceptance_apply.json`。当前第一版只允许 `inspect_only` 进入既有 `acceptance_review` apply 路径；`execute_tests`、`request_human` 和 `rescue` 会被拦截为未应用，并在 apply 审计文件里记录下一步需要显式执行测试、人工确认或救援接管。`--apply` 不会自动跑 tests，也不会自动 rescue。
+
+显式传 `--next-action` 时只生成父/上级代理可读的下一步建议，例如 `run_tests`、`request_human_confirmation`、`plan_rescue` 或 `apply_acceptance`。它会展示建议命令和 `parent_acceptance_decision.json` / `parent_acceptance_apply.json` refs，但不会执行建议命令、不会写 task 状态。
+
+显式传 `--auto-policy` 时会读取 next-action，写入 `reports/parent_acceptance_auto_policy.json`，并展示策略判断。第一版固定 dry-run：`run_tests` 可被标记为 `allow` / `would_execute=true`，但 `executed=false`；`request_human_confirmation`、`plan_rescue`、`apply_acceptance` 等不会自动执行。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `run_id` | - | 子代理运行 ID。 |
+| `--json` | `false` | 输出机器可读 JSON，仍保持 refs-only。 |
+| `--write` | `false` | 写入 refs-only 父级验收决策审计文件，不执行决策。 |
+| `--apply` | `false` | 显式应用低风险 `inspect_only` 决策；其它决策只写入拦截审计，不改 task。 |
+| `--next-action` | `false` | 查看父/上级代理下一步显式动作建议，不执行动作。 |
+| `--auto-policy` | `false` | 查看并写入父级自动策略 dry-run 审计，不执行动作。 |
+| `--reviewer <name>` | `parent` | `--apply` 进入普通验收路径时写入的 reviewer。 |
+| `--note <text>` | `""` | `--apply` 进入普通验收路径时写入的备注。 |
 
 ## `subagents-tests`
 
