@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -73,10 +75,11 @@ class TestExecutor:
         if error:
             return _command_rejected_record(test, command, error)
         argv = _split_command(command)
+        run_argv = _execution_argv(argv)
         start = time.monotonic()
         try:
             completed = subprocess.run(
-                argv,
+                run_argv,
                 cwd=self.workspace_root,
                 capture_output=True,
                 text=True,
@@ -160,6 +163,14 @@ def _split_command(command: str) -> list[str]:
     argv = shlex.split(command, posix=os.name != "nt")
     if os.name == "nt":
         return [_strip_wrapping_quotes(item) for item in argv]
+    return argv
+
+
+# LLM: _execution_argv makes portable `python ...` tests use the current interpreter when needed.
+# 函数用途: 在系统没有 python 命令时，把首个 `python` 参数替换为当前解释器，保持验收测试跨平台可跑。
+def _execution_argv(argv: list[str]) -> list[str]:
+    if argv and _command_name(argv[0]) == "python" and shutil.which(argv[0]) is None:
+        return [sys.executable, *argv[1:]]
     return argv
 
 

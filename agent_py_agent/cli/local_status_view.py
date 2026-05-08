@@ -10,7 +10,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from .common import format_local_time
-from .shared_progress import format_shared_progress_lines, format_takeover_view_lines
+from .shared_progress import (
+    format_acceptance_next_action_lines,
+    format_acceptance_plan_lines,
+    format_shared_progress_lines,
+    format_takeover_view_lines,
+)
 
 
 # LLM: _format_takeover_view_section exposes concrete recovery entries for parent takeover.
@@ -18,6 +23,22 @@ from .shared_progress import format_shared_progress_lines, format_takeover_view_
 def _format_takeover_view_section(panels: list[dict]) -> None:
     print("Takeover View")
     for line in format_takeover_view_lines(panels):
+        print(line)
+
+
+# LLM: _format_acceptance_plan_section shows parent dry-run next steps without applying them.
+# 函数用途: 在 status 输出里展示验收计划摘要；只渲染 shared-progress payload，不执行 tests。
+def _format_acceptance_plan_section(panels: list[dict]) -> None:
+    print("Acceptance Plan")
+    for line in format_acceptance_plan_lines(panels):
+        print(line)
+
+
+# LLM: _format_acceptance_next_action_section shows parent advisory actions without applying them.
+# 函数用途: 在 status 输出里展示验收下一动作建议；只渲染 shared-progress payload，不执行命令。
+def _format_acceptance_next_action_section(panels: list[dict]) -> None:
+    print("Acceptance Next Action")
+    for line in format_acceptance_next_action_lines(panels):
         print(line)
 
 
@@ -74,6 +95,10 @@ def print_status_human(ctx: StatusPrintContext):
     _format_shared_progress_section(getattr(ctx.board, "shared_progress", []))
     print("")
     _format_takeover_view_section(getattr(ctx.board, "shared_progress", []))
+    print("")
+    _format_acceptance_plan_section(getattr(ctx.board, "shared_progress", []))
+    print("")
+    _format_acceptance_next_action_section(getattr(ctx.board, "shared_progress", []))
     print("")
     _format_timeline(ctx.timeline)
     print("")

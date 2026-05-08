@@ -20,6 +20,7 @@ from .subagents import (
     cmd_subagent_run,
     cmd_subagents,
     cmd_subagents_acceptance,
+    cmd_subagents_acceptance_plan,
     cmd_subagents_apply_actions,
     cmd_subagents_dispatch,
     cmd_subagents_due_check,
@@ -138,6 +139,19 @@ def _add_agents_acceptance_subcommand(sub):
     )
     acceptance.add_argument("--test-timeout", type=float, default=None, help="真实执行 tests 时单条测试超时秒数")
     acceptance.set_defaults(func=cmd_subagents_acceptance, apply=False)
+
+    # LLM: acceptance-plan exposes the parent controller decision and an explicit inspect_only apply bridge.
+    # 函数用途: 注册父级验收计划查看命令；默认只展示决策，--apply 仅放行低风险 inspect_only。
+    acceptance_plan = sub.add_parser("subagents-acceptance-plan", help="查看单个 subagent 的父级验收 dry-run 决策")
+    acceptance_plan.add_argument("run_id", help="子代理运行 ID")
+    acceptance_plan.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    acceptance_plan.add_argument("--write", action="store_true", help="写入 refs-only 父级验收决策审计文件")
+    acceptance_plan.add_argument("--apply", action="store_true", help="显式应用 inspect_only 低风险父级验收决策")
+    acceptance_plan.add_argument("--next-action", action="store_true", help="查看父级下一步显式动作建议，不执行动作")
+    acceptance_plan.add_argument("--auto-policy", action="store_true", help="查看父级自动策略 dry-run，不执行动作")
+    acceptance_plan.add_argument("--reviewer", default="parent", help="apply 时写入验收记录的 reviewer")
+    acceptance_plan.add_argument("--note", default="", help="apply 时写入验收记录的备注")
+    acceptance_plan.set_defaults(func=cmd_subagents_acceptance_plan)
 
 
 # LLM: _add_agents_tests_subcommand registers the explicit test-report inspection command.
