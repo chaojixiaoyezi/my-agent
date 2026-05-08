@@ -72,6 +72,29 @@ class _FakeSubagents:
             },
         )
 
+    def plan_parent_acceptance_auto_policy(self, run_id):
+        assert run_id == self._task.id
+        return SimpleNamespace(
+            run_id=run_id,
+            action="run_tests",
+            decision="allow",
+            reason="action is in auto-policy allowlist",
+            command=f"subagents-tests {run_id} --re-run",
+            dry_run=True,
+            would_execute=True,
+            executed=False,
+            mutates_task_state=False,
+            next_action_ref=str(Path(self._task.reports_dir) / "parent_acceptance_next_action.json"),
+            to_dict=lambda: {
+                "run_id": run_id,
+                "action": "run_tests",
+                "decision": "allow",
+                "dry_run": True,
+                "would_execute": True,
+                "executed": False,
+            },
+        )
+
     def plan_parent_acceptance(self, run_id):
         assert run_id == self._task.id
         return SimpleNamespace(
@@ -291,3 +314,26 @@ def test_subagents_acceptance_plan_next_action_prints_recommended_action(tmp_pat
     assert "SUBAGENT ACCEPTANCE NEXT ACTION" in out
     assert "run_id=run-1 action=run_tests mutates_task_state=False" in out
     assert "command=subagents-tests run-1 --re-run" in out
+
+
+def test_subagents_acceptance_plan_auto_policy_prints_policy_decision(tmp_path, capsys):
+    task = _task(tmp_path)
+    fake_agent = _FakeAgent(task)
+    args = argparse.Namespace(
+        config=str(tmp_path / "config.yaml"),
+        run_id="run-1",
+        json=False,
+        write=False,
+        apply=False,
+        next_action=False,
+        auto_policy=True,
+    )
+
+    with patch("agent_py_agent.cli._acceptance_plan.make_agent", return_value=fake_agent):
+        result = cmd_subagents_acceptance_plan(args)
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert "SUBAGENT ACCEPTANCE AUTO POLICY" in out
+    assert "run_id=run-1 action=run_tests decision=allow dry_run=True" in out
+    assert "would_execute=True executed=False" in out

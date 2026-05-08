@@ -236,6 +236,59 @@ def test_parent_acceptance_next_action_requests_human_for_unsafe_command():
         assert "unsafe" in action.reason
 
 
+def test_parent_acceptance_auto_policy_dry_run_allows_run_tests_without_execution():
+    root_ctx, agent, task = _agent_and_task()
+    with root_ctx:
+        _write_output(
+            task,
+            [{
+                "name": "unit",
+                "validation_method": "command",
+                "command": "python -m pytest -q",
+            }],
+        )
+        agent.subagents.apply_parent_acceptance_decision(task.id, reviewer="parent")
+
+        policy = agent.subagents.plan_parent_acceptance_auto_policy(task.id)
+
+        payload = json.loads(Path(task.reports_dir, "parent_acceptance_auto_policy.json").read_text(encoding="utf-8"))
+        reloaded = agent.subagents.load(task.id)
+        assert policy.action == "run_tests"
+        assert policy.decision == "allow"
+        assert policy.dry_run is True
+        assert policy.would_execute is True
+        assert policy.executed is False
+        assert policy.command == f"subagents-tests {task.id} --re-run"
+        assert policy.mutates_task_state is False
+        assert reloaded.status == "AWAITING_ACCEPTANCE"
+        assert reloaded.verification_status == "NEEDS_ACCEPTANCE"
+        assert payload["schema"] == "parent_acceptance_auto_policy.v1"
+        assert payload["dry_run"] is True
+        assert payload["policy"]["decision"] == "allow"
+        assert payload["reserved"]["refs_only"] is True
+
+
+def test_parent_acceptance_auto_policy_blocks_human_confirmation():
+    root_ctx, agent, task = _agent_and_task()
+    with root_ctx:
+        _write_output(
+            task,
+            [{
+                "name": "unsafe",
+                "validation_method": "command",
+                "command": "python -m pytest -q; remove-stuff",
+            }],
+        )
+
+        policy = agent.subagents.plan_parent_acceptance_auto_policy(task.id)
+
+        assert policy.action == "request_human_confirmation"
+        assert policy.decision == "blocked"
+        assert policy.requires_human_confirmation is True
+        assert policy.would_execute is False
+        assert policy.executed is False
+
+
 def test_parent_acceptance_plan_requires_human_for_unsafe_test_command():
     root_ctx, agent, task = _agent_and_task()
     with root_ctx:

@@ -177,7 +177,7 @@
 
 ## 2026-04-30 / Memory 长期规则索引化与强制路由
 
-状态：设计中
+状态：部分落地
 
 思路：
 - 长期规则不能一条条塞进常驻 memory，否则用久后会变成第二个臃肿上下文。
@@ -1820,3 +1820,18 @@ def example(...):
 - 2026-05-08 新增显式 `--apply` 第一片：只有 `inspect_only` 会桥接到既有 acceptance apply；`execute_tests`、`request_human`、`rescue` 只写入 `reports/parent_acceptance_apply.json` 拦截审计，不自动跑 tests、不自动 rescue、不绕过人工确认。
 - 2026-05-08 新增 `--next-action` 第一片：父/上级代理可读取当前 plan 和 apply 审计 refs，得到 `run_tests`、`request_human_confirmation`、`plan_rescue` 或 `apply_acceptance` 建议；它只返回建议命令和 refs，不执行建议、不写状态。
 - 当前仍没有自动策略配置；父/上级代理后续可以读取 `parent_acceptance_decision.json`、`parent_acceptance_apply.json` 和 next-action 结果，再按策略显式执行测试、请求人工或进入救援。
+
+## 2026-05-08 Parent Acceptance Auto Policy v1 草案
+
+状态：设计中
+
+模块结构文档：[docs/modules/subagent/04-structure.md](docs/modules/subagent/04-structure.md)
+
+摘要：
+- Auto Policy v1 只定义父级验收 next-action 的自动化策略草案和审计 schema，不改变当前运行行为；第一版必须保持 dry-run，不执行 tests、不 apply acceptance、不 rescue、不修改 task 状态。
+- 2026-05-08 已落地 dry-run 实现：`plan_parent_acceptance_auto_policy(run_id)` 和 `subagents-acceptance-plan --auto-policy` 会写入 `reports/parent_acceptance_auto_policy.json`；当前只生成 `allow/blocked`、`would_execute` 和 `executed=false` 审计。
+- 建议配置字段先按“全局默认 + 能力路由细则”拆分：如果后续实现成用户可见的主验收策略，必须同步 `agent_py_agent/config/agent_config.yaml` 与 `AgentConfig`；如果只是 capability/subagent 路由内部的授权、次数、allowlist 或层级参数，应进入 `agent_py_agent/config/capability_config.yaml` 与 `capability_config.py`，不要塞进主配置。
+- 主配置草案建议包含 `acceptance_auto_policy_enabled=false`、`acceptance_auto_policy_mode=dry_run`、`acceptance_auto_policy_auto_execute=false`、`acceptance_auto_policy_action_allowlist=["run_tests"]`、`acceptance_auto_policy_write_audit=true`、`acceptance_auto_policy_max_actions_per_run=1`。其中 allowlist 第一版默认只建议 `run_tests`，但 `auto_execute=false` 使它也只能生成 would-run 审计。
+- 第一版动作边界：`run_tests` 只能记录“如果允许会执行哪个测试入口”；`request_human_confirmation` 只能生成确认请求意图；`plan_rescue` 只能引用 takeover/readiness/rescue packet；`apply_acceptance` 只能说明仍需显式 apply gate。任何 `requires_human=true`、安全信号、未知 action、缺少决策 refs 或越权配置 scope 都必须阻断自动执行。
+- 审计 JSON 建议写入 `reports/parent_acceptance_auto_policy.json`，作为机器事实源；Markdown/CLI 只展示摘要。字段至少包含 `schema_version`、`record_type`、`created_at`、`run_id`、`root_run_id`、`policy`、`decision_refs`、`next_action`、`allowed_by_policy`、`dry_run`、`auto_execute`、`would_execute`、`executed=false`、`blocked_reason`、`requires_human`、`safety_signals`、`rescue_refs`、`runtime_identity`、`config_scope` 和 `reserved`。
+- 安全预留：后续接入 `requires_human`、rescue、安全信号、Security Gate、租户/员工 conversation 配置隔离时，Auto Policy 只能读取这些事实和 policy 结果，不能绕过它们；tenant/principal/conversation/run scope 的 effective config diff 与 rollback ref 要进入审计，防止员工会话测试污染全局策略。

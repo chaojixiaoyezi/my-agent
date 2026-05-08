@@ -14,6 +14,13 @@ from .common import make_agent
 def cmd_subagents_acceptance_plan(args) -> int:
     agent = make_agent(args)
     run_id = str(getattr(args, "run_id", "") or "")
+    if bool(getattr(args, "auto_policy", False)):
+        policy = agent.subagents.plan_parent_acceptance_auto_policy(run_id)
+        if bool(getattr(args, "json", False)):
+            print(json.dumps(_policy_to_dict(policy), ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        _print_acceptance_auto_policy(policy)
+        return 0
     if bool(getattr(args, "next_action", False)):
         action = agent.subagents.plan_parent_acceptance_next_action(run_id)
         if bool(getattr(args, "json", False)):
@@ -99,6 +106,45 @@ def _action_to_dict(action) -> dict:
         "command": getattr(action, "command", ""),
         "mutates_task_state": bool(getattr(action, "mutates_task_state", False)),
     }
+
+
+# LLM: _policy_to_dict keeps auto-policy output robust for dataclasses and test doubles.
+# 函数用途: 把父级自动策略 dry-run 结果转换成 JSON 字典；不展开引用文件正文。
+def _policy_to_dict(policy) -> dict:
+    to_dict = getattr(policy, "to_dict", None)
+    if callable(to_dict):
+        payload = to_dict()
+        return payload if isinstance(payload, dict) else {}
+    return {
+        "run_id": getattr(policy, "run_id", ""),
+        "action": getattr(policy, "action", ""),
+        "decision": getattr(policy, "decision", ""),
+        "dry_run": bool(getattr(policy, "dry_run", True)),
+        "would_execute": bool(getattr(policy, "would_execute", False)),
+        "executed": bool(getattr(policy, "executed", False)),
+    }
+
+
+# LLM: _print_acceptance_auto_policy renders policy gating without executing the recommendation.
+# 函数用途: 打印父级自动策略 dry-run 结果、建议命令和审计引用。
+def _print_acceptance_auto_policy(policy) -> None:
+    print("SUBAGENT ACCEPTANCE AUTO POLICY")
+    print(
+        f"run_id={getattr(policy, 'run_id', '')} action={getattr(policy, 'action', '')} "
+        f"decision={getattr(policy, 'decision', '')} dry_run={bool(getattr(policy, 'dry_run', True))}"
+    )
+    print(
+        f"would_execute={bool(getattr(policy, 'would_execute', False))} "
+        f"executed={bool(getattr(policy, 'executed', False))}"
+    )
+    print(f"reason={getattr(policy, 'reason', '')}")
+    command = str(getattr(policy, "command", "") or "")
+    if command:
+        print(f"command={command}")
+    for name in ("next_action_ref", "decision_ref", "apply_ref"):
+        value = str(getattr(policy, name, "") or "")
+        if value:
+            print(f"{name}={value}")
 
 
 # LLM: _print_acceptance_next_action renders the scheduler-facing recommendation without executing it.

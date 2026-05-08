@@ -12,6 +12,7 @@ from ..agent.subagent import filter_board_items
 from ..agent.subagents.models import SubAgentBoardOptions
 from .common import make_agent
 from .shared_progress import (
+    format_acceptance_next_action_lines,
     format_acceptance_plan_lines,
     format_shared_progress_lines,
     format_takeover_view_lines,
@@ -32,6 +33,14 @@ def _print_takeover_view(panels: list[dict]) -> None:
 def _print_acceptance_plan(panels: list[dict]) -> None:
     print("Acceptance Plan")
     for line in format_acceptance_plan_lines(panels):
+        print(line)
+
+
+# LLM: _print_acceptance_next_action keeps advisory commands visible but never executes them.
+# 函数用途: 在 subagents 看板中展示父级验收下一动作建议；只打印命令和 refs，不写状态。
+def _print_acceptance_next_action(panels: list[dict]) -> None:
+    print("Acceptance Next Action")
+    for line in format_acceptance_next_action_lines(panels):
         print(line)
 
 
@@ -75,6 +84,7 @@ def cmd_subagents(args) -> int:
     _print_shared_progress(panels)
     _print_takeover_view(panels)
     _print_acceptance_plan(panels)
+    _print_acceptance_next_action(panels)
     if not items:
         print("没有匹配的子代理记录。")
         return 0
