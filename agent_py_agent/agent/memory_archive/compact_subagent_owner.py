@@ -45,6 +45,7 @@ def resolve_compact_subagent_owner(request: CompactSubagentOwnerRequest) -> dict
         "refs": refs,
         "workspace_refs": refs.get("agent_run_workspaces", []),
         "legacy_run_ref": _read_legacy_run_ref(refs.get("legacy_run_ref", "")),
+        "reserved_hooks": _reserved_hooks(request, refs),
     }
 
 
@@ -62,6 +63,7 @@ def _base_payload(request: CompactSubagentOwnerRequest) -> dict[str, Any]:
         "memory_scope": "task_local",
         "writes_main_memory": False,
         "automatic_tool_execution": "none",
+        "reserved_hooks": {},
         "reserved": runtime_memory_reserved_fields(COMPACT_SUBAGENT_OWNER_SCHEMA),
     }
 
@@ -120,6 +122,26 @@ def _read_legacy_run_ref(value: str) -> dict[str, Any]:
         return {}
     payload = read_json_object(Path(value))
     return payload if payload else {}
+
+
+# LLM: _reserved_hooks names future subagent session compact files without creating or mutating them.
+# 函数用途: 预留子代理自动会话压缩 hook 的路径和边界，当前只返回 refs，不写文件。
+def _reserved_hooks(request: CompactSubagentOwnerRequest, refs: dict[str, Any]) -> dict[str, Any]:
+    compactions = str(refs.get("agent_compactions", "") or "")
+    return {
+        "enabled": False,
+        "owner_type": request.owner_type,
+        "owner_id": request.owner_id,
+        "run_compactions_dir": compactions,
+        "session_compact_ledger": f"{compactions}/session_compact_ledger.jsonl" if compactions else "",
+        "continue_packet_ref": f"{compactions}/latest_continue_packet.json" if compactions else "",
+        "writes_main_memory": False,
+        "automatic_tool_execution": "none",
+        "notes": [
+            "reserved for future task-local subagent session compact",
+            "must not write main-agent long-term memory",
+        ],
+    }
 
 
 # LLM: _owner_status describes whether a subagent owner can resume from a run workspace or only legacy data.

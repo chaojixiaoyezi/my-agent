@@ -51,7 +51,7 @@ agent_py_agent/
 |   |   |-- services/                          # 日志分析服务层通用 coercion/normalization
 |   |   |-- storage/                           # 日志存储和查询 projection
 |   |   `-- tools/                             # agent 可调用的日志查询/trace/hunt 工具
-|   |-- memory_archive/                       # raw archive、task/run workspace、compact apply/resume/handoff/action-guard/auto/suggest/subagent-owner refs、memory gate
+|   |-- memory_archive/                       # raw archive、task/run workspace、runtime facts、compact apply/resume/handoff/action-guard/auto/suggest/subagent-owner refs、memory gate
 |   |   |-- query/                             # archive 查询/filter/payload 构造
 |   |   |-- runtime/                           # run-time archive hook 和事件同步
 |   |   `-- snapshots/                         # 快照模型和 snapshot IO
@@ -184,7 +184,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |   |   |-- memory.py                          # 记忆兼容入口，真实实现已拆到 memory_store/
 |   |   |-- memory_settings.py                 # memory 配置安全解析兼容入口，真实实现已拆到 settings/memory.py
 |   |   |-- memory_store/                      # 长期记忆存储，当前是 JSONL + LocalStore 索引
-|   |   |-- memory_archive/                    # raw/hook/snapshot、runtime workspace、schema v2、control-plane query、tool-output artifacts 和非破坏性 compact apply/resume/subagent-owner refs
+|   |   |-- memory_archive/                    # raw/hook/snapshot、runtime workspace/facts、schema v2、control-plane query、tool-output artifacts 和非破坏性 compact apply/resume/continue packet/subagent-owner refs
 |   |   |-- memory_routing/                    # 长期规则索引化路由，负责 MEMORY -> index -> authority file 的确定性匹配
 |   |   |-- observability/                     # 未来 request_id、耗时、状态、错误码、metrics、trace 目录
 |   |   |   `-- user_space/                    # 用户数据隔离：路径解析、目录管理、迁移工具
@@ -233,6 +233,8 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 |       |-- test_log_analysis_query.py         # 本地日志查询、evidence 和 hunting tool 测试
 |       |-- test_memory_archive.py             # 压缩前快照、raw 冷归档、留存策略和 token 估算测试
 |       |-- test_memory_archive_runtime.py     # run turn 冷归档 helper、稳定 event_id/hash 和工具元数据测试
+|       |-- test_compact_parent_acceptance_flow.py # compact resume continue packet 与 parent acceptance auto-policy 联调边界测试
+|       |-- test_memory_compact.py              # compact apply/resume、handoff、completion prompt 和手动 fact-write 闭环测试
 |       |-- test_memory_compact_auto.py        # 自动 compact/resume 协调器的 plan-only 和 action guard 停车测试
 |       |-- test_memory_cli.py                 # memory-route / memory-doctor CLI 可见诊断测试
 |       |-- test_memory_config.py              # memory 配置安全默认、非法值回退和 warning receipt 测试
@@ -922,9 +924,12 @@ docs/
 - `agent_py_agent/agent/subagents/services/takeover_readiness.py`: 生成接管前必读包 `reports/takeover_readiness.json` 和 `TAKEOVER_READINESS.md`，只保存 refs、artifact manifest 元数据和读取顺序，不读取大正文。
 - `agent_py_agent/agent/subagents/rendering_rescue.py`: 渲染 rescue packet 的 refs-only 摘要，避免主 `rendering.py` 因接管/救援展示继续膨胀。
 - `agent_py_agent/agent/memory_archive/compact_resume_failsafe.py`: 从 compact restore refs 指向的 hook JSONL 中提取工具输出外置前 fail-safe checkpoint，保持 memory-resume refs-only。
+- `agent_py_agent/agent/memory_archive/compact_continue_packet.py`: 把 compact resume 后的 work_state、action guard、推荐读取路径和 subagent owner refs 固定成继续工作包；它只表达恢复上下文可继续，不执行工具或业务验收。
+- `agent_py_agent/agent/memory_archive/compact_resume_blocked.py`: 生成 compact metadata 缺失时的 schema-compatible 阻断 payload，让主 resume 编排保持薄。
 - `agent_py_agent/agent/memory_archive/artifact_reader.py`: 按 tool output index 显式读取外置 artifact 正文切片，并校验路径边界和 sha256。
 - `agent_py_agent/agent/tooling/artifact.py`: 注册 `read_artifact` 工具，给模型提供受控 artifact slice 读取入口。
 - `agent_py_agent/cli/memory_artifact_commands.py`: 提供 `memory-artifact-read` 命令，保持 artifact 正文读取和 archive resume/search CLI 分离。
+- `agent_py_agent/cli/memory_resume_compact_rendering.py`: 输出 `memory-resume --from-compact` 的 handoff、continue packet、completion prompt 和推荐路径。
 - `agent_py_agent/agent/subagents/services/persistence_security.py`: 负责 `SecuritySignal` 预留字段的读取归一化，避免 persistence 主流程继续膨胀；当前不执行安全策略。
 - `agent_py_agent/agent/subagents/services/persistence_identity.py`: 负责 `RuntimeIdentity` 预留字段的读取归一化，保证员工/会话/配置 scope 只作为审计元数据进入 task 记录。
 - `agent_py_agent/agent/subagents/model_task.py`: 新增 `SecuritySignal` 和 `security_review_required` 安全预留字段，用于记录安全劫持、安全欺骗、prompt injection、工具权限异常等可疑信号；当前只审计不拦截。

@@ -53,6 +53,7 @@
 - 2026-05-08 Parent Acceptance Controller 第五片已落地：新增 `subagents-acceptance-plan --apply` 和 `parent_acceptance_apply.json`；只有 `inspect_only` 会进入既有 acceptance apply，`execute_tests` / `request_human` / `rescue` 只写拦截审计，不自动跑 tests、不自动 rescue、不绕过人工确认。
 - 2026-05-08 Parent Acceptance Controller 第六片已落地：新增 `plan_parent_acceptance_next_action(run_id)` 和 `subagents-acceptance-plan --next-action`，把当前 plan/apply 审计映射成上级可读的显式动作建议；它只展示建议和 refs，不执行动作、不改 task。
 - 2026-05-08 Parent Acceptance Auto Policy dry-run 第一片已落地：新增 `plan_parent_acceptance_auto_policy(run_id)` 和 `subagents-acceptance-plan --auto-policy`，写入 `parent_acceptance_auto_policy.json`；当前只判断 allow/blocked 和 would_execute，`executed` 固定 false，不执行 tests、不 apply、不 rescue。
+- 2026-05-08 compact/resume 联调第一片已落地：新增测试证明 subagent owner refs、compact continue packet 和 parent acceptance auto-policy 可以串联；compact `ready_to_continue` 不会触发 parent tests/apply/rescue，auto-policy 仍保持 dry-run、`executed=false`、不改 task 状态。
 - 2026-05-08 Parent Acceptance Controller 第七片已落地：`status --json`、人类 `status` 和 `subagents` 看板新增 `Acceptance Next Action` 摘要，展示可见待验收/失败/阻塞 run 的 action、reason、command、refs 和 `mutates_task_state`；展示层保持 refs-only，不执行命令、不读取 artifact 正文、不写任务状态。
 
 - 2026-05-05 CI 稳定性修复：修正 `manager_runner_results.py` 在结构化解析失败时仍把 `SubAgentRunnerResult.ok` 写成旧值的问题；同时补齐 `test_local_store_gateway.py` 的临时目录隔离和 heartbeat 读取路径，避免 gateway 测试互相污染。

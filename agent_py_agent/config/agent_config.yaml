@@ -61,6 +61,7 @@ auto_save_memory: true
 # - memory_resume_auto_context_mode:
 #   off: 不注入恢复块；trigger: 只有“继续/恢复/刚刚/run_id”等场景触发；always: 每轮都尝试。
 # - memory_resume_auto_context_limit 表示自动恢复最多拿多少条线索，范围 1-50。
+# - memory_compact_auto_allow_apply 默认关闭；开启后也只允许非破坏性 apply + auto resume + guard，不自动跑工具。
 memory_archive_level: 3
 memory_hook_enabled: true
 memory_hook_archive_level: 3
@@ -72,6 +73,7 @@ memory_rule_receipt_enabled: true
 memory_resume_auto_context_enabled: false
 memory_resume_auto_context_mode: "trigger"
 memory_resume_auto_context_limit: 5
+memory_compact_auto_allow_apply: false
 
 # 是否启用自学习功能
 # - false: 默认关闭，只按已有 prompt、记忆、工具和 skill 工作，不自动沉淀新经验

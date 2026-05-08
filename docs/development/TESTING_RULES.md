@@ -89,18 +89,48 @@ Keep fixtures minimal; prefer factory functions for complex objects.
 
 ## 6. Verification Commands / 验证命令
 
-Run these commands before committing:
+Run focused tests while developing, then choose the final gate based on whether
+the change will be pushed to the remote repository.
+
+开发中先跑 focused tests；收尾时按是否提交远端选择验收强度。
+
+### 6.1 Local-only development / 只做本地开发
+
+If the work stays local and will not be pushed yet, run the checks that match
+the risk of the change:
+
+如果这轮只是本地探索、草稿、小切片开发，暂时不推远端，按改动风险运行：
 
 ```bash
 python -m compileall -q agent_py_agent scripts          # Syntax check
-python -m pytest agent_py_agent/tests/ -q                # Full test suite
-python -m pytest agent_py_agent/tests/test_architecture_guardrails.py -q  # Guardrails
-ruff check agent_py_agent                                # Lint
-python scripts/check_code_size.py                        # Size limits
+python -m pytest agent_py_agent/tests/test_memory_routing_matcher.py -q -v  # Focused example
+python scripts/check_doc_sync.py                         # Docs sync when docs/modules changed
+python scripts/check_code_size.py --mode warn            # Size warnings for code changes
 git diff --check                                         # Whitespace errors
 ```
 
-For focused development: `python -m pytest agent_py_agent/tests/test_memory_routing_matcher.py -q -v`
+### 6.2 Remote push / PR / main merge strict gate
+
+Before pushing a branch, updating a remote PR, or merging into `main`, run the
+strict local gate below. This rule still applies when GitHub Actions is disabled,
+blocked by billing, or intentionally deferred until the next quota cycle.
+
+推送远端分支、更新远端 PR、或合并到 `main` 前，必须跑下面的本地严格 gate。GitHub Actions 被关闭、被账单阻塞、或计划下个月再开时，也不能跳过这一步。
+
+```bash
+python3 -m pytest -q --tb=short                          # Full test suite
+ruff check agent_py_agent scripts                        # Lint
+python3 scripts/check_doc_sync.py                        # Docs sync
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json  # Hard/high-risk/soft gate
+git diff --check                                         # Whitespace errors
+python3 scripts/check_clean_package.py .                 # Package cleanliness
+```
+
+If any strict-gate command fails, do not push or merge by default. Only bypass
+with an explicit user instruction, and record the failing command plus risk in
+the final report.
+
+如果严格 gate 任一命令失败，默认不得推送或合并。只有用户明确要求绕过时才允许，并且最终汇报必须写清失败命令和风险。
 
 ---
 

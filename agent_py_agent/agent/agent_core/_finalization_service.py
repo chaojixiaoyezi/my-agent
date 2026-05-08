@@ -15,6 +15,7 @@ from ..memory_archive import (
 from ..memory_archive.compact import MemoryCompactPlanOptions
 from ..memory_archive.compact_auto import MemoryCompactAutoCycleOptions
 from ..memory_archive.runtime.turn_archiver import ArchiveRunTurnParams, ArchiveTurnContext
+from ..memory_archive.runtime_fact_source import RuntimeFactSourceRequest, write_runtime_fact_source
 from ..memory_archive.snapshots import (
     RecoverySnapshotInput,
 )
@@ -54,6 +55,7 @@ class FinalizationService:
             source=ctx.source,
         )
         archive_result = self._archive_run_if_needed(archive_params)
+        runtime_fact_source = self._write_runtime_fact_source_if_needed(ctx, run_request_id)
 
         recovery_params = WriteRecoverySnapshotParams(
             do_save=ctx.do_save,
@@ -66,7 +68,7 @@ class FinalizationService:
             task_id=ctx.task_id,
             source=ctx.source,
             recovery_task_refs=ctx.recovery_task_refs,
-            recovery_content_paths=ctx.recovery_content_paths,
+            recovery_content_paths=_recovery_content_paths(ctx, runtime_fact_source),
             recovery_next_actions=ctx.recovery_next_actions,
             routed_context=ctx.routed_context,
         )
@@ -84,6 +86,24 @@ class FinalizationService:
         token_ledger = self._estimate_token_usage(token_params)
 
         return self._build_agent_run_result(ctx, archive_result, snapshot_result, token_ledger)
+
+    # LLM: _write_runtime_fact_source_if_needed makes real run facts visible to later compact apply.
+    # 函数用途: 保存真实 run 的显式验收、约束和测试事实源，并把目录交给 recovery snapshot。
+    def _write_runtime_fact_source_if_needed(self, ctx: FinalizeContext, run_request_id: str) -> str:
+        if not ctx.do_save:
+            return ""
+        return write_runtime_fact_source(
+            RuntimeFactSourceRequest(
+                root=self._agent.root,
+                request_id=run_request_id,
+                user_prompt=ctx.user_prompt,
+                response_text=ctx.final_response.text,
+                backend=ctx.final_response.backend,
+                status="ok",
+                next_actions=ctx.recovery_next_actions or [],
+                archive_tool_calls=ctx.archive_tool_calls or [],
+            )
+        )
 
     # LLM: _archive_run_if_needed 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 写入ifneeded的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动运行循环、工具调用、调度记录和最终响应，调用方依赖写入顺序和文件格式。
@@ -205,6 +225,15 @@ class FinalizationService:
         )
 
 
+# LLM: _recovery_content_paths appends runtime fact source refs without mutating FinalizeContext.
+# 函数用途: 合并调用方 recovery_content_paths 和本轮 run fact 目录，供 hook snapshot 记录恢复入口。
+def _recovery_content_paths(ctx: FinalizeContext, runtime_fact_source: str) -> list[str]:
+    paths = list(ctx.recovery_content_paths or [])
+    if runtime_fact_source:
+        paths.append(runtime_fact_source)
+    return paths
+
+
 # LLM: _snapshot_result_fields 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 处理snapshot结果字段相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _snapshot_result_fields(snapshot_result) -> dict:
@@ -250,6 +279,7 @@ def _compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[s
                 run_id=ctx.run_id or "",
                 task_id=ctx.task_id or "",
             ),
+            allow_apply=bool(getattr(agent.config, "memory_compact_auto_allow_apply", False)),
         ),
     )
     suggestion = cycle["suggestion"]
@@ -263,6 +293,8 @@ def _compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[s
         "memory_compact_auto_next_action": str(cycle["next_action"]),
         "memory_compact_auto_allowed_to_continue": bool(cycle["allowed_to_continue"]),
         "memory_compact_auto_tool_execution": str(cycle["automatic_tool_execution"]),
+        "memory_compact_auto_apply_id": str(cycle["apply_id"]),
+        "memory_compact_auto_continue_ready": bool(cycle["continue_packet"].get("ready_to_continue")),
     }
 
 

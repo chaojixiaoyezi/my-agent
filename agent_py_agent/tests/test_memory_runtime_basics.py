@@ -105,7 +105,33 @@ def test_run_surfaces_compact_suggestion_without_auto_apply(tmp_path):
     assert result.memory_compact_auto_next_action == "ask_user_before_apply"
     assert result.memory_compact_auto_tool_execution == "none"
     assert result.memory_compact_auto_allowed_to_continue is False
+    assert result.memory_compact_auto_apply_id == ""
+    assert result.memory_compact_auto_continue_ready is False
     assert not (tmp_path / "memory_archive" / "compact_applies").exists()
+
+
+def test_run_auto_compact_apply_stops_after_continue_packet(tmp_path):
+    """LLM: Tests opt-in auto compact apply still stops after guarded continue packet."""
+    agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
+    agent.config.memory_compact_context_window_tokens = 20
+    agent.config.memory_compact_auto_allow_apply = True
+
+    result = agent.run(
+        "验收: auto compact packet exists\n约束: no automatic tool execution\n测试: focused compact runtime test",
+        save=True,
+        request_id="req-auto-compact",
+        run_id="run-auto-compact",
+        task_id="run-auto-compact",
+        recovery_next_actions=["continue only after reading continue packet"],
+    )
+
+    assert result.memory_compact_auto_status == "ready_after_action_guard"
+    assert result.memory_compact_auto_next_action == "continue_after_guard"
+    assert result.memory_compact_auto_allowed_to_continue is True
+    assert result.memory_compact_auto_continue_ready is True
+    assert result.memory_compact_auto_tool_execution == "none"
+    assert result.memory_compact_auto_apply_id
+    assert (tmp_path / "memory_archive" / "compact_applies").exists()
 
 
 def test_run_no_save_does_not_write_raw_archive(tmp_path):

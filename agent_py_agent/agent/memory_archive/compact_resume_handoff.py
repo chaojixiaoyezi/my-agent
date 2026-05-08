@@ -29,6 +29,7 @@ class CompactResumeHandoffRequest:
     recommended_read_paths: list[str]
     next_actions: list[str]
     fail_safe_checkpoints: list[dict[str, Any]]
+    completion_prompt: dict[str, Any]
 
 
 # LLM: build_compact_resume_handoff is read-only and makes resume output easy for humans and agents.
@@ -53,6 +54,7 @@ def build_compact_resume_handoff(request: CompactResumeHandoffRequest) -> dict[s
         "recommended_read_paths": list(request.recommended_read_paths),
         "fail_safe_checkpoints": _fail_safe_checkpoint_payloads(request.fail_safe_checkpoints),
         "missing_fields": _string_list(work_state.get("missing_fields")),
+        "completion_prompt": dict(request.completion_prompt),
         "consistency_status": str(request.consistency.get("status", "")),
         "action_guard": _action_guard_payload(request.action_guard),
         "reserved": runtime_memory_reserved_fields(COMPACT_RESUME_HANDOFF_SCHEMA),
@@ -84,6 +86,7 @@ def render_compact_resume_context_block(handoff: dict[str, Any]) -> str:
     _extend_section(lines, "Fail Safe Checkpoints", _fail_safe_checkpoint_lines(handoff["fail_safe_checkpoints"]))
     _extend_section(lines, "Must Read", handoff["recommended_read_paths"][:12])
     _extend_section(lines, "Next Actions", handoff["next_actions"])
+    _extend_completion_prompt(lines, handoff.get("completion_prompt", {}))
     return "\n".join(lines)
 
 
@@ -183,6 +186,14 @@ def _extend_section(lines: list[str], title: str, items: list[str]) -> None:
     lines.extend([f"## {title}", ""])
     lines.extend(f"- {item}" for item in items) if items else lines.append("- none")
     lines.append("")
+
+
+# LLM: _extend_completion_prompt adds the semi-auto missing-field template only when needed.
+# 函数用途: 在 context block 里展示可复制补全模板；字段齐全时不输出额外内容。
+def _extend_completion_prompt(lines: list[str], completion: dict[str, Any]) -> None:
+    if completion.get("status") != "needs_user_input":
+        return
+    lines.extend(["## Completion Prompt", "", completion.get("prompt_template", ""), ""])
 
 
 # LLM: _string_list normalizes unknown JSON values into readable short strings.

@@ -14,6 +14,15 @@ from .compact_action_guard import (
     CompactActionGuardRequest,
     build_compact_action_guard,
 )
+from .compact_continue_packet import (
+    CompactContinuePacketRequest,
+    build_compact_continue_packet,
+)
+from .compact_resume_blocked import BlockedCompactResumeRequest, build_blocked_compact_resume
+from .compact_resume_completion import (
+    CompactCompletionPromptRequest,
+    build_compact_completion_prompt,
+)
 from .compact_resume_failsafe import collect_fail_safe_checkpoints
 from .compact_resume_handoff import (
     CompactResumeHandoffRequest,
@@ -25,6 +34,7 @@ from .compact_resume_io import (
     read_json_object,
     resolve_compact_metadata_path,
 )
+from .compact_resume_paths import recommended_compact_resume_paths
 from .compact_subagent_owner import (
     CompactSubagentOwnerRequest,
     resolve_compact_subagent_owner,
@@ -61,14 +71,28 @@ class _ResumePayloadBuildRequest:
     action_guard: dict[str, Any]
 
 
-# LLM: _BlockedResumeRequest keeps failed compact resolution payloads on the same bundle style.
-# 类用途: 汇总缺失 compact metadata 时的阻断结果字段，避免错误路径 helper 参数继续增长。
+# LLM: _HandoffBundleRequest keeps resume handoff construction separate from the top-level payload.
+# 类用途: 汇总 handoff、completion prompt 和 context block 所需字段，避免恢复 payload 函数膨胀。
 @dataclass(frozen=True)
-class _BlockedResumeRequest:
-    workspace: Path
-    options: MemoryCompactResumeOptions
-    metadata_path: Path
-    status: str
+class _HandoffBundleRequest:
+    metadata: dict[str, Any]
+    artifacts: dict[str, Any]
+    consistency: dict[str, Any]
+    action_guard: dict[str, Any]
+    recommended: list[str]
+    next_actions: list[str]
+    fail_safe_checkpoints: list[dict[str, Any]]
+
+
+# LLM: _ContinuePacketBuildRequest keeps continue-packet inputs bundled at the resume boundary.
+# 类用途: 汇总继续工作包构建所需字段，避免私有 helper 继续拉长参数列表。
+@dataclass(frozen=True)
+class _ContinuePacketBuildRequest:
+    payload_request: _ResumePayloadBuildRequest
+    recommended: list[str]
+    next_actions: list[str]
+    subagent_refs: dict[str, Any]
+    handoff: dict[str, Any]
 
 
 # LLM: build_memory_compact_resume is read-only; it never mutates archive, task, or subagent files.
@@ -78,7 +102,17 @@ def build_memory_compact_resume(root: str | Path, options: MemoryCompactResumeOp
     metadata_path = resolve_compact_metadata_path(workspace, options.apply_ref)
     metadata = read_json_object(metadata_path)
     if not metadata:
-        return _blocked_result(_BlockedResumeRequest(workspace, options, metadata_path, "blocked_missing_compact_metadata"))
+        return build_blocked_compact_resume(
+            BlockedCompactResumeRequest(
+                workspace=workspace,
+                apply_ref=options.apply_ref,
+                owner_type=options.owner_type,
+                owner_id=options.owner_id,
+                resume_mode=options.resume_mode,
+                metadata_path=metadata_path,
+                status="blocked_missing_compact_metadata",
+            )
+        )
     artifacts = read_compact_apply_artifacts(metadata)
     consistency = _consistency_report(metadata, artifacts, options)
     action_guard = build_compact_action_guard(
@@ -145,20 +179,23 @@ def _resume_payload(request: _ResumePayloadBuildRequest) -> dict[str, Any]:
     consistency = request.consistency
     action_guard = request.action_guard
     fail_safe_checkpoints = collect_fail_safe_checkpoints(artifacts["restore_refs"])
-    recommended = _recommended_read_paths(metadata, artifacts, fail_safe_checkpoints)
+    recommended = recommended_compact_resume_paths(metadata, artifacts, fail_safe_checkpoints)
     next_actions = _next_actions(consistency)
-    handoff = build_compact_resume_handoff(
-        CompactResumeHandoffRequest(
+    subagent_refs = _subagent_extension(request.workspace, request.options)
+    handoff_bundle = _handoff_bundle(
+        _HandoffBundleRequest(
             metadata=metadata,
-            work_state=artifacts["work_state"],
+            artifacts=artifacts,
             consistency=consistency,
             action_guard=action_guard,
-            recommended_read_paths=recommended,
+            recommended=recommended,
             next_actions=next_actions,
             fail_safe_checkpoints=fail_safe_checkpoints,
         )
     )
-    context_block = render_compact_resume_context_block(handoff)
+    continue_packet = _continue_packet(
+        _ContinuePacketBuildRequest(request, recommended, next_actions, subagent_refs, handoff_bundle["handoff"])
+    )
     return {
         "version": COMPACT_RESUME_SCHEMA.version,
         "schema": runtime_memory_schema_payload(COMPACT_RESUME_SCHEMA),
@@ -172,76 +209,63 @@ def _resume_payload(request: _ResumePayloadBuildRequest) -> dict[str, Any]:
         "work_state": artifacts["work_state"],
         "consistency_report": consistency,
         "action_guard": action_guard,
-        "handoff": handoff,
+        "handoff": handoff_bundle["handoff"],
+        "continue_packet": continue_packet,
         "fail_safe_checkpoints": fail_safe_checkpoints,
+        "completion_prompt": handoff_bundle["completion_prompt"],
         "recommended_read_paths": recommended,
         "next_actions": next_actions,
-        "context_block": context_block,
-        "subagent_session_compact": _subagent_extension(request.workspace, request.options),
+        "context_block": handoff_bundle["context_block"],
+        "subagent_session_compact": subagent_refs,
         "reserved": runtime_memory_reserved_fields(COMPACT_RESUME_SCHEMA),
     }
 
 
-# LLM: _blocked_result returns a valid v2 payload when the requested compact apply cannot be found.
-# 函数用途: 生成缺失 metadata 时的阻断结果，CLI 可据此返回非零退出码。
-def _blocked_result(request: _BlockedResumeRequest) -> dict[str, Any]:
-    consistency = {
-        "version": COMPACT_RESUME_CONSISTENCY_SCHEMA.version,
-        "schema": runtime_memory_schema_payload(COMPACT_RESUME_CONSISTENCY_SCHEMA),
-        "ok": False,
-        "status": request.status,
-        "owner": _owner_payload(request.options),
-        "apply_id": request.options.apply_ref,
-        "plan_id": "",
-        "checks": [{"name": "metadata_loaded", "ok": False, "severity": "hard"}],
-        "missing_fields": [],
-        "reserved": runtime_memory_reserved_fields(COMPACT_RESUME_CONSISTENCY_SCHEMA),
-    }
-    action_guard = build_compact_action_guard(
-        CompactActionGuardRequest(
-            consistency_report=consistency,
-            work_state={},
-            refs={"metadata": str(request.metadata_path)},
-            options=CompactActionGuardOptions(
-                mode=request.options.resume_mode,
-                owner_type=request.options.owner_type,
-                owner_id=request.options.owner_id,
-            ),
+# LLM: _handoff_bundle builds the human/model handoff pieces from already validated compact artifacts.
+# 函数用途: 生成 completion prompt、handoff 和可复制 context block；不读取或写入额外文件。
+def _handoff_bundle(request: _HandoffBundleRequest) -> dict[str, Any]:
+    completion_prompt = build_compact_completion_prompt(
+        CompactCompletionPromptRequest(
+            apply_id=str(request.metadata.get("apply_id", "")),
+            plan_id=str(request.metadata.get("plan_id", "")),
+            work_state=request.artifacts["work_state"],
+        )
+    )
+    handoff = build_compact_resume_handoff(
+        CompactResumeHandoffRequest(
+            metadata=request.metadata,
+            work_state=request.artifacts["work_state"],
+            consistency=request.consistency,
+            action_guard=request.action_guard,
+            recommended_read_paths=request.recommended,
+            next_actions=request.next_actions,
+            fail_safe_checkpoints=request.fail_safe_checkpoints,
+            completion_prompt=completion_prompt,
         )
     )
     return {
-        "version": COMPACT_RESUME_SCHEMA.version,
-        "schema": runtime_memory_schema_payload(COMPACT_RESUME_SCHEMA),
-        "ok": False,
-        "mode": "resume_from_compact",
-        "workspace_root": str(request.workspace),
-        "apply_id": request.options.apply_ref,
-        "plan_id": "",
-        "owner": _owner_payload(request.options),
-        "refs": {"metadata": str(request.metadata_path)},
-        "work_state": {},
-        "consistency_report": consistency,
-        "action_guard": action_guard,
-        "handoff": {},
-        "fail_safe_checkpoints": [],
-        "recommended_read_paths": [str(request.metadata_path)],
-        "next_actions": ["Find a valid compact apply id or rerun memory-compact --apply."],
-        "context_block": "",
-        "subagent_session_compact": _subagent_extension(request.workspace, request.options),
-        "reserved": runtime_memory_reserved_fields(COMPACT_RESUME_SCHEMA),
+        "completion_prompt": completion_prompt,
+        "handoff": handoff,
+        "context_block": render_compact_resume_context_block(handoff),
     }
 
 
-# LLM: _recommended_read_paths points humans/models back to facts before continuing work.
-# 函数用途: 返回手动恢复时必须优先读取的 compact 产物和原始事实源路径。
-def _recommended_read_paths(
-    metadata: dict[str, Any], artifacts: dict[str, Any], fail_safe_checkpoints: list[dict[str, Any]]
-) -> list[str]:
-    refs = metadata.get("refs", {}) if isinstance(metadata.get("refs"), dict) else {}
-    paths = [str(value) for value in refs.values() if value]
-    paths.extend(str(item.get("path", "") or "") for item in fail_safe_checkpoints)
-    paths.extend(_source_paths(artifacts["restore_refs"]))
-    return _dedupe(paths)
+# LLM: _continue_packet freezes resume state for manual, semi-auto, and future auto callers.
+# 函数用途: 生成继续工作包；只打包已读取的 compact resume 结果，不再读写任何文件。
+def _continue_packet(request: _ContinuePacketBuildRequest) -> dict[str, Any]:
+    payload_request = request.payload_request
+    return build_compact_continue_packet(
+        CompactContinuePacketRequest(
+            metadata=payload_request.metadata,
+            work_state=payload_request.artifacts["work_state"],
+            consistency=payload_request.consistency,
+            action_guard=payload_request.action_guard,
+            handoff=request.handoff,
+            recommended_read_paths=request.recommended,
+            next_actions=request.next_actions,
+            subagent_owner_refs=request.subagent_refs,
+        )
+    )
 
 
 # LLM: _next_actions keeps manual resume from silently executing tools after context recovery.
@@ -280,13 +304,6 @@ def _work_state_missing_fields(artifacts: dict[str, Any]) -> list[str]:
     return list(value) if isinstance(value, list) else []
 
 
-# LLM: _source_paths extracts original fact-source paths from restore refs.
-# 函数用途: 收集 restore refs 中的 archive、snapshot 和 token ledger 路径，供推荐读取。
-def _source_paths(restore_refs: dict[str, Any]) -> list[str]:
-    source_refs = restore_refs.get("source_refs", {}) if isinstance(restore_refs, dict) else {}
-    return [str(item.get("path", "")) for group in source_refs.values() for item in group if item.get("path")]
-
-
 # LLM: _owner_payload records who owns this compact resume without changing current main-agent behavior.
 # 函数用途: 预留 main/subagent/session compact 的 owner 字段，后续子代理自动会话压缩可直接复用。
 def _owner_payload(options: MemoryCompactResumeOptions) -> dict[str, str]:
@@ -304,16 +321,6 @@ def _subagent_extension(workspace: Path, options: MemoryCompactResumeOptions) ->
             resume_mode=options.resume_mode,
         )
     )
-
-
-# LLM: _dedupe preserves read order while removing duplicate recommended paths.
-# 函数用途: 对推荐读取路径去重，保持 compact 产物优先、源文件随后。
-def _dedupe(values: list[str]) -> list[str]:
-    result: list[str] = []
-    for value in values:
-        if value and value not in result:
-            result.append(value)
-    return result
 
 
 __all__ = ["MemoryCompactResumeOptions", "build_memory_compact_resume"]
