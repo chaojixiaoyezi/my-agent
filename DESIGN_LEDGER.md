@@ -1854,3 +1854,12 @@ def example(...):
 - `parent_acceptance_auto_policy.json` 的 policy 现在包含 `execution_mode=manual_only`、`automatic_execution_allowed=false` 和 `recommended_command`。
 - 这一步只把“如果要继续，应该手动跑哪条命令”写成机器可读字段；不会启动进程、不会跑 tests、不会 apply、不会 rescue，也不会改 task/run 状态。
 - `reserved.semi_auto_plan` 记录 stage、manual confirmation 和 `dry_run_only/no_process_execution/no_task_state_mutation` 等硬边界，为后续受控调度器读取做准备。
+
+## 2026-05-09 Parent Acceptance Auto Policy dispatch 半自动摘要
+
+状态：已落地
+
+摘要：
+- `subagents-dispatch` 的 acceptance record 现在透传 policy 的 `execution_mode`、`automatic_execution_allowed` 和 `recommended_command`。
+- JSON report 和 `SUBAGENT_DISPATCH.md` 都能直接看到 manual-only 边界，避免 watch/调度层只看 `would_execute=true` 就误判为可以自动执行。
+- 行为边界不变：dispatch/watch 仍只写审计和引用，不启动 recommended command，不 apply，不 rescue，不改 task 状态。

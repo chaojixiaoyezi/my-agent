@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 
 # LLM: DispatchRecord 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存调度记录字段，包括父级验收 auto-policy 的 refs-only 摘要；关键副作用: 本身不执行输入输出，字段变化会影响构造点、序列化和测试读取。
+# 类用途: 集中保存调度记录字段，包括父级验收 auto-policy 的 refs-only 与 manual-only 摘要；关键副作用: 本身不执行输入输出，字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class DispatchRecord:
     """鐖朵唬鐞嗚皟搴﹀櫒鐨勪竴姝ュ璁¤褰曘€?"""
@@ -32,6 +32,9 @@ class DispatchRecord:
     parent_acceptance_policy_action: str = ""
     parent_acceptance_policy_would_execute: bool = False
     parent_acceptance_policy_executed: bool = False
+    parent_acceptance_policy_execution_mode: str = ""
+    parent_acceptance_policy_automatic_execution_allowed: bool = False
+    parent_acceptance_policy_recommended_command: str = ""
     created_at: float = 0.0
 
 

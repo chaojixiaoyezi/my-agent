@@ -94,6 +94,11 @@ def test_subagent_dispatch_dry_run_plans_runner_patch_and_acceptance():
         assert acceptance_record.parent_acceptance_policy_action == "run_tests"
         assert acceptance_record.parent_acceptance_policy_would_execute is True
         assert acceptance_record.parent_acceptance_policy_executed is False
+        assert acceptance_record.parent_acceptance_policy_execution_mode == "manual_only"
+        assert acceptance_record.parent_acceptance_policy_automatic_execution_allowed is False
+        assert acceptance_record.parent_acceptance_policy_recommended_command == (
+            f"subagents-tests {review_task.id} --re-run"
+        )
         policy_ref = Path(review_task.reports_dir) / "parent_acceptance_auto_policy.json"
         assert acceptance_record.parent_acceptance_policy_ref == str(policy_ref)
         policy_payload = json.loads(policy_ref.read_text(encoding="utf-8"))
@@ -104,6 +109,9 @@ def test_subagent_dispatch_dry_run_plans_runner_patch_and_acceptance():
         assert agent.subagents.load(review_task.id).status == "AWAITING_ACCEPTANCE"
         dispatch_markdown = (root / "subs" / "SUBAGENT_DISPATCH.md").read_text(encoding="utf-8")
         assert "parent_acceptance_auto_policy" in dispatch_markdown
+        assert "execution_mode=manual_only" in dispatch_markdown
+        assert "automatic_execution_allowed=False" in dispatch_markdown
+        assert f"recommended_command=subagents-tests {review_task.id} --re-run" in dispatch_markdown
         assert str(policy_ref) in dispatch_markdown
         assert (root / "subs" / "subagent_dispatch_report.json").exists()
         assert not (root / "subs" / "subagent_dispatch_log.jsonl").exists()
