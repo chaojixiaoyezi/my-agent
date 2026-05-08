@@ -224,3 +224,7 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 - `memory_archive/artifact_reader.py` owns indexed tool-output artifact body reads. It treats `index.jsonl` as the authority, validates the registered path boundary, verifies sha256, and returns explicit slices.
 - `cli/memory_artifact_commands.py` exposes `memory-artifact-read`, keeping failed reads metadata-only and successful reads clearly marked with `reads_artifact_body=true`.
 - `tooling/artifact.py` exposes `read_artifact` to the model as the controlled runtime tool; ordinary workspace files still go through `read_file`.
+
+## 2026-05-08 artifact explicit read CI follow-up
+- `artifact_reader.py` 的路径根、目录边界、path-like ref 判断和 sha256 helper 现在都有定义级用途说明，后续维护者能直接看到这些 helper 是任意文件读取防线的一部分。
+- `__main__.py` 的 CLI 导入顺序已按 ruff 统一格式整理；结构和命令语义不变。
