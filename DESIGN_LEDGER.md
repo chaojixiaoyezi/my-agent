@@ -1788,3 +1788,12 @@ def example(...):
 - checkpoint 来自 compact restore refs 指向的 hook JSONL；恢复包只展示 path、line_no、snapshot_id、工具名、hash、size、next_actions 等摘要，不读取 artifact 正文。
 - `compact_resume_handoff` 和 Compact Resume Context 新增 `Fail Safe Checkpoints` 小节，接管者先读 checkpoint 摘要，再决定是否显式读取 artifact。
 - 这条边界继续遵守：checkpoint 不是 compact，summary 不是 verified fact，artifact ref 不是任意文件路径，完整 artifact body 不是默认 prompt 内容。
+
+## 2026-05-08 artifact explicit read command/tool
+状态：已落地
+
+摘要：
+- 新增 `memory-artifact-read` 命令和 `read_artifact` 工具，作为从 artifact ref 到正文内容的显式读取入口。
+- 读取前必须命中 `memory_archive/artifacts/tool_outputs/index.jsonl`；artifact path、sha256、call_id 只是登记记录的查找 key，不等于任意文件路径读取权限。
+- reader 会校验登记路径仍在 `memory_archive/artifacts/tool_outputs/` 下，读取 artifact JSON 后校验正文 sha256，并支持 `offset` / `max_chars` 切片；`max_chars=0` 才读取完整正文。
+- 这一步把 “artifact_ref != arbitrary file path” 和 “完整大正文必须显式读取” 从设计边界落到 CLI/tool 层。

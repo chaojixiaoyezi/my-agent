@@ -202,3 +202,8 @@
 ## 2026-05-08 compact resume fail-safe code-size split
 - 为避免 `compact_resume.py` 和 `test_memory_compact.py` 继续接近 code-size 软上限，checkpoint JSONL 扫描逻辑拆到 `compact_resume_failsafe.py`，新增回归测试拆到 `test_memory_compact_failsafe.py`。
 - 行为边界不变：memory-resume 只展示 fail-safe checkpoint refs / hash / size / next_actions，不自动读取 tool-output artifact 正文。
+
+## 2026-05-08 artifact explicit read progress
+- 新增 `memory-artifact-read <artifact_ref>`，只读取 tool output index 已登记 artifact；未登记普通文件会返回 `artifact_not_registered`，不打印正文。
+- 新增 `read_artifact` 工具，模型只能通过 artifact path/hash/call_id 显式读取正文切片；默认 `max_chars=4000`，`max_chars=0` 表示读取完整正文。
+- artifact reader 会校验路径仍在 `memory_archive/artifacts/tool_outputs/` 下，并校验 artifact content sha256，避免把 artifact ref 变成任意文件读取后门。
