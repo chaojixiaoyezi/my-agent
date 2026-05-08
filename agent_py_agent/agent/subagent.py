@@ -10,6 +10,8 @@ Human version:
 `agent.subagents.*`，这里保留旧入口，避免一次重构打断所有调用方。
 """
 
+# LLM: keep acceptance options exported through this legacy facade; CI lint may reorder imports, but callers keep the old path.
+from .subagents.acceptance_review_service import AcceptanceReviewOptions
 from .subagents.manager import SubAgentManager
 from .subagents.manager_runner_results import RecordRunnerResultParams
 from .subagents.models import (

@@ -170,6 +170,7 @@ Ctrl+C
 | `subagents-workflow-plan` | 预览目标会命中哪个内置 subagent workflow | 否 | 否 |
 | `subagents-route-capabilities` | 路由 capability request | `--apply` 时写 grant/gap | 否 |
 | `subagents-acceptance` | 验收等待验收的 subagent | `--apply` 时写回状态和审计日志 | 否 |
+| `subagents-tests` | 查看或显式重跑单个 subagent 的真实测试执行记录 | `--re-run` 时写 `test_execution.json/md` | 否 |
 | `subagents-patches` | 审核或 apply runner 输出的 patch 记录 | 默认 review dry-run；`--review-apply` 只写审核状态；`--apply` 真正落文件 | 否 |
 | `subagents-memory-gate` | 查看或写回子代理 memory/skill 候选 review decision | 传 `--candidate-id` 时写 `memory_gate/decisions.jsonl` 和 gate 状态 | 否 |
 | `subagents-dispatch` | 执行父代理调度 | dry-run 写报告；`--apply` 写回 | 只有 `--apply --execute-runners` 会调用 |
@@ -781,6 +782,7 @@ my-agent subagents-route-capabilities --apply --skill-dir .\skills
 ```powershell
 my-agent subagents-acceptance --dry-run
 my-agent subagents-acceptance --apply --reviewer parent
+my-agent subagents-acceptance --execute-tests --test-timeout 120
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -791,6 +793,24 @@ my-agent subagents-acceptance --apply --reviewer parent
 | `--limit <n>` | `20` | 最多处理多少条记录。 |
 | `--reviewer <name>` | `parent` | 验收者标识。 |
 | `--note <text>` | - | 写入验收记录的备注。 |
+| `--execute-tests` | 配置值 | 本次验收显式执行 `output.json.tests`，覆盖 `acceptance_execute_tests`。 |
+| `--no-execute-tests` | 配置值 | 本次验收显式不执行 tests，覆盖配置默认值。 |
+| `--test-timeout <seconds>` | `acceptance_test_timeout_seconds` | 本次真实执行 tests 的单条测试超时秒数。 |
+
+## `subagents-tests`
+
+```powershell
+my-agent subagents-tests <run_id>
+my-agent subagents-tests <run_id> --re-run --timeout 120
+```
+
+默认只读取并展示该 run 的 `reports/test_execution.json` 摘要，不会重新执行测试，也不会读取任何 artifact 正文。显式传 `--re-run` 后，命令会按 `output.json` 里的 `tests` 执行 allowlist 内验证，并写回 `test_execution.json` 和 `test_execution.md`。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `run_id` | - | 子代理运行 ID。 |
+| `--re-run` | `false` | 显式重新执行 `output.json.tests` 并写入真实执行报告。 |
+| `--timeout <seconds>` | `120` | 重跑时单条测试的超时秒数。 |
 
 ## `subagents-patches`
 

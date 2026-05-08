@@ -607,6 +607,7 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 你后续调工具策略时，优先会改这里：
 - 用户层任务规模：`task_max_subagents`、`task_max_grandchildren`，0 表示不设硬上限。
 - Subagent workflow：`subagent_workflow_mode` 支持 `auto/manual/off`，`subagent_builtin_workflows` 控制是否加载内置模板，`subagent_user_workflow_dirs` 指向用户可覆盖模板目录。
+- 父级验收真实测试执行：`acceptance_execute_tests` 默认关闭，`acceptance_test_timeout_seconds` 控制真实执行 tests 的单条超时。
 - 未来 gateway 自适应策略：`scheduler_mode`、`runner_concurrency`、`runner_start_rate`、`runner_timeout_seconds` 和 `runner_failure_policy`，默认都是 `auto`。
 - 第一版 gateway 控制面：`gateway_workspace`、`gateway_heartbeat_interval`、`gateway_stale_seconds`、`gateway_stop_timeout`、`gateway_request_timeout` 和 `gateway_request_poll_interval`。
 - 当前前台 daemon 高级参数：`daemon_*`，用于在 gateway 完整实现前控制 watch 调度。
@@ -922,12 +923,27 @@ docs/
 - `agent_py_agent/agent/subagents/services/persistence_security.py`: 负责 `SecuritySignal` 预留字段的读取归一化，避免 persistence 主流程继续膨胀；当前不执行安全策略。
 - `agent_py_agent/agent/subagents/services/persistence_identity.py`: 负责 `RuntimeIdentity` 预留字段的读取归一化，保证员工/会话/配置 scope 只作为审计元数据进入 task 记录。
 - `agent_py_agent/agent/subagents/model_task.py`: 新增 `SecuritySignal` 和 `security_review_required` 安全预留字段，用于记录安全劫持、安全欺骗、prompt injection、工具权限异常等可疑信号；当前只审计不拦截。
+- `agent_py_agent/agent/subagents/execution_records.py`: 新增 `TestExecutionRecord`，定义真实验收执行证据、输出截断和通过结果派生。
+- `agent_py_agent/agent/subagents/execution_executor.py`: 新增最小 `TestExecutor`，执行 command/file/content 三类检查并产出 `TestExecutionRecord`；当前不接 acceptance 自动写回。
+- `agent_py_agent/agent/subagents/execution_report.py`: 新增 `test_execution.json` / `test_execution.md` 报告写读入口；JSON 是机器事实源，Markdown 只做展示。
+- `agent_py_agent/agent/subagents/acceptance_test_execution.py`: 新增显式验收测试执行桥接，把 `AcceptanceReviewOptions(execute_tests=True)` 转成真实测试报告和阻断 findings；默认不运行。
+- `agent_py_agent/agent/settings/config.py`: 新增 `acceptance_execute_tests` 和 `acceptance_test_timeout_seconds`，让真实测试执行可配置但默认关闭。
+- `agent_py_agent/agent/settings/services/_normalize_runtime_fields.py`: 校验真实验收执行配置，布尔开关走 bool coerce，超时限制在 1 到 300 秒。
+- `agent_py_agent/config/agent_config.yaml`: 新增父级验收真实执行配置注释，说明默认关闭和单次命令覆盖方式。
+- `agent_py_agent/cli/_review.py`: 新增 `subagents-tests` 命令入口；默认只读已有 `test_execution.json` 摘要，`--re-run` 才显式执行 `output.json.tests` 并写回报告；`subagents-acceptance` 读取配置默认值并允许 CLI 覆盖。
+- `agent_py_agent/cli/subcommands_agents.py`: 注册 `subagents-tests <run_id> [--re-run] [--timeout]`，并给 `subagents-acceptance` 增加 `--execute-tests` / `--no-execute-tests` / `--test-timeout`。
 - `agent_py_agent/tests/test_local_store_control_plane.py`: 覆盖 LocalStore 控制面表、rollup 计算、上级/中间子代理 runtime query，以及 `SubAgentPersistenceService.save()` 的投影写入路径。
 - `agent_py_agent/tests/test_local_store_shared_progress_panel.py`: 覆盖共享进度面板如何组合 runtime query、task rollup、blocked runs、inheritance manifest refs 和 takeover readiness refs。
 - `agent_py_agent/tests/test_subagent_inheritance_manifest.py`: 覆盖 parent/child 创建时的继承、覆盖、裁剪记录和 manifest JSON 落盘。
 - `agent_py_agent/tests/test_subagent_failure_handoff.py`: 覆盖失败/阻塞 run 保存时的 failure handoff JSON 落盘和 LocalStore metadata refs。
 - `agent_py_agent/tests/test_subagent_takeover_readiness.py`: 覆盖接管前必读包生成、落盘和不读取 artifact 正文的边界。
 - `agent_py_agent/tests/test_subagent_security_reserve.py`: 覆盖安全信号预留字段随 task 持久化，并投影到 LocalStore metadata。
+- `agent_py_agent/tests/test_subagent_test_execution_record.py`: 覆盖真实验收执行记录模型的序列化、stdout/stderr 截断和 `passed` 语义。
+- `agent_py_agent/tests/test_subagent_test_executor.py`: 覆盖最小真实验收执行器的 command、危险字符拦截、file_check 和 content_check 行为。
+- `agent_py_agent/tests/test_subagent_test_execution_report.py`: 覆盖 test execution JSON/Markdown 报告的汇总字段、记录恢复和人类摘要。
+- `agent_py_agent/tests/test_agent/test_subagent_acceptance.py`: 新增显式真实测试执行 dry-run 验收用例，覆盖 runner 假 PASS 被真实命令失败阻断且任务状态不被 dry-run 改写。
+- `agent_py_agent/tests/test_subagents_tests_command.py`: 覆盖 `subagents-tests` 查看已有报告、显式 `--re-run` 写回报告，以及 `subagents-acceptance` 从配置读取真实执行默认值并被 CLI 覆盖。
+- `agent_py_agent/tests/test_config_validation.py`: 覆盖 `acceptance_execute_tests` 默认关闭、布尔 coerce 和 `acceptance_test_timeout_seconds` 范围校验。
 - `agent_py_agent/tests/test_status_shared_progress.py`: 覆盖 `status` / `subagents` CLI 展示共享进度、failure handoff refs 和 takeover packet refs。
 - `agent_py_agent/tests/test_tool_output_externalizer.py`: 覆盖大工具输出外置 artifact 和外置前 fail-safe recovery snapshot。
 - `agent_py_agent/tests/test_memory_compact_failsafe.py`: 覆盖 `memory-resume --from-compact` 如何展示 fail-safe checkpoint refs 且不读取 artifact 正文。

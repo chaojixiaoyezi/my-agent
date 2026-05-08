@@ -131,7 +131,7 @@
 
 ## 2026-04-29 / Memory 第一批痛点归档
 
-状态：设计中
+状态：部分落地
 
 思路：
 - 记忆系统的问题不是“没有记忆”，而是层级、召回、任务状态、flush、lesson 抽象和未来 skill 沉淀之间没有稳定同步。
@@ -151,7 +151,7 @@
 
 ## 2026-04-30 / Memory 全量归档等级与压缩前 Hook
 
-状态：设计中
+状态：部分落地
 
 思路：
 - 原始会话可以做全量冷归档，但不能直接进入 prompt。
@@ -1744,18 +1744,15 @@ def example(...):
 摘要：
 
 验收不能只看子代理"填表"，必须有系统级真实执行验证：
-1. **TestExecutionRecord**：记录测试命令的真实退出码/stdout/stderr
-2. **TestExecutor**：执行测试命令，支持三种验证方式（command/file_check/content_check）
-3. **命令安全**：allowlist + 阻止高风险 shell 字符 + 超时限制
-4. **集成验收**：验收时自动执行测试，结果作为验收依据
-5. **存储**：test_execution.json 保存执行记录，支持 CLI 查看
+1. **TestExecutionRecord**：记录测试命令的真实退出码/stdout/stderr（2026-05-08 已落地第一片：纯数据模型、序列化、输出截断和 `passed` 派生结果）
+2. **TestExecutor**：执行测试命令，支持三种验证方式（command/file_check/content_check）（2026-05-08 已落地第一片：最小执行器、workspace 内文件检查、literal 内容检查）
+3. **命令安全**：allowlist + 阻止高风险 shell 字符 + 超时限制（2026-05-08 已落地第一片：shell=False、基础 allowlist、危险字符拦截、超时记录）
+4. **集成验收**：验收时自动执行测试，结果作为验收依据（2026-05-08 已落地第一片：通过 `AcceptanceReviewOptions(execute_tests=True)` 显式 opt-in，dry-run 会写 `test_execution.json/md` 并生成 P0 阻断 finding；默认仍不自动执行）
+5. **存储**：test_execution.json 保存执行记录，支持 CLI 查看（2026-05-08 已落地：`write_test_execution_report()` 写 JSON/Markdown，JSON 是事实源，Markdown 只做展示；`subagents-tests <run_id>` 可查看，`--re-run` 才显式重跑）
+6. **配置**：`acceptance_execute_tests` 默认关闭，`acceptance_test_timeout_seconds` 默认 120；`subagents-acceptance` 可用 `--execute-tests` / `--no-execute-tests` / `--test-timeout` 覆盖单次验收。
 
 待做：
-- 实现 TestExecutor 类
-- 集成到 acceptance_helpers.py
-- 新增 test_execution.json 存储
-- 新增 subagents-tests CLI 命令
-- 更新配置项
+- 后续再补聚合统计、保留策略和更细的 allowlist 配置。
 
 ## 2026-05-08 / Agent Runtime Control Plane 预留边界
 

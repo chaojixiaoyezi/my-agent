@@ -68,7 +68,7 @@
 | test_capability_config.py | capability_config | 17 |
 | test_capability_config_class.py | capability_config | 13 |
 
-### cli (17 文件, 399 tests)
+### cli (20 文件, 400+ tests)
 
 | 文件 | 覆盖模块 | 测试数 |
 |------|----------|--------|
@@ -77,7 +77,7 @@
 | test_cli_reference.py | cli.reference | 1 |
 | test_config_commands.py | cli.config | 20 |
 | test_config_normalize.py | cli.config_normalize | 30 |
-| test_config_validation.py | cli.config_validation | 13 |
+| test_config_validation.py | cli.config_validation | 15 |
 | test_gateway_commands.py | cli.gateway | 15 |
 | test_local_store_commands.py | cli.local_store | 11 |
 | test_log_analysis_cli.py | cli.log_analysis | 6 |
@@ -89,6 +89,7 @@
 | test_memory_commands_cli.py | cli.memory | 22 |
 | test_parser_subcommands.py | cli.parser | 18 |
 | test_startup_commands.py | cli.startup | 12 |
+| test_subagents_tests_command.py | cli.subagents_tests | 4 |
 | test_task_cli_ux.py | cli.task | 22 |
 | test_workstream_commands.py | cli.workstream | 12 |
 
@@ -300,13 +301,16 @@
 | test_stress_log_pipeline.py | stress.log_pipeline | 11 |
 | test_stress_memory.py | stress.memory | 19 |
 
-### subagent (21 文件, 440+ tests)
+### subagent (24 文件, 450+ tests)
 
 | 文件 | 覆盖模块 | 测试数 |
 |------|----------|--------|
 | test_subagent_commands.py | subagent.commands | 15 |
 | test_subagent_mixin.py | subagent.mixin | 17 |
 | test_subagent_models.py | subagent.models | 16 |
+| test_subagent_test_execution_record.py | subagent.execution_records | 3 |
+| test_subagent_test_executor.py | subagent.execution_records | 4 |
+| test_subagent_test_execution_report.py | subagent.execution_report | 2 |
 | test_subagent_parsing.py | subagent.parsing | 27 |
 | test_subagent_policies.py | subagent.policies | 37 |
 | test_subagent_quality_contract.py | subagent.quality | 5 |
@@ -319,7 +323,7 @@
 | test_subagent_workflow_planner.py | subagent.workflow | 10 |
 | test_subagent_workflow_router.py | subagent.workflow | 10 |
 | test_subagent_workflow_templates.py | subagent.workflow | 5 |
-| test_subcommands_agents_class.py | subagent.commands | 17 |
+| test_subcommands_agents_class.py | subagent.commands | 19 |
 | test_subcommands_basic_class.py | subagent.commands | 34 |
 | test_subcommands_gateway_class.py | subagent.commands | 22 |
 | test_planner.py | subagent.planner | 16 |

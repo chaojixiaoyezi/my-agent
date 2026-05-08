@@ -161,6 +161,17 @@ subagent_workflow_review_rounds: 1
 task_max_subagents: 0
 task_max_grandchildren: 0
 
+# 父级验收是否默认真实执行 runner 输出里的 tests：
+# - false: 保守默认，只检查 runner 填写的 tests 字段和证据，不自动跑命令。
+# - true: `subagents-acceptance` 默认执行 allowlist 内的 command/file/content 验证。
+# - 单次命令可用 `--execute-tests` / `--no-execute-tests` 覆盖这里。
+acceptance_execute_tests: false
+
+# 父级验收真实执行 tests 时的单条测试超时秒数：
+# - 1 到 300 秒；超过范围会回退默认值。
+# - `subagents-acceptance --test-timeout` 和 `subagents-tests --timeout` 可覆盖单次调用。
+acceptance_test_timeout_seconds: 120
+
 # 调度策略（未来 gateway 的主要策略面板）：
 # - auto 表示由主代理/调度器根据模型速度、失败率、队列长度和卡住情况自适应调整。
 # - 普通用户不需要改这些；高级用户可以改成具体数字或具体策略。

@@ -15,6 +15,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from .execution_executor import TestExecutor
+
+# LLM: TestExecutionRecord/TestExecutor stay exported from this facade so acceptance code can use the stable model path.
+from .execution_records import TestExecutionRecord
 from .model_capabilities import (
     CapabilityGap,
     CapabilityGrant,
@@ -159,6 +163,8 @@ __all__ = [
     "SubAgentTask",
     "StatusReport",
     "TakeoverRecord",
+    "TestExecutor",
+    "TestExecutionRecord",
     "TaskStatus",
     "VerificationEvidence",
     "WorkOrderValidation",

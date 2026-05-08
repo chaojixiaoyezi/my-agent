@@ -28,6 +28,7 @@ from .subagents import (
     cmd_subagents_plan_actions,
     cmd_subagents_probe,
     cmd_subagents_route_capabilities,
+    cmd_subagents_tests,
     cmd_subagents_workflow_plan,
 )
 
@@ -106,6 +107,14 @@ def _add_agents_action_subcommands(sub):
     route.add_argument("--limit", type=int, default=20, help="最多处理多少条 request")
     route.set_defaults(func=cmd_subagents_route_capabilities, apply=False)
 
+    _add_agents_acceptance_subcommand(sub)
+    _add_agents_tests_subcommand(sub)
+    _add_agents_patch_subcommand(sub)
+
+
+# LLM: _add_agents_acceptance_subcommand keeps acceptance-specific argparse wiring isolated.
+# 函数用途: 注册父级验收命令和真实测试执行覆盖参数。
+def _add_agents_acceptance_subcommand(sub):
     acceptance = sub.add_parser("subagents-acceptance", help="验收等待验收的 subagent")
     acceptance.add_argument("--dry-run", action="store_false", dest="apply", help="只生成验收报告，不修改记录")
     acceptance.add_argument("--apply", action="store_true", help="验收通过时标记 DONE/VERIFIED，失败时标记 BLOCKED/FAILED")
@@ -113,8 +122,37 @@ def _add_agents_action_subcommands(sub):
     acceptance.add_argument("--limit", type=int, default=20, help="最多处理多少条记录")
     acceptance.add_argument("--reviewer", default="parent", help="验收者标识")
     acceptance.add_argument("--note", help="写入验收记录的备注")
+    acceptance_tests = acceptance.add_mutually_exclusive_group()
+    acceptance_tests.add_argument(
+        "--execute-tests",
+        action="store_true",
+        dest="execute_tests",
+        default=None,
+        help="本次验收显式执行 output.json 里的 tests",
+    )
+    acceptance_tests.add_argument(
+        "--no-execute-tests",
+        action="store_false",
+        dest="execute_tests",
+        help="本次验收显式不执行 tests，覆盖配置默认值",
+    )
+    acceptance.add_argument("--test-timeout", type=float, default=None, help="真实执行 tests 时单条测试超时秒数")
     acceptance.set_defaults(func=cmd_subagents_acceptance, apply=False)
 
+
+# LLM: _add_agents_tests_subcommand registers the explicit test-report inspection command.
+# 函数用途: 注册测试执行记录查看和手动重跑命令。
+def _add_agents_tests_subcommand(sub):
+    tests = sub.add_parser("subagents-tests", help="查看或显式重跑 subagent 真实测试执行记录")
+    tests.add_argument("run_id", help="子代理运行 ID")
+    tests.add_argument("--re-run", action="store_true", help="显式重新执行 output.json 里的 tests 并写入报告")
+    tests.add_argument("--timeout", type=float, default=120.0, help="re-run 时单条测试超时秒数")
+    tests.set_defaults(func=cmd_subagents_tests)
+
+
+# LLM: _add_agents_patch_subcommand keeps patch review/apply argparse wiring out of the action hub.
+# 函数用途: 注册 patch 审核、预演和 apply 命令参数。
+def _add_agents_patch_subcommand(sub):
     patches = sub.add_parser("subagents-patches", help="审核 runner 输出里的 patch 记录")
     patch_action = patches.add_mutually_exclusive_group()
     patch_action.add_argument("--dry-run", action="store_const", const="review_dry_run", dest="patch_action", help="只生成 patch 审核报告，不修改记录")

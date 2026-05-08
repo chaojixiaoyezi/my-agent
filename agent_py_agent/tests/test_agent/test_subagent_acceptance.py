@@ -14,6 +14,7 @@ from pathlib import Path
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagent import (
+    AcceptanceReviewOptions,
     EvidencePacket,
     RecordRunnerResultParams,
     VerificationEvidence,
@@ -241,3 +242,46 @@ def test_subagent_acceptance_verifier_rejects_unresolved_evidence_risk():
             item.name == "verifier_no_unresolved_evidence_risks" and not item.ok
             for item in report.records[0].verifier_checks
         )
+
+
+def test_subagent_acceptance_can_execute_real_tests_on_explicit_dry_run():
+    """LLM: Verifies explicit acceptance test execution writes records and blocks false PASS claims."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        task = agent.subagents.create_run(
+            goal="真实测试执行验收",
+            thought="runner 声称测试通过，但命令实际失败。",
+            plan=["检查 evidence", "真实执行 tests"],
+            acceptance_checks=["必须有真实测试记录"],
+        )
+        _setup_acceptance_task(agent, task)
+        Path(task.output_json).write_text(json.dumps({
+            "run_id": task.id,
+            "status": "AWAITING_ACCEPTANCE",
+            "tests": [{
+                "name": "failing command",
+                "validation_method": "command",
+                "command": "python -c \"import sys; sys.exit(1)\"",
+                "ok": True,
+            }],
+            "artifacts": [{"path": "reports/smoke.md", "kind": "report"}],
+            "patches": [],
+            "blockers": [],
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        report = agent.subagents.write_acceptance_review_report(
+            run_ids=[task.id],
+            options=AcceptanceReviewOptions(execute_tests=True, test_timeout_seconds=10),
+            reviewer="tester",
+        )
+        loaded = agent.subagents.load(task.id)
+        test_execution_json = Path(loaded.reports_dir) / "test_execution.json"
+
+        assert report.records[0].decision == "REJECT"
+        assert loaded.status == "AWAITING_ACCEPTANCE"
+        assert test_execution_json.exists()
+        assert Path(loaded.reports_dir, "test_execution.md").exists()
+        assert any(item.name == "test_execution_passed" and not item.ok for item in report.records[0].findings)
+        assert str(test_execution_json) in report.records[0].evidence_paths

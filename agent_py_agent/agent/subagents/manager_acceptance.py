@@ -98,12 +98,8 @@ class _SubAgentAcceptanceFacade:
             reviewer=reviewer,
             note=note,
         )
-        return self._review_acceptance_task(
-            task,
-            apply=opts.apply,
-            reviewer=opts.reviewer,
-            note=opts.note,
-        )
+        # LLM: pass the normalized options bundle so opt-in test execution fields are preserved.
+        return _call_review_acceptance_task(self, task, opts)
 
     # LLM: review_acceptances 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
     # 函数用途: 处理审查acceptances相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
@@ -130,13 +126,9 @@ class _SubAgentAcceptanceFacade:
             limit=limit,
         )
         selected = _selected_acceptance_runs(self, run_ids, opts.limit)
+        # LLM: preserve the same options bundle for every selected task, including execute_tests.
         records = [
-            self._review_acceptance_task(
-                task,
-                apply=opts.apply,
-                reviewer=opts.reviewer,
-                note=opts.note,
-            )
+            _call_review_acceptance_task(self, task, opts)
             for task in selected
         ]
         return AcceptanceReviewReport(
@@ -217,6 +209,9 @@ class _SubAgentAcceptanceFacade:
                 reviewer=opts.reviewer,
                 note=opts.note,
                 now=opts.now,
+                # LLM: real test execution stays opt-in and is carried only through the request bundle.
+                execute_tests=opts.execute_tests,
+                test_timeout_seconds=opts.test_timeout_seconds,
             ),
         )
 
@@ -280,6 +275,21 @@ def _selected_acceptance_runs(manager, run_ids: list[str] | None, limit: int):
             or task.verification_status == "NEEDS_ACCEPTANCE"
         ]
     return selected[:limit] if limit > 0 else selected
+
+
+# LLM: _call_review_acceptance_task keeps old tests/mocks working while preserving new option bundles.
+# 函数用途: 默认验收仍按旧关键字调用；只有真实测试执行等新字段启用时才传完整 options 包。
+def _call_review_acceptance_task(manager, task: SubAgentTask, opts: AcceptanceReviewOptions):
+    default_timeout = AcceptanceReviewOptions().test_timeout_seconds
+    needs_options_bundle = opts.execute_tests or opts.test_timeout_seconds != default_timeout or opts.now is not None
+    if needs_options_bundle:
+        return manager._review_acceptance_task(task, options=opts)
+    return manager._review_acceptance_task(
+        task,
+        apply=opts.apply,
+        reviewer=opts.reviewer,
+        note=opts.note,
+    )
 
 
 # LLM: _acceptance_report_summary 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

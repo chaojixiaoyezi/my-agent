@@ -229,12 +229,14 @@ class SubagentAdvancedFieldsService:
             defaults,
             (
                 ("subagent_automation_level", 1, 3),
+                ("acceptance_test_timeout_seconds", 1, 300),
                 ("dynamic_timeout_min", 10, None),
                 ("dynamic_timeout_max", 60, None),
                 ("max_auto_split_depth", 0, None),
                 ("max_auto_retry_attempts", 1, 10),
             ),
         )
+        warnings.extend(_apply_bool_fields(out, defaults, ("acceptance_execute_tests",)))
         value, warn = CoercionService.coerce_float(
             "dynamic_timeout_safety_margin", out.get("dynamic_timeout_safety_margin"),
             defaults.dynamic_timeout_safety_margin, min_val=1.0, max_val=10.0,

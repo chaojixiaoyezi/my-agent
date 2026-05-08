@@ -27,4 +27,10 @@ from agent_py_agent.cli._inspection import (
     cmd_subagents_probe,
 )
 from agent_py_agent.cli._memory_gate import cmd_subagents_memory_gate
-from agent_py_agent.cli._review import cmd_subagents_acceptance, cmd_subagents_patches
+
+# 函数用途: 汇总 review 类子命令入口，供 argparse 注册层统一导入。
+from agent_py_agent.cli._review import (
+    cmd_subagents_acceptance,
+    cmd_subagents_patches,
+    cmd_subagents_tests,
+)

@@ -153,6 +153,32 @@ def test_daemon_defaults_are_true():
     assert defaults_normalized.get("daemon_execute_runners") is True, "daemon_execute_runners 默认应为 True"
 
 
+def test_acceptance_real_execution_config_defaults_are_conservative():
+    """验证真实验收执行配置默认关闭，避免老验收路径自动跑命令。"""
+    defaults_normalized, warnings = normalize_agent_config({})
+    assert warnings == []
+    assert defaults_normalized["acceptance_execute_tests"] is False
+    assert defaults_normalized["acceptance_test_timeout_seconds"] == 120
+
+
+def test_acceptance_real_execution_config_coercion_and_range():
+    """验证真实验收执行配置支持显式开启和超时校验。"""
+    normalized, warnings = normalize_agent_config({
+        "acceptance_execute_tests": "true",
+        "acceptance_test_timeout_seconds": "30",
+    })
+    assert warnings == []
+    assert normalized["acceptance_execute_tests"] is True
+    assert normalized["acceptance_test_timeout_seconds"] == 30
+
+    fallback, warnings = normalize_agent_config({
+        "acceptance_test_timeout_seconds": "9999",
+    })
+    defaults_normalized, _ = normalize_agent_config({})
+    assert any("acceptance_test_timeout_seconds" in warning for warning in warnings)
+    assert fallback["acceptance_test_timeout_seconds"] == defaults_normalized["acceptance_test_timeout_seconds"]
+
+
 def test_lease_config_defaults():
     """验证 lease 心跳续期配置项的默认值和 coerce 规则。"""
     defaults_normalized, _ = normalize_agent_config({})
