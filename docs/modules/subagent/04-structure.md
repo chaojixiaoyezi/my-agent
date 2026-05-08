@@ -185,3 +185,7 @@ agent_py_agent/agent/
 - Module structure docs now treat the definition-level double-layer comments as part of the code architecture: `LLM:` records model-facing contract/caller/side-effect notes, and `函数用途:` / `类用途:` records beginner-readable purpose and edit guidance.
 - New files, services, bundles, or facade methods must update both this structure page and the in-code comments at the same time.
 - The global file tree in `CODEBASE_TREE.md` now includes a current architecture map for CLI, agent core, gateway, memory, log-analysis, subagent, tooling, and settings boundaries.
+## 2026-05-08 status/board takeover view structure update
+- `cli/shared_progress.py` 现在在 shared progress panel payload 里生成 `takeover_entries`，每条记录只包含 run 摘要、handoff/readiness refs 和 recommended read order。
+- `cli/local_status_view.py` 和 `cli/_board.py` 共用同一个 takeover view 渲染函数，保证 `status` 和 `subagents` 看板的接管入口一致。
+- 接管视图只解析 `takeover_readiness.json` 这个索引文件，不读取 artifact refs 指向的大正文；事实核实仍回到 task/run workspace、failure handoff、checkpoint 和 artifact manifest。

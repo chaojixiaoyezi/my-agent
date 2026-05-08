@@ -179,3 +179,7 @@
 - Product-code modules, classes, functions, and methods in the active module now carry the required `LLM:` plus `函数用途:` / `类用途:` definition-level double-layer comments format.
 - This is a documentation-only maintainability pass: behavior, file formats, workflow semantics, and public interfaces are intended to stay unchanged.
 - Future module changes must keep these comments current when changing module/class/def behavior, side effects, bundles, or caller expectations.
+## 2026-05-08 status/board takeover view
+- `status --json`、人类 `status` 和 `subagents` 看板现在会展示 `Takeover View`，把需要接管的 run、failure handoff ref、takeover readiness ref 和 recommended read order 放到同一个视图里。
+- 该视图只读取 `takeover_readiness.json` 恢复索引，不展开 artifact 正文；大输出仍必须走显式 artifact 读取命令或工具。
+- 回归覆盖 `status` payload、人类输出和 `subagents` 看板，额外断言大 artifact body 不会被内联进 status payload。
