@@ -58,6 +58,7 @@
 - 2026-05-08 compact/resume + 业务验收联调第二片已落地：新增端到端 focused 测试串起 compact apply/resume、parent acceptance execute_tests 阻断、显式 `AcceptanceReviewOptions(execute_tests=True)` 真实 file_check、`test_execution.json` 事实源、后续 inspect-only apply；验证通过后任务才进入 `DONE/VERIFIED`，且 memory gate exports 仍不自动写主 memory。
 - 2026-05-08 Acceptance Real Execution 事实源修正：普通 acceptance 现在会优先读取已有 `reports/test_execution.json` 判断 tests_passed，避免 `output.json.tests` 没有 `ok` 字段时把真实通过的测试误判为失败；默认仍不自动执行 tests，只有显式执行路径会生成或刷新报告。
 - 2026-05-09 Parent Acceptance Auto Policy dispatch/watch dry-run 接入已落地：`subagents-dispatch` 在 acceptance 记录上写入 `parent_acceptance_policy_*` 摘要字段，并生成 `reports/parent_acceptance_auto_policy.json`；`SUBAGENT_DISPATCH.md` 会展示 policy ref、decision、action、would_execute 和 executed。watch 仍只引用 `subagent_dispatch_report.json` / `SUBAGENT_DISPATCH.md`，不重复执行 policy、不跑 tests、不 apply、不改 task 状态。
+- 2026-05-09 业务/子代理验收链路联调修正：`runner-retry` 和 `structured-repair` 离线 scenario stub 输出已补齐带 refs 的 `evidence_packets` 和安全 `file_check` tests，真实 CLI `scenario-test --case runner-retry` / `--case structured-repair` 均能走到 `DONE/VERIFIED` 与 `SCENARIO_PASS`。
 
 - 2026-05-05 CI 稳定性修复：修正 `manager_runner_results.py` 在结构化解析失败时仍把 `SubAgentRunnerResult.ok` 写成旧值的问题；同时补齐 `test_local_store_gateway.py` 的临时目录隔离和 heartbeat 读取路径，避免 gateway 测试互相污染。
 - workflow 配置和开关已落地：`auto`、`manual`、`off`。
@@ -183,6 +184,7 @@
 - 本轮 Parent Acceptance Auto Policy CI 修复：补齐 `cli/acceptance_progress.py`、`cli/shared_progress.py` 和 `manager_acceptance.review_acceptance()` 的定义级注释格式；`TestExecutor` 在没有 `python` 命令的本地环境会回退到当前解释器，保持 allowlist 和无 shell 执行边界不变。
 - 本轮 compact/resume + parent acceptance 联调回归：`python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_compact_parent_acceptance_flow.py agent_py_agent/tests/test_parent_acceptance_controller.py` -> `12 passed`；`python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_agent/test_subagent_acceptance.py::test_subagent_acceptance_can_execute_real_tests_on_explicit_dry_run agent_py_agent/tests/test_subagents_tests_command.py` -> `10 passed`。
 - 本轮 Parent Acceptance Auto Policy dispatch/watch TDD 验收：`python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_agent/test_dispatch_and_planner.py::test_subagent_dispatch_dry_run_plans_runner_patch_and_acceptance agent_py_agent/tests/test_agent/test_planner_and_watch.py::test_subagent_dispatch_watch_surfaces_parent_acceptance_auto_policy_refs` 先因 dispatch record 缺少 policy 字段、watch 未生成 policy audit、Markdown 不展示 policy ref 失败，补实现后 -> `2 passed`。
+- 本轮业务/子代理验收链路联调 TDD 验收：`python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_scenario_gateway_resume.py::test_scenario_runner_retry_reaches_parent_acceptance agent_py_agent/tests/test_scenario_gateway_resume.py::test_scenario_structured_repair_reaches_parent_acceptance` 先因 scenario stub 缺少 refs-bearing evidence packet 失败，补齐后 -> `2 passed`；手工 CLI `python3 -m agent_py_agent scenario-test --case runner-retry --workspace /tmp/my-agent-integration-runs --max-runners 1` 和 `python3 -m agent_py_agent scenario-test --case structured-repair --workspace /tmp/my-agent-integration-runs --max-runners 1` 均输出 `SCENARIO_PASS`。
 
 ## 未跑测试
 
