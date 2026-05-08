@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from agent_py_agent.__main__ import build_parser
@@ -14,6 +15,10 @@ from agent_py_agent.agent.memory_archive.compact_apply import (
 from agent_py_agent.agent.memory_archive.compact_resume import (
     MemoryCompactResumeOptions,
     build_memory_compact_resume,
+)
+from agent_py_agent.agent.memory_archive.runtime_fact_source import (
+    RuntimeFactSourceRequest,
+    write_runtime_fact_source,
 )
 
 
@@ -41,6 +46,39 @@ def test_real_run_runtime_fact_source_allows_complete_compact_resume(tmp_path: P
     assert resume["action_guard"]["status"] == "allow_automated_continue"
     assert resume["action_guard"]["allowed_to_continue"] is True
     assert resume["completion_prompt"]["status"] == "complete"
+
+
+# LLM: test_runtime_fact_source_stops_sections_at_unknown_headings guards scoped facts from prompt prose bleed.
+# 函数用途: 确认显式验收段落后遇到未知标题时会停止收集，避免实施步骤被当成验收事实。
+def test_runtime_fact_source_stops_sections_at_unknown_headings(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+
+    write_runtime_fact_source(
+        RuntimeFactSourceRequest(
+            root=root,
+            request_id="req-section-stop",
+            user_prompt=(
+                "验收条件:\n"
+                "- only approved acceptance\n\n"
+                "实施步骤:\n"
+                "- do not treat this as acceptance\n\n"
+                "约束:\n"
+                "- only approved constraint\n"
+            ),
+            response_text="ok",
+            backend="echo",
+            status="ok",
+            next_actions=[],
+            archive_tool_calls=[],
+        )
+    )
+
+    payload = json.loads(
+        (root / "memory_archive" / "runtime_facts" / "req-section-stop" / "task.json").read_text(encoding="utf-8")
+    )
+    assert payload["acceptance"] == ["only approved acceptance"]
+    assert payload["constraints"] == ["only approved constraint"]
+    assert "do not treat this as acceptance" not in payload["acceptance"]
 
 
 # LLM: _write_config keeps the real-run test isolated from repository and user config.

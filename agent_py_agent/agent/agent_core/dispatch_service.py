@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..capabilities import CapabilityRouter
@@ -219,6 +220,7 @@ def make_acceptance_records(params: AcceptanceRecordParams):
         )
     )
     for item in acceptance_report.records:
+        policy_summary = _parent_acceptance_policy_summary(agent, item.run_id)
         records.append(
             agent.subagents.make_dispatch_record(
                 params=DispatchRecordParams(
@@ -234,10 +236,28 @@ def make_acceptance_records(params: AcceptanceRecordParams):
                 before_verification_status=item.before_verification_status,
                 after_verification_status=item.after_verification_status,
                 evidence_paths=item.evidence_paths,
+                **policy_summary,
                 ),
             )
         )
     return records
+
+
+# LLM: _parent_acceptance_policy_summary attaches dry-run auto-policy refs to dispatch records only.
+# 函数用途: 为 acceptance 调度记录生成自动验收策略摘要；只写审计文件和引用字段，不执行命令、不改任务状态。
+def _parent_acceptance_policy_summary(agent, run_id: str) -> dict[str, object]:
+    if not run_id:
+        return {}
+    task = agent.subagents.load(run_id)
+    policy = agent.subagents.plan_parent_acceptance_auto_policy(run_id)
+    policy_ref = Path(task.reports_dir) / "parent_acceptance_auto_policy.json"
+    return {
+        "parent_acceptance_policy_ref": str(policy_ref),
+        "parent_acceptance_policy_decision": policy.decision,
+        "parent_acceptance_policy_action": policy.action,
+        "parent_acceptance_policy_would_execute": bool(policy.would_execute),
+        "parent_acceptance_policy_executed": bool(policy.executed),
+    }
 
 
 # ---------------------------------------------------------------------------

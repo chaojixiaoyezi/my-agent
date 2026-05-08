@@ -239,3 +239,9 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 ## 2026-05-08 artifact explicit read CI follow-up
 - `artifact_reader.py` 的路径根、目录边界、path-like ref 判断和 sha256 helper 现在都有定义级用途说明，后续维护者能直接看到这些 helper 是任意文件读取防线的一部分。
 - `__main__.py` 的 CLI 导入顺序已按 ruff 统一格式整理；结构和命令语义不变。
+
+## 2026-05-08 compact/resume safety structure update
+- `agent_core/_finalization_service.py` 的 auto compact apply 入口现在必须同时满足配置允许和当前 run `do_save=true`，把 `--no-save` 保持为硬持久化边界。
+- `memory_archive/runtime_fact_source.py` 的显式段落解析遇到未知标题会重置 active bucket，避免后续实施说明被升级成 work-state facts。
+- `memory_archive/compact_work_state_sources.py` 按字面 id 查找 task/run/runtime_fact 目录，`request_id` / `session_id` 中的 glob 元字符不再参与文件系统模式匹配。
+- `memory_archive/compact_resume_completion.py` 渲染 suggested commands 时保留原 compact scope flags，用户复制命令不会意外跑无范围 `memory-compact --apply`。

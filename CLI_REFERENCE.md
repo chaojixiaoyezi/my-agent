@@ -954,6 +954,15 @@ my-agent subagents-dispatch --watch --planner --interval 30
 | `--locked-file <path>` | - | 接管时锁定的文件，可多次传入。 |
 | `--skill-dir <path>` | - | 额外 skill 目录，可多次传入。 |
 
+dispatch 输出位置：
+
+```text
+agent_py_agent/data/subagents/subagent_dispatch_report.json
+agent_py_agent/data/subagents/SUBAGENT_DISPATCH.md
+```
+
+当本轮 dispatch 处理 `AWAITING_ACCEPTANCE` / `NEEDS_ACCEPTANCE` 的 run 时，acceptance 记录会带 parent acceptance auto-policy 的 refs-only 摘要：`parent_acceptance_policy_ref`、decision、action、would_execute 和 executed。它只写 `reports/parent_acceptance_auto_policy.json` 审计并展示引用，不执行 tests、不 apply、不 rescue、不修改 task 状态。
+
 watch 输出位置：
 
 ```text
@@ -963,6 +972,8 @@ agent_py_agent/data/subagents/SUBAGENT_DISPATCH_WATCH.md
 agent_py_agent/data/subagents/subagent_dispatch_watch_log.jsonl
 agent_py_agent/data/subagents/DISPATCH_WATCH_LOG.md
 ```
+
+watch 模式不会在 watch 层重新运行 auto-policy；watch record 的 evidence 只指向本轮 dispatch JSON/Markdown，后续沿 dispatch record 里的 ref 查看单个 run 的 policy audit。
 
 planner 输出位置：
 

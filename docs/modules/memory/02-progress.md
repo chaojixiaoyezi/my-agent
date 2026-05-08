@@ -63,6 +63,9 @@
 - 2026-05-08 半自动 Resume 第二片已落地：`completion_prompt` 新增 `suggested_commands`，给出 `memory-fact-write --from-compact`、同 scope 重新 `memory-compact --apply` 和 `memory-resume --compact-resume-mode auto` 的闭环提示；仍只写用户显式确认事实，不解析助手回复。
 - 2026-05-08 子代理 Compact Hook 预留第二片已落地：subagent owner refs 会带 `reserved_hooks`，预留 run-local `session_compact_ledger.jsonl` 和 `latest_continue_packet.json` 路径；当前 `enabled=false`，不写主 memory、不自动执行工具、不改 runner。
 - 2026-05-08 Auto Compact/Resume 第一版增强已落地：新增 `memory_compact_auto_allow_apply` 配置，默认 false；开启后 `SimpleAgent.run()` 也只做非破坏性 apply、auto resume、continue packet 和 guard 停车，并把 `apply_id` / `continue_ready` 暴露给结果和 CLI。
+- 2026-05-08 Auto Compact/Resume 持久化边界修正：即使配置开启 `memory_compact_auto_allow_apply`，`run(..., save=False)` / `--no-save` 仍会阻止自动 apply 写入 `memory_archive/compact_applies/*`，继续只返回人工确认建议。
+- 2026-05-08 Runtime Fact Source 解析边界修正：显式验收/约束/测试段落遇到未知标题会停止当前桶，避免“实施步骤”等后续段落被误收为 acceptance/constraints/latest_tests。
+- 2026-05-08 Compact work-state scope 安全修正：request/session/task/run id 现在按字面路径解析，`*`、`[]` 等 glob 字符不会扩大扫描 `tasks/*/agents/*`；半自动 completion 命令也会保留原 `--session-id/--request-id/--task-id/--run-id` scope。
 - 2026-05-08 compact + parent acceptance 联调第一片已落地：新增 focused 测试串起 subagent task、compact apply/resume、continue packet、parent acceptance apply 阻断和 auto-policy dry-run；断言 auto-policy 仍 `executed=false`、`mutates_task_state=false`，且 task 状态不被 compact 自动链路改动。
 - **记忆推模式** (`memory_push.py`)：在关键决策点自动查询并注入相关记忆，实现"推模式"记忆系统。
   - `MemoryType` 枚举：`LESSON_GENERAL`、`LESSON_TASK`、`LESSON_TEMP`、`CONTEXT`、`FACT`
@@ -222,3 +225,8 @@
 ## 2026-05-08 artifact explicit read CI follow-up
 - 补齐 `artifact_reader.py` 私有 helper 的双层用途注释，符合 code-size 脚本对产品代码可维护性的检查要求。
 - 该修复只补充 reader helper 的边界说明和入口导入排序，不改变 `memory-artifact-read` / `read_artifact` 的 refs-only 读取边界。
+
+## 2026-05-08 compact/resume safety review follow-up
+- `SimpleAgent.run()` 的 auto compact apply 现在同时受配置开关和当前 run 的 `save` 边界控制：`save=False` 永远不写 `compact_applies`。
+- runtime fact 显式段落解析、work-state scoped id 扫描、completion suggested command 都新增 focused 回归，防止事实串桶、glob 扩扫和 scope 丢失。
+- 本轮 focused 验收：`python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_memory_runtime_basics.py::test_run_no_save_blocks_opt_in_auto_compact_apply agent_py_agent/tests/test_memory_compact_runtime_facts.py::test_runtime_fact_source_stops_sections_at_unknown_headings agent_py_agent/tests/test_memory_compact_auto.py::test_memory_compact_work_state_treats_scope_ids_as_literal_paths agent_py_agent/tests/test_memory_compact.py::test_memory_compact_apply_reads_hook_recovery_state_without_snapshot_file` -> `4 passed`。

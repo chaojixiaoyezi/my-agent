@@ -14,7 +14,7 @@ class DispatchRecordBuilder:
     """Build dispatch audit records."""
 
     # LLM: make_record 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-    # 函数用途: 构建make记录所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
+    # 函数用途: 构建make记录所需的数据结构或请求参数，包括 policy refs 摘要；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     @staticmethod
     def make_record(manager, params) -> DispatchRecord:
         """Create a dispatch audit record from params bundle."""
@@ -34,6 +34,11 @@ class DispatchRecordBuilder:
             before_verification_status=params.before_verification_status,
             after_verification_status=params.after_verification_status,
             evidence_paths=params.evidence_paths or [],
+            parent_acceptance_policy_ref=params.parent_acceptance_policy_ref,
+            parent_acceptance_policy_decision=params.parent_acceptance_policy_decision,
+            parent_acceptance_policy_action=params.parent_acceptance_policy_action,
+            parent_acceptance_policy_would_execute=params.parent_acceptance_policy_would_execute,
+            parent_acceptance_policy_executed=params.parent_acceptance_policy_executed,
             created_at=time.time(),
         )
 
