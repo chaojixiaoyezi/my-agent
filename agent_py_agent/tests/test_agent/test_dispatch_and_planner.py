@@ -47,7 +47,7 @@ def _setup_review_task(agent, task, *, patch_status="applied", patch_summary="å·
     Path(task.output_json).write_text(
         json.dumps({
             "run_id": task.id,
-            "tests": [{"name": "smoke", "command": "", "ok": True}],
+            "tests": [{"name": "smoke", "validation_method": "file_check", "file_path": "README.md", "ok": True}],
             "patches": [{"path": "agent_py_agent/agent/demo.py", "status": patch_status, "summary": patch_summary}],
             "blockers": [],
         }, ensure_ascii=False, indent=2), encoding="utf-8",
@@ -90,9 +90,21 @@ def test_subagent_dispatch_dry_run_plans_runner_patch_and_acceptance():
         assert report.dry_run
         assert any(item.step == "runner" and item.run_id == runner_task.id for item in report.records)
         assert any(item.step == "patch_review" and item.run_id == review_task.id for item in report.records)
-        assert any(item.step == "acceptance" and item.run_id == review_task.id for item in report.records)
+        acceptance_record = next(item for item in report.records if item.step == "acceptance" and item.run_id == review_task.id)
+        assert acceptance_record.parent_acceptance_policy_action == "run_tests"
+        assert acceptance_record.parent_acceptance_policy_would_execute is True
+        assert acceptance_record.parent_acceptance_policy_executed is False
+        policy_ref = Path(review_task.reports_dir) / "parent_acceptance_auto_policy.json"
+        assert acceptance_record.parent_acceptance_policy_ref == str(policy_ref)
+        policy_payload = json.loads(policy_ref.read_text(encoding="utf-8"))
+        assert policy_payload["policy"]["executed"] is False
+        assert policy_payload["policy"]["mutates_task_state"] is False
         assert "review_status" not in output["patches"][0]
         assert agent.subagents.load(runner_task.id).status == "PLANNING"
+        assert agent.subagents.load(review_task.id).status == "AWAITING_ACCEPTANCE"
+        dispatch_markdown = (root / "subs" / "SUBAGENT_DISPATCH.md").read_text(encoding="utf-8")
+        assert "parent_acceptance_auto_policy" in dispatch_markdown
+        assert str(policy_ref) in dispatch_markdown
         assert (root / "subs" / "subagent_dispatch_report.json").exists()
         assert not (root / "subs" / "subagent_dispatch_log.jsonl").exists()
 

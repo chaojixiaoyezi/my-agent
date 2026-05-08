@@ -174,6 +174,78 @@ def test_subagent_dispatch_watch_runs_one_cycle_and_releases_lock():
         assert not (workspace / "subagent_dispatch_watch.lock").exists()
 
 
+# LLM: Builds a watch fixture that is ready for parent acceptance policy planning.
+# 函数用途: 创建等待父级验收的子代理任务，并写入安全的 file_check 测试事实。
+def _setup_watch_acceptance_policy_task(agent):
+    task = agent.subagents.create_run(
+        goal="watch parent acceptance policy",
+        thought="worker finished and needs parent tests",
+        plan=["wait for parent acceptance"],
+    )
+    task.status = "AWAITING_ACCEPTANCE"
+    task.verification_status = "NEEDS_ACCEPTANCE"
+    task.channel_status = "OK"
+    agent.subagents.save(task)
+    Path(task.output_json).write_text(
+        json.dumps({
+            "run_id": task.id,
+            "status": "AWAITING_ACCEPTANCE",
+            "tests": [{"name": "smoke", "validation_method": "file_check", "file_path": "README.md"}],
+            "artifacts": [],
+            "patches": [],
+            "blockers": [],
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return task
+
+
+# LLM: Reads the acceptance dispatch record from the watch-triggered dispatch report.
+# 函数用途: 从 dispatch JSON 报告里取出 acceptance 记录，方便断言 policy 摘要字段。
+def _watch_acceptance_dispatch_record(root: Path) -> dict:
+    dispatch_payload = json.loads((root / "subs" / "subagent_dispatch_report.json").read_text(encoding="utf-8"))
+    return next(item for item in dispatch_payload["records"] if item["step"] == "acceptance")
+
+
+def test_subagent_dispatch_watch_surfaces_parent_acceptance_auto_policy_refs():
+    """LLM: Verifies watch sees parent acceptance auto-policy dry-run refs without executing them."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        task = _setup_watch_acceptance_policy_task(agent)
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+
+        report = agent.watch_subagents(
+            router,
+            CapabilityConfig(),
+            apply=False,
+            max_cycles=1,
+            interval=0,
+            max_runners=0,
+        )
+
+        watch_record = report.records[0]
+        policy_ref = Path(task.reports_dir) / "parent_acceptance_auto_policy.json"
+        payload = json.loads(policy_ref.read_text(encoding="utf-8"))
+        reloaded = agent.subagents.load(task.id)
+        assert watch_record.evidence_paths == [
+            str(root / "subs" / "subagent_dispatch_report.json"),
+            str(root / "subs" / "SUBAGENT_DISPATCH.md"),
+        ]
+        assert watch_record.dispatch_summary["acceptance"] >= 1
+        acceptance_record = _watch_acceptance_dispatch_record(root)
+        assert acceptance_record["parent_acceptance_policy_ref"] == str(policy_ref)
+        assert acceptance_record["parent_acceptance_policy_action"] == "run_tests"
+        assert acceptance_record["parent_acceptance_policy_would_execute"] is True
+        assert acceptance_record["parent_acceptance_policy_executed"] is False
+        assert payload["policy"]["would_execute"] is True
+        assert payload["policy"]["executed"] is False
+        assert payload["reserved"]["mutates_task_state"] is False
+        assert reloaded.status == "AWAITING_ACCEPTANCE"
+        assert reloaded.verification_status == "NEEDS_ACCEPTANCE"
+
+
 def test_subagent_dispatch_watch_lock_prevents_second_parent():
     """LLM: Verifies watch raises RuntimeError when a lock file already exists."""
     with tempfile.TemporaryDirectory() as td:

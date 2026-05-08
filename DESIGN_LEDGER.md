@@ -1835,3 +1835,13 @@ def example(...):
 - 第一版动作边界：`run_tests` 只能记录“如果允许会执行哪个测试入口”；`request_human_confirmation` 只能生成确认请求意图；`plan_rescue` 只能引用 takeover/readiness/rescue packet；`apply_acceptance` 只能说明仍需显式 apply gate。任何 `requires_human=true`、安全信号、未知 action、缺少决策 refs 或越权配置 scope 都必须阻断自动执行。
 - 审计 JSON 建议写入 `reports/parent_acceptance_auto_policy.json`，作为机器事实源；Markdown/CLI 只展示摘要。字段至少包含 `schema_version`、`record_type`、`created_at`、`run_id`、`root_run_id`、`policy`、`decision_refs`、`next_action`、`allowed_by_policy`、`dry_run`、`auto_execute`、`would_execute`、`executed=false`、`blocked_reason`、`requires_human`、`safety_signals`、`rescue_refs`、`runtime_identity`、`config_scope` 和 `reserved`。
 - 安全预留：后续接入 `requires_human`、rescue、安全信号、Security Gate、租户/员工 conversation 配置隔离时，Auto Policy 只能读取这些事实和 policy 结果，不能绕过它们；tenant/principal/conversation/run scope 的 effective config diff 与 rollback ref 要进入审计，防止员工会话测试污染全局策略。
+
+## 2026-05-09 Parent Acceptance Auto Policy dispatch/watch dry-run 接入
+
+状态：已落地
+
+摘要：
+- `subagents-dispatch` 现在会在 acceptance dispatch record 上写入 `parent_acceptance_policy_ref`、decision、action、would_execute、executed 等 refs-only 摘要，并生成 run-local `reports/parent_acceptance_auto_policy.json`。
+- `SUBAGENT_DISPATCH.md` 展示同一组摘要，方便父代理或人类先看报告再沿 ref 进入具体 run 审计。
+- `subagents-dispatch --watch` 不在 watch 层重新运行 policy；watch record 只引用本轮 dispatch JSON/Markdown，避免 watch 循环把 `would_execute=true` 误解成自动执行。
+- 当前边界不变：不执行 tests、不 apply acceptance、不 rescue、不修改 task 状态；`executed=false` 仍是硬约束。

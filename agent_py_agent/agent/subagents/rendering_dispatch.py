@@ -13,7 +13,7 @@ from .reports import DispatchReport, DispatchWatchReport, ParentPlannerReport
 
 
 # LLM: render_dispatch_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 渲染或汇总markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
+# 函数用途: 渲染或汇总markdown的展示文本，并展示 auto-policy refs 摘要；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def render_dispatch_markdown(report: DispatchReport) -> str:
     """渲染父代理调度器报告。"""
 
@@ -41,6 +41,15 @@ def render_dispatch_markdown(report: DispatchReport) -> str:
             f"applied={record.applied} dry_run={record.dry_run}"
         )
         lines.append(f"  - {record.message}")
+        if record.parent_acceptance_policy_ref:
+            lines.append(
+                "  - parent_acceptance_auto_policy: "
+                f"decision={record.parent_acceptance_policy_decision} "
+                f"action={record.parent_acceptance_policy_action} "
+                f"would_execute={record.parent_acceptance_policy_would_execute} "
+                f"executed={record.parent_acceptance_policy_executed} "
+                f"ref={record.parent_acceptance_policy_ref}"
+            )
     return "\n".join(lines) + "\n"
 
 
