@@ -35,7 +35,16 @@ from .model_runtime import (
 )
 
 # LLM: 通过稳定门面导出任务树控制面数据类，避免调用方绑定内部文件。
-from .model_task import EvidencePacket, Finding, LearningCandidate, StatusReport, SubAgentTask
+from .model_task import (
+    EvidencePacket,
+    FailureHandoff,
+    Finding,
+    InheritanceManifest,
+    LearningCandidate,
+    SecuritySignal,
+    StatusReport,
+    SubAgentTask,
+)
 from .quality_models import ContextManifest, QualityContract
 
 
@@ -130,9 +139,12 @@ __all__ = [
     "ContextManifest",
     "DISPATCH_INELIGIBLE_STATUSES",
     "EvidencePacket",
+    "FailureHandoff",
     "Finding",
+    "InheritanceManifest",
     "LearningCandidate",
     "QualityContract",
+    "SecuritySignal",
     "SubAgentCard",
     "SubAgentBoardOptions",
     "SubAgentCapabilityRouteOptions",

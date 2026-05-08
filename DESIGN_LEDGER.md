@@ -1748,3 +1748,33 @@ def example(...):
 - 新增 test_execution.json 存储
 - 新增 subagents-tests CLI 命令
 - 更新配置项
+
+## 2026-05-08 / Agent Runtime Control Plane 预留边界
+
+状态：设计中
+
+摘要：
+
+在 Agent Runtime Control Plane、subagent workspace、memory gate 和 tool output 外置继续推进前，需要预留四类长期扩展边界，避免第一版把结构写死：
+
+1. **扩展备用字段和接口**：核心记录、事件和控制面 API 需要预留 `reserved` / `extensions` / `metadata` 等受控扩展槽，新增实验字段优先进入保留槽，稳定后再提升为正式字段。接口设计优先使用 Request/Options/Result bundle，避免后续靠不断加散参扩展。
+2. **父子代理继承上下文**：子代理需要能继承父代理的相关能力、约束、记忆路由、上下文包、工具授权和质量契约，但继承必须可裁剪、可覆盖、可撤销，不能默认把父代理全部上下文灌入子代理。当前已落地第一版 explicit inheritance manifest，记录 inherited / overridden / dropped 项，并写入 `reports/inheritance_manifest.json`；它是审计与接管事实，不是自动展开父级上下文的开关。
+3. **层级查询和接管视图**：控制面查询不应只假设“主代理查子代理”。任意上级代理（主代理或中间子代理）都可能需要查询自己的下级树；后续还要预留同级协调者、兄弟父级、takeover/rescue 代理在授权范围内查询某个 subtree 或 blocked run 的能力。第一版字段里需要保留 requester / scope / visibility / takeover_hint 这类扩展位，但事实源仍回到 task/run workspace。当前 `status --json` / 人类 `status` 和 `subagents` 看板已经能展示共享进度摘要。
+4. **共享进度反馈面板**：子代理之间需要共享任务级反馈面，包含 progress、current step、blockers、messages、findings、evidence packets 和 parent rollup。当前已落地第一版 `SharedProgressPanel` 查询面，把 runtime query、rollup、blocked runs、inheritance manifest refs 和 failure handoff refs 合成上级/接管代理可读状态包；shared blackboard 可以作为协作摘要，但不是事实源；事实仍来自 verified finding、evidence packet、artifact manifest、failure handoff 和 checkpoint。
+5. **Failure Handoff / 失败交接**：子代理可以失败、超时或被黑盒大输出拖垮，但不能“白死”。当黑盒工具、外部系统或未知输出可能瞬间撑爆上下文时，子代理必须尽量先保存 checkpoint / tool-output artifact / minimal failure event，再进入外置和压缩流程；如果最终仍挂掉，也要留下警告、现场锚点、避坑提示、恢复建议和最小证据，方便后续 takeover/rescue 子代理不要机械重复同一个坑。当前已落地第一版 `FailureHandoff`，失败/阻塞保存时会写 `reports/failure_handoff.json`，记录 `failure_type`、`risk_level`、`warning`、`last_safe_checkpoint_ref`、`artifact_refs`、`avoid_next_time` 和 `recommended_next_action`；它只做审计和恢复线索，`auto_rescue=false`，不自动重试或接管。当前还会写 `reports/takeover_readiness.json` 和 `TAKEOVER_READINESS.md` 接管前必读包，把 failure handoff、checkpoint、status report、artifact manifest、evidence/artifact refs 排成 recommended read order；Shared Progress/status/subagents 只展示 takeover packet 数量和 refs，不读取正文。
+6. **Security Signal / 安全信号预留**：安全劫持、安全欺骗、prompt injection、工具权限异常、插件/供应链风险等不能靠后续口头补救，第一版需要先在 task/run 记录里留审计字段。当前已落地 `SecuritySignal` 和 `security_review_required`，只保存 `signal_type`、`severity`、`summary`、`evidence_refs`、`artifact_refs` 和 `reserved`，LocalStore metadata 暴露 signal count / types / review flag；它不拦截、不判罪、不自动改授权，只给后续 security policy/gate 接入预留事实入口。OpenClaw、Hermes 等公开安全问题可作为后续研究输入，但必须先核验来源和复现场景，再沉淀成 risk pattern 或 test fixture，不能直接把未验证传闻写进策略。
+7. **Principal / Conversation / Run 记忆隔离口子**：飞书、微信、Web、CLI 多入口并发时，“主代理”不能等同于全局唯一 my-agent。Agent Service 属于 `service_owner_id`，但每次聊天应有 `requester_id` / `effective_principal_id` / `conversation_id` / `root_run_id`；员工通过管理员的 my-agent 发起任务时，员工会话自己的 root run 和子代理运行树仍要独立保存 artifact、snapshot、checkpoint、failure handoff 和 tool-output refs。长期记忆先预留 namespace 与 policy 字段，不默认为每个员工开启独立长期记忆；默认只隔离 session/run 产物，后续可在显式授权后增加 `user_memory`、`team_memory`、`org_memory`、`project_memory` 等层级，并通过 visibility / retention / consent policy 控制是否写入和召回。
+8. **任务记忆和员工会话记忆分离**：子代理的大量上下文属于 task/run working memory，任务完成后可以按保留策略清理，只留下 summary、verified facts、artifact refs、snapshot refs、failure handoff、acceptance/test evidence 和必要审计索引，方便反查、复盘和接管；这些临时记忆不应沉淀成员工长期记忆。员工 conversation memory 则是产品层能力：用于记住员工偏好、常用项目、授权过的工作方式、未完成事项和跨会话协作习惯。第一版不默认做员工长期记忆，只保留 `conversation_memory_policy` / `memory_namespace` / `promotion_policy` 口子；后续如要启用，应把“从任务事实提升到员工记忆”的流程做成显式 promotion：必须有来源 refs、可解释摘要、可撤销记录、保留期限和权限范围，不能把子代理临时上下文或未验证 finding 直接写成员工长期记忆。
+9. **配置隔离和实验沙箱**：员工可能会让自己的 conversation 做测试、改配置、试权限或开玩笑触发危险配置；这些操作默认只能写入 conversation/run scoped config overlay，不能直接改全局配置、组织配置、管理员个人配置或服务级安全边界。配置写入需要区分 `global_config`、`tenant_config`、`project_config`、`principal_config`、`conversation_overlay`、`run_override`；越靠上的层级越需要显式授权、审计和回滚。my-agent 的定位要同时覆盖个人、个体、组织、企业甚至国家级部署，所以第一版必须把配置作用域、继承链、override 来源、effective config diff 和 rollback ref 留出来，避免某个员工会话的测试行为污染全局运行。
+
+后续方向：
+
+- 在 Agent Runtime Control Plane v1 里统一保留扩展槽和 bundle-first API。
+- 继续把 inheritance manifest 接入执行上下文摘要和接管视图，但仍保持 audit-only；后续如需真实继承策略，应先加显式 policy/gate，而不是默认扩大子代理上下文。
+- 继续把 `SharedProgressPanel` 接入 CLI/status 展示和 shared workspace facts；面板只暴露 refs 和投影摘要，不读取 artifact 正文，也不替代 task/run workspace 事实源。
+- tool output externalizer 前已加入 fail-safe recovery snapshot，ToolContextReducer 也已接入 live prompt 注入前：大工具输出写 artifact 前先记录工具名、hash、大小、run/task/request id 和下一步建议；下一轮 prompt 只放 artifact 摘要、路径和 checkpoint refs，不再直接塞回完整大正文。
+- takeover/rescue 下一步应优先读取 `takeover_readiness_ref`，再按包里的 recommended read order 显式读取 failure handoff、checkpoint、artifact manifest 或 artifact 切片；第一版仍不自动接管或重试。
+- 后续做 Security Gate 时优先基于 `SecuritySignal` 扩展：先补外部案例调研、风险分类、detector fixture 和 audit report，再决定是否接入权限收窄、工具隔离或人工确认流程。
+- 后续接外部 IM / 企业用户时，先实现 `RuntimeIdentity` / `ConversationScope` 这类轻量身份包，把 service owner、effective principal、conversation、root run 和 memory namespace 写进 artifact/snapshot/control-plane metadata；员工长期记忆是否启用保持 policy 决策，不和第一版 artifact 隔离绑死。
+- 后续做员工记忆时，先实现 task/run working memory 的清理与保留包，再实现 conversation memory 的显式 promotion 队列；主代理可以读取员工授权范围内的 conversation summary / preference card / open tasks，但不能默认读取员工私有 run artifacts 或管理员个人记忆。
+- 后续做配置系统时，先实现 scoped config overlay 和 effective config viewer：员工会话里的配置测试默认落到 `conversation_overlay` / `run_override`，只有通过明确的 admin approval / policy gate 才能 promote 到 project、tenant 或 global 层；所有 promote 都要写 audit event、diff、rollback ref 和发起人的 effective principal。

@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .shared_progress import shared_progress_for_board
+
 
 # LLM: GatewayStatusRequest 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
 # 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
@@ -92,4 +94,5 @@ def _subagents_payload(ctx: StatusPayloadContext) -> dict:
         "recent_count": len(ctx.board.recent),
         "hot": [item.__dict__ for item in ctx.board.hot_list[: ctx.agent.config.subagent_board_limit]],
         "recent": [item.__dict__ for item in ctx.board.recent[: ctx.agent.config.subagent_board_limit]],
+        "shared_progress": shared_progress_for_board(ctx.agent, ctx.board, purpose="status"),
     }

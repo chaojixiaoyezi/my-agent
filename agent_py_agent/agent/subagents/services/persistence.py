@@ -32,6 +32,12 @@ from ..models import (
 )
 from ..utils import _apply_missing_paths, _read_json_object
 from .checkpoint_artifacts import build_checkpoint_artifact_payloads
+from .control_plane_projection import sync_subagent_control_plane_projection
+from .failure_handoff import refresh_failure_handoff
+from .persistence_failure_handoff import normalize_failure_handoff, write_failure_handoff
+from .persistence_inheritance import normalize_inheritance_manifest, write_inheritance_manifest
+from .persistence_recovery_outputs import write_recovery_output_files
+from .persistence_security import normalize_security_signal
 from .task_workspace_adapter import sync_task_workspace_fields
 
 
@@ -256,6 +262,11 @@ class SubAgentPersistenceService:
         data["context_manifest"] = _normalize_context_manifest(data.get("context_manifest"))
         data["context_packs"] = _normalize_context_packs(data.get("context_packs"))
         data["latest_status_report"] = _normalize_status_report(data.get("latest_status_report"))
+        data["inheritance_manifest"] = normalize_inheritance_manifest(data.get("inheritance_manifest"))
+        data["failure_handoff"] = normalize_failure_handoff(data.get("failure_handoff"))
+        data["security_signals"] = [
+            normalize_security_signal(item) for item in data.get("security_signals", []) if isinstance(item, dict)
+        ]
         return SubAgentTask(**data)
 
     # LLM: list_runs 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -285,6 +296,7 @@ class SubAgentPersistenceService:
         if task.checkpoint_json:
             task.checkpoint_ref = task.checkpoint_json
         task.latest_status_report = build_status_report(task)
+        refresh_failure_handoff(task)
         output_payload = _read_json_object(Path(task.output_json)) if task.output_json else {}
         checkpoint_artifacts = build_checkpoint_artifact_payloads(task, output_payload)
         # LLM: 任务工作区是增量运行记忆适配层，旧路径暂时仍是权威来源。
@@ -297,20 +309,14 @@ class SubAgentPersistenceService:
                 json.dumps(asdict(task.latest_status_report), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-        for field_name, artifact_payload in checkpoint_artifacts.items():
-            artifact_path = getattr(task, field_name, "")
-            if not artifact_path:
-                continue
-            if isinstance(artifact_payload, str):
-                Path(artifact_path).write_text(artifact_payload, encoding="utf-8")
-            else:
-                Path(artifact_path).write_text(
-                    json.dumps(artifact_payload, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+        write_inheritance_manifest(task)
+        write_failure_handoff(task)
+        write_recovery_output_files(task, checkpoint_artifacts)
         (task_dir / "thought.md").write_text(self._render_thought_markdown(task), encoding="utf-8")
         self.manager._index_task(task)
         if self.manager.local_store:
+            # LLM: 控制面投影只给父级查询和 rollup 用，旧工单目录与 runtime workspace 仍是事实源。
+            sync_subagent_control_plane_projection(self.manager.local_store, task)
             self.manager.local_store.task_registry.register_task(
                 task_id=task.id,
                 session_id=task.root_id,

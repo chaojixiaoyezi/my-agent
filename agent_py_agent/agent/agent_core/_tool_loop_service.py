@@ -6,11 +6,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record, snapshots
+from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
 from ..prompting_parts.builder import ToolSections
 from ..tools import ToolExecutionResult
 from ._runtime_params import ToolLoopExecuteParams
 from .parameters import _one_shot_tool_call_key
+from .tool_context_reducer import render_tool_result_for_live_prompt
+from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 
 
 # LLM: ToolCallRecordParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -142,28 +144,30 @@ class ToolLoopService:
     def _record_tool_call(self, record: ToolCallRecordParams) -> None:
         if record.result.ok and record.result.tool not in {"__parse_error__", "unknown"}:
             record.params.executed_tools.append(record.result.tool)
-        record.params.archive_tool_calls.append(self._archive_tool_call_record(record))
+        archive_record = self._archive_tool_call_record(record)
+        record.params.archive_tool_calls.append(archive_record)
         record.params.tool_context.append(
             f"[tool-call-{record.tool_rounds}-{record.idx}]\n{record.payload}\n"
             f"[tool-result-{record.tool_rounds}-{record.idx}]\n"
-            f"{record.result.render_for_prompt()}"
+            f"{render_tool_result_for_live_prompt(record.result, archive_record)}"
         )
 
     # LLM: _archive_tool_call_record 属于 SimpleAgent 核心运行的函数边界；工具输出归档格式变化会影响 raw archive 和 compact。
     # 函数用途: 生成可归档的工具调用记录，大输出外置为 artifact，当前工具上下文仍保留完整结果。
     def _archive_tool_call_record(self, record: ToolCallRecordParams) -> dict[str, object]:
         call_id = f"{record.tool_rounds}-{record.idx}"
-        output_record = externalize_tool_output_record(
-            ExternalizeToolOutputRequest(
-                root=self._agent.root,
-                tool=record.result.tool,
-                call_id=call_id,
-                output=record.result.output,
-                ok=record.result.ok,
-                request_id=record.params.request_id,
-                run_id=record.params.run_id,
-                task_id=record.params.task_id,
-            )
+        request = ExternalizeToolOutputRequest(
+            root=self._agent.root,
+            tool=record.result.tool,
+            call_id=call_id,
+            output=record.result.output,
+            ok=record.result.ok,
+            request_id=record.params.request_id,
+            run_id=record.params.run_id,
+            task_id=record.params.task_id,
         )
+        fail_safe = write_tool_output_fail_safe_checkpoint(request)
+        output_record = externalize_tool_output_record(request)
+        output_record.update(fail_safe)
         output_record["parameters"] = record.payload
         return output_record

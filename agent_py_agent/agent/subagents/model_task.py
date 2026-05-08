@@ -69,6 +69,55 @@ class StatusReport:
     updated_at: float = 0.0
 
 
+# LLM: InheritanceManifest records parent-to-child projection decisions without expanding parent context.
+# 类用途: 记录子代理从上级继承、覆盖和裁剪了哪些上下文/能力字段。
+@dataclass
+class InheritanceManifest:
+
+    source_run_id: str = ""
+    target_run_id: str = ""
+    root_task_id: str = ""
+    inherited: dict[str, object] = field(default_factory=dict)
+    overridden: dict[str, object] = field(default_factory=dict)
+    dropped: dict[str, object] = field(default_factory=dict)
+    policy: dict[str, object] = field(default_factory=dict)
+    created_at: float = 0.0
+    reserved: dict[str, object] = field(default_factory=dict)
+
+
+# LLM: FailureHandoff records warnings and recovery advice before/after a run fails.
+# 类用途: 保存失败交接事实，帮助后续接管代理避开同一个坑。
+@dataclass
+class FailureHandoff:
+
+    run_id: str = ""
+    status: str = ""
+    failure_type: str = ""
+    risk_level: str = ""
+    warning: str = ""
+    last_safe_checkpoint_ref: str = ""
+    artifact_refs: list[str] = field(default_factory=list)
+    evidence_refs: list[str] = field(default_factory=list)
+    avoid_next_time: list[str] = field(default_factory=list)
+    recommended_next_action: str = ""
+    created_at: float = 0.0
+    reserved: dict[str, object] = field(default_factory=dict)
+
+
+# LLM: SecuritySignal is an audit-only reserve for future hijack/deception defenses.
+# 类用途: 记录可疑安全信号和证据引用，先给后续安全模块预留读取入口。
+@dataclass
+class SecuritySignal:
+
+    signal_type: str = ""
+    severity: str = ""
+    summary: str = ""
+    evidence_refs: list[str] = field(default_factory=list)
+    artifact_refs: list[str] = field(default_factory=list)
+    created_at: float = 0.0
+    reserved: dict[str, object] = field(default_factory=dict)
+
+
 # LLM: SubAgentTask 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 类用途: 集中保存subagent任务字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
@@ -127,6 +176,10 @@ class SubAgentTask:
     evidence_refs: list[str] = field(default_factory=list)
     checkpoint_ref: str = ""
     latest_status_report: StatusReport = field(default_factory=StatusReport)
+    inheritance_manifest: InheritanceManifest = field(default_factory=InheritanceManifest)
+    failure_handoff: FailureHandoff = field(default_factory=FailureHandoff)
+    security_signals: list[SecuritySignal] = field(default_factory=list)
+    security_review_required: bool = False
     task_dir: str = ""
     data_dir: str = ""
     output_dir: str = ""
@@ -195,6 +248,11 @@ class SubAgentTask:
     debrief_file: str = ""
     output_json: str = ""
     status_report_json: str = ""
+    inheritance_manifest_json: str = ""
+    failure_handoff_json: str = ""
+    # LLM: takeover readiness files list recovery refs; they must not embed large artifact bodies.
+    takeover_readiness_json: str = ""
+    takeover_readiness_md: str = ""
     # LLM: compact/checkpoint recovery artifacts stay separate from full chat history.
     checkpoint_json: str = ""
     decision_ledger_json: str = ""
