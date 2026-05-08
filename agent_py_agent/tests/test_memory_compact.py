@@ -238,6 +238,9 @@ def test_memory_compact_apply_reads_hook_recovery_state_without_snapshot_file(tm
     assert resume["continue_packet"]["automatic_tool_execution"] == "none"
     assert resume["completion_prompt"]["status"] == "needs_user_input"
     assert resume["completion_prompt"]["suggested_commands"]
+    assert resume["completion_prompt"]["suggested_commands"][1] == (
+        "my-agent memory-compact --apply --session-id session-compact --request-id request-compact"
+    )
     assert "验收条件" in resume["completion_prompt"]["prompt_template"]
     assert "Completion Prompt" in resume["context_block"]
     assert auto_resume["action_guard"]["status"] == "blocked_missing_work_state_fields"

@@ -126,6 +126,10 @@ git diff --check                                         # Whitespace errors
 python3 scripts/check_clean_package.py .                 # Package cleanliness
 ```
 
+Local ruff note: on the desktop machine, ruff is also available at
+`/Users/example/ai_claw/bin/ruff`. If `python3 -m ruff` is missing in the
+current interpreter, use `ruff check ...` from PATH or that explicit binary.
+
 If any strict-gate command fails, do not push or merge by default. Only bypass
 with an explicit user instruction, and record the failing command plus risk in
 the final report.

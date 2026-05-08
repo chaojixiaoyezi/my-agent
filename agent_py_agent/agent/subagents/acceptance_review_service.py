@@ -172,17 +172,19 @@ def review_acceptance_task(manager, request: AcceptanceReviewRequest) -> Accepta
     )
 
 
-# LLM: _acceptance_review_inputs 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 处理验收审查inputs相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
+# LLM: _acceptance_review_inputs writes opt-in real test reports before findings so acceptance reads machine facts.
+# 函数用途: 汇总验收输入；显式执行 tests 时先写 test_execution.json，再让普通 findings 以机器报告为测试事实源。
 def _acceptance_review_inputs(manager, request: AcceptanceReviewRequest, now: float) -> AcceptanceReviewInputs:
     task = request.task
     output = _read_json_object(Path(task.output_json))
     runner = _read_json_object(Path(task.runner_result_json))
-    findings = manager.acceptance_findings(task, output, runner, now)
+    test_findings: list[AcceptanceReviewFinding] = []
     if request.execute_tests:
-        findings.extend(build_acceptance_test_execution_findings(
+        test_findings.extend(build_acceptance_test_execution_findings(
             AcceptanceTestExecutionRequest(manager, task, output, request, now)
         ))
+    findings = manager.acceptance_findings(task, output, runner, now)
+    findings.extend(test_findings)
     return AcceptanceReviewInputs(
         output=output,
         runner=runner,
