@@ -100,10 +100,15 @@ def test_memory_compact_auto_guard_allows_complete_work_state_without_running_to
     assert resume["action_guard"]["allowed_next_action"] == "continue_after_guard"
     assert resume["action_guard"]["automatic_tool_execution"] == "none"
     assert resume["action_guard"]["missing_fields"] == []
+    assert resume["continue_packet"]["ready_to_continue"] is True
+    assert resume["continue_packet"]["continue_mode"] == "automated_guarded"
+    assert resume["continue_packet"]["guard"]["allowed_next_action"] == "continue_after_guard"
     assert cycle["status"] == "ready_after_action_guard"
     assert cycle["allowed_to_continue"] is True
     assert cycle["automatic_tool_execution"] == "none"
     assert cycle["next_action"] == "continue_after_guard"
+    assert cycle["continue_packet"]["ready_to_continue"] is True
+    assert cycle["apply_id"]
 
 
 def test_memory_compact_resume_links_subagent_run_workspace_refs(tmp_path: Path) -> None:
@@ -134,6 +139,9 @@ def test_memory_compact_resume_links_subagent_run_workspace_refs(tmp_path: Path)
     assert owner["memory_scope"] == "task_local"
     assert owner["writes_main_memory"] is False
     assert owner["automatic_tool_execution"] == "none"
+    assert owner["reserved_hooks"]["enabled"] is False
+    assert owner["reserved_hooks"]["writes_main_memory"] is False
+    assert owner["reserved_hooks"]["automatic_tool_execution"] == "none"
     assert Path(owner["refs"]["agent_run_workspace"]).parts[-4:] == (
         "tasks",
         "root-compact",

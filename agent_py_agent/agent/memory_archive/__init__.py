@@ -40,6 +40,9 @@ from .compact_chain import (
     default_compact_chain_result,
     sync_agent_run_compact_chain,
 )
+
+# LLM: Continue packet exports are the shared compact/resume continuation contract for future automation.
+from .compact_continue_packet import CompactContinuePacketRequest, build_compact_continue_packet
 from .compact_resume import MemoryCompactResumeOptions, build_memory_compact_resume
 from .compact_suggest import MemoryCompactSuggestOptions, build_memory_compact_suggestion
 from .control_plane import MemoryControlPlaneQueryOptions, query_memory_control_plane
@@ -110,6 +113,7 @@ __all__ = [
     "AppendSubagentTaskEventRequest",
     "ArtifactManifestResult",
     "CompactChainResult",
+    "CompactContinuePacketRequest",
     "DailyLedgerAppendResult",
     "DailyLedgerWorkspaceRefs",
     "EnsureAgentRunWorkspaceRequest",
@@ -143,6 +147,7 @@ __all__ = [
     "apply_memory_compact",
     "append_subagent_task_event",
     "build_auto_resume_context",
+    "build_compact_continue_packet",
     "build_memory_compact_resume",
     "build_compact_action_guard",
     "build_memory_compact_suggestion",

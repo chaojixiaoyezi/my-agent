@@ -96,8 +96,8 @@ def _base_snapshot(request: WorkStateSnapshotRequest, source_state: dict[str, An
     }
 
 
-# LLM: _source_work_state extracts goal and next actions from existing snapshot fact sources only.
-# 函数用途: 从 restore refs 指向的 snapshot 中提取最小工作状态，不猜测未记录的验收或约束。
+# LLM: _source_work_state prefers authoritative snapshot files, then falls back to bounded run archives.
+# 函数用途: 从 restore refs 指向的 snapshot/hook/raw 文件提取目标和下一步，不猜测未记录的验收或约束。
 def _source_work_state(restore_refs: dict[str, Any]) -> dict[str, Any]:
     for ref in restore_refs["source_refs"]["snapshot_files"]:
         payload = _read_json_dict(Path(ref["path"]))
@@ -108,7 +108,97 @@ def _source_work_state(restore_refs: dict[str, Any]) -> dict[str, Any]:
                 "content_paths": _text_list(payload.get("content_paths")),
                 "task_refs": _text_list(payload.get("task_refs")),
             }
+    archive_state = _archive_work_state(restore_refs)
+    if archive_state["goal"] or archive_state["next_actions"]:
+        return archive_state
     return {"goal": "", "next_actions": [], "content_paths": [], "task_refs": []}
+
+
+# LLM: _archive_work_state reads only restore_refs archive files to recover real-run goal and next action.
+# 函数用途: 当没有 snapshot JSON 文件时，从 hook recovery snapshot 或 raw 用户事件回填最小工作状态。
+def _archive_work_state(restore_refs: dict[str, Any]) -> dict[str, Any]:
+    records = _archive_records(restore_refs)
+    return {
+        "goal": _archive_goal(records),
+        "next_actions": _archive_next_actions(records),
+        "content_paths": _archive_texts(records, "content_paths"),
+        "task_refs": _archive_task_refs(records),
+    }
+
+
+# LLM: _archive_records keeps fallback reads scoped to compact restore refs instead of scanning workspace.
+# 函数用途: 读取 restore_refs 已登记的 raw/hook JSONL 文件，跳过损坏行并保持文件顺序。
+def _archive_records(restore_refs: dict[str, Any]) -> list[dict[str, Any]]:
+    refs = restore_refs.get("source_refs", {}) if isinstance(restore_refs.get("source_refs"), dict) else {}
+    archive_refs = refs.get("archive_files", []) if isinstance(refs.get("archive_files"), list) else []
+    return [record for ref in archive_refs for record in _read_jsonl_dicts(Path(str(ref.get("path", ""))))]
+
+
+# LLM: _archive_goal prefers recovery hook user_intents, then raw user message previews.
+# 函数用途: 从真实 run 归档里提取用户目标，让 compact resume 不因缺 snapshot 文件丢失目标。
+def _archive_goal(records: list[dict[str, Any]]) -> str:
+    return _first_nonempty([_first_text(record.get("user_intents")) for record in records]) or _first_nonempty(
+        [_raw_user_text(record) for record in records]
+    )
+
+
+# LLM: _raw_user_text returns raw user message text without interpreting assistant output as task facts.
+# 函数用途: 从 raw archive 用户事件提取目标文本，非用户事件返回空字符串。
+def _raw_user_text(record: dict[str, Any]) -> str:
+    if str(record.get("speaker") or "") != "user":
+        return ""
+    return str(record.get("content") or record.get("content_preview") or "").strip()
+
+
+# LLM: _first_nonempty keeps archive fallback selectors flat enough for guardrail limits.
+# 函数用途: 返回字符串列表中的第一条非空值，避免字段提取函数出现深层嵌套。
+def _first_nonempty(values: list[str]) -> str:
+    return next((value for value in values if value), "")
+
+
+# LLM: _archive_next_actions uses hook recovery next_actions without parsing assistant prose.
+# 函数用途: 从 hook recovery snapshot 回填下一步；没有结构化 next_actions 时保持未知。
+def _archive_next_actions(records: list[dict[str, Any]]) -> list[str]:
+    for record in records:
+        items = _text_list(record.get("next_actions"))
+        if items:
+            return items
+    return []
+
+
+# LLM: _archive_texts collects list-like fields from archive records for bounded fact-source roots.
+# 函数用途: 提取 content_paths 等列表字段，供 work_state 后续扫描任务事实源使用。
+def _archive_texts(records: list[dict[str, Any]], key: str) -> list[str]:
+    return _dedupe([item for record in records for item in _text_list(record.get(key))])
+
+
+# LLM: _archive_task_refs combines hook task_refs with raw task/run ids for workspace fact-source lookup.
+# 函数用途: 收集真实 run 相关 task/run 标识，帮助后续查找 task/subagent fact files。
+def _archive_task_refs(records: list[dict[str, Any]]) -> list[str]:
+    values = [item for record in records for item in _text_list(record.get("task_refs"))]
+    for record in records:
+        values.extend(str(record.get(key) or "").strip() for key in ("task_id", "run_id") if record.get(key))
+    return _dedupe(values)
+
+
+# LLM: _read_jsonl_dicts is a tolerant reader for append-only raw/hook archive files.
+# 函数用途: 逐行读取 JSONL 对象，坏行按缺失处理，避免 compact apply 被旧归档中断。
+def _read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            records.append(payload)
+    return records
 
 
 # LLM: _work_state_restore_refs keeps source path existence checks close to work-state capture.
@@ -201,6 +291,16 @@ def _text_list(value: Any) -> list[str]:
     if not isinstance(value, list | tuple):
         return []
     return [text for item in value if (text := str(item).strip())]
+
+
+# LLM: _dedupe preserves source order for recovered archive fields.
+# 函数用途: 对 hook/raw 回填字段去重，避免同一 task/run id 多次进入事实源扫描。
+def _dedupe(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value and value not in result:
+            result.append(value)
+    return result
 
 
 __all__ = [

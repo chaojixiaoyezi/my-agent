@@ -59,6 +59,14 @@ def _write_compact_fixture(root: Path) -> None:
     _append_compact_token_usage(root)
 
 
+# LLM: _write_real_run_archive_fixture simulates run --save archives without authoritative snapshot files.
+# 函数用途: 写入真实 run 风格的 raw/hook/token 数据，验证 compact apply 能从 hook recovery 回填状态。
+def _write_real_run_archive_fixture(root: Path) -> None:
+    append_raw_event(root, _compact_raw_event())
+    append_snapshot(root, _compact_snapshot())
+    _append_compact_token_usage(root)
+
+
 def _compact_raw_event() -> RawMemoryEvent:
     return RawMemoryEvent(
         event_id="raw-compact-1",
@@ -200,6 +208,40 @@ def test_apply_memory_compact_writes_non_destructive_artifacts(tmp_path: Path) -
     _assert_apply_artifact_schemas(result, artifacts)
     _assert_successful_apply_payload(result, artifacts)
     _assert_apply_preserved_sources(root)
+
+
+def test_memory_compact_apply_reads_hook_recovery_state_without_snapshot_file(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    _write_real_run_archive_fixture(root)
+
+    result = apply_memory_compact(
+        root,
+        MemoryCompactApplyOptions(
+            plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        ),
+    )
+    resume = build_memory_compact_resume(root, MemoryCompactResumeOptions(apply_ref=result["apply_id"]))
+    auto_resume = build_memory_compact_resume(
+        root,
+        MemoryCompactResumeOptions(apply_ref=result["apply_id"], resume_mode="auto"),
+    )
+
+    work_state = result["work_state_snapshot"]
+    assert result["source_plan"]["snapshot_file_count"] == 0
+    assert work_state["goal"] == "需要自动 compact dry-run 计划"
+    assert work_state["next_step"] == "先看 dry-run，再决定是否启用 apply。"
+    assert work_state["missing_fields"] == ["acceptance", "constraints", "latest_tests"]
+    assert resume["action_guard"]["status"] == "requires_user_confirmation"
+    assert resume["handoff"]["goal"] == "需要自动 compact dry-run 计划"
+    assert resume["continue_packet"]["ready_to_continue"] is False
+    assert resume["continue_packet"]["continue_mode"] == "manual_handoff"
+    assert resume["continue_packet"]["automatic_tool_execution"] == "none"
+    assert resume["completion_prompt"]["status"] == "needs_user_input"
+    assert resume["completion_prompt"]["suggested_commands"]
+    assert "验收条件" in resume["completion_prompt"]["prompt_template"]
+    assert "Completion Prompt" in resume["context_block"]
+    assert auto_resume["action_guard"]["status"] == "blocked_missing_work_state_fields"
+    assert auto_resume["action_guard"]["allowed_to_continue"] is False
 
 
 # LLM: _load_apply_artifacts keeps compact apply tests focused on behavior instead of path-reading boilerplate.
@@ -456,6 +498,8 @@ def test_memory_resume_from_compact_cli_outputs_context_only(tmp_path: Path, cap
     assert apply_result["apply_id"] in captured.out
 
 
+# LLM: test_memory_fact_write_closes_compact_missing_fields verifies the semi-auto manual fact loop.
+# 函数用途: 先让 compact resume 因缺字段阻断，再写入用户确认事实并重新 apply，确认 auto guard 放行。
 def test_memory_compact_suggestion_prompts_without_applying(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     _write_compact_fixture(root)

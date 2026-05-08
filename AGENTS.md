@@ -165,6 +165,27 @@ def example(...):
 - 自学习草稿生成。
 - skill 加载和优先级。
 
+### 远端提交前强制本地严格验收
+
+当前仓库可能因为 GitHub Actions 额度、账单或临时策略暂停线上 CI。只要准备把代码推到远端、更新远端分支、开/更新 PR、或合并到 `main`，就必须先在本地跑最严格验收；不能把“线上 CI 暂停/没跑”当成跳过测试的理由。
+
+远端提交前最小严格 gate：
+
+```bash
+python3 -m pytest -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+python3 scripts/check_clean_package.py .
+```
+
+要求：
+- 改动涉及特定模块时，先跑对应 focused tests，再跑上面的全量严格 gate。
+- 任一命令失败时，默认不得推送远端、不得合并到 `main`；除非用户明确要求绕过，并且最终汇报写清失败命令、风险和原因。
+- 如果线上 CI 被禁用或被 billing 阻塞，最终汇报必须明确说明“本地严格 gate 已通过/未通过”，以及线上 CI 没有作为验收来源。
+- 如果本轮不提交远端，只是本地探索、草稿或小切片开发，继续按改动风险运行 focused tests、语法检查、doc sync 或必要 guard；不强制每次都跑全量严格 gate。
+
 ## 安全边界
 
 - 写文件、发网络请求、执行命令、自学习落盘都要能被用户理解和追踪。

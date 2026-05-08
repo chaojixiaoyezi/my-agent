@@ -95,6 +95,7 @@ compact 后的模型上下文应该由这些层组成：
 - 写 compression snapshot。
 - 写 LocalStore audit event。
 - 生成 dry-run compact plan。
+- 生成 continue packet / guard 报告，让后续流程先看机器可读状态再决定是否继续。
 
 自动 compact 不应该静默完成的动作：
 
@@ -104,6 +105,7 @@ compact 后的模型上下文应该由这些层组成：
 - self check 失败仍继续运行。
 - 把 hypothesis 写成 confirmed fact。
 - 自动写正式 skill。
+- 自动执行 parent acceptance 的 `run_tests`、`apply_acceptance` 或 rescue。
 
 ## 无人值守工作状态锁
 
@@ -127,13 +129,15 @@ compact 后的模型上下文应该由这些层组成：
 4. 只有 `ok=true` 时才允许继续执行工具或改代码。
 5. 如果缺字段、refs 不存在、任务目标冲突或 diff 范围异常，进入 `blocked_needs_human_review`，不得无人值守继续。
 
+Action Guard 之后还必须生成 Continue Packet。Continue Packet 固定继续工作所需的目标、下一步、验收、约束、最近测试、refs、owner 和 `automatic_tool_execution=none`。它是“compact 恢复可继续”的证明，不是“业务验收已通过”的证明；子代理是否通过验收仍由 parent acceptance controller 和 auto-policy 负责。
+
 这条规则适用于半自动和自动模式：自动 compact 不是“压完就继续”，而是“压完、恢复、对照、确认一致，再继续”。
 
 用户最少动手的理想路径：
 
 ```text
 50%: 系统自动 checkpoint，不打扰用户，只在状态行提示。
-70%: 系统建议 compact；半自动阶段需用户确认，自动阶段也必须先通过 work state consistency check。
+70%: 系统建议 compact；半自动阶段需用户确认，自动阶段也必须先通过 work state consistency check 和 continue packet。
 85%: 系统自动 artifact 化大输出，并提示上下文高风险。
 95%: 系统停止继续膨胀，要求 compact/retry/人工恢复三选一。
 ```
@@ -609,6 +613,9 @@ compact、resume 和 memory runtime 应该同步推进，但要分清职责，�
 - `apply_id` 使用 `plan_id + 时间` 生成；同一秒重复 apply 会自动追加后缀，避免覆盖旧产物。
 - `plan_id`、`apply_id` 会同时写入 metadata、apply bundle、restore refs、work state snapshot、self-check、失败报告和 ledger。
 - 新增 `*.work_state_snapshot.json`，记录 goal、phase、next step、acceptance、constraints、changed/read files、artifact refs、restore refs、latest tests、git state、missing fields 和 source quality。
+- work state 优先从 `memory_archive/snapshots/*.json` 权威 snapshot 读取 goal/next action；如果真实 `run --save` 只留下 hook recovery snapshot 和 raw archive，apply 会从本次 `restore_refs` 指向的 hook/raw JSONL 回填 goal/next_step，仍不从普通对话里猜验收、约束或测试状态。
+- 真实 `run --save` 会额外写 `memory_archive/runtime_facts/<request_id>/task.json`，并通过 hook snapshot `content_paths` 暴露给 compact apply；其中 acceptance/constraints/latest_tests 只来自用户 prompt 的显式标签或真实测试工具命令。
+- `memory-fact-write` 可把用户确认后的补全事实写入 `memory_archive/runtime_facts/<fact_id>/task.json`；后续用同一 request/session/task/run scope 重新 `memory-compact --apply` 时，work state 会只读扫描这个 fact source。
 - work state 字段来源第一片已接入：只读 workspace 内 task/run 事实源，例如 `ACCEPTANCE.md`、`CONSTRAINTS.md`、`TEST_CHECKLIST.md`、`task.json`、旧 `subagents/<run_id>/` 和新 `tasks/*/agents/<run_id>/`；找不到字段时仍写 `missing_fields`，不会猜测或伪造。
 - self-check 已检查 context、restore refs、apply bundle、work state snapshot 是否写入，restore refs 是否存在，以及 goal / next actions / acceptance / constraints / test state / risks 是否被带出。
 - 当前仍保持非破坏性：不删除、不重写、不裁剪 raw/hook/snapshot/token/task/run 文件。
@@ -642,6 +649,8 @@ my-agent memory-resume --from-compact <apply_id> --context-only
 - `memory-resume --from-compact <apply_id>` 会只读读取 metadata、apply bundle、restore refs、work state snapshot、compact context 和 self-check。
 - 输出 `compact_resume` payload、`compact_resume_consistency_report`、`compact_resume_handoff`、推荐读取路径、下一步建议和 `context_block`。
 - `compact_resume_handoff` 会稳定包含 goal、current_phase、next_step、acceptance、constraints、latest_tests、changed_files、read_files、recommended_read_paths 和 action_guard 摘要，方便新会话或其他 agent 接手。
+- 缺 work state 字段时，resume 会输出 `completion_prompt`，给出可复制的显式标签模板，例如“验收条件/约束/测试”；它只帮助用户补充事实源，不自动写文件。
+- 用户确认补全内容后，可以执行 `memory-fact-write --from-compact <apply_id> --acceptance ... --constraint ... --latest-test ...` 写入显式事实源；命令不会解析模型回复，也不会替用户猜字段。
 - `--context-only` 只打印 `Compact Resume Context`，方便复制到新会话或后续自动注入。
 - self-check 失败、restore refs 缺失、apply IDs 串号或 compact context 缺失时会进入 `blocked_needs_human_review`，不会自动继续执行工具。
 - `MemoryCompactResumeOptions.owner_type/owner_id` 已接入子代理 owner 只读引用解析；`subagent_run` / `subagent_session` 会返回 task-local run workspace 和 legacy adapter refs，但不触碰 subagent runner，不写主 memory。
