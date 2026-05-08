@@ -148,6 +148,7 @@ def _add_agents_acceptance_subcommand(sub):
     acceptance_plan.add_argument("--write", action="store_true", help="写入 refs-only 父级验收决策审计文件")
     acceptance_plan.add_argument("--apply", action="store_true", help="显式应用 inspect_only 低风险父级验收决策")
     acceptance_plan.add_argument("--next-action", action="store_true", help="查看父级下一步显式动作建议，不执行动作")
+    acceptance_plan.add_argument("--auto-policy", action="store_true", help="查看父级自动策略 dry-run，不执行动作")
     acceptance_plan.add_argument("--reviewer", default="parent", help="apply 时写入验收记录的 reviewer")
     acceptance_plan.add_argument("--note", default="", help="apply 时写入验收记录的备注")
     acceptance_plan.set_defaults(func=cmd_subagents_acceptance_plan)

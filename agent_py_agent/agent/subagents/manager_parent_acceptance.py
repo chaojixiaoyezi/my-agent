@@ -11,6 +11,10 @@ from .parent_acceptance_apply import (
     blocked_parent_acceptance_apply_result,
     write_parent_acceptance_apply_result_file,
 )
+from .parent_acceptance_auto_policy import (
+    ParentAcceptanceAutoPolicy,
+    build_parent_acceptance_auto_policy,
+)
 from .parent_acceptance_controller import (
     ParentAcceptanceDecision,
     build_parent_acceptance_decision,
@@ -81,6 +85,16 @@ def manager_apply_parent_acceptance_decision(
 def manager_plan_parent_acceptance_next_action(manager, run_id: str) -> ParentAcceptanceNextAction:
     task = manager.load(run_id)
     return build_parent_acceptance_next_action(
+        task,
+        workspace_root=acceptance_workspace_root(manager),
+    )
+
+
+# LLM: manager_plan_parent_acceptance_auto_policy exposes dry-run policy gating for schedulers.
+# 函数用途: 读取 next-action 并写入自动策略审计；不执行建议动作、不修改任务状态。
+def manager_plan_parent_acceptance_auto_policy(manager, run_id: str) -> ParentAcceptanceAutoPolicy:
+    task = manager.load(run_id)
+    return build_parent_acceptance_auto_policy(
         task,
         workspace_root=acceptance_workspace_root(manager),
     )

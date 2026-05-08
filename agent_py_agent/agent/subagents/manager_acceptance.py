@@ -27,10 +27,12 @@ from .acceptance_review_service import (
 )
 from .manager_parent_acceptance import (
     ParentAcceptanceApplyResult,
+    ParentAcceptanceAutoPolicy,
     ParentAcceptanceDecision,
     ParentAcceptanceNextAction,
     manager_apply_parent_acceptance_decision,
     manager_plan_parent_acceptance,
+    manager_plan_parent_acceptance_auto_policy,
     manager_plan_parent_acceptance_next_action,
     manager_write_parent_acceptance_decision,
 )
@@ -115,6 +117,11 @@ class _SubAgentAcceptanceFacade:
     # 函数用途: 为父/上级代理生成下一步显式动作建议；不运行 tests、不 rescue、不改状态。
     def plan_parent_acceptance_next_action(self, run_id: str) -> ParentAcceptanceNextAction:
         return manager_plan_parent_acceptance_next_action(self, run_id)
+
+    # LLM: plan_parent_acceptance_auto_policy is a dry-run policy gate for future automation.
+    # 函数用途: 生成父级验收自动策略审计；不执行建议动作、不改状态。
+    def plan_parent_acceptance_auto_policy(self, run_id: str) -> ParentAcceptanceAutoPolicy:
+        return manager_plan_parent_acceptance_auto_policy(self, run_id)
 
     def review_acceptance(
         self,

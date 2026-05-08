@@ -23,11 +23,12 @@
 - The first shared progress panel read model now composes runtime query results, task rollup, blocked visible runs, and inheritance manifest refs for upper-agent or takeover-agent views; it still points back to task/run workspace facts instead of loading artifact bodies.
 - Failed or blocked tasks now carry a first failure handoff record, written to `reports/failure_handoff.json`, with warnings, last safe checkpoint refs, artifact/evidence refs, and next-run avoidance advice; it is recovery guidance, not an automatic rescue trigger.
 - Tasks now also have audit-only security reserve fields: `SecuritySignal` entries and `security_review_required`. These fields are for future security hijack/deception defenses and do not enforce policy by themselves.
-- CLI status surfaces now expose shared progress, failure handoff refs, takeover refs, and parent acceptance dry-run summaries in `status --json`, human `status`, and the `subagents` board. These views show counts, decisions, summaries, and refs only; they do not load failure handoff, test report bodies, or artifact bodies.
+- CLI status surfaces now expose shared progress, failure handoff refs, takeover refs, parent acceptance dry-run summaries, and parent acceptance next-action summaries in `status --json`, human `status`, and the `subagents` board. These views show counts, decisions, actions, command summaries, `mutates_task_state`, and refs only; they do not execute commands or load failure handoff, test report, or artifact bodies.
 - Large runtime tool outputs now write a fail-safe recovery snapshot before externalization. The snapshot stores metadata such as tool, hash, size, run/task/request ids, and next action, while the full output body still belongs only to the externalized artifact.
 - ToolContextReducer now protects the next live prompt: externalized large outputs are injected as refs and metadata only, while full bodies remain in artifacts.
 - Takeover/rescue command paths now consume takeover readiness refs first: action plans and takeover apply records surface `takeover_readiness.json` before its recommended read order, without loading artifact bodies.
 - Rescue packet metadata now travels with action plan/apply records: dedupe, repeat count, retry limit, escalation target, manual confirmation, and recovery entrypoints are visible as refs-only audit data.
+- Parent Acceptance Auto Policy v1 dry-run 已有第一片实现：当前只生成策略审计，不执行 tests、不 apply acceptance、不自动触发 rescue。
 # Subagent：结构树和详细说明
 
 ## 模块结构
@@ -62,11 +63,13 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/parent_acceptance_controller.py`：生成父代理验收 dry-run 决策，返回 `execute_tests` / `inspect_only` / `request_human` / `rescue` 等下一步；它只读 refs 和机器事实源，不执行命令、不写 task；显式写入时生成 `parent_acceptance_decision.json`。
 - `agent_py_agent/agent/subagents/parent_acceptance_apply.py`：保存父级验收显式 apply 的结果模型、拦截/应用结果构造和 `parent_acceptance_apply.json` 落盘逻辑。
 - `agent_py_agent/agent/subagents/parent_acceptance_next_action.py`：把父级验收 plan/apply 审计映射成下一步动作建议，例如 `run_tests`、`request_human_confirmation`、`plan_rescue` 或 `apply_acceptance`；它只返回建议和 refs，不执行动作。
-- `agent_py_agent/agent/subagents/manager_parent_acceptance.py`：承接 manager 的父级验收 plan/write/apply/next-action 桥接流程，让 `manager_acceptance.py` 类体只保留薄转发方法。
+- `agent_py_agent/agent/subagents/parent_acceptance_auto_policy.py`：把 next-action 映射成自动策略 dry-run 判断并写入 `parent_acceptance_auto_policy.json`；当前只生成 allow/blocked、would_execute 和 executed=false。
+- `agent_py_agent/agent/subagents/manager_parent_acceptance.py`：承接 manager 的父级验收 plan/write/apply/next-action/auto-policy 桥接流程，让 `manager_acceptance.py` 类体只保留薄转发方法。
 - `agent_py_agent/agent/subagents/acceptance_test_execution.py`：把显式开启的真实测试执行接入 acceptance findings，生成 `test_execution_recorded` 和 `test_execution_passed`，默认不运行。
-- `agent_py_agent/cli/_acceptance_plan.py`：提供 `subagents-acceptance-plan` CLI 渲染；默认只展示父级验收 dry-run 决策和 refs，`--write` 只写决策审计文件，`--apply` 只允许 `inspect_only` 进入既有 acceptance apply，其它决策只写拦截审计，`--next-action` 只打印上级动作建议。
+- `agent_py_agent/cli/_acceptance_plan.py`：提供 `subagents-acceptance-plan` CLI 渲染；默认只展示父级验收 dry-run 决策和 refs，`--write` 只写决策审计文件，`--apply` 只允许 `inspect_only` 进入既有 acceptance apply，其它决策只写拦截审计，`--next-action` 只打印上级动作建议，`--auto-policy` 只打印并写入自动策略 dry-run 审计。
 - `agent_py_agent/cli/_review.py`：提供 `subagents-tests` 和验收相关兼容导出；tests 默认只读取已有 `test_execution.json`，显式 `--re-run` 才重新执行 `output.json.tests`。
 - `agent_py_agent/agent/settings/config.py` / `agent_py_agent/config/agent_config.yaml`：提供 `acceptance_execute_tests` 和 `acceptance_test_timeout_seconds`，默认保持老验收路径不自动跑命令。
+- Auto Policy v1 当前只实现 dry-run 审计，尚未接主配置；后续若做成用户可见主配置，配置默认值和中文说明必须同步写入 `agent_py_agent/config/agent_config.yaml` 与 `AgentConfig`。如果只是 subagent/capability 路由内部的授权、次数或 allowlist 细则，应进入 `agent_py_agent/config/capability_config.yaml` 与 `capability_config.py`，不要扩张主配置。
 - `agent_py_agent/agent/subagents/manager_indexing.py`：实现 `_select_runs()` 等索引和过滤逻辑，同时提供公开别名 `select_runs()`、`index_task()` 等。
 - `agent_py_agent/agent/subagents/manager_acceptance_findings.py`：实现验收发现逻辑，公开别名 `acceptance_findings()`。
 - `agent_py_agent/agent/subagents/acceptance_review_service.py`：对单个任务做父级验收，生成分层 acceptance record，并执行只读 verifier checks。
@@ -140,6 +143,7 @@ agent_py_agent/agent/
 9. Acceptance Real Execution 当前提供 `TestExecutionRecord`、最小 `TestExecutor`、report 存储、显式 acceptance 接入、`subagents-tests` CLI、`subagents-acceptance-plan` CLI 和配置默认值；只有 `AcceptanceReviewOptions(execute_tests=True)`、`subagents-tests --re-run`、`subagents-acceptance --execute-tests` 或配置 `acceptance_execute_tests: true` 时才运行 tests 并生成报告/阻断 findings，默认旧验收路径和 acceptance-plan 都不执行命令。
 9. Parent Acceptance Controller 的 `--apply` 当前只是第一片安全桥接：`inspect_only` 才能进入普通 acceptance apply；`execute_tests`、`request_human`、`rescue` 会被写入 `parent_acceptance_apply.json` 并保持任务状态不变，留给上级/自动调度器下一步显式处理。
 9. Parent Acceptance Controller 的 `--next-action` 是自动调度前的建议层：它读取当前 plan 和已有 apply 审计 refs，返回下一步建议命令或人工/救援意图，但不会执行建议，也不会把建议当 verified fact。
+9. Parent Acceptance Auto Policy v1 dry-run 当前消费 next-action、决策/apply refs 和保守 allowlist。第一片只判断“策略是否允许、如果允许会执行什么、为什么仍不执行”，写 `parent_acceptance_auto_policy.json`；不运行 tests、不 apply、不 rescue，也不改 task/run 状态。
 10. due-check 把 blocked、timeout、stale heartbeat、capability request/gap 等问题转成 action plan，并附带 rescue/escalation 元数据。
 10. persistence 同步 `tasks/<root_id>/state.json`、`timeline.jsonl`、`summaries/current_summary.md`、`shared/`、`artifacts/` 和 `agents/<run_id>/legacy_run_ref.json`，为后续正式 agent run workspace 做兼容桥。
 11. persistence 同步 `tasks/<root_id>/agents/<run_id>/agent.yaml`、run `state.json`、run `timeline.jsonl`、`task.md`、`checkpoint.json`、`summary.md`、`final_report.md`、`findings.jsonl` 和 inbox/outbox/artifacts/compactions 目录，先形成 agent run workspace skeleton。
@@ -156,7 +160,7 @@ agent_py_agent/agent/
 21. 控制面投影的 metadata 会暴露 `inheritance_manifest_ref`、`failure_handoff_ref`、`takeover_readiness_ref`、`security_signal_count`、`security_signal_types` 和 `security_review_required` 这类恢复/安全线索；这些 refs 指向任务目录里的事实文件，不替代 artifact、checkpoint 或 verified finding。
 22. 如果 task 携带 `RuntimeIdentity`，控制面 metadata 会额外暴露 `runtime_identity`、`memory_scope` 和 `config_scope`。默认 `conversation_memory_policy=not_enabled`、`writes_global_config=false`；员工/外部会话只能形成可审计 run/conversation 作用域元数据，不能自动生成员工长期记忆或污染全局配置。
 23. `query_shared_progress_panel()` 在 runtime query 之上返回面板状态包，包含 rollup、可见 runs、blocked runs、inheritance refs、failure handoff refs 和 takeover readiness refs；它只做投影汇总，不读取 artifact 正文或替代 verified facts。
-24. `status --json`、人类 `status` 和 `subagents` 看板通过 `cli/shared_progress.py` 展示共享进度摘要；展示层按 root task 查询控制面，不扫描旧工单目录正文。接管视图可以显示 principal、conversation、memory namespace 和 config scope 摘要；`Acceptance Plan` 只调用父级 dry-run planner 生成决策摘要，不执行 tests、不写 task。需要审计落盘时必须显式调用 `subagents-acceptance-plan --write`；需要尝试写回状态时必须显式调用 `subagents-acceptance-plan --apply`，且当前只放行 `inspect_only`；需要给上级代理看下一步建议时调用 `--next-action`。
+24. `status --json`、人类 `status` 和 `subagents` 看板通过 `cli/shared_progress.py` 展示共享进度摘要；展示层按 root task 查询控制面，不扫描旧工单目录正文。接管视图可以显示 principal、conversation、memory namespace 和 config scope 摘要；`Acceptance Plan` 只调用父级 dry-run planner 生成决策摘要，不执行 tests、不写 task；`Acceptance Next Action` 只调用父级 next-action planner 生成 action、reason、command、refs 和 `mutates_task_state` 摘要，不执行命令、不写 task。需要审计落盘时必须显式调用 `subagents-acceptance-plan --write`；需要尝试写回状态时必须显式调用 `subagents-acceptance-plan --apply`，且当前只放行 `inspect_only`；需要单独查看下一步建议时可调用 `--next-action`。
 24. runtime tool loop 对大工具输出先调用 `tool_output_failsafe.py` 写 recovery snapshot，再调用 `tool_output_externalizer.py` 写 artifact；snapshot 里只有摘要 metadata，完整输出不会进入 snapshot。
 25. `tool_context_reducer.py` 根据 archive record 决定下一轮 prompt 内容：小输出保留原工具结果，大输出只保留 preview、artifact path、hash、size 和 fail-safe checkpoint path。
 26. action plan 的 `rescue_context_refs` 和 takeover apply 的 `evidence_paths` 会把 `takeover_readiness.json` 放在首位，再按 packet 的 recommended read order 展开 failure handoff、checkpoint、artifact manifest 等 refs；这些路径是恢复索引，不代表自动读取正文或自动接管。
@@ -181,6 +185,111 @@ agent_py_agent/agent/
 ## 当前第一版索引 / 待补齐
 
 本页先解释主结构和学习路径。更细的状态机、workflow 子工单依赖、status report 索引范围和验收阻断细节，后续仍需要继续补齐。
+
+## Parent Acceptance Auto Policy v1
+
+### 设计目标
+
+Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，但上级代理还缺少一份可审计、可配置、默认安全的“是否允许自动推进”判断。当前第一片已实现 dry-run 和审计，不把建议变成真实动作。
+
+第一版明确不做：
+- 不执行 `subagents-tests --re-run` 或任何测试命令。
+- 不调用 acceptance apply。
+- 不触发 rescue / takeover / retry。
+- 不读取 artifact 正文。
+- 不提升 conversation/run overlay 到全局配置。
+
+### 配置字段草案
+
+用户可见主配置候选：
+- `acceptance_auto_policy_enabled: false`：总开关，默认关闭。
+- `acceptance_auto_policy_mode: dry_run`：第一版只允许 `dry_run`；后续如引入 `enforce` / `execute`，必须另走设计评审。
+- `acceptance_auto_policy_auto_execute: false`：是否允许策略直接执行动作；第一版固定 false。
+- `acceptance_auto_policy_action_allowlist: ["run_tests"]`：策略允许考虑的动作；第一版默认只包含 `run_tests`，但仍因为 `auto_execute=false` 不会真正运行。
+- `acceptance_auto_policy_max_actions_per_run: 1`：单个 run 最多建议/尝试的自动动作次数，`0` 按能力路由配置约定表示不限制，但不建议第一版使用。
+- `acceptance_auto_policy_write_audit: true`：是否写审计记录；第一版建议默认写。
+
+能力路由 / subagent 专属配置候选：
+- action allowlist 的分层覆盖、capability grant 条件、同一 root run 的节流、上抛目标、rescue 入口、测试命令授权细则，优先放在 `capability_config.yaml` / `capability_config.py`。
+- 这些字段属于能力授权和路由边界，不应混进主配置；主配置只表达用户对父级验收自动化的全局偏好。
+
+### 动作边界
+
+- `run_tests`：只允许形成 would-run 审计，记录测试 refs、命令摘要和安全预检结果；第一版不执行。
+- `request_human_confirmation`：只生成需要人工确认的原因、问题和 refs，不自动发起外部通知。
+- `plan_rescue`：只引用 `failure_handoff_ref`、`takeover_readiness_ref`、`rescue_packet` 和 recommended read order，不启动救援 agent。
+- `apply_acceptance`：只说明需要显式 apply gate；第一版不会自动调用 apply。
+
+自动执行必须被阻断的情况：
+- `requires_human=true`。
+- 存在 `security_review_required=true` 或高严重度 `SecuritySignal`。
+- next-action 不在 allowlist。
+- 缺少 parent decision / apply / evidence refs。
+- effective config 来自 conversation/run overlay 且试图影响 project / tenant / global scope。
+- action 需要读取 artifact 正文、写文件、发网络请求、启动进程或改变长期状态。
+
+### 审计 JSON 草案
+
+事实源路径：`reports/parent_acceptance_auto_policy.json`。当前实现使用 `schema: parent_acceptance_auto_policy.v1`、`dry_run=true`、`policy` 和 `reserved`；下面保留后续配置化扩展草案：
+
+```json
+{
+  "schema_version": 1,
+  "record_type": "parent_acceptance_auto_policy",
+  "created_at": "ISO-8601",
+  "run_id": "string",
+  "root_run_id": "string",
+  "parent_run_id": "string|null",
+  "policy": {
+    "enabled": false,
+    "mode": "dry_run",
+    "auto_execute": false,
+    "action_allowlist": ["run_tests"],
+    "max_actions_per_run": 1,
+    "config_source": "default|agent_config|capability_config|conversation_overlay|run_override"
+  },
+  "decision_refs": {
+    "parent_acceptance_decision_ref": "reports/parent_acceptance_decision.json",
+    "parent_acceptance_apply_ref": "reports/parent_acceptance_apply.json|null",
+    "next_action_ref": "inline|path|null",
+    "test_execution_ref": "reports/test_execution.json|null",
+    "takeover_readiness_ref": "reports/takeover_readiness.json|null"
+  },
+  "next_action": "run_tests|request_human_confirmation|plan_rescue|apply_acceptance|none",
+  "allowed_by_policy": false,
+  "dry_run": true,
+  "auto_execute": false,
+  "would_execute": false,
+  "executed": false,
+  "blocked_reason": "dry_run_only",
+  "requires_human": false,
+  "safety_signals": [],
+  "rescue_refs": [],
+  "runtime_identity": {
+    "service_owner_id": "string|null",
+    "effective_principal_id": "string|null",
+    "conversation_id": "string|null",
+    "memory_namespace": "string|null"
+  },
+  "config_scope": {
+    "scope": "global|tenant|project|principal|conversation|run|default",
+    "writes_global_config": false,
+    "promotion_policy": "explicit_review"
+  },
+  "reserved": {}
+}
+```
+
+审计记录里的 `executed` 第一版必须恒为 false；`would_execute` 只表达策略判断，不代表动作已经发生。Markdown 或 CLI 视图只能展示摘要，机器判断必须读取 JSON。
+
+### 安全预留
+
+后续接入真实执行前，Auto Policy 必须先接入这些闸门：
+- `requires_human`：人工确认优先级高于 allowlist。
+- rescue / takeover：只能从 failure handoff、takeover readiness 和 rescue packet 读取 refs，不能自动读取大 artifact 正文。
+- 安全信号：`SecuritySignal` 和 `security_review_required` 先作为硬阻断输入，再考虑细分 severity。
+- 租户/员工 conversation 配置隔离：员工会话里的策略测试只能落在 conversation/run scope；提升到 project、tenant 或 global 必须有 admin approval、diff、audit event 和 rollback ref。
+
 ## 2026-05-06 structure update
 - Workflow routing and subagent manager internals now separate decision fields, rendering sections, patch normalization, and service actions.
 - Compatibility modules still re-export the existing public model and rendering names for callers.
@@ -207,3 +316,9 @@ agent_py_agent/agent/
 - `cli/shared_progress.py` 现在在 shared progress panel payload 里生成 `takeover_entries`，每条记录只包含 run 摘要、handoff/readiness refs 和 recommended read order。
 - `cli/local_status_view.py` 和 `cli/_board.py` 共用同一个 takeover view 渲染函数，保证 `status` 和 `subagents` 看板的接管入口一致。
 - 接管视图只解析 `takeover_readiness.json` 这个索引文件，不读取 artifact refs 指向的大正文；事实核实仍回到 task/run workspace、failure handoff、checkpoint 和 artifact manifest。
+
+## 2026-05-08 status/board acceptance next-action structure update
+- `cli/shared_progress.py` 现在在 shared progress panel payload 里生成 `acceptance_next_action_entries`，每条记录只包含 run_id、action、reason、command、refs 和 `mutates_task_state`。
+- `cli/acceptance_progress.py` 承接 Acceptance Plan / Acceptance Next Action 的 refs-only payload 和人类输出渲染；`cli/shared_progress.py` 只负责控制面面板组装和 takeover view。
+- `cli/local_status_view.py` 和 `cli/_board.py` 共用同一个 Acceptance Next Action 渲染函数，保证 `status` 和 `subagents` 看板展示一致。
+- 下一动作视图只调用 manager 的 `plan_parent_acceptance_next_action()` 生成建议，不读取 artifact 正文、不执行建议命令、不写任务状态。
