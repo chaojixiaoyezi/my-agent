@@ -14,14 +14,24 @@ from pathlib import Path
 
 from .local_storage import (
     PREVIEW_CHARS,
+    AgentEventInput,
+    AgentEventRecord,
+    AgentRunRecord,
+    AgentRuntimeQueryContext,
+    AgentRuntimeQueryResult,
+    AgentTreeReport,
     LocalSearchResult,
+    LocalStoreControlPlaneMixin,
     LocalStoreEvent,
     LocalStoreEventMixin,
     LocalStoreMaintenanceMixin,
     LocalStoreRecordMixin,
     LocalStoreSchemaMixin,
     LocalStoreSearchMixin,
+    LocalStoreSharedProgressPanelMixin,
     LocalTimelineItem,
+    SharedProgressPanel,
+    TaskRollupRecord,
 )
 from .task_registry import TaskRegistry
 
@@ -33,6 +43,8 @@ class LocalStore(
     LocalStoreRecordMixin,
     LocalStoreSearchMixin,
     LocalStoreEventMixin,
+    LocalStoreControlPlaneMixin,
+    LocalStoreSharedProgressPanelMixin,
     LocalStoreMaintenanceMixin,
 ):
     """composes LocalStore persistence, search, events, and maintenance APIs.
@@ -86,10 +98,18 @@ class LocalStore(
 
 
 __all__ = [
+    "AgentEventInput",
+    "AgentEventRecord",
+    "AgentRuntimeQueryContext",
+    "AgentRuntimeQueryResult",
+    "AgentRunRecord",
+    "AgentTreeReport",
     "LocalSearchResult",
     "LocalStore",
     "LocalStoreEvent",
     "LocalTimelineItem",
     "PREVIEW_CHARS",
+    "SharedProgressPanel",
+    "TaskRollupRecord",
     "TaskRegistry",
 ]

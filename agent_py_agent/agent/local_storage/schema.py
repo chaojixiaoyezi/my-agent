@@ -79,6 +79,67 @@ _TASK_REGISTRY_SQL = (
     """,
 )
 
+_CONTROL_PLANE_SQL = (
+    """
+    CREATE TABLE IF NOT EXISTS agent_runs (
+        run_id TEXT PRIMARY KEY,
+        root_task_id TEXT NOT NULL,
+        parent_run_id TEXT NOT NULL DEFAULT '',
+        depth INTEGER NOT NULL DEFAULT 0,
+        role TEXT NOT NULL DEFAULT '',
+        agent_name TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT '',
+        progress REAL NOT NULL DEFAULT 0,
+        current_step TEXT NOT NULL DEFAULT '',
+        latest_summary TEXT NOT NULL DEFAULT '',
+        workspace_path TEXT NOT NULL DEFAULT '',
+        checkpoint_ref TEXT NOT NULL DEFAULT '',
+        latest_compact_ref TEXT NOT NULL DEFAULT '',
+        compact_count INTEGER NOT NULL DEFAULT 0,
+        heartbeat_at REAL NOT NULL DEFAULT 0,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        reserved_json TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_agent_runs_root ON agent_runs(root_task_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_runs_parent ON agent_runs(parent_run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_runs_status ON agent_runs(status)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_runs_updated ON agent_runs(updated_at)",
+    """
+    CREATE TABLE IF NOT EXISTS agent_events (
+        event_id TEXT PRIMARY KEY,
+        root_task_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        parent_run_id TEXT NOT NULL DEFAULT '',
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        created_at REAL NOT NULL,
+        reserved_json TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_agent_events_root ON agent_events(root_task_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_events_run ON agent_events(run_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_events_type ON agent_events(event_type)",
+    """
+    CREATE TABLE IF NOT EXISTS task_rollups (
+        task_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL DEFAULT '',
+        progress REAL NOT NULL DEFAULT 0,
+        running_agents INTEGER NOT NULL DEFAULT 0,
+        blocked_agents INTEGER NOT NULL DEFAULT 0,
+        completed_agents INTEGER NOT NULL DEFAULT 0,
+        failed_agents INTEGER NOT NULL DEFAULT 0,
+        latest_summary TEXT NOT NULL DEFAULT '',
+        updated_at REAL NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        reserved_json TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_task_rollups_updated ON task_rollups(updated_at)",
+)
+
 
 # LLM: LocalStoreSchemaMixin 属于 LocalStore 本地事实索引 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
 # 类用途: LocalStoreSchemaMixin 封装 LocalStore 本地事实索引 的一组相关操作，供上层组合调用。
@@ -93,6 +154,7 @@ class LocalStoreSchemaMixin:
         with self._connection() as conn:
             self._execute_schema(conn, _BASE_SCHEMA_SQL)
             self._execute_schema(conn, _TASK_REGISTRY_SQL)
+            self._execute_schema(conn, _CONTROL_PLANE_SQL)
             if self.enable_fts:
                 self._init_fts_schema(conn)
             conn.commit()

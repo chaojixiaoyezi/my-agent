@@ -108,6 +108,7 @@ from .cli.memory_archive_commands import (
     cmd_memory_archive_search,
     cmd_memory_resume,
 )
+from .cli.memory_artifact_commands import cmd_memory_artifact_read
 from .cli.memory_commands import cmd_memory_doctor, cmd_memory_route
 from .cli.models import ChatJob, DaemonOptions
 from .cli.parser import build_parser, main

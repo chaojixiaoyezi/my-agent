@@ -85,6 +85,8 @@
 - [ ] action plan 默认 dry-run
 - [ ] apply 动作必须显式 `--apply`
 - [ ] takeover 需要 `--take-over-by`
+- [ ] takeover/rescue 只把 `takeover_readiness.json`、failure handoff、checkpoint、artifact manifest 等 refs 放入计划或审计记录，不自动读取大 artifact 正文
+- [ ] rescue packet 记录 dedupe、repeat count、retry limit、escalation target、manual confirmation 和 recovery refs，且 `auto_retry=false`
 - [ ] apply 后有审计日志
 
 ## 修改 runner 时

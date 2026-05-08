@@ -40,6 +40,8 @@
 - 2026-05-07 P0 安全切片已落地：runtime compression snapshot 现在会带上 routed memory context 和 auto resume context；artifact manifest 只允许读取 legacy task dir、task workspace、agent run workspace 内的 artifact；shared workspace 的 findings/evidence 改为按 id 合并，避免 sibling 子代理互相覆盖。
 - 2026-05-07 Compact Apply 语义拆分第一片已落地：`memory-compact --apply` 不再等同于 destructive rewrite，而是写 `memory_archive/compact_applies/` 下的 compact context、metadata、ledger 和 self-check，状态标记为 `applied_non_destructive`。
 - 2026-05-07 Artifact Externalizer 第一片已落地：runtime 工具循环会把超过阈值的大工具输出写入 `memory_archive/artifacts/tool_outputs/*.json`，并追加 `index.jsonl`；`archive_tool_calls` 只保留 preview/hash/path/size，当前工具上下文仍保留完整结果，不改变本轮模型行为。
+- 2026-05-08 Tool Output fail-safe checkpoint 已落地：大工具输出写 artifact 前会先写 recovery snapshot；snapshot 的 `tool_calls` 会保留工具名、调用 id、ok、output hash、size 和 externalized=pending 元数据，但仍不保存完整工具输出正文。
+- 2026-05-08 ToolContextReducer live prompt 保护已落地：大工具输出外置后，下一轮 prompt 只注入 preview、artifact path、hash、size 和 fail-safe checkpoint；完整正文只留在 artifact 文件里。
 - 2026-05-07 Control-plane Query API 第一片已落地：`query_memory_control_plane()` 会只读汇总 `daily/YYYY-MM-DD/events.jsonl`、task/run refs、`memory_archive/compact_applies/ledger.jsonl` 和 `memory_archive/artifacts/tool_outputs/index.jsonl`，按 date/task/run/event scope 返回轻量引用；它不读取大工具正文，不写入 workspace，也不替代 task/run 事实源。
 - 2026-05-07 Schema v2 / Reserved Fields 已固化第一片：`daily_ledger_event`、`control_plane_task_run_ref`、`compact_apply` / `compact_apply_ledger` / `compact_apply_self_check`、`tool_output_archive_record` / `tool_output_artifact` / `tool_output_index` 现在统一写 `version=2`、`schema` 和结构化 `reserved={schema_name,schema_version,extensions,compat,future}`；后续新增字段优先走明确业务字段，实验性扩展只能放入 reserved 三槽。
 - 2026-05-07 Compact Apply 第二片已落地：`memory-compact --apply` 现在除 context/metadata/self-check/ledger 外，还会写 `*.apply_bundle.json` 和 `*.restore_refs.json`，把原始 archive/snapshot/token refs 和恢复步骤串起来；如果 post-compact self-check 失败，会写 `*.self_check_failed.json` 并把 metadata/ledger 标记为 `blocked_self_check_failed`，仍然不删除、不重写、不裁剪历史事实源。
@@ -98,6 +100,8 @@
 - compact dry-run 解决了“还没压缩前不知道会碰到哪些归档、snapshot、token ledger 和风险”的问题；真实 apply 前可以先审计计划。
 - compact apply 语义拆分解决了“checkpoint_only 和真正 apply 混在一起”的问题；现在 apply 先形成可审计恢复入口和自检报告，明确保留原始内容，后续才能继续做更激进的上下文裁剪。
 - artifact externalizer 解决了“大工具输出只能混在工具上下文或归档摘要里”的问题；现在 compact/resume 能从 index 找到完整 artifact，而 raw archive、token ledger 和 apply metadata 不需要复制大正文。
+- tool output fail-safe checkpoint 解决了“黑盒大输出外置过程中如果失败，可能没有恢复锚点”的问题；现在 externalizer 前先留下 metadata-only snapshot，后续接管代理至少能看到工具名、hash、大小和建议下一步。
+- ToolContextReducer live prompt 保护解决了“artifact 已经外置，但下一轮 prompt 仍把完整大正文塞回上下文”的问题；现在模型看到的是恢复安全摘要，想读正文必须显式走 artifact 路径。
 - control-plane query 解决了“daily ledger、compact apply、tool output index 和 task/run refs 只能各自散扫”的问题；现在 compact/resume/debug 可以先走统一只读入口，再按 refs 回到权威文件核实。
 - schema v2 / reserved 固化解决了“索引记录以后要加字段时没有统一落点”的问题；现在核心 runtime memory 轻量记录都带同一个版本和保留槽，架构评审能区分正式字段、兼容字段和未来实验扩展。
 - compact apply 第二片解决了“apply 只有摘要产物，但缺少显式恢复包和失败阻断”的问题；现在恢复时可以先读 apply bundle，再按 restore refs 回查原始事实源，自检失败也会留下机器可读失败报告。
@@ -162,6 +166,8 @@
 - 本轮 P0 安全 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_memory_first_loop.py::test_runtime_compression_receives_routed_and_resume_context agent_py_agent/tests/test_subagent_persistence_service.py::test_subagent_persistence_writes_artifact_manifests agent_py_agent/tests/test_memory_workspace_safety.py` -> passed。
 - 本轮 compact apply focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_memory_compact.py` -> `5 passed`。
 - 本轮 artifact externalizer focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_tool_output_externalizer.py` -> `2 passed`。
+- 本轮 Tool Output fail-safe checkpoint 验收：`python -m pytest -q agent_py_agent\tests\test_tool_output_externalizer.py` -> `3 passed`。
+- 本轮 ToolContextReducer live prompt 保护验收：`python -m pytest -q agent_py_agent\tests\test_tool_output_externalizer.py agent_py_agent\tests\test_tooling_base.py::TestToolExecutionResult` -> `6 passed`。
 
 ## 未跑测试
 
@@ -186,3 +192,22 @@
 - Product-code modules, classes, functions, and methods in the active module now carry the required `LLM:` plus `函数用途:` / `类用途:` definition-level double-layer comments format.
 - This is a documentation-only maintainability pass: behavior, file formats, workflow semantics, and public interfaces are intended to stay unchanged.
 - Future module changes must keep these comments current when changing module/class/def behavior, side effects, bundles, or caller expectations.
+
+## 2026-05-08 compact resume fail-safe checkpoint refs
+- `memory-resume --from-compact` 现在会从 compact restore refs 指向的 hook JSONL 中提取 `tool_output_externalizer` 的 fail-safe checkpoint。
+- 新增输出字段 `fail_safe_checkpoints`，只包含 checkpoint path、line_no、snapshot_id、source/status、request/run/task id、工具名、调用 id、output hash、size、externalized 状态和 next_actions。
+- `compact_resume_handoff` 和 `Compact Resume Context` 新增 `Fail Safe Checkpoints` 小节；`recommended_read_paths` 会把这些 checkpoint path 提前放入必读入口。
+- 该流程只读 metadata-only hook checkpoint，不自动读取 `memory_archive/artifacts/tool_outputs/*` 的完整正文；完整大输出仍必须后续显式按 artifact 路径读取。
+
+## 2026-05-08 compact resume fail-safe code-size split
+- 为避免 `compact_resume.py` 和 `test_memory_compact.py` 继续接近 code-size 软上限，checkpoint JSONL 扫描逻辑拆到 `compact_resume_failsafe.py`，新增回归测试拆到 `test_memory_compact_failsafe.py`。
+- 行为边界不变：memory-resume 只展示 fail-safe checkpoint refs / hash / size / next_actions，不自动读取 tool-output artifact 正文。
+
+## 2026-05-08 artifact explicit read progress
+- 新增 `memory-artifact-read <artifact_ref>`，只读取 tool output index 已登记 artifact；未登记普通文件会返回 `artifact_not_registered`，不打印正文。
+- 新增 `read_artifact` 工具，模型只能通过 artifact path/hash/call_id 显式读取正文切片；默认 `max_chars=4000`，`max_chars=0` 表示读取完整正文。
+- artifact reader 会校验路径仍在 `memory_archive/artifacts/tool_outputs/` 下，并校验 artifact content sha256，避免把 artifact ref 变成任意文件读取后门。
+
+## 2026-05-08 artifact explicit read CI follow-up
+- 补齐 `artifact_reader.py` 私有 helper 的双层用途注释，符合 code-size 脚本对产品代码可维护性的检查要求。
+- 该修复只补充 reader helper 的边界说明和入口导入排序，不改变 `memory-artifact-read` / `read_artifact` 的 refs-only 读取边界。

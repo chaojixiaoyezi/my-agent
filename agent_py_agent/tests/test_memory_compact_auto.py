@@ -134,9 +134,14 @@ def test_memory_compact_resume_links_subagent_run_workspace_refs(tmp_path: Path)
     assert owner["memory_scope"] == "task_local"
     assert owner["writes_main_memory"] is False
     assert owner["automatic_tool_execution"] == "none"
-    assert owner["refs"]["agent_run_workspace"].endswith("tasks/root-compact/agents/run-compact")
+    assert Path(owner["refs"]["agent_run_workspace"]).parts[-4:] == (
+        "tasks",
+        "root-compact",
+        "agents",
+        "run-compact",
+    )
     assert owner["refs"]["agent_checkpoint"].endswith("checkpoint.json")
-    assert owner["legacy_run_ref"]["legacy_task_dir"].endswith("subagents/run-compact")
+    assert Path(owner["legacy_run_ref"]["legacy_task_dir"]).parts[-2:] == ("subagents", "run-compact")
 
 
 def _auto_cycle_options(*, allow_apply: bool = False) -> MemoryCompactAutoCycleOptions:

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from ..log_analysis.capabilities import SECURITY_TOOL_NAMES
+from .artifact import ReadArtifactTool
 from .filesystem import (
     AppendFileTool,
     ListFilesTool,
@@ -91,6 +92,7 @@ class ToolRegistry:
         self.register(ListFilesTool(self.workspace_root, params.max_entries, workspace_roots))
         self.register(ReadFileTool(self.workspace_root, params.max_chars, workspace_roots))
         self.register(SearchTextTool(self.workspace_root, params.max_matches, workspace_roots))
+        self.register(ReadArtifactTool(self.workspace_root))
         self.register(WriteFileTool(self.workspace_root, workspace_roots))
         self.register(AppendFileTool(self.workspace_root, workspace_roots))
         self.register(ReplaceInFileTool(self.workspace_root, workspace_roots))

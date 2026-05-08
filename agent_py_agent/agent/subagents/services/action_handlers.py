@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .action_params import RecordAfterTaskActionParams
+from .takeover_readiness import takeover_readiness_ref_order
 
 
 # LLM: ActionHandlerContext 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -131,6 +132,8 @@ def apply_takeover_or_reassign(service, action, task, ctx: ActionHandlerContext)
     )
     task = service.manager.load(action.run_id)
     service._append_task_work_log(task, f"action_apply takeover_or_reassign: 已由 {take_over_by} 接管。")
+    evidence_paths = takeover_readiness_ref_order(task.takeover_readiness_json)
+    evidence_paths.extend([task.takeover_file, task.work_log_file])
     return service._record_after_task_action(
         RecordAfterTaskActionParams(
             action,
@@ -138,7 +141,7 @@ def apply_takeover_or_reassign(service, action, task, ctx: ActionHandlerContext)
             ctx.before_status,
             ctx.before_channel_status,
             f"已由 {take_over_by} 接管任务。",
-            evidence_paths=[task.takeover_file, task.work_log_file],
+            evidence_paths=list(dict.fromkeys(ref for ref in evidence_paths if ref)),
         )
     )
 
