@@ -5,7 +5,10 @@ from __future__ import annotations
 
 """rescue/escalation annotations for due-check action plans."""
 
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+from .takeover_readiness import takeover_readiness_ref_order
 
 if TYPE_CHECKING:
     from ..reports import DueCheckIssue
@@ -80,6 +83,7 @@ def _strategy_and_target(kind: str, action: str) -> tuple[str, str]:
 # 函数用途: 处理上下文refs相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _context_refs(issue: DueCheckIssue) -> list[str]:
     refs = [issue.task_dir]
+    refs.extend(_readiness_refs_for_issue(issue))
     refs.extend([
         f"status:{issue.status}",
         f"severity:{issue.severity}",
@@ -91,6 +95,17 @@ def _context_refs(issue: DueCheckIssue) -> list[str]:
     if issue.open_gap_count:
         refs.append(f"open_capability_gaps:{issue.open_gap_count}")
     return [ref for ref in refs if ref]
+
+
+# LLM: _readiness_refs_for_issue exposes recovery pointers while keeping large artifact bodies out of action plans.
+# 函数用途: 根据 due-check 的 task_dir 查找 takeover_readiness.json，只读取 refs 顺序，不读取 artifact 正文。
+def _readiness_refs_for_issue(issue: DueCheckIssue) -> list[str]:
+    if not issue.task_dir:
+        return []
+    path = Path(issue.task_dir) / "reports" / "takeover_readiness.json"
+    if not path.exists():
+        return []
+    return takeover_readiness_ref_order(str(path))
 
 
 # LLM: _merge_refs 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
