@@ -1,5 +1,5 @@
 # LLM: CLI acceptance-progress helpers render parent acceptance projections without executing actions.
-# 模块用途：给 status/subagents CLI 展示父级验收 plan 和 next-action 摘要；只处理 refs，不读取 artifact 正文。
+# 模块用途:给 status/subagents CLI 展示父级验收 plan 和 next-action 摘要；只处理 refs，不读取 artifact 正文。
 from __future__ import annotations
 
 """Parent acceptance progress helpers for CLI status surfaces."""
@@ -10,7 +10,7 @@ _ACCEPTANCE_PLAN_STATUSES = {"AWAITING_ACCEPTANCE", "FAILED", "BLOCKED", "ERROR"
 
 
 # LLM: format_acceptance_plan_lines renders parent dry-run decisions without executing tests.
-# 函数用途：给 status/subagents 展示父级验收下一步摘要；只显示 refs 和摘要字段，不展开事实文件正文。
+# 函数用途:给 status/subagents 展示父级验收下一步摘要；只显示 refs 和摘要字段，不展开事实文件正文。
 def format_acceptance_plan_lines(panels: list[dict[str, Any]]) -> list[str]:
     entries = _acceptance_plan_entries_from_panels(panels)
     if not entries:
@@ -22,7 +22,7 @@ def format_acceptance_plan_lines(panels: list[dict[str, Any]]) -> list[str]:
 
 
 # LLM: format_acceptance_next_action_lines renders advisory next actions without executing them.
-# 函数用途：给 status/subagents 展示父级验收建议动作；只显示命令和 refs，不读取 artifact 正文。
+# 函数用途:给 status/subagents 展示父级验收建议动作；只显示命令和 refs，不读取 artifact 正文。
 def format_acceptance_next_action_lines(panels: list[dict[str, Any]]) -> list[str]:
     entries = _acceptance_next_action_entries_from_panels(panels)
     if not entries:
@@ -34,7 +34,7 @@ def format_acceptance_next_action_lines(panels: list[dict[str, Any]]) -> list[st
 
 
 # LLM: acceptance_plan_entries calls the read-only parent controller for visible risky/awaiting runs.
-# 函数用途：从控制面可见 run 生成父级验收 dry-run 摘要；异常时跳过该 run，不执行 tests 或写回状态。
+# 函数用途:从控制面可见 run 生成父级验收 dry-run 摘要；异常时跳过该 run，不执行 tests 或写回状态。
 def acceptance_plan_entries(runs: list[Any], planner: Any = None) -> list[dict[str, Any]]:
     if not callable(planner):
         return []
@@ -51,7 +51,7 @@ def acceptance_plan_entries(runs: list[Any], planner: Any = None) -> list[dict[s
 
 
 # LLM: acceptance_next_action_entries calls the read-only advisory hook for visible risky/awaiting runs.
-# 函数用途：从控制面可见 run 生成父级下一动作建议；异常时跳过该 run，不执行命令或写回状态。
+# 函数用途:从控制面可见 run 生成父级下一动作建议；异常时跳过该 run，不执行命令或写回状态。
 def acceptance_next_action_entries(runs: list[Any], planner: Any = None) -> list[dict[str, Any]]:
     if not callable(planner):
         return []
@@ -68,19 +68,19 @@ def acceptance_next_action_entries(runs: list[Any], planner: Any = None) -> list
 
 
 # LLM: acceptance_planner locates the manager dry-run hook without making it mandatory for test doubles.
-# 函数用途：安全取得 `plan_parent_acceptance`；没有该能力时 status/board 仍能展示其它面板内容。
+# 函数用途:安全取得 `plan_parent_acceptance`；没有该能力时 status/board 仍能展示其它面板内容。
 def acceptance_planner(agent: Any) -> Any:
     return getattr(getattr(agent, "subagents", None), "plan_parent_acceptance", None)
 
 
 # LLM: acceptance_next_action_planner locates the advisory hook without making it mandatory for test doubles.
-# 函数用途：安全取得 `plan_parent_acceptance_next_action`；没有该能力时其它 status 面板不受影响。
+# 函数用途:安全取得 `plan_parent_acceptance_next_action`；没有该能力时其它 status 面板不受影响。
 def acceptance_next_action_planner(agent: Any) -> Any:
     return getattr(getattr(agent, "subagents", None), "plan_parent_acceptance_next_action", None)
 
 
 # LLM: _acceptance_plan_entry_lines keeps one decision's human output compact and refs-only.
-# 函数用途：渲染单条父级验收计划摘要，避免主格式函数继续加深嵌套。
+# 函数用途:渲染单条父级验收计划摘要，避免主格式函数继续加深嵌套。
 def _acceptance_plan_entry_lines(entry: dict[str, Any]) -> list[str]:
     lines = [
         f"- {entry.get('run_id', '')} decision={entry.get('decision', '')} "
@@ -95,14 +95,14 @@ def _acceptance_plan_entry_lines(entry: dict[str, Any]) -> list[str]:
 
 
 # LLM: _acceptance_plan_ref_lines emits only paths already present in the dry-run decision.
-# 函数用途：输出验收计划引用路径，不打开引用文件。
+# 函数用途:输出验收计划引用路径，不打开引用文件。
 def _acceptance_plan_ref_lines(entry: dict[str, Any]) -> list[str]:
     names = ("test_execution_ref", "failure_handoff_ref", "takeover_readiness_ref")
     return [f"  - {name}={entry[name]}" for name in names if entry.get(name)]
 
 
 # LLM: _acceptance_next_action_entry_lines keeps one advisory action compact and refs-only.
-# 函数用途：渲染单条父级下一动作建议；不执行 command，也不读取 refs 指向的正文。
+# 函数用途:渲染单条父级下一动作建议；不执行 command，也不读取 refs 指向的正文。
 def _acceptance_next_action_entry_lines(entry: dict[str, Any]) -> list[str]:
     lines = [
         f"- {entry.get('run_id', '')} action={entry.get('action', '')} "
@@ -119,7 +119,7 @@ def _acceptance_next_action_entry_lines(entry: dict[str, Any]) -> list[str]:
 
 
 # LLM: _acceptance_next_action_ref_lines emits only references already present on the advisory action.
-# 函数用途：输出父级下一动作关联的审计/交接路径，不打开路径内容。
+# 函数用途:输出父级下一动作关联的审计/交接路径，不打开路径内容。
 def _acceptance_next_action_ref_lines(entry: dict[str, Any]) -> list[str]:
     names = (
         "decision_ref",
@@ -132,7 +132,7 @@ def _acceptance_next_action_ref_lines(entry: dict[str, Any]) -> list[str]:
 
 
 # LLM: _acceptance_plan_entries_from_panels flattens prepared dry-run decisions for CLI rendering.
-# 函数用途：复用 shared-progress payload 中的验收计划摘要，避免 status 和看板各自拼字段。
+# 函数用途:复用 shared-progress payload 中的验收计划摘要，避免 status 和看板各自拼字段。
 def _acceptance_plan_entries_from_panels(panels: list[dict[str, Any]]) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for panel in panels:
@@ -143,7 +143,7 @@ def _acceptance_plan_entries_from_panels(panels: list[dict[str, Any]]) -> list[d
 
 
 # LLM: _acceptance_next_action_entries_from_panels flattens prepared advisory actions for display.
-# 函数用途：复用 shared-progress payload 中的下一动作建议，避免 status 和看板重复拼字段。
+# 函数用途:复用 shared-progress payload 中的下一动作建议，避免 status 和看板重复拼字段。
 def _acceptance_next_action_entries_from_panels(panels: list[dict[str, Any]]) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for panel in panels:
@@ -154,7 +154,7 @@ def _acceptance_next_action_entries_from_panels(panels: list[dict[str, Any]]) ->
 
 
 # LLM: _decision_payload narrows parent decisions to refs-only fields safe for status JSON.
-# 函数用途：把真实或测试替身决策转为 CLI payload；保留路径/摘要，不读取路径内容。
+# 函数用途:把真实或测试替身决策转为 CLI payload；保留路径/摘要，不读取路径内容。
 def _decision_payload(decision: Any) -> dict[str, Any]:
     to_dict = getattr(decision, "to_dict", None)
     payload = to_dict() if callable(to_dict) else {}
@@ -177,7 +177,7 @@ def _decision_payload(decision: Any) -> dict[str, Any]:
 
 
 # LLM: _next_action_payload narrows advisory actions to refs-only fields safe for status JSON.
-# 函数用途：把真实或测试替身下一动作建议转为 CLI payload；保留命令/路径/摘要，不执行命令或读取路径。
+# 函数用途:把真实或测试替身下一动作建议转为 CLI payload；保留命令/路径/摘要，不执行命令或读取路径。
 def _next_action_payload(action: Any) -> dict[str, Any]:
     to_dict = getattr(action, "to_dict", None)
     payload = to_dict() if callable(to_dict) else {}

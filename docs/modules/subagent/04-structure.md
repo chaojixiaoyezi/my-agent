@@ -322,3 +322,7 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `cli/acceptance_progress.py` 承接 Acceptance Plan / Acceptance Next Action 的 refs-only payload 和人类输出渲染；`cli/shared_progress.py` 只负责控制面面板组装和 takeover view。
 - `cli/local_status_view.py` 和 `cli/_board.py` 共用同一个 Acceptance Next Action 渲染函数，保证 `status` 和 `subagents` 看板展示一致。
 - 下一动作视图只调用 manager 的 `plan_parent_acceptance_next_action()` 生成建议，不读取 artifact 正文、不执行建议命令、不写任务状态。
+
+## 2026-05-08 parent acceptance CI fix structure update
+- 新增或修改的 subagent/CLI 文件必须继续使用半角 `模块用途:`、`函数用途:`、`类用途:` 注释标签，避免 annotation coverage 在 CI 中漏检失败。
+- `TestExecutor` 仍只执行 allowlist 内命令且不使用 shell；当环境没有 `python` 可执行文件时，会把首个 `python` 参数替换为当前解释器路径，保证本地和 CI 的真实验收 smoke test 行为一致。
