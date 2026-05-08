@@ -55,6 +55,7 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/`：保存真实 subagent 管理、运行、报告和验收相关代码。
 - `agent_py_agent/agent/subagents/models.py`：定义 `SubAgentTask`、`TaskStatus`、`DISPATCH_INELIGIBLE_STATUSES` 等核心数据结构。
 - `agent_py_agent/agent/subagents/model_task.py`：承接 `SubAgentTask`、`EvidencePacket`、`Finding`、`StatusReport`、`SecuritySignal` 等任务树、证据和安全预留合同模型，`models.py` 继续作为兼容导出入口。
+- `agent_py_agent/agent/subagents/model_task.py`：同时定义 `RuntimeIdentity`，记录 service owner、requester、effective principal、conversation、memory namespace 和 config overlay scope；这些字段是隔离和审计口子，不是授权、长期记忆或全局配置事实源。
 - `agent_py_agent/agent/subagents/manager_indexing.py`：实现 `_select_runs()` 等索引和过滤逻辑，同时提供公开别名 `select_runs()`、`index_task()` 等。
 - `agent_py_agent/agent/subagents/manager_acceptance_findings.py`：实现验收发现逻辑，公开别名 `acceptance_findings()`。
 - `agent_py_agent/agent/subagents/acceptance_review_service.py`：对单个任务做父级验收，生成分层 acceptance record，并执行只读 verifier checks。
@@ -73,6 +74,7 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/services/persistence_recovery_outputs.py`：集中写 checkpoint artifacts 和 takeover readiness 文件，避免 persistence 主保存流程重新靠近 code-size 风险。
 - `agent_py_agent/agent/subagents/services/takeover_readiness.py`：生成 `reports/takeover_readiness.json` 和 `TAKEOVER_READINESS.md` 接管前必读包；只整理 refs、manifest 元数据和读取顺序，不读取 artifact 正文；并提供 refs-only 的推荐读取顺序解析给 rescue/action apply 使用。
 - `agent_py_agent/agent/subagents/services/persistence_security.py`：归一化 `SecuritySignal` 预留字段，让安全信号解析不挤进 persistence 主流程；当前不执行安全策略。
+- `agent_py_agent/agent/subagents/services/persistence_identity.py`：归一化 `RuntimeIdentity` 预留字段，让员工/会话/配置 scope 解析不挤进 persistence 主流程；当前只保留审计元数据。
 - `agent_py_agent/agent/subagents/services/checkpoint_artifacts.py`：从 task facts 和 `output.json` 构建 compact 可读恢复包，包含 checkpoint、decision ledger、progress、failing tests 和 next actions。
 - `agent_py_agent/agent/subagents/services/task_workspace_adapter.py`：把 runtime memory task workspace 路径同步回 `SubAgentTask`，避免 persistence 保存函数继续膨胀。
 - `agent_py_agent/agent/memory_archive/task_workspace.py`：subagent 保存路径调用的 runtime memory adapter；创建 `tasks/<root_id>/` task workspace skeleton 和 `agents/<run_id>/legacy_run_ref.json`，但不移动旧工单目录。
@@ -137,8 +139,9 @@ agent_py_agent/agent/
 20. persistence 把当前 task 投影到 LocalStore 的 `agent_runs` / `agent_events` / `task_rollups`；上级代理或接管代理可以先用 `AgentRuntimeQueryContext` 查 root tree、own subtree、blocked runs 或 takeover candidates，再回到 task/run workspace 核实事实。
 20. task 如果携带 `security_signals` 或 `security_review_required`，persistence 会随 `task.json` 保存这些 audit-only 字段；它们只记录可疑信号和证据引用，不自动阻断 runner、改变工具授权或修改 memory。
 21. 控制面投影的 metadata 会暴露 `inheritance_manifest_ref`、`failure_handoff_ref`、`takeover_readiness_ref`、`security_signal_count`、`security_signal_types` 和 `security_review_required` 这类恢复/安全线索；这些 refs 指向任务目录里的事实文件，不替代 artifact、checkpoint 或 verified finding。
-22. `query_shared_progress_panel()` 在 runtime query 之上返回面板状态包，包含 rollup、可见 runs、blocked runs、inheritance refs、failure handoff refs 和 takeover readiness refs；它只做投影汇总，不读取 artifact 正文或替代 verified facts。
-23. `status --json`、人类 `status` 和 `subagents` 看板通过 `cli/shared_progress.py` 展示共享进度摘要；展示层按 root task 查询控制面，不扫描旧工单目录正文。
+22. 如果 task 携带 `RuntimeIdentity`，控制面 metadata 会额外暴露 `runtime_identity`、`memory_scope` 和 `config_scope`。默认 `conversation_memory_policy=not_enabled`、`writes_global_config=false`；员工/外部会话只能形成可审计 run/conversation 作用域元数据，不能自动生成员工长期记忆或污染全局配置。
+23. `query_shared_progress_panel()` 在 runtime query 之上返回面板状态包，包含 rollup、可见 runs、blocked runs、inheritance refs、failure handoff refs 和 takeover readiness refs；它只做投影汇总，不读取 artifact 正文或替代 verified facts。
+24. `status --json`、人类 `status` 和 `subagents` 看板通过 `cli/shared_progress.py` 展示共享进度摘要；展示层按 root task 查询控制面，不扫描旧工单目录正文。接管视图可以显示 principal、conversation、memory namespace 和 config scope 摘要，方便后续多入口/员工会话隔离排查。
 24. runtime tool loop 对大工具输出先调用 `tool_output_failsafe.py` 写 recovery snapshot，再调用 `tool_output_externalizer.py` 写 artifact；snapshot 里只有摘要 metadata，完整输出不会进入 snapshot。
 25. `tool_context_reducer.py` 根据 archive record 决定下一轮 prompt 内容：小输出保留原工具结果，大输出只保留 preview、artifact path、hash、size 和 fail-safe checkpoint path。
 26. action plan 的 `rescue_context_refs` 和 takeover apply 的 `evidence_paths` 会把 `takeover_readiness.json` 放在首位，再按 packet 的 recommended read order 展开 failure handoff、checkpoint、artifact manifest 等 refs；这些路径是恢复索引，不代表自动读取正文或自动接管。

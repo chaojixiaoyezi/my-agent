@@ -17,6 +17,25 @@ from .model_records import ChannelProbeCheck, TakeoverRecord
 from .quality_models import ContextManifest, QualityContract
 
 
+# LLM: RuntimeIdentity is audit-only scope metadata for future tenant/conversation isolation.
+# 类用途: 记录服务所有者、请求者、会话、记忆命名空间和配置覆盖边界；当前只用于追踪，不授予额外权限。
+@dataclass
+class RuntimeIdentity:
+
+    service_owner_id: str = ""
+    requester_id: str = ""
+    effective_principal_id: str = ""
+    conversation_id: str = ""
+    root_run_id: str = ""
+    memory_namespace: str = ""
+    conversation_memory_policy: str = "not_enabled"
+    promotion_policy: str = "explicit_review"
+    config_scope: str = "run_override"
+    config_overlay_ref: str = ""
+    config_promotion_policy: str = "admin_approval_required"
+    reserved: dict[str, object] = field(default_factory=dict)
+
+
 # LLM: EvidencePacket 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 类用途: 集中保存证据packet字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 @dataclass
@@ -180,6 +199,7 @@ class SubAgentTask:
     failure_handoff: FailureHandoff = field(default_factory=FailureHandoff)
     security_signals: list[SecuritySignal] = field(default_factory=list)
     security_review_required: bool = False
+    runtime_identity: RuntimeIdentity = field(default_factory=RuntimeIdentity)
     task_dir: str = ""
     data_dir: str = ""
     output_dir: str = ""

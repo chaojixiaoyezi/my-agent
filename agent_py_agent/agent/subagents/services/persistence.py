@@ -35,6 +35,7 @@ from .checkpoint_artifacts import build_checkpoint_artifact_payloads
 from .control_plane_projection import sync_subagent_control_plane_projection
 from .failure_handoff import refresh_failure_handoff
 from .persistence_failure_handoff import normalize_failure_handoff, write_failure_handoff
+from .persistence_identity import normalize_runtime_identity
 from .persistence_inheritance import normalize_inheritance_manifest, write_inheritance_manifest
 from .persistence_recovery_outputs import write_recovery_output_files
 from .persistence_security import normalize_security_signal
@@ -267,6 +268,8 @@ class SubAgentPersistenceService:
         data["security_signals"] = [
             normalize_security_signal(item) for item in data.get("security_signals", []) if isinstance(item, dict)
         ]
+        # LLM: Runtime identity normalization stays in a helper so this load path only wires audit scope metadata.
+        data["runtime_identity"] = normalize_runtime_identity(data.get("runtime_identity"))
         return SubAgentTask(**data)
 
     # LLM: list_runs 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。

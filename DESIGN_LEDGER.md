@@ -1,5 +1,13 @@
 # 设计思路台账
 
+## 2026-05-08 principal/conversation/config isolation reserve
+状态：已落地第一版
+摘要：
+- `RuntimeIdentity` 已接入 `SubAgentTask` 保存/读取，记录 `service_owner_id`、`requester_id`、`effective_principal_id`、`conversation_id`、`root_run_id`、`memory_namespace` 和配置覆盖 scope。
+- LocalStore run metadata 会投影 `runtime_identity`、`memory_scope`、`config_scope`；默认 `conversation_memory_policy=not_enabled`、`promotion_policy=explicit_review`、`writes_global_config=false`。
+- `status` / `subagents` 的 `Takeover View` 可以显示 principal、conversation、memory namespace 和 config scope 摘要，便于未来飞书/微信/CLI 多入口与员工会话隔离排查。
+- 当前只是审计和扩展口子：不启用员工长期记忆，不允许 conversation/run overlay 自动提升到全局配置，也不把子代理 task/run working memory 直接写成员工记忆。
+
 这份文档用来记录我们在交流中形成的新思路，避免后续开发时忘记上下文。
 
 后续 AI 开发者必须先读：
