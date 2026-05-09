@@ -292,6 +292,56 @@ def test_subagent_acceptance_can_execute_real_tests_on_explicit_dry_run():
         assert str(test_execution_json) in report.records[0].evidence_paths
 
 
+def test_subagent_acceptance_runs_tests_from_clean_deliverables_with_nested_runtime_workspace():
+    """LLM: Verifies runtime/subagent folders can stay hidden while tests run beside clean deliverables."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        deliverable_dir = root / "deliverables" / "leaf"
+        deliverable_dir.mkdir(parents=True)
+        (deliverable_dir / "solution.py").write_text("def add(left, right):\n    return left + right\n", encoding="utf-8")
+        (deliverable_dir / "test_solution.py").write_text(
+            "from solution import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n",
+            encoding="utf-8",
+        )
+        cfg = AgentConfig(model_backend="echo", subagent_workspace=".my_agent_runtime/run/subagents")
+        agent = SimpleAgent(cfg, root)
+        task = agent.subagents.create_run(
+            goal="干净产物目录真实测试",
+            thought="runner 把代码放到 deliverables，运行痕迹放到 hidden runtime。",
+            plan=["写产物", "父级从产物目录执行测试"],
+            acceptance_checks=["真实测试必须在 deliverables 子目录通过"],
+        )
+        _setup_acceptance_task(agent, task)
+        Path(task.output_json).write_text(json.dumps({
+            "run_id": task.id,
+            "status": "AWAITING_ACCEPTANCE",
+            "tests": [{
+                "name": "pytest deliverable",
+                "validation_method": "command",
+                "command": "python3 -m pytest test_solution.py -q",
+                "ok": True,
+            }],
+            "artifacts": [
+                {"path": str(deliverable_dir / "solution.py"), "kind": "code"},
+                {"path": str(deliverable_dir / "test_solution.py"), "kind": "test"},
+            ],
+            "patches": [],
+            "blockers": [],
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        report = agent.subagents.write_acceptance_review_report(
+            run_ids=[task.id],
+            options=AcceptanceReviewOptions(execute_tests=True, test_timeout_seconds=10),
+            reviewer="tester",
+        )
+        execution_report = json.loads(Path(task.reports_dir, "test_execution.json").read_text(encoding="utf-8"))
+
+        assert any(item.name == "test_execution_passed" and item.ok for item in report.records[0].findings)
+        assert execution_report["workspace_root"] == str(root.resolve())
+        assert execution_report["records"][0]["exit_code"] == 0
+        assert execution_report["records"][0]["metadata"]["working_dir"] == str(deliverable_dir.resolve())
+
+
 def test_subagent_acceptance_allows_parent_test_report_as_machine_evidence_chain():
     """LLM: Verifies passed parent tests can satisfy traceability when runner emitted no evidence packets."""
     with tempfile.TemporaryDirectory() as td:

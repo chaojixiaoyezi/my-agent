@@ -100,7 +100,7 @@ def cmd_subagents_tests(args) -> int:
 
     if options.re_run:
         _request_acceptance_test_execution(agent, options)
-        if not report_path.exists():
+        if _needs_direct_subagents_tests_report(report_path, task):
             _write_subagents_tests_report(agent, task, options)
 
     if not report_path.exists():
@@ -111,7 +111,7 @@ def cmd_subagents_tests(args) -> int:
 
     report = load_test_execution_report(report_path)
     _print_subagents_tests_report(options, report)
-    return 0
+    return _subagents_tests_exit_code(report)
 
 
 # LLM: _subagents_tests_options normalizes argparse names used by tests and CLI wiring.
@@ -155,6 +155,29 @@ def _write_subagents_tests_report(agent, task, options: SubagentsTestsOptions):
             timeout_seconds=options.timeout,
         ),
     )
+
+
+# LLM: _needs_direct_subagents_tests_report prevents empty acceptance side effects from masking declared tests.
+# 函数用途: 判断是否需要直接按 output.json 执行 tests；空报告不能覆盖真实声明的测试项。
+def _needs_direct_subagents_tests_report(report_path: Path, task) -> bool:
+    if not report_path.exists():
+        return True
+    report = load_test_execution_report(report_path)
+    return report.total_tests == 0 and _output_declares_tests(task)
+
+
+# LLM: _output_declares_tests reads only structured output metadata to decide whether a zero-test report is suspicious.
+# 函数用途: 判断 output.json 是否声明了 tests；用于避免“报告存在但没执行任何测试”被当成成功。
+def _output_declares_tests(task) -> bool:
+    return bool([item for item in _read_task_output(task).get("tests", []) if isinstance(item, dict)])
+
+
+# LLM: _subagents_tests_exit_code makes the CLI fail when no tests ran or any test failed.
+# 函数用途: 根据 test_execution 汇总决定命令退出码，防止空报告或失败报告误报成功。
+def _subagents_tests_exit_code(report) -> int:
+    if report.total_tests <= 0 or report.failed > 0:
+        return 1
+    return 0
 
 
 # LLM: _subagents_tests_workspace prefers the manager project root and falls back to output.json's folder.

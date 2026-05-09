@@ -107,3 +107,49 @@ def test_prepare_test_items_recovers_nested_relative_artifact_command_cwd(tmp_pa
     )
 
     assert prepared[0]["working_dir"] == "run-1"
+
+
+def test_prepare_test_items_converts_safe_cd_chain_into_working_dir(tmp_path):
+    """LLM: Verifies model-style cd && pytest commands become bounded cwd plus plain command."""
+    target_dir = tmp_path / "deliverables" / "leaf"
+    target_dir.mkdir(parents=True)
+    artifact = target_dir / "test_solution.py"
+    artifact.write_text("pass\n", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[{
+                "name": "pytest test_solution.py",
+                "validation_method": "command",
+                "command": f"cd {target_dir} && python3 -m pytest test_solution.py -v",
+            }],
+            output={"artifacts": [{"path": str(artifact)}]},
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert prepared[0]["command"] == "python3 -m pytest test_solution.py -v"
+    assert prepared[0]["working_dir"] == "deliverables/leaf"
+
+
+def test_prepare_test_items_infers_pytest_when_runner_only_reports_test_artifact(tmp_path):
+    """LLM: Verifies missing tests can still execute workspace-local test_*.py artifacts."""
+    target_dir = tmp_path / "deliverables" / "leaf"
+    target_dir.mkdir(parents=True)
+    artifact = target_dir / "test_solution.py"
+    artifact.write_text("pass\n", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[],
+            output={"artifacts": [{"path": str(artifact), "kind": "test"}]},
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert prepared == [{
+        "name": "artifact pytest test_solution.py",
+        "validation_method": "command",
+        "command": "python3 -m pytest test_solution.py -q",
+        "working_dir": "deliverables/leaf",
+    }]

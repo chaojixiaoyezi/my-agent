@@ -5,6 +5,7 @@ from __future__ import annotations
 
 """Prepare test execution items for parent acceptance."""
 
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
@@ -50,6 +51,8 @@ def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, An
         fallback_dir=_single_artifact_dir(artifact_dirs),
         workspace_root=workspace_root,
     )
+    if not request.tests:
+        return _artifact_pytest_items(context)
     return [_prepared_test_item(test, context) for test in request.tests]
 
 
@@ -60,6 +63,7 @@ def _prepared_test_item(
     context: TestItemPreparationContext,
 ) -> dict[str, Any]:
     item = dict(test)
+    _normalize_leading_cd_command(item, context.workspace_root)
     if not _needs_working_dir(item):
         return item
     command_dir = _command_artifact_working_dir(item, context.artifact_paths, context.workspace_root)
@@ -71,6 +75,54 @@ def _prepared_test_item(
         return item
     item["working_dir"] = _relative_or_absolute(inferred, context.workspace_root)
     return item
+
+
+# LLM: _normalize_leading_cd_command removes a safe shell cwd wrapper without allowing shell execution.
+# 函数用途: 把 `cd <workspace内目录> && python...` 转成 working_dir 加纯命令，避免为了常见模型输出放开 shell。
+def _normalize_leading_cd_command(item: dict[str, Any], workspace_root: Path) -> None:
+    if str(item.get("working_dir") or item.get("cwd") or "").strip():
+        return
+    parsed = _safe_leading_cd_command(str(item.get("command") or ""), workspace_root)
+    if parsed is None:
+        return
+    working_dir, command = parsed
+    item["command"] = command
+    item["working_dir"] = _relative_or_absolute(working_dir, workspace_root)
+
+
+# LLM: _safe_leading_cd_command accepts only one leading cd chain and keeps the actual command for executor validation.
+# 函数用途: 解析常见 `cd 目录 && 命令` 模式；目录必须在 workspace 内，其余命令仍由执行器安全校验。
+def _safe_leading_cd_command(command: str, workspace_root: Path) -> tuple[Path, str] | None:
+    if command.count("&&") != 1:
+        return None
+    cd_part, actual = [part.strip() for part in command.split("&&", 1)]
+    if not actual:
+        return None
+    try:
+        cd_argv = shlex.split(cd_part)
+    except ValueError:
+        return None
+    if len(cd_argv) != 2 or cd_argv[0] != "cd":
+        return None
+    path = _workspace_dir(cd_argv[1], workspace_root)
+    if path is None:
+        return None
+    return path, actual
+
+
+# LLM: _workspace_dir resolves a cwd literal and rejects missing or out-of-workspace directories.
+# 函数用途: 校验 cd 目标目录是否真实存在且位于 workspace 内；失败时让执行器继续按原命令阻断。
+def _workspace_dir(value: object, workspace_root: Path) -> Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    path = candidate.resolve() if candidate.is_absolute() else (workspace_root / candidate).resolve()
+    try:
+        path.relative_to(workspace_root)
+    except ValueError:
+        return None
+    return path if path.is_dir() else None
 
 
 # LLM: _needs_working_dir limits inference to command tests that have not already chosen a cwd.
@@ -126,6 +178,30 @@ def _workspace_path(value: object, workspace_root: Path) -> Path | None:
     except ValueError:
         return None
     return path
+
+
+# LLM: _artifact_pytest_items gives parent acceptance a bounded fallback when runners omit tests.
+# 函数用途: 从 workspace 内 test_*.py artifact 生成 pytest 命令；只用路径元数据，不执行或读取文件正文。
+def _artifact_pytest_items(context: TestItemPreparationContext) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    for _raw, path in context.artifact_paths:
+        if path in seen or not _is_pytest_artifact(path):
+            continue
+        seen.add(path)
+        items.append({
+            "name": f"artifact pytest {path.name}",
+            "validation_method": "command",
+            "command": f"python3 -m pytest {path.name} -q",
+            "working_dir": _relative_or_absolute(path.parent, context.workspace_root),
+        })
+    return items
+
+
+# LLM: _is_pytest_artifact keeps inferred tests narrow to conventional Python test files.
+# 函数用途: 判断 artifact 是否是可安全自动执行的 pytest 文件；普通源码和非 Python 文件不会被推断。
+def _is_pytest_artifact(path: Path) -> bool:
+    return path.is_file() and path.suffix == ".py" and path.name.startswith("test_")
 
 
 # LLM: _find_workspace_suffix recovers model-reported relative artifact paths from nested run directories.

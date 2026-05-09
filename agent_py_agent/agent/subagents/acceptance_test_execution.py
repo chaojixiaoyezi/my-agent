@@ -66,11 +66,14 @@ def build_acceptance_test_execution_findings(
     ]
 
 
-# LLM: _acceptance_test_workspace picks the project root that tests should run in, not the run report folder.
-# 函数用途: 推断真实测试命令的工作目录；常规 subagent workspace 下返回用户项目根目录。
+# LLM: _acceptance_test_workspace prefers the explicit manager root so hidden runtime folders do not become test cwd.
+# 函数用途: 推断真实测试命令的工作目录；新旧 subagent workspace 下都应返回用户项目根目录。
 def _acceptance_test_workspace(manager: Any) -> Path:
     """Return the workspace root for acceptance test execution."""
 
+    workspace_root = getattr(manager, "workspace_root", None)
+    if workspace_root:
+        return Path(workspace_root).resolve()
     workspace = Path(manager.workspace)
     if workspace.name == "subagents" and workspace.parent.name == ".my_agent":
         return workspace.parent.parent

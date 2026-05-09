@@ -317,9 +317,12 @@ def _followup_rescue_action(task) -> ActionPlanItem:
     )
 
 
-# LLM: acceptance_workspace_root mirrors real-test execution workspace inference for dry-run command preflight.
-# 函数用途: 推断父级验收命令所在项目根目录；这里只用于风险预检，不会启动进程。
+# LLM: acceptance_workspace_root mirrors real execution and prefers manager.workspace_root over runtime folders.
+# 函数用途: 推断父级验收命令所在项目根目录；隐藏 runtime/subagent 目录不能替代用户任务根目录。
 def acceptance_workspace_root(manager) -> Path:
+    workspace_root = getattr(manager, "workspace_root", None)
+    if workspace_root:
+        return Path(workspace_root).resolve()
     workspace = Path(manager.workspace)
     if workspace.name == "subagents" and workspace.parent.name == ".my_agent":
         return workspace.parent.parent
