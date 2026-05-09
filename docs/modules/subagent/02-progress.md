@@ -235,6 +235,7 @@
 - 本轮调试追踪第二片：空 command 类型测试项不再触发 `request_human_confirmation`，会作为“不可执行占位检查”进入 refs 摘要并降级到 inspect-only；`subagent_debug_trace_level=2` 现在还覆盖 `hierarchy_schedule_result`、`parent_acceptance_decision` 和 `parent_acceptance_next_action`，用于后续 1/4/16/48 和购物网站 E2E 快速定位调度、验收、人审和救援卡点。
 - 本轮主节点单入口 1/2/4/12 E2E 暴露 root 最终总结卡住问题：下层已产出 12 套 leaf 文件后，root 最终模型响应长期不返回；已把 `subagent-run --execute` 改为复用 runner worker timeout 计算和执行边界，避免 CLI 入口裸跑模型导致无人值守任务无限挂住。真实 E2E 记录见 `06-real-e2e-findings.md`。
 - 本轮叶子能力边界提示修复：runner prompt 新增明确 contract，要求叶子没有 `shell/command/terminal` 工具时不要因为不能自己跑 `pytest` 上抛 capability_request，而是写好产物、测试文件和推荐命令，交给父级验收器执行。
+- 本轮层级路径继承修复：当模型创建下一层时只给出短 goal，scheduler 会把父级目标/边界追加进 child goal，并用补全后的 goal 推断叶子写文件工具，避免产物目录只留在 thought 里、传到孙级后丢失。
 
 ## 未跑测试
 

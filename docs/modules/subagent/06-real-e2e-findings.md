@@ -1242,3 +1242,28 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Add root finalization timeout / partial-finalize fallback first.
   - Then tighten leaf worker prompt/tool contract: leaf writes artifacts and tests; parent/verifier runs commands.
   - Then add strict deliverables-root propagation checks before moving to larger `1/4/16/48` scale.
+
+## 2026-05-09 Timeout/Leaf-Contract Smoke Retest
+
+- Test scene:
+  - Case id: `main_node_timeout_contract_smoke_20260509_2342`.
+  - Runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/main_node_timeout_contract_smoke_20260509_2342`.
+  - Deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/main_node_timeout_contract_smoke_20260509_2342`.
+  - Shape requested: root -> child -> leaf, with only root started externally.
+- 中文说明：
+  - 这次专门复测两个刚修的点：`subagent-run --execute` 是否有总超时边界，以及 leaf 没有命令工具时是否应把 pytest 交给父级验收器。
+  - 测试没有手动操作 child/leaf；只启动 root。
+- Observed behavior:
+  - The direct CLI timeout boundary worked: root runner returned `TIMEOUT` after 120 seconds instead of hanging indefinitely.
+  - The timeout result wrote normal runner refs, including `RUNNER_RESULT.md` and `reports/runner_result.json`.
+  - Before timing out, root created one child.
+- New issue found:
+  - Root created the child with a vague goal: `创建 leaf worker，实现 add(a,b) 并写测试`.
+  - The child goal dropped the deliverables path and leaf boundary from the root task.
+  - 中文解释：系统已经在 `thought` 里放了父级摘要，但真实模型下一层更依赖 `goal`。如果产物路径只靠 thought 转述，后续很容易丢。
+- Fix added after this retest:
+  - Hierarchy scheduler now enriches vague child goals with `继承父级目标/边界`.
+  - Leaf tool inference uses the enriched goal, so a vague leaf goal can still inherit `.py` / deliverable write intent from parent scope.
+- Remaining gap:
+  - Timeout can still leave a just-created child in `RUNNING` if root times out before it records child dispatch completion.
+  - 中文解释：现在不会无限卡住，但还需要后续的 due-check / recovery-tree 把这种“父超时、子还挂着”的场景收口成可接管动作。

@@ -10,6 +10,7 @@ from typing import Any
 from ..debug_trace import trace_hierarchy_schedule
 from ..models import SubAgentTask
 from .base import CreateRunParams
+from .hierarchy_context import inherited_hierarchy_thought, scheduled_child_goal
 
 _DEFAULT_LEAF_CODING_TOOLS = [
     "list_files",
@@ -204,10 +205,11 @@ def _apply_result(
 def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) -> SubAgentTask:
     role = _scheduled_child_role(parent, spec)
     extra_write_roots = spec.extra_write_roots or _inherited_extra_write_roots(parent)
+    goal = scheduled_child_goal(parent, spec)
     return manager.create_run(
         params=CreateRunParams(
-            goal=spec.goal,
-            thought=spec.thought or _inherited_hierarchy_thought(parent),
+            goal=goal,
+            thought=spec.thought or inherited_hierarchy_thought(parent),
             plan=spec.plan or ["读取父级 refs", "执行小切片", "写回状态和证据 refs", "等待父级验收"],
             agent_name=spec.agent_name or spec.role or "worker",
             role=role,
@@ -215,7 +217,7 @@ def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) 
             root_id=parent.root_id or parent.id,
             depth=parent.depth + 1,
             allowed_skills=spec.allowed_skills or list(parent.allowed_skills),
-            allowed_tools=_scheduled_child_tools(parent, spec, extra_write_roots),
+            allowed_tools=_scheduled_child_tools(parent, spec, extra_write_roots, goal=goal),
             owner=spec.agent_name or spec.role or parent.owner,
             supervisor=parent.id,
             final_owner=parent.final_owner or parent.owner,
@@ -248,29 +250,6 @@ def _scheduled_child_role(parent: SubAgentTask, spec: HierarchyChildSpec) -> str
     return "coordinator"
 
 
-# LLM: _inherited_hierarchy_thought gives descendants enough context without broadening permissions.
-# 函数用途: 把父级目标和提示压成 child thought，避免下一层只看到空泛编号任务。
-def _inherited_hierarchy_thought(parent: SubAgentTask) -> str:
-    parts = [
-        f"执行由 {parent.id} 派生的层级子任务。",
-        "必须把下一层 goal 写成自包含任务，包含目标、产物路径、工具边界和验收条件。",
-    ]
-    if parent.goal:
-        parts.append(f"父级目标摘要：{_clip_parent_context(parent.goal)}")
-    if parent.thought:
-        parts.append(f"父级补充：{_clip_parent_context(parent.thought)}")
-    return "\n".join(parts)
-
-
-# LLM: _clip_parent_context bounds inherited text so deep hierarchies do not explode prompts.
-# 函数用途: 限制父级上下文长度；保留开头关键信息，避免层级越深 token 越失控。
-def _clip_parent_context(text: str, *, limit: int = 1600) -> str:
-    compact = str(text or "").strip()
-    if len(compact) <= limit:
-        return compact
-    return compact[:limit].rstrip() + "...[truncated]"
-
-
 # LLM: _inherited_extra_write_roots forwards user-approved product roots without exposing parent task internals.
 # 函数用途: 从父节点 allowed_write_roots 中继承非父工单目录的写入根，保持共同产物目录可用。
 def _inherited_extra_write_roots(parent: SubAgentTask) -> list[str]:
@@ -289,8 +268,10 @@ def _scheduled_child_tools(
     parent: SubAgentTask,
     spec: HierarchyChildSpec,
     extra_write_roots: list[str],
+    *,
+    goal: str | None = None,
 ) -> list[str]:
-    should_infer_leaf_tools = _should_infer_leaf_coding_tools(spec, extra_write_roots)
+    should_infer_leaf_tools = _should_infer_leaf_coding_tools(spec, extra_write_roots, goal=goal)
     if spec.allowed_tools:
         explicit_tools = [_canonical_tool_name(item) for item in spec.allowed_tools]
         if should_infer_leaf_tools:
@@ -311,13 +292,18 @@ def _canonical_tool_name(tool_name: object) -> str:
 
 # LLM: _should_infer_leaf_coding_tools keeps automatic write-tool inference narrow and auditable.
 # 函数用途: 只在非 coordinator child、继承了写入根、文本里有明确写文件意图时返回 True。
-def _should_infer_leaf_coding_tools(spec: HierarchyChildSpec, extra_write_roots: list[str]) -> bool:
+def _should_infer_leaf_coding_tools(
+    spec: HierarchyChildSpec,
+    extra_write_roots: list[str],
+    *,
+    goal: str | None = None,
+) -> bool:
     if not extra_write_roots:
         return False
     role_text = f"{spec.role} {spec.agent_name}".lower()
     if "coordinator" in role_text or "lead" in role_text:
         return False
-    intent_text = "\n".join([spec.goal, *spec.acceptance_checks]).lower()
+    intent_text = "\n".join([goal or spec.goal, *spec.acceptance_checks]).lower()
     return any(marker.lower() in intent_text for marker in _WRITE_INTENT_MARKERS)
 
 
@@ -332,7 +318,7 @@ def _planned_items(parent: SubAgentTask, request: HierarchyScheduleRequest) -> l
             depth=parent.depth + 1,
             role=_scheduled_child_role(parent, spec),
             agent_name=spec.agent_name or spec.role or "worker",
-            goal=spec.goal,
+            goal=scheduled_child_goal(parent, spec),
             created=False,
             reason="planned",
         )
