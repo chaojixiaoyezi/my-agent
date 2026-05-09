@@ -73,3 +73,4 @@ class AcceptanceRecordParams:
     reviewer: str
     note: str
     limit: int
+    execute_acceptance_tests: bool = False

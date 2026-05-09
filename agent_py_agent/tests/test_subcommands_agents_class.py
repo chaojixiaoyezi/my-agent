@@ -134,6 +134,17 @@ class TestSubagentsSubcommandRegistration:
         args = parser.parse_args(["subagents-dispatch", "--apply"])
         assert args.apply is True
 
+    def test_subagents_dispatch_has_execute_acceptance_tests_argument(self):
+        """测试 subagents-dispatch 可显式触发父级验收 tests，但不自动 apply。"""
+        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="subcommand")
+        add_subagents_subcommands(sub)
+
+        args = parser.parse_args(["subagents-dispatch", "--execute-acceptance-tests"])
+        assert args.execute_acceptance_tests is True
+
     def test_subagent_run_has_run_id_argument(self):
         """测试 subagent-run 命令有 run_id 参数。
 

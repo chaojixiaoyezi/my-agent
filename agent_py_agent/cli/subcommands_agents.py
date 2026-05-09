@@ -215,6 +215,7 @@ def _add_agents_dispatch_subcommands(sub):
     dispatch.add_argument("--dry-run", action="store_false", dest="apply", help="只生成调度报告，不修改记录")
     dispatch.add_argument("--apply", action="store_true", help="执行低风险调度动作并写审计日志")
     dispatch.add_argument("--execute-runners", action="store_true", help="配合 --apply 调用真实模型执行 runner")
+    dispatch.add_argument("--execute-acceptance-tests", action="store_true", help="显式执行父级验收 run_tests，但不自动 apply")
     dispatch.add_argument("--planner", action="store_true", help="有待处理事项时调用父代理 LLM planner，禁止空心 HEARTBEAT_OK")
     dispatch.add_argument("--workflow-mode", choices=["off", "plan", "auto"], default="off", help="dispatch 前对父任务执行 workflow 规划；plan 只写计划，auto 还会自动派工")
     dispatch.add_argument("--max-runners", type=int, default=1, help="本轮最多推进多少个 runner，0 表示不执行 runner")

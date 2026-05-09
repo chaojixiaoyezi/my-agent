@@ -27,6 +27,7 @@ def _subagents_dispatch_options(args) -> SubagentsDispatchOptions:
     return SubagentsDispatchOptions(
         apply=bool(args.apply),
         execute_runners=bool(args.execute_runners),
+        execute_acceptance_tests=bool(getattr(args, "execute_acceptance_tests", False)),
         planner=bool(args.planner),
         workflow_mode=args.workflow_mode or "off",
         max_runners=int(args.max_runners or 0),
@@ -51,6 +52,7 @@ def _dispatch_params(options: SubagentsDispatchOptions) -> DispatchParams:
     return DispatchParams(
         apply=options.apply,
         execute_runners=options.execute_runners,
+        execute_acceptance_tests=options.execute_acceptance_tests,
         planner=options.planner,
         workflow_mode=options.workflow_mode,
         max_runners=options.max_runners,
@@ -83,7 +85,7 @@ def _print_watch_report(agent, report, options: SubagentsDispatchOptions) -> Non
     print("SUBAGENT DISPATCH WATCH")
     print(
         f"mode={mode} planner={options.planner} execute_runners={options.execute_runners} "
-        f"cycles={report.summary.get('total', 0)}"
+        f"execute_acceptance_tests={options.execute_acceptance_tests} cycles={report.summary.get('total', 0)}"
     )
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
     for record in report.records:
@@ -110,7 +112,7 @@ def _print_dispatch_report(agent, report, options: SubagentsDispatchOptions) -> 
     print("SUBAGENT DISPATCH")
     print(
         f"mode={mode} planner={options.planner} execute_runners={options.execute_runners} "
-        f"total_records={report.summary.get('total', 0)}"
+        f"execute_acceptance_tests={options.execute_acceptance_tests} total_records={report.summary.get('total', 0)}"
     )
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
     if not report.records:

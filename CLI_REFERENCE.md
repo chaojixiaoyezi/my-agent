@@ -175,7 +175,7 @@ Ctrl+C
 | `subagents-tests` | 查看或显式重跑单个 subagent 的真实测试执行记录 | `--re-run` 时写 `test_execution.json/md` | 否 |
 | `subagents-patches` | 审核或 apply runner 输出的 patch 记录 | 默认 review dry-run；`--review-apply` 只写审核状态；`--apply` 真正落文件 | 否 |
 | `subagents-memory-gate` | 查看或写回子代理 memory/skill 候选 review decision | 传 `--candidate-id` 时写 `memory_gate/decisions.jsonl` 和 gate 状态 | 否 |
-| `subagents-dispatch` | 执行父代理调度 | dry-run 写报告；`--apply` 写回 | 只有 `--apply --execute-runners` 会调用 |
+| `subagents-dispatch` | 执行父代理调度 | dry-run 写报告；`--apply` 写回；`--execute-acceptance-tests` 只跑父级验收 tests | 只有 `--apply --execute-runners` 会调用模型；`--execute-acceptance-tests` 会执行本地验收 tests |
 | `daemon` | 按 `agent_config.yaml` 的 `daemon_*` 配置启动前台常驻调度 | 取决于配置 | 取决于配置 |
 | `scenario-test` | 跑一轮隔离的 gateway/chat/subagent/runner/验收全流程 | 写临时 fixture 和报告 | 默认调用真实 API，可用 `--dry-run` 跳过 runner |
 | `gateway` | 管理后台 gateway 进程 | 写 gateway pid/state/heartbeat/log | 取决于配置 |
@@ -934,6 +934,7 @@ my-agent subagents-memory-gate <run_id> --verify
 my-agent subagents-dispatch
 my-agent subagents-dispatch --apply
 my-agent subagents-dispatch --apply --execute-runners
+my-agent subagents-dispatch --execute-acceptance-tests --max-runners 0
 my-agent subagents-dispatch --watch --planner --interval 30
 ```
 
@@ -943,6 +944,7 @@ my-agent subagents-dispatch --watch --planner --interval 30
 | `--dry-run` | 默认模式 | 只生成调度报告，不修改记录。 |
 | `--apply` | `false` | 执行低风险调度动作并写审计日志。 |
 | `--execute-runners` | `false` | 配合 `--apply` 调用真实模型执行 runner；不能单独使用。 |
+| `--execute-acceptance-tests` | `false` | 显式执行父级验收 auto-policy 允许的 `run_tests`，写 `test_execution.json/md`，但不 apply、不 rescue、不修改 task 状态。 |
 | `--planner` | `false` | 有 active/pending/stalled/needs-intervention 事项时调用父代理 LLM planner；如果模型只回 `HEARTBEAT_OK`，会被 gate 标记为失败。 |
 | `--workflow-mode <off\|plan\|auto>` | `off` | dispatch 前对父任务执行 workflow 规划；`plan` 只写计划，`auto` 还会自动派出 workflow worker 子工单。 |
 | `--max-runners <n>` | `1` | 本轮最多推进多少个 runner；`0` 表示不执行 runner。 |
@@ -967,7 +969,7 @@ agent_py_agent/data/subagents/subagent_dispatch_report.json
 agent_py_agent/data/subagents/SUBAGENT_DISPATCH.md
 ```
 
-当本轮 dispatch 处理 `AWAITING_ACCEPTANCE` / `NEEDS_ACCEPTANCE` 的 run 时，acceptance 记录会带 parent acceptance auto-policy 的 refs-only 摘要：`parent_acceptance_policy_ref`、decision、action、would_execute 和 executed。它只写 `reports/parent_acceptance_auto_policy.json` 审计并展示引用，不执行 tests、不 apply、不 rescue、不修改 task 状态。
+当本轮 dispatch 处理 `AWAITING_ACCEPTANCE` / `NEEDS_ACCEPTANCE` 的 run 时，acceptance 记录会带 parent acceptance auto-policy 的 refs-only 摘要：`parent_acceptance_policy_ref`、decision、action、would_execute 和 executed。默认只写 `reports/parent_acceptance_auto_policy.json` / `parent_acceptance_auto_execution.json` 审计并展示引用，不执行 tests、不 apply、不 rescue、不修改 task 状态。只有显式传 `--execute-acceptance-tests` 时，dispatch/watch 才会执行 auto-policy 允许的 `run_tests` 并写测试报告；任务仍停留在等待验收状态，后续必须另走显式 apply。
 
 watch 输出位置：
 

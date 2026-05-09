@@ -64,9 +64,9 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/parent_acceptance_apply.py`：保存父级验收显式 apply 的结果模型、拦截/应用结果构造和 `parent_acceptance_apply.json` 落盘逻辑。
 - `agent_py_agent/agent/subagents/parent_acceptance_next_action.py`：把父级验收 plan/apply 审计映射成下一步动作建议，例如 `run_tests`、`request_human_confirmation`、`plan_rescue` 或 `apply_acceptance`；它只返回建议和 refs，不执行动作。
 - `agent_py_agent/agent/subagents/parent_acceptance_auto_policy.py`：把 next-action 映射成自动策略 dry-run 判断并写入 `parent_acceptance_auto_policy.json`；当前生成 allow/blocked、would_execute、manual-only 半自动计划、preflight 检查和 executed=false。
-- `agent_py_agent/agent/subagents/parent_acceptance_auto_execution.py`：定义父级验收自动执行 Request/Result bundle，并生成 `parent_acceptance_auto_execution.json` dry-run 审计；当前只记录计划、policy ref、recommended command、blockers 和 hard guard，不执行命令、不改状态。
-- `agent_py_agent/agent/agent_core/dispatch_service.py`：在 acceptance 调度记录上附加 parent acceptance auto-policy 和 auto-execution 的 refs-only 摘要；包括 manual-only、preflight 和 hard-guard 字段，但该接入只调用 dry-run 审计，不执行 tests、不 apply acceptance、不触发 rescue。
-- `agent_py_agent/agent/subagents/report_dispatch_models.py` / `services/dispatch_params.py`：`DispatchRecord` 和 `DispatchRecordParams` 持有 `parent_acceptance_policy_*` 与 `parent_acceptance_auto_execution_*` 机器摘要字段，供 JSON report、Markdown 和 watch 读取。
+- `agent_py_agent/agent/subagents/parent_acceptance_auto_execution.py`：定义父级验收自动执行 Request/Result bundle，并生成 `parent_acceptance_auto_execution.json` 审计；默认只记录计划、policy ref、recommended command、blockers 和 hard guard，显式确认时只允许执行 tests。
+- `agent_py_agent/agent/agent_core/dispatch_service.py`：在 acceptance 调度记录上附加 parent acceptance auto-policy 和 auto-execution 摘要；默认 dry-run，只在 `execute_acceptance_tests` 显式打开时调用第一层 run_tests 执行路径，不 apply acceptance、不触发 rescue。
+- `agent_py_agent/agent/subagents/report_dispatch_models.py` / `services/dispatch_params.py`：`DispatchRecord` 和 `DispatchRecordParams` 持有 `parent_acceptance_policy_*` 与 `parent_acceptance_auto_execution_*` 机器摘要字段，包括可选 test report ref/total/failed，供 JSON report、Markdown 和 watch 读取。
 - `agent_py_agent/agent/subagents/rendering_dispatch.py`：`SUBAGENT_DISPATCH.md` 展示 policy 摘要和 ref，仍不展开 audit 文件正文。
 - `agent_py_agent/agent/subagents/manager_parent_acceptance.py`：承接 manager 的父级验收 plan/write/apply/next-action/auto-policy 桥接流程，让 `manager_acceptance.py` 类体只保留薄转发方法。
 - `agent_py_agent/agent/subagents/acceptance_test_execution.py`：把显式开启的真实测试执行接入 acceptance findings，生成 `test_execution_recorded` 和 `test_execution_passed`，默认不运行。
@@ -150,7 +150,7 @@ agent_py_agent/agent/
 9. Parent Acceptance Controller 的 `--next-action` 是自动调度前的建议层：它读取当前 plan 和已有 apply 审计 refs，返回下一步建议命令或人工/救援意图，但不会执行建议，也不会把建议当 verified fact。
 9. Parent Acceptance Auto Policy v1 dry-run 当前消费 next-action、决策/apply refs 和保守 allowlist。第一片只判断“策略是否允许、如果允许会执行什么、为什么仍不执行”，写 `parent_acceptance_auto_policy.json`；半自动计划只暴露 `execution_mode=manual_only`、`automatic_execution_allowed=false`、`recommended_command` 和 preflight 检查，不运行 tests、不 apply、不 rescue，也不改 task/run 状态。
 9. Parent Acceptance Auto Execution facade v1 当前消费 auto-policy 输出并写 `parent_acceptance_auto_execution.json`；默认 dry-run 固定 `execution_allowed=false`、`guard_status=blocked`、`executed=false`、`mutates_task_state=false`。只有显式 `ParentAcceptanceAutoExecutionOptions(execute_tests=True)` / `--execute-auto-tests` 才允许执行 run_tests 并写 `test_execution.json`，仍不 apply、不 rescue、不修改 task 状态。
-9. `subagents-dispatch` 现在会在 acceptance 记录上附带 parent auto-policy 的 machine summary 和 ref；watch 只读取本轮 dispatch report / Markdown，不在 watch 层重新跑 policy，也不会因为 `would_execute=true` 自动执行任何动作。
+9. `subagents-dispatch` 现在会在 acceptance 记录上附带 parent auto-policy 的 machine summary 和 ref；默认不会因为 `would_execute=true` 自动执行任何动作。只有 `DispatchParams/WatchParams(execute_acceptance_tests=True)` 或 CLI `--execute-acceptance-tests` 会受控执行 run_tests，并且仍不 apply、不 rescue、不修改 task 状态。
 10. Compact resume 的 continue packet 可以携带 subagent owner refs 和 acceptance/test 线索，但它只证明“恢复上下文可继续”，不证明“子代理业务验收通过”。父级验收和 auto-policy 仍是 tests/apply/rescue 的唯一判断层，compact auto 不得绕过。
 10. compact/resume 与父级验收的联调链路是：continue packet ready -> parent acceptance 发现缺 `test_execution.json` 并阻断为 `execute_tests` -> 显式测试执行写报告 -> parent acceptance 变为 `inspect_only` -> 显式 apply 才能写 `DONE/VERIFIED`。任一步都不允许 compact auto 直接跑 tests、apply 或导出子代理 memory。
 10. due-check 把 blocked、timeout、stale heartbeat、capability request/gap 等问题转成 action plan，并附带 rescue/escalation 元数据。
@@ -303,9 +303,9 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 
 - `subagents-dispatch` 的 acceptance record 会带 `parent_acceptance_policy_ref`、`parent_acceptance_policy_decision`、`parent_acceptance_policy_action`、`parent_acceptance_policy_would_execute`、`parent_acceptance_policy_executed`、`parent_acceptance_policy_execution_mode`、`parent_acceptance_policy_automatic_execution_allowed`、`parent_acceptance_policy_recommended_command`、`parent_acceptance_policy_preflight_status`、`parent_acceptance_policy_ready_for_automatic_execution` 和 `parent_acceptance_policy_preflight_blockers`。
 - `SUBAGENT_DISPATCH.md` 展示同一组摘要，方便人类快速判断下一步；完整事实源仍是 run-local `reports/parent_acceptance_auto_policy.json`。Markdown 展示 recommended command 不代表 dispatch 会执行。
-- `subagents-dispatch` 的 acceptance record 也会带 `parent_acceptance_auto_execution_ref`、status、allowed、executed、guard status 和 blockers；完整事实源是 run-local `reports/parent_acceptance_auto_execution.json`。watch 层只读取本轮 dispatch report/Markdown，不单独执行 auto-execution facade。
-- `subagents-dispatch --watch` 不单独执行 auto-policy。watch record 的 evidence 只指向 `subagent_dispatch_report.json` 和 `SUBAGENT_DISPATCH.md`，由调用方沿 ref 读取具体 run 的 policy audit。
-- 第一片接入仍是 refs-only dry-run：`would_execute=true` 只说明未来可考虑执行，`executed=false` 仍是硬边界。
+- `subagents-dispatch` 的 acceptance record 也会带 `parent_acceptance_auto_execution_ref`、status、allowed、executed、guard status、blockers，以及显式执行时的 test ref/total/failed；完整事实源是 run-local `reports/parent_acceptance_auto_execution.json` 和 `reports/test_execution.json`。
+- `subagents-dispatch --watch` 不单独执行 auto-policy。watch record 的 evidence 只指向 `subagent_dispatch_report.json` 和 `SUBAGENT_DISPATCH.md`，由调用方沿 ref 读取具体 run 的 policy audit；若 watch params 显式打开 `execute_acceptance_tests`，本轮 dispatch report 会记录 tests_executed，但 task 仍等待后续显式 apply。
+- 默认接入仍是 refs-only dry-run：`would_execute=true` 只说明未来可考虑执行，`executed=false` 仍是硬边界；显式测试执行只证明 tests report 已刷新，不代表验收已经 apply。
 
 ### 安全预留
 

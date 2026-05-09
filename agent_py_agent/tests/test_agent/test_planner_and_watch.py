@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from agent_py_agent.agent.agent_core.dispatch_params import WatchParams
 from agent_py_agent.agent.capabilities import CapabilityRouter
 from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.config import AgentConfig
@@ -272,6 +273,34 @@ def test_subagent_dispatch_watch_surfaces_parent_acceptance_auto_policy_refs():
         assert payload["reserved"]["mutates_task_state"] is False
         assert reloaded.status == "AWAITING_ACCEPTANCE"
         assert reloaded.verification_status == "NEEDS_ACCEPTANCE"
+
+
+def test_subagent_dispatch_watch_executes_acceptance_tests_when_confirmed():
+    """LLM: Verifies watch forwards explicit acceptance test execution without applying the task."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        (root / "README.md").write_text("watch manual acceptance test\n", encoding="utf-8")
+        task = _setup_watch_acceptance_policy_task(agent)
+        router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+
+        agent.watch_subagents(
+            router,
+            CapabilityConfig(),
+            params=WatchParams(max_cycles=1, interval=0, max_runners=0, execute_acceptance_tests=True),
+        )
+
+        record = _watch_acceptance_dispatch_record(root)
+        test_ref = Path(task.reports_dir) / "test_execution.json"
+        loaded = agent.subagents.load(task.id)
+        assert record["parent_acceptance_auto_execution_status"] == "tests_executed"
+        assert record["parent_acceptance_auto_execution_allowed"] is True
+        assert record["parent_acceptance_auto_execution_executed"] is True
+        assert record["parent_acceptance_auto_execution_test_ref"] == str(test_ref)
+        assert json.loads(test_ref.read_text(encoding="utf-8"))["failed"] == 0
+        assert loaded.status == "AWAITING_ACCEPTANCE"
+        assert loaded.verification_status == "NEEDS_ACCEPTANCE"
 
 
 def test_subagent_dispatch_watch_lock_prevents_second_parent():
