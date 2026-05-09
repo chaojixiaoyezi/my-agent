@@ -165,6 +165,9 @@ def followup_command_for_action(run_id: str, action: str) -> str:
         return f"subagents-acceptance-plan {run_id} --apply-followup --take-over-by <agent>"
     if action == "run_tests":
         return f"subagents-acceptance-plan {run_id} --auto-execution --execute-auto-tests"
+    # LLM: Review patches through the patch command; follow-up control must not approve them implicitly.
+    if action == "review_patches":
+        return f"subagents-patches --review-apply --run-id {run_id}"
     return ""
 
 
@@ -277,7 +280,8 @@ def _preview_result(task: SubAgentTask, followup: dict[str, Any]) -> ParentAccep
         status=status,
         action=action,
         applied=False,
-        ok=status in {"ready_for_manual_apply", "needs_manual_rescue"},
+        # LLM: needs_patch_review is actionable guidance, not a completed acceptance state.
+        ok=status in {"ready_for_manual_apply", "needs_manual_rescue", "needs_patch_review"},
         message=str(followup.get("reason") or ""),
         followup_ref=str(parent_acceptance_followup_ref(task)),
         control_ref=str(parent_acceptance_followup_control_ref(task)),

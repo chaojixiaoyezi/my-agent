@@ -49,6 +49,8 @@ def build_parent_acceptance_next_action(
         return _next_action(task, decision, {"action": "none", "reason": "task already accepted"})
     if decision.decision == "execute_tests":
         return _run_tests_next_action(task, decision)
+    if decision.decision == "review_patches":
+        return _review_patches_next_action(task, decision)
     if decision.decision == "request_human":
         return _human_next_action(task, decision)
     if decision.decision == "rescue":
@@ -64,6 +66,20 @@ def _run_tests_next_action(task: SubAgentTask, decision) -> ParentAcceptanceNext
         decision,
         {"action": "run_tests", "reason": "blocked apply requires explicit test execution"},
         {"command": f"subagents-tests {task.id} --re-run"},
+    )
+
+
+# LLM: _review_patches_next_action exposes the mandatory patch gate before acceptance apply.
+# 函数用途: 为有未审核 applied patch 的任务生成显式 patch review 命令；本函数只给建议，不写状态。
+def _review_patches_next_action(task: SubAgentTask, decision) -> ParentAcceptanceNextAction:
+    return _next_action(
+        task,
+        decision,
+        {"action": "review_patches", "reason": decision.reason},
+        {
+            "command": f"subagents-patches --review-apply --run-id {task.id}",
+            "mutates_task_state": True,
+        },
     )
 
 

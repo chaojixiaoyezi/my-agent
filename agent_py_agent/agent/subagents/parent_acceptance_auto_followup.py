@@ -134,6 +134,9 @@ def _followup_status(action: ParentAcceptanceNextAction) -> str:
         return "needs_human_confirmation"
     if action.action == "run_tests":
         return "needs_manual_tests"
+    # LLM: Patch review is a manual gate after tests pass, distinct from acceptance apply.
+    if action.action == "review_patches":
+        return "needs_patch_review"
     if action.action == "none":
         return "complete"
     return "blocked"

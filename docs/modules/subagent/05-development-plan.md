@@ -27,6 +27,14 @@
 - 子代理输出默认是待审核材料，不是最终结论。
 - 每个关键结论必须能追溯到 evidence 或 artifact。
 - 父级要能随时回答“谁在干什么、卡在哪里、证据是什么、下一步是什么”。
+- 默认查询必须是轻量 refs-only：`status`、`subagents`、startup recovery、due-check、
+  shared progress 和 acceptance plan 只能读热元数据和索引，不读 runner prompt/response、
+  artifact 正文或外置工具输出，也不调用模型。
+- 只有显式执行入口才能产生模型调用或命令调用，例如 `subagent-run --execute`、
+  `subagents-dispatch --execute-runners`、`subagents-tests --re-run` 和
+  `subagents-dispatch --execute-acceptance-tests`。
+- 子代理目录允许保留大量冷文件，但冷文件必须通过 detail / inspect / resume /
+  acceptance 等明确命令读取，不能被看板、状态页或普通检索自动展开。
 
 ## 当前已有基础
 

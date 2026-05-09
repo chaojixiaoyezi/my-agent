@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 from contextlib import redirect_stdout
 from io import StringIO
+from pathlib import Path
 from types import SimpleNamespace
 
 from agent_py_agent.agent.local_store import LocalStore
 from agent_py_agent.agent.subagents.manager import SubAgentManager
+from agent_py_agent.agent.subagents.models import SubAgentBoardOptions, SubAgentTask
+from agent_py_agent.agent.subagents.services.board import SubAgentBoardService
 from agent_py_agent.cli.local_status_payload import StatusPayloadContext, build_status_payload
 from agent_py_agent.cli.local_status_view import StatusPrintContext, print_status_human
 from agent_py_agent.cli.subagents import cmd_subagents
@@ -101,6 +104,106 @@ def test_status_payload_surfaces_acceptance_next_action_summary(tmp_path) -> Non
     assert entry["command"] == f"subagents-tests {task.id} --re-run"
     assert entry["mutates_task_state"] is False
     assert "STATUS_ACCEPTANCE_NEXT_ACTION_MUST_NOT_INLINE_ARTIFACT_BODY" not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_status_payload_does_not_read_cold_runner_logs_or_artifacts(tmp_path, monkeypatch) -> None:
+    store = LocalStore(tmp_path / "local.db")
+    manager = SubAgentManager(tmp_path / "subagents", local_store=store)
+    task = manager.create_run(
+        goal="status should stay light",
+        thought="keep cold files out of status",
+        plan=["write refs"],
+    )
+    task.status = "FAILED"
+    task.failure_type = "tool_output_context_overflow"
+    task.latest_summary = "large output externalized"
+    cold_artifact = Path(task.reports_dir) / "large-output.txt"
+    cold_artifact.write_text("STATUS_MUST_NOT_READ_COLD_ARTIFACT_BODY\n", encoding="utf-8")
+    Path(task.runner_prompt_file).write_text("STATUS_MUST_NOT_READ_RUNNER_PROMPT\n", encoding="utf-8")
+    Path(task.runner_response_file).write_text("STATUS_MUST_NOT_READ_RUNNER_RESPONSE\n", encoding="utf-8")
+    task.artifact_refs = [str(cold_artifact)]
+    manager.save(task)
+
+    original_read_text = Path.read_text
+    cold_names = {"large-output.txt", "runner_prompt.md", "runner_response.md"}
+
+    def guarded_read_text(path: Path, *args, **kwargs):
+        if path.name in cold_names:
+            raise AssertionError(f"status unexpectedly read cold subagent file: {path}")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+    board = manager.build_board(
+        options=SubAgentBoardOptions(
+            recent_limit=5,
+            include_child_status_counts=False,
+        )
+    )
+    payload = build_status_payload(_status_payload_context(tmp_path, store, manager, board))
+
+    payload_text = json.dumps(payload, ensure_ascii=False)
+    assert task.failure_handoff_json in payload_text
+    assert "STATUS_MUST_NOT_READ" not in payload_text
+
+
+def test_board_child_counts_use_preloaded_tasks_without_extra_loads() -> None:
+    parent = SubAgentTask(
+        id="parent",
+        goal="parent",
+        thought="parent",
+        plan=["delegate"],
+        child_ids=["child"],
+        updated_at=2,
+    )
+    child = SubAgentTask(
+        id="child",
+        goal="child",
+        thought="child",
+        plan=["work"],
+        status="RUNNING",
+        updated_at=1,
+    )
+
+    class FakeManager:
+        def list_runs(self):
+            return [parent, child]
+
+        def load(self, run_id: str):
+            raise AssertionError(f"board should not reload child task {run_id}")
+
+    board = SubAgentBoardService(FakeManager()).build_board(
+        options=SubAgentBoardOptions(recent_limit=5)
+    )
+
+    item = next(item for item in board.items if item.id == "parent")
+    assert item.child_status_counts == {"RUNNING": 1}
+
+
+def test_lightweight_board_skips_child_count_expansion() -> None:
+    parent = SubAgentTask(
+        id="parent",
+        goal="parent",
+        thought="parent",
+        plan=["delegate"],
+        child_ids=["missing-child"],
+        updated_at=1,
+    )
+
+    class FakeManager:
+        def list_runs(self):
+            return [parent]
+
+        def load(self, run_id: str):
+            raise AssertionError(f"lightweight board should not load child task {run_id}")
+
+    board = SubAgentBoardService(FakeManager()).build_board(
+        options=SubAgentBoardOptions(
+            recent_limit=5,
+            include_child_status_counts=False,
+        )
+    )
+
+    assert board.items[0].child_status_counts == {}
 
 
 def test_status_human_prints_shared_progress_failure_handoff(tmp_path, capsys) -> None:

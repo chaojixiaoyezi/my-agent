@@ -38,6 +38,7 @@ from .persistence_failure_handoff import normalize_failure_handoff, write_failur
 from .persistence_identity import normalize_runtime_identity
 from .persistence_inheritance import normalize_inheritance_manifest, write_inheritance_manifest
 from .persistence_recovery_outputs import write_recovery_output_files
+from .persistence_rendering import render_thought_markdown
 from .persistence_security import normalize_security_signal
 from .task_workspace_adapter import sync_task_workspace_fields
 
@@ -292,6 +293,7 @@ class SubAgentPersistenceService:
         """Persist a task as JSON plus human-readable Markdown."""
 
         _apply_missing_paths(task, self.manager._build_work_order_paths(task.id, task.task_dir or None))
+        _merge_existing_child_links(self, task)
         task_dir = Path(task.task_dir)
         task_dir.mkdir(parents=True, exist_ok=True)
         self.manager._ensure_work_order_files(task)
@@ -315,7 +317,7 @@ class SubAgentPersistenceService:
         write_inheritance_manifest(task)
         write_failure_handoff(task)
         write_recovery_output_files(task, checkpoint_artifacts)
-        (task_dir / "thought.md").write_text(self._render_thought_markdown(task), encoding="utf-8")
+        (task_dir / "thought.md").write_text(render_thought_markdown(task), encoding="utf-8")
         self.manager._index_task(task)
         if self.manager.local_store:
             # LLM: 控制面投影只给父级查询和 rollup 用，旧工单目录与 runtime workspace 仍是事实源。
@@ -328,34 +330,18 @@ class SubAgentPersistenceService:
                 goal=task.goal,
             )
 
-    # LLM: _render_thought_markdown 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-    # 函数用途: 渲染或汇总thoughtmarkdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会更新任务状态、报告记录和持久化副作用，需避免破坏既有状态机约定。
-    @staticmethod
-    def _render_thought_markdown(task: SubAgentTask) -> str:
-        return (
-            "# Thought\n\n"
-            f"{task.thought}\n\n"
-            "## Plan\n"
-            + "\n".join(f"- {item}" for item in task.plan)
-            + "\n\n"
-            "## Capability Boundary\n"
-            f"- Agent: {task.agent_name}\n"
-            f"- Role: {task.role}\n"
-            f"- Owner: {task.owner or 'none'}\n"
-            f"- Supervisor: {task.supervisor or 'none'}\n"
-            f"- Final owner: {task.final_owner or 'none'}\n"
-            f"- Parent: {task.parent_id or 'none'}\n"
-            f"- Depth: {task.depth}\n"
-            f"- Allowed skills: {', '.join(task.allowed_skills) or 'none'}\n"
-            f"- Allowed tools: {', '.join(task.allowed_tools) or 'none'}\n\n"
-            "## Write Boundary\n"
-            f"- Task dir: {task.task_dir}\n"
-            f"- Allowed write roots: {', '.join(task.allowed_write_roots) or 'none'}\n"
-            f"- Forbidden write roots: {', '.join(task.forbidden_write_roots) or 'none'}\n\n"
-            "## Acceptance Checks\n"
-            + "\n".join(f"- {item}" for item in task.acceptance_checks or ["未设置"])
-            + "\n\n"
-            "## Evidence\n"
-            + "\n".join(f"- [{item.kind}] {item.summary}" for item in task.evidence or [])
-            + ("\n" if task.evidence else "- 暂无\n")
-        )
+
+# LLM: _merge_existing_child_links protects hierarchy edges from stale full-object saves.
+# 函数用途: 保存任务前合并磁盘上已有 child_ids，避免父任务旧快照覆盖新创建的子任务链接。
+def _merge_existing_child_links(service: SubAgentPersistenceService, task: SubAgentTask) -> None:
+    try:
+        existing = service.load(task.id)
+    except (FileNotFoundError, json.JSONDecodeError, TypeError):
+        return
+    task.child_ids = _unique_strings([*existing.child_ids, *task.child_ids])
+
+
+# LLM: _unique_strings keeps append-only refs stable while removing duplicates.
+# 函数用途: 合并 child_ids 时保留首次出现顺序，避免重复链接污染 board 和控制面展示。
+def _unique_strings(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(item for item in values if item))

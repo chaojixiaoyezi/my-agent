@@ -203,6 +203,49 @@ do_write()
 4. `python scripts/check_code_size.py` — no size limit violations.
 5. `git diff --check` — no whitespace errors.
 
+## 11.1 Subagent Token / Model-Call Budget
+
+- Status, board, startup recovery, due-check, action-plan, acceptance-plan,
+  shared-progress, and memory-resume views must be deterministic local reads.
+  They must not call an LLM, run a runner, execute tests, or expand artifact
+  bodies unless the command name/flag explicitly says it will execute.
+- Explicit model-call entry points must stay opt-in, such as
+  `subagent-run --execute`, `subagents-dispatch --execute-runners`, and
+  planner paths that are clearly named as planner/model execution.
+- Explicit command execution must stay opt-in, such as
+  `subagents-tests --re-run`, `subagents-acceptance --execute-tests`, or
+  `subagents-dispatch --execute-acceptance-tests`.
+- Default lookup surfaces must be refs-only: show ids, status, summaries,
+  counts, hashes, sizes, and file refs. Do not read or inline
+  `logs/runner_prompt.md`, `logs/runner_response.md`, externalized tool
+  outputs, artifact bodies, or large report bodies in status/board/startup
+  paths.
+- New subagent files should be classified as hot metadata or cold body data.
+  Hot metadata may be read by status and scheduler code; cold body data should
+  be opened only by an explicit detail, inspect, resume, or acceptance command.
+- Any new status/search/scheduler feature must add or reuse a regression test
+  proving it does not read cold runner logs or artifact bodies on the default
+  path.
+- When users ask for progress or quality checks, prefer refs-only reporting and
+  checker subagent roles over expanding the main agent context with large
+  artifacts. Reporter/checker roles may collect ids, summaries, status, and
+  evidence refs, but they should not auto-read cold bodies or promote facts
+  into main memory without an explicit gate.
+- For remote CI pushes, use the strict remote-submit profile before pushing:
+  focused tests for touched areas, full pytest when feasible, ruff, doc sync,
+  strict code-size, and `git diff --check`. If not pushing remote, use the
+  smaller local checklist appropriate to the change risk.
+
+## 11.2 Real E2E Findings Ledger
+
+- During real subagent E2E runs, append every discovered product or workflow
+  issue to `docs/modules/subagent/06-real-e2e-findings.md`.
+- Each entry should include the scene, discovery time, symptom, root cause,
+  fix or routing decision, verification command/result, current status, and
+  remaining risk.
+- Keep the ledger append-only. Do not rewrite old findings except for narrow
+  typo/path corrections.
+
 ---
 
 ## 12. Reversibility / 可逆性

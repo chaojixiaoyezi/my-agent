@@ -14,6 +14,7 @@ from ..agent.subagents.execution_report import (
     load_test_execution_report,
     write_test_execution_report,
 )
+from ..agent.subagents.execution_test_items import TestItemPreparationRequest, prepare_test_items
 from ..agent.subagents.patch import PatchApplyOptions, PatchReviewOptions
 from ._acceptance_plan import cmd_subagents_acceptance_plan
 from .common import make_agent
@@ -141,6 +142,9 @@ def _write_subagents_tests_report(agent, task, options: SubagentsTestsOptions):
     workspace_root = _subagents_tests_workspace(agent, task)
     output = _read_task_output(task)
     tests = [item for item in output.get("tests", []) if isinstance(item, dict)]
+    tests = prepare_test_items(
+        TestItemPreparationRequest(tests=tests, output=output, workspace_root=workspace_root)
+    )
     executor = TestExecutor(workspace_root, timeout_seconds=options.timeout)
     records = [executor.execute(test) for test in tests]
     return write_test_execution_report(

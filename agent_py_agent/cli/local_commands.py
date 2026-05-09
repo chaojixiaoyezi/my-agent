@@ -21,6 +21,7 @@ from ..agent.gateway import (
     read_json_file,
     recover_gateway_processing_requests,
 )
+from ..agent.subagents.models import SubAgentBoardOptions
 from .common import format_local_time, make_agent, resume_context_override
 from .local_doctor import build_status_suggestions
 from .local_repair_commands import (
@@ -47,7 +48,12 @@ def cmd_status(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
     local_stats = agent.local_store.stats()
-    board = agent.subagents.build_board(recent_limit=args.limit)
+    board = agent.subagents.build_board(
+        options=SubAgentBoardOptions(
+            recent_limit=args.limit,
+            include_child_status_counts=False,
+        )
+    )
     timeline = agent.local_store.timeline(limit=args.limit)
     pid, alive = gateway_running(paths)
     gateway_state = read_json_file(paths.state)
