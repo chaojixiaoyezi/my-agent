@@ -9,8 +9,13 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from .execution_executor import TestExecutor
-from .execution_report import TestExecutionReportOptions, write_test_execution_report
 from .models import SubAgentTask
+from .parent_acceptance_auto_execution_reports import (
+    ConfirmedTestReportRequest,
+    followup_path,
+    write_confirmed_test_report,
+    write_execution_followup,
+)
 from .parent_acceptance_auto_policy import (
     ParentAcceptanceAutoPolicy,
     build_parent_acceptance_auto_policy,
@@ -83,6 +88,11 @@ class ParentAcceptanceAutoExecutionResult:
     test_execution_ref: str = ""
     test_total: int = 0
     test_failed: int = 0
+    followup_ref: str = ""
+    followup_status: str = ""
+    followup_action: str = ""
+    followup_command: str = ""
+    followup_reason: str = ""
     reserved: dict[str, Any] = field(default_factory=dict)
 
     # LLM: to_dict keeps nested request output consistent with dataclass serialization.
@@ -211,14 +221,10 @@ def _execute_confirmed_tests(
         return _blocked_manual_result(request, ["missing_tests"])
     executor = TestExecutor(workspace_root, timeout_seconds=request.timeout_seconds)
     records = [executor.execute(test) for test in tests]
-    report = write_test_execution_report(
-        task.reports_dir,
-        records,
-        options=TestExecutionReportOptions(
-            workspace_root=workspace_root,
-            timeout_seconds=request.timeout_seconds,
-        ),
+    report = write_confirmed_test_report(
+        ConfirmedTestReportRequest(task, request, workspace_root, records)
     )
+    followup = write_execution_followup(task, workspace_root, report)
     return ParentAcceptanceAutoExecutionResult(
         run_id=request.run_id,
         mode=request.mode,
@@ -241,6 +247,11 @@ def _execute_confirmed_tests(
         test_execution_ref=str(report.json_path),
         test_total=report.total_tests,
         test_failed=report.failed,
+        followup_ref=str(followup_path(task)),
+        followup_status=followup.status,
+        followup_action=followup.action,
+        followup_command=followup.command,
+        followup_reason=followup.reason,
     )
 
 

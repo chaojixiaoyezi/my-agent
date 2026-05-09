@@ -293,11 +293,15 @@ def test_subagent_dispatch_watch_executes_acceptance_tests_when_confirmed():
 
         record = _watch_acceptance_dispatch_record(root)
         test_ref = Path(task.reports_dir) / "test_execution.json"
+        followup_ref = Path(task.reports_dir) / "parent_acceptance_auto_followup.json"
         loaded = agent.subagents.load(task.id)
         assert record["parent_acceptance_auto_execution_status"] == "tests_executed"
         assert record["parent_acceptance_auto_execution_allowed"] is True
         assert record["parent_acceptance_auto_execution_executed"] is True
         assert record["parent_acceptance_auto_execution_test_ref"] == str(test_ref)
+        assert record["parent_acceptance_followup_ref"] == str(followup_ref)
+        assert record["parent_acceptance_followup_status"] == "ready_for_manual_apply"
+        assert record["parent_acceptance_followup_action"] == "apply_acceptance"
         assert json.loads(test_ref.read_text(encoding="utf-8"))["failed"] == 0
         assert loaded.status == "AWAITING_ACCEPTANCE"
         assert loaded.verification_status == "NEEDS_ACCEPTANCE"

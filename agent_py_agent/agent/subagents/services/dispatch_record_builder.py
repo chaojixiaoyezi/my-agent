@@ -14,7 +14,7 @@ class DispatchRecordBuilder:
     """Build dispatch audit records."""
 
     # LLM: make_record 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-    # 函数用途: 构建make记录所需的数据结构或请求参数，包括 auto-policy、auto-execution 和 test report 摘要；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
+    # 函数用途: 构建make记录所需的数据结构或请求参数，包括 auto-policy、auto-execution、follow-up 和 test report 摘要；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     @staticmethod
     def make_record(manager, params) -> DispatchRecord:
         """Create a dispatch audit record from params bundle."""
@@ -34,34 +34,7 @@ class DispatchRecordBuilder:
             before_verification_status=params.before_verification_status,
             after_verification_status=params.after_verification_status,
             evidence_paths=params.evidence_paths or [],
-            parent_acceptance_policy_ref=params.parent_acceptance_policy_ref,
-            parent_acceptance_policy_decision=params.parent_acceptance_policy_decision,
-            parent_acceptance_policy_action=params.parent_acceptance_policy_action,
-            parent_acceptance_policy_would_execute=params.parent_acceptance_policy_would_execute,
-            parent_acceptance_policy_executed=params.parent_acceptance_policy_executed,
-            parent_acceptance_policy_execution_mode=params.parent_acceptance_policy_execution_mode,
-            parent_acceptance_policy_automatic_execution_allowed=(
-                params.parent_acceptance_policy_automatic_execution_allowed
-            ),
-            parent_acceptance_policy_recommended_command=params.parent_acceptance_policy_recommended_command,
-            parent_acceptance_policy_preflight_status=params.parent_acceptance_policy_preflight_status,
-            parent_acceptance_policy_ready_for_automatic_execution=(
-                params.parent_acceptance_policy_ready_for_automatic_execution
-            ),
-            parent_acceptance_policy_preflight_blockers=(
-                params.parent_acceptance_policy_preflight_blockers or []
-            ),
-            parent_acceptance_auto_execution_ref=params.parent_acceptance_auto_execution_ref,
-            parent_acceptance_auto_execution_status=params.parent_acceptance_auto_execution_status,
-            parent_acceptance_auto_execution_allowed=params.parent_acceptance_auto_execution_allowed,
-            parent_acceptance_auto_execution_executed=params.parent_acceptance_auto_execution_executed,
-            parent_acceptance_auto_execution_guard_status=params.parent_acceptance_auto_execution_guard_status,
-            parent_acceptance_auto_execution_blocked_by=(
-                params.parent_acceptance_auto_execution_blocked_by or []
-            ),
-            parent_acceptance_auto_execution_test_ref=params.parent_acceptance_auto_execution_test_ref,
-            parent_acceptance_auto_execution_test_total=params.parent_acceptance_auto_execution_test_total,
-            parent_acceptance_auto_execution_test_failed=params.parent_acceptance_auto_execution_test_failed,
+            **_parent_acceptance_fields(params),
             created_at=time.time(),
         )
 
@@ -81,3 +54,39 @@ class DispatchRecordBuilder:
                 "applied" if record.applied else "dry_run", 0,
             ) + 1
         return summary
+
+
+# LLM: _parent_acceptance_fields keeps dispatch record creation below the size guard.
+# 函数用途: 提取父级验收 policy、execution、follow-up 摘要字段，供 DispatchRecord 构造器展开。
+def _parent_acceptance_fields(params) -> dict[str, object]:
+    return {
+        "parent_acceptance_policy_ref": params.parent_acceptance_policy_ref,
+        "parent_acceptance_policy_decision": params.parent_acceptance_policy_decision,
+        "parent_acceptance_policy_action": params.parent_acceptance_policy_action,
+        "parent_acceptance_policy_would_execute": params.parent_acceptance_policy_would_execute,
+        "parent_acceptance_policy_executed": params.parent_acceptance_policy_executed,
+        "parent_acceptance_policy_execution_mode": params.parent_acceptance_policy_execution_mode,
+        "parent_acceptance_policy_automatic_execution_allowed": (
+            params.parent_acceptance_policy_automatic_execution_allowed
+        ),
+        "parent_acceptance_policy_recommended_command": params.parent_acceptance_policy_recommended_command,
+        "parent_acceptance_policy_preflight_status": params.parent_acceptance_policy_preflight_status,
+        "parent_acceptance_policy_ready_for_automatic_execution": (
+            params.parent_acceptance_policy_ready_for_automatic_execution
+        ),
+        "parent_acceptance_policy_preflight_blockers": params.parent_acceptance_policy_preflight_blockers or [],
+        "parent_acceptance_auto_execution_ref": params.parent_acceptance_auto_execution_ref,
+        "parent_acceptance_auto_execution_status": params.parent_acceptance_auto_execution_status,
+        "parent_acceptance_auto_execution_allowed": params.parent_acceptance_auto_execution_allowed,
+        "parent_acceptance_auto_execution_executed": params.parent_acceptance_auto_execution_executed,
+        "parent_acceptance_auto_execution_guard_status": params.parent_acceptance_auto_execution_guard_status,
+        "parent_acceptance_auto_execution_blocked_by": params.parent_acceptance_auto_execution_blocked_by or [],
+        "parent_acceptance_auto_execution_test_ref": params.parent_acceptance_auto_execution_test_ref,
+        "parent_acceptance_auto_execution_test_total": params.parent_acceptance_auto_execution_test_total,
+        "parent_acceptance_auto_execution_test_failed": params.parent_acceptance_auto_execution_test_failed,
+        "parent_acceptance_followup_ref": params.parent_acceptance_followup_ref,
+        "parent_acceptance_followup_status": params.parent_acceptance_followup_status,
+        "parent_acceptance_followup_action": params.parent_acceptance_followup_action,
+        "parent_acceptance_followup_command": params.parent_acceptance_followup_command,
+        "parent_acceptance_followup_reason": params.parent_acceptance_followup_reason,
+    }

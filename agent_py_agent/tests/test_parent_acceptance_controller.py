@@ -449,21 +449,76 @@ def test_parent_acceptance_auto_execution_manual_confirm_runs_tests_without_appl
         )
 
         execution_path = Path(task.reports_dir) / "parent_acceptance_auto_execution.json"
+        followup_path = Path(task.reports_dir) / "parent_acceptance_auto_followup.json"
         test_report_path = Path(task.reports_dir) / "test_execution.json"
         payload = json.loads(execution_path.read_text(encoding="utf-8"))
+        followup_payload = json.loads(followup_path.read_text(encoding="utf-8"))
         test_payload = json.loads(test_report_path.read_text(encoding="utf-8"))
         reloaded = agent.subagents.load(task.id)
-        assert result.status == "tests_executed"
-        assert result.mode == "manual_confirm_execute_tests"
-        assert result.execution_allowed is True
-        assert result.executed is True
-        assert result.mutates_task_state is False
-        assert result.test_execution_ref == str(test_report_path)
-        assert result.test_failed == 0
+        _assert_manual_execution_result(result, task, test_report_path, followup_path)
         assert payload["dry_run"] is False
         assert payload["reserved"]["executes_tests"] is True
         assert payload["reserved"]["mutates_task_state"] is False
+        _assert_manual_followup_payload(followup_payload)
         assert test_payload["total_tests"] == 1
         assert test_payload["failed"] == 0
+        assert reloaded.status == "AWAITING_ACCEPTANCE"
+        assert reloaded.verification_status == "NEEDS_ACCEPTANCE"
+
+
+# LLM: _assert_manual_execution_result keeps the manual auto-execution test below size limits.
+# 函数用途: 断言显式测试执行成功写入 report 和 follow-up，但没有 apply 任务状态。
+def _assert_manual_execution_result(result, task, test_report_path: Path, followup_path: Path) -> None:
+    assert result.status == "tests_executed"
+    assert result.mode == "manual_confirm_execute_tests"
+    assert result.execution_allowed is True
+    assert result.executed is True
+    assert result.mutates_task_state is False
+    assert result.test_execution_ref == str(test_report_path)
+    assert result.test_failed == 0
+    assert result.followup_ref == str(followup_path)
+    assert result.followup_status == "ready_for_manual_apply"
+    assert result.followup_action == "apply_acceptance"
+    assert result.followup_command == f"subagents-acceptance-plan {task.id} --apply"
+
+
+# LLM: _assert_manual_followup_payload checks the persisted follow-up safety boundaries.
+# 函数用途: 断言 follow-up 文件只给下一步建议，不会自己修改 task 状态。
+def _assert_manual_followup_payload(payload: dict) -> None:
+    assert payload["schema"] == "parent_acceptance_auto_followup.v1"
+    assert payload["followup"]["status"] == "ready_for_manual_apply"
+    assert payload["followup"]["next_action_mutates_task_state"] is True
+    assert payload["reserved"]["mutates_task_state"] is False
+
+
+def test_parent_acceptance_auto_execution_followup_reports_failed_tests_without_rescue():
+    root_ctx, agent, task = _agent_and_task()
+    with root_ctx:
+        _write_output(
+            task,
+            [{
+                "name": "missing-readme",
+                "validation_method": "file_check",
+                "file_path": "README.md",
+            }],
+        )
+
+        result = agent.subagents.plan_parent_acceptance_auto_execution(
+            task.id,
+            options=ParentAcceptanceAutoExecutionOptions(execute_tests=True),
+        )
+
+        followup_path = Path(task.reports_dir) / "parent_acceptance_auto_followup.json"
+        followup_payload = json.loads(followup_path.read_text(encoding="utf-8"))
+        reloaded = agent.subagents.load(task.id)
+        assert result.status == "tests_executed"
+        assert result.test_failed == 1
+        assert result.followup_status == "needs_manual_rescue"
+        assert result.followup_action == "plan_rescue"
+        assert result.followup_command == ""
+        assert followup_payload["followup"]["test_failed"] == 1
+        assert followup_payload["followup"]["failed_tests"][0]["name"] == "missing-readme"
+        assert followup_payload["followup"]["next_action"]["action"] == "plan_rescue"
+        assert followup_payload["followup"]["reserved"]["auto_starts_rescue"] is False
         assert reloaded.status == "AWAITING_ACCEPTANCE"
         assert reloaded.verification_status == "NEEDS_ACCEPTANCE"
