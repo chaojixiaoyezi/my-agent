@@ -32,6 +32,7 @@ class TestSubagentsSubcommandRegistration:
             "subagents",
             "subagents-workflow-plan",
             "subagents-leadership-recovery-plan",
+            "subagents-leadership-recovery-apply",
             "subagents-due-check",
             "subagents-probe",
             "subagents-plan-actions",

@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING, Any
 
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
-from ..subagents.models import SubAgentCapabilityRouteOptions, SubAgentDueCheckOptions
+from ..subagents.models import (
+    SubAgentCapabilityRouteOptions,
+    SubAgentDueCheckOptions,
+    SubAgentLeadershipRecoveryPlanOptions,
+)
 from ..subagents.services.dispatch_params import DispatchRecordParams, DispatchWatchRecordParams
 from .dispatch_record_params import (
     AcceptanceRecordParams,
@@ -68,6 +72,35 @@ def make_due_check_record(agent, cfg, apply):
         ok=True,
         message=f"发现 {due_report.summary.get('total', 0)} 个 due-check issue。",
         evidence_paths=[str(agent.subagents.workspace / "subagent_due_check.json")],
+        ),
+    )
+
+
+# LLM: make_leadership_recovery_plan_record surfaces stale-coordinator handoff plans without mutating state.
+# 函数用途: 在 dispatch/watch 中写出批量领导权恢复计划 ref，只做 inspect_refs，不重挂任务树。
+def make_leadership_recovery_plan_record(agent, cfg):
+    options = SubAgentLeadershipRecoveryPlanOptions(config=cfg, write_report=True)
+    plan = agent.subagents.write_leadership_recovery_plan(params=options)
+    affected = plan.summary.get("stale_coordinators", 0) + plan.summary.get("failed_parent_nodes", 0)
+    if affected <= 0:
+        return None
+    plan_ref = str(agent.subagents.workspace / "subagent_leadership_recovery_plan.json")
+    return agent.subagents.make_dispatch_record(
+        params=DispatchRecordParams(
+            step="leadership_recovery_plan",
+            action="inspect_refs",
+            dry_run=True,
+            applied=False,
+            ok=True,
+            message=(
+                f"发现 {affected} 个需要领导权恢复计划的父节点；"
+                f"assigned_children={plan.summary.get('assigned_children', 0)} "
+                f"unassigned_children={plan.summary.get('unassigned_children', 0)}。"
+            ),
+            evidence_paths=[
+                plan_ref,
+                str(agent.subagents.workspace / "SUBAGENT_LEADERSHIP_RECOVERY_PLAN.md"),
+            ],
         ),
     )
 

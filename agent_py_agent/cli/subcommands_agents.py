@@ -25,6 +25,7 @@ from .subagents import (
     cmd_subagents_dispatch,
     cmd_subagents_due_check,
     cmd_subagents_hierarchy,
+    cmd_subagents_leadership_recovery_apply,
     cmd_subagents_leadership_recovery_plan,
     cmd_subagents_memory_gate,
     cmd_subagents_patches,
@@ -111,6 +112,17 @@ def _add_agents_leadership_subcommands(sub):
     )
     recovery_plan.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     recovery_plan.set_defaults(func=cmd_subagents_leadership_recovery_plan)
+
+    recovery_apply = sub.add_parser("subagents-leadership-recovery-apply", help="Apply one explicit child-subset leader handoff")
+    recovery_apply.add_argument("--dry-run", action="store_false", dest="apply", help="只预览，不修改任务树")
+    recovery_apply.add_argument("--apply", action="store_true", help="真正重挂指定 child 子树")
+    recovery_apply.add_argument("--root-id", help="限制在指定 root subagent 任务树内")
+    recovery_apply.add_argument("--coordinator", required=True, help="旧 coordinator run_id")
+    recovery_apply.add_argument("--leader", required=True, help="新 leader run_id")
+    recovery_apply.add_argument("--child-run-id", action="append", required=True, help="要重挂的直接 child run_id，可重复")
+    recovery_apply.add_argument("--max-children-per-leader", type=int, default=0, help="可选 leader 直接 child 容量上限；0 表示不检查")
+    recovery_apply.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    recovery_apply.set_defaults(func=cmd_subagents_leadership_recovery_apply, apply=False)
 
 
 # LLM: _add_agents_hierarchy_subcommands keeps hierarchy CLI wiring out of the basic command hub.

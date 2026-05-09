@@ -9,7 +9,10 @@ import json
 from dataclasses import asdict
 
 from ..agent.capability_config import load_capability_config
-from ..agent.subagents.models import SubAgentLeadershipRecoveryPlanOptions
+from ..agent.subagents.models import (
+    SubAgentLeadershipRecoveryApplyOptions,
+    SubAgentLeadershipRecoveryPlanOptions,
+)
 from .common import make_agent
 
 
@@ -45,4 +48,37 @@ def cmd_subagents_leadership_recovery_plan(args) -> int:
         print(f"- unassigned coordinator={item.coordinator_id} children={len(item.child_ids)} reason={item.reason}")
     print(f"\n已写入: {agent.subagents.workspace / 'subagent_leadership_recovery_plan.json'}")
     print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_LEADERSHIP_RECOVERY_PLAN.md'}")
+    return 0
+
+
+# LLM: cmd_subagents_leadership_recovery_apply performs a controlled subset handoff only with --apply.
+# 函数用途: CLI 分批接管入口；默认 dry-run，显式 --apply 才移动 child 子树。
+def cmd_subagents_leadership_recovery_apply(args) -> int:
+    agent = make_agent(args)
+    params = SubAgentLeadershipRecoveryApplyOptions(
+        root_id=str(args.root_id or ""),
+        coordinator_id=str(args.coordinator or ""),
+        leader_id=str(args.leader or ""),
+        child_ids=list(args.child_run_id or []),
+        apply=bool(args.apply),
+        max_children_per_leader=int(args.max_children_per_leader or 0),
+    )
+    report = agent.subagents.write_leadership_recovery_apply(params=params)
+    if args.json:
+        print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
+        return 0
+    mode = "apply" if params.apply else "dry-run"
+    print("SUBAGENT LEADERSHIP RECOVERY APPLY")
+    print(f"mode={mode}")
+    print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
+    for record in report.records:
+        status = "OK" if record.ok else "FAIL"
+        print(
+            f"- [{status}] coordinator={record.coordinator_id} -> leader={record.leader_id} "
+            f"applied={record.applied} moved={len(record.moved_child_ids)} :: {record.message}"
+        )
+        if record.blocked_by:
+            print("  blocked_by=" + ",".join(record.blocked_by))
+    print(f"\n已写入: {agent.subagents.workspace / 'subagent_leadership_recovery_apply_report.json'}")
+    print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_LEADERSHIP_RECOVERY_APPLY.md'}")
     return 0

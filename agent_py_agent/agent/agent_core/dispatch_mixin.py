@@ -47,6 +47,7 @@ from .dispatch_service import (
     make_action_apply_records,
     make_capability_route_records,
     make_due_check_record,
+    make_leadership_recovery_plan_record,
     make_patch_review_records,
     update_pending_work_state,
 )
@@ -99,6 +100,9 @@ class _DispatchCollectionBase:
             records.extend(workflow_records)
 
         records.append(make_due_check_record(self, ctx.cfg, ctx.apply))
+        leadership_record = make_leadership_recovery_plan_record(self, ctx.cfg)
+        if leadership_record is not None:
+            records.append(leadership_record)
         action_records = make_action_apply_records(
             ActionApplyRecordParams(
                 self,
