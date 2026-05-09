@@ -607,6 +607,7 @@ python3 -m agent_py_agent subagents-plan-actions --root-id <root_run_id> --all
 - `reopen_for_evidence`
 - `run_acceptance`
 - `takeover_or_reassign`
+- `recover_coordinator_leadership`
 - `route_capability_request`
 - `triage_capability_gap`
 - `probe_or_repair_channel`
@@ -636,6 +637,17 @@ python3 -m agent_py_agent subagents-apply-actions --apply \
 ```
 
 接管会写 `TAKEOVER.md`，并把 final owner 切给接管者。
+
+恢复 coordinator 领导权：
+
+```bash
+python3 -m agent_py_agent subagents-apply-actions --apply \
+  --action recover_coordinator_leadership \
+  --run-id <stale_coordinator_run_id> \
+  --take-over-by <new_leader_run_id>
+```
+
+这个动作要求 `<new_leader_run_id>` 是已存在的 subagent run；它会把旧 coordinator 标记为 `TAKEN_OVER`，并把其子任务的 `supervisor/final_owner` 切给新 leader。
 
 ### 能力路由
 
