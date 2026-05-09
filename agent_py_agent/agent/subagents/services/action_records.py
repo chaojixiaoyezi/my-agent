@@ -39,6 +39,8 @@ ACTION_DISPATCH = {
     "run_acceptance": apply_run_acceptance,
     "takeover_or_reassign": apply_takeover_or_reassign,
     "recover_coordinator_leadership": apply_recover_coordinator_leadership,
+    # LLM: parent-timeout child recovery is audit-only until an explicit handoff apply exists.
+    "recover_child_after_parent_timeout": apply_record_only_action,
     "route_capability_request": apply_record_only_action,
     "triage_capability_gap": apply_record_only_action,
     "inspect_failure": apply_record_only_action,

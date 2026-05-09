@@ -382,6 +382,21 @@ def test_action_for_issue_coordinator_heartbeat_stale():
     assert new_status == ""
 
 
+def test_action_for_issue_parent_timeout_with_unfinished_children():
+    """父超时但子任务未完成时，只生成子树恢复提示动作。"""
+    issue = DueCheckIssue(
+        run_id="root-timeout",
+        severity="P1",
+        kind="parent_timeout_with_unfinished_children",
+        message="",
+        suggested_action="",
+    )
+    action, priority, new_status = _action_for_issue(issue)
+    assert action == "recover_child_after_parent_timeout"
+    assert priority == 830
+    assert new_status == ""
+
+
 # ── _commands_for_action 测试 ──────────────────────────────────────────────
 
 def test_commands_for_action_takeover():
@@ -408,6 +423,12 @@ def test_commands_for_action_recover_coordinator_leadership():
     """领导权恢复动作返回 recovery-tree 命令。"""
     commands = _commands_for_action("recover_coordinator_leadership", "root-1")
     assert any("subagents-recovery-tree root-1" in cmd for cmd in commands)
+
+
+def test_commands_for_action_recover_child_after_parent_timeout():
+    """父超时子任务恢复动作返回 recovery-tree 命令。"""
+    commands = _commands_for_action("recover_child_after_parent_timeout", "root-timeout")
+    assert any("subagents-recovery-tree root-timeout" in cmd for cmd in commands)
 
 
 # ── _is_active 测试 ────────────────────────────────────────────────────────

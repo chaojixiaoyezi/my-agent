@@ -10,7 +10,13 @@ from __future__ import annotations
 """
 
 from ..policies import _is_active
-from .board_due_models import DueCheckSettings, DueInspectionContext, DueIssueSpec, _single_issue
+from .board_due_models import (
+    DueInspectionContext,
+    DueIssueSpec,
+    InspectTaskDueRequest,
+    _single_issue,
+)
+from .board_parent_timeout import check_parent_timeout_child_issues
 
 
 # LLM: _check_work_order_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -286,37 +292,35 @@ def _is_parked_planning_coordinator(task) -> bool:
     return status == "PLANNING" and not active_attempt and bool(getattr(task, "child_ids", None))
 
 
-# LLM: inspect_single_task_due 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 处理inspect单个任务到期相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
-def inspect_single_task_due(
-    manager,
-    task,
-    settings: DueCheckSettings,
-    risk_flags_builder,
-):
+# LLM: inspect_single_task_due stays bundle-first so new predicates do not grow the public signature.
+# 函数用途: 处理单个任务的到期巡检，串起所有 predicate 并返回 refs-only issue 列表。
+def inspect_single_task_due(request: InspectTaskDueRequest):
     """Inspect a single task for due issues. Returns a list of issues."""
+    task = request.task
     open_request_count = sum(1 for item in task.capability_requests if item.status == "OPEN")
     open_gap_count = sum(1 for item in task.capability_gaps if item.status == "OPEN")
     ctx = DueInspectionContext(
         task=task,
-        risk_flags=risk_flags_builder(task, open_request_count, open_gap_count),
+        task_index=request.task_index,
+        risk_flags=request.risk_flags_builder(task, open_request_count, open_gap_count),
         open_request_count=open_request_count,
         open_gap_count=open_gap_count,
-        age_seconds=max(0.0, settings.now - (task.created_at or settings.now)),
-        stale_seconds=max(0.0, settings.now - (task.heartbeat_at or task.updated_at or settings.now)),
+        age_seconds=max(0.0, request.settings.now - (task.created_at or request.settings.now)),
+        stale_seconds=max(0.0, request.settings.now - (task.heartbeat_at or task.updated_at or request.settings.now)),
     )
-    validation = manager.validate_work_order(task.id)
+    validation = request.manager.validate_work_order(task.id)
     issues = []
     issues.extend(_check_work_order_issues(ctx, validation))
     issues.extend(_check_status_issues(ctx))
+    issues.extend(check_parent_timeout_child_issues(ctx))
     issues.extend(_check_channel_broken_issues(ctx))
     issues.extend(_check_channel_degraded_issues(ctx))
     issues.extend(_check_probe_missing_issues(ctx))
-    issues.extend(_check_done_evidence_issues(ctx, settings.min_evidence))
+    issues.extend(_check_done_evidence_issues(ctx, request.settings.min_evidence))
     issues.extend(_check_done_verification_issues(ctx))
     issues.extend(_check_capability_request_issues(ctx))
     issues.extend(_check_capability_gap_issues(ctx))
-    issues.extend(_check_coordinator_heartbeat_issues(ctx, settings.heartbeat_timeout))
-    issues.extend(_check_heartbeat_timeout_issues(ctx, settings.heartbeat_timeout))
-    issues.extend(_check_run_timeout_issues(ctx, settings.run_timeout))
+    issues.extend(_check_coordinator_heartbeat_issues(ctx, request.settings.heartbeat_timeout))
+    issues.extend(_check_heartbeat_timeout_issues(ctx, request.settings.heartbeat_timeout))
+    issues.extend(_check_run_timeout_issues(ctx, request.settings.run_timeout))
     return issues

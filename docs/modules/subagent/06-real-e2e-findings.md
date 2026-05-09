@@ -1284,7 +1284,31 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Root created the child but did not dispatch that child before timing out.
   - Root returned `TIMEOUT` after 180 seconds through the new direct runner timeout boundary.
   - Child remained `PLANNING`, with no leaf created and no deliverables written.
-- Next recommendation:
-  - Add a recovery path for `parent TIMEOUT + direct child PLANNING/RUNNING`.
-  - The recovery should be refs-only at first: detect the orphaned child, recommend `dispatch_subagents` / `takeover_or_reassign`, and avoid automatically writing code.
-  - 中文解释：现在“不会一直卡住”和“路径不容易丢”已经有进展；下一步要让父级超时后，留下的孩子能被明确发现、接管、继续跑。
+- Follow-up:
+  - The next section records the refs-only recovery guard added for `parent TIMEOUT + direct child PLANNING/RUNNING`.
+  - 中文解释：下面一节就是针对“父级超时后孩子残留”的修复记录，避免读到这里误以为还完全没做。
+
+## 2026-05-09 Parent Timeout Child Recovery Guard
+
+- Trigger:
+  - The scope-inheritance smoke retest left a direct child in `PLANNING` after the root returned `TIMEOUT`.
+  - 中文解释：父节点超时了，但孩子还挂着。如果没人提醒，上级就可能以为整棵树已经停了，实际还有孩子需要继续派发或接管。
+- Fix:
+  - `due-check` now builds a scoped task index for the current root tree.
+  - When a `TIMEOUT` parent still owns unfinished direct children, it reports `parent_timeout_with_unfinished_children`.
+  - `plan-actions` maps that issue to `recover_child_after_parent_timeout`.
+  - The suggested command is `my-agent subagents-recovery-tree <root> --hide-healthy`, so the next agent can inspect refs and choose a recovery path.
+  - `rescue_context_refs` and `rescue_packet.recovery_entrypoints` include structured refs such as `unfinished_child:<child_id>:PLANNING`.
+  - `subagents-recovery-tree --hide-healthy` now also keeps those unfinished children visible as `parent_timeout_unfinished_child:<parent_id>` candidates.
+- Safety boundary:
+  - This first slice is refs-only.
+  - It does not automatically dispatch children, take over runs, modify task state, or write product code.
+  - 中文解释：现在先做到“能发现、能提示、能给恢复入口”，不是自动替你接管所有孩子。
+- Verification:
+  - Red tests first failed because no issue/action existed for this case.
+  - After the fix:
+    - `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_subagent_coordinator_due_check.py agent_py_agent/tests/test_policy_checks.py::test_action_for_issue_parent_timeout_with_unfinished_children agent_py_agent/tests/test_policy_checks.py::test_commands_for_action_recover_child_after_parent_timeout` -> `6 passed`.
+    - `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_subagent_hierarchy_recovery.py::test_hierarchy_recovery_packet_includes_unfinished_child_after_parent_timeout` -> `1 passed`.
+- Current status:
+  - Solved for detection and dry-run recovery planning.
+  - Remaining follow-up is an explicit, audited apply path if we later decide a new leader should adopt those children automatically or semi-automatically.

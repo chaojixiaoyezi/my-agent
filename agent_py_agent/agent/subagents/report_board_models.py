@@ -82,6 +82,8 @@ class DueCheckIssue:
     open_gap_count: int = 0
     age_seconds: float = 0.0
     stale_seconds: float = 0.0
+    # LLM: related_refs keeps due-check recovery hints machine-readable without parsing messages.
+    related_refs: list[str] = field(default_factory=list)
     created_at: float = 0.0
 
 

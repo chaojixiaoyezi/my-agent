@@ -236,6 +236,7 @@
 - 本轮主节点单入口 1/2/4/12 E2E 暴露 root 最终总结卡住问题：下层已产出 12 套 leaf 文件后，root 最终模型响应长期不返回；已把 `subagent-run --execute` 改为复用 runner worker timeout 计算和执行边界，避免 CLI 入口裸跑模型导致无人值守任务无限挂住。真实 E2E 记录见 `06-real-e2e-findings.md`。
 - 本轮叶子能力边界提示修复：runner prompt 新增明确 contract，要求叶子没有 `shell/command/terminal` 工具时不要因为不能自己跑 `pytest` 上抛 capability_request，而是写好产物、测试文件和推荐命令，交给父级验收器执行。
 - 本轮层级路径继承修复：当模型创建下一层时只给出短 goal，scheduler 会把父级目标/边界追加进 child goal，并用补全后的 goal 推断叶子写文件工具，避免产物目录只留在 thought 里、传到孙级后丢失。
+- 本轮父超时子任务残留恢复第一片：`due-check` 现在会在父节点 `TIMEOUT` 且仍有未完成 direct child 时报告 `parent_timeout_with_unfinished_children`，`plan-actions` 只生成 `recover_child_after_parent_timeout` refs-only 恢复提示和 `subagents-recovery-tree` 命令；相关 child 以 `unfinished_child:<child_id>:<status>` 结构化 ref 写入 rescue packet，recovery-tree 在 `--hide-healthy` 下也会展示这些残留 child，不自动接管、不执行代码。
 
 ## 未跑测试
 

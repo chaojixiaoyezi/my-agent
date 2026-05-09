@@ -68,6 +68,9 @@ def action_rescue_record_fields(action) -> dict[str, object]:
 def _strategy_and_target(kind: str, action: str) -> tuple[str, str]:
     if kind in {"run_timeout", "heartbeat_stale", "status_timeout"}:
         return "takeover_or_shrink_scope_before_retry", "parent"
+    # LLM: parent-timeout child recovery is guidance-only until a human selects a handoff path.
+    if kind == "parent_timeout_with_unfinished_children":
+        return "recover_unfinished_children_after_parent_timeout", "parent"
     if kind in {"status_failed", "status_blocked"}:
         return "inspect_failure_then_rescue_or_escalate", "parent"
     if kind in {"channel_broken", "channel_probe_missing", "status_channel_error"}:
@@ -88,6 +91,8 @@ def _strategy_and_target(kind: str, action: str) -> tuple[str, str]:
 def _context_refs(issue: DueCheckIssue) -> list[str]:
     refs = [issue.task_dir]
     refs.extend(_readiness_refs_for_issue(issue))
+    # LLM: related_refs preserves child/run recovery entrypoints without scraping localized text.
+    refs.extend(str(ref) for ref in getattr(issue, "related_refs", []) or [])
     refs.extend([
         f"status:{issue.status}",
         f"severity:{issue.severity}",

@@ -56,6 +56,8 @@ class MakeDueIssueParams:
     open_gap_count: int
     age_seconds: float
     stale_seconds: float
+    # LLM: related_refs mirrors production policy payloads for structured rescue refs.
+    related_refs: list[str] | None = None
 
 
 # LLM: RunnerNextActionParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
@@ -92,6 +94,7 @@ def _make_due_issue(*, params: MakeDueIssueParams) -> DueCheckIssue:
         open_gap_count=params.open_gap_count,
         age_seconds=params.age_seconds,
         stale_seconds=params.stale_seconds,
+        related_refs=list(params.related_refs or []),
         created_at=time.time(),
     )
 
@@ -117,6 +120,7 @@ def _issue_weight(issue: DueCheckIssue) -> int:
         "status_failed": 65,
         "status_timeout": 65,
         "status_channel_error": 60,
+        "parent_timeout_with_unfinished_children": 59,
         "coordinator_heartbeat_stale": 58,
         "status_blocked": 50,
         "channel_probe_missing": 48,
@@ -145,6 +149,8 @@ def _action_for_issue(issue: DueCheckIssue) -> tuple[str, int, str]:
         return "run_acceptance", 760, ""
     if kind in {"run_timeout", "heartbeat_stale", "status_timeout"}:
         return "takeover_or_reassign", 900, "TIMEOUT"
+    if kind == "parent_timeout_with_unfinished_children":
+        return "recover_child_after_parent_timeout", 830, ""
     if kind == "coordinator_heartbeat_stale":
         return "recover_coordinator_leadership", 820, ""
     if kind == "status_failed":
@@ -164,47 +170,31 @@ def _commands_for_action(action: str, run_id: str) -> list[str]:
 
     # LLM: 优先使用已安装命令行入口，绕开 Windows 的 python3 占位程序问题。
     cli = "my-agent"
-    commands = {
-        "probe_or_repair_channel": [
-            f"{cli} subagents-probe {run_id}",
-            f"{cli} subagent {run_id}",
-        ],
-        "inspect_channel_probe": [
-            f"{cli} subagents-probe {run_id}",
-            f"{cli} subagent {run_id}",
-        ],
-        "repair_work_order": [
-            f"{cli} subagents-probe {run_id}",
-            f"{cli} subagent {run_id}",
-        ],
-        "reopen_for_evidence": [
-            f"{cli} subagent {run_id}",
-        ],
-        "run_acceptance": [
-            f"{cli} subagent {run_id}",
-        ],
-        "takeover_or_reassign": [
-            f"{cli} subagents-probe {run_id}",
-            f"{cli} subagent {run_id}",
-        ],
-        "recover_coordinator_leadership": [
-            f"{cli} subagents-recovery-tree {run_id} --hide-healthy",
-            f"{cli} subagent {run_id}",
-        ],
-        "inspect_failure": [
-            f"{cli} subagent {run_id}",
-        ],
-        "classify_blocker": [
-            f"{cli} subagent {run_id}",
-        ],
-        "route_capability_request": [
-            f"{cli} subagent {run_id}",
-        ],
-        "triage_capability_gap": [
-            f"{cli} subagent {run_id}",
-        ],
+    if action in _probe_command_actions():
+        return [f"{cli} subagents-probe {run_id}", f"{cli} subagent {run_id}"]
+    if action in _recovery_tree_command_actions():
+        return [f"{cli} subagents-recovery-tree {run_id} --hide-healthy", f"{cli} subagent {run_id}"]
+    return [f"{cli} subagent {run_id}"]
+
+
+# LLM: _probe_command_actions groups actions whose safest first step is channel/work-order probing.
+# 函数用途: 返回需要先查看 probe 再打开 subagent 详情的动作集合，避免命令映射函数继续变长。
+def _probe_command_actions() -> set[str]:
+    return {
+        "probe_or_repair_channel",
+        "inspect_channel_probe",
+        "repair_work_order",
+        "takeover_or_reassign",
     }
-    return commands.get(action, [f"{cli} subagent {run_id}"])
+
+
+# LLM: _recovery_tree_command_actions groups actions that should inspect hierarchy refs first.
+# 函数用途: 返回需要先查询 recovery-tree 的动作集合，保持父子恢复入口一致。
+def _recovery_tree_command_actions() -> set[str]:
+    return {
+        "recover_coordinator_leadership",
+        "recover_child_after_parent_timeout",
+    }
 
 
 # LLM: _status_from_structured_output 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

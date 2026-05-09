@@ -133,3 +133,33 @@ def test_hierarchy_recovery_packet_includes_stale_running_descendant(tmp_path):
         stale.id,
         grandchildren[-1],
     ]
+
+
+# LLM: test_hierarchy_recovery_packet_includes_unfinished_child_after_parent_timeout covers root timeout cleanup.
+# 函数用途: 父节点 TIMEOUT 后，恢复树在 hide-healthy 模式下仍展示未完成 child。
+def test_hierarchy_recovery_packet_includes_unfinished_child_after_parent_timeout(tmp_path):
+    manager = SubAgentManager(tmp_path)
+    root = manager.create_run(goal="root", thought="orchestrate", plan=["split"])
+    child_id = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=root.id,
+            apply=True,
+            child_specs=[
+                HierarchyChildSpec(goal="child waits for leaf", role="child_coordinator", agent_name="child"),
+            ],
+        )
+    ).created_run_ids[0]
+    root_task = manager.load(root.id)
+    root_task.status = "TIMEOUT"
+    manager.save(root_task)
+
+    result = manager.build_hierarchy_recovery_packet(
+        params=HierarchyRecoveryRequest(root_run_id=root.id, include_healthy=False)
+    )
+
+    nodes = {item.run_id: item for item in result.nodes}
+    child = nodes[child_id]
+    assert [item.run_id for item in result.nodes] == [root.id, child_id]
+    assert child.needs_recovery is True
+    assert child.recovery_reason == f"parent_timeout_unfinished_child:{root.id}"
+    assert "subagents-recovery-tree" in child.recommended_command

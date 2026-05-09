@@ -94,9 +94,10 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/services/board.py`：构建看板摘要和 child status counts。`SubAgentBoardOptions(include_child_status_counts=False)` 用于 status / startup recovery 等轻量路径，避免默认查询二次加载 child task；完整看板通过已加载 task 索引汇总 child 状态，不读取 runner prompt/response 或 artifact 正文。
 - `agent_py_agent/agent/subagents/services/board.py`：`due_check(..., root_id=...)` 和 `plan_actions(..., root_id=...)` 可把巡检/动作计划限制到一棵任务树，适合真实 E2E 多 root 共用 workspace 时减少噪音；默认仍处理全部 run。
 - `agent_py_agent/agent/subagents/services/board_due_models.py`：承接 due-check 共享 DTO 和 issue helper，让巡检谓词文件保持可维护。
-- `agent_py_agent/agent/subagents/services/board_due_checks.py`：heartbeat/run-timeout 只针对真实运行中或待接管的执行任务；带 child runs 且没有 active attempt 的 `PLANNING` coordinator 不按普通 runner 卡死处理，而是报告 `coordinator_heartbeat_stale`，由父代理决定是否恢复/转移领导权。
-- `agent_py_agent/agent/subagents/services/action_handlers.py`：`recover_coordinator_leadership` 是受控 apply 动作；必须显式传已有 leader run id，才会把旧 coordinator 标记为 `TAKEN_OVER`，把直接子任务重挂到新 leader，并同步 `parent_id`、`depth`、`supervisor`、`final_owner`。
+- `agent_py_agent/agent/subagents/services/board_due_checks.py`：heartbeat/run-timeout 只针对真实运行中或待接管的执行任务；带 child runs 且没有 active attempt 的 `PLANNING` coordinator 不按普通 runner 卡死处理，而是报告 `coordinator_heartbeat_stale`，由父代理决定是否恢复/转移领导权。父节点已经 `TIMEOUT` 但仍有 direct child 处于未验收、未完成或缺失状态时，会额外报告 `parent_timeout_with_unfinished_children`，用于提示恢复残留子树。
+- `agent_py_agent/agent/subagents/services/action_handlers.py`：`recover_coordinator_leadership` 是受控 apply 动作；必须显式传已有 leader run id，才会把旧 coordinator 标记为 `TAKEN_OVER`，把直接子任务重挂到新 leader，并同步 `parent_id`、`depth`、`supervisor`、`final_owner`。`recover_child_after_parent_timeout` 当前是 record-only 恢复提示动作，用于把父超时后的残留孩子暴露给上级，不自动接管或改写任务树。
 - `agent_py_agent/agent/subagents/services/leadership_recovery.py`：批量领导权恢复计划器；复用 due-check 的 `coordinator_heartbeat_stale` 事实源，把多个失联 coordinator 的直接孩子按候选 leader 容量拆批，当前只生成 refs-only dry-run 报告，不修改任务树。
+- `agent_py_agent/agent/subagents/services/hierarchy_recovery.py`：`subagents-recovery-tree` 的 refs-only 恢复树构建器；父节点 `TIMEOUT` 后，未完成 child 会以 `parent_timeout_unfinished_child:<parent>` 进入恢复候选，所以 `--hide-healthy` 仍能展示需要继续派发或接管的孩子。
 - `agent_py_agent/agent/subagents/services/leadership_recovery_apply.py`：受控分批 apply 服务；只移动显式 child 子集，校验 root、leader 健康、直接 child 关系和可选容量，移动后递归刷新后代 depth，并在旧 coordinator 清空后标记 `TAKEN_OVER`。
 - `agent_py_agent/cli/_acceptance_plan.py`：提供 `subagents-acceptance-plan` CLI 入口；默认只展示父级验收 dry-run 决策和 refs，`--write` 只写决策审计文件，`--apply` 只允许 `inspect_only`，`--followup` 只预览，`--apply-followup` 才进入受控 apply/rescue。
 - `agent_py_agent/cli/_acceptance_plan_renderers.py`：承接 acceptance-plan 的 JSON 转换和人类输出渲染；只打印 refs、状态和推荐命令，不展开 audit 文件正文。
@@ -157,12 +158,12 @@ agent_py_agent/agent/
 - `agent_py_agent/cli/_memory_gate.py`：实现 `subagents-memory-gate` CLI，显式列出候选、写回 approve/reject/needs_evidence、导出 approved 候选、生成 skill draft 和跑 verify。
 - `SKILL_SPARKS.md`：子代理目录里的经验火花候选，只记录可复用步骤、触发条件、证据引用、限制和反例；后续提升为 skill 必须经过单独 gate。
 - `agent_py_agent/agent/subagents/services/board.py`：把任务树节点转成 report board item，并汇总 child status、progress、summary、evidence/finding/blocker 计数。
-- `agent_py_agent/agent/subagents/services/rescue_policy.py`：根据 due-check issue 给 action plan 添加 rescue/escalation 元数据，保持建议可审计但不自动越权执行；当 task 目录存在 `reports/takeover_readiness.json` 时，会优先把该包和推荐读取 refs 放入 `rescue_context_refs`，并生成 refs-only 的 `rescue_packet`。
+- `agent_py_agent/agent/subagents/services/rescue_policy.py`：根据 due-check issue 给 action plan 添加 rescue/escalation 元数据，保持建议可审计但不自动越权执行；当 task 目录存在 `reports/takeover_readiness.json` 时，会优先把该包和推荐读取 refs 放入 `rescue_context_refs`，并生成 refs-only 的 `rescue_packet`。父超时残留子任务会把 `unfinished_child:<child_id>:<status>` 作为结构化 ref 写入 action plan，避免后续自动化解析自然语言。
 - `agent_py_agent/agent/subagents/rendering_rescue.py`：渲染 rescue packet 的 retry / manual confirmation / recovery refs 摘要，避免主 `rendering.py` 继续接近 code-size 风险线。
 - `agent_py_agent/agent/subagents/result_structured.py`：解析 runner structured output 中的 evidence packets、findings、artifacts、tests、blockers，并写回任务事实。
 - `agent_py_agent/agent/subagents/capability_route_service.py`：承接 capability route record 构建、gap 包装、summary 和报告落盘。
 - `agent_py_agent/agent/subagents/services/indexing_records.py`：承接 LocalStore dataclass record 索引 helper，让 indexing service 只保留编排入口。
-- `agent_py_agent/agent/subagents/policies.py` / `policy_checks.py`：负责 due-check 风险规则和下一步建议命令；用户可见命令统一使用 `my-agent` 控制台入口。
+- `agent_py_agent/agent/subagents/policies.py` / `policy_checks.py`：负责 due-check 风险规则和下一步建议命令；用户可见命令统一使用 `my-agent` 控制台入口。父超时子任务残留会建议 `recover_child_after_parent_timeout`，命令入口指向 `subagents-recovery-tree <root> --hide-healthy`，保持 refs-only。
 - `agent_py_agent/agent/memory_push.py`：实现记忆推模式，在决策点自动注入相关记忆。
 - `agent_py_agent/cli/subagents.py`：用户从 CLI 预览或操作 subagent 的入口。
 
