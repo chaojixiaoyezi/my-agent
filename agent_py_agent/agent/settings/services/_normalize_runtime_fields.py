@@ -90,7 +90,7 @@ class SubagentBasicFieldsService:
         warnings = _apply_int_fields(
             out,
             defaults,
-            (("memory_top_k", 0, None), ("max_subagents", 0, None)),
+            (("memory_top_k", 0, None), ("max_subagents", 0, None), ("subagent_board_limit", 0, None)),
         )
         out["subagent_allowed_tools"] = _normalize_string_list(
             out.get("subagent_allowed_tools", defaults.subagent_allowed_tools)
@@ -224,6 +224,7 @@ class TimeoutFieldsService:
             (
                 ("lease_heartbeat_interval_seconds", 10, None),
                 ("lease_stale_without_heartbeat_seconds", 30, None),
+                ("task_lock_timeout_seconds", 1, None),
             ),
         )
         return out, warnings

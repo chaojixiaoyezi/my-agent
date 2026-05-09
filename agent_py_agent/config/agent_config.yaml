@@ -20,7 +20,7 @@ auto_detect_work_on_startup: true
 # - 场景测试、外部聊天工具或未来多项目模式可以把它指向某个独立目录。
 # - memory_path、subagent_workspace、gateway_workspace、prompt_files 和文件工具都会以这个目录为基础。
 # - 这就是“测试不能影响当前开发仓库”的关键开关。
-workspace_root: ["", "C:/Users/41542/Desktop/2026年工作/5月"]
+workspace_root: ["", "C:/Users/41542/Desktop/2026年工作/5月","/Users/xiaoyezi/my-claude-code"]
 
 # 默认模型后端：
 # - echo: 本地离线调试
@@ -137,8 +137,16 @@ admin_user_id: "admin"
 # 单次最多拆出多少个子任务
 max_subagents: 5
 
+# status/startup 等轻量路径展示多少条子代理看板摘要；完整报告仍可读取详细记录。
+subagent_board_limit: 5
+
 # 子任务记录输出目录
 subagent_workspace: "data/subagents"
+
+# 子代理 runner 默认工具白名单：
+# - [] 表示不在全局配置里额外限制，沿用任务自己的 allowed_tools。
+# - 可填 ["read_file", "write_file"] 这类工具名，用于真实 E2E 或受限工作区。
+subagent_allowed_tools: []
 
 # Subagent Workflow 工作流开关（第一阶段配置骨架）：
 # - auto: 由主代理按任务复杂度自动选择是否套用工作流模板。
@@ -340,6 +348,9 @@ anthropic_version: "2023-06-01"
 
 # 是否启用工具调用循环
 enable_tools: true
+
+# 是否启用流式模型响应；关闭后走一次性响应路径，便于排查兼容接口问题。
+stream_enabled: true
 
 # 单轮请求里，最多允许几次“模型调用工具再继续推理”
 max_tool_rounds: 5

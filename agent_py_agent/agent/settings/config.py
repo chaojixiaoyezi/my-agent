@@ -136,6 +136,7 @@ class AgentConfig:
     notification_store_path: str = "data/notifications"
     notification_channel_timeout_seconds: int = 300
     concurrency_lock_enabled: bool = True
+    task_lock_timeout_seconds: int = 30
     audit_enabled: bool = True
     audit_log_path: str = "data/audit/audit.jsonl"
     daemon_planner: bool = True

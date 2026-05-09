@@ -102,7 +102,7 @@ agent_py_agent/agent/
 - `agent_py_agent/cli/_hierarchy.py`：同时实现 `subagents-recovery-tree` 命令；按 root run 输出多层恢复包，`--hide-healthy` 可减少上下文体积，`--capability-config` 提供 stale RUNNING 判定阈值，仍只展示 refs 和摘要。
 - `agent_py_agent/cli/_leadership.py`：实现 `subagents-leadership-recovery-plan` 和 `subagents-leadership-recovery-apply`；前者只写计划，后者默认 dry-run，只有 `--apply` 才按指定 `--child-run-id` 重挂子树。
 - `agent_py_agent/cli/_review.py`：提供 `subagents-tests` 和验收相关兼容导出；tests 默认只读取已有 `test_execution.json`，显式 `--re-run` 才重新执行 `output.json.tests`。
-- `agent_py_agent/agent/settings/config.py` / `agent_py_agent/config/agent_config.yaml`：提供 `acceptance_execute_tests` 和 `acceptance_test_timeout_seconds`，默认保持老验收路径不自动跑命令；`subagent_allowed_tools` 可给 `spawn_subagents` 创建出的 runner 任务设置默认工具白名单。
+- `agent_py_agent/agent/settings/config.py` / `agent_py_agent/config/agent_config.yaml`：提供 `acceptance_execute_tests` 和 `acceptance_test_timeout_seconds`，默认保持老验收路径不自动跑命令；`subagent_board_limit` 控制轻量看板摘要数量，`subagent_allowed_tools` 可给 `spawn_subagents` 创建出的 runner 任务设置默认工具白名单。
 - Auto Policy v1 当前只实现 dry-run 审计，尚未接主配置；后续若做成用户可见主配置，配置默认值和中文说明必须同步写入 `agent_py_agent/config/agent_config.yaml` 与 `AgentConfig`。如果只是 subagent/capability 路由内部的授权、次数或 allowlist 细则，应进入 `agent_py_agent/config/capability_config.yaml` 与 `capability_config.py`，不要扩张主配置。
 - `agent_py_agent/agent/subagents/manager_indexing.py`：实现 `_select_runs()` 等索引和过滤逻辑，同时提供公开别名 `select_runs()`、`index_task()` 等。
 - `agent_py_agent/agent/subagents/manager_acceptance_findings.py`：实现验收发现逻辑，公开别名 `acceptance_findings()`。
