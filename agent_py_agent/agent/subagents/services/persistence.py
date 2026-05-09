@@ -287,13 +287,14 @@ class SubAgentPersistenceService:
         runs.sort(key=lambda item: item.updated_at or item.created_at, reverse=True)
         return runs
 
-    # LLM: save 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-    # 函数用途: 写入save的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
-    def save(self, task: SubAgentTask) -> None:
+    # LLM: save preserves child links by default; hierarchy rewrites must explicitly opt out.
+    # 函数用途: 写入任务状态和工单文件；默认合并已有 child_ids，受控重挂时可关闭合并以精确保存父子关系。
+    def save(self, task: SubAgentTask, *, preserve_child_links: bool = True) -> None:
         """Persist a task as JSON plus human-readable Markdown."""
 
         _apply_missing_paths(task, self.manager._build_work_order_paths(task.id, task.task_dir or None))
-        _merge_existing_child_links(self, task)
+        if preserve_child_links:
+            _merge_existing_child_links(self, task)
         task_dir = Path(task.task_dir)
         task_dir.mkdir(parents=True, exist_ok=True)
         self.manager._ensure_work_order_files(task)

@@ -613,7 +613,7 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Added `subagents-plan-actions --root-id <root>` so action planning uses the same scoped issue set.
   - Due-check heartbeat/run-timeout rules no longer treat parked `PLANNING` coordinator tasks that already have child runs as ordinary runners; child `RUNNING` tasks still receive stale timeout issues.
   - Stale coordinators now emit `coordinator_heartbeat_stale` with action `recover_coordinator_leadership`, so a parent can notice the orphan-risk tree and decide whether to appoint a new leader.
-  - `recover_coordinator_leadership` now has a controlled apply path requiring `--take-over-by <leader_run_id>`; it marks the old coordinator as `TAKEN_OVER` and updates child `supervisor/final_owner` fields to the new leader without restructuring the task tree.
+  - `recover_coordinator_leadership` now has a controlled apply path requiring `--take-over-by <leader_run_id>`; it marks the old coordinator as `TAKEN_OVER`, moves direct children under the new leader, updates `parent_id` / `depth` / `supervisor` / `final_owner`, and recursively refreshes descendant depths.
   - Real rerun on `subagent-1778309037-dddc7214` produced two scoped issues: coordinator leadership recovery for the root and the remaining graph-child open capability request.
 - Remaining risk:
   - `subagents-due-check --all` is still intentionally global and can be noisy in shared E2E workspaces.
