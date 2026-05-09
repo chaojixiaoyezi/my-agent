@@ -243,14 +243,16 @@ def make_acceptance_records(params: AcceptanceRecordParams):
     return records
 
 
-# LLM: _parent_acceptance_policy_summary attaches dry-run auto-policy refs to dispatch records only.
-# 函数用途: 为 acceptance 调度记录生成自动验收策略摘要；只写审计文件和引用字段，不执行命令、不改任务状态。
+# LLM: _parent_acceptance_policy_summary attaches dry-run policy/execution refs to dispatch records only.
+# 函数用途: 为 acceptance 调度记录生成自动验收策略和执行 facade 摘要；只写审计文件和引用字段，不执行命令、不改任务状态。
 def _parent_acceptance_policy_summary(agent, run_id: str) -> dict[str, object]:
     if not run_id:
         return {}
     task = agent.subagents.load(run_id)
     policy = agent.subagents.plan_parent_acceptance_auto_policy(run_id)
+    execution = agent.subagents.plan_parent_acceptance_auto_execution(run_id)
     policy_ref = Path(task.reports_dir) / "parent_acceptance_auto_policy.json"
+    execution_ref = Path(task.reports_dir) / "parent_acceptance_auto_execution.json"
     return {
         "parent_acceptance_policy_ref": str(policy_ref),
         "parent_acceptance_policy_decision": policy.decision,
@@ -267,6 +269,12 @@ def _parent_acceptance_policy_summary(agent, run_id: str) -> dict[str, object]:
             policy.ready_for_automatic_execution
         ),
         "parent_acceptance_policy_preflight_blockers": list(policy.preflight_blockers),
+        "parent_acceptance_auto_execution_ref": str(execution_ref),
+        "parent_acceptance_auto_execution_status": execution.status,
+        "parent_acceptance_auto_execution_allowed": bool(execution.execution_allowed),
+        "parent_acceptance_auto_execution_executed": bool(execution.executed),
+        "parent_acceptance_auto_execution_guard_status": execution.guard_status,
+        "parent_acceptance_auto_execution_blocked_by": list(execution.blocked_by),
     }
 
 

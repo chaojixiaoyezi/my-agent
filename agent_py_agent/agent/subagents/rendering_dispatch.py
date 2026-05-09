@@ -13,7 +13,7 @@ from .reports import DispatchReport, DispatchWatchReport, ParentPlannerReport
 
 
 # LLM: render_dispatch_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 渲染或汇总markdown的展示文本，并展示 auto-policy refs、manual-only 与 preflight 摘要；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
+# 函数用途: 渲染或汇总markdown的展示文本，并展示 auto-policy 和 auto-execution 摘要；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def render_dispatch_markdown(report: DispatchReport) -> str:
     """渲染父代理调度器报告。"""
 
@@ -42,24 +42,43 @@ def render_dispatch_markdown(report: DispatchReport) -> str:
         )
         lines.append(f"  - {record.message}")
         if record.parent_acceptance_policy_ref:
-            lines.append(
-                "  - parent_acceptance_auto_policy: "
-                f"decision={record.parent_acceptance_policy_decision} "
-                f"action={record.parent_acceptance_policy_action} "
-                f"would_execute={record.parent_acceptance_policy_would_execute} "
-                f"executed={record.parent_acceptance_policy_executed} "
-                f"execution_mode={record.parent_acceptance_policy_execution_mode} "
-                "automatic_execution_allowed="
-                f"{record.parent_acceptance_policy_automatic_execution_allowed} "
-                f"recommended_command={record.parent_acceptance_policy_recommended_command} "
-                f"preflight_status={record.parent_acceptance_policy_preflight_status} "
-                "ready_for_automatic_execution="
-                f"{record.parent_acceptance_policy_ready_for_automatic_execution} "
-                "preflight_blockers="
-                f"{','.join(record.parent_acceptance_policy_preflight_blockers)} "
-                f"ref={record.parent_acceptance_policy_ref}"
-            )
+            lines.append(_dispatch_auto_policy_line(record))
+        if record.parent_acceptance_auto_execution_ref:
+            lines.append(_dispatch_auto_execution_line(record))
     return "\n".join(lines) + "\n"
+
+
+# LLM: _dispatch_auto_policy_line keeps policy rendering compact and non-executing.
+# 函数用途: 渲染 auto-policy 摘要单行，只展示字段和 ref，不读取正文或执行命令。
+def _dispatch_auto_policy_line(record) -> str:
+    return (
+        "  - parent_acceptance_auto_policy: "
+        f"decision={record.parent_acceptance_policy_decision} "
+        f"action={record.parent_acceptance_policy_action} "
+        f"would_execute={record.parent_acceptance_policy_would_execute} "
+        f"executed={record.parent_acceptance_policy_executed} "
+        f"execution_mode={record.parent_acceptance_policy_execution_mode} "
+        f"automatic_execution_allowed={record.parent_acceptance_policy_automatic_execution_allowed} "
+        f"recommended_command={record.parent_acceptance_policy_recommended_command} "
+        f"preflight_status={record.parent_acceptance_policy_preflight_status} "
+        f"ready_for_automatic_execution={record.parent_acceptance_policy_ready_for_automatic_execution} "
+        f"preflight_blockers={','.join(record.parent_acceptance_policy_preflight_blockers)} "
+        f"ref={record.parent_acceptance_policy_ref}"
+    )
+
+
+# LLM: _dispatch_auto_execution_line keeps executor facade rendering compact and audit-only.
+# 函数用途: 渲染 auto-execution 摘要单行，只展示 hard guard 和 ref，不触发执行。
+def _dispatch_auto_execution_line(record) -> str:
+    return (
+        "  - parent_acceptance_auto_execution: "
+        f"execution_status={record.parent_acceptance_auto_execution_status} "
+        f"execution_allowed={record.parent_acceptance_auto_execution_allowed} "
+        f"executed={record.parent_acceptance_auto_execution_executed} "
+        f"guard_status={record.parent_acceptance_auto_execution_guard_status} "
+        f"execution_blocked_by={','.join(record.parent_acceptance_auto_execution_blocked_by)} "
+        f"ref={record.parent_acceptance_auto_execution_ref}"
+    )
 
 
 # LLM: render_dispatch_watch_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
