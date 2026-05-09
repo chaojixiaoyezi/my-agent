@@ -204,6 +204,70 @@ def test_hierarchy_schedule_carries_parent_context_to_child_thought(tmp_path):
     assert "必须把下一层 goal 写成自包含任务" in child.thought
 
 
+# LLM: test_hierarchy_schedule_carries_parent_boundary_into_vague_child_goal locks real E2E path preservation.
+# 函数用途: 当模型给下一层的 goal 太短时，系统把父级产物路径和边界补进 goal，避免路径靠 thought 转述而丢失。
+def test_hierarchy_schedule_carries_parent_boundary_into_vague_child_goal(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    deliverables = tmp_path / "deliverables"
+    root = manager.create_run(
+        goal=f"必须让 leaf 写到 {deliverables}/leaf_outputs/proof/solution.py，coordinator 不得代写。",
+        thought="root thought",
+        plan=["plan"],
+        extra_write_roots=[str(deliverables)],
+    )
+
+    child_result = _schedule_vague_child(manager, root.id)
+    child = manager.load(child_result.created_run_ids[0])
+
+    assert "创建 leaf worker，实现 add(a,b) 并写测试" in child.goal
+    assert str(deliverables / "leaf_outputs" / "proof" / "solution.py") in child.goal
+    assert "继承父级目标/边界" in child.goal
+
+    leaf_result = _schedule_vague_leaf(manager, child.id)
+    leaf = manager.load(leaf_result.created_run_ids[0])
+
+    assert str(deliverables / "leaf_outputs" / "proof" / "solution.py") in leaf.goal
+    assert "write_file" in leaf.allowed_tools
+
+
+# LLM: _schedule_vague_child keeps the boundary-inheritance test below the code-size risk threshold.
+# 函数用途: 生成缺少产物路径的 child spec，用于验证 scheduler 自动补父级边界。
+def _schedule_vague_child(manager: SubAgentManager, parent_id: str):
+    return manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent_id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="创建 leaf worker，实现 add(a,b) 并写测试",
+                    role="child_coordinator",
+                    agent_name="child",
+                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+                )
+            ],
+            apply=True,
+        )
+    )
+
+
+# LLM: _schedule_vague_leaf verifies inherited parent scope is also used for leaf tool inference.
+# 函数用途: 生成缺少产物路径的 leaf spec，用于验证补全 goal 后仍能推断写文件工具。
+def _schedule_vague_leaf(manager: SubAgentManager, parent_id: str):
+    return manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent_id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="实现 add(a,b)",
+                    role="leaf_worker",
+                    agent_name="leaf",
+                )
+            ],
+            apply=True,
+            max_depth=2,
+        )
+    )
+
+
 # LLM: test_hierarchy_schedule_infers_coordinator_role_from_tools keeps model role slips recoverable.
 # 函数用途: 当模型把带层级调度权限的下一层误写成 worker 时，系统按 depth 纠正为 coordinator。
 def test_hierarchy_schedule_infers_coordinator_role_from_tools(tmp_path):
