@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..reports import AcceptanceReviewFinding
+from .acceptance_machine_evidence import passed_test_execution_report
 
 if TYPE_CHECKING:
     from ..models import SubAgentTask
@@ -33,6 +34,10 @@ def _base_evidence_findings(task: SubAgentTask, created_at: float) -> list[Accep
     packets_with_refs = [
         item for item in task.evidence_packets if item.evidence_refs or item.artifact_refs
     ]
+    machine_report = None if task.evidence_packets else passed_test_execution_report(task)
+    evidence_chain_ok = bool(packets_with_refs) or machine_report is not None
+    evidence_chain_message = _evidence_chain_message(packets_with_refs, machine_report)
+    evidence_chain_path = str(machine_report.json_path) if machine_report is not None else task.output_json
     return [
         AcceptanceReviewFinding(
             name="evidence_present",
@@ -44,14 +49,10 @@ def _base_evidence_findings(task: SubAgentTask, created_at: float) -> list[Accep
         ),
         AcceptanceReviewFinding(
             name="evidence_chain_present",
-            ok=bool(packets_with_refs),
+            ok=evidence_chain_ok,
             severity="P0",
-            message=(
-                f"已有 {len(packets_with_refs)} 条 evidence packet 可追溯。"
-                if packets_with_refs
-                else "缺少带 evidence/artifact refs 的 evidence packet。"
-            ),
-            evidence_path=task.output_json,
+            message=evidence_chain_message,
+            evidence_path=evidence_chain_path,
             created_at=created_at,
         ),
         AcceptanceReviewFinding(
@@ -63,6 +64,16 @@ def _base_evidence_findings(task: SubAgentTask, created_at: float) -> list[Accep
             created_at=created_at,
         ),
     ]
+
+
+# LLM: _evidence_chain_message explains whether traceability came from worker packets or machine tests.
+# 函数用途: 生成证据链 finding 文案；父级测试报告只在没有 worker evidence packet 时作为兜底证据链。
+def _evidence_chain_message(packets_with_refs, machine_report) -> str:
+    if packets_with_refs:
+        return f"已有 {len(packets_with_refs)} 条 evidence packet 可追溯。"
+    if machine_report is not None:
+        return f"父级真实测试报告可追溯: total={machine_report.total_tests} failed=0。"
+    return "缺少带 evidence/artifact refs 的 evidence packet。"
 
 
 # LLM: _required_read_file_finding 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。

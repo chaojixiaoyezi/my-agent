@@ -63,6 +63,21 @@ class ParentAcceptanceDecision:
         return payload
 
 
+# LLM: TestReportDecisionInput keeps test-report decision expansion bundle-shaped.
+# 类用途: 保存基于 `test_execution.json` 继续决策所需的事实源，避免 helper 参数继续增长。
+@dataclass(frozen=True)
+class TestReportDecisionInput:
+    """Bundle for deriving a parent decision from a test execution report."""
+
+    __test__: ClassVar[bool] = False
+
+    task: SubAgentTask
+    output: dict[str, Any]
+    refs: list[ParentAcceptanceRef]
+    report_path: Path
+    recovery_refs: tuple[str, str]
+
+
 # LLM: build_parent_acceptance_decision is side-effect free and only reads task-local JSON facts.
 # 函数用途: 根据 output、test_execution 和失败交接线索生成父级验收下一步；不会写文件、不会跑命令。
 def build_parent_acceptance_decision(
@@ -90,9 +105,17 @@ def build_parent_acceptance_decision(
         return _execute_tests_for_missing_report(task, refs)
 
     if report_path.exists():
-        return _decision_from_test_report(task, refs, report_path, (failure_ref, takeover_ref))
+        return _decision_from_test_report(
+            TestReportDecisionInput(
+                task=task,
+                output=output,
+                refs=refs,
+                report_path=report_path,
+                recovery_refs=(failure_ref, takeover_ref),
+            )
+        )
 
-    return _inspect_without_tests(task, refs)
+    return _inspect_without_tests(task, output, refs)
 
 
 # LLM: write_parent_acceptance_decision_file persists the dry-run decision as an audit artifact only.
@@ -177,23 +200,22 @@ def _execute_tests_for_missing_report(
 
 # LLM: _decision_from_test_report turns a persisted machine report into a parent next step.
 # 函数用途: 根据 `test_execution.json` 汇总通过或失败；只读取 JSON 事实源，不读 Markdown。
-def _decision_from_test_report(
-    task: SubAgentTask,
-    refs: list[ParentAcceptanceRef],
-    report_path: Path,
-    recovery_refs: tuple[str, str],
-) -> ParentAcceptanceDecision:
-    report = load_test_execution_report(report_path)
-    failure_ref, takeover_ref = recovery_refs
-    test_ref = ParentAcceptanceRef("test_execution", str(report_path), "test execution report")
+def _decision_from_test_report(params: TestReportDecisionInput) -> ParentAcceptanceDecision:
+    task = params.task
+    report = load_test_execution_report(params.report_path)
+    failure_ref, takeover_ref = params.recovery_refs
+    test_ref = ParentAcceptanceRef("test_execution", str(params.report_path), "test execution report")
     if report.total_tests > 0 and report.failed == 0:
+        patch_review = _patch_review_decision(task, params.output, [*params.refs, test_ref])
+        if patch_review is not None:
+            return patch_review
         return ParentAcceptanceDecision(
             run_id=task.id,
             decision="inspect_only",
             reason="real test execution already passed; parent can continue normal acceptance inspection",
             risk_level="low",
-            evidence_refs=[*refs, test_ref],
-            test_execution_ref=str(report_path),
+            evidence_refs=[*params.refs, test_ref],
+            test_execution_ref=str(params.report_path),
             next_actions=["run parent acceptance review without re-running tests"],
         )
     return ParentAcceptanceDecision(
@@ -201,17 +223,56 @@ def _decision_from_test_report(
         decision="rescue",
         reason=f"real test execution failed: total={report.total_tests} failed={report.failed}",
         risk_level="medium",
-        evidence_refs=[*refs, test_ref],
-        test_execution_ref=str(report_path),
+        evidence_refs=[*params.refs, test_ref],
+        test_execution_ref=str(params.report_path),
         failure_handoff_ref=failure_ref,
         takeover_readiness_ref=takeover_ref,
         next_actions=["inspect test_execution.json", "plan retry, rescue, or escalate"],
     )
 
 
+# LLM: _patch_review_decision keeps passed tests from skipping the explicit patch-review gate.
+# 函数用途: 测试通过但存在未审核 applied patch 时，先建议父代理执行 patch review，不直接进入 apply 验收。
+def _patch_review_decision(
+    task: SubAgentTask,
+    output: dict[str, Any],
+    refs: list[ParentAcceptanceRef],
+) -> ParentAcceptanceDecision | None:
+    unreviewed = _unreviewed_applied_patches(output)
+    if not unreviewed:
+        return None
+    return ParentAcceptanceDecision(
+        run_id=task.id,
+        decision="review_patches",
+        reason=f"{len(unreviewed)} applied patch requires parent patch review before acceptance",
+        risk_level="low",
+        evidence_refs=refs,
+        next_actions=["run explicit parent patch review", "re-run parent acceptance decision"],
+        reserved={"unreviewed_applied_patch_count": len(unreviewed)},
+    )
+
+
+# LLM: _unreviewed_applied_patches reads only output.json patch metadata.
+# 函数用途: 找出 status=applied 但 review_status 不是 APPROVED 的 patch，供父级流程明确下一步。
+def _unreviewed_applied_patches(output: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in _dict_list(output.get("patches", []))
+        if str(item.get("status", "")).lower() == "applied"
+        and str(item.get("review_status", "")).upper() != "APPROVED"
+    ]
+
+
 # LLM: _inspect_without_tests is the safe default for runs that provide no executable validation items.
 # 函数用途: 没有 tests 时不假装通过，只建议继续普通父级验收检查 evidence/verifier。
-def _inspect_without_tests(task: SubAgentTask, refs: list[ParentAcceptanceRef]) -> ParentAcceptanceDecision:
+def _inspect_without_tests(
+    task: SubAgentTask,
+    output: dict[str, Any],
+    refs: list[ParentAcceptanceRef],
+) -> ParentAcceptanceDecision:
+    patch_review = _patch_review_decision(task, output, refs)
+    if patch_review is not None:
+        return patch_review
     return ParentAcceptanceDecision(
         run_id=task.id,
         decision="inspect_only",

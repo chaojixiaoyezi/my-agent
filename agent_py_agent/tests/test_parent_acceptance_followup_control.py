@@ -184,3 +184,118 @@ def test_parent_acceptance_followup_rescue_uses_action_gate_for_takeover():
         assert loaded.status == "TAKEN_OVER"
         assert loaded.takeover_by == "parent-rescue"
         assert "README.md" in loaded.locked_files
+
+
+def test_parent_acceptance_followup_uses_existing_failed_test_report_for_rescue():
+    root_ctx, agent, task = _agent_and_task()
+    with root_ctx:
+        _write_output(
+            task,
+            [{
+                "name": "unit",
+                "validation_method": "command",
+                "command": "python -m pytest",
+            }],
+        )
+        write_test_execution_report(
+            task.reports_dir,
+            [
+                TestExecutionRecord(
+                    test_name="unit",
+                    command="python -m pytest",
+                    executed=True,
+                    exit_code=1,
+                    validation_method="command",
+                    validation_result={"ok": False},
+                )
+            ],
+            options=TestExecutionReportOptions(executed_at="2026-05-09T00:00:00Z"),
+        )
+
+        preview = agent.subagents.plan_parent_acceptance_followup(task.id)
+        rescued = agent.subagents.apply_parent_acceptance_followup(
+            task.id,
+            options=ParentAcceptanceFollowUpControlOptions(
+                apply=True,
+                take_over_by="parent-rescue",
+                locked_files=["interval_tools.py"],
+            ),
+        )
+
+        loaded = agent.subagents.load(task.id)
+        assert preview.status == "needs_manual_rescue"
+        assert preview.action == "plan_rescue"
+        assert preview.recommended_command.endswith("--apply-followup --take-over-by <agent>")
+        assert rescued.status == "takeover_recorded"
+        assert loaded.status == "TAKEN_OVER"
+        assert loaded.takeover_by == "parent-rescue"
+
+
+def test_parent_acceptance_followup_rescues_blocked_runner_without_test_report():
+    root_ctx, agent, task = _agent_and_task()
+    with root_ctx:
+        _write_output(task, [])
+        task.status = "BLOCKED"
+        task.verification_status = "UNVERIFIED"
+        task.failure_type = "runner_error"
+        agent.subagents.save(task)
+
+        preview = agent.subagents.plan_parent_acceptance_followup(task.id)
+        rescued = agent.subagents.apply_parent_acceptance_followup(
+            task.id,
+            options=ParentAcceptanceFollowUpControlOptions(
+                apply=True,
+                take_over_by="parent-rescue",
+                locked_files=["blocked-output"],
+            ),
+        )
+
+        loaded = agent.subagents.load(task.id)
+        assert preview.status == "needs_manual_rescue"
+        assert preview.action == "plan_rescue"
+        assert preview.recommended_command.endswith("--apply-followup --take-over-by <agent>")
+        assert preview.reserved["synthetic_from_task_state"] is True
+        assert rescued.status == "takeover_recorded"
+        assert loaded.status == "TAKEN_OVER"
+        assert loaded.takeover_by == "parent-rescue"
+
+
+def test_parent_acceptance_followup_rescues_failed_task_with_passing_tests():
+    root_ctx, agent, task = _agent_and_task()
+    with root_ctx:
+        _write_output(
+            task,
+            [{
+                "name": "unit",
+                "validation_method": "command",
+                "command": "python -m pytest",
+            }],
+        )
+        write_test_execution_report(
+            task.reports_dir,
+            [
+                TestExecutionRecord(
+                    test_name="unit",
+                    command="python -m pytest",
+                    executed=True,
+                    exit_code=0,
+                    validation_method="command",
+                    validation_result={"ok": True},
+                )
+            ],
+            options=TestExecutionReportOptions(executed_at="2026-05-09T00:00:00Z"),
+        )
+        task.status = "BLOCKED"
+        task.verification_status = "FAILED"
+        agent.subagents.save(task)
+
+        preview = agent.subagents.plan_parent_acceptance_followup(task.id)
+        rescued = agent.subagents.apply_parent_acceptance_followup(
+            task.id,
+            options=ParentAcceptanceFollowUpControlOptions(apply=True, take_over_by="parent-rescue"),
+        )
+
+        loaded = agent.subagents.load(task.id)
+        assert preview.status == "needs_manual_rescue"
+        assert rescued.status == "takeover_recorded"
+        assert loaded.status == "TAKEN_OVER"

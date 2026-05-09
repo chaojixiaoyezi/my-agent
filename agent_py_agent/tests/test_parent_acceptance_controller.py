@@ -38,7 +38,7 @@ def _agent_and_task():
     return root_ctx, agent, task
 
 
-def _write_output(task, tests):
+def _write_output(task, tests, *, patches=None):
     Path(task.output_json).write_text(
         json.dumps(
             {
@@ -47,7 +47,7 @@ def _write_output(task, tests):
                 "summary": "worker says tests are ready",
                 "tests": tests,
                 "artifacts": [],
-                "patches": [],
+                "patches": patches or [],
                 "blockers": [],
             },
             ensure_ascii=False,

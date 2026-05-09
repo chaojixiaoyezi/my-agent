@@ -18,12 +18,14 @@
 - `subagents-memory-gate` can now write explicit review decisions to `memory_gate/decisions.jsonl`; these decisions are preserved across later saves and still do not auto-promote.
 - `subagents-memory-gate` can now explicitly run retention, export approved memory candidates, export approved skill drafts, and verify the no-auto-promotion boundary; none of these paths installs a formal skill automatically.
 - Each persisted task now also updates the LocalStore agent runtime control-plane projection: `agent_runs`, `agent_events`, and `task_rollups`. This projection is for upper-agent, takeover, and shared progress views only; task/run workspace files remain the source of truth.
-- LocalStore control-plane queries now accept a runtime query context, so a main agent, middle subagent, or future takeover agent can ask for root tree, own subtree, blocked runs, or takeover candidates through the same bundle-shaped API.
+- LocalStore control-plane queries now accept a runtime query context, so a main agent, middle subagent, or future takeover agent can ask for root tree, own subtree, blocked runs, or takeover candidates through the same bundle-shaped API. `blocked_runs` stays `BLOCKED`-only; `takeover_candidates` includes `BLOCKED`, `FAILED`, `ERROR`, and `TIMEOUT` so a timed-out grandchild is visible to recovery views.
+- Subagent persistence preserves append-only hierarchy links during stale snapshot saves: when an older parent or child task object is saved after descendants were created, existing on-disk `child_ids` are merged into the write. This keeps multi-level trees from losing child/grandchild edges during parallel orchestration.
 - Child tasks with a parent now carry an audit-only inheritance manifest, written to `reports/inheritance_manifest.json`, showing inherited / overridden / dropped capability and context fields without expanding parent context into the child.
 - The first shared progress panel read model now composes runtime query results, task rollup, blocked visible runs, and inheritance manifest refs for upper-agent or takeover-agent views; it still points back to task/run workspace facts instead of loading artifact bodies.
 - Failed or blocked tasks now carry a first failure handoff record, written to `reports/failure_handoff.json`, with warnings, last safe checkpoint refs, artifact/evidence refs, and next-run avoidance advice; it is recovery guidance, not an automatic rescue trigger.
 - Tasks now also have audit-only security reserve fields: `SecuritySignal` entries and `security_review_required`. These fields are for future security hijack/deception defenses and do not enforce policy by themselves.
 - CLI status surfaces now expose shared progress, failure handoff refs, takeover refs, parent acceptance dry-run summaries, and parent acceptance next-action summaries in `status --json`, human `status`, and the `subagents` board. These views show counts, decisions, actions, command summaries, `mutates_task_state`, and refs only; they do not execute commands or load failure handoff, test report, or artifact bodies.
+- Status and startup recovery now use lightweight board options: they do not expand child status counts, read runner prompt/response logs, read cold artifact bodies, execute tests, or call models. The full board still preserves child status counts, but derives them from already loaded task records instead of reloading children one by one.
 - Large runtime tool outputs now write a fail-safe recovery snapshot before externalization. The snapshot stores metadata such as tool, hash, size, run/task/request ids, and next action, while the full output body still belongs only to the externalized artifact.
 - ToolContextReducer now protects the next live prompt: externalized large outputs are injected as refs and metadata only, while full bodies remain in artifacts.
 - Takeover/rescue command paths now consume takeover readiness refs first: action plans and takeover apply records surface `takeover_readiness.json` before its recommended read order, without loading artifact bodies.
@@ -58,23 +60,30 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/model_task.py`：承接 `SubAgentTask`、`EvidencePacket`、`Finding`、`StatusReport`、`SecuritySignal` 等任务树、证据和安全预留合同模型，`models.py` 继续作为兼容导出入口。
 - `agent_py_agent/agent/subagents/model_task.py`：同时定义 `RuntimeIdentity`，记录 service owner、requester、effective principal、conversation、memory namespace 和 config overlay scope；这些字段是隔离和审计口子，不是授权、长期记忆或全局配置事实源。
 - `agent_py_agent/agent/subagents/execution_records.py`：定义 `TestExecutionRecord`，保存真实验收执行证据字段、序列化、stdout/stderr 截断和 `passed` 派生结果。
-- `agent_py_agent/agent/subagents/execution_executor.py`：定义最小 `TestExecutor`，支持 command / file_check / content_check，当前不写任务状态、不生成 `test_execution.json`。
+- `agent_py_agent/agent/subagents/execution_executor.py`：定义最小 `TestExecutor`，支持 command / file_check / content_check，当前不写任务状态、不生成 `test_execution.json`；command 可带 workspace 内 `working_dir` / `cwd`，执行记录会保存真实工作目录。
+- `agent_py_agent/agent/subagents/execution_executor_helpers.py`：承接 `TestExecutor` 的命令解析、跨平台 python argv、记录构造和 UTC 时间 helper，让 executor 主文件保持薄执行器职责。
+- `agent_py_agent/agent/subagents/execution_test_items.py`：在父级验收执行前预处理 tests；当 runner 只给出相对测试命令但 artifacts 都指向同一产物目录时，安全补 `working_dir`，避免在 workspace 根目录误判“0 tests ran”。
 - `agent_py_agent/agent/subagents/execution_report.py`：写入和读取 `test_execution.json`，并生成 `test_execution.md` 展示报告；JSON 是事实源，Markdown 不参与机器判断。
-- `agent_py_agent/agent/subagents/parent_acceptance_controller.py`：生成父代理验收 dry-run 决策，返回 `execute_tests` / `inspect_only` / `request_human` / `rescue` 等下一步；它只读 refs 和机器事实源，不执行命令、不写 task；显式写入时生成 `parent_acceptance_decision.json`。
+- `agent_py_agent/agent/subagents/services/acceptance_machine_evidence.py`：只读 `reports/test_execution.json`，当父级真实测试全部通过且 runner 没有 evidence packet 时，把测试报告作为机器证据链；已有坏 evidence packet 不会被测试报告覆盖。
+- `agent_py_agent/agent/subagents/parent_acceptance_controller.py`：生成父代理验收 dry-run 决策，返回 `execute_tests` / `review_patches` / `inspect_only` / `request_human` / `rescue` 等下一步；它只读 refs 和机器事实源，不执行命令、不写 task；显式写入时生成 `parent_acceptance_decision.json`。
 - `agent_py_agent/agent/subagents/parent_acceptance_apply.py`：保存父级验收显式 apply 的结果模型、拦截/应用结果构造和 `parent_acceptance_apply.json` 落盘逻辑。
-- `agent_py_agent/agent/subagents/parent_acceptance_next_action.py`：把父级验收 plan/apply 审计映射成下一步动作建议，例如 `run_tests`、`request_human_confirmation`、`plan_rescue` 或 `apply_acceptance`；它只返回建议和 refs，不执行动作。
+- `agent_py_agent/agent/subagents/parent_acceptance_next_action.py`：把父级验收 plan/apply 审计映射成下一步动作建议，例如 `run_tests`、`review_patches`、`request_human_confirmation`、`plan_rescue` 或 `apply_acceptance`；它只返回建议和 refs，不执行动作。
 - `agent_py_agent/agent/subagents/parent_acceptance_auto_policy.py`：把 next-action 映射成自动策略 dry-run 判断并写入 `parent_acceptance_auto_policy.json`；当前生成 allow/blocked、would_execute、manual-only 半自动计划、preflight 检查和 executed=false。
 - `agent_py_agent/agent/subagents/parent_acceptance_auto_execution.py`：定义父级验收自动执行 Request/Result bundle，并生成 `parent_acceptance_auto_execution.json` 审计；默认只记录计划、policy ref、recommended command、blockers 和 hard guard，显式确认时只允许执行 tests。
-- `agent_py_agent/agent/subagents/parent_acceptance_followup_control.py`：读取测试后的 `parent_acceptance_auto_followup.json`，提供 `--followup` 预览和 `--apply-followup` 受控入口；坏 JSON 会返回 blocked 而不是崩 CLI，测试通过时复用 `inspect_only` apply 桥，测试失败时复用 `takeover_or_reassign` action gate，不直接改写接管文件。
+- `agent_py_agent/agent/subagents/parent_acceptance_auto_followup.py`：显式父级测试后的 follow-up 审计包，写 `parent_acceptance_auto_followup.json`，归类人工 apply、patch review、人工 rescue、人工确认或继续测试；只保存 refs、失败摘要和建议命令，不改 task 状态。
+- `agent_py_agent/agent/subagents/parent_acceptance_followup_control.py`：读取测试后的 `parent_acceptance_auto_followup.json`，提供 `--followup` 预览和 `--apply-followup` 受控入口；坏 JSON 会返回 blocked 而不是崩 CLI，测试通过时复用 `inspect_only` apply 桥，测试失败或当前任务已失败/阻塞时复用 `takeover_or_reassign` action gate，不直接改写接管文件。
+- `agent_py_agent/agent/subagents/parent_acceptance_followup_consistency.py`：承接 follow-up apply 前的一致性校验，检查 run_id、测试报告引用、失败数和新鲜度，并允许当前任务已失败/阻塞时走状态驱动 rescue。
+- `agent_py_agent/agent/subagents/parent_acceptance_rescue_followup.py`：承接没有测试 follow-up 的失败/阻塞任务 rescue 预览和 payload 构造，避免 manager 桥接文件膨胀。
 - `agent_py_agent/agent/agent_core/dispatch_service.py`：承接 due-check、action apply、capability route、patch review 等 dispatch 记录构建；acceptance 记录已拆到专门模块，避免主调度服务继续膨胀。
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_records.py`：在 acceptance 调度记录上附加 parent acceptance auto-policy 和 auto-execution 摘要；默认 dry-run，只在 `execute_acceptance_tests` 显式打开时调用第一层 run_tests 执行路径。
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_refresh.py`：当显式 parent tests 本轮写出新 `test_execution.json` 后，重新计算 acceptance dry-run 结果，并让 dispatch 展示、单 run 审计和 aggregate acceptance report 都对齐测试后结论；它不 apply acceptance、不触发 rescue、不修改 task 状态。
 - `agent_py_agent/agent/subagents/report_dispatch_models.py` / `services/dispatch_params.py`：`DispatchRecord` 和 `DispatchRecordParams` 持有 `parent_acceptance_policy_*` 与 `parent_acceptance_auto_execution_*` 机器摘要字段，包括可选 test report ref/total/failed，供 JSON report、Markdown 和 watch 读取。
 - `agent_py_agent/agent/subagents/rendering_dispatch.py`：`SUBAGENT_DISPATCH.md` 展示 policy 摘要和 ref，仍不展开 audit 文件正文。
-- `agent_py_agent/agent/subagents/manager_parent_acceptance.py`：承接 manager 的父级验收 plan/write/apply/next-action/auto-policy/follow-up 桥接流程，并在 follow-up apply 前校验 run_id、当前 test report 引用、失败数和文件新鲜度。
+- `agent_py_agent/agent/subagents/manager_parent_acceptance.py`：承接 manager 的父级验收 plan/write/apply/next-action/auto-policy/follow-up 桥接流程，并在 follow-up apply 前校验 run_id、当前 test report 引用、失败数和文件新鲜度；已失败/阻塞且没有测试报告的任务会得到合成 rescue follow-up，不会被误导去跑 tests。
 - `agent_py_agent/agent/subagents/manager_acceptance_parent_facade.py`：承接父级验收公开方法薄 facade，让 `manager_acceptance.py` 继续只负责普通 acceptance review 编排。
-- `agent_py_agent/agent/subagents/acceptance_test_execution.py`：把显式开启的真实测试执行接入 acceptance findings，生成 `test_execution_recorded` 和 `test_execution_passed`，默认不运行。
+- `agent_py_agent/agent/subagents/acceptance_test_execution.py`：把显式开启的真实测试执行接入 acceptance findings，生成 `test_execution_recorded` 和 `test_execution_passed`，默认不运行；执行前会复用 tests 预处理，仍只允许 workspace 内目录。
 - `agent_py_agent/agent/subagents/services/acceptance_findings.py`：普通 acceptance 的 finding 汇总层；当已有 `reports/test_execution.json` 时，tests_passed 以机器执行报告为准，而不是只相信 `output.json.tests[*].ok`。
+- `agent_py_agent/agent/subagents/services/board.py`：构建看板摘要和 child status counts。`SubAgentBoardOptions(include_child_status_counts=False)` 用于 status / startup recovery 等轻量路径，避免默认查询二次加载 child task；完整看板通过已加载 task 索引汇总 child 状态，不读取 runner prompt/response 或 artifact 正文。
 - `agent_py_agent/cli/_acceptance_plan.py`：提供 `subagents-acceptance-plan` CLI 入口；默认只展示父级验收 dry-run 决策和 refs，`--write` 只写决策审计文件，`--apply` 只允许 `inspect_only`，`--followup` 只预览，`--apply-followup` 才进入受控 apply/rescue。
 - `agent_py_agent/cli/_acceptance_plan_renderers.py`：承接 acceptance-plan 的 JSON 转换和人类输出渲染；只打印 refs、状态和推荐命令，不展开 audit 文件正文。
 - `agent_py_agent/cli/_review.py`：提供 `subagents-tests` 和验收相关兼容导出；tests 默认只读取已有 `test_execution.json`，显式 `--re-run` 才重新执行 `output.json.tests`。
@@ -150,13 +159,13 @@ agent_py_agent/agent/
 6. runner 根据 execution context 调模型和工具，把 `RUNNER_RESULT.md`、`reports/runner_result.json`、`reports/status_report.json`、`reports/checkpoint.json`、`reports/progress.md`、`SKILL_SPARKS.md`、`output.json` 写回旧 run 工单目录。
 7. structured output 中的 `evidence_packets` / `findings` 会进入任务事实源；acceptance 会检查完成态结果是否有 evidence chain。
 8. acceptance report 分层记录 worker 自述、证据事实、父级结论；verifier checks 只读 evidence packets / findings 并能阻断未解决风险。
-9. Acceptance Real Execution 当前提供 `TestExecutionRecord`、最小 `TestExecutor`、report 存储、显式 acceptance 接入、`subagents-tests` CLI、`subagents-acceptance-plan` CLI 和配置默认值；只有 `AcceptanceReviewOptions(execute_tests=True)`、`subagents-tests --re-run`、`subagents-acceptance --execute-tests` 或配置 `acceptance_execute_tests: true` 时才运行 tests 并生成报告/阻断 findings，默认旧验收路径和 acceptance-plan 都不执行命令；已有 `test_execution.json` 会作为后续 acceptance/apply 的测试事实源。
-9. Parent Acceptance Controller 的 `--apply` 当前只是第一片安全桥接：`inspect_only` 才能进入普通 acceptance apply；`execute_tests`、`request_human`、`rescue` 会被写入 `parent_acceptance_apply.json` 并保持任务状态不变，留给上级/自动调度器下一步显式处理。
-9. Parent Acceptance Controller 的 `--next-action` 是自动调度前的建议层：它读取当前 plan 和已有 apply 审计 refs，返回下一步建议命令或人工/救援意图，但不会执行建议，也不会把建议当 verified fact。
+9. Acceptance Real Execution 当前提供 `TestExecutionRecord`、最小 `TestExecutor`、tests 工作目录预处理、report 存储、显式 acceptance 接入、机器证据链兜底、`subagents-tests` CLI、`subagents-acceptance-plan` CLI 和配置默认值；只有 `AcceptanceReviewOptions(execute_tests=True)`、`subagents-tests --re-run`、`subagents-acceptance --execute-tests` 或配置 `acceptance_execute_tests: true` 时才运行 tests 并生成报告/阻断 findings，默认旧验收路径和 acceptance-plan 都不执行命令；已有通过的 `test_execution.json` 会作为后续 acceptance/apply 的测试事实源，并可在没有 worker evidence packet 时作为机器证据链。
+9. Parent Acceptance Controller 的 `--apply` 当前只是安全桥接：只有 `inspect_only` 才能进入普通 acceptance apply；`execute_tests`、`review_patches`、`request_human`、`rescue` 会被写入 `parent_acceptance_apply.json` 并保持任务状态不变，留给上级/自动调度器下一步显式处理。
+9. Parent Acceptance Controller 的 `--next-action` 是自动调度前的建议层：它读取当前 plan 和已有 apply 审计 refs，返回下一步建议命令或人工/救援意图；测试通过但 patch 未审核时会先建议 `subagents-patches --review-apply --run-id <run_id>`，不会直接跳到 acceptance apply。
 9. Parent Acceptance Auto Policy v1 dry-run 当前消费 next-action、决策/apply refs 和保守 allowlist。第一片只判断“策略是否允许、如果允许会执行什么、为什么仍不执行”，写 `parent_acceptance_auto_policy.json`；半自动计划只暴露 `execution_mode=manual_only`、`automatic_execution_allowed=false`、`recommended_command` 和 preflight 检查，不运行 tests、不 apply、不 rescue，也不改 task/run 状态。
 9. Parent Acceptance Auto Execution facade v1 当前消费 auto-policy 输出并写 `parent_acceptance_auto_execution.json`；默认 dry-run 固定 `execution_allowed=false`、`guard_status=blocked`、`executed=false`、`mutates_task_state=false`。只有显式 `ParentAcceptanceAutoExecutionOptions(execute_tests=True)` / `--execute-auto-tests` 才允许执行 run_tests 并写 `test_execution.json`，仍不 apply、不 rescue、不修改 task 状态。
-9. Parent Acceptance Auto Follow-up 当前只在显式测试执行后写 `parent_acceptance_auto_followup.json`：测试通过时给 `ready_for_manual_apply` 和显式 apply 命令，测试失败时给 `needs_manual_rescue` 和失败测试摘要，危险或缺事实时保持人工确认/继续测试。follow-up 自身不读取 artifact 正文、不自动 apply、不自动 rescue。
-9. Parent Acceptance Follow-up Control 当前把 follow-up 变成半自动受控入口：`--followup` 只展示下一步和 refs；`--apply-followup` 必须由人或上级调度显式调用。测试通过时它只走已有 `inspect_only` 父级验收 apply；测试失败时必须带 `--take-over-by`，并复用 action handler 的 `takeover_or_reassign` 门禁和审计。失败验收会记录 `acceptance_rejected`，不会被标成 ok。
+9. Parent Acceptance Auto Follow-up 当前只在显式测试执行后写 `parent_acceptance_auto_followup.json`：测试通过且 patch 已满足 gate 时给 `ready_for_manual_apply`，测试通过但 patch 未审核时给 `needs_patch_review`，测试失败时给 `needs_manual_rescue` 和失败测试摘要，危险或缺事实时保持人工确认/继续测试。follow-up 自身不读取 artifact 正文、不自动 apply、不自动 rescue。
+9. Parent Acceptance Follow-up Control 当前把 follow-up 变成半自动受控入口：`--followup` 只展示下一步和 refs；`--apply-followup` 必须由人或上级调度显式调用。测试通过时它只走已有 `inspect_only` 父级验收 apply；测试失败或当前任务已失败/阻塞时必须带 `--take-over-by`，并复用 action handler 的 `takeover_or_reassign` 门禁和审计。失败验收会记录 `acceptance_rejected`，不会被标成 ok。若 `subagents-tests --re-run` 已经写出当前 `test_execution.json` 但 follow-up 文件缺失，manager 会从现有测试报告补一个 refs-only follow-up；若 runner 已经失败/阻塞且没有测试报告，manager 会生成只读 rescue follow-up，不重新执行 tests。
 9. `subagents-dispatch` 现在会在 acceptance 记录上附带 parent auto-policy 的 machine summary、auto-execution 摘要和 follow-up ref；默认不会因为 `would_execute=true` 自动执行任何动作。只有 `DispatchParams/WatchParams(execute_acceptance_tests=True)` 或 CLI `--execute-acceptance-tests` 会受控执行 run_tests；本轮 tests 写入后会刷新 acceptance dry-run 展示，避免报告继续显示测试前旧结论，但仍不 apply、不 rescue、不修改 task 状态。
 10. Compact resume 的 continue packet 可以携带 subagent owner refs 和 acceptance/test 线索，但它只证明“恢复上下文可继续”，不证明“子代理业务验收通过”。父级验收和 auto-policy 仍是 tests/apply/rescue 的唯一判断层，compact auto 不得绕过。
 10. compact/resume 与父级验收的联调链路是：continue packet ready -> parent acceptance 发现缺 `test_execution.json` 并阻断为 `execute_tests` -> 显式测试执行写报告 -> parent acceptance 变为 `inspect_only` -> 显式 apply 才能写 `DONE/VERIFIED`。任一步都不允许 compact auto 直接跑 tests、apply 或导出子代理 memory。
@@ -171,7 +180,8 @@ agent_py_agent/agent/
 17. create_run 如果看到 `parent_id`，会生成 task-local inheritance manifest，记录 child 当前字段相对 parent 的 inherited / overridden / dropped 项；manifest 是审计事实，不会把 parent 全量上下文灌入 child prompt。
 18. persistence 对失败、错误、超时、阻塞或带 `failure_type` 的 task 生成 `reports/failure_handoff.json`；它记录 warning、risk level、last safe checkpoint、artifact/evidence refs、avoid-next-time 和 recommended next action，但不触发自动 rescue。
 19. persistence 生成 `reports/takeover_readiness.json` 和 `TAKEOVER_READINESS.md`，把 failure handoff、checkpoint、status report、artifact manifest、evidence refs 和 artifact refs 排成 recommended read order；它是恢复索引，不复制或读取大 artifact 正文。
-20. persistence 把当前 task 投影到 LocalStore 的 `agent_runs` / `agent_events` / `task_rollups`；上级代理或接管代理可以先用 `AgentRuntimeQueryContext` 查 root tree、own subtree、blocked runs 或 takeover candidates，再回到 task/run workspace 核实事实。
+20. persistence 把当前 task 投影到 LocalStore 的 `agent_runs` / `agent_events` / `task_rollups`；上级代理或接管代理可以先用 `AgentRuntimeQueryContext` 查 root tree、own subtree、blocked runs 或 takeover candidates，再回到 task/run workspace 核实事实。`takeover_candidates` 是恢复候选视图，包含阻塞、失败、错误和超时；`blocked_runs` 保持只看阻塞。
+20. persistence 保存旧 task 快照时会把磁盘已有 `child_ids` 合并回来，避免父/子任务在并行派生后被旧对象保存覆盖层级链接。
 20. task 如果携带 `security_signals` 或 `security_review_required`，persistence 会随 `task.json` 保存这些 audit-only 字段；它们只记录可疑信号和证据引用，不自动阻断 runner、改变工具授权或修改 memory。
 21. 控制面投影的 metadata 会暴露 `inheritance_manifest_ref`、`failure_handoff_ref`、`takeover_readiness_ref`、`security_signal_count`、`security_signal_types` 和 `security_review_required` 这类恢复/安全线索；这些 refs 指向任务目录里的事实文件，不替代 artifact、checkpoint 或 verified finding。
 22. 如果 task 携带 `RuntimeIdentity`，控制面 metadata 会额外暴露 `runtime_identity`、`memory_scope` 和 `config_scope`。默认 `conversation_memory_policy=not_enabled`、`writes_global_config=false`；员工/外部会话只能形成可审计 run/conversation 作用域元数据，不能自动生成员工长期记忆或污染全局配置。
@@ -232,6 +242,7 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 ### 动作边界
 
 - `run_tests`：只允许形成 would-run 审计，记录测试 refs、命令摘要和安全预检结果；第一版不执行。
+- `review_patches`：只提示显式 patch review 命令；它会写 patch review 审计和 `review_status`，因此不进入当前自动 allowlist。
 - `request_human_confirmation`：只生成需要人工确认的原因、问题和 refs，不自动发起外部通知。
 - `plan_rescue`：只引用 `failure_handoff_ref`、`takeover_readiness_ref`、`rescue_packet` 和 recommended read order，不启动救援 agent。
 - `apply_acceptance`：只说明需要显式 apply gate；第一版不会自动调用 apply。
@@ -271,7 +282,7 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
     "test_execution_ref": "reports/test_execution.json|null",
     "takeover_readiness_ref": "reports/takeover_readiness.json|null"
   },
-  "next_action": "run_tests|request_human_confirmation|plan_rescue|apply_acceptance|none",
+  "next_action": "run_tests|review_patches|request_human_confirmation|plan_rescue|apply_acceptance|none",
   "allowed_by_policy": false,
   "dry_run": true,
   "auto_execute": false,
@@ -312,7 +323,7 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `SUBAGENT_DISPATCH.md` 展示同一组摘要，方便人类快速判断下一步；完整事实源仍是 run-local `reports/parent_acceptance_auto_policy.json`。Markdown 展示 recommended command 不代表 dispatch 会执行。
 - `subagents-dispatch` 的 acceptance record 也会带 `parent_acceptance_auto_execution_ref`、status、allowed、executed、guard status、blockers，以及显式执行时的 test ref/total/failed；完整事实源是 run-local `reports/parent_acceptance_auto_execution.json` 和 `reports/test_execution.json`。
 - 显式测试执行会在同一轮 dispatch 内刷新 acceptance dry-run record，让 `SUBAGENT_DISPATCH.md`、`subagent_dispatch_report.json`、单 run `acceptance_review.json` 和 aggregate `subagent_acceptance_report.json` 展示测试后的 accept/reject 判断；刷新不等同于 `--apply-followup`。
-- 显式测试执行后还会写 `parent_acceptance_auto_followup.json`，dispatch/watch 摘要只展示 follow-up status/action/command/reason/ref。command 会指向 `subagents-acceptance-plan <run_id> --apply-followup`，失败测试场景会额外提示 `--take-over-by <agent>`；它用于告诉上级“下一步人工 apply 还是人工 rescue”，不代表调度器已经做了下一步。
+- 显式测试执行后还会写 `parent_acceptance_auto_followup.json`，dispatch/watch 摘要只展示 follow-up status/action/command/reason/ref。测试通过且 patch 已审核时 command 会指向 `subagents-acceptance-plan <run_id> --apply-followup`；测试通过但 patch 未审核时会指向 `subagents-patches --review-apply --run-id <run_id>`；失败测试场景会额外提示 `--take-over-by <agent>`。它用于告诉上级“下一步人工 apply、patch review 还是人工 rescue”，不代表调度器已经做了下一步。
 - `subagents-dispatch --watch` 不单独执行 auto-policy。watch record 的 evidence 只指向 `subagent_dispatch_report.json` 和 `SUBAGENT_DISPATCH.md`，由调用方沿 ref 读取具体 run 的 policy audit；若 watch params 显式打开 `execute_acceptance_tests`，本轮 dispatch report 会记录 tests_executed，但 task 仍等待后续显式 apply。
 - 默认接入仍是 refs-only dry-run：`would_execute=true` 只说明未来可考虑执行，`executed=false` 仍是硬边界；显式测试执行只证明 tests report 已刷新，不代表验收已经 apply。
 

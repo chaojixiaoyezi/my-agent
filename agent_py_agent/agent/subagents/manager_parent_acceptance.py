@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from .acceptance_review_service import AcceptanceReviewOptions
-from .execution_report import load_test_execution_report
 from .parent_acceptance_apply import (
     ParentAcceptanceApplyResult,
     applied_parent_acceptance_apply_result,
@@ -17,6 +16,7 @@ from .parent_acceptance_auto_execution import (
     ParentAcceptanceAutoExecutionResult,
     build_parent_acceptance_auto_execution,
 )
+from .parent_acceptance_auto_followup import build_parent_acceptance_auto_followup
 from .parent_acceptance_auto_policy import (
     ParentAcceptanceAutoPolicy,
     build_parent_acceptance_auto_policy,
@@ -26,6 +26,7 @@ from .parent_acceptance_controller import (
     build_parent_acceptance_decision,
     write_parent_acceptance_decision_file,
 )
+from .parent_acceptance_followup_consistency import followup_consistency_block
 from .parent_acceptance_followup_control import (
     BlockedFollowUpControlInput,
     ParentAcceptanceFollowUpControlOptions,
@@ -46,6 +47,10 @@ from .parent_acceptance_followup_control import (
 from .parent_acceptance_next_action import (
     ParentAcceptanceNextAction,
     build_parent_acceptance_next_action,
+)
+from .parent_acceptance_rescue_followup import (
+    missing_followup_rescue_payload,
+    missing_followup_rescue_preview,
 )
 from .reports import ActionPlanItem
 from .services.action_options import ActionApplyOptions
@@ -148,6 +153,10 @@ def manager_plan_parent_acceptance_followup(
     run_id: str,
 ) -> ParentAcceptanceFollowUpControlResult:
     task = manager.load(run_id)
+    _ensure_followup_from_current_tests(task, workspace_root=acceptance_workspace_root(manager))
+    rescue = missing_followup_rescue_preview(task, workspace_root=acceptance_workspace_root(manager))
+    if rescue is not None:
+        return rescue
     return preview_parent_acceptance_followup_control(task)
 
 
@@ -161,11 +170,33 @@ def manager_apply_parent_acceptance_followup(
 ) -> ParentAcceptanceFollowUpControlResult:
     task = manager.load(run_id)
     opts = options or ParentAcceptanceFollowUpControlOptions()
+    _ensure_followup_from_current_tests(task, workspace_root=acceptance_workspace_root(manager))
     payload = read_parent_acceptance_followup_payload(task)
+    if not payload:
+        payload = missing_followup_rescue_payload(
+            task,
+            workspace_root=acceptance_workspace_root(manager),
+        )
     result = _followup_control_result(manager, task, payload, opts)
     write_parent_acceptance_followup_control_file(task, result)
     return result
 
+
+# LLM: _ensure_followup_from_current_tests lets plain subagents-tests reports feed the same manual gate.
+# 函数用途: 当已有 test_execution.json 但缺 follow-up 审计时，生成 refs-only follow-up；不执行 tests、不改状态。
+def _ensure_followup_from_current_tests(task, *, workspace_root: Path) -> None:
+    followup_path = parent_acceptance_followup_ref(task)
+    if followup_path.exists():
+        return
+    report_path = Path(task.reports_dir) / "test_execution.json"
+    if not report_path.exists():
+        return
+    build_parent_acceptance_auto_followup(
+        task,
+        workspace_root=workspace_root,
+        execution_ref="",
+        test_execution_ref=str(report_path),
+    )
 
 # LLM: _followup_control_result routes the stored follow-up to the matching manual gate.
 # 函数用途: 根据 follow-up action 选择 apply、rescue 或 blocked；不猜测缺失事实。
@@ -192,7 +223,7 @@ def _followup_control_result(
         )
     if not opts.apply:
         return preview_parent_acceptance_followup_control(task)
-    consistency = _followup_consistency_block(task, payload, status, action)
+    consistency = followup_consistency_block(task, payload, status, action)
     if consistency is not None:
         return consistency
     if action == "apply_acceptance" and status == "ready_for_manual_apply":
@@ -208,64 +239,6 @@ def _followup_control_result(
             recommended_command=followup_command_for_action(task.id, action),
         ),
     )
-
-
-# LLM: _followup_consistency_block protects manual apply from stale or mismatched test evidence.
-# 函数用途: 在真正 apply/rescue 前校验 follow-up 与当前 test_execution.json 是否一致；不一致就阻断。
-def _followup_consistency_block(
-    task,
-    payload: dict,
-    status: str,
-    action: str,
-) -> ParentAcceptanceFollowUpControlResult | None:
-    followup = payload.get("followup") if isinstance(payload, dict) else {}
-    followup = followup if isinstance(followup, dict) else {}
-    reason = _followup_consistency_reason(task, payload, followup)
-    if not reason:
-        return None
-    return blocked_followup_control_result(
-        task,
-        BlockedFollowUpControlInput(
-            status=reason[0],
-            action=action or "run_tests",
-            message=reason[1],
-            recommended_command=followup_command_for_action(task.id, "run_tests"),
-        ),
-    )
-
-
-# LLM: _followup_consistency_reason returns compact machine-readable stale evidence reasons.
-# 函数用途: 对 run_id、测试报告引用、失败数和文件新鲜度做最小校验，避免旧 follow-up 推进状态。
-def _followup_consistency_reason(
-    task,
-    payload: dict,
-    followup: dict,
-) -> tuple[str, str] | None:
-    status = str(followup.get("status") or "")
-    action = str(followup.get("action") or "")
-    if str(payload.get("run_id") or followup.get("run_id") or "") != task.id:
-        return ("stale_followup", "follow-up run_id does not match this task")
-    report_path = Path(str(followup.get("test_execution_ref") or ""))
-    current_report = Path(task.reports_dir) / "test_execution.json"
-    if not report_path.exists():
-        return ("missing_test_execution", "follow-up test_execution_ref is missing")
-    if report_path.resolve() != current_report.resolve():
-        return ("stale_followup", "follow-up test_execution_ref is not the current task report")
-    if report_path.stat().st_mtime > parent_acceptance_followup_ref(task).stat().st_mtime + 0.001:
-        return ("stale_followup", "test_execution.json is newer than the follow-up audit")
-    try:
-        report = load_test_execution_report(report_path)
-    except (OSError, ValueError):
-        return ("invalid_test_execution", "current test_execution.json is not readable")
-    followup_failed = int(followup.get("test_failed") or 0)
-    if followup_failed != report.failed:
-        return ("followup_test_mismatch", "follow-up failed count does not match current test report")
-    if action == "apply_acceptance" and (status != "ready_for_manual_apply" or report.failed != 0):
-        return ("followup_test_mismatch", "apply follow-up requires a passing current test report")
-    if action == "plan_rescue" and (status != "needs_manual_rescue" or report.failed <= 0):
-        return ("followup_test_mismatch", "rescue follow-up requires failing current test evidence")
-    return None
-
 
 # LLM: _apply_followup_acceptance reuses the existing inspect_only acceptance apply bridge.
 # 函数用途: 测试通过后显式应用父级验收；实际状态写回仍由既有 apply 决策函数负责。

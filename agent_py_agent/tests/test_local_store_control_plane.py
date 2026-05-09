@@ -86,6 +86,25 @@ def _blocked_sibling_record() -> AgentRunRecord:
     )
 
 
+# LLM: _timeout_leaf_record models a hung grandchild that should still be visible to takeover views.
+# 函数用途: 构造 TIMEOUT 孙代理投影，验证接管候选不仅包含 BLOCKED。
+def _timeout_leaf_record() -> AgentRunRecord:
+    return AgentRunRecord(
+        run_id="run-timeout",
+        root_task_id="task-root",
+        parent_run_id="run-child",
+        depth=2,
+        role="worker",
+        agent_name="timeout-leaf",
+        status="TIMEOUT",
+        progress=0.15,
+        current_step="执行超时",
+        latest_summary="孙代理超时，需要接管。",
+        created_at=95.0,
+        updated_at=105.0,
+    )
+
+
 def _store_runtime_query_tree(store: LocalStore) -> None:
     for record in [_parent_run_record(), _child_run_record(), _leaf_run_record(), _blocked_sibling_record()]:
         store.upsert_agent_run(record)
@@ -149,6 +168,8 @@ def test_runtime_query_scope_limits_middle_agent_to_own_subtree(tmp_path) -> Non
 def test_runtime_query_scope_keeps_takeover_candidates_extensible(tmp_path) -> None:
     store = LocalStore(tmp_path / "local.db")
     _store_runtime_query_tree(store)
+    store.upsert_agent_run(_timeout_leaf_record())
+    store.rebuild_task_rollup("task-root")
 
     result = store.query_agent_runtime(
         AgentRuntimeQueryContext(
@@ -164,8 +185,8 @@ def test_runtime_query_scope_keeps_takeover_candidates_extensible(tmp_path) -> N
     assert result.context.visibility == "takeover_candidates"
     assert result.context.authorized_scope == "root_task"
     assert result.report.task_id == "task-root"
-    assert [item.run_id for item in result.report.runs] == ["run-child", "run-sibling"]
-    assert result.reserved["takeover_hint"] == "blocked_runs"
+    assert [item.run_id for item in result.report.runs] == ["run-child", "run-sibling", "run-timeout"]
+    assert result.reserved["takeover_hint"] == "blocked_failed_timeout_runs"
 
 
 def test_subagent_save_projects_status_into_control_plane(tmp_path) -> None:
@@ -215,3 +236,44 @@ def test_subagent_save_projects_status_into_control_plane(tmp_path) -> None:
     assert rollup.blocked_agents == 1
     assert rollup.running_agents == 0
     assert child.id in [item.run_id for item in tree.runs]
+
+
+# LLM: Regression for multi-level agent trees where stale parent snapshots are saved after child creation.
+# 函数用途: 验证旧父/子对象再次保存时不会覆盖 add_child 已写入的 child_ids，避免并行子代理层级断链。
+def test_subagent_save_preserves_child_links_from_stale_snapshots(tmp_path) -> None:
+    from agent_py_agent.agent.subagents.manager import SubAgentManager
+
+    manager = SubAgentManager(tmp_path)
+    parent = manager.create_run(
+        goal="父任务",
+        thought="保存前已被调用方持有。",
+        plan=["派发子任务"],
+        role="coordinator",
+    )
+    child = manager.create_run(
+        goal="子任务",
+        thought="链接到父任务。",
+        plan=["继续派发"],
+        parent_id=parent.id,
+        root_id=parent.root_id,
+        depth=1,
+    )
+    leaf = manager.create_run(
+        goal="孙任务",
+        thought="链接到子任务。",
+        plan=["执行叶子任务"],
+        parent_id=child.id,
+        root_id=parent.root_id,
+        depth=2,
+    )
+
+    parent.status = "RUNNING"
+    child.status = "BLOCKED"
+    manager.save(parent)
+    manager.save(child)
+
+    reloaded_parent = manager.load(parent.id)
+    reloaded_child = manager.load(child.id)
+
+    assert child.id in reloaded_parent.child_ids
+    assert leaf.id in reloaded_child.child_ids

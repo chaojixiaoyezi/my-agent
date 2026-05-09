@@ -20,6 +20,11 @@ from agent_py_agent.agent.subagent import (
     VerificationEvidence,
     parse_subagent_runner_output,
 )
+from agent_py_agent.agent.subagents.execution_records import TestExecutionRecord
+from agent_py_agent.agent.subagents.execution_report import (
+    TestExecutionReportOptions,
+    write_test_execution_report,
+)
 
 
 def _rrr(run_id: str, **kwargs) -> RecordRunnerResultParams:
@@ -285,3 +290,76 @@ def test_subagent_acceptance_can_execute_real_tests_on_explicit_dry_run():
         assert Path(loaded.reports_dir, "test_execution.md").exists()
         assert any(item.name == "test_execution_passed" and not item.ok for item in report.records[0].findings)
         assert str(test_execution_json) in report.records[0].evidence_paths
+
+
+def test_subagent_acceptance_allows_parent_test_report_as_machine_evidence_chain():
+    """LLM: Verifies passed parent tests can satisfy traceability when runner emitted no evidence packets."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        task = agent.subagents.create_run(
+            goal="父级测试报告证据链",
+            thought="runner 没有 evidence packet，但父级真实测试已通过。",
+            plan=["生成文件", "父级测试"],
+        )
+        _setup_acceptance_task(agent, task)
+        loaded = agent.subagents.load(task.id)
+        loaded.evidence_packets = []
+        agent.subagents.save(loaded)
+        write_test_execution_report(
+            loaded.reports_dir,
+            [TestExecutionRecord(
+                test_name="unit",
+                command="python -m unittest",
+                executed=True,
+                exit_code=0,
+                validation_method="command",
+                validation_result={"ok": True},
+            )],
+            options=TestExecutionReportOptions(executed_at="2026-05-09T00:00:00Z"),
+        )
+
+        report = agent.subagents.write_acceptance_review_report(run_ids=[task.id], apply=True, reviewer="tester")
+        accepted = agent.subagents.load(task.id)
+
+        assert report.records[0].decision == "ACCEPT"
+        assert accepted.status == "DONE"
+        assert any(item.name == "evidence_chain_present" and item.ok for item in report.records[0].findings)
+        assert any(item.name == "verifier_evidence_packets_traceable" and item.ok for item in report.records[0].verifier_checks)
+
+
+def test_subagent_acceptance_does_not_hide_bad_worker_evidence_packets_with_parent_tests():
+    """LLM: Verifies machine tests do not wash over malformed worker evidence packets."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        task = agent.subagents.create_run(
+            goal="坏 evidence packet 不能被测试覆盖",
+            thought="runner 给了缺 refs 的 evidence packet。",
+            plan=["生成文件", "父级测试"],
+        )
+        _setup_acceptance_task(agent, task)
+        loaded = agent.subagents.load(task.id)
+        loaded.evidence_packets[0].evidence_refs = []
+        loaded.evidence_packets[0].artifact_refs = []
+        agent.subagents.save(loaded)
+        write_test_execution_report(
+            loaded.reports_dir,
+            [TestExecutionRecord(
+                test_name="unit",
+                command="python -m unittest",
+                executed=True,
+                exit_code=0,
+                validation_method="command",
+                validation_result={"ok": True},
+            )],
+            options=TestExecutionReportOptions(executed_at="2026-05-09T00:00:00Z"),
+        )
+
+        report = agent.subagents.write_acceptance_review_report(run_ids=[task.id], apply=False)
+
+        assert report.records[0].decision == "REJECT"
+        assert any(item.name == "evidence_chain_present" and not item.ok for item in report.records[0].findings)
+        assert any(item.name == "verifier_evidence_packets_traceable" and not item.ok for item in report.records[0].verifier_checks)

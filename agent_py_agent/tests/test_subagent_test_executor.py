@@ -24,6 +24,45 @@ def test_test_executor_runs_allowed_command_and_records_exit_code(tmp_path):
     assert record.executed_at
 
 
+def test_test_executor_runs_command_in_explicit_working_dir(tmp_path):
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    (package_dir / "test_smoke.py").write_text(
+        "import unittest\n\n"
+        "class TestSmoke(unittest.TestCase):\n"
+        "    def test_ok(self):\n"
+        "        self.assertTrue(True)\n",
+        encoding="utf-8",
+    )
+    executor = TestExecutor(tmp_path, timeout_seconds=10)
+
+    record = executor.execute({
+        "name": "relative unittest",
+        "validation_method": "command",
+        "command": "python -m unittest discover -s . -p 'test_*.py'",
+        "working_dir": "package",
+    })
+
+    assert record.passed is True
+    assert record.validation_result["working_dir"] == str(package_dir.resolve())
+    assert record.metadata["working_dir"] == str(package_dir.resolve())
+
+
+def test_test_executor_blocks_working_dir_escape(tmp_path):
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute({
+        "name": "escape",
+        "validation_method": "command",
+        "command": "python -c \"print('ok')\"",
+        "working_dir": "../outside",
+    })
+
+    assert record.executed is False
+    assert record.passed is False
+    assert "working_dir 超出 workspace 边界" in record.error
+
+
 def test_test_executor_blocks_high_risk_shell_characters(tmp_path):
     executor = TestExecutor(tmp_path)
 

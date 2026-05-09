@@ -133,6 +133,8 @@ class SubAgentBoardOptions:
     """Bundle for board rendering and recent-list selection."""
 
     recent_limit: int = 20
+    # LLM: Lightweight status/startup paths can skip tree expansion while full boards keep child rollups.
+    include_child_status_counts: bool = True
 
 
 __all__ = [

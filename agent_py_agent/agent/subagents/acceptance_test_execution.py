@@ -11,6 +11,7 @@ from typing import Any
 
 from .execution_executor import TestExecutor
 from .execution_report import TestExecutionReportOptions, write_test_execution_report
+from .execution_test_items import TestItemPreparationRequest, prepare_test_items
 from .parsing import _dict_list
 from .reports import AcceptanceReviewFinding
 
@@ -41,6 +42,14 @@ def build_acceptance_test_execution_findings(
     options = request.options
     tests = _dict_list(output.get("tests", []))
     workspace_root = _acceptance_test_workspace(manager)
+    # LLM: Parent tests run from an inferred artifact cwd when runner emitted relative commands.
+    tests = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=tests,
+            output=output,
+            workspace_root=workspace_root,
+        )
+    )
     executor = TestExecutor(workspace_root, timeout_seconds=options.test_timeout_seconds)
     records = [executor.execute(test) for test in tests]
     report = write_test_execution_report(

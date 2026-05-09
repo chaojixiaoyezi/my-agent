@@ -40,6 +40,7 @@ _RUNNING_STATUSES = {"RUNNING"}
 _BLOCKED_STATUSES = {"BLOCKED"}
 _COMPLETED_STATUSES = {"DONE", "COMPLETED", "ACCEPTED", "AWAITING_ACCEPTANCE"}
 _FAILED_STATUSES = {"FAILED", "ERROR", "TIMEOUT"}
+_TAKEOVER_CANDIDATE_STATUSES = _BLOCKED_STATUSES | _FAILED_STATUSES
 
 
 # LLM: LocalStoreControlPlaneMixin owns query projection writes for agent runtime status.
@@ -177,43 +178,10 @@ class LocalStoreControlPlaneMixin:
     # LLM: query_agent_runtime normalizes caller intent before selecting a tree, subtree, or takeover view.
     # 函数用途: 根据 requester/scope/purpose 查询 agent runtime 投影，预留接管和授权扩展字段。
     def query_agent_runtime(self, context: AgentRuntimeQueryContext) -> AgentRuntimeQueryResult:
-        normalized, warnings = self._normalize_runtime_query_context(context)
-        report = self._runtime_query_report(normalized)
+        normalized, warnings = _normalize_runtime_query_context(self, context)
+        report = _runtime_query_report(self, normalized)
         reserved = _runtime_query_reserved(normalized)
         return AgentRuntimeQueryResult(context=normalized, report=report, warnings=warnings, reserved=reserved)
-
-    # LLM: _normalize_runtime_query_context resolves root task and visibility without enforcing policy yet.
-    # 函数用途: 归一化查询上下文，保留未来 requester/scope 授权检查入口。
-    def _normalize_runtime_query_context(
-        self,
-        context: AgentRuntimeQueryContext,
-    ) -> tuple[AgentRuntimeQueryContext, list[str]]:
-        warnings: list[str] = []
-        requester = self.get_agent_run(context.requester_run_id) if context.requester_run_id else None
-        root_task_id = context.root_task_id or (requester.root_task_id if requester else "")
-        target_run_id = context.target_run_id or _default_query_target(context)
-        visibility = context.visibility or _default_query_visibility(context.scope)
-        if not root_task_id and not target_run_id:
-            warnings.append("missing_root_task_or_target_run")
-        return replace(
-            context,
-            root_task_id=root_task_id,
-            target_run_id=target_run_id,
-            visibility=visibility,
-        ), warnings
-
-    # LLM: _runtime_query_report keeps scope selection explicit and easy to extend.
-    # 函数用途: 按 scope 返回整树、子树、阻塞列表或接管候选。
-    def _runtime_query_report(self, context: AgentRuntimeQueryContext) -> AgentTreeReport:
-        if context.scope in {"own_subtree", "subtree"} and context.target_run_id:
-            return self.list_subtree(context.target_run_id)
-        if context.scope in {"blocked_runs", "takeover_candidates"}:
-            runs = self.list_blocked_runs(context.root_task_id)
-            rollup = self.get_task_rollup(context.root_task_id)
-            return AgentTreeReport(task_id=context.root_task_id, runs=runs, rollup=rollup)
-        if context.root_task_id:
-            return self.list_agent_tree(context.root_task_id)
-        return AgentTreeReport(task_id="", runs=[], rollup=None)
 
     # LLM: _agent_runs_for_task centralizes tree ordering for all control-plane queries.
     # 函数用途: 按稳定顺序读取一个 root task 的所有 agent run。
@@ -228,6 +196,45 @@ class LocalStoreControlPlaneMixin:
                 (task_id,),
             ).fetchall()
         return [agent_run_from_row(row) for row in rows]
+
+
+# LLM: _normalize_runtime_query_context resolves root task and visibility without enforcing policy yet.
+# 函数用途: 归一化查询上下文，保留未来 requester/scope 授权检查入口。
+def _normalize_runtime_query_context(
+    store: LocalStoreControlPlaneMixin,
+    context: AgentRuntimeQueryContext,
+) -> tuple[AgentRuntimeQueryContext, list[str]]:
+    warnings: list[str] = []
+    requester = store.get_agent_run(context.requester_run_id) if context.requester_run_id else None
+    root_task_id = context.root_task_id or (requester.root_task_id if requester else "")
+    target_run_id = context.target_run_id or _default_query_target(context)
+    visibility = context.visibility or _default_query_visibility(context.scope)
+    if not root_task_id and not target_run_id:
+        warnings.append("missing_root_task_or_target_run")
+    return replace(
+        context,
+        root_task_id=root_task_id,
+        target_run_id=target_run_id,
+        visibility=visibility,
+    ), warnings
+
+
+# LLM: _runtime_query_report keeps scope selection explicit and easy to extend.
+# 函数用途: 按 scope 返回整树、子树、阻塞列表或接管候选。
+def _runtime_query_report(store: LocalStoreControlPlaneMixin, context: AgentRuntimeQueryContext) -> AgentTreeReport:
+    if context.scope in {"own_subtree", "subtree"} and context.target_run_id:
+        return store.list_subtree(context.target_run_id)
+    if context.scope == "blocked_runs":
+        runs = store.list_blocked_runs(context.root_task_id)
+        rollup = store.get_task_rollup(context.root_task_id)
+        return AgentTreeReport(task_id=context.root_task_id, runs=runs, rollup=rollup)
+    if context.scope == "takeover_candidates":
+        runs = _takeover_candidate_runs(store._agent_runs_for_task(context.root_task_id))
+        rollup = store.get_task_rollup(context.root_task_id)
+        return AgentTreeReport(task_id=context.root_task_id, runs=runs, rollup=rollup)
+    if context.root_task_id:
+        return store.list_agent_tree(context.root_task_id)
+    return AgentTreeReport(task_id="", runs=[], rollup=None)
 
 
 # LLM: _build_task_rollup derives a compact task summary from run projections.
@@ -279,6 +286,12 @@ def _select_subtree(runs: list[AgentRunRecord], root_run_id: str) -> list[AgentR
     return [run for run in runs if run.run_id in selected_ids]
 
 
+# LLM: _takeover_candidate_runs includes failed/timeout leaves so recovery views do not miss them.
+# 函数用途: 从已排序的 run 投影中筛出可接管状态，包含 BLOCKED、FAILED、ERROR、TIMEOUT。
+def _takeover_candidate_runs(runs: list[AgentRunRecord]) -> list[AgentRunRecord]:
+    return [item for item in runs if item.status in _TAKEOVER_CANDIDATE_STATUSES]
+
+
 # LLM: _runs_by_parent makes subtree traversal shallow and deterministic.
 # 函数用途: 为每个 parent_run_id 建立直接子 run 索引。
 def _runs_by_parent(runs: list[AgentRunRecord]) -> dict[str, list[AgentRunRecord]]:
@@ -312,5 +325,5 @@ def _default_query_visibility(scope: str) -> str:
 # 函数用途: 给查询结果补充后续接管/授权扩展提示。
 def _runtime_query_reserved(context: AgentRuntimeQueryContext) -> dict[str, object]:
     if context.scope == "takeover_candidates":
-        return {"takeover_hint": "blocked_runs"}
+        return {"takeover_hint": "blocked_failed_timeout_runs"}
     return {}

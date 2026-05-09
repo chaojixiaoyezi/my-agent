@@ -70,13 +70,20 @@ def _build_risk_flags(
 def _to_board_item(
     manager: Any,
     task: SubAgentTask,
+    *,
+    task_index: dict[str, SubAgentTask] | None = None,
+    include_child_status_counts: bool = True,
 ) -> SubAgentBoardItem:
     """Convert a task to a board item."""
     open_request_count = sum(1 for item in task.capability_requests if item.status == "OPEN")
     open_gap_count = sum(1 for item in task.capability_gaps if item.status == "OPEN")
     flags = _build_risk_flags(task, open_request_count, open_gap_count)
     # LLM: child status counts let parents inspect the task tree without reading every work log.
-    child_status_counts = _child_status_counts(manager, task)
+    child_status_counts = (
+        _child_status_counts(manager, task, task_index=task_index)
+        if include_child_status_counts
+        else {}
+    )
     return SubAgentBoardItem(
         id=task.id,
         root_id=task.root_id,
@@ -112,12 +119,20 @@ def _to_board_item(
 
 # LLM: _child_status_counts 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 函数用途: 处理子级状态counts相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
-def _child_status_counts(manager: Any, task: SubAgentTask) -> dict[str, int]:
+def _child_status_counts(
+    manager: Any,
+    task: SubAgentTask,
+    *,
+    task_index: dict[str, SubAgentTask] | None = None,
+) -> dict[str, int]:
     counts: dict[str, int] = {}
     for child_id in task.child_ids:
         try:
-            child = manager.load(child_id)
+            child = task_index[child_id] if task_index is not None else manager.load(child_id)
         except (FileNotFoundError, TypeError):
+            counts["missing"] = counts.get("missing", 0) + 1
+            continue
+        except KeyError:
             counts["missing"] = counts.get("missing", 0) + 1
             continue
         counts[child.status] = counts.get(child.status, 0) + 1
@@ -144,7 +159,18 @@ class SubAgentBoardService:
     ) -> SubAgentBoard:
         """Build the subagent traffic light board."""
         board_options = _board_options(options, recent_limit=recent_limit)
-        items = [_to_board_item(self.manager, task) for task in self.manager.list_runs()]
+        tasks = self.manager.list_runs()
+        # LLM: Full boards reuse the loaded task set for child counts; lightweight paths stay metadata-only.
+        task_index = {task.id: task for task in tasks} if board_options.include_child_status_counts else None
+        items = [
+            _to_board_item(
+                self.manager,
+                task,
+                task_index=task_index,
+                include_child_status_counts=board_options.include_child_status_counts,
+            )
+            for task in tasks
+        ]
         summary: dict[str, int] = {"total": len(items)}
         for item in items:
             summary[item.status] = summary.get(item.status, 0) + 1
