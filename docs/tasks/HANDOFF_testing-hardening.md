@@ -17,6 +17,13 @@
 
 ## 实际完成
 
+### 中文速览
+
+- 这条 handoff 主要补了两个“坏天气”E2E 场景：一个测 gateway 处理到一半被 stop/restart 后能不能恢复，另一个测真实模型多轮工具调用后 memory-resume 能不能把上下文找回来。
+- `gateway-processing-stop` 是不丢请求测试：worker 已经把请求拿走并写到 processing，这时模拟 gateway 停掉，再重排回 pending，确认新 worker 能继续完成。
+- `real-model-recovery-multi-round` 是真实模型恢复测试：模型至少走 read_file 和 search_text 两轮工具调用，最后把结果写成可恢复的任务输出，确认恢复线索里有真实响应、工具 evidence 和 `output.json`。
+- 当时只做到了语法检查通过；真实运行被 `log_analysis.bounded_query` 缺失挡住，所以这份 handoff 的状态是“代码入口已补，环境修复后还要复跑真实 E2E”。
+
 ### gateway-processing-stop（新增场景）
 - 在 `gateway_cases.py` 新增 `run_scenario_gateway_processing_stop_case()` 函数
 - 模拟：投递请求 → worker 领任务并进入 processing 状态（带 lease）→ 模拟 gateway stop/restart（调用 requeue_gateway_processing_requests）→ 新 worker 重拾请求完成

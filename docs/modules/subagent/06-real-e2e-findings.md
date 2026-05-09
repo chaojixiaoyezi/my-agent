@@ -2,6 +2,100 @@
 
 This document is append-only. Record every real subagent E2E issue found during live model/API runs, including the test scene, observed behavior, root cause, fix, verification, and remaining gap.
 
+## 中文阅读说明
+
+这份文档保留英文标题和字段，是为了方便代码、测试、CI、后续 LLM 和外部评审检索；下面补一份中文速览，按每条 E2E 记录解释“这次测了什么、发现了什么、修到什么程度、还差什么”。
+
+字段对照：
+
+- `Test scene`：测试场景，也就是这次真实 E2E 怎么跑、在哪里跑、用了什么模型。
+- `Workspace`：用户任务目录，本轮都在 `/Users/xiaoyezi/my-claude-code` 附近做真实测试。
+- `Runtime output` / `Internal runtime root`：内部运行目录，放 prompt、response、runner 报告、memory、LocalStore 等用户一般不看的东西。
+- `Clean deliverables root` / `Deliverables root`：干净产物目录，只放用户要看的代码、测试、报告等成果。
+- `Subagent workspace`：子代理工单和运行状态目录，里面会比较多文件，是系统内部使用的。
+- `Model backend`：模型接口类型，比如 `anthropic_compatible` 表示走兼容 Anthropic 格式的接口。
+- `Model name`：真实调用的模型名，本轮主要是 `MiniMax-M2.7`。
+- `Real execution mode`：真实执行方式，比如 `subagent-run --execute --no-probe` 表示真正调模型跑子代理，不是 dry-run。
+- `Observed behavior` / `Symptom`：实际看到的现象。
+- `Root cause`：原因。
+- `Fix`：本轮怎么改。
+- `Verification`：用什么测试或真实命令验证。
+- `Status`：当前是否解决。
+- `Remaining risk` / `Remaining gap`：还没完全解决、后续还要补的风险。
+
+## 中文速览（每条 E2E 记录）
+
+### 3 个子代理并行真实 E2E
+
+- Finding 1：父级测试一开始跑错目录。子代理已经写好了文件，手动测试也能过，但父级验收从错误目录执行测试，导致误报失败；后来让测试命令自动推断 artifact 所在目录，并记录真实 cwd，字符串和统计任务复测通过。
+- Finding 2：图算法子代理写了文件，但最后没有干净收尾。系统正确把它标成 `BLOCKED` 并生成接管线索；这条主要证明坏任务能被发现，但当时还没自动修复。
+- Finding 3：测试通过不等于正式验收通过。字符串和统计测试过了，但 evidence/patch review 不完整，所以正式 acceptance 拒绝；后来增加“父级真实测试报告可作为机器证据”的兜底，但坏 evidence 仍不会被掩盖。
+- Finding 4：外层测试 wrapper 不能当唯一真相。外层 shell session 可能失真，所以后续 E2E 以文件、board、due-check、acceptance 报告和真实命令输出为准。
+
+### 3 个子代理并行真实 E2E v2
+
+- Result：正向链路跑通。3 个真实 runner 都完成，父级测试都过，父级 next-action 建议验收，显式 apply 后全部 `DONE / VERIFIED`；这证明“runner -> 父级测试 -> 下一步建议 -> 显式验收”主链路可用。
+
+### 5 个子代理故障真实 E2E
+
+- Result：父级能发现并接管被杀掉的 runner。geometry 子代理被手动 `SIGTERM`，系统通过 heartbeat/run timeout 识别异常，并用 action plan 接管。
+- Result：父级能抓到已经完成 runner 的真实测试失败。interval 任务跑完了，但父级测试失败，所以没有被验收；这证明“完成状态”不会绕过父级质量关。
+- Finding 5：已有失败测试报告时，follow-up 一开始不会生成正确救援建议。后来修成可以从现有 `test_execution.json` 合成 follow-up，并通过 `--apply-followup --take-over-by ...` 进入接管。
+- Result：正常任务仍然可以验收。array/search/tree 都通过并 `DONE / VERIFIED`，故障任务进入 `TAKEN_OVER`，due-check 清零。
+
+### 10 个子代理并行真实 E2E
+
+- Result：10 并发部分通过，同时暴露供应商限流。7 个 runner 到等待验收，3 个 blocked；清洁任务可以验收，非清洁任务进入接管。它不是全绿测试，而是压力/恢复测试。
+- Finding 6：MiniMax 在 10 个并发 runner 下出现 429 限流。系统不是本地代码坏了，而是模型服务端限流；当前能路由到接管，后续还要加供应商感知的限速、退避和重试。
+- Finding 7：模型少了结构化输出结束标记会被干净拦截。matrix 任务因为缺 `[/SUBAGENT_RESULT]` 被标 blocked；当前能救援接管，后续可以加一次安全重试/修复。
+- Finding 8：子代理自己写的测试也可能是错的。colors 任务实现看起来对，但子代理写了错误期望；父级测试发现失败并转救援。后续需要父级拥有的 oracle/test pack，不能只信孩子自己写的测试。
+- Finding 9：父级验收曾跳过 patch review。roman 任务测试过了，但 patch 没 review，按严格规则应该先 review patch；后来 next-action 会先建议 `subagents-patches --review-apply`。
+- Finding 10：blocked runner 没有测试报告时，follow-up 曾提示去跑测试，方向不对。现在 blocked/failed runner 可以直接生成 rescue preview，并通过 take-over 进入接管。
+
+### 多层子代理控制面 E2E（不调真实模型）
+
+- Result：1 主 / 2 子 / 4 孙的控制面通过。重点测任务树、LocalStore、board、due-check、接管视图和 TestExecutor 安全边界，确认多层结构能存、能查、能显示、能发现风险。
+- Finding 11：旧的父任务快照保存时可能把 child 链接覆盖掉。后来保存任务时合并磁盘已有 `child_ids`，避免父子关系被旧对象写没。
+- Finding 12：接管候选查询一开始漏掉 TIMEOUT 的孙节点。后来 `takeover_candidates` 覆盖 `BLOCKED / FAILED / ERROR / TIMEOUT`，不再只看 blocked。
+- Prior Pain Point Matrix：把我们之前的痛点逐条对照了一遍：3/5/10 并发、runner 被杀/阻塞/超时、测试过但验收卡住、孩子测试写错、高危命令安全、reporter/checker 角色、多层主子孙结构。这里是“哪些痛点已经测过、哪些还欠”的总表。
+
+### 真实多层 MiniMax E2E
+
+- Result：真实多层树暴露 runner/验收缺口。真实模型创建 1 root、2 child、4 grandchild；有的写出文件，有的测试发现真实 bug，有的被故障注入终止，due-check/action-plan 能报告接管动作。
+- Finding 13：配置里的子代理工具白名单没有传到 `spawn_subagents`。导致 child 没有写文件工具；后来把 `subagent_allowed_tools` 加到配置归一化和 spawn 创建路径里。
+- Finding 14：父级测试和验收需要能恢复嵌套 artifact 路径。真实模型常写相对路径，父级一开始找不到；后来按安全目录内的唯一后缀路径恢复，不读正文，只找文件位置。
+- Finding 15：任务状态变了以后，旧 follow-up 可能误导。比如旧报告说可以 apply，但任务已经 blocked；后来 preview 和 apply 使用同一套状态一致性检查，状态不合适时转救援。
+- Remaining Gaps：图算法任务还没修；共享 workspace 的全局 due-check 仍可能很吵；孩子自己写的测试不够可靠；还需要父级 test packs。
+- Finding 16：recovery-tree 一开始漏掉还处于 `RUNNING` 但其实已经心跳超时的孙节点。后来 recovery-tree 读取超时配置，把 stale running descendants 纳入恢复交接包，并给出接管命令。
+
+### 1/4/16/48 干净产物树真实 E2E
+
+- Result：用户产物目录和内部运行目录成功分开。48 个叶子 runner 都跑完，用户看的 `deliverables/` 没有内部 runtime 泄漏，内部复杂文件都留在 `.my_agent_runtime/`。
+- Result：父级 oracle 和产品测试命令现在会真实失败，不会假绿。48 个 leaf 的直接父级 oracle 发现 27 过、21 失败；产品命令修复后也能诚实输出 25 过、23 失败/阻塞。
+- Finding 17：`subagents-tests --re-run` 曾把空测试报告当成功。后来要求真正执行过测试，否则返回非零，不再假绿。
+- Finding 18：`.my_agent_runtime/.../subagents` 新布局下，测试工作目录推断错了。后来优先用 `manager.workspace_root`，再从 artifact 推断 deliverable 目录。
+- Finding 19：模型常写 `cd <dir> && pytest ...`，安全层会挡 shell 链。后来只允许“开头一个安全 cd + 后面普通命令”被拆成 `working_dir` 和 plain command，仍保留高危 shell 拦截。
+- Finding 20：有些 runner 写了 test 文件，但 `output.json` 没写 `tests` 字段。后来当 `tests` 为空时，会从安全 artifact 里的 `test_*.py` 推断 pytest 命令。
+- Remaining Gaps：仍有一个 leaf 既没结构化 tests 也没 artifact，父级只能救援/人工检查；孩子测试仍不能作为唯一真相；UI/CLI 后续要更清楚展示 `deliverables/` 和 `.my_agent_runtime/` 两个根目录。
+
+### 主节点单入口层级烟测 E2E
+
+- Finding 21：runner 内部没有模型工具来创建自己的下一层。后来新增 `schedule_child_subagents`，只能在当前 runner 上下文使用，外部不能绕过主节点直接创建下层。
+- Finding 22：child run 没继承用户批准的产物目录。后来下层默认继承父节点的 `allowed_write_roots`，但不会继承父工单目录，避免污染父节点内部文件。
+- Finding 23：嵌套 dispatch 曾意外生成 workflow worker。runner 里没显式指定 workflow 时，现在默认 `off`，只推进已有孩子，不自动扩任务树。
+- Finding 24：嵌套 dispatch 曾选中正在运行的父节点自己，导致递归跑自己。现在 runner 内 dispatch 默认只选当前节点的直接 child，并排除当前 runner id。
+- Finding 25：coordinator 如果拿到写工具，可能自己代替 leaf 写产物。测试模板改成 coordinator 只有调度/读工具，只有 leaf 有写工具。
+- Finding 26：模型把 `max_depth=1` 理解成“再创建一层”，系统原来按绝对深度拦住了。现在在 runner context 下会把这种值归一化成“允许多一层”。
+- Successful Smoke：小烟测已通过。外层只启动 root，root 创建 child，child 创建 leaf，只有 leaf 写 `proof.txt=hierarchy-ok`；这条证明主节点单入口原则在小链路上能跑通。
+
+### 主节点单入口 1/4/16/48 压测尝试
+
+- Finding 27：父节点重复 dispatch 曾被 one-shot guard 阻断。现在只有创建类工具 one-shot，dispatch/board 这种进度循环工具可以重复调用。
+- Finding 28：下层 runner 缺父级目标上下文。现在 child/grandchild 会继承 bounded parent goal/thought，让下一层知道原始目标、产物路径和验收要求。
+- Finding 29：模型把 coordinator 误写成 worker。现在如果一个节点有调度工具且没有写工具，会按 depth 推断成 child/grandchild coordinator。
+- Finding 30：限速下还没跑的 PLANNING child 被误判成失败。现在 dispatch 返回 direct child 进度摘要和 continue hint，告诉父节点还有 PLANNING/RUNNING 的孩子要继续 dispatch。
+- Remaining Gap：失败分支自动恢复还没完全闭环。当前已经证明 root->child->grandchild->leaf 能真实写部分文件，root 在一个 child blocked 后能继续推进别的 child；还缺自动救援超时 coordinator、接管残留 PLANNING leaf，以及完整 48 文件 main-node-only 全绿复跑。
+
 ## 2026-05-09 Real 3-Subagent Parallel E2E
 
 - Test scene:

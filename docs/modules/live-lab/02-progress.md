@@ -42,10 +42,12 @@
 - 当前 log-analysis replay 较成熟，其它模块 suite 还需要补。
 - 如果 suite 输出路径变化但文档没同步，新手会按旧路径找不到产物。
 ## 2026-05-06 code-size cleanup
+- 中文说明：这一轮只拆 Live Lab 代码结构，不改变 replay 行为。重点是把 log-analysis replay 的 setup 和 stage 执行拆小，降低代码体积风险，后续加更多真实演练 case 会更好维护。
 - Split log-analysis replay setup and stage execution into smaller parameterized helpers.
 - Kept live-lab replay behavior stable while reducing script-level near-soft code-size risk.
 
 ## 2026-05-07 LLM annotation coverage update
+- 中文说明：这一轮是注释/可维护性补强，不改 Live Lab 的 suite 行为和产物路径。以后改 `scripts/live_lab/` 的流程、artifact 路径或执行副作用时，要同步更新 `LLM:` 和 `函数用途:` / `类用途:` 注释。
 - `scripts/live_lab/` and related governance scripts now follow the same definition-level double-layer comments rule as product code: every module/class/function/method has `LLM:` plus `函数用途:` / `类用途:`.
 - This is a documentation/maintainability pass only; Live Lab suite behavior and artifact paths are intended to stay unchanged.
 - Added a code-size script regression test that scans non-test, non-runtime Python files so future changes cannot silently miss annotation coverage.

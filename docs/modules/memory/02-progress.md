@@ -194,15 +194,18 @@
 - route index、raw archive、LocalStore、daily memory 同时存在，新手可能混淆“事实源”和“索引/摘要”的区别。
 - 后续如果改恢复链路但不更新结构图，会很快重新变成散乱文档。
 ## 2026-05-06 code-size cleanup
+- 中文说明：这一轮拆 memory archive query、resume brief、storage-date、runtime event 和 memory routing helper，输出语义不变，主要降低 near-soft 体积风险。
 - Refactored memory archive query, resume brief, storage-date, runtime event, and memory routing helpers to reduce near-soft code-size risk.
 - Preserved archive query outputs, memory routing receipts, and resume guidance semantics.
 - Verified with memory/archive/routing focused tests, ruff, and the global code-size report.
 
 ## 2026-05-07 high-risk pre-clean
+- 中文说明：这一轮先把 task workspace 的 state/timeline payload 和 JSONL helper 拆到 `task_workspace_payloads.py`，让 `task_workspace.py` 继续只管编排和路径；同时继续把 archive query、resume brief、memory gate、routing receipts 收进 bundle。
 - Split task workspace state/timeline payload and JSONL helpers into `memory_archive/task_workspace_payloads.py` so `task_workspace.py` stays focused on orchestration and path wiring.
 - Preserved task workspace file shapes, legacy run adapter behavior, and existing focused persistence tests.
 - Continued bundle cleanup in archive query, resume brief, memory gate review, and routing receipts; these changes keep archive/LocalStore records as clues while task/run/gateway files remain the authority.
 ## 2026-05-07 LLM annotation coverage update
+- 中文说明：这一轮只补 memory 模块产品代码的双层注释，不改行为、文件格式、工作流语义或公开接口。后续改恢复链路、bundle 或副作用时要同步维护。
 - Product-code modules, classes, functions, and methods in the active module now carry the required `LLM:` plus `函数用途:` / `类用途:` definition-level double-layer comments format.
 - This is a documentation-only maintainability pass: behavior, file formats, workflow semantics, and public interfaces are intended to stay unchanged.
 - Future module changes must keep these comments current when changing module/class/def behavior, side effects, bundles, or caller expectations.

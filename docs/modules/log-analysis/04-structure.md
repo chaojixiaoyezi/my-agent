@@ -1,4 +1,5 @@
 ﻿## 2026-05-06 structure update
+- 中文说明：LOG 的 work-order 模型、规划、实体分类、gap detail、trace-case 查询组装都拆到更具体的文件。外部命令不变，内部结构更适合后续加 detector 和 analyst。
 - `dispatch/work_orders/models.py` now owns work-order dataclasses; `planning.py` owns planning flow only.
 - `analytics/detectors/classifier_entities.py` now owns entity comparison, entity extraction, and gap detail helpers; `classifiers.py` owns event predicates and weak-signal classification.
 - `tools/query_trace.py` now owns trace-case parameter and query assembly helpers; `tools/query_functions.py` remains the public tool facade.
@@ -63,26 +64,31 @@ agent_py_agent/agent/log_analysis/
 
 本页先描述主结构和学习路径。后续应补充每条 CLI 命令的输入输出样例、工具返回 JSON 样例，以及 Live Lab replay 的产物路径说明。
 ## 2026-05-06 structure update
+- 中文说明：ingestion、work-order dispatch、parser 和 security 模块现在使用小 helper 和参数 bundle 承接长链路调用；公开包结构和 CLI 行为保持稳定。
 - Ingestion, work-order dispatch, parser, and security modules now use small helper functions and parameter bundles for long internal call paths.
 - Public log-analysis package layout and external command behavior remain stable; the cleanup is an internal maintainability pass.
 
 ## 2026-05-07 bundle structure update
+- 中文说明：LOG 各层入口用领域专属 Params/Options 表达多字段输入，`bounded_query`、work-order creation、parser、ingest、report、evidence、scheduler、storage query 和 tool query 都不再依赖开放式 kwargs 作为产品接口。
 - `bounded_query.py` exposes `BoundedQueryParams` for file-tail query options; old explicit keyword fields are normalized into that bundle at the boundary.
 - `dispatch/work_orders/creation.py` now calls subagent creation with `CreateRunParams`, so LOG dispatch no longer expands arbitrary task fields across the module boundary. It sets `normalize_role=False` for LOG work orders so `analyst` / `reviewer` remain domain-visible while still carrying parent-gated quality contracts.
 - The parser, ingest, report, evidence, scheduler, storage query, and tool query helpers use domain-specific Params/Options records for multi-field inputs; no LOG product function keeps a var-keyword service signature.
 
 ## 2026-05-07 hard/soft structure update
+- 中文说明：security prompt、case evidence、dispatch queue、ingest、entity graph、storage query 和 trace-case 的兼容字段都只是 adapter，真正服务逻辑使用 bundle；strict code-size 已无 hard/soft，剩余近软项只作为后续重构提示。
 - `agents/prompts.py` uses `SecurityPromptScope` as the security prompt scope bundle; tests now exercise the bundle call shape directly.
 - `cases/evidence.py`, `dispatch/queue.py`, `ingest/*`, `security/entity_graph.py`, `storage/query.py`, and `tools/query_trace.py` keep legacy explicit fields only as adapters around small dataclass bundles.
 - The strict code-size report now has no hard or soft findings for log-analysis; remaining items are high-risk near-soft warnings for follow-up refactors.
 - Detector rule helpers and query evidence writers use focused params objects at construction time, keeping storage facts and query summaries stable while near-soft cleanup splits implementation details.
 
 ## 2026-05-07 high-risk zero update
+- 中文说明：LOG ingest finalize、storage query projection 等高风险路径继续拆分；manifest/dedup/checkpoint 和 row matching/preview projection 分别落到专门文件，strict report 已没有 LOG high-risk。
 - `ingest/pipeline_finalize.py` now owns manifest, dedup completion, and checkpoint finalization; `ingest/pipeline_enrich.py` stays focused on one-file ingest orchestration and storage flushing.
 - `storage/query_projection.py` now owns row matching, summaries, and preview projection; `storage/query.py` stays focused on bounded query execution and evidence persistence.
 - Parser, evidence, checkpoint, health, entity graph, trace-case, and config warning helpers use explicit Params/Request bundles at internal boundaries; the strict report has no remaining log-analysis high-risk entries.
 
 ## 2026-05-07 annotation structure update
+- 中文说明：结构文档把代码里的双层注释当作架构同步内容。新增 LOG 文件、服务、bundle 或 facade 方法时，要同步更新结构页和 in-code 注释。
 - Module structure docs now treat the definition-level double-layer comments as part of the code architecture: `LLM:` records model-facing contract/caller/side-effect notes, and `函数用途:` / `类用途:` records beginner-readable purpose and edit guidance.
 - New files, services, bundles, or facade methods must update both this structure page and the in-code comments at the same time.
 - The global file tree in `CODEBASE_TREE.md` now includes a current architecture map for CLI, agent core, gateway, memory, log-analysis, subagent, tooling, and settings boundaries.
