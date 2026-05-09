@@ -1187,3 +1187,58 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining risk:
   - Empty command tests are not automatically converted into file checks yet. For now they are visible but non-executable.
   - A future improvement can infer safe `file_check` tests when the output already cites concrete artifact paths.
+
+## 2026-05-09 Main-Node 1/2/4/12 Trace Tree E2E
+
+- Test scene:
+  - Case id: `main_node_trace_tree_1_2_4_12_20260509_230212`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/main_node_trace_tree_1_2_4_12_20260509_230212`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/main_node_trace_tree_1_2_4_12_20260509_230212`.
+  - Only the root runner was started externally. The root created 2 child coordinators; each child created 2 grandchild coordinators; each grandchild created 3 leaf workers.
+- 中文说明：
+  - 这次按用户要求验证“主节点只管发令，下层自己继续派工”的真实链路。
+  - 我没有直接去指挥叶子节点；叶子节点的文件都是通过 root -> child -> grandchild -> leaf 这条链路产生的。
+  - 这次规模是 `1 主 / 2 子 / 4 孙 / 12 叶`，不是最终压力规模，但已经能暴露真实层级调度、产物落盘、父级汇总和叶子能力边界问题。
+- Observed behavior:
+  - The hierarchy created 19 tasks total:
+    - 1 root coordinator.
+    - 2 child coordinators.
+    - 4 grandchild coordinators.
+    - 12 leaf workers.
+  - `subagent_debug_trace_level=2` recorded:
+    - all `task_created` events;
+    - all `hierarchy_schedule_result` events;
+    - leaf and coordinator `runner_result_recorded` events.
+  - All 12 leaf deliverable folders eventually produced:
+    - `solution.py`;
+    - `README.md`;
+    - `test_solution.py`.
+- Verification:
+  - Parent-side external pytest ran every generated `test_solution.py` in its own leaf directory.
+  - Result: 12 leaf test suites total, 9 passed, 3 failed.
+  - Passed suites:
+    - `anagram_groups`, `interval_merge`, `palindrome`;
+    - `lru_cache`, `valid_parentheses`;
+    - `bfs`, `dijkstra`;
+    - `binary_search`, `prime_sieve`.
+  - Failed suites:
+    - `two_sum`: implementation returned a valid pair `[4999, 5001]`, but the test expected one specific pair `[1, 9999]`. 中文解释：题目本身允许多个答案，但测试写得太死，导致“功能可能没错，测试标准不稳”。
+    - `topological_sort`: DFS and Kahn outputs were both valid topological orders, but the integration test expected the same relative order. 中文解释：拓扑排序本来可以有多个正确顺序，这个测试把“唯一顺序”当成标准，测试口径不合理。
+    - `stats`: `standard_deviation` returned population standard deviation, while the test expected sample standard deviation. 中文解释：实现和测试没有先约定“总体标准差”还是“样本标准差”，所以口径打架。
+- Real issues found:
+  - Root finalization did not return after lower layers had mostly completed:
+    - root runner stayed alive for more than 18 minutes;
+    - CPU dropped to 0;
+    - trace had no new event for more than 160 seconds;
+    - process stack showed it was waiting on model streaming response during final summary.
+  - 中文解释：下层已经把活干得差不多了，但主节点最后总结卡住了。后续需要 root-level model-call timeout / heartbeat / partial-finalize fallback，不能让无人值守任务无限挂住。
+  - One leaf (`dijkstra`) wrote files successfully, but marked itself `BLOCKED` because it wanted to run `pytest` and did not have a shell/command tool.
+  - 中文解释：叶子节点应该明白自己的权限边界：没有命令工具时，应该写好 `test_solution.py` 和建议命令，让父级验收器执行，而不是把自己标记为缺能力。
+  - Some intermediate prompts dropped the requested `leaf_outputs` path segment and wrote directly under child/grandchild folders.
+  - 中文解释：产物没有写丢，但路径不完全听话。后续要把 deliverables root 当作强字段传递，不能靠自然语言一层层转述。
+- Cleanup:
+  - Removed `.DS_Store`, `.pytest_cache`, and `__pycache__` only inside this case deliverables directory.
+- Next recommendation:
+  - Add root finalization timeout / partial-finalize fallback first.
+  - Then tighten leaf worker prompt/tool contract: leaf writes artifacts and tests; parent/verifier runs commands.
+  - Then add strict deliverables-root propagation checks before moving to larger `1/4/16/48` scale.
