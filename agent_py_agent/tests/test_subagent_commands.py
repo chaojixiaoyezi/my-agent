@@ -187,6 +187,39 @@ class TestCmdSubagentsPlanActions:
             assert call_kwargs["params"].root_id == "root-a"
 
 
+class TestCmdSubagentsLeadershipRecoveryPlan:
+    """测试 cmd_subagents_leadership_recovery_plan 命令。"""
+
+    def test_cmd_subagents_leadership_recovery_plan_passes_bundle(self, tmp_path: Path):
+        """领导权恢复计划 CLI 应把 root、leader 和容量传给业务层 bundle。"""
+        from agent_py_agent.cli.subagents import cmd_subagents_leadership_recovery_plan
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.capability_config = str(tmp_path / "capability.yaml")
+        args.root_id = "root-a"
+        args.leader = ["leader-a", "leader-b"]
+        args.max_children_per_leader = 3
+        args.json = False
+
+        mock_agent = MagicMock()
+        mock_report = MagicMock()
+        mock_report.summary = {"assignments": 0, "assigned_children": 0, "unassigned_children": 0}
+        mock_report.assignments = []
+        mock_report.unassigned = []
+        mock_agent.subagents.write_leadership_recovery_plan.return_value = mock_report
+
+        with patch("agent_py_agent.cli._leadership.make_agent", return_value=mock_agent), \
+             patch("agent_py_agent.cli._leadership.load_capability_config", return_value=MagicMock()):
+            result = cmd_subagents_leadership_recovery_plan(args)
+
+        assert result == 0
+        call_kwargs = mock_agent.subagents.write_leadership_recovery_plan.call_args.kwargs
+        assert call_kwargs["params"].root_id == "root-a"
+        assert call_kwargs["params"].leader_ids == ["leader-a", "leader-b"]
+        assert call_kwargs["params"].max_children_per_leader == 3
+
+
 class TestCmdSubagentsApplyActions:
     """测试 cmd_subagents_apply_actions 命令。"""
 

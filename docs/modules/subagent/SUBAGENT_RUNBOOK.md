@@ -612,6 +612,20 @@ python3 -m agent_py_agent subagents-plan-actions --root-id <root_run_id> --all
 - `triage_capability_gap`
 - `probe_or_repair_channel`
 
+### 批量 coordinator 领导权恢复计划
+
+如果一个 coordinator 挂掉，但它下面还有很多孩子，不要急着把所有孩子塞给同一个 leader。先生成分摊计划：
+
+```bash
+python3 -m agent_py_agent subagents-leadership-recovery-plan \
+  --root-id <root_run_id> \
+  --leader <leader_run_id_a> \
+  --leader <leader_run_id_b> \
+  --max-children-per-leader 3
+```
+
+这个命令只读 `coordinator_heartbeat_stale` 问题，并写 `subagent_leadership_recovery_plan.json` / `SUBAGENT_LEADERSHIP_RECOVERY_PLAN.md`。它不会修改 `parent_id`，不会标记旧 coordinator，也不会自动执行报告里的 future command；分批 apply 入口后续单独做。
+
 ### 执行动作
 
 默认 dry-run：

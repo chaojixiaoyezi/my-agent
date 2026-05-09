@@ -169,6 +169,7 @@ Ctrl+C
 | `subagents-plan-actions` | 根据 due-check 生成动作计划 | 写 action plan 报告 | 否 |
 | `subagents-apply-actions` | dry-run 或执行低风险动作 | `--apply` 时写回任务和审计日志 | 否 |
 | `subagents-workflow-plan` | 预览目标会命中哪个内置 subagent workflow | 否 | 否 |
+| `subagents-leadership-recovery-plan` | 预览批量 coordinator 挂掉后的 leader 分摊接管计划 | 写 dry-run 计划报告 | 否 |
 | `subagents-hierarchy` | 预览或显式创建 child/grandchild subagent run | `--apply` 时创建下一层任务 | 否 |
 | `subagents-recovery-tree` | 查询 root subagent 的多层恢复交接包 | 否，只输出 refs-only 恢复线索 | 否 |
 | `subagents-route-capabilities` | 路由 capability request | `--apply` 时写 grant/gap | 否 |
@@ -797,6 +798,23 @@ my-agent subagents-workflow-plan "开发一个可验收的功能" --template-id 
 | `--template-id <id>` | - | 强制使用指定 workflow 模板做预览。 |
 | `--output-dir <path>` | - | 显式写出 JSON / Markdown dry-run 预览，不创建 subagent。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
+
+## `subagents-leadership-recovery-plan`
+
+```powershell
+my-agent subagents-leadership-recovery-plan --root-id <root_run_id> --leader <leader_run_id>
+my-agent subagents-leadership-recovery-plan --root-id <root_run_id> --leader <leader_a> --leader <leader_b> --max-children-per-leader 3 --json
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--capability-config <path>` | `agent_py_agent/config/capability_config.yaml` | 指定 heartbeat timeout 等巡检阈值。 |
+| `--root-id <id>` | - | 必填，只规划这一棵 root subagent 任务树。 |
+| `--leader <id>` | - | 必填，候选新 leader run ID；可多次传入。 |
+| `--max-children-per-leader <n>` | `3` | 每个 leader 最多接多少个直接孩子；`0` 表示不限制。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+该命令只做 dry-run：它会读取 due-check 里的 `coordinator_heartbeat_stale` 问题，把失联 coordinator 的直接孩子按容量分给候选 leader，并写出 `subagent_leadership_recovery_plan.json` / `SUBAGENT_LEADERSHIP_RECOVERY_PLAN.md`。当前不会改 `parent_id`、不会标记旧 coordinator，也不会自动执行 future command；真正分批 apply 入口是后续阶段。
 
 ## `subagents-hierarchy`
 

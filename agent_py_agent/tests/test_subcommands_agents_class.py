@@ -31,6 +31,7 @@ class TestSubagentsSubcommandRegistration:
             "spawn-subagents",
             "subagents",
             "subagents-workflow-plan",
+            "subagents-leadership-recovery-plan",
             "subagents-due-check",
             "subagents-probe",
             "subagents-plan-actions",

@@ -94,10 +94,12 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/services/board_due_models.py`：承接 due-check 共享 DTO 和 issue helper，让巡检谓词文件保持可维护。
 - `agent_py_agent/agent/subagents/services/board_due_checks.py`：heartbeat/run-timeout 只针对真实运行中或待接管的执行任务；带 child runs 且没有 active attempt 的 `PLANNING` coordinator 不按普通 runner 卡死处理，而是报告 `coordinator_heartbeat_stale`，由父代理决定是否恢复/转移领导权。
 - `agent_py_agent/agent/subagents/services/action_handlers.py`：`recover_coordinator_leadership` 是受控 apply 动作；必须显式传已有 leader run id，才会把旧 coordinator 标记为 `TAKEN_OVER`，把直接子任务重挂到新 leader，并同步 `parent_id`、`depth`、`supervisor`、`final_owner`。
+- `agent_py_agent/agent/subagents/services/leadership_recovery.py`：批量领导权恢复计划器；复用 due-check 的 `coordinator_heartbeat_stale` 事实源，把多个失联 coordinator 的直接孩子按候选 leader 容量拆批，当前只生成 refs-only dry-run 报告，不修改任务树。
 - `agent_py_agent/cli/_acceptance_plan.py`：提供 `subagents-acceptance-plan` CLI 入口；默认只展示父级验收 dry-run 决策和 refs，`--write` 只写决策审计文件，`--apply` 只允许 `inspect_only`，`--followup` 只预览，`--apply-followup` 才进入受控 apply/rescue。
 - `agent_py_agent/cli/_acceptance_plan_renderers.py`：承接 acceptance-plan 的 JSON 转换和人类输出渲染；只打印 refs、状态和推荐命令，不展开 audit 文件正文。
 - `agent_py_agent/cli/_hierarchy.py`：实现 `subagents-hierarchy` 命令；`--child ROLE:AGENT_NAME:GOAL` 可重复，默认 dry-run，`--apply` 才创建下一层 run，输出只包含 refs 和摘要。
 - `agent_py_agent/cli/_hierarchy.py`：同时实现 `subagents-recovery-tree` 命令；按 root run 输出多层恢复包，`--hide-healthy` 可减少上下文体积，`--capability-config` 提供 stale RUNNING 判定阈值，仍只展示 refs 和摘要。
+- `agent_py_agent/cli/_leadership.py`：实现 `subagents-leadership-recovery-plan` 命令；用户必须给 `--root-id` 和一个或多个 `--leader`，命令写 `subagent_leadership_recovery_plan.json` / `SUBAGENT_LEADERSHIP_RECOVERY_PLAN.md`，但不执行接管。
 - `agent_py_agent/cli/_review.py`：提供 `subagents-tests` 和验收相关兼容导出；tests 默认只读取已有 `test_execution.json`，显式 `--re-run` 才重新执行 `output.json.tests`。
 - `agent_py_agent/agent/settings/config.py` / `agent_py_agent/config/agent_config.yaml`：提供 `acceptance_execute_tests` 和 `acceptance_test_timeout_seconds`，默认保持老验收路径不自动跑命令；`subagent_allowed_tools` 可给 `spawn_subagents` 创建出的 runner 任务设置默认工具白名单。
 - Auto Policy v1 当前只实现 dry-run 审计，尚未接主配置；后续若做成用户可见主配置，配置默认值和中文说明必须同步写入 `agent_py_agent/config/agent_config.yaml` 与 `AgentConfig`。如果只是 subagent/capability 路由内部的授权、次数或 allowlist 细则，应进入 `agent_py_agent/config/capability_config.yaml` 与 `capability_config.py`，不要扩张主配置。
