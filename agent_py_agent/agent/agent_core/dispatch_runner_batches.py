@@ -57,7 +57,7 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
     records = list(batch.records)
     runner_max_attempts = _runner_max_attempts(agent.config.runner_failure_policy)
     runner_candidates = _dispatch_runner_candidates(
-        agent.subagents.list_runs(),
+        _scoped_runner_tasks(agent.subagents.list_runs(), ctx),
         ctx.max_runners,
         runner_max_attempts=runner_max_attempts,
     )
@@ -70,6 +70,22 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
     batch.pending_runner_jobs = _limited_runner_jobs(agent, pending_runner_jobs)
     batch.records = records
     return run_runner_batch(agent, batch)
+
+
+# LLM: _scoped_runner_tasks keeps nested dispatch focused on the current node's descendants.
+# 函数用途: 根据 parent/root/exclude 过滤 runner 候选；默认顶层不变，runner 内部可只跑直接 child。
+def _scoped_runner_tasks(tasks: list, ctx: DispatchContext) -> list:
+    excluded = {str(item) for item in (ctx.exclude_run_ids or []) if str(item).strip()}
+    scoped = []
+    for task in tasks:
+        if task.id in excluded:
+            continue
+        if ctx.parent_run_id and task.parent_id != ctx.parent_run_id:
+            continue
+        if ctx.root_id and task.root_id != ctx.root_id:
+            continue
+        scoped.append(task)
+    return scoped
 
 
 # LLM: collect_runner_candidates 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

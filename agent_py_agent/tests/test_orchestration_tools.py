@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -302,6 +303,86 @@ class TestDispatchSubagentsToolExecute:
 
         assert result.ok is True
 
+    def test_runner_context_dispatch_defaults_workflow_mode_off(self):
+        """子代理 runner 内部 dispatch 默认不再套全局 workflow auto。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_report = MagicMock()
+        mock_report.dry_run = False
+        mock_report.summary = {}
+        mock_report.records = []
+
+        mock_agent = MagicMock()
+        mock_agent._current_subagent_run_id = "subagent-root"
+        mock_agent.config.subagent_workflow_mode = "auto"
+        mock_agent.tools.specs.return_value = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = Path("/tmp/workspace")
+
+        tool = DispatchSubagentsTool(mock_agent)
+        result = tool.execute({"apply": True})
+
+        assert result.ok is True
+        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
+        assert call_kwargs["params"].workflow_mode == "off"
+        assert call_kwargs["params"].parent_run_id == "subagent-root"
+        assert call_kwargs["params"].exclude_run_ids == ["subagent-root"]
+        assert call_kwargs["params"].finalize_acceptance is False
+
+    def test_runner_context_invalid_workflow_mode_stays_off(self):
+        """模型误传 parallel 时，runner dispatch 也不能回退成全局 auto。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_report = MagicMock()
+        mock_report.dry_run = False
+        mock_report.summary = {}
+        mock_report.records = []
+
+        mock_agent = MagicMock()
+        mock_agent._current_subagent_run_id = "subagent-root"
+        mock_agent.config.subagent_workflow_mode = "auto"
+        mock_agent.tools.specs.return_value = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = Path("/tmp/workspace")
+
+        tool = DispatchSubagentsTool(mock_agent)
+        result = tool.execute({"apply": True, "workflow_mode": "parallel"})
+
+        assert result.ok is True
+        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
+        assert call_kwargs["params"].workflow_mode == "off"
+
+    def test_runner_context_dispatch_reports_direct_child_progress(self):
+        """runner 内 dispatch 结果要提示剩余 PLANNING child，避免误判失败。"""
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_report = MagicMock()
+        mock_report.dry_run = False
+        mock_report.summary = {"runner": 1}
+        mock_report.records = []
+
+        mock_agent = MagicMock()
+        mock_agent._current_subagent_run_id = "parent-run"
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent.tools.specs.return_value = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = Path("/tmp/workspace")
+        mock_agent.subagents.list_runs.return_value = [
+            SimpleNamespace(id="parent-run", parent_id="", status="RUNNING"),
+            SimpleNamespace(id="child-a", parent_id="parent-run", status="AWAITING_ACCEPTANCE"),
+            SimpleNamespace(id="child-b", parent_id="parent-run", status="PLANNING"),
+        ]
+
+        tool = DispatchSubagentsTool(mock_agent)
+        result = tool.execute({"apply": True, "execute_runners": True})
+
+        payload = json.loads(result.output)
+        assert payload["direct_children"]["by_status"]["PLANNING"] == 1
+        assert payload["direct_children"]["planning_run_ids"] == ["child-b"]
+        assert "继续调用 dispatch_subagents" in payload["direct_children"]["continue_hint"]
+
 
 class TestOrchestrationToolsSpec:
     """测试工具规格定义。"""
@@ -346,3 +427,62 @@ class TestOrchestrationToolsSpec:
 
         assert spec.name == "dispatch_subagents"
         assert spec.category == "orchestration"
+
+    def test_schedule_child_subagents_spec_defined(self):
+        """ScheduleChildSubagentsTool 工具规格已定义。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
+
+        mock_agent = MagicMock()
+        tool = ScheduleChildSubagentsTool(mock_agent)
+        spec = tool.spec
+
+        assert spec.name == "schedule_child_subagents"
+        assert spec.category == "orchestration"
+        assert "当前 subagent runner" in spec.description
+
+
+class TestScheduleChildSubagentsTool:
+    """测试当前 runner 创建下一层子节点的安全边界。"""
+
+    def test_rejects_without_current_runner_context(self):
+        """没有当前 runner id 时，不能绕过主节点直接挂 child。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent._current_subagent_run_id = ""
+        tool = ScheduleChildSubagentsTool(mock_agent)
+
+        result = tool.execute({"children": [{"goal": "leaf"}], "apply": True})
+
+        assert not result.ok
+        assert "顶层派工请使用 create_subagents" in result.output
+
+    def test_runner_context_max_depth_can_mean_one_more_layer(self, tmp_path):
+        """模型在 depth=1 传 max_depth=1 时，按“再开一层”兼容处理。"""
+        import json
+
+        from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+        root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
+        child = agent.subagents.create_run(
+            goal="child", thought="child", plan=["child"], parent_id=root.id, root_id=root.id, depth=1,
+        )
+        agent._current_subagent_run_id = child.id
+        tool = ScheduleChildSubagentsTool(agent)
+
+        result = tool.execute(
+            {
+                "apply": True,
+                "max_depth": 1,
+                "children": [{"goal": "leaf", "role": "leaf", "agent_name": "leaf"}],
+            }
+        )
+        payload = json.loads(result.output)
+        leaf = agent.subagents.load(payload["created_run_ids"][0])
+
+        assert result.ok
+        assert leaf.parent_id == child.id
+        assert leaf.depth == 2

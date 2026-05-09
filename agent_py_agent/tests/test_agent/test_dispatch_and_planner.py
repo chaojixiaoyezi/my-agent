@@ -210,6 +210,62 @@ def test_subagent_dispatch_dry_run_plans_runner_patch_and_acceptance():
         assert not (root / "subs" / "subagent_dispatch_log.jsonl").exists()
 
 
+def test_subagent_dispatch_parent_scope_runs_direct_children_not_parent():
+    """LLM: Verifies nested dispatch from a runner advances children instead of rerunning itself."""
+    from agent_py_agent.agent.agent_core.dispatch_params import DispatchParams
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        parent = agent.subagents.create_run(
+            goal="parent", thought="currently running", plan=["dispatch child"], role="coordinator",
+        )
+        child = agent.subagents.create_run(
+            goal="child", thought="work", plan=["work"], parent_id=parent.id, root_id=parent.id, depth=1,
+        )
+        running_parent = agent.subagents.load(parent.id)
+        running_parent.status = "RUNNING"
+        agent.subagents.save(running_parent)
+
+        report = agent.dispatch_subagents(
+            _make_router(agent),
+            CapabilityConfig(),
+            params=DispatchParams(apply=False, max_runners=1, workflow_mode="off", parent_run_id=parent.id),
+        )
+
+        runner_records = [item for item in report.records if item.step == "runner"]
+        assert [item.run_id for item in runner_records] == [child.id]
+        assert parent.id not in [item.run_id for item in runner_records]
+
+
+def test_subagent_dispatch_can_defer_acceptance_finalize():
+    """LLM: Verifies nested dispatch can run children without immediately applying acceptance."""
+    from agent_py_agent.agent.agent_core.dispatch_params import DispatchParams
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        task = agent.subagents.create_run(
+            goal="awaiting acceptance", thought="runner done", plan=["accept"], role="worker",
+        )
+        loaded = agent.subagents.load(task.id)
+        loaded.status = "AWAITING_ACCEPTANCE"
+        loaded.verification_status = "NEEDS_ACCEPTANCE"
+        agent.subagents.save(loaded)
+        Path(loaded.output_json).write_text(json.dumps({"patches": []}), encoding="utf-8")
+
+        report = agent.dispatch_subagents(
+            _make_router(agent),
+            CapabilityConfig(),
+            params=DispatchParams(apply=True, max_runners=0, workflow_mode="off", finalize_acceptance=False),
+        )
+
+        assert not [item for item in report.records if item.step == "acceptance"]
+        assert agent.subagents.load(task.id).status == "AWAITING_ACCEPTANCE"
+
+
 def test_subagent_dispatch_surfaces_leadership_recovery_plan_refs_only():
     """Dispatch should write a leadership recovery plan ref without applying hierarchy changes."""
     with tempfile.TemporaryDirectory() as td:

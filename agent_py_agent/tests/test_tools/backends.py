@@ -111,6 +111,33 @@ class DuplicateSubagentDelegationBackend(BaseBackend):
         return ModelResponse(text="重复派工已被拦截并收口。", backend=self.name)
 
 
+class RepeatedDispatchBackend(BaseBackend):
+    """LLM: fake backend that calls dispatch twice to prove parent loops can keep advancing.
+
+    新手说明:
+    前两次都请求同一个 dispatch_subagents 调用，第三次确认没有被一次性工具防重复挡住。
+    """
+
+    name = "fake_repeated_dispatch_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls <= 2:
+            return ModelResponse(
+                text=(
+                    "[TOOL_CALL]\n"
+                    '{"tool":"dispatch_subagents","apply":true,"execute_runners":false,"max_runners":1}\n'
+                    "[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+        assert "阻止重复执行" not in prompt
+        return ModelResponse(text="重复 dispatch 已允许继续推进。", backend=self.name)
+
+
 class MaxToolRoundBackend(BaseBackend):
     """LLM: fake model backend that verifies a final response is generated when max tool rounds are hit.
 

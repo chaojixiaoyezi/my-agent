@@ -85,6 +85,80 @@ def test_hierarchy_schedule_apply_builds_two_child_four_grandchild_tree(tmp_path
     assert sum(len(manager.load(child_id).child_ids) for child_id in first.created_run_ids) == 4
 
 
+# LLM: test_hierarchy_schedule_inherits_parent_extra_write_roots keeps user-approved product roots available.
+# 函数用途: 确认下一层默认继承父节点的外部产物目录权限，但不继承父节点工单目录。
+def test_hierarchy_schedule_inherits_parent_extra_write_roots(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    deliverables = tmp_path / "deliverables"
+    root = manager.create_run(
+        goal="root",
+        thought="orchestrate",
+        plan=["plan"],
+        extra_write_roots=[str(deliverables)],
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(parent_run_id=root.id, child_specs=_child_specs(1), apply=True)
+    )
+    child = manager.load(result.created_run_ids[0])
+
+    assert str(deliverables) in child.allowed_write_roots
+    assert root.task_dir not in child.allowed_write_roots
+
+
+# LLM: test_hierarchy_schedule_carries_parent_context_to_child_thought prevents vague nested handoffs.
+# 函数用途: 确认下层 coordinator 能通过 thought 看到父级目标和提示，避免只拿到空泛编号任务。
+def test_hierarchy_schedule_carries_parent_context_to_child_thought(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    root = manager.create_run(
+        goal="父级要求 leaf 写 48 个验收文件，且 coordinator 不能代写。",
+        thought="父级补充：只能通过当前节点继续派下一层。",
+        plan=["plan"],
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(parent_run_id=root.id, child_specs=_child_specs(1), apply=True)
+    )
+    child = manager.load(result.created_run_ids[0])
+
+    assert "父级要求 leaf 写 48 个验收文件" in child.thought
+    assert "父级补充：只能通过当前节点继续派下一层" in child.thought
+    assert "必须把下一层 goal 写成自包含任务" in child.thought
+
+
+# LLM: test_hierarchy_schedule_infers_coordinator_role_from_tools keeps model role slips recoverable.
+# 函数用途: 当模型把带层级调度权限的下一层误写成 worker 时，系统按 depth 纠正为 coordinator。
+def test_hierarchy_schedule_infers_coordinator_role_from_tools(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    root = manager.create_run(goal="root", thought="split", plan=["plan"])
+    child = manager.create_run(
+        goal="child",
+        thought="coordinate",
+        plan=["plan"],
+        parent_id=root.id,
+        root_id=root.id,
+        depth=1,
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=child.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="创建三个 leaf worker 并调度执行。",
+                    agent_name="child-01-grandchild-01",
+                    role="worker",
+                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+                )
+            ],
+            apply=True,
+        )
+    )
+    grandchild = manager.load(result.created_run_ids[0])
+
+    assert grandchild.role == "grandchild_coordinator"
+
+
 # LLM: test_hierarchy_schedule_blocks_depth_and_child_limits keeps fan-out bounded.
 # 函数用途: 确认超过最大深度或最大子任务数量时不会创建新任务。
 def test_hierarchy_schedule_blocks_depth_and_child_limits(tmp_path):

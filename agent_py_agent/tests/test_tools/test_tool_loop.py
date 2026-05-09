@@ -16,6 +16,7 @@ from agent_py_agent.agent.tools import ToolRegistry, ToolRegistryParams
 from .backends import (
     DuplicateSubagentDelegationBackend,
     MaxToolRoundBackend,
+    RepeatedDispatchBackend,
     SubagentDelegationBackend,
     ToolCallingBackend,
     make_tool_registry,
@@ -128,6 +129,26 @@ def test_repeated_orchestration_tool_call_is_not_executed_twice():
         assert result.response == "重复派工已被拦截并收口。"
         assert result.tool_rounds == 2
         assert len(tasks) == 1
+
+
+def test_repeated_dispatch_is_allowed_for_parent_progress_loops():
+    """LLM: dispatch_subagents may need repeated identical calls when rate limits leave pending children."""
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            subagent_workspace="subs",
+            max_tool_rounds=4,
+        )
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = RepeatedDispatchBackend()
+
+        result = agent.run("继续推进父节点调度", save=False)
+
+        assert result.response == "重复 dispatch 已允许继续推进。"
+        assert result.tool_rounds == 2
+        assert "阻止重复执行" not in result.prompt
 
 
 def test_max_tool_rounds_generates_final_response():

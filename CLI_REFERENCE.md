@@ -165,6 +165,7 @@ Ctrl+C
 | `spawn-subagents` | 拆分并创建 subagent 工单 | 是 | 否 |
 | `subagents` | 查看 subagent 看板 | 否 | 否 |
 | `subagents-due-check` | 巡检 subagent 风险 | 写全局 due-check 报告 | 否 |
+| `subagents-budget` | 汇总 subagent runner 调用、工具轮数和 token 粗估 | 写预算 JSON/Markdown 报告 | 否 |
 | `subagents-probe` | 检查 subagent 通道健康 | 写 probe 报告和单任务记录 | 否 |
 | `subagents-plan-actions` | 根据 due-check 生成动作计划 | 写 action plan 报告 | 否 |
 | `subagents-apply-actions` | dry-run 或执行低风险动作 | `--apply` 时写回任务和审计日志 | 否 |
@@ -740,6 +741,32 @@ my-agent subagents-due-check --root-id <root_run_id> --all
 | `--root-id <root_run_id>` | 空 | 只巡检指定 root subagent 任务树；适合真实 E2E 多棵树共用一个 workspace 时降噪。 |
 | `--all` | `false` | 显示全部问题，而不是按 limit 截断。 |
 | `--limit <n>` | `20` | 最多显示多少条问题。 |
+
+## `subagents-budget`
+
+```powershell
+my-agent subagents-budget
+my-agent subagents-budget --root-id <root_run_id> --max-model-calls 80 --max-tool-rounds 200
+my-agent subagents-budget --root-id <root_run_id> --max-prompt-response-tokens 500000 --include-dry-runs --json
+```
+
+这个命令只读取 runner 结果引用和 prompt/response 文件大小，用来估算一棵真实 E2E 树的模型调用、工具轮数和粗略 token 预算。它不会展开 artifact 正文，也不会改变任务状态；适合在 3、5、10、1/4/16/48 这类多代理压测后快速确认调用没有失控。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--root-id <root_run_id>` | 空 | 只统计指定 root subagent 任务树；为空时统计当前 workspace 里所有可读 runner 记录。 |
+| `--max-model-calls <n>` | `0` | 模型调用数阈值；`0` 表示不检查。超过时写入 `exceeded`，但不阻断执行。 |
+| `--max-tool-rounds <n>` | `0` | 工具轮数阈值；`0` 表示不检查。 |
+| `--max-prompt-response-tokens <n>` | `0` | prompt+response 粗略 token 阈值；按文件字节数估算，`0` 表示不检查。 |
+| `--include-dry-runs` | `false` | 把 dry-run prompt 也计入预算记录；默认只看真实 runner 结果。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+输出位置：
+
+```text
+agent_py_agent/data/subagents/subagent_run_budget.json
+agent_py_agent/data/subagents/SUBAGENT_RUN_BUDGET.md
+```
 
 ## `subagents-probe`
 

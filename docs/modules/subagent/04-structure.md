@@ -59,7 +59,8 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/models.py`：定义 `SubAgentTask`、`TaskStatus`、`DISPATCH_INELIGIBLE_STATUSES` 等核心数据结构。
 - `agent_py_agent/agent/subagents/model_task.py`：承接 `SubAgentTask`、`EvidencePacket`、`Finding`、`StatusReport`、`SecuritySignal` 等任务树、证据和安全预留合同模型，`models.py` 继续作为兼容导出入口。
 - `agent_py_agent/agent/subagents/model_task.py`：同时定义 `RuntimeIdentity`，记录 service owner、requester、effective principal、conversation、memory namespace 和 config overlay scope；这些字段是隔离和审计口子，不是授权、长期记忆或全局配置事实源。
-- `agent_py_agent/agent/subagents/services/hierarchy_scheduler.py`：定义 `HierarchyScheduleRequest` / `HierarchyChildSpec`，通过显式 bundle dry-run 或创建 child/grandchild run；默认不写任务，`apply=True` 时复用 `create_run`，并限制 `max_depth` / `max_children`。
+- `agent_py_agent/agent/subagents/services/hierarchy_scheduler.py`：定义 `HierarchyScheduleRequest` / `HierarchyChildSpec`，通过显式 bundle dry-run 或创建 child/grandchild run；默认不写任务，`apply=True` 时复用 `create_run`，并限制 `max_depth` / `max_children`。层级 child 会继承 bounded parent goal/thought 作为 `thought`，并在模型把带 orchestration tools 的下一层误标成 `worker` 时按 depth 推断 coordinator role。
+- `agent_py_agent/agent/agent_core/orchestration_tools.py`：暴露模型可调用的 `schedule_child_subagents`，只在当前 subagent runner 上下文中创建下一层 child；没有 active runner id 会拒绝。`orchestration_dispatch_scope.py` 集中维护 runner 内部 `dispatch_subagents` 的默认 parent scope、self-exclude、workflow-off 和 defer-acceptance 规则，避免外层绕过主节点或递归跑自己。`orchestration_progress_payload.py` 会在 runner-context dispatch 响应里附带 direct child status counts、PLANNING/RUNNING ids 和 continue hint，帮助父节点继续推进限速未跑完的孩子。
 - `agent_py_agent/agent/subagents/services/hierarchy_recovery.py`：定义 `HierarchyRecoveryRequest` / `HierarchyRecoveryResult`，从 root run 只读扫描 child_ids 子树，返回需要恢复的后代、takeover readiness、failure handoff 和 checkpoint refs；可按 capability timeout 阈值把 stale `RUNNING` 后代纳入恢复候选，不展开 artifact 正文、不自动接管。
 - `agent_py_agent/agent/subagents/manager_hierarchy.py`：给 `SubAgentManager` 暴露 `schedule_child_runs(params=...)` 薄 facade，让层级创建入口保持单一且可测试。
 - `agent_py_agent/agent/subagents/role_contracts.py`：集中定义 `reporter` / `checker` 角色契约；`analyst` 映射到 reporter，`reviewer` 映射到 checker，checker 默认只读工具、不能自验收、最终由父级 gate 裁决。
@@ -210,6 +211,7 @@ agent_py_agent/agent/
 29. retention 只从 active review queue 移除 rejected / already exported 候选，候选、decision、export 和 verifier 文件仍留在 run workspace 里供接管和审计。
 28. `memory-resume` 在跨天恢复时用 archive/LocalStore 作为线索，最终推荐读取任务目录里的事实源和 checkpoint artifacts，再由父级决定是否验收；这只是恢复入口推荐，不代表子代理写入主代理长期 memory。
 29. workflow preview 仍可通过 CLI dry-run 展示；真实路径已接入 `create_run(... workflow_mode="plan|auto")` 和 `subagents-dispatch --apply --workflow-mode auto`，可把父任务上的 `workflow_plan` 物化为 worker 子工单。LOG 专项 apply path 和 runner 恢复 scenario 继续作为真实任务记录的先行验证样本。
+30. 主节点单入口层级执行的外层控制器只启动 root。root/child/grandchild 通过 runner-context `schedule_child_subagents` 和 `dispatch_subagents` 向下反馈；外层不得直接启动或修复下层节点。创建类工具保持 one-shot 防重复，dispatch/board 属于 progress-loop 工具，可在同一父节点工具循环中重复调用。
 30. CLI / core / manager 的新接口规则是先构造 Request/Options bundle，再进入业务服务；旧散参入口只做兼容 adapter，不作为新增字段的扩展位置。
 31. subagent runner、spawn、recovery snapshot 和 board 的新字段优先加到 `subagent_params.py` 或 `SubAgentBoardOptions`，mixin 只做兼容 facade 和少量编排。
 

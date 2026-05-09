@@ -76,6 +76,7 @@ def build_parent_acceptance_auto_followup(
         mutates_task_state=False,
         next_action_mutates_task_state=action.mutates_task_state,
         reserved={
+            **_classification_reserved(task),
             "refs_only": True,
             "reads_artifact_bodies": False,
             "mutates_task_state": False,
@@ -158,3 +159,20 @@ def _failed_tests(report: TestExecutionReport) -> list[dict[str, str]]:
             }
         )
     return failed
+
+
+# LLM: _classification_reserved attaches compact failure routing facts to the post-test follow-up.
+# 函数用途: 读取同目录的测试失败分类摘要，给 repair/rescue 子代理一个稳定 ref，不展开测试输出正文。
+def _classification_reserved(task: SubAgentTask) -> dict[str, Any]:
+    path = Path(task.reports_dir) / "test_failure_classification.json"
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {"test_failure_classification_ref": str(path), "test_failure_classification_status": "invalid"}
+    return {
+        "test_failure_classification_ref": str(path),
+        "test_failure_primary_category": str(payload.get("primary_category") or ""),
+        "test_failure_recommended_action": str(payload.get("recommended_action") or ""),
+    }

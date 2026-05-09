@@ -509,6 +509,7 @@ def test_parent_acceptance_auto_execution_followup_reports_failed_tests_without_
         )
 
         followup_path = Path(task.reports_dir) / "parent_acceptance_auto_followup.json"
+        classification_path = Path(task.reports_dir) / "test_failure_classification.json"
         followup_payload = json.loads(followup_path.read_text(encoding="utf-8"))
         reloaded = agent.subagents.load(task.id)
         assert result.status == "tests_executed"
@@ -521,6 +522,13 @@ def test_parent_acceptance_auto_execution_followup_reports_failed_tests_without_
         assert followup_payload["followup"]["test_failed"] == 1
         assert followup_payload["followup"]["failed_tests"][0]["name"] == "missing-readme"
         assert followup_payload["followup"]["next_action"]["action"] == "plan_rescue"
+        assert classification_path.exists()
+        assert followup_payload["followup"]["reserved"]["test_failure_classification_ref"] == str(classification_path)
+        assert followup_payload["followup"]["reserved"]["test_failure_recommended_action"] in {
+            "repair_code",
+            "fix_runner_output",
+            "manual_review",
+        }
         assert followup_payload["followup"]["reserved"]["auto_starts_rescue"] is False
         assert reloaded.status == "AWAITING_ACCEPTANCE"
         assert reloaded.verification_status == "NEEDS_ACCEPTANCE"

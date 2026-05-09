@@ -72,6 +72,7 @@ class DispatchFinalizeParams:
     note: str
     limit: int
     execute_acceptance_tests: bool
+    finalize_acceptance: bool
     existing_records: list
 
 
@@ -150,6 +151,8 @@ class _DispatchCollectionBase:
             )
         )
         records.extend(patch_records)
+        if not params.finalize_acceptance:
+            return records
         acceptance_records = make_acceptance_records(
             AcceptanceRecordParams(
                 self,
@@ -299,6 +302,10 @@ def _dispatch_context_from_params(
         note=params.note,
         take_over_by=params.take_over_by,
         locked_files=params.locked_files,
+        parent_run_id=params.parent_run_id,
+        root_id=params.root_id,
+        exclude_run_ids=params.exclude_run_ids,
+        finalize_acceptance=params.finalize_acceptance,
         router=router,
     )
 
@@ -312,6 +319,7 @@ def _dispatch_finalize_params(params: DispatchParams, records: list) -> Dispatch
         note=params.note,
         limit=params.limit,
         execute_acceptance_tests=params.execute_acceptance_tests,
+        finalize_acceptance=params.finalize_acceptance,
         existing_records=records,
     )
 

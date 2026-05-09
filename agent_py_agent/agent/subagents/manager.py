@@ -15,6 +15,7 @@ from .manager_acceptance_findings import SubAgentAcceptanceFindingMixin
 from .manager_actions import SubAgentActionMixin
 from .manager_base import SubAgentBaseMixin, SubAgentManagerInitParams
 from .manager_board import SubAgentBoardMixin
+from .manager_budget import SubAgentBudgetMixin
 from .manager_capabilities import SubAgentCapabilityMixin
 from .manager_channel_probe import SubAgentChannelProbeMixin
 from .manager_dispatch import SubAgentDispatchMixin
@@ -39,6 +40,7 @@ class SubAgentManager(
     SubAgentBaseMixin,
     SubAgentLifecycleMixin,
     SubAgentBoardMixin,
+    SubAgentBudgetMixin,
     SubAgentActionMixin,
     SubAgentCapabilityMixin,
     SubAgentAcceptanceMixin,

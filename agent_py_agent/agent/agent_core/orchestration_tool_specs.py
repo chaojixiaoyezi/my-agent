@@ -27,7 +27,7 @@ _CREATE_PARAMETER_DETAILS = {
     "allowed_tools": "JSON 数组，例如 [\"read_file\", \"write_file\"]。如果需要写代码，通常至少给 read_file/search_text/write_file/replace_in_file。",
     "acceptance_checks": "JSON 数组或多行文本，说明父代理后续怎样判断任务完成。",
     "plan": "JSON 数组或多行文本，给子代理的初始执行步骤。",
-    "workflow_mode": "默认跟随配置：auto->auto，manual->plan，off->off。显式传值会覆盖配置。",
+    "workflow_mode": "默认跟随配置：auto->auto，manual->plan，off->off。只支持 off/plan/auto；未知值保守按 off 处理。",
     "extra_write_roots": "JSON 数组，例如 [\"C:/Users/you/Desktop/work\"]；只给本次子代理任务增加写入边界。",
 }
 _CREATE_EXAMPLES = [
@@ -53,9 +53,46 @@ _DISPATCH_PARAMETER_DETAILS = {
     "apply": "false 只生成计划和报告；true 会写审计日志并可能改变任务状态。",
     "execute_runners": "true 会消耗真实 API；只有用户明确要求开跑/真实执行/完整测试时才打开。",
     "planner": "true 会额外调用父代理 LLM planner；适合长任务统筹，但会多消耗一次模型调用。",
-    "workflow_mode": "plan 只把 workflow 计划写回父任务；auto 会在计划 OK 时落成 worker 子工单。",
+    "workflow_mode": "plan 只把 workflow 计划写回父任务；auto 会在计划 OK 时落成 worker 子工单；未知值保守按 off 处理。",
     "max_runners": "用来限制本轮推进数量，避免一次把太多子代理同时跑起来。",
 }
+
+_SCHEDULE_CHILD_USE_CASES = [
+    "当前 subagent runner 需要把自己的任务继续拆给下一层子/孙代理",
+    "需要保持 main -> child -> grandchild 的层级边界，而不是外层直接创建叶子节点",
+]
+_SCHEDULE_CHILD_KEYWORDS = [
+    "下一层",
+    "子节点",
+    "孙代理",
+    "层级",
+    "hierarchy",
+    "child",
+    "grandchild",
+]
+_SCHEDULE_CHILD_PARAMETERS = {
+    "children": "下一层子任务列表，每项包含 goal/role/agent_name 等字段，必填",
+    "apply": "是否真正创建下一层任务；默认 false 只预览",
+    "max_depth": "允许创建到的最大 depth，默认 3",
+    "max_children": "父节点最多能拥有多少直接 child，0 表示不限制",
+}
+_SCHEDULE_CHILD_PARAMETER_DETAILS = {
+    "children": (
+        "JSON 数组。每项可含 role、agent_name、goal、plan、allowed_tools、allowed_skills、"
+        "acceptance_checks、extra_write_roots。"
+    ),
+    "apply": "true 才写任务树；false 只返回会创建什么，适合先检查。",
+    "max_depth": "用来避免子代理无限递归创建下级节点。",
+    "max_children": "用来避免一个父节点一次挂太多直接孩子。",
+}
+_SCHEDULE_CHILD_EXAMPLES = [
+    (
+        '{"tool":"schedule_child_subagents","apply":true,"max_depth":3,'
+        '"children":[{"role":"child_coordinator","agent_name":"catalog-lead",'
+        '"goal":"继续拆分商品目录实现任务",'
+        '"allowed_tools":["schedule_child_subagents","dispatch_subagents","subagent_board","read_file","write_file"]}]}'
+    ),
+]
 
 
 # LLM: build_create_subagents_spec 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -105,4 +142,20 @@ def build_dispatch_subagents_spec() -> ToolSpec:
             '{"tool":"dispatch_subagents","apply":false,"workflow_mode":"plan","max_runners":1}',
             '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"workflow_mode":"auto","max_runners":2,"runner_instruction":"只在隔离 fixture 目录内写文件，并输出可验收证据"}',
         ],
+    )
+
+
+# LLM: build_schedule_child_subagents_spec exposes hierarchy scheduling only inside runner context.
+# 函数用途: 构建“当前节点创建下一层子节点”的模型工具规格，区别于顶层 create_subagents。
+def build_schedule_child_subagents_spec() -> ToolSpec:
+    return ToolSpec(
+        name="schedule_child_subagents",
+        category="orchestration",
+        description="在当前 subagent runner 的名下创建下一层 child runs，保持层级树可恢复。",
+        use_cases=_SCHEDULE_CHILD_USE_CASES,
+        avoid_when=["顶层主代理第一次派工时继续用 create_subagents；没有当前 runner 上下文时不要调用"],
+        keywords=_SCHEDULE_CHILD_KEYWORDS,
+        parameters=_SCHEDULE_CHILD_PARAMETERS,
+        parameter_details=_SCHEDULE_CHILD_PARAMETER_DETAILS,
+        examples=_SCHEDULE_CHILD_EXAMPLES,
     )
