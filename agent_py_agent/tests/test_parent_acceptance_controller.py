@@ -389,3 +389,32 @@ def test_parent_acceptance_auto_executor_bundles_are_json_stable():
     assert result.to_dict()["executed"] is False
     assert result.to_dict()["mutates_task_state"] is False
     assert result.to_dict()["request"]["ready_for_automatic_execution"] is False
+
+
+def test_parent_acceptance_auto_execution_writes_dry_run_audit_file():
+    root_ctx, agent, task = _agent_and_task()
+    with root_ctx:
+        _write_output(
+            task,
+            [{
+                "name": "unit",
+                "validation_method": "command",
+                "command": "python -m pytest -q",
+            }],
+        )
+
+        result = agent.subagents.plan_parent_acceptance_auto_execution(task.id)
+
+        execution_path = Path(task.reports_dir) / "parent_acceptance_auto_execution.json"
+        payload = json.loads(execution_path.read_text(encoding="utf-8"))
+        reloaded = agent.subagents.load(task.id)
+        assert result.status == "blocked"
+        assert result.executed is False
+        assert result.command == f"subagents-tests {task.id} --re-run"
+        assert result.request.policy_ref.endswith("parent_acceptance_auto_policy.json")
+        assert payload["schema"] == "parent_acceptance_auto_execution.v1"
+        assert payload["dry_run"] is True
+        assert payload["result"]["executed"] is False
+        assert payload["reserved"]["executes_command"] is False
+        assert reloaded.status == "AWAITING_ACCEPTANCE"
+        assert reloaded.verification_status == "NEEDS_ACCEPTANCE"

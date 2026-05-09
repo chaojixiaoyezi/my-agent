@@ -27,11 +27,13 @@ from .acceptance_review_service import (
 )
 from .manager_parent_acceptance import (
     ParentAcceptanceApplyResult,
+    ParentAcceptanceAutoExecutionResult,
     ParentAcceptanceAutoPolicy,
     ParentAcceptanceDecision,
     ParentAcceptanceNextAction,
     manager_apply_parent_acceptance_decision,
     manager_plan_parent_acceptance,
+    manager_plan_parent_acceptance_auto_execution,
     manager_plan_parent_acceptance_auto_policy,
     manager_plan_parent_acceptance_next_action,
     manager_write_parent_acceptance_decision,
@@ -122,6 +124,11 @@ class _SubAgentAcceptanceFacade:
     # 函数用途: 生成父级验收自动策略审计；不执行建议动作、不改状态。
     def plan_parent_acceptance_auto_policy(self, run_id: str) -> ParentAcceptanceAutoPolicy:
         return manager_plan_parent_acceptance_auto_policy(self, run_id)
+
+    # LLM: plan_parent_acceptance_auto_execution is an audit-only executor facade.
+    # 函数用途: 生成父级验收自动执行计划审计；不启动命令、不改任务状态。
+    def plan_parent_acceptance_auto_execution(self, run_id: str) -> ParentAcceptanceAutoExecutionResult:
+        return manager_plan_parent_acceptance_auto_execution(self, run_id)
 
     # LLM: review_acceptance runs one parent acceptance review with explicit opt-in execution options.
     # 函数用途: 对单个子代理 run 执行父级验收；只有 options 或 apply 参数允许时才写回任务状态。
