@@ -410,11 +410,17 @@ def test_parent_acceptance_auto_execution_writes_dry_run_audit_file():
         reloaded = agent.subagents.load(task.id)
         assert result.status == "blocked"
         assert result.executed is False
+        assert result.execution_allowed is False
+        assert result.guard_status == "blocked"
+        assert "auto_executor_dry_run_only" in result.blocked_by
+        assert "no_process_execution" in result.safety_boundaries
         assert result.command == f"subagents-tests {task.id} --re-run"
         assert result.request.policy_ref.endswith("parent_acceptance_auto_policy.json")
         assert payload["schema"] == "parent_acceptance_auto_execution.v1"
         assert payload["dry_run"] is True
         assert payload["result"]["executed"] is False
+        assert payload["result"]["execution_allowed"] is False
+        assert payload["result"]["guard_status"] == "blocked"
         assert payload["reserved"]["executes_command"] is False
         assert reloaded.status == "AWAITING_ACCEPTANCE"
         assert reloaded.verification_status == "NEEDS_ACCEPTANCE"

@@ -40,8 +40,8 @@ class ParentAcceptanceAutoExecutionRequest:
         return asdict(self)
 
 
-# LLM: ParentAcceptanceAutoExecutionResult is an audit result, not proof of execution.
-# 类用途: 记录自动执行计划结果；第一版 executed 恒为 false，不改 task 状态。
+# LLM: ParentAcceptanceAutoExecutionResult is an audit result with hard guards, not proof of execution.
+# 类用途: 记录自动执行计划结果和硬闸门；第一版 execution_allowed/executed 恒为 false，不改 task 状态。
 @dataclass(frozen=True)
 class ParentAcceptanceAutoExecutionResult:
     """Audit-only result for a parent acceptance auto-execution plan."""
@@ -52,11 +52,15 @@ class ParentAcceptanceAutoExecutionResult:
     mode: str
     status: str
     request: ParentAcceptanceAutoExecutionRequest
+    execution_allowed: bool = False
+    guard_status: str = "blocked"
+    guard_reason: str = "auto executor is dry-run only"
     executed: bool = False
     mutates_task_state: bool = False
     command: str = ""
     execution_ref: str = ""
     blocked_by: list[str] = field(default_factory=list)
+    safety_boundaries: list[str] = field(default_factory=list)
     reserved: dict[str, Any] = field(default_factory=dict)
 
     # LLM: to_dict keeps nested request output consistent with dataclass serialization.
@@ -134,11 +138,20 @@ def _request_from_policy(
 def _result_from_request(
     request: ParentAcceptanceAutoExecutionRequest,
 ) -> ParentAcceptanceAutoExecutionResult:
+    blocked_by = [*request.preflight_blockers, "auto_executor_dry_run_only"]
     return ParentAcceptanceAutoExecutionResult(
         run_id=request.run_id,
         mode=request.mode,
         status="blocked",
         request=request,
+        execution_allowed=False,
+        guard_status="blocked",
+        guard_reason="auto executor is dry-run only",
         command=request.recommended_command,
-        blocked_by=list(request.preflight_blockers),
+        blocked_by=blocked_by,
+        safety_boundaries=[
+            "dry_run_only",
+            "no_process_execution",
+            "no_task_state_mutation",
+        ],
     )
