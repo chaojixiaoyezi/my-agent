@@ -836,6 +836,7 @@ my-agent subagents-acceptance-plan <run_id> --write
 my-agent subagents-acceptance-plan <run_id> --apply
 my-agent subagents-acceptance-plan <run_id> --next-action
 my-agent subagents-acceptance-plan <run_id> --auto-policy
+my-agent subagents-acceptance-plan <run_id> --auto-execution
 ```
 
 只读取该 run 的 `output.json`、`reports/test_execution.json` 和 handoff/readiness refs，展示父级下一步 dry-run 决策。输出可能是 `execute_tests`、`inspect_only`、`request_human` 或 `rescue`；默认不会执行 tests、不会读取 artifact 正文、不会写回 task 状态。显式传 `--write` 时会写入 `reports/parent_acceptance_decision.json` 审计文件，但这仍然不是 apply。
@@ -846,6 +847,8 @@ my-agent subagents-acceptance-plan <run_id> --auto-policy
 
 显式传 `--auto-policy` 时会读取 next-action，写入 `reports/parent_acceptance_auto_policy.json`，并展示策略判断。第一版固定 dry-run：`run_tests` 可被标记为 `allow` / `would_execute=true`，但 `executed=false`；`request_human_confirmation`、`plan_rescue`、`apply_acceptance` 等不会自动执行。半自动计划会额外展示 `execution_mode=manual_only`、`automatic_execution_allowed=false`、`recommended_command` 和 `preflight_status`，意思是“这条命令可以给人或后续受控调度器参考，但当前代码不会自己运行”。`ready_for_automatic_execution` 第一版固定 false。
 
+显式传 `--auto-execution` 时会读取 auto-policy，写入 `reports/parent_acceptance_auto_execution.json`，并展示自动执行 dry-run facade。第一版固定 `execution_allowed=false`、`guard_status=blocked`、`executed=false`，只展示 recommended command、blockers 和 hard guard，不启动命令、不修改 task 状态。
+
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `run_id` | - | 子代理运行 ID。 |
@@ -854,6 +857,7 @@ my-agent subagents-acceptance-plan <run_id> --auto-policy
 | `--apply` | `false` | 显式应用低风险 `inspect_only` 决策；其它决策只写入拦截审计，不改 task。 |
 | `--next-action` | `false` | 查看父/上级代理下一步显式动作建议，不执行动作。 |
 | `--auto-policy` | `false` | 查看并写入父级自动策略 dry-run 审计，不执行动作。 |
+| `--auto-execution` | `false` | 查看并写入父级自动执行 dry-run facade 审计，不执行动作。 |
 | `--reviewer <name>` | `parent` | `--apply` 进入普通验收路径时写入的 reviewer。 |
 | `--note <text>` | `""` | `--apply` 进入普通验收路径时写入的备注。 |
 

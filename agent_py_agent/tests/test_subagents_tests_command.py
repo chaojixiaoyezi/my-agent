@@ -109,6 +109,51 @@ class _FakeSubagents:
             },
         )
 
+    def plan_parent_acceptance_auto_execution(self, run_id):
+        assert run_id == self._task.id
+        request = SimpleNamespace(
+            run_id=run_id,
+            mode="dry_run",
+            policy_ref=str(Path(self._task.reports_dir) / "parent_acceptance_auto_policy.json"),
+            recommended_command=f"subagents-tests {run_id} --re-run",
+            ready_for_automatic_execution=False,
+            to_dict=lambda: {
+                "run_id": run_id,
+                "mode": "dry_run",
+                "policy_ref": str(Path(self._task.reports_dir) / "parent_acceptance_auto_policy.json"),
+                "recommended_command": f"subagents-tests {run_id} --re-run",
+                "ready_for_automatic_execution": False,
+            },
+        )
+        return SimpleNamespace(
+            run_id=run_id,
+            mode="dry_run",
+            status="blocked",
+            request=request,
+            execution_allowed=False,
+            guard_status="blocked",
+            executed=False,
+            mutates_task_state=False,
+            command=f"subagents-tests {run_id} --re-run",
+            execution_ref=str(Path(self._task.reports_dir) / "parent_acceptance_auto_execution.json"),
+            blocked_by=["automatic_execution_disabled", "auto_executor_dry_run_only"],
+            safety_boundaries=["dry_run_only", "no_process_execution", "no_task_state_mutation"],
+            to_dict=lambda: {
+                "run_id": run_id,
+                "mode": "dry_run",
+                "status": "blocked",
+                "request": request.to_dict(),
+                "execution_allowed": False,
+                "guard_status": "blocked",
+                "executed": False,
+                "mutates_task_state": False,
+                "command": f"subagents-tests {run_id} --re-run",
+                "execution_ref": str(Path(self._task.reports_dir) / "parent_acceptance_auto_execution.json"),
+                "blocked_by": ["automatic_execution_disabled", "auto_executor_dry_run_only"],
+                "safety_boundaries": ["dry_run_only", "no_process_execution", "no_task_state_mutation"],
+            },
+        )
+
     def plan_parent_acceptance(self, run_id):
         assert run_id == self._task.id
         return SimpleNamespace(
@@ -354,3 +399,30 @@ def test_subagents_acceptance_plan_auto_policy_prints_policy_decision(tmp_path, 
     assert "execution_mode=manual_only automatic_execution_allowed=False" in out
     assert "preflight_status=manual_ready manual=True automatic=False" in out
     assert "recommended_command=subagents-tests run-1 --re-run" in out
+
+
+def test_subagents_acceptance_plan_auto_execution_prints_dry_run_facade(tmp_path, capsys):
+    task = _task(tmp_path)
+    fake_agent = _FakeAgent(task)
+    args = argparse.Namespace(
+        config=str(tmp_path / "config.yaml"),
+        run_id="run-1",
+        json=False,
+        write=False,
+        apply=False,
+        next_action=False,
+        auto_policy=False,
+        auto_execution=True,
+    )
+
+    with patch("agent_py_agent.cli._acceptance_plan.make_agent", return_value=fake_agent):
+        result = cmd_subagents_acceptance_plan(args)
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert "SUBAGENT ACCEPTANCE AUTO EXECUTION" in out
+    assert "run_id=run-1 mode=dry_run status=blocked" in out
+    assert "execution_allowed=False executed=False" in out
+    assert "guard_status=blocked" in out
+    assert "command=subagents-tests run-1 --re-run" in out
+    assert "blocked_by=automatic_execution_disabled,auto_executor_dry_run_only" in out
