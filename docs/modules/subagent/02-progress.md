@@ -229,6 +229,9 @@
 - 本轮业务/子代理验收链路联调 TDD 验收：`python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_scenario_gateway_resume.py::test_scenario_runner_retry_reaches_parent_acceptance agent_py_agent/tests/test_scenario_gateway_resume.py::test_scenario_structured_repair_reaches_parent_acceptance` 先因 scenario stub 缺少 refs-bearing evidence packet 失败，补齐后 -> `2 passed`；手工 CLI `python3 -m agent_py_agent scenario-test --case runner-retry --workspace /tmp/my-agent-integration-runs --max-runners 1` 和 `python3 -m agent_py_agent scenario-test --case structured-repair --workspace /tmp/my-agent-integration-runs --max-runners 1` 均输出 `SCENARIO_PASS`。
 - 本轮真实 1/4/16/48 clean-deliverables 树 E2E：48 个 MiniMax leaf runner 全部 CLI 完成，`deliverables/real_tree_1778318291` 保持用户产物干净、`.my_agent_runtime/real_tree_1778318291` 承载内部运行痕迹；修复 `subagents-tests --re-run` 空报告假绿、`.my_agent_runtime/.../subagents` workspace 推断、`cd <dir> && pytest` 安全归一化、缺 tests 但有 `test_*.py` artifact 的 pytest 兜底。最终产品复跑 48 个 leaf：25 executed passed、22 executed failed、1 zero-tests blocked。
 - 本轮主节点单入口 1/4/16/48 stress attempt：只启动 root，观察到 root->child->grandchild->leaf 全链路真实写出部分 leaf 文件；在失败分支上定位并修复 repeated dispatch、父上下文继承、角色推断和 direct child progress 反馈。该 run 被主动停止以避免继续消耗在已知系统性问题上，后续需先跑小型树复测，再跑完整 48 leaf。
+- 本轮主节点单入口 1/2/4 小树复测：只启动 root，root 自己创建 2 个 child，child 自己创建 4 个 leaf，4 个 leaf 均写出真实算法产物并通过父级 smoke test；已修复 leaf 写工具缺失和成功重试后残留旧 failure/capability 状态的问题，仍需继续优化空测试命令导致的 `request_human` 验收噪音。
+- 本轮子代理调试追踪第一片：新增 `subagent_debug_trace_level`（0-5，默认 0），开启后写内部 `debug_traces/subagent_trace.jsonl`，先覆盖 task_created 和 runner_result_recorded refs-only 事件；该能力用于真实 E2E 观察，不污染用户产物目录。
+- 本轮 trace smoke 暴露并修复模型工具别名问题：真实 child 曾给 leaf 下发 `allowed_tools=["write", ...]`，但真实工具名是 `write_file`；现在层级调度会把 `write/read/list/search/append/replace` 等常见别名转成真实工具名，并在 leaf 写文件任务上补齐安全文件工具。复测 `main_node_trace_smoke_fixed_20260509_2218` 已由 root 自己驱动 child/leaf 写出 `proof.txt=trace-hierarchy-ok`。
 
 ## 未跑测试
 

@@ -179,6 +179,25 @@ def test_acceptance_real_execution_config_coercion_and_range():
     assert fallback["acceptance_test_timeout_seconds"] == defaults_normalized["acceptance_test_timeout_seconds"]
 
 
+def test_subagent_debug_trace_level_defaults_to_off():
+    """验证子代理调试追踪默认关闭，避免普通运行写额外测试日志。"""
+    defaults_normalized, warnings = normalize_agent_config({})
+    assert warnings == []
+    assert defaults_normalized["subagent_debug_trace_level"] == 0
+
+
+def test_subagent_debug_trace_level_accepts_zero_to_five():
+    """验证子代理调试追踪等级只接受 0-5，方便测试期开不同详细度。"""
+    normalized, warnings = normalize_agent_config({"subagent_debug_trace_level": "5"})
+    assert warnings == []
+    assert normalized["subagent_debug_trace_level"] == 5
+
+    fallback, warnings = normalize_agent_config({"subagent_debug_trace_level": "6"})
+    defaults_normalized, _ = normalize_agent_config({})
+    assert any("subagent_debug_trace_level" in warning for warning in warnings)
+    assert fallback["subagent_debug_trace_level"] == defaults_normalized["subagent_debug_trace_level"]
+
+
 def test_lease_config_defaults():
     """验证 lease 心跳续期配置项的默认值和 coerce 规则。"""
     defaults_normalized, _ = normalize_agent_config({})

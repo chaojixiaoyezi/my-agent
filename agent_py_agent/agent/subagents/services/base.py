@@ -239,7 +239,11 @@ class SubAgentBaseService:
     # 函数用途: 处理finalize任务相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
     def _finalize_task(self, task: SubAgentTask, parent_id: str) -> None:
         """Save task, register in local store, and link to parent if needed."""
+        from ..debug_trace import trace_task_created
+
         self.manager.save(task)
+        # LLM: trace_task_created is gated by subagent_debug_trace_level and writes only internal refs.
+        trace_task_created(self.manager, task)
         if self.manager.local_store:
             self.manager.local_store.task_registry.register_task(
                 task_id=task.id,

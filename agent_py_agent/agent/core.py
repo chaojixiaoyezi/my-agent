@@ -162,6 +162,7 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
         workspace_root=agent.root,
         workspace_roots=agent.workspace_roots,
         enable_self_learning=agent.config.enable_self_learning,
+        debug_trace_level=agent.config.subagent_debug_trace_level,
     )
 
 

@@ -94,6 +94,13 @@ enable_subagents: true
 # - 3: 保守优先。预估 >= 8 轮或用户明确指定才派子代理。
 subagent_automation_level: 2
 
+# 子代理调试追踪等级
+# - 0: 默认关闭，不写额外调试日志
+# - 1: 只记录关键生命周期事件，比如任务创建、runner 收束
+# - 2: 记录调度/验收/runner 结果的更多 refs-only 字段
+# - 3-5: 预留给真实 E2E 深度排障；仍应写入内部 runtime，不污染用户产物目录
+subagent_debug_trace_level: 0
+
 # 动态超时安全边际
 # - 实际超时 = 预估耗时 * safety_margin
 # - 默认 2.0，即预估 10 秒的任务给 20 秒超时

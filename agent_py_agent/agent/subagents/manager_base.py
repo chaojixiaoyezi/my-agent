@@ -36,6 +36,7 @@ class SubAgentManagerInitParams:
     workspace_root: str | Path | None = None
     workspace_roots: list[str | Path] | None = None
     enable_self_learning: bool = False
+    debug_trace_level: int = 0
 
 
 # LLM: SubAgentBaseMixin 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
@@ -68,6 +69,7 @@ class SubAgentBaseMixin:
         self.workspace_root = Path(params.workspace_root).resolve() if params.workspace_root else self.workspace.resolve().parent
         self.workspace_roots = _normalized_workspace_roots(self.workspace_root, params.workspace_roots)
         self.enable_self_learning = bool(params.enable_self_learning)
+        self.debug_trace_level = _normalize_debug_trace_level(params.debug_trace_level)
 
         from .services.base import SubAgentBaseService
         from .services.lifecycle import SubAgentLifecycleService
@@ -232,6 +234,16 @@ def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -
         if path not in resolved:
             resolved.append(path)
     return resolved
+
+
+# LLM: _normalize_debug_trace_level keeps direct manager construction aligned with AgentConfig normalization.
+# 函数用途: 把子代理调试追踪等级裁剪到 0-5，坏值按 0 关闭，避免测试配置把 manager 初始化打崩。
+def _normalize_debug_trace_level(value: object) -> int:
+    try:
+        level = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(5, level))
 
 
 from .services.base import _extract_write_dirs

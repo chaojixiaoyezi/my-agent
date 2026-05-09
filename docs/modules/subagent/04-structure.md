@@ -393,3 +393,9 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 ## 2026-05-08 parent acceptance CI fix structure update
 - 新增或修改的 subagent/CLI 文件必须继续使用半角 `模块用途:`、`函数用途:`、`类用途:` 注释标签，避免 annotation coverage 在 CI 中漏检失败。
 - `TestExecutor` 仍只执行 allowlist 内命令且不使用 shell；当环境没有 `python` 可执行文件时，会把首个 `python` 参数替换为当前解释器路径，保证本地和 CI 的真实验收 smoke test 行为一致。
+
+## 2026-05-09 debug trace and tool alias structure update
+- `agent_py_agent/agent/subagents/debug_trace.py` 是正式调试追踪写入层；`subagent_debug_trace_level=0` 完全静默，开启后只写内部 `debug_traces/subagent_trace.jsonl`，事件必须 refs-only、bounded，不复制 prompt/response/artifact/tool output 正文。
+- `SubAgentManagerInitParams.debug_trace_level` 从 `AgentConfig.subagent_debug_trace_level` 传入 manager；创建任务和 runner 收束分别写 `task_created`、`runner_result_recorded`，但只在 trace level 允许时写入。
+- `SubAgentHierarchyScheduler` 会在持久化 child/leaf run 前把模型常见工具别名归一成真实工具名，例如 `write -> write_file`、`read -> read_file`、`list -> list_files`；leaf 写文件任务仍会补齐安全文件工具包，coordinator 不自动获得写工具。
+- 这条结构边界服务真实 E2E：测试期可以开 1-5 级观察多层代理行为，正常用户运行保持 0；后续新增 trace 事件必须同步测试和 findings 台账。
