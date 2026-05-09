@@ -10,7 +10,7 @@ Human version:
 业务逻辑已移至 services/board.py。
 """
 
-from .models import SubAgentBoardOptions, SubAgentDueCheckOptions
+from .models import SubAgentBoardOptions, SubAgentDueCheckOptions, SubAgentPlanActionsOptions
 from .services.board import SubAgentBoardService, _build_risk_flags, _to_board_item
 
 
@@ -69,14 +69,14 @@ class SubAgentBoardMixin:
         )
         return board
 
-    # LLM: due_check 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 处理到期检查相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
+    # LLM: due_check must preserve optional root_id scoping for noisy shared subagent workspaces.
+    # 函数用途: 生成到期检查报告；可按 root_id 限定一棵任务树，避免其他测试树的问题混进当前汇报。
     def due_check(self, config=None, *, params: SubAgentDueCheckOptions | None = None):
         options = _due_check_options(config=config, params=params, write_report=False)
-        return self._board_service.due_check(options.config)
+        return self._board_service.due_check(options.config, root_id=options.root_id)
 
-    # LLM: write_due_check 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 写入到期检查的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
+    # LLM: write_due_check writes the same scoped due-check result that the user requested.
+    # 函数用途: 写入到期检查报告；如果传了 root_id，只落盘当前任务树的问题视图。
     def write_due_check(self, config=None, *, params: SubAgentDueCheckOptions | None = None):
         options = _due_check_options(config=config, params=params, write_report=True)
         report = self.due_check(params=options)
@@ -91,15 +91,17 @@ class SubAgentBoardMixin:
         )
         return report
 
-    # LLM: plan_actions 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 处理计划动作相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
-    def plan_actions(self, config=None):
-        return self._board_service.plan_actions(config)
+    # LLM: plan_actions keeps root-scoped dry-run planning aligned with due-check reports.
+    # 函数用途: 生成子代理 dry-run 动作计划；可按 root_id 只处理一棵任务树的问题。
+    def plan_actions(self, config=None, *, params: SubAgentPlanActionsOptions | None = None):
+        options = _plan_actions_options(config=config, params=params, write_report=False)
+        return self._board_service.plan_actions(options.config, root_id=options.root_id)
 
-    # LLM: write_action_plan 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 写入动作计划的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
-    def write_action_plan(self, config=None):
-        report = self.plan_actions(config)
+    # LLM: write_action_plan persists the same scoped action plan requested by CLI or parent controller.
+    # 函数用途: 写入动作计划报告；如果传了 root_id，只落盘当前任务树的问题动作视图。
+    def write_action_plan(self, config=None, *, params: SubAgentPlanActionsOptions | None = None):
+        options = _plan_actions_options(config=config, params=params, write_report=True)
+        report = self.plan_actions(params=options)
         import json
         from dataclasses import asdict
         (self.workspace / "subagent_action_plan.json").write_text(
@@ -132,6 +134,22 @@ def _due_check_options(
         return params
     # LLM: 到期检查保留配置位置参数兼容性，内部使用选项参数包。
     return SubAgentDueCheckOptions(config=config, write_report=write_report)
+
+
+# LLM: _plan_actions_options normalizes legacy config calls into the scoped options bundle.
+# 函数用途: 统一解析 action-plan 参数；保留旧 config 入口，同时让 root_id 通过 bundle 传递。
+def _plan_actions_options(
+    *,
+    config,
+    params: SubAgentPlanActionsOptions | None,
+    write_report: bool,
+) -> SubAgentPlanActionsOptions:
+    if params is not None:
+        if not isinstance(params, SubAgentPlanActionsOptions):
+            raise TypeError("plan actions requires params: SubAgentPlanActionsOptions")
+        return params
+    # LLM: 动作计划保留配置位置参数兼容性，内部使用选项参数包。
+    return SubAgentPlanActionsOptions(config=config, write_report=write_report)
 
 
 # LLM: _board_options 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

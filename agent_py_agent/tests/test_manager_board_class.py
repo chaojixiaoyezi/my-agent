@@ -345,6 +345,52 @@ class TestDueCheck:
 
         assert report.summary["total"] > 0
 
+    def test_due_check_can_scope_to_root_id(self, tmp_path: Path):
+        """只巡检指定 root_id 的任务树。"""
+        from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
+        from agent_py_agent.agent.subagents.models import SubAgentDueCheckOptions, SubAgentTask
+
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+            def __init__(self, workspace: Path):
+                SubAgentBaseMixin.__init__(self, workspace=workspace)
+                self._tasks = []
+
+            def list_runs(self):
+                return self._tasks
+
+            def validate_work_order(self, run_id):
+                from agent_py_agent.agent.subagents.models import WorkOrderValidation
+                return WorkOrderValidation(run_id=run_id, ok=True, missing=[], warnings=[])
+
+        mixin = TestMixin(workspace=tmp_path)
+        first = SubAgentTask(
+            id="run_failed_a",
+            root_id="root-a",
+            goal="失败任务 A",
+            thought="check",
+            plan=["inspect"],
+            status="FAILED",
+            verification_status="FAILED",
+            channel_status="OK",
+            **mixin._build_work_order_paths("run_failed_a"),
+        )
+        second = SubAgentTask(
+            id="run_failed_b",
+            root_id="root-b",
+            goal="失败任务 B",
+            thought="check",
+            plan=["inspect"],
+            status="FAILED",
+            verification_status="FAILED",
+            channel_status="OK",
+            **mixin._build_work_order_paths("run_failed_b"),
+        )
+        mixin._tasks = [first, second]
+
+        report = mixin.due_check(params=SubAgentDueCheckOptions(root_id="root-a"))
+
+        assert {issue.run_id for issue in report.issues} == {"run_failed_a"}
 
 class TestPlanActions:
     """测试 plan_actions() 方法。"""
@@ -367,6 +413,52 @@ class TestPlanActions:
 
         assert report.summary["total"] == 0
 
+    def test_plan_actions_can_scope_to_root_id(self, tmp_path: Path):
+        """动作计划只使用指定 root_id 的 due-check 问题。"""
+        from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.manager_board import SubAgentBoardMixin
+        from agent_py_agent.agent.subagents.models import SubAgentPlanActionsOptions, SubAgentTask
+
+        class TestMixin(SubAgentBaseMixin, SubAgentBoardMixin):
+            def __init__(self, workspace: Path):
+                SubAgentBaseMixin.__init__(self, workspace=workspace)
+                self._tasks = []
+
+            def list_runs(self):
+                return self._tasks
+
+            def validate_work_order(self, run_id):
+                from agent_py_agent.agent.subagents.models import WorkOrderValidation
+                return WorkOrderValidation(run_id=run_id, ok=True, missing=[], warnings=[])
+
+        mixin = TestMixin(workspace=tmp_path)
+        first = SubAgentTask(
+            id="run_failed_a",
+            root_id="root-a",
+            goal="失败任务 A",
+            thought="check",
+            plan=["inspect"],
+            status="FAILED",
+            verification_status="FAILED",
+            channel_status="OK",
+            **mixin._build_work_order_paths("run_failed_a"),
+        )
+        second = SubAgentTask(
+            id="run_failed_b",
+            root_id="root-b",
+            goal="失败任务 B",
+            thought="check",
+            plan=["inspect"],
+            status="FAILED",
+            verification_status="FAILED",
+            channel_status="OK",
+            **mixin._build_work_order_paths("run_failed_b"),
+        )
+        mixin._tasks = [first, second]
+
+        report = mixin.plan_actions(params=SubAgentPlanActionsOptions(root_id="root-a"))
+
+        assert {action.run_id for action in report.actions} == {"run_failed_a"}
 
 class TestWriteBoard:
     """测试 write_board() 方法。"""

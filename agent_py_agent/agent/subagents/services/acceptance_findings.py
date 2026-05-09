@@ -35,7 +35,9 @@ def _artifact_exists(manager: Any, task: SubAgentTask, raw_path: str) -> bool:
         return True
     path = Path(text)
     candidates = [path] if path.is_absolute() else []
+    roots: list[Path] = []
     if not path.is_absolute():
+        roots.extend([Path(task.task_dir), manager.workspace, manager.workspace.parent])
         candidates.extend(
             [
                 Path(task.task_dir) / path,
@@ -44,8 +46,34 @@ def _artifact_exists(manager: Any, task: SubAgentTask, raw_path: str) -> bool:
             ]
         )
         if manager.workspace.name == "subagents" and manager.workspace.parent.name == ".my_agent":
+            roots.append(manager.workspace.parent.parent)
             candidates.append(manager.workspace.parent.parent / path)
-    return any(candidate.exists() for candidate in candidates)
+    if any(candidate.exists() for candidate in candidates):
+        return True
+    if not path.is_absolute():
+        return _path_suffix_exists(path, roots)
+    return False
+
+
+# LLM: _path_suffix_exists recovers model-reported relative artifacts from nested task output dirs.
+# 函数用途: 当 runner 少写了外层任务目录时，在安全候选根目录内按路径后缀查找真实文件。
+def _path_suffix_exists(relative_path: Path, roots: list[Path]) -> bool:
+    parts = relative_path.parts
+    if not parts:
+        return False
+    return any(
+        _path_has_suffix(item, parts)
+        for root in roots
+        if root.exists() and root.is_dir()
+        for item in root.rglob(parts[-1])
+    )
+
+
+# LLM: _path_has_suffix keeps nested artifact recovery shallow enough for strict size guards.
+# 函数用途: 判断真实文件路径是否以 runner 报告的相对路径片段结尾。
+def _path_has_suffix(path: Path, parts: tuple[str, ...]) -> bool:
+    return len(path.parts) >= len(parts) and path.parts[-len(parts):] == parts
+
 
 # LLM: _dict_list 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 函数用途: 处理dictlist相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。

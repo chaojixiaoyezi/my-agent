@@ -95,9 +95,16 @@ class SubAgentBaseService:
     def __init__(self, manager: Any):
         self.manager = manager
 
-    # LLM: split 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-    # 函数用途: 拆分split输入集合，给调度、验收或补丁处理提供分组结果；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
-    def split(self, goal: str, count: int, *, workflow_mode: str = "off") -> list[SubAgentTask]:
+    # LLM: split owns template child creation and must pass inherited allowed_tools into CreateRunParams.
+    # 函数用途: 按数量创建模板子任务；把默认工具白名单写入每个子任务，避免真实 runner 缺少写入/读取工具。
+    def split(
+        self,
+        goal: str,
+        count: int,
+        *,
+        workflow_mode: str = "off",
+        allowed_tools: list[str] | None = None,
+    ) -> list[SubAgentTask]:
         """Split a goal into multiple subagent task records.
 
         Currently uses template-based splitting for simplicity.
@@ -111,6 +118,7 @@ class SubAgentBaseService:
                     goal=f"{goal} / 子任务{i}",
                     thought="先缩小任务边界，明确输入、输出和验证证据，再执行。",
                     plan=["理解目标", "列出交付物", "执行最小验证", "汇报结果和证据"],
+                    allowed_tools=list(allowed_tools or []),
                     extra_write_roots=extra_roots,
                     workflow_mode=workflow_mode,
                 ),

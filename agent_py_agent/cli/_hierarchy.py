@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 
+from ..agent.capability_config import load_capability_config
 from ..agent.subagents.services.hierarchy_recovery import HierarchyRecoveryRequest
 from ..agent.subagents.services.hierarchy_scheduler import (
     HierarchyChildSpec,
@@ -73,15 +74,18 @@ def cmd_subagents_hierarchy(args) -> int:
 
 
 # LLM: cmd_subagents_recovery_tree prints refs-only hierarchy recovery packets.
-# 函数用途: 执行 subagents-recovery-tree CLI；只查询恢复线索，不接管、不读 artifact 正文。
+# 函数用途: 执行 subagents-recovery-tree CLI；按 capability 超时阈值查询恢复线索，不接管、不读 artifact 正文。
 def cmd_subagents_recovery_tree(args) -> int:
     agent = make_agent(args)
+    capability_config = load_capability_config(args.capability_config)
     result = agent.subagents.build_hierarchy_recovery_packet(
         params=HierarchyRecoveryRequest(
             root_run_id=args.run_id,
             requested_by=args.requested_by or "parent",
             include_healthy=not bool(args.hide_healthy),
             max_nodes=int(args.max_nodes or 200),
+            heartbeat_timeout=float(capability_config.subagent_heartbeat_timeout),
+            run_timeout=float(capability_config.subagent_run_timeout),
         )
     )
     payload = result.to_dict()

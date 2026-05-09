@@ -116,14 +116,26 @@ class SubAgentChannelProbeOptions:
     limit: int = 0
 
 
-# LLM: SubAgentDueCheckOptions 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 集中保存subagent到期检查选项字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
+# LLM: SubAgentDueCheckOptions carries report scope and capability thresholds without widening CLI signatures.
+# 类用途: 集中保存 subagent 到期检查选项字段，可按 root_id 限定一棵任务树，避免多场景共用 workspace 时互相污染。
 @dataclass(frozen=True)
 class SubAgentDueCheckOptions:
     """Bundle for due-check report options."""
 
     config: Any | None = None
     write_report: bool = False
+    root_id: str = ""
+
+
+# LLM: SubAgentPlanActionsOptions keeps action-plan scope explicit without widening CLI/service calls.
+# 类用途: 集中保存 subagent 动作计划选项；root_id 用来只根据一棵任务树的问题生成建议动作。
+@dataclass(frozen=True)
+class SubAgentPlanActionsOptions:
+    """Bundle for dry-run action-plan options."""
+
+    config: Any | None = None
+    write_report: bool = False
+    root_id: str = ""
 
 
 # LLM: SubAgentBoardOptions 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
@@ -159,6 +171,7 @@ __all__ = [
     "SubAgentCapabilityRouteOptions",
     "SubAgentChannelProbeOptions",
     "SubAgentDueCheckOptions",
+    "SubAgentPlanActionsOptions",
     "SubAgentExecutionContext",
     "SubAgentParsedOutput",
     "SubAgentRunnerResult",

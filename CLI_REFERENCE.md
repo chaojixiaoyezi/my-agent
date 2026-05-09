@@ -729,11 +729,13 @@ my-agent subagents --limit 20
 
 ```powershell
 my-agent subagents-due-check --limit 20
+my-agent subagents-due-check --root-id <root_run_id> --all
 ```
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--capability-config <path>` | `agent_py_agent/config/capability_config.yaml` | 指定能力路由配置。 |
+| `--root-id <root_run_id>` | 空 | 只巡检指定 root subagent 任务树；适合真实 E2E 多棵树共用一个 workspace 时降噪。 |
 | `--all` | `false` | 显示全部问题，而不是按 limit 截断。 |
 | `--limit <n>` | `20` | 最多显示多少条问题。 |
 
@@ -753,6 +755,7 @@ my-agent subagents-probe <run_id>
 
 ```powershell
 my-agent subagents-plan-actions --limit 20
+my-agent subagents-plan-actions --root-id <root_run_id> --all
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -760,6 +763,7 @@ my-agent subagents-plan-actions --limit 20
 | `--capability-config <path>` | `agent_py_agent/config/capability_config.yaml` | 指定能力路由配置。 |
 | `--all` | `false` | 显示全部动作，而不是按 limit 截断。 |
 | `--limit <n>` | `20` | 最多显示多少条动作。 |
+| `--root-id <id>` | - | 只为指定 root subagent 任务树生成动作计划，适合多棵真实 E2E 树共用 workspace 时降噪。 |
 
 ## `subagents-apply-actions`
 
@@ -815,11 +819,13 @@ my-agent subagents-hierarchy <run_id> --child checker:checker-a:"check report" -
 ```powershell
 my-agent subagents-recovery-tree <run_id>
 my-agent subagents-recovery-tree <run_id> --hide-healthy --json
+my-agent subagents-recovery-tree <run_id> --capability-config config/capability_config.yaml
 ```
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `run_id` | - | 必填，根 subagent 运行 ID。 |
+| `--capability-config <path>` | `config/capability_config.yaml` | 提供 heartbeat/run timeout 阈值，用于把 stale `RUNNING` 后代列入恢复候选。 |
 | `--hide-healthy` | `false` | 只展示 root 和需要恢复的节点，减少上下文体积。 |
 | `--requested-by <name>` | `parent` | 查询请求来源，用于审计摘要。 |
 | `--max-nodes <n>` | `200` | 最多扫描多少个子树节点。 |

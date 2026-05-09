@@ -485,3 +485,135 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Covered at persistence/control-plane level.
   - Current status: `create_run(parent_id=..., root_id=..., depth=...)`, inheritance manifest, LocalStore tree/subtree queries, board, and takeover view work.
   - Remaining gap: a child runner autonomously spawning grandchildren and supervising them end-to-end is not fully implemented yet.
+
+## 2026-05-09 Real Multi-Level MiniMax E2E
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`
+  - Config: `/Users/xiaoyezi/my-claude-code/.my-agent-e2e-config-real-multilevel-1778308650.yaml`
+  - Subagent workspace: `/Users/xiaoyezi/my-claude-code/.my_agent_subagents_real_multilevel_1778308650`
+  - Runtime outputs:
+    - `/Users/xiaoyezi/my-claude-code/real_multilevel_e2e_1778308650`
+    - `/Users/xiaoyezi/my-claude-code/real_multilevel_e2e_1778309023`
+  - Model backend: `anthropic_compatible`
+  - Model name: `MiniMax-M2.7`
+  - Hierarchy: 1 root coordinator, 2 child runners, 4 grandchild runners.
+  - Real execution mode: child/grandchild `subagent-run --execute --no-probe` with real model calls and explicit parent tests.
+
+### Result: Real Multi-Level Tree Exposed Runner/Acceptance Gaps
+
+- Observed behavior:
+  - The first real hierarchy tree created 1 root, 2 children, and 4 grandchildren, but child runners did not receive write tools from the test config.
+  - The second real hierarchy tree propagated write tools and produced actual files:
+    - sorting child wrote code/tests/README and parent tests passed.
+    - graph child wrote code/tests/README, but parent tests caught a real topological-sort bug.
+    - graph-test grandchild produced failing black-box tests that confirmed the graph bug.
+    - two grandchildren were deliberately terminated after hanging; due-check and action plan reported stale heartbeat/takeover actions.
+  - Reusing one subagent workspace for two real hierarchy trees made global `--all` due-check output noisy with old runs.
+- Status: useful failure-driven E2E, not a clean all-green scenario.
+
+### Finding 13: Configured Subagent Tool Allowlist Was Not Propagated By `spawn_subagents`
+
+- Discovered at: 2026-05-09 during the first real MiniMax hierarchy run.
+- Symptom:
+  - Root `spawn_subagents` created child tasks, but the child tasks had `allowed_tools=[]`.
+  - The sorting child blocked because it could not write files.
+  - The graph child was also constrained by role defaults and could not write the requested artifact.
+- Root cause:
+  - `AgentConfig` had no normalized `subagent_allowed_tools` field.
+  - `spawn_subagents()` passed the allowlist into complexity estimation but not into `SubAgentManager.split()`.
+- Fix:
+  - Added `subagent_allowed_tools` to `AgentConfig` and runtime config normalization.
+  - Propagated the configured allowlist through `spawn_subagents()` -> `SubAgentBaseMixin.split()` -> `CreateRunParams`.
+  - The field accepts YAML lists or comma-separated strings and filters empty values.
+- Verification:
+  - `python -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_subagent_mixin.py::TestSubagentMixinSpawn agent_py_agent/tests/test_config_normalize.py::TestNormalizeAgentConfig::test_normalize_subagent_allowed_tools_list agent_py_agent/tests/test_config_normalize.py::TestNormalizeAgentConfig::test_normalize_subagent_allowed_tools_scalar agent_py_agent/tests/test_subagent_hierarchy_scheduler.py` -> `11 passed`
+  - Real second tree showed root/children receiving `read_file`, `write_file`, `append_file`, and `replace_in_file`.
+- Status: solved for config-driven spawn paths.
+
+### Finding 14: Parent Test And Acceptance Needed Nested Artifact Path Recovery
+
+- Discovered at: 2026-05-09 during the second real MiniMax hierarchy run.
+- Symptom:
+  - Sorting-edge grandchild wrote `grandchild_sorting_edge/sorting_edge_report.md` and `test_sorting_edges.py`.
+  - Parent direct unittest passed when run from the real output directory.
+  - `subagents-tests --re-run` initially failed because the runner reported a relative artifact path missing the outer run directory.
+  - After test execution was fixed, `--apply-followup` still rejected the same task because artifact existence checking had the same relative-path blind spot.
+- Root cause:
+  - Test preparation and acceptance artifact checks assumed the reported relative path was directly below the workspace or task directory.
+  - Real model output often reports paths relative to the task output directory, not the outer E2E run directory.
+- Fix:
+  - Extended `execution_test_items.py` to recover a unique workspace-local suffix path for runner-reported artifacts.
+  - Extended both current service-layer and legacy helper artifact existence checks to look for the same suffix inside safe candidate roots.
+  - Kept the lookup metadata-only: it finds files by path suffix but does not read artifact contents.
+- Verification:
+  - `python -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_acceptance_helpers_class.py::TestCheckArtifactExists agent_py_agent/tests/test_manager_acceptance_findings.py::TestSubAgentAcceptanceOutputFindingMixin::test_nested_relative_artifact_paths_exist agent_py_agent/tests/test_subagent_test_item_preparation.py agent_py_agent/tests/test_subagents_tests_command.py` -> `26 passed`
+  - Real rerun:
+    - `subagents-tests subagent-1778309080-a1addc2d --re-run` -> passed.
+    - `subagents-acceptance-plan subagent-1778309080-a1addc2d --followup` stopped reporting missing artifact paths.
+- Status: solved for observed nested relative artifact paths.
+- Remaining risk:
+  - If multiple files share the same suffix under one workspace, test cwd inference stays conservative; future runner prompts should still prefer explicit `working_dir`.
+
+### Finding 15: Stale Apply Follow-Up Could Mislead After Task State Changed
+
+- Discovered at: 2026-05-09 after fixing nested artifact path checks.
+- Symptom:
+  - The sorting-edge grandchild had already been moved to `BLOCKED` by the earlier artifact false negative.
+  - After the path fix, `--followup` initially said the task was `ready_for_manual_apply`.
+  - `--apply-followup` then rejected it because the current task state was no longer awaiting acceptance.
+- Root cause:
+  - Follow-up preview trusted the stored passing test follow-up without checking the current task state.
+  - Apply path eventually hit the stricter state guard, so preview and apply disagreed.
+- Fix:
+  - Follow-up preview now runs the same consistency check used by apply.
+  - If an old apply follow-up exists but the task is now failed/blocked, preview returns `needs_manual_rescue` and recommends `--apply-followup --take-over-by <agent>`.
+  - Apply with `--take-over-by` routes through the existing takeover action gate instead of trying to resurrect a stale apply decision.
+- Verification:
+  - `python -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_parent_acceptance_followup_control.py` -> passed inside the focused 35-test run.
+  - Real rerun:
+    - `subagents-acceptance-plan subagent-1778309080-a1addc2d --followup` -> `needs_manual_rescue`
+    - `subagents-acceptance-plan subagent-1778309080-a1addc2d --apply-followup --take-over-by real-multilevel-parent ...` -> `takeover_recorded`
+- Status: solved.
+
+### Remaining Gaps From This Real Hierarchy Run
+
+- Recovery-tree now surfaces stale `RUNNING` descendants when heartbeat/run-timeout thresholds are provided, matching due-check recovery visibility.
+- Graph child quality still needs repair/resume; parent tests correctly prevented acceptance.
+- E2E test workspaces should still be isolated per run when possible; `subagents-due-check --root-id <root>` now reduces cross-tree due-check noise when a shared workspace is unavoidable.
+- Child-authored tests remain insufficient as the only oracle; parent-owned test packs are still needed for common algorithm/task families.
+
+### Finding 16: Recovery Tree Missed Stale RUNNING Grandchildren
+
+- Discovered at: 2026-05-09 after the real MiniMax hierarchy fault injection.
+- Symptom:
+  - Two grandchild runner processes were deliberately terminated.
+  - `subagents-due-check --all` reported them as `heartbeat_stale` / `run_timeout`.
+  - `subagents-recovery-tree <root> --hide-healthy` initially did not include them because their status was still `RUNNING`, not `BLOCKED` or `TIMEOUT`.
+- Root cause:
+  - Hierarchy recovery only considered terminal failure-like statuses, blockers, and failure types.
+  - It did not reuse due-check timeout thresholds for active descendants.
+- Fix:
+  - Added `heartbeat_timeout`, `run_timeout`, and `now` fields to `HierarchyRecoveryRequest`.
+  - `subagents-recovery-tree` now reads capability timeout config and marks truly active stale descendants as `due:heartbeat_stale,run_timeout`.
+  - The stale rule is intentionally narrower than due-check: it applies to `RUNNING` or runs with an active attempt, so parked coordinator/root `PLANNING` tasks are not noisy recovery candidates.
+  - Stale descendants get a refs-only recommended command through the existing takeover action gate:
+    - `my-agent subagents-apply-actions --apply --action takeover_or_reassign --run-id <run_id> --take-over-by <agent>`
+- Verification:
+  - `python -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_subagent_hierarchy_recovery.py agent_py_agent/tests/test_subagent_hierarchy_cli_e2e.py agent_py_agent/tests/test_subcommands_agents_class.py::TestSubagentsSubcommandRegistration::test_add_subagents_subcommands_creates_expected_commands` -> `5 passed`
+  - Real rerun:
+    - `subagents-recovery-tree subagent-1778309037-dddc7214 --hide-healthy --json` included `subagent-1778309080-620c4772` and `subagent-1778309080-77f7ba19` with `due:heartbeat_stale,run_timeout`.
+    - `subagents-apply-actions --apply --action takeover_or_reassign --run-id subagent-1778309080-620c4772 --take-over-by real-multilevel-parent` -> `RUNNING->TAKEN_OVER`
+    - `subagents-apply-actions --apply --action takeover_or_reassign --run-id subagent-1778309080-77f7ba19 --take-over-by real-multilevel-parent` -> `RUNNING->TAKEN_OVER`
+- Status: solved for stale active descendants in recovery-tree.
+- Follow-up fix:
+  - Added `subagents-due-check --root-id <root>` so real tests can scope due-check to one hierarchy tree.
+  - Real rerun on `subagent-1778309037-dddc7214` reduced the shared-workspace due-check output from 17 cross-tree issues to 3 current-root issues.
+- Follow-up fix 2:
+  - Added `subagents-plan-actions --root-id <root>` so action planning uses the same scoped issue set.
+  - Due-check heartbeat/run-timeout rules no longer treat parked `PLANNING` coordinator tasks that already have child runs as ordinary runners; child `RUNNING` tasks still receive stale timeout issues.
+  - Stale coordinators now emit `coordinator_heartbeat_stale` with action `recover_coordinator_leadership`, so a parent can notice the orphan-risk tree and decide whether to appoint a new leader.
+  - Real rerun on `subagent-1778309037-dddc7214` produced two scoped issues: coordinator leadership recovery for the root and the remaining graph-child open capability request.
+- Remaining risk:
+  - `subagents-due-check --all` is still intentionally global and can be noisy in shared E2E workspaces.
+  - Standalone stale `PLANNING` runs without children can still become takeover candidates; that remains the backlog/dispatch-stall policy.

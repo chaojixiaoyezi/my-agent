@@ -98,7 +98,9 @@ def _check_artifact_exists(
         return True
     path = Path(text)
     candidates = [path] if path.is_absolute() else []
+    roots: list[Path] = []
     if not path.is_absolute():
+        roots.extend([Path(task_dir), workspace, workspace.parent])
         candidates.extend(
             [
                 Path(task_dir) / path,
@@ -107,5 +109,30 @@ def _check_artifact_exists(
             ]
         )
         if workspace.name == "subagents" and workspace.parent.name == ".my_agent":
+            roots.append(workspace.parent.parent)
             candidates.append(workspace.parent.parent / path)
-    return any(candidate.exists() for candidate in candidates)
+    if any(candidate.exists() for candidate in candidates):
+        return True
+    if not path.is_absolute():
+        return _path_suffix_exists(path, roots)
+    return False
+
+
+# LLM: _path_suffix_exists recovers model-reported relative artifacts from nested task output dirs.
+# 函数用途: 当 runner 少写了外层任务目录时，在安全候选根目录内按路径后缀查找真实文件。
+def _path_suffix_exists(relative_path: Path, roots: list[Path]) -> bool:
+    parts = relative_path.parts
+    if not parts:
+        return False
+    return any(
+        _path_has_suffix(item, parts)
+        for root in roots
+        if root.exists() and root.is_dir()
+        for item in root.rglob(parts[-1])
+    )
+
+
+# LLM: _path_has_suffix keeps nested artifact recovery shallow enough for strict size guards.
+# 函数用途: 判断真实文件路径是否以 runner 报告的相对路径片段结尾。
+def _path_has_suffix(path: Path, parts: tuple[str, ...]) -> bool:
+    return len(path.parts) >= len(parts) and path.parts[-len(parts):] == parts

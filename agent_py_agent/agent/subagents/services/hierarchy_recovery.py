@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ..models import SubAgentTask
+from ..policies import _is_active
 
 RECOVERY_STATUSES = frozenset({"BLOCKED", "FAILED", "TIMEOUT", "ERROR", "CHANNEL_ERROR"})
 
@@ -20,6 +21,9 @@ class HierarchyRecoveryRequest:
     requested_by: str = "parent"
     include_healthy: bool = True
     max_nodes: int = 200
+    heartbeat_timeout: float = 0.0
+    run_timeout: float = 0.0
+    now: float = 0.0
 
 
 # LLM: HierarchyRecoveryNode is a refs-only summary for one task in the tree.
@@ -80,7 +84,7 @@ class SubAgentHierarchyRecoveryService:
     # LLM: build_packet walks child_ids breadth-first and returns recovery candidates.
     # 函数用途: 生成 root 子树恢复包，支持隐藏健康节点以降低上下文体积。
     def build_packet(self, request: HierarchyRecoveryRequest) -> HierarchyRecoveryResult:
-        scanned = _scan_tree(self.manager, request.root_run_id, max_nodes=request.max_nodes)
+        scanned = _scan_tree(self.manager, request)
         candidates = [node for node in scanned if node.needs_recovery]
         visible = _visible_nodes(scanned, candidates, request)
         return HierarchyRecoveryResult(
@@ -99,11 +103,11 @@ class SubAgentHierarchyRecoveryService:
 
 # LLM: _scan_tree walks persisted child_ids in deterministic breadth-first order.
 # 函数用途: 从 root 出发加载任务树摘要；节点缺失时跳过，不中断整个恢复包。
-def _scan_tree(manager: Any, root_run_id: str, *, max_nodes: int) -> list[HierarchyRecoveryNode]:
-    queue = [root_run_id]
+def _scan_tree(manager: Any, request: HierarchyRecoveryRequest) -> list[HierarchyRecoveryNode]:
+    queue = [request.root_run_id]
     seen: set[str] = set()
     nodes: list[HierarchyRecoveryNode] = []
-    limit = max(1, int(max_nodes or 1))
+    limit = max(1, int(request.max_nodes or 1))
     while queue and len(nodes) < limit:
         run_id = queue.pop(0)
         if run_id in seen:
@@ -113,7 +117,7 @@ def _scan_tree(manager: Any, root_run_id: str, *, max_nodes: int) -> list[Hierar
             task = manager.load(run_id)
         except FileNotFoundError:
             continue
-        nodes.append(_node_from_task(task))
+        nodes.append(_node_from_task(task, request))
         queue.extend(child_id for child_id in task.child_ids if child_id not in seen)
     return nodes
 
@@ -132,9 +136,9 @@ def _visible_nodes(
 
 
 # LLM: _node_from_task converts one persisted task into a recovery summary.
-# 函数用途: 提取 run 状态、refs、候选原因和建议命令，不读取 refs 指向的正文。
-def _node_from_task(task: SubAgentTask) -> HierarchyRecoveryNode:
-    reason = _recovery_reason(task)
+# 函数用途: 提取 run 状态、refs、候选原因、过期运行线索和建议命令，不读取 refs 指向的正文。
+def _node_from_task(task: SubAgentTask, request: HierarchyRecoveryRequest) -> HierarchyRecoveryNode:
+    reason = _recovery_reason(task, request)
     return HierarchyRecoveryNode(
         run_id=task.id,
         parent_id=task.parent_id,
@@ -158,8 +162,8 @@ def _node_from_task(task: SubAgentTask) -> HierarchyRecoveryNode:
 
 
 # LLM: _recovery_reason classifies candidate runs without changing task state.
-# 函数用途: 判断当前 run 是否需要恢复/接管，并返回机器可读原因。
-def _recovery_reason(task: SubAgentTask) -> str:
+# 函数用途: 判断当前 run 是否需要恢复/接管；除终态失败外，也识别 RUNNING 心跳停滞或运行超时。
+def _recovery_reason(task: SubAgentTask, request: HierarchyRecoveryRequest) -> str:
     status = str(task.status or "").upper()
     if status in RECOVERY_STATUSES:
         return f"status:{status}"
@@ -167,6 +171,9 @@ def _recovery_reason(task: SubAgentTask) -> str:
         return f"failure_type:{task.failure_type}"
     if task.blockers:
         return "blockers_present"
+    stale_reasons = _active_stale_reasons(task, request)
+    if stale_reasons:
+        return f"due:{','.join(stale_reasons)}"
     return ""
 
 
@@ -175,4 +182,27 @@ def _recovery_reason(task: SubAgentTask) -> str:
 def _recommended_command(task: SubAgentTask, reason: str) -> str:
     if not reason:
         return ""
+    if reason.startswith("due:"):
+        return (
+            "my-agent subagents-apply-actions --apply --action takeover_or_reassign "
+            f"--run-id {task.id} --take-over-by <agent>"
+        )
     return f"my-agent subagents-acceptance-plan {task.id} --followup"
+
+
+# LLM: _active_stale_reasons mirrors due-check timeout signals for recovery-tree visibility.
+# 函数用途: 对仍处于活动状态的 run 计算 heartbeat/run timeout 原因，不修改任务状态。
+def _active_stale_reasons(task: SubAgentTask, request: HierarchyRecoveryRequest) -> list[str]:
+    status = str(task.status or "").upper()
+    has_active_attempt = bool(str(task.runner_active_attempt_id or "").strip())
+    if not (_is_active(status) and (status == "RUNNING" or has_active_attempt)):
+        return []
+    now = float(request.now or time.time())
+    reasons: list[str] = []
+    stale_seconds = max(0.0, now - float(task.heartbeat_at or task.updated_at or now))
+    age_seconds = max(0.0, now - float(task.created_at or now))
+    if request.heartbeat_timeout > 0 and stale_seconds > request.heartbeat_timeout:
+        reasons.append("heartbeat_stale")
+    if request.run_timeout > 0 and age_seconds > request.run_timeout:
+        reasons.append("run_timeout")
+    return reasons

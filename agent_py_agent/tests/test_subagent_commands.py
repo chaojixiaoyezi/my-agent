@@ -118,6 +118,7 @@ class TestCmdSubagentsDueCheck:
         args.capability_config = str(tmp_path / "capability.yaml")
         args.limit = 10
         args.all = False
+        args.root_id = "root-a"
         args.skill_dir = None
 
         mock_agent = MagicMock()
@@ -130,6 +131,8 @@ class TestCmdSubagentsDueCheck:
              patch("agent_py_agent.cli._inspection.load_capability_config", return_value=MagicMock()):
             result = cmd_subagents_due_check(args)
             assert result == 0
+            params = mock_agent.subagents.write_due_check.call_args.kwargs["params"]
+            assert params.root_id == "root-a"
 
 
 class TestCmdSubagentsProbe:
@@ -167,6 +170,7 @@ class TestCmdSubagentsPlanActions:
         args.capability_config = str(tmp_path / "capability.yaml")
         args.limit = 10
         args.all = False
+        args.root_id = "root-a"
         args.skill_dir = None
 
         mock_agent = MagicMock()
@@ -179,6 +183,8 @@ class TestCmdSubagentsPlanActions:
              patch("agent_py_agent.cli._actions.load_capability_config", return_value=MagicMock()):
             result = cmd_subagents_plan_actions(args)
             assert result == 0
+            call_kwargs = mock_agent.subagents.write_action_plan.call_args.kwargs
+            assert call_kwargs["params"].root_id == "root-a"
 
 
 class TestCmdSubagentsApplyActions:

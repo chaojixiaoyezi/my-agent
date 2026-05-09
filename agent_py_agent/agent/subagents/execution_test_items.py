@@ -23,6 +23,20 @@ class TestItemPreparationRequest:
     workspace_root: str | Path
 
 
+# LLM: TestItemPreparationContext bundles derived artifact indexes for one preparation pass.
+# 类用途: 保存 artifact 索引和 workspace 根目录，避免内部 helper 继续扩散多参数接口。
+@dataclass(frozen=True)
+class TestItemPreparationContext:
+    """Derived metadata used while preparing one test item."""
+
+    __test__: ClassVar[bool] = False
+
+    artifact_dirs: dict[str, Path]
+    artifact_paths: list[tuple[str, Path]]
+    fallback_dir: Path | None
+    workspace_root: Path
+
+
 # LLM: prepare_test_items adds workspace-local working_dir hints without trusting arbitrary command text.
 # 函数用途: 给缺少 working_dir 的命令测试补安全工作目录；目录来自同一 output.json 的 artifact 路径。
 def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, Any]]:
@@ -30,28 +44,32 @@ def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, An
 
     workspace_root = Path(request.workspace_root).resolve()
     artifact_dirs = _artifact_dirs_by_name(request.output, workspace_root)
-    fallback_dir = _single_artifact_dir(artifact_dirs)
-    return [
-        _prepared_test_item(test, artifact_dirs, fallback_dir, workspace_root)
-        for test in request.tests
-    ]
+    context = TestItemPreparationContext(
+        artifact_dirs=artifact_dirs,
+        artifact_paths=_artifact_paths(request.output, workspace_root),
+        fallback_dir=_single_artifact_dir(artifact_dirs),
+        workspace_root=workspace_root,
+    )
+    return [_prepared_test_item(test, context) for test in request.tests]
 
 
 # LLM: _prepared_test_item keeps cwd inference flat so the public helper stays easy to audit.
 # 函数用途: 复制单条测试项，并在安全时补 working_dir；不修改传入字典。
 def _prepared_test_item(
     test: dict[str, Any],
-    artifact_dirs: dict[str, Path],
-    fallback_dir: Path | None,
-    workspace_root: Path,
+    context: TestItemPreparationContext,
 ) -> dict[str, Any]:
     item = dict(test)
     if not _needs_working_dir(item):
         return item
-    inferred = _named_artifact_dir(item, artifact_dirs) or fallback_dir
+    command_dir = _command_artifact_working_dir(item, context.artifact_paths, context.workspace_root)
+    if command_dir is not None:
+        item["working_dir"] = _relative_or_absolute(command_dir, context.workspace_root)
+        return item
+    inferred = _named_artifact_dir(item, context.artifact_dirs) or context.fallback_dir
     if inferred is None:
         return item
-    item["working_dir"] = _relative_or_absolute(inferred, workspace_root)
+    item["working_dir"] = _relative_or_absolute(inferred, context.workspace_root)
     return item
 
 
@@ -76,6 +94,23 @@ def _artifact_dirs_by_name(output: dict[str, object], workspace_root: Path) -> d
     return dirs
 
 
+# LLM: _artifact_paths keeps workspace-safe artifact path pairs for command/cwd inference.
+# 函数用途: 收集 output.json 中安全 artifact 的原始路径和解析路径，供命令匹配但不读取文件正文。
+def _artifact_paths(output: dict[str, object], workspace_root: Path) -> list[tuple[str, Path]]:
+    values: list[tuple[str, Path]] = []
+    for artifact in output.get("artifacts") or []:
+        if not isinstance(artifact, dict):
+            continue
+        raw = str(artifact.get("path") or "").strip()
+        path = _workspace_path(raw, workspace_root)
+        if path is None:
+            continue
+        pair = (raw, path)
+        if raw and pair not in values:
+            values.append(pair)
+    return values
+
+
 # LLM: _workspace_path resolves artifact paths as literals and rejects paths outside the configured workspace.
 # 函数用途: 把 artifact path 解析成 workspace 内绝对路径；越界或空路径返回 None。
 def _workspace_path(value: object, workspace_root: Path) -> Path | None:
@@ -84,11 +119,27 @@ def _workspace_path(value: object, workspace_root: Path) -> Path | None:
         return None
     candidate = Path(raw).expanduser()
     path = candidate.resolve() if candidate.is_absolute() else (workspace_root / candidate).resolve()
+    if not path.exists() and not candidate.is_absolute():
+        path = _find_workspace_suffix(candidate, workspace_root) or path
     try:
         path.relative_to(workspace_root)
     except ValueError:
         return None
     return path
+
+
+# LLM: _find_workspace_suffix recovers model-reported relative artifact paths from nested run directories.
+# 函数用途: 当 artifact 相对路径少了任务目录前缀时，在 workspace 内按路径后缀找唯一真实文件。
+def _find_workspace_suffix(relative_path: Path, workspace_root: Path) -> Path | None:
+    parts = relative_path.parts
+    if not parts:
+        return None
+    matches = [
+        item.resolve()
+        for item in workspace_root.rglob(parts[-1])
+        if item.parts[-len(parts):] == parts
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 # LLM: _single_artifact_dir is a conservative fallback for single-directory outputs.
@@ -107,6 +158,26 @@ def _named_artifact_dir(test: dict[str, Any], artifact_dirs: dict[str, Path]) ->
     for name, path in artifact_dirs.items():
         if name and name in haystack:
             return path
+    return None
+
+
+# LLM: _command_artifact_working_dir chooses a cwd that makes runner-declared artifact paths valid.
+# 函数用途: 如果命令已经写了 artifact 路径，按真实文件后缀推断执行目录，避免路径重复或少前缀。
+def _command_artifact_working_dir(
+    test: dict[str, Any],
+    artifact_paths: list[tuple[str, Path]],
+    workspace_root: Path,
+) -> Path | None:
+    command = str(test.get("command") or "")
+    for raw, path in artifact_paths:
+        if not (raw and raw in command and ("/" in raw or "\\" in raw)):
+            continue
+        if Path(raw).is_absolute():
+            return workspace_root
+        part_count = len(Path(raw).parts)
+        if part_count <= 1:
+            return path.parent
+        return path.parents[part_count - 1]
     return None
 
 

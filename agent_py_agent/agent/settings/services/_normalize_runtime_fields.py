@@ -92,6 +92,9 @@ class SubagentBasicFieldsService:
             defaults,
             (("memory_top_k", 0, None), ("max_subagents", 0, None)),
         )
+        out["subagent_allowed_tools"] = _normalize_string_list(
+            out.get("subagent_allowed_tools", defaults.subagent_allowed_tools)
+        )
         return out, warnings
 
 
@@ -141,6 +144,18 @@ class AdapterFieldsService:
 # 函数用途: 完成 配置系统 中的 string_config_value 步骤，并保持调用方依赖的数据形状。
 def _string_config_value(value: object) -> str:
     return value if isinstance(value, str) else ""
+
+
+# LLM: _normalize_string_list keeps list-like config fields predictable for runtime call sites.
+# 函数用途: 把字符串、列表或元组配置归一成去空白的字符串列表，避免 MagicMock 或坏配置漏进业务接口。
+def _normalize_string_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        raw_items = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        raw_items = value
+    else:
+        return []
+    return [str(item).strip() for item in raw_items if item is not None and str(item).strip()]
 
 
 # LLM: UserFieldsService 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。

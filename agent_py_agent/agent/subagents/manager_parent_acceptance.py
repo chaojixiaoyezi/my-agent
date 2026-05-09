@@ -146,8 +146,8 @@ def manager_plan_parent_acceptance_auto_execution(
     )
 
 
-# LLM: manager_plan_parent_acceptance_followup exposes post-test semi-auto guidance without mutation.
-# 函数用途: 读取测试后的 follow-up 审计，返回显式下一步建议；不写文件、不改状态。
+# LLM: manager_plan_parent_acceptance_followup must preview the same consistency gate that apply uses.
+# 函数用途: 读取测试后的 follow-up 审计并校验当前任务状态；只返回下一步建议，不写文件、不改状态。
 def manager_plan_parent_acceptance_followup(
     manager,
     run_id: str,
@@ -157,6 +157,12 @@ def manager_plan_parent_acceptance_followup(
     rescue = missing_followup_rescue_preview(task, workspace_root=acceptance_workspace_root(manager))
     if rescue is not None:
         return rescue
+    payload = read_parent_acceptance_followup_payload(task)
+    status = followup_status(payload)
+    action = followup_action(payload)
+    consistency = followup_consistency_block(task, payload, status, action) if status else None
+    if consistency is not None:
+        return consistency
     return preview_parent_acceptance_followup_control(task)
 
 
@@ -198,8 +204,8 @@ def _ensure_followup_from_current_tests(task, *, workspace_root: Path) -> None:
         test_execution_ref=str(report_path),
     )
 
-# LLM: _followup_control_result routes the stored follow-up to the matching manual gate.
-# 函数用途: 根据 follow-up action 选择 apply、rescue 或 blocked；不猜测缺失事实。
+# LLM: _followup_control_result routes stale apply follow-ups into explicit rescue only through the action gate.
+# 函数用途: 根据 follow-up action 和一致性结果选择 apply、rescue 或 blocked；不猜测缺失事实。
 def _followup_control_result(
     manager,
     task,
@@ -225,6 +231,8 @@ def _followup_control_result(
         return preview_parent_acceptance_followup_control(task)
     consistency = followup_consistency_block(task, payload, status, action)
     if consistency is not None:
+        if consistency.status == "needs_manual_rescue" and consistency.action == "plan_rescue":
+            return _apply_followup_rescue(manager, task, opts)
         return consistency
     if action == "apply_acceptance" and status == "ready_for_manual_apply":
         return _apply_followup_acceptance(manager, task, opts)

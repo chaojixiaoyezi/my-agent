@@ -367,6 +367,21 @@ def test_action_for_issue_channel_degraded():
     assert action == "inspect_channel_probe"
 
 
+def test_action_for_issue_coordinator_heartbeat_stale():
+    """失联 coordinator 动作为领导权恢复。"""
+    issue = DueCheckIssue(
+        run_id="root-1",
+        severity="P1",
+        kind="coordinator_heartbeat_stale",
+        message="",
+        suggested_action="",
+    )
+    action, priority, new_status = _action_for_issue(issue)
+    assert action == "recover_coordinator_leadership"
+    assert priority == 820
+    assert new_status == ""
+
+
 # ── _commands_for_action 测试 ──────────────────────────────────────────────
 
 def test_commands_for_action_takeover():
@@ -387,6 +402,12 @@ def test_commands_for_action_unknown():
     commands = _commands_for_action("unknown", "run-y")
     assert len(commands) >= 1
     assert "run-y" in commands[0]
+
+
+def test_commands_for_action_recover_coordinator_leadership():
+    """领导权恢复动作返回 recovery-tree 命令。"""
+    commands = _commands_for_action("recover_coordinator_leadership", "root-1")
+    assert any("subagents-recovery-tree root-1" in cmd for cmd in commands)
 
 
 # ── _is_active 测试 ────────────────────────────────────────────────────────

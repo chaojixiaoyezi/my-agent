@@ -65,6 +65,15 @@ def _build_risk_flags(
     return flags
 
 
+# LLM: _scoped_due_check_tasks keeps root-scoped due-check filtering in one auditable helper.
+# 函数用途: 过滤到期检查任务列表；未传 root_id 时保持全部任务，传入时只保留该 root 树。
+def _scoped_due_check_tasks(tasks: list[SubAgentTask], root_id: str) -> list[SubAgentTask]:
+    normalized = str(root_id or "").strip()
+    if not normalized:
+        return tasks
+    return [task for task in tasks if (task.root_id or task.id) == normalized]
+
+
 # LLM: _to_board_item 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 函数用途: 转换看板条目的数据表示，保持跨模块传递时的字段含义一致；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
 def _to_board_item(
@@ -187,9 +196,9 @@ class SubAgentBoardService:
             items=items,
         )
 
-    # LLM: due_check 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-    # 函数用途: 处理到期检查相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
-    def due_check(self, config: CapabilityConfig | None = None) -> DueCheckReport:
+    # LLM: due_check can scope inspection to one root task while preserving default all-runs behavior.
+    # 函数用途: 巡检子代理是否超时、阻塞或缺证据；传 root_id 时只看该任务树。
+    def due_check(self, config: CapabilityConfig | None = None, *, root_id: str = "") -> DueCheckReport:
         """Inspect all subagent runs to find issues needing parent intervention."""
         if config is None and hasattr(self.manager, "_make_default_capability_config"):
             config = self.manager._make_default_capability_config()
@@ -201,7 +210,7 @@ class SubAgentBoardService:
         settings = DueCheckSettings(now, heartbeat_timeout, run_timeout, min_evidence)
         issues: list[DueCheckIssue] = []
 
-        for task in self.manager.list_runs():
+        for task in _scoped_due_check_tasks(self.manager.list_runs(), root_id):
             issues.extend(
                 inspect_single_task_due(
                     self.manager,
@@ -218,11 +227,16 @@ class SubAgentBoardService:
             summary[issue.kind] = summary.get(issue.kind, 0) + 1
         return DueCheckReport(generated_at=now, summary=summary, issues=issues)
 
-    # LLM: plan_actions 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-    # 函数用途: 处理计划动作相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
-    def plan_actions(self, config: CapabilityConfig | None = None) -> ActionPlanReport:
+    # LLM: plan_actions reuses due-check scoping so dry-run actions stay tied to the active task tree.
+    # 函数用途: 根据 due-check 问题生成 dry-run 动作计划；传 root_id 时只为这棵任务树生成建议。
+    def plan_actions(
+        self,
+        config: CapabilityConfig | None = None,
+        *,
+        root_id: str = "",
+    ) -> ActionPlanReport:
         """Convert due-check issues into a dry-run action plan."""
-        due_report = self.due_check(config)
+        due_report = self.due_check(config, root_id=root_id)
         merged: dict[tuple[str, str], ActionPlanItem] = {}
         for issue in due_report.issues:
             action, priority, would_change_status_to = _action_for_issue(issue)

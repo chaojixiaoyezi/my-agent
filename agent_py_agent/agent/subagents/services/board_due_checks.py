@@ -9,71 +9,8 @@ from __future__ import annotations
 这里把单任务巡检拆出 board.py，用一个上下文对象承载重复参数，避免每个检查函数都有长参数列表。
 """
 
-from dataclasses import dataclass
-from typing import Any
-
-from ..policies import MakeDueIssueParams, _is_active, _make_due_issue
-
-
-# LLM: DueCheckSettings 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 类用途: 集中保存到期检查settings字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
-@dataclass(frozen=True)
-class DueCheckSettings:
-    """Runtime thresholds for one due-check pass."""
-
-    now: float
-    heartbeat_timeout: float
-    run_timeout: float
-    min_evidence: int
-
-
-# LLM: DueInspectionContext 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 类用途: 集中保存到期inspection上下文字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
-@dataclass(frozen=True)
-class DueInspectionContext:
-    """Shared values used by all due-check predicates for one task."""
-
-    task: Any
-    risk_flags: list[str]
-    open_request_count: int
-    open_gap_count: int
-    age_seconds: float
-    stale_seconds: float
-
-
-# LLM: DueIssueSpec 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 类用途: 集中保存到期issuespec字段，让调用方按同一参数包传递上下文；关键副作用: 方法可能触发任务状态、报告记录和持久化副作用相关副作用，需保持公开契约稳定。
-@dataclass(frozen=True)
-class DueIssueSpec:
-    """One due-check issue template."""
-
-    severity: str
-    kind: str
-    message: str
-    action: str
-
-
-# LLM: _issue_params 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 处理issue参数相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
-def _issue_params(ctx: DueInspectionContext, spec: DueIssueSpec):
-    return MakeDueIssueParams(
-        task=ctx.task,
-        severity=spec.severity,
-        kind=spec.kind,
-        message=spec.message,
-        suggested_action=spec.action,
-        risk_flags=ctx.risk_flags,
-        open_request_count=ctx.open_request_count,
-        open_gap_count=ctx.open_gap_count,
-        age_seconds=ctx.age_seconds,
-        stale_seconds=ctx.stale_seconds,
-    )
-
-
-# LLM: _single_issue 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-# 函数用途: 处理单个issue相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、报告记录和持久化副作用上的返回值和副作用边界稳定。
-def _single_issue(ctx: DueInspectionContext, spec: DueIssueSpec):
-    return _make_due_issue(params=_issue_params(ctx, spec))
+from ..policies import _is_active
+from .board_due_models import DueCheckSettings, DueInspectionContext, DueIssueSpec, _single_issue
 
 
 # LLM: _check_work_order_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -260,7 +197,11 @@ def _check_capability_gap_issues(ctx: DueInspectionContext):
 # 函数用途: 校验heartbeat超时issues需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 主要返回判断或抛出明确异常，调用方依赖布尔语义稳定。
 def _check_heartbeat_timeout_issues(ctx: DueInspectionContext, heartbeat_timeout):
     """Check for stale heartbeat on active tasks."""
-    if not (_is_active(ctx.task.status) and heartbeat_timeout > 0 and ctx.stale_seconds > heartbeat_timeout):
+    if not (
+        _is_runtime_timeout_candidate(ctx.task)
+        and heartbeat_timeout > 0
+        and ctx.stale_seconds > heartbeat_timeout
+    ):
         return []
     severity = "P0" if ctx.stale_seconds > heartbeat_timeout * 3 else "P1"
     return [
@@ -276,11 +217,43 @@ def _check_heartbeat_timeout_issues(ctx: DueInspectionContext, heartbeat_timeout
     ]
 
 
+# LLM: _check_coordinator_heartbeat_issues reports orphan-risk coordinators without treating them as runners.
+# 函数用途: 检查有子任务的 coordinator 是否失联；只生成领导权恢复建议，不触发普通 runner timeout。
+def _check_coordinator_heartbeat_issues(ctx: DueInspectionContext, heartbeat_timeout):
+    """Check for stale planning coordinators that may need leadership handoff."""
+    if not (
+        _is_parked_planning_coordinator(ctx.task)
+        and heartbeat_timeout > 0
+        and ctx.stale_seconds > heartbeat_timeout
+    ):
+        return []
+    severity = "P1" if ctx.stale_seconds <= heartbeat_timeout * 3 else "P0"
+    child_count = len(getattr(ctx.task, "child_ids", []) or [])
+    return [
+        _single_issue(
+            ctx,
+            DueIssueSpec(
+                severity,
+                "coordinator_heartbeat_stale",
+                (
+                    f"协调节点心跳已停滞 {ctx.stale_seconds:.0f}s，旗下还有 {child_count} 个子任务，"
+                    "需要父代理确认是否重新指定 leader。"
+                ),
+                "recover_coordinator_leadership",
+            ),
+        )
+    ]
+
+
 # LLM: _check_run_timeout_issues 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 函数用途: 校验超时issues需要的输入和状态，不满足时把错误明确反馈给调用方；关键副作用: 会影响任务状态、报告记录和持久化副作用，需保持重试、超时和状态迁移语义。
 def _check_run_timeout_issues(ctx: DueInspectionContext, run_timeout):
     """Check for run timeout on active tasks."""
-    if not (_is_active(ctx.task.status) and run_timeout > 0 and ctx.age_seconds > run_timeout):
+    if not (
+        _is_runtime_timeout_candidate(ctx.task)
+        and run_timeout > 0
+        and ctx.age_seconds > run_timeout
+    ):
         return []
     return [
         _single_issue(
@@ -293,6 +266,24 @@ def _check_run_timeout_issues(ctx: DueInspectionContext, run_timeout):
             ),
         )
     ]
+
+
+# LLM: _is_runtime_timeout_candidate separates real runner stalls from parked coordinator planning nodes.
+# 函数用途: 判断任务是否应该进入 heartbeat/run timeout 规则；有子任务的 PLANNING 协调节点不按 runner 卡死处理。
+def _is_runtime_timeout_candidate(task) -> bool:
+    status = str(task.status or "").upper()
+    active_attempt = bool(getattr(task, "runner_active_attempt_id", "") or "")
+    if _is_parked_planning_coordinator(task):
+        return False
+    return _is_active(status)
+
+
+# LLM: _is_parked_planning_coordinator identifies parent-only planning nodes with live child ownership.
+# 函数用途: 判断一个任务是否是等待子任务的 coordinator，而不是正在执行的 runner。
+def _is_parked_planning_coordinator(task) -> bool:
+    status = str(getattr(task, "status", "") or "").upper()
+    active_attempt = bool(getattr(task, "runner_active_attempt_id", "") or "")
+    return status == "PLANNING" and not active_attempt and bool(getattr(task, "child_ids", None))
 
 
 # LLM: inspect_single_task_due 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -325,6 +316,7 @@ def inspect_single_task_due(
     issues.extend(_check_done_verification_issues(ctx))
     issues.extend(_check_capability_request_issues(ctx))
     issues.extend(_check_capability_gap_issues(ctx))
+    issues.extend(_check_coordinator_heartbeat_issues(ctx, settings.heartbeat_timeout))
     issues.extend(_check_heartbeat_timeout_issues(ctx, settings.heartbeat_timeout))
     issues.extend(_check_run_timeout_issues(ctx, settings.run_timeout))
     return issues

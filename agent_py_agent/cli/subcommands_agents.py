@@ -73,6 +73,7 @@ def _add_agents_basic_subcommands(sub):
 
     due_check = sub.add_parser("subagents-due-check", help="巡检 subagent 并输出父代理待处理项")
     _add_capability_config_arg(due_check)
+    due_check.add_argument("--root-id", help="只巡检指定 root subagent 任务树")
     due_check.add_argument("--all", action="store_true", help="显示全部问题，而不是按 limit 截断")
     due_check.add_argument("--limit", type=int, default=20, help="最多显示多少条问题")
     due_check.set_defaults(func=cmd_subagents_due_check)
@@ -86,6 +87,7 @@ def _add_agents_basic_subcommands(sub):
     _add_capability_config_arg(action_plan)
     action_plan.add_argument("--all", action="store_true", help="显示全部动作，而不是按 limit 截断")
     action_plan.add_argument("--limit", type=int, default=20, help="最多显示多少条动作")
+    action_plan.add_argument("--root-id", help="只为指定 root subagent 任务树生成动作计划")
     action_plan.set_defaults(func=cmd_subagents_plan_actions)
 
 
@@ -108,6 +110,7 @@ def _add_agents_hierarchy_subcommands(sub):
     hierarchy.set_defaults(func=cmd_subagents_hierarchy)
 
     recovery = sub.add_parser("subagents-recovery-tree", help="查询 root subagent 的多层恢复交接包")
+    _add_capability_config_arg(recovery)
     recovery.add_argument("run_id", help="根 subagent 运行 ID")
     recovery.add_argument("--hide-healthy", action="store_true", help="只展示 root 和需要恢复的节点")
     recovery.add_argument("--requested-by", default="parent", help="查询请求来源，用于审计摘要")

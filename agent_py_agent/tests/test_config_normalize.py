@@ -130,6 +130,20 @@ class TestNormalizeAgentConfig:
         assert normalized["memory_top_k"] == 10
         assert len(warnings) == 0
 
+    def test_normalize_subagent_allowed_tools_list(self):
+        """验证子代理默认工具白名单会被归一成字符串列表。"""
+        data = {"subagent_allowed_tools": ["read_file", " write_file ", "", None]}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["subagent_allowed_tools"] == ["read_file", "write_file"]
+        assert len(warnings) == 0
+
+    def test_normalize_subagent_allowed_tools_scalar(self):
+        """验证逗号分隔的子代理工具白名单也可用。"""
+        data = {"subagent_allowed_tools": "read_file, write_file, append_file"}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["subagent_allowed_tools"] == ["read_file", "write_file", "append_file"]
+        assert len(warnings) == 0
+
     def test_normalize_empty_dict(self):
         """验证空字典使用所有默认值。"""
         normalized, warnings = normalize_agent_config({})

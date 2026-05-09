@@ -284,6 +284,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
   一层是常驻的工具目录，一层是按当前任务筛出来的少量候选详情。
 - 执行工具调用。
 - 支持 `allowed_tools` 白名单，给 subagent runner 限制可见和可调用工具。
+- `AgentConfig.subagent_allowed_tools` 可作为 `spawn_subagents` 的默认工具白名单；配置归一化支持 YAML 列表或逗号分隔字符串。
 - 解析模型输出里的工具调用块。
   标准格式是 `[TOOL_CALL]...JSON...[/TOOL_CALL]`，同时兼容 Qwen/OpenClaw 常见的 XML-ish `<tool_call><function=...><parameter=...>` 方言。
   如果 XML-ish 工具调用只有半截，解析器会返回 `__parse_error__`，让主循环继续可恢复，而不是直接崩掉。
@@ -561,9 +562,9 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - `probe_channel()` 可以检查单个子代理的工单现场、机器 JSON 和写入通道是否健康。
 - `write_channel_probe_report()` 会写出 `subagent_channel_probe.json` 和 `SUBAGENT_CHANNEL_PROBE.md`。
 - `python3 -m agent_py_agent subagents-probe` 可以从 CLI 触发通道健康检查。
-- `plan_actions()` 会把 due-check issue 映射成接管、重派、修复工单、能力路由等 dry-run 动作。
+- `plan_actions()` 会把 due-check issue 映射成接管、重派、修复工单、能力路由等 dry-run 动作；支持 root_id 作用域，避免跨树问题混入当前动作计划。
 - `write_action_plan()` 会写出 `subagent_action_plan.json` 和 `SUBAGENT_ACTION_PLAN.md`。
-- `python3 -m agent_py_agent subagents-plan-actions` 可以从 CLI 查看 dry-run 动作计划。
+- `python3 -m agent_py_agent subagents-plan-actions --root-id <root_run_id>` 可以从 CLI 查看指定任务树的 dry-run 动作计划。
 - `apply_actions()` 默认 dry-run，只有显式 apply 时才会执行低风险动作。
 - `write_action_apply_report()` 会写出 `subagent_action_apply_report.json` 和 `SUBAGENT_ACTION_APPLY.md`。
 - 真正 apply 时会追加 `subagent_action_apply_log.jsonl` 和 `ACTION_APPLY_LOG.md` 审计日志。
@@ -959,18 +960,21 @@ docs/
 - `agent_py_agent/agent/subagents/parent_acceptance_followup_consistency.py`: 新增 follow-up apply 前的一致性检查 helper，集中处理 run_id、test report ref、失败数、新鲜度和状态驱动 rescue 例外。
 - `agent_py_agent/agent/subagents/parent_acceptance_rescue_followup.py`: 新增已失败/阻塞任务的 rescue follow-up helper，让无 `test_execution.json` 的 runner 失败也能进入受控接管路径。
 - `agent_py_agent/agent/subagents/services/hierarchy_scheduler.py`: 新增层级调度器 v1，使用 `HierarchyScheduleRequest` / `HierarchyChildSpec` 显式预览或创建 child/grandchild run，并统一限制深度和 fan-out。
-- `agent_py_agent/agent/subagents/services/hierarchy_recovery.py`: 新增多层恢复包服务，从 root run 只读扫描子树，返回需要恢复的后代、接管入口和 checkpoint refs，不读取 artifact 正文。
+- `agent_py_agent/agent/subagents/services/hierarchy_recovery.py`: 新增多层恢复包服务，从 root run 只读扫描子树，返回需要恢复的后代、接管入口和 checkpoint refs；现在也可按 capability 阈值标记 stale `RUNNING` 后代，不读取 artifact 正文。
+- `agent_py_agent/agent/subagents/services/board.py`: due-check 和 plan-actions 支持 root_id 作用域，真实 E2E 多棵任务树共用 workspace 时可以只看当前 root 并只生成当前树动作。
+- `agent_py_agent/agent/subagents/services/board_due_models.py`: due-check 共享参数包和 issue 构造 helper，避免巡检谓词文件继续膨胀。
+- `agent_py_agent/agent/subagents/services/board_due_checks.py`: due-check heartbeat/run-timeout 规则把已派生 child runs 的 parked `PLANNING` coordinator 转成 `coordinator_heartbeat_stale` 领导权恢复问题，避免误当普通 runner 接管，同时不会静默漏掉失联 coordinator。
 - `agent_py_agent/agent/subagents/manager_hierarchy.py`: 新增 `SubAgentManager.schedule_child_runs(params=...)` facade，保持层级创建只走 bundle 入口和既有 `create_run` 持久化路径。
 - `agent_py_agent/agent/subagents/role_contracts.py`: 新增 reporter/checker 角色契约和 analyst/reviewer 兼容映射；checker 默认只读工具并保持 parent final gate。
 - `agent_py_agent/agent/subagents/automation_gate.py`: 新增半自动/自动执行门，默认只放行 refs-only 查询动作，跑工具或改状态动作继续需要人工确认。
 - `agent_py_agent/agent/agent_core/dispatch_limiter.py`: 新增 runner 启动限流 bundle/helper，统一处理 start-rate 和可选 role budgets，供 dispatch runner batch 调用。
-- `agent_py_agent/cli/_hierarchy.py`: 新增 `subagents-hierarchy` 和 `subagents-recovery-tree` CLI；前者默认 dry-run、`--apply` 才创建下一层子代理，后者查询 refs-only 多层恢复包。
+- `agent_py_agent/cli/_hierarchy.py`: 新增 `subagents-hierarchy` 和 `subagents-recovery-tree` CLI；前者默认 dry-run、`--apply` 才创建下一层子代理，后者查询 refs-only 多层恢复包并通过 capability config 判断 stale `RUNNING` 后代。
 - `agent_py_agent/agent/subagents/manager_parent_acceptance.py`: 新增 manager 父级验收桥接函数，把 plan/write/apply/next-action/auto-policy/follow-up 流程从 `manager_acceptance.py` 类体拆出，保持 manager facade 轻量，并在 follow-up apply 前校验测试报告新鲜度；当前任务已失败/阻塞时可生成 rescue follow-up，不会误导去跑 tests。
 - `agent_py_agent/agent/subagents/manager_acceptance_parent_facade.py`: 新增父级验收 manager facade 方法集合，让 `manager_acceptance.py` 继续只承接普通 acceptance review 流程。
 - `agent_py_agent/agent/subagents/acceptance_test_execution.py`: 新增显式验收测试执行桥接，把 `AcceptanceReviewOptions(execute_tests=True)` 转成真实测试报告和阻断 findings；默认不运行。
 - `agent_py_agent/agent/subagents/services/acceptance_findings.py`: 普通验收 finding 汇总层；已有 `reports/test_execution.json` 时优先以机器执行报告判断 tests_passed。
-- `agent_py_agent/agent/settings/config.py`: 新增 `acceptance_execute_tests` 和 `acceptance_test_timeout_seconds`，让真实测试执行可配置但默认关闭。
-- `agent_py_agent/agent/settings/services/_normalize_runtime_fields.py`: 校验真实验收执行配置，布尔开关走 bool coerce，超时限制在 1 到 300 秒。
+- `agent_py_agent/agent/settings/config.py`: 新增 `acceptance_execute_tests`、`acceptance_test_timeout_seconds` 和 `subagent_allowed_tools`，让真实测试执行和 spawn 默认工具白名单可配置但默认保守。
+- `agent_py_agent/agent/settings/services/_normalize_runtime_fields.py`: 校验真实验收执行配置，布尔开关走 bool coerce，超时限制在 1 到 300 秒；`subagent_allowed_tools` 归一成去空白字符串列表。
 - `agent_py_agent/config/agent_config.yaml`: 新增父级验收真实执行配置注释，说明默认关闭和单次命令覆盖方式。
 - `agent_py_agent/cli/_acceptance_plan.py`: 新增 `subagents-acceptance-plan` 命令入口；默认只展示父级 dry-run 决策和 refs，`--write` 写入决策审计，`--apply` 只允许 inspect_only，`--next-action` / `--auto-policy` / `--auto-execution` / `--followup` / `--apply-followup` 都走显式分支。
 - `agent_py_agent/cli/_acceptance_plan_renderers.py`: 拆出 acceptance-plan 的 JSON 转换和人类输出渲染；只展示 refs 和摘要，不读取引用正文。
