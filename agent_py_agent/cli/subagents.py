@@ -22,6 +22,9 @@ from agent_py_agent.cli._dispatch import (
     cmd_subagents_dispatch,
     cmd_subagents_workflow_plan,
 )
+
+# LLM: hierarchy commands expose explicit child scheduling and refs-only recovery tree queries.
+from agent_py_agent.cli._hierarchy import cmd_subagents_hierarchy, cmd_subagents_recovery_tree
 from agent_py_agent.cli._inspection import (
     cmd_subagent_context,
     cmd_subagents_due_check,

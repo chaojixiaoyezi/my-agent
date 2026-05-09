@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..subagents.services.dispatch_params import DispatchRecordParams
+from .dispatch_limiter import RunnerJobLimitRequest, limit_runner_jobs
 from .dispatch_params import DispatchContext, RunnerBatchContext
 from .runner_dispatch import (
     RunnerDispatchRecordParams,
@@ -120,9 +121,29 @@ def _dry_runner_message(retry_reason: str) -> str:
 # 函数用途: 计算limited执行器jobs的预算、数量或限制，影响后续调度节奏；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _limited_runner_jobs(agent, pending_runner_jobs: list) -> list:
     _, _, runner_start_rate = resolve_runner_config(agent.config, len(pending_runner_jobs))
-    if runner_start_rate and runner_start_rate < len(pending_runner_jobs):
-        return pending_runner_jobs[:runner_start_rate]
-    return pending_runner_jobs
+    result = limit_runner_jobs(
+        RunnerJobLimitRequest(
+            jobs=pending_runner_jobs,
+            runner_start_rate=runner_start_rate,
+            role_limits=_runner_role_limits(agent.config),
+        )
+    )
+    return result.allowed_jobs
+
+
+# LLM: _runner_role_limits reads an optional future config hook without requiring schema changes today.
+# 函数用途: 获取可选 runner_role_limits；不存在时返回空，保持旧行为。
+def _runner_role_limits(config) -> dict[str, int]:
+    raw = getattr(config, "runner_role_limits", {}) or {}
+    if not isinstance(raw, dict):
+        return {}
+    limits: dict[str, int] = {}
+    for role, limit in raw.items():
+        try:
+            limits[str(role)] = max(0, int(limit))
+        except (TypeError, ValueError):
+            continue
+    return limits
 
 
 # LLM: run_runner_batch 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

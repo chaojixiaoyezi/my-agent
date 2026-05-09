@@ -78,6 +78,12 @@
 - 2026-05-09 真实 3 子代理 E2E 暴露“测试通过但 evidence packet 缺失仍被拒绝”问题：已新增父级真实测试报告机器证据链兜底；当 runner 没有 evidence packet 且 `test_execution.json` 全通过时，acceptance/verifier 可把父级测试报告作为可追溯证据链，但不会覆盖已有的坏 evidence packet。
 - 2026-05-09 真实 5 子代理坏天气 E2E 已覆盖进程被杀和真实测试失败：被 SIGTERM 的 runner 通过 fast due-check 暴露 `run_timeout` / `heartbeat_stale`，action plan 推荐并成功执行 `takeover_or_reassign`；普通测试失败会进入 `plan_rescue`，且已有 `test_execution.json` 现在可自动生成 follow-up rescue 包，不再卡在 missing follow-up。
 - 2026-05-09 业务/子代理验收链路联调修正：`runner-retry` 和 `structured-repair` 离线 scenario stub 输出已补齐带 refs 的 `evidence_packets` 和安全 `file_check` tests，真实 CLI `scenario-test --case runner-retry` / `--case structured-repair` 均能走到 `DONE/VERIFIED` 与 `SCENARIO_PASS`。
+- 2026-05-09 层级调度器 v1 已落地：新增 `HierarchyScheduleRequest` / `HierarchyChildSpec` bundle、`SubAgentManager.schedule_child_runs()` 和 `subagents-hierarchy` CLI；默认 dry-run，只在显式 `--apply` 时创建 child/grandchild run，并统一限制 `max_depth` / `max_children`。
+- 2026-05-09 Reporter / Checker 角色契约第一片已落地：新增 `role_contracts.py`，把 `analyst/reviewer` 兼容映射到 `reporter/checker`；reporter 默认要求输出引用 evidence/artifact refs，checker 默认只读工具并强制 parent final gate / cannot self-accept。
+- 2026-05-09 多层恢复闭环第一片已落地：新增 `HierarchyRecoveryRequest` 和 `build_hierarchy_recovery_packet()`，可从 root run 生成 refs-only 子树恢复包，定位 BLOCKED/FAILED/TIMEOUT/ERROR 后代和 takeover/failure/checkpoint refs；不读取 artifact 正文、不自动接管。
+- 2026-05-09 并发调度和限流第一片已落地：新增 `dispatch_limiter.py`，把 runner_start_rate 和可选 `runner_role_limits` 收束成 `RunnerJobLimitRequest` bundle；现有 worker pool 行为保持兼容，后续可按 reporter/checker 做角色预算。
+- 2026-05-09 层级子代理 CLI E2E 回归第一片已落地：新增 `subagents-recovery-tree` 命令，真实 parser/config/SimpleAgent 测试覆盖 `subagents-hierarchy --apply` 创建 child run 后，再用 recovery-tree 查到阻塞后代和 takeover refs。
+- 2026-05-09 半自动到自动执行门第一片已落地：新增 `automation_gate.py`，通过 `SubAgentAutomationGateRequest` 区分 refs-only 自动可放行动作、人工确认半自动动作、以及改状态/跑工具/候选过多的阻断动作；当前不执行命令，只产出 gate 结果。
 
 - 2026-05-05 CI 稳定性修复：修正 `manager_runner_results.py` 在结构化解析失败时仍把 `SubAgentRunnerResult.ok` 写成旧值的问题；同时补齐 `test_local_store_gateway.py` 的临时目录隔离和 heartbeat 读取路径，避免 gateway 测试互相污染。
 - workflow 配置和开关已落地：`auto`、`manual`、`off`。

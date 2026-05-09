@@ -74,6 +74,7 @@
 - Security prompt, query evidence, dispatch queue, ingest pipeline, dedup, dead-letter, entity graph, and trace-case helpers now expose explicit bundle params instead of function-level var-keyword compatibility bags.
 - Focused verification covered dispatch, queue, entity graph, dead-letter, ingest, evidence, architecture guardrails, and strict code-size checks.
 - 2026-05-07 high-risk cleanup continued in detector rule helpers and query evidence references; finding construction and evidence metadata now keep multi-field payloads inside explicit params objects.
+- 2026-05-09 LOG work-order apply compatibility updated: LOG-created tasks keep domain-visible `analyst` / `reviewer` roles even though the generic subagent layer now has `reporter` / `checker` aliases; parent final gate and cannot-self-accept contracts remain enforced through the work-order quality contract.
 ## 2026-05-07 LLM annotation coverage update
 - Product-code modules, classes, functions, and methods in the active module now carry the required `LLM:` plus `函数用途:` / `类用途:` definition-level double-layer comments format.
 - This is a documentation-only maintainability pass: behavior, file formats, workflow semantics, and public interfaces are intended to stay unchanged.

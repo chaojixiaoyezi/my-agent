@@ -300,6 +300,8 @@ def _create_run_payload(order: SubagentWorkOrder, *, options: WorkOrderCreationO
         "quality_contract": _work_order_quality_contract(order),
         "context_manifest": _context_manifest(order),
         "context_packs": [_work_order_context_pack(order)],
+        # LLM: LOG keeps analyst/reviewer as domain-visible roles while still inheriting parent gate contracts.
+        "normalize_role": False,
     }
 
 

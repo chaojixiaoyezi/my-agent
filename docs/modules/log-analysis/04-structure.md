@@ -68,7 +68,7 @@ agent_py_agent/agent/log_analysis/
 
 ## 2026-05-07 bundle structure update
 - `bounded_query.py` exposes `BoundedQueryParams` for file-tail query options; old explicit keyword fields are normalized into that bundle at the boundary.
-- `dispatch/work_orders/creation.py` now calls subagent creation with `CreateRunParams`, so LOG dispatch no longer expands arbitrary task fields across the module boundary.
+- `dispatch/work_orders/creation.py` now calls subagent creation with `CreateRunParams`, so LOG dispatch no longer expands arbitrary task fields across the module boundary. It sets `normalize_role=False` for LOG work orders so `analyst` / `reviewer` remain domain-visible while still carrying parent-gated quality contracts.
 - The parser, ingest, report, evidence, scheduler, storage query, and tool query helpers use domain-specific Params/Options records for multi-field inputs; no LOG product function keeps a var-keyword service signature.
 
 ## 2026-05-07 hard/soft structure update
