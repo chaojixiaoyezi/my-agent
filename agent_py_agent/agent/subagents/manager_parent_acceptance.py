@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .acceptance_review_service import AcceptanceReviewOptions
+from .debug_trace import trace_acceptance_decision, trace_acceptance_next_action
 from .parent_acceptance_apply import (
     ParentAcceptanceApplyResult,
     applied_parent_acceptance_apply_result,
@@ -60,10 +61,11 @@ from .services.action_options import ActionApplyOptions
 # 函数用途: 给 manager 方法提供父级验收 dry-run 决策实现；不执行 tests、不改任务状态。
 def manager_plan_parent_acceptance(manager, run_id: str) -> ParentAcceptanceDecision:
     task = manager.load(run_id)
-    return build_parent_acceptance_decision(
+    decision = build_parent_acceptance_decision(
         task,
         workspace_root=acceptance_workspace_root(manager),
     )
+    return trace_acceptance_decision(manager, task, decision)
 
 
 # LLM: manager_write_parent_acceptance_decision persists only the dry-run decision audit file.
@@ -75,7 +77,7 @@ def manager_write_parent_acceptance_decision(manager, run_id: str) -> ParentAcce
         workspace_root=acceptance_workspace_root(manager),
     )
     write_parent_acceptance_decision_file(task, decision)
-    return decision
+    return trace_acceptance_decision(manager, task, decision)
 
 
 # LLM: manager_apply_parent_acceptance_decision only bridges inspect_only into normal acceptance apply.
@@ -114,10 +116,11 @@ def manager_apply_parent_acceptance_decision(
 # 函数用途: 读取父级验收事实源和审计引用，返回下一步显式动作建议；不执行命令、不写状态。
 def manager_plan_parent_acceptance_next_action(manager, run_id: str) -> ParentAcceptanceNextAction:
     task = manager.load(run_id)
-    return build_parent_acceptance_next_action(
+    action = build_parent_acceptance_next_action(
         task,
         workspace_root=acceptance_workspace_root(manager),
     )
+    return trace_acceptance_next_action(manager, task, action)
 
 
 # LLM: manager_plan_parent_acceptance_auto_policy exposes dry-run policy gating for schedulers.

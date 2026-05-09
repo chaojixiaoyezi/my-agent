@@ -330,6 +330,30 @@ def test_parent_acceptance_plan_requires_human_for_unsafe_test_command():
         assert any("unsafe" in item for item in decision.next_actions)
 
 
+def test_parent_acceptance_plan_ignores_empty_command_tests_as_non_executable():
+    root_ctx, agent, task = _agent_and_task()
+    with root_ctx:
+        _write_output(
+            task,
+            [{
+                "name": "层级派工验证",
+                "validation_method": "command",
+                "command": "",
+            }],
+        )
+
+        decision = agent.subagents.plan_parent_acceptance(task.id)
+        action = agent.subagents.plan_parent_acceptance_next_action(task.id)
+
+        assert decision.decision == "inspect_only"
+        assert decision.risk_level == "low"
+        assert decision.requires_human_confirmation is False
+        assert "no executable tests" in decision.reason
+        assert any("ignored_empty_command_tests=1" in ref.summary for ref in decision.evidence_refs)
+        assert action.action == "apply_acceptance"
+        assert action.requires_human_confirmation is False
+
+
 def test_parent_acceptance_plan_inspects_only_when_real_tests_already_passed():
     root_ctx, agent, task = _agent_and_task()
     with root_ctx:

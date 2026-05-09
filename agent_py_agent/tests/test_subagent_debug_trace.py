@@ -4,6 +4,10 @@ import json
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.manager_runner_results import RecordRunnerResultParams
+from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
+    HierarchyChildSpec,
+    HierarchyScheduleRequest,
+)
 
 
 def _trace_records(workspace):
@@ -73,3 +77,60 @@ def test_subagent_debug_trace_records_runner_result_when_enabled(tmp_path):
     assert runner_record["backend"] == "echo"
     assert runner_record["tool_rounds"] == 1
     assert runner_record["runner_result_ref"].endswith("RUNNER_RESULT.md")
+
+
+def test_subagent_debug_trace_records_hierarchy_schedule_when_enabled(tmp_path):
+    """等级 2 记录层级调度结果，方便观察父节点实际创建了哪些下一层。"""
+    manager = SubAgentManager(tmp_path, debug_trace_level=2)
+    root = manager.create_run(goal="root", thought="split", plan=["plan"])
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=root.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="write proof.txt",
+                    agent_name="leaf",
+                    role="worker",
+                    allowed_tools=["write"],
+                )
+            ],
+            apply=True,
+            requested_by="root",
+        )
+    )
+
+    records = _trace_records(tmp_path)
+    schedule_record = records[-1]
+    assert schedule_record["event_type"] == "hierarchy_schedule_result"
+    assert schedule_record["run_id"] == root.id
+    assert schedule_record["dry_run"] is False
+    assert schedule_record["blocked"] is False
+    assert schedule_record["reason"] == "created"
+    assert schedule_record["planned_count"] == 1
+    assert schedule_record["created_count"] == 1
+    assert schedule_record["created_run_ids"] == result.created_run_ids
+    assert schedule_record["requested_by"] == "root"
+
+
+def test_subagent_debug_trace_records_parent_acceptance_decision_and_next_action(tmp_path):
+    """等级 2 记录父级验收判断和下一动作，便于排查卡在人审还是测试。"""
+    manager = SubAgentManager(tmp_path, debug_trace_level=2)
+    task = manager.create_run(goal="acceptance", thought="check", plan=["plan"])
+
+    manager.plan_parent_acceptance(task.id)
+    manager.plan_parent_acceptance_next_action(task.id)
+
+    records = _trace_records(tmp_path)
+    assert [record["event_type"] for record in records] == [
+        "task_created",
+        "parent_acceptance_decision",
+        "parent_acceptance_next_action",
+    ]
+    decision_record = records[-2]
+    action_record = records[-1]
+    assert decision_record["decision"] == "inspect_only"
+    assert decision_record["risk_level"] == "low"
+    assert decision_record["requires_human_confirmation"] is False
+    assert action_record["action"] == "apply_acceptance"
+    assert action_record["mutates_task_state"] is True

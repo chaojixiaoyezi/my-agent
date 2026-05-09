@@ -232,6 +232,7 @@
 - 本轮主节点单入口 1/2/4 小树复测：只启动 root，root 自己创建 2 个 child，child 自己创建 4 个 leaf，4 个 leaf 均写出真实算法产物并通过父级 smoke test；已修复 leaf 写工具缺失和成功重试后残留旧 failure/capability 状态的问题，仍需继续优化空测试命令导致的 `request_human` 验收噪音。
 - 本轮子代理调试追踪第一片：新增 `subagent_debug_trace_level`（0-5，默认 0），开启后写内部 `debug_traces/subagent_trace.jsonl`，先覆盖 task_created 和 runner_result_recorded refs-only 事件；该能力用于真实 E2E 观察，不污染用户产物目录。
 - 本轮 trace smoke 暴露并修复模型工具别名问题：真实 child 曾给 leaf 下发 `allowed_tools=["write", ...]`，但真实工具名是 `write_file`；现在层级调度会把 `write/read/list/search/append/replace` 等常见别名转成真实工具名，并在 leaf 写文件任务上补齐安全文件工具。复测 `main_node_trace_smoke_fixed_20260509_2218` 已由 root 自己驱动 child/leaf 写出 `proof.txt=trace-hierarchy-ok`。
+- 本轮调试追踪第二片：空 command 类型测试项不再触发 `request_human_confirmation`，会作为“不可执行占位检查”进入 refs 摘要并降级到 inspect-only；`subagent_debug_trace_level=2` 现在还覆盖 `hierarchy_schedule_result`、`parent_acceptance_decision` 和 `parent_acceptance_next_action`，用于后续 1/4/16/48 和购物网站 E2E 快速定位调度、验收、人审和救援卡点。
 
 ## 未跑测试
 

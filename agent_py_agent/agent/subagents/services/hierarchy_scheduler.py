@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..debug_trace import trace_hierarchy_schedule
 from ..models import SubAgentTask
 from .base import CreateRunParams
 
@@ -120,10 +121,10 @@ class SubAgentHierarchyScheduler:
         parent = self.manager.load(request.parent_run_id)
         reason = _schedule_block_reason(parent, request)
         if reason:
-            return _blocked_result(parent, request, reason)
+            return trace_hierarchy_schedule(self.manager, parent, _blocked_result(parent, request, reason))
         if not request.apply:
-            return _dry_run_result(parent, request)
-        return _apply_result(self.manager, parent, request)
+            return trace_hierarchy_schedule(self.manager, parent, _dry_run_result(parent, request))
+        return trace_hierarchy_schedule(self.manager, parent, _apply_result(self.manager, parent, request))
 
 
 # LLM: _schedule_block_reason keeps guard checks deterministic and side-effect free.
