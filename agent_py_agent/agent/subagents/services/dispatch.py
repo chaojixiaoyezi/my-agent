@@ -104,7 +104,7 @@ class SubAgentDispatchService:
                 "subagent_dispatch_report_written",
             ),
         )
-        return report
+        return _trace_written_dispatch_report(self.manager, report)
 
     # LLM: make_dispatch_watch_record 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
     # 函数用途: 构建make调度监控记录所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
@@ -154,7 +154,7 @@ class SubAgentDispatchService:
                 "subagent_dispatch_watch_report_written",
             ),
         )
-        return report
+        return _trace_written_dispatch_watch_report(self.manager, report)
 
     # LLM: write_dispatch_watch_heartbeat 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
     # 函数用途: 写入heartbeat的状态、日志或审计记录，保持持久化格式兼容；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
@@ -260,3 +260,22 @@ class SubAgentDispatchService:
         from .parent_planner_builder import ParentPlannerLogAppender
 
         ParentPlannerLogAppender.append(record, self.manager.workspace, self.manager)
+
+
+# LLM: _trace_written_dispatch_report keeps dispatch trace glue outside the service class body.
+# 函数用途: 写 dispatch 报告后的 bounded trace，详细记录仍留在报告文件。
+def _trace_written_dispatch_report(manager: Any, report: DispatchReport) -> DispatchReport:
+    from ..debug_trace_reports import trace_dispatch_report
+
+    return trace_dispatch_report(manager, report)
+
+
+# LLM: _trace_written_dispatch_watch_report keeps watch trace glue outside the service class body.
+# 函数用途: 写 dispatch-watch 报告后的 bounded trace，避免在 watch 日志里重复正文。
+def _trace_written_dispatch_watch_report(
+    manager: Any,
+    report: DispatchWatchReport,
+) -> DispatchWatchReport:
+    from ..debug_trace_reports import trace_dispatch_watch_report
+
+    return trace_dispatch_watch_report(manager, report)

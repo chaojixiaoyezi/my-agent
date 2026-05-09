@@ -4,6 +4,7 @@ import json
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.manager_runner_results import RecordRunnerResultParams
+from agent_py_agent.agent.subagents.services.hierarchy_recovery import HierarchyRecoveryRequest
 from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
@@ -134,3 +135,67 @@ def test_subagent_debug_trace_records_parent_acceptance_decision_and_next_action
     assert decision_record["requires_human_confirmation"] is False
     assert action_record["action"] == "apply_acceptance"
     assert action_record["mutates_task_state"] is True
+
+
+def test_subagent_debug_trace_records_due_action_and_recovery_reports_at_level_three(tmp_path):
+    """等级 3 记录 due/action/recovery 摘要，便于定位父超时子树恢复卡点。"""
+    manager = SubAgentManager(tmp_path, debug_trace_level=3)
+    root = manager.create_run(goal="root", thought="split", plan=["dispatch"])
+    child_id = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=root.id,
+            child_specs=[HierarchyChildSpec(goal="child waits", agent_name="child", role="coordinator")],
+            apply=True,
+        )
+    ).created_run_ids[0]
+    root_task = manager.load(root.id)
+    root_task.status = "TIMEOUT"
+    manager.save(root_task)
+
+    manager.due_check()
+    manager.plan_actions()
+    manager.build_hierarchy_recovery_packet(
+        params=HierarchyRecoveryRequest(root_run_id=root.id, include_healthy=False)
+    )
+
+    records = _trace_records(tmp_path)
+    by_type = {record["event_type"]: record for record in records}
+    assert by_type["due_check_report"]["issue_count"] >= 1
+    assert by_type["due_check_report"]["summary"]["parent_timeout_with_unfinished_children"] == 1
+    assert by_type["action_plan_report"]["action_count"] >= 1
+    assert by_type["action_plan_report"]["summary"]["recover_child_after_parent_timeout"] == 1
+    recovery = by_type["hierarchy_recovery_packet"]
+    assert recovery["root_run_id"] == root.id
+    assert recovery["candidate_count"] >= 2
+    assert child_id in recovery["candidate_run_ids"]
+
+
+def test_subagent_debug_trace_records_dispatch_reports_at_level_three(tmp_path):
+    """等级 3 记录 dispatch/watch 摘要，但不复制报告正文。"""
+    manager = SubAgentManager(tmp_path, debug_trace_level=3)
+    task = manager.create_run(goal="dispatch target", thought="observe", plan=["dispatch"])
+    record = manager.make_dispatch_record(
+        step="runner",
+        action="run_subagent",
+        run_id=task.id,
+        dry_run=True,
+        ok=True,
+        message="planned",
+    )
+    manager.write_dispatch_report(manager.build_dispatch_report([record], dry_run=True))
+    watch = manager.make_dispatch_watch_record(
+        cycle=1,
+        dry_run=True,
+        ok=True,
+        message="watch",
+        dispatch_record_count=1,
+        dispatch_summary={"run_subagent": 1},
+    )
+    manager.write_dispatch_watch_report(manager.build_dispatch_watch_report([watch], dry_run=True))
+
+    records = _trace_records(tmp_path)
+    by_type = {record["event_type"]: record for record in records}
+    assert by_type["dispatch_report"]["record_count"] == 1
+    assert by_type["dispatch_report"]["summary"]["run_subagent"] == 1
+    assert by_type["dispatch_watch_report"]["record_count"] == 1
+    assert by_type["dispatch_watch_report"]["summary"]["dispatch_records"] == 1

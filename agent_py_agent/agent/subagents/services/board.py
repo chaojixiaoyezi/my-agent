@@ -232,7 +232,11 @@ class SubAgentBoardService:
         for issue in issues:
             summary[issue.severity] = summary.get(issue.severity, 0) + 1
             summary[issue.kind] = summary.get(issue.kind, 0) + 1
-        return DueCheckReport(generated_at=now, summary=summary, issues=issues)
+        report = DueCheckReport(generated_at=now, summary=summary, issues=issues)
+        # LLM: due-check trace stores summary/kinds only so status views remain cheap.
+        from ..debug_trace_reports import trace_due_check_report
+
+        return trace_due_check_report(self.manager, report)
 
     # LLM: plan_actions reuses due-check scoping so dry-run actions stay tied to the active task tree.
     # 函数用途: 根据 due-check 问题生成 dry-run 动作计划；传 root_id 时只为这棵任务树生成建议。
@@ -278,11 +282,20 @@ class SubAgentBoardService:
 
         actions = list(merged.values())
         actions.sort(key=lambda item: (-item.priority, item.run_id, item.action))
-        summary: dict[str, int] = {"total": len(actions)}
-        for action in actions:
-            summary[action.severity] = summary.get(action.severity, 0) + 1
-            summary[action.action] = summary.get(action.action, 0) + 1
-        return ActionPlanReport(generated_at=time.time(), summary=summary, actions=actions)
+        return _action_plan_report(self.manager, actions)
+
+
+# LLM: _action_plan_report centralizes summary and trace so plan_actions stays below risk limits.
+# 函数用途: 根据 action 列表生成 ActionPlanReport，并写入 bounded action-plan trace。
+def _action_plan_report(manager: Any, actions: list[ActionPlanItem]) -> ActionPlanReport:
+    summary: dict[str, int] = {"total": len(actions)}
+    for action in actions:
+        summary[action.severity] = summary.get(action.severity, 0) + 1
+        summary[action.action] = summary.get(action.action, 0) + 1
+    report = ActionPlanReport(generated_at=time.time(), summary=summary, actions=actions)
+    from ..debug_trace_reports import trace_action_plan_report
+
+    return trace_action_plan_report(manager, report)
 
 
 # LLM: _board_options 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。

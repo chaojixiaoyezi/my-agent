@@ -1312,3 +1312,23 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Current status:
   - Solved for detection and dry-run recovery planning.
   - Remaining follow-up is an explicit, audited apply path if we later decide a new leader should adopt those children automatically or semi-automatically.
+
+## 2026-05-09 Debug Trace Report Summary Expansion
+
+- Change:
+  - `subagent_debug_trace_level=3` now records report-level summaries:
+    - `due_check_report`
+    - `action_plan_report`
+    - `hierarchy_recovery_packet`
+    - `dispatch_report`
+    - `dispatch_watch_report`
+  - These events include counts, summary maps, issue/action kinds and recovery candidate ids.
+  - 中文解释：以后真实 E2E 卡住时，不用先打开一堆报告正文；可以先看 trace 知道 due-check 发现了什么、action-plan 建议了什么、recovery-tree 看到了哪些候选、dispatch/watch 有没有继续推进。
+- Safety boundary:
+  - Default level 0 remains silent.
+  - The new events are refs-only and bounded; they do not copy prompt, response, artifact body or tool output body.
+  - They do not call models, run commands, or touch user deliverables.
+- Verification:
+  - Red tests first failed because report events did not exist.
+  - After the fix:
+    - `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_subagent_debug_trace.py::test_subagent_debug_trace_records_due_action_and_recovery_reports_at_level_three agent_py_agent/tests/test_subagent_debug_trace.py::test_subagent_debug_trace_records_dispatch_reports_at_level_three` -> `2 passed`.
