@@ -14,6 +14,7 @@ from .action_handlers import (
     ActionHandlerContext,
     apply_probe_or_repair_channel,
     apply_record_only_action,
+    apply_recover_coordinator_leadership,
     apply_reopen_for_evidence,
     apply_repair_work_order,
     apply_run_acceptance,
@@ -28,6 +29,8 @@ if TYPE_CHECKING:
     from ..reports import ActionApplyRecord, ActionPlanItem
 
 
+# LLM: ACTION_DISPATCH is the only apply-action registry; new actions must stay explicit and audited.
+# 函数用途: 把 action-plan 的动作名映射到受控 handler，避免字符串分发散落在服务层。
 ACTION_DISPATCH = {
     "probe_or_repair_channel": apply_probe_or_repair_channel,
     "inspect_channel_probe": apply_probe_or_repair_channel,
@@ -35,6 +38,7 @@ ACTION_DISPATCH = {
     "reopen_for_evidence": apply_reopen_for_evidence,
     "run_acceptance": apply_run_acceptance,
     "takeover_or_reassign": apply_takeover_or_reassign,
+    "recover_coordinator_leadership": apply_recover_coordinator_leadership,
     "route_capability_request": apply_record_only_action,
     "triage_capability_gap": apply_record_only_action,
     "inspect_failure": apply_record_only_action,

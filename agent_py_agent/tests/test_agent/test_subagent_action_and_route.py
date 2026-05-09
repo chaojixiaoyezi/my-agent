@@ -64,6 +64,29 @@ def _make_stale_task(agent):
     return task
 
 
+# LLM: _make_coordinator_handoff_fixture builds a stale coordinator, one child, and one candidate leader.
+# 函数用途: 复用 coordinator 领导权恢复测试夹具，避免单个测试函数膨胀。
+def _make_coordinator_handoff_fixture(agent):
+    coordinator = agent.subagents.create_run(
+        goal="协调子任务", thought="等待孩子完成。", plan=["dispatch", "collect"],
+        agent_name="root-coord", role="coordinator",
+    )
+    child = agent.subagents.create_run(
+        goal="实现模块", thought="被旧 coordinator 管理。", plan=["work"],
+        parent_id=coordinator.id, root_id=coordinator.root_id, supervisor=coordinator.id,
+    )
+    leader = agent.subagents.create_run(
+        goal="接手协调", thought="新的 leader。", plan=["lead"],
+        parent_id=coordinator.id, root_id=coordinator.root_id,
+        supervisor=coordinator.id, role="coordinator",
+    )
+    stale = agent.subagents.load(coordinator.id)
+    stale.heartbeat_at = time.time() - 30
+    stale.updated_at = stale.heartbeat_at
+    agent.subagents.save(stale)
+    return coordinator, child, leader
+
+
 def test_subagent_action_plan_dry_run():
     """LLM: Verifies action-plan produces takeover, reopen, route, and probe actions."""
     with tempfile.TemporaryDirectory() as td:
@@ -148,6 +171,38 @@ def test_subagent_action_apply_dry_run_and_apply():
         assert takeover.records[0].ok and taken.status == "TAKEN_OVER"
         assert taken.takeover_by == "parent-supervisor" and "src/example.py" in taken.locked_files
         assert Path(taken.takeover_file).exists()
+
+
+def test_subagent_action_apply_recovers_coordinator_leadership():
+    """LLM: Verifies stale coordinator children can be reassigned to an explicit leader run."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        coordinator, child, leader = _make_coordinator_handoff_fixture(agent)
+
+        missing = agent.subagents.write_action_apply_report(
+            CapabilityConfig(subagent_heartbeat_timeout=1),
+            apply=True,
+            action_filter="recover_coordinator_leadership",
+            run_id=coordinator.id,
+        )
+        assert not missing.records[0].ok
+
+        applied = agent.subagents.write_action_apply_report(
+            CapabilityConfig(subagent_heartbeat_timeout=1),
+            apply=True,
+            action_filter="recover_coordinator_leadership",
+            run_id=coordinator.id,
+            take_over_by=leader.id,
+        )
+
+        assert applied.records[0].ok
+        assert agent.subagents.load(coordinator.id).status == "TAKEN_OVER"
+        assert agent.subagents.load(coordinator.id).takeover_by == leader.id
+        reloaded_child = agent.subagents.load(child.id)
+        assert reloaded_child.supervisor == leader.id
+        assert reloaded_child.final_owner == leader.id
 
 
 def test_subagent_action_apply_repairs_work_order():

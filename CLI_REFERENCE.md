@@ -770,6 +770,7 @@ my-agent subagents-plan-actions --root-id <root_run_id> --all
 ```powershell
 my-agent subagents-apply-actions --dry-run
 my-agent subagents-apply-actions --apply --action reopen_for_evidence
+my-agent subagents-apply-actions --apply --action recover_coordinator_leadership --run-id <stale_root> --take-over-by <leader_run_id>
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -780,7 +781,7 @@ my-agent subagents-apply-actions --apply --action reopen_for_evidence
 | `--action <name>` | - | 只处理指定动作，如 `reopen_for_evidence`。 |
 | `--run-id <id>` | - | 只处理指定子代理运行 ID，可多次传入。 |
 | `--limit <n>` | `20` | 最多处理多少条动作。 |
-| `--take-over-by <name>` | - | 接管动作的接管者，apply takeover 时必填。 |
+| `--take-over-by <name>` | - | 接管/领导权恢复动作的接管者；`recover_coordinator_leadership` 要求这里是现有 leader run ID。 |
 | `--locked-file <path>` | - | 接管时锁定的文件，可多次传入。 |
 
 ## `subagents-workflow-plan`

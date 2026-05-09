@@ -146,6 +146,79 @@ def apply_takeover_or_reassign(service, action, task, ctx: ActionHandlerContext)
     )
 
 
+# LLM: apply_recover_coordinator_leadership performs explicit child supervision handoff for stale coordinators.
+# 函数用途: 把失联 coordinator 标记为被接管，并把其子任务的 supervisor/final_owner 指向新的 leader run。
+def apply_recover_coordinator_leadership(service, action, task, ctx: ActionHandlerContext):
+    from ..reports import ActionApplyRecord
+
+    leader_id = ctx.take_over_by
+    if not leader_id:
+        return ActionApplyRecord(
+            id=service.manager._new_id("apply"), action_id=action.id, run_id=action.run_id, action=action.action,
+            dry_run=False, applied=False, ok=False,
+            message="recover_coordinator_leadership 需要 --take-over-by 指向新 leader run_id。",
+            before_status=ctx.before_status, after_status=ctx.before_status,
+            before_channel_status=ctx.before_channel_status, after_channel_status=ctx.before_channel_status,
+            evidence_paths=[task.task_dir], created_at=ctx.now,
+        )
+    try:
+        leader = service.manager.load(leader_id)
+    except FileNotFoundError:
+        return ActionApplyRecord(
+            id=service.manager._new_id("apply"), action_id=action.id, run_id=action.run_id, action=action.action,
+            dry_run=False, applied=False, ok=False,
+            message=f"新 leader run 不存在: {leader_id}",
+            before_status=ctx.before_status, after_status=ctx.before_status,
+            before_channel_status=ctx.before_channel_status, after_channel_status=ctx.before_channel_status,
+            evidence_paths=[task.task_dir], created_at=ctx.now,
+        )
+    updated_children = _handoff_child_supervision(service, task.child_ids, leader.id, ctx.now)
+    service.manager.record_takeover(
+        action.run_id,
+        take_over_by=leader.id,
+        reason=action.reason,
+        locked_files=ctx.locked_files or [],
+    )
+    task = service.manager.load(action.run_id)
+    service._append_task_work_log(
+        task,
+        f"action_apply recover_coordinator_leadership: 已将 {len(updated_children)} 个子任务交给 {leader.id}。",
+    )
+    return service._record_after_task_action(
+        RecordAfterTaskActionParams(
+            action,
+            task,
+            ctx.before_status,
+            ctx.before_channel_status,
+            f"已把 coordinator 标记为接管，并将 {len(updated_children)} 个子任务交给 {leader.id}。",
+            evidence_paths=[task.takeover_file, task.work_log_file, *updated_children],
+        )
+    )
+
+
+# LLM: _handoff_child_supervision updates child ownership fields without restructuring the task tree.
+# 函数用途: 将旧 coordinator 旗下子任务的 supervisor/final_owner 改为新 leader，并记录每个子任务日志。
+def _handoff_child_supervision(service, child_ids: list[str], leader_id: str, now: float) -> list[str]:
+    updated: list[str] = []
+    for child_id in child_ids:
+        if child_id == leader_id:
+            continue
+        try:
+            child = service.manager.load(child_id)
+        except FileNotFoundError:
+            continue
+        child.supervisor = leader_id
+        child.final_owner = leader_id
+        child.updated_at = now
+        service.manager.save(child)
+        service._append_task_work_log(
+            child,
+            f"action_apply recover_coordinator_leadership: supervisor/final_owner -> {leader_id}。",
+        )
+        updated.append(child.task_dir)
+    return updated
+
+
 # LLM: apply_record_only_action 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 函数用途: 更新only动作对应的任务或运行状态，并保留既有字段语义；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
 def apply_record_only_action(service, action, task, ctx: ActionHandlerContext):

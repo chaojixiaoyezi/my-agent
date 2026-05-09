@@ -566,6 +566,7 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - `write_action_plan()` 会写出 `subagent_action_plan.json` 和 `SUBAGENT_ACTION_PLAN.md`。
 - `python3 -m agent_py_agent subagents-plan-actions --root-id <root_run_id>` 可以从 CLI 查看指定任务树的 dry-run 动作计划。
 - `apply_actions()` 默认 dry-run，只有显式 apply 时才会执行低风险动作。
+- `recover_coordinator_leadership` 需要显式 `--apply` 和现有 leader run id，成功后旧 coordinator 进入 `TAKEN_OVER`，其子任务 supervisor/final_owner 指向新 leader。
 - `write_action_apply_report()` 会写出 `subagent_action_apply_report.json` 和 `SUBAGENT_ACTION_APPLY.md`。
 - 真正 apply 时会追加 `subagent_action_apply_log.jsonl` 和 `ACTION_APPLY_LOG.md` 审计日志。
 - `python3 -m agent_py_agent subagents-apply-actions --apply ...` 可以执行受限动作。
