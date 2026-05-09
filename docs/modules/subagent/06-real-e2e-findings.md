@@ -1267,3 +1267,24 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining gap:
   - Timeout can still leave a just-created child in `RUNNING` if root times out before it records child dispatch completion.
   - 中文解释：现在不会无限卡住，但还需要后续的 due-check / recovery-tree 把这种“父超时、子还挂着”的场景收口成可接管动作。
+
+## 2026-05-09 Scope-Inheritance Smoke Retest
+
+- Test scene:
+  - Case id: `main_node_scope_inherit_smoke_20260509_2348`.
+  - Runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/main_node_scope_inherit_smoke_20260509_2348`.
+  - Deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/main_node_scope_inherit_smoke_20260509_2348`.
+  - Shape requested: root -> child -> leaf, with only root started externally.
+- What improved:
+  - The child goal preserved the required deliverables path:
+    - `/Users/xiaoyezi/my-claude-code/deliverables/main_node_scope_inherit_smoke_20260509_2348/leaf_outputs/proof/`
+  - The child goal also preserved the boundary that coordinator should not write and leaf should write.
+  - 中文解释：这说明“父级产物路径/边界传到下一层”已经比上一轮稳定，至少没有再变成一句很短的 `实现 add 并写测试`。
+- What still failed:
+  - Root created the child but did not dispatch that child before timing out.
+  - Root returned `TIMEOUT` after 180 seconds through the new direct runner timeout boundary.
+  - Child remained `PLANNING`, with no leaf created and no deliverables written.
+- Next recommendation:
+  - Add a recovery path for `parent TIMEOUT + direct child PLANNING/RUNNING`.
+  - The recovery should be refs-only at first: detect the orphaned child, recommend `dispatch_subagents` / `takeover_or_reassign`, and avoid automatically writing code.
+  - 中文解释：现在“不会一直卡住”和“路径不容易丢”已经有进展；下一步要让父级超时后，留下的孩子能被明确发现、接管、继续跑。
