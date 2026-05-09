@@ -30,6 +30,9 @@ from agent_py_agent.cli._inspection import (
     cmd_subagents_due_check,
     cmd_subagents_probe,
 )
+
+# LLM: leadership recovery command is a refs-only dry-run planner, not a mutating handoff apply path.
+from agent_py_agent.cli._leadership import cmd_subagents_leadership_recovery_plan
 from agent_py_agent.cli._memory_gate import cmd_subagents_memory_gate
 
 # 函数用途: 汇总 review 类子命令入口；包含只读的父级验收计划 dry-run 查看命令。

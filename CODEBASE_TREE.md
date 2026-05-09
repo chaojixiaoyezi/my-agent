@@ -567,6 +567,7 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - `python3 -m agent_py_agent subagents-plan-actions --root-id <root_run_id>` 可以从 CLI 查看指定任务树的 dry-run 动作计划。
 - `apply_actions()` 默认 dry-run，只有显式 apply 时才会执行低风险动作。
 - `recover_coordinator_leadership` 需要显式 `--apply` 和现有 leader run id，成功后旧 coordinator 进入 `TAKEN_OVER`，其直接子任务会重挂到新 leader，并同步 parent_id/depth/supervisor/final_owner。
+- `plan_leadership_recovery()` / `write_leadership_recovery_plan()` 会为批量失联 coordinator 生成只读分摊计划，把直接孩子按候选 leader 容量拆批；当前只写 `subagent_leadership_recovery_plan.json` 和 `SUBAGENT_LEADERSHIP_RECOVERY_PLAN.md`，不自动改树。
 - `write_action_apply_report()` 会写出 `subagent_action_apply_report.json` 和 `SUBAGENT_ACTION_APPLY.md`。
 - 真正 apply 时会追加 `subagent_action_apply_log.jsonl` 和 `ACTION_APPLY_LOG.md` 审计日志。
 - `python3 -m agent_py_agent subagents-apply-actions --apply ...` 可以执行受限动作。
@@ -965,12 +966,14 @@ docs/
 - `agent_py_agent/agent/subagents/services/board.py`: due-check 和 plan-actions 支持 root_id 作用域，真实 E2E 多棵任务树共用 workspace 时可以只看当前 root 并只生成当前树动作。
 - `agent_py_agent/agent/subagents/services/board_due_models.py`: due-check 共享参数包和 issue 构造 helper，避免巡检谓词文件继续膨胀。
 - `agent_py_agent/agent/subagents/services/board_due_checks.py`: due-check heartbeat/run-timeout 规则把已派生 child runs 的 parked `PLANNING` coordinator 转成 `coordinator_heartbeat_stale` 领导权恢复问题，避免误当普通 runner 接管，同时不会静默漏掉失联 coordinator。
+- `agent_py_agent/agent/subagents/services/leadership_recovery.py`: 批量 coordinator 领导权恢复 dry-run 计划器；只读取 root 作用域 due-check 问题和显式候选 leader，按容量输出 assignments/unassigned，不修改任务树。
 - `agent_py_agent/agent/subagents/services/persistence.py`: 普通保存默认合并已有 child_ids 防止旧快照覆盖层级边，`save_hierarchy_links()` 场景会关闭合并以支持受控子树重挂。
 - `agent_py_agent/agent/subagents/manager_hierarchy.py`: 新增 `SubAgentManager.schedule_child_runs(params=...)` facade，保持层级创建只走 bundle 入口和既有 `create_run` 持久化路径。
 - `agent_py_agent/agent/subagents/role_contracts.py`: 新增 reporter/checker 角色契约和 analyst/reviewer 兼容映射；checker 默认只读工具并保持 parent final gate。
 - `agent_py_agent/agent/subagents/automation_gate.py`: 新增半自动/自动执行门，默认只放行 refs-only 查询动作，跑工具或改状态动作继续需要人工确认。
 - `agent_py_agent/agent/agent_core/dispatch_limiter.py`: 新增 runner 启动限流 bundle/helper，统一处理 start-rate 和可选 role budgets，供 dispatch runner batch 调用。
 - `agent_py_agent/cli/_hierarchy.py`: 新增 `subagents-hierarchy` 和 `subagents-recovery-tree` CLI；前者默认 dry-run、`--apply` 才创建下一层子代理，后者查询 refs-only 多层恢复包并通过 capability config 判断 stale `RUNNING` 后代。
+- `agent_py_agent/cli/_leadership.py`: 新增 `subagents-leadership-recovery-plan` CLI，写批量领导权恢复 dry-run JSON/Markdown 报告；不会执行 future apply 命令。
 - `agent_py_agent/agent/subagents/manager_parent_acceptance.py`: 新增 manager 父级验收桥接函数，把 plan/write/apply/next-action/auto-policy/follow-up 流程从 `manager_acceptance.py` 类体拆出，保持 manager facade 轻量，并在 follow-up apply 前校验测试报告新鲜度；当前任务已失败/阻塞时可生成 rescue follow-up，不会误导去跑 tests。
 - `agent_py_agent/agent/subagents/manager_acceptance_parent_facade.py`: 新增父级验收 manager facade 方法集合，让 `manager_acceptance.py` 继续只承接普通 acceptance review 流程。
 - `agent_py_agent/agent/subagents/acceptance_test_execution.py`: 新增显式验收测试执行桥接，把 `AcceptanceReviewOptions(execute_tests=True)` 转成真实测试报告和阻断 findings；默认不运行。

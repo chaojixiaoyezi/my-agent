@@ -138,6 +138,19 @@ class SubAgentPlanActionsOptions:
     root_id: str = ""
 
 
+# LLM: SubAgentLeadershipRecoveryPlanOptions keeps batch leader handoff planning read-only and scoped.
+# 类用途: 集中保存批量领导权恢复计划参数；只生成 dry-run 分配建议，不修改任务树。
+@dataclass(frozen=True)
+class SubAgentLeadershipRecoveryPlanOptions:
+    """Bundle for dry-run batch coordinator leadership recovery planning."""
+
+    config: Any | None = None
+    write_report: bool = False
+    root_id: str = ""
+    leader_ids: list[str] = field(default_factory=list)
+    max_children_per_leader: int = 3
+
+
 # LLM: SubAgentBoardOptions 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 类用途: 集中保存subagent看板选项字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass(frozen=True)
@@ -171,6 +184,7 @@ __all__ = [
     "SubAgentCapabilityRouteOptions",
     "SubAgentChannelProbeOptions",
     "SubAgentDueCheckOptions",
+    "SubAgentLeadershipRecoveryPlanOptions",
     "SubAgentPlanActionsOptions",
     "SubAgentExecutionContext",
     "SubAgentParsedOutput",

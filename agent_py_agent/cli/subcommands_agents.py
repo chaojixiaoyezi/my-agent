@@ -25,6 +25,7 @@ from .subagents import (
     cmd_subagents_dispatch,
     cmd_subagents_due_check,
     cmd_subagents_hierarchy,
+    cmd_subagents_leadership_recovery_plan,
     cmd_subagents_memory_gate,
     cmd_subagents_patches,
     cmd_subagents_plan_actions,
@@ -69,6 +70,7 @@ def _add_agents_basic_subcommands(sub):
     workflow_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     workflow_plan.set_defaults(func=cmd_subagents_workflow_plan)
 
+    _add_agents_leadership_subcommands(sub)
     _add_agents_hierarchy_subcommands(sub)
 
     due_check = sub.add_parser("subagents-due-check", help="巡检 subagent 并输出父代理待处理项")
@@ -89,6 +91,26 @@ def _add_agents_basic_subcommands(sub):
     action_plan.add_argument("--limit", type=int, default=20, help="最多显示多少条动作")
     action_plan.add_argument("--root-id", help="只为指定 root subagent 任务树生成动作计划")
     action_plan.set_defaults(func=cmd_subagents_plan_actions)
+
+
+# LLM: _add_agents_leadership_subcommands keeps batch recovery planning out of the crowded basic registry.
+# 函数用途: 注册批量 coordinator 领导权恢复计划命令，保持默认 dry-run 且不执行接管。
+def _add_agents_leadership_subcommands(sub):
+    recovery_plan = sub.add_parser(
+        "subagents-leadership-recovery-plan",
+        help="Preview batch stale-coordinator leader handoffs",
+    )
+    _add_capability_config_arg(recovery_plan)
+    recovery_plan.add_argument("--root-id", required=True, help="只规划指定 root subagent 任务树")
+    recovery_plan.add_argument("--leader", action="append", required=True, help="候选新 leader run_id，可重复")
+    recovery_plan.add_argument(
+        "--max-children-per-leader",
+        type=int,
+        default=3,
+        help="每个候选 leader 最多接多少个直接孩子",
+    )
+    recovery_plan.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    recovery_plan.set_defaults(func=cmd_subagents_leadership_recovery_plan)
 
 
 # LLM: _add_agents_hierarchy_subcommands keeps hierarchy CLI wiring out of the basic command hub.
