@@ -77,6 +77,15 @@ def _acceptance_dispatch_record(report, run_id: str):
     return next(item for item in report.records if item.step == "acceptance" and item.run_id == run_id)
 
 
+# LLM: _write_output_patches keeps acceptance fixtures explicit while avoiding oversized tests.
+# 函数用途: 覆盖子代理 output.json 里的 patches 列表，用于构造“没有待审核 patch”的验收场景。
+def _write_output_patches(task, patches: list[dict[str, object]]) -> None:
+    output_path = Path(task.output_json)
+    output = json.loads(output_path.read_text(encoding="utf-8"))
+    output["patches"] = patches
+    output_path.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 # LLM: _assert_parent_acceptance_policy_dispatch verifies policy summaries stay refs-only and non-executing.
 # 函数用途: 检查 dispatch record 的父级验收 auto-policy 摘要，确保 manual/preflight 字段没有变成执行许可。
 def _assert_parent_acceptance_policy_dispatch(record, task) -> Path:
@@ -119,6 +128,47 @@ def _assert_dispatch_policy_markdown(markdown: str, task, policy_ref: Path) -> N
     assert "execution_allowed=False" in markdown
     assert "execution_blocked_by=automatic_execution_disabled,auto_executor_dry_run_only" in markdown
     assert str(policy_ref) in markdown
+
+
+# LLM: _assert_manual_acceptance_test_execution verifies dispatch records show the post-test dry-run result.
+# 函数用途: 检查显式执行父级 tests 后，dispatch acceptance 记录和 follow-up 字段都来自最新测试结果。
+def _assert_manual_acceptance_test_execution(record, task, test_ref: Path, followup_ref: Path) -> None:
+    assert record.action == "accept"
+    assert record.ok is True
+    assert record.message == "验收通过。"
+    assert record.parent_acceptance_auto_execution_status == "tests_executed"
+    assert record.parent_acceptance_auto_execution_allowed is True
+    assert record.parent_acceptance_auto_execution_executed is True
+    assert record.parent_acceptance_auto_execution_guard_status == "manual_confirmed"
+    assert record.parent_acceptance_auto_execution_blocked_by == []
+    assert record.parent_acceptance_auto_execution_test_ref == str(test_ref)
+    assert record.parent_acceptance_auto_execution_test_failed == 0
+    assert record.parent_acceptance_followup_ref == str(followup_ref)
+    assert record.parent_acceptance_followup_status == "ready_for_manual_apply"
+    assert record.parent_acceptance_followup_action == "apply_acceptance"
+    assert record.parent_acceptance_followup_command == (
+        f"subagents-acceptance-plan {task.id} --apply-followup"
+    )
+
+
+# LLM: _assert_acceptance_aggregate_refreshed verifies apply+tests reports use post-test facts.
+# 函数用途: 检查全局 acceptance 报告和单 run 审计都显示测试后的 dry-run 结论，而不是测试前旧结论。
+def _assert_acceptance_aggregate_refreshed(root: Path, task) -> None:
+    report_path = root / "subs" / "subagent_acceptance_report.json"
+    single_path = Path(task.reports_dir) / "acceptance_review.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    single = json.loads(single_path.read_text(encoding="utf-8"))
+    assert report["dry_run"] is True
+    assert report["summary"]["ACCEPT"] == 1
+    assert report["summary"]["ok"] == 1
+    assert report["summary"]["dry_run"] == 1
+    assert report["records"][0]["run_id"] == task.id
+    assert report["records"][0]["decision"] == "ACCEPT"
+    assert report["records"][0]["applied"] is False
+    assert report["records"][0]["message"] == "验收通过。"
+    assert single["decision"] == "ACCEPT"
+    assert single["applied"] is False
+    assert single["message"] == "验收通过。"
 
 
 def test_subagent_dispatch_dry_run_plans_runner_patch_and_acceptance():
@@ -174,6 +224,7 @@ def test_subagent_dispatch_manual_acceptance_test_execution_is_test_only():
             ),
             patch_status="none",
         )
+        _write_output_patches(task, [])
 
         report = agent.dispatch_subagents(
             _make_router(agent),
@@ -187,23 +238,43 @@ def test_subagent_dispatch_manual_acceptance_test_execution_is_test_only():
         payload = json.loads(test_ref.read_text(encoding="utf-8"))
         followup_payload = json.loads(followup_ref.read_text(encoding="utf-8"))
         loaded = agent.subagents.load(task.id)
-        assert record.parent_acceptance_auto_execution_status == "tests_executed"
-        assert record.parent_acceptance_auto_execution_allowed is True
-        assert record.parent_acceptance_auto_execution_executed is True
-        assert record.parent_acceptance_auto_execution_guard_status == "manual_confirmed"
-        assert record.parent_acceptance_auto_execution_blocked_by == []
-        assert record.parent_acceptance_auto_execution_test_ref == str(test_ref)
-        assert record.parent_acceptance_auto_execution_test_failed == 0
-        assert record.parent_acceptance_followup_ref == str(followup_ref)
-        assert record.parent_acceptance_followup_status == "ready_for_manual_apply"
-        assert record.parent_acceptance_followup_action == "apply_acceptance"
-        assert record.parent_acceptance_followup_command == (
-            f"subagents-acceptance-plan {task.id} --apply-followup"
-        )
+        _assert_manual_acceptance_test_execution(record, task, test_ref, followup_ref)
         assert followup_payload["followup"]["status"] == "ready_for_manual_apply"
         assert payload["failed"] == 0
         assert loaded.status == "AWAITING_ACCEPTANCE"
         assert loaded.verification_status == "NEEDS_ACCEPTANCE"
+
+
+def test_subagent_dispatch_apply_with_acceptance_tests_refreshes_aggregate_report():
+    """LLM: Verifies apply+execute tests refreshes acceptance reports without applying task state."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        (root / "README.md").write_text("dispatch apply acceptance refresh\n", encoding="utf-8")
+        task = _setup_review_task(
+            agent,
+            agent.subagents.create_run(
+                goal="调度 apply 跑 tests 但等待 follow-up", thought="等待 tests。", plan=["tests"],
+            ),
+            patch_status="none",
+        )
+        _write_output_patches(task, [])
+
+        report = agent.dispatch_subagents(
+            _make_router(agent),
+            CapabilityConfig(),
+            params=DispatchParams(apply=True, max_runners=0, execute_acceptance_tests=True),
+        )
+
+        record = _acceptance_dispatch_record(report, task.id)
+        loaded = agent.subagents.load(task.id)
+        assert record.action == "accept"
+        assert record.ok is True
+        assert record.applied is False
+        assert loaded.status == "AWAITING_ACCEPTANCE"
+        assert loaded.verification_status == "NEEDS_ACCEPTANCE"
+        _assert_acceptance_aggregate_refreshed(root, task)
 
 
 def test_subagent_dispatch_to_followup_apply_acceptance_chain():
@@ -220,9 +291,7 @@ def test_subagent_dispatch_to_followup_apply_acceptance_chain():
             ),
             patch_status="none",
         )
-        output = json.loads(Path(task.output_json).read_text(encoding="utf-8"))
-        output["patches"] = []
-        Path(task.output_json).write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_output_patches(task, [])
 
         agent.dispatch_subagents(
             _make_router(agent),
