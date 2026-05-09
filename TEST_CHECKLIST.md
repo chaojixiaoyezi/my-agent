@@ -151,6 +151,8 @@
 - [ ] parent acceptance auto-policy 半自动计划必须保持 `execution_mode=manual_only`、`automatic_execution_allowed=false`，`recommended_command` 只能作为人工或后续受控调度参考；dispatch JSON/Markdown 只能透传这些字段，不能执行命令
 - [ ] parent acceptance auto-policy preflight 可以显示 manual_ready，但 `ready_for_automatic_execution` 必须为 false，且自动执行禁用原因必须进入 blockers
 - [ ] dispatch JSON/Markdown 透传 preflight 摘要时，不得把 `manual_ready` 当成自动执行许可
+- [ ] parent acceptance auto-execution facade 只能写 `parent_acceptance_auto_execution.json` dry-run 审计，`execution_allowed/executed/mutates_task_state` 必须为 false
+- [ ] dispatch/watch 透传 `parent_acceptance_auto_execution_*` 摘要时，只能展示 ref、status、guard 和 blockers，不能执行 recommended command
 - [ ] `subagents-dispatch --watch --max-cycles 1 --interval 0` 能安全退出
 - [ ] watch 模式会写 heartbeat、watch 报告和 watch 日志
 - [ ] watch 只引用本轮 dispatch report/Markdown，不在 watch 层重新执行 auto-policy、tests、apply 或 rescue
