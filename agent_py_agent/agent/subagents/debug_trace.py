@@ -258,6 +258,9 @@ def _safe_payload_value(value: Any) -> Any:
         return _preview(value)
     if isinstance(value, list):
         return [_safe_payload_value(item) for item in value[:32]]
+    # LLM: report summaries may be dicts; keep keys/values bounded instead of stringifying the whole map.
+    if isinstance(value, dict):
+        return {str(key): _safe_payload_value(item) for key, item in list(value.items())[:32]}
     return _preview(str(value))
 
 

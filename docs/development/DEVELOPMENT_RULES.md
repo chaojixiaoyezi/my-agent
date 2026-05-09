@@ -258,17 +258,20 @@ do_write()
   Do not copy prompt bodies, response bodies, artifact bodies, or tool output
   bodies into trace records.
 - Level guidance:
-  - `1`: lifecycle checkpoints such as task creation and runner close-out.
-  - `2`: dispatch, hierarchy scheduling, parent acceptance decision/next-action,
-    runner result, and recovery refs.
-  - `3`: deeper E2E diagnosis with bounded status snapshots, normalization
-    counts, and guard decisions.
+  - `1`: lifecycle checkpoints such as task creation.
+  - `2`: runner close-out, hierarchy scheduling, parent acceptance
+    decision/next-action, and other critical state transitions.
+  - `3`: report and loop summaries such as due-check, action-plan,
+    recovery-tree, dispatch, dispatch-watch, bounded status snapshots,
+    normalization counts, and guard decisions.
   - `4`: bounded prompt/response/tool refs only; still no body expansion.
   - `5`: maximum local diagnostics for short controlled test windows.
 - Current approved event families are lifecycle (`task_created`), runner
   close-out (`runner_result_recorded`), hierarchy fan-out
-  (`hierarchy_schedule_result`), and parent acceptance control-plane events
-  (`parent_acceptance_decision`, `parent_acceptance_next_action`).
+  (`hierarchy_schedule_result`), parent acceptance control-plane events
+  (`parent_acceptance_decision`, `parent_acceptance_next_action`), and bounded
+  report summaries (`due_check_report`, `action_plan_report`,
+  `hierarchy_recovery_packet`, `dispatch_report`, `dispatch_watch_report`).
 - Any new trace event must have focused tests proving `0` writes nothing and
   enabled levels write bounded internal records.
 - Trace expansion must happen only at stable lifecycle boundaries. Avoid

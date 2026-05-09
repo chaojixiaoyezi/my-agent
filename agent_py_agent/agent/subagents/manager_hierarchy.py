@@ -39,7 +39,11 @@ class SubAgentHierarchyMixin:
     # LLM: build_hierarchy_recovery_packet summarizes a nested task tree without reading artifact bodies.
     # 函数用途: 为 root run 生成多层恢复交接包，列出需要接管/恢复的子孙节点和 refs。
     def build_hierarchy_recovery_packet(self, *, params: HierarchyRecoveryRequest) -> HierarchyRecoveryResult:
-        return SubAgentHierarchyRecoveryService(self).build_packet(params)
+        result = SubAgentHierarchyRecoveryService(self).build_packet(params)
+        # LLM: recovery trace is level-gated and records ids/counts only, never artifact bodies.
+        from .debug_trace_reports import trace_hierarchy_recovery_result
+
+        return trace_hierarchy_recovery_result(self, result)
 
     # LLM: plan_leadership_recovery previews batch handoffs for stale coordinators without mutating the tree.
     # 函数用途: 为批量 coordinator 挂掉场景生成 leader 分摊计划，当前只读不执行。

@@ -237,6 +237,7 @@
 - 本轮叶子能力边界提示修复：runner prompt 新增明确 contract，要求叶子没有 `shell/command/terminal` 工具时不要因为不能自己跑 `pytest` 上抛 capability_request，而是写好产物、测试文件和推荐命令，交给父级验收器执行。
 - 本轮层级路径继承修复：当模型创建下一层时只给出短 goal，scheduler 会把父级目标/边界追加进 child goal，并用补全后的 goal 推断叶子写文件工具，避免产物目录只留在 thought 里、传到孙级后丢失。
 - 本轮父超时子任务残留恢复第一片：`due-check` 现在会在父节点 `TIMEOUT` 且仍有未完成 direct child 时报告 `parent_timeout_with_unfinished_children`，`plan-actions` 只生成 `recover_child_after_parent_timeout` refs-only 恢复提示和 `subagents-recovery-tree` 命令；相关 child 以 `unfinished_child:<child_id>:<status>` 结构化 ref 写入 rescue packet，recovery-tree 在 `--hide-healthy` 下也会展示这些残留 child，不自动接管、不执行代码。
+- 本轮调试追踪第三片：新增 `debug_trace_reports.py`，`subagent_debug_trace_level=3` 记录 due-check、action-plan、hierarchy recovery、dispatch 和 dispatch-watch 的 bounded 摘要；仍只写内部 JSONL，不展开任务正文、prompt/response、artifact 或 tool output。
 
 ## 未跑测试
 

@@ -398,6 +398,7 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 ## 2026-05-09 debug trace and tool alias structure update
 - `agent_py_agent/agent/subagents/debug_trace.py` 是正式调试追踪写入层；`subagent_debug_trace_level=0` 完全静默，开启后只写内部 `debug_traces/subagent_trace.jsonl`，事件必须 refs-only、bounded，不复制 prompt/response/artifact/tool output 正文。
 - `SubAgentManagerInitParams.debug_trace_level` 从 `AgentConfig.subagent_debug_trace_level` 传入 manager；创建任务和 runner 收束分别写 `task_created`、`runner_result_recorded`，但只在 trace level 允许时写入。
+- `agent_py_agent/agent/subagents/debug_trace_reports.py` 承接报告类 trace：level 3 会记录 due-check、action-plan、hierarchy recovery、dispatch 和 dispatch-watch 的 counts、summary、candidate/action/issue ids；它不读取报告 refs 指向的正文，也不调用模型或命令。
 - Trace 第二片把 `hierarchy_schedule_result`、`parent_acceptance_decision` 和 `parent_acceptance_next_action` 纳入 level 2。它们只记录 parent/run/root/depth/status、decision/action、human gate、命令短预览、refs 和计数，不执行命令、不读取正文。
 - `SubAgentHierarchyScheduler` 会在持久化 child/leaf run 前把模型常见工具别名归一成真实工具名，例如 `write -> write_file`、`read -> read_file`、`list -> list_files`；leaf 写文件任务仍会补齐安全文件工具包，coordinator 不自动获得写工具。
 - `parent_acceptance_controller` 会把空 command 测试项识别为不可执行占位检查，写入 refs 摘要 `ignored_empty_command_tests=N`，但不会因此触发人工确认或测试执行。真正有命令的测试仍走 allowlist / shell 字符安全预检。
