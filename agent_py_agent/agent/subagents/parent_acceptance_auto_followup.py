@@ -10,6 +10,7 @@ from typing import Any, ClassVar
 
 from .execution_report import TestExecutionReport, load_test_execution_report
 from .models import SubAgentTask
+from .parent_acceptance_followup_control import followup_command_for_action
 from .parent_acceptance_next_action import (
     ParentAcceptanceNextAction,
     build_parent_acceptance_next_action,
@@ -64,7 +65,8 @@ def build_parent_acceptance_auto_followup(
         status=_followup_status(action),
         action=action.action,
         reason=action.reason,
-        command=action.command,
+        # LLM: Keep post-test prompts pointed at the controlled follow-up gate, not legacy direct apply.
+        command=followup_command_for_action(task.id, action.action) or action.command,
         execution_ref=execution_ref,
         test_execution_ref=test_execution_ref,
         test_total=report.total_tests,

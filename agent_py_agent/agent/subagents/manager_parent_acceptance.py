@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .acceptance_review_service import AcceptanceReviewOptions
+from .execution_report import load_test_execution_report
 from .parent_acceptance_apply import (
     ParentAcceptanceApplyResult,
     applied_parent_acceptance_apply_result,
@@ -25,10 +26,29 @@ from .parent_acceptance_controller import (
     build_parent_acceptance_decision,
     write_parent_acceptance_decision_file,
 )
+from .parent_acceptance_followup_control import (
+    BlockedFollowUpControlInput,
+    ParentAcceptanceFollowUpControlOptions,
+    ParentAcceptanceFollowUpControlResult,
+    acceptance_followup_control_result,
+    blocked_followup_control_result,
+    followup_action,
+    followup_command_for_action,
+    followup_status,
+    invalid_followup_control_result,
+    invalid_followup_error,
+    parent_acceptance_followup_ref,
+    preview_parent_acceptance_followup_control,
+    read_parent_acceptance_followup_payload,
+    rescue_followup_control_result,
+    write_parent_acceptance_followup_control_file,
+)
 from .parent_acceptance_next_action import (
     ParentAcceptanceNextAction,
     build_parent_acceptance_next_action,
 )
+from .reports import ActionPlanItem
+from .services.action_options import ActionApplyOptions
 
 
 # LLM: manager_plan_parent_acceptance is side-effect free and only reads task-local fact sources.
@@ -118,6 +138,201 @@ def manager_plan_parent_acceptance_auto_execution(
         task,
         workspace_root=acceptance_workspace_root(manager),
         options=options,
+    )
+
+
+# LLM: manager_plan_parent_acceptance_followup exposes post-test semi-auto guidance without mutation.
+# 函数用途: 读取测试后的 follow-up 审计，返回显式下一步建议；不写文件、不改状态。
+def manager_plan_parent_acceptance_followup(
+    manager,
+    run_id: str,
+) -> ParentAcceptanceFollowUpControlResult:
+    task = manager.load(run_id)
+    return preview_parent_acceptance_followup_control(task)
+
+
+# LLM: manager_apply_parent_acceptance_followup is the controlled manual gate after tests.
+# 函数用途: 显式处理 follow-up；测试通过才 apply 验收，救援必须走 action handler 接管门。
+def manager_apply_parent_acceptance_followup(
+    manager,
+    run_id: str,
+    *,
+    options: ParentAcceptanceFollowUpControlOptions | None = None,
+) -> ParentAcceptanceFollowUpControlResult:
+    task = manager.load(run_id)
+    opts = options or ParentAcceptanceFollowUpControlOptions()
+    payload = read_parent_acceptance_followup_payload(task)
+    result = _followup_control_result(manager, task, payload, opts)
+    write_parent_acceptance_followup_control_file(task, result)
+    return result
+
+
+# LLM: _followup_control_result routes the stored follow-up to the matching manual gate.
+# 函数用途: 根据 follow-up action 选择 apply、rescue 或 blocked；不猜测缺失事实。
+def _followup_control_result(
+    manager,
+    task,
+    payload: dict,
+    opts: ParentAcceptanceFollowUpControlOptions,
+) -> ParentAcceptanceFollowUpControlResult:
+    invalid = invalid_followup_error(payload)
+    if invalid:
+        return invalid_followup_control_result(task, invalid)
+    status = followup_status(payload)
+    action = followup_action(payload)
+    if not status:
+        return blocked_followup_control_result(
+            task,
+            BlockedFollowUpControlInput(
+                status="missing_followup",
+                action="run_tests",
+                message="parent acceptance follow-up is missing; run explicit tests first",
+                recommended_command=followup_command_for_action(task.id, "run_tests"),
+            ),
+        )
+    if not opts.apply:
+        return preview_parent_acceptance_followup_control(task)
+    consistency = _followup_consistency_block(task, payload, status, action)
+    if consistency is not None:
+        return consistency
+    if action == "apply_acceptance" and status == "ready_for_manual_apply":
+        return _apply_followup_acceptance(manager, task, opts)
+    if action == "plan_rescue" and status == "needs_manual_rescue":
+        return _apply_followup_rescue(manager, task, opts)
+    return blocked_followup_control_result(
+        task,
+        BlockedFollowUpControlInput(
+            status=status,
+            action=action,
+            message=f"follow-up action {action or status} is not safe for explicit apply",
+            recommended_command=followup_command_for_action(task.id, action),
+        ),
+    )
+
+
+# LLM: _followup_consistency_block protects manual apply from stale or mismatched test evidence.
+# 函数用途: 在真正 apply/rescue 前校验 follow-up 与当前 test_execution.json 是否一致；不一致就阻断。
+def _followup_consistency_block(
+    task,
+    payload: dict,
+    status: str,
+    action: str,
+) -> ParentAcceptanceFollowUpControlResult | None:
+    followup = payload.get("followup") if isinstance(payload, dict) else {}
+    followup = followup if isinstance(followup, dict) else {}
+    reason = _followup_consistency_reason(task, payload, followup)
+    if not reason:
+        return None
+    return blocked_followup_control_result(
+        task,
+        BlockedFollowUpControlInput(
+            status=reason[0],
+            action=action or "run_tests",
+            message=reason[1],
+            recommended_command=followup_command_for_action(task.id, "run_tests"),
+        ),
+    )
+
+
+# LLM: _followup_consistency_reason returns compact machine-readable stale evidence reasons.
+# 函数用途: 对 run_id、测试报告引用、失败数和文件新鲜度做最小校验，避免旧 follow-up 推进状态。
+def _followup_consistency_reason(
+    task,
+    payload: dict,
+    followup: dict,
+) -> tuple[str, str] | None:
+    status = str(followup.get("status") or "")
+    action = str(followup.get("action") or "")
+    if str(payload.get("run_id") or followup.get("run_id") or "") != task.id:
+        return ("stale_followup", "follow-up run_id does not match this task")
+    report_path = Path(str(followup.get("test_execution_ref") or ""))
+    current_report = Path(task.reports_dir) / "test_execution.json"
+    if not report_path.exists():
+        return ("missing_test_execution", "follow-up test_execution_ref is missing")
+    if report_path.resolve() != current_report.resolve():
+        return ("stale_followup", "follow-up test_execution_ref is not the current task report")
+    if report_path.stat().st_mtime > parent_acceptance_followup_ref(task).stat().st_mtime + 0.001:
+        return ("stale_followup", "test_execution.json is newer than the follow-up audit")
+    try:
+        report = load_test_execution_report(report_path)
+    except (OSError, ValueError):
+        return ("invalid_test_execution", "current test_execution.json is not readable")
+    followup_failed = int(followup.get("test_failed") or 0)
+    if followup_failed != report.failed:
+        return ("followup_test_mismatch", "follow-up failed count does not match current test report")
+    if action == "apply_acceptance" and (status != "ready_for_manual_apply" or report.failed != 0):
+        return ("followup_test_mismatch", "apply follow-up requires a passing current test report")
+    if action == "plan_rescue" and (status != "needs_manual_rescue" or report.failed <= 0):
+        return ("followup_test_mismatch", "rescue follow-up requires failing current test evidence")
+    return None
+
+
+# LLM: _apply_followup_acceptance reuses the existing inspect_only acceptance apply bridge.
+# 函数用途: 测试通过后显式应用父级验收；实际状态写回仍由既有 apply 决策函数负责。
+def _apply_followup_acceptance(
+    manager,
+    task,
+    opts: ParentAcceptanceFollowUpControlOptions,
+) -> ParentAcceptanceFollowUpControlResult:
+    apply_result = manager_apply_parent_acceptance_decision(
+        manager,
+        task.id,
+        reviewer=opts.reviewer,
+        note=opts.note,
+    )
+    return acceptance_followup_control_result(manager.load(task.id), apply_result)
+
+
+# LLM: _apply_followup_rescue reuses action-apply takeover gates instead of direct takeover writes.
+# 函数用途: 测试失败后显式接管；缺少 take_over_by 会被 action handler 拦截，不直接改状态。
+def _apply_followup_rescue(
+    manager,
+    task,
+    opts: ParentAcceptanceFollowUpControlOptions,
+) -> ParentAcceptanceFollowUpControlResult:
+    action = _followup_rescue_action(task)
+    record = manager._apply_action_item(
+        action,
+        options=ActionApplyOptions(
+            apply=True,
+            action_filter="takeover_or_reassign",
+            run_id=task.id,
+            take_over_by=opts.take_over_by,
+            locked_files=list(opts.locked_files),
+            limit=1,
+        ),
+    )
+    manager._append_action_apply_log(record)
+    return rescue_followup_control_result(manager.load(task.id), record)
+
+
+# LLM: _followup_rescue_action builds the explicit action item consumed by the existing rescue handler.
+# 函数用途: 构造 takeover_or_reassign 动作，复用 action handler 的通道检查和审计字段。
+def _followup_rescue_action(task) -> ActionPlanItem:
+    return ActionPlanItem(
+        id=f"parent-followup-rescue-{task.id}",
+        run_id=task.id,
+        severity="HIGH",
+        priority=950,
+        action="takeover_or_reassign",
+        reason="parent acceptance tests failed; manual rescue requested from follow-up",
+        source_issue_kinds=["parent_acceptance_test_failed"],
+        suggested_commands=[followup_command_for_action(task.id, "plan_rescue")],
+        would_change_status_to="TAKEN_OVER",
+        rescue_trigger="parent_acceptance_test_failed",
+        rescue_strategy="manual_takeover_after_failed_parent_tests",
+        escalation_target="parent",
+        rescue_context_refs=[str(Path(task.reports_dir) / "parent_acceptance_auto_followup.json")],
+        rescue_packet={
+            "auto_retry": False,
+            "requires_manual_confirmation": True,
+            "source": "parent_acceptance_followup",
+        },
+        requires_confirmation=True,
+        dry_run=False,
+        owner=task.owner,
+        final_owner=task.final_owner,
+        task_dir=task.task_dir,
     )
 
 

@@ -479,7 +479,7 @@ def _assert_manual_execution_result(result, task, test_report_path: Path, follow
     assert result.followup_ref == str(followup_path)
     assert result.followup_status == "ready_for_manual_apply"
     assert result.followup_action == "apply_acceptance"
-    assert result.followup_command == f"subagents-acceptance-plan {task.id} --apply"
+    assert result.followup_command == f"subagents-acceptance-plan {task.id} --apply-followup"
 
 
 # LLM: _assert_manual_followup_payload checks the persisted follow-up safety boundaries.
@@ -515,7 +515,9 @@ def test_parent_acceptance_auto_execution_followup_reports_failed_tests_without_
         assert result.test_failed == 1
         assert result.followup_status == "needs_manual_rescue"
         assert result.followup_action == "plan_rescue"
-        assert result.followup_command == ""
+        assert result.followup_command == (
+            f"subagents-acceptance-plan {task.id} --apply-followup --take-over-by <agent>"
+        )
         assert followup_payload["followup"]["test_failed"] == 1
         assert followup_payload["followup"]["failed_tests"][0]["name"] == "missing-readme"
         assert followup_payload["followup"]["next_action"]["action"] == "plan_rescue"

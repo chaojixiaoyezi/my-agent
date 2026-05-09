@@ -25,20 +25,7 @@ from .acceptance_review_service import (
     acceptance_review_options,
     review_acceptance_task,
 )
-from .manager_parent_acceptance import (
-    ParentAcceptanceApplyResult,
-    ParentAcceptanceAutoExecutionOptions,
-    ParentAcceptanceAutoExecutionResult,
-    ParentAcceptanceAutoPolicy,
-    ParentAcceptanceDecision,
-    ParentAcceptanceNextAction,
-    manager_apply_parent_acceptance_decision,
-    manager_plan_parent_acceptance,
-    manager_plan_parent_acceptance_auto_execution,
-    manager_plan_parent_acceptance_auto_policy,
-    manager_plan_parent_acceptance_next_action,
-    manager_write_parent_acceptance_decision,
-)
+from .manager_acceptance_parent_facade import _ParentAcceptanceFacade
 from .models import SubAgentTask
 from .parsing import (
     _dict_list,
@@ -91,49 +78,8 @@ if TYPE_CHECKING:
     from ..local_store import LocalStore
 
 # LLM: _SubAgentAcceptanceFacade 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 类用途: 拆分subagent验收门面流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
-class _SubAgentAcceptanceFacade:
-    # LLM: plan_parent_acceptance is a dry-run upper-agent controller entrypoint; it must not execute tests or mutate tasks.
-    # 函数用途: 让父代理先查看验收下一步建议；只读取任务事实源并返回决策，不写状态、不跑命令。
-    def plan_parent_acceptance(self, run_id: str) -> ParentAcceptanceDecision:
-        return manager_plan_parent_acceptance(self, run_id)
-
-    # LLM: write_parent_acceptance_decision persists the dry-run plan but does not apply it.
-    # 函数用途: 写入父级验收 dry-run 决策审计文件；不执行 tests、不修改 task 状态。
-    def write_parent_acceptance_decision(self, run_id: str) -> ParentAcceptanceDecision:
-        return manager_write_parent_acceptance_decision(self, run_id)
-
-    # LLM: apply_parent_acceptance_decision only bridges inspect_only into the existing acceptance apply path.
-    # 函数用途: 显式应用父级验收决策；execute_tests/request_human/rescue 只写入拦截审计，不自动跑命令或改状态。
-    def apply_parent_acceptance_decision(
-        self,
-        run_id: str,
-        *,
-        reviewer: str = "parent",
-        note: str = "",
-    ) -> ParentAcceptanceApplyResult:
-        return manager_apply_parent_acceptance_decision(self, run_id, reviewer=reviewer, note=note)
-
-    # LLM: plan_parent_acceptance_next_action returns a scheduler-facing recommendation, not an execution.
-    # 函数用途: 为父/上级代理生成下一步显式动作建议；不运行 tests、不 rescue、不改状态。
-    def plan_parent_acceptance_next_action(self, run_id: str) -> ParentAcceptanceNextAction:
-        return manager_plan_parent_acceptance_next_action(self, run_id)
-
-    # LLM: plan_parent_acceptance_auto_policy is a dry-run policy gate for future automation.
-    # 函数用途: 生成父级验收自动策略审计；不执行建议动作、不改状态。
-    def plan_parent_acceptance_auto_policy(self, run_id: str) -> ParentAcceptanceAutoPolicy:
-        return manager_plan_parent_acceptance_auto_policy(self, run_id)
-
-    # LLM: plan_parent_acceptance_auto_execution is a guarded executor facade with default dry-run behavior.
-    # 函数用途: 生成父级验收自动执行计划审计；只有 execute_tests 显式为 true 时才运行 tests，不 apply。
-    def plan_parent_acceptance_auto_execution(
-        self,
-        run_id: str,
-        *,
-        options: ParentAcceptanceAutoExecutionOptions | None = None,
-    ) -> ParentAcceptanceAutoExecutionResult:
-        return manager_plan_parent_acceptance_auto_execution(self, run_id, options=options)
-
+# 类用途: 拆分subagent普通验收门面流程片段；父级验收方法已移到 _ParentAcceptanceFacade，避免本文件再次膨胀。
+class _SubAgentAcceptanceFacade(_ParentAcceptanceFacade):
     # LLM: review_acceptance runs one parent acceptance review with explicit opt-in execution options.
     # 函数用途: 对单个子代理 run 执行父级验收；只有 options 或 apply 参数允许时才写回任务状态。
     def review_acceptance(
