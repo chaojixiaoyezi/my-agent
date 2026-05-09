@@ -781,7 +781,7 @@ my-agent subagents-apply-actions --apply --action recover_coordinator_leadership
 | `--action <name>` | - | 只处理指定动作，如 `reopen_for_evidence`。 |
 | `--run-id <id>` | - | 只处理指定子代理运行 ID，可多次传入。 |
 | `--limit <n>` | `20` | 最多处理多少条动作。 |
-| `--take-over-by <name>` | - | 接管/领导权恢复动作的接管者；`recover_coordinator_leadership` 要求这里是现有 leader run ID。 |
+| `--take-over-by <name>` | - | 接管/领导权恢复动作的接管者；`recover_coordinator_leadership` 要求这里是现有 leader run ID，并会把旧 coordinator 的直接子任务重挂到该 leader。 |
 | `--locked-file <path>` | - | 接管时锁定的文件，可多次传入。 |
 
 ## `subagents-workflow-plan`

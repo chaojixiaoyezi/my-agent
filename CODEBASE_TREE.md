@@ -566,7 +566,7 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - `write_action_plan()` 会写出 `subagent_action_plan.json` 和 `SUBAGENT_ACTION_PLAN.md`。
 - `python3 -m agent_py_agent subagents-plan-actions --root-id <root_run_id>` 可以从 CLI 查看指定任务树的 dry-run 动作计划。
 - `apply_actions()` 默认 dry-run，只有显式 apply 时才会执行低风险动作。
-- `recover_coordinator_leadership` 需要显式 `--apply` 和现有 leader run id，成功后旧 coordinator 进入 `TAKEN_OVER`，其子任务 supervisor/final_owner 指向新 leader。
+- `recover_coordinator_leadership` 需要显式 `--apply` 和现有 leader run id，成功后旧 coordinator 进入 `TAKEN_OVER`，其直接子任务会重挂到新 leader，并同步 parent_id/depth/supervisor/final_owner。
 - `write_action_apply_report()` 会写出 `subagent_action_apply_report.json` 和 `SUBAGENT_ACTION_APPLY.md`。
 - 真正 apply 时会追加 `subagent_action_apply_log.jsonl` 和 `ACTION_APPLY_LOG.md` 审计日志。
 - `python3 -m agent_py_agent subagents-apply-actions --apply ...` 可以执行受限动作。
@@ -965,6 +965,7 @@ docs/
 - `agent_py_agent/agent/subagents/services/board.py`: due-check 和 plan-actions 支持 root_id 作用域，真实 E2E 多棵任务树共用 workspace 时可以只看当前 root 并只生成当前树动作。
 - `agent_py_agent/agent/subagents/services/board_due_models.py`: due-check 共享参数包和 issue 构造 helper，避免巡检谓词文件继续膨胀。
 - `agent_py_agent/agent/subagents/services/board_due_checks.py`: due-check heartbeat/run-timeout 规则把已派生 child runs 的 parked `PLANNING` coordinator 转成 `coordinator_heartbeat_stale` 领导权恢复问题，避免误当普通 runner 接管，同时不会静默漏掉失联 coordinator。
+- `agent_py_agent/agent/subagents/services/persistence.py`: 普通保存默认合并已有 child_ids 防止旧快照覆盖层级边，`save_hierarchy_links()` 场景会关闭合并以支持受控子树重挂。
 - `agent_py_agent/agent/subagents/manager_hierarchy.py`: 新增 `SubAgentManager.schedule_child_runs(params=...)` facade，保持层级创建只走 bundle 入口和既有 `create_run` 持久化路径。
 - `agent_py_agent/agent/subagents/role_contracts.py`: 新增 reporter/checker 角色契约和 analyst/reviewer 兼容映射；checker 默认只读工具并保持 parent final gate。
 - `agent_py_agent/agent/subagents/automation_gate.py`: 新增半自动/自动执行门，默认只放行 refs-only 查询动作，跑工具或改状态动作继续需要人工确认。

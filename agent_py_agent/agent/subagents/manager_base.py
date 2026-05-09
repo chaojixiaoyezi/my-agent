@@ -175,6 +175,11 @@ class SubAgentBaseMixin:
     def save(self, task: SubAgentTask) -> None:
         self.persistence.save(task)
 
+    # LLM: save_hierarchy_links is reserved for controlled reparent operations that intentionally remove child edges.
+    # 函数用途: 精确保存任务的 child_ids，用于显式领导权恢复/子树重挂；普通保存仍走 save() 的防覆盖合并。
+    def save_hierarchy_links(self, task: SubAgentTask) -> None:
+        self.persistence.save(task, preserve_child_links=False)
+
     # LLM: add_child 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
     # 函数用途: 处理add子级相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     def add_child(self, parent_id: str, child_id: str) -> None:

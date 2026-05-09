@@ -647,7 +647,7 @@ python3 -m agent_py_agent subagents-apply-actions --apply \
   --take-over-by <new_leader_run_id>
 ```
 
-这个动作要求 `<new_leader_run_id>` 是已存在的 subagent run；它会把旧 coordinator 标记为 `TAKEN_OVER`，并把其子任务的 `supervisor/final_owner` 切给新 leader。
+这个动作要求 `<new_leader_run_id>` 是已存在的 subagent run；它会把旧 coordinator 标记为 `TAKEN_OVER`，把其子任务重挂到新 leader 名下，并同步更新 `parent_id`、`depth`、`supervisor` 和 `final_owner`。孙级节点不会换父级，但 depth 会跟随刷新。
 
 ### 能力路由
 

@@ -75,6 +75,10 @@ def _make_coordinator_handoff_fixture(agent):
         goal="实现模块", thought="被旧 coordinator 管理。", plan=["work"],
         parent_id=coordinator.id, root_id=coordinator.root_id, supervisor=coordinator.id,
     )
+    grandchild = agent.subagents.create_run(
+        goal="实现子模块", thought="被 child 管理。", plan=["work"],
+        parent_id=child.id, root_id=coordinator.root_id, supervisor=child.id,
+    )
     leader = agent.subagents.create_run(
         goal="接手协调", thought="新的 leader。", plan=["lead"],
         parent_id=coordinator.id, root_id=coordinator.root_id,
@@ -84,7 +88,7 @@ def _make_coordinator_handoff_fixture(agent):
     stale.heartbeat_at = time.time() - 30
     stale.updated_at = stale.heartbeat_at
     agent.subagents.save(stale)
-    return coordinator, child, leader
+    return coordinator, child, grandchild, leader
 
 
 def test_subagent_action_plan_dry_run():
@@ -179,7 +183,7 @@ def test_subagent_action_apply_recovers_coordinator_leadership():
         root = Path(td)
         cfg = AgentConfig(subagent_workspace="subs")
         agent = SimpleAgent(cfg, root)
-        coordinator, child, leader = _make_coordinator_handoff_fixture(agent)
+        coordinator, child, grandchild, leader = _make_coordinator_handoff_fixture(agent)
 
         missing = agent.subagents.write_action_apply_report(
             CapabilityConfig(subagent_heartbeat_timeout=1),
@@ -200,9 +204,17 @@ def test_subagent_action_apply_recovers_coordinator_leadership():
         assert applied.records[0].ok
         assert agent.subagents.load(coordinator.id).status == "TAKEN_OVER"
         assert agent.subagents.load(coordinator.id).takeover_by == leader.id
+        reloaded_coordinator = agent.subagents.load(coordinator.id)
+        reloaded_leader = agent.subagents.load(leader.id)
         reloaded_child = agent.subagents.load(child.id)
+        reloaded_grandchild = agent.subagents.load(grandchild.id)
+        assert reloaded_coordinator.child_ids == [leader.id]
+        assert reloaded_child.parent_id == leader.id
         assert reloaded_child.supervisor == leader.id
         assert reloaded_child.final_owner == leader.id
+        assert child.id in reloaded_leader.child_ids
+        assert reloaded_child.depth == reloaded_leader.depth + 1
+        assert reloaded_grandchild.depth == reloaded_child.depth + 1
 
 
 def test_subagent_action_apply_repairs_work_order():
