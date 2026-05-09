@@ -8,6 +8,8 @@ import json
 import sys
 
 from ..agent.agent_core.dispatch_params import DispatchParams, WatchParams
+from ..agent.agent_core.runner_gate import get_task_timeout, resolve_runner_config
+from ..agent.agent_core.runner_worker import RunSubagentWorkerParams, _run_subagent_worker
 from ..agent.agent_core.subagent_params import SubagentRunParams
 from ..agent.capability_config import load_capability_config
 from ..agent.config import load_config
@@ -215,15 +217,7 @@ def cmd_subagents_workflow_plan(args) -> int:
 def cmd_subagent_run(args) -> int:
 
     agent = make_agent(args)
-    result = agent.run_subagent(
-        params=SubagentRunParams(
-            run_id=args.run_id,
-            instruction=args.instruction or "",
-            dry_run=not args.execute,
-            max_cards=args.max_cards,
-            probe=not args.no_probe,
-        )
-    )
+    result = _execute_subagent_run_cli(agent, args)
     mode = "execute" if args.execute else "dry-run"
     status = "OK" if result.ok else "FAIL"
     print("SUBAGENT RUNNER")
@@ -240,3 +234,41 @@ def cmd_subagent_run(args) -> int:
     if result.response_file:
         print(f"response: {result.response_file}")
     return 0 if result.ok else 1
+
+
+# LLM: _execute_subagent_run_cli keeps direct CLI execution under the same timeout boundary as dispatched runners.
+# 函数用途: 根据 CLI 参数执行或 dry-run 一个 subagent；执行模式走 worker timeout，避免模型流式响应卡住时裸跑不收口。
+def _execute_subagent_run_cli(agent, args):
+    if not args.execute:
+        return agent.run_subagent(
+            params=SubagentRunParams(
+                run_id=args.run_id,
+                instruction=args.instruction or "",
+                dry_run=True,
+                max_cards=int(args.max_cards or 0),
+                probe=not args.no_probe,
+            )
+        )
+    return _run_subagent_worker(
+        RunSubagentWorkerParams(
+            config=agent.config,
+            root=agent.root,
+            run_id=args.run_id,
+            instruction=args.instruction or "",
+            dry_run=False,
+            max_cards=int(args.max_cards or 0),
+            probe=not args.no_probe,
+            retry_reason="",
+            timeout_seconds=_cli_subagent_run_timeout(agent, args.run_id),
+            local_store=getattr(agent, "local_store", None),
+            backend_override=getattr(agent, "_subagent_worker_backend_override", None),
+        )
+    )
+
+
+# LLM: _cli_subagent_run_timeout mirrors dispatch timeout calculation for one explicitly requested runner.
+# 函数用途: 读取 run 的任务信息和配置，计算 `subagent-run --execute` 的总运行超时秒数。
+def _cli_subagent_run_timeout(agent, run_id: str) -> float:
+    task = agent.subagents.load(run_id)
+    runner_timeout_seconds, _, _ = resolve_runner_config(agent.config, 1)
+    return get_task_timeout(task, runner_timeout_seconds, agent.config)

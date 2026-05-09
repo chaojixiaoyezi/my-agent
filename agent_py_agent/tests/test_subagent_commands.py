@@ -486,6 +486,51 @@ class TestCmdSubagentRun:
             result = cmd_subagent_run(args)
             assert result == 1
 
+    def test_cmd_subagent_run_execute_uses_timeout_worker(self, tmp_path: Path):
+        """执行模式通过带超时的 worker 跑，避免 CLI 入口裸跑模型卡住。"""
+        from agent_py_agent.cli.subagents import cmd_subagent_run
+
+        args = MagicMock()
+        args.config = str(tmp_path / "config.yaml")
+        args.run_id = "run_001"
+        args.instruction = "继续"
+        args.execute = True
+        args.max_cards = 3
+        args.no_probe = False
+
+        mock_task = MagicMock()
+        mock_agent = MagicMock()
+        mock_agent.root = tmp_path
+        mock_agent.local_store = None
+        mock_agent.subagents.load.return_value = mock_task
+
+        mock_result = MagicMock()
+        mock_result.ok = False
+        mock_result.run_id = "run_001"
+        mock_result.status = "TIMEOUT"
+        mock_result.verification_status = "UNVERIFIED"
+        mock_result.message = "runner timed out after 0.05s"
+        mock_result.execution_context_json = tmp_path / "exec.json"
+        mock_result.result_json = tmp_path / "result.json"
+        mock_result.result_file = tmp_path / "result.md"
+        mock_result.prompt_file = None
+        mock_result.response_file = None
+
+        with (
+            patch("agent_py_agent.cli._dispatch.make_agent", return_value=mock_agent),
+            patch("agent_py_agent.cli._dispatch._cli_subagent_run_timeout", return_value=0.05),
+            patch("agent_py_agent.cli._dispatch._run_subagent_worker", return_value=mock_result) as worker,
+        ):
+            result = cmd_subagent_run(args)
+
+        assert result == 1
+        worker_params = worker.call_args.args[0]
+        assert worker_params.run_id == "run_001"
+        assert worker_params.dry_run is False
+        assert worker_params.instruction == "继续"
+        assert worker_params.timeout_seconds == 0.05
+        mock_agent.run_subagent.assert_not_called()
+
 
 class TestCmdSubagentDetail:
     """测试 cmd_subagent_detail 命令。"""
