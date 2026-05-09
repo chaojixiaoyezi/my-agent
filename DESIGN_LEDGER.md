@@ -1881,3 +1881,13 @@ def example(...):
 - `subagents-dispatch` 的 acceptance record 现在透传 `preflight_status`、`ready_for_automatic_execution` 和 `preflight_blockers`。
 - `SUBAGENT_DISPATCH.md` 展示同一组 preflight 摘要，让 watch/调度层直接看到“manual_ready 仍不等于自动放行”。
 - 这仍是报告层字段，不触发 tests/apply/rescue，也不会根据 preflight 自动修改 task/run 状态。
+
+## 2026-05-09 Parent Acceptance Auto Execution dry-run facade
+
+状态：已落地
+
+摘要：
+- 新增 `ParentAcceptanceAutoExecutionRequest` / `ParentAcceptanceAutoExecutionResult`，把 future executor 入口统一成 bundle。
+- 新增 `plan_parent_acceptance_auto_execution(run_id)` 和 `subagents-acceptance-plan --auto-execution`，写入 `reports/parent_acceptance_auto_execution.json`。
+- 第一版固定 hard guard：`execution_allowed=false`、`guard_status=blocked`、`executed=false`、`mutates_task_state=false`，只展示 recommended command、policy ref、blockers 和 safety boundaries。
+- `subagents-dispatch` 的 acceptance record 和 `SUBAGENT_DISPATCH.md` 透传 `parent_acceptance_auto_execution_*` 摘要；watch 仍只沿 dispatch report/Markdown 查看，不执行命令。
