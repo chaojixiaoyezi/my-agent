@@ -217,6 +217,40 @@ def test_subagent_action_apply_recovers_coordinator_leadership():
         assert reloaded_grandchild.depth == reloaded_child.depth + 1
 
 
+def test_subagent_action_apply_parent_timeout_child_recovery_is_record_only():
+    """LLM: Verifies parent-timeout child recovery records guidance without reparenting children."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        parent = agent.subagents.create_run(
+            goal="协调孩子", thought="父节点会超时。", plan=["dispatch", "collect"],
+            agent_name="root-coord", role="coordinator",
+        )
+        child = agent.subagents.create_run(
+            goal="等待 leaf", thought="孩子未完成。", plan=["dispatch leaf"],
+            parent_id=parent.id, root_id=parent.root_id, supervisor=parent.id,
+        )
+        timed_out = agent.subagents.load(parent.id)
+        timed_out.status = "TIMEOUT"
+        agent.subagents.save(timed_out)
+
+        report = agent.subagents.write_action_apply_report(
+            CapabilityConfig(subagent_heartbeat_timeout=3600, subagent_run_timeout=3600),
+            apply=True,
+            action_filter="recover_child_after_parent_timeout",
+            run_id=parent.id,
+        )
+
+        reloaded_parent = agent.subagents.load(parent.id)
+        reloaded_child = agent.subagents.load(child.id)
+        assert report.records[0].ok is True
+        assert report.records[0].action == "recover_child_after_parent_timeout"
+        assert reloaded_parent.status == "TIMEOUT"
+        assert reloaded_child.parent_id == parent.id
+        assert reloaded_child.status == "PLANNING"
+
+
 def test_subagent_action_apply_repairs_work_order():
     """LLM: Verifies apply with repair_work_order recreates missing output_json."""
     with tempfile.TemporaryDirectory() as td:

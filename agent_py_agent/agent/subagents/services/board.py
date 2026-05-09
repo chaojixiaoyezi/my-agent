@@ -30,7 +30,8 @@ from ..reports import (
     SubAgentBoardItem,
 )
 from ..utils import _merge_list
-from .board_due_checks import DueCheckSettings, inspect_single_task_due
+from .board_due_checks import inspect_single_task_due
+from .board_due_models import DueCheckSettings, InspectTaskDueRequest
 from .rescue_policy import merge_rescue_fields, rescue_fields_for_issue
 
 if TYPE_CHECKING:
@@ -209,14 +210,20 @@ class SubAgentBoardService:
         min_evidence = cfg.subagent_min_evidence_for_done if cfg else 0
         settings = DueCheckSettings(now, heartbeat_timeout, run_timeout, min_evidence)
         issues: list[DueCheckIssue] = []
+        # LLM: due-check uses one loaded task index so parent/child rules stay refs-only and cheap.
+        tasks = _scoped_due_check_tasks(self.manager.list_runs(), root_id)
+        task_index = {task.id: task for task in tasks}
 
-        for task in _scoped_due_check_tasks(self.manager.list_runs(), root_id):
+        for task in tasks:
             issues.extend(
                 inspect_single_task_due(
-                    self.manager,
-                    task,
-                    settings,
-                    risk_flags_builder=_build_risk_flags,
+                    InspectTaskDueRequest(
+                        manager=self.manager,
+                        task=task,
+                        settings=settings,
+                        risk_flags_builder=_build_risk_flags,
+                        task_index=task_index,
+                    )
                 )
             )
 

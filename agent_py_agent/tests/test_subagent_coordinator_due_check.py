@@ -67,6 +67,48 @@ def _running_child_task(mixin: _BoardTestMixin, *, old: float) -> SubAgentTask:
     )
 
 
+# LLM: _timed_out_parent_task creates a failed leader that still owns unfinished children.
+# 函数用途: 构造父节点已经 TIMEOUT、但 child_ids 仍指向未完成子任务的真实恢复场景。
+def _timed_out_parent_task(mixin: _BoardTestMixin, *, old: float) -> SubAgentTask:
+    return SubAgentTask(
+        id="root_timeout",
+        root_id="root_timeout",
+        goal="协调子任务后汇总",
+        thought="parent runner timed out before finalizing child",
+        plan=["dispatch child", "collect result"],
+        status="TIMEOUT",
+        verification_status="PENDING",
+        channel_status="OK",
+        depth=0,
+        child_ids=["run_child"],
+        created_at=old,
+        updated_at=old,
+        heartbeat_at=old,
+        **mixin._build_work_order_paths("root_timeout"),
+    )
+
+
+# LLM: _planning_child_after_parent_timeout keeps the child unfinished but not independently stale.
+# 函数用途: 构造父节点超时后的未完成子节点，用于验证 due-check 能识别领导权断链。
+def _planning_child_after_parent_timeout(mixin: _BoardTestMixin, *, old: float) -> SubAgentTask:
+    return SubAgentTask(
+        id="run_child",
+        root_id="root_timeout",
+        parent_id="root_timeout",
+        goal="等待 leaf 执行 add(a,b)",
+        thought="child was left in planning",
+        plan=["dispatch leaf"],
+        status="PLANNING",
+        verification_status="PENDING",
+        channel_status="OK",
+        depth=1,
+        created_at=old,
+        updated_at=old,
+        heartbeat_at=old,
+        **mixin._build_work_order_paths("run_child"),
+    )
+
+
 def test_due_check_reports_stale_planning_coordinator_without_runner_timeout(tmp_path: Path):
     """有子任务的 PLANNING coordinator 心跳停滞时报告领导权问题，而不是 runner timeout。"""
     mixin = _BoardTestMixin(workspace=tmp_path)
@@ -94,6 +136,23 @@ def test_due_check_reports_stale_planning_coordinator_without_runner_timeout(tmp
     }
 
 
+def test_due_check_reports_unfinished_children_after_parent_timeout(tmp_path: Path):
+    """父节点 TIMEOUT 但子节点未完成时，due-check 给出 refs-only 恢复提示。"""
+    mixin = _BoardTestMixin(workspace=tmp_path)
+    old = time.time() - 30
+    mixin._tasks = [
+        _timed_out_parent_task(mixin, old=old),
+        _planning_child_after_parent_timeout(mixin, old=old),
+    ]
+
+    report = mixin.due_check(CapabilityConfig(subagent_heartbeat_timeout=3600, subagent_run_timeout=3600))
+
+    issues = {(issue.run_id, issue.kind): issue for issue in report.issues}
+    issue = issues[("root_timeout", "parent_timeout_with_unfinished_children")]
+    assert issue.suggested_action == "recover_child_after_parent_timeout"
+    assert "run_child:PLANNING" in issue.message
+
+
 def test_plan_actions_reports_stale_coordinator_leadership_recovery(tmp_path: Path):
     """动作计划把失联 coordinator 转成领导权恢复建议。"""
     mixin = _BoardTestMixin(workspace=tmp_path)
@@ -104,3 +163,23 @@ def test_plan_actions_reports_stale_coordinator_leadership_recovery(tmp_path: Pa
     actions = {(action.run_id, action.action): action for action in report.actions}
     assert ("root_coord", "recover_coordinator_leadership") in actions
     assert actions[("root_coord", "recover_coordinator_leadership")].would_change_status_to == ""
+
+
+def test_plan_actions_reports_parent_timeout_child_recovery(tmp_path: Path):
+    """动作计划把父超时、子未完成转成只读恢复建议，不直接改状态。"""
+    mixin = _BoardTestMixin(workspace=tmp_path)
+    old = time.time() - 30
+    mixin._tasks = [
+        _timed_out_parent_task(mixin, old=old),
+        _planning_child_after_parent_timeout(mixin, old=old),
+    ]
+
+    report = mixin.plan_actions(CapabilityConfig(subagent_heartbeat_timeout=3600, subagent_run_timeout=3600))
+
+    actions = {(action.run_id, action.action): action for action in report.actions}
+    action = actions[("root_timeout", "recover_child_after_parent_timeout")]
+    assert action.would_change_status_to == ""
+    assert "parent_timeout_with_unfinished_children" in action.source_issue_kinds
+    assert "unfinished_child:run_child:PLANNING" in action.rescue_context_refs
+    assert "unfinished_child:run_child:PLANNING" in action.rescue_packet["recovery_entrypoints"]
+    assert action.rescue_packet["reserved"]["auto_execute"] is False

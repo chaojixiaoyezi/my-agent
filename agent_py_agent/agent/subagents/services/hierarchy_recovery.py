@@ -104,11 +104,19 @@ class SubAgentHierarchyRecoveryService:
 # LLM: _scan_tree walks persisted child_ids in deterministic breadth-first order.
 # 函数用途: 从 root 出发加载任务树摘要；节点缺失时跳过，不中断整个恢复包。
 def _scan_tree(manager: Any, request: HierarchyRecoveryRequest) -> list[HierarchyRecoveryNode]:
+    tasks = _load_tree_tasks(manager, request)
+    task_index = {task.id: task for task in tasks}
+    return [_node_from_task(task, request, task_index=task_index) for task in tasks]
+
+
+# LLM: _load_tree_tasks collects task metadata before recovery classification so child checks can inspect parents.
+# 函数用途: 按广度优先加载 root 子树任务对象；缺失节点跳过，不读取 artifact 正文。
+def _load_tree_tasks(manager: Any, request: HierarchyRecoveryRequest) -> list[SubAgentTask]:
     queue = [request.root_run_id]
     seen: set[str] = set()
-    nodes: list[HierarchyRecoveryNode] = []
+    tasks: list[SubAgentTask] = []
     limit = max(1, int(request.max_nodes or 1))
-    while queue and len(nodes) < limit:
+    while queue and len(tasks) < limit:
         run_id = queue.pop(0)
         if run_id in seen:
             continue
@@ -117,9 +125,9 @@ def _scan_tree(manager: Any, request: HierarchyRecoveryRequest) -> list[Hierarch
             task = manager.load(run_id)
         except FileNotFoundError:
             continue
-        nodes.append(_node_from_task(task, request))
+        tasks.append(task)
         queue.extend(child_id for child_id in task.child_ids if child_id not in seen)
-    return nodes
+    return tasks
 
 
 # LLM: _visible_nodes keeps root and candidates when healthy nodes are hidden.
@@ -137,8 +145,13 @@ def _visible_nodes(
 
 # LLM: _node_from_task converts one persisted task into a recovery summary.
 # 函数用途: 提取 run 状态、refs、候选原因、过期运行线索和建议命令，不读取 refs 指向的正文。
-def _node_from_task(task: SubAgentTask, request: HierarchyRecoveryRequest) -> HierarchyRecoveryNode:
-    reason = _recovery_reason(task, request)
+def _node_from_task(
+    task: SubAgentTask,
+    request: HierarchyRecoveryRequest,
+    *,
+    task_index: dict[str, SubAgentTask] | None = None,
+) -> HierarchyRecoveryNode:
+    reason = _recovery_reason(task, request, task_index=task_index)
     return HierarchyRecoveryNode(
         run_id=task.id,
         parent_id=task.parent_id,
@@ -163,7 +176,12 @@ def _node_from_task(task: SubAgentTask, request: HierarchyRecoveryRequest) -> Hi
 
 # LLM: _recovery_reason classifies candidate runs without changing task state.
 # 函数用途: 判断当前 run 是否需要恢复/接管；除终态失败外，也识别 RUNNING 心跳停滞或运行超时。
-def _recovery_reason(task: SubAgentTask, request: HierarchyRecoveryRequest) -> str:
+def _recovery_reason(
+    task: SubAgentTask,
+    request: HierarchyRecoveryRequest,
+    *,
+    task_index: dict[str, SubAgentTask] | None = None,
+) -> str:
     status = str(task.status or "").upper()
     if status in RECOVERY_STATUSES:
         return f"status:{status}"
@@ -171,10 +189,37 @@ def _recovery_reason(task: SubAgentTask, request: HierarchyRecoveryRequest) -> s
         return f"failure_type:{task.failure_type}"
     if task.blockers:
         return "blockers_present"
+    parent_timeout = _parent_timeout_child_reason(task, task_index)
+    if parent_timeout:
+        return parent_timeout
     stale_reasons = _active_stale_reasons(task, request)
     if stale_reasons:
         return f"due:{','.join(stale_reasons)}"
     return ""
+
+
+# LLM: _parent_timeout_child_reason exposes unfinished children when their parent runner timed out.
+# 函数用途: 父节点已 TIMEOUT 且当前子任务未收口时，把子任务列为恢复候选。
+def _parent_timeout_child_reason(
+    task: SubAgentTask,
+    task_index: dict[str, SubAgentTask] | None,
+) -> str:
+    if _child_is_closed_for_parent_timeout(task):
+        return ""
+    parent = (task_index or {}).get(str(task.parent_id or ""))
+    if parent is None or str(parent.status or "").upper() != "TIMEOUT":
+        return ""
+    return f"parent_timeout_unfinished_child:{parent.id}"
+
+
+# LLM: _child_is_closed_for_parent_timeout keeps verified completion and prior takeover out of recovery noise.
+# 函数用途: 判断父超时后当前子任务是否已经安全收口，避免 hide-healthy 输出过多。
+def _child_is_closed_for_parent_timeout(task: SubAgentTask) -> bool:
+    status = str(task.status or "").upper()
+    verification = str(task.verification_status or "").upper()
+    if status == "DONE" and verification == "VERIFIED":
+        return True
+    return status in {"TAKEN_OVER", "ABANDONED"}
 
 
 # LLM: _recommended_command points humans/parent automation to the existing controlled follow-up gate.
@@ -182,6 +227,9 @@ def _recovery_reason(task: SubAgentTask, request: HierarchyRecoveryRequest) -> s
 def _recommended_command(task: SubAgentTask, reason: str) -> str:
     if not reason:
         return ""
+    if reason.startswith("parent_timeout_unfinished_child:"):
+        root_id = task.root_id or task.id
+        return f"my-agent subagents-recovery-tree {root_id} --hide-healthy"
     if reason.startswith("due:"):
         return (
             "my-agent subagents-apply-actions --apply --action takeover_or_reassign "

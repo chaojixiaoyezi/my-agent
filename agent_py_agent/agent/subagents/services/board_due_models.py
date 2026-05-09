@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,6 +29,8 @@ class DueInspectionContext:
     """Shared values used by all due-check predicates for one task."""
 
     task: Any
+    # LLM: task_index lets due predicates compare parent/child states without reloading files.
+    task_index: dict[str, Any] | None
     risk_flags: list[str]
     open_request_count: int
     open_gap_count: int
@@ -45,6 +48,21 @@ class DueIssueSpec:
     kind: str
     message: str
     action: str
+    # LLM: related_refs become rescue_context_refs for machine-readable recovery hints.
+    related_refs: list[str] | None = None
+
+
+# LLM: InspectTaskDueRequest keeps the due-check entrypoint bundle-first as predicates grow.
+# 类用途: 集中保存单任务 due-check 所需 manager、任务、阈值、风险构造器和任务索引。
+@dataclass(frozen=True)
+class InspectTaskDueRequest:
+    """Bundle for inspecting one task for due-check issues."""
+
+    manager: Any
+    task: Any
+    settings: DueCheckSettings
+    risk_flags_builder: Callable[[Any, int, int], list[str]]
+    task_index: dict[str, Any] | None = None
 
 
 # LLM: _issue_params converts local context/spec into the shared report construction bundle.
@@ -61,6 +79,7 @@ def _issue_params(ctx: DueInspectionContext, spec: DueIssueSpec):
         open_gap_count=ctx.open_gap_count,
         age_seconds=ctx.age_seconds,
         stale_seconds=ctx.stale_seconds,
+        related_refs=spec.related_refs,
     )
 
 
