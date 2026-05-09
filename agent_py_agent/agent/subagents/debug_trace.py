@@ -42,6 +42,25 @@ class SubAgentRunnerTraceRequest:
     params: Any
 
 
+# LLM: SubAgentHierarchyTraceRequest keeps hierarchy observability tied to schedule result refs.
+# 类用途: 层级调度 trace 参数包，记录 parent task 和调度摘要，不展开子任务正文。
+@dataclass(frozen=True)
+class SubAgentHierarchyTraceRequest:
+    manager: Any
+    parent_task: Any
+    result: Any
+
+
+# LLM: SubAgentAcceptanceTraceRequest keeps parent-acceptance trace inputs compact and future-extensible.
+# 类用途: 父级验收 trace 参数包，记录 decision/action 摘要和任务引用，用于定位验收卡点。
+@dataclass(frozen=True)
+class SubAgentAcceptanceTraceRequest:
+    manager: Any
+    task: Any
+    value: Any
+    event_type: str
+
+
 # LLM: write_subagent_debug_trace appends one bounded refs-only event when configured level allows it.
 # 函数用途: 根据 manager.debug_trace_level 判断是否写调试事件；只写内部 workspace/debug_traces/subagent_trace.jsonl。
 def write_subagent_debug_trace(request: SubAgentDebugTraceRequest) -> Path | None:
@@ -92,6 +111,106 @@ def trace_runner_result(request: SubAgentRunnerTraceRequest) -> Path | None:
     )
 
 
+# LLM: trace_hierarchy_schedule_result records fan-out decisions without reading child prompts or outputs.
+# 函数用途: 记录一次层级调度的 dry-run/apply、阻断原因、创建数量和子任务引用。
+def trace_hierarchy_schedule_result(request: SubAgentHierarchyTraceRequest) -> Path | None:
+    result = request.result
+    return write_subagent_debug_trace(
+        SubAgentDebugTraceRequest(
+            manager=request.manager,
+            level=2,
+            event_type="hierarchy_schedule_result",
+            task=request.parent_task,
+            payload={
+                "dry_run": bool(getattr(result, "dry_run", True)),
+                "blocked": bool(getattr(result, "blocked", False)),
+                "reason": str(getattr(result, "reason", "") or ""),
+                "requested_by": str(getattr(result, "requested_by", "") or ""),
+                "planned_count": int(getattr(result, "planned_count", 0) or 0),
+                "created_count": len(getattr(result, "created_run_ids", []) or []),
+                "created_run_ids": list(getattr(result, "created_run_ids", []) or [])[:32],
+            },
+        )
+    )
+
+
+# LLM: trace_hierarchy_schedule is a thin caller-friendly bridge for scheduler lifecycle points.
+# 函数用途: 让调度器一行写 trace 并返回原 result，避免服务文件增长。
+def trace_hierarchy_schedule(manager: Any, parent_task: Any, result: Any) -> Any:
+    trace_hierarchy_schedule_result(SubAgentHierarchyTraceRequest(manager, parent_task, result))
+    return result
+
+
+# LLM: trace_parent_acceptance_decision makes acceptance blockers visible in long-running E2E traces.
+# 函数用途: 记录父级验收决策摘要，包括 decision/risk/human/test refs，不展开 report 正文。
+def trace_parent_acceptance_decision(request: SubAgentAcceptanceTraceRequest) -> Path | None:
+    decision = request.value
+    return write_subagent_debug_trace(
+        SubAgentDebugTraceRequest(
+            manager=request.manager,
+            level=2,
+            event_type=request.event_type,
+            task=request.task,
+            payload={
+                "decision": str(getattr(decision, "decision", "") or ""),
+                "risk_level": str(getattr(decision, "risk_level", "") or ""),
+                "requires_human_confirmation": bool(
+                    getattr(decision, "requires_human_confirmation", False)
+                ),
+                "test_execution_ref": str(getattr(decision, "test_execution_ref", "") or ""),
+                "failure_handoff_ref": str(getattr(decision, "failure_handoff_ref", "") or ""),
+                "takeover_readiness_ref": str(getattr(decision, "takeover_readiness_ref", "") or ""),
+                "evidence_ref_count": len(getattr(decision, "evidence_refs", []) or []),
+                "reason_preview": _preview(getattr(decision, "reason", "") or ""),
+            },
+        )
+    )
+
+
+# LLM: trace_acceptance_decision is a compact bridge for parent-acceptance manager methods.
+# 函数用途: 写父级验收 decision trace；返回原 decision，方便调用方保持薄入口。
+def trace_acceptance_decision(manager: Any, task: Any, decision: Any) -> Any:
+    trace_parent_acceptance_decision(
+        SubAgentAcceptanceTraceRequest(manager, task, decision, "parent_acceptance_decision")
+    )
+    return decision
+
+
+# LLM: trace_parent_acceptance_next_action records the suggested bridge without executing it.
+# 函数用途: 记录父级验收下一动作摘要，方便区分 run_tests、apply、rescue、人审等卡点。
+def trace_parent_acceptance_next_action(request: SubAgentAcceptanceTraceRequest) -> Path | None:
+    action = request.value
+    return write_subagent_debug_trace(
+        SubAgentDebugTraceRequest(
+            manager=request.manager,
+            level=2,
+            event_type=request.event_type,
+            task=request.task,
+            payload={
+                "action": str(getattr(action, "action", "") or ""),
+                "decision": str(getattr(action, "decision", "") or ""),
+                "command_preview": _preview(getattr(action, "command", "") or ""),
+                "requires_human_confirmation": bool(
+                    getattr(action, "requires_human_confirmation", False)
+                ),
+                "mutates_task_state": bool(getattr(action, "mutates_task_state", False)),
+                "decision_ref": str(getattr(action, "decision_ref", "") or ""),
+                "apply_ref": str(getattr(action, "apply_ref", "") or ""),
+                "reason_preview": _preview(getattr(action, "reason", "") or ""),
+            },
+        )
+    )
+
+
+# LLM: trace_acceptance_next_action is a compact bridge for next-action manager methods.
+# 函数用途: 写父级验收 next-action trace；返回原 action，避免 manager 文件膨胀。
+def trace_acceptance_next_action(manager: Any, task: Any, action: Any) -> Any:
+    trace_parent_acceptance_next_action(
+        SubAgentAcceptanceTraceRequest(manager, task, action, "parent_acceptance_next_action")
+    )
+    return action
+
+
 # LLM: _build_trace_record keeps common task fields stable across trace event types.
 # 函数用途: 组装单条 JSONL 记录，字段保持短小、可检索、refs-only。
 def _build_trace_record(request: SubAgentDebugTraceRequest, event_level: int) -> dict[str, Any]:
@@ -137,6 +256,8 @@ def _safe_payload_value(value: Any) -> Any:
         return value
     if isinstance(value, str):
         return _preview(value)
+    if isinstance(value, list):
+        return [_safe_payload_value(item) for item in value[:32]]
     return _preview(str(value))
 
 

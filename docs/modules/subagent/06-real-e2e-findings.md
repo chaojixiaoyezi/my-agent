@@ -1151,3 +1151,39 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining gap:
   - Root acceptance still produced `request_human_confirmation` because the model emitted an empty test command named `层级派工验证`.
   - 中文解释：实际产物已经写对了，但验收层对“空测试命令”太保守。下一步应把空测试命令变成可执行文件检查，或降级为 inspect-only。
+
+## 2026-05-09 Empty Test Command Noise And Trace Expansion
+
+- Test scene:
+  - Triggered by the `main_node_trace_smoke_fixed_20260509_2218` remaining gap.
+  - Regression focused on parent acceptance control-plane behavior and debug trace coverage.
+- 中文说明：
+  - 这次修的是“空测试命令”造成的假阻塞。
+  - 子代理有时会在 tests 里写一个名字，例如 `层级派工验证`，但 command 为空。旧逻辑把它当成危险或无效命令，于是要求人工确认。
+  - 新逻辑把它当成不可执行的占位检查：不会假装测试通过，也不会要求人工确认；父级验收会进入 inspect-only，让上级继续看证据、产物和 verifier。
+- Root cause:
+  - `parent_acceptance_controller` used the raw `tests` list for both command safety preflight and missing-report decisions.
+  - An empty command therefore reached `TestExecutor._validate_command("")`, which returned `空测试命令` and got mapped to `request_human_confirmation`.
+- Fix:
+  - Parent acceptance now filters executable validation tests before safety preflight and test-report decisions.
+  - Empty command tests are ignored as executable work, but stay visible in refs summary as `ignored_empty_command_tests=N`.
+  - Unsafe non-empty commands still request human confirmation.
+- Debug trace expansion:
+  - `subagent_debug_trace_level=2` now records:
+    - `hierarchy_schedule_result`
+    - `parent_acceptance_decision`
+    - `parent_acceptance_next_action`
+  - These events are refs-only and bounded. They show ids, hierarchy fields, decision/action, human gate, mutates-state flag, command preview, refs, and counts.
+- Verification:
+  - Red tests first failed on the old behavior:
+    - empty command produced `request_human`;
+    - hierarchy schedule wrote no trace event;
+    - parent acceptance wrote no trace events.
+  - After the fix:
+    - `python3 -m pytest -q agent_py_agent/tests/test_parent_acceptance_controller.py::test_parent_acceptance_plan_ignores_empty_command_tests_as_non_executable agent_py_agent/tests/test_subagent_debug_trace.py::test_subagent_debug_trace_records_hierarchy_schedule_when_enabled agent_py_agent/tests/test_subagent_debug_trace.py::test_subagent_debug_trace_records_parent_acceptance_decision_and_next_action -p no:cacheprovider` -> `3 passed`.
+- Current status:
+  - Solved for the known empty-command acceptance noise.
+  - Trace is now broad enough to observe the next real 1/4/16/48 run without opening prompt/response bodies.
+- Remaining risk:
+  - Empty command tests are not automatically converted into file checks yet. For now they are visible but non-executable.
+  - A future improvement can infer safe `file_check` tests when the output already cites concrete artifact paths.
