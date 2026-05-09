@@ -11,6 +11,10 @@ from .parent_acceptance_apply import (
     blocked_parent_acceptance_apply_result,
     write_parent_acceptance_apply_result_file,
 )
+from .parent_acceptance_auto_execution import (
+    ParentAcceptanceAutoExecutionResult,
+    build_parent_acceptance_auto_execution,
+)
 from .parent_acceptance_auto_policy import (
     ParentAcceptanceAutoPolicy,
     build_parent_acceptance_auto_policy,
@@ -95,6 +99,19 @@ def manager_plan_parent_acceptance_next_action(manager, run_id: str) -> ParentAc
 def manager_plan_parent_acceptance_auto_policy(manager, run_id: str) -> ParentAcceptanceAutoPolicy:
     task = manager.load(run_id)
     return build_parent_acceptance_auto_policy(
+        task,
+        workspace_root=acceptance_workspace_root(manager),
+    )
+
+
+# LLM: manager_plan_parent_acceptance_auto_execution exposes the dry-run executor facade.
+# 函数用途: 生成父级验收自动执行计划和审计文件；不启动命令、不修改任务状态。
+def manager_plan_parent_acceptance_auto_execution(
+    manager,
+    run_id: str,
+) -> ParentAcceptanceAutoExecutionResult:
+    task = manager.load(run_id)
+    return build_parent_acceptance_auto_execution(
         task,
         workspace_root=acceptance_workspace_root(manager),
     )
