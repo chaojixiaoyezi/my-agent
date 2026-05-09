@@ -59,6 +59,11 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/models.py`：定义 `SubAgentTask`、`TaskStatus`、`DISPATCH_INELIGIBLE_STATUSES` 等核心数据结构。
 - `agent_py_agent/agent/subagents/model_task.py`：承接 `SubAgentTask`、`EvidencePacket`、`Finding`、`StatusReport`、`SecuritySignal` 等任务树、证据和安全预留合同模型，`models.py` 继续作为兼容导出入口。
 - `agent_py_agent/agent/subagents/model_task.py`：同时定义 `RuntimeIdentity`，记录 service owner、requester、effective principal、conversation、memory namespace 和 config overlay scope；这些字段是隔离和审计口子，不是授权、长期记忆或全局配置事实源。
+- `agent_py_agent/agent/subagents/services/hierarchy_scheduler.py`：定义 `HierarchyScheduleRequest` / `HierarchyChildSpec`，通过显式 bundle dry-run 或创建 child/grandchild run；默认不写任务，`apply=True` 时复用 `create_run`，并限制 `max_depth` / `max_children`。
+- `agent_py_agent/agent/subagents/services/hierarchy_recovery.py`：定义 `HierarchyRecoveryRequest` / `HierarchyRecoveryResult`，从 root run 只读扫描 child_ids 子树，返回需要恢复的后代、takeover readiness、failure handoff 和 checkpoint refs；不展开 artifact 正文、不自动接管。
+- `agent_py_agent/agent/subagents/manager_hierarchy.py`：给 `SubAgentManager` 暴露 `schedule_child_runs(params=...)` 薄 facade，让层级创建入口保持单一且可测试。
+- `agent_py_agent/agent/subagents/role_contracts.py`：集中定义 `reporter` / `checker` 角色契约；`analyst` 映射到 reporter，`reviewer` 映射到 checker，checker 默认只读工具、不能自验收、最终由父级 gate 裁决。
+- `agent_py_agent/agent/subagents/automation_gate.py`：定义半自动/自动执行门；只允许 `query_recovery_tree` / `inspect_refs` 这类 refs-only 动作自动放行，跑工具或改 task 状态必须人工确认或继续阻断。
 - `agent_py_agent/agent/subagents/execution_records.py`：定义 `TestExecutionRecord`，保存真实验收执行证据字段、序列化、stdout/stderr 截断和 `passed` 派生结果。
 - `agent_py_agent/agent/subagents/execution_executor.py`：定义最小 `TestExecutor`，支持 command / file_check / content_check，当前不写任务状态、不生成 `test_execution.json`；command 可带 workspace 内 `working_dir` / `cwd`，执行记录会保存真实工作目录。
 - `agent_py_agent/agent/subagents/execution_executor_helpers.py`：承接 `TestExecutor` 的命令解析、跨平台 python argv、记录构造和 UTC 时间 helper，让 executor 主文件保持薄执行器职责。
@@ -81,11 +86,14 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/rendering_dispatch.py`：`SUBAGENT_DISPATCH.md` 展示 policy 摘要和 ref，仍不展开 audit 文件正文。
 - `agent_py_agent/agent/subagents/manager_parent_acceptance.py`：承接 manager 的父级验收 plan/write/apply/next-action/auto-policy/follow-up 桥接流程，并在 follow-up apply 前校验 run_id、当前 test report 引用、失败数和文件新鲜度；已失败/阻塞且没有测试报告的任务会得到合成 rescue follow-up，不会被误导去跑 tests。
 - `agent_py_agent/agent/subagents/manager_acceptance_parent_facade.py`：承接父级验收公开方法薄 facade，让 `manager_acceptance.py` 继续只负责普通 acceptance review 编排。
+- `agent_py_agent/agent/agent_core/dispatch_limiter.py`：runner 启动前的统一限流 helper，接收 `RunnerJobLimitRequest`，先保持 `runner_start_rate` 兼容语义，再提供可选 `runner_role_limits` 角色预算口子。
 - `agent_py_agent/agent/subagents/acceptance_test_execution.py`：把显式开启的真实测试执行接入 acceptance findings，生成 `test_execution_recorded` 和 `test_execution_passed`，默认不运行；执行前会复用 tests 预处理，仍只允许 workspace 内目录。
 - `agent_py_agent/agent/subagents/services/acceptance_findings.py`：普通 acceptance 的 finding 汇总层；当已有 `reports/test_execution.json` 时，tests_passed 以机器执行报告为准，而不是只相信 `output.json.tests[*].ok`。
 - `agent_py_agent/agent/subagents/services/board.py`：构建看板摘要和 child status counts。`SubAgentBoardOptions(include_child_status_counts=False)` 用于 status / startup recovery 等轻量路径，避免默认查询二次加载 child task；完整看板通过已加载 task 索引汇总 child 状态，不读取 runner prompt/response 或 artifact 正文。
 - `agent_py_agent/cli/_acceptance_plan.py`：提供 `subagents-acceptance-plan` CLI 入口；默认只展示父级验收 dry-run 决策和 refs，`--write` 只写决策审计文件，`--apply` 只允许 `inspect_only`，`--followup` 只预览，`--apply-followup` 才进入受控 apply/rescue。
 - `agent_py_agent/cli/_acceptance_plan_renderers.py`：承接 acceptance-plan 的 JSON 转换和人类输出渲染；只打印 refs、状态和推荐命令，不展开 audit 文件正文。
+- `agent_py_agent/cli/_hierarchy.py`：实现 `subagents-hierarchy` 命令；`--child ROLE:AGENT_NAME:GOAL` 可重复，默认 dry-run，`--apply` 才创建下一层 run，输出只包含 refs 和摘要。
+- `agent_py_agent/cli/_hierarchy.py`：同时实现 `subagents-recovery-tree` 命令；按 root run 输出多层恢复包，`--hide-healthy` 可减少上下文体积，仍只展示 refs 和摘要。
 - `agent_py_agent/cli/_review.py`：提供 `subagents-tests` 和验收相关兼容导出；tests 默认只读取已有 `test_execution.json`，显式 `--re-run` 才重新执行 `output.json.tests`。
 - `agent_py_agent/agent/settings/config.py` / `agent_py_agent/config/agent_config.yaml`：提供 `acceptance_execute_tests` 和 `acceptance_test_timeout_seconds`，默认保持老验收路径不自动跑命令。
 - Auto Policy v1 当前只实现 dry-run 审计，尚未接主配置；后续若做成用户可见主配置，配置默认值和中文说明必须同步写入 `agent_py_agent/config/agent_config.yaml` 与 `AgentConfig`。如果只是 subagent/capability 路由内部的授权、次数或 allowlist 细则，应进入 `agent_py_agent/config/capability_config.yaml` 与 `capability_config.py`，不要扩张主配置。

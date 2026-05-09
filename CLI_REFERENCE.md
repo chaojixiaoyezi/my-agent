@@ -169,6 +169,8 @@ Ctrl+C
 | `subagents-plan-actions` | 根据 due-check 生成动作计划 | 写 action plan 报告 | 否 |
 | `subagents-apply-actions` | dry-run 或执行低风险动作 | `--apply` 时写回任务和审计日志 | 否 |
 | `subagents-workflow-plan` | 预览目标会命中哪个内置 subagent workflow | 否 | 否 |
+| `subagents-hierarchy` | 预览或显式创建 child/grandchild subagent run | `--apply` 时创建下一层任务 | 否 |
+| `subagents-recovery-tree` | 查询 root subagent 的多层恢复交接包 | 否，只输出 refs-only 恢复线索 | 否 |
 | `subagents-route-capabilities` | 路由 capability request | `--apply` 时写 grant/gap | 否 |
 | `subagents-acceptance` | 验收等待验收的 subagent | `--apply` 时写回状态和审计日志 | 否 |
 | `subagents-acceptance-plan` | 查看、审计或显式应用单个 subagent 的父级验收决策 | `--write` 写 dry-run 决策；`--apply` 只允许 `inspect_only` 进入普通验收 apply；`--next-action` 给上级动作建议；`--auto-policy` 写策略 dry-run 审计；`--execute-auto-tests` 只在 `--auto-execution` 下手动确认跑 tests | 否 |
@@ -789,6 +791,38 @@ my-agent subagents-workflow-plan "开发一个可验收的功能" --template-id 
 | `goal` | - | 必填，待路由的父任务目标。 |
 | `--template-id <id>` | - | 强制使用指定 workflow 模板做预览。 |
 | `--output-dir <path>` | - | 显式写出 JSON / Markdown dry-run 预览，不创建 subagent。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `subagents-hierarchy`
+
+```powershell
+my-agent subagents-hierarchy <run_id> --child reporter:reporter-a:"write report"
+my-agent subagents-hierarchy <run_id> --child checker:checker-a:"check report" --apply --json
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `run_id` | - | 必填，父级 subagent 运行 ID。 |
+| `--child <role:agent:goal>` | - | 待创建子任务，格式 `ROLE:AGENT_NAME:GOAL`；可多次传入。 |
+| `--apply` | `false` | 真正创建 child runs；默认只预览。 |
+| `--requested-by <name>` | `parent` | 调度请求来源，用于审计摘要。 |
+| `--max-children <n>` | `0` | 父级最多 child 数；0 表示不限制。 |
+| `--max-depth <n>` | `2` | 允许创建的最大层级深度。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+## `subagents-recovery-tree`
+
+```powershell
+my-agent subagents-recovery-tree <run_id>
+my-agent subagents-recovery-tree <run_id> --hide-healthy --json
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `run_id` | - | 必填，根 subagent 运行 ID。 |
+| `--hide-healthy` | `false` | 只展示 root 和需要恢复的节点，减少上下文体积。 |
+| `--requested-by <name>` | `parent` | 查询请求来源，用于审计摘要。 |
+| `--max-nodes <n>` | `200` | 最多扫描多少个子树节点。 |
 | `--json` | `false` | 输出机器可读 JSON。 |
 
 ## `subagents-route-capabilities`

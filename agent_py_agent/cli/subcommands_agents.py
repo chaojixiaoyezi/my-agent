@@ -24,10 +24,12 @@ from .subagents import (
     cmd_subagents_apply_actions,
     cmd_subagents_dispatch,
     cmd_subagents_due_check,
+    cmd_subagents_hierarchy,
     cmd_subagents_memory_gate,
     cmd_subagents_patches,
     cmd_subagents_plan_actions,
     cmd_subagents_probe,
+    cmd_subagents_recovery_tree,
     cmd_subagents_route_capabilities,
     cmd_subagents_tests,
     cmd_subagents_workflow_plan,
@@ -67,6 +69,8 @@ def _add_agents_basic_subcommands(sub):
     workflow_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     workflow_plan.set_defaults(func=cmd_subagents_workflow_plan)
 
+    _add_agents_hierarchy_subcommands(sub)
+
     due_check = sub.add_parser("subagents-due-check", help="巡检 subagent 并输出父代理待处理项")
     _add_capability_config_arg(due_check)
     due_check.add_argument("--all", action="store_true", help="显示全部问题，而不是按 limit 截断")
@@ -83,6 +87,33 @@ def _add_agents_basic_subcommands(sub):
     action_plan.add_argument("--all", action="store_true", help="显示全部动作，而不是按 limit 截断")
     action_plan.add_argument("--limit", type=int, default=20, help="最多显示多少条动作")
     action_plan.set_defaults(func=cmd_subagents_plan_actions)
+
+
+# LLM: _add_agents_hierarchy_subcommands keeps hierarchy CLI wiring out of the basic command hub.
+# 函数用途: 注册层级创建和恢复树查询命令，避免 basic subcommand 注册函数继续增长。
+def _add_agents_hierarchy_subcommands(sub):
+    hierarchy = sub.add_parser("subagents-hierarchy", help="Preview or create child/grandchild subagent runs")
+    hierarchy.add_argument("run_id", help="父级 subagent 运行 ID")
+    hierarchy.add_argument(
+        "--child",
+        action="append",
+        required=True,
+        help="待创建子任务，格式 ROLE:AGENT_NAME:GOAL；可重复",
+    )
+    hierarchy.add_argument("--apply", action="store_true", help="真正创建 child runs；默认只 dry-run")
+    hierarchy.add_argument("--requested-by", default="parent", help="调度请求来源，用于审计摘要")
+    hierarchy.add_argument("--max-children", type=int, default=0, help="父级最多 child 数；0 表示不限制")
+    hierarchy.add_argument("--max-depth", type=int, default=2, help="允许创建的最大层级深度")
+    hierarchy.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    hierarchy.set_defaults(func=cmd_subagents_hierarchy)
+
+    recovery = sub.add_parser("subagents-recovery-tree", help="查询 root subagent 的多层恢复交接包")
+    recovery.add_argument("run_id", help="根 subagent 运行 ID")
+    recovery.add_argument("--hide-healthy", action="store_true", help="只展示 root 和需要恢复的节点")
+    recovery.add_argument("--requested-by", default="parent", help="查询请求来源，用于审计摘要")
+    recovery.add_argument("--max-nodes", type=int, default=200, help="最多扫描多少个子树节点")
+    recovery.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    recovery.set_defaults(func=cmd_subagents_recovery_tree)
 
 
 # LLM: _add_agents_action_subcommands 属于CLI 命令层；改行为前先对齐调用方和快照/单测。

@@ -50,6 +50,7 @@ class CreateRunParams:
     context_packs: Any = None
     extra_write_roots: list[str] | None = None
     workflow_mode: str = "off"
+    normalize_role: bool = True
 
 
 # LLM: _extract_write_dirs 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -137,6 +138,10 @@ class SubAgentBaseService:
           - "plan" : run workflow planning, write result to task.workflow_plan
           - "auto" : run workflow planning, auto-merge worker spec and parent gate into acceptance checklist
         """
+        # LLM: role contracts normalize reporter/checker semantics before workflow planning and persistence.
+        from ..role_contracts import apply_role_contract_to_create_params
+
+        params = apply_role_contract_to_create_params(params)
         prepared = self._prepare_run(params)
         task = self._build_task(params, prepared)
         self._finalize_task(task, params.parent_id)

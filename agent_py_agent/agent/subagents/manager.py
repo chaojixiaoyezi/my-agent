@@ -18,6 +18,9 @@ from .manager_board import SubAgentBoardMixin
 from .manager_capabilities import SubAgentCapabilityMixin
 from .manager_channel_probe import SubAgentChannelProbeMixin
 from .manager_dispatch import SubAgentDispatchMixin
+
+# LLM: hierarchy mixin owns explicit child/grandchild scheduling and refs-only recovery queries.
+from .manager_hierarchy import SubAgentHierarchyMixin
 from .manager_indexing import SubAgentIndexingMixin
 from .manager_learning import SubAgentLearningMixin
 from .manager_lifecycle import SubAgentLifecycleMixin
@@ -48,6 +51,7 @@ class SubAgentManager(
     SubAgentLearningMixin,
     SubAgentMemoryGateMixin,
     SubAgentIndexingMixin,
+    SubAgentHierarchyMixin,
     SubAgentWorkflowMixin,
 ):
     """LLM contract: public subagent orchestration facade composed from focused mixins.
