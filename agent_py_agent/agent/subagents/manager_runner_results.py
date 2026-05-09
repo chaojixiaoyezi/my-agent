@@ -205,6 +205,10 @@ class _SubAgentRunnerResultFacade:
             result,
             _PostResultSideEffectParams(output_payload, params.dry_run, extracted.parsed, extracted.lessons),
         )
+        # LLM: optional debug tracing is refs-only and gated by subagent_debug_trace_level.
+        from .debug_trace import SubAgentRunnerTraceRequest, trace_runner_result
+
+        trace_runner_result(SubAgentRunnerTraceRequest(self, task, result, params))
         return result
 
     # LLM: _runner_result_build_context 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

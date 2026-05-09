@@ -10,6 +10,39 @@ from typing import Any
 from ..models import SubAgentTask
 from .base import CreateRunParams
 
+_DEFAULT_LEAF_CODING_TOOLS = [
+    "list_files",
+    "read_file",
+    "search_text",
+    "write_file",
+    "append_file",
+    "replace_in_file",
+]
+_TOOL_NAME_ALIASES = {
+    "append": "append_file",
+    "list": "list_files",
+    "read": "read_file",
+    "replace": "replace_in_file",
+    "search": "search_text",
+    "write": "write_file",
+}
+_WRITE_INTENT_MARKERS = (
+    "write_file",
+    "append_file",
+    "replace_in_file",
+    "写入",
+    "写文件",
+    "产物路径",
+    "output path",
+    "deliverable",
+    ".py",
+    ".md",
+    ".json",
+    ".txt",
+    ".html",
+    ".css",
+    ".js",
+)
 
 # LLM: HierarchyChildSpec is the stable bundle for one planned descendant run.
 # 类用途: 描述一个待创建的子/孙代理任务，避免用散乱 kwargs 扩展层级调度接口。
@@ -169,6 +202,7 @@ def _apply_result(
 # 函数用途: 复用现有 create_run 路径创建子任务，保证 work-order、runtime workspace 和控制面同步。
 def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) -> SubAgentTask:
     role = _scheduled_child_role(parent, spec)
+    extra_write_roots = spec.extra_write_roots or _inherited_extra_write_roots(parent)
     return manager.create_run(
         params=CreateRunParams(
             goal=spec.goal,
@@ -180,7 +214,7 @@ def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) 
             root_id=parent.root_id or parent.id,
             depth=parent.depth + 1,
             allowed_skills=spec.allowed_skills or list(parent.allowed_skills),
-            allowed_tools=spec.allowed_tools or list(parent.allowed_tools),
+            allowed_tools=_scheduled_child_tools(parent, spec, extra_write_roots),
             owner=spec.agent_name or spec.role or parent.owner,
             supervisor=parent.id,
             final_owner=parent.final_owner or parent.owner,
@@ -188,7 +222,7 @@ def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) 
             quality_contract=parent.quality_contract,
             context_manifest=parent.context_manifest,
             context_packs=parent.context_packs,
-            extra_write_roots=spec.extra_write_roots or _inherited_extra_write_roots(parent),
+            extra_write_roots=extra_write_roots,
             workflow_mode="off",
         )
     )
@@ -246,6 +280,44 @@ def _inherited_extra_write_roots(parent: SubAgentTask) -> list[str]:
         if text and text != parent_task_dir and text not in roots:
             roots.append(str(item))
     return roots
+
+
+# LLM: _scheduled_child_tools prevents leaf write tasks from losing tool grants when the model omits allowed_tools.
+# 函数用途: 在父级已有授权产物目录且 child 明确要写文件时，给叶子任务补齐安全文件工具；coordinator 不自动拿写权限。
+def _scheduled_child_tools(
+    parent: SubAgentTask,
+    spec: HierarchyChildSpec,
+    extra_write_roots: list[str],
+) -> list[str]:
+    should_infer_leaf_tools = _should_infer_leaf_coding_tools(spec, extra_write_roots)
+    if spec.allowed_tools:
+        explicit_tools = [_canonical_tool_name(item) for item in spec.allowed_tools]
+        if should_infer_leaf_tools:
+            return list(dict.fromkeys([*explicit_tools, *_DEFAULT_LEAF_CODING_TOOLS]))
+        return list(dict.fromkeys(explicit_tools))
+    parent_tools = list(parent.allowed_tools)
+    if should_infer_leaf_tools:
+        return list(dict.fromkeys([*parent_tools, *_DEFAULT_LEAF_CODING_TOOLS]))
+    return parent_tools
+
+
+# LLM: _canonical_tool_name maps common model aliases to real ToolRegistry names before runner prompts see them.
+# 函数用途: 把模型常写的 write/read/list 等口语化工具名转成真实工具名，避免 leaf 拿到不可调用工具。
+def _canonical_tool_name(tool_name: object) -> str:
+    text = str(tool_name or "").strip()
+    return _TOOL_NAME_ALIASES.get(text, text)
+
+
+# LLM: _should_infer_leaf_coding_tools keeps automatic write-tool inference narrow and auditable.
+# 函数用途: 只在非 coordinator child、继承了写入根、文本里有明确写文件意图时返回 True。
+def _should_infer_leaf_coding_tools(spec: HierarchyChildSpec, extra_write_roots: list[str]) -> bool:
+    if not extra_write_roots:
+        return False
+    role_text = f"{spec.role} {spec.agent_name}".lower()
+    if "coordinator" in role_text or "lead" in role_text:
+        return False
+    intent_text = "\n".join([spec.goal, *spec.acceptance_checks]).lower()
+    return any(marker.lower() in intent_text for marker in _WRITE_INTENT_MARKERS)
 
 
 # LLM: _planned_items mirrors created item shape while keeping run_id empty in dry-runs.

@@ -74,12 +74,15 @@ class SubAgentManager(
         workspace_root=None,
         workspace_roots=None,
         enable_self_learning=False,
+        debug_trace_level=0,
     ):
+        # LLM: debug_trace_level is an internal observability switch; level 0 must keep persistence silent.
         params = params or SubAgentManagerInitParams(
             local_store=local_store,
             workspace_root=workspace_root,
             workspace_roots=workspace_roots,
             enable_self_learning=enable_self_learning,
+            debug_trace_level=debug_trace_level,
         )
         super().__init__(
             workspace,

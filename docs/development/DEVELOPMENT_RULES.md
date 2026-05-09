@@ -246,6 +246,28 @@ do_write()
 - Keep the ledger append-only. Do not rewrite old findings except for narrow
   typo/path corrections.
 
+## 11.3 Subagent Debug Trace Levels / 子代理调试追踪等级
+
+- `subagent_debug_trace_level` is a formal test observability switch, not a
+  temporary `print` habit. Default `0` must stay completely silent.
+- Levels `1-5` are for real E2E and fault-injection runs. They must write only
+  to the internal runtime workspace, currently
+  `debug_traces/subagent_trace.jsonl`, and must not pollute user deliverables.
+- Trace records must be refs-only and bounded by default: ids, hierarchy depth,
+  role, status, verification status, short previews, counts, and file refs.
+  Do not copy prompt bodies, response bodies, artifact bodies, or tool output
+  bodies into trace records.
+- Level guidance:
+  - `1`: lifecycle checkpoints such as task creation and runner close-out.
+  - `2`: dispatch, acceptance, runner result, and recovery refs.
+  - `3`: deeper E2E diagnosis with bounded status snapshots.
+  - `4`: bounded prompt/response/tool refs only; still no body expansion.
+  - `5`: maximum local diagnostics for short controlled test windows.
+- Any new trace event must have focused tests proving `0` writes nothing and
+  enabled levels write bounded internal records.
+- When a real E2E exposes a new trace need, record the reason in
+  `docs/modules/subagent/06-real-e2e-findings.md` before expanding trace detail.
+
 ---
 
 ## 12. Reversibility / 可逆性

@@ -17,6 +17,7 @@ from agent_py_agent.agent.subagents.manager_runner_results import (
     SubAgentRunnerResultMixin,
 )
 from agent_py_agent.agent.subagents.models import (
+    CapabilityRequest,
     SubAgentParsedOutput,
     SubAgentRunnerResult,
     SubAgentTask,
@@ -494,3 +495,50 @@ def test_record_runner_result_with_blocked_reason(mock_manager, sample_task):
     ))
 
     assert "waiting for resource" in result.blocked_reason
+
+
+def test_record_runner_result_success_clears_stale_failure_state(mock_manager, sample_task):
+    """成功重跑后清理旧 failure_type、blockers 和 OPEN capability request。"""
+    sample_task.failure_type = "capability_request"
+    sample_task.blockers = ["旧的 write_file 能力缺口"]
+    sample_task.capability_requests = [
+        CapabilityRequest(
+            id="capreq-old",
+            from_run_id=sample_task.id,
+            problem="缺少写入能力",
+            needed_capability="write_file",
+        )
+    ]
+    mock_manager._tasks[sample_task.id] = sample_task
+
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="AWAITING_ACCEPTANCE",
+        summary="文件已经写出，等待验收。",
+        blocked_reason="",
+        failure_type="",
+        used_skills=[],
+        used_tools=[],
+        evidence=[],
+        capability_requests=[],
+        artifacts=[],
+        tests=[],
+        patches=[],
+        lessons=[],
+        next_actions=[],
+    )
+
+    mock_manager.record_runner_result(_rrr(
+        run_id="run-123",
+        dry_run=False,
+        ok=True,
+        message="ok",
+        structured_output=parsed,
+    ))
+
+    assert sample_task.status == "AWAITING_ACCEPTANCE"
+    assert sample_task.failure_type == ""
+    assert sample_task.blockers == []
+    assert sample_task.capability_requests[0].status == "RESOLVED"

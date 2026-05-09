@@ -28,9 +28,14 @@ def normalize_failure_handoff(value: object) -> FailureHandoff:
 # LLM: write_failure_handoff persists only meaningful failure records.
 # 函数用途: 将失败交接记录写成机器可读 JSON；空记录不写入。
 def write_failure_handoff(task: SubAgentTask) -> None:
-    if not task.failure_handoff_json or not task.failure_handoff.run_id:
+    if not task.failure_handoff_json:
         return
-    Path(task.failure_handoff_json).write_text(
+    path = Path(task.failure_handoff_json)
+    if not task.failure_handoff.run_id:
+        # LLM: a successful retry must clear stale handoff refs instead of leaving old failure dashboards red.
+        path.unlink(missing_ok=True)
+        return
+    path.write_text(
         json.dumps(asdict(task.failure_handoff), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )

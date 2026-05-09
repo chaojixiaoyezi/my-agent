@@ -95,6 +95,8 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Finding 29：模型把 coordinator 误写成 worker。现在如果一个节点有调度工具且没有写工具，会按 depth 推断成 child/grandchild coordinator。
 - Finding 30：限速下还没跑的 PLANNING child 被误判成失败。现在 dispatch 返回 direct child 进度摘要和 continue hint，告诉父节点还有 PLANNING/RUNNING 的孩子要继续 dispatch。
 - Remaining Gap：失败分支自动恢复还没完全闭环。当前已经证明 root->child->grandchild->leaf 能真实写部分文件，root 在一个 child blocked 后能继续推进别的 child；还缺自动救援超时 coordinator、接管残留 PLANNING leaf，以及完整 48 文件 main-node-only 全绿复跑。
+- Small Fixed Retest：主节点单入口 1/2/4 小树复测通过。外层只启动 root，root 创建 2 child，child 创建 4 leaf，4 个 leaf 真实写出算法文件并通过父级 Python smoke test；leaf 写工具缺失和旧 failure/capability 状态残留已修复。还剩一个验收噪音：某 leaf 的 acceptance plan 因“空测试命令”进入 `request_human`，需要后续让空测试命令降级成 inspect-only 或生成可执行检查。
+- Debug Trace：子代理调试日志改成正式 `subagent_debug_trace_level` 开关。默认 0 不写；1-5 只写内部 runtime 的 refs-only JSONL，用于后续多层真实测试定位谁创建、谁运行、谁收束，不污染 deliverables。
 
 ## 2026-05-09 Real 3-Subagent Parallel E2E
 
@@ -1052,3 +1054,100 @@ This document is append-only. Record every real subagent E2E issue found during 
   - rerun a smaller `1 root -> 2 child -> 4 grandchild -> 12 leaf` tree first after the fixes above;
   - then rerun full `1/4/16/48`;
   - only after that start the shopping-site E2E.
+
+## 2026-05-09 Main-Node-Only 1/2/4 Fixed Retest
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`
+  - Internal runtime root: `/Users/example/my-终端应用/.my_agent_runtime/main_node_small_fixed_1_2_4_20260509_214828`
+  - Clean deliverables root: `/Users/example/my-终端应用/deliverables/main_node_small_fixed_1_2_4_20260509_214828`
+  - Root run: `subagent-1778334508-b053f5fa`
+  - Real execution mode: outer controller only started root with `subagent-run --execute --no-probe --max-cards 0`.
+- 中文说明：
+  - 这次严格按“外层只启动主节点”的原则复测。
+  - 外层没有直接启动、修复或指挥 child / leaf，只读 board、文件和报告观察结果。
+  - root 自己创建 2 个 child coordinator；child 自己创建 4 个 leaf worker；leaf 负责写真实文件。
+- Observed behavior:
+  - All 7 runs ended `AWAITING_ACCEPTANCE / NEEDS_ACCEPTANCE`.
+  - Four leaf deliverables were written under clean deliverables:
+    - `child-alpha/palindrome/solution.py` and `README.md`
+    - `child-alpha/interval_merge/solution.py` and `README.md`
+    - `child-beta/bfs/solution.py` and `README.md`
+    - `child-beta/stats/solution.py` and `README.md`
+  - No `failure_handoff.json` remained after the successful run.
+  - `subagent_capability_route_report.json` reported `total=0`.
+- Verification:
+  - Parent-side Python smoke tests imported all 4 generated `solution.py` files and verified:
+    - `is_palindrome`
+    - `merge_intervals`
+    - `Graph.bfs`, `Graph.bfs_shortest_path`, `bfs_tree`
+    - `mean`, `median`, `variance`, `standard_deviation`, `describe`
+  - Smoke output: `small fixed 1-2-4 leaf smoke tests passed`.
+  - Clean deliverables check removed `.DS_Store` and `__pycache__`, leaving only the 8 expected leaf files.
+- Fixes verified by this retest:
+  - Leaf coding tasks with explicit deliverable paths now infer write-capable tools when the model omits `allowed_tools`.
+  - A successful retry now clears stale failure fields, stale blockers, stale open capability requests, and stale `failure_handoff.json`.
+- Remaining gap:
+  - One leaf acceptance next-action still became `request_human_confirmation` because a generated check had an empty test command.
+  - 中文解释：产物本身和父级 smoke test 都过了，但验收计划看到“空测试命令”后变得保守，要求人工确认。后续应把这种空测试命令降级为 inspect-only，或自动转成安全的文件存在性检查。
+
+## 2026-05-09 Formal Subagent Debug Trace Switch
+
+- Requirement:
+  - Real E2E needs optional high-signal logs for multi-layer agent behavior.
+  - The logs must not become temporary scattered `print` calls, and must not pollute user deliverables.
+- Design:
+  - New config: `subagent_debug_trace_level`.
+  - Level `0`: default off, no trace file is written.
+  - Levels `1-5`: write bounded refs-only JSONL events to the internal runtime workspace.
+  - Current file: `<subagent_workspace>/debug_traces/subagent_trace.jsonl`.
+- Current events:
+  - `task_created` at level 1.
+  - `runner_result_recorded` at level 2.
+- Guardrails:
+  - Trace records include ids, root/parent links, depth, role, status, verification status, short previews, counts, and refs.
+  - Trace records must not copy prompt bodies, response bodies, artifact bodies, or large tool outputs.
+  - Debug trace is a test observability feature; normal status/board/startup paths remain refs-only and model-call free.
+- Verification:
+  - `test_subagent_debug_trace_level_defaults_to_off`
+  - `test_subagent_debug_trace_level_accepts_zero_to_five`
+  - `test_subagent_debug_trace_is_off_by_default`
+  - `test_subagent_debug_trace_records_task_creation_when_enabled`
+  - `test_subagent_debug_trace_records_runner_result_when_enabled`
+
+## 2026-05-09 Trace Smoke Tool Alias Failure And Fix
+
+- Test scene:
+  - First failing case: `main_node_trace_smoke_20260509_2200`
+  - Fixed retest case: `main_node_trace_smoke_fixed_20260509_2218`
+  - Both used main-node-only execution: the outer controller only created and started the root runner.
+- 中文说明：
+  - 这次专门验证 `subagent_debug_trace_level=2` 在真实模型运行里是否有用。
+  - 它确实有用：不用打开 prompt/response 正文，就能从 trace JSONL 看见 root、child、leaf 的创建顺序、层级、角色和 runner 收束状态。
+- Symptom:
+  - In the first trace smoke, root created child and child created leaf correctly.
+  - Leaf blocked with `write 工具不可用且无 fallback`.
+  - Trace showed the exact failing node: depth 2 `leaf_worker`, status `BLOCKED`.
+- Root cause:
+  - The child model supplied `allowed_tools=["write", "read_file", "list_files"]`.
+  - `write` is a natural-language/model alias, but the real ToolRegistry tool is `write_file`.
+  - Because explicit `allowed_tools` were trusted as-is, leaf received an unavailable tool name and missed the canonical write tools.
+- Fix:
+  - Hierarchy scheduling now canonicalizes common model aliases before persisting child runs:
+    - `write -> write_file`
+    - `read -> read_file`
+    - `list -> list_files`
+    - `search -> search_text`
+    - `append -> append_file`
+    - `replace -> replace_in_file`
+  - If the task is a leaf write task under an approved deliverables root, the scheduler also appends the safe leaf coding tool bundle.
+- Verification:
+  - Regression test: `test_hierarchy_schedule_normalizes_model_write_alias_for_leaf_tasks`.
+  - Real fixed retest:
+    - `root -> child -> leaf` completed without direct lower-layer intervention.
+    - `proof.txt` was written at `/Users/example/my-终端应用/deliverables/main_node_trace_smoke_fixed_20260509_2218/leaf_outputs/proof/proof.txt`.
+    - File content check output: `proof-content-ok`.
+    - Trace file recorded 3 `task_created` events and 3 `runner_result_recorded` events, all refs-only.
+- Remaining gap:
+  - Root acceptance still produced `request_human_confirmation` because the model emitted an empty test command named `层级派工验证`.
+  - 中文解释：实际产物已经写对了，但验收层对“空测试命令”太保守。下一步应把空测试命令变成可执行文件检查，或降级为 inspect-only。

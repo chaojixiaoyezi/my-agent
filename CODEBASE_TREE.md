@@ -927,6 +927,7 @@ docs/
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_records.py`: 承接 dispatch acceptance record 构建、parent acceptance auto-policy/auto-execution 摘要和显式 tests 后的 refresh 调用，让主 dispatch service 保持薄编排。
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_refresh.py`: 本轮显式 parent tests 写入 `test_execution.json` 后重新 dry-run acceptance，并刷新 dispatch 展示、单 run 审计和 aggregate acceptance report；不 apply、不 rescue、不修改 task 状态。
 - `agent_py_agent/agent/subagents/services/control_plane_projection.py`: 在 subagent 保存时把 task 当前状态投影到 LocalStore 控制面；它只做查询索引，不替代旧工单目录或 runtime workspace 事实源。
+- `agent_py_agent/agent/subagents/debug_trace.py`: 子代理正式调试追踪开关的写入层；`subagent_debug_trace_level=0` 时完全静默，开启后只把 bounded refs-only 事件写入内部 `debug_traces/subagent_trace.jsonl`。
 - `agent_py_agent/agent/subagents/services/persistence.py`: 负责 task/run/status report 落盘和旧任务兼容归一化；保存时会合并磁盘已有 `child_ids`，避免旧父/子快照覆盖新派生的层级链接。
 - `agent_py_agent/agent/subagents/services/persistence_rendering.py`: 承接 persistence 写 `thought.md` 的 Markdown 内容组装，让持久化主流程继续保持薄编排。
 - `agent_py_agent/agent/subagents/services/inheritance_manifest.py`: 创建 child task 时生成继承清单，记录 inherited / overridden / dropped 项；它是 audit-only，不自动扩大子代理上下文。

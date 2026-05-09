@@ -106,6 +106,84 @@ def test_hierarchy_schedule_inherits_parent_extra_write_roots(tmp_path):
     assert root.task_dir not in child.allowed_write_roots
 
 
+# LLM: test_hierarchy_schedule_infers_leaf_write_tools_from_explicit_deliverables covers real runner prompt drift.
+# 函数用途: 当模型忘记 allowed_tools 但 leaf 任务明确要写已授权产物文件时，系统自动补齐文件读写工具。
+def test_hierarchy_schedule_infers_leaf_write_tools_from_explicit_deliverables(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    deliverables = tmp_path / "deliverables"
+    root = manager.create_run(
+        goal="root",
+        thought="orchestrate",
+        plan=["plan"],
+        extra_write_roots=[str(deliverables)],
+    )
+    child = manager.create_run(
+        goal="child coordinator",
+        thought="split",
+        plan=["plan"],
+        parent_id=root.id,
+        root_id=root.id,
+        depth=1,
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+        extra_write_roots=[str(deliverables)],
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=child.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal=f"写入 {deliverables}/leaf/solution.py 和 README.md。",
+                    agent_name="leaf-writer",
+                    role="worker",
+                    acceptance_checks=["solution.py 必须存在"],
+                )
+            ],
+            apply=True,
+        )
+    )
+    leaf = manager.load(result.created_run_ids[0])
+
+    assert "write_file" in leaf.allowed_tools
+    assert "replace_in_file" in leaf.allowed_tools
+    assert str(deliverables) in leaf.allowed_write_roots
+
+
+# LLM: test_hierarchy_schedule_normalizes_model_write_alias keeps real runners from receiving unavailable tool names.
+# 函数用途: 当模型把 write 当成工具名时，系统转成真实 write_file，并保留叶子写文件需要的工具包。
+def test_hierarchy_schedule_normalizes_model_write_alias_for_leaf_tasks(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    deliverables = tmp_path / "deliverables"
+    parent = manager.create_run(
+        goal="child coordinator",
+        thought="split",
+        plan=["plan"],
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+        extra_write_roots=[str(deliverables)],
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal=f"写入 {deliverables}/proof.txt，内容为 trace-hierarchy-ok。",
+                    agent_name="leaf-writer",
+                    role="leaf_worker",
+                    allowed_tools=["write", "read_file", "list_files"],
+                )
+            ],
+            apply=True,
+        )
+    )
+    leaf = manager.load(result.created_run_ids[0])
+
+    assert "write" not in leaf.allowed_tools
+    assert "write_file" in leaf.allowed_tools
+    assert "append_file" in leaf.allowed_tools
+    assert "replace_in_file" in leaf.allowed_tools
+
+
 # LLM: test_hierarchy_schedule_carries_parent_context_to_child_thought prevents vague nested handoffs.
 # 函数用途: 确认下层 coordinator 能通过 thought 看到父级目标和提示，避免只拿到空泛编号任务。
 def test_hierarchy_schedule_carries_parent_context_to_child_thought(tmp_path):

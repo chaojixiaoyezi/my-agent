@@ -245,6 +245,7 @@ class SubagentAdvancedFieldsService:
             defaults,
             (
                 ("subagent_automation_level", 1, 3),
+                ("subagent_debug_trace_level", 0, 5),
                 ("acceptance_test_timeout_seconds", 1, 300),
                 ("dynamic_timeout_min", 10, None),
                 ("dynamic_timeout_max", 60, None),

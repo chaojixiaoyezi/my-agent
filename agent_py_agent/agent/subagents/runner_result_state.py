@@ -13,6 +13,8 @@ from dataclasses import dataclass
 
 from .policies import _status_from_structured_output, _verification_from_runner_status
 
+_RUNNER_FAILURE_STATUSES = {"BLOCKED", "FAILED", "CHANNEL_ERROR", "TIMEOUT"}
+
 
 # LLM: RunnerResultFieldParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 类用途: 集中保存执行器结果字段参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
@@ -80,9 +82,7 @@ def _apply_status_fields(task, status_context, parsed) -> None:
     if parsed.found and parsed.ok:
         task.status = (status or _status_from_structured_output(parsed)).upper()
         task.verification_status = (verification_status or _verification_from_runner_status(task.status)).upper()
-        task.failure_type = failure_type or parsed.failure_type or task.failure_type
-        if task.capability_requests and not failure_type:
-            task.failure_type = "capability_request"
+        _apply_structured_failure_state(task, failure_type or parsed.failure_type, parsed)
         return
     if parsed.found and not parsed.ok:
         task.status = status.upper() if status else "BLOCKED"
@@ -95,6 +95,31 @@ def _apply_status_fields(task, status_context, parsed) -> None:
         task.verification_status = verification_status.upper()
     if failure_type:
         task.failure_type = failure_type
+
+
+# LLM: _apply_structured_failure_state keeps stale recovery state from surviving a successful retry.
+# 函数用途: 根据当前结构化输出刷新 failure_type/blockers/open capability request，成功结果会清掉旧阻塞态。
+def _apply_structured_failure_state(task, current_failure_type: str, parsed) -> None:
+    if current_failure_type:
+        task.failure_type = current_failure_type
+        return
+    if parsed.capability_requests or parsed.blocked_reason:
+        task.failure_type = "capability_request"
+        return
+    if task.status in _RUNNER_FAILURE_STATUSES:
+        task.failure_type = task.failure_type or task.status.lower()
+        return
+    task.failure_type = ""
+    task.blockers = []
+    _resolve_stale_capability_requests(task)
+
+
+# LLM: _resolve_stale_capability_requests marks old OPEN requests inactive once the runner has current evidence.
+# 函数用途: 成功重跑且当前输出不再请求能力时，把旧 OPEN 能力请求标为 RESOLVED，避免看板继续报假阻塞。
+def _resolve_stale_capability_requests(task) -> None:
+    for request in getattr(task, "capability_requests", []) or []:
+        if getattr(request, "status", "") == "OPEN":
+            request.status = "RESOLVED"
 
 
 # LLM: _apply_unstructured_failure 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

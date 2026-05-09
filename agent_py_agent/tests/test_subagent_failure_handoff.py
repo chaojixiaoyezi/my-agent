@@ -38,3 +38,29 @@ def test_subagent_save_writes_failure_handoff_for_failed_run(tmp_path) -> None:
     assert payload["warning"] == "黑盒输出可能撑爆上下文，已停止继续展开。"
     assert projected is not None
     assert projected.metadata["failure_handoff_ref"] == loaded.failure_handoff_json
+
+
+def test_subagent_save_removes_failure_handoff_after_successful_retry(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path / "subagents")
+    task = manager.create_run(
+        goal="先失败后恢复",
+        thought="保留恢复线索，成功后清理当前失败态。",
+        plan=["fail", "retry"],
+    )
+    task.status = "BLOCKED"
+    task.failure_type = "capability_request"
+    task.blockers = ["缺少 write_file"]
+    manager.save(task)
+    handoff_path = Path(manager.load(task.id).failure_handoff_json)
+    assert handoff_path.exists()
+
+    task = manager.load(task.id)
+    task.status = "AWAITING_ACCEPTANCE"
+    task.verification_status = "NEEDS_ACCEPTANCE"
+    task.failure_type = ""
+    task.blockers = []
+    manager.save(task)
+
+    loaded = manager.load(task.id)
+    assert loaded.failure_handoff.run_id == ""
+    assert not handoff_path.exists()
