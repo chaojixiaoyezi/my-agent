@@ -18,6 +18,14 @@ from ..subagents.models import SubAgentBoardOptions
 from ..subagents.services.base import CreateRunParams, _extract_write_dirs
 from ..tools import BaseTool, ToolExecutionResult
 from .dispatch_params import DispatchParams
+from .hierarchy_tools import ScheduleChildSubagentsTool
+from .orchestration_dispatch_scope import (
+    dispatch_exclude_run_ids,
+    dispatch_finalize_acceptance,
+    dispatch_parent_run_id,
+    dispatch_workflow_mode,
+)
+from .orchestration_progress_payload import direct_children_progress_payload
 from .orchestration_tool_specs import (
     build_create_subagents_spec,
     build_dispatch_subagents_spec,
@@ -48,6 +56,8 @@ def _tool_workflow_mode(explicit_mode: object, config_mode: object) -> str:
         normalized = explicit_mode.strip().lower()
         if normalized in {"off", "plan", "auto"}:
             return normalized
+        if normalized:
+            return "off"
     if isinstance(config_mode, str):
         normalized = config_mode.strip().lower()
         if normalized == "auto":
@@ -282,7 +292,7 @@ class DispatchSubagentsTool(BaseTool):
             apply=apply,
             execute_runners=execute_runners,
             planner=_bool_param(params.get("planner"), default=False),
-            workflow_mode=_tool_workflow_mode(params.get("workflow_mode"), self.agent.config.subagent_workflow_mode),
+            workflow_mode=dispatch_workflow_mode(self.agent, params, _tool_workflow_mode),
             max_runners=_non_negative_int(params.get("max_runners"), default=1),
             limit=_non_negative_int(params.get("limit"), default=20),
             reviewer=str(params.get("reviewer") or "chat-tool").strip(),
@@ -292,12 +302,16 @@ class DispatchSubagentsTool(BaseTool):
             probe=not _bool_param(params.get("no_probe"), default=False),
             take_over_by=str(params.get("take_over_by") or "").strip(),
             locked_files=_string_list(params.get("locked_files")),
+            parent_run_id=dispatch_parent_run_id(self.agent, params),
+            root_id=str(params.get("root_id") or "").strip(),
+            exclude_run_ids=dispatch_exclude_run_ids(self.agent, params),
+            finalize_acceptance=dispatch_finalize_acceptance(self.agent, params),
         )
 
     # LLM: _report_payload 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 处理报告载荷相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
     def _report_payload(self, report) -> dict[str, object]:
-        return {
+        payload = {
             "dry_run": report.dry_run,
             "summary": report.summary,
             "records": [
@@ -317,3 +331,5 @@ class DispatchSubagentsTool(BaseTool):
             "dispatch_json": str(self.agent.subagents.workspace / "subagent_dispatch_report.json"),
             "dispatch_md": str(self.agent.subagents.workspace / "SUBAGENT_DISPATCH.md"),
         }
+        payload.update(direct_children_progress_payload(self.agent))
+        return payload

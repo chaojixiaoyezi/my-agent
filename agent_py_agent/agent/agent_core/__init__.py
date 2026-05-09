@@ -10,8 +10,13 @@ SimpleAgent 的主循环、子代理、dispatch、prompt 模板、工具类和�
 """
 
 from .dispatch_mixin import SimpleAgentDispatchMixin
+from .hierarchy_tools import ScheduleChildSubagentsTool
 from .models import AgentRunResult
-from .orchestration_tools import CreateSubagentsTool, DispatchSubagentsTool, SubagentBoardTool
+from .orchestration_tools import (
+    CreateSubagentsTool,
+    DispatchSubagentsTool,
+    SubagentBoardTool,
+)
 from .runtime_mixin import SimpleAgentRuntimeMixin
 from .subagent_mixin import SimpleAgentSubagentMixin
 
@@ -19,6 +24,7 @@ __all__ = [
     "AgentRunResult",
     "CreateSubagentsTool",
     "DispatchSubagentsTool",
+    "ScheduleChildSubagentsTool",
     "SimpleAgentDispatchMixin",
     "SimpleAgentRuntimeMixin",
     "SimpleAgentSubagentMixin",

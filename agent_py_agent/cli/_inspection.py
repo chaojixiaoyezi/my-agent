@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 
 from ..agent.capability_config import load_capability_config
 from ..agent.subagents.models import SubAgentChannelProbeOptions, SubAgentDueCheckOptions
+from ..agent.subagents.run_budget import SubagentRunBudgetRequest
 from .common import make_agent
 from .models import SubagentContextOptions, SubagentsDueCheckOptions, SubagentsProbeOptions
 
@@ -69,6 +71,33 @@ def cmd_subagents_probe(args) -> int:
             print(f"  [{check.severity}] {check.name}: {check.summary} {check.error}".rstrip())
     print(f"\n已写入: {agent.subagents.workspace / 'subagent_channel_probe.json'}")
     print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_CHANNEL_PROBE.md'}")
+    return 0
+
+
+# LLM: cmd_subagents_budget exposes refs-only runner cost summaries for large E2E runs.
+# 函数用途: CLI 预算报告入口；只统计已有 runner 结果，不触发模型、不执行工具、不改任务状态。
+def cmd_subagents_budget(args) -> int:
+    agent = make_agent(args)
+    report = agent.subagents.write_run_budget_report(
+        params=SubagentRunBudgetRequest(
+            manager=agent.subagents,
+            root_id=str(getattr(args, "root_id", "") or ""),
+            max_model_calls=int(getattr(args, "max_model_calls", 0) or 0),
+            max_tool_rounds=int(getattr(args, "max_tool_rounds", 0) or 0),
+            max_prompt_response_tokens=int(getattr(args, "max_prompt_response_tokens", 0) or 0),
+            include_dry_runs=bool(getattr(args, "include_dry_runs", False)),
+        )
+    )
+    if bool(getattr(args, "json", False)):
+        print(json.dumps(asdict(report), ensure_ascii=False, indent=2))
+        return 0
+    print("SUBAGENT RUN BUDGET")
+    print(f"root_id={report.root_id or 'all'}")
+    print("totals=" + json.dumps(report.totals, ensure_ascii=False, sort_keys=True))
+    print("limits=" + json.dumps(report.limits, ensure_ascii=False, sort_keys=True))
+    print("exceeded=" + json.dumps(report.exceeded, ensure_ascii=False))
+    print(f"\n已写入: {agent.subagents.workspace / 'subagent_run_budget.json'}")
+    print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_RUN_BUDGET.md'}")
     return 0
 
 

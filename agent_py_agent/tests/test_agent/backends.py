@@ -141,6 +141,80 @@ class BoundaryWriteSubagentBackend(BaseBackend):
         )
 
 
+class HierarchicalScheduleSubagentBackend(BaseBackend):
+    """测试用后端：主节点 runner 通过层级调度工具创建下一层子节点。"""
+
+    name = "hierarchical_schedule_subagent_backend"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.prompts.append(prompt)
+        if len(self.prompts) == 1:
+            assert "schedule_child_subagents [orchestration]" in prompt
+            return _hierarchical_schedule_tool_call_response(self.name)
+
+        assert "child-catalog" in prompt
+        return _hierarchical_schedule_result_response(self.name)
+
+
+# LLM: _hierarchical_schedule_tool_call_response keeps the fake model's first turn short.
+# 函数用途: 返回测试模型第一次调用 schedule_child_subagents 的固定响应。
+def _hierarchical_schedule_tool_call_response(backend: str) -> ModelResponse:
+    return ModelResponse(
+        text=(
+            "[TOOL_CALL]\n"
+            "{"
+            '"tool":"schedule_child_subagents",'
+            '"apply":true,'
+            '"max_depth":3,'
+            '"max_children":4,'
+            '"children":[{'
+            '"role":"child_coordinator",'
+            '"agent_name":"child-catalog",'
+            '"goal":"作为主节点的下一层，继续拆分目录和商品列表实现任务",'
+            '"allowed_tools":["schedule_child_subagents","dispatch_subagents","subagent_board","read_file","write_file"],'
+            '"acceptance_checks":["必须只通过父节点汇报 refs 和状态"]'
+            "}]"
+            "}\n"
+            "[/TOOL_CALL]"
+        ),
+        backend=backend,
+    )
+
+
+# LLM: _hierarchical_schedule_result_response keeps the fake model's final result reusable.
+# 函数用途: 返回测试模型第二次收口的结构化 subagent 结果。
+def _hierarchical_schedule_result_response(backend: str) -> ModelResponse:
+    return ModelResponse(
+        text=(
+            "[SUBAGENT_RESULT]\n"
+            "{\n"
+            '  "status": "AWAITING_ACCEPTANCE",\n'
+            '  "summary": "主节点已创建下一层 child coordinator，等待父级继续调度。",\n'
+            '  "used_tools": ["schedule_child_subagents"],\n'
+            '  "used_skills": [],\n'
+            '  "evidence": [\n'
+            '    {"kind": "tool", "summary": "schedule_child_subagents 已返回 child-catalog", "ok": true}\n'
+            "  ],\n"
+            '  "capability_requests": [],\n'
+            '  "artifacts": [],\n'
+            '  "tests": [\n'
+            '    {"name": "hierarchy-schedule", "command": "", "ok": true, "summary": "下一层已创建"}\n'
+            "  ],\n"
+            '  "patches": [],\n'
+            '  "lessons": [],\n'
+            '  "next_actions": ["dispatch_child_coordinator_from_parent"],\n'
+            '  "blocked_reason": "",\n'
+            '  "failure_type": ""\n'
+            "}\n"
+            "[/SUBAGENT_RESULT]"
+        ),
+        backend=backend,
+    )
+
+
 class FlakyThenAcceptedSubagentBackend(BaseBackend):
     """测试用后端：第一次模型调用失败，第二次返回可验收结果。"""
 

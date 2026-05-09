@@ -27,6 +27,7 @@ from agent_py_agent.cli._dispatch import (
 from agent_py_agent.cli._hierarchy import cmd_subagents_hierarchy, cmd_subagents_recovery_tree
 from agent_py_agent.cli._inspection import (
     cmd_subagent_context,
+    cmd_subagents_budget,
     cmd_subagents_due_check,
     cmd_subagents_probe,
 )

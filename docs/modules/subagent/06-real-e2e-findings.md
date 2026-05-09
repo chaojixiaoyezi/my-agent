@@ -742,3 +742,219 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Large clean deliverables trees work, but future UI/CLI should make the two roots obvious:
   - clean user output: `deliverables/<run_id>/...`
   - internal runtime: `.my_agent_runtime/<run_id>/...`
+
+## 2026-05-09 Main-Node-Only Hierarchy Smoke E2E
+
+### Finding 21: Runner Context Had No Model Tool For Creating Its Own Next Layer
+
+- Discovered at: 2026-05-09 before rerunning the main-node-only smoke E2E.
+- Symptom:
+  - Product code already had `HierarchyScheduleRequest`, but a running subagent could not call a dedicated tool to create child runs under itself.
+  - A controller could still create descendants externally through CLI/API, which does not match the required main-node-only feedback chain.
+- Root cause:
+  - `SubAgentHierarchyScheduler` existed only as manager/CLI service.
+  - The model tool catalog exposed generic `create_subagents`, not a current-runner-bound child scheduler.
+- Fix:
+  - Added `schedule_child_subagents` as an orchestration tool.
+  - The tool reads `agent._current_subagent_run_id` and refuses to run without an active runner context.
+  - `run_subagent_flow()` now sets and restores `_current_subagent_run_id` around the model turn.
+- Verification:
+  - `test_subagent_runner_can_schedule_children_from_current_node_context` first failed with no child created, then passed after the fix.
+  - `test_rejects_without_current_runner_context` verifies the tool cannot be used to bypass the main node.
+- Status: solved for current-runner child creation.
+
+### Finding 22: Child Runs Did Not Inherit The User-Approved Deliverables Root
+
+- Discovered at: 2026-05-09 while preparing the main-node-only smoke E2E.
+- Symptom:
+  - The parent task could have `/Users/xiaoyezi/my-claude-code/deliverables/<case>` in `allowed_write_roots`, but scheduled children lost that product write root unless the model repeated `extra_write_roots`.
+- Root cause:
+  - `SubAgentHierarchyScheduler._create_child()` passed only `spec.extra_write_roots`.
+  - Empty child specs defaulted to task-local write roots only.
+- Fix:
+  - Descendants now inherit parent `allowed_write_roots` except the parent task directory itself.
+  - This forwards user-approved product roots while avoiding writes into the parent work-order directory.
+- Verification:
+  - `test_hierarchy_schedule_inherits_parent_extra_write_roots` first failed, then passed.
+- Status: solved for default hierarchy scheduling.
+
+### Finding 23: Nested Dispatch Accidentally Spawned Workflow Workers
+
+- Discovered at: 2026-05-09 during real smoke case `hier_main_only_smoke_1778325266`.
+- Symptom:
+  - The main node was instructed to create exactly one child coordinator.
+  - It did create one child through `schedule_child_subagents`, but its later `dispatch_subagents` call inherited global `subagent_workflow_mode=auto`.
+  - Dispatch then planned a `producer_critic_repair` workflow for the running root and spawned 3 extra worker children.
+  - The proof file was never produced; the root ended `BLOCKED`.
+- Root cause:
+  - `DispatchSubagentsTool` used global config workflow mode when the model omitted `workflow_mode`.
+  - Inside a subagent runner this is unsafe for hierarchy tests, because dispatch should advance existing child tasks unless the node explicitly asks for workflow expansion.
+- Fix:
+  - In runner context, `dispatch_subagents` now defaults `workflow_mode` to `off`.
+  - Top-level dispatch still follows config, and explicit `workflow_mode` still wins.
+- Verification:
+  - `test_runner_context_dispatch_defaults_workflow_mode_off` first failed with `auto`, then passed with `off`.
+- Status: fixed in code; real smoke rerun still pending.
+
+### Finding 24: Nested Dispatch Selected The Running Parent Instead Of Its Child
+
+- Discovered at: 2026-05-09 during real smoke case `hier_main_only_smoke_1778325522`.
+- Symptom:
+  - The main node created exactly one child after Finding 23 was fixed.
+  - Its nested `dispatch_subagents` call then selected the running main node itself as the runner candidate.
+  - The root recursively ran itself, timed out after 30 seconds, and the child stayed `PLANNING`.
+- Root cause:
+  - Runner candidate selection was global.
+  - `DispatchSubagentsTool` did not pass the active runner id as a scope or exclusion.
+- Fix:
+  - `DispatchParams` / `DispatchContext` now carry `parent_run_id`, `root_id`, and `exclude_run_ids`.
+  - When called inside a runner, `dispatch_subagents` defaults `parent_run_id` to the active run and excludes the active run id.
+  - Runner job selection filters by those scope fields before choosing candidates.
+- Verification:
+  - `test_subagent_dispatch_parent_scope_runs_direct_children_not_parent` first failed because `parent_run_id` did not exist, then passed.
+- Status: fixed in code; real smoke rerun still pending.
+
+### Finding 25: Coordinator Nodes Can Bypass Leaf Work If Given Write Tools
+
+- Discovered at: 2026-05-09 during real smoke case `hier_main_only_smoke_1778325957`.
+- Symptom:
+  - The hierarchy chain reached root -> child -> leaf and the proof file was written.
+  - However the child coordinator also had `write_file`, so it wrote `proof.txt` itself after believing the leaf was blocked.
+- Root cause:
+  - The test prompt granted coordinator nodes both orchestration tools and product write tools.
+  - This violates the intended rule: coordinators may teach/delegate/observe, but must not do leaf work.
+- Fix:
+  - Updated the live test pattern: coordinator nodes receive only `schedule_child_subagents`, `dispatch_subagents`, `subagent_board`, and read/search/list tools.
+  - Leaf nodes receive write tools for product artifacts.
+- Verification:
+  - Real smoke case `hier_main_only_smoke_1778326442` confirmed the child coordinator had no write tools and did not use `write_file`.
+- Status: solved as a test-template and permission-boundary rule; future prompt templates should encode this split.
+
+### Finding 26: Subagents Interpret `max_depth=1` As Relative Depth
+
+- Discovered at: 2026-05-09 during real smoke case `hier_main_only_smoke_1778326442`.
+- Symptom:
+  - A child coordinator at depth 1 called `schedule_child_subagents` with `max_depth=1`.
+  - The service treated it as absolute max depth and blocked leaf creation with `max_depth_exceeded:1`.
+- Root cause:
+  - The tool parameter name was model-unfriendly inside nested runner context.
+  - The model naturally used `max_depth=1` to mean “create one more layer”.
+- Fix:
+  - `schedule_child_subagents` now normalizes explicit `max_depth` values that would block all children in the active context.
+  - Example: parent depth 1 + `max_depth=1` becomes effective absolute max depth 2.
+- Verification:
+  - `test_runner_context_max_depth_can_mean_one_more_layer` first failed, then passed.
+- Status: solved in tool boundary.
+
+### Successful Smoke: Main-Node-Only Root -> Child -> Leaf
+
+- Completed at: 2026-05-09 with real smoke case `hier_main_only_smoke_1778326811`.
+- Runtime root:
+  - `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/hier_main_only_smoke_1778326811`
+- Deliverables root:
+  - `/Users/xiaoyezi/my-claude-code/deliverables/hier_main_only_smoke_1778326811`
+- Verified behavior:
+  - Outer controller only started root `subagent-1778326811-7c86e224`.
+  - Root created one child `subagent-1778326838-c47aa8b4`.
+  - Child created one leaf `subagent-1778326850-81b8f4d6`.
+  - Leaf wrote `/Users/xiaoyezi/my-claude-code/deliverables/hier_main_only_smoke_1778326811/proof.txt`.
+  - Proof content: `hierarchy-ok`.
+  - Root, child, and leaf all ended `AWAITING_ACCEPTANCE / NEEDS_ACCEPTANCE`, not `BLOCKED`.
+  - Child used only orchestration/read tools; leaf used `write_file`.
+- Status: passed as the small main-node-only hierarchy smoke. Larger 1/4/16/48 and shopping-site E2E still need separate runs.
+
+## 2026-05-09 Main-Node-Only 1/4/16/48 Stress Attempt
+
+### Finding 27: Repeated Parent Dispatch Was Blocked By The One-Shot Guard
+
+- Discovered at: 2026-05-09 in case `main_node_tree_1_4_16_48_serial_20260509_201422`.
+- Symptom:
+  - The root created 4 direct child coordinators.
+  - Because `runner_start_rate=1`, the first dispatch only ran one child.
+  - The root then tried to call the same `dispatch_subagents` again, but the one-shot guard blocked it.
+- Root cause:
+  - `dispatch_subagents` and `subagent_board` were grouped with creation tools in `ONE_SHOT_TOOL_NAMES`.
+  - Creation tools must be one-shot to avoid duplicate task creation, but dispatch/board are progress-loop tools and must be callable repeatedly by the same parent.
+- Fix:
+  - The one-shot guard now only covers task creation tools: `create_subagents` and `schedule_child_subagents`.
+  - `dispatch_subagents` and `subagent_board` can be repeated inside a parent runner.
+- Verification:
+  - `test_repeated_dispatch_is_allowed_for_parent_progress_loops` covers two identical dispatch tool calls in one tool loop.
+  - The later live case `main_node_tree_1_4_16_48_serial_20260509_2040` showed a grandchild repeatedly dispatching leaf workers until multiple leaves wrote files.
+- Status: solved.
+
+### Finding 28: Descendant Runners Needed Parent Goal Context
+
+- Discovered at: 2026-05-09 in case `main_node_tree_1_4_16_48_serial_20260509_201422`.
+- Symptom:
+  - A grandchild was created with goal `child-04-grandchild-04 任务执行`.
+  - It blocked with missing input because its task context did not include the leaf paths or exact content requirements.
+- Root cause:
+  - `schedule_child_subagents` persisted only the child spec goal and a generic thought.
+  - If a parent model wrote a thin child goal, the next layer lost the root task details.
+- Fix:
+  - Hierarchy-created descendants now inherit a bounded parent goal/thought summary in `thought`.
+  - The inherited thought also tells coordinators to make the next layer goal self-contained.
+  - This preserves the root -> child -> grandchild feedback path while avoiding external controller intervention.
+- Verification:
+  - `test_hierarchy_schedule_carries_parent_context_to_child_thought` covers inherited parent goal/thought.
+  - The live case `main_node_tree_1_4_16_48_serial_20260509_2040` showed leaf prompts containing parent, grandparent, and root summaries.
+- Status: solved with bounded inherited context; future tuning may shrink the summary further if token pressure rises.
+
+### Finding 29: Coordinator Role Slips Created Worker-Shaped Grandchildren
+
+- Discovered at: 2026-05-09 in case `main_node_tree_1_4_16_48_serial_20260509_2040`.
+- Symptom:
+  - `child-03` created `child-03-grandchild-*` runs with role `worker` even though those runs had `schedule_child_subagents` and `dispatch_subagents`.
+  - The hierarchy shape became harder to reason about and recovery rules could classify them incorrectly.
+- Root cause:
+  - The model-supplied role was trusted even when tools and depth clearly indicated a coordinator.
+- Fix:
+  - `SubAgentHierarchyScheduler` now infers coordinator roles for children that have orchestration tools and no write tools:
+    - depth 1 -> `child_coordinator`
+    - depth 2 -> `grandchild_coordinator`
+    - deeper -> `coordinator`
+  - Explicit non-worker roles are still respected.
+- Verification:
+  - `test_hierarchy_schedule_infers_coordinator_role_from_tools` first failed with `worker`, then passed with `grandchild_coordinator`.
+- Status: solved for common role slips.
+
+### Finding 30: Rate-Limited Pending Children Were Misread As Failed
+
+- Discovered at: 2026-05-09 in case `main_node_tree_1_4_16_48_serial_20260509_2040`.
+- Symptom:
+  - A grandchild created 3 leaf workers.
+  - With `runner_start_rate=1`, only one leaf ran in a dispatch slice.
+  - The coordinator reported the remaining PLANNING leaves as failed instead of continuing dispatch.
+- Root cause:
+  - The dispatch tool response did not explicitly summarize the current node's direct child status after the dispatch slice.
+  - The model saw missing files and interpreted not-yet-run children as failures.
+- Fix:
+  - Runner-context `dispatch_subagents` responses now include a `direct_children` summary:
+    - total direct children
+    - status counts
+    - PLANNING ids
+    - RUNNING ids
+    - a continue hint telling the parent to call dispatch again when children remain PLANNING/RUNNING.
+- Verification:
+  - `test_runner_context_dispatch_reports_direct_child_progress` covers the new refs-only progress payload.
+- Status: solved for tool feedback; full 1/4/16/48 rerun still needed.
+
+### Remaining Gap: Failed Branch Recovery Is Not Fully Automatic
+
+- The live case `main_node_tree_1_4_16_48_serial_20260509_2040` was stopped after exposing systemic issues.
+- Confirmed working:
+  - external controller only started root;
+  - root created children;
+  - child created grandchildren;
+  - grandchild created leaf workers;
+  - leaf workers wrote real files under clean `deliverables/.../leaf_outputs`;
+  - when `child-04` blocked, root continued to `child-03`.
+- Still missing:
+  - automatic in-tree rescue when a coordinator times out after partial child completion;
+  - parent-driven retry/takeover for PLANNING leaf workers left behind by a partial dispatch;
+  - final clean 48-file pass under the main-node-only constraint.
+- Next recommended test:
+  - rerun a smaller `1 root -> 2 child -> 4 grandchild -> 12 leaf` tree first after the fixes above;
+  - then rerun full `1/4/16/48`;
+  - only after that start the shopping-site E2E.

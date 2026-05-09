@@ -23,10 +23,10 @@ def _check_action_options(action, reference, missing):
             missing.append(option)
 
 
-def _collect_subparser_options(action, reference):
+def _collect_subparser_options(command, action, reference):
     """Collect missing --options from a subparser action."""
     return [
-        f"{action.title} {sub_option}"
+        f"{command} {sub_option}"
         for sub_action in action._actions
         for sub_option in sub_action.option_strings
         if sub_option.startswith("--") and sub_option not in reference
@@ -38,7 +38,7 @@ def _collect_missing_subcommands(action, reference, missing):
     for command, subparser in action.choices.items():
         if f"`{command}`" not in reference:
             missing.append(command)
-        missing.extend(_collect_subparser_options(subparser, reference))
+        missing.extend(_collect_subparser_options(command, subparser, reference))
 
 
 def test_cli_reference_mentions_all_commands_and_long_options():

@@ -6,14 +6,17 @@ from __future__ import annotations
 """normalizes orchestration-tool parameters and one-shot tool-call guard keys.
 
 模型传来的工具参数可能是数组、JSON 字符串、多行文本、逗号分隔文本。
-这个文件专门把这些输入整理成稳定类型，也负责拦住同一轮重复执行的一次性编排工具。
+这个文件专门把这些输入整理成稳定类型，也负责拦住同一轮重复创建任务的一次性编排工具。
 """
 
 import json
 import time
 from pathlib import Path
 
-ONE_SHOT_TOOL_NAMES = {"create_subagents", "subagent_board", "dispatch_subagents"}
+ONE_SHOT_TOOL_NAMES = {
+    "create_subagents",
+    "schedule_child_subagents",
+}
 
 
 # LLM: _one_shot_tool_call_key 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

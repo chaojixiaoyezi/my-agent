@@ -93,7 +93,9 @@ def test_subagents_tests_rerun_does_not_accept_empty_acceptance_report(tmp_path,
     out = capsys.readouterr().out
     assert result == 0
     assert "total=1 executed=1 passed=1 failed=0" in out
+    assert "classification=passed recommended_action=apply_acceptance" in out
     assert "file exists" in out
+    assert Path(task.reports_dir, "test_failure_classification.json").exists()
 
 
 def test_subagents_tests_returns_failure_for_empty_existing_report(tmp_path, capsys):
@@ -112,3 +114,4 @@ def test_subagents_tests_returns_failure_for_empty_existing_report(tmp_path, cap
     out = capsys.readouterr().out
     assert result == 1
     assert "total=0 executed=0 passed=0 failed=0" in out
+    assert "classification=runner_output_missing_tests recommended_action=fix_runner_output" in out

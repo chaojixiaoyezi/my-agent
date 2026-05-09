@@ -17,6 +17,7 @@ from agent_py_agent.agent.subagent import parse_subagent_runner_output
 from .backends import (
     AcceptedSubagentBackend,
     BoundaryWriteSubagentBackend,
+    HierarchicalScheduleSubagentBackend,
     RepairingSubagentBackend,
     StructuredSubagentBackend,
 )
@@ -149,6 +150,44 @@ def test_subagent_runner_enforces_write_boundary_at_tool_layer():
         assert len(backend.prompts) == 2
         assert not (root / "README.md").exists()
         assert "写入被阻止" in backend.prompts[1]
+
+
+def test_subagent_runner_can_schedule_children_from_current_node_context():
+    """LLM: Verifies a running subagent can create the next hierarchy layer under itself."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(
+            enable_tools=True,
+            model_backend="echo",
+            subagent_workspace="subs",
+            max_tool_rounds=3,
+        )
+        agent = SimpleAgent(cfg, root)
+        backend = HierarchicalScheduleSubagentBackend()
+        agent.backend = backend
+        task = agent.subagents.create_run(
+            goal="主节点统筹购物站点真实 E2E 测试",
+            thought="只创建下一层，不直接碰叶子节点。",
+            plan=["创建下一层 coordinator", "等待父级观察日志", "汇报 refs"],
+            agent_name="main-node",
+            role="root_coordinator",
+            allowed_tools=["schedule_child_subagents"],
+            acceptance_checks=["下一层必须挂在当前 run 下面"],
+        )
+
+        result = agent.run_subagent(task.id, dry_run=False, probe=False)
+        loaded = agent.subagents.load(task.id)
+        child = agent.subagents.load(loaded.child_ids[0])
+
+        assert result.ok
+        assert result.structured_output_ok
+        assert len(backend.prompts) == 2
+        assert len(loaded.child_ids) == 1
+        assert child.parent_id == task.id
+        assert child.root_id == task.id
+        assert child.depth == 1
+        assert child.agent_name == "child-catalog"
+        assert "schedule_child_subagents" in child.allowed_tools
 
 
 def test_subagent_runner_repairs_missing_structured_output():

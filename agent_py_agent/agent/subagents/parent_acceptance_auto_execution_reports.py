@@ -17,6 +17,10 @@ from .parent_acceptance_auto_followup import (
     ParentAcceptanceAutoFollowUp,
     build_parent_acceptance_auto_followup,
 )
+from .test_failure_classification import (
+    TestFailureClassificationRequest,
+    write_test_failure_classification,
+)
 
 
 # LLM: ConfirmedTestReportRequest bundles report-write inputs so helper signatures stay stable.
@@ -36,7 +40,7 @@ class ConfirmedTestReportRequest:
 # LLM: write_confirmed_test_report keeps execution separate from result construction.
 # 函数用途: 把真实测试执行记录写成 test_execution 报告；只写报告，不改 task 状态。
 def write_confirmed_test_report(params: ConfirmedTestReportRequest) -> TestExecutionReport:
-    return write_test_execution_report(
+    report = write_test_execution_report(
         params.task.reports_dir,
         params.records,
         options=TestExecutionReportOptions(
@@ -44,6 +48,11 @@ def write_confirmed_test_report(params: ConfirmedTestReportRequest) -> TestExecu
             timeout_seconds=params.request.timeout_seconds,
         ),
     )
+    write_test_failure_classification(
+        params.task.reports_dir,
+        TestFailureClassificationRequest(report=report),
+    )
+    return report
 
 
 # LLM: write_execution_followup produces the post-test handoff without applying the task.

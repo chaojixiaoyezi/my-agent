@@ -168,13 +168,14 @@ def _apply_result(
 # LLM: _create_child converts one schedule spec into the existing CreateRunParams bundle.
 # 函数用途: 复用现有 create_run 路径创建子任务，保证 work-order、runtime workspace 和控制面同步。
 def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) -> SubAgentTask:
+    role = _scheduled_child_role(parent, spec)
     return manager.create_run(
         params=CreateRunParams(
             goal=spec.goal,
-            thought=spec.thought or f"执行由 {parent.id} 派生的层级子任务。",
+            thought=spec.thought or _inherited_hierarchy_thought(parent),
             plan=spec.plan or ["读取父级 refs", "执行小切片", "写回状态和证据 refs", "等待父级验收"],
             agent_name=spec.agent_name or spec.role or "worker",
-            role=spec.role or "worker",
+            role=role,
             parent_id=parent.id,
             root_id=parent.root_id or parent.id,
             depth=parent.depth + 1,
@@ -187,10 +188,64 @@ def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) 
             quality_contract=parent.quality_contract,
             context_manifest=parent.context_manifest,
             context_packs=parent.context_packs,
-            extra_write_roots=spec.extra_write_roots or [],
+            extra_write_roots=spec.extra_write_roots or _inherited_extra_write_roots(parent),
             workflow_mode="off",
         )
     )
+
+
+# LLM: _scheduled_child_role repairs common model slips without changing explicit coordinator roles.
+# 函数用途: 带层级调度权限的 child 如果被模型误标成 worker，按 depth 推断为 coordinator。
+def _scheduled_child_role(parent: SubAgentTask, spec: HierarchyChildSpec) -> str:
+    role = str(spec.role or "worker").strip() or "worker"
+    if role not in {"worker", "general"}:
+        return role
+    tools = set(spec.allowed_tools or [])
+    if "schedule_child_subagents" not in tools and "dispatch_subagents" not in tools:
+        return role
+    if "write_file" in tools or "append_file" in tools or "replace_in_file" in tools:
+        return role
+    depth = int(parent.depth or 0) + 1
+    if depth == 1:
+        return "child_coordinator"
+    if depth == 2:
+        return "grandchild_coordinator"
+    return "coordinator"
+
+
+# LLM: _inherited_hierarchy_thought gives descendants enough context without broadening permissions.
+# 函数用途: 把父级目标和提示压成 child thought，避免下一层只看到空泛编号任务。
+def _inherited_hierarchy_thought(parent: SubAgentTask) -> str:
+    parts = [
+        f"执行由 {parent.id} 派生的层级子任务。",
+        "必须把下一层 goal 写成自包含任务，包含目标、产物路径、工具边界和验收条件。",
+    ]
+    if parent.goal:
+        parts.append(f"父级目标摘要：{_clip_parent_context(parent.goal)}")
+    if parent.thought:
+        parts.append(f"父级补充：{_clip_parent_context(parent.thought)}")
+    return "\n".join(parts)
+
+
+# LLM: _clip_parent_context bounds inherited text so deep hierarchies do not explode prompts.
+# 函数用途: 限制父级上下文长度；保留开头关键信息，避免层级越深 token 越失控。
+def _clip_parent_context(text: str, *, limit: int = 1600) -> str:
+    compact = str(text or "").strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit].rstrip() + "...[truncated]"
+
+
+# LLM: _inherited_extra_write_roots forwards user-approved product roots without exposing parent task internals.
+# 函数用途: 从父节点 allowed_write_roots 中继承非父工单目录的写入根，保持共同产物目录可用。
+def _inherited_extra_write_roots(parent: SubAgentTask) -> list[str]:
+    parent_task_dir = str(parent.task_dir or "").rstrip("/")
+    roots: list[str] = []
+    for item in parent.allowed_write_roots:
+        text = str(item or "").rstrip("/")
+        if text and text != parent_task_dir and text not in roots:
+            roots.append(str(item))
+    return roots
 
 
 # LLM: _planned_items mirrors created item shape while keeping run_id empty in dry-runs.
@@ -202,7 +257,7 @@ def _planned_items(parent: SubAgentTask, request: HierarchyScheduleRequest) -> l
             parent_id=parent.id,
             root_id=parent.root_id or parent.id,
             depth=parent.depth + 1,
-            role=spec.role or "worker",
+            role=_scheduled_child_role(parent, spec),
             agent_name=spec.agent_name or spec.role or "worker",
             goal=spec.goal,
             created=False,
