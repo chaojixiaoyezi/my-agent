@@ -327,6 +327,17 @@ class TestSubagentsReviewCommandRegistration:
         args = parser.parse_args(["subagents-acceptance-plan", "run-123", "--auto-policy"])
         assert args.auto_policy is True
 
+    def test_subagents_acceptance_plan_has_auto_execution_argument(self):
+        """测试 subagents-acceptance-plan 可查看自动执行 dry-run facade。"""
+        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="subcommand")
+        add_subagents_subcommands(sub)
+
+        args = parser.parse_args(["subagents-acceptance-plan", "run-123", "--auto-execution"])
+        assert args.auto_execution is True
+
     def test_subagents_patches_has_patch_action_group(self):
         """测试 subagents-patches 命令有 patch 操作组。
 

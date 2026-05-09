@@ -15,37 +15,74 @@ def cmd_subagents_acceptance_plan(args) -> int:
     agent = make_agent(args)
     run_id = str(getattr(args, "run_id", "") or "")
     if bool(getattr(args, "auto_policy", False)):
-        policy = agent.subagents.plan_parent_acceptance_auto_policy(run_id)
-        if bool(getattr(args, "json", False)):
-            print(json.dumps(_policy_to_dict(policy), ensure_ascii=False, indent=2, sort_keys=True))
-            return 0
-        _print_acceptance_auto_policy(policy)
-        return 0
+        return _handle_auto_policy(agent, run_id, json_output=bool(getattr(args, "json", False)))
+    if bool(getattr(args, "auto_execution", False)):
+        return _handle_auto_execution(agent, run_id, json_output=bool(getattr(args, "json", False)))
     if bool(getattr(args, "next_action", False)):
-        action = agent.subagents.plan_parent_acceptance_next_action(run_id)
-        if bool(getattr(args, "json", False)):
-            print(json.dumps(_action_to_dict(action), ensure_ascii=False, indent=2, sort_keys=True))
-            return 0
-        _print_acceptance_next_action(action)
-        return 0
+        return _handle_next_action(agent, run_id, json_output=bool(getattr(args, "json", False)))
     if bool(getattr(args, "apply", False)):
-        result = agent.subagents.apply_parent_acceptance_decision(
-            run_id,
-            reviewer=str(getattr(args, "reviewer", "") or "parent"),
-            note=str(getattr(args, "note", "") or ""),
-        )
-        if bool(getattr(args, "json", False)):
-            print(json.dumps(_result_to_dict(result), ensure_ascii=False, indent=2, sort_keys=True))
-            return 0
-        _print_acceptance_apply(result)
+        return _handle_apply(agent, args, run_id, json_output=bool(getattr(args, "json", False)))
+    return _handle_default_plan(agent, run_id, args, json_output=bool(getattr(args, "json", False)))
+
+
+# LLM: _handle_auto_policy keeps the top-level CLI dispatcher below size limits.
+# 函数用途: 渲染父级 auto-policy dry-run；只打印或输出 JSON，不执行建议命令。
+def _handle_auto_policy(agent, run_id: str, *, json_output: bool) -> int:
+    policy = agent.subagents.plan_parent_acceptance_auto_policy(run_id)
+    if json_output:
+        print(json.dumps(_policy_to_dict(policy), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
+    _print_acceptance_auto_policy(policy)
+    return 0
+
+
+# LLM: _handle_auto_execution renders the audit-only executor facade.
+# 函数用途: 渲染父级自动执行 dry-run facade；不会启动命令或修改任务状态。
+def _handle_auto_execution(agent, run_id: str, *, json_output: bool) -> int:
+    result = agent.subagents.plan_parent_acceptance_auto_execution(run_id)
+    if json_output:
+        print(json.dumps(_execution_to_dict(result), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    _print_acceptance_auto_execution(result)
+    return 0
+
+
+# LLM: _handle_next_action renders the scheduler-facing recommendation.
+# 函数用途: 渲染父级下一动作建议；只展示 refs 和命令，不执行。
+def _handle_next_action(agent, run_id: str, *, json_output: bool) -> int:
+    action = agent.subagents.plan_parent_acceptance_next_action(run_id)
+    if json_output:
+        print(json.dumps(_action_to_dict(action), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    _print_acceptance_next_action(action)
+    return 0
+
+
+# LLM: _handle_apply contains the explicit apply bridge while keeping unsafe decisions blocked.
+# 函数用途: 处理显式 apply 分支；只有底层安全桥允许的 inspect_only 会写回状态。
+def _handle_apply(agent, args, run_id: str, *, json_output: bool) -> int:
+    result = agent.subagents.apply_parent_acceptance_decision(
+        run_id,
+        reviewer=str(getattr(args, "reviewer", "") or "parent"),
+        note=str(getattr(args, "note", "") or ""),
+    )
+    if json_output:
+        print(json.dumps(_result_to_dict(result), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    _print_acceptance_apply(result)
+    return 0
+
+
+# LLM: _handle_default_plan renders or writes the parent dry-run decision.
+# 函数用途: 处理默认父级验收计划和 `--write` 审计分支；不执行 tests。
+def _handle_default_plan(agent, run_id: str, args, *, json_output: bool) -> int:
     write = bool(getattr(args, "write", False))
     decision = (
         agent.subagents.write_parent_acceptance_decision(run_id)
         if write
         else agent.subagents.plan_parent_acceptance(run_id)
     )
-    if bool(getattr(args, "json", False)):
+    if json_output:
         payload = _decision_to_dict(decision)
         if write:
             payload["decision_ref"] = str(_decision_file_path(agent, run_id))
@@ -125,6 +162,22 @@ def _policy_to_dict(policy) -> dict:
     }
 
 
+# LLM: _execution_to_dict keeps auto-execution output robust for dataclasses and test doubles.
+# 函数用途: 把自动执行 dry-run facade 结果转换成 JSON 字典；不展开引用文件正文。
+def _execution_to_dict(result) -> dict:
+    to_dict = getattr(result, "to_dict", None)
+    if callable(to_dict):
+        payload = to_dict()
+        return payload if isinstance(payload, dict) else {}
+    return {
+        "run_id": getattr(result, "run_id", ""),
+        "mode": getattr(result, "mode", ""),
+        "status": getattr(result, "status", ""),
+        "execution_allowed": bool(getattr(result, "execution_allowed", False)),
+        "executed": bool(getattr(result, "executed", False)),
+    }
+
+
 # LLM: _print_acceptance_auto_policy renders policy gating without executing the recommendation.
 # 函数用途: 打印父级自动策略 dry-run 结果、建议命令和审计引用。
 def _print_acceptance_auto_policy(policy) -> None:
@@ -158,6 +211,31 @@ def _print_acceptance_auto_policy(policy) -> None:
         print(f"command={command}")
     for name in ("next_action_ref", "decision_ref", "apply_ref"):
         value = str(getattr(policy, name, "") or "")
+        if value:
+            print(f"{name}={value}")
+
+
+# LLM: _print_acceptance_auto_execution renders the dry-run executor facade without running commands.
+# 函数用途: 打印父级自动执行计划、硬闸门和阻断原因；不会启动 recommended command。
+def _print_acceptance_auto_execution(result) -> None:
+    print("SUBAGENT ACCEPTANCE AUTO EXECUTION")
+    print(
+        f"run_id={getattr(result, 'run_id', '')} mode={getattr(result, 'mode', '')} "
+        f"status={getattr(result, 'status', '')}"
+    )
+    print(
+        f"execution_allowed={bool(getattr(result, 'execution_allowed', False))} "
+        f"executed={bool(getattr(result, 'executed', False))}"
+    )
+    print(f"guard_status={getattr(result, 'guard_status', '')}")
+    command = str(getattr(result, "command", "") or "")
+    if command:
+        print(f"command={command}")
+    blocked_by = list(getattr(result, "blocked_by", []) or [])
+    if blocked_by:
+        print(f"blocked_by={','.join(str(item) for item in blocked_by)}")
+    for name in ("execution_ref",):
+        value = str(getattr(result, name, "") or "")
         if value:
             print(f"{name}={value}")
 
