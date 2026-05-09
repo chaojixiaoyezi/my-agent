@@ -626,6 +626,20 @@ python3 -m agent_py_agent subagents-leadership-recovery-plan \
 
 这个命令只读 `coordinator_heartbeat_stale` 问题，并写 `subagent_leadership_recovery_plan.json` / `SUBAGENT_LEADERSHIP_RECOVERY_PLAN.md`。它不会修改 `parent_id`，不会标记旧 coordinator，也不会自动执行报告里的 future command；分批 apply 入口后续单独做。
 
+按计划重挂指定 child 子集：
+
+```bash
+python3 -m agent_py_agent subagents-leadership-recovery-apply \
+  --root-id <root_run_id> \
+  --coordinator <stale_coordinator_run_id> \
+  --leader <new_leader_run_id> \
+  --child-run-id <child_run_id_a> \
+  --child-run-id <child_run_id_b> \
+  --apply
+```
+
+默认不传 `--apply` 时只是 dry-run。apply 前会校验 root 一致、leader 健康、child 仍是旧 coordinator 的直接孩子，以及可选 `--max-children-per-leader` 容量；任一校验失败就整次阻断，不做半截移动。旧 coordinator 还有剩余孩子时不会标记 `TAKEN_OVER`；所有孩子都移动完后才标记。
+
 ### 执行动作
 
 默认 dry-run：

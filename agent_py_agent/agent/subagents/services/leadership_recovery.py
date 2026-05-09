@@ -54,6 +54,17 @@ class _LeaderCapacity:
     remaining: int
 
 
+# LLM: _SummaryInput bundles plan summary counters to avoid widening helper signatures.
+# 类用途: 汇总 leadership recovery plan 的输入集合，保持 code-size 参数守卫清零。
+@dataclass(frozen=True)
+class _SummaryInput:
+    coordinators: list[SubAgentTask]
+    leaders: list[_LeaderCapacity]
+    assignments: list[LeadershipRecoveryAssignment]
+    unassigned: list[LeadershipRecoveryUnassigned]
+    failed_parent_count: int = 0
+
+
 # LLM: SubAgentLeadershipRecoveryPlanner owns read-only batch leader assignment rules.
 # 类用途: 根据 due-check 发现的失联 coordinator，按 leader 容量生成分批接管计划。
 class SubAgentLeadershipRecoveryPlanner:
@@ -67,14 +78,24 @@ class SubAgentLeadershipRecoveryPlanner:
     # LLM: plan uses existing due-check facts and explicit leader IDs to build a deterministic dry-run.
     # 函数用途: 生成批量 leadership recovery 分配结果，所有输出都是 refs-only。
     def plan(self, request: SubAgentLeadershipRecoveryPlanOptions) -> LeadershipRecoveryPlanReport:
-        coordinators = self._stale_coordinators(request)
+        stale_coordinators = self._stale_coordinators(request)
+        failed_parents = self._failed_parent_sources(request, stale_coordinators)
+        coordinators = _unique_sources([*stale_coordinators, *failed_parents])
         leaders = self._candidate_leaders(request)
         assignments, unassigned = _assign_coordinator_children(coordinators, leaders)
         return LeadershipRecoveryPlanReport(
             generated_at=time.time(),
             root_id=request.root_id,
             max_children_per_leader=max(0, int(request.max_children_per_leader or 0)),
-            summary=_summary(coordinators, leaders, assignments, unassigned),
+            summary=_summary(
+                _SummaryInput(
+                    coordinators=coordinators,
+                    leaders=leaders,
+                    assignments=assignments,
+                    unassigned=unassigned,
+                    failed_parent_count=len(failed_parents),
+                )
+            ),
             assignments=assignments,
             unassigned=unassigned,
             candidate_leader_ids=[leader.task.id for leader in leaders],
@@ -95,6 +116,24 @@ class SubAgentLeadershipRecoveryPlanner:
             except FileNotFoundError:
                 continue
         return coordinators
+
+    # LLM: _failed_parent_sources lets a replacement leader that later fails become a fresh handoff source.
+    # 函数用途: 找出同 root 下已经失败/超时/断通道且仍有孩子的父节点，支持二次接管计划。
+    def _failed_parent_sources(
+        self,
+        request: SubAgentLeadershipRecoveryPlanOptions,
+        stale_coordinators: list[SubAgentTask],
+    ) -> list[SubAgentTask]:
+        stale_ids = {task.id for task in stale_coordinators}
+        failed: list[SubAgentTask] = []
+        for task in self.manager.list_runs():
+            if task.id in stale_ids or not task.child_ids:
+                continue
+            if not _leader_matches_scope(task, request.root_id):
+                continue
+            if _parent_is_failed_recovery_source(task):
+                failed.append(task)
+        return failed
 
     # LLM: _candidate_leaders accepts only explicit same-root healthy leader refs in this first dry-run slice.
     # 函数用途: 校验候选 leader 是否存在、同 root 且不是明显不可接管状态。
@@ -140,6 +179,19 @@ def _assign_coordinator_children(
                 )
             )
     return assignments, unassigned
+
+
+# LLM: _unique_sources keeps source order deterministic when a node matches more than one recovery rule.
+# 函数用途: 合并 stale coordinator 和 failed parent 列表，避免重复生成分配批次。
+def _unique_sources(tasks: list[SubAgentTask]) -> list[SubAgentTask]:
+    seen: set[str] = set()
+    unique: list[SubAgentTask] = []
+    for task in tasks:
+        if task.id in seen:
+            continue
+        seen.add(task.id)
+        unique.append(task)
+    return unique
 
 
 # LLM: _assign_pending_children consumes leader capacity and returns only leftovers.
@@ -193,6 +245,14 @@ def _leader_is_available(leader: SubAgentTask) -> bool:
     return status not in {"FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER", "ABANDONED"} and channel != "BROKEN"
 
 
+# LLM: _parent_is_failed_recovery_source identifies failed leaders whose child subtrees need a new owner.
+# 函数用途: 判断一个已有 child_ids 的父节点是否已经不可继续领导，用于二次恢复计划。
+def _parent_is_failed_recovery_source(task: SubAgentTask) -> bool:
+    status = str(task.status or "").upper()
+    channel = str(task.channel_status or "").upper()
+    return status in {"FAILED", "TIMEOUT", "CHANNEL_ERROR", "ABANDONED"} or channel == "BROKEN"
+
+
 # LLM: _future_subset_apply_command documents the intended next apply command without executing it.
 # 函数用途: 给报告显示未来分批 apply 的命令形状；当前第一片不提供真正执行入口。
 def _future_subset_apply_command(coordinator_id: str, leader_id: str, child_ids: list[str]) -> str:
@@ -205,18 +265,14 @@ def _future_subset_apply_command(coordinator_id: str, leader_id: str, child_ids:
 
 # LLM: _summary keeps CLI/report counters machine-readable and stable.
 # 函数用途: 汇总 coordinator、leader、分配和未分配孩子数量。
-def _summary(
-    coordinators: list[SubAgentTask],
-    leaders: list[_LeaderCapacity],
-    assignments: list[LeadershipRecoveryAssignment],
-    unassigned: list[LeadershipRecoveryUnassigned],
-) -> dict[str, int]:
-    assigned_children = sum(len(item.child_ids) for item in assignments)
-    unassigned_children = sum(len(item.child_ids) for item in unassigned)
+def _summary(data: _SummaryInput) -> dict[str, int]:
+    assigned_children = sum(len(item.child_ids) for item in data.assignments)
+    unassigned_children = sum(len(item.child_ids) for item in data.unassigned)
     return {
-        "stale_coordinators": len(coordinators),
-        "candidate_leaders": len(leaders),
-        "assignments": len(assignments),
+        "stale_coordinators": len(data.coordinators) - data.failed_parent_count,
+        "candidate_leaders": len(data.leaders),
+        "assignments": len(data.assignments),
         "assigned_children": assigned_children,
         "unassigned_children": unassigned_children,
+        "failed_parent_nodes": data.failed_parent_count,
     }

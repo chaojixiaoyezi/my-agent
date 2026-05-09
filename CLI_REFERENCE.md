@@ -170,6 +170,7 @@ Ctrl+C
 | `subagents-apply-actions` | dry-run 或执行低风险动作 | `--apply` 时写回任务和审计日志 | 否 |
 | `subagents-workflow-plan` | 预览目标会命中哪个内置 subagent workflow | 否 | 否 |
 | `subagents-leadership-recovery-plan` | 预览批量 coordinator 挂掉后的 leader 分摊接管计划 | 写 dry-run 计划报告 | 否 |
+| `subagents-leadership-recovery-apply` | 按显式 child 子集重挂到新 leader | `--apply` 时只移动指定 child 子树 | 否 |
 | `subagents-hierarchy` | 预览或显式创建 child/grandchild subagent run | `--apply` 时创建下一层任务 | 否 |
 | `subagents-recovery-tree` | 查询 root subagent 的多层恢复交接包 | 否，只输出 refs-only 恢复线索 | 否 |
 | `subagents-route-capabilities` | 路由 capability request | `--apply` 时写 grant/gap | 否 |
@@ -815,6 +816,26 @@ my-agent subagents-leadership-recovery-plan --root-id <root_run_id> --leader <le
 | `--json` | `false` | 输出机器可读 JSON。 |
 
 该命令只做 dry-run：它会读取 due-check 里的 `coordinator_heartbeat_stale` 问题，把失联 coordinator 的直接孩子按容量分给候选 leader，并写出 `subagent_leadership_recovery_plan.json` / `SUBAGENT_LEADERSHIP_RECOVERY_PLAN.md`。当前不会改 `parent_id`、不会标记旧 coordinator，也不会自动执行 future command；真正分批 apply 入口是后续阶段。
+
+## `subagents-leadership-recovery-apply`
+
+```powershell
+my-agent subagents-leadership-recovery-apply --coordinator <old_coord> --leader <new_leader> --child-run-id <child>
+my-agent subagents-leadership-recovery-apply --apply --root-id <root_run_id> --coordinator <old_coord> --leader <new_leader> --child-run-id <child_a> --child-run-id <child_b>
+```
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--dry-run` | 默认模式 | 只预览，不修改任务树。 |
+| `--apply` | `false` | 真正重挂指定 child 子树。 |
+| `--root-id <id>` | - | 可选，限制 coordinator / leader / child 必须属于同一 root。 |
+| `--coordinator <id>` | - | 必填，旧 coordinator run ID。 |
+| `--leader <id>` | - | 必填，新 leader run ID，必须存在且不能是失败/超时/断通道状态。 |
+| `--child-run-id <id>` | - | 必填，要移动的直接 child run ID；可多次传入。 |
+| `--max-children-per-leader <n>` | `0` | 可选容量上限；非 0 时会阻断超过 leader 直接 child 容量的 apply。 |
+| `--json` | `false` | 输出机器可读 JSON。 |
+
+安全边界：只移动 `--child-run-id` 明确列出的直接孩子；如果 child 已经不在旧 coordinator 下、root 不匹配、leader 不健康或容量超限，整次 apply 会被阻断，不会产生部分移动。移动成功后会递归刷新后代 depth；旧 coordinator 没有剩余孩子时才标记为 `TAKEN_OVER`。
 
 ## `subagents-hierarchy`
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 """Explicit hierarchy scheduling facade for subagent task trees."""
 
-from .models import SubAgentLeadershipRecoveryPlanOptions
+from .models import SubAgentLeadershipRecoveryApplyOptions, SubAgentLeadershipRecoveryPlanOptions
 from .services.hierarchy_recovery import (
     HierarchyRecoveryRequest,
     HierarchyRecoveryResult,
@@ -19,6 +19,10 @@ from .services.hierarchy_scheduler import (
 from .services.leadership_recovery import (
     LeadershipRecoveryPlanReport,
     SubAgentLeadershipRecoveryPlanner,
+)
+from .services.leadership_recovery_apply import (
+    LeadershipRecoveryApplyReport,
+    SubAgentLeadershipRecoveryApplier,
 )
 
 
@@ -65,6 +69,34 @@ class SubAgentHierarchyMixin:
         )
         return report
 
+    # LLM: apply_leadership_recovery executes one validated child-subset handoff or previews it.
+    # 函数用途: 按 bundle 请求重挂指定 child 子集；默认 dry-run，apply=True 才写任务树。
+    def apply_leadership_recovery(
+        self,
+        *,
+        params: SubAgentLeadershipRecoveryApplyOptions,
+    ) -> LeadershipRecoveryApplyReport:
+        return SubAgentLeadershipRecoveryApplier(self).apply(params)
+
+    # LLM: write_leadership_recovery_apply persists the subset apply audit report for review.
+    # 函数用途: 写入分批 leadership recovery apply 的 JSON/Markdown 审计报告。
+    def write_leadership_recovery_apply(
+        self,
+        *,
+        params: SubAgentLeadershipRecoveryApplyOptions,
+    ) -> LeadershipRecoveryApplyReport:
+        import json
+        from dataclasses import asdict
+
+        report = self.apply_leadership_recovery(params=params)
+        (self.workspace / "subagent_leadership_recovery_apply_report.json").write_text(
+            json.dumps(asdict(report), ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+        (self.workspace / "SUBAGENT_LEADERSHIP_RECOVERY_APPLY.md").write_text(
+            _render_leadership_recovery_apply(report), encoding="utf-8",
+        )
+        return report
+
 
 # LLM: _render_leadership_recovery_plan keeps the human report refs-only and compact.
 # 函数用途: 将批量接管计划转成 Markdown 摘要，不读取任何子任务 artifact 正文。
@@ -90,4 +122,28 @@ def _render_leadership_recovery_plan(report: LeadershipRecoveryPlanReport) -> st
         lines.append("- none")
     for item in report.unassigned:
         lines.append(f"- coordinator `{item.coordinator_id}` children={item.child_ids} reason={item.reason}")
+    return "\n".join(lines) + "\n"
+
+
+# LLM: _render_leadership_recovery_apply keeps subset handoff audit readable without loading artifacts.
+# 函数用途: 将分批 apply 报告渲染成 Markdown，只展示 refs、阻断原因和移动数量。
+def _render_leadership_recovery_apply(report: LeadershipRecoveryApplyReport) -> str:
+    lines = [
+        "# Subagent Leadership Recovery Apply",
+        "",
+        f"- mode: `{'dry-run' if report.dry_run else 'apply'}`",
+        f"- summary: `{report.summary}`",
+        "",
+        "## Records",
+    ]
+    if not report.records:
+        lines.append("- none")
+    for record in report.records:
+        lines.append(
+            f"- coordinator `{record.coordinator_id}` -> leader `{record.leader_id}` "
+            f"ok={record.ok} applied={record.applied} moved={record.moved_child_ids}"
+        )
+        if record.blocked_by:
+            lines.append(f"  - blocked_by: {record.blocked_by}")
+        lines.append(f"  - message: {record.message}")
     return "\n".join(lines) + "\n"

@@ -210,6 +210,45 @@ def test_subagent_dispatch_dry_run_plans_runner_patch_and_acceptance():
         assert not (root / "subs" / "subagent_dispatch_log.jsonl").exists()
 
 
+def test_subagent_dispatch_surfaces_leadership_recovery_plan_refs_only():
+    """Dispatch should write a leadership recovery plan ref without applying hierarchy changes."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        coordinator = agent.subagents.create_run(
+            goal="stale coordinator", thought="waiting", plan=["coordinate"], role="coordinator",
+        )
+        child = agent.subagents.create_run(
+            goal="child", thought="work", plan=["work"], parent_id=coordinator.id, root_id=coordinator.id, depth=1,
+        )
+        stale = agent.subagents.load(coordinator.id)
+        stale.status = "PLANNING"
+        stale.runner_active_attempt_id = ""
+        stale.heartbeat_at = time.time() - 120
+        stale.updated_at = stale.heartbeat_at
+        agent.subagents.save_hierarchy_links(stale)
+
+        report = agent.dispatch_subagents(
+            _make_router(agent),
+            CapabilityConfig(subagent_heartbeat_timeout=1),
+            apply=False,
+            max_runners=0,
+        )
+
+        record = next(item for item in report.records if item.step == "leadership_recovery_plan")
+        plan_ref = root / "subs" / "subagent_leadership_recovery_plan.json"
+        plan_payload = json.loads(plan_ref.read_text(encoding="utf-8"))
+        assert record.action == "inspect_refs"
+        assert record.dry_run is True
+        assert record.applied is False
+        assert record.ok is True
+        assert str(plan_ref) in record.evidence_paths
+        assert plan_payload["summary"]["stale_coordinators"] == 1
+        assert plan_payload["summary"]["unassigned_children"] == 1
+        assert agent.subagents.load(child.id).parent_id == coordinator.id
+
+
 def test_subagent_dispatch_manual_acceptance_test_execution_is_test_only():
     """LLM: Verifies dispatch can explicitly run parent acceptance tests without applying acceptance."""
     with tempfile.TemporaryDirectory() as td:
