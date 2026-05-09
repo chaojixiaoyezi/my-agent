@@ -14,7 +14,7 @@ class DispatchRecordBuilder:
     """Build dispatch audit records."""
 
     # LLM: make_record 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
-    # 函数用途: 构建make记录所需的数据结构或请求参数，包括 policy refs、manual-only 与 preflight 摘要；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
+    # 函数用途: 构建make记录所需的数据结构或请求参数，包括 auto-policy 和 auto-execution 摘要；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
     @staticmethod
     def make_record(manager, params) -> DispatchRecord:
         """Create a dispatch audit record from params bundle."""
@@ -50,6 +50,14 @@ class DispatchRecordBuilder:
             ),
             parent_acceptance_policy_preflight_blockers=(
                 params.parent_acceptance_policy_preflight_blockers or []
+            ),
+            parent_acceptance_auto_execution_ref=params.parent_acceptance_auto_execution_ref,
+            parent_acceptance_auto_execution_status=params.parent_acceptance_auto_execution_status,
+            parent_acceptance_auto_execution_allowed=params.parent_acceptance_auto_execution_allowed,
+            parent_acceptance_auto_execution_executed=params.parent_acceptance_auto_execution_executed,
+            parent_acceptance_auto_execution_guard_status=params.parent_acceptance_auto_execution_guard_status,
+            parent_acceptance_auto_execution_blocked_by=(
+                params.parent_acceptance_auto_execution_blocked_by or []
             ),
             created_at=time.time(),
         )

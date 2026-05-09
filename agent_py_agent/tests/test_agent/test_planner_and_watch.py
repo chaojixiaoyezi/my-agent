@@ -207,6 +207,36 @@ def _watch_acceptance_dispatch_record(root: Path) -> dict:
     return next(item for item in dispatch_payload["records"] if item["step"] == "acceptance")
 
 
+# LLM: _assert_watch_auto_execution_summary keeps watch tests below size guard limits.
+# 函数用途: 检查 watch 透传 auto-execution hard guard 摘要，确认它不是自动执行许可。
+def _assert_watch_auto_execution_summary(record: dict, task) -> None:
+    execution_ref = Path(task.reports_dir) / "parent_acceptance_auto_execution.json"
+    assert record["parent_acceptance_auto_execution_ref"] == str(execution_ref)
+    assert record["parent_acceptance_auto_execution_status"] == "blocked"
+    assert record["parent_acceptance_auto_execution_allowed"] is False
+    assert record["parent_acceptance_auto_execution_executed"] is False
+    assert record["parent_acceptance_auto_execution_guard_status"] == "blocked"
+    assert record["parent_acceptance_auto_execution_blocked_by"] == [
+        "automatic_execution_disabled",
+        "auto_executor_dry_run_only",
+    ]
+
+
+# LLM: _assert_watch_auto_policy_summary verifies policy summaries remain advisory in watch reports.
+# 函数用途: 检查 watch 透传 auto-policy 摘要，避免把 manual_ready 误当自动执行许可。
+def _assert_watch_auto_policy_summary(record: dict, task, policy_ref: Path) -> None:
+    assert record["parent_acceptance_policy_ref"] == str(policy_ref)
+    assert record["parent_acceptance_policy_action"] == "run_tests"
+    assert record["parent_acceptance_policy_would_execute"] is True
+    assert record["parent_acceptance_policy_executed"] is False
+    assert record["parent_acceptance_policy_execution_mode"] == "manual_only"
+    assert record["parent_acceptance_policy_automatic_execution_allowed"] is False
+    assert record["parent_acceptance_policy_recommended_command"] == f"subagents-tests {task.id} --re-run"
+    assert record["parent_acceptance_policy_preflight_status"] == "manual_ready"
+    assert record["parent_acceptance_policy_ready_for_automatic_execution"] is False
+    assert record["parent_acceptance_policy_preflight_blockers"] == ["automatic_execution_disabled"]
+
+
 def test_subagent_dispatch_watch_surfaces_parent_acceptance_auto_policy_refs():
     """LLM: Verifies watch sees parent acceptance auto-policy dry-run refs without executing them."""
     with tempfile.TemporaryDirectory() as td:
@@ -235,20 +265,8 @@ def test_subagent_dispatch_watch_surfaces_parent_acceptance_auto_policy_refs():
         ]
         assert watch_record.dispatch_summary["acceptance"] >= 1
         acceptance_record = _watch_acceptance_dispatch_record(root)
-        assert acceptance_record["parent_acceptance_policy_ref"] == str(policy_ref)
-        assert acceptance_record["parent_acceptance_policy_action"] == "run_tests"
-        assert acceptance_record["parent_acceptance_policy_would_execute"] is True
-        assert acceptance_record["parent_acceptance_policy_executed"] is False
-        assert acceptance_record["parent_acceptance_policy_execution_mode"] == "manual_only"
-        assert acceptance_record["parent_acceptance_policy_automatic_execution_allowed"] is False
-        assert acceptance_record["parent_acceptance_policy_recommended_command"] == (
-            f"subagents-tests {task.id} --re-run"
-        )
-        assert acceptance_record["parent_acceptance_policy_preflight_status"] == "manual_ready"
-        assert acceptance_record["parent_acceptance_policy_ready_for_automatic_execution"] is False
-        assert acceptance_record["parent_acceptance_policy_preflight_blockers"] == [
-            "automatic_execution_disabled"
-        ]
+        _assert_watch_auto_policy_summary(acceptance_record, task, policy_ref)
+        _assert_watch_auto_execution_summary(acceptance_record, task)
         assert payload["policy"]["would_execute"] is True
         assert payload["policy"]["executed"] is False
         assert payload["reserved"]["mutates_task_state"] is False

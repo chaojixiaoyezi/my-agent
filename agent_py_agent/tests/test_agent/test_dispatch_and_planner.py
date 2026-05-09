@@ -87,6 +87,16 @@ def _assert_parent_acceptance_policy_dispatch(record, task) -> Path:
     assert record.parent_acceptance_policy_preflight_blockers == ["automatic_execution_disabled"]
     policy_ref = Path(task.reports_dir) / "parent_acceptance_auto_policy.json"
     assert record.parent_acceptance_policy_ref == str(policy_ref)
+    execution_ref = Path(task.reports_dir) / "parent_acceptance_auto_execution.json"
+    assert record.parent_acceptance_auto_execution_ref == str(execution_ref)
+    assert record.parent_acceptance_auto_execution_status == "blocked"
+    assert record.parent_acceptance_auto_execution_allowed is False
+    assert record.parent_acceptance_auto_execution_executed is False
+    assert record.parent_acceptance_auto_execution_guard_status == "blocked"
+    assert record.parent_acceptance_auto_execution_blocked_by == [
+        "automatic_execution_disabled",
+        "auto_executor_dry_run_only",
+    ]
     return policy_ref
 
 
@@ -100,6 +110,10 @@ def _assert_dispatch_policy_markdown(markdown: str, task, policy_ref: Path) -> N
     assert "preflight_status=manual_ready" in markdown
     assert "ready_for_automatic_execution=False" in markdown
     assert "preflight_blockers=automatic_execution_disabled" in markdown
+    assert "parent_acceptance_auto_execution" in markdown
+    assert "execution_status=blocked" in markdown
+    assert "execution_allowed=False" in markdown
+    assert "execution_blocked_by=automatic_execution_disabled,auto_executor_dry_run_only" in markdown
     assert str(policy_ref) in markdown
 
 
