@@ -7,20 +7,27 @@ from __future__ import annotations
 import json
 
 from ..agent.capability_config import load_capability_config
-from ..agent.subagents.models import SubAgentCapabilityRouteOptions
+from ..agent.subagents.models import SubAgentCapabilityRouteOptions, SubAgentPlanActionsOptions
 from ..agent.subagents.services.action_options import ActionApplyOptions
 from .common import make_agent, make_capability_router
-from .models import SubagentsCapabilityRouteOptions
+from .models import SubagentsCapabilityRouteOptions, SubagentsPlanActionsOptions
 
 
-# LLM: cmd_subagents_plan_actions 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
+# LLM: cmd_subagents_plan_actions preserves root-scoped dry-run planning for noisy shared workspaces.
+# 函数用途: CLI 动作计划入口；可按 root_id 限定一棵任务树，输出和落盘使用同一作用域。
 def cmd_subagents_plan_actions(args) -> int:
 
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
-    report = agent.subagents.write_action_plan(capability_config)
-    actions = report.actions if args.all else report.actions[: args.limit]
+    options = _subagents_plan_actions_options(args)
+    report = agent.subagents.write_action_plan(
+        params=SubAgentPlanActionsOptions(
+            config=capability_config,
+            write_report=True,
+            root_id=options.root_id,
+        ),
+    )
+    actions = report.actions if options.all else report.actions[: options.limit]
     print("SUBAGENT ACTION PLAN")
     print(f"total_actions={report.summary.get('total', 0)} mode=dry-run")
     print("summary=" + json.dumps(report.summary, ensure_ascii=False, sort_keys=True))
@@ -37,6 +44,16 @@ def cmd_subagents_plan_actions(args) -> int:
     print(f"\n已写入: {agent.subagents.workspace / 'subagent_action_plan.json'}")
     print(f"已写入: {agent.subagents.workspace / 'SUBAGENT_ACTION_PLAN.md'}")
     return 0
+
+
+# LLM: _subagents_plan_actions_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
+# 函数用途: 生成 action-plan 结构化字段，保持 CLI 输出、报告和测试读取口径一致。
+def _subagents_plan_actions_options(args) -> SubagentsPlanActionsOptions:
+    return SubagentsPlanActionsOptions(
+        all=bool(args.all),
+        limit=int(args.limit or 0),
+        root_id=str(getattr(args, "root_id", "") or ""),
+    )
 
 
 # LLM: cmd_subagents_apply_actions 属于CLI 命令层；改行为前先对齐调用方和快照/单测。

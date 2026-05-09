@@ -72,6 +72,19 @@ def _initial_repair_state(result) -> dict[str, object]:
     }
 
 
+# LLM: _configured_subagent_allowed_tools normalizes optional config before task creation.
+# 函数用途: 从配置里取默认子代理工具白名单，过滤空值和测试 mock，避免坏配置进入任务记录。
+def _configured_subagent_allowed_tools(config: object) -> list[str]:
+    value = getattr(config, "subagent_allowed_tools", [])
+    if isinstance(value, str):
+        raw_items = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        raw_items = value
+    else:
+        return []
+    return [str(item).strip() for item in raw_items if item is not None and str(item).strip()]
+
+
 # LLM: _tuple_repair_state 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 处理tuplerepair状态相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _tuple_repair_state(value: tuple) -> dict[str, object]:
@@ -108,7 +121,7 @@ class _SubagentLifecycleBase:
         options = spawn_subagents_params(params, goal=goal, count=count)
 
         if options.count is None:
-            allowed_tools = getattr(self.config, "subagent_allowed_tools", [])
+            allowed_tools = _configured_subagent_allowed_tools(self.config)
             complexity = estimate_task_complexity(options.goal, plan=[], allowed_tools=allowed_tools)
             guard = SubagentAutomationGuard(self.config)
             should_delegate = guard.should_delegate(complexity)
@@ -122,6 +135,7 @@ class _SubagentLifecycleBase:
                     workflow_mode=_config_workflow_dispatch_mode(
                         self.config.subagent_workflow_mode
                     ),
+                    allowed_tools=allowed_tools,
                 )
                 delegated = len(tasks) > 0
             else:
@@ -131,10 +145,12 @@ class _SubagentLifecycleBase:
             return tasks
         else:
             n = min(options.count, self.config.max_subagents)
+            allowed_tools = _configured_subagent_allowed_tools(self.config)
             return self.subagents.split(
                 options.goal,
                 n,
                 workflow_mode=_config_workflow_dispatch_mode(self.config.subagent_workflow_mode),
+                allowed_tools=allowed_tools,
             )
 
     # LLM: run_subagent 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

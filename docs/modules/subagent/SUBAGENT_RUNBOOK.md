@@ -596,9 +596,11 @@ python3 -m agent_py_agent subagents-probe <run_id>
 
 ```bash
 python3 -m agent_py_agent subagents-plan-actions
+python3 -m agent_py_agent subagents-plan-actions --root-id <root_run_id> --all
 ```
 
 它只生成 dry-run 动作计划，不修改任务。
+多棵真实任务树共用同一个 workspace 时，优先带 `--root-id`，避免其他测试树的问题混入当前动作计划。
 
 常见动作：
 - `repair_work_order`

@@ -116,6 +116,7 @@ def _issue_weight(issue: DueCheckIssue) -> int:
         "status_failed": 65,
         "status_timeout": 65,
         "status_channel_error": 60,
+        "coordinator_heartbeat_stale": 58,
         "status_blocked": 50,
         "channel_probe_missing": 48,
         "unverified_done": 45,
@@ -144,6 +145,8 @@ def _action_for_issue(issue: DueCheckIssue) -> tuple[str, int, str]:
         return "run_acceptance", 760, ""
     if kind in {"run_timeout", "heartbeat_stale", "status_timeout"}:
         return "takeover_or_reassign", 900, "TIMEOUT"
+    if kind == "coordinator_heartbeat_stale":
+        return "recover_coordinator_leadership", 820, ""
     if kind == "status_failed":
         return "inspect_failure", 860, ""
     if kind == "status_blocked":
@@ -166,6 +169,8 @@ def _commands_for_action(action: str, run_id: str) -> list[str]:
     }
     if action in probe_actions:
         return [f"{cli} subagents-probe {run_id}", f"{cli} subagent {run_id}"]
+    if action == "recover_coordinator_leadership":
+        return [f"{cli} subagents-recovery-tree {run_id} --hide-healthy", f"{cli} subagent {run_id}"]
     return [f"{cli} subagent {run_id}"]
 # LLM: _filter_action_plan_items 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 处理filter动作计划条目相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。

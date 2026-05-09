@@ -77,10 +77,22 @@ class SubAgentBaseMixin:
         self.persistence = SubAgentPersistenceService(self)
         self.base_service = SubAgentBaseService(self)
 
-    # LLM: split 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 拆分split输入集合，给调度、验收或补丁处理提供分组结果；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
-    def split(self, goal: str, count: int, *, workflow_mode: str = "off") -> list[SubAgentTask]:
-        return self.base_service.split(goal, count, workflow_mode=workflow_mode)
+    # LLM: split must preserve configured default allowed_tools when spawn_subagents delegates through the manager.
+    # 函数用途: 拆分目标并创建子任务；可传入默认工具白名单，保证真实 runner 拿到父级配置的工具边界。
+    def split(
+        self,
+        goal: str,
+        count: int,
+        *,
+        workflow_mode: str = "off",
+        allowed_tools: list[str] | None = None,
+    ) -> list[SubAgentTask]:
+        return self.base_service.split(
+            goal,
+            count,
+            workflow_mode=workflow_mode,
+            allowed_tools=allowed_tools,
+        )
 
     # LLM: register_card 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
     # 函数用途: 处理registercard相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。

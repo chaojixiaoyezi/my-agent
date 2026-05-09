@@ -162,13 +162,24 @@ class SubagentsDispatchOptions:
     watch: bool
 
 
-# LLM: SubagentsDueCheckOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。
-# 类用途: 保存一次调用所需参数，避免 CLI 和服务层之间散传字段。
+# LLM: SubagentsDueCheckOptions keeps display limit and root scope together for due-check CLI.
+# 类用途: 保存 due-check 展示参数；root_id 用来只看一棵 subagent 任务树。
 @dataclass(frozen=True)
 class SubagentsDueCheckOptions:
 
     all: bool
     limit: int
+    root_id: str = ""
+
+
+# LLM: SubagentsPlanActionsOptions keeps action-plan display and root scope as one CLI bundle.
+# 类用途: 保存 subagents-plan-actions 展示参数；root_id 用来只为指定任务树生成动作建议。
+@dataclass(frozen=True)
+class SubagentsPlanActionsOptions:
+
+    all: bool
+    limit: int
+    root_id: str = ""
 
 
 # LLM: SubagentsProbeOptions 是CLI 命令层的数据契约；字段名会被调用方和测试读取。

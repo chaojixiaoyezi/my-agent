@@ -145,6 +145,49 @@ def test_parent_acceptance_followup_blocks_stale_test_report():
         assert loaded.verification_status == "NEEDS_ACCEPTANCE"
 
 
+def test_parent_acceptance_followup_preview_blocks_apply_after_task_state_changed():
+    root_ctx, agent, task = _agent_and_task()
+    with root_ctx:
+        root = Path(root_ctx.name)
+        (root / "README.md").write_text("manual followup task state changed\n", encoding="utf-8")
+        _write_output(
+            task,
+            [{
+                "name": "readme",
+                "validation_method": "file_check",
+                "file_path": "README.md",
+            }],
+        )
+        agent.subagents.plan_parent_acceptance_auto_execution(
+            task.id,
+            options=ParentAcceptanceAutoExecutionOptions(execute_tests=True),
+        )
+        task.status = "BLOCKED"
+        task.verification_status = "FAILED"
+        task.failure_type = "acceptance_rejected"
+        agent.subagents.save(task)
+
+        preview = agent.subagents.plan_parent_acceptance_followup(task.id)
+        blocked = agent.subagents.apply_parent_acceptance_followup(
+            task.id,
+            options=ParentAcceptanceFollowUpControlOptions(apply=True, reviewer="parent"),
+        )
+        rescued = agent.subagents.apply_parent_acceptance_followup(
+            task.id,
+            options=ParentAcceptanceFollowUpControlOptions(apply=True, take_over_by="parent-rescue"),
+        )
+
+        loaded = agent.subagents.load(task.id)
+        assert preview.status == "needs_manual_rescue"
+        assert preview.action == "plan_rescue"
+        assert preview.recommended_command.endswith("--apply-followup --take-over-by <agent>")
+        assert blocked.status == "blocked"
+        assert blocked.applied is False
+        assert rescued.status == "takeover_recorded"
+        assert loaded.status == "TAKEN_OVER"
+        assert loaded.takeover_by == "parent-rescue"
+
+
 def test_parent_acceptance_followup_rescue_uses_action_gate_for_takeover():
     root_ctx, agent, task = _agent_and_task()
     with root_ctx:

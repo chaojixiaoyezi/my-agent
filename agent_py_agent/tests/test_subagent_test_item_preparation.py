@@ -65,3 +65,45 @@ def test_prepare_test_items_ignores_out_of_workspace_artifacts(tmp_path):
     )
 
     assert "working_dir" not in prepared[0]
+
+
+def test_prepare_test_items_keeps_workspace_cwd_when_command_names_relative_artifact(tmp_path):
+    target_dir = tmp_path / "grandchild_sorting_edge"
+    target_dir.mkdir()
+    artifact = target_dir / "test_sorting_edges.py"
+    artifact.write_text("pass\n", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[{
+                "name": "test_sorting_edges.py",
+                "validation_method": "command",
+                "command": "python -m pytest grandchild_sorting_edge/test_sorting_edges.py -v",
+            }],
+            output={"artifacts": [{"path": "grandchild_sorting_edge/test_sorting_edges.py"}]},
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert prepared[0]["working_dir"] == "."
+
+
+def test_prepare_test_items_recovers_nested_relative_artifact_command_cwd(tmp_path):
+    target_dir = tmp_path / "run-1" / "grandchild_sorting_edge"
+    target_dir.mkdir(parents=True)
+    artifact = target_dir / "test_sorting_edges.py"
+    artifact.write_text("pass\n", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[{
+                "name": "test_sorting_edges.py",
+                "validation_method": "command",
+                "command": "python -m pytest grandchild_sorting_edge/test_sorting_edges.py -v",
+            }],
+            output={"artifacts": [{"path": "grandchild_sorting_edge/test_sorting_edges.py"}]},
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert prepared[0]["working_dir"] == "run-1"

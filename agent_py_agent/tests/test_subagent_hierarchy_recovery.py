@@ -93,3 +93,43 @@ def test_hierarchy_recovery_packet_can_hide_healthy_nodes(tmp_path):
 
     assert [item.run_id for item in result.nodes] == [root.id, grandchildren[0], grandchildren[-1]]
     assert result.omitted_healthy_count == 4
+
+
+# LLM: test_hierarchy_recovery_packet_includes_stale_running_descendant covers due-check parity.
+# 函数用途: 确认 RUNNING 孙代理心跳停滞/运行超时时，也会进入 recovery-tree 候选。
+def test_hierarchy_recovery_packet_includes_stale_running_descendant(tmp_path):
+    manager = SubAgentManager(tmp_path)
+    root, _, grandchildren = _make_tree(manager)
+    root_task = manager.load(root.id)
+    root_task.created_at = 100.0
+    root_task.updated_at = 100.0
+    root_task.heartbeat_at = 100.0
+    manager.save(root_task)
+    stale = manager.load(grandchildren[1])
+    stale.status = "RUNNING"
+    stale.created_at = 100.0
+    stale.updated_at = 100.0
+    stale.heartbeat_at = 100.0
+    manager.save(stale)
+
+    result = manager.build_hierarchy_recovery_packet(
+        params=HierarchyRecoveryRequest(
+            root_run_id=root.id,
+            include_healthy=False,
+            heartbeat_timeout=10.0,
+            run_timeout=50.0,
+            now=200.0,
+        )
+    )
+
+    candidate = next(item for item in result.recovery_candidates if item.run_id == stale.id)
+    root_node = next(item for item in result.nodes if item.run_id == root.id)
+    assert root_node.needs_recovery is False
+    assert candidate.recovery_reason == "due:heartbeat_stale,run_timeout"
+    assert "subagents-apply-actions --apply --action takeover_or_reassign" in candidate.recommended_command
+    assert [item.run_id for item in result.nodes] == [
+        root.id,
+        grandchildren[0],
+        stale.id,
+        grandchildren[-1],
+    ]

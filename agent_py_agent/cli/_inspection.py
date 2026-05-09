@@ -12,15 +12,19 @@ from .common import make_agent
 from .models import SubagentContextOptions, SubagentsDueCheckOptions, SubagentsProbeOptions
 
 
-# LLM: cmd_subagents_due_check 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
-# 函数用途: CLI 子命令入口，连接 argparse 参数、服务调用和最终退出码。
+# LLM: cmd_subagents_due_check keeps root-scoped reports available for noisy shared workspaces.
+# 函数用途: CLI 到期检查入口；可按 root_id 限定一棵任务树，输出和落盘使用同一作用域。
 def cmd_subagents_due_check(args) -> int:
 
     agent = make_agent(args)
     capability_config = load_capability_config(args.capability_config)
     options = _subagents_due_check_options(args)
     report = agent.subagents.write_due_check(
-        params=SubAgentDueCheckOptions(config=capability_config, write_report=True),
+        params=SubAgentDueCheckOptions(
+            config=capability_config,
+            write_report=True,
+            root_id=options.root_id,
+        ),
     )
     issues = report.issues if options.all else report.issues[: options.limit]
     print("SUBAGENT DUE CHECK")
@@ -88,7 +92,11 @@ def cmd_subagent_context(args) -> int:
 # LLM: _subagents_due_check_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。
 # 函数用途: 生成结构化字段，保持 CLI 输出、报告和测试读取口径一致。
 def _subagents_due_check_options(args) -> SubagentsDueCheckOptions:
-    return SubagentsDueCheckOptions(all=bool(args.all), limit=int(args.limit or 0))
+    return SubagentsDueCheckOptions(
+        all=bool(args.all),
+        limit=int(args.limit or 0),
+        root_id=str(getattr(args, "root_id", "") or ""),
+    )
 
 
 # LLM: _subagents_probe_options 属于CLI 命令层；改行为前先对齐调用方和快照/单测。

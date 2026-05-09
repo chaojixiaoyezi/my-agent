@@ -44,6 +44,23 @@ class TestSubagentMixinSpawn:
         assert len(result) == 2
         mixin.subagents.split.assert_called_once()
 
+    def test_spawn_subagents_passes_configured_allowed_tools(self) -> None:
+        """测试 spawn 时把配置里的默认工具白名单写入子任务。"""
+        mixin = SimpleAgentSubagentMixin()
+        mixin.config = MagicMock()
+        mixin.config.enable_subagents = True
+        mixin.config.max_subagents = 3
+        mixin.config.subagent_workflow_mode = "off"
+        mixin.config.subagent_allowed_tools = ["read_file", "write_file"]
+        mixin.subagents = MagicMock()
+        mock_task = MagicMock()
+        mixin.subagents.split.return_value = [mock_task]
+
+        mixin.spawn_subagents("测试目标", count=1)
+
+        call = mixin.subagents.split.call_args
+        assert call.kwargs["allowed_tools"] == ["read_file", "write_file"]
+
     def test_spawn_subagents_count_exceeds_max(self) -> None:
         """测试数量超过 max_subagents 时的限制。"""
         mixin = SimpleAgentSubagentMixin()

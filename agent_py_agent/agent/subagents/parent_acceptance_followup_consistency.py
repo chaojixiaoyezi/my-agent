@@ -32,13 +32,19 @@ def followup_consistency_block(
     reason = _followup_consistency_reason(task, payload, followup)
     if not reason:
         return None
+    blocked_status = "needs_manual_rescue" if reason[0] == "task_state_changed" else reason[0]
+    blocked_action = "plan_rescue" if reason[0] == "task_state_changed" else action or "run_tests"
+    recommended = followup_command_for_action(
+        task.id,
+        "plan_rescue" if reason[0] == "task_state_changed" else "run_tests",
+    )
     return blocked_followup_control_result(
         task,
         BlockedFollowUpControlInput(
-            status=reason[0],
-            action=action or "run_tests",
+            status=blocked_status,
+            action=blocked_action,
             message=reason[1],
-            recommended_command=followup_command_for_action(task.id, "run_tests"),
+            recommended_command=recommended,
         ),
     )
 
@@ -54,6 +60,8 @@ def _followup_consistency_reason(
     action = str(followup.get("action") or "")
     if str(payload.get("run_id") or followup.get("run_id") or "") != task.id:
         return ("stale_followup", "follow-up run_id does not match this task")
+    if action == "apply_acceptance" and not _task_awaits_acceptance(task):
+        return ("task_state_changed", "apply follow-up requires the task to still be awaiting acceptance")
     if task_state_rescue_followup(task, status, action):
         return None
     report_path = Path(str(followup.get("test_execution_ref") or ""))
@@ -87,3 +95,11 @@ def _report_consistency_reason(
     if action == "plan_rescue" and (status != "needs_manual_rescue" or report.failed <= 0):
         return ("followup_test_mismatch", "rescue follow-up requires failing current test evidence")
     return None
+
+
+# LLM: _task_awaits_acceptance keeps preview/apply guidance aligned with current task state.
+# 函数用途: 判断旧 follow-up 是否还能 apply；任务已失败/阻塞后必须走显式 rescue。
+def _task_awaits_acceptance(task: SubAgentTask) -> bool:
+    status = str(getattr(task, "status", "") or "").upper()
+    verification = str(getattr(task, "verification_status", "") or "").upper()
+    return status == "AWAITING_ACCEPTANCE" and verification == "NEEDS_ACCEPTANCE"

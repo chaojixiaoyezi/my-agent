@@ -117,6 +117,7 @@ def _issue_weight(issue: DueCheckIssue) -> int:
         "status_failed": 65,
         "status_timeout": 65,
         "status_channel_error": 60,
+        "coordinator_heartbeat_stale": 58,
         "status_blocked": 50,
         "channel_probe_missing": 48,
         "unverified_done": 45,
@@ -144,6 +145,8 @@ def _action_for_issue(issue: DueCheckIssue) -> tuple[str, int, str]:
         return "run_acceptance", 760, ""
     if kind in {"run_timeout", "heartbeat_stale", "status_timeout"}:
         return "takeover_or_reassign", 900, "TIMEOUT"
+    if kind == "coordinator_heartbeat_stale":
+        return "recover_coordinator_leadership", 820, ""
     if kind == "status_failed":
         return "inspect_failure", 860, ""
     if kind == "status_blocked":
@@ -182,6 +185,10 @@ def _commands_for_action(action: str, run_id: str) -> list[str]:
         ],
         "takeover_or_reassign": [
             f"{cli} subagents-probe {run_id}",
+            f"{cli} subagent {run_id}",
+        ],
+        "recover_coordinator_leadership": [
+            f"{cli} subagents-recovery-tree {run_id} --hide-healthy",
             f"{cli} subagent {run_id}",
         ],
         "inspect_failure": [

@@ -438,6 +438,22 @@ class TestCheckArtifactExists:
         result = _check_artifact_exists(tmp_path, str(tmp_path / "task"), "workspace_file.txt")
         assert result is True
 
+    def test_nested_relative_path_by_workspace_suffix(self, tmp_path: Path):
+        """runner 少写外层目录时，按 workspace 内路径后缀找到 artifact。"""
+        from agent_py_agent.agent.subagents.acceptance_helpers import _check_artifact_exists
+
+        test_file = tmp_path / "real_run" / "grandchild_sorting_edge" / "sorting_edge_report.md"
+        test_file.parent.mkdir(parents=True)
+        test_file.write_text("ok", encoding="utf-8")
+
+        result = _check_artifact_exists(
+            tmp_path,
+            str(tmp_path / "task"),
+            "grandchild_sorting_edge/sorting_edge_report.md",
+        )
+
+        assert result is True
+
     def test_nonexistent_path_returns_false(self, tmp_path: Path):
         """不存在的路径返回 False。"""
         from agent_py_agent.agent.subagents.acceptance_helpers import _check_artifact_exists

@@ -315,6 +315,34 @@ class TestSubAgentAcceptanceOutputFindingMixin(_FindingSetupMixin, _FindingAsser
 
         self._assert_finding(findings, "artifact_paths_exist", expected_ok=True)
 
+    def test_nested_relative_artifact_paths_exist(self, tmp_path: Path):
+        """artifact 路径少写外层运行目录时，验收层仍能在工作区内核对。"""
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
+
+        class MockManager(SubAgentAcceptanceFindingMixin):
+            def __init__(self):
+                self.workspace = tmp_path / ".my_agent_subagents"
+
+        manager = MockManager()
+        manager.workspace.mkdir()
+        test_file = tmp_path / "real_run" / "grandchild_sorting_edge" / "sorting_edge_report.md"
+        test_file.parent.mkdir(parents=True)
+        test_file.write_text("ok", encoding="utf-8")
+        task = self._make_findings_task(tmp_path)
+        self._write_findings_files(tmp_path)
+        manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
+
+        findings = manager._acceptance_findings(
+            task,
+            {"artifacts": [{"path": "grandchild_sorting_edge/sorting_edge_report.md"}]},
+            {},
+            time.time(),
+        )
+
+        self._assert_finding(findings, "artifact_paths_exist", expected_ok=True)
+
 
 class TestSeverityLevels:
     """测试严重程度级别。"""
