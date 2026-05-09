@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_py_agent.agent.settings.config import AgentConfig
+from agent_py_agent.agent.settings.config import AgentConfig, load_simple_yaml
 from agent_py_agent.agent.settings.config_normalize import (
     normalize_agent_config,
     normalize_subagent_workflow_config,
@@ -144,6 +144,20 @@ class TestNormalizeAgentConfig:
         assert normalized["subagent_allowed_tools"] == ["read_file", "write_file", "append_file"]
         assert len(warnings) == 0
 
+    def test_normalize_subagent_board_limit_invalid(self):
+        """验证无效的 subagent_board_limit 会回退。"""
+        data = {"subagent_board_limit": "many"}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["subagent_board_limit"] == AgentConfig().subagent_board_limit
+        assert len(warnings) > 0
+
+    def test_normalize_task_lock_timeout_seconds_invalid(self):
+        """验证无效的 task_lock_timeout_seconds 会回退，避免配置样例变成假字段。"""
+        data = {"task_lock_timeout_seconds": 0}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["task_lock_timeout_seconds"] == AgentConfig().task_lock_timeout_seconds
+        assert len(warnings) > 0
+
     def test_normalize_empty_dict(self):
         """验证空字典使用所有默认值。"""
         normalized, warnings = normalize_agent_config({})
@@ -215,6 +229,20 @@ class TestNormalizeSubagentWorkflowConfig:
 
 class TestNormalizeAgentConfigIntegration:
     """测试 normalize_agent_config 和 normalize_subagent_workflow_config 集成。"""
+
+    def test_default_config_yaml_matches_public_agent_config_fields(self):
+        """默认配置样例必须覆盖所有公开配置字段，且不能包含会被忽略的假字段。"""
+        config_path = Path(__file__).resolve().parents[1] / "config" / "agent_config.yaml"
+        yaml_keys = set(load_simple_yaml(config_path))
+        internal_keys = {
+            "memory_config_warnings",
+            "subagent_workflow_config_warnings",
+            "config_warnings",
+        }
+        config_keys = set(AgentConfig.__dataclass_fields__) - internal_keys
+
+        assert sorted(config_keys - yaml_keys) == []
+        assert sorted(yaml_keys - config_keys) == []
 
     def test_both_normalizations_together(self):
         """验证两个归一化一起使用。"""
