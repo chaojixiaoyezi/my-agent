@@ -943,13 +943,16 @@ docs/
 - `agent_py_agent/agent/subagents/parent_acceptance_auto_execution.py`: 新增父级自动执行 dry-run facade 的 Request/Result bundle 和 `parent_acceptance_auto_execution.json` 审计落盘；第一版固定 hard guard，不执行命令、不改状态。
 - `agent_py_agent/agent/subagents/parent_acceptance_auto_execution_reports.py`: 拆出显式测试执行后的 report/follow-up 写入 helper，让 executor facade 保持薄层和 bundle 入口。
 - `agent_py_agent/agent/subagents/parent_acceptance_auto_followup.py`: 新增显式验收测试后的 follow-up 审计包，写 `parent_acceptance_auto_followup.json`，归类人工 apply / 人工 rescue / 人工确认 / 继续测试；只保存 refs 和失败摘要，不改 task 状态。
-- `agent_py_agent/agent/subagents/manager_parent_acceptance.py`: 新增 manager 父级验收桥接函数，把 plan/write/apply/next-action/auto-policy 流程从 `manager_acceptance.py` 类体拆出，保持 manager facade 轻量。
+- `agent_py_agent/agent/subagents/parent_acceptance_followup_control.py`: 新增 follow-up 受控入口模型和审计文件，支持预览、坏 JSON 阻断、显式 apply 和复用 action handler 的接管 rescue。
+- `agent_py_agent/agent/subagents/manager_parent_acceptance.py`: 新增 manager 父级验收桥接函数，把 plan/write/apply/next-action/auto-policy/follow-up 流程从 `manager_acceptance.py` 类体拆出，保持 manager facade 轻量，并在 follow-up apply 前校验测试报告新鲜度。
+- `agent_py_agent/agent/subagents/manager_acceptance_parent_facade.py`: 新增父级验收 manager facade 方法集合，让 `manager_acceptance.py` 继续只承接普通 acceptance review 流程。
 - `agent_py_agent/agent/subagents/acceptance_test_execution.py`: 新增显式验收测试执行桥接，把 `AcceptanceReviewOptions(execute_tests=True)` 转成真实测试报告和阻断 findings；默认不运行。
 - `agent_py_agent/agent/subagents/services/acceptance_findings.py`: 普通验收 finding 汇总层；已有 `reports/test_execution.json` 时优先以机器执行报告判断 tests_passed。
 - `agent_py_agent/agent/settings/config.py`: 新增 `acceptance_execute_tests` 和 `acceptance_test_timeout_seconds`，让真实测试执行可配置但默认关闭。
 - `agent_py_agent/agent/settings/services/_normalize_runtime_fields.py`: 校验真实验收执行配置，布尔开关走 bool coerce，超时限制在 1 到 300 秒。
 - `agent_py_agent/config/agent_config.yaml`: 新增父级验收真实执行配置注释，说明默认关闭和单次命令覆盖方式。
-- `agent_py_agent/cli/_acceptance_plan.py`: 新增 `subagents-acceptance-plan` 命令渲染；默认只展示父级 dry-run 决策和 refs，`--write` 写入 `parent_acceptance_decision.json`，`--apply` 只允许 inspect_only 进入普通验收 apply，`--next-action` 只展示上级动作建议，`--auto-policy` 写策略 dry-run 审计，`--auto-execution` 写执行 facade 审计；不执行 tests、不读取 artifact 正文。
+- `agent_py_agent/cli/_acceptance_plan.py`: 新增 `subagents-acceptance-plan` 命令入口；默认只展示父级 dry-run 决策和 refs，`--write` 写入决策审计，`--apply` 只允许 inspect_only，`--next-action` / `--auto-policy` / `--auto-execution` / `--followup` / `--apply-followup` 都走显式分支。
+- `agent_py_agent/cli/_acceptance_plan_renderers.py`: 拆出 acceptance-plan 的 JSON 转换和人类输出渲染；只展示 refs 和摘要，不读取引用正文。
 - `agent_py_agent/cli/_review.py`: 新增 `subagents-tests` 命令入口并兼容导出验收命令；tests 命令默认只读已有 `test_execution.json` 摘要，`--re-run` 才显式执行 `output.json.tests` 并写回报告。
 - `agent_py_agent/cli/subcommands_agents.py`: 注册 `subagents-tests <run_id> [--re-run] [--timeout]` 和 `subagents-acceptance-plan <run_id> [--json] [--write] [--apply] [--next-action] [--auto-policy]`，并给 `subagents-acceptance` 增加 `--execute-tests` / `--no-execute-tests` / `--test-timeout`。
 - `agent_py_agent/cli/shared_progress.py`: 在共享进度 payload 中新增 `acceptance_plan_entries`，供 `status --json`、人类 `status` 和 `subagents` 看板展示父级验收 dry-run 决策；不执行 tests、不读取 artifact 正文。

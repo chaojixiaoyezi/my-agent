@@ -838,6 +838,8 @@ my-agent subagents-acceptance-plan <run_id> --next-action
 my-agent subagents-acceptance-plan <run_id> --auto-policy
 my-agent subagents-acceptance-plan <run_id> --auto-execution
 my-agent subagents-acceptance-plan <run_id> --auto-execution --execute-auto-tests
+my-agent subagents-acceptance-plan <run_id> --followup
+my-agent subagents-acceptance-plan <run_id> --apply-followup
 ```
 
 只读取该 run 的 `output.json`、`reports/test_execution.json` 和 handoff/readiness refs，展示父级下一步 dry-run 决策。输出可能是 `execute_tests`、`inspect_only`、`request_human` 或 `rescue`；默认不会执行 tests、不会读取 artifact 正文、不会写回 task 状态。显式传 `--write` 时会写入 `reports/parent_acceptance_decision.json` 审计文件，但这仍然不是 apply。
@@ -850,6 +852,8 @@ my-agent subagents-acceptance-plan <run_id> --auto-execution --execute-auto-test
 
 显式传 `--auto-execution` 时会读取 auto-policy，写入 `reports/parent_acceptance_auto_execution.json`，并展示自动执行 dry-run facade。默认固定 `execution_allowed=false`、`guard_status=blocked`、`executed=false`，只展示 recommended command、blockers 和 hard guard，不启动命令、不修改 task 状态。只有同时显式传 `--execute-auto-tests` 时，才会把 auto-policy 的 `run_tests` 建议转换为一次手动确认的测试执行，写入 `reports/test_execution.json/md`；随后会写 `reports/parent_acceptance_auto_followup.json`，把测试后的下一步归类为人工 apply、人工 rescue、人工确认或继续补测试。follow-up 仍只是审计和建议，不 apply、不 rescue、不修改 task 状态。
 
+显式传 `--followup` 时只读取 `parent_acceptance_auto_followup.json` 并展示受控下一步命令。显式传 `--apply-followup` 时才进入人工确认入口：`ready_for_manual_apply` 会复用父级 `inspect_only` apply 桥接；`needs_manual_rescue` 必须提供 `--take-over-by`，并复用 `takeover_or_reassign` action handler 的通道检查、接管审计和 readiness refs。坏 JSON、run_id 不匹配、测试报告引用不一致或过期测试报告都会被阻断。它不会因为 follow-up 存在就自动执行。
+
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `run_id` | - | 子代理运行 ID。 |
@@ -860,6 +864,10 @@ my-agent subagents-acceptance-plan <run_id> --auto-execution --execute-auto-test
 | `--auto-policy` | `false` | 查看并写入父级自动策略 dry-run 审计，不执行动作。 |
 | `--auto-execution` | `false` | 查看并写入父级自动执行 dry-run facade 审计，不执行动作。 |
 | `--execute-auto-tests` | `false` | 只能配合 `--auto-execution` 使用；显式确认执行 auto-policy 允许的 `run_tests`，写测试报告但不 apply。 |
+| `--followup` | `false` | 查看测试后的 follow-up 下一步建议，不执行动作。 |
+| `--apply-followup` | `false` | 显式处理 follow-up：测试通过时 apply，测试失败时走受控接管入口。 |
+| `--take-over-by <name>` | `""` | `--apply-followup` 处理 rescue 时必填；复用 action apply 的 takeover 门。 |
+| `--locked-file <path>` | - | follow-up rescue 接管时锁定的文件，可多次传入。 |
 | `--reviewer <name>` | `parent` | `--apply` 进入普通验收路径时写入的 reviewer。 |
 | `--note <text>` | `""` | `--apply` 进入普通验收路径时写入的备注。 |
 
@@ -969,7 +977,7 @@ agent_py_agent/data/subagents/subagent_dispatch_report.json
 agent_py_agent/data/subagents/SUBAGENT_DISPATCH.md
 ```
 
-当本轮 dispatch 处理 `AWAITING_ACCEPTANCE` / `NEEDS_ACCEPTANCE` 的 run 时，acceptance 记录会带 parent acceptance auto-policy 的 refs-only 摘要：`parent_acceptance_policy_ref`、decision、action、would_execute 和 executed。默认只写 `reports/parent_acceptance_auto_policy.json` / `parent_acceptance_auto_execution.json` 审计并展示引用，不执行 tests、不 apply、不 rescue、不修改 task 状态。只有显式传 `--execute-acceptance-tests` 时，dispatch/watch 才会执行 auto-policy 允许的 `run_tests` 并写测试报告；任务仍停留在等待验收状态，后续必须另走显式 apply。
+当本轮 dispatch 处理 `AWAITING_ACCEPTANCE` / `NEEDS_ACCEPTANCE` 的 run 时，acceptance 记录会带 parent acceptance auto-policy 的 refs-only 摘要：`parent_acceptance_policy_ref`、decision、action、would_execute 和 executed。默认只写 `reports/parent_acceptance_auto_policy.json` / `parent_acceptance_auto_execution.json` 审计并展示引用，不执行 tests、不 apply、不 rescue、不修改 task 状态。只有显式传 `--execute-acceptance-tests` 时，dispatch/watch 才会执行 auto-policy 允许的 `run_tests` 并写测试报告和 follow-up；任务仍停留在等待验收状态，后续必须另走 `subagents-acceptance-plan <run_id> --apply-followup` 或带 `--take-over-by` 的 rescue 入口。
 
 watch 输出位置：
 

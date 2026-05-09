@@ -365,6 +365,27 @@ class TestSubagentsReviewCommandRegistration:
         ])
         assert args.execute_auto_tests is True
 
+    def test_subagents_acceptance_plan_has_followup_arguments(self):
+        """测试 subagents-acceptance-plan 可查看并显式处理 follow-up。"""
+        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="subcommand")
+        add_subagents_subcommands(sub)
+
+        args = parser.parse_args([
+            "subagents-acceptance-plan",
+            "run-123",
+            "--apply-followup",
+            "--take-over-by",
+            "parent",
+            "--locked-file",
+            "README.md",
+        ])
+        assert args.apply_followup is True
+        assert args.take_over_by == "parent"
+        assert args.locked_file == ["README.md"]
+
     def test_subagents_patches_has_patch_action_group(self):
         """测试 subagents-patches 命令有 patch 操作组。
 

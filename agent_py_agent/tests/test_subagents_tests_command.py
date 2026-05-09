@@ -22,6 +22,7 @@ class _FakeSubagents:
     def __init__(self, task):
         self._task = task
         self.review_options = None
+        self.followup_options = None
         self.workspace = Path(task.reports_dir).parent
 
     def load(self, run_id):
@@ -178,6 +179,60 @@ class _FakeSubagents:
                 "requires_human_confirmation": False,
             },
         )
+
+
+# LLM: _fake_plan_parent_acceptance_followup keeps the fake class below code-size risk.
+# 函数用途: 给 CLI 测试替身返回 follow-up 预览结果，避免测试依赖真实 manager。
+def _fake_plan_parent_acceptance_followup(self, run_id):
+    assert run_id == self._task.id
+    return SimpleNamespace(
+        run_id=run_id,
+        status="ready_for_manual_apply",
+        action="apply_acceptance",
+        applied=False,
+        ok=True,
+        message="tests passed; parent can apply",
+        followup_ref=str(Path(self._task.reports_dir) / "parent_acceptance_auto_followup.json"),
+        control_ref=str(Path(self._task.reports_dir) / "parent_acceptance_followup_control.json"),
+        recommended_command=f"subagents-acceptance-plan {run_id} --apply-followup",
+        mutates_task_state=False,
+        to_dict=lambda: {
+            "run_id": run_id,
+            "status": "ready_for_manual_apply",
+            "action": "apply_acceptance",
+            "recommended_command": f"subagents-acceptance-plan {run_id} --apply-followup",
+        },
+    )
+
+
+# LLM: _fake_apply_parent_acceptance_followup captures CLI options while staying side-effect free.
+# 函数用途: 给 CLI 测试替身模拟 follow-up apply，并保存 options 供断言。
+def _fake_apply_parent_acceptance_followup(self, run_id, *, options=None):
+    assert run_id == self._task.id
+    self.followup_options = options
+    return SimpleNamespace(
+        run_id=run_id,
+        status="applied_acceptance",
+        action="apply_acceptance",
+        applied=True,
+        ok=True,
+        message="accepted",
+        followup_ref=str(Path(self._task.reports_dir) / "parent_acceptance_auto_followup.json"),
+        control_ref=str(Path(self._task.reports_dir) / "parent_acceptance_followup_control.json"),
+        acceptance_apply_ref=str(Path(self._task.reports_dir) / "parent_acceptance_apply.json"),
+        recommended_command="",
+        mutates_task_state=True,
+        to_dict=lambda: {
+            "run_id": run_id,
+            "status": "applied_acceptance",
+            "action": "apply_acceptance",
+            "applied": True,
+        },
+    )
+
+
+_FakeSubagents.plan_parent_acceptance_followup = _fake_plan_parent_acceptance_followup
+_FakeSubagents.apply_parent_acceptance_followup = _fake_apply_parent_acceptance_followup
 
 
 class _FakeAgent:
@@ -450,3 +505,60 @@ def test_subagents_acceptance_plan_auto_execution_passes_manual_confirm(tmp_path
         result = cmd_subagents_acceptance_plan(args)
 
     assert result == 0
+
+
+def test_subagents_acceptance_plan_followup_prints_control_command(tmp_path, capsys):
+    task = _task(tmp_path)
+    fake_agent = _FakeAgent(task)
+    args = argparse.Namespace(
+        config=str(tmp_path / "config.yaml"),
+        run_id="run-1",
+        json=False,
+        write=False,
+        apply=False,
+        followup=True,
+        apply_followup=False,
+        next_action=False,
+        auto_policy=False,
+        auto_execution=False,
+    )
+
+    with patch("agent_py_agent.cli._acceptance_plan.make_agent", return_value=fake_agent):
+        result = cmd_subagents_acceptance_plan(args)
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert "SUBAGENT ACCEPTANCE FOLLOWUP" in out
+    assert "status=ready_for_manual_apply action=apply_acceptance" in out
+    assert "recommended_command=subagents-acceptance-plan run-1 --apply-followup" in out
+
+
+def test_subagents_acceptance_plan_apply_followup_passes_manual_options(tmp_path, capsys):
+    task = _task(tmp_path)
+    fake_agent = _FakeAgent(task)
+    args = argparse.Namespace(
+        config=str(tmp_path / "config.yaml"),
+        run_id="run-1",
+        json=False,
+        write=False,
+        apply=False,
+        followup=False,
+        apply_followup=True,
+        next_action=False,
+        auto_policy=False,
+        auto_execution=False,
+        reviewer="parent",
+        note="ok",
+        take_over_by="rescuer",
+        locked_file=["README.md"],
+    )
+
+    with patch("agent_py_agent.cli._acceptance_plan.make_agent", return_value=fake_agent):
+        result = cmd_subagents_acceptance_plan(args)
+
+    out = capsys.readouterr().out
+    assert result == 0
+    assert fake_agent.subagents.followup_options.apply is True
+    assert fake_agent.subagents.followup_options.take_over_by == "rescuer"
+    assert fake_agent.subagents.followup_options.locked_files == ["README.md"]
+    assert "applied=True" in out

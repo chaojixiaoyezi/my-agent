@@ -16,6 +16,9 @@ from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagent import EvidencePacket, VerificationEvidence
+from agent_py_agent.agent.subagents.parent_acceptance_followup_control import (
+    ParentAcceptanceFollowUpControlOptions,
+)
 
 from .backends import (
     AcceptedSubagentBackend,
@@ -194,11 +197,48 @@ def test_subagent_dispatch_manual_acceptance_test_execution_is_test_only():
         assert record.parent_acceptance_followup_ref == str(followup_ref)
         assert record.parent_acceptance_followup_status == "ready_for_manual_apply"
         assert record.parent_acceptance_followup_action == "apply_acceptance"
-        assert record.parent_acceptance_followup_command == f"subagents-acceptance-plan {task.id} --apply"
+        assert record.parent_acceptance_followup_command == (
+            f"subagents-acceptance-plan {task.id} --apply-followup"
+        )
         assert followup_payload["followup"]["status"] == "ready_for_manual_apply"
         assert payload["failed"] == 0
         assert loaded.status == "AWAITING_ACCEPTANCE"
         assert loaded.verification_status == "NEEDS_ACCEPTANCE"
+
+
+def test_subagent_dispatch_to_followup_apply_acceptance_chain():
+    """LLM: Verifies dispatch tests can hand off to explicit follow-up apply."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        (root / "README.md").write_text("dispatch followup acceptance chain\n", encoding="utf-8")
+        task = _setup_review_task(
+            agent,
+            agent.subagents.create_run(
+                goal="调度后显式 follow-up apply", thought="等待测试和人工 apply。", plan=["tests", "apply"],
+            ),
+            patch_status="none",
+        )
+        output = json.loads(Path(task.output_json).read_text(encoding="utf-8"))
+        output["patches"] = []
+        Path(task.output_json).write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        agent.dispatch_subagents(
+            _make_router(agent),
+            CapabilityConfig(),
+            params=DispatchParams(max_runners=0, execute_acceptance_tests=True),
+        )
+        result = agent.subagents.apply_parent_acceptance_followup(
+            task.id,
+            options=ParentAcceptanceFollowUpControlOptions(apply=True, reviewer="dispatch-followup"),
+        )
+
+        loaded = agent.subagents.load(task.id)
+        assert result.status == "applied_acceptance"
+        assert result.applied is True
+        assert loaded.status == "DONE"
+        assert loaded.verification_status == "VERIFIED"
 
 
 def test_subagent_dispatch_apply_reviews_patch_then_accepts():
