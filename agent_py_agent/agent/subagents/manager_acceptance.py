@@ -27,6 +27,7 @@ from .acceptance_review_service import (
 )
 from .manager_parent_acceptance import (
     ParentAcceptanceApplyResult,
+    ParentAcceptanceAutoExecutionOptions,
     ParentAcceptanceAutoExecutionResult,
     ParentAcceptanceAutoPolicy,
     ParentAcceptanceDecision,
@@ -92,8 +93,6 @@ if TYPE_CHECKING:
 # LLM: _SubAgentAcceptanceFacade 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 类用途: 拆分subagent验收门面流程片段，复用宿主对象上的状态和服务依赖；关键副作用: 方法可能触发任务状态、执行器结果、验收和报告展示相关副作用，需保持公开契约稳定。
 class _SubAgentAcceptanceFacade:
-    # LLM: review_acceptance 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-    # 函数用途: 处理审查验收相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持任务状态、执行器结果、验收和报告展示上的返回值和副作用边界稳定。
     # LLM: plan_parent_acceptance is a dry-run upper-agent controller entrypoint; it must not execute tests or mutate tasks.
     # 函数用途: 让父代理先查看验收下一步建议；只读取任务事实源并返回决策，不写状态、不跑命令。
     def plan_parent_acceptance(self, run_id: str) -> ParentAcceptanceDecision:
@@ -125,10 +124,15 @@ class _SubAgentAcceptanceFacade:
     def plan_parent_acceptance_auto_policy(self, run_id: str) -> ParentAcceptanceAutoPolicy:
         return manager_plan_parent_acceptance_auto_policy(self, run_id)
 
-    # LLM: plan_parent_acceptance_auto_execution is an audit-only executor facade.
-    # 函数用途: 生成父级验收自动执行计划审计；不启动命令、不改任务状态。
-    def plan_parent_acceptance_auto_execution(self, run_id: str) -> ParentAcceptanceAutoExecutionResult:
-        return manager_plan_parent_acceptance_auto_execution(self, run_id)
+    # LLM: plan_parent_acceptance_auto_execution is a guarded executor facade with default dry-run behavior.
+    # 函数用途: 生成父级验收自动执行计划审计；只有 execute_tests 显式为 true 时才运行 tests，不 apply。
+    def plan_parent_acceptance_auto_execution(
+        self,
+        run_id: str,
+        *,
+        options: ParentAcceptanceAutoExecutionOptions | None = None,
+    ) -> ParentAcceptanceAutoExecutionResult:
+        return manager_plan_parent_acceptance_auto_execution(self, run_id, options=options)
 
     # LLM: review_acceptance runs one parent acceptance review with explicit opt-in execution options.
     # 函数用途: 对单个子代理 run 执行父级验收；只有 options 或 apply 参数允许时才写回任务状态。

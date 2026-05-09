@@ -15,6 +15,9 @@ from agent_py_agent.agent.subagents.models import (
     TestExecutionRecord,
     VerificationEvidence,
 )
+from agent_py_agent.agent.subagents.parent_acceptance_auto_execution import (
+    ParentAcceptanceAutoExecutionOptions,
+)
 
 
 def _agent_and_task():
@@ -422,5 +425,45 @@ def test_parent_acceptance_auto_execution_writes_dry_run_audit_file():
         assert payload["result"]["execution_allowed"] is False
         assert payload["result"]["guard_status"] == "blocked"
         assert payload["reserved"]["executes_command"] is False
+        assert reloaded.status == "AWAITING_ACCEPTANCE"
+        assert reloaded.verification_status == "NEEDS_ACCEPTANCE"
+
+
+def test_parent_acceptance_auto_execution_manual_confirm_runs_tests_without_apply():
+    root_ctx, agent, task = _agent_and_task()
+    with root_ctx:
+        root = Path(root_ctx.name)
+        (root / "README.md").write_text("manual confirm test evidence\n", encoding="utf-8")
+        _write_output(
+            task,
+            [{
+                "name": "readme",
+                "validation_method": "file_check",
+                "file_path": "README.md",
+            }],
+        )
+
+        result = agent.subagents.plan_parent_acceptance_auto_execution(
+            task.id,
+            options=ParentAcceptanceAutoExecutionOptions(execute_tests=True),
+        )
+
+        execution_path = Path(task.reports_dir) / "parent_acceptance_auto_execution.json"
+        test_report_path = Path(task.reports_dir) / "test_execution.json"
+        payload = json.loads(execution_path.read_text(encoding="utf-8"))
+        test_payload = json.loads(test_report_path.read_text(encoding="utf-8"))
+        reloaded = agent.subagents.load(task.id)
+        assert result.status == "tests_executed"
+        assert result.mode == "manual_confirm_execute_tests"
+        assert result.execution_allowed is True
+        assert result.executed is True
+        assert result.mutates_task_state is False
+        assert result.test_execution_ref == str(test_report_path)
+        assert result.test_failed == 0
+        assert payload["dry_run"] is False
+        assert payload["reserved"]["executes_tests"] is True
+        assert payload["reserved"]["mutates_task_state"] is False
+        assert test_payload["total_tests"] == 1
+        assert test_payload["failed"] == 0
         assert reloaded.status == "AWAITING_ACCEPTANCE"
         assert reloaded.verification_status == "NEEDS_ACCEPTANCE"

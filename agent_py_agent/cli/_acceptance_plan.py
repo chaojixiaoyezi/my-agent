@@ -6,6 +6,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from agent_py_agent.agent.subagents.parent_acceptance_auto_execution import (
+    ParentAcceptanceAutoExecutionOptions,
+)
+
 from .common import make_agent
 
 
@@ -17,7 +21,7 @@ def cmd_subagents_acceptance_plan(args) -> int:
     if bool(getattr(args, "auto_policy", False)):
         return _handle_auto_policy(agent, run_id, json_output=bool(getattr(args, "json", False)))
     if bool(getattr(args, "auto_execution", False)):
-        return _handle_auto_execution(agent, run_id, json_output=bool(getattr(args, "json", False)))
+        return _handle_auto_execution(agent, args, run_id, json_output=bool(getattr(args, "json", False)))
     if bool(getattr(args, "next_action", False)):
         return _handle_next_action(agent, run_id, json_output=bool(getattr(args, "json", False)))
     if bool(getattr(args, "apply", False)):
@@ -36,10 +40,17 @@ def _handle_auto_policy(agent, run_id: str, *, json_output: bool) -> int:
     return 0
 
 
-# LLM: _handle_auto_execution renders the audit-only executor facade.
-# 函数用途: 渲染父级自动执行 dry-run facade；不会启动命令或修改任务状态。
-def _handle_auto_execution(agent, run_id: str, *, json_output: bool) -> int:
-    result = agent.subagents.plan_parent_acceptance_auto_execution(run_id)
+# LLM: _handle_auto_execution renders dry-run by default and passes explicit test-execution confirmation as a bundle.
+# 函数用途: 渲染父级自动执行 facade；只有 --execute-auto-tests 才跑 tests，始终不 apply、不改任务状态。
+def _handle_auto_execution(agent, args, run_id: str, *, json_output: bool) -> int:
+    options = ParentAcceptanceAutoExecutionOptions(
+        execute_tests=bool(getattr(args, "execute_auto_tests", False)),
+        timeout_seconds=float(getattr(args, "timeout", 120.0) or 120.0),
+    )
+    result = agent.subagents.plan_parent_acceptance_auto_execution(
+        run_id,
+        options=options,
+    )
     if json_output:
         print(json.dumps(_execution_to_dict(result), ensure_ascii=False, indent=2, sort_keys=True))
         return 0

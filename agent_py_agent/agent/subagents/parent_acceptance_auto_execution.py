@@ -1,5 +1,5 @@
-# LLM: Parent acceptance auto-execution facade models; first slice is audit-only and never runs commands.
-# 模块用途: 定义父级验收自动执行器的请求/结果包，为后续 dry-run facade 和审计文件打基础。
+# LLM: Parent acceptance auto-execution facade keeps default dry-run and gates the first manual test execution slice.
+# 模块用途: 定义父级验收自动执行器的请求/结果包；默认只写审计，显式确认时只允许跑 tests。
 from __future__ import annotations
 
 import json
@@ -8,11 +8,28 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
+from .execution_executor import TestExecutor
+from .execution_report import TestExecutionReportOptions, write_test_execution_report
 from .models import SubAgentTask
 from .parent_acceptance_auto_policy import (
     ParentAcceptanceAutoPolicy,
     build_parent_acceptance_auto_policy,
 )
+from .parsing import _dict_list
+
+
+# LLM: ParentAcceptanceAutoExecutionOptions is the stable bundle for future executor knobs.
+# 类用途: 汇总父级验收自动执行的调用选项；新增开关时扩展这个包，避免业务接口继续增加散参数。
+@dataclass(frozen=True)
+class ParentAcceptanceAutoExecutionOptions:
+    """Options bundle for parent acceptance auto-execution planning."""
+
+    __test__: ClassVar[bool] = False
+
+    mode: str = "dry_run"
+    execute_tests: bool = False
+    timeout_seconds: float = TestExecutor.DEFAULT_TIMEOUT_SECONDS
+    reserved: dict[str, Any] = field(default_factory=dict)
 
 
 # LLM: ParentAcceptanceAutoExecutionRequest is the explicit bundle future executors must consume.
@@ -31,6 +48,8 @@ class ParentAcceptanceAutoExecutionRequest:
     ready_for_manual_execution: bool = False
     ready_for_automatic_execution: bool = False
     preflight_blockers: list[str] = field(default_factory=list)
+    manual_confirmed: bool = False
+    timeout_seconds: float = TestExecutor.DEFAULT_TIMEOUT_SECONDS
     requested_by: str = "parent_acceptance_auto_policy"
     reserved: dict[str, Any] = field(default_factory=dict)
 
@@ -40,8 +59,8 @@ class ParentAcceptanceAutoExecutionRequest:
         return asdict(self)
 
 
-# LLM: ParentAcceptanceAutoExecutionResult is an audit result with hard guards, not proof of execution.
-# 类用途: 记录自动执行计划结果和硬闸门；第一版 execution_allowed/executed 恒为 false，不改 task 状态。
+# LLM: ParentAcceptanceAutoExecutionResult records dry-run blocks or manual test execution refs without applying acceptance.
+# 类用途: 记录自动执行计划结果、硬闸门和测试报告引用；即使跑 tests，也不改 task 状态。
 @dataclass(frozen=True)
 class ParentAcceptanceAutoExecutionResult:
     """Audit-only result for a parent acceptance auto-execution plan."""
@@ -61,6 +80,9 @@ class ParentAcceptanceAutoExecutionResult:
     execution_ref: str = ""
     blocked_by: list[str] = field(default_factory=list)
     safety_boundaries: list[str] = field(default_factory=list)
+    test_execution_ref: str = ""
+    test_total: int = 0
+    test_failed: int = 0
     reserved: dict[str, Any] = field(default_factory=dict)
 
     # LLM: to_dict keeps nested request output consistent with dataclass serialization.
@@ -69,18 +91,28 @@ class ParentAcceptanceAutoExecutionResult:
         return asdict(self)
 
 
-# LLM: build_parent_acceptance_auto_execution plans the executor path while keeping execution closed.
-# 函数用途: 生成父级验收自动执行 dry-run 计划并写审计文件；不启动进程、不改 task 状态。
+# LLM: build_parent_acceptance_auto_execution plans by default and runs tests only when the options bundle confirms it.
+# 函数用途: 生成父级验收自动执行计划并写审计文件；只有 options.execute_tests 为 true 时才跑 tests。
 def build_parent_acceptance_auto_execution(
     task: SubAgentTask,
     *,
     workspace_root: str | Path,
-    mode: str = "dry_run",
+    options: ParentAcceptanceAutoExecutionOptions | None = None,
 ) -> ParentAcceptanceAutoExecutionResult:
+    opts = options or ParentAcceptanceAutoExecutionOptions()
+    workspace = Path(workspace_root)
     policy = build_parent_acceptance_auto_policy(task, workspace_root=workspace_root)
     policy_ref = Path(task.reports_dir) / "parent_acceptance_auto_policy.json"
-    request = _request_from_policy(task, policy, policy_ref=policy_ref, mode=mode)
-    result = _result_from_request(request)
+    request = _request_from_policy(
+        task,
+        policy,
+        policy_ref=policy_ref,
+        options=opts,
+    )
+    result = (
+        _execute_confirmed_tests(task, request, workspace_root=workspace)
+        if opts.execute_tests else _result_from_request(request)
+    )
     write_parent_acceptance_auto_execution_file(task, result)
     return result
 
@@ -97,13 +129,14 @@ def write_parent_acceptance_auto_execution_file(
     payload = {
         "schema": "parent_acceptance_auto_execution.v1",
         "generated_at": generated_at if generated_at is not None else time.time(),
-        "dry_run": True,
+        "dry_run": not result.executed,
         "run_id": task.id,
         "request": result.request.to_dict(),
         "result": result.to_dict(),
         "reserved": {
             "refs_only": True,
-            "executes_command": False,
+            "executes_tests": bool(result.executed),
+            "executes_command": bool(result.executed),
             "mutates_task_state": False,
             "future_execute_supported": True,
         },
@@ -119,8 +152,9 @@ def _request_from_policy(
     policy: ParentAcceptanceAutoPolicy,
     *,
     policy_ref: Path,
-    mode: str,
+    options: ParentAcceptanceAutoExecutionOptions,
 ) -> ParentAcceptanceAutoExecutionRequest:
+    mode = "manual_confirm_execute_tests" if options.execute_tests else options.mode
     return ParentAcceptanceAutoExecutionRequest(
         run_id=task.id,
         mode=mode,
@@ -130,6 +164,9 @@ def _request_from_policy(
         ready_for_manual_execution=policy.ready_for_manual_execution,
         ready_for_automatic_execution=policy.ready_for_automatic_execution,
         preflight_blockers=list(policy.preflight_blockers),
+        manual_confirmed=options.execute_tests,
+        timeout_seconds=options.timeout_seconds,
+        reserved=dict(options.reserved),
     )
 
 
@@ -155,3 +192,103 @@ def _result_from_request(
             "no_task_state_mutation",
         ],
     )
+
+
+# LLM: _execute_confirmed_tests is the only first-layer manual execution path.
+# 函数用途: 在显式确认后执行 run_tests 类验证并写测试报告；不 apply、不 rescue、不改 task 状态。
+def _execute_confirmed_tests(
+    task: SubAgentTask,
+    request: ParentAcceptanceAutoExecutionRequest,
+    *,
+    workspace_root: Path,
+) -> ParentAcceptanceAutoExecutionResult:
+    blockers = _manual_execution_blockers(request)
+    if blockers:
+        return _blocked_manual_result(request, blockers)
+    output = _read_task_output(task)
+    tests = _dict_list(output.get("tests", []))
+    if not tests:
+        return _blocked_manual_result(request, ["missing_tests"])
+    executor = TestExecutor(workspace_root, timeout_seconds=request.timeout_seconds)
+    records = [executor.execute(test) for test in tests]
+    report = write_test_execution_report(
+        task.reports_dir,
+        records,
+        options=TestExecutionReportOptions(
+            workspace_root=workspace_root,
+            timeout_seconds=request.timeout_seconds,
+        ),
+    )
+    return ParentAcceptanceAutoExecutionResult(
+        run_id=request.run_id,
+        mode=request.mode,
+        status="tests_executed",
+        request=request,
+        execution_allowed=True,
+        guard_status="manual_confirmed",
+        guard_reason="manual confirmation allowed run_tests execution",
+        executed=True,
+        mutates_task_state=False,
+        command=request.recommended_command,
+        blocked_by=[],
+        safety_boundaries=[
+            "manual_confirmed_only",
+            "run_tests_only",
+            "no_acceptance_apply",
+            "no_rescue",
+            "no_task_state_mutation",
+        ],
+        test_execution_ref=str(report.json_path),
+        test_total=report.total_tests,
+        test_failed=report.failed,
+    )
+
+
+# LLM: _manual_execution_blockers allows only the explicit run_tests path through.
+# 函数用途: 检查手动确认执行是否仍被 blocker 拦住；自动执行禁用不阻止手动确认路径。
+def _manual_execution_blockers(request: ParentAcceptanceAutoExecutionRequest) -> list[str]:
+    blockers = [item for item in request.preflight_blockers if item != "automatic_execution_disabled"]
+    if not request.manual_confirmed:
+        blockers.append("missing_manual_confirmation")
+    if not request.ready_for_manual_execution:
+        blockers.append("not_ready_for_manual_execution")
+    expected = f"subagents-tests {request.run_id} --re-run"
+    if request.recommended_command != expected:
+        blockers.append("unsupported_recommended_command")
+    return blockers
+
+
+# LLM: _blocked_manual_result keeps failed manual attempts audit-only.
+# 函数用途: 生成手动确认路径的阻断结果；不执行 tests，也不修改 task 状态。
+def _blocked_manual_result(
+    request: ParentAcceptanceAutoExecutionRequest,
+    blockers: list[str],
+) -> ParentAcceptanceAutoExecutionResult:
+    return ParentAcceptanceAutoExecutionResult(
+        run_id=request.run_id,
+        mode=request.mode,
+        status="blocked",
+        request=request,
+        execution_allowed=False,
+        guard_status="blocked",
+        guard_reason="manual execution blocked by guard",
+        command=request.recommended_command,
+        blocked_by=blockers,
+        safety_boundaries=[
+            "manual_confirmed_only",
+            "run_tests_only",
+            "no_acceptance_apply",
+            "no_rescue",
+            "no_task_state_mutation",
+        ],
+    )
+
+
+# LLM: _read_task_output reads only the structured runner output used for test specs.
+# 函数用途: 读取 task.output_json 的 tests 数组来源；失败时返回空结构，由 guard 生成阻断。
+def _read_task_output(task: SubAgentTask) -> dict[str, object]:
+    path = Path(getattr(task, "output_json", "") or "")
+    if not path.is_file():
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, dict) else {}
