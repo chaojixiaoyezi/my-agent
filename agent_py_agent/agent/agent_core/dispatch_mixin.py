@@ -70,6 +70,7 @@ class DispatchFinalizeParams:
     reviewer: str
     note: str
     limit: int
+    execute_acceptance_tests: bool
     existing_records: list
 
 
@@ -146,7 +147,14 @@ class _DispatchCollectionBase:
         )
         records.extend(patch_records)
         acceptance_records = make_acceptance_records(
-            AcceptanceRecordParams(self, params.apply, params.reviewer, params.note, params.limit)
+            AcceptanceRecordParams(
+                self,
+                params.apply,
+                params.reviewer,
+                params.note,
+                params.limit,
+                params.execute_acceptance_tests,
+            )
         )
         records.extend(acceptance_records)
         return records
@@ -299,6 +307,7 @@ def _dispatch_finalize_params(params: DispatchParams, records: list) -> Dispatch
         reviewer=params.reviewer,
         note=params.note,
         limit=params.limit,
+        execute_acceptance_tests=params.execute_acceptance_tests,
         existing_records=records,
     )
 

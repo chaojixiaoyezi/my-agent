@@ -10,6 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from agent_py_agent.agent.agent_core.dispatch_params import DispatchParams
 from agent_py_agent.agent.capabilities import CapabilityRouter
 from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.config import AgentConfig
@@ -154,6 +155,43 @@ def test_subagent_dispatch_dry_run_plans_runner_patch_and_acceptance():
         _assert_dispatch_policy_markdown(dispatch_markdown, review_task, policy_ref)
         assert (root / "subs" / "subagent_dispatch_report.json").exists()
         assert not (root / "subs" / "subagent_dispatch_log.jsonl").exists()
+
+
+def test_subagent_dispatch_manual_acceptance_test_execution_is_test_only():
+    """LLM: Verifies dispatch can explicitly run parent acceptance tests without applying acceptance."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        (root / "README.md").write_text("dispatch manual acceptance test\n", encoding="utf-8")
+        task = _setup_review_task(
+            agent,
+            agent.subagents.create_run(
+                goal="调度只跑验收测试", thought="等待父代理跑 tests 但不 apply。", plan=["验收测试"],
+            ),
+            patch_status="none",
+        )
+
+        report = agent.dispatch_subagents(
+            _make_router(agent),
+            CapabilityConfig(),
+            params=DispatchParams(max_runners=0, execute_acceptance_tests=True),
+        )
+
+        record = _acceptance_dispatch_record(report, task.id)
+        test_ref = Path(task.reports_dir) / "test_execution.json"
+        payload = json.loads(test_ref.read_text(encoding="utf-8"))
+        loaded = agent.subagents.load(task.id)
+        assert record.parent_acceptance_auto_execution_status == "tests_executed"
+        assert record.parent_acceptance_auto_execution_allowed is True
+        assert record.parent_acceptance_auto_execution_executed is True
+        assert record.parent_acceptance_auto_execution_guard_status == "manual_confirmed"
+        assert record.parent_acceptance_auto_execution_blocked_by == []
+        assert record.parent_acceptance_auto_execution_test_ref == str(test_ref)
+        assert record.parent_acceptance_auto_execution_test_failed == 0
+        assert payload["failed"] == 0
+        assert loaded.status == "AWAITING_ACCEPTANCE"
+        assert loaded.verification_status == "NEEDS_ACCEPTANCE"
 
 
 def test_subagent_dispatch_apply_reviews_patch_then_accepts():

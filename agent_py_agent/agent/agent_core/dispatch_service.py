@@ -11,7 +11,9 @@ from typing import TYPE_CHECKING, Any
 
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
+from ..subagents.acceptance_review_service import AcceptanceReviewOptions
 from ..subagents.models import SubAgentCapabilityRouteOptions, SubAgentDueCheckOptions
+from ..subagents.parent_acceptance_auto_execution import ParentAcceptanceAutoExecutionOptions
 from ..subagents.services.dispatch_params import DispatchRecordParams, DispatchWatchRecordParams
 from .dispatch_record_params import (
     AcceptanceRecordParams,
@@ -204,23 +206,28 @@ def make_patch_review_records(params: PatchReviewRecordParams):
 def make_acceptance_records(params: AcceptanceRecordParams):
     agent = params.agent
     records = []
+    apply_acceptance = params.apply and not params.execute_acceptance_tests
+    options = AcceptanceReviewOptions(
+        apply=apply_acceptance,
+        reviewer=params.reviewer,
+        note=params.note,
+        limit=params.limit,
+    )
     acceptance_report = (
         agent.subagents.write_acceptance_review_report(
-            apply=True,
-            reviewer=params.reviewer,
-            note=params.note,
-            limit=params.limit,
+            options=options,
         )
         if params.apply
         else agent.subagents.review_acceptances(
-            apply=False,
-            reviewer=params.reviewer,
-            note=params.note,
-            limit=params.limit,
+            options=options,
         )
     )
     for item in acceptance_report.records:
-        policy_summary = _parent_acceptance_policy_summary(agent, item.run_id)
+        policy_summary = _parent_acceptance_policy_summary(
+            agent,
+            item.run_id,
+            options=_auto_execution_options(params.execute_acceptance_tests),
+        )
         records.append(
             agent.subagents.make_dispatch_record(
                 params=DispatchRecordParams(
@@ -243,14 +250,19 @@ def make_acceptance_records(params: AcceptanceRecordParams):
     return records
 
 
-# LLM: _parent_acceptance_policy_summary attaches dry-run policy/execution refs to dispatch records only.
-# 函数用途: 为 acceptance 调度记录生成自动验收策略和执行 facade 摘要；只写审计文件和引用字段，不执行命令、不改任务状态。
-def _parent_acceptance_policy_summary(agent, run_id: str) -> dict[str, object]:
+# LLM: _parent_acceptance_policy_summary attaches policy/execution refs and runs tests only with explicit options.
+# 函数用途: 为 acceptance 调度记录生成自动验收策略和执行摘要；默认只写审计，显式 options 才跑 tests，始终不改任务状态。
+def _parent_acceptance_policy_summary(
+    agent,
+    run_id: str,
+    *,
+    options: ParentAcceptanceAutoExecutionOptions | None = None,
+) -> dict[str, object]:
     if not run_id:
         return {}
     task = agent.subagents.load(run_id)
     policy = agent.subagents.plan_parent_acceptance_auto_policy(run_id)
-    execution = agent.subagents.plan_parent_acceptance_auto_execution(run_id)
+    execution = agent.subagents.plan_parent_acceptance_auto_execution(run_id, options=options)
     policy_ref = Path(task.reports_dir) / "parent_acceptance_auto_policy.json"
     execution_ref = Path(task.reports_dir) / "parent_acceptance_auto_execution.json"
     return {
@@ -275,7 +287,18 @@ def _parent_acceptance_policy_summary(agent, run_id: str) -> dict[str, object]:
         "parent_acceptance_auto_execution_executed": bool(execution.executed),
         "parent_acceptance_auto_execution_guard_status": execution.guard_status,
         "parent_acceptance_auto_execution_blocked_by": list(execution.blocked_by),
+        "parent_acceptance_auto_execution_test_ref": execution.test_execution_ref,
+        "parent_acceptance_auto_execution_test_total": execution.test_total,
+        "parent_acceptance_auto_execution_test_failed": execution.test_failed,
     }
+
+
+# LLM: _auto_execution_options converts the dispatch flag into the guarded parent acceptance options bundle.
+# 函数用途: 只在 dispatch/watch 显式确认时创建 execute_tests 选项包；默认保持 dry-run facade。
+def _auto_execution_options(execute_tests: bool) -> ParentAcceptanceAutoExecutionOptions | None:
+    if not execute_tests:
+        return None
+    return ParentAcceptanceAutoExecutionOptions(execute_tests=True)
 
 
 # ---------------------------------------------------------------------------

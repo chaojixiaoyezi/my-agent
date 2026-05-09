@@ -67,9 +67,16 @@ def _dispatch_auto_policy_line(record) -> str:
     )
 
 
-# LLM: _dispatch_auto_execution_line keeps executor facade rendering compact and audit-only.
-# 函数用途: 渲染 auto-execution 摘要单行，只展示 hard guard 和 ref，不触发执行。
+# LLM: _dispatch_auto_execution_line keeps executor facade rendering compact and includes test refs only when present.
+# 函数用途: 渲染 auto-execution 摘要单行，展示 hard guard、审计 ref 和显式测试执行报告引用，不触发执行。
 def _dispatch_auto_execution_line(record) -> str:
+    tests = ""
+    if record.parent_acceptance_auto_execution_test_ref:
+        tests = (
+            f" test_ref={record.parent_acceptance_auto_execution_test_ref} "
+            f"test_total={record.parent_acceptance_auto_execution_test_total} "
+            f"test_failed={record.parent_acceptance_auto_execution_test_failed}"
+        )
     return (
         "  - parent_acceptance_auto_execution: "
         f"execution_status={record.parent_acceptance_auto_execution_status} "
@@ -78,6 +85,7 @@ def _dispatch_auto_execution_line(record) -> str:
         f"guard_status={record.parent_acceptance_auto_execution_guard_status} "
         f"execution_blocked_by={','.join(record.parent_acceptance_auto_execution_blocked_by)} "
         f"ref={record.parent_acceptance_auto_execution_ref}"
+        f"{tests}"
     )
 
 

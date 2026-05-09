@@ -27,6 +27,7 @@ class DispatchParams:
     probe: bool = True
     take_over_by: str = ""
     locked_files: list[str] | None = None
+    execute_acceptance_tests: bool = False
 
 
 # LLM: WatchParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -47,6 +48,7 @@ class WatchParams:
     probe: bool = True
     take_over_by: str = ""
     locked_files: list[str] | None = None
+    execute_acceptance_tests: bool = False
     interval: float = 30.0
     max_cycles: int = 0
     force_lock: bool = False
