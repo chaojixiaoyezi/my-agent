@@ -1158,6 +1158,7 @@ failure_type = structured_output_parse_error
 默认安全行为：
 - `subagent-run` 默认 dry-run。
 - `subagent-run --execute` 才调用模型。
+- `subagent-run --execute` 会走 runner worker timeout 边界；`runner_timeout_seconds` 为固定值时用固定值，为 `auto` 时按任务规模和动态 timeout 配置计算，避免单独 CLI runner 因模型流式响应卡住而无限等待。
 - 执行前默认 probe。
 - 工具有 allowlist。
 - 未授权工具调用会失败。
