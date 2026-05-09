@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..subagent import DispatchReport
+from .dispatch_acceptance_records import make_acceptance_records
 from .dispatch_facade import _DispatchFacadeMixin, _DispatchFailureMixin
 from .dispatch_mixin_helpers import (
     DispatchRunnerStageRequest,
@@ -43,7 +44,6 @@ if TYPE_CHECKING:
 
 from .dispatch_service import (
     build_workflow_records,
-    make_acceptance_records,
     make_action_apply_records,
     make_capability_route_records,
     make_due_check_record,
