@@ -180,7 +180,9 @@ def test_subagent_dispatch_manual_acceptance_test_execution_is_test_only():
 
         record = _acceptance_dispatch_record(report, task.id)
         test_ref = Path(task.reports_dir) / "test_execution.json"
+        followup_ref = Path(task.reports_dir) / "parent_acceptance_auto_followup.json"
         payload = json.loads(test_ref.read_text(encoding="utf-8"))
+        followup_payload = json.loads(followup_ref.read_text(encoding="utf-8"))
         loaded = agent.subagents.load(task.id)
         assert record.parent_acceptance_auto_execution_status == "tests_executed"
         assert record.parent_acceptance_auto_execution_allowed is True
@@ -189,6 +191,11 @@ def test_subagent_dispatch_manual_acceptance_test_execution_is_test_only():
         assert record.parent_acceptance_auto_execution_blocked_by == []
         assert record.parent_acceptance_auto_execution_test_ref == str(test_ref)
         assert record.parent_acceptance_auto_execution_test_failed == 0
+        assert record.parent_acceptance_followup_ref == str(followup_ref)
+        assert record.parent_acceptance_followup_status == "ready_for_manual_apply"
+        assert record.parent_acceptance_followup_action == "apply_acceptance"
+        assert record.parent_acceptance_followup_command == f"subagents-acceptance-plan {task.id} --apply"
+        assert followup_payload["followup"]["status"] == "ready_for_manual_apply"
         assert payload["failed"] == 0
         assert loaded.status == "AWAITING_ACCEPTANCE"
         assert loaded.verification_status == "NEEDS_ACCEPTANCE"

@@ -45,6 +45,8 @@ def render_dispatch_markdown(report: DispatchReport) -> str:
             lines.append(_dispatch_auto_policy_line(record))
         if record.parent_acceptance_auto_execution_ref:
             lines.append(_dispatch_auto_execution_line(record))
+        if record.parent_acceptance_followup_ref:
+            lines.append(_dispatch_acceptance_followup_line(record))
     return "\n".join(lines) + "\n"
 
 
@@ -86,6 +88,19 @@ def _dispatch_auto_execution_line(record) -> str:
         f"execution_blocked_by={','.join(record.parent_acceptance_auto_execution_blocked_by)} "
         f"ref={record.parent_acceptance_auto_execution_ref}"
         f"{tests}"
+    )
+
+
+# LLM: _dispatch_acceptance_followup_line renders the post-test next-step hint without applying it.
+# 函数用途: 展示验收测试后的 follow-up 审计摘要，让人知道下一步但不触发下一步。
+def _dispatch_acceptance_followup_line(record) -> str:
+    return (
+        "  - parent_acceptance_followup: "
+        f"status={record.parent_acceptance_followup_status} "
+        f"action={record.parent_acceptance_followup_action} "
+        f"command={record.parent_acceptance_followup_command} "
+        f"reason={record.parent_acceptance_followup_reason} "
+        f"ref={record.parent_acceptance_followup_ref}"
     )
 
 

@@ -245,6 +245,16 @@ def _print_acceptance_auto_execution(result) -> None:
     blocked_by = list(getattr(result, "blocked_by", []) or [])
     if blocked_by:
         print(f"blocked_by={','.join(str(item) for item in blocked_by)}")
+    followup_ref = str(getattr(result, "followup_ref", "") or "")
+    if followup_ref:
+        print(
+            f"followup_status={getattr(result, 'followup_status', '')} "
+            f"followup_action={getattr(result, 'followup_action', '')}"
+        )
+        followup_command = str(getattr(result, "followup_command", "") or "")
+        if followup_command:
+            print(f"followup_command={followup_command}")
+        print(f"followup_ref={followup_ref}")
     for name in ("execution_ref",):
         value = str(getattr(result, name, "") or "")
         if value:

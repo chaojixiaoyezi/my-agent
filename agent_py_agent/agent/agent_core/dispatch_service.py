@@ -290,6 +290,11 @@ def _parent_acceptance_policy_summary(
         "parent_acceptance_auto_execution_test_ref": execution.test_execution_ref,
         "parent_acceptance_auto_execution_test_total": execution.test_total,
         "parent_acceptance_auto_execution_test_failed": execution.test_failed,
+        "parent_acceptance_followup_ref": execution.followup_ref,
+        "parent_acceptance_followup_status": execution.followup_status,
+        "parent_acceptance_followup_action": execution.followup_action,
+        "parent_acceptance_followup_command": execution.followup_command,
+        "parent_acceptance_followup_reason": execution.followup_reason,
     }
 
 
