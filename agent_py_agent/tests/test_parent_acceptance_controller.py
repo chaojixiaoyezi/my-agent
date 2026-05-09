@@ -359,3 +359,33 @@ def test_parent_acceptance_plan_inspects_only_when_real_tests_already_passed():
         assert decision.risk_level == "low"
         assert decision.test_execution_ref.endswith("test_execution.json")
         assert "already passed" in decision.reason
+
+
+def test_parent_acceptance_auto_executor_bundles_are_json_stable():
+    from agent_py_agent.agent.subagents.parent_acceptance_auto_execution import (
+        ParentAcceptanceAutoExecutionRequest,
+        ParentAcceptanceAutoExecutionResult,
+    )
+
+    request = ParentAcceptanceAutoExecutionRequest(
+        run_id="run-1",
+        mode="dry_run",
+        policy_ref="reports/parent_acceptance_auto_policy.json",
+        recommended_command="subagents-tests run-1 --re-run",
+        preflight_status="manual_ready",
+        ready_for_manual_execution=True,
+        ready_for_automatic_execution=False,
+        preflight_blockers=["automatic_execution_disabled"],
+    )
+    result = ParentAcceptanceAutoExecutionResult(
+        run_id="run-1",
+        mode=request.mode,
+        status="blocked",
+        request=request,
+        blocked_by=["automatic_execution_disabled"],
+    )
+
+    assert request.to_dict()["recommended_command"] == "subagents-tests run-1 --re-run"
+    assert result.to_dict()["executed"] is False
+    assert result.to_dict()["mutates_task_state"] is False
+    assert result.to_dict()["request"]["ready_for_automatic_execution"] is False
