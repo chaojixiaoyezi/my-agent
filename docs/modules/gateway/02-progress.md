@@ -1,4 +1,5 @@
 ﻿## 2026-05-06 adapter code-size cleanup
+- 中文说明：这一段是 adapter 入口拆分记录。它把 `cli/adapter.py` 里的文件循环、gateway 可用性检查、daemon 启动、前台注册、状态和停止流程拆成小 helper；用户命令和文件协议路径保持不变。
 - Split `cli/adapter.py` file-adapter loop, gateway availability checks, daemon startup, foreground registration, status, and stop flows into focused helpers.
 - Daemon flags remain cross-platform: Windows uses process-group/no-window flags, macOS/Linux keep the POSIX new-session path.
 - User-visible adapter CLI behavior and file protocol paths stay stable.
@@ -89,16 +90,19 @@
 - 文件队列并发写入需要持续测试，否则 worker pool 扩大后容易出现重复处理或状态覆盖。
 - 普通用户入口和开发者命令层级需要继续打磨，避免体验被内部协议细节淹没。
 ## 2026-05-06 code-size cleanup
+- 中文说明：这一轮把 gateway 请求执行、IO、lease、恢复、supervisor 和 adapter helper 继续拆薄。用户可见行为不变，主要是降低 gateway 大文件继续膨胀和并发路径难调试的风险。
 - Split gateway request execution out of the request worker and flattened gateway IO, lease, recovery, supervisor, and adapter helpers.
 - Strengthened request ID generation by keeping the full UUID suffix, eliminating stress-test collisions seen with the previous short suffix.
 - Preserved macOS/POSIX process handling while keeping Windows-native locking and file replacement safeguards.
 
 ## 2026-05-07 bundle interface completion
+- 中文说明：这一轮把 Gateway / Adapter 的接口继续收敛成明确的 options/context bundle，避免 `args` 或散参数一路传到深层 helper。以后新增字段时，优先扩展 dataclass 上下文，不要把函数签名越拉越长。
 - Gateway logging, queue response merge, and supervisor control options were aligned with explicit option records/fields instead of product-level var-keyword service signatures.
 - Gateway helper calls remain stable for CLI/scenario callers while watch/daemon/gateway paths continue to enter core through `WatchParams` and context bundles.
 - Focused verification covered gateway helper and gateway logging tests.
 - 2026-05-07 high-risk cleanup continued across adapter, audit, HTTP startup, logging, recovery, and request execution helpers; new fields stay behind focused dataclass contexts rather than widening gateway request handling.
 ## 2026-05-07 LLM annotation coverage update
+- 中文说明：这一轮是 gateway 模块的注释同步，不改变协议、文件格式、工作流语义和公开接口。以后改模块/类/函数行为、bundle 字段或副作用，要同步维护这些注释。
 - Product-code modules, classes, functions, and methods in the active module now carry the required `LLM:` plus `函数用途:` / `类用途:` definition-level double-layer comments format.
 - This is a documentation-only maintainability pass: behavior, file formats, workflow semantics, and public interfaces are intended to stay unchanged.
 - Future module changes must keep these comments current when changing module/class/def behavior, side effects, bundles, or caller expectations.

@@ -1,4 +1,5 @@
 ﻿## 2026-05-06 structure update
+- 中文说明：subagent 数据模型拆成多个职责文件，旧 `models.py` 继续做兼容门面；任务树、证据、finding、checkpoint、runtime memory workspace 和 skill sparks 都落到结构化字段/文件里，方便恢复和验收。
 - `subagents/models.py` is now a compatibility facade over `model_capabilities.py`, `model_records.py`, `model_runtime.py`, and `model_task.py`.
 - `subagents/result_processors.py` delegates structured output handling to `result_structured.py` and output payload assembly to `result_payloads.py`.
 - `subagents/manager_base.py` delegates work-order filesystem concerns to `manager_work_orders.py`.
@@ -353,16 +354,19 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - 租户/员工 conversation 配置隔离：员工会话里的策略测试只能落在 conversation/run scope；提升到 project、tenant 或 global 必须有 admin approval、diff、audit event 和 rollback ref。
 
 ## 2026-05-06 structure update
+- 中文说明：workflow 路由、manager 内部、patch 归一化和 service action 的结构已拆开；兼容模块仍保留旧导出名，避免调用方被迫一次性迁移。
 - Workflow routing and subagent manager internals now separate decision fields, rendering sections, patch normalization, and service actions.
 - Compatibility modules still re-export the existing public model and rendering names for callers.
 
 ## 2026-05-07 bundle structure update
+- 中文说明：manager/core/runner/recovery 路径现在先收敛到明确的 Params/Options bundle，再进入服务逻辑。旧字段只作为兼容 adapter，不能再作为新功能扩展点。
 - `manager_base.py`, `manager_dispatch.py`, `manager_actions.py`, `manager_indexing.py`, and patch facades now list old compatibility fields explicitly and immediately construct `CreateRunParams`, dispatch params, `ActionApplyOptions`, `LocalRecordParams`, or patch request bundles.
 - `policy_checks.py` / `policies.py` use `RunnerNextActionParams`; `state_machine.py` uses `StateTransitionParams`; runner output payload construction passes those bundles instead of loose fields.
 - `agent_core` dispatch/watch/run-subagent/recovery paths now normalize into `DispatchParams`, `WatchParams`, `DispatchLoopParams`, `SubagentRunParams`, and `RecoverySnapshotParams` before entering service logic.
 - The remaining subagent params cleanup now routes action post-recording, report/dataclass indexing, learning candidate updates, due-check issue creation, patch review fallback, and patch spec validation through `RecordAfterTaskActionParams`, `IndexReportParams`, `DataclassRecordIndexParams`, `UpdateLearningCandidateParams`, `DueIssueSpec`, `PatchReviewTaskRequest`, and `PatchSpecFields`.
 
 ## 2026-05-07 hard/soft structure update
+- 中文说明：patch/action/acceptance 的内部细节继续从主 mixin/facade 拆出去，公开 manager 方法仍走原服务门面。workflow 的 route、compile、parent acceptance 也保持分层，worker 自报不能直接成为验收来源。
 - Patch manager parsing details stay outside the main mixin path, preserving `SubAgentPatchMixin` as a facade over patch review/apply services.
 - Action application split unsupported-action record creation and handler context construction into helpers while keeping `ActionApplyOptions` as the service bundle.
 - `subagents/rendering.py` keeps acceptance record section and failed-summary formatting behind small shared helpers so verifier checks and findings use one rendering path.
@@ -371,6 +375,7 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `subagent_workflows` keeps routing, dispatch-plan compilation, and parent acceptance planning as separate helper surfaces; compatibility callers can still ask for one planning result, but new fields enter through route/compile/acceptance bundles.
 
 ## 2026-05-07 annotation structure update
+- 中文说明：结构文档把代码里的双层注释纳入架构同步要求。新增文件、服务、bundle 或 facade 方法时，要同时更新本结构页和 in-code 注释。
 - Module structure docs now treat the definition-level double-layer comments as part of the code architecture: `LLM:` records model-facing contract/caller/side-effect notes, and `函数用途:` / `类用途:` records beginner-readable purpose and edit guidance.
 - New files, services, bundles, or facade methods must update both this structure page and the in-code comments at the same time.
 - The global file tree in `CODEBASE_TREE.md` now includes a current architecture map for CLI, agent core, gateway, memory, log-analysis, subagent, tooling, and settings boundaries.

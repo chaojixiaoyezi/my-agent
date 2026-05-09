@@ -1,4 +1,5 @@
 ﻿## 2026-05-06 structure update
+- 中文说明：adapter CLI 只负责启动、状态、停止和生命周期编排；真正的 inbox/outbox 文件协议仍在 `gateway_parts/adapter.py`。这能避免命令行入口继续变厚。
 - `cli/adapter.py` now keeps command entrypoints small and delegates file-loop, daemon, registration, status, and stop concerns to local helper functions.
 - `gateway_parts/adapter.py` still owns the inbox/outbox file protocol; CLI helpers only orchestrate startup and process lifecycle.
 # Gateway：结构树和详细说明
@@ -149,18 +150,22 @@ memory-resume 或 run(auto resume)
 
 本页先描述单机文件协议。后续应补充真实目录样例、请求 JSON schema、response JSON schema、失败恢复时序图和 gateway chat 的用户路径。
 ## 2026-05-06 structure update
+- 中文说明：gateway request worker 现在只管队列认领和归档流转，单个请求的执行、chunk streaming、lease 刷新和响应完成拆到 `request_execution.py`。Windows 仍走带锁和重试 replace 的文件 IO，macOS/Linux 保持原子替换路径。
 - `gateway_parts/request_worker.py` now owns queue claiming and archive flow, while `gateway_parts/request_execution.py` owns one-request execution, chunk streaming, lease refresh, and response completion.
 - Gateway file IO keeps per-path process-local locks and retrying replace logic for Windows; POSIX behavior remains the normal atomic replace path.
 
 ## 2026-05-07 bundle structure update
+- 中文说明：gateway 文件队列协议没变，但 helper 入口改成 typed bundle 或明确字段，避免用开放式 kwargs 承载产品行为。日志、队列合并、supervisor、adapter、audit、HTTP 启动和 recovery 都按小上下文拆边界。
 - Gateway execution continues to use file request/response facts, but option-heavy service helpers now expose typed bundles or explicit fields before they touch persistence.
 - `gateway_parts/logging.py`, `queue_service.py`, and `supervisor.py` are part of the bundle sweep; they no longer rely on open-ended keyword option bags for product behavior.
 - `gateway_parts/adapter.py`, `audit_service.py`, `http_service.py`, `logging.py`, `recovery.py`, and `request_execution.py` keep protocol fields in small context records so queue IO, audit indexing, HTTP boot, and stale-request recovery can evolve independently.
 
 ## 2026-05-07 request execution size update
+- 中文说明：请求执行状态被收进小 context，完成审计也拆成 helper，所以 gateway request-execution 这条路径不再有高风险体积项。
 - `gateway_parts/request_execution.py` keeps request execution state in small context records and delegates completion audit into a helper, leaving no high-risk code-size entry in the gateway request-execution slice.
 
 ## 2026-05-07 annotation structure update
+- 中文说明：结构文档把代码里的双层注释也当成架构一部分。新增文件、服务、bundle 或 facade 方法时，需要同时更新结构页和代码注释，避免 LLM/人类读到旧契约。
 - Module structure docs now treat the definition-level double-layer comments as part of the code architecture: `LLM:` records model-facing contract/caller/side-effect notes, and `函数用途:` / `类用途:` records beginner-readable purpose and edit guidance.
 - New files, services, bundles, or facade methods must update both this structure page and the in-code comments at the same time.
 - The global file tree in `CODEBASE_TREE.md` now includes a current architecture map for CLI, agent core, gateway, memory, log-analysis, subagent, tooling, and settings boundaries.

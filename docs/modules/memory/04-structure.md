@@ -207,20 +207,24 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 
 本页先讲主结构和阅读路径。后续需要补真实 route index 样例、raw archive 样例、doctor 输出样例、LocalStore 命中样例，以及更长时间的真实跨午夜恢复链路图。
 ## 2026-05-06 structure update
+- 中文说明：memory archive query 和 memory routing matcher 内部已经拆成过滤、payload 构造、gateway payload 收集、resume guidance 渲染、评分规格和 receipt 创建等小职责；公开输出保持稳定。
 - Memory archive query logic now delegates filtering, task payload construction, gateway payload collection, and resume guidance rendering to focused helpers.
 - Memory routing matcher internals separate scoring specs, score accumulation, and receipt creation while keeping public model outputs stable.
 
 ## 2026-05-07 bundle structure update
+- 中文说明：memory archive query、resume brief、snapshot helper 和 routing read receipt 现在用显式 Params/Options 字段表达输入；这不改变权威来源模型，task/run/gateway 文件仍是事实源，LocalStore/archive 只是线索。
 - `memory_archive/query/query_logic.py` now exposes explicit archive collection/filter fields, and higher-level query service code converts compatibility inputs before filtering.
 - `resume_brief.py`, snapshot helpers, and memory route read receipts now use explicit Params/Options-style fields rather than var-keyword option bags.
 - Memory remains a fact-source locator: bundle cleanup does not change the authority model where task/run/gateway files stay authoritative and LocalStore/archive records are clues.
 
 ## 2026-05-07 high-risk structure update
+- 中文说明：task workspace 的 payload/JSON/JSONL IO 从编排入口拆出去，archive query、resume brief、memory gate review 和 routing matcher 也改用 request/params bundle；文件形状和事实源权威关系不变。
 - `memory_archive/task_workspace_payloads.py` now owns task workspace state/timeline payload construction and JSON/JSONL helper IO.
 - `memory_archive/task_workspace.py` remains the adapter/orchestration entry point and keeps the same public `EnsureSubagentTaskWorkspaceRequest` / `TaskWorkspacePaths` surface.
 - `memory_archive/query/query_logic.py`, `resume_brief.py`, `memory_gate_review.py`, and `memory_routing/matcher.py` now use request/params bundles for collection, filtering, reviewer write-back, and read receipts without changing the fact-source authority model.
 
 ## 2026-05-07 annotation structure update
+- 中文说明：结构文档把 memory 代码里的双层注释纳入同步要求。新增文件、服务、bundle 或 facade 方法时，要同时更新结构页和 in-code 注释。
 - Module structure docs now treat the definition-level double-layer comments as part of the code architecture: `LLM:` records model-facing contract/caller/side-effect notes, and `函数用途:` / `类用途:` records beginner-readable purpose and edit guidance.
 - New files, services, bundles, or facade methods must update both this structure page and the in-code comments at the same time.
 - The global file tree in `CODEBASE_TREE.md` now includes a current architecture map for CLI, agent core, gateway, memory, log-analysis, subagent, tooling, and settings boundaries.

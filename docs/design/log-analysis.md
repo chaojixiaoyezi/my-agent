@@ -191,6 +191,7 @@
 - 是否引入 DuckDB / Parquet / Kafka / ML 依赖。
 ## 2026-04-30 Implementation Note: Storage Audit
 
+- 中文说明：这一片解决“坏 JSONL 行被悄悄跳过”的问题。现在读取日志时会写 audit，记录跳过了哪些坏行、坏对象，并把 skipped/corrupt 计数放进 query 摘要，方便 reviewer 知道证据是否完整。
 - Status: landed in code and focused tests.
 - Solves: bad JSONL lines are no longer silently skipped with no trail. Reads now produce a `JsonlReadAudit`, persist corrupt/non-object samples to `corrupt_lines.jsonl`, and include skipped/corrupt counts in query summaries and query records.
 - Parent acceptance: this proves the local JSONL backend is still tolerant of bad rows, while giving reviewers evidence about what was skipped.
@@ -198,6 +199,7 @@
 
 ## 2026-04-30 Implementation Note: Runtime Capability, Limits, and Replay
 
+- 中文说明：这一片把 LOG 能力接到真实运行入口。普通任务仍然看不到安全日志工具；只有明显是安全日志分析的 prompt，或显式给了 `logs/security` capability，才暴露有限的查询工具。同时修了 query limit 配置不一致，并让 Live Lab 能离线 replay SecurityAlertV1，不花真实模型成本。
 - Status: landed in code and full regression.
 - Runtime capability solves: obvious security-log analysis prompts now auto-grant `logs/security` for ordinary `SimpleAgent.run()` calls, while normal tasks still keep security tools hidden.
 - Runtime capability guardrail: explicit grants still work; implicit grants are limited to explicit/obvious security-log phrasing and tested for both English and Chinese prompts.
@@ -208,6 +210,7 @@
 
 ## 2026-04-30 User-Facing Note: LOG Quickstart
 
+- 中文说明：这一段是给用户看的 LOG 快速入口。用户既可以显式用 `my-agent logs ...` 命令，也可以用自然语言让 run/chat/gateway 触发安全日志能力；定位上它是本地轻量 first-response 工具，不是生产级 SIEM。
 - Published user path: README and CLI_REFERENCE now describe both explicit `my-agent logs status/ingest/query/hunt-ip/trace-case` and ordinary-language `run/chat/gateway` usage.
 - Runtime visibility rule: normal tasks keep security tools hidden; obvious security-log tasks or explicit `logs/security` grants expose only `security_query`, `security_hunt_ip`, and `security_trace_case`.
 - Positioning: this is documented as a local lightweight log-analysis base for first-response replay and bounded evidence queries, not a production SIEM.
@@ -215,6 +218,7 @@
 
 ## 2026-04-30 Implementation Note: LOG Analyst Work Orders
 
+- 中文说明：这一片先做 dry-run 工单规划，不直接派真实子代理。detector 找到 case 后，可以生成 analyst/reviewer 的受控任务规格，里面有证据引用、工具边界、验收要求和不能自验收规则；缺证据的 case 会明确返回 issue，而不是硬派人干活。
 - Status: dry-run work-order planning landed.
 - Solves: detected cases can be translated into controlled analyst/reviewer specs before any real subagent is created.
 - Safety: work orders include evidence refs, bounded tool lists, acceptance checks, `cannot_self_accept`, and parent final gate rules.

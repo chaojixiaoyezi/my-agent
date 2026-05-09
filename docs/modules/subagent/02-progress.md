@@ -243,16 +243,19 @@
 - workflow 已经能从规划进入真实 worker 子工单创建，但产品风险还在：什么时候需要用户确认、怎么展示自动选择理由、如何避免高风险任务被过度自动化，还需要继续验证。
 - 并行 worker 可能同时补文档，后续需要以模块四件套为主入口，避免再次分散。
 ## 2026-05-06 code-size cleanup
+- 中文说明：这一轮把 subagent workflow routing、manager helper、patch review、runner rendering 和 service utility 拆成更小模块，行为和公开 dataclass/兼容导出不变，只是把大文件风险降下来。
 - Split subagent workflow routing, manager helpers, patch review, runner rendering, and service utilities into smaller focused helpers.
 - Kept public report dataclasses, patch rendering compatibility, and re-export behavior intact.
 - Verified with subagent-focused pytest, ruff, and the global code-size report.
 
 ## 2026-05-07 bundle interface completion
+- 中文说明：这一轮把 subagent 主要服务入口改成 bundle-first：创建、dispatch、action、patch、acceptance、runner、recovery 等都先构造明确 Params/Options，再进入服务逻辑；新业务不再用散乱 `**kwargs` 扩字段。
 - Converted subagent manager/core action, dispatch, indexing, create-run, patch review/apply, runner next-action, state transition, run-subagent, recovery snapshot, and dispatch-loop compatibility paths to bundle-first or explicit keyword -> bundle adapters.
 - Added an architecture guardrail that blocks new product-code function var-keyword service interfaces; only transparent retry decorator forwarding remains exempt.
 - Focused verification covered policy checks, manager actions/dispatch/indexing, bundle interfaces, dispatch loop/watchdog, subagent runner, acceptance, patch review, and mixin recovery snapshot paths.
 
 ## 2026-05-07 hard/soft code-size cleanup
+- 中文说明：这一轮清掉 subagent patch/action 的 soft 和 high-risk 体积风险，但不改变 manager facade。patch/action/acceptance 的记录构造、证据构造、渲染逻辑被拆成小 helper，方便后续功能继续加而不挤爆入口。
 - Cleared current subagent patch/action soft findings without changing public manager facades.
 - `SubAgentPatchMixin` remains a thin adapter over patch services; action application now keeps helper context bundled so follow-up fields do not lengthen service signatures.
 - Split acceptance Markdown item rendering into shared helpers, keeping verifier checks, findings, and record summary output identical while reducing function-level near-soft risk.
@@ -260,6 +263,7 @@
 - Focused verification covered manager patch, manager actions, strict code-size, ruff, and architecture guardrails.
 - 2026-05-07 workflow high-risk cleanup continued in router, planner, and parent acceptance helpers; route fields, compile inputs, and final-gate checklist expansion stay separated so worker self-report cannot become the acceptance source.
 ## 2026-05-07 LLM annotation coverage update
+- 中文说明：这一轮只补产品代码的定义级注释，不改行为、文件格式、工作流语义或公开接口。以后改 module/class/def 的行为、bundle 或副作用，要同步维护 `LLM:` 和 `函数用途:` / `类用途:`。
 - Product-code modules, classes, functions, and methods in the active module now carry the required `LLM:` plus `函数用途:` / `类用途:` definition-level double-layer comments format.
 - This is a documentation-only maintainability pass: behavior, file formats, workflow semantics, and public interfaces are intended to stay unchanged.
 - Future module changes must keep these comments current when changing module/class/def behavior, side effects, bundles, or caller expectations.

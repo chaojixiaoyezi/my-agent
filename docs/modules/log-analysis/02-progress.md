@@ -60,22 +60,26 @@
 - `evidence_read` 仍是待落地的受控读取能力，真实 analyst 执行前必须补齐。
 - JSONL 本地后端适合开发和小样本，不应被误解为生产 SIEM 存储。
 ## 2026-05-06 code-size cleanup
+- 中文说明：这一轮把 log-analysis 的 prompt、ingest、dispatch、parser、安全 helper 拆成更小内部单元，公开调用面和测试行为不变，主要是清掉 80% 附近的体积风险。
 - Refactored log-analysis prompts, ingestion, dispatch, parser, and security helpers into smaller internal units.
 - Cleared current log-analysis 80% code-size high-risk findings while preserving public call surfaces and test behavior.
 - Verified with log-focused pytest, ruff, and the global code-size report.
 
 ## 2026-05-07 bundle interface completion
+- 中文说明：这一轮把 LOG 的 coercion、parser、query、ingest、evidence、scheduler、report、work-order 等入口改成明确 Params/Options bundle 或显式字段 adapter；LOG 创建子代理时也通过 `CreateRunParams`，不再跨模块展开任意 task 字段。
 - Converted log-analysis coercion, parser, query, ingest, evidence, scheduler, reports, work-order planning/creation, entity graph, and bounded query paths to explicit Params/Options bundles or explicit keyword adapters.
 - Removed product-level function var-keyword interfaces from `agent/log_analysis`; the work-order task creation boundary now passes `CreateRunParams` instead of expanding task payload fields.
 - Focused verification covered log-analysis query, ingest, dispatch queue/health, scheduler, first-loop bounded query, and work-order creation paths.
 
 ## 2026-05-07 hard/soft code-size cleanup
+- 中文说明：这一轮清掉 LOG 的 strict code-size soft，保持 `hard=0`。安全 prompt、query evidence、dispatch queue、ingest、dead-letter、entity graph 和 trace-case 都把多字段输入收进 bundle，避免后续继续长函数/长签名。
 - Cleared the remaining log-analysis strict code-size soft findings while keeping `hard=0`.
 - Security prompt, query evidence, dispatch queue, ingest pipeline, dedup, dead-letter, entity graph, and trace-case helpers now expose explicit bundle params instead of function-level var-keyword compatibility bags.
 - Focused verification covered dispatch, queue, entity graph, dead-letter, ingest, evidence, architecture guardrails, and strict code-size checks.
 - 2026-05-07 high-risk cleanup continued in detector rule helpers and query evidence references; finding construction and evidence metadata now keep multi-field payloads inside explicit params objects.
 - 2026-05-09 LOG work-order apply compatibility updated: LOG-created tasks keep domain-visible `analyst` / `reviewer` roles even though the generic subagent layer now has `reporter` / `checker` aliases; parent final gate and cannot-self-accept contracts remain enforced through the work-order quality contract.
 ## 2026-05-07 LLM annotation coverage update
+- 中文说明：这一轮只补 LOG 模块产品代码的双层注释，不改行为、文件格式、工作流语义或公开接口。后续改模块/类/函数行为、bundle 或副作用时要同步维护。
 - Product-code modules, classes, functions, and methods in the active module now carry the required `LLM:` plus `函数用途:` / `类用途:` definition-level double-layer comments format.
 - This is a documentation-only maintainability pass: behavior, file formats, workflow semantics, and public interfaces are intended to stay unchanged.
 - Future module changes must keep these comments current when changing module/class/def behavior, side effects, bundles, or caller expectations.

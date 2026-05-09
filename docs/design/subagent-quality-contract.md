@@ -495,6 +495,7 @@ Phase 10：失败沉淀
 - 代码补丁类：抽 diff 范围、测试结果、兼容入口、未解决风险。
 ## 2026-04-30 Implementation Note: Workflow Router / Compiler / Parent Gate
 
+- 中文说明：这一片把“用户只说目标，系统自己选择派工方式”的第一刀做出来。Router 负责选 workflow，Compiler 把 workflow 阶段编译成 worker 任务规格，Parent gate 负责生成父级验收计划，防止 worker 自己说 PASS 就算完成。
 - Status: Phase 3 first slice landed in code and focused tests.
 - Solves: users can describe the task in natural language while the system selects a workflow template, compiles template phases into reviewable worker dispatch specs, and creates a parent-side acceptance plan before trusting worker output.
 - Router: supports `auto`, `manual`, and `off`; honors explicit template ids; falls back safely; recognizes English and common Chinese code/quality task wording.
@@ -504,6 +505,7 @@ Phase 10：失败沉淀
 
 ## 2026-04-30 Implementation Note: Workflow Planner Facade
 
+- 中文说明：这一片把 router、compiler、parent-gate 的调用包成一个门面函数。父级不用每次手动串多个服务，只要调用 `plan_workflow_for_goal()` 就能拿到路由结果、模板、派工计划、验收计划和问题列表。
 - Status: dry-run planning facade landed.
 - Solves: parent code no longer has to call router, compiler, and parent-gate planner separately for every workflow experiment.
 - API: `plan_workflow_for_goal()` returns one `WorkflowPlanningResult` with the route decision, selected template, dispatch plan, parent acceptance plan, and accumulated issues.
@@ -513,6 +515,7 @@ Phase 10：失败沉淀
 
 ## 2026-04-30 Implementation Note: Workflow Plan CLI
 
+- 中文说明：这一片把 workflow 预览暴露成 CLI。用户或父会话可以先看系统打算怎么拆任务、怎么验收，再决定是否真的创建子代理；这个命令本身不创建、不执行、不验收。
 - Status: dry-run CLI preview landed.
 - Command: `my-agent subagents-workflow-plan "<goal>" [--template-id <id>] [--json]`.
 - Solves: users and the parent session can inspect the selected workflow, worker split, and parent acceptance checklist before creating any subagent task.
@@ -522,6 +525,7 @@ Phase 10：失败沉淀
 
 ## 2026-04-30 Implementation Note: Preview Persistence
 
+- 中文说明：这一片让 dry-run 预览可以显式保存到指定目录。好处是后续父级验收和调度记录能引用“当时具体看过哪份计划”，而不是只靠聊天记忆。
 - Status: explicit dry-run preview persistence landed.
 - Command: `my-agent subagents-workflow-plan "<goal>" --output-dir <dir>`.
 - Solves: parent acceptance can now reference the exact JSON/Markdown workflow preview used before dispatch, instead of relying on memory of the conversation.
