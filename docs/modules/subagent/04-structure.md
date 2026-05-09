@@ -67,7 +67,7 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/execution_records.py`：定义 `TestExecutionRecord`，保存真实验收执行证据字段、序列化、stdout/stderr 截断和 `passed` 派生结果。
 - `agent_py_agent/agent/subagents/execution_executor.py`：定义最小 `TestExecutor`，支持 command / file_check / content_check，当前不写任务状态、不生成 `test_execution.json`；command 可带 workspace 内 `working_dir` / `cwd`，执行记录会保存真实工作目录。
 - `agent_py_agent/agent/subagents/execution_executor_helpers.py`：承接 `TestExecutor` 的命令解析、跨平台 python argv、记录构造和 UTC 时间 helper，让 executor 主文件保持薄执行器职责。
-- `agent_py_agent/agent/subagents/execution_test_items.py`：在父级验收执行前预处理 tests；当 runner 只给出相对测试命令但 artifacts 都指向同一产物目录时，安全补 `working_dir`，并能在 workspace 内按唯一路径后缀恢复嵌套相对 artifact，避免在 workspace 根目录误判“0 tests ran”。
+- `agent_py_agent/agent/subagents/execution_test_items.py`：在父级验收执行前预处理 tests；当 runner 只给出相对测试命令但 artifacts 都指向同一产物目录时，安全补 `working_dir`，并能在 workspace 内按唯一路径后缀恢复嵌套相对 artifact；常见 `cd <workspace内目录> && python3 -m pytest ...` 会被归一成受限 `working_dir` 加纯命令，不放开 shell；若 tests 为空但 artifacts 里有 workspace 内 `test_*.py`，会生成保守 pytest 兜底，避免假绿和无谓的“0 tests ran”。
 - `agent_py_agent/agent/subagents/execution_report.py`：写入和读取 `test_execution.json`，并生成 `test_execution.md` 展示报告；JSON 是事实源，Markdown 不参与机器判断。
 - `agent_py_agent/agent/subagents/services/acceptance_machine_evidence.py`：只读 `reports/test_execution.json`，当父级真实测试全部通过且 runner 没有 evidence packet 时，把测试报告作为机器证据链；已有坏 evidence packet 不会被测试报告覆盖。
 - `agent_py_agent/agent/subagents/parent_acceptance_controller.py`：生成父代理验收 dry-run 决策，返回 `execute_tests` / `review_patches` / `inspect_only` / `request_human` / `rescue` 等下一步；它只读 refs 和机器事实源，不执行命令、不写 task；显式写入时生成 `parent_acceptance_decision.json`。

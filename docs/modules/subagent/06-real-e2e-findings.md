@@ -618,3 +618,127 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining risk:
   - `subagents-due-check --all` is still intentionally global and can be noisy in shared E2E workspaces.
   - Standalone stale `PLANNING` runs without children can still become takeover candidates; that remains the backlog/dispatch-stall policy.
+
+## 2026-05-09 Real 1/4/16/48 Clean Deliverables Tree E2E
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`
+  - Clean deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/real_tree_1778318291`
+  - Internal runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/real_tree_1778318291`
+  - Subagent workspace: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/real_tree_1778318291/subagents`
+  - Config: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/real_tree_1778318291/agent_config.yaml`
+  - Model backend: `anthropic_compatible`
+  - Model name: `MiniMax-M2.7`
+  - Tree shape: 1 root, 4 children, 16 grandchildren, 48 great-grandchild leaf workers.
+  - Real execution mode: 48 concurrent leaf `subagent-run --execute --no-probe` CLI processes with concurrency 6.
+
+### Result: Clean User Output And Bulky Internal Runtime Were Separated
+
+- Observed behavior:
+  - All 48 leaf runner CLI processes returned exit code 0.
+  - Runner duration range: min 57.92s, max 293.59s, avg 134.37s.
+  - User-visible deliverables directory contained only deliverable files after cleanup:
+    - final file count: 517
+    - internal/runtime leak count: 0
+  - Runtime-heavy files stayed under `.my_agent_runtime`, including subagent work orders, prompts, responses, reports, local store, memory, manifests, and E2E logs.
+- Status: passed for the requested directory split.
+- Remaining risk:
+  - The product should keep treating `deliverables/` as user-facing output and `.my_agent_runtime/` as internal state. Future cleanups should avoid deleting deliverables unless the task explicitly asks for it.
+
+### Result: Parent Oracle And Product Test Command Now Fail Honestly
+
+- Independent parent oracle:
+  - Direct pytest over all 48 deliverable folders produced 27 passed and 21 failed.
+  - Failures included real algorithm bugs, questionable child-authored expectations, and one syntax error class.
+- Product command before fixes:
+  - `subagents-tests --re-run` initially reported all 48 as CLI success because it accepted empty `test_execution.json` reports with `total_tests=0`.
+  - After the first fix, it stopped reporting fake success but exposed a workspace-root bug in the clean runtime layout.
+- Product command after fixes:
+  - Final full product rerun produced:
+    - 25 `passed_cli`
+    - 23 `failed_cli`
+    - Shape breakdown: 25 executed/passed, 22 executed/failed, 1 zero-tests blocked.
+  - Final report directory: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/real_tree_1778318291/product_subagents_tests_logs_after_artifact_infer`
+- Status: solved for fake-green reports, nested runtime workspace, safe `cd && pytest` commands, and missing-tests-with-test-artifact fallback.
+
+### Finding 17: `subagents-tests --re-run` Accepted Empty Acceptance Reports As Success
+
+- Discovered at: 2026-05-09 during the 48-leaf clean deliverables tree E2E.
+- Symptom:
+  - `subagents-tests --re-run` returned exit code 0 even when the acceptance side had written `test_execution.json` with `total_tests=0`.
+  - This masked real runner output tests and made all 48 leaves look green from the product CLI.
+- Root cause:
+  - CLI logic only checked whether `test_execution.json` existed after requesting acceptance test execution.
+  - It did not verify that the report actually executed a declared test.
+- Fix:
+  - `cmd_subagents_tests()` now treats an existing zero-test acceptance report as insufficient when `output.json` declares tests.
+  - It falls back to direct product test execution in that case.
+  - The CLI now returns nonzero when `total_tests <= 0` or any test failed.
+- Verification:
+  - `python3 -m pytest -q agent_py_agent/tests/test_subagents_tests_command.py agent_py_agent/tests/test_agent/test_subagent_acceptance.py agent_py_agent/tests/test_agent/test_dispatch_and_planner.py::test_subagent_dispatch_manual_acceptance_test_execution_is_test_only` -> passed.
+- Status: solved.
+
+### Finding 18: Acceptance Test Workspace Inference Broke With `.my_agent_runtime/.../subagents`
+
+- Discovered at: 2026-05-09 during product rerun after Finding 17.
+- Symptom:
+  - Tests for clean deliverables failed with errors such as `file or directory not found: test_solution.py`.
+  - The command ran from `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/real_tree_1778318291` instead of the task workspace root or deliverable directory.
+- Root cause:
+  - The old inference only recognized the legacy `.my_agent/subagents` layout.
+  - With the new split layout, `workspace.parent` pointed at the runtime directory rather than the user task directory.
+- Fix:
+  - Explicit acceptance execution and parent acceptance dry-run now prefer `manager.workspace_root` when available.
+  - Tests can still use inferred artifact working directories below the task root.
+- Verification:
+  - Added a regression where `subagent_workspace=".my_agent_runtime/run/subagents"` and artifacts live under `deliverables/leaf`.
+  - The acceptance test report now records `workspace_root` as the task root and command cwd as the deliverable directory.
+- Status: solved.
+
+### Finding 19: Model-Style `cd <dir> && pytest ...` Was Blocked Before Real Execution
+
+- Discovered at: 2026-05-09 during product rerun on the dijkstra leaf.
+- Symptom:
+  - Runner output declared `cd /.../deliverables/... && python3 -m pytest test_solution.py -v`.
+  - `TestExecutor` correctly blocked the shell chain, but the test was marked not executed.
+- Root cause:
+  - The safety layer blocks shell operators such as `&&`.
+  - The preprocessor did not normalize the common safe pattern into a bounded working directory plus a plain command.
+- Fix:
+  - `execution_test_items.py` now converts exactly one leading `cd <workspace-local-dir> && <command>` into:
+    - `working_dir=<that directory>`
+    - `command=<plain command>`
+  - The executor still validates the remaining command through the existing allowlist and shell-character blocker.
+- Verification:
+  - Regression test covers the conversion.
+  - Real dijkstra rerun changed from `executed=0` / command rejected to `executed=1` / real pytest failure.
+- Status: solved.
+
+### Finding 20: Some Runners Wrote Test Files But Omitted `tests` In `output.json`
+
+- Discovered at: 2026-05-09 during product rerun after workspace fixes.
+- Symptom:
+  - Three leaves had `total_tests=0`.
+  - Two of them had test artifacts on disk but no structured `tests` entries.
+  - One leaf had neither tests nor artifacts in `output.json`.
+- Root cause:
+  - Real model output can omit the structured `tests` list even when it created `test_*.py` files.
+  - The product command only trusted the structured tests list.
+- Fix:
+  - When `tests` is empty, `prepare_test_items()` now infers bounded pytest commands from workspace-local `test_*.py` artifacts.
+  - It does not infer from ordinary source files, non-Python files, or out-of-workspace paths.
+- Verification:
+  - Regression test covers artifact-only `test_solution.py`.
+  - Real rerun:
+    - median leaf changed from zero-tests to real executed failure.
+    - union-find leaf changed from zero-tests to real executed pass.
+    - toposort leaf remained zero-tests because `output.json` had neither tests nor artifacts.
+- Status: solved where artifact refs exist; remaining zero-tests behavior is intentional.
+
+### Remaining Gaps From The 48-Leaf Tree
+
+- One leaf still cannot be product-tested because the runner produced no structured `tests` and no structured `artifacts`; parent can only route it to rescue or manual inspection.
+- Child-authored tests are not a reliable sole quality oracle. Some failures are real code bugs, while some are bad test expectations. Parent-owned task-family test packs are still needed.
+- Large clean deliverables trees work, but future UI/CLI should make the two roots obvious:
+  - clean user output: `deliverables/<run_id>/...`
+  - internal runtime: `.my_agent_runtime/<run_id>/...`
