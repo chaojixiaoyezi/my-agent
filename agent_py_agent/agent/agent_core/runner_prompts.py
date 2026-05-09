@@ -54,12 +54,15 @@ def _build_subagent_runner_prompt(
 
     payload = json.dumps(asdict(context), ensure_ascii=False, indent=2)
     extra = instruction.strip() or "按执行上下文完成任务；如果能力不足，说明需要上抛的 capability_request。"
+    execution_contract = "\n".join(_runner_execution_contract_lines(context))
     return (
         "# SubAgent Runner Task\n\n"
         "你是一个被父代理授权的子代理，只能依据下面的执行上下文工作。\n"
         "不要使用上下文之外的 skill/tool，不要假完成；没有验收证据时只能标记等待验收或上抛能力请求。\n\n"
         "## Extra Instruction\n\n"
         f"{extra}\n\n"
+        "## Runner Contract\n\n"
+        f"{execution_contract}\n\n"
         "## Execution Context JSON\n\n"
         "```json\n"
         f"{payload}\n"
@@ -73,6 +76,20 @@ def _build_subagent_runner_prompt(
         "在最终结果块之前，不要把 [SUBAGENT_RESULT] 或 [/SUBAGENT_RESULT] 当作普通说明文字重复引用。\n\n"
         f"{_SUBAGENT_RESULT_TEMPLATE}"
     )
+
+
+# LLM: _runner_execution_contract_lines keeps model-facing runner rules precise without bloating the prompt builder.
+# 函数用途: 根据 runner 上下文生成执行边界说明，尤其说明叶子节点测试命令应交给父级验收器执行。
+def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[str]:
+    lines = [
+        "- 只把真正阻止你产出文件、报告或证据的缺口写成 capability_request。",
+        "- 如果你没有 shell/command/terminal 工具，不要因为不能自己运行 pytest 就提交 capability_request。",
+        "- 没有命令执行工具时，应写出可验收产物和测试文件，并在 tests/next_actions 中给父级验收器推荐命令。",
+        "- 推荐给父级验收器的命令必须是安全、具体、可复制的；不要假装你已经执行过它。",
+    ]
+    if "leaf" in str(context.role or "").lower():
+        lines.append("- 叶子节点重点是交付产物和测试文件；父级验收器负责运行命令、判定通过和触发 rescue。")
+    return lines
 
 
 # LLM: _build_subagent_runner_repair_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
