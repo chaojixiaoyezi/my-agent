@@ -23,6 +23,19 @@ def dispatch_record_payload(item) -> dict[str, object]:
     return payload
 
 
+# LLM: dispatch_recovery_payload keeps blocking runner-selection fixes visible before bulky records.
+# 函数用途: 当模型传错 run_id 时，把可执行恢复指令放到 dispatch_subagents 顶层返回。
+def dispatch_recovery_payload(records: list[object]) -> dict[str, object]:
+    for item in records:
+        if item.step == "runner_selection" and item.action == "invalid_run_ids":
+            return {
+                "action": "retry_dispatch_with_valid_run_id",
+                "message": item.message,
+                "valid_task_refs": list(item.evidence_paths or [])[:20],
+            }
+    return {}
+
+
 # LLM: _dispatch_record_runner_payload surfaces nested runner child creation as facts, not prose guesses.
 # 函数用途: 顶层主代理读取 dispatch_subagents 结果时，直接看到 runner 内部创建的 child ids/roles。
 def _dispatch_record_runner_payload(item) -> dict[str, object]:

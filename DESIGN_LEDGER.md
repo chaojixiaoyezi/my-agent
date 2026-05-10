@@ -1985,3 +1985,14 @@ def example(...):
 - 阻断记录会列出 `invalid_run_ids`、`valid_scope_run_ids`，并在错误 id 和唯一可见 child 共享短后缀时输出 `possible_corrections`。系统不自动纠正，避免隐式跑错任务。
 - 同父级重复领域去重继续保留 checkout/quality 这类真实重复保护，但现在过滤 generated id 片段和泛化编号词，避免误挡 `grand-1` / `grand-2` 这类恢复树 checker sibling。
 - 下一步：R8 复测 coordinator 是否能根据阻断记录重试正确 child id，再继续做 producer/quality 阶段依赖和静态购物流程验收。
+
+## 2026-05-11 Stage7 shopping E2E R8 path-drift and recovery visibility
+
+状态：已落地，待 R9 复测
+
+摘要：
+- R8 真实测试确认 auth/catalog 可以产出页面，但 cart coordinator 把父级 `/build` 目录漂移成 sibling `/stage7_r8_build`，说明“child spec 自己写路径就授权”还缺少父级权威根锚定。
+- `hierarchy_scope_guards.py` 新增 child write-root drift guard：父级已有权威产物根时，child goal / extra_write_roots 中的本地路径必须等于或位于这些根下面；否则返回 `child_write_root_drift`，不创建 child。
+- `read_artifact` 仍不允许读取任意文件；当模型只抄错 artifact path 前缀但文件名在 index 中唯一时，reader 会修复到登记记录，然后继续做 trusted tool-output 目录检查和 sha256 校验。
+- `dispatch_subagents` 顶层 payload 新增 `runner_selection_recovery`，`subagent_board` 顶层新增 `actionable_run_ids` 并截断长 goal，降低真实 runner 在大报告/外置摘要里看不到关键 id 的概率。
+- 下一步：R9 用干净 runtime/deliverables 复测 cart 分支是否能被 drift guard 纠回 `/build`，再继续做 producer/quality 阶段依赖和完整购物站静态验收。

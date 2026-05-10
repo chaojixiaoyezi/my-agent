@@ -384,3 +384,10 @@
 - 已修正：同父级 coordinator/checker 去重现在会过滤 generated id 片段和 `grand/one/two` 这类泛化编号词，避免误挡 recovery 树里的 `grand-1` / `grand-2` checker siblings。
 - 设计边界：工具层只提示，不自动替换 id；这样避免隐形改写模型意图，也避免极小概率后缀撞车时跑错孩子。
 - 下一步：用干净 R8 复测 root -> coordinator -> leaf，看 cart coordinator 是否能根据阻断记录重试正确 child id，然后继续补 producer/quality 阶段顺序和完整购物站静态验收。
+
+## 2026-05-11 Stage7 shopping E2E R8 path-drift guard
+- 中文说明：R8 真实测试中 auth/catalog 分支完成并写出页面，但 cart coordinator 把父级的 `/build` 目标漂移成 sibling `/stage7_r8_build`，随后继续围绕错误目录和错误 artifact refs 空转。
+- 已修正：`hierarchy_scope_guards.py` 会在 child run 落盘前检查 child goal / extra_write_roots 是否仍位于父级继承的权威产物根下；如果模型 invent sibling 目录，会返回 `child_write_root_drift` 并列出 invalid/valid roots。
+- 已修正：`read_artifact` 仍以 `tool_outputs/index.jsonl` 为唯一事实源，但现在能用唯一 artifact 文件名修复“路径前缀抄错”的情况。
+- 已修正：`dispatch_subagents` 把 `runner_selection_recovery` 放进顶层 payload；`subagent_board` 增加 `actionable_run_ids` 并截断长 goal，让大报告被外置时模型仍先看到该用哪些 run id。
+- 下一步：用干净 R9 复测 cart 分支是否能被 path-drift guard 纠回 `/build`，然后继续做 producer/quality 阶段依赖和静态购物流程验收。

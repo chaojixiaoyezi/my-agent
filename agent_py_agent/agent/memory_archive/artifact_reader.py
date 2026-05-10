@@ -107,7 +107,22 @@ def _find_index_record(root: Path, artifact_ref: str) -> dict[str, Any] | None:
             return record
         if resolved_ref is not None and record_path == resolved_ref:
             return record
+    if resolved_ref is not None:
+        return _unique_record_by_basename(records, ref_path.name)
     return None
+
+
+# LLM: _unique_record_by_basename repairs copied artifact paths with a wrong workspace prefix only.
+# 函数用途: 当模型把已登记 artifact 的目录前缀抄错时，用唯一文件名匹配回 index 记录。
+def _unique_record_by_basename(records: list[dict[str, Any]], filename: str) -> dict[str, Any] | None:
+    if not filename.endswith(".json"):
+        return None
+    matches = [
+        record
+        for record in records
+        if Path(str(record.get("path", "") or "")).name == filename
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 # LLM: _index_records is tolerant of corrupt lines but never treats index absence as permission to read files.

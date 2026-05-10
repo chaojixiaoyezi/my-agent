@@ -238,3 +238,8 @@
 - 中文说明：子代理 leaf 被授权写入 `allowed_write_roots` 后，artifact manifest 现在会把这些目录当成安全元数据解析根；这样 deliverables 里的真实产物能显示为 `resolved`，不会在接管包里误标越界。
 - 行为边界不变：manifest 仍只记录 ref/path/exists/size/hash/status，不复制正文；未授权外部绝对路径仍然是 `blocked_outside_workspace`。
 - 本轮 focused 验收：`python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_subagent_artifact_allowed_roots.py agent_py_agent/tests/test_memory_workspace_safety.py::test_subagent_artifact_manifest_blocks_outside_workspace_refs` -> passed。
+
+## 2026-05-11 artifact copied-prefix recovery
+- 中文说明：真实 E2E 里模型会把 artifact 路径前缀抄成当前代码仓库路径，导致明明 index 里有登记，却按错误绝对路径读不到正文；现在 artifact reader 在精确匹配失败时，只允许用唯一 artifact 文件名回到 index 记录。
+- 行为边界不变：修复只信任 `index.jsonl` 已登记记录，仍会检查 artifact 位于 `memory_archive/artifacts/tool_outputs/` 边界内，并校验 sha256；同名多条或未登记文件继续失败，不会变成任意文件读取。
+- 本轮 focused 验收：`python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_memory_artifact_read.py::test_read_artifact_tool_repairs_wrong_prefix_with_unique_artifact_name` -> passed。

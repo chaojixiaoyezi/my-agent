@@ -949,7 +949,7 @@ docs/
 - `agent_py_agent/agent/memory_archive/compact_resume_failsafe.py`: 从 compact restore refs 指向的 hook JSONL 中提取工具输出外置前 fail-safe checkpoint，保持 memory-resume refs-only。
 - `agent_py_agent/agent/memory_archive/compact_continue_packet.py`: 把 compact resume 后的 work_state、action guard、推荐读取路径和 subagent owner refs 固定成继续工作包；它只表达恢复上下文可继续，不执行工具或业务验收。
 - `agent_py_agent/agent/memory_archive/compact_resume_blocked.py`: 生成 compact metadata 缺失时的 schema-compatible 阻断 payload，让主 resume 编排保持薄。
-- `agent_py_agent/agent/memory_archive/artifact_reader.py`: 按 tool output index 显式读取外置 artifact 正文切片，并校验路径边界和 sha256。
+- `agent_py_agent/agent/memory_archive/artifact_reader.py`: 按 tool output index 显式读取外置 artifact 正文切片，并校验路径边界和 sha256；路径前缀抄错但 artifact 文件名唯一时，可修复到登记记录。
 - `agent_py_agent/agent/tooling/artifact.py`: 注册 `read_artifact` 工具，给模型提供受控 artifact slice 读取入口。
 - `agent_py_agent/cli/memory_artifact_commands.py`: 提供 `memory-artifact-read` 命令，保持 artifact 正文读取和 archive resume/search CLI 分离。
 - `agent_py_agent/cli/memory_resume_compact_rendering.py`: 输出 `memory-resume --from-compact` 的 handoff、continue packet、completion prompt 和推荐路径。
@@ -982,7 +982,7 @@ docs/
 - `agent_py_agent/agent/subagents/execution_executor.py`: `content_check` 支持 `content_pattern` 包含匹配，也支持 `content_equals` / `expected_content` + `match_mode=exact`，用于严格验证文件内容没有额外字符。
 - `agent_py_agent/agent/agent_core/_tool_loop_service.py`: 主代理和 subagent 共用的工具循环；到达 `max_tool_rounds` 后给模型一次收口机会，如果模型仍吐工具调用，返回确定性停止说明而不是把新 `[TOOL_CALL]` 当最终回答。
 - `agent_py_agent/agent/subagents/services/hierarchy_role_identity.py`: 从 scheduler 拆出的角色 identity 兜底策略，根据 `agent_name` / `goal` 恢复模型漏填的 researcher/tester/acceptor/bug_finder/writer/worker 等角色。
-- `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 从 scheduler 中拆出的层级 scope guard，集中处理空计划、深度/数量限制、禁止 sibling 领域、同批混建 coordinator/leaf、domain mismatch 和同父级 coordinator 领域去重；去重会过滤 generated id 片段和泛化编号词，避免误挡 recovery checker siblings。
+- `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 从 scheduler 中拆出的层级 scope guard，集中处理空计划、深度/数量限制、禁止 sibling 领域、同批混建 coordinator/leaf、child 写入根漂移、domain mismatch 和同父级 coordinator 领域去重；去重会过滤 generated id 片段和泛化编号词，避免误挡 recovery checker siblings。
 - `agent_py_agent/agent/subagents/services/hierarchy_write_policy.py`: 层级写入根策略，区分 task-local 报告写入和最终产品写入；coordinator/researcher/tester/bug_finder/acceptor 可保留产品路径上下文但不继承产品写入根。
 - `agent_py_agent/agent/subagents/services/hierarchy_recovery.py`: 多层恢复包服务，从 root run 只读扫描子树，返回需要恢复的后代、当前/父级 context bundle refs、接管入口和 checkpoint refs；现在也可按 capability 阈值标记 stale `RUNNING` 后代，不读取 artifact 正文。
 - `agent_py_agent/agent/subagents/services/board.py`: due-check 和 plan-actions 支持 root_id 作用域，真实 E2E 多棵任务树共用 workspace 时可以只看当前 root 并只生成当前树动作。
@@ -998,6 +998,10 @@ docs/
 - `agent_py_agent/agent/agent_core/coordinator_seed_tools.py`: 显式 root/coordinator seed 的工具过滤策略；模型额外传入 shell/web 工具时收敛回内置 coordinator 工具包。
 - `agent_py_agent/agent/agent_core/spawn_role_seed.py`: CLI 显式 role seed 入口；root/coordinator seed 保留 goal 里的产品路径给下层派工，但自身 allowed write roots 只保留 task-local 协调目录。
 - `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context dispatch 的直接 child 进度摘要；含状态计数、unfinished ids、`needs_more_dispatch` 和带 `run_ids` 的建议继续调度工具调用。
+- `agent_py_agent/agent/agent_core/orchestration_board_payload.py`: subagent board 输出整形 helper；把可继续处理的 run id 按状态放到顶层，并截断长 goal，避免看板响应挤占模型上下文。
+- `agent_py_agent/agent/agent_core/orchestration_dispatch_tool.py`: `dispatch_subagents` 模型工具类；把模型参数收敛成 `DispatchParams`，返回 refs-first 调度报告和错误 run id 恢复提示。
+- `agent_py_agent/agent/agent_core/orchestration_workflow_mode.py`: create/dispatch 共用 workflow mode 归一化 helper，维持 `off` / `plan` / `auto` 兼容语义。
+- `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`: dispatch 工具返回 payload 压缩层；单条 record 只保留 refs 和关键字段，错 run_id 时把 `runner_selection_recovery` 放到顶层。
 - `agent_py_agent/agent/agent_core/dispatch_runner_selection.py`: runner 候选范围和显式 `include_run_ids` 预检；错 id 会返回 `runner_selection/invalid_run_ids`、可用 direct child ids 和保守纠正提示。
 - `agent_py_agent/agent/agent_core/dispatch_runner_batches.py`: runner 候选收集和执行批处理；调用 selection helper 精确推进父节点给定的直接孩子。
 - `agent_py_agent/agent/tooling/json_repair.py`: 工具调用 JSON 的窄口修复 helper；目前只修有效对象后多余右花括号，避免模型因 parse error 把完整任务 goal 越改越短。

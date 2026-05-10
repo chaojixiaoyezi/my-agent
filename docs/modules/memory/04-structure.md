@@ -240,6 +240,10 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 - `cli/memory_artifact_commands.py` exposes `memory-artifact-read`, keeping failed reads metadata-only and successful reads clearly marked with `reads_artifact_body=true`.
 - `tooling/artifact.py` exposes `read_artifact` to the model as the controlled runtime tool; ordinary workspace files still go through `read_file`.
 
+## 2026-05-11 artifact copied-prefix recovery structure update
+- `memory_archive/artifact_reader.py` 现在在精确 path/hash/call_id 匹配失败、且 ref 看起来像路径时，会尝试用唯一 artifact 文件名回到已登记 index 记录；这是为了修复模型复制路径前缀时把 workspace 根写错的真实 E2E 问题。
+- 这个 fallback 仍然是 index-first：同名不唯一、未登记 artifact、目录越界或 sha256 不一致都会失败；成功读取仍只返回显式 slice，不把 artifact 正文塞进普通恢复上下文。
+
 ## 2026-05-08 artifact explicit read CI follow-up
 - `artifact_reader.py` 的路径根、目录边界、path-like ref 判断和 sha256 helper 现在都有定义级用途说明，后续维护者能直接看到这些 helper 是任意文件读取防线的一部分。
 - `__main__.py` 的 CLI 导入顺序已按 ruff 统一格式整理；结构和命令语义不变。

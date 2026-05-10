@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 from ..models import SubAgentTask
+from .base import _extract_write_dirs
+from .hierarchy_write_policy import inherited_extra_write_roots
 
 _DOMAIN_STOPWORDS = {
     "agent",
@@ -57,6 +60,9 @@ def schedule_block_reason(parent: SubAgentTask, request: Any) -> str:
     mixed_reason = _mixed_coordinator_leaf_reason(request.child_specs)
     if mixed_reason:
         return mixed_reason
+    drift_reason = _child_write_root_drift_reason(parent, request)
+    if drift_reason:
+        return drift_reason
     return _forbidden_child_scope_reason(parent, request) or _domain_mismatch_reason(parent, request)
 
 
@@ -141,6 +147,49 @@ def _mixed_coordinator_leaf_reason(child_specs: list[Any]) -> str:
     has_coordinator = any(_child_has_role_token(spec, {"coordinator", "lead"}) for spec in child_specs)
     has_leaf = any(_child_has_role_token(spec, {"leaf", "leaf_worker", "leaf-worker"}) for spec in child_specs)
     return "mixed_coordinator_leaf_children" if has_coordinator and has_leaf else ""
+
+
+# LLM: _child_write_root_drift_reason blocks model-invented sibling output paths before child runs exist.
+# 函数用途: parent 已有权威产物根时，child 不能把 build 猜成 sibling 目录后继续落盘。
+def _child_write_root_drift_reason(parent: SubAgentTask, request: Any) -> str:
+    valid_roots = inherited_extra_write_roots(parent)
+    if not valid_roots:
+        return ""
+    for spec in request.child_specs:
+        invalid = _invalid_child_write_roots(spec, valid_roots)
+        if invalid:
+            return (
+                "child_write_root_drift:"
+                f"invalid_write_roots={invalid};"
+                f"valid_inherited_write_roots={valid_roots};"
+                "rewrite child goal with the exact inherited root"
+            )
+    return ""
+
+
+# LLM: _invalid_child_write_roots compares model-proposed roots against inherited product roots literally.
+# 函数用途: 找出 child goal/extra_write_roots 里不在父级产物根下的本地路径。
+def _invalid_child_write_roots(spec: Any, valid_roots: list[str]) -> list[str]:
+    invalid: list[str] = []
+    for raw in [*getattr(spec, "extra_write_roots", []), *_extract_write_dirs(getattr(spec, "goal", ""))]:
+        text = str(raw or "").rstrip("/")
+        if text and not _is_under_any_write_root(text, valid_roots) and text not in invalid:
+            invalid.append(text)
+    return invalid
+
+
+# LLM: _is_under_any_write_root treats non-existing files/directories as path facts without touching disk.
+# 函数用途: 判断候选路径是否等于或位于任一权威产物根下面。
+def _is_under_any_write_root(candidate: str, roots: list[str]) -> bool:
+    path = Path(candidate).expanduser().resolve(strict=False)
+    for raw in roots:
+        root = Path(str(raw)).expanduser().resolve(strict=False)
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 # LLM: _child_has_role_token keeps hierarchy role checks limited to explicit role/agent labels.
