@@ -54,7 +54,7 @@ _DISPATCH_PARAMETERS = {
     "max_runners": "本轮最多推进多少个 runner，默认 1；0 表示不执行 runner",
     "limit": "每阶段最多处理多少条记录，默认 20；0 表示不限制",
     "run_ids": "精确指定本轮要推进的 run_id 列表，按给定顺序执行；也可写 include_run_ids",
-    "runner_instruction": "给 runner 的额外指令",
+    "runner_instruction": "给单个 runner 的额外指令；多 run_ids 同轮执行时会被忽略以防串线",
 }
 _DISPATCH_PARAMETER_DETAILS = {
     "apply": "顶层默认 false 只生成计划和报告；当前 runner 内部默认 true，只推进当前节点的直接孩子。显式 false 会覆盖默认。",
@@ -65,6 +65,7 @@ _DISPATCH_PARAMETER_DETAILS = {
     "workflow_mode": "plan 只把 workflow 计划写回父任务；auto 会在计划 OK 时落成 worker 子工单；未知值保守按 off 处理。",
     "max_runners": "用来限制本轮推进数量；顶层默认 1，runner 内部默认 6，避免父节点只推进一个孩子就超时。",
     "run_ids": "适合父 runner 用 schedule_child_subagents 返回的 created_run_ids 指定本轮孩子，例如先跑 auth/catalog，再跑 cart/quality。",
+    "runner_instruction": "只适合单个 run_id 的补充说明。多个不同子任务一起跑时不要写子任务专属内容；需要专属说明就拆成多次单 run_id dispatch。",
 }
 
 _SCHEDULE_CHILD_USE_CASES = [
@@ -161,7 +162,7 @@ def build_dispatch_subagents_spec() -> ToolSpec:
         examples=[
             '{"tool":"dispatch_subagents","apply":false,"workflow_mode":"plan","max_runners":1}',
             '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"run_ids":["child-auth","child-catalog"],"max_runners":2}',
-            '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"workflow_mode":"auto","max_runners":2,"runner_instruction":"只在隔离 fixture 目录内写文件，并输出可验收证据"}',
+            '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"run_ids":["child-auth"],"max_runners":1,"runner_instruction":"只补充 auth 子任务自己的执行重点"}',
         ],
     )
 

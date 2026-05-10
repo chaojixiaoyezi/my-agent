@@ -69,6 +69,7 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
         return records
     batch.pending_runner_jobs = _limited_runner_jobs(agent, pending_runner_jobs)
     batch.records = records
+    _guard_multi_runner_instruction(agent, ctx, batch)
     return run_runner_batch(agent, batch)
 
 
@@ -151,6 +152,36 @@ def _limited_runner_jobs(agent, pending_runner_jobs: list) -> list:
         )
     )
     return result.allowed_jobs
+
+
+# LLM: _guard_multi_runner_instruction prevents one child-specific hint from poisoning a batch of distinct runners.
+# 函数用途: 多个 runner 同轮执行时清空共享 runner_instruction，并写一条调度记录，避免 auth 指令串到 catalog/cart 等不同分支。
+def _guard_multi_runner_instruction(agent, ctx: DispatchContext, batch: RunnerBatchContext) -> None:
+    if len(batch.pending_runner_jobs) <= 1 or not str(batch.effective_runner_instruction or "").strip():
+        return
+    task_dirs = [str(before.task_dir) for _, before, _ in batch.pending_runner_jobs if before.task_dir]
+    batch.records.append(_multi_runner_instruction_record(agent, ctx, task_dirs))
+    batch.effective_runner_instruction = ""
+
+
+# LLM: _multi_runner_instruction_record keeps the safety downgrade visible without leaking full prompt text.
+# 函数用途: 构建“多 runner 指令被忽略”的报告记录；只写原因和任务目录引用，不写完整指令正文。
+def _multi_runner_instruction_record(agent, ctx: DispatchContext, evidence_paths: list[str]):
+    return agent.subagents.make_dispatch_record(
+        params=DispatchRecordParams(
+            step="runner_instruction",
+            action="ignore_multi_runner_instruction",
+            dry_run=not ctx.apply,
+            applied=False,
+            ok=True,
+            message=(
+                "已忽略本轮共享 runner_instruction：同一次 dispatch 选中了多个 runner，"
+                "为避免某个子任务专属提示污染其他分支，请改为分别 dispatch 单个 run_id，"
+                "或把通用要求写入每个 child goal/context bundle。"
+            ),
+            evidence_paths=evidence_paths[:20],
+        ),
+    )
 
 
 # LLM: _runner_role_limits reads an optional future config hook without requiring schema changes today.

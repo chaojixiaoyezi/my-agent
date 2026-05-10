@@ -1963,3 +1963,14 @@ def example(...):
 - `hierarchy_scope_guards.py` 新增同父级 coordinator-domain guard；只作用于 coordinator/checker/tester/reviewer 类角色，避免误拦多个真实 worker/leaf。
 - `artifact_registry.py` 现在把 task 的 `allowed_write_roots` 纳入 artifact manifest 安全解析根；被授权写出的业务产物能记录 exists/size/hash，越界路径仍然 blocked 且不读取正文。
 - 下一步：R6 必须验证重复 coordinator 被阻断、deliverables 产物在 takeover manifest 中可解析，并继续推进 producer/quality 阶段依赖。
+
+## 2026-05-11 Stage7 shopping E2E R6 multi-run instruction guard
+
+状态：已落地，待 R7 复测
+
+摘要：
+- R6 真实测试中 root 没有重复创建 checkout/quality，说明同域去重生效；但同轮 dispatch auth/catalog/cart 时，auth 专属 `runner_instruction` 被广播给所有 runner，导致 cart 分支创建 auth leaf。
+- `dispatch_runner_batches.py` 新增多 runner 指令保护：一个批次包含多个 pending runner 且有共享 `runner_instruction` 时，清空该共享指令并写入 `ignore_multi_runner_instruction` 调度记录。
+- 单个 run_id dispatch 仍保留专属 `runner_instruction`，用于父节点对某一个孩子补充上下文。
+- 工具说明和 coordinator prompt 已同步：多个孩子一起跑时不要写子任务专属 runner_instruction；需要专属补充就拆成单 run_id dispatch。
+- 下一步：R7 复测身份不串线，再补 producer/quality 阶段依赖和完整购物站静态验收。

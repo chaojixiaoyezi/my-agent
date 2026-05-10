@@ -2055,3 +2055,34 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining gaps:
   - Rerun R6 from a clean runtime/deliverables with the duplicate-domain guard and allowed-artifact-root fix active.
   - Add producer/quality phase gating so quality/checker runs after auth/catalog/cart workers have produced or explicitly failed.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R6
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r6.yaml`.
+  - Internal runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r6`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r6`.
+  - Root run: `subagent-1778441176-aab44813`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+- 中文说明：
+  - R6 继续遵守“外层只观察 root”的真实测试方式；外层没有替下层创建 leaf，也没有替它们写页面。
+  - Root 正确只创建了 auth、catalog、cart-checkout 三个直接生产 coordinator，没有再重复创建 checkout/quality 分支，说明 R5 的同域去重生效。
+  - 这轮主动停止，因为暴露出多 runner dispatch 的共享指令污染问题；不能把这个错误路径继续跑成购物网站验收。
+- Observed facts:
+  - Root 对 3 个 coordinator 使用同一次 `dispatch_subagents(run_ids=[auth,catalog,cart], execute_runners=true)`。
+  - 这次调用同时传入了 `runner_instruction="你是 auth-coordinator..."`。
+  - Auth、catalog、cart-checkout 三个 runner prompt 都收到了同一段 auth 专属 `Extra Instruction`。
+  - Cart-checkout coordinator 因此创建了 `auth-leaf`，并让它写出了 `register.html` / `login.html`；这是子代理自己在错误上下文下执行的结果，不是外层代写。
+  - Cart coordinator 第一次尝试 `dispatch_subagents(execute_runners=true, apply=false)` 被安全门拒绝；这是正确保护，但提示词需要更明确告诉 coordinator 跑 child 时用 `apply=true`。
+- Finding 46: multi-run dispatch must not broadcast task-specific runner instruction.
+  - Symptom: 一个 auth 专属补充指令被广播给 catalog/cart 分支，导致下层节点身份串线。
+  - 中文解释：主节点想“一口气叫三个人开工”，但又附带了一句“你是 auth”。结果三个人都听成了“我是 auth”，购物车分支也去写登录注册。这种问题会让越往下的孙代理越跑偏。
+  - Root cause: dispatch runner batch used one shared `effective_runner_instruction` for every selected runner, whether the batch contained one child or many unrelated children.
+  - Fix: when a dispatch batch contains more than one pending runner and a shared `runner_instruction`, dispatch now clears that instruction before launching workers and records `ignore_multi_runner_instruction` in the dispatch report. Single-run dispatch still keeps the instruction.
+  - Prompt/spec update: `dispatch_subagents` docs now say task-specific `runner_instruction` is for a single `run_id`; multiple children need separate dispatch calls or child goal/context-bundle fields. Coordinator prompt also now spells out `dispatch_subagents(apply=true, execute_runners=true)` for running direct children.
+  - Verification: `test_dispatch_parallel_runner_pool_does_not_broadcast_specific_instruction` and `test_dispatch_single_runner_keeps_specific_instruction`.
+- Remaining gaps:
+  - Rerun R7 from a clean runtime/deliverables to verify multi-run dispatch no longer contaminates child identity.
+  - Continue producer/quality phase gating so quality/test/acceptance starts after auth/catalog/cart have produced or explicitly failed.
+  - Add full static shopping-site validation: missing pages, `${...}` placeholders, dead links, dead images, and inert buttons must block acceptance.
