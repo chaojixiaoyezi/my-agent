@@ -206,6 +206,58 @@ def test_prepare_test_items_infers_static_site_check_for_html_artifacts(tmp_path
     }]
 
 
+# LLM: test_prepare_test_items_drops_malformed_runner_checklist_when_static_check_is_available covers R13.
+# 函数用途: 模型把清单写成 content_check 但缺 file_path/pattern 时，自动站点验收接管，避免误报失败。
+def test_prepare_test_items_drops_malformed_runner_checklist_when_static_check_is_available(tmp_path):
+    site_dir = tmp_path / "deliverables" / "shop" / "build"
+    site_dir.mkdir(parents=True)
+    (site_dir / "index.html").write_text("<link rel='stylesheet' href='style.css'>", encoding="utf-8")
+    (site_dir / "cart.html").write_text("<script src='app.js'></script>", encoding="utf-8")
+    (site_dir / "style.css").write_text("body { color: #111; }\n", encoding="utf-8")
+    (site_dir / "app.js").write_text("console.log('ok');\n", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[{
+                "name": "文件结构验证",
+                "validation_method": "content_check",
+                "command": "",
+                "working_dir": str(site_dir),
+                "ok": True,
+                "summary": "8个HTML文件 + CSS + JS + images目录",
+            }],
+            output={"artifacts": [
+                {"path": str(site_dir / "index.html")},
+                {"path": str(site_dir / "cart.html")},
+                {"path": str(site_dir / "style.css")},
+                {"path": str(site_dir / "app.js")},
+            ]},
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert prepared == [{
+        "name": "inferred static site check",
+        "validation_method": "static_site_check",
+        "site_root": "deliverables/shop/build",
+        "required_files": ["cart.html", "index.html"],
+    }]
+
+
+# LLM: test_prepare_test_items_keeps_malformed_check_without_machine_fallback preserves conservative failure signals.
+# 函数用途: 没有自动机器验收兜底时，格式不完整的测试项仍保留，让父级看到 runner 输出不合格。
+def test_prepare_test_items_keeps_malformed_check_without_machine_fallback(tmp_path):
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[{"name": "文件结构验证", "validation_method": "content_check"}],
+            output={"artifacts": []},
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert prepared == [{"name": "文件结构验证", "validation_method": "content_check"}]
+
+
 # LLM: test_prepare_test_items_does_not_duplicate_static_site_check preserves runner-declared tests.
 # 函数用途: 模型已显式给 static_site_check 时，预处理只保留原测试并补安全字段，不重复追加。
 def test_prepare_test_items_does_not_duplicate_static_site_check(tmp_path):
