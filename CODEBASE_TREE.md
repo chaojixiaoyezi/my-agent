@@ -288,7 +288,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - 执行工具调用。
 - 支持 `allowed_tools` 白名单，给 subagent runner 限制可见和可调用工具。
 - `AgentConfig.subagent_allowed_tools=[]` 表示子代理工具由角色模板、任务目标和调度器自动判断；非空列表才作为全局受限白名单。`subagent_role_template_dirs=[]` 默认使用工作区 `.agent/subagents/roles` 作为用户外置角色模板目录；角色模板摘要会进入工具规格和 coordinator prompt，帮助模型按角色派工。
-- `spawn-subagents --role coordinator --agent-name <name>` 是层级 E2E 的 root seed 入口：外层只创建主节点，主节点再创建子代理，子代理再创建孙代理，孙代理再创建孙孙代理；coordinator seed 默认有调度、看板、读取和 task-local 报告写入工具，但模型额外传入的 shell/web 工具会被过滤，最终业务产物仍由 worker/writer/leaf_worker 写入。
+- `spawn-subagents --role coordinator --agent-name <name>` 是层级 E2E 的 root seed 入口：外层只创建主节点，主节点再创建子代理，子代理再创建孙代理，孙代理再创建孙孙代理；coordinator seed 默认有调度、看板、读取和 task-local 报告写入工具，但模型额外传入的 shell/web 工具会被过滤。显式 root/coordinator 只保留产物路径上下文，不继承最终产物写入根，最终业务产物仍由 worker/writer/leaf_worker 写入。
 - 解析模型输出里的工具调用块。
   标准格式是 `[TOOL_CALL]...JSON...[/TOOL_CALL]`，同时兼容 Qwen/OpenClaw 常见的 XML-ish `<tool_call><function=...><parameter=...>` 方言。
   如果 XML-ish 工具调用只有半截，解析器会返回 `__parse_error__`，让主循环继续可恢复，而不是直接崩掉。
@@ -987,6 +987,7 @@ docs/
 - `agent_py_agent/agent/subagents/role_templates.py`: 加载内置和用户 JSON role templates，要求广义角色、中文说明和多目标适用，坏模板记录 issue；提供轻量 `role_template_index_text()` 给主代理常驻提示词，按需 `role_template_detail_text()` 给派工 coordinator 展开完整角色提示。
 - `agent_py_agent/agent/subagents/role_template_catalog/builtin/*.json`: 内置 `coordinator/worker/bug_finder/tester/acceptor/researcher/writer` 角色模板。
 - `agent_py_agent/agent/agent_core/coordinator_seed_tools.py`: 显式 root/coordinator seed 的工具过滤策略；模型额外传入 shell/web 工具时收敛回内置 coordinator 工具包。
+- `agent_py_agent/agent/agent_core/spawn_role_seed.py`: CLI 显式 role seed 入口；root/coordinator seed 保留 goal 里的产品路径给下层派工，但自身 allowed write roots 只保留 task-local 协调目录。
 - `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context dispatch 的直接 child 进度摘要；含状态计数、unfinished ids、`needs_more_dispatch` 和建议继续调度工具调用。
 - `agent_py_agent/agent/tooling/json_repair.py`: 工具调用 JSON 的窄口修复 helper；目前只修有效对象后多余右花括号，避免模型因 parse error 把完整任务 goal 越改越短。
 - `agent_py_agent/agent/subagents/role_contracts.py`: 新增 reporter/checker 角色契约和 analyst/reviewer 兼容映射；同时把模板角色接入默认工具、输出契约和 parent final gate。

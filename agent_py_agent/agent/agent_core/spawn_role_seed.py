@@ -46,11 +46,11 @@ def is_explicit_root_role(role: str) -> bool:
     return "coordinator" in text or text.endswith("lead")
 
 
-# LLM: spawn_explicit_role_runs creates parent-capable seed runs without using worker split defaults.
-# 函数用途: 创建显式 root/coordinator 任务；外层只负责 seed，后续子/孙/孙孙必须由上一层自己创建。
+# LLM: spawn_explicit_role_runs creates parent-capable seed runs without granting product write roots.
+# 函数用途: 创建显式 root/coordinator 任务；产物路径保留在 goal 里给下层派工，root 自己只写协调报告。
 def spawn_explicit_role_runs(request: SpawnExplicitRoleRequest) -> list[SubAgentTask]:
     role = clean_spawn_role(request.options.role)
-    extra_roots = _extract_write_dirs(request.options.goal)
+    extra_roots = [] if is_explicit_root_role(role) else _extract_write_dirs(request.options.goal)
     allowed_tools = _spawn_role_allowed_tools(role, request.allowed_tools)
     tasks: list[SubAgentTask] = []
     for index in range(1, request.count + 1):
