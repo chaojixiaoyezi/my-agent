@@ -1721,3 +1721,46 @@ This document is append-only. Record every real subagent E2E issue found during 
   - `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_orchestration_coordinator_seed_tools.py agent_py_agent/tests/test_subagent_hierarchy_write_policy.py` -> `5 passed`.
   - `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_orchestration_dispatch_child_refs.py` -> `5 passed`.
   - Real MiniMax run `role_template_boundary_retest_20260510_200613` verified the corrected write roots from `task.json` and debug trace.
+
+## 2026-05-10 Role Template Continue Dispatch Retest
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/role_template_continue_retest_20260510_204242`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/role_template_continue_retest_20260510_204242`.
+  - Root run: `subagent-1778416997-d49ebeb8`.
+  - Model name: `MiniMax-M2.7`.
+  - Observation rule: outer controller only seeded root/coordinator and then dispatched that root; all six direct children were created by root itself.
+- 中文说明：
+  - 这轮验证两个问题：第一，CLI 显式创建 root/coordinator 时，root 只能写自己的协调目录，不能因为 goal 里出现产物路径就拿到最终产物写权限；第二，root 看到还有 child 没跑完时，能不能根据 `needs_more_dispatch` / `unfinished_run_ids` 继续调度下一波。
+  - 外层没有替 root 创建 researcher/worker/writer/bug_finder/tester/acceptor；这些直接子代理都来自 root 的 `schedule_child_subagents`。
+- Observed hierarchy:
+  - `researcher`: `subagent-1778417047-c0133cf5` -> `DONE / VERIFIED`.
+  - `leaf_worker`: `subagent-1778417047-54945bfd` -> `DONE / VERIFIED`.
+  - `writer`: `subagent-1778417047-8ac14739` -> `DONE / VERIFIED`.
+  - `tester`: `subagent-1778417047-c2208e30` -> `BLOCKED / FAILED`.
+  - `acceptor`: `subagent-1778417047-e2cc4f33` -> `BLOCKED / FAILED`.
+  - `bug_finder`: `subagent-1778417047-595d2f54` -> `AWAITING_ACCEPTANCE / NEEDS_ACCEPTANCE`.
+- Observed deliverables:
+  - `product/role_template_demo/__init__.py`.
+  - `product/role_template_demo/calculator.py`.
+  - `product/role_template_demo/test_calculator.py`.
+  - `product/README.md`.
+  - No subagent runtime files were written into the product directory; `.DS_Store` may appear at the macOS deliverables root and is not a my-agent runtime artifact.
+- Finding 1: CLI root/coordinator seed still had a separate write-root path.
+  - Symptom: the first continue retest exposed that `spawn-subagents --role coordinator` used `_extract_write_dirs(goal)` directly and could grant root the product path.
+  - 中文解释：代码路径有两个入口。模型工具入口已经修过，但 CLI 入口还会从 goal 里自动提取产物目录，导致 root 知道路径的同时也拿到写权限。
+  - Fix: `spawn_explicit_role_runs()` now keeps product paths in the root goal for delegation context, but sets `extra_roots=[]` for explicit root/coordinator roles.
+  - Verification: the rerun root `allowed_write_roots` contained only its own task directory, while the product path still remained in the goal so worker/writer could receive it from scheduler policy.
+- Finding 2: continue-dispatch fields worked in a real MiniMax runner.
+  - Symptom before the fix: root could stop after the first limited dispatch wave and leave some direct children in `PLANNING`.
+  - 中文解释：`max_runners` 限制会让一次 dispatch 只跑一部分孩子。root 需要机器可读字段告诉它“还有谁没跑，下一步继续 dispatch”，不能只靠自然语言猜。
+  - Observed behavior: root first dispatched part of the six children, inspected board/artifacts, then called `dispatch_subagents` again. The second wave started `acceptor` and `bug_finder`, proving `needs_more_dispatch` / `unfinished_run_ids` can guide real continuation.
+- Finding 3: checker roles correctly found a real product bug.
+  - Symptom: direct product pytest failed with `ModuleNotFoundError: No module named 'calculator'`.
+  - 中文解释：worker 写出了包，但测试文件用了 `from calculator import ...`。从包目录外执行 pytest 时，这个导入路径不稳定；tester、bug_finder 和 acceptor 都抓到了这个问题。
+  - Manual verification: `python3 -m pytest -q -p no:cacheprovider /Users/example/my-终端应用/deliverables/role_template_continue_retest_20260510_204242/product/role_template_demo` -> failed during collection with the same import error.
+- Remaining gaps:
+  - Root still timed out after starting the second dispatch wave, so root final summary is missing. The recovery refs are present, but next work should improve partial-success finalization or root timeout recovery.
+  - Acceptance safety still treats some pytest shell shapes as high-risk when they contain shell chaining or imprecise command text. The long-term fix should normalize safe pytest commands inside allowed working roots, not loosen shell execution globally.
+  - The chain currently detects the worker bug but does not yet automatically create a repair worker and re-run acceptance; that belongs to the next rescue/follow-up loop.

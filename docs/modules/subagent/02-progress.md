@@ -257,10 +257,11 @@
 - 本轮 boundary retest after parser fix 已确认 root 能拿完整 goal 并真实创建 6 类 child；继续暴露并修复两个权限边界问题：显式 root/coordinator 只保留产品路径上下文、不继承最终产物写入根；模型把 `role=child` 但 `agent_name=researcher/tester/acceptor/...` 时，scheduler 会先归一化真实角色再套写入根策略。真实 MiniMax run `role_template_boundary_retest_20260510_200613` 验证 root/report-only roles 只写 task-local，worker/writer 才拿 deliverables。
 - 本轮 runner-context partial-progress 第一片：`dispatch_subagents` 在 runner 内返回直接孩子状态时新增 `needs_more_dispatch`、`unfinished_run_ids`、`next_action=continue_dispatch_direct_children` 和 `suggested_tool_call`，让 root/coordinator 面对限速或串行波次未跑完的 child 时拿到机器可读的继续动作，而不只是一句自然语言提示。
 - 本轮 runner partial-success 记录第一片：runner 自己 `TIMEOUT` 但已经创建 child 时，dispatch record 会保存 `runner_child_status_counts`、`runner_unfinished_child_ids` 和 `runner_partial_success`，恢复流程不再只能看到单个失败状态。
+- 本轮 role-template continue-dispatch 真实复测：CLI 显式 root/coordinator seed 现在只保留产品路径上下文，不再继承最终产物写入根；真实 MiniMax root 自己创建 researcher/worker/writer/bug_finder/tester/acceptor 六类 direct child，并根据 `needs_more_dispatch` / `unfinished_run_ids` 发起第二波 dispatch。tester/bug_finder/acceptor 成功发现 worker 产物的真实 import bug；剩余 gap 是 root 第二波后仍超时，下一轮要做 partial-success finalization / rescue follow-up 闭环。
 
 ## 未跑测试
 
-- 当前 runner 阶段心跳已用 focused stub tests 和真实 MiniMax 小 smoke 覆盖；root/coordinator seed 已用 focused tests 覆盖，尚未用真实 MiniMax 重跑层级 smoke、完整 `1/4/16/48` 或购物网站级大型 E2E。
+- 当前 runner 阶段心跳已用 focused stub tests 和真实 MiniMax 小 smoke 覆盖；root/coordinator seed 和 continue-dispatch 已用真实 MiniMax 小型角色模板复测覆盖，尚未重跑完整 `1/4/16/48` 或购物网站级大型 E2E。
 - workflow apply 已有实现，但仍需要继续补更贴近真实 dispatch 的端到端回归，尤其是 worker 子工单依赖、验收阻断和失败回放。
 - 同步门目前只覆盖 `log-analysis` 和 `subagent` 两个模块；其它模块还需要先补四件套和规则映射。
 - parent/subagent 跨天恢复已有确定性 backend 场景和真实 API 多轮恢复记录；后续交付级变更仍应按风险补跑真实 API 冒烟。

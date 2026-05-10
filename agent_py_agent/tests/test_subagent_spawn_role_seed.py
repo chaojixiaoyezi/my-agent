@@ -11,6 +11,12 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from agent_py_agent.agent.agent_core.spawn_role_seed import (
+    SpawnExplicitRoleRequest,
+    spawn_explicit_role_runs,
+)
+from agent_py_agent.agent.agent_core.subagent_params import SpawnSubagentsParams
+from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.models import SubAgentTask
 
 
@@ -64,3 +70,29 @@ def test_cmd_spawn_passes_explicit_role_bundle(tmp_path: Path):
     assert result == 0
     assert params.role == "coordinator"
     assert params.agent_name == "root-coordinator"
+
+
+# LLM: test_explicit_root_spawn_keeps_product_path_context_not_write_root covers the CLI seed path.
+# 函数用途: 显式 root/coordinator seed 可以把产物目录留在 goal 里，但不能自动拿最终产物写权限。
+def test_explicit_root_spawn_keeps_product_path_context_not_write_root(tmp_path: Path):
+    deliverables = tmp_path / "deliverables" / "product"
+    agent = MagicMock()
+    agent.subagents = SubAgentManager(tmp_path / "subagents", workspace_root=tmp_path)
+    request = SpawnExplicitRoleRequest(
+        agent=agent,
+        options=SpawnSubagentsParams(
+            goal=f"Coordinate workers for {deliverables}.",
+            count=1,
+            role="coordinator",
+            agent_name="root-coordinator",
+        ),
+        count=1,
+        allowed_tools=None,
+        workflow_mode="off",
+    )
+
+    root = spawn_explicit_role_runs(request)[0]
+
+    assert str(deliverables) in root.goal
+    assert root.allowed_write_roots == [root.task_dir]
+    assert str(deliverables) not in root.allowed_write_roots
