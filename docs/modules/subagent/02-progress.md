@@ -344,3 +344,8 @@
 - `move_to_task_trash()` 只允许移动 task_dir 或显式 allowed_roots 内的路径，不能移动任务目录本身，也不能再次移动 trash 内的文件。
 - trash 目录被用户或清理钩子删掉后，`ensure_task_trash()` 会自动重建，并保证 manifest 文件存在。
 - manifest 只记录 source、destination、reason、actor_run_id 和时间，不读取或内联文件正文。
+
+## 2026-05-11 controlled tools stage 6
+- 中文说明：新增 `fallback_report.py`，父级可在子代理正常写入失败、通道异常或工具缺失时保存 task-local 兜底报告。
+- 兜底报告写入 `reports/fallback_report.md` 和 `reports/fallback_report.json`，只包含摘要、细节和 artifact/evidence refs，不自动展开大文件正文。
+- 新增本地 E2E：capability request/grant -> shell gateway execute -> stdout 移入 task trash -> fallback report，验证受控工具链路可以完整闭环。
