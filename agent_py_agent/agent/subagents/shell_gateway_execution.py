@@ -1,0 +1,195 @@
+# LLM: Shell gateway execution layer runs only after dry-run policy approves a scoped command.
+# 模块用途: 执行已通过 shell_gateway dry-run 的命令，按预算截断输出并写入外置审计文件。
+
+from __future__ import annotations
+
+"""Execution helpers for controlled subagent shell gateway."""
+
+import json
+import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+from .shell_gateway import (
+    ShellGatewayDecision,
+    ShellGatewayRequest,
+    _is_relative_to,
+    plan_shell_command,
+)
+
+
+# LLM: ShellGatewayExecutionResult records bounded subprocess output refs and never stores unlimited stdout/stderr.
+# 类用途: 保存一次 shell 网关执行结果，包括退出码、截断输出、外置输出路径和审计文件引用。
+@dataclass
+class ShellGatewayExecutionResult:
+    decision: ShellGatewayDecision
+    executed: bool = False
+    exit_code: int | None = None
+    timed_out: bool = False
+    duration_seconds: float = 0.0
+    stdout_preview: str = ""
+    stderr_preview: str = ""
+    stdout_ref: str = ""
+    stderr_ref: str = ""
+    audit_ref: str = ""
+    stdout_bytes: int = 0
+    stderr_bytes: int = 0
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+
+
+# LLM: _ExecutionCapture is an internal bundle for bounded stdout/stderr bytes drained from pipes.
+# 类用途: 保存 subprocess 执行后的有限输出和总字节数，供结果构造和审计写入使用。
+@dataclass
+class _ExecutionCapture:
+    exit_code: int | None
+    stdout: bytes = b""
+    stderr: bytes = b""
+    stdout_total: int = 0
+    stderr_total: int = 0
+    timed_out: bool = False
+
+
+# LLM: execute_shell_command is v1 execution and must reuse dry-run policy before starting subprocesses.
+# 函数用途: 在通过 shell 网关检查后执行命令，按输出预算截断 stdout/stderr，并写入外置输出和审计记录。
+def execute_shell_command(request: ShellGatewayRequest) -> ShellGatewayExecutionResult:
+    decision = plan_shell_command(request)
+    result = ShellGatewayExecutionResult(decision=decision)
+    if not decision.allowed:
+        return result
+    start = time.monotonic()
+    budget = decision.output_budget
+    try:
+        capture = _run_subprocess_with_budget(
+            decision,
+            int(budget["stdout_bytes"]),
+            int(budget["stderr_bytes"]),
+            int(budget["timeout_seconds"]),
+        )
+    except Exception as exc:  # pragma: no cover - platform-specific subprocess failures.
+        text = str(exc).encode()
+        capture = _ExecutionCapture(exit_code=None, stderr=text, stderr_total=len(text))
+    output_dir = _resolve_artifact_dir(request, Path(decision.audit["workspace_root"]))
+    return _execution_result_from_capture(result, capture, output_dir, start)
+
+
+# LLM: _run_subprocess_with_budget drains pipes while retaining only budgeted bytes.
+# 函数用途: 执行已通过检查的 argv，并持续读取 stdout/stderr，超过预算的内容只计数不保存。
+def _run_subprocess_with_budget(
+    decision: ShellGatewayDecision,
+    stdout_limit: int,
+    stderr_limit: int,
+    timeout_seconds: int,
+) -> _ExecutionCapture:
+    process = subprocess.Popen(
+        decision.argv,
+        cwd=decision.cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=False,
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        stdout_future = pool.submit(_read_limited, process.stdout, stdout_limit)
+        stderr_future = pool.submit(_read_limited, process.stderr, stderr_limit)
+        timed_out = False
+        try:
+            exit_code = process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            process.kill()
+            exit_code = process.wait()
+        stdout, stdout_total = stdout_future.result()
+        stderr, stderr_total = stderr_future.result()
+    return _ExecutionCapture(exit_code, stdout, stderr, stdout_total, stderr_total, timed_out)
+
+
+# LLM: _read_limited drains stream content so child processes do not block while avoiding huge memory use.
+# 函数用途: 从 pipe 读取全部数据但只保留 limit 字节，防止 1G 日志进入内存或上下文。
+def _read_limited(stream, limit: int) -> tuple[bytes, int]:
+    if stream is None:
+        return b"", 0
+    chunks: list[bytes] = []
+    total = 0
+    stored = 0
+    while True:
+        data = stream.read(8192)
+        if not data:
+            break
+        total += len(data)
+        if stored < limit:
+            chunk = data[: limit - stored]
+            chunks.append(chunk)
+            stored += len(chunk)
+    return b"".join(chunks), total
+
+
+# LLM: _execution_result_from_capture writes bounded artifacts and one JSONL audit record.
+# 函数用途: 根据执行捕获结果生成用户可读摘要、输出文件引用和审计记录。
+def _execution_result_from_capture(
+    result: ShellGatewayExecutionResult,
+    capture: _ExecutionCapture,
+    output_dir: Path,
+    start: float,
+) -> ShellGatewayExecutionResult:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    token = _artifact_token(result.decision)
+    result.stdout_ref = _write_output(output_dir / f"{token}.stdout.txt", capture.stdout)
+    result.stderr_ref = _write_output(output_dir / f"{token}.stderr.txt", capture.stderr)
+    result.executed = True
+    result.exit_code = capture.exit_code
+    result.timed_out = capture.timed_out
+    result.duration_seconds = round(time.monotonic() - start, 4)
+    result.stdout_preview = _decode_preview(capture.stdout)
+    result.stderr_preview = _decode_preview(capture.stderr)
+    result.stdout_bytes = capture.stdout_total
+    result.stderr_bytes = capture.stderr_total
+    result.stdout_truncated = capture.stdout_total > len(capture.stdout)
+    result.stderr_truncated = capture.stderr_total > len(capture.stderr)
+    result.audit_ref = _write_audit(output_dir, result)
+    return result
+
+
+# LLM: _resolve_artifact_dir keeps shell outputs inside the workspace even when callers pass custom dirs.
+# 函数用途: 解析输出目录；默认写到 workspace 内部 shell_gateway_outputs，越界时回退默认目录。
+def _resolve_artifact_dir(request: ShellGatewayRequest, workspace: Path) -> Path:
+    if not str(request.artifact_dir or "").strip():
+        return workspace / "shell_gateway_outputs"
+    candidate = Path(request.artifact_dir).expanduser()
+    path = candidate.resolve() if candidate.is_absolute() else (workspace / candidate).resolve()
+    return path if _is_relative_to(path, workspace) else workspace / "shell_gateway_outputs"
+
+
+# LLM: _write_output saves only already-budgeted bytes and returns an empty ref for empty streams.
+# 函数用途: 写 stdout/stderr 截断文件；无输出时不创建文件引用。
+def _write_output(path: Path, data: bytes) -> str:
+    if not data:
+        return ""
+    path.write_bytes(data)
+    return str(path)
+
+
+# LLM: _write_audit records execution metadata without embedding stdout/stderr bodies.
+# 函数用途: 追加 shell 网关审计 JSONL，只写引用、计数和阻断状态，不写大输出正文。
+def _write_audit(output_dir: Path, result: ShellGatewayExecutionResult) -> str:
+    audit_path = output_dir / "shell_gateway_audit.jsonl"
+    record = asdict(result)
+    record["decision"].pop("argv", None)
+    with audit_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return str(audit_path)
+
+
+# LLM: _artifact_token creates short deterministic-ish file names without exposing full command text.
+# 函数用途: 生成 shell 输出文件前缀，便于同一 run/request 下追踪多次执行。
+def _artifact_token(decision: ShellGatewayDecision) -> str:
+    run = str(decision.audit.get("run_id") or "run").replace("/", "_")[:40]
+    req = str(decision.audit.get("request_id") or "request").replace("/", "_")[:40]
+    return f"shell_{run}_{req}_{int(time.time() * 1000)}"
+
+
+# LLM: _decode_preview keeps summaries small and resilient to binary output.
+# 函数用途: 将已截断 bytes 转成短文本摘要，无法解码的字节使用替代字符。
+def _decode_preview(data: bytes) -> str:
+    return data[:512].decode("utf-8", errors="replace")

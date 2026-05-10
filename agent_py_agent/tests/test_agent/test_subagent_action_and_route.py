@@ -277,6 +277,39 @@ def test_subagent_action_apply_repairs_work_order():
         assert (root / "subs" / "SUBAGENT_ACTION_APPLY.md").exists()
 
 
+# LLM: Helper keeps the route grant test focused while preserving scoped request coverage.
+# 函数用途: 创建带 shell/path/network/output budget 范围的 HTTP capability request。
+def _record_scoped_http_request(agent, task_id: str, root: Path):
+    return agent.subagents.record_capability_request(
+        task_id,
+        RecordCapabilityRequestParams(
+            problem="当前需要请求 REST API 并检查 HTTP 状态码和 JSON 返回。",
+            needed_capability="http_request",
+            expected_output="接口状态码和返回体摘要",
+            capability_type="shell",
+            requested_tools=["http_request"],
+            requested_commands=["curl"],
+            path_scope=[str(root)],
+            network_scope=["https://api.example.test"],
+            output_budget={"stdout_bytes": 4096},
+            risk_level="low",
+        ),
+    )
+
+
+# LLM: Helper asserts scoped grant fields without lengthening the main route test.
+# 函数用途: 验证父级路由生成的 grant 和 route record 都保留了申请范围。
+def _assert_scoped_http_grant(routed, applied, root: Path) -> None:
+    grant = routed.capability_grants[0]
+    assert grant.grant_type == "shell"
+    assert grant.command_allowlist == ["curl"]
+    assert grant.path_scope == [str(root)]
+    assert grant.network_scope == ["https://api.example.test"]
+    assert grant.output_budget["stdout_bytes"] == 4096
+    assert applied.records[0].request_scope["requested_commands"] == ["curl"]
+    assert applied.records[0].grant_scope["command_allowlist"] == ["curl"]
+
+
 def test_subagent_capability_route_grants_tool():
     """LLM: Verifies capability router grants a tool and updates allowed_tools."""
     with tempfile.TemporaryDirectory() as td:
@@ -288,21 +321,7 @@ def test_subagent_capability_route_grants_tool():
             thought="需要 HTTP 工具。",
             plan=["请求能力"],
         )
-        request = agent.subagents.record_capability_request(
-            task.id,
-            RecordCapabilityRequestParams(
-                problem="当前需要请求 REST API 并检查 HTTP 状态码和 JSON 返回。",
-                needed_capability="http_request",
-                expected_output="接口状态码和返回体摘要",
-                capability_type="shell",
-                requested_tools=["http_request"],
-                requested_commands=["curl"],
-                path_scope=[str(root)],
-                network_scope=["https://api.example.test"],
-                output_budget={"stdout_bytes": 4096},
-                risk_level="low",
-            ),
-        )
+        request = _record_scoped_http_request(agent, task.id, root)
         router = CapabilityRouter(
             config=CapabilityConfig(capability_candidate_limit=3, capability_grant_max_tools=1),
             tool_specs=agent.tools.specs(),
@@ -320,14 +339,7 @@ def test_subagent_capability_route_grants_tool():
         assert routed.capability_requests[0].status == "GRANTED"
         assert routed.capability_grants
         assert "http_request" in routed.allowed_tools
-        grant = routed.capability_grants[0]
-        assert grant.grant_type == "shell"
-        assert grant.command_allowlist == ["curl"]
-        assert grant.path_scope == [str(root)]
-        assert grant.network_scope == ["https://api.example.test"]
-        assert grant.output_budget["stdout_bytes"] == 4096
-        assert applied.records[0].request_scope["requested_commands"] == ["curl"]
-        assert applied.records[0].grant_scope["command_allowlist"] == ["curl"]
+        _assert_scoped_http_grant(routed, applied, root)
         assert (root / "subs" / "subagent_capability_route_report.json").exists()
         assert (root / "subs" / "SUBAGENT_CAPABILITY_ROUTE.md").exists()
         assert (root / "subs" / "subagent_capability_route_log.jsonl").exists()
