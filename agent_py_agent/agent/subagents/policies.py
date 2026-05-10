@@ -199,12 +199,13 @@ def _filter_action_plan_items(
 # 函数用途: 处理能力请求查询相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _capability_request_query(task: SubAgentTask, request: CapabilityRequest) -> str:
     # LLM: Include scoped request terms so shell/MCP/tool needs can route without broad prompt context.
+    scoped_type = "" if request.capability_type == "generic" else request.capability_type
     parts = [
         task.goal,
         request.needed_capability,
         request.problem,
         request.expected_output,
-        request.capability_type,
+        scoped_type,
         " ".join(request.tried),
         " ".join(request.evidence),
         " ".join(request.requested_tools),
