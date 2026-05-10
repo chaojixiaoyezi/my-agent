@@ -1465,5 +1465,8 @@ This document is append-only. Record every real subagent E2E issue found during 
   - 中文解释：不限制超时能防误杀，但如果底层模型请求或工具循环卡住，父级现在只能靠外部观察判断卡点。
   - Fix first slice: `subagent_debug_trace_level=3` 现在记录 runner 阶段心跳：`runner_model_request_started`、`runner_model_response_received`、`runner_model_request_failed`、`runner_tool_call_started`、`runner_tool_call_finished`。中文解释：以后再遇到无限等待，先看 debug trace 就能知道卡在“问模型”“模型回来了但没进工具”“工具开始后没结束”哪一段。
   - Verification first slice: focused stub tests 已覆盖模型请求/响应、模型异常和工具调用事件；尚未用真实 MiniMax 重跑大型 E2E。
+  - Real smoke: `runner_stage_trace_20260510_145432` 用 MiniMax-M2.7 真实跑通 level 3 trace。事件计数为 `runner_model_request_started=4`、`runner_model_response_received=4`、`runner_tool_call_started=3`、`runner_tool_call_finished=3`、`runner_result_recorded=1`；产物 `/Users/xiaoyezi/my-claude-code/deliverables/runner_stage_trace_20260510_145432/leaf_outputs/proof/proof.txt` 内容为 `runner-stage-trace-ok`。
+  - New finding: 这次真实 smoke 也暴露 `spawn-subagents --count 1` 会把测试 root 建成 `worker`，没有创建/调度 child 的工具；模型最后直接写了 proof.txt 并正确标记 `BLOCKED`，原因是缺少创建子代理能力。中文解释：trace 没问题，但这个入口不适合测试“主节点自己拉起子节点”；下一步需要补一个正式的 root/coordinator 创建入口或 spawn role 参数，再重跑层级 smoke。
   - Follow-up:
     - 需要把“无限 runner 长时间无 response 文件/无工具事件”纳入 due-check，可提示人工诊断或受控取消，而不是静默挂起。
+    - 需要让真实 E2E 能明确创建 root/coordinator，而不是用默认 worker 冒充 root。
