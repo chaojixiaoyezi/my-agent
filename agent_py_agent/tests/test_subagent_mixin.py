@@ -14,8 +14,9 @@ import pytest
 from agent_py_agent.agent.agent_core.subagent_mixin import (
     SimpleAgentSubagentMixin,
     _config_workflow_dispatch_mode,
-    _configured_subagent_allowed_tools,
 )
+from agent_py_agent.agent.agent_core.subagent_params import SpawnSubagentsParams
+from agent_py_agent.agent.agent_core.subagent_spawn_flow import configured_subagent_allowed_tools
 
 
 class TestSubagentMixinSpawn:
@@ -79,20 +80,54 @@ class TestSubagentMixinSpawn:
         call = mixin.subagents.split.call_args
         assert call.kwargs["allowed_tools"] is None
 
+    def test_spawn_subagents_explicit_coordinator_creates_root_run(self) -> None:
+        """显式 coordinator spawn 应创建真正 root/coordinator，而不是默认 worker split。"""
+        mixin = SimpleAgentSubagentMixin()
+        mixin.config = MagicMock()
+        mixin.config.enable_subagents = True
+        mixin.config.max_subagents = 1000
+        mixin.config.subagent_workflow_mode = "off"
+        mixin.config.subagent_allowed_tools = []
+        mixin.config.subagent_role_template_dirs = []
+        mixin.subagents = MagicMock()
+        mock_task = MagicMock()
+        mixin.subagents.create_run.return_value = mock_task
+
+        result = mixin.spawn_subagents(
+            params=SpawnSubagentsParams(
+                goal="主节点只负责创建子代理",
+                count=1,
+                role="coordinator",
+                agent_name="root-coordinator",
+            )
+        )
+
+        assert result == [mock_task]
+        mixin.subagents.split.assert_not_called()
+        create_params = mixin.subagents.create_run.call_args.kwargs["params"]
+        assert create_params.goal == "主节点只负责创建子代理"
+        assert create_params.role == "coordinator"
+        assert create_params.agent_name == "root-coordinator"
+        assert create_params.parent_id == ""
+        assert create_params.root_id == ""
+        assert "schedule_child_subagents" in create_params.allowed_tools
+        assert "dispatch_subagents" in create_params.allowed_tools
+        assert "write_file" not in create_params.allowed_tools
+
     def test_configured_subagent_allowed_tools_empty_means_automatic(self) -> None:
         """测试配置归一化：空字符串、空列表和缺省值都表示自动工具策略。"""
         config = MagicMock()
         config.subagent_allowed_tools = []
-        assert _configured_subagent_allowed_tools(config) is None
+        assert configured_subagent_allowed_tools(config) is None
 
         config.subagent_allowed_tools = "  "
-        assert _configured_subagent_allowed_tools(config) is None
+        assert configured_subagent_allowed_tools(config) is None
 
         config.subagent_allowed_tools = None
-        assert _configured_subagent_allowed_tools(config) is None
+        assert configured_subagent_allowed_tools(config) is None
 
         config.subagent_allowed_tools = "read_file, write_file"
-        assert _configured_subagent_allowed_tools(config) == ["read_file", "write_file"]
+        assert configured_subagent_allowed_tools(config) == ["read_file", "write_file"]
 
     def test_spawn_subagents_count_exceeds_max(self) -> None:
         """测试数量超过 max_subagents 时的限制。"""

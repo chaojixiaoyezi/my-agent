@@ -25,6 +25,8 @@ class SubagentRunParams:
 class SpawnSubagentsParams:
     goal: str
     count: int | None = None
+    role: str = "worker"
+    agent_name: str = ""
 
 
 # LLM: SubagentProbeParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -96,10 +98,17 @@ def spawn_subagents_params(
     *,
     goal: str | None,
     count: int | None,
+    role: str = "worker",
+    agent_name: str = "",
 ) -> SpawnSubagentsParams:
     if params is not None:
         if not isinstance(params, SpawnSubagentsParams):
             raise TypeError("spawn_subagents() requires params: SpawnSubagentsParams")
         return params
     # LLM: spawn_subagents keeps the old goal/count shape but immediately normalizes it.
-    return SpawnSubagentsParams(goal=str(goal or ""), count=count)
+    return SpawnSubagentsParams(
+        goal=str(goal or ""),
+        count=count,
+        role=str(role or "worker"),
+        agent_name=str(agent_name or ""),
+    )

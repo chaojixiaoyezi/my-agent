@@ -57,7 +57,14 @@ def _task_jsonable(task):
 def cmd_spawn(args) -> int:
 
     agent = make_agent(args)
-    tasks = agent.spawn_subagents(params=SpawnSubagentsParams(goal=args.goal, count=args.count))
+    tasks = agent.spawn_subagents(
+        params=SpawnSubagentsParams(
+            goal=args.goal,
+            count=args.count,
+            role=getattr(args, "role", "worker"),
+            agent_name=getattr(args, "agent_name", ""),
+        )
+    )
     for task in tasks:
         print(json.dumps(_task_jsonable(task), ensure_ascii=False))
     return 0

@@ -80,6 +80,27 @@ class TestSubagentsSubcommandRegistration:
         assert hasattr(args, "count")
         assert args.count == 3
 
+    def test_spawn_subagents_has_role_arguments(self):
+        """spawn-subagents 支持显式创建 coordinator/root 入口。"""
+        from agent_py_agent.cli.subcommands_agents import add_subagents_subcommands
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="subcommand")
+        add_subagents_subcommands(sub)
+
+        args = parser.parse_args(
+            [
+                "spawn-subagents",
+                "主节点任务",
+                "--role",
+                "coordinator",
+                "--agent-name",
+                "root-coordinator",
+            ]
+        )
+        assert args.role == "coordinator"
+        assert args.agent_name == "root-coordinator"
+
     def test_subagents_has_limit_argument(self):
         """测试 subagents 命令有 limit 参数。
 
