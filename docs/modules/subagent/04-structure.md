@@ -416,6 +416,7 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 
 ## 2026-05-09 debug trace and tool alias structure update
 - `agent_py_agent/agent/subagents/debug_trace.py` 是正式调试追踪写入层；`subagent_debug_trace_level=0` 完全静默，开启后只写内部 `debug_traces/subagent_trace.jsonl`，事件必须 refs-only、bounded，不复制 prompt/response/artifact/tool output 正文。
+- `subagent_debug_trace_level=4` 会在 JSONL 里追加短 prompt/response/tool 预览和当前 task goal，便于 `tail -f` 实时观察；`level=5` 会把完整 prompt、response、tool payload 和 tool output 写到内部 `debug_traces/details/<run_id>/` 并在 JSONL 里留下 ref。该等级只用于真实 E2E 排障，不污染用户产物目录，默认 0 不写。
 - `SubAgentManagerInitParams.debug_trace_level` 从 `AgentConfig.subagent_debug_trace_level` 传入 manager；创建任务和 runner 收束分别写 `task_created`、`runner_result_recorded`，但只在 trace level 允许时写入。
 - `agent_py_agent/agent/subagents/debug_trace_reports.py` 承接报告类 trace：level 3 会记录 due-check、action-plan、hierarchy recovery、dispatch 和 dispatch-watch 的 counts、summary、candidate/action/issue ids；它不读取报告 refs 指向的正文，也不调用模型或命令。
 - `agent_py_agent/agent/agent_core/runner_stage_trace.py` 把 core tool loop 里的模型/工具阶段接入 subagent debug trace；level 3 会记录 `runner_model_request_started`、`runner_model_response_received`、`runner_model_request_failed`、`runner_tool_call_started`、`runner_tool_call_finished`。这些事件只写 prompt/response 长度、backend、工具名、payload keys、ok 和输出长度，不写 prompt、response 或工具输出正文。

@@ -931,9 +931,9 @@ docs/
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_records.py`: 承接 dispatch acceptance record 构建、parent acceptance auto-policy/auto-execution 摘要和显式 tests 后的 refresh 调用，让主 dispatch service 保持薄编排。
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_refresh.py`: 本轮显式 parent tests 写入 `test_execution.json` 后重新 dry-run acceptance，并刷新 dispatch 展示、单 run 审计和 aggregate acceptance report；不 apply、不 rescue、不修改 task 状态。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`: 承接 runner-context `dispatch_subagents` 工具返回 payload 的单条 record 构造，输出 test/follow-up refs 和摘要，不展开正文。
-- `agent_py_agent/agent/agent_core/runner_stage_trace.py`: 把子代理 runner 的模型请求/响应/失败和工具调用开始/结束写入 level 3 debug trace；只记录长度、backend、工具名、payload keys 和 ok，不记录 prompt/response/tool output 正文。
+- `agent_py_agent/agent/agent_core/runner_stage_trace.py`: 把子代理 runner 的模型请求/响应/失败和工具调用开始/结束写入 debug trace；level 3 只记录长度、backend、工具名、payload keys 和 ok，level 4/5 才追加短预览或完整 detail 文件 ref。
 - `agent_py_agent/agent/subagents/services/control_plane_projection.py`: 在 subagent 保存时把 task 当前状态投影到 LocalStore 控制面；它只做查询索引，不替代旧工单目录或 runtime workspace 事实源。
-- `agent_py_agent/agent/subagents/debug_trace.py`: 子代理正式调试追踪开关的写入层；`subagent_debug_trace_level=0` 时完全静默，开启后只把 bounded refs-only 事件写入内部 `debug_traces/subagent_trace.jsonl`。
+- `agent_py_agent/agent/subagents/debug_trace.py`: 子代理正式调试追踪开关的写入层；`subagent_debug_trace_level=0` 时完全静默，level 1-3 只把 bounded refs-only 事件写入内部 `debug_traces/subagent_trace.jsonl`，level 4 加短预览，level 5 把完整 prompt/response/tool payload/tool output 写入内部 `debug_traces/details/` 并在 JSONL 里留 ref。
 - `agent_py_agent/agent/subagents/context_bundle.py`: 生成 runner-facing `context_bundle.json` / `CONTEXT_BUNDLE.md`，包含目标、计划、验收、权限、写入边界、输出合同、lineage 和 Context Gate；多层传递只保存当前/父级 bundle refs，不展开父级正文。
 - `agent_py_agent/agent/subagents/result_structured.py`: 解析 runner structured output 并写回 artifacts、tests、evidence packets、findings 和 capability requests；artifact 证据合成委托给小模块，保持解析主流程薄。
 - `agent_py_agent/agent/subagents/result_artifact_evidence.py`: 从 runner artifact metadata 合并 `artifact_refs`，并在模型漏写 `evidence_packets` 时合成 refs-only artifact evidence packet，不读取 artifact 正文。

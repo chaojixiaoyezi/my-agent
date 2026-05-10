@@ -98,7 +98,9 @@ subagent_automation_level: 2
 # - 0: 默认关闭，不写额外调试日志
 # - 1: 只记录关键生命周期事件，比如任务创建、runner 收束
 # - 2: 记录调度/验收/runner 结果的更多 refs-only 字段
-# - 3-5: 预留给真实 E2E 深度排障；仍应写入内部 runtime，不污染用户产物目录
+# - 3: 记录模型请求/响应、工具调用开始/结束的 refs-only 阶段日志
+# - 4: 在 JSONL 里追加短 prompt/response/tool 预览，方便 tail 实时观察
+# - 5: 额外把完整 prompt、response、tool 参数和工具输出写到 debug_traces/details；仅建议真实 E2E 排障时开启
 subagent_debug_trace_level: 0
 
 # 动态超时安全边际

@@ -288,6 +288,78 @@ def test_subagent_debug_trace_records_runner_model_and_tool_stages(tmp_path):
     assert tool_finished["output_chars"] > 0
 
 
+def test_subagent_debug_trace_level_four_records_stage_previews(tmp_path):
+    """等级 4 写 prompt/response/tool 的短预览，方便实时 tail 定位模型传参。"""
+    cfg = AgentConfig(
+        enable_tools=True,
+        model_backend="echo",
+        subagent_workspace="subs",
+        subagent_debug_trace_level=4,
+        max_tool_rounds=3,
+    )
+    agent = SimpleAgent(cfg, tmp_path)
+    agent.backend = _TraceToolBackend()
+    task = agent.subagents.create_run(
+        goal="observe detailed runner previews",
+        thought="需要看短预览。",
+        plan=["list", "finalize"],
+        allowed_tools=["list_files"],
+    )
+
+    result = agent.run_subagent(task.id, dry_run=False, probe=False)
+
+    assert result.ok
+    records = _trace_records(tmp_path / "subs")
+    model_started = next(record for record in records if record["event_type"] == "runner_model_request_started")
+    model_received = next(record for record in records if record["event_type"] == "runner_model_response_received")
+    tool_started = next(record for record in records if record["event_type"] == "runner_tool_call_started")
+    tool_finished = next(record for record in records if record["event_type"] == "runner_tool_call_finished")
+    assert "observe detailed runner previews" in model_started["task_goal_preview"]
+    assert model_started["prompt_preview"]
+    assert "TOOL_CALL" in model_received["response_preview"]
+    assert "list_files" in tool_started["tool_payload_preview"]
+    assert tool_finished["tool_output_preview"]
+    assert "prompt_detail_ref" not in model_started
+
+
+def test_subagent_debug_trace_level_five_writes_detail_refs(tmp_path):
+    """等级 5 把完整 prompt/response/tool payload/output 写到内部 detail 文件。"""
+    cfg = AgentConfig(
+        enable_tools=True,
+        model_backend="echo",
+        subagent_workspace="subs",
+        subagent_debug_trace_level=5,
+        max_tool_rounds=3,
+    )
+    agent = SimpleAgent(cfg, tmp_path)
+    agent.backend = _TraceToolBackend()
+    task = agent.subagents.create_run(
+        goal="observe full detail refs",
+        thought="需要完整调试文件。",
+        plan=["list", "finalize"],
+        allowed_tools=["list_files"],
+    )
+
+    result = agent.run_subagent(task.id, dry_run=False, probe=False)
+
+    assert result.ok
+    records = _trace_records(tmp_path / "subs")
+    model_started = next(record for record in records if record["event_type"] == "runner_model_request_started")
+    model_received = next(record for record in records if record["event_type"] == "runner_model_response_received")
+    tool_started = next(record for record in records if record["event_type"] == "runner_tool_call_started")
+    tool_finished = next(record for record in records if record["event_type"] == "runner_tool_call_finished")
+    assert "observe full detail refs" in _read_debug_detail(model_started["prompt_detail_ref"])
+    assert _read_debug_detail(model_received["response_detail_ref"])
+    response_details = [
+        _read_debug_detail(record["response_detail_ref"])
+        for record in records
+        if record["event_type"] == "runner_model_response_received"
+    ]
+    assert any("SUBAGENT_RESULT" in detail for detail in response_details)
+    assert "list_files" in _read_debug_detail(tool_started["tool_payload_detail_ref"])
+    assert _read_debug_detail(tool_finished["tool_output_detail_ref"])
+
+
 def test_subagent_debug_trace_records_runner_model_request_failure(tmp_path):
     """等级 3 记录模型请求异常，避免 trace 只停在 request_started。"""
     cfg = AgentConfig(
@@ -315,3 +387,9 @@ def test_subagent_debug_trace_records_runner_model_request_failure(tmp_path):
     failed = next(record for record in records if record["event_type"] == "runner_model_request_failed")
     assert failed["error_type"] == "RuntimeError"
     assert "trace backend failed" in failed["error_preview"]
+
+
+def _read_debug_detail(path_text: str) -> str:
+    from pathlib import Path
+
+    return Path(path_text).read_text(encoding="utf-8")
