@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..models import SubAgentTask
@@ -45,6 +46,8 @@ class HierarchyRecoveryNode:
     takeover_readiness_ref: str = ""
     failure_handoff_ref: str = ""
     checkpoint_ref: str = ""
+    context_bundle_ref: str = ""
+    parent_context_bundle_ref: str = ""
     recommended_command: str = ""
     artifact_refs: list[str] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)
@@ -168,10 +171,39 @@ def _node_from_task(
         takeover_readiness_ref=task.takeover_readiness_json,
         failure_handoff_ref=task.failure_handoff_json,
         checkpoint_ref=task.agent_run_checkpoint_json or task.checkpoint_json or task.checkpoint_ref,
+        context_bundle_ref=_context_bundle_ref(task),
+        parent_context_bundle_ref=_parent_context_bundle_ref(task, task_index),
         recommended_command=_recommended_command(task, reason),
         artifact_refs=list(dict.fromkeys(task.artifact_refs)),
         evidence_refs=list(dict.fromkeys(task.evidence_refs)),
     )
+
+
+# LLM: _context_bundle_ref points recovery-tree readers at the task-local handoff bundle.
+# 函数用途: 为恢复树节点生成自己的 context bundle 引用，不读取 bundle 正文。
+def _context_bundle_ref(task: SubAgentTask) -> str:
+    if task.agent_run_workspace_dir:
+        return str(Path(task.agent_run_workspace_dir) / "context_bundle.json")
+    if task.task_dir:
+        return str(Path(task.task_dir) / "context_bundle.json")
+    return ""
+
+
+# LLM: _parent_context_bundle_ref keeps child recovery connected to the direct parent handoff.
+# 函数用途: 生成父级 context bundle 引用；优先用已加载父任务，缺失时按 task workspace 推导。
+def _parent_context_bundle_ref(
+    task: SubAgentTask,
+    task_index: dict[str, SubAgentTask] | None,
+) -> str:
+    parent_id = str(task.parent_id or "")
+    if not parent_id:
+        return ""
+    parent = (task_index or {}).get(parent_id)
+    if parent is not None:
+        return _context_bundle_ref(parent)
+    if task.task_workspace_dir:
+        return str(Path(task.task_workspace_dir) / "agents" / parent_id / "context_bundle.json")
+    return ""
 
 
 # LLM: _recovery_reason classifies candidate runs without changing task state.

@@ -78,6 +78,8 @@
 - 2026-05-09 Parent Acceptance Auto Policy 半自动计划字段已落地：policy JSON 和 CLI 现在展示 `execution_mode=manual_only`、`automatic_execution_allowed=false` 和 `recommended_command`，明确这是人工/后续受控调度参考，不会自动启动进程、不跑 tests、不 apply、不 rescue、不改 task 状态。
 - 2026-05-09 Parent Acceptance Auto Policy dispatch 半自动摘要已落地：acceptance dispatch record 和 `SUBAGENT_DISPATCH.md` 透传 `execution_mode`、`automatic_execution_allowed` 和 `recommended_command`，让 watch/调度层明确看到 manual-only 边界；仍不执行建议命令、不 apply、不 rescue、不改 task 状态。
 - 2026-05-09 Parent Acceptance Auto Policy preflight 审计已落地：policy JSON 和 CLI 现在展示 `preflight_status`、`ready_for_manual_execution`、`ready_for_automatic_execution`、checks 和 blockers；`run_tests` 可以是 manual_ready，但自动执行第一版固定 false，人工确认/状态修改/非 allowlist 会明确阻断。
+- 2026-05-10 Context Bundle v1 第一片已落地：每次 `write_execution_context()` 会从 `SubAgentTask` 生成实时 `context_bundle.json` / `CONTEXT_BUNDLE.md`，包含 goal、plan、acceptance、权限、约束、workspace refs、output contract 和 source refs；同一份 bundle 会镜像到旧 run 工单目录和 `tasks/<root_id>/agents/<run_id>/`，方便 runner、接管代理和后续 resume 读取。
+- 2026-05-10 Context Gate v1 已接入 runner prompt：gate 会检查 goal、plan、acceptance、workspace/output/权限/约束等最小字段；缺字段时 prompt 明确要求子代理不要硬做业务实现，而是在结构化结果里返回 `BLOCKED` 并列出需要父代理补齐的字段。当前 gate 是派发自检和 prompt 约束，尚未自动停止所有 runner 调用。
 - 2026-05-09 Parent Acceptance Auto Policy dispatch preflight 摘要已落地：acceptance dispatch record 和 `SUBAGENT_DISPATCH.md` 透传 `preflight_status`、`ready_for_automatic_execution` 和 blockers，报告层能看清“manual_ready 仍不等于自动放行”；仍不执行命令、不 apply、不 rescue。
 - 2026-05-09 Parent Acceptance Auto Execution bundle/facade 第一片已落地：新增 `parent_acceptance_auto_execution.py` 的 Request/Result bundle、`plan_parent_acceptance_auto_execution(run_id)` manager 入口和 `parent_acceptance_auto_execution.json` 审计文件；当前只生成 dry-run 执行计划，并写入 `execution_allowed=false`、`guard_status=blocked`、`auto_executor_dry_run_only` 等硬闸门，不启动命令、不改 task 状态。
 - 2026-05-09 Parent Acceptance Auto Execution CLI 已落地：`subagents-acceptance-plan --auto-execution` 会展示并写入 executor dry-run facade 审计；第一版只打印 recommended command、hard guard、blockers 和 execution ref，不执行命令。
@@ -259,6 +261,7 @@
 - 本轮 runner partial-success 记录第一片：runner 自己 `TIMEOUT` 但已经创建 child 时，dispatch record 会保存 `runner_child_status_counts`、`runner_unfinished_child_ids` 和 `runner_partial_success`，恢复流程不再只能看到单个失败状态。
 - 本轮 role-template continue-dispatch 真实复测：CLI 显式 root/coordinator seed 现在只保留产品路径上下文，不再继承最终产物写入根；真实 MiniMax root 自己创建 researcher/worker/writer/bug_finder/tester/acceptor 六类 direct child，并根据 `needs_more_dispatch` / `unfinished_run_ids` 发起第二波 dispatch。tester/bug_finder/acceptor 成功发现 worker 产物的真实 import bug；剩余 gap 是 root 第二波后仍超时，下一轮要做 partial-success finalization / rescue follow-up 闭环。
 - 本轮 parent acceptance 安全 pytest 归一化第一片：父级 dry-run 预检和手动 auto-execution 都会先复用 `prepare_test_items()`，把 workspace 内安全的 `cd <dir> && python3 -m pytest ...` 转成 `working_dir + 纯命令`，不再误判为人审；仍不放开 shell，也不允许越界目录。
+- 本轮 Context Bundle 多层传递和异常恢复第一片：每个 run 的 `context_bundle.json` 新增 `lineage`，记录 root、parent、depth、自己的 bundle ref 和直接父级 bundle ref；四层 root/child/grandchild/great-grandchild focused 测试确认子孙节点能按 refs 追到父级交接包。`takeover_readiness.json` 和 recovery-tree 节点也会暴露 context bundle refs，失败、阻塞、超时和父超时残留 child 的接管/恢复流程能先读交接包再看 checkpoint/artifact manifest，仍不读取 artifact 正文、不自动接管。
 
 ## 未跑测试
 

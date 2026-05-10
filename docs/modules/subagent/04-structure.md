@@ -32,6 +32,10 @@
 - Takeover/rescue command paths now consume takeover readiness refs first: action plans and takeover apply records surface `takeover_readiness.json` before its recommended read order, without loading artifact bodies.
 - Rescue packet metadata now travels with action plan/apply records: dedupe, repeat count, retry limit, escalation target, manual confirmation, and recovery entrypoints are visible as refs-only audit data.
 - Parent Acceptance Auto Policy v1 dry-run 已有第一片实现：当前只生成策略审计，不执行 tests、不 apply acceptance、不自动触发 rescue。
+- Context Bundle v1 已接入执行上下文生成：`SubAgentTask` 会被压成实时工单包，写入旧 run 工单目录和 agent run workspace，runner prompt 只展示 gate 状态和 refs，不展开大型 artifact 正文。
+- Context Gate v1 当前检查最小工单字段是否齐全；缺字段时要求 runner 返回 `BLOCKED` 和缺字段列表，后续可升级为调度前硬阻断。
+- Context Bundle v1 现在带 `lineage`：记录 root、parent、depth、自己的 bundle ref 和直接父级 bundle ref；多层恢复时只沿 refs 读交接包，不把父级全文塞给子孙节点。
+- `takeover_readiness.json`、`rescue_context_refs` 和 hierarchy recovery-tree 节点会暴露 context bundle refs；失败、阻塞、超时或父节点超时后，接管者可以先读当前/父级交接包，再读 checkpoint、status report、artifact manifest，仍不展开 artifact 正文、不自动执行接管。
 # Subagent：结构树和详细说明
 
 ## 模块结构
@@ -40,6 +44,7 @@
 agent_py_agent/agent/
 |-- subagent.py                         # 兼容入口
 |-- subagents/                          # subagent 任务、manager、报告、runner、解析和渲染
+|   |-- context_bundle.py               # 实时子代理工单包和 Context Gate
 |   |-- role_templates.py               # role template 加载、校验和查询
 |   |-- role_template_catalog/builtin/  # 内置广义角色模板 JSON
 |   `-- workflow_template_catalog/      # 后续 workflow 模板外置化预留目录
@@ -70,7 +75,7 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/agent_core/orchestration_tools.py`：暴露模型可调用的 `schedule_child_subagents`，只在当前 subagent runner 上下文中创建下一层 child；没有 active runner id 会拒绝。显式 root/coordinator seed 会忽略模型额外塞入的 shell/web 工具，只保留内置 coordinator 工具包，避免 root 因自然语言漂移拿到不该有的权限。`coordinator_seed_tools.py` 承接 root/coordinator seed 工具过滤，避免核心工具入口继续变胖。`orchestration_dispatch_scope.py` 集中维护 runner 内部 `dispatch_subagents` 的默认 parent scope、self-exclude、workflow-off 和 defer-acceptance 规则，避免外层绕过主节点或递归跑自己；runner-context 在 `apply=True` 且 `execute_acceptance_tests=True` 时会打开 `auto_apply_acceptance_followup`，让父 runner 在孩子测试通过后收口直接孩子，顶层 CLI/API 仍保持人工 apply。`orchestration_progress_payload.py` 会在 runner-context dispatch 响应里附带 direct child status counts、PLANNING/RUNNING ids、`needs_more_dispatch`、`unfinished_run_ids`、`next_action` 和建议工具调用，帮助父节点继续推进限速未跑完的孩子。
 - `spawn-subagents --role coordinator --agent-name <name>` 是真实层级 E2E 的 seed 入口：外层只创建一个 root/coordinator，自动授予 `schedule_child_subagents` / `dispatch_subagents` / `subagent_board`、读取工具和 task-local 报告写入工具；如果模型显式传入 `run_command` / `fetch_url` 等额外工具，会被收敛回 coordinator 工具包。`spawn_role_seed.py` 会把 goal 里的产物路径保留下来作为派工上下文，但显式 root/coordinator 不再从 goal 自动提取最终产物写入根；coordinator 可以写自己的计划、分工、证据和协调报告，但最终业务代码/页面/文档产物仍应派给 worker/writer，并受 task-local 写入边界和父级验收控制。后续子、孙、孙孙任务必须由上一层 runner 通过 orchestration tools 创建，外层不得直接替下层创建。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`：承接 `dispatch_subagents` 工具输出里的单条 record payload，保持返回给 runner 的 acceptance/test/follow-up refs 精简且可测试；runner 真实创建了下级时，会透传 `runner_created_children`、child run ids 和 roles，避免父级把 dispatch 记录数误读成真实孩子数。
-- `agent_py_agent/agent/subagents/services/hierarchy_recovery.py`：定义 `HierarchyRecoveryRequest` / `HierarchyRecoveryResult`，从 root run 只读扫描 child_ids 子树，返回需要恢复的后代、takeover readiness、failure handoff 和 checkpoint refs；可按 capability timeout 阈值把 stale `RUNNING` 后代纳入恢复候选，不展开 artifact 正文、不自动接管。
+- `agent_py_agent/agent/subagents/services/hierarchy_recovery.py`：定义 `HierarchyRecoveryRequest` / `HierarchyRecoveryResult`，从 root run 只读扫描 child_ids 子树，返回需要恢复的后代、context bundle、父级 context bundle、takeover readiness、failure handoff 和 checkpoint refs；可按 capability timeout 阈值把 stale `RUNNING` 后代纳入恢复候选，不展开 artifact 正文、不自动接管。
 - `agent_py_agent/agent/subagents/manager_hierarchy.py`：给 `SubAgentManager` 暴露 `schedule_child_runs(params=...)` 薄 facade，让层级创建入口保持单一且可测试。
 - `agent_py_agent/agent/subagents/role_templates.py`：加载内置和用户外置 JSON 角色模板；模板必须是广义角色、带中文说明、可处理多个目标，坏模板只记录 issue，不影响内置模板。`role_template_index_text()` 给主代理常驻 prompt 只提供模板索引和位置；`role_template_detail_text()` 给普通 runner 只展开当前角色详情，给 coordinator runner 在派工时展开角色全集详情，避免不派工时加载全部派工细节。
 - `agent_py_agent/agent/subagents/role_template_catalog/builtin/*.json`：内置角色模板，包括协调、执行、找茬、测试、验收、研究、写作。模板定义默认工具、是否可写、是否可验收、输出契约和中文 prompt。
@@ -137,7 +142,7 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/subagents/services/failure_handoff.py`：根据失败/阻塞状态和 `failure_type` 生成失败交接记录，给后续接管代理留下警告、避坑建议和推荐下一步。
 - `agent_py_agent/agent/subagents/services/persistence_failure_handoff.py`：归一化并写入 `reports/failure_handoff.json`，让 persistence 主流程只负责编排。
 - `agent_py_agent/agent/subagents/services/persistence_recovery_outputs.py`：集中写 checkpoint artifacts 和 takeover readiness 文件，避免 persistence 主保存流程重新靠近 code-size 风险。
-- `agent_py_agent/agent/subagents/services/takeover_readiness.py`：生成 `reports/takeover_readiness.json` 和 `TAKEOVER_READINESS.md` 接管前必读包；只整理 refs、manifest 元数据和读取顺序，不读取 artifact 正文；并提供 refs-only 的推荐读取顺序解析给 rescue/action apply 使用。
+- `agent_py_agent/agent/subagents/services/takeover_readiness.py`：生成 `reports/takeover_readiness.json` 和 `TAKEOVER_READINESS.md` 接管前必读包；只整理 context bundle refs、checkpoint refs、manifest 元数据和读取顺序，不读取 artifact 正文；并提供 refs-only 的推荐读取顺序解析给 rescue/action apply 使用。
 - `agent_py_agent/agent/subagents/services/persistence_security.py`：归一化 `SecuritySignal` 预留字段，让安全信号解析不挤进 persistence 主流程；当前不执行安全策略。
 - `agent_py_agent/agent/subagents/services/persistence_identity.py`：归一化 `RuntimeIdentity` 预留字段，让员工/会话/配置 scope 解析不挤进 persistence 主流程；当前只保留审计元数据。
 - `agent_py_agent/agent/subagents/services/checkpoint_artifacts.py`：从 task facts 和 `output.json` 构建 compact 可读恢复包，包含 checkpoint、decision ledger、progress、failing tests 和 next actions。

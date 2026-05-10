@@ -46,6 +46,10 @@ class SubAgentExecutionContext:
     quality_contract: QualityContract = field(default_factory=QualityContract)
     context_manifest: ContextManifest = field(default_factory=ContextManifest)
     context_packs: list[dict[str, object]] = field(default_factory=list)
+    # LLM: context_bundle refs let runners and recovery readers inspect handoff facts without loading parent text.
+    context_bundle: dict[str, object] = field(default_factory=dict)
+    context_bundle_file: str = ""
+    context_bundle_json: str = ""
     write_boundary: dict[str, object] = field(default_factory=dict)
     pending_requests: list[dict[str, object]] = field(default_factory=list)
     open_gaps: list[dict[str, object]] = field(default_factory=list)
