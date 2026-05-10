@@ -55,6 +55,8 @@ def _add_agents_basic_subcommands(sub):
     spawn = sub.add_parser("spawn-subagents", help="拆分并创建 subagent 任务记录")
     spawn.add_argument("goal", help="要拆分的目标")
     spawn.add_argument("--count", type=int, default=3, help="子代理数量")
+    spawn.add_argument("--role", default="worker", help="创建角色，如 worker/coordinator")
+    spawn.add_argument("--agent-name", default="", help="显式 agent 名称，常用于 root/coordinator E2E")
     spawn.set_defaults(func=cmd_spawn)
 
     subagents = sub.add_parser("subagents", help="查看 subagent 红绿灯看板")

@@ -705,12 +705,15 @@ chat 和 gateway 都复用 `SimpleAgent.run()` 的恢复上下文能力。也就
 
 ```powershell
 my-agent spawn-subagents "开发一个可验收的功能" --count 2
+my-agent spawn-subagents "真实层级 E2E 主节点任务" --count 1 --role coordinator --agent-name root-coordinator
 ```
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `goal` | - | 必填，要拆分的目标。 |
 | `--count <n>` | `3` | 子代理数量。 |
+| `--role <role>` | `worker` | 显式创建角色。普通拆分保持 `worker`；真实层级 E2E 可用 `coordinator` 创建只负责调度下层的 root。 |
+| `--agent-name <name>` | `""` | 显式 agent 名称，常用于 root/coordinator E2E，例如 `root-coordinator`。 |
 
 ## `subagents`
 

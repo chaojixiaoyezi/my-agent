@@ -288,6 +288,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - 执行工具调用。
 - 支持 `allowed_tools` 白名单，给 subagent runner 限制可见和可调用工具。
 - `AgentConfig.subagent_allowed_tools=[]` 表示子代理工具由角色模板、任务目标和调度器自动判断；非空列表才作为全局受限白名单。`subagent_role_template_dirs=[]` 默认使用工作区 `.agent/subagents/roles` 作为用户外置角色模板目录；角色模板摘要会进入工具规格和 coordinator prompt，帮助模型按角色派工。
+- `spawn-subagents --role coordinator --agent-name <name>` 是层级 E2E 的 root seed 入口：外层只创建主节点，主节点再创建子代理，子代理再创建孙代理，孙代理再创建孙孙代理；coordinator seed 默认只有调度、看板和只读工具，没有写文件工具。
 - 解析模型输出里的工具调用块。
   标准格式是 `[TOOL_CALL]...JSON...[/TOOL_CALL]`，同时兼容 Qwen/OpenClaw 常见的 XML-ish `<tool_call><function=...><parameter=...>` 方言。
   如果 XML-ish 工具调用只有半截，解析器会返回 `__parse_error__`，让主循环继续可恢复，而不是直接崩掉。

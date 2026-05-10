@@ -1467,6 +1467,7 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Verification first slice: focused stub tests 已覆盖模型请求/响应、模型异常和工具调用事件；尚未用真实 MiniMax 重跑大型 E2E。
   - Real smoke: `runner_stage_trace_20260510_145432` 用 MiniMax-M2.7 真实跑通 level 3 trace。事件计数为 `runner_model_request_started=4`、`runner_model_response_received=4`、`runner_tool_call_started=3`、`runner_tool_call_finished=3`、`runner_result_recorded=1`；产物 `/Users/xiaoyezi/my-claude-code/deliverables/runner_stage_trace_20260510_145432/leaf_outputs/proof/proof.txt` 内容为 `runner-stage-trace-ok`。
   - New finding: 这次真实 smoke 也暴露 `spawn-subagents --count 1` 会把测试 root 建成 `worker`，没有创建/调度 child 的工具；模型最后直接写了 proof.txt 并正确标记 `BLOCKED`，原因是缺少创建子代理能力。中文解释：trace 没问题，但这个入口不适合测试“主节点自己拉起子节点”；下一步需要补一个正式的 root/coordinator 创建入口或 spawn role 参数，再重跑层级 smoke。
+  - Fix root seed: `spawn-subagents` 现在支持 `--role coordinator --agent-name <name>`。显式 coordinator seed 会创建真正 root/coordinator，带调度/看板/只读工具，不带写文件工具；单个 root 不追加 `/ 子任务1`，避免真实 E2E prompt 失真。
   - Follow-up:
     - 需要把“无限 runner 长时间无 response 文件/无工具事件”纳入 due-check，可提示人工诊断或受控取消，而不是静默挂起。
-    - 需要让真实 E2E 能明确创建 root/coordinator，而不是用默认 worker 冒充 root。
+    - 需要用新的 root/coordinator seed 重跑层级 smoke，确认主节点创建子代理、子代理创建孙代理、孙代理创建孙孙代理。

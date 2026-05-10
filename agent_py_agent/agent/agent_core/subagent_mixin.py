@@ -20,7 +20,6 @@ from ._subagent_repair_mixin import (
     SubagentRepairParams,
     _SubagentRepairMixin,
 )
-from .automation_guard import SubagentAutomationGuard
 from .planner import _build_parent_planner_state
 from .runner_prompts import (
     _build_subagent_runner_prompt,
@@ -41,7 +40,10 @@ from .subagent_params import (
     subagent_run_params,
 )
 from .subagent_run_flow import run_subagent_flow
-from .task_complexity import TaskComplexityEstimate, estimate_task_complexity
+from .subagent_spawn_flow import (
+    SpawnSubagentsFlowRequest,
+    spawn_subagents_flow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,20 +74,6 @@ def _initial_repair_state(result) -> dict[str, object]:
     }
 
 
-# LLM: _configured_subagent_allowed_tools treats empty config as automatic role/tool policy.
-# 函数用途: 从配置里取子代理工具白名单；空值返回 None，表示让角色模板和任务上下文自动判断工具。
-def _configured_subagent_allowed_tools(config: object) -> list[str] | None:
-    value = getattr(config, "subagent_allowed_tools", [])
-    if isinstance(value, str):
-        raw_items = value.split(",")
-    elif isinstance(value, (list, tuple)):
-        raw_items = value
-    else:
-        return None
-    tools = [str(item).strip() for item in raw_items if item is not None and str(item).strip()]
-    return tools or None
-
-
 # LLM: _tuple_repair_state 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 处理tuplerepair状态相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _tuple_repair_state(value: tuple) -> dict[str, object]:
@@ -100,16 +88,6 @@ def _tuple_repair_state(value: tuple) -> dict[str, object]:
         "ok": ok,
         "error": error,
     }
-
-
-# LLM: _effective_max_subagents turns zero or invalid caps into a generous automatic limit.
-# 函数用途: 解析子代理数量上限；0/坏值表示不限制用户意图，默认按 1000 这种宽松保护值处理。
-def _effective_max_subagents(value: object, *, fallback: int) -> int:
-    try:
-        cap = int(value)
-    except (TypeError, ValueError):
-        return fallback
-    return cap if cap > 0 else fallback
 
 
 # LLM: _SubagentLifecycleBase 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -129,40 +107,15 @@ class _SubagentLifecycleBase:
         if not self.config.enable_subagents:
             raise RuntimeError("配置已禁用 subagent。")
 
-        options = spawn_subagents_params(params, goal=goal, count=count)
-
-        if options.count is None:
-            allowed_tools = _configured_subagent_allowed_tools(self.config)
-            complexity = estimate_task_complexity(options.goal, plan=[], allowed_tools=allowed_tools or [])
-            guard = SubagentAutomationGuard(self.config)
-            should_delegate = guard.should_delegate(complexity)
-            delegated = False
-
-            if should_delegate:
-                n = _effective_max_subagents(self.config.max_subagents, fallback=1000)
-                tasks = self.subagents.split(
-                    options.goal,
-                    n,
-                    workflow_mode=_config_workflow_dispatch_mode(
-                        self.config.subagent_workflow_mode
-                    ),
-                    allowed_tools=allowed_tools,
-                )
-                delegated = len(tasks) > 0
-            else:
-                tasks = []
-
-            guard.warn_if_not_delegating(complexity, delegated)
-            return tasks
-        else:
-            n = min(options.count, _effective_max_subagents(self.config.max_subagents, fallback=options.count))
-            allowed_tools = _configured_subagent_allowed_tools(self.config)
-            return self.subagents.split(
-                options.goal,
-                n,
-                workflow_mode=_config_workflow_dispatch_mode(self.config.subagent_workflow_mode),
-                allowed_tools=allowed_tools,
-            )
+        options = spawn_subagents_params(
+            params,
+            goal=goal,
+            count=count,
+        )
+        workflow_mode = _config_workflow_dispatch_mode(self.config.subagent_workflow_mode)
+        return spawn_subagents_flow(
+            SpawnSubagentsFlowRequest(agent=self, options=options, workflow_mode=workflow_mode)
+        )
 
     # LLM: run_subagent 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 推进子代理的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。

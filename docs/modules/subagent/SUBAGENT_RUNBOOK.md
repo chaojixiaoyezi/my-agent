@@ -530,6 +530,14 @@ agent_py_agent/data/subagents/<run_id>/
 python3 -m agent_py_agent spawn-subagents "实现一个功能并验收" --count 2
 ```
 
+真实层级 E2E 要先创建主节点/root coordinator 时，用显式 role：
+
+```bash
+python3 -m agent_py_agent spawn-subagents "主节点任务说明" --count 1 --role coordinator --agent-name root-coordinator
+```
+
+这条命令只负责创建一个能调度下层的 root/coordinator。后续必须由 root runner 自己调用 `schedule_child_subagents` 创建子代理；子代理再创建孙代理；孙代理再创建孙孙代理。外层测试控制器不要直接替下层创建任务。
+
 输出里会看到 run id，例如：
 
 ```text
