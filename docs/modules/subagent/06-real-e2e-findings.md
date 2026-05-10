@@ -1997,3 +1997,29 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Rerun Stage7 R4 from a clean runtime/deliverables after exact `run_ids` dispatch and coordinator-tool preservation.
   - Validate whether root now runs auth/catalog first, then cart/quality, instead of letting quality inspect unfinished output too early.
   - Continue toward complete shopping flow validation: register, login, product list/detail, cart, checkout, order success, no broken buttons or image refs.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R4
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Config: `/Users/xiaoyezi/my-claude-code/.my-agent-stage7-shop-smoke-20260511-r4.yaml`.
+  - Internal runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/stage7_shop_smoke_20260511_r4`.
+  - Root run: `subagent-1778438905-2339a519`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+- 中文说明：
+  - R4 验证了精确 dispatch 和 coordinator 工具保留后，root 能继续创建 4 个一级 coordinator，auth coordinator 能再创建 leaf_worker 并写出 `auth.html`。
+  - 这轮在发现 catalog URL 写入根误判后主动停止，没有宣称购物网站完整完成。
+- Observed facts:
+  - Root 创建了 auth、catalog、cart-checkout、quality 四个直接 coordinator。
+  - Auth 分支创建 leaf_worker，并产出 `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r4/build/auth.html`。
+  - Catalog coordinator 尝试创建 product-list/product-detail worker 时，goal 里的 `https://picsum.photos/...` 和 `https://images.unsplash.com/...` 图片 URL 被路径提取器误判成写入根，导致 scheduler 拒绝创建任务。
+  - Quality coordinator 仍然过早启动，在完整产物不存在时开始读取 runtime/tree 和 auth.html，prompt 增长到约 50k。
+- Finding 43: write-root extraction must ignore URLs.
+  - Symptom: `schedule_child_subagents` rejected a catalog worker with `target=s://picsum.photos/` even though the intended deliverable path was under the workspace.
+  - 中文解释：这不是模型想写到外网，而是我们把图片 URL 里的 `https://` 错当成了本地路径，等于把正常图片地址误报成越权写入目录。
+  - Root cause: Windows path regex matched the `s:/` fragment inside `https://...`; Unix path regex could also see URL host/path fragments as `/host/path`.
+  - Fix: `_extract_write_dirs()` now records URL spans and skips any local path candidate that overlaps a URL. The Windows pattern also requires the drive letter not to be inside a word.
+  - Verification: `test_ignores_url_paths_when_extracting_write_dirs` and `test_hierarchy_schedule_ignores_url_image_sources_in_write_roots`.
+- Remaining gaps:
+  - Rerun R5 from a clean runtime/deliverables to verify catalog worker creation is no longer blocked by image URLs.
+  - Add dependency/phase gating so quality does not run before required producer children have at least attempted or produced deliverables.

@@ -188,6 +188,18 @@ class TestExtractWriteDirs:
 
         assert result == []
 
+    def test_ignores_url_paths_when_extracting_write_dirs(self):
+        """图片/API URL 不是本地写入根。"""
+        from agent_py_agent.agent.subagents.manager_base import _extract_write_dirs
+
+        goal = (
+            "在 /Users/test/project/build 写页面，商品图片可用 https://picsum.photos/300/200 "
+            "或 https://images.unsplash.com/photo-1.jpg。"
+        )
+        result = _extract_write_dirs(goal)
+
+        assert result == ["/Users/test/project/build"]
+
 
 class TestBuildWorkOrderPaths:
     """测试 _build_work_order_paths() 函数。"""

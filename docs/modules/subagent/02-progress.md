@@ -360,3 +360,8 @@
 - 中文说明：R3 真实跑到 root 创建 4 个 coordinator 后主动停下，定位到三个调度层问题：coordinator 显式工具列表会丢派工能力、dispatch 不能按 root 指定的 child ids 精确推进、live tool context 太像工具调用导致模型复制出 parse error。
 - 已修正：coordinator 显式工具会合并内置 coordinator 工具包；`dispatch_subagents` 支持 `run_ids` / `include_run_ids` 精确过滤并按顺序执行；未完成 direct children 的建议工具调用会带 `run_ids`；历史工具记录改成中性 marker 和摘要行。
 - 下一步：用干净 R4 重新跑购物网站层级 E2E，重点看 root 是否按 auth/catalog -> cart/quality 的顺序推进，并继续验证完整购物流程、按钮和图片链接。
+
+## 2026-05-11 Stage7 shopping E2E R4 URL write-root fix
+- 中文说明：R4 证明 root 能创建 4 个 coordinator，auth 分支能创建 leaf_worker 并写出 `auth.html`；但 catalog 分支暴露图片 URL 被误判成本地写入根，导致 worker 创建被拒。
+- 已修正：写入根提取器会先标出 URL 范围，跳过 URL 内的 `s:/` 和 `//host/path` 片段；Windows 盘符匹配也不再允许从单词中间开始。
+- 下一步：用干净 R5 复测 catalog 商品页 worker 创建和页面产出，同时补 quality 的阶段依赖，避免完整产物没出来就先验收。

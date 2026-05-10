@@ -150,6 +150,44 @@ def test_hierarchy_schedule_grants_worker_path_written_by_child_spec(tmp_path):
     assert "write_file" in worker.allowed_tools
 
 
+# LLM: test_hierarchy_schedule_ignores_url_image_sources_in_write_roots covers real shopping E2E URLs.
+# 函数用途: worker goal 里出现图片 CDN URL 时，scheduler 不能把 URL 片段当成本地写入根并拒绝创建。
+def test_hierarchy_schedule_ignores_url_image_sources_in_write_roots(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    deliverables = tmp_path / "deliverables"
+    coordinator = manager.create_run(
+        goal="catalog coordinator only delegates",
+        thought="delegate",
+        plan=["plan"],
+        agent_name="catalog-lead",
+        role="coordinator",
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=coordinator.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal=(
+                        f"在 {deliverables}/build/product-list.html 写商品列表，"
+                        "图片可使用 https://picsum.photos/300/200 和 "
+                        "https://images.unsplash.com/photo-1.jpg。"
+                    ),
+                    agent_name="catalog-page-worker",
+                    role="worker",
+                )
+            ],
+            apply=True,
+        )
+    )
+
+    assert result.created_run_ids
+    worker = manager.load(result.created_run_ids[0])
+    assert str(deliverables / "build" / "product-list.html") in worker.allowed_write_roots
+    assert not any("picsum" in root or "unsplash" in root for root in worker.allowed_write_roots)
+
+
 # LLM: test_hierarchy_schedule_preserves_coordinator_orchestration_tools covers real model omissions.
 # 函数用途: 模型给 coordinator 显式传读写工具但漏掉调度工具时，系统仍补齐创建/调度下一层能力。
 def test_hierarchy_schedule_preserves_coordinator_orchestration_tools(tmp_path):

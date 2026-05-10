@@ -975,6 +975,7 @@ docs/
 - `agent_py_agent/agent/subagents/parent_acceptance_followup_consistency.py`: 新增 follow-up apply 前的一致性检查 helper，集中处理 run_id、test report ref、失败数、新鲜度和状态驱动 rescue 例外。
 - `agent_py_agent/agent/subagents/parent_acceptance_rescue_followup.py`: 新增已失败/阻塞任务的 rescue follow-up helper，让无 `test_execution.json` 的 runner 失败也能进入受控接管路径。
 - `agent_py_agent/agent/subagents/services/hierarchy_scheduler.py`: 新增层级调度器 v1，使用 `HierarchyScheduleRequest` / `HierarchyChildSpec` 显式预览或创建 child/grandchild run，并统一限制深度和 fan-out；当真实模型把 `role=child`、具体角色写进 `agent_name` 时，会先恢复 researcher/tester/acceptor/bug_finder/writer/worker 等角色再套权限策略；模型漏传 `acceptance_checks` 时会通过 `hierarchy_acceptance.py` 从 child goal/角色派生最小验收项。
+- `agent_py_agent/agent/subagents/services/base.py`: 子代理基础创建服务；`_extract_write_dirs()` 从目标文本中提取本地写入根，并跳过 URL 范围，避免图片/API 地址被误当成可写目录。
 - `agent_py_agent/agent/subagents/services/hierarchy_acceptance.py`: 从 scheduler 拆出的验收兜底策略，只在模型没有显式 `acceptance_checks` 时派生最小验收项。
 - `agent_py_agent/agent/subagents/services/hierarchy_tool_policy.py`: 从 scheduler 拆出的工具策略，统一处理 coordinator/leaf 的工具继承、写文件工具补齐和 `write`/`read` 等模型工具名别名修正；coordinator 显式 allowed_tools 会补回内置编排工具，避免模型漏传后失去派工能力。
 - `agent_py_agent/agent/subagents/execution_test_items.py`: 预处理父级验收 tests，推断 workspace 内 `working_dir`，拆安全 `cd <dir> && pytest`，并把带明确期望内容的 `cat <workspace文件>` 改成受控 `content_check`，避免为真实模型输出放开 `cat` 命令。
