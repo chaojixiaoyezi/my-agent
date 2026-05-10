@@ -253,9 +253,9 @@ class ToolLoopService:
         archive_record = self._archive_tool_call_record(record)
         record.params.archive_tool_calls.append(archive_record)
         record.params.tool_context.append(
-            f"[tool-call-{record.tool_rounds}-{record.idx}]\n"
+            f"[tool-record round={record.tool_rounds} index={record.idx}]\n"
             f"{render_tool_payload_for_live_prompt(record.payload)}\n"
-            f"[tool-result-{record.tool_rounds}-{record.idx}]\n"
+            f"[tool-output-record round={record.tool_rounds} index={record.idx}]\n"
             f"{render_tool_result_for_live_prompt(record.result, archive_record)}"
         )
 

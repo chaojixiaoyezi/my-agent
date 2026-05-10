@@ -313,7 +313,7 @@ class DispatchSubagentsTool(BaseTool):
         params: dict[str, object],
         apply: bool,
         execute_runners: bool,
-        ) -> DispatchParams:
+    ) -> DispatchParams:
         execute_acceptance_tests = dispatch_execute_acceptance_tests_default(self.agent, params, apply=apply)
         return DispatchParams(
             apply=apply,
@@ -338,6 +338,7 @@ class DispatchSubagentsTool(BaseTool):
             ),
             parent_run_id=dispatch_parent_run_id(self.agent, params),
             root_id=str(params.get("root_id") or "").strip(),
+            include_run_ids=_string_list(params.get("run_ids") or params.get("include_run_ids")),
             exclude_run_ids=dispatch_exclude_run_ids(self.agent, params),
             finalize_acceptance=dispatch_finalize_acceptance(self.agent, params),
         )

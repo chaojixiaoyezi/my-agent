@@ -45,8 +45,6 @@ def render_tool_payload_for_live_prompt(
 ) -> str:
     if not isinstance(payload, dict):
         return _bounded_repr(payload, max_inline_chars, max_value_preview_chars)
-    if not _should_reduce_payload(payload, max_inline_chars, max_value_preview_chars):
-        return repr(payload)
     return "\n".join(_tool_call_summary_lines(1, payload, max_value_preview_chars))
 
 
@@ -58,20 +56,6 @@ def _should_reduce_tool_round(request: AssistantToolRoundContextRequest) -> bool
     return any(
         _value_size(value) > request.max_value_preview_chars * 4
         for payload in request.tool_calls
-        for key, value in payload.items()
-        if key != "tool"
-    )
-
-
-# LLM: _should_reduce_payload mirrors assistant-round reduction for persisted live context records.
-# 函数用途: 判断单条工具调用参数是否太大，尤其是 write_file/append_file 的正文。
-def _should_reduce_payload(
-    payload: dict[str, Any], max_inline_chars: int, max_value_preview_chars: int
-) -> bool:
-    if _value_size(payload) > max_inline_chars:
-        return True
-    return any(
-        _value_size(value) > max_value_preview_chars * 4
         for key, value in payload.items()
         if key != "tool"
     )

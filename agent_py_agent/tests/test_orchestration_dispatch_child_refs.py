@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from agent_py_agent.agent.agent_core.dispatch_params import DispatchContext
+from agent_py_agent.agent.agent_core.dispatch_runner_batches import _scoped_runner_tasks
 from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 from agent_py_agent.agent.agent_core.runner_dispatch import (
     RunnerDispatchRecordParams,
@@ -132,6 +134,39 @@ def test_dispatch_payload_tells_runner_to_continue_unfinished_children():
     assert direct["next_action"] == "continue_dispatch_direct_children"
     assert direct["suggested_tool_call"]["tool"] == "dispatch_subagents"
     assert direct["suggested_tool_call"]["execute_runners"] is True
+    assert direct["suggested_tool_call"]["run_ids"] == ["child-a", "child-b"]
+
+
+# LLM: test_scoped_runner_tasks_honors_include_run_ids protects exact child dispatch waves.
+# 函数用途: 父 runner 指定 run_ids 时，调度候选只能包含这些直接孩子，并按指定顺序执行。
+def test_scoped_runner_tasks_honors_include_run_ids_order():
+    tasks = [
+        SimpleNamespace(id="child-a", parent_id="root", root_id="root"),
+        SimpleNamespace(id="child-b", parent_id="root", root_id="root"),
+        SimpleNamespace(id="child-c", parent_id="root", root_id="root"),
+        SimpleNamespace(id="other", parent_id="other-parent", root_id="root"),
+    ]
+    ctx = DispatchContext(
+        cfg=MagicMock(),
+        normalized_workflow_mode="off",
+        apply=True,
+        planner=False,
+        runner_instruction="",
+        max_runners=10,
+        limit=20,
+        reviewer="tester",
+        note="",
+        take_over_by="",
+        locked_files=None,
+        router=MagicMock(),
+        parent_run_id="root",
+        root_id="root",
+        include_run_ids=["child-b", "child-a"],
+    )
+
+    scoped = _scoped_runner_tasks(tasks, ctx)
+
+    assert [task.id for task in scoped] == ["child-b", "child-a"]
 
 
 # LLM: test_runner_dispatch_record_carries_created_child_summary validates persisted dispatch evidence.

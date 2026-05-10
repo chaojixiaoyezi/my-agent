@@ -306,6 +306,7 @@ def _dispatch_context_from_params(
         locked_files=params.locked_files,
         parent_run_id=params.parent_run_id,
         root_id=params.root_id,
+        include_run_ids=params.include_run_ids,
         exclude_run_ids=params.exclude_run_ids,
         finalize_acceptance=params.finalize_acceptance,
         router=router,

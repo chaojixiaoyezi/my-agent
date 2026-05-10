@@ -148,3 +148,37 @@ def test_hierarchy_schedule_grants_worker_path_written_by_child_spec(tmp_path):
     assert worker.role == "leaf_worker"
     assert str(deliverables / "build") in worker.allowed_write_roots
     assert "write_file" in worker.allowed_tools
+
+
+# LLM: test_hierarchy_schedule_preserves_coordinator_orchestration_tools covers real model omissions.
+# 函数用途: 模型给 coordinator 显式传读写工具但漏掉调度工具时，系统仍补齐创建/调度下一层能力。
+def test_hierarchy_schedule_preserves_coordinator_orchestration_tools(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    root = manager.create_run(
+        goal="root",
+        thought="delegate",
+        plan=["plan"],
+        role="coordinator",
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=root.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="cart lead should create a worker later",
+                    agent_name="cart-checkout-lead",
+                    role="coordinator",
+                    allowed_tools=["write_file", "read_file", "list_files"],
+                )
+            ],
+            apply=True,
+        )
+    )
+    coordinator = manager.load(result.created_run_ids[0])
+
+    assert coordinator.role == "coordinator"
+    assert "schedule_child_subagents" in coordinator.allowed_tools
+    assert "dispatch_subagents" in coordinator.allowed_tools
+    assert "write_file" in coordinator.allowed_tools

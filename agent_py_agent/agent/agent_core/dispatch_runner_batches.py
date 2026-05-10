@@ -72,12 +72,16 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
     return run_runner_batch(agent, batch)
 
 
-# LLM: _scoped_runner_tasks keeps nested dispatch focused on the current node's descendants.
-# 函数用途: 根据 parent/root/exclude 过滤 runner 候选；默认顶层不变，runner 内部可只跑直接 child。
+# LLM: _scoped_runner_tasks keeps nested dispatch focused and can honor explicit child order.
+# 函数用途: 根据 include/parent/root/exclude 过滤 runner 候选；runner 可精确指定本轮要跑的 direct child ids。
 def _scoped_runner_tasks(tasks: list, ctx: DispatchContext) -> list:
+    included = [str(item) for item in (ctx.include_run_ids or []) if str(item).strip()]
+    include_order = {run_id: index for index, run_id in enumerate(included)}
     excluded = {str(item) for item in (ctx.exclude_run_ids or []) if str(item).strip()}
     scoped = []
     for task in tasks:
+        if include_order and task.id not in include_order:
+            continue
         if task.id in excluded:
             continue
         if ctx.parent_run_id and task.parent_id != ctx.parent_run_id:
@@ -85,6 +89,8 @@ def _scoped_runner_tasks(tasks: list, ctx: DispatchContext) -> list:
         if ctx.root_id and task.root_id != ctx.root_id:
             continue
         scoped.append(task)
+    if include_order:
+        scoped.sort(key=lambda task: include_order.get(task.id, len(include_order)))
     return scoped
 
 

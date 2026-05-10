@@ -1960,3 +1960,40 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Rerun Stage7 R3 from a clean runtime/deliverables after the write-root and payload fixes.
   - Add or strengthen parent-side static site validation so missing pages, literal template placeholders, and broken links/images block acceptance.
   - Improve coordinator stop behavior after partial child success so root can summarize or hand off cleanly instead of timing out while descendants are already done/blocked.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R3
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r3.yaml`.
+  - Internal runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r3`.
+  - Root run: `subagent-1778437464-84570584`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+- 中文说明：
+  - 这轮没有等到完整购物网站完成，而是在 root 已经创建 4 个 coordinator 后主动停下，专门抓调度偏移和工具上下文问题。
+  - 外层仍只观察 root；没有直接替 auth/catalog/cart/quality 或它们的孩子写代码。
+- Observed facts:
+  - Root 创建了 `auth`、`catalog`、`cart-checkout`、`quality` 四个直接 coordinator。
+  - Root 想先推进 auth/catalog，但 dispatch 没有精确 run id 入口，实际先跑到了 cart/quality。
+  - Cart coordinator 因显式 allowed_tools 漏掉 `schedule_child_subagents`，无法继续创建 worker。
+  - Quality coordinator 过早执行，开始检查未完成产物和 runtime 目录，扩大了 prompt 和噪声。
+  - 模型有时把上一轮 live prompt 里的 `[tool-call-*]` 记录和 dict payload 复制进新的 `[TOOL_CALL]`，导致 parse error。
+- Finding 40: coordinator explicit tools must preserve orchestration tools.
+  - Symptom: model created a coordinator with `allowed_tools=["write_file","read_file","list_files"]`; scheduler honored it too literally, so the coordinator no longer had child creation/dispatch tools.
+  - 中文解释：协调员哪怕模型只给了读写工具，也仍然必须能继续派下一层。否则它就变成“有计划但没有派工按钮”的节点。
+  - Fix: coordinator specs now merge explicit tools with the built-in coordinator tool pack, so `schedule_child_subagents` / `dispatch_subagents` / `subagent_board` stay available.
+  - Verification: `test_hierarchy_schedule_preserves_coordinator_orchestration_tools`.
+- Finding 41: parent runners need exact dispatch targeting.
+  - Symptom: root intended to run auth/catalog first, but generic dispatch selected other ready children from the same parent queue.
+  - 中文解释：主节点已经点名“先跑这两个孩子”，调度器却只能说“跑一批孩子”，所以队列顺序会把工作带偏。
+  - Fix: `dispatch_subagents` accepts `run_ids` / `include_run_ids`; runner candidates are filtered to those ids and executed in the given order. Progress payload suggested calls now include `run_ids` for unfinished direct children.
+  - Verification: `test_dispatch_exact_run_ids_are_passed_to_params` and `test_scoped_runner_tasks_honors_include_run_ids_order`.
+- Finding 42: live tool-context labels must not look like tool calls.
+  - Symptom: models copied `[tool-call-*]` context snippets and dict-like payloads into new tool-call blocks, producing parse errors.
+  - 中文解释：以前历史记录长得太像“可复制的工具调用”，模型容易照抄。现在历史记录改成中性标签和摘要行，减少误触发。
+  - Fix: live context markers changed to `[tool-record ...]` / `[tool-output-record ...]`, and dict payloads render as summary lines instead of Python dict repr.
+  - Verification: `test_render_tool_payload_keeps_small_payload_readable`.
+- Remaining gaps:
+  - Rerun Stage7 R4 from a clean runtime/deliverables after exact `run_ids` dispatch and coordinator-tool preservation.
+  - Validate whether root now runs auth/catalog first, then cart/quality, instead of letting quality inspect unfinished output too early.
+  - Continue toward complete shopping flow validation: register, login, product list/detail, cart, checkout, order success, no broken buttons or image refs.

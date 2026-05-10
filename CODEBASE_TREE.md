@@ -976,7 +976,7 @@ docs/
 - `agent_py_agent/agent/subagents/parent_acceptance_rescue_followup.py`: 新增已失败/阻塞任务的 rescue follow-up helper，让无 `test_execution.json` 的 runner 失败也能进入受控接管路径。
 - `agent_py_agent/agent/subagents/services/hierarchy_scheduler.py`: 新增层级调度器 v1，使用 `HierarchyScheduleRequest` / `HierarchyChildSpec` 显式预览或创建 child/grandchild run，并统一限制深度和 fan-out；当真实模型把 `role=child`、具体角色写进 `agent_name` 时，会先恢复 researcher/tester/acceptor/bug_finder/writer/worker 等角色再套权限策略；模型漏传 `acceptance_checks` 时会通过 `hierarchy_acceptance.py` 从 child goal/角色派生最小验收项。
 - `agent_py_agent/agent/subagents/services/hierarchy_acceptance.py`: 从 scheduler 拆出的验收兜底策略，只在模型没有显式 `acceptance_checks` 时派生最小验收项。
-- `agent_py_agent/agent/subagents/services/hierarchy_tool_policy.py`: 从 scheduler 拆出的工具策略，统一处理 coordinator/leaf 的工具继承、写文件工具补齐和 `write`/`read` 等模型工具名别名修正。
+- `agent_py_agent/agent/subagents/services/hierarchy_tool_policy.py`: 从 scheduler 拆出的工具策略，统一处理 coordinator/leaf 的工具继承、写文件工具补齐和 `write`/`read` 等模型工具名别名修正；coordinator 显式 allowed_tools 会补回内置编排工具，避免模型漏传后失去派工能力。
 - `agent_py_agent/agent/subagents/execution_test_items.py`: 预处理父级验收 tests，推断 workspace 内 `working_dir`，拆安全 `cd <dir> && pytest`，并把带明确期望内容的 `cat <workspace文件>` 改成受控 `content_check`，避免为真实模型输出放开 `cat` 命令。
 - `agent_py_agent/agent/subagents/execution_executor.py`: `content_check` 支持 `content_pattern` 包含匹配，也支持 `content_equals` / `expected_content` + `match_mode=exact`，用于严格验证文件内容没有额外字符。
 - `agent_py_agent/agent/agent_core/_tool_loop_service.py`: 主代理和 subagent 共用的工具循环；到达 `max_tool_rounds` 后给模型一次收口机会，如果模型仍吐工具调用，返回确定性停止说明而不是把新 `[TOOL_CALL]` 当最终回答。
@@ -993,10 +993,11 @@ docs/
 - `agent_py_agent/agent/subagents/manager_hierarchy.py`: 新增 `SubAgentManager.schedule_child_runs(params=...)` facade，保持层级创建只走 bundle 入口和既有 `create_run` 持久化路径。
 - `agent_py_agent/agent/subagents/role_templates.py`: 加载内置和用户 JSON role templates，要求广义角色、中文说明和多目标适用，坏模板记录 issue；提供轻量 `role_template_index_text()` 给主代理常驻提示词，按需 `role_template_detail_text()` 给派工 coordinator 展开完整角色提示。
 - `agent_py_agent/agent/subagents/role_template_catalog/builtin/*.json`: 内置 `coordinator/worker/bug_finder/tester/acceptor/researcher/writer` 角色模板。
-- `agent_py_agent/agent/agent_core/tool_call_context_reducer.py`: 大段 assistant tool-call 参数摘要层，避免 `write_file(content=<large html>)` 原文反复进入下一轮 prompt；保留工具名、路径、字段大小、hash 和短预览。
+- `agent_py_agent/agent/agent_core/tool_call_context_reducer.py`: 大段 assistant tool-call 参数摘要层，避免 `write_file(content=<large html>)` 原文反复进入下一轮 prompt；保留工具名、路径、字段大小、hash 和短预览。小 dict payload 也渲染为摘要行，避免模型把历史 dict 复制成新工具调用。
 - `agent_py_agent/agent/agent_core/coordinator_seed_tools.py`: 显式 root/coordinator seed 的工具过滤策略；模型额外传入 shell/web 工具时收敛回内置 coordinator 工具包。
 - `agent_py_agent/agent/agent_core/spawn_role_seed.py`: CLI 显式 role seed 入口；root/coordinator seed 保留 goal 里的产品路径给下层派工，但自身 allowed write roots 只保留 task-local 协调目录。
-- `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context dispatch 的直接 child 进度摘要；含状态计数、unfinished ids、`needs_more_dispatch` 和建议继续调度工具调用。
+- `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context dispatch 的直接 child 进度摘要；含状态计数、unfinished ids、`needs_more_dispatch` 和带 `run_ids` 的建议继续调度工具调用。
+- `agent_py_agent/agent/agent_core/dispatch_runner_batches.py`: runner 候选收集和执行批处理；支持 `include_run_ids` 精确过滤并按父节点给定顺序推进直接孩子。
 - `agent_py_agent/agent/tooling/json_repair.py`: 工具调用 JSON 的窄口修复 helper；目前只修有效对象后多余右花括号，避免模型因 parse error 把完整任务 goal 越改越短。
 - `agent_py_agent/agent/subagents/role_contracts.py`: 新增 reporter/checker 角色契约和 analyst/reviewer 兼容映射；同时把模板角色接入默认工具、输出契约和 parent final gate。
 - `agent_py_agent/agent/subagents/automation_gate.py`: 新增半自动/自动执行门，默认只放行 refs-only 查询动作，跑工具或改状态动作继续需要人工确认。
