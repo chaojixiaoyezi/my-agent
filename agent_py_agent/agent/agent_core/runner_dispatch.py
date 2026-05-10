@@ -38,20 +38,22 @@ _RUNNER_CHILD_FINAL_STATUSES = {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "T
 def _runner_role_phase_priority(task: SubAgentTask) -> int:
 
     role = str(getattr(task, "role", "") or "").strip().lower().replace("-", "_")
+    text = f"{role} {getattr(task, 'agent_name', '')} {getattr(task, 'goal', '')}".lower().replace("-", "_")
     if not role:
         return 10
-    if "coordinator" in role or role in {"lead", "planner", "dispatcher"}:
-        return 0
-    if "accept" in role or role in {"acceptor", "verifier", "verification"}:
+    if "accept" in text or any(token in text for token in {"acceptor", "verifier", "verification"}):
         return 30
     if (
-        "test" in role
-        or "bug" in role
-        or "review" in role
-        or "critic" in role
-        or role in {"qa", "checker", "auditor"}
+        "quality" in text
+        or "test" in text
+        or "bug" in text
+        or "review" in text
+        or "critic" in text
+        or any(token in text for token in {"qa", "checker", "auditor"})
     ):
         return 20
+    if "coordinator" in role or role in {"lead", "planner", "dispatcher"}:
+        return 0
     if "worker" in role or role in {"general", "writer", "coder", "researcher", "reporter"}:
         return 10
     return 10
@@ -275,8 +277,18 @@ def _dispatch_runner_candidates(
         if not _is_dispatch_runner_candidate(task, runner_max_attempts=runner_max_attempts):
             continue
         candidates.append(task)
+    candidates = _ready_phase_candidates(candidates)
     ordered = sorted(enumerate(candidates), key=lambda item: (_runner_role_phase_priority(item[1]), item[0]))
     return [task for _, task in ordered[:max_runners]]
+
+
+# LLM: _ready_phase_candidates prevents QA/test runners from racing ahead of implementation runners.
+# 函数用途: 同一 dispatch 范围内只放行当前最低阶段的候选；生产线未完成前，quality/test/acceptance 先等待下一轮。
+def _ready_phase_candidates(candidates: list[SubAgentTask]) -> list[SubAgentTask]:
+    if not candidates:
+        return []
+    current_phase = min(_runner_role_phase_priority(task) for task in candidates)
+    return [task for task in candidates if _runner_role_phase_priority(task) == current_phase]
 
 
 # LLM: _limit_items 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

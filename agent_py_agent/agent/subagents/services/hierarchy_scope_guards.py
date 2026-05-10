@@ -69,6 +69,9 @@ def schedule_block_reason(parent: SubAgentTask, request: Any) -> str:
 # LLM: duplicate_child_domain_reason blocks repeated coordinator domains under the same parent.
 # 函数用途: 阻止同一个父节点重复创建 checkout/quality 这类同域 coordinator，避免真实 E2E 扇出膨胀。
 def duplicate_child_domain_reason(manager: Any, parent: SubAgentTask, request: Any) -> str:
+    bypass_reason = _root_leaf_bypass_reason(manager, parent, request)
+    if bypass_reason:
+        return bypass_reason
     seen_domains: list[set[str]] = []
     for child in _existing_coordination_children(manager, parent):
         seen_domains.append(_child_domain_tokens(child))
@@ -81,6 +84,18 @@ def duplicate_child_domain_reason(manager: Any, parent: SubAgentTask, request: A
             return f"duplicate_child_domain:{duplicate}"
         if domains:
             seen_domains.append(domains)
+    return ""
+
+
+# LLM: _root_leaf_bypass_reason preserves coordinator ownership once a root has delegated domains.
+# 函数用途: root 已经创建 coordinator 后，阻断它继续直接创建 leaf/worker，避免绕开子代理领导层。
+def _root_leaf_bypass_reason(manager: Any, parent: SubAgentTask, request: Any) -> str:
+    if int(parent.depth or 0) != 0:
+        return ""
+    if not any(_is_leaf_like(spec) for spec in request.child_specs):
+        return ""
+    if _existing_coordination_children(manager, parent):
+        return "root_leaf_bypass_existing_coordinators:dispatch or repair direct coordinator children first"
     return ""
 
 
@@ -103,6 +118,13 @@ def _existing_coordination_children(manager: Any, parent: SubAgentTask) -> list[
 def _is_coordination_like(item: Any) -> bool:
     text = f"{getattr(item, 'role', '')} {getattr(item, 'agent_name', '')}".lower()
     return any(token in text for token in _COORDINATION_ROLE_TOKENS)
+
+
+# LLM: _is_leaf_like detects implementation leaves without looking at broad goal prose.
+# 函数用途: 判断 child spec 是否是执行/写作类叶子节点，用于 root 绕层创建保护。
+def _is_leaf_like(item: Any) -> bool:
+    text = f"{getattr(item, 'role', '')} {getattr(item, 'agent_name', '')}".lower()
+    return any(token in text for token in {"leaf", "leaf_worker", "leaf-worker", "worker", "writer", "coder"})
 
 
 # LLM: _child_domain_tokens extracts stable, human-named task domains from a child spec or task.
