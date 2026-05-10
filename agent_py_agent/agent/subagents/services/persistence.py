@@ -49,6 +49,13 @@ def _field_names(model: type) -> set[str]:
     return {item.name for item in fields(model)}
 
 
+# LLM: _normalize_nested_model keeps persisted child records tolerant of reserved/future keys.
+# 函数用途: 读取嵌套 dataclass 记录时只保留当前模型认识的字段，避免旧/新记录互相卡死。
+def _normalize_nested_model(model: type, item: dict[str, object]):
+    payload = {key: item[key] for key in _field_names(model) if key in item}
+    return model(**payload)
+
+
 # LLM: _list_value 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
 # 函数用途: 读取或查询value需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def _list_value(value: object) -> list[object]:
@@ -239,13 +246,19 @@ class SubAgentPersistenceService:
         data = json.loads(path.read_text(encoding="utf-8"))
         data = {key: value for key, value in data.items() if key in _field_names(SubAgentTask)}
         data["capability_requests"] = [
-            CapabilityRequest(**item) for item in data.get("capability_requests", []) if isinstance(item, dict)
+            _normalize_nested_model(CapabilityRequest, item)
+            for item in data.get("capability_requests", [])
+            if isinstance(item, dict)
         ]
         data["capability_grants"] = [
-            CapabilityGrant(**item) for item in data.get("capability_grants", []) if isinstance(item, dict)
+            _normalize_nested_model(CapabilityGrant, item)
+            for item in data.get("capability_grants", [])
+            if isinstance(item, dict)
         ]
         data["capability_gaps"] = [
-            CapabilityGap(**item) for item in data.get("capability_gaps", []) if isinstance(item, dict)
+            _normalize_nested_model(CapabilityGap, item)
+            for item in data.get("capability_gaps", [])
+            if isinstance(item, dict)
         ]
         data["evidence"] = [VerificationEvidence(**item) for item in data.get("evidence", []) if isinstance(item, dict)]
         data["evidence_packets"] = [

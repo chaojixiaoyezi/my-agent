@@ -29,6 +29,26 @@
 暂停         暂时不做，但保留背景
 ```
 
+## 2026-05-11 / Subagent Controlled Shell Gateway 与能力申请闭环
+
+状态：设计中
+
+摘要：
+- 用户明确希望子代理、孙代理后续能调用 shell / 本机 CLI / 网络工具 / MCP 工具，但不能给裸 `exec`。设计方向是“受控网关”：子代理把命令请求交给网关，网关按角色、capability grant、路径边界、网络策略、输出预算和风险等级决定是否执行。
+- 受控网关要给未来工具扩展留口子：Playwright、Chrome tools、scrapling、curl、日志分析 CLI、用户自装工具、skill 自带脚本、MCP 暴露工具都应注册为 tool/capability card，而不是写死在 runner prompt 或 scheduler 里。
+- 子代理不直接拿 `rm`。删除语义改为任务级 trash：每个 task workspace 自动有 `trash/`，删除=移动到 trash 并写 manifest，记录原路径、操作者、原因、时间、可恢复信息；长期任务如果用户清空 trash，工具调用前可自动重建；清理由 TTL/大小上限/任务完成钩子控制。
+- 输出外置不能无上限。任何 shell/MCP/tool 输出都要有 output budget：stdout/stderr 捕获上限、artifact 上限、head/tail 或 slice 策略、截断标记、hash/refs、重复读取去重、任务级累计预算和全局并发读取限制。1G/1T 日志不能被直接完整写进 artifact；日志分析优先走 `rg`、`tail`、`head`、`wc`、offset slice、采样和索引。
+- curl / 网络工具需要读写分级：GET/HEAD 可以作为低风险候选；POST/PUT/DELETE、上传、带敏感 header/token 的调用需要更高层 grant 或用户确认；响应体同样走 budget、脱敏、外置 refs。
+- 能力申请闭环要正式接入 shell/tool/skill/MCP：子代理发现缺工具、缺 skill、缺路径权限、缺网络权限、缺输出预算或没有解决办法时，必须写结构化 `capability_request`；父级能解决就下发 scoped `capability_grant`，不能解决就继续上抛；最终无解必须写 `capability_gap`、finding、shared blackboard 或 skill_spark 候选，不能静默丢失。
+- Shell Gateway 和 Capability Grant 责任分离：grant 决定“能不能用、可用范围是什么”，gateway 决定“怎么安全执行、怎么限制输出、怎么审计”。后续 MCP/tools/skills 都应复用同一套审计和预算记录。
+- 子代理必须有“写入失败也能说话”的兜底通道：如果 `write_file` 或任务文件落盘失败，runner final response 仍可带结果，父级负责保存 fallback report；不能让内部写工具异常导致子代理彻底失声。
+
+今晚节奏建议：
+- 先开发最小底座，再做真实测试。原因是当前真实测试会暴露“缺 shell/缺工具/输出太大/申请没闭环”等已知问题，但如果没有受控记录入口，问题会散在日志里，复盘成本高。
+- 今晚第一小步建议只做“设计/记录 + capability request schema 扩展 + trace 记录口”，不要一上来开放真实 shell。字段先预留 `tool_kind=shell|mcp|skill|network|path|output_budget`、`requested_command/tool`、`cwd_scope`、`network_scope`、`output_budget`、`risk_self_assessment`、`fallback_attempted`、`escalation_target`。
+- 第二小步再做受控 shell dry-run / allowlist 第一片，先只允许 `pwd`、`ls`、`rg`、`python -m pytest`、`node --version`、GET/HEAD curl 这类低风险动作。
+- 第三小步才进入真实 E2E：让 root 自己创建下级，叶子遇到工具不足先申请，父级路由 grant/gap，再继续执行。测试同时覆盖申请成功、申请失败、无解记录 gap、输出截断和 trash 行为。
+
 ## 2026-04-30 / Subagent 质量契约与用户少说派工
 
 状态：部分落地

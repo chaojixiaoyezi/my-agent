@@ -429,3 +429,10 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `SubAgentHierarchyScheduler` 会在持久化 child/leaf run 前把模型常见工具别名归一成真实工具名，例如 `write -> write_file`、`read -> read_file`、`list -> list_files`；leaf 写文件任务仍会补齐安全文件工具包，coordinator 会保留报告写入工具用于计划/证据/协调记录，最终业务产物仍由 worker/writer 和写入边界控制。
 - `parent_acceptance_controller` 会把空 command 测试项识别为不可执行占位检查，写入 refs 摘要 `ignored_empty_command_tests=N`，但不会因此触发人工确认或测试执行。真正有命令的测试仍走 allowlist / shell 字符安全预检。
 - 这条结构边界服务真实 E2E：测试期可以开 1-5 级观察多层代理行为，正常用户运行保持 0；后续新增 trace 事件必须同步测试和 findings 台账。
+
+## 2026-05-11 controlled tools structure update
+- `model_capabilities.py` 继续是能力申请、授权和缺口的唯一数据合同；新增 shell/MCP/tool/skill/path/network/output budget 字段必须先进入这些 dataclass，再由 service bundle 承接。
+- `services/lifecycle.py` 的 `RecordCapabilityRequestParams`、`RecordCapabilityGrantParams`、`RecordCapabilityGapParams` 是产品接口入口；后续新增能力字段不能通过散乱 `**kwargs` 进入 manager。
+- `result_structured.py` 负责把 runner 结构化输出里的 capability request 扩展字段规范成 dataclass；它只保留 bounded JSON-like scope/budget，不执行任何工具。
+- `services/persistence.py` 读取嵌套 capability 记录时会过滤未知字段，给 reserved/schema v2 留升级空间；过滤只发生在读取边界，不会吞掉当前模型已声明字段。
+- 第一阶段只补“表达和持久化能力需求”的结构层，尚未放开 shell 执行；真实执行必须继续走后续 shell gateway、trash、输出预算和审计层。

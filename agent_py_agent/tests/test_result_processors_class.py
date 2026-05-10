@@ -247,6 +247,12 @@ def test_process_structured_output_creates_capability_requests(mock_task):
             "problem": "缺少图像处理能力",
             "needed_capability": "图像处理",
             "expected_output": "图像处理结果",
+            "capability_type": "shell",
+            "requested_tools": ["shell_gateway"],
+            "requested_commands": ["python -m pytest"],
+            "path_scope": ["/workspace/project"],
+            "output_budget": {"stdout_bytes": 2048},
+            "risk_level": "low",
         }],
         artifacts=[],
         tests=[],
@@ -259,6 +265,11 @@ def test_process_structured_output_creates_capability_requests(mock_task):
 
     assert result["structured_request_count"] == 1
     assert len(mock_task.capability_requests) == 1
+    request = mock_task.capability_requests[0]
+    assert request.capability_type == "shell"
+    assert request.requested_tools == ["shell_gateway"]
+    assert request.requested_commands == ["python -m pytest"]
+    assert request.output_budget["stdout_bytes"] == 2048
 
 
 def test_process_structured_output_skips_empty_requests(mock_task):
