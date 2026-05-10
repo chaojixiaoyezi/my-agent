@@ -89,6 +89,36 @@ def test_read_artifact_tool_reads_explicit_slice_from_registered_artifact(tmp_pa
     assert payload["reads_artifact_body"] is True
 
 
+def test_read_artifact_tool_repairs_wrong_prefix_with_unique_artifact_name(tmp_path: Path) -> None:
+    artifact_path = _write_externalized_tool_output(tmp_path, content="abcdef" * 300)
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=tmp_path,
+            max_chars=1000,
+            max_entries=20,
+            max_matches=20,
+            web_max_chars=1000,
+            http_timeout=5,
+            catalog_limit=20,
+            retrieval_limit=10,
+            vector_search_enabled=False,
+        )
+    )
+
+    result = registry.execute_call({
+        "tool": "read_artifact",
+        "artifact_ref": f"/wrong/workspace/memory_archive/artifacts/tool_outputs/{artifact_path.name}",
+        "offset": 0,
+        "max_chars": 6,
+    })
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["ok"] is True
+    assert payload["artifact_path"] == str(artifact_path)
+    assert payload["content"] == "abcdef"
+
+
 def _write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(

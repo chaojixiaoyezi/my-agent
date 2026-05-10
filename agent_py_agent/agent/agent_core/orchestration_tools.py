@@ -12,34 +12,20 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from ..capabilities import CapabilityRouter
-from ..capability_config import CapabilityConfig
 from ..subagents.models import SubAgentBoardOptions
 from ..subagents.services.base import CreateRunParams, _extract_write_dirs
 from ..tools import BaseTool, ToolExecutionResult
 from .coordinator_seed_tools import explicit_root_allowed_tools
-from .dispatch_params import DispatchParams
 from .hierarchy_tools import ScheduleChildSubagentsTool
-from .orchestration_dispatch_payload import dispatch_record_payload
-from .orchestration_dispatch_scope import (
-    dispatch_apply_default,
-    dispatch_auto_apply_acceptance_followup_default,
-    dispatch_exclude_run_ids,
-    dispatch_execute_acceptance_tests_default,
-    dispatch_execute_runners_default,
-    dispatch_finalize_acceptance,
-    dispatch_max_runners_default,
-    dispatch_parent_run_id,
-    dispatch_workflow_mode,
-)
-from .orchestration_progress_payload import direct_children_progress_payload
+from .orchestration_board_payload import board_actionable_run_ids, clip_board_text
+from .orchestration_dispatch_tool import DispatchSubagentsTool
 from .orchestration_tool_specs import (
     build_create_subagents_spec,
-    build_dispatch_subagents_spec,
     build_subagent_board_spec,
 )
+from .orchestration_workflow_mode import tool_workflow_mode as _tool_workflow_mode
 from .orchestration_write_guard import external_write_target_error
-from .parameters import _bool_param, _non_negative_int, _positive_int, _string_list
+from .parameters import _positive_int, _string_list
 from .spawn_role_seed import is_explicit_root_role
 
 if TYPE_CHECKING:
@@ -55,24 +41,6 @@ CODING_SUBAGENT_TOOLS = [
     "append_file",
     "replace_in_file",
 ]
-
-
-# LLM: _tool_workflow_mode 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 函数用途: 处理工具工作流mode相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
-def _tool_workflow_mode(explicit_mode: object, config_mode: object) -> str:
-    if isinstance(explicit_mode, str):
-        normalized = explicit_mode.strip().lower()
-        if normalized in {"off", "plan", "auto"}:
-            return normalized
-        if normalized:
-            return "off"
-    if isinstance(config_mode, str):
-        normalized = config_mode.strip().lower()
-        if normalized == "auto":
-            return "auto"
-        if normalized == "manual":
-            return "plan"
-    return "off"
 
 
 # LLM: _subagent_allowed_tools 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -246,11 +214,12 @@ class SubagentBoardTool(BaseTool):
         payload = {
             "summary": board.summary,
             "returned": len(items),
+            "actionable_run_ids": board_actionable_run_ids(items),
             "subagent_workspace": str(self.agent.subagents.workspace),
             "items": [
                 {
                     "id": item.id,
-                    "goal": item.goal,
+                    "goal": clip_board_text(item.goal),
                     "status": item.status,
                     "verification_status": item.verification_status,
                     "channel_status": item.channel_status,
@@ -266,92 +235,3 @@ class SubagentBoardTool(BaseTool):
             "board_md": str(self.agent.subagents.workspace / "SUBAGENT_BOARD.md"),
         }
         return ToolExecutionResult("subagent_board", True, json.dumps(payload, ensure_ascii=False, indent=2))
-
-
-# LLM: DispatchSubagentsTool 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 提供调度子代理工具模型工具入口，把结构化参数转为子代理操作；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
-class DispatchSubagentsTool(BaseTool):
-
-    # LLM: __init__ 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 初始化实例依赖和配置字段，为后续方法调用准备共享状态；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
-    def __init__(self, agent: SimpleAgent):
-        self.agent = agent
-        self.spec = build_dispatch_subagents_spec()
-
-    # LLM: execute 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 推进execute的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
-    def execute(self, params: dict[str, object]) -> ToolExecutionResult:
-        apply = dispatch_apply_default(self.agent, params)
-        execute_runners = dispatch_execute_runners_default(self.agent, params, apply=apply)
-        if execute_runners and not apply:
-            return ToolExecutionResult(
-                "dispatch_subagents",
-                False,
-                "execute_runners=true 必须配合 apply=true，避免误触发真实 API runner。",
-            )
-
-        cfg, router = self._router()
-        report = self.agent.dispatch_subagents(
-            router,
-            cfg,
-            params=self._dispatch_params(params, apply, execute_runners),
-        )
-        payload = self._report_payload(report)
-        return ToolExecutionResult("dispatch_subagents", True, json.dumps(payload, ensure_ascii=False, indent=2))
-
-    # LLM: _router 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 处理router相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
-    def _router(self) -> tuple[CapabilityConfig, CapabilityRouter]:
-        cfg = CapabilityConfig()
-        tool_specs = [spec for spec in self.agent.tools.specs() if spec.category != "orchestration"]
-        return cfg, CapabilityRouter(config=cfg, tool_specs=tool_specs)
-
-    # LLM: _dispatch_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 推进参数的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
-    def _dispatch_params(
-        self,
-        params: dict[str, object],
-        apply: bool,
-        execute_runners: bool,
-    ) -> DispatchParams:
-        execute_acceptance_tests = dispatch_execute_acceptance_tests_default(self.agent, params, apply=apply)
-        return DispatchParams(
-            apply=apply,
-            execute_runners=execute_runners,
-            planner=_bool_param(params.get("planner"), default=False),
-            workflow_mode=dispatch_workflow_mode(self.agent, params, _tool_workflow_mode),
-            max_runners=dispatch_max_runners_default(self.agent, params),
-            limit=_non_negative_int(params.get("limit"), default=20),
-            reviewer=str(params.get("reviewer") or "chat-tool").strip(),
-            note=str(params.get("note") or "triggered by dispatch_subagents tool").strip(),
-            runner_instruction=str(params.get("runner_instruction") or params.get("instruction") or "").strip(),
-            max_cards=_non_negative_int(params.get("max_cards"), default=0),
-            probe=not _bool_param(params.get("no_probe"), default=False),
-            take_over_by=str(params.get("take_over_by") or "").strip(),
-            locked_files=_string_list(params.get("locked_files")),
-            execute_acceptance_tests=execute_acceptance_tests,
-            auto_apply_acceptance_followup=dispatch_auto_apply_acceptance_followup_default(
-                self.agent,
-                params,
-                apply=apply,
-                execute_acceptance_tests=execute_acceptance_tests,
-            ),
-            parent_run_id=dispatch_parent_run_id(self.agent, params),
-            root_id=str(params.get("root_id") or "").strip(),
-            include_run_ids=_string_list(params.get("run_ids") or params.get("include_run_ids")),
-            exclude_run_ids=dispatch_exclude_run_ids(self.agent, params),
-            finalize_acceptance=dispatch_finalize_acceptance(self.agent, params),
-        )
-
-    # LLM: _report_payload 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-    # 函数用途: 处理报告载荷相关的数据流，连接当前职责的前后步骤；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
-    def _report_payload(self, report) -> dict[str, object]:
-        payload = {
-            "dry_run": report.dry_run,
-            "summary": report.summary,
-            "records": [dispatch_record_payload(item) for item in report.records],
-            "dispatch_json": str(self.agent.subagents.workspace / "subagent_dispatch_report.json"),
-            "dispatch_md": str(self.agent.subagents.workspace / "SUBAGENT_DISPATCH.md"),
-        }
-        payload.update(direct_children_progress_payload(self.agent))
-        return payload

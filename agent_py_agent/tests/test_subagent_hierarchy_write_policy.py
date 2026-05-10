@@ -150,6 +150,74 @@ def test_hierarchy_schedule_grants_worker_path_written_by_child_spec(tmp_path):
     assert "write_file" in worker.allowed_tools
 
 
+# LLM: test_hierarchy_schedule_blocks_sibling_path_drift protects exact deliverable-root propagation.
+# 函数用途: coordinator 把 build 猜成 sibling 目录时，调度层应阻断并要求重写 child goal。
+def test_hierarchy_schedule_blocks_sibling_path_drift(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    deliverables = tmp_path / "deliverables" / "case"
+    parent = manager.create_run(
+        goal=f"在 {deliverables}/build 目录创建购物车页面。",
+        thought="delegate",
+        plan=["plan"],
+        agent_name="cart-coordinator",
+        role="coordinator",
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal=f"在 {deliverables}/stage7_r8_build 目录创建 cart.html。",
+                    agent_name="cart-worker",
+                    role="worker",
+                )
+            ],
+            apply=True,
+        )
+    )
+
+    assert result.blocked is True
+    assert result.created_run_ids == []
+    assert result.reason.startswith("child_write_root_drift:")
+    assert str(deliverables / "stage7_r8_build") in result.reason
+    assert str(deliverables / "build") in result.reason
+
+
+# LLM: test_hierarchy_schedule_allows_child_path_under_parent_root keeps valid nested output dirs working.
+# 函数用途: child 在父级 build 目录下写具体文件或子目录时不能被漂移 guard 误挡。
+def test_hierarchy_schedule_allows_child_path_under_parent_root(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    deliverables = tmp_path / "deliverables" / "case"
+    parent = manager.create_run(
+        goal=f"在 {deliverables}/build 目录创建购物网站。",
+        thought="delegate",
+        plan=["plan"],
+        agent_name="cart-coordinator",
+        role="coordinator",
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal=f"在 {deliverables}/build/cart.html 写购物车页面。",
+                    agent_name="cart-worker",
+                    role="worker",
+                )
+            ],
+            apply=True,
+        )
+    )
+    worker = manager.load(result.created_run_ids[0])
+
+    assert result.blocked is False
+    assert str(deliverables / "build") in worker.allowed_write_roots
+
+
 # LLM: test_hierarchy_schedule_ignores_url_image_sources_in_write_roots covers real shopping E2E URLs.
 # 函数用途: worker goal 里出现图片 CDN URL 时，scheduler 不能把 URL 片段当成本地写入根并拒绝创建。
 def test_hierarchy_schedule_ignores_url_image_sources_in_write_roots(tmp_path):

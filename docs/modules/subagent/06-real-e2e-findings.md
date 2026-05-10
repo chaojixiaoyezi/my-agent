@@ -2120,3 +2120,43 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Rerun R8 from a clean runtime/deliverables to verify wrong-id feedback lets the coordinator retry with the exact child id instead of looping.
   - Add producer/quality phase gating so QA/test/acceptance starts only after required producer branches have produced, failed, or explicitly handed off.
   - Add full static shopping-site validation: required pages, no `${...}` placeholders, no dead local links/src, no inert core buttons, and a register -> login -> browse -> cart -> checkout -> order success flow.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R8
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r8.yaml`.
+  - Internal runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r8`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r8`.
+  - Root run: `subagent-1778444752-9b01d744`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+- 中文说明：
+  - R8 继续按“外层只观察 root”的真实测试方式跑；外层没有替 cart 创建 leaf，也没有替任何 leaf 写页面。
+  - R7 的错误 id 阻断至少让错误 dispatch 没有直接跑错孩子，但 cart coordinator 仍然把 `build` 猜成了 sibling 目录 `stage7_r8_build`，随后围绕错误目录和错误 refs 继续读。
+  - Auth/catalog 两个分支可以完成并写出页面；cart 分支因路径漂移和错误恢复信息可见性不足主动停止，没有宣称购物网站完整可用。
+- Observed facts:
+  - Root 创建 `auth-coordinator-r8`、`catalog-coordinator-r8`、`cart-checkout-coordinator-r8` 三个一级 coordinator。
+  - Auth coordinator 创建 auth worker，auth worker 写出 `register.html` 和 `login.html`，进入 `DONE/VERIFIED`。
+  - Catalog coordinator 创建 catalog leaf，catalog leaf 写出 `products.html` 和 `product-detail.html`，进入 `DONE/VERIFIED`。
+  - Cart coordinator 先从父级 goal 得到正确目标 `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r8/build`，但后续模型回复中出现了伪造/漂移的历史工具输出，把目录改成 `stage7_r8_build`。
+  - Cart coordinator 创建 leaf 时把错误 sibling 目录写入 child goal；这类路径漂移以前会落盘成一个真实 child，后续即使 dispatch id 被拦住，也会继续把模型注意力拉到错误目录。
+  - `read_artifact` 还暴露出一个恢复体验问题：模型把已登记 artifact path 的前缀抄成了 `/Users/example/my_agent/...`，导致读取失败；真实 artifact 在 `/Users/example/my-终端应用/memory_archive/...`。
+- Finding 48: child write roots must stay anchored to inherited product roots.
+  - Symptom: coordinator 把父级给的 `build` 目录改写成 sibling `stage7_r8_build`，然后把错误路径继续传给 leaf。
+  - 中文解释：父节点说“成果放在 build 盒子里”，孩子自己猜了一个旁边的新盒子。以前系统只看“这个新盒子也在工作区里”，没有检查它是不是父节点指定的那个成果盒子。
+  - Fix: `hierarchy_scope_guards.py` now blocks child specs whose `goal` or `extra_write_roots` contain local paths outside the inherited product roots, when the parent already has authoritative product roots. The block returns `child_write_root_drift` with invalid and valid roots so the coordinator must rewrite the child goal before any child is created.
+  - Verification: `test_hierarchy_schedule_blocks_sibling_path_drift` and `test_hierarchy_schedule_allows_child_path_under_parent_root`.
+- Finding 49: artifact reads should recover copied-prefix typos without weakening the index boundary.
+  - Symptom: model copied a registered tool-output artifact filename but changed the workspace prefix, so `read_artifact` could not find it.
+  - 中文解释：身份证号码的后半截和登记表完全一样，但地址前缀抄错了。只要登记表里这个文件名唯一，我们可以安全地找回真正登记的那条记录。
+  - Fix: `artifact_reader.py` now falls back to a unique registered artifact basename when a path-like `artifact_ref` misses exact path/hash/call-id lookup. It still reads only paths already present in `tool_outputs/index.jsonl` and still verifies the file remains under the trusted artifact directory.
+  - Verification: `test_read_artifact_tool_repairs_wrong_prefix_with_unique_artifact_name`.
+- Finding 50: board/dispatch recovery facts must appear before bulky record bodies.
+  - Symptom: invalid-run-id and board facts existed, but large tool outputs were externalized/truncated before the model saw the most actionable ids.
+  - 中文解释：系统已经知道“你该用哪个孩子 ID”，但这句话埋在一大堆报告后面，模型看到的是一截摘要，容易继续猜。
+  - Fix: `dispatch_subagents` now puts `runner_selection_recovery` at the top of the tool payload when run-id selection is blocked. `subagent_board` now puts compact `actionable_run_ids` before item rows and clips long goals, so refs remain visible earlier in the prompt.
+  - Verification: focused orchestration and worker-pool tests remained green.
+- Remaining gaps:
+  - Rerun R9 from a clean runtime/deliverables to verify path-drift blocking makes cart coordinator rewrite the child goal back to `/build`.
+  - Add producer/quality phase gating so QA/test/acceptance starts only after required producer branches have produced, failed, or explicitly handed off.
+  - Add static shopping-site validation: required pages, no `${...}` placeholders, no dead local links/src, no inert core buttons, and a register -> login -> browse -> cart -> checkout -> order success flow.
