@@ -11,6 +11,15 @@ from ..prompting_parts.builder import ToolSections
 from ..tools import ToolExecutionResult
 from ._runtime_params import ToolLoopExecuteParams
 from .parameters import _one_shot_tool_call_key
+from .runner_stage_trace import (
+    RunnerModelStageTraceRequest,
+    RunnerToolStageTraceRequest,
+    trace_runner_model_request_failed,
+    trace_runner_model_request_started,
+    trace_runner_model_response_received,
+    trace_runner_tool_call_finished,
+    trace_runner_tool_call_started,
+)
 from .tool_context_reducer import render_tool_result_for_live_prompt
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 
@@ -24,6 +33,26 @@ class ToolCallRecordParams:
     idx: int
     payload: object
     result: ToolExecutionResult
+
+
+# LLM: ToolCallExecuteParams keeps one tool execution request bundled before result recording.
+# 类用途: 单次工具调用执行参数包，避免 runner trace 和执行入口继续增加散乱参数。
+@dataclass(frozen=True)
+class ToolCallExecuteParams:
+    params: ToolLoopExecuteParams
+    tool_rounds: int
+    idx: int
+    payload: object
+
+
+# LLM: ModelGenerateParams bundles backend generation inputs for trace and bundle-interface guard.
+# 类用途: 模型生成参数包，集中 agent、运行参数、prompt 和当前工具轮次。
+@dataclass(frozen=True)
+class ModelGenerateParams:
+    agent: object
+    params: ToolLoopExecuteParams
+    prompt: str
+    tool_rounds: int
 
 
 # LLM: _build_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -82,8 +111,13 @@ class ToolLoopService:
 
         while True:
             final_prompt = _build_prompt(self._agent, params)
-            response = self._agent.backend.generate(
-                final_prompt, on_chunk=params.effective_on_chunk
+            response = _generate_model_response(
+                ModelGenerateParams(
+                    agent=self._agent,
+                    params=params,
+                    prompt=final_prompt,
+                    tool_rounds=tool_rounds,
+                )
             )
             final_response = response
 
@@ -95,13 +129,21 @@ class ToolLoopService:
                 break
 
             if self._tool_round_limit_reached(params, tool_rounds):
-                final_prompt, final_response = self._final_response_after_tool_limit(params)
+                final_prompt, final_response = self._final_response_after_tool_limit(
+                    params, tool_rounds
+                )
                 break
 
             tool_rounds += 1
             params.tool_context.append(f"[assistant-tool-round-{tool_rounds}]\n{response.text}")
             for idx, payload in enumerate(calls, start=1):
-                result = self._execute_one_tool_call(params, payload)
+                tool_request = ToolCallExecuteParams(
+                    params=params,
+                    tool_rounds=tool_rounds,
+                    idx=idx,
+                    payload=payload,
+                )
+                result = self._execute_one_tool_call(tool_request)
                 self._record_tool_call(
                     ToolCallRecordParams(params, tool_rounds, idx, payload, result)
                 )
@@ -115,28 +157,62 @@ class ToolLoopService:
 
     # LLM: _final_response_after_tool_limit 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 处理final响应after工具限制相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
-    def _final_response_after_tool_limit(self, params: ToolLoopExecuteParams):
+    def _final_response_after_tool_limit(self, params: ToolLoopExecuteParams, tool_rounds: int):
         params.tool_context.append("[tool-system]\n已达到最大工具轮数限制，停止继续调用工具。")
         final_prompt = _build_prompt(self._agent, params)
-        final_response = self._agent.backend.generate(
-            final_prompt, on_chunk=params.effective_on_chunk
+        final_response = _generate_model_response(
+            ModelGenerateParams(
+                agent=self._agent,
+                params=params,
+                prompt=final_prompt,
+                tool_rounds=tool_rounds,
+            )
         )
         return final_prompt, final_response
 
     # LLM: _execute_one_tool_call 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 推进one工具call的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
-    def _execute_one_tool_call(self, params: ToolLoopExecuteParams, payload):
-        one_shot_key = _one_shot_tool_call_key(payload)
-        if one_shot_key and one_shot_key in params.one_shot_tool_calls:
-            return _duplicate_one_shot_result(payload)
+    def _execute_one_tool_call(self, request: ToolCallExecuteParams):
+        trace_request = RunnerToolStageTraceRequest(
+            agent=self._agent,
+            params=request.params,
+            tool_rounds=request.tool_rounds,
+            idx=request.idx,
+            payload=request.payload,
+        )
+        trace_runner_tool_call_started(trace_request)
+        one_shot_key = _one_shot_tool_call_key(request.payload)
+        if one_shot_key and one_shot_key in request.params.one_shot_tool_calls:
+            result = _duplicate_one_shot_result(request.payload)
+            trace_runner_tool_call_finished(
+                RunnerToolStageTraceRequest(
+                    agent=self._agent,
+                    params=request.params,
+                    tool_rounds=request.tool_rounds,
+                    idx=request.idx,
+                    payload=request.payload,
+                    result=result,
+                )
+            )
+            return result
         result = self._agent.tools.execute_call(
-            payload,
-            allowed_tools=params.allowed_tools,
-            granted_capabilities=params.granted_capabilities,
-            write_boundary=params.write_boundary,
+            request.payload,
+            allowed_tools=request.params.allowed_tools,
+            granted_capabilities=request.params.granted_capabilities,
+            write_boundary=request.params.write_boundary,
         )
         if one_shot_key and result.ok:
-            params.one_shot_tool_calls.add(one_shot_key)
+            request.params.one_shot_tool_calls.add(one_shot_key)
+        trace_runner_tool_call_finished(
+            RunnerToolStageTraceRequest(
+                agent=self._agent,
+                params=request.params,
+                tool_rounds=request.tool_rounds,
+                idx=request.idx,
+                payload=request.payload,
+                result=result,
+            )
+        )
         return result
 
     # LLM: _record_tool_call 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -171,3 +247,40 @@ class ToolLoopService:
         output_record.update(fail_safe)
         output_record["parameters"] = record.payload
         return output_record
+
+
+# LLM: _generate_model_response wraps backend calls with refs-only runner stage trace events.
+# 函数用途: 在模型请求前后写 runner 阶段心跳；普通主代理没有 runner id 时不会写 trace。
+def _generate_model_response(request: ModelGenerateParams):
+    trace_runner_model_request_started(
+        RunnerModelStageTraceRequest(
+            agent=request.agent,
+            params=request.params,
+            tool_rounds=request.tool_rounds,
+            prompt=request.prompt,
+        )
+    )
+    try:
+        response = request.agent.backend.generate(
+            request.prompt,
+            on_chunk=request.params.effective_on_chunk,
+        )
+    except Exception as exc:
+        trace_runner_model_request_failed(
+            RunnerModelStageTraceRequest(
+                agent=request.agent,
+                params=request.params,
+                tool_rounds=request.tool_rounds,
+                exc=exc,
+            )
+        )
+        raise
+    trace_runner_model_response_received(
+        RunnerModelStageTraceRequest(
+            agent=request.agent,
+            params=request.params,
+            tool_rounds=request.tool_rounds,
+            response=response,
+        )
+    )
+    return response
