@@ -320,3 +320,9 @@
 - `CapabilityGrant` 新增 grant type、MCP tools、command allowlist、path/network scope、output budget、risk、expires_at 和 reserved 字段；这些字段只是授权边界，不代表自动执行。
 - `CapabilityGap` 新增 gap type、requested scope、escalation chain、next refs 和 reserved 字段；无解问题能保留原始申请范围，方便父级继续路由或沉淀 skill_spark。
 - 结构化 runner 输出里的 `capability_requests` 会保留这些扩展字段；持久化读取会忽略未来未知字段，避免后续 schema 小扩展卡死旧记录。
+
+## 2026-05-11 controlled tools stage 2
+- 中文说明：父级 capability route 现在会把申请范围真正带进 dry-run report、grant 和 gap；能解决时是 scoped grant，不能解决时保留 requested scope 和 escalation chain。
+- 命中能力卡时，grant 会写入 `grant_type`、command allowlist、MCP tools、path/network scope、output budget、risk 和 request scope reserved；`allowed_tools` 仍只合并明确授权的工具。
+- 未命中能力卡时，gap 会写入 `gap_type`、requested scope、escalation chain 和 `capability_request:<id>` ref，方便父级继续上抛、人工处理或后续 skill_spark 学习。
+- capability route dry-run record 也带 `request_scope` / `grant_scope`，让人类或上级 agent 在 apply 前就能看到授权边界。

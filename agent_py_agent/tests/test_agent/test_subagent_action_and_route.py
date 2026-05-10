@@ -294,6 +294,13 @@ def test_subagent_capability_route_grants_tool():
                 problem="当前需要请求 REST API 并检查 HTTP 状态码和 JSON 返回。",
                 needed_capability="http_request",
                 expected_output="接口状态码和返回体摘要",
+                capability_type="shell",
+                requested_tools=["http_request"],
+                requested_commands=["curl"],
+                path_scope=[str(root)],
+                network_scope=["https://api.example.test"],
+                output_budget={"stdout_bytes": 4096},
+                risk_level="low",
             ),
         )
         router = CapabilityRouter(
@@ -313,6 +320,14 @@ def test_subagent_capability_route_grants_tool():
         assert routed.capability_requests[0].status == "GRANTED"
         assert routed.capability_grants
         assert "http_request" in routed.allowed_tools
+        grant = routed.capability_grants[0]
+        assert grant.grant_type == "shell"
+        assert grant.command_allowlist == ["curl"]
+        assert grant.path_scope == [str(root)]
+        assert grant.network_scope == ["https://api.example.test"]
+        assert grant.output_budget["stdout_bytes"] == 4096
+        assert applied.records[0].request_scope["requested_commands"] == ["curl"]
+        assert applied.records[0].grant_scope["command_allowlist"] == ["curl"]
         assert (root / "subs" / "subagent_capability_route_report.json").exists()
         assert (root / "subs" / "SUBAGENT_CAPABILITY_ROUTE.md").exists()
         assert (root / "subs" / "subagent_capability_route_log.jsonl").exists()
@@ -384,6 +399,9 @@ def test_subagent_capability_route_creates_gap_when_no_match():
                 problem="需要 zzz_unmatched_capability_999 完成一个不存在的能力。",
                 needed_capability="zzz_unmatched_capability_999",
                 expected_output="未知输出",
+                capability_type="mcp",
+                requested_mcp_tools=["zzz_unmatched_mcp_999"],
+                escalation_target="root-reviewer",
             ),
         )
         router = CapabilityRouter(
@@ -397,6 +415,10 @@ def test_subagent_capability_route_creates_gap_when_no_match():
         assert report.records[0].status == "GAP"
         assert routed.capability_requests[0].status == "GAP"
         assert routed.capability_gaps
+        assert routed.capability_gaps[0].gap_type == "mcp"
+        assert routed.capability_gaps[0].requested_scope["requested_mcp_tools"] == ["zzz_unmatched_mcp_999"]
+        assert "root-reviewer" in routed.capability_gaps[0].escalation_chain
+        assert report.records[0].request_scope["capability_type"] == "mcp"
 
 
 def test_subagent_execution_context_uses_only_grants():

@@ -198,13 +198,19 @@ def _filter_action_plan_items(
 # LLM: _capability_request_query 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 处理能力请求查询相关的数据流，连接当前职责的前后步骤；关键副作用: 可能触发网络输入输出或消费流式响应，需保留错误传播语义。
 def _capability_request_query(task: SubAgentTask, request: CapabilityRequest) -> str:
+    # LLM: Include scoped request terms so shell/MCP/tool needs can route without broad prompt context.
     parts = [
         task.goal,
         request.needed_capability,
         request.problem,
         request.expected_output,
+        request.capability_type,
         " ".join(request.tried),
         " ".join(request.evidence),
+        " ".join(request.requested_tools),
+        " ".join(request.requested_skills),
+        " ".join(request.requested_mcp_tools),
+        " ".join(request.requested_commands),
         " ".join(f"{key}:{value}" for key, value in request.constraints.items()),
     ]
     return "\n".join(part for part in parts if part)

@@ -24,11 +24,18 @@ from .capability_route_service import (
     record_capability_route_gap,
     write_capability_route_report_files,
 )
+from .capability_scope import (
+    grant_command_allowlist,
+    grant_tools,
+    request_scope_snapshot,
+    scoped_constraints,
+)
 from .models import CapabilityRequest, SubAgentCapabilityRouteOptions, SubAgentTask
 from .policies import _capability_request_query, _select_capability_hits
 from .reports import CapabilityRouteRecord, CapabilityRouteReport
 from .services.lifecycle import RecordCapabilityGrantParams
 
+# LLM: Capability routing now carries request scope into grants, but still never executes tools.
 if TYPE_CHECKING:
     from ..capabilities import CapabilitySearchHit
 
@@ -152,10 +159,19 @@ class SubAgentCapabilityMixin:
             RecordCapabilityGrantParams(
                 request_id=params.request.id,
                 skills=params.granted_skills,
-                tools=params.granted_tools,
+                tools=grant_tools(params.request, params.granted_tools),
+                mcp_tools=params.request.requested_mcp_tools,
+                command_allowlist=grant_command_allowlist(params.request),
+                grant_type=params.request.capability_type,
                 capability_cards=params.selected_cards,
                 reason=f"CapabilityRouter 命中 {len(params.selected_hits)} 张能力卡。",
+                constraints=scoped_constraints(params.request),
+                path_scope=params.request.path_scope or params.request.cwd_scope,
+                network_scope=params.request.network_scope,
+                output_budget=params.request.output_budget,
+                risk_level=params.request.risk_level,
                 expires_after_task=True,
+                reserved={"request_scope": request_scope_snapshot(params.request)},
             ),
         )
         _mark_capability_request_status(self, params.task.id, params.request.id, "GRANTED")
