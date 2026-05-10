@@ -265,10 +265,11 @@
 - 本轮真实小烟测观察补强：真实 root->child 链路暴露 child 调用 `schedule_child_subagents` 失败时现有 level 3 trace 只能看到 `ok=false`，看不到模型传参和工具错误正文；新增 `subagent_debug_trace_level=4/5`，level 4 在 JSONL 写短预览，level 5 把完整 prompt、response、tool payload 和 tool output 写到内部 `debug_traces/details/`，只用于 E2E 排障，默认 0 不写。
 - 本轮真实四层 trace5 小烟测修复第一片：level 5 追踪确认 root->child->grandchild->leaf 能逐层创建，但 leaf 因模型漏传 `acceptance_checks` 被 Context Gate 阻塞；层级调度器现在会在 child spec 省略验收项时，从自包含 goal/角色派生最小验收项，避免叶子因字段缺失直接停住。工具循环也新增 max-tool-round hard stop：达到工具轮数上限后，如果模型仍输出 `[TOOL_CALL]`，系统返回确定性停止说明，不把新工具请求当最终答复。
 - 本轮真实四层 trace5 复测已跑通：外层只启动/观察 root，root 创建 child，child 创建 grandchild，grandchild 创建 leaf，leaf 真实写出 `proof.txt=context-lineage-ok`，最终 root dispatch acceptance 通过。复测同时暴露并修复父级验收里模型输出 `cat <file>` 的问题：现在安全的 workspace-local `cat` 内容检查会被归一成受控 `content_check`，并支持 `content_equals` + `match_mode=exact`，不需要放开 `cat` 命令白名单。
+- 本轮 Stage7 购物网站层级 E2E 第一轮真实观察：外层只启动 root/coordinator，root 自己创建 frontend/backend leads，frontend lead 继续创建 auth/shop coordinators，shop coordinator 成功创建 products leaf，products leaf 已写出 `frontend/products/list.html`。同时暴露两个长期问题并已先修代码入口：coordinator 遇到最终产物目录写入保护后，部分模型会误以为该申请自己拿写权限；runner tool-loop 会把大段 `write_file(content=HTML...)` 的工具调用原文塞回下一轮 prompt，导致上下文膨胀和模型请求长时间无返回。现在 coordinator prompt/模板明确要求转派 worker/writer/leaf_worker，不给自己申请产物写权限；新增 assistant tool-call context reducer，只把大工具参数的长度、hash、路径和短预览放回 live prompt。
 
 ## 未跑测试
 
-- 当前 runner 阶段心跳已用 focused stub tests 和真实 MiniMax 小 smoke 覆盖；root/coordinator seed 和 continue-dispatch 已用真实 MiniMax 小型角色模板复测覆盖，尚未重跑完整 `1/4/16/48` 或购物网站级大型 E2E。
+- 当前 runner 阶段心跳已用 focused stub tests 和真实 MiniMax 小 smoke 覆盖；root/coordinator seed 和 continue-dispatch 已用真实 MiniMax 小型角色模板复测覆盖，购物网站 Stage7 已完成第一轮真实暴露和局部修复，但尚未复跑到注册/登录/购买全链路全绿。
 - workflow apply 已有实现，但仍需要继续补更贴近真实 dispatch 的端到端回归，尤其是 worker 子工单依赖、验收阻断和失败回放。
 - 同步门目前只覆盖 `log-analysis` 和 `subagent` 两个模块；其它模块还需要先补四件套和规则映射。
 - parent/subagent 跨天恢复已有确定性 backend 场景和真实 API 多轮恢复记录；后续交付级变更仍应按风险补跑真实 API 冒烟。

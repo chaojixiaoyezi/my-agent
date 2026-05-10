@@ -107,6 +107,10 @@ _SCHEDULE_CHILD_EXAMPLES = [
         '{"role":"acceptor","agent_name":"qa-acceptor","goal":"按验收标准判断是否可以交付"}]}'
     ),
 ]
+_SCHEDULE_CHILD_COORDINATOR_RULES = (
+    "coordinator/lead 不要直接写最终业务产物；如果最终产物路径不在自己的 allowed_write_roots 内，"
+    "这是设计保护。请用本工具创建 worker/writer/leaf_worker，并把父级给定的路径、文件名和验收条件原样传下去。"
+)
 
 
 # LLM: build_create_subagents_spec 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -165,7 +169,8 @@ def build_schedule_child_subagents_spec() -> ToolSpec:
     return ToolSpec(
         name="schedule_child_subagents",
         category="orchestration",
-        description="在当前 subagent runner 的名下创建下一层 child runs，保持层级树可恢复。",
+        description="在当前 subagent runner 的名下创建下一层 child runs，保持层级树可恢复。"
+        + _SCHEDULE_CHILD_COORDINATOR_RULES,
         use_cases=_SCHEDULE_CHILD_USE_CASES,
         avoid_when=["顶层主代理第一次派工时继续用 create_subagents；没有当前 runner 上下文时不要调用"],
         keywords=_SCHEDULE_CHILD_KEYWORDS,

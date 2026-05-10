@@ -46,6 +46,8 @@ def test_runner_prompt_tells_coordinator_to_write_reports_but_delegate_deliverab
     assert "coordinator" in prompt
     assert "可以在自己的 task_dir 写计划、证据和协调报告" in prompt
     assert "最终产物仍应交给 worker/writer" in prompt
+    assert "不要给自己申请最终产物目录写权限" in prompt
+    assert "创建 worker/writer/leaf_worker" in prompt
     assert "不要让 worker/writer 代写 coordinator 自己的协调证据" in prompt
     assert "原样传递父级指定的文件名" in prompt
     assert "mixed_coordinator_leaf_children" in prompt

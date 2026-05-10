@@ -1882,3 +1882,40 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining gaps:
   - Coordinator prompt/tool-use quality still needs tuning so parent nodes stop after direct child verification instead of repeatedly reading artifacts.
   - Streaming mode for Anthropic-compatible MiniMax remains unverified for deep chains; keep non-stream mode for this E2E until a separate streaming smoke passes.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511.yaml`.
+  - Internal runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511`.
+  - Root run: `subagent-1778434074-6b6d17c5`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+  - Observation rule: the outer controller only seeded and dispatched root; root created child coordinators, child coordinators created or attempted to create their own descendants.
+- 中文说明：
+  - 这轮按用户要求做购物网站级真实烟测，目标是让层级代理自己拆出前端、后端、认证、购物车、结账等工作；外层只观察 root，不直接替子/孙/叶子干活。
+  - 这不是全绿交付，而是暴露问题的 Stage7 第一轮。当前已经证明写保护、trace、board、child 创建和部分 leaf 写文件链路真实发生。
+- Observed facts:
+  - Root created `frontend-lead` and `backend-lead`.
+  - `frontend-lead` created `auth-coord` and `shop-coord`.
+  - `shop-coord` recovered from product write denial and created `products-leaf`.
+  - `products-leaf` wrote `deliverables/stage7_shop_smoke_20260511/frontend/products/list.html`.
+  - `auth-coord` and `backend-lead` became `BLOCKED`; board surfaced failure handoff and takeover readiness refs.
+  - The dispatch command was stopped after trace stopped advancing for several minutes during a leaf model request.
+- Finding 35: coordinator product-write denial needs to become delegation, not self-grant.
+  - Symptom: report-only coordinators tried to write files under `deliverables/stage7_shop_smoke_20260511/...`; write boundary correctly rejected them because their `allowed_write_roots` only allowed task-local reports.
+  - 中文解释：协调员本来应该“派人干活”，不是自己去写最终页面。系统挡住写入是对的；问题是模型有时不知道下一步该创建 leaf，而是说要申请权限或让父代理代写。
+  - Root cause: the role prompt and schedule tool spec did not state strongly enough that this specific denial is the intended coordinator boundary and should be handled by `schedule_child_subagents`.
+  - Fix: coordinator runner prompt, coordinator role template, and `schedule_child_subagents` tool description now state that denied final-product writes must be delegated to worker/writer/leaf_worker, with paths, filenames, and acceptance checks passed through exactly. Coordinators should not request product write grants for themselves and should not ask the parent to direct-write product files.
+  - Verification: `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_subagent_prompt_contract.py agent_py_agent/tests/test_subagent_role_templates.py` -> passed.
+- Finding 36: large `write_file` tool-call payloads inflated the next live prompt.
+  - Symptom: after `products-leaf` generated a large HTML `write_file` call, the next runner prompt grew to about 61k chars and the model request stopped producing trace progress.
+  - 中文解释：叶子写 HTML 时，上一轮模型回复里包含整段 HTML。系统以前把这整段工具调用原文塞回下一轮 prompt，等于让模型反复背自己刚写的大文件，慢且容易卡。
+  - Root cause: tool output externalization only handled tool results, not assistant tool-call payloads. `ToolLoopService` appended the full assistant response to `tool_context` before executing parsed calls.
+  - Fix: added `tool_call_context_reducer.py`. Large assistant tool-call payloads are now summarized for live prompt as tool name, path, field sizes, sha256, and short preview. The full content remains in the target artifact/debug detail refs, not in every subsequent prompt.
+  - Verification: `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_tool_output_externalizer.py` -> passed.
+- Remaining gaps:
+  - Need rerun Stage7 shopping smoke after the reducer/prompt fix, starting again from a clean deliverables/runtime directory.
+  - Need reach a usable shopping site path: register -> login -> product list/detail -> cart -> checkout -> success, with no dead buttons and no broken image references.
+  - Need decide whether Stage7 should use a bounded runner timeout during smoke tests even if user default remains `off`, so one stalled model call cannot block the whole overnight test harness.

@@ -108,6 +108,14 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
             "- coordinator/lead 节点可以在自己的 task_dir 写计划、证据和协调报告；"
             "业务代码、页面、文档正文等最终产物仍应交给 worker/writer。"
         )
+        lines.append(
+            "- 如果你尝试写最终产物时收到 allowed_write_roots 阻止，这是正确保护；"
+            "不要给自己申请最终产物目录写权限，也不要让父代理直接代写。"
+        )
+        lines.append(
+            "- 正确动作是调用 schedule_child_subagents 创建 worker/writer/leaf_worker，"
+            "把目标路径、文件名、验收条件原样传给下一层，然后用 dispatch_subagents 推进直接 child。"
+        )
         lines.append("- 不要让 worker/writer 代写 coordinator 自己的协调证据；需要共享时引用 artifact_refs/evidence_refs。")
         lines.append("- 创建 child/leaf 时必须原样传递父级指定的文件名、目录和验收条件，不要把 solution.py 改成别的模块名。")
         lines.append("- 同一次 schedule_child_subagents 不要混建 coordinator 和 leaf_worker；如返回 mixed_coordinator_leaf_children，先只创建下一层 coordinator。")
