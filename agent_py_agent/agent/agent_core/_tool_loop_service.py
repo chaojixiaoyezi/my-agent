@@ -21,6 +21,10 @@ from .runner_stage_trace import (
     trace_runner_tool_call_finished,
     trace_runner_tool_call_started,
 )
+from .tool_call_context_reducer import (
+    AssistantToolRoundContextRequest,
+    render_assistant_tool_round_context,
+)
 from .tool_context_reducer import render_tool_result_for_live_prompt
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 
@@ -54,6 +58,16 @@ class ModelGenerateParams:
     params: ToolLoopExecuteParams
     prompt: str
     tool_rounds: int
+
+
+# LLM: AssistantToolRoundAppendParams keeps live-context append inputs in one bundle.
+# 类用途: 保存本轮工具调用摘要回写所需上下文，避免内部 helper 重新出现散乱参数。
+@dataclass(frozen=True)
+class AssistantToolRoundAppendParams:
+    params: ToolLoopExecuteParams
+    tool_rounds: int
+    response: ModelResponse
+    calls: list[dict[str, object]]
 
 
 # LLM: _build_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -91,6 +105,17 @@ def _duplicate_one_shot_result(payload: dict[str, object]) -> ToolExecutionResul
         False,
         "本轮已经执行过相同的一次性编排工具调用，系统已阻止重复执行。"
         "请基于前面的工具结果直接给最终回答，不要再次调用同一个工具。",
+    )
+
+
+# LLM: _append_assistant_tool_round_context protects the next live prompt from large tool payloads.
+# 函数用途: 把模型刚生成的工具调用摘要写回 tool_context；大正文只保留长度/hash/预览，不再反复塞进后续提示词。
+def _append_assistant_tool_round_context(request: AssistantToolRoundAppendParams) -> None:
+    rendered = render_assistant_tool_round_context(
+        AssistantToolRoundContextRequest(request.response.text, request.calls)
+    )
+    request.params.tool_context.append(
+        f"[assistant-tool-round-{request.tool_rounds}]\n{rendered}"
     )
 
 
@@ -136,7 +161,9 @@ class ToolLoopService:
                 break
 
             tool_rounds += 1
-            params.tool_context.append(f"[assistant-tool-round-{tool_rounds}]\n{response.text}")
+            _append_assistant_tool_round_context(
+                AssistantToolRoundAppendParams(params, tool_rounds, response, calls)
+            )
             for idx, payload in enumerate(calls, start=1):
                 tool_request = ToolCallExecuteParams(
                     params=params,

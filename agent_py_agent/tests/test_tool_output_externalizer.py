@@ -13,6 +13,10 @@ from types import SimpleNamespace
 
 from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
 from agent_py_agent.agent.agent_core._tool_loop_service import ToolCallRecordParams, ToolLoopService
+from agent_py_agent.agent.agent_core.tool_call_context_reducer import (
+    AssistantToolRoundContextRequest,
+    render_assistant_tool_round_context,
+)
 from agent_py_agent.agent.memory_archive.runtime.turn_archiver import (
     ArchiveRunTurnParams,
     ArchiveTurnContext,
@@ -60,6 +64,29 @@ def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) ->
     assert str(artifact_path) in params.tool_context[-1]
     assert "完整工具输出已外置" in params.tool_context[-1]
     assert record["fail_safe_checkpoint_path"] in params.tool_context[-1]
+
+
+def test_tool_loop_summarizes_large_tool_call_payload_for_live_prompt() -> None:
+    huge_html = "<html>" + ("x" * 9000) + "</html>"
+    response = (
+        "我要写商品页面。\n"
+        "[TOOL_CALL]\n"
+        + json.dumps({"tool": "write_file", "path": "shop/list.html", "content": huge_html})
+        + "\n[/TOOL_CALL]"
+    )
+
+    rendered = render_assistant_tool_round_context(
+        AssistantToolRoundContextRequest(
+            response_text=response,
+            tool_calls=[{"tool": "write_file", "path": "shop/list.html", "content": huge_html}],
+        )
+    )
+
+    assert "assistant tool-call response summarized" in rendered
+    assert "tool_call_1: tool=write_file" in rendered
+    assert "path: shop/list.html" in rendered
+    assert "large text omitted" in rendered
+    assert huge_html not in rendered
 
 
 def test_tool_loop_writes_fail_safe_checkpoint_before_externalizing_large_output(tmp_path: Path) -> None:

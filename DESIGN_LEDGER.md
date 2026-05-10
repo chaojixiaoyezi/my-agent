@@ -8,6 +8,16 @@
 - `status` / `subagents` 的 `Takeover View` 可以显示 principal、conversation、memory namespace 和 config scope 摘要，便于未来飞书/微信/CLI 多入口与员工会话隔离排查。
 - 当前只是审计和扩展口子：不启用员工长期记忆，不允许 conversation/run overlay 自动提升到全局配置，也不把子代理 task/run working memory 直接写成员工记忆。
 
+## 2026-05-11 / Stage7 购物网站真实 E2E：coordinator 只委派，large tool-call 只摘要
+
+状态：待验证
+
+摘要：
+- 真实 Stage7 购物网站烟测证明 root->lead->coord->leaf 链路能开始工作，且 report-only coordinator 被产物目录写保护挡住是正确行为。
+- 新决策：coordinator 遇到最终产物写入被 `allowed_write_roots` 拒绝时，不应申请自己拿产品写权限，也不应让父代理代写；它必须创建 worker/writer/leaf_worker，并把路径、文件名、验收条件原样传下去。
+- 新决策：assistant 生成的大工具调用参数（尤其 `write_file(content=<large html>)`）不能原样回灌下一轮 live prompt。系统只回灌工具名、路径、字段大小、hash 和短预览；完整内容以目标文件/debug detail ref 为准。
+- 待验证：清理 Stage7 runtime/deliverables 后重跑购物网站全链路，目标覆盖注册、登录、商品列表/详情、购物车、结账和成功页，且按钮和图片引用可用。
+
 这份文档用来记录我们在交流中形成的新思路，避免后续开发时忘记上下文。
 
 后续 AI 开发者必须先读：
