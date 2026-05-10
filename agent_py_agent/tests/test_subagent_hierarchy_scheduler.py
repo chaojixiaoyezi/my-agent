@@ -484,6 +484,30 @@ def test_hierarchy_schedule_blocks_depth_and_child_limits(tmp_path):
     assert manager.load(root.id).child_ids == [child_id]
 
 
+def test_hierarchy_schedule_blocks_mixed_coordinator_and_leaf_children(tmp_path):
+    manager = SubAgentManager(tmp_path)
+    root = manager.create_run(goal="root", thought="orchestrate", plan=["plan"])
+    child = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(parent_run_id=root.id, child_specs=_child_specs(1), apply=True)
+    )
+    parent_id = child.created_run_ids[0]
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent_id,
+            child_specs=[
+                HierarchyChildSpec(goal="create next coordinator", role="coordinator"),
+                HierarchyChildSpec(goal="write final proof", role="leaf_worker"),
+            ],
+            apply=True,
+        )
+    )
+
+    assert result.blocked is True
+    assert result.reason == "mixed_coordinator_leaf_children"
+    assert manager.load(parent_id).child_ids == []
+
+
 # LLM: test_subagents_hierarchy_cli_is_dry_run_by_default covers the command boundary.
 # 函数用途: 确认 CLI 可以解析 child spec，默认不写入，输出可读 JSON 摘要。
 def test_subagents_hierarchy_cli_is_dry_run_by_default(tmp_path, capsys):

@@ -18,7 +18,25 @@ def schedule_block_reason(parent: SubAgentTask, request: Any) -> str:
         return f"max_depth_exceeded:{request.max_depth}"
     if request.max_children > 0 and len(parent.child_ids) + len(request.child_specs) > request.max_children:
         return f"max_children_exceeded:{request.max_children}"
+    mixed_reason = _mixed_coordinator_leaf_reason(request.child_specs)
+    if mixed_reason:
+        return mixed_reason
     return _forbidden_child_scope_reason(parent, request) or _domain_mismatch_reason(parent, request)
+
+
+# LLM: _mixed_coordinator_leaf_reason blocks one call from flattening a planned hierarchy.
+# 函数用途: 同一次层级创建里不能既建 coordinator 又建 leaf，避免模型绕过“上层先创建下层领导”的职责链。
+def _mixed_coordinator_leaf_reason(child_specs: list[Any]) -> str:
+    has_coordinator = any(_child_has_role_token(spec, {"coordinator", "lead"}) for spec in child_specs)
+    has_leaf = any(_child_has_role_token(spec, {"leaf", "leaf_worker", "leaf-worker"}) for spec in child_specs)
+    return "mixed_coordinator_leaf_children" if has_coordinator and has_leaf else ""
+
+
+# LLM: _child_has_role_token keeps hierarchy role checks limited to explicit role/agent labels.
+# 函数用途: 判断 child spec 是否属于 coordinator 或 leaf 类角色；不看 goal，避免“创建 leaf 的 coordinator”被误判为 leaf。
+def _child_has_role_token(spec: Any, tokens: set[str]) -> bool:
+    text = f"{spec.agent_name} {spec.role}".lower()
+    return any(token in text for token in tokens)
 
 
 # LLM: _forbidden_child_scope_reason enforces explicit sibling exclusions before bad children are persisted.

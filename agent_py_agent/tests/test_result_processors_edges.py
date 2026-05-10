@@ -71,6 +71,30 @@ def test_process_structured_output_records_evidence_packets_and_findings(mock_ta
     assert mock_task.artifact_refs == ["artifact://raw-1"]
 
 
+def test_process_structured_output_synthesizes_artifact_evidence_packet(mock_task):
+    """LLM: artifact-only runner outputs still become traceable parent-acceptance evidence."""
+    parsed = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        parse_error="",
+        status="DONE",
+        summary="写入 proof.txt",
+        artifacts=[{
+            "path": "/tmp/proof.txt",
+            "kind": "file",
+            "summary": "包含精确内容 coordinator-seed-ok",
+        }],
+        evidence_packets=[],
+    )
+
+    result = _process_structured_output(mock_task, parsed, 123456.0, None)
+
+    assert len(result["evidence_packets"]) == 1
+    assert result["evidence_packets"][0]["artifact_refs"] == ["/tmp/proof.txt"]
+    assert mock_task.artifact_refs == ["/tmp/proof.txt"]
+    assert mock_task.evidence_packets[0].claim == "artifact produced: 包含精确内容 coordinator-seed-ok"
+
+
 def _lessons_payload_context(mock_task, parsed: SubAgentParsedOutput) -> OutputPayloadContext:
     lessons = ["经验1", "经验2"]
     next_actions = ["行动1", "行动2", "行动3"]

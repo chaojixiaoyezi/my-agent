@@ -16,6 +16,7 @@ from .models import (
     VerificationEvidence,
 )
 from .parsing import _normalize_runner_items, _split_allowed_items, _string_dict, _string_list
+from .result_artifact_evidence import merge_artifact_evidence
 from .utils import _merge_list, _new_id
 
 
@@ -291,13 +292,11 @@ def _process_structured_output(
     findings = _process_findings(parsed, task, now)
     structured_request_count, created_request_ids = _create_capability_requests_from_parsed(task, parsed, now)
     normalized = _normalize_parsed_fields(parsed)
-    task.artifact_refs = _merge_list(
-        task.artifact_refs,
-        [
-            ref
-            for ref in (str(item.get("path") or item.get("uri") or item.get("artifact_id") or "") for item in normalized["artifacts"])
-            if ref
-        ],
+    evidence_packets = merge_artifact_evidence(
+        task,
+        normalized["artifacts"],
+        evidence_packets,
+        now,
     )
     task.blockers = _merge_list(task.blockers, [parsed.blocked_reason] if parsed.blocked_reason else [])
     return {

@@ -248,6 +248,8 @@
 - 本轮 runner 阶段心跳第一片：`subagent_debug_trace_level=3` 现在会记录子代理 runner 的模型请求开始、模型响应返回、模型请求失败、工具调用开始、工具调用结束；只写长度、backend、工具名、payload keys、ok 和输出长度，不写 prompt/response/tool output 正文。这样无限 runner 卡住时能先区分是模型请求卡住、模型已返回但工具没跑、还是工具调用卡住。
 - 本轮真实 runner trace smoke：MiniMax-M2.7 case `runner_stage_trace_20260510_145432` 已验证 level 3 事件真实落盘，覆盖 4 次模型请求/响应和 3 次工具调用开始/结束；同时暴露 `spawn-subagents --count 1` 默认建 worker，不适合当 root/coordinator 层级测试入口，下一步需补正式 root/coordinator 创建方式。
 - 本轮 root/coordinator seed 入口：`spawn-subagents --role coordinator --agent-name root-coordinator --count 1` 会创建真正的 root/coordinator，带调度/看板/只读工具，不带写文件工具；用于真实 E2E 时外层只启动这个 root，后续必须由 root 创建子代理、子代理创建孙代理、孙代理创建孙孙代理。
+- 本轮 root -> child -> grandchild -> leaf 真实 4 层 guard smoke 已跑通：外层测试控制器只启动 root，root 创建 child coordinator，child 创建 grandchild coordinator，grandchild 创建 leaf，leaf 写出 `proof.txt=hierarchy4-guard-ok`，最终 4 个节点全部 `DONE / VERIFIED`。
+- 本轮真实 4 层 E2E 修复三类收口问题：runner 只有 artifacts 但漏写 `evidence_packets` 时会自动补 refs-only artifact evidence packet；空 `test_execution.json` 且没有可执行 tests 但有 artifact/evidence refs 时降级为 `inspect_only`，不再误判 rescue；同一次 `schedule_child_subagents` 若混建 coordinator 和 leaf 会返回 `mixed_coordinator_leaf_children`，避免模型把层级职责拍平。
 
 ## 未跑测试
 
