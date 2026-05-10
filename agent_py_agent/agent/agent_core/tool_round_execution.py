@@ -17,6 +17,14 @@ from .tool_call_context_reducer import (
     render_assistant_tool_round_context,
 )
 
+_STATEFUL_ORCHESTRATION_TOOLS = {"create_subagents", "schedule_child_subagents"}
+_DEPENDENT_ORCHESTRATION_TOOLS = {
+    "create_subagents",
+    "dispatch_subagents",
+    "schedule_child_subagents",
+    "subagent_board",
+}
+
 
 # LLM: ToolCallRecordParams keeps tool record inputs bundled for trace/archive reducers.
 # 类用途: 集中保存工具调用记录字段；调用方用它写 live context、runner trace 和外置工具输出记录。
@@ -63,15 +71,43 @@ class ToolRoundExecutionRequest:
 def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     _append_assistant_tool_round_context(request)
     subagent_output_written = False
+    stateful_orchestration_seen = False
     for idx, payload in enumerate(request.calls, start=1):
-        result = request.execute_one(
-            ToolCallExecuteParams(request.params, request.tool_rounds, idx, payload)
-        )
+        tool_name = _tool_name(payload)
+        if stateful_orchestration_seen and tool_name in _DEPENDENT_ORCHESTRATION_TOOLS:
+            result = _deferred_orchestration_result(tool_name)
+        else:
+            result = request.execute_one(
+                ToolCallExecuteParams(request.params, request.tool_rounds, idx, payload)
+            )
         request.record_one(ToolCallRecordParams(request.params, request.tool_rounds, idx, payload, result))
         subagent_output_written = subagent_output_written or _is_subagent_output_json_write(
             request.agent, payload, result
         )
+        stateful_orchestration_seen = (
+            stateful_orchestration_seen or tool_name in _STATEFUL_ORCHESTRATION_TOOLS
+        )
     return subagent_output_written
+
+
+# LLM: _tool_name extracts a model-requested tool name without trusting payload shape.
+# 函数用途: 从工具调用 payload 中读取工具名；坏 payload 返回空字符串，由正常执行路径处理错误。
+def _tool_name(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("tool") or "").strip()
+
+
+# LLM: _deferred_orchestration_result prevents same-turn dispatch from using hallucinated run ids.
+# 函数用途: 当模型同一轮先创建子代理又立刻调度时，延后后续编排工具，要求下一轮读取真实返回值。
+def _deferred_orchestration_result(tool_name: str) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        tool_name or "unknown",
+        False,
+        "同一轮已经执行过会创建或改变子代理树的工具调用，"
+        "后续编排工具已延后。请先读取上一条工具的真实输出，"
+        "下一轮再使用返回的 created_run_ids/actionable_run_ids 调用 dispatch_subagents。",
+    )
 
 
 # LLM: subagent_output_json_response turns the just-written output.json into the final runner contract.

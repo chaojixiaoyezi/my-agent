@@ -2355,3 +2355,39 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining gaps:
   - R14 should be rerun after this single-page inference fix to verify `shared-leaf` no longer false-fails and catalog's real placeholder failure is still caught.
   - Parent/root-level acceptance still needs a whole-site required-file oracle so a split directory layout cannot satisfy child-local checks while missing top-level `build/products.html`, `build/cart.html`, and related user-facing routes.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R15
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r15.yaml`.
+  - Root run: `subagent-1778454846-4ca5f7ae`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+- 中文说明：
+  - R15 仍按“外层只观察 root”的方式跑；外层没有替 root 创建 child，也没有替任何 leaf 写购物网站文件。
+  - R15 证明四个一级 coordinator 能被 root 创建，auth/catalog/shared 分支能产出页面或资源，但 cart-checkout 分支被底层 guard 和同轮工具依赖问题卡住。
+  - 这次主动停止 root runner，保留失败样本；没有手工补购物车、结账和订单成功页。
+- Observed facts:
+  - `cart-checkout-coordinator-r15` 在同一模型响应里先请求 `schedule_child_subagents`，又在还没拿到真实 schedule 结果前请求 `dispatch_subagents`，并填入自己脑补的 run ids。
+  - 真正的 `schedule_child_subagents` 被写入预检误拦截：购物车文案里的 `+/-按钮` 被识别成外部绝对路径 `/-按钮`。
+  - 随后的 `dispatch_subagents` 用脑补 run ids 执行，返回 `runner_selection/invalid_run_ids`；真实子节点没有创建，`cart.html`、`checkout.html`、`order-success.html` 未生成。
+  - `shared-assets-coordinator-r15` 还暴露了修复任务遇到 `max_children_exceeded` 后缺少更清晰恢复动作的问题。
+  - `static_site_check` 继续有效，能抓到 `products.html` / `product-detail.html` 里的 `${...}` 占位符。
+- Finding 62: UI text and HTML tags must not look like absolute write paths.
+  - Symptom: `+/-按钮` and `</body>` inside page-generation instructions could be parsed as `/...` filesystem targets and rejected as outside workspace.
+  - 中文解释：模型写“加号/减号按钮”或者“在 body 结束标签前插脚本”，这只是页面内容，不是要往 `/body` 或 `/-按钮` 这种系统路径写文件。
+  - Fix: `orchestration_write_guard.py` excludes slashes immediately after `<` or `+` from absolute-path matching while preserving normal `/Users/...` path detection.
+  - Verification: `test_ui_symbols_and_html_tags_do_not_trip_external_write_guard`.
+- Finding 63: same-turn dependent orchestration calls must wait for real tool output.
+  - Symptom: the model emitted `schedule_child_subagents` and `dispatch_subagents` in one response, then used hallucinated run ids before the scheduler had returned real `created_run_ids`.
+  - 中文解释：孩子还没真的出生，模型就先给孩子编了身份证号，然后拿假身份证去开跑。系统不能执行这种“依赖上一个工具返回值”的同轮后续调度。
+  - Fix: `tool_round_execution.py` executes the first stateful orchestration call (`create_subagents` / `schedule_child_subagents`) and defers later dependent orchestration tools in the same assistant turn. The next model turn must read the real `created_run_ids` / `actionable_run_ids` before dispatching.
+  - Verification: `test_tool_round_defers_dependent_dispatch_after_schedule`.
+- Finding 64: orchestration wrapper JSON remains part of the supported tool-call dialect.
+  - Symptom: real runners often emit `{"tool":"schedule_child_subagents","orchestration":{...}}`.
+  - 中文解释：模型喜欢把参数装进一个 `orchestration` 包里。这个写法应该继续被展开成真正工具参数，不要求模型每次都完全扁平。
+  - Verification: `test_tool_call_parser_unwraps_model_orchestration_bundle`.
+- Remaining gaps:
+  - Re-run a clean R16 root-only shopping E2E after these fixes and verify `cart-checkout` creates real child ids first, then dispatches them in the next round.
+  - Add a whole-site required-file oracle at root/parent acceptance so split branches cannot individually pass while the user-facing top-level shopping flow is incomplete.
+  - Improve recovery output for `max_children_exceeded` repair attempts, so coordinators can either reuse an existing child or request a bounded repair slot instead of stalling.
