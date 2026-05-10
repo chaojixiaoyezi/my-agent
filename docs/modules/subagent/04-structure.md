@@ -92,7 +92,8 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/tooling/json_repair.py`：工具调用 JSON 的窄口修复层；目前只接受“第一个 JSON 对象后面额外多出右花括号”的真实模型漂移，不会吞掉第二个 JSON 对象或任意坏格式。
 - `agent_py_agent/agent/subagents/automation_gate.py`：定义半自动/自动执行门；只允许 `query_recovery_tree` / `inspect_refs` 这类 refs-only 动作自动放行，跑工具或改 task 状态必须人工确认或继续阻断。
 - `agent_py_agent/agent/subagents/execution_records.py`：定义 `TestExecutionRecord`，保存真实验收执行证据字段、序列化、stdout/stderr 截断和 `passed` 派生结果。
-- `agent_py_agent/agent/subagents/execution_executor.py`：定义最小 `TestExecutor`，支持 command / file_check / content_check，当前不写任务状态、不生成 `test_execution.json`；command 可带 workspace 内 `working_dir` / `cwd`，执行记录会保存真实工作目录。`content_check` 支持包含匹配，也支持 `content_equals` / `expected_content` + `match_mode=exact` 的精确内容检查。
+- `agent_py_agent/agent/subagents/execution_executor.py`：定义最小 `TestExecutor`，支持 command / file_check / content_check / static_site_check，当前不写任务状态、不生成 `test_execution.json`；command 可带 workspace 内 `working_dir` / `cwd`，执行记录会保存真实工作目录。`content_check` 支持包含匹配，也支持 `content_equals` / `expected_content` + `match_mode=exact` 的精确内容检查；`static_site_check` 检查静态站点必需文件、本地链接/资源、`${...}` 占位符和明显无动作控件，不执行 JS、不访问网络。
+- `agent_py_agent/agent/subagents/static_site_validator.py`：承接 `static_site_check` 的 HTML 扫描、链接解析和控件检查；所有路径都限制在 workspace 内，只返回 refs-only 问题摘要。
 - `agent_py_agent/agent/subagents/execution_executor_helpers.py`：承接 `TestExecutor` 的命令解析、跨平台 python argv、记录构造和 UTC 时间 helper，让 executor 主文件保持薄执行器职责。
 - `agent_py_agent/agent/subagents/execution_test_items.py`：在父级验收执行前预处理 tests；当 runner 只给出相对测试命令但 artifacts 都指向同一产物目录时，安全补 `working_dir`，并能在 workspace 内按唯一路径后缀恢复嵌套相对 artifact；常见 `cd <workspace内目录> && python3 -m pytest ...` 会被归一成受限 `working_dir` 加纯命令，即使 runner 同时给了 `working_dir` 也会拆掉安全开头 `cd`，但不放开 shell；若 tests 为空但 artifacts 里有 workspace 内 `test_*.py`，会生成保守 pytest 兜底，避免假绿和无谓的“0 tests ran”。
 - `agent_py_agent/agent/subagents/execution_content_checks.py`：从 tests 预处理拆出的内容验收窄口，只把明确期望内容的 `cat <workspace文件>` 转成受控 `content_check`。

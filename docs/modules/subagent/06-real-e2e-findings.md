@@ -2232,3 +2232,33 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining gaps:
   - Rerun R11 from a clean runtime/deliverables to verify quality is delayed and root no longer creates direct leaf workers after coordinator delegation.
   - Add static shopping-site validation: required pages, no `${...}` placeholders, no dead local links/src, no inert core buttons, and a register -> login -> browse -> cart -> checkout -> order success flow.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R11
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r11.yaml`.
+  - Internal runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r11`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r11`.
+  - Root run: `subagent-1778449356-81c536f3`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+- 中文说明：
+  - R11 继续按“外层只观察 root”的方式跑；外层只创建并运行 root，没有替 root 创建下级，也没有替任何 leaf 写页面。
+  - R10 的两个修复点有效：quality 没有抢跑，root 也没有再绕过 coordinator 直接创建 leaf。
+  - root -> coordinator -> worker/leaf 路径能写出一组真实购物网站页面，但静态链路和 blocked child 收束仍没闭环，所以主动停止 root 进程并保留证据。
+- Observed facts:
+  - Root first created three production coordinators: auth、catalog、cart-checkout；没有创建 quality/test/review 分支抢跑。
+  - Auth coordinator created `auth-worker`; auth worker wrote `register.html` and `login.html`, then became `DONE/VERIFIED`.
+  - Cart-checkout coordinator created `cart-page-leaf`、`checkout-page-leaf`、`order-success-page-leaf`; cart and checkout became `DONE/VERIFIED`, order-success became `BLOCKED/FAILED` with failure handoff and takeover readiness refs.
+  - Catalog coordinator created `shop-html-worker`; it wrote `products.html` and `product-detail.html`, then became `DONE/VERIFIED`.
+  - Final deliverables included `register.html`, `login.html`, `products.html`, `product-detail.html`, `cart.html`, `checkout.html`, and `order-success.html`.
+  - A machine static check over the R11 build failed with `placeholder_hits=2; broken_local_refs=2`: `order-success.html` / `products.html` still contained `${...}`, and `cart.html` / `order-success.html` linked to missing `index.html`.
+- Finding 55: generated static sites need deterministic parent-side validation.
+  - Symptom: multiple leaf workers could report completion while the assembled site still had bad local links and `${...}` placeholders.
+  - 中文解释：页面文件“写出来了”不等于“能正常点”。我们需要机器检查：哪些页面必须存在、链接是不是指向真实文件、有没有模板占位符、按钮是不是明显没动作。
+  - Fix: added `static_site_check` to `TestExecutor`. It scans only workspace-local HTML, checks required files, local `href` / `src` / `action` refs, `${...}` placeholders, and obvious inert buttons/links. It does not execute JavaScript and does not fetch remote URLs.
+  - Verification: `test_static_site_check_passes_valid_site`, `test_static_site_check_blocks_common_generated_site_failures`, `test_static_site_check_rejects_outside_site_root`, plus a real R11 static check that reported the expected failures.
+- Remaining gaps:
+  - Parent/coordinator still needs a rescue loop that can create a repair child from a blocked leaf handoff instead of staying RUNNING indefinitely.
+  - Same-parent duplicate leaf scheduling should be tightened when an equivalent sibling is already `DONE/VERIFIED`.
+  - Shopping-site workflows should inject `static_site_check` into parent acceptance automatically for static web deliverables.

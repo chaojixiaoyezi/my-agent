@@ -26,6 +26,7 @@ from .execution_executor_helpers import (
     _with_working_dir,
 )
 from .execution_records import TestExecutionRecord
+from .static_site_validator import run_static_site_check
 
 
 # LLM: TestExecutor performs bounded local validation and returns records; callers decide whether records affect acceptance.
@@ -70,6 +71,9 @@ class TestExecutor:
             return self._check_file(test)
         if method == "content_check":
             return self._check_content(test)
+        if method == "static_site_check":
+            # LLM: Static-site validation is read-only and workspace-bound like file/content checks.
+            return run_static_site_check(test, self.workspace_root)
         return TestExecutionRecord(
             test_name=_test_name(test),
             validation_method=method,
