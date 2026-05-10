@@ -208,6 +208,16 @@ class TestExtractWriteDirs:
 
         assert result == []
 
+    def test_ignores_url_paths_when_extracting_write_dirs(self):
+        """图片/API URL 不是本地写入根。"""
+        from agent_py_agent.agent.subagents.manager_normalize import _extract_write_dirs
+
+        result = _extract_write_dirs(
+            "写到 /Users/test/project/build，图片用 https://picsum.photos/300/200。"
+        )
+
+        assert result == ["/Users/test/project/build"]
+
 
 class TestWorkflowModeNormalization:
     """测试 manager_base.py 中的工作流模式相关函数。"""

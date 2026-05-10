@@ -1942,3 +1942,14 @@ def example(...):
 - runner-context 进度 payload 的建议工具调用会把 unfinished direct child ids 放进 `run_ids`，让父节点继续调度时不必靠自然语言记忆。
 - live tool context 的历史记录改用 `[tool-record ...]` / `[tool-output-record ...]` 中性标签，并把 dict payload 渲染成摘要行，降低模型复制历史记录造成 parse error 的概率。
 - 下一轮 R4 要验证 root 是否能按指定孩子顺序推进，并继续把购物网站完整流程验收到 register/login/product/cart/checkout/order success。
+
+## 2026-05-11 Stage7 shopping E2E R4 URL path guard
+
+状态：已落地，待 R5 复测
+
+摘要：
+- R4 真实测试确认 root 已能创建 4 个 coordinator，auth 分支能创建 leaf_worker 并写出 `auth.html`。
+- 新问题：catalog 分支在 goal 里引用 `https://picsum.photos/...` 和 `https://images.unsplash.com/...` 时，写入根提取器把 URL 片段误当成本地路径，scheduler 因越界写入根拒绝创建 worker。
+- 修复：`_extract_write_dirs()` 增加 URL span 过滤；Windows 盘符正则不再从单词中间匹配，避免 `https://` 的 `s:/` 误判。
+- 设计边界：URL 仍然可以作为页面图片/src 内容出现在 worker 任务描述里，但不会进入 `allowed_write_roots`；网络工具/抓取授权后续仍走 capability/shell gateway，不走写入根。
+- 下一步：R5 复测 catalog worker 是否能正常创建，并补 quality 阶段依赖，避免过早验收未完成产物。
