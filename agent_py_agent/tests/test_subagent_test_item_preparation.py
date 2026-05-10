@@ -179,6 +179,60 @@ def test_prepare_test_items_infers_pytest_when_runner_only_reports_test_artifact
     }]
 
 
+# LLM: test_prepare_test_items_infers_static_site_check covers auto validation for generated HTML sites.
+# 函数用途: runner 只报告多个 HTML 产物时，父级验收会自动补 static_site_check。
+def test_prepare_test_items_infers_static_site_check_for_html_artifacts(tmp_path):
+    site_dir = tmp_path / "deliverables" / "shop" / "build"
+    site_dir.mkdir(parents=True)
+    (site_dir / "register.html").write_text("<a href='login.html'>login</a>", encoding="utf-8")
+    (site_dir / "login.html").write_text("<a href='register.html'>register</a>", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[],
+            output={"artifacts": [
+                {"path": str(site_dir / "register.html")},
+                {"path": str(site_dir / "login.html")},
+            ]},
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert prepared == [{
+        "name": "inferred static site check",
+        "validation_method": "static_site_check",
+        "site_root": "deliverables/shop/build",
+        "required_files": ["login.html", "register.html"],
+    }]
+
+
+# LLM: test_prepare_test_items_does_not_duplicate_static_site_check preserves runner-declared tests.
+# 函数用途: 模型已显式给 static_site_check 时，预处理只保留原测试并补安全字段，不重复追加。
+def test_prepare_test_items_does_not_duplicate_static_site_check(tmp_path):
+    site_dir = tmp_path / "site"
+    site_dir.mkdir()
+    (site_dir / "index.html").write_text("<a href='cart.html'>cart</a>", encoding="utf-8")
+    (site_dir / "cart.html").write_text("<a href='index.html'>home</a>", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[{
+                "name": "declared static check",
+                "validation_method": "static_site_check",
+                "site_root": "site",
+                "required_files": ["index.html", "cart.html"],
+            }],
+            output={"artifacts": [
+                {"path": str(site_dir / "index.html")},
+                {"path": str(site_dir / "cart.html")},
+            ]},
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert [item["validation_method"] for item in prepared] == ["static_site_check"]
+
+
 def test_prepare_test_items_normalizes_pytest_method_with_command(tmp_path):
     """LLM: Verifies runner `validation_method=pytest` remains executable by TestExecutor."""
     target_dir = tmp_path / "deliverables" / "leaf"

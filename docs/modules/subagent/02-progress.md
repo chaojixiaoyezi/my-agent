@@ -416,3 +416,9 @@
 - `orchestration_progress_payload.py` 现在区分 `needs_more_dispatch` 和 `needs_recovery`；PLANNING/RUNNING 继续 dispatch，BLOCKED/FAILED/TIMEOUT/CHANNEL_ERROR 进入恢复路径。
 - `hierarchy_scope_guards.py` 的 leaf 去重只读取 direct child 的任务元数据和 `output.json.artifacts` 路径引用，不读取产物正文；只有具体文件名重合才阻断，避免 cart/checkout/order-success 这类不同页面 sibling 被误挡。
 - 下一步：把 `static_site_check` 自动注入静态 Web 产物的父级验收，让失败结果能自然进入恢复/修复 child 流程。
+
+## 2026-05-11 Stage7 static web auto-test injection
+- 中文说明：父级验收预处理层现在会根据 `output.json.artifacts` 自动识别多页静态 HTML 产物；如果 runner 没有显式写 `static_site_check`，系统会自动追加一条机器检查。
+- 自动生成的测试只包含 `site_root` 和 `required_files`，执行时仍由 `static_site_validator.py` 检查页面存在、坏链接、`${...}` 占位符和明显失效控件；推断阶段不读取 HTML 正文。
+- 已加保护：如果 runner 已经声明 `static_site_check`，不会重复追加；单个 HTML 或非 Web artifact 不触发，避免误把普通文档任务当网站验收。
+- 下一步：跑干净 R12 root-only 购物网站 E2E，验证静态检查失败能自然变成父级 follow-up/rescue，而不是由外层人工发现。

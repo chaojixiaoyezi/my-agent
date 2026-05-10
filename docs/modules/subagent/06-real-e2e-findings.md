@@ -2278,3 +2278,14 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining gaps:
   - Auto-inject `static_site_check` for static web outputs so parent acceptance can catch link/placeholders without relying on model-authored tests.
   - Run a fresh root-only R12 shopping E2E after auto-injection and confirm the parent creates repair/rescue work instead of spinning.
+
+## 2026-05-11 R11 Follow-Up Static Auto-Test Injection
+
+- Finding 58: static Web checks should not depend on model-authored tests.
+  - Symptom: R11 only exposed broken links and `${...}` placeholders after an external manual static check. If the runner forgot to declare the test, parent acceptance could miss the assembled-site defect.
+  - 中文解释：模型写页面时经常会说“完成了”，但不一定自己写“检查所有链接和占位符”。这种基础验收应该由系统看 artifact 自动补上。
+  - Fix: `execution_test_items.py` now appends an inferred `static_site_check` when `output.json.artifacts` contains multiple workspace-local HTML files and no existing static-site test. `execution_static_site_items.py` owns the inference and only reads path refs.
+  - Verification: `test_prepare_test_items_infers_static_site_check_for_html_artifacts` and `test_prepare_test_items_does_not_duplicate_static_site_check`.
+- Remaining gaps:
+  - Run a fresh root-only R12 shopping E2E and confirm the inferred check appears in parent acceptance/test reports.
+  - If R12 still leaves a blocked leaf, verify the new `recovery_run_ids` hint leads the parent toward retry/rescue instead of unbounded running.
