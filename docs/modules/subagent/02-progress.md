@@ -332,3 +332,9 @@
 - dry-run 会检查命令解析、shell 高风险字符、危险命令、父级 command allowlist、workspace/cwd/allowed roots、curl 网络范围和输出预算。
 - `rm/rmdir/sudo/dd/chmod/chown/kill` 等危险命令即使写进 allowlist 也会被拒绝；后续删除文件走 task trash。
 - dry-run 决策会返回 `allowed`、`would_execute`、`blockers`、解析后的 `argv`、cwd、输出预算和 audit 摘要，为 execute v1 复用同一闸门。
+
+## 2026-05-11 controlled tools stage 4
+- 中文说明：`shell_gateway_execution.py` 已接入 shell gateway v1，只有 dry-run 闸门通过后才会启动 subprocess，且全程不使用 shell 展开。
+- stdout/stderr 通过 pipe 持续读取并只保留预算内字节；超过预算的内容只计总字节和 truncated 标记，避免大日志进入内存或上下文。
+- 执行输出写到 workspace 内 `shell_gateway_outputs/` 或调用方传入的 workspace-local artifact dir；越界 artifact dir 会回退默认目录。
+- 审计写 `shell_gateway_audit.jsonl`，只记录元数据、输出引用、字节数和阻断状态，不内联 stdout/stderr 正文。

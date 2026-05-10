@@ -22,7 +22,13 @@ from ..models import (
     SubAgentTask,
     VerificationEvidence,
 )
-from ..utils import _merge_list, _new_id
+from ..utils import _merge_list
+from .lifecycle_capability_records import (
+    BuildCapabilityGapInput,
+    build_capability_gap,
+    build_capability_grant,
+    build_capability_request,
+)
 
 
 # LLM: RecordCapabilityGrantParams 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -145,30 +151,7 @@ class SubAgentLifecycleService:
         params: RecordCapabilityRequestParams,
     ) -> CapabilityRequest:
         task = self.manager.load(run_id)
-        request = CapabilityRequest(
-            id=_new_id("capreq"),
-            from_run_id=run_id,
-            problem=params.problem,
-            needed_capability=params.needed_capability,
-            expected_output=params.expected_output,
-            capability_type=params.capability_type,
-            tried=params.tried or [],
-            evidence=params.evidence or [],
-            constraints=params.constraints or {},
-            requested_tools=params.requested_tools or [],
-            requested_skills=params.requested_skills or [],
-            requested_mcp_tools=params.requested_mcp_tools or [],
-            requested_commands=params.requested_commands or [],
-            cwd_scope=params.cwd_scope or [],
-            path_scope=params.path_scope or [],
-            network_scope=params.network_scope or [],
-            output_budget=params.output_budget or {},
-            risk_level=params.risk_level,
-            fallback_attempted=params.fallback_attempted or [],
-            escalation_target=params.escalation_target,
-            created_at=time.time(),
-            reserved=params.reserved or {},
-        )
+        request = build_capability_request(run_id, params)
         task.capability_requests.append(request)
         task.updated_at = time.time()
         self.manager.save(task)
@@ -183,27 +166,7 @@ class SubAgentLifecycleService:
         params: RecordCapabilityGrantParams,
     ) -> CapabilityGrant:
         task = self.manager.load(run_id)
-        grant = CapabilityGrant(
-            id=_new_id("capgrant"),
-            request_id=params.request_id,
-            grant_to_run_id=run_id,
-            grant_type=params.grant_type,
-            skills=params.skills or [],
-            tools=params.tools or [],
-            mcp_tools=params.mcp_tools or [],
-            command_allowlist=params.command_allowlist or [],
-            capability_cards=params.capability_cards or [],
-            reason=params.reason,
-            constraints=params.constraints or {},
-            path_scope=params.path_scope or [],
-            network_scope=params.network_scope or [],
-            output_budget=params.output_budget or {},
-            risk_level=params.risk_level,
-            expires_after_task=params.expires_after_task,
-            expires_at=params.expires_at,
-            created_at=time.time(),
-            reserved=params.reserved or {},
-        )
+        grant = build_capability_grant(run_id, params)
         task.capability_grants.append(grant)
         task.allowed_skills = _merge_list(task.allowed_skills, grant.skills)
         task.allowed_tools = _merge_list(task.allowed_tools, grant.tools)
@@ -221,25 +184,8 @@ class SubAgentLifecycleService:
     ) -> CapabilityGap:
         task = self.manager.load(run_id)
         injected_rule_paths, memory_routes = self._match_memory_routes(params.missing_capability, params.why_failed, task)
-        gap = CapabilityGap(
-            id=_new_id("capgap"),
-            run_id=run_id,
-            missing_capability=params.missing_capability,
-            source_task=task.goal,
-            why_failed=params.why_failed,
-            gap_type=params.gap_type,
-            attempted_skills=params.attempted_skills or [],
-            attempted_tools=params.attempted_tools or [],
-            needed_outputs=params.needed_outputs or [],
-            suggested_skill=params.suggested_skill,
-            suggested_tool=params.suggested_tool,
-            requested_scope=params.requested_scope or {},
-            escalation_chain=params.escalation_chain or [],
-            next_record_refs=params.next_record_refs or [],
-            memory_routes=memory_routes,
-            injected_rule_paths=injected_rule_paths,
-            created_at=time.time(),
-            reserved=params.reserved or {},
+        gap = build_capability_gap(
+            BuildCapabilityGapInput(run_id, task.goal, params, memory_routes, injected_rule_paths)
         )
         task.capability_gaps.append(gap)
         if injected_rule_paths:

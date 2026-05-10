@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from .model_capabilities import CapabilityRequest
 from .model_task import SubAgentTask
+from .services.lifecycle import RecordCapabilityGrantParams
 from .utils import _merge_list
 
 
@@ -53,6 +54,35 @@ def grant_command_allowlist(request: CapabilityRequest) -> list[str]:
 # 函数用途: 合并路由命中的工具和申请中点名的工具，保持顺序去重。
 def grant_tools(request: CapabilityRequest, routed_tools: list[str]) -> list[str]:
     return _merge_list(routed_tools, request.requested_tools)
+
+
+# LLM: scoped_grant_params keeps SubAgentCapabilityMixin thin while preserving all grant scope fields.
+# 函数用途: 将路由命中和能力申请合成授权参数包，后续新增授权字段集中在这里维护。
+def scoped_grant_params(
+    request: CapabilityRequest,
+    *,
+    routed_skills: list[str],
+    routed_tools: list[str],
+    selected_cards: list[dict[str, str]],
+    hit_count: int,
+) -> RecordCapabilityGrantParams:
+    return RecordCapabilityGrantParams(
+        request_id=request.id,
+        skills=routed_skills,
+        tools=grant_tools(request, routed_tools),
+        mcp_tools=request.requested_mcp_tools,
+        command_allowlist=grant_command_allowlist(request),
+        grant_type=request.capability_type,
+        capability_cards=selected_cards,
+        reason=f"CapabilityRouter 命中 {hit_count} 张能力卡。",
+        constraints=scoped_constraints(request),
+        path_scope=request.path_scope or request.cwd_scope,
+        network_scope=request.network_scope,
+        output_budget=request.output_budget,
+        risk_level=request.risk_level,
+        expires_after_task=True,
+        reserved={"request_scope": request_scope_snapshot(request)},
+    )
 
 
 # LLM: gap_attempted_tools keeps attempted shell commands visible as unresolved capability facts.

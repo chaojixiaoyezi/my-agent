@@ -42,6 +42,7 @@ class ShellGatewayRequest:
     request_id: str = ""
     run_id: str = ""
     dry_run: bool = True
+    artifact_dir: str | Path = ""
 
 
 # LLM: ShellGatewayDecision is refs-only approval data; allowed=True never means execution already happened.
@@ -67,7 +68,7 @@ def plan_shell_command(request: ShellGatewayRequest) -> ShellGatewayDecision:
     workspace = Path(request.workspace_root).expanduser().resolve()
     cwd, cwd_error = _resolve_cwd(request.cwd, workspace)
     roots = _resolve_allowed_roots(workspace, request.allowed_roots)
-    blockers = _collect_blockers(request, argv, parse_error, cwd, cwd_error, roots)
+    blockers = _collect_blockers(_BlockerCheck(request, argv, parse_error, cwd, cwd_error, roots))
     executable = _command_name(argv[0]) if argv else ""
     allowed = not blockers
     budget = _normalize_output_budget(request.output_budget)
@@ -98,23 +99,28 @@ def decision_to_dict(decision: ShellGatewayDecision) -> dict[str, object]:
     return asdict(decision)
 
 
+# LLM: _BlockerCheck keeps dry-run policy bundled and below params-count limits.
+# 类用途: 汇总一次 shell dry-run 阻断检查所需的解析结果、路径和授权根目录。
+@dataclass(frozen=True)
+class _BlockerCheck:
+    request: ShellGatewayRequest
+    argv: list[str]
+    parse_error: str
+    cwd: Path
+    cwd_error: str
+    roots: list[Path]
+
+
 # LLM: _collect_blockers centralizes dry-run policy so execute v1 can reuse the same gate.
 # 函数用途: 汇总命令解析、危险字符、危险命令、白名单、cwd 和网络范围的阻断原因。
-def _collect_blockers(
-    request: ShellGatewayRequest,
-    argv: list[str],
-    parse_error: str,
-    cwd: Path,
-    cwd_error: str,
-    roots: list[Path],
-) -> list[str]:
+def _collect_blockers(check: _BlockerCheck) -> list[str]:
     blockers: list[str] = []
-    if parse_error:
-        blockers.append(parse_error)
+    if check.parse_error:
+        blockers.append(check.parse_error)
         return blockers
-    blockers.extend(_command_policy_blockers(request, argv))
-    blockers.extend(_cwd_policy_blockers(cwd, cwd_error, roots))
-    blockers.extend(_network_policy_blockers(request, argv))
+    blockers.extend(_command_policy_blockers(check.request, check.argv))
+    blockers.extend(_cwd_policy_blockers(check.cwd, check.cwd_error, check.roots))
+    blockers.extend(_network_policy_blockers(check.request, check.argv))
     return blockers
 
 
