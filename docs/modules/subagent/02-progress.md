@@ -423,3 +423,9 @@
 - 自动生成的测试只包含 `site_root` 和 `required_files`，执行时仍由 `static_site_validator.py` 检查页面存在、坏链接、`${...}` 占位符和明显失效控件；推断阶段不读取 HTML 正文。
 - 已加保护：如果 runner 已经声明 `static_site_check`，不会重复追加；单个 HTML 或非 Web artifact 不触发，避免误把普通文档任务当网站验收。
 - 下一步：跑干净 R12 root-only 购物网站 E2E，验证静态检查失败能自然变成父级 follow-up/rescue，而不是由外层人工发现。
+
+## 2026-05-11 Stage7 R15 orchestration dependency guard
+- 中文说明：R15 真实购物网站 E2E 暴露了两个底层问题：页面文案 `+/-按钮` 被误判成外部路径 `/-按钮`，以及模型同一轮先创建 child 又立刻用脑补 run_id 调度 child。
+- 已修正：写入预检不再把 `+/-按钮`、`</body>` 这类 UI/HTML 内容当绝对路径；`tool_round_execution.py` 会把同轮中依赖前一个 stateful orchestration 结果的后续编排工具延后到下一轮，要求模型读取真实 `created_run_ids` / `actionable_run_ids` 后再 dispatch。
+- 已补测试：`test_ui_symbols_and_html_tags_do_not_trip_external_write_guard`、`test_tool_round_defers_dependent_dispatch_after_schedule`、`test_tool_call_parser_unwraps_model_orchestration_bundle`。
+- 下一步：用干净 R16 root-only 购物站 E2E 复测 cart-checkout 分支，确认 schedule 成功创建真实 children，下一轮 dispatch 使用真实 run ids，并继续补 root whole-site required-file 验收。

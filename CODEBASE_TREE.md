@@ -983,6 +983,7 @@ docs/
 - `agent_py_agent/agent/subagents/execution_test_items.py`: 预处理父级验收 tests，推断 workspace 内 `working_dir`，拆安全 `cd <dir> && pytest`，并把带明确期望内容的 `cat <workspace文件>` 改成受控 `content_check`，避免为真实模型输出放开 `cat` 命令；多页 HTML artifacts 会自动补 `static_site_check`。
 - `agent_py_agent/agent/subagents/execution_executor.py`: `content_check` 支持 `content_pattern` 包含匹配，也支持 `content_equals` / `expected_content` + `match_mode=exact`，用于严格验证文件内容没有额外字符；`static_site_check` 用于机器验收购物站这类静态产物的页面存在性、坏链接、占位符和明显失效控件。
 - `agent_py_agent/agent/agent_core/_tool_loop_service.py`: 主代理和 subagent 共用的工具循环；到达 `max_tool_rounds` 后给模型一次收口机会，如果模型仍吐工具调用，返回确定性停止说明而不是把新 `[TOOL_CALL]` 当最终回答。
+- `agent_py_agent/agent/agent_core/tool_round_execution.py`: 单轮工具执行 helper；负责记录 assistant tool round、执行/记录工具调用、检测子代理 `output.json` 收口，并把同轮 `schedule_child_subagents` 后依赖真实 run id 的 `dispatch_subagents` 等编排调用延后到下一轮，避免模型使用脑补 run id。
 - `agent_py_agent/agent/subagents/services/hierarchy_role_identity.py`: 从 scheduler 拆出的角色 identity 兜底策略，根据 `agent_name` / `goal` 恢复模型漏填的 researcher/tester/acceptor/bug_finder/writer/worker 等角色。
 - `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 从 scheduler 中拆出的层级 scope guard，集中处理空计划、深度/数量限制、禁止 sibling 领域、同批混建 coordinator/leaf、root 已有 coordinator 后直建 leaf/worker、child 写入根漂移、domain mismatch、同父级 coordinator 领域去重和已验证 leaf 具体目标文件去重；去重会过滤 generated id 片段和泛化编号词，避免误挡 recovery checker siblings。
 - `agent_py_agent/agent/subagents/services/hierarchy_leaf_targets.py`: 从 scope guard 拆出的已验证 leaf 目标文件去重 helper；只读 direct child 元数据和 `output.json.artifacts` 路径引用，不读取 artifact 正文。
@@ -1047,6 +1048,9 @@ docs/
 - `agent_py_agent/tests/test_subagents_tests_command.py`: 覆盖 `subagents-tests` 查看已有报告、显式 `--re-run` 写回报告、`subagents-acceptance-plan` 展示/写入/显式 apply/next-action/auto-policy 父级决策，以及 `subagents-acceptance` 从配置读取真实执行默认值并被 CLI 覆盖。
 - `agent_py_agent/tests/test_config_validation.py`: 覆盖 `acceptance_execute_tests` 默认关闭、布尔 coerce 和 `acceptance_test_timeout_seconds` 范围校验。
 - `agent_py_agent/tests/test_status_shared_progress.py`: 覆盖 `status` / `subagents` CLI 展示共享进度、failure handoff refs、takeover packet refs 和父级验收 dry-run 摘要，并断言大 artifact 正文不会内联。
+- `agent_py_agent/tests/test_tool_round_execution.py`: 覆盖单轮工具执行 guard，确保 `schedule_child_subagents` 后的同轮 `dispatch_subagents` 会延后到下一轮读取真实 run ids。
+- `agent_py_agent/tests/test_tooling_orchestration_parser.py`: 覆盖真实模型常见的 `orchestration` 参数包展开，保持 schedule/dispatch 等工具 bundle 入口兼容。
+- `agent_py_agent/tests/test_orchestration_write_guard.py`: 覆盖派工写入预检，确保 UI 文案和 HTML 标签不会被误判为外部绝对路径。
 - `agent_py_agent/tests/test_tool_output_externalizer.py`: 覆盖大工具输出外置 artifact 和外置前 fail-safe recovery snapshot。
 - `agent_py_agent/tests/test_memory_compact_failsafe.py`: 覆盖 `memory-resume --from-compact` 如何展示 fail-safe checkpoint refs 且不读取 artifact 正文。
 - `agent_py_agent/tests/test_memory_artifact_read.py`: 覆盖 CLI 和 `read_artifact` 工具如何显式读取已登记 artifact，并拒绝未登记普通文件。
