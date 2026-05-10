@@ -444,3 +444,4 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - shell gateway 的 dry-run `allowed=True` 只代表“如果进入执行层，可以尝试执行”；它不表示已执行，也不允许子代理获得裸 shell。
 - `shell_gateway_execution.py` 提供第一版执行入口 `execute_shell_command()`；它先调用 `plan_shell_command()`，再用 `subprocess.Popen(..., shell=False)` 执行 argv，并用 `_read_limited()` 持续 drain stdout/stderr。
 - `ShellGatewayExecutionResult` 只保存预览、字节数、截断标记和文件 refs；完整输出不会自动塞进模型上下文，调用方要显式读 refs。
+- `task_trash.py` 是删除类动作的受控替代层：`ensure_task_trash()` 管目录，`move_to_task_trash()` 只做 workspace/task-local move 和 manifest 记录；shell gateway 仍阻断 `rm`。

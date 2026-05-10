@@ -338,3 +338,9 @@
 - stdout/stderr 通过 pipe 持续读取并只保留预算内字节；超过预算的内容只计总字节和 truncated 标记，避免大日志进入内存或上下文。
 - 执行输出写到 workspace 内 `shell_gateway_outputs/` 或调用方传入的 workspace-local artifact dir；越界 artifact dir 会回退默认目录。
 - 审计写 `shell_gateway_audit.jsonl`，只记录元数据、输出引用、字节数和阻断状态，不内联 stdout/stderr 正文。
+
+## 2026-05-11 controlled tools stage 5
+- 中文说明：新增 `task_trash.py`，给每个任务目录提供 `trash/manifest.jsonl`，子代理后续删除类动作应走 move-to-trash 而不是 `rm`。
+- `move_to_task_trash()` 只允许移动 task_dir 或显式 allowed_roots 内的路径，不能移动任务目录本身，也不能再次移动 trash 内的文件。
+- trash 目录被用户或清理钩子删掉后，`ensure_task_trash()` 会自动重建，并保证 manifest 文件存在。
+- manifest 只记录 source、destination、reason、actor_run_id 和时间，不读取或内联文件正文。
