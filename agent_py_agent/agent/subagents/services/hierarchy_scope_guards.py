@@ -16,17 +16,22 @@ _DOMAIN_STOPWORDS = {
     "checker",
     "coordinator",
     "deliverables",
+    "grand",
     "grandchild",
     "html",
     "implementer",
     "lead",
     "leaf",
+    "one",
     "page",
     "reporter",
     "reviewer",
     "runner",
+    "subagent",
     "task",
     "tester",
+    "three",
+    "two",
     "worker",
 }
 _COORDINATION_ROLE_TOKENS = {
@@ -108,7 +113,16 @@ def _child_domain_tokens(item: Any) -> set[str]:
 # 函数用途: 把文本转换成领域词集合；优先使用 agent_name/role，避免共享路径导致误判。
 def _domain_tokens(text: str) -> set[str]:
     tokens = re.findall(r"[a-z][a-z0-9]+", text)
-    return {token for token in tokens if token not in _DOMAIN_STOPWORDS}
+    return {
+        token for token in tokens
+        if token not in _DOMAIN_STOPWORDS and not _looks_generated_id_token(token)
+    }
+
+
+# LLM: _looks_generated_id_token prevents run-id fragments from becoming business domains.
+# 函数用途: 过滤 `dd1d90d8` 这类自动生成 id 片段，避免同父级不同 checker 被误判为同域重复。
+def _looks_generated_id_token(token: str) -> bool:
+    return any(char.isdigit() for char in token)
 
 
 # LLM: _first_overlapping_domain keeps duplicate errors deterministic.

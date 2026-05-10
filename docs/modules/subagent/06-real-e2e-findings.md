@@ -2086,3 +2086,37 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Rerun R7 from a clean runtime/deliverables to verify multi-run dispatch no longer contaminates child identity.
   - Continue producer/quality phase gating so quality/test/acceptance starts after auth/catalog/cart have produced or explicitly failed.
   - Add full static shopping-site validation: missing pages, `${...}` placeholders, dead links, dead images, and inert buttons must block acceptance.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R7
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Config: `/Users/xiaoyezi/my-claude-code/.my-agent-stage7-shop-smoke-20260511-r7.yaml`.
+  - Internal runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/stage7_shop_smoke_20260511_r7`.
+  - Deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r7`.
+  - Root run: `subagent-1778442411-6c83288e`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+- 中文说明：
+  - R7 继续按“外层只观察 root”的方式测试；root 自己创建 auth、catalog、cart-checkout 三个直接 coordinator，下层 coordinator 自己创建 leaf/worker。
+  - R6 的共享 `runner_instruction` 串线没有复发：auth/catalog/cart 的 runner prompt 都保持自己的任务身份，没有再把 auth 身份广播给其他分支。
+  - Auth 分支完成并写出注册/登录相关文件；catalog 分支创建了 config/home/product 相关 leaf 并开始产出；cart 分支暴露出新的 run_id 传递失真问题，因此主动停止。
+- Observed facts:
+  - Root 创建 `auth-lead`、`catalog-lead`、`cart-checkout-lead` 三个一级 coordinator。
+  - Auth coordinator 创建 `auth-worker`，auth worker 写出 `auth.js`、`app.js`、`register.html`、`login.html`，并进入 `DONE/VERIFIED`。
+  - Catalog coordinator 后续创建 `config-writer`、`home-page-writer`、`product-page-writer`，写出 `config.js`、`api.js`、`home.html`、`product.html`。
+  - Cart-checkout coordinator 创建了真实 child `subagent-1778442674-65f43222`，但后续把它抄成不存在的 `subagent-1778442548-65f43222`。
+  - 因为错误 id 没有被工具边界明确阻断，cart coordinator 继续读不存在的 task/run workspace 和 artifact refs，prompt 增长到约 70K。
+- Finding 47: scoped runner dispatch must block invalid child ids.
+  - Symptom: coordinator 把 direct child run id 的时间戳前缀记错，dispatch/list/read 继续围绕不存在的 id 空转。
+  - 中文解释：父节点已经有一个真实孩子，但它把身份证号码抄错了一段。系统以前只是“查不到”，没有立刻告诉它“你抄错了，这些才是你的孩子”，所以它越查越乱、越读越大。
+  - Root cause: `include_run_ids` 只用于候选过滤；当 id 不存在或不在当前 parent/root scope 内时，过滤结果为空，但 dispatch report 没有返回明确的 `invalid_run_ids` 阻断记录和可用 direct child ids。
+  - Fix: runner dispatch now preflights explicit `include_run_ids`; if any requested id is missing/out-of-scope, it returns a `runner_selection/invalid_run_ids` record, blocks runner execution for that call, lists `valid_scope_run_ids`, and adds conservative `possible_corrections` when a wrong id shares a unique short suffix with a visible child.
+  - Verification: `test_dispatch_blocks_invalid_scoped_run_id_with_valid_child_hint`.
+- Follow-up guard fix:
+  - Full pytest exposed that same-parent duplicate-domain detection treated generated run-id fragments in goals like `subagent-...-fc60` as business domains and could block generic `grand-1` / `grand-2` checker siblings.
+  - 中文解释：去重是为了挡“又创建一个 checkout coordinator”，不是为了挡“两个编号不同的 checker”。现在数字/id 片段和 `grand/one/two` 这类泛词不会当成业务域。
+  - Verification: `test_hierarchy_schedule_allows_generic_numbered_checker_siblings` plus hierarchy recovery packet tests.
+- Remaining gaps:
+  - Rerun R8 from a clean runtime/deliverables to verify wrong-id feedback lets the coordinator retry with the exact child id instead of looping.
+  - Add producer/quality phase gating so QA/test/acceptance starts only after required producer branches have produced, failed, or explicitly handed off.
+  - Add full static shopping-site validation: required pages, no `${...}` placeholders, no dead local links/src, no inert core buttons, and a register -> login -> browse -> cart -> checkout -> order success flow.

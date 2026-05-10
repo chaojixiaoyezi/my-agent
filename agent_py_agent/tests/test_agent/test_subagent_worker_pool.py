@@ -203,6 +203,80 @@ def test_dispatch_single_runner_keeps_specific_instruction(monkeypatch, tmp_path
     assert captured == ["你是 auth-coordinator，只能写 auth 页面。"]
 
 
+# LLM: _parent_child_pair creates a scoped coordinator/child pair for dispatch selection tests.
+# 函数用途: 准备一个父 coordinator 和直接 child，避免测试函数本身堆太多搭建代码。
+def _parent_child_pair(agent):
+    parent = agent.subagents.create_run(
+        goal="cart coordinator", thought="create cart worker", plan=["dispatch child"], role="coordinator",
+    )
+    child = agent.subagents.create_run(
+        goal="cart worker", thought="write cart", plan=["work"],
+        parent_id=parent.id, root_id=parent.id, depth=1,
+    )
+    return parent, child
+
+
+# LLM: _capture_runner_ids patches runner execution while preserving dispatch report construction.
+# 函数用途: 记录本轮是否真的启动 runner；错 id 测试要求该列表保持为空。
+def _capture_runner_ids(monkeypatch, agent, captured: list[str]) -> None:
+    def fake_worker(params):
+        captured.append(params.run_id)
+        return agent.subagents.record_runner_result(
+            RecordRunnerResultParams(
+                run_id=params.run_id,
+                dry_run=False,
+                ok=True,
+                message="should not run",
+                status="DONE",
+                verification_status="NEEDS_ACCEPTANCE",
+            )
+        )
+
+    monkeypatch.setattr("agent_py_agent.agent.agent_core.runner_dispatch._run_subagent_worker", fake_worker)
+
+
+def test_dispatch_blocks_invalid_scoped_run_id_with_valid_child_hint(monkeypatch, tmp_path):
+    captured: list[str] = []
+    cfg = AgentConfig(
+        model_backend="worker-pool-test",
+        subagent_workspace="subs",
+        runner_concurrency="1",
+        runner_start_rate="1",
+    )
+    monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: CountingAcceptedBackend())
+    agent = SimpleAgent(cfg, tmp_path)
+    parent, child = _parent_child_pair(agent)
+    wrong_id = f"subagent-0000000000-{child.id.rsplit('-', 1)[-1]}"
+    _capture_runner_ids(monkeypatch, agent, captured)
+
+    router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+    report = agent.dispatch_subagents(
+        router,
+        CapabilityConfig(),
+        params=DispatchParams(
+            apply=True,
+            execute_runners=True,
+            parent_run_id=parent.id,
+            include_run_ids=[wrong_id],
+            max_runners=1,
+            probe=False,
+            finalize_acceptance=False,
+        ),
+    )
+
+    selection_records = [
+        record for record in report.records
+        if record.step == "runner_selection" and record.action == "invalid_run_ids"
+    ]
+
+    assert captured == []
+    assert len(selection_records) == 1
+    assert selection_records[0].ok is False
+    assert wrong_id in selection_records[0].message
+    assert child.id in selection_records[0].message
+    assert agent.subagents.load(child.id).status == "PLANNING"
+
+
 def test_dispatch_parallel_runner_pool_timeout_does_not_block_other_workers(monkeypatch, tmp_path):
     root = tmp_path
     backend = OneSlowOneFastBackend()

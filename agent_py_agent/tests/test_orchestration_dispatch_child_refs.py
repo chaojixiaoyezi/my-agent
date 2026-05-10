@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from agent_py_agent.agent.agent_core.dispatch_params import DispatchContext
-from agent_py_agent.agent.agent_core.dispatch_runner_batches import _scoped_runner_tasks
+from agent_py_agent.agent.agent_core.dispatch_runner_selection import scoped_runner_tasks
 from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 from agent_py_agent.agent.agent_core.runner_dispatch import (
     RunnerDispatchRecordParams,
@@ -164,7 +164,7 @@ def test_scoped_runner_tasks_honors_include_run_ids_order():
         include_run_ids=["child-b", "child-a"],
     )
 
-    scoped = _scoped_runner_tasks(tasks, ctx)
+    scoped = scoped_runner_tasks(tasks, ctx)
 
     assert [task.id for task in scoped] == ["child-b", "child-a"]
 

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from ..subagents.services.dispatch_params import DispatchRecordParams
 from .dispatch_limiter import RunnerJobLimitRequest, limit_runner_jobs
 from .dispatch_params import DispatchContext, RunnerBatchContext
+from .dispatch_runner_selection import invalid_include_run_ids_record, scoped_runner_tasks
 from .runner_dispatch import (
     RunnerDispatchRecordParams,
     _dispatch_runner_candidates,
@@ -56,8 +57,14 @@ class RunnerDryRecordParams:
 def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) -> list:
     records = list(batch.records)
     runner_max_attempts = _runner_max_attempts(agent.config.runner_failure_policy)
+    all_tasks = agent.subagents.list_runs()
+    scoped_tasks = scoped_runner_tasks(all_tasks, ctx)
+    selection_record = invalid_include_run_ids_record(agent, ctx, all_tasks, scoped_tasks)
+    if selection_record is not None:
+        records.append(selection_record)
+        return records
     runner_candidates = _dispatch_runner_candidates(
-        _scoped_runner_tasks(agent.subagents.list_runs(), ctx),
+        scoped_tasks,
         ctx.max_runners,
         runner_max_attempts=runner_max_attempts,
     )
@@ -71,28 +78,6 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
     batch.records = records
     _guard_multi_runner_instruction(agent, ctx, batch)
     return run_runner_batch(agent, batch)
-
-
-# LLM: _scoped_runner_tasks keeps nested dispatch focused and can honor explicit child order.
-# 函数用途: 根据 include/parent/root/exclude 过滤 runner 候选；runner 可精确指定本轮要跑的 direct child ids。
-def _scoped_runner_tasks(tasks: list, ctx: DispatchContext) -> list:
-    included = [str(item) for item in (ctx.include_run_ids or []) if str(item).strip()]
-    include_order = {run_id: index for index, run_id in enumerate(included)}
-    excluded = {str(item) for item in (ctx.exclude_run_ids or []) if str(item).strip()}
-    scoped = []
-    for task in tasks:
-        if include_order and task.id not in include_order:
-            continue
-        if task.id in excluded:
-            continue
-        if ctx.parent_run_id and task.parent_id != ctx.parent_run_id:
-            continue
-        if ctx.root_id and task.root_id != ctx.root_id:
-            continue
-        scoped.append(task)
-    if include_order:
-        scoped.sort(key=lambda task: include_order.get(task.id, len(include_order)))
-    return scoped
 
 
 # LLM: collect_runner_candidates 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

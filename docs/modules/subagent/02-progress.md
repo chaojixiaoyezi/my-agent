@@ -377,3 +377,10 @@
 - 已修正：当同一次 dispatch 选中多个 pending runner 且带共享 `runner_instruction` 时，调度器会清空该共享指令并记录 `ignore_multi_runner_instruction`；单 run_id dispatch 仍保留专属指令。
 - 已同步：`dispatch_subagents` 工具说明和 coordinator runner prompt 明确 task-specific instruction 只能给单个 run_id；多个孩子需要分别 dispatch，或把通用要求写进 child goal/context bundle。
 - 下一步：用干净 R7 复测 root -> coordinator -> leaf，确认身份不再串线，并继续做 producer/quality 阶段依赖和静态购物流程验收。
+
+## 2026-05-11 Stage7 shopping E2E R7 scoped run-id guard
+- 中文说明：R7 确认多 runner 指令串线已消失，auth 分支完成，catalog 分支开始写商品页；新的真实问题是 cart coordinator 把自己的 child run_id 抄错，围绕不存在的目录反复读取。
+- 已修正：`dispatch_subagents` 在 runner 候选执行前预检 `include_run_ids`；只要显式 id 不存在或不属于当前 parent/root scope，就返回 `runner_selection/invalid_run_ids` 阻断记录，列出可用 direct child ids，并在唯一短后缀匹配时给出 `possible_corrections`。
+- 已修正：同父级 coordinator/checker 去重现在会过滤 generated id 片段和 `grand/one/two` 这类泛化编号词，避免误挡 recovery 树里的 `grand-1` / `grand-2` checker siblings。
+- 设计边界：工具层只提示，不自动替换 id；这样避免隐形改写模型意图，也避免极小概率后缀撞车时跑错孩子。
+- 下一步：用干净 R8 复测 root -> coordinator -> leaf，看 cart coordinator 是否能根据阻断记录重试正确 child id，然后继续补 producer/quality 阶段顺序和完整购物站静态验收。
