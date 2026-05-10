@@ -326,3 +326,9 @@
 - 命中能力卡时，grant 会写入 `grant_type`、command allowlist、MCP tools、path/network scope、output budget、risk 和 request scope reserved；`allowed_tools` 仍只合并明确授权的工具。
 - 未命中能力卡时，gap 会写入 `gap_type`、requested scope、escalation chain 和 `capability_request:<id>` ref，方便父级继续上抛、人工处理或后续 skill_spark 学习。
 - capability route dry-run record 也带 `request_scope` / `grant_scope`，让人类或上级 agent 在 apply 前就能看到授权边界。
+
+## 2026-05-11 controlled tools stage 3
+- 中文说明：新增 `shell_gateway.py` 干跑骨架，只判断命令是否允许，不执行任何 subprocess。
+- dry-run 会检查命令解析、shell 高风险字符、危险命令、父级 command allowlist、workspace/cwd/allowed roots、curl 网络范围和输出预算。
+- `rm/rmdir/sudo/dd/chmod/chown/kill` 等危险命令即使写进 allowlist 也会被拒绝；后续删除文件走 task trash。
+- dry-run 决策会返回 `allowed`、`would_execute`、`blockers`、解析后的 `argv`、cwd、输出预算和 audit 摘要，为 execute v1 复用同一闸门。
