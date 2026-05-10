@@ -13,6 +13,7 @@ import json
 from dataclasses import asdict
 
 from ..subagent import SubAgentExecutionContext
+from ..subagents.role_templates import role_template_guide_text
 
 _SUBAGENT_RESULT_TEMPLATE = (
     "[SUBAGENT_RESULT]\n"
@@ -93,6 +94,8 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
     if "leaf" in str(context.role or "").lower():
         lines.append("- 叶子节点重点是交付产物和测试文件；父级验收器负责运行命令、判定通过和触发 rescue。")
     if _is_coordinator_context(context):
+        lines.append("可用角色模板：")
+        lines.extend(f"  {line}" for line in role_template_guide_text().splitlines())
         lines.append(
             "- coordinator/lead 节点不直接写产物；目标要求写文件且自己没有 write_file 时，"
             "先使用 schedule_child_subagents 创建 leaf_worker，不要因为自己没有 write_file 就提交 capability_request。"

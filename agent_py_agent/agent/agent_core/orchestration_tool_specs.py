@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+from ..subagents.role_templates import role_template_guide_text
 from ..tools import ToolSpec
 
+_ROLE_TEMPLATE_GUIDE = role_template_guide_text()
 _CREATE_USE_CASES = [
     "用户要求拆分任务、派多个子代理、开工单或让子代理分别处理事项",
     "需要把聊天里的计划落盘，后续由 dispatch_subagents 推进和验收",
@@ -13,8 +15,9 @@ _CREATE_KEYWORDS = ["子代理", "派工", "拆分", "工单", "任务", "subage
 _CREATE_PARAMETERS = {
     "goal": "总目标或任务描述，必填",
     "count": "创建多少个子代理，默认 1，受 max_subagents 限制",
-    "tool_preset": "默认 read_only；coding 会授予文件读写工具；none 不授予工具",
-    "allowed_tools": "显式工具列表；传了它就覆盖 tool_preset",
+    "role": "子代理角色模板 id；默认 worker",
+    "tool_preset": "默认 automatic；显式 read_only/coding/none 时才覆盖自动工具策略",
+    "allowed_tools": "显式工具列表；传了它就覆盖 role template 和 tool_preset",
     "acceptance_checks": "验收标准列表",
     "plan": "每个子代理的初始步骤列表",
     "workflow_mode": "off/plan/auto；决定是否在建工单时挂 workflow 计划",
@@ -23,16 +26,18 @@ _CREATE_PARAMETERS = {
 _CREATE_PARAMETER_DETAILS = {
     "goal": "写清楚子代理要交付什么，不要只写一个空泛标题。",
     "count": "例如 3 表示创建 3 个并列子任务；如果任务需要人工精细拆分，可以多次调用本工具。",
-    "tool_preset": "`read_only` 只允许 list/read/search；`coding` 允许读写和替换文件；`none` 不授予工具。",
-    "allowed_tools": "JSON 数组，例如 [\"read_file\", \"write_file\"]。如果需要写代码，通常至少给 read_file/search_text/write_file/replace_in_file。",
+    "role": "优先用模板角色，而不是临时造小角色。可用角色模板：\n" + _ROLE_TEMPLATE_GUIDE,
+    "tool_preset": "省略时自动：由 role template、任务目标和调度器决定工具；`read_only` 只允许 list/read/search；`coding` 允许读写和替换文件；`none` 不授予工具。",
+    "allowed_tools": "一般省略。只有受限环境才显式写 JSON 数组，例如 [\"read_file\", \"write_file\"]。",
     "acceptance_checks": "JSON 数组或多行文本，说明父代理后续怎样判断任务完成。",
     "plan": "JSON 数组或多行文本，给子代理的初始执行步骤。",
     "workflow_mode": "默认跟随配置：auto->auto，manual->plan，off->off。只支持 off/plan/auto；未知值保守按 off 处理。",
     "extra_write_roots": "JSON 数组，例如 [\"C:/Users/you/Desktop/work\"]；只给本次子代理任务增加写入边界。",
 }
 _CREATE_EXAMPLES = [
-    '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"tool_preset":"coding","workflow_mode":"auto","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',
-    '{"tool":"create_subagents","goal":"调研 gateway 失败场景","count":2,"tool_preset":"read_only"}',
+    '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"role":"worker","workflow_mode":"auto","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',
+    '{"tool":"create_subagents","goal":"检查多个 worker 的购物网站实现","count":1,"role":"bug_finder"}',
+    '{"tool":"create_subagents","goal":"验收购物网站从注册到下单的完整流程","count":1,"role":"acceptor"}',
 ]
 
 _BOARD_PARAMETERS = {
@@ -83,7 +88,7 @@ _SCHEDULE_CHILD_PARAMETERS = {
 _SCHEDULE_CHILD_PARAMETER_DETAILS = {
     "children": (
         "JSON 数组。每项可含 role、agent_name、goal、plan、allowed_tools、allowed_skills、"
-        "acceptance_checks、extra_write_roots。"
+        "acceptance_checks、extra_write_roots。优先从这些角色模板里选 role：\n" + _ROLE_TEMPLATE_GUIDE
     ),
     "apply": "runner 内省略时默认 true；显式 false 只返回会创建什么，适合先检查。",
     "max_depth": "用来避免子代理无限递归创建下级节点。",
@@ -95,6 +100,12 @@ _SCHEDULE_CHILD_EXAMPLES = [
         '"children":[{"role":"child_coordinator","agent_name":"catalog-lead",'
         '"goal":"继续拆分商品目录实现任务",'
         '"allowed_tools":["schedule_child_subagents","dispatch_subagents","subagent_board","read_file"]}]}'
+    ),
+    (
+        '{"tool":"schedule_child_subagents","apply":true,'
+        '"children":[{"role":"bug_finder","agent_name":"qa-finder","goal":"检查多个 worker 的实现和证据"},'
+        '{"role":"tester","agent_name":"qa-tester","goal":"测试注册、登录、购物车和下单流程"},'
+        '{"role":"acceptor","agent_name":"qa-acceptor","goal":"按验收标准判断是否可以交付"}]}'
     ),
 ]
 

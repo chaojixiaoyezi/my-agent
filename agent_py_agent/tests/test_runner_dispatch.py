@@ -177,6 +177,47 @@ class TestResolveRunnerTimeoutSeconds:
         assert _resolve_runner_timeout_seconds(-10) == 0.0
 
 
+class TestRunnerTaskTimeout:
+    """测试 runner 自动超时计算。"""
+
+    def _timeout_config(self, runner_timeout_seconds: str = "auto"):
+        """构造动态超时配置。"""
+
+        config = MagicMock()
+        config.runner_timeout_seconds = runner_timeout_seconds
+        config.dynamic_timeout_safety_margin = 2.0
+        config.dynamic_timeout_min = 30
+        config.dynamic_timeout_max = 600
+        config.model_speed_profile_path = ""
+        return config
+
+    def test_off_runner_timeout_returns_no_limit(self):
+        """用户配置 off/none/disabled 时，runner 不套超时墙。"""
+        from agent_py_agent.agent.agent_core.runner_gate import get_task_timeout
+
+        task = MagicMock()
+        task.attributes = {}
+        task.goal = "实现购物网站 demo，包含注册、登录、购物车和下单。"
+        task.plan = ["write files", "verify behavior"]
+        task.role = "worker"
+        task.allowed_tools = ["read_file", "write_file"]
+
+        assert get_task_timeout(task, 0.0, self._timeout_config("off")) == 0.0
+
+    def test_static_runner_timeout_still_overrides_no_limit_config(self):
+        """用户显式数字超时时，仍按数字超时执行。"""
+        from agent_py_agent.agent.agent_core.runner_gate import get_task_timeout
+
+        task = MagicMock()
+        task.attributes = {}
+        task.goal = "实现一个小改动。"
+        task.plan = []
+        task.role = "worker"
+        task.allowed_tools = ["write_file"]
+
+        assert get_task_timeout(task, 45.0, self._timeout_config("off")) == 45.0
+
+
 class TestIsDispatchRunnerCandidate:
     """测试 _is_dispatch_runner_candidate() 函数。"""
 
@@ -284,6 +325,21 @@ class TestIsDispatchRunnerCandidate:
 class TestDispatchRunnerCandidates:
     """测试 _dispatch_runner_candidates() 函数。"""
 
+    def _runner_task(self, run_id: str, role: str, created_at: float = 1.0):
+        """构造可调度 runner 候选，便于测试角色排序。"""
+
+        task = MagicMock()
+        task.id = run_id
+        task.role = role
+        task.status = "PLANNING"
+        task.verification_status = "PENDING"
+        task.channel_status = "OK"
+        task.capability_requests = []
+        task.capability_gaps = []
+        task.created_at = created_at
+        task.updated_at = created_at
+        return task
+
     def test_zero_max_runners_returns_empty(self):
         """max_runners 为 0 返回空列表。"""
         from agent_py_agent.agent.agent_core.runner_dispatch import _dispatch_runner_candidates
@@ -312,6 +368,21 @@ class TestDispatchRunnerCandidates:
 
         result = _dispatch_runner_candidates([mock_task1, mock_task2], max_runners=1)
         assert len(result) == 1
+
+    def test_role_phase_order_is_applied_before_runner_limit(self):
+        """worker 先于找错/测试/验收，且排序发生在 max_runners 截断前。"""
+        from agent_py_agent.agent.agent_core.runner_dispatch import _dispatch_runner_candidates
+
+        tasks = [
+            self._runner_task("accept", "acceptor", created_at=1.0),
+            self._runner_task("bug", "bug_finder", created_at=2.0),
+            self._runner_task("test", "tester", created_at=3.0),
+            self._runner_task("work", "worker", created_at=4.0),
+        ]
+
+        result = _dispatch_runner_candidates(tasks, max_runners=1)
+
+        assert [task.id for task in result] == ["work"]
 
 
 class TestLimitItems:

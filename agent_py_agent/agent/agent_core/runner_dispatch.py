@@ -32,6 +32,30 @@ RETRYABLE_RUNNER_FAILURE_TYPES = {
 }
 
 
+# LLM: role phase ordering keeps QA and acceptance runners from racing ahead of implementation runners.
+# 函数用途: 给 runner 角色分配执行阶段顺序；coordinator 先拆任务，worker 先产出，tester/找错随后检查，acceptor 最后验收。
+def _runner_role_phase_priority(task: SubAgentTask) -> int:
+
+    role = str(getattr(task, "role", "") or "").strip().lower().replace("-", "_")
+    if not role:
+        return 10
+    if "coordinator" in role or role in {"lead", "planner", "dispatcher"}:
+        return 0
+    if "accept" in role or role in {"acceptor", "verifier", "verification"}:
+        return 30
+    if (
+        "test" in role
+        or "bug" in role
+        or "review" in role
+        or "critic" in role
+        or role in {"qa", "checker", "auditor"}
+    ):
+        return 20
+    if "worker" in role or role in {"general", "writer", "coder", "researcher", "reporter"}:
+        return 10
+    return 10
+
+
 # LLM: _runner_max_attempts 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 推进执行器maxattempts的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
 def _runner_max_attempts(policy: str) -> int:
@@ -196,9 +220,8 @@ def _dispatch_runner_candidates(
         if not _is_dispatch_runner_candidate(task, runner_max_attempts=runner_max_attempts):
             continue
         candidates.append(task)
-        if len(candidates) >= max_runners:
-            break
-    return candidates
+    ordered = sorted(enumerate(candidates), key=lambda item: (_runner_role_phase_priority(item[1]), item[0]))
+    return [task for _, task in ordered[:max_runners]]
 
 
 # LLM: _limit_items 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

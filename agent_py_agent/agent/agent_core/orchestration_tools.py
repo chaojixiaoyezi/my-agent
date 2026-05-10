@@ -75,10 +75,12 @@ def _tool_workflow_mode(explicit_mode: object, config_mode: object) -> str:
 
 # LLM: _subagent_allowed_tools 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 处理子代理allowed工具相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
-def _subagent_allowed_tools(params: dict[str, object]) -> list[str]:
+def _subagent_allowed_tools(params: dict[str, object]) -> list[str] | None:
     allowed_tools = _string_list(params.get("allowed_tools"))
     if allowed_tools:
         return allowed_tools
+    if "tool_preset" not in params:
+        return None
     preset = str(params.get("tool_preset") or "read_only").strip().lower()
     if preset == "coding":
         return list(CODING_SUBAGENT_TOOLS)
@@ -89,7 +91,12 @@ def _subagent_allowed_tools(params: dict[str, object]) -> list[str]:
 
 # LLM: _create_run_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 构建参数所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
-def _create_run_params(agent, raw_params: dict[str, object], goal: str, allowed_tools: list[str]):
+def _create_run_params(
+    agent,
+    raw_params: dict[str, object],
+    goal: str,
+    allowed_tools: list[str] | None,
+):
     workflow_mode = _tool_workflow_mode(raw_params.get("workflow_mode"), agent.config.subagent_workflow_mode)
     extra_write_roots = _merged_extra_write_roots(raw_params, goal)
     return CreateRunParams(
@@ -144,7 +151,11 @@ class CreateSubagentsTool(BaseTool):
             return count
 
         allowed_tools = _subagent_allowed_tools(params)
-        target_error = external_write_target_error(self.agent, goal, allowed_tools)
+        target_error = external_write_target_error(
+            self.agent,
+            goal,
+            allowed_tools or CODING_SUBAGENT_TOOLS,
+        )
         if target_error:
             return ToolExecutionResult("create_subagents", False, target_error)
 
@@ -182,11 +193,11 @@ class CreateSubagentsTool(BaseTool):
 
     # LLM: _create_payload 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 构建载荷所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
-    def _create_payload(self, tasks, allowed_tools: list[str]) -> dict[str, object]:
+    def _create_payload(self, tasks, allowed_tools: list[str] | None) -> dict[str, object]:
         return {
             "created": len(tasks),
             "ids": [task.id for task in tasks],
-            "allowed_tools": allowed_tools,
+            "allowed_tools": allowed_tools or "automatic",
             "subagent_workspace": str(self.agent.subagents.workspace),
             "tasks": [
                 {

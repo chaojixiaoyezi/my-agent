@@ -1435,3 +1435,34 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining gap:
   - Running pytest directly in deliverables can create `.pytest_cache` and `__pycache__`; this does not pollute repo code, but future test runners should support cleaner artifact hygiene for user-facing deliverables.
   - Root final acceptance was invoked by parent API after the root runner completed. A later CLI/watch bridge can expose this as a clearer semi-auto operator action without changing the safety boundary.
+
+## 2026-05-10 Role Template Dispatch Smoke
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/role_template_e2e`.
+  - Deliverables root: `/Users/xiaoyezi/my-claude-code/role_template_e2e_deliverables`.
+  - Model name: `MiniMax-M2.7`.
+- 中文说明：
+  - 这次验证“模型能不能看到角色模板，并自己选 worker / tester / 找茬 / 验收”。
+  - 父级只调用主节点，真实模型自己通过 `create_subagents` 创建四个子代理。
+- Observed behavior:
+  - MiniMax 创建了 4 个任务：`worker`、`tester`、`bug_finder`、`acceptor`。
+  - `worker` 得到 `write_file/append_file/replace_in_file` 等写工具。
+  - `tester`、`bug_finder`、`acceptor` 保持只读工具。
+- Finding 1: QA roles could be selected before worker.
+  - Symptom: `subagents-dispatch --dry-run --max-runners 1` 在旧逻辑下会被文件/更新时间顺序影响，可能先选到 `acceptor`。
+  - 中文解释：这会变成“还没做东西就先验收”，真实业务流水线顺序错了。
+  - Fix: runner 候选先全部筛出来，再按角色阶段排序，最后才按 `max_runners` 截断。顺序为 coordinator/规划类、worker/产出类、tester/bug_finder/critic、acceptor。
+  - Verification: focused test `test_role_phase_order_is_applied_before_runner_limit` 先红后绿；真实 dry-run 复测 `max_runners=1` 选中 worker。
+- Finding 2: default 30s timeout killed a real worker before output.
+  - Symptom: worker 执行购物 demo 时 30 秒超时，未生成产物。
+  - 中文解释：这类真实 E2E 比单元测试慢，固定 30 秒会误杀正常任务。
+  - Fix: 按当前用户要求，默认 `runner_timeout_seconds` 改为 `off`；`off/none/disabled/0` 表示不套外层超时，数字秒数表示固定超时，`auto` 表示动态 timeout。
+  - Verification: focused timeout tests 先红后绿；真实 worker 重跑超过 30 秒后没有被 timeout wrapper 杀掉。
+- Finding 3: unlimited runner can still hang without visible model-stage progress.
+  - Symptom: 无限时长重跑超过 5 分钟仍无 response/output/deliverables，只写出 execution context；最终人工停止并把 attempt 标记 abandoned，task 标记 `BLOCKED/manual_stop_after_unlimited_hung`。
+  - 中文解释：不限制超时能防误杀，但如果底层模型请求或工具循环卡住，父级现在只能靠外部观察判断卡点。
+  - Follow-up:
+    - 需要增加 runner 内部阶段心跳，例如 `model_request_started`、`model_response_received`、`tool_call_started`、`tool_call_finished`。
+    - 需要把“无限 runner 长时间无 response 文件/无工具事件”纳入 due-check，可提示人工诊断或受控取消，而不是静默挂起。
