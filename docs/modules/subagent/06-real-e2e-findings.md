@@ -2328,3 +2328,30 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining gaps:
   - R13 coordinator collapsed a medium web project into one large leaf (`shop-pages-builder`) instead of splitting auth/catalog/cart/style/test into multiple leaves. This is functional for the smoke test, but not ideal for speed or 48-leaf scale; role/template prompting should keep coordinators biased toward smaller independent leaves.
   - R14 should run from a clean runtime/deliverables with the two fixes above and verify the root can continue from child production into parent/coordinator acceptance without false rescue loops.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R14
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Config: `/Users/xiaoyezi/my-claude-code/.my-agent-stage7-shop-smoke-20260511-r14.yaml`.
+  - Root run: `subagent-1778454295-9cdf2b5e`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+- 中文说明：
+  - R14 继续保持“外层只观察 root”。外层只创建并运行 root，没有直接创建 lower agents，也没有替任何 leaf 写产物。
+  - R14 证明“分支拆分”比 R13 好：root 创建 auth、catalog、cart-checkout、shared 四个一级 coordinator；这些 coordinator 再创建自己的 leaf。
+  - R14 也暴露了单页静态产物的验收缺口：首页 leaf 只输出一个 `index.html` 加 CSS/JS，之前不会自动生成 `static_site_check`，导致模型写的空壳 `content_check` 被当成失败。
+- Observed facts:
+  - Root created four depth-1 production coordinators: `auth-coordinator`, `catalog-coordinator`, `cart-checkout-coordinator`, `shared-coordinator`.
+  - Coordinators created depth-2 leaves such as `auth-leaf-worker`, `catalog-leaf-worker`, `cart-checkout-leaf-writer`, and `shared-leaf`.
+  - Deliverables were written under `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r14/build`, including `index.html`, auth pages/assets, catalog pages, and shared assets before the run was stopped for the product fix.
+  - Catalog leaf static validation correctly failed on a real generated-site bug: `placeholder_hits=1` in `product-detail.html`.
+  - Shared leaf validation incorrectly failed on malformed model-authored test: `index.html 导航链接验证` used `content_check` but provided no `file_path`.
+- Finding 61: single-page static outputs also need inferred static-site checks.
+  - Symptom: `shared-leaf` produced one HTML page plus CSS/JS artifacts, but `execution_static_site_items.py` only inferred `static_site_check` when it saw at least two HTML files. The malformed runner-declared `content_check` therefore remained the only test and failed with `缺少 file_path`.
+  - 中文解释：首页这种任务只有一个 HTML，也应该机器检查链接、CSS/JS 引用、占位符和按钮。之前系统只给“多页面网站”补静态检查，导致单页 leaf 又被模型空壳测试拖成假红。
+  - Fix: `inferred_static_site_items()` now creates a `static_site_check` for one or more HTML artifact refs, not only multi-page outputs. When this inferred check exists, the existing malformed-checklist filter drops the empty `content_check`.
+  - Verification:
+    - `test_prepare_test_items_infers_static_site_check_for_single_html_artifact`.
+- Remaining gaps:
+  - R14 should be rerun after this single-page inference fix to verify `shared-leaf` no longer false-fails and catalog's real placeholder failure is still caught.
+  - Parent/root-level acceptance still needs a whole-site required-file oracle so a split directory layout cannot satisfy child-local checks while missing top-level `build/products.html`, `build/cart.html`, and related user-facing routes.

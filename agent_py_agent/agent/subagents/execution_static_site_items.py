@@ -21,13 +21,13 @@ class StaticSiteTestItemsRequest:
     existing_tests: list[dict[str, Any]]
 
 
-# LLM: inferred_static_site_items creates one refs-only static_site_check for multi-page HTML outputs.
-# 函数用途: 当 artifact 显示有静态 Web 产物且尚无同类测试时，自动补机器验收项。
+# LLM: inferred_static_site_items creates one refs-only static_site_check for HTML outputs.
+# 函数用途: 当 artifact 显示有静态 Web 产物且尚无同类测试时，自动补机器验收项；单页也检查本地资源。
 def inferred_static_site_items(request: StaticSiteTestItemsRequest) -> list[dict[str, Any]]:
     if _has_static_site_check(request.existing_tests):
         return []
     html_paths = _html_artifact_paths(request.artifact_paths)
-    if len(html_paths) < 2:
+    if not html_paths:
         return []
     site_root = _common_parent(html_paths)
     return [{

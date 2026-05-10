@@ -244,6 +244,45 @@ def test_prepare_test_items_drops_malformed_runner_checklist_when_static_check_i
     }]
 
 
+# LLM: test_prepare_test_items_infers_static_site_check_for_single_html_artifact covers single-page leaf outputs.
+# 函数用途: 只有一个 HTML 页面和 CSS/JS 资源时也要生成静态站点验收，避免模型空壳测试误报。
+def test_prepare_test_items_infers_static_site_check_for_single_html_artifact(tmp_path):
+    site_dir = tmp_path / "deliverables" / "shop" / "build"
+    site_dir.mkdir(parents=True)
+    (site_dir / "index.html").write_text(
+        "<link rel='stylesheet' href='shared/style.css'><script src='shared/main.js'></script>",
+        encoding="utf-8",
+    )
+    shared = site_dir / "shared"
+    shared.mkdir()
+    (shared / "style.css").write_text("body { color: #111; }\n", encoding="utf-8")
+    (shared / "main.js").write_text("console.log('ok');\n", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[{
+                "name": "index.html 导航链接验证",
+                "validation_method": "content_check",
+                "ok": True,
+                "summary": "包含 login.html、register.html、products.html、cart.html 链接",
+            }],
+            output={"artifacts": [
+                {"path": str(site_dir / "index.html")},
+                {"path": str(shared / "style.css")},
+                {"path": str(shared / "main.js")},
+            ]},
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert prepared == [{
+        "name": "inferred static site check",
+        "validation_method": "static_site_check",
+        "site_root": "deliverables/shop/build",
+        "required_files": ["index.html"],
+    }]
+
+
 # LLM: test_prepare_test_items_keeps_malformed_check_without_machine_fallback preserves conservative failure signals.
 # 函数用途: 没有自动机器验收兜底时，格式不完整的测试项仍保留，让父级看到 runner 输出不合格。
 def test_prepare_test_items_keeps_malformed_check_without_machine_fallback(tmp_path):
