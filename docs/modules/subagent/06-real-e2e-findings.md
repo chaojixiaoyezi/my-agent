@@ -2196,3 +2196,39 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Rerun R10 from a clean runtime/deliverables to verify root uses `valid_run_ids` / `actionable_run_ids` and actually runs the four child coordinators.
   - Continue producer/quality phase gating so QA/test/acceptance starts only after producers produce, fail, or hand off.
   - Add static shopping-site validation: required pages, no `${...}` placeholders, no dead local links/src, no inert core buttons, and a register -> login -> browse -> cart -> checkout -> order success flow.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R10
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Config: `/Users/xiaoyezi/my-claude-code/.my-agent-stage7-shop-smoke-20260511-r10.yaml`.
+  - Internal runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/stage7_shop_smoke_20260511_r10`.
+  - Deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r10`.
+  - Root run: `subagent-1778447294-8a2fa764`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+- 中文说明：
+  - R10 继续按“外层只观察 root”的方式跑；外层没有替下层创建 coordinator/leaf，也没有替它们写购物网站文件。
+  - Root 能创建 4 个一级 coordinator，并把 auth/catalog/cart 分支推进到真实产物写入，说明 R9 的 run id / board 恢复可见性改进有效。
+  - 这轮主动停止，因为暴露出两个新的结构问题：quality 分支抢跑，以及 root 后续绕过已有 coordinator 直接创建 leaf。
+- Observed facts:
+  - Root created four depth-1 coordinators:
+    - `subagent-1778447377-944f6754` / `auth-coordinator`.
+    - `subagent-1778447377-c019b103` / `catalog-coordinator`.
+    - `subagent-1778447377-fcc28ded` / `cart-checkout-coordinator`.
+    - `subagent-1778447378-96d98343` / `quality-coordinator`.
+  - Real deliverables were written under `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r10/build`, including auth pages/assets, catalog pages/assets, cart/checkout pages, root `index.html`, order success page, and shared styles.
+  - Before stopping, task status showed auth/catalog awaiting parent acceptance, cart-checkout done/verified, quality blocked/unverified, and root still running/unverified.
+  - Root later created direct leaf workers under itself, including `catalog-detail-leaf`, `cart-leaf`, `auth-login-leaf`, `index-leaf`, `order-success-leaf`, `auth-register-leaf`, `catalog-list-leaf`, `css-leaf`, and `checkout-leaf`.
+- Finding 53: quality/test runners need phase gating.
+  - Symptom: `quality-coordinator` ran before producers had completed and tried to inspect partial/empty build state, then became `BLOCKED`.
+  - 中文解释：验收员太早进场了，工人还没把货架搭完，它就开始检查“这里缺东西”。这不是验收能力问题，而是开工顺序问题。
+  - Fix: runner candidate selection now computes role phase from role, agent name, and goal text, then releases only the current lowest phase per dispatch wave. Quality/test/review/acceptance candidates wait until producer/coordinator candidates are no longer runnable in that scope.
+  - Verification: `test_runner_candidates_defer_quality_until_producers_finish`.
+- Finding 54: root must not bypass the coordinator layer after delegation.
+  - Symptom: after creating coordinator children, root directly scheduled many leaf/worker children under itself.
+  - 中文解释：root 已经把“楼层经理”叫来了，后面就应该让楼层经理带自己的工人。root 不能又直接越过经理去招一堆叶子工人，不然层级会乱，恢复和验收也不知道谁负责谁。
+  - Fix: hierarchy scope guard now returns `root_leaf_bypass_existing_coordinators` when a root with existing coordinator children tries to create leaf-like worker children. The guard tells the root to dispatch or repair its direct coordinator children first.
+  - Verification: `test_root_with_coordinators_cannot_bypass_into_leaf`.
+- Remaining gaps:
+  - Rerun R11 from a clean runtime/deliverables to verify quality is delayed and root no longer creates direct leaf workers after coordinator delegation.
+  - Add static shopping-site validation: required pages, no `${...}` placeholders, no dead local links/src, no inert core buttons, and a register -> login -> browse -> cart -> checkout -> order success flow.

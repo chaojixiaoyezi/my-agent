@@ -398,3 +398,9 @@
 - 已修正：`runner_selection_recovery` 顶层 payload 新增 `valid_run_ids`，从 evidence task refs 提取机器可读 run id，模型无需从中文 message 里解析。
 - 设计边界：系统仍只提示正确 id，不自动替模型重写并执行 dispatch；这样避免隐形跑错孩子。
 - 下一步：用干净 R10 复测 root 是否能根据 `valid_run_ids` / board `actionable_run_ids` 重试正确 child id。
+
+## 2026-05-11 Stage7 shopping E2E R10 phase gates
+- 中文说明：R10 确认 root 能创建 4 个一级 coordinator，并能让 auth/catalog/cart 分支产出真实页面；但 quality coordinator 抢跑，在生产线未完成时开始验收并 BLOCKED，root 后续还绕过 coordinator 直接创建多个 leaf。
+- 已修正：runner 候选现在按阶段放行，同一 dispatch 范围内只跑当前最低阶段；producer/coordinator 未完成前，quality/test/review/acceptance 候选会等下一轮。
+- 已修正：root 已经拥有 coordinator child 后，再调用 `schedule_child_subagents` 创建 leaf/worker 会被 `root_leaf_bypass_existing_coordinators` 阻断，要求先 dispatch 或修复直接 coordinator children。
+- 下一步：用干净 R11 复测 quality 是否延后，root 是否不再直接创建 leaf。
