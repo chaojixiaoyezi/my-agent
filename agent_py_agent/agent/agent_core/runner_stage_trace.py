@@ -48,6 +48,7 @@ class RunnerStageTraceBundle:
     params: Any
     tool_rounds: int
     payload: dict[str, Any] = field(default_factory=dict)
+    detail_payload: dict[str, Any] = field(default_factory=dict)
 
 
 # LLM: trace_runner_model_request_started records the last known point before a backend call can block.
@@ -60,6 +61,7 @@ def trace_runner_model_request_started(request: RunnerModelStageTraceRequest) ->
             params=request.params,
             tool_rounds=request.tool_rounds,
             payload={"prompt_chars": len(request.prompt or "")},
+            detail_payload={"prompt": request.prompt or ""},
         )
     )
 
@@ -77,6 +79,7 @@ def trace_runner_model_response_received(request: RunnerModelStageTraceRequest) 
                 "backend": str(getattr(request.response, "backend", "") or ""),
                 "response_chars": len(str(getattr(request.response, "text", "") or "")),
             },
+            detail_payload={"response": str(getattr(request.response, "text", "") or "")},
         )
     )
 
@@ -113,6 +116,7 @@ def trace_runner_tool_call_started(request: RunnerToolStageTraceRequest) -> None
                 "tool": _tool_name(request.payload),
                 "payload_keys": _payload_keys(request.payload),
             },
+            detail_payload={"tool_payload": request.payload},
         )
     )
 
@@ -132,6 +136,7 @@ def trace_runner_tool_call_finished(request: RunnerToolStageTraceRequest) -> Non
                 "ok": bool(getattr(request.result, "ok", False)),
                 "output_chars": len(str(getattr(request.result, "output", "") or "")),
             },
+            detail_payload={"tool_output": str(getattr(request.result, "output", "") or "")},
         )
     )
 
@@ -161,9 +166,44 @@ def _trace_runner_stage(bundle: RunnerStageTraceBundle) -> None:
                 "runtime_task_id": str(getattr(bundle.params, "task_id", "") or ""),
                 "tool_rounds": int(bundle.tool_rounds or 0),
                 **bundle.payload,
+                **_detail_trace_payload(bundle.agent.subagents, task, bundle),
             },
         )
     )
+
+
+# LLM: _detail_trace_payload adds opt-in level 4 previews and level 5 detail refs to stage events.
+# 函数用途: 高等级真实 E2E 调试时记录模型/工具交互内容，默认等级不会写正文。
+def _detail_trace_payload(manager: Any, task: Any, bundle: RunnerStageTraceBundle) -> dict[str, Any]:
+    if not bundle.detail_payload:
+        return {}
+    from ..subagents.debug_trace import (
+        SubAgentDebugDetailRequest,
+        configured_subagent_debug_trace_level,
+        preview_debug_trace_text,
+        write_subagent_debug_detail,
+    )
+
+    level = configured_subagent_debug_trace_level(manager)
+    if level < 4:
+        return {}
+    payload: dict[str, Any] = {
+        "task_goal_preview": preview_debug_trace_text(str(getattr(task, "goal", "") or "")),
+    }
+    for label, value in bundle.detail_payload.items():
+        payload[f"{label}_preview"] = preview_debug_trace_text(value)
+        detail_ref = write_subagent_debug_detail(
+            SubAgentDebugDetailRequest(
+                manager,
+                task,
+                event_type=bundle.event_type,
+                label=label,
+                value=value,
+            )
+        )
+        if detail_ref:
+            payload[f"{label}_detail_ref"] = detail_ref
+    return payload
 
 
 # LLM: _tool_name extracts a stable tool identifier from the model payload without trusting shape.

@@ -11,6 +11,7 @@ from __future__ import annotations
 排障。默认 0 完全关闭，所以正常使用不会多写调试文件。
 """
 
+import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,17 @@ class SubAgentDebugTraceRequest:
     event_type: str
     task: Any = None
     payload: dict[str, Any] = field(default_factory=dict)
+
+
+# LLM: SubAgentDebugDetailRequest bundles opt-in full-detail trace writes behind one parameter.
+# 类用途: 保存等级 5 详情日志写入所需的 manager、task、事件名、标签和值，避免调试接口参数继续增长。
+@dataclass(frozen=True)
+class SubAgentDebugDetailRequest:
+    manager: Any
+    task: Any
+    event_type: str
+    label: str
+    value: Any
 
 
 # LLM: SubAgentRunnerTraceRequest keeps runner trace inputs bundled to avoid another broad service-style signature.
@@ -72,6 +84,34 @@ def write_subagent_debug_trace(request: SubAgentDebugTraceRequest) -> Path | Non
     trace_file = Path(request.manager.workspace) / "debug_traces" / "subagent_trace.jsonl"
     append_jsonl(trace_file, record, sort_keys=True)
     return trace_file
+
+
+# LLM: configured_subagent_debug_trace_level exposes the normalized level for trace detail writers.
+# 函数用途: 给 runner stage trace 判断是否写短预览或完整 detail 文件；坏值按 0 处理。
+def configured_subagent_debug_trace_level(manager: Any) -> int:
+    return _configured_trace_level(manager)
+
+
+# LLM: preview_debug_trace_text reuses the trace truncation policy outside this module.
+# 函数用途: 生成可 tail 的短预览，避免高等级调试把大 prompt 直接塞进 JSONL。
+def preview_debug_trace_text(value: Any) -> str:
+    return _preview(_detail_text(value))
+
+
+# LLM: write_subagent_debug_detail stores full opt-in test logs outside the main JSONL trace.
+# 函数用途: 等级 5 时把完整 prompt、response、工具参数或工具输出写到内部 detail 文件，并返回路径引用。
+def write_subagent_debug_detail(request: SubAgentDebugDetailRequest) -> str:
+    if configured_subagent_debug_trace_level(request.manager) < 5:
+        return ""
+    run_id = str(getattr(request.task, "id", "") or "unknown")
+    detail_dir = Path(request.manager.workspace) / "debug_traces" / "details" / _safe_name(run_id)
+    detail_dir.mkdir(parents=True, exist_ok=True)
+    detail_file = (
+        detail_dir
+        / f"{int(time.time() * 1000)}-{_safe_name(request.event_type)}-{_safe_name(request.label)}.txt"
+    )
+    detail_file.write_text(_detail_text(request.value), encoding="utf-8")
+    return str(detail_file)
 
 
 # LLM: trace_task_created keeps creation observability near the lifecycle event without exposing prompt bodies.
@@ -287,3 +327,21 @@ def _preview(value: str) -> str:
     if len(compact) <= _PREVIEW_LIMIT:
         return compact
     return compact[: _PREVIEW_LIMIT - 3] + "..."
+
+
+# LLM: _detail_text serializes debug detail values for level-5 files only.
+# 函数用途: 把 prompt/response/工具参数转成可读文本，复杂对象用 JSON，字符串保持原文。
+def _detail_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+    except TypeError:
+        return str(value)
+
+
+# LLM: _safe_name keeps trace detail filenames portable and independent from user/task text.
+# 函数用途: 清理 run id、事件名和 label，只保留适合文件名的短字符。
+def _safe_name(value: str) -> str:
+    cleaned = "".join(char if char.isalnum() or char in {"-", "_"} else "-" for char in str(value))
+    return cleaned.strip("-")[:80] or "item"

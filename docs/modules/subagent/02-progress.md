@@ -262,6 +262,7 @@
 - 本轮 role-template continue-dispatch 真实复测：CLI 显式 root/coordinator seed 现在只保留产品路径上下文，不再继承最终产物写入根；真实 MiniMax root 自己创建 researcher/worker/writer/bug_finder/tester/acceptor 六类 direct child，并根据 `needs_more_dispatch` / `unfinished_run_ids` 发起第二波 dispatch。tester/bug_finder/acceptor 成功发现 worker 产物的真实 import bug；剩余 gap 是 root 第二波后仍超时，下一轮要做 partial-success finalization / rescue follow-up 闭环。
 - 本轮 parent acceptance 安全 pytest 归一化第一片：父级 dry-run 预检和手动 auto-execution 都会先复用 `prepare_test_items()`，把 workspace 内安全的 `cd <dir> && python3 -m pytest ...` 转成 `working_dir + 纯命令`，不再误判为人审；仍不放开 shell，也不允许越界目录。
 - 本轮 Context Bundle 多层传递和异常恢复第一片：每个 run 的 `context_bundle.json` 新增 `lineage`，记录 root、parent、depth、自己的 bundle ref 和直接父级 bundle ref；四层 root/child/grandchild/great-grandchild focused 测试确认子孙节点能按 refs 追到父级交接包。`takeover_readiness.json` 和 recovery-tree 节点也会暴露 context bundle refs，失败、阻塞、超时和父超时残留 child 的接管/恢复流程能先读交接包再看 checkpoint/artifact manifest，仍不读取 artifact 正文、不自动接管。
+- 本轮真实小烟测观察补强：真实 root->child 链路暴露 child 调用 `schedule_child_subagents` 失败时现有 level 3 trace 只能看到 `ok=false`，看不到模型传参和工具错误正文；新增 `subagent_debug_trace_level=4/5`，level 4 在 JSONL 写短预览，level 5 把完整 prompt、response、tool payload 和 tool output 写到内部 `debug_traces/details/`，只用于 E2E 排障，默认 0 不写。
 
 ## 未跑测试
 
