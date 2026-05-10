@@ -59,3 +59,28 @@ def test_hierarchy_schedule_blocks_duplicate_coordinator_domains(tmp_path):
     assert duplicate.blocked is True
     assert duplicate.reason == "duplicate_child_domain:checkout"
     assert manager.load(root.id).child_ids == first.created_run_ids
+
+
+# LLM: test_hierarchy_schedule_allows_generic_numbered_checker_siblings protects recovery trees.
+# 函数用途: `grand-1/grand-2` 这类泛化编号 checker 不是同业务域重复，不能被同域去重误挡。
+def test_hierarchy_schedule_allows_generic_numbered_checker_siblings(tmp_path):
+    manager = SubAgentManager(tmp_path)
+    root = manager.create_run(goal="root", thought="orchestrate", plan=["split"])
+    child = manager.create_run(
+        goal="child one", thought="work", plan=["work"],
+        parent_id=root.id, root_id=root.id, depth=1,
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=child.id,
+            child_specs=[
+                HierarchyChildSpec(goal="grand one", role="checker", agent_name="grand-1"),
+                HierarchyChildSpec(goal="grand two", role="checker", agent_name="grand-2"),
+            ],
+            apply=True,
+        )
+    )
+
+    assert result.blocked is False
+    assert len(result.created_run_ids) == 2

@@ -982,7 +982,7 @@ docs/
 - `agent_py_agent/agent/subagents/execution_executor.py`: `content_check` 支持 `content_pattern` 包含匹配，也支持 `content_equals` / `expected_content` + `match_mode=exact`，用于严格验证文件内容没有额外字符。
 - `agent_py_agent/agent/agent_core/_tool_loop_service.py`: 主代理和 subagent 共用的工具循环；到达 `max_tool_rounds` 后给模型一次收口机会，如果模型仍吐工具调用，返回确定性停止说明而不是把新 `[TOOL_CALL]` 当最终回答。
 - `agent_py_agent/agent/subagents/services/hierarchy_role_identity.py`: 从 scheduler 拆出的角色 identity 兜底策略，根据 `agent_name` / `goal` 恢复模型漏填的 researcher/tester/acceptor/bug_finder/writer/worker 等角色。
-- `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 从 scheduler 中拆出的层级 scope guard，集中处理空计划、深度/数量限制、禁止 sibling 领域、同批混建 coordinator/leaf、domain mismatch 和同父级 coordinator 领域去重。
+- `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 从 scheduler 中拆出的层级 scope guard，集中处理空计划、深度/数量限制、禁止 sibling 领域、同批混建 coordinator/leaf、domain mismatch 和同父级 coordinator 领域去重；去重会过滤 generated id 片段和泛化编号词，避免误挡 recovery checker siblings。
 - `agent_py_agent/agent/subagents/services/hierarchy_write_policy.py`: 层级写入根策略，区分 task-local 报告写入和最终产品写入；coordinator/researcher/tester/bug_finder/acceptor 可保留产品路径上下文但不继承产品写入根。
 - `agent_py_agent/agent/subagents/services/hierarchy_recovery.py`: 多层恢复包服务，从 root run 只读扫描子树，返回需要恢复的后代、当前/父级 context bundle refs、接管入口和 checkpoint refs；现在也可按 capability 阈值标记 stale `RUNNING` 后代，不读取 artifact 正文。
 - `agent_py_agent/agent/subagents/services/board.py`: due-check 和 plan-actions 支持 root_id 作用域，真实 E2E 多棵任务树共用 workspace 时可以只看当前 root 并只生成当前树动作。
@@ -998,7 +998,8 @@ docs/
 - `agent_py_agent/agent/agent_core/coordinator_seed_tools.py`: 显式 root/coordinator seed 的工具过滤策略；模型额外传入 shell/web 工具时收敛回内置 coordinator 工具包。
 - `agent_py_agent/agent/agent_core/spawn_role_seed.py`: CLI 显式 role seed 入口；root/coordinator seed 保留 goal 里的产品路径给下层派工，但自身 allowed write roots 只保留 task-local 协调目录。
 - `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context dispatch 的直接 child 进度摘要；含状态计数、unfinished ids、`needs_more_dispatch` 和带 `run_ids` 的建议继续调度工具调用。
-- `agent_py_agent/agent/agent_core/dispatch_runner_batches.py`: runner 候选收集和执行批处理；支持 `include_run_ids` 精确过滤并按父节点给定顺序推进直接孩子。
+- `agent_py_agent/agent/agent_core/dispatch_runner_selection.py`: runner 候选范围和显式 `include_run_ids` 预检；错 id 会返回 `runner_selection/invalid_run_ids`、可用 direct child ids 和保守纠正提示。
+- `agent_py_agent/agent/agent_core/dispatch_runner_batches.py`: runner 候选收集和执行批处理；调用 selection helper 精确推进父节点给定的直接孩子。
 - `agent_py_agent/agent/tooling/json_repair.py`: 工具调用 JSON 的窄口修复 helper；目前只修有效对象后多余右花括号，避免模型因 parse error 把完整任务 goal 越改越短。
 - `agent_py_agent/agent/subagents/role_contracts.py`: 新增 reporter/checker 角色契约和 analyst/reviewer 兼容映射；同时把模板角色接入默认工具、输出契约和 parent final gate。
 - `agent_py_agent/agent/subagents/automation_gate.py`: 新增半自动/自动执行门，默认只放行 refs-only 查询动作，跑工具或改状态动作继续需要人工确认。

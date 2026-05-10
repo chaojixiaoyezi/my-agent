@@ -1974,3 +1974,14 @@ def example(...):
 - 单个 run_id dispatch 仍保留专属 `runner_instruction`，用于父节点对某一个孩子补充上下文。
 - 工具说明和 coordinator prompt 已同步：多个孩子一起跑时不要写子任务专属 runner_instruction；需要专属补充就拆成单 run_id dispatch。
 - 下一步：R7 复测身份不串线，再补 producer/quality 阶段依赖和完整购物站静态验收。
+
+## 2026-05-11 Stage7 shopping E2E R7 scoped run-id guard
+
+状态：已落地，待 R8 复测
+
+摘要：
+- R7 真实测试确认多 runner 指令串线已修正；auth 分支完成，catalog 分支开始产出，cart 分支暴露 child run_id 抄错后空转的问题。
+- `dispatch_runner_batches.py` 现在会在 runner 候选执行前预检显式 `include_run_ids`。缺失、越界或不属于当前 parent/root scope 的 id 会生成 `runner_selection/invalid_run_ids` 阻断记录。
+- 阻断记录会列出 `invalid_run_ids`、`valid_scope_run_ids`，并在错误 id 和唯一可见 child 共享短后缀时输出 `possible_corrections`。系统不自动纠正，避免隐式跑错任务。
+- 同父级重复领域去重继续保留 checkout/quality 这类真实重复保护，但现在过滤 generated id 片段和泛化编号词，避免误挡 `grand-1` / `grand-2` 这类恢复树 checker sibling。
+- 下一步：R8 复测 coordinator 是否能根据阻断记录重试正确 child id，再继续做 producer/quality 阶段依赖和静态购物流程验收。
