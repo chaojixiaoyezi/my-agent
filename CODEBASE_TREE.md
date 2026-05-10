@@ -587,7 +587,7 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - `review_patches()` 会检查 runner 输出的 patch 记录，只允许已应用且状态合法的 patch 进入审核通过。
 - `write_patch_review_report()` 会写出 `subagent_patch_review_report.json`、`SUBAGENT_PATCH_REVIEW.md` 和单任务 `PATCH_REVIEW.md`。
 - `python3 -m agent_py_agent subagents-patches` 默认 dry-run；显式 `--apply` 才会写回 patch `review_status` 和审计日志。
-- `SimpleAgent.dispatch_subagents()` 会执行一轮父代理调度：due-check、action apply、capability route、runner、patch review、acceptance。
+- `SimpleAgent.dispatch_subagents()` 会执行一轮父代理调度：due-check、action apply、capability route、runner、patch review、acceptance；多个 runner 同批执行时会忽略共享 `runner_instruction` 并记录原因，避免子任务专属提示串线。
 - `SimpleAgent.watch_subagents()` 会用运行锁持续执行 dispatch，并写 heartbeat / watch log。
 - `SimpleAgent.run_parent_planner()` 会在 gate 发现待处理事项时触发完整父代理 LLM turn，并阻断空心 `HEARTBEAT_OK`。
 - `write_dispatch_report()` 会写出 `subagent_dispatch_report.json` 和 `SUBAGENT_DISPATCH.md`，apply 时追加调度审计日志；当 acceptance 记录生成 parent auto-policy dry-run 时，报告只展示 policy ref 和摘要，不执行 policy 动作。若本轮显式执行了 parent tests，dispatch 会先刷新 acceptance dry-run 展示和 aggregate acceptance report，避免报告继续显示测试前旧结论。

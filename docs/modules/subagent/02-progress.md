@@ -371,3 +371,9 @@
 - 已修正：同一父节点的 coordinator/checker/tester/reviewer 类 child 会按领域词去重，避免重复 checkout/quality 分支继续膨胀。
 - 已修正：artifact manifest 现在把 `allowed_write_roots` 也纳入安全元数据解析边界；被授权的业务产物会显示 `resolved`，未授权外部路径仍然 blocked。
 - 下一步：用干净 R6 复测 root -> coordinator -> leaf 链路，重点验证 catalog worker 不再被 URL 拦住、重复分支被挡住，并继续补 producer/quality 阶段顺序。
+
+## 2026-05-11 Stage7 shopping E2E R6 multi-run instruction guard
+- 中文说明：R6 真实测试证明同域 coordinator 去重已生效，但 root 同轮调度 auth/catalog/cart 时，把 auth 专属 `runner_instruction` 广播给了三个孩子，导致 cart 分支也创建 auth leaf。
+- 已修正：当同一次 dispatch 选中多个 pending runner 且带共享 `runner_instruction` 时，调度器会清空该共享指令并记录 `ignore_multi_runner_instruction`；单 run_id dispatch 仍保留专属指令。
+- 已同步：`dispatch_subagents` 工具说明和 coordinator runner prompt 明确 task-specific instruction 只能给单个 run_id；多个孩子需要分别 dispatch，或把通用要求写进 child goal/context bundle。
+- 下一步：用干净 R7 复测 root -> coordinator -> leaf，确认身份不再串线，并继续做 producer/quality 阶段依赖和静态购物流程验收。

@@ -5,11 +5,13 @@ import threading
 import time
 from pathlib import Path
 
+from agent_py_agent.agent.agent_core.dispatch_params import DispatchParams
 from agent_py_agent.agent.backend import BaseBackend, ModelResponse
 from agent_py_agent.agent.capabilities import CapabilityRouter
 from agent_py_agent.agent.capability_config import CapabilityConfig
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.subagent import RecordRunnerResultParams
 
 
 def _accepted_result(summary: str) -> ModelResponse:
@@ -104,6 +106,101 @@ def test_dispatch_parallel_runner_pool_respects_start_rate(monkeypatch):
         assert len([item for item in report.records if item.step == "runner"]) == 2
         assert len(done) == 2
         assert len(planning) == 1
+
+
+def test_dispatch_parallel_runner_pool_does_not_broadcast_specific_instruction(monkeypatch, tmp_path):
+    captured: list[tuple[str, str]] = []
+    cfg = AgentConfig(
+        model_backend="worker-pool-test",
+        subagent_workspace="subs",
+        runner_concurrency="2",
+        runner_start_rate="2",
+        runner_timeout_seconds="3.0",
+    )
+    monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: CountingAcceptedBackend())
+    agent = SimpleAgent(cfg, tmp_path)
+    tasks = [
+        agent.subagents.create_run(goal="auth coordinator task", thought="等待 worker。", plan=["执行"]),
+        agent.subagents.create_run(goal="catalog coordinator task", thought="等待 worker。", plan=["执行"]),
+    ]
+
+    def fake_worker(params):
+        captured.append((params.run_id, params.instruction))
+        return agent.subagents.record_runner_result(
+            RecordRunnerResultParams(
+                run_id=params.run_id,
+                dry_run=False,
+                ok=True,
+                message="done",
+                status="DONE",
+                verification_status="NEEDS_ACCEPTANCE",
+            )
+        )
+
+    monkeypatch.setattr("agent_py_agent.agent.agent_core.runner_dispatch._run_subagent_worker", fake_worker)
+
+    router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+    report = agent.dispatch_subagents(
+        router,
+        CapabilityConfig(),
+        params=None,
+        apply=True,
+        execute_runners=True,
+        max_runners=2,
+        probe=False,
+        reviewer="worker-pool-test",
+        runner_instruction="你是 auth-coordinator，只能写 auth 页面。",
+    )
+
+    assert {run_id for run_id, _ in captured} == {task.id for task in tasks}
+    assert [instruction for _, instruction in captured] == ["", ""]
+    assert any(record.action == "ignore_multi_runner_instruction" for record in report.records)
+
+
+def test_dispatch_single_runner_keeps_specific_instruction(monkeypatch, tmp_path):
+    captured: list[str] = []
+    cfg = AgentConfig(
+        model_backend="worker-pool-test",
+        subagent_workspace="subs",
+        runner_concurrency="2",
+        runner_start_rate="2",
+        runner_timeout_seconds="3.0",
+    )
+    monkeypatch.setattr("agent_py_agent.agent.core.get_backend", lambda _name, _config: CountingAcceptedBackend())
+    agent = SimpleAgent(cfg, tmp_path)
+    task = agent.subagents.create_run(goal="auth coordinator task", thought="等待 worker。", plan=["执行"])
+
+    def fake_worker(params):
+        captured.append(params.instruction)
+        return agent.subagents.record_runner_result(
+            RecordRunnerResultParams(
+                run_id=params.run_id,
+                dry_run=False,
+                ok=True,
+                message="done",
+                status="DONE",
+                verification_status="NEEDS_ACCEPTANCE",
+            )
+        )
+
+    monkeypatch.setattr("agent_py_agent.agent.agent_core.runner_dispatch._run_subagent_worker", fake_worker)
+
+    router = CapabilityRouter(config=CapabilityConfig(), tool_specs=agent.tools.specs())
+    agent.dispatch_subagents(
+        router,
+        CapabilityConfig(),
+        params=DispatchParams(
+            apply=True,
+            execute_runners=True,
+            include_run_ids=[task.id],
+            max_runners=1,
+            probe=False,
+            reviewer="worker-pool-test",
+            runner_instruction="你是 auth-coordinator，只能写 auth 页面。",
+        ),
+    )
+
+    assert captured == ["你是 auth-coordinator，只能写 auth 页面。"]
 
 
 def test_dispatch_parallel_runner_pool_timeout_does_not_block_other_workers(monkeypatch, tmp_path):

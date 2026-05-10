@@ -120,7 +120,8 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         lines.append("- 创建 child/leaf 时必须原样传递父级指定的文件名、目录和验收条件，不要把 solution.py 改成别的模块名。")
         lines.append("- 同一次 schedule_child_subagents 不要混建 coordinator 和 leaf_worker；如返回 mixed_coordinator_leaf_children，先只创建下一层 coordinator。")
         lines.append("- 如果 schedule_child_subagents 返回 domain_mismatch 或 forbidden_child_scope，必须修正 child 领域后重试，不能宣称完成。")
-        lines.append("- 创建 leaf 后使用 dispatch_subagents 推进直接 child，并汇总 leaf 的产物 refs。")
+        lines.append("- 创建 leaf 后使用 dispatch_subagents(apply=true, execute_runners=true) 推进直接 child，并汇总 leaf 的产物 refs。")
+        lines.append("- 多个 child 同轮 dispatch 时不要写子任务专属 runner_instruction；需要专属补充就按单个 run_id 分多次 dispatch。")
         lines.append("- dispatch_subagents 返回 child test_failed 或 followup_action=plan_rescue 时，不要宣称完成；先汇报失败 refs 或安排修复。")
     return lines
 
