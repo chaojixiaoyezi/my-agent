@@ -439,3 +439,5 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `capability_scope.py` 是父级路由的 scope 投影层：从 request 提取 request snapshot、legacy constraints、command allowlist、gap attempted tools 和 escalation chain。
 - `manager_capabilities.py` 只负责把路由命中转成 `RecordCapabilityGrantParams`，不直接解释 shell 命令；`capability_route_service.py` 只负责 gap/dry-run/apply report 的 refs-only 记录。
 - `CapabilityRouteRecord.request_scope` / `grant_scope` 只用于审计和展示，不触发执行；后续 shell gateway 必须重新检查 grant、cwd、路径、网络和输出预算。
+- `shell_gateway.py` 是受控 shell 的策略入口。当前只提供 `ShellGatewayRequest`、`ShellGatewayDecision` 和 `plan_shell_command()` dry-run；后续 execute v1 必须复用这个策略层，不得绕过危险命令、cwd、网络和输出预算检查。
+- shell gateway 的 dry-run `allowed=True` 只代表“如果进入执行层，可以尝试执行”；它不表示已执行，也不允许子代理获得裸 shell。
