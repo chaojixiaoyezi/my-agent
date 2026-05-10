@@ -288,7 +288,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - 执行工具调用。
 - 支持 `allowed_tools` 白名单，给 subagent runner 限制可见和可调用工具。
 - `AgentConfig.subagent_allowed_tools=[]` 表示子代理工具由角色模板、任务目标和调度器自动判断；非空列表才作为全局受限白名单。`subagent_role_template_dirs=[]` 默认使用工作区 `.agent/subagents/roles` 作为用户外置角色模板目录；角色模板摘要会进入工具规格和 coordinator prompt，帮助模型按角色派工。
-- `spawn-subagents --role coordinator --agent-name <name>` 是层级 E2E 的 root seed 入口：外层只创建主节点，主节点再创建子代理，子代理再创建孙代理，孙代理再创建孙孙代理；coordinator seed 默认只有调度、看板和只读工具，没有写文件工具。
+- `spawn-subagents --role coordinator --agent-name <name>` 是层级 E2E 的 root seed 入口：外层只创建主节点，主节点再创建子代理，子代理再创建孙代理，孙代理再创建孙孙代理；coordinator seed 默认有调度、看板、读取和 task-local 报告写入工具，但模型额外传入的 shell/web 工具会被过滤，最终业务产物仍由 worker/writer/leaf_worker 写入。
 - 解析模型输出里的工具调用块。
   标准格式是 `[TOOL_CALL]...JSON...[/TOOL_CALL]`，同时兼容 Qwen/OpenClaw 常见的 XML-ish `<tool_call><function=...><parameter=...>` 方言。
   如果 XML-ish 工具调用只有半截，解析器会返回 `__parse_error__`，让主循环继续可恢复，而不是直接崩掉。
@@ -974,6 +974,7 @@ docs/
 - `agent_py_agent/agent/subagents/parent_acceptance_rescue_followup.py`: 新增已失败/阻塞任务的 rescue follow-up helper，让无 `test_execution.json` 的 runner 失败也能进入受控接管路径。
 - `agent_py_agent/agent/subagents/services/hierarchy_scheduler.py`: 新增层级调度器 v1，使用 `HierarchyScheduleRequest` / `HierarchyChildSpec` 显式预览或创建 child/grandchild run，并统一限制深度和 fan-out。
 - `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 从 scheduler 中拆出的层级 scope guard，集中处理空计划、深度/数量限制、禁止 sibling 领域、同批混建 coordinator/leaf 和 domain mismatch。
+- `agent_py_agent/agent/subagents/services/hierarchy_write_policy.py`: 层级写入根策略，区分 task-local 报告写入和最终产品写入；coordinator/researcher/tester/bug_finder/acceptor 可保留产品路径上下文但不继承产品写入根。
 - `agent_py_agent/agent/subagents/services/hierarchy_recovery.py`: 新增多层恢复包服务，从 root run 只读扫描子树，返回需要恢复的后代、接管入口和 checkpoint refs；现在也可按 capability 阈值标记 stale `RUNNING` 后代，不读取 artifact 正文。
 - `agent_py_agent/agent/subagents/services/board.py`: due-check 和 plan-actions 支持 root_id 作用域，真实 E2E 多棵任务树共用 workspace 时可以只看当前 root 并只生成当前树动作。
 - `agent_py_agent/agent/subagents/services/board_due_models.py`: due-check 共享参数包和 issue 构造 helper，避免巡检谓词文件继续膨胀。
@@ -984,6 +985,7 @@ docs/
 - `agent_py_agent/agent/subagents/manager_hierarchy.py`: 新增 `SubAgentManager.schedule_child_runs(params=...)` facade，保持层级创建只走 bundle 入口和既有 `create_run` 持久化路径。
 - `agent_py_agent/agent/subagents/role_templates.py`: 加载内置和用户 JSON role templates，要求广义角色、中文说明和多目标适用，坏模板记录 issue；提供轻量 `role_template_index_text()` 给主代理常驻提示词，按需 `role_template_detail_text()` 给派工 coordinator 展开完整角色提示。
 - `agent_py_agent/agent/subagents/role_template_catalog/builtin/*.json`: 内置 `coordinator/worker/bug_finder/tester/acceptor/researcher/writer` 角色模板。
+- `agent_py_agent/agent/agent_core/coordinator_seed_tools.py`: 显式 root/coordinator seed 的工具过滤策略；模型额外传入 shell/web 工具时收敛回内置 coordinator 工具包。
 - `agent_py_agent/agent/subagents/role_contracts.py`: 新增 reporter/checker 角色契约和 analyst/reviewer 兼容映射；同时把模板角色接入默认工具、输出契约和 parent final gate。
 - `agent_py_agent/agent/subagents/automation_gate.py`: 新增半自动/自动执行门，默认只放行 refs-only 查询动作，跑工具或改状态动作继续需要人工确认。
 - `agent_py_agent/agent/agent_core/dispatch_limiter.py`: 新增 runner 启动限流 bundle/helper，统一处理 start-rate 和可选 role budgets，供 dispatch runner batch 调用。

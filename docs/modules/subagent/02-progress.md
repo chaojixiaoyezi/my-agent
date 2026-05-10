@@ -252,6 +252,7 @@
 - 本轮 root -> child -> grandchild -> leaf 真实 4 层 guard smoke 已跑通：外层测试控制器只启动 root，root 创建 child coordinator，child 创建 grandchild coordinator，grandchild 创建 leaf，leaf 写出 `proof.txt=hierarchy4-guard-ok`，最终 4 个节点全部 `DONE / VERIFIED`。
 - 本轮真实 4 层 E2E 修复三类收口问题：runner 只有 artifacts 但漏写 `evidence_packets` 时会自动补 refs-only artifact evidence packet；空 `test_execution.json` 且没有可执行 tests 但有 artifact/evidence refs 时降级为 `inspect_only`，不再误判 rescue；同一次 `schedule_child_subagents` 若混建 coordinator 和 leaf 会返回 `mixed_coordinator_leaf_children`，避免模型把层级职责拍平。
 - 本轮 prompt template 懒加载第一片已落地：角色模板现在分 `role_template_index_text()` 和 `role_template_detail_text()`。主代理常驻工具说明只注入轻量模板索引（id、中文名、能力标签、模板位置），不展开完整系统提示片段；普通 runner 只加载“当前角色”的模板详情，coordinator runner 真正派工时才加载模板全集详情（适用场景、默认工具、输出合同、中文系统提示）。后续真实 E2E 仍最多先测到主/子/孙/孙孙 4 层，但代码不写死 4 层。
+- 本轮 role-template report-write boundary 真实复测：外层只启动 main/root，root 真实创建 researcher、worker、writer、bug_finder、tester、acceptor 六类 direct children；复测暴露主模型最终自然语言会编错 child id/path，后续 reporting 必须以 structured refs 为准。已修复 explicit root/coordinator seed 误收 `run_command`/`fetch_url` 的问题，并把 report-only 角色的报告写入能力和最终产物写入根分离：coordinator/researcher/tester/bug_finder/acceptor 只写 task-local 报告，worker/writer/leaf_worker 才继承产品产物目录。
 
 ## 未跑测试
 

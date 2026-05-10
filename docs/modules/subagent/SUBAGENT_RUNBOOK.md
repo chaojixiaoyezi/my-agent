@@ -538,6 +538,8 @@ python3 -m agent_py_agent spawn-subagents "主节点任务说明" --count 1 --ro
 
 这条命令只负责创建一个能调度下层的 root/coordinator。后续必须由 root runner 自己调用 `schedule_child_subagents` 创建子代理；子代理再创建孙代理；孙代理再创建孙孙代理。外层测试控制器不要直接替下层创建任务。
 
+root/coordinator seed 会拿到调度、看板、读取和 task-local 报告写入工具；如果模型在创建 root 时额外塞入 `run_command`、`fetch_url` 这类 shell/web 工具，系统会收敛回内置 coordinator 工具包。中文理解：coordinator 可以写计划、分工、证据、协调报告，但最终业务代码、页面、文档产物仍交给 worker/writer/leaf_worker。
+
 层级创建还有一个硬边界：同一次 `schedule_child_subagents` 不能同时创建 coordinator/lead 和 leaf/leaf_worker。系统会返回 `mixed_coordinator_leaf_children`，要求父节点先只创建下一层 coordinator，再让下一层 coordinator 自己创建它的 leaf。中文理解：不能让上一层一口气把领导和最底层工人都造出来，否则任务树会被拍平，后续接管、验收和责任归属会乱。
 
 输出里会看到 run id，例如：

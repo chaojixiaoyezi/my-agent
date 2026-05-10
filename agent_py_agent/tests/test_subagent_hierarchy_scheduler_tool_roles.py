@@ -199,3 +199,5 @@ def test_hierarchy_schedule_preserves_report_write_tools_for_coordinators(tmp_pa
     assert "schedule_child_subagents" in coordinator.allowed_tools
     assert "dispatch_subagents" in coordinator.allowed_tools
     assert "write_file" in coordinator.allowed_tools
+    assert coordinator.allowed_write_roots == [coordinator.task_dir]
+    assert str(deliverables) not in coordinator.goal

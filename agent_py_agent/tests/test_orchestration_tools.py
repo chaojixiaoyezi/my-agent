@@ -225,7 +225,6 @@ class TestCreateSubagentsToolExecute:
         assert result.ok is True
         assert params.workflow_mode == "off"
 
-
 class TestSubagentBoardToolExecute:
     """测试 SubagentBoardTool.execute() 方法。"""
 

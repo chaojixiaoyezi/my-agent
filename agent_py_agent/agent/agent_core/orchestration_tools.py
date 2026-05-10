@@ -17,6 +17,7 @@ from ..capability_config import CapabilityConfig
 from ..subagents.models import SubAgentBoardOptions
 from ..subagents.services.base import CreateRunParams, _extract_write_dirs
 from ..tools import BaseTool, ToolExecutionResult
+from .coordinator_seed_tools import explicit_root_allowed_tools
 from .dispatch_params import DispatchParams
 from .hierarchy_tools import ScheduleChildSubagentsTool
 from .orchestration_dispatch_payload import dispatch_record_payload
@@ -104,6 +105,7 @@ def _create_run_params(
     role = str(raw_params.get("role") or "worker").strip()
     if is_explicit_root_role(role):
         workflow_mode = "off"
+        allowed_tools = explicit_root_allowed_tools(allowed_tools)
     extra_write_roots = _merged_extra_write_roots(raw_params, goal)
     return CreateRunParams(
         goal=goal,

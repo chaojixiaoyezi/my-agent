@@ -12,6 +12,11 @@ from ..models import SubAgentTask
 from .base import CreateRunParams
 from .hierarchy_context import inherited_hierarchy_thought, scheduled_child_goal
 from .hierarchy_scope_guards import schedule_block_reason
+from .hierarchy_write_policy import (
+    ScheduledWriteRootRequest,
+    inherited_extra_write_roots,
+    scheduled_child_extra_write_roots,
+)
 
 _DEFAULT_LEAF_CODING_TOOLS = [
     "list_files",
@@ -188,9 +193,18 @@ def _apply_result(
 # LLM: _create_child converts one schedule spec into the existing CreateRunParams bundle.
 # 函数用途: 复用现有 create_run 路径创建子任务，保证 work-order、runtime workspace 和控制面同步。
 def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) -> SubAgentTask:
-    extra_write_roots = spec.extra_write_roots or _inherited_extra_write_roots(parent)
-    goal = scheduled_child_goal(parent, spec)
-    role = _scheduled_child_role(parent, spec, extra_write_roots, goal=goal)
+    requested_write_roots = spec.extra_write_roots or inherited_extra_write_roots(parent)
+    role_probe_goal = scheduled_child_goal(parent, spec, write_roots=requested_write_roots)
+    role = _scheduled_child_role(parent, spec, requested_write_roots, goal=role_probe_goal)
+    extra_write_roots = scheduled_child_extra_write_roots(
+        ScheduledWriteRootRequest(
+            role=role,
+            spec_role=spec.role,
+            requested_roots=requested_write_roots,
+            leaf_write_intent=_should_infer_leaf_coding_tools(spec, requested_write_roots, goal=role_probe_goal),
+        )
+    )
+    goal = scheduled_child_goal(parent, spec, write_roots=extra_write_roots)
     return manager.create_run(
         params=CreateRunParams(
             goal=goal,
@@ -241,20 +255,8 @@ def _scheduled_child_role(
     return "coordinator"
 
 
-# LLM: _inherited_extra_write_roots forwards user-approved product roots without exposing parent task internals.
-# 函数用途: 从父节点 allowed_write_roots 中继承非父工单目录的写入根，保持共同产物目录可用。
-def _inherited_extra_write_roots(parent: SubAgentTask) -> list[str]:
-    parent_task_dir = str(parent.task_dir or "").rstrip("/")
-    roots: list[str] = []
-    for item in parent.allowed_write_roots:
-        text = str(item or "").rstrip("/")
-        if text and text != parent_task_dir and text not in roots:
-            roots.append(str(item))
-    return roots
-
-
-# LLM: _scheduled_child_tools prevents leaf write tasks from losing tool grants when the model omits allowed_tools.
-# 函数用途: 在父级已有授权产物目录且 child 明确要写文件时，给叶子任务补齐安全文件工具；coordinator 不自动拿写权限。
+# LLM: _scheduled_child_tools preserves report-write tools for leads and file tools for product-writing leaves.
+# 函数用途: coordinator 可写本地报告，leaf 写业务产物时补安全文件工具；产品写入根由 extra_write_roots 单独控制。
 def _scheduled_child_tools(
     parent: SubAgentTask,
     spec: HierarchyChildSpec,
@@ -332,7 +334,7 @@ def _planned_items(parent: SubAgentTask, request: HierarchyScheduleRequest) -> l
             role=_scheduled_child_role(
                 parent,
                 spec,
-                spec.extra_write_roots or _inherited_extra_write_roots(parent),
+                spec.extra_write_roots or inherited_extra_write_roots(parent),
                 goal=scheduled_child_goal(parent, spec),
             ),
             agent_name=spec.agent_name or spec.role or "worker",
