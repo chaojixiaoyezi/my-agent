@@ -74,11 +74,19 @@ def _schedule_request(request: ScheduleRequestBuildParams) -> HierarchyScheduleR
     return HierarchyScheduleRequest(
         parent_run_id=request.parent_run_id,
         child_specs=request.child_specs,
-        apply=_bool_param(request.raw_params.get("apply"), default=False),
+        apply=_schedule_apply_default(request.raw_params),
         requested_by=request.parent_run_id,
         max_children=_non_negative_int(request.raw_params.get("max_children"), default=0),
         max_depth=_schedule_max_depth(request.agent, request.parent_run_id, request.raw_params),
     )
+
+
+# LLM: _schedule_apply_default lets active runners materialize their own direct children by default.
+# 函数用途: runner 内 schedule_child_subagents 省略 apply 时默认创建；显式 false 仍可预览。
+def _schedule_apply_default(params: dict[str, object]) -> bool:
+    if "apply" in params:
+        return _bool_param(params.get("apply"), default=False)
+    return True
 
 
 # LLM: _schedule_payload_json renders service results without leaking large workspace content.

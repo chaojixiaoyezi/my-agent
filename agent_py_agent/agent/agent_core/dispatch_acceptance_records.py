@@ -11,6 +11,7 @@ from typing import Any
 
 from ..subagents.acceptance_review_service import AcceptanceReviewOptions
 from ..subagents.parent_acceptance_auto_execution import ParentAcceptanceAutoExecutionOptions
+from ..subagents.parent_acceptance_followup_control import ParentAcceptanceFollowUpControlOptions
 from ..subagents.rendering import render_acceptance_review_markdown
 from ..subagents.reports import AcceptanceReviewRecord, AcceptanceReviewReport
 from ..subagents.services.dispatch_params import DispatchRecordParams
@@ -38,6 +39,7 @@ def make_acceptance_records(params: AcceptanceRecordParams):
         refreshed = refresh_acceptance_after_parent_tests(
             DispatchAcceptanceRefreshRequest(agent, item, params, policy_summary)
         )
+        refreshed = _apply_acceptance_followup_if_ready(params, refreshed, policy_summary)
         refreshed_records.append(refreshed)
         records.append(agent.subagents.make_dispatch_record(
             params=_acceptance_dispatch_record_params(refreshed, policy_summary)
@@ -54,8 +56,11 @@ def _acceptance_report(params: AcceptanceRecordParams):
         reviewer=params.reviewer,
         note=params.note,
         limit=params.limit,
+        execute_tests=params.execute_acceptance_tests,
     )
     if params.apply and not params.execute_acceptance_tests:
+        return params.agent.subagents.write_acceptance_review_report(options=options)
+    if params.execute_acceptance_tests:
         return params.agent.subagents.write_acceptance_review_report(options=options)
     return params.agent.subagents.review_acceptances(options=options)
 
@@ -70,7 +75,7 @@ def _write_refreshed_report_if_needed(
         return
     report = AcceptanceReviewReport(
         generated_at=time.time(),
-        dry_run=True,
+        dry_run=all(record.dry_run for record in records),
         summary=_acceptance_report_summary(records),
         records=records,
     )
@@ -146,7 +151,100 @@ def _parent_acceptance_policy_summary(
     task = agent.subagents.load(run_id)
     policy = agent.subagents.plan_parent_acceptance_auto_policy(run_id)
     execution = agent.subagents.plan_parent_acceptance_auto_execution(run_id, options=options)
-    return _parent_acceptance_policy_payload(task, policy, execution)
+    payload = _parent_acceptance_policy_payload(task, policy, execution)
+    if options and options.execute_tests:
+        payload.update(_existing_test_followup_payload(task))
+    return payload
+
+
+# LLM: _apply_acceptance_followup_if_ready mutates only when runner-context dispatch requested apply.
+# 函数用途: 父节点 dispatch 已明确 apply 且 tests 通过时，执行受控 follow-up apply 并返回落盘后的验收记录。
+def _apply_acceptance_followup_if_ready(
+    params: AcceptanceRecordParams,
+    record: AcceptanceReviewRecord,
+    policy_summary: dict[str, object],
+) -> AcceptanceReviewRecord:
+    if not _should_apply_acceptance_followup(params, record, policy_summary):
+        return record
+    result = params.agent.subagents.apply_parent_acceptance_followup(
+        record.run_id,
+        options=ParentAcceptanceFollowUpControlOptions(
+            apply=True,
+            reviewer=params.reviewer,
+            note=params.note,
+        ),
+    )
+    policy_summary.update(_followup_control_summary(result))
+    return _stored_acceptance_record(params.agent, record.run_id) or record
+
+
+# LLM: _should_apply_acceptance_followup keeps top-level dispatch and failed tests non-mutating.
+# 函数用途: 只允许显式 auto_apply、测试已执行且 0 失败、follow-up 指向 apply_acceptance 的场景落状态。
+def _should_apply_acceptance_followup(
+    params: AcceptanceRecordParams,
+    record: AcceptanceReviewRecord,
+    policy_summary: dict[str, object],
+) -> bool:
+    return bool(
+        params.apply
+        and params.execute_acceptance_tests
+        and params.auto_apply_acceptance_followup
+        and record.ok
+        and policy_summary.get("parent_acceptance_auto_execution_executed") is True
+        and policy_summary.get("parent_acceptance_auto_execution_test_failed") == 0
+        and policy_summary.get("parent_acceptance_followup_status") == "ready_for_manual_apply"
+        and policy_summary.get("parent_acceptance_followup_action") == "apply_acceptance"
+    )
+
+
+# LLM: _followup_control_summary replaces ready-for-manual fields with the applied control outcome.
+# 函数用途: dispatch record 输出 follow-up 的最终控制结果，便于 coordinator 看到 child 已闭环。
+def _followup_control_summary(result: Any) -> dict[str, object]:
+    return {
+        "parent_acceptance_followup_status": str(getattr(result, "status", "") or ""),
+        "parent_acceptance_followup_action": str(getattr(result, "action", "") or ""),
+        "parent_acceptance_followup_command": str(getattr(result, "recommended_command", "") or ""),
+        "parent_acceptance_followup_reason": str(getattr(result, "message", "") or ""),
+    }
+
+
+# LLM: _stored_acceptance_record reloads the authoritative record written by the follow-up apply gate.
+# 函数用途: follow-up apply 后从 task-local acceptance_review.json 取回 after_status/applied 等最终字段。
+def _stored_acceptance_record(agent: Any, run_id: str) -> AcceptanceReviewRecord | None:
+    try:
+        task = agent.subagents.load(run_id)
+    except FileNotFoundError:
+        return None
+    path = Path(task.reports_dir) / "acceptance_review.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return AcceptanceReviewRecord(
+        id=str(payload.get("id") or ""),
+        run_id=str(payload.get("run_id") or run_id),
+        dry_run=bool(payload.get("dry_run", True)),
+        applied=bool(payload.get("applied", False)),
+        ok=bool(payload.get("ok", False)),
+        decision=str(payload.get("decision") or ""),
+        message=str(payload.get("message") or ""),
+        before_status=str(payload.get("before_status") or ""),
+        after_status=str(payload.get("after_status") or ""),
+        before_verification_status=str(payload.get("before_verification_status") or ""),
+        after_verification_status=str(payload.get("after_verification_status") or ""),
+        reviewer=str(payload.get("reviewer") or ""),
+        note=str(payload.get("note") or ""),
+        evidence_count=int(payload.get("evidence_count") or 0),
+        test_count=int(payload.get("test_count") or 0),
+        artifact_count=int(payload.get("artifact_count") or 0),
+        worker_claims=_string_list(payload.get("worker_claims")),
+        evidence_facts=_string_list(payload.get("evidence_facts")),
+        parent_conclusions=_string_list(payload.get("parent_conclusions")),
+        evidence_paths=_string_list(payload.get("evidence_paths")),
+        created_at=float(payload.get("created_at") or 0.0),
+    )
 
 
 # LLM: _parent_acceptance_policy_payload keeps the summary field list out of the orchestration function.
@@ -189,3 +287,50 @@ def _auto_execution_options(execute_tests: bool) -> ParentAcceptanceAutoExecutio
     if not execute_tests:
         return None
     return ParentAcceptanceAutoExecutionOptions(execute_tests=True)
+
+
+# LLM: _existing_test_followup_payload surfaces tests run by the explicit acceptance review path.
+# 函数用途: 当 dispatch 已通过 execute_tests 写出 test_execution/follow-up 时，记录中仍显示 tests_executed。
+def _existing_test_followup_payload(task: Any) -> dict[str, object]:
+    test_ref = Path(task.reports_dir) / "test_execution.json"
+    followup_ref = Path(task.reports_dir) / "parent_acceptance_auto_followup.json"
+    if not test_ref.exists():
+        return {}
+    test_payload = json.loads(test_ref.read_text(encoding="utf-8"))
+    followup = _read_followup_payload(followup_ref)
+    return {
+        "parent_acceptance_auto_execution_status": "tests_executed",
+        "parent_acceptance_auto_execution_allowed": True,
+        "parent_acceptance_auto_execution_executed": True,
+        "parent_acceptance_auto_execution_guard_status": "manual_confirmed",
+        "parent_acceptance_auto_execution_blocked_by": [],
+        "parent_acceptance_auto_execution_test_ref": str(test_ref),
+        "parent_acceptance_auto_execution_test_total": int(test_payload.get("total_tests") or 0),
+        "parent_acceptance_auto_execution_test_failed": int(test_payload.get("failed") or 0),
+        "parent_acceptance_followup_ref": str(followup_ref) if followup_ref.exists() else "",
+        "parent_acceptance_followup_status": str(followup.get("status") or ""),
+        "parent_acceptance_followup_action": str(followup.get("action") or ""),
+        "parent_acceptance_followup_command": str(followup.get("command") or ""),
+        "parent_acceptance_followup_reason": str(followup.get("reason") or ""),
+    }
+
+
+# LLM: _read_followup_payload tolerates missing or malformed follow-up audit files.
+# 函数用途: 读取 parent_acceptance_auto_followup.json 的 followup 子结构；失败返回空字典。
+def _read_followup_payload(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    followup = payload.get("followup") if isinstance(payload, dict) else {}
+    return followup if isinstance(followup, dict) else {}
+
+
+# LLM: _string_list normalizes optional JSON arrays from stored audit files.
+# 函数用途: 把 acceptance_review.json 中可能缺失或非字符串的数组字段安全转回字符串列表。
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item is not None]

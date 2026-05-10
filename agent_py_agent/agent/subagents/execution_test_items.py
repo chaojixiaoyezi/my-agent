@@ -63,6 +63,7 @@ def _prepared_test_item(
     context: TestItemPreparationContext,
 ) -> dict[str, Any]:
     item = dict(test)
+    _normalize_validation_method(item)
     _normalize_leading_cd_command(item, context.workspace_root)
     if not _needs_working_dir(item):
         return item
@@ -77,17 +78,24 @@ def _prepared_test_item(
     return item
 
 
+# LLM: _normalize_validation_method repairs common runner aliases before bounded execution.
+# 函数用途: 把 pytest/unittest 这类模型常写的验证方式转成 command，交给 TestExecutor 的 allowlist 校验。
+def _normalize_validation_method(item: dict[str, Any]) -> None:
+    method = str(item.get("validation_method") or "command").strip().lower()
+    if method in {"pytest", "unittest"} and str(item.get("command") or "").strip():
+        item["validation_method"] = "command"
+
+
 # LLM: _normalize_leading_cd_command removes a safe shell cwd wrapper without allowing shell execution.
 # 函数用途: 把 `cd <workspace内目录> && python...` 转成 working_dir 加纯命令，避免为了常见模型输出放开 shell。
 def _normalize_leading_cd_command(item: dict[str, Any], workspace_root: Path) -> None:
-    if str(item.get("working_dir") or item.get("cwd") or "").strip():
-        return
     parsed = _safe_leading_cd_command(str(item.get("command") or ""), workspace_root)
     if parsed is None:
         return
     working_dir, command = parsed
     item["command"] = command
-    item["working_dir"] = _relative_or_absolute(working_dir, workspace_root)
+    if not str(item.get("working_dir") or item.get("cwd") or "").strip():
+        item["working_dir"] = _relative_or_absolute(working_dir, workspace_root)
 
 
 # LLM: _safe_leading_cd_command accepts only one leading cd chain and keeps the actual command for executor validation.

@@ -238,10 +238,13 @@
 - 本轮层级路径继承修复：当模型创建下一层时只给出短 goal，scheduler 会把父级目标/边界追加进 child goal，并用补全后的 goal 推断叶子写文件工具，避免产物目录只留在 thought 里、传到孙级后丢失。
 - 本轮父超时子任务残留恢复第一片：`due-check` 现在会在父节点 `TIMEOUT` 且仍有未完成 direct child 时报告 `parent_timeout_with_unfinished_children`，`plan-actions` 只生成 `recover_child_after_parent_timeout` refs-only 恢复提示和 `subagents-recovery-tree` 命令；相关 child 以 `unfinished_child:<child_id>:<status>` 结构化 ref 写入 rescue packet，recovery-tree 在 `--hide-healthy` 下也会展示这些残留 child，不自动接管、不执行代码。
 - 本轮调试追踪第三片：新增 `debug_trace_reports.py`，`subagent_debug_trace_level=3` 记录 due-check、action-plan、hierarchy recovery、dispatch 和 dispatch-watch 的 bounded 摘要；仍只写内部 JSONL，不展开任务正文、prompt/response、artifact 或 tool output。
+- 本轮 runner-context 验收收口修复：真实 MiniMax 复测暴露“父节点已经跑完孩子 tests，但孩子仍停在 `AWAITING_ACCEPTANCE`”的问题；现在 runner 内部 `dispatch_subagents(apply=True, execute_acceptance_tests=True)` 会在测试通过且 follow-up 判断可验收时受控 apply 直接孩子，顶层 CLI/API dispatch 仍默认人工 apply。Focused dispatch 回归 `4 passed`。
+- 本轮 coordinator/root child-acceptance 修复：真实模型会写 `auto_acceptance`，也可能让 root/coordinator 有 direct children 但 tests 为空；现在这两类都转成确定性的 `child_acceptance`，只按直接孩子是否 `DONE/VERIFIED` 判断，不相信模型自称完成。真实 case `main_node_coordinator_accept_retest_20260510_113000` 最终 5 个节点全部 `DONE/VERIFIED`。
+- 本轮真实路径/命令鲁棒性修复：`cd <workspace dir> && pytest ...` 即使已有 `working_dir` 也会被拆成安全工作目录加无 shell 命令；artifact 检查会把 task `allowed_write_roots` 纳入 roots，并对 allowed root 内的绝对路径 typo 做保守后缀恢复。对应 focused tests 和真实 leaf 独立 pytest 已通过。
 
 ## 未跑测试
 
-- 当前文档同步轮没有重新跑真实 API 冒烟。
+- 当前文档同步轮已经补跑真实 MiniMax 小树收口冒烟；尚未重跑完整 `1/4/16/48` 或购物网站级大型 E2E。
 - workflow apply 已有实现，但仍需要继续补更贴近真实 dispatch 的端到端回归，尤其是 worker 子工单依赖、验收阻断和失败回放。
 - 同步门目前只覆盖 `log-analysis` 和 `subagent` 两个模块；其它模块还需要先补四件套和规则映射。
 - parent/subagent 跨天恢复已有确定性 backend 场景和真实 API 多轮恢复记录；后续交付级变更仍应按风险补跑真实 API 冒烟。

@@ -31,7 +31,7 @@ _SUBAGENT_RESULT_TEMPLATE = (
     '    {"path": "产物路径", "kind": "file|report|log", "summary": "产物说明"}\n'
     "  ],\n"
     '  "tests": [\n'
-    '    {"name": "测试名称", "command": "运行命令", "ok": true, "summary": "测试结果摘要"}\n'
+    '    {"name": "测试名称", "validation_method": "command", "command": "python3 -m pytest -q", "working_dir": "运行目录", "ok": true, "summary": "测试结果摘要"}\n'
     "  ],\n"
     '  "patches": [\n'
     '    {"path": "改动文件", "status": "applied|planned|blocked", "summary": "改了什么或准备改什么"}\n'
@@ -86,10 +86,34 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "- 如果你没有 shell/command/terminal 工具，不要因为不能自己运行 pytest 就提交 capability_request。",
         "- 没有命令执行工具时，应写出可验收产物和测试文件，并在 tests/next_actions 中给父级验收器推荐命令。",
         "- 推荐给父级验收器的命令必须是安全、具体、可复制的；不要假装你已经执行过它。",
+        "- tests 里的命令必须能被父级 TestExecutor 安全执行：不要写 cd ... &&，把目录写在 \"working_dir\" 字段里。",
+        "- 写代码和测试后，必须逐条对照验收条件做静态自检，确保实现、测试、README 三者互相一致。",
+        "- 写 Python 测试时必须保证从 working_dir 运行能导入被测模块；优先把测试文件和模块放同一目录，或显式处理 import path。",
     ]
     if "leaf" in str(context.role or "").lower():
         lines.append("- 叶子节点重点是交付产物和测试文件；父级验收器负责运行命令、判定通过和触发 rescue。")
+    if _is_coordinator_context(context):
+        lines.append(
+            "- coordinator/lead 节点不直接写产物；目标要求写文件且自己没有 write_file 时，"
+            "先使用 schedule_child_subagents 创建 leaf_worker，不要因为自己没有 write_file 就提交 capability_request。"
+        )
+        lines.append("- schedule_child_subagents 创建 coordinator/lead 子节点不要授予 write_file；只有 leaf_worker 才能拿写文件工具。")
+        lines.append("- 创建 child/leaf 时必须原样传递父级指定的文件名、目录和验收条件，不要把 solution.py 改成别的模块名。")
+        lines.append("- 如果 schedule_child_subagents 返回 domain_mismatch 或 forbidden_child_scope，必须修正 child 领域后重试，不能宣称完成。")
+        lines.append("- 创建 leaf 后使用 dispatch_subagents 推进直接 child，并汇总 leaf 的产物 refs。")
+        lines.append("- dispatch_subagents 返回 child test_failed 或 followup_action=plan_rescue 时，不要宣称完成；先汇报失败 refs 或安排修复。")
     return lines
+
+
+# LLM: _is_coordinator_context identifies runner roles that should delegate file writing to leaves.
+# 函数用途: 判断当前 runner 是否是层级协调节点；用于给模型注入更强的派叶子规则。
+def _is_coordinator_context(context: SubAgentExecutionContext) -> bool:
+    role_text = f"{context.role} {context.agent_name}".lower()
+    tools = set(context.allowed_tools or [])
+    return (
+        ("coordinator" in role_text or "lead" in role_text)
+        and "schedule_child_subagents" in tools
+    )
 
 
 # LLM: _build_subagent_runner_repair_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

@@ -926,6 +926,7 @@ docs/
 - `agent_py_agent/agent/agent_core/tool_context_reducer.py`: 大工具输出进入下一轮 live prompt 前只注入 artifact 摘要和 checkpoint refs，小输出仍保留原工具结果。
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_records.py`: 承接 dispatch acceptance record 构建、parent acceptance auto-policy/auto-execution 摘要和显式 tests 后的 refresh 调用，让主 dispatch service 保持薄编排。
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_refresh.py`: 本轮显式 parent tests 写入 `test_execution.json` 后重新 dry-run acceptance，并刷新 dispatch 展示、单 run 审计和 aggregate acceptance report；不 apply、不 rescue、不修改 task 状态。
+- `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`: 承接 runner-context `dispatch_subagents` 工具返回 payload 的单条 record 构造，输出 test/follow-up refs 和摘要，不展开正文。
 - `agent_py_agent/agent/subagents/services/control_plane_projection.py`: 在 subagent 保存时把 task 当前状态投影到 LocalStore 控制面；它只做查询索引，不替代旧工单目录或 runtime workspace 事实源。
 - `agent_py_agent/agent/subagents/debug_trace.py`: 子代理正式调试追踪开关的写入层；`subagent_debug_trace_level=0` 时完全静默，开启后只把 bounded refs-only 事件写入内部 `debug_traces/subagent_trace.jsonl`。
 - `agent_py_agent/agent/subagents/services/persistence.py`: 负责 task/run/status report 落盘和旧任务兼容归一化；保存时会合并磁盘已有 `child_ids`，避免旧父/子快照覆盖新派生的层级链接。
@@ -964,6 +965,7 @@ docs/
 - `agent_py_agent/agent/subagents/parent_acceptance_followup_consistency.py`: 新增 follow-up apply 前的一致性检查 helper，集中处理 run_id、test report ref、失败数、新鲜度和状态驱动 rescue 例外。
 - `agent_py_agent/agent/subagents/parent_acceptance_rescue_followup.py`: 新增已失败/阻塞任务的 rescue follow-up helper，让无 `test_execution.json` 的 runner 失败也能进入受控接管路径。
 - `agent_py_agent/agent/subagents/services/hierarchy_scheduler.py`: 新增层级调度器 v1，使用 `HierarchyScheduleRequest` / `HierarchyChildSpec` 显式预览或创建 child/grandchild run，并统一限制深度和 fan-out。
+- `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 从 scheduler 中拆出的层级 scope guard，集中处理空计划、深度/数量限制、禁止 sibling 领域和 domain mismatch。
 - `agent_py_agent/agent/subagents/services/hierarchy_recovery.py`: 新增多层恢复包服务，从 root run 只读扫描子树，返回需要恢复的后代、接管入口和 checkpoint refs；现在也可按 capability 阈值标记 stale `RUNNING` 后代，不读取 artifact 正文。
 - `agent_py_agent/agent/subagents/services/board.py`: due-check 和 plan-actions 支持 root_id 作用域，真实 E2E 多棵任务树共用 workspace 时可以只看当前 root 并只生成当前树动作。
 - `agent_py_agent/agent/subagents/services/board_due_models.py`: due-check 共享参数包和 issue 构造 helper，避免巡检谓词文件继续膨胀。

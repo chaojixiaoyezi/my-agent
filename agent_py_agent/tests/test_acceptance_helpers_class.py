@@ -454,6 +454,43 @@ class TestCheckArtifactExists:
 
         assert result is True
 
+    def test_runtime_subagents_workspace_recovers_project_relative_suffix(self, tmp_path: Path):
+        """新 runtime 布局下，artifact 相对路径应回到用户项目根目录查找。"""
+        from agent_py_agent.agent.subagents.acceptance_helpers import _check_artifact_exists
+
+        project = tmp_path / "project"
+        workspace = project / ".my_agent_runtime" / "case-1" / "subagents"
+        task_dir = workspace / "run-1"
+        artifact = project / "deliverables" / "case-1" / "leaf_outputs" / "leaf_worker_text" / "solution.py"
+        task_dir.mkdir(parents=True)
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("def normalize_text(text):\n    return text.strip().lower()\n", encoding="utf-8")
+
+        result = _check_artifact_exists(
+            workspace,
+            str(task_dir),
+            "leaf_outputs/leaf_worker_text/solution.py",
+        )
+
+        assert result is True
+
+    def test_absolute_path_typo_recovers_by_safe_workspace_suffix(self, tmp_path: Path):
+        """绝对路径里 case id 写错时，可按安全 workspace 后缀找到真实 artifact。"""
+        from agent_py_agent.agent.subagents.acceptance_helpers import _check_artifact_exists
+
+        project = tmp_path / "project"
+        workspace = project / ".my_agent_runtime" / "case-1" / "subagents"
+        task_dir = workspace / "run-1"
+        artifact = project / "deliverables" / "case-1" / "leaf_outputs" / "leaf_worker_arithmetic" / "solution.py"
+        typo = project / "deliverables" / "case-typo" / "leaf_outputs" / "leaf_worker_arithmetic" / "solution.py"
+        task_dir.mkdir(parents=True)
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("def add_numbers(a, b):\n    return a + b\n", encoding="utf-8")
+
+        result = _check_artifact_exists(workspace, str(task_dir), str(typo))
+
+        assert result is True
+
     def test_nonexistent_path_returns_false(self, tmp_path: Path):
         """不存在的路径返回 False。"""
         from agent_py_agent.agent.subagents.acceptance_helpers import _check_artifact_exists

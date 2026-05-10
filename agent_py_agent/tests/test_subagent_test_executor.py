@@ -24,6 +24,22 @@ def test_test_executor_runs_allowed_command_and_records_exit_code(tmp_path):
     assert record.executed_at
 
 
+def test_test_executor_treats_pytest_validation_method_as_command(tmp_path):
+    """runner may label pytest commands as validation_method=pytest."""
+    (tmp_path / "test_solution.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    executor = TestExecutor(tmp_path, timeout_seconds=10)
+
+    record = executor.execute({
+        "name": "pytest alias",
+        "validation_method": "pytest",
+        "command": "python3 -m pytest test_solution.py -q",
+    })
+
+    assert record.executed is True
+    assert record.passed is True
+    assert record.validation_method == "command"
+
+
 def test_test_executor_runs_command_in_explicit_working_dir(tmp_path):
     package_dir = tmp_path / "package"
     package_dir.mkdir()

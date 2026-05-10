@@ -63,7 +63,7 @@ class TestExecutor:
     def execute(self, test: dict[str, Any]) -> TestExecutionRecord:
         """Execute a validation item and return its evidence record."""
 
-        method = str(test.get("validation_method") or "command").strip() or "command"
+        method = _validation_method(test)
         if method == "command":
             return self._execute_command(test)
         if method == "file_check":
@@ -185,3 +185,12 @@ class TestExecutor:
         if not path.exists() or not path.is_dir():
             return path, "working_dir 不存在或不是目录"
         return path, ""
+
+
+# LLM: _validation_method treats common test-runner aliases as bounded commands.
+# 函数用途: runner 把 pytest/unittest 写进 validation_method 时，只要提供 command，就仍走 command allowlist。
+def _validation_method(test: dict[str, Any]) -> str:
+    method = str(test.get("validation_method") or "command").strip().lower() or "command"
+    if method in {"pytest", "unittest"} and str(test.get("command") or "").strip():
+        return "command"
+    return method

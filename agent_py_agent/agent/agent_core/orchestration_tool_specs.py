@@ -43,6 +43,8 @@ _BOARD_PARAMETERS = {
 _DISPATCH_PARAMETERS = {
     "apply": "是否写回低风险动作，默认 false",
     "execute_runners": "是否真实调用模型执行 runner，必须配合 apply=true",
+    "execute_acceptance_tests": "是否执行子代理输出的父级验收 tests；runner 内部默认 true",
+    "auto_apply_acceptance_followup": "tests 通过后是否自动应用验收 follow-up；runner 内部默认 true，顶层默认 false",
     "planner": "是否启用父代理 planner，默认 false",
     "workflow_mode": "off/plan/auto；是否在 dispatch 前补做 workflow 规划或自动派工",
     "max_runners": "本轮最多推进多少个 runner，默认 1；0 表示不执行 runner",
@@ -50,11 +52,13 @@ _DISPATCH_PARAMETERS = {
     "runner_instruction": "给 runner 的额外指令",
 }
 _DISPATCH_PARAMETER_DETAILS = {
-    "apply": "false 只生成计划和报告；true 会写审计日志并可能改变任务状态。",
-    "execute_runners": "true 会消耗真实 API；只有用户明确要求开跑/真实执行/完整测试时才打开。",
+    "apply": "顶层默认 false 只生成计划和报告；当前 runner 内部默认 true，只推进当前节点的直接孩子。显式 false 会覆盖默认。",
+    "execute_runners": "顶层默认 false；当前 runner 内部且 apply=true 时默认 true，会消耗真实 API。显式 false 会覆盖默认。",
+    "execute_acceptance_tests": "顶层默认 false；当前 runner 内部且 apply=true 时默认 true，用于执行直接 child 的 tests 并写 follow-up refs。",
+    "auto_apply_acceptance_followup": "顶层默认 false；当前 runner 内部且 apply=true、tests 通过、follow-up 指向 apply_acceptance 时默认 true，只落当前直接 child 的验收状态。",
     "planner": "true 会额外调用父代理 LLM planner；适合长任务统筹，但会多消耗一次模型调用。",
     "workflow_mode": "plan 只把 workflow 计划写回父任务；auto 会在计划 OK 时落成 worker 子工单；未知值保守按 off 处理。",
-    "max_runners": "用来限制本轮推进数量，避免一次把太多子代理同时跑起来。",
+    "max_runners": "用来限制本轮推进数量；顶层默认 1，runner 内部默认 6，避免父节点只推进一个孩子就超时。",
 }
 
 _SCHEDULE_CHILD_USE_CASES = [
@@ -72,7 +76,7 @@ _SCHEDULE_CHILD_KEYWORDS = [
 ]
 _SCHEDULE_CHILD_PARAMETERS = {
     "children": "下一层子任务列表，每项包含 goal/role/agent_name 等字段，必填",
-    "apply": "是否真正创建下一层任务；默认 false 只预览",
+    "apply": "是否真正创建下一层任务；runner 内默认 true，显式 false 只预览",
     "max_depth": "允许创建到的最大 depth，默认 3",
     "max_children": "父节点最多能拥有多少直接 child，0 表示不限制",
 }
@@ -81,7 +85,7 @@ _SCHEDULE_CHILD_PARAMETER_DETAILS = {
         "JSON 数组。每项可含 role、agent_name、goal、plan、allowed_tools、allowed_skills、"
         "acceptance_checks、extra_write_roots。"
     ),
-    "apply": "true 才写任务树；false 只返回会创建什么，适合先检查。",
+    "apply": "runner 内省略时默认 true；显式 false 只返回会创建什么，适合先检查。",
     "max_depth": "用来避免子代理无限递归创建下级节点。",
     "max_children": "用来避免一个父节点一次挂太多直接孩子。",
 }
@@ -90,7 +94,7 @@ _SCHEDULE_CHILD_EXAMPLES = [
         '{"tool":"schedule_child_subagents","apply":true,"max_depth":3,'
         '"children":[{"role":"child_coordinator","agent_name":"catalog-lead",'
         '"goal":"继续拆分商品目录实现任务",'
-        '"allowed_tools":["schedule_child_subagents","dispatch_subagents","subagent_board","read_file","write_file"]}]}'
+        '"allowed_tools":["schedule_child_subagents","dispatch_subagents","subagent_board","read_file"]}]}'
     ),
 ]
 

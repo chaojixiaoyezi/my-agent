@@ -132,6 +132,30 @@ def test_prepare_test_items_converts_safe_cd_chain_into_working_dir(tmp_path):
     assert prepared[0]["working_dir"] == "deliverables/leaf"
 
 
+def test_prepare_test_items_strips_safe_cd_chain_even_with_working_dir(tmp_path):
+    """LLM: Verifies explicit working_dir does not leave a redundant shell cd chain in command."""
+    target_dir = tmp_path / "deliverables" / "leaf"
+    target_dir.mkdir(parents=True)
+    artifact = target_dir / "test_solution.py"
+    artifact.write_text("pass\n", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[{
+                "name": "pytest test_solution.py",
+                "validation_method": "command",
+                "command": f"cd {target_dir} && python3 -m pytest test_solution.py -v",
+                "working_dir": str(target_dir),
+            }],
+            output={"artifacts": [{"path": str(artifact)}]},
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert prepared[0]["command"] == "python3 -m pytest test_solution.py -v"
+    assert prepared[0]["working_dir"] == str(target_dir)
+
+
 def test_prepare_test_items_infers_pytest_when_runner_only_reports_test_artifact(tmp_path):
     """LLM: Verifies missing tests can still execute workspace-local test_*.py artifacts."""
     target_dir = tmp_path / "deliverables" / "leaf"
@@ -153,3 +177,26 @@ def test_prepare_test_items_infers_pytest_when_runner_only_reports_test_artifact
         "command": "python3 -m pytest test_solution.py -q",
         "working_dir": "deliverables/leaf",
     }]
+
+
+def test_prepare_test_items_normalizes_pytest_method_with_command(tmp_path):
+    """LLM: Verifies runner `validation_method=pytest` remains executable by TestExecutor."""
+    target_dir = tmp_path / "deliverables" / "leaf"
+    target_dir.mkdir(parents=True)
+    artifact = target_dir / "test_solution.py"
+    artifact.write_text("pass\n", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[{
+                "name": "pytest alias",
+                "validation_method": "pytest",
+                "command": "python3 -m pytest test_solution.py -q",
+            }],
+            output={"artifacts": [{"path": str(artifact)}]},
+            workspace_root=tmp_path,
+        )
+    )
+
+    assert prepared[0]["validation_method"] == "command"
+    assert prepared[0]["working_dir"] == "deliverables/leaf"

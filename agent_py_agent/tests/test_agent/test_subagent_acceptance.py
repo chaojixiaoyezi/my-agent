@@ -64,6 +64,56 @@ def _setup_acceptance_task(agent, task):
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+# LLM: _setup_verified_child_parent keeps child-acceptance tests focused and below size limits.
+# 函数用途: 构造一个等待验收的 coordinator/root 和一个已经 DONE/VERIFIED 的直接 child。
+def _setup_verified_child_parent(
+    agent: SimpleAgent,
+    *,
+    parent_goal: str,
+    parent_role: str,
+    tests: list[dict[str, object]],
+):
+    parent = agent.subagents.create_run(
+        goal=parent_goal,
+        thought="孩子已完成，自己只汇总。",
+        plan=["check children"],
+        role=parent_role,
+    )
+    child = agent.subagents.create_run(
+        goal="child done",
+        thought="child verified",
+        plan=["done"],
+        parent_id=parent.id,
+        root_id=parent.id,
+        depth=1,
+        role="leaf_worker",
+    )
+    child.status = "DONE"
+    child.verification_status = "VERIFIED"
+    agent.subagents.save(child)
+    parent = agent.subagents.load(parent.id)
+    parent.status = "AWAITING_ACCEPTANCE"
+    parent.verification_status = "NEEDS_ACCEPTANCE"
+    parent.evidence = [VerificationEvidence(kind="note", summary="child 已完成", ok=True)]
+    parent.evidence_packets = []
+    agent.subagents.save(parent)
+    Path(parent.output_json).write_text(json.dumps({
+        "run_id": parent.id,
+        "status": "AWAITING_ACCEPTANCE",
+        "tests": tests,
+        "artifacts": [],
+        "patches": [],
+        "blockers": [],
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    Path(parent.runner_result_json).write_text(json.dumps({
+        "run_id": parent.id,
+        "structured_output_found": True,
+        "structured_output_ok": True,
+        "structured_parse_error": "",
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    return parent
+
+
 def _actual_tool_evidence_output() -> str:
     return (
         "[SUBAGENT_RESULT]\n"
@@ -377,6 +427,63 @@ def test_subagent_acceptance_allows_parent_test_report_as_machine_evidence_chain
         assert accepted.status == "DONE"
         assert any(item.name == "evidence_chain_present" and item.ok for item in report.records[0].findings)
         assert any(item.name == "verifier_evidence_packets_traceable" and item.ok for item in report.records[0].verifier_checks)
+
+
+def test_subagent_acceptance_auto_acceptance_checks_verified_children():
+    """LLM: Verifies coordinator auto_acceptance tests inspect child DONE/VERIFIED state."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        parent = _setup_verified_child_parent(
+            agent,
+            parent_goal="child coordinator",
+            parent_role="child_coordinator",
+            tests=[{"name": "children verified", "validation_method": "auto_acceptance"}],
+        )
+
+        report = agent.subagents.write_acceptance_review_report(
+            run_ids=[parent.id],
+            options=AcceptanceReviewOptions(execute_tests=True),
+            apply=True,
+            reviewer="tester",
+        )
+        execution = json.loads(Path(parent.reports_dir, "test_execution.json").read_text(encoding="utf-8"))
+        accepted = agent.subagents.load(parent.id)
+
+        assert report.records[0].decision == "ACCEPT"
+        assert execution["failed"] == 0
+        assert execution["records"][0]["validation_method"] == "child_acceptance"
+        assert accepted.status == "DONE"
+        assert accepted.verification_status == "VERIFIED"
+
+
+def test_subagent_acceptance_infers_child_acceptance_when_coordinator_omits_tests():
+    """LLM: Verifies coordinator/root nodes with verified children get a machine child_acceptance fallback."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        parent = _setup_verified_child_parent(
+            agent,
+            parent_goal="root coordinator",
+            parent_role="root_coordinator",
+            tests=[],
+        )
+
+        report = agent.subagents.write_acceptance_review_report(
+            run_ids=[parent.id],
+            options=AcceptanceReviewOptions(execute_tests=True),
+            apply=True,
+            reviewer="tester",
+        )
+        execution = json.loads(Path(parent.reports_dir, "test_execution.json").read_text(encoding="utf-8"))
+        accepted = agent.subagents.load(parent.id)
+
+        assert report.records[0].decision == "ACCEPT"
+        assert execution["records"][0]["validation_method"] == "child_acceptance"
+        assert accepted.status == "DONE"
+        assert accepted.verification_status == "VERIFIED"
 
 
 def test_subagent_acceptance_does_not_hide_bad_worker_evidence_packets_with_parent_tests():
