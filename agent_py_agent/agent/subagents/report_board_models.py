@@ -196,6 +196,9 @@ class CapabilityRouteRecord:
     granted_tools: list[str] = field(default_factory=list)
     selected_cards: list[dict[str, str]] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
+    # LLM: route scope fields stay refs-only so dry-run reports can show boundaries without executing tools.
+    request_scope: dict[str, object] = field(default_factory=dict)
+    grant_scope: dict[str, object] = field(default_factory=dict)
     grant_id: str = ""
     gap_id: str = ""
     message: str = ""

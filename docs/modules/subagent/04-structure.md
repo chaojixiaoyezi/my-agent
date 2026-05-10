@@ -436,3 +436,6 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `result_structured.py` 负责把 runner 结构化输出里的 capability request 扩展字段规范成 dataclass；它只保留 bounded JSON-like scope/budget，不执行任何工具。
 - `services/persistence.py` 读取嵌套 capability 记录时会过滤未知字段，给 reserved/schema v2 留升级空间；过滤只发生在读取边界，不会吞掉当前模型已声明字段。
 - 第一阶段只补“表达和持久化能力需求”的结构层，尚未放开 shell 执行；真实执行必须继续走后续 shell gateway、trash、输出预算和审计层。
+- `capability_scope.py` 是父级路由的 scope 投影层：从 request 提取 request snapshot、legacy constraints、command allowlist、gap attempted tools 和 escalation chain。
+- `manager_capabilities.py` 只负责把路由命中转成 `RecordCapabilityGrantParams`，不直接解释 shell 命令；`capability_route_service.py` 只负责 gap/dry-run/apply report 的 refs-only 记录。
+- `CapabilityRouteRecord.request_scope` / `grant_scope` 只用于审计和展示，不触发执行；后续 shell gateway 必须重新检查 grant、cwd、路径、网络和输出预算。

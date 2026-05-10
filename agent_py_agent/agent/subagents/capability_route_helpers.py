@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
 from ..file_io import append_jsonl
+from .capability_scope import request_scope_snapshot
 from .models import CapabilityRequest, SubAgentTask
 from .reports import CapabilityRouteRecord
 from .utils import _new_id
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from ..capabilities import CapabilitySearchHit
     from .models import CapabilityGrant
 
+# LLM: Applied route records include grant scope so parent agents can audit bounded permissions.
 
 # LLM: RouteCapabilityGrantParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 类用途: 集中保存route能力grant参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
@@ -116,6 +118,19 @@ def _route_capability_grant(*, params: RouteCapabilityGrantParams) -> Capability
         granted_tools=granted_tools,
         selected_cards=selected_cards,
         reasons=reasons,
+        request_scope=request_scope_snapshot(request),
+        grant_scope={
+            "grant_id": grant.id,
+            "grant_type": grant.grant_type,
+            "tools": list(grant.tools),
+            "skills": list(grant.skills),
+            "mcp_tools": list(grant.mcp_tools),
+            "command_allowlist": list(grant.command_allowlist),
+            "path_scope": list(grant.path_scope),
+            "network_scope": list(grant.network_scope),
+            "output_budget": dict(grant.output_budget),
+            "constraints": dict(grant.constraints),
+        },
         grant_id=grant.id,
         message="已生成 capability grant。",
         created_at=now,

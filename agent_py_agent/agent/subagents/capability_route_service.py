@@ -14,6 +14,12 @@ from .capability_route_helpers import (
     _append_capability_route_log,
     _mark_capability_request_status,
 )
+from .capability_scope import (
+    escalation_chain,
+    gap_attempted_tools,
+    request_scope_snapshot,
+    scoped_constraints,
+)
 from .policies import _route_card_payload
 from .rendering import render_capability_route_markdown
 from .reports import CapabilityRouteRecord, CapabilityRouteReport
@@ -25,6 +31,7 @@ if TYPE_CHECKING:
     from ..capabilities import CapabilitySearchHit
     from .models import CapabilityRequest, SubAgentTask
 
+# LLM: Route records expose scope for review only; execution remains blocked until shell gateway approval.
 
 # LLM: WouldGrantRecordParams 属于子代理任务管理的类边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 类用途: 集中保存wouldgrant记录参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
@@ -74,6 +81,7 @@ def build_would_gap_record(
         dry_run=True,
         query=query,
         candidate_count=len(hits),
+        request_scope=request_scope_snapshot(request),
         message="未找到足够可信的 skill/tool card；apply 时会记录 capability gap。",
         created_at=created_at or time.time(),
     )
@@ -96,8 +104,13 @@ def record_capability_route_gap(
         RecordCapabilityGapParams(
             missing_capability=request.needed_capability,
             why_failed="CapabilityRouter 没有找到匹配的 skill/tool card。",
-            attempted_tools=request.tried,
+            gap_type=request.capability_type,
+            attempted_tools=gap_attempted_tools(request),
             needed_outputs=[request.expected_output] if request.expected_output else [],
+            requested_scope=request_scope_snapshot(request),
+            escalation_chain=escalation_chain(task, request),
+            next_record_refs=[f"capability_request:{request.id}"],
+            reserved={"constraints": scoped_constraints(request)},
         ),
     )
     _mark_capability_request_status(manager, task.id, request.id, "GAP")
@@ -109,6 +122,12 @@ def record_capability_route_gap(
         dry_run=False,
         query=query,
         candidate_count=len(hits),
+        request_scope=request_scope_snapshot(request),
+        grant_scope={
+            "grant_type": request.capability_type,
+            "constraints": scoped_constraints(request),
+            "requested_scope": request_scope_snapshot(request),
+        },
         gap_id=gap.id,
         message="未找到足够可信的 skill/tool card，已记录 capability gap。",
         created_at=created_at or time.time(),
@@ -131,6 +150,12 @@ def build_would_grant_record(params: WouldGrantRecordParams) -> CapabilityRouteR
         granted_tools=params.granted_tools,
         selected_cards=params.selected_cards,
         reasons=params.reasons,
+        request_scope=request_scope_snapshot(params.request),
+        grant_scope={
+            "grant_type": params.request.capability_type,
+            "constraints": scoped_constraints(params.request),
+            "requested_scope": request_scope_snapshot(params.request),
+        },
         message="找到候选能力；apply 时会生成 capability grant。",
         created_at=params.created_at or time.time(),
     )
