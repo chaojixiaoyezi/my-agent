@@ -287,7 +287,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
   一层是常驻的工具目录，一层是按当前任务筛出来的少量候选详情。
 - 执行工具调用。
 - 支持 `allowed_tools` 白名单，给 subagent runner 限制可见和可调用工具。
-- `AgentConfig.subagent_allowed_tools=[]` 表示子代理工具由角色模板、任务目标和调度器自动判断；非空列表才作为全局受限白名单。`subagent_role_template_dirs=[]` 默认使用工作区 `.agent/subagents/roles` 作为用户外置角色模板目录。
+- `AgentConfig.subagent_allowed_tools=[]` 表示子代理工具由角色模板、任务目标和调度器自动判断；非空列表才作为全局受限白名单。`subagent_role_template_dirs=[]` 默认使用工作区 `.agent/subagents/roles` 作为用户外置角色模板目录；角色模板摘要会进入工具规格和 coordinator prompt，帮助模型按角色派工。
 - 解析模型输出里的工具调用块。
   标准格式是 `[TOOL_CALL]...JSON...[/TOOL_CALL]`，同时兼容 Qwen/通道运行时 常见的 XML-ish `<tool_call><function=...><parameter=...>` 方言。
   如果 XML-ish 工具调用只有半截，解析器会返回 `__parse_error__`，让主循环继续可恢复，而不是直接崩掉。
@@ -622,7 +622,7 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - 用户层任务规模：`task_max_subagents`、`task_max_grandchildren`，0 表示不设硬上限。
 - Subagent workflow：`subagent_workflow_mode` 支持 `auto/manual/off`，`subagent_builtin_workflows` 控制是否加载内置模板，`subagent_user_workflow_dirs` 指向用户可覆盖模板目录。
 - 父级验收真实测试执行：`acceptance_execute_tests` 默认关闭，`acceptance_test_timeout_seconds` 控制真实执行 tests 的单条超时。
-- 未来 gateway 自适应策略：`scheduler_mode`、`runner_concurrency`、`runner_start_rate`、`runner_timeout_seconds` 和 `runner_failure_policy`，默认都是 `auto`。
+- 未来 gateway 自适应策略：`scheduler_mode`、`runner_concurrency`、`runner_start_rate` 和 `runner_failure_policy` 默认走 `auto`；`runner_timeout_seconds` 默认 `off`，表示 runner 不套外层超时，真实 E2E/长任务不会被固定时间墙打断，用户需要上限时可改秒数或 `auto`。
 - 第一版 gateway 控制面：`gateway_workspace`、`gateway_heartbeat_interval`、`gateway_stale_seconds`、`gateway_stop_timeout`、`gateway_request_timeout` 和 `gateway_request_poll_interval`。
 - 当前前台 daemon 高级参数：`daemon_*`，用于在 gateway 完整实现前控制 watch 调度。
 - 工具返回长度限制
@@ -883,9 +883,9 @@ docs/
 - `agent_py_agent/agent/subagents/models.py`: SubAgentTask 新增 `attributes: dict[str, object]` 字段
   - 用于存储动态超时、拆分信息等运行时属性
 
-- `agent_py_agent/agent/agent_core/runner_dispatch.py`: 集成动态超时
-  - 新增导入 `calculate_dynamic_timeout`
-  - 支持从任务 attributes 读取动态超时
+- `agent_py_agent/agent/agent_core/runner_dispatch.py`: runner 候选选择、重试和角色阶段排序；coordinator/worker/tester/bug_finder/acceptor 会按“先拆/先做/再测/再验收”的阶段顺序进入 `max_runners`。
+- `agent_py_agent/agent/agent_core/runner_gate.py`: 集中计算 runner timeout；`off/none/disabled/0` 表示不限制，`auto` 表示按动态 timeout 配置计算，固定数字表示秒数。
+  - 支持从任务 attributes 读取动态超时。
 
 - `agent_py_agent/agent/agent_core/dispatch_mixin.py`: 集成失败分析和自适应重派
   - 新增导入 `adaptive_retry`、`calculate_dynamic_timeout`、`SubAgentFailureAnalyzer`

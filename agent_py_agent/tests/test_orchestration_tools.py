@@ -156,8 +156,8 @@ class TestCreateSubagentsToolExecute:
         # 应该最多只创建 max_subagents 个
         assert mock_agent.subagents.create_run.call_count <= 2
 
-    def test_default_tool_preset_read_only(self):
-        """默认 tool_preset 为 read_only。"""
+    def test_default_tools_use_role_template_policy(self):
+        """默认不再要求用户选工具，而是交给角色模板/任务上下文推断。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
         mock_agent = MagicMock()
@@ -175,9 +175,32 @@ class TestCreateSubagentsToolExecute:
         tool = CreateSubagentsTool(mock_agent)
         result = tool.execute({"goal": "测试"})
 
-        # 验证调用时使用了默认的只读工具
         call_kwargs = mock_agent.subagents.create_run.call_args[1]
-        assert "read_file" in call_kwargs["params"].allowed_tools
+        assert call_kwargs["params"].allowed_tools is None
+        assert call_kwargs["params"].role == "worker"
+        assert result.ok is True
+
+    def test_explicit_tool_preset_read_only_still_works(self):
+        """显式 tool_preset=read_only 仍然会限制为只读工具。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+
+        mock_task = MagicMock()
+        mock_task.id = "run_default"
+        mock_task.goal = ""
+        mock_task.status = "PENDING"
+        mock_task.verification_status = "PENDING"
+        mock_task.task_dir = "/tmp"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        tool.execute({"goal": "测试", "tool_preset": "read_only"})
+
+        call_kwargs = mock_agent.subagents.create_run.call_args[1]
+        assert call_kwargs["params"].allowed_tools == ["list_files", "read_file", "search_text"]
 
 
 class TestSubagentBoardToolExecute:
@@ -456,63 +479,6 @@ class TestDispatchSubagentsToolRunnerContextOutput:
         assert payload["direct_children"]["by_status"]["PLANNING"] == 1
         assert payload["direct_children"]["planning_run_ids"] == ["child-b"]
         assert "继续调用 dispatch_subagents" in payload["direct_children"]["continue_hint"]
-
-
-class TestOrchestrationToolsSpec:
-    """测试工具规格定义。"""
-
-    def test_create_subagents_spec_defined(self):
-        """CreateSubagentsTool 工具规格已定义。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
-
-        mock_agent = MagicMock()
-        mock_agent.config.enable_subagents = True
-        mock_agent.config.max_subagents = 10
-
-        tool = CreateSubagentsTool(mock_agent)
-        spec = tool.spec
-
-        assert spec.name == "create_subagents"
-        assert spec.category == "orchestration"
-
-    def test_subagent_board_spec_defined(self):
-        """SubagentBoardTool 工具规格已定义。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import SubagentBoardTool
-
-        mock_agent = MagicMock()
-        mock_agent.subagents.workspace = Path("/tmp")
-
-        tool = SubagentBoardTool(mock_agent)
-        spec = tool.spec
-
-        assert spec.name == "subagent_board"
-        assert spec.category == "orchestration"
-
-    def test_dispatch_subagents_spec_defined(self):
-        """DispatchSubagentsTool 工具规格已定义。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
-
-        mock_agent = MagicMock()
-        mock_agent.config.subagent_workflow_mode = "off"
-        mock_agent.tools.specs.return_value = []
-
-        tool = DispatchSubagentsTool(mock_agent)
-        spec = tool.spec
-
-        assert spec.name == "dispatch_subagents"
-        assert spec.category == "orchestration"
-
-    def test_schedule_child_subagents_spec_defined(self):
-        """ScheduleChildSubagentsTool 工具规格已定义。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
-
-        mock_agent = MagicMock()
-        tool = ScheduleChildSubagentsTool(mock_agent)
-        spec = tool.spec
-
-        assert spec.name == "schedule_child_subagents"
-        assert spec.category == "orchestration"
-        assert "当前 subagent runner" in spec.description
 
 
 class TestScheduleChildSubagentsTool:

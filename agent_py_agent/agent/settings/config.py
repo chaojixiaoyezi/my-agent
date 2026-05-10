@@ -111,7 +111,7 @@ class AgentConfig:
     scheduler_mode: str = "auto"
     runner_concurrency: str = "auto"
     runner_start_rate: str = "auto"
-    runner_timeout_seconds: str = "auto"
+    runner_timeout_seconds: str = "off"
     runner_failure_policy: str = "auto"
     gateway_workspace: str = "data/gateway"
     gateway_heartbeat_interval: int = 5

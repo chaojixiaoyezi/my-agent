@@ -242,6 +242,9 @@
 - 本轮 runner-context 验收收口修复：真实 MiniMax 复测暴露“父节点已经跑完孩子 tests，但孩子仍停在 `AWAITING_ACCEPTANCE`”的问题；现在 runner 内部 `dispatch_subagents(apply=True, execute_acceptance_tests=True)` 会在测试通过且 follow-up 判断可验收时受控 apply 直接孩子，顶层 CLI/API dispatch 仍默认人工 apply。Focused dispatch 回归 `4 passed`。
 - 本轮 coordinator/root child-acceptance 修复：真实模型会写 `auto_acceptance`，也可能让 root/coordinator 有 direct children 但 tests 为空；现在这两类都转成确定性的 `child_acceptance`，只按直接孩子是否 `DONE/VERIFIED` 判断，不相信模型自称完成。真实 case `main_node_coordinator_accept_retest_20260510_113000` 最终 5 个节点全部 `DONE/VERIFIED`。
 - 本轮真实路径/命令鲁棒性修复：`cd <workspace dir> && pytest ...` 即使已有 `working_dir` 也会被拆成安全工作目录加无 shell 命令；artifact 检查会把 task `allowed_write_roots` 纳入 roots，并对 allowed root 内的绝对路径 typo 做保守后缀恢复。对应 focused tests 和真实 leaf 独立 pytest 已通过。
+- 本轮角色模板真实接入：`create_subagents` / `schedule_child_subagents` 工具规格和 coordinator runner prompt 现在会展示内置角色模板摘要，真实 MiniMax smoke 能主动创建 `worker/tester/bug_finder/acceptor` 四类子代理；默认不传 `allowed_tools` 时由角色模板和任务目标决定工具，worker 得到写工具，tester/bug_finder/acceptor 保持只读。
+- 本轮 dispatch 阶段排序修复：真实 role-template smoke 暴露 `acceptor/bug_finder/tester` 可能先于 `worker` 被 `max_runners` 截断选中；现在 runner 候选会在截断前按角色阶段排序，保证“先拆/先做/再测/再验收”。
+- 本轮 runner 超时配置调整：按用户要求，默认 `runner_timeout_seconds` 改为 `off`，`off/none/disabled/0` 明确表示不套外层超时；数字秒数仍是固定超时，`auto` 才使用动态 timeout。真实重跑确认不再 30 秒误杀，但也暴露“无限等待时缺少活跃心跳/请求阶段可观测性”的后续问题，已记录到真实 E2E findings。
 
 ## 未跑测试
 

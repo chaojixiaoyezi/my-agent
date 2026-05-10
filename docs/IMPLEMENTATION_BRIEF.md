@@ -162,7 +162,7 @@ runner 输出的 lessons 只写到 output.json 和 DEBRIEF.md，无法聚合、�
 
 3. **结果收集**：并行 runner 的结果必须正确写回各自的工单目录，不能互相干扰（工单目录天然隔离，只需确保无共享状态）。
 
-4. **超时控制**：单个 runner 有 `runner_timeout_seconds` 配置，超时后标记 `TIMEOUT` 并继续其他 runner。
+4. **超时控制**：单个 runner 有 `runner_timeout_seconds` 配置。固定秒数会在超时后标记 `TIMEOUT` 并继续其他 runner；默认 `off` 表示不套外层超时，适合当前真实 E2E 和长任务压测；`auto` 才使用动态超时预算。
 
 5. **失败隔离**：单个 runner 失败不影响其他 runner 继续执行。
 

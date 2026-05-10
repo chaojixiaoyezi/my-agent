@@ -198,12 +198,13 @@ acceptance_test_timeout_seconds: 120
 
 # 调度策略（未来 gateway 的主要策略面板）：
 # - auto 表示由主代理/调度器根据模型速度、失败率、队列长度和卡住情况自适应调整。
+# - off/none/disabled 表示 runner 不设置外层超时，适合真实 E2E 和长任务压测。
 # - 普通用户不需要改这些；高级用户可以改成具体数字或具体策略。
 # - 当前前台 daemon 只会读取 daemon_* 低层参数；这些字段先作为 gateway 设计契约和配置落点。
 scheduler_mode: "auto"
 runner_concurrency: "auto"
 runner_start_rate: "auto"
-runner_timeout_seconds: "auto"
+runner_timeout_seconds: "off"
 
 # runner_failure_policy 控制 runner 临时失败后的总尝试次数：
 # - "auto": 当前等价于最多 2 次，也就是首次失败后下一轮 dispatch 再试一次

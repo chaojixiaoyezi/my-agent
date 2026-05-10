@@ -998,7 +998,7 @@ python3 -m agent_py_agent daemon
 
 配置分两层：
 - 用户层任务规模：`task_max_subagents=0` / `task_max_grandchildren=0` 表示不设硬上限，让主代理按任务复杂度决定。
-- 未来 gateway 调度策略：`runner_concurrency: "auto"`、`runner_start_rate: "auto"`、`runner_timeout_seconds: "auto"` 表示由主代理/调度器根据模型速度、失败率、队列长度和卡住情况自适应。
+- 未来 gateway 调度策略：`runner_concurrency: "auto"`、`runner_start_rate: "auto"` 让主代理/调度器根据队列长度和卡住情况自适应；`runner_timeout_seconds: "off"` 表示 runner 不套外层超时，适合真实 E2E 和长任务压测；需要固定上限时可改成秒数，需要动态预算时可改成 `auto`。
 - 当前前台 daemon 高级参数：`daemon_max_runners: "auto"` 会先映射成保守值 1；`daemon_max_cycles=0` 表示持续运行；`daemon_limit=0` 表示不限制记录条数；`daemon_max_cards=0` 表示不限制能力卡数量；`daemon_interval=0` 通常只用于测试或单轮验证。
 
 父代理 planner 模式：
@@ -1158,7 +1158,7 @@ failure_type = structured_output_parse_error
 默认安全行为：
 - `subagent-run` 默认 dry-run。
 - `subagent-run --execute` 才调用模型。
-- `subagent-run --execute` 会走 runner worker timeout 边界；`runner_timeout_seconds` 为固定值时用固定值，为 `auto` 时按任务规模和动态 timeout 配置计算，避免单独 CLI runner 因模型流式响应卡住而无限等待。
+- `subagent-run --execute` 会走 runner worker timeout 边界；`runner_timeout_seconds` 为固定值时用固定值，为 `auto` 时按任务规模和动态 timeout 配置计算；`off` / `none` / `disabled` / `0` 表示不套外层超时，适合真实长任务测试，但如果模型请求卡住，需要靠 debug trace、外部观察或后续 watchdog 诊断。
 - 执行前默认 probe。
 - 工具有 allowlist。
 - 未授权工具调用会失败。

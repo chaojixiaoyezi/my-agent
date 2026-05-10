@@ -49,3 +49,6 @@ def test_runner_prompt_tells_coordinator_to_schedule_leaf_before_requesting_writ
     assert "coordinator/lead 子节点不要授予 write_file" in prompt
     assert "原样传递父级指定的文件名" in prompt
     assert "domain_mismatch" in prompt
+    assert "可用角色模板" in prompt
+    assert "bug_finder" in prompt
+    assert "找茬子代理" in prompt

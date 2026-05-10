@@ -90,12 +90,27 @@ def load_role_template_store(
 
 
 # LLM: template_for_role is a tiny helper for runtime role contracts.
-# 函数用途: 根据标准化 role id 返回内置模板；目前运行期只用内置模板，用户目录由上层显式加载。
+# 函数用途: 根据标准化 role id 返回模板；用户目录由上层传入。
 def template_for_role(
     role: str,
     user_template_dir: str | Path | Iterable[str | Path] | None = None,
 ) -> RoleTemplate | None:
     return load_role_template_store(user_template_dir=user_template_dir).get(role)
+
+
+# LLM: role_template_guide_text renders a compact model-facing role catalog.
+# 函数用途: 把内置和用户角色模板压成短说明，注入工具规格和 runner prompt，帮助 LLM 正确选 role。
+def role_template_guide_text(
+    user_template_dir: str | Path | Iterable[str | Path] | None = None,
+    *,
+    limit: int = 12,
+) -> str:
+    store = load_role_template_store(user_template_dir=user_template_dir)
+    lines = [
+        f"- {item.id}: {item.name_zh}；{item.summary_zh}；输出：{item.output_contract_zh}"
+        for item in store.all()[:limit]
+    ]
+    return "\n".join(lines)
 
 
 # LLM: _iter_user_template_dirs protects strings from being treated as char iterables.

@@ -20,6 +20,18 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+# LLM: timeout off/none/disabled must mean no runner wrapper timeout, not auto dynamic timeout.
+# 函数用途: 判断用户是否显式关闭 runner 超时；返回 true 时 runner 可一直等到模型自然返回。
+def _runner_timeout_disabled(config: Any) -> bool:
+    raw_value = getattr(config, "runner_timeout_seconds", "auto")
+    if isinstance(raw_value, str):
+        return raw_value.strip().lower() in {"off", "none", "disabled", "false", "no", "0"}
+    try:
+        return float(raw_value) == 0.0
+    except (TypeError, ValueError):
+        return False
+
+
 # LLM: get_task_timeout 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 函数用途: 读取或查询任务超时需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
 def get_task_timeout(
@@ -38,6 +50,8 @@ def get_task_timeout(
     # Use configured static timeout
     if runner_timeout_seconds > 0:
         return runner_timeout_seconds
+    if _runner_timeout_disabled(config):
+        return 0.0
 
     # Dynamic calculation
     estimated_input_tokens, estimated_output_tokens = estimate_task_tokens(task.goal, task.plan)

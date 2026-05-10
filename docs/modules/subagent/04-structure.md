@@ -69,9 +69,11 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`：承接 `dispatch_subagents` 工具输出里的单条 record payload，保持返回给 runner 的 acceptance/test/follow-up refs 精简且可测试。
 - `agent_py_agent/agent/subagents/services/hierarchy_recovery.py`：定义 `HierarchyRecoveryRequest` / `HierarchyRecoveryResult`，从 root run 只读扫描 child_ids 子树，返回需要恢复的后代、takeover readiness、failure handoff 和 checkpoint refs；可按 capability timeout 阈值把 stale `RUNNING` 后代纳入恢复候选，不展开 artifact 正文、不自动接管。
 - `agent_py_agent/agent/subagents/manager_hierarchy.py`：给 `SubAgentManager` 暴露 `schedule_child_runs(params=...)` 薄 facade，让层级创建入口保持单一且可测试。
-- `agent_py_agent/agent/subagents/role_templates.py`：加载内置和用户外置 JSON 角色模板；模板必须是广义角色、带中文说明、可处理多个目标，坏模板只记录 issue，不影响内置模板。
+- `agent_py_agent/agent/subagents/role_templates.py`：加载内置和用户外置 JSON 角色模板；模板必须是广义角色、带中文说明、可处理多个目标，坏模板只记录 issue，不影响内置模板；`role_template_guide_text()` 会把模板摘要注入工具规格和 coordinator runner prompt，帮助模型选择 `worker/tester/bug_finder/acceptor` 等角色。
 - `agent_py_agent/agent/subagents/role_template_catalog/builtin/*.json`：内置角色模板，包括协调、执行、找茬、测试、验收、研究、写作。模板定义默认工具、是否可写、是否可验收、输出契约和中文 prompt。
 - `agent_py_agent/agent/subagents/role_contracts.py`：集中定义 `reporter` / `checker` 兼容角色契约，并把 `bug_finder/tester/acceptor/coordinator/worker/researcher/writer` 接到 role template；检查型角色默认只读、不能自验收、最终由父级 gate 裁决。
+- `agent_py_agent/agent/agent_core/runner_dispatch.py`：runner 候选会先过滤可执行状态，再按角色阶段排序：coordinator/规划类优先，worker/产出类先于 tester/bug_finder/critic，acceptor 最后，排序发生在 `max_runners` 截断前，避免真实业务链路出现“先验收再干活”。
+- `agent_py_agent/agent/agent_core/runner_gate.py`：统一计算 runner 外层超时；默认用户配置 `runner_timeout_seconds: "off"` 表示不限制，`auto` 才进入动态 timeout，数字字符串表示固定秒数。
 - `agent_py_agent/agent/subagents/automation_gate.py`：定义半自动/自动执行门；只允许 `query_recovery_tree` / `inspect_refs` 这类 refs-only 动作自动放行，跑工具或改 task 状态必须人工确认或继续阻断。
 - `agent_py_agent/agent/subagents/execution_records.py`：定义 `TestExecutionRecord`，保存真实验收执行证据字段、序列化、stdout/stderr 截断和 `passed` 派生结果。
 - `agent_py_agent/agent/subagents/execution_executor.py`：定义最小 `TestExecutor`，支持 command / file_check / content_check，当前不写任务状态、不生成 `test_execution.json`；command 可带 workspace 内 `working_dir` / `cwd`，执行记录会保存真实工作目录。
@@ -112,7 +114,7 @@ agent_py_agent/agent/
 - `agent_py_agent/cli/_hierarchy.py`：同时实现 `subagents-recovery-tree` 命令；按 root run 输出多层恢复包，`--hide-healthy` 可减少上下文体积，`--capability-config` 提供 stale RUNNING 判定阈值，仍只展示 refs 和摘要。
 - `agent_py_agent/cli/_leadership.py`：实现 `subagents-leadership-recovery-plan` 和 `subagents-leadership-recovery-apply`；前者只写计划，后者默认 dry-run，只有 `--apply` 才按指定 `--child-run-id` 重挂子树。
 - `agent_py_agent/cli/_review.py`：提供 `subagents-tests` 和验收相关兼容导出；tests 默认只读取已有 `test_execution.json`，显式 `--re-run` 才重新执行 `output.json.tests`。
-- `agent_py_agent/agent/settings/config.py` / `agent_py_agent/config/agent_config.yaml`：提供 `acceptance_execute_tests` 和 `acceptance_test_timeout_seconds`，默认保持老验收路径不自动跑命令；`subagent_board_limit` 控制轻量看板摘要数量；`subagent_allowed_tools=[]` 表示自动工具策略，由角色模板、任务目标和调度器判断，只有受限环境才显式填工具名；`subagent_role_template_dirs=[]` 表示使用工作区 `.agent/subagents/roles` 作为用户模板目录。
+- `agent_py_agent/agent/settings/config.py` / `agent_py_agent/config/agent_config.yaml`：提供 `acceptance_execute_tests` 和 `acceptance_test_timeout_seconds`，默认保持老验收路径不自动跑命令；`subagent_board_limit` 控制轻量看板摘要数量；`subagent_allowed_tools=[]` 表示自动工具策略，由角色模板、任务目标和调度器判断，只有受限环境才显式填工具名；`subagent_role_template_dirs=[]` 表示使用工作区 `.agent/subagents/roles` 作为用户模板目录；`runner_timeout_seconds="off"` 表示真实 runner 不套外层超时，适合当前 E2E 压测。
 - Auto Policy v1 当前只实现 dry-run 审计，尚未接主配置；后续若做成用户可见主配置，配置默认值和中文说明必须同步写入 `agent_py_agent/config/agent_config.yaml` 与 `AgentConfig`。如果只是 subagent/capability 路由内部的授权、次数或 allowlist 细则，应进入 `agent_py_agent/config/capability_config.yaml` 与 `capability_config.py`，不要扩张主配置。
 - `agent_py_agent/agent/subagents/manager_indexing.py`：实现 `_select_runs()` 等索引和过滤逻辑，同时提供公开别名 `select_runs()`、`index_task()` 等。
 - `agent_py_agent/agent/subagents/manager_acceptance_findings.py`：实现验收发现逻辑，公开别名 `acceptance_findings()`。
