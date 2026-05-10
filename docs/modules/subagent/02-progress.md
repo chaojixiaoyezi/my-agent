@@ -258,6 +258,7 @@
 - 本轮 runner-context partial-progress 第一片：`dispatch_subagents` 在 runner 内返回直接孩子状态时新增 `needs_more_dispatch`、`unfinished_run_ids`、`next_action=continue_dispatch_direct_children` 和 `suggested_tool_call`，让 root/coordinator 面对限速或串行波次未跑完的 child 时拿到机器可读的继续动作，而不只是一句自然语言提示。
 - 本轮 runner partial-success 记录第一片：runner 自己 `TIMEOUT` 但已经创建 child 时，dispatch record 会保存 `runner_child_status_counts`、`runner_unfinished_child_ids` 和 `runner_partial_success`，恢复流程不再只能看到单个失败状态。
 - 本轮 role-template continue-dispatch 真实复测：CLI 显式 root/coordinator seed 现在只保留产品路径上下文，不再继承最终产物写入根；真实 MiniMax root 自己创建 researcher/worker/writer/bug_finder/tester/acceptor 六类 direct child，并根据 `needs_more_dispatch` / `unfinished_run_ids` 发起第二波 dispatch。tester/bug_finder/acceptor 成功发现 worker 产物的真实 import bug；剩余 gap 是 root 第二波后仍超时，下一轮要做 partial-success finalization / rescue follow-up 闭环。
+- 本轮 parent acceptance 安全 pytest 归一化第一片：父级 dry-run 预检和手动 auto-execution 都会先复用 `prepare_test_items()`，把 workspace 内安全的 `cd <dir> && python3 -m pytest ...` 转成 `working_dir + 纯命令`，不再误判为人审；仍不放开 shell，也不允许越界目录。
 
 ## 未跑测试
 

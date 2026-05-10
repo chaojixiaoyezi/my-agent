@@ -957,16 +957,16 @@ docs/
 - `agent_py_agent/agent/subagents/model_task.py`: 新增 `SecuritySignal` 和 `security_review_required` 安全预留字段，用于记录安全劫持、安全欺骗、prompt injection、工具权限异常等可疑信号；当前只审计不拦截。
 - `agent_py_agent/agent/subagents/execution_records.py`: 新增 `TestExecutionRecord`，定义真实验收执行证据、输出截断和通过结果派生。
 - `agent_py_agent/agent/subagents/execution_executor.py`: 新增最小 `TestExecutor`，执行 command/file/content 三类检查并产出 `TestExecutionRecord`；当前不接 acceptance 自动写回。
-- `agent_py_agent/agent/subagents/execution_test_items.py`: 新增测试项预处理 helper，根据 runner artifacts 安全推断 command 测试工作目录，避免父验收在 workspace 根目录误跑相对测试命令。
+- `agent_py_agent/agent/subagents/execution_test_items.py`: 新增测试项预处理 helper，根据 runner artifacts 安全推断 command 测试工作目录，避免父验收在 workspace 根目录误跑相对测试命令；也会把 workspace 内安全的 `cd <dir> && pytest` 拆成 `working_dir + 纯命令`，不放开 shell。
 - `agent_py_agent/agent/subagents/execution_executor_helpers.py`: 新增 `TestExecutor` 命令解析、记录构造和时间戳 helper，保持执行器主文件只负责 bounded execution。
 - `agent_py_agent/agent/subagents/execution_report.py`: 新增 `test_execution.json` / `test_execution.md` 报告写读入口；JSON 是机器事实源，Markdown 只做展示。
 - `agent_py_agent/agent/subagents/services/acceptance_machine_evidence.py`: 新增父级真实测试报告读取 helper；通过的 `test_execution.json` 可在无 worker evidence packet 时作为机器证据链。
-- `agent_py_agent/agent/subagents/parent_acceptance_controller.py`: 新增父级验收 dry-run 决策器和 refs-only 决策落盘 helper，读取 `output.json`、`test_execution.json` 和 handoff refs，返回 execute_tests / review_patches / inspect_only / request_human / rescue；显式写入生成 `parent_acceptance_decision.json`，不读取 artifact 正文；空测试报告配合 traceable artifact/evidence refs 会走 inspect_only，不误判为 rescue。
+- `agent_py_agent/agent/subagents/parent_acceptance_controller.py`: 新增父级验收 dry-run 决策器和 refs-only 决策落盘 helper，读取 `output.json`、`test_execution.json` 和 handoff refs，返回 execute_tests / review_patches / inspect_only / request_human / rescue；显式写入生成 `parent_acceptance_decision.json`，不读取 artifact 正文；预检前复用 `prepare_test_items()` 归一化安全 cwd 包装，空测试报告配合 traceable artifact/evidence refs 会走 inspect_only，不误判为 rescue。
 - `agent_py_agent/agent/subagents/parent_acceptance_empty_report.py`: 拆出可执行 test 筛选和空 `test_execution.json` 的 inspect-only 判定，只检查 evidence/artifact refs 元数据，不展开正文。
 - `agent_py_agent/agent/subagents/parent_acceptance_apply.py`: 新增显式 apply 结果模型、拦截/应用结果构造和 `parent_acceptance_apply.json` 落盘 helper；非 inspect_only 决策只留下拦截审计，不改任务状态。
 - `agent_py_agent/agent/subagents/parent_acceptance_next_action.py`: 新增父级下一动作建议模型，把当前决策/apply 审计映射成 run_tests / review_patches / request_human_confirmation / plan_rescue / apply_acceptance；只返回 refs 和建议命令，不执行。
 - `agent_py_agent/agent/subagents/parent_acceptance_auto_policy.py`: 新增父级自动策略 dry-run 模型和 `parent_acceptance_auto_policy.json` 审计落盘；第一版只判断 allow/blocked、would_execute、manual-only 半自动计划和 preflight 检查，不执行命令、不改状态。
-- `agent_py_agent/agent/subagents/parent_acceptance_auto_execution.py`: 新增父级自动执行 dry-run facade 的 Request/Result bundle 和 `parent_acceptance_auto_execution.json` 审计落盘；第一版固定 hard guard，不执行命令、不改状态。
+- `agent_py_agent/agent/subagents/parent_acceptance_auto_execution.py`: 新增父级自动执行 dry-run facade 的 Request/Result bundle 和 `parent_acceptance_auto_execution.json` 审计落盘；第一版固定 hard guard，只有显式确认路径执行 tests，执行前同样归一化安全 cwd 包装，仍不 apply、不 rescue、不改状态。
 - `agent_py_agent/agent/subagents/parent_acceptance_auto_execution_reports.py`: 拆出显式测试执行后的 report/follow-up 写入 helper，让 executor facade 保持薄层和 bundle 入口。
 - `agent_py_agent/agent/subagents/parent_acceptance_auto_followup.py`: 新增显式验收测试后的 follow-up 审计包，写 `parent_acceptance_auto_followup.json`，归类人工 apply / patch review / 人工 rescue / 人工确认 / 继续测试；只保存 refs 和失败摘要，不改 task 状态。
 - `agent_py_agent/agent/subagents/parent_acceptance_followup_control.py`: 新增 follow-up 受控入口模型和审计文件，支持预览、坏 JSON 阻断、显式 apply、patch review 命令提示和复用 action handler 的接管 rescue。
@@ -1021,6 +1021,7 @@ docs/
 - `agent_py_agent/tests/test_subagent_test_item_preparation.py`: 覆盖父验收测试项如何从 artifact 路径推断工作目录、保留显式 working_dir 并拒绝越界 artifact。
 - `agent_py_agent/tests/test_subagent_test_execution_report.py`: 覆盖 test execution JSON/Markdown 报告的汇总字段、记录恢复和人类摘要。
 - `agent_py_agent/tests/test_parent_acceptance_controller.py`: 覆盖父级验收 dry-run 决策、refs-only 审计落盘、显式 apply 边界、next-action 建议和 auto-policy dry-run，包括缺少真实测试报告时建议执行、危险命令要求人工确认、已有通过报告时只需 inspect、patch 未审核时先 review_patches，以及非 inspect_only apply 不改任务状态。
+- `agent_py_agent/tests/test_parent_acceptance_safe_cd.py`: 覆盖真实 runner 常见的 `cd <workspace内目录> && pytest` 输出漂移；父级 dry-run 预检和手动 auto-execution 都应归一化后继续走受限命令执行。
 - `agent_py_agent/tests/test_parent_acceptance_patch_gate.py`: 覆盖真实测试通过但 applied patch 未审核时的 `review_patches` next-action 和 follow-up 命令。
 - `agent_py_agent/tests/test_agent/test_subagent_acceptance.py`: 新增显式真实测试执行 dry-run 验收用例，覆盖 runner 假 PASS 被真实命令失败阻断且任务状态不被 dry-run 改写。
 - `agent_py_agent/tests/test_subagents_tests_command.py`: 覆盖 `subagents-tests` 查看已有报告、显式 `--re-run` 写回报告、`subagents-acceptance-plan` 展示/写入/显式 apply/next-action/auto-policy 父级决策，以及 `subagents-acceptance` 从配置读取真实执行默认值并被 CLI 覆盖。

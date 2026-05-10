@@ -1764,3 +1764,7 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Root still timed out after starting the second dispatch wave, so root final summary is missing. The recovery refs are present, but next work should improve partial-success finalization or root timeout recovery.
   - Acceptance safety still treats some pytest shell shapes as high-risk when they contain shell chaining or imprecise command text. The long-term fix should normalize safe pytest commands inside allowed working roots, not loosen shell execution globally.
   - The chain currently detects the worker bug but does not yet automatically create a repair worker and re-run acceptance; that belongs to the next rescue/follow-up loop.
+- Follow-up fix:
+  - Parent acceptance dry-run and manual auto-execution now both reuse `prepare_test_items()` before command safety checks or execution.
+  - 中文解释：真实模型经常同时写 `cd <目录> && pytest ...` 和 `working_dir`。系统现在会在确认目录位于 workspace 内后，把它拆成 `working_dir=<目录>` 加 `python3 -m pytest ...` 纯命令；仍然不放开 shell，不允许任意 `&&`、`;`、管道或越界目录。
+  - Verification: focused tests cover both the non-mutating parent preflight path and the explicit `ParentAcceptanceAutoExecutionOptions(execute_tests=True)` path.

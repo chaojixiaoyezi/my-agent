@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from .execution_executor import TestExecutor
+from .execution_test_items import TestItemPreparationRequest, prepare_test_items
 from .models import SubAgentTask
 from .parent_acceptance_auto_execution_reports import (
     ConfirmedTestReportRequest,
@@ -99,6 +100,20 @@ class ParentAcceptanceAutoExecutionResult:
     # 函数用途: 把自动执行结果转换为 JSON 友好字典；保留 request 子结构和阻断原因。
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+# LLM: TestsExecutedResultInput keeps confirmed-run result assembly bundle-shaped.
+# 类用途: 保存测试执行结果组装所需的报告和 follow-up，不承载执行逻辑。
+@dataclass(frozen=True)
+class TestsExecutedResultInput:
+    """Bundle for building a confirmed test execution result."""
+
+    __test__: ClassVar[bool] = False
+
+    request: ParentAcceptanceAutoExecutionRequest
+    report: Any
+    followup: Any
+    followup_ref: str
 
 
 # LLM: build_parent_acceptance_auto_execution plans by default and runs tests only when the options bundle confirms it.
@@ -216,15 +231,47 @@ def _execute_confirmed_tests(
     if blockers:
         return _blocked_manual_result(request, blockers)
     output = _read_task_output(task)
-    tests = _dict_list(output.get("tests", []))
+    tests = _manual_execution_tests(output, workspace_root)
     if not tests:
         return _blocked_manual_result(request, ["missing_tests"])
-    executor = TestExecutor(workspace_root, timeout_seconds=request.timeout_seconds)
-    records = [executor.execute(test) for test in tests]
+    records = _manual_execution_records(tests, workspace_root, request.timeout_seconds)
     report = write_confirmed_test_report(
         ConfirmedTestReportRequest(task, request, workspace_root, records)
     )
     followup = write_execution_followup(task, workspace_root, report)
+    return _tests_executed_result(
+        TestsExecutedResultInput(request, report, followup, str(followup_path(task)))
+    )
+
+
+# LLM: _manual_execution_tests mirrors parent preflight normalization before confirmed execution.
+# 函数用途: 为手动确认执行准备 tests；只归一化安全 cwd，不运行命令、不放开 shell。
+def _manual_execution_tests(output: dict[str, object], workspace_root: Path) -> list[dict[str, Any]]:
+    tests = _dict_list(output.get("tests", []))
+    if not tests:
+        return []
+    return prepare_test_items(
+        TestItemPreparationRequest(tests=tests, output=output, workspace_root=workspace_root)
+    )
+
+
+# LLM: _manual_execution_records keeps subprocess execution out of the guard/result assembly function.
+# 函数用途: 用受限 TestExecutor 执行已归一化 tests，并返回测试记录列表。
+def _manual_execution_records(
+    tests: list[dict[str, Any]],
+    workspace_root: Path,
+    timeout_seconds: float,
+) -> list[Any]:
+    executor = TestExecutor(workspace_root, timeout_seconds=timeout_seconds)
+    return [executor.execute(test) for test in tests]
+
+
+# LLM: _tests_executed_result centralizes the audit result shape for confirmed test runs.
+# 函数用途: 根据真实测试报告和 follow-up 组装自动执行结果；仍不 apply、不 rescue、不改状态。
+def _tests_executed_result(params: TestsExecutedResultInput) -> ParentAcceptanceAutoExecutionResult:
+    request = params.request
+    report = params.report
+    followup = params.followup
     return ParentAcceptanceAutoExecutionResult(
         run_id=request.run_id,
         mode=request.mode,
@@ -247,7 +294,7 @@ def _execute_confirmed_tests(
         test_execution_ref=str(report.json_path),
         test_total=report.total_tests,
         test_failed=report.failed,
-        followup_ref=str(followup_path(task)),
+        followup_ref=params.followup_ref,
         followup_status=followup.status,
         followup_action=followup.action,
         followup_command=followup.command,
