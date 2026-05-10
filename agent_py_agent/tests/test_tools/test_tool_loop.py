@@ -292,6 +292,18 @@ def test_tool_call_parser_unwraps_model_memory_bundle():
     ]
 
 
+# LLM: test_tool_call_parser_recovers_single_extra_trailing_brace covers real MiniMax tool-call drift.
+# 函数用途: 模型在有效 JSON 后多吐一个 `}` 时，解析器应保留完整工具参数而不是逼模型缩短任务。
+def test_tool_call_parser_recovers_single_extra_trailing_brace():
+    registry = make_tool_registry(Path.cwd())
+
+    calls = registry.parse_tool_calls(
+        '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n}\n[/TOOL_CALL]'
+    )
+
+    assert calls == [{"tool": "read_file", "path": "README.md"}]
+
+
 def test_tool_spec_catalog_entry_includes_first_example():
     """LLM: Compact catalog entries should show tool-specific JSON when examples are available."""
     from agent_py_agent.agent.tools import ToolSpec

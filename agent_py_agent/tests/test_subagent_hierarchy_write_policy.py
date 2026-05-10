@@ -75,3 +75,42 @@ def test_hierarchy_schedule_keeps_report_goal_product_root_readonly(tmp_path):
     assert child.allowed_write_roots == [child.task_dir]
     assert str(deliverables) not in child.allowed_write_roots
     assert str(deliverables) in child.goal
+
+
+# LLM: test_hierarchy_schedule_recovers_report_role_from_child_agent_name covers real runner placeholder roles.
+# 函数用途: 模型把 role 写成 child 但 agent_name 写 researcher/tester 时，系统仍按报告型角色收紧写入权限。
+def test_hierarchy_schedule_recovers_report_role_from_child_agent_name(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    deliverables = tmp_path / "deliverables"
+    root = manager.create_run(
+        goal=f"最终业务产物只能放在 {deliverables}",
+        thought="orchestrate",
+        plan=["plan"],
+        extra_write_roots=[str(deliverables)],
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=root.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="读取资料，写 researcher/report.md 到 task_dir，不能写最终业务产物。",
+                    agent_name="researcher",
+                    role="child",
+                ),
+                HierarchyChildSpec(
+                    goal="整理最终说明并写 README.md 到产物目录。",
+                    agent_name="writer",
+                    role="child",
+                ),
+            ],
+            apply=True,
+        )
+    )
+    researcher = manager.load(result.created_run_ids[0])
+    writer = manager.load(result.created_run_ids[1])
+
+    assert researcher.role == "researcher"
+    assert researcher.allowed_write_roots == [researcher.task_dir]
+    assert writer.role == "writer"
+    assert str(deliverables) in writer.allowed_write_roots

@@ -11,6 +11,7 @@ from ..debug_trace import trace_hierarchy_schedule
 from ..models import SubAgentTask
 from .base import CreateRunParams
 from .hierarchy_context import inherited_hierarchy_thought, scheduled_child_goal
+from .hierarchy_role_identity import role_from_child_spec_identity
 from .hierarchy_scope_guards import schedule_block_reason
 from .hierarchy_write_policy import (
     ScheduledWriteRootRequest,
@@ -239,8 +240,8 @@ def _scheduled_child_role(
     *,
     goal: str | None = None,
 ) -> str:
-    role = str(spec.role or "worker").strip() or "worker"
-    if role not in {"worker", "general"}:
+    role = role_from_child_spec_identity(spec)
+    if role not in {"worker", "general", "child"}:
         return role
     if _should_infer_leaf_coding_tools(spec, extra_write_roots or [], goal=goal):
         return "leaf_worker"
@@ -253,7 +254,6 @@ def _scheduled_child_role(
     if depth == 2:
         return "grandchild_coordinator"
     return "coordinator"
-
 
 # LLM: _scheduled_child_tools preserves report-write tools for leads and file tools for product-writing leaves.
 # 函数用途: coordinator 可写本地报告，leaf 写业务产物时补安全文件工具；产品写入根由 extra_write_roots 单独控制。
