@@ -1807,3 +1807,78 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining gaps:
   - 这一步只保证 refs 和文件落点正确；还没有验证真实模型在大任务里会稳定按 lineage ref 阅读父级交接包。
   - 后续真实测试需要用主节点单入口方式重跑小树，再逐步放大到 1/4/16/48 和购物网站项目。
+
+## 2026-05-10 Context Lineage Trace5 Four-Level Smoke
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/context_lineage_trace5_nostream_20260510_225330`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/context_lineage_trace5_nostream_20260510_225330`.
+  - Debug trace: `subagents/debug_traces/subagent_trace.jsonl`, with level 5 detail refs under `subagents/debug_traces/details/`.
+  - Model name: `MiniMax-M2.7`, `stream_enabled=false`.
+  - Observation rule: the outer controller only dispatched root; root created child, child created grandchild, grandchild created leaf.
+- 中文说明：
+  - 这轮专门验证刚加的 trace level 5 是否能看到“主给子、子给孙、孙给叶子”的真实提示词、工具参数和工具输出。
+  - 外层没有替叶子写文件；leaf 没成功写出 `proof.txt`，所以这条是暴露问题的失败烟测，不是通过烟测。
+- Observed facts:
+  - Root created child `subagent-1778424848-a10d7506`.
+  - Child created grandchild `subagent-1778424901-e17137dc`.
+  - Grandchild created leaf `subagent-1778424923-cffb5c5c`.
+  - Trace level 5 recorded full prompt/response/tool payload/tool output refs, which made the blocker directly visible.
+- Finding 31: leaf blocked because `acceptance_checks` was missing.
+  - Symptom: leaf received a clear goal to write `proof.txt=context-lineage-ok`, but Context Bundle Gate returned `BLOCKED` with `missing_fields=acceptance_checks`.
+  - 中文解释：模型把“要写什么”写进了 goal，但没有额外填结构化验收项。系统之前太死板，看到 acceptance 空就让叶子停住。
+  - Root cause: `schedule_child_subagents` accepted omitted `acceptance_checks` and persisted the child task with an empty list; Context Gate then correctly treated the bundle as incomplete.
+  - Fix: hierarchy scheduler now derives minimal acceptance checks from child goal and role when the model omits them. For leaf/write tasks it emphasizes target artifact existence and goal consistency; for coordinator tasks it emphasizes child ids, status, next step, and evidence/artifact refs.
+  - Verification: `python3 -m pytest -q agent_py_agent/tests/test_subagent_hierarchy_scheduler.py::test_hierarchy_schedule_derives_acceptance_checks_when_model_omits_them` -> passed.
+- Finding 32: max-tool-round final response could still contain a tool call.
+  - Symptom: after tool rounds reached the configured limit, the model still emitted another `subagent_board` / `read_artifact` style tool call during the final collection turn.
+  - 中文解释：系统已经说“不能再用工具了”，但模型还想继续查；这种内容不能再当成最终答案，否则上层会被误导。
+  - Fix: `_tool_loop_service` now gives the model one final response chance after max rounds; if that response still contains a tool call, it returns a deterministic stop message and executes no more tools.
+  - Verification: `python3 -m pytest -q agent_py_agent/tests/test_tools/test_tool_loop.py::test_max_tool_rounds_hard_stops_when_model_still_requests_tools` -> passed.
+- Remaining gaps:
+  - Need rerun the four-level smoke after the fixes to verify leaf now writes the proof file through the proper parent-created chain.
+  - The root tried to read a child context bundle before child execution context existed; this is not fatal, but schedule payloads should eventually expose clearer “context bundle available after dispatch” refs.
+  - MiniMax Anthropic-compatible streaming returned an empty stream in one prior attempt; this E2E used non-stream mode. Streaming should be tested separately before becoming default for deep subagent chains.
+
+## 2026-05-10 Context Lineage Trace5 Content-Check Retest
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - First fixed runtime root: `/Users/example/my-终端应用/.my_agent_runtime/context_lineage_trace5_override2_20260510_232744`.
+  - Passing runtime root: `/Users/example/my-终端应用/.my_agent_runtime/context_lineage_trace5_contentcheck_20260510_234017`.
+  - Passing deliverables root: `/Users/example/my-终端应用/deliverables/context_lineage_trace5_contentcheck_20260510_234017`.
+  - Root run: `subagent-1778427653-19a3726d`.
+  - Model name: `MiniMax-M2.7`, `stream_enabled=false`, `subagent_debug_trace_level=5`.
+  - Observation rule: the outer controller only seeded/dispatched root; root created child, child created grandchild, grandchild created leaf.
+- 中文说明：
+  - 这轮复测严格按“只观察 root，不替下层干活”的方式跑。leaf 自己通过 `write_file` 写出 `proof.txt`，外层只看 board、dispatch report 和 debug trace。
+  - level 5 trace 能看到每层模型 prompt、模型回复、工具 payload 和工具输出的 detail ref，方便定位“谁创建了谁、谁传了什么提示词、谁调用了什么工具”。
+- Observed facts:
+  - Failing-first retest `context_lineage_trace5_override2_20260510_232744` proved leaf could write `proof.txt=context-lineage-ok`, but root acceptance failed because runner output recommended `cat <proof.txt>` and the parent test executor correctly rejected `cat` as non-allowlisted.
+  - Focused rerun on the same root after the fix:
+    - `subagents-tests subagent-1778426892-0587c5a8 --re-run --timeout 120` -> `total=1 executed=1 passed=1 failed=0`, method=`content_check`.
+  - Full rerun `context_lineage_trace5_contentcheck_20260510_234017` completed the chain:
+    - root `subagent-1778427653-19a3726d`.
+    - child `subagent-1778427689-78c18f36`.
+    - grandchild `subagent-1778427721-63ec70f1`.
+    - leaf `subagent-1778427774-dc843624`.
+    - final dispatch summary: runner OK, acceptance OK.
+  - Final artifact exists at `/Users/example/my-终端应用/deliverables/context_lineage_trace5_contentcheck_20260510_234017/proof.txt` with exact text `context-lineage-ok`.
+- Finding 33: model-style `cat file` content checks should not loosen command safety.
+  - Symptom: root produced a parent test command `cat /Users/example/my-终端应用/deliverables/.../proof.txt`; the bounded executor rejected it as `测试命令不在 allowlist 内: cat`.
+  - 中文解释：产物文件是真的对，但验收方式不对。不能为了这一个场景把 `cat` 放进命令白名单，因为 `cat` 可以读大文件或无关文件。
+  - Fix: `prepare_test_items()` now rewrites safe, workspace-local `cat <file>` checks into `validation_method=content_check` when an explicit or narrow inferred expected content exists. The executor reads the workspace-local file through its file validation path instead of running `cat`.
+  - Extra guard: `content_check` now supports `content_equals` / `expected_content` plus `match_mode=exact`, so exact file contracts do not pass when extra characters or newlines are present.
+  - Prompt fix: runner contract now tells models to use `content_check` for file-content validation and not to write `cat` commands.
+- Finding 34: coordinator completion override works for tool-limit cleanup, but prompt pressure remains.
+  - Symptom: child/root coordinators still sometimes continue reading board/artifact refs after all direct children are already `DONE/VERIFIED`.
+  - 中文解释：任务已经完成了，但模型还想“再确认一下”。系统现在能兜底收口，不会因此误判失败；但后续还要继续让 coordinator 更早停止，减少模型调用和 token。
+  - Verification: both `context_lineage_trace5_override2_20260510_232744` and `context_lineage_trace5_contentcheck_20260510_234017` reached acceptance after direct children completed even when the model tried extra tool calls near the max-tool boundary.
+- Verification:
+  - `python3 -m pytest -q agent_py_agent/tests/test_subagent_test_item_preparation.py::test_prepare_test_items_converts_cat_content_assertion_to_content_check` -> passed.
+  - `python3 -m pytest -q agent_py_agent/tests/test_subagent_test_executor.py::test_test_executor_content_check_supports_exact_match` -> passed.
+  - Real MiniMax rerun `context_lineage_trace5_contentcheck_20260510_234017` -> root dispatch acceptance passed.
+- Remaining gaps:
+  - Coordinator prompt/tool-use quality still needs tuning so parent nodes stop after direct child verification instead of repeatedly reading artifacts.
+  - Streaming mode for Anthropic-compatible MiniMax remains unverified for deep chains; keep non-stream mode for this E2E until a separate streaming smoke passes.

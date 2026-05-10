@@ -262,13 +262,17 @@ def _write_context_bundle_files(context: SubAgentExecutionContext) -> None:
         if key not in {"gate", "context_bundle_json", "context_bundle_file"}
     }
     gate_payload = payload.get("gate") or {}
-    Path(context.context_bundle_json).write_text(
+    bundle_json = Path(context.context_bundle_json)
+    bundle_json.parent.mkdir(parents=True, exist_ok=True)
+    bundle_json.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     bundle = build_context_bundle_from_payload(bundle_payload)
     gate = context_gate_report_from_payload(gate_payload)
-    Path(context.context_bundle_file).write_text(
+    bundle_file = Path(context.context_bundle_file)
+    bundle_file.parent.mkdir(parents=True, exist_ok=True)
+    bundle_file.write_text(
         render_context_bundle_markdown(bundle, gate),
         encoding="utf-8",
     )

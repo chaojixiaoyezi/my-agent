@@ -17,6 +17,7 @@ from .backends import (
     DuplicateSubagentDelegationBackend,
     MaxToolRoundBackend,
     RepeatedDispatchBackend,
+    StubbornToolAfterLimitBackend,
     SubagentDelegationBackend,
     ToolCallingBackend,
     make_tool_registry,
@@ -171,6 +172,24 @@ def test_max_tool_rounds_generates_final_response():
         result = agent.run("读取 notes", save=False)
 
         assert result.response == "工具轮数到顶后已正常收口。"
+        assert result.tool_rounds == 0
+        assert agent.backend.calls == 2
+
+
+# LLM: tool loop must not return a fresh TOOL_CALL as the final answer after max rounds.
+# 函数用途: 模拟模型不听收口提示仍继续要工具，验证系统返回确定性停止说明而不是继续误导上层。
+def test_max_tool_rounds_hard_stops_when_model_still_requests_tools():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl", max_tool_rounds=0)
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = StubbornToolAfterLimitBackend()
+
+        result = agent.run("读取 notes", save=False)
+
+        assert "已达到最大工具轮数限制" in result.response
+        assert "后续工具请求不会被执行" in result.response
+        assert "[TOOL_CALL]" not in result.response
         assert result.tool_rounds == 0
         assert agent.backend.calls == 2
 

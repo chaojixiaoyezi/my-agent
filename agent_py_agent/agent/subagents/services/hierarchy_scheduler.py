@@ -10,49 +10,23 @@ from typing import Any
 from ..debug_trace import trace_hierarchy_schedule
 from ..models import SubAgentTask
 from .base import CreateRunParams
+from .hierarchy_acceptance import scheduled_child_acceptance_checks
 from .hierarchy_context import inherited_hierarchy_thought, scheduled_child_goal
 from .hierarchy_role_identity import role_from_child_spec_identity
 from .hierarchy_scope_guards import schedule_block_reason
+from .hierarchy_tool_policy import (
+    LeafWriteIntentRequest,
+    ToolPolicyRequest,
+    scheduled_child_tools,
+    should_infer_leaf_coding_tools,
+)
 from .hierarchy_write_policy import (
     ScheduledWriteRootRequest,
     inherited_extra_write_roots,
     scheduled_child_extra_write_roots,
 )
 
-_DEFAULT_LEAF_CODING_TOOLS = [
-    "list_files",
-    "read_file",
-    "search_text",
-    "write_file",
-    "append_file",
-    "replace_in_file",
-]
-_LEAF_ORCHESTRATION_TOOLS = {"schedule_child_subagents", "dispatch_subagents", "subagent_board"}
-_TOOL_NAME_ALIASES = {
-    "append": "append_file",
-    "list": "list_files",
-    "read": "read_file",
-    "replace": "replace_in_file",
-    "search": "search_text",
-    "write": "write_file",
-}
-_WRITE_INTENT_MARKERS = (
-    "write_file",
-    "append_file",
-    "replace_in_file",
-    "写入",
-    "写文件",
-    "产物路径",
-    "output path",
-    "deliverable",
-    ".py",
-    ".md",
-    ".json",
-    ".txt",
-    ".html",
-    ".css",
-    ".js",
-)
+
 # LLM: HierarchyChildSpec is the stable bundle for one planned descendant run.
 # 类用途: 描述一个待创建的子/孙代理任务，避免用散乱 kwargs 扩展层级调度接口。
 @dataclass(frozen=True)
@@ -108,6 +82,17 @@ class HierarchyScheduleResult:
     items: list[HierarchyScheduledItem]
     manual_confirmation_required: bool = True
     automatic_execution_allowed: bool = False
+
+
+# LLM: HierarchyCreateChildRequest separates child creation facts from the persistence call.
+# 类用途: 保存创建一个 child run 所需的已推导字段，供参数组装 helper 使用。
+@dataclass(frozen=True)
+class HierarchyCreateChildRequest:
+    parent: SubAgentTask
+    spec: HierarchyChildSpec
+    role: str
+    goal: str
+    extra_write_roots: list[str]
 
 # LLM: SubAgentHierarchyScheduler owns hierarchy limits and delegates actual persistence to SubAgentManager.
 # 类用途: 封装层级创建规则；只通过 manager.create_run 写任务，避免绕开既有工单/控制面同步。
@@ -202,32 +187,72 @@ def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) 
             role=role,
             spec_role=spec.role,
             requested_roots=requested_write_roots,
-            leaf_write_intent=_should_infer_leaf_coding_tools(spec, requested_write_roots, goal=role_probe_goal),
+            leaf_write_intent=should_infer_leaf_coding_tools(
+                LeafWriteIntentRequest(
+                    spec=spec,
+                    extra_write_roots=requested_write_roots,
+                    goal=role_probe_goal,
+                )
+            ),
         )
     )
     goal = scheduled_child_goal(parent, spec, write_roots=extra_write_roots)
     return manager.create_run(
-        params=CreateRunParams(
-            goal=goal,
-            thought=spec.thought or inherited_hierarchy_thought(parent, child_goal=goal),
-            plan=spec.plan or ["读取父级 refs", "执行小切片", "写回状态和证据 refs", "等待父级验收"],
-            agent_name=spec.agent_name or spec.role or "worker",
-            role=role,
-            parent_id=parent.id,
-            root_id=parent.root_id or parent.id,
-            depth=parent.depth + 1,
-            allowed_skills=spec.allowed_skills or list(parent.allowed_skills),
-            allowed_tools=_scheduled_child_tools(parent, spec, extra_write_roots, goal=goal),
-            owner=spec.agent_name or spec.role or parent.owner,
-            supervisor=parent.id,
-            final_owner=parent.final_owner or parent.owner,
-            acceptance_checks=spec.acceptance_checks,
-            quality_contract=parent.quality_contract,
-            context_manifest=parent.context_manifest,
-            context_packs=parent.context_packs,
-            extra_write_roots=extra_write_roots,
-            workflow_mode="off",
+        params=_create_child_params(
+            HierarchyCreateChildRequest(
+                parent=parent,
+                spec=spec,
+                role=role,
+                goal=goal,
+                extra_write_roots=extra_write_roots,
+            )
         )
+    )
+
+
+# LLM: _create_child_params maps derived hierarchy facts into the existing CreateRunParams bundle.
+# 函数用途: 只负责组装 create_run 参数；不创建文件、不读取状态，便于后续增字段时局部修改。
+def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParams:
+    parent = request.parent
+    spec = request.spec
+    return CreateRunParams(
+        goal=request.goal,
+        thought=spec.thought or inherited_hierarchy_thought(parent, child_goal=request.goal),
+        plan=spec.plan or ["读取父级 refs", "执行小切片", "写回状态和证据 refs", "等待父级验收"],
+        agent_name=spec.agent_name or spec.role or "worker",
+        role=request.role,
+        parent_id=parent.id,
+        root_id=parent.root_id or parent.id,
+        depth=parent.depth + 1,
+        allowed_skills=spec.allowed_skills or list(parent.allowed_skills),
+        allowed_tools=scheduled_child_tools(
+            ToolPolicyRequest(
+                parent_tools=list(parent.allowed_tools),
+                spec=spec,
+                extra_write_roots=request.extra_write_roots,
+                goal=request.goal,
+            )
+        ),
+        owner=spec.agent_name or spec.role or parent.owner,
+        supervisor=parent.id,
+        final_owner=parent.final_owner or parent.owner,
+        acceptance_checks=scheduled_child_acceptance_checks(
+            spec,
+            role=request.role,
+            goal=request.goal,
+            leaf_write_intent=should_infer_leaf_coding_tools(
+                LeafWriteIntentRequest(
+                    spec=spec,
+                    extra_write_roots=inherited_extra_write_roots(parent),
+                    goal=request.goal,
+                )
+            ),
+        ),
+        quality_contract=parent.quality_contract,
+        context_manifest=parent.context_manifest,
+        context_packs=parent.context_packs,
+        extra_write_roots=request.extra_write_roots,
+        workflow_mode="off",
     )
 
 
@@ -243,7 +268,9 @@ def _scheduled_child_role(
     role = role_from_child_spec_identity(spec)
     if role not in {"worker", "general", "child"}:
         return role
-    if _should_infer_leaf_coding_tools(spec, extra_write_roots or [], goal=goal):
+    if should_infer_leaf_coding_tools(
+        LeafWriteIntentRequest(spec=spec, extra_write_roots=extra_write_roots or [], goal=goal)
+    ):
         return "leaf_worker"
     tools = set(spec.allowed_tools or [])
     if "schedule_child_subagents" not in tools and "dispatch_subagents" not in tools:
@@ -254,73 +281,6 @@ def _scheduled_child_role(
     if depth == 2:
         return "grandchild_coordinator"
     return "coordinator"
-
-# LLM: _scheduled_child_tools preserves report-write tools for leads and file tools for product-writing leaves.
-# 函数用途: coordinator 可写本地报告，leaf 写业务产物时补安全文件工具；产品写入根由 extra_write_roots 单独控制。
-def _scheduled_child_tools(
-    parent: SubAgentTask,
-    spec: HierarchyChildSpec,
-    extra_write_roots: list[str],
-    *,
-    goal: str | None = None,
-) -> list[str]:
-    should_infer_leaf_tools = _should_infer_leaf_coding_tools(spec, extra_write_roots, goal=goal)
-    if spec.allowed_tools:
-        explicit_tools = [_canonical_tool_name(item) for item in spec.allowed_tools]
-        if _is_coordinator_spec(spec):
-            return _coordinator_tools(explicit_tools)
-        if should_infer_leaf_tools:
-            return _leaf_write_tools([*explicit_tools, *_DEFAULT_LEAF_CODING_TOOLS])
-        return list(dict.fromkeys(explicit_tools))
-    parent_tools = list(parent.allowed_tools)
-    if _is_coordinator_spec(spec):
-        return _coordinator_tools(parent_tools)
-    if should_infer_leaf_tools:
-        return _leaf_write_tools([*parent_tools, *_DEFAULT_LEAF_CODING_TOOLS])
-    return parent_tools
-
-
-# LLM: _leaf_write_tools strips hierarchy orchestration grants from concrete product-writing leaves.
-# 函数用途: 给 leaf 写文件任务保留文件读写工具，去掉继续派下级的工具，避免叶子递归生孩子。
-def _leaf_write_tools(tools: list[str]) -> list[str]:
-    return list(dict.fromkeys(tool for tool in tools if tool not in _LEAF_ORCHESTRATION_TOOLS))
-
-
-# LLM: _coordinator_tools preserves report-writing tools but keeps this hook for orchestration policy.
-# 函数用途: coordinator/lead 可以写自己的计划/证据报告；业务产物仍交给 worker/writer 和写入边界控制。
-def _coordinator_tools(tools: list[str]) -> list[str]:
-    return list(dict.fromkeys(tools))
-
-
-# LLM: _canonical_tool_name maps common model aliases to real ToolRegistry names before runner prompts see them.
-# 函数用途: 把模型常写的 write/read/list 等口语化工具名转成真实工具名，避免 leaf 拿到不可调用工具。
-def _canonical_tool_name(tool_name: object) -> str:
-    text = str(tool_name or "").strip()
-    return _TOOL_NAME_ALIASES.get(text, text)
-
-
-# LLM: _should_infer_leaf_coding_tools keeps automatic write-tool inference narrow and auditable.
-# 函数用途: 只在非 coordinator child、继承了写入根、文本里有明确写文件意图时返回 True。
-def _should_infer_leaf_coding_tools(
-    spec: HierarchyChildSpec,
-    extra_write_roots: list[str],
-    *,
-    goal: str | None = None,
-) -> bool:
-    if not extra_write_roots:
-        return False
-    if _is_coordinator_spec(spec):
-        return False
-    intent_text = "\n".join([goal or spec.goal, *spec.acceptance_checks]).lower()
-    return any(marker.lower() in intent_text for marker in _WRITE_INTENT_MARKERS)
-
-
-# LLM: _is_coordinator_spec centralizes the role/name check used by role and tool inference.
-# 函数用途: 判断 child spec 是否明确是协调节点，避免写工具和 leaf 归一化规则误伤。
-def _is_coordinator_spec(spec: HierarchyChildSpec) -> bool:
-    role_text = f"{spec.role} {spec.agent_name}".lower()
-    return "coordinator" in role_text or "lead" in role_text
-
 
 # LLM: _planned_items mirrors created item shape while keeping run_id empty in dry-runs.
 # 函数用途: 生成预览条目，调用方无需猜测 root/depth/parent。

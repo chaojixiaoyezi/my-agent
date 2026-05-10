@@ -162,6 +162,22 @@ class MaxToolRoundBackend(BaseBackend):
         return ModelResponse(text="工具轮数到顶后已正常收口。", backend=self.name)
 
 
+# LLM: fake backend keeps requesting tools even during final max-round recovery.
+# 类用途: 复现真实模型到工具轮数上限后仍吐 TOOL_CALL 的场景，确保系统硬收束。
+class StubbornToolAfterLimitBackend(BaseBackend):
+    name = "fake_stubborn_tool_after_limit_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        return ModelResponse(
+            text='[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]',
+            backend=self.name,
+        )
+
+
 class DemoHandler(BaseHTTPRequestHandler):
     """LLM: minimal HTTP handler for local integration tests of fetch and http_request tools.
 

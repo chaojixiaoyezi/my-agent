@@ -80,7 +80,7 @@ class SubAgentLeadershipRecoveryPlanner:
     def plan(self, request: SubAgentLeadershipRecoveryPlanOptions) -> LeadershipRecoveryPlanReport:
         stale_coordinators = self._stale_coordinators(request)
         failed_parents = self._failed_parent_sources(request, stale_coordinators)
-        coordinators = _unique_sources([*stale_coordinators, *failed_parents])
+        coordinators = _top_level_sources(self.manager, _unique_sources([*stale_coordinators, *failed_parents]))
         leaders = self._candidate_leaders(request)
         assignments, unassigned = _assign_coordinator_children(coordinators, leaders)
         return LeadershipRecoveryPlanReport(
@@ -112,9 +112,12 @@ class SubAgentLeadershipRecoveryPlanner:
             if issue.kind != "coordinator_heartbeat_stale":
                 continue
             try:
-                coordinators.append(self.manager.load(issue.run_id))
+                coordinator = self.manager.load(issue.run_id)
             except FileNotFoundError:
                 continue
+            if _is_scope_root(coordinator, request.root_id):
+                continue
+            coordinators.append(coordinator)
         return coordinators
 
     # LLM: _failed_parent_sources lets a replacement leader that later fails become a fresh handoff source.
@@ -194,6 +197,30 @@ def _unique_sources(tasks: list[SubAgentTask]) -> list[SubAgentTask]:
     return unique
 
 
+# LLM: _top_level_sources avoids recovering both an ancestor and its descendant in the same plan.
+# 函数用途: 同一轮接管只处理最高层失联父节点；子树会随父节点移动，避免重复分配和容量误耗尽。
+def _top_level_sources(manager: Any, tasks: list[SubAgentTask]) -> list[SubAgentTask]:
+    selected_ids = {task.id for task in tasks}
+    return [task for task in tasks if not _has_selected_ancestor(manager, task, selected_ids)]
+
+
+# LLM: _has_selected_ancestor walks parent refs without expanding artifacts or changing task state.
+# 函数用途: 判断某个候选恢复源是否已经被更高层候选覆盖，防止恢复计划同时处理父子两层。
+def _has_selected_ancestor(manager: Any, task: SubAgentTask, selected_ids: set[str]) -> bool:
+    parent_id = str(task.parent_id or "")
+    seen: set[str] = set()
+    while parent_id and parent_id not in seen:
+        if parent_id in selected_ids:
+            return True
+        seen.add(parent_id)
+        try:
+            parent = manager.load(parent_id)
+        except FileNotFoundError:
+            return False
+        parent_id = str(parent.parent_id or "")
+    return False
+
+
 # LLM: _assign_pending_children consumes leader capacity and returns only leftovers.
 # 函数用途: 为单个 coordinator 的孩子生成一个或多个 leader 批次，保持算法可预测。
 def _assign_pending_children(
@@ -235,6 +262,13 @@ def _remaining_capacity(leader: SubAgentTask, max_children: int) -> int:
 def _leader_matches_scope(leader: SubAgentTask, root_id: str) -> bool:
     normalized = str(root_id or "").strip()
     return not normalized or (leader.root_id or leader.id) == normalized
+
+
+# LLM: _is_scope_root prevents root run heartbeat staleness from becoming a child handoff source.
+# 函数用途: leadership recovery 只恢复 root 下方失联的 coordinator；root 本身是本次扫描边界。
+def _is_scope_root(task: SubAgentTask, root_id: str) -> bool:
+    normalized = str(root_id or "").strip()
+    return bool(normalized) and task.id == normalized
 
 
 # LLM: _leader_is_available rejects terminal or broken candidates before planning child load.

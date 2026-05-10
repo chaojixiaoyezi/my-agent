@@ -76,25 +76,33 @@ def _file_result(path: Path, exists: bool) -> dict[str, Any]:
     return result
 
 
-# LLM: _content_match_record reads one workspace-local text file and stores only match metadata.
-# 函数用途: 构造内容检查记录；不会把完整文件正文写入 validation_result。
+# LLM: _content_match_record reads one workspace-local text file and supports exact matches for cat normalization.
+# 函数用途: 构造内容检查记录；不会把完整文件正文写入 validation_result，可用于精确或包含匹配。
 def _content_match_record(
     test: dict[str, Any],
     path: Path,
     pattern: str,
+    *,
+    exact: bool = False,
 ) -> TestExecutionRecord:
     """Return a content_check validation record."""
 
     text = path.read_text(encoding="utf-8", errors="replace")
-    matched = pattern in text
+    matched = text == pattern if exact else pattern in text
     return TestExecutionRecord(
         test_name=_test_name(test),
         executed=True,
         exit_code=0 if matched else 1,
         executed_at=_utc_now_iso(),
         validation_method="content_check",
-        validation_result={"ok": matched, "matched": matched, "path": str(path), "pattern": pattern},
-        error="" if matched else "内容未匹配",
+        validation_result={
+            "ok": matched,
+            "matched": matched,
+            "path": str(path),
+            "pattern": pattern,
+            "match_mode": "exact" if exact else "contains",
+        },
+        error="" if matched else ("内容不相等" if exact else "内容未匹配"),
     )
 
 

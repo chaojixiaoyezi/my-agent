@@ -168,8 +168,8 @@ def _constraints(task: SubAgentTask) -> dict[str, object]:
         "allowed_write_roots": list(task.allowed_write_roots or []),
         "forbidden_write_roots": list(task.forbidden_write_roots or []),
         "locked_files": list(task.locked_files or []),
-        "failure_handoff_ref": task.failure_handoff_json,
-        "takeover_readiness_ref": task.takeover_readiness_json,
+        "failure_handoff_ref": _safe_string_ref(task, "failure_handoff_json"),
+        "takeover_readiness_ref": _safe_string_ref(task, "takeover_readiness_json"),
     }
 
 
@@ -177,13 +177,13 @@ def _constraints(task: SubAgentTask) -> dict[str, object]:
 # 函数用途: 生成旧工单目录和新 runtime workspace 的关键文件引用。
 def _workspace_refs(task: SubAgentTask) -> dict[str, str]:
     return {
-        "task_dir": task.task_dir,
-        "task_workspace": task.task_workspace_dir,
-        "agent_run_workspace": task.agent_run_workspace_dir,
-        "shared_blackboard": task.task_workspace_shared_blackboard,
-        "artifacts_dir": task.agent_run_artifacts_dir or task.output_dir,
-        "execution_context_json": task.execution_context_json,
-        "execution_context_file": task.execution_context_file,
+        "task_dir": _safe_string_ref(task, "task_dir"),
+        "task_workspace": _safe_string_ref(task, "task_workspace_dir"),
+        "agent_run_workspace": _safe_string_ref(task, "agent_run_workspace_dir"),
+        "shared_blackboard": _safe_string_ref(task, "task_workspace_shared_blackboard"),
+        "artifacts_dir": _safe_string_ref(task, "agent_run_artifacts_dir") or _safe_string_ref(task, "output_dir"),
+        "execution_context_json": _safe_string_ref(task, "execution_context_json"),
+        "execution_context_file": _safe_string_ref(task, "execution_context_file"),
     }
 
 
@@ -191,9 +191,9 @@ def _workspace_refs(task: SubAgentTask) -> dict[str, str]:
 # 函数用途: 约定子代理最终报告、结构化输出、证据、测试和产物引用，避免只返回自然语言。
 def _output_contract(task: SubAgentTask) -> dict[str, object]:
     return {
-        "final_report_ref": task.agent_run_final_report_md or task.debrief_file,
-        "runner_result_ref": task.runner_result_json,
-        "output_json_ref": task.output_json,
+        "final_report_ref": _safe_string_ref(task, "agent_run_final_report_md") or _safe_string_ref(task, "debrief_file"),
+        "runner_result_ref": _safe_string_ref(task, "runner_result_json"),
+        "output_json_ref": _safe_string_ref(task, "output_json"),
         "evidence_refs_required": True,
         "tests_ref_style": "refs_only_with_working_dir",
         "artifact_refs_required": True,
@@ -204,22 +204,32 @@ def _output_contract(task: SubAgentTask) -> dict[str, object]:
 # 函数用途: 记录当前子代理在任务树中的位置，以及直接父级 context bundle 的可读路径。
 def _lineage(task: SubAgentTask) -> dict[str, object]:
     parent_id = str(task.parent_id or "")
-    task_dir = Path(task.task_dir) if task.task_dir else Path("")
-    task_workspace = Path(task.task_workspace_dir) if task.task_workspace_dir else Path("")
-    parent_legacy_ref = str(task_dir.parent / parent_id / "context_bundle.json") if parent_id and task.task_dir else ""
-    parent_agent_ref = str(task_workspace / "agents" / parent_id / "context_bundle.json") if parent_id and task.task_workspace_dir else ""
+    task_dir_ref = _safe_string_ref(task, "task_dir")
+    task_workspace_ref = _safe_string_ref(task, "task_workspace_dir")
+    agent_run_ref = _safe_string_ref(task, "agent_run_workspace_dir")
+    task_dir = Path(task_dir_ref) if task_dir_ref else Path("")
+    task_workspace = Path(task_workspace_ref) if task_workspace_ref else Path("")
+    parent_legacy_ref = str(task_dir.parent / parent_id / "context_bundle.json") if parent_id and task_dir_ref else ""
+    parent_agent_ref = str(task_workspace / "agents" / parent_id / "context_bundle.json") if parent_id and task_workspace_ref else ""
     return {
         "root_id": task.root_id or task.id,
         "parent_id": parent_id,
         "depth": int(task.depth or 0),
-        "own_context_bundle_ref": str(Path(task.agent_run_workspace_dir) / "context_bundle.json")
-        if task.agent_run_workspace_dir
-        else "",
-        "own_legacy_context_bundle_ref": str(Path(task.task_dir) / "context_bundle.json") if task.task_dir else "",
+        "own_context_bundle_ref": str(Path(agent_run_ref) / "context_bundle.json") if agent_run_ref else "",
+        "own_legacy_context_bundle_ref": str(Path(task_dir_ref) / "context_bundle.json") if task_dir_ref else "",
         "parent_context_bundle_ref": parent_agent_ref,
         "parent_legacy_context_bundle_ref": parent_legacy_ref,
-        "inheritance_manifest_ref": task.inheritance_manifest_json,
+        "inheritance_manifest_ref": _safe_string_ref(task, "inheritance_manifest_json"),
     }
+
+
+# LLM: _safe_string_ref protects JSON context bundles from mocks or missing optional path refs.
+# 函数用途: 读取可选路径字段；只有字符串和 Path 会进入 bundle，MagicMock/None 等测试占位值会归一成空串。
+def _safe_string_ref(task: SubAgentTask, field_name: str) -> str:
+    value = getattr(task, field_name, "")
+    if isinstance(value, Path):
+        return str(value)
+    return value if isinstance(value, str) else ""
 
 
 # LLM: _source_refs makes every major bundle field traceable to existing task facts.

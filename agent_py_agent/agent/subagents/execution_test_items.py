@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
+from .execution_content_checks import CatContentCheckRequest, normalize_cat_content_check
+
 
 # LLM: TestItemPreparationRequest keeps test normalization inputs bundled for future schema fields.
 # 类用途: 保存测试项、runner 输出和 workspace 根目录；调用方用它生成可执行但仍受限的测试项。
@@ -34,6 +36,7 @@ class TestItemPreparationContext:
 
     artifact_dirs: dict[str, Path]
     artifact_paths: list[tuple[str, Path]]
+    artifact_summaries: dict[Path, str]
     fallback_dir: Path | None
     workspace_root: Path
 
@@ -48,6 +51,7 @@ def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, An
     context = TestItemPreparationContext(
         artifact_dirs=artifact_dirs,
         artifact_paths=_artifact_paths(request.output, workspace_root),
+        artifact_summaries=_artifact_summaries_by_path(request.output, workspace_root),
         fallback_dir=_single_artifact_dir(artifact_dirs),
         workspace_root=workspace_root,
     )
@@ -65,6 +69,13 @@ def _prepared_test_item(
     item = dict(test)
     _normalize_validation_method(item)
     _normalize_leading_cd_command(item, context.workspace_root)
+    item = normalize_cat_content_check(
+        CatContentCheckRequest(
+            item=item,
+            workspace_root=context.workspace_root,
+            artifact_summaries=context.artifact_summaries,
+        )
+    )
     if not _needs_working_dir(item):
         return item
     command_dir = _command_artifact_working_dir(item, context.artifact_paths, context.workspace_root)
@@ -168,6 +179,22 @@ def _artifact_paths(output: dict[str, object], workspace_root: Path) -> list[tup
         pair = (raw, path)
         if raw and pair not in values:
             values.append(pair)
+    return values
+
+
+# LLM: _artifact_summaries_by_path indexes artifact descriptions without reading artifact bodies.
+# 函数用途: 让常见“cat 文件，内容应为 X”的模型测试能从 artifact 摘要里恢复期望内容。
+def _artifact_summaries_by_path(output: dict[str, object], workspace_root: Path) -> dict[Path, str]:
+    values: dict[Path, str] = {}
+    for artifact in output.get("artifacts") or []:
+        if not isinstance(artifact, dict):
+            continue
+        path = _workspace_path(artifact.get("path"), workspace_root)
+        if path is None:
+            continue
+        summary = str(artifact.get("summary") or "").strip()
+        if summary:
+            values[path] = summary
     return values
 
 

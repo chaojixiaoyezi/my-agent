@@ -130,3 +130,22 @@ def test_test_executor_content_check_matches_literal_pattern(tmp_path):
     assert record.validation_method == "content_check"
     assert record.validation_result["ok"] is True
     assert record.validation_result["matched"] is True
+
+
+def test_test_executor_content_check_supports_exact_match(tmp_path):
+    """LLM: Exact content checks keep parent acceptance from accepting extra text."""
+    (tmp_path / "proof.txt").write_text("context-lineage-ok\n", encoding="utf-8")
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute({
+        "name": "proof exact",
+        "validation_method": "content_check",
+        "file_path": "proof.txt",
+        "content_equals": "context-lineage-ok",
+        "match_mode": "exact",
+    })
+
+    assert record.executed is True
+    assert record.passed is False
+    assert record.validation_result["match_mode"] == "exact"
+    assert record.error == "内容不相等"
