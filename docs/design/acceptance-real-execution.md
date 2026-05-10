@@ -426,7 +426,7 @@ my-agent subagents-acceptance --execute-tests --test-timeout 120
 1. 新增 `TestExecutionRecord` 数据模型（已落地第一片：`agent_py_agent/agent/subagents/execution_records.py`，当前只做记录模型、序列化、stdout/stderr 截断和 `passed` 派生结果）
 2. 实现 `TestExecutor` 类（已落地第一片：`agent_py_agent/agent/subagents/execution_executor.py`，当前不会自动影响 acceptance 状态）
 3. 实现命令安全性验证（已落地第一片：shell=False、基础 allowlist、高风险 shell 字符拦截、超时记录）
-4. 实现四种验证方式（command/file_check/content_check/static_site_check）（已落地：command 真实执行、file_check 元数据检查、content_check 字面量包含检查、static_site_check 静态页面链路检查）
+4. 实现四种验证方式（command/file_check/content_check/static_site_check）（已落地：command 真实执行、file_check 元数据检查、content_check 字面量包含检查、static_site_check 静态页面链路检查；多页 HTML artifacts 会自动补静态站点检查）
 
 ### 第二阶段：集成验收
 

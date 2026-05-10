@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from .execution_content_checks import CatContentCheckRequest, normalize_cat_content_check
+from .execution_static_site_items import StaticSiteTestItemsRequest, inferred_static_site_items
 
 
 # LLM: TestItemPreparationRequest keeps test normalization inputs bundled for future schema fields.
@@ -55,9 +56,20 @@ def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, An
         fallback_dir=_single_artifact_dir(artifact_dirs),
         workspace_root=workspace_root,
     )
-    if not request.tests:
-        return _artifact_pytest_items(context)
-    return [_prepared_test_item(test, context) for test in request.tests]
+    # LLM: Static-site inference appends refs-only checks after runner tests are normalized.
+    prepared = _artifact_pytest_items(context) if not request.tests else [
+        _prepared_test_item(test, context) for test in request.tests
+    ]
+    return [
+        *prepared,
+        *inferred_static_site_items(
+            StaticSiteTestItemsRequest(
+                artifact_paths=context.artifact_paths,
+                workspace_root=workspace_root,
+                existing_tests=prepared,
+            )
+        ),
+    ]
 
 
 # LLM: _prepared_test_item keeps cwd inference flat so the public helper stays easy to audit.
