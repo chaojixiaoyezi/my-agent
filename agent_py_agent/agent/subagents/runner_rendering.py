@@ -9,9 +9,11 @@ from .models import (
     SubAgentExecutionContext,
     SubAgentRunnerResult,
 )
+from .runner_rendering_context import render_context_bundle_section
 from .runner_rendering_sections import render_evidence_item_lines, render_granted_card_lines
 
 
+# LLM: execution-context Markdown includes context bundle refs before capabilities so handoff checks are visible first.
 # LLM: _render_execution_context_header 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 渲染或汇总execution上下文header的展示文本，保持命令行、日志和审计输出一致；关键副作用: 主要返回派生结构或文本，需保持字段名、顺序和空值处理稳定。
 def _render_execution_context_header(context):
@@ -175,6 +177,7 @@ def _render_open_gaps_section(context):
 def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
     lines = _render_execution_context_header(context)
     lines.extend(f"- {item}" for item in context.plan or ["未设置"])
+    lines.extend(render_context_bundle_section(context))
     lines.extend(_render_capabilities_section(context))
     lines.extend(_render_write_boundary_section(context))
     lines.extend(["", "## Acceptance Checks", ""])
@@ -192,6 +195,8 @@ def render_execution_context_markdown(context: SubAgentExecutionContext) -> str:
     )
     lines.extend(f"- {item}" for item in context.instructions)
     return "\n".join(lines) + "\n"
+
+
 # LLM: render_runner_result_markdown 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
 # 函数用途: 渲染或汇总执行器结果markdown的展示文本，保持命令行、日志和审计输出一致；关键副作用: 会影响任务状态、执行器结果、验收和报告展示，需保持重试、超时和状态迁移语义。
 def render_runner_result_markdown(result: SubAgentRunnerResult) -> str:

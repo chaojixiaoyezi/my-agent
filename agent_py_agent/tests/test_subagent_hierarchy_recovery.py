@@ -44,6 +44,8 @@ def _make_tree(manager: SubAgentManager):
                 )
             ).created_run_ids
         )
+    for run_id in [root.id, *children, *grandchildren]:
+        manager.write_execution_context(run_id)
     blocked = manager.load(grandchildren[0])
     artifact_path = Path(blocked.reports_dir) / "large.txt"
     artifact_path.write_text("DO_NOT_READ_THIS_RECOVERY_ARTIFACT_BODY", encoding="utf-8")
@@ -77,6 +79,8 @@ def test_hierarchy_recovery_packet_collects_multilevel_candidates_refs_only(tmp_
     assert result.recovery_candidate_count == 2
     assert {item.run_id for item in result.recovery_candidates} == {grandchildren[0], grandchildren[-1]}
     assert all(item.takeover_readiness_ref for item in result.recovery_candidates)
+    assert all(item.context_bundle_ref.endswith("context_bundle.json") for item in result.recovery_candidates)
+    assert all(item.parent_context_bundle_ref.endswith("context_bundle.json") for item in result.recovery_candidates)
     assert all(item.recommended_command.startswith("my-agent subagents-acceptance-plan") for item in result.recovery_candidates)
     assert "DO_NOT_READ_THIS_RECOVERY_ARTIFACT_BODY" not in payload
 
@@ -151,6 +155,8 @@ def test_hierarchy_recovery_packet_includes_unfinished_child_after_parent_timeou
     ).created_run_ids[0]
     root_task = manager.load(root.id)
     root_task.status = "TIMEOUT"
+    manager.write_execution_context(root.id)
+    manager.write_execution_context(child_id)
     manager.save(root_task)
 
     result = manager.build_hierarchy_recovery_packet(
@@ -162,4 +168,6 @@ def test_hierarchy_recovery_packet_includes_unfinished_child_after_parent_timeou
     assert [item.run_id for item in result.nodes] == [root.id, child_id]
     assert child.needs_recovery is True
     assert child.recovery_reason == f"parent_timeout_unfinished_child:{root.id}"
+    assert child.context_bundle_ref.endswith("context_bundle.json")
+    assert child.parent_context_bundle_ref.endswith("context_bundle.json")
     assert "subagents-recovery-tree" in child.recommended_command

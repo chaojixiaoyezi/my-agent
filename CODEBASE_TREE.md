@@ -934,6 +934,7 @@ docs/
 - `agent_py_agent/agent/agent_core/runner_stage_trace.py`: 把子代理 runner 的模型请求/响应/失败和工具调用开始/结束写入 level 3 debug trace；只记录长度、backend、工具名、payload keys 和 ok，不记录 prompt/response/tool output 正文。
 - `agent_py_agent/agent/subagents/services/control_plane_projection.py`: 在 subagent 保存时把 task 当前状态投影到 LocalStore 控制面；它只做查询索引，不替代旧工单目录或 runtime workspace 事实源。
 - `agent_py_agent/agent/subagents/debug_trace.py`: 子代理正式调试追踪开关的写入层；`subagent_debug_trace_level=0` 时完全静默，开启后只把 bounded refs-only 事件写入内部 `debug_traces/subagent_trace.jsonl`。
+- `agent_py_agent/agent/subagents/context_bundle.py`: 生成 runner-facing `context_bundle.json` / `CONTEXT_BUNDLE.md`，包含目标、计划、验收、权限、写入边界、输出合同、lineage 和 Context Gate；多层传递只保存当前/父级 bundle refs，不展开父级正文。
 - `agent_py_agent/agent/subagents/result_structured.py`: 解析 runner structured output 并写回 artifacts、tests、evidence packets、findings 和 capability requests；artifact 证据合成委托给小模块，保持解析主流程薄。
 - `agent_py_agent/agent/subagents/result_artifact_evidence.py`: 从 runner artifact metadata 合并 `artifact_refs`，并在模型漏写 `evidence_packets` 时合成 refs-only artifact evidence packet，不读取 artifact 正文。
 - `agent_py_agent/agent/subagents/services/persistence.py`: 负责 task/run/status report 落盘和旧任务兼容归一化；保存时会合并磁盘已有 `child_ids`，避免旧父/子快照覆盖新派生的层级链接。
@@ -943,7 +944,7 @@ docs/
 - `agent_py_agent/agent/subagents/services/failure_handoff.py`: 生成失败交接记录，保存 warning、risk level、checkpoint refs、artifact/evidence refs、避坑建议和推荐下一步。
 - `agent_py_agent/agent/subagents/services/persistence_failure_handoff.py`: 负责失败交接记录的读取归一化和 `reports/failure_handoff.json` 写入，避免 persistence 主流程继续膨胀。
 - `agent_py_agent/agent/subagents/services/persistence_recovery_outputs.py`: 集中写入 checkpoint artifacts 和 takeover readiness 文件，让 persistence 主流程保持薄编排。
-- `agent_py_agent/agent/subagents/services/takeover_readiness.py`: 生成接管前必读包 `reports/takeover_readiness.json` 和 `TAKEOVER_READINESS.md`，只保存 refs、artifact manifest 元数据和读取顺序，不读取大正文。
+- `agent_py_agent/agent/subagents/services/takeover_readiness.py`: 生成接管前必读包 `reports/takeover_readiness.json` 和 `TAKEOVER_READINESS.md`，只保存 context bundle refs、checkpoint refs、artifact manifest 元数据和读取顺序，不读取大正文。
 - `agent_py_agent/agent/subagents/rendering_rescue.py`: 渲染 rescue packet 的 refs-only 摘要，避免主 `rendering.py` 因接管/救援展示继续膨胀。
 - `agent_py_agent/agent/memory_archive/compact_resume_failsafe.py`: 从 compact restore refs 指向的 hook JSONL 中提取工具输出外置前 fail-safe checkpoint，保持 memory-resume refs-only。
 - `agent_py_agent/agent/memory_archive/compact_continue_packet.py`: 把 compact resume 后的 work_state、action guard、推荐读取路径和 subagent owner refs 固定成继续工作包；它只表达恢复上下文可继续，不执行工具或业务验收。
@@ -976,7 +977,7 @@ docs/
 - `agent_py_agent/agent/subagents/services/hierarchy_role_identity.py`: 从 scheduler 拆出的角色 identity 兜底策略，根据 `agent_name` / `goal` 恢复模型漏填的 researcher/tester/acceptor/bug_finder/writer/worker 等角色。
 - `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 从 scheduler 中拆出的层级 scope guard，集中处理空计划、深度/数量限制、禁止 sibling 领域、同批混建 coordinator/leaf 和 domain mismatch。
 - `agent_py_agent/agent/subagents/services/hierarchy_write_policy.py`: 层级写入根策略，区分 task-local 报告写入和最终产品写入；coordinator/researcher/tester/bug_finder/acceptor 可保留产品路径上下文但不继承产品写入根。
-- `agent_py_agent/agent/subagents/services/hierarchy_recovery.py`: 新增多层恢复包服务，从 root run 只读扫描子树，返回需要恢复的后代、接管入口和 checkpoint refs；现在也可按 capability 阈值标记 stale `RUNNING` 后代，不读取 artifact 正文。
+- `agent_py_agent/agent/subagents/services/hierarchy_recovery.py`: 多层恢复包服务，从 root run 只读扫描子树，返回需要恢复的后代、当前/父级 context bundle refs、接管入口和 checkpoint refs；现在也可按 capability 阈值标记 stale `RUNNING` 后代，不读取 artifact 正文。
 - `agent_py_agent/agent/subagents/services/board.py`: due-check 和 plan-actions 支持 root_id 作用域，真实 E2E 多棵任务树共用 workspace 时可以只看当前 root 并只生成当前树动作。
 - `agent_py_agent/agent/subagents/services/board_due_models.py`: due-check 共享参数包和 issue 构造 helper，避免巡检谓词文件继续膨胀。
 - `agent_py_agent/agent/subagents/services/board_due_checks.py`: due-check heartbeat/run-timeout 规则把已派生 child runs 的 parked `PLANNING` coordinator 转成 `coordinator_heartbeat_stale` 领导权恢复问题，避免误当普通 runner 接管，同时不会静默漏掉失联 coordinator。
@@ -1014,7 +1015,8 @@ docs/
 - `agent_py_agent/tests/test_local_store_shared_progress_panel.py`: 覆盖共享进度面板如何组合 runtime query、task rollup、blocked runs、inheritance manifest refs 和 takeover readiness refs。
 - `agent_py_agent/tests/test_subagent_inheritance_manifest.py`: 覆盖 parent/child 创建时的继承、覆盖、裁剪记录和 manifest JSON 落盘。
 - `agent_py_agent/tests/test_subagent_failure_handoff.py`: 覆盖失败/阻塞 run 保存时的 failure handoff JSON 落盘和 LocalStore metadata refs。
-- `agent_py_agent/tests/test_subagent_takeover_readiness.py`: 覆盖接管前必读包生成、落盘和不读取 artifact 正文的边界。
+- `agent_py_agent/tests/test_subagent_context_bundle.py`: 覆盖 Context Bundle v1 字段、Context Gate、runner prompt 接入、agent run workspace 镜像和四层 lineage refs。
+- `agent_py_agent/tests/test_subagent_takeover_readiness.py`: 覆盖接管前必读包生成、context bundle refs、落盘和不读取 artifact 正文的边界。
 - `agent_py_agent/tests/test_subagent_security_reserve.py`: 覆盖安全信号预留字段随 task 持久化，并投影到 LocalStore metadata。
 - `agent_py_agent/tests/test_subagent_test_execution_record.py`: 覆盖真实验收执行记录模型的序列化、stdout/stderr 截断和 `passed` 语义。
 - `agent_py_agent/tests/test_subagent_test_executor.py`: 覆盖最小真实验收执行器的 command、危险字符拦截、file_check 和 content_check 行为。

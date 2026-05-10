@@ -1768,3 +1768,42 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Parent acceptance dry-run and manual auto-execution now both reuse `prepare_test_items()` before command safety checks or execution.
   - 中文解释：真实模型经常同时写 `cd <目录> && pytest ...` 和 `working_dir`。系统现在会在确认目录位于 workspace 内后，把它拆成 `working_dir=<目录>` 加 `python3 -m pytest ...` 纯命令；仍然不放开 shell，不允许任意 `&&`、`;`、管道或越界目录。
   - Verification: focused tests cover both the non-mutating parent preflight path and the explicit `ParentAcceptanceAutoExecutionOptions(execute_tests=True)` path.
+
+## 2026-05-10 Context Bundle Single-Subagent E2E
+
+- Test scene:
+  - Command: `python3 -m agent_py_agent scenario-test --case happy --workspace /tmp/my_agent_context_bundle_e2e_real --count 1 --max-runners 1 --max-cycles 2 --direct`.
+  - Run root: `/private/tmp/my_agent_context_bundle_e2e_real/scenario-20260510-220517-1b2a68`.
+  - Root flow: main agent created one subagent, dispatch ran the runner, parent acceptance verified it.
+  - Run id: `subagent-1778421942-b122db0e`.
+- 中文说明：
+  - 这轮只验证“主节点创建和推进子代理时，Context Bundle 是否真实进入 runner 路径”，没有绕过主节点直接替子代理干活。
+  - dry-run 版本也验证过 bundle 生成，但 scenario 脚本因为 dry-run 不进入 VERIFIED 会返回 `SCENARIO_FAIL`；非 dry-run 场景使用内置 scenario backend 完成并返回 `SCENARIO_PASS`。
+- Observed facts:
+  - Legacy run dir wrote `context_bundle.json` and `CONTEXT_BUNDLE.md`.
+  - Agent run workspace mirrored the same files under `tasks/<root_id>/agents/<run_id>/`.
+  - `EXECUTION_CONTEXT.md` exposes both legacy and agent-run context bundle refs.
+  - `runner_prompt.md` includes `## Context Bundle Gate` and `Context Gate: PASS`.
+  - Both bundle JSON files report `schema_version=subagent_context_bundle.v1`, `gate.ok=true`, and `missing_fields=[]`.
+- Remaining gaps:
+  - Context Gate v1 currently guides the runner prompt; it does not yet hard-stop dispatch before runner invocation.
+  - Bundle source refs are task-field based; later phases should add compact/resume/daily-ledger refs when those are the real source of a field.
+
+## 2026-05-10 Context Bundle Multilevel / Recovery Control Tests
+
+- Test scene:
+  - Focused control-plane tests, not a fresh external-model E2E.
+  - Commands covered:
+    - `python3 -m pytest -q agent_py_agent/tests/test_subagent_context_bundle.py agent_py_agent/tests/test_subagent_takeover_readiness.py`
+    - `python3 -m pytest -q agent_py_agent/tests/test_subagent_hierarchy_recovery.py agent_py_agent/tests/test_subagent_hierarchy_cli_e2e.py`
+- 中文说明：
+  - 这轮先把“多层代理怎么拿到父级交接包”和“挂了以后接管者先读什么”做成确定性测试。
+  - 它不是新的 1/4/16/48 真实模型大跑；真实大跑下一轮仍必须只启动 root，让 root 自己创建 child，child 自己创建 grandchild，grandchild 自己创建 leaf。
+- Observed facts:
+  - 每个 `context_bundle.json` 现在有 `lineage`，包含 root、parent、depth、自己的 bundle ref 和直接父级 bundle ref。
+  - 四层 root / child / grandchild / great-grandchild fixture 中，每一层 child 都能通过 ref 找到直接父级的 `tasks/<root_id>/agents/<parent_id>/context_bundle.json`。
+  - `takeover_readiness.json` 的推荐读取顺序现在包含 context bundle refs，位于 checkpoint / artifact manifest 前面。
+  - hierarchy recovery-tree 节点现在直接暴露 `context_bundle_ref` 和 `parent_context_bundle_ref`，用于失败、阻塞、超时和父超时残留 child 的恢复定位。
+- Remaining gaps:
+  - 这一步只保证 refs 和文件落点正确；还没有验证真实模型在大任务里会稳定按 lineage ref 阅读父级交接包。
+  - 后续真实测试需要用主节点单入口方式重跑小树，再逐步放大到 1/4/16/48 和购物网站项目。

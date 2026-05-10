@@ -33,6 +33,7 @@ def build_takeover_readiness_packet(task: SubAgentTask) -> dict[str, object]:
         "latest_summary": task.latest_summary,
         "blockers": _unique_strings(task.blockers),
         "failure_handoff_ref": task.failure_handoff_json if task.failure_handoff.run_id else "",
+        "context_bundle_refs": _context_bundle_refs(task),
         "checkpoint_refs": _checkpoint_refs(task),
         "artifact_refs": _unique_strings(task.artifact_refs),
         "artifact_manifest_ref": task.agent_run_artifact_manifest_jsonl or task.task_artifact_manifest_jsonl,
@@ -55,6 +56,7 @@ def build_takeover_readiness_packet(task: SubAgentTask) -> dict[str, object]:
 def render_takeover_readiness_markdown(packet: dict[str, object]) -> str:
     run = _dict_value(packet.get("run"))
     checkpoint_refs = _dict_value(packet.get("checkpoint_refs"))
+    context_bundle_refs = _dict_value(packet.get("context_bundle_refs"))
     return "\n".join(
         [
             "# TAKEOVER_READINESS",
@@ -65,11 +67,15 @@ def render_takeover_readiness_markdown(packet: dict[str, object]) -> str:
             f"- status: {packet.get('status', '')}",
             f"- current_step: {packet.get('current_step', '')}",
             f"- failure_handoff_ref: {packet.get('failure_handoff_ref', '') or 'none'}",
+            f"- context_bundle: {context_bundle_refs.get('agent_run_context_bundle', '') or 'none'}",
             f"- legacy_checkpoint: {checkpoint_refs.get('legacy_checkpoint', '') or 'none'}",
             f"- agent_run_checkpoint: {checkpoint_refs.get('agent_run_checkpoint', '') or 'none'}",
             "",
             "## 建议读取顺序",
             _render_list(_string_list(packet.get("recommended_read_order"))),
+            "",
+            "## Context Bundle Refs",
+            _render_key_values(context_bundle_refs),
             "",
             "## 阻塞项",
             _render_list(_string_list(packet.get("blockers"))),
@@ -141,12 +147,30 @@ def _checkpoint_refs(task: SubAgentTask) -> dict[str, str]:
     }
 
 
+# LLM: _context_bundle_refs points recovery readers to the handoff snapshot without copying prompt-sized content.
+# 函数用途: 收集旧工单和 agent run workspace 中的 context bundle 路径，供接管者先读任务边界。
+def _context_bundle_refs(task: SubAgentTask) -> dict[str, str]:
+    return {
+        "legacy_context_bundle": str(Path(task.task_dir) / "context_bundle.json") if task.task_dir else "",
+        "legacy_context_bundle_md": str(Path(task.task_dir) / "CONTEXT_BUNDLE.md") if task.task_dir else "",
+        "agent_run_context_bundle": str(Path(task.agent_run_workspace_dir) / "context_bundle.json")
+        if task.agent_run_workspace_dir
+        else "",
+        "agent_run_context_bundle_md": str(Path(task.agent_run_workspace_dir) / "CONTEXT_BUNDLE.md")
+        if task.agent_run_workspace_dir
+        else "",
+    }
+
+
 # LLM: _recommended_read_order lists refs to read later without opening them now.
 # 函数用途: 生成接管者的建议读取顺序，从 failure handoff 到 artifact refs 逐步展开。
 def _recommended_read_order(task: SubAgentTask) -> list[str]:
+    context_refs = _context_bundle_refs(task)
     refs = [
         task.failure_handoff_json if task.failure_handoff.run_id else "",
         task.takeover_readiness_json,
+        context_refs.get("agent_run_context_bundle", ""),
+        context_refs.get("legacy_context_bundle", ""),
         task.agent_run_checkpoint_json,
         task.checkpoint_json or task.checkpoint_ref,
         task.status_report_json,
@@ -240,6 +264,14 @@ def _list_dicts(value: object) -> list[dict[str, object]]:
 # 函数用途: 将字符串列表渲染为 Markdown bullet，空列表显示“暂无”。
 def _render_list(items: list[str]) -> str:
     return "\n".join(f"- {item}" for item in items) if items else "- 暂无"
+
+
+# LLM: _render_key_values keeps refs readable in Markdown without loading pointed files.
+# 函数用途: 把接管包里的键值引用渲染成列表；空值显示 none。
+def _render_key_values(items: dict[str, object]) -> str:
+    if not items:
+        return "- 暂无"
+    return "\n".join(f"- {key}: {value or 'none'}" for key, value in items.items())
 
 
 # LLM: _render_manifest_rows prints manifest metadata only, never artifact content.

@@ -33,13 +33,27 @@ def test_subagent_hierarchy_cli_e2e_creates_and_queries_recovery(tmp_path, capsy
     agent = SimpleAgent(load_config(config_path), tmp_path)
     root = agent.subagents.create_run(goal="root", thought="orchestrate", plan=["split"])
     parser = build_parser()
+    created = _create_child_runs(parser, config_path, root.id, capsys)
+    _write_hierarchy_contexts(agent, root.id, created["created_run_ids"])
+    blocked = _mark_blocked_child(agent, created["created_run_ids"][1])
+    recovery = _query_recovery_tree(parser, config_path, root.id, capsys)
 
+    assert recovery["root_run_id"] == root.id
+    assert recovery["node_count"] == 3
+    assert recovery["recovery_candidate_count"] == 1
+    assert [item["run_id"] for item in recovery["nodes"]] == [root.id, blocked.id]
+    assert recovery["recovery_candidates"][0]["takeover_readiness_ref"]
+    assert recovery["recovery_candidates"][0]["context_bundle_ref"].endswith("context_bundle.json")
+    assert recovery["recovery_candidates"][0]["parent_context_bundle_ref"].endswith("context_bundle.json")
+
+
+def _create_child_runs(parser, config_path: Path, root_id: str, capsys) -> dict[str, object]:
     create_args = parser.parse_args(
         [
             "--config",
             str(config_path),
             "subagents-hierarchy",
-            root.id,
+            root_id,
             "--child",
             "analyst:reporter-a:write report",
             "--child",
@@ -51,27 +65,33 @@ def test_subagent_hierarchy_cli_e2e_creates_and_queries_recovery(tmp_path, capsy
     assert create_args.func(create_args) == 0
     created = json.loads(capsys.readouterr().out)
     assert len(created["created_run_ids"]) == 2
+    return created
 
-    blocked = agent.subagents.load(created["created_run_ids"][1])
+
+def _write_hierarchy_contexts(agent: SimpleAgent, root_id: str, run_ids: list[str]) -> None:
+    agent.subagents.write_execution_context(root_id)
+    for run_id in run_ids:
+        agent.subagents.write_execution_context(run_id)
+
+
+def _mark_blocked_child(agent: SimpleAgent, run_id: str):
+    blocked = agent.subagents.load(run_id)
     blocked.status = "BLOCKED"
     blocked.blockers = ["checker waiting for reporter evidence"]
     agent.subagents.save(blocked)
+    return blocked
 
+
+def _query_recovery_tree(parser, config_path: Path, root_id: str, capsys) -> dict[str, object]:
     recovery_args = parser.parse_args(
         [
             "--config",
             str(config_path),
             "subagents-recovery-tree",
-            root.id,
+            root_id,
             "--hide-healthy",
             "--json",
         ]
     )
     assert recovery_args.func(recovery_args) == 0
-    recovery = json.loads(capsys.readouterr().out)
-
-    assert recovery["root_run_id"] == root.id
-    assert recovery["node_count"] == 3
-    assert recovery["recovery_candidate_count"] == 1
-    assert [item["run_id"] for item in recovery["nodes"]] == [root.id, blocked.id]
-    assert recovery["recovery_candidates"][0]["takeover_readiness_ref"]
+    return json.loads(capsys.readouterr().out)

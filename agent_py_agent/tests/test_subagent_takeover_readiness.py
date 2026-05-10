@@ -28,6 +28,7 @@ def test_takeover_readiness_packet_collects_refs_without_reading_artifact_body(t
     task.blockers = ["工具输出过大"]
     task.artifact_refs = ["reports/blackbox.txt"]
     task.evidence_refs = ["reports/status_report.json"]
+    manager.write_execution_context(task.id)
     manager.save(task)
 
     loaded = manager.load(task.id)
@@ -40,6 +41,10 @@ def test_takeover_readiness_packet_collects_refs_without_reading_artifact_body(t
     assert packet["run"]["run_id"] == task.id
     assert packet["run"]["root_id"] == task.root_id
     assert packet["failure_handoff_ref"] == loaded.failure_handoff_json
+    assert packet["context_bundle_refs"]["legacy_context_bundle"] == str(Path(loaded.task_dir) / "context_bundle.json")
+    assert packet["context_bundle_refs"]["agent_run_context_bundle"] == (
+        str(Path(loaded.agent_run_workspace_dir) / "context_bundle.json")
+    )
     assert packet["checkpoint_refs"]["legacy_checkpoint"] == loaded.checkpoint_json
     assert packet["checkpoint_refs"]["agent_run_checkpoint"] == loaded.agent_run_checkpoint_json
     assert packet["artifact_refs"] == ["reports/blackbox.txt"]
@@ -47,10 +52,12 @@ def test_takeover_readiness_packet_collects_refs_without_reading_artifact_body(t
     assert packet["artifact_manifest_records"][0]["ref"] == "reports/blackbox.txt"
     assert packet["artifact_manifest_records"][0]["exists"] is True
     assert packet["recommended_read_order"][0] == loaded.failure_handoff_json
+    assert packet["context_bundle_refs"]["agent_run_context_bundle"] in packet["recommended_read_order"]
     assert "summary_is_not_verified_fact" in packet["boundary_notes"]
     assert "VERY_LARGE_ARTIFACT_BODY_SHOULD_NOT_APPEAR_IN_PACKET" not in encoded
     assert "VERY_LARGE_ARTIFACT_BODY_SHOULD_NOT_APPEAR_IN_PACKET" not in markdown
     assert "## 建议读取顺序" in markdown
+    assert "## Context Bundle Refs" in markdown
 
 
 def test_subagent_save_writes_takeover_readiness_packet_files(tmp_path) -> None:
@@ -64,6 +71,7 @@ def test_subagent_save_writes_takeover_readiness_packet_files(tmp_path) -> None:
     task.latest_summary = "等待父级接管。"
     task.blockers = ["缺少权限"]
     task.artifact_refs = ["output.json"]
+    manager.write_execution_context(task.id)
     manager.save(task)
 
     loaded = manager.load(task.id)
@@ -72,6 +80,7 @@ def test_subagent_save_writes_takeover_readiness_packet_files(tmp_path) -> None:
 
     assert payload["run"]["run_id"] == task.id
     assert payload["failure_handoff_ref"] == loaded.failure_handoff_json
+    assert payload["context_bundle_refs"]["agent_run_context_bundle"] in payload["recommended_read_order"]
     assert payload["reserved"]["reads_artifact_bodies"] is False
     assert "## 建议读取顺序" in markdown
     assert loaded.takeover_readiness_json in payload["recommended_read_order"]
