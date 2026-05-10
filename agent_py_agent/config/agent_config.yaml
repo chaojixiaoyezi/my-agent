@@ -142,7 +142,9 @@ auth_enabled: true
 admin_user_id: "admin"
 
 # 单次最多拆出多少个子任务
-max_subagents: 5
+# - 默认 1000，表示用户层基本不限制；真实并发仍由 runner/scheduler 控制。
+# - 如果你明确想限制规模，可以改小，例如 20。
+max_subagents: 1000
 
 # status/startup 等轻量路径展示多少条子代理看板摘要；完整报告仍可读取详细记录。
 subagent_board_limit: 5
@@ -151,9 +153,14 @@ subagent_board_limit: 5
 subagent_workspace: "data/subagents"
 
 # 子代理 runner 默认工具白名单：
-# - [] 表示不在全局配置里额外限制，沿用任务自己的 allowed_tools。
-# - 可填 ["read_file", "write_file"] 这类工具名，用于真实 E2E 或受限工作区。
+# - [] 表示自动：让角色模板、任务目标和 LLM/调度器共同判断工具。
+# - 用户一般不需要填；只有特别受限的测试环境才建议显式填工具名。
 subagent_allowed_tools: []
+
+# 子代理角色模板目录：
+# - [] 表示自动使用工作区 .agent/subagents/roles（如果存在）+ 内置模板。
+# - 用户要新增角色模板时，优先放到 .agent/subagents/roles/*.json。
+subagent_role_template_dirs: []
 
 # Subagent Workflow 工作流开关（第一阶段配置骨架）：
 # - auto: 由主代理按任务复杂度自动选择是否套用工作流模板。

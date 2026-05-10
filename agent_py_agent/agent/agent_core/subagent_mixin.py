@@ -72,17 +72,18 @@ def _initial_repair_state(result) -> dict[str, object]:
     }
 
 
-# LLM: _configured_subagent_allowed_tools normalizes optional config before task creation.
-# 函数用途: 从配置里取默认子代理工具白名单，过滤空值和测试 mock，避免坏配置进入任务记录。
-def _configured_subagent_allowed_tools(config: object) -> list[str]:
+# LLM: _configured_subagent_allowed_tools treats empty config as automatic role/tool policy.
+# 函数用途: 从配置里取子代理工具白名单；空值返回 None，表示让角色模板和任务上下文自动判断工具。
+def _configured_subagent_allowed_tools(config: object) -> list[str] | None:
     value = getattr(config, "subagent_allowed_tools", [])
     if isinstance(value, str):
         raw_items = value.split(",")
     elif isinstance(value, (list, tuple)):
         raw_items = value
     else:
-        return []
-    return [str(item).strip() for item in raw_items if item is not None and str(item).strip()]
+        return None
+    tools = [str(item).strip() for item in raw_items if item is not None and str(item).strip()]
+    return tools or None
 
 
 # LLM: _tuple_repair_state 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -99,6 +100,16 @@ def _tuple_repair_state(value: tuple) -> dict[str, object]:
         "ok": ok,
         "error": error,
     }
+
+
+# LLM: _effective_max_subagents turns zero or invalid caps into a generous automatic limit.
+# 函数用途: 解析子代理数量上限；0/坏值表示不限制用户意图，默认按 1000 这种宽松保护值处理。
+def _effective_max_subagents(value: object, *, fallback: int) -> int:
+    try:
+        cap = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return cap if cap > 0 else fallback
 
 
 # LLM: _SubagentLifecycleBase 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -122,13 +133,13 @@ class _SubagentLifecycleBase:
 
         if options.count is None:
             allowed_tools = _configured_subagent_allowed_tools(self.config)
-            complexity = estimate_task_complexity(options.goal, plan=[], allowed_tools=allowed_tools)
+            complexity = estimate_task_complexity(options.goal, plan=[], allowed_tools=allowed_tools or [])
             guard = SubagentAutomationGuard(self.config)
             should_delegate = guard.should_delegate(complexity)
             delegated = False
 
             if should_delegate:
-                n = self.config.max_subagents
+                n = _effective_max_subagents(self.config.max_subagents, fallback=1000)
                 tasks = self.subagents.split(
                     options.goal,
                     n,
@@ -144,7 +155,7 @@ class _SubagentLifecycleBase:
             guard.warn_if_not_delegating(complexity, delegated)
             return tasks
         else:
-            n = min(options.count, self.config.max_subagents)
+            n = min(options.count, _effective_max_subagents(self.config.max_subagents, fallback=options.count))
             allowed_tools = _configured_subagent_allowed_tools(self.config)
             return self.subagents.split(
                 options.goal,

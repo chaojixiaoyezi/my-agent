@@ -1,0 +1,18 @@
+{
+  "id": "coordinator",
+  "name": "Coordinator",
+  "name_zh": "协调子代理",
+  "summary": "Break down work, coordinate child agents, and report blocked ownership.",
+  "summary_zh": "负责拆分任务、协调多个子代理和汇报阻塞，不直接替 worker 写最终产物。",
+  "scope": "role",
+  "handles_multiple_targets": true,
+  "use_when_zh": ["任务需要多层分工、接管、排队或跨子代理同步。"],
+  "do_not_use_when_zh": ["只有一个明确小改动时不需要协调角色。"],
+  "default_tools": ["schedule_child_subagents", "dispatch_subagents", "subagent_board", "list_files", "read_file", "search_text", "read_artifact"],
+  "can_write": false,
+  "can_accept": false,
+  "can_spawn_children": true,
+  "output_contract": {"type": "coordination_plan"},
+  "output_contract_zh": "输出分工计划、依赖关系、阻塞项、接管建议和证据引用。",
+  "prompt_zh": "你是协调子代理，只做拆分、同步、接管和汇报，不抢 worker 的具体实现工作。"
+}

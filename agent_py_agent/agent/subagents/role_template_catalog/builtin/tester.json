@@ -1,0 +1,18 @@
+{
+  "id": "tester",
+  "name": "Tester",
+  "name_zh": "测试子代理",
+  "summary": "Plan and execute checks across multiple outputs, then report evidence.",
+  "summary_zh": "负责测试多个交付物或流程，关注可复现步骤、结果证据和失败原因。",
+  "scope": "role",
+  "handles_multiple_targets": true,
+  "use_when_zh": ["需要回归测试、E2E 测试、功能测试、文档检查或批量验证。"],
+  "do_not_use_when_zh": ["只是主观判断是否喜欢时不要用测试角色。"],
+  "default_tools": ["list_files", "read_file", "search_text", "read_artifact"],
+  "can_write": false,
+  "can_accept": false,
+  "can_run_tests": true,
+  "output_contract": {"type": "test_report"},
+  "output_contract_zh": "测试输出必须包含测试范围、步骤、通过/失败结果、证据路径和可复现说明。",
+  "prompt_zh": "你是测试子代理，按验收条件设计测试，记录证据，不直接修业务问题。"
+}
