@@ -38,6 +38,18 @@ def render_assistant_tool_round_context(request: AssistantToolRoundContextReques
     return "\n".join(lines)
 
 
+# LLM: render_tool_payload_for_live_prompt keeps recorded tool-call params bounded too.
+# 函数用途: `_record_tool_call` 回写上下文时使用；避免 write_file content 通过 payload 再次进入后续 prompt。
+def render_tool_payload_for_live_prompt(
+    payload: object, *, max_inline_chars: int = 4000, max_value_preview_chars: int = 240
+) -> str:
+    if not isinstance(payload, dict):
+        return _bounded_repr(payload, max_inline_chars, max_value_preview_chars)
+    if not _should_reduce_payload(payload, max_inline_chars, max_value_preview_chars):
+        return repr(payload)
+    return "\n".join(_tool_call_summary_lines(1, payload, max_value_preview_chars))
+
+
 # LLM: _should_reduce_tool_round detects responses that would bloat every later prompt.
 # 函数用途: 只在回复本身过大或任意工具参数过大时压缩，避免影响普通短工具调用。
 def _should_reduce_tool_round(request: AssistantToolRoundContextRequest) -> bool:
@@ -46,6 +58,20 @@ def _should_reduce_tool_round(request: AssistantToolRoundContextRequest) -> bool
     return any(
         _value_size(value) > request.max_value_preview_chars * 4
         for payload in request.tool_calls
+        for key, value in payload.items()
+        if key != "tool"
+    )
+
+
+# LLM: _should_reduce_payload mirrors assistant-round reduction for persisted live context records.
+# 函数用途: 判断单条工具调用参数是否太大，尤其是 write_file/append_file 的正文。
+def _should_reduce_payload(
+    payload: dict[str, Any], max_inline_chars: int, max_value_preview_chars: int
+) -> bool:
+    if _value_size(payload) > max_inline_chars:
+        return True
+    return any(
+        _value_size(value) > max_value_preview_chars * 4
         for key, value in payload.items()
         if key != "tool"
     )
@@ -61,6 +87,15 @@ def _tool_call_summary_lines(index: int, payload: dict[str, Any], max_preview_ch
             continue
         lines.append(f"  - {key}: {_value_summary(value, max_preview_chars)}")
     return lines
+
+
+# LLM: _bounded_repr handles non-dict payloads without letting pathological values leak into prompts.
+# 函数用途: 非标准工具 payload 也只保留短预览和 hash，避免异常路径撑大 live prompt。
+def _bounded_repr(value: object, max_inline_chars: int, max_preview_chars: int) -> str:
+    text = repr(value)
+    if len(text) <= max_inline_chars:
+        return text
+    return _large_text_summary(text, max_preview_chars)
 
 
 # LLM: _value_summary gives model-useful metadata for strings, lists, dicts, and scalars.

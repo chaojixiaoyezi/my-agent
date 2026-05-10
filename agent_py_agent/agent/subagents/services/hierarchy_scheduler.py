@@ -21,8 +21,10 @@ from .hierarchy_tool_policy import (
     should_infer_leaf_coding_tools,
 )
 from .hierarchy_write_policy import (
+    ChildWriteRootRequest,
     ScheduledWriteRootRequest,
     inherited_extra_write_roots,
+    requested_child_write_roots,
     scheduled_child_extra_write_roots,
 )
 
@@ -176,10 +178,16 @@ def _apply_result(
     )
 
 
-# LLM: _create_child converts one schedule spec into the existing CreateRunParams bundle.
-# 函数用途: 复用现有 create_run 路径创建子任务，保证 work-order、runtime workspace 和控制面同步。
+# LLM: _create_child converts one spec into CreateRunParams while preserving declared product paths.
+# 函数用途: 复用现有 create_run 路径创建子任务；child spec 自己写出的产物路径会成为候选根，最终授权仍由角色策略裁决。
 def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) -> SubAgentTask:
-    requested_write_roots = spec.extra_write_roots or inherited_extra_write_roots(parent)
+    requested_write_roots = requested_child_write_roots(
+        ChildWriteRootRequest(
+            parent=parent,
+            spec_goal=spec.goal,
+            explicit_roots=list(spec.extra_write_roots),
+        )
+    )
     role_probe_goal = scheduled_child_goal(parent, spec, write_roots=requested_write_roots)
     role = _scheduled_child_role(parent, spec, requested_write_roots, goal=role_probe_goal)
     extra_write_roots = scheduled_child_extra_write_roots(
@@ -294,7 +302,13 @@ def _planned_items(parent: SubAgentTask, request: HierarchyScheduleRequest) -> l
             role=_scheduled_child_role(
                 parent,
                 spec,
-                spec.extra_write_roots or inherited_extra_write_roots(parent),
+                requested_child_write_roots(
+                    ChildWriteRootRequest(
+                        parent=parent,
+                        spec_goal=spec.goal,
+                        explicit_roots=list(spec.extra_write_roots),
+                    )
+                ),
                 goal=scheduled_child_goal(parent, spec),
             ),
             agent_name=spec.agent_name or spec.role or "worker",

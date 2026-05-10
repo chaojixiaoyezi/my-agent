@@ -35,6 +35,15 @@ class ScheduledWriteRootRequest:
     leaf_write_intent: bool
 
 
+# LLM: ChildWriteRootRequest gathers parent, explicit, and model-written path sources.
+# 类用途: 计算 child 可委派写入根时，把父级继承、spec.extra_write_roots 和 spec.goal 里的路径放在同一入口。
+@dataclass(frozen=True)
+class ChildWriteRootRequest:
+    parent: SubAgentTask
+    spec_goal: str
+    explicit_roots: list[str]
+
+
 # LLM: scheduled_child_extra_write_roots grants product roots only to product-writing roles.
 # 函数用途: 报告/检查/验收/协调类角色只写自己的工单目录；worker/writer/leaf_worker 才继承产品产物目录。
 def scheduled_child_extra_write_roots(request: ScheduledWriteRootRequest) -> list[str]:
@@ -46,6 +55,21 @@ def scheduled_child_extra_write_roots(request: ScheduledWriteRootRequest) -> lis
     if request.leaf_write_intent:
         return list(dict.fromkeys(request.requested_roots))
     return []
+
+
+# LLM: requested_child_write_roots keeps model-provided deliverable paths available for leaf grants.
+# 函数用途: child spec 自己写出产物路径时也纳入候选根；是否授权仍由角色/写入意图策略决定。
+def requested_child_write_roots(request: ChildWriteRootRequest) -> list[str]:
+    roots: list[str] = []
+    for item in [
+        *request.explicit_roots,
+        *inherited_extra_write_roots(request.parent),
+        *_extract_write_dirs(request.spec_goal),
+    ]:
+        text = str(item or "").rstrip("/")
+        if text and text not in roots:
+            roots.append(text)
+    return roots
 
 
 # LLM: inherited_extra_write_roots forwards product roots for delegation without copying parent internals.

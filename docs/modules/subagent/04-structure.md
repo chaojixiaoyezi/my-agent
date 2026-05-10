@@ -448,3 +448,5 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `ShellGatewayExecutionResult` 只保存预览、字节数、截断标记和文件 refs；完整输出不会自动塞进模型上下文，调用方要显式读 refs。
 - `task_trash.py` 是删除类动作的受控替代层：`ensure_task_trash()` 管目录，`move_to_task_trash()` 只做 workspace/task-local move 和 manifest 记录；shell gateway 仍阻断 `rm`。
 - `fallback_report.py` 是父级保存兜底结果的最小写入层；它只写 task-local reports，不替代 runner 正常 artifact 写入，也不把报告内容提升进长期 memory。
+- `tool_call_context_reducer.py` 同时保护两条 live prompt 入口：assistant 回复里的大工具调用会摘要，`_record_tool_call` 里的工具 payload 也会摘要；完整正文只能留在目标 artifact、debug detail 或显式读取的外部文件里。
+- `hierarchy_write_policy.py` 的 `requested_child_write_roots()` 会合并父级继承根、显式 `extra_write_roots` 和 child spec goal 中的产物路径；是否授权仍由角色和写入意图决定，coordinator/researcher/tester/acceptor 不因看见路径就拿最终产物写权限。

@@ -114,3 +114,37 @@ def test_hierarchy_schedule_recovers_report_role_from_child_agent_name(tmp_path)
     assert researcher.allowed_write_roots == [researcher.task_dir]
     assert writer.role == "writer"
     assert str(deliverables) in writer.allowed_write_roots
+
+
+# LLM: test_hierarchy_schedule_grants_worker_path_written_by_child_spec covers real coordinator output.
+# 函数用途: coordinator 给 worker 的 goal 自己写出产物目录时，worker 应拿到该目录写权限。
+def test_hierarchy_schedule_grants_worker_path_written_by_child_spec(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    deliverables = tmp_path / "deliverables"
+    coordinator = manager.create_run(
+        goal="cart coordinator only writes coordination notes",
+        thought="delegate",
+        plan=["plan"],
+        agent_name="cart-checkout-lead",
+        role="coordinator",
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents"],
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=coordinator.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal=f"创建购物车页面，目标产物路径：{deliverables}/build，写 cart.html。",
+                    agent_name="cart-checkout-worker",
+                    role="worker",
+                )
+            ],
+            apply=True,
+        )
+    )
+    worker = manager.load(result.created_run_ids[0])
+
+    assert worker.role == "leaf_worker"
+    assert str(deliverables / "build") in worker.allowed_write_roots
+    assert "write_file" in worker.allowed_tools
