@@ -17,6 +17,7 @@ from agent_py_agent.agent.subagent import parse_subagent_runner_output
 from .backends import (
     AcceptedSubagentBackend,
     BoundaryWriteSubagentBackend,
+    CoordinatorToolLimitBlockedBackend,
     HierarchicalScheduleSubagentBackend,
     RepairingSubagentBackend,
     StructuredSubagentBackend,
@@ -226,6 +227,57 @@ def test_subagent_runner_repairs_missing_structured_output():
         assert runner_json["structured_repair_ok"] is True
         assert output_json["structured_output"]["repair_attempted"] is True
         assert output_json["structured_output"]["repair_ok"] is True
+
+
+# LLM: coordinator finalization should trust verified direct children over a late tool-limit cleanup miss.
+# 函数用途: 复现真实 E2E 中 root 已经带出完成子链路，却因为最后多查一次撞到工具上限被误标 BLOCKED 的问题。
+def test_subagent_runner_keeps_completed_coordinator_awaiting_acceptance_after_tool_limit():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(
+            enable_tools=True,
+            model_backend="echo",
+            subagent_workspace="subs",
+            max_tool_rounds=0,
+        )
+        agent = SimpleAgent(cfg, root)
+        agent.backend = CoordinatorToolLimitBlockedBackend()
+        parent = agent.subagents.create_run(
+            goal="root coordinator 只负责创建和验收直接 child",
+            thought="直接 child 完成后，root 应等待父级验收。",
+            plan=["观察 child", "汇总 refs"],
+            agent_name="root-coordinator",
+            role="coordinator",
+            allowed_tools=["read_file", "schedule_child_subagents"],
+            acceptance_checks=["直接 child 必须 DONE/VERIFIED"],
+        )
+        child = agent.subagents.create_run(
+            goal="已完成的直接 child",
+            thought="模拟真实下层链路已完成。",
+            plan=["done"],
+            parent_id=parent.id,
+            root_id=parent.id,
+            depth=1,
+            agent_name="child-coordinator",
+            role="coordinator",
+            acceptance_checks=["已完成"],
+        )
+        child.status = "DONE"
+        child.verification_status = "VERIFIED"
+        agent.subagents.save(child)
+
+        result = agent.run_subagent(parent.id, dry_run=False, probe=False)
+        loaded = agent.subagents.load(parent.id)
+
+        assert len(agent.backend.prompts) == 3
+        assert result.structured_output_found
+        assert result.structured_output_ok
+        assert result.status == "AWAITING_ACCEPTANCE"
+        assert result.verification_status == "NEEDS_ACCEPTANCE"
+        assert result.blocked_reason == ""
+        assert loaded.status == "AWAITING_ACCEPTANCE"
+        assert loaded.failure_type == ""
+        assert child.id in result.structured_summary
 
 
 def test_subagent_runner_parser_uses_last_parseable_fenced_block():

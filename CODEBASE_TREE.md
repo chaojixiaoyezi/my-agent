@@ -959,6 +959,7 @@ docs/
 - `agent_py_agent/agent/subagents/execution_records.py`: 新增 `TestExecutionRecord`，定义真实验收执行证据、输出截断和通过结果派生。
 - `agent_py_agent/agent/subagents/execution_executor.py`: 新增最小 `TestExecutor`，执行 command/file/content 三类检查并产出 `TestExecutionRecord`；当前不接 acceptance 自动写回。
 - `agent_py_agent/agent/subagents/execution_test_items.py`: 新增测试项预处理 helper，根据 runner artifacts 安全推断 command 测试工作目录，避免父验收在 workspace 根目录误跑相对测试命令；也会把 workspace 内安全的 `cd <dir> && pytest` 拆成 `working_dir + 纯命令`，不放开 shell。
+- `agent_py_agent/agent/subagents/execution_content_checks.py`: 从测试项预处理拆出的内容验收归一化 helper，把模型常写的 `cat <workspace文件>` 转成受控 `content_check`，只接受明确期望内容，不放开 `cat` 命令。
 - `agent_py_agent/agent/subagents/execution_executor_helpers.py`: 新增 `TestExecutor` 命令解析、记录构造和时间戳 helper，保持执行器主文件只负责 bounded execution。
 - `agent_py_agent/agent/subagents/execution_report.py`: 新增 `test_execution.json` / `test_execution.md` 报告写读入口；JSON 是机器事实源，Markdown 只做展示。
 - `agent_py_agent/agent/subagents/services/acceptance_machine_evidence.py`: 新增父级真实测试报告读取 helper；通过的 `test_execution.json` 可在无 worker evidence packet 时作为机器证据链。
@@ -973,7 +974,12 @@ docs/
 - `agent_py_agent/agent/subagents/parent_acceptance_followup_control.py`: 新增 follow-up 受控入口模型和审计文件，支持预览、坏 JSON 阻断、显式 apply、patch review 命令提示和复用 action handler 的接管 rescue。
 - `agent_py_agent/agent/subagents/parent_acceptance_followup_consistency.py`: 新增 follow-up apply 前的一致性检查 helper，集中处理 run_id、test report ref、失败数、新鲜度和状态驱动 rescue 例外。
 - `agent_py_agent/agent/subagents/parent_acceptance_rescue_followup.py`: 新增已失败/阻塞任务的 rescue follow-up helper，让无 `test_execution.json` 的 runner 失败也能进入受控接管路径。
-- `agent_py_agent/agent/subagents/services/hierarchy_scheduler.py`: 新增层级调度器 v1，使用 `HierarchyScheduleRequest` / `HierarchyChildSpec` 显式预览或创建 child/grandchild run，并统一限制深度和 fan-out；当真实模型把 `role=child`、具体角色写进 `agent_name` 时，会先恢复 researcher/tester/acceptor/bug_finder/writer/worker 等角色再套权限策略。
+- `agent_py_agent/agent/subagents/services/hierarchy_scheduler.py`: 新增层级调度器 v1，使用 `HierarchyScheduleRequest` / `HierarchyChildSpec` 显式预览或创建 child/grandchild run，并统一限制深度和 fan-out；当真实模型把 `role=child`、具体角色写进 `agent_name` 时，会先恢复 researcher/tester/acceptor/bug_finder/writer/worker 等角色再套权限策略；模型漏传 `acceptance_checks` 时会通过 `hierarchy_acceptance.py` 从 child goal/角色派生最小验收项。
+- `agent_py_agent/agent/subagents/services/hierarchy_acceptance.py`: 从 scheduler 拆出的验收兜底策略，只在模型没有显式 `acceptance_checks` 时派生最小验收项。
+- `agent_py_agent/agent/subagents/services/hierarchy_tool_policy.py`: 从 scheduler 拆出的工具策略，统一处理 coordinator/leaf 的工具继承、写文件工具补齐和 `write`/`read` 等模型工具名别名修正。
+- `agent_py_agent/agent/subagents/execution_test_items.py`: 预处理父级验收 tests，推断 workspace 内 `working_dir`，拆安全 `cd <dir> && pytest`，并把带明确期望内容的 `cat <workspace文件>` 改成受控 `content_check`，避免为真实模型输出放开 `cat` 命令。
+- `agent_py_agent/agent/subagents/execution_executor.py`: `content_check` 支持 `content_pattern` 包含匹配，也支持 `content_equals` / `expected_content` + `match_mode=exact`，用于严格验证文件内容没有额外字符。
+- `agent_py_agent/agent/agent_core/_tool_loop_service.py`: 主代理和 subagent 共用的工具循环；到达 `max_tool_rounds` 后给模型一次收口机会，如果模型仍吐工具调用，返回确定性停止说明而不是把新 `[TOOL_CALL]` 当最终回答。
 - `agent_py_agent/agent/subagents/services/hierarchy_role_identity.py`: 从 scheduler 拆出的角色 identity 兜底策略，根据 `agent_name` / `goal` 恢复模型漏填的 researcher/tester/acceptor/bug_finder/writer/worker 等角色。
 - `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 从 scheduler 中拆出的层级 scope guard，集中处理空计划、深度/数量限制、禁止 sibling 领域、同批混建 coordinator/leaf 和 domain mismatch。
 - `agent_py_agent/agent/subagents/services/hierarchy_write_policy.py`: 层级写入根策略，区分 task-local 报告写入和最终产品写入；coordinator/researcher/tester/bug_finder/acceptor 可保留产品路径上下文但不继承产品写入根。
@@ -1019,7 +1025,8 @@ docs/
 - `agent_py_agent/tests/test_subagent_takeover_readiness.py`: 覆盖接管前必读包生成、context bundle refs、落盘和不读取 artifact 正文的边界。
 - `agent_py_agent/tests/test_subagent_security_reserve.py`: 覆盖安全信号预留字段随 task 持久化，并投影到 LocalStore metadata。
 - `agent_py_agent/tests/test_subagent_test_execution_record.py`: 覆盖真实验收执行记录模型的序列化、stdout/stderr 截断和 `passed` 语义。
-- `agent_py_agent/tests/test_subagent_test_executor.py`: 覆盖最小真实验收执行器的 command、危险字符拦截、file_check 和 content_check 行为。
+- `agent_py_agent/tests/test_subagent_test_executor.py`: 覆盖最小真实验收执行器的 command、危险字符拦截、file_check、content_check 和 exact content 行为。
+- `agent_py_agent/tests/test_subagent_test_item_preparation.py`: 覆盖父级验收 tests 预处理，包括 artifact 工作目录推断、安全 `cd &&` 拆分、pytest artifact fallback，以及 `cat <file>` 到 exact `content_check` 的归一化。
 - `agent_py_agent/tests/test_subagent_test_item_preparation.py`: 覆盖父验收测试项如何从 artifact 路径推断工作目录、保留显式 working_dir 并拒绝越界 artifact。
 - `agent_py_agent/tests/test_subagent_test_execution_report.py`: 覆盖 test execution JSON/Markdown 报告的汇总字段、记录恢复和人类摘要。
 - `agent_py_agent/tests/test_parent_acceptance_controller.py`: 覆盖父级验收 dry-run 决策、refs-only 审计落盘、显式 apply 边界、next-action 建议和 auto-policy dry-run，包括缺少真实测试报告时建议执行、危险命令要求人工确认、已有通过报告时只需 inspect、patch 未审核时先 review_patches，以及非 inspect_only apply 不改任务状态。

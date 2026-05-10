@@ -307,6 +307,54 @@ class RepairingSubagentBackend(BaseBackend):
         )
 
 
+class CoordinatorToolLimitBlockedBackend(BaseBackend):
+    """测试用后端：coordinator 子层已完成，但收尾继续要工具并在修复回合误报 BLOCKED。"""
+
+    name = "coordinator_tool_limit_blocked_backend"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.prompts.append(prompt)
+        if len(self.prompts) <= 2:
+            return ModelResponse(
+                text=(
+                    "直接 child 已经完成并验收，但我还想再查一次 proof.txt。\n"
+                    "[TOOL_CALL]\n"
+                    '{"tool":"read_file","path":"proof.txt"}\n'
+                    "[/TOOL_CALL]"
+                ),
+                backend=self.name,
+            )
+
+        assert "# SubAgent Runner Output Repair" in prompt
+        return ModelResponse(
+            text=(
+                "[SUBAGENT_RESULT]\n"
+                "{\n"
+                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "summary": "直接 child 已完成，但工具轮数上限导致无法重复验证。",\n'
+                '  "used_tools": [],\n'
+                '  "used_skills": [],\n'
+                '  "evidence": [],\n'
+                '  "capability_requests": [\n'
+                '    {"problem": "工具轮数限制导致无法重复读取 proof.txt", "needed_capability": "增加 max_tool_rounds", "expected_output": "确认 proof.txt 内容", "tried": ["read_artifact"], "evidence": [], "constraints": {}}\n'
+                "  ],\n"
+                '  "artifacts": [],\n'
+                '  "tests": [],\n'
+                '  "patches": [],\n'
+                '  "lessons": [],\n'
+                '  "next_actions": ["parent_acceptance"],\n'
+                '  "blocked_reason": "",\n'
+                '  "failure_type": ""\n'
+                "}\n"
+                "[/SUBAGENT_RESULT]"
+            ),
+            backend=self.name,
+        )
+
+
 class ParentPlannerBackend(BaseBackend):
     """测试用后端：返回父代理 planner 结构化结果。"""
 

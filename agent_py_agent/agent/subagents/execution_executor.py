@@ -144,18 +144,19 @@ class TestExecutor:
             error="" if exists else "文件不存在",
         )
 
-    # LLM: _check_content reads only workspace-local text and searches for a literal pattern.
-    # 函数用途: 检查文件内容是否包含指定文本；当前是字面量包含，不做正则或模型判断。
+    # LLM: _check_content reads only workspace-local text and compares literal patterns.
+    # 函数用途: 检查文件内容是否包含或精确等于指定文本；不做正则或模型判断。
     def _check_content(self, test: dict[str, Any]) -> TestExecutionRecord:
         path, error = self._resolve_test_path(test.get("file_path"))
-        pattern = str(test.get("content_pattern") or "")
+        pattern = _content_pattern(test)
+        exact = _content_match_is_exact(test)
         if error:
             return _file_record(test, "content_check", error=error)
         if not pattern:
             return _file_record(test, "content_check", error="内容检查缺少 content_pattern")
         if not path.exists() or not path.is_file():
             return _file_record(test, "content_check", error="文件不存在", path=path)
-        return _content_match_record(test, path, pattern)
+        return _content_match_record(test, path, pattern, exact=exact)
 
     # LLM: _resolve_test_path enforces that file validations cannot escape the executor workspace.
     # 函数用途: 把测试项里的相对路径解析为 workspace 内绝对路径；越界路径会返回错误。
@@ -194,3 +195,20 @@ def _validation_method(test: dict[str, Any]) -> str:
     if method in {"pytest", "unittest"} and str(test.get("command") or "").strip():
         return "command"
     return method
+
+
+# LLM: _content_pattern accepts newer exact-content field names while preserving legacy content_pattern.
+# 函数用途: 从 content_check 测试项里提取要匹配的字面文本；支持后续 schema 扩展字段。
+def _content_pattern(test: dict[str, Any]) -> str:
+    for key in ("content_equals", "expected_content", "content_pattern"):
+        value = str(test.get(key) or "")
+        if value:
+            return value
+    return ""
+
+
+# LLM: _content_match_is_exact keeps exact file assertions explicit and backward compatible.
+# 函数用途: 判断 content_check 是否要做全文相等；旧的 content_pattern 默认仍是包含匹配。
+def _content_match_is_exact(test: dict[str, Any]) -> bool:
+    mode = str(test.get("match_mode") or "").strip().lower()
+    return mode in {"exact", "equals", "equal"} or any(key in test for key in ("content_equals", "expected_content"))

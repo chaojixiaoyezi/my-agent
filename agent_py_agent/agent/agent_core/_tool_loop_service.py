@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..backends import ModelResponse
 from ..memory_archive import ExternalizeToolOutputRequest, externalize_tool_output_record
 from ..prompting_parts.builder import ToolSections
 from ..tools import ToolExecutionResult
@@ -168,6 +169,7 @@ class ToolLoopService:
                 tool_rounds=tool_rounds,
             )
         )
+        final_response = _without_tool_call_after_limit(self._agent, final_response)
         return final_prompt, final_response
 
     # LLM: _execute_one_tool_call 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -247,6 +249,21 @@ class ToolLoopService:
         output_record.update(fail_safe)
         output_record["parameters"] = record.payload
         return output_record
+
+
+# LLM: _without_tool_call_after_limit enforces max-tool-round boundaries even if the model ignores the stop hint.
+# 函数用途: 工具轮数已到顶后，如果模型仍输出工具调用，改成确定性停止说明，避免上层把新工具请求当最终答复。
+def _without_tool_call_after_limit(agent, response: ModelResponse) -> ModelResponse:
+    if not agent.tools.parse_tool_calls(response.text):
+        return response
+    return ModelResponse(
+        text=(
+            "已达到最大工具轮数限制，系统已经停止执行新的工具调用。"
+            "模型在收口阶段仍输出工具调用请求，后续工具请求不会被执行；"
+            "请只基于已有工具结果总结，若已有证据足够则进入等待验收。"
+        ),
+        backend=response.backend,
+    )
 
 
 # LLM: _generate_model_response wraps backend calls with refs-only runner stage trace events.
