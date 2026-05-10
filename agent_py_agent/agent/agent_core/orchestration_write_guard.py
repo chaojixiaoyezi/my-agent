@@ -14,7 +14,7 @@ from pathlib import Path
 
 WRITE_SUBAGENT_TOOLS = {"write_file", "append_file", "replace_in_file"}
 
-_ABSOLUTE_PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/][^\s\"'<>|]+|~[\\/][^\s\"'<>|]+|/[^\s\"'<>|]+)")
+_ABSOLUTE_PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/][^\s\"'<>|]+|~[\\/][^\s\"'<>|]+|(?<![\w.\-])/[^\s\"'<>|]+)")
 _WINDOWS_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _WRITE_INTENT_WORDS = (
     "写",

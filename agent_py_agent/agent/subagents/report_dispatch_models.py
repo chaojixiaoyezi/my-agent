@@ -27,6 +27,12 @@ class DispatchRecord:
     before_verification_status: str = ""
     after_verification_status: str = ""
     evidence_paths: list[str] = field(default_factory=list)
+    # LLM: runner_* fields are refs-only child creation facts surfaced to parent agents.
+    # 字段用途: 保存 runner 实际创建的下级数量、run id 和 role，避免父级误把 dispatch 记录数当成孩子数。
+    runner_summary: str = ""
+    runner_created_child_count: int = 0
+    runner_created_child_ids: list[str] = field(default_factory=list)
+    runner_created_roles: list[str] = field(default_factory=list)
     parent_acceptance_policy_ref: str = ""
     parent_acceptance_policy_decision: str = ""
     parent_acceptance_policy_action: str = ""

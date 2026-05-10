@@ -25,6 +25,16 @@ _MAX_TOOL_FIELD_NAME_CHARS = 128
 _MAX_TOOL_NAME_CHARS = 128
 _MAX_PARSE_ERROR_RAW_CHARS = 1000
 _MAX_EXCEPTION_MESSAGE_CHARS = 500
+_MODEL_WRAPPER_PARAM_KEYS = {
+    "api",
+    "filesystem",
+    "log_analysis",
+    "memory",
+    "orchestration",
+    "param_name",
+    "system",
+    "web",
+}
 
 
 # LLM: ExecuteRegistryCallParams 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
@@ -205,7 +215,10 @@ def _parse_tool_block_payload(raw: str) -> dict[str, Any]:
         return _parse_error_payload(f"工具调用 JSON 解析失败: {exc}", raw)
     if not isinstance(payload, dict):
         return _parse_error_payload("工具调用必须是 JSON 对象", raw)
-    return payload
+    normalized, error = _normalize_tool_payload(payload)
+    if error or normalized is None:
+        return _parse_error_payload(error or "工具调用解析失败", raw)
+    return normalized
 
 
 # LLM: _tool_auth_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -259,20 +272,52 @@ def _parse_error_payload(error: str, raw: str) -> dict[str, str]:
 def _normalize_tool_payload(payload: object) -> tuple[dict[str, Any] | None, str]:
     if not isinstance(payload, dict):
         return None, "工具调用必须是 JSON 对象"
-    if len(payload) > _MAX_TOOL_PAYLOAD_FIELDS:
+    normalized, error = _normalize_payload_mapping(payload)
+    if error:
+        return None, error
+    expanded, error = _unwrap_param_name_bundle(normalized)
+    if error:
+        return None, error
+    if len(expanded) > _MAX_TOOL_PAYLOAD_FIELDS:
         return None, f"工具调用字段过多，最多 {_MAX_TOOL_PAYLOAD_FIELDS} 个字段"
+    return expanded, ""
+
+
+# LLM: _normalize_payload_mapping validates a tool payload map before dispatch.
+# 函数用途: 检查工具参数名是否安全，并把参数键统一转成字符串，避免坏键污染执行层。
+def _normalize_payload_mapping(payload: dict[Any, Any]) -> tuple[dict[str, Any], str]:
+    if len(payload) > _MAX_TOOL_PAYLOAD_FIELDS:
+        return {}, f"工具调用字段过多，最多 {_MAX_TOOL_PAYLOAD_FIELDS} 个字段"
 
     normalized: dict[str, Any] = {}
     for key, value in payload.items():
         key_text = str(key)
         if not key_text:
-            return None, "工具调用包含空参数名"
+            return {}, "工具调用包含空参数名"
         if len(key_text) > _MAX_TOOL_FIELD_NAME_CHARS:
-            return None, f"工具调用参数名过长，最多 {_MAX_TOOL_FIELD_NAME_CHARS} 个字符"
+            return {}, f"工具调用参数名过长，最多 {_MAX_TOOL_FIELD_NAME_CHARS} 个字符"
         if any(ord(char) < 32 for char in key_text):
-            return None, "工具调用参数名包含不支持的控制字符"
+            return {}, "工具调用参数名包含不支持的控制字符"
         normalized[key_text] = value
     return normalized, ""
+
+
+# LLM: _unwrap_param_name_bundle repairs a common model mistake without hiding real collisions.
+# 函数用途: 当模型把真实参数误包进 param_name 字段时，将其展开成工具可执行的扁平参数。
+def _unwrap_param_name_bundle(payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    wrapper_keys = [key for key in payload if key != "tool"]
+    if (
+        len(wrapper_keys) != 1
+        or wrapper_keys[0] not in _MODEL_WRAPPER_PARAM_KEYS
+        or not isinstance(payload.get(wrapper_keys[0]), dict)
+    ):
+        return payload, ""
+    bundled, error = _normalize_payload_mapping(payload[wrapper_keys[0]])
+    if error:
+        return {}, error
+    if "tool" in bundled:
+        return {}, f"{wrapper_keys[0]} 参数包不能包含 tool 字段"
+    return {"tool": payload["tool"], **bundled}, ""
 
 
 # LLM: _tool_name 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。

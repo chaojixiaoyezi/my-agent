@@ -12,7 +12,14 @@ from typing import Any
 READ_ONLY_TOOLS = ["list_files", "read_file", "search_text", "read_artifact"]
 WORKER_READ_TOOLS = ["list_files", "read_file", "search_text", "read_artifact"]
 WORKER_WRITE_TOOLS = ["write_file", "append_file", "replace_in_file"]
-COORDINATOR_TOOLS = ["schedule_child_subagents", "dispatch_subagents", "subagent_board", *READ_ONLY_TOOLS]
+REPORT_WRITE_TOOLS = ["write_file", "append_file", "replace_in_file"]
+ROLE_BASE_TOOLS = [*READ_ONLY_TOOLS, *REPORT_WRITE_TOOLS]
+COORDINATOR_TOOLS = [
+    "schedule_child_subagents",
+    "dispatch_subagents",
+    "subagent_board",
+    *ROLE_BASE_TOOLS,
+]
 
 
 # LLM: RoleTemplate is the stable bundle for one reusable subagent persona.
@@ -98,19 +105,93 @@ def template_for_role(
     return load_role_template_store(user_template_dir=user_template_dir).get(role)
 
 
-# LLM: role_template_guide_text renders a compact model-facing role catalog.
-# 函数用途: 把内置和用户角色模板压成短说明，注入工具规格和 runner prompt，帮助 LLM 正确选 role。
-def role_template_guide_text(
+# LLM: role_template_index_text renders the lightweight catalog main agents can keep in prompt.
+# 函数用途: 输出角色模板索引，只包含 id、中文名、摘要、能力标签和模板位置；不展开完整 prompt 细节。
+def role_template_index_text(
     user_template_dir: str | Path | Iterable[str | Path] | None = None,
     *,
     limit: int = 12,
 ) -> str:
     store = load_role_template_store(user_template_dir=user_template_dir)
     lines = [
-        f"- {item.id}: {item.name_zh}；{item.summary_zh}；输出：{item.output_contract_zh}"
+        (
+            f"- {item.id}: {item.name_zh}；{item.summary_zh}；"
+            f"能力={_capability_tags(item)}；模板位置={item.source_path}"
+        )
         for item in store.all()[:limit]
     ]
     return "\n".join(lines)
+
+
+# LLM: role_template_detail_text loads full role prompt contracts only when dispatching/delegating.
+# 函数用途: 按需输出选定角色的详细中文提示、默认工具和输出合同；用于派工 prompt，不用于常驻索引。
+def role_template_detail_text(
+    user_template_dir: str | Path | Iterable[str | Path] | None = None,
+    *,
+    roles: list[str] | tuple[str, ...] | None = None,
+    limit: int = 12,
+) -> str:
+    store = load_role_template_store(user_template_dir=user_template_dir)
+    templates = _selected_templates(store, roles=roles, limit=limit)
+    return "\n".join(_detail_lines(item) for item in templates)
+
+
+# LLM: role_template_guide_text keeps older callers compatible while preferring the lightweight index.
+# 函数用途: 兼容旧的 guide 调用；新代码应按场景选择 index 或 detail。
+def role_template_guide_text(
+    user_template_dir: str | Path | Iterable[str | Path] | None = None,
+    *,
+    limit: int = 12,
+) -> str:
+    return role_template_index_text(user_template_dir=user_template_dir, limit=limit)
+
+
+# LLM: _selected_templates keeps detail loading scoped to requested roles when possible.
+# 函数用途: 根据 roles 选择模板详情；未指定时最多返回前 limit 个模板，避免 prompt 无限增长。
+def _selected_templates(
+    store: RoleTemplateStore,
+    *,
+    roles: list[str] | tuple[str, ...] | None,
+    limit: int,
+) -> list[RoleTemplate]:
+    if not roles:
+        return store.all()[:limit]
+    selected: list[RoleTemplate] = []
+    for role in roles:
+        template = store.get(role)
+        if template is not None:
+            selected.append(template)
+    return selected[:limit]
+
+
+# LLM: _capability_tags compresses role permissions for the always-on template catalog.
+# 函数用途: 把写入、验收、测试、派生子节点等能力压成短标签，减少主 prompt 负担。
+def _capability_tags(item: RoleTemplate) -> str:
+    tags = []
+    if item.can_spawn_children:
+        tags.append("spawn_children")
+    if item.can_write:
+        tags.append("write")
+    if item.can_run_tests:
+        tags.append("test")
+    if item.can_accept:
+        tags.append("accept")
+    return ",".join(tags) or "read_only"
+
+
+# LLM: _detail_lines renders one full role template for active delegation prompts.
+# 函数用途: 输出一个模板的完整细节，包括适用/不适用、默认工具、输出合同和中文系统提示片段。
+def _detail_lines(item: RoleTemplate) -> str:
+    return "\n".join([
+        f"- {item.id}: {item.name_zh}",
+        f"  用途: {item.summary_zh}",
+        f"  适用: {'；'.join(item.use_when_zh) or '未设置'}",
+        f"  不适用: {'；'.join(item.do_not_use_when_zh) or '未设置'}",
+        f"  默认工具: {', '.join(item.default_tools) or 'none'}",
+        f"  输出合同: {item.output_contract_zh or '未设置'}",
+        f"  系统提示片段: {item.prompt_zh or '未设置'}",
+        f"  模板位置: {item.source_path}",
+    ])
 
 
 # LLM: _iter_user_template_dirs protects strings from being treated as char iterables.

@@ -224,7 +224,72 @@ def test_tool_catalog_format_example_does_not_bias_to_path_param():
     catalog = registry.render_catalog_section()
 
     assert '{"tool": "tool_name", "path": "example"}' not in catalog
-    assert '"param_name": "param_value"' in catalog
+    assert '"actual_parameter_name": "actual_value"' in catalog
+    assert '"param_name": "param_value"' not in catalog
+    assert "不要写 param_name" in catalog
+
+
+def test_tool_call_parser_unwraps_model_param_name_bundle():
+    """LLM: tolerate models that wrap real tool parameters in a literal param_name bundle."""
+    registry = make_tool_registry(Path.cwd())
+
+    calls = registry.parse_tool_calls(
+        '[TOOL_CALL]\n{"tool":"read_file","param_name":{"path":"README.md"}}\n[/TOOL_CALL]'
+    )
+
+    assert calls == [{"tool": "read_file", "path": "README.md"}]
+
+
+def test_tool_executor_unwraps_model_param_name_bundle(tmp_path: Path):
+    """LLM: direct execution should also recover literal param_name bundles before tool dispatch."""
+    (tmp_path / "notes.txt").write_text("bundle recovered", encoding="utf-8")
+    registry = make_tool_registry(tmp_path)
+
+    result = registry.execute_call(
+        {"tool": "read_file", "param_name": {"path": "notes.txt"}}
+    )
+
+    assert result.ok
+    assert "bundle recovered" in result.output
+
+
+def test_tool_call_parser_unwraps_model_category_bundle():
+    """LLM: tolerate models that wrap params by tool category such as orchestration or filesystem."""
+    registry = make_tool_registry(Path.cwd())
+
+    calls = registry.parse_tool_calls(
+        '[TOOL_CALL]\n{"tool":"subagent_board","orchestration":{"limit":20,"status":"running"}}\n[/TOOL_CALL]'
+    )
+
+    assert calls == [{"tool": "subagent_board", "limit": 20, "status": "running"}]
+
+
+def test_tool_executor_unwraps_model_filesystem_bundle(tmp_path: Path):
+    """LLM: filesystem category wrappers should be flattened before file tool execution."""
+    (tmp_path / "notes.txt").write_text("category bundle recovered", encoding="utf-8")
+    registry = make_tool_registry(tmp_path)
+
+    result = registry.execute_call(
+        {"tool": "read_file", "filesystem": {"path": "notes.txt"}}
+    )
+
+    assert result.ok
+    assert "category bundle recovered" in result.output
+
+
+def test_tool_call_parser_unwraps_model_memory_bundle():
+    """LLM: memory/read_artifact wrappers should flatten to stable tool params."""
+    registry = make_tool_registry(Path.cwd())
+
+    calls = registry.parse_tool_calls(
+        '[TOOL_CALL]\n'
+        '{"tool":"read_artifact","memory":{"artifact_ref":"/tmp/out.json","offset":0,"max_chars":4000}}\n'
+        '[/TOOL_CALL]'
+    )
+
+    assert calls == [
+        {"tool": "read_artifact", "artifact_ref": "/tmp/out.json", "offset": 0, "max_chars": 4000}
+    ]
 
 
 def test_tool_spec_catalog_entry_includes_first_example():

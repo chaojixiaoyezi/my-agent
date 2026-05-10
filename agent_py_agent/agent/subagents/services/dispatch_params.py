@@ -25,6 +25,12 @@ class DispatchRecordParams:
     before_verification_status: str = ""
     after_verification_status: str = ""
     evidence_paths: list[str] | None = None
+    # LLM: runner_* params carry bounded child refs from real runner execution into dispatch reports.
+    # 字段用途: 保存 runner 实际创建的孩子摘要、run id 和角色，供主代理继续 watch/验收/恢复。
+    runner_summary: str = ""
+    runner_created_child_count: int = 0
+    runner_created_child_ids: list[str] | None = None
+    runner_created_roles: list[str] | None = None
     parent_acceptance_policy_ref: str = ""
     parent_acceptance_policy_decision: str = ""
     parent_acceptance_policy_action: str = ""

@@ -18,8 +18,25 @@ def dispatch_record_payload(item) -> dict[str, object]:
         "before_status": item.before_status,
         "after_status": item.after_status,
     }
+    payload.update(_dispatch_record_runner_payload(item))
     payload.update(_dispatch_record_acceptance_payload(item))
     return payload
+
+
+# LLM: _dispatch_record_runner_payload surfaces nested runner child creation as facts, not prose guesses.
+# 函数用途: 顶层主代理读取 dispatch_subagents 结果时，直接看到 runner 内部创建的 child ids/roles。
+def _dispatch_record_runner_payload(item) -> dict[str, object]:
+    keys = {
+        "runner_summary": "runner_summary",
+        "runner_created_child_count": "runner_created_child_count",
+        "runner_created_child_ids": "runner_created_child_ids",
+        "runner_created_roles": "runner_created_roles",
+    }
+    return {
+        name: value
+        for name, attr in keys.items()
+        if (value := getattr(item, attr, "")) not in ("", 0, [], None)
+    }
 
 
 # LLM: _dispatch_record_acceptance_payload keeps parent test/follow-up refs compact and optional.

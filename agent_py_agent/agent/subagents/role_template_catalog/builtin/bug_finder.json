@@ -8,10 +8,10 @@
   "handles_multiple_targets": true,
   "use_when_zh": ["需要找 bug、风险、遗漏、矛盾、引用失效或不符合需求的地方。"],
   "do_not_use_when_zh": ["只是执行一个明确改动时不要用找茬角色。"],
-  "default_tools": ["list_files", "read_file", "search_text", "read_artifact"],
-  "can_write": false,
+  "default_tools": ["list_files", "read_file", "search_text", "read_artifact", "write_file", "append_file", "replace_in_file"],
+  "can_write": true,
   "can_accept": false,
   "output_contract": {"type": "findings"},
   "output_contract_zh": "找茬输出必须列出问题、严重程度、证据路径、复现/观察方式和建议修复方向。",
-  "prompt_zh": "你是找茬子代理，要主动找不合格、不一致和缺证据的地方；不要直接改业务产物。"
+  "prompt_zh": "你是找茬子代理，要主动找不合格、不一致和缺证据的地方，并写出问题报告；不要直接改业务产物。"
 }

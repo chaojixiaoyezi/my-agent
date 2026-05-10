@@ -200,8 +200,35 @@ def _runner_dispatch_record(params: RunnerDispatchRecordParams):
                 params.result.result_json,
                 params.result.output_json,
             ],
+            **_runner_child_summary_fields(params.agent, params.after, params.result),
         ),
     )
+
+
+# LLM: _runner_child_summary_fields makes nested schedule_child_subagents visible to the parent dispatch payload.
+# 函数用途: 从执行后的任务快照收集 child ids/roles 和 runner 摘要，避免上层模型把 dispatch 记录数当成孩子数。
+def _runner_child_summary_fields(agent, after: SubAgentTask, result: SubAgentRunnerResult) -> dict[str, object]:
+    child_ids = [str(item) for item in (after.child_ids or []) if str(item).strip()]
+    return {
+        "runner_summary": result.structured_summary,
+        "runner_created_child_count": len(child_ids),
+        "runner_created_child_ids": child_ids,
+        "runner_created_roles": _runner_child_roles(agent, child_ids),
+    }
+
+
+# LLM: _runner_child_roles resolves roles from persisted child task refs only.
+# 函数用途: 给 dispatch 报告附加轻量角色列表；读失败时跳过，避免调度记录写入失败。
+def _runner_child_roles(agent, child_ids: list[str]) -> list[str]:
+    roles: list[str] = []
+    for child_id in child_ids:
+        try:
+            role = str(getattr(agent.subagents.load(child_id), "role", "") or "").strip()
+        except Exception:
+            role = ""
+        if role:
+            roles.append(role)
+    return roles
 
 
 # LLM: _dispatch_runner_candidates 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

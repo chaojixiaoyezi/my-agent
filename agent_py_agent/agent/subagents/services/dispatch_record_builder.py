@@ -34,6 +34,12 @@ class DispatchRecordBuilder:
             before_verification_status=params.before_verification_status,
             after_verification_status=params.after_verification_status,
             evidence_paths=params.evidence_paths or [],
+            # LLM: keep child creation refs in the audit record without loading child artifacts.
+            # 字段用途: 让父级看到 runner 真实创建的下级数量、id 和角色，后续按 refs 继续处理。
+            runner_summary=params.runner_summary,
+            runner_created_child_count=params.runner_created_child_count,
+            runner_created_child_ids=params.runner_created_child_ids or [],
+            runner_created_roles=params.runner_created_roles or [],
             **_parent_acceptance_fields(params),
             created_at=time.time(),
         )
@@ -53,6 +59,9 @@ class DispatchRecordBuilder:
             summary["applied" if record.applied else "dry_run"] = summary.get(
                 "applied" if record.applied else "dry_run", 0,
             ) + 1
+            summary["runner_created_children"] = summary.get(
+                "runner_created_children", 0,
+            ) + int(record.runner_created_child_count or 0)
         return summary
 
 

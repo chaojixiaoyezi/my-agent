@@ -7,8 +7,16 @@ from __future__ import annotations
 
 import json
 
+from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
 from agent_py_agent.agent.subagents.manager import SubAgentManager
-from agent_py_agent.agent.subagents.role_templates import load_role_template_store
+from agent_py_agent.agent.subagents.models import SubAgentExecutionContext
+from agent_py_agent.agent.subagents.role_templates import (
+    load_role_template_store,
+    role_template_detail_text,
+    role_template_index_text,
+)
+
+BUILTIN_ROLE_IDS = ["acceptor", "bug_finder", "coordinator", "researcher", "tester", "worker", "writer"]
 
 
 # LLM: test_builtin_role_templates_are_bilingual_and_broad protects the user-facing role catalog.
@@ -134,9 +142,17 @@ def test_quality_role_contracts_use_template_defaults(tmp_path):
         role="acceptor",
     )
 
-    assert bug_finder.allowed_tools == ["list_files", "read_file", "search_text", "read_artifact"]
-    assert "write_file" not in tester.allowed_tools
-    assert "write_file" not in acceptor.allowed_tools
+    assert bug_finder.allowed_tools == [
+        "list_files",
+        "read_file",
+        "search_text",
+        "read_artifact",
+        "write_file",
+        "append_file",
+        "replace_in_file",
+    ]
+    assert "write_file" in tester.allowed_tools
+    assert "write_file" in acceptor.allowed_tools
     assert bug_finder.quality_contract.cannot_self_accept is True
     assert tester.quality_contract.parent_final_gate is True
     assert acceptor.quality_contract.parent_final_gate is True
@@ -160,3 +176,126 @@ def test_worker_template_supplies_default_write_tools(tmp_path):
     assert "read_file" in task.allowed_tools
     assert "write_file" in task.allowed_tools
     assert "replace_in_file" in task.allowed_tools
+
+
+# LLM: test_role_template_index_is_compact_catalog_metadata locks the lazy prompt boundary.
+# 函数用途: 主代理常驻只需要知道有哪些模板和位置，不应加载完整系统提示词或默认工具细节。
+def test_role_template_index_is_compact_catalog_metadata():
+    index = role_template_index_text()
+
+    assert "worker" in index
+    assert "执行子代理" in index
+    assert "模板位置" in index
+    assert "你是执行子代理" not in index
+    assert "write_file" not in index
+
+
+# LLM: test_role_template_detail_text_loads_prompt_contract_on_demand proves details stay available when dispatching.
+# 函数用途: 真正派工时能按角色加载完整中文提示片段、输出合同和默认工具，而不是只拿摘要。
+def test_role_template_detail_text_loads_prompt_contract_on_demand():
+    detail = role_template_detail_text(roles=["worker"])
+
+    assert "worker" in detail
+    assert "你是执行子代理" in detail
+    assert "默认工具" in detail
+    assert "write_file" in detail
+    assert "验收子代理" not in detail
+
+
+# LLM: test_all_builtin_role_templates_are_visible_in_main_index covers role selection discovery.
+# 函数用途: 主代理常驻索引必须能看到每个内置模板，但不能提前加载完整提示词和工具清单。
+def test_all_builtin_role_templates_are_visible_in_main_index():
+    store = load_role_template_store()
+    index = role_template_index_text()
+
+    for template_id in BUILTIN_ROLE_IDS:
+        template = store.get(template_id)
+        assert template is not None
+        assert template.id in index
+        assert template.name_zh in index
+        assert template.summary_zh in index
+        assert template.source_path in index
+        assert template.prompt_zh not in index
+        for tool_name in template.default_tools:
+            assert tool_name not in index
+
+
+# LLM: _assert_other_role_prompts_absent keeps role template scope tests shallow for code-size guard.
+# 函数用途: 确认 prompt/detail 只包含当前角色提示，避免测试函数出现多层循环和条件嵌套。
+def _assert_other_role_prompts_absent(prompt: str, *, store, template_id: str) -> None:
+    other_prompts = [item.prompt_zh for item in store.all() if item.id != template_id]
+    assert all(text not in prompt for text in other_prompts)
+
+
+# LLM: test_all_builtin_role_template_details_are_scoped covers on-demand role prompt loading.
+# 函数用途: 每个模板派工时只能加载自己的详细提示，不能把其他角色的系统提示全塞进去。
+def test_all_builtin_role_template_details_are_scoped():
+    store = load_role_template_store()
+
+    for template_id in BUILTIN_ROLE_IDS:
+        template = store.get(template_id)
+        assert template is not None
+        detail = role_template_detail_text(roles=[template_id])
+        assert template.id in detail
+        assert template.name_zh in detail
+        assert template.prompt_zh in detail
+        assert template.output_contract_zh in detail
+        for tool_name in template.default_tools:
+            assert tool_name in detail
+        _assert_other_role_prompts_absent(detail, store=store, template_id=template_id)
+
+
+# LLM: test_all_builtin_role_contracts_are_applied_on_create_run covers effective execution boundaries.
+# 函数用途: 每个模板创建 run 后都应拿到对应默认工具、输出合同和父级验收边界。
+def test_all_builtin_role_contracts_are_applied_on_create_run(tmp_path):
+    store = load_role_template_store()
+    manager = SubAgentManager(tmp_path)
+
+    for template_id in BUILTIN_ROLE_IDS:
+        template = store.get(template_id)
+        assert template is not None
+        task = manager.create_run(
+            goal=f"验证 {template.name_zh} 的模板执行边界",
+            thought="role coverage",
+            plan=["read contract", "report evidence"],
+            role=template_id,
+        )
+
+        assert task.role == template_id
+        assert task.allowed_tools == template.default_tools
+        assert any(template.output_contract_zh in check for check in task.acceptance_checks)
+        assert task.quality_contract.cannot_self_accept is True
+        assert task.quality_contract.parent_final_gate is True
+        for tool_name in ["write_file", "append_file", "replace_in_file"]:
+            assert (tool_name in task.allowed_tools) is template.can_write
+        assert ("schedule_child_subagents" in task.allowed_tools) is template.can_spawn_children
+
+
+# LLM: test_all_builtin_runner_prompts_load_current_role_template covers execution-time role guidance.
+# 函数用途: 每个可执行角色的 runner prompt 都要拿到本角色提示；coordinator 额外拿模板全集用于继续派工。
+def test_all_builtin_runner_prompts_load_current_role_template():
+    store = load_role_template_store()
+
+    for template_id in BUILTIN_ROLE_IDS:
+        template = store.get(template_id)
+        assert template is not None
+        context = SubAgentExecutionContext(
+            run_id=f"{template_id}-run",
+            generated_at=1.0,
+            goal=f"执行 {template.name_zh} 覆盖测试",
+            thought="role prompt coverage",
+            plan=["follow contract"],
+            role=template_id,
+            agent_name=template_id,
+            allowed_tools=template.default_tools,
+            acceptance_checks=[template.output_contract_zh],
+        )
+        prompt = _build_subagent_runner_prompt(context)
+
+        assert template.prompt_zh in prompt
+        if template_id == "coordinator":
+            assert "模板详情" in prompt
+            assert "你是找茬子代理" in prompt
+        else:
+            assert "当前角色模板详情" in prompt
+            _assert_other_role_prompts_absent(prompt, store=store, template_id=template_id)

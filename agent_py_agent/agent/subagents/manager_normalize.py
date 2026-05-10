@@ -94,9 +94,9 @@ def _normalize_context_packs(value: object) -> list[dict[str, object]]:
 
 
 # LLM: patterns for extracting directory paths from user goal text.
-_DIR_PATTERN = re.compile(r"(?:/[\w.\-]+){2,}")
+_DIR_PATTERN = re.compile(r"(?<![\w.\-])(?:/[\w.\-]+){2,}")
 _HOME_DIR_PATTERN = re.compile(r"(?:~/[\w.\-]+(?:/[\w.\-]+)*)")
-_ABSOLUTE_DIR_PATTERN = re.compile(r"(?:/[\w.\-]+(?:/[\w.\-]+)*)(?=/|$)")
+_ABSOLUTE_DIR_PATTERN = re.compile(r"(?<![\w.\-])(?:/[\w.\-]+(?:/[\w.\-]+)*)(?=/|$)")
 
 
 # LLM: _extract_write_dirs 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
@@ -113,7 +113,13 @@ def _extract_write_dirs(goal: str) -> list[str]:
 # 函数用途: 处理迭代writedirmatches相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
 def _iter_write_dir_matches(goal: str):
     return (
-        match.group().strip()
+        _trim_write_dir_candidate(match.group())
         for pattern in [_DIR_PATTERN, _HOME_DIR_PATTERN]
         for match in pattern.finditer(goal)
     )
+
+
+# LLM: _trim_write_dir_candidate keeps legacy normalization aligned with services.base.
+# 函数用途: 清理目录候选末尾标点，避免自动写入根带上自然语言句号。
+def _trim_write_dir_candidate(raw: str) -> str:
+    return raw.strip().rstrip(".,;:，。；：、)]}）】")

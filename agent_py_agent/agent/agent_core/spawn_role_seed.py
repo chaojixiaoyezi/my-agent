@@ -10,8 +10,6 @@ from ..subagents.role_templates import COORDINATOR_TOOLS
 from ..subagents.services.base import CreateRunParams, _extract_write_dirs
 from .subagent_params import SpawnSubagentsParams
 
-_COORDINATOR_WRITE_TOOLS = {"write_file", "append_file", "replace_in_file"}
-
 
 # LLM: SpawnExplicitRoleRequest bundles explicit-root creation data to keep helper calls narrow.
 # 类用途: 保存显式 role spawn 所需的 agent、参数、数量、工具和 workflow 模式。
@@ -70,13 +68,13 @@ def spawn_explicit_role_runs(request: SpawnExplicitRoleRequest) -> list[SubAgent
     return tasks
 
 
-# LLM: _spawn_role_allowed_tools gives coordinator roots orchestration tools but strips write tools.
-# 函数用途: 为显式 root/coordinator 生成工具列表，确保它能创建/调度下层，但不能直接写用户产物。
+# LLM: _spawn_role_allowed_tools gives coordinator roots orchestration and report-writing tools.
+# 函数用途: 为显式 root/coordinator 生成工具列表，确保它能创建/调度下层，并写自己的协调报告。
 def _spawn_role_allowed_tools(role: str, configured_tools: list[str] | None) -> list[str] | None:
     if not is_explicit_root_role(role):
         return configured_tools
     merged = [*COORDINATOR_TOOLS, *(configured_tools or [])]
-    return list(dict.fromkeys(tool for tool in merged if tool not in _COORDINATOR_WRITE_TOOLS))
+    return list(dict.fromkeys(merged))
 
 
 # LLM: _create_explicit_role_run builds one CreateRunParams bundle for deterministic root seeding.
@@ -86,7 +84,7 @@ def _create_explicit_role_run(request: ExplicitRoleRunRequest) -> SubAgentTask:
     return seed.agent.subagents.create_run(
         params=CreateRunParams(
             goal=_spawn_goal_text(seed.options.goal, request.index, seed.count),
-            thought="只负责拆分、调度和汇报；不得直接替下层 worker 写最终产物。",
+            thought="只负责拆分、调度、汇报和写协调报告；不得直接替下层 worker 写最终产物。",
             plan=["创建直接子代理", "调度直接子代理", "观察子代理状态", "汇报证据和阻塞"],
             agent_name=_spawn_agent_name(seed.options.agent_name, request.role, request.index, seed.count),
             role=request.role,
