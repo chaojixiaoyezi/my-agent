@@ -12,6 +12,7 @@ from typing import Any, ClassVar
 
 from .execution_executor import TestExecutor
 from .execution_report import load_test_execution_report
+from .execution_test_items import TestItemPreparationRequest, prepare_test_items
 from .models import SubAgentTask
 from .parent_acceptance_empty_report import empty_report_is_inspectable, executable_tests
 from .parsing import _dict_list
@@ -77,6 +78,7 @@ class TestReportDecisionInput:
     refs: list[ParentAcceptanceRef]
     report_path: Path
     recovery_refs: tuple[str, str]
+    runnable_tests: list[dict[str, Any]]
 
 
 # LLM: build_parent_acceptance_decision is side-effect free and only reads task-local JSON facts.
@@ -89,7 +91,7 @@ def build_parent_acceptance_decision(
     """Build a dry-run parent acceptance decision for one subagent task."""
 
     output = _read_json_object(Path(task.output_json))
-    tests = _dict_list(output.get("tests", []))
+    tests = _prepared_tests(output, workspace_root)
     runnable_tests, ignored_empty_command_count = executable_tests(tests)
     refs = _base_refs(task, tests, runnable_tests, ignored_empty_command_count)
     report_path = Path(task.reports_dir) / "test_execution.json"
@@ -114,6 +116,7 @@ def build_parent_acceptance_decision(
                 refs=refs,
                 report_path=report_path,
                 recovery_refs=(failure_ref, takeover_ref),
+                runnable_tests=runnable_tests,
             )
         )
 
@@ -207,13 +210,11 @@ def _decision_from_test_report(params: TestReportDecisionInput) -> ParentAccepta
     report = load_test_execution_report(params.report_path)
     failure_ref, takeover_ref = params.recovery_refs
     test_ref = ParentAcceptanceRef("test_execution", str(params.report_path), "test execution report")
-    tests = _dict_list(params.output.get("tests", []))
-    runnable_tests, _ignored_empty = executable_tests(tests)
     if empty_report_is_inspectable(
         task=task,
         output=params.output,
         report=report,
-        has_executable_tests=bool(runnable_tests),
+        has_executable_tests=bool(params.runnable_tests),
     ):
         return ParentAcceptanceDecision(
             run_id=task.id,
@@ -342,6 +343,18 @@ def _unsafe_test_reason(tests: list[dict[str, Any]], workspace_root: str | Path)
             name = str(item.get("name") or command or "unknown").strip()
             return f"test command requires human confirmation: {name}: {error}"
     return ""
+
+
+# LLM: _prepared_tests keeps parent dry-run checks aligned with the eventual bounded executor input.
+# 函数用途: 在父级验收预检前归一化 tests；只拆安全 cwd 包装，不执行命令、不放开 shell。
+def _prepared_tests(output: dict[str, Any], workspace_root: str | Path) -> list[dict[str, Any]]:
+    return prepare_test_items(
+        TestItemPreparationRequest(
+            tests=_dict_list(output.get("tests", [])),
+            output=output,
+            workspace_root=workspace_root,
+        )
+    )
 
 
 # LLM: _existing_path returns a string ref only when the task-local fact file exists.
