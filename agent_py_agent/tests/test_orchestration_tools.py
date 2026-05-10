@@ -286,7 +286,6 @@ class TestSubagentBoardToolExecute:
 
         assert result.ok is True
 
-
 class TestDispatchSubagentsToolExecute:
     """测试 DispatchSubagentsTool.execute() 方法。"""
 

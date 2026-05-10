@@ -930,7 +930,7 @@ docs/
 - `agent_py_agent/agent/agent_core/tool_context_reducer.py`: 大工具输出进入下一轮 live prompt 前只注入 artifact 摘要和 checkpoint refs，小输出仍保留原工具结果。
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_records.py`: 承接 dispatch acceptance record 构建、parent acceptance auto-policy/auto-execution 摘要和显式 tests 后的 refresh 调用，让主 dispatch service 保持薄编排。
 - `agent_py_agent/agent/agent_core/dispatch_acceptance_refresh.py`: 本轮显式 parent tests 写入 `test_execution.json` 后重新 dry-run acceptance，并刷新 dispatch 展示、单 run 审计和 aggregate acceptance report；不 apply、不 rescue、不修改 task 状态。
-- `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`: 承接 runner-context `dispatch_subagents` 工具返回 payload 的单条 record 构造，输出 test/follow-up refs 和摘要，不展开正文。
+- `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`: 承接 runner-context `dispatch_subagents` 工具返回 payload 的单条 record 构造，输出 test/follow-up refs 和摘要，不展开正文；错 run_id 时顶层 recovery 会给 `valid_run_ids`。
 - `agent_py_agent/agent/agent_core/runner_stage_trace.py`: 把子代理 runner 的模型请求/响应/失败和工具调用开始/结束写入 debug trace；level 3 只记录长度、backend、工具名、payload keys 和 ok，level 4/5 才追加短预览或完整 detail 文件 ref。
 - `agent_py_agent/agent/subagents/services/control_plane_projection.py`: 在 subagent 保存时把 task 当前状态投影到 LocalStore 控制面；它只做查询索引，不替代旧工单目录或 runtime workspace 事实源。
 - `agent_py_agent/agent/subagents/debug_trace.py`: 子代理正式调试追踪开关的写入层；`subagent_debug_trace_level=0` 时完全静默，level 1-3 只把 bounded refs-only 事件写入内部 `debug_traces/subagent_trace.jsonl`，level 4 加短预览，level 5 把完整 prompt/response/tool payload/tool output 写入内部 `debug_traces/details/` 并在 JSONL 里留 ref。
@@ -998,10 +998,10 @@ docs/
 - `agent_py_agent/agent/agent_core/coordinator_seed_tools.py`: 显式 root/coordinator seed 的工具过滤策略；模型额外传入 shell/web 工具时收敛回内置 coordinator 工具包。
 - `agent_py_agent/agent/agent_core/spawn_role_seed.py`: CLI 显式 role seed 入口；root/coordinator seed 保留 goal 里的产品路径给下层派工，但自身 allowed write roots 只保留 task-local 协调目录。
 - `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context dispatch 的直接 child 进度摘要；含状态计数、unfinished ids、`needs_more_dispatch` 和带 `run_ids` 的建议继续调度工具调用。
-- `agent_py_agent/agent/agent_core/orchestration_board_payload.py`: subagent board 输出整形 helper；把可继续处理的 run id 按状态放到顶层，并截断长 goal，避免看板响应挤占模型上下文。
+- `agent_py_agent/agent/agent_core/orchestration_board_payload.py`: subagent board 输出整形 helper；把可继续处理的 run id 按状态放到顶层，归一 `status=ALL/*/ANY` 为不过滤，并截断长 goal，避免看板响应挤占模型上下文。
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_tool.py`: `dispatch_subagents` 模型工具类；把模型参数收敛成 `DispatchParams`，返回 refs-first 调度报告和错误 run id 恢复提示。
 - `agent_py_agent/agent/agent_core/orchestration_workflow_mode.py`: create/dispatch 共用 workflow mode 归一化 helper，维持 `off` / `plan` / `auto` 兼容语义。
-- `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`: dispatch 工具返回 payload 压缩层；单条 record 只保留 refs 和关键字段，错 run_id 时把 `runner_selection_recovery` 放到顶层。
+- `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`: dispatch 工具返回 payload 压缩层；单条 record 只保留 refs 和关键字段，错 run_id 时把 `runner_selection_recovery.valid_run_ids` 放到顶层。
 - `agent_py_agent/agent/agent_core/dispatch_runner_selection.py`: runner 候选范围和显式 `include_run_ids` 预检；错 id 会返回 `runner_selection/invalid_run_ids`、可用 direct child ids 和保守纠正提示。
 - `agent_py_agent/agent/agent_core/dispatch_runner_batches.py`: runner 候选收集和执行批处理；调用 selection helper 精确推进父节点给定的直接孩子。
 - `agent_py_agent/agent/tooling/json_repair.py`: 工具调用 JSON 的窄口修复 helper；目前只修有效对象后多余右花括号，避免模型因 parse error 把完整任务 goal 越改越短。

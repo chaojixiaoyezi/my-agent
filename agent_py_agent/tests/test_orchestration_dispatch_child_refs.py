@@ -119,6 +119,29 @@ def test_dispatch_payload_includes_acceptance_followup():
     assert payload["records"][0]["followup_command"].endswith("--take-over-by <agent>")
 
 
+# LLM: test_dispatch_payload_exposes_recovery_valid_run_ids covers model retry ergonomics.
+# 函数用途: 模型传错 run_id 时，顶层恢复 payload 要直接给机器可读的 valid_run_ids。
+def test_dispatch_payload_exposes_recovery_valid_run_ids():
+    record = SimpleNamespace(
+        step="runner_selection",
+        action="invalid_run_ids",
+        run_id="",
+        ok=False,
+        dry_run=False,
+        applied=False,
+        message="blocked",
+        before_status="",
+        after_status="",
+        evidence_paths=["/tmp/subagents/child-a", "/tmp/subagents/child-b"],
+    )
+    payload = _dispatch_payload_for_record(record)
+
+    recovery = payload["runner_selection_recovery"]
+    assert recovery["action"] == "retry_dispatch_with_valid_run_id"
+    assert recovery["valid_run_ids"] == ["child-a", "child-b"]
+    assert recovery["valid_task_refs"] == ["/tmp/subagents/child-a", "/tmp/subagents/child-b"]
+
+
 # LLM: test_dispatch_payload_tells_runner_to_continue_unfinished_children covers partial runner waves.
 # 函数用途: runner 内还有 PLANNING/RUNNING 直接孩子时，payload 必须给出机器可读的继续调度动作。
 def test_dispatch_payload_tells_runner_to_continue_unfinished_children():

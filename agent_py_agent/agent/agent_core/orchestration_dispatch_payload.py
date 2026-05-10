@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 
 # LLM: dispatch_record_payload exposes compact acceptance facts to coordinator runners.
 # 函数用途: 给模型工具返回每条调度记录的核心字段和父级验收摘要，避免 coordinator 看不到 child 测试失败。
@@ -31,6 +33,7 @@ def dispatch_recovery_payload(records: list[object]) -> dict[str, object]:
             return {
                 "action": "retry_dispatch_with_valid_run_id",
                 "message": item.message,
+                "valid_run_ids": _valid_run_ids_from_refs(item.evidence_paths or []),
                 "valid_task_refs": list(item.evidence_paths or [])[:20],
             }
     return {}
@@ -53,6 +56,17 @@ def _dispatch_record_runner_payload(item) -> dict[str, object]:
         for name, attr in keys.items()
         if (value := getattr(item, attr, "")) not in ("", 0, [], None)
     }
+
+
+# LLM: _valid_run_ids_from_refs converts task-dir refs into machine-readable retry ids.
+# 函数用途: 从 dispatch 阻断证据路径中提取 run id，放到顶层 recovery payload，避免模型从自然语言里猜 id。
+def _valid_run_ids_from_refs(paths: list[str]) -> list[str]:
+    ids: list[str] = []
+    for path in paths[:20]:
+        run_id = Path(str(path)).name.strip()
+        if run_id and run_id not in ids:
+            ids.append(run_id)
+    return ids
 
 
 # LLM: _dispatch_record_acceptance_payload keeps parent test/follow-up refs compact and optional.

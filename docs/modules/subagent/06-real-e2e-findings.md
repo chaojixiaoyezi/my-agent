@@ -2160,3 +2160,39 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Rerun R9 from a clean runtime/deliverables to verify path-drift blocking makes cart coordinator rewrite the child goal back to `/build`.
   - Add producer/quality phase gating so QA/test/acceptance starts only after required producer branches have produced, failed, or explicitly handed off.
   - Add static shopping-site validation: required pages, no `${...}` placeholders, no dead local links/src, no inert core buttons, and a register -> login -> browse -> cart -> checkout -> order success flow.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R9
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r9.yaml`.
+  - Internal runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r9`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r9`.
+  - Root run: `subagent-1778446763-af4105e4`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+- 中文说明：
+  - R9 仍按“外层只观察 root”的方式跑。外层只创建并运行 root，没有替 root 创建下级，也没有写业务产物。
+  - Root 正确创建了 auth、catalog、cart-checkout、quality 四个一级 coordinator，说明 R8 的 path-drift guard 没有挡住合法 `/build` 目标。
+  - 随后 root 没有直接使用 `schedule_child_subagents` 返回的真实 `created_run_ids`，而是猜了旧格式 id 去 dispatch；dispatch 已阻断并返回正确 ids，但 root 又用 `subagent_board(status="ALL")` 查板，旧过滤逻辑把 ALL 当成真实状态，返回 0 条，导致恢复信息不足。
+- Observed facts:
+  - Created valid children:
+    - `subagent-1778446829-04f1bee3` / `auth-coordinator`
+    - `subagent-1778446829-73872e47` / `catalog-coordinator`
+    - `subagent-1778446829-79924b55` / `cart-checkout-coordinator`
+    - `subagent-1778446829-22e8faee` / `quality-coordinator`
+  - Invalid dispatch ids guessed by root: `subagent-1778446775-6f1fa8a5`, `subagent-1778446776-9f7a0bc3`, `subagent-1778446777-c2a2d4e6`, `subagent-1778446778-d3e3f5a7`.
+  - Dispatch output already contained `direct_children.suggested_tool_call.run_ids`, but board follow-up returned `returned=0` because of `status="ALL"`.
+- Finding 51: board `status=ALL` must mean no filter.
+  - Symptom: root asked for all board rows with `status="ALL"` and got zero rows.
+  - 中文解释：模型说“给我全部”，系统却按“状态名必须等于 ALL”来筛选。结果明明有 4 个孩子，看板像空的一样。
+  - Fix: `orchestration_board_payload.board_status_filter()` now treats `ALL`, `*`, `ANY`, and empty values as no filter.
+  - Verification: `test_status_all_keeps_board_items`.
+- Finding 52: invalid-run-id recovery needs machine-readable ids.
+  - Symptom: correct run ids were present in a Chinese message and task refs, but root still copied guessed ids.
+  - 中文解释：让模型从一大段中文提示里抠 id 太脆。恢复包应该直接给 `valid_run_ids` 这种机器能照抄的字段。
+  - Fix: `runner_selection_recovery` now includes `valid_run_ids` extracted from evidence task refs, while still keeping `valid_task_refs`.
+  - Verification: `test_dispatch_payload_exposes_recovery_valid_run_ids`.
+- Remaining gaps:
+  - Rerun R10 from a clean runtime/deliverables to verify root uses `valid_run_ids` / `actionable_run_ids` and actually runs the four child coordinators.
+  - Continue producer/quality phase gating so QA/test/acceptance starts only after producers produce, fail, or hand off.
+  - Add static shopping-site validation: required pages, no `${...}` placeholders, no dead local links/src, no inert core buttons, and a register -> login -> browse -> cart -> checkout -> order success flow.
