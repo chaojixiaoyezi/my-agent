@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 
+from agent_py_agent.agent.backend import BaseBackend, ModelResponse
+from agent_py_agent.agent.config import AgentConfig
+from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.manager_runner_results import RecordRunnerResultParams
 from agent_py_agent.agent.subagents.services.hierarchy_recovery import HierarchyRecoveryRequest
@@ -14,6 +17,54 @@ from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
 def _trace_records(workspace):
     trace_file = workspace / "debug_traces" / "subagent_trace.jsonl"
     return [json.loads(line) for line in trace_file.read_text(encoding="utf-8").splitlines()]
+
+
+# LLM: _TraceToolBackend drives one model request, one tool call, and one final response for trace assertions.
+# 类用途: 测试 runner 阶段心跳时使用的假后端；第一轮请求 list_files，第二轮返回结构化子代理结果。
+class _TraceToolBackend(BaseBackend):
+    name = "trace_tool_backend"
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"list_files","path":"."}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        return ModelResponse(
+            text=(
+                "[SUBAGENT_RESULT]\n"
+                "{\n"
+                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "summary": "trace runner finished.",\n'
+                '  "used_tools": ["list_files"],\n'
+                '  "used_skills": [],\n'
+                '  "evidence": [{"kind": "tool", "summary": "listed workspace", "ok": true}],\n'
+                '  "capability_requests": [],\n'
+                '  "artifacts": [],\n'
+                '  "tests": [],\n'
+                '  "patches": [],\n'
+                '  "lessons": [],\n'
+                '  "next_actions": [],\n'
+                '  "blocked_reason": "",\n'
+                '  "failure_type": ""\n'
+                "}\n"
+                "[/SUBAGENT_RESULT]"
+            ),
+            backend=self.name,
+        )
+
+
+# LLM: _FailingTraceBackend verifies request-failed trace writes before runner failure handling.
+# 类用途: 测试模型请求抛异常时，debug trace 也能留下失败阶段事件。
+class _FailingTraceBackend(BaseBackend):
+    name = "failing_trace_backend"
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        raise RuntimeError("trace backend failed")
 
 
 def test_subagent_debug_trace_is_off_by_default(tmp_path):
@@ -199,3 +250,68 @@ def test_subagent_debug_trace_records_dispatch_reports_at_level_three(tmp_path):
     assert by_type["dispatch_report"]["summary"]["run_subagent"] == 1
     assert by_type["dispatch_watch_report"]["record_count"] == 1
     assert by_type["dispatch_watch_report"]["summary"]["dispatch_records"] == 1
+
+
+def test_subagent_debug_trace_records_runner_model_and_tool_stages(tmp_path):
+    """等级 3 记录模型请求/响应和工具调用阶段，便于定位长 runner 卡点。"""
+    cfg = AgentConfig(
+        enable_tools=True,
+        model_backend="echo",
+        subagent_workspace="subs",
+        subagent_debug_trace_level=3,
+        max_tool_rounds=3,
+    )
+    agent = SimpleAgent(cfg, tmp_path)
+    agent.backend = _TraceToolBackend()
+    task = agent.subagents.create_run(
+        goal="observe runner stages",
+        thought="需要一次工具调用再收口。",
+        plan=["list", "finalize"],
+        allowed_tools=["list_files"],
+    )
+
+    result = agent.run_subagent(task.id, dry_run=False, probe=False)
+
+    assert result.ok
+    records = _trace_records(tmp_path / "subs")
+    event_types = [record["event_type"] for record in records]
+    assert event_types.count("runner_model_request_started") == 2
+    assert event_types.count("runner_model_response_received") == 2
+    assert "runner_tool_call_started" in event_types
+    assert "runner_tool_call_finished" in event_types
+    tool_started = next(record for record in records if record["event_type"] == "runner_tool_call_started")
+    tool_finished = next(record for record in records if record["event_type"] == "runner_tool_call_finished")
+    assert tool_started["tool"] == "list_files"
+    assert tool_started["payload_keys"] == ["path", "tool"]
+    assert "payload" not in tool_started
+    assert tool_finished["ok"] is True
+    assert tool_finished["output_chars"] > 0
+
+
+def test_subagent_debug_trace_records_runner_model_request_failure(tmp_path):
+    """等级 3 记录模型请求异常，避免 trace 只停在 request_started。"""
+    cfg = AgentConfig(
+        enable_tools=True,
+        model_backend="echo",
+        subagent_workspace="subs",
+        subagent_debug_trace_level=3,
+    )
+    agent = SimpleAgent(cfg, tmp_path)
+    agent.backend = _FailingTraceBackend()
+    task = agent.subagents.create_run(
+        goal="observe failed model request",
+        thought="模型请求会失败。",
+        plan=["call model"],
+        allowed_tools=[],
+    )
+
+    result = agent.run_subagent(task.id, dry_run=False, probe=False)
+
+    assert not result.ok
+    records = _trace_records(tmp_path / "subs")
+    event_types = [record["event_type"] for record in records]
+    assert "runner_model_request_started" in event_types
+    assert "runner_model_request_failed" in event_types
+    failed = next(record for record in records if record["event_type"] == "runner_model_request_failed")
+    assert failed["error_type"] == "RuntimeError"
+    assert "trace backend failed" in failed["error_preview"]

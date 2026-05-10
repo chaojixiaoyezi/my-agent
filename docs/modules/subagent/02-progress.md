@@ -245,10 +245,11 @@
 - 本轮角色模板真实接入：`create_subagents` / `schedule_child_subagents` 工具规格和 coordinator runner prompt 现在会展示内置角色模板摘要，真实 MiniMax smoke 能主动创建 `worker/tester/bug_finder/acceptor` 四类子代理；默认不传 `allowed_tools` 时由角色模板和任务目标决定工具，worker 得到写工具，tester/bug_finder/acceptor 保持只读。
 - 本轮 dispatch 阶段排序修复：真实 role-template smoke 暴露 `acceptor/bug_finder/tester` 可能先于 `worker` 被 `max_runners` 截断选中；现在 runner 候选会在截断前按角色阶段排序，保证“先拆/先做/再测/再验收”。
 - 本轮 runner 超时配置调整：按用户要求，默认 `runner_timeout_seconds` 改为 `off`，`off/none/disabled/0` 明确表示不套外层超时；数字秒数仍是固定超时，`auto` 才使用动态 timeout。真实重跑确认不再 30 秒误杀，但也暴露“无限等待时缺少活跃心跳/请求阶段可观测性”的后续问题，已记录到真实 E2E findings。
+- 本轮 runner 阶段心跳第一片：`subagent_debug_trace_level=3` 现在会记录子代理 runner 的模型请求开始、模型响应返回、模型请求失败、工具调用开始、工具调用结束；只写长度、backend、工具名、payload keys、ok 和输出长度，不写 prompt/response/tool output 正文。这样无限 runner 卡住时能先区分是模型请求卡住、模型已返回但工具没跑、还是工具调用卡住。
 
 ## 未跑测试
 
-- 当前文档同步轮已经补跑真实 MiniMax 小树收口冒烟；尚未重跑完整 `1/4/16/48` 或购物网站级大型 E2E。
+- 当前 runner 阶段心跳已用 focused stub tests 覆盖；尚未用真实 MiniMax 重跑完整 `1/4/16/48` 或购物网站级大型 E2E。
 - workflow apply 已有实现，但仍需要继续补更贴近真实 dispatch 的端到端回归，尤其是 worker 子工单依赖、验收阻断和失败回放。
 - 同步门目前只覆盖 `log-analysis` 和 `subagent` 两个模块；其它模块还需要先补四件套和规则映射。
 - parent/subagent 跨天恢复已有确定性 backend 场景和真实 API 多轮恢复记录；后续交付级变更仍应按风险补跑真实 API 冒烟。

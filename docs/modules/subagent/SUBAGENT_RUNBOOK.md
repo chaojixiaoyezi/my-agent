@@ -1158,7 +1158,7 @@ failure_type = structured_output_parse_error
 默认安全行为：
 - `subagent-run` 默认 dry-run。
 - `subagent-run --execute` 才调用模型。
-- `subagent-run --execute` 会走 runner worker timeout 边界；`runner_timeout_seconds` 为固定值时用固定值，为 `auto` 时按任务规模和动态 timeout 配置计算；`off` / `none` / `disabled` / `0` 表示不套外层超时，适合真实长任务测试，但如果模型请求卡住，需要靠 debug trace、外部观察或后续 watchdog 诊断。
+- `subagent-run --execute` 会走 runner worker timeout 边界；`runner_timeout_seconds` 为固定值时用固定值，为 `auto` 时按任务规模和动态 timeout 配置计算；`off` / `none` / `disabled` / `0` 表示不套外层超时，适合真实长任务测试。若同时开启 `subagent_debug_trace_level=3`，debug trace 会记录 `runner_model_request_started`、`runner_model_response_received`、`runner_model_request_failed`、`runner_tool_call_started`、`runner_tool_call_finished`，用于判断卡在模型请求、模型响应后处理还是工具调用阶段；后续 watchdog 仍负责把长期无进展变成可恢复动作。
 - 执行前默认 probe。
 - 工具有 allowlist。
 - 未授权工具调用会失败。

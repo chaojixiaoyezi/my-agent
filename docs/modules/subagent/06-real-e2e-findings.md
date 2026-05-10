@@ -1463,6 +1463,7 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Finding 3: unlimited runner can still hang without visible model-stage progress.
   - Symptom: 无限时长重跑超过 5 分钟仍无 response/output/deliverables，只写出 execution context；最终人工停止并把 attempt 标记 abandoned，task 标记 `BLOCKED/manual_stop_after_unlimited_hung`。
   - 中文解释：不限制超时能防误杀，但如果底层模型请求或工具循环卡住，父级现在只能靠外部观察判断卡点。
+  - Fix first slice: `subagent_debug_trace_level=3` 现在记录 runner 阶段心跳：`runner_model_request_started`、`runner_model_response_received`、`runner_model_request_failed`、`runner_tool_call_started`、`runner_tool_call_finished`。中文解释：以后再遇到无限等待，先看 debug trace 就能知道卡在“问模型”“模型回来了但没进工具”“工具开始后没结束”哪一段。
+  - Verification first slice: focused stub tests 已覆盖模型请求/响应、模型异常和工具调用事件；尚未用真实 MiniMax 重跑大型 E2E。
   - Follow-up:
-    - 需要增加 runner 内部阶段心跳，例如 `model_request_started`、`model_response_received`、`tool_call_started`、`tool_call_finished`。
     - 需要把“无限 runner 长时间无 response 文件/无工具事件”纳入 due-check，可提示人工诊断或受控取消，而不是静默挂起。
