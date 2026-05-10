@@ -349,6 +349,32 @@ class TestDispatchSubagentsToolExecute:
 
         assert result.ok is True
 
+    def test_dispatch_exact_run_ids_are_passed_to_params(self):
+        """run_ids 让父 runner 精确指定本轮孩子执行顺序。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_report = MagicMock()
+        mock_report.dry_run = False
+        mock_report.summary = {}
+        mock_report.records = []
+
+        mock_agent = MagicMock()
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent.tools.specs.return_value = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = Path("/tmp/workspace")
+
+        tool = DispatchSubagentsTool(mock_agent)
+        result = tool.execute({
+            "apply": True,
+            "execute_runners": True,
+            "run_ids": ["child-auth", "child-catalog"],
+        })
+
+        assert result.ok is True
+        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
+        assert call_kwargs["params"].include_run_ids == ["child-auth", "child-catalog"]
+
     def test_top_level_dispatch_does_not_auto_workflow_active_root_coordinator(self):
         """推进 root coordinator 时，模型误传 workflow_mode=auto 也不能绕过 coordinator 生成通用 worker。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool

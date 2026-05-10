@@ -114,8 +114,11 @@ def test_tool_call_record_summarizes_large_payload_for_live_prompt(tmp_path: Pat
 
 def test_render_tool_payload_keeps_small_payload_readable() -> None:
     payload = {"tool": "read_file", "path": "README.md"}
+    rendered = render_tool_payload_for_live_prompt(payload)
 
-    assert render_tool_payload_for_live_prompt(payload) == repr(payload)
+    assert "tool_call_1: tool=read_file" in rendered
+    assert "path: README.md" in rendered
+    assert "{'tool'" not in rendered
 
 
 def test_tool_loop_writes_fail_safe_checkpoint_before_externalizing_large_output(tmp_path: Path) -> None:

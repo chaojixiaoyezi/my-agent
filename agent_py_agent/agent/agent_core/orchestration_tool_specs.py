@@ -53,6 +53,7 @@ _DISPATCH_PARAMETERS = {
     "workflow_mode": "off/plan/auto；是否在 dispatch 前补做 workflow 规划或自动派工",
     "max_runners": "本轮最多推进多少个 runner，默认 1；0 表示不执行 runner",
     "limit": "每阶段最多处理多少条记录，默认 20；0 表示不限制",
+    "run_ids": "精确指定本轮要推进的 run_id 列表，按给定顺序执行；也可写 include_run_ids",
     "runner_instruction": "给 runner 的额外指令",
 }
 _DISPATCH_PARAMETER_DETAILS = {
@@ -63,6 +64,7 @@ _DISPATCH_PARAMETER_DETAILS = {
     "planner": "true 会额外调用父代理 LLM planner；适合长任务统筹，但会多消耗一次模型调用。",
     "workflow_mode": "plan 只把 workflow 计划写回父任务；auto 会在计划 OK 时落成 worker 子工单；未知值保守按 off 处理。",
     "max_runners": "用来限制本轮推进数量；顶层默认 1，runner 内部默认 6，避免父节点只推进一个孩子就超时。",
+    "run_ids": "适合父 runner 用 schedule_child_subagents 返回的 created_run_ids 指定本轮孩子，例如先跑 auth/catalog，再跑 cart/quality。",
 }
 
 _SCHEDULE_CHILD_USE_CASES = [
@@ -158,6 +160,7 @@ def build_dispatch_subagents_spec() -> ToolSpec:
         parameter_details=_DISPATCH_PARAMETER_DETAILS,
         examples=[
             '{"tool":"dispatch_subagents","apply":false,"workflow_mode":"plan","max_runners":1}',
+            '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"run_ids":["child-auth","child-catalog"],"max_runners":2}',
             '{"tool":"dispatch_subagents","apply":true,"execute_runners":true,"workflow_mode":"auto","max_runners":2,"runner_instruction":"只在隔离 fixture 目录内写文件，并输出可验收证据"}',
         ],
     )

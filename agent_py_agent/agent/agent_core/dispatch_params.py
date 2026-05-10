@@ -31,6 +31,7 @@ class DispatchParams:
     auto_apply_acceptance_followup: bool = False
     parent_run_id: str = ""
     root_id: str = ""
+    include_run_ids: list[str] | None = None
     exclude_run_ids: list[str] | None = None
     finalize_acceptance: bool = True
 
@@ -57,6 +58,7 @@ class WatchParams:
     auto_apply_acceptance_followup: bool = False
     parent_run_id: str = ""
     root_id: str = ""
+    include_run_ids: list[str] | None = None
     exclude_run_ids: list[str] | None = None
     finalize_acceptance: bool = True
     interval: float = 30.0
@@ -131,6 +133,7 @@ class DispatchContext:
     router: Any  # CapabilityRouter – forward ref to avoid circular import at module level
     parent_run_id: str = ""
     root_id: str = ""
+    include_run_ids: list[str] | None = None
     exclude_run_ids: list[str] | None = None
     finalize_acceptance: bool = True
     records: list = field(default_factory=list)

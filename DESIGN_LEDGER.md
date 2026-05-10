@@ -1931,3 +1931,14 @@ def example(...):
 - 两个架构口子已修：child spec goal 自己写出的产物路径会进入 write-root 候选；`write_file` 这类大工具 payload 在 assistant round 和 tool-call record 两处都会摘要，不再反复进入 prompt。
 - 设计边界不变：coordinator/researcher/tester/acceptor 看到产物路径也不能拿最终产物写权限；只有 worker/writer/leaf_worker 且有明确写入意图时才继承候选根。
 - 下一轮 R3 必须补强父级静态站点验收：缺失页面、`${...}` 占位符、失效链接/图片和不可达按钮都应阻断验收。
+
+## 2026-05-11 Stage7 shopping E2E R3 stabilization
+
+状态：已落地调度稳定性修复，待 R4 复测
+
+摘要：
+- coordinator 显式 allowed_tools 现在会合并内置 coordinator 工具包，确保协调节点不会因为模型漏写 `schedule_child_subagents` / `dispatch_subagents` 而失去继续派工能力。
+- `dispatch_subagents` 新增 `run_ids` / `include_run_ids` 精确推进入口；runner 候选会先按这些 id 过滤并按给定顺序执行，解决 root 想先跑 auth/catalog 但队列跑偏的问题。
+- runner-context 进度 payload 的建议工具调用会把 unfinished direct child ids 放进 `run_ids`，让父节点继续调度时不必靠自然语言记忆。
+- live tool context 的历史记录改用 `[tool-record ...]` / `[tool-output-record ...]` 中性标签，并把 dict payload 渲染成摘要行，降低模型复制历史记录造成 parse error 的概率。
+- 下一轮 R4 要验证 root 是否能按指定孩子顺序推进，并继续把购物网站完整流程验收到 register/login/product/cart/checkout/order success。

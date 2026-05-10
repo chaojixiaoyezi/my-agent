@@ -27,6 +27,7 @@ def direct_children_progress_payload(agent) -> dict[str, object]:
                 "tool": "dispatch_subagents",
                 "apply": True,
                 "execute_runners": True,
+                "run_ids": payload["direct_children"]["unfinished_run_ids"],
                 "workflow_mode": "auto",
             },
             "continue_hint": (

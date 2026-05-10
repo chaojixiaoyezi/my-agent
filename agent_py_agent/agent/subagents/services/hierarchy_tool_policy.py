@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
+from ..role_templates import COORDINATOR_TOOLS
+
 _DEFAULT_LEAF_CODING_TOOLS = [
     "list_files",
     "read_file",
@@ -72,7 +74,7 @@ class ToolPolicyRequest:
 
 
 # LLM: scheduled_child_tools applies coordinator and leaf policies without touching persistence.
-# 函数用途: 根据 child 角色、显式工具和写产物意图，返回去重后的下一层工具列表。
+# 函数用途: 根据 child 角色、显式工具和写产物意图，返回去重后的下一层工具列表；coordinator 显式工具也会补齐编排工具。
 def scheduled_child_tools(request: ToolPolicyRequest) -> list[str]:
     """Return the allowed tools for a scheduled child."""
 
@@ -86,12 +88,12 @@ def scheduled_child_tools(request: ToolPolicyRequest) -> list[str]:
     if request.spec.allowed_tools:
         explicit_tools = [_canonical_tool_name(item) for item in request.spec.allowed_tools]
         if is_coordinator_spec(request.spec):
-            return _coordinator_tools(explicit_tools)
+            return _coordinator_tools([*explicit_tools, *COORDINATOR_TOOLS])
         if should_infer_leaf_tools:
             return _leaf_write_tools([*explicit_tools, *_DEFAULT_LEAF_CODING_TOOLS])
         return list(dict.fromkeys(explicit_tools))
     if is_coordinator_spec(request.spec):
-        return _coordinator_tools(request.parent_tools)
+        return _coordinator_tools([*request.parent_tools, *COORDINATOR_TOOLS])
     if should_infer_leaf_tools:
         return _leaf_write_tools([*request.parent_tools, *_DEFAULT_LEAF_CODING_TOOLS])
     return request.parent_tools

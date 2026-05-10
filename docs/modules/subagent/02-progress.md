@@ -355,3 +355,8 @@
 - 中文说明：购物网站真实 E2E R2 跑出了 root -> 4 coordinator -> worker/leaf 链路，产出认证和商品页面，但购物车/结账未完成，上层在 480s smoke 边界内超时。
 - 已修正两个核心口子：`write_file` 大 payload 现在在 assistant round 和 tool-call record 两处都只回写摘要；worker/writer/leaf_worker 的 child spec goal 自己写出产物目录时，也会参与写入根授权候选。
 - 仍未完成：静态站点验收需要拦截缺失页面、`${...}` 模板占位符和失效链接/图片；coordinator 在部分子树成功/失败后还需要更早停止并交接，而不是继续读 refs 到超时。
+
+## 2026-05-11 Stage7 shopping E2E R3 stabilization
+- 中文说明：R3 真实跑到 root 创建 4 个 coordinator 后主动停下，定位到三个调度层问题：coordinator 显式工具列表会丢派工能力、dispatch 不能按 root 指定的 child ids 精确推进、live tool context 太像工具调用导致模型复制出 parse error。
+- 已修正：coordinator 显式工具会合并内置 coordinator 工具包；`dispatch_subagents` 支持 `run_ids` / `include_run_ids` 精确过滤并按顺序执行；未完成 direct children 的建议工具调用会带 `run_ids`；历史工具记录改成中性 marker 和摘要行。
+- 下一步：用干净 R4 重新跑购物网站层级 E2E，重点看 root 是否按 auth/catalog -> cart/quality 的顺序推进，并继续验证完整购物流程、按钮和图片链接。
