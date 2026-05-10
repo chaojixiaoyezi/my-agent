@@ -40,6 +40,9 @@ class DispatchRecordBuilder:
             runner_created_child_count=params.runner_created_child_count,
             runner_created_child_ids=params.runner_created_child_ids or [],
             runner_created_roles=params.runner_created_roles or [],
+            runner_child_status_counts=params.runner_child_status_counts or {},
+            runner_unfinished_child_ids=params.runner_unfinished_child_ids or [],
+            runner_partial_success=params.runner_partial_success,
             **_parent_acceptance_fields(params),
             created_at=time.time(),
         )

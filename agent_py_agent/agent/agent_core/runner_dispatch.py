@@ -30,6 +30,7 @@ RETRYABLE_RUNNER_FAILURE_TYPES = {
     "transient_error",
     "runner_timeout",
 }
+_RUNNER_CHILD_FINAL_STATUSES = {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
 
 
 # LLM: role phase ordering keeps QA and acceptance runners from racing ahead of implementation runners.
@@ -209,26 +210,53 @@ def _runner_dispatch_record(params: RunnerDispatchRecordParams):
 # 函数用途: 从执行后的任务快照收集 child ids/roles 和 runner 摘要，避免上层模型把 dispatch 记录数当成孩子数。
 def _runner_child_summary_fields(agent, after: SubAgentTask, result: SubAgentRunnerResult) -> dict[str, object]:
     child_ids = [str(item) for item in (after.child_ids or []) if str(item).strip()]
+    child_states = _runner_child_states(agent, child_ids)
     return {
         "runner_summary": result.structured_summary,
         "runner_created_child_count": len(child_ids),
         "runner_created_child_ids": child_ids,
-        "runner_created_roles": _runner_child_roles(agent, child_ids),
+        "runner_created_roles": [item["role"] for item in child_states if item["role"]],
+        "runner_child_status_counts": _runner_child_status_counts(child_states),
+        "runner_unfinished_child_ids": _runner_unfinished_child_ids(child_states),
+        "runner_partial_success": bool(child_ids and not result.ok),
     }
 
 
-# LLM: _runner_child_roles resolves roles from persisted child task refs only.
-# 函数用途: 给 dispatch 报告附加轻量角色列表；读失败时跳过，避免调度记录写入失败。
-def _runner_child_roles(agent, child_ids: list[str]) -> list[str]:
-    roles: list[str] = []
+# LLM: _runner_child_states resolves child status/role from persisted refs only.
+# 函数用途: 给 dispatch 报告附加轻量 child 状态；读失败时保留 id，避免调度记录写入失败。
+def _runner_child_states(agent, child_ids: list[str]) -> list[dict[str, str]]:
+    states: list[dict[str, str]] = []
     for child_id in child_ids:
         try:
-            role = str(getattr(agent.subagents.load(child_id), "role", "") or "").strip()
+            child = agent.subagents.load(child_id)
         except Exception:
-            role = ""
-        if role:
-            roles.append(role)
-    return roles
+            states.append({"id": child_id, "role": "", "status": "UNKNOWN"})
+            continue
+        states.append({
+            "id": child_id,
+            "role": str(getattr(child, "role", "") or "").strip(),
+            "status": str(getattr(child, "status", "") or "UNKNOWN").strip().upper(),
+        })
+    return states
+
+
+# LLM: _runner_child_status_counts keeps partial-success records compact.
+# 函数用途: 汇总 runner 已创建 child 的状态分布，不读取 child artifact 正文。
+def _runner_child_status_counts(child_states: list[dict[str, str]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in child_states:
+        status = item["status"] or "UNKNOWN"
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+# LLM: _runner_unfinished_child_ids surfaces children that need another dispatch wave.
+# 函数用途: 标出还没终态的 child ids，便于父级 timeout 后继续调度或接管。
+def _runner_unfinished_child_ids(child_states: list[dict[str, str]]) -> list[str]:
+    return [
+        item["id"] for item in child_states
+        if item["id"] and item["status"] not in _RUNNER_CHILD_FINAL_STATUSES
+    ]
 
 
 # LLM: _dispatch_runner_candidates 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

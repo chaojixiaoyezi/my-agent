@@ -31,6 +31,9 @@ def _dispatch_record_runner_payload(item) -> dict[str, object]:
         "runner_created_child_count": "runner_created_child_count",
         "runner_created_child_ids": "runner_created_child_ids",
         "runner_created_roles": "runner_created_roles",
+        "runner_child_status_counts": "runner_child_status_counts",
+        "runner_unfinished_child_ids": "runner_unfinished_child_ids",
+        "runner_partial_success": "runner_partial_success",
     }
     return {
         name: value

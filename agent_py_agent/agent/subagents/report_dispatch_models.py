@@ -33,6 +33,9 @@ class DispatchRecord:
     runner_created_child_count: int = 0
     runner_created_child_ids: list[str] = field(default_factory=list)
     runner_created_roles: list[str] = field(default_factory=list)
+    runner_child_status_counts: dict[str, int] = field(default_factory=dict)
+    runner_unfinished_child_ids: list[str] = field(default_factory=list)
+    runner_partial_success: bool = False
     parent_acceptance_policy_ref: str = ""
     parent_acceptance_policy_decision: str = ""
     parent_acceptance_policy_action: str = ""

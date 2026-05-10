@@ -884,7 +884,7 @@ docs/
 - `agent_py_agent/agent/subagents/models.py`: SubAgentTask 新增 `attributes: dict[str, object]` 字段
   - 用于存储动态超时、拆分信息等运行时属性
 
-- `agent_py_agent/agent/agent_core/runner_dispatch.py`: runner 候选选择、重试和角色阶段排序；coordinator/worker/tester/bug_finder/acceptor 会按“先拆/先做/再测/再验收”的阶段顺序进入 `max_runners`。
+- `agent_py_agent/agent/agent_core/runner_dispatch.py`: runner 候选选择、重试和角色阶段排序；coordinator/worker/tester/bug_finder/acceptor 会按“先拆/先做/再测/再验收”的阶段顺序进入 `max_runners`；dispatch record 会保留 runner 创建的 child 状态摘要、未完成 child ids 和 partial-success 标记。
 - `agent_py_agent/agent/agent_core/runner_gate.py`: 集中计算 runner timeout；`off/none/disabled/0` 表示不限制，`auto` 表示按动态 timeout 配置计算，固定数字表示秒数。
   - 支持从任务 attributes 读取动态超时。
 
@@ -987,6 +987,7 @@ docs/
 - `agent_py_agent/agent/subagents/role_templates.py`: 加载内置和用户 JSON role templates，要求广义角色、中文说明和多目标适用，坏模板记录 issue；提供轻量 `role_template_index_text()` 给主代理常驻提示词，按需 `role_template_detail_text()` 给派工 coordinator 展开完整角色提示。
 - `agent_py_agent/agent/subagents/role_template_catalog/builtin/*.json`: 内置 `coordinator/worker/bug_finder/tester/acceptor/researcher/writer` 角色模板。
 - `agent_py_agent/agent/agent_core/coordinator_seed_tools.py`: 显式 root/coordinator seed 的工具过滤策略；模型额外传入 shell/web 工具时收敛回内置 coordinator 工具包。
+- `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context dispatch 的直接 child 进度摘要；含状态计数、unfinished ids、`needs_more_dispatch` 和建议继续调度工具调用。
 - `agent_py_agent/agent/tooling/json_repair.py`: 工具调用 JSON 的窄口修复 helper；目前只修有效对象后多余右花括号，避免模型因 parse error 把完整任务 goal 越改越短。
 - `agent_py_agent/agent/subagents/role_contracts.py`: 新增 reporter/checker 角色契约和 analyst/reviewer 兼容映射；同时把模板角色接入默认工具、输出契约和 parent final gate。
 - `agent_py_agent/agent/subagents/automation_gate.py`: 新增半自动/自动执行门，默认只放行 refs-only 查询动作，跑工具或改状态动作继续需要人工确认。
