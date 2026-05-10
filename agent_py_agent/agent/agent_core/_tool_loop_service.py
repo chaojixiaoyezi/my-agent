@@ -21,34 +21,16 @@ from .runner_stage_trace import (
     trace_runner_tool_call_finished,
     trace_runner_tool_call_started,
 )
-from .tool_call_context_reducer import (
-    AssistantToolRoundContextRequest,
-    render_assistant_tool_round_context,
-    render_tool_payload_for_live_prompt,
-)
+from .tool_call_context_reducer import render_tool_payload_for_live_prompt
 from .tool_context_reducer import render_tool_result_for_live_prompt
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
-
-
-# LLM: ToolCallRecordParams 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
-# 类用途: 集中保存工具call记录参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
-@dataclass(frozen=True)
-class ToolCallRecordParams:
-    params: ToolLoopExecuteParams
-    tool_rounds: int
-    idx: int
-    payload: object
-    result: ToolExecutionResult
-
-
-# LLM: ToolCallExecuteParams keeps one tool execution request bundled before result recording.
-# 类用途: 单次工具调用执行参数包，避免 runner trace 和执行入口继续增加散乱参数。
-@dataclass(frozen=True)
-class ToolCallExecuteParams:
-    params: ToolLoopExecuteParams
-    tool_rounds: int
-    idx: int
-    payload: object
+from .tool_round_execution import (
+    ToolCallExecuteParams,
+    ToolCallRecordParams,
+    ToolRoundExecutionRequest,
+    execute_tool_round,
+    subagent_output_json_response,
+)
 
 
 # LLM: ModelGenerateParams bundles backend generation inputs for trace and bundle-interface guard.
@@ -59,16 +41,6 @@ class ModelGenerateParams:
     params: ToolLoopExecuteParams
     prompt: str
     tool_rounds: int
-
-
-# LLM: AssistantToolRoundAppendParams keeps live-context append inputs in one bundle.
-# 类用途: 保存本轮工具调用摘要回写所需上下文，避免内部 helper 重新出现散乱参数。
-@dataclass(frozen=True)
-class AssistantToolRoundAppendParams:
-    params: ToolLoopExecuteParams
-    tool_rounds: int
-    response: ModelResponse
-    calls: list[dict[str, object]]
 
 
 # LLM: _build_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -106,17 +78,6 @@ def _duplicate_one_shot_result(payload: dict[str, object]) -> ToolExecutionResul
         False,
         "本轮已经执行过相同的一次性编排工具调用，系统已阻止重复执行。"
         "请基于前面的工具结果直接给最终回答，不要再次调用同一个工具。",
-    )
-
-
-# LLM: _append_assistant_tool_round_context protects the next live prompt from large tool payloads.
-# 函数用途: 把模型刚生成的工具调用摘要写回 tool_context；大正文只保留长度/hash/预览，不再反复塞进后续提示词。
-def _append_assistant_tool_round_context(request: AssistantToolRoundAppendParams) -> None:
-    rendered = render_assistant_tool_round_context(
-        AssistantToolRoundContextRequest(request.response.text, request.calls)
-    )
-    request.params.tool_context.append(
-        f"[assistant-tool-round-{request.tool_rounds}]\n{rendered}"
     )
 
 
@@ -162,20 +123,19 @@ class ToolLoopService:
                 break
 
             tool_rounds += 1
-            _append_assistant_tool_round_context(
-                AssistantToolRoundAppendParams(params, tool_rounds, response, calls)
-            )
-            for idx, payload in enumerate(calls, start=1):
-                tool_request = ToolCallExecuteParams(
+            if execute_tool_round(
+                ToolRoundExecutionRequest(
+                    agent=self._agent,
                     params=params,
                     tool_rounds=tool_rounds,
-                    idx=idx,
-                    payload=payload,
+                    response=response,
+                    calls=calls,
+                    execute_one=self._execute_one_tool_call,
+                    record_one=self._record_tool_call,
                 )
-                result = self._execute_one_tool_call(tool_request)
-                self._record_tool_call(
-                    ToolCallRecordParams(params, tool_rounds, idx, payload, result)
-                )
+            ):
+                final_response = subagent_output_json_response(self._agent, response)
+                break
 
         return final_prompt, final_response, tool_rounds
 

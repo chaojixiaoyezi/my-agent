@@ -16,6 +16,7 @@ from agent_py_agent.agent.tools import ToolRegistry, ToolRegistryParams
 from .backends import (
     DuplicateSubagentDelegationBackend,
     MaxToolRoundBackend,
+    OutputJsonCompletionBackend,
     RepeatedDispatchBackend,
     StubbornToolAfterLimitBackend,
     SubagentDelegationBackend,
@@ -192,6 +193,36 @@ def test_max_tool_rounds_hard_stops_when_model_still_requests_tools():
         assert "[TOOL_CALL]" not in result.response
         assert result.tool_rounds == 0
         assert agent.backend.calls == 2
+
+
+# LLM: verifies runner completion artifacts short-circuit extra model turns.
+# 函数用途: 子代理成功写出自己的 output.json 后，应直接进入等待验收，避免继续请求模型导致卡住或烧 token。
+def test_subagent_runner_stops_after_output_json_write():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            subagent_workspace="subs",
+            max_tool_rounds=4,
+        )
+        agent = SimpleAgent(cfg, workspace)
+        task = agent.subagents.create_run(
+            goal="写出 output.json 后收口",
+            thought="模拟真实 runner 完成产物后等待父级验收。",
+            plan=["写结果", "停止工具循环"],
+            allowed_tools=["write_file"],
+        )
+        agent.backend = OutputJsonCompletionBackend(Path(task.output_json))
+
+        result = agent.run_subagent(task.id, dry_run=False, probe=False)
+
+        assert agent.backend.calls == 1
+        assert result.status == "AWAITING_ACCEPTANCE"
+        assert result.verification_status == "NEEDS_ACCEPTANCE"
+        assert result.structured_output_found is True
+        assert result.structured_output_ok is True
+        assert result.tool_rounds == 1
 
 
 def test_tool_catalog_and_recommended_sections():

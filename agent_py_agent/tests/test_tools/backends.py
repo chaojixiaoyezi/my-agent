@@ -178,6 +178,46 @@ class StubbornToolAfterLimitBackend(BaseBackend):
         )
 
 
+# LLM: OutputJsonCompletionBackend proves subagent output.json can terminate a runner without a second model call.
+# 类用途: 测试专用后端；第一次响应写入子代理 output.json，若系统再次调用模型就主动失败。
+class OutputJsonCompletionBackend(BaseBackend):
+    name = "fake_output_json_completion_backend"
+
+    # LLM: __init__ stores the task-local output path that the fake model will write.
+    # 函数用途: 初始化测试后端的 output.json 路径和调用计数。
+    def __init__(self, output_path: Path):
+        self.output_path = output_path
+        self.calls = 0
+
+    # LLM: generate emits a completion artifact once and rejects accidental extra turns.
+    # 函数用途: 第一次返回 write_file 工具调用；第二次调用说明 runner 未按 output.json 收敛。
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls > 1:
+            raise AssertionError("subagent runner should stop after writing output.json")
+        payload = {
+            "status": "COMPLETED",
+            "summary": "output.json completion smoke",
+            "artifacts": [{"path": "proof.txt", "kind": "file", "ok": True}],
+            "tests": [{"name": "proof exists", "command": "test -f proof.txt"}],
+        }
+        return ModelResponse(
+            text=(
+                "[TOOL_CALL]\n"
+                + json.dumps(
+                    {
+                        "tool": "write_file",
+                        "path": str(self.output_path),
+                        "content": json.dumps(payload, ensure_ascii=False),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n[/TOOL_CALL]"
+            ),
+            backend=self.name,
+        )
+
+
 class DemoHandler(BaseHTTPRequestHandler):
     """LLM: minimal HTTP handler for local integration tests of fetch and http_request tools.
 

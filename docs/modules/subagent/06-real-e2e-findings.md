@@ -2289,3 +2289,42 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining gaps:
   - Run a fresh root-only R12 shopping E2E and confirm the inferred check appears in parent acceptance/test reports.
   - If R12 still leaves a blocked leaf, verify the new `recovery_run_ids` hint leads the parent toward retry/rescue instead of unbounded running.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R12/R13
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - R12 config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r12.yaml`.
+  - R12 root run: `subagent-1778451668-d99a5adb`.
+  - R13 config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r13.yaml`.
+  - R13 root run: `subagent-1778453114-17d53dfd`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+- 中文说明：
+  - R12/R13 继续按“外层只观察 root”的方式跑。外层只创建并运行 root，没有替 root 创建下级，也没有替任何 child/leaf 写购物网站文件。
+  - R12 证明 root -> child coordinator -> 多个 leaf worker 可以由模型自己创建，但暴露了 leaf 写完 `output.json` 后还继续请求模型、导致长时间空转的问题。
+  - R13 用修复后的 runner 复跑。leaf 写完购物网站产物后能进入父级验收，自动 `static_site_check` 也被注入并通过；但模型自报的一个“文件结构验证”测试格式不完整，曾误报失败。
+- Observed facts:
+  - R12 root created child coordinator `subagent-1778451860-30acda3c` / `shop-build-lead`, then the coordinator created four leaf workers for auth/products/cart/styles.
+  - R12 base-styles worker tried to write `/Users/xiaoyezei/...` with a typo in the username path; write boundary correctly rejected the out-of-scope path.
+  - R12 leaf workers wrote deliverables and `output.json`, but after the completion artifact they continued into another model/tool loop instead of finalizing quickly.
+  - R13 root created child coordinator `subagent-1778453143-53fb6199` / `shop-build-lead`, and that coordinator created leaf `subagent-1778453364-f3dfcaae` / `shop-pages-builder`.
+  - R13 deliverables were written under `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r13/build`, including eight HTML pages, `style.css`, `app.js`, and local SVG images.
+  - R13 static site validation passed after rerun: `total=1 executed=1 passed=1 failed=0`.
+- Finding 59: subagent runners should stop after a valid `output.json` completion artifact.
+  - Symptom: R12 leaf workers wrote their final `output.json`, but the runner still asked the model for more work. This delayed parent acceptance and made healthy leaves look stuck.
+  - 中文解释：孩子已经把“我做完了，这是结果单”放到桌上了，系统却还继续问它“你下一步干嘛”。这会浪费模型调用，也容易让父级误以为孩子没收尾。
+  - Root cause: the tool loop treated `write_file(output.json)` like an ordinary file write and always started another model round to ask for final text.
+  - Fix: `_tool_loop_service.py` now detects a successful write to the current subagent's own `task.output_json`, reads the JSON back, synthesizes a `[SUBAGENT_RESULT]...[/SUBAGENT_RESULT]` response, and stops the tool loop.
+  - Verification:
+    - `python3 -m pytest -q agent_py_agent/tests/test_tools/test_tool_loop.py::test_subagent_runner_stops_after_output_json_write -p no:cacheprovider`.
+- Finding 60: malformed model-authored checklist tests must not override inferred machine checks.
+  - Symptom: R13 inferred `static_site_check` passed, but a model-authored test named `文件结构验证` had `validation_method=content_check` without `file_path` or `content_pattern`, so parent acceptance reported `total=2 failed=1`.
+  - 中文解释：真正的机器检查说“页面、链接、CSS/JS 引用都过了”，但模型自己写了一条空壳测试，系统把空壳测试当失败，造成假红。
+  - Root cause: `prepare_test_items()` preserved malformed runner-declared test items even when it could infer a stronger deterministic static-site check from artifact refs.
+  - Fix: when an inferred `static_site_check` is available, `execution_test_items.py` now drops non-executable model checklist items that lack the required command/file/content/site-root fields. If there is no machine fallback, malformed tests stay visible as conservative failure evidence.
+  - Verification:
+    - `python3 -m pytest -q agent_py_agent/tests/test_subagent_test_item_preparation.py -p no:cacheprovider`.
+    - Real R13 rerun: `subagents-tests subagent-1778453364-f3dfcaae --re-run --timeout 120` -> `total=1 executed=1 passed=1 failed=0`.
+- Remaining gaps:
+  - R13 coordinator collapsed a medium web project into one large leaf (`shop-pages-builder`) instead of splitting auth/catalog/cart/style/test into multiple leaves. This is functional for the smoke test, but not ideal for speed or 48-leaf scale; role/template prompting should keep coordinators biased toward smaller independent leaves.
+  - R14 should run from a clean runtime/deliverables with the two fixes above and verify the root can continue from child production into parent/coordinator acceptance without false rescue loops.
