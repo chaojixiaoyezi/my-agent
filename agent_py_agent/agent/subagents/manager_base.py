@@ -35,6 +35,7 @@ class SubAgentManagerInitParams:
     local_store: LocalStore | None = None
     workspace_root: str | Path | None = None
     workspace_roots: list[str | Path] | None = None
+    role_template_dirs: list[str | Path] | None = None
     enable_self_learning: bool = False
     debug_trace_level: int = 0
 
@@ -54,12 +55,14 @@ class SubAgentBaseMixin:
         local_store: LocalStore | None = None,
         workspace_root: str | Path | None = None,
         workspace_roots: list[str | Path] | None = None,
+        role_template_dirs: list[str | Path] | None = None,
         enable_self_learning: bool = False,
     ):
         params = params or SubAgentManagerInitParams(
             local_store=local_store,
             workspace_root=workspace_root,
             workspace_roots=workspace_roots,
+            role_template_dirs=role_template_dirs,
             enable_self_learning=enable_self_learning,
         )
         self.workspace = Path(workspace)
@@ -68,6 +71,7 @@ class SubAgentBaseMixin:
         self.local_store = params.local_store
         self.workspace_root = Path(params.workspace_root).resolve() if params.workspace_root else self.workspace.resolve().parent
         self.workspace_roots = _normalized_workspace_roots(self.workspace_root, params.workspace_roots)
+        self.role_template_dirs = _normalized_template_dirs(self.workspace_root, params.role_template_dirs)
         self.enable_self_learning = bool(params.enable_self_learning)
         self.debug_trace_level = _normalize_debug_trace_level(params.debug_trace_level)
 
@@ -231,6 +235,21 @@ def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -
     resolved: list[Path] = []
     for raw in [primary, *(roots or [])]:
         path = Path(raw).resolve()
+        if path not in resolved:
+            resolved.append(path)
+    return resolved
+
+
+# LLM: _normalized_template_dirs adds the standard user role-template directory when config is empty.
+# 函数用途: 子代理角色模板目录为空时默认使用工作区 `.agent/subagents/roles`，用户无需配置即可扩展。
+def _normalized_template_dirs(primary: Path, dirs: list[str | Path] | None) -> list[Path]:
+    raw_dirs = dirs if dirs else [primary / ".agent" / "subagents" / "roles"]
+    resolved: list[Path] = []
+    for raw in raw_dirs:
+        path = Path(raw)
+        if not path.is_absolute():
+            path = primary / path
+        path = path.resolve()
         if path not in resolved:
             resolved.append(path)
     return resolved

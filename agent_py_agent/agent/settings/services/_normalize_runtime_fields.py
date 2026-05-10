@@ -95,6 +95,9 @@ class SubagentBasicFieldsService:
         out["subagent_allowed_tools"] = _normalize_string_list(
             out.get("subagent_allowed_tools", defaults.subagent_allowed_tools)
         )
+        out["subagent_role_template_dirs"] = _normalize_string_list(
+            out.get("subagent_role_template_dirs", defaults.subagent_role_template_dirs)
+        )
         return out, warnings
 
 

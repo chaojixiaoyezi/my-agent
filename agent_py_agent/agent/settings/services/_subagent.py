@@ -68,6 +68,9 @@ class SubagentWorkflowConfigService:
     def _normalize_mode(config: object, defaults: object, warnings: list[dict[str, object]]) -> None:
         """Normalize subagent workflow mode."""
         raw_mode = config.subagent_workflow_mode
+        if raw_mode is None or (isinstance(raw_mode, str) and not raw_mode.strip()):
+            config.subagent_workflow_mode = defaults.subagent_workflow_mode
+            return
         if isinstance(raw_mode, str) and raw_mode.strip().lower() in {"auto", "manual", "off"}:
             config.subagent_workflow_mode = raw_mode.strip().lower()
         else:

@@ -253,6 +253,17 @@ do_write()
   has direct children and no executable tests, use a deterministic
   child-acceptance check against direct child `DONE/VERIFIED` state instead of
   trusting model-written completion text.
+- Subagent role templates must stay external and broad. Built-ins live under
+  `agent_py_agent/agent/subagents/role_template_catalog/builtin/*.json`; user
+  templates live under `.agent/subagents/roles/*.json` by default. A template
+  should describe a reusable role such as bug finding, testing, acceptance,
+  coordination, writing, or research, not a one-off action like checking one
+  button. Include Chinese fields (`name_zh`, `summary_zh`, `use_when_zh`,
+  `output_contract_zh`) so humans and LLMs can both read it.
+- Empty user-facing subagent tool config means automatic policy. Keep
+  `subagent_allowed_tools=[]` as “role/template/task decides tools”, not “no
+  tools”. Only use a non-empty global list for deliberately restricted test
+  environments.
 
 ## 11.3 Subagent Debug Trace Levels / 子代理调试追踪等级
 

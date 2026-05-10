@@ -17,8 +17,9 @@ class SubagentConfig:
     """Subagent limits and automation policies."""
 
     enable_subagents: bool = True
-    max_subagents: int = 5
+    max_subagents: int = 1000
     subagent_workspace: str = "data/subagents"
+    subagent_role_template_dirs: list[str] = field(default_factory=list)
     subagent_workflow_mode: str = "auto"
     subagent_builtin_workflows: bool = True
     subagent_user_workflow_dirs: list[str] = field(default_factory=lambda: [".agent/workflows/user"])

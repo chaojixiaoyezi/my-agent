@@ -14,6 +14,7 @@ import pytest
 from agent_py_agent.agent.agent_core.subagent_mixin import (
     SimpleAgentSubagentMixin,
     _config_workflow_dispatch_mode,
+    _configured_subagent_allowed_tools,
 )
 
 
@@ -60,6 +61,38 @@ class TestSubagentMixinSpawn:
 
         call = mixin.subagents.split.call_args
         assert call.kwargs["allowed_tools"] == ["read_file", "write_file"]
+
+    def test_spawn_subagents_empty_allowed_tools_uses_automatic_policy(self) -> None:
+        """测试空 subagent_allowed_tools 不等于禁用工具，而是交给角色/任务推断。"""
+        mixin = SimpleAgentSubagentMixin()
+        mixin.config = MagicMock()
+        mixin.config.enable_subagents = True
+        mixin.config.max_subagents = 3
+        mixin.config.subagent_workflow_mode = "off"
+        mixin.config.subagent_allowed_tools = []
+        mixin.subagents = MagicMock()
+        mock_task = MagicMock()
+        mixin.subagents.split.return_value = [mock_task]
+
+        mixin.spawn_subagents("测试目标", count=1)
+
+        call = mixin.subagents.split.call_args
+        assert call.kwargs["allowed_tools"] is None
+
+    def test_configured_subagent_allowed_tools_empty_means_automatic(self) -> None:
+        """测试配置归一化：空字符串、空列表和缺省值都表示自动工具策略。"""
+        config = MagicMock()
+        config.subagent_allowed_tools = []
+        assert _configured_subagent_allowed_tools(config) is None
+
+        config.subagent_allowed_tools = "  "
+        assert _configured_subagent_allowed_tools(config) is None
+
+        config.subagent_allowed_tools = None
+        assert _configured_subagent_allowed_tools(config) is None
+
+        config.subagent_allowed_tools = "read_file, write_file"
+        assert _configured_subagent_allowed_tools(config) == ["read_file", "write_file"]
 
     def test_spawn_subagents_count_exceeds_max(self) -> None:
         """测试数量超过 max_subagents 时的限制。"""

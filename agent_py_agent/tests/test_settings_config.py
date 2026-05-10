@@ -296,7 +296,7 @@ class TestAgentConfigDefaults:
         assert config.model_backend == "echo"
         assert config.max_tool_rounds == 5
         assert config.memory_top_k == 5
-        assert config.max_subagents == 5
+        assert config.max_subagents == 1000
 
     def test_agent_config_dispatch_defaults(self):
         """验证 dispatch 相关默认值。"""

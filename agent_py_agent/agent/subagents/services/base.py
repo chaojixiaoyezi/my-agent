@@ -95,8 +95,8 @@ class SubAgentBaseService:
     def __init__(self, manager: Any):
         self.manager = manager
 
-    # LLM: split owns template child creation and must pass inherited allowed_tools into CreateRunParams.
-    # 函数用途: 按数量创建模板子任务；把默认工具白名单写入每个子任务，避免真实 runner 缺少写入/读取工具。
+    # LLM: split owns template child creation and leaves empty allowed_tools to role inference.
+    # 函数用途: 按数量创建模板子任务；有显式工具才传入，空值交给 worker 角色模板和任务推断。
     def split(
         self,
         goal: str,
@@ -118,7 +118,8 @@ class SubAgentBaseService:
                     goal=f"{goal} / 子任务{i}",
                     thought="先缩小任务边界，明确输入、输出和验证证据，再执行。",
                     plan=["理解目标", "列出交付物", "执行最小验证", "汇报结果和证据"],
-                    allowed_tools=list(allowed_tools or []),
+                    role="worker",
+                    allowed_tools=list(allowed_tools) if allowed_tools else None,
                     extra_write_roots=extra_roots,
                     workflow_mode=workflow_mode,
                 ),
@@ -149,7 +150,10 @@ class SubAgentBaseService:
         # LLM: role contracts normalize reporter/checker semantics before workflow planning and persistence.
         from ..role_contracts import apply_role_contract_to_create_params
 
-        params = apply_role_contract_to_create_params(params)
+        params = apply_role_contract_to_create_params(
+            params,
+            role_template_dirs=getattr(self.manager, "role_template_dirs", None),
+        )
         prepared = self._prepare_run(params)
         task = self._build_task(params, prepared)
         self._finalize_task(task, params.parent_id)

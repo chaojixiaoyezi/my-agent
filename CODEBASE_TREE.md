@@ -64,6 +64,9 @@ agent_py_agent/
 |   |-- settings/                             # 配置 schema、normalize、服务化 coercion
 |   |   `-- services/                         # 配置字段归一化和 runtime/subagent 子配置
 |   |-- subagent_workflows/                   # 子代理 workflow route/compile/plan 和内置模板
+|   |-- subagents/role_templates.py           # 子代理广义角色模板加载、校验和查询
+|   |-- subagents/role_template_catalog/      # 内置外置 JSON role templates
+|   |-- subagents/workflow_template_catalog/  # workflow 模板外置化预留目录
 |   |-- subagents/                            # 子代理 manager facade、服务、验收、patch、runner、persistence
 |   |   |-- acceptance_helpers/                # 父级验收 evidence/artifact/readiness helpers
 |   |   |-- patch/                             # patch review/apply/render 服务
@@ -284,7 +287,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
   一层是常驻的工具目录，一层是按当前任务筛出来的少量候选详情。
 - 执行工具调用。
 - 支持 `allowed_tools` 白名单，给 subagent runner 限制可见和可调用工具。
-- `AgentConfig.subagent_allowed_tools` 可作为 `spawn_subagents` 的默认工具白名单；配置归一化支持 YAML 列表或逗号分隔字符串。
+- `AgentConfig.subagent_allowed_tools=[]` 表示子代理工具由角色模板、任务目标和调度器自动判断；非空列表才作为全局受限白名单。`subagent_role_template_dirs=[]` 默认使用工作区 `.agent/subagents/roles` 作为用户外置角色模板目录。
 - 解析模型输出里的工具调用块。
   标准格式是 `[TOOL_CALL]...JSON...[/TOOL_CALL]`，同时兼容 Qwen/通道运行时 常见的 XML-ish `<tool_call><function=...><parameter=...>` 方言。
   如果 XML-ish 工具调用只有半截，解析器会返回 `__parse_error__`，让主循环继续可恢复，而不是直接崩掉。
@@ -974,7 +977,9 @@ docs/
 - `agent_py_agent/agent/subagents/services/leadership_recovery_apply.py`: 分批领导权恢复 apply 服务；校验 root、leader、直接 child、容量，成功后只移动指定 child 子树并递归刷新后代 depth。
 - `agent_py_agent/agent/subagents/services/persistence.py`: 普通保存默认合并已有 child_ids 防止旧快照覆盖层级边，`save_hierarchy_links()` 场景会关闭合并以支持受控子树重挂。
 - `agent_py_agent/agent/subagents/manager_hierarchy.py`: 新增 `SubAgentManager.schedule_child_runs(params=...)` facade，保持层级创建只走 bundle 入口和既有 `create_run` 持久化路径。
-- `agent_py_agent/agent/subagents/role_contracts.py`: 新增 reporter/checker 角色契约和 analyst/reviewer 兼容映射；checker 默认只读工具并保持 parent final gate。
+- `agent_py_agent/agent/subagents/role_templates.py`: 加载内置和用户 JSON role templates，要求广义角色、中文说明和多目标适用，坏模板记录 issue。
+- `agent_py_agent/agent/subagents/role_template_catalog/builtin/*.json`: 内置 `coordinator/worker/bug_finder/tester/acceptor/researcher/writer` 角色模板。
+- `agent_py_agent/agent/subagents/role_contracts.py`: 新增 reporter/checker 角色契约和 analyst/reviewer 兼容映射；同时把模板角色接入默认工具、输出契约和 parent final gate。
 - `agent_py_agent/agent/subagents/automation_gate.py`: 新增半自动/自动执行门，默认只放行 refs-only 查询动作，跑工具或改状态动作继续需要人工确认。
 - `agent_py_agent/agent/agent_core/dispatch_limiter.py`: 新增 runner 启动限流 bundle/helper，统一处理 start-rate 和可选 role budgets，供 dispatch runner batch 调用。
 - `agent_py_agent/cli/_hierarchy.py`: 新增 `subagents-hierarchy` 和 `subagents-recovery-tree` CLI；前者默认 dry-run、`--apply` 才创建下一层子代理，后者查询 refs-only 多层恢复包并通过 capability config 判断 stale `RUNNING` 后代。
@@ -984,8 +989,8 @@ docs/
 - `agent_py_agent/agent/subagents/manager_acceptance_parent_facade.py`: 新增父级验收 manager facade 方法集合，让 `manager_acceptance.py` 继续只承接普通 acceptance review 流程。
 - `agent_py_agent/agent/subagents/acceptance_test_execution.py`: 新增显式验收测试执行桥接，把 `AcceptanceReviewOptions(execute_tests=True)` 转成真实测试报告和阻断 findings；默认不运行。
 - `agent_py_agent/agent/subagents/services/acceptance_findings.py`: 普通验收 finding 汇总层；已有 `reports/test_execution.json` 时优先以机器执行报告判断 tests_passed。
-- `agent_py_agent/agent/settings/config.py`: 新增 `acceptance_execute_tests`、`acceptance_test_timeout_seconds` 和 `subagent_allowed_tools`，让真实测试执行和 spawn 默认工具白名单可配置但默认保守。
-- `agent_py_agent/agent/settings/services/_normalize_runtime_fields.py`: 校验真实验收执行配置，布尔开关走 bool coerce，超时限制在 1 到 300 秒；`subagent_allowed_tools` 归一成去空白字符串列表。
+- `agent_py_agent/agent/settings/config.py`: 新增 `acceptance_execute_tests`、`acceptance_test_timeout_seconds`、`subagent_allowed_tools` 和 `subagent_role_template_dirs`，真实测试执行默认关闭，子代理工具默认自动判断。
+- `agent_py_agent/agent/settings/services/_normalize_runtime_fields.py`: 校验真实验收执行配置，布尔开关走 bool coerce，超时限制在 1 到 300 秒；`subagent_allowed_tools` 和 `subagent_role_template_dirs` 归一成去空白字符串列表。
 - `agent_py_agent/config/agent_config.yaml`: 新增父级验收真实执行配置注释，说明默认关闭和单次命令覆盖方式。
 - `agent_py_agent/cli/_acceptance_plan.py`: 新增 `subagents-acceptance-plan` 命令入口；默认只展示父级 dry-run 决策和 refs，`--write` 写入决策审计，`--apply` 只允许 inspect_only，`--next-action` / `--auto-policy` / `--auto-execution` / `--followup` / `--apply-followup` 都走显式分支。
 - `agent_py_agent/cli/_acceptance_plan_renderers.py`: 拆出 acceptance-plan 的 JSON 转换和人类输出渲染；只展示 refs 和摘要，不读取引用正文。

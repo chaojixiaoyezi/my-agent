@@ -144,6 +144,23 @@ class TestNormalizeAgentConfig:
         assert normalized["subagent_allowed_tools"] == ["read_file", "write_file", "append_file"]
         assert len(warnings) == 0
 
+    def test_subagent_defaults_leave_decisions_automatic(self):
+        """验证默认子代理配置不让用户预判工具和工作流，只保留宽松数量上限。"""
+        normalized, warnings = normalize_agent_config({})
+        assert warnings == []
+        assert normalized["max_subagents"] == 1000
+        assert normalized["subagent_allowed_tools"] == []
+        assert normalized["subagent_role_template_dirs"] == []
+        assert AgentConfig().subagent_workflow_mode == "auto"
+
+    def test_empty_subagent_workflow_mode_means_auto(self):
+        """验证配置文件里把工作流模式置空时，运行期按自动策略处理。"""
+        config = AgentConfig()
+        config.subagent_workflow_mode = ""
+        warnings = normalize_subagent_workflow_config(config)
+        assert warnings == []
+        assert config.subagent_workflow_mode == "auto"
+
     def test_normalize_subagent_board_limit_invalid(self):
         """验证无效的 subagent_board_limit 会回退。"""
         data = {"subagent_board_limit": "many"}
