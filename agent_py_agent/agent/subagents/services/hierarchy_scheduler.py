@@ -11,6 +11,7 @@ from ..debug_trace import trace_hierarchy_schedule
 from ..models import SubAgentTask
 from .base import CreateRunParams
 from .hierarchy_context import inherited_hierarchy_thought, scheduled_child_goal
+from .hierarchy_scope_guards import schedule_block_reason
 
 _DEFAULT_LEAF_CODING_TOOLS = [
     "list_files",
@@ -20,6 +21,8 @@ _DEFAULT_LEAF_CODING_TOOLS = [
     "append_file",
     "replace_in_file",
 ]
+_LEAF_ORCHESTRATION_TOOLS = {"schedule_child_subagents", "dispatch_subagents", "subagent_board"}
+_COORDINATOR_WRITE_TOOLS = {"write_file", "append_file", "replace_in_file"}
 _TOOL_NAME_ALIASES = {
     "append": "append_file",
     "list": "list_files",
@@ -45,7 +48,6 @@ _WRITE_INTENT_MARKERS = (
     ".css",
     ".js",
 )
-
 # LLM: HierarchyChildSpec is the stable bundle for one planned descendant run.
 # 类用途: 描述一个待创建的子/孙代理任务，避免用散乱 kwargs 扩展层级调度接口。
 @dataclass(frozen=True)
@@ -60,7 +62,6 @@ class HierarchyChildSpec:
     acceptance_checks: list[str] = field(default_factory=list)
     extra_write_roots: list[str] = field(default_factory=list)
 
-
 # LLM: HierarchyScheduleRequest is the only business entrypoint for hierarchy materialization.
 # 类用途: 集中保存层级调度的 parent、候选子任务、限制和执行模式。
 @dataclass(frozen=True)
@@ -71,7 +72,6 @@ class HierarchyScheduleRequest:
     requested_by: str = "parent"
     max_children: int = 0
     max_depth: int = 2
-
 
 # LLM: HierarchyScheduledItem reports either a planned or created child without loading large artifacts.
 # 类用途: 返回单个调度条目摘要，给 CLI、测试和后续调度器读取。
@@ -86,7 +86,6 @@ class HierarchyScheduledItem:
     goal: str
     created: bool
     reason: str = ""
-
 
 # LLM: HierarchyScheduleResult keeps automatic behavior visible and conservative by default.
 # 类用途: 返回层级调度结果、阻断原因和是否真正创建 run。
@@ -105,7 +104,6 @@ class HierarchyScheduleResult:
     manual_confirmation_required: bool = True
     automatic_execution_allowed: bool = False
 
-
 # LLM: SubAgentHierarchyScheduler owns hierarchy limits and delegates actual persistence to SubAgentManager.
 # 类用途: 封装层级创建规则；只通过 manager.create_run 写任务，避免绕开既有工单/控制面同步。
 class SubAgentHierarchyScheduler:
@@ -120,24 +118,12 @@ class SubAgentHierarchyScheduler:
     # 函数用途: dry-run 或真正创建下一层 run；超过深度/数量限制时只返回 blocked。
     def schedule_children(self, request: HierarchyScheduleRequest) -> HierarchyScheduleResult:
         parent = self.manager.load(request.parent_run_id)
-        reason = _schedule_block_reason(parent, request)
+        reason = schedule_block_reason(parent, request)
         if reason:
             return trace_hierarchy_schedule(self.manager, parent, _blocked_result(parent, request, reason))
         if not request.apply:
             return trace_hierarchy_schedule(self.manager, parent, _dry_run_result(parent, request))
         return trace_hierarchy_schedule(self.manager, parent, _apply_result(self.manager, parent, request))
-
-
-# LLM: _schedule_block_reason keeps guard checks deterministic and side-effect free.
-# 函数用途: 判断本轮层级调度是否因深度、数量或空计划被阻断。
-def _schedule_block_reason(parent: SubAgentTask, request: HierarchyScheduleRequest) -> str:
-    if not request.child_specs:
-        return "no_child_specs"
-    if parent.depth + 1 > request.max_depth:
-        return f"max_depth_exceeded:{request.max_depth}"
-    if request.max_children > 0 and len(parent.child_ids) + len(request.child_specs) > request.max_children:
-        return f"max_children_exceeded:{request.max_children}"
-    return ""
 
 
 # LLM: _blocked_result returns a refs-only plan without creating child runs.
@@ -203,13 +189,13 @@ def _apply_result(
 # LLM: _create_child converts one schedule spec into the existing CreateRunParams bundle.
 # 函数用途: 复用现有 create_run 路径创建子任务，保证 work-order、runtime workspace 和控制面同步。
 def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) -> SubAgentTask:
-    role = _scheduled_child_role(parent, spec)
     extra_write_roots = spec.extra_write_roots or _inherited_extra_write_roots(parent)
     goal = scheduled_child_goal(parent, spec)
+    role = _scheduled_child_role(parent, spec, extra_write_roots, goal=goal)
     return manager.create_run(
         params=CreateRunParams(
             goal=goal,
-            thought=spec.thought or inherited_hierarchy_thought(parent),
+            thought=spec.thought or inherited_hierarchy_thought(parent, child_goal=goal),
             plan=spec.plan or ["读取父级 refs", "执行小切片", "写回状态和证据 refs", "等待父级验收"],
             agent_name=spec.agent_name or spec.role or "worker",
             role=role,
@@ -231,12 +217,20 @@ def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) 
     )
 
 
-# LLM: _scheduled_child_role repairs common model slips without changing explicit coordinator roles.
-# 函数用途: 带层级调度权限的 child 如果被模型误标成 worker，按 depth 推断为 coordinator。
-def _scheduled_child_role(parent: SubAgentTask, spec: HierarchyChildSpec) -> str:
+# LLM: _scheduled_child_role repairs common model slips while preserving concrete leaf write intent.
+# 函数用途: 带层级调度权限的 child 如果是协调任务则按 depth 推断；若目标明确写产物则归一为 leaf_worker。
+def _scheduled_child_role(
+    parent: SubAgentTask,
+    spec: HierarchyChildSpec,
+    extra_write_roots: list[str] | None = None,
+    *,
+    goal: str | None = None,
+) -> str:
     role = str(spec.role or "worker").strip() or "worker"
     if role not in {"worker", "general"}:
         return role
+    if _should_infer_leaf_coding_tools(spec, extra_write_roots or [], goal=goal):
+        return "leaf_worker"
     tools = set(spec.allowed_tools or [])
     if "schedule_child_subagents" not in tools and "dispatch_subagents" not in tools:
         return role
@@ -274,13 +268,29 @@ def _scheduled_child_tools(
     should_infer_leaf_tools = _should_infer_leaf_coding_tools(spec, extra_write_roots, goal=goal)
     if spec.allowed_tools:
         explicit_tools = [_canonical_tool_name(item) for item in spec.allowed_tools]
+        if _is_coordinator_spec(spec):
+            return _coordinator_tools(explicit_tools)
         if should_infer_leaf_tools:
-            return list(dict.fromkeys([*explicit_tools, *_DEFAULT_LEAF_CODING_TOOLS]))
+            return _leaf_write_tools([*explicit_tools, *_DEFAULT_LEAF_CODING_TOOLS])
         return list(dict.fromkeys(explicit_tools))
     parent_tools = list(parent.allowed_tools)
+    if _is_coordinator_spec(spec):
+        return _coordinator_tools(parent_tools)
     if should_infer_leaf_tools:
-        return list(dict.fromkeys([*parent_tools, *_DEFAULT_LEAF_CODING_TOOLS]))
+        return _leaf_write_tools([*parent_tools, *_DEFAULT_LEAF_CODING_TOOLS])
     return parent_tools
+
+
+# LLM: _leaf_write_tools strips hierarchy orchestration grants from concrete product-writing leaves.
+# 函数用途: 给 leaf 写文件任务保留文件读写工具，去掉继续派下级的工具，避免叶子递归生孩子。
+def _leaf_write_tools(tools: list[str]) -> list[str]:
+    return list(dict.fromkeys(tool for tool in tools if tool not in _LEAF_ORCHESTRATION_TOOLS))
+
+
+# LLM: _coordinator_tools prevents coordinators from bypassing their leaf workers.
+# 函数用途: coordinator/lead 只保留调度、看板和读取能力；即使模型显式传 write_file 也剥掉。
+def _coordinator_tools(tools: list[str]) -> list[str]:
+    return list(dict.fromkeys(tool for tool in tools if tool not in _COORDINATOR_WRITE_TOOLS))
 
 
 # LLM: _canonical_tool_name maps common model aliases to real ToolRegistry names before runner prompts see them.
@@ -300,11 +310,17 @@ def _should_infer_leaf_coding_tools(
 ) -> bool:
     if not extra_write_roots:
         return False
-    role_text = f"{spec.role} {spec.agent_name}".lower()
-    if "coordinator" in role_text or "lead" in role_text:
+    if _is_coordinator_spec(spec):
         return False
     intent_text = "\n".join([goal or spec.goal, *spec.acceptance_checks]).lower()
     return any(marker.lower() in intent_text for marker in _WRITE_INTENT_MARKERS)
+
+
+# LLM: _is_coordinator_spec centralizes the role/name check used by role and tool inference.
+# 函数用途: 判断 child spec 是否明确是协调节点，避免写工具和 leaf 归一化规则误伤。
+def _is_coordinator_spec(spec: HierarchyChildSpec) -> bool:
+    role_text = f"{spec.role} {spec.agent_name}".lower()
+    return "coordinator" in role_text or "lead" in role_text
 
 
 # LLM: _planned_items mirrors created item shape while keeping run_id empty in dry-runs.
@@ -316,7 +332,12 @@ def _planned_items(parent: SubAgentTask, request: HierarchyScheduleRequest) -> l
             parent_id=parent.id,
             root_id=parent.root_id or parent.id,
             depth=parent.depth + 1,
-            role=_scheduled_child_role(parent, spec),
+            role=_scheduled_child_role(
+                parent,
+                spec,
+                spec.extra_write_roots or _inherited_extra_write_roots(parent),
+                goal=scheduled_child_goal(parent, spec),
+            ),
             agent_name=spec.agent_name or spec.role or "worker",
             goal=scheduled_child_goal(parent, spec),
             created=False,

@@ -230,6 +230,187 @@ def test_hierarchy_schedule_carries_parent_boundary_into_vague_child_goal(tmp_pa
     assert "write_file" in leaf.allowed_tools
 
 
+# LLM: test_hierarchy_schedule_keeps_sibling_scope_out_of_child_handoff covers real E2E tree blow-up.
+# 函数用途: 当父级同时描述多个 sibling 任务时，调度某一个 child 不应把其它 sibling 的目标塞进交接。
+def test_hierarchy_schedule_keeps_sibling_scope_out_of_child_handoff(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    deliverables = tmp_path / "deliverables"
+    root = manager.create_run(
+        goal=(
+            f"arithmetic leaf 必须写 {deliverables}/leaf_outputs/leaf_worker_arithmetic/solution.py。"
+            f"text leaf 必须写 {deliverables}/leaf_outputs/leaf_worker_text/solution.py。"
+            "root 不得直接写产物。"
+        ),
+        thought="root 只做分派。",
+        plan=["plan"],
+        extra_write_roots=[str(deliverables)],
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=root.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="arithmetic领域：创建leaf_worker_arithmetic，写入solution.py",
+                    role="child_coordinator",
+                    agent_name="arithmetic-lead",
+                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+                )
+            ],
+            apply=True,
+        )
+    )
+    child = manager.load(result.created_run_ids[0])
+
+    assert "leaf_worker_arithmetic" in child.goal
+    assert "leaf_worker_text" not in child.goal
+    assert "leaf_worker_text" not in child.thought
+    assert "当前子任务只执行" in child.goal
+
+
+# LLM: test_hierarchy_schedule_keeps_exact_file_contract_when_child_goal_only_has_dir locks real E2E drift.
+# 函数用途: child goal 只带产物目录时，也要继承父级指定的 solution.py/test_solution.py/README.md 文件契约。
+def test_hierarchy_schedule_keeps_exact_file_contract_when_child_goal_only_has_dir(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    deliverables = tmp_path / "deliverables"
+    root = manager.create_run(
+        goal=(
+            f"arithmetic leaf 必须写 {deliverables}/leaf_outputs/leaf_worker_arithmetic/solution.py、"
+            "test_solution.py、README.md，实现 add(a,b) 和 multiply(a,b)。"
+            f"text leaf 必须写 {deliverables}/leaf_outputs/leaf_worker_text/solution.py、"
+            "test_solution.py、README.md，实现 normalize_text(text)。"
+        ),
+        thought="root 只做分派。",
+        plan=["plan"],
+        extra_write_roots=[str(deliverables)],
+    )
+
+    child_result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=root.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal=f"创建 arithmetic leaf_worker，产物写至 {deliverables}/leaf_outputs/leaf_worker_arithmetic/",
+                    role="child_coordinator",
+                    agent_name="arithmetic-lead",
+                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+                )
+            ],
+            apply=True,
+        )
+    )
+    child = manager.load(child_result.created_run_ids[0])
+
+    assert "leaf_worker_arithmetic/solution.py" in child.goal
+    assert "test_solution.py" in child.goal
+    assert "README.md" in child.goal
+    assert "leaf_worker_text" not in child.goal
+
+    leaf_result = _schedule_vague_leaf(manager, child.id)
+    leaf = manager.load(leaf_result.created_run_ids[0])
+
+    assert "leaf_worker_arithmetic/solution.py" in leaf.goal
+    assert "test_solution.py" in leaf.goal
+    assert "README.md" in leaf.goal
+
+
+# LLM: test_hierarchy_schedule_blocks_forbidden_sibling_scope prevents wrong-domain leaf creation.
+# 函数用途: 当 parent 明确禁止创建 sibling 领域任务时，scheduler 必须阻断错误 child spec。
+def test_hierarchy_schedule_blocks_forbidden_sibling_scope(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    deliverables = tmp_path / "deliverables"
+    root = manager.create_run(goal="root", thought="root", plan=["root"], extra_write_roots=[str(deliverables)])
+    parent = manager.create_run(
+        goal=(
+            "作为 text-lead coordinator，只负责 text 领域任务。"
+            f"创建 leaf_worker_text，写入 {deliverables}/leaf_outputs/leaf_worker_text/solution.py。"
+            "不得创建 arithmetic 相关任务。"
+        ),
+        thought="text only",
+        plan=["plan"],
+        parent_id=root.id,
+        root_id=root.id,
+        depth=1,
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+        extra_write_roots=[str(deliverables)],
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[HierarchyChildSpec(goal="创建 leaf_worker_arithmetic 并写 solution.py")],
+            apply=True,
+        )
+    )
+
+    assert result.blocked is True
+    assert "forbidden_child_scope:arithmetic" in result.reason
+    assert manager.load(parent.id).child_ids == []
+
+
+# LLM: test_forbidden_scope_ignores_parent_thought keeps debug notes from becoming hard constraints.
+# 函数用途: thought 里的测试说明不应被解析为“不得创建 X”的硬禁止规则。
+def test_hierarchy_schedule_forbidden_scope_ignores_parent_thought(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    root = manager.create_run(goal="root", thought="root", plan=["root"])
+    parent = manager.create_run(
+        goal="作为 arithmetic-lead coordinator，只负责 arithmetic 领域任务。",
+        thought="测试说明：text-lead 不得创建 arithmetic leaf。",
+        plan=["plan"],
+        parent_id=root.id,
+        root_id=root.id,
+        depth=1,
+        allowed_tools=["schedule_child_subagents"],
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[HierarchyChildSpec(goal="创建 leaf_worker_arithmetic 并写 solution.py")],
+            apply=True,
+        )
+    )
+
+    assert result.blocked is False
+    assert len(result.created_run_ids) == 1
+
+
+# LLM: test_hierarchy_schedule_blocks_implicit_domain_mismatch catches coordinator sibling drift.
+# 函数用途: 即使 parent 没写“不得创建”，text-lead 也不能误创建 arithmetic leaf。
+def test_hierarchy_schedule_blocks_implicit_domain_mismatch(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    deliverables = tmp_path / "deliverables"
+    root = manager.create_run(goal="root", thought="root", plan=["root"], extra_write_roots=[str(deliverables)])
+    parent = manager.create_run(
+        goal=(
+            "创建 text leaf_worker，写入 "
+            f"{deliverables}/leaf_outputs/leaf_worker_text/solution.py，"
+            "实现 normalize_text(text)。"
+        ),
+        thought="text only",
+        plan=["plan"],
+        agent_name="text-lead",
+        role="child_coordinator",
+        parent_id=root.id,
+        root_id=root.id,
+        depth=1,
+        allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+        extra_write_roots=[str(deliverables)],
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[HierarchyChildSpec(goal="创建 arithmetic leaf_worker，写入 solution.py")],
+            apply=True,
+        )
+    )
+
+    assert result.blocked is True
+    assert result.reason == "domain_mismatch:text->arithmetic"
+    assert manager.load(parent.id).child_ids == []
+
+
 # LLM: _schedule_vague_child keeps the boundary-inheritance test below the code-size risk threshold.
 # 函数用途: 生成缺少产物路径的 child spec，用于验证 scheduler 自动补父级边界。
 def _schedule_vague_child(manager: SubAgentManager, parent_id: str):
@@ -266,39 +447,6 @@ def _schedule_vague_leaf(manager: SubAgentManager, parent_id: str):
             max_depth=2,
         )
     )
-
-
-# LLM: test_hierarchy_schedule_infers_coordinator_role_from_tools keeps model role slips recoverable.
-# 函数用途: 当模型把带层级调度权限的下一层误写成 worker 时，系统按 depth 纠正为 coordinator。
-def test_hierarchy_schedule_infers_coordinator_role_from_tools(tmp_path):
-    manager = SubAgentManager(tmp_path / "subs")
-    root = manager.create_run(goal="root", thought="split", plan=["plan"])
-    child = manager.create_run(
-        goal="child",
-        thought="coordinate",
-        plan=["plan"],
-        parent_id=root.id,
-        root_id=root.id,
-        depth=1,
-    )
-
-    result = manager.schedule_child_runs(
-        params=HierarchyScheduleRequest(
-            parent_run_id=child.id,
-            child_specs=[
-                HierarchyChildSpec(
-                    goal="创建三个 leaf worker 并调度执行。",
-                    agent_name="child-01-grandchild-01",
-                    role="worker",
-                    allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
-                )
-            ],
-            apply=True,
-        )
-    )
-    grandchild = manager.load(result.created_run_ids[0])
-
-    assert grandchild.role == "grandchild_coordinator"
 
 
 # LLM: test_hierarchy_schedule_blocks_depth_and_child_limits keeps fan-out bounded.

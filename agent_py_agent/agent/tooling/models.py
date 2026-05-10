@@ -38,11 +38,13 @@ class ToolSpec:
         params = "、".join(self.parameters.keys()) or "无"
         use_cases = "；".join(self.use_cases[:2]) or "无"
         avoid_when = "；".join(self.avoid_when[:1]) or "无"
+        example = f"\n  示例：{self.examples[0]}" if self.examples else ""
         return (
             f"- {self.name} [{self.category}]：{self.description}\n"
             f"  适用场景：{use_cases}\n"
             f"  关键参数：{params}\n"
             f"  不适用时机：{avoid_when}"
+            f"{example}"
         )
 
     # LLM: ToolSpec.render_detail_entry 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。

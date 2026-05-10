@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -327,7 +328,80 @@ class TestDispatchSubagentsToolExecute:
         assert call_kwargs["params"].workflow_mode == "off"
         assert call_kwargs["params"].parent_run_id == "subagent-root"
         assert call_kwargs["params"].exclude_run_ids == ["subagent-root"]
-        assert call_kwargs["params"].finalize_acceptance is False
+        assert call_kwargs["params"].execute_acceptance_tests is True
+        assert call_kwargs["params"].finalize_acceptance is True
+
+    def test_runner_context_dispatch_defaults_to_execute_direct_children(self):
+        """runner 内部省略 apply/execute 时，默认推进当前节点的直接孩子。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_report = MagicMock()
+        mock_report.dry_run = False
+        mock_report.summary = {"runner": 1}
+        mock_report.records = []
+
+        mock_agent = MagicMock()
+        mock_agent._current_subagent_run_id = "subagent-root"
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent.tools.specs.return_value = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = Path("/tmp/workspace")
+        mock_agent.subagents.list_runs.return_value = []
+
+        tool = DispatchSubagentsTool(mock_agent)
+        result = tool.execute({})
+
+        assert result.ok is True
+        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
+        assert call_kwargs["params"].apply is True
+        assert call_kwargs["params"].execute_runners is True
+        assert call_kwargs["params"].execute_acceptance_tests is True
+        assert call_kwargs["params"].max_runners == 6
+        assert call_kwargs["params"].parent_run_id == "subagent-root"
+        assert call_kwargs["params"].exclude_run_ids == ["subagent-root"]
+        assert call_kwargs["params"].finalize_acceptance is True
+
+    def test_runner_context_dispatch_payload_includes_acceptance_followup(self):
+        """runner 内部要能看到 child 测试失败和 follow-up 动作，才可能继续救援。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        record = SimpleNamespace(
+            step="acceptance",
+            action="reject",
+            run_id="leaf-1",
+            ok=False,
+            dry_run=True,
+            applied=False,
+            message="验收失败。",
+            before_status="AWAITING_ACCEPTANCE",
+            after_status="AWAITING_ACCEPTANCE",
+            parent_acceptance_auto_execution_test_ref="/tmp/test_execution.json",
+            parent_acceptance_auto_execution_test_total=8,
+            parent_acceptance_auto_execution_test_failed=5,
+            parent_acceptance_followup_status="needs_manual_rescue",
+            parent_acceptance_followup_action="plan_rescue",
+            parent_acceptance_followup_command="subagents-acceptance-plan leaf-1 --apply-followup --take-over-by <agent>",
+            parent_acceptance_followup_reason="tests failed",
+            parent_acceptance_followup_ref="/tmp/parent_acceptance_auto_followup.json",
+        )
+        mock_report = MagicMock()
+        mock_report.dry_run = False
+        mock_report.summary = {"acceptance": 1}
+        mock_report.records = [record]
+
+        mock_agent = MagicMock()
+        mock_agent.subagents.workspace = Path("/tmp/workspace")
+        mock_agent.subagents.list_runs.return_value = []
+
+        payload = DispatchSubagentsTool(mock_agent)._report_payload(mock_report)
+
+        assert payload["records"][0]["test_failed"] == 5
+        assert payload["records"][0]["followup_action"] == "plan_rescue"
+        assert payload["records"][0]["followup_command"].endswith("--take-over-by <agent>")
+
+
+class TestDispatchSubagentsToolRunnerContextOutput:
+    """测试 runner-context dispatch 输出和错误参数归一。"""
 
     def test_runner_context_invalid_workflow_mode_stays_off(self):
         """模型误传 parallel 时，runner dispatch 也不能回退成全局 auto。"""
@@ -486,3 +560,24 @@ class TestScheduleChildSubagentsTool:
         assert result.ok
         assert leaf.parent_id == child.id
         assert leaf.depth == 2
+
+    def test_runner_context_schedule_defaults_to_apply_direct_child(self, tmp_path):
+        """runner 内部省略 apply 时，应真实创建当前节点的直接 child。"""
+        import json
+
+        from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+        root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
+        agent._current_subagent_run_id = root.id
+        tool = ScheduleChildSubagentsTool(agent)
+
+        result = tool.execute({"children": [{"goal": "leaf", "role": "leaf_worker", "agent_name": "leaf"}]})
+        payload = json.loads(result.output)
+
+        assert result.ok
+        assert payload["dry_run"] is False
+        assert len(payload["created_run_ids"]) == 1
+        assert agent.subagents.load(root.id).child_ids == payload["created_run_ids"]

@@ -72,6 +72,7 @@ class DispatchFinalizeParams:
     note: str
     limit: int
     execute_acceptance_tests: bool
+    auto_apply_acceptance_followup: bool
     finalize_acceptance: bool
     existing_records: list
 
@@ -161,6 +162,7 @@ class _DispatchCollectionBase:
                 params.note,
                 params.limit,
                 params.execute_acceptance_tests,
+                params.auto_apply_acceptance_followup,
             )
         )
         records.extend(acceptance_records)
@@ -319,6 +321,7 @@ def _dispatch_finalize_params(params: DispatchParams, records: list) -> Dispatch
         note=params.note,
         limit=params.limit,
         execute_acceptance_tests=params.execute_acceptance_tests,
+        auto_apply_acceptance_followup=params.auto_apply_acceptance_followup,
         finalize_acceptance=params.finalize_acceptance,
         existing_records=records,
     )

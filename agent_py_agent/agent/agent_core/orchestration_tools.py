@@ -19,9 +19,15 @@ from ..subagents.services.base import CreateRunParams, _extract_write_dirs
 from ..tools import BaseTool, ToolExecutionResult
 from .dispatch_params import DispatchParams
 from .hierarchy_tools import ScheduleChildSubagentsTool
+from .orchestration_dispatch_payload import dispatch_record_payload
 from .orchestration_dispatch_scope import (
+    dispatch_apply_default,
+    dispatch_auto_apply_acceptance_followup_default,
     dispatch_exclude_run_ids,
+    dispatch_execute_acceptance_tests_default,
+    dispatch_execute_runners_default,
     dispatch_finalize_acceptance,
+    dispatch_max_runners_default,
     dispatch_parent_run_id,
     dispatch_workflow_mode,
 )
@@ -255,8 +261,8 @@ class DispatchSubagentsTool(BaseTool):
     # LLM: execute 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 推进execute的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
-        apply = _bool_param(params.get("apply"), default=False)
-        execute_runners = _bool_param(params.get("execute_runners"), default=False)
+        apply = dispatch_apply_default(self.agent, params)
+        execute_runners = dispatch_execute_runners_default(self.agent, params, apply=apply)
         if execute_runners and not apply:
             return ToolExecutionResult(
                 "dispatch_subagents",
@@ -287,13 +293,14 @@ class DispatchSubagentsTool(BaseTool):
         params: dict[str, object],
         apply: bool,
         execute_runners: bool,
-    ) -> DispatchParams:
+        ) -> DispatchParams:
+        execute_acceptance_tests = dispatch_execute_acceptance_tests_default(self.agent, params, apply=apply)
         return DispatchParams(
             apply=apply,
             execute_runners=execute_runners,
             planner=_bool_param(params.get("planner"), default=False),
             workflow_mode=dispatch_workflow_mode(self.agent, params, _tool_workflow_mode),
-            max_runners=_non_negative_int(params.get("max_runners"), default=1),
+            max_runners=dispatch_max_runners_default(self.agent, params),
             limit=_non_negative_int(params.get("limit"), default=20),
             reviewer=str(params.get("reviewer") or "chat-tool").strip(),
             note=str(params.get("note") or "triggered by dispatch_subagents tool").strip(),
@@ -302,6 +309,13 @@ class DispatchSubagentsTool(BaseTool):
             probe=not _bool_param(params.get("no_probe"), default=False),
             take_over_by=str(params.get("take_over_by") or "").strip(),
             locked_files=_string_list(params.get("locked_files")),
+            execute_acceptance_tests=execute_acceptance_tests,
+            auto_apply_acceptance_followup=dispatch_auto_apply_acceptance_followup_default(
+                self.agent,
+                params,
+                apply=apply,
+                execute_acceptance_tests=execute_acceptance_tests,
+            ),
             parent_run_id=dispatch_parent_run_id(self.agent, params),
             root_id=str(params.get("root_id") or "").strip(),
             exclude_run_ids=dispatch_exclude_run_ids(self.agent, params),
@@ -314,20 +328,7 @@ class DispatchSubagentsTool(BaseTool):
         payload = {
             "dry_run": report.dry_run,
             "summary": report.summary,
-            "records": [
-                {
-                    "step": item.step,
-                    "action": item.action,
-                    "run_id": item.run_id,
-                    "ok": item.ok,
-                    "dry_run": item.dry_run,
-                    "applied": item.applied,
-                    "message": item.message,
-                    "before_status": item.before_status,
-                    "after_status": item.after_status,
-                }
-                for item in report.records
-            ],
+            "records": [dispatch_record_payload(item) for item in report.records],
             "dispatch_json": str(self.agent.subagents.workspace / "subagent_dispatch_report.json"),
             "dispatch_md": str(self.agent.subagents.workspace / "SUBAGENT_DISPATCH.md"),
         }

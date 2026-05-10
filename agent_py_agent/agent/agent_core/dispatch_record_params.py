@@ -74,3 +74,4 @@ class AcceptanceRecordParams:
     note: str
     limit: int
     execute_acceptance_tests: bool = False
+    auto_apply_acceptance_followup: bool = False

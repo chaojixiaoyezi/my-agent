@@ -1332,3 +1332,106 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Red tests first failed because report events did not exist.
   - After the fix:
     - `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_subagent_debug_trace.py::test_subagent_debug_trace_records_due_action_and_recovery_reports_at_level_three agent_py_agent/tests/test_subagent_debug_trace.py::test_subagent_debug_trace_records_dispatch_reports_at_level_three` -> `2 passed`.
+
+## 2026-05-10 Runner-Context Acceptance Closure Retest
+
+- Test scene:
+  - Case id: `main_node_final_acceptance_retest_20260510_110000`.
+  - Runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/main_node_final_acceptance_retest_20260510_110000`.
+  - Deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/main_node_final_acceptance_retest_20260510_110000`.
+  - Model name: `MiniMax-M2.7`.
+  - Real execution mode: only the root/parent runner was driven; lower layers were created and dispatched through runner-context tools.
+- 中文说明：
+  - 这次验证“父节点自己派发孩子、自己跑孩子验收、孩子测试通过后状态能不能真正收口”。
+  - 之前的问题是测试报告已经通过，follow-up 也说可以验收，但孩子还停在 `AWAITING_ACCEPTANCE` / `NEEDS_ACCEPTANCE`，无人值守时会像“明明做完了但没盖章”。
+- Symptom:
+  - Leaf pytest succeeded:
+    - text leaf: `9 passed`.
+    - arithmetic leaf: `13 passed`.
+  - `test_execution.json` and `parent_acceptance_auto_followup.json` existed.
+  - Acceptance follow-up classified the runs as apply-ready, but task state did not become `DONE / VERIFIED`.
+- Root cause:
+  - Top-level dispatch intentionally keeps follow-up apply manual.
+  - Runner-context dispatch reused the same conservative default, so an active parent runner could run tests but could not close its own direct children after tests passed.
+- Fix:
+  - Added `auto_apply_acceptance_followup` to dispatch/watch/acceptance record bundles.
+  - Runner-context dispatch now enables that flag only when both `apply=True` and `execute_acceptance_tests=True`.
+  - Top-level CLI/API dispatch remains manual by default.
+- Verification:
+  - `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_agent/test_dispatch_and_planner.py::test_runner_context_dispatch_applies_passed_child_acceptance_followup` -> `1 passed`.
+  - `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_agent/test_dispatch_and_planner.py::test_subagent_dispatch_manual_acceptance_test_execution_is_test_only agent_py_agent/tests/test_agent/test_dispatch_and_planner.py::test_subagent_dispatch_apply_with_acceptance_tests_refreshes_aggregate_report agent_py_agent/tests/test_agent/test_dispatch_and_planner.py::test_subagent_dispatch_to_followup_apply_acceptance_chain agent_py_agent/tests/test_agent/test_dispatch_and_planner.py::test_runner_context_dispatch_applies_passed_child_acceptance_followup` -> `4 passed`.
+- Status:
+  - Solved for direct child closure from an active parent runner after explicit tests pass.
+  - Still intentionally manual for top-level user commands, so the outer user/operator does not accidentally mutate task state by inspecting dispatch.
+
+## 2026-05-10 Coordinator Acceptance Robustness Retest
+
+- Test scene:
+  - Case id: `main_node_auto_accept_retest_20260510_112000`.
+  - Runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/main_node_auto_accept_retest_20260510_112000`.
+  - Deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/main_node_auto_accept_retest_20260510_112000`.
+  - Model name: `MiniMax-M2.7`.
+- 中文说明：
+  - 这次继续验证真实模型会不会写出“不完全按我们格式来”的验收字段、测试命令和路径。
+  - 暴露的问题都来自真实 runner 输出，不是手写假样本。
+- Observed behavior:
+  - The tree created 5 nodes.
+  - Both leaf workers reached `DONE / VERIFIED`.
+  - Two child coordinators stayed `AWAITING_ACCEPTANCE`.
+- Finding 1: coordinator emitted `auto_acceptance`.
+  - Symptom: `auto_acceptance` was not a recognized validation method, so coordinator acceptance could not close even though direct children were done.
+  - 中文解释：模型用了“自动验收”这个自然语言式名字，但系统只认识更严格的测试类型。
+  - Fix: `auto_acceptance` is normalized into deterministic child-state acceptance. It passes only when all direct children exist and are `DONE / VERIFIED`.
+  - Verification: `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_agent/test_subagent_acceptance.py::test_subagent_acceptance_auto_acceptance_checks_verified_children` -> `1 passed`.
+- Finding 2: safe `cd ... && pytest ...` was blocked when `working_dir` already existed.
+  - Symptom: a coordinator emitted `working_dir` plus command `cd <same workspace dir> && python3 -m pytest ...`; the executor rejected shell chaining before reaching pytest.
+  - 中文解释：安全层挡住 shell 链是对的，但这种“开头切目录再跑 pytest”的常见模型写法可以安全拆开。
+  - Fix: tests preprocessor strips exactly one leading safe workspace-local `cd ... &&` even when `working_dir` is already present, then keeps the remaining command shell-free.
+  - Verification: `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_subagent_test_item_preparation.py::test_prepare_test_items_strips_safe_cd_chain_even_with_working_dir` -> `1 passed`.
+- Finding 3: coordinator hallucinated one path segment in an absolute artifact path.
+  - Symptom: it wrote `main_node_auto_accept_retest_20250510_112000` instead of `20260510`, so artifact existence failed although the real file existed under the allowed deliverables root.
+  - 中文解释：模型把年份写错了一个数字。不能因为一个路径拼写错就误判整棵树失败，但也不能放开任意路径扫描。
+  - Fix: artifact lookup now uses allowed workspace/write roots and can recover by safe unique suffix for absolute paths that are meant to live under those roots.
+  - Verification: `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_acceptance_helpers_class.py::TestCheckArtifactExists::test_absolute_path_typo_recovers_by_safe_workspace_suffix` -> `1 passed`.
+- Status:
+  - Solved for these three real coordinator-output variations.
+  - Remaining risk: suffix recovery is intentionally conservative; if two candidate paths match the same suffix, it should continue to fail closed.
+
+## 2026-05-10 Root Child-Acceptance Completion Retest
+
+- Test scene:
+  - Case id: `main_node_coordinator_accept_retest_20260510_113000`.
+  - Runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/main_node_coordinator_accept_retest_20260510_113000`.
+  - Deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/main_node_coordinator_accept_retest_20260510_113000`.
+  - Model name: `MiniMax-M2.7`.
+  - Root run id: `subagent-1778383475-aabb42dc`.
+- 中文说明：
+  - 这次验证最终收口：root、child coordinator、leaf worker 都要真实变成 `DONE / VERIFIED`，不是只让叶子文件测试通过。
+  - 只在最后用父级验收 API 给 root 补了一次显式验收，验收判断仍来自真实 child 状态和真实测试报告。
+- Observed behavior before the last root acceptance:
+  - 5 tasks existed.
+  - Both child coordinators were `DONE / VERIFIED`.
+  - Both leaves were `DONE / VERIFIED`.
+  - Root was still `AWAITING_ACCEPTANCE / NEEDS_ACCEPTANCE`.
+  - Root `output.json` had artifacts but an empty `tests` list.
+- Finding:
+  - Root/coordinator tasks with direct children can omit tests entirely.
+  - 中文解释：协调节点有时候不写 pytest 命令，因为它自己不产代码；它真正的验收标准应该是“直接孩子都完成并通过验收”。
+- Fix:
+  - If a coordinator/root task has direct `child_ids` and an empty tests list, acceptance execution synthesizes one deterministic `child_acceptance` check.
+  - `child_acceptance` passes only when all direct children exist and are `DONE / VERIFIED`.
+- Final result:
+  - Root coordinator: `DONE / VERIFIED`.
+  - Text child coordinator: `DONE / VERIFIED`.
+  - Arithmetic child coordinator: `DONE / VERIFIED`.
+  - Text leaf: `DONE / VERIFIED`.
+  - Arithmetic leaf: `DONE / VERIFIED`.
+  - Root `test_execution.json`: `total=1`, `failed=0`, `passed=1`, `validation_method=child_acceptance`.
+  - All four lower task reports passed.
+- Independent verification:
+  - `python3 -m pytest -q -p no:cacheprovider /Users/xiaoyezi/my-claude-code/deliverables/main_node_coordinator_accept_retest_20260510_113000/leaf_outputs/leaf_worker_text` -> `14 passed`.
+  - `python3 -m pytest -q -p no:cacheprovider /Users/xiaoyezi/my-claude-code/deliverables/main_node_coordinator_accept_retest_20260510_113000/leaf_outputs/leaf_worker_arithmetic` -> `5 passed`.
+  - `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_agent/test_subagent_acceptance.py::test_subagent_acceptance_infers_child_acceptance_when_coordinator_omits_tests` -> `1 passed`.
+- Remaining gap:
+  - Running pytest directly in deliverables can create `.pytest_cache` and `__pycache__`; this does not pollute repo code, but future test runners should support cleaner artifact hygiene for user-facing deliverables.
+  - Root final acceptance was invoked by parent API after the root runner completed. A later CLI/watch bridge can expose this as a clearer semi-auto operator action without changing the safety boundary.

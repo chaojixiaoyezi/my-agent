@@ -28,6 +28,7 @@ class DispatchParams:
     take_over_by: str = ""
     locked_files: list[str] | None = None
     execute_acceptance_tests: bool = False
+    auto_apply_acceptance_followup: bool = False
     parent_run_id: str = ""
     root_id: str = ""
     exclude_run_ids: list[str] | None = None
@@ -53,6 +54,7 @@ class WatchParams:
     take_over_by: str = ""
     locked_files: list[str] | None = None
     execute_acceptance_tests: bool = False
+    auto_apply_acceptance_followup: bool = False
     parent_run_id: str = ""
     root_id: str = ""
     exclude_run_ids: list[str] | None = None

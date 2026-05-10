@@ -205,6 +205,49 @@ def test_tool_catalog_and_recommended_sections():
     assert "推荐理由" in recommended
 
 
+def test_tool_catalog_format_example_does_not_bias_to_path_param():
+    """LLM: Tool call instructions should not teach all tools to pass a fake path parameter."""
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=Path.cwd(),
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+        )
+    )
+
+    catalog = registry.render_catalog_section()
+
+    assert '{"tool": "tool_name", "path": "example"}' not in catalog
+    assert '"param_name": "param_value"' in catalog
+
+
+def test_tool_spec_catalog_entry_includes_first_example():
+    """LLM: Compact catalog entries should show tool-specific JSON when examples are available."""
+    from agent_py_agent.agent.tools import ToolSpec
+
+    spec = ToolSpec(
+        name="schedule_child_subagents",
+        category="orchestration",
+        description="create child runs",
+        use_cases=["split hierarchy"],
+        avoid_when=[],
+        keywords=[],
+        parameters={"children": "child specs", "apply": "write"},
+        examples=['{"tool":"schedule_child_subagents","apply":true,"children":[]}'],
+    )
+
+    entry = spec.render_catalog_entry()
+
+    assert "示例" in entry
+    assert '"children":[]' in entry
+
+
 def test_tool_call_parser_accepts_subagent_call_alias():
     """LLM: verify that [SUBAGENT_CALL] opening tag is accepted as an alias for [TOOL_CALL].
 

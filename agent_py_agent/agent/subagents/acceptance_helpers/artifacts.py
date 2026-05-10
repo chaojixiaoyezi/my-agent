@@ -96,26 +96,52 @@ def _check_artifact_exists(
     text = raw_path.strip()
     if not text or "://" in text:
         return True
-    path = Path(text)
+    path = Path(text).expanduser()
     candidates = [path] if path.is_absolute() else []
-    roots: list[Path] = []
+    roots = _artifact_roots(workspace, task_dir)
     if not path.is_absolute():
-        roots.extend([Path(task_dir), workspace, workspace.parent])
         candidates.extend(
             [
-                Path(task_dir) / path,
-                workspace / path,
-                workspace.parent / path,
+                root / path
+                for root in roots
             ]
         )
-        if workspace.name == "subagents" and workspace.parent.name == ".my_agent":
-            roots.append(workspace.parent.parent)
-            candidates.append(workspace.parent.parent / path)
     if any(candidate.exists() for candidate in candidates):
         return True
     if not path.is_absolute():
         return _path_suffix_exists(path, roots)
+    if _absolute_path_inside_roots(path, roots):
+        return _absolute_path_suffix_exists(path, roots)
     return False
+
+
+# LLM: _artifact_roots searches runtime and user workspace roots for model-relative artifact paths.
+# 函数用途: 让 .my_agent_runtime/<case>/subagents 下的验收也能用 leaf_outputs/... 找到项目产物。
+def _artifact_roots(workspace: Path, task_dir: str) -> list[Path]:
+    roots = [Path(task_dir), workspace, workspace.parent]
+    runtime_root = _runtime_project_root(workspace)
+    if runtime_root is not None:
+        roots.append(runtime_root)
+    return list(dict.fromkeys(root.resolve() for root in roots))
+
+
+# LLM: _runtime_project_root maps hidden agent runtime paths back to the visible project root.
+# 函数用途: 从 <project>/.my_agent_runtime/<case>/subagents 或 <project>/.my_agent/subagents 推回 project。
+def _runtime_project_root(workspace: Path) -> Path | None:
+    parts = workspace.resolve().parts
+    index = _runtime_marker_index(parts)
+    return Path(*parts[:index]) if index > 0 else None
+
+
+# LLM: _runtime_marker_index keeps runtime root detection shallow for code-size guards.
+# 函数用途: 返回隐藏 runtime 标记所在下标；找不到时返回 -1。
+def _runtime_marker_index(parts: tuple[str, ...]) -> int:
+    for marker in (".my_agent_runtime", ".my_agent"):
+        try:
+            return parts.index(marker)
+        except ValueError:
+            continue
+    return -1
 
 
 # LLM: _path_suffix_exists recovers model-reported relative artifacts from nested task output dirs.
@@ -129,6 +155,30 @@ def _path_suffix_exists(relative_path: Path, roots: list[Path]) -> bool:
         for root in roots
         if root.exists() and root.is_dir()
         for item in root.rglob(parts[-1])
+    )
+
+
+# LLM: _absolute_path_inside_roots avoids repairing arbitrary absolute paths outside the task workspace.
+# 函数用途: 只有不存在的绝对路径仍位于 workspace/runtime 根下，才尝试按尾部路径片段恢复。
+def _absolute_path_inside_roots(path: Path, roots: list[Path]) -> bool:
+    resolved = path.resolve()
+    for root in roots:
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+# LLM: _absolute_path_suffix_exists recovers model typos in run/case directory names.
+# 函数用途: 绝对 artifact 路径不存在时，用足够长的尾部路径在安全根目录内查找真实文件。
+def _absolute_path_suffix_exists(path: Path, roots: list[Path]) -> bool:
+    parts = path.parts
+    max_depth = min(6, len(parts))
+    return any(
+        _path_suffix_exists(Path(*parts[-depth:]), roots)
+        for depth in range(max_depth, 2, -1)
     )
 
 

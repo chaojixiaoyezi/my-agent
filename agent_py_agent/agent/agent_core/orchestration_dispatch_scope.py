@@ -3,8 +3,56 @@
 
 from __future__ import annotations
 
-from .parameters import _bool_param, _string_list
+from .parameters import _bool_param, _non_negative_int, _string_list
 from .runner_context import current_subagent_run_id
+
+
+# LLM: dispatch_apply_default keeps top-level dispatch safe while runner-context dispatch can actually advance children.
+# 函数用途: 顶层工具省略 apply 时继续 dry-run；runner 内部省略 apply 时默认推进当前节点直接孩子。
+def dispatch_apply_default(agent, params: dict[str, object]) -> bool:
+    if "apply" in params:
+        return _bool_param(params.get("apply"), default=False)
+    return bool(current_subagent_run_id(agent))
+
+
+# LLM: dispatch_execute_runners_default matches runner-context apply default without overriding explicit false.
+# 函数用途: runner 内部未显式设置 execute_runners 时默认真实执行直接 child；顶层仍保持不执行。
+def dispatch_execute_runners_default(agent, params: dict[str, object], *, apply: bool) -> bool:
+    if "execute_runners" in params:
+        return _bool_param(params.get("execute_runners"), default=False)
+    return bool(apply and current_subagent_run_id(agent))
+
+
+# LLM: dispatch_execute_acceptance_tests_default makes runner parents validate direct children after execution.
+# 函数用途: runner 内部调度默认跑父级验收 tests；顶层和显式 false 仍保持原来的非自动执行边界。
+def dispatch_execute_acceptance_tests_default(agent, params: dict[str, object], *, apply: bool) -> bool:
+    if "execute_acceptance_tests" in params:
+        return _bool_param(params.get("execute_acceptance_tests"), default=False)
+    return bool(apply and current_subagent_run_id(agent))
+
+
+# LLM: dispatch_auto_apply_acceptance_followup_default closes runner-context children after passed tests.
+# 函数用途: 顶层仍保留人工 follow-up；runner 内 apply+tests 通过后默认落子节点验收状态。
+def dispatch_auto_apply_acceptance_followup_default(
+    agent,
+    params: dict[str, object],
+    *,
+    apply: bool,
+    execute_acceptance_tests: bool,
+) -> bool:
+    if "auto_apply_acceptance_followup" in params:
+        return _bool_param(params.get("auto_apply_acceptance_followup"), default=False)
+    return bool(apply and execute_acceptance_tests and current_subagent_run_id(agent))
+
+
+# LLM: dispatch_max_runners_default prevents runner-context parents from advancing only one child and timing out.
+# 函数用途: 顶层默认每轮 1 个 runner；runner 内部默认推进最多 6 个直接 child，显式参数优先。
+def dispatch_max_runners_default(agent, params: dict[str, object]) -> int:
+    if "max_runners" in params:
+        return _non_negative_int(params.get("max_runners"), default=1)
+    if current_subagent_run_id(agent):
+        return 6
+    return 1
 
 
 # LLM: dispatch_workflow_mode keeps nested runner dispatch from spawning workflow workers accidentally.
@@ -36,11 +84,9 @@ def dispatch_exclude_run_ids(agent, params: dict[str, object]) -> list[str]:
     return excluded
 
 
-# LLM: dispatch_finalize_acceptance defers acceptance when a child runner is launched from its parent runner.
-# 函数用途: runner 内部 dispatch 默认只推进子节点执行，不立刻替父级验收；显式参数仍可覆盖。
+# LLM: dispatch_finalize_acceptance lets runner parents write acceptance/test refs for direct children.
+# 函数用途: runner 内部 dispatch 默认进入验收阶段以捕获 child 测试结果；显式 false 仍可只推进执行。
 def dispatch_finalize_acceptance(agent, params: dict[str, object]) -> bool:
     if "finalize_acceptance" in params:
         return _bool_param(params.get("finalize_acceptance"), default=True)
-    if current_subagent_run_id(agent):
-        return False
     return True

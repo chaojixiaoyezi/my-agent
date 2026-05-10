@@ -10,10 +10,17 @@ from pathlib import Path
 from typing import Any
 
 from .execution_executor import TestExecutor
+from .execution_executor_helpers import _test_name, _utc_now_iso
+from .execution_records import TestExecutionRecord
 from .execution_report import TestExecutionReportOptions, write_test_execution_report
 from .execution_test_items import TestItemPreparationRequest, prepare_test_items
+from .parent_acceptance_auto_execution_reports import write_execution_followup
 from .parsing import _dict_list
 from .reports import AcceptanceReviewFinding
+from .test_failure_classification import (
+    TestFailureClassificationRequest,
+    write_test_failure_classification,
+)
 
 
 # LLM: AcceptanceTestExecutionRequest bundles opt-in acceptance execution context without growing helper signatures.
@@ -40,7 +47,7 @@ def build_acceptance_test_execution_findings(
     task = request.task
     output = request.output
     options = request.options
-    tests = _dict_list(output.get("tests", []))
+    tests = _tests_with_child_acceptance_fallback(task, _dict_list(output.get("tests", [])))
     workspace_root = _acceptance_test_workspace(manager)
     # LLM: Parent tests run from an inferred artifact cwd when runner emitted relative commands.
     tests = prepare_test_items(
@@ -51,7 +58,7 @@ def build_acceptance_test_execution_findings(
         )
     )
     executor = TestExecutor(workspace_root, timeout_seconds=options.test_timeout_seconds)
-    records = [executor.execute(test) for test in tests]
+    records = [_execute_acceptance_test(manager, task, executor, test) for test in tests]
     report = write_test_execution_report(
         task.reports_dir,
         records,
@@ -60,10 +67,87 @@ def build_acceptance_test_execution_findings(
             timeout_seconds=options.test_timeout_seconds,
         ),
     )
+    write_test_failure_classification(
+        task.reports_dir,
+        TestFailureClassificationRequest(report=report),
+    )
+    write_execution_followup(task, workspace_root, report)
     return [
         _execution_recorded_finding(report, bool(tests), request.created_at),
         _execution_passed_finding(report, request.created_at),
     ]
+
+
+# LLM: _tests_with_child_acceptance_fallback keeps coordinator/root nodes verifiable without fake shell tests.
+# 函数用途: coordinator 没写 tests 但有直接孩子时，补一个 child_acceptance 机器检查。
+def _tests_with_child_acceptance_fallback(task: Any, tests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if tests or not getattr(task, "child_ids", None):
+        return tests
+    return [{
+        "name": "direct children acceptance",
+        "validation_method": "child_acceptance",
+    }]
+
+
+# LLM: _execute_acceptance_test routes coordinator self-check aliases to child status verification.
+# 函数用途: 执行一条验收测试；auto_acceptance 不信模型自评，而是检查直接 child 是否 DONE/VERIFIED。
+def _execute_acceptance_test(
+    manager: Any,
+    task: Any,
+    executor: TestExecutor,
+    test: dict[str, Any],
+) -> TestExecutionRecord:
+    method = str(test.get("validation_method") or "command").strip().lower()
+    if method in {"auto_acceptance", "child_acceptance"}:
+        return _child_acceptance_record(manager, task, test)
+    return executor.execute(test)
+
+
+# LLM: _child_acceptance_record gives coordinator nodes a machine-checkable completion test.
+# 函数用途: 校验当前 coordinator 的直接孩子都已 DONE/VERIFIED；缺孩子、缺任务或未完成都会失败。
+def _child_acceptance_record(manager: Any, task: Any, test: dict[str, Any]) -> TestExecutionRecord:
+    child_ids = [str(item) for item in (getattr(task, "child_ids", []) or []) if str(item).strip()]
+    children = []
+    missing: list[str] = []
+    for child_id in child_ids:
+        try:
+            children.append(manager.load(child_id))
+        except FileNotFoundError:
+            missing.append(child_id)
+    incomplete = [
+        getattr(child, "id", "")
+        for child in children
+        if str(getattr(child, "status", "")).upper() != "DONE"
+        or str(getattr(child, "verification_status", "")).upper() != "VERIFIED"
+    ]
+    ok = bool(child_ids) and not missing and not incomplete
+    return TestExecutionRecord(
+        test_name=_test_name(test),
+        executed=True,
+        exit_code=0 if ok else 1,
+        executed_at=_utc_now_iso(),
+        error="" if ok else _child_acceptance_error(child_ids, missing, incomplete),
+        validation_method="child_acceptance",
+        validation_result={
+            "ok": ok,
+            "checked_children": len(children),
+            "missing_children": missing,
+            "incomplete_children": incomplete,
+        },
+        metadata={"child_ids": child_ids},
+    )
+
+
+# LLM: _child_acceptance_error keeps coordinator acceptance failures readable in reports.
+# 函数用途: 生成 child_acceptance 失败原因，便于父节点和人类快速判断是缺孩子还是孩子未完成。
+def _child_acceptance_error(child_ids: list[str], missing: list[str], incomplete: list[str]) -> str:
+    if not child_ids:
+        return "coordinator 没有直接 child 可验收"
+    if missing:
+        return f"存在缺失 child: {missing[0]}"
+    if incomplete:
+        return f"存在未完成 child: {incomplete[0]}"
+    return "child acceptance 未通过"
 
 
 # LLM: _acceptance_test_workspace prefers the explicit manager root so hidden runtime folders do not become test cwd.
