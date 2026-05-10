@@ -404,3 +404,9 @@
 - 已修正：runner 候选现在按阶段放行，同一 dispatch 范围内只跑当前最低阶段；producer/coordinator 未完成前，quality/test/review/acceptance 候选会等下一轮。
 - 已修正：root 已经拥有 coordinator child 后，再调用 `schedule_child_subagents` 创建 leaf/worker 会被 `root_leaf_bypass_existing_coordinators` 阻断，要求先 dispatch 或修复直接 coordinator children。
 - 下一步：用干净 R11 复测 quality 是否延后，root 是否不再直接创建 leaf。
+
+## 2026-05-11 Stage7 shopping E2E R11 static-site acceptance
+- 中文说明：R11 复测确认 quality 没有抢跑，root 也没有再直接创建 leaf；root -> coordinator -> worker/leaf 能写出注册、登录、商品、购物车、结账、成功页。
+- 新发现：真实产物仍存在静态链路问题，例如 `order-success.html` / `products.html` 里有 `${...}`，`cart.html` / `order-success.html` 链到不存在的 `index.html`；root 在有 blocked child 时会长时间不自然收束。
+- 已新增：`static_site_check` 验收方式，父级 TestExecutor 可检查 workspace 内静态站点目录的必需文件、本地 href/src/action、`${...}` 占位符和明显无动作控件，不执行 JS、不访问网络。
+- 下一步：把静态站点检查接入购物网站类任务的验收/runner 提示和 rescue 流程，让失败 leaf 能由上级创建修复任务闭环。
