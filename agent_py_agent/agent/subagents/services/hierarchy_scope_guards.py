@@ -8,6 +8,37 @@ from typing import Any
 
 from ..models import SubAgentTask
 
+_DOMAIN_STOPWORDS = {
+    "agent",
+    "acceptor",
+    "build",
+    "child",
+    "checker",
+    "coordinator",
+    "deliverables",
+    "grandchild",
+    "html",
+    "implementer",
+    "lead",
+    "leaf",
+    "page",
+    "reporter",
+    "reviewer",
+    "runner",
+    "task",
+    "tester",
+    "worker",
+}
+_COORDINATION_ROLE_TOKENS = {
+    "acceptor",
+    "checker",
+    "coordinator",
+    "lead",
+    "reporter",
+    "reviewer",
+    "tester",
+}
+
 
 # LLM: schedule_block_reason keeps guard checks deterministic and side-effect free.
 # 函数用途: 判断本轮层级调度是否因深度、数量、空计划或领域越界被阻断。
@@ -22,6 +53,72 @@ def schedule_block_reason(parent: SubAgentTask, request: Any) -> str:
     if mixed_reason:
         return mixed_reason
     return _forbidden_child_scope_reason(parent, request) or _domain_mismatch_reason(parent, request)
+
+
+# LLM: duplicate_child_domain_reason blocks repeated coordinator domains under the same parent.
+# 函数用途: 阻止同一个父节点重复创建 checkout/quality 这类同域 coordinator，避免真实 E2E 扇出膨胀。
+def duplicate_child_domain_reason(manager: Any, parent: SubAgentTask, request: Any) -> str:
+    seen_domains: list[set[str]] = []
+    for child in _existing_coordination_children(manager, parent):
+        seen_domains.append(_child_domain_tokens(child))
+    for spec in request.child_specs:
+        if not _is_coordination_like(spec):
+            continue
+        domains = _child_domain_tokens(spec)
+        duplicate = _first_overlapping_domain(domains, seen_domains)
+        if duplicate:
+            return f"duplicate_child_domain:{duplicate}"
+        if domains:
+            seen_domains.append(domains)
+    return ""
+
+
+# LLM: _existing_coordination_children reads only lightweight child task metadata.
+# 函数用途: 获取当前父节点已存在的 coordinator/checker/tester 子任务；读取失败时跳过，避免破坏调度。
+def _existing_coordination_children(manager: Any, parent: SubAgentTask) -> list[Any]:
+    children: list[Any] = []
+    for child_id in parent.child_ids:
+        try:
+            child = manager.load(child_id)
+        except (FileNotFoundError, OSError, ValueError, TypeError):
+            continue
+        if _is_coordination_like(child):
+            children.append(child)
+    return children
+
+
+# LLM: _is_coordination_like limits duplicate blocking to planner/reviewer style roles.
+# 函数用途: 只给协调/测试/验收类节点做同域去重，避免多个同域 worker 被误挡。
+def _is_coordination_like(item: Any) -> bool:
+    text = f"{getattr(item, 'role', '')} {getattr(item, 'agent_name', '')}".lower()
+    return any(token in text for token in _COORDINATION_ROLE_TOKENS)
+
+
+# LLM: _child_domain_tokens extracts stable, human-named task domains from a child spec or task.
+# 函数用途: 从 agent_name/role/goal 中提取 checkout、quality、catalog 等领域词，用于同父级去重。
+def _child_domain_tokens(item: Any) -> set[str]:
+    label_text = f"{getattr(item, 'agent_name', '')} {getattr(item, 'role', '')}".lower()
+    label_tokens = _domain_tokens(label_text)
+    if label_tokens:
+        return label_tokens
+    return _domain_tokens(str(getattr(item, "goal", "")).lower())
+
+
+# LLM: _domain_tokens removes generic role/path words before duplicate-domain comparison.
+# 函数用途: 把文本转换成领域词集合；优先使用 agent_name/role，避免共享路径导致误判。
+def _domain_tokens(text: str) -> set[str]:
+    tokens = re.findall(r"[a-z][a-z0-9]+", text)
+    return {token for token in tokens if token not in _DOMAIN_STOPWORDS}
+
+
+# LLM: _first_overlapping_domain keeps duplicate errors deterministic.
+# 函数用途: 找出新任务领域和已有领域的第一个交集，返回稳定错误原因。
+def _first_overlapping_domain(domains: set[str], seen_domains: list[set[str]]) -> str:
+    for seen in seen_domains:
+        overlap = sorted(domains & seen)
+        if overlap:
+            return overlap[0]
+    return ""
 
 
 # LLM: _mixed_coordinator_leaf_reason blocks one call from flattening a planned hierarchy.

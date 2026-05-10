@@ -139,7 +139,13 @@ def _artifact_records(
         task_id=task_id,
         run_id=run_id,
         now=now,
-        allowed_roots=_allowed_roots(task_dir, task_workspace_root, agent_run_workspace_root),
+        # LLM: product roots granted to this run are safe for metadata only; bodies stay externalized.
+        allowed_roots=_allowed_roots(
+            task_dir,
+            task_workspace_root,
+            agent_run_workspace_root,
+            getattr(task, "allowed_write_roots", []) or [],
+        ),
     )
     records: list[dict[str, object]] = []
     for index, ref in enumerate(_artifact_refs(task), start=1):
@@ -229,8 +235,19 @@ def _allowed_roots(
     task_dir: Path | None,
     task_workspace_root: Path,
     agent_run_workspace_root: Path,
+    allowed_write_roots: list[str],
 ) -> tuple[Path, ...]:
-    roots = [item for item in [task_dir, task_workspace_root, agent_run_workspace_root] if item is not None]
+    # LLM: allowed_write_roots lets leaf product artifacts resolve without weakening outside-workspace blocking.
+    roots = [
+        item
+        for item in [
+            task_dir,
+            task_workspace_root,
+            agent_run_workspace_root,
+            *[Path(str(root)) for root in allowed_write_roots if str(root or "").strip()],
+        ]
+        if item is not None
+    ]
     normalized: list[Path] = []
     for root in roots:
         resolved = Path(root).expanduser().resolve(strict=False)

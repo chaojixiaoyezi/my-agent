@@ -233,3 +233,8 @@
 - `SimpleAgent.run()` 的 auto compact apply 现在同时受配置开关和当前 run 的 `save` 边界控制：`save=False` 永远不写 `compact_applies`。
 - runtime fact 显式段落解析、work-state scoped id 扫描、completion suggested command 都新增 focused 回归，防止事实串桶、glob 扩扫和 scope 丢失。
 - 本轮 focused 验收：`python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_memory_runtime_basics.py::test_run_no_save_blocks_opt_in_auto_compact_apply agent_py_agent/tests/test_memory_compact_runtime_facts.py::test_runtime_fact_source_stops_sections_at_unknown_headings agent_py_agent/tests/test_memory_compact_auto.py::test_memory_compact_work_state_treats_scope_ids_as_literal_paths agent_py_agent/tests/test_memory_compact.py::test_memory_compact_apply_reads_hook_recovery_state_without_snapshot_file` -> `4 passed`。
+
+## 2026-05-11 subagent artifact allowed roots
+- 中文说明：子代理 leaf 被授权写入 `allowed_write_roots` 后，artifact manifest 现在会把这些目录当成安全元数据解析根；这样 deliverables 里的真实产物能显示为 `resolved`，不会在接管包里误标越界。
+- 行为边界不变：manifest 仍只记录 ref/path/exists/size/hash/status，不复制正文；未授权外部绝对路径仍然是 `blocked_outside_workspace`。
+- 本轮 focused 验收：`python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_subagent_artifact_allowed_roots.py agent_py_agent/tests/test_memory_workspace_safety.py::test_subagent_artifact_manifest_blocks_outside_workspace_refs` -> passed。

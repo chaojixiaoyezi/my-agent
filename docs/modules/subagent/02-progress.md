@@ -365,3 +365,9 @@
 - 中文说明：R4 证明 root 能创建 4 个 coordinator，auth 分支能创建 leaf_worker 并写出 `auth.html`；但 catalog 分支暴露图片 URL 被误判成本地写入根，导致 worker 创建被拒。
 - 已修正：写入根提取器会先标出 URL 范围，跳过 URL 内的 `s:/` 和 `//host/path` 片段；Windows 盘符匹配也不再允许从单词中间开始。
 - 下一步：用干净 R5 复测 catalog 商品页 worker 创建和页面产出，同时补 quality 的阶段依赖，避免完整产物没出来就先验收。
+
+## 2026-05-11 Stage7 shopping E2E R5 hierarchy/artifact stabilization
+- 中文说明：R5 真实跑出了 auth coordinator -> auth leaf -> deliverables 产物写入，但也发现 root 会重复创建同域 coordinator，且 deliverables 产物在接管 manifest 里被误标为越界。
+- 已修正：同一父节点的 coordinator/checker/tester/reviewer 类 child 会按领域词去重，避免重复 checkout/quality 分支继续膨胀。
+- 已修正：artifact manifest 现在把 `allowed_write_roots` 也纳入安全元数据解析边界；被授权的业务产物会显示 `resolved`，未授权外部路径仍然 blocked。
+- 下一步：用干净 R6 复测 root -> coordinator -> leaf 链路，重点验证 catalog worker 不再被 URL 拦住、重复分支被挡住，并继续补 producer/quality 阶段顺序。

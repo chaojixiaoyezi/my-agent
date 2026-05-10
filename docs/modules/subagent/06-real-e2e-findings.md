@@ -2023,3 +2023,35 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining gaps:
   - Rerun R5 from a clean runtime/deliverables to verify catalog worker creation is no longer blocked by image URLs.
   - Add dependency/phase gating so quality does not run before required producer children have at least attempted or produced deliverables.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R5
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Config: `/Users/xiaoyezi/my-claude-code/.my-agent-stage7-shop-smoke-20260511-r5.yaml`.
+  - Internal runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/stage7_shop_smoke_20260511_r5`.
+  - Deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r5`.
+  - Root run: `subagent-1778440060-6046f213`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+- 中文说明：
+  - R5 继续按“外层只观察 root”的方式测试；root 自己创建 coordinator，auth coordinator 自己创建 leaf。
+  - Auth leaf 真实写出了 `register.html`、`login.html`、`auth.css`、`auth.js`，说明 coordinator -> leaf -> 产物写入这条链路可用。
+  - 这轮也暴露出两个新结构问题，所以主动停止，没有宣称购物网站完整可用。
+- Observed facts:
+  - Root 第一次创建了 auth、catalog、cart-checkout、quality 四个 coordinator；随后又重复创建了 checkout 和 quality-checker 两个同域 coordinator。
+  - Auth coordinator 创建了 auth leaf，auth leaf 写入 `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r5/build` 下的 4 个文件。
+  - Catalog 分支仍在旧进程里触发了图片 URL 写入根误判，并转成 capability request；后续新进程应使用已修正的 URL span 过滤。
+  - Leaf 的 `artifact_refs` 指向 deliverables 产物时，takeover manifest 把它们标成 `blocked_outside_workspace`，虽然真实文件已经存在。
+- Finding 44: same-parent coordinator domains need dedupe.
+  - Symptom: one root created both `cart-checkout-coordinator` and `checkout-coordinator`, and both `quality-coordinator` and `quality-checker`.
+  - 中文解释：同一个老板不能因为模型多说了一次，就重复招两批做同一块的人；不然孩子越来越多，调度会膨胀，也会让验收顺序混乱。
+  - Fix: hierarchy scheduling now checks existing same-parent coordination-style children and blocks overlapping domains such as `checkout` or `quality`. The guard is limited to coordinator/checker/tester/reviewer style roles so multiple real worker/leaf tasks are not accidentally blocked.
+  - Verification: `test_hierarchy_schedule_blocks_duplicate_coordinator_domains`.
+- Finding 45: artifact manifests must trust task allowed write roots.
+  - Symptom: auth leaf reported absolute artifact paths under its granted deliverables directory, but manifest resolution only trusted task/run workspace roots and marked them outside workspace.
+  - 中文解释：叶子已经被允许把最终页面写到 deliverables，那么接管包也应该能登记这些文件的元数据；否则父级会看到“文件不存在/越界”，但磁盘上其实有文件。
+  - Fix: artifact manifest resolution now includes `task.allowed_write_roots` as safe metadata roots. It still stores only path/size/hash/status and never copies file bodies into memory.
+  - Verification: `test_subagent_persistence_resolves_allowed_product_artifacts` and existing outside-workspace blocking test.
+- Remaining gaps:
+  - Rerun R6 from a clean runtime/deliverables with the duplicate-domain guard and allowed-artifact-root fix active.
+  - Add producer/quality phase gating so quality/checker runs after auth/catalog/cart workers have produced or explicitly failed.

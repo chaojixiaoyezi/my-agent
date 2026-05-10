@@ -1953,3 +1953,13 @@ def example(...):
 - 修复：`_extract_write_dirs()` 增加 URL span 过滤；Windows 盘符正则不再从单词中间匹配，避免 `https://` 的 `s:/` 误判。
 - 设计边界：URL 仍然可以作为页面图片/src 内容出现在 worker 任务描述里，但不会进入 `allowed_write_roots`；网络工具/抓取授权后续仍走 capability/shell gateway，不走写入根。
 - 下一步：R5 复测 catalog worker 是否能正常创建，并补 quality 阶段依赖，避免过早验收未完成产物。
+
+## 2026-05-11 Stage7 shopping E2E R5 duplicate/artifact guard
+
+状态：已落地，待 R6 复测
+
+摘要：
+- R5 真实测试中 auth leaf 写出了 deliverables 产物，但 root 重复创建 checkout/quality 同域 coordinator，说明同父级需要领域去重。
+- `hierarchy_scope_guards.py` 新增同父级 coordinator-domain guard；只作用于 coordinator/checker/tester/reviewer 类角色，避免误拦多个真实 worker/leaf。
+- `artifact_registry.py` 现在把 task 的 `allowed_write_roots` 纳入 artifact manifest 安全解析根；被授权写出的业务产物能记录 exists/size/hash，越界路径仍然 blocked 且不读取正文。
+- 下一步：R6 必须验证重复 coordinator 被阻断、deliverables 产物在 takeover manifest 中可解析，并继续推进 producer/quality 阶段依赖。

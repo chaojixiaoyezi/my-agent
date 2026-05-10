@@ -13,7 +13,7 @@ from .base import CreateRunParams
 from .hierarchy_acceptance import scheduled_child_acceptance_checks
 from .hierarchy_context import inherited_hierarchy_thought, scheduled_child_goal
 from .hierarchy_role_identity import role_from_child_spec_identity
-from .hierarchy_scope_guards import schedule_block_reason
+from .hierarchy_scope_guards import duplicate_child_domain_reason, schedule_block_reason
 from .hierarchy_tool_policy import (
     LeafWriteIntentRequest,
     ToolPolicyRequest,
@@ -110,7 +110,12 @@ class SubAgentHierarchyScheduler:
     # 函数用途: dry-run 或真正创建下一层 run；超过深度/数量限制时只返回 blocked。
     def schedule_children(self, request: HierarchyScheduleRequest) -> HierarchyScheduleResult:
         parent = self.manager.load(request.parent_run_id)
-        reason = schedule_block_reason(parent, request)
+        # LLM: generic guards run first; duplicate-domain guard needs persisted sibling metadata.
+        reason = schedule_block_reason(parent, request) or duplicate_child_domain_reason(
+            self.manager,
+            parent,
+            request,
+        )
         if reason:
             return trace_hierarchy_schedule(self.manager, parent, _blocked_result(parent, request, reason))
         if not request.apply:
