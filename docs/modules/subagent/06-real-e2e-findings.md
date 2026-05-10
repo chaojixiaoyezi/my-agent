@@ -1648,3 +1648,70 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Partial success plus root timeout still needs clearer status semantics. Root created all 6 children but finished as `TIMEOUT / UNVERIFIED`.
   - Not all report-only children executed before the root timed out; a later run should confirm tester/bug_finder/acceptor each write their own task-local reports.
   - Parent/main reporting should use structured refs and task state rather than model-synthesized final prose.
+
+## 2026-05-10 Role Template Boundary Retest After Policy Fix
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/role_template_boundary_retest_20260510_193834`.
+  - Config: `/Users/xiaoyezi/my-claude-code/.my-agent-role-template-boundary-retest-20260510_193834.yaml`.
+  - Model name: `MiniMax-M2.7`.
+  - Observation rule: outer controller only started main/root; no direct child manipulation.
+- 中文说明：
+  - 这次想复测刚修好的写入边界，但先暴露了一个更上游的问题：main 的第一次 `create_subagents` 工具调用里，有效 JSON 后多了一个 `}`。
+  - 解析失败后，模型自己反复缩短 goal，最后 root 只拿到“角色模板边界复测”这个空泛目标。
+  - 结果 root 只能写本地运行文件和读看板，没有足够上下文去创建 6 类 child。
+- Observed facts:
+  - Created root: `subagent-1778413205-25742fa3`.
+  - Root task state stayed `RUNNING / UNVERIFIED`.
+  - `child_ids=[]`; only one real subagent task directory existed.
+  - Root `allowed_write_roots` was task-local only, so the report-write boundary itself held.
+  - Debug trace showed model/tool rounds with `list_files` / `read_file` / `read_artifact`, but no `schedule_child_subagents`.
+- Finding: tool-call parse failure caused goal degradation.
+  - Symptom: the first full `create_subagents` payload contained the correct long goal, but parser rejected it because a trailing `}` made JSON look like `Extra data`.
+  - 中文解释：不是 root 不会派工，而是 root 一开始就没拿到完整任务；模型为了修 JSON，把任务内容越删越短。
+  - Fix: `tooling/json_repair.py` now narrowly repairs a valid JSON object followed only by extra right braces. It does not swallow a second object or arbitrary broken JSON.
+  - Verification: `test_tool_call_parser_recovers_single_extra_trailing_brace` covers the exact MiniMax-style extra-brace shape.
+- Status:
+  - This E2E run was stopped after the issue was identified to avoid burning API on a known upstream parser problem.
+  - Next real retest should rerun the same scenario and confirm root receives the full goal, then creates real researcher/worker/writer/bug_finder/tester/acceptor children.
+
+## 2026-05-10 Role Template Boundary Retest After Parser Fix
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Runtime roots:
+    - `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/role_template_boundary_retest_20260510_195010`.
+    - `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/role_template_boundary_retest_20260510_200613`.
+  - Clean deliverables roots:
+    - `/Users/xiaoyezi/my-claude-code/deliverables/role_template_boundary_retest_20260510_195010`.
+    - `/Users/xiaoyezi/my-claude-code/deliverables/role_template_boundary_retest_20260510_200613`.
+  - Model name: `MiniMax-M2.7`.
+  - Observation rule: outer controller only started main/root; root created direct children through its own runner.
+- 中文说明：
+  - 这轮确认 parser 修复后，main 不再把完整 goal 越改越短；root 能拿到完整任务并真实创建 6 类 direct child。
+  - 同时继续查权限边界：coordinator 只能写自己的 task-local 报告；researcher/bug_finder/tester/acceptor 只能写自己的 task-local 报告；worker/writer 才能写最终产物目录。
+- Observed facts:
+  - Parser fix worked: root `goal_preview` kept the full deliverables path and six-role instructions.
+  - Run `role_template_boundary_retest_20260510_195010` created 6 children, but exposed that explicit root/coordinator still inherited the final deliverables root.
+  - Fix: explicit root/coordinator seed now keeps product paths in `goal` as delegation context but strips `extra_write_roots`, so root cannot write final deliverables directly.
+  - Run `role_template_boundary_retest_20260510_200613` then verified root `allowed_write_roots` contained only its own task directory.
+  - The same run created six children with corrected roles:
+    - `researcher`, `bug_finder`, `tester`, and `acceptor` had task-local-only write roots.
+    - `leaf_worker` and `writer` had task-local plus the deliverables root.
+    - Worker wrote product files under `/Users/xiaoyezi/my-claude-code/deliverables/role_template_boundary_retest_20260510_200613`.
+- Finding 1: root/coordinator needs path context, not product write authority.
+  - Symptom: root knew the deliverables path and therefore inherited it as an allowed write root.
+  - 中文解释：root 要知道产物目录在哪里，才能派工和验收；但“知道路径”不等于“自己能写最终产物”。
+  - Fix: explicit root/coordinator create-run params now set `extra_write_roots=[]`; the path remains in goal so child worker/writer can inherit it through scheduler policy.
+- Finding 2: real models may use `role=child` and put the real role in `agent_name`.
+  - Symptom: one root scheduled all six children with generic `role=child` and names like `researcher`, `writer`, `tester`; before the fix, report-only children could inherit product write roots because the policy could not see their real role.
+  - 中文解释：模型经常把结构化字段填得不够标准，但名字里已经说明了真实角色。系统要兜底识别，不能因为一个泛化 role 就放大权限。
+  - Fix: hierarchy scheduler now recovers concrete role ids from `agent_name` / goal identity when `role` is `child` / `general` / placeholder. This normalizes researcher/tester/acceptor/bug_finder/writer/worker before write-root policy runs.
+- Remaining gaps:
+  - Root still timed out after creating children, so final root summary remains partial; this is a runner completion/status-semantics issue, not a write-boundary failure.
+  - Some report-only children were still `PLANNING` or `RUNNING` when root timed out; later E2E should focus on runner progress/heartbeat, fair dispatch waves, and partial-success finalization.
+  - Child runner still sometimes probes missing paths and reads repeated artifacts; this belongs to prompt/tool-use quality tuning, not permission enforcement.
+- Verification:
+  - `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_orchestration_coordinator_seed_tools.py agent_py_agent/tests/test_subagent_hierarchy_write_policy.py` -> `5 passed`.
+  - Real MiniMax run `role_template_boundary_retest_20260510_200613` verified the corrected write roots from `task.json` and debug trace.

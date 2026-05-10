@@ -103,10 +103,11 @@ def _create_run_params(
 ):
     workflow_mode = _tool_workflow_mode(raw_params.get("workflow_mode"), agent.config.subagent_workflow_mode)
     role = str(raw_params.get("role") or "worker").strip()
-    if is_explicit_root_role(role):
+    is_explicit_root = is_explicit_root_role(role)
+    if is_explicit_root:
         workflow_mode = "off"
         allowed_tools = explicit_root_allowed_tools(allowed_tools)
-    extra_write_roots = _merged_extra_write_roots(raw_params, goal)
+    extra_write_roots = [] if is_explicit_root else _merged_extra_write_roots(raw_params, goal)
     return CreateRunParams(
         goal=goal,
         thought=str(raw_params.get("thought") or "根据父代理派工执行，并保留可验收证据。").strip(),

@@ -45,3 +45,24 @@ def test_explicit_coordinator_seed_filters_model_shell_web_tools():
     assert params.allowed_tools == COORDINATOR_TOOLS
     assert "run_command" not in params.allowed_tools
     assert "fetch_url" not in params.allowed_tools
+
+
+# LLM: test_explicit_coordinator_seed_keeps_product_paths_as_context_not_write_grants locks the root boundary.
+# 函数用途: root coordinator 可以在 goal 里保留产物目录给下级派工，但自己不能拿产物目录写权限。
+def test_explicit_coordinator_seed_keeps_product_paths_as_context_not_write_grants():
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+    mock_agent = _mock_coordinator_agent()
+    tool = CreateSubagentsTool(mock_agent)
+    result = tool.execute({
+        "goal": "Coordinate role boundary evidence for /tmp/product-deliverables.",
+        "role": "coordinator",
+        "agent_name": "root-coordinator",
+        "allowed_tools": ["schedule_child_subagents", "write_file"],
+        "extra_write_roots": ["/tmp/product-deliverables"],
+    })
+
+    params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+    assert result.ok is True
+    assert "/tmp/product-deliverables" in params.goal
+    assert params.extra_write_roots == []

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from ..log_analysis.capabilities import SECURITY_TOOL_NAMES, has_security_tool_capability
+from .json_repair import load_tool_block_json
 from .models import BaseTool, ToolExecutionResult
 from .parser import parse_xmlish_tool_calls
 from .write_boundary import validate_write_boundary
@@ -210,7 +211,7 @@ def _next_tool_block_end(text: str, start_at: int) -> tuple[int, str] | None:
 # 函数用途: 解析 parse_tool_block_payload 数据结构。
 def _parse_tool_block_payload(raw: str) -> dict[str, Any]:
     try:
-        payload = json.loads(raw)
+        payload = load_tool_block_json(raw)
     except json.JSONDecodeError as exc:
         return _parse_error_payload(f"工具调用 JSON 解析失败: {exc}", raw)
     if not isinstance(payload, dict):
