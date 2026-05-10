@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from agent_py_agent.agent.agent_core.orchestration_progress_payload import _progress_payload
 from agent_py_agent.agent.agent_core.runner_dispatch import _dispatch_runner_candidates
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
@@ -75,3 +76,22 @@ def test_runner_candidates_defer_quality_until_producers_finish():
     selected = _dispatch_runner_candidates(tasks, max_runners=4)
 
     assert [task.id for task in selected] == ["auth", "catalog"]
+
+
+# LLM: test_progress_payload_surfaces_blocked_children covers parent recovery after a child fails.
+# 函数用途: 直接 child 已失败/阻塞时，dispatch payload 必须给出可执行 run_ids，而不是假装没有下一步。
+def test_progress_payload_surfaces_blocked_children():
+    tasks = [
+        _runner_task("done", "leaf_worker"),
+        _runner_task("blocked", "leaf_worker"),
+    ]
+    tasks[0].status = "DONE"
+    tasks[0].verification_status = "VERIFIED"
+    tasks[1].status = "BLOCKED"
+    tasks[1].verification_status = "FAILED"
+
+    payload = _progress_payload("parent", tasks)["direct_children"]
+
+    assert payload["needs_more_dispatch"] is False
+    assert payload["needs_recovery"] is True
+    assert payload["recovery_run_ids"] == ["blocked"]

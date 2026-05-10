@@ -9,6 +9,7 @@ from typing import Any
 
 from ..models import SubAgentTask
 from .base import _extract_write_dirs
+from .hierarchy_leaf_targets import LeafTargetDedupeRequest, duplicate_verified_leaf_target_reason
 from .hierarchy_write_policy import inherited_extra_write_roots
 
 _DOMAIN_STOPWORDS = {
@@ -72,6 +73,16 @@ def duplicate_child_domain_reason(manager: Any, parent: SubAgentTask, request: A
     bypass_reason = _root_leaf_bypass_reason(manager, parent, request)
     if bypass_reason:
         return bypass_reason
+    leaf_reason = duplicate_verified_leaf_target_reason(
+        LeafTargetDedupeRequest(
+            manager=manager,
+            parent=parent,
+            schedule_request=request,
+            leaf_like=_is_leaf_like,
+        )
+    )
+    if leaf_reason:
+        return leaf_reason
     seen_domains: list[set[str]] = []
     for child in _existing_coordination_children(manager, parent):
         seen_domains.append(_child_domain_tokens(child))
