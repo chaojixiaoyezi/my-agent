@@ -350,3 +350,8 @@
 - 中文说明：新增 `fallback_report.py`，父级可在子代理正常写入失败、通道异常或工具缺失时保存 task-local 兜底报告。
 - 兜底报告写入 `reports/fallback_report.md` 和 `reports/fallback_report.json`，只包含摘要、细节和 artifact/evidence refs，不自动展开大文件正文。
 - 新增本地 E2E：capability request/grant -> shell gateway execute -> stdout 移入 task trash -> fallback report，验证受控工具链路可以完整闭环。
+
+## 2026-05-11 Stage7 shopping E2E follow-up
+- 中文说明：购物网站真实 E2E R2 跑出了 root -> 4 coordinator -> worker/leaf 链路，产出认证和商品页面，但购物车/结账未完成，上层在 480s smoke 边界内超时。
+- 已修正两个核心口子：`write_file` 大 payload 现在在 assistant round 和 tool-call record 两处都只回写摘要；worker/writer/leaf_worker 的 child spec goal 自己写出产物目录时，也会参与写入根授权候选。
+- 仍未完成：静态站点验收需要拦截缺失页面、`${...}` 模板占位符和失效链接/图片；coordinator 在部分子树成功/失败后还需要更早停止并交接，而不是继续读 refs 到超时。

@@ -16,6 +16,7 @@ from agent_py_agent.agent.agent_core._tool_loop_service import ToolCallRecordPar
 from agent_py_agent.agent.agent_core.tool_call_context_reducer import (
     AssistantToolRoundContextRequest,
     render_assistant_tool_round_context,
+    render_tool_payload_for_live_prompt,
 )
 from agent_py_agent.agent.memory_archive.runtime.turn_archiver import (
     ArchiveRunTurnParams,
@@ -87,6 +88,34 @@ def test_tool_loop_summarizes_large_tool_call_payload_for_live_prompt() -> None:
     assert "path: shop/list.html" in rendered
     assert "large text omitted" in rendered
     assert huge_html not in rendered
+
+
+def test_tool_call_record_summarizes_large_payload_for_live_prompt(tmp_path: Path) -> None:
+    service = ToolLoopService(SimpleNamespace(root=tmp_path))
+    params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
+    huge_html = "<html>" + ("x" * 9000) + "</html>"
+
+    service._record_tool_call(
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=1,
+            idx=1,
+            payload={"tool": "write_file", "path": "shop/cart.html", "content": huge_html},
+            result=ToolExecutionResult("write_file", False, "路径不在 allowed_write_roots 内"),
+        )
+    )
+
+    live_context = params.tool_context[-1]
+    assert "tool_call_1: tool=write_file" in live_context
+    assert "path: shop/cart.html" in live_context
+    assert "large text omitted" in live_context
+    assert huge_html not in live_context
+
+
+def test_render_tool_payload_keeps_small_payload_readable() -> None:
+    payload = {"tool": "read_file", "path": "README.md"}
+
+    assert render_tool_payload_for_live_prompt(payload) == repr(payload)
 
 
 def test_tool_loop_writes_fail_safe_checkpoint_before_externalizing_large_output(tmp_path: Path) -> None:

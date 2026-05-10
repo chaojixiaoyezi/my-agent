@@ -1921,3 +1921,13 @@ def example(...):
 - 新增 `plan_parent_acceptance_auto_execution(run_id)` 和 `subagents-acceptance-plan --auto-execution`，写入 `reports/parent_acceptance_auto_execution.json`。
 - 第一版固定 hard guard：`execution_allowed=false`、`guard_status=blocked`、`executed=false`、`mutates_task_state=false`，只展示 recommended command、policy ref、blockers 和 safety boundaries。
 - `subagents-dispatch` 的 acceptance record 和 `SUBAGENT_DISPATCH.md` 透传 `parent_acceptance_auto_execution_*` 摘要；watch 仍只沿 dispatch report/Markdown 查看，不执行命令。
+
+## 2026-05-11 Stage7 shopping E2E R2
+
+状态：已落地第一轮修复，仍需 R3 复测
+
+摘要：
+- 购物网站真实 E2E R2 证明 root 单入口链路能创建 4 个 coordinator 和多个 worker/leaf，但还没有交付完整购物流程。
+- 两个架构口子已修：child spec goal 自己写出的产物路径会进入 write-root 候选；`write_file` 这类大工具 payload 在 assistant round 和 tool-call record 两处都会摘要，不再反复进入 prompt。
+- 设计边界不变：coordinator/researcher/tester/acceptor 看到产物路径也不能拿最终产物写权限；只有 worker/writer/leaf_worker 且有明确写入意图时才继承候选根。
+- 下一轮 R3 必须补强父级静态站点验收：缺失页面、`${...}` 占位符、失效链接/图片和不可达按钮都应阻断验收。

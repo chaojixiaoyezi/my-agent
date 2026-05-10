@@ -1919,3 +1919,44 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Need rerun Stage7 shopping smoke after the reducer/prompt fix, starting again from a clean deliverables/runtime directory.
   - Need reach a usable shopping site path: register -> login -> product list/detail -> cart -> checkout -> success, with no dead buttons and no broken image references.
   - Need decide whether Stage7 should use a bounded runner timeout during smoke tests even if user default remains `off`, so one stalled model call cannot block the whole overnight test harness.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R2
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Config: `/Users/xiaoyezi/my-claude-code/.my-agent-stage7-shop-smoke-20260511-r2.yaml`.
+  - Internal runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/stage7_shop_smoke_20260511_r2`.
+  - Deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r2`.
+  - Root run: `subagent-1778436330-1cfc37a4`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+  - Observation rule: the outer controller only seeded and dispatched root; root created direct coordinators, and coordinators created their own workers/leaves.
+- 中文说明：
+  - 这轮复测了上一轮的“coordinator 不应自写产物”和“write_file 大 payload 摘要”修复。
+  - 系统真实跑出 root -> 4 个直接 coordinator -> 4 个 worker/leaf 的链路，并产出 6 个页面；仍未达到购物网站完整可用。
+- Observed facts:
+  - Root created `auth-lead`, `catalog-lead`, `cart-checkout-lead`, and `quality-lead`.
+  - `auth-lead` created an auth leaf and produced `index.html`, `login.html`, and `register.html`.
+  - `catalog-lead` created a catalog leaf and produced `product-list.html`, `product-detail.html`, and `category.html`.
+  - `cart-checkout-lead` created a worker, but that worker blocked on missing deliverables write permission.
+  - `quality-lead`, `catalog-lead`, `cart-checkout-lead`, and root timed out under the 480s smoke-test harness limit; board produced failure handoff and takeover readiness refs.
+  - External validation found missing cart/checkout/order pages and broken static refs such as `cart.html` and literal `${product.image}`.
+- Finding 37: worker spec paths must participate in write-root grants.
+  - Symptom: `cart-checkout-worker` goal explicitly contained `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r2/build`, but `allowed_write_roots` only contained its task-local runtime directory.
+  - 中文解释：子代理自己已经把“我要写到哪里”说清楚了，但 scheduler 只看父节点继承来的路径，没有看 child spec 自己写出来的路径，所以真正干活的 worker 没拿到产物目录写权限。
+  - Root cause: `_create_child()` built `requested_write_roots` from `spec.extra_write_roots` or `inherited_extra_write_roots(parent)`, but not from `_extract_write_dirs(spec.goal)`.
+  - Fix: `requested_child_write_roots()` now merges explicit roots, inherited roots, and child spec goal paths. Authorization remains role-gated: report/coordinator roles still stay task-local, but worker/writer/leaf_worker can receive the deliverable root they explicitly need.
+  - Verification: `test_hierarchy_schedule_grants_worker_path_written_by_child_spec` covers the real cart-worker pattern.
+- Finding 38: `_record_tool_call` also needed payload reduction.
+  - Symptom: prompts still reached about 60k-70k chars in R2 even after assistant tool-call response summarization.
+  - 中文解释：上一轮只压了“模型回复里的工具调用原文”，但工具执行记录里还会再写一遍 `payload`，也就是 `write_file` 的整段 HTML 又从另一个门塞回 prompt。
+  - Root cause: `_record_tool_call()` appended `record.payload` directly into `tool_context`; large failed or successful `write_file` payloads bypassed `tool_call_context_reducer`.
+  - Fix: `render_tool_payload_for_live_prompt()` now summarizes large recorded tool payloads too, keeping tool name, path, sizes, hash, and short preview while omitting the full body.
+  - Verification: `test_tool_call_record_summarizes_large_payload_for_live_prompt` covers the blocked `write_file` path.
+- Finding 39: quality validation needs real browser/static-link checks before acceptance.
+  - Symptom: generated catalog pages included broken static references: `cart.html` did not exist, query-string links were naively checked as files, and literal `${product.image}` appeared in `src`.
+  - 中文解释：部分页面已经写出来，但不能算购物网站可用；下一轮必须让质量/验收子代理用真实规则检查链接、按钮、图片和核心流程，不能只看“文件存在”。
+  - Status: detected and documented; not solved in this patch.
+- Remaining gaps:
+  - Rerun Stage7 R3 from a clean runtime/deliverables after the write-root and payload fixes.
+  - Add or strengthen parent-side static site validation so missing pages, literal template placeholders, and broken links/images block acceptance.
+  - Improve coordinator stop behavior after partial child success so root can summarize or hand off cleanly instead of timing out while descendants are already done/blocked.
