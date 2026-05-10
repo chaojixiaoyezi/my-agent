@@ -1604,3 +1604,47 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Status: recorded as a remaining gap. The next real E2E should rerun with the new report-write templates and confirm root writes its own report and stops faster.
 - Verification:
   - `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_subagent_role_templates.py agent_py_agent/tests/test_subagent_prompt_contract.py agent_py_agent/tests/test_subagent_mixin.py::TestSubagentMixinSpawn::test_spawn_subagents_explicit_coordinator_creates_root_run agent_py_agent/tests/test_subagent_hierarchy_scheduler_tool_roles.py agent_py_agent/tests/test_orchestration_tools.py::TestRunnerDispatchRecords::test_runner_dispatch_record_carries_created_child_summary agent_py_agent/tests/test_orchestration_tools.py::TestDispatchSubagentsToolExecute::test_dispatch_payload_exposes_runner_created_children` -> `22 passed`.
+
+## 2026-05-10 Role Template Report-Write Boundary Retest
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/role_template_report_write_20260510_190201`.
+  - Clean deliverables root: `/Users/example/my-终端应用/deliverables/role_template_report_write_20260510_190201`.
+  - Config: `/Users/example/my-终端应用/.my-agent-role-template-report-write-20260510_190201.yaml`.
+  - Model name: `MiniMax-M2.7`.
+  - Observation rule: the test controller only started the main agent/root seed. Root created direct children through its own runner.
+- 中文说明：
+  - 这轮继续测角色模板：root 自己创建 researcher、worker、writer、bug_finder、tester、acceptor 六类孩子。
+  - 核心要看两件事：每个报告型角色能不能写自己的报告；报告型角色会不会误拿最终产物目录。
+  - 真实事实以 `task.json`、debug trace、runner reports 和文件系统为准，不能只信主模型最后的自然语言总结。
+- Observed hierarchy:
+  - Root: `subagent-1778410985-d82d0df8`.
+  - Direct children created by root:
+    - `subagent-1778411047-b800886d` researcher.
+    - `subagent-1778411048-acb88122` leaf_worker.
+    - `subagent-1778411048-e4eb14b3` writer.
+    - `subagent-1778411048-f6ce1b83` bug_finder.
+    - `subagent-1778411048-8b190ff2` tester.
+    - `subagent-1778411048-23b22567` acceptor.
+- Observed files:
+  - Root wrote its coordination report under its own task directory: `ROOT_REPORT.md`.
+  - Worker wrote task-local product/report files under its own task directory.
+  - Writer wrote task-local text/report files under its own task directory.
+  - The clean deliverables root stayed empty in this run.
+- Finding 1: Main-agent final prose hallucinated child ids and paths.
+  - Symptom: the final natural-language summary named child ids like `subagent-1778410985-*`, but real trace/task ids were `subagent-1778411047-*` and `subagent-1778411048-*`.
+  - 中文解释：模型最后“口头总结”会编错 id 或路径；系统判断必须看结构化 refs，而不是看一句总结。
+  - Status: recorded. Next reporting improvement should render final progress from structured child refs instead of free-form model text.
+- Finding 2: Explicit root coordinator seed accepted model-added shell/web tools.
+  - Symptom: the main model passed `run_command` / `fetch_url` into a root coordinator seed.
+  - 中文解释：root coordinator 只应该负责派工、看板、读资料和写协调报告，不应该因为模型多写了工具名就拿到 shell/web 权限。
+  - Fix: explicit root/coordinator seed now filters model-supplied tools back to the built-in coordinator tool bundle.
+- Finding 3: Report-only roles inherited product write roots.
+  - Symptom: researcher/tester/bug_finder/acceptor/coordinator can write reports, but they should not inherit the final deliverables root.
+  - 中文解释：会写报告不等于能写最终业务产物。报告放自己的工单目录；业务产物仍交给 worker/writer/leaf_worker。
+  - Fix: hierarchy scheduler now separates report-write capability from product-write authority. Report/check/accept/research/coordinator roles keep task-local write roots only; worker/writer/leaf_worker can inherit product write roots. Product paths may remain visible as delegation/test context, but write authority is enforced by `allowed_write_roots`.
+- Remaining gaps:
+  - Partial success plus root timeout still needs clearer status semantics. Root created all 6 children but finished as `TIMEOUT / UNVERIFIED`.
+  - Not all report-only children executed before the root timed out; a later run should confirm tester/bug_finder/acceptor each write their own task-local reports.
+  - Parent/main reporting should use structured refs and task state rather than model-synthesized final prose.

@@ -28,13 +28,18 @@ def inherited_hierarchy_thought(parent: SubAgentTask, *, child_goal: str = "") -
     return "\n".join(parts)
 
 
-# LLM: scheduled_child_goal makes model-shortened child goals self-contained before persistence.
-# 函数用途: 当模型只给下一层短目标时，把父级目标/边界补入 goal，确保产物路径和限制能继续传给孙级。
-def scheduled_child_goal(parent: SubAgentTask, spec: HierarchyChildSpec) -> str:
+# LLM: scheduled_child_goal makes child goals self-contained while reflecting actual write roots.
+# 函数用途: 生成 child goal；补入父级相关边界，但允许路径作为委派/验收上下文继续传给下一层。
+def scheduled_child_goal(
+    parent: SubAgentTask,
+    spec: HierarchyChildSpec,
+    *,
+    write_roots: list[str] | None = None,
+) -> str:
     goal = str(spec.goal or "").strip()
     if not parent.goal or goal_carries_parent_scope(parent, goal):
         return goal
-    inherited = _inherited_goal_context(parent, goal)
+    inherited = _inherited_goal_context(parent, goal, write_roots=write_roots)
     if not inherited:
         return goal
     return "\n\n".join([goal, inherited])
@@ -91,12 +96,17 @@ def relevant_parent_context(parent_goal: str, child_goal: str, *, limit: int = 8
 
 # LLM: _inherited_goal_context renders boundary text that models can safely pass to descendants.
 # 函数用途: 生成 child goal 的继承块；只放当前相关片段和写入根，不把父级完整 sibling 目标塞进去。
-def _inherited_goal_context(parent: SubAgentTask, child_goal: str) -> str:
+def _inherited_goal_context(
+    parent: SubAgentTask,
+    child_goal: str,
+    *,
+    write_roots: list[str] | None = None,
+) -> str:
     lines = [
         "继承父级目标/边界（仅用于目录/权限/验收，不代表当前子任务要执行父级全部目标）：",
         "当前子任务只执行上方 goal，不要展开父级其它 sibling 目标。",
     ]
-    roots = _write_root_lines(parent)
+    roots = _write_root_lines(parent, write_roots=write_roots)
     if roots:
         lines.append("允许写入根：")
         lines.extend(roots)
@@ -110,9 +120,9 @@ def _inherited_goal_context(parent: SubAgentTask, child_goal: str) -> str:
 
 # LLM: _write_root_lines keeps inherited filesystem boundaries explicit without copying artifacts.
 # 函数用途: 把父级允许写入根格式化为短列表，供下层继续使用。
-def _write_root_lines(parent: SubAgentTask) -> list[str]:
+def _write_root_lines(parent: SubAgentTask, *, write_roots: list[str] | None = None) -> list[str]:
     roots: list[str] = []
-    for raw in parent.allowed_write_roots:
+    for raw in parent.allowed_write_roots if write_roots is None else write_roots:
         text = str(raw or "").strip()
         if text and text not in roots:
             roots.append(text)
