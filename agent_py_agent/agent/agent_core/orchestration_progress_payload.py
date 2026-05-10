@@ -35,6 +35,21 @@ def direct_children_progress_payload(agent) -> dict[str, object]:
                 "继续调用 dispatch_subagents，不要把 PLANNING 直接判为失败。"
             ),
         })
+    elif payload["direct_children"]["needs_recovery"]:
+        payload["direct_children"].update({
+            "next_action": "inspect_or_rescue_direct_children",
+            "suggested_tool_call": {
+                "tool": "dispatch_subagents",
+                "apply": True,
+                "execute_runners": True,
+                "run_ids": payload["direct_children"]["recovery_run_ids"],
+                "workflow_mode": "auto",
+            },
+            "recovery_hint": (
+                "有直接 child 已 BLOCKED/FAILED/TIMEOUT；先用这些 run_ids 尝试受控重试。"
+                "如果仍不可重试，再查看 failure_handoff/takeover refs 并创建接管任务。"
+            ),
+        })
     return payload
 
 
@@ -44,6 +59,7 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
     by_status: dict[str, int] = {}
     planning_ids: list[str] = []
     running_ids: list[str] = []
+    recovery_ids: list[str] = []
     for item in direct_children:
         status = str(getattr(item, "status", "") or "UNKNOWN").upper()
         by_status[status] = by_status.get(status, 0) + 1
@@ -51,7 +67,10 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
             planning_ids.append(str(getattr(item, "id", "")))
         if status == "RUNNING":
             running_ids.append(str(getattr(item, "id", "")))
+        if status in {"BLOCKED", "FAILED", "TIMEOUT", "CHANNEL_ERROR"}:
+            recovery_ids.append(str(getattr(item, "id", "")))
     unfinished_ids = [item for item in [*planning_ids, *running_ids] if item]
+    recovery_ids = [item for item in recovery_ids if item]
     return {
         "direct_children": {
             "parent_run_id": parent_run_id,
@@ -59,7 +78,9 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
             "by_status": by_status,
             "planning_run_ids": [item for item in planning_ids if item],
             "running_run_ids": [item for item in running_ids if item],
+            "recovery_run_ids": recovery_ids,
             "unfinished_run_ids": unfinished_ids,
             "needs_more_dispatch": bool(unfinished_ids),
+            "needs_recovery": bool(recovery_ids),
         }
     }

@@ -2262,3 +2262,19 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Parent/coordinator still needs a rescue loop that can create a repair child from a blocked leaf handoff instead of staying RUNNING indefinitely.
   - Same-parent duplicate leaf scheduling should be tightened when an equivalent sibling is already `DONE/VERIFIED`.
   - Shopping-site workflows should inject `static_site_check` into parent acceptance automatically for static web deliverables.
+
+## 2026-05-11 R11 Follow-Up Fixes
+
+- Finding 56: direct child recovery must be visible in runner-context dispatch payloads.
+  - Symptom: when a coordinator had DONE siblings plus a BLOCKED/FAILED child, the progress payload only exposed PLANNING/RUNNING as actionable. The parent could keep running without a crisp rescue next step.
+  - 中文解释：孩子里有人卡住了，父节点不能只看“还有没有没跑完的人”。它还要看到“谁失败了，下一步该拿哪些 run_id 去重试或接管”。
+  - Fix: `orchestration_progress_payload.py` now emits `recovery_run_ids`, `needs_recovery`, and an `inspect_or_rescue_direct_children` suggested dispatch call when direct children are BLOCKED/FAILED/TIMEOUT/CHANNEL_ERROR and no PLANNING/RUNNING child remains.
+  - Verification: `test_progress_payload_surfaces_blocked_children`.
+- Finding 57: completed leaf outputs need concrete target dedupe.
+  - Symptom: after `auth-worker` had already written and verified `register.html` / `login.html`, the auth coordinator created another auth leaf for the same targets.
+  - 中文解释：同一个父节点下面，已经有工人把同一批页面写完并验收了，就不该再叫一个新工人重复写同样文件。否则会浪费模型调用，还可能覆盖或制造冲突。
+  - Fix: `hierarchy_scope_guards.py` now reads direct child metadata plus `output.json.artifacts` path refs and blocks new leaf specs whose concrete file names overlap a DONE/VERIFIED leaf. It does not read artifact bodies and does not block different file targets.
+  - Verification: `test_hierarchy_schedule_blocks_duplicate_verified_leaf_targets`.
+- Remaining gaps:
+  - Auto-inject `static_site_check` for static web outputs so parent acceptance can catch link/placeholders without relying on model-authored tests.
+  - Run a fresh root-only R12 shopping E2E after auto-injection and confirm the parent creates repair/rescue work instead of spinning.

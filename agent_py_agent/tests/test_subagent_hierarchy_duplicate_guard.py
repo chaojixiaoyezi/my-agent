@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
     HierarchyChildSpec,
@@ -84,3 +87,86 @@ def test_hierarchy_schedule_allows_generic_numbered_checker_siblings(tmp_path):
 
     assert result.blocked is False
     assert len(result.created_run_ids) == 2
+
+
+# LLM: test_hierarchy_schedule_blocks_duplicate_verified_leaf_targets covers R11 duplicate auth leaf creation.
+# 函数用途: 同父级已有 DONE/VERIFIED leaf 写出 register/login 后，不能再派同一文件的 leaf。
+def test_hierarchy_schedule_blocks_duplicate_verified_leaf_targets(tmp_path):
+    manager = SubAgentManager(tmp_path)
+    parent = _auth_parent_with_verified_leaf(manager)
+
+    duplicate = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="rewrite register.html and login.html",
+                    role="leaf_worker",
+                    agent_name="auth-leaf-writer",
+                )
+            ],
+            apply=True,
+        )
+    )
+    sibling = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="write password-reset.html",
+                    role="leaf_worker",
+                    agent_name="password-reset-leaf",
+                )
+            ],
+            apply=True,
+        )
+    )
+
+    assert duplicate.blocked is True
+    assert duplicate.reason == "duplicate_leaf_target:login.html"
+    assert sibling.blocked is False
+    assert len(sibling.created_run_ids) == 1
+
+
+# LLM: _auth_parent_with_verified_leaf creates a parent with one completed auth leaf fixture.
+# 函数用途: 构造 leaf 目标去重测试用的父节点和已验证子节点，避免测试主体过长。
+def _auth_parent_with_verified_leaf(manager: SubAgentManager):
+    root = manager.create_run(goal="shopping root", thought="orchestrate", plan=["plan"])
+    parent = manager.create_run(
+        goal="auth coordinator",
+        thought="coordinate auth",
+        plan=["split auth"],
+        parent_id=root.id,
+        root_id=root.id,
+        depth=1,
+        role="coordinator",
+        agent_name="auth-coordinator",
+    )
+    done_leaf = manager.create_run(
+        goal="write register.html and login.html",
+        thought="write auth pages",
+        plan=["write pages"],
+        parent_id=parent.id,
+        root_id=root.id,
+        depth=2,
+        role="leaf_worker",
+        agent_name="auth-worker",
+    )
+    _mark_leaf_verified_with_artifacts(
+        manager,
+        done_leaf,
+        ["deliverables/shop/build/register.html", "deliverables/shop/build/login.html"],
+    )
+    return parent
+
+
+# LLM: _mark_leaf_verified_with_artifacts writes only structured artifact refs for dedupe tests.
+# 函数用途: 把 leaf fixture 标记为 DONE/VERIFIED，并在 output.json 里写 artifact 路径引用。
+def _mark_leaf_verified_with_artifacts(manager: SubAgentManager, leaf, artifact_paths: list[str]) -> None:
+    Path(leaf.output_json).write_text(
+        json.dumps({"artifacts": [{"path": item} for item in artifact_paths]}),
+        encoding="utf-8",
+    )
+    leaf.status = "DONE"
+    leaf.verification_status = "VERIFIED"
+    manager.save(leaf)

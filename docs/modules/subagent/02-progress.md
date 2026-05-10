@@ -410,3 +410,9 @@
 - 新发现：真实产物仍存在静态链路问题，例如 `order-success.html` / `products.html` 里有 `${...}`，`cart.html` / `order-success.html` 链到不存在的 `index.html`；root 在有 blocked child 时会长时间不自然收束。
 - 已新增：`static_site_check` 验收方式，父级 TestExecutor 可检查 workspace 内静态站点目录的必需文件、本地 href/src/action、`${...}` 占位符和明显无动作控件，不执行 JS、不访问网络。
 - 下一步：把静态站点检查接入购物网站类任务的验收/runner 提示和 rescue 流程，让失败 leaf 能由上级创建修复任务闭环。
+
+## 2026-05-11 Stage7 recovery/duplicate follow-up
+- 中文说明：R11 后补了两个“别让父节点空转”的小闭环：直接 child 失败/阻塞时，dispatch 返回会显式给 `recovery_run_ids` 和建议的受控重试工具调用；同父级已有 DONE/VERIFIED leaf 写过同一目标文件时，新的 leaf 创建会被 `duplicate_leaf_target:<file>` 阻断。
+- `orchestration_progress_payload.py` 现在区分 `needs_more_dispatch` 和 `needs_recovery`；PLANNING/RUNNING 继续 dispatch，BLOCKED/FAILED/TIMEOUT/CHANNEL_ERROR 进入恢复路径。
+- `hierarchy_scope_guards.py` 的 leaf 去重只读取 direct child 的任务元数据和 `output.json.artifacts` 路径引用，不读取产物正文；只有具体文件名重合才阻断，避免 cart/checkout/order-success 这类不同页面 sibling 被误挡。
+- 下一步：把 `static_site_check` 自动注入静态 Web 产物的父级验收，让失败结果能自然进入恢复/修复 child 流程。
