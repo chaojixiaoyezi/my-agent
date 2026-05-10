@@ -20,11 +20,20 @@ def direct_children_progress_payload(agent) -> dict[str, object]:
     except Exception:
         return {}
     payload = _progress_payload(parent_run_id, direct_children)
-    if payload["direct_children"]["planning_run_ids"] or payload["direct_children"]["running_run_ids"]:
-        payload["direct_children"]["continue_hint"] = (
-            "仍有直接 child 处于 PLANNING/RUNNING；这通常是限速或串行调度造成的。"
-            "继续调用 dispatch_subagents，不要把 PLANNING 直接判为失败。"
-        )
+    if payload["direct_children"]["needs_more_dispatch"]:
+        payload["direct_children"].update({
+            "next_action": "continue_dispatch_direct_children",
+            "suggested_tool_call": {
+                "tool": "dispatch_subagents",
+                "apply": True,
+                "execute_runners": True,
+                "workflow_mode": "auto",
+            },
+            "continue_hint": (
+                "仍有直接 child 处于 PLANNING/RUNNING；这通常是限速或串行调度造成的。"
+                "继续调用 dispatch_subagents，不要把 PLANNING 直接判为失败。"
+            ),
+        })
     return payload
 
 
@@ -41,6 +50,7 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
             planning_ids.append(str(getattr(item, "id", "")))
         if status == "RUNNING":
             running_ids.append(str(getattr(item, "id", "")))
+    unfinished_ids = [item for item in [*planning_ids, *running_ids] if item]
     return {
         "direct_children": {
             "parent_run_id": parent_run_id,
@@ -48,5 +58,7 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
             "by_status": by_status,
             "planning_run_ids": [item for item in planning_ids if item],
             "running_run_ids": [item for item in running_ids if item],
+            "unfinished_run_ids": unfinished_ids,
+            "needs_more_dispatch": bool(unfinished_ids),
         }
     }

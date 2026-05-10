@@ -1712,6 +1712,12 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Root still timed out after creating children, so final root summary remains partial; this is a runner completion/status-semantics issue, not a write-boundary failure.
   - Some report-only children were still `PLANNING` or `RUNNING` when root timed out; later E2E should focus on runner progress/heartbeat, fair dispatch waves, and partial-success finalization.
   - Child runner still sometimes probes missing paths and reads repeated artifacts; this belongs to prompt/tool-use quality tuning, not permission enforcement.
+- Follow-up fix:
+  - Runner-context `dispatch_subagents` now adds machine-readable direct-child continuation fields when direct children remain `PLANNING` or `RUNNING`: `needs_more_dispatch`, `unfinished_run_ids`, `next_action=continue_dispatch_direct_children`, and `suggested_tool_call`.
+  - 中文解释：以后父节点看到“还有孩子没跑完”时，不只看到一句提示，而是能拿到明确下一步工具调用建议，减少 root 超时后不知道怎么继续。
+  - Runner dispatch records now also preserve `runner_child_status_counts`, `runner_unfinished_child_ids`, and `runner_partial_success` when a runner times out after creating children.
+  - 中文解释：以后 root 自己超时也不会只留下一个“TIMEOUT”；父级/恢复流程还能看见它已经创建了哪些孩子，哪些孩子没收口。
 - Verification:
   - `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_orchestration_coordinator_seed_tools.py agent_py_agent/tests/test_subagent_hierarchy_write_policy.py` -> `5 passed`.
+  - `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_orchestration_dispatch_child_refs.py` -> `5 passed`.
   - Real MiniMax run `role_template_boundary_retest_20260510_200613` verified the corrected write roots from `task.json` and debug trace.

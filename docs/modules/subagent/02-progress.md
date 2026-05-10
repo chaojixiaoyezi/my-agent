@@ -255,6 +255,8 @@
 - 本轮 role-template report-write boundary 真实复测：外层只启动 main/root，root 真实创建 researcher、worker、writer、bug_finder、tester、acceptor 六类 direct children；复测暴露主模型最终自然语言会编错 child id/path，后续 reporting 必须以 structured refs 为准。已修复 explicit root/coordinator seed 误收 `run_command`/`fetch_url` 的问题，并把 report-only 角色的报告写入能力和最终产物写入根分离：coordinator/researcher/tester/bug_finder/acceptor 只写 task-local 报告，worker/writer/leaf_worker 才继承产品产物目录。
 - 本轮 boundary retest after policy fix 暴露工具调用解析上游问题：MiniMax 把完整 `create_subagents` JSON 后多吐一个 `}`，解析失败后模型自我修复时把 goal 缩短到“角色模板边界复测”，导致 root 没拿到 6 类 child 任务。已新增窄口 JSON repair：只修“有效对象后剩余内容全是右花括号”的情况，不吞第二个对象；下一轮真实复测要确认 root 能拿完整 goal 并真实创建 6 类 child。
 - 本轮 boundary retest after parser fix 已确认 root 能拿完整 goal 并真实创建 6 类 child；继续暴露并修复两个权限边界问题：显式 root/coordinator 只保留产品路径上下文、不继承最终产物写入根；模型把 `role=child` 但 `agent_name=researcher/tester/acceptor/...` 时，scheduler 会先归一化真实角色再套写入根策略。真实 MiniMax run `role_template_boundary_retest_20260510_200613` 验证 root/report-only roles 只写 task-local，worker/writer 才拿 deliverables。
+- 本轮 runner-context partial-progress 第一片：`dispatch_subagents` 在 runner 内返回直接孩子状态时新增 `needs_more_dispatch`、`unfinished_run_ids`、`next_action=continue_dispatch_direct_children` 和 `suggested_tool_call`，让 root/coordinator 面对限速或串行波次未跑完的 child 时拿到机器可读的继续动作，而不只是一句自然语言提示。
+- 本轮 runner partial-success 记录第一片：runner 自己 `TIMEOUT` 但已经创建 child 时，dispatch record 会保存 `runner_child_status_counts`、`runner_unfinished_child_ids` 和 `runner_partial_success`，恢复流程不再只能看到单个失败状态。
 
 ## 未跑测试
 

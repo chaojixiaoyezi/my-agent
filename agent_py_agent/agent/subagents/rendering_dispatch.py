@@ -57,11 +57,15 @@ def render_dispatch_markdown(report: DispatchReport) -> str:
 def _dispatch_runner_line(record) -> str:
     child_ids = ",".join(record.runner_created_child_ids)
     roles = ",".join(record.runner_created_roles)
+    unfinished = ",".join(record.runner_unfinished_child_ids)
     return (
         "  - runner_effect: "
         f"created_child_count={record.runner_created_child_count} "
         f"created_child_ids={child_ids} "
         f"created_roles={roles} "
+        f"child_status_counts={record.runner_child_status_counts} "
+        f"unfinished_child_ids={unfinished} "
+        f"partial_success={record.runner_partial_success} "
         f"summary={record.runner_summary}"
     )
 

@@ -30,6 +30,20 @@ def _dispatch_payload_for_record(record: SimpleNamespace) -> dict:
     return DispatchSubagentsTool(mock_agent)._report_payload(mock_report)
 
 
+# LLM: _dispatch_payload_with_direct_children builds a runner-context dispatch payload fixture.
+# 函数用途: 构造带当前 parent runner 和 direct child 状态的 payload，验证继续调度指令。
+def _dispatch_payload_with_direct_children(children: list[SimpleNamespace]) -> dict:
+    mock_report = MagicMock()
+    mock_report.dry_run = False
+    mock_report.summary = {"total": 0}
+    mock_report.records = []
+    mock_agent = MagicMock()
+    mock_agent._current_subagent_run_id = "root"
+    mock_agent.subagents.workspace = Path("/tmp/workspace")
+    mock_agent.subagents.list_runs.return_value = children
+    return DispatchSubagentsTool(mock_agent)._report_payload(mock_report)
+
+
 # LLM: _runner_result returns the minimal successful runner result used by child-ref dispatch tests.
 # 函数用途: 构造带结构化摘要的 runner 结果，供 dispatch record 测试复用。
 def _runner_result() -> SubAgentRunnerResult:
@@ -64,12 +78,18 @@ def test_dispatch_payload_exposes_runner_created_children():
         runner_created_child_count=2,
         runner_created_child_ids=["child-a", "child-b"],
         runner_created_roles=["researcher", "worker"],
+        runner_child_status_counts={"DONE": 1, "PLANNING": 1},
+        runner_unfinished_child_ids=["child-b"],
+        runner_partial_success=True,
     )
     payload = _dispatch_payload_for_record(record)
 
     assert payload["records"][0]["runner_created_child_count"] == 2
     assert payload["records"][0]["runner_created_child_ids"] == ["child-a", "child-b"]
     assert payload["records"][0]["runner_created_roles"] == ["researcher", "worker"]
+    assert payload["records"][0]["runner_child_status_counts"] == {"DONE": 1, "PLANNING": 1}
+    assert payload["records"][0]["runner_unfinished_child_ids"] == ["child-b"]
+    assert payload["records"][0]["runner_partial_success"] is True
     assert "root 创建了 2 个直接孩子" in payload["records"][0]["runner_summary"]
 
 
@@ -95,6 +115,23 @@ def test_dispatch_payload_includes_acceptance_followup():
     assert payload["records"][0]["test_failed"] == 5
     assert payload["records"][0]["followup_action"] == "plan_rescue"
     assert payload["records"][0]["followup_command"].endswith("--take-over-by <agent>")
+
+
+# LLM: test_dispatch_payload_tells_runner_to_continue_unfinished_children covers partial runner waves.
+# 函数用途: runner 内还有 PLANNING/RUNNING 直接孩子时，payload 必须给出机器可读的继续调度动作。
+def test_dispatch_payload_tells_runner_to_continue_unfinished_children():
+    payload = _dispatch_payload_with_direct_children([
+        SimpleNamespace(id="child-a", parent_id="root", status="PLANNING"),
+        SimpleNamespace(id="child-b", parent_id="root", status="RUNNING"),
+        SimpleNamespace(id="child-c", parent_id="root", status="DONE"),
+    ])
+
+    direct = payload["direct_children"]
+    assert direct["needs_more_dispatch"] is True
+    assert direct["unfinished_run_ids"] == ["child-a", "child-b"]
+    assert direct["next_action"] == "continue_dispatch_direct_children"
+    assert direct["suggested_tool_call"]["tool"] == "dispatch_subagents"
+    assert direct["suggested_tool_call"]["execute_runners"] is True
 
 
 # LLM: test_runner_dispatch_record_carries_created_child_summary validates persisted dispatch evidence.
@@ -129,3 +166,39 @@ def test_runner_dispatch_record_carries_created_child_summary():
     assert record.runner_created_child_count == 2
     assert record.runner_created_child_ids == ["child-a", "child-b"]
     assert record.runner_created_roles == ["researcher", "worker"]
+
+
+# LLM: test_runner_dispatch_record_marks_partial_success_children covers timeout-after-schedule E2E facts.
+# 函数用途: root runner 超时但已创建孩子时，dispatch record 要保留部分成功和未完成 child ids。
+def test_runner_dispatch_record_marks_partial_success_children():
+    before = SimpleNamespace(status="PLANNING", verification_status="UNVERIFIED")
+    after = SimpleNamespace(
+        status="TIMEOUT",
+        verification_status="UNVERIFIED",
+        child_ids=["child-a", "child-b"],
+    )
+    result = _runner_result()
+    result.ok = False
+    result.status = "TIMEOUT"
+    agent = MagicMock()
+    agent.subagents.load.side_effect = [
+        SimpleNamespace(role="worker", status="DONE"),
+        SimpleNamespace(role="tester", status="PLANNING"),
+    ]
+    agent.subagents.make_dispatch_record.side_effect = lambda *, params: params
+
+    record = _runner_dispatch_record(
+        RunnerDispatchRecordParams(
+            agent=agent,
+            run_id="root",
+            before=before,
+            after=after,
+            result=result,
+            retry_reason="",
+            execute_runners=True,
+        )
+    )
+
+    assert record.runner_partial_success is True
+    assert record.runner_child_status_counts == {"DONE": 1, "PLANNING": 1}
+    assert record.runner_unfinished_child_ids == ["child-b"]
