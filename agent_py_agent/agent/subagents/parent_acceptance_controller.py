@@ -13,6 +13,7 @@ from typing import Any, ClassVar
 from .execution_executor import TestExecutor
 from .execution_report import load_test_execution_report
 from .models import SubAgentTask
+from .parent_acceptance_empty_report import empty_report_is_inspectable, executable_tests
 from .parsing import _dict_list
 from .utils import _read_json_object
 
@@ -89,8 +90,8 @@ def build_parent_acceptance_decision(
 
     output = _read_json_object(Path(task.output_json))
     tests = _dict_list(output.get("tests", []))
-    executable_tests, ignored_empty_command_count = _executable_tests(tests)
-    refs = _base_refs(task, tests, executable_tests, ignored_empty_command_count)
+    runnable_tests, ignored_empty_command_count = executable_tests(tests)
+    refs = _base_refs(task, tests, runnable_tests, ignored_empty_command_count)
     report_path = Path(task.reports_dir) / "test_execution.json"
     failure_ref = _existing_path(Path(task.reports_dir) / "failure_handoff.json")
     takeover_ref = _existing_path(Path(task.reports_dir) / "takeover_readiness.json")
@@ -98,11 +99,11 @@ def build_parent_acceptance_decision(
     if _task_is_failed(task):
         return _rescue_for_task_failure(task, refs, failure_ref, takeover_ref)
 
-    unsafe_reason = _unsafe_test_reason(executable_tests, workspace_root)
+    unsafe_reason = _unsafe_test_reason(runnable_tests, workspace_root)
     if unsafe_reason:
         return _request_human_for_unsafe_test(task, refs, unsafe_reason)
 
-    if executable_tests and not report_path.exists():
+    if runnable_tests and not report_path.exists():
         return _execute_tests_for_missing_report(task, refs)
 
     if report_path.exists():
@@ -206,6 +207,23 @@ def _decision_from_test_report(params: TestReportDecisionInput) -> ParentAccepta
     report = load_test_execution_report(params.report_path)
     failure_ref, takeover_ref = params.recovery_refs
     test_ref = ParentAcceptanceRef("test_execution", str(params.report_path), "test execution report")
+    tests = _dict_list(params.output.get("tests", []))
+    runnable_tests, _ignored_empty = executable_tests(tests)
+    if empty_report_is_inspectable(
+        task=task,
+        output=params.output,
+        report=report,
+        has_executable_tests=bool(runnable_tests),
+    ):
+        return ParentAcceptanceDecision(
+            run_id=task.id,
+            decision="inspect_only",
+            reason="no executable tests were declared; traceable artifact evidence is ready for parent inspection",
+            risk_level="low",
+            evidence_refs=[*params.refs, test_ref],
+            test_execution_ref=str(params.report_path),
+            next_actions=["run parent acceptance review without treating empty test report as failure"],
+        )
     if report.total_tests > 0 and report.failed == 0:
         patch_review = _patch_review_decision(task, params.output, [*params.refs, test_ref])
         if patch_review is not None:
@@ -300,21 +318,6 @@ def _base_refs(
     if runner_path.exists():
         refs.append(ParentAcceptanceRef("runner_result", str(runner_path), "runner result fact source"))
     return refs
-
-
-# LLM: _executable_tests drops empty generated command placeholders so acceptance does not request humans for noise.
-# 函数用途: 把 tests 中真正可执行的检查筛出来；空 command 只作为被忽略事实进入 refs，不当成高风险命令。
-def _executable_tests(tests: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
-    executable: list[dict[str, Any]] = []
-    ignored_empty_command_count = 0
-    for item in tests:
-        method = str(item.get("validation_method") or "command").strip() or "command"
-        command = str(item.get("command") or "").strip()
-        if method == "command" and not command:
-            ignored_empty_command_count += 1
-            continue
-        executable.append(item)
-    return executable, ignored_empty_command_count
 
 
 # LLM: _task_is_failed maps task terminal risk states into a conservative parent rescue decision.

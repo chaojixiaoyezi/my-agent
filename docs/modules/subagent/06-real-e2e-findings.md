@@ -1471,3 +1471,86 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Follow-up:
     - 需要把“无限 runner 长时间无 response 文件/无工具事件”纳入 due-check，可提示人工诊断或受控取消，而不是静默挂起。
     - 需要用新的 root/coordinator seed 重跑层级 smoke，确认主节点创建子代理、子代理创建孙代理、孙代理创建孙孙代理。
+
+## 2026-05-10 Root/Child/Grandchild/Leaf Guard Smoke
+
+- Test scene:
+  - Case id: `coordinator_seed_20260510_153852`.
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Deliverables proof: `/Users/xiaoyezi/my-claude-code/deliverables/coordinator_seed_20260510_153852/leaf_outputs/proof/proof.txt`.
+  - Model name: `MiniMax-M2.7`.
+- 中文说明：
+  - 这次从新的 root/coordinator seed 开始，外层只启动 root，后续必须由 root/child/leaf 自己推进。
+  - leaf 实际写出了 `proof.txt=coordinator-seed-ok`，说明“真正的 root/coordinator 入口”可用。
+- Finding:
+  - leaf 和 child 已经写出/读回正确产物，但 board 一度把 child/leaf 标成 `BLOCKED / FAILED`。
+  - Root cause: 真实模型输出了 `artifacts`，但没有输出 `evidence_packets`；父级验收需要 traceable evidence chain，因此把 artifact-only 输出当成证据不足。
+  - 中文解释：文件是真的写对了，但“证据包”少了，系统为了严格验收没有直接信模型自述。
+- Fix:
+  - `result_structured.py` 现在会在 runner 有 artifact refs 但没有 evidence packets 时，合成 refs-only artifact evidence packet。
+  - 合成证据只包含 artifact ref 和简短 claim，不读取 artifact 正文，不扩大 token。
+- Verification:
+  - Red test first failed because `evidence_packets` stayed empty.
+  - After the fix:
+    - `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_result_processors_edges.py::test_process_structured_output_synthesizes_artifact_evidence_packet` -> `1 passed`.
+    - Result-processor and acceptance focused regression -> `57 passed`.
+- Status:
+  - Solved for artifact-only successful outputs.
+  - Remaining risk: synthetic evidence is intentionally lower confidence (`0.5`); higher-value tasks should still prefer explicit worker evidence packets or parent tests.
+
+## 2026-05-10 Four-Level Hierarchy Smoke Before Guard
+
+- Test scene:
+  - Case id: `hierarchy4_20260510_154710`.
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Deliverables proof: `/Users/xiaoyezi/my-claude-code/deliverables/hierarchy4_20260510_154710/leaf_outputs/proof/proof.txt`.
+  - Model name: `MiniMax-M2.7`.
+- 中文说明：
+  - 这次测试 4 层：root -> child coordinator -> grandchild coordinator -> leaf。
+  - proof 最终写对了，内容是 `hierarchy4-ok`，但中间暴露了层级职责被拍平的问题。
+- Finding 1: child coordinator created a grandchild coordinator and an extra leaf in the same schedule call.
+  - Symptom: 最终 board 变成 5 个节点，而不是预期 4 个节点。
+  - 中文解释：child 一次性建了“下一层领导”和“叶子工人”，这等于绕过 grandchild，让层级结构变扁。
+  - Fix: `hierarchy_scope_guards.py` 新增 `mixed_coordinator_leaf_children`，同一次 `schedule_child_subagents` 不能同时创建 coordinator/lead 和 leaf/leaf_worker。
+  - Prompt update: runner contract 明确告诉 coordinator：同一次 schedule 不要混建 coordinator 和 leaf；遇到该阻断时先只创建下一层 coordinator。
+- Finding 2: empty test report was treated like a rescue case even when artifact evidence existed.
+  - Symptom: artifact-only root/coordinator 没有可执行 tests，`test_execution.json` total=0 failed=0；父级一度按 rescue 路径处理。
+  - 中文解释：协调节点不一定自己有 pytest；它可能只需要检查孩子和产物 refs。空测试不应该天然等于失败。
+  - Fix: Parent Acceptance Controller now treats `total=0 failed=0` as `inspect_only` when no executable tests were declared and traceable artifact/evidence refs exist.
+- Verification:
+  - `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_parent_acceptance_controller.py::test_parent_acceptance_plan_inspects_empty_report_with_traceable_artifact_evidence` -> `1 passed`.
+  - `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_subagent_hierarchy_scheduler.py::test_hierarchy_schedule_blocks_mixed_coordinator_and_leaf_children` -> `1 passed`.
+  - Combined hierarchy/prompt/acceptance regression -> `45 passed`.
+- Status:
+  - Solved for the two observed control-plane issues.
+  - This run itself was manually accepted after the fix; the next section records the clean guard retest.
+
+## 2026-05-10 Four-Level Hierarchy Guard Retest
+
+- Test scene:
+  - Case id: `hierarchy4_guard_20260510_155814`.
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Runtime config: `/Users/xiaoyezi/my-claude-code/.my-agent-hierarchy4-guard-smoke.yaml`.
+  - Deliverables proof: `/Users/xiaoyezi/my-claude-code/deliverables/hierarchy4_guard_20260510_155814/leaf_outputs/proof/proof.txt`.
+  - Model name: `MiniMax-M2.7`.
+  - Real execution mode: outer controller only spawned and ran root coordinator; all lower nodes were created by their direct parent.
+- 中文说明：
+  - 这次严格按用户要求测试：外层只启动 root；root 创建 child；child 创建 grandchild；grandchild 创建 leaf；leaf 才能写最终文件。
+  - 这是为了验证以后大型树不能由主控脚本偷懒直接批量创建叶子节点。
+- Observed hierarchy:
+  - Root: `subagent-1778399922-67cd2afa`.
+  - Child coordinator: `subagent-1778399946-8df2b558`.
+  - Grandchild coordinator: `subagent-1778399990-28fd53a5`.
+  - Leaf: `subagent-1778400040-1f584546`.
+- Final result:
+  - Board summary: `DONE=4`, `VERIFIED=4`, `hot=0`.
+  - Proof file content: `hierarchy4-guard-ok`.
+  - No extra sibling leaf was created beside the grandchild coordinator.
+  - Root final acceptance decision: `inspect_only`, then explicit `subagents-acceptance-plan <root> --apply` accepted it.
+- Trace observations:
+  - `debug_traces/subagent_trace.jsonl` showed each `task_created` event came from the direct parent.
+  - The leaf used `write_file` and `read_file`; upper coordinators stayed in scheduling/read/board roles.
+  - One coordinator tried a few invalid `read_artifact` calls before using board/file refs; this did not break the run, but suggests future prompt/tool docs can make artifact refs easier to consume.
+- Status:
+  - Passed for the 4-level strict hierarchy smoke.
+  - Remaining gap: next real E2E should scale the same rule to larger trees, especially 1 root / 4 child / 16 grandchild / 48 great-grandchild leaf and the shopping-site project scenario.
