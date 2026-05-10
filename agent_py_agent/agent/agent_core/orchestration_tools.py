@@ -17,7 +17,11 @@ from ..subagents.services.base import CreateRunParams, _extract_write_dirs
 from ..tools import BaseTool, ToolExecutionResult
 from .coordinator_seed_tools import explicit_root_allowed_tools
 from .hierarchy_tools import ScheduleChildSubagentsTool
-from .orchestration_board_payload import board_actionable_run_ids, clip_board_text
+from .orchestration_board_payload import (
+    board_actionable_run_ids,
+    board_status_filter,
+    clip_board_text,
+)
 from .orchestration_dispatch_tool import DispatchSubagentsTool
 from .orchestration_tool_specs import (
     build_create_subagents_spec,
@@ -203,7 +207,7 @@ class SubagentBoardTool(BaseTool):
     # 函数用途: 推进execute的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
         limit = _positive_int(params.get("limit"), default=10)
-        status_filter = str(params.get("status") or "").strip().upper()
+        status_filter = board_status_filter(params.get("status"))
         board = self.agent.subagents.write_board(
             options=SubAgentBoardOptions(recent_limit=max(1, limit)),
         )

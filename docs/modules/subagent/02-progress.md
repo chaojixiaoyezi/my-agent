@@ -391,3 +391,10 @@
 - 已修正：`read_artifact` 仍以 `tool_outputs/index.jsonl` 为唯一事实源，但现在能用唯一 artifact 文件名修复“路径前缀抄错”的情况。
 - 已修正：`dispatch_subagents` 把 `runner_selection_recovery` 放进顶层 payload；`subagent_board` 增加 `actionable_run_ids` 并截断长 goal，让大报告被外置时模型仍先看到该用哪些 run id。
 - 下一步：用干净 R9 复测 cart 分支是否能被 path-drift guard 纠回 `/build`，然后继续做 producer/quality 阶段依赖和静态购物流程验收。
+
+## 2026-05-11 Stage7 shopping E2E R9 board/recovery ergonomics
+- 中文说明：R9 root 正确创建了 4 个一级 coordinator，但随后使用模型猜出的旧 run id 调度失败；dispatch payload 已给出正确 ids，但 root 又调用 `subagent_board(status="ALL")`，旧逻辑把 ALL 当成真实状态过滤，返回 0 条，导致它继续围绕错误 id 读不存在文件。
+- 已修正：`subagent_board` 现在把 `status=ALL/*/ANY` 当成不过滤，保留全部看板条目和 `actionable_run_ids`。
+- 已修正：`runner_selection_recovery` 顶层 payload 新增 `valid_run_ids`，从 evidence task refs 提取机器可读 run id，模型无需从中文 message 里解析。
+- 设计边界：系统仍只提示正确 id，不自动替模型重写并执行 dispatch；这样避免隐形跑错孩子。
+- 下一步：用干净 R10 复测 root 是否能根据 `valid_run_ids` / board `actionable_run_ids` 重试正确 child id。

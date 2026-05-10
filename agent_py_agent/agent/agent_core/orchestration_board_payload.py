@@ -16,6 +16,15 @@ def board_actionable_run_ids(items) -> dict[str, list[str]]:
     return {key: value for key, value in buckets.items() if value}
 
 
+# LLM: board_status_filter normalizes model-friendly aliases before filtering board rows.
+# 函数用途: 把空值、ALL、* 这类“查看全部”的自然写法归一成不过滤，避免模型误把看板过滤空。
+def board_status_filter(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if text in {"", "ALL", "*", "ANY"}:
+        return ""
+    return text
+
+
 # LLM: clip_board_text keeps subagent_board useful without flooding later model prompts.
 # 函数用途: 截断看板中的长 goal，完整内容仍保留在 task_dir 或 context bundle 里，需要时再读。
 def clip_board_text(value: str, *, limit: int = 260) -> str:
