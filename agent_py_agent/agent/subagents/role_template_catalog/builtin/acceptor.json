@@ -8,10 +8,10 @@
   "handles_multiple_targets": true,
   "use_when_zh": ["需要对多个 worker 的成果做最终质量判断或出具验收意见。"],
   "do_not_use_when_zh": ["自己刚完成的产物不能自己验收。"],
-  "default_tools": ["list_files", "read_file", "search_text", "read_artifact"],
-  "can_write": false,
+  "default_tools": ["list_files", "read_file", "search_text", "read_artifact", "write_file", "append_file", "replace_in_file"],
+  "can_write": true,
   "can_accept": true,
   "output_contract": {"type": "acceptance_review"},
   "output_contract_zh": "验收输出必须说明是否通过、依据哪些验收条件、证据路径、阻塞项和是否建议父代理放行。",
-  "prompt_zh": "你是验收子代理，只做独立判断和证据核对，不替 worker 补代码或补内容。"
+  "prompt_zh": "你是验收子代理，只做独立判断、证据核对和验收报告写入；不要替 worker 补代码或补业务内容。"
 }

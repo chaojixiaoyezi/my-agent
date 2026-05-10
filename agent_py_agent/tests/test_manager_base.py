@@ -176,6 +176,18 @@ class TestExtractWriteDirs:
         result = _extract_write_dirs(goal)
         assert len(result) == 1
 
+    def test_ignores_slash_separated_deliverable_labels(self):
+        """requirements/research-brief 这类标签串不是 Unix 绝对路径。"""
+        from agent_py_agent.agent.subagents.manager_base import _extract_write_dirs
+
+        goal = (
+            "deliverables: requirements/research-brief/implementation/README/"
+            "bug-report/test-report/acceptance-verdict"
+        )
+        result = _extract_write_dirs(goal)
+
+        assert result == []
+
 
 class TestBuildWorkOrderPaths:
     """测试 _build_work_order_paths() 函数。"""

@@ -28,8 +28,8 @@ def test_runner_prompt_tells_leaf_to_defer_command_execution_to_parent():
     assert "从 working_dir 运行能导入被测模块" in prompt
 
 
-def test_runner_prompt_tells_coordinator_to_schedule_leaf_before_requesting_write_tool():
-    """coordinator 没有写工具时，应先创建 leaf，而不是上抛 write_file 缺口。"""
+def test_runner_prompt_tells_coordinator_to_write_reports_but_delegate_deliverables():
+    """coordinator 可以写协调报告，但最终业务产物仍要派给 worker/writer。"""
     context = SubAgentExecutionContext(
         run_id="child-1",
         generated_at=1.0,
@@ -44,9 +44,9 @@ def test_runner_prompt_tells_coordinator_to_schedule_leaf_before_requesting_writ
     prompt = _build_subagent_runner_prompt(context)
 
     assert "coordinator" in prompt
-    assert "先使用 schedule_child_subagents 创建 leaf_worker" in prompt
-    assert "不要因为自己没有 write_file 就提交 capability_request" in prompt
-    assert "coordinator/lead 子节点不要授予 write_file" in prompt
+    assert "可以在自己的 task_dir 写计划、证据和协调报告" in prompt
+    assert "最终产物仍应交给 worker/writer" in prompt
+    assert "不要让 worker/writer 代写 coordinator 自己的协调证据" in prompt
     assert "原样传递父级指定的文件名" in prompt
     assert "mixed_coordinator_leaf_children" in prompt
     assert "同一次" in prompt
@@ -54,3 +54,44 @@ def test_runner_prompt_tells_coordinator_to_schedule_leaf_before_requesting_writ
     assert "可用角色模板" in prompt
     assert "bug_finder" in prompt
     assert "找茬子代理" in prompt
+    assert "模板详情" in prompt
+    assert "你是找茬子代理" in prompt
+
+
+def test_runner_prompt_keeps_role_template_details_out_of_leaf_prompt():
+    """非派工节点不用加载完整角色模板细节，避免每个 leaf prompt 变厚。"""
+    context = SubAgentExecutionContext(
+        run_id="leaf-compact",
+        generated_at=1.0,
+        goal="写一个 proof.txt",
+        thought="",
+        plan=[],
+        role="leaf_worker",
+        allowed_tools=["write_file", "read_file"],
+        acceptance_checks=["proof.txt 必须存在"],
+    )
+
+    prompt = _build_subagent_runner_prompt(context)
+
+    assert "模板详情" not in prompt
+    assert "你是找茬子代理" not in prompt
+
+
+def test_runner_prompt_loads_current_role_template_for_worker():
+    """执行型子代理应拿到自己的角色提示片段，但不加载其他角色全集。"""
+    context = SubAgentExecutionContext(
+        run_id="worker-1",
+        generated_at=1.0,
+        goal="实现一个小功能",
+        thought="",
+        plan=[],
+        role="worker",
+        allowed_tools=["write_file", "read_file"],
+        acceptance_checks=["必须输出证据"],
+    )
+
+    prompt = _build_subagent_runner_prompt(context)
+
+    assert "当前角色模板详情" in prompt
+    assert "你是执行子代理" in prompt
+    assert "你是找茬子代理" not in prompt

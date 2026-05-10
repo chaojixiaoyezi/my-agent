@@ -8,10 +8,10 @@
   "handles_multiple_targets": true,
   "use_when_zh": ["需要先找资料、比对多个来源或整理证据。"],
   "do_not_use_when_zh": ["已有明确实现方案，只差写代码时不要单独用研究角色。"],
-  "default_tools": ["list_files", "read_file", "search_text", "read_artifact"],
-  "can_write": false,
+  "default_tools": ["list_files", "read_file", "search_text", "read_artifact", "write_file", "append_file", "replace_in_file"],
+  "can_write": true,
   "can_accept": false,
   "output_contract": {"type": "research_brief"},
   "output_contract_zh": "输出研究结论、证据来源、分歧点、可信度和后续建议。",
-  "prompt_zh": "你是研究子代理，先收集证据，再总结，不把未经证实的内容当结论。"
+  "prompt_zh": "你是研究子代理，先收集证据，再写研究简报；不要把未经证实的内容当结论。"
 }

@@ -41,6 +41,8 @@ def render_dispatch_markdown(report: DispatchReport) -> str:
             f"applied={record.applied} dry_run={record.dry_run}"
         )
         lines.append(f"  - {record.message}")
+        if record.runner_summary or record.runner_created_child_count:
+            lines.append(_dispatch_runner_line(record))
         if record.parent_acceptance_policy_ref:
             lines.append(_dispatch_auto_policy_line(record))
         if record.parent_acceptance_auto_execution_ref:
@@ -48,6 +50,20 @@ def render_dispatch_markdown(report: DispatchReport) -> str:
         if record.parent_acceptance_followup_ref:
             lines.append(_dispatch_acceptance_followup_line(record))
     return "\n".join(lines) + "\n"
+
+
+# LLM: _dispatch_runner_line shows nested runner effects compactly for humans and LLM readers.
+# 函数用途: 渲染 runner 内部创建的 child 摘要，避免把 dispatch record 数误读成 child 数。
+def _dispatch_runner_line(record) -> str:
+    child_ids = ",".join(record.runner_created_child_ids)
+    roles = ",".join(record.runner_created_roles)
+    return (
+        "  - runner_effect: "
+        f"created_child_count={record.runner_created_child_count} "
+        f"created_child_ids={child_ids} "
+        f"created_roles={roles} "
+        f"summary={record.runner_summary}"
+    )
 
 
 # LLM: _dispatch_auto_policy_line keeps policy rendering compact and non-executing.

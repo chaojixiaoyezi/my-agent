@@ -13,7 +13,7 @@ import json
 from dataclasses import asdict
 
 from ..subagent import SubAgentExecutionContext
-from ..subagents.role_templates import role_template_guide_text
+from ..subagents.role_templates import role_template_detail_text, role_template_index_text
 
 _SUBAGENT_RESULT_TEMPLATE = (
     "[SUBAGENT_RESULT]\n"
@@ -91,22 +91,34 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "- 写代码和测试后，必须逐条对照验收条件做静态自检，确保实现、测试、README 三者互相一致。",
         "- 写 Python 测试时必须保证从 working_dir 运行能导入被测模块；优先把测试文件和模块放同一目录，或显式处理 import path。",
     ]
+    lines.extend(_current_role_template_lines(context))
     if "leaf" in str(context.role or "").lower():
         lines.append("- 叶子节点重点是交付产物和测试文件；父级验收器负责运行命令、判定通过和触发 rescue。")
     if _is_coordinator_context(context):
-        lines.append("可用角色模板：")
-        lines.extend(f"  {line}" for line in role_template_guide_text().splitlines())
+        lines.append("可用角色模板索引：")
+        lines.extend(f"  {line}" for line in role_template_index_text().splitlines())
+        lines.append("模板详情：")
+        lines.extend(f"  {line}" for line in role_template_detail_text().splitlines())
         lines.append(
-            "- coordinator/lead 节点不直接写产物；目标要求写文件且自己没有 write_file 时，"
-            "先使用 schedule_child_subagents 创建 leaf_worker，不要因为自己没有 write_file 就提交 capability_request。"
+            "- coordinator/lead 节点可以在自己的 task_dir 写计划、证据和协调报告；"
+            "业务代码、页面、文档正文等最终产物仍应交给 worker/writer。"
         )
-        lines.append("- schedule_child_subagents 创建 coordinator/lead 子节点不要授予 write_file；只有 leaf_worker 才能拿写文件工具。")
+        lines.append("- 不要让 worker/writer 代写 coordinator 自己的协调证据；需要共享时引用 artifact_refs/evidence_refs。")
         lines.append("- 创建 child/leaf 时必须原样传递父级指定的文件名、目录和验收条件，不要把 solution.py 改成别的模块名。")
         lines.append("- 同一次 schedule_child_subagents 不要混建 coordinator 和 leaf_worker；如返回 mixed_coordinator_leaf_children，先只创建下一层 coordinator。")
         lines.append("- 如果 schedule_child_subagents 返回 domain_mismatch 或 forbidden_child_scope，必须修正 child 领域后重试，不能宣称完成。")
         lines.append("- 创建 leaf 后使用 dispatch_subagents 推进直接 child，并汇总 leaf 的产物 refs。")
         lines.append("- dispatch_subagents 返回 child test_failed 或 followup_action=plan_rescue 时，不要宣称完成；先汇报失败 refs 或安排修复。")
     return lines
+
+
+# LLM: _current_role_template_lines gives each runner its own role prompt without loading all templates.
+# 函数用途: 只展开当前角色的模板详情；普通 worker/tester 等能拿到专属提示，leaf_worker 等无模板角色保持精简。
+def _current_role_template_lines(context: SubAgentExecutionContext) -> list[str]:
+    detail = role_template_detail_text(roles=[str(context.role or "")]).strip()
+    if not detail or _is_coordinator_context(context):
+        return []
+    return ["当前角色模板详情：", *[f"  {line}" for line in detail.splitlines()]]
 
 
 # LLM: _is_coordinator_context identifies runner roles that should delegate file writing to leaves.

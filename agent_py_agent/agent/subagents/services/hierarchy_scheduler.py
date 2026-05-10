@@ -22,7 +22,6 @@ _DEFAULT_LEAF_CODING_TOOLS = [
     "replace_in_file",
 ]
 _LEAF_ORCHESTRATION_TOOLS = {"schedule_child_subagents", "dispatch_subagents", "subagent_board"}
-_COORDINATOR_WRITE_TOOLS = {"write_file", "append_file", "replace_in_file"}
 _TOOL_NAME_ALIASES = {
     "append": "append_file",
     "list": "list_files",
@@ -217,8 +216,8 @@ def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) 
     )
 
 
-# LLM: _scheduled_child_role repairs common model slips while preserving concrete leaf write intent.
-# 函数用途: 带层级调度权限的 child 如果是协调任务则按 depth 推断；若目标明确写产物则归一为 leaf_worker。
+# LLM: _scheduled_child_role repairs common model slips while preserving concrete product-write intent.
+# 函数用途: 带层级调度权限的 child 即使有报告写入工具，也按协调任务推断；只有明确写业务产物才归一为 leaf_worker。
 def _scheduled_child_role(
     parent: SubAgentTask,
     spec: HierarchyChildSpec,
@@ -233,8 +232,6 @@ def _scheduled_child_role(
         return "leaf_worker"
     tools = set(spec.allowed_tools or [])
     if "schedule_child_subagents" not in tools and "dispatch_subagents" not in tools:
-        return role
-    if "write_file" in tools or "append_file" in tools or "replace_in_file" in tools:
         return role
     depth = int(parent.depth or 0) + 1
     if depth == 1:
@@ -287,10 +284,10 @@ def _leaf_write_tools(tools: list[str]) -> list[str]:
     return list(dict.fromkeys(tool for tool in tools if tool not in _LEAF_ORCHESTRATION_TOOLS))
 
 
-# LLM: _coordinator_tools prevents coordinators from bypassing their leaf workers.
-# 函数用途: coordinator/lead 只保留调度、看板和读取能力；即使模型显式传 write_file 也剥掉。
+# LLM: _coordinator_tools preserves report-writing tools but keeps this hook for orchestration policy.
+# 函数用途: coordinator/lead 可以写自己的计划/证据报告；业务产物仍交给 worker/writer 和写入边界控制。
 def _coordinator_tools(tools: list[str]) -> list[str]:
-    return list(dict.fromkeys(tool for tool in tools if tool not in _COORDINATOR_WRITE_TOOLS))
+    return list(dict.fromkeys(tools))
 
 
 # LLM: _canonical_tool_name maps common model aliases to real ToolRegistry names before runner prompts see them.

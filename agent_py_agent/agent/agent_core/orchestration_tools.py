@@ -39,6 +39,7 @@ from .orchestration_tool_specs import (
 )
 from .orchestration_write_guard import external_write_target_error
 from .parameters import _bool_param, _non_negative_int, _positive_int, _string_list
+from .spawn_role_seed import is_explicit_root_role
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -84,9 +85,11 @@ def _subagent_allowed_tools(params: dict[str, object]) -> list[str] | None:
     preset = str(params.get("tool_preset") or "read_only").strip().lower()
     if preset == "coding":
         return list(CODING_SUBAGENT_TOOLS)
+    if preset == "read_only":
+        return list(READ_ONLY_SUBAGENT_TOOLS)
     if preset == "none":
         return []
-    return list(READ_ONLY_SUBAGENT_TOOLS)
+    return None
 
 
 # LLM: _create_run_params 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -98,13 +101,16 @@ def _create_run_params(
     allowed_tools: list[str] | None,
 ):
     workflow_mode = _tool_workflow_mode(raw_params.get("workflow_mode"), agent.config.subagent_workflow_mode)
+    role = str(raw_params.get("role") or "worker").strip()
+    if is_explicit_root_role(role):
+        workflow_mode = "off"
     extra_write_roots = _merged_extra_write_roots(raw_params, goal)
     return CreateRunParams(
         goal=goal,
         thought=str(raw_params.get("thought") or "根据父代理派工执行，并保留可验收证据。").strip(),
         plan=_string_list(raw_params.get("plan")) or ["理解目标", "执行任务", "产出证据", "等待父代理验收"],
         agent_name=str(raw_params.get("agent_name") or "general").strip(),
-        role=str(raw_params.get("role") or "worker").strip(),
+        role=role,
         allowed_tools=allowed_tools,
         owner=str(raw_params.get("owner") or "").strip(),
         supervisor=str(raw_params.get("supervisor") or "parent").strip(),

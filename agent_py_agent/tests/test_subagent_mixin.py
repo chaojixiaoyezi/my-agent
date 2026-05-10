@@ -112,7 +112,7 @@ class TestSubagentMixinSpawn:
         assert create_params.root_id == ""
         assert "schedule_child_subagents" in create_params.allowed_tools
         assert "dispatch_subagents" in create_params.allowed_tools
-        assert "write_file" not in create_params.allowed_tools
+        assert "write_file" in create_params.allowed_tools
 
     def test_configured_subagent_allowed_tools_empty_means_automatic(self) -> None:
         """测试配置归一化：空字符串、空列表和缺省值都表示自动工具策略。"""

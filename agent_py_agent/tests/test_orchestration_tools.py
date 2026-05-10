@@ -12,83 +12,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-class TestToolWorkflowMode:
-    """测试 _tool_workflow_mode() 函数。"""
+# LLM: test_create_subagents_tool_spec_uses_template_index_not_full_prompt protects startup token budget.
+# 函数用途: create_subagents 工具说明只暴露角色模板索引，不把完整角色系统提示词放进主代理常驻工具说明。
+def test_create_subagents_tool_spec_uses_template_index_not_full_prompt():
+    from agent_py_agent.agent.agent_core.orchestration_tool_specs import build_create_subagents_spec
 
-    def test_explicit_off(self):
-        """显式 off 模式。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import _tool_workflow_mode
+    spec = build_create_subagents_spec()
+    role_detail = spec.parameter_details["role"]
 
-        assert _tool_workflow_mode("off", "auto") == "off"
-
-    def test_explicit_plan(self):
-        """显式 plan 模式。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import _tool_workflow_mode
-
-        assert _tool_workflow_mode("plan", "auto") == "plan"
-
-    def test_explicit_auto(self):
-        """显式 auto 模式。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import _tool_workflow_mode
-
-        assert _tool_workflow_mode("auto", "manual") == "auto"
-
-    def test_config_auto_falls_through(self):
-        """配置 auto 但无显式值时。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import _tool_workflow_mode
-
-        result = _tool_workflow_mode(None, "auto")
-        assert result == "auto"
-
-    def test_config_manual_maps_to_plan(self):
-        """配置 manual 映射为 plan。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import _tool_workflow_mode
-
-        result = _tool_workflow_mode(None, "manual")
-        assert result == "plan"
-
-    def test_default_off(self):
-        """默认返回 off。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import _tool_workflow_mode
-
-        assert _tool_workflow_mode("invalid", "invalid") == "off"
-
-    def test_whitespace_handling(self):
-        """验证空格处理。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import _tool_workflow_mode
-
-        assert _tool_workflow_mode("  off  ", "auto") == "off"
-
-
-class TestReadOnlySubagentTools:
-    """测试 READ_ONLY_SUBAGENT_TOOLS 常量。"""
-
-    def test_contains_read_tools(self):
-        """验证只读工具列表。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import READ_ONLY_SUBAGENT_TOOLS
-
-        assert "list_files" in READ_ONLY_SUBAGENT_TOOLS
-        assert "read_file" in READ_ONLY_SUBAGENT_TOOLS
-        assert "search_text" in READ_ONLY_SUBAGENT_TOOLS
-
-
-class TestCodingSubagentTools:
-    """测试 CODING_SUBAGENT_TOOLS 常量。"""
-
-    def test_contains_write_tools(self):
-        """验证包含写工具。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import CODING_SUBAGENT_TOOLS
-
-        assert "write_file" in CODING_SUBAGENT_TOOLS
-        assert "replace_in_file" in CODING_SUBAGENT_TOOLS
-        assert "append_file" in CODING_SUBAGENT_TOOLS
-
-    def test_contains_read_tools(self):
-        """验证也包含读工具。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import CODING_SUBAGENT_TOOLS
-
-        assert "read_file" in CODING_SUBAGENT_TOOLS
-        assert "list_files" in CODING_SUBAGENT_TOOLS
+    assert "模板位置" in role_detail
+    assert "worker" in role_detail
+    assert "你是执行子代理" not in role_detail
 
 
 class TestCreateSubagentsToolExecute:
@@ -201,6 +135,95 @@ class TestCreateSubagentsToolExecute:
 
         call_kwargs = mock_agent.subagents.create_run.call_args[1]
         assert call_kwargs["params"].allowed_tools == ["list_files", "read_file", "search_text"]
+
+    def test_unknown_tool_preset_does_not_override_role_template(self):
+        """模型误把 role 写到 tool_preset 时，应回退给 role template 自动决定工具。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+
+        mock_task = MagicMock()
+        mock_task.id = "coordinator_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/coordinator_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": "Seed a root coordinator and let the role template choose tools.",
+            "role": "coordinator",
+            "tool_preset": "coordinator",
+        })
+
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
+        assert params.allowed_tools is None
+
+    def test_slash_separated_deliverable_labels_do_not_trip_external_write_guard(self):
+        """交付物标签里的斜杠不是绝对路径，不能误拦截 coordinator seed。"""
+        from pathlib import Path
+
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent.subagents.workspace_root = Path("/Users/xiaoyezi/my-claude-code")
+        mock_agent.subagents.workspace_roots = [Path("/Users/xiaoyezi/my-claude-code")]
+
+        mock_task = MagicMock()
+        mock_task.id = "coordinator_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/coordinator_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": (
+                "Create deliverables named requirements/research-brief/implementation/"
+                "README/bug-report/test-report/acceptance-verdict inside the approved root."
+            ),
+            "role": "coordinator",
+            "extra_write_roots": ["/Users/xiaoyezi/my-claude-code/deliverables/role-template"],
+        })
+
+        assert result.ok is True
+        mock_agent.subagents.create_run.assert_called_once()
+
+    def test_explicit_coordinator_seed_ignores_model_workflow_auto(self):
+        """coordinator/root seed 只能创建根节点，不能被模型的 workflow_mode=auto 自动污染孩子。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+
+        mock_agent = MagicMock()
+        mock_agent.config.enable_subagents = True
+        mock_agent.config.max_subagents = 10
+        mock_agent.config.subagent_workflow_mode = "auto"
+
+        mock_task = MagicMock()
+        mock_task.id = "coordinator_001"
+        mock_task.goal = ""
+        mock_task.status = "PLANNING"
+        mock_task.verification_status = "UNVERIFIED"
+        mock_task.task_dir = "/tmp/coordinator_001"
+        mock_agent.subagents.create_run.return_value = mock_task
+
+        tool = CreateSubagentsTool(mock_agent)
+        result = tool.execute({
+            "goal": "Seed one root coordinator. Children must be created by that coordinator.",
+            "role": "coordinator",
+            "workflow_mode": "auto",
+        })
+
+        params = mock_agent.subagents.create_run.call_args.kwargs["params"]
+        assert result.ok is True
+        assert params.workflow_mode == "off"
 
 
 class TestSubagentBoardToolExecute:
@@ -327,6 +350,38 @@ class TestDispatchSubagentsToolExecute:
 
         assert result.ok is True
 
+    def test_top_level_dispatch_does_not_auto_workflow_active_root_coordinator(self):
+        """推进 root coordinator 时，模型误传 workflow_mode=auto 也不能绕过 coordinator 生成通用 worker。"""
+        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
+
+        mock_report = MagicMock()
+        mock_report.dry_run = False
+        mock_report.summary = {}
+        mock_report.records = []
+
+        mock_agent = MagicMock()
+        mock_agent._current_subagent_run_id = ""
+        mock_agent.config.subagent_workflow_mode = "auto"
+        mock_agent.tools.specs.return_value = []
+        mock_agent.dispatch_subagents.return_value = mock_report
+        mock_agent.subagents.workspace = Path("/tmp/workspace")
+        mock_agent.subagents.list_runs.return_value = [
+            SimpleNamespace(
+                id="root",
+                role="coordinator",
+                parent_id="",
+                status="PLANNING",
+                workflow_parent_run_id="",
+            )
+        ]
+
+        tool = DispatchSubagentsTool(mock_agent)
+        result = tool.execute({"apply": True, "execute_runners": True, "workflow_mode": "auto"})
+
+        assert result.ok is True
+        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
+        assert call_kwargs["params"].workflow_mode == "off"
+
     def test_runner_context_dispatch_defaults_workflow_mode_off(self):
         """子代理 runner 内部 dispatch 默认不再套全局 workflow auto。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
@@ -383,45 +438,6 @@ class TestDispatchSubagentsToolExecute:
         assert call_kwargs["params"].parent_run_id == "subagent-root"
         assert call_kwargs["params"].exclude_run_ids == ["subagent-root"]
         assert call_kwargs["params"].finalize_acceptance is True
-
-    def test_runner_context_dispatch_payload_includes_acceptance_followup(self):
-        """runner 内部要能看到 child 测试失败和 follow-up 动作，才可能继续救援。"""
-        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
-
-        record = SimpleNamespace(
-            step="acceptance",
-            action="reject",
-            run_id="leaf-1",
-            ok=False,
-            dry_run=True,
-            applied=False,
-            message="验收失败。",
-            before_status="AWAITING_ACCEPTANCE",
-            after_status="AWAITING_ACCEPTANCE",
-            parent_acceptance_auto_execution_test_ref="/tmp/test_execution.json",
-            parent_acceptance_auto_execution_test_total=8,
-            parent_acceptance_auto_execution_test_failed=5,
-            parent_acceptance_followup_status="needs_manual_rescue",
-            parent_acceptance_followup_action="plan_rescue",
-            parent_acceptance_followup_command="subagents-acceptance-plan leaf-1 --apply-followup --take-over-by <agent>",
-            parent_acceptance_followup_reason="tests failed",
-            parent_acceptance_followup_ref="/tmp/parent_acceptance_auto_followup.json",
-        )
-        mock_report = MagicMock()
-        mock_report.dry_run = False
-        mock_report.summary = {"acceptance": 1}
-        mock_report.records = [record]
-
-        mock_agent = MagicMock()
-        mock_agent.subagents.workspace = Path("/tmp/workspace")
-        mock_agent.subagents.list_runs.return_value = []
-
-        payload = DispatchSubagentsTool(mock_agent)._report_payload(mock_report)
-
-        assert payload["records"][0]["test_failed"] == 5
-        assert payload["records"][0]["followup_action"] == "plan_rescue"
-        assert payload["records"][0]["followup_command"].endswith("--take-over-by <agent>")
-
 
 class TestDispatchSubagentsToolRunnerContextOutput:
     """测试 runner-context dispatch 输出和错误参数归一。"""

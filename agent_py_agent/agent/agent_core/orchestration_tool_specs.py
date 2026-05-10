@@ -3,10 +3,9 @@
 
 from __future__ import annotations
 
-from ..subagents.role_templates import role_template_guide_text
+from ..subagents.role_templates import role_template_index_text
 from ..tools import ToolSpec
 
-_ROLE_TEMPLATE_GUIDE = role_template_guide_text()
 _CREATE_USE_CASES = [
     "用户要求拆分任务、派多个子代理、开工单或让子代理分别处理事项",
     "需要把聊天里的计划落盘，后续由 dispatch_subagents 推进和验收",
@@ -26,12 +25,12 @@ _CREATE_PARAMETERS = {
 _CREATE_PARAMETER_DETAILS = {
     "goal": "写清楚子代理要交付什么，不要只写一个空泛标题。",
     "count": "例如 3 表示创建 3 个并列子任务；如果任务需要人工精细拆分，可以多次调用本工具。",
-    "role": "优先用模板角色，而不是临时造小角色。可用角色模板：\n" + _ROLE_TEMPLATE_GUIDE,
+    "role": "优先用模板角色，而不是临时造小角色。可用角色模板索引：\n{role_template_index}",
     "tool_preset": "省略时自动：由 role template、任务目标和调度器决定工具；`read_only` 只允许 list/read/search；`coding` 允许读写和替换文件；`none` 不授予工具。",
     "allowed_tools": "一般省略。只有受限环境才显式写 JSON 数组，例如 [\"read_file\", \"write_file\"]。",
     "acceptance_checks": "JSON 数组或多行文本，说明父代理后续怎样判断任务完成。",
     "plan": "JSON 数组或多行文本，给子代理的初始执行步骤。",
-    "workflow_mode": "默认跟随配置：auto->auto，manual->plan，off->off。只支持 off/plan/auto；未知值保守按 off 处理。",
+    "workflow_mode": "默认跟随配置：auto->auto，manual->plan，off->off。显式 coordinator/root/lead 入口会强制 off，孩子必须由该 coordinator 自己创建。",
     "extra_write_roots": "JSON 数组，例如 [\"C:/Users/you/Desktop/work\"]；只给本次子代理任务增加写入边界。",
 }
 _CREATE_EXAMPLES = [
@@ -88,7 +87,7 @@ _SCHEDULE_CHILD_PARAMETERS = {
 _SCHEDULE_CHILD_PARAMETER_DETAILS = {
     "children": (
         "JSON 数组。每项可含 role、agent_name、goal、plan、allowed_tools、allowed_skills、"
-        "acceptance_checks、extra_write_roots。优先从这些角色模板里选 role：\n" + _ROLE_TEMPLATE_GUIDE
+        "acceptance_checks、extra_write_roots。优先从这些角色模板索引里选 role：\n{role_template_index}"
     ),
     "apply": "runner 内省略时默认 true；显式 false 只返回会创建什么，适合先检查。",
     "max_depth": "用来避免子代理无限递归创建下级节点。",
@@ -121,7 +120,7 @@ def build_create_subagents_spec() -> ToolSpec:
         avoid_when=["只是解释思路、不需要真正创建任务时，不要调用；先直接回答即可"],
         keywords=_CREATE_KEYWORDS,
         parameters=_CREATE_PARAMETERS,
-        parameter_details=_CREATE_PARAMETER_DETAILS,
+        parameter_details=_with_role_template_index(_CREATE_PARAMETER_DETAILS),
         examples=_CREATE_EXAMPLES,
     )
 
@@ -171,6 +170,15 @@ def build_schedule_child_subagents_spec() -> ToolSpec:
         avoid_when=["顶层主代理第一次派工时继续用 create_subagents；没有当前 runner 上下文时不要调用"],
         keywords=_SCHEDULE_CHILD_KEYWORDS,
         parameters=_SCHEDULE_CHILD_PARAMETERS,
-        parameter_details=_SCHEDULE_CHILD_PARAMETER_DETAILS,
+        parameter_details=_with_role_template_index(_SCHEDULE_CHILD_PARAMETER_DETAILS),
         examples=_SCHEDULE_CHILD_EXAMPLES,
     )
+
+
+# LLM: _with_role_template_index injects lightweight catalog metadata only when building specs.
+# 函数用途: 运行时生成工具规格时插入模板索引，避免模块 import 阶段加载完整模板详情。
+def _with_role_template_index(details: dict[str, str]) -> dict[str, str]:
+    return {
+        key: value.replace("{role_template_index}", role_template_index_text())
+        for key, value in details.items()
+    }

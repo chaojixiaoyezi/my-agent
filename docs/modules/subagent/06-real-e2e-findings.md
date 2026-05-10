@@ -84,7 +84,7 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Finding 22：child run 没继承用户批准的产物目录。后来下层默认继承父节点的 `allowed_write_roots`，但不会继承父工单目录，避免污染父节点内部文件。
 - Finding 23：嵌套 dispatch 曾意外生成 workflow worker。runner 里没显式指定 workflow 时，现在默认 `off`，只推进已有孩子，不自动扩任务树。
 - Finding 24：嵌套 dispatch 曾选中正在运行的父节点自己，导致递归跑自己。现在 runner 内 dispatch 默认只选当前节点的直接 child，并排除当前 runner id。
-- Finding 25：coordinator 如果拿到写工具，可能自己代替 leaf 写产物。测试模板改成 coordinator 只有调度/读工具，只有 leaf 有写工具。
+- Finding 25：coordinator 如果拿到“业务产物写入”职责，可能自己代替 leaf 写产物。现在口径改成 coordinator 可以写自己的计划/证据/协调报告，但最终业务产物仍必须交给 leaf/worker/writer。
 - Finding 26：模型把 `max_depth=1` 理解成“再创建一层”，系统原来按绝对深度拦住了。现在在 runner context 下会把这种值归一化成“允许多一层”。
 - Successful Smoke：小烟测已通过。外层只启动 root，root 创建 child，child 创建 leaf，只有 leaf 写 `proof.txt=hierarchy-ok`；这条证明主节点单入口原则在小链路上能跑通。
 
@@ -92,7 +92,7 @@ This document is append-only. Record every real subagent E2E issue found during 
 
 - Finding 27：父节点重复 dispatch 曾被 one-shot guard 阻断。现在只有创建类工具 one-shot，dispatch/board 这种进度循环工具可以重复调用。
 - Finding 28：下层 runner 缺父级目标上下文。现在 child/grandchild 会继承 bounded parent goal/thought，让下一层知道原始目标、产物路径和验收要求。
-- Finding 29：模型把 coordinator 误写成 worker。现在如果一个节点有调度工具且没有写工具，会按 depth 推断成 child/grandchild coordinator。
+- Finding 29：模型把 coordinator 误写成 worker。现在如果一个节点有调度工具且没有明确业务产物写入意图，会按 depth 推断成 child/grandchild coordinator；报告写入工具不会阻止这个推断。
 - Finding 30：限速下还没跑的 PLANNING child 被误判成失败。现在 dispatch 返回 direct child 进度摘要和 continue hint，告诉父节点还有 PLANNING/RUNNING 的孩子要继续 dispatch。
 - Remaining Gap：失败分支自动恢复还没完全闭环。当前已经证明 root->child->grandchild->leaf 能真实写部分文件，root 在一个 child blocked 后能继续推进别的 child；还缺自动救援超时 coordinator、接管残留 PLANNING leaf，以及完整 48 文件 main-node-only 全绿复跑。
 - Small Fixed Retest：主节点单入口 1/2/4 小树复测通过。外层只启动 root，root 创建 2 child，child 创建 4 leaf，4 个 leaf 真实写出算法文件并通过父级 Python smoke test；leaf 写工具缺失和旧 failure/capability 状态残留已修复。还剩一个验收噪音：某 leaf 的 acceptance plan 因“空测试命令”进入 `request_human`，需要后续让空测试命令降级成 inspect-only 或生成可执行检查。
@@ -925,6 +925,9 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Verification:
   - Real smoke case `hier_main_only_smoke_1778326442` confirmed the child coordinator had no write tools and did not use `write_file`.
 - Status: solved as a test-template and permission-boundary rule; future prompt templates should encode this split.
+- 2026-05-10 update:
+  - This finding is still valid for final business/product files, but the tool policy was refined after role-template observer testing.
+  - Coordinator nodes now keep report-write tools so they can write their own plans, evidence, and coordination reports; prompts and task-local write boundaries still prevent them from replacing worker/writer deliverables.
 
 ### Finding 26: Subagents Interpret `max_depth=1` As Relative Depth
 
@@ -1006,7 +1009,7 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Root cause:
   - The model-supplied role was trusted even when tools and depth clearly indicated a coordinator.
 - Fix:
-  - `SubAgentHierarchyScheduler` now infers coordinator roles for children that have orchestration tools and no write tools:
+  - `SubAgentHierarchyScheduler` now infers coordinator roles for children that have orchestration tools and no concrete product-write intent, even if they have report-write tools:
     - depth 1 -> `child_coordinator`
     - depth 2 -> `grandchild_coordinator`
     - deeper -> `coordinator`
@@ -1467,7 +1470,7 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Verification first slice: focused stub tests 已覆盖模型请求/响应、模型异常和工具调用事件；尚未用真实 MiniMax 重跑大型 E2E。
   - Real smoke: `runner_stage_trace_20260510_145432` 用 MiniMax-M2.7 真实跑通 level 3 trace。事件计数为 `runner_model_request_started=4`、`runner_model_response_received=4`、`runner_tool_call_started=3`、`runner_tool_call_finished=3`、`runner_result_recorded=1`；产物 `/Users/xiaoyezi/my-claude-code/deliverables/runner_stage_trace_20260510_145432/leaf_outputs/proof/proof.txt` 内容为 `runner-stage-trace-ok`。
   - New finding: 这次真实 smoke 也暴露 `spawn-subagents --count 1` 会把测试 root 建成 `worker`，没有创建/调度 child 的工具；模型最后直接写了 proof.txt 并正确标记 `BLOCKED`，原因是缺少创建子代理能力。中文解释：trace 没问题，但这个入口不适合测试“主节点自己拉起子节点”；下一步需要补一个正式的 root/coordinator 创建入口或 spawn role 参数，再重跑层级 smoke。
-  - Fix root seed: `spawn-subagents` 现在支持 `--role coordinator --agent-name <name>`。显式 coordinator seed 会创建真正 root/coordinator，带调度/看板/只读工具，不带写文件工具；单个 root 不追加 `/ 子任务1`，避免真实 E2E prompt 失真。
+  - Fix root seed: `spawn-subagents` 现在支持 `--role coordinator --agent-name <name>`。显式 coordinator seed 会创建真正 root/coordinator，带调度/看板、读取工具和报告写入工具；单个 root 不追加 `/ 子任务1`，避免真实 E2E prompt 失真。
   - Follow-up:
     - 需要把“无限 runner 长时间无 response 文件/无工具事件”纳入 due-check，可提示人工诊断或受控取消，而不是静默挂起。
     - 需要用新的 root/coordinator seed 重跑层级 smoke，确认主节点创建子代理、子代理创建孙代理、孙代理创建孙孙代理。
@@ -1554,3 +1557,50 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Status:
   - Passed for the 4-level strict hierarchy smoke.
   - Remaining gap: next real E2E should scale the same rule to larger trees, especially 1 root / 4 child / 16 grandchild / 48 great-grandchild leaf and the shopping-site project scenario.
+
+## Ongoing Real E2E Difficulty Ladder
+
+- 中文说明：
+  - 后续测试要不断增加难度和意外情况，但当前真实层级最多先测到 4 层：主 -> 子 -> 孙 -> 孙孙。
+  - 代码不能写死 4 层；`max_depth` 只是测试/运行约束，底层数据结构仍按通用 tree 处理。
+- Next test categories:
+  - Normal 4-level chain: root creates child, child creates grandchild, grandchild creates great-grandchild/leaf, leaf writes deliverables.
+  - State feedback: every layer must report created child ids, running ids, blocked ids, done ids, next action, and takeover/recovery refs.
+  - Failure injection: parent timeout with unfinished child, child runner blocked, stale RUNNING node, model emits wrong role, model repeats dispatch, empty tests, invalid artifact refs, test failure, acceptance failure.
+  - Loop protection: repeated task-creation guard, max children, max depth, direct-child dispatch scope, self-exclude, and progress-loop tools that can repeat safely.
+  - Prompt budget: main agent keeps a lightweight template index; coordinator nodes load full template details only when dispatching or scheduling children.
+- Current status:
+  - Template index/detail split is covered by focused tests, not yet by a new real MiniMax E2E.
+  - The next real run should combine this lazy template behavior with a small 4-level chain before scaling back to `1/4/16/48` or shopping-site E2E.
+
+## 2026-05-10 Role Template Observer / Coordinator Report Write E2E
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/role_template_observer_20260510_181700`.
+  - Debug trace: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/role_template_observer_20260510_181700/subagents/debug_traces/subagent_trace.jsonl`.
+  - Model name: `MiniMax-M2.7`.
+  - Observation rule: outer controller only started the main agent/root seed; lower nodes were created by their direct parent.
+- 中文说明：
+  - 这次专门看“主代理是否能只启动 root，然后由 root 自己创建不同角色的子代理”。
+  - 还验证一个现实问题：coordinator 不能只读，它也需要写自己的计划、分工、证据和协调报告，否则别人看不到它的协调产物。
+- Observed behavior:
+  - Root run: `subagent-1778408334-bae4a61f`.
+  - Root created 6 direct children itself through `schedule_child_subagents`: researcher, worker, writer, bug_finder, tester, and acceptor.
+  - `dispatch_subagents` now returned `runner_created_children=6`, child ids, and child roles, so the main agent no longer has to guess from the number of dispatch records.
+- Finding 1: Dispatch output needed child refs, not just dispatch records.
+  - Symptom: before the fix, the parent could confuse “4 dispatch records” with “4 children created by the runner”.
+  - 中文解释：调度报告有几行，不等于下级真的建了几个。父级需要看到真实 child ids 和 roles，才能继续 watch、接管或验收。
+  - Fix: dispatch records and tool payloads now carry `runner_created_children`, `runner_created_child_ids`, and `runner_created_roles`.
+  - Verification: focused tests cover both direct dispatch payload and persisted dispatch record summaries.
+- Finding 2: Coordinator and QA roles need report-write tools.
+  - Symptom: the old coordinator template had no write tools but was asked to write `evidence.json`; worker/writer then tried to write parent/root evidence files and hit write-boundary blocks.
+  - 中文解释：coordinator 的“产物”不是业务代码，而是协调报告；tester/bug_finder/acceptor 的“产物”是测试/找错/验收报告。没有写报告能力，下级就会乱帮它写，反而破坏边界。
+  - Fix: all built-in role templates now include read tools and task-local report-write tools. Coordinator prompts now say: write your own coordination reports, but delegate final business code/pages/docs to worker/writer.
+  - Boundary: children still cannot freely write parent directories; task-local write roots remain the hard boundary, and parent acceptance remains the final gate.
+- Finding 3: Partial success plus timeout still needs cleaner status semantics.
+  - Symptom: the old-template root created all 6 children but eventually timed out after 240 seconds; the parent saw the child refs and reported useful progress, but the runner record itself remained `ok=false`.
+  - 中文解释：它已经成功“生孩子”了，但最后总结没收口，所以状态看起来像失败。后续要把“已创建下级但最终总结超时”单独表达成 partial success，便于恢复。
+  - Status: recorded as a remaining gap. The next real E2E should rerun with the new report-write templates and confirm root writes its own report and stops faster.
+- Verification:
+  - `python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_subagent_role_templates.py agent_py_agent/tests/test_subagent_prompt_contract.py agent_py_agent/tests/test_subagent_mixin.py::TestSubagentMixinSpawn::test_spawn_subagents_explicit_coordinator_creates_root_run agent_py_agent/tests/test_subagent_hierarchy_scheduler_tool_roles.py agent_py_agent/tests/test_orchestration_tools.py::TestRunnerDispatchRecords::test_runner_dispatch_record_carries_created_child_summary agent_py_agent/tests/test_orchestration_tools.py::TestDispatchSubagentsToolExecute::test_dispatch_payload_exposes_runner_created_children` -> `22 passed`.

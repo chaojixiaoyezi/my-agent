@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 
 # LLM: patterns for extracting directory paths from user goal text.
-_DIR_PATTERN = re.compile(r"(?:/[\w.\-]+){2,}")
+_DIR_PATTERN = re.compile(r"(?<![\w.\-])(?:/[\w.\-]+){2,}")
 _WINDOWS_DIR_PATTERN = re.compile(r"[A-Za-z]:[\\/][^\s\"'<>|]+")
 _HOME_DIR_PATTERN = re.compile(r"(?:~/[\w.\-]+(?:/[\w.\-]+)*)")
 
@@ -68,10 +68,16 @@ def _extract_write_dirs(goal: str) -> list[str]:
 # 函数用途: 处理迭代writedirmatches相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
 def _iter_write_dir_matches(goal: str):
     return (
-        match.group().strip()
+        _trim_write_dir_candidate(match.group())
         for pattern in [_WINDOWS_DIR_PATTERN, _DIR_PATTERN, _HOME_DIR_PATTERN]
         for match in pattern.finditer(goal)
     )
+
+
+# LLM: _trim_write_dir_candidate keeps punctuation out of auto-granted write roots.
+# 函数用途: 清理从 goal 文本里提取的目录候选，避免句号、逗号混进写入边界。
+def _trim_write_dir_candidate(raw: str) -> str:
+    return raw.strip().rstrip(".,;:，。；：、)]}）】")
 
 
 # LLM: _load_parent_task keeps inheritance manifest creation best-effort and non-blocking.

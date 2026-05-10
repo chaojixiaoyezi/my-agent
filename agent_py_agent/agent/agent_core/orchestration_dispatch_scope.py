@@ -5,6 +5,9 @@ from __future__ import annotations
 
 from .parameters import _bool_param, _non_negative_int, _string_list
 from .runner_context import current_subagent_run_id
+from .spawn_role_seed import is_explicit_root_role
+
+_DISPATCH_FINAL_STATUSES = {"DONE", "FAILED", "TIMEOUT", "CHANNEL_ERROR", "TAKEN_OVER"}
 
 
 # LLM: dispatch_apply_default keeps top-level dispatch safe while runner-context dispatch can actually advance children.
@@ -58,11 +61,40 @@ def dispatch_max_runners_default(agent, params: dict[str, object]) -> int:
 # LLM: dispatch_workflow_mode keeps nested runner dispatch from spawning workflow workers accidentally.
 # 函数用途: 顶层 dispatch 继续跟随配置；runner 内部未显式指定时默认 off，避免层级测试被自动 workflow 打散。
 def dispatch_workflow_mode(agent, params: dict[str, object], parser) -> str:
+    if _top_level_root_role_dispatch(agent, params):
+        return "off"
     if "workflow_mode" in params:
         return parser(params.get("workflow_mode"), agent.config.subagent_workflow_mode)
     if current_subagent_run_id(agent):
         return "off"
     return parser(None, agent.config.subagent_workflow_mode)
+
+
+# LLM: _top_level_root_role_dispatch protects coordinator-owned hierarchy from generic workflow auto-splitting.
+# 函数用途: 顶层正在执行 root/coordinator 时关闭 workflow 自动拆分，避免绕过该 coordinator 自己创建孩子。
+def _top_level_root_role_dispatch(agent, params: dict[str, object]) -> bool:
+    if current_subagent_run_id(agent):
+        return False
+    if not _bool_param(params.get("execute_runners"), default=False):
+        return False
+    requested_mode = str(params.get("workflow_mode") or agent.config.subagent_workflow_mode or "").strip().lower()
+    if requested_mode not in {"plan", "auto", "manual"}:
+        return False
+    try:
+        runs = agent.subagents.list_runs()
+    except Exception:
+        return False
+    return any(_is_active_root_role_task(task) for task in runs)
+
+
+# LLM: _is_active_root_role_task identifies explicit root/coordinator runs that should own child creation.
+# 函数用途: 判断任务是否是未结束的顶层协调节点，用于阻止 dispatch workflow 污染层级。
+def _is_active_root_role_task(task) -> bool:
+    return (
+        not str(getattr(task, "parent_id", "") or "").strip()
+        and is_explicit_root_role(str(getattr(task, "role", "") or ""))
+        and str(getattr(task, "status", "") or "").upper() not in _DISPATCH_FINAL_STATUSES
+    )
 
 
 # LLM: dispatch_parent_run_id scopes runner-context dispatch to the current node's direct children.

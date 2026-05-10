@@ -197,6 +197,17 @@ class TestExtractWriteDirs:
         result = _extract_write_dirs("")
         assert result == []
 
+    def test_ignores_slash_separated_deliverable_labels(self):
+        """requirements/research-brief 这类标签串不是 Unix 绝对路径。"""
+        from agent_py_agent.agent.subagents.manager_normalize import _extract_write_dirs
+
+        result = _extract_write_dirs(
+            "deliverables: requirements/research-brief/implementation/README/"
+            "bug-report/test-report/acceptance-verdict"
+        )
+
+        assert result == []
+
 
 class TestWorkflowModeNormalization:
     """测试 manager_base.py 中的工作流模式相关函数。"""

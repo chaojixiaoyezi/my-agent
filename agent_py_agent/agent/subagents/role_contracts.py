@@ -78,7 +78,7 @@ def _acceptance_checks_for_role(role: str, checks: object, template: RoleTemplat
 
 
 # LLM: _allowed_tools_for_role applies template defaults while preserving explicit grants.
-# 函数用途: 按角色模板补默认工具；只读角色会剔除写工具，避免找茬/测试/验收子代理改业务产物。
+# 函数用途: 按角色模板补默认工具；只有自定义模板声明 can_write=false 时才剔除写工具。
 def _allowed_tools_for_role(
     role: str,
     tools: object,
