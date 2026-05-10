@@ -32,12 +32,22 @@ class RecordCapabilityGrantParams:
     """Params bundle for record_capability_grant."""
 
     request_id: str
+    # LLM: scoped grant fields mirror CapabilityGrant so service callers never pass loose kwargs.
+    grant_type: str = "generic"
     skills: list[str] | None = None
     tools: list[str] | None = None
+    mcp_tools: list[str] | None = None
+    command_allowlist: list[str] | None = None
     capability_cards: list[dict[str, str]] | None = None
     reason: str = ""
     constraints: dict[str, str] | None = None
+    path_scope: list[str] | None = None
+    network_scope: list[str] | None = None
+    output_budget: dict[str, object] | None = None
+    risk_level: str = ""
     expires_after_task: bool = True
+    expires_at: float = 0.0
+    reserved: dict[str, object] | None = None
 
 
 # LLM: RecordCapabilityGapParams 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -48,11 +58,17 @@ class RecordCapabilityGapParams:
 
     missing_capability: str
     why_failed: str
+    # LLM: gap scope keeps enough routing evidence for escalation without reading runner output.
+    gap_type: str = "generic"
     attempted_skills: list[str] | None = None
     attempted_tools: list[str] | None = None
     needed_outputs: list[str] | None = None
     suggested_skill: str = ""
     suggested_tool: str = ""
+    requested_scope: dict[str, object] | None = None
+    escalation_chain: list[str] | None = None
+    next_record_refs: list[str] | None = None
+    reserved: dict[str, object] | None = None
 
 
 # LLM: RecordCapabilityRequestParams 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -64,9 +80,23 @@ class RecordCapabilityRequestParams:
     problem: str
     needed_capability: str
     expected_output: str = ""
+    # LLM: request scope fields let child agents ask for constrained tools instead of broad permissions.
+    capability_type: str = "generic"
     tried: list[str] | None = None
     evidence: list[str] | None = None
     constraints: dict[str, str] | None = None
+    requested_tools: list[str] | None = None
+    requested_skills: list[str] | None = None
+    requested_mcp_tools: list[str] | None = None
+    requested_commands: list[str] | None = None
+    cwd_scope: list[str] | None = None
+    path_scope: list[str] | None = None
+    network_scope: list[str] | None = None
+    output_budget: dict[str, object] | None = None
+    risk_level: str = ""
+    fallback_attempted: list[str] | None = None
+    escalation_target: str = ""
+    reserved: dict[str, object] | None = None
 
 
 # LLM: RecordEvidenceParams 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -121,10 +151,23 @@ class SubAgentLifecycleService:
             problem=params.problem,
             needed_capability=params.needed_capability,
             expected_output=params.expected_output,
+            capability_type=params.capability_type,
             tried=params.tried or [],
             evidence=params.evidence or [],
             constraints=params.constraints or {},
+            requested_tools=params.requested_tools or [],
+            requested_skills=params.requested_skills or [],
+            requested_mcp_tools=params.requested_mcp_tools or [],
+            requested_commands=params.requested_commands or [],
+            cwd_scope=params.cwd_scope or [],
+            path_scope=params.path_scope or [],
+            network_scope=params.network_scope or [],
+            output_budget=params.output_budget or {},
+            risk_level=params.risk_level,
+            fallback_attempted=params.fallback_attempted or [],
+            escalation_target=params.escalation_target,
             created_at=time.time(),
+            reserved=params.reserved or {},
         )
         task.capability_requests.append(request)
         task.updated_at = time.time()
@@ -144,13 +187,22 @@ class SubAgentLifecycleService:
             id=_new_id("capgrant"),
             request_id=params.request_id,
             grant_to_run_id=run_id,
+            grant_type=params.grant_type,
             skills=params.skills or [],
             tools=params.tools or [],
+            mcp_tools=params.mcp_tools or [],
+            command_allowlist=params.command_allowlist or [],
             capability_cards=params.capability_cards or [],
             reason=params.reason,
             constraints=params.constraints or {},
+            path_scope=params.path_scope or [],
+            network_scope=params.network_scope or [],
+            output_budget=params.output_budget or {},
+            risk_level=params.risk_level,
             expires_after_task=params.expires_after_task,
+            expires_at=params.expires_at,
             created_at=time.time(),
+            reserved=params.reserved or {},
         )
         task.capability_grants.append(grant)
         task.allowed_skills = _merge_list(task.allowed_skills, grant.skills)
@@ -175,14 +227,19 @@ class SubAgentLifecycleService:
             missing_capability=params.missing_capability,
             source_task=task.goal,
             why_failed=params.why_failed,
+            gap_type=params.gap_type,
             attempted_skills=params.attempted_skills or [],
             attempted_tools=params.attempted_tools or [],
             needed_outputs=params.needed_outputs or [],
             suggested_skill=params.suggested_skill,
             suggested_tool=params.suggested_tool,
+            requested_scope=params.requested_scope or {},
+            escalation_chain=params.escalation_chain or [],
+            next_record_refs=params.next_record_refs or [],
             memory_routes=memory_routes,
             injected_rule_paths=injected_rule_paths,
             created_at=time.time(),
+            reserved=params.reserved or {},
         )
         task.capability_gaps.append(gap)
         if injected_rule_paths:

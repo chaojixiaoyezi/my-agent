@@ -49,6 +49,30 @@
 
 ## 开发顺序
 
+### 0. Controlled Tools / Shell Gateway 预备层
+
+状态：设计中；建议作为今晚优先小切片，在继续大规模真实 E2E 前先补记录和边界。
+
+这一步不是给子代理裸 `exec`，而是补一个受控工具网关和能力申请闭环，让子代理以后可以安全使用本机 CLI、网络工具、MCP、skill 自带脚本和日志分析命令。
+
+要做：
+
+- 定义 `shell/tool/mcp/skill/network/path/output_budget` 类型的 capability request 字段。
+- 子代理遇到缺工具、缺 skill、缺网络、缺路径权限、缺输出预算、无解决办法时，必须结构化上报，不能假完成或静默失败。
+- 父级能解决就下发 scoped capability grant；不能解决继续上抛；最终无解写 capability gap / finding / shared blackboard / skill_spark 候选。
+- 设计受控 shell gateway：命令先经过角色、grant、cwd、路径、网络、输出预算和风险策略检查，再执行。
+- 子代理不直接获得 `rm`；删除动作走 task-local `trash/`，写 manifest，后续支持 TTL、大小上限和任务完成清理钩子。
+- 输出外置必须受预算控制：单次 stdout/stderr、artifact、任务累计输出和全局读取都有限制；大日志只允许 slice/search/sample/summary，不允许无脑保存 1G/1T 全量输出。
+- 工具扩展留口子：Playwright、Chrome tools、curl、scrapling、日志 CLI、用户自装工具、MCP 工具和 skill 脚本都通过 tool/capability registry 接入，而不是写死在 prompt 里。
+- 增加写入失败兜底：子代理即使 `write_file`/报告落盘失败，也能通过 runner response 回传结果，由父级保存 fallback report。
+
+退出标准：
+
+- 子代理缺工具时能生成可路由 request，并在 due-check/dispatch/watch 中可见。
+- grant/gap 全链路可审计；无解问题不会丢失。
+- shell gateway dry-run 能说明会执行什么、为何允许/拒绝、输出预算是多少。
+- 真实测试前能从 trace 里看到申请、路由、授权、拒绝、gap 和输出截断记录。
+
 ### 1. Task Tree Control Plane v1
 
 状态：第一片已落地；还需要继续补父级查询和更完整的 CLI/status 展示。

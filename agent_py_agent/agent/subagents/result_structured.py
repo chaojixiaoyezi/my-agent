@@ -104,15 +104,36 @@ def _create_capability_requests_from_parsed(task, parsed, now):
             problem=problem,
             needed_capability=needed,
             expected_output=str(item.get("expected_output", "") or ""),
+            capability_type=str(item.get("capability_type", "generic") or "generic"),
             tried=_string_list(item.get("tried", [])),
             evidence=_string_list(item.get("evidence", [])),
             constraints=_string_dict(item.get("constraints", {})),
+            requested_tools=_string_list(item.get("requested_tools", [])),
+            requested_skills=_string_list(item.get("requested_skills", [])),
+            requested_mcp_tools=_string_list(item.get("requested_mcp_tools", [])),
+            requested_commands=_string_list(item.get("requested_commands", [])),
+            cwd_scope=_string_list(item.get("cwd_scope", [])),
+            path_scope=_string_list(item.get("path_scope", [])),
+            network_scope=_string_list(item.get("network_scope", [])),
+            output_budget=_object_dict(item.get("output_budget", {})),
+            risk_level=str(item.get("risk_level", "") or ""),
+            fallback_attempted=_string_list(item.get("fallback_attempted", [])),
+            escalation_target=str(item.get("escalation_target", "") or ""),
             created_at=now,
+            reserved=_object_dict(item.get("reserved", {})),
         )
         task.capability_requests.append(request)
         created_ids.append(request.id)
         count += 1
     return count, created_ids
+
+
+# LLM: _object_dict preserves JSON-like scope/budget values without stringifying nested data.
+# 函数用途: 把模型给出的对象字段规范成普通字典，用于能力申请里的范围、预算和预留字段。
+def _object_dict(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): val for key, val in value.items()}
 
 
 # LLM: _split_tools_and_skills 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

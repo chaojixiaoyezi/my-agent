@@ -1165,6 +1165,15 @@ failure_type = structured_output_parse_error
 - 缺能力可以逐层上抛。
 - 找到能力后沿链路下发。
 
+下一阶段要接入受控 shell / MCP / 外部工具：
+- 子代理不能直接拿裸 `exec`，只能通过受控 gateway 提交 shell/tool 请求。
+- Capability grant 决定能不能用、能用哪些命令/工具、在哪些目录/域名/预算内用。
+- Gateway 决定怎么执行、如何限制 cwd/path/network/output、如何写审计和 trace。
+- 子代理不直接拿 `rm`；删除类需求走 task-local `trash/`，并写 manifest 以便恢复和审计。
+- 本机新增工具、Playwright/Chrome tools、curl、日志分析 CLI、MCP 工具和 skill 自带脚本都应注册成 capability/tool card，再由父级按需 grant。
+- 大输出默认不完整外置：stdout/stderr、artifact 和任务累计输出必须有预算；大日志用 `rg`/`tail`/`head`/slice/采样/索引，不允许子代理无脑 `cat` 1G/1T 文件。
+- 找不到解决办法时必须写 capability gap / finding / shared blackboard / skill_spark 候选，不能让问题只停在模型自然语言里。
+
 ## 安全边界
 
 默认安全行为：

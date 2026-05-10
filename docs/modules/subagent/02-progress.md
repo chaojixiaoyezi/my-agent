@@ -313,3 +313,10 @@
 - 新增 refs-only 守卫测试：默认 `status` payload 不允许读取 `logs/runner_prompt.md`、`logs/runner_response.md` 或大 artifact body。
 - 开发规范新增 subagent token / model-call budget：状态、看板、startup、due-check、acceptance-plan 等默认查询不得调用模型、执行命令或展开冷文件。
 - 本轮 focused 验收：`python3 -m pytest agent_py_agent/tests/test_status_shared_progress.py -q` -> `8 passed`；`python3 -m pytest agent_py_agent/tests/test_subagent_commands.py -q` -> `16 passed`。
+
+## 2026-05-11 controlled tools stage 1
+- 中文说明：能力申请、授权和缺口记录已扩展成 scoped bundle，能表达 shell、MCP、tool、skill、路径、网络和输出预算需求；旧字段仍兼容，旧调用不需要一次性迁移。
+- `CapabilityRequest` 新增 `capability_type`、requested tools/skills/MCP/commands、cwd/path/network scope、output budget、risk、fallback 和 escalation 字段。
+- `CapabilityGrant` 新增 grant type、MCP tools、command allowlist、path/network scope、output budget、risk、expires_at 和 reserved 字段；这些字段只是授权边界，不代表自动执行。
+- `CapabilityGap` 新增 gap type、requested scope、escalation chain、next refs 和 reserved 字段；无解问题能保留原始申请范围，方便父级继续路由或沉淀 skill_spark。
+- 结构化 runner 输出里的 `capability_requests` 会保留这些扩展字段；持久化读取会忽略未来未知字段，避免后续 schema 小扩展卡死旧记录。
