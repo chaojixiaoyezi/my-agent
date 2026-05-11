@@ -26,6 +26,9 @@ _SUBAGENT_RESULT_TEMPLATE = (
     '  "evidence": [\n'
     '    {"kind": "command", "summary": "验证摘要", "command": "", "path": "", "url": "", "ok": true}\n'
     "  ],\n"
+    '  "evidence_packets": [\n'
+    '    {"id": "evpkt-run-id-short", "claim": "可验收声明", "checked_scope": "检查范围", "evidence_refs": ["runner_result.json"], "artifact_refs": ["产物路径或output.json"], "confidence": 0.9}\n'
+    "  ],\n"
     '  "capability_requests": [\n'
     '    {"problem": "缺少什么", "needed_capability": "能力名", "expected_output": "希望得到什么", "tried": [], "evidence": [], "constraints": {}}\n'
     "  ],\n"
@@ -44,6 +47,27 @@ _SUBAGENT_RESULT_TEMPLATE = (
     '  "failure_type": ""\n'
     "}\n"
     "[/SUBAGENT_RESULT]\n"
+)
+
+_SUBAGENT_REPAIR_RESULT_TEMPLATE = (
+    "[SUBAGENT_RESULT]\n"
+    "{\n"
+    '  "status": "AWAITING_ACCEPTANCE",\n'
+    '  "summary": "本轮完成或卡住的摘要",\n'
+    '  "used_tools": [],\n'
+    '  "used_skills": [],\n'
+    '  "evidence": [],\n'
+    '  "evidence_packets": [],\n'
+    '  "capability_requests": [],\n'
+    '  "artifacts": [],\n'
+    '  "tests": [],\n'
+    '  "patches": [],\n'
+    '  "lessons": [],\n'
+    '  "next_actions": [],\n'
+    '  "blocked_reason": "",\n'
+    '  "failure_type": ""\n'
+    "}\n"
+    "[/SUBAGENT_RESULT]"
 )
 
 
@@ -75,7 +99,8 @@ def _build_subagent_runner_prompt(
         "## Required Output\n\n"
         "- 说明完成了什么或卡在哪里。\n"
         "- 列出使用过的授权工具或 skill。\n"
-        "- 给出可验收证据；如果没有证据，明确写出还需要什么能力或工具。\n"
+        "- 给出可验收证据；成功时 evidence_packets 必须有 artifact_refs 或 evidence_refs，不能只写普通 evidence。\n"
+        "- 结果块要短：evidence/artifacts/tests/lessons 每类只保留最关键的 1-5 条，长报告写文件后引用路径。\n"
         "- 最后必须输出一个机器可解析结果块，格式如下：\n\n"
         "注意：结果块里面只能放裸 JSON object，不要使用 ```json 或任何 Markdown 代码围栏。\n"
         "在最终结果块之前，不要把 [SUBAGENT_RESULT] 或 [/SUBAGENT_RESULT] 当作普通说明文字重复引用。\n\n"
@@ -172,39 +197,36 @@ def _build_subagent_runner_repair_prompt(
 
     payload = json.dumps(asdict(context), ensure_ascii=False, indent=2)
     problem = parse_error.strip() or "上一轮回复缺少 [SUBAGENT_RESULT] 结果块。"
+    prompt_tail = _clip_repair_text(original_prompt, 6000)
+    response_tail = _clip_repair_text(original_response, 12000)
     return (
         "# SubAgent Runner Output Repair\n\n"
         "上一轮子代理已经完成了一次执行，但父代理没有拿到可解析的机器结果块。\n"
         "你现在只做格式修复：不要调用工具，不要新增事实，不要虚构证据；"
         "只能根据执行上下文、上一轮最终 prompt 里的工具结果、以及上一轮回复来整理结果。\n"
         "如果上一轮确实没有可验收证据，就把 status 写成 BLOCKED，并在 blocked_reason 里说明缺什么。\n\n"
+        "输出必须很短：summary 不超过 300 字；evidence/artifacts/tests/lessons 各不超过 5 条；"
+        "不要复述长报告、表格或源码。成功时必须给 evidence_packets，且每个 packet 至少包含 "
+        "artifact_refs 或 evidence_refs 之一。\n\n"
         "必须只输出下面这种结果块，不要输出解释文字、Markdown 代码围栏或额外前后缀：\n\n"
-        "[SUBAGENT_RESULT]\n"
-        "{\n"
-        '  "status": "AWAITING_ACCEPTANCE",\n'
-        '  "summary": "本轮完成或卡住的摘要",\n'
-        '  "used_tools": [],\n'
-        '  "used_skills": [],\n'
-        '  "evidence": [],\n'
-        '  "capability_requests": [],\n'
-        '  "artifacts": [],\n'
-        '  "tests": [],\n'
-        '  "patches": [],\n'
-        '  "lessons": [],\n'
-        '  "next_actions": [],\n'
-        '  "blocked_reason": "",\n'
-        '  "failure_type": ""\n'
-        "}\n"
-        "[/SUBAGENT_RESULT]\n\n"
+        f"{_SUBAGENT_REPAIR_RESULT_TEMPLATE}\n\n"
         "## Parse Problem\n\n"
         f"{problem}\n\n"
         "## Execution Context JSON\n\n"
         f"{payload}\n\n"
-        "## Previous Final Prompt\n\n"
-        f"{original_prompt}\n\n"
-        "## Previous Model Response\n\n"
-        f"{original_response}\n"
+        "## Previous Final Prompt Tail\n\n"
+        f"{prompt_tail}\n\n"
+        "## Previous Model Response Tail\n\n"
+        f"{response_tail}\n"
     )
+
+
+# LLM: _clip_repair_text keeps repair prompts bounded so the repair answer has room to close JSON.
+# 函数用途: 裁剪结构化修复 prompt 中的长上下文，只保留尾部最可能包含工具结果和最终报告的片段。
+def _clip_repair_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return f"[... clipped {len(text) - limit} chars ...]\n{text[-limit:]}"
 
 
 # LLM: _append_runner_repair_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

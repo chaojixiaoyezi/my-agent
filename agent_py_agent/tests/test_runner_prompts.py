@@ -64,6 +64,9 @@ class TestBuildSubagentRunnerPrompt:
 
         assert "[SUBAGENT_RESULT]" in prompt
         assert "[/SUBAGENT_RESULT]" in prompt
+        assert '"evidence_packets"' in prompt
+        assert "artifact_refs" in prompt
+        assert "evidence_refs" in prompt
 
     def test_prompt_describes_role(self):
         """验证 prompt 说明子代理角色。"""
@@ -139,6 +142,28 @@ class TestBuildSubagentRunnerRepairPrompt:
 
         assert "Execution Context JSON" in prompt
         assert "测试上下文" in prompt
+
+    # LLM: repair prompts must stay small enough for the model to close the JSON block.
+    # 函数用途: 复现真实 E2E 中 repair prompt 太胖导致修复回复再次截断的问题。
+    def test_repair_prompt_clips_large_prompt_and_response(self):
+        from agent_py_agent.agent.agent_core.runner_prompts import (
+            _build_subagent_runner_repair_prompt,
+        )
+
+        context = self._make_context("run_clip", task_dir="/tmp")
+        prompt = _build_subagent_runner_repair_prompt(
+            context,
+            original_prompt="P" * 8000 + "PROMPT_TAIL",
+            original_response="R" * 14000 + "RESPONSE_TAIL",
+            parse_error="缺少结束标记",
+        )
+
+        assert "PROMPT_TAIL" in prompt
+        assert "RESPONSE_TAIL" in prompt
+        assert "[... clipped" in prompt
+        assert "evidence_packets" in prompt
+        assert "不要复述长报告" in prompt
+        assert len(prompt) < 23000
 
 
 class TestAppendRunnerRepairPrompt:
