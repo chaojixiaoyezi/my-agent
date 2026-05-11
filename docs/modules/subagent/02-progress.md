@@ -554,3 +554,12 @@
 - 已保留：真正截断的 `write_file.content` 仍然不会被误执行，会继续提示模型改成 `write_file` 短骨架 + `append_file` 分块。
 - 已补测试：`test_tool_call_parser_recovers_complete_json_without_closing_marker`、`test_tool_loop_executes_complete_unclosed_write_file_tool_call`，并回归 `test_tool_call_parser_reports_missing_closing_tool_marker`、`test_parse_error_hint_recommends_append_for_truncated_write`。
 - 下一步：跑 focused/full gates 后提交；随后用新一轮 root-only E2E 验证 R40 那类“完整 JSON 少结束标记”的场景是否少一次模型重试。如果仍频繁长内容截断，再做真正的 bounded write helper。
+
+## 2026-05-11 Stage7 R42 per-agent tool budget guard
+- 中文说明：按当前设计先只做“单个代理”的工具调用预算；整个任务树和单次对话不设全局预算，默认不限制。这样可以挡住某个子代理卡住后 10 分钟内疯狂读写/查询，又不误伤其他兄弟代理、主代理普通聊天或长期任务。
+- 已实现：`agent_core/tool_agent_budget.py` 增加按 `run_id` 分组的内存滚动窗口预算，默认 `tool_agent_budget_window_seconds=600`、`tool_agent_budget_max_calls=50`。没有 `run_id` 的主代理普通对话不会被该预算限制；不同 run_id 互不抢预算；超过预算时工具循环返回“自检/向父级上报/请求接管或提高预算”的工具结果，而不是直接杀进程。
+- 已接入：`_tool_loop_service.py` 在真实执行工具前检查预算；如果超过预算，该次工具不会执行，模型会在下一轮看到预算提示并收口或上报。预算只存在当前长存活 agent 对象内，不写磁盘、不跨进程共享。
+- 已同步配置：`AgentConfig`、`ToolConfig`、配置归一化和 `agent_config.yaml` 都有同名字段。`0` 表示关闭对应窗口或次数限制。
+- 已补测试：`test_tool_agent_budget_ignores_calls_without_run_id`、`test_tool_agent_budget_blocks_after_per_agent_window_limit`、`test_tool_agent_budget_is_scoped_per_run_id`、`test_tool_agent_budget_prunes_calls_outside_window`、`test_tool_loop_enforces_per_agent_tool_budget_for_run_id`。
+- 设计边界：受控 `exec` / shell 读写能力后续应走目录受限网关，常用读写命令可以在工作目录内低摩擦使用，但危险命令、越界路径和大输出必须继续被网关拦住。主代理长存活应由 gateway/daemon/supervisor 承接，不能因为一次任务完成或无人应答就自动挂掉。
+- 下一步：设计并实现受控 shell/exec 网关的子代理授权面：工作目录限制、trash 替代 `rm`、输出大小上限、长日志读取分片、工具/skill 申请上报和审计记录。

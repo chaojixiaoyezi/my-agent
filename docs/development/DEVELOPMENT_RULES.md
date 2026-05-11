@@ -235,6 +235,22 @@ do_write()
   focused tests for touched areas, full pytest when feasible, ruff, doc sync,
   strict code-size, and `git diff --check`. If not pushing remote, use the
   smaller local checklist appropriate to the change risk.
+- Tool-call budget is per agent run, not per task tree and not per conversation.
+  Default policy is `tool_agent_budget_window_seconds=600` and
+  `tool_agent_budget_max_calls=50`, keyed by `run_id`. Calls without a `run_id`
+  are treated as ordinary main-agent chat and are not limited by this guard.
+- A budget hit must be a recoverable self-check/handoff signal: return a bounded
+  tool result asking the agent to summarize current progress, detect repeated
+  tool use, and escalate to its parent if more tools are needed. Do not silently
+  kill the runner, and do not charge sibling agents or the whole task tree.
+- Do not add task-wide or conversation-wide tool budgets unless a future spec
+  explicitly reopens that decision. Long-lived root/main-agent behavior should
+  be handled by gateway/daemon/supervisor lifecycle, not by this per-run budget.
+- Future shell/exec access for subagents must go through a controlled gateway:
+  workspace-bound paths, no raw destructive commands for lower agents, `trash`
+  instead of direct `rm`, bounded output capture, and audit records. Directory
+  permission can make read/write commands low-friction, but it must not bypass
+  path containment, output-size guards, or tool/skill request escalation.
 
 ## 11.2 Real E2E Findings Ledger
 

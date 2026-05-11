@@ -372,6 +372,10 @@ stream_enabled: true
 # 单轮请求里，最多允许几次“模型调用工具再继续推理”
 max_tool_rounds: 5
 
+# 单个代理滚动工具预算；只按 subagent run_id 生效，普通主代理聊天默认不限制
+tool_agent_budget_window_seconds: 600
+tool_agent_budget_max_calls: 50
+
 # read_file 工具最多返回多少字符，避免单次结果太长
 tool_read_max_chars: 6000
 

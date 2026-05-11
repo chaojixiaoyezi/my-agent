@@ -991,7 +991,8 @@ docs/
 - `agent_py_agent/agent/subagents/services/hierarchy_tool_policy.py`: 从 scheduler 拆出的工具策略，统一处理 coordinator/leaf 的工具继承、写文件工具补齐和 `write`/`read` 等模型工具名别名修正；coordinator 显式 allowed_tools 会补回内置编排工具，避免模型漏传后失去派工能力。
 - `agent_py_agent/agent/subagents/execution_test_items.py`: 预处理父级验收 tests，推断 workspace 内 `working_dir`，拆安全 `cd <dir> && pytest`，并把带明确期望内容的 `cat <workspace文件>` 改成受控 `content_check`，避免为真实模型输出放开 `cat` 命令；多页 HTML artifacts 会自动补 `static_site_check`。
 - `agent_py_agent/agent/subagents/execution_executor.py`: `content_check` 支持 `content_pattern` 包含匹配，也支持 `content_equals` / `expected_content` + `match_mode=exact`，用于严格验证文件内容没有额外字符；`static_site_check` 用于机器验收购物站这类静态产物的页面存在性、坏链接、占位符和明显失效控件。
-- `agent_py_agent/agent/agent_core/_tool_loop_service.py`: 主代理和 subagent 共用的工具循环；到达 `max_tool_rounds` 后给模型一次收口机会，如果模型仍吐工具调用，返回确定性停止说明而不是把新 `[TOOL_CALL]` 当最终回答。
+- `agent_py_agent/agent/agent_core/_tool_loop_service.py`: 主代理和 subagent 共用的工具循环；到达 `max_tool_rounds` 后给模型一次收口机会，如果模型仍吐工具调用，返回确定性停止说明而不是把新 `[TOOL_CALL]` 当最终回答；执行真实工具前会检查 per-run 工具预算，预算触发时只拦截当前 run 的工具并给模型自检/上报提示。
+- `agent_py_agent/agent/agent_core/tool_agent_budget.py` / `tool_agent_budget_stage.py`: 单个代理滚动工具预算 helper 和工具循环集成层；默认按 `run_id` 做 10 分钟 50 次限制，没有 `run_id` 的主代理普通聊天不受限，且不做任务树或单次对话的全局预算。
 - `agent_py_agent/agent/agent_core/tool_round_execution.py`: 单轮工具执行 helper；负责记录 assistant tool round、执行/记录工具调用、检测子代理 `output.json` 收口，并把同轮 `schedule_child_subagents` 后依赖真实 run id 的 `dispatch_subagents` 等编排调用延后到下一轮，避免模型使用脑补 run id；`output.json` 收口检测支持 flat `path` 和 bundle `filesystem.path`。
 - `agent_py_agent/agent/subagents/services/hierarchy_role_identity.py`: 从 scheduler 拆出的角色 identity 兜底策略，根据 `agent_name` / `goal` 恢复模型漏填的 researcher/tester/acceptor/bug_finder/writer/worker 等角色。
 - `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 从 scheduler 中拆出的层级 scope guard，集中处理空计划、深度/数量限制、禁止 sibling 领域、同批混建 coordinator/leaf、root 已有 coordinator 后直建 leaf/worker、child 写入根漂移、domain mismatch、同父级 coordinator 领域去重和已验证 leaf 具体目标文件去重；去重会过滤 generated id 片段和泛化编号词，避免误挡 recovery checker siblings。
@@ -1028,7 +1029,7 @@ docs/
 - `agent_py_agent/agent/subagents/manager_acceptance_parent_facade.py`: 新增父级验收 manager facade 方法集合，让 `manager_acceptance.py` 继续只承接普通 acceptance review 流程。
 - `agent_py_agent/agent/subagents/acceptance_test_execution.py`: 新增显式验收测试执行桥接，把 `AcceptanceReviewOptions(execute_tests=True)` 转成真实测试报告和阻断 findings；默认不运行。
 - `agent_py_agent/agent/subagents/services/acceptance_findings.py`: 普通验收 finding 汇总层；已有 `reports/test_execution.json` 时优先以机器执行报告判断 tests_passed。
-- `agent_py_agent/agent/settings/config.py`: 新增 `acceptance_execute_tests`、`acceptance_test_timeout_seconds`、`subagent_allowed_tools` 和 `subagent_role_template_dirs`，真实测试执行默认关闭，子代理工具默认自动判断。
+- `agent_py_agent/agent/settings/config.py`: 新增 `acceptance_execute_tests`、`acceptance_test_timeout_seconds`、`subagent_allowed_tools`、`subagent_role_template_dirs` 和 `tool_agent_budget_*`，真实测试执行默认关闭，子代理工具默认自动判断，单代理工具预算默认 10 分钟 50 次。
 - `agent_py_agent/agent/settings/services/_normalize_runtime_fields.py`: 校验真实验收执行配置，布尔开关走 bool coerce，超时限制在 1 到 300 秒；`subagent_allowed_tools` 和 `subagent_role_template_dirs` 归一成去空白字符串列表。
 - `agent_py_agent/config/agent_config.yaml`: 新增父级验收真实执行配置注释，说明默认关闭和单次命令覆盖方式。
 - `agent_py_agent/cli/_acceptance_plan.py`: 新增 `subagents-acceptance-plan` 命令入口；默认只展示父级 dry-run 决策和 refs，`--write` 写入决策审计，`--apply` 只允许 inspect_only，`--next-action` / `--auto-policy` / `--auto-execution` / `--followup` / `--apply-followup` 都走显式分支。

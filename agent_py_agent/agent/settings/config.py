@@ -166,6 +166,8 @@ class AgentConfig:
     anthropic_version: str = "2023-06-01"
     enable_tools: bool = True
     max_tool_rounds: int = 5
+    tool_agent_budget_window_seconds: int = 600
+    tool_agent_budget_max_calls: int = 50
     tool_read_max_chars: int = 6000
     tool_list_max_entries: int = 200
     tool_search_max_matches: int = 50
