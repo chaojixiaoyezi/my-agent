@@ -436,3 +436,9 @@
 - 已修正：父级验收预处理会从 task goal/thought/description/acceptance_checks 抽取 `index.html`、`style.css`、`app.js` 等静态站点必需文件，并合并进自动 `static_site_check.required_files`，避免分支目录局部通过但顶层购物流程缺页面。
 - 已补测试：`test_read_file_rejects_tool_output_artifact_wrapper`、`test_prepare_test_items_merges_task_required_static_files`、`test_static_required_files_from_texts_extracts_static_web_targets`、`test_parse_error_result_includes_retry_format_hint`。
 - 下一步：用干净 R17 root-only 购物站 E2E 复测完整注册 -> 登录 -> 商品 -> 购物车 -> 结账 -> 成功页链路，并观察 root/fix coordinator 是否仍有最终流卡住问题。
+
+## 2026-05-11 Stage7 R17 path typo retry guidance
+- 中文说明：R17 root-only 真实购物站 E2E 暴露了路径拼写误判：root 创建四个一级 coordinator 时，把一个目标路径写成 `/Users/xiaoyuzei/...`；系统正确拒绝越界路径，但 root 把提示理解成“需要扩大权限”，没有用正确的 `/Users/example/...` 重试。
+- 已修正：派工写入预检现在会识别“工作区目录名和后缀一致、但前缀疑似拼错”的绝对路径，返回 `suspected_path_typo=true`、原始 `target`、`workspace_root` 和 `suggested_target`，并明确要求重新调用 `schedule_child_subagents`，不要写 `capability_request`。
+- 已补测试：`test_external_write_guard_suggests_workspace_typo_retry`。
+- 下一步：用干净 R18 root-only 购物站 E2E 复测 root 是否按 `suggested_target` 重试并成功创建下级，再继续观察最终收口和完整购物流程验收。

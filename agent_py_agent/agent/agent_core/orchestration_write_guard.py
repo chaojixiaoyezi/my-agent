@@ -38,9 +38,20 @@ def external_write_target_error(agent, goal: str, allowed_tools: list[str]) -> s
     if not _goal_has_write_intent(goal):
         return ""
     workspace_roots = getattr(agent.subagents, "workspace_roots", [agent.subagents.workspace_root])
-    external_paths = _external_absolute_paths(goal, workspace_roots)
+    roots = _workspace_roots(workspace_roots)
+    external_paths = _external_absolute_paths(goal, roots)
     if not external_paths:
         return ""
+    typo_hint = _first_workspace_typo_hint(external_paths, roots)
+    if typo_hint:
+        target, suggested_target = typo_hint
+        return (
+            "子代理写入目标疑似路径拼写错误，已拒绝创建任务以避免越权写入。"
+            f" suspected_path_typo=true target={target} workspace_root={agent.subagents.workspace_root}"
+            f" suggested_target={suggested_target}。"
+            " 这是路径拼写错误，不是权限缺口；"
+            "请使用 suggested_target 重新调用 schedule_child_subagents，不要写 capability_request。"
+        )
     preview = ", ".join(external_paths[:3])
     return (
         "子代理写入目标在当前工作区外，已拒绝创建任务，避免后续 dispatch 超时或越权写入。"
@@ -72,6 +83,53 @@ def _external_absolute_paths(goal: str, workspace_roots: Path | list[Path]) -> l
 # 函数用途: 处理trim路径candidate相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
 def _trim_path_candidate(raw: str) -> str:
     return raw.strip().rstrip(".,;:，。；：、)]}）】")
+
+
+# LLM: _first_workspace_typo_hint turns near-miss workspace paths into retry instructions while preserving the deny.
+# 函数用途: 在外部路径看起来只是工作区前缀拼错时，生成一个安全的建议路径；不会自动放行写入。
+def _first_workspace_typo_hint(external_paths: list[str], workspace_roots: list[Path]) -> tuple[str, str] | None:
+    for raw in external_paths:
+        suggested = _suggest_workspace_typo_target(raw, workspace_roots)
+        if suggested:
+            return raw, suggested
+    return None
+
+
+# LLM: _suggest_workspace_typo_target repairs only suffix-matching paths under known workspace roots.
+# 函数用途: 根据工作区目录名后的相同尾部，推导用户名前缀拼错时应重试的目标路径。
+def _suggest_workspace_typo_target(raw: str, workspace_roots: list[Path]) -> str:
+    if _WINDOWS_ABSOLUTE_RE.match(raw):
+        return ""
+    candidate = Path(raw.replace("\\", "/")).expanduser()
+    if not candidate.is_absolute():
+        return ""
+    for root in workspace_roots:
+        suggested = _suggest_workspace_root_tail(root, candidate.parts)
+        if suggested:
+            return suggested
+    return ""
+
+
+# LLM: _suggest_workspace_root_tail keeps typo repair readable and avoids nested path heuristics.
+# 函数用途: 从候选路径中找到工作区目录名后的尾部，并拼回真实工作区根。
+def _suggest_workspace_root_tail(root: Path, candidate_parts: tuple[str, ...]) -> str:
+    tail = _tail_after_part(candidate_parts, root.name)
+    if not tail:
+        return ""
+    suggestion = root.joinpath(*tail).resolve(strict=False)
+    return str(suggestion) if _is_relative_to(suggestion, root) else ""
+
+
+# LLM: _tail_after_part extracts a suffix after a known workspace directory marker.
+# 函数用途: 找到路径中指定目录名后面的相对尾部；找不到或没有尾部时返回空元组。
+def _tail_after_part(parts: tuple[str, ...], marker: str) -> tuple[str, ...]:
+    if not marker:
+        return ()
+    try:
+        index = parts.index(marker)
+    except ValueError:
+        return ()
+    return parts[index + 1 :]
 
 
 # LLM: _is_external_absolute_path 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

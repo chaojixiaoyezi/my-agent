@@ -2430,3 +2430,29 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Re-run a clean R17 root-only shopping E2E after the artifact-read guard and whole-site required-file oracle.
   - Watch whether root/fix coordinator still stalls after downstream work is complete; if it does, add a non-destructive finalization watchdog or completion-from-child-summary path.
   - Improve recovery output for `max_children_exceeded` repair attempts, especially “reuse existing child” or “ask parent for bounded repair slot”.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R17
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r17.yaml`.
+  - Internal runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r17`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r17/build`.
+  - Root run: `subagent-1778460134-7525d829`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+- 中文说明:
+  - R17 仍按“外层只观察 root”的方式跑。外层只创建并运行 root，没有替 root 创建 child，也没有替任何 child/leaf 写购物网站文件。
+  - root 先正确规划 auth/catalog/cart/shared 四个一级 coordinator，但其中一个 child goal 把用户名路径写成 `/Users/xiaoyuzei/...`。
+  - 写入预检正确拒绝了这个越界路径；但错误文案太像权限不足，root 误以为 `/Users/example/.../deliverables/.../build` 也不在允许范围内，于是写了 `capability_request.json` 并 BLOCKED。
+- Observed facts:
+  - `schedule_child_subagents` 返回的拒绝信息包含 `target=/Users/xiaoyuzei/my-终端应用/...` 和 `workspace_root=/Users/example/my-终端应用`。
+  - root 的后续报告把真实正确路径 `/Users/example/my-终端应用/deliverables/.../build` 也误解为越界，申请 `expanded_allowed_write_roots`。
+  - board 最终只有 root 一个 run，状态为 `BLOCKED/UNVERIFIED`，没有 child 被创建，也没有购物站产物落盘。
+- Finding 68: near-miss workspace paths need retry guidance, not capability escalation.
+  - Symptom: a username typo in an absolute path was correctly blocked, but the model interpreted the block as a permission gap and wrote a capability request instead of retrying the corrected path.
+  - 中文解释：系统挡住拼错路径是对的，但提示应该说“你把路径拼错了，按这个正确路径重试”，不能让 root 误会成“需要扩大权限”。
+  - Fix: `orchestration_write_guard.py` now detects suffix-matching workspace path typos, keeps the deny, and returns `suspected_path_typo=true` plus `suggested_target=<workspace_root + same suffix>` and an explicit instruction to retry `schedule_child_subagents` without writing `capability_request`.
+  - Verification: `test_external_write_guard_suggests_workspace_typo_retry`.
+- Remaining gaps:
+  - Re-run a clean R18 root-only shopping E2E and confirm root retries with `suggested_target` instead of escalating.
+  - If R18 reaches downstream production again, continue watching root/fix coordinator finalization and whole-site top-level required files.
