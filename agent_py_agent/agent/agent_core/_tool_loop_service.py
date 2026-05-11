@@ -22,6 +22,7 @@ from .runner_stage_trace import (
     trace_runner_tool_call_finished,
     trace_runner_tool_call_started,
 )
+from .tool_agent_budget_stage import ToolAgentBudgetStageRequest, maybe_block_tool_agent_budget
 from .tool_call_context_reducer import render_tool_payload_for_live_prompt
 from .tool_context_reducer import render_tool_result_for_live_prompt
 from .tool_loop_completion import ToolRoundCompletionRequest, completion_response_after_tool_round
@@ -210,6 +211,9 @@ class ToolLoopService:
                 )
             )
             return result
+        budget_result = maybe_block_tool_agent_budget(ToolAgentBudgetStageRequest(self._agent, request, payload))
+        if budget_result:
+            return budget_result
         result = self._agent.tools.execute_call(
             payload,
             allowed_tools=request.params.allowed_tools,

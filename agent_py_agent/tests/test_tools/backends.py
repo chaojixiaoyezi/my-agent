@@ -67,6 +67,30 @@ class UnclosedWriteFileBackend(BaseBackend):
         return ModelResponse(text="写入完成", backend=self.name)
 
 
+# LLM: BudgetedRepeatedReadBackend verifies per-run tool budgets are enforced inside the tool loop.
+# 类用途: 测试专用后端；重复请求同一工具，第二次应收到预算自检提示。
+class BudgetedRepeatedReadBackend(BaseBackend):
+    name = "fake_budgeted_repeated_read_backend"
+
+    # LLM: __init__ tracks model calls for a deterministic budget-flow assertion.
+    # 函数用途: 初始化调用计数，让测试确认第二次工具请求被预算拦截后还能收口。
+    def __init__(self):
+        self.calls = 0
+
+    # LLM: generate asks for read_file twice and then expects the budget message in prompt.
+    # 函数用途: 复现单个代理在窗口内重复调用工具，触发预算自检后输出最终回答。
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls <= 2:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"read_file","path":"notes.txt"}\n[/TOOL_CALL]',
+                backend=self.name,
+            )
+        assert "单个代理工具预算已达到" in prompt
+        assert "自检" in prompt
+        return ModelResponse(text="预算触发后已自检收口。", backend=self.name)
+
+
 class SubagentDelegationBackend(BaseBackend):
     """LLM: fake model backend that simulates a main agent creating sub-agents from natural language.
 

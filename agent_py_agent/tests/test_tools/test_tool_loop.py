@@ -19,6 +19,7 @@ from agent_py_agent.agent.subagent import EvidencePacket, VerificationEvidence
 from agent_py_agent.agent.tools import ToolExecutionResult, ToolRegistry
 
 from .backends import (
+    BudgetedRepeatedReadBackend,
     DispatchCompletionBackend,
     DuplicateSubagentDelegationBackend,
     MaxToolRoundBackend,
@@ -86,6 +87,30 @@ def test_tool_loop_executes_complete_unclosed_write_file_tool_call():
         assert result.tool_rounds == 1
         assert agent.backend.calls == 2
         assert (workspace / "index.html").read_text(encoding="utf-8") == "<main>ok</main>"
+
+
+# LLM: per-agent budget should block repeated tool calls only for the active run id.
+# 函数用途: 验证工具循环里同一 run_id 超过预算后，返回自检提示并停止继续执行工具。
+def test_tool_loop_enforces_per_agent_tool_budget_for_run_id():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        (workspace / "notes.txt").write_text("budget note", encoding="utf-8")
+        cfg = AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            max_tool_rounds=4,
+            tool_agent_budget_window_seconds=600,
+            tool_agent_budget_max_calls=1,
+        )
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = BudgetedRepeatedReadBackend()
+
+        result = agent.run("重复读文件后自检", save=False, allowed_tools=["read_file"], run_id="run-budget")
+
+        assert result.response == "预算触发后已自检收口。"
+        assert result.tool_rounds == 2
+        assert agent.backend.calls == 3
+        assert result.executed_tools == ["read_file"]
 
 
 def test_agent_can_delegate_to_subagents_from_tool_call():

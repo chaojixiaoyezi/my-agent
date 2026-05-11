@@ -68,6 +68,8 @@ class ToolFieldsService:
             defaults,
             (
                 ("max_tool_rounds", 1, None),
+                ("tool_agent_budget_window_seconds", 0, None),
+                ("tool_agent_budget_max_calls", 0, None),
                 ("tool_read_max_chars", 100, None),
                 ("tool_http_timeout", 1, None),
                 ("tool_shell_timeout", 1, None),
