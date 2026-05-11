@@ -47,6 +47,59 @@ class TestParseSubagentRunnerOutput:
         assert result.ok is False
         assert "缺少" in result.parse_error and "[/SUBAGENT_RESULT]" in result.parse_error
 
+    def test_parse_partial_success_with_traceable_evidence_packets(self):
+        """结果尾部截断但 evidence_packets 已完整时，恢复最小可验收结果。"""
+        text = """[SUBAGENT_RESULT]
+{
+  "status": "AWAITING_ACCEPTANCE",
+  "summary": "10个文件已创建",
+  "used_tools": ["write_file", "list_files"],
+  "evidence_packets": [
+    {"id": "evpkt-files", "claim": "文件已创建", "checked_scope": "build", "artifact_refs": ["/tmp/build/index.html"], "evidence_refs": [], "confidence": 1.0}
+  ],
+  "artifacts": [
+    {"path": "/tmp/build/index.html", "kind": "file", "summary": "首页"},
+"""
+        result = parse_subagent_runner_output(text)
+        assert result.found is True
+        assert result.ok is True
+        assert result.status == "AWAITING_ACCEPTANCE"
+        assert result.summary == "10个文件已创建"
+        assert result.used_tools == ["write_file", "list_files"]
+        assert result.evidence_packets[0]["artifact_refs"] == ["/tmp/build/index.html"]
+
+    def test_parse_partial_success_without_refs_stays_blocked(self):
+        """没有可追溯 refs 的截断成功态不能被恢复成完成。"""
+        text = """[SUBAGENT_RESULT]
+{
+  "status": "AWAITING_ACCEPTANCE",
+  "summary": "我完成了",
+  "evidence_packets": [
+    {"id": "evpkt-no-refs", "claim": "完成", "checked_scope": "prose", "confidence": 1.0}
+  ],
+"""
+        result = parse_subagent_runner_output(text)
+        assert result.found is True
+        assert result.ok is False
+        assert "缺少" in result.parse_error and "[/SUBAGENT_RESULT]" in result.parse_error
+
+    def test_parse_partial_success_with_cut_evidence_packet_array(self):
+        """evidence_packets 数组尾部截断时，保留已闭合且带 refs 的证据包。"""
+        text = """[SUBAGENT_RESULT]
+{
+  "status": "COMPLETED",
+  "summary": "协调节点完成链路和文件检查",
+  "evidence_packets": [
+    {"id": "evpkt-files", "claim": "文件齐全", "checked_scope": "build", "artifact_refs": ["/tmp/build/index.html"], "evidence_refs": [], "confidence": 1.0},
+    {"id": "evpkt-chain", "claim": "链路建立", "checked_scope": "subagents", "artifact_refs": [], "evidence_refs": ["subagent-run-id"], "confidence": 0.95},
+    {"id": "evpkt-cut", "claim
+"""
+        result = parse_subagent_runner_output(text)
+        assert result.found is True
+        assert result.ok is True
+        assert result.status == "COMPLETED"
+        assert [item["id"] for item in result.evidence_packets] == ["evpkt-files", "evpkt-chain"]
+
     def test_parse_not_found(self):
         """完全不包含结果标记时返回未找到。"""
         text = "这只是普通文本"

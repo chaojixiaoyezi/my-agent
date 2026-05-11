@@ -492,3 +492,11 @@
 - 已修正：runner 结果模板现在明确要求 `evidence_packets`，并说明成功时必须带 `artifact_refs` 或 `evidence_refs`；结构化修复 prompt 会裁剪原 prompt/响应，只保留尾部关键上下文，避免修复输出没空间闭合。
 - 已补测试：`test_prompt_contains_result_block_markers`、`test_repair_prompt_clips_large_prompt_and_response`、`test_subagent_runner_repairs_missing_structured_output`。
 - 下一步：用干净 R32 复测 evidence-packet 模板和 compact repair prompt；如果 root 失败后顶层 CLI 仍不退出，再优先修 run-loop 的失败收束边界。
+
+## 2026-05-11 Stage7 R32 partial-result recovery and schedule ergonomics
+- 中文说明：R32 真实 root-only 复测跑出 root -> `小傻妞-前端协调` -> `小小傻妞-coordinator` -> `小小小傻妞-HTML`，10 个购物站文件全部写进用户指定 deliverables build 目录，并实际测试了 broadcast/direct 消息。
+- 新发现：真实模型会只写 `agent_name="小小傻妞"` 这类无后缀层级名，旧命名修正逻辑会抛裸 `IndexError`；leaf/coordinator 结果块也可能在长 artifacts/evidence 列表尾部截断，但前面的 `evidence_packets` 已经完整可追溯。
+- 已修正：层级命名 helper 对只有中文前缀的名字回退到 role 后缀，`schedule_child_subagents` 底层参数异常会转成结构化工具错误；runner parser 在成功态截断时可从完整的 traceable `evidence_packets` 恢复最小结果，数组尾部截断时保留前面已闭合的证据对象。
+- 已修正：runner contract 提醒大结果优先写 `execution_context.output_json` 短 JSON；工具循环现在识别 `filesystem.path` 形式写出的当前 `output.json`，能触发自动收口。
+- 已补测试：`test_hierarchy_schedule_repairs_bare_lineage_agent_name`、`test_runner_context_schedule_bare_lineage_name_returns_payload_not_index_error`、`test_parse_partial_success_with_traceable_evidence_packets`、`test_parse_partial_success_with_cut_evidence_packet_array`、`test_tool_round_detects_bundled_filesystem_output_json`。
+- 下一步：用干净 R33 复测结果恢复和 `output.json` 收口；如果 root 失败后顶层进程仍长时间不返回，优先做 failed-root run-loop exit。

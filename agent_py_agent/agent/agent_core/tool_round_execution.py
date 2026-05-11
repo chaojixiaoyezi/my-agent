@@ -154,7 +154,18 @@ def _is_subagent_output_json_write(agent, payload: object, result: ToolExecution
         task = agent.subagents.load(run_id)
     except Exception:
         return False
-    return _same_path(payload.get("path"), getattr(task, "output_json", ""))
+    return _same_path(_tool_payload_path(payload), getattr(task, "output_json", ""))
+
+
+# LLM: _tool_payload_path accepts both flat and bundled filesystem tool arguments.
+# 函数用途: 识别模型写 output.json 时常见的 path / filesystem.path 两种形态，用于提前收口 runner。
+def _tool_payload_path(payload: dict[str, object]) -> object:
+    if payload.get("path"):
+        return payload.get("path")
+    filesystem = payload.get("filesystem")
+    if isinstance(filesystem, dict):
+        return filesystem.get("path")
+    return ""
 
 
 # LLM: _same_path compares model paths as filesystem literals without glob behavior.

@@ -12,7 +12,7 @@ from ..models import SubAgentTask
 # 函数用途: 按 parent.depth + 1 生成子节点展示名；会去掉已有同类前缀，避免重复叠前缀。
 def scheduled_child_agent_name(parent: SubAgentTask, spec: Any) -> str:
     depth = max(1, int(parent.depth or 0) + 1)
-    suffix = _agent_name_suffix(spec.agent_name or spec.role or "worker")
+    suffix = _agent_name_suffix(spec.agent_name or spec.role or "worker", fallback=spec.role)
     return f"{_lineage_prefix(depth)}-{suffix}"
 
 
@@ -22,11 +22,14 @@ def _lineage_prefix(depth: int) -> str:
     return f"{'小' * max(1, depth)}傻妞"
 
 
-# LLM: _agent_name_suffix removes any old lineage prefix before applying the current depth.
-# 函数用途: 保留 catalog-lead 这类专业辨识后缀，同时把错层级前缀纠成当前层级。
-def _agent_name_suffix(value: str) -> str:
+# LLM: _agent_name_suffix removes old lineage prefixes and repairs bare prefix-only model names.
+# 函数用途: 保留 catalog-lead 这类专业辨识后缀；模型只写“小小傻妞”无后缀时，回退到 role 作为后缀。
+def _agent_name_suffix(value: str, fallback: str = "worker") -> str:
     text = str(value or "").strip().strip("-") or "worker"
+    fallback_text = str(fallback or "").strip().strip("-") or "worker"
     while _has_lineage_prefix(text):
+        if "-" not in text:
+            return "worker" if _has_lineage_prefix(fallback_text) else fallback_text
         text = text.split("-", 1)[1].strip().strip("-") or "worker"
     return text
 

@@ -60,11 +60,14 @@ class ScheduleChildSubagentsTool(BaseTool):
         target_error = _hierarchy_target_error(self.agent, child_specs)
         if target_error:
             return _schedule_error(target_error)
-        result = self.agent.subagents.schedule_child_runs(
-            params=_schedule_request(
-                ScheduleRequestBuildParams(self.agent, parent_run_id, child_specs, params)
+        try:
+            result = self.agent.subagents.schedule_child_runs(
+                params=_schedule_request(
+                    ScheduleRequestBuildParams(self.agent, parent_run_id, child_specs, params)
+                )
             )
-        )
+        except (IndexError, TypeError, ValueError) as exc:
+            return _schedule_error(_schedule_validation_error_message(exc))
         return ToolExecutionResult("schedule_child_subagents", True, _schedule_payload_json(result))
 
 
@@ -72,6 +75,16 @@ class ScheduleChildSubagentsTool(BaseTool):
 # 函数用途: 生成层级调度工具的失败结果，便于模型和测试稳定识别工具名。
 def _schedule_error(message: str) -> ToolExecutionResult:
     return ToolExecutionResult("schedule_child_subagents", False, message)
+
+
+# LLM: _schedule_validation_error_message keeps model-facing schedule failures actionable.
+# 函数用途: 把底层参数异常转成结构化工具错误，避免真实 runner 看到裸 IndexError 后反复试错。
+def _schedule_validation_error_message(exc: Exception) -> str:
+    return (
+        f"schedule_child_subagents 参数无效: {exc.__class__.__name__}。"
+        "请检查 agent_name 是否带可识别后缀、children 是否为对象列表、"
+        "role/goal/allowed_tools/extra_write_roots 是否放在每个 child 对象里。"
+    )
 
 
 # LLM: _schedule_tool_params tolerates real-model namespace wrappers without changing the public bundle.

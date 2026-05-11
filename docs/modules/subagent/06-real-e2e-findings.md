@@ -2866,3 +2866,36 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Status: recorded; not fixed in this patch. 下一片建议专门修 run-loop 失败退出边界。
 - Remaining check:
   - Re-run clean R32 after evidence-packet template and compact repair prompt. Expected result: coordinator 正常结果或 repair 结果应更短、更容易闭合，并给父级足够 evidence_packets；如果仍 blocked，再优先修顶层 run-loop 退出和自动接管策略。
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R32
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r32.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r32`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r32/build`.
+- 中文说明：
+  - R32 继续按 root-only 原则跑：外层只启动 root，root 自己派 `小傻妞-前端协调`，child 自己派 `小小傻妞-coordinator`，孙节点自己派 `小小小傻妞-HTML`。
+  - 真实产物已经写进用户指定 build 目录：8 个 HTML + `style.css` + `app.js`，共 10 个文件；禁止文件没有落盘。
+  - 通信链路也跑到了：root 使用 broadcast 给 descendants 发文件名规范，也用 direct 给具体下级发路径提醒。
+- Finding 102: bare lineage names could crash scheduling as raw `IndexError`.
+  - Symptom: child 多次调用 `schedule_child_subagents` 时只写 `agent_name="小小傻妞"`，没有专业后缀；工具层暴露 `工具执行失败: IndexError`，模型只能反复猜参数。
+  - 中文解释：我们的命名规则要求 `小傻妞-xxx`、`小小傻妞-xxx`。真实模型有时只写前缀，没有 `-xxx`。系统不能因为少后缀就炸成裸异常，应该自动回退到 role 后缀，例如 `小小傻妞-coordinator`。
+  - Fix: `hierarchy_agent_names.py` 现在能处理只有中文层级前缀的名字；`schedule_child_subagents` 还会把底层参数异常转成结构化工具错误，不再把裸 `IndexError` 交给模型。
+  - Verification: `test_hierarchy_schedule_repairs_bare_lineage_agent_name`、`test_runner_context_schedule_bare_lineage_name_returns_payload_not_index_error`。
+- Finding 103: truncated result JSON with complete evidence should be recoverable.
+  - Symptom: `小小小傻妞-HTML` 已写完 10 个文件，并在最终结果里给出完整 `evidence_packets`；但长 `artifacts` 列表尾部被截断，缺 `[/SUBAGENT_RESULT]`，旧逻辑把整个 leaf 判成 `structured_output_parse_error`。
+  - 中文解释：如果模型最后半截 artifacts 没写完，但前面已经有可追溯证据包，系统应该先保住“可验收事实”，不要把实际产物全当失败。没有 refs 的自夸仍不能恢复。
+  - Fix: parser 现在支持部分恢复：成功态必须先解析出完整 `evidence_packets`，且至少一个 packet 带 `artifact_refs` 或 `evidence_refs`；如果数组尾部也截断，会保留前面已闭合的证据对象。
+  - Verification: `test_parse_partial_success_with_traceable_evidence_packets`、`test_parse_partial_success_with_cut_evidence_packet_array`、`test_parse_partial_success_without_refs_stays_blocked`；用 R32 旧 `runner_response.md` 回放，leaf 与 child coordinator 都能从截断响应恢复出可解析结果。
+- Finding 104: long final results should use `output.json` file closeout.
+  - Symptom: coordinator 已经写了 `ACCEPTANCE.md`，但仍在对话里输出很长 `SUBAGENT_RESULT`，导致子节点结果块也截断。
+  - 中文解释：大任务最后不要在聊天回复里贴一长串文件清单。更稳的办法是写一个短的 `output.json`，系统看到当前 runner 写了自己的 `output.json` 就自动收口。
+  - Fix: runner contract 现在明确提示：最终结果很长时优先 `write_file` 写 `execution_context.output_json` 的短 JSON；`tool_round_execution.py` 同时识别 `path` 和 `filesystem.path` 两种工具参数形态，避免模型用 bundle 形式写 `output.json` 时漏触发收口。
+  - Verification: `test_tool_round_detects_bundled_filesystem_output_json`。
+- Finding 105: top-level run-loop still needs failed-root natural exit.
+  - Symptom: R32 在多层恢复/重试后进入长时间运行；观察者终止进程以保留日志和避免继续在同类错误上消耗。
+  - 中文解释：这轮修的是“真实问题被看懂、能恢复、工具不裸炸”。顶层 root 失败后自然退出还没完全解决，仍是下一片的重点。
+  - Status: recorded; not fixed in this patch.
+- Remaining check:
+  - Re-run clean R33. Expected result: bare `小小傻妞` 不再触发 `IndexError`；leaf/coordinator 长结果即便尾部截断，也能凭 traceable `evidence_packets` 进入可验收状态；模型若写 `output.json` 应自动收口。若顶层仍长时间不返回，下一片优先修 failed-root run-loop exit。
