@@ -47,3 +47,21 @@ def test_external_write_guard_suggests_workspace_typo_retry():
     assert f"suggested_target={suggested_target}" in result
     assert "请使用 suggested_target 重新调用 schedule_child_subagents" in result
     assert "不要写 capability_request" in result
+
+
+# LLM: URL image sources are content references, not write targets.
+# 函数用途: 验证商品图片 URL 不会被派工写入预检误切成 `s://...` 并阻断 child 创建。
+def test_external_write_guard_ignores_url_image_sources(tmp_path):
+    workspace_root = tmp_path / "my-claude-code"
+    target = workspace_root / "deliverables" / "shop" / "build"
+    mock_agent = MagicMock()
+    mock_agent.subagents.workspace_root = workspace_root
+    mock_agent.subagents.workspace_roots = [workspace_root]
+
+    result = external_write_target_error(
+        mock_agent,
+        f"在 {target} 创建 products.html，商品图片可使用 https://via.placeholder.com/300x200。",
+        ["write_file"],
+    )
+
+    assert result == ""

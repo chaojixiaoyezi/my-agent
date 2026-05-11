@@ -2456,3 +2456,37 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining gaps:
   - Re-run a clean R18 root-only shopping E2E and confirm root retries with `suggested_target` instead of escalating.
   - If R18 reaches downstream production again, continue watching root/fix coordinator finalization and whole-site top-level required files.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R18
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Config: `/Users/xiaoyezi/my-claude-code/.my-agent-stage7-shop-smoke-20260511-r18.yaml`.
+  - Internal runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/stage7_shop_smoke_20260511_r18`.
+  - Deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r18/build`.
+  - Root run: `subagent-1778460769-e9282812`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+- 中文说明:
+  - R18 仍按“外层只观察 root”的方式跑。外层只创建并运行 root，没有替 root 创建 child，也没有替任何 leaf 写购物网站文件。
+  - R17 的路径 typo 修复有效：root 成功创建 auth、catalog、cart-checkout、shared-assets 四个一级 coordinator，没有再把正确 deliverables 路径误判为权限缺口。
+  - 这轮在模型服务 HTTP 529 过载后结束为 root `BLOCKED/UNVERIFIED`；这不是本地 runner 崩溃，但它暴露了多个真实恢复问题。
+- Observed facts:
+  - auth 分支创建 leaf `auth-page-builder`，并写出 `index.html`、`register.html`、`login.html`、`style.css`；auth leaf 最终 `DONE/VERIFIED`，auth coordinator 进入 `AWAITING_ACCEPTANCE/NEEDS_ACCEPTANCE`。
+  - cart-checkout 分支创建 leaf `cart-checkout-worker`，并写出 `cart.html`、`checkout.html`、`order-success.html`。
+  - catalog coordinator 尝试创建商品 leaf 时，目标里的 `https://via.placeholder.com/300x200` 被派工预检误切成 `s://via.placeholder.com/300x200`，导致 child 创建被拒。
+  - cart coordinator 后续多次把 `/Users/xiaoyezi/...` 拼成 `/Users/xiaoyezei/...`，普通 `read_file` / `list_files` 只返回泛化越界提示，模型继续围绕错误路径尝试。
+  - shared-assets 分支创建 style/app worker 后遭遇 API 529，多个 run 写出 failure handoff / takeover readiness。
+- Finding 69: orchestration write preflight must ignore URLs, not only local write-root extraction.
+  - Symptom: a catalog child goal containing `https://via.placeholder.com/300x200` was rejected as an external write target `s://via.placeholder.com/300x200`.
+  - 中文解释：商品图片 URL 是页面内容引用，不是本机目录。之前自动写入根提取器已经会跳过 URL，但派工前的另一层守卫还没跳过，所以同类问题在另一个入口复发。
+  - Fix: `orchestration_write_guard.py` now uses shared URL spans from `path_recovery_hints.py` and skips path regex matches that overlap URLs.
+  - Verification: `test_external_write_guard_ignores_url_image_sources`.
+- Finding 70: filesystem read/list boundary errors need typo recovery hints too.
+  - Symptom: after a coordinator copied `/Users/xiaoyezi/...` as `/Users/xiaoyezei/...`, `read_file` / `list_files` returned only a generic outside-workspace error, and the model kept retrying the wrong path.
+  - 中文解释：不只是派工会拼错路径，读文件和列目录也会拼错。工具应该直接告诉模型“这是拼写错误，正确路径是 suggested_target”，否则模型容易误解成权限问题或继续瞎试。
+  - Fix: `FileSystemTool.resolve_path()` now returns `suspected_path_typo=true` plus `suggested_target` for suffix-matching workspace path typos while preserving the deny.
+  - Verification: `test_filesystem_tool_suggests_workspace_path_typo`.
+- Remaining gaps:
+  - Rerun a clean R19 after the URL skip and filesystem typo hint fixes; R18 was interrupted by API 529 and should not be treated as completed acceptance.
+  - Continue watching artifact-read recovery: models may invent old or wrong artifact refs such as `C:/repo/...`; current reader rejects unregistered refs, but the recovery instruction may need to be more explicit.
+  - Add or tune a recovery/resume path for API 529 mid-run so root can continue from existing takeover refs instead of leaving many descendants BLOCKED.
