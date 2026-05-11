@@ -17,6 +17,7 @@ from typing import Any
 WRITE_TOOL_NAMES = {"write_file", "append_file", "replace_in_file"}
 _MAX_BOUNDARY_PATH_CHARS = 4096
 _PRODUCT_WRITE_DELEGATE_POLICY = "delegate"
+_INTERNAL_OUTPUT_JSON_NAME = "output.json"
 
 
 # LLM: _path_text 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -75,6 +76,10 @@ def validate_write_boundary(
             f" target={_display_path(target, workspace_root)} allowed={roots}"
         )
 
+    internal_output_error = _internal_output_json_error(target, write_boundary, workspace_root, roots)
+    if internal_output_error:
+        return internal_output_error
+
     product_policy_error = _product_write_policy_error(target, write_boundary, workspace_root, roots)
     if product_policy_error:
         return product_policy_error
@@ -83,6 +88,30 @@ def validate_write_boundary(
     if forbidden_error:
         return forbidden_error
     return _locked_boundary_error(target, write_boundary, workspace_root)
+
+
+# LLM: _internal_output_json_error keeps runner bookkeeping out of user deliverable roots.
+# 函数用途: 阻止子代理把内部收口 output.json 写进产品目录；真实 task.output_json 仍然允许写。
+def _internal_output_json_error(
+    target: Path,
+    write_boundary: dict[str, object],
+    workspace_root: Path,
+    workspace_roots: list[Path],
+) -> str:
+    output_refs = _boundary_paths([write_boundary.get("output_json")], workspace_root, workspace_roots)
+    if not output_refs or target == output_refs[0]:
+        return ""
+    if target.name != _INTERNAL_OUTPUT_JSON_NAME:
+        return ""
+    product_roots = _boundary_paths(write_boundary.get("product_write_roots"), workspace_root, workspace_roots)
+    if not any(_is_relative_to(target, root) for root in product_roots):
+        return ""
+    return (
+        "内部结果文件写入被阻止: output.json 是子代理 runner 的收口/验收文件，"
+        "不能写进用户产物目录，避免污染 deliverables。"
+        f" target={_display_path(target, workspace_root)} "
+        f"execution_context.output_json={output_refs[0]}"
+    )
 
 
 # LLM: _product_write_policy_error separates inherited authority from direct business writes.

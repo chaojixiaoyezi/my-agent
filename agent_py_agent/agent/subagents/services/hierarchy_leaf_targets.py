@@ -12,6 +12,11 @@ from typing import Any
 
 from ..models import SubAgentTask
 
+_REFERENCE_FILE_HINT_RE = re.compile(
+    r"(?:引入|引用|链接到|链接|导入|加载|依赖|link(?:s)?\s+to|include|import|load|use(?:s|d)?)",
+    re.IGNORECASE,
+)
+
 
 # LLM: LeafTargetDedupeRequest bundles all state needed for same-parent leaf output dedupe.
 # 类用途: 集中保存 manager、parent、调度请求和 leaf 判断函数，避免去重入口散参扩张。
@@ -142,13 +147,44 @@ def _target_tokens_from_artifact(artifact: Any) -> set[str]:
 # 函数用途: 从文本中提取常见代码/文档/网页文件名；跳过目录根和 URL。
 def _target_tokens_from_text(text: str) -> list[str]:
     tokens: list[str] = []
-    for match in re.findall(r"[\w./~:-]+\.(?:html|css|js|ts|tsx|jsx|py|md|json|txt|csv|yaml|yml)", text):
-        if "://" in match:
-            continue
+    for match in _target_file_match_candidates(text):
         token = Path(match.strip("`'\" ,;:，。；：、)]}）】")).name.lower()
         if token and token not in tokens:
             tokens.append(token)
     return tokens
+
+
+# LLM: _target_file_match_candidates keeps regex scanning outside the public token normalizer.
+# 函数用途: 从输出目标片段中产出文件路径候选，并过滤 URL，降低去重函数复杂度。
+def _target_file_match_candidates(text: str) -> list[str]:
+    matches: list[str] = []
+    for segment in _output_target_segments(text):
+        matches.extend(
+            match
+            for match in re.findall(r"[\w./~:-]+\.(?:html|css|js|ts|tsx|jsx|py|md|json|txt|csv|yaml|yml)", segment)
+            if "://" not in match
+        )
+    return matches
+
+
+# LLM: _output_target_segments drops referenced assets from target ownership extraction.
+# 函数用途: 只把引用词之前的文件当作当前 leaf 产物，避免“引入 app.js”抢占共享资产 owner。
+def _output_target_segments(text: str) -> list[str]:
+    segments: list[str] = []
+    for raw in re.split(r"[\n。；;]+", str(text or "")):
+        segment = _segment_before_reference_hint(raw)
+        if segment:
+            segments.append(segment)
+    return segments
+
+
+# LLM: _segment_before_reference_hint keeps the subject file but skips imported/linked files.
+# 函数用途: “cart.html 引入 app.js”只保留 cart.html；“引入 app.js”整段跳过。
+def _segment_before_reference_hint(text: str) -> str:
+    match = _REFERENCE_FILE_HINT_RE.search(text or "")
+    if not match:
+        return text
+    return text[: match.start()]
 
 
 # LLM: _first_overlapping_target keeps duplicate leaf errors deterministic.

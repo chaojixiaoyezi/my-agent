@@ -192,9 +192,17 @@ def _hierarchy_chain_leaf_reason(parent: SubAgentTask, child_specs: list[Any]) -
         return ""
     if not _goal_requires_four_layer_chain(parent.goal):
         return ""
-    if any(_is_leaf_like(spec) for spec in child_specs):
+    if any(_is_leaf_without_coordination_role(spec) for spec in child_specs):
         return "hierarchy_chain_requires_coordinator_until_depth_3"
     return ""
+
+
+# LLM: Four-layer enforcement must honor an explicit coordinator role even when the display name says writer.
+# 函数用途: 判断候选 child 是否真的在跳层创建执行叶子；明确 coordinator/lead/tester 等协调角色优先于名字里的 writer。
+def _is_leaf_without_coordination_role(spec: Any) -> bool:
+    if _is_coordination_like(spec):
+        return False
+    return _is_leaf_like(spec)
 
 
 # LLM: _goal_requires_four_layer_chain detects explicit root->child->grandchild->great-grandchild requests.

@@ -476,3 +476,9 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `manager_work_orders.py` 的初始 `output.json`、`status_report.json`、`dependencies.json` 必须由 dict template 写入，再交给 `_write_json_if_missing` 序列化一次；禁止重新引入“JSON 字符串包 JSON 对象”的双层编码。
 - `subagents/utils.py::_read_json_object` 是子代理 JSON 事实源的容错读取入口，兼容历史双层编码但只返回 dict；新读取点应优先复用它，不要在业务层重复 `json.loads(...).get(...)`。
 - Runner contract 和文件工具说明明确 `write_file` / `append_file` 会在授权 `allowed_write_roots` 内自动创建父目录；叶子节点不应因为目标产品目录尚不存在就上抛 shell/mkdir capability request。
+- `hierarchy_scope_guards.py` 的四层链路 guard 只阻止真正 leaf/worker 跳层；如果 child spec 明确是 coordinator/lead/tester/reviewer/checker，即使 `agent_name` 含 `writer` 这类业务词，也不能被当成 leaf。
+- `required_file_terms.py` 必须把“禁止改名（如 x.html）/例如/比如”里的文件名作为 forbidden examples；这些名字不得进入 inherited required files，否则下级会同时收到“必须创建”和“禁止创建”的冲突合同。
+- `hierarchy_leaf_targets.py` 的 leaf 产物去重只应该认定输出目标，不应该把“引入/引用/链接/导入/加载/use/include/import/link to”后面的共享资源当作当前 leaf 的 ownership claim；真实产物仍以显式目标路径和 `output.json.artifacts` 为准。
+- `agent_core/_tool_loop_service.py` 的 one-shot 编排去重只在工具结果真正推进时登记；`schedule_child_subagents` 这类工具可能 `ok=True` 但 JSON 输出 `blocked=true`，这类语义阻断必须保留父级修正后重试的空间。
+- `tooling/write_boundary.py` 把 task-local `output_json` 和 product_write_roots 分开处理：子代理可以写自己的 `execution_context.output_json` 收口，但不能在用户 deliverables/product roots 里创建内部 `output.json`，避免系统交接文件污染业务产物目录。
+- `agent_core/runner_prompts.py` 必须持续提醒 runner/coordinator：`output.json` 是内部结果文件名，给 child goal 时不能要求写到产品目录；需要结构化汇报时引用 `execution_context.output_json`。

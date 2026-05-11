@@ -128,6 +128,8 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "- write_file 和 append_file 会在授权 allowed_write_roots 内自动创建父目录；不要因为目标目录尚未创建就标记 BLOCKED。",
         "- 如果最终结果需要列很多 artifacts 或证据，优先用 write_file 写 execution_context.output_json 的短 JSON；"
         "系统会自动把它包成 SUBAGENT_RESULT 收口，避免对话里的长结果块被截断。",
+        "- output.json 是内部收口文件名；只能写 execution_context.output_json，"
+        "不要在 product_write_roots、deliverables 或用户产物目录里创建 output.json。",
     ]
     lines.extend(_current_role_template_lines(context))
     if "leaf" in str(context.role or "").lower():
@@ -153,6 +155,8 @@ def _coordinator_execution_contract_lines() -> list[str]:
             "如果直接写业务产物被工具层拒绝，立刻创建救援 worker/writer/leaf_worker。",
             "- 正确动作是调用 schedule_child_subagents 创建 worker/writer/leaf_worker，"
             "把目标路径、文件名、验收条件原样传给下一层，然后用 dispatch_subagents 推进直接 child。",
+            "- 给 child 写 goal 时，不要要求它在产物目录写 output.json；"
+            "如需结构化汇报，只能要求它写自己的 execution_context.output_json。",
             "- coordinator/lead 可以继续创建 coordinator/child_coordinator/grandchild_coordinator 作为下一层领导节点；"
             "需要多层协作时不要误以为只能创建 worker；父级要求 4 层链路时，深度未到孙孙层前先创建下一层 coordinator。",
             '- schedule_child_subagents 的参数必须放在顶层，例如 {"tool":"schedule_child_subagents","apply":true,"children":[...]}；'

@@ -152,6 +152,38 @@ def test_hierarchy_schedule_allows_explicit_repair_leaf_for_existing_target(tmp_
     assert len(repair.created_run_ids) == 1
 
 
+# LLM: Referencing shared assets must not make a page worker claim ownership of those assets.
+# 函数用途: 复现 R38 cart-writer 只“引入 app.js”却被当成 app.js 产物重复的真实 E2E 问题。
+def test_hierarchy_schedule_allows_leaf_referencing_shared_assets(tmp_path):
+    manager = SubAgentManager(tmp_path)
+    parent = _shared_parent_with_verified_leaf(manager)
+
+    cart = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal=(
+                        "写 cart.html 和 checkout.html\n"
+                        "## 目标\n"
+                        "- /tmp/shop/build/cart.html\n"
+                        "- /tmp/shop/build/checkout.html\n"
+                        "## 内容\n"
+                        "- cart.html 引入 style.css 和 app.js\n"
+                        "- checkout.html 链接到 order-success.html"
+                    ),
+                    role="leaf_worker",
+                    agent_name="小小小傻妞-cart-writer",
+                )
+            ],
+            apply=True,
+        )
+    )
+
+    assert cart.blocked is False
+    assert len(cart.created_run_ids) == 1
+
+
 # LLM: _auth_parent_with_verified_leaf creates a parent with one completed auth leaf fixture.
 # 函数用途: 构造 leaf 目标去重测试用的父节点和已验证子节点，避免测试主体过长。
 def _auth_parent_with_verified_leaf(manager: SubAgentManager):
