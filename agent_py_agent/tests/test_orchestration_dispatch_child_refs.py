@@ -119,6 +119,48 @@ def test_dispatch_payload_includes_acceptance_followup():
     assert payload["records"][0]["followup_command"].endswith("--take-over-by <agent>")
 
 
+# LLM: dispatch payload should tell models when only audit/classify actions remain.
+# 函数用途: 防止父模型看到重复 due-check/classify 记录后继续无限调用 dispatch_subagents。
+def test_dispatch_payload_marks_no_progress_terminal_actions():
+    mock_report = MagicMock()
+    mock_report.dry_run = False
+    mock_report.summary = {"total": 2}
+    mock_report.records = [
+        SimpleNamespace(
+            step="due_check",
+            action="scan",
+            run_id="",
+            ok=True,
+            dry_run=False,
+            applied=False,
+            message="scan",
+            before_status="",
+            after_status="",
+        ),
+        SimpleNamespace(
+            step="action_apply",
+            action="classify_blocker",
+            run_id="blocked-run",
+            ok=True,
+            dry_run=False,
+            applied=True,
+            message="classified",
+            before_status="BLOCKED",
+            after_status="BLOCKED",
+        ),
+    ]
+    mock_agent = MagicMock()
+    mock_agent.subagents.workspace = Path("/tmp/workspace")
+    mock_agent.subagents.list_runs.return_value = []
+
+    payload = DispatchSubagentsTool(mock_agent)._report_payload(mock_report)
+
+    terminal = payload["dispatch_terminal"]
+    assert terminal["no_progress_actions_only"] is True
+    assert terminal["recommended_next_action"] == "stop_dispatch_and_report_blockers"
+    assert terminal["blocked_run_ids"] == ["blocked-run"]
+
+
 # LLM: test_dispatch_payload_exposes_recovery_valid_run_ids covers model retry ergonomics.
 # 函数用途: 模型传错 run_id 时，顶层恢复 payload 要直接给机器可读的 valid_run_ids。
 def test_dispatch_payload_exposes_recovery_valid_run_ids():

@@ -29,6 +29,25 @@ class DispatchNoProgressTracker:
         return self.repeated_rounds >= 2
 
 
+# LLM: dispatch_no_progress_payload exposes no-progress diagnosis to model-facing dispatch tools.
+# 函数用途: 当 dispatch_subagents 只做重复审计/分类而没有真实推进时，返回机器可读停止提示，避免父模型继续空转调用。
+def dispatch_no_progress_payload(dispatch_report) -> dict[str, object]:
+    signature = _dispatch_no_progress_signature(dispatch_report)
+    if signature is None or not signature:
+        return {}
+    records = list(getattr(dispatch_report, "records", []) or [])
+    return {
+        "no_progress_actions_only": True,
+        "recommended_next_action": "stop_dispatch_and_report_blockers",
+        "reason": (
+            "本轮 dispatch 只有 due-check、inspect 或 classify 等记录类动作；"
+            "没有创建子代理、状态变化或验收执行。请停止重复 dispatch，改为汇报 blockers 和 refs。"
+        ),
+        "record_count": len(records),
+        "blocked_run_ids": _record_run_ids(records),
+    }
+
+
 # LLM: _dispatch_no_progress_signature protects parent dispatch from repeating identical audit-only work forever.
 # 函数用途: 给一轮调度生成“无实际推进”的稳定签名；如果本轮创建孩子、改变状态或执行动作，则返回 None 让循环继续。
 def _dispatch_no_progress_signature(dispatch_report) -> tuple | None:
@@ -148,4 +167,15 @@ def _safe_list(record, field_name: str) -> list:
     return value if isinstance(value, list) else []
 
 
-__all__ = ["DispatchNoProgressTracker"]
+# LLM: _record_run_ids keeps terminal hints concrete without copying bulky record bodies.
+# 函数用途: 从无进展调度记录中提取涉及的 run_id，供父模型最终汇报而不是继续重复调度。
+def _record_run_ids(records: list[object]) -> list[str]:
+    run_ids: list[str] = []
+    for record in records:
+        run_id = _safe_str(record, "run_id") or ""
+        if run_id and run_id not in run_ids:
+            run_ids.append(run_id)
+    return run_ids[:20]
+
+
+__all__ = ["DispatchNoProgressTracker", "dispatch_no_progress_payload"]

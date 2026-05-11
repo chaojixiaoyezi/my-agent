@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..tools import BaseTool, ToolExecutionResult
+from .dispatch_no_progress import dispatch_no_progress_payload
 from .dispatch_params import DispatchParams
 from .orchestration_dispatch_payload import dispatch_record_payload, dispatch_recovery_payload
 from .orchestration_dispatch_scope import (
@@ -117,6 +118,8 @@ class DispatchSubagentsTool(BaseTool):
             "dispatch_json": str(self.agent.subagents.workspace / "subagent_dispatch_report.json"),
             "dispatch_md": str(self.agent.subagents.workspace / "SUBAGENT_DISPATCH.md"),
         }
+        if terminal := dispatch_no_progress_payload(report):
+            payload["dispatch_terminal"] = terminal
         payload.update(direct_children_progress_payload(self.agent))
         return payload
 

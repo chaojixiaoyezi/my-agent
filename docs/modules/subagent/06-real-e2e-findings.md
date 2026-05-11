@@ -97,6 +97,7 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Remaining Gap：失败分支自动恢复还没完全闭环。当前已经证明 root->child->grandchild->leaf 能真实写部分文件，root 在一个 child blocked 后能继续推进别的 child；还缺自动救援超时 coordinator、接管残留 PLANNING leaf，以及完整 48 文件 main-node-only 全绿复跑。
 - Small Fixed Retest：主节点单入口 1/2/4 小树复测通过。外层只启动 root，root 创建 2 child，child 创建 4 leaf，4 个 leaf 真实写出算法文件并通过父级 Python smoke test；leaf 写工具缺失和旧 failure/capability 状态残留已修复。还剩一个验收噪音：某 leaf 的 acceptance plan 因“空测试命令”进入 `request_human`，需要后续让空测试命令降级成 inspect-only 或生成可执行检查。
 - Debug Trace：子代理调试日志改成正式 `subagent_debug_trace_level` 开关。默认 0 不写；1-5 只写内部 runtime 的 refs-only JSONL，用于后续多层真实测试定位谁创建、谁运行、谁收束，不污染 deliverables。
+- Stage7 R34：购物站 10 个文件真实落到用户产物目录，但 root/部分 child 的 `output.json` 缺 evidence packet，导致严格验收失败；同时 dispatch 工具缺少“只剩重复记账，不要再调度”的明确提示。现在 output.json 自动收口会从已存在报告/产物路径补最小证据包，dispatch_subagents 会返回 `dispatch_terminal` 让父模型停下来汇报 blockers。
 
 ## 2026-05-09 Real 3-Subagent Parallel E2E
 
@@ -2926,3 +2927,35 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Status: recorded. 下一片建议合并修：成功无证据自动转待修复/重开；live prompt 进一步突出 scoped `read_artifact`。
 - Remaining check:
   - Re-run clean R34 after no-progress fuse. Expected result: 如果 root 已完成且剩余只是重复 record-only blocked 分类，顶层 CLI 应自然返回，不再需要观察者手动 kill。若仍挂住，继续查 run-loop 外层是否还有不看 `stopped_by_no_progress` 的循环。
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R34
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Config: `/Users/xiaoyezi/my-claude-code/.my-agent-stage7-shop-smoke-20260511-r34.yaml`.
+  - Runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/stage7_shop_smoke_20260511_r34`.
+  - User deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r34/build`.
+- 中文说明：
+  - R34 继续按 root-only 原则跑：外层只启动主代理，root 自己派下级，下级再继续派孙/孙孙节点。
+  - 真实购物站产物落到了用户指定 build 目录，目标 10 个文件都存在：8 个 HTML、`style.css`、`app.js`。
+  - root 的 broadcast/direct descendants 通信成功；root 尝试 peer 消息失败是合理的，因为 root 没有 parent，不能作为“同级”发 peer 消息。
+- Finding 109: output.json closeout needs machine evidence packets.
+  - Symptom: root、frontend lead 和一个 HTML leaf 已写报告或产物，但 `output.json` 里 `evidence_packets` 为空，严格验收报 `缺少带 evidence/artifact refs 的 evidence packet`。
+  - 中文解释：模型说“我完成了”不够，机器验收需要能追到文件或报告的证据包。R34 说明只靠提示词还不稳，系统在 `output.json` 自动收口时也要帮忙把已经存在的报告/产物路径整理成最小 evidence packet。
+  - Fix: `subagent_output_json_response()` now derives a minimal traceable `evidence_packets` entry from existing `artifacts` / `evidence` paths and current task reports such as `coordinator_report.md`, then writes the enriched payload back to `output.json`. If the model wrote a non-empty but malformed packet, the system leaves it strict so acceptance can still reject bad evidence.
+  - Verification:
+    - `test_subagent_output_json_response_derives_packet_from_report`.
+    - `test_subagent_output_json_response_does_not_hide_bad_packet`.
+- Finding 110: dispatch_subagents needs a model-facing terminal hint for audit-only rounds.
+  - Symptom: after root wrote its report, the outer run still repeated `due_check -> classify_blocker` on historical blocked runs. No child was created, no status changed, and no acceptance ran.
+  - 中文解释：R33 修了内部循环保险丝，但 R34 暴露出模型工具返回本身也要说清楚：这一轮只是重复记账，别继续 dispatch 了，应该汇报 blockers 和 refs。
+  - Fix: `dispatch_subagents` payload now includes `dispatch_terminal` when a report contains only audit/record actions. It tells the parent model `recommended_next_action=stop_dispatch_and_report_blockers` and lists involved `blocked_run_ids`. The dispatch loop also clears the pending-work flag when the no-progress fuse trips.
+  - Verification:
+    - `test_dispatch_payload_marks_no_progress_terminal_actions`.
+    - `test_dispatch_loop_stops_when_audit_only_actions_repeat`.
+- Finding 111: hierarchy role/depth and parent acceptance still need follow-up hardening.
+  - Symptom: R34 created a direct child whose name/role looked like a grandchild (`小傻妞-html-coord` with `grandchild_coordinator`) before self-correcting with a deeper `小小傻妞-html-coord`. Some upper nodes also judged completion from “10 files exist” while a lower app worker was still appending `app.js`.
+  - 中文解释：路径和文件已经更稳，但“谁领导谁、谁真的完成、父级什么时候可以宣布完成”还要继续收紧。父级不能只看文件存在，还要看 leaf 完成证据、状态机和验收证据。
+  - Status: recorded. 下一轮建议做 authoritative status/handoff sync 和 parent acceptance 对 leaf evidence 的闭环检查。
+- Remaining check:
+  - Re-run clean R35 after evidence-packet enrichment and dispatch terminal hint. Expected result: successful `output.json` closeout should carry traceable packets, and when only historical blockers remain, root should stop dispatching and report refs instead of hanging.

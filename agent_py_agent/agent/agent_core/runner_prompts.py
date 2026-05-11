@@ -56,8 +56,12 @@ _SUBAGENT_REPAIR_RESULT_TEMPLATE = (
     '  "summary": "本轮完成或卡住的摘要",\n'
     '  "used_tools": [],\n'
     '  "used_skills": [],\n'
-    '  "evidence": [],\n'
-    '  "evidence_packets": [],\n'
+    '  "evidence": [\n'
+    '    {"kind": "artifact", "summary": "已检查的产物或报告", "path": "产物路径或报告路径", "ok": true}\n'
+    "  ],\n"
+    '  "evidence_packets": [\n'
+    '    {"id": "evpkt-repair-run-id-short", "claim": "可验收声明", "checked_scope": "修复整理范围", "evidence_refs": ["报告或output.json路径"], "artifact_refs": ["产物路径"], "confidence": 0.8}\n'
+    "  ],\n"
     '  "capability_requests": [],\n'
     '  "artifacts": [],\n'
     '  "tests": [],\n'

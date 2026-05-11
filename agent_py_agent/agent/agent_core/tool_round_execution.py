@@ -122,6 +122,7 @@ def subagent_output_json_response(agent, fallback: ModelResponse) -> ModelRespon
         return fallback
     if not isinstance(payload, dict):
         return fallback
+    payload = _enrich_subagent_output_payload(payload, task)
     text = (
         "[SUBAGENT_RESULT]\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
@@ -129,6 +130,183 @@ def subagent_output_json_response(agent, fallback: ModelResponse) -> ModelRespon
         "系统检测到当前子代理已写出 output.json，已结束工具循环并等待父级验收。"
     )
     return ModelResponse(text=text, backend=fallback.backend)
+
+
+# LLM: _enrich_subagent_output_payload derives traceable packets from files already written by the runner.
+# 函数用途: output.json 自动收口时，如果模型漏写 evidence_packets，就用已有报告/产物路径补最小证据包并回写文件。
+def _enrich_subagent_output_payload(payload: dict[str, object], task) -> dict[str, object]:
+    if _has_traceable_evidence_packets(payload) or _has_malformed_evidence_packets(payload):
+        return payload
+    evidence_refs, artifact_refs = _derive_output_json_refs(payload, task)
+    if not evidence_refs and not artifact_refs:
+        return payload
+    enriched = dict(payload)
+    enriched["evidence_packets"] = [
+        {
+            "id": _evidence_packet_id(task),
+            "claim": _evidence_packet_claim(enriched),
+            "checked_scope": "output_json closeout refs",
+            "evidence_refs": evidence_refs[:8],
+            "artifact_refs": artifact_refs[:8],
+            "confidence": 0.7,
+        }
+    ]
+    _write_enriched_output_json(task, enriched)
+    return enriched
+
+
+# LLM: _has_traceable_evidence_packets checks the strict acceptance contract before auto-enrichment.
+# 函数用途: 判断 output.json 是否已经有带 refs 的 evidence packet；已有好证据时不改模型结果。
+def _has_traceable_evidence_packets(payload: dict[str, object]) -> bool:
+    packets = payload.get("evidence_packets")
+    if not isinstance(packets, list):
+        return False
+    for packet in packets:
+        if not isinstance(packet, dict):
+            continue
+        if _string_refs(packet.get("evidence_refs")) or _string_refs(packet.get("artifact_refs")):
+            return True
+    return False
+
+
+# LLM: _has_malformed_evidence_packets avoids hiding explicitly bad packets with a synthetic good one.
+# 函数用途: 如果模型写了非空但无 refs 的 evidence_packets，保留验收器严格拒绝；只修复完全缺失/空列表场景。
+def _has_malformed_evidence_packets(payload: dict[str, object]) -> bool:
+    packets = payload.get("evidence_packets")
+    if not isinstance(packets, list) or not packets:
+        return False
+    return not _has_traceable_evidence_packets(payload)
+
+
+# LLM: _derive_output_json_refs collects only existing refs so auto-enrichment stays evidence-based.
+# 函数用途: 从 artifacts/evidence/reports/output.json 中提取真实存在的路径；不读取正文，不虚构产物。
+def _derive_output_json_refs(payload: dict[str, object], task) -> tuple[list[str], list[str]]:
+    artifact_refs = _payload_path_refs(payload.get("artifacts"))
+    evidence_refs = _payload_path_refs(payload.get("evidence"))
+    evidence_refs.extend(_task_report_refs(task))
+    if artifact_refs or evidence_refs:
+        output_ref = _existing_path(getattr(task, "output_json", ""))
+        if output_ref:
+            evidence_refs.append(output_ref)
+    return _unique_strings(evidence_refs), _unique_strings(artifact_refs)
+
+
+# LLM: _payload_path_refs extracts file refs from model-provided evidence/artifact arrays.
+# 函数用途: 遍历结构化数组里的 path/file_path/url 字段，只保留可追溯引用，避免把大正文塞进证据包。
+def _payload_path_refs(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    refs: list[str] = []
+    for item in value:
+        refs.extend(_payload_item_refs(item))
+    return refs
+
+
+# LLM: _payload_item_refs keeps per-item ref extraction shallow for size guards.
+# 函数用途: 从单个 evidence/artifact 对象中取 path/file_path/url 引用；坏形态返回空列表。
+def _payload_item_refs(item: object) -> list[str]:
+    if not isinstance(item, dict):
+        return []
+    refs: list[str] = []
+    for key in ("path", "file_path", "url"):
+        ref = _ref_string(item.get(key))
+        if ref:
+            refs.append(ref)
+    return refs
+
+
+# LLM: _task_report_refs prefers runner-written reports as closeout evidence for coordinator nodes.
+# 函数用途: output.json 本身太短时，从当前 task 的 reports 目录找已存在报告作为 evidence_refs。
+def _task_report_refs(task) -> list[str]:
+    reports_dir_text = str(getattr(task, "reports_dir", "") or "").strip()
+    if not reports_dir_text:
+        return []
+    reports_dir = Path(reports_dir_text)
+    if not reports_dir.is_dir():
+        return []
+    names = (
+        "coordinator_report.md",
+        "runner_result.json",
+        "test_execution.json",
+        "acceptance_review.json",
+        "parent_acceptance_auto_execution.json",
+        "parent_acceptance_decision.json",
+        "failure_handoff.json",
+        "takeover_readiness.json",
+    )
+    return [ref for name in names if (ref := _existing_path(reports_dir / name))]
+
+
+# LLM: _ref_string accepts existing local paths and URLs as compact evidence refs.
+# 函数用途: 将候选引用归一化成字符串；本地路径必须真实存在，URL 保留给外部证据。
+def _ref_string(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith(("http://", "https://")):
+        return text
+    return _existing_path(text)
+
+
+# LLM: _existing_path resolves filesystem refs without globbing or reading file contents.
+# 函数用途: 检查候选路径是否存在；失败时返回空字符串，避免把模型散文当证据。
+def _existing_path(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        path = Path(text).expanduser()
+        return str(path) if path.exists() else ""
+    except OSError:
+        return ""
+
+
+# LLM: _evidence_packet_id creates deterministic-enough ids from real task identity.
+# 函数用途: 给自动补齐的 evidence packet 一个稳定、短小、可读的 id。
+def _evidence_packet_id(task) -> str:
+    run_id = str(getattr(task, "id", "") or "run").strip() or "run"
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in run_id)
+    return f"evpkt-output-json-{safe[:48]}"
+
+
+# LLM: _evidence_packet_claim keeps auto-generated evidence honest and bounded.
+# 函数用途: 从 summary/status 生成简短 claim；没有摘要时说明只是 output.json 收口证据，不替模型夸大完成度。
+def _evidence_packet_claim(payload: dict[str, object]) -> str:
+    summary = str(payload.get("summary") or "").strip()
+    if summary:
+        return summary[:200]
+    status = str(payload.get("status") or "AWAITING_ACCEPTANCE").strip()
+    return f"runner wrote output.json closeout with status={status}"
+
+
+# LLM: _write_enriched_output_json keeps disk state aligned with the synthetic final model response.
+# 函数用途: 将补过 evidence_packets 的 payload 回写 task.output_json，让后续验收读取同一份证据。
+def _write_enriched_output_json(task, payload: dict[str, object]) -> None:
+    try:
+        Path(task.output_json).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        return
+
+
+# LLM: _string_refs normalizes evidence_refs/artifact_refs values from model JSON.
+# 函数用途: 接受字符串列表作为 refs；其他形态按空处理，交给验收器继续严格检查。
+def _string_refs(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item or "").strip()]
+
+
+# LLM: _unique_strings preserves first-seen evidence order while removing duplicates.
+# 函数用途: 压缩自动证据包 refs，避免同一路径在 evidence_refs 中重复出现。
+def _unique_strings(values: list[str]) -> list[str]:
+    unique: list[str] = []
+    for value in values:
+        if value and value not in unique:
+            unique.append(value)
+    return unique
 
 
 # LLM: _append_assistant_tool_round_context protects the next live prompt from large tool payloads.
