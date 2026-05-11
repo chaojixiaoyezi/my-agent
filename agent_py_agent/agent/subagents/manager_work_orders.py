@@ -121,14 +121,14 @@ def ensure_work_order_files(task: SubAgentTask) -> None:
     _write_if_missing(Path(task.skill_sparks_file), _skill_sparks_content(task))
     _write_if_missing(Path(task.handoff_file), _handoff_content(task))
     _write_if_missing(Path(task.debrief_file), _DEBRIEF_TMPL)
-    _write_json_if_missing(Path(task.output_json), _OUTPUT_JSON_TMPL.format(task_id=task.id, status=task.status))
-    _write_json_if_missing(Path(task.status_report_json), _STATUS_REPORT_JSON_TMPL.format(task_id=task.id, status=task.status))
+    _write_json_if_missing(Path(task.output_json), _output_json_template(task.id, task.status))
+    _write_json_if_missing(Path(task.status_report_json), _status_report_json_template(task.id, task.status))
     _write_json_if_missing(Path(task.checkpoint_json), _CHECKPOINT_JSON_TMPL(task.id, task.status))
     _write_json_if_missing(Path(task.decision_ledger_json), _DECISION_LEDGER_JSON_TMPL(task.id))
     _write_if_missing(Path(task.progress_md), _PROGRESS_MD_TMPL.format(task_id=task.id, status=task.status))
     _write_json_if_missing(Path(task.failing_tests_json), _FAILING_TESTS_JSON_TMPL(task.id))
     _write_json_if_missing(Path(task.next_actions_json), _NEXT_ACTIONS_JSON_TMPL(task.id))
-    _write_json_if_missing(Path(task.dependencies_json), _DEPS_JSON_TMPL.format(task_id=task.id))
+    _write_json_if_missing(Path(task.dependencies_json), _deps_json_template(task.id))
 
 
 # LLM: write_takeover_file 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
@@ -263,10 +263,51 @@ _TEST_CHECKLIST_TMPL = "# TEST_CHECKLIST\n\n## From Requirement\n\n- [ ] 原始�
 _BUGS_TMPL = "# BUGS\n\n## Open P0/P1\n\n- 暂无\n\n## Non-blocking\n\n- 暂无\n"
 _SKILL_USAGE_TMPL = "# SKILL_USAGE\n\n记录本任务匹配、读取和实际使用过的 skill / references / 外部知识库。\n\n## Used\n\n- 暂无\n\n## Considered But Not Used\n\n- 暂无\n"
 _DEBRIEF_TMPL = "# DEBRIEF\n\n## 方法\n\n- 待填写\n\n## 结果\n\n- 待填写\n\n## 可沉淀经验\n\n- 待填写\n"
-_OUTPUT_JSON_TMPL = '{{"run_id": "{task_id}", "status": "{status}", "artifacts": [], "tests": [], "acceptance": [], "blockers": [], "next_action": ""}}'
-_STATUS_REPORT_JSON_TMPL = '{{"run_id": "{task_id}", "version": 0, "state": "{status}", "progress": 0.0, "current_step": "{status}", "summary_delta": {{"facts_added": [], "facts_invalidated": [], "decisions_changed": [], "open_questions": []}}, "budget_used": {{}}, "artifact_refs": [], "evidence_refs": [], "blockers": [], "checkpoint_ref": "", "next_recommended_action": ""}}'
 _PROGRESS_MD_TMPL = "# PROGRESS\n\n- run_id: {task_id}\n- status: {status}\n- progress: 0.0\n- current_step: {status}\n\n## Latest Summary\n\n- 暂无\n"
-_DEPS_JSON_TMPL = '{{"run_id": "{task_id}", "dependencies": []}}'
+
+
+# LLM: _output_json_template must return a dict, not pre-serialized JSON, because _write_json_if_missing serializes once.
+# 函数用途: 生成子代理初始 output.json 的最小对象；避免写成 JSON 字符串导致父级验收无法读取字段。
+def _output_json_template(task_id: str, status: str) -> dict[str, object]:
+    return {
+        "run_id": task_id,
+        "status": status,
+        "artifacts": [],
+        "tests": [],
+        "acceptance": [],
+        "blockers": [],
+        "next_action": "",
+    }
+
+
+# LLM: _status_report_json_template keeps the initial progress report machine-readable.
+# 函数用途: 生成初始 status_report.json 对象，供父级查询进度和恢复链路时直接读取。
+def _status_report_json_template(task_id: str, status: str) -> dict[str, object]:
+    return {
+        "run_id": task_id,
+        "version": 0,
+        "state": status,
+        "progress": 0.0,
+        "current_step": status,
+        "summary_delta": {
+            "facts_added": [],
+            "facts_invalidated": [],
+            "decisions_changed": [],
+            "open_questions": [],
+        },
+        "budget_used": {},
+        "artifact_refs": [],
+        "evidence_refs": [],
+        "blockers": [],
+        "checkpoint_ref": "",
+        "next_recommended_action": "",
+    }
+
+
+# LLM: _deps_json_template returns the default dependency ledger payload for new work orders.
+# 函数用途: 生成 dependencies.json 初始对象；没有依赖时明确写空列表，方便后续扩展。
+def _deps_json_template(task_id: str) -> dict[str, object]:
+    return {"run_id": task_id, "dependencies": []}
 
 
 # LLM: _CHECKPOINT_JSON_TMPL 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

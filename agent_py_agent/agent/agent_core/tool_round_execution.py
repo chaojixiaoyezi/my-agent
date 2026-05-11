@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from ..backends import ModelResponse
+from ..subagents.utils import _read_json_object
 from ..tools import ToolExecutionResult
 from ._runtime_params import ToolLoopExecuteParams
 from .tool_call_context_reducer import (
@@ -117,9 +118,9 @@ def subagent_output_json_response(agent, fallback: ModelResponse) -> ModelRespon
     run_id = str(getattr(agent, "_current_subagent_run_id", "") or "")
     try:
         task = agent.subagents.load(run_id)
-        payload = json.loads(Path(task.output_json).read_text(encoding="utf-8"))
     except Exception:
         return fallback
+    payload = _read_json_object(Path(task.output_json))
     if not isinstance(payload, dict):
         return fallback
     payload = _enrich_subagent_output_payload(payload, task)

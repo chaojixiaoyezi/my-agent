@@ -29,7 +29,7 @@ class WriteFileTool(FileSystemTool):
         self.spec = ToolSpec(
             name="write_file",
             category="filesystem",
-            description="写入或覆盖一个文本文件，适合生成新代码、脚本和配置。",
+            description="写入或覆盖文本文件；缺失父目录会自动创建。",
             use_cases=[
                 "新建代码文件、配置文件或文档",
                 "已经明确要重写某个文件的完整内容",
@@ -44,7 +44,7 @@ class WriteFileTool(FileSystemTool):
                 "content": "完整文本内容",
             },
             parameter_details={
-                "path": "相对工作区的目标文件路径；父目录不存在时会自动创建。",
+                "path": "相对工作区的目标文件路径；缺失父目录会自动创建。",
                 "content": "会直接成为文件的新内容；原文件存在时会被整体覆盖。长文件请保持短骨架，后续用 append_file 分块补齐。",
             },
             examples=[
@@ -87,7 +87,7 @@ class AppendFileTool(FileSystemTool):
         self.spec = ToolSpec(
             name="append_file",
             category="filesystem",
-            description="向文本文件末尾追加内容，适合补日志、补文档和补配置片段。",
+            description="向文本文件末尾追加内容；缺失父目录会自动创建。",
             use_cases=[
                 "往日志、Markdown、结果汇总文件后面追加一段内容",
                 "在不覆盖原文件的前提下补充说明",
@@ -102,7 +102,7 @@ class AppendFileTool(FileSystemTool):
                 "content": "要追加的文本内容",
             },
             parameter_details={
-                "path": "相对工作区的目标文件路径；父目录不存在时会自动创建。",
+                "path": "相对工作区的目标文件路径；缺失父目录会自动创建。",
                 "content": "会直接拼接到文件尾部，不会替换已有内容。",
             },
             examples=[

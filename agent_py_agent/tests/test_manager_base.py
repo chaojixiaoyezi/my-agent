@@ -276,3 +276,33 @@ class TestEnsureWorkOrderFiles:
         assert Path(task.status_file).exists()
         assert Path(task.work_log_file).exists()
         assert Path(task.output_json).exists()
+
+    # LLM: default work-order JSON must be a JSON object so parent acceptance can read fields immediately.
+    # 函数用途: 防止初始 output/status/dependencies 文件被写成“JSON 字符串包 JSON”，导致父级聚合丢字段。
+    def test_creates_machine_readable_default_json_files(self, tmp_path: Path):
+        from agent_py_agent.agent.subagents.manager_base import SubAgentBaseMixin
+        from agent_py_agent.agent.subagents.models import SubAgentTask
+
+        mixin = SubAgentBaseMixin(workspace=tmp_path)
+        task = SubAgentTask(
+            id="test_json_files",
+            goal="测试任务",
+            thought="思考",
+            plan=["步骤1"],
+            agent_name="test",
+            created_at=1234567890.0,
+            updated_at=1234567890.0,
+            **mixin._build_work_order_paths("test_json_files"),
+        )
+
+        mixin._ensure_work_order_files(task)
+
+        output = json.loads(Path(task.output_json).read_text(encoding="utf-8"))
+        status = json.loads(Path(task.status_report_json).read_text(encoding="utf-8"))
+        deps = json.loads(Path(task.dependencies_json).read_text(encoding="utf-8"))
+        assert isinstance(output, dict)
+        assert output["run_id"] == "test_json_files"
+        assert isinstance(status, dict)
+        assert status["run_id"] == "test_json_files"
+        assert isinstance(deps, dict)
+        assert deps["dependencies"] == []

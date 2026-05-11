@@ -218,6 +218,32 @@ class OutputJsonCompletionBackend(BaseBackend):
         )
 
 
+# LLM: DispatchCompletionBackend proves completed subagent dispatch can close without a second model call.
+# 类用途: 测试专用后端；第一次要求 dispatch_subagents，若系统没有本地收口而二次请求模型就失败。
+class DispatchCompletionBackend(BaseBackend):
+    name = "fake_dispatch_completion_backend"
+
+    # LLM: __init__ tracks model calls so the regression test catches extra final requests.
+    # 函数用途: 初始化调用计数；第二次 generate 说明顶层 dispatch 未按本地 DONE/VERIFIED 状态收敛。
+    def __init__(self):
+        self.calls = 0
+
+    # LLM: generate emits one dispatch_subagents call and refuses extra finalization turns.
+    # 函数用途: 让主代理执行一次 dispatch_subagents；之后应由系统本地生成收尾回答。
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls > 1:
+            raise AssertionError("completed dispatch should close without another model call")
+        return ModelResponse(
+            text=(
+                "[TOOL_CALL]\n"
+                '{"tool":"dispatch_subagents","apply":true,"execute_runners":false,"no_probe":true}\n'
+                "[/TOOL_CALL]"
+            ),
+            backend=self.name,
+        )
+
+
 class DemoHandler(BaseHTTPRequestHandler):
     """LLM: minimal HTTP handler for local integration tests of fetch and http_request tools.
 

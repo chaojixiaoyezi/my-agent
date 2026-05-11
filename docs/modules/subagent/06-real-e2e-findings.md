@@ -2959,3 +2959,60 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Status: recorded. 下一轮建议做 authoritative status/handoff sync 和 parent acceptance 对 leaf evidence 的闭环检查。
 - Remaining check:
   - Re-run clean R35 after evidence-packet enrichment and dispatch terminal hint. Expected result: successful `output.json` closeout should carry traceable packets, and when only historical blockers remain, root should stop dispatching and report refs instead of hanging.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R35
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Config: `/Users/xiaoyezi/my-claude-code/.my-agent-stage7-shop-smoke-20260511-r35.yaml`.
+  - Runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/stage7_shop_smoke_20260511_r35`.
+  - User deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r35/build`.
+- 中文说明：
+  - R35 继续按 root-only 原则跑：外层只启动主代理，主代理创建 root，root 自己派下级，下级继续派孙/孙孙节点。
+  - 子代理树最终 5 个节点全部 `DONE/VERIFIED`，每个 `output.json` 都有 `evidence_packets`；用户指定 build 目录里 10 个购物站文件全部存在。
+  - R34 的 evidence-packet 自动补强有效：这轮没有再因为成功结果缺少可追溯 evidence packet 而卡住父级验收。
+- Finding 112: top-level final model call can hang after completed dispatch.
+  - Symptom: root 和 direct child 都已经 `DONE/VERIFIED`，dispatch 报告也已经验收通过；但顶层 `my-agent run` 继续等待一次新的模型请求，接近 15 分钟没有新的子代理事件，最后由观察者 `Ctrl-C` 保留栈和文件证据。
+  - 中文解释：活已经做完了，系统却还想让最外层模型再“写一段总结”。真实网络请求可能卡住或很慢，这会让用户看起来像任务没结束，也会浪费 token/API 时间。
+  - Root cause: 顶层工具循环在 `dispatch_subagents` 后总是回到模型，让模型根据工具记录再输出最终回答；没有识别“当前 workspace 里的所有子代理都已经 DONE/VERIFIED，可以本地收口”这个确定性状态。
+  - Fix: 顶层主代理刚执行过 `dispatch_subagents`，且当前子代理 workspace 内所有任务都是 `DONE/VERIFIED` 时，系统直接生成 refs-first 本地收尾回答，不再发起额外模型请求。这个口只对顶层主代理生效；子代理 runner 内仍必须通过自己的 `output.json` 收口，避免破坏 runner 契约。
+  - Verification:
+    - `test_completed_dispatch_closes_without_extra_model_call`.
+    - `test_subagent_runner_stops_after_output_json_write`.
+- Finding 113: target depth wording still needs clearer max-depth semantics.
+  - Symptom: 本轮提示里“至少 4 层 / at least 4 layers”被模型理解成可以继续往下派，最后出现 depth=4 的 `小小小小傻妞-*` 节点；同时旧 prompt 片段仍带有 “English naming” 表述，和中文前缀规则不完全一致。
+  - 中文解释：如果只说“至少 4 层”，模型可能觉得越深越保险。我们真实测试目前只要求主 -> 子 -> 孙 -> 孙孙这 4 层，代码不能写死 4 层，但测试任务需要能明确 `target_depth` 和 `max_depth`，否则模型会多派一层。
+  - Status: recorded. 下一片建议在 context bundle / dispatch prompt 里加清晰的 `target_depth`、`max_depth`、`depth_name_prefix` 字段，并让 root 给下级传递同一份深度约束。
+- Remaining check:
+  - Re-run clean R36 after top-level dispatch closeout. Expected result: 当 root 和所有子代理已 `DONE/VERIFIED` 时，顶层 CLI 应直接返回本地收尾说明，不再等待额外模型请求；同时下一轮 prompt 要明确最多 4 层，避免继续创建 `小小小小傻妞-*`。
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R36
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Config: `/Users/xiaoyezi/my-claude-code/.my-agent-stage7-shop-smoke-20260511-r36.yaml`.
+  - Runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/stage7_shop_smoke_20260511_r36`.
+  - User deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r36/build`.
+- 中文说明：
+  - R36 继续按 root-only 原则跑，外层只启动主代理；主代理创建 root，root 自己派 `小傻妞`，child 再派 `小小傻妞`，孙节点再派 3 个 `小小小傻妞-*` leaf worker。
+  - 链路创建到了目标 4 层，说明“主 -> 子 -> 孙 -> 孙孙”的递归调度通道已经能跑起来；观察者没有直接启动任何下级代理。
+  - 本轮没有等到完整产物，因为叶子 worker 在目标 build 目录不存在时误判自己缺少 `mkdir`/shell 能力，其中一个 leaf 进入 `BLOCKED`，观察者用 `SIGTERM` 停止本轮以保留证据。
+- Finding 114: initial work-order JSON files were double-encoded strings.
+  - Symptom: 新创建任务的 `output.json` 内容形如 `"{"run_id": "...", "status": "PLANNING", ...}"`，外层是 JSON string，不是 JSON object；观察脚本和父级聚合读取 `.keys()` 时会失败。
+  - 中文解释：文件看起来像 JSON，但机器读出来其实是“一段字符串”。父级要读 `status`、`artifacts`、`evidence_packets` 时就拿不到字段。
+  - Fix: 初始 `output.json`、`status_report.json`、`dependencies.json` 现在由 dict template 生成，再交给 `_write_json_if_missing` 序列化一次；`_read_json_object` 也兼容旧的双层编码，避免历史任务读取失败。
+  - Verification:
+    - `test_creates_machine_readable_default_json_files`.
+    - `test_read_nested_json_string_object`.
+- Finding 115: leaf worker misunderstood missing product directory as missing capability.
+  - Symptom: leaf worker 的授权写入根包含用户 build 目录，`write_file` 本身也能自动创建父目录；但 runner prompt 没把这点说清，模型看到 `list_files` 返回路径不存在后，直接报告“缺少目录创建工具/无 shell”，导致任务 `BLOCKED`。
+  - 中文解释：不是权限不够，也不是工具做不到，是提示词没把工具能力讲明白。叶子节点应该直接用 `write_file` 写短骨架，工具会帮它建目录。
+  - Fix: runner contract 明确写入规则：`write_file` / `append_file` 会在授权 `allowed_write_roots` 内自动创建父目录，不要因为目标目录不存在就标记 `BLOCKED`。工具 catalog 的一句话描述也同步补上“父目录不存在时会自动创建”。
+  - Verification:
+    - `test_prompt_says_write_file_creates_parent_dirs`.
+- Finding 116: big inline HTML write still risks tool-call truncation.
+  - Symptom: 一个 leaf 尝试把完整 HTML 一次性塞进 `write_file.content`，模型回复缺 `[/TOOL_CALL]`，工具层返回 parse hint 后它又绕回目录检查。
+  - 中文解释：大文件一次塞进工具调用容易截断。我们已经提示“短骨架 + append_file 分块”，但模型遇到目录不存在后注意力跑偏。本次先补清目录能力，后续继续观察是否需要更强的“长内容分块执行器”。
+  - Status: recorded. Not fully fixed in this patch.
+- Remaining check:
+  - Re-run clean R37. Expected result: 新任务默认 JSON 是 object；叶子节点遇到不存在的 build 目录时，直接用 `write_file` 创建短骨架并继续 `append_file` 分块，而不是因为缺 mkdir/shell 进入 `BLOCKED`。如果仍出现长 HTML 工具截断，下一片优先做更硬的分块写入引导或受控文件生成 helper。

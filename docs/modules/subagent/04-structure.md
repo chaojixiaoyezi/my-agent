@@ -472,3 +472,7 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `dispatch_runner_selection.py` 在 runner 候选执行前预检显式 `include_run_ids`。缺失或越界 id 会生成 `runner_selection/invalid_run_ids`，把 `valid_scope_run_ids` 和保守 `possible_corrections` 返回给父节点；调度器不自动改写 id，也不启动该轮 runner。
 - `subagents/parsing.py` 的 runner/planner 结果块解析现在支持“缺结束标记但 JSON object 完整”的窄恢复；`parsing_partial.py` 只在成功态且已有可追溯 `evidence_packets` 时恢复截断尾部，避免把无证据长文本误当完成。
 - `agent_core/orchestration_tools.py` 的 `create_subagents` 会在显式 root/coordinator 交付文件/网站但缺少产物写入根时拒绝创建，要求模型把 `extra_write_roots` 放在工具 JSON 顶层重试；这样 root 不会把内部 agent-run workspace 下的 `build` 误当成用户 deliverables 目录。
+- `agent_core/tool_loop_completion.py` / `subagent_dispatch_closeout.py` 是工具轮后的确定性收口层：子代理 runner 仍优先通过自身 `output.json` 收口，顶层主代理只有在刚执行过 `dispatch_subagents` 且所有 run 都 `DONE/VERIFIED` 时才本地生成 refs-first 最终回答。
+- `manager_work_orders.py` 的初始 `output.json`、`status_report.json`、`dependencies.json` 必须由 dict template 写入，再交给 `_write_json_if_missing` 序列化一次；禁止重新引入“JSON 字符串包 JSON 对象”的双层编码。
+- `subagents/utils.py::_read_json_object` 是子代理 JSON 事实源的容错读取入口，兼容历史双层编码但只返回 dict；新读取点应优先复用它，不要在业务层重复 `json.loads(...).get(...)`。
+- Runner contract 和文件工具说明明确 `write_file` / `append_file` 会在授权 `allowed_write_roots` 内自动创建父目录；叶子节点不应因为目标产品目录尚不存在就上抛 shell/mkdir capability request。

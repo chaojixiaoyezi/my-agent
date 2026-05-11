@@ -38,13 +38,15 @@ def _merge_list(left: list[str], right: list[str]) -> list[str]:
     return merged
 
 
-# LLM: _read_json_object 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
-# 函数用途: 读取或查询JSONobject需要的状态，返回调用方可继续处理的快照；关键副作用: 主要返回快照或派生值，需避免引入额外写入副作用。
+# LLM: _read_json_object tolerates historical JSON-string-wrapped objects while still returning only dicts.
+# 函数用途: 读取子代理 JSON 事实源，兼容旧的双层编码文件；读不到对象时返回空对象，不引入写入副作用。
 def _read_json_object(path: Path) -> dict[str, object]:
     """读取 JSON object，缺失或格式不对时返回空对象。"""
 
     try:
         obj = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(obj, str):
+            obj = json.loads(obj)
     except Exception:
         return {}
     return obj if isinstance(obj, dict) else {}
@@ -89,5 +91,3 @@ def _write_json_if_missing(path: Path, payload: dict[str, object]) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-

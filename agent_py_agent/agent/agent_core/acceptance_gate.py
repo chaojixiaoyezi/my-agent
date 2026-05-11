@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from ..subagents.utils import _read_json_object
+
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
@@ -38,12 +40,11 @@ def acceptance_decision_from_evidence(task) -> str:
 
     # Try to load output.json for test results
     try:
-        import json
         from pathlib import Path
 
         output_path = Path(task.output_json)
         if output_path.exists():
-            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            payload = _read_json_object(output_path)
             tests = payload.get("tests", [])
             passing_tests = sum(1 for t in tests if t.get("ok", False))
             total_tests = len(tests)

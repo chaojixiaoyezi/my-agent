@@ -23,13 +23,13 @@ from .runner_stage_trace import (
 )
 from .tool_call_context_reducer import render_tool_payload_for_live_prompt
 from .tool_context_reducer import render_tool_result_for_live_prompt
+from .tool_loop_completion import ToolRoundCompletionRequest, completion_response_after_tool_round
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 from .tool_round_execution import (
     ToolCallExecuteParams,
     ToolCallRecordParams,
     ToolRoundExecutionRequest,
     execute_tool_round,
-    subagent_output_json_response,
 )
 
 
@@ -57,6 +57,21 @@ def _build_prompt(agent, params: ToolLoopExecuteParams) -> str:
             tool_context=params.tool_context,
         ),
     )
+
+
+# LLM: _next_model_response keeps ToolLoopService.execute focused on control flow.
+# 函数用途: 构建下一轮 prompt 并调用模型，返回 prompt 和 response 给工具循环使用。
+def _next_model_response(agent, params: ToolLoopExecuteParams, tool_rounds: int):
+    prompt = _build_prompt(agent, params)
+    response = _generate_model_response(
+        ModelGenerateParams(
+            agent=agent,
+            params=params,
+            prompt=prompt,
+            tool_rounds=tool_rounds,
+        )
+    )
+    return prompt, response
 
 
 # LLM: _effective_max_tool_rounds 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
@@ -98,15 +113,7 @@ class ToolLoopService:
         tool_rounds = params.tool_rounds
 
         while True:
-            final_prompt = _build_prompt(self._agent, params)
-            response = _generate_model_response(
-                ModelGenerateParams(
-                    agent=self._agent,
-                    params=params,
-                    prompt=final_prompt,
-                    tool_rounds=tool_rounds,
-                )
-            )
+            final_prompt, response = _next_model_response(self._agent, params, tool_rounds)
             final_response = response
 
             if not self._agent.config.enable_tools:
@@ -123,21 +130,37 @@ class ToolLoopService:
                 break
 
             tool_rounds += 1
-            if execute_tool_round(
+            tool_rounds, final_response = self._run_tool_round(
                 ToolRoundExecutionRequest(
-                    agent=self._agent,
-                    params=params,
-                    tool_rounds=tool_rounds,
-                    response=response,
-                    calls=calls,
-                    execute_one=self._execute_one_tool_call,
-                    record_one=self._record_tool_call,
+                    self._agent,
+                    params,
+                    tool_rounds,
+                    response,
+                    calls,
+                    self._execute_one_tool_call,
+                    self._record_tool_call,
                 )
-            ):
-                final_response = subagent_output_json_response(self._agent, response)
+            )
+            if final_response:
                 break
 
         return final_prompt, final_response, tool_rounds
+
+    # LLM: _run_tool_round executes one parsed tool round and returns any deterministic closeout.
+    # 函数用途: 封装工具执行、output.json 收口和顶层 dispatch 收口，让 execute 保持短流程。
+    def _run_tool_round(self, request: ToolRoundExecutionRequest):
+        before_executed_count = len(request.params.executed_tools)
+        subagent_output_written = execute_tool_round(request)
+        final_response = completion_response_after_tool_round(
+            ToolRoundCompletionRequest(
+                self._agent,
+                request.params,
+                request.response,
+                before_executed_count,
+                subagent_output_written,
+            )
+        )
+        return request.tool_rounds, final_response
 
     # LLM: _tool_round_limit_reached 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 处理工具round限制reached相关的数据流，连接当前职责的前后步骤；关键副作用: 需保持运行循环、工具调用、调度记录和最终响应上的返回值和副作用边界稳定。
