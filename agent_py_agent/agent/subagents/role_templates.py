@@ -18,6 +18,7 @@ COORDINATOR_TOOLS = [
     "schedule_child_subagents",
     "dispatch_subagents",
     "subagent_board",
+    "subagent_message",
     *ROLE_BASE_TOOLS,
 ]
 

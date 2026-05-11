@@ -163,30 +163,31 @@ class ToolLoopService:
     # LLM: _execute_one_tool_call 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 推进one工具call的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _execute_one_tool_call(self, request: ToolCallExecuteParams):
+        payload = _payload_with_runtime_scope(self._agent, request.params, request.payload)
         trace_request = RunnerToolStageTraceRequest(
             agent=self._agent,
             params=request.params,
             tool_rounds=request.tool_rounds,
             idx=request.idx,
-            payload=request.payload,
+            payload=payload,
         )
         trace_runner_tool_call_started(trace_request)
-        one_shot_key = _one_shot_tool_call_key(request.payload)
+        one_shot_key = _one_shot_tool_call_key(payload)
         if one_shot_key and one_shot_key in request.params.one_shot_tool_calls:
-            result = _duplicate_one_shot_result(request.payload)
+            result = _duplicate_one_shot_result(payload)
             trace_runner_tool_call_finished(
                 RunnerToolStageTraceRequest(
                     agent=self._agent,
                     params=request.params,
                     tool_rounds=request.tool_rounds,
                     idx=request.idx,
-                    payload=request.payload,
+                    payload=payload,
                     result=result,
                 )
             )
             return result
         result = self._agent.tools.execute_call(
-            request.payload,
+            payload,
             allowed_tools=request.params.allowed_tools,
             granted_capabilities=request.params.granted_capabilities,
             write_boundary=request.params.write_boundary,
@@ -199,7 +200,7 @@ class ToolLoopService:
                 params=request.params,
                 tool_rounds=request.tool_rounds,
                 idx=request.idx,
-                payload=request.payload,
+                payload=payload,
                 result=result,
             )
         )
@@ -230,7 +231,7 @@ class ToolLoopService:
             output=record.result.output,
             ok=record.result.ok,
             request_id=record.params.request_id,
-            run_id=record.params.run_id,
+            run_id=_runtime_run_id(self._agent, record.params),
             task_id=record.params.task_id,
         )
         fail_safe = write_tool_output_fail_safe_checkpoint(request)
@@ -253,6 +254,24 @@ def _without_tool_call_after_limit(agent, response: ModelResponse) -> ModelRespo
         ),
         backend=response.backend,
     )
+
+
+# LLM: _payload_with_runtime_scope injects current runner ids into scoped tools without model involvement.
+# 函数用途: 让 read_artifact 短引用按当前 run/task/request 解析，避免同号 artifact 跨 run 串线。
+def _payload_with_runtime_scope(agent, params: ToolLoopExecuteParams, payload: object) -> object:
+    if not isinstance(payload, dict) or str(payload.get("tool") or "") != "read_artifact":
+        return payload
+    scoped = dict(payload)
+    scoped.setdefault("run_id", _runtime_run_id(agent, params))
+    scoped.setdefault("task_id", params.task_id)
+    scoped.setdefault("request_id", params.request_id)
+    return scoped
+
+
+# LLM: _runtime_run_id falls back to active subagent context for nested runner tool records.
+# 函数用途: 子代理 runner 调用 agent.run(save=False) 时通常不显式传 run_id，这里补当前 runner id。
+def _runtime_run_id(agent, params: ToolLoopExecuteParams) -> str:
+    return str(params.run_id or getattr(agent, "_current_subagent_run_id", "") or "")
 
 
 # LLM: _generate_model_response wraps backend calls with refs-only runner stage trace events.

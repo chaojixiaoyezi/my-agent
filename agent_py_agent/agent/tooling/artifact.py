@@ -32,9 +32,12 @@ class ReadArtifactTool(BaseTool):
         ],
         keywords=["artifact", "tool_output", "externalized", "read_artifact", "checkpoint"],
         parameters={
-            "artifact_ref": "artifact path、sha256 或 call_id；必须能在 tool_outputs/index.jsonl 中命中",
+            "artifact_ref": "artifact path、sha256、scoped_call_id 或 call_id；必须能在 tool_outputs/index.jsonl 中命中",
             "offset": "从正文第几个字符开始读取，默认 0",
             "max_chars": "最多读取多少字符；0 表示读取全部，默认 4000",
+            "run_id": "可选；读取短 call_id 时用于限制当前 runner 作用域，通常由系统自动注入",
+            "task_id": "可选；读取短 call_id 时用于限制当前任务作用域，通常由系统自动注入",
+            "request_id": "可选；读取短 call_id 时用于限制当前请求作用域，通常由系统自动注入",
         },
         examples=[
             '{"tool": "read_artifact", "artifact_ref": "C:/repo/memory_archive/artifacts/tool_outputs/read_file-call-abc.json", "offset": 0, "max_chars": 4000}',
@@ -55,6 +58,9 @@ class ReadArtifactTool(BaseTool):
                 artifact_ref=str(params.get("artifact_ref") or params.get("path") or ""),
                 offset=int(params.get("offset", 0) or 0),
                 max_chars=int(params.get("max_chars", 4000) or 0),
+                run_id=str(params.get("run_id") or ""),
+                task_id=str(params.get("task_id") or ""),
+                request_id=str(params.get("request_id") or ""),
             )
         )
         return ToolExecutionResult(self.spec.name, bool(payload.get("ok")), json.dumps(payload, ensure_ascii=False))

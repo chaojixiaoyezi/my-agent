@@ -243,3 +243,11 @@
 - 中文说明：真实 E2E 里模型会把 artifact 路径前缀抄成当前代码仓库路径，导致明明 index 里有登记，却按错误绝对路径读不到正文；现在 artifact reader 在精确匹配失败时，只允许用唯一 artifact 文件名回到 index 记录。
 - 行为边界不变：修复只信任 `index.jsonl` 已登记记录，仍会检查 artifact 位于 `memory_archive/artifacts/tool_outputs/` 边界内，并校验 sha256；同名多条或未登记文件继续失败，不会变成任意文件读取。
 - 本轮 focused 验收：`python3 -m pytest -q -p no:cacheprovider agent_py_agent/tests/test_memory_artifact_read.py::test_read_artifact_tool_repairs_wrong_prefix_with_unique_artifact_name` -> passed。
+
+## 2026-05-11 scoped tool-output artifact refs
+- 中文说明：真实多层子代理 E2E 暴露出 `read_artifact("17-1")` 这类短调用号会撞到旧轮次记录；模型收到的是“短号”，但 memory index 里同名旧记录排在前面，最终就像 prompt/路径被误传。参考 Hermes/OpenClaw/Codex/Claude Code 的共同边界，工具结果引用必须带 session/run/workspace 作用域，不能靠全局短号猜。
+- `tool_output_externalizer` 现在把 `request_id`、`run_id`、`task_id` 和 `scoped_call_id` 写进 archive record、artifact body 和 `index.jsonl`；subagent runner 调用模型时会把当前 `run_id/task_id` 传入 `agent.run()`，工具循环也会在 `read_artifact` 调用缺 scope 时补当前 subagent run scope。
+- `artifact_reader` 现在解析 path/hash/scoped_call_id/call_id 时会优先匹配当前 run/task/request scope；没有显式 scope 时才回退到最新匹配记录，避免旧 run 的 artifact 被当成当前 run 的事实源。
+- `tool_context_reducer` 的 live prompt 提示现在优先展示 artifact path、`output_scoped_call_id` 和 scope flags；模型要读正文时会拿到可复制的 scoped `read_artifact` 参数，而不是只看到全局短号。
+- 行为边界不变：artifact 正文仍只通过显式 `read_artifact` 读取，仍校验 index、目录边界和 sha256；这次修复只改变“引用怎么定位”，不把大输出重新塞回 prompt，也不开放任意文件读取。
+- 本轮 focused 验收：`python3 -m pytest -q agent_py_agent/tests/test_memory_artifact_read.py agent_py_agent/tests/test_tool_output_externalizer.py agent_py_agent/tests/test_failure_introspector.py agent_py_agent/tests/test_tools/test_tool_loop.py` -> `39 passed`。

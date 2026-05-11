@@ -62,6 +62,10 @@
 - 2026-05-10 子代理角色模板第一片已落地：新增外置 JSON role template catalog，内置 `coordinator/worker/bug_finder/tester/acceptor/researcher/writer` 均带中文说明、默认工具和输出契约；用户可在 `.agent/subagents/roles/*.json` 增加广义角色模板，代码只负责加载、校验和只读/写权限边界。`subagent_allowed_tools=[]` 现在明确表示自动工具策略，不再等同于“没有工具”；默认 `max_subagents=1000`，真实并发仍由 runner/scheduler 控制。
 - 2026-05-11 Stage7 R12/R13/R14 真实购物站点 E2E 修复已落地：runner 成功写入当前子代理 `output.json` 后会直接合成 `SUBAGENT_RESULT` 收口，不再多打一轮模型；静态 Web 自动验收存在时，会丢弃缺 `file_path` / `content_pattern` / `site_root` 的模型空壳测试；单页 HTML artifact 也会生成 `static_site_check`，避免首页这类单页 leaf 被空壳 content_check 误判失败。
 - 2026-05-11 Stage7 R19 真实购物站点 E2E 修复已落地：外层只启动 root，root 自建 4 个一级 coordinator，子层写出购物站 10 个顶层必需文件；本轮暴露并修复 repair leaf 被 `duplicate_leaf_target` 误挡、root/coordinator 无法写 agent-run workspace 报告、`runner_timeout_seconds=off` 仍触发模型调度内 due-check 超时接管、以及 static-site check 误把 JS template literal 当 `${...}` 占位符的问题。R19 仍保留 root recovery 不够 actionable 的 gap，下一轮 R20 需要验证 shared-assets 能创建修复 leaf 并收口。
+- 2026-05-11 Stage7 R20 权限/层级/通信修复已落地：层级命名固定为 `小傻妞-*` / `小小傻妞-*` / `小小小傻妞-*` 递增；上层继承下层产物写入根用于检查、接管和救援，但 `product_write_policy=delegate` 会阻止 coordinator/root/tester/reviewer 直接写业务产物，要求创建 worker/writer/leaf_worker；父级明确文件名和 4 层链路会作为硬合同传给下层；新增 `subagent_message`，支持 `direct+descendants` 给少数子孙定向纠偏、`broadcast+descendants` 给自己子树写 scoped shared-board 广播、`direct+peers` 给同父级平级讨论，并阻断跨分支越权通知。
+- 2026-05-11 Stage7 R21 真实 E2E 发现并修正长批量派工截断：root-only 购物站测试中，深层 coordinator 一次创建 3 个长 goal 的 leaf_worker，模型工具 JSON 半截截断后进入 BLOCKED。`schedule_child_subagents` 工具入口现在单次最多接受 2 个 child，超过会明确要求拆成多次 1-2 个 child 调用；manager 服务层仍保留批量能力，限制只作用在模型 runner 工具入口，防止真实模型输出过长卡死。
+- 2026-05-11 Stage7 R22/R27 真实 E2E 发现并修正禁止文件名误传：`product-detail.html（禁止改成 product.html）` 里的 `product.html` 曾被正则误抽成父级明确文件，导致 child goal 带错必需产物。新增 `required_file_terms.py`，层级 handoff、context bundle 和静态站 required_files 共用它：正向交付文件进入 `required_files`，禁止反例进入 `forbidden_files`，下层必须按结构化合同传递，不再从长散文里二次猜。
+- 2026-05-11 Stage7 R27 真实 E2E 进一步暴露长文件写入截断：`style.css` 的完整 `write_file.content` 两次缺少结束标记；parse-error hint 虽然提示了 `append_file`，模型仍重复长写。runner contract 和 write/append 工具说明现在提前要求长 CSS/JS/HTML 先写短骨架，再 `append_file` 分块追加；这借鉴了 Codex/Claude 的结构化工具协议、Hermes 的 schema/structuredContent 和大输出外置、OpenClaw 的模板变量、free-code 的 lineage metadata，核心是把机器契约从自然语言里拆出来。
 - 2026-05-08 Acceptance Real Execution 第五片已落地：新增 `subagents-tests <run_id>` CLI；默认只展示已有 `test_execution.json` 摘要，`--re-run` 才显式读取 `output.json.tests`、执行 allowlist 验证并写回 `test_execution.json/md`。
 - 2026-05-08 Acceptance Real Execution 第六片已落地：新增 `acceptance_execute_tests` 和 `acceptance_test_timeout_seconds` 配置；默认仍关闭真实执行，`subagents-acceptance --execute-tests/--no-execute-tests/--test-timeout` 可覆盖单次验收。
 - 2026-05-08 Acceptance Real Execution CI 收尾：整理 ruff import/UP037，并让默认验收路径继续按旧 `apply/reviewer/note` 调用兼容旧测试替身；只有真实测试执行、超时覆盖或显式时间等新字段启用时才传完整 options 包。
@@ -459,3 +463,25 @@
 - 已对照学习：Hermes / Codex / free-code / OpenClaw / claw-code 都在不同程度上使用结构化 cwd/workspace、相对路径/短 ID、输出截断或 claim-check、路径边界校验；结论是我们也要减少模型复制长绝对路径，让工具用短 ref 和边界校验兜底。
 - 已补测试：`test_hierarchy_schedule_allows_explicit_repair_leaf_for_existing_target`、`test_build_execution_context_write_boundary`、`test_dispatch_tool_respects_runner_timeout_off_for_auto_due_check`、`test_static_site_check_allows_javascript_template_literals`、`test_read_file_typo_to_tool_output_artifact_routes_to_read_artifact`、`test_tool_loop_externalizes_large_tool_output_for_archive`。
 - 下一步：用干净 R20 root-only 购物站 E2E 复测：root 不被硬性 coordinator 策略绑死，shared-assets 能创建修复 leaf，artifact 读取优先用短 `call_id`，并开始补浏览器级完整注册/登录/购买流程验收。
+
+## 2026-05-11 Stage7 R28 scoped artifact refs
+- 中文说明：R28 真实测试定位到一个更底层的 prompt 串线来源：`read_artifact("17-1")` 这种短 call id 在不同 run 里重复，旧逻辑从 index 顶部找第一条，可能把旧 R15/R19 artifact 内容注入当前 R28 prompt。
+- 已修正：tool-output artifact 记录和 index 现在带 `run_id`、`task_id`、`request_id`、`scoped_call_id`；子代理 runner 会把当前 run id 透传进工具循环；`read_artifact` 读取短 id 时优先匹配当前作用域，没有作用域时也取最新记录而不是最老记录。
+- 已修正：live prompt 的 `read_artifact_hint` 不再只给裸 `call_id`，会优先给具体 artifact path 和 run/task/request scope，降低模型复制短号串线概率。
+- 已修正：FailureIntrospector 支持 Markdown JSON 代码块，避免真实模型返回 fenced JSON 时误降级。
+- 对照学习：Hermes session/transcript、OpenClaw per-agent workspace/session、Codex/Claude 类结构化 tool call 都说明同一短编号必须被 run/session/workspace scope 包住，不能裸放在全局空间。
+- 已补测试：`test_read_artifact_short_call_id_prefers_matching_run_scope`、`test_read_artifact_short_call_id_without_scope_prefers_latest`、`test_tool_loop_externalizer_falls_back_to_current_subagent_run_id`、`test_introspect_with_llm_fenced_json_success`。
+- 下一步：用干净 R29 root-only 购物站 E2E 复测 scoped artifact refs；如果不再读旧 artifact，再强化 root/coordinator 的 rescue 收敛策略，减少反复读 board/artifact 的空转。
+
+## 2026-05-11 Stage7 R29 structured result recovery
+- 中文说明：R29 真实 root-only 购物站 E2E 已产出 10 个目标文件，并跑出 root -> 子 -> 孙 -> 孙孙 4 层命名链路；禁止文件名没有落盘，scoped artifact refs 没再把旧 run 内容串进当前 prompt。
+- 新发现：root 和两个 HTML coordinator 最后因为缺少 `[/SUBAGENT_RESULT]` 结束标记被判 `BLOCKED/UNVERIFIED`，但业务产物已经存在；CLI 最终自然语言不能作为唯一通过标准，必须以机器 task 状态和验收记录为准。
+- 已修正：`parse_subagent_runner_output` / parent planner 共用的结果块提取逻辑现在会在缺尾标记时窄范围恢复完整 JSON；只有标记后面直接是 JSON、`json` 前缀 JSON 或 JSON fence 且 JSON object 完整时才恢复，真正截断的 JSON 仍失败。
+- 已补测试：`test_parse_complete_json_without_end_marker`、`test_parse_incomplete_json_without_end_marker`，并回归 fenced/prefixed parser 用例。
+- 下一步：用干净 R30 复测缺尾标记恢复是否让 coordinator 状态正确进入待验收；同时补 finalizer/report，避免“产物在但状态 blocked”被汇报成 E2E passed。
+
+## 2026-05-11 Stage7 R30 product-root guard
+- 中文说明：R30 复测没有再遇到缺 `[/SUBAGENT_RESULT]` 的结构化解析误判；root -> 子 -> 孙 -> 孙孙链路能跑起来，但模型首次 `create_subagents` 漏掉顶层 `extra_write_roots`，root 没拿到用户指定 deliverables 目录，随后把内部 `tasks/<root>/agents/<root>/build` 当成业务 build，10 个文件都写进内部 runtime，用户产物目录保持 0 文件。
+- 已修正：`create_subagents` 对显式 root/coordinator 增加产品写入根门禁。目标像“交付网站/文件”但没有 `extra_write_roots` 或 goal 内绝对产物路径时，系统会拒绝创建，要求模型把 `extra_write_roots` 放在工具 JSON 顶层重试，避免继续发明内部 build 目录。
+- 已补测试：`test_explicit_coordinator_product_delivery_requires_write_root`；同时记录 root failed 后顶层 CLI 仍挂起、验收只看内部 build 不看用户 deliverables root 的真实问题。
+- 下一步：用干净 R31 复测 root-write-root guard：模型漏传时应被工具拒绝并自我重试；成功后必须写入 `/Users/xiaoyezi/my-claude-code/deliverables/.../build`。

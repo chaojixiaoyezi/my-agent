@@ -16,6 +16,7 @@ from typing import Any
 
 WRITE_TOOL_NAMES = {"write_file", "append_file", "replace_in_file"}
 _MAX_BOUNDARY_PATH_CHARS = 4096
+_PRODUCT_WRITE_DELEGATE_POLICY = "delegate"
 
 
 # LLM: _path_text 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
@@ -74,10 +75,38 @@ def validate_write_boundary(
             f" target={_display_path(target, workspace_root)} allowed={roots}"
         )
 
+    product_policy_error = _product_write_policy_error(target, write_boundary, workspace_root, roots)
+    if product_policy_error:
+        return product_policy_error
+
     forbidden_error = _forbidden_boundary_error(target, allowed_roots, write_boundary, workspace_root)
     if forbidden_error:
         return forbidden_error
     return _locked_boundary_error(target, write_boundary, workspace_root)
+
+
+# LLM: _product_write_policy_error separates inherited authority from direct business writes.
+# 函数用途: 上层 coordinator/tester/reviewer 可以拥有产物目录权限用于检查和救援，但默认不能直接写业务产物。
+def _product_write_policy_error(
+    target: Path,
+    write_boundary: dict[str, object],
+    workspace_root: Path,
+    workspace_roots: list[Path],
+) -> str:
+    policy = str(write_boundary.get("product_write_policy") or "").strip().lower()
+    if policy != _PRODUCT_WRITE_DELEGATE_POLICY:
+        return ""
+    product_roots = _boundary_paths(write_boundary.get("product_write_roots"), workspace_root, workspace_roots)
+    if not any(_is_relative_to(target, root) for root in product_roots):
+        return ""
+    role = str(write_boundary.get("role") or "coordinator").strip() or "coordinator"
+    return (
+        "业务产物写入被阻止: 当前角色拥有上层覆盖权限用于检查、接管和救援，"
+        "但默认不能直接写最终业务产物。"
+        f" role={role} target={_display_path(target, workspace_root)} "
+        "请创建或调度 worker/writer/leaf_worker 处理该产物；"
+        "当前角色只能把计划、证据和协调报告写入自己的 task_dir。"
+    )
 
 
 # LLM: _forbidden_boundary_error 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。

@@ -25,7 +25,8 @@ def render_tool_result_for_live_prompt(result: ToolExecutionResult, archive_reco
         f"- output_path: {archive_record.get('output_path', '')}",
         f"- output_artifact_ref: {artifact_ref}",
         f"- output_call_id: {call_id}",
-        f"- read_artifact_hint: {_read_artifact_hint(call_id or artifact_ref)}",
+        f"- output_scoped_call_id: {archive_record.get('scoped_call_id', '')}",
+        f"- read_artifact_hint: {_read_artifact_hint(artifact_ref or call_id, archive_record)}",
         f"- output_hash: {archive_record.get('output_hash', '')}",
         f"- output_size_bytes: {archive_record.get('output_size_bytes', 0)}",
     ]
@@ -37,6 +38,12 @@ def render_tool_result_for_live_prompt(result: ToolExecutionResult, archive_reco
 
 # LLM: _read_artifact_hint gives the next model turn a short stable ref instead of a long absolute path.
 # 函数用途: 生成可直接复制的 read_artifact 示例；优先用 call_id，减少长路径抄错。
-def _read_artifact_hint(ref: str) -> str:
+# LLM: _read_artifact_hint favors concrete/scoped refs so same call ids cannot cross runs.
+# 函数用途: 给下一轮模型一个可复制的 read_artifact 示例；包含 run/task/request 作用域，避免 `17-1` 串到旧任务。
+def _read_artifact_hint(ref: str, archive_record: dict[str, object]) -> str:
     payload = {"tool": "read_artifact", "artifact_ref": ref, "offset": 0, "max_chars": 4000}
+    for key in ("run_id", "task_id", "request_id"):
+        value = str(archive_record.get(key) or "")
+        if value:
+            payload[key] = value
     return json.dumps(payload, ensure_ascii=False)

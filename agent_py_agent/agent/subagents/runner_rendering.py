@@ -66,10 +66,13 @@ def _render_capabilities_section(context):
 def _render_write_boundary_section(context):
     lines = ["", "## Write Boundary", ""]
     allowed_roots = context.write_boundary.get("allowed_write_roots") or []
+    product_roots = context.write_boundary.get("product_write_roots") or []
     forbidden_roots = context.write_boundary.get("forbidden_write_roots") or []
     locked_files = context.write_boundary.get("locked_files") or []
     lines.append(f"- task_dir: {context.write_boundary.get('task_dir') or context.task_dir}")
     lines.append(f"- allowed_write_roots: {', '.join(allowed_roots) if allowed_roots else 'none'}")
+    lines.append(f"- product_write_roots: {', '.join(product_roots) if product_roots else 'none'}")
+    lines.append(f"- product_write_policy: {context.write_boundary.get('product_write_policy') or 'direct'}")
     lines.append(
         f"- forbidden_write_roots: {', '.join(forbidden_roots) if forbidden_roots else 'none'}"
     )

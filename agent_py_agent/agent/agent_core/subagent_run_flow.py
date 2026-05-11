@@ -121,6 +121,8 @@ def _run_subagent_model_turn(agent, prompt: str, context):
         save=False,
         allowed_tools=context.allowed_tools,
         write_boundary=context.write_boundary,
+        run_id=context.run_id,
+        task_id=context.root_id or context.run_id,
         source="subagent_run_model_turn",
         recovery_snapshot=False,
     )

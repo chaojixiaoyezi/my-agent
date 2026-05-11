@@ -72,9 +72,9 @@ def test_cmd_spawn_passes_explicit_role_bundle(tmp_path: Path):
     assert params.agent_name == "root-coordinator"
 
 
-# LLM: test_explicit_root_spawn_keeps_product_path_context_not_write_root covers the CLI seed path.
-# 函数用途: 显式 root/coordinator seed 可以把产物目录留在 goal 里，但不能自动拿最终产物写权限。
-def test_explicit_root_spawn_keeps_product_path_context_not_write_root(tmp_path: Path):
+# LLM: test_explicit_root_spawn_keeps_product_path_and_write_root covers parent authority coverage.
+# 函数用途: 显式 root/coordinator seed 既保留产物目录上下文，也保留覆盖下级的写入权限用于检查/接管/救援。
+def test_explicit_root_spawn_keeps_product_path_and_write_root(tmp_path: Path):
     deliverables = tmp_path / "deliverables" / "product"
     agent = MagicMock()
     agent.subagents = SubAgentManager(tmp_path / "subagents", workspace_root=tmp_path)
@@ -94,5 +94,4 @@ def test_explicit_root_spawn_keeps_product_path_context_not_write_root(tmp_path:
     root = spawn_explicit_role_runs(request)[0]
 
     assert str(deliverables) in root.goal
-    assert root.allowed_write_roots == [root.task_dir]
-    assert str(deliverables) not in root.allowed_write_roots
+    assert root.allowed_write_roots == [root.task_dir, str(deliverables)]

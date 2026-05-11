@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .models import SubAgentTask
+from .required_file_terms import forbidden_file_terms_from_text, required_file_terms_from_text
 
 REQUIRED_CONTEXT_BUNDLE_FIELDS = (
     "goal",
@@ -121,6 +122,8 @@ def render_context_bundle_markdown(bundle: ContextBundleV1, gate: ContextGateRep
     lines.extend(f"- [ ] {item}" for item in bundle.acceptance_checks or ["未设置"])
     lines.extend(["", "## Workspace Refs", ""])
     lines.extend(f"- {key}: {value or 'none'}" for key, value in bundle.workspace_refs.items())
+    lines.extend(["", "## Output Contract", ""])
+    lines.extend(_render_output_contract_lines(bundle.output_contract))
     lines.extend(["", "## Lineage", ""])
     lines.extend(f"- {key}: {value or 'none'}" for key, value in bundle.lineage.items())
     lines.extend(["", "## Context Gate", ""])
@@ -181,6 +184,9 @@ def _workspace_refs(task: SubAgentTask) -> dict[str, str]:
         "task_workspace": _safe_string_ref(task, "task_workspace_dir"),
         "agent_run_workspace": _safe_string_ref(task, "agent_run_workspace_dir"),
         "shared_blackboard": _safe_string_ref(task, "task_workspace_shared_blackboard"),
+        "shared_messages": _safe_string_ref(task, "task_workspace_shared_messages_jsonl"),
+        "agent_run_inbox": _safe_string_ref(task, "agent_run_inbox_dir"),
+        "agent_run_outbox": _safe_string_ref(task, "agent_run_outbox_dir"),
         "artifacts_dir": _safe_string_ref(task, "agent_run_artifacts_dir") or _safe_string_ref(task, "output_dir"),
         "execution_context_json": _safe_string_ref(task, "execution_context_json"),
         "execution_context_file": _safe_string_ref(task, "execution_context_file"),
@@ -194,10 +200,69 @@ def _output_contract(task: SubAgentTask) -> dict[str, object]:
         "final_report_ref": _safe_string_ref(task, "agent_run_final_report_md") or _safe_string_ref(task, "debrief_file"),
         "runner_result_ref": _safe_string_ref(task, "runner_result_json"),
         "output_json_ref": _safe_string_ref(task, "output_json"),
+        "required_files": _required_file_contract(task),
+        "forbidden_files": _forbidden_file_contract(task),
+        "file_contract_source": "task_text_positive_negative_extraction",
         "evidence_refs_required": True,
         "tests_ref_style": "refs_only_with_working_dir",
         "artifact_refs_required": True,
     }
+
+
+# LLM: _required_file_contract extracts exact deliverable filenames from task text without reading artifacts.
+# 函数用途: 从 goal/thought/description/acceptance_checks 生成必需文件清单，作为结构化下发合同。
+def _required_file_contract(task: SubAgentTask) -> list[str]:
+    return _dedupe_file_terms(
+        term
+        for text in _file_contract_texts(task)
+        for term in required_file_terms_from_text(text, extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html")
+    )
+
+
+# LLM: _forbidden_file_contract extracts negative filename examples so descendants do not treat them as outputs.
+# 函数用途: 从任务文本里生成禁止文件清单，明确 product.html/legacy.html 这类反例不能创建。
+def _forbidden_file_contract(task: SubAgentTask) -> list[str]:
+    return _dedupe_file_terms(
+        term
+        for text in _file_contract_texts(task)
+        for term in forbidden_file_terms_from_text(text, extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html")
+    )
+
+
+# LLM: _file_contract_texts keeps contract extraction bounded to lightweight persisted task facts.
+# 函数用途: 收集可用于文件契约的短文本字段，不读取 output/artifact 正文，避免 token 和 IO 膨胀。
+def _file_contract_texts(task: SubAgentTask) -> list[str]:
+    values: list[object] = [
+        task.goal,
+        task.thought,
+        getattr(task, "description", ""),
+        *(task.acceptance_checks or []),
+    ]
+    return [str(value or "") for value in values if str(value or "").strip()]
+
+
+# LLM: _dedupe_file_terms preserves user-mentioned order for required/forbidden contract lists.
+# 函数用途: 对结构化文件清单去重，避免同一文件从 goal 和验收条件重复出现。
+def _dedupe_file_terms(values) -> list[str]:
+    terms: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in terms:
+            terms.append(text)
+    return terms
+
+
+# LLM: _render_output_contract_lines makes machine file contracts visible in handoff markdown.
+# 函数用途: 渲染 context bundle 的产物合同，方便人和接管代理快速看到 required/forbidden 文件清单。
+def _render_output_contract_lines(contract: dict[str, object]) -> list[str]:
+    lines: list[str] = []
+    for key, value in contract.items():
+        if isinstance(value, list):
+            rendered = ", ".join(str(item) for item in value) if value else "none"
+        else:
+            rendered = str(value) if value not in (None, "") else "none"
+        lines.append(f"- {key}: {rendered}")
+    return lines
 
 
 # LLM: _lineage gives nested runners parent/root refs without expanding ancestor files into prompt text.
@@ -243,7 +308,14 @@ def _source_refs() -> dict[str, list[str]]:
         "permissions": ["task.allowed_tools", "task.allowed_skills", "task.capability_grants"],
         "constraints": ["task.allowed_write_roots", "task.forbidden_write_roots", "task.locked_files"],
         "workspace_refs": ["task.task_dir", "task.task_workspace_dir", "task.agent_run_workspace_dir"],
-        "output_contract": ["task.output_json", "task.runner_result_json", "task.agent_run_final_report_md"],
+        "output_contract": [
+            "task.output_json",
+            "task.runner_result_json",
+            "task.agent_run_final_report_md",
+            "task.goal",
+            "task.thought",
+            "task.acceptance_checks",
+        ],
         "lineage": ["task.root_id", "task.parent_id", "task.depth", "task.inheritance_manifest_json"],
         "context_packs": ["task.context_packs"],
     }

@@ -253,3 +253,10 @@ LocalStore / sqlite / 搜索索引只帮助定位事实源，不替代 task/run 
 - `memory_archive/runtime_fact_source.py` 的显式段落解析遇到未知标题会重置 active bucket，避免后续实施说明被升级成 work-state facts。
 - `memory_archive/compact_work_state_sources.py` 按字面 id 查找 task/run/runtime_fact 目录，`request_id` / `session_id` 中的 glob 元字符不再参与文件系统模式匹配。
 - `memory_archive/compact_resume_completion.py` 渲染 suggested commands 时保留原 compact scope flags，用户复制命令不会意外跑无范围 `memory-compact --apply`。
+
+## 2026-05-11 scoped artifact-ref structure update
+- `memory_archive/tool_output_externalizer.py` 写 tool-output artifact 时会同时登记 `request_id`、`run_id`、`task_id` 和 `scoped_call_id`。`scoped_call_id` 的形态是当前 run/task/request scope 加短调用号，用来避免不同子代理、不同轮次都叫 `17-1` 时互相串线。
+- `memory_archive/artifact_reader.py` 现在把 `index.jsonl` 当成带作用域的登记表：先按 path/hash/scoped_call_id/call_id 找候选，再优先选择当前 `run_id/task_id/request_id` 匹配的记录；没有 scope 的 legacy 调用只回退到最新候选，不再读第一条旧记录。
+- `agent_core/_tool_loop_service.py` 会把当前 subagent run scope 注入 `read_artifact` 参数和工具输出归档记录；`agent_core/subagent_run_flow.py` 也会把 subagent run/task id 传进 `agent.run()`，让工具链能从调用栈拿到稳定 scope。
+- `agent_core/tool_context_reducer.py` 的 live prompt 只给模型 scoped 读取线索：artifact path、hash、`output_scoped_call_id`、run/task/request flags 和 preview；完整 artifact 正文仍必须通过 `read_artifact` 显式读取。
+- 这条结构规则用于修复真实 E2E 的 prompt/路径误传问题：模型看到的引用不能只是人类可读短号，必须能绑定到当前任务、当前 run、当前 workspace。

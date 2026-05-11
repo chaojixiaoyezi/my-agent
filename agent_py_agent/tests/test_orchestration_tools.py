@@ -554,3 +554,31 @@ class TestScheduleChildSubagentsTool:
         assert payload["dry_run"] is False
         assert len(payload["created_run_ids"]) == 1
         assert agent.subagents.load(root.id).child_ids == payload["created_run_ids"]
+
+    def test_runner_context_schedule_accepts_orchestration_wrapper(self, tmp_path):
+        """真实模型常把 children 包进 orchestration；工具入口要展开后再调度。"""
+        import json
+
+        from agent_py_agent.agent.agent_core.orchestration_tools import ScheduleChildSubagentsTool
+        from agent_py_agent.agent.config import AgentConfig
+        from agent_py_agent.agent.core import SimpleAgent
+
+        agent = SimpleAgent(AgentConfig(model_backend="echo", subagent_workspace="subs"), tmp_path)
+        root = agent.subagents.create_run(goal="root", thought="root", plan=["root"])
+        agent._current_subagent_run_id = root.id
+        tool = ScheduleChildSubagentsTool(agent)
+
+        result = tool.execute({
+            "tool": "schedule_child_subagents",
+            "orchestration": {
+                "apply": True,
+                "children": [{"goal": "grandchild coordinator", "role": "coordinator", "agent_name": "页面组"}],
+            },
+        })
+        payload = json.loads(result.output)
+        child = agent.subagents.load(payload["created_run_ids"][0])
+
+        assert result.ok
+        assert payload["dry_run"] is False
+        assert child.parent_id == root.id
+        assert child.agent_name == "小傻妞-页面组"

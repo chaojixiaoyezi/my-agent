@@ -30,9 +30,18 @@ class TestParseSubagentRunnerOutput:
         assert result.status == "COMPLETED"
         assert result.summary == "任务完成"
 
-    def test_parse_missing_end_marker(self):
-        """缺少结束标记时返回错误。"""
-        text = '[SUBAGENT_RESULT]\n{"status": "COMPLETED"}\n'
+    def test_parse_complete_json_without_end_marker(self):
+        """缺少结束标记但 JSON 完整时仍可恢复解析。"""
+        text = '[SUBAGENT_RESULT]\n{"status": "COMPLETED", "summary": "已完成"}\n'
+        result = parse_subagent_runner_output(text)
+        assert result.found is True
+        assert result.ok is True
+        assert result.status == "COMPLETED"
+        assert result.summary == "已完成"
+
+    def test_parse_incomplete_json_without_end_marker(self):
+        """缺少结束标记且 JSON 不完整时返回错误。"""
+        text = '[SUBAGENT_RESULT]\n{"status": "COMPLETED"\n'
         result = parse_subagent_runner_output(text)
         assert result.found is True
         assert result.ok is False
@@ -110,6 +119,15 @@ class TestParseParentPlannerOutput:
         text = '[PARENT_PLANNER_RESULT]\n{"suggested_max_runners": 5}\n[/PARENT_PLANNER_RESULT]'
         result = parse_parent_planner_output(text)
         assert result.suggested_max_runners == 5
+
+    def test_parse_complete_planner_json_without_end_marker(self):
+        """父级规划器缺少结束标记但 JSON 完整时仍可恢复。"""
+        text = '[PARENT_PLANNER_RESULT]\n{"decision": "HEARTBEAT_OK", "summary": "已观察"}\n'
+        result = parse_parent_planner_output(text)
+        assert result.found is True
+        assert result.ok is True
+        assert result.decision == "HEARTBEAT_OK"
+        assert result.summary == "已观察"
 
 
 class TestStripJsonFence:

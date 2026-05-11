@@ -1,6 +1,6 @@
 """LLM: focused tests for hierarchy write-root policy.
 
-函数/模块用途: 验证报告型角色可读产品路径并写本地报告，但不能继承最终产物写入根。
+函数/模块用途: 验证上层/协调/报告型角色保留覆盖下级的产物写根，同时角色职责仍要求优先写报告、把实际产物交给 worker。
 """
 
 from __future__ import annotations
@@ -12,9 +12,9 @@ from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
 )
 
 
-# LLM: test_hierarchy_schedule_keeps_report_roles_task_local protects product deliverable boundaries.
-# 函数用途: researcher/tester/acceptor 等报告型角色可以写自己的报告，但不能继承父级最终产物目录。
-def test_hierarchy_schedule_keeps_report_roles_task_local(tmp_path):
+# LLM: test_hierarchy_schedule_keeps_report_roles_with_parent_write_coverage covers takeover authority.
+# 函数用途: researcher/tester/acceptor 等报告型角色也继承父级产物根，方便检查、接管、救援；是否亲自写由角色职责约束。
+def test_hierarchy_schedule_keeps_report_roles_with_parent_write_coverage(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
     root = manager.create_run(
@@ -40,14 +40,13 @@ def test_hierarchy_schedule_keeps_report_roles_task_local(tmp_path):
     child = manager.load(result.created_run_ids[0])
 
     assert child.role == "researcher"
-    assert child.allowed_write_roots == [child.task_dir]
-    assert str(deliverables) not in child.allowed_write_roots
-    assert "允许写入根：" not in child.goal
+    assert child.allowed_write_roots == [child.task_dir, str(deliverables)]
+    assert "允许写入根：" in child.goal
 
 
-# LLM: test_hierarchy_schedule_keeps_report_goal_product_root_readonly covers model-written product paths.
-# 函数用途: 模型把最终目录写进报告型 goal 时，系统保留路径上下文但不授予该目录写权限。
-def test_hierarchy_schedule_keeps_report_goal_product_root_readonly(tmp_path):
+# LLM: test_hierarchy_schedule_keeps_report_goal_product_root_writable_for_recovery covers model paths.
+# 函数用途: 模型把最终目录写进报告型 goal 时，系统保留路径上下文并授予覆盖权限，方便父链检查和恢复。
+def test_hierarchy_schedule_keeps_report_goal_product_root_writable_for_recovery(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
     root = manager.create_run(
@@ -72,13 +71,12 @@ def test_hierarchy_schedule_keeps_report_goal_product_root_readonly(tmp_path):
     )
     child = manager.load(result.created_run_ids[0])
 
-    assert child.allowed_write_roots == [child.task_dir]
-    assert str(deliverables) not in child.allowed_write_roots
+    assert child.allowed_write_roots == [child.task_dir, str(deliverables)]
     assert str(deliverables) in child.goal
 
 
 # LLM: test_hierarchy_schedule_recovers_report_role_from_child_agent_name covers real runner placeholder roles.
-# 函数用途: 模型把 role 写成 child 但 agent_name 写 researcher/tester 时，系统仍按报告型角色收紧写入权限。
+# 函数用途: 模型把 role 写成 child 但 agent_name 写 researcher/tester 时，系统仍识别报告型职责，同时保留上级覆盖写入根。
 def test_hierarchy_schedule_recovers_report_role_from_child_agent_name(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     deliverables = tmp_path / "deliverables"
@@ -111,7 +109,7 @@ def test_hierarchy_schedule_recovers_report_role_from_child_agent_name(tmp_path)
     writer = manager.load(result.created_run_ids[1])
 
     assert researcher.role == "researcher"
-    assert researcher.allowed_write_roots == [researcher.task_dir]
+    assert researcher.allowed_write_roots == [researcher.task_dir, str(deliverables)]
     assert writer.role == "writer"
     assert str(deliverables) in writer.allowed_write_roots
 

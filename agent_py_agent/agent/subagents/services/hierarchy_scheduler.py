@@ -11,6 +11,7 @@ from ..debug_trace import trace_hierarchy_schedule
 from ..models import SubAgentTask
 from .base import CreateRunParams
 from .hierarchy_acceptance import scheduled_child_acceptance_checks
+from .hierarchy_agent_names import scheduled_child_agent_name
 from .hierarchy_context import inherited_hierarchy_thought, scheduled_child_goal
 from .hierarchy_role_identity import role_from_child_spec_identity
 from .hierarchy_scope_guards import duplicate_child_domain_reason, schedule_block_reason
@@ -228,11 +229,12 @@ def _create_child(manager: Any, parent: SubAgentTask, spec: HierarchyChildSpec) 
 def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParams:
     parent = request.parent
     spec = request.spec
+    agent_name = scheduled_child_agent_name(parent, spec)
     return CreateRunParams(
         goal=request.goal,
         thought=spec.thought or inherited_hierarchy_thought(parent, child_goal=request.goal),
         plan=spec.plan or ["读取父级 refs", "执行小切片", "写回状态和证据 refs", "等待父级验收"],
-        agent_name=spec.agent_name or spec.role or "worker",
+        agent_name=agent_name,
         role=request.role,
         parent_id=parent.id,
         root_id=parent.root_id or parent.id,
@@ -246,7 +248,7 @@ def _create_child_params(request: HierarchyCreateChildRequest) -> CreateRunParam
                 goal=request.goal,
             )
         ),
-        owner=spec.agent_name or spec.role or parent.owner,
+        owner=agent_name,
         supervisor=parent.id,
         final_owner=parent.final_owner or parent.owner,
         acceptance_checks=scheduled_child_acceptance_checks(
@@ -316,7 +318,7 @@ def _planned_items(parent: SubAgentTask, request: HierarchyScheduleRequest) -> l
                 ),
                 goal=scheduled_child_goal(parent, spec),
             ),
-            agent_name=spec.agent_name or spec.role or "worker",
+            agent_name=scheduled_child_agent_name(parent, spec),
             goal=scheduled_child_goal(parent, spec),
             created=False,
             reason="planned",

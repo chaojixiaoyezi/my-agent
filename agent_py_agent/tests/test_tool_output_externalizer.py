@@ -59,15 +59,45 @@ def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) ->
     assert "x" * 700 not in json.dumps(record, ensure_ascii=False)
     assert artifact["content"] == large_output
     assert artifact["request_id"] == "req-tool"
+    assert artifact["run_id"] == "run-tool"
+    assert artifact["scoped_call_id"] == "run-tool:1-1"
     assert index[-1]["path"] == str(artifact_path)
     assert index[-1]["sha256"] == artifact["sha256"]
+    assert index[-1]["run_id"] == "run-tool"
+    assert index[-1]["scoped_call_id"] == "run-tool:1-1"
     assert large_output not in params.tool_context[-1]
     assert str(artifact_path) in params.tool_context[-1]
     assert f"output_artifact_ref: {artifact_path}" in params.tool_context[-1]
     assert "output_call_id: 1-1" in params.tool_context[-1]
-    assert 'read_artifact", "artifact_ref": "1-1"' in params.tool_context[-1]
+    assert "output_scoped_call_id: run-tool:1-1" in params.tool_context[-1]
+    assert f'read_artifact", "artifact_ref": "{artifact_path}"' in params.tool_context[-1]
+    assert '"run_id": "run-tool"' in params.tool_context[-1]
     assert "完整工具输出已外置" in params.tool_context[-1]
     assert record["fail_safe_checkpoint_path"] in params.tool_context[-1]
+
+
+# LLM: subagent runner scope must reach artifacts even when run(save=False) did not pass run_id.
+# 函数用途: 子代理内部工具输出要带当前 runner id，否则 read_artifact 短引用会跨任务串线。
+def test_tool_loop_externalizer_falls_back_to_current_subagent_run_id(tmp_path: Path) -> None:
+    service = ToolLoopService(SimpleNamespace(root=tmp_path, _current_subagent_run_id="runner-42"))
+    params = _tool_loop_params(request_id="", run_id="", task_id="")
+    large_output = "line\n" + ("x" * 1400)
+
+    service._record_tool_call(
+        ToolCallRecordParams(
+            params=params,
+            tool_rounds=7,
+            idx=1,
+            payload={"tool": "subagent_board"},
+            result=ToolExecutionResult("subagent_board", True, large_output),
+        )
+    )
+    record = params.archive_tool_calls[0]
+    artifact = json.loads(Path(record["output_path"]).read_text(encoding="utf-8"))
+
+    assert record["run_id"] == "runner-42"
+    assert record["scoped_call_id"] == "runner-42:7-1"
+    assert artifact["run_id"] == "runner-42"
 
 
 def test_tool_loop_summarizes_large_tool_call_payload_for_live_prompt() -> None:

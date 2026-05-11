@@ -94,13 +94,57 @@ def _extract_subagent_result_blocks(text: str, marker_start: str, marker_end: st
     while True:
         start = text.find(marker_start, offset)
         if start == -1:
-            break
-        end = text.find(marker_end, start + len(marker_start))
+            return blocks
+        body_start = start + len(marker_start)
+        end = text.find(marker_end, body_start)
         if end == -1:
-            break
-        blocks.append(text[start + len(marker_start) : end].strip())
+            return _blocks_with_open_result_candidate(blocks, text[body_start:])
+        blocks.append(text[body_start:end].strip())
         offset = end + len(marker_end)
-    return blocks
+
+
+# LLM: _blocks_with_open_result_candidate keeps block scanning shallow for code-size guards.
+# 函数用途: 把缺尾标记恢复候选追加到已有结果块列表；没有可靠候选时保持原列表不变。
+def _blocks_with_open_result_candidate(blocks: list[str], section: str) -> list[str]:
+    """Append an unclosed result candidate when recovery is safe."""
+
+    open_candidate = _extract_open_result_block_candidate(section)
+    if not open_candidate:
+        return blocks
+    return [*blocks, open_candidate]
+
+
+# LLM: _extract_open_result_block_candidate salvages complete JSON when the model dropped only the closing marker.
+# 函数用途: 在结果块缺少结束标记时，仅当标记后面直接是完整 JSON/fence JSON 才提取候选，避免把说明文字误当执行结果。
+def _extract_open_result_block_candidate(section: str) -> str:
+    """从未闭合的结果块里提取完整 JSON 候选。"""
+
+    stripped = section.strip()
+    if not stripped:
+        return ""
+    return _extract_direct_json_object_text(stripped)
+
+
+# LLM: _extract_direct_json_object_text keeps open-marker recovery from swallowing nested objects.
+# 函数用途: 只接受结果块开头的完整 JSON object，避免把坏外层 JSON 里的内层小对象误当成最终结果。
+def _extract_direct_json_object_text(text: str) -> str:
+    """Return a complete JSON object only when it starts the recovered block."""
+
+    leading = text.lstrip()
+    lowered = leading.lower()
+    if lowered.startswith("json"):
+        leading = leading[4:].lstrip()
+    elif leading.startswith("```"):
+        leading = _strip_json_fence(leading)
+    if not leading.startswith("{"):
+        return ""
+    try:
+        payload, end = json.JSONDecoder().raw_decode(leading)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return leading[:end].strip()
 
 
 # LLM: _parsed_parent_planner_from_payload 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。

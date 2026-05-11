@@ -23,6 +23,7 @@ _DEPENDENT_ORCHESTRATION_TOOLS = {
     "dispatch_subagents",
     "schedule_child_subagents",
     "subagent_board",
+    "subagent_message",
 }
 
 

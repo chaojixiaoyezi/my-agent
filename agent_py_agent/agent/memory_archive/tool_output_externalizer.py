@@ -71,6 +71,11 @@ def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str
         "schema": runtime_memory_schema_payload(TOOL_OUTPUT_RECORD_SCHEMA),
         "tool": request.tool,
         "id": request.call_id,
+        "call_id": request.call_id,
+        "request_id": request.request_id,
+        "run_id": request.run_id,
+        "task_id": request.task_id,
+        "scoped_call_id": _scoped_call_id(request),
         "ok": request.ok,
         "output_preview": _preview(output),
         "output_hash": digest,
@@ -92,6 +97,7 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
         "kind": "tool_output",
         "tool": request.tool,
         "call_id": request.call_id,
+        "scoped_call_id": _scoped_call_id(request),
         "ok": request.ok,
         "request_id": request.request_id,
         "run_id": request.run_id,
@@ -117,6 +123,7 @@ def _append_index(path: Path, payload: dict[str, Any]) -> None:
         "kind": payload["kind"],
         "tool": payload["tool"],
         "call_id": payload["call_id"],
+        "scoped_call_id": payload.get("scoped_call_id", ""),
         "request_id": payload["request_id"],
         "run_id": payload["run_id"],
         "task_id": payload["task_id"],
@@ -162,6 +169,13 @@ def _sha256_text(text: str) -> str:
 def _safe_segment(value: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in str(value or "item"))
     return cleaned.strip("._") or "item"
+
+
+# LLM: _scoped_call_id prevents short call ids like 17-1 from colliding across subagent runs.
+# 函数用途: 为 tool-output artifact 生成 run/task/request 作用域短引用；没有作用域时保留旧 call_id 兼容。
+def _scoped_call_id(request: ExternalizeToolOutputRequest) -> str:
+    scope = request.run_id or request.task_id or request.request_id
+    return f"{scope}:{request.call_id}" if scope else request.call_id
 
 
 __all__ = ["ExternalizeToolOutputRequest", "externalize_tool_output_record"]

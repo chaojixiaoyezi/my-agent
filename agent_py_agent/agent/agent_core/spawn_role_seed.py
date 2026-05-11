@@ -46,11 +46,11 @@ def is_explicit_root_role(role: str) -> bool:
     return "coordinator" in text or text.endswith("lead")
 
 
-# LLM: spawn_explicit_role_runs creates parent-capable seed runs without granting product write roots.
-# 函数用途: 创建显式 root/coordinator 任务；产物路径保留在 goal 里给下层派工，root 自己只写协调报告。
+# LLM: spawn_explicit_role_runs creates parent-capable seeds whose authority covers descendants.
+# 函数用途: 创建显式 root/coordinator 任务；上层保留 goal 中的产物写根用于检查/接管/救援，但职责上仍优先派给下级执行。
 def spawn_explicit_role_runs(request: SpawnExplicitRoleRequest) -> list[SubAgentTask]:
     role = clean_spawn_role(request.options.role)
-    extra_roots = [] if is_explicit_root_role(role) else _extract_write_dirs(request.options.goal)
+    extra_roots = _extract_write_dirs(request.options.goal)
     allowed_tools = _spawn_role_allowed_tools(role, request.allowed_tools)
     tasks: list[SubAgentTask] = []
     for index in range(1, request.count + 1):
@@ -84,7 +84,7 @@ def _create_explicit_role_run(request: ExplicitRoleRunRequest) -> SubAgentTask:
     return seed.agent.subagents.create_run(
         params=CreateRunParams(
             goal=_spawn_goal_text(seed.options.goal, request.index, seed.count),
-            thought="只负责拆分、调度、汇报和写协调报告；不得直接替下层 worker 写最终产物。",
+            thought="负责拆分、调度、检查、接管和救援；权限覆盖下级，但正常执行时优先派 worker 写最终产物。",
             plan=["创建直接子代理", "调度直接子代理", "观察子代理状态", "汇报证据和阻塞"],
             agent_name=_spawn_agent_name(seed.options.agent_name, request.role, request.index, seed.count),
             role=request.role,

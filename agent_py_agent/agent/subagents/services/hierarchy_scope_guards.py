@@ -61,6 +61,9 @@ def schedule_block_reason(parent: SubAgentTask, request: Any) -> str:
     mixed_reason = _mixed_coordinator_leaf_reason(request.child_specs)
     if mixed_reason:
         return mixed_reason
+    chain_reason = _hierarchy_chain_leaf_reason(parent, request.child_specs)
+    if chain_reason:
+        return chain_reason
     drift_reason = _child_write_root_drift_reason(parent, request)
     if drift_reason:
         return drift_reason
@@ -180,6 +183,25 @@ def _mixed_coordinator_leaf_reason(child_specs: list[Any]) -> str:
     has_coordinator = any(_child_has_role_token(spec, {"coordinator", "lead"}) for spec in child_specs)
     has_leaf = any(_child_has_role_token(spec, {"leaf", "leaf_worker", "leaf-worker"}) for spec in child_specs)
     return "mixed_coordinator_leaf_children" if has_coordinator and has_leaf else ""
+
+
+# LLM: _hierarchy_chain_leaf_reason enforces explicit multi-layer test contracts without hardcoding all tasks.
+# 函数用途: 父级明确要求 4 层链路时，深度不足的节点不能直接创建 leaf/worker 跳过孙孙层。
+def _hierarchy_chain_leaf_reason(parent: SubAgentTask, child_specs: list[Any]) -> str:
+    if int(parent.depth or 0) >= 2:
+        return ""
+    if not _goal_requires_four_layer_chain(parent.goal):
+        return ""
+    if any(_is_leaf_like(spec) for spec in child_specs):
+        return "hierarchy_chain_requires_coordinator_until_depth_3"
+    return ""
+
+
+# LLM: _goal_requires_four_layer_chain detects explicit root->child->grandchild->great-grandchild requests.
+# 函数用途: 只在用户/父级写明要四层链路时启用层级约束，普通 root 仍可直接创建 worker。
+def _goal_requires_four_layer_chain(goal: str) -> bool:
+    lowered = str(goal or "").lower()
+    return any(token in lowered for token in ("4 层", "四层", "孙孙", "great-grandchild", "root ->"))
 
 
 # LLM: _child_write_root_drift_reason blocks model-invented sibling output paths before child runs exist.

@@ -197,6 +197,59 @@ class TestValidateWriteBoundaryAllowedRoots:
         )
         assert result == ""
 
+    def test_delegate_policy_blocks_coordinator_product_write(self, tmp_path):
+        task_dir = tmp_path / "task"
+        product = tmp_path / "deliverables"
+        task_dir.mkdir()
+        product.mkdir()
+        result = validate_write_boundary(
+            "write_file",
+            {"path": str(product / "index.html")},
+            workspace_root=tmp_path,
+            write_boundary={
+                "role": "coordinator",
+                "allowed_write_roots": [str(task_dir), str(product)],
+                "product_write_roots": [str(product)],
+                "product_write_policy": "delegate",
+            },
+        )
+        assert "业务产物写入被阻止" in result
+        assert "创建或调度 worker/writer/leaf_worker" in result
+
+    def test_delegate_policy_allows_task_dir_reports(self, tmp_path):
+        task_dir = tmp_path / "task"
+        product = tmp_path / "deliverables"
+        task_dir.mkdir()
+        product.mkdir()
+        result = validate_write_boundary(
+            "write_file",
+            {"path": str(task_dir / "coordination_report.md")},
+            workspace_root=tmp_path,
+            write_boundary={
+                "role": "coordinator",
+                "allowed_write_roots": [str(task_dir), str(product)],
+                "product_write_roots": [str(product)],
+                "product_write_policy": "delegate",
+            },
+        )
+        assert result == ""
+
+    def test_direct_policy_allows_worker_product_write(self, tmp_path):
+        product = tmp_path / "deliverables"
+        product.mkdir()
+        result = validate_write_boundary(
+            "write_file",
+            {"path": str(product / "index.html")},
+            workspace_root=tmp_path,
+            write_boundary={
+                "role": "leaf_worker",
+                "allowed_write_roots": [str(product)],
+                "product_write_roots": [str(product)],
+                "product_write_policy": "direct",
+            },
+        )
+        assert result == ""
+
 
 class TestValidateWriteBoundaryForbiddenRoots:
     def test_path_in_forbidden_root_blocked(self, tmp_path):

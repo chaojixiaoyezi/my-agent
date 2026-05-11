@@ -202,12 +202,16 @@ def test_role_template_detail_text_loads_prompt_contract_on_demand():
     assert "验收子代理" not in detail
 
 
-def test_coordinator_template_says_denied_product_write_should_delegate():
+def test_coordinator_template_says_parent_authority_covers_children_but_should_delegate():
     detail = role_template_detail_text(roles=["coordinator"])
 
-    assert "allowed_write_roots" in detail
-    assert "不要给自己申请写权限" in detail
+    assert "上层权限应覆盖下层" in detail
+    assert "继承产物写入根" in detail
+    assert "不要抢 worker" in detail
+    assert "child_coordinator" in detail
     assert "worker/writer/leaf_worker" in detail
+    assert "subagent_message" in detail
+    assert "平级讨论" in detail
 
 
 # LLM: test_all_builtin_role_templates_are_visible_in_main_index covers role selection discovery.
