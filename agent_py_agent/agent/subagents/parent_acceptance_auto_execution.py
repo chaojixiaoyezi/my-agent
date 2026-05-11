@@ -23,6 +23,7 @@ from .parent_acceptance_auto_policy import (
 )
 from .parsing import _dict_list
 from .static_required_files import required_static_files_for_task
+from .utils import _read_json_object
 
 
 # LLM: ParentAcceptanceAutoExecutionOptions is the stable bundle for future executor knobs.
@@ -348,11 +349,10 @@ def _blocked_manual_result(
     )
 
 
-# LLM: _read_task_output reads only the structured runner output used for test specs.
-# 函数用途: 读取 task.output_json 的 tests 数组来源；失败时返回空结构，由 guard 生成阻断。
+# LLM: _read_task_output uses the shared tolerant JSON reader so historical output.json defaults remain usable.
+# 函数用途: 读取 task.output_json 的 tests 数组来源，兼容旧双层编码；失败时返回空结构，由 guard 生成阻断。
 def _read_task_output(task: SubAgentTask) -> dict[str, object]:
     path = Path(getattr(task, "output_json", "") or "")
     if not path.is_file():
         return {}
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    return payload if isinstance(payload, dict) else {}
+    return _read_json_object(path)

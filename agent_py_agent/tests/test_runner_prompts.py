@@ -77,6 +77,22 @@ class TestBuildSubagentRunnerPrompt:
 
         assert "父代理" in prompt
 
+    # LLM: Real leaf workers must know write_file can create missing product directories.
+    # 函数用途: 防止叶子节点因为 build 目录不存在而误报缺少 mkdir/shell 能力。
+    def test_prompt_says_write_file_creates_parent_dirs(self):
+        from agent_py_agent.agent.agent_core.runner_prompts import _build_subagent_runner_prompt
+
+        context = self._make_context(
+            "run_write_parent",
+            role="leaf_worker",
+            task_dir="/tmp",
+            allowed_tools=["write_file", "append_file"],
+        )
+        prompt = _build_subagent_runner_prompt(context)
+
+        assert "自动创建父目录" in prompt
+        assert "不要因为目标目录尚未创建就标记 BLOCKED" in prompt
+
 
 class TestBuildSubagentRunnerRepairPrompt:
     """测试 _build_subagent_runner_repair_prompt() 函数。"""

@@ -125,6 +125,7 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "- 写代码和测试后，必须逐条对照验收条件做静态自检，确保实现、测试、README 三者互相一致。",
         "- 写 Python 测试时必须保证从 working_dir 运行能导入被测模块；优先把测试文件和模块放同一目录，或显式处理 import path。",
         "- 生成长 CSS/JS/HTML 或大段代码时，不要一次性把完整 content 塞进 write_file；先用 write_file 写短骨架，再用 append_file 分块追加。",
+        "- write_file 和 append_file 会在授权 allowed_write_roots 内自动创建父目录；不要因为目标目录尚未创建就标记 BLOCKED。",
         "- 如果最终结果需要列很多 artifacts 或证据，优先用 write_file 写 execution_context.output_json 的短 JSON；"
         "系统会自动把它包成 SUBAGENT_RESULT 收口，避免对话里的长结果块被截断。",
     ]

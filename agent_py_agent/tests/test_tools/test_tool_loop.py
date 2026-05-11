@@ -12,9 +12,11 @@ from pathlib import Path
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.log_analysis.storage import LocalLogStore
+from agent_py_agent.agent.subagent import EvidencePacket, VerificationEvidence
 from agent_py_agent.agent.tools import ToolRegistry
 
 from .backends import (
+    DispatchCompletionBackend,
     DuplicateSubagentDelegationBackend,
     MaxToolRoundBackend,
     OutputJsonCompletionBackend,
@@ -223,6 +225,72 @@ def test_subagent_runner_stops_after_output_json_write():
         assert result.structured_output_found is True
         assert result.structured_output_ok is True
         assert result.tool_rounds == 1
+
+
+# LLM: verifies top-level dispatch completion does not need a final model turn.
+# 函数用途: 子代理任务全都 DONE/VERIFIED 后，顶层主代理执行 dispatch_subagents 应本地收口，避免真实网络 final-call 卡住。
+def test_completed_dispatch_closes_without_extra_model_call():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(
+            enable_tools=True,
+            memory_path="memory.jsonl",
+            subagent_workspace="subs",
+            max_tool_rounds=4,
+        )
+        agent = SimpleAgent(cfg, workspace)
+        task = _done_verified_task(agent)
+        agent.backend = DispatchCompletionBackend()
+
+        result = agent.run("推进并汇报已完成的子代理", save=False)
+
+        assert agent.backend.calls == 1
+        assert result.tool_rounds == 1
+        assert "未再发起额外模型请求" in result.response
+        assert task.id in result.response
+
+
+# LLM: _done_verified_task creates a traceable finished subagent for top-level closeout tests.
+# 函数用途: 构造已完成且已验收的子代理任务，并写入最小 output.json，供 dispatch 收口测试复用。
+def _done_verified_task(agent):
+    task = agent.subagents.create_run(
+        goal="已完成任务 fixture",
+        thought="用于测试顶层 dispatch 本地收口。",
+        plan=["完成", "验收"],
+        allowed_tools=[],
+    )
+    task.status = "DONE"
+    task.verification_status = "VERIFIED"
+    task.evidence.append(VerificationEvidence(
+        kind="note",
+        summary="任务已有验收证据。",
+        ok=True,
+    ))
+    task.evidence_packets.append(EvidencePacket(
+        id="evpkt-dispatch-closeout",
+        claim="任务已完成并可追踪。",
+        checked_scope="dispatch closeout fixture",
+        evidence_refs=[task.output_json],
+        artifact_refs=[task.output_json],
+        confidence=0.9,
+    ))
+    Path(task.output_json).write_text(
+        json.dumps({
+            "status": "AWAITING_ACCEPTANCE",
+            "summary": "fixture done",
+            "evidence_packets": [{
+                "id": "evpkt-dispatch-closeout",
+                "claim": "任务已完成并可追踪。",
+                "checked_scope": "dispatch closeout fixture",
+                "evidence_refs": [task.output_json],
+                "artifact_refs": [task.output_json],
+                "confidence": 0.9,
+            }],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    agent.subagents.save(task)
+    return task
 
 
 def test_tool_allowlist_limits_prompt_and_execution():

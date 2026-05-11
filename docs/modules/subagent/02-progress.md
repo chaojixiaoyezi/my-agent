@@ -507,3 +507,12 @@
 - 已修正：`dispatch_loop` 增加 no-progress fuse。连续两轮调度签名完全一样且均为 audit-only / record-only 动作时，循环会标记 `stopped_by_no_progress=True` 并自然停止；真实状态迁移、验收执行、runner 创建 child 不受影响。
 - 已补测试：`test_dispatch_loop_stops_when_audit_only_actions_repeat`，并回归 dispatch loop / watchdog / record-only action focused tests。
 - 下一步：用干净 R34 复测顶层 CLI 是否能在“root 完成但剩余只是重复 blocked 分类”时自然返回；随后修 authoritative status/handoff sync 和“无证据成功”收口。
+
+## 2026-05-11 Stage7 R34-R36 closeout and work-order JSON hardening
+- 中文说明：R34/R35 继续证明真实购物站链路能写出用户 build 目录里的 10 个目标文件，并跑通 broadcast/direct 消息；R35 还验证了所有子代理 `DONE/VERIFIED` 后可以本地收口，不再强制追加一次顶层模型总结。
+- 已修正：`output.json` 自动收口会从 artifacts/evidence/report refs 补最小 `evidence_packets`；`dispatch_subagents` 在只剩 audit-only record actions 时返回 `dispatch_terminal`，提示父节点停止空转并汇报 blockers。
+- 已修正：顶层主代理刚执行过 `dispatch_subagents` 且当前 subagent workspace 全部 `DONE/VERIFIED` 时，会生成 refs-first 本地收尾回答，不再发起额外模型请求；子代理 runner 内仍只走自己的 `output.json` 契约。
+- R36 新发现：初始 work-order JSON 曾写成 JSON string 包 JSON object，导致父级聚合 `.get/.keys` 读取不到字段；leaf worker 也因为 build 目录不存在误判自己缺少 mkdir/shell 能力。
+- 已修正：初始 `output.json`、`status_report.json`、`dependencies.json` 现在写机器可读 JSON object；`_read_json_object` 兼容旧双层编码；runner contract 和工具说明明确 `write_file` / `append_file` 会在授权写入根内自动创建父目录。
+- 已补测试：`test_subagent_output_json_response_derives_packet_from_report`、`test_completed_dispatch_closes_without_extra_model_call`、`test_creates_machine_readable_default_json_files`、`test_read_nested_json_string_object`、`test_prompt_says_write_file_creates_parent_dirs`。
+- 下一步：用干净 R37 复测 leaf 遇到不存在 build 目录时是否直接用 `write_file` 写短骨架并继续 `append_file` 分块；如果仍出现长 HTML 工具截断，再做更硬的分块写入引导或受控文件生成 helper。
