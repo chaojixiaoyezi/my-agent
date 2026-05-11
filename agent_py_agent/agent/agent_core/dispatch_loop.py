@@ -201,6 +201,7 @@ def dispatch_loop(
             break
         if no_progress_tracker.should_stop(dispatch_report):
             report.stopped_by_no_progress = True
+            _clear_pending_work(agent)
             break
         if round_num >= max_rounds:
             report.stopped_by_limit = True
@@ -225,6 +226,15 @@ def _final_pending_runner_count(agent) -> int:
         return len(candidates)
     except Exception:
         return 0
+
+
+# LLM: _clear_pending_work lets a no-progress fuse settle the outer run loop.
+# 函数用途: 当调度只剩重复审计记录时，清掉 agent 待处理标记，让上层循环自然收口而不是继续空转。
+def _clear_pending_work(agent) -> None:
+    try:
+        agent._has_pending_work = False
+    except Exception:
+        return
 
 
 __all__ = ["DispatchLoopReport", "DispatchLoopParams", "dispatch_loop"]

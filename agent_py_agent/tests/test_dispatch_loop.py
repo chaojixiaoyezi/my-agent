@@ -143,7 +143,6 @@ class TestDispatchLoop:
     def test_dispatch_loop_stops_when_audit_only_actions_repeat(self, tmp_path: Path):
         """重复的记录类动作不应该把调度循环拖到最大轮数。"""
         from agent_py_agent.agent.agent_core.dispatch_loop import dispatch_loop
-        from agent_py_agent.agent.subagents.reports import DispatchRecord, DispatchReport
 
         agent = MagicMock()
         agent.config.runner_failure_policy = "auto"
@@ -151,35 +150,7 @@ class TestDispatchLoop:
 
         def dispatch_side_effect(*args, **kwargs):
             agent.has_pending_work = True
-            return DispatchReport(
-                generated_at=0.0,
-                dry_run=False,
-                summary={"total": 2},
-                records=[
-                    DispatchRecord(
-                        id="due",
-                        step="due_check",
-                        action="scan",
-                        run_id="",
-                        dry_run=False,
-                        applied=False,
-                        ok=True,
-                        message="发现 3 个 due-check issue。",
-                    ),
-                    DispatchRecord(
-                        id="classify",
-                        step="action_apply",
-                        action="classify_blocker",
-                        run_id="blocked-run",
-                        dry_run=False,
-                        applied=True,
-                        ok=True,
-                        message="已记录 classify_blocker 待人工处理。",
-                        before_status="BLOCKED",
-                        after_status="BLOCKED",
-                    ),
-                ],
-            )
+            return _audit_only_dispatch_report()
 
         agent.dispatch_subagents.side_effect = dispatch_side_effect
 
@@ -188,6 +159,59 @@ class TestDispatchLoop:
         assert result.rounds_count == 2
         assert result.stopped_by_no_progress is True
         assert result.stopped_by_limit is False
+        assert agent._has_pending_work is False
+
+
+# LLM: _audit_only_dispatch_report keeps loop tests short while preserving real report shape.
+# 函数用途: 构造只有 due-check 和 classify_blocker 的调度报告，用于验证 no-progress fuse。
+def _audit_only_dispatch_report():
+    from agent_py_agent.agent.subagents.reports import DispatchRecord, DispatchReport
+
+    return DispatchReport(
+        generated_at=0.0,
+        dry_run=False,
+        summary={"total": 2},
+        records=[
+            _audit_record(),
+            _classify_record(),
+        ],
+    )
+
+
+# LLM: _audit_record models the repeated scan half of an audit-only dispatch round.
+# 函数用途: 返回无状态变化的 due_check/scan 记录，模拟真实 R33/R34 空转前半段。
+def _audit_record():
+    from agent_py_agent.agent.subagents.reports import DispatchRecord
+
+    return DispatchRecord(
+        id="due",
+        step="due_check",
+        action="scan",
+        run_id="",
+        dry_run=False,
+        applied=False,
+        ok=True,
+        message="发现 3 个 due-check issue。",
+    )
+
+
+# LLM: _classify_record models the record-only blocker classification that should not count as progress.
+# 函数用途: 返回状态不变的 classify_blocker 记录，验证重复分类不会让父级循环一直跑。
+def _classify_record():
+    from agent_py_agent.agent.subagents.reports import DispatchRecord
+
+    return DispatchRecord(
+        id="classify",
+        step="action_apply",
+        action="classify_blocker",
+        run_id="blocked-run",
+        dry_run=False,
+        applied=True,
+        ok=True,
+        message="已记录 classify_blocker 待人工处理。",
+        before_status="BLOCKED",
+        after_status="BLOCKED",
+    )
 
 
 class TestAdaptiveInterval:
