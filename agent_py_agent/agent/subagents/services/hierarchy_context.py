@@ -7,6 +7,7 @@ import re
 from typing import TYPE_CHECKING
 
 from ..models import SubAgentTask
+from ..required_file_terms import forbidden_file_terms_from_text, required_file_terms_from_text
 
 if TYPE_CHECKING:
     from .hierarchy_scheduler import HierarchyChildSpec
@@ -50,8 +51,9 @@ def scheduled_child_goal(
 def goal_carries_parent_scope(parent: SubAgentTask, goal: str) -> bool:
     if "继承父级目标/边界" in goal:
         return True
-    relevant = relevant_parent_context(parent.goal, goal)
-    if _missing_relevant_file_terms(relevant, goal):
+    if _missing_relevant_file_terms(parent.goal, goal):
+        return False
+    if _missing_hierarchy_contract_terms(parent.goal, goal):
         return False
     roots = [str(item or "").rstrip("/") for item in parent.allowed_write_roots]
     return bool(goal and any(root and root in goal for root in roots))
@@ -67,11 +69,32 @@ def _missing_relevant_file_terms(relevant: str, goal: str) -> bool:
     return any(term.lower() not in lowered for term in terms)
 
 
+# LLM: _missing_hierarchy_contract_terms keeps explicit depth-chain requirements alive across delegation.
+# 函数用途: 父级要求 4 层链路/孙孙节点时，child goal 不能只带路径就丢掉这类协作约束。
+def _missing_hierarchy_contract_terms(parent_goal: str, goal: str) -> bool:
+    contracts = _hierarchy_contract_segments(parent_goal)
+    if not contracts:
+        return False
+    lowered = str(goal or "").lower()
+    return not any(_segment_anchor(segment) in lowered for segment in contracts)
+
+
 # LLM: _file_terms extracts explicit filenames from compact parent context.
 # 函数用途: 提取 solution.py、test_solution.py、README.md 等验收文件名，用于判断下层交接是否完整。
 def _file_terms(text: str) -> list[str]:
-    pattern = r"(?<![\w.-])[\w.-]+\.(?:py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html)(?![\w.-])"
-    return list(dict.fromkeys(re.findall(pattern, str(text or ""), flags=re.IGNORECASE)))
+    return required_file_terms_from_text(
+        text,
+        extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html",
+    )
+
+
+# LLM: _forbidden_file_terms keeps negative filename examples visible without promoting them to deliverables.
+# 函数用途: 提取 product.html/legacy.html 这类禁止反例，给下层明确的“不要创建/不要改名成”清单。
+def _forbidden_file_terms(text: str) -> list[str]:
+    return forbidden_file_terms_from_text(
+        text,
+        extensions=r"py|md|json|ya?ml|txt|ts|tsx|js|jsx|css|html",
+    )
 
 
 # LLM: relevant_parent_context keeps inherited scope focused on the current child instead of every sibling.
@@ -110,6 +133,18 @@ def _inherited_goal_context(
     if roots:
         lines.append("允许写入根：")
         lines.extend(roots)
+    file_terms = _file_terms(parent.goal)
+    if file_terms:
+        lines.append("父级必需文件/产物名（structured required_files，必须原样传给下一层，不能改名或缩水）：")
+        lines.extend(f"- {item}" for item in file_terms)
+    forbidden_file_terms = _forbidden_file_terms(parent.goal)
+    if forbidden_file_terms:
+        lines.append("父级禁止文件/反例名（structured forbidden_files，不得创建，不得当成 required_files）：")
+        lines.extend(f"- {item}" for item in forbidden_file_terms)
+    hierarchy_contracts = _hierarchy_contract_segments(parent.goal)
+    if hierarchy_contracts:
+        lines.append("父级层级/协作约束（必须原样遵守）：")
+        lines.extend(f"- {item}" for item in hierarchy_contracts)
     relevant = relevant_parent_context(parent.goal, child_goal)
     if relevant:
         lines.extend(["相关父级片段：", relevant])
@@ -137,6 +172,27 @@ def _parent_goal_segments(text: str) -> list[str]:
         for item in re.split(r"[\n。；;]+", str(text or ""))
         if item.strip()
     ]
+
+
+# LLM: _hierarchy_contract_segments extracts delegation-shape constraints without copying whole parent goals.
+# 函数用途: 保留 4 层链路、命名和层层创建规则；这些不是业务 sibling 目标，不能被相关性筛掉。
+def _hierarchy_contract_segments(text: str) -> list[str]:
+    keywords = ("4 层", "四层", "孙孙", "great-grandchild", "root ->", "命名统一", "层层")
+    return [
+        clip_parent_context(segment, limit=500)
+        for segment in _parent_goal_segments(text)
+        if any(keyword.lower() in segment.lower() for keyword in keywords)
+    ]
+
+
+# LLM: _segment_anchor gives contract presence checks a stable short token.
+# 函数用途: 用短关键字判断 child goal 是否已经携带同类层级合同，避免重复追加。
+def _segment_anchor(segment: str) -> str:
+    lowered = segment.lower()
+    for anchor in ("孙孙", "great-grandchild", "root ->", "4 层", "四层", "命名统一", "层层"):
+        if anchor.lower() in lowered:
+            return anchor.lower()
+    return lowered[:24]
 
 
 # LLM: _scope_tokens extracts model-stable identifiers such as arithmetic or leaf_worker_text.

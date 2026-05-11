@@ -28,6 +28,27 @@ def test_runner_prompt_tells_leaf_to_defer_command_execution_to_parent():
     assert "从 working_dir 运行能导入被测模块" in prompt
 
 
+# LLM: test_runner_prompt_tells_leaf_to_chunk_long_file_writes prevents repeated truncated tool calls.
+# 函数用途: 长 CSS/JS/HTML 不能等工具解析失败后才提醒；runner 起步就要要求分块写。
+def test_runner_prompt_tells_leaf_to_chunk_long_file_writes():
+    context = SubAgentExecutionContext(
+        run_id="leaf-css",
+        generated_at=1.0,
+        goal="写 style.css 和 app.js",
+        thought="",
+        plan=[],
+        role="leaf_worker",
+        allowed_tools=["write_file", "append_file"],
+        acceptance_checks=["CSS/JS 必须存在"],
+    )
+
+    prompt = _build_subagent_runner_prompt(context)
+
+    assert "长 CSS/JS/HTML" in prompt
+    assert "write_file 写短骨架" in prompt
+    assert "append_file 分块追加" in prompt
+
+
 def test_runner_prompt_tells_coordinator_to_write_reports_but_delegate_deliverables():
     """coordinator 可以写协调报告，但最终业务产物仍要派给 worker/writer。"""
     context = SubAgentExecutionContext(
@@ -45,8 +66,10 @@ def test_runner_prompt_tells_coordinator_to_write_reports_but_delegate_deliverab
 
     assert "coordinator" in prompt
     assert "可以在自己的 task_dir 写计划、证据和协调报告" in prompt
-    assert "最终产物仍应交给 worker/writer" in prompt
-    assert "不要给自己申请最终产物目录写权限" in prompt
+    assert "最终产物仍应优先交给 worker/writer" in prompt
+    assert "上层权限应覆盖下层" in prompt
+    assert "不要误以为只能创建 worker" in prompt
+    assert "不要包成" in prompt
     assert "创建 worker/writer/leaf_worker" in prompt
     assert "不要让 worker/writer 代写 coordinator 自己的协调证据" in prompt
     assert "原样传递父级指定的文件名" in prompt
@@ -58,6 +81,9 @@ def test_runner_prompt_tells_coordinator_to_write_reports_but_delegate_deliverab
     assert "找茬子代理" in prompt
     assert "模板详情" in prompt
     assert "你是找茬子代理" in prompt
+    assert "subagent_message" in prompt
+    assert "scope=descendants" in prompt
+    assert "scope=peers" in prompt
 
 
 def test_runner_prompt_keeps_role_template_details_out_of_leaf_prompt():

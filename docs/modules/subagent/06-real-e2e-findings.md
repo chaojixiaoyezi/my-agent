@@ -1644,6 +1644,7 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Symptom: researcher/tester/bug_finder/acceptor/coordinator can write reports, but they should not inherit the final deliverables root.
   - 中文解释：会写报告不等于能写最终业务产物。报告放自己的工单目录；业务产物仍交给 worker/writer/leaf_worker。
   - Fix: hierarchy scheduler now separates report-write capability from product-write authority. Report/check/accept/research/coordinator roles keep task-local write roots only; worker/writer/leaf_worker can inherit product write roots. Product paths may remain visible as delegation/test context, but write authority is enforced by `allowed_write_roots`.
+  - 2026-05-11 update：这个旧结论被后续真实恢复需求推翻。现在的原则改为“上层权限覆盖下层”，coordinator/tester/reviewer 也保留产物根，方便检查、接管和救援；但角色职责仍要求它们优先写报告、把实际业务产物交给 worker/writer/leaf_worker。
 - Remaining gaps:
   - Partial success plus root timeout still needs clearer status semantics. Root created all 6 children but finished as `TIMEOUT / UNVERIFIED`.
   - Not all report-only children executed before the root timed out; a later run should confirm tester/bug_finder/acceptor each write their own task-local reports.
@@ -1690,20 +1691,21 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Observation rule: outer controller only started main/root; root created direct children through its own runner.
 - 中文说明：
   - 这轮确认 parser 修复后，main 不再把完整 goal 越改越短；root 能拿到完整任务并真实创建 6 类 direct child。
-  - 同时继续查权限边界：coordinator 只能写自己的 task-local 报告；researcher/bug_finder/tester/acceptor 只能写自己的 task-local 报告；worker/writer 才能写最终产物目录。
+  - 同时继续查当时的权限边界：coordinator/researcher/bug_finder/tester/acceptor 只拿 task-local 写根，worker/writer 才能写最终产物目录。这个结论在 2026-05-11 后被“上层权限覆盖下层”新原则替代。
 - Observed facts:
   - Parser fix worked: root `goal_preview` kept the full deliverables path and six-role instructions.
   - Run `role_template_boundary_retest_20260510_195010` created 6 children, but exposed that explicit root/coordinator still inherited the final deliverables root.
   - Fix: explicit root/coordinator seed now keeps product paths in `goal` as delegation context but strips `extra_write_roots`, so root cannot write final deliverables directly.
   - Run `role_template_boundary_retest_20260510_200613` then verified root `allowed_write_roots` contained only its own task directory.
   - The same run created six children with corrected roles:
-    - `researcher`, `bug_finder`, `tester`, and `acceptor` had task-local-only write roots.
+    - `researcher`, `bug_finder`, `tester`, and `acceptor` had task-local-only write roots under the old policy.
     - `leaf_worker` and `writer` had task-local plus the deliverables root.
     - Worker wrote product files under `/Users/example/my-终端应用/deliverables/role_template_boundary_retest_20260510_200613`.
 - Finding 1: root/coordinator needs path context, not product write authority.
   - Symptom: root knew the deliverables path and therefore inherited it as an allowed write root.
   - 中文解释：root 要知道产物目录在哪里，才能派工和验收；但“知道路径”不等于“自己能写最终产物”。
-  - Fix: explicit root/coordinator create-run params now set `extra_write_roots=[]`; the path remains in goal so child worker/writer can inherit it through scheduler policy.
+  - Fix at that time: explicit root/coordinator create-run params set `extra_write_roots=[]`; the path remained in goal so child worker/writer could inherit it through scheduler policy.
+  - 2026-05-11 update：这个边界也调整了。root/coordinator 现在会保留产物写根，原因是上层必须能覆盖下层权限，才能在下级挂掉、路径写错或需要接管时直接检查和恢复。系统用角色职责和验收链约束“不要乱写”，而不是让上层完全没权限。
 - Finding 2: real models may use `role=child` and put the real role in `agent_name`.
   - Symptom: one root scheduled all six children with generic `role=child` and names like `researcher`, `writer`, `tester`; before the fix, report-only children could inherit product write roots because the policy could not see their real role.
   - 中文解释：模型经常把结构化字段填得不够标准，但名字里已经说明了真实角色。系统要兜底识别，不能因为一个泛化 role 就放大权限。
@@ -1732,7 +1734,7 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Model name: `MiniMax-M2.7`.
   - Observation rule: outer controller only seeded root/coordinator and then dispatched that root; all six direct children were created by root itself.
 - 中文说明：
-  - 这轮验证两个问题：第一，CLI 显式创建 root/coordinator 时，root 只能写自己的协调目录，不能因为 goal 里出现产物路径就拿到最终产物写权限；第二，root 看到还有 child 没跑完时，能不能根据 `needs_more_dispatch` / `unfinished_run_ids` 继续调度下一波。
+  - 这轮验证两个问题：第一，CLI 显式创建 root/coordinator 时，旧策略要求 root 只能写自己的协调目录；第二，root 看到还有 child 没跑完时，能不能根据 `needs_more_dispatch` / `unfinished_run_ids` 继续调度下一波。2026-05-11 后第一点已改为上层保留覆盖权限。
   - 外层没有替 root 创建 researcher/worker/writer/bug_finder/tester/acceptor；这些直接子代理都来自 root 的 `schedule_child_subagents`。
 - Observed hierarchy:
   - `researcher`: `subagent-1778417047-c0133cf5` -> `DONE / VERIFIED`.
@@ -2556,3 +2558,279 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Add a stronger root-owned full flow oracle for registration/login/cart/checkout behavior; current `static_site_check` validates files/links/placeholders/buttons but does not execute JavaScript in a browser.
   - R20 still needs to verify the new recovery suggestion works in a live root-only run; it is intentionally role-flexible, not coordinator-only.
   - Later work should move more path passing toward short ids / relative paths / structured cwd bundles so long absolute paths appear less often in prompts.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R20
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r20.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r20`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r20/build`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+- 中文说明：
+  - R20 按用户新要求验证“上层权限覆盖下层”。root/coordinator/tester/reviewer 可以继承产物写入根，用于检查、接管和救援；但正常职责仍要把具体页面/代码交给 worker/writer。
+  - 外层只 seed root；root 自己创建了 `小傻妞-购物网站架构师`，没有外层直接创建下级，命名规则第一层生效。
+- Finding 77: old coordinator prompt contradicted authority coverage.
+  - Symptom: root already had deliverables write coverage, but coordinator runner prompt still said final product write denial was expected and told the model not to request final product write permission.
+  - 中文解释：权限模型已经改了，但提示词还在讲旧规矩，模型会误以为自己不能继续创建 coordinator/孙节点，容易把可恢复任务报成 BLOCKED。
+  - Fix: runner prompt and coordinator role template now say parent authority covers descendants; coordinator can inherit product roots for inspection/takeover/rescue, can create coordinator/child_coordinator/grandchild_coordinator for multi-layer work, and should still delegate product writing to worker/writer/leaf_worker.
+  - Verification:
+    - `test_runner_prompt_tells_coordinator_to_write_reports_but_delegate_deliverables`.
+    - `test_coordinator_template_says_parent_authority_covers_children_but_should_delegate`.
+    - focused hierarchy write-root tests, ruff, and strict code-size.
+- Finding 78: long multi-child schedule payload can truncate before closing the tool call.
+  - Symptom: `小傻妞-购物网站架构师` tried to create three long grandchildren specs in one `schedule_child_subagents` call; the model response stopped mid-JSON before `[/TOOL_CALL]`, so no grandchildren were created.
+  - 中文解释：这不是 schedule 工具不能创建孙节点，而是一次塞太长，模型输出半截 JSON，工具根本没法执行。
+  - Fix: coordinator runner prompt and schedule tool spec now require schedule params at the tool JSON top level and tell long goals to split into multiple calls with 1-2 children each. The tool entrypoint also tolerates a real-model `orchestration` wrapper and unwraps it before scheduling, while keeping the public bundle interface unchanged.
+  - Verification: `test_runner_context_schedule_accepts_orchestration_wrapper`.
+- Finding 79: inherited product authority must not mean coordinator writes the product itself.
+  - Symptom: after child/grandchild runs became `BLOCKED`, root interpreted inherited write roots as permission to directly create the shopping-site files itself.
+  - 中文解释：你说的“上层权限覆盖下层”是对的，但这不等于 root/coordinator 平时亲手写业务文件。它们要能检查、接管、救援，可默认动作应该是再派救援 worker，而不是把 worker 的活抢过来。
+  - Fix: runner write boundary now exposes `product_write_roots` and `product_write_policy`. Coordinator/tester/reviewer-style roles keep product roots in `allowed_write_roots`, but `product_write_policy=delegate` blocks direct writes under product roots and tells the model to create or dispatch `worker/writer/leaf_worker`. Worker/writer/leaf roles use `product_write_policy=direct`.
+  - Verification:
+    - `test_delegate_policy_blocks_coordinator_product_write`.
+    - `test_delegate_policy_allows_task_dir_reports`.
+    - `test_direct_policy_allows_worker_product_write`.
+    - `test_build_execution_context_write_boundary`.
+- Finding 80: exact file contracts were lost across hierarchy handoff.
+  - Symptom: root required `product-detail.html`, root-level `style.css`, and root-level `app.js`, but the grandchild goal shrank the list to `product.html`, `css/style.css`, and `js/main.js`.
+  - 中文解释：模型不是故意乱写，它在层层转述时把“必须叫这些文件名”的合同压缩坏了。后续验收会按父级原始要求查文件，所以这类改名必须在派工时就防住。
+  - Fix: `scheduled_child_goal()` now treats explicit parent file names as a hard handoff contract. If the child goal only carries the output directory but misses parent filenames, it appends `父级明确文件/产物名` and requires descendants to pass those names verbatim.
+  - Verification: `test_hierarchy_schedule_preserves_shopping_file_contract_when_child_goal_only_has_build_dir`.
+- Finding 81: explicit four-layer tests need a coordinator gate before leaf work.
+  - Symptom: root intended `root -> 子 -> 孙 -> 孙孙`, but the first child created a depth-2 `worker` directly; that made the chain stop at three levels and prevented a depth-3 `小小小傻妞-*` node.
+  - 中文解释：平时 root 可以直接派 worker，也可以派 coordinator；但这轮 prompt 明确要求 4 层链路，所以深度还没到孙孙层时，下一层应该先是 coordinator，再由它继续派 leaf。
+  - Fix: `hierarchy_scope_guards.py` now blocks `worker/leaf_worker` children before depth 3 only when the parent goal explicitly mentions a 4-layer/great-grandchild chain. This is scenario-driven, not a hardcoded global depth limit.
+  - Verification: `test_hierarchy_schedule_blocks_leaf_before_explicit_four_layer_chain_reaches_depth_three`.
+- Finding 82: coordinator product-write blocking needs a real communication lane.
+  - Symptom: once coordinator/root product writes are blocked by `product_write_policy=delegate`, they still need a way to correct child paths, announce requirement changes, and tell many descendants to reread shared facts without writing the product themselves.
+  - 中文解释：coordinator 可以被拦住不亲自写页面，但不能因此变成“哑巴领导”。少数下属需要不同消息时要能一对一通知；大量下属同一消息时要能写公共看板广播；同时不能越权广播到别的 sibling 分支。平级子代理也要能点对点讨论，给以后 team 功能留口子。
+  - Fix: added `subagent_message` orchestration tool. `direct + descendants` writes target inbox/outbox only inside the sender subtree. `broadcast + descendants` appends scoped rows to shared messages/blackboard with `recipient_scope` and `scope_root_run_id`. `direct + peers` allows same-parent sibling discussion only; cousin/other-branch targets are blocked.
+  - Verification:
+    - `test_direct_message_allows_ancestor_to_descendant`.
+    - `test_direct_message_allows_peers_under_same_parent`.
+    - `test_broadcast_scopes_to_sender_descendants`.
+    - `test_message_blocks_cross_branch_descendant_targets`.
+- Remaining check:
+  - Rerun a clean R21/R20-style root-only shopping E2E and verify root creates a 4-layer chain with `小傻妞-*` -> `小小傻妞-*` -> `小小小傻妞-*`, product writes are performed by worker/leaf nodes, and the required shopping-site file names stay exact.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R21
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r21.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r21`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r21/build`.
+- 中文说明：
+  - R21 继续按 root-only 原则测试：外层只给主代理任务，主代理创建 root coordinator，后续 child / grandchild / great-grandchild 必须由上层节点自己创建。
+  - 真实模型验证了两个新边界：coordinator 试图直接写 `.gitkeep` 到业务产物目录时被 `product_write_policy=delegate` 拦住；depth=1 coordinator 过早创建 leaf_worker 时被 `hierarchy_chain_requires_coordinator_until_depth_3` 拦住。
+  - 真实模型也实际调用了 `subagent_message direct + descendants`，把纠偏消息写进下级 inbox/outbox，证明 coordinator 被禁止写业务产物后仍有通信能力。
+- Finding 83: long multi-child schedule calls need a hard tool boundary, not just prompt wording.
+  - Symptom: depth=2 `小小傻妞-*` coordinator tried to create 3 long leaf_worker specs in one `schedule_child_subagents` call. The model response/tool call was truncated before the tool returned; no leaf runs were created, and the branch became `BLOCKED/UNVERIFIED`.
+  - 中文解释：之前只在提示词里写“长任务拆成 1-2 个 child”，但真实模型还是会一口气塞 3 个。只靠提示不够，要让工具本身拒绝过大的单次调用，并告诉模型拆小重试。
+  - Fix: `schedule_child_subagents` tool entrypoint now rejects more than 2 child specs per model call with a clear split-and-retry message. The lower manager API still supports batch scheduling; this guard only protects live runner tool calls from overlong JSON truncation.
+  - Verification:
+    - `test_schedule_tool_rejects_three_child_batches`.
+    - `test_schedule_tool_allows_two_child_batches`.
+- Remaining check:
+  - Re-run a clean R22 root-only shopping E2E after the hard batch guard and verify the depth=2 coordinator retries as multiple small schedule calls instead of becoming blocked.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R22
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r22.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r22`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r22/build`.
+- 中文说明：
+  - R22 确认 R21 的批量守卫方向有效：root coordinator 这次按小批次创建了第一层 `小傻妞-*`，没有再一次塞 3 个长 child goal。
+  - 通信能力也真实触发：root 对下级发送了 `direct + descendants` 纠偏消息，并发送了 `broadcast + descendants` 的统一文件名/目录约束通知。
+- Finding 84: forbidden rename examples must not become required file contracts.
+  - Symptom: R22 child goal 的继承块里出现了 `- product.html`，来源是父级文本 `product-detail.html（禁止改成 product.html）` / `不允许把 product-detail.html 改名成 product.html`。这会让下级误以为必须交付 `product.html`，正好违反用户要求。
+  - 中文解释：这是 prompt 被误传，不是下级单纯变笨。我们把自然语言里的所有 `*.html/*.css/*.js` 都正则抽出来当“必须文件”，但没有区分“必须包含 X”和“禁止改成 Y”。Y 是反例，不是产物合同。
+  - Reference lesson:
+    - 长期助手 cron/script 上下文会先做路径作用域校验，再把脚本输出作为带标题的 context 注入，不让任意路径或环境上下文直接混进任务。
+    - 会话运行时/claw-code 风格把 workspace/sandbox/write roots 做成结构化字段，而不是只靠自然语言长句让模型复制。
+    - 终端交互 的 context usage 路径强调按类别统计/压缩上下文；对我们来说，对子代理 handoff 也应拆成结构化 `required_files` / `forbidden_files` / `write_roots`，减少从散文里二次猜语义。
+  - Fix: added `required_file_terms.py`, shared by hierarchy handoff and static required-file extraction. It extracts positive deliverable filenames but skips filenames that appear as forbidden rename/create targets such as `禁止改成 product.html` or `不要创建 legacy.html`.
+  - Follow-up from R23: MiniMax rewrote the same rule as `不得改名为 product.html`; the first fix covered `改名成` but not `改名为`, so R23 was stopped and the marker list now covers both forms plus `改为`。
+  - Follow-up from R24: the second forbidden alternative in `不要改名成 product.html 或 old-product.html` still leaked because `old-product.html` no longer had the negative verb directly in front of it. The extractor now carries a short negative chain across sibling connectors like `或` / `或者` / `、` / comma, so `不要创建 a.html、b.html` and `不要改成 a.html 或 b.html` both stay forbidden examples instead of required deliverables.
+  - 中文解释：这次不是模型单纯写错，而是我们把“不要改名成 A 或 B”里的 B 当成了正常文件名。以后类似“不要创建 A、B、C”的并列反例会一起过滤掉。
+  - Verification:
+    - `test_hierarchy_file_contract_skips_forbidden_rename_targets`.
+    - `test_static_required_files_from_texts_extracts_static_web_targets`.
+- Remaining check:
+  - Re-run a clean R25 root-only shopping E2E and verify `product.html` / `old-product.html` / `legacy.html` no longer appear in `父级明确文件/产物名` or static required files while `product-detail.html` remains.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R25
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r25.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r25`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r25/build`.
+- 中文说明：
+  - R25 用更难的否定文件名规则复测：`不要改名成 product.html 或 old-product.html`、`不要创建 legacy.html 或 obsolete.html`。
+  - 本轮没有进入真正子代理派工；主模型在第一条 `create_subagents` 工具调用里把 root goal/plan/acceptance 写得过长，导致 `[TOOL_CALL]` 没有闭合，工具系统以前会把半截工具块当成普通最终回答放过去。
+- Finding 85: incomplete standard tool blocks need parse-error recovery.
+  - Symptom: R25 response contained `[TOOL_CALL]` and a partial `create_subagents` JSON body, but lacked `[/TOOL_CALL]`. Because the parser only accepted fully closed standard blocks, the run ended without creating `stage7-shop-r25-root` or any deliverables.
+  - 中文解释：这和前面的“3 个 child 一次塞太长”是同一类问题。模型开始按协议调用工具了，但参数太长被截断；系统不能装作没看见，应该明确告诉模型“这不是回答，是坏掉的工具调用，请短一点重试”。
+  - Reference lesson:
+    - 会话运行时 / 模型助手 Code / claw-code 类工具调用都更像协议层消息：缺字段、越权、解析失败会变成结构化错误并要求重试，而不是让半截工具调用混进最终回复。
+    - 长期助手 / 通道运行时 对输出和上下文会做大小边界；对我们来说，工具层也要拦截“过长导致未闭合”的 payload，逼模型使用短合同/短引用。
+  - Fix: standard `[TOOL_CALL]` / `[SUBAGENT_CALL]` blocks now report `__parse_error__` when the closing marker is missing. The retry hint specifically tells the model to shorten `goal` / `plan` / `acceptance_checks` and keep only path, required filenames, and hard constraints.
+  - Verification: `test_tool_call_parser_reports_missing_closing_tool_marker`.
+- Remaining check:
+  - Re-run a clean R26 root-only shopping E2E after parse-error recovery and verify the model retries with a shorter `create_subagents` call, then confirm forbidden alternatives stay out of inherited file contracts.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R26
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r26.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r26`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r26/build`.
+- 中文说明：
+  - R26 证明 R25 的 parse-error recovery 有效：首轮创建 root 之前模型先误调了一次空 `dispatch_subagents`，随后成功创建 root coordinator `subagent-1778475598-9db62bdf`。
+  - root 自己创建了 child coordinator `subagent-1778475629-f3b10917`，child 自己创建了 grandchild coordinator `subagent-1778475662-b24b23f2`，grandchild 创建了 depth=3 leaf workers，满足“外层只观察，层级自己派发”的测试方式。
+  - `register.html` 和 `login.html` 已由 depth=3 leaf worker `subagent-1778475770-0114105c` 写出；这说明四层链路已能真实落到孙孙节点产物写入。
+  - root coordinator 尝试直接写业务目录 `.gitkeep` 被 `product_write_policy=delegate` 拦住，然后转为派发下级，这是正确的上层权限边界。
+- Finding 86: truncated write_file content needs a write-specific retry hint.
+  - Symptom: homepage/style leaf `subagent-1778475750-9ecbc43d` tried to write a long `style.css` with one `write_file` call. The standard tool block was truncated twice. The new parse-error recovery caught both as `__parse_error__`, but the hint only mentioned shortening `goal/plan/acceptance_checks`, so the model kept trying long `write_file.content`.
+  - 中文解释：这次不是路径传错，而是“文件正文太长”。写 CSS/HTML/JS 时，模型很容易把整段代码塞进一个 JSON 字符串，导致工具调用半截断掉。应该明确教它：先 `write_file` 写短骨架，再 `append_file` 分块追加。
+  - Fix: parse-error hints now detect truncated `write_file` payloads with `content` and add a specific instruction to use `append_file` chunks with short content while keeping JSON closed.
+  - Verification: `test_parse_error_hint_recommends_append_for_truncated_write`.
+- Remaining check:
+  - Re-run a clean R27 root-only shopping E2E and verify long CSS/HTML writes recover through `append_file`, not repeated truncated `write_file`.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R27
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r27.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r27`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r27/build`.
+- 中文说明：
+  - R27 继续按 root-only 原则测试：外层只启动主代理，主代理创建 root，root 创建 child，child 创建 grandchild，grandchild 创建 depth=3 leaf。
+  - 本轮没有再看到 `product.html` / `old-product.html` / `legacy.html` 这类禁止反例进入必需文件清单，说明 R22/R24 的正向过滤方向有效。
+  - `subagent_message direct + descendants` 在 child 层真实执行过，coordinator 写业务目录 `.gitkeep` 仍被 `product_write_policy=delegate` 正确拦截。
+- Finding 87: forbidden examples need a first-class `forbidden_files` contract, not just omission from `required_files`.
+  - Symptom: R27 没再把禁止文件名放进 required 清单，但父传子仍主要靠一段自然语言继承块。只“跳过反例”能减少误传，但下层仍不知道哪些文件名是明确禁止项。
+  - 中文解释：问题不只是模型记错名字，而是我们把“必需文件”和“禁止反例”混在散文里交接。按理这种合同应该像其他工具一样是结构化字段：哪些必须有，哪些绝对不要创建。
+  - Cross-product lesson:
+    - 会话运行时 / 模型助手 Code 风格的工具调用更像协议消息：参数、cwd、sandbox、错误都结构化，不让模型从长句里猜机器字段。
+    - 长期助手 会保留 MCP `structuredContent`，也有 schema coercion 和大输出外置；机器事实优先走结构化 JSON，而不是只走模型散文。
+    - 通道运行时 的 sub-agent prompt 使用显式模板变量和 claims/state 文件，避免每层重新理解同一批路径。
+    - 终端交互 把 `agentId` / `parentSessionId` / `agentType` 放进显式 metadata；链路身份不靠模型复述。
+  - Fix: `required_file_terms.py` now exposes both positive `required_file_terms_from_text()` and negative `forbidden_file_terms_from_text()`. `context_bundle.output_contract` now contains `required_files`, `forbidden_files`, and `file_contract_source=task_text_positive_negative_extraction`; hierarchy inherited goals render separate `structured required_files` and `structured forbidden_files` blocks.
+  - Verification:
+    - `test_file_contract_extracts_required_and_forbidden_terms_separately`.
+    - `test_context_bundle_output_contract_separates_required_and_forbidden_files`.
+- Finding 88: write-specific parse-error hints are too late for long generated CSS/JS/HTML.
+  - Symptom: leaf `subagent-1778476196-a3e99e53` repeatedly attempted a long `write_file` for `style.css`. The parser returned `__parse_error__` with a 300-character hint that mentioned `append_file` chunks, but the model ignored it and repeated the same long `write_file` pattern.
+  - 中文解释：等工具调用已经坏了再提醒，模型可能已经进入“重复上一招”的循环。长 CSS/JS/HTML 应该在 runner 开始干活前就拿到规则：短骨架 + 分块追加。
+  - Fix: runner contract now tells every subagent that long CSS/JS/HTML or large code must use `write_file` for a short skeleton and `append_file` chunks for the body. `write_file` / `append_file` tool specs now carry the same rule, and parse-error hints explicitly say not to repeat a full `write_file.content`.
+  - Verification:
+    - `test_runner_prompt_tells_leaf_to_chunk_long_file_writes`.
+    - `test_parse_error_hint_recommends_append_for_truncated_write`.
+- Remaining check:
+  - Re-run a clean R28 root-only shopping E2E and verify `style.css` / `app.js` are produced through short skeleton plus `append_file` chunks, and context bundle files contain separate `required_files` / `forbidden_files`.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R28
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r28.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r28`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r28/build`.
+- 中文说明：
+  - R28 继续按 root-only 方式跑：外层只创建 root coordinator，root 自己创建 `小傻妞-*`，child 自己创建 `小小傻妞-*`，grandchild 自己创建 `小小小傻妞-*`。
+  - 文件名 contract 比 R22/R24 稳定：`product-detail.html` 没有被改成 `product.html`，禁止反例没有出现在当前 deliverables 里。
+  - 真实产物只完成 5 个 HTML：`index.html`、`register.html`、`login.html`、`products.html`、`product-detail.html`。缺少 `cart.html`、`checkout.html`、`order-success.html`、`style.css`、`app.js`。
+- Finding 89: short artifact refs were not scoped to the active runner.
+  - Symptom: root 使用 `read_artifact artifact_ref="17-1"` 时，可能读到旧 R15/R19 的同号 tool-output artifact，而不是当前 R28 的同号输出。旧 artifact 里带着旧 case id 和旧路径，随后污染当前 prompt，造成路径/任务误传。
+  - 中文解释：这不是“模型凭空写错名字”。系统给了一个太短的编号 `17-1`，而这个编号在多个 run 里都会重复。模型照着编号读，工具却拿了旧任务的内容给它，后面当然会串线。按理这种问题不应该发生，应该像会话 ID / run ID 一样有作用域。
+  - Cross-product lesson:
+    - 长期助手 gateway/session 会把 transcript 和工具消息绑定 `session_id`，cron 也会生成独立 session id；其 release note 也强调 `structuredContent` 优先，减少从散文里猜字段。
+    - 通道运行时 的多代理说明强调 per-agent sessions / workspaces，文件访问也按 workspace root / agentId 做边界。
+    - 会话运行时 / 模型助手 Code 类工具协议通常把 tool call、cwd、sandbox、run/session 作为结构化上下文字段处理，而不是让短编号在全局空间里裸奔。
+  - Fix:
+    - tool-output artifact 现在写入 `run_id`、`task_id`、`request_id`、`scoped_call_id`。
+    - 子代理 runner 调 `agent.run(save=False)` 时会传入当前 `run_id` / `task_id`；即使旧路径没显式传，也会从 `_current_subagent_run_id` 回填。
+    - `read_artifact` 读取短 `call_id` 时会优先匹配当前 run/task/request；没有作用域时也从最新记录开始，而不是读最老记录。
+    - live prompt 里的 `read_artifact_hint` 现在优先给具体 artifact path 和 scope 字段，而不是只给全局短号。
+  - Verification:
+    - `test_read_artifact_short_call_id_prefers_matching_run_scope`.
+    - `test_read_artifact_short_call_id_without_scope_prefers_latest`.
+    - `test_tool_loop_externalizer_falls_back_to_current_subagent_run_id`.
+- Finding 90: FailureIntrospector treated fenced JSON as parse failure.
+  - Symptom: 真实模型返回 Markdown JSON 代码块包裹的失败分析时，FailureIntrospector 打印 `JSON 解析失败` 并降级到规则分类。
+  - 中文解释：很多模型会把 JSON 放进 Markdown 代码块，这不应该算“分析不可用”。解析器应该先去掉围栏，再解析 JSON。
+  - Fix: FailureIntrospector now accepts bare JSON and fenced JSON blocks.
+  - Verification: `test_introspect_with_llm_fenced_json_success`.
+- Finding 91: root/coordinator rescue still needs stronger stop-and-dispatch behavior.
+  - Symptom: root/coordinator 在下级 529 或结构化输出失败后，曾尝试直接写业务产物；工具层已按 `product_write_policy=delegate` 拦住，但 root 随后进入多轮 `subagent_board` / `read_artifact` 循环，prompt 从约 6 万字符涨到 8 万字符，仍未完成剩余 5 个文件。
+  - 中文解释：写入边界已经拦住“领导自己写页面”，但“领导被拦以后该怎么救援”还不够硬。下一轮要让它少读状态，多用 `schedule_child_subagents` 创建明确的 rescue worker，并限制重复读取同一个 board/artifact 的循环。
+  - Status: recorded; not fully solved in this patch. The scoped artifact fix removes one major source of wrong context, but R29 still needs a clean rerun to verify rescue convergence.
+- Remaining check:
+  - Re-run clean R29 after scoped artifact refs. Expectation: `read_artifact("17-1")` no longer imports old run content; if child/coordinator blocks, root should create a rescue worker instead of looping over old artifact/body reads.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R29
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r29.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r29`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r29/build`.
+- 中文说明：
+  - R29 继续按 root-only 方式测试：外层只启动主代理，root 自己派 `小傻妞-*`，child 自己派 `小小傻妞-*`，grandchild 自己派 `小小小傻妞-*`。
+  - 本轮真实产生 10 个目标文件：`index.html`、`register.html`、`login.html`、`products.html`、`product-detail.html`、`cart.html`、`checkout.html`、`order-success.html`、`style.css`、`app.js`。
+  - 禁止反例没有落盘：没有 `product.html`、`old-product.html`、`legacy.html`、`obsolete.html`。
+  - 真实层级也跑出来了：root -> `小傻妞-html/cssjs` -> `小小傻妞-*` -> `小小小傻妞-*`，也就是用户口径里的 4 层。
+- Finding 92: scoped artifact refs worked, but final state must trust machine task status over prose.
+  - Symptom: CLI 最后一段自然语言说 E2E passed，但 `task.json` 显示 root、HTML child coordinator、HTML grandchild coordinator 仍是 `BLOCKED/UNVERIFIED`。业务文件在，状态机没过，不能把这类运行当作完整通过。
+  - 中文解释：以后汇报不能只看模型最后一句“完成了”。要同时看机器状态：root 有没有 blocked、关键 coordinator 有没有 verified、验收有没有真的过。
+  - Evidence: R29 的 10 个 deliverable 文件存在；`task.json` 同时显示 3 个 coordinator blocked。
+  - Status: recorded. 后续 finalizer/report 要把 “deliverables complete but coordinator state blocked” 作为非通过状态展示。
+- Finding 93: unclosed structured result blocks should be recoverable when JSON is complete.
+  - Symptom: root 和两个 coordinator 的 `RUNNER_RESULT.md` 都显示 `structured output parse failed: 缺少 [/SUBAGENT_RESULT] 结束标记。`，但它们已经完成了多轮派工、通信、观察和最终汇总。
+  - 中文解释：模型最后少写一个结束标签，不应该直接把整个协调节点判死。如果 `[SUBAGENT_RESULT]` 后面的 JSON object 本身是完整的，系统应该能救回来；只有 JSON 真的没写完时才失败。
+  - Fix: runner/parser 现在会在缺少结束标记时做窄范围恢复：只有标记后面直接是完整 JSON、`json` 前缀 JSON 或 JSON fence 时才解析；普通说明里提到 `[SUBAGENT_RESULT]` 不会被误当结果。
+  - Verification:
+    - `test_parse_complete_json_without_end_marker`.
+    - `test_parse_incomplete_json_without_end_marker`.
+    - `test_subagent_runner_parser_uses_last_parseable_fenced_block`.
+    - `test_subagent_runner_parser_accepts_prefixed_json_block`.
+- Finding 94: communication self-repair worked but tool ergonomics can improve.
+  - Symptom: root 首次调用 `subagent_message` 时缺 `topic/body` 被拒，随后自己修正为 direct/broadcast 消息，继续推进。
+  - 中文解释：这说明错误能被模型自己修正，但工具返回可以更明确、更短，让上层更快知道“少了哪个字段、怎么补”。
+  - Status: recorded. 不是本次 blocker，后续可优化 message tool 的错误提示模板。
+- Remaining check:
+  - Re-run clean R30 after parser recovery. Expected result: 如果 root/coordinator 输出了完整 JSON 但缺 `[/SUBAGENT_RESULT]`，状态不应再被误判为 blocked；若仍 blocked，则优先修 finalizer 的 blocked-state 汇报和 coordinator 收束规则。
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R30
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r30.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r30`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r30/build`.
+- 中文说明：
+  - R30 继续按 root-only 跑，外层只创建 root，root 自己创建 `小傻妞-shop-build-l1`，child 自己创建 `小小傻妞-shop-build-l2`，grandchild 自己创建两个 `小小小傻妞-*` leaf worker。
+  - 这轮没有复现 R29 的缺 `[/SUBAGENT_RESULT]` 误判；root/coordinator 的 `structured_output_ok=True`，说明 parser recovery 方向可用。
+  - 但测试没有通过：用户指定的 deliverables build 目录是 0 个文件；10 个文件被写到了内部 agent-run workspace：`.my_agent_runtime/.../tasks/<root>/agents/<root>/build`。
+- Finding 95: root seed must preserve product write roots instead of inventing an internal build dir.
+  - Symptom: 顶层提示要求 `extra_write_roots=["/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r30/build"]`，但真实模型首次 `create_subagents` 调用漏掉了该字段。系统仍创建 root，root 的 `allowed_write_roots` 只剩自己的 task dir，于是它把 `build` 解释成内部 agent-run workspace。
+  - 中文解释：这不是叶子节点单纯写错路径，而是 root 一开始就没拿到用户产物目录。没有真实 `extra_write_roots` 时，coordinator 会用自己“家目录”下面的 build，当成业务产物目录传给所有下级。
+  - Fix: `create_subagents` 现在对显式 root/coordinator 做产品写入根门禁：如果目标像“交付网站/文件”，但既没有 `extra_write_roots`，goal 里也没有可提取的绝对产物路径，就拒绝创建，并要求模型用顶层 `extra_write_roots` 重试。
+  - Verification: `test_explicit_coordinator_product_delivery_requires_write_root`.
+- Finding 96: failed root should let the CLI return instead of hanging.
+  - Symptom: root 已进入 `BLOCKED/FAILED`，用户 deliverables 目录仍为空，但顶层 `my-agent run` 进程继续挂起接近 30 分钟，最终由外层测试观察者终止 R30 进程以保留日志。
+  - 中文解释：真实无人值守时，任务已经失败就应该明确收束并返回失败报告，不能让主进程继续空转。否则用户看起来像“卡死了”。
+  - Status: recorded. 后续需要让主运行循环在 root failed 且没有可执行恢复动作时自然退出，并打印失败 refs。
+- Finding 97: acceptance/report must distinguish internal workspace artifacts from user deliverables.
+  - Symptom: root 报告 `build目录包含10个文件`，这句话对内部 workspace build 为真，但对用户指定 deliverables build 为假。
+  - 中文解释：验收不能只问“有一个 build 目录吗”，必须问“是不是用户指定的那个 build 目录”。后续静态站验收要绑定 authoritative deliverables root。
+  - Status: partially covered by Finding 95 guard. 仍建议后续把 authoritative product root 放进 context bundle/output contract，并让 static-site acceptance 优先检查该 root。
+- Remaining check:
+  - Re-run clean R31 after root-write-root guard. Expected result: 如果模型漏传 `extra_write_roots`，`create_subagents` 应拒绝并要求重试；如果模型按提示补上，root/children 应把文件写入 `/deliverables/.../build`，不是内部 agent-run workspace。

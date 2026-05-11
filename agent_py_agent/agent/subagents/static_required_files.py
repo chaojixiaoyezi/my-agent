@@ -3,10 +3,9 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
-_STATIC_REQUIRED_FILE_RE = re.compile(r"(?<![\w./-])([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:html?|css|js))(?![\w.-])")
+from .required_file_terms import required_file_terms_from_text
 
 
 # LLM: static_required_files_from_texts extracts small static-web file expectations from human/task text.
@@ -15,7 +14,7 @@ def static_required_files_from_texts(texts: list[object]) -> list[str]:
     matches = [
         match
         for value in texts
-        for match in _STATIC_REQUIRED_FILE_RE.findall(str(value or ""))
+        for match in required_file_terms_from_text(str(value or ""), extensions=r"html?|css|js")
     ]
     return _dedupe(matches)[:50]
 

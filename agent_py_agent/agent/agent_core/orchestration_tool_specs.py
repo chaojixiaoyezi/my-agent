@@ -90,7 +90,9 @@ _SCHEDULE_CHILD_PARAMETERS = {
 _SCHEDULE_CHILD_PARAMETER_DETAILS = {
     "children": (
         "JSON 数组。每项可含 role、agent_name、goal、plan、allowed_tools、allowed_skills、"
-        "acceptance_checks、extra_write_roots。优先从这些角色模板索引里选 role：\n{role_template_index}"
+    "acceptance_checks、extra_write_roots。参数必须在 tool JSON 顶层，不要包在 orchestration/filesystem 等二级字段里；"
+        "长目标请分多次调用，每次 1-2 个 child。多层领导节点可用 role=coordinator/child_coordinator/grandchild_coordinator。"
+        "优先从这些角色模板索引里选 role：\n{role_template_index}"
     ),
     "apply": "runner 内省略时默认 true；显式 false 只返回会创建什么，适合先检查。",
     "max_depth": "用来避免子代理无限递归创建下级节点。",
@@ -111,8 +113,11 @@ _SCHEDULE_CHILD_EXAMPLES = [
     ),
 ]
 _SCHEDULE_CHILD_COORDINATOR_RULES = (
-    "coordinator/lead 不要直接写最终业务产物；如果最终产物路径不在自己的 allowed_write_roots 内，"
-    "这是设计保护。请用本工具创建 worker/writer/leaf_worker，并把父级给定的路径、文件名和验收条件原样传下去。"
+    "coordinator/lead 的权限应覆盖下级，便于检查、接管和救援；但正常职责不是亲自写最终业务产物。"
+    "请用本工具创建 worker/writer/leaf_worker，并把父级给定的路径、文件名和验收条件原样传下去。"
+    "如果父级要求 4 层链路，深度未到孙孙层前先创建下一层 coordinator。"
+    "需要通知下级时用 subagent_message：少量不同消息用 direct+descendants，大量统一消息用 broadcast+descendants；"
+    "平级讨论用 direct+peers，不能越权通知别的分支。"
 )
 
 

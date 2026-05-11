@@ -21,6 +21,8 @@ from .runner_context import current_subagent_run_id
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
+_MAX_CHILDREN_PER_TOOL_CALL = 2
+
 
 # LLM: ScheduleRequestBuildParams bundles internal request-build inputs to keep signatures stable.
 # 类用途: 汇总当前 agent、parent run、child specs 和原始工具参数，避免后续字段扩展推高参数数量。
@@ -45,12 +47,16 @@ class ScheduleChildSubagentsTool(BaseTool):
     # LLM: execute validates model JSON, builds a hierarchy request, and delegates scheduling.
     # 函数用途: 当前 runner 按 bundle 创建下一层 child runs；没有当前 run 上下文时直接阻断。
     def execute(self, params: dict[str, object]) -> ToolExecutionResult:
+        params = _schedule_tool_params(params)
         parent_run_id = current_subagent_run_id(self.agent)
         if not parent_run_id:
             return _schedule_error("缺少当前 subagent runner 上下文；顶层派工请使用 create_subagents。")
         child_specs = _hierarchy_child_specs(params)
         if isinstance(child_specs, ToolExecutionResult):
             return child_specs
+        bulk_error = _bulk_schedule_error(child_specs)
+        if bulk_error:
+            return _schedule_error(bulk_error)
         target_error = _hierarchy_target_error(self.agent, child_specs)
         if target_error:
             return _schedule_error(target_error)
@@ -66,6 +72,19 @@ class ScheduleChildSubagentsTool(BaseTool):
 # 函数用途: 生成层级调度工具的失败结果，便于模型和测试稳定识别工具名。
 def _schedule_error(message: str) -> ToolExecutionResult:
     return ToolExecutionResult("schedule_child_subagents", False, message)
+
+
+# LLM: _schedule_tool_params tolerates real-model namespace wrappers without changing the public bundle.
+# 函数用途: 兼容模型把 schedule_child_subagents 参数包进 orchestration 字段；顶层显式字段仍优先生效。
+def _schedule_tool_params(params: dict[str, object]) -> dict[str, object]:
+    nested = params.get("orchestration")
+    if not isinstance(nested, dict):
+        return params
+    merged = dict(nested)
+    for key, value in params.items():
+        if key not in {"tool", "orchestration"}:
+            merged[key] = value
+    return merged
 
 
 # LLM: _schedule_request converts validated tool params into the manager service bundle.
@@ -135,6 +154,17 @@ def _hierarchy_child_specs(params: dict[str, object]) -> list[HierarchyChildSpec
             return spec
         specs.append(spec)
     return specs
+
+
+# LLM: _bulk_schedule_error turns real-model long child batches into explicit retry guidance.
+# 函数用途: 限制 runner 单次层级调度最多 2 个 child，避免长 JSON 工具参数被截断后卡死。
+def _bulk_schedule_error(child_specs: list[HierarchyChildSpec]) -> str:
+    if len(child_specs) <= _MAX_CHILDREN_PER_TOOL_CALL:
+        return ""
+    return (
+        "schedule_child_subagents 单次最多创建 2 个 child；"
+        "请拆成多次调用，每次 1-2 个 child，并保持每个 goal 短小完整。"
+    )
 
 
 # LLM: _hierarchy_child_spec validates one child bundle from the model tool call.

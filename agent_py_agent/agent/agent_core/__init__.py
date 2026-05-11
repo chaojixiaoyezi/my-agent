@@ -18,6 +18,7 @@ from .orchestration_tools import (
     SubagentBoardTool,
 )
 from .runtime_mixin import SimpleAgentRuntimeMixin
+from .subagent_message_tool import SubagentMessageTool
 from .subagent_mixin import SimpleAgentSubagentMixin
 
 __all__ = [
@@ -28,5 +29,6 @@ __all__ = [
     "SimpleAgentDispatchMixin",
     "SimpleAgentRuntimeMixin",
     "SimpleAgentSubagentMixin",
+    "SubagentMessageTool",
     "SubagentBoardTool",
 ]

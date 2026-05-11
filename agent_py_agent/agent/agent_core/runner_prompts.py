@@ -95,34 +95,48 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         "- 验证文件内容时优先写 validation_method=\"content_check\"、file_path、content_pattern 或 content_equals、match_mode=\"exact\"，不要写 cat 文件命令。",
         "- 写代码和测试后，必须逐条对照验收条件做静态自检，确保实现、测试、README 三者互相一致。",
         "- 写 Python 测试时必须保证从 working_dir 运行能导入被测模块；优先把测试文件和模块放同一目录，或显式处理 import path。",
+        "- 生成长 CSS/JS/HTML 或大段代码时，不要一次性把完整 content 塞进 write_file；先用 write_file 写短骨架，再用 append_file 分块追加。",
     ]
     lines.extend(_current_role_template_lines(context))
     if "leaf" in str(context.role or "").lower():
         lines.append("- 叶子节点重点是交付产物和测试文件；父级验收器负责运行命令、判定通过和触发 rescue。")
     if _is_coordinator_context(context):
-        lines.append("可用角色模板索引：")
-        lines.extend(f"  {line}" for line in role_template_index_text().splitlines())
-        lines.append("模板详情：")
-        lines.extend(f"  {line}" for line in role_template_detail_text().splitlines())
-        lines.append(
+        lines.extend(_coordinator_execution_contract_lines())
+    return lines
+
+
+# LLM: _coordinator_execution_contract_lines keeps delegation policy readable and under size limits.
+# 函数用途: 生成 coordinator/lead 专属执行规则，包括模板选择、权限继承、产物委派和调度失败处理。
+def _coordinator_execution_contract_lines() -> list[str]:
+    lines = ["可用角色模板索引："]
+    lines.extend(f"  {line}" for line in role_template_index_text().splitlines())
+    lines.append("模板详情：")
+    lines.extend(f"  {line}" for line in role_template_detail_text().splitlines())
+    lines.extend(
+        [
             "- coordinator/lead 节点可以在自己的 task_dir 写计划、证据和协调报告；"
-            "业务代码、页面、文档正文等最终产物仍应交给 worker/writer。"
-        )
-        lines.append(
-            "- 如果你尝试写最终产物时收到 allowed_write_roots 阻止，这是正确保护；"
-            "不要给自己申请最终产物目录写权限，也不要让父代理直接代写。"
-        )
-        lines.append(
+            "也可以继承产物写入根用于检查、接管和救援；业务代码、页面、文档正文等最终产物仍应优先交给 worker/writer。",
+            "- 上层权限应覆盖下层；如果父级给了产物写入根，你可以用它检查、修复或接管，"
+            "但不要因为有权限就绕过 worker/writer 直接替它们完成整块业务产物；"
+            "如果直接写业务产物被工具层拒绝，立刻创建救援 worker/writer/leaf_worker。",
             "- 正确动作是调用 schedule_child_subagents 创建 worker/writer/leaf_worker，"
-            "把目标路径、文件名、验收条件原样传给下一层，然后用 dispatch_subagents 推进直接 child。"
-        )
-        lines.append("- 不要让 worker/writer 代写 coordinator 自己的协调证据；需要共享时引用 artifact_refs/evidence_refs。")
-        lines.append("- 创建 child/leaf 时必须原样传递父级指定的文件名、目录和验收条件，不要把 solution.py 改成别的模块名。")
-        lines.append("- 同一次 schedule_child_subagents 不要混建 coordinator 和 leaf_worker；如返回 mixed_coordinator_leaf_children，先只创建下一层 coordinator。")
-        lines.append("- 如果 schedule_child_subagents 返回 domain_mismatch 或 forbidden_child_scope，必须修正 child 领域后重试，不能宣称完成。")
-        lines.append("- 创建 leaf 后使用 dispatch_subagents(apply=true, execute_runners=true) 推进直接 child，并汇总 leaf 的产物 refs。")
-        lines.append("- 多个 child 同轮 dispatch 时不要写子任务专属 runner_instruction；需要专属补充就按单个 run_id 分多次 dispatch。")
-        lines.append("- dispatch_subagents 返回 child test_failed 或 followup_action=plan_rescue 时，不要宣称完成；先汇报失败 refs 或安排修复。")
+            "把目标路径、文件名、验收条件原样传给下一层，然后用 dispatch_subagents 推进直接 child。",
+            "- coordinator/lead 可以继续创建 coordinator/child_coordinator/grandchild_coordinator 作为下一层领导节点；"
+            "需要多层协作时不要误以为只能创建 worker；父级要求 4 层链路时，深度未到孙孙层前先创建下一层 coordinator。",
+            '- schedule_child_subagents 的参数必须放在顶层，例如 {"tool":"schedule_child_subagents","apply":true,"children":[...]}；'
+            '不要包成 {"orchestration": {...}}，长目标请分多次调用，每次 1-2 个 child。',
+            "- 不要让 worker/writer 代写 coordinator 自己的协调证据；需要共享时引用 artifact_refs/evidence_refs。",
+            "- 创建 child/leaf 时必须原样传递父级指定的文件名、目录和验收条件，不要把 solution.py 改成别的模块名。",
+            "- 同一次 schedule_child_subagents 不要混建 coordinator 和 leaf_worker；如返回 mixed_coordinator_leaf_children，先只创建下一层 coordinator。",
+            "- 如果 schedule_child_subagents 返回 domain_mismatch 或 forbidden_child_scope，必须修正 child 领域后重试，不能宣称完成。",
+            "- 创建 leaf 后使用 dispatch_subagents(apply=true, execute_runners=true) 推进直接 child，并汇总 leaf 的产物 refs。",
+            "- 多个 child 同轮 dispatch 时不要写子任务专属 runner_instruction；需要专属补充就按单个 run_id 分多次 dispatch。",
+            "- dispatch_subagents 返回 child test_failed 或 followup_action=plan_rescue 时，不要宣称完成；先汇报失败 refs 或安排修复。",
+            "- 少数下属需要不同纠偏、路径修正或需求变更时，用 subagent_message mode=direct scope=descendants 发给具体 run_id；"
+            "大量下属需要同一通知时，用 mode=broadcast scope=descendants 写 scoped shared board。"
+            "平级讨论只能用 mode=direct scope=peers，不能广播到兄弟分支的子孙。"
+        ]
+    )
     return lines
 
 

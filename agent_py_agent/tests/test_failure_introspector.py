@@ -104,6 +104,33 @@ class TestFailureIntrospector:
         assert result.confidence == 0.8
         mock_agent.run.assert_called_once()
 
+    # LLM: real models often wrap JSON in markdown fences; introspection should still parse it.
+    # 函数用途: 防止 FailureIntrospector 因 ```json 包裹而降级，降低阻塞诊断噪音。
+    def test_introspect_with_llm_fenced_json_success(
+        self,
+        mock_agent: MagicMock,
+        sample_task: SubAgentTask,
+        sample_result: SubAgentRunnerResult,
+        sample_analysis: FailureAnalysis,
+    ) -> None:
+        mock_agent.run.return_value = MagicMock(
+            response=(
+                "```json\n"
+                '{"analysis_reason": "服务过载", "root_cause": "infrastructure_overload", '
+                '"suggested_params": {"retry_after_seconds": 30}, '
+                '"should_retry": true, "should_split": false, "confidence": 0.7}\n'
+                "```"
+            )
+        )
+        introspector = FailureIntrospector(agent=mock_agent)
+
+        result = introspector.introspect(sample_task, sample_result, sample_analysis)
+
+        assert result.analysis_reason == "服务过载"
+        assert result.root_cause == "infrastructure_overload"
+        assert result.suggested_params == {"retry_after_seconds": 30}
+        assert result.confidence == 0.7
+
     def test_introspect_with_llm_json_parse_error(self, mock_agent: MagicMock, sample_task: SubAgentTask, sample_result: SubAgentRunnerResult, sample_analysis: FailureAnalysis) -> None:
         """测试 LLM 返回非 JSON 格式时降级。"""
         mock_agent.run.return_value = MagicMock(response="这不是 JSON")

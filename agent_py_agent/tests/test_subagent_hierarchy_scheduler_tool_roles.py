@@ -45,6 +45,49 @@ def test_hierarchy_schedule_infers_coordinator_role_from_tools(tmp_path):
     assert grandchild.role == "grandchild_coordinator"
 
 
+# LLM: test_hierarchy_schedule_applies_depth_agent_name_prefixes locks user-facing lineage names.
+# 函数用途: 层级调度创建子/孙/孙孙节点时，自动按 depth 加中文前缀，同时保留专业辨识名。
+def test_hierarchy_schedule_applies_depth_agent_name_prefixes(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    root = manager.create_run(goal="root", thought="split", plan=["plan"], agent_name="root")
+
+    child_result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=root.id,
+            child_specs=[HierarchyChildSpec(goal="catalog child", agent_name="catalog-lead", role="coordinator")],
+            apply=True,
+        )
+    )
+    child = manager.load(child_result.created_run_ids[0])
+    grand_result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=child.id,
+            child_specs=[HierarchyChildSpec(goal="product grandchild", agent_name="小傻妞-product-worker", role="worker")],
+            apply=True,
+        )
+    )
+    grandchild = manager.load(grand_result.created_run_ids[0])
+    great_result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=grandchild.id,
+            child_specs=[HierarchyChildSpec(goal="sku great grandchild", agent_name="sku-leaf", role="worker")],
+            apply=True,
+            max_depth=3,
+        )
+    )
+    great_grandchild = manager.load(great_result.created_run_ids[0])
+
+    assert child.agent_name == "小傻妞-catalog-lead"
+    assert child.owner == "小傻妞-catalog-lead"
+    assert child_result.items[0].agent_name == "小傻妞-catalog-lead"
+    assert grandchild.agent_name == "小小傻妞-product-worker"
+    assert grandchild.owner == "小小傻妞-product-worker"
+    assert grand_result.items[0].agent_name == "小小傻妞-product-worker"
+    assert great_grandchild.agent_name == "小小小傻妞-sku-leaf"
+    assert great_grandchild.owner == "小小小傻妞-sku-leaf"
+    assert great_result.items[0].agent_name == "小小小傻妞-sku-leaf"
+
+
 # LLM: test_hierarchy_schedule_infers_coordinator_even_with_report_write_tools covers report-write coordinators.
 # 函数用途: coordinator 允许写报告后，模型误写 worker 也不能因为 write_file 存在而跳过协调角色推断。
 def test_hierarchy_schedule_infers_coordinator_even_with_report_write_tools(tmp_path):
@@ -199,5 +242,5 @@ def test_hierarchy_schedule_preserves_report_write_tools_for_coordinators(tmp_pa
     assert "schedule_child_subagents" in coordinator.allowed_tools
     assert "dispatch_subagents" in coordinator.allowed_tools
     assert "write_file" in coordinator.allowed_tools
-    assert coordinator.allowed_write_roots == [coordinator.task_dir]
-    assert str(deliverables) not in coordinator.goal
+    assert coordinator.allowed_write_roots == [coordinator.task_dir, str(deliverables)]
+    assert str(deliverables) in coordinator.goal

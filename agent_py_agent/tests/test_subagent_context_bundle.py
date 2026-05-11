@@ -45,10 +45,46 @@ def test_context_bundle_v1_captures_task_handoff_fields(tmp_path) -> None:
     assert bundle.acceptance_checks == ["能从购物车进入结算", "测试覆盖订单总价"]
     assert bundle.constraints["forbidden_write_roots"] == ["/System"]
     assert bundle.permissions["allowed_tools"] == ["read_file", "write_file"]
+    assert bundle.workspace_refs["shared_messages"].endswith("shared/messages.jsonl")
+    assert bundle.workspace_refs["agent_run_inbox"].endswith("inbox")
+    assert bundle.workspace_refs["agent_run_outbox"].endswith("outbox")
     assert bundle.output_contract["final_report_ref"].endswith("final_report.md")
     assert "task.goal" in bundle.source_refs["goal"]
     assert "task.acceptance_checks" in bundle.source_refs["acceptance_checks"]
     assert set(REQUIRED_CONTEXT_BUNDLE_FIELDS).issubset(payload)
+
+
+# LLM: test_context_bundle_output_contract_separates_required_and_forbidden_files covers prompt drift.
+# 函数用途: context bundle 要把必需产物和禁止反例拆成结构化字段，减少下层模型靠自然语言猜。
+def test_context_bundle_output_contract_separates_required_and_forbidden_files(tmp_path) -> None:
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(
+        goal=(
+            "交付静态购物站，必须包含 index.html、product-detail.html、style.css、app.js。"
+            "不允许把 product-detail.html 改名成 product.html 或 old-product.html。"
+        ),
+        thought="禁止创建 legacy.html。",
+        plan=["拆页面", "验收文件名"],
+        role="worker",
+        acceptance_checks=["必须保留 product-detail.html，不得创建 obsolete.html。"],
+    )
+    manager.save(task)
+
+    bundle = build_context_bundle(manager.load(task.id))
+
+    assert bundle.output_contract["required_files"] == [
+        "index.html",
+        "product-detail.html",
+        "style.css",
+        "app.js",
+    ]
+    assert bundle.output_contract["forbidden_files"] == [
+        "product.html",
+        "old-product.html",
+        "legacy.html",
+        "obsolete.html",
+    ]
+    assert bundle.output_contract["file_contract_source"] == "task_text_positive_negative_extraction"
 
 
 def test_context_bundle_gate_reports_missing_required_handoff_fields(tmp_path) -> None:

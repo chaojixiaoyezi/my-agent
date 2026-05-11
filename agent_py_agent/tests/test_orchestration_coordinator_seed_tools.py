@@ -47,9 +47,9 @@ def test_explicit_coordinator_seed_filters_model_shell_web_tools():
     assert "fetch_url" not in params.allowed_tools
 
 
-# LLM: test_explicit_coordinator_seed_keeps_product_paths_as_context_not_write_grants locks the root boundary.
-# 函数用途: root coordinator 可以在 goal 里保留产物目录给下级派工，但自己不能拿产物目录写权限。
-def test_explicit_coordinator_seed_keeps_product_paths_as_context_not_write_grants():
+# LLM: test_explicit_coordinator_seed_keeps_product_paths_and_write_grants locks parent coverage.
+# 函数用途: root coordinator 可以在 goal 里保留产物目录，也保留覆盖下级的写入根用于验收、接管和救援。
+def test_explicit_coordinator_seed_keeps_product_paths_and_write_grants():
     from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 
     mock_agent = _mock_coordinator_agent()
@@ -65,4 +65,4 @@ def test_explicit_coordinator_seed_keeps_product_paths_as_context_not_write_gran
     params = mock_agent.subagents.create_run.call_args.kwargs["params"]
     assert result.ok is True
     assert "/tmp/product-deliverables" in params.goal
-    assert params.extra_write_roots == []
+    assert params.extra_write_roots == ["/tmp/product-deliverables"]

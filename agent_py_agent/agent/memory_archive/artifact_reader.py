@@ -21,6 +21,9 @@ class ReadToolOutputArtifactRequest:
     artifact_ref: str
     offset: int = 0
     max_chars: int = DEFAULT_ARTIFACT_READ_CHARS
+    run_id: str = ""
+    task_id: str = ""
+    request_id: str = ""
 
 
 # LLM: _RegisteredArtifactRead keeps internal artifact read arguments bundled for code-size guardrails.
@@ -39,7 +42,7 @@ def read_tool_output_artifact(request: ReadToolOutputArtifactRequest) -> dict[st
     artifact_ref = str(request.artifact_ref or "").strip()
     if not artifact_ref:
         return _error_payload("missing_artifact_ref", artifact_ref, "artifact_ref is required")
-    record = _find_index_record(root, artifact_ref)
+    record = _find_index_record(root, artifact_ref, request)
     if record is None:
         return _error_payload("artifact_not_registered", artifact_ref, "artifact ref was not found in tool output index")
     path = Path(str(record.get("path", "") or "")).expanduser().resolve(strict=False)
@@ -96,20 +99,79 @@ def _read_registered_artifact(read: _RegisteredArtifactRead) -> dict[str, Any]:
 
 # LLM: _find_index_record accepts registered path/hash/call id refs while keeping index as authority.
 # 函数用途: 从 tool output index 中查找用户传入的 artifact ref；找不到就拒绝读取。
-def _find_index_record(root: Path, artifact_ref: str) -> dict[str, Any] | None:
+def _find_index_record(
+    root: Path,
+    artifact_ref: str,
+    request: ReadToolOutputArtifactRequest,
+) -> dict[str, Any] | None:
     index_path = _tool_output_root(root) / "index.jsonl"
     records = _index_records(index_path)
     ref_path = Path(artifact_ref).expanduser()
     resolved_ref = ref_path.resolve(strict=False) if ref_path.is_absolute() or _looks_like_path(artifact_ref) else None
-    for record in records:
-        record_path = Path(str(record.get("path", "") or "")).expanduser().resolve(strict=False)
-        if artifact_ref in {str(record.get("path", "") or ""), str(record.get("sha256", "") or ""), str(record.get("call_id", "") or "")}:
-            return record
-        if resolved_ref is not None and record_path == resolved_ref:
-            return record
+    matches = [
+        record
+        for record in records
+        if _record_matches_ref(record, artifact_ref, resolved_ref)
+    ]
+    scoped = _scoped_matches(matches, artifact_ref, request)
+    if scoped:
+        return scoped[-1]
+    if matches:
+        return matches[-1]
     if resolved_ref is not None:
         return _unique_record_by_basename(records, ref_path.name)
     return None
+
+
+# LLM: _record_matches_ref treats path/hash/scoped-call-id/call-id as index keys.
+# 函数用途: 判断 index 行是否命中模型传入的 artifact_ref，避免读取未登记文件。
+def _record_matches_ref(
+    record: dict[str, Any],
+    artifact_ref: str,
+    resolved_ref: Path | None,
+) -> bool:
+    record_path = Path(str(record.get("path", "") or "")).expanduser().resolve(strict=False)
+    literal_refs = {
+        str(record.get("path", "") or ""),
+        str(record.get("sha256", "") or ""),
+        str(record.get("scoped_call_id", "") or ""),
+        str(record.get("call_id", "") or ""),
+    }
+    return artifact_ref in literal_refs or bool(resolved_ref is not None and record_path == resolved_ref)
+
+
+# LLM: _scoped_matches prefers the current run/task/request when short refs collide.
+# 函数用途: 对 `17-1` 这类短 call_id，优先选同一 run/task/request 的记录；没作用域时保持最新记录优先。
+def _scoped_matches(
+    matches: list[dict[str, Any]],
+    artifact_ref: str,
+    request: ReadToolOutputArtifactRequest,
+) -> list[dict[str, Any]]:
+    if ":" in artifact_ref:
+        return matches
+    exact = [record for record in matches if _record_scope_matches_request(record, request)]
+    if exact:
+        return exact
+    return [record for record in matches if _record_has_scope(record)]
+
+
+# LLM: _record_scope_matches_request checks current runner scope without trusting model text.
+# 函数用途: 让 read_artifact("17-1") 在 runner 内优先命中当前 run/task/request 的同号工具输出。
+def _record_scope_matches_request(
+    record: dict[str, Any],
+    request: ReadToolOutputArtifactRequest,
+) -> bool:
+    return any(
+        str(getattr(request, key) or "").strip()
+        and str(record.get(key) or "").strip() == str(getattr(request, key) or "").strip()
+        for key in ("run_id", "task_id", "request_id")
+    )
+
+
+# LLM: _record_has_scope lets scoped records outrank legacy unscoped records.
+# 函数用途: 判断 artifact index 行是否携带 run/task/request 标识，防止读到旧 run 的同号 call_id。
+def _record_has_scope(record: dict[str, Any]) -> bool:
+    return any(str(record.get(key) or "").strip() for key in ("run_id", "task_id", "request_id"))
 
 
 # LLM: _unique_record_by_basename repairs copied artifact paths with a wrong workspace prefix only.

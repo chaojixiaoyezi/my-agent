@@ -1,9 +1,10 @@
-# LLM: Hierarchy write policy separates product-write authority from report-writing tools.
-# 模块用途: 判断层级 child 是否能继承最终产物写入根，避免 scheduler 主流程继续膨胀。
+# LLM: Hierarchy write policy keeps parent authority as a superset of descendant authority.
+# 模块用途: 计算层级 child 继承的写入根；上层保留覆盖权限，具体是否亲自写由角色职责和提示词约束。
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .base import _extract_write_dirs
@@ -44,21 +45,14 @@ class ChildWriteRootRequest:
     explicit_roots: list[str]
 
 
-# LLM: scheduled_child_extra_write_roots grants product roots only to product-writing roles.
-# 函数用途: 报告/检查/验收/协调类角色只写自己的工单目录；worker/writer/leaf_worker 才继承产品产物目录。
+# LLM: scheduled_child_extra_write_roots propagates authority so parents can inspect, recover, and take over.
+# 函数用途: 让下一层继承父级可委派产物根；角色职责仍要求 coordinator/tester/reviewer 优先写报告并把实际产物交给 worker。
 def scheduled_child_extra_write_roots(request: ScheduledWriteRootRequest) -> list[str]:
-    normalized = str(request.role or request.spec_role or "").strip().lower()
-    if any(marker in normalized for marker in _REPORT_ONLY_ROLE_MARKERS):
-        return []
-    if any(marker in normalized for marker in _PRODUCT_WRITE_ROLE_MARKERS):
-        return list(dict.fromkeys(request.requested_roots))
-    if request.leaf_write_intent:
-        return list(dict.fromkeys(request.requested_roots))
-    return []
+    return list(dict.fromkeys(request.requested_roots))
 
 
-# LLM: requested_child_write_roots keeps model-provided deliverable paths available for leaf grants.
-# 函数用途: child spec 自己写出产物路径时也纳入候选根；是否授权仍由角色/写入意图策略决定。
+# LLM: requested_child_write_roots keeps model-provided deliverable paths available for delegated coverage.
+# 函数用途: child spec 自己写出产物路径时也纳入候选根；最终会作为上层覆盖下层的可委派写入根。
 def requested_child_write_roots(request: ChildWriteRootRequest) -> list[str]:
     roots: list[str] = []
     for item in [
@@ -77,8 +71,42 @@ def requested_child_write_roots(request: ChildWriteRootRequest) -> list[str]:
 def inherited_extra_write_roots(parent: SubAgentTask) -> list[str]:
     parent_task_dir = str(parent.task_dir or "").rstrip("/")
     roots: list[str] = []
-    for item in [*parent.allowed_write_roots, *_extract_write_dirs(parent.goal)]:
+    authorized_roots = _non_task_allowed_roots(parent, parent_task_dir)
+    for item in authorized_roots:
         text = str(item or "").rstrip("/")
         if text and text != parent_task_dir and text not in roots:
             roots.append(str(item))
+    for item in _extract_write_dirs(parent.goal):
+        text = str(item or "").rstrip("/")
+        if _covered_by_authorized_root(text, authorized_roots):
+            continue
+        if text and text != parent_task_dir and text not in roots:
+            roots.append(str(item))
     return roots
+
+
+# LLM: _non_task_allowed_roots keeps broad parent authority without leaking task-local internals.
+# 函数用途: 从父节点 allowed_write_roots 中去掉自己的工单目录，保留用户授权的产物/共享目录。
+def _non_task_allowed_roots(parent: SubAgentTask, parent_task_dir: str) -> list[str]:
+    roots: list[str] = []
+    for item in parent.allowed_write_roots:
+        text = str(item or "").rstrip("/")
+        if text and text != parent_task_dir and text not in roots:
+            roots.append(text)
+    return roots
+
+
+# LLM: _covered_by_authorized_root avoids copying sibling file paths when a broader product root exists.
+# 函数用途: 若父级已经授权 deliverables 根，就不再把 sibling 的具体 solution.py/html 路径塞进 child goal。
+def _covered_by_authorized_root(candidate: str, roots: list[str]) -> bool:
+    if not candidate:
+        return False
+    candidate_path = Path(candidate).expanduser().resolve(strict=False)
+    for raw in roots:
+        root = Path(str(raw)).expanduser().resolve(strict=False)
+        try:
+            candidate_path.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False

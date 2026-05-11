@@ -21,6 +21,7 @@ from .agent_core import (
     SimpleAgentRuntimeMixin,
     SimpleAgentSubagentMixin,
     SubagentBoardTool,
+    SubagentMessageTool,
 )
 from .agent_core.dispatch_lock import _DispatchWatchLock
 from .agent_core.orchestration_tools import CODING_SUBAGENT_TOOLS, READ_ONLY_SUBAGENT_TOOLS
@@ -193,6 +194,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
 def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CreateSubagentsTool(agent))
     agent.tools.register(SubagentBoardTool(agent))
+    agent.tools.register(SubagentMessageTool(agent))
     agent.tools.register(DispatchSubagentsTool(agent))
     agent.tools.register(ScheduleChildSubagentsTool(agent))
 
@@ -207,5 +209,6 @@ __all__ = [
     "READ_ONLY_SUBAGENT_TOOLS",
     "ScheduleChildSubagentsTool",
     "SimpleAgent",
+    "SubagentMessageTool",
     "SubagentBoardTool",
 ]

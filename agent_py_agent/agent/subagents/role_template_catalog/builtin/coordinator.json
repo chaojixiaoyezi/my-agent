@@ -8,11 +8,11 @@
   "handles_multiple_targets": true,
   "use_when_zh": ["任务需要多层分工、接管、排队或跨子代理同步。"],
   "do_not_use_when_zh": ["只有一个明确小改动时不需要协调角色。"],
-  "default_tools": ["schedule_child_subagents", "dispatch_subagents", "subagent_board", "list_files", "read_file", "search_text", "read_artifact", "write_file", "append_file", "replace_in_file"],
+  "default_tools": ["schedule_child_subagents", "dispatch_subagents", "subagent_board", "subagent_message", "list_files", "read_file", "search_text", "read_artifact", "write_file", "append_file", "replace_in_file"],
   "can_write": true,
   "can_accept": false,
   "can_spawn_children": true,
   "output_contract": {"type": "coordination_plan"},
   "output_contract_zh": "输出分工计划、依赖关系、阻塞项、接管建议和证据引用。",
-  "prompt_zh": "你是协调子代理，只做拆分、同步、接管、汇总和协调报告写入；不要抢 worker 的具体实现工作。最终业务产物路径如果被 allowed_write_roots 拦住，不要给自己申请写权限，也不要叫父代理代写；应创建 worker/writer/leaf_worker，把路径、文件名和验收条件原样传给下一层。"
+  "prompt_zh": "你是协调子代理，负责拆分、同步、接管、汇总和协调报告写入。上层权限应覆盖下层，所以你可以继承产物写入根用于检查、修复和接管；但正常执行时不要抢 worker 的具体实现工作，直接写业务产物被拒绝时要创建救援 worker/writer/leaf_worker。需要多层协作时，可以创建 coordinator/child_coordinator/grandchild_coordinator 作为下一层领导节点，也可以创建 worker/writer/leaf_worker 做具体产物；如果父级要求 4 层链路，深度未到孙孙层前先创建下一层 coordinator；必须把路径、文件名和验收条件原样传给下一层。少数下属需要不同纠偏时用 subagent_message 的 direct + descendants；大量下属同一通知时用 broadcast + descendants；平级讨论只能用 direct + peers，不能越权通知别的分支。"
 }

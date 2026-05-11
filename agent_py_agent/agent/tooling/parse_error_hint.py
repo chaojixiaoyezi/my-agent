@@ -9,10 +9,24 @@ _PARSE_RETRY_HINT = (
     "请重新输出标准工具调用格式：[TOOL_CALL] 后跟一个 JSON 对象，再用 [/TOOL_CALL] 结束；"
     "不要混用未闭合的 XML 标签，也不要在 JSON 外追加正文。"
 )
+_TRUNCATED_PAYLOAD_HINT = (
+    "如果上一轮工具参数太长导致截断，请缩短 goal/plan/acceptance_checks，"
+    "只保留关键路径、必需文件名和硬约束；长说明交给后续 runner 自己展开。"
+)
+_TRUNCATED_WRITE_HINT = (
+    "如果上一轮是 write_file 且 content 太长，不要重复输出完整 content；"
+    "必须先用 write_file 写短骨架，再用 append_file 分块追加内容；每次 content 保持很短并确保 JSON 闭合。"
+)
 
 
 # LLM: parse_error_message gives the model a compact repair instruction without echoing raw tool bodies.
 # 函数用途: 工具调用解析失败时返回固定重试格式提示，避免模型继续用同一种坏格式空转。
 def parse_error_message(payload: dict[str, Any]) -> str:
     error = str(payload.get("error") or "工具调用解析失败")
-    return f"{error}。{_PARSE_RETRY_HINT}"
+    hint = f"{error}。{_PARSE_RETRY_HINT}"
+    if "缺少结束标记" in error:
+        hint = f"{hint}{_TRUNCATED_PAYLOAD_HINT}"
+    raw = str(payload.get("raw") or "")
+    if "缺少结束标记" in error and '"write_file"' in raw and '"content"' in raw:
+        hint = f"{hint}{_TRUNCATED_WRITE_HINT}"
+    return hint

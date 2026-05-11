@@ -330,6 +330,8 @@ def test_static_required_files_from_texts_extracts_static_web_targets():
     files = static_required_files_from_texts([
         "必须生成 index.html, products.html, product-detail.html, cart.html, checkout.html。",
         "还要有 style.css 和 app.js；不要把 /Users/example/project/docs.md 当静态站文件。",
+        "不允许把 product-detail.html 改名成 product.html 或 old-product.html，也不要创建 legacy.html、old-detail.html。",
+        "不得改名为 old-detail.html。",
     ])
 
     assert files == [

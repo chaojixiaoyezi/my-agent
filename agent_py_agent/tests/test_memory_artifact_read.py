@@ -119,6 +119,68 @@ def test_read_artifact_tool_repairs_wrong_prefix_with_unique_artifact_name(tmp_p
     assert payload["content"] == "abcdef"
 
 
+# LLM: short call ids must resolve by current run scope before falling back to latest.
+# 函数用途: 防止 read_artifact("17-1") 在长任务里读到旧 run 的同号工具输出，导致路径和 prompt 串线。
+def test_read_artifact_short_call_id_prefers_matching_run_scope(tmp_path: Path) -> None:
+    _write_externalized_tool_output(
+        tmp_path,
+        content="old-run-output",
+        call_id="17-1",
+        run_id="old-run",
+    )
+    _write_externalized_tool_output(
+        tmp_path,
+        content="new-run-output",
+        call_id="17-1",
+        run_id="new-run",
+    )
+    registry = _registry(tmp_path)
+
+    result = registry.execute_call({
+        "tool": "read_artifact",
+        "artifact_ref": "17-1",
+        "run_id": "old-run",
+        "offset": 0,
+        "max_chars": 0,
+    })
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["ok"] is True
+    assert payload["content"] == "old-run-output"
+    assert payload["run_id"] == "old-run"
+
+
+# LLM: unscoped short call ids should choose the newest record instead of the oldest legacy collision.
+# 函数用途: 没有 run_id 注入的旧调用也不能优先读到历史测试的同号 artifact。
+def test_read_artifact_short_call_id_without_scope_prefers_latest(tmp_path: Path) -> None:
+    _write_externalized_tool_output(
+        tmp_path,
+        content="older-output",
+        call_id="17-1",
+        run_id="older-run",
+    )
+    _write_externalized_tool_output(
+        tmp_path,
+        content="latest-output",
+        call_id="17-1",
+        run_id="latest-run",
+    )
+    registry = _registry(tmp_path)
+
+    result = registry.execute_call({
+        "tool": "read_artifact",
+        "artifact_ref": "17-1",
+        "offset": 0,
+        "max_chars": 0,
+    })
+    payload = json.loads(result.output)
+
+    assert result.ok is True
+    assert payload["content"] == "latest-output"
+    assert payload["run_id"] == "latest-run"
+
+
 # LLM: test_read_file_rejects_tool_output_artifact_wrapper captures the R16 prompt-bloat regression.
 # 函数用途: 防止模型用 read_file 直接读取外置工具输出 JSON 包装，必须改走 read_artifact 分片。
 def test_read_file_rejects_tool_output_artifact_wrapper(tmp_path: Path) -> None:
@@ -190,16 +252,38 @@ def _workspace(config_path: Path) -> Path:
     return config_path.parent / "workspace"
 
 
-def _write_externalized_tool_output(root: Path, *, content: str) -> Path:
+def _registry(root: Path) -> ToolRegistry:
+    return ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=root,
+            max_chars=1000,
+            max_entries=20,
+            max_matches=20,
+            web_max_chars=1000,
+            http_timeout=5,
+            catalog_limit=20,
+            retrieval_limit=10,
+            vector_search_enabled=False,
+        )
+    )
+
+
+def _write_externalized_tool_output(
+    root: Path,
+    *,
+    content: str,
+    call_id: str = "call-artifact",
+    run_id: str = "run-artifact",
+) -> Path:
     record = externalize_tool_output_record(
         ExternalizeToolOutputRequest(
             root=root,
             tool="blackbox_tool",
-            call_id="call-artifact",
+            call_id=call_id,
             output=content,
             ok=True,
             request_id="req-artifact",
-            run_id="run-artifact",
+            run_id=run_id,
             task_id="task-artifact",
             min_chars=10,
         )

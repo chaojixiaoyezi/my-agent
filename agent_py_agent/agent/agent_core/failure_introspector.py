@@ -78,8 +78,7 @@ class FailureIntrospector:
     ) -> FailureIntrospection:
         try:
             response = self._agent.run(_failure_introspection_prompt(self, task, runner_result, failure_analysis), save=False)
-            # 解析 JSON
-            result_data = json.loads(response.response.strip())
+            result_data = _loads_introspection_json(response.response)
             return FailureIntrospection(
                 analysis_reason=str(result_data.get("analysis_reason", "")),
                 root_cause=str(result_data.get("root_cause", failure_analysis.root_cause)),
@@ -120,6 +119,27 @@ class FailureIntrospector:
         if task.attributes and "dynamic_timeout_seconds" in task.attributes:
             return float(task.attributes["dynamic_timeout_seconds"])
         return 120.0  # 默认超时
+
+
+# LLM: _loads_introspection_json accepts bare JSON or a fenced JSON block from real models.
+# 函数用途: 解析失败自省模型返回；真实模型常包 ```json，不能因此误判为不可用。
+def _loads_introspection_json(text: str) -> dict:
+    raw = str(text or "").strip()
+    if raw.startswith("```"):
+        raw = _strip_json_fence(raw)
+    return json.loads(raw)
+
+
+# LLM: _strip_json_fence removes Markdown fences without changing JSON body content.
+# 函数用途: 从 ```json ... ``` 中提取 JSON 字符串；没有闭合围栏时保留去掉首行后的正文让 json.loads 报准错。
+def _strip_json_fence(text: str) -> str:
+    lines = text.strip().splitlines()
+    if not lines:
+        return text
+    body = lines[1:] if lines[0].lstrip().startswith("```") else lines
+    if body and body[-1].strip().startswith("```"):
+        body = body[:-1]
+    return "\n".join(body).strip()
 
 
 # LLM: _failure_introspection_prompt 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

@@ -68,6 +68,7 @@ from .utils import (
     _write_if_missing,
     _write_json_if_missing,
 )
+from .write_boundary_policy import task_product_write_policy, task_product_write_roots
 
 if TYPE_CHECKING:
     from ..local_store import LocalStore
@@ -103,9 +104,14 @@ class SubAgentRunnerContextMixin:
     # 函数用途: 构建boundary所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
     def _build_write_boundary(self, task: SubAgentTask) -> dict[str, object]:
         """Build write boundary configuration dict."""
+        report_roots = _task_report_write_roots(task)
+        product_roots = task_product_write_roots(task, report_roots)
         return {
             "task_dir": task.task_dir,
-            "allowed_write_roots": _merge_list(task.allowed_write_roots, _task_report_write_roots(task)),
+            "role": task.role,
+            "allowed_write_roots": _merge_list(task.allowed_write_roots, report_roots),
+            "product_write_roots": product_roots,
+            "product_write_policy": task_product_write_policy(task, product_roots),
             "forbidden_write_roots": task.forbidden_write_roots,
             "locked_files": task.locked_files,
             "status_file": task.status_file,

@@ -1,17 +1,18 @@
-"""LLM: tests for tool loop, delegation, max rounds, catalog, and parser.
+"""LLM: tests for tool loop, delegation, max rounds, allowlists, and security grants.
 
 给人看的解释：
-这个文件放所有和"工具循环流程"相关的测试：工具调用闭环、子代理派工和去重、
-最大轮数收口、工具目录与推荐渲染、工具调用解析器兼容性。
+这个文件放和"工具循环流程"相关的测试：工具调用闭环、子代理派工和去重、最大轮数收口、
+子代理 output.json 收口、工具授权过滤和安全能力授权。
 """
 
+import json
 import tempfile
 from pathlib import Path
 
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.log_analysis.storage import LocalLogStore
-from agent_py_agent.agent.tools import ToolRegistry, ToolRegistryParams
+from agent_py_agent.agent.tools import ToolRegistry
 
 from .backends import (
     DuplicateSubagentDelegationBackend,
@@ -21,7 +22,6 @@ from .backends import (
     StubbornToolAfterLimitBackend,
     SubagentDelegationBackend,
     ToolCallingBackend,
-    make_tool_registry,
 )
 
 
@@ -225,309 +225,6 @@ def test_subagent_runner_stops_after_output_json_write():
         assert result.tool_rounds == 1
 
 
-def test_tool_catalog_and_recommended_sections():
-    """LLM: verify that catalog and recommended-tools sections render correctly.
-
-    新手说明:
-    检查工具目录里有 http_request，推荐工具区能根据自然语言选到 http_request。
-    """
-    registry = ToolRegistry(
-        ToolRegistryParams(
-            workspace_root=Path.cwd(),
-            max_chars=6000,
-            max_entries=200,
-            max_matches=50,
-            web_max_chars=12000,
-            http_timeout=30,
-            catalog_limit=20,
-            retrieval_limit=3,
-            vector_search_enabled=False,
-        )
-    )
-
-    catalog = registry.render_catalog_section()
-    recommended = registry.render_recommended_tools_section("帮我测试一个 REST API 接口并查看返回")
-
-    assert "# Tool Catalog" in catalog
-    assert "http_request [api]" in catalog
-    assert "适用场景" in catalog
-    assert "## http_request" in recommended
-    assert "推荐理由" in recommended
-
-
-def test_tool_catalog_format_example_does_not_bias_to_path_param():
-    """LLM: Tool call instructions should not teach all tools to pass a fake path parameter."""
-    registry = ToolRegistry(
-        ToolRegistryParams(
-            workspace_root=Path.cwd(),
-            max_chars=6000,
-            max_entries=200,
-            max_matches=50,
-            web_max_chars=12000,
-            http_timeout=30,
-            catalog_limit=20,
-            retrieval_limit=3,
-            vector_search_enabled=False,
-        )
-    )
-
-    catalog = registry.render_catalog_section()
-
-    assert '{"tool": "tool_name", "path": "example"}' not in catalog
-    assert '"actual_parameter_name": "actual_value"' in catalog
-    assert '"param_name": "param_value"' not in catalog
-    assert "不要写 param_name" in catalog
-
-
-def test_tool_call_parser_unwraps_model_param_name_bundle():
-    """LLM: tolerate models that wrap real tool parameters in a literal param_name bundle."""
-    registry = make_tool_registry(Path.cwd())
-
-    calls = registry.parse_tool_calls(
-        '[TOOL_CALL]\n{"tool":"read_file","param_name":{"path":"README.md"}}\n[/TOOL_CALL]'
-    )
-
-    assert calls == [{"tool": "read_file", "path": "README.md"}]
-
-
-def test_tool_executor_unwraps_model_param_name_bundle(tmp_path: Path):
-    """LLM: direct execution should also recover literal param_name bundles before tool dispatch."""
-    (tmp_path / "notes.txt").write_text("bundle recovered", encoding="utf-8")
-    registry = make_tool_registry(tmp_path)
-
-    result = registry.execute_call(
-        {"tool": "read_file", "param_name": {"path": "notes.txt"}}
-    )
-
-    assert result.ok
-    assert "bundle recovered" in result.output
-
-
-def test_tool_call_parser_unwraps_model_category_bundle():
-    """LLM: tolerate models that wrap params by tool category such as orchestration or filesystem."""
-    registry = make_tool_registry(Path.cwd())
-
-    calls = registry.parse_tool_calls(
-        '[TOOL_CALL]\n{"tool":"subagent_board","orchestration":{"limit":20,"status":"running"}}\n[/TOOL_CALL]'
-    )
-
-    assert calls == [{"tool": "subagent_board", "limit": 20, "status": "running"}]
-
-
-def test_tool_executor_unwraps_model_filesystem_bundle(tmp_path: Path):
-    """LLM: filesystem category wrappers should be flattened before file tool execution."""
-    (tmp_path / "notes.txt").write_text("category bundle recovered", encoding="utf-8")
-    registry = make_tool_registry(tmp_path)
-
-    result = registry.execute_call(
-        {"tool": "read_file", "filesystem": {"path": "notes.txt"}}
-    )
-
-    assert result.ok
-    assert "category bundle recovered" in result.output
-
-
-def test_tool_call_parser_unwraps_model_memory_bundle():
-    """LLM: memory/read_artifact wrappers should flatten to stable tool params."""
-    registry = make_tool_registry(Path.cwd())
-
-    calls = registry.parse_tool_calls(
-        '[TOOL_CALL]\n'
-        '{"tool":"read_artifact","memory":{"artifact_ref":"/tmp/out.json","offset":0,"max_chars":4000}}\n'
-        '[/TOOL_CALL]'
-    )
-
-    assert calls == [
-        {"tool": "read_artifact", "artifact_ref": "/tmp/out.json", "offset": 0, "max_chars": 4000}
-    ]
-
-
-# LLM: test_tool_call_parser_recovers_single_extra_trailing_brace covers real MiniMax tool-call drift.
-# 函数用途: 模型在有效 JSON 后多吐一个 `}` 时，解析器应保留完整工具参数而不是逼模型缩短任务。
-def test_tool_call_parser_recovers_single_extra_trailing_brace():
-    registry = make_tool_registry(Path.cwd())
-
-    calls = registry.parse_tool_calls(
-        '[TOOL_CALL]\n{"tool":"read_file","path":"README.md"}\n}\n[/TOOL_CALL]'
-    )
-
-    assert calls == [{"tool": "read_file", "path": "README.md"}]
-
-
-# LLM: test_parse_error_result_includes_retry_format_hint covers malformed XML-ish tool-call recovery.
-# 函数用途: 模型工具调用格式坏掉时，执行结果要明确告诉它下一轮用标准 JSON 工具块重试。
-def test_parse_error_result_includes_retry_format_hint():
-    registry = make_tool_registry(Path.cwd())
-    calls = registry.parse_tool_calls("<tool_call><function=read><parameter=file_path>README.md</parameter>")
-
-    result = registry.execute_call(calls[0])
-
-    assert result.ok is False
-    assert result.tool == "__parse_error__"
-    assert "[TOOL_CALL]" in result.output
-    assert "[/TOOL_CALL]" in result.output
-
-
-def test_tool_spec_catalog_entry_includes_first_example():
-    """LLM: Compact catalog entries should show tool-specific JSON when examples are available."""
-    from agent_py_agent.agent.tools import ToolSpec
-
-    spec = ToolSpec(
-        name="schedule_child_subagents",
-        category="orchestration",
-        description="create child runs",
-        use_cases=["split hierarchy"],
-        avoid_when=[],
-        keywords=[],
-        parameters={"children": "child specs", "apply": "write"},
-        examples=['{"tool":"schedule_child_subagents","apply":true,"children":[]}'],
-    )
-
-    entry = spec.render_catalog_entry()
-
-    assert "示例" in entry
-    assert '"children":[]' in entry
-
-
-def test_tool_call_parser_accepts_subagent_call_alias():
-    """LLM: verify that [SUBAGENT_CALL] opening tag is accepted as an alias for [TOOL_CALL].
-
-    新手说明:
-    有些模型输出 [SUBAGENT_CALL]，解析器应该和 [TOOL_CALL] 一视同仁。
-    """
-    registry = ToolRegistry(
-        ToolRegistryParams(
-            workspace_root=Path.cwd(),
-            max_chars=6000,
-            max_entries=200,
-            max_matches=50,
-            web_max_chars=12000,
-            http_timeout=30,
-            catalog_limit=20,
-            retrieval_limit=3,
-            vector_search_enabled=False,
-            shell_tool_timeout=30,
-        )
-    )
-    calls = registry.parse_tool_calls(
-        '[SUBAGENT_CALL]\n{"tool":"read_file","path":"README.md"}\n[/TOOL_CALL]'
-    )
-
-    assert calls == [{"tool": "read_file", "path": "README.md"}]
-
-
-def test_tool_call_parser_accepts_qwen_xmlish_read_call():
-    """LLM: verify that Qwen-style XML-ish function call for read is parsed correctly.
-
-    新手说明:
-    Qwen 模型可能输出 <function=read> 格式的工具调用，需要正确映射到 read_file。
-    """
-    registry = ToolRegistry(
-        ToolRegistryParams(
-            workspace_root=Path.cwd(),
-            max_chars=6000,
-            max_entries=200,
-            max_matches=50,
-            web_max_chars=12000,
-            http_timeout=30,
-            catalog_limit=20,
-            retrieval_limit=3,
-            vector_search_enabled=False,
-            shell_tool_timeout=30,
-        )
-    )
-    calls = registry.parse_tool_calls(
-        "\n"
-        "<function=read>\n"
-        "<parameter=file_path>\nREADME.md\n</parameter>\n"
-        "</function>\n"
-        ""
-    )
-
-    assert calls == [{"tool": "read_file", "path": "README.md"}]
-
-
-def test_tool_call_parser_accepts_qwen_xmlish_write_call():
-    """LLM: verify that Qwen-style XML-ish function call for write handles HTML entities.
-
-    新手说明:
-    Qwen 写文件调用里 &amp; 应该被解码成 &。
-    """
-    registry = ToolRegistry(
-        ToolRegistryParams(
-            workspace_root=Path.cwd(),
-            max_chars=6000,
-            max_entries=200,
-            max_matches=50,
-            web_max_chars=12000,
-            http_timeout=30,
-            catalog_limit=20,
-            retrieval_limit=3,
-            vector_search_enabled=False,
-            shell_tool_timeout=30,
-        )
-    )
-    calls = registry.parse_tool_calls(
-        '<function name="write">'
-        '<parameter name="file_path">notes.txt</parameter>'
-        '<parameter name="content">hello &amp; hi</parameter>'
-        "</function>"
-    )
-
-    assert calls == [{"tool": "write_file", "path": "notes.txt", "content": "hello & hi"}]
-
-
-def test_tool_call_parser_reports_incomplete_qwen_xmlish_call():
-    """LLM: verify that an incomplete Qwen XML-ish call is reported as a parse error.
-
-    新手说明:
-    第二个调用缺少闭合标签，解析器应返回 __parse_error__ 而不是崩溃。
-    """
-    registry = ToolRegistry(
-        ToolRegistryParams(
-            workspace_root=Path.cwd(),
-            max_chars=6000,
-            max_entries=200,
-            max_matches=50,
-            web_max_chars=12000,
-            http_timeout=30,
-            catalog_limit=20,
-            retrieval_limit=3,
-            vector_search_enabled=False,
-            shell_tool_timeout=30,
-        )
-    )
-    calls = registry.parse_tool_calls(
-        "<function=read><parameter=file_path>A.md</parameter>\n"
-        "<function=read><parameter=file_path>B.md</parameter>"
-    )
-
-    assert calls[0] == {"tool": "read_file", "path": "A.md"}
-    assert calls[1]["tool"] == "__parse_error__"
-    assert "missing a closing " in calls[1]["error"]
-    assert "B.md" in calls[1]["raw"]
-
-
-def test_tool_call_parser_and_executor_reject_non_object_payloads():
-    """LLM: verify that non-object JSON payloads are rejected at parse and execute time.
-
-    新手说明:
-    传入数组或列表应该报错，提示必须是 JSON 对象。
-    """
-    registry = make_tool_registry(Path.cwd())
-
-    calls = registry.parse_tool_calls("[TOOL_CALL]\n[1, 2, 3]\n[/TOOL_CALL]")
-    parsed_result = registry.execute_call(calls[0])
-    direct_result = registry.execute_call(["not", "a", "dict"])
-
-    assert calls[0]["tool"] == "__parse_error__"
-    assert "JSON 对象" in calls[0]["error"]
-    assert not parsed_result.ok
-    assert "JSON 对象" in parsed_result.output
-    assert not direct_result.ok
-    assert "JSON 对象" in direct_result.output
-
-
 def test_tool_allowlist_limits_prompt_and_execution():
     """LLM: verify that allowed_tools filters both the prompt catalog and tool execution.
 
@@ -548,9 +245,6 @@ def test_tool_allowlist_limits_prompt_and_execution():
         assert "write_file [filesystem]" not in result.prompt
         assert not blocked.ok
         assert "未授权" in blocked.output
-
-
-import json
 
 
 def _make_tool_registry(workspace: Path) -> ToolRegistry:

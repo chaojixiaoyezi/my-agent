@@ -79,7 +79,7 @@ def _create_run_params(
     if is_explicit_root:
         workflow_mode = "off"
         allowed_tools = explicit_root_allowed_tools(allowed_tools)
-    extra_write_roots = [] if is_explicit_root else _merged_extra_write_roots(raw_params, goal)
+    extra_write_roots = _merged_extra_write_roots(raw_params, goal)
     return CreateRunParams(
         goal=goal,
         thought=str(raw_params.get("thought") or "根据父代理派工执行，并保留可验收证据。").strip(),
@@ -107,6 +107,34 @@ def _merged_extra_write_roots(params: dict[str, object], goal: str) -> list[str]
     return roots
 
 
+# LLM: explicit_root_missing_write_root_error prevents product paths from drifting into agent workspaces.
+# 函数用途: 显式 root/coordinator 要交付文件但没带产物写入根时拒绝创建，要求模型带 extra_write_roots 重试。
+def explicit_root_missing_write_root_error(params: dict[str, object], goal: str) -> str:
+    role = str(params.get("role") or "worker").strip()
+    if not is_explicit_root_role(role):
+        return ""
+    if _merged_extra_write_roots(params, goal):
+        return ""
+    if not _goal_needs_product_write_root(goal):
+        return ""
+    return (
+        "显式 root/coordinator 要交付文件或网站时，必须提供真实产物写入根，"
+        "否则下级会误把 agent-run workspace 当成 build 目录。"
+        "请重新调用 create_subagents，并在顶层传入 extra_write_roots，"
+        "例如 extra_write_roots=[\"/Users/.../deliverables/.../build\"]；"
+        "不要只在 goal 里写“build 目录”。"
+    )
+
+
+# LLM: _goal_needs_product_write_root detects concrete deliverable tasks without parsing prose too broadly.
+# 函数用途: 判断目标是否像文件/网站交付任务；只用于缺写入根时的保守拦截，不用于授权。
+def _goal_needs_product_write_root(goal: str) -> bool:
+    lowered = goal.lower()
+    if not any(word in lowered for word in ("交付", "deliver", "build", "网站", "demo", "文件")):
+        return False
+    return any(suffix in lowered for suffix in (".html", ".css", ".js", ".py", ".md", ".json", ".txt"))
+
+
 # LLM: CreateSubagentsTool 属于 SimpleAgent 核心运行的类边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
 # 类用途: 提供create子代理工具模型工具入口，把结构化参数转为子代理操作；关键副作用: 方法可能触发运行循环、工具调用、调度记录和最终响应相关副作用，需保持公开契约稳定。
 class CreateSubagentsTool(BaseTool):
@@ -132,6 +160,9 @@ class CreateSubagentsTool(BaseTool):
             return count
 
         allowed_tools = _subagent_allowed_tools(params)
+        missing_write_root = explicit_root_missing_write_root_error(params, goal)
+        if missing_write_root:
+            return ToolExecutionResult("create_subagents", False, missing_write_root)
         target_error = external_write_target_error(
             self.agent,
             goal,
