@@ -18,6 +18,7 @@ from typing import Any
 from ..log_analysis.capabilities import SECURITY_TOOL_NAMES, has_security_tool_capability
 from .json_repair import load_tool_block_json
 from .models import BaseTool, ToolExecutionResult
+from .parse_error_hint import parse_error_message
 from .parser import parse_xmlish_tool_calls
 from .write_boundary import validate_write_boundary
 
@@ -100,7 +101,7 @@ def execute_registry_call(call: ExecuteRegistryCallParams) -> ToolExecutionResul
         return ToolExecutionResult(
             "__parse_error__",
             False,
-            str(normalized_payload.get("error") or "工具调用解析失败"),
+            parse_error_message(normalized_payload),
         )
 
     try:

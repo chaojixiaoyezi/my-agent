@@ -16,6 +16,7 @@ from ._filesystem_helpers import (
     _required_path,
     _text_param,
 )
+from .filesystem_artifact_guard import tool_output_artifact_read_hint
 from .models import BaseTool, ToolExecutionResult, ToolSpec
 
 _MAX_WRITE_TEXT_CHARS = 1_000_000
@@ -174,6 +175,9 @@ class ReadFileTool(FileSystemTool):
             target = self.resolve_path(raw_path)
         except ValueError as exc:
             return ToolExecutionResult("read_file", False, str(exc))
+        artifact_hint = tool_output_artifact_read_hint(target, self.workspace_roots)
+        if artifact_hint:
+            return ToolExecutionResult("read_file", False, artifact_hint)
         if not target.exists():
             return ToolExecutionResult("read_file", False, f"文件不存在: {self.display_path(target)}")
         if not target.is_file():

@@ -296,7 +296,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 这次额外预留了混合检索框架：
 - 当前真正生效的是关键词检索。
 - 向量检索接口已经留好，后续接 embedding 时不用重写核心流程。
-- `agent_py_agent/agent/tooling/registry_execution.py` 承接工具调用块解析、payload 规范化、授权检查、写边界检查和异常格式化，避免注册表类继续膨胀。
+- `agent_py_agent/agent/tooling/registry_execution.py` 承接工具调用块解析、payload 规范化、授权检查、写边界检查和异常格式化，避免注册表类继续膨胀；解析失败会通过 `parse_error_hint.py` 返回标准 `[TOOL_CALL]` JSON 重试提示，不回显坏工具正文。
 
 当前内置工具包括：
 - `list_files`：列目录，适合先摸清项目结构。
@@ -950,6 +950,8 @@ docs/
 - `agent_py_agent/agent/memory_archive/compact_continue_packet.py`: 把 compact resume 后的 work_state、action guard、推荐读取路径和 subagent owner refs 固定成继续工作包；它只表达恢复上下文可继续，不执行工具或业务验收。
 - `agent_py_agent/agent/memory_archive/compact_resume_blocked.py`: 生成 compact metadata 缺失时的 schema-compatible 阻断 payload，让主 resume 编排保持薄。
 - `agent_py_agent/agent/memory_archive/artifact_reader.py`: 按 tool output index 显式读取外置 artifact 正文切片，并校验路径边界和 sha256；路径前缀抄错但 artifact 文件名唯一时，可修复到登记记录。
+- `agent_py_agent/agent/tooling/_filesystem_read.py`: `read_file` 读取工作区文本文件；误读 tool-output artifact 包装的判断拆到 `filesystem_artifact_guard.py`。
+- `agent_py_agent/agent/tooling/filesystem_artifact_guard.py`: 拒绝 `memory_archive/artifacts/tool_outputs/*.json` 外置工具输出包装经由 `read_file` 读取，提示改用 `read_artifact` 分片。
 - `agent_py_agent/agent/tooling/artifact.py`: 注册 `read_artifact` 工具，给模型提供受控 artifact slice 读取入口。
 - `agent_py_agent/cli/memory_artifact_commands.py`: 提供 `memory-artifact-read` 命令，保持 artifact 正文读取和 archive resume/search CLI 分离。
 - `agent_py_agent/cli/memory_resume_compact_rendering.py`: 输出 `memory-resume --from-compact` 的 handoff、continue packet、completion prompt 和推荐路径。
@@ -959,8 +961,10 @@ docs/
 - `agent_py_agent/agent/subagents/execution_records.py`: 新增 `TestExecutionRecord`，定义真实验收执行证据、输出截断和通过结果派生。
 - `agent_py_agent/agent/subagents/execution_executor.py`: 新增最小 `TestExecutor`，执行 command/file/content/static_site 四类检查并产出 `TestExecutionRecord`；当前不接 acceptance 自动写回。
 - `agent_py_agent/agent/subagents/static_site_validator.py`: 父级验收的静态站点检查器，扫描 workspace 内 HTML 必需文件、本地 href/src/action、`${...}` 占位符和明显无动作控件，不执行 JS、不访问网络。
-- `agent_py_agent/agent/subagents/execution_test_items.py`: 新增测试项预处理 helper，根据 runner artifacts 安全推断 command 测试工作目录，避免父验收在 workspace 根目录误跑相对测试命令；也会把 workspace 内安全的 `cd <dir> && pytest` 拆成 `working_dir + 纯命令`，不放开 shell；当 artifacts 显示多页静态 HTML 且缺少同类测试时，会追加 `static_site_check`。
-- `agent_py_agent/agent/subagents/execution_static_site_items.py`: 根据 output artifacts 推断静态站点机器验收项，只读 HTML 路径引用，生成 site_root 和 required_files，不读取页面正文。
+- `agent_py_agent/agent/subagents/execution_test_items.py`: 新增测试项预处理 helper，根据 runner artifacts 安全推断 command 测试工作目录，避免父验收在 workspace 根目录误跑相对测试命令；也会把 workspace 内安全的 `cd <dir> && pytest` 拆成 `working_dir + 纯命令`，不放开 shell；当 artifacts 显示静态 HTML 且缺少同类测试时，会追加 `static_site_check`，并能把调用方传入的 task-level required files 合进 required_files。
+- `agent_py_agent/agent/subagents/static_required_files.py`: 从 task goal/thought/description/acceptance_checks 提取 `index.html`、`style.css`、`app.js` 等静态 Web 必需文件名，不读取产物正文。
+- `agent_py_agent/agent/subagents/parent_acceptance_preflight.py`: 父级验收预检 helper，负责准备测试项和命令安全预检，保持 controller 决策文件更薄。
+- `agent_py_agent/agent/subagents/execution_static_site_items.py`: 根据 output artifacts 推断静态站点机器验收项，只读 HTML 路径引用，生成 site_root 和 required_files，并合并父级传入的 task-level required files，不读取页面正文。
 - `agent_py_agent/agent/subagents/execution_content_checks.py`: 从测试项预处理拆出的内容验收归一化 helper，把模型常写的 `cat <workspace文件>` 转成受控 `content_check`，只接受明确期望内容，不放开 `cat` 命令。
 - `agent_py_agent/agent/subagents/execution_executor_helpers.py`: 新增 `TestExecutor` 命令解析、记录构造和时间戳 helper，保持执行器主文件只负责 bounded execution。
 - `agent_py_agent/agent/subagents/execution_report.py`: 新增 `test_execution.json` / `test_execution.md` 报告写读入口；JSON 是机器事实源，Markdown 只做展示。
@@ -1053,4 +1057,4 @@ docs/
 - `agent_py_agent/tests/test_orchestration_write_guard.py`: 覆盖派工写入预检，确保 UI 文案和 HTML 标签不会被误判为外部绝对路径。
 - `agent_py_agent/tests/test_tool_output_externalizer.py`: 覆盖大工具输出外置 artifact 和外置前 fail-safe recovery snapshot。
 - `agent_py_agent/tests/test_memory_compact_failsafe.py`: 覆盖 `memory-resume --from-compact` 如何展示 fail-safe checkpoint refs 且不读取 artifact 正文。
-- `agent_py_agent/tests/test_memory_artifact_read.py`: 覆盖 CLI 和 `read_artifact` 工具如何显式读取已登记 artifact，并拒绝未登记普通文件。
+- `agent_py_agent/tests/test_memory_artifact_read.py`: 覆盖 CLI 和 `read_artifact` 工具如何显式读取已登记 artifact，并拒绝未登记普通文件；同时覆盖 `read_file` 不能直接读取 tool-output artifact JSON 包装。

@@ -22,6 +22,7 @@ from .parent_acceptance_auto_policy import (
     build_parent_acceptance_auto_policy,
 )
 from .parsing import _dict_list
+from .static_required_files import required_static_files_for_task
 
 
 # LLM: ParentAcceptanceAutoExecutionOptions is the stable bundle for future executor knobs.
@@ -231,7 +232,7 @@ def _execute_confirmed_tests(
     if blockers:
         return _blocked_manual_result(request, blockers)
     output = _read_task_output(task)
-    tests = _manual_execution_tests(output, workspace_root)
+    tests = _manual_execution_tests(task, output, workspace_root)
     if not tests:
         return _blocked_manual_result(request, ["missing_tests"])
     records = _manual_execution_records(tests, workspace_root, request.timeout_seconds)
@@ -246,12 +247,17 @@ def _execute_confirmed_tests(
 
 # LLM: _manual_execution_tests mirrors parent preflight normalization before confirmed execution.
 # 函数用途: 为手动确认执行准备 tests；只归一化安全 cwd，不运行命令、不放开 shell。
-def _manual_execution_tests(output: dict[str, object], workspace_root: Path) -> list[dict[str, Any]]:
+def _manual_execution_tests(task: SubAgentTask, output: dict[str, object], workspace_root: Path) -> list[dict[str, Any]]:
     tests = _dict_list(output.get("tests", []))
     if not tests:
         return []
     return prepare_test_items(
-        TestItemPreparationRequest(tests=tests, output=output, workspace_root=workspace_root)
+        TestItemPreparationRequest(
+            tests=tests,
+            output=output,
+            workspace_root=workspace_root,
+            required_files=required_static_files_for_task(task),
+        )
     )
 
 

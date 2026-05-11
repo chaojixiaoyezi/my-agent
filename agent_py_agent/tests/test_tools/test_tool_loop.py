@@ -354,6 +354,20 @@ def test_tool_call_parser_recovers_single_extra_trailing_brace():
     assert calls == [{"tool": "read_file", "path": "README.md"}]
 
 
+# LLM: test_parse_error_result_includes_retry_format_hint covers malformed XML-ish tool-call recovery.
+# 函数用途: 模型工具调用格式坏掉时，执行结果要明确告诉它下一轮用标准 JSON 工具块重试。
+def test_parse_error_result_includes_retry_format_hint():
+    registry = make_tool_registry(Path.cwd())
+    calls = registry.parse_tool_calls("<tool_call><function=read><parameter=file_path>README.md</parameter>")
+
+    result = registry.execute_call(calls[0])
+
+    assert result.ok is False
+    assert result.tool == "__parse_error__"
+    assert "[TOOL_CALL]" in result.output
+    assert "[/TOOL_CALL]" in result.output
+
+
 def test_tool_spec_catalog_entry_includes_first_example():
     """LLM: Compact catalog entries should show tool-specific JSON when examples are available."""
     from agent_py_agent.agent.tools import ToolSpec

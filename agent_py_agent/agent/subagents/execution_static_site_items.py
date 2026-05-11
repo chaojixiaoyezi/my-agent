@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -19,6 +19,7 @@ class StaticSiteTestItemsRequest:
     artifact_paths: list[tuple[str, Path]]
     workspace_root: Path
     existing_tests: list[dict[str, Any]]
+    required_files: list[str] = field(default_factory=list)
 
 
 # LLM: inferred_static_site_items creates one refs-only static_site_check for HTML outputs.
@@ -30,11 +31,15 @@ def inferred_static_site_items(request: StaticSiteTestItemsRequest) -> list[dict
     if not html_paths:
         return []
     site_root = _common_parent(html_paths)
+    required_files = _merged_required_files(
+        _required_files(html_paths, site_root),
+        _normalized_required_files(request.required_files),
+    )
     return [{
         "name": "inferred static site check",
         "validation_method": "static_site_check",
         "site_root": _relative_or_absolute(site_root, request.workspace_root),
-        "required_files": _required_files(html_paths, site_root),
+        "required_files": required_files,
     }]
 
 
@@ -90,6 +95,29 @@ def _required_files(paths: list[Path], site_root: Path) -> list[str]:
         if value not in files:
             files.append(value)
     return files
+
+
+# LLM: _normalized_required_files accepts task-level static deliverable expectations without reading files.
+# 函数用途: 规整从任务目标/验收条件抽取的必需文件名；保留相对路径，拒绝绝对路径和父目录跳转。
+def _normalized_required_files(values: list[str]) -> list[str]:
+    files: list[str] = []
+    for value in values:
+        raw = str(value or "").strip().replace("\\", "/").lstrip("./")
+        if not raw or raw.startswith("/") or ".." in Path(raw).parts:
+            continue
+        if raw not in files:
+            files.append(raw)
+    return files
+
+
+# LLM: _merged_required_files keeps artifact-observed pages plus task-declared top-level files in one check.
+# 函数用途: 合并自动发现和任务要求的必需文件，顺序稳定且去重。
+def _merged_required_files(observed: list[str], declared: list[str]) -> list[str]:
+    files: list[str] = []
+    for value in [*observed, *declared]:
+        if value and value not in files:
+            files.append(value)
+    return sorted(files)
 
 
 # LLM: _relative_or_absolute keeps generated test specs portable under workspace_root.

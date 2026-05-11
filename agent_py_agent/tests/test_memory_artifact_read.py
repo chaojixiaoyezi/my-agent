@@ -119,6 +119,31 @@ def test_read_artifact_tool_repairs_wrong_prefix_with_unique_artifact_name(tmp_p
     assert payload["content"] == "abcdef"
 
 
+# LLM: test_read_file_rejects_tool_output_artifact_wrapper captures the R16 prompt-bloat regression.
+# 函数用途: 防止模型用 read_file 直接读取外置工具输出 JSON 包装，必须改走 read_artifact 分片。
+def test_read_file_rejects_tool_output_artifact_wrapper(tmp_path: Path) -> None:
+    artifact_path = _write_externalized_tool_output(tmp_path, content="large-output" * 500)
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=tmp_path,
+            max_chars=1000,
+            max_entries=20,
+            max_matches=20,
+            web_max_chars=1000,
+            http_timeout=5,
+            catalog_limit=20,
+            retrieval_limit=10,
+            vector_search_enabled=False,
+        )
+    )
+
+    result = registry.execute_call({"tool": "read_file", "path": str(artifact_path)})
+
+    assert result.ok is False
+    assert "read_artifact" in result.output
+    assert "max_chars" in result.output
+
+
 def _write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(

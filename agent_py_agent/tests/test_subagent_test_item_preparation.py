@@ -4,6 +4,7 @@ from agent_py_agent.agent.subagents.execution_test_items import (
     TestItemPreparationRequest,
     prepare_test_items,
 )
+from agent_py_agent.agent.subagents.static_required_files import static_required_files_from_texts
 
 
 def test_prepare_test_items_infers_single_artifact_working_dir(tmp_path):
@@ -281,6 +282,65 @@ def test_prepare_test_items_infers_static_site_check_for_single_html_artifact(tm
         "site_root": "deliverables/shop/build",
         "required_files": ["index.html"],
     }]
+
+
+# LLM: test_prepare_test_items_merges_task_required_static_files covers root whole-site required files.
+# 函数用途: 分支目录已有 HTML 时，也要把任务明确要求的顶层购物站文件放进 static_site_check。
+def test_prepare_test_items_merges_task_required_static_files(tmp_path):
+    site_dir = tmp_path / "deliverables" / "shop" / "build"
+    auth = site_dir / "auth"
+    catalog = site_dir / "catalog"
+    auth.mkdir(parents=True)
+    catalog.mkdir(parents=True)
+    (auth / "login.html").write_text("<a href='../catalog/products.html'>products</a>", encoding="utf-8")
+    (catalog / "products.html").write_text("<a href='../auth/login.html'>login</a>", encoding="utf-8")
+
+    prepared = prepare_test_items(
+        TestItemPreparationRequest(
+            tests=[],
+            output={"artifacts": [
+                {"path": str(auth / "login.html")},
+                {"path": str(catalog / "products.html")},
+            ]},
+            workspace_root=tmp_path,
+            required_files=["index.html", "login.html", "products.html", "cart.html", "style.css", "app.js"],
+        )
+    )
+
+    assert prepared == [{
+        "name": "inferred static site check",
+        "validation_method": "static_site_check",
+        "site_root": "deliverables/shop/build",
+        "required_files": [
+            "app.js",
+            "auth/login.html",
+            "cart.html",
+            "catalog/products.html",
+            "index.html",
+            "login.html",
+            "products.html",
+            "style.css",
+        ],
+    }]
+
+
+# LLM: test_static_required_files_from_texts_extracts_static_web_targets validates task-text oracle input.
+# 函数用途: 从用户目标和验收条件中抽取静态文件名，供父级验收补全 whole-site 必需文件。
+def test_static_required_files_from_texts_extracts_static_web_targets():
+    files = static_required_files_from_texts([
+        "必须生成 index.html, products.html, product-detail.html, cart.html, checkout.html。",
+        "还要有 style.css 和 app.js；不要把 /Users/example/project/docs.md 当静态站文件。",
+    ])
+
+    assert files == [
+        "index.html",
+        "products.html",
+        "product-detail.html",
+        "cart.html",
+        "checkout.html",
+        "style.css",
+        "app.js",
+    ]
 
 
 # LLM: test_prepare_test_items_keeps_malformed_check_without_machine_fallback preserves conservative failure signals.

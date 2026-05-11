@@ -429,3 +429,10 @@
 - 已修正：写入预检不再把 `+/-按钮`、`</body>` 这类 UI/HTML 内容当绝对路径；`tool_round_execution.py` 会把同轮中依赖前一个 stateful orchestration 结果的后续编排工具延后到下一轮，要求模型读取真实 `created_run_ids` / `actionable_run_ids` 后再 dispatch。
 - 已补测试：`test_ui_symbols_and_html_tags_do_not_trip_external_write_guard`、`test_tool_round_defers_dependent_dispatch_after_schedule`、`test_tool_call_parser_unwraps_model_orchestration_bundle`。
 - 下一步：用干净 R16 root-only 购物站 E2E 复测 cart-checkout 分支，确认 schedule 成功创建真实 children，下一轮 dispatch 使用真实 run ids，并继续补 root whole-site required-file 验收。
+
+## 2026-05-11 Stage7 R16 artifact/read and whole-site oracle
+- 中文说明：R16 真实购物网站 E2E 证明 R15 修复有效：cart-checkout 能先创建真实 child，再用真实 run id 调度；但也暴露 repair worker 直接 read_file 读取外置 tool-output JSON，导致 live prompt 再次膨胀，以及父级静态验收只看已观察 artifact、不看任务要求的顶层 required files。
+- 已修正：`read_file` 会拒绝 `memory_archive/artifacts/tool_outputs/*.json` artifact 包装文件，并提示使用 `read_artifact artifact_ref/max_chars` 分片读取；parse error 结果会附带标准 `[TOOL_CALL]` JSON 重试格式提示。
+- 已修正：父级验收预处理会从 task goal/thought/description/acceptance_checks 抽取 `index.html`、`style.css`、`app.js` 等静态站点必需文件，并合并进自动 `static_site_check.required_files`，避免分支目录局部通过但顶层购物流程缺页面。
+- 已补测试：`test_read_file_rejects_tool_output_artifact_wrapper`、`test_prepare_test_items_merges_task_required_static_files`、`test_static_required_files_from_texts_extracts_static_web_targets`、`test_parse_error_result_includes_retry_format_hint`。
+- 下一步：用干净 R17 root-only 购物站 E2E 复测完整注册 -> 登录 -> 商品 -> 购物车 -> 结账 -> 成功页链路，并观察 root/fix coordinator 是否仍有最终流卡住问题。
