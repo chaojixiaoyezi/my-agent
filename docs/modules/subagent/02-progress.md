@@ -500,3 +500,10 @@
 - 已修正：runner contract 提醒大结果优先写 `execution_context.output_json` 短 JSON；工具循环现在识别 `filesystem.path` 形式写出的当前 `output.json`，能触发自动收口。
 - 已补测试：`test_hierarchy_schedule_repairs_bare_lineage_agent_name`、`test_runner_context_schedule_bare_lineage_name_returns_payload_not_index_error`、`test_parse_partial_success_with_traceable_evidence_packets`、`test_parse_partial_success_with_cut_evidence_packet_array`、`test_tool_round_detects_bundled_filesystem_output_json`。
 - 下一步：用干净 R33 复测结果恢复和 `output.json` 收口；如果 root 失败后顶层进程仍长时间不返回，优先做 failed-root run-loop exit。
+
+## 2026-05-11 Stage7 R33 dispatch no-progress fuse
+- 中文说明：R33 真实 root-only 复测已跑出 root -> `小傻妞-*` -> `小小傻妞-*` -> `小小小傻妞-*` 四层链路，10 个购物站文件全部写进用户指定 deliverables build 目录，coordinator 直写业务产物被 guard 拦住后能创建 rescue leaf 补齐文件。
+- 新发现：root 已 `DONE/VERIFIED` 且产物完整后，顶层进程仍反复执行 `due_check/action_plan/classify_blocker`；这些记录只是在历史 blocked 子节点上重复记账，没有创建孩子、没有状态变化，导致无人值守时看起来像卡死。
+- 已修正：`dispatch_loop` 增加 no-progress fuse。连续两轮调度签名完全一样且均为 audit-only / record-only 动作时，循环会标记 `stopped_by_no_progress=True` 并自然停止；真实状态迁移、验收执行、runner 创建 child 不受影响。
+- 已补测试：`test_dispatch_loop_stops_when_audit_only_actions_repeat`，并回归 dispatch loop / watchdog / record-only action focused tests。
+- 下一步：用干净 R34 复测顶层 CLI 是否能在“root 完成但剩余只是重复 blocked 分类”时自然返回；随后修 authoritative status/handoff sync 和“无证据成功”收口。

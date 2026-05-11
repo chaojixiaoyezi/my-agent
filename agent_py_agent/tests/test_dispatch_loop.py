@@ -140,6 +140,55 @@ class TestDispatchLoop:
         # dispatch_subagents 被调用 5 次
         assert agent.dispatch_subagents.call_count == 5
 
+    def test_dispatch_loop_stops_when_audit_only_actions_repeat(self, tmp_path: Path):
+        """重复的记录类动作不应该把调度循环拖到最大轮数。"""
+        from agent_py_agent.agent.agent_core.dispatch_loop import dispatch_loop
+        from agent_py_agent.agent.subagents.reports import DispatchRecord, DispatchReport
+
+        agent = MagicMock()
+        agent.config.runner_failure_policy = "auto"
+        agent.subagents.list_runs.return_value = []
+
+        def dispatch_side_effect(*args, **kwargs):
+            agent.has_pending_work = True
+            return DispatchReport(
+                generated_at=0.0,
+                dry_run=False,
+                summary={"total": 2},
+                records=[
+                    DispatchRecord(
+                        id="due",
+                        step="due_check",
+                        action="scan",
+                        run_id="",
+                        dry_run=False,
+                        applied=False,
+                        ok=True,
+                        message="发现 3 个 due-check issue。",
+                    ),
+                    DispatchRecord(
+                        id="classify",
+                        step="action_apply",
+                        action="classify_blocker",
+                        run_id="blocked-run",
+                        dry_run=False,
+                        applied=True,
+                        ok=True,
+                        message="已记录 classify_blocker 待人工处理。",
+                        before_status="BLOCKED",
+                        after_status="BLOCKED",
+                    ),
+                ],
+            )
+
+        agent.dispatch_subagents.side_effect = dispatch_side_effect
+
+        result = dispatch_loop(agent, router=None, max_consecutive_rounds=20)
+
+        assert result.rounds_count == 2
+        assert result.stopped_by_no_progress is True
+        assert result.stopped_by_limit is False
+
 
 class TestAdaptiveInterval:
     """测试自适应间隔逻辑。"""

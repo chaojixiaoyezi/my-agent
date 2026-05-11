@@ -888,6 +888,7 @@ docs/
 - `agent_py_agent/agent/agent_core/runner_gate.py`: 集中计算 runner timeout；`off/none/disabled/0` 表示不限制，`auto` 表示按动态 timeout 配置计算，固定数字表示秒数。
   - 支持从任务 attributes 读取动态超时。
 
+- `agent_py_agent/agent/agent_core/dispatch_no_progress.py`: 父级 dispatch no-progress 判断 helper；连续重复的 due-check / record-only action 且无状态、验收或 child 创建变化时，通知 `dispatch_loop` 自然停止，避免无人值守时无限记账。
 - `agent_py_agent/agent/agent_core/dispatch_mixin.py`: 集成失败分析和自适应重派
   - 新增导入 `adaptive_retry`、`calculate_dynamic_timeout`、`SubAgentFailureAnalyzer`
   - 在 runner 失败后调用失败分析和自适应重派逻辑

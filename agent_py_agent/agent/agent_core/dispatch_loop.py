@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from ..capability_config import CapabilityConfig
     from ..subagent import SubAgent
 
+from .dispatch_no_progress import DispatchNoProgressTracker
 from .dispatch_params import DispatchParams
 
 
@@ -45,6 +46,7 @@ class DispatchLoopReport:
     total_records: int = 0
     final_pending_count: int = 0
     stopped_by_limit: bool = False
+    stopped_by_no_progress: bool = False
     rounds: list[dict] = field(default_factory=list)
 
 
@@ -188,6 +190,7 @@ def dispatch_loop(
     params = _dispatch_loop_params_from_locals(locals())
     report = DispatchLoopReport()
     max_rounds = params.max_consecutive_rounds
+    no_progress_tracker = DispatchNoProgressTracker()
 
     for round_num in range(1, max_rounds + 1):
         dispatch_report = _run_single_dispatch(
@@ -195,6 +198,9 @@ def dispatch_loop(
         )
         _append_dispatch_round(report, dispatch_report, round_num)
         if not agent.has_pending_work:
+            break
+        if no_progress_tracker.should_stop(dispatch_report):
+            report.stopped_by_no_progress = True
             break
         if round_num >= max_rounds:
             report.stopped_by_limit = True

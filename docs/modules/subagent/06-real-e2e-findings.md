@@ -2899,3 +2899,30 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Status: recorded; not fixed in this patch.
 - Remaining check:
   - Re-run clean R33. Expected result: bare `小小傻妞` 不再触发 `IndexError`；leaf/coordinator 长结果即便尾部截断，也能凭 traceable `evidence_packets` 进入可验收状态；模型若写 `output.json` 应自动收口。若顶层仍长时间不返回，下一片优先修 failed-root run-loop exit。
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R33
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r33.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r33`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r33/build`.
+- 中文说明：
+  - R33 继续按 root-only 原则跑：外层只启动 root，root 自己派 `小傻妞-html-coordinator` / `小傻妞-cssjs-coordinator`，child 再派 `小小傻妞-*`，孙节点再派 `小小小傻妞-*` 叶子。
+  - 购物站 10 个目标文件全部写入用户指定 build 目录：8 个 HTML、`style.css`、`app.js`；禁止文件没有落盘。
+  - root 真实执行了 broadcast 和 direct 消息：统一广播文件名规范，并单独纠正 HTML coordinator 的路径；HTML coordinator 试图直接写业务产物时被 `product_write_policy=delegate` 拦住，随后创建 rescue leaf 完成 `order-success.html`。
+- Finding 106: audit-only due-check/action apply records could keep the parent loop alive.
+  - Symptom: root 已经写出最终报告，业务产物完整，root 任务状态为 `DONE/VERIFIED`；但顶层进程继续每约 31 秒重复 `due_check -> action_plan -> classify_blocker`，只是在 3 个历史失败节点上反复记录 `before_status=BLOCKED / after_status=BLOCKED`。
+  - 中文解释：这不是还在干活，而是在重复记账。`classify_blocker` 这种动作只是“记录这个节点需要人工/后续处理”，如果连续两轮完全一样、没有创建孩子、没有状态变化，就不应该让主循环继续空转。
+  - Fix: `dispatch_loop` 新增 no-progress fuse。它会比较连续两轮的稳定调度签名，忽略易变 id/时间；如果记录只是 due-check、leadership inspect 或 record-only action，且没有状态/验收/child 创建变化，第二次重复时停止并标记 `stopped_by_no_progress=True`。真实推进的 runner 创建、状态迁移、验收执行仍会继续。
+  - Verification: `test_dispatch_loop_stops_when_audit_only_actions_repeat`。
+- Finding 107: status source drift still needs a dedicated follow-up.
+  - Symptom: 部分 child 的 `output.json` 还显示 `AWAITING_ACCEPTANCE/NEEDS_ACCEPTANCE`，但 `task.json/run.json` 已落成 `BLOCKED/FAILED/acceptance_failed`；root 读到旧 `STATUS.md` / `HANDOFF.md` 占位内容时，也会浪费轮次重新确认。
+  - 中文解释：机器最终状态、output.json、状态文档还没有完全同源。后续要让 root 优先读 authoritative task/run 状态，并在 runner 收束后同步 handoff/status，避免旧文档误导上层。
+  - Status: recorded. 本次先修无限循环；下一片建议修 authoritative status/handoff sync。
+- Finding 108: evidence and artifact ergonomics remain the next quality bottleneck.
+  - Symptom: 一个叶子曾以 `AWAITING_ACCEPTANCE` 暴露给父级，但 `evidence_packets=0`、artifacts=0；另有节点仍会尝试用 `read_file` 读取外置 tool-output wrapper JSON，系统能提示改用 `read_artifact`，但会多耗模型轮次。
+  - 中文解释：不能让“没有证据的成功”被父级误收，也要减少模型走错读取工具的成本。成功态需要更硬的证据合同，artifact 提示需要更容易复制执行。
+  - Status: recorded. 下一片建议合并修：成功无证据自动转待修复/重开；live prompt 进一步突出 scoped `read_artifact`。
+- Remaining check:
+  - Re-run clean R34 after no-progress fuse. Expected result: 如果 root 已完成且剩余只是重复 record-only blocked 分类，顶层 CLI 应自然返回，不再需要观察者手动 kill。若仍挂住，继续查 run-loop 外层是否还有不看 `stopped_by_no_progress` 的循环。
