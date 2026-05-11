@@ -442,3 +442,10 @@
 - 已修正：派工写入预检现在会识别“工作区目录名和后缀一致、但前缀疑似拼错”的绝对路径，返回 `suspected_path_typo=true`、原始 `target`、`workspace_root` 和 `suggested_target`，并明确要求重新调用 `schedule_child_subagents`，不要写 `capability_request`。
 - 已补测试：`test_external_write_guard_suggests_workspace_typo_retry`。
 - 下一步：用干净 R18 root-only 购物站 E2E 复测 root 是否按 `suggested_target` 重试并成功创建下级，再继续观察最终收口和完整购物流程验收。
+
+## 2026-05-11 Stage7 R18 URL/path recovery hardening
+- 中文说明：R18 验证 R17 修复有效，root 成功创建四个一级 coordinator，并由 leaf 真实写出 auth 页面和 cart/checkout/order-success 页面；本轮最终因 MiniMax HTTP 529 过载变成 BLOCKED，不能算完整验收通过。
+- 新发现：派工写入预检会把 `https://via.placeholder.com/300x200` 误切成 `s://...` 当成本地路径；普通 `read_file` / `list_files` 遇到 `/Users/xiaoyezei/...` 这种用户名拼错只返回泛化越界提示，模型会继续错误重试。
+- 已修正：新增 `path_recovery_hints.py` 统一提供 URL span 和工作区路径 typo 建议；派工写入预检跳过 URL 内部路径片段；文件系统读/列工具遇到 suffix-matching 工作区路径拼写错误时返回 `suspected_path_typo=true` 和 `suggested_target`。
+- 已补测试：`test_external_write_guard_ignores_url_image_sources`、`test_filesystem_tool_suggests_workspace_path_typo`。
+- 下一步：用干净 R19 root-only 购物站 E2E 复测 URL 不再阻断 catalog leaf，路径 typo 能自我纠偏，并观察 529/blocked 子树的恢复接管链路。

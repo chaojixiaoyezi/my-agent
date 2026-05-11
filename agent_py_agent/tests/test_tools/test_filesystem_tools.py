@@ -174,6 +174,28 @@ def test_filesystem_tools_allow_configured_extra_workspace_root():
         assert "report.txt" in list_result.output
 
 
+def test_filesystem_tool_suggests_workspace_path_typo():
+    """LLM: near-miss workspace paths should return retryable path hints instead of a generic boundary error.
+
+    新手说明:
+    模型把用户名或工作区前缀拼错时，读文件工具要明确告诉它正确路径，而不是让它误以为需要扩大权限。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td).resolve()
+        workspace = base / "my-claude-code"
+        workspace.mkdir()
+        wrong = base / "wrong-user" / "my-claude-code" / "deliverables" / "shop" / "build"
+        suggested = workspace / "deliverables" / "shop" / "build"
+        tool = ListFilesTool(workspace, max_entries=20)
+
+        result = tool.execute({"path": str(wrong)})
+
+        assert not result.ok
+        assert "suspected_path_typo=true" in result.output
+        assert f"suggested_target={suggested}" in result.output
+        assert "请使用 suggested_target 重试" in result.output
+
+
 def test_filesystem_tools_reject_bad_parameters_and_hide_absolute_outside_paths():
     """LLM: verify that filesystem tools reject bad params and never expose absolute paths outside workspace.
 

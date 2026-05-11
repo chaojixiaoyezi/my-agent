@@ -950,7 +950,8 @@ docs/
 - `agent_py_agent/agent/memory_archive/compact_continue_packet.py`: 把 compact resume 后的 work_state、action guard、推荐读取路径和 subagent owner refs 固定成继续工作包；它只表达恢复上下文可继续，不执行工具或业务验收。
 - `agent_py_agent/agent/memory_archive/compact_resume_blocked.py`: 生成 compact metadata 缺失时的 schema-compatible 阻断 payload，让主 resume 编排保持薄。
 - `agent_py_agent/agent/memory_archive/artifact_reader.py`: 按 tool output index 显式读取外置 artifact 正文切片，并校验路径边界和 sha256；路径前缀抄错但 artifact 文件名唯一时，可修复到登记记录。
-- `agent_py_agent/agent/tooling/_filesystem_read.py`: `read_file` 读取工作区文本文件；误读 tool-output artifact 包装的判断拆到 `filesystem_artifact_guard.py`。
+- `agent_py_agent/agent/path_recovery_hints.py`: 共享 URL span 和工作区路径 typo 恢复提示，供派工预检、读文件和列目录等入口复用。
+- `agent_py_agent/agent/tooling/_filesystem_read.py`: `read_file` 读取工作区文本文件；读/列/search 遇到疑似工作区路径拼写错误时返回 `suggested_target`；误读 tool-output artifact 包装的判断拆到 `filesystem_artifact_guard.py`。
 - `agent_py_agent/agent/tooling/filesystem_artifact_guard.py`: 拒绝 `memory_archive/artifacts/tool_outputs/*.json` 外置工具输出包装经由 `read_file` 读取，提示改用 `read_artifact` 分片。
 - `agent_py_agent/agent/tooling/artifact.py`: 注册 `read_artifact` 工具，给模型提供受控 artifact slice 读取入口。
 - `agent_py_agent/cli/memory_artifact_commands.py`: 提供 `memory-artifact-read` 命令，保持 artifact 正文读取和 archive resume/search CLI 分离。
@@ -1054,7 +1055,7 @@ docs/
 - `agent_py_agent/tests/test_status_shared_progress.py`: 覆盖 `status` / `subagents` CLI 展示共享进度、failure handoff refs、takeover packet refs 和父级验收 dry-run 摘要，并断言大 artifact 正文不会内联。
 - `agent_py_agent/tests/test_tool_round_execution.py`: 覆盖单轮工具执行 guard，确保 `schedule_child_subagents` 后的同轮 `dispatch_subagents` 会延后到下一轮读取真实 run ids。
 - `agent_py_agent/tests/test_tooling_orchestration_parser.py`: 覆盖真实模型常见的 `orchestration` 参数包展开，保持 schedule/dispatch 等工具 bundle 入口兼容。
-- `agent_py_agent/tests/test_orchestration_write_guard.py`: 覆盖派工写入预检，确保 UI 文案和 HTML 标签不会被误判为外部绝对路径，并验证疑似工作区路径拼写错误会返回可重试的 `suggested_target`。
+- `agent_py_agent/tests/test_orchestration_write_guard.py`: 覆盖派工写入预检，确保 UI 文案、HTML 标签和图片 URL 不会被误判为外部绝对路径，并验证疑似工作区路径拼写错误会返回可重试的 `suggested_target`。
 - `agent_py_agent/tests/test_tool_output_externalizer.py`: 覆盖大工具输出外置 artifact 和外置前 fail-safe recovery snapshot。
 - `agent_py_agent/tests/test_memory_compact_failsafe.py`: 覆盖 `memory-resume --from-compact` 如何展示 fail-safe checkpoint refs 且不读取 artifact 正文。
 - `agent_py_agent/tests/test_memory_artifact_read.py`: 覆盖 CLI 和 `read_artifact` 工具如何显式读取已登记 artifact，并拒绝未登记普通文件；同时覆盖 `read_file` 不能直接读取 tool-output artifact JSON 包装。

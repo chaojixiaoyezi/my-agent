@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..path_recovery_hints import suggest_workspace_typo_target
 from ._filesystem_helpers import (
     _MAX_SEARCH_LINE_CHARS,
     _MAX_SEARCH_QUERY_CHARS,
@@ -49,6 +50,9 @@ class FileSystemTool(BaseTool):
         try:
             candidate.relative_to(self.workspace_root)
         except ValueError as exc:
+            hint = _workspace_typo_error(raw_text, self.workspace_root, self.workspace_roots)
+            if hint:
+                raise ValueError(hint) from exc
             raise ValueError("路径超出允许的工作区范围，请使用工作区内路径。") from exc
         return candidate
 
@@ -68,6 +72,20 @@ class FileSystemTool(BaseTool):
             return str(path.relative_to(self.workspace_root)).replace("\\", "/")
         except ValueError:
             return "<outside-workspace>"
+
+
+# LLM: _workspace_typo_error gives models a precise retry path for near-miss workspace paths.
+# 函数用途: 当读/列文件路径只是工作区前缀拼错时，返回机器可读的 suggested_target 提示。
+def _workspace_typo_error(raw_path: str, workspace_root: Path, workspace_roots: list[Path]) -> str:
+    suggested = suggest_workspace_typo_target(raw_path, workspace_roots)
+    if not suggested:
+        return ""
+    return (
+        "路径疑似拼写错误，已拒绝访问。"
+        f" suspected_path_typo=true target={raw_path} workspace_root={workspace_root}"
+        f" suggested_target={suggested}。"
+        " 这是路径拼写错误，不是权限缺口；请使用 suggested_target 重试。"
+    )
 
 
 # LLM: ListFilesTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
