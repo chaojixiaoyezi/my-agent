@@ -2834,3 +2834,35 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Status: partially covered by Finding 95 guard. 仍建议后续把 authoritative product root 放进 context bundle/output contract，并让 static-site acceptance 优先检查该 root。
 - Remaining check:
   - Re-run clean R31 after root-write-root guard. Expected result: 如果模型漏传 `extra_write_roots`，`create_subagents` 应拒绝并要求重试；如果模型按提示补上，root/children 应把文件写入 `/deliverables/.../build`，不是内部 agent-run workspace。
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R31
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Config: `/Users/xiaoyezi/my-claude-code/.my-agent-stage7-shop-smoke-20260511-r31.yaml`.
+  - Runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/stage7_shop_smoke_20260511_r31`.
+  - User deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r31/build`.
+- 中文说明：
+  - R31 按 root-only 原则跑出真实 4 层链路：`stage7-shop-r31-root` -> `小傻妞-目录管理` -> `小小傻妞-任务拆分` -> `小小小傻妞-文件创建`。
+  - 本轮验证了 R30 的产物根目录修复：10 个目标文件全部写入用户指定的 deliverables build 目录，没有写到内部 `.my_agent_runtime/.../build`。
+  - root 和 child 都真实执行了 `subagent_message`：broadcast 给 descendants，direct 给具体下级；这说明上层对下层的通信通路已可用。
+- Finding 98: product root guard worked, but coordinator result packets were still too weak.
+  - Symptom: `小傻妞-目录管理` 完成了派工、通信和产物验证，但最终结构化结果只写了普通 `evidence` / `delivered_files`，没有 `evidence_packets`。父级验收因此给 `acceptance_failed`。
+  - 中文解释：业务已经做完，但机器验收需要“可追溯证据包”。只说“文件都在”不够，必须写成 evidence_packets，里面有 artifact_refs 或 evidence_refs，父级才知道证据能追到哪里。
+  - Fix: runner required-output template 现在显式包含 `evidence_packets`；提示词明确要求成功时 evidence_packets 必须带 artifact_refs/evidence_refs，并限制 evidence/artifacts/tests/lessons 每类只保留关键 1-5 条，长报告写文件后引用路径。
+  - Verification: `test_prompt_contains_result_block_markers`.
+- Finding 99: repair prompt was too large, causing the repair answer to truncate again.
+  - Symptom: `小小傻妞-任务拆分` 的第一次结果块在 `"cap...` 处截断；repair 回合又把完整原 prompt 和长原响应塞回模型，修复回复也再次截断，没有闭合 `[/SUBAGENT_RESULT]`。
+  - 中文解释：修复不是重新写论文，而是把最后结果整理成短 JSON。上下文太胖会挤掉模型输出空间，导致“修复也坏掉”。
+  - Fix: structured-output repair prompt 现在裁剪 `original_prompt` 和 `original_response`，只保留尾部最可能包含工具结果和最终报告的部分；同时强制 summary、evidence、artifacts、tests、lessons 短输出，并要求成功时写 evidence_packets。
+  - Verification: `test_repair_prompt_clips_large_prompt_and_response`、`test_subagent_runner_repairs_missing_structured_output`。
+- Finding 100: real run still exposed repeated long/multi tool-call formatting mistakes.
+  - Symptom: 叶子和 root 在连续写多个文件、连续读多个文件时多次缺少 `[/TOOL_CALL]`。系统 parse-error hint 能让它继续前进，但模型仍倾向一次输出太多工具调用。
+  - 中文解释：救场能力有效，但还不是最优。后续要进一步让模型默认“一次少量工具调用”，特别是写长 HTML/CSS/JS 和读多个文件时。
+  - Status: recorded. Current patch tightens result/repair outputs first；后续可继续调 tool-call batching prompt 或工具层自动分批。
+- Finding 101: failed root should still return the top-level CLI promptly.
+  - Symptom: root 已经落成 `BLOCKED/structured_output_parse_error`，但顶层 `my-agent run` 进程仍未自然退出，最后由观察者终止进程。
+  - 中文解释：失败可以接受，卡住不行。无人值守时，root 没有更多可执行恢复动作就应该输出失败 refs 并返回。
+  - Status: recorded; not fixed in this patch. 下一片建议专门修 run-loop 失败退出边界。
+- Remaining check:
+  - Re-run clean R32 after evidence-packet template and compact repair prompt. Expected result: coordinator 正常结果或 repair 结果应更短、更容易闭合，并给父级足够 evidence_packets；如果仍 blocked，再优先修顶层 run-loop 退出和自动接管策略。

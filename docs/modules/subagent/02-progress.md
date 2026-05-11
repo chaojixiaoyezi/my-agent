@@ -485,3 +485,10 @@
 - 已修正：`create_subagents` 对显式 root/coordinator 增加产品写入根门禁。目标像“交付网站/文件”但没有 `extra_write_roots` 或 goal 内绝对产物路径时，系统会拒绝创建，要求模型把 `extra_write_roots` 放在工具 JSON 顶层重试，避免继续发明内部 build 目录。
 - 已补测试：`test_explicit_coordinator_product_delivery_requires_write_root`；同时记录 root failed 后顶层 CLI 仍挂起、验收只看内部 build 不看用户 deliverables root 的真实问题。
 - 下一步：用干净 R31 复测 root-write-root guard：模型漏传时应被工具拒绝并自我重试；成功后必须写入 `/Users/xiaoyezi/my-claude-code/deliverables/.../build`。
+
+## 2026-05-11 Stage7 R31 evidence and repair hardening
+- 中文说明：R31 真实 root-only 复测已跑出 4 层链路：root -> `小傻妞-目录管理` -> `小小傻妞-任务拆分` -> `小小小傻妞-文件创建`；10 个目标文件全部落在用户指定 deliverables build 目录，说明 R30 的产品写入根方向有效。
+- 新发现：业务产物完整，但 child/coordinator 的结构化结果缺 `evidence_packets`，孙节点和 root 的 repair 回合又因上下文太胖二次截断，最终机器状态仍是 BLOCKED/FAILED，不算完整 E2E 通过。
+- 已修正：runner 结果模板现在明确要求 `evidence_packets`，并说明成功时必须带 `artifact_refs` 或 `evidence_refs`；结构化修复 prompt 会裁剪原 prompt/响应，只保留尾部关键上下文，避免修复输出没空间闭合。
+- 已补测试：`test_prompt_contains_result_block_markers`、`test_repair_prompt_clips_large_prompt_and_response`、`test_subagent_runner_repairs_missing_structured_output`。
+- 下一步：用干净 R32 复测 evidence-packet 模板和 compact repair prompt；如果 root 失败后顶层 CLI 仍不退出，再优先修 run-loop 的失败收束边界。
