@@ -600,7 +600,7 @@ dispatch watch、parent planner、capability route、action apply 和 channel pr
 - `python3 -m agent_py_agent subagent-context <run_id>` 可以生成单个子代理执行上下文包。
 - `record_runner_result()` 会把 runner 输出写回 `output.json`、`RUNNER_RESULT.md` 和任务日志。
 - `record_runner_result(..., actual_tools=[...])` 会把系统真实记录的工具执行落成验收证据，避免模型 evidence 换写法时误判缺少 `read_file/write_file`。
-- `parse_subagent_runner_output()` 会解析 `[SUBAGENT_RESULT]...[/SUBAGENT_RESULT]` JSON 块。
+- `parse_subagent_runner_output()` 会解析 `[SUBAGENT_RESULT]...[/SUBAGENT_RESULT]` JSON 块；缺结束标记但 JSON 完整、或成功态尾部截断但前置 `evidence_packets` 已完整且带 refs 时，可恢复最小结果。没有 refs 的截断成功态仍会阻断。
 - 结构化 runner 输出里的 evidence 会自动写入验收证据。
 - 结构化 runner 输出里的 capability request 会自动写成 open `CapabilityRequest`。
 - 结构化 runner 输出里的 artifacts / tests / patches / lessons / next_actions 会写入 `output.json` 和 `DEBRIEF.md`。
@@ -937,6 +937,8 @@ docs/
 - `agent_py_agent/agent/subagents/context_bundle.py`: 生成 runner-facing `context_bundle.json` / `CONTEXT_BUNDLE.md`，包含目标、计划、验收、权限、写入边界、输出合同、lineage 和 Context Gate；多层传递只保存当前/父级 bundle refs，不展开父级正文。
 - `agent_py_agent/agent/subagents/result_structured.py`: 解析 runner structured output 并写回 artifacts、tests、evidence packets、findings 和 capability requests；artifact 证据合成委托给小模块，保持解析主流程薄。
 - `agent_py_agent/agent/subagents/result_artifact_evidence.py`: 从 runner artifact metadata 合并 `artifact_refs`，并在模型漏写 `evidence_packets` 时合成 refs-only artifact evidence packet，不读取 artifact 正文。
+- `agent_py_agent/agent/subagents/parsing_partial.py`: 从 runner 结果块恢复被截断但仍有可追溯 `evidence_packets` 的成功结果；只接受 refs-only 证据链，避免把无证据长文本误当完成。
+- `agent_py_agent/agent/subagents/parsing_values.py`: 子代理结果解析共用的 list/dict/int 归一化 helper，让 `parsing.py` 保持薄层并保留旧 private import 兼容。
 - `agent_py_agent/agent/subagents/services/persistence.py`: 负责 task/run/status report 落盘和旧任务兼容归一化；保存时会合并磁盘已有 `child_ids`，避免旧父/子快照覆盖新派生的层级链接。
 - `agent_py_agent/agent/subagents/services/persistence_rendering.py`: 承接 persistence 写 `thought.md` 的 Markdown 内容组装，让持久化主流程继续保持薄编排。
 - `agent_py_agent/agent/subagents/services/inheritance_manifest.py`: 创建 child task 时生成继承清单，记录 inherited / overridden / dropped 项；它是 audit-only，不自动扩大子代理上下文。
@@ -982,13 +984,14 @@ docs/
 - `agent_py_agent/agent/subagents/parent_acceptance_followup_consistency.py`: 新增 follow-up apply 前的一致性检查 helper，集中处理 run_id、test report ref、失败数、新鲜度和状态驱动 rescue 例外。
 - `agent_py_agent/agent/subagents/parent_acceptance_rescue_followup.py`: 新增已失败/阻塞任务的 rescue follow-up helper，让无 `test_execution.json` 的 runner 失败也能进入受控接管路径。
 - `agent_py_agent/agent/subagents/services/hierarchy_scheduler.py`: 新增层级调度器 v1，使用 `HierarchyScheduleRequest` / `HierarchyChildSpec` 显式预览或创建 child/grandchild run，并统一限制深度和 fan-out；当真实模型把 `role=child`、具体角色写进 `agent_name` 时，会先恢复 researcher/tester/acceptor/bug_finder/writer/worker 等角色再套权限策略；模型漏传 `acceptance_checks` 时会通过 `hierarchy_acceptance.py` 从 child goal/角色派生最小验收项。
+- `agent_py_agent/agent/subagents/services/hierarchy_agent_names.py`: 层级展示名统一生成器，负责 `小傻妞-*` / `小小傻妞-*` / `小小小傻妞-*` 前缀；真实模型只写 `小小傻妞` 这种无后缀名字时会回退到 role 后缀，避免调度工具抛裸 `IndexError`。
 - `agent_py_agent/agent/subagents/services/base.py`: 子代理基础创建服务；`_extract_write_dirs()` 从目标文本中提取本地写入根，并跳过 URL 范围，避免图片/API 地址被误当成可写目录。
 - `agent_py_agent/agent/subagents/services/hierarchy_acceptance.py`: 从 scheduler 拆出的验收兜底策略，只在模型没有显式 `acceptance_checks` 时派生最小验收项。
 - `agent_py_agent/agent/subagents/services/hierarchy_tool_policy.py`: 从 scheduler 拆出的工具策略，统一处理 coordinator/leaf 的工具继承、写文件工具补齐和 `write`/`read` 等模型工具名别名修正；coordinator 显式 allowed_tools 会补回内置编排工具，避免模型漏传后失去派工能力。
 - `agent_py_agent/agent/subagents/execution_test_items.py`: 预处理父级验收 tests，推断 workspace 内 `working_dir`，拆安全 `cd <dir> && pytest`，并把带明确期望内容的 `cat <workspace文件>` 改成受控 `content_check`，避免为真实模型输出放开 `cat` 命令；多页 HTML artifacts 会自动补 `static_site_check`。
 - `agent_py_agent/agent/subagents/execution_executor.py`: `content_check` 支持 `content_pattern` 包含匹配，也支持 `content_equals` / `expected_content` + `match_mode=exact`，用于严格验证文件内容没有额外字符；`static_site_check` 用于机器验收购物站这类静态产物的页面存在性、坏链接、占位符和明显失效控件。
 - `agent_py_agent/agent/agent_core/_tool_loop_service.py`: 主代理和 subagent 共用的工具循环；到达 `max_tool_rounds` 后给模型一次收口机会，如果模型仍吐工具调用，返回确定性停止说明而不是把新 `[TOOL_CALL]` 当最终回答。
-- `agent_py_agent/agent/agent_core/tool_round_execution.py`: 单轮工具执行 helper；负责记录 assistant tool round、执行/记录工具调用、检测子代理 `output.json` 收口，并把同轮 `schedule_child_subagents` 后依赖真实 run id 的 `dispatch_subagents` 等编排调用延后到下一轮，避免模型使用脑补 run id。
+- `agent_py_agent/agent/agent_core/tool_round_execution.py`: 单轮工具执行 helper；负责记录 assistant tool round、执行/记录工具调用、检测子代理 `output.json` 收口，并把同轮 `schedule_child_subagents` 后依赖真实 run id 的 `dispatch_subagents` 等编排调用延后到下一轮，避免模型使用脑补 run id；`output.json` 收口检测支持 flat `path` 和 bundle `filesystem.path`。
 - `agent_py_agent/agent/subagents/services/hierarchy_role_identity.py`: 从 scheduler 拆出的角色 identity 兜底策略，根据 `agent_name` / `goal` 恢复模型漏填的 researcher/tester/acceptor/bug_finder/writer/worker 等角色。
 - `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 从 scheduler 中拆出的层级 scope guard，集中处理空计划、深度/数量限制、禁止 sibling 领域、同批混建 coordinator/leaf、root 已有 coordinator 后直建 leaf/worker、child 写入根漂移、domain mismatch、同父级 coordinator 领域去重和已验证 leaf 具体目标文件去重；去重会过滤 generated id 片段和泛化编号词，避免误挡 recovery checker siblings。
 - `agent_py_agent/agent/subagents/services/hierarchy_leaf_targets.py`: 从 scope guard 拆出的已验证 leaf 目标文件去重 helper；只读 direct child 元数据和 `output.json.artifacts` 路径引用，不读取 artifact 正文。

@@ -51,3 +51,38 @@ def test_tool_round_defers_dependent_dispatch_after_schedule():
     assert records[1][0] == "dispatch_subagents"
     assert records[1][1] is False
     assert "已延后" in records[1][2]
+
+
+# LLM: test_tool_round_detects_bundled_filesystem_output_json covers real model write_file bundles.
+# 函数用途: 模型用 filesystem.path 写 output.json 时，也应触发 runner 提前收口，避免再生成长结果块。
+def test_tool_round_detects_bundled_filesystem_output_json(tmp_path):
+    output_json = tmp_path / "output.json"
+    task = SimpleNamespace(output_json=str(output_json))
+    agent = SimpleNamespace(
+        _current_subagent_run_id="run-1",
+        subagents=SimpleNamespace(load=lambda run_id: task),
+    )
+    payload = {"tool": "write_file", "filesystem": {"path": str(output_json), "content": "{}"}}
+    records: list[str] = []
+
+    def execute_one(request):
+        assert request.payload == payload
+        return ToolExecutionResult("write_file", True, "ok")
+
+    def record_one(record):
+        records.append(record.result.tool)
+
+    completed = execute_tool_round(
+        ToolRoundExecutionRequest(
+            agent=agent,
+            params=SimpleNamespace(tool_context=[]),
+            tool_rounds=1,
+            response=ModelResponse(text="", backend="test"),
+            calls=[payload],
+            execute_one=execute_one,
+            record_one=record_one,
+        )
+    )
+
+    assert completed is True
+    assert records == ["write_file"]

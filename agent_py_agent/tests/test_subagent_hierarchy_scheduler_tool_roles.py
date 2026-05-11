@@ -88,6 +88,33 @@ def test_hierarchy_schedule_applies_depth_agent_name_prefixes(tmp_path):
     assert great_result.items[0].agent_name == "小小小傻妞-sku-leaf"
 
 
+# LLM: test_hierarchy_schedule_repairs_bare_lineage_agent_name covers real E2E name-only prefixes.
+# 函数用途: 模型只写“小小傻妞”这类无后缀名字时，调度器不能抛 IndexError，应回退到 role 后缀。
+def test_hierarchy_schedule_repairs_bare_lineage_agent_name(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    root = manager.create_run(goal="root", thought="split", plan=["plan"], agent_name="root")
+    child = manager.create_run(
+        goal="child",
+        thought="coordinate",
+        plan=["plan"],
+        parent_id=root.id,
+        root_id=root.id,
+        depth=1,
+    )
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=child.id,
+            child_specs=[HierarchyChildSpec(goal="继续协调页面任务", agent_name="小小傻妞", role="coordinator")],
+            apply=True,
+        )
+    )
+    grandchild = manager.load(result.created_run_ids[0])
+
+    assert grandchild.agent_name == "小小傻妞-coordinator"
+    assert result.items[0].agent_name == "小小傻妞-coordinator"
+
+
 # LLM: test_hierarchy_schedule_infers_coordinator_even_with_report_write_tools covers report-write coordinators.
 # 函数用途: coordinator 允许写报告后，模型误写 worker 也不能因为 write_file 存在而跳过协调角色推断。
 def test_hierarchy_schedule_infers_coordinator_even_with_report_write_tools(tmp_path):
