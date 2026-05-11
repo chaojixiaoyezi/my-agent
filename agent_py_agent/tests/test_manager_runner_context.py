@@ -215,6 +215,9 @@ def test_build_execution_context_with_granted_cards_limit(mock_manager, tmp_path
 def test_build_execution_context_write_boundary(mock_manager, tmp_path):
     """测试写入边界设置。"""
     sample_task = make_task(tmp_path)
+    run_workspace = tmp_path / "tasks" / "root-456" / "agents" / sample_task.id
+    sample_task.agent_run_workspace_dir = str(run_workspace)
+    sample_task.agent_run_final_report_md = str(run_workspace / "final_report.md")
     mock_manager._tasks[sample_task.id] = sample_task
 
     context = mock_manager.build_execution_context(sample_task.id)
@@ -224,6 +227,7 @@ def test_build_execution_context_write_boundary(mock_manager, tmp_path):
     assert "forbidden_write_roots" in context.write_boundary
     assert "locked_files" in context.write_boundary
     assert context.write_boundary["skill_sparks_file"].endswith("skill_sparks.md")
+    assert str(run_workspace) in context.write_boundary["allowed_write_roots"]
 
 
 def test_build_execution_context_instructions(mock_manager, tmp_path):

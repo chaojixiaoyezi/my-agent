@@ -17,10 +17,11 @@ from ._filesystem_helpers import (
     _required_path,
     _text_param,
 )
-from .filesystem_artifact_guard import tool_output_artifact_read_hint
+from .filesystem_artifact_guard import (
+    tool_output_artifact_read_hint,
+    tool_output_artifact_typo_hint,
+)
 from .models import BaseTool, ToolExecutionResult, ToolSpec
-
-_MAX_WRITE_TEXT_CHARS = 1_000_000
 
 
 # LLM: FileSystemTool 属于 工具系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
@@ -80,6 +81,9 @@ def _workspace_typo_error(raw_path: str, workspace_root: Path, workspace_roots: 
     suggested = suggest_workspace_typo_target(raw_path, workspace_roots)
     if not suggested:
         return ""
+    artifact_hint = tool_output_artifact_typo_hint(raw_path, workspace_root, suggested)
+    if artifact_hint:
+        return artifact_hint
     return (
         "路径疑似拼写错误，已拒绝访问。"
         f" suspected_path_typo=true target={raw_path} workspace_root={workspace_root}"

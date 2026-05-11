@@ -8,10 +8,32 @@ from pathlib import Path
 _TOOL_OUTPUT_ARTIFACT_PARTS = ("memory_archive", "artifacts", "tool_outputs")
 
 
+# LLM: is_tool_output_artifact_path detects wrapper paths even before workspace-prefix validation succeeds.
+# 函数用途: 判断路径文本是否指向 tool_outputs 下的 JSON artifact 包装文件；可用于拼错前缀时的恢复提示。
+def is_tool_output_artifact_path(target: Path) -> bool:
+    return target.suffix.lower() == ".json" and _path_has_parts(target, _TOOL_OUTPUT_ARTIFACT_PARTS)
+
+
+# LLM: tool_output_artifact_typo_hint routes typo-repaired wrapper paths to the artifact reader.
+# 函数用途: 当模型把 tool-output artifact 路径前缀抄错时，返回 read_artifact 恢复提示而不是 read_file 重试提示。
+def tool_output_artifact_typo_hint(raw_path: str, workspace_root: Path, suggested: str) -> str:
+    suggested_path = Path(suggested)
+    if not is_tool_output_artifact_path(suggested_path):
+        return ""
+    return (
+        "路径疑似拼写错误，已拒绝访问。"
+        f" suspected_path_typo=true target={raw_path} workspace_root={workspace_root}"
+        f" suggested_target={suggested}。"
+        " 这是路径拼写错误，不是权限缺口；但目标是已外置的 tool-output artifact JSON 包装文件。"
+        f" 不要用 read_file 或 suggested_target 重试，请改用 read_artifact，artifact_ref={suggested_path.name}，"
+        "offset=0，max_chars=4000；需要更多内容再分页读取。"
+    )
+
+
 # LLM: tool_output_artifact_read_hint blocks accidental prompt-flood reads of externalized output wrappers.
 # 函数用途: 判断 read_file 目标是否是 tool_outputs 下的 artifact JSON；若是则要求使用 read_artifact 切片读取。
 def tool_output_artifact_read_hint(target: Path, roots: list[Path]) -> str:
-    if target.suffix.lower() != ".json" or not _path_has_parts(target, _TOOL_OUTPUT_ARTIFACT_PARTS):
+    if not is_tool_output_artifact_path(target):
         return ""
     for root in roots:
         artifact_root = root / Path(*_TOOL_OUTPUT_ARTIFACT_PARTS)

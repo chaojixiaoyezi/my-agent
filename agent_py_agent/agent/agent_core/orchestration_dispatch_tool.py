@@ -65,7 +65,7 @@ class DispatchSubagentsTool(BaseTool):
     # LLM: _router builds the non-orchestration capability router used by dispatch planning.
     # 函数用途: 收集当前 agent 的普通工具规格，排除 orchestration 工具，构建 dispatch 所需 capability router。
     def _router(self) -> tuple[CapabilityConfig, CapabilityRouter]:
-        cfg = CapabilityConfig()
+        cfg = _dispatch_capability_config(self.agent)
         tool_specs = [spec for spec in self.agent.tools.specs() if spec.category != "orchestration"]
         return cfg, CapabilityRouter(config=cfg, tool_specs=tool_specs)
 
@@ -119,3 +119,25 @@ class DispatchSubagentsTool(BaseTool):
         }
         payload.update(direct_children_progress_payload(self.agent))
         return payload
+
+
+# LLM: _dispatch_capability_config aligns model-facing due-check with runner timeout policy.
+# 函数用途: 生成 dispatch_subagents 内部能力配置；当用户关闭 runner 超时时，不让自动调度把活跃 runner 误接管。
+def _dispatch_capability_config(agent: SimpleAgent) -> CapabilityConfig:
+    cfg = CapabilityConfig()
+    if _runner_timeouts_disabled(getattr(agent, "config", None)):
+        cfg.subagent_run_timeout = 0
+        cfg.subagent_heartbeat_timeout = 0
+    return cfg
+
+
+# LLM: _runner_timeouts_disabled keeps the accepted off/none/disabled spellings in one small check.
+# 函数用途: 判断 agent_config 里 runner_timeout_seconds 是否表示不限制，用于自动 dispatch 的 due-check 降噪。
+def _runner_timeouts_disabled(config: object) -> bool:
+    raw = getattr(config, "runner_timeout_seconds", "auto")
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"off", "none", "disabled", "false", "no", "0"}
+    try:
+        return float(raw) == 0.0
+    except (TypeError, ValueError):
+        return False

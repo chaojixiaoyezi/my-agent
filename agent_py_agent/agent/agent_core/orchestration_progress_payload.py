@@ -45,9 +45,13 @@ def direct_children_progress_payload(agent) -> dict[str, object]:
                 "run_ids": payload["direct_children"]["recovery_run_ids"],
                 "workflow_mode": "auto",
             },
+            "suggested_recovery_child_tool_call": _recovery_child_tool_call(
+                payload["direct_children"]["recovery_run_ids"]
+            ),
             "recovery_hint": (
                 "有直接 child 已 BLOCKED/FAILED/TIMEOUT；先用这些 run_ids 尝试受控重试。"
-                "如果仍不可重试，再查看 failure_handoff/takeover refs 并创建接管任务。"
+                "如果仍不可重试，按 suggested_recovery_child_tool_call 创建恢复 child。"
+                "恢复 child 默认可以是 worker；只有确实需要继续拆多层时，父节点才改成 coordinator。"
             ),
         })
     return payload
@@ -83,4 +87,33 @@ def _progress_payload(parent_run_id: str, direct_children: list) -> dict[str, ob
             "needs_more_dispatch": bool(unfinished_ids),
             "needs_recovery": bool(recovery_ids),
         }
+    }
+
+
+# LLM: _recovery_child_tool_call suggests a flexible child recovery step without forcing a coordinator.
+# 函数用途: 生成 refs-only 恢复 child 创建建议；真实创建仍必须由父 runner 自己调用 schedule_child_subagents。
+def _recovery_child_tool_call(recovery_run_ids: list[str]) -> dict[str, object]:
+    ids = [item for item in recovery_run_ids if item]
+    joined_ids = ", ".join(ids)
+    return {
+        "tool": "schedule_child_subagents",
+        "apply": True,
+        "role_selection_hint": "默认用 worker；只有恢复本身需要继续拆下级任务时，父节点才把 role 改成 coordinator/lead。",
+        "children": [
+            {
+                "role": "worker",
+                "agent_name": "recovery-worker",
+                "goal": (
+                    "接管或修复这些直接 child runs："
+                    f"{joined_ids}。先读取它们的 status/failure_handoff/takeover refs，"
+                    "不要改写健康分支；如果只是单点修复就直接完成，"
+                    "如果确实需要继续拆多层，再由父节点改派 coordinator。"
+                ),
+                "allowed_tools": [
+                    "subagent_board",
+                    "read_file",
+                    "list_files",
+                ],
+            }
+        ],
     }

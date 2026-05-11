@@ -144,6 +144,34 @@ def test_read_file_rejects_tool_output_artifact_wrapper(tmp_path: Path) -> None:
     assert "max_chars" in result.output
 
 
+# LLM: test_read_file_typo_to_tool_output_artifact_routes_to_read_artifact catches copied-prefix drift.
+# 函数用途: 模型把 artifact 绝对路径前缀抄错时，read_file 也要提示改用 read_artifact，而不是按 suggested_target 继续读文件。
+def test_read_file_typo_to_tool_output_artifact_routes_to_read_artifact(tmp_path: Path) -> None:
+    artifact_path = _write_externalized_tool_output(tmp_path, content="large-output" * 500)
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=tmp_path,
+            max_chars=1000,
+            max_entries=20,
+            max_matches=20,
+            web_max_chars=1000,
+            http_timeout=5,
+            catalog_limit=20,
+            retrieval_limit=10,
+            vector_search_enabled=False,
+        )
+    )
+    wrong_prefix = f"/wrong/{tmp_path.name}/memory_archive/artifacts/tool_outputs/{artifact_path.name}"
+
+    result = registry.execute_call({"tool": "read_file", "path": wrong_prefix})
+
+    assert result.ok is False
+    assert "suspected_path_typo=true" in result.output
+    assert "read_artifact" in result.output
+    assert artifact_path.name in result.output
+    assert "不要用 read_file" in result.output
+
+
 def _write_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "agent_config.yaml"
     config_path.write_text(

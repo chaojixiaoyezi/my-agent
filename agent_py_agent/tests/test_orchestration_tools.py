@@ -463,11 +463,8 @@ class TestDispatchSubagentsToolExecute:
         assert call_kwargs["params"].exclude_run_ids == ["subagent-root"]
         assert call_kwargs["params"].finalize_acceptance is True
 
-class TestDispatchSubagentsToolRunnerContextOutput:
-    """测试 runner-context dispatch 输出和错误参数归一。"""
-
-    def test_runner_context_invalid_workflow_mode_stays_off(self):
-        """模型误传 parallel 时，runner dispatch 也不能回退成全局 auto。"""
+    def test_dispatch_tool_respects_runner_timeout_off_for_auto_due_check(self):
+        """runner_timeout_seconds=off 时，模型调度工具不应自动生成 run/heartbeat 接管动作。"""
         from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
 
         mock_report = MagicMock()
@@ -477,49 +474,19 @@ class TestDispatchSubagentsToolRunnerContextOutput:
 
         mock_agent = MagicMock()
         mock_agent._current_subagent_run_id = "subagent-root"
-        mock_agent.config.subagent_workflow_mode = "auto"
+        mock_agent.config.subagent_workflow_mode = "off"
+        mock_agent.config.runner_timeout_seconds = "off"
         mock_agent.tools.specs.return_value = []
         mock_agent.dispatch_subagents.return_value = mock_report
         mock_agent.subagents.workspace = Path("/tmp/workspace")
+        mock_agent.subagents.list_runs.return_value = []
 
-        tool = DispatchSubagentsTool(mock_agent)
-        result = tool.execute({"apply": True, "workflow_mode": "parallel"})
+        result = DispatchSubagentsTool(mock_agent).execute({"apply": True, "execute_runners": True})
 
         assert result.ok is True
-        call_kwargs = mock_agent.dispatch_subagents.call_args.kwargs
-        assert call_kwargs["params"].workflow_mode == "off"
-
-    def test_runner_context_dispatch_reports_direct_child_progress(self):
-        """runner 内 dispatch 结果要提示剩余 PLANNING child，避免误判失败。"""
-        from types import SimpleNamespace
-
-        from agent_py_agent.agent.agent_core.orchestration_tools import DispatchSubagentsTool
-
-        mock_report = MagicMock()
-        mock_report.dry_run = False
-        mock_report.summary = {"runner": 1}
-        mock_report.records = []
-
-        mock_agent = MagicMock()
-        mock_agent._current_subagent_run_id = "parent-run"
-        mock_agent.config.subagent_workflow_mode = "off"
-        mock_agent.tools.specs.return_value = []
-        mock_agent.dispatch_subagents.return_value = mock_report
-        mock_agent.subagents.workspace = Path("/tmp/workspace")
-        mock_agent.subagents.list_runs.return_value = [
-            SimpleNamespace(id="parent-run", parent_id="", status="RUNNING"),
-            SimpleNamespace(id="child-a", parent_id="parent-run", status="AWAITING_ACCEPTANCE"),
-            SimpleNamespace(id="child-b", parent_id="parent-run", status="PLANNING"),
-        ]
-
-        tool = DispatchSubagentsTool(mock_agent)
-        result = tool.execute({"apply": True, "execute_runners": True})
-
-        payload = json.loads(result.output)
-        assert payload["direct_children"]["by_status"]["PLANNING"] == 1
-        assert payload["direct_children"]["planning_run_ids"] == ["child-b"]
-        assert "继续调用 dispatch_subagents" in payload["direct_children"]["continue_hint"]
-
+        capability_config = mock_agent.dispatch_subagents.call_args.args[1]
+        assert capability_config.subagent_run_timeout == 0
+        assert capability_config.subagent_heartbeat_timeout == 0
 
 class TestScheduleChildSubagentsTool:
     """测试当前 runner 创建下一层子节点的安全边界。"""

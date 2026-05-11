@@ -128,6 +128,30 @@ def test_hierarchy_schedule_blocks_duplicate_verified_leaf_targets(tmp_path):
     assert len(sibling.created_run_ids) == 1
 
 
+# LLM: test_hierarchy_schedule_allows_explicit_repair_leaf_for_existing_target locks R19 repair recovery.
+# 函数用途: 已有 leaf 写过 app.js 后，明确“修复/补齐”任务仍可创建新的修复 leaf，避免 coordinator 卡死。
+def test_hierarchy_schedule_allows_explicit_repair_leaf_for_existing_target(tmp_path):
+    manager = SubAgentManager(tmp_path)
+    parent = _shared_parent_with_verified_leaf(manager)
+
+    repair = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="修复 app.js，补齐 getUrlParam 和 setUrlParam 函数。",
+                    role="leaf_worker",
+                    agent_name="app-js-repair-worker",
+                )
+            ],
+            apply=True,
+        )
+    )
+
+    assert repair.blocked is False
+    assert len(repair.created_run_ids) == 1
+
+
 # LLM: _auth_parent_with_verified_leaf creates a parent with one completed auth leaf fixture.
 # 函数用途: 构造 leaf 目标去重测试用的父节点和已验证子节点，避免测试主体过长。
 def _auth_parent_with_verified_leaf(manager: SubAgentManager):
@@ -156,6 +180,38 @@ def _auth_parent_with_verified_leaf(manager: SubAgentManager):
         manager,
         done_leaf,
         ["deliverables/shop/build/register.html", "deliverables/shop/build/login.html"],
+    )
+    return parent
+
+
+# LLM: _shared_parent_with_verified_leaf mirrors the R19 shared-assets coordinator fixture.
+# 函数用途: 构造 app.js 已由同父级 leaf 完成的场景，用来验证后续修复 leaf 不被误拦。
+def _shared_parent_with_verified_leaf(manager: SubAgentManager):
+    root = manager.create_run(goal="shopping root", thought="orchestrate", plan=["plan"])
+    parent = manager.create_run(
+        goal="shared assets coordinator",
+        thought="coordinate shared js/css",
+        plan=["split shared assets"],
+        parent_id=root.id,
+        root_id=root.id,
+        depth=1,
+        role="coordinator",
+        agent_name="shared-assets-coordinator",
+    )
+    done_leaf = manager.create_run(
+        goal="write app.js",
+        thought="write shared app logic",
+        plan=["write app.js"],
+        parent_id=parent.id,
+        root_id=root.id,
+        depth=2,
+        role="leaf_worker",
+        agent_name="app-js-worker",
+    )
+    _mark_leaf_verified_with_artifacts(
+        manager,
+        done_leaf,
+        ["deliverables/shop/build/app.js"],
     )
     return parent
 
