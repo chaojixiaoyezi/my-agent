@@ -162,6 +162,19 @@ def test_tool_call_parser_reports_missing_closing_tool_marker():
     assert "缩短 goal/plan/acceptance_checks" in result.output
 
 
+# LLM: complete JSON without the closing marker should still execute when the payload is intact.
+# 函数用途: 真实模型偶尔少写 [/TOOL_CALL]，但 JSON 已完整；这种情况不应浪费一轮重试。
+def test_tool_call_parser_recovers_complete_json_without_closing_marker():
+    registry = make_tool_registry(Path.cwd())
+    calls = registry.parse_tool_calls(
+        '[TOOL_CALL]\n{"tool":"write_file","path":"index.html","content":"<main>ok</main>"}'
+    )
+
+    assert calls == [
+        {"tool": "write_file", "path": "index.html", "content": "<main>ok</main>"}
+    ]
+
+
 # LLM: test_parse_error_hint_recommends_append_for_truncated_write covers long generated CSS/HTML writes.
 # 函数用途: 写文件内容太长被截断时，错误提示要引导模型用 append_file 分块写，避免重复失败。
 def test_parse_error_hint_recommends_append_for_truncated_write():

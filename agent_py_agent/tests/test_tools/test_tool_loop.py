@@ -27,6 +27,7 @@ from .backends import (
     StubbornToolAfterLimitBackend,
     SubagentDelegationBackend,
     ToolCallingBackend,
+    UnclosedWriteFileBackend,
 )
 
 
@@ -68,6 +69,23 @@ def test_tool_loop_and_prompt_transcript():
         assert result.response == "工具执行完成"
         assert result.tool_rounds == 1
         assert "hello tool world" in result.prompt
+
+
+# LLM: complete tool JSON should execute even when the closing marker is missing.
+# 函数用途: 覆盖真实 runner 漏写 [/TOOL_CALL] 但 write_file JSON 完整时，不应白跑 parse recovery。
+def test_tool_loop_executes_complete_unclosed_write_file_tool_call():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = UnclosedWriteFileBackend(workspace)
+
+        result = agent.run("写 index.html", save=False, allowed_tools=["write_file"])
+
+        assert result.response == "写入完成"
+        assert result.tool_rounds == 1
+        assert agent.backend.calls == 2
+        assert (workspace / "index.html").read_text(encoding="utf-8") == "<main>ok</main>"
 
 
 def test_agent_can_delegate_to_subagents_from_tool_call():

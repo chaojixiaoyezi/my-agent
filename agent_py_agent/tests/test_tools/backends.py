@@ -42,6 +42,31 @@ class ToolCallingBackend(BaseBackend):
         return ModelResponse(text="工具执行完成", backend=self.name)
 
 
+# LLM: UnclosedWriteFileBackend verifies complete tool JSON can execute without the closing marker.
+# 类用途: 测试专用后端；第一次少写 [/TOOL_CALL]，第二次确认文件已真实写入。
+class UnclosedWriteFileBackend(BaseBackend):
+    name = "fake_unclosed_write_file_backend"
+
+    # LLM: __init__ stores the workspace so the second model turn can verify side effects.
+    # 函数用途: 初始化工作区路径和调用计数，供 tool-loop 恢复测试使用。
+    def __init__(self, workspace: Path):
+        self.workspace = workspace
+        self.calls = 0
+
+    # LLM: generate emits one complete JSON tool payload without the closing marker.
+    # 函数用途: 复现真实模型漏写 [/TOOL_CALL] 但 JSON 完整的场景，并验证系统直接执行写文件。
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                text='[TOOL_CALL]\n{"tool":"write_file","path":"index.html","content":"<main>ok</main>"}',
+                backend=self.name,
+            )
+        assert (self.workspace / "index.html").read_text(encoding="utf-8") == "<main>ok</main>"
+        assert "已写入文件" in prompt
+        return ModelResponse(text="写入完成", backend=self.name)
+
+
 class SubagentDelegationBackend(BaseBackend):
     """LLM: fake model backend that simulates a main agent creating sub-agents from natural language.
 

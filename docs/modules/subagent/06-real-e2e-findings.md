@@ -3135,7 +3135,9 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Finding 128: long HTML/JS writes still create parse-recovery churn even when the task succeeds.
   - Symptom: leaf 首轮尝试把较长 HTML 一次性塞进 `write_file` 工具 JSON 时，仍出现“工具调用缺少结束标记 `[/TOOL_CALL]`”；工具层提示后模型改短内容并继续完成任务。
   - 中文解释：现在不再必然失败，但速度、稳定性和 token 成本都不好。模型手写长 JSON 还是容易断，真实项目越大越容易烧轮次。
-  - Status: recorded. 下一片建议做“长文件写入协议”或 helper：让模型少手写大段 JSON，改成短片段、草稿 artifact、受控 chunk 或专门的 bounded write 流程。
+  - Fix slice: 解析器现在会在缺 `[/TOOL_CALL]` 时先尝试恢复完整 JSON object；如果工具 JSON 已经完整，会直接执行，不再强制模型重试。真正半截断的 JSON 仍保持 parse error 和分块写入提示。
+  - Verification: `test_tool_call_parser_recovers_complete_json_without_closing_marker`、`test_tool_loop_executes_complete_unclosed_write_file_tool_call`，并回归缺标记半截 JSON 和 truncated write hint 用例。
+  - Remaining status: partially fixed. 这只减少“JSON 完整但少结束标记”的浪费；如果内容本身真被截断，仍需要后续 bounded write helper 或文件草稿协议。
 - Finding 129: parent acceptance is working, but richer product QA is still outside this smoke.
   - Symptom: 本轮验收确认文件齐、路径对、链路状态对；但还没有用浏览器真实点击注册、登录、加购、结算，也没有逐页检查图片/按钮/布局。
   - 中文解释：这次证明“多层子代理可以把东西交出来并完成父级验收”；还不能等同于“购物网站用户体验完全可用”。下一步要加浏览器级验收子代理或 verifier，让它真实打开页面、点按钮、检查引用资源。

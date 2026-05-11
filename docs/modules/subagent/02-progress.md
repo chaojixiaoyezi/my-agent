@@ -547,3 +547,10 @@
 - 已验证：leaf 遇到不存在的 build 目录时能继续用 `write_file`，父目录自动创建；`site-writer` coordinator 名称、shared asset 引用、product-root `output.json` guard 都在真实链路里生效。
 - 仍需改进：长 HTML/JS 直接塞进工具 JSON 时仍会触发缺 `[/TOOL_CALL]` 的 parse recovery；本轮能自修成功，但真实大项目会浪费轮次并提高超时概率。
 - 下一步：优先做长文件写入协议或 bounded write helper，降低模型手写大 JSON 的失败率；随后加入浏览器级 verifier，真实点击注册、登录、加购、结算等流程。
+
+## 2026-05-11 Stage7 R41 tool-call close-marker recovery
+- 中文说明：先做长文件稳定性的第一片小修复：当模型已经吐出完整工具 JSON，但忘了写 `[/TOOL_CALL]`，解析器现在会直接恢复执行，不再白白消耗一轮 parse recovery。
+- 已修正：`parse_registry_tool_calls()` 缺少结束标记时会先尝试解析 raw JSON；只有 JSON 不完整或不合法时，才返回“工具调用缺少结束标记”的 parse error。
+- 已保留：真正截断的 `write_file.content` 仍然不会被误执行，会继续提示模型改成 `write_file` 短骨架 + `append_file` 分块。
+- 已补测试：`test_tool_call_parser_recovers_complete_json_without_closing_marker`、`test_tool_loop_executes_complete_unclosed_write_file_tool_call`，并回归 `test_tool_call_parser_reports_missing_closing_tool_marker`、`test_parse_error_hint_recommends_append_for_truncated_write`。
+- 下一步：跑 focused/full gates 后提交；随后用新一轮 root-only E2E 验证 R40 那类“完整 JSON 少结束标记”的场景是否少一次模型重试。如果仍频繁长内容截断，再做真正的 bounded write helper。

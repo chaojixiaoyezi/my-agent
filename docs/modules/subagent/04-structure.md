@@ -482,3 +482,4 @@ Auto Policy v1 解决的问题是：父级验收已经能给出 next-action，�
 - `agent_core/_tool_loop_service.py` 的 one-shot 编排去重只在工具结果真正推进时登记；`schedule_child_subagents` 这类工具可能 `ok=True` 但 JSON 输出 `blocked=true`，这类语义阻断必须保留父级修正后重试的空间。
 - `tooling/write_boundary.py` 把 task-local `output_json` 和 product_write_roots 分开处理：子代理可以写自己的 `execution_context.output_json` 收口，但不能在用户 deliverables/product roots 里创建内部 `output.json`，避免系统交接文件污染业务产物目录。
 - `agent_core/runner_prompts.py` 必须持续提醒 runner/coordinator：`output.json` 是内部结果文件名，给 child goal 时不能要求写到产品目录；需要结构化汇报时引用 `execution_context.output_json`。
+- `tooling/registry_execution.py` 对标准 `[TOOL_CALL]` 做窄恢复：如果模型漏写 `[/TOOL_CALL]` 但中间 JSON object 已完整，就直接恢复并执行；如果 JSON 真的截断，仍返回 parse error 和分块写入提示。

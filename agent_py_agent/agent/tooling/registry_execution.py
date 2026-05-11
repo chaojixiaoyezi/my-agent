@@ -78,7 +78,8 @@ def parse_registry_tool_calls(text: str) -> list[dict[str, Any]]:
         end_info = _next_tool_block_end(text, start + len(marker_start))
         if end_info is None:
             raw = text[start + len(marker_start) :].strip().strip("`")
-            calls.append((start, _parse_error_payload("工具调用缺少结束标记 [/TOOL_CALL]", raw)))
+            payload = _parse_tool_block_payload(raw)
+            calls.append((start, _parse_error_payload("工具调用缺少结束标记 [/TOOL_CALL]", raw) if payload.get("tool") == "__parse_error__" else payload))
             break
         end, marker_end = end_info
         raw = text[start + len(marker_start) : end].strip().strip("`")
