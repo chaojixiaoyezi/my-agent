@@ -3016,3 +3016,98 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Status: recorded. Not fully fixed in this patch.
 - Remaining check:
   - Re-run clean R37. Expected result: 新任务默认 JSON 是 object；叶子节点遇到不存在的 build 目录时，直接用 `write_file` 创建短骨架并继续 `append_file` 分块，而不是因为缺 mkdir/shell 进入 `BLOCKED`。如果仍出现长 HTML 工具截断，下一片优先做更硬的分块写入引导或受控文件生成 helper。
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R37
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Config: `/Users/xiaoyezi/my-claude-code/.my-agent-stage7-shop-smoke-20260511-r37.yaml`.
+  - Runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/stage7_shop_smoke_20260511_r37`.
+  - User deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r37/build`.
+- 中文说明：
+  - R37 继续按 root-only 原则跑，外层只启动主代理；主代理创建 root，root 自己创建 `小傻妞-html-coordinator`。
+  - R36 的双重 JSON 默认文件问题没有复现：新任务 `output.json` / 报告文件按 object 形态落盘，观察脚本可以直接读取字段。
+  - 本轮没有进入 leaf 写产物阶段，因为 depth=1 coordinator 在创建 depth=2 coordinator 时反复被层级 guard 拦住；观察者终止进程，避免同一策略错误继续烧 API。
+- Finding 117: runner can self-repair one missing `[/TOOL_CALL]`, but long schedule payloads still make parse failures likely.
+  - Symptom: root 第一轮 `schedule_child_subagents` 工具调用缺少结束标记，工具层返回“工具调用缺少结束标记”提示；root 第二轮缩短参数后成功创建 depth=1 child。
+  - 中文解释：系统能把“工具调用格式坏了”反馈给模型，模型也能自修一次。但真实长 goal 仍容易把工具 JSON 写长、写断，后续要继续压缩 schedule payload，减少模型手写长 JSON 的机会。
+  - Status: recorded. 本次没有改 parse 逻辑；R37 证明现有自修提示有效，但还不够省轮次。
+- Finding 118: coordinator names containing `writer` were misclassified as leaf workers.
+  - Symptom: depth=1 child 多次尝试创建 `role="coordinator"` / `agent_name="小小傻妞-site-writer"` 的 depth=2 节点；工具总是返回 `blocked=true` / `reason="hierarchy_chain_requires_coordinator_until_depth_3"`。
+  - 中文解释：它明明是 coordinator，只是名字里有 `writer`。我们的层级 guard 把名字里的 `writer` 当成“这是叶子 worker”，于是误以为它在四层链路未到 depth=3 前跳层创建 leaf，直接拦住。
+  - Fix: 四层链路 guard 现在先尊重明确的协调类角色（coordinator/lead/tester/reviewer/checker 等）；只有不是协调角色、且确实像 leaf/worker 时才阻断。
+  - Verification:
+    - `test_hierarchy_schedule_allows_coordinator_name_with_writer_before_depth_three`.
+- Finding 119: negative filename examples in parentheses could pollute required files.
+  - Symptom: root goal 写了“文件名禁止改名（如 product.html、old-detail.html、legacy.html 等均不允许）”；下级继承块却把 `product.html`、`old-detail.html`、`legacy.html` 放进 `父级必需文件/产物名`。
+  - 中文解释：括号里的文件名只是“别创建这些反例”，不是要交付的文件。它们如果混进 required_files，下级会一边被要求别创建，一边又被要求必须创建，后续验收和提示都会混乱。
+  - Fix: required/forbidden 文件名提取器现在识别“如/例如/比如”这类否定例子；这些文件只进 `forbidden_files`，不进 `required_files`。
+  - Verification:
+    - `test_file_contract_treats_negative_examples_as_forbidden_terms`.
+- Remaining check:
+  - Re-run clean R38. Expected result: `小小傻妞-site-writer` 这类 coordinator 名称不再被 `hierarchy_chain_requires_coordinator_until_depth_3` 误挡；`product.html` / `old-detail.html` / `legacy.html` 只作为 forbidden examples 传递，不进入 required_files。若链路继续推进到 leaf，继续观察缺 build 目录时是否直接用 `write_file` 自动建父目录。
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R38
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Config: `/Users/xiaoyezi/my-claude-code/.my-agent-stage7-shop-smoke-20260511-r38.yaml`.
+  - Runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/stage7_shop_smoke_20260511_r38`.
+  - User deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r38/build`.
+- 中文说明：
+  - R38 继续按 root-only 原则跑：观察者只启动顶层主代理，后续由 root 创建 `小傻妞`，再由下级创建 `小小傻妞` 和 `小小小傻妞-*` leaf。
+  - R37 的 coordinator/`writer` 误判已消失；本轮成功推进到 depth=3 leaf，并写出 `index.html`、`register.html`、`login.html`、`products.html`、`product-detail.html`。
+  - R36 的“目录不存在误判缺 mkdir/shell”没有复现：leaf 在 build 目录不存在时直接使用 `write_file`，工具自动创建父目录。
+  - 本轮在 5/10 文件处停止保留证据，因为 coordinator 修正 cart worker 时被两个更具体的问题挡住。
+- Finding 120: leaf target dedupe treated referenced shared assets as owned outputs.
+  - Symptom: `cart-writer` 的目标是写 `cart.html` 和 `checkout.html`，内容说明里写“引入 style.css 和 app.js”；由于同父级已有 app.js 相关目标，调度返回 `duplicate_leaf_target:app.js`，导致 cart worker 没创建。
+  - 中文解释：页面引用公共脚本，不代表这个页面 worker 要负责写公共脚本。否则所有 HTML 页面都会和真正负责 `app.js/style.css` 的 leaf 抢所有权。
+  - Fix: leaf 产物去重现在遇到“引入/引用/链接/导入/加载/use/include/import/link to”等引用语义时，只保留引用词之前的主语文件，不把后面的共享资源当成本 leaf 的产物 claim。
+  - Verification:
+    - `test_hierarchy_schedule_allows_leaf_referencing_shared_assets`.
+- Finding 121: blocked schedule results consumed one-shot orchestration keys.
+  - Symptom: `schedule_child_subagents` 返回 `ok=True` 但 payload 里 `blocked=true` 后，coordinator 用相同工具重试修正目标，工具循环直接返回“本轮已经执行过相同的一次性编排工具调用”，而不是再次让调度器给出真实结果。
+  - 中文解释：工具调用本身没崩，但调度没有真正创建孩子。没有创建成功的尝试不应该吃掉“只能执行一次”的名额，否则父级无法修正后重试。
+  - Fix: 一次性编排去重只在工具结果真正推进时登记；JSON 输出里 `blocked=true` 的结果不登记 one-shot key，允许上层修正后重试。
+  - Verification:
+    - `test_blocked_schedule_result_does_not_consume_one_shot_key`.
+- Finding 122: long `write_file` / `append_file` payloads still waste rounds on parse recovery.
+  - Symptom: 多个 leaf 首次尝试把较长 HTML 一次性塞进工具 JSON，出现缺少 `[/TOOL_CALL]`；工具提示后 leaf 通常能改成短骨架 + 分块追加，但每个复杂页面会额外消耗多轮。
+  - 中文解释：现在不是彻底失败，但速度和稳定性不好。模型手写长 JSON 太容易断，后续应考虑更强的文件生成 helper、自动分块写入或更短的产物写入协议。
+  - Status: recorded. 本次先修会阻塞调度树继续前进的 ownership/one-shot 问题。
+- Finding 123: tool-output artifact wrapper recovery hint works but is not yet the model's first instinct.
+  - Symptom: leaf 看到 `memory_archive/artifacts/tool_outputs/*.json` 后先用 `read_file` 读包装文件；工具返回“请改用 read_artifact”，leaf 随后绕回读取原始文件继续工作。
+  - 中文解释：系统兜底提示有效，但模型还会先抄长 artifact 路径。后续可以继续缩短 live prompt 中的 artifact 提示，优先给 scoped `read_artifact` 调用，减少抄错路径和多余轮次。
+  - Status: recorded. 本次没有改 artifact prompt。
+- Remaining check:
+  - Re-run clean R39. Expected result: `cart-writer` 只 claim `cart.html/checkout.html`，不会因为“引入 app.js/style.css”被 shared assets 去重挡住；如果调度返回 `blocked=true`，父级修正后可以重新调用 schedule 工具获得真实结果，而不是被 one-shot guard 拦截。
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R39
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Config: `/Users/xiaoyezi/my-claude-code/.my-agent-stage7-shop-smoke-20260511-r39.yaml`.
+  - Runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/stage7_shop_smoke_20260511_r39`.
+  - User deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r39/build`.
+- 中文说明：
+  - R39 继续按 root-only 原则跑，观察者只启动顶层主代理；root 自己创建 `小傻妞-*`，下级再创建 `小小傻妞-*` 和 `小小小傻妞-*`。
+  - R38 的 shared asset ownership 修复在真实链路里生效：`cart/checkout/order-success` leaf 可以创建，不再因为“引入 app.js/style.css”被 `duplicate_leaf_target:app.js` 拦住。
+  - 路径 typo guard 在真实链路里生效：leaf 把 `/Users/xiaoyezi` 误写成 `/Users/xiaoyuzi` 时，工具层拒绝并给出 suggested target。
+  - 本轮产出多项购物站文件，但观察者在模型接口超时、一个 leaf `BLOCKED`、以及新发现的产物目录污染后停止进程，保留证据并转入修复。
+- Finding 124: internal `output.json` polluted the user deliverables directory.
+  - Symptom: 一个 leaf 的 child goal 写了“完成后写 output.json 列出产物路径”，模型把它理解成在 `/deliverables/.../build/output.json` 写文件；用户产物目录本应只放 HTML/CSS/JS 等业务产物。
+  - 中文解释：`output.json` 是子代理自己的内部收口文件，用来给父级验收读结果；它不应该出现在用户要看的购物网站目录里。否则用户产物目录会混进系统内部文件，后续项目越大越难清理。
+  - Fix: 写入边界现在把 product_write_roots 里的 `output.json` 识别为内部结果文件污染并拒绝；真实 task-local `execution_context.output_json` 仍允许写。runner prompt 同步说明：只能写自己的 `execution_context.output_json`，不要在 deliverables/product roots 里创建 `output.json`，coordinator 给 child goal 时也不能这样要求。
+  - Verification:
+    - `test_direct_policy_blocks_internal_output_json_in_product_root`.
+    - `test_direct_policy_allows_task_local_output_json`.
+- Finding 125: long app.js write still triggers parse recovery and burns rounds.
+  - Symptom: CSS leaf 先成功分块写 `style.css`，随后尝试一次性写较长 `app.js`，模型回复再次缺少 `[/TOOL_CALL]`，工具层进入 parse recovery。
+  - 中文解释：长内容塞进一个工具调用还是容易断。现在能提示模型缩短/分块，但会多消耗模型轮次，也增加超时概率。
+  - Status: recorded. 下一片建议做更硬的长文件生成协议：例如自动 chunk helper、文件草稿 artifact 再 apply、或工具层专门支持 bounded multi-part write。
+- Finding 126: model API timeout leaves a leaf `BLOCKED` even when sibling outputs already exist.
+  - Symptom: cart leaf 写出 `cart.html`、`checkout.html`、`order-success.html` 后，后续模型请求超时，runner 结果记录为 `BLOCKED`。
+  - 中文解释：真实网络超时不是业务失败，但当前 runner 还不能自动根据已写产物和局部证据做“可恢复/待验收”收束。
+  - Status: recorded. 后续建议增强 timeout recovery：如果已存在 required artifacts，可生成 failure handoff，交给父级 verifier/rescue 判断，而不是只留下普通 BLOCKED。
+- Remaining check:
+  - Re-run clean R40 after the product-root `output.json` guard. Expected result: 子代理仍能写自己的 task-local `output.json` 收口，但不能把内部 `output.json` 写进用户 build 目录；继续观察长 `app.js` 生成和模型接口超时后的恢复策略。

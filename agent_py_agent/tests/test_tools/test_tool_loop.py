@@ -9,11 +9,14 @@ import json
 import tempfile
 from pathlib import Path
 
+from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
+from agent_py_agent.agent.agent_core._tool_loop_service import ToolLoopService
+from agent_py_agent.agent.agent_core.tool_round_execution import ToolCallExecuteParams
 from agent_py_agent.agent.config import AgentConfig
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.log_analysis.storage import LocalLogStore
 from agent_py_agent.agent.subagent import EvidencePacket, VerificationEvidence
-from agent_py_agent.agent.tools import ToolRegistry
+from agent_py_agent.agent.tools import ToolExecutionResult, ToolRegistry
 
 from .backends import (
     DispatchCompletionBackend,
@@ -25,6 +28,28 @@ from .backends import (
     SubagentDelegationBackend,
     ToolCallingBackend,
 )
+
+
+# LLM: _OneShotHarnessAgent gives ToolLoopService only the attributes needed for private one-shot tests.
+# 函数用途: 避免为一次性调度去重单测启动完整 SimpleAgent，同时保持工具执行路径真实。
+class _OneShotHarnessAgent:
+    def __init__(self, tools):
+        self.tools = tools
+
+
+# LLM: _BlockedScheduleTools simulates a semantic schedule block with a successful tool envelope.
+# 函数用途: 返回 ok=True 但 JSON 里 blocked=true 的真实 schedule_child_subagents 输出形状。
+class _BlockedScheduleTools:
+    def __init__(self):
+        self.calls = 0
+
+    def execute_call(self, payload, *, allowed_tools=None, granted_capabilities=None, write_boundary=None):
+        self.calls += 1
+        return ToolExecutionResult(
+            "schedule_child_subagents",
+            True,
+            '{"blocked": true, "reason": "duplicate_leaf_target:app.js", "created_run_ids": []}',
+        )
 
 
 def test_tool_loop_and_prompt_transcript():
@@ -133,6 +158,42 @@ def test_repeated_orchestration_tool_call_is_not_executed_twice():
         assert result.response == "重复派工已被拦截并收口。"
         assert result.tool_rounds == 2
         assert len(tasks) == 1
+
+
+# LLM: blocked hierarchy schedule attempts must remain retryable after the parent narrows scope.
+# 函数用途: 复现 R38 中 schedule_child_subagents 返回 blocked=true 后，被一次性调用去重挡住修正重试的问题。
+def test_blocked_schedule_result_does_not_consume_one_shot_key():
+    params = ToolLoopExecuteParams(
+        user_prompt="",
+        memories=[],
+        runtime_injections=[],
+        prompt_files=[],
+        tool_catalog_section="",
+        tool_recommendations_section="",
+        tool_context=[],
+        effective_on_chunk=None,
+        allowed_tools=None,
+        granted_capabilities=None,
+        write_boundary=None,
+        task_attributes=None,
+        request_id="",
+        run_id="",
+        task_id="",
+        one_shot_tool_calls=set(),
+        executed_tools=[],
+        archive_tool_calls=[],
+    )
+    agent = _OneShotHarnessAgent(_BlockedScheduleTools())
+    service = ToolLoopService(agent)
+    payload = {"tool": "schedule_child_subagents", "apply": True, "children": [{"goal": "cart"}]}
+
+    first = service._execute_one_tool_call(ToolCallExecuteParams(params, 1, 1, payload))
+    second = service._execute_one_tool_call(ToolCallExecuteParams(params, 2, 1, payload))
+
+    assert first.ok is True
+    assert second.ok is True
+    assert agent.tools.calls == 2
+    assert "阻止重复执行" not in second.output
 
 
 def test_repeated_dispatch_is_allowed_for_parent_progress_loops():

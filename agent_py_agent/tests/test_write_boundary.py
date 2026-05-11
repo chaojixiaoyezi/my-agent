@@ -250,6 +250,50 @@ class TestValidateWriteBoundaryAllowedRoots:
         )
         assert result == ""
 
+    # LLM: Product roots must stay clean; subagent closeout JSON belongs in the task workspace.
+    # 函数用途: 防止真实 E2E 中 worker 把内部 output.json 写进用户产物目录。
+    def test_direct_policy_blocks_internal_output_json_in_product_root(self, tmp_path):
+        task_dir = tmp_path / "task"
+        product = tmp_path / "deliverables"
+        task_dir.mkdir()
+        product.mkdir()
+        result = validate_write_boundary(
+            "write_file",
+            {"path": str(product / "output.json")},
+            workspace_root=tmp_path,
+            write_boundary={
+                "role": "leaf_worker",
+                "allowed_write_roots": [str(task_dir), str(product)],
+                "product_write_roots": [str(product)],
+                "product_write_policy": "direct",
+                "output_json": str(task_dir / "output.json"),
+            },
+        )
+        assert "内部结果文件写入被阻止" in result
+        assert str(task_dir / "output.json") in result
+
+    # LLM: The reserved-name guard must not block the real task-local closeout path.
+    # 函数用途: 确认子代理仍能写自己的 task_dir/output.json 来完成 runner 收口。
+    def test_direct_policy_allows_task_local_output_json(self, tmp_path):
+        task_dir = tmp_path / "task"
+        product = tmp_path / "deliverables"
+        task_dir.mkdir()
+        product.mkdir()
+        output_json = task_dir / "output.json"
+        result = validate_write_boundary(
+            "write_file",
+            {"path": str(output_json)},
+            workspace_root=tmp_path,
+            write_boundary={
+                "role": "leaf_worker",
+                "allowed_write_roots": [str(task_dir), str(product)],
+                "product_write_roots": [str(product)],
+                "product_write_policy": "direct",
+                "output_json": str(output_json),
+            },
+        )
+        assert result == ""
+
 
 class TestValidateWriteBoundaryForbiddenRoots:
     def test_path_in_forbidden_root_blocked(self, tmp_path):

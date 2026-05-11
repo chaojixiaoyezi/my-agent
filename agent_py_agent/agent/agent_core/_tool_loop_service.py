@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from ..backends import ModelResponse
@@ -215,7 +216,7 @@ class ToolLoopService:
             granted_capabilities=request.params.granted_capabilities,
             write_boundary=request.params.write_boundary,
         )
-        if one_shot_key and result.ok:
+        if one_shot_key and _one_shot_result_consumes_key(result):
             request.params.one_shot_tool_calls.add(one_shot_key)
         trace_runner_tool_call_finished(
             RunnerToolStageTraceRequest(
@@ -262,6 +263,26 @@ class ToolLoopService:
         output_record.update(fail_safe)
         output_record["parameters"] = record.payload
         return output_record
+
+
+# LLM: _one_shot_result_consumes_key preserves retry room for semantic orchestration blocks.
+# 函数用途: 只有真正成功推进的 create/schedule 调用才登记去重；blocked=true 允许上层修正后重试。
+def _one_shot_result_consumes_key(result: ToolExecutionResult) -> bool:
+    if not result.ok:
+        return False
+    return not _orchestration_result_is_blocked(result.output)
+
+
+# LLM: _orchestration_result_is_blocked detects JSON schedule payloads that did not mutate the tree.
+# 函数用途: schedule_child_subagents 可能 ok=True 但返回 blocked=true；这类结果不应吃掉一次性调用名额。
+def _orchestration_result_is_blocked(output: object) -> bool:
+    try:
+        payload = json.loads(str(output or ""))
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return bool(payload.get("blocked"))
 
 
 # LLM: _without_tool_call_after_limit enforces max-tool-round boundaries even if the model ignores the stop hint.

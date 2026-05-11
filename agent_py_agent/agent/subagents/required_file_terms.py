@@ -7,8 +7,10 @@ import re
 
 _FILE_RE_TEMPLATE = r"(?<![\w./-])([A-Za-z0-9][A-Za-z0-9_.-]*\.(?:{exts}))(?![\w.-])"
 _NEGATIVE_HINTS = ("禁止", "不允许", "不要", "不能", "不得", "勿", "do not", "don't", "must not", "not ")
+# LLM: Negative examples may be introduced by “如/例如/比如”, not only by rename/create verbs.
+# 函数用途: 识别禁止说明里的示例前缀，避免反例文件名进入 required_files。
 _NEGATIVE_TARGET_RE = re.compile(
-    r"(?:改成|改为|改名成|改名为|重命名为|命名为|叫做|叫|创建|生成|包含|产出|写入|to|as|create|generate|include|write)\s*$",
+    r"(?:改成|改为|改名成|改名为|重命名为|命名为|叫做|叫|创建|生成|包含|产出|写入|如|例如|比如|to|as|create|generate|include|write)\s*[（(]?\s*$",
     re.IGNORECASE,
 )
 _NEGATIVE_CHAIN_CONNECTOR_RE = re.compile(r"^(?:[\s,，、/]*|[\s,，、/]*(?:或|或者|or)[\s,，、/]*)$", re.IGNORECASE)

@@ -107,6 +107,21 @@ def test_file_contract_extracts_required_and_forbidden_terms_separately():
     assert forbidden == ["product.html", "old-product.html", "legacy.html", "obsolete.html"]
 
 
+# LLM: Parent examples like "禁止改名（如 x.html）" must not become required deliverables.
+# 函数用途: 防止 root 用括号举 forbidden 文件名反例时，把 product.html/legacy.html 误传成下级必需文件。
+def test_file_contract_treats_negative_examples_as_forbidden_terms():
+    text = (
+        "必须包含 index.html、products.html、product-detail.html、style.css、app.js。"
+        "文件名禁止改名（如 product.html、old-detail.html、legacy.html 等均不允许）。"
+    )
+
+    required = required_file_terms_from_text(text, extensions=r"html?|css|js")
+    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js")
+
+    assert required == ["index.html", "products.html", "product-detail.html", "style.css", "app.js"]
+    assert forbidden == ["product.html", "old-detail.html", "legacy.html"]
+
+
 # LLM: test_hierarchy_schedule_blocks_leaf_before_explicit_four_layer_chain_reaches_depth_three covers root-only E2E.
 # 函数用途: 父级明确要求 4 层链路时，深度未到孙孙层前不能直接创建 leaf/worker 跳层。
 def test_hierarchy_schedule_blocks_leaf_before_explicit_four_layer_chain_reaches_depth_three(tmp_path):
@@ -136,3 +151,44 @@ def test_hierarchy_schedule_blocks_leaf_before_explicit_four_layer_chain_reaches
     assert blocked.blocked is True
     assert blocked.reason == "hierarchy_chain_requires_coordinator_until_depth_3"
     assert manager.load(child.id).child_ids == []
+
+
+# LLM: Coordinator names can include writer/domain words without becoming leaf workers.
+# 函数用途: 防止“小小傻妞-site-writer”这类 coordinator 因名字里有 writer 被四层链路 guard 误挡。
+def test_hierarchy_schedule_allows_coordinator_name_with_writer_before_depth_three(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    root = manager.create_run(
+        goal="本轮必须至少覆盖一条 4 层链路：root -> 子 -> 孙 -> 孙孙。",
+        thought="root",
+        plan=["plan"],
+    )
+    child_result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=root.id,
+            child_specs=[
+                HierarchyChildSpec(goal="继续协调", role="coordinator", agent_name="小傻妞-html-coordinator")
+            ],
+            apply=True,
+        )
+    )
+    child = manager.load(child_result.created_run_ids[0])
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=child.id,
+            child_specs=[
+                HierarchyChildSpec(
+                    goal="继续拆解页面编写任务，后续再创建 depth=3 leaf worker。",
+                    role="coordinator",
+                    agent_name="小小傻妞-site-writer",
+                )
+            ],
+            apply=True,
+        )
+    )
+
+    assert result.blocked is False
+    assert result.created_run_ids
+    grandchild = manager.load(result.created_run_ids[0])
+    assert grandchild.depth == 2
+    assert "coordinator" in grandchild.role

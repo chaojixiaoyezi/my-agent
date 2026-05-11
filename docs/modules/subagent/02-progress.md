@@ -516,3 +516,27 @@
 - 已修正：初始 `output.json`、`status_report.json`、`dependencies.json` 现在写机器可读 JSON object；`_read_json_object` 兼容旧双层编码；runner contract 和工具说明明确 `write_file` / `append_file` 会在授权写入根内自动创建父目录。
 - 已补测试：`test_subagent_output_json_response_derives_packet_from_report`、`test_completed_dispatch_closes_without_extra_model_call`、`test_creates_machine_readable_default_json_files`、`test_read_nested_json_string_object`、`test_prompt_says_write_file_creates_parent_dirs`。
 - 下一步：用干净 R37 复测 leaf 遇到不存在 build 目录时是否直接用 `write_file` 写短骨架并继续 `append_file` 分块；如果仍出现长 HTML 工具截断，再做更硬的分块写入引导或受控文件生成 helper。
+
+## 2026-05-11 Stage7 R37 hierarchy coordinator-role hardening
+- 中文说明：R37 真实 root-only 复测确认 work-order JSON 默认文件已是机器可读 object；但 depth=1 coordinator 创建 `小小傻妞-site-writer` 时，被四层链路 guard 误判成 leaf worker，反复返回 `hierarchy_chain_requires_coordinator_until_depth_3`。
+- 新发现：层级 guard 不该因为 agent_name 里有 `writer` 就忽略明确的 `role="coordinator"`；父级 goal 里的“禁止改名（如 product.html、old-detail.html、legacy.html）”也会被旧文件名提取器误放进 required files。
+- 已修正：四层链路 guard 现在优先尊重 coordinator/lead/tester/reviewer/checker 等协调角色，避免 `site-writer` 这种领域名误触发 leaf 跳层拦截。
+- 已修正：required/forbidden 文件名提取器识别“如/例如/比如”这类否定例子，把反例文件放入 forbidden files，不再污染 required files。
+- 已补测试：`test_hierarchy_schedule_allows_coordinator_name_with_writer_before_depth_three`、`test_file_contract_treats_negative_examples_as_forbidden_terms`。
+- 下一步：用干净 R38 复测 depth=2 coordinator 创建能否继续推进到 depth=3 leaf；随后观察 leaf 是否能在 build 目录不存在时直接 `write_file` 自动建父目录，并继续验证完整购物站产物。
+
+## 2026-05-11 Stage7 R38 shared-asset target and schedule retry hardening
+- 中文说明：R38 真实 root-only 复测确认 R37 的 coordinator/`writer` 误判已修好，链路推进到 depth=3 leaf，并真实写出 `index.html`、`register.html`、`login.html`、`products.html`、`product-detail.html`。
+- 新发现：`cart-writer` 只是“引入 style.css 和 app.js”，但 leaf 产物去重把 `app.js` 当成它要写的目标，导致 `duplicate_leaf_target:app.js`；随后 `blocked=true` 的 schedule 结果又消耗了一次性编排 key，父级修正重试被 one-shot guard 拦住。
+- 已修正：leaf target 提取遇到“引入/引用/链接/导入/加载/use/include/import/link to”等引用语义时，只保留引用词之前的主语文件，不把后面的共享资源当成本 leaf 产物。
+- 已修正：一次性编排去重只在工具结果真正推进时登记；JSON 输出里 `blocked=true` 的调度结果不登记 one-shot key，允许父级修正后重试。
+- 已补测试：`test_hierarchy_schedule_allows_leaf_referencing_shared_assets`、`test_blocked_schedule_result_does_not_consume_one_shot_key`。
+- 下一步：用干净 R39 复测 cart/checkout worker 是否能创建并继续推进剩余 5 个文件；同时继续观察长 `write_file`/`append_file` 工具调用的截断恢复成本。
+
+## 2026-05-11 Stage7 R39 product-root output guard
+- 中文说明：R39 真实 root-only 复测确认 cart/checkout worker 能创建，shared asset 引用不再触发重复产物 ownership；路径 typo guard 也能在 leaf 抄错 `/Users/xiaoyezi` 时给出 suggested target。
+- 新发现：child goal 里的“完成后写 output.json”会被 leaf 理解成在用户 `deliverables/build/output.json` 写内部收口文件，污染用户产物目录。
+- 已修正：工具写入边界会阻止 product_write_roots 里的内部 `output.json` 写入，并提示写 task-local `execution_context.output_json`；真实 task-local `output.json` 收口不受影响。
+- 已修正：runner contract 和 coordinator 调度提示明确：`output.json` 是内部收口文件，只能写自己的 `execution_context.output_json`，不要在用户产物目录或 product roots 下创建。
+- 已补测试：`test_direct_policy_blocks_internal_output_json_in_product_root`、`test_direct_policy_allows_task_local_output_json`。
+- 下一步：用干净 R40 复测产物目录不再出现内部 `output.json`；随后优先处理长文件工具调用分块和模型接口超时后的 partial artifact recovery。
