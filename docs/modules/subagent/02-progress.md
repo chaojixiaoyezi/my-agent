@@ -61,6 +61,7 @@
 - 2026-05-09 主节点单入口 1/4/16/48 压测修复第一轮已落地：真实 MiniMax case 暴露 repeated dispatch 被 one-shot guard 阻断、下层缺父级目标上下文、coordinator role 被模型误写成 worker、限速 PLANNING child 被误判失败；已修复 dispatch/board 可重复调用、层级 child 继承 bounded parent goal/thought、按工具/depth 推断 coordinator role，并在 runner-context dispatch 响应里返回 direct child progress/continue hint。完整 48 文件 main-node-only pass 仍需复跑。
 - 2026-05-10 子代理角色模板第一片已落地：新增外置 JSON role template catalog，内置 `coordinator/worker/bug_finder/tester/acceptor/researcher/writer` 均带中文说明、默认工具和输出契约；用户可在 `.agent/subagents/roles/*.json` 增加广义角色模板，代码只负责加载、校验和只读/写权限边界。`subagent_allowed_tools=[]` 现在明确表示自动工具策略，不再等同于“没有工具”；默认 `max_subagents=1000`，真实并发仍由 runner/scheduler 控制。
 - 2026-05-11 Stage7 R12/R13/R14 真实购物站点 E2E 修复已落地：runner 成功写入当前子代理 `output.json` 后会直接合成 `SUBAGENT_RESULT` 收口，不再多打一轮模型；静态 Web 自动验收存在时，会丢弃缺 `file_path` / `content_pattern` / `site_root` 的模型空壳测试；单页 HTML artifact 也会生成 `static_site_check`，避免首页这类单页 leaf 被空壳 content_check 误判失败。
+- 2026-05-11 Stage7 R19 真实购物站点 E2E 修复已落地：外层只启动 root，root 自建 4 个一级 coordinator，子层写出购物站 10 个顶层必需文件；本轮暴露并修复 repair leaf 被 `duplicate_leaf_target` 误挡、root/coordinator 无法写 agent-run workspace 报告、`runner_timeout_seconds=off` 仍触发模型调度内 due-check 超时接管、以及 static-site check 误把 JS template literal 当 `${...}` 占位符的问题。R19 仍保留 root recovery 不够 actionable 的 gap，下一轮 R20 需要验证 shared-assets 能创建修复 leaf 并收口。
 - 2026-05-08 Acceptance Real Execution 第五片已落地：新增 `subagents-tests <run_id>` CLI；默认只展示已有 `test_execution.json` 摘要，`--re-run` 才显式读取 `output.json.tests`、执行 allowlist 验证并写回 `test_execution.json/md`。
 - 2026-05-08 Acceptance Real Execution 第六片已落地：新增 `acceptance_execute_tests` 和 `acceptance_test_timeout_seconds` 配置；默认仍关闭真实执行，`subagents-acceptance --execute-tests/--no-execute-tests/--test-timeout` 可覆盖单次验收。
 - 2026-05-08 Acceptance Real Execution CI 收尾：整理 ruff import/UP037，并让默认验收路径继续按旧 `apply/reviewer/note` 调用兼容旧测试替身；只有真实测试执行、超时覆盖或显式时间等新字段启用时才传完整 options 包。
@@ -449,3 +450,12 @@
 - 已修正：新增 `path_recovery_hints.py` 统一提供 URL span 和工作区路径 typo 建议；派工写入预检跳过 URL 内部路径片段；文件系统读/列工具遇到 suffix-matching 工作区路径拼写错误时返回 `suspected_path_typo=true` 和 `suggested_target`。
 - 已补测试：`test_external_write_guard_ignores_url_image_sources`、`test_filesystem_tool_suggests_workspace_path_typo`。
 - 下一步：用干净 R19 root-only 购物站 E2E 复测 URL 不再阻断 catalog leaf，路径 typo 能自我纠偏，并观察 529/blocked 子树的恢复接管链路。
+
+## 2026-05-11 Stage7 R19 recovery/path ergonomics
+- 中文说明：R19 root-only 真实购物站 E2E 已跑到 10 个顶层必需文件全部落盘，证明 root -> coordinator -> leaf 链路能产出完整静态站；但 shared-assets 修复 `app.js` 时被重复 leaf 去重挡住，root 恢复提示还不够可执行，外置 artifact 路径也再次出现前缀抄错。
+- 已明确架构边界：root 不固定必须创建 coordinator，也不禁止直接创建 worker；实际层数由任务复杂度和 prompt 约束决定。当前“四层”只是某些 E2E 的测试要求，不能写死到通用调度里。
+- 已修正：明确 repair/update/fix leaf 可绕过同父级同目标文件去重；coordinator/root 可写自己的 agent-run workspace 报告；`runner_timeout_seconds: "off"` 会同步影响模型可见的 dispatch due-check；静态站 `${...}` 检查会跳过 `<script>/<style>`。
+- 已修正：外置工具输出的 live prompt 增加 `output_artifact_ref`、`output_call_id` 和可复制的 `read_artifact` 示例；如果模型把 `memory_archive/artifacts/tool_outputs/*.json` 的绝对路径前缀抄错，`read_file` 也会提示“不要用 read_file，改用 read_artifact + artifact_ref + max_chars”。
+- 已对照学习：长期助手 / 会话运行时 / 终端交互 / 通道运行时 / claw-code 都在不同程度上使用结构化 cwd/workspace、相对路径/短 ID、输出截断或 claim-check、路径边界校验；结论是我们也要减少模型复制长绝对路径，让工具用短 ref 和边界校验兜底。
+- 已补测试：`test_hierarchy_schedule_allows_explicit_repair_leaf_for_existing_target`、`test_build_execution_context_write_boundary`、`test_dispatch_tool_respects_runner_timeout_off_for_auto_due_check`、`test_static_site_check_allows_javascript_template_literals`、`test_read_file_typo_to_tool_output_artifact_routes_to_read_artifact`、`test_tool_loop_externalizes_large_tool_output_for_archive`。
+- 下一步：用干净 R20 root-only 购物站 E2E 复测：root 不被硬性 coordinator 策略绑死，shared-assets 能创建修复 leaf，artifact 读取优先用短 `call_id`，并开始补浏览器级完整注册/登录/购买流程验收。

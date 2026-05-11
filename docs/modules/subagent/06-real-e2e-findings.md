@@ -2490,3 +2490,69 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Rerun a clean R19 after the URL skip and filesystem typo hint fixes; R18 was interrupted by API 529 and should not be treated as completed acceptance.
   - Continue watching artifact-read recovery: models may invent old or wrong artifact refs such as `C:/repo/...`; current reader rejects unregistered refs, but the recovery instruction may need to be more explicit.
   - Add or tune a recovery/resume path for API 529 mid-run so root can continue from existing takeover refs instead of leaving many descendants BLOCKED.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R19
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r19.yaml`.
+  - Internal runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r19`.
+  - Deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r19/build`.
+  - Root run: `subagent-1778462398-53c920e2`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+- 中文说明:
+  - R19 仍按“外层只观察 root”的方式跑。外层只 seed 并运行 root/coordinator，没有替 root 创建下级，也没有替任何 child/leaf 写购物网站文件。
+  - root 成功创建 4 个一级 coordinator：auth、catalog、cart-checkout、shared-assets；这些 coordinator 再创建自己的 leaf/worker。
+  - 购物网站 10 个顶层必需文件都由下层代理写出：`index.html`、`register.html`、`login.html`、`products.html`、`product-detail.html`、`cart.html`、`checkout.html`、`order-success.html`、`style.css`、`app.js`。
+  - 本轮主动停止 root runner，保留卡住样本；停止前 board 为 `DONE/VERIFIED=10`、`BLOCKED=1`、root 仍 `RUNNING/UNVERIFIED`。
+- Observed facts:
+  - `cart-checkout-coordinator` 一开始尝试自己写 `cart.html`，写入边界正确阻止；随后它自我修正，创建 `cart-page-writer`、`checkout-page-writer`、`order-success-page-writer` 三个 leaf，三个页面最终 `DONE/VERIFIED`。
+  - `shared-assets-coordinator` 的 style/app leaf 已写出 `style.css` 和 `app.js`，但后续发现 `app.js` 缺 `getUrlParam` / `setUrlParam`，尝试创建 `html-ref-worker` 修复时被 `duplicate_leaf_target:app.js` 挡住。
+  - duplicate guard 挡住修复 leaf 后，shared coordinator 多次尝试自己写 `app.js`，被 `allowed_write_roots` 正确阻止，最后写 capability request 并进入 `BLOCKED`。
+  - root 多次调 `dispatch_subagents` 后只得到 `plan_rescue` / `classify_blocker`，没有真正生成接管/修复 child；同时 prompt 增长到约 82k 字符，长期等待模型响应。
+  - root 早期尝试把 `final_report.md` 写到自己的 `agent_run_workspace`，但 write boundary 只允许 legacy `task_dir`，导致内部报告写入被挡。
+  - 外部静态站点检查第一次误报 `placeholder_hits=3`，实际是合法 JavaScript template literal（如 `` `${item.name}` ``），不是未替换 HTML 占位符。
+- Finding 71: explicit repair leaves must bypass duplicate leaf target dedupe.
+  - Symptom: `shared-assets-coordinator` needed a bounded repair leaf for `app.js`, but same-parent leaf dedupe returned `duplicate_leaf_target:app.js` because an earlier app worker had already produced that file.
+  - 中文解释：同一个文件已经写过，不代表以后不能修。去重应该拦“重复造一个一模一样的生产工人”，但不能拦“明确修复这个坏文件的修复工人”。
+  - Fix: `hierarchy_leaf_targets.py` now lets explicit repair/update/fix leaf specs bypass duplicate target blocking while keeping ordinary duplicate writes blocked.
+  - Verification: `test_hierarchy_schedule_allows_explicit_repair_leaf_for_existing_target` and existing duplicate target tests.
+- Finding 72: coordinator/root report writes need agent-run workspace access.
+  - Symptom: root tried to write `tasks/<root>/agents/<root>/final_report.md`, but write boundary allowed only the legacy task directory.
+  - 中文解释：coordinator 不能写用户产物目录，这是对的；但它应该能写自己的内部交接报告。不然 root 明明想留总结，却被当成越界写文件。
+  - Fix: runner write boundary now includes the task's `agent_run_workspace_dir` and `agent_run_final_report_md` parent as internal report roots, without adding user deliverable roots.
+  - Verification: `test_build_execution_context_write_boundary`.
+- Finding 73: model-facing dispatch due-check must honor runner timeout off.
+  - Symptom: R19 config used `runner_timeout_seconds: "off"`, but `dispatch_subagents` still used default `CapabilityConfig(subagent_run_timeout=900, subagent_heartbeat_timeout=180)` and kept suggesting timeout/takeover actions for the active root.
+  - 中文解释：用户说“runner 不限时”，真实模型调度工具就不应该一边不限时、一边又在内部巡检里把它当超时任务接管。
+  - Fix: `DispatchSubagentsTool` now builds its internal capability config from agent config; when runner timeout is disabled, model-facing auto dispatch sets subagent run/heartbeat timeout to 0. Manual CLI due-check can still use an explicit capability config.
+  - Verification: `test_dispatch_tool_respects_runner_timeout_off_for_auto_due_check`.
+- Finding 74: static-site placeholder checks should ignore JavaScript template literals.
+  - Symptom: R19 generated pages contained normal JavaScript template strings such as `` `${item.name}` `` inside `<script>`, and static validation flagged them as leftover placeholders.
+  - 中文解释：`${...}` 在 HTML 正文里通常是没替换的模板占位符；但在 JS 里是正常语法。静态检查要分清楚，不能把正常购物车渲染逻辑误判成坏产物。
+  - Fix: `static_site_validator.py` strips `script` / `style` blocks before looking for visible `${...}` placeholders.
+  - Verification:
+    - `test_static_site_check_allows_javascript_template_literals`.
+    - Real R19 static check after fix: required files present, no broken local refs, no inert controls, no visible placeholder hits.
+- Finding 75: recovery suggestions must not force every root/parent into coordinator mode.
+  - Symptom: R19 needed a better "create repair/takeover child" hint, but a naive fix could accidentally teach root that all recovery work must create a coordinator.
+  - 中文解释：root 可以直接派 worker，也可以派 coordinator；区别取决于任务需不需要继续拆下级。4 层测试是这轮 prompt 的要求，不是系统永远只能走 4 层。
+  - Fix: `orchestration_progress_payload.py` now returns a refs-only `suggested_recovery_child_tool_call` with default role `worker` plus a `role_selection_hint`; parent runner can change it to `coordinator/lead` only when the recovery itself needs another layer of delegation.
+  - Verification: `test_runner_context_dispatch_suggests_recovery_child_for_blocked_direct_child`.
+- Finding 76: copied tool-output artifact paths need artifact-reader recovery, not file-reader retry.
+  - Symptom: debug trace showed the model copied a tool-output artifact path with `/Users/example/...` misspelled as `/Users/xiaoyezei/...`, then `read_file` returned a generic path typo retry against `suggested_target`.
+  - 中文解释：这类路径不是用户产物文件，而是“大工具输出仓库”的包装 JSON。即使把路径拼对了，也不应该用普通读文件去搬包装箱；应该用 `read_artifact` 按短 id 或文件名分片读正文。
+  - Fix: `tool_context_reducer.py` now exposes `output_artifact_ref`, `output_call_id`, and a copyable `read_artifact` hint for externalized outputs; `_filesystem_read.py` detects typo-repaired `memory_archive/artifacts/tool_outputs/*.json` paths and tells the model to use `read_artifact` instead of retrying `read_file`.
+  - Cross-product lesson:
+    - 长期助手 uses `resolve()` / `relative_to()` style path checks, read limits, and output truncation.
+    - 会话运行时 execution carries structured `cwd` / sandbox settings instead of asking the model to reason from prose paths.
+    - 终端交互 distinguishes fresh/forked agents and warns that inherited paths may need worktree translation.
+    - 通道运行时 / claw-code use workspace/media path validation and output-size boundaries.
+  - Verification:
+    - `test_read_file_typo_to_tool_output_artifact_routes_to_read_artifact`.
+    - `test_tool_loop_externalizes_large_tool_output_for_archive`.
+- Remaining gaps:
+  - Re-run a clean R20 root-only shopping E2E after these fixes and verify shared-assets can create a repair leaf instead of capability escalation.
+  - Add a stronger root-owned full flow oracle for registration/login/cart/checkout behavior; current `static_site_check` validates files/links/placeholders/buttons but does not execute JavaScript in a browser.
+  - R20 still needs to verify the new recovery suggestion works in a live root-only run; it is intentionally role-flexible, not coordinator-only.
+  - Later work should move more path passing toward short ids / relative paths / structured cwd bundles so long absolute paths appear less often in prompts.

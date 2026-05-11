@@ -32,6 +32,8 @@ def duplicate_verified_leaf_target_reason(request: LeafTargetDedupeRequest) -> s
     for spec in request.schedule_request.child_specs:
         if not request.leaf_like(spec):
             continue
+        if _is_explicit_repair_leaf(spec):
+            continue
         duplicate = _first_overlapping_target(_child_target_tokens(spec), seen_targets)
         if duplicate:
             return f"duplicate_leaf_target:{duplicate}"
@@ -77,6 +79,29 @@ def _child_target_tokens(item: Any) -> set[str]:
     targets = set(_target_tokens_from_text(text))
     targets.update(_target_tokens_from_output_json(getattr(item, "output_json", "") or ""))
     return targets
+
+
+# LLM: _is_explicit_repair_leaf lets parent coordinators create bounded fixes for known bad artifacts.
+# 函数用途: 判断新 leaf 是否明确是修复/补齐现有文件；这种任务允许写同一目标，避免真实 E2E 修复链被去重误挡。
+def _is_explicit_repair_leaf(item: Any) -> bool:
+    text = " ".join([
+        str(getattr(item, "agent_name", "") or ""),
+        str(getattr(item, "role", "") or ""),
+        str(getattr(item, "goal", "") or ""),
+    ]).lower()
+    repair_tokens = {
+        "fix",
+        "repair",
+        "patch",
+        "update",
+        "补齐",
+        "补全",
+        "修复",
+        "修补",
+        "更新",
+        "改正",
+    }
+    return any(token in text for token in repair_tokens)
 
 
 # LLM: _target_tokens_from_output_json reads artifact path refs without expanding artifact contents.

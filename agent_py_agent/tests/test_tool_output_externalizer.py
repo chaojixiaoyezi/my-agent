@@ -63,6 +63,9 @@ def test_tool_loop_externalizes_large_tool_output_for_archive(tmp_path: Path) ->
     assert index[-1]["sha256"] == artifact["sha256"]
     assert large_output not in params.tool_context[-1]
     assert str(artifact_path) in params.tool_context[-1]
+    assert f"output_artifact_ref: {artifact_path}" in params.tool_context[-1]
+    assert "output_call_id: 1-1" in params.tool_context[-1]
+    assert 'read_artifact", "artifact_ref": "1-1"' in params.tool_context[-1]
     assert "完整工具输出已外置" in params.tool_context[-1]
     assert record["fail_safe_checkpoint_path"] in params.tool_context[-1]
 

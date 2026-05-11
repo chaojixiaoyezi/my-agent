@@ -5,6 +5,7 @@ from __future__ import annotations
 
 """Bounded static-site validation for parent acceptance tests."""
 
+import re
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -139,7 +140,7 @@ def _scan_site(test: dict[str, Any], site_root: Path) -> StaticSiteCheckResult:
     check_controls = test.get("check_inert_controls", True) is not False
     for path in html_files:
         text = path.read_text(encoding="utf-8", errors="replace")
-        if check_placeholders and "${" in text:
+        if check_placeholders and _has_visible_template_placeholder(text):
             result.placeholder_hits.append(_rel(path, site_root))
         parser = StaticSiteHTMLParser()
         parser.feed(text)
@@ -253,6 +254,13 @@ def _failure_summary(result: StaticSiteCheckResult) -> str:
     if result.inert_control_hits:
         parts.append(f"inert_control_hits={len(result.inert_control_hits)}")
     return "; ".join(parts)
+
+
+# LLM: _has_visible_template_placeholder separates real leftover HTML placeholders from JS template literals.
+# 函数用途: 检查页面可见/标记区域是否残留 `${...}`；会先剔除 script/style，避免误伤正常 JavaScript 模板字符串。
+def _has_visible_template_placeholder(text: str) -> bool:
+    visible_text = re.sub(r"<(script|style)\b[^>]*>.*?</\1>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    return "${" in visible_text
 
 
 # LLM: _string_list accepts runner JSON shapes without trusting non-string objects.

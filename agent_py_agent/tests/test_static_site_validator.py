@@ -53,7 +53,7 @@ def test_static_site_check_blocks_common_generated_site_failures(tmp_path):
         tmp_path,
         {
             "login.html": '<button>孤立按钮</button><script>location.href = "product_list.html";</script>',
-            "order-success.html": '<a href="index.html">继续购物</a><script>const msg = `${name}`;</script>',
+            "order-success.html": '<a href="index.html">继续购物</a><main>${name}</main>',
         },
     )
     executor = TestExecutor(tmp_path)
@@ -75,6 +75,40 @@ def test_static_site_check_blocks_common_generated_site_failures(tmp_path):
     assert "inert_control_hits=1" in record.error
     assert record.validation_result["missing_required_files"] == ["products.html"]
     assert record.validation_result["placeholder_hits"] == ["order-success.html"]
+
+
+# LLM: test_static_site_check_allows_javascript_template_literals preserves real shop pages.
+# 函数用途: JS 运行时模板字符串可以包含 `${...}`，但不应被当成未替换的 HTML 占位符。
+def test_static_site_check_allows_javascript_template_literals(tmp_path):
+    _write_site(
+        tmp_path,
+        {
+            "cart.html": """
+            <html>
+              <body>
+                <div id="cart"></div>
+                <script>
+                  const row = `<tr data-index="${index}"><td>${item.name}</td></tr>`;
+                  document.getElementById('cart').innerHTML = row;
+                </script>
+              </body>
+            </html>
+            """,
+        },
+    )
+    executor = TestExecutor(tmp_path)
+
+    record = executor.execute(
+        {
+            "name": "shop site",
+            "validation_method": "static_site_check",
+            "site_root": "site",
+            "required_files": ["cart.html"],
+        }
+    )
+
+    assert record.passed is True
+    assert record.validation_result["placeholder_hits"] == []
 
 
 # LLM: The validator must never scan outside the configured workspace.

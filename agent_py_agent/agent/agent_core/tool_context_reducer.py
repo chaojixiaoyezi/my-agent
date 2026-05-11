@@ -5,6 +5,8 @@ from __future__ import annotations
 
 """Live prompt reducer for tool execution results."""
 
+import json
+
 from ..tools import ToolExecutionResult
 
 
@@ -14,11 +16,16 @@ def render_tool_result_for_live_prompt(result: ToolExecutionResult, archive_reco
     if not archive_record.get("output_externalized"):
         return result.render_for_prompt()
     status = "ok" if result.ok else "error"
+    artifact_ref = str(archive_record.get("artifact_ref") or archive_record.get("output_path") or "")
+    call_id = str(archive_record.get("id") or "")
     lines = [
         f"[tool={result.tool}; status={status}]",
         "完整工具输出已外置，live prompt 只保留摘要和恢复锚点。",
         f"- output_preview: {archive_record.get('output_preview', '')}",
         f"- output_path: {archive_record.get('output_path', '')}",
+        f"- output_artifact_ref: {artifact_ref}",
+        f"- output_call_id: {call_id}",
+        f"- read_artifact_hint: {_read_artifact_hint(call_id or artifact_ref)}",
         f"- output_hash: {archive_record.get('output_hash', '')}",
         f"- output_size_bytes: {archive_record.get('output_size_bytes', 0)}",
     ]
@@ -26,3 +33,10 @@ def render_tool_result_for_live_prompt(result: ToolExecutionResult, archive_reco
     if checkpoint:
         lines.append(f"- fail_safe_checkpoint: {checkpoint}")
     return "\n".join(lines)
+
+
+# LLM: _read_artifact_hint gives the next model turn a short stable ref instead of a long absolute path.
+# 函数用途: 生成可直接复制的 read_artifact 示例；优先用 call_id，减少长路径抄错。
+def _read_artifact_hint(ref: str) -> str:
+    payload = {"tool": "read_artifact", "artifact_ref": ref, "offset": 0, "max_chars": 4000}
+    return json.dumps(payload, ensure_ascii=False)

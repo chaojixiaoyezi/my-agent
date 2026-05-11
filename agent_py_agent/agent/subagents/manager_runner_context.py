@@ -101,11 +101,11 @@ class SubAgentRunnerContextMixin:
 
     # LLM: _build_write_boundary 属于子代理任务管理的函数边界；调整时先确认任务状态、执行器结果、验收和报告展示仍按原契约工作。
     # 函数用途: 构建boundary所需的数据结构或请求参数，供下一阶段流程消费；关键副作用: 会改动任务状态、执行器结果、验收和报告展示，调用方依赖写入顺序和文件格式。
-    def _build_write_boundary(self, task: SubAgentTask) -> dict[str, str]:
+    def _build_write_boundary(self, task: SubAgentTask) -> dict[str, object]:
         """Build write boundary configuration dict."""
         return {
             "task_dir": task.task_dir,
-            "allowed_write_roots": task.allowed_write_roots,
+            "allowed_write_roots": _merge_list(task.allowed_write_roots, _task_report_write_roots(task)),
             "forbidden_write_roots": task.forbidden_write_roots,
             "locked_files": task.locked_files,
             "status_file": task.status_file,
@@ -238,6 +238,19 @@ def _execution_context_task_fields(task: SubAgentTask) -> dict[str, object]:
         "execution_context_file": task.execution_context_file,
         "execution_context_json": task.execution_context_json,
     }
+
+
+# LLM: _task_report_write_roots grants runners only their internal report workspace, not product roots.
+# 函数用途: 允许 coordinator/root 写 agent-run workspace 的 final_report 等内部交接文件，避免误把报告写入当越界产物。
+def _task_report_write_roots(task: SubAgentTask) -> list[str]:
+    roots: list[str] = []
+    run_workspace = str(getattr(task, "agent_run_workspace_dir", "") or "").strip()
+    if run_workspace:
+        roots.append(run_workspace)
+    final_report = str(getattr(task, "agent_run_final_report_md", "") or "").strip()
+    if final_report:
+        roots.append(str(Path(final_report).parent))
+    return roots
 
 
 # LLM: _execution_context_bundle embeds the gate report beside the handoff facts for runner self-checks.
