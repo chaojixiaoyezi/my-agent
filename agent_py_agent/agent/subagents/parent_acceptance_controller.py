@@ -10,11 +10,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
-from .execution_executor import TestExecutor
 from .execution_report import load_test_execution_report
-from .execution_test_items import TestItemPreparationRequest, prepare_test_items
 from .models import SubAgentTask
 from .parent_acceptance_empty_report import empty_report_is_inspectable, executable_tests
+from .parent_acceptance_preflight import (
+    prepared_tests_for_parent_acceptance,
+    unsafe_test_reason,
+)
 from .parsing import _dict_list
 from .utils import _read_json_object
 
@@ -91,7 +93,7 @@ def build_parent_acceptance_decision(
     """Build a dry-run parent acceptance decision for one subagent task."""
 
     output = _read_json_object(Path(task.output_json))
-    tests = _prepared_tests(output, workspace_root)
+    tests = prepared_tests_for_parent_acceptance(output, workspace_root, task)
     runnable_tests, ignored_empty_command_count = executable_tests(tests)
     refs = _base_refs(task, tests, runnable_tests, ignored_empty_command_count)
     report_path = Path(task.reports_dir) / "test_execution.json"
@@ -101,7 +103,7 @@ def build_parent_acceptance_decision(
     if _task_is_failed(task):
         return _rescue_for_task_failure(task, refs, failure_ref, takeover_ref)
 
-    unsafe_reason = _unsafe_test_reason(runnable_tests, workspace_root)
+    unsafe_reason = unsafe_test_reason(runnable_tests, workspace_root)
     if unsafe_reason:
         return _request_human_for_unsafe_test(task, refs, unsafe_reason)
 
@@ -327,34 +329,6 @@ def _task_is_failed(task: SubAgentTask) -> bool:
     status = str(task.status or "").upper()
     verification = str(task.verification_status or "").upper()
     return bool(task.failure_type) or status in {"FAILED", "ERROR", "TIMEOUT", "BLOCKED"} or verification == "FAILED"
-
-
-# LLM: _unsafe_test_reason preflights command syntax through TestExecutor validation without running it.
-# 函数用途: 检查 tests 里的命令是否触发 allowlist 或 shell 字符风险；只做预检，不执行命令。
-def _unsafe_test_reason(tests: list[dict[str, Any]], workspace_root: str | Path) -> str:
-    executor = TestExecutor(workspace_root)
-    for item in tests:
-        method = str(item.get("validation_method") or "command").strip() or "command"
-        if method != "command":
-            continue
-        command = str(item.get("command") or "").strip()
-        error = executor._validate_command(command)
-        if error:
-            name = str(item.get("name") or command or "unknown").strip()
-            return f"test command requires human confirmation: {name}: {error}"
-    return ""
-
-
-# LLM: _prepared_tests keeps parent dry-run checks aligned with the eventual bounded executor input.
-# 函数用途: 在父级验收预检前归一化 tests；只拆安全 cwd 包装，不执行命令、不放开 shell。
-def _prepared_tests(output: dict[str, Any], workspace_root: str | Path) -> list[dict[str, Any]]:
-    return prepare_test_items(
-        TestItemPreparationRequest(
-            tests=_dict_list(output.get("tests", [])),
-            output=output,
-            workspace_root=workspace_root,
-        )
-    )
 
 
 # LLM: _existing_path returns a string ref only when the task-local fact file exists.

@@ -6,7 +6,7 @@ from __future__ import annotations
 """Prepare test execution items for parent acceptance."""
 
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -25,6 +25,7 @@ class TestItemPreparationRequest:
     tests: list[dict[str, Any]]
     output: dict[str, object]
     workspace_root: str | Path
+    required_files: list[str] = field(default_factory=list)
 
 
 # LLM: TestItemPreparationContext bundles derived artifact indexes for one preparation pass.
@@ -65,6 +66,7 @@ def prepare_test_items(request: TestItemPreparationRequest) -> list[dict[str, An
             artifact_paths=context.artifact_paths,
             workspace_root=workspace_root,
             existing_tests=prepared,
+            required_files=request.required_files,
         )
     )
     if inferred:

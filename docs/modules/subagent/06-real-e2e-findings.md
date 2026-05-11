@@ -2391,3 +2391,42 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Re-run a clean R16 root-only shopping E2E after these fixes and verify `cart-checkout` creates real child ids first, then dispatches them in the next round.
   - Add a whole-site required-file oracle at root/parent acceptance so split branches cannot individually pass while the user-facing top-level shopping flow is incomplete.
   - Improve recovery output for `max_children_exceeded` repair attempts, so coordinators can either reuse an existing child or request a bounded repair slot instead of stalling.
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R16
+
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - Config: `/Users/xiaoyezi/my-claude-code/.my-agent-stage7-shop-smoke-20260511-r16.yaml`.
+  - Internal runtime root: `/Users/xiaoyezi/my-claude-code/.my_agent_runtime/stage7_shop_smoke_20260511_r16`.
+  - Deliverables root: `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_smoke_20260511_r16/build`.
+  - Root run: `subagent-1778456564-d88a044e`.
+  - Model name: `MiniMax-M2.7`, `subagent_debug_trace_level=5`.
+- 中文说明:
+  - R16 仍按“外层只观察 root”的方式跑。外层没有替 root 创建 child，也没有替任何 leaf 写购物网站文件。
+  - R15 的两个底层修复有效：`cart-checkout-coordinator` 成功创建真实 child，并在下一轮使用真实 run id 调度；`+/-按钮` 文案不再被当成系统路径。
+  - root 能发现顶层 required files 缺失并创建修复 coordinator，修复 leaf 最终把 `index.html`、登录/注册、商品、购物车、结账、订单成功、`style.css`、`app.js` 放到顶层 `build/`。
+  - 这轮在 root/fix coordinator 最终模型流长期不返回时主动停止；下层产物和修复结果已落盘，未把卡住流当作通过。
+- Observed facts:
+  - 最终顶层产物包括 `index.html`、`register.html`、`login.html`、`products.html`、`product-detail.html`、`cart.html`、`checkout.html`、`order-success.html`、`style.css`、`app.js` 和 `images/.gitkeep`。
+  - board 停止前显示 `total=11`，其中 9 个 `DONE/VERIFIED`，root 和 `fix-structure-coordinator` 仍在 `RUNNING/UNVERIFIED`。
+  - `file-restructure-worker` 曾反复用 `read_file` 读取 `memory_archive/artifacts/tool_outputs/*.json`，导致 prompt 从约 111k 增到 134k 字符，说明外置 artifact 包装文件不能再被普通文件读取。
+  - 模型仍会偶发输出未闭合 XML-ish 工具调用或 JSON 外多余正文；系统需要给出更明确的下一轮格式修复提示。
+- Finding 65: tool-output artifact wrappers must not be read through `read_file`.
+  - Symptom: a repair worker read externalized tool-output JSON wrapper files through `read_file`, pulling metadata wrappers and large content back into live prompt.
+  - 中文解释：大工具输出已经“搬到仓库里”了，模型又用普通读文件把仓库包装箱整个搬回对话，等于重新把上下文撑大。
+  - Fix: `ReadFileTool` now rejects workspace-local `memory_archive/artifacts/tool_outputs/*.json` reads and tells the model to use `read_artifact` with `artifact_ref` and bounded `max_chars`.
+  - Verification: `test_read_file_rejects_tool_output_artifact_wrapper`.
+- Finding 66: root-level static Web acceptance needs task-promised required files, not only observed artifacts.
+  - Symptom: split branch outputs could put pages under subdirectories while top-level `build/products.html`, `build/cart.html`, or shared assets were still missing.
+  - 中文解释：孩子各自说“我目录里有页面”，不代表用户打开 `build/` 顶层就能从注册到下单一路点通。父级验收要看用户要求的入口文件是否真的在该在的位置。
+  - Fix: parent acceptance test preparation now extracts static deliverable filenames such as `index.html`、`style.css`、`app.js` from task goal / thought / description / acceptance checks, and merges them into inferred `static_site_check.required_files`.
+  - Verification: `test_prepare_test_items_merges_task_required_static_files` and `test_static_required_files_from_texts_extracts_static_web_targets`.
+- Finding 67: parse-error feedback should tell the model exactly how to recover.
+  - Symptom: malformed XML-ish or JSON tool-call text was reported as parse failure, but the model could continue retrying the same broken shape.
+  - 中文解释：只说“解析失败”太含糊。模型需要被明确提醒下一轮用 `[TOOL_CALL] + JSON + [/TOOL_CALL]`，别再混未闭合 XML 标签。
+  - Fix: parse-error tool results now append a compact retry-format hint without echoing the raw bad tool body.
+  - Verification: `test_parse_error_result_includes_retry_format_hint`.
+- Remaining gaps:
+  - Re-run a clean R17 root-only shopping E2E after the artifact-read guard and whole-site required-file oracle.
+  - Watch whether root/fix coordinator still stalls after downstream work is complete; if it does, add a non-destructive finalization watchdog or completion-from-child-summary path.
+  - Improve recovery output for `max_children_exceeded` repair attempts, especially “reuse existing child” or “ask parent for bounded repair slot”.

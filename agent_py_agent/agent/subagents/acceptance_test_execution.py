@@ -17,6 +17,7 @@ from .execution_test_items import TestItemPreparationRequest, prepare_test_items
 from .parent_acceptance_auto_execution_reports import write_execution_followup
 from .parsing import _dict_list
 from .reports import AcceptanceReviewFinding
+from .static_required_files import required_static_files_for_task
 from .test_failure_classification import (
     TestFailureClassificationRequest,
     write_test_failure_classification,
@@ -55,6 +56,7 @@ def build_acceptance_test_execution_findings(
             tests=tests,
             output=output,
             workspace_root=workspace_root,
+            required_files=required_static_files_for_task(task),
         )
     )
     executor = TestExecutor(workspace_root, timeout_seconds=options.test_timeout_seconds)
