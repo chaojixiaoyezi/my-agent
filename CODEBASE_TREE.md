@@ -1054,7 +1054,7 @@ docs/
 - `agent_py_agent/tests/test_status_shared_progress.py`: 覆盖 `status` / `subagents` CLI 展示共享进度、failure handoff refs、takeover packet refs 和父级验收 dry-run 摘要，并断言大 artifact 正文不会内联。
 - `agent_py_agent/tests/test_tool_round_execution.py`: 覆盖单轮工具执行 guard，确保 `schedule_child_subagents` 后的同轮 `dispatch_subagents` 会延后到下一轮读取真实 run ids。
 - `agent_py_agent/tests/test_tooling_orchestration_parser.py`: 覆盖真实模型常见的 `orchestration` 参数包展开，保持 schedule/dispatch 等工具 bundle 入口兼容。
-- `agent_py_agent/tests/test_orchestration_write_guard.py`: 覆盖派工写入预检，确保 UI 文案和 HTML 标签不会被误判为外部绝对路径。
+- `agent_py_agent/tests/test_orchestration_write_guard.py`: 覆盖派工写入预检，确保 UI 文案和 HTML 标签不会被误判为外部绝对路径，并验证疑似工作区路径拼写错误会返回可重试的 `suggested_target`。
 - `agent_py_agent/tests/test_tool_output_externalizer.py`: 覆盖大工具输出外置 artifact 和外置前 fail-safe recovery snapshot。
 - `agent_py_agent/tests/test_memory_compact_failsafe.py`: 覆盖 `memory-resume --from-compact` 如何展示 fail-safe checkpoint refs 且不读取 artifact 正文。
 - `agent_py_agent/tests/test_memory_artifact_read.py`: 覆盖 CLI 和 `read_artifact` 工具如何显式读取已登记 artifact，并拒绝未登记普通文件；同时覆盖 `read_file` 不能直接读取 tool-output artifact JSON 包装。
