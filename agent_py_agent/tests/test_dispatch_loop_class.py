@@ -145,6 +145,7 @@ class TestDispatchLoopClass:
         assert hasattr(result, "total_records")
         assert hasattr(result, "final_pending_count")
         assert hasattr(result, "stopped_by_limit")
+        assert hasattr(result, "stopped_by_no_progress")
         assert hasattr(result, "rounds")
 
     def test_dispatch_loop_rounds_list(self, tmp_path: Path):
@@ -204,6 +205,7 @@ class TestDispatchLoopReport:
         assert report.total_records == 0
         assert report.final_pending_count == 0
         assert report.stopped_by_limit is False
+        assert report.stopped_by_no_progress is False
         assert report.rounds == []
 
     def test_round_info_structure(self, tmp_path: Path):
