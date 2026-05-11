@@ -540,3 +540,10 @@
 - 已修正：runner contract 和 coordinator 调度提示明确：`output.json` 是内部收口文件，只能写自己的 `execution_context.output_json`，不要在用户产物目录或 product roots 下创建。
 - 已补测试：`test_direct_policy_blocks_internal_output_json_in_product_root`、`test_direct_policy_allows_task_local_output_json`。
 - 下一步：用干净 R40 复测产物目录不再出现内部 `output.json`；随后优先处理长文件工具调用分块和模型接口超时后的 partial artifact recovery。
+
+## 2026-05-11 Stage7 R40 root-only hierarchy success
+- 中文说明：R40 真实 root-only 复测完整跑通 root -> `小傻妞-coordinator` -> `小小傻妞-site-writer` -> `小小小傻妞-小叶子-writer` 四层链路，4 个节点全部 `DONE/VERIFIED`。
+- 已验证：10 个购物站目标文件全部写进用户指定 `deliverables/stage7_shop_smoke_20260511_r40/build`，产物目录没有内部 `output.json`；各子代理自己的 `output.json` 留在 runtime/subagents 目录。
+- 已验证：leaf 遇到不存在的 build 目录时能继续用 `write_file`，父目录自动创建；`site-writer` coordinator 名称、shared asset 引用、product-root `output.json` guard 都在真实链路里生效。
+- 仍需改进：长 HTML/JS 直接塞进工具 JSON 时仍会触发缺 `[/TOOL_CALL]` 的 parse recovery；本轮能自修成功，但真实大项目会浪费轮次并提高超时概率。
+- 下一步：优先做长文件写入协议或 bounded write helper，降低模型手写大 JSON 的失败率；随后加入浏览器级 verifier，真实点击注册、登录、加购、结算等流程。

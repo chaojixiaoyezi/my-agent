@@ -3111,3 +3111,32 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Status: recorded. 后续建议增强 timeout recovery：如果已存在 required artifacts，可生成 failure handoff，交给父级 verifier/rescue 判断，而不是只留下普通 BLOCKED。
 - Remaining check:
   - Re-run clean R40 after the product-root `output.json` guard. Expected result: 子代理仍能写自己的 task-local `output.json` 收口，但不能把内部 `output.json` 写进用户 build 目录；继续观察长 `app.js` 生成和模型接口超时后的恢复策略。
+
+## 2026-05-11 Stage7 Shopping-Site Hierarchy Smoke R40
+
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-smoke-20260511-r40.yaml`.
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_smoke_20260511_r40`.
+  - User deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_smoke_20260511_r40/build`.
+- 中文说明：
+  - R40 继续按 root-only 原则跑，观察者只启动顶层主代理；root 自己创建 `小傻妞-coordinator`，再由下级创建 `小小傻妞-site-writer`，最后由孙节点创建 `小小小傻妞-小叶子-writer`。
+  - 四层链路最终全部 `DONE/VERIFIED`：root、子、孙、孙孙都完成，并由父级验收通过。
+  - 用户产物目录只包含 10 个目标业务文件：`index.html`、`register.html`、`login.html`、`products.html`、`product-detail.html`、`cart.html`、`checkout.html`、`order-success.html`、`style.css`、`app.js`。
+  - R39 的 product-root `output.json` 污染没有复现；内部 `output.json` 只出现在各自子代理 runtime 目录。
+  - R36 的“目标 build 目录不存在就误判缺 mkdir/shell”没有复现；leaf 明确使用 `write_file` 自动创建父目录。
+- Finding 127: root-only 4-level chain can now complete and verify a small static shopping site.
+  - Symptom: 本轮不再停在中间层调度、路径纠偏、产物目录污染或父级验收；root 最后读取 board 和产物目录后自然收口。
+  - 中文解释：这说明“外层只启动 root，root 逐层派工，下级自己继续派工，最终由上层验收”的基础链路已经跑通。对用户来说，产物目录也比较干净，只放业务文件，不混系统内部结果文件。
+  - Verification:
+    - Runtime board shows 4 runs, all `DONE/VERIFIED`.
+    - Deliverables build directory has exactly the 10 expected static-site files.
+    - `find .../build -name output.json` returns no product-root `output.json`.
+- Finding 128: long HTML/JS writes still create parse-recovery churn even when the task succeeds.
+  - Symptom: leaf 首轮尝试把较长 HTML 一次性塞进 `write_file` 工具 JSON 时，仍出现“工具调用缺少结束标记 `[/TOOL_CALL]`”；工具层提示后模型改短内容并继续完成任务。
+  - 中文解释：现在不再必然失败，但速度、稳定性和 token 成本都不好。模型手写长 JSON 还是容易断，真实项目越大越容易烧轮次。
+  - Status: recorded. 下一片建议做“长文件写入协议”或 helper：让模型少手写大段 JSON，改成短片段、草稿 artifact、受控 chunk 或专门的 bounded write 流程。
+- Finding 129: parent acceptance is working, but richer product QA is still outside this smoke.
+  - Symptom: 本轮验收确认文件齐、路径对、链路状态对；但还没有用浏览器真实点击注册、登录、加购、结算，也没有逐页检查图片/按钮/布局。
+  - 中文解释：这次证明“多层子代理可以把东西交出来并完成父级验收”；还不能等同于“购物网站用户体验完全可用”。下一步要加浏览器级验收子代理或 verifier，让它真实打开页面、点按钮、检查引用资源。
+  - Status: recorded. 下一轮建议从 long-write 稳定性和浏览器 QA 两条线推进。
