@@ -88,6 +88,25 @@ def test_hierarchy_schedule_applies_depth_agent_name_prefixes(tmp_path):
     assert great_result.items[0].agent_name == "小小小傻妞-sku-leaf"
 
 
+# LLM: root-created runs already wearing 小傻妞 must advance visible lineage for their children.
+# 函数用途: 真实 E2E 中 root 第一层已叫“小傻妞-*”，再派下级时不能重新生成同一层“小傻妞-*”。
+def test_hierarchy_schedule_advances_from_parent_lineage_prefix(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    root = manager.create_run(goal="root", thought="split", plan=["plan"], agent_name="小傻妞-shop-root")
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=root.id,
+            child_specs=[HierarchyChildSpec(goal="继续协调页面任务", agent_name="coord-r78", role="coordinator")],
+            apply=True,
+        )
+    )
+    child = manager.load(result.created_run_ids[0])
+
+    assert child.agent_name == "小小傻妞-coord-r78"
+    assert result.items[0].agent_name == "小小傻妞-coord-r78"
+
+
 # LLM: test_hierarchy_schedule_repairs_bare_lineage_agent_name covers real E2E name-only prefixes.
 # 函数用途: 模型只写“小小傻妞”这类无后缀名字时，调度器不能抛 IndexError，应回退到 role 后缀。
 def test_hierarchy_schedule_repairs_bare_lineage_agent_name(tmp_path):

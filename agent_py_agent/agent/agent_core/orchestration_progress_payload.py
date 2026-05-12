@@ -126,7 +126,7 @@ def _dispatch_tool_call(run_ids: list[str]) -> dict[str, object]:
         "apply": True,
         "execute_runners": True,
         "run_ids": run_ids,
-        "workflow_mode": "auto",
+        "workflow_mode": "off",
     }
 
 

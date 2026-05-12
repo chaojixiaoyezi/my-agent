@@ -4555,3 +4555,38 @@ This document is append-only. Record every real subagent E2E issue found during 
   - `test_dispatch_externalized_result_keeps_compact_next_action_without_read_hint`
 - Next:
   - Run clean R78. Expected behavior: first run name starts with `小傻妞-`; root still does not write `capability_request`; parent/root reads board/dispatch refs without stale id/path drift, then proceeds to tester/bug_finder/acceptor instead of looping on false empty-build state.
+
+### Result: R78 Confirmed Scoped Refs And Exposed QA/Workflow Runaway
+
+- Discovered at: 2026-05-12 during R78 clean root-only shopping-site run.
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - The outer observer seeded one root/coordinator, then only watched logs/status.
+  - Root and descendants created child runs and wrote product files.
+- Observed behavior:
+  - First run name was fixed: `小傻妞-shop-root-r78`.
+  - Root did not write `capability_request`.
+  - The leaf wrote all 10 required product files in the clean build directory.
+  - tester, bug_finder, and acceptor were real persisted tasks and ran.
+  - The model used scoped artifact ids such as `subagent-...:2-1`; this is better than copying long artifact paths.
+  - Delegating body-read guard blocked parent product-body reads before acceptor closeout.
+- 中文解释：
+  - 这轮证明几条改动是有效的：root 不再申请能力，第一层默认名不再是 `general`，外置输出的 scoped id 也更好用。
+  - 但验收链还没稳：QA 子代理明明已经完成，却被系统误判成“它自己缺少同名 QA 子代理”；父级看到 reject 后又启动 recovery，后来因为继续调度建议带 `workflow_mode=auto`，又跑出无关 generic worker，开始越跑越重。
+- Root causes:
+  - `qa_role_contract.py` treated a QA role's own identity text as a parent requirement to spawn another same-role QA child.
+  - `scheduled_child_agent_name` used only `parent.depth + 1`; when root already displayed `小傻妞-*` at depth 0, its child did not advance to `小小傻妞-*`.
+  - `direct_children.suggested_tool_call` used `workflow_mode=auto`, which is unsafe inside runner-context direct-child continuation because it can spawn generic workflow workers instead of only advancing existing children.
+- Fix:
+  - QA roles (`tester`, `bug_finder`, `acceptor`) are now treated as terminal reviewer roles for QA role coverage; they do not inherit a requirement to create themselves again.
+  - Child display names now advance from the parent's visible lineage prefix when present, with depth remaining as the fallback.
+  - Direct-child continuation suggestions now use `workflow_mode=off`.
+- Verification:
+  - `test_hierarchy_schedule_advances_from_parent_lineage_prefix`
+  - `test_qa_role_tasks_do_not_inherit_their_own_required_role_contract`
+  - `test_dispatch_payload_tells_runner_to_continue_unfinished_children`
+  - Related focused dispatch / QA / acceptance tests passed locally.
+- Status:
+  - R78 was intentionally stopped after it entered generic-worker runaway; the product files and logs were preserved for review.
+- Next:
+  - Run clean R79. Expected behavior: QA roles close out as QA outputs, not as parents missing their own child roles; parent/coordinator should summarize refs or explicitly create repair children without spawning generic workflow workers.

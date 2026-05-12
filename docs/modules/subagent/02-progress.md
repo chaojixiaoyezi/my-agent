@@ -976,3 +976,12 @@
 - 新问题 3：顶层观察入口读取外置 board/dispatch 摘要后出现状态漂移，误判 build 目录为空，并基于错状态重复 dispatch。已先补调度摘要里的 `output_call_id` / `output_scoped_call_id` 和“优先用 scoped id，不抄长路径/hash”的提示，下一轮继续验证是否减少 artifact/path 串线。
 - 已补测试：`test_explicit_coordinator_seed_without_name_gets_lineage_prefix`、`test_runner_prompt_tells_root_not_to_request_capability`、`test_dispatch_externalized_result_keeps_compact_next_action_without_read_hint`。
 - 下一步：跑 R78 干净复测，重点观察三件事：第一层名字是否稳定为 `小傻妞-*`；root 是否继续不写 capability_request；父级读取 board/dispatch refs 后是否不再把真实产物状态看反。
+
+## 2026-05-12 R78: QA self-role and workflow-mode runaway fix
+- 中文说明：R78 干净复测确认第一层默认名已变成 `小傻妞-shop-root-r78`，root 没有再写 `capability_request`，leaf 真实写出 10 个购物站产物文件，tester / bug_finder / acceptor 也被真实创建并运行。
+- 新发现 1：显示命名出现“差一层”。root 已经叫 `小傻妞-*`，它创建的 child 仍叫 `小傻妞-*`，没有前进到 `小小傻妞-*`。已修正为按父节点可见中文前缀继续递增；没有前缀时继续按 depth 兜底。
+- 新发现 2：tester / bug_finder / acceptor 自己的 goal 里会出现角色名，旧 `qa_role_contract.py` 把它理解成“这个 QA 节点还必须再创建一个同名 QA 子代理”，导致 QA 自己被验收拒绝。已修正：QA 角色本身是终端 reviewer，不再继承同名 QA 覆盖义务。
+- 新发现 3：runner-context `direct_children` 建议继续调度时仍给 `workflow_mode=auto`，模型复制后触发通用 workflow，又生成了无关 generic worker/review，并继续扩容。已修正：继续调度直接孩子的 suggested tool call 使用 `workflow_mode=off`，让父节点只推进已有直接 child，不自动展开通用 workflow。
+- 额外观察：外置 artifact 的 scoped id 提示开始生效，模型已能用 `subagent-...:2-1` 这类 scoped call id 读取摘要；委托期 body-read guard 也成功拦截了父级在 acceptor 完成前读正文。
+- 已补测试：`test_hierarchy_schedule_advances_from_parent_lineage_prefix`、`test_qa_role_tasks_do_not_inherit_their_own_required_role_contract`、`test_dispatch_payload_tells_runner_to_continue_unfinished_children`。
+- 下一步：干净启动 R79。预期 QA 三角色能被父级验收闭环，`AWAITING_ACCEPTANCE/NEEDS_ACCEPTANCE` 不再被误读成“同名 QA 缺失”，runner-context dispatch 不再凭 `workflow_mode=auto` 生成额外 generic workers。

@@ -77,11 +77,13 @@ def qa_role_identity_roles(*, role: str, agent_name: str = "") -> set[str]:
     return roles
 
 
-# LLM: qa_role_task_is_leaf mirrors hierarchy semantics so leaves are not punished for inherited wording.
-# 函数用途: 判断任务是否已经是执行叶子，leaf 不负责继续创建 tester/bug_finder/acceptor 下级。
+# LLM: qa_role_task_is_leaf treats terminal workers/reviewers as not responsible for spawning QA copies.
+# 函数用途: 判断任务是否已经是执行叶子或 QA reviewer；这类节点不负责继续创建 tester/bug_finder/acceptor 下级。
 def qa_role_task_is_leaf(task) -> bool:
     role = str(getattr(task, "role", "") or "").lower()
     agent_name = str(getattr(task, "agent_name", "") or "").lower()
+    if qa_role_identity_roles(role=role, agent_name=agent_name):
+        return True
     return role == "leaf_worker" or "leaf" in agent_name
 
 
