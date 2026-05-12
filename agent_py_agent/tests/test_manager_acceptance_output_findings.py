@@ -202,6 +202,84 @@ class TestSubAgentAcceptanceRoleCoverageFindings(_FindingSetupMixin, _FindingAss
 
         self._assert_finding(findings, "required_role_coverage", expected_ok=True)
 
+    def test_parent_with_unfinished_descendant_blocks_acceptance(self, tmp_path: Path):
+        """父级不能在后代仍 PLANNING/UNVERIFIED 时被验收为完成。"""
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
+
+        class MockManager(SubAgentAcceptanceFindingMixin):
+            def __init__(self):
+                self.workspace = tmp_path
+
+        manager = MockManager()
+        (tmp_path / "tester").mkdir()
+        (tmp_path / "tester" / "task.json").write_text(
+            json.dumps(
+                {
+                    "id": "tester",
+                    "role": "tester",
+                    "agent_name": "小傻妞-tester",
+                    "status": "PLANNING",
+                    "verification_status": "UNVERIFIED",
+                    "child_ids": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        task = self._make_findings_task(
+            tmp_path,
+            goal="必须至少覆盖 tester / bug_finder / acceptor 三类 QA 子代理。",
+            role="coordinator",
+            child_ids=["tester"],
+        )
+        output = {"artifacts": [], "structured_output": {"status": "COMPLETED"}}
+        self._write_findings_files(tmp_path, output)
+        manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
+
+        findings = manager._acceptance_findings(task, output, {}, time.time())
+
+        self._assert_finding(findings, "descendant_health", expected_ok=False)
+
+    def test_parent_with_verified_descendants_passes_descendant_health(self, tmp_path: Path):
+        """所有后代 DONE/VERIFIED 时，父级后代健康门通过。"""
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
+
+        class MockManager(SubAgentAcceptanceFindingMixin):
+            def __init__(self):
+                self.workspace = tmp_path
+
+        manager = MockManager()
+        for run_id in ("tester", "bug", "accept"):
+            (tmp_path / run_id).mkdir()
+            (tmp_path / run_id / "task.json").write_text(
+                json.dumps(
+                    {
+                        "id": run_id,
+                        "role": {"bug": "bug_finder"}.get(run_id, run_id),
+                        "status": "DONE",
+                        "verification_status": "VERIFIED",
+                        "child_ids": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+        task = self._make_findings_task(
+            tmp_path,
+            goal="必须至少覆盖 tester / bug_finder / acceptor 三类 QA 子代理。",
+            role="coordinator",
+            child_ids=["tester", "bug", "accept"],
+        )
+        output = {"artifacts": [], "structured_output": {"status": "COMPLETED"}}
+        self._write_findings_files(tmp_path, output)
+        manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
+
+        findings = manager._acceptance_findings(task, output, {}, time.time())
+
+        self._assert_finding(findings, "descendant_health", expected_ok=True)
+
 
 
 class TestSubAgentAcceptanceTestsAndArtifactFindings(_FindingSetupMixin, _FindingAssertMixin, _FindingReportMixin):

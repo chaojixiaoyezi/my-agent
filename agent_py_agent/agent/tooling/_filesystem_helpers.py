@@ -118,6 +118,40 @@ def _bool_param(value: Any, *, default: bool = False) -> bool:
     return default
 
 
+# LLM: _bundled_filesystem_param accepts both flat and filesystem-bundled tool parameters during migration.
+# 函数用途: 让文件工具兼容 {"path": "..."} 和 {"filesystem": {"path": "..."}} 两种参数形态。
+def _bundled_filesystem_param(params: dict[str, Any], key: str, default: Any = None) -> Any:
+    if key in params:
+        return params.get(key)
+    filesystem = params.get("filesystem")
+    if isinstance(filesystem, dict) and key in filesystem:
+        return filesystem.get(key)
+    return default
+
+
+# LLM: _normalized_workspace_roots resolves and deduplicates allowed filesystem roots.
+# 函数用途: 解析并去重工作区根目录，保留第一个主工作区。
+def _normalized_workspace_roots(primary: Path, roots: list[Path] | None) -> list[Path]:
+    resolved: list[Path] = []
+    for raw in [primary, *(roots or [])]:
+        path = Path(raw).resolve()
+        if path not in resolved:
+            resolved.append(path)
+    return resolved
+
+
+# LLM: _is_under_any_root checks containment without following model-provided glob semantics.
+# 函数用途: 判断某个路径是否位于任一允许根目录之下。
+def _is_under_any_root(path: Path, roots: list[Path]) -> bool:
+    for root in roots:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
 # LLM: _read_text_safe 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
 # 函数用途: 读取 read_text_safe 数据并转换成内部对象。
 def _read_text_safe(path: Path) -> str | None:

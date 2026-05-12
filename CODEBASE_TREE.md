@@ -962,7 +962,7 @@ docs/
 - `agent_py_agent/agent/memory_archive/compact_resume_blocked.py`: 生成 compact metadata 缺失时的 schema-compatible 阻断 payload，让主 resume 编排保持薄。
 - `agent_py_agent/agent/memory_archive/artifact_reader.py`: 按 tool output index 显式读取外置 artifact 正文切片，并校验路径边界和 sha256；路径前缀抄错但 artifact 文件名唯一时，可修复到登记记录。
 - `agent_py_agent/agent/path_recovery_hints.py`: 共享 URL span 和工作区路径 typo 恢复提示，供派工预检、读文件和列目录等入口复用。
-- `agent_py_agent/agent/tooling/_filesystem_read.py`: `read_file` 读取工作区文本文件；读/列/search 遇到疑似工作区路径拼写错误时返回 `suggested_target`；误读 tool-output artifact 包装的判断拆到 `filesystem_artifact_guard.py`。
+- `agent_py_agent/agent/tooling/_filesystem_read.py`: `read_file` 读取工作区文本文件；读/列/search 同时接受顶层参数和 `filesystem.*` bundle 参数；遇到疑似工作区路径拼写错误时返回 `suggested_target`；误读 tool-output artifact 包装的判断拆到 `filesystem_artifact_guard.py`。
 - `agent_py_agent/agent/tooling/filesystem_artifact_guard.py`: 拒绝 `memory_archive/artifacts/tool_outputs/*.json` 外置工具输出包装经由 `read_file` 读取，提示改用 `read_artifact` 分片。
 - `agent_py_agent/agent/tooling/artifact.py`: 注册 `read_artifact` 工具，给模型提供受控 artifact slice 读取入口。
 - `agent_py_agent/agent/tooling/controlled_exec.py`: 注册 `controlled_exec` 工具包装；只从 `write_boundary.controlled_exec_grants` 读取父级 shell grant，dry-run 返回 plan，显式 apply 才调用 bounded shell execution 或 task trash；`apply/execute/run/full` 字符串也会被识别为执行意图，delete-to-trash dry-run 作为有效计划返回，但 prompt/验收会要求真实 stdout/audit/trash refs 才算完成。执行后的 shell decision/audit 会标记 `dry_run=false`，避免模型把真实执行误读成计划。
@@ -1056,7 +1056,8 @@ docs/
 - `agent_py_agent/agent/subagents/manager_parent_acceptance.py`: 新增 manager 父级验收桥接函数，把 plan/write/apply/next-action/auto-policy/follow-up 流程从 `manager_acceptance.py` 类体拆出，保持 manager facade 轻量，并在 follow-up apply 前校验测试报告新鲜度；当前任务已失败/阻塞时可生成 rescue follow-up，不会误导去跑 tests。
 - `agent_py_agent/agent/subagents/manager_acceptance_parent_facade.py`: 新增父级验收 manager facade 方法集合，让 `manager_acceptance.py` 继续只承接普通 acceptance review 流程。
 - `agent_py_agent/agent/subagents/acceptance_test_execution.py`: 新增显式验收测试执行桥接，把 `AcceptanceReviewOptions(execute_tests=True)` 转成真实测试报告和阻断 findings；默认不运行。
-- `agent_py_agent/agent/subagents/services/acceptance_findings.py`: 普通验收 finding 汇总层；已有 `reports/test_execution.json` 时优先以机器执行报告判断 tests_passed；pending capability finding 防止半成品被验收；`required_child_spawned` 会在目标要求创建下级时核对真实 `task.child_ids`，但不会把 leaf/self 的“真实创建 leaf_worker”自述误判为还要继续创建 child。
+- `agent_py_agent/agent/subagents/services/acceptance_findings.py`: 普通验收 finding 汇总层；已有 `reports/test_execution.json` 时优先以机器执行报告判断 tests_passed；pending capability finding 防止半成品被验收；`required_child_spawned` 会在目标要求创建下级时核对真实 `task.child_ids`，`descendant_health` 会阻断仍有未完成/失败后代的父级验收，但不会把 leaf/self 的“真实创建 leaf_worker”自述误判为还要继续创建 child。
+- `agent_py_agent/agent/subagents/services/acceptance_descendant_health.py`: 父级验收的后代健康门；沿真实 `child_ids` 有界读取后代 `task.json`，后代未完成、未验收、失败、阻塞或缺失时返回 P0 finding。
 - `agent_py_agent/agent/subagents/services/acceptance_controlled_exec_findings.py`: controlled_exec 专属验收 finding；当 goal/acceptance 声明受控 shell 时，要求实际工具记录和 stdout/audit/trash refs，并会在 task_dir/allowed_write_roots 内按固定小文件名查找 refs/summary；若 refs 文件显式指向 `controlled_exec-*.json` tool-output artifact，会按 64KB 上限精确读取该小 artifact 补齐 stdout/audit refs，防止伪 refs 报告通过且避免扫描目录或读取大日志。
 - `agent_py_agent/agent/settings/config.py`: 新增 `acceptance_execute_tests`、`acceptance_test_timeout_seconds`、`subagent_allowed_tools`、`subagent_role_template_dirs` 和 `tool_agent_budget_*`，真实测试执行默认关闭，子代理工具默认自动判断，单代理工具预算默认 10 分钟 50 次。
 - `agent_py_agent/agent/settings/services/_normalize_runtime_fields.py`: 校验真实验收执行配置，布尔开关走 bool coerce，超时限制在 1 到 300 秒；`subagent_allowed_tools` 和 `subagent_role_template_dirs` 归一成去空白字符串列表。

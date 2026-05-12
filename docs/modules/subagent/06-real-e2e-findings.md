@@ -4129,3 +4129,46 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Fix: added `qa_role_contract.py` as the shared role-detection source. `hierarchy_scheduler.py` now checks parent goal/acceptance before guards run, compares requested specs plus persisted descendants, and appends missing tester/bug_finder/acceptor child specs exactly once. `acceptance_role_coverage.py` now reuses the same contract helper, so scheduling and final acceptance do not drift. Scope guard domain stopwords now ignore structural `run/id/ref/refs/qa` terms so auto-created QA children do not collide just because they mention the same parent ref.
   - Verification: `test_hierarchy_schedule_auto_adds_required_qa_roles_from_parent_contract`, `test_hierarchy_schedule_avoids_duplicate_required_qa_roles`, and existing role-coverage tests pass locally.
   - Remaining risk: this is deterministic scheduling support, not a guarantee that each QA child will finish real testing under provider timeouts. The next real E2E still needs to verify root-only creation plus real tester/bug_finder/acceptor completion.
+
+## 2026-05-12 Shopping Site Complete E2E R62 QA Scheduling and Parent False-Green
+
+- Run: `stage7_shop_complete_20260512_r62`
+- Config: `/Users/example/my-终端应用/.my-agent-stage7-shop-complete-20260512-r62.yaml`
+- Prompt: `/Users/example/my-终端应用/stage7_shop_complete_20260512_r62_prompt.md`
+- Principle: root-only. 外层只启动 `my-agent run` 并观察；root 自己创建 depth=1，depth=1 创建 depth=2，depth=2 创建 depth=3。外层没有直接创建或修改任何下级子代理，也没有代替 leaf 写购物网站产物。
+- Persisted task state observed after interrupting the silent outer process:
+  - `subagent-1778554271-259a76cb` depth=0 role=`coordinator` name=`stage7-shop-r62-root` status=`DONE` verify=`VERIFIED`
+  - `subagent-1778554412-6f8a3637` depth=1 role=`coordinator` name=`小傻妞-1` status=`DONE` verify=`VERIFIED`
+  - `subagent-1778554474-b3170a6a` depth=2 role=`coordinator` name=`小小傻妞-1` status=`DONE` verify=`VERIFIED`
+  - `subagent-1778554511-84e2d7b4` depth=3 role=`leaf_worker` name=`小小小傻妞-1` status=`DONE` verify=`VERIFIED`
+  - auto QA children existed but did not finish cleanly: tester / bug_finder / acceptor had `PLANNING` or `BLOCKED/FAILED` states.
+- Good checkpoint:
+  - QA auto-scheduler did create tester / bug_finder / acceptor descendants for a parent that explicitly requested those roles.
+  - 四层主链路继续真实跑通，并且 depth=3 leaf 写出了 10 个购物网站文件到 `/Users/example/my-终端应用/deliverables/stage7_shop_complete_20260512_r62/build`。
+  - `subagent_message mode=broadcast scope=descendants` 成功写入广播；root 尝试 `scope=peers` 被拒绝是正确边界，因为 root 没有 parent_id。
+- Finding 204: bundled `filesystem.path` was ignored by read/search tools.
+  - Symptom: bug_finder 调用 `search_text` 时传了 `{"filesystem": {"path": "<build>"}}`，但工具没有读取这个 bundle 里的 path，退回到更大的默认目录，结果搜到了旧 prompt/run 文件而不是只搜 build。
+  - 中文解释：模型没有完全写错，它用了我们倡导的 bundle 参数格式；问题是读/列/search 工具还只看顶层 `path`，没看 `filesystem.path`。
+  - Root cause: `ListFilesTool` / `ReadFileTool` / `SearchTextTool` still only consumed flat params for path/range/query-like fields.
+  - Fix: filesystem read tools now use `_bundled_filesystem_param()` and accept both flat params and `filesystem.*` bundle params for `path`、`recursive`、`start_line`、`end_line` and `query`.
+  - Verification: `test_search_text_accepts_filesystem_bundle_path` confirms scoped search no longer falls back to the whole workspace.
+- Finding 205: parent acceptance could become false-green while descendants were unfinished or failed.
+  - Symptom: root became `DONE/VERIFIED` even though its QA descendants were still `PLANNING` or `BLOCKED/FAILED`。
+  - 中文解释：父节点自己总结“我完成了”，但它下面还有孩子没做完，甚至有孩子失败。以前验收检查“有没有创建这些角色”，没有强制检查“所有后代是不是都健康收口”。
+  - Root cause: role coverage and child-spawn findings checked existence of child runs, but parent acceptance did not hard-block on persisted descendant status.
+  - Fix: added `acceptance_descendant_health.py`. Parent acceptance now scans exact `child_ids` breadth-first through bounded `task.json` reads. Any descendant that is not `DONE/VERIFIED` or a closed recovery state such as `TAKEN_OVER` / `ABANDONED` blocks parent acceptance with P0 `descendant_health`.
+  - Verification: `test_parent_with_unfinished_descendant_blocks_acceptance` and `test_parent_with_verified_descendants_passes_descendant_health`.
+- Finding 206: root duplicated QA roles after reading the board too loosely.
+  - Symptom: auto-scheduled QA children already existed, but root later created another bug_finder and acceptor because it treated existing `PLANNING` QA nodes as missing.
+  - 中文解释：这不是权限问题，是模型看板理解问题：孩子已经有了，只是还没跑完；root 应该继续 dispatch 或等待/救援，而不是再派一批重复的 QA。
+  - Status: recorded as remaining risk. `descendant_health` now prevents this from ending in false-green, but board/dispatch payload should later make “existing but unfinished QA role ids” more explicit and discourage duplicate role creation unless the parent is intentionally launching parallel reviewers.
+- Finding 207: long-content recovery improved, but repeated malformed writes still appear under pressure.
+  - Symptom: leaf eventually wrote all 10 files, but `style.css`、`app.js`、`order-success.html` still triggered several malformed long `write_file` / `append_file` retries before recovery.
+  - 中文解释：系统能把模型从长 JSON 写崩里拉回来，但还不够省时。以后需要让大文件生成更稳定地走短骨架、分块追加、patch 或受控生成器。
+  - Status: partially solved by previous content transport/recovery work; keep testing under bigger real workloads.
+- Finding 208: outer CLI observability is still weak when the top-level process waits silently.
+  - Symptom: persisted task files showed useful terminal/blocked facts, but the outer `tee` log stayed empty and the CLI did not promptly emit a final deterministic report during observation. The process was manually interrupted after the task tree facts were collected.
+  - 中文解释：磁盘里已经有事实，但用户盯着终端会以为还在卡住。无人值守时，这会影响判断“到底跑完没”。
+  - Status: remaining observation gap. Do not overread this single sample as a proven timeout bug; next slice should add or verify a parent/CLI blocked-closeout watchdog that reports persisted terminal facts without relying on model prose.
+- Status: R62 does not count as fully accepted. It proved QA auto-scheduling can fire and the four-layer chain can write all 10 files, but it also exposed a parent false-green and scoped filesystem bundle bug. Both critical code issues are fixed locally; duplicate QA interpretation, long-write efficiency, and outer CLI closeout remain next E2E targets.
+- Next: rerun a clean root-only R63 after the focused tests and strict checks. Expected checkpoint: if any QA child remains PLANNING/BLOCKED/FAILED, root acceptance must fail with `descendant_health`; scoped read/search must stay inside the requested build path; final closeout should report persisted task truth instead of silent waiting.
