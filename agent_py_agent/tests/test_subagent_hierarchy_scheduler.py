@@ -262,6 +262,7 @@ def test_hierarchy_schedule_infers_leaf_write_tools_from_explicit_deliverables(t
     leaf = manager.load(result.created_run_ids[0])
 
     assert "write_file" in leaf.allowed_tools
+    assert "read_artifact" in leaf.allowed_tools
     assert "replace_in_file" in leaf.allowed_tools
     assert str(deliverables) in leaf.allowed_write_roots
 
@@ -297,6 +298,7 @@ def test_hierarchy_schedule_normalizes_model_write_alias_for_leaf_tasks(tmp_path
 
     assert "write" not in leaf.allowed_tools
     assert "write_file" in leaf.allowed_tools
+    assert "read_artifact" in leaf.allowed_tools
     assert "append_file" in leaf.allowed_tools
     assert "replace_in_file" in leaf.allowed_tools
 

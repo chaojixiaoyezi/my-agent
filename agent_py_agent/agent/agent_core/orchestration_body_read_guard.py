@@ -28,8 +28,10 @@ _METADATA_FILE_NAMES = {
     "acceptance_review.json",
     "failing_tests.json",
     "failure_handoff.json",
+    "output.json",
     "parent_acceptance_auto_followup.json",
     "progress.md",
+    "runner_result.json",
     "status_report.json",
     "takeover_readiness.json",
     "task.json",
@@ -62,7 +64,7 @@ def maybe_block_delegating_body_read(request: DelegatingBodyReadGuardRequest) ->
         return None
     if _has_completed_acceptor(request.agent, parent):
         return None
-    if tool == "read_file" and _is_runtime_metadata_read(request.agent, request.payload):
+    if tool == "read_file" and _is_runtime_metadata_read(request.agent, parent, request.payload):
         return None
     if tool == "read_artifact" and _is_orchestration_artifact_read(request.payload):
         return None
@@ -138,11 +140,11 @@ def _is_completed_for_acceptance(task: object) -> bool:
 
 # LLM: _is_runtime_metadata_read allows parents to inspect coordination state without product bodies.
 # 函数用途: 委托期 read_file 只允许读取 subagent runtime 元数据文件，不允许读 deliverables/业务正文。
-def _is_runtime_metadata_read(agent: object, payload: dict[str, Any]) -> bool:
+def _is_runtime_metadata_read(agent: object, parent: object, payload: dict[str, Any]) -> bool:
     path = _payload_path(agent, payload)
     if path is None or path.name not in _METADATA_FILE_NAMES:
         return False
-    return _looks_like_runtime_path(path)
+    return _looks_like_runtime_path(path) or _is_current_task_metadata_path(parent, path)
 
 
 # LLM: _is_orchestration_artifact_read lets parents read small refs/status artifacts while blocking product bodies.
@@ -196,6 +198,19 @@ def _looks_like_runtime_path(path: Path) -> bool:
     if "tasks" in parts and "agents" in parts:
         return True
     return False
+
+
+# LLM: _is_current_task_metadata_path recognizes the active legacy task directory as runtime metadata.
+# 函数用途: 允许父级读取自己 task_dir 下的 output/status/runner 元数据，但不放行业务产物正文。
+def _is_current_task_metadata_path(parent: object, path: Path) -> bool:
+    task_dir = str(getattr(parent, "task_dir", "") or "").strip()
+    if not task_dir:
+        return False
+    try:
+        path.relative_to(Path(task_dir).expanduser().resolve(strict=False))
+    except ValueError:
+        return False
+    return True
 
 
 # LLM: _blocked_message teaches the model the recovery route instead of making it ask the user.

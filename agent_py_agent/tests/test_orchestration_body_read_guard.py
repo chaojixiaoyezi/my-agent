@@ -68,6 +68,21 @@ def test_delegating_parent_can_read_runtime_metadata_before_acceptor_done():
     assert result is None
 
 
+# LLM: task-local runner metadata must remain readable even when product bodies stay blocked.
+# 函数用途: 父级 runner 派出子代理后，仍能读取自己 task_dir 下的 output/runner 元数据用于收口。
+def test_delegating_parent_can_read_own_task_output_metadata_before_acceptor_done():
+    tasks = {"root": _task("root", identity="worker", children=["worker"]), "worker": _task("worker")}
+    result = maybe_block_delegating_body_read(
+        DelegatingBodyReadGuardRequest(
+            agent=_agent(tasks),
+            user_prompt="请让子代理先做，最后按验收标准收口。",
+            payload={"tool": "read_file", "path": "/tmp/runtime/subagents/root/output.json"},
+        )
+    )
+
+    assert result is None
+
+
 # LLM: orchestration artifacts are refs-only status packets, so parent recovery may read them.
 # 函数用途: 委托期允许读取 dispatch/subagent_board 小摘要 artifact，避免父级被迫盲目恢复。
 def test_delegating_parent_can_read_orchestration_artifact_before_acceptor_done():

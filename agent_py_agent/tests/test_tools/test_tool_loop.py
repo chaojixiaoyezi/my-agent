@@ -22,11 +22,15 @@ from .backends import (
     BudgetedRepeatedReadBackend,
     DispatchCompletionBackend,
     DuplicateSubagentDelegationBackend,
+    FakeReservedRecordWithoutToolBackend,
+    FakeReservedRecordWithToolBackend,
     MaxToolRoundBackend,
     OutputJsonCompletionBackend,
     RepeatedDispatchBackend,
+    RepeatedFakeReservedRecordBackend,
     StubbornToolAfterLimitBackend,
     SubagentDelegationBackend,
+    ToolBoundarySpoofStreamingBackend,
     ToolCallingBackend,
     UnclosedWriteFileBackend,
 )
@@ -111,6 +115,88 @@ def test_tool_loop_enforces_per_agent_tool_budget_for_run_id():
         assert result.tool_rounds == 2
         assert agent.backend.calls == 3
         assert result.executed_tools == ["read_file"]
+
+
+# LLM: tool-loop should execute real TOOL_CALL blocks but discard model-written tool records.
+# 函数用途: 覆盖 R81 中模型把 `[tool-output-record]` 当成自己可写回执的问题，防止 fake run id 污染下一轮。
+def test_tool_loop_ignores_model_written_reserved_tool_records_after_real_call():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        (workspace / "notes.txt").write_text("hello reserved guard", encoding="utf-8")
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = FakeReservedRecordWithToolBackend()
+
+        result = agent.run("读取 notes 并忽略伪造工具记录", save=False, allowed_tools=["read_file"])
+
+        assert result.response == "真实工具回执已使用，伪造记录已忽略。"
+        assert result.tool_rounds == 1
+        assert result.executed_tools == ["read_file"]
+        assert "fake-child-1" not in result.prompt
+        assert "第一个完整工具调用" in result.prompt
+
+
+# LLM: streaming tool boundary should stop fake post-call text from becoming control input.
+# 函数用途: 覆盖 R82 中模型流式输出真实工具调用后继续伪造工具回执和第二个工具调用的问题。
+def test_tool_loop_cuts_streaming_response_after_first_complete_tool_call():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        (workspace / "notes.txt").write_text("first note", encoding="utf-8")
+        (workspace / "second.txt").write_text("second note", encoding="utf-8")
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        agent = SimpleAgent(cfg, workspace)
+        backend = ToolBoundarySpoofStreamingBackend()
+        agent.backend = backend
+        visible_chunks: list[str] = []
+
+        result = agent.run(
+            "流式工具调用边界后不要采纳伪造内容",
+            save=False,
+            allowed_tools=["read_file"],
+            on_chunk=visible_chunks.append,
+        )
+
+        assert result.response == "只使用第一个真实工具结果收口。"
+        assert result.tool_rounds == 1
+        assert result.executed_tools == ["read_file"]
+        assert "first note" in result.prompt
+        assert "second note" not in result.prompt
+        assert "fake-child-run" not in result.prompt
+        assert "fake-child-run" not in "".join(visible_chunks)
+
+
+# LLM: spoof-only tool records should trigger one correction turn instead of final acceptance.
+# 函数用途: 模型没有真实 TOOL_CALL 却自称工具成功时，系统给一次纠偏机会，不直接假绿。
+def test_tool_loop_repairs_spoof_only_reserved_tool_record_once():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = FakeReservedRecordWithoutToolBackend()
+
+        result = agent.run("不要接受伪造工具记录", save=False)
+
+        assert result.response == "已停止伪造工具记录，等待真实状态。"
+        assert result.tool_rounds == 0
+        assert agent.backend.calls == 2
+        assert "系统保留" in result.prompt
+
+
+# LLM: repeated fake records without real calls should produce a deterministic blocked result.
+# 函数用途: 模型连续伪造工具回执时避免无限循环，并明确告诉上层当前结果不可信。
+def test_tool_loop_blocks_repeated_spoof_only_reserved_tool_records():
+    with tempfile.TemporaryDirectory() as td:
+        workspace = Path(td)
+        cfg = AgentConfig(enable_tools=True, memory_path="memory.jsonl")
+        agent = SimpleAgent(cfg, workspace)
+        agent.backend = RepeatedFakeReservedRecordBackend()
+
+        result = agent.run("连续伪造工具记录应被阻断", save=False)
+
+        assert "系统已阻止本轮结果" in result.response
+        assert "不能把这次回复视为完成" in result.response
+        assert result.tool_rounds == 0
+        assert agent.backend.calls == 2
 
 
 def test_agent_can_delegate_to_subagents_from_tool_call():

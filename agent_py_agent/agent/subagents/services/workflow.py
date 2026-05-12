@@ -11,10 +11,12 @@ SubAgentManager 通过 facade 方法委托到这里，不把规划逻辑塞在 m
 """
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .base import CreateRunParams
+from .hierarchy_agent_names import scheduled_child_agent_name
 
 if TYPE_CHECKING:
     from ..capability_config import CapabilityConfig
@@ -31,6 +33,14 @@ _CODING_SUBAGENT_TOOLS = [
     "append_file",
     "replace_in_file",
 ]
+
+
+# LLM: _WorkflowAgentNameSpec adapts workflow phases to the hierarchy naming helper.
+# 类用途: 给 workflow 自动生成的 phase child 提供 agent_name/role 字段，避免重复写命名规则。
+@dataclass(frozen=True)
+class _WorkflowAgentNameSpec:
+    agent_name: str
+    role: str
 
 
 # LLM: _normalize_workflow_mode_value 属于子代理服务层的函数边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -119,6 +129,18 @@ def _try_workflow_plan(
 # 函数用途: 处理工作流extrawriteroots相关的数据流，连接当前职责的前后步骤；关键副作用: 会改动任务状态、报告记录和持久化副作用，调用方依赖写入顺序和文件格式。
 def _workflow_extra_write_roots(task: SubAgentTask) -> list[str]:
     return [item for item in task.allowed_write_roots if item and item != task.task_dir]
+
+
+# LLM: _workflow_child_agent_name keeps workflow-created children in the same lineage naming system.
+# 函数用途: workflow phase 自动派生的 child 也必须按“小傻妞/小小傻妞”层级命名，而不是复制 parent 名字。
+def _workflow_child_agent_name(parent: SubAgentTask, phase_id: str, role: str) -> str:
+    return scheduled_child_agent_name(
+        parent,
+        _WorkflowAgentNameSpec(
+            agent_name=phase_id or role or "worker",
+            role=role or "worker",
+        ),
+    )
 
 
 # LLM: SubAgentWorkflowService 属于子代理服务层的类边界；调整时先确认任务状态、报告记录和持久化副作用仍按原契约工作。
@@ -210,6 +232,7 @@ class SubAgentWorkflowService:
         if depends_on:
             child_plan.append("先确认依赖 phase 已提交结果：" + ", ".join(depends_on))
 
+        agent_name = _workflow_child_agent_name(parent, phase_id, role)
         child = self.manager.create_run(
             params=CreateRunParams(
                 goal=f"{parent.goal}\n\nWorkflow phase {phase_id}: {phase_task}",
@@ -218,14 +241,14 @@ class SubAgentWorkflowService:
                     " 先遵守质量契约和写入边界，再提交待父代理验收的材料。"
                 ),
                 plan=child_plan,
-                agent_name=parent.agent_name,
+                agent_name=agent_name,
                 role=role,
                 parent_id=parent.id,
                 root_id=parent.root_id,
                 depth=parent.depth + 1,
                 allowed_skills=list(parent.allowed_skills),
                 allowed_tools=_workflow_worker_tools(parent.allowed_tools, kind),
-                owner=parent.owner,
+                owner=agent_name,
                 supervisor=parent.supervisor,
                 final_owner=parent.final_owner,
                 acceptance_checks=[str(item) for item in worker.get("acceptance_checks") or [] if str(item).strip()],

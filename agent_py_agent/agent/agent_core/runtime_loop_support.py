@@ -16,7 +16,6 @@ from .runtime_services import CompressionContext, ToolLoopExecuteParams
 # 类用途: 集中保存run参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class RunParams:
-
     inject: list[str] | None = None
     prompt_files: list[str] | None = None
     save: bool | None = None
@@ -27,6 +26,7 @@ class RunParams:
     run_id: str = ""
     task_id: str = ""
     task_attributes: dict | None = None
+    system_prompt_override: str | None = None
     source: str = "run"
     recovery_snapshot: bool | None = None
     resume_context: bool | None = None
@@ -40,7 +40,6 @@ class RunParams:
 # 类用途: 集中保存运行时循环和压缩快照需要的上下文字段；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class _RuntimeLoopParams:
-
     user_prompt: str
     memories: list
     runtime_injections: list
@@ -51,6 +50,7 @@ class _RuntimeLoopParams:
     prompt_files: list | None = None
     write_boundary: dict | None = None
     task_attributes: dict | None = None
+    system_prompt_override: str | None = None
     on_chunk: object = None
     request_id: str = ""
     run_id: str = ""
@@ -62,7 +62,6 @@ class _RuntimeLoopParams:
 # 类用途: 集中保存finalize参数字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class _FinalizeParams:
-
     user_prompt: str
     final_prompt: str
     final_response: Any
@@ -83,7 +82,6 @@ class _FinalizeParams:
 # 类用途: 集中保存运行前准备出的 memory、路由和恢复上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class _PreparedRuntimeContext:
-
     memories: list
     runtime_injections: list
     routed_context: Any
@@ -95,7 +93,6 @@ class _PreparedRuntimeContext:
 # 类用途: 集中保存运行时循环结果字段，让调用方按同一参数包传递上下文；关键副作用: 本身不执行输入输出；字段变化会影响构造点、序列化和测试读取。
 @dataclass
 class _RuntimeLoopResult:
-
     final_prompt: str
     final_response: Any
     tool_rounds: int
@@ -144,6 +141,7 @@ def run_params_from_values(
     run_id: str | None = None,
     task_id: str | None = None,
     task_attributes: dict | None = None,
+    system_prompt_override: str | None = None,
     source: str | None = None,
     recovery_snapshot: bool | None = None,
     resume_context: bool | None = None,
@@ -182,6 +180,7 @@ def _runtime_loop_params(
         prompt_files=params.prompt_files,
         write_boundary=params.write_boundary,
         task_attributes=params.task_attributes,
+        system_prompt_override=params.system_prompt_override,
         on_chunk=params.on_chunk,
         request_id=params.request_id,
         run_id=params.run_id,
@@ -338,6 +337,7 @@ def _tool_loop_execute_params(seed: _RuntimeToolLoopSeed) -> ToolLoopExecutePara
         granted_capabilities=params.granted_capabilities,
         write_boundary=params.write_boundary,
         task_attributes=params.task_attributes,
+        system_prompt_override=params.system_prompt_override,
         request_id=params.request_id,
         run_id=params.run_id,
         task_id=params.task_id,

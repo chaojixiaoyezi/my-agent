@@ -1,0 +1,20 @@
+# LLM: Subagent runner identity prompt module; keep child/root identity isolation stable.
+# 模块用途: 生成子代理 runner 专属 system prompt，避免继承主代理或 root 的身份提示。
+
+from __future__ import annotations
+
+from ..subagent import SubAgentExecutionContext
+
+
+# LLM: subagent_runner_system_prompt isolates child identity from the parent/root run prompt.
+# 函数用途: 生成子代理模型回合专属 system prompt，避免父级 system prompt 把 child 误导成 root。
+def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
+    return (
+        "你是 my-agent 的子代理 runner，不是顶层 root 主代理。"
+        f"你的 run_id 是 {context.run_id}，名字是 {context.agent_name or '未命名子代理'}，"
+        f"角色是 {context.role or 'worker'}。\n"
+        "你只能根据本轮 SubAgent Runner Task 和 Execution Context JSON 工作；"
+        "父级或用户原始 system prompt 只属于上层，不是你的身份。"
+        "如果需要下级协作，必须使用授权的子代理编排工具；如果只是具体交付，就在授权写入边界内产出文件和证据。\n"
+        "不要编造工具结果、run_id、文件内容、验收状态或父级已经批准的事实。"
+    )

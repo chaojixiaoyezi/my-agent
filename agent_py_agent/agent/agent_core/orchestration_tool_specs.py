@@ -24,7 +24,10 @@ _CREATE_PARAMETERS = {
 }
 _CREATE_PARAMETER_DETAILS = {
     "goal": "写清楚子代理要交付什么，不要只写一个空泛标题。",
-    "count": "例如 3 表示创建 3 个并列子任务；如果任务需要人工精细拆分，可以多次调用本工具。",
+    "count": (
+        "例如 3 表示创建 3 个同目标并列子任务。不同工作切片不要用 count 复制同一个 goal；"
+        "请多次调用本工具，每次传不同 goal/agent_name，或让 coordinator 后续用 schedule_child_subagents.children 精细拆分。"
+    ),
     "role": "优先用模板角色，而不是临时造小角色。可用角色模板索引：\n{role_template_index}",
     "tool_preset": "省略时自动：由 role template、任务目标和调度器决定工具；`read_only` 只允许 list/read/search；`coding` 允许读写和替换文件；`none` 不授予工具。",
     "allowed_tools": "一般省略。只有受限环境才显式写 JSON 数组，例如 [\"read_file\", \"write_file\"]。",
@@ -35,6 +38,8 @@ _CREATE_PARAMETER_DETAILS = {
 }
 _CREATE_EXAMPLES = [
     '{"tool":"create_subagents","goal":"在隔离 fixture 项目里实现三个小功能并写报告","count":3,"role":"worker","workflow_mode":"auto","acceptance_checks":["必须有文件证据","必须说明测试结果"]}',
+    '{"tool":"create_subagents","goal":"实现购物网站 HTML 骨架和 products.json","count":1,"role":"worker","agent_name":"小傻妞-基础结构"}',
+    '{"tool":"create_subagents","goal":"实现购物网站 styles.css 和 app.js 交互","count":1,"role":"worker","agent_name":"小傻妞-样式交互"}',
     '{"tool":"create_subagents","goal":"检查多个 worker 的购物网站实现","count":1,"role":"bug_finder"}',
     '{"tool":"create_subagents","goal":"验收购物网站从注册到下单的完整流程","count":1,"role":"acceptor"}',
 ]

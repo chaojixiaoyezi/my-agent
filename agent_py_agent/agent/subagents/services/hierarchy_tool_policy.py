@@ -14,6 +14,7 @@ _DEFAULT_LEAF_CODING_TOOLS = [
     "list_files",
     "read_file",
     "search_text",
+    "read_artifact",
     "write_file",
     "append_file",
     "replace_in_file",
