@@ -208,6 +208,7 @@ def test_dispatch_payload_tells_runner_to_continue_unfinished_children():
     assert direct["suggested_tool_call"]["tool"] == "dispatch_subagents"
     assert direct["suggested_tool_call"]["execute_runners"] is True
     assert direct["suggested_tool_call"]["run_ids"] == ["child-a", "child-b"]
+    assert direct["suggested_tool_call"]["workflow_mode"] == "off"
 
 
 # LLM: test_dispatch_payload_tells_runner_to_summarize_ready_children covers R5 over-read prevention.

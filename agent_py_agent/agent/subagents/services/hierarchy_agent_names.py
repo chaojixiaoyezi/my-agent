@@ -11,7 +11,7 @@ from ..models import SubAgentTask
 # LLM: scheduled_child_agent_name applies the depth prefix while preserving the semantic suffix.
 # 函数用途: 按 parent.depth + 1 生成子节点展示名；会去掉已有同类前缀，避免重复叠前缀。
 def scheduled_child_agent_name(parent: SubAgentTask, spec: Any) -> str:
-    depth = max(1, int(parent.depth or 0) + 1)
+    depth = max(1, int(parent.depth or 0) + 1, _parent_visible_lineage_depth(parent) + 1)
     suffix = _agent_name_suffix(spec.agent_name or spec.role or "worker", fallback=spec.role)
     return f"{_lineage_prefix(depth)}-{suffix}"
 
@@ -41,6 +41,15 @@ def _agent_name_suffix(value: str, fallback: str = "worker") -> str:
 def _has_lineage_prefix(value: str) -> bool:
     prefix = value.split("-", 1)[0]
     return len(prefix) >= 2 and prefix.endswith("傻妞") and set(prefix[:-2]) == {"小"}
+
+
+# LLM: _parent_visible_lineage_depth keeps display names monotonic when root already has a lineage prefix.
+# 函数用途: 从父节点 agent_name 读取“小傻妞/小小傻妞”层数；没有前缀时返回 0，让 depth 继续兜底。
+def _parent_visible_lineage_depth(parent: SubAgentTask) -> int:
+    prefix = str(getattr(parent, "agent_name", "") or "").split("-", 1)[0]
+    if not _has_lineage_prefix(prefix):
+        return 0
+    return max(1, len(prefix) - len("傻妞"))
 
 
 # LLM: _is_placeholder_suffix repairs literal template markers before they become user-facing agent names.

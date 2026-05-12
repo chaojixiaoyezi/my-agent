@@ -372,9 +372,16 @@ do_write()
 - Explicit QA role requirements are machine contracts, not prose suggestions.
   If a parent goal or acceptance check names `tester`, `bug_finder`, or
   `acceptor` (including the Chinese role names), detection must flow through
-  `qa_role_contract.py`. Scheduling may proactively create missing QA children,
-  and acceptance must verify real persisted descendant roles instead of trusting
-  summaries.
+  `qa_role_contract.py`. QA roles themselves are terminal reviewer roles and
+  must not be forced to spawn another same-role child just because their own
+  goal contains `tester`, `bug_finder`, or `acceptor`. Scheduling should expose
+  quality advice for the LLM to choose scope/order, while acceptance verifies
+  real persisted descendant roles instead of trusting summaries.
+- Runner-context dispatch suggestions must not accidentally re-enable generic
+  workflow expansion. When a parent is merely continuing existing direct
+  children, the suggested `dispatch_subagents` call should use
+  `workflow_mode=off`; broad `workflow_mode=auto` is for deliberate top-level
+  workflow planning, not for child closeout/retry loops.
 - Empty user-facing subagent tool config means automatic policy. Keep
   `subagent_allowed_tools=[]` as “role/template/task decides tools”, not “no
   tools”. Only use a non-empty global list for deliberately restricted test

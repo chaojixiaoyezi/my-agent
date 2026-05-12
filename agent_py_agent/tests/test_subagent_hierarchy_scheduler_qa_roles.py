@@ -10,6 +10,7 @@ from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
     HierarchyChildSpec,
     HierarchyScheduleRequest,
 )
+from agent_py_agent.agent.subagents.services.qa_role_contract import qa_roles_required_by_task
 
 ORCHESTRATION_TOOLS = ["schedule_child_subagents", "dispatch_subagents", "subagent_board"]
 
@@ -202,3 +203,18 @@ def test_hierarchy_schedule_quality_advice_after_implementation_descendant_ready
     assert result.quality_advice is not None
     assert result.quality_advice.phase == "quality_wave_ready"
     assert set(result.quality_advice.suggested_roles) == {"tester", "bug_finder", "acceptor"}
+
+
+# LLM: QA workers are terminal reviewer roles, not parents that must spawn another copy of themselves.
+# 函数用途: tester/bug_finder/acceptor 自己的目标会出现角色名，但验收时不应再要求它们创建同名 QA 子代理。
+def test_qa_role_tasks_do_not_inherit_their_own_required_role_contract(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    task = manager.create_run(
+        goal="你是小小傻妞-acceptor（第三层验收子代理），验收购物网站。",
+        thought="qa",
+        plan=["inspect refs"],
+        role="acceptor",
+        agent_name="小小傻妞-acceptor",
+    )
+
+    assert qa_roles_required_by_task(task) == []
