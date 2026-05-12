@@ -230,6 +230,37 @@ class HierarchicalScheduleSubagentBackend(BaseBackend):
         return _hierarchical_schedule_result_response(self.name)
 
 
+class CoordinatorAnalysisOnlyBackend(BaseBackend):
+    """测试用后端：coordinator 只分析下一步派工，但没有真正调用 schedule_child_subagents。"""
+
+    name = "coordinator_analysis_only_backend"
+
+    def generate(self, prompt: str, on_chunk=None) -> ModelResponse:
+        assert "schedule_child_subagents [orchestration]" in prompt
+        return ModelResponse(
+            text=(
+                "[SUBAGENT_RESULT]\n"
+                "{\n"
+                '  "status": "AWAITING_ACCEPTANCE",\n'
+                '  "summary": "我已经分析完，下一步应该调用 schedule_child_subagents 创建 worker。",\n'
+                '  "used_tools": [],\n'
+                '  "used_skills": [],\n'
+                '  "evidence": [],\n'
+                '  "capability_requests": [],\n'
+                '  "artifacts": [],\n'
+                '  "tests": [],\n'
+                '  "patches": [],\n'
+                '  "lessons": [],\n'
+                '  "next_actions": ["schedule_child_subagents"],\n'
+                '  "blocked_reason": "",\n'
+                '  "failure_type": ""\n'
+                "}\n"
+                "[/SUBAGENT_RESULT]"
+            ),
+            backend=self.name,
+        )
+
+
 # LLM: _hierarchical_schedule_tool_call_response keeps the fake model's first turn short.
 # 函数用途: 返回测试模型第一次调用 schedule_child_subagents 的固定响应。
 def _hierarchical_schedule_tool_call_response(backend: str) -> ModelResponse:

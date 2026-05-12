@@ -15,7 +15,7 @@ ORCHESTRATION_TOOLS = ["schedule_child_subagents", "dispatch_subagents", "subage
 
 
 # LLM: _qa_parent creates a coordinator that explicitly requires all broad QA roles.
-# 函数用途: 构造点名 tester/bug_finder/acceptor 的父任务，复用在自动补派测试里。
+# 函数用途: 构造点名 tester/bug_finder/acceptor 的父任务，复用在 QA advice 测试里。
 def _qa_parent(manager: SubAgentManager, *, extra_write_roots: list[str] | None = None):
     return manager.create_run(
         goal="购物网站任务必须覆盖 tester / bug_finder / acceptor 三类 QA 子代理。",
@@ -27,18 +27,19 @@ def _qa_parent(manager: SubAgentManager, *, extra_write_roots: list[str] | None 
     )
 
 
-# LLM: explicit QA role contracts should become real child runs even when the model forgets them.
-# 函数用途: 父级点名 tester/bug_finder/acceptor 时，层级调度器自动补齐缺失 QA 子代理，避免只创建 worker 后验收才失败。
-def test_hierarchy_schedule_auto_adds_required_qa_roles_from_parent_contract(tmp_path):
+# LLM: explicit QA role contracts should become LLM-facing advice, not hardcoded child creation.
+# 函数用途: 父级点名 tester/bug_finder/acceptor 时，调度器提示缺失 QA 角色，但不替 LLM 固定创建。
+def test_hierarchy_schedule_advises_required_qa_roles_without_auto_creation(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
-    parent = _qa_parent(manager)
+    build = tmp_path / "deliverables" / "shop" / "build"
+    parent = _qa_parent(manager, extra_write_roots=[str(build)])
 
     result = manager.schedule_child_runs(
         params=HierarchyScheduleRequest(
             parent_run_id=parent.id,
             child_specs=[
                 HierarchyChildSpec(
-                    goal="实现购物车模块，写回证据 refs。",
+                        goal=f"实现购物车模块到 {build}，写回证据 refs。",
                     role="worker",
                     agent_name="小傻妞-cart-worker",
                 )
@@ -49,14 +50,17 @@ def test_hierarchy_schedule_auto_adds_required_qa_roles_from_parent_contract(tmp
     roles = {manager.load(run_id).role for run_id in result.created_run_ids}
 
     assert result.blocked is False
-    assert result.planned_count == 4
-    assert {"tester", "bug_finder", "acceptor"}.issubset(roles)
-    assert len(manager.load(parent.id).child_ids) == 4
+    assert result.planned_count == 1
+    assert roles <= {"worker", "leaf_worker"}
+    assert result.quality_advice is not None
+    assert result.quality_advice.phase == "implementation_first"
+    assert set(result.quality_advice.suggested_roles) == {"tester", "bug_finder", "acceptor"}
+    assert len(manager.load(parent.id).child_ids) == 1
 
 
-# LLM: persisted QA children must prevent duplicate auto-scheduling on later parent dispatches.
-# 函数用途: 父级已经存在 tester 子代理时，新一轮调度只补缺失 QA 角色，不重复创建同类检查代理。
-def test_hierarchy_schedule_avoids_duplicate_required_qa_roles(tmp_path):
+# LLM: persisted QA children should narrow LLM advice instead of forcing deterministic auto-fill.
+# 函数用途: 父级已存在 tester 时，调度器建议缺失 QA 角色，但不自动创建 bug_finder/acceptor。
+def test_hierarchy_schedule_advice_omits_existing_qa_roles(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     parent = _qa_parent(manager)
     existing = manager.create_run(
@@ -82,15 +86,16 @@ def test_hierarchy_schedule_avoids_duplicate_required_qa_roles(tmp_path):
             apply=True,
         )
     )
-    roles = [manager.load(run_id).role for run_id in result.created_run_ids]
 
     assert existing.id in manager.load(parent.id).child_ids
-    assert "tester" not in roles
-    assert {"bug_finder", "acceptor"}.issubset(set(roles))
+    assert result.blocked is False
+    assert len(result.created_run_ids) == 1
+    assert result.quality_advice is not None
+    assert result.quality_advice.suggested_roles == ["bug_finder", "acceptor"]
 
 
 # LLM: product delivery parents should not auto-create QA before implementation is ready.
-# 函数用途: 有产物根的父任务先创建/完成 worker 或 leaf，再自动补派 QA，避免空 build 上测试空转。
+# 函数用途: 有产物根的父任务先创建/完成 worker 或 leaf，再给 LLM QA advice，避免空 build 上测试空转。
 def test_hierarchy_schedule_defers_auto_qa_until_implementation_ready(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
@@ -117,9 +122,9 @@ def test_hierarchy_schedule_defers_auto_qa_until_implementation_ready(tmp_path):
     assert len(manager.load(parent.id).child_ids) == 1
 
 
-# LLM: once implementation reaches acceptance, required QA autofill may create checkers.
-# 函数用途: worker 已等待验收后，调度器可以自动补齐 tester/bug_finder/acceptor。
-def test_hierarchy_schedule_auto_qa_after_implementation_ready(tmp_path):
+# LLM: once implementation reaches acceptance, required QA advice should invite LLM-chosen checkers.
+# 函数用途: worker 已等待验收后，调度器建议可创建 QA wave，但不直接替 LLM 创建固定角色。
+def test_hierarchy_schedule_quality_advice_after_implementation_ready(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     build = tmp_path / "deliverables" / "shop" / "build"
     parent = _qa_parent(manager, extra_write_roots=[str(build)])
@@ -144,7 +149,10 @@ def test_hierarchy_schedule_auto_qa_after_implementation_ready(tmp_path):
             apply=True,
         )
     )
-    roles = {manager.load(run_id).role for run_id in result.created_run_ids}
 
-    assert result.blocked is False
-    assert {"tester", "bug_finder", "acceptor"}.issubset(roles)
+    assert result.blocked is True
+    assert result.reason == "no_child_specs"
+    assert result.created_run_ids == []
+    assert result.quality_advice is not None
+    assert result.quality_advice.phase == "quality_wave_ready"
+    assert set(result.quality_advice.suggested_roles) == {"tester", "bug_finder", "acceptor"}

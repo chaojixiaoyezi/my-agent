@@ -37,6 +37,7 @@ class FinalizedRecoverySnapshotRequest:
 def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
     params = request.params
     structured = _coordinator_child_completion_override(request, request.structured)
+    structured = _coordinator_analysis_only_override(request, structured)
     repair_state = request.repair_state
     return request.agent.subagents.record_runner_result(
         RecordRunnerResultParams(
@@ -57,6 +58,27 @@ def record_finalized_runner_result(request: FinalizedRunnerRecordRequest):
             structured_repair_ok=repair_state["ok"],
             structured_repair_error=repair_state["error"],
         )
+    )
+
+
+# LLM: _coordinator_analysis_only_override blocks fake completion when no child creation happened.
+# 函数用途: coordinator 只写“下一步要 schedule child”但没有工具调用或 child refs 时，转为可恢复阻塞。
+def _coordinator_analysis_only_override(
+    request: FinalizedRunnerRecordRequest,
+    structured: object,
+) -> object:
+    if not _is_coordinator_context(request.params.context):
+        return structured
+    if not _looks_like_analysis_only_child_plan(request, structured):
+        return structured
+    return SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        status="BLOCKED",
+        summary="coordinator described child scheduling but did not create child refs; continue orchestration.",
+        blocked_reason="coordinator_needs_child_creation: call schedule_child_subagents before acceptance",
+        failure_type="needs_child_creation",
+        next_actions=["schedule_child_subagents"],
     )
 
 
@@ -112,6 +134,32 @@ def _is_coordinator_context(context: object) -> bool:
     return ("coordinator" in role_text or "lead" in role_text) and "schedule_child_subagents" in tools
 
 
+# LLM: _looks_like_analysis_only_child_plan keeps the guard to explicit orchestration promises.
+# 函数用途: 只拦“未用工具、无 child、却说要 schedule”的 coordinator，避免影响普通总结或已派工节点。
+def _looks_like_analysis_only_child_plan(request: FinalizedRunnerRecordRequest, structured: object) -> bool:
+    if not bool(getattr(structured, "found", False)) or not bool(getattr(structured, "ok", False)):
+        return False
+    if request.params.result.executed_tools:
+        return False
+    if _direct_child_refs(request.agent, request.params.run_id):
+        return False
+    status = str(getattr(structured, "status", "") or "").strip().upper()
+    if status not in {"", "AWAITING_ACCEPTANCE", "DONE", "COMPLETED", "SUCCESS"}:
+        return False
+    return "schedule_child_subagents" in _structured_next_step_text(structured)
+
+
+# LLM: _structured_next_step_text searches only result fields intended to guide the next action.
+# 函数用途: 从 summary/next_actions 中找派工意图，不读取大正文，保持判断可解释。
+def _structured_next_step_text(structured: object) -> str:
+    return " ".join(
+        [
+            str(getattr(structured, "summary", "") or ""),
+            *[str(item) for item in (getattr(structured, "next_actions", []) or [])],
+        ]
+    )
+
+
 # LLM: _looks_like_tool_limit_cleanup avoids overriding real capability or business blockers.
 # 函数用途: 只对“缺结果块/工具轮数上限/收尾多查一次”这类清理失败放行，保留真实 BLOCKED。
 def _looks_like_tool_limit_cleanup(structured: object) -> bool:
@@ -154,6 +202,16 @@ def _verified_direct_child_refs(agent: object, run_id: str) -> list[str]:
             return []
         verified.append(child_id)
     return verified
+
+
+# LLM: _direct_child_refs reads only child ids for fake-completion detection.
+# 函数用途: 判断当前 coordinator 是否已经真实创建过 child；有 child 时不触发 analysis-only 阻断。
+def _direct_child_refs(agent: object, run_id: str) -> list[str]:
+    try:
+        task = agent.subagents.load(run_id)
+    except Exception:
+        return []
+    return [str(item) for item in (getattr(task, "child_ids", []) or []) if str(item).strip()]
 
 
 # LLM: write_finalized_recovery_snapshot 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

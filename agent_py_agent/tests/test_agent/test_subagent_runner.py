@@ -17,6 +17,7 @@ from agent_py_agent.agent.subagent import parse_subagent_runner_output
 from .backends import (
     AcceptedSubagentBackend,
     BoundaryWriteSubagentBackend,
+    CoordinatorAnalysisOnlyBackend,
     CoordinatorToolLimitBlockedBackend,
     HierarchicalScheduleSubagentBackend,
     RepairingSubagentBackend,
@@ -229,6 +230,35 @@ def test_subagent_runner_can_schedule_children_from_current_node_context():
         assert child.depth == 1
         assert child.agent_name == "小傻妞-child-catalog"
         assert "schedule_child_subagents" in child.allowed_tools
+
+
+# LLM: coordinator cannot finish by merely saying it should schedule children next.
+# 函数用途: 复现 R66：coordinator 没有工具调用、没有 child refs，却把“下一步派工”当成可验收完成。
+def test_subagent_runner_blocks_analysis_only_coordinator_without_children():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = AgentConfig(enable_tools=True, model_backend="echo", subagent_workspace="subs")
+        agent = SimpleAgent(cfg, root)
+        agent.backend = CoordinatorAnalysisOnlyBackend()
+        task = agent.subagents.create_run(
+            goal="先创建 worker，再等待 QA。",
+            thought="coordinator",
+            plan=["schedule worker"],
+            agent_name="小傻妞-coordinator",
+            role="coordinator",
+            allowed_tools=["schedule_child_subagents", "dispatch_subagents", "subagent_board"],
+        )
+
+        result = agent.run_subagent(task.id, dry_run=False, probe=False)
+        loaded = agent.subagents.load(task.id)
+        output = json.loads(Path(loaded.output_json).read_text(encoding="utf-8"))
+
+        assert result.structured_output_found
+        assert loaded.status == "BLOCKED"
+        assert loaded.verification_status == "UNVERIFIED"
+        assert loaded.failure_type == "needs_child_creation"
+        assert "schedule_child_subagents" in output["next_actions"]
+        assert output["structured_output"]["actual_tools"] == []
 
 
 def test_subagent_runner_repairs_missing_structured_output():

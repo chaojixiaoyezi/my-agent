@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..debug_trace import trace_hierarchy_schedule
@@ -13,7 +13,7 @@ from .base import CreateRunParams
 from .hierarchy_acceptance import scheduled_child_acceptance_checks
 from .hierarchy_agent_names import scheduled_child_agent_name
 from .hierarchy_context import inherited_hierarchy_thought, scheduled_child_goal
-from .hierarchy_qa_scheduler import RequiredQaChildSpec, required_qa_child_specs
+from .hierarchy_qa_scheduler import QaOrchestrationAdvice, qa_orchestration_advice
 from .hierarchy_scheduled_role import scheduled_child_role
 from .hierarchy_scope_guards import duplicate_child_domain_reason, schedule_block_reason
 from .hierarchy_tool_policy import (
@@ -86,6 +86,8 @@ class HierarchyScheduleResult:
     items: list[HierarchyScheduledItem]
     manual_confirmation_required: bool = True
     automatic_execution_allowed: bool = False
+    # LLM: quality_advice guides the model's next QA choice without creating a fixed workflow.
+    quality_advice: QaOrchestrationAdvice | None = None
 
 
 # LLM: HierarchyCreateChildRequest separates child creation facts from the persistence call.
@@ -97,6 +99,15 @@ class HierarchyCreateChildRequest:
     role: str
     goal: str
     extra_write_roots: list[str]
+
+
+# LLM: HierarchyResultBuildRequest bundles shared result-rendering inputs to keep helpers small.
+# 类用途: 组装 blocked/dry-run/apply 结果时复用 parent、request 和 LLM advice，避免 helper 参数继续膨胀。
+@dataclass(frozen=True)
+class HierarchyResultBuildRequest:
+    parent: SubAgentTask
+    request: HierarchyScheduleRequest
+    quality_advice: QaOrchestrationAdvice | None = None
 
 # LLM: SubAgentHierarchyScheduler owns hierarchy limits and delegates actual persistence to SubAgentManager.
 # 类用途: 封装层级创建规则；只通过 manager.create_run 写任务，避免绕开既有工单/控制面同步。
@@ -112,7 +123,8 @@ class SubAgentHierarchyScheduler:
     # 函数用途: dry-run 或真正创建下一层 run；超过深度/数量限制时只返回 blocked。
     def schedule_children(self, request: HierarchyScheduleRequest) -> HierarchyScheduleResult:
         parent = self.manager.load(request.parent_run_id)
-        request = _request_with_required_qa_roles(self.manager, parent, request)
+        quality_advice = qa_orchestration_advice(manager=self.manager, parent=parent, specs=request.child_specs)
+        result_build = HierarchyResultBuildRequest(parent=parent, request=request, quality_advice=quality_advice)
         # LLM: generic guards run first; duplicate-domain guard needs persisted sibling metadata.
         reason = schedule_block_reason(parent, request) or duplicate_child_domain_reason(
             self.manager,
@@ -120,19 +132,29 @@ class SubAgentHierarchyScheduler:
             request,
         )
         if reason:
-            return trace_hierarchy_schedule(self.manager, parent, _blocked_result(parent, request, reason))
+            return trace_hierarchy_schedule(
+                self.manager,
+                parent,
+                _blocked_result(result_build, reason),
+            )
         if not request.apply:
-            return trace_hierarchy_schedule(self.manager, parent, _dry_run_result(parent, request))
-        return trace_hierarchy_schedule(self.manager, parent, _apply_result(self.manager, parent, request))
+            return trace_hierarchy_schedule(
+                self.manager,
+                parent,
+                _dry_run_result(result_build),
+            )
+        return trace_hierarchy_schedule(
+            self.manager,
+            parent,
+            _apply_result(self.manager, result_build),
+        )
 
 
 # LLM: _blocked_result returns a refs-only plan without creating child runs.
 # 函数用途: 构造阻断结果，保持 dry-run 形状稳定。
-def _blocked_result(
-    parent: SubAgentTask,
-    request: HierarchyScheduleRequest,
-    reason: str,
-) -> HierarchyScheduleResult:
+def _blocked_result(build: HierarchyResultBuildRequest, reason: str) -> HierarchyScheduleResult:
+    parent = build.parent
+    request = build.request
     return HierarchyScheduleResult(
         generated_at=time.time(),
         parent_run_id=parent.id,
@@ -144,12 +166,17 @@ def _blocked_result(
         planned_count=len(request.child_specs),
         created_run_ids=[],
         items=_planned_items(parent, request),
+        quality_advice=build.quality_advice,
     )
 
 
 # LLM: _dry_run_result previews exact depth/root/parent values without touching task files.
 # 函数用途: 构造非写入预览结果，让上级代理先确认会创建什么。
-def _dry_run_result(parent: SubAgentTask, request: HierarchyScheduleRequest) -> HierarchyScheduleResult:
+def _dry_run_result(
+    build: HierarchyResultBuildRequest,
+) -> HierarchyScheduleResult:
+    parent = build.parent
+    request = build.request
     return HierarchyScheduleResult(
         generated_at=time.time(),
         parent_run_id=parent.id,
@@ -161,6 +188,7 @@ def _dry_run_result(parent: SubAgentTask, request: HierarchyScheduleRequest) -> 
         planned_count=len(request.child_specs),
         created_run_ids=[],
         items=_planned_items(parent, request),
+        quality_advice=build.quality_advice,
     )
 
 
@@ -168,9 +196,10 @@ def _dry_run_result(parent: SubAgentTask, request: HierarchyScheduleRequest) -> 
 # 函数用途: 逐个创建下一层 run，并返回 refs-only 创建摘要。
 def _apply_result(
     manager: Any,
-    parent: SubAgentTask,
-    request: HierarchyScheduleRequest,
+    build: HierarchyResultBuildRequest,
 ) -> HierarchyScheduleResult:
+    parent = build.parent
+    request = build.request
     created = [_create_child(manager, parent, spec) for spec in request.child_specs]
     return HierarchyScheduleResult(
         generated_at=time.time(),
@@ -183,33 +212,7 @@ def _apply_result(
         planned_count=len(request.child_specs),
         created_run_ids=[item.id for item in created],
         items=[_created_item(item) for item in created],
-    )
-
-
-# LLM: _request_with_required_qa_roles turns explicit QA contracts into real child specs before guards run.
-# 函数用途: 父任务点名 tester/bug_finder/acceptor 时，补齐模型漏派的 QA 子任务；已有或本轮已请求的角色不会重复创建。
-def _request_with_required_qa_roles(
-    manager: Any,
-    parent: SubAgentTask,
-    request: HierarchyScheduleRequest,
-) -> HierarchyScheduleRequest:
-    qa_specs = required_qa_child_specs(manager=manager, parent=parent, specs=request.child_specs)
-    if not qa_specs:
-        return request
-    return replace(
-        request,
-        child_specs=[*request.child_specs, *[_hierarchy_child_spec_from_qa_spec(item) for item in qa_specs]]
-    )
-
-
-# LLM: _hierarchy_child_spec_from_qa_spec adapts scheduler-neutral QA specs into the public bundle.
-# 函数用途: 把 QA helper 返回的轻量规格转成 `HierarchyChildSpec`，避免 helper 反向依赖 scheduler 类型。
-def _hierarchy_child_spec_from_qa_spec(spec: RequiredQaChildSpec) -> HierarchyChildSpec:
-    return HierarchyChildSpec(
-        goal=spec.goal,
-        agent_name=spec.agent_name,
-        role=spec.role,
-        acceptance_checks=list(spec.acceptance_checks),
+        quality_advice=build.quality_advice,
     )
 
 
