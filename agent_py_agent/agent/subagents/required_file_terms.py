@@ -68,13 +68,13 @@ _INTERNAL_REF_HINTS = (
     "child",
 )
 _POSITIVE_DELIVERABLE_HINTS = (
-    "必须",
     "交付",
     "产出",
     "创建",
     "生成",
     "写入",
     "写 ",
+    "包含",
     "required",
     "deliver",
     "create",

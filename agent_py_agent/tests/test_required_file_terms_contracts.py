@@ -475,7 +475,7 @@ def test_file_contract_treats_markdown_forbidden_heading_as_negative_scope():
 # 函数用途: 验收/看板语境里的 `task.json 里的状态` 不能变成下级必须创建的产物。
 def test_file_contract_ignores_internal_state_file_references_without_deliverable_label():
     text = (
-        "必须包含 index.html、style.css、app.js。\n"
+        "必须包含 index.html、style.css、app.js；购物网站产物完整只是基础通过项。\n"
         "只有所有真实 task.json 里的 root/child/grandchild 状态一致时，才能说完整通过。\n"
         "父级状态报告会读取 execution_context.json refs，但这些不是用户产物。"
     )
