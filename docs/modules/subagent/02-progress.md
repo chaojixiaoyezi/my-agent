@@ -961,8 +961,18 @@
 
 ## 2026-05-12 R76: root no longer writes capability requests
 - 中文说明：R76 暴露一个更基础的问题：root 没有上级，却能调用 `capability_request` 写 OPEN 请求，结果像“自己给自己请假”，会把 root 卡进等待授权流程。
-- 已修正：`capability_request` 工具现在拒绝 root run；只有有 parent 的非 root runner 才能写 OPEN 能力申请。root 遇到任务目录内普通缺口应调度下级或做策略决策；遇到系统/自毁/越权红线先记录阻止，未来再接 root policy/user confirmation，不再伪装成向父级申请。
+- 已修正：`capability_request` 工具现在拒绝 root run；只有有 parent 的非 root runner 才能写 OPEN 能力申请。root 遇到任务目录内普通缺口应使用现有工具、调度下级或说明暂不支持；root 自毁/卸载/系统红线暂时不纳入当前能力申请链路，后续再单独设计 root policy。
 - Prompt 同步：depth=0/root runner prompt 明确写入 `root 不走 capability_request` 和 `root 当前不应缺能力`，减少模型先走错路。
 - 对标结论：通道运行时 的 exec policy 按 `security/ask/allowlist/approval` 在执行边界决策，长期助手 也把危险命令审批放在用户/配置策略层；两者都不是让最上层 agent 生成一条“等上级授权”的内部工单。我们按这个思路把 root 从 child capability 流程里拿出来。
 - 已补测试：`test_capability_request_tool_blocks_root_run_requests`、`test_runner_prompt_tells_root_not_to_request_capability`，并回归 capability request tool 和 prompt contract focused tests。
 - 下一步：继续干净 R77，重点观察 root 遇到删除/清理/缺工具时是否改为调度下级、记录策略阻止或走未来 root-policy 口子，而不是 OPEN capability request。
+
+## 2026-05-12 R77: root cap request fixed, but state handoff drift remains
+- 中文说明：R77 是干净任务目录下的真实 4 层购物站复测，外层观察者只创建第一层并观察，后续由 root/coordinator 继续派 child、grandchild 和 leaf。
+- 已确认：root 没有再写 `capability_request`，下级能力申请通道仍保留；leaf 被工具轮数/资源限制卡住后，父级能通过 `subagent_board` 发现 BLOCKED，并创建 `小小小傻妞-rescue-worker` 接管剩余页面。
+- 产物事实：rescue worker 最终把 `index.html`、`register.html`、`login.html`、`products.html`、`product-detail.html`、`cart.html`、`checkout.html`、`order-success.html`、`style.css`、`app.js` 写到 `/Users/example/my-终端应用/deliverables/stage7_shop_complete_20260512_r77/build`。
+- 新问题 1：第一层 root/coordinator 因 `create_subagents` 未传 `agent_name` 仍落成 `general`，违反“小傻妞-*”命名观察规则；已修正为未传名时默认 `小傻妞-role`。
+- 新问题 2：长 `write_file` 仍会先撞 inline 上限，模型会重复几轮后才切到短骨架/分块追加；现有恢复有效但不够丝滑，后续还要继续压低大正文单次工具参数概率。
+- 新问题 3：顶层观察入口读取外置 board/dispatch 摘要后出现状态漂移，误判 build 目录为空，并基于错状态重复 dispatch。已先补调度摘要里的 `output_call_id` / `output_scoped_call_id` 和“优先用 scoped id，不抄长路径/hash”的提示，下一轮继续验证是否减少 artifact/path 串线。
+- 已补测试：`test_explicit_coordinator_seed_without_name_gets_lineage_prefix`、`test_runner_prompt_tells_root_not_to_request_capability`、`test_dispatch_externalized_result_keeps_compact_next_action_without_read_hint`。
+- 下一步：跑 R78 干净复测，重点观察三件事：第一层名字是否稳定为 `小傻妞-*`；root 是否继续不写 capability_request；父级读取 board/dispatch refs 后是否不再把真实产物状态看反。

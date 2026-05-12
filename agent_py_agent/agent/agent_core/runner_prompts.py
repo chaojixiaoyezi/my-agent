@@ -174,7 +174,7 @@ def _root_execution_contract_lines(context: SubAgentExecutionContext) -> list[st
         return []
     return [
         "- root 不走 capability_request；root 当前不应缺能力。"
-        "遇到任务内普通缺口时创建/调度下级或做策略决策；遇到系统/自毁/越权红线时记录阻止原因，等待未来 root policy，不要写 OPEN 能力申请。"
+        "遇到任务内普通缺口时使用现有工具、创建/调度下级或直接说明暂不支持；不要写 OPEN 能力申请。"
     ]
 
 

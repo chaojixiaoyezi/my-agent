@@ -86,7 +86,7 @@ def _create_run_params(
         goal=goal,
         thought=str(raw_params.get("thought") or "根据父代理派工执行，并保留可验收证据。").strip(),
         plan=_string_list(raw_params.get("plan")) or ["理解目标", "执行任务", "产出证据", "等待父代理验收"],
-        agent_name=str(raw_params.get("agent_name") or "general").strip(),
+        agent_name=_root_agent_name(raw_params, role),
         role=role,
         allowed_tools=allowed_tools,
         owner=str(raw_params.get("owner") or "").strip(),
@@ -96,6 +96,18 @@ def _create_run_params(
         extra_write_roots=extra_write_roots,
         workflow_mode=workflow_mode,
     )
+
+
+# LLM: _root_agent_name gives top-level spawned agents the same lineage naming contract as descendants.
+# 函数用途: create_subagents 未传 agent_name 时，用“小傻妞-role”兜底，避免真实测试落成 general。
+def _root_agent_name(raw_params: dict[str, object], role: str) -> str:
+    explicit = str(raw_params.get("agent_name") or "").strip().strip("-")
+    if explicit:
+        return explicit
+    suffix = str(role or "worker").strip().replace("_", "-").strip("-") or "worker"
+    if suffix in {"general", "child"}:
+        suffix = "worker"
+    return f"小傻妞-{suffix}"
 
 
 # LLM: _merged_extra_write_roots 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。

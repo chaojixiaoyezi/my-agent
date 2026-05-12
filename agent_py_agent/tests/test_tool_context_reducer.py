@@ -32,6 +32,8 @@ def test_dispatch_externalized_result_keeps_compact_next_action_without_read_hin
             "output_externalized": True,
             "artifact_ref": "/tmp/tool_outputs/dispatch_subagents-1.json",
             "output_path": "/tmp/tool_outputs/dispatch_subagents-1.json",
+            "call_id": "1-1",
+            "scoped_call_id": "root-1:1-1",
             "output_hash": "abc",
             "output_size_bytes": len(output),
         },
@@ -40,6 +42,8 @@ def test_dispatch_externalized_result_keeps_compact_next_action_without_read_hin
     assert "orchestration_summary" in rendered
     assert "inspect_or_rescue_direct_children" in rendered
     assert "child-1" in rendered
+    assert "output_scoped_call_id: root-1:1-1" in rendered
+    assert "prefer output_scoped_call_id" in rendered
     assert "records" not in rendered
     assert "read_artifact_hint" not in rendered
     assert len(rendered) < 1400

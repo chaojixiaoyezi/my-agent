@@ -146,6 +146,8 @@ def test_runner_prompt_tells_root_not_to_request_capability():
 
     assert "root 不走 capability_request" in prompt
     assert "root 当前不应缺能力" in prompt
+    assert "自毁" not in prompt
+    assert "root policy" not in prompt
 
 
 def test_runner_prompt_keeps_role_template_details_out_of_leaf_prompt():

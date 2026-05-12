@@ -4523,3 +4523,35 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Focused capability request and prompt-contract tests passed after the fix.
 - Next:
   - Start clean R77. Expected behavior: if root hits cleanup/delete/tool gaps, it should not create OPEN capability requests; it should use child routing, refs-only advice, or policy-block reporting until a dedicated root policy exists.
+
+### Result: R77 Confirmed Rescue Handoff, Exposed State Drift
+
+- Discovered at: 2026-05-12 during R77 clean root-only shopping-site run.
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`.
+  - The outer observer seeded one root/coordinator and then watched; product files were only written by descendants.
+  - Required chain was main observer -> `小傻妞-*` -> `小小傻妞-*` -> `小小小傻妞-*`.
+- Observed behavior:
+  - Root no longer created any OPEN `capability_request`, which matches the narrowed root rule.
+  - First created run still used the default name `general` because top-level `create_subagents` did not provide `agent_name`.
+  - The chain did reach depth 3: `general` -> `小傻妞-child_coordinator` -> `小小傻妞-child_coordinator` -> `小小小傻妞-leaf_worker`.
+  - The first leaf hit `RESOURCE_LIMIT` after repeated long write attempts, but its parent saw the BLOCKED state and created `小小小傻妞-rescue-worker`.
+  - The rescue worker wrote all 10 expected shopping-site files into the clean build directory.
+  - Later, the top observer/root-facing loop read externalized board/dispatch refs and drifted: it reported stale/nonexistent run ids and incorrectly concluded the build directory was empty, even though the files existed on disk.
+- 中文解释：
+  - 好的地方：下级挂了，上级能看到并叫救援 worker；root 没再“找不存在的上级申请能力”。
+  - 坏的地方：名字兜底不稳，第一层还会叫 `general`；另外 refs/artifact 摘要一旦被模型抄错或脑补，父级会基于错状态继续派工，越跑越偏。
+- Root cause:
+  - `create_subagents` 的默认 `agent_name` 仍是 legacy `general`，没有复用层级中文命名合同。
+  - Orchestration artifact 摘要主要给了长路径/hash，缺少更不容易抄错的 scoped call id；真实模型倾向复制长 artifact 路径并在 hash/路径上漂移。
+  - 长内容恢复规则能救回来，但模型仍会先重复撞几次 inline 上限，说明写大文件的 prompt/工具体验还要继续收紧。
+- Fix:
+  - `create_subagents` 未传 `agent_name` 时现在默认生成 `小傻妞-<role>`。
+  - root runner prompt 和 capability_request 错误文案收窄为：root 不走 capability_request；普通缺口用现有工具、调度下级或说明暂不支持。root 自毁/卸载/系统红线不放在当前 child capability 流程里，后续单独设计。
+  - Externalized orchestration summaries now include `output_call_id`, `output_scoped_call_id`, and a policy line telling the model to prefer the scoped id for `read_artifact` instead of copying long paths or hashes.
+- Verification:
+  - `test_explicit_coordinator_seed_without_name_gets_lineage_prefix`
+  - `test_runner_prompt_tells_root_not_to_request_capability`
+  - `test_dispatch_externalized_result_keeps_compact_next_action_without_read_hint`
+- Next:
+  - Run clean R78. Expected behavior: first run name starts with `小傻妞-`; root still does not write `capability_request`; parent/root reads board/dispatch refs without stale id/path drift, then proceeds to tester/bug_finder/acceptor instead of looping on false empty-build state.

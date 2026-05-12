@@ -98,7 +98,7 @@ def _capability_request_input(agent: object, params: dict[str, object]) -> Capab
     if not run_id:
         return _capability_error("缺少 run_id；runner 内会自动使用当前 run id。")
     if _is_root_run(agent, run_id):
-        return _capability_error("root run 不走 capability_request；root 当前不应缺能力，遇到安全红线应记录为策略阻止或等待未来 root policy。")
+        return _capability_error("root run 不走 capability_request；root 当前不应缺能力，请使用现有工具、调度下级或说明暂不支持。")
     problem = str(normalized.get("problem") or "").strip()
     if not problem:
         return _capability_error("缺少 problem；必须说明当前被什么能力缺口阻塞。")
