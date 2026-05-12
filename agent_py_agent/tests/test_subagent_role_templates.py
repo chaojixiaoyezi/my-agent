@@ -87,6 +87,46 @@ def test_user_role_template_can_extend_catalog(tmp_path):
     assert any("PPT润色子代理" in check for check in task.acceptance_checks)
 
 
+# LLM: test_user_template_role_can_be_selected_from_natural_name protects external template resolution.
+# 函数用途: 用户模板目录新增角色后，LLM 写出带前后缀的自然角色名也能落到对应模板。
+def test_user_template_role_can_be_selected_from_natural_name(tmp_path):
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir()
+    (template_dir / "ppt_polisher.json").write_text(
+        json.dumps(
+            {
+                "id": "ppt_polisher",
+                "name": "PPT Polisher",
+                "name_zh": "PPT润色子代理",
+                "summary": "Review and polish presentation decks.",
+                "summary_zh": "检查并润色演示文稿，可以同时看多个页面或多个文件。",
+                "scope": "role",
+                "handles_multiple_targets": True,
+                "use_when_zh": ["需要统一风格、措辞、结构或讲述节奏。"],
+                "default_tools": ["list_files", "read_file", "read_artifact"],
+                "can_write": False,
+                "output_contract": {"type": "findings"},
+                "output_contract_zh": "输出问题清单、证据路径和建议修改方向。",
+                "prompt_zh": "你是PPT润色子代理，先看整体叙事，再看页面细节。",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    manager = SubAgentManager(tmp_path / "workspace", role_template_dirs=[template_dir])
+    task = manager.create_run(
+        goal="检查三份 PPT 草稿",
+        thought="polish",
+        plan=["read", "report"],
+        role="slide_ppt_polisher_lead",
+    )
+
+    assert task.role == "slide_ppt_polisher_lead"
+    assert task.allowed_tools == ["list_files", "read_file", "read_artifact"]
+    assert any("PPT润色子代理" in check for check in task.acceptance_checks)
+
+
 # LLM: test_tiny_action_template_is_rejected keeps role templates from becoming one-off tasks.
 # 函数用途: 防止把“检查某个按钮”这种小动作登记成内置/自定义角色模板。
 def test_tiny_action_template_is_rejected(tmp_path):

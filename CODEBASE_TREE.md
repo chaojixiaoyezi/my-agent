@@ -64,6 +64,7 @@ agent_py_agent/
 |   |-- settings/                             # 配置 schema、normalize、服务化 coercion
 |   |   `-- services/                         # 配置字段归一化和 runtime/subagent 子配置
 |   |-- subagent_workflows/                   # 子代理 workflow route/compile/plan 和内置模板
+|   |-- subagents/role_template_resolution.py # 自然 role 名到模板 id 的运行时解析
 |   |-- subagents/role_templates.py           # 子代理广义角色模板加载、校验和查询
 |   |-- subagents/role_template_catalog/      # 内置外置 JSON role templates
 |   |-- subagents/workflow_template_catalog/  # workflow 模板外置化预留目录
@@ -1033,6 +1034,7 @@ docs/
 - `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 层级调度守卫；识别四层/孙孙/depth=3 合同，阻止 depth<2 提前创建 leaf，并在写根漂移检查中区分用户产物根和内部 task/run workspace。
 - `agent_py_agent/agent/subagents/services/persistence.py`: 普通保存默认合并已有 child_ids 防止旧快照覆盖层级边，`save_hierarchy_links()` 场景会关闭合并以支持受控子树重挂。
 - `agent_py_agent/agent/subagents/manager_hierarchy.py`: 新增 `SubAgentManager.schedule_child_runs(params=...)` facade，保持层级创建只走 bundle 入口和既有 `create_run` 持久化路径。
+- `agent_py_agent/agent/subagents/role_template_resolution.py`: 从当前模板目录把 `child_coordinator`、`qa_tester`、用户自定义前后缀 role 等自然名字解析到模板 id，避免自由 role 落成空工具代理。
 - `agent_py_agent/agent/subagents/role_templates.py`: 加载内置和用户 JSON role templates，要求广义角色、中文说明和多目标适用，坏模板记录 issue；提供轻量 `role_template_index_text()` 给主代理和派工类角色常驻使用，索引包含适用/不适用场景、能力标签和模板位置但不展开默认工具；按需 `role_template_detail_text()` 给派工 coordinator 展开完整角色提示。
 - `agent_py_agent/agent/subagents/role_template_catalog/builtin/*.json`: 内置 `coordinator/worker/bug_finder/tester/acceptor/researcher/writer` 角色模板。
 - `agent_py_agent/agent/agent_core/tool_call_context_reducer.py`: 大段 assistant tool-call 参数摘要层，避免 `write_file(content=<large html>)` 原文反复进入下一轮 prompt；保留工具名、路径、字段大小、hash 和短预览。小 dict payload 也渲染为摘要行，避免模型把历史 dict 复制成新工具调用。

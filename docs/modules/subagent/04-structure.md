@@ -46,6 +46,7 @@ agent_py_agent/agent/
 |-- subagent.py                         # 兼容入口
 |-- subagents/                          # subagent 任务、manager、报告、runner、解析和渲染
 |   |-- context_bundle.py               # 实时子代理工单包和 Context Gate
+|   |-- role_template_resolution.py      # 自然 role 名到模板 id 的运行时解析
 |   |-- role_templates.py               # role template 加载、校验和查询
 |   |-- role_template_catalog/builtin/  # 内置广义角色模板 JSON
 |   `-- workflow_template_catalog/      # 后续 workflow 模板外置化预留目录
@@ -111,12 +112,12 @@ agent_py_agent/agent/
 - `agent_py_agent/agent/agent_core/orchestration_dispatch_payload.py`：承接 `dispatch_subagents` 工具输出里的单条 record payload，保持返回给 runner 的 acceptance/test/follow-up refs 精简且可测试；runner 真实创建了下级时，会透传 `runner_created_children`、child run ids 和 roles，避免父级把 dispatch 记录数误读成真实孩子数；run id 选择失败时还会把 `valid_run_ids` 放到顶层 recovery payload。
 - `agent_py_agent/agent/subagents/services/hierarchy_recovery.py`：定义 `HierarchyRecoveryRequest` / `HierarchyRecoveryResult`，从 root run 只读扫描 child_ids 子树，返回需要恢复的后代、context bundle、父级 context bundle、takeover readiness、failure handoff 和 checkpoint refs；可按 capability timeout 阈值把 stale `RUNNING` 后代纳入恢复候选，不展开 artifact 正文、不自动接管。
 - `agent_py_agent/agent/subagents/manager_hierarchy.py`：给 `SubAgentManager` 暴露 `schedule_child_runs(params=...)` 薄 facade，让层级创建入口保持单一且可测试。
-- `agent_py_agent/agent/subagents/role_templates.py`：加载内置和用户外置 JSON 角色模板；模板必须是广义角色、带中文说明、可处理多个目标，坏模板只记录 issue，不影响内置模板。`role_template_index_text()` 给主代理常驻 prompt 提供模板索引、适用/不适用场景、能力标签和模板位置，但不展开默认工具和完整系统提示；`role_template_detail_text()` 给普通 runner 只展开当前角色详情，给 coordinator runner 在派工时展开角色全集详情，避免不派工时加载全部派工细节。
+- `agent_py_agent/agent/subagents/role_templates.py`：加载内置和用户外置 JSON 角色模板；模板必须是广义角色、带中文说明、可处理多个目标，坏模板只记录 issue，不影响内置模板。`role_template_index_text()` 给主代理常驻 prompt 提供模板索引、适用/不适用场景、能力标签和模板位置，但不展开默认工具和完整系统提示；`role_template_detail_text()` 给普通 runner 只展开当前角色详情，给 coordinator runner 在派工时展开角色全集详情，避免不派工时加载全部派工细节。`role_template_id_for_role()` 是运行时兜底解析层：LLM 写出 `child_coordinator`、`qa_tester`、`slide_ppt_polisher_lead` 这类自然角色名时，会从当前模板目录按 token 匹配到 `coordinator/tester/ppt_polisher`，找不到时由角色契约回退到 `worker` 模板，避免空工具子代理。
 - `agent_py_agent/agent/subagents/role_template_catalog/builtin/*.json`：内置角色模板，包括协调、执行、找茬、测试、验收、研究、写作。模板定义默认工具、是否可写、是否可验收、输出契约和中文 prompt。
 - `docs/modules/subagent/08-role-selection-strategy.md`：角色选择策略文档，明确 root/coordinator/lead 什么时候用 coordinator、worker、writer、researcher、tester、bug_finder、acceptor，以及常驻短索引和按需模板详情的边界。
 - 角色选择策略必须和模板分开维护：root/coordinator/lead 常驻只加载“角色索引 + 何时使用”的短规则，真正派工时才展开模板详情。推荐默认语义是：`coordinator/lead` 拆分、广播、纠偏、接管和 refs 汇总；`worker/writer` 负责真实产物；`researcher` 查资料/事实源；`tester` 做验证计划或执行可用测试；`bug_finder` 找错、找风险、做反例；`acceptor` 做最终验收建议但不自验收。一个 tester/bug_finder/acceptor 可以检查多个 worker 的产物，不要求一一对应。
 - `coordinator` 角色模板把最终产物写入定义为“有权限覆盖但默认委派”的职责边界：coordinator 可以继承产物目录权限用于检查、接管和救援；runner write boundary 会把这些目录标成 `product_write_roots`，并对 coordinator/tester/reviewer 等上层角色使用 `product_write_policy=delegate`，所以它们只能写 task-local 报告和证据，真实业务产物必须转派 worker/writer/leaf_worker。
-- `agent_py_agent/agent/subagents/role_contracts.py`：集中定义 `reporter` / `checker` 兼容角色契约，并把 `bug_finder/tester/acceptor/coordinator/worker/researcher/writer` 接到 role template；检查型角色可以写 task-local 检查报告和证据摘要，但不能自验收、不能替 worker/writer 写最终业务产物，最终仍由父级 gate 裁决。
+- `agent_py_agent/agent/subagents/role_contracts.py`：集中定义 `reporter` / `checker` 兼容角色契约，并把 `bug_finder/tester/acceptor/coordinator/worker/researcher/writer` 接到 role template；检查型角色可以写 task-local 检查报告和证据摘要，但不能自验收、不能替 worker/writer 写最终业务产物，最终仍由父级 gate 裁决。运行时角色名可保留层级/专业辨识度，例如 `child_coordinator`、`leaf_worker`、`frontend_footer_builder`，但工具、验收和质量合同必须套到匹配模板；未知自由角色至少回退 `worker` 模板，不能生成 `allowed_tools=[]` 的空能力代理。
 - `agent_py_agent/agent/agent_core/runner_dispatch.py`：runner 候选会先过滤可执行状态，再按角色阶段排序：coordinator/规划类优先，worker/产出类先于 tester/bug_finder/critic，acceptor 最后；同一轮 dispatch 只放行当前最低阶段候选，producer/coordinator 未完成前 QA/test/review/acceptance 会等下一轮，排序发生在 `max_runners` 截断前，避免真实业务链路出现“先验收再干活”。runner dispatch record 会保存内部创建的 child ids/roles/status counts；runner 超时但已创建 child 时标记 `runner_partial_success` 和未完成 child ids。
 - `agent_py_agent/agent/agent_core/orchestration_tool_specs.py`：`create_subagents` / `schedule_child_subagents` 的工具说明只展示角色模板索引，不展开 `prompt_zh` 和默认工具细节；真正需要派工时由 runner prompt 加载详情。
 - `agent_py_agent/agent/agent_core/runner_gate.py`：统一计算 runner 外层超时；默认用户配置 `runner_timeout_seconds: "off"` 表示不限制，`auto` 才进入动态 timeout，数字字符串表示固定秒数。

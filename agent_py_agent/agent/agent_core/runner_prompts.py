@@ -236,10 +236,18 @@ def _coordinator_execution_contract_lines() -> list[str]:
 # LLM: _current_role_template_lines gives each runner its own role prompt without loading all templates.
 # 函数用途: 只展开当前角色的模板详情；普通 worker/tester 等能拿到专属提示，leaf_worker 等无模板角色保持精简。
 def _current_role_template_lines(context: SubAgentExecutionContext) -> list[str]:
+    if _is_leaf_worker_context(context):
+        return []
     detail = role_template_detail_text(roles=[str(context.role or "")]).strip()
     if not detail or _is_coordinator_context(context):
         return []
     return ["当前角色模板详情：", *[f"  {line}" for line in detail.splitlines()]]
+
+
+# LLM: _is_leaf_worker_context keeps concrete leaves slim while still letting contracts grant worker tools.
+# 函数用途: leaf_worker 只需要边界、工具和验收条件，不加载完整 worker 模板，避免大批叶子节点 prompt 变厚。
+def _is_leaf_worker_context(context: SubAgentExecutionContext) -> bool:
+    return "leaf_worker" in str(context.role or "").lower()
 
 
 # LLM: _is_coordinator_context identifies runner roles that should delegate file writing to leaves.
