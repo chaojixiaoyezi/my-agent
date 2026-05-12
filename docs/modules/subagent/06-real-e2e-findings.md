@@ -4270,3 +4270,51 @@ This document is append-only. Record every real subagent E2E issue found during 
   - `test_inherited_parent_qa_contract_does_not_bind_intermediate_coordinator`
 - Remaining risk:
   - Need a clean R68 real run to verify the new direct-contract behavior lets the correct parent create QA after implementation is ready, instead of binding QA to every intermediate coordinator.
+
+### Finding 213: Four-Layer Guard Became A Hardcoded Workflow
+
+- Discovered at: 2026-05-12 during R70.
+- Symptom:
+  - R70 confirmed `task.json` no longer polluted `required_files`, but root then tried to create a depth-2 style worker branch and hit `hierarchy_chain_requires_coordinator_until_depth_3`.
+  - After root dispatched the real depth=1 coordinator, that coordinator also tried to create a worker/writer child and hit the same block.
+- 中文解释：
+  - 这就是“规则太死”的典型例子。用户说“至少要有一条 4 层链路”，不是说所有分支都必须一层层全是 coordinator。root 可能一部分任务走 4 层，一部分走 3 层，一部分直接派 worker。
+- Root cause:
+  - The scheduler guard treated any implementation-like role before depth 3 as a chain violation whenever the parent goal mentioned a four-layer test.
+  - A separate root bypass guard blocked direct root worker/leaf creation after a coordinator already existed, which made mixed-depth task trees impossible.
+- Fix:
+  - Schedule-time guards no longer force the four-layer workflow shape or block root from mixing coordinator and direct implementation branches.
+  - The remaining schedule guards are red lines: empty plans, max depth/children, same-call coordinator plus explicit leaf, product-root drift, forbidden sibling domains, QA before implementation readiness, and duplicate verified leaf targets.
+- Verification:
+  - `test_hierarchy_schedule_preserves_no_space_four_layer_contract_without_forcing_coord_chain`
+  - `test_root_with_coordinators_can_still_create_direct_leaf`
+  - `test_hierarchy_schedule_keeps_controlled_exec_contract_for_leaf`
+- Next:
+  - Rerun a clean R71. Expected result: root may create coordinator/worker mixed branches, while final acceptance still fails if the real task tree lacks the required four-layer coverage, QA roles, or healthy descendants.
+
+### Finding 214: R71 Proved Production Chain But Root Skipped QA Roles
+
+- Discovered at: 2026-05-12 during R71.
+- Symptom:
+  - Root created a real 4-layer chain: root coordinator -> `小傻妞-商品协调员` -> `小小傻妞-商品协调员` -> `小小小傻妞-文件写入员`.
+  - The leaf worker wrote all 10 required shopping-site files into the build directory, then the coordinators marked their production chain as complete.
+  - Root inspected the product files but never created real `tester`, `bug_finder`, or `acceptor` subagents.
+  - Final acceptance correctly blocked the root with `acceptance_failed`: missing user-named QA roles `tester, bug_finder, acceptor`.
+- 中文解释：
+  - 这次不是“干活没干出来”，而是“干活出来了，但没找测试/找错/验收的小傻妞”。所以系统不能说完成，必须挡住。这符合当前方向：流程不要写死，但最后验收必须按真实事实卡住。
+- What worked:
+  - The scheduler no longer blocked implementation children just because the parent goal mentioned a 4-layer chain.
+  - The real product root stayed clean: no `task.json`, `RUNNER_RESULT.md`, `execution_context.json`, or forbidden legacy product filenames landed in `build`.
+  - Long-content parse failures on `products.html/app.js` recovered through shorter follow-up writes, and `app.js` was eventually created.
+- Root cause:
+  - `quality_advice` and runner closeout prompts are still not strong enough to make root choose QA roles after production children finish.
+  - This should be solved by better advice/context and workflow templates, not by reintroducing a scheduler rule that auto-creates fixed QA children.
+- Fix:
+  - No code fix in this slice; this run validates the acceptance gate behavior after removing hardcoded hierarchy forcing.
+- Verification:
+  - R71 task state ended with root `BLOCKED / FAILED / acceptance_failed`.
+  - Child, grandchild, and leaf production tasks ended `DONE / VERIFIED`.
+  - Required files present in `/Users/example/my-终端应用/deliverables/stage7_shop_complete_20260512_r71/build`:
+    `index.html`, `register.html`, `login.html`, `products.html`, `product-detail.html`, `cart.html`, `checkout.html`, `order-success.html`, `style.css`, `app.js`.
+- Next:
+  - Strengthen `quality_advice` / root closeout context so root sees “production done, now create tester/bug_finder/acceptor” as the next action before finalizing.

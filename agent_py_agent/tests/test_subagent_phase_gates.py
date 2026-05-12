@@ -1,6 +1,6 @@
 """LLM: focused tests for hierarchy phase gates discovered by real Stage7 E2E.
 
-模块用途: 验证 root 不绕过 coordinator 直建 leaf，并验证 quality/test runner 不抢在生产线前执行。
+模块用途: 验证 root 可按任务混合直派 worker/leaf，并验证 quality/test runner 不抢在生产线前执行。
 """
 
 from __future__ import annotations
@@ -34,9 +34,9 @@ def _runner_task(run_id: str, role: str, agent_name: str = "", goal: str = ""):
     )
 
 
-# LLM: test_root_with_coordinators_cannot_bypass_into_leaf protects layered delegation.
-# 函数用途: root 已创建 coordinator 后，不能再直接创建 leaf_worker，应让对应 coordinator 继续派下一层。
-def test_root_with_coordinators_cannot_bypass_into_leaf(tmp_path):
+# LLM: test_root_with_coordinators_can_still_create_direct_leaf keeps dispatch policy flexible.
+# 函数用途: root 已创建 coordinator 后，仍可为别的工作分支直接创建 leaf_worker；是否满足层级链路交给验收判断。
+def test_root_with_coordinators_can_still_create_direct_leaf(tmp_path):
     manager = SubAgentManager(tmp_path / "subs")
     root = manager.create_run(goal="root delegates", thought="plan", plan=["plan"], role="coordinator")
     first = manager.schedule_child_runs(
@@ -60,8 +60,8 @@ def test_root_with_coordinators_cannot_bypass_into_leaf(tmp_path):
     )
 
     assert first.created_run_ids
-    assert result.blocked is True
-    assert result.reason.startswith("root_leaf_bypass_existing_coordinators")
+    assert result.blocked is False
+    assert result.created_run_ids
 
 
 # LLM: test_runner_candidates_defer_quality_until_producers_finish covers producer/QA phase order.

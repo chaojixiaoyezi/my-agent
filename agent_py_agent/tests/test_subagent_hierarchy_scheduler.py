@@ -160,9 +160,10 @@ def test_hierarchy_schedule_blocks_leaf_when_four_layer_token_has_no_space(tmp_p
         )
     )
 
-    assert result.blocked is True
-    assert result.reason == "hierarchy_chain_requires_coordinator_until_depth_3"
-    assert manager.load(child.id).child_ids == []
+    assert result.blocked is False
+    leaf = manager.load(result.created_run_ids[0])
+    assert leaf.parent_id == child.id
+    assert leaf.depth == 2
 
 
 # LLM: child goals may mention task_dir as context; product-root drift should only reject user-output drift.
@@ -438,9 +439,11 @@ def test_hierarchy_schedule_keeps_controlled_exec_contract_for_leaf(tmp_path):
     root = _controlled_exec_contract_root(manager, deliverables)
 
     child_result = _schedule_vague_child(manager, root.id)
-    early_leaf = _schedule_vague_leaf(manager, child_result.created_run_ids[0])
-    assert early_leaf.blocked is True
-    assert early_leaf.reason == "hierarchy_chain_requires_coordinator_until_depth_3"
+    early_leaf_result = _schedule_vague_leaf(manager, child_result.created_run_ids[0])
+    assert early_leaf_result.blocked is False
+    early_leaf = manager.load(early_leaf_result.created_run_ids[0])
+    assert "controlled_exec" in early_leaf.goal
+    assert "task_trash" in early_leaf.goal
     leaf = _schedule_controlled_exec_contract_leaf(manager, child_result.created_run_ids[0])
 
     assert "capability_request" in leaf.goal
