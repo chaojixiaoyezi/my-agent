@@ -188,6 +188,9 @@ def _coordinator_execution_contract_lines() -> list[str]:
             "需要多层协作时不要误以为只能创建 worker；父级要求 4 层链路时，深度未到孙孙层前先创建下一层 coordinator。",
             "- 如果父级目标或验收条件点名需要 tester、bug_finder、acceptor、reviewer、找错、测试或验收角色，"
             "必须创建真实 child run，并把 role/agent_name 写成对应角色；只在 goal、summary 或 evidence 里提到这些词不算角色覆盖。",
+            "- 当生产 child/leaf 已完成，但父级合同仍缺 tester/bug_finder/acceptor 时，"
+            "不要直接输出最终 SUBAGENT_RESULT；先调用 schedule_child_subagents 获取或执行 quality_advice，"
+            "再由你按 ready refs、风险和 scope 选择 QA 数量、顺序和是否需要 repair。",
             '- schedule_child_subagents 的参数必须放在顶层，例如 {"tool":"schedule_child_subagents","apply":true,"children":[...]}；'
             '不要包成 {"orchestration": {...}}，长目标请分多次调用，每次 1-2 个 child。',
             "- 不要让 worker/writer 代写 coordinator 自己的协调证据；需要共享时引用 artifact_refs/evidence_refs。",

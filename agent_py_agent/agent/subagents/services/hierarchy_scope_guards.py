@@ -18,6 +18,8 @@ from .hierarchy_leaf_targets import LeafTargetDedupeRequest, duplicate_verified_
 from .hierarchy_write_policy import inherited_extra_write_roots
 from .qa_role_contract import qa_role_identity_roles
 
+_IMPLEMENTATION_SCAN_MAX_NODES = 64
+
 
 # LLM: schedule_block_reason keeps only red-line dispatch guards; workflow shape is left to LLM/templates.
 # 函数用途: 判断本轮层级调度是否因深度、数量、空计划、越权写入或领域越界被阻断，不固定每层必须是 coordinator。
@@ -92,18 +94,27 @@ def _is_qa_like(item: Any) -> bool:
     return bool(qa_role_identity_roles(role=str(getattr(item, "role", "")), agent_name=str(getattr(item, "agent_name", ""))))
 
 
-# LLM: _ready_implementation_children reads only direct child identity and persisted status.
-# 函数用途: 判断父节点下是否已有 worker/writer/leaf/coder 子任务进入可验收或完成状态；否则不允许提前创建 QA。
+# LLM: _ready_implementation_children scans persisted descendants so QA can follow delegated production chains.
+# 函数用途: 判断父节点子树里是否已有 worker/writer/leaf/coder 进入可验收或完成状态；否则不允许提前创建 QA。
 def _ready_implementation_children(manager: Any, parent: SubAgentTask) -> list[Any]:
-    children: list[Any] = []
-    for child_id in parent.child_ids:
+    ready: list[Any] = []
+    queue = [str(item) for item in parent.child_ids if item]
+    seen: set[str] = set()
+    scanned = 0
+    while queue and scanned < _IMPLEMENTATION_SCAN_MAX_NODES:
+        child_id = queue.pop(0)
+        if child_id in seen:
+            continue
+        seen.add(child_id)
+        scanned += 1
         try:
             child = manager.load(child_id)
         except (FileNotFoundError, OSError, ValueError, TypeError):
             continue
         if _is_leaf_like(child) and _implementation_child_ready(child):
-            children.append(child)
-    return children
+            ready.append(child)
+        queue.extend(str(item) for item in getattr(child, "child_ids", []) or [] if str(item) not in seen)
+    return ready
 
 
 # LLM: _implementation_child_ready keeps QA creation behind an actual implementation checkpoint.

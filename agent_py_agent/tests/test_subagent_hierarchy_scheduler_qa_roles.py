@@ -156,3 +156,49 @@ def test_hierarchy_schedule_quality_advice_after_implementation_ready(tmp_path):
     assert result.quality_advice is not None
     assert result.quality_advice.phase == "quality_wave_ready"
     assert set(result.quality_advice.suggested_roles) == {"tester", "bug_finder", "acceptor"}
+
+
+# LLM: QA advice must notice ready implementation descendants, not only direct worker children.
+# 函数用途: root 先通过 coordinator 链路完成 leaf 后，再询问 schedule_child_subagents 时应收到 quality_wave_ready。
+def test_hierarchy_schedule_quality_advice_after_implementation_descendant_ready(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    build = tmp_path / "deliverables" / "shop" / "build"
+    parent = _qa_parent(manager, extra_write_roots=[str(build)])
+    coordinator = manager.create_run(
+        goal=f"协调 leaf 写购物站页面到 {build}。",
+        thought="coord",
+        plan=["delegate"],
+        parent_id=parent.id,
+        root_id=parent.id,
+        role="child_coordinator",
+        agent_name="小傻妞-shop-lead",
+        extra_write_roots=[str(build)],
+    )
+    leaf = manager.create_run(
+        goal=f"实现购物站页面，写到 {build}。",
+        thought="work",
+        plan=["write"],
+        parent_id=coordinator.id,
+        root_id=parent.id,
+        role="leaf_worker",
+        agent_name="小小傻妞-shop-worker",
+        extra_write_roots=[str(build)],
+    )
+    leaf.status = "AWAITING_ACCEPTANCE"
+    leaf.verification_status = "NEEDS_ACCEPTANCE"
+    manager.save(leaf)
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=parent.id,
+            child_specs=[],
+            apply=True,
+        )
+    )
+
+    assert result.blocked is True
+    assert result.reason == "no_child_specs"
+    assert result.created_run_ids == []
+    assert result.quality_advice is not None
+    assert result.quality_advice.phase == "quality_wave_ready"
+    assert set(result.quality_advice.suggested_roles) == {"tester", "bug_finder", "acceptor"}

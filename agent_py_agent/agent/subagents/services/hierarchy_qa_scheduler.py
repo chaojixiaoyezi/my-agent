@@ -115,13 +115,24 @@ def _existing_descendant_qa_roles(manager: Any, parent: SubAgentTask) -> set[str
     return roles
 
 
-# LLM: _has_ready_implementation_child checks direct implementation children without reading artifacts.
-# 函数用途: 判断父节点是否已有 worker/writer/leaf 子任务进入可验收/已完成状态，作为 QA 自动补派阶段门。
+# LLM: _has_ready_implementation_child scans descendants so advice follows delegated production branches.
+# 函数用途: 判断父节点子树是否已有 worker/writer/leaf 子任务进入可验收/已完成状态，作为 QA advice 阶段门。
 def _has_ready_implementation_child(manager: Any, parent: SubAgentTask) -> bool:
-    for child_id in parent.child_ids:
-        child = _load_child_for_qa_scan(manager, str(child_id))
-        if child is not None and _is_ready_implementation_child(child):
+    queue = [str(item) for item in parent.child_ids if item]
+    seen: set[str] = set()
+    scanned = 0
+    while queue and scanned < _QA_SCAN_MAX_NODES:
+        run_id = queue.pop(0)
+        if run_id in seen:
+            continue
+        seen.add(run_id)
+        scanned += 1
+        child = _load_child_for_qa_scan(manager, run_id)
+        if child is None:
+            continue
+        if _is_ready_implementation_child(child):
             return True
+        queue.extend(child_id for child_id in child.child_ids if child_id not in seen)
     return False
 
 

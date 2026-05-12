@@ -4308,13 +4308,53 @@ This document is append-only. Record every real subagent E2E issue found during 
   - Long-content parse failures on `products.html/app.js` recovered through shorter follow-up writes, and `app.js` was eventually created.
 - Root cause:
   - `quality_advice` and runner closeout prompts are still not strong enough to make root choose QA roles after production children finish.
+  - The QA phase gate and advice also only checked direct implementation children, so a root with `coordinator -> coordinator -> leaf_worker` production could miss that the descendant leaf was already ready for QA.
   - This should be solved by better advice/context and workflow templates, not by reintroducing a scheduler rule that auto-creates fixed QA children.
 - Fix:
-  - No code fix in this slice; this run validates the acceptance gate behavior after removing hardcoded hierarchy forcing.
+  - R72 changed QA readiness checks to scan ready implementation descendants, not only direct children.
+  - Coordinator runner prompt now says production done + missing tester/bug_finder/acceptor means call `schedule_child_subagents` for `quality_advice` before final closeout.
+  - The scheduler still does not auto-create fixed QA children; LLM/templates choose QA quantity, scope, order, and repair strategy.
 - Verification:
   - R71 task state ended with root `BLOCKED / FAILED / acceptance_failed`.
   - Child, grandchild, and leaf production tasks ended `DONE / VERIFIED`.
   - Required files present in `/Users/example/my-终端应用/deliverables/stage7_shop_complete_20260512_r71/build`:
     `index.html`, `register.html`, `login.html`, `products.html`, `product-detail.html`, `cart.html`, `checkout.html`, `order-success.html`, `style.css`, `app.js`.
 - Next:
-  - Strengthen `quality_advice` / root closeout context so root sees “production done, now create tester/bug_finder/acceptor” as the next action before finalizing.
+  - R72 should verify whether root sees descendant production readiness, then creates tester/bug_finder/acceptor instead of finalizing after file inspection.
+
+### Result: R72 Created QA Roles From Descendant Readiness, Then Correctly Blocked On QA Evidence
+
+- Discovered at: 2026-05-12 during R72.
+- Test scene:
+  - Workspace: `/Users/example/my-终端应用`
+  - Clean deliverables root: `/Users/example/my-终端应用/deliverables/stage7_shop_complete_20260512_r72/build`
+  - Runtime root: `/Users/example/my-终端应用/.my_agent_runtime/stage7_shop_complete_20260512_r72`
+  - Model backend: `anthropic_compatible`
+  - Outer observation rule: only seed and dispatch root; root and descendants create all lower nodes and product files.
+- Observed behavior:
+  - Root created depth=1 `小傻妞-coordinator`.
+  - Depth=1 created depth=2 `小小傻妞-coordinator`.
+  - Depth=2 created four depth=3 `leaf_worker` runs, then later created depth=3 `tester`, `bug_finder`, and `acceptor`.
+  - The build directory contained exactly the required 10 files: `index.html`, `register.html`, `login.html`, `products.html`, `product-detail.html`, `cart.html`, `checkout.html`, `order-success.html`, `style.css`, and `app.js`.
+  - The build directory did not contain forbidden internal or legacy files such as `product.html`, `old-product.html`, `legacy.html`, `obsolete.html`, `output.json`, `RUNNER_RESULT.md`, or `execution_context.json`.
+- 中文解释：
+  - 这一轮证明“不要写死流程，让 LLM 读 advice 自己派 QA”是能跑起来的。系统没有偷偷固定创建 QA，而是深层 coordinator 看到 leaf 已经产出后，自己补了 tester、bug_finder、acceptor。
+  - 但它没有全通过。tester 找到真实流程问题，父级最后挡住了，这正是我们想要的：产物写出来不等于完成，测试/找错/验收有冲突时必须停下来修。
+- What worked:
+  - QA readiness no longer requires a direct implementation child. A coordinator with descendant leaf workers can move into QA.
+  - The “batch only 1-2 children” red line worked: the model first tried to create too many leaf children in one call, received a bounded error, then self-corrected into smaller batches.
+  - `qa_before_implementation_ready` worked: the model tried QA too early once, was blocked, then finished implementation before QA.
+  - All four product leaf workers eventually produced their assigned files.
+  - QA roles were real persisted tasks, not just words in a goal.
+- Real failures found:
+  - Tester found a flow break: `checkout.html` did not provide a valid link/action path to `order-success.html`.
+  - Bug finder reported two low-priority typos around `href hre`.
+  - Acceptor reported pass despite the tester failure, creating a QA disagreement the parent must not silently ignore.
+  - Root final response missed the `[/SUBAGENT_RESULT]` end marker; structured parsing correctly blocked the root with `structured_output_parse_error`.
+- Status:
+  - R72 fixed the R71 “no QA roles after production” gap.
+  - R72 did not complete the shopping-site E2E; it correctly stopped on QA/acceptance failures.
+- Next:
+  - Add an LLM-guided repair wave after QA disagreement: parent should read tester/bug_finder/acceptor evidence refs, create a repair worker for specific failed files, then rerun tester/acceptor.
+  - Keep this as advice/template/workflow behavior plus acceptance guardrails, not as another hardcoded scheduler workflow.
+  - Improve root final structured-output robustness so a blocked root can still emit a valid concise `SUBAGENT_RESULT` with refs.

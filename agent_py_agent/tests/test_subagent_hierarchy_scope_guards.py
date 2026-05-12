@@ -205,6 +205,56 @@ def test_hierarchy_schedule_allows_qa_after_implementation_ready(tmp_path):
     assert len(result.created_run_ids) == 1
 
 
+# LLM: delegated production branches should also unlock QA at the parent that owns the contract.
+# 函数用途: root 通过 coordinator 链路完成 leaf 后，root 仍能创建 tester/bug_finder/acceptor，不被“直接 child 不是 worker”误挡。
+def test_hierarchy_schedule_allows_qa_after_implementation_descendant_ready(tmp_path):
+    manager = SubAgentManager(tmp_path / "subs")
+    build = tmp_path / "deliverables" / "shop" / "build"
+    root = manager.create_run(
+        goal=f"交付购物网站到 {build}，需要 tester / bug_finder / acceptor。",
+        thought="root",
+        plan=["root"],
+        extra_write_roots=[str(build)],
+        role="coordinator",
+    )
+    coordinator = manager.create_run(
+        goal=f"协调 leaf 写购物网站到 {build}",
+        thought="coord",
+        plan=["delegate"],
+        parent_id=root.id,
+        root_id=root.id,
+        depth=1,
+        role="child_coordinator",
+        extra_write_roots=[str(build)],
+    )
+    leaf = manager.create_run(
+        goal=f"写购物网站文件到 {build}",
+        thought="leaf",
+        plan=["write"],
+        parent_id=coordinator.id,
+        root_id=root.id,
+        depth=2,
+        role="leaf_worker",
+        agent_name="小小傻妞-leaf",
+        extra_write_roots=[str(build)],
+    )
+    leaf.status = "AWAITING_ACCEPTANCE"
+    leaf.verification_status = "NEEDS_ACCEPTANCE"
+    manager.save(leaf)
+
+    result = manager.schedule_child_runs(
+        params=HierarchyScheduleRequest(
+            parent_run_id=root.id,
+            child_specs=[HierarchyChildSpec(goal="检查完整购物流程", role="tester", agent_name="小傻妞-tester")],
+            apply=True,
+            max_depth=3,
+        )
+    )
+
+    assert result.blocked is False
+    assert len(result.created_run_ids) == 1
+
+
 # LLM: test_hierarchy_schedule_blocks_implicit_domain_mismatch catches coordinator sibling drift.
 # 函数用途: 即使 parent 没写“不得创建”，text-lead 也不能误创建 arithmetic leaf。
 def test_hierarchy_schedule_blocks_implicit_domain_mismatch(tmp_path):

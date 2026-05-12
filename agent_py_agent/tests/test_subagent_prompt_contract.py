@@ -114,6 +114,9 @@ def test_runner_prompt_tells_coordinator_to_write_reports_but_delegate_deliverab
     assert "可用角色模板" in prompt
     assert "bug_finder" in prompt
     assert "找茬子代理" in prompt
+    assert "不要直接输出最终 SUBAGENT_RESULT" in prompt
+    assert "quality_advice" in prompt
+    assert "ready refs" in prompt
     assert "模板详情" in prompt
     assert "你是找茬子代理" in prompt
     assert "subagent_message" in prompt
