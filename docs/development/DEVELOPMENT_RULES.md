@@ -313,8 +313,10 @@ do_write()
   authorization.
 - Large generated file bodies must not travel as one giant tool-call JSON
   argument. `write_file` / `append_file` content goes through
-  `content_transport_policy.py`; if it exceeds the inline limit, the caller must
-  use a short skeleton plus bounded `append_file` chunks, a small
+  `content_transport_policy.py`; the default trial inline hard limit is 12,000
+  characters and can be tuned with `tool_write_inline_max_chars`. If content
+  exceeds that configured limit, the caller must use a short skeleton plus
+  bounded `append_file` chunks, a small
   `replace_in_file`/patch edit, or a grant-backed `controlled_exec` path that
   writes inside the allowed workspace and returns only refs/audit metadata.
   Streaming stdout/stderr can improve observability, but it is not a fix for an

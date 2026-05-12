@@ -5,7 +5,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-MAX_INLINE_WRITE_CONTENT_CHARS = 4_000
+from ..settings.tool_config import DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
+
+MAX_INLINE_WRITE_CONTENT_CHARS = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
 RECOMMENDED_WRITE_CHUNK_CHARS = "1500-2000"
 RECOVERY_WRITE_CHUNK_CHARS = 800
 
@@ -18,6 +20,7 @@ class InlineContentPolicyRequest:
     field_name: str
     content: str
     path: str = ""
+    max_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS
 
 
 # LLM: InlineContentPolicyDecision lets tools fail closed with a stable recovery message.
@@ -28,6 +31,17 @@ class InlineContentPolicyDecision:
     actual_chars: int
     max_chars: int
     message: str = ""
+
+
+# LLM: LongContentTransportHintRequest keeps hint rendering bundle-based as policy fields grow.
+# 类用途: 保存长正文失败提示所需的工具名、字段名、长度、目标路径和当前上限。
+@dataclass(frozen=True)
+class LongContentTransportHintRequest:
+    tool_name: str
+    field_name: str
+    actual_chars: int
+    path: str = ""
+    max_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS
 
 
 # LLM: long_content_avoidance_rule is shared by tool specs so model-facing guidance stays consistent.
@@ -53,22 +67,24 @@ def append_chunk_use_case() -> str:
 
 # LLM: write_file_content_parameter_detail is the single source for write_file content docs.
 # 函数用途: 生成 write_file.content 的模型可读说明，集中维护 inline 上限和分块建议。
-def write_file_content_parameter_detail() -> str:
+def write_file_content_parameter_detail(max_inline_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS) -> str:
+    limit = inline_write_content_limit(max_inline_chars)
     return (
         "会直接成为文件的新内容；原文件存在时会被整体覆盖。长文件请保持短骨架，"
         f"正常分块单次 content 建议 {RECOMMENDED_WRITE_CHUNK_CHARS} 字符，"
         "后续用 append_file 分块补齐；"
-        f"单次 inline content 硬上限为 {MAX_INLINE_WRITE_CONTENT_CHARS} 字符。"
+        f"单次 inline content 硬上限为 {limit} 字符。"
     )
 
 
 # LLM: append_file_content_parameter_detail is the single source for append_file content docs.
 # 函数用途: 生成 append_file.content 的模型可读说明，集中维护 inline 上限和分块建议。
-def append_file_content_parameter_detail() -> str:
+def append_file_content_parameter_detail(max_inline_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS) -> str:
+    limit = inline_write_content_limit(max_inline_chars)
     return (
         "会直接拼接到文件尾部，不会替换已有内容。长文件分多次追加，"
         f"正常分块单次 content 建议 {RECOMMENDED_WRITE_CHUNK_CHARS} 字符；"
-        f"单次 inline content 硬上限为 {MAX_INLINE_WRITE_CONTENT_CHARS} 字符。"
+        f"单次 inline content 硬上限为 {limit} 字符。"
     )
 
 
@@ -76,34 +92,47 @@ def append_file_content_parameter_detail() -> str:
 # 函数用途: 判断正文是否过长；过长时生成分块/patch/controlled_exec 的长期修复提示。
 def check_inline_write_content(request: InlineContentPolicyRequest) -> InlineContentPolicyDecision:
     actual = len(request.content)
-    if actual <= MAX_INLINE_WRITE_CONTENT_CHARS:
-        return InlineContentPolicyDecision(True, actual, MAX_INLINE_WRITE_CONTENT_CHARS)
+    limit = inline_write_content_limit(request.max_chars)
+    if actual <= limit:
+        return InlineContentPolicyDecision(True, actual, limit)
     return InlineContentPolicyDecision(
         False,
         actual,
-        MAX_INLINE_WRITE_CONTENT_CHARS,
+        limit,
         long_content_transport_hint(
-            tool_name=request.tool_name,
-            field_name=request.field_name,
-            actual_chars=actual,
-            path=request.path,
+            LongContentTransportHintRequest(
+                tool_name=request.tool_name,
+                field_name=request.field_name,
+                actual_chars=actual,
+                path=request.path,
+                max_chars=limit,
+            )
         ),
     )
 
 
+# LLM: inline_write_content_limit normalizes per-registry write limits without mutating global policy.
+# 函数用途: 把配置传入的单次 inline 正文上限转换成正整数；无效值回退到默认 12K。
+def inline_write_content_limit(value: int | None = None) -> int:
+    if value is None:
+        return MAX_INLINE_WRITE_CONTENT_CHARS
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        return MAX_INLINE_WRITE_CONTENT_CHARS
+    if limit <= 0:
+        return MAX_INLINE_WRITE_CONTENT_CHARS
+    return limit
+
+
 # LLM: long_content_transport_hint teaches the model the durable fix instead of increasing limits.
 # 函数用途: 生成统一长内容失败提示，避免模型重复输出同一个超长工具调用。
-def long_content_transport_hint(
-    *,
-    tool_name: str,
-    field_name: str,
-    actual_chars: int,
-    path: str = "",
-) -> str:
-    target = f" path={path}" if path else ""
+def long_content_transport_hint(request: LongContentTransportHintRequest) -> str:
+    limit = inline_write_content_limit(request.max_chars)
+    target = f" path={request.path}" if request.path else ""
     return (
-        f"{tool_name}.{field_name} inline content 过长：{actual_chars} 字符，"
-        f"最多 {MAX_INLINE_WRITE_CONTENT_CHARS} 字符。{target}\n"
+        f"{request.tool_name}.{request.field_name} inline content 过长：{request.actual_chars} 字符，"
+        f"最多 {limit} 字符。{target}\n"
         "长期规则：不要把大文件正文塞进一个 JSON 工具参数；流式输出也不能修复坏掉的工具 JSON。\n"
         f"请先用 write_file 写短骨架，再用 append_file 分块追加；每块 content 建议 "
         f"{RECOMMENDED_WRITE_CHUNK_CHARS} 字符，工具解析失败后降到不超过 "

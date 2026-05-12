@@ -29,6 +29,7 @@ from .normalize import (
     normalize_agent_config,
     normalize_subagent_workflow_config,
 )
+from .tool_config import DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
 
 __all__ = [
     "AgentConfig",
@@ -169,6 +170,7 @@ class AgentConfig:
     tool_agent_budget_window_seconds: int = 600
     tool_agent_budget_max_calls: int = 50
     tool_read_max_chars: int = 6000
+    tool_write_inline_max_chars: int = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
     tool_list_max_entries: int = 200
     tool_search_max_matches: int = 50
     tool_web_max_chars: int = 12000

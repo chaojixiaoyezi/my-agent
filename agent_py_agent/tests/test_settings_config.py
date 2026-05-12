@@ -163,6 +163,22 @@ class TestNormalizeAgentConfig:
         assert normalized["max_tool_rounds"] == 5  # 默认值
         assert len(warnings) > 0
 
+    # LLM: Tool write inline limits must be user-configurable through the standard config normalizer.
+    # 函数用途: 验证用户能通过配置调整 write_file/append_file 单次正文上限。
+    def test_normalize_agent_config_tool_write_inline_max_chars(self):
+        data = {"tool_write_inline_max_chars": 16384}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["tool_write_inline_max_chars"] == 16384
+        assert warnings == []
+
+    # LLM: Invalid inline write limits should fall back before reaching ToolRegistry.
+    # 函数用途: 验证过小的写入正文上限会回退默认值，并产生配置告警。
+    def test_normalize_agent_config_invalid_tool_write_inline_max_chars(self):
+        data = {"tool_write_inline_max_chars": 10}
+        normalized, warnings = normalize_agent_config(data)
+        assert normalized["tool_write_inline_max_chars"] == AgentConfig().tool_write_inline_max_chars
+        assert len(warnings) > 0
+
     def test_normalize_agent_config_temperature_out_of_range(self):
         """验证超出范围的 temperature 回退到默认值。"""
         data = {"temperature": "5.0"}
@@ -253,6 +269,20 @@ class TestLoadConfig:
             config = load_config(path)
             assert config.model_backend == "echo"
             assert config.max_tool_rounds == 10
+        finally:
+            path.unlink()
+
+    # LLM: User config files should be able to tune write/append inline transport limits.
+    # 函数用途: 验证完整 load_config 会保留用户写入的 tool_write_inline_max_chars 配置项。
+    def test_load_config_with_tool_write_inline_max_chars(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write("model_backend: echo\ntool_write_inline_max_chars: 16000\n")
+            f.flush()
+            path = Path(f.name)
+
+        try:
+            config = load_config(path)
+            assert config.tool_write_inline_max_chars == 16000
         finally:
             path.unlink()
 

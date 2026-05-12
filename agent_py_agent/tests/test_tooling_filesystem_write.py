@@ -47,6 +47,42 @@ class TestWriteFileTool:
         assert tool.spec.parameter_details["content"] == write_file_content_parameter_detail()
         assert str(MAX_INLINE_WRITE_CONTENT_CHARS) in tool.spec.parameter_details["content"]
 
+    # LLM: The inline write threshold is intentionally trialed at 12K before chunked transport lands.
+    # 函数用途: 固定 write_file 单次 inline content 试运行阈值；12K 可写，超过 1 字符仍走分块提示。
+    def test_write_file_allows_trial_12k_inline_content(self, tmp_path: Path):
+        from agent_py_agent.agent.tooling.filesystem_write import WriteFileTool
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        tool = WriteFileTool(workspace)
+        result = tool.execute({
+            "path": "site/style.css",
+            "content": "A" * 12_000,
+        })
+
+        assert MAX_INLINE_WRITE_CONTENT_CHARS == 12_000
+        assert result.ok is True
+        assert (workspace / "site" / "style.css").read_text() == "A" * 12_000
+
+    # LLM: Per-tool inline write limits must be configurable without changing policy defaults.
+    # 函数用途: 验证写入工具能接收调用方传入的 inline 上限，并把该上限写入模型说明和执行检查。
+    def test_write_file_uses_configured_inline_content_limit(self, tmp_path: Path):
+        from agent_py_agent.agent.tooling.filesystem_write import WriteFileTool
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        tool = WriteFileTool(workspace, max_inline_content_chars=512)
+        result = tool.execute({
+            "path": "site/style.css",
+            "content": "A" * 513,
+        })
+
+        assert result.ok is False
+        assert "最多 512 字符" in result.output
+        assert "512" in tool.spec.parameter_details["content"]
+
     def test_write_file_creates_parent_dirs(self, tmp_path: Path):
         """写入时自动创建父目录。"""
         from agent_py_agent.agent.tooling.filesystem_write import WriteFileTool
