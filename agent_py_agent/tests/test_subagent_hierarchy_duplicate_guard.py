@@ -15,9 +15,9 @@ from agent_py_agent.agent.subagents.services.hierarchy_scheduler import (
 )
 
 
-# LLM: test_hierarchy_schedule_blocks_duplicate_coordinator_domains covers real shopping E2E double-dispatch.
-# 函数用途: 同一个父节点已有 checkout/quality coordinator 后，再创建同域 coordinator 必须被阻断。
-def test_hierarchy_schedule_blocks_duplicate_coordinator_domains(tmp_path):
+# LLM: duplicate coordinator domains are audit warnings, not hard orchestration blockers.
+# 函数用途: 同一个父节点已有 checkout/quality coordinator 后，再创建同域 coordinator 只提示风险，不阻断 QA/修复协作。
+def test_hierarchy_schedule_warns_duplicate_coordinator_domains(tmp_path):
     manager = SubAgentManager(tmp_path)
     root = manager.create_run(goal="shopping root", thought="orchestrate", plan=["plan"])
 
@@ -59,9 +59,10 @@ def test_hierarchy_schedule_blocks_duplicate_coordinator_domains(tmp_path):
     )
 
     assert len(first.created_run_ids) == 2
-    assert duplicate.blocked is True
-    assert duplicate.reason == "duplicate_child_domain:checkout"
-    assert manager.load(root.id).child_ids == first.created_run_ids
+    assert duplicate.blocked is False
+    assert duplicate.reason == "created"
+    assert duplicate.scheduling_warnings == ["duplicate_child_domain:checkout", "duplicate_child_domain:quality"]
+    assert manager.load(root.id).child_ids == [*first.created_run_ids, *duplicate.created_run_ids]
 
 
 # LLM: test_hierarchy_schedule_allows_generic_numbered_checker_siblings protects recovery trees.

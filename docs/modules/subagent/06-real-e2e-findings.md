@@ -4450,3 +4450,42 @@ This document is append-only. Record every real subagent E2E issue found during 
   - `test_read_artifact_dispatch_content_is_summarized_for_live_prompt`.
 - Next:
   - Restart a clean R75 after focused verification. Expected behavior: root should create QA/repair/acceptance children from refs and only perform body inspection after a real acceptor completes or the user explicitly authorizes parent inspection.
+
+### Result: R75 Showed Guard Should Be Safety Rail, Not Workflow Manager
+
+- Discovered at: 2026-05-12 during R75 clean root-only shopping-site run.
+- Test scene:
+  - Workspace: `/Users/xiaoyezi/my-claude-code`.
+  - The outer observer cleaned the task directory, seeded one root/coordinator, and watched logs/status only.
+  - Root and descendants were responsible for creating lower agents and product files.
+- Observed behavior:
+  - Root did create the first lower agent itself, and later lower agents were created by agents, not by the outer observer.
+  - Product files eventually existed under `/Users/xiaoyezi/my-claude-code/deliverables/stage7_shop_complete_20260512_r75/build`.
+  - The delegating parent body-read guard correctly blocked root/coordinator from reading product bodies before a real acceptor finished.
+  - The same guard was too broad for orchestration: it also blocked small status artifacts such as dispatch/subagent-board refs that parents need for coordination.
+  - `duplicate_child_domain:dir` blocked creation of tester/bug_finder/acceptor style QA children that legitimately share the same product directory.
+  - The implementation leaf tried to send very large `write_file` content in one tool call, then recovered through many append operations; prompt size grew heavily.
+- 中文解释：
+  - 这一轮最大的结论很清楚：guard 不能当项目经理。真正危险的东西要拦，比如越权写系统目录、删坏自己、父级偷读大正文绕过验收；但“多个 QA 看同一个 build 目录”“重复 checkout/quality 领域”“修复 worker 重写同一个文件”这类是正常协作，不该卡死。
+  - 父级确实不能在验收前自己翻孩子正文，否则上下文会爆；但父级必须能看调度摘要、看板、状态 refs，不然它就像被蒙眼指挥。
+- Root cause:
+  - `duplicate_child_domain` was implemented as a hard scheduler blocker, so a useful audit signal became a workflow bottleneck.
+  - `orchestration_body_read_guard` did not distinguish product/body artifacts from refs-only orchestration artifacts.
+  - Earlier guard design had accumulated workflow preferences that should belong to LLM role templates, workflow templates, advice payloads, and final acceptance.
+- Fix:
+  - `duplicate_child_domain:<domain>` is now emitted through `scheduling_warnings` and no longer blocks child creation.
+  - `duplicate_leaf_target:<file>` remains warning-only.
+  - `qa_before_implementation_ready` stays hard for now because it prevents QA from running on an empty product root.
+  - Delegating parents may read orchestration artifacts such as `dispatch_subagents-*`, `subagent_board-*`, due-check, and action-plan refs while product bodies remain blocked.
+  - Development rules now define the guard boundary: hard guards are for execution/path/self-destruction safety; normal workflow coordination should be warning/advice/acceptance, not hardcoded scheduler blocks.
+- Borrowed lesson:
+  - Hermes-style approval gates focus on dangerous commands, recursive removal, system paths, update/self-kill, and trusted skill/tool boundaries.
+  - OpenClaw-style execution policy focuses on stable cwd/script/env/approval binding and path authority.
+  - The useful takeaway for my-agent is to keep hard safety at tool/path/execution/self-termination boundaries, while letting LLM/templates handle planning, QA order, repair waves, and role choice.
+- Verification:
+  - `test_delegating_parent_can_read_orchestration_artifact_before_acceptor_done`
+  - `test_delegating_parent_cannot_read_artifact_body_before_acceptor_done`
+  - `test_hierarchy_schedule_warns_duplicate_coordinator_domains`
+  - Focused guard tests passed after the change.
+- Next:
+  - Run a clean R76 with the same root-only rule. Expected behavior: root/coordinators can use board/dispatch refs to create QA/repair/acceptance children without product-body reads or duplicate-domain blocks.

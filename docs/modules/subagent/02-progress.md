@@ -949,3 +949,12 @@
 - 已修正：新增 `tool_context_orchestration_summary.py`。调度类大输出外置后，live prompt 保留 `next_action`、run ids、状态计数和 suggested tool call，不再默认给模型 `read_artifact_hint` 去展开大 dispatch artifact。
 - 已补测试：`test_orchestration_body_read_guard.py` 覆盖委托期阻断、运行元数据放行、acceptor 完成后放行、用户显式 override 和泛化验收文字不误放；`test_tool_context_reducer.py` 覆盖 externalized dispatch/read_artifact 的 compact orchestration summary。
 - 下一步：跑 focused verification 后干净启动 R75。预期 root 只看 refs/状态/advice，按建议创建 QA/repair/acceptance 子代理；只有 acceptor 完成或用户明确授权时，root 才做最后正文检查。
+
+## 2026-05-12 R75: guard boundary narrowed to real safety
+- 中文说明：R75 真实复测证明 body-read guard 的方向是对的，但边界太宽会让父级“看不到调度状态”；同时 `duplicate_child_domain` 把多个 QA/验收角色共享同一 build 目录误当成硬冲突，直接拖慢测试。
+- 已修正：委托期父级仍不能读产品正文或大 child artifact 正文，但可以读取调度类小 artifact，例如 `dispatch_subagents-*`、`subagent_board-*`、due-check/action-plan refs。这让父级能靠 refs 指挥，而不是被迫读正文或盲修。
+- 已修正：`duplicate_child_domain:<domain>` 从 hard block 改为 `scheduling_warnings`。重复 checkout/quality coordinator、多个 QA agent 看同一个目录、repair worker 重写同一文件，都只审计提醒，不阻断创建。
+- 保留红线：`qa_before_implementation_ready` 暂时仍硬阻断，因为空 build 上跑 QA 会烧模型并产生假失败；写根漂移、越界路径、深度/数量、同批压扁层级等仍是安全/结构红线。
+- 对标结论：Hermes/OpenClaw 更像把硬安全放在工具执行、cwd/path、危险命令、自毁/系统路径上；规划顺序、QA 波次、repair 策略交给 LLM/模板/验收事实。我们也按这个方向收窄 guard。
+- 已补测试：`test_hierarchy_schedule_warns_duplicate_coordinator_domains`、`test_delegating_parent_can_read_orchestration_artifact_before_acceptor_done`，并回归 duplicate guard 和 body-read guard focused tests。
+- 下一步：干净启动 R76。预期 root/coordinator 能读取看板/dispatch refs，创建 tester/bug_finder/acceptor 或 repair 子代理，不再被同域 QA/重复目录卡住。

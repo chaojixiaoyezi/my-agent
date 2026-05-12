@@ -23,7 +23,7 @@ from .hierarchy_scheduler_models import (
     HierarchyScheduleResult,
 )
 from .hierarchy_scope_guards import (
-    duplicate_child_domain_reason,
+    qa_phase_block_reason,
     schedule_block_reason,
     schedule_warnings,
 )
@@ -63,8 +63,8 @@ class SubAgentHierarchyScheduler:
             quality_advice=quality_advice,
             scheduling_warnings=schedule_warnings(self.manager, parent, request),
         )
-        # LLM: generic guards run first; duplicate-domain guard needs persisted sibling metadata.
-        reason = schedule_block_reason(parent, request) or duplicate_child_domain_reason(
+        # LLM: red-line guards stay hard; duplicate coordination domains are emitted as warnings.
+        reason = schedule_block_reason(parent, request) or qa_phase_block_reason(
             self.manager,
             parent,
             request,
