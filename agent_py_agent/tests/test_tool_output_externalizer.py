@@ -24,7 +24,10 @@ from agent_py_agent.agent.memory_archive.runtime.turn_archiver import (
     archive_run_turn,
 )
 from agent_py_agent.agent.memory_archive.schema import RUNTIME_MEMORY_SCHEMA_VERSION
-from agent_py_agent.agent.tooling.content_transport_policy import RECOVERY_WRITE_CHUNK_CHARS
+from agent_py_agent.agent.tooling.content_transport_policy import (
+    MAX_INLINE_WRITE_CONTENT_CHARS,
+    RECOVERY_WRITE_CHUNK_CHARS,
+)
 from agent_py_agent.agent.tooling.models import ToolExecutionResult
 
 
@@ -189,8 +192,10 @@ def test_tool_loop_enters_long_content_recovery_after_inline_write_rejection(
 ) -> None:
     service = ToolLoopService(SimpleNamespace(root=tmp_path))
     params = _tool_loop_params(request_id="req-tool", run_id="run-tool", task_id="task-tool")
+    rejected_chars = MAX_INLINE_WRITE_CONTENT_CHARS + 500
     output = (
-        "write_file.content inline content 过长：9000 字符，最多 4000 字符。 path=site/app.css\n"
+        f"write_file.content inline content 过长：{rejected_chars} 字符，"
+        f"最多 {MAX_INLINE_WRITE_CONTENT_CHARS} 字符。 path=site/app.css\n"
         "请先用 write_file 写短骨架，再用 append_file 分块追加。"
     )
 
@@ -199,7 +204,7 @@ def test_tool_loop_enters_long_content_recovery_after_inline_write_rejection(
             params=params,
             tool_rounds=3,
             idx=1,
-            payload={"tool": "write_file", "path": "site/app.css", "content": "A" * 9000},
+            payload={"tool": "write_file", "path": "site/app.css", "content": "A" * rejected_chars},
             result=ToolExecutionResult("write_file", False, output),
         )
     )

@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-__all__ = ["ToolConfig"]
+__all__ = ["DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS", "ToolConfig"]
+
+DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS = 12_000
 
 
 # LLM: ToolConfig 属于 配置系统 的稳定结构；调整字段或继承关系前先核对序列化、导入和测试。
@@ -21,6 +23,7 @@ class ToolConfig:
     tool_agent_budget_window_seconds: int = 600
     tool_agent_budget_max_calls: int = 50
     tool_read_max_chars: int = 6000
+    tool_write_inline_max_chars: int = DEFAULT_TOOL_WRITE_INLINE_MAX_CHARS
     tool_list_max_entries: int = 200
     tool_search_max_matches: int = 50
     tool_web_max_chars: int = 12000

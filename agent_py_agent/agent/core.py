@@ -186,6 +186,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             catalog_limit=config.tool_catalog_limit,
             retrieval_limit=config.tool_retrieval_limit,
             vector_search_enabled=config.tool_vector_search_enabled,
+            tool_write_inline_max_chars=config.tool_write_inline_max_chars,
         )
     )
 

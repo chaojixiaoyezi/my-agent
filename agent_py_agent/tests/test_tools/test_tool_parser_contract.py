@@ -49,6 +49,34 @@ def test_tool_catalog_and_recommended_sections():
     assert "推荐理由" in recommended
 
 
+# LLM: ToolRegistry must pass config-level inline write limits into registered file-write tools.
+# 函数用途: 验证注册表里的 write_file 会使用用户配置的单次正文上限，而不是硬编码默认值。
+def test_registry_uses_configured_write_inline_limit(tmp_path: Path):
+    registry = ToolRegistry(
+        ToolRegistryParams(
+            workspace_root=tmp_path,
+            max_chars=6000,
+            max_entries=200,
+            max_matches=50,
+            web_max_chars=12000,
+            http_timeout=30,
+            catalog_limit=20,
+            retrieval_limit=3,
+            vector_search_enabled=False,
+            shell_tool_timeout=30,
+            tool_write_inline_max_chars=512,
+        )
+    )
+
+    result = registry.execute_call(
+        {"tool": "write_file", "path": "site/app.js", "content": "A" * 513},
+        allowed_tools=None,
+    )
+
+    assert result.ok is False
+    assert "最多 512 字符" in result.output
+
+
 def test_tool_catalog_format_example_does_not_bias_to_path_param():
     """LLM: Tool call instructions should not teach all tools to pass a fake path parameter."""
     registry = _registry()

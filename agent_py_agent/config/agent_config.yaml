@@ -379,6 +379,10 @@ tool_agent_budget_max_calls: 50
 # read_file 工具最多返回多少字符，避免单次结果太长
 tool_read_max_chars: 6000
 
+# write_file / append_file 单次 inline content 硬上限
+# 默认 12000；调大可以减少分块次数，但过大更容易让工具 JSON 被模型截断。
+tool_write_inline_max_chars: 12000
+
 # list_files 工具最多列出多少条结果
 tool_list_max_entries: 200
 

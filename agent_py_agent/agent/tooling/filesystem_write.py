@@ -19,6 +19,7 @@ from .content_transport_policy import (
     append_chunk_use_case,
     append_file_content_parameter_detail,
     check_inline_write_content,
+    inline_write_content_limit,
     long_content_avoidance_rule,
     write_file_content_parameter_detail,
 )
@@ -38,8 +39,9 @@ class WriteFileTool(FileSystemTool):
 
     # LLM: WriteFileTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 初始化 WriteFileTool 的依赖、配置和运行期字段。
-    def __init__(self, workspace_root: Path):
+    def __init__(self, workspace_root: Path, *, max_inline_content_chars: int | None = None):
         super().__init__(workspace_root)
+        self.max_inline_content_chars = inline_write_content_limit(max_inline_content_chars)
         self.spec = ToolSpec(
             name="write_file",
             category="filesystem",
@@ -59,7 +61,7 @@ class WriteFileTool(FileSystemTool):
             },
             parameter_details={
                 "path": "相对工作区的目标文件路径；缺失父目录会自动创建。",
-                "content": write_file_content_parameter_detail(),
+                "content": write_file_content_parameter_detail(self.max_inline_content_chars),
             },
             examples=[
                 '{"tool": "write_file", "path": "src/demo.py", "content": "print(\\"hello\\")\\n"}',
@@ -83,6 +85,7 @@ class WriteFileTool(FileSystemTool):
                     field_name="content",
                     content=content,
                     path=raw_path,
+                    max_chars=self.max_inline_content_chars,
                 )
             )
             if not content_policy.allowed:
@@ -106,8 +109,9 @@ class AppendFileTool(FileSystemTool):
 
     # LLM: AppendFileTool.__init__ 属于 工具系统 的调用边界；改行为前先核对直接调用方和错误路径。
     # 函数用途: 初始化 AppendFileTool 的依赖、配置和运行期字段。
-    def __init__(self, workspace_root: Path):
+    def __init__(self, workspace_root: Path, *, max_inline_content_chars: int | None = None):
         super().__init__(workspace_root)
+        self.max_inline_content_chars = inline_write_content_limit(max_inline_content_chars)
         self.spec = ToolSpec(
             name="append_file",
             category="filesystem",
@@ -127,7 +131,7 @@ class AppendFileTool(FileSystemTool):
             },
             parameter_details={
                 "path": "相对工作区的目标文件路径；缺失父目录会自动创建。",
-                "content": append_file_content_parameter_detail(),
+                "content": append_file_content_parameter_detail(self.max_inline_content_chars),
             },
             examples=[
                 '{"tool": "append_file", "path": "RUNLOG.md", "content": "\\n- 新增一条记录"}',
@@ -151,6 +155,7 @@ class AppendFileTool(FileSystemTool):
                     field_name="content",
                     content=content,
                     path=raw_path,
+                    max_chars=self.max_inline_content_chars,
                 )
             )
             if not content_policy.allowed:
