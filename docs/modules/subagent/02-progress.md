@@ -897,6 +897,7 @@
 - 已修正：层级命名合同不再只看 `depth=3` 这类宽锚点；如果父级合同有 `小小小傻妞-*` / `小小小小傻妞-*` 精确前缀，子级摘要必须包含同样前缀，否则系统补回原始合同。
 - 已修正：文件契约解析器识别 `## 禁止文件` 这种 Markdown 负向标题；`task.json 里的状态`、`execution_context.json refs` 这类内部引用不会当成用户产物。
 - R68 预检又发现 `必须按真实 task.json 阻塞汇报` 这种说法仍会被“必须”误导；已把内部状态文件的正向判断改成必须有 `交付/创建/写入/包含` 等交付动作，单独的“必须按真实 task.json 汇报”不再算产物。
+- R69 继续发现继承块里前文 `禁止创建 depth>=4` 的“创建”会污染后面的 `task.json 里的状态`；已让 `task.json 里的/refs/阻塞/汇报/状态` 这类紧邻内部状态语境优先于前文交付动词。
 - 已修正：QA role coverage 只读取当前节点自己的 direct goal / acceptance，遇到 `继承父级目标/边界`、`父级层级/协作约束` 等继承块就停止，避免每个中间 coordinator 都背父级全局 QA 硬义务。
-- 已补测试：`test_file_contract_treats_markdown_forbidden_heading_as_negative_scope`、`test_file_contract_ignores_internal_state_file_references_without_deliverable_label`、`test_explicit_coordinator_seed_repairs_wrong_lineage_summary_from_raw_prompt`、`test_inherited_parent_qa_contract_does_not_bind_intermediate_coordinator`；并用 R68 prompt 验证 required_files 只剩 10 个用户交付文件。
+- 已补测试：`test_file_contract_treats_markdown_forbidden_heading_as_negative_scope`、`test_file_contract_ignores_internal_state_file_references_without_deliverable_label`、`test_file_contract_ignores_task_json_inside_hierarchy_state_clause`、`test_explicit_coordinator_seed_repairs_wrong_lineage_summary_from_raw_prompt`、`test_inherited_parent_qa_contract_does_not_bind_intermediate_coordinator`；并用 R68/R69 prompt 验证 required_files 只剩 10 个用户交付文件。
 - 下一步：干净启动 R68；预期 required_files 只保留 10 个交付文件，命名合同保留 `小小小傻妞-*`，中间 coordinator 不再因继承 QA 文字被误判失败，正确父级仍要通过 `quality_advice` 主动选择 QA 波次。
