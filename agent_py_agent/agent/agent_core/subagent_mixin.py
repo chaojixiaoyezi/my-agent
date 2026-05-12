@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 
+from ..backends import is_provider_timeout_error
 from ..capabilities import CapabilityRouter
 from ..capability_config import CapabilityConfig
 from ..subagent import (
@@ -200,6 +201,7 @@ class _SubagentLifecycleBase:
     # LLM: _handle_subagent_run_failure 属于 SimpleAgent 核心运行的函数边界；调整时先确认运行循环、工具调用、调度记录和最终响应仍按原契约工作。
     # 函数用途: 推进子代理run失败的运行阶段，串接调度、等待、回写或错误处理；关键副作用: 会影响运行循环、工具调用、调度记录和最终响应，需保持重试、超时和状态迁移语义。
     def _handle_subagent_run_failure(self, params: SubagentRunFailureParams):
+        failure_type = _subagent_run_failure_type(params.exc)
         failed_result = self.subagents.record_runner_result(
             RecordRunnerResultParams(
                 run_id=params.run_id,
@@ -210,7 +212,7 @@ class _SubagentLifecycleBase:
                 prompt=params.prompt,
                 status="BLOCKED",
                 verification_status="UNVERIFIED",
-                failure_type="runner_error",
+                failure_type=failure_type,
             )
         )
         self._write_subagent_recovery_snapshot(
@@ -220,7 +222,7 @@ class _SubagentLifecycleBase:
                 response_text=failed_result.message,
                 backend="",
                 status=failed_result.status,
-                error_code=failed_result.runner_last_error or "runner_error",
+                error_code=failed_result.runner_last_error or failure_type,
                 tool_calls=[],
             )
         )
@@ -260,6 +262,14 @@ class SimpleAgentSubagentMixin(
     _ParentPlannerMixin,
 ):
     pass
+
+
+# LLM: _subagent_run_failure_type keeps provider timeout recovery distinct from generic runner crashes.
+# 函数用途: 把模型接口超时写成可检索的 failure_type，便于父级恢复和动作计划识别。
+def _subagent_run_failure_type(exc: BaseException) -> str:
+    if is_provider_timeout_error(exc):
+        return "provider_timeout"
+    return "runner_error"
 
 
 # Re-export for backward compatibility

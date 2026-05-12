@@ -32,7 +32,7 @@ agent_py_agent/
 |   |   `-- services/                         # 主循环可复用服务，例如 notification/watch
 |   |-- audit/                                # 审计日志、任务访问记录和查询
 |   |-- auth/                                 # 认证、权限中间件和用户身份模型
-|   |-- backends/                             # 模型后端适配和流式解析
+|   |-- backends/                             # 模型后端适配、流式解析和 ProviderTimeoutError 等错误边界
 |   |-- capability/                           # skill/tool/capability 配置、路由和 card 解析
 |   |-- concurrency/                          # 乐观锁、任务锁和透明重试
 |   |-- extensions/                           # 插件/扩展声明和加载边界
@@ -310,6 +310,7 @@ simple-python-agent-v0.3/                      # 项目根目录，放代码、�
 - `append_file`：向文件末尾追加内容，适合补日志、补文档和补配置片段。
 - `replace_in_file`：精确替换文件中的一段已有内容，适合小范围改代码、改配置和改说明。
 - `content_transport_policy.py`：写入类工具共用的长内容传输策略；大文件正文不能一次塞进 `write_file.content` / `append_file.content`，需要短骨架、分块追加、patch 小 diff 或受控 exec refs。
+- `content_recovery_mode.py`：长内容写入失败后的下一轮恢复策略；parse error 或 inline 上限拒绝后，live prompt 会进入 `long_content_recovery_mode`，要求只发一个小块写入调用。
 - `fetch_url`：抓取网页或文本接口内容，适合查在线文档。
 - `http_request`：发送 HTTP 请求，适合测试 REST API、Webhook 和普通接口。
 
@@ -994,7 +995,7 @@ docs/
 - `agent_py_agent/agent/subagents/parent_acceptance_followup_control.py`: 新增 follow-up 受控入口模型和审计文件，支持预览、坏 JSON 阻断、显式 apply、patch review 命令提示和复用 action handler 的接管 rescue。
 - `agent_py_agent/agent/subagents/parent_acceptance_followup_consistency.py`: 新增 follow-up apply 前的一致性检查 helper，集中处理 run_id、test report ref、失败数、新鲜度和状态驱动 rescue 例外。
 - `agent_py_agent/agent/subagents/parent_acceptance_rescue_followup.py`: 新增已失败/阻塞任务的 rescue follow-up helper，让无 `test_execution.json` 的 runner 失败也能进入受控接管路径。
-- `agent_py_agent/agent/subagents/services/hierarchy_scheduler.py`: 新增层级调度器 v1，使用 `HierarchyScheduleRequest` / `HierarchyChildSpec` 显式预览或创建 child/grandchild run，并统一限制深度和 fan-out；当真实模型把 `role=child`、具体角色写进 `agent_name` 时，会先恢复 researcher/tester/acceptor/bug_finder/writer/worker 等角色再套权限策略；模型漏传 `acceptance_checks` 时会通过 `hierarchy_acceptance.py` 从 child goal/角色派生最小验收项。
+- `agent_py_agent/agent/subagents/services/hierarchy_scheduler.py`: 新增层级调度器 v1，使用 `HierarchyScheduleRequest` / `HierarchyChildSpec` 显式预览或创建 child/grandchild run，并统一限制深度和 fan-out；当真实模型把 `role=child`、具体角色写进 `agent_name` 时，会先恢复 researcher/tester/acceptor/bug_finder/writer/worker 等角色再套权限策略；模型漏传 `acceptance_checks` 时会通过 `hierarchy_acceptance.py` 从 child goal/角色派生最小验收项；父任务明确点名 tester/bug_finder/acceptor 时，会自动补齐缺失 QA child，但不会重复创建已有或本轮已请求的角色。
 - `agent_py_agent/agent/subagents/services/hierarchy_agent_names.py`: 层级展示名统一生成器，负责 `小傻妞-*` / `小小傻妞-*` / `小小小傻妞-*` 前缀；真实模型只写 `小小傻妞` 这种无后缀名字或把 `*` 占位符原样传入时，会回退到 role 后缀，避免裸异常和模板占位符泄漏。
 - `agent_py_agent/agent/subagents/services/base.py`: 子代理基础创建服务；`_extract_write_dirs()` 从目标文本中提取本地写入根，并跳过 URL 范围，避免图片/API 地址被误当成可写目录。
 - `agent_py_agent/agent/subagents/services/hierarchy_acceptance.py`: 从 scheduler 拆出的验收兜底策略，只在模型没有显式 `acceptance_checks` 时派生最小验收项。
@@ -1008,8 +1009,11 @@ docs/
 - `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context `dispatch_subagents` 的直接 child 进度摘要；提示继续调度、恢复阻塞 child 或最新 acceptance review 为 REJECT 的 child，只有 child 都已等待验收/完成且没有 rejected acceptance 时才用 refs-first summary 收口，避免上层反复读取子产物正文。
 - `agent_py_agent/agent/agent_core/tool_round_execution.py`: 单轮工具执行 helper；负责记录 assistant tool round、执行/记录工具调用、检测子代理 `output.json` 收口，并把同轮 `schedule_child_subagents` 后依赖真实 run id 的 `dispatch_subagents` 等编排调用延后到下一轮，避免模型使用脑补 run id；`output.json` 收口检测支持 flat `path` 和 bundle `filesystem.path`。
 - `agent_py_agent/agent/subagents/services/hierarchy_role_identity.py`: 从 scheduler 拆出的角色 identity 兜底策略，根据 `agent_name` / `goal` 恢复模型漏填的 researcher/tester/acceptor/bug_finder/writer/worker 等角色。
+- `agent_py_agent/agent/subagents/services/hierarchy_scheduled_role.py`: 从 scheduler 拆出的下一层 role 推断策略，把 child/general/worker 这类模型模糊角色修正成 coordinator 或 leaf_worker。
+- `agent_py_agent/agent/subagents/services/qa_role_contract.py`: tester / bug_finder / acceptor 角色合同识别 helper；调度器和验收发现共用它来判断父任务是否要求真实 QA 后代、某个 persisted child 是否真正覆盖 QA 角色。
+- `agent_py_agent/agent/subagents/services/hierarchy_qa_scheduler.py`: 调度阶段 QA 补派 helper；根据父任务合同、本轮 specs 和已存在后代计算缺失 tester/bug_finder/acceptor，并返回 scheduler-neutral child spec，避免核心 scheduler 继续变胖。
 - `agent_py_agent/agent/subagents/services/hierarchy_context.py`: 层级派工的父级上下文继承层；保留产物路径、文件合同、层级合同，以及 `controlled_exec` / capability request / path_scope / output_budget / task_trash / refs 等不能丢的能力安全合同。
-- `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 从 scheduler 中拆出的层级 scope guard，集中处理空计划、深度/数量限制、禁止 sibling 领域、同批混建 coordinator/leaf、root 已有 coordinator 后直建 leaf/worker、child 写入根漂移、domain mismatch、同父级 coordinator 领域去重和已验证 leaf 具体目标文件去重；forbidden scope 会过滤 depth/layer/level/child/worker 这类层级或角色词，避免“不要创建 depth>=4”误挡正常孙代理；去重会过滤 generated id 片段和泛化编号词，goal 兜底会先剥离绝对路径、文件名、继承块以及 `users/模型助手/code/shop/tests/css/js` 等路径脚手架词，避免误挡 recovery checker siblings 或共享 `/Users/.../my-终端应用/...` 的不同 child。
+- `agent_py_agent/agent/subagents/services/hierarchy_scope_guards.py`: 从 scheduler 中拆出的层级 scope guard，集中处理空计划、深度/数量限制、禁止 sibling 领域、同批混建 coordinator/leaf、root 已有 coordinator 后直建 leaf/worker、child 写入根漂移、domain mismatch、同父级 coordinator 领域去重和已验证 leaf 具体目标文件去重；forbidden scope 会过滤 depth/layer/level/child/worker 这类层级或角色词，避免“不要创建 depth>=4”误挡正常孙代理；去重会过滤 generated id 片段、`run/id/ref/refs/qa` 等结构词和泛化编号词，goal 兜底会先剥离绝对路径、文件名、继承块以及 `users/模型助手/code/shop/tests/css/js` 等路径脚手架词，避免误挡 recovery checker siblings、自动 QA children 或共享 `/Users/.../my-终端应用/...` 的不同 child。
 - `agent_py_agent/agent/subagents/services/hierarchy_leaf_targets.py`: 从 scope guard 拆出的已验证 leaf 目标文件去重 helper；只读 direct child 元数据和 `output.json.artifacts` 路径引用，不读取 artifact 正文。
 - `agent_py_agent/agent/subagents/services/hierarchy_context.py`: 层级目标继承 helper；把父级 required/forbidden 文件合同、4层/depth/命名合同和能力安全合同补进下级 goal，防止模型总结时把关键边界缩水。
 - `agent_py_agent/agent/subagents/services/hierarchy_write_policy.py`: 层级写入根策略，区分 task-local 报告写入和最终产品写入；coordinator/researcher/tester/bug_finder/acceptor 可保留产品路径上下文但不继承产品写入根。
@@ -1029,6 +1033,8 @@ docs/
 - `agent_py_agent/agent/subagents/role_template_catalog/builtin/*.json`: 内置 `coordinator/worker/bug_finder/tester/acceptor/researcher/writer` 角色模板。
 - `agent_py_agent/agent/agent_core/tool_call_context_reducer.py`: 大段 assistant tool-call 参数摘要层，避免 `write_file(content=<large html>)` 原文反复进入下一轮 prompt；保留工具名、路径、字段大小、hash 和短预览。小 dict payload 也渲染为摘要行，避免模型把历史 dict 复制成新工具调用。
 - `agent_py_agent/agent/tooling/content_transport_policy.py`: 长内容工具参数硬门；`write_file` / `append_file` 在写入前统一检查 inline content 长度，过长时返回分块、patch 或 grant-backed `controlled_exec` 的恢复提示，不写磁盘。
+- `agent_py_agent/agent/tooling/content_recovery_mode.py`: 长内容工具失败后的自动降级策略；工具循环检测到截断 parse error 或 inline 上限拒绝后，只把短恢复模式放回下一轮 prompt，不回灌正文。
+- `agent_py_agent/agent/backends/errors.py`: 模型后端错误类型；`ProviderTimeoutError` 让 CLI、runner 和恢复逻辑能把 provider 超时从普通崩溃里分出来。
 - `agent_py_agent/agent/agent_core/coordinator_seed_tools.py`: 显式 root/coordinator seed 的工具过滤策略；模型额外传入 shell/web 工具时收敛回内置 coordinator 工具包。
 - `agent_py_agent/agent/agent_core/spawn_role_seed.py`: CLI 显式 role seed 入口；root/coordinator seed 保留 goal 里的产品路径给下层派工，但自身 allowed write roots 只保留 task-local 协调目录。
 - `agent_py_agent/agent/agent_core/orchestration_progress_payload.py`: runner-context dispatch 的直接 child 进度摘要；含状态计数、unfinished ids、recovery ids、rejected acceptance ids、`needs_more_dispatch` / `needs_recovery` 和带 `run_ids` 的建议继续调度或恢复工具调用。

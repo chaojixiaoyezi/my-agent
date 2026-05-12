@@ -19,6 +19,7 @@ from .base import (
     OpenAICompatibleBackend,
     get_backend,
 )
+from .errors import ProviderTimeoutError, is_provider_timeout_error, provider_timeout_report
 
 __all__ = [
     "AnthropicCompatibleBackend",
@@ -28,5 +29,8 @@ __all__ = [
     "HttpBackend",
     "ModelResponse",
     "OpenAICompatibleBackend",
+    "ProviderTimeoutError",
     "get_backend",
+    "is_provider_timeout_error",
+    "provider_timeout_report",
 ]

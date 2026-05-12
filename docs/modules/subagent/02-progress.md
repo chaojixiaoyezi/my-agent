@@ -855,3 +855,12 @@
 - 已修正：coordinator prompt 明确要求点名 tester / bug_finder / acceptor / reviewer / 找错 / 测试 / 验收时必须创建真实角色 run，summary/evidence 里提到不算覆盖。
 - 已补测试：`test_stale_attempt_guard_blocks_abandoned_runner_tools`、`test_dispatch_limit_response_uses_persisted_task_state`，并回归 board tool/rendering 与层级 schedule focused tests。
 - 下一步：干净启动 R61。目标不是优化购物网站，而是验证：超时旧线程不再继续写，工具上限报告严格按 task.json，root/coordinator 能主动创建真实 QA 角色，或者系统明确保持 incomplete 而不是假完成。
+
+## 2026-05-12 R61 follow-up: long content, provider timeout, QA auto scheduling
+- 中文说明：R61 暴露三类框架问题：长 `write_file/append_file` 工具调用会让 JSON 块损坏；provider timeout 缺少明确错误边界；tester / bug_finder / acceptor 以前主要靠 prompt 和最终验收，调度时不会主动补派。
+- 已修正：长内容失败后会进入 `long_content_recovery_mode`，下一轮强制短骨架、小块 append 或受控 exec refs，不再让模型重复输出同一个巨大 JSON 参数。
+- 已修正：模型接口请求/流式超时会抛 `ProviderTimeoutError`；子代理 runner 记录 `failure_type=provider_timeout`，CLI 输出可读 handoff 和非 0 退出。
+- 已修正：新增 `qa_role_contract.py` 和 `hierarchy_qa_scheduler.py`。父任务明确点名 tester / bug_finder / acceptor 时，层级调度会比较本轮 specs 和已存在后代，自动补齐缺失 QA child；最终验收也复用同一套角色识别规则。
+- 已修正：duplicate-domain 去重过滤 `run/id/ref/refs/qa` 等结构词，避免自动 QA child 因共享父级 ref 被误判成同域重复。
+- 已补测试：长内容恢复、provider timeout、QA 自动补派、QA 去重和原有角色覆盖验收 focused tests 已通过。
+- 下一步：重新跑干净真实 E2E，继续用购物网站作为复杂载荷，验证 root-only 下是否能真实创建并完成 tester / bug_finder / acceptor，而不是只在最终验收阶段发现缺席。

@@ -351,7 +351,7 @@ api_key_env: "AGENT_API_KEY"
 # 模型名称
 model_name: "MiniMax-M2.7"
 
-# HTTP 请求总超时秒数
+# HTTP 请求总超时秒数；超时会记录为 provider_timeout，CLI 会给恢复提示。
 request_timeout: 60
 
 # 允许模型最多生成多少 token

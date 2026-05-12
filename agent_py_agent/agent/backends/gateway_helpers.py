@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import json
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass
+
+from .errors import ProviderTimeoutError
 
 
 # LLM: GatewayRequest 属于模型后端请求的类边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。
@@ -109,12 +112,27 @@ def _runtime_network_error(exc: BaseException, request: GatewayRequest) -> Runti
     parsed = urllib.parse.urlparse(request.url)
     host = parsed.netloc or parsed.path.split("/", 1)[0] or request.api_base
     reason = getattr(exc, "reason", None) or str(exc) or exc.__class__.__name__
+    if _is_timeout_exception(exc):
+        return ProviderTimeoutError(
+            "模型接口请求超时: "
+            f"host={host} request_timeout={request.timeout}s url={request.url} "
+            f"底层错误: {reason}"
+        )
     return RuntimeError(
         "网络请求失败: "
         f"无法连接模型接口 {host}（{request.url}）。"
         "请检查 DNS、网络/代理和 api_base 配置；"
         f"底层错误: {reason}"
     )
+
+
+# LLM: _is_timeout_exception recognizes urllib/socket timeout shapes without broad message matching.
+# 函数用途: 把直接 TimeoutError 和 URLError.reason 里的 timeout 都归一成 provider timeout。
+def _is_timeout_exception(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return True
+    reason = getattr(exc, "reason", None)
+    return isinstance(reason, (TimeoutError, socket.timeout))
 
 
 # LLM: _iter_sse_data_lines 属于模型后端请求的函数边界；调整时先确认模型请求参数、流式解析和错误传播仍按原契约工作。

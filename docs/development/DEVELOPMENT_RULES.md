@@ -270,6 +270,15 @@ do_write()
   writes inside the allowed workspace and returns only refs/audit metadata.
   Streaming stdout/stderr can improve observability, but it is not a fix for an
   oversized or malformed tool-call JSON block.
+- Long-content recovery must be policy-driven. If a write-like tool parse error
+  or inline-limit rejection needs to guide the next model turn, put that rule in
+  `content_recovery_mode.py` and append a compact `[tool-system]` recovery mode;
+  do not copy another long Chinese hint into the tool loop, parser, or individual
+  tool class.
+- Provider/network timeouts must be typed and recoverable. HTTP backends should
+  raise `ProviderTimeoutError` for request/stream timeouts, runners should record
+  `failure_type=provider_timeout`, and CLI entry points should print a compact
+  recovery handoff rather than exposing a raw traceback or staying silent.
 - New write-like tools must reuse `content_transport_policy.py` or document a
   reviewed exception. Do not create a second hardcoded chunk-size or parse-error
   hint in a separate module.
@@ -311,6 +320,12 @@ do_write()
   searches for defects and counterexamples; acceptor prepares final acceptance
   recommendations; coordinator/lead splits, broadcasts, corrects, rescues, and
   summarizes refs without defaulting to writing final product artifacts.
+- Explicit QA role requirements are machine contracts, not prose suggestions.
+  If a parent goal or acceptance check names `tester`, `bug_finder`, or
+  `acceptor` (including the Chinese role names), detection must flow through
+  `qa_role_contract.py`. Scheduling may proactively create missing QA children,
+  and acceptance must verify real persisted descendant roles instead of trusting
+  summaries.
 - Empty user-facing subagent tool config means automatic policy. Keep
   `subagent_allowed_tools=[]` as “role/template/task decides tools”, not “no
   tools”. Only use a non-empty global list for deliberately restricted test

@@ -14,6 +14,7 @@ import json
 import sys
 import time
 
+from ..agent.backends import ProviderTimeoutError, provider_timeout_report
 from ..agent.gateway import (
     gateway_paths,
     gateway_request_counts,
@@ -148,6 +149,9 @@ def cmd_run(args) -> int:
             recovery_next_actions=["如需恢复本次单轮 run，先查看 memory-resume 和 LocalStore 记录。"],
             on_chunk=_on_run_chunk,
         )
+    except ProviderTimeoutError as exc:
+        print(_provider_timeout_cli_report(agent, exc))
+        return 2
     finally:
         spinner.stop()
     if args.show_prompt:
@@ -167,6 +171,15 @@ def cmd_run(args) -> int:
     )
     _print_compact_suggestion(result)
     return 0
+
+
+# LLM: _provider_timeout_cli_report converts backend timeout exceptions into a readable command result.
+# 函数用途: 顶层 run 超时时输出恢复提示并退出，不让用户面对长堆栈或沉默等待。
+def _provider_timeout_cli_report(agent, exc: ProviderTimeoutError) -> str:
+    return provider_timeout_report(
+        exc,
+        timeout_seconds=getattr(getattr(agent, "config", None), "request_timeout", ""),
+    )
 
 
 # LLM: _print_compact_suggestion keeps run CLI compact output out of cmd_run size-sensitive orchestration.
