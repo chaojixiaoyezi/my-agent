@@ -281,6 +281,50 @@ class TestSubAgentAcceptanceRoleCoverageFindings(_FindingSetupMixin, _FindingAss
         self._assert_finding(findings, "descendant_health", expected_ok=True)
 
 
+class TestSubAgentAcceptanceInheritedRoleCoverageFindings(
+    _FindingSetupMixin,
+    _FindingAssertMixin,
+    _FindingReportMixin,
+):
+    """Regression tests for inherited QA role wording."""
+
+    def test_inherited_parent_qa_contract_does_not_bind_intermediate_coordinator(self, tmp_path: Path):
+        """中间 coordinator 继承父级 QA 目标时，不应被硬性要求自己补齐全部 QA。"""
+        from agent_py_agent.agent.subagents.manager_acceptance_findings import (
+            SubAgentAcceptanceFindingMixin,
+        )
+
+        class MockManager(SubAgentAcceptanceFindingMixin):
+            def __init__(self):
+                self.workspace = tmp_path
+
+        manager = MockManager()
+        (tmp_path / "leaf").mkdir()
+        (tmp_path / "leaf" / "task.json").write_text(
+            json.dumps({"id": "leaf", "role": "leaf_worker", "child_ids": []}),
+            encoding="utf-8",
+        )
+        task = self._make_findings_task(
+            tmp_path,
+            goal=(
+                "你是页面协调，负责创建 leaf_worker 写页面。\n"
+                "继承父级目标/边界（仅用于目录/权限/验收，不代表当前子任务要执行父级全部目标）：\n"
+                "父级层级/协作约束：\n"
+                "- 同时创建 tester（小傻妞-测试员）和 bug_finder（小傻妞-找茬员）\n"
+                "- 至少一个 acceptor 给最终验收建议"
+            ),
+            role="child_coordinator",
+            child_ids=["leaf"],
+        )
+        output = {"artifacts": [], "structured_output": {"status": "COMPLETED"}}
+        self._write_findings_files(tmp_path, output)
+        manager.validate_work_order = MagicMock(return_value=MagicMock(ok=True, missing=[]))
+
+        findings = manager._acceptance_findings(task, output, {}, time.time())
+
+        self._assert_finding(findings, "required_role_coverage", expected_ok=True)
+
+
 
 class TestSubAgentAcceptanceTestsAndArtifactFindings(_FindingSetupMixin, _FindingAssertMixin, _FindingReportMixin):
     """Tests and artifact acceptance tests."""

@@ -4225,3 +4225,40 @@ This document is append-only. Record every real subagent E2E issue found during 
 - Next:
   - Rerun a real root-only E2E to verify the model reads `needs_child_creation` and `quality_advice`, then calls `schedule_child_subagents` again instead of stopping at acceptance failure.
   - Keep system logic as a guardrail, not as a hardcoded workflow: LLM proposes QA/repair/acceptance plan; guards reject impossible actions such as empty-product QA, skipped failed descendants, or out-of-scope broadcast.
+
+### Finding 211: File And Naming Contracts Drifted Through Natural-Language Inheritance
+
+- Discovered at: 2026-05-12 during R67.
+- Symptom:
+  - The depth-3 naming rule drifted from `小小小傻妞-*` into `小小的傻妞-*` in inherited prompts, even though persisted run names were later repaired by the scheduler prefix.
+  - `## 禁止文件` entries such as `product.html` and `output.json` were copied into inherited `required_files`.
+  - Internal state references such as `task.json 里的状态` also appeared as required product files.
+- 中文解释：
+  - 这不是单纯模型笨，而是我们让自然语言摘要承担了太多机器合同工作。模型写了一个“差不多”的说法，旧代码只看见 `depth=3` 就以为合同没丢；文件名提取也把“禁止文件”和“状态文件”当成了“必须交付文件”。
+- Root cause:
+  - Hierarchy contract completeness used broad anchors such as `depth=3` instead of exact lineage terms.
+  - Required-file extraction did not treat Markdown headings like `## 禁止文件` as negative scope, and did not distinguish internal state refs from user deliverables.
+- Fix:
+  - Hierarchy contract checks now require exact lineage terms like `小小小傻妞-*` / `小小小小傻妞-*` when those terms are present in the parent contract.
+  - `required_file_terms.py` now treats Markdown forbidden headings as forbidden scope and ignores internal state refs such as `task.json 里的状态` / `execution_context.json refs` unless a positive deliverable label owns them.
+- Verification:
+  - `test_file_contract_treats_markdown_forbidden_heading_as_negative_scope`
+  - `test_file_contract_ignores_internal_state_file_references_without_deliverable_label`
+  - `test_explicit_coordinator_seed_repairs_wrong_lineage_summary_from_raw_prompt`
+
+### Finding 212: Inherited QA Goal Over-Bound Intermediate Coordinators
+
+- Discovered at: 2026-05-12 during R67.
+- Symptom:
+  - A depth-2 coordinator successfully created a depth-3 leaf, and the leaf wrote all 10 shopping-site files.
+  - The coordinator was still marked `BLOCKED / acceptance_failed` because its inherited parent context mentioned tester / bug_finder / acceptor, so role coverage demanded those QA roles under the wrong node.
+- 中文解释：
+  - 父级说“整件事最后要有测试、找茬、验收”，不等于每个中间协调员都必须自己补齐全套 QA。旧验收把“父级背景”误当成“当前节点硬任务”，这就是过度写死规则造成的误伤。
+- Root cause:
+  - `qa_role_contract_text()` scanned the whole goal and acceptance text, including inherited parent blocks.
+- Fix:
+  - QA role coverage now only reads the current node's direct goal / acceptance text. It stops before inherited sections such as `继承父级目标/边界` and `父级层级/协作约束`.
+- Verification:
+  - `test_inherited_parent_qa_contract_does_not_bind_intermediate_coordinator`
+- Remaining risk:
+  - Need a clean R68 real run to verify the new direct-contract behavior lets the correct parent create QA after implementation is ready, instead of binding QA to every intermediate coordinator.

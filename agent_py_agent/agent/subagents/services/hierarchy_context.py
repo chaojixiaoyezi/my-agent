@@ -12,6 +12,8 @@ from ..required_file_terms import forbidden_file_terms_from_text, required_file_
 if TYPE_CHECKING:
     from .hierarchy_scheduler import HierarchyChildSpec
 
+_LINEAGE_CONTRACT_RE = re.compile(r"小+傻妞-\*")
+
 
 # LLM: inherited_hierarchy_thought gives descendants relevant context without expanding sibling scope.
 # 函数用途: 把父级相关边界压成 child thought；避免某个 child 误拿到其它 sibling 的目标。
@@ -89,9 +91,7 @@ def _missing_hierarchy_contract_terms(parent_goal: str, goal: str) -> bool:
     contracts = _hierarchy_contract_segments(parent_goal)
     if not contracts:
         return False
-    lowered = str(goal or "").lower()
-    anchors = {_segment_anchor(segment) for segment in contracts}
-    return any(anchor and anchor not in lowered for anchor in anchors)
+    return any(not hierarchy_contract_present(segment, goal) for segment in contracts)
 
 
 # LLM: _missing_capability_contract_terms prevents delegated agents from dropping tool grants.
@@ -226,6 +226,28 @@ def _hierarchy_contract_segments(text: str) -> list[str]:
         for segment in _parent_goal_segments(text)
         if any(keyword.lower() in segment.lower() for keyword in keywords)
     ]
+
+
+# LLM: hierarchy_contract_present verifies exact structured hierarchy terms before accepting a summary.
+# 函数用途: 如果父级合同写了“小小小傻妞-*”这类精确前缀，子级不能只写 depth=3 就算已继承。
+def hierarchy_contract_present(segment: str, goal: str) -> bool:
+    goal_text = str(goal or "").lower()
+    lineage_terms = _lineage_contract_terms(segment)
+    if lineage_terms:
+        return all(term.lower() in goal_text for term in lineage_terms)
+    anchor = _segment_anchor(segment)
+    return bool(anchor and anchor in goal_text)
+
+
+# LLM: _lineage_contract_terms extracts configurable-looking lineage prefixes from a contract line.
+# 函数用途: 捕获“小傻妞-* / 小小傻妞-* / 更深前缀”等精确命名合同，避免模型摘要把层级名字改错。
+def _lineage_contract_terms(segment: str) -> list[str]:
+    terms: list[str] = []
+    for match in _LINEAGE_CONTRACT_RE.finditer(str(segment or "")):
+        value = match.group(0)
+        if value not in terms:
+            terms.append(value)
+    return terms
 
 
 # LLM: _capability_contract_segments extracts non-droppable tool/shell safety requirements.

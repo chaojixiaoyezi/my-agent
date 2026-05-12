@@ -431,3 +431,55 @@ def test_file_contract_keeps_required_filename_before_sentence_period():
         "style.css",
         "app.js",
     ]
+
+
+# LLM: R67 showed Markdown negative headings can still pollute inherited required_files.
+# 函数用途: `## 禁止文件` 后面的文件名必须只进入 forbidden_files，不进入 required_files。
+def test_file_contract_treats_markdown_forbidden_heading_as_negative_scope():
+    text = (
+        "## 必须文件（共10个）\n"
+        "index.html, register.html, login.html, products.html, product-detail.html, "
+        "cart.html, checkout.html, order-success.html, style.css, app.js\n\n"
+        "## 禁止文件\n"
+        "product.html, old-product.html, legacy.html, obsolete.html, "
+        "output.json, RUNNER_RESULT.md, execution_context.json\n"
+    )
+
+    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
+    forbidden = forbidden_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
+
+    assert required == [
+        "index.html",
+        "register.html",
+        "login.html",
+        "products.html",
+        "product-detail.html",
+        "cart.html",
+        "checkout.html",
+        "order-success.html",
+        "style.css",
+        "app.js",
+    ]
+    assert forbidden == [
+        "product.html",
+        "old-product.html",
+        "legacy.html",
+        "obsolete.html",
+        "output.json",
+        "RUNNER_RESULT.md",
+        "execution_context.json",
+    ]
+
+
+# LLM: task.json is an internal state reference unless a positive deliverable label owns it.
+# 函数用途: 验收/看板语境里的 `task.json 里的状态` 不能变成下级必须创建的产物。
+def test_file_contract_ignores_internal_state_file_references_without_deliverable_label():
+    text = (
+        "必须包含 index.html、style.css、app.js。\n"
+        "只有所有真实 task.json 里的 root/child/grandchild 状态一致时，才能说完整通过。\n"
+        "父级状态报告会读取 execution_context.json refs，但这些不是用户产物。"
+    )
+
+    required = required_file_terms_from_text(text, extensions=r"html?|css|js|json|md")
+
+    assert required == ["index.html", "style.css", "app.js"]
